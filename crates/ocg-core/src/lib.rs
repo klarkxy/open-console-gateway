@@ -3,6 +3,7 @@ pub mod auth;
 pub mod browser;
 pub mod console_usage;
 pub mod crypto;
+pub mod custom_http;
 pub mod dashboard;
 pub mod db;
 pub mod gateway;

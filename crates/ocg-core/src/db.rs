@@ -368,6 +368,23 @@ fn persist_account_custom_config_on(
             ],
         )?;
     }
+    mark_required_verification_stale_on(conn, account_id)?;
+    Ok(())
+}
+
+/// Re-open a verification-required account as a disabled pending draft.
+/// Go (`not_required`) rows are left untouched.
+fn mark_required_verification_stale_on(conn: &Connection, account_id: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE accounts
+         SET verification_status = 'pending',
+             connection_verified_at = NULL,
+             verification_error = NULL,
+             enabled = 0,
+             updated_at = ?2
+         WHERE id = ?1 AND verification_status <> 'not_required'",
+        params![account_id, Utc::now().to_rfc3339()],
+    )?;
     Ok(())
 }
 
@@ -376,7 +393,26 @@ fn persist_account_model_capabilities_on(
     account_id: &str,
     capabilities: &[AccountModelCapabilityInput],
 ) -> Result<()> {
-    let now = Utc::now();
+    if !capabilities.is_empty() {
+        let expected_protocol: String = conn
+            .query_row(
+                "SELECT upstream_protocol FROM account_custom_configs WHERE account_id = ?1",
+                [account_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Custom model capabilities require a persisted custom_config.upstream_protocol"
+                )
+            })?;
+        for capability in capabilities {
+            anyhow::ensure!(
+                capability.protocol.as_str() == expected_protocol,
+                "model capability protocol must match account custom_config.upstream_protocol"
+            );
+        }
+    }
     conn.execute(
         "DELETE FROM account_model_capabilities WHERE account_id = ?1",
         [account_id],
@@ -403,30 +439,7 @@ fn persist_account_model_capabilities_on(
             params![account_id, model_id, capability.protocol.as_str(), source],
         )?;
     }
-    if !capabilities.is_empty() {
-        let binding = conn
-            .query_row(
-                "SELECT provider_id, offering_id FROM accounts WHERE id = ?1",
-                [account_id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-            )
-            .optional()?;
-        if binding.is_some_and(|(provider_id, offering_id)| {
-            builtin_plan(&provider_id, &offering_id)
-                .is_some_and(|plan| plan.verification_policy == VerificationPolicy::Required)
-        }) {
-            conn.execute(
-                "UPDATE accounts
-                 SET verification_status = CASE
-                        WHEN verification_status = 'verified' THEN 'pending'
-                        ELSE verification_status END,
-                     connection_verified_at = NULL,
-                     updated_at = ?2
-                 WHERE id = ?1",
-                params![account_id, now.to_rfc3339()],
-            )?;
-        }
-    }
+    mark_required_verification_stale_on(conn, account_id)?;
     Ok(())
 }
 
@@ -2083,8 +2096,10 @@ impl Database {
         let requires_verification = builtin_plan(&existing.provider_id, &existing.offering_id)
             .is_some_and(|plan| plan.verification_policy == VerificationPolicy::Required);
 
-        self.conn.execute(
-            "UPDATE accounts SET name = ?1, username = ?2, password_cipher = ?3, key_cipher = ?4, enabled = ?5, referral_code = ?6, recharge_date = ?7, notes = ?8,
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE accounts SET name = ?1, username = ?2, password_cipher = ?3, key_cipher = ?4,
+             enabled = CASE WHEN ?10 AND ?13 THEN 0 ELSE ?5 END, referral_code = ?6, recharge_date = ?7, notes = ?8,
              usage_month_window_cost_offset = CASE WHEN ?9 THEN 0 ELSE usage_month_window_cost_offset END,
              auth_error = CASE WHEN ?10 THEN NULL ELSE auth_error END,
              verification_status = CASE WHEN ?10 AND ?13 THEN 'pending' ELSE verification_status END,
@@ -2108,11 +2123,12 @@ impl Database {
             ],
         )?;
         if key_replaced && requires_verification {
-            self.conn.execute(
+            tx.execute(
                 "DELETE FROM account_model_capabilities WHERE account_id = ?1",
                 [id],
             )?;
         }
+        tx.commit()?;
         Ok(())
     }
 
@@ -2260,12 +2276,9 @@ impl Database {
         allow_protocol_auth_change: bool,
     ) -> Result<AccountCustomConfig> {
         anyhow::ensure!(self.get_account(account_id)?.is_some(), "account not found");
-        persist_account_custom_config_on(
-            &self.conn,
-            account_id,
-            input,
-            allow_protocol_auth_change,
-        )?;
+        let tx = self.conn.unchecked_transaction()?;
+        persist_account_custom_config_on(&tx, account_id, input, allow_protocol_auth_change)?;
+        tx.commit()?;
         self.account_custom_config(account_id)?
             .ok_or_else(|| anyhow::anyhow!("custom config was not persisted"))
     }
@@ -8735,6 +8748,216 @@ mod tests {
             "Custom create must require at least one model capability"
         );
         assert!(db.get_account("custom-empty-caps").unwrap().is_none());
+
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn custom_capability_protocol_must_match_config_and_mismatch_is_atomic() {
+        let dir = temp_data_dir("custom-protocol-mismatch");
+        let db = Database::open(dir.clone()).unwrap();
+        let mut custom = account("custom-protocol");
+        custom.provider_id = CUSTOM_PROVIDER_ID.to_string();
+        custom.offering_id = CUSTOM_API_OFFERING_ID.to_string();
+        custom.enabled = true;
+        let mismatch = db.create_account_with_contract(
+            &custom,
+            Some(&AccountCustomConfigInput {
+                base_url: "https://api.example.com/v1".into(),
+                upstream_protocol: UpstreamProtocolKind::Messages,
+                auth_scheme: UpstreamAuthScheme::Bearer,
+            }),
+            &[AccountModelCapabilityInput {
+                model_id: "org/model".into(),
+                protocol: UpstreamProtocolKind::ChatCompletions,
+                source: None,
+            }],
+            None,
+        );
+        assert!(
+            mismatch
+                .unwrap_err()
+                .to_string()
+                .contains("must match account custom_config.upstream_protocol")
+        );
+        assert!(db.get_account("custom-protocol").unwrap().is_none());
+
+        db.create_account_with_contract(
+            &custom,
+            Some(&AccountCustomConfigInput {
+                base_url: "https://api.example.com/v1".into(),
+                upstream_protocol: UpstreamProtocolKind::Messages,
+                auth_scheme: UpstreamAuthScheme::Bearer,
+            }),
+            &[AccountModelCapabilityInput {
+                model_id: "org/model".into(),
+                protocol: UpstreamProtocolKind::Messages,
+                source: None,
+            }],
+            None,
+        )
+        .unwrap();
+        let rejected = db.replace_account_model_capabilities(
+            "custom-protocol",
+            &[AccountModelCapabilityInput {
+                model_id: "org/other".into(),
+                protocol: UpstreamProtocolKind::ChatCompletions,
+                source: None,
+            }],
+        );
+        assert!(
+            rejected
+                .unwrap_err()
+                .to_string()
+                .contains("must match account custom_config.upstream_protocol")
+        );
+        let kept = db
+            .list_account_model_capabilities("custom-protocol")
+            .unwrap();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].model_id, "org/model");
+        assert_eq!(kept[0].protocol, UpstreamProtocolKind::Messages);
+
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn custom_mutations_repend_and_disable_verified_accounts() {
+        let dir = temp_data_dir("custom-lifecycle-stale");
+        let db = Database::open(dir.clone()).unwrap();
+        let mut custom = account("custom-stale");
+        custom.provider_id = CUSTOM_PROVIDER_ID.to_string();
+        custom.offering_id = CUSTOM_API_OFFERING_ID.to_string();
+        custom.enabled = true;
+        db.create_account_with_contract(
+            &custom,
+            Some(&AccountCustomConfigInput {
+                base_url: "https://api.example.com/v1".into(),
+                upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+                auth_scheme: UpstreamAuthScheme::Bearer,
+            }),
+            &[AccountModelCapabilityInput {
+                model_id: "org/model".into(),
+                protocol: UpstreamProtocolKind::ChatCompletions,
+                source: None,
+            }],
+            None,
+        )
+        .unwrap();
+        db.set_account_verification(
+            "custom-stale",
+            ConnectionVerificationStatus::Verified,
+            Some(Utc::now()),
+            Some("previous"),
+        )
+        .unwrap();
+        db.conn
+            .execute(
+                "UPDATE accounts SET enabled = 1 WHERE id = 'custom-stale'",
+                [],
+            )
+            .unwrap();
+
+        db.upsert_account_custom_config(
+            "custom-stale",
+            &AccountCustomConfigInput {
+                base_url: "https://api.example.net/v2".into(),
+                upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+                auth_scheme: UpstreamAuthScheme::Bearer,
+            },
+            false,
+        )
+        .unwrap();
+        let after_url = db.get_account("custom-stale").unwrap().unwrap();
+        let after_url_state = db
+            .account_verification_state("custom-stale")
+            .unwrap()
+            .unwrap();
+        assert!(!after_url.enabled);
+        assert_eq!(
+            after_url_state.status,
+            ConnectionVerificationStatus::Pending
+        );
+        assert!(after_url_state.connection_verified_at.is_none());
+        assert!(after_url_state.verification_error.is_none());
+
+        db.set_account_verification(
+            "custom-stale",
+            ConnectionVerificationStatus::Verified,
+            Some(Utc::now()),
+            None,
+        )
+        .unwrap();
+        db.conn
+            .execute(
+                "UPDATE accounts SET enabled = 1 WHERE id = 'custom-stale'",
+                [],
+            )
+            .unwrap();
+        db.replace_account_model_capabilities(
+            "custom-stale",
+            &[AccountModelCapabilityInput {
+                model_id: "org/other".into(),
+                protocol: UpstreamProtocolKind::ChatCompletions,
+                source: None,
+            }],
+        )
+        .unwrap();
+        let after_caps = db.get_account("custom-stale").unwrap().unwrap();
+        let after_caps_state = db
+            .account_verification_state("custom-stale")
+            .unwrap()
+            .unwrap();
+        assert!(!after_caps.enabled);
+        assert_eq!(
+            after_caps_state.status,
+            ConnectionVerificationStatus::Pending
+        );
+        assert!(after_caps_state.connection_verified_at.is_none());
+
+        db.set_account_verification(
+            "custom-stale",
+            ConnectionVerificationStatus::Verified,
+            Some(Utc::now()),
+            Some("stale"),
+        )
+        .unwrap();
+        db.conn
+            .execute(
+                "UPDATE accounts SET enabled = 1 WHERE id = 'custom-stale'",
+                [],
+            )
+            .unwrap();
+        db.update_account(
+            "custom-stale",
+            &AccountUpdate {
+                key: Some("rotated".into()),
+                enabled: Some(true),
+                ..AccountUpdate::default()
+            },
+            Some("new-cipher"),
+            None,
+        )
+        .unwrap();
+        let after_key = db.get_account("custom-stale").unwrap().unwrap();
+        let after_key_state = db
+            .account_verification_state("custom-stale")
+            .unwrap()
+            .unwrap();
+        assert!(!after_key.enabled);
+        assert_eq!(
+            after_key_state.status,
+            ConnectionVerificationStatus::Pending
+        );
+        assert!(after_key_state.connection_verified_at.is_none());
+        assert!(after_key_state.verification_error.is_none());
+        assert!(
+            db.list_account_model_capabilities("custom-stale")
+                .unwrap()
+                .is_empty()
+        );
 
         drop(db);
         fs::remove_dir_all(dir).unwrap();

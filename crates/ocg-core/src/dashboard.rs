@@ -1385,6 +1385,13 @@ fn create_account_inner(
         for capability in &model_capabilities {
             crate::provider::validate_custom_model_id(&capability.model_id)
                 .map_err(|error| ApiError::bad_request(error.to_string()))?;
+            if let Some(config) = custom_config.as_ref() {
+                if capability.protocol != config.upstream_protocol {
+                    return Err(ApiError::bad_request(
+                        "model capability protocol must match account custom_config.upstream_protocol",
+                    ));
+                }
+            }
         }
     } else {
         if custom_config.is_some() {
@@ -4319,19 +4326,21 @@ fn is_loopback(url: &reqwest::Url) -> bool {
 mod tests {
     use super::{
         AccountOrderInput, AccountSetupUpdate, AccountUsageUpdate, BrowserTarget,
-        DashboardAccountUpdate, ForwardLogQuery, MAX_ACCOUNT_NOTES_CHARS,
-        MAX_MANAGED_KEY_VERIFICATION_RESPONSE_BYTES, MAX_PRICING_MULTIPLIER, ManagedAccountInput,
-        OpenBrowserInput, PricingMultiplierInput, PricingMultiplierUpdate, PricingRefreshPolicy,
-        ProxyTestRequest, SemverVersion, SettingsUpdateRequest, VerifyManagedKeyInput,
-        advance_account_setup, apply_official_go_usage_snapshot, apply_pricing_refresh, asset_path,
-        create_account, create_account_inner, create_managed_account, dashboard_account,
-        dashboard_summary, format_error_chain, is_update_available,
-        load_ready_account_for_official_go_usage, map_official_usage_refresh_error,
-        open_account_browser, parse_semver_version, pricing_multiplier_changes,
-        pricing_semantically_equal, provider_account_usage, read_managed_key_verification_response,
-        redact_diagnostic, redact_known_secrets, reorder_accounts, test_proxy, update_account,
-        update_account_usage, update_pricing_multipliers, update_settings,
-        validate_forward_log_query, validate_websocket_origin, verify_managed_account_key,
+        DashboardAccountUpdate, DashboardCustomConfigUpdate, DashboardModelCapabilitiesUpdate,
+        ForwardLogQuery, MAX_ACCOUNT_NOTES_CHARS, MAX_MANAGED_KEY_VERIFICATION_RESPONSE_BYTES,
+        MAX_PRICING_MULTIPLIER, ManagedAccountInput, OpenBrowserInput, PricingMultiplierInput,
+        PricingMultiplierUpdate, PricingRefreshPolicy, ProxyTestRequest, SemverVersion,
+        SettingsUpdateRequest, VerifyManagedKeyInput, advance_account_setup,
+        apply_official_go_usage_snapshot, apply_pricing_refresh, asset_path, create_account,
+        create_account_inner, create_managed_account, dashboard_account, dashboard_summary,
+        format_error_chain, is_update_available, load_ready_account_for_official_go_usage,
+        map_official_usage_refresh_error, open_account_browser, parse_semver_version,
+        pricing_multiplier_changes, pricing_semantically_equal, provider_account_usage,
+        put_account_custom_config, put_account_model_capabilities,
+        read_managed_key_verification_response, redact_diagnostic, redact_known_secrets,
+        reorder_accounts, test_proxy, update_account, update_account_usage,
+        update_pricing_multipliers, update_settings, validate_forward_log_query,
+        validate_websocket_origin, verify_managed_account_key,
     };
     use crate::browser::{BrowserProfileOperationKind, StagedBrowserProfiles};
     use crate::crypto::{KeyCipher, StaticKeyCipher};
@@ -6646,6 +6655,183 @@ mod tests {
             assert_eq!(usage.experimental, experimental);
             assert!(usage.quota_windows.is_empty());
         }
+
+        drop(state);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn custom_config_and_capability_mutations_repend_disable_and_reject_protocol_mismatch() {
+        let dir = temp_data_dir("v23-custom-lifecycle");
+        let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("test"));
+        let db = Database::open(dir.clone()).unwrap();
+        let state = Arc::new(CoreStateInner::new(db, dir.clone(), cipher).unwrap());
+
+        let mismatch = create_account_inner(
+            state.clone(),
+            AccountInput {
+                provider_id: crate::provider::CUSTOM_PROVIDER_ID.into(),
+                offering_id: crate::provider::CUSTOM_API_OFFERING_ID.into(),
+                name: "Custom mismatch".into(),
+                username: None,
+                password: None,
+                key: "custom-key".into(),
+                referral_code: None,
+                purchase_date: None,
+                notes: None,
+            },
+            Some(AccountCustomConfigInput {
+                base_url: "https://api.example.com/v1".into(),
+                upstream_protocol: crate::provider::UpstreamProtocolKind::Messages,
+                auth_scheme: crate::provider::UpstreamAuthScheme::Bearer,
+            }),
+            Vec::new(),
+            vec![AccountModelCapabilityInput {
+                model_id: "org/model".into(),
+                protocol: crate::provider::UpstreamProtocolKind::ChatCompletions,
+                source: None,
+            }],
+        )
+        .expect_err("capability protocol must match custom_config.upstream_protocol");
+        assert_eq!(mismatch.status, StatusCode::BAD_REQUEST);
+        assert!(
+            state
+                .db
+                .lock()
+                .list_accounts()
+                .unwrap()
+                .iter()
+                .all(|account| account.name != "Custom mismatch")
+        );
+
+        let custom = create_account_inner(
+            state.clone(),
+            AccountInput {
+                provider_id: crate::provider::CUSTOM_PROVIDER_ID.into(),
+                offering_id: crate::provider::CUSTOM_API_OFFERING_ID.into(),
+                name: "Custom".into(),
+                username: None,
+                password: None,
+                key: "custom-key".into(),
+                referral_code: None,
+                purchase_date: None,
+                notes: None,
+            },
+            Some(AccountCustomConfigInput {
+                base_url: "https://api.example.com/v1".into(),
+                upstream_protocol: crate::provider::UpstreamProtocolKind::Messages,
+                auth_scheme: crate::provider::UpstreamAuthScheme::XApiKey,
+            }),
+            Vec::new(),
+            vec![AccountModelCapabilityInput {
+                model_id: "org/model".into(),
+                protocol: crate::provider::UpstreamProtocolKind::Messages,
+                source: None,
+            }],
+        )
+        .expect("Custom draft should save")
+        .0;
+        state
+            .db
+            .lock()
+            .set_account_verification(
+                &custom.id,
+                crate::provider::ConnectionVerificationStatus::Verified,
+                Some(Utc::now()),
+                Some("previous"),
+            )
+            .unwrap();
+
+        let updated = put_account_custom_config(
+            State(state.clone()),
+            AxumPath(custom.id.clone()),
+            Json(DashboardCustomConfigUpdate {
+                config: AccountCustomConfigInput {
+                    base_url: "https://api.example.net/v2".into(),
+                    upstream_protocol: crate::provider::UpstreamProtocolKind::Messages,
+                    auth_scheme: crate::provider::UpstreamAuthScheme::XApiKey,
+                },
+                expected_revision: Some(custom.revision),
+            }),
+        )
+        .await
+        .expect("base URL change should persist")
+        .0;
+        assert!(!updated.enabled);
+        assert_eq!(
+            updated.verification_status,
+            crate::provider::ConnectionVerificationStatus::Pending
+        );
+        assert!(updated.connection_verified_at.is_none());
+        assert!(updated.verification_error.is_none());
+        assert_eq!(
+            updated.custom_config.as_ref().unwrap().base_url,
+            "https://api.example.net/v2"
+        );
+
+        let protocol_change = put_account_custom_config(
+            State(state.clone()),
+            AxumPath(custom.id.clone()),
+            Json(DashboardCustomConfigUpdate {
+                config: AccountCustomConfigInput {
+                    base_url: "https://api.example.net/v2".into(),
+                    upstream_protocol: crate::provider::UpstreamProtocolKind::ChatCompletions,
+                    auth_scheme: crate::provider::UpstreamAuthScheme::XApiKey,
+                },
+                expected_revision: Some(updated.revision),
+            }),
+        )
+        .await
+        .expect_err("protocol must stay immutable");
+        assert_eq!(protocol_change.status, StatusCode::BAD_REQUEST);
+
+        let cap_mismatch = put_account_model_capabilities(
+            State(state.clone()),
+            AxumPath(custom.id.clone()),
+            Json(DashboardModelCapabilitiesUpdate {
+                capabilities: vec![AccountModelCapabilityInput {
+                    model_id: "org/other".into(),
+                    protocol: crate::provider::UpstreamProtocolKind::ChatCompletions,
+                    source: None,
+                }],
+                expected_revision: Some(updated.revision),
+            }),
+        )
+        .await
+        .expect_err("capability protocol must match config");
+        assert_eq!(cap_mismatch.status, StatusCode::BAD_REQUEST);
+
+        state
+            .db
+            .lock()
+            .set_account_verification(
+                &custom.id,
+                crate::provider::ConnectionVerificationStatus::Verified,
+                Some(Utc::now()),
+                None,
+            )
+            .unwrap();
+        let caps = put_account_model_capabilities(
+            State(state.clone()),
+            AxumPath(custom.id.clone()),
+            Json(DashboardModelCapabilitiesUpdate {
+                capabilities: vec![AccountModelCapabilityInput {
+                    model_id: "org/other".into(),
+                    protocol: crate::provider::UpstreamProtocolKind::Messages,
+                    source: None,
+                }],
+                expected_revision: Some(updated.revision),
+            }),
+        )
+        .await
+        .expect("matching capability protocol should persist")
+        .0;
+        assert!(!caps.enabled);
+        assert_eq!(
+            caps.verification_status,
+            crate::provider::ConnectionVerificationStatus::Pending
+        );
+        assert_eq!(caps.model_capabilities[0].model_id, "org/other");
 
         drop(state);
         fs::remove_dir_all(dir).unwrap();
