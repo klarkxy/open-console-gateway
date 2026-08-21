@@ -15,11 +15,13 @@
 //!    `prefer_twin` when Prefer-mode context fits). Match accounts in saved
 //!    account order through [`super::provider_adapter::supports_plan`], using
 //!    mapping order only as the per-account tie-break. Protocol selection
-//!    uses the OpenCode `MODEL_PROTOCOLS` table for that upstream model.
+//!    uses the OpenCode `MODEL_PROTOCOLS` table for Go/Zen upstream models
+//!    and the Command Code-native table for GOAT raw IDs.
 //!    **Never** trial a billable inference path.
 //! 4. Ask [`super::provider_adapter::resolve_route`] for endpoint + auth.
-//!    GOAT / SCNet / Custom, including PinnedRaw of those offerings, stay
-//!    fail-closed until those slices ship a production route.
+//!    Production GOAT stays fail-closed (catalog unroutable, drafts disabled,
+//!    no live adapter without the loopback test seam). The official slash raw
+//!    ID pins to command-code/goat without stealing Go kebab aliases.
 //!
 //! OpenCode Go and Zen Free are implemented here. Claude Desktop
 //! `sonnet` / `opus` / `haiku` aliases are rewritten to a configured Go
@@ -152,11 +154,6 @@ pub(crate) fn materialize_account_routes(
 ) -> Result<MaterializedRouteSet, ProtocolError> {
     match resolved {
         ResolvedModel::PinnedRaw { mapping, .. } => {
-            if !mapping.routeable {
-                return Err(ProtocolError::new(format!(
-                    "unknown model `{routing_model}`"
-                )));
-            }
             let plan = materialize_mapping_plan(
                 config,
                 parsed,
@@ -176,7 +173,6 @@ pub(crate) fn materialize_account_routes(
                     mapping: mapping.clone(),
                     plan,
                 }],
-                true,
                 false,
             )
         }
@@ -255,15 +251,7 @@ pub(crate) fn materialize_account_routes(
                 });
             }
 
-            collect_mapping_plans(
-                accounts,
-                config,
-                parsed,
-                client_model,
-                plans,
-                false,
-                zen_only,
-            )
+            collect_mapping_plans(accounts, config, parsed, client_model, plans, zen_only)
         }
     }
 }
@@ -358,25 +346,16 @@ fn collect_mapping_plans(
     parsed: &ParsedClientRequest,
     client_model: &str,
     plans: Vec<MappingPlan>,
-    pinned: bool,
     free_only: bool,
 ) -> Result<MaterializedRouteSet, ProtocolError> {
     let mut routes = Vec::new();
     let mut rejected = Vec::new();
     for account in accounts {
         for candidate in &plans {
-            if pinned
-                && (account.provider_id != candidate.mapping.provider_id
-                    || account.offering_id != candidate.mapping.offering_id)
+            if account.provider_id != candidate.mapping.provider_id
+                || account.offering_id != candidate.mapping.offering_id
             {
                 continue;
-            }
-            if !pinned {
-                let account_is_zen = account.provider_id == OPENCODE_ZEN_FREE_PROVIDER_ID
-                    && account.offering_id == ANONYMOUS_FREE_OFFERING_ID;
-                if account_is_zen != (candidate.plan.channel == UpstreamChannel::Free) {
-                    continue;
-                }
             }
             if routes.iter().any(|route: &MaterializedCandidate| {
                 route.routing.account.id == account.id
@@ -423,11 +402,10 @@ mod tests {
     use crate::alias::{self, ResolvedModel};
     use crate::crypto::{KeyCipher, StaticKeyCipher};
     use crate::gateway::protocol::{ApiFormat, parse_client_request};
-    use crate::gateway::provider_adapter::{
-        LoopbackTestAuth, install_goat_loopback_route_for_test,
-    };
+    use crate::gateway::provider_adapter::install_goat_loopback_route_for_test;
     use crate::models::{Account, AccountSetupStep, AccountType, AppConfig, FreeModelRouting};
     use crate::provider::{
+        COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS, COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
         COMMAND_CODE_PROVIDER_ID, CredentialKind, GO_OFFERING_ID, GOAT_OFFERING_ID,
         OPENCODE_PROVIDER_ID, QuotaScope, ZEN_FREE_ACCOUNT_ID, ZEN_FREE_ACCOUNT_NAME,
     };
@@ -713,14 +691,14 @@ mod tests {
     #[test]
     fn pinned_raw_unimplemented_provider_is_fail_closed_through_adapter() {
         let config = AppConfig::default();
-        let body = chat_body("goat-raw");
+        let body = chat_body(COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM);
         let parsed = parse_client_request(ApiFormat::ChatCompletions, body.clone()).unwrap();
         let resolved = ResolvedModel::PinnedRaw {
-            requested: "goat-raw".into(),
+            requested: COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM.into(),
             mapping: crate::alias::ProviderMapping {
                 provider_id: COMMAND_CODE_PROVIDER_ID,
                 offering_id: GOAT_OFFERING_ID,
-                upstream_model: "glm-5.2",
+                upstream_model: COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
                 routeable: true,
             },
         };
@@ -729,8 +707,8 @@ mod tests {
             &config,
             &parsed,
             &resolved,
-            "goat-raw",
-            "goat-raw",
+            COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
+            COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
             &body,
             true,
         )
@@ -757,21 +735,66 @@ mod tests {
     }
 
     #[test]
-    fn goat_loopback_still_receives_alias_candidates() {
+    fn goat_alias_does_not_steal_go_requests_even_with_loopback() {
         let config = AppConfig::default();
         let goat = goat_account("goat-loop");
-        let _guard = install_goat_loopback_route_for_test(
-            goat.id.clone(),
-            "http://127.0.0.1:9",
-            ["glm-5.2"],
-            [ApiFormat::ChatCompletions],
-            LoopbackTestAuth::Bearer,
-        )
-        .unwrap();
-        let set = routes_for("glm-5.2", &[goat, go_account("go-1")], &config, true);
-        assert_eq!(set.routes.len(), 2);
+        let _guard =
+            install_goat_loopback_route_for_test(goat.id.clone(), "http://127.0.0.1:9").unwrap();
+        let set = routes_for(
+            COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS,
+            &[goat, go_account("go-1")],
+            &config,
+            true,
+        );
+        assert_eq!(set.routes.len(), 1);
+        assert_eq!(set.routes[0].routing.account.id, "go-1");
+        assert_eq!(
+            set.routes[0].plan.model,
+            COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS
+        );
+        assert_eq!(set.routes[0].plan.upstream, ApiFormat::ChatCompletions);
+    }
+
+    #[test]
+    fn goat_slash_raw_pins_through_loopback_as_chat() {
+        let config = AppConfig::default();
+        let goat = goat_account("goat-loop");
+        let _guard =
+            install_goat_loopback_route_for_test(goat.id.clone(), "http://127.0.0.1:9").unwrap();
+        let set = routes_for(
+            COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
+            &[goat, go_account("go-1")],
+            &config,
+            true,
+        );
+        assert_eq!(set.routes.len(), 1);
         assert_eq!(set.routes[0].routing.account.id, "goat-loop");
-        assert_eq!(set.routes[1].routing.account.id, "go-1");
+        assert_eq!(
+            set.routes[0].plan.model,
+            COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM
+        );
+        assert_eq!(set.routes[0].plan.upstream, ApiFormat::ChatCompletions);
+        assert_eq!(
+            set.routes[0].plan.client_model,
+            COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM
+        );
+    }
+
+    #[test]
+    fn goat_slash_raw_without_loopback_is_fail_closed() {
+        let config = AppConfig::default();
+        let set = routes_for(
+            COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
+            &[goat_account("goat-1"), go_account("go-1")],
+            &config,
+            true,
+        );
+        assert!(set.routes.is_empty());
+        assert!(set.incompatibility.as_deref().is_some_and(|message| {
+            message.contains("not verified")
+                || message.contains("disabled")
+                || message.contains("unsupported")
+        }));
     }
 
     #[test]

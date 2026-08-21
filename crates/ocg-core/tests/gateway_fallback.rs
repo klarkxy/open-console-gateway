@@ -4,10 +4,12 @@ use chrono::{Duration, Utc};
 use ocg_core::crypto::{KeyCipher, StaticKeyCipher};
 use ocg_core::db::{Database, ForwardLogQueryOptions};
 use ocg_core::gateway;
-use ocg_core::gateway::protocol::ApiFormat;
-use ocg_core::gateway::provider_adapter::{LoopbackTestAuth, install_goat_loopback_route_for_test};
+use ocg_core::gateway::provider_adapter::install_goat_loopback_route_for_test;
 use ocg_core::models::{Account, AccountUpdate, ForwardLog, ProxyMode, RoutingMode};
-use ocg_core::provider::{COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID, ZEN_FREE_ACCOUNT_ID};
+use ocg_core::provider::{
+    COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS, COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
+    COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID, ZEN_FREE_ACCOUNT_ID,
+};
 use ocg_core::state::{CoreStateInner, GatewayHandle};
 use std::collections::{HashMap, VecDeque};
 use std::fs;
@@ -3110,11 +3112,11 @@ async fn goat_loopback_adapter_routes_all_client_formats_with_its_own_auth_contr
             },
             MockReply {
                 status: 200,
-                body: RESPONSES_SUCCESS_BODY,
+                body: SUCCESS_BODY,
             },
             MockReply {
                 status: 200,
-                body: MESSAGES_SUCCESS_BODY,
+                body: SUCCESS_BODY,
             },
             MockReply {
                 status: 200,
@@ -3131,25 +3133,20 @@ async fn goat_loopback_adapter_routes_all_client_formats_with_its_own_auth_contr
         .lock()
         .reorder_accounts(&[goat_id.clone(), "acct-1".into(), ZEN_FREE_ACCOUNT_ID.into()])
         .unwrap();
-    let _goat_route = install_goat_loopback_route_for_test(
-        goat_id.clone(),
-        base_url,
-        ["deepseek-v4-flash"],
-        [
-            ApiFormat::ChatCompletions,
-            ApiFormat::Responses,
-            ApiFormat::Messages,
-        ],
-        LoopbackTestAuth::Bearer,
-    )
-    .unwrap();
+    let _goat_route = install_goat_loopback_route_for_test(goat_id.clone(), base_url).unwrap();
     let (port, gateway_handle) = start_gateway(state.clone()).await;
 
     for path in ["/v1/chat/completions", "/v1/responses", "/v1/messages"] {
-        let (status, body) = protocol_call(port, path, "deepseek-v4-flash").await;
+        let (status, body) =
+            protocol_call(port, path, COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM).await;
         assert_eq!(status, StatusCode::OK, "{path}: {body}");
+        assert_eq!(
+            body["model"].as_str(),
+            Some(COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM),
+            "{path}: {body}"
+        );
     }
-    let (status, body) = gemini_call(port, "deepseek-v4-flash").await;
+    let (status, body) = gemini_call(port, COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM).await;
     assert_eq!(status, StatusCode::OK, "{body}");
 
     let captured = calls.lock().unwrap().clone();
@@ -3160,24 +3157,38 @@ async fn goat_loopback_adapter_routes_all_client_formats_with_its_own_auth_contr
             .all(|call| call.authorization.as_deref() == Some("Bearer goat-key"))
     );
     assert!(captured.iter().all(|call| call.x_api_key.is_none()));
-    assert_eq!(
+    assert!(
+        captured
+            .iter()
+            .all(|call| call.path == "/provider/v1/chat/completions"),
+        "{:?}",
         captured
             .iter()
             .map(|call| call.path.as_str())
-            .collect::<Vec<_>>(),
-        [
-            "/v1/chat/completions",
-            "/v1/responses",
-            "/v1/messages",
-            "/v1/chat/completions"
-        ]
+            .collect::<Vec<_>>()
     );
+    assert!(
+        captured
+            .iter()
+            .all(|call| !call.path.contains("/responses") && !call.path.contains("/messages")),
+        "GOAT must not emit /responses or /messages: {:?}",
+        captured
+            .iter()
+            .map(|call| call.path.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert!(captured.iter().all(|call| {
+        call.body
+            .contains(COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM)
+            && !call.body.contains("\"x-cmdc-zdr\"")
+    }));
     let logs = state.db.lock().list_forward_logs(10).unwrap();
     assert!(logs.iter().all(|log| {
         log.route_account_id.as_deref() == Some(goat_id.as_str())
             && log.provider_id.as_deref() == Some(COMMAND_CODE_PROVIDER_ID)
             && log.offering_id.as_deref() == Some(GOAT_OFFERING_ID)
             && log.credential_account_id.as_deref() == Some(goat_id.as_str())
+            && log.model == COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM
     }));
     assert!(logs.iter().all(|log| {
         log.status == "success_unpriced"
@@ -3214,14 +3225,7 @@ async fn unsupported_goat_model_is_skipped_before_any_upstream_attempt() {
         .lock()
         .reorder_accounts(&[goat_id.clone(), "acct-1".into(), ZEN_FREE_ACCOUNT_ID.into()])
         .unwrap();
-    let _goat_route = install_goat_loopback_route_for_test(
-        goat_id,
-        base_url,
-        ["minimax-m2.7"],
-        [ApiFormat::ChatCompletions],
-        LoopbackTestAuth::Bearer,
-    )
-    .unwrap();
+    let _goat_route = install_goat_loopback_route_for_test(goat_id, base_url).unwrap();
     let (port, gateway_handle) = start_gateway(state).await;
 
     let (status, body) = chat(port).await;
@@ -3273,20 +3277,20 @@ async fn mixed_goat_cooldown_and_sticky_state_are_independent() {
         .lock()
         .reorder_accounts(&[goat_id.clone(), "acct-1".into(), ZEN_FREE_ACCOUNT_ID.into()])
         .unwrap();
-    let _goat_route = install_goat_loopback_route_for_test(
-        goat_id.clone(),
-        base_url,
-        ["deepseek-v4-flash"],
-        [ApiFormat::ChatCompletions],
-        LoopbackTestAuth::Bearer,
-    )
-    .unwrap();
+    let _goat_route = install_goat_loopback_route_for_test(goat_id.clone(), base_url).unwrap();
     let (port, gateway_handle) = start_gateway(state.clone()).await;
 
-    for _ in 0..2 {
-        let (status, body) = chat(port).await;
-        assert_eq!(status, 200, "{body}");
-    }
+    let (status, body) = protocol_call(
+        port,
+        "/v1/chat/completions",
+        COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
+    )
+    .await;
+    assert_ne!(
+        status,
+        StatusCode::OK,
+        "pinned GOAT 429 must not fall through to Go: {body}"
+    );
     assert_eq!(
         calls
             .lock()
@@ -3294,12 +3298,121 @@ async fn mixed_goat_cooldown_and_sticky_state_are_independent() {
             .iter()
             .map(|call| call.key.as_str())
             .collect::<Vec<_>>(),
-        ["goat-key", "open-key", "open-key"]
+        ["goat-key"]
+    );
+    assert!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|call| call.path == "/provider/v1/chat/completions")
     );
     let goat = state.db.lock().get_account(&goat_id).unwrap().unwrap();
     let open = state.db.lock().get_account("acct-1").unwrap().unwrap();
     assert!(goat.cooldown_until.is_some());
+    assert!(goat.cooldown_generic_until.is_some());
+    assert!(goat.cooldown_5h_until.is_none());
+    assert!(goat.cooldown_week_until.is_none());
+    assert!(goat.cooldown_month_until.is_none());
     assert!(open.cooldown_until.is_none());
+    let sync = state.db.lock().account_usage_sync_state(&goat_id).unwrap();
+    assert!(
+        sync.as_ref()
+            .is_none_or(|state| state.next_eligible_at.is_none()),
+        "GOAT 429 must not schedule OpenCode Go usage sync: {sync:?}"
+    );
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop_mock.send(());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn goat_loopback_does_not_steal_go_alias_requests() {
+    let replies = HashMap::from([(
+        "open-key".to_string(),
+        VecDeque::from([MockReply {
+            status: 200,
+            body: SUCCESS_BODY,
+        }]),
+    )]);
+    let (base_url, calls, stop_mock) = start_mock_upstream(replies).await;
+    let (state, dir) = build_state(base_url.clone(), &["open-key"]);
+    let goat_id = format!("goat-{}", uuid::Uuid::new_v4());
+    create_goat_account(&state, "acct-1", &goat_id, "goat-key");
+    state
+        .db
+        .lock()
+        .reorder_accounts(&[goat_id.clone(), "acct-1".into(), ZEN_FREE_ACCOUNT_ID.into()])
+        .unwrap();
+    let _goat_route = install_goat_loopback_route_for_test(goat_id, base_url).unwrap();
+    let (port, gateway_handle) = start_gateway(state).await;
+
+    let (status, body) = protocol_call(
+        port,
+        "/v1/chat/completions",
+        COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|call| call.key.as_str())
+            .collect::<Vec<_>>(),
+        ["open-key"]
+    );
+    assert!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|call| call.path == "/v1/chat/completions")
+    );
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop_mock.send(());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn enabled_goat_without_loopback_is_not_selected() {
+    let replies = HashMap::from([(
+        "open-key".to_string(),
+        VecDeque::from([MockReply {
+            status: 200,
+            body: SUCCESS_BODY,
+        }]),
+    )]);
+    let (base_url, calls, stop_mock) = start_mock_upstream(replies).await;
+    let (state, dir) = build_state(base_url, &["open-key"]);
+    let goat_id = format!("goat-{}", uuid::Uuid::new_v4());
+    create_goat_account(&state, "acct-1", &goat_id, "goat-key");
+    state
+        .db
+        .lock()
+        .reorder_accounts(&[goat_id, "acct-1".into(), ZEN_FREE_ACCOUNT_ID.into()])
+        .unwrap();
+    let (port, gateway_handle) = start_gateway(state).await;
+
+    let (status, body) = protocol_call(
+        port,
+        "/v1/chat/completions",
+        COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
+    )
+    .await;
+    assert_ne!(
+        status,
+        StatusCode::OK,
+        "production GOAT must stay unselected without the loopback seam: {body}"
+    );
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "pinned GOAT raw id must not fall through to Go: {:?}",
+        calls.lock().unwrap()
+    );
 
     gateway::stop_gateway(gateway_handle);
     let _ = stop_mock.send(());

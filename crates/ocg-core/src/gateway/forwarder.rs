@@ -17,6 +17,7 @@ use crate::models::{
     Account, AppConfig, ForwardLog, ForwardMetrics, UpstreamChannel, UsageWindowKind,
 };
 use crate::pricing::PricingSnapshot;
+use crate::provider::is_command_code_goat;
 use crate::state::CoreState;
 use anyhow::Result;
 use axum::body::Body;
@@ -356,6 +357,7 @@ async fn forward_request_impl(
                 | "transfer-encoding"
                 | "accept-encoding"
                 | "x-ocg-conversation-id"
+                | "x-cmdc-zdr"
         ) || (plan.upstream != ApiFormat::Messages
             && matches!(header.as_str(), "anthropic-version" | "anthropic-beta")))
         {
@@ -436,18 +438,31 @@ async fn forward_request_impl(
         reqwest::header::HeaderValue::from_static("identity"),
     );
 
-    let upstream_path = provider_route
-        .upstream
-        .upstream_path()
-        .ok_or_else(|| anyhow::anyhow!("Gemini is a client-only protocol"))?;
+    let upstream_path = if provider_route.path.is_empty() {
+        provider_route
+            .upstream
+            .upstream_path()
+            .ok_or_else(|| anyhow::anyhow!("Gemini is a client-only protocol"))?
+            .to_string()
+    } else {
+        provider_route.path.clone()
+    };
     let url = format!(
         "{}{}",
         provider_route.base_url.trim_end_matches('/'),
         upstream_path
     );
 
+    let goat_client;
+    let send_client = if !provider_route.follow_redirects {
+        goat_client = crate::http_client::build_no_redirect(config)?;
+        &goat_client
+    } else {
+        client
+    };
+
     let model = plan.model.clone();
-    let upstream_req = client
+    let upstream_req = send_client
         .post(&url)
         .headers(upstream_headers)
         .body(plan.body.clone());
@@ -682,12 +697,10 @@ async fn forward_request_impl(
             // The endpoint/channel is authoritative. Free providers sometimes
             // reuse Go-window wording (5-hour/weekly/monthly); that text must not
             // downgrade an IP-shared Free 429 into per-account key rotation.
-            let window = usage_limit_window_for_channel(plan.channel, &text);
-            let cooldown = if window == Some(UsageWindowKind::Free) {
-                parse_free_reset_or_default(&text)
-            } else {
-                parse_reset(&text).unwrap_or_else(|| Duration::minutes(5))
-            };
+            // Command Code GOAT 429 is a generic provider-key cooldown: never parse
+            // OpenCode Go limit windows and never schedule Go usage sync.
+            let goat = is_command_code_goat(&account.provider_id, &account.offering_id);
+            let (window, cooldown) = rate_limit_window_and_cooldown(goat, plan.channel, &text);
             let until = Utc::now() + cooldown;
             let sanitized = attempt_context.sanitize_upstream_error(&text);
             let error_message = format!(
@@ -734,7 +747,7 @@ async fn forward_request_impl(
             }
             // Schedule (never inline) an official usage reconciliation shortly
             // after a real inference 429. Does not alter cooldown/failover.
-            if plan.channel != UpstreamChannel::Free {
+            if !goat && plan.channel != UpstreamChannel::Free {
                 crate::usage_sync::schedule_after_inference_429(state, &account.id);
             }
             return Ok(ForwardResult {
@@ -2208,6 +2221,23 @@ fn usage_limit_window_for_channel(channel: UpstreamChannel, text: &str) -> Optio
     }
 }
 
+fn rate_limit_window_and_cooldown(
+    goat: bool,
+    channel: UpstreamChannel,
+    text: &str,
+) -> (Option<UsageWindowKind>, Duration) {
+    if goat {
+        return (None, Duration::minutes(5));
+    }
+    let window = usage_limit_window_for_channel(channel, text);
+    let cooldown = if window == Some(UsageWindowKind::Free) {
+        parse_free_reset_or_default(text)
+    } else {
+        parse_reset(text).unwrap_or_else(|| Duration::minutes(5))
+    };
+    (window, cooldown)
+}
+
 fn action_for_usage_limit(
     window: Option<UsageWindowKind>,
     allow_go_fallback: bool,
@@ -2634,6 +2664,28 @@ mod stream_usage_tests {
             action_for_usage_limit(None, false),
             ForwardAction::TryNextAccount
         );
+    }
+
+    #[test]
+    fn goat_429_is_generic_and_ignores_go_limit_windows() {
+        for misleading_body in [
+            "5-hour usage limit reached. Resets in 13min.",
+            "Weekly usage limit reached. Resets in 4 days.",
+            "Monthly usage limit reached. Resets in 13 days.",
+            r#"{"type":"GoUsageLimitError","message":"Weekly usage limit reached. Resets in 3 days."}"#,
+        ] {
+            let (window, cooldown) =
+                rate_limit_window_and_cooldown(true, UpstreamChannel::Go, misleading_body);
+            assert_eq!(window, None, "{misleading_body}");
+            assert_eq!(cooldown, Duration::minutes(5), "{misleading_body}");
+        }
+        let (go_window, go_cooldown) = rate_limit_window_and_cooldown(
+            false,
+            UpstreamChannel::Go,
+            "Weekly usage limit reached. Resets in 4 days.",
+        );
+        assert_eq!(go_window, Some(UsageWindowKind::Week));
+        assert_eq!(go_cooldown, Duration::days(4));
     }
 
     #[test]

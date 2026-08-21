@@ -8,8 +8,11 @@
 //! when it uniquely selects one provider mapping; ambiguity returns
 //! [`ResolveError::Ambiguous`] with code [`AMBIGUOUS_MODEL_ID`].
 //!
-//! Command Code GOAT, SCNet, and Custom have no production mappings here and
-//! stay fail-closed. Later provider adapters consume [`ProviderMapping`] from
+//! Command Code GOAT has one official non-routeable mapping:
+//! Alias `deepseek-v4-flash` → raw `deepseek/deepseek-v4-flash`. The kebab
+//! alias stays Go-owned and published; the unique slash raw ID pins to GOAT
+//! and is not production-selectable. SCNet and Custom stay fail-closed.
+//! Later provider adapters consume [`ProviderMapping`] from
 //! [`crate::gateway::materialize`]: parse the client protocol once, then
 //! materialize model / protocol / endpoint / auth per candidate. Adapters must
 //! not probe a billable inference path to discover protocol support. The
@@ -18,7 +21,9 @@
 use crate::gateway::free_models::{is_free_model, mapped_free_for};
 use crate::gateway::protocol::supported_model_ids;
 use crate::provider::{
-    ANONYMOUS_FREE_OFFERING_ID, GO_OFFERING_ID, OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID,
+    ANONYMOUS_FREE_OFFERING_ID, COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS,
+    COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM, COMMAND_CODE_PROVIDER_ID, GO_OFFERING_ID,
+    GOAT_OFFERING_ID, OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID,
 };
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
@@ -44,6 +49,10 @@ impl ProviderMapping {
     pub fn is_zen_free(&self) -> bool {
         self.provider_id == OPENCODE_ZEN_FREE_PROVIDER_ID
             && self.offering_id == ANONYMOUS_FREE_OFFERING_ID
+    }
+
+    pub fn is_command_code_goat(&self) -> bool {
+        crate::provider::is_command_code_goat(self.provider_id, self.offering_id)
     }
 }
 
@@ -166,7 +175,7 @@ fn build_builtin_registry() -> Registry {
         } else {
             specs.push(AliasEntry {
                 alias: id,
-                mappings: vec![go_mapping(id)],
+                mappings: go_alias_mappings(id),
                 prefer_twin: mapped_free_for(id),
             });
         }
@@ -181,6 +190,23 @@ fn go_mapping(upstream_model: &'static str) -> ProviderMapping {
         upstream_model,
         routeable: true,
     }
+}
+
+fn goat_deepseek_v4_flash_mapping() -> ProviderMapping {
+    ProviderMapping {
+        provider_id: COMMAND_CODE_PROVIDER_ID,
+        offering_id: GOAT_OFFERING_ID,
+        upstream_model: COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
+        routeable: false,
+    }
+}
+
+fn go_alias_mappings(upstream_model: &'static str) -> Vec<ProviderMapping> {
+    let mut mappings = vec![go_mapping(upstream_model)];
+    if upstream_model == COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS {
+        mappings.push(goat_deepseek_v4_flash_mapping());
+    }
+    mappings
 }
 
 fn zen_mapping(upstream_model: &'static str) -> ProviderMapping {
@@ -241,14 +267,10 @@ fn pin_or_ambiguous(
     mappings: &[ProviderMapping],
 ) -> Result<ResolvedModel, ResolveError> {
     match mappings {
-        [mapping] if mapping.routeable => Ok(ResolvedModel::PinnedRaw {
+        [mapping] => Ok(ResolvedModel::PinnedRaw {
             requested,
             mapping: mapping.clone(),
         }),
-        [mapping] => {
-            let _ = mapping;
-            Err(ResolveError::Unknown { requested })
-        }
         [] => Err(ResolveError::Unknown { requested }),
         _ => Err(ResolveError::Ambiguous {
             requested,
@@ -435,20 +457,60 @@ mod tests {
     }
 
     #[test]
-    fn slash_prefixed_goat_shaped_raw_is_not_a_go_alias() {
-        match resolve("deepseek/deepseek-v4-flash") {
-            Err(ResolveError::Unknown { requested }) => {
-                assert_eq!(requested, "deepseek/deepseek-v4-flash");
+    fn slash_prefixed_goat_raw_pins_to_command_code_and_does_not_steal_go() {
+        match resolve(COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM) {
+            Ok(ResolvedModel::PinnedRaw { mapping, .. }) => {
+                assert!(mapping.is_command_code_goat());
+                assert!(!mapping.routeable);
+                assert_eq!(
+                    mapping.upstream_model,
+                    COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM
+                );
+                assert!(
+                    ResolvedModel::PinnedRaw {
+                        requested: COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM.into(),
+                        mapping: mapping.clone(),
+                    }
+                    .routeable_mappings()
+                    .is_empty()
+                );
             }
-            other => panic!("GOAT-shaped raw id must not resolve as Go, got {other:?}"),
+            other => panic!("GOAT raw id must uniquely pin to command-code/goat, got {other:?}"),
         }
-        assert!(matches!(
-            resolve("deepseek-v4-flash").unwrap(),
+        match resolve(COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS).unwrap() {
             ResolvedModel::Alias {
-                alias: "deepseek-v4-flash",
-                ..
+                alias, mappings, ..
+            } => {
+                assert_eq!(alias, COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS);
+                assert!(mappings.iter().any(|mapping| mapping.is_opencode_go()));
+                assert!(
+                    mappings
+                        .iter()
+                        .any(|mapping| mapping.is_command_code_goat() && !mapping.routeable)
+                );
+                let routeable = mappings
+                    .iter()
+                    .filter(|mapping| mapping.routeable)
+                    .collect::<Vec<_>>();
+                assert_eq!(routeable.len(), 1);
+                assert!(routeable[0].is_opencode_go());
+                assert_eq!(
+                    routeable[0].upstream_model,
+                    COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS
+                );
             }
+            other => panic!("expected published Go alias, got {other:?}"),
+        }
+        assert!(is_published_alias(
+            COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS
         ));
+        assert!(!is_published_alias(
+            COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM
+        ));
+        assert!(
+            !published_aliases().iter().any(|alias| alias.contains('/')
+                || *alias == COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM)
+        );
     }
 
     #[test]
@@ -570,10 +632,21 @@ mod tests {
             prefer_twin: None,
         }]);
         match resolve_in(&registry, "goat-only-raw") {
-            Err(ResolveError::Unknown { requested }) => {
-                assert_eq!(requested, "goat-only-raw");
+            Ok(ResolvedModel::PinnedRaw { mapping, .. }) => {
+                assert!(!mapping.routeable);
+                assert_eq!(mapping.provider_id, "command-code");
+                assert!(
+                    ResolvedModel::PinnedRaw {
+                        requested: "goat-only-raw".into(),
+                        mapping: mapping.clone(),
+                    }
+                    .routeable_mappings()
+                    .is_empty()
+                );
             }
-            other => panic!("fail-closed unique raw must not pin, got {other:?}"),
+            other => {
+                panic!("fail-closed unique raw must pin without being routeable, got {other:?}")
+            }
         }
         match resolve_in(&registry, "visible").unwrap() {
             ResolvedModel::Alias { mappings, .. } => {

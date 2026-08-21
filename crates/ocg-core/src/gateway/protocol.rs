@@ -1,5 +1,9 @@
 use crate::models::UpstreamChannel;
 use crate::pricing::normalize_model_name;
+use crate::provider::{
+    COMMAND_CODE_GOAT_CHAT_COMPLETIONS_PATH, COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS,
+    COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM, COMMAND_CODE_GOAT_MESSAGES_PATH,
+};
 use axum::http::StatusCode;
 use base64::{
     Engine as _,
@@ -421,8 +425,54 @@ pub fn supported_model_ids() -> impl Iterator<Item = &'static str> {
 /// Provider adapters use the same probed OpenCode matrix as request planning;
 /// this prevents a mixed-provider selector from probing an unsupported
 /// model/protocol pair merely because that account appears earlier.
-pub(crate) fn opencode_supports_upstream(model: &str, upstream: ApiFormat) -> bool {
+pub fn opencode_supports_upstream(model: &str, upstream: ApiFormat) -> bool {
     model_protocol(model).is_some_and(|profile| profile.supported.contains(&upstream))
+}
+
+/// Command Code GOAT protocol profiles, independent of OpenCode `MODEL_PROTOCOLS`.
+/// Lookup is exact (case-insensitive) on the upstream raw ID. Slash IDs are
+/// never folded onto kebab OpenCode aliases, so `deepseek/deepseek-v4-flash`
+/// cannot steal Go's `deepseek-v4-flash` protocol row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommandCodeModelProtocol {
+    pub alias: &'static str,
+    pub upstream_id: &'static str,
+    pub preferred: ApiFormat,
+    pub supported_upstream: &'static [ApiFormat],
+}
+
+const COMMAND_CODE_MODEL_PROTOCOLS: &[CommandCodeModelProtocol] = &[CommandCodeModelProtocol {
+    alias: COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS,
+    upstream_id: COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
+    preferred: ApiFormat::ChatCompletions,
+    supported_upstream: CHAT_ONLY,
+}];
+
+/// Exact Command Code raw-ID lookup. Does not consult OpenCode `MODEL_PROTOCOLS`
+/// and does not slash-fold onto a kebab alias.
+pub fn command_code_model_protocol(model: &str) -> Option<&'static CommandCodeModelProtocol> {
+    let trimmed = model.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    COMMAND_CODE_MODEL_PROTOCOLS
+        .iter()
+        .find(|profile| profile.upstream_id.eq_ignore_ascii_case(trimmed))
+}
+
+pub fn command_code_supports_upstream(model: &str, upstream: ApiFormat) -> bool {
+    command_code_model_protocol(model)
+        .is_some_and(|profile| profile.supported_upstream.contains(&upstream))
+}
+
+/// Official Command Code relative paths. Responses and Gemini have no upstream
+/// path; client formats convert to Chat for the first supported GOAT model.
+pub fn command_code_upstream_path(format: ApiFormat) -> Option<&'static str> {
+    match format {
+        ApiFormat::ChatCompletions => Some(COMMAND_CODE_GOAT_CHAT_COMPLETIONS_PATH),
+        ApiFormat::Messages => Some(COMMAND_CODE_GOAT_MESSAGES_PATH),
+        ApiFormat::Responses | ApiFormat::Gemini => None,
+    }
 }
 
 const ANTHROPIC_THINKING_ENCRYPTED_PREFIX: &str = "ocg-anthropic-thinking-v1:";
@@ -1485,7 +1535,26 @@ fn model_protocol(model: &str) -> Option<&'static ModelProtocol> {
         .find(|profile| profile.id == normalized)
 }
 
+fn resolve_from_supported(
+    client: ApiFormat,
+    preferred: ApiFormat,
+    supported: &'static [ApiFormat],
+) -> ApiFormat {
+    match client {
+        ApiFormat::Gemini => preferred,
+        client if supported.contains(&client) => client,
+        _ => preferred,
+    }
+}
+
 fn resolve_upstream_format(client: ApiFormat, model: &str) -> Result<ApiFormat, ProtocolError> {
+    if let Some(profile) = command_code_model_protocol(model) {
+        return Ok(resolve_from_supported(
+            client,
+            profile.preferred,
+            profile.supported_upstream,
+        ));
+    }
     match (client, model_protocol(model)) {
         (ApiFormat::Gemini, Some(profile)) => Ok(profile.preferred),
         (client, Some(profile)) if profile.supported.contains(&client) => Ok(client),
@@ -5632,6 +5701,132 @@ mod tests {
         assert_eq!(
             gemini["error"]["details"][0]["reason"],
             crate::alias::AMBIGUOUS_MODEL_ID
+        );
+    }
+
+    #[test]
+    fn command_code_descriptor_is_separate_from_opencode_table() {
+        let goat = command_code_model_protocol(COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM)
+            .expect("official GOAT raw id");
+        assert_eq!(goat.alias, COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS);
+        assert_eq!(goat.preferred, ApiFormat::ChatCompletions);
+        assert_eq!(goat.supported_upstream, CHAT_ONLY);
+        assert!(command_code_supports_upstream(
+            COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
+            ApiFormat::ChatCompletions
+        ));
+        assert!(!command_code_supports_upstream(
+            COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
+            ApiFormat::Responses
+        ));
+        assert!(!command_code_supports_upstream(
+            COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
+            ApiFormat::Messages
+        ));
+        assert!(
+            command_code_model_protocol(COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS).is_none(),
+            "kebab alias must stay OpenCode-owned; GOAT lookup is exact slash raw id only"
+        );
+        assert!(
+            !opencode_supports_upstream(
+                COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
+                ApiFormat::ChatCompletions
+            ),
+            "GOAT raw id must not resolve through OpenCode MODEL_PROTOCOLS"
+        );
+        assert!(opencode_supports_upstream(
+            COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS,
+            ApiFormat::Responses
+        ));
+        assert_eq!(
+            command_code_upstream_path(ApiFormat::ChatCompletions),
+            Some("/chat/completions")
+        );
+        assert_eq!(
+            command_code_upstream_path(ApiFormat::Messages),
+            Some("/messages")
+        );
+        assert_eq!(command_code_upstream_path(ApiFormat::Responses), None);
+        assert_eq!(command_code_upstream_path(ApiFormat::Gemini), None);
+    }
+
+    #[test]
+    fn command_code_client_formats_convert_to_chat_and_never_emit_responses() {
+        for (client, body) in [
+            (
+                ApiFormat::ChatCompletions,
+                bytes(json!({
+                    "model": COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
+                    "messages": [{"role": "user", "content": "hi"}]
+                })),
+            ),
+            (
+                ApiFormat::Responses,
+                bytes(json!({
+                    "model": COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
+                    "input": "hi",
+                    "store": false
+                })),
+            ),
+            (
+                ApiFormat::Messages,
+                bytes(json!({
+                    "model": COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
+                    "max_tokens": 1,
+                    "messages": [{"role": "user", "content": "hi"}]
+                })),
+            ),
+        ] {
+            let parsed = parse_client_request(client, body).unwrap();
+            let plan = materialize_parsed_request(
+                &parsed,
+                &MaterializeSpec {
+                    client_model: parsed.requested_model.clone(),
+                    upstream_model: COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM.into(),
+                    resolved_alias: Some(COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS.into()),
+                    channel: UpstreamChannel::Go,
+                    upstream_base_override: None,
+                    original_model: None,
+                    allow_go_fallback: false,
+                },
+            )
+            .unwrap();
+            assert_eq!(plan.upstream, ApiFormat::ChatCompletions, "{client:?}");
+            assert_eq!(
+                plan.model, COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
+                "{client:?}"
+            );
+            assert_ne!(plan.upstream, ApiFormat::Responses);
+            assert_eq!(
+                command_code_upstream_path(plan.upstream),
+                Some("/chat/completions")
+            );
+        }
+
+        let gemini = parse_gemini_request(
+            COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM.into(),
+            false,
+            bytes(json!({"contents":[{"role":"user","parts":[{"text":"hi"}]}]})),
+        )
+        .unwrap();
+        let plan = materialize_parsed_request(
+            &gemini,
+            &MaterializeSpec {
+                client_model: gemini.requested_model.clone(),
+                upstream_model: COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM.into(),
+                resolved_alias: Some(COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS.into()),
+                channel: UpstreamChannel::Go,
+                upstream_base_override: None,
+                original_model: None,
+                allow_go_fallback: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(plan.client, ApiFormat::Gemini);
+        assert_eq!(plan.upstream, ApiFormat::ChatCompletions);
+        assert_eq!(
+            command_code_upstream_path(plan.upstream),
+            Some("/chat/completions")
         );
     }
 }
