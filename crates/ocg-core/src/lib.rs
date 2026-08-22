@@ -2,6 +2,7 @@ pub mod alias;
 pub mod auth;
 pub mod browser;
 pub mod console_usage;
+pub(crate) mod control;
 pub mod crypto;
 pub mod custom;
 pub mod custom_http;

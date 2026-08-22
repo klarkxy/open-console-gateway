@@ -97,6 +97,22 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "PricingMultiplierWrite",
     "ProviderPricing",
     "PricingAvailability",
+    "GatewayStatus",
+    "ApplicationModels",
+    "DashboardSummary",
+    "DailyModelCost",
+    "DailyCostByModel",
+    "GatewayLog",
+    "GatewayLogs",
+    "ForwardLog",
+    "ForwardLogSummary",
+    "ForwardLogs",
+    "ForwardLogClientKey",
+    "ForwardLogKeys",
+    "ForwardLogModels",
+    "GatewayLogQuery",
+    "ForwardLogQuery",
+    "DailyCostQuery",
 ];
 
 pub const ERROR_UNAUTHORIZED: &str = "unauthorized";
@@ -1462,6 +1478,260 @@ pub enum PricingAvailability {
     Unpriced,
 }
 
+/// Secret-free gateway listener view. The plaintext Key lives only on
+/// [`ConnectionInfo`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GatewayStatus {
+    pub running: bool,
+    pub port: u16,
+    pub upstream_base_url: String,
+    pub last_error: Option<String>,
+    pub revision: u64,
+    pub process_generation: u64,
+    pub pricing_revision: String,
+}
+
+/// Local Applications picker: Go routable Alias ∩ current pricing snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ApplicationModels {
+    pub models: Vec<String>,
+    pub revision: u64,
+    pub process_generation: u64,
+    pub pricing_revision: String,
+}
+
+/// Dashboard home totals. Custom/GOAT/SCNet cards are not "available".
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DashboardSummary {
+    pub total_accounts: u64,
+    pub available_accounts: u64,
+    pub gateway_running: bool,
+    pub today_cost: f64,
+    pub week_cost: f64,
+    pub month_cost: f64,
+    pub revision: u64,
+    pub process_generation: u64,
+    pub pricing_revision: String,
+}
+
+/// One UTC day / model cost bucket. `date` is `YYYY-MM-DD`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DailyModelCost {
+    pub date: String,
+    pub model: String,
+    pub cost: f64,
+}
+
+/// GET `/dashboard/daily-cost-by-model` envelope.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DailyCostByModel {
+    pub items: Vec<DailyModelCost>,
+    pub revision: u64,
+    pub process_generation: u64,
+    pub pricing_revision: String,
+}
+
+/// One redacted gateway log row.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GatewayLog {
+    pub id: i64,
+    pub level: String,
+    pub category: String,
+    pub message: String,
+    pub created_at: String,
+    pub request_id: Option<String>,
+    pub attempt: Option<i64>,
+    pub error_source: Option<String>,
+    pub error_stage: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub diagnostic: Option<Value>,
+}
+
+/// GET `/logs/gateway` envelope.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GatewayLogs {
+    pub items: Vec<GatewayLog>,
+    pub revision: u64,
+    pub process_generation: u64,
+    pub pricing_revision: String,
+}
+
+/// One redacted forward-log row plus native model identity. There is no
+/// `requestedAlias` field.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ForwardLog {
+    pub id: i64,
+    pub timestamp: String,
+    pub model: String,
+    pub account_id: String,
+    pub account_name: String,
+    pub route_account_id: Option<String>,
+    pub provider_id: Option<String>,
+    pub offering_id: Option<String>,
+    pub credential_account_id: Option<String>,
+    pub client_key_id: Option<String>,
+    pub client_key_name: Option<String>,
+    pub status: String,
+    pub http_status: Option<i32>,
+    pub route: String,
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub cached_tokens: i64,
+    pub cache_creation_tokens: i64,
+    pub cost: Option<f64>,
+    pub raw_cost_usd: Option<f64>,
+    pub quota_debit: Option<f64>,
+    pub effective_paid_cost_usd: Option<f64>,
+    pub pricing_revision_id: Option<String>,
+    pub quota_multiplier: Option<f64>,
+    pub local_adjustment_multiplier: Option<f64>,
+    pub service_tier: Option<String>,
+    pub cost_state: String,
+    pub error_message: Option<String>,
+    pub request_id: Option<String>,
+    pub attempt: Option<i64>,
+    pub error_source: Option<String>,
+    pub error_stage: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub diagnostic: Option<Value>,
+    pub requested_model: Option<String>,
+    pub resolved_alias: Option<String>,
+    pub upstream_model: Option<String>,
+    pub native_cost_value: Option<f64>,
+    pub native_cost_unit: Option<String>,
+    pub native_cost_currency: Option<String>,
+}
+
+/// Aggregates for the current forward-log filter, computed before paging.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ForwardLogSummary {
+    pub total_requests: i64,
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub cached_tokens: i64,
+    pub cost: f64,
+}
+
+/// GET `/logs/forward` envelope.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ForwardLogs {
+    pub items: Vec<ForwardLog>,
+    pub summary: ForwardLogSummary,
+    pub revision: u64,
+    pub process_generation: u64,
+    pub pricing_revision: String,
+}
+
+/// One historical client-key identity observed in forward logs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ForwardLogClientKey {
+    pub id: String,
+    pub name: String,
+}
+
+/// GET `/logs/forward/keys` envelope. Includes disabled, deleted, and
+/// dangling identities so stored rows remain selectable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ForwardLogKeys {
+    pub keys: Vec<ForwardLogClientKey>,
+    pub revision: u64,
+    pub process_generation: u64,
+    pub pricing_revision: String,
+}
+
+/// GET `/logs/forward/models` envelope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ForwardLogModels {
+    pub models: Vec<String>,
+    pub revision: u64,
+    pub process_generation: u64,
+    pub pricing_revision: String,
+}
+
+/// GET `/logs/gateway` query. All fields may be omitted.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GatewayLogQuery {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+}
+
+/// GET `/logs/forward` query. Filter/sort tokens keep V2 values
+/// (`prompt_tokens`, `asc`/`desc`). Unknown fields are rejected.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ForwardLogQuery {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offering_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_account_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_account_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_time: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_time: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort_order: Option<String>,
+}
+
+/// GET `/dashboard/daily-cost-by-model` query. `days` may be omitted.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DailyCostQuery {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub days: Option<i64>,
+}
+
 /// Deterministic JSON Schema catalog for the checked-in V3 contract.
 ///
 /// Response types are generated with the serialize contract so `Option` fields
@@ -1518,6 +1788,19 @@ pub fn contract_schema() -> Value {
     include_type::<PricingMultiplierChange>(&mut serialize);
     include_type::<ProviderPricing>(&mut serialize);
     include_type::<PricingAvailability>(&mut serialize);
+    include_type::<GatewayStatus>(&mut serialize);
+    include_type::<ApplicationModels>(&mut serialize);
+    include_type::<DashboardSummary>(&mut serialize);
+    include_type::<DailyModelCost>(&mut serialize);
+    include_type::<DailyCostByModel>(&mut serialize);
+    include_type::<GatewayLog>(&mut serialize);
+    include_type::<GatewayLogs>(&mut serialize);
+    include_type::<ForwardLog>(&mut serialize);
+    include_type::<ForwardLogSummary>(&mut serialize);
+    include_type::<ForwardLogs>(&mut serialize);
+    include_type::<ForwardLogClientKey>(&mut serialize);
+    include_type::<ForwardLogKeys>(&mut serialize);
+    include_type::<ForwardLogModels>(&mut serialize);
     let mut defs = serialize.take_definitions(true);
 
     let mut deserialize = SchemaSettings::draft2020_12().into_generator();
@@ -1543,6 +1826,9 @@ pub fn contract_schema() -> Value {
     include_type::<PricingRefreshPolicy>(&mut deserialize);
     include_type::<PricingMultipliersUpdate>(&mut deserialize);
     include_type::<PricingMultiplierWrite>(&mut deserialize);
+    include_type::<GatewayLogQuery>(&mut deserialize);
+    include_type::<ForwardLogQuery>(&mut deserialize);
+    include_type::<DailyCostQuery>(&mut deserialize);
     for (name, schema) in deserialize.take_definitions(true) {
         defs.entry(name).or_insert(schema);
     }
@@ -2813,9 +3099,29 @@ mod tests {
         }
     }
 
+    const OBSERVABILITY_CATALOG_TYPES: &[&str] = &[
+        "GatewayStatus",
+        "ApplicationModels",
+        "DashboardSummary",
+        "DailyModelCost",
+        "DailyCostByModel",
+        "GatewayLog",
+        "GatewayLogs",
+        "ForwardLog",
+        "ForwardLogSummary",
+        "ForwardLogs",
+        "ForwardLogClientKey",
+        "ForwardLogKeys",
+        "ForwardLogModels",
+        "GatewayLogQuery",
+        "ForwardLogQuery",
+        "DailyCostQuery",
+    ];
+
     #[test]
     fn catalog_type_names_append_pricing_dtos_after_the_provider_prefix() {
         let prefix_len = ACCOUNTS_CATALOG_PREFIX.len() + PROVIDER_CATALOG_TYPES.len();
+        let pricing_end = prefix_len + PRICING_CATALOG_TYPES.len();
         assert_eq!(
             &CATALOG_TYPE_NAMES[..ACCOUNTS_CATALOG_PREFIX.len()],
             ACCOUNTS_CATALOG_PREFIX
@@ -2824,10 +3130,17 @@ mod tests {
             &CATALOG_TYPE_NAMES[ACCOUNTS_CATALOG_PREFIX.len()..prefix_len],
             PROVIDER_CATALOG_TYPES
         );
-        assert_eq!(&CATALOG_TYPE_NAMES[prefix_len..], PRICING_CATALOG_TYPES);
+        assert_eq!(
+            &CATALOG_TYPE_NAMES[prefix_len..pricing_end],
+            PRICING_CATALOG_TYPES
+        );
+        assert_eq!(
+            &CATALOG_TYPE_NAMES[pricing_end..],
+            OBSERVABILITY_CATALOG_TYPES
+        );
         assert_eq!(
             CATALOG_TYPE_NAMES.len(),
-            prefix_len + PRICING_CATALOG_TYPES.len()
+            pricing_end + OBSERVABILITY_CATALOG_TYPES.len()
         );
     }
 
@@ -3072,5 +3385,281 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    fn sample_gateway_status() -> GatewayStatus {
+        GatewayStatus {
+            running: true,
+            port: 9042,
+            upstream_base_url: "https://opencode.ai/zen/go/v1".into(),
+            last_error: None,
+            revision: 11,
+            process_generation: 9,
+            pricing_revision: "seed".into(),
+        }
+    }
+
+    fn sample_forward_log() -> ForwardLog {
+        ForwardLog {
+            id: 7,
+            timestamp: "2026-08-16T12:00:00.000Z".into(),
+            model: "glm-5".into(),
+            account_id: "acct-1".into(),
+            account_name: "go".into(),
+            route_account_id: Some("acct-1".into()),
+            provider_id: Some("opencode".into()),
+            offering_id: Some("go".into()),
+            credential_account_id: Some("acct-1".into()),
+            client_key_id: Some("key-1".into()),
+            client_key_name: Some("Laptop".into()),
+            status: "success".into(),
+            http_status: Some(200),
+            route: "proxy".into(),
+            prompt_tokens: 1,
+            completion_tokens: 2,
+            cached_tokens: 0,
+            cache_creation_tokens: 0,
+            cost: Some(0.1),
+            raw_cost_usd: Some(0.1),
+            quota_debit: Some(0.1),
+            effective_paid_cost_usd: Some(0.1),
+            pricing_revision_id: Some("seed".into()),
+            quota_multiplier: Some(1.0),
+            local_adjustment_multiplier: Some(1.0),
+            service_tier: None,
+            cost_state: "priced".into(),
+            error_message: None,
+            request_id: Some("req-1".into()),
+            attempt: Some(1),
+            error_source: None,
+            error_stage: None,
+            duration_ms: Some(12),
+            diagnostic: None,
+            requested_model: Some("GLM-5".into()),
+            resolved_alias: Some("glm-5".into()),
+            upstream_model: Some("glm-5".into()),
+            native_cost_value: Some(0.1),
+            native_cost_unit: Some("usd".into()),
+            native_cost_currency: Some("USD".into()),
+        }
+    }
+
+    #[test]
+    fn observability_dtos_emit_camel_case_nulls_and_stay_secret_free() {
+        let status = sample_gateway_status();
+        let status_value = serde_json::to_value(&status).unwrap();
+        assert_eq!(status_value["running"], true);
+        assert_eq!(status_value["port"], 9042);
+        assert_eq!(
+            status_value["upstreamBaseUrl"],
+            "https://opencode.ai/zen/go/v1"
+        );
+        assert_eq!(status_value["lastError"], Value::Null);
+        assert_eq!(status_value["revision"], 11);
+        assert_eq!(status_value["processGeneration"], 9);
+        assert_eq!(status_value["pricingRevision"], "seed");
+        assert!(status_value.get("key").is_none());
+        assert!(status_value.get("gatewayKey").is_none());
+        assert!(status_value.get("primaryKey").is_none());
+        assert!(status_value.get("upstream_base_url").is_none());
+        assert_secret_free(&status_value);
+
+        let models = ApplicationModels {
+            models: vec!["grok-4.5".into(), "minimax-m2.7-highspeed".into()],
+            revision: 11,
+            process_generation: 9,
+            pricing_revision: "seed".into(),
+        };
+        let models_value = serde_json::to_value(&models).unwrap();
+        assert_eq!(
+            models_value["models"],
+            json!(["grok-4.5", "minimax-m2.7-highspeed"])
+        );
+        assert_eq!(models_value["revision"], 11);
+        assert!(models_value.as_object().unwrap().contains_key("models"));
+
+        let summary = DashboardSummary {
+            total_accounts: 2,
+            available_accounts: 1,
+            gateway_running: true,
+            today_cost: 1.5,
+            week_cost: 2.5,
+            month_cost: 3.5,
+            revision: 11,
+            process_generation: 9,
+            pricing_revision: "seed".into(),
+        };
+        let summary_value = serde_json::to_value(&summary).unwrap();
+        assert_eq!(summary_value["totalAccounts"], 2);
+        assert_eq!(summary_value["availableAccounts"], 1);
+        assert_eq!(summary_value["gatewayRunning"], true);
+        assert!(summary_value.get("total_accounts").is_none());
+
+        let daily = DailyCostByModel {
+            items: vec![DailyModelCost {
+                date: "2026-08-16".into(),
+                model: "glm-5".into(),
+                cost: 1.25,
+            }],
+            revision: 11,
+            process_generation: 9,
+            pricing_revision: "seed".into(),
+        };
+        let daily_value = serde_json::to_value(&daily).unwrap();
+        assert_eq!(daily_value["items"][0]["date"], "2026-08-16");
+        assert_eq!(daily_value["items"][0]["model"], "glm-5");
+        assert_eq!(daily_value["items"][0]["cost"], 1.25);
+
+        let log = sample_forward_log();
+        let log_value = serde_json::to_value(&log).unwrap();
+        assert_eq!(log_value["requestedModel"], "GLM-5");
+        assert_eq!(log_value["resolvedAlias"], "glm-5");
+        assert_eq!(log_value["upstreamModel"], "glm-5");
+        assert_eq!(log_value["accountId"], "acct-1");
+        assert_eq!(log_value["httpStatus"], 200);
+        assert_eq!(log_value["costState"], "priced");
+        assert_eq!(log_value["errorMessage"], Value::Null);
+        assert_eq!(log_value["serviceTier"], Value::Null);
+        assert_eq!(log_value["diagnostic"], Value::Null);
+        assert!(log_value.get("requestedAlias").is_none());
+        assert!(log_value.get("requested_alias").is_none());
+        assert!(log_value.get("requested_model").is_none());
+        assert_secret_free(&log_value);
+
+        let page = ForwardLogs {
+            items: vec![log],
+            summary: ForwardLogSummary {
+                total_requests: 1,
+                prompt_tokens: 1,
+                completion_tokens: 2,
+                cached_tokens: 0,
+                cost: 0.1,
+            },
+            revision: 11,
+            process_generation: 9,
+            pricing_revision: "seed".into(),
+        };
+        let page_value = serde_json::to_value(&page).unwrap();
+        assert_eq!(page_value["summary"]["totalRequests"], 1);
+        assert_eq!(page_value["summary"]["promptTokens"], 1);
+        assert!(
+            page_value
+                .get("summary")
+                .unwrap()
+                .get("total_requests")
+                .is_none()
+        );
+
+        let gateway = GatewayLogs {
+            items: vec![GatewayLog {
+                id: 3,
+                level: "info".into(),
+                category: "gateway".into(),
+                message: "started".into(),
+                created_at: "2026-08-16T12:00:00.000Z".into(),
+                request_id: None,
+                attempt: None,
+                error_source: None,
+                error_stage: None,
+                duration_ms: None,
+                diagnostic: None,
+            }],
+            revision: 11,
+            process_generation: 9,
+            pricing_revision: "seed".into(),
+        };
+        let gateway_value = serde_json::to_value(&gateway).unwrap();
+        assert_eq!(
+            gateway_value["items"][0]["createdAt"],
+            "2026-08-16T12:00:00.000Z"
+        );
+        assert_eq!(gateway_value["items"][0]["requestId"], Value::Null);
+        assert_eq!(gateway_value["items"][0]["diagnostic"], Value::Null);
+        assert_secret_free(&gateway_value);
+    }
+
+    #[test]
+    fn observability_query_objects_deny_unknown_and_snake_case_fields() {
+        let empty: ForwardLogQuery = serde_json::from_value(json!({})).unwrap();
+        assert!(empty.account_id.is_none());
+        assert!(empty.limit.is_none());
+
+        let parsed: ForwardLogQuery = serde_json::from_value(json!({
+            "limit": 20,
+            "offset": 10,
+            "accountId": "acct-1",
+            "sortBy": "prompt_tokens",
+            "sortOrder": "asc"
+        }))
+        .unwrap();
+        assert_eq!(parsed.limit, Some(20));
+        assert_eq!(parsed.account_id.as_deref(), Some("acct-1"));
+        assert_eq!(parsed.sort_by.as_deref(), Some("prompt_tokens"));
+
+        assert!(
+            serde_json::from_value::<ForwardLogQuery>(json!({ "account_id": "acct-1" })).is_err()
+        );
+        assert!(
+            serde_json::from_value::<ForwardLogQuery>(json!({
+                "accountId": "acct-1",
+                "unknown": true
+            }))
+            .is_err()
+        );
+        assert!(serde_json::from_value::<GatewayLogQuery>(json!({ "request_id": "r" })).is_err());
+        assert!(serde_json::from_value::<DailyCostQuery>(json!({ "Days": 7 })).is_err());
+        let days: DailyCostQuery = serde_json::from_value(json!({ "days": 7 })).unwrap();
+        assert_eq!(days.days, Some(7));
+    }
+
+    #[test]
+    fn observability_catalog_registers_new_defs_without_reshaping_the_prefix() {
+        let schema = contract_schema();
+        let defs = schema["$defs"].as_object().expect("catalog $defs");
+        for name in OBSERVABILITY_CATALOG_TYPES {
+            assert!(defs.contains_key(*name), "schema missing {name}");
+        }
+        let status_required = defs["GatewayStatus"]["required"].as_array().unwrap();
+        for field in [
+            "running",
+            "port",
+            "upstreamBaseUrl",
+            "lastError",
+            "revision",
+            "processGeneration",
+            "pricingRevision",
+        ] {
+            assert!(
+                status_required.iter().any(|value| value == field),
+                "{field} must stay required"
+            );
+        }
+        assert!(
+            !defs["GatewayStatus"]["properties"]
+                .as_object()
+                .unwrap()
+                .contains_key("key")
+        );
+        let forward_required = defs["ForwardLog"]["required"].as_array().unwrap();
+        for field in [
+            "requestedModel",
+            "resolvedAlias",
+            "upstreamModel",
+            "diagnostic",
+        ] {
+            assert!(
+                forward_required.iter().any(|value| value == field),
+                "{field} must stay required T|null"
+            );
+        }
+        assert!(
+            !defs["ForwardLog"]["properties"]
+                .as_object()
+                .unwrap()
+                .contains_key("requestedAlias")
+        );
+        assert_eq!(defs["ForwardLogQuery"]["additionalProperties"], false);
+        assert_eq!(defs["GatewayLogQuery"]["additionalProperties"], false);
+        assert_eq!(defs["DailyCostQuery"]["additionalProperties"], false);
     }
 }

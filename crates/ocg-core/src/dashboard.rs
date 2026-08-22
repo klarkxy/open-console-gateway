@@ -3,7 +3,8 @@ use crate::auth;
 use crate::browser::{
     BrowserCapabilities, BrowserOpenResult, BrowserProfileOperationKind, StagedBrowserProfiles,
 };
-use crate::db::{ForwardLogQueryOptions, ReorderAccountsError};
+use crate::control::observability::{self, ObservabilityError};
+use crate::db::ReorderAccountsError;
 use crate::gateway::{
     diagnostics::{
         api_format_name, redact_known_secret, sanitize_upstream_error_value_with_known_secret,
@@ -34,10 +35,12 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{delete, get, patch, post, put},
 };
-use chrono::{DateTime, Duration, SecondsFormat, Utc};
+use chrono::{DateTime, Duration, Utc};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet};
+#[cfg(test)]
+use std::collections::BTreeMap;
+use std::collections::HashSet;
 use std::path::{Component, Path as FsPath, PathBuf};
 use std::str::FromStr;
 
@@ -4937,58 +4940,11 @@ async fn gateway_status(State(state): State<CoreState>) -> Json<GatewayStatus> {
 /// account, calls upstream, writes logs, or advances routing state.
 #[cfg(test)]
 fn local_application_models(snapshot: &crate::kernel::pricing::PricingSnapshot) -> Vec<String> {
-    local_application_models_with_contracts(snapshot, None)
-}
-
-fn local_application_models_with_contracts(
-    snapshot: &crate::kernel::pricing::PricingSnapshot,
-    contracts: Option<&crate::provider_contracts::EffectiveContractSet>,
-) -> Vec<String> {
-    let priced = snapshot
-        .models
-        .iter()
-        .map(|model| model.model_id.as_str())
-        .collect::<HashSet<_>>();
-    alias::routeable_aliases_for(
-        crate::provider::OPENCODE_PROVIDER_ID,
-        crate::provider::GO_OFFERING_ID,
-    )
-    .into_iter()
-    .filter(|alias| {
-        application_alias_is_priced(alias, &priced)
-            && contracts.is_none_or(|contracts| go_alias_has_enabled_protocol(alias, contracts))
-    })
-    .collect()
-}
-
-fn go_alias_has_enabled_protocol(
-    alias: &str,
-    contracts: &crate::provider_contracts::EffectiveContractSet,
-) -> bool {
-    match crate::alias::resolve(alias) {
-        Ok(crate::alias::ResolvedModel::Alias { mappings, .. }) => mappings.iter().any(|mapping| {
-            mapping.routeable
-                && mapping.provider_id == crate::provider::OPENCODE_PROVIDER_ID
-                && contracts.mapping_has_enabled_protocol(mapping)
-        }),
-        Ok(crate::alias::ResolvedModel::PinnedRaw { mapping, .. }) => {
-            mapping.routeable
-                && mapping.provider_id == crate::provider::OPENCODE_PROVIDER_ID
-                && contracts.mapping_has_enabled_protocol(&mapping)
-        }
-        Err(_) => false,
-    }
-}
-
-fn application_alias_is_priced(alias: &str, priced: &HashSet<&str>) -> bool {
-    priced.contains(alias)
-        || alias
-            .strip_suffix("-highspeed")
-            .is_some_and(|base| priced.contains(base))
+    observability::application_models_from_snapshot(snapshot, None)
 }
 
 async fn application_models(State(state): State<CoreState>) -> Json<Vec<String>> {
-    Json(local_application_models_with_contracts(
+    Json(observability::application_models(
         &state.pricing_snapshot(),
         Some(&state.provider_contracts()),
     ))
@@ -5020,73 +4976,60 @@ struct ForwardLogQuery {
     sort_order: Option<String>,
 }
 
+#[cfg(test)]
 fn validate_forward_log_query(
     query: &ForwardLogQuery,
 ) -> Result<(Option<String>, Option<String>), ApiError> {
-    if query.sort_by.as_deref().is_some_and(|value| {
-        !matches!(
-            value,
-            "timestamp"
-                | "attempt"
-                | "prompt_tokens"
-                | "completion_tokens"
-                | "cached_tokens"
-                | "cost"
-                | "model"
-                | "status"
-        )
-    }) {
-        return Err(ApiError::bad_request("invalid sort_by"));
-    }
-    if query
-        .sort_order
-        .as_deref()
-        .is_some_and(|value| !matches!(value, "asc" | "desc"))
-    {
-        return Err(ApiError::bad_request("invalid sort_order"));
-    }
+    observability::normalize_forward_log_window(
+        query.sort_by.as_deref(),
+        query.sort_order.as_deref(),
+        query.start_time.as_deref(),
+        query.end_time.as_deref(),
+    )
+    .map_err(ApiError::bad_request)
+}
 
-    let parse_time = |value: Option<&str>, name: &str| -> Result<_, ApiError> {
-        value
-            .map(|value| {
-                DateTime::parse_from_rfc3339(value)
-                    .map(|time| {
-                        time.with_timezone(&Utc)
-                            .to_rfc3339_opts(SecondsFormat::Millis, true)
-                    })
-                    .map_err(|_| ApiError::bad_request(format!("invalid {name}")))
-            })
-            .transpose()
-    };
-    let start_time = parse_time(query.start_time.as_deref(), "start_time")?;
-    let end_time = parse_time(query.end_time.as_deref(), "end_time")?;
-    if start_time
-        .as_ref()
-        .zip(end_time.as_ref())
-        .is_some_and(|(start, end)| start > end)
-    {
-        return Err(ApiError::bad_request(
-            "start_time must not be after end_time",
-        ));
+fn observability_error(error: ObservabilityError) -> ApiError {
+    match error {
+        ObservabilityError::InvalidQuery(message) => ApiError::bad_request(message),
+        ObservabilityError::Internal(error) => ApiError::internal(error),
     }
-    Ok((start_time, end_time))
+}
+
+fn forward_log_read_query(query: ForwardLogQuery) -> observability::ForwardLogReadQuery {
+    observability::ForwardLogReadQuery {
+        limit: query.limit,
+        offset: query.offset,
+        status: query.status,
+        account_id: query.account_id,
+        provider_id: query.provider_id,
+        offering_id: query.offering_id,
+        route_account_id: query.route_account_id,
+        credential_account_id: query.credential_account_id,
+        model: query.model,
+        request_id: query.request_id,
+        key_id: query.key_id,
+        start_time: query.start_time,
+        end_time: query.end_time,
+        sort_by: query.sort_by,
+        sort_order: query.sort_order,
+    }
 }
 
 async fn gateway_logs(
     State(state): State<CoreState>,
     Query(q): Query<LimitQuery>,
 ) -> Result<Json<Vec<GatewayLog>>, ApiError> {
-    let mut logs = state
-        .db
-        .lock()
-        .query_gateway_logs(q.limit.unwrap_or(100), q.request_id.as_deref())
-        .map_err(ApiError::internal)?;
-    let secrets = dashboard_account_secrets(&state)?;
-    for log in &mut logs {
-        log.message = redact_known_secrets(&log.message, &secrets);
-        log.diagnostic = redact_diagnostic(log.diagnostic.take(), secrets.values());
-    }
-    Ok(Json(logs))
+    observability::gateway_logs(
+        &state.db.lock(),
+        observability::GatewayLogReadQuery {
+            limit: q.limit,
+            request_id: q.request_id,
+        },
+        |cipher| state.decrypt_key(cipher).ok(),
+    )
+    .map(Json)
+    .map_err(observability_error)
 }
 
 #[derive(Serialize)]
@@ -5111,114 +5054,46 @@ async fn forward_logs(
     State(state): State<CoreState>,
     Query(q): Query<ForwardLogQuery>,
 ) -> Result<Json<DashboardForwardLogPage>, ApiError> {
-    let (start_time, end_time) = validate_forward_log_query(&q)?;
-    let mut page = state
-        .db
-        .lock()
-        .query_forward_logs(ForwardLogQueryOptions {
-            limit: q.limit.unwrap_or(100),
-            offset: q.offset.unwrap_or(0),
-            status: q.status.as_deref(),
-            account_id: q.account_id.as_deref(),
-            provider_id: q.provider_id.as_deref().filter(|value| !value.is_empty()),
-            offering_id: q.offering_id.as_deref().filter(|value| !value.is_empty()),
-            route_account_id: q
-                .route_account_id
-                .as_deref()
-                .filter(|value| !value.is_empty()),
-            credential_account_id: q
-                .credential_account_id
-                .as_deref()
-                .filter(|value| !value.is_empty()),
-            model: q.model.as_deref(),
-            request_id: q.request_id.as_deref(),
-            start_time: start_time.as_deref(),
-            end_time: end_time.as_deref(),
-            sort_by: q.sort_by.as_deref(),
-            sort_order: q.sort_order.as_deref(),
-            key_id: q.key_id.as_deref().filter(|value| !value.is_empty()),
+    let page =
+        observability::query_forward_logs(&state.db.lock(), forward_log_read_query(q), |cipher| {
+            state.decrypt_key(cipher).ok()
         })
-        .map_err(ApiError::internal)?;
-    let secrets = dashboard_account_secrets(&state)?;
-    for log in &mut page.items {
-        if let Some(secret) = secrets.get(&log.account_id) {
-            log.error_message = log
-                .error_message
-                .take()
-                .map(|error| redact_known_secret(&error, secret));
-            log.diagnostic = redact_diagnostic(log.diagnostic.take(), std::slice::from_ref(secret));
-        }
-    }
-    let attributions = state
-        .db
-        .lock()
-        .query_forward_log_native_attributions(
-            &page.items.iter().map(|log| log.id).collect::<Vec<_>>(),
-        )
-        .map_err(ApiError::internal)?;
+        .map_err(observability_error)?;
     Ok(Json(DashboardForwardLogPage {
         items: page
             .items
             .into_iter()
-            .map(|log| {
-                let attribution = attributions.get(&log.id).cloned().unwrap_or_default();
-                DashboardForwardLog {
-                    log,
-                    requested_model: attribution.requested_model,
-                    resolved_alias: attribution.resolved_alias,
-                    upstream_model: attribution.upstream_model,
-                    native_cost_value: attribution.native_cost_value,
-                    native_cost_unit: attribution.native_cost_unit,
-                    native_cost_currency: attribution.native_cost_currency,
-                }
+            .map(|item| DashboardForwardLog {
+                log: item.log,
+                requested_model: item.requested_model,
+                resolved_alias: item.resolved_alias,
+                upstream_model: item.upstream_model,
+                native_cost_value: item.native_cost_value,
+                native_cost_unit: item.native_cost_unit,
+                native_cost_currency: item.native_cost_currency,
             })
             .collect(),
         summary: page.summary,
     }))
 }
 
-fn dashboard_account_secrets(state: &CoreState) -> Result<BTreeMap<String, String>, ApiError> {
-    let accounts = state
-        .db
-        .lock()
-        .list_accounts()
-        .map_err(ApiError::internal)?;
-    Ok(accounts
-        .into_iter()
-        .filter(|account| !account.key_cipher.is_empty())
-        .filter_map(|account| {
-            state
-                .decrypt_key(&account.key_cipher)
-                .ok()
-                .map(|secret| (account.id, secret))
-        })
-        .collect())
-}
-
+#[cfg(test)]
 fn redact_known_secrets(text: &str, secrets: &BTreeMap<String, String>) -> String {
-    secrets.values().fold(text.to_string(), |text, secret| {
-        redact_known_secret(&text, secret)
-    })
+    observability::redact_known_secrets(text, secrets)
 }
 
+#[cfg(test)]
 fn redact_diagnostic(
     diagnostic: Option<serde_json::Value>,
     secrets: impl IntoIterator<Item = impl AsRef<str>>,
 ) -> Option<serde_json::Value> {
-    let mut encoded = diagnostic?.to_string();
-    for secret in secrets {
-        encoded = redact_known_secret(&encoded, secret.as_ref());
-    }
-    serde_json::from_str(&encoded).ok()
+    observability::redact_diagnostic(diagnostic, secrets)
 }
 
 async fn forward_log_models(State(state): State<CoreState>) -> Result<Json<Vec<String>>, ApiError> {
-    state
-        .db
-        .lock()
-        .list_forward_log_models()
+    observability::forward_log_models(&state.db.lock())
         .map(Json)
-        .map_err(ApiError::internal)
+        .map_err(observability_error)
 }
 
 /// Distinct client keys observed in forward logs — including disabled,
@@ -5227,83 +5102,29 @@ async fn forward_log_models(State(state): State<CoreState>) -> Result<Json<Vec<S
 async fn forward_log_keys(
     State(state): State<CoreState>,
 ) -> Result<Json<Vec<ForwardLogClientKey>>, ApiError> {
-    state
-        .db
-        .lock()
-        .list_forward_log_keys()
+    observability::forward_log_keys(&state.db.lock())
         .map(Json)
-        .map_err(ApiError::internal)
+        .map_err(observability_error)
 }
 
 async fn dashboard_summary(
     State(state): State<CoreState>,
 ) -> Result<Json<DashboardSummary>, ApiError> {
     let db = state.db.lock();
-    let accounts = db.list_accounts().map_err(ApiError::internal)?;
-    let total_accounts = accounts.len();
-    let now = Utc::now();
-    let free_channel_cooling = db
-        .free_channel_cooldown_until()
-        .map_err(ApiError::internal)?
-        .is_some();
-    let available_accounts = accounts
-        .iter()
-        .filter(|account| {
-            dashboard_account_is_available(&state, account, now, free_channel_cooling)
-        })
-        .count();
-    let (today_cost, week_cost, month_cost) = db.total_usage().map_err(ApiError::internal)?;
-    Ok(Json(DashboardSummary {
-        total_accounts,
-        available_accounts,
-        gateway_running: state.gateway.lock().is_some(),
-        today_cost,
-        week_cost,
-        month_cost,
-    }))
-}
-
-fn dashboard_account_is_available(
-    state: &CoreState,
-    account: &Account,
-    now: DateTime<Utc>,
-    free_channel_cooling: bool,
-) -> bool {
-    if !account.enabled
-        || !account.setup_step.is_ready()
-        || account.auth_error.is_some()
-        || account.validate_provider_binding().is_err()
-    {
-        return false;
-    }
-    match (account.provider_id.as_str(), account.offering_id.as_str()) {
-        (crate::provider::OPENCODE_PROVIDER_ID, crate::provider::GO_OFFERING_ID) => {
-            !account.is_cooling_for(UpstreamChannel::Go, now)
-                && !account.key_cipher.is_empty()
-                && state
-                    .decrypt_key(&account.key_cipher)
-                    .is_ok_and(|key| !key.trim().is_empty())
-        }
-        (
-            crate::provider::OPENCODE_ZEN_FREE_PROVIDER_ID,
-            crate::provider::ANONYMOUS_FREE_OFFERING_ID,
-        ) => !free_channel_cooling && !account.is_cooling_for(UpstreamChannel::Free, now),
-        // Command Code GOAT is intentionally unavailable in production even
-        // while a loopback-only integration seam exists in provider_adapter.
-        _ => false,
-    }
+    observability::dashboard_summary(&db, state.gateway.lock().is_some(), |cipher| {
+        state.decrypt_key(cipher).ok()
+    })
+    .map(Json)
+    .map_err(observability_error)
 }
 
 async fn daily_cost_by_model(
     State(state): State<CoreState>,
     Query(q): Query<LimitQuery>,
 ) -> Result<Json<Vec<DailyModelCost>>, ApiError> {
-    state
-        .db
-        .lock()
-        .daily_cost_by_model(q.days.unwrap_or(30))
+    observability::daily_cost_by_model(&state.db.lock(), q.days)
         .map(Json)
-        .map_err(ApiError::internal)
+        .map_err(observability_error)
 }
 
 fn status_from_state(state: &CoreState) -> GatewayStatus {
@@ -5314,12 +5135,18 @@ fn status_from_state(state: &CoreState) -> GatewayStatus {
     } else {
         state.db.lock().latest_gateway_error().ok().flatten()
     };
-    GatewayStatus {
+    let runtime = observability::gateway_runtime_status(
         running,
-        port: state.active_gateway_port(),
-        key: config.gateway_key.clone(),
-        upstream_base_url: config.upstream_base_url,
+        state.active_gateway_port(),
+        config.upstream_base_url,
         last_error,
+    );
+    GatewayStatus {
+        running: runtime.running,
+        port: runtime.port,
+        key: config.gateway_key,
+        upstream_base_url: runtime.upstream_base_url,
+        last_error: runtime.last_error,
     }
 }
 

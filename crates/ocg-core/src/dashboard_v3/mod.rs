@@ -3,19 +3,21 @@
 //! Mounted at `/dashboard/api/v3` beside the unchanged V2 `/dashboard/api`
 //! router. This module owns the shared DTO / error / CAS envelope, process
 //! generation, connection/settings reads, the settings write path, the
-//! access-key lifecycle, the local accounts control plane, and the local/Zen
-//! provider catalog, contracts, Zen Free control plane, and pricing. Billable
-//! protocol probes stay off this router.
+//! access-key lifecycle, the local accounts control plane, the local/Zen
+//! provider catalog, contracts, Zen Free control plane, pricing, and
+//! read-only observability. Billable protocol probes stay off this router.
 
 mod accounts;
 mod connection;
 mod keys;
+mod observability;
 mod pricing;
 mod providers;
 mod settings;
 mod types;
 
-use axum::extract::{Request, State};
+use axum::extract::{FromRequestParts, Query, Request, State};
+use axum::http::request::Parts;
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -35,13 +37,16 @@ pub use types::{
     AccountModelCapabilitiesUpdate, AccountModelCapability, AccountModelCapabilityWrite,
     AccountMutation, AccountOrder, AccountQuotaScope, AccountSetupStep, AccountSetupUpdate,
     AccountType, AccountUpdate, AccountUpstreamProtocol, AccountVerificationStatus,
-    CATALOG_TYPE_NAMES, CapabilitySummary, CardCapabilitySummary, ConnectionInfo, ConnectionSubKey,
-    ContractScopeKind, ControlRevision, CustomEndpointContract, ERROR_CONFLICT, ERROR_INTERNAL,
-    ERROR_INVALID_JSON, ERROR_INVALID_REQUEST, ERROR_MISSING_EXPECTED_REVISION, ERROR_NOT_FOUND,
-    ERROR_PRECONDITION_FAILED, ERROR_REVISION_CONFLICT, ERROR_SERVICE_UNAVAILABLE,
+    ApplicationModels, CATALOG_TYPE_NAMES, CapabilitySummary, CardCapabilitySummary,
+    ConnectionInfo, ConnectionSubKey, ContractScopeKind, ControlRevision, CustomEndpointContract,
+    DailyCostByModel, DailyCostQuery, DailyModelCost, DashboardSummary, ERROR_CONFLICT,
+    ERROR_INTERNAL, ERROR_INVALID_JSON, ERROR_INVALID_REQUEST, ERROR_MISSING_EXPECTED_REVISION,
+    ERROR_NOT_FOUND, ERROR_PRECONDITION_FAILED, ERROR_REVISION_CONFLICT, ERROR_SERVICE_UNAVAILABLE,
     ERROR_UNAUTHORIZED, EffectiveCatalog, EffectiveModelContract, EffectiveModelProtocols,
-    EffectiveProtocolEvidence, KeyCreate, KeyUpdate, MutationAck, MutationExpectation,
-    PricingAdjustment, PricingAvailability, PricingLimits, PricingModel, PricingMultiplierChange,
+    EffectiveProtocolEvidence, ForwardLog, ForwardLogClientKey, ForwardLogKeys, ForwardLogModels,
+    ForwardLogQuery, ForwardLogSummary, ForwardLogs, GatewayLog, GatewayLogQuery, GatewayLogs,
+    GatewayStatus, KeyCreate, KeyUpdate, MutationAck, MutationExpectation, PricingAdjustment,
+    PricingAvailability, PricingLimits, PricingModel, PricingMultiplierChange,
     PricingMultiplierWrite, PricingMultipliersUpdate, PricingRefresh, PricingRefreshPolicy,
     PricingRefreshStatus, PricingRefreshUpdate, PricingRevision, PricingSnapshot,
     PricingTimeWindow, ProtocolSwitchUpdate, ProtocolSwitches, ProviderAccountChoice,
@@ -147,7 +152,48 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
             "/provider-contracts/provider/{scope_id}/protocols/{protocol}",
             put(providers::put_provider_protocol_switch),
         )
+        .route("/gateway/status", get(observability::get_gateway_status))
+        .route(
+            "/application-models",
+            get(observability::get_application_models),
+        )
+        .route(
+            "/dashboard/summary",
+            get(observability::get_dashboard_summary),
+        )
+        .route(
+            "/dashboard/daily-cost-by-model",
+            get(observability::get_daily_cost_by_model),
+        )
+        .route("/logs/gateway", get(observability::get_gateway_logs))
+        .route("/logs/forward", get(observability::get_forward_logs))
+        .route(
+            "/logs/forward/models",
+            get(observability::get_forward_log_models),
+        )
+        .route(
+            "/logs/forward/keys",
+            get(observability::get_forward_log_keys),
+        )
         .route_layer(middleware::from_fn_with_state(state, require_v3_session))
+}
+
+struct V3Query<T>(T);
+
+impl<T> FromRequestParts<CoreState> for V3Query<T>
+where
+    T: DeserializeOwned + Send,
+{
+    type Rejection = V3ApiError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &CoreState,
+    ) -> Result<Self, Self::Rejection> {
+        Query::<T>::try_from_uri(&parts.uri)
+            .map(|Query(value)| Self(value))
+            .map_err(|_| V3ApiError::invalid_request_at(state, "invalid query"))
+    }
 }
 
 struct V3ApiError {
