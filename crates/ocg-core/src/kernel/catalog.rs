@@ -1,12 +1,15 @@
-//! I/O-free provider catalog identity enums.
+//! I/O-free provider catalog identity enums and canonical catalog endpoints.
 //!
 //! Binding, enablement, and URL/key validation stay in `crate::provider`.
-//! This module holds the closed identity vocabularies and a kernel-local
-//! parse error so later hosts can share the same strings without pulling
-//! catalog policy or HTTP.
+//! This module holds the closed identity vocabularies, a kernel-local
+//! parse error, and I/O-free catalog endpoint literals so later hosts can
+//! share the same strings without pulling catalog policy or HTTP.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
+
+/// Production OpenCode Go usage endpoint. Callers must not substitute another URL.
+pub const OPENCODE_GO_USAGE_URL: &str = "https://opencode.ai/zen/go/v1/usage";
 
 /// Parse failure for a catalog identity string.
 ///
@@ -200,5 +203,10 @@ mod tests {
             UpstreamAuthScheme::try_from("basic"),
             Err(CatalogParseError::UnknownAuthScheme(value)) if value == "basic"
         ));
+    }
+
+    #[test]
+    fn opencode_go_usage_url_is_the_fixed_official_endpoint() {
+        assert_eq!(OPENCODE_GO_USAGE_URL, "https://opencode.ai/zen/go/v1/usage");
     }
 }

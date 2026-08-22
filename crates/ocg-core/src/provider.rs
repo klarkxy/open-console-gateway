@@ -1167,7 +1167,7 @@ impl UsageAdapter for OpenCodeGoAdapter {
         UsageDescriptor {
             catalog_availability: plan.usage_availability,
             contract: UsageContractKind::Authoritative,
-            endpoint: Some(crate::go_usage::GO_USAGE_URL),
+            endpoint: Some(crate::kernel::catalog::OPENCODE_GO_USAGE_URL),
             experimental: false,
             automatic_sync: true,
             authoritative_for_quota: true,
@@ -2558,7 +2558,15 @@ mod tests {
         assert_eq!(go.inference.origin, InferenceOriginKind::ConfigUpstreamBase);
         assert!(go.usage.automatic_sync);
         assert!(go.usage.authoritative_for_quota);
+        assert_eq!(
+            go.usage.endpoint,
+            Some(crate::kernel::catalog::OPENCODE_GO_USAGE_URL)
+        );
         assert_eq!(go.usage.endpoint, Some(crate::go_usage::GO_USAGE_URL));
+        assert_eq!(
+            crate::go_usage::GO_USAGE_URL,
+            "https://opencode.ai/zen/go/v1/usage"
+        );
         assert_eq!(go.usage.contract, UsageContractKind::Authoritative);
         assert!(go.usage.publishes_capability);
         assert!(go.error_cooldown.parse_opencode_go_windows_on_429);

@@ -15,7 +15,9 @@ use std::fmt;
 use std::time::Duration;
 
 /// Production Go usage endpoint. Callers must not substitute another URL.
-pub const GO_USAGE_URL: &str = "https://opencode.ai/zen/go/v1/usage";
+///
+/// Canonical definition: [`crate::kernel::catalog::OPENCODE_GO_USAGE_URL`].
+pub use crate::kernel::catalog::OPENCODE_GO_USAGE_URL as GO_USAGE_URL;
 
 const MAX_BODY_BYTES: usize = 64 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -444,6 +446,11 @@ mod tests {
     #[test]
     fn production_endpoint_is_the_fixed_official_url() {
         assert_eq!(GO_USAGE_URL, "https://opencode.ai/zen/go/v1/usage");
+        assert_eq!(GO_USAGE_URL, crate::kernel::catalog::OPENCODE_GO_USAGE_URL);
+        assert!(std::ptr::eq(
+            GO_USAGE_URL,
+            crate::kernel::catalog::OPENCODE_GO_USAGE_URL
+        ));
     }
 
     #[test]
