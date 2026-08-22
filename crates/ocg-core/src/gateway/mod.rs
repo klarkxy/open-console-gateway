@@ -1,3 +1,4 @@
+pub mod classify;
 pub mod diagnostics;
 pub mod forwarder;
 pub mod free_models;

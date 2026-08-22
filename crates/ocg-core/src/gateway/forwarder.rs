@@ -1,11 +1,16 @@
 use crate::custom_http::{build_custom_http_client, json_content_headers};
 use crate::db::{Database, ForwardLogDiagnosticUpdate};
+use crate::gateway::classify::{
+    PreflightKind, ProviderErrorClass, RateLimitFallback, StreamClassifyInput,
+    TransportClassifyInput, classify_http, classify_preflight, classify_stream, classify_transport,
+    rate_limit_fallback, rate_limit_window_and_cooldown, schedule_go_usage_sync,
+};
 use crate::gateway::diagnostics::{
     ErrorDiagnostic, RequestTrace, api_format_name, emit_failure, redact_known_secret,
     redact_known_secret_values, safe_upstream_headers,
     sanitize_upstream_error_value_with_known_secret, serialize_diagnostic,
 };
-use crate::gateway::limit::{parse_free_reset_or_default, parse_reset, parse_usage_limit_window};
+use crate::gateway::limit::{parse_reset, parse_usage_limit_window};
 use crate::gateway::materialize::native_log_identity;
 use crate::gateway::protocol::{
     ApiFormat, RequestPlan, UsageCounts, error_body, extract_usage, format_error,
@@ -19,9 +24,6 @@ use crate::models::{
     Account, AppConfig, ForwardLog, ForwardMetrics, UpstreamChannel, UsageWindowKind,
 };
 use crate::pricing::PricingSnapshot;
-use crate::provider::{
-    OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID, is_command_code_goat, is_custom_api,
-};
 use crate::state::CoreState;
 use anyhow::Result;
 use axum::body::Body;
@@ -279,6 +281,7 @@ async fn forward_request_impl(
     let provider_route = match provider_adapter::resolve_route(account, config, plan) {
         Ok(route) => route,
         Err(error) => {
+            let class = classify_preflight(PreflightKind::Route);
             let message = format!("provider route is unavailable: {error}");
             let failure = attempt_context.failure(FailureSpec {
                 error_source: "gateway",
@@ -286,7 +289,11 @@ async fn forward_request_impl(
                 downstream_status: Some(StatusCode::BAD_GATEWAY.as_u16()),
                 upstream_status: None,
                 upstream_wait_ms: None,
-                retry_action: Some("try_next_account"),
+                retry_action: Some(retry_action_name(forward_action_for_class(
+                    class,
+                    allow_same_account_retry,
+                    None,
+                ))),
                 upstream_headers: None,
                 upstream_error: None,
                 request_body: Some(client_body),
@@ -319,6 +326,7 @@ async fn forward_request_impl(
         match state.decrypt_key(&account.key_cipher) {
             Ok(key) => Some(key),
             Err(error) => {
+                let class = classify_preflight(PreflightKind::Decrypt);
                 let message = format!("failed to decrypt account credentials: {error}");
                 let failure = attempt_context.failure(FailureSpec {
                     error_source: "gateway",
@@ -326,7 +334,11 @@ async fn forward_request_impl(
                     downstream_status: Some(StatusCode::BAD_GATEWAY.as_u16()),
                     upstream_status: None,
                     upstream_wait_ms: None,
-                    retry_action: Some("try_next_account"),
+                    retry_action: Some(retry_action_name(forward_action_for_class(
+                        class,
+                        allow_same_account_retry,
+                        None,
+                    ))),
                     upstream_headers: None,
                     upstream_error: None,
                     request_body: Some(client_body),
@@ -399,6 +411,7 @@ async fn forward_request_impl(
         let key_header = match reqwest::header::HeaderValue::from_str(key) {
             Ok(value) => value,
             Err(error) => {
+                let class = classify_preflight(PreflightKind::Decrypt);
                 let message = format!("account key is not a valid upstream header value: {error}");
                 let failure = attempt_context.failure(FailureSpec {
                     error_source: "gateway",
@@ -406,7 +419,11 @@ async fn forward_request_impl(
                     downstream_status: Some(StatusCode::BAD_GATEWAY.as_u16()),
                     upstream_status: None,
                     upstream_wait_ms: None,
-                    retry_action: Some("try_next_account"),
+                    retry_action: Some(retry_action_name(forward_action_for_class(
+                        class,
+                        allow_same_account_retry,
+                        None,
+                    ))),
                     upstream_headers: None,
                     upstream_error: None,
                     request_body: Some(client_body),
@@ -539,19 +556,21 @@ async fn forward_request_impl(
         {
             Ok(result) => result,
             Err(_) => {
+                let class = classify_transport(TransportClassifyInput::HeaderTimeout);
                 let detail = format!(
                     "upstream did not return response headers within {}s",
                     config.stream_idle_timeout_secs
                 );
                 let error_message = outcome_unknown_message(&detail);
                 let upstream_wait_ms = upstream_started.elapsed().as_millis() as u64;
+                let action = forward_action_for_class(class, allow_same_account_retry, None);
                 let failure = attempt_context.failure(FailureSpec {
                     error_source: "transport",
                     error_stage: "response_headers",
                     downstream_status: Some(StatusCode::GATEWAY_TIMEOUT.as_u16()),
                     upstream_status: None,
                     upstream_wait_ms: Some(upstream_wait_ms),
-                    retry_action: Some("return"),
+                    retry_action: Some(retry_action_name(action)),
                     upstream_headers: None,
                     upstream_error: Some(&detail),
                     request_body: Some(client_body),
@@ -580,7 +599,7 @@ async fn forward_request_impl(
                         StatusCode::GATEWAY_TIMEOUT,
                         &detail,
                     ),
-                    action: ForwardAction::Return,
+                    action,
                     error_message: Some(error_message),
                 });
             }
@@ -593,8 +612,15 @@ async fn forward_request_impl(
         Ok(resp) => resp,
         Err(e) => {
             let upstream_wait_ms = upstream_started.elapsed().as_millis() as u64;
-            let connect_failure = e.is_connect();
-            let outcome_unknown = !connect_failure;
+            let class = classify_transport(if e.is_connect() {
+                TransportClassifyInput::Connect
+            } else if e.is_timeout() {
+                TransportClassifyInput::SendTimeout
+            } else {
+                TransportClassifyInput::OtherSendFailure
+            });
+            let connect_failure = matches!(class, ProviderErrorClass::Connect);
+            let outcome_unknown = matches!(class, ProviderErrorClass::OutcomeUnknown);
             let detail = if e.is_timeout() {
                 format!("upstream request timed out: {e}")
             } else {
@@ -610,6 +636,7 @@ async fn forward_request_impl(
             } else {
                 StatusCode::BAD_GATEWAY
             };
+            let action = forward_action_for_class(class, allow_same_account_retry, None);
             let failure = attempt_context.failure(FailureSpec {
                 error_source: "transport",
                 error_stage: if connect_failure {
@@ -620,11 +647,7 @@ async fn forward_request_impl(
                 downstream_status: Some(status.as_u16()),
                 upstream_status: None,
                 upstream_wait_ms: Some(upstream_wait_ms),
-                retry_action: Some(if connect_failure && allow_same_account_retry {
-                    "retry_same_account"
-                } else {
-                    "return"
-                }),
+                retry_action: Some(retry_action_name(action)),
                 upstream_headers: None,
                 upstream_error: Some(&detail),
                 request_body: Some(client_body),
@@ -661,11 +684,7 @@ async fn forward_request_impl(
                 } else {
                     error_response(plan.client, &error_message, None)
                 },
-                action: if connect_failure && allow_same_account_retry {
-                    ForwardAction::RetrySameAccount
-                } else {
-                    ForwardAction::Return
-                },
+                action,
                 error_message: Some(error_message),
             });
         }
@@ -697,6 +716,14 @@ async fn forward_request_impl(
         )
         .await
         .unwrap_or_else(ResponseBodyFailure::into_detail);
+        let class = classify_http(
+            status.as_u16(),
+            &account.provider_id,
+            &account.offering_id,
+            plan.channel,
+            provider_route.auth == UpstreamAuth::None,
+        );
+        let action = forward_action_for_class(class, allow_same_account_retry, None);
         let error_message = format!(
             "upstream error {}: {}",
             status.as_u16(),
@@ -708,7 +735,7 @@ async fn forward_request_impl(
             downstream_status: Some(status.as_u16()),
             upstream_status: Some(status.as_u16()),
             upstream_wait_ms: Some(upstream_wait_ms),
-            retry_action: Some("return"),
+            retry_action: Some(retry_action_name(action)),
             upstream_headers: Some(&error_headers),
             upstream_error: Some(&text),
             request_body: Some(client_body),
@@ -733,7 +760,7 @@ async fn forward_request_impl(
         }
         return Ok(ForwardResult {
             response: protocol_status_error_response(plan.client, status, &error_message, None),
-            action: ForwardAction::Return,
+            action,
             error_message: Some(error_message),
         });
     }
@@ -750,328 +777,315 @@ async fn forward_request_impl(
         )
         .await
         .unwrap_or_else(ResponseBodyFailure::into_detail);
-
-        if status.as_u16() == 429 {
-            // Go usage windows and Zen free promo limits both arrive as 429; cool the matching channel.
-            // Unlike a rejected 429, ambiguous transport failures and 5xx responses are not replayed.
-            // The endpoint/channel is authoritative. Free providers sometimes
-            // reuse Go-window wording (5-hour/weekly/monthly); that text must not
-            // downgrade an IP-shared Free 429 into per-account key rotation.
-            // Command Code GOAT 429 is a generic provider-key cooldown: never parse
-            // OpenCode Go limit windows and never schedule Go usage sync.
-            let generic_limit = is_command_code_goat(&account.provider_id, &account.offering_id)
-                || is_custom_api(&account.provider_id, &account.offering_id);
-            let (window, cooldown) =
-                rate_limit_window_and_cooldown(generic_limit, plan.channel, &text);
-            let until = Utc::now() + cooldown;
-            let sanitized = attempt_context.sanitize_upstream_error(&text);
-            let error_message = format!(
-                "rate limited: {} (resets in {}s)",
-                sanitized,
-                cooldown.num_seconds()
-            );
-            let action = action_for_usage_limit(window);
-            let failure = attempt_context.failure(FailureSpec {
-                error_source: "upstream",
-                error_stage: "upstream_http",
-                downstream_status: Some(StatusCode::BAD_GATEWAY.as_u16()),
-                upstream_status: Some(status.as_u16()),
-                upstream_wait_ms: Some(upstream_wait_ms),
-                retry_action: Some(retry_action_name(action)),
-                upstream_headers: Some(&error_headers),
-                upstream_error: Some(&text),
-                request_body: Some(client_body),
-            });
-            {
-                let db = state.db.lock();
-                log_forward(
-                    &db,
-                    account,
-                    &model,
-                    "client_error",
-                    Some(429),
-                    metadata_metrics(
-                        &pricing_snapshot,
-                        plan.service_tier.as_deref(),
-                        "not_applicable",
-                    ),
-                    Some(&sanitized),
-                    &attempt_context,
-                    Some(failure),
-                )?;
-                db.set_account_rate_limit_if_key_matches(
-                    &account.id,
-                    &account.key_cipher,
-                    until,
-                    &sanitized,
-                    window,
-                )?;
-            }
-            // Schedule (never inline) an official usage reconciliation shortly
-            // after a real inference 429. Does not alter cooldown/failover.
-            if !generic_limit && plan.channel != UpstreamChannel::Free {
-                crate::usage_sync::schedule_after_inference_429(state, &account.id);
-            }
-            return Ok(ForwardResult {
-                response: error_response(plan.client, &error_message, None),
-                action,
-                error_message: Some(error_message),
-            });
-        }
-
-        if status.as_u16() == 408 {
-            let detail = format!(
-                "upstream returned 408: {}",
-                attempt_context.sanitize_upstream_error(&text)
-            );
-            let error_message = outcome_unknown_message(&detail);
-            let failure = attempt_context.failure(FailureSpec {
-                error_source: "upstream",
-                error_stage: "upstream_http",
-                downstream_status: Some(StatusCode::GATEWAY_TIMEOUT.as_u16()),
-                upstream_status: Some(status.as_u16()),
-                upstream_wait_ms: Some(upstream_wait_ms),
-                retry_action: Some("return"),
-                upstream_headers: Some(&error_headers),
-                upstream_error: Some(&text),
-                request_body: Some(client_body),
-            });
-            {
-                let db = state.db.lock();
-                log_forward(
-                    &db,
-                    account,
-                    &model,
-                    "outcome_unknown",
-                    Some(408),
-                    metadata_metrics(
-                        &pricing_snapshot,
-                        plan.service_tier.as_deref(),
-                        "outcome_unknown",
-                    ),
-                    Some(&error_message),
-                    &attempt_context,
-                    Some(failure),
-                )?;
-            }
-            return Ok(ForwardResult {
-                response: outcome_unknown_response(
-                    plan.client,
-                    StatusCode::GATEWAY_TIMEOUT,
-                    &detail,
-                ),
-                action: ForwardAction::Return,
-                error_message: Some(error_message),
-            });
-        }
-
-        // OpenCode uses 401 for ModelError ("model is not supported") as well
-        // as invalid keys. Return it as-is so the client/CLI stops; do not
-        // rotate accounts or persist an auth breaker. Other provider adapters
-        // retain normal credential failover semantics for a 401.
-        let opencode_inference = matches!(
-            account.provider_id.as_str(),
-            OPENCODE_PROVIDER_ID | OPENCODE_ZEN_FREE_PROVIDER_ID
+        let class = classify_http(
+            status.as_u16(),
+            &account.provider_id,
+            &account.offering_id,
+            plan.channel,
+            provider_route.auth == UpstreamAuth::None,
         );
-        if status == StatusCode::UNAUTHORIZED && opencode_inference {
-            let error_message = format!(
-                "upstream auth error 401: {}",
-                attempt_context.sanitize_upstream_error(&text)
-            );
-            let sanitized = attempt_context.sanitize_upstream_error(&text);
-            let failure = attempt_context.failure(FailureSpec {
-                error_source: "upstream",
-                error_stage: "upstream_http",
-                downstream_status: Some(status.as_u16()),
-                upstream_status: Some(status.as_u16()),
-                upstream_wait_ms: Some(upstream_wait_ms),
-                retry_action: Some("return"),
-                upstream_headers: Some(&error_headers),
-                upstream_error: Some(&text),
-                request_body: Some(client_body),
-            });
-            {
-                let db = state.db.lock();
-                log_forward(
-                    &db,
-                    account,
-                    &model,
-                    "client_error",
-                    Some(401),
-                    metadata_metrics(
-                        &pricing_snapshot,
-                        plan.service_tier.as_deref(),
-                        "not_applicable",
-                    ),
-                    Some(&sanitized),
-                    &attempt_context,
-                    Some(failure),
-                )?;
-            }
-            let upstream_error = Some(sanitize_upstream_error_value_with_known_secret(
-                &text,
-                key.as_deref().unwrap_or_default(),
-            ));
-            let body = format_error(plan.client, status, &sanitized, upstream_error.as_ref());
-            return Ok(ForwardResult {
-                response: (status, axum::Json(body)).into_response(),
-                action: ForwardAction::Return,
-                error_message: Some(error_message),
-            });
-        }
 
-        if status == StatusCode::UNAUTHORIZED {
-            let error_message = format!(
-                "upstream auth error 401: {}",
-                attempt_context.sanitize_upstream_error(&text)
-            );
-            let sanitized = attempt_context.sanitize_upstream_error(&text);
-            let failure = attempt_context.failure(FailureSpec {
-                error_source: "upstream",
-                error_stage: "upstream_http",
-                downstream_status: Some(StatusCode::BAD_GATEWAY.as_u16()),
-                upstream_status: Some(status.as_u16()),
-                upstream_wait_ms: Some(upstream_wait_ms),
-                retry_action: Some("try_next_account"),
-                upstream_headers: Some(&error_headers),
-                upstream_error: Some(&text),
-                request_body: Some(client_body),
-            });
-            {
-                let db = state.db.lock();
-                log_forward(
-                    &db,
-                    account,
-                    &model,
-                    "client_error",
-                    Some(401),
-                    metadata_metrics(
-                        &pricing_snapshot,
-                        plan.service_tier.as_deref(),
-                        "not_applicable",
-                    ),
-                    Some(&sanitized),
-                    &attempt_context,
-                    Some(failure),
-                )?;
-                db.set_account_auth_error_if_key_matches(
-                    &account.id,
-                    &account.key_cipher,
-                    Some(&error_message),
-                )?;
+        match class {
+            ProviderErrorClass::RateLimited { policy } => {
+                let (window, cooldown) = rate_limit_window_and_cooldown(policy, &text);
+                let until = Utc::now() + cooldown;
+                let sanitized = attempt_context.sanitize_upstream_error(&text);
+                let error_message = format!(
+                    "rate limited: {} (resets in {}s)",
+                    sanitized,
+                    cooldown.num_seconds()
+                );
+                let action = forward_action_for_class(class, allow_same_account_retry, window);
+                let failure = attempt_context.failure(FailureSpec {
+                    error_source: "upstream",
+                    error_stage: "upstream_http",
+                    downstream_status: Some(StatusCode::BAD_GATEWAY.as_u16()),
+                    upstream_status: Some(status.as_u16()),
+                    upstream_wait_ms: Some(upstream_wait_ms),
+                    retry_action: Some(retry_action_name(action)),
+                    upstream_headers: Some(&error_headers),
+                    upstream_error: Some(&text),
+                    request_body: Some(client_body),
+                });
+                {
+                    let db = state.db.lock();
+                    log_forward(
+                        &db,
+                        account,
+                        &model,
+                        "client_error",
+                        Some(429),
+                        metadata_metrics(
+                            &pricing_snapshot,
+                            plan.service_tier.as_deref(),
+                            "not_applicable",
+                        ),
+                        Some(&sanitized),
+                        &attempt_context,
+                        Some(failure),
+                    )?;
+                    db.set_account_rate_limit_if_key_matches(
+                        &account.id,
+                        &account.key_cipher,
+                        until,
+                        &sanitized,
+                        window,
+                    )?;
+                }
+                // Schedule (never inline) an official usage reconciliation shortly
+                // after a real inference 429. Does not alter cooldown/failover.
+                if schedule_go_usage_sync(class) {
+                    crate::usage_sync::schedule_after_inference_429(state, &account.id);
+                }
+                return Ok(ForwardResult {
+                    response: error_response(plan.client, &error_message, None),
+                    action,
+                    error_message: Some(error_message),
+                });
             }
-            return Ok(ForwardResult {
-                response: error_response(plan.client, &error_message, None),
-                action: ForwardAction::TryNextAccount,
-                error_message: Some(error_message),
-            });
-        }
-
-        // 403 may still be isolated to this account; fail over without a breaker.
-        if status == StatusCode::FORBIDDEN {
-            let anonymous_route = provider_route.auth == UpstreamAuth::None;
-            let error_message = if anonymous_route {
-                format!(
-                    "anonymous provider route was rejected with 403; no credential fallback was attempted: {}",
+            ProviderErrorClass::HttpRequestTimeout => {
+                let detail = format!(
+                    "upstream returned 408: {}",
                     attempt_context.sanitize_upstream_error(&text)
-                )
-            } else {
-                format!(
-                    "upstream auth error 403: {}",
-                    attempt_context.sanitize_upstream_error(&text)
-                )
-            };
-            let sanitized = attempt_context.sanitize_upstream_error(&text);
-            let action = if anonymous_route {
-                ForwardAction::Return
-            } else {
-                ForwardAction::TryNextAccount
-            };
-            let failure = attempt_context.failure(FailureSpec {
-                error_source: "upstream",
-                error_stage: "upstream_http",
-                downstream_status: Some(StatusCode::BAD_GATEWAY.as_u16()),
-                upstream_status: Some(status.as_u16()),
-                upstream_wait_ms: Some(upstream_wait_ms),
-                retry_action: Some(retry_action_name(action)),
-                upstream_headers: Some(&error_headers),
-                upstream_error: Some(&text),
-                request_body: Some(client_body),
-            });
-            {
-                let db = state.db.lock();
-                log_forward(
-                    &db,
-                    account,
-                    &model,
-                    "client_error",
-                    Some(403),
-                    metadata_metrics(
-                        &pricing_snapshot,
-                        plan.service_tier.as_deref(),
-                        "not_applicable",
+                );
+                let error_message = outcome_unknown_message(&detail);
+                let action = forward_action_for_class(class, allow_same_account_retry, None);
+                let failure = attempt_context.failure(FailureSpec {
+                    error_source: "upstream",
+                    error_stage: "upstream_http",
+                    downstream_status: Some(StatusCode::GATEWAY_TIMEOUT.as_u16()),
+                    upstream_status: Some(status.as_u16()),
+                    upstream_wait_ms: Some(upstream_wait_ms),
+                    retry_action: Some(retry_action_name(action)),
+                    upstream_headers: Some(&error_headers),
+                    upstream_error: Some(&text),
+                    request_body: Some(client_body),
+                });
+                {
+                    let db = state.db.lock();
+                    log_forward(
+                        &db,
+                        account,
+                        &model,
+                        "outcome_unknown",
+                        Some(408),
+                        metadata_metrics(
+                            &pricing_snapshot,
+                            plan.service_tier.as_deref(),
+                            "outcome_unknown",
+                        ),
+                        Some(&error_message),
+                        &attempt_context,
+                        Some(failure),
+                    )?;
+                }
+                return Ok(ForwardResult {
+                    response: outcome_unknown_response(
+                        plan.client,
+                        StatusCode::GATEWAY_TIMEOUT,
+                        &detail,
                     ),
-                    Some(&sanitized),
-                    &attempt_context,
-                    Some(failure),
-                )?;
+                    action,
+                    error_message: Some(error_message),
+                });
             }
-            return Ok(ForwardResult {
-                response: error_response(plan.client, &error_message, None),
-                action,
-                error_message: Some(error_message),
-            });
+            ProviderErrorClass::UnauthorizedPassthrough => {
+                let error_message = format!(
+                    "upstream auth error 401: {}",
+                    attempt_context.sanitize_upstream_error(&text)
+                );
+                let sanitized = attempt_context.sanitize_upstream_error(&text);
+                let action = forward_action_for_class(class, allow_same_account_retry, None);
+                let failure = attempt_context.failure(FailureSpec {
+                    error_source: "upstream",
+                    error_stage: "upstream_http",
+                    downstream_status: Some(status.as_u16()),
+                    upstream_status: Some(status.as_u16()),
+                    upstream_wait_ms: Some(upstream_wait_ms),
+                    retry_action: Some(retry_action_name(action)),
+                    upstream_headers: Some(&error_headers),
+                    upstream_error: Some(&text),
+                    request_body: Some(client_body),
+                });
+                {
+                    let db = state.db.lock();
+                    log_forward(
+                        &db,
+                        account,
+                        &model,
+                        "client_error",
+                        Some(401),
+                        metadata_metrics(
+                            &pricing_snapshot,
+                            plan.service_tier.as_deref(),
+                            "not_applicable",
+                        ),
+                        Some(&sanitized),
+                        &attempt_context,
+                        Some(failure),
+                    )?;
+                }
+                let upstream_error = Some(sanitize_upstream_error_value_with_known_secret(
+                    &text,
+                    key.as_deref().unwrap_or_default(),
+                ));
+                let body = format_error(plan.client, status, &sanitized, upstream_error.as_ref());
+                return Ok(ForwardResult {
+                    response: (status, axum::Json(body)).into_response(),
+                    action,
+                    error_message: Some(error_message),
+                });
+            }
+            ProviderErrorClass::UnauthorizedRotate => {
+                let error_message = format!(
+                    "upstream auth error 401: {}",
+                    attempt_context.sanitize_upstream_error(&text)
+                );
+                let sanitized = attempt_context.sanitize_upstream_error(&text);
+                let action = forward_action_for_class(class, allow_same_account_retry, None);
+                let failure = attempt_context.failure(FailureSpec {
+                    error_source: "upstream",
+                    error_stage: "upstream_http",
+                    downstream_status: Some(StatusCode::BAD_GATEWAY.as_u16()),
+                    upstream_status: Some(status.as_u16()),
+                    upstream_wait_ms: Some(upstream_wait_ms),
+                    retry_action: Some(retry_action_name(action)),
+                    upstream_headers: Some(&error_headers),
+                    upstream_error: Some(&text),
+                    request_body: Some(client_body),
+                });
+                {
+                    let db = state.db.lock();
+                    log_forward(
+                        &db,
+                        account,
+                        &model,
+                        "client_error",
+                        Some(401),
+                        metadata_metrics(
+                            &pricing_snapshot,
+                            plan.service_tier.as_deref(),
+                            "not_applicable",
+                        ),
+                        Some(&sanitized),
+                        &attempt_context,
+                        Some(failure),
+                    )?;
+                    db.set_account_auth_error_if_key_matches(
+                        &account.id,
+                        &account.key_cipher,
+                        Some(&error_message),
+                    )?;
+                }
+                return Ok(ForwardResult {
+                    response: error_response(plan.client, &error_message, None),
+                    action,
+                    error_message: Some(error_message),
+                });
+            }
+            ProviderErrorClass::ForbiddenStop | ProviderErrorClass::ForbiddenRotate => {
+                let anonymous_route = matches!(class, ProviderErrorClass::ForbiddenStop);
+                let error_message = if anonymous_route {
+                    format!(
+                        "anonymous provider route was rejected with 403; no credential fallback was attempted: {}",
+                        attempt_context.sanitize_upstream_error(&text)
+                    )
+                } else {
+                    format!(
+                        "upstream auth error 403: {}",
+                        attempt_context.sanitize_upstream_error(&text)
+                    )
+                };
+                let sanitized = attempt_context.sanitize_upstream_error(&text);
+                let action = forward_action_for_class(class, allow_same_account_retry, None);
+                let failure = attempt_context.failure(FailureSpec {
+                    error_source: "upstream",
+                    error_stage: "upstream_http",
+                    downstream_status: Some(StatusCode::BAD_GATEWAY.as_u16()),
+                    upstream_status: Some(status.as_u16()),
+                    upstream_wait_ms: Some(upstream_wait_ms),
+                    retry_action: Some(retry_action_name(action)),
+                    upstream_headers: Some(&error_headers),
+                    upstream_error: Some(&text),
+                    request_body: Some(client_body),
+                });
+                {
+                    let db = state.db.lock();
+                    log_forward(
+                        &db,
+                        account,
+                        &model,
+                        "client_error",
+                        Some(403),
+                        metadata_metrics(
+                            &pricing_snapshot,
+                            plan.service_tier.as_deref(),
+                            "not_applicable",
+                        ),
+                        Some(&sanitized),
+                        &attempt_context,
+                        Some(failure),
+                    )?;
+                }
+                return Ok(ForwardResult {
+                    response: error_response(plan.client, &error_message, None),
+                    action,
+                    error_message: Some(error_message),
+                });
+            }
+            _ => {
+                // Other 4xx: request-level error. Convert its envelope for the caller,
+                // but don't retry another account for the same invalid request.
+                let sanitized = attempt_context.sanitize_upstream_error(&text);
+                let action = forward_action_for_class(class, allow_same_account_retry, None);
+                let failure = attempt_context.failure(FailureSpec {
+                    error_source: "upstream",
+                    error_stage: "upstream_http",
+                    downstream_status: Some(status.as_u16()),
+                    upstream_status: Some(status.as_u16()),
+                    upstream_wait_ms: Some(upstream_wait_ms),
+                    retry_action: Some(retry_action_name(action)),
+                    upstream_headers: Some(&error_headers),
+                    upstream_error: Some(&text),
+                    request_body: Some(client_body),
+                });
+                {
+                    let db = state.db.lock();
+                    log_forward(
+                        &db,
+                        account,
+                        &model,
+                        "client_error",
+                        Some(status.as_u16() as i32),
+                        metadata_metrics(
+                            &pricing_snapshot,
+                            plan.service_tier.as_deref(),
+                            "not_applicable",
+                        ),
+                        Some(&sanitized),
+                        &attempt_context,
+                        Some(failure),
+                    )?;
+                }
+                let upstream_error = Some(sanitize_upstream_error_value_with_known_secret(
+                    &text,
+                    key.as_deref().unwrap_or_default(),
+                ));
+                let message = sanitized;
+                let body = format_error(plan.client, status, &message, upstream_error.as_ref());
+                let mut response = (status, axum::Json(body)).into_response();
+                if status == StatusCode::PAYLOAD_TOO_LARGE {
+                    response
+                        .extensions_mut()
+                        .insert(UpstreamPayloadTooLargeResponse);
+                }
+                return Ok(ForwardResult {
+                    response,
+                    action,
+                    error_message: None,
+                });
+            }
         }
-
-        // Other 4xx: request-level error. Convert its envelope for the caller,
-        // but don't retry another account for the same invalid request.
-        let sanitized = attempt_context.sanitize_upstream_error(&text);
-        let failure = attempt_context.failure(FailureSpec {
-            error_source: "upstream",
-            error_stage: "upstream_http",
-            downstream_status: Some(status.as_u16()),
-            upstream_status: Some(status.as_u16()),
-            upstream_wait_ms: Some(upstream_wait_ms),
-            retry_action: Some("return"),
-            upstream_headers: Some(&error_headers),
-            upstream_error: Some(&text),
-            request_body: Some(client_body),
-        });
-        {
-            let db = state.db.lock();
-            log_forward(
-                &db,
-                account,
-                &model,
-                "client_error",
-                Some(status.as_u16() as i32),
-                metadata_metrics(
-                    &pricing_snapshot,
-                    plan.service_tier.as_deref(),
-                    "not_applicable",
-                ),
-                Some(&sanitized),
-                &attempt_context,
-                Some(failure),
-            )?;
-        }
-        let upstream_error = Some(sanitize_upstream_error_value_with_known_secret(
-            &text,
-            key.as_deref().unwrap_or_default(),
-        ));
-        let message = sanitized;
-        let body = format_error(plan.client, status, &message, upstream_error.as_ref());
-        let mut response = (status, axum::Json(body)).into_response();
-        if status == StatusCode::PAYLOAD_TOO_LARGE {
-            response
-                .extensions_mut()
-                .insert(UpstreamPayloadTooLargeResponse);
-        }
-        return Ok(ForwardResult {
-            response,
-            action: ForwardAction::Return,
-            error_message: None,
-        });
     }
 
     // Success path — for non-stream, record breaker success now.
@@ -1156,7 +1170,7 @@ async fn forward_request_impl(
                                 "gateway",
                                 "response_transform",
                                 &detail,
-                                false,
+                                StreamClassifyInput::ConversionFailedBeforeOutput,
                                 allow_same_account_retry,
                             ) {
                                 PreOutputFailure::Retry(result) => return Ok(result),
@@ -1181,7 +1195,7 @@ async fn forward_request_impl(
                         "transport",
                         "stream",
                         &detail,
-                        true,
+                        StreamClassifyInput::InterruptedBeforeOutput,
                         allow_same_account_retry,
                     ) {
                         PreOutputFailure::Retry(result) => return Ok(result),
@@ -1216,7 +1230,7 @@ async fn forward_request_impl(
                                 "gateway",
                                 "response_transform",
                                 &detail,
-                                true,
+                                StreamClassifyInput::EndedIncompleteBeforeOutput,
                                 allow_same_account_retry,
                             ) {
                                 PreOutputFailure::Retry(result) => return Ok(result),
@@ -1244,7 +1258,7 @@ async fn forward_request_impl(
                         "transport",
                         "stream",
                         &detail,
-                        false,
+                        StreamClassifyInput::IdleTimeoutBeforeOutput,
                         allow_same_account_retry,
                     ) {
                         PreOutputFailure::Retry(result) => return Ok(result),
@@ -1314,7 +1328,7 @@ async fn forward_request_impl(
                                         downstream_status: Some(status.as_u16()),
                                         upstream_status: Some(status.as_u16()),
                                         upstream_wait_ms: Some(upstream_wait_ms),
-                                        retry_action: Some("return"),
+                                        retry_action: Some(no_replay_retry_action()),
                                         upstream_headers: None,
                                         upstream_error: Some(&detail),
                                         request_body: None,
@@ -1360,7 +1374,7 @@ async fn forward_request_impl(
                                 downstream_status: Some(status.as_u16()),
                                 upstream_status: Some(status.as_u16()),
                                 upstream_wait_ms: Some(upstream_wait_ms),
-                                retry_action: Some("return"),
+                                retry_action: Some(no_replay_retry_action()),
                                 upstream_headers: None,
                                 upstream_error: Some(&detail),
                                 request_body: None,
@@ -1407,7 +1421,7 @@ async fn forward_request_impl(
                                 downstream_status: Some(status.as_u16()),
                                 upstream_status: Some(status.as_u16()),
                                 upstream_wait_ms: Some(upstream_wait_ms),
-                                retry_action: Some("return"),
+                                retry_action: Some(no_replay_retry_action()),
                                 upstream_headers: None,
                                 upstream_error: Some(&detail),
                                 request_body: None,
@@ -1582,7 +1596,7 @@ async fn forward_request_impl(
                                 downstream_status: Some(status.as_u16()),
                                 upstream_status: Some(status.as_u16()),
                                 upstream_wait_ms: Some(upstream_wait_ms),
-                                retry_action: Some("return"),
+                                retry_action: Some(no_replay_retry_action()),
                                 upstream_headers: None,
                                 upstream_error: Some(error),
                                 request_body: None,
@@ -1595,7 +1609,7 @@ async fn forward_request_impl(
                                     downstream_status: Some(status.as_u16()),
                                     upstream_status: Some(status.as_u16()),
                                     upstream_wait_ms: Some(upstream_wait_ms),
-                                    retry_action: Some("return"),
+                                    retry_action: Some(no_replay_retry_action()),
                                     upstream_headers: None,
                                     upstream_error: Some(error),
                                     request_body: None,
@@ -1650,6 +1664,12 @@ async fn forward_request_impl(
         let text = match response_text_with_timeout(upstream_resp, body_timeout, None).await {
             Ok(text) => text,
             Err(error) => {
+                let class = classify_transport(if error.is_timeout() {
+                    TransportClassifyInput::BodyTimeout
+                } else {
+                    TransportClassifyInput::OtherSendFailure
+                });
+                let action = forward_action_for_class(class, allow_same_account_retry, None);
                 let downstream_status = if error.is_timeout() {
                     StatusCode::GATEWAY_TIMEOUT
                 } else {
@@ -1663,7 +1683,7 @@ async fn forward_request_impl(
                     downstream_status: Some(downstream_status.as_u16()),
                     upstream_status: Some(status.as_u16()),
                     upstream_wait_ms: Some(upstream_wait_ms),
-                    retry_action: Some("return"),
+                    retry_action: Some(retry_action_name(action)),
                     upstream_headers: None,
                     upstream_error: Some(&detail),
                     request_body: Some(client_body),
@@ -1688,7 +1708,7 @@ async fn forward_request_impl(
                 }
                 return Ok(ForwardResult {
                     response: outcome_unknown_response(plan.client, downstream_status, &detail),
-                    action: ForwardAction::Return,
+                    action,
                     error_message: Some(error_message),
                 });
             }
@@ -2032,10 +2052,12 @@ fn handle_pre_output_stream_failure(
     error_source: &'static str,
     error_stage: &'static str,
     detail: &str,
-    retryable: bool,
+    stream_input: StreamClassifyInput,
     allow_retry: bool,
 ) -> PreOutputFailure {
-    let retry = retryable && allow_retry;
+    let class = classify_stream(stream_input);
+    let action = forward_action_for_class(class, allow_retry, None);
+    let retry = matches!(action, ForwardAction::RetrySameAccount);
     let message = if retry {
         outcome_unknown_retry_message(detail)
     } else {
@@ -2055,11 +2077,7 @@ fn handle_pre_output_stream_failure(
         downstream_status: Some(upstream_status.as_u16()),
         upstream_status: Some(upstream_status.as_u16()),
         upstream_wait_ms: Some(upstream_wait_ms),
-        retry_action: Some(if retry {
-            "retry_same_account"
-        } else {
-            "return"
-        }),
+        retry_action: Some(retry_action_name(action)),
         upstream_headers: None,
         upstream_error: Some(detail),
         request_body: None,
@@ -2085,7 +2103,7 @@ fn handle_pre_output_stream_failure(
     if retry {
         PreOutputFailure::Retry(ForwardResult {
             response: outcome_unknown_response_with_message(plan.client, failure_status, &message),
-            action: ForwardAction::RetrySameAccount,
+            action,
             error_message: Some(message),
         })
     } else {
@@ -2362,41 +2380,33 @@ fn error_response(format: ApiFormat, message: &str, upstream: Option<&Value>) ->
     (StatusCode::BAD_GATEWAY, axum::Json(body)).into_response()
 }
 
-fn usage_limit_window_for_channel(channel: UpstreamChannel, text: &str) -> Option<UsageWindowKind> {
-    if channel == UpstreamChannel::Free {
-        Some(UsageWindowKind::Free)
-    } else {
-        parse_usage_limit_window(text)
+fn forward_action_for_class(
+    class: ProviderErrorClass,
+    allow_same_account_retry: bool,
+    rate_limit_window: Option<UsageWindowKind>,
+) -> ForwardAction {
+    if class.same_account_retry_eligible() && allow_same_account_retry {
+        return ForwardAction::RetrySameAccount;
+    }
+    match class {
+        ProviderErrorClass::RouteUnavailable
+        | ProviderErrorClass::DecryptFailed
+        | ProviderErrorClass::UnauthorizedRotate
+        | ProviderErrorClass::ForbiddenRotate => ForwardAction::TryNextAccount,
+        ProviderErrorClass::RateLimited { .. } => match rate_limit_fallback(rate_limit_window) {
+            RateLimitFallback::ExhaustFreeChannel => ForwardAction::ExhaustFreeChannel,
+            RateLimitFallback::TryNextAccount => ForwardAction::TryNextAccount,
+        },
+        _ => ForwardAction::Return,
     }
 }
 
-fn rate_limit_window_and_cooldown(
-    goat: bool,
-    channel: UpstreamChannel,
-    text: &str,
-) -> (Option<UsageWindowKind>, Duration) {
-    if goat {
-        return (None, Duration::minutes(5));
-    }
-    let window = usage_limit_window_for_channel(channel, text);
-    let cooldown = if window == Some(UsageWindowKind::Free) {
-        parse_free_reset_or_default(text)
-    } else {
-        parse_reset(text).unwrap_or_else(|| Duration::minutes(5))
-    };
-    (window, cooldown)
-}
-
-fn action_for_usage_limit(window: Option<UsageWindowKind>) -> ForwardAction {
-    if window == Some(UsageWindowKind::Free) {
-        // Free is an ordinary provider candidate. Exhausting its shared IP
-        // quota continues through the remaining account-card order; a
-        // Free-only alias naturally returns the shared cooldown once no other
-        // compatible candidate remains.
-        ForwardAction::ExhaustFreeChannel
-    } else {
-        ForwardAction::TryNextAccount
-    }
+fn no_replay_retry_action() -> &'static str {
+    retry_action_name(forward_action_for_class(
+        classify_stream(StreamClassifyInput::AfterDownstreamBytes),
+        false,
+        None,
+    ))
 }
 
 fn retry_action_name(action: ForwardAction) -> &'static str {
@@ -2781,55 +2791,6 @@ mod stream_usage_tests {
 
     fn usage_event() -> Vec<u8> {
         b"data: {\"id\":\"x\",\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":20,\"total_tokens\":30,\"prompt_tokens_details\":{\"cached_tokens\":5}}}\n\ndata: [DONE]\n\n".to_vec()
-    }
-
-    #[test]
-    fn free_429_does_not_rotate_keys() {
-        for misleading_body in [
-            "5-hour usage limit reached. Resets in 13min.",
-            "Weekly usage limit reached. Resets in 4 days.",
-            "Monthly usage limit reached. Resets in 13 days.",
-        ] {
-            assert_eq!(
-                usage_limit_window_for_channel(UpstreamChannel::Free, misleading_body),
-                Some(UsageWindowKind::Free),
-            );
-        }
-        assert_eq!(
-            action_for_usage_limit(Some(UsageWindowKind::Free)),
-            ForwardAction::ExhaustFreeChannel
-        );
-        assert_eq!(
-            action_for_usage_limit(Some(UsageWindowKind::Free)),
-            ForwardAction::ExhaustFreeChannel
-        );
-        assert_eq!(
-            action_for_usage_limit(Some(UsageWindowKind::FiveHours)),
-            ForwardAction::TryNextAccount
-        );
-        assert_eq!(action_for_usage_limit(None), ForwardAction::TryNextAccount);
-    }
-
-    #[test]
-    fn goat_429_is_generic_and_ignores_go_limit_windows() {
-        for misleading_body in [
-            "5-hour usage limit reached. Resets in 13min.",
-            "Weekly usage limit reached. Resets in 4 days.",
-            "Monthly usage limit reached. Resets in 13 days.",
-            r#"{"type":"GoUsageLimitError","message":"Weekly usage limit reached. Resets in 3 days."}"#,
-        ] {
-            let (window, cooldown) =
-                rate_limit_window_and_cooldown(true, UpstreamChannel::Go, misleading_body);
-            assert_eq!(window, None, "{misleading_body}");
-            assert_eq!(cooldown, Duration::minutes(5), "{misleading_body}");
-        }
-        let (go_window, go_cooldown) = rate_limit_window_and_cooldown(
-            false,
-            UpstreamChannel::Go,
-            "Weekly usage limit reached. Resets in 4 days.",
-        );
-        assert_eq!(go_window, Some(UsageWindowKind::Week));
-        assert_eq!(go_cooldown, Duration::days(4));
     }
 
     #[test]
