@@ -11,7 +11,7 @@ use crate::models::{
     AppConfig, ProxyListDirection as AppProxyListDirection, ProxyMode as AppProxyMode,
     RoutingMode as AppRoutingMode, normalize_client_root_url,
 };
-use crate::state::CoreState;
+use crate::state::{CoreState, HostSettingsError};
 
 use super::types::{
     ProxyListDirection, ProxyMode, ProxySupportedModel, RoutingMode, Settings, SettingsUpdate,
@@ -77,62 +77,27 @@ fn update_settings(state: &CoreState, update: SettingsUpdate) -> Result<Mutation
     config.client_root_url = normalize_client_root_url(&config.client_root_url)
         .map_err(|message| V3ApiError::invalid_request_at(state, message))?;
 
-    let next_auto_start = config.auto_start;
-    let next_show_dock_icon = config.show_dock_icon;
-    let auto_start_supported = state.auto_start_supported();
-    let dock_visibility_supported = state.dock_visibility_supported();
-    if !auto_start_supported && next_auto_start != previous_config.auto_start {
-        return Err(V3ApiError::invalid_request_at(
-            state,
-            "auto-start is unavailable in this runtime",
-        ));
-    }
-    if !dock_visibility_supported && next_show_dock_icon != previous_config.show_dock_icon {
-        return Err(V3ApiError::invalid_request_at(
-            state,
-            "Dock visibility is unavailable in this runtime",
-        ));
-    }
-
-    state.set_config(config).map_err(V3ApiError::internal)?;
-    let runtime_sync = (|| -> anyhow::Result<()> {
-        if auto_start_supported {
-            state.sync_auto_start(next_auto_start)?;
-        }
-        if dock_visibility_supported {
-            state.sync_dock_visibility(next_show_dock_icon)?;
-        }
-        Ok(())
-    })();
-    if let Err(sync_error) = runtime_sync {
-        let config_rollback_error = state.set_config(previous_config.clone()).err();
-        let auto_start_rollback_error = auto_start_supported
-            .then(|| state.sync_auto_start(previous_config.auto_start).err())
-            .flatten();
-        let dock_rollback_error = dock_visibility_supported
-            .then(|| {
-                state
-                    .sync_dock_visibility(previous_config.show_dock_icon)
-                    .err()
-            })
-            .flatten();
-        let mut message = format!("failed to synchronize desktop settings: {sync_error}");
-        if let Some(error) = config_rollback_error {
-            message.push_str(&format!("; failed to restore settings: {error}"));
-        }
-        if let Some(error) = auto_start_rollback_error {
-            message.push_str(&format!("; failed to restore auto-start state: {error}"));
-        }
-        if let Some(error) = dock_rollback_error {
-            message.push_str(&format!("; failed to restore Dock visibility: {error}"));
-        }
-        return Err(V3ApiError::internal(message));
-    }
+    state
+        .apply_host_settings(&previous_config, config)
+        .map_err(|error| map_host_settings_error(state, error))?;
 
     Ok(MutationAck {
         revision: state.settings_revision(),
         process_generation: state.process_generation(),
     })
+}
+
+fn map_host_settings_error(state: &CoreState, error: HostSettingsError) -> V3ApiError {
+    match error {
+        HostSettingsError::AutoStartUnsupported => {
+            V3ApiError::invalid_request_at(state, HostSettingsError::AUTO_START_UNAVAILABLE)
+        }
+        HostSettingsError::DockVisibilityUnsupported => {
+            V3ApiError::invalid_request_at(state, HostSettingsError::DOCK_VISIBILITY_UNAVAILABLE)
+        }
+        HostSettingsError::Persist(error) => V3ApiError::internal(error),
+        HostSettingsError::Sync(message) => V3ApiError::internal(message),
+    }
 }
 
 fn apply_settings_patch(config: &mut AppConfig, update: &SettingsUpdate) {

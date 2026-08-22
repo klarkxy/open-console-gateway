@@ -20,7 +20,7 @@ use crate::pricing::{
     OfficialPricingRefresh, PricingRefreshConfirmPolicy, evaluate_official_pricing_refresh,
     fetch_official_snapshot, prepare_multiplier_update, stamp_pricing_activation,
 };
-use crate::state::{CoreState, DesktopUpdateStartError, DesktopUpdateStatus};
+use crate::state::{CoreState, DesktopUpdateStartError, DesktopUpdateStatus, HostSettingsError};
 use axum::{
     Json, Router,
     body::Body,
@@ -4393,57 +4393,25 @@ async fn update_settings(
     validate_upstream_url(&config.upstream_base_url)?;
     config.client_root_url =
         normalize_client_root_url(&config.client_root_url).map_err(ApiError::bad_request)?;
-    let next_auto_start = config.auto_start;
-    let next_show_dock_icon = config.show_dock_icon;
-    let auto_start_supported = state.auto_start_supported();
-    let dock_visibility_supported = state.dock_visibility_supported();
-    if !auto_start_supported && next_auto_start != previous_config.auto_start {
-        return Err(ApiError::bad_request(
-            "auto-start is unavailable in this runtime",
-        ));
-    }
-    if !dock_visibility_supported && next_show_dock_icon != previous_config.show_dock_icon {
-        return Err(ApiError::bad_request(
-            "Dock visibility is unavailable in this runtime",
-        ));
-    }
-    state.set_config(config).map_err(ApiError::internal)?;
-    let runtime_sync = (|| -> anyhow::Result<()> {
-        if auto_start_supported {
-            state.sync_auto_start(next_auto_start)?;
-        }
-        if dock_visibility_supported {
-            state.sync_dock_visibility(next_show_dock_icon)?;
-        }
-        Ok(())
-    })();
-    if let Err(sync_error) = runtime_sync {
-        let config_rollback_error = state.set_config(previous_config.clone()).err();
-        let auto_start_rollback_error = auto_start_supported
-            .then(|| state.sync_auto_start(previous_config.auto_start).err())
-            .flatten();
-        let dock_rollback_error = dock_visibility_supported
-            .then(|| {
-                state
-                    .sync_dock_visibility(previous_config.show_dock_icon)
-                    .err()
-            })
-            .flatten();
-        let mut message = format!("failed to synchronize desktop settings: {sync_error}");
-        if let Some(error) = config_rollback_error {
-            message.push_str(&format!("; failed to restore settings: {error}"));
-        }
-        if let Some(error) = auto_start_rollback_error {
-            message.push_str(&format!("; failed to restore auto-start state: {error}"));
-        }
-        if let Some(error) = dock_rollback_error {
-            message.push_str(&format!("; failed to restore Dock visibility: {error}"));
-        }
-        return Err(ApiError::internal(message));
-    }
+    state
+        .apply_host_settings(&previous_config, config)
+        .map_err(map_host_settings_error)?;
     Ok(Json(SettingsRevisionResponse {
         revision: state.settings_revision(),
     }))
+}
+
+fn map_host_settings_error(error: HostSettingsError) -> ApiError {
+    match error {
+        HostSettingsError::AutoStartUnsupported => {
+            ApiError::bad_request(HostSettingsError::AUTO_START_UNAVAILABLE)
+        }
+        HostSettingsError::DockVisibilityUnsupported => {
+            ApiError::bad_request(HostSettingsError::DOCK_VISIBILITY_UNAVAILABLE)
+        }
+        HostSettingsError::Persist(error) => ApiError::internal(error),
+        HostSettingsError::Sync(message) => ApiError::internal(message),
+    }
 }
 
 /// Write-gate validation for list proxy mode. Only the dashboard save path

@@ -7,6 +7,7 @@ use crate::models::{
 };
 use crate::pricing::{embedded_seed, ensure_current_adjustment_policy, ensure_seed_model_coverage};
 use parking_lot::{Mutex, RwLock};
+use std::fmt;
 use std::path::PathBuf;
 use std::sync::{
     Arc,
@@ -89,6 +90,44 @@ pub struct CoreStateInner {
 }
 
 pub type CoreState = Arc<CoreStateInner>;
+
+/// Host-effect failures from [`CoreStateInner::apply_host_settings`].
+///
+/// Adapters map variants onto their existing status/code/message without
+/// changing V2 or V3 DTO shapes.
+#[derive(Debug)]
+pub enum HostSettingsError {
+    AutoStartUnsupported,
+    DockVisibilityUnsupported,
+    Persist(anyhow::Error),
+    Sync(String),
+}
+
+impl HostSettingsError {
+    pub const AUTO_START_UNAVAILABLE: &'static str = "auto-start is unavailable in this runtime";
+    pub const DOCK_VISIBILITY_UNAVAILABLE: &'static str =
+        "Dock visibility is unavailable in this runtime";
+}
+
+impl fmt::Display for HostSettingsError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AutoStartUnsupported => f.write_str(Self::AUTO_START_UNAVAILABLE),
+            Self::DockVisibilityUnsupported => f.write_str(Self::DOCK_VISIBILITY_UNAVAILABLE),
+            Self::Persist(error) => write!(f, "{error}"),
+            Self::Sync(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for HostSettingsError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Persist(error) => Some(error.as_ref()),
+            Self::AutoStartUnsupported | Self::DockVisibilityUnsupported | Self::Sync(_) => None,
+        }
+    }
+}
 
 impl CoreStateInner {
     pub fn new(
@@ -437,6 +476,63 @@ impl CoreStateInner {
             db.set_config(&config_json)?;
         }
         self.apply_persisted_config(config, http_client);
+        Ok(())
+    }
+
+    /// Persists `next`, then reasserts every supported auto-start / Dock hook.
+    ///
+    /// Callers must hold `settings_update` and finish protocol-specific
+    /// validation/CAS first. Unsupported capability deltas fail before
+    /// persistence. After a successful `set_config`, every supported hook is
+    /// invoked with the persisted values even when those fields did not
+    /// change. Hook failure rolls the config back, then best-effort restores
+    /// both host hooks.
+    pub fn apply_host_settings(
+        &self,
+        previous: &AppConfig,
+        next: AppConfig,
+    ) -> Result<(), HostSettingsError> {
+        let next_auto_start = next.auto_start;
+        let next_show_dock_icon = next.show_dock_icon;
+        let auto_start_supported = self.auto_start_supported();
+        let dock_visibility_supported = self.dock_visibility_supported();
+        if !auto_start_supported && next_auto_start != previous.auto_start {
+            return Err(HostSettingsError::AutoStartUnsupported);
+        }
+        if !dock_visibility_supported && next_show_dock_icon != previous.show_dock_icon {
+            return Err(HostSettingsError::DockVisibilityUnsupported);
+        }
+
+        self.set_config(next).map_err(HostSettingsError::Persist)?;
+        let runtime_sync = (|| -> crate::Result<()> {
+            if auto_start_supported {
+                self.sync_auto_start(next_auto_start)?;
+            }
+            if dock_visibility_supported {
+                self.sync_dock_visibility(next_show_dock_icon)?;
+            }
+            Ok(())
+        })();
+        if let Err(sync_error) = runtime_sync {
+            let config_rollback_error = self.set_config(previous.clone()).err();
+            let auto_start_rollback_error = auto_start_supported
+                .then(|| self.sync_auto_start(previous.auto_start).err())
+                .flatten();
+            let dock_rollback_error = dock_visibility_supported
+                .then(|| self.sync_dock_visibility(previous.show_dock_icon).err())
+                .flatten();
+            let mut message = format!("failed to synchronize desktop settings: {sync_error}");
+            if let Some(error) = config_rollback_error {
+                message.push_str(&format!("; failed to restore settings: {error}"));
+            }
+            if let Some(error) = auto_start_rollback_error {
+                message.push_str(&format!("; failed to restore auto-start state: {error}"));
+            }
+            if let Some(error) = dock_rollback_error {
+                message.push_str(&format!("; failed to restore Dock visibility: {error}"));
+            }
+            return Err(HostSettingsError::Sync(message));
+        }
         Ok(())
     }
 
