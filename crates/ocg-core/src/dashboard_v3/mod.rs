@@ -3,9 +3,10 @@
 //! Mounted at `/dashboard/api/v3` beside the unchanged V2 `/dashboard/api`
 //! router. This module owns the shared DTO / error / CAS envelope, process
 //! generation, connection/settings reads, the settings write path, the
-//! access-key lifecycle, the local accounts control plane, and the local/Zen
-//! provider catalog, contracts, Zen Free control plane, pricing, and Go/Zen
-//! protocol probes. Custom protocol probes stay account-owned on V2.
+//! access-key lifecycle, the local accounts control plane, local account usage
+//! calibration and provider-usage reads, and the local/Zen provider catalog,
+//! contracts, Zen Free control plane, pricing, and Go/Zen protocol probes.
+//! Custom protocol probes stay account-owned on V2.
 
 mod accounts;
 mod connection;
@@ -14,6 +15,7 @@ mod pricing;
 mod providers;
 mod settings;
 mod types;
+mod usage;
 
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
@@ -34,23 +36,25 @@ pub use types::{
     AccountCustomConfigUpdate, AccountCustomConfigWrite, AccountList, AccountManagedCreate,
     AccountModelCapabilitiesUpdate, AccountModelCapability, AccountModelCapabilityWrite,
     AccountMutation, AccountOrder, AccountQuotaScope, AccountSetupStep, AccountSetupUpdate,
-    AccountType, AccountUpdate, AccountUpstreamProtocol, AccountVerificationStatus,
-    CATALOG_TYPE_NAMES, CapabilitySummary, CardCapabilitySummary, ConnectionInfo, ConnectionSubKey,
-    ContractScopeKind, ControlRevision, CustomEndpointContract, ERROR_CONFLICT, ERROR_INTERNAL,
-    ERROR_INVALID_JSON, ERROR_INVALID_REQUEST, ERROR_MISSING_EXPECTED_REVISION, ERROR_NOT_FOUND,
-    ERROR_NOT_IMPLEMENTED, ERROR_PRECONDITION_FAILED, ERROR_REVISION_CONFLICT,
-    ERROR_SERVICE_UNAVAILABLE, ERROR_UNAUTHORIZED, EffectiveCatalog, EffectiveModelContract,
-    EffectiveModelProtocols, EffectiveProtocolEvidence, KeyCreate, KeyUpdate, MutationAck,
-    MutationExpectation, PricingAdjustment, PricingAvailability, PricingLimits, PricingModel,
-    PricingMultiplierChange, PricingMultiplierWrite, PricingMultipliersUpdate, PricingRefresh,
-    PricingRefreshPolicy, PricingRefreshStatus, PricingRefreshUpdate, PricingRevision,
-    PricingSnapshot, PricingTimeWindow, ProtocolProbeRequest, ProtocolProbeResponse,
-    ProtocolProbeResult, ProtocolSwitchUpdate, ProtocolSwitches, ProviderAccountChoice,
-    ProviderCatalog, ProviderCatalogEntry, ProviderCatalogFormField, ProviderCatalogRiskNotice,
+    AccountType, AccountUpdate, AccountUpstreamProtocol, AccountUsageUpdate,
+    AccountVerificationStatus, CATALOG_TYPE_NAMES, CapabilitySummary, CardCapabilitySummary,
+    ConnectionInfo, ConnectionSubKey, ContractScopeKind, ControlRevision, CreditBalance,
+    CustomEndpointContract, ERROR_CONFLICT, ERROR_INTERNAL, ERROR_INVALID_JSON,
+    ERROR_INVALID_REQUEST, ERROR_MISSING_EXPECTED_REVISION, ERROR_NOT_FOUND, ERROR_NOT_IMPLEMENTED,
+    ERROR_PRECONDITION_FAILED, ERROR_REVISION_CONFLICT, ERROR_SERVICE_UNAVAILABLE,
+    ERROR_UNAUTHORIZED, EffectiveCatalog, EffectiveModelContract, EffectiveModelProtocols,
+    EffectiveProtocolEvidence, KeyCreate, KeyUpdate, MutationAck, MutationExpectation,
+    PricingAdjustment, PricingAvailability, PricingLimits, PricingModel, PricingMultiplierChange,
+    PricingMultiplierWrite, PricingMultipliersUpdate, PricingRefresh, PricingRefreshPolicy,
+    PricingRefreshStatus, PricingRefreshUpdate, PricingRevision, PricingSnapshot,
+    PricingTimeWindow, ProtocolProbeRequest, ProtocolProbeResponse, ProtocolProbeResult,
+    ProtocolSwitchUpdate, ProtocolSwitches, ProviderAccountChoice, ProviderCatalog,
+    ProviderCatalogEntry, ProviderCatalogFormField, ProviderCatalogRiskNotice,
     ProviderContractGroup, ProviderContracts, ProviderModelCapability, ProviderOfferingChoice,
-    ProviderPricing, ProxyListDirection, ProxyMode, ProxySupportedModel, RoutingMode, Settings,
-    SettingsUpdate, V3Error, ZenFreeModel, ZenFreeModels, ZenFreeSettings, ZenFreeSettingsUpdate,
-    contract_schema, contract_schema_pretty,
+    ProviderPricing, ProviderUsage, ProxyListDirection, ProxyMode, ProxySupportedModel,
+    QuotaWindow, RoutingMode, Settings, SettingsUpdate, UsageAvailability, UsageMutation,
+    UsageSyncState, UsageWindow, V3Error, ZenFreeModel, ZenFreeModels, ZenFreeSettings,
+    ZenFreeSettingsUpdate, contract_schema, contract_schema_pretty,
 };
 
 #[cfg(debug_assertions)]
@@ -122,6 +126,14 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
         .route(
             "/accounts/{id}/acknowledgements",
             post(accounts::create_account_acknowledgement),
+        )
+        .route(
+            "/accounts/{id}/usage",
+            get(usage::get_account_usage).patch(usage::patch_account_usage),
+        )
+        .route(
+            "/accounts/{id}/provider-usage",
+            get(usage::get_provider_usage),
         )
         .route("/providers", get(providers::get_providers))
         .route(

@@ -6,7 +6,9 @@
 //! Plaintext keys must not appear on `Settings` or provider/Zen/contract DTOs —
 //! `ConnectionInfo` is the only secret-bearing V3 DTO. Protocol path/switch tokens
 //! stay `chat_completions`, `responses`, and `messages`. Pricing wire DTOs are
-//! distinct from `kernel::pricing` and from stored provider pricing blobs.
+//! distinct from `kernel::pricing` and from stored provider pricing blobs. Usage
+//! wire DTOs are distinct from `models::UsageWindow` and from stored quota/sync
+//! rows.
 
 use schemars::JsonSchema;
 use schemars::generate::{SchemaGenerator, SchemaSettings};
@@ -97,6 +99,14 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "PricingMultiplierWrite",
     "ProviderPricing",
     "PricingAvailability",
+    "UsageWindow",
+    "UsageMutation",
+    "AccountUsageUpdate",
+    "ProviderUsage",
+    "QuotaWindow",
+    "CreditBalance",
+    "UsageSyncState",
+    "UsageAvailability",
 ];
 
 pub const ERROR_UNAUTHORIZED: &str = "unauthorized";
@@ -1476,6 +1486,131 @@ pub enum PricingAvailability {
     Unpriced,
 }
 
+/// GET `/accounts/{id}/usage` body. Distinct from `models::UsageWindow`.
+///
+/// `revision` is the settings CAS token and is not advanced by calibration.
+/// `pricingRevision` is present when the projection uses the live Go snapshot.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UsageWindow {
+    pub account_id: String,
+    pub window_5h: f64,
+    pub window_week: f64,
+    pub window_month: f64,
+    pub resets_in_5h: Option<String>,
+    pub resets_in_week: Option<String>,
+    pub resets_in_month: Option<String>,
+    pub revision: u64,
+    pub process_generation: u64,
+    pub pricing_revision: Option<String>,
+}
+
+/// PATCH `/accounts/{id}/usage` envelope. Calibration does not bump revision.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UsageMutation {
+    pub usage: UsageWindow,
+    pub revision: u64,
+    pub process_generation: u64,
+}
+
+/// PATCH `/accounts/{id}/usage` body. CAS tokens, `window`, and `percent` are
+/// required; `resetsInMinutes` may be omitted. Unknown fields are rejected.
+/// Window tokens stay the V2 identifiers `window_5h` / `window_week` /
+/// `window_month`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AccountUsageUpdate {
+    #[serde(flatten)]
+    pub expectation: MutationExpectation,
+    pub window: String,
+    pub percent: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resets_in_minutes: Option<i64>,
+}
+
+/// GET `/accounts/{id}/provider-usage` body. Distinct from stored quota rows.
+///
+/// `pricingRevision` is present when live Go quota windows use one captured
+/// pricing snapshot.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderUsage {
+    pub account_id: String,
+    pub provider_id: String,
+    pub offering_id: String,
+    pub availability: UsageAvailability,
+    pub experimental: bool,
+    pub free_cooldown_until: Option<String>,
+    pub quota_windows: Vec<QuotaWindow>,
+    pub credit_balances: Vec<CreditBalance>,
+    pub sync_state: Option<UsageSyncState>,
+    pub revision: u64,
+    pub process_generation: u64,
+    pub pricing_revision: Option<String>,
+}
+
+/// One live or synthetic quota window. Distinct from `provider::QuotaWindow`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QuotaWindow {
+    pub account_id: String,
+    pub window_kind: String,
+    pub used: f64,
+    pub limit_value: Option<f64>,
+    pub started_at: Option<String>,
+    pub resets_at: Option<String>,
+    pub calibration_offset: f64,
+    pub unit: String,
+    pub source: String,
+    pub observed_at: Option<String>,
+    pub updated_at: String,
+}
+
+/// One credit balance row as projected for provider usage. Distinct from the
+/// stored provider credit row.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreditBalance {
+    pub account_id: String,
+    pub balance_kind: String,
+    pub amount: f64,
+    pub unit: String,
+    pub source: String,
+    pub observed_at: Option<String>,
+    pub updated_at: String,
+}
+
+/// Official-usage sync metadata as projected for provider usage. Distinct from
+/// the stored `provider_usage_sync_state` row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UsageSyncState {
+    pub account_id: String,
+    pub last_success_at: Option<String>,
+    pub last_attempt_at: Option<String>,
+    pub next_eligible_at: Option<String>,
+    pub failure_streak: i64,
+    pub last_expedited_at: Option<String>,
+}
+
+/// Registry usage availability. Wire values stay snake_case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum UsageAvailability {
+    Available,
+    Unavailable,
+    LocalState,
+}
+
 /// Deterministic JSON Schema catalog for the checked-in V3 contract.
 ///
 /// Response types are generated with the serialize contract so `Option` fields
@@ -1532,6 +1667,13 @@ pub fn contract_schema() -> Value {
     include_type::<PricingMultiplierChange>(&mut serialize);
     include_type::<ProviderPricing>(&mut serialize);
     include_type::<PricingAvailability>(&mut serialize);
+    include_type::<UsageWindow>(&mut serialize);
+    include_type::<UsageMutation>(&mut serialize);
+    include_type::<ProviderUsage>(&mut serialize);
+    include_type::<QuotaWindow>(&mut serialize);
+    include_type::<CreditBalance>(&mut serialize);
+    include_type::<UsageSyncState>(&mut serialize);
+    include_type::<UsageAvailability>(&mut serialize);
     let mut defs = serialize.take_definitions(true);
 
     let mut deserialize = SchemaSettings::draft2020_12().into_generator();
@@ -1557,6 +1699,7 @@ pub fn contract_schema() -> Value {
     include_type::<PricingRefreshPolicy>(&mut deserialize);
     include_type::<PricingMultipliersUpdate>(&mut deserialize);
     include_type::<PricingMultiplierWrite>(&mut deserialize);
+    include_type::<AccountUsageUpdate>(&mut deserialize);
     for (name, schema) in deserialize.take_definitions(true) {
         defs.entry(name).or_insert(schema);
     }
@@ -2809,6 +2952,17 @@ mod tests {
         "PricingAvailability",
     ];
 
+    const USAGE_CATALOG_TYPES: &[&str] = &[
+        "UsageWindow",
+        "UsageMutation",
+        "AccountUsageUpdate",
+        "ProviderUsage",
+        "QuotaWindow",
+        "CreditBalance",
+        "UsageSyncState",
+        "UsageAvailability",
+    ];
+
     fn sample_pricing_snapshot() -> PricingSnapshot {
         PricingSnapshot {
             revision: 11,
@@ -2856,10 +3010,15 @@ mod tests {
             &CATALOG_TYPE_NAMES[ACCOUNTS_CATALOG_PREFIX.len()..prefix_len],
             PROVIDER_CATALOG_TYPES
         );
-        assert_eq!(&CATALOG_TYPE_NAMES[prefix_len..], PRICING_CATALOG_TYPES);
+        let pricing_end = prefix_len + PRICING_CATALOG_TYPES.len();
+        assert_eq!(
+            &CATALOG_TYPE_NAMES[prefix_len..pricing_end],
+            PRICING_CATALOG_TYPES
+        );
+        assert_eq!(&CATALOG_TYPE_NAMES[pricing_end..], USAGE_CATALOG_TYPES);
         assert_eq!(
             CATALOG_TYPE_NAMES.len(),
-            prefix_len + PRICING_CATALOG_TYPES.len()
+            pricing_end + USAGE_CATALOG_TYPES.len()
         );
     }
 
@@ -3103,6 +3262,190 @@ mod tests {
                 "token": "nope"
             }))
             .is_err()
+        );
+    }
+
+    #[test]
+    fn usage_responses_emit_camel_case_nulls_and_reject_unknown_request_fields() {
+        let usage = UsageWindow {
+            account_id: "acct-1".into(),
+            window_5h: 6.0,
+            window_week: 6.0,
+            window_month: 6.0,
+            resets_in_5h: None,
+            resets_in_week: None,
+            resets_in_month: None,
+            revision: 11,
+            process_generation: 9,
+            pricing_revision: Some("seed".into()),
+        };
+        let usage_value = serde_json::to_value(&usage).unwrap();
+        assert_eq!(usage_value["accountId"], "acct-1");
+        assert_eq!(usage_value["window5h"], 6.0);
+        assert_eq!(usage_value["windowWeek"], 6.0);
+        assert_eq!(usage_value["windowMonth"], 6.0);
+        assert_eq!(usage_value["resetsIn5h"], Value::Null);
+        assert_eq!(usage_value["resetsInWeek"], Value::Null);
+        assert_eq!(usage_value["resetsInMonth"], Value::Null);
+        assert_eq!(usage_value["revision"], 11);
+        assert_eq!(usage_value["processGeneration"], 9);
+        assert_eq!(usage_value["pricingRevision"], "seed");
+        assert!(usage_value.get("window_5h").is_none());
+        assert!(usage_value.get("resets_in_5h").is_none());
+        assert_secret_free(&usage_value);
+
+        let goat = UsageWindow {
+            pricing_revision: None,
+            ..usage.clone()
+        };
+        assert_eq!(
+            serde_json::to_value(&goat).unwrap()["pricingRevision"],
+            Value::Null
+        );
+
+        let mutation = UsageMutation {
+            usage: goat,
+            revision: 11,
+            process_generation: 9,
+        };
+        let mutation_value = serde_json::to_value(&mutation).unwrap();
+        assert_eq!(mutation_value["revision"], 11);
+        assert_eq!(mutation_value["processGeneration"], 9);
+        assert_eq!(mutation_value["usage"]["pricingRevision"], Value::Null);
+        assert_secret_free(&mutation_value);
+
+        let omitted: AccountUsageUpdate = serde_json::from_value(json!({
+            "expectedRevision": 11,
+            "processGeneration": 9,
+            "window": "window_5h",
+            "percent": 50.0
+        }))
+        .unwrap();
+        assert_eq!(omitted.expectation.expected_revision, 11);
+        assert_eq!(omitted.window, "window_5h");
+        assert_eq!(omitted.percent, 50.0);
+        assert!(omitted.resets_in_minutes.is_none());
+        let with_reset: AccountUsageUpdate = serde_json::from_value(json!({
+            "expectedRevision": 11,
+            "processGeneration": 9,
+            "window": "window_5h",
+            "percent": 50.0,
+            "resetsInMinutes": 180
+        }))
+        .unwrap();
+        assert_eq!(with_reset.resets_in_minutes, Some(180));
+        assert!(
+            serde_json::from_value::<AccountUsageUpdate>(json!({
+                "expectedRevision": 11,
+                "processGeneration": 9,
+                "window": "window_5h",
+                "percent": 50.0,
+                "resets_in_minutes": 180
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<AccountUsageUpdate>(json!({
+                "expectedRevision": 11,
+                "processGeneration": 9,
+                "window": "window_5h",
+                "percent": 50.0,
+                "key": "sk-secret"
+            }))
+            .is_err()
+        );
+
+        let provider = ProviderUsage {
+            account_id: "acct-1".into(),
+            provider_id: "opencode".into(),
+            offering_id: "go".into(),
+            availability: UsageAvailability::Available,
+            experimental: false,
+            free_cooldown_until: None,
+            quota_windows: vec![QuotaWindow {
+                account_id: "acct-1".into(),
+                window_kind: "five_hours".into(),
+                used: 6.0,
+                limit_value: Some(12.0),
+                started_at: None,
+                resets_at: None,
+                calibration_offset: 0.0,
+                unit: "usd".into(),
+                source: "opencode-go-live".into(),
+                observed_at: None,
+                updated_at: "2026-08-16T12:00:00Z".into(),
+            }],
+            credit_balances: Vec::new(),
+            sync_state: None,
+            revision: 11,
+            process_generation: 9,
+            pricing_revision: Some("seed".into()),
+        };
+        let provider_value = serde_json::to_value(&provider).unwrap();
+        assert_eq!(provider_value["availability"], "available");
+        assert_eq!(provider_value["freeCooldownUntil"], Value::Null);
+        assert_eq!(provider_value["syncState"], Value::Null);
+        assert_eq!(
+            provider_value["quotaWindows"][0]["windowKind"],
+            "five_hours"
+        );
+        assert_eq!(provider_value["quotaWindows"][0]["limitValue"], 12.0);
+        assert_eq!(provider_value["quotaWindows"][0]["startedAt"], Value::Null);
+        assert_eq!(provider_value["pricingRevision"], "seed");
+        assert!(provider_value.get("quota_windows").is_none());
+        assert_eq!(
+            serde_json::to_value(UsageAvailability::LocalState).unwrap(),
+            json!("local_state")
+        );
+        assert_eq!(
+            serde_json::to_value(UsageAvailability::Unavailable).unwrap(),
+            json!("unavailable")
+        );
+        assert_secret_free(&provider_value);
+
+        let schema = contract_schema();
+        let usage_required = schema["$defs"]["UsageWindow"]["required"]
+            .as_array()
+            .unwrap();
+        for field in [
+            "resetsIn5h",
+            "resetsInWeek",
+            "resetsInMonth",
+            "pricingRevision",
+        ] {
+            assert!(
+                usage_required.iter().any(|value| value == field),
+                "{field} must stay required so responses emit T|null"
+            );
+        }
+        let provider_required = schema["$defs"]["ProviderUsage"]["required"]
+            .as_array()
+            .unwrap();
+        for field in ["freeCooldownUntil", "syncState", "pricingRevision"] {
+            assert!(
+                provider_required.iter().any(|value| value == field),
+                "{field} must stay required so responses emit T|null"
+            );
+        }
+        let request = &schema["$defs"]["AccountUsageUpdate"];
+        assert_eq!(request["additionalProperties"], false);
+        let request_required = request["required"].as_array().unwrap();
+        assert!(
+            request_required
+                .iter()
+                .any(|value| value == "expectedRevision")
+        );
+        assert!(
+            request_required
+                .iter()
+                .any(|value| value == "processGeneration")
+        );
+        assert!(request_required.iter().any(|value| value == "window"));
+        assert!(request_required.iter().any(|value| value == "percent"));
+        assert!(
+            !request_required
+                .iter()
+                .any(|value| value == "resetsInMinutes")
         );
     }
 }
