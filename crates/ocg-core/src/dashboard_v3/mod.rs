@@ -2,8 +2,10 @@
 //!
 //! Mounted at `/dashboard/api/v3` beside the unchanged V2 `/dashboard/api`
 //! router. This module owns the shared DTO / error / CAS envelope, process
-//! generation, and the minimum metadata route later endpoint slices build on.
+//! generation, connection/settings reads, and the settings write path.
 
+mod connection;
+mod settings;
 mod types;
 
 use axum::extract::{Request, State};
@@ -16,8 +18,10 @@ use axum::{Json, Router};
 use crate::state::CoreState;
 
 pub use types::{
-    CATALOG_TYPE_NAMES, ControlRevision, ERROR_INVALID_JSON, ERROR_MISSING_EXPECTED_REVISION,
+    CATALOG_TYPE_NAMES, ConnectionInfo, ConnectionSubKey, ControlRevision, ERROR_INTERNAL,
+    ERROR_INVALID_JSON, ERROR_INVALID_REQUEST, ERROR_MISSING_EXPECTED_REVISION,
     ERROR_REVISION_CONFLICT, ERROR_UNAUTHORIZED, MutationAck, MutationExpectation, PricingRevision,
+    ProxyListDirection, ProxyMode, ProxySupportedModel, RoutingMode, Settings, SettingsUpdate,
     V3Error, contract_schema, contract_schema_pretty,
 };
 
@@ -27,6 +31,11 @@ const SESSION_COOKIE: &str = "ocg_dashboard_session";
 pub fn api_router(state: CoreState) -> Router<CoreState> {
     Router::new()
         .route("/contract", get(get_contract))
+        .route("/connection", get(connection::get_connection))
+        .route(
+            "/settings",
+            get(settings::get_settings).put(settings::put_settings),
+        )
         .route_layer(middleware::from_fn_with_state(state, require_v3_session))
 }
 
@@ -40,6 +49,45 @@ impl V3ApiError {
         Self {
             status: StatusCode::UNAUTHORIZED,
             body: V3Error::unauthorized(),
+        }
+    }
+
+    fn invalid_json() -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            body: V3Error::invalid_json(),
+        }
+    }
+
+    fn missing_expected_revision() -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            body: V3Error::missing_expected_revision(),
+        }
+    }
+
+    fn revision_conflict(state: &CoreState) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            body: V3Error::revision_conflict(state.settings_revision(), state.process_generation()),
+        }
+    }
+
+    fn invalid_request_at(state: &CoreState, message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            body: V3Error::invalid_request_at(
+                message,
+                state.settings_revision(),
+                state.process_generation(),
+            ),
+        }
+    }
+
+    fn internal(message: impl std::fmt::Display) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            body: V3Error::internal(message.to_string()),
         }
     }
 }
