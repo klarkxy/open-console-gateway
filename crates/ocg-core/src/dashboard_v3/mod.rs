@@ -3,11 +3,12 @@
 //! Mounted at `/dashboard/api/v3` beside the unchanged V2 `/dashboard/api`
 //! router. This module owns the shared DTO / error / CAS envelope, process
 //! generation, connection/settings reads, the settings write path, the
-//! access-key lifecycle, and the local accounts control plane.
+//! access-key lifecycle, the local accounts control plane, and pricing.
 
 mod accounts;
 mod connection;
 mod keys;
+mod pricing;
 mod settings;
 mod types;
 
@@ -32,9 +33,18 @@ pub use types::{
     CATALOG_TYPE_NAMES, ConnectionInfo, ConnectionSubKey, ControlRevision, ERROR_CONFLICT,
     ERROR_INTERNAL, ERROR_INVALID_JSON, ERROR_INVALID_REQUEST, ERROR_MISSING_EXPECTED_REVISION,
     ERROR_NOT_FOUND, ERROR_PRECONDITION_FAILED, ERROR_REVISION_CONFLICT, ERROR_SERVICE_UNAVAILABLE,
-    ERROR_UNAUTHORIZED, KeyCreate, KeyUpdate, MutationAck, MutationExpectation, PricingRevision,
-    ProxyListDirection, ProxyMode, ProxySupportedModel, RoutingMode, Settings, SettingsUpdate,
-    V3Error, contract_schema, contract_schema_pretty,
+    ERROR_UNAUTHORIZED, KeyCreate, KeyUpdate, MutationAck, MutationExpectation, PricingAdjustment,
+    PricingAvailability, PricingLimits, PricingModel, PricingMultiplierChange,
+    PricingMultiplierWrite, PricingMultipliersUpdate, PricingRefresh, PricingRefreshPolicy,
+    PricingRefreshStatus, PricingRefreshUpdate, PricingRevision, PricingSnapshot,
+    PricingTimeWindow, ProviderPricing, ProxyListDirection, ProxyMode, ProxySupportedModel,
+    RoutingMode, Settings, SettingsUpdate, V3Error, contract_schema, contract_schema_pretty,
+};
+
+#[cfg(debug_assertions)]
+pub use pricing::{
+    OfficialPricingFetchGuard, install_official_pricing_fetch_error_for_tests,
+    install_official_pricing_fetch_for_tests,
 };
 
 /// Must match `dashboard.rs` `SESSION_COOKIE`. V2 owns login; V3 only checks it.
@@ -47,6 +57,16 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
         .route(
             "/settings",
             get(settings::get_settings).put(settings::put_settings),
+        )
+        .route("/pricing", get(pricing::get_pricing))
+        .route("/pricing/refresh", post(pricing::refresh_pricing))
+        .route(
+            "/pricing/multipliers",
+            put(pricing::put_pricing_multipliers),
+        )
+        .route(
+            "/providers/{provider_id}/{offering_id}/pricing",
+            get(pricing::get_provider_pricing),
         )
         .route(
             "/keys/primary/regenerate",
@@ -140,10 +160,14 @@ impl V3ApiError {
     }
 
     fn not_found(state: &CoreState) -> Self {
+        Self::not_found_at(state, "account not found")
+    }
+
+    fn not_found_at(state: &CoreState, message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
             body: V3Error::not_found(
-                "account not found",
+                message,
                 state.settings_revision(),
                 state.process_generation(),
             ),
@@ -262,6 +286,19 @@ fn check_expectation(
     if expectation.expected_revision != state.settings_revision()
         || expectation.process_generation != state.process_generation()
     {
+        Err(V3ApiError::revision_conflict(state))
+    } else {
+        Ok(())
+    }
+}
+
+fn check_pricing_expectation(
+    state: &CoreState,
+    expectation: &MutationExpectation,
+    expected_pricing_revision: &str,
+) -> Result<(), V3ApiError> {
+    check_expectation(state, expectation)?;
+    if expected_pricing_revision != state.pricing_snapshot().revision {
         Err(V3ApiError::revision_conflict(state))
     } else {
         Ok(())

@@ -4,7 +4,7 @@ use futures_util::StreamExt;
 use reqwest::redirect::{Attempt, Policy};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::time::Duration;
 
@@ -493,6 +493,182 @@ pub(crate) fn stamp_pricing_activation(mut snapshot: PricingSnapshot) -> Pricing
     snapshot.revision = unique_revision_for_content_hash(&snapshot.content_hash);
     snapshot.activated_at = Utc::now().to_rfc3339();
     snapshot
+}
+
+pub(crate) const MAX_PRICING_MULTIPLIER: f64 = 1000.0;
+
+/// Dashboard confirmation policy for an official pricing refresh. Shared by
+/// V2 and V3 so multiplier merge / confirmation matching stays identical.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PricingRefreshConfirmPolicy {
+    KeepCurrent,
+    UseOfficial,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PricingMultiplierDelta {
+    pub model_id: String,
+    pub current_multiplier: f64,
+    pub official_multiplier: f64,
+}
+
+/// I/O-free official-refresh decision. Callers stamp, persist, and bump.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum OfficialPricingRefresh {
+    Failed {
+        error: String,
+    },
+    NeedsConfirmation {
+        multiplier_changes: Vec<PricingMultiplierDelta>,
+        official_content_hash: String,
+    },
+    Unchanged {
+        multiplier_changes: Vec<PricingMultiplierDelta>,
+    },
+    Activate {
+        candidate: PricingSnapshot,
+        multiplier_changes: Vec<PricingMultiplierDelta>,
+    },
+}
+
+pub(crate) fn evaluate_official_pricing_refresh(
+    active: &PricingSnapshot,
+    result: Result<PricingSnapshot>,
+    policy: Option<PricingRefreshConfirmPolicy>,
+    expected_official_content_hash: Option<&str>,
+) -> OfficialPricingRefresh {
+    match result {
+        Ok(official) => {
+            // Compare the candidate after allowlisted coverage is applied. A
+            // seed-only Muse row can carry a user multiplier; comparing the
+            // incomplete official table first would erase it without a prompt.
+            let official = ensure_seed_model_coverage(official);
+            let multiplier_changes = pricing_multiplier_deltas(active, &official);
+            let official_content_hash = official.content_hash.clone();
+            let confirmation_matches = expected_official_content_hash
+                .is_some_and(|expected| expected == official_content_hash);
+            if !multiplier_changes.is_empty() && (policy.is_none() || !confirmation_matches) {
+                return OfficialPricingRefresh::NeedsConfirmation {
+                    multiplier_changes,
+                    official_content_hash,
+                };
+            }
+
+            // Official rows win; the allowlisted seed coverage above prevents
+            // the public table's omitted standard Muse row from becoming unpriced.
+            let mut candidate = official;
+            if matches!(policy, Some(PricingRefreshConfirmPolicy::KeepCurrent)) {
+                merge_current_multipliers(active, &mut candidate);
+            }
+            if pricing_semantically_equal(active, &candidate) {
+                return OfficialPricingRefresh::Unchanged { multiplier_changes };
+            }
+            OfficialPricingRefresh::Activate {
+                candidate,
+                multiplier_changes,
+            }
+        }
+        Err(error) => OfficialPricingRefresh::Failed {
+            error: error.to_string(),
+        },
+    }
+}
+
+pub(crate) fn pricing_multiplier_deltas(
+    current: &PricingSnapshot,
+    official: &PricingSnapshot,
+) -> Vec<PricingMultiplierDelta> {
+    let current = pricing_multiplier_map(current);
+    let official = pricing_multiplier_map(official);
+    current
+        .iter()
+        .filter_map(|(model_id, current_multiplier)| {
+            let official_multiplier = official.get(model_id)?;
+            (current_multiplier != official_multiplier).then(|| PricingMultiplierDelta {
+                model_id: model_id.clone(),
+                current_multiplier: *current_multiplier,
+                official_multiplier: *official_multiplier,
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn pricing_multiplier_map(snapshot: &PricingSnapshot) -> BTreeMap<String, f64> {
+    snapshot
+        .models
+        .iter()
+        .map(|model| (model.model_id.clone(), model.quota_multiplier))
+        .collect()
+}
+
+pub(crate) fn merge_current_multipliers(
+    current: &PricingSnapshot,
+    candidate: &mut PricingSnapshot,
+) {
+    let current = pricing_multiplier_map(current);
+    for model in &mut candidate.models {
+        if let Some(multiplier) = current.get(&model.model_id) {
+            model.quota_multiplier = *multiplier;
+        }
+    }
+}
+
+pub(crate) fn pricing_semantically_equal(left: &PricingSnapshot, right: &PricingSnapshot) -> bool {
+    left.content_hash == right.content_hash
+        && left.document_updated_at == right.document_updated_at
+        && left.limits == right.limits
+        && left.models == right.models
+        && left.adjustment_policy_version == right.adjustment_policy_version
+}
+
+/// Validate a multiplier batch. `Ok(None)` is a no-op; `Ok(Some)` is the
+/// unstamped candidate the caller must stamp and activate.
+pub(crate) fn prepare_multiplier_update(
+    active: &PricingSnapshot,
+    writes: &[(String, f64)],
+) -> std::result::Result<Option<PricingSnapshot>, String> {
+    if writes.is_empty() {
+        return Err("at least one multiplier is required".to_string());
+    }
+    let known_models = active
+        .models
+        .iter()
+        .map(|model| model.model_id.as_str())
+        .collect::<HashSet<_>>();
+    let mut requested = BTreeMap::new();
+    for (model_id, multiplier) in writes {
+        let model_id = model_id.trim();
+        if model_id.is_empty() || !known_models.contains(model_id) {
+            return Err(format!("unknown pricing model `{model_id}`"));
+        }
+        if !multiplier.is_finite() || *multiplier <= 0.0 || *multiplier > MAX_PRICING_MULTIPLIER {
+            return Err(format!(
+                "multiplier for `{model_id}` must be greater than 0 and at most {MAX_PRICING_MULTIPLIER}"
+            ));
+        }
+        if requested
+            .insert(model_id.to_string(), *multiplier)
+            .is_some()
+        {
+            return Err(format!("duplicate multiplier for `{model_id}`"));
+        }
+    }
+
+    let mut snapshot = active.clone();
+    let mut changed = false;
+    for model in &mut snapshot.models {
+        if let Some(multiplier) = requested.get(&model.model_id)
+            && model.quota_multiplier != *multiplier
+        {
+            model.quota_multiplier = *multiplier;
+            changed = true;
+        }
+    }
+    if changed {
+        Ok(Some(snapshot))
+    } else {
+        Ok(None)
+    }
 }
 
 fn legacy_policy_needs_multiplier_repair(version: &str) -> bool {

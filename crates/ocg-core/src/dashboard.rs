@@ -17,7 +17,8 @@ use crate::kernel::protocol::{
 };
 use crate::models::*;
 use crate::pricing::{
-    ensure_seed_model_coverage, fetch_official_snapshot, stamp_pricing_activation,
+    OfficialPricingRefresh, PricingRefreshConfirmPolicy, evaluate_official_pricing_refresh,
+    fetch_official_snapshot, prepare_multiplier_update, stamp_pricing_activation,
 };
 use crate::state::{CoreState, DesktopUpdateStartError, DesktopUpdateStatus};
 use axum::{
@@ -690,8 +691,6 @@ struct PricingMultiplierUpdate {
     multipliers: Vec<PricingMultiplierInput>,
 }
 
-const MAX_PRICING_MULTIPLIER: f64 = 1000.0;
-
 async fn refresh_pricing(
     State(state): State<CoreState>,
     request: Option<Json<PricingRefreshRequest>>,
@@ -729,43 +728,37 @@ fn apply_pricing_refresh(
     policy: Option<PricingRefreshPolicy>,
     expected_official_content_hash: Option<&str>,
 ) -> Result<PricingRefreshResponse, ApiError> {
-    match result {
-        Ok(official) => {
-            let active = state.pricing_snapshot();
-            // Compare the candidate after allowlisted coverage is applied. A
-            // seed-only Muse row can carry a user multiplier; comparing the
-            // incomplete official table first would erase it without a prompt.
-            let official = ensure_seed_model_coverage(official);
-            let multiplier_changes = pricing_multiplier_changes(&active, &official);
-            let official_content_hash = official.content_hash.clone();
-            let confirmation_matches = expected_official_content_hash
-                .is_some_and(|expected| expected == official_content_hash);
-            if !multiplier_changes.is_empty() && (policy.is_none() || !confirmation_matches) {
-                return Ok(PricingRefreshResponse {
-                    snapshot: active.as_ref().clone(),
-                    refresh_status: "needs_confirmation",
-                    multiplier_changes,
-                    official_content_hash: Some(official_content_hash),
-                    error: None,
-                });
-            }
-
-            // Official rows win; the allowlisted seed coverage above prevents
-            // the public table's omitted standard Muse row from becoming unpriced.
-            let mut candidate = official;
-            if matches!(policy, Some(PricingRefreshPolicy::KeepCurrent)) {
-                merge_current_multipliers(&active, &mut candidate);
-            }
-            if pricing_semantically_equal(&active, &candidate) {
-                return Ok(PricingRefreshResponse {
-                    snapshot: active.as_ref().clone(),
-                    refresh_status: "unchanged",
-                    multiplier_changes,
-                    official_content_hash: None,
-                    error: None,
-                });
-            }
-
+    let policy = policy.map(|policy| match policy {
+        PricingRefreshPolicy::KeepCurrent => PricingRefreshConfirmPolicy::KeepCurrent,
+        PricingRefreshPolicy::UseOfficial => PricingRefreshConfirmPolicy::UseOfficial,
+    });
+    match evaluate_official_pricing_refresh(
+        state.pricing_snapshot().as_ref(),
+        result,
+        policy,
+        expected_official_content_hash,
+    ) {
+        OfficialPricingRefresh::NeedsConfirmation {
+            multiplier_changes,
+            official_content_hash,
+        } => Ok(PricingRefreshResponse {
+            snapshot: state.pricing_snapshot().as_ref().clone(),
+            refresh_status: "needs_confirmation",
+            multiplier_changes: v2_multiplier_changes(multiplier_changes),
+            official_content_hash: Some(official_content_hash),
+            error: None,
+        }),
+        OfficialPricingRefresh::Unchanged { multiplier_changes } => Ok(PricingRefreshResponse {
+            snapshot: state.pricing_snapshot().as_ref().clone(),
+            refresh_status: "unchanged",
+            multiplier_changes: v2_multiplier_changes(multiplier_changes),
+            official_content_hash: None,
+            error: None,
+        }),
+        OfficialPricingRefresh::Activate {
+            candidate,
+            multiplier_changes,
+        } => {
             let snapshot = stamp_pricing_activation(candidate);
             state
                 .activate_pricing_snapshot(snapshot.clone())
@@ -778,71 +771,39 @@ fn apply_pricing_refresh(
             Ok(PricingRefreshResponse {
                 snapshot,
                 refresh_status: "success",
-                multiplier_changes,
+                multiplier_changes: v2_multiplier_changes(multiplier_changes),
                 official_content_hash: None,
                 error: None,
             })
         }
-        Err(error) => {
-            let message = error.to_string();
+        OfficialPricingRefresh::Failed { error } => {
             let _ = state.db.lock().log_gateway(
                 "warn",
                 "pricing",
-                &format!("OpenCode Go pricing refresh failed: {message}"),
+                &format!("OpenCode Go pricing refresh failed: {error}"),
             );
             Ok(PricingRefreshResponse {
                 snapshot: state.pricing_snapshot().as_ref().clone(),
                 refresh_status: "failed_no_change",
                 multiplier_changes: Vec::new(),
                 official_content_hash: None,
-                error: Some(message),
+                error: Some(error),
             })
         }
     }
 }
 
-fn pricing_multiplier_changes(
-    current: &PricingSnapshot,
-    official: &PricingSnapshot,
+fn v2_multiplier_changes(
+    changes: Vec<crate::pricing::PricingMultiplierDelta>,
 ) -> Vec<PricingMultiplierChange> {
-    let current = pricing_multiplier_map(current);
-    let official = pricing_multiplier_map(official);
-    current
-        .iter()
-        .filter_map(|(model_id, current_multiplier)| {
-            let official_multiplier = official.get(model_id)?;
-            (current_multiplier != official_multiplier).then(|| PricingMultiplierChange {
-                model_id: model_id.clone(),
-                current_multiplier: *current_multiplier,
-                official_multiplier: *official_multiplier,
-            })
+    changes
+        .into_iter()
+        .map(|change| PricingMultiplierChange {
+            model_id: change.model_id,
+            current_multiplier: change.current_multiplier,
+            official_multiplier: change.official_multiplier,
         })
         .collect()
-}
-
-fn pricing_multiplier_map(snapshot: &PricingSnapshot) -> BTreeMap<String, f64> {
-    snapshot
-        .models
-        .iter()
-        .map(|model| (model.model_id.clone(), model.quota_multiplier))
-        .collect()
-}
-
-fn merge_current_multipliers(current: &PricingSnapshot, candidate: &mut PricingSnapshot) {
-    let current = pricing_multiplier_map(current);
-    for model in &mut candidate.models {
-        if let Some(multiplier) = current.get(&model.model_id) {
-            model.quota_multiplier = *multiplier;
-        }
-    }
-}
-
-fn pricing_semantically_equal(left: &PricingSnapshot, right: &PricingSnapshot) -> bool {
-    left.content_hash == right.content_hash
-        && left.document_updated_at == right.document_updated_at
-        && left.limits == right.limits
-        && left.models == right.models
-        && left.adjustment_policy_version == right.adjustment_policy_version
 }
 
 async fn update_pricing_multipliers(
@@ -860,65 +821,27 @@ async fn update_pricing_multipliers(
             "pricing revision changed; refresh and try again",
         ));
     }
-    if update.multipliers.is_empty() {
-        return Err(ApiError::bad_request("at least one multiplier is required"));
-    }
-
-    let known_models = active
-        .models
-        .iter()
-        .map(|model| model.model_id.as_str())
-        .collect::<HashSet<_>>();
-    let mut requested = BTreeMap::new();
-    for input in update.multipliers {
-        let model_id = input.model_id.trim();
-        if model_id.is_empty() || !known_models.contains(model_id) {
-            return Err(ApiError::bad_request(format!(
-                "unknown pricing model `{model_id}`"
-            )));
-        }
-        if !input.multiplier.is_finite()
-            || input.multiplier <= 0.0
-            || input.multiplier > MAX_PRICING_MULTIPLIER
-        {
-            return Err(ApiError::bad_request(format!(
-                "multiplier for `{model_id}` must be greater than 0 and at most {MAX_PRICING_MULTIPLIER}"
-            )));
-        }
-        if requested
-            .insert(model_id.to_string(), input.multiplier)
-            .is_some()
-        {
-            return Err(ApiError::bad_request(format!(
-                "duplicate multiplier for `{model_id}`"
-            )));
+    let writes = update
+        .multipliers
+        .into_iter()
+        .map(|input| (input.model_id, input.multiplier))
+        .collect::<Vec<_>>();
+    match prepare_multiplier_update(&active, &writes) {
+        Err(message) => Err(ApiError::bad_request(message)),
+        Ok(None) => Ok(Json(active.as_ref().clone())),
+        Ok(Some(snapshot)) => {
+            let snapshot = stamp_pricing_activation(snapshot);
+            state
+                .activate_pricing_snapshot(snapshot.clone())
+                .map_err(ApiError::internal)?;
+            let _ = state.db.lock().log_gateway(
+                "info",
+                "pricing",
+                &format!("updated pricing multipliers in {}", snapshot.revision),
+            );
+            Ok(Json(snapshot))
         }
     }
-
-    let mut snapshot = active.as_ref().clone();
-    let mut changed = false;
-    for model in &mut snapshot.models {
-        if let Some(multiplier) = requested.get(&model.model_id)
-            && model.quota_multiplier != *multiplier
-        {
-            model.quota_multiplier = *multiplier;
-            changed = true;
-        }
-    }
-    if !changed {
-        return Ok(Json(active.as_ref().clone()));
-    }
-
-    let snapshot = stamp_pricing_activation(snapshot);
-    state
-        .activate_pricing_snapshot(snapshot.clone())
-        .map_err(ApiError::internal)?;
-    let _ = state.db.lock().log_gateway(
-        "info",
-        "pricing",
-        &format!("updated pricing multipliers in {}", snapshot.revision),
-    );
-    Ok(Json(snapshot))
 }
 
 fn encrypted_optional(
@@ -5430,8 +5353,8 @@ mod tests {
         AccountOrderInput, AccountSetupUpdate, AccountTestRequest, AccountUsageUpdate,
         BrowserTarget, DashboardAccountUpdate, DashboardCustomConfigUpdate,
         DashboardModelCapabilitiesUpdate, ForwardLogQuery, MAX_ACCOUNT_NOTES_CHARS,
-        MAX_MANAGED_KEY_VERIFICATION_RESPONSE_BYTES, MAX_PRICING_MULTIPLIER, ManagedAccountInput,
-        OpenBrowserInput, PricingMultiplierInput, PricingMultiplierUpdate, PricingRefreshPolicy,
+        MAX_MANAGED_KEY_VERIFICATION_RESPONSE_BYTES, ManagedAccountInput, OpenBrowserInput,
+        PricingMultiplierInput, PricingMultiplierUpdate, PricingRefreshPolicy,
         ProtocolProbeRequest, ProxyTestRequest, SemverVersion, SettingsUpdateRequest,
         VerifyManagedKeyInput, account_test_case, account_test_payload, advance_account_setup,
         application_models, apply_official_go_usage_snapshot, apply_pricing_refresh, asset_path,
@@ -5439,8 +5362,7 @@ mod tests {
         dashboard_account, dashboard_summary, format_error_chain, forward_logs, get_settings,
         is_update_available, load_ready_account_for_official_go_usage, local_application_models,
         map_official_usage_refresh_error, open_account_browser, parse_semver_version,
-        pricing_multiplier_changes, pricing_semantically_equal, provider_account_usage,
-        put_account_custom_config, put_account_model_capabilities,
+        provider_account_usage, put_account_custom_config, put_account_model_capabilities,
         read_managed_key_verification_response, redact_diagnostic, redact_known_secrets,
         reorder_accounts, require_unique_probe_protocols, run_account_protocol_probes, test_proxy,
         toggle_account, update_account, update_account_usage, update_pricing_multipliers,
@@ -5459,7 +5381,10 @@ mod tests {
         ClaudeDesktopModels, ForwardLog, ProxyListDirection, ProxyMode, UsageWindow,
         normalize_purchase_date, purchase_expires_on,
     };
-    use crate::pricing::stamp_pricing_activation;
+    use crate::pricing::{
+        MAX_PRICING_MULTIPLIER, pricing_multiplier_deltas, pricing_semantically_equal,
+        stamp_pricing_activation,
+    };
     use crate::state::CoreStateInner;
     use axum::Json;
     use axum::extract::{Path as AxumPath, Query, State};
@@ -5949,7 +5874,7 @@ mod tests {
             }
         }
 
-        let changes = pricing_multiplier_changes(&before, &official);
+        let changes = pricing_multiplier_deltas(&before, &official);
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].model_id, "qwen3.7-plus");
         let response = apply_pricing_refresh(&state, Ok(official), None, None).unwrap();
