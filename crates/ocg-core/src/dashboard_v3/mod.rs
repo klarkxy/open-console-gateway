@@ -4,9 +4,9 @@
 //! router. This module owns the shared DTO / error / CAS envelope, process
 //! generation, connection/settings reads, the settings write path, the
 //! access-key lifecycle, the local accounts control plane, the local/Zen
-//! provider catalog, contracts, Zen Free control plane, pricing, and
-//! read-only observability plus Go/Zen protocol probes. Custom protocol probes
-//! stay account-owned on V2.
+//! provider catalog, contracts, Zen Free control plane, pricing, the
+//! settings proxy diagnostic, and read-only observability plus Go/Zen
+//! protocol probes. Custom protocol probes stay account-owned on V2.
 
 mod accounts;
 mod connection;
@@ -14,6 +14,7 @@ mod keys;
 mod observability;
 mod pricing;
 mod providers;
+mod proxy_test;
 mod settings;
 mod types;
 
@@ -31,6 +32,9 @@ use crate::state::CoreState;
 
 #[cfg(debug_assertions)]
 pub use providers::set_zen_models_source_url_override_for_tests;
+pub use proxy_test::PROXY_TEST_TARGET;
+#[cfg(debug_assertions)]
+pub use proxy_test::{ProxyTestTargetGuard, install_proxy_test_target_for_tests};
 pub use types::{
     Account, AccountAcknowledgement, AccountAcknowledgementCreate, AccountAcknowledgementWrite,
     AccountAuthScheme, AccountCreate, AccountCredentialKind, AccountCustomConfig,
@@ -42,21 +46,22 @@ pub use types::{
     ConnectionInfo, ConnectionSubKey, ContractScopeKind, ControlRevision, CustomEndpointContract,
     DailyCostByModel, DailyCostQuery, DailyModelCost, DashboardSummary, ERROR_CONFLICT,
     ERROR_INTERNAL, ERROR_INVALID_JSON, ERROR_INVALID_REQUEST, ERROR_MISSING_EXPECTED_REVISION,
-    ERROR_NOT_FOUND, ERROR_NOT_IMPLEMENTED, ERROR_PRECONDITION_FAILED, ERROR_REVISION_CONFLICT,
-    ERROR_SERVICE_UNAVAILABLE, ERROR_UNAUTHORIZED, EffectiveCatalog, EffectiveModelContract,
-    EffectiveModelProtocols, EffectiveProtocolEvidence, ForwardLog, ForwardLogClientKey,
-    ForwardLogKeys, ForwardLogModels, ForwardLogQuery, ForwardLogSummary, ForwardLogs, GatewayLog,
-    GatewayLogQuery, GatewayLogs, GatewayStatus, KeyCreate, KeyUpdate, MutationAck,
-    MutationExpectation, PricingAdjustment, PricingAvailability, PricingLimits, PricingModel,
-    PricingMultiplierChange, PricingMultiplierWrite, PricingMultipliersUpdate, PricingRefresh,
-    PricingRefreshPolicy, PricingRefreshStatus, PricingRefreshUpdate, PricingRevision,
-    PricingSnapshot, PricingTimeWindow, ProtocolProbeRequest, ProtocolProbeResponse,
-    ProtocolProbeResult, ProtocolSwitchUpdate, ProtocolSwitches, ProviderAccountChoice,
-    ProviderCatalog, ProviderCatalogEntry, ProviderCatalogFormField, ProviderCatalogRiskNotice,
-    ProviderContractGroup, ProviderContracts, ProviderModelCapability, ProviderOfferingChoice,
-    ProviderPricing, ProxyListDirection, ProxyMode, ProxySupportedModel, RoutingMode, Settings,
-    SettingsUpdate, V3Error, ZenFreeModel, ZenFreeModels, ZenFreeSettings, ZenFreeSettingsUpdate,
-    contract_schema, contract_schema_pretty,
+    ERROR_NOT_FOUND, ERROR_NOT_IMPLEMENTED, ERROR_OUTBOUND_FAILED, ERROR_PRECONDITION_FAILED,
+    ERROR_REVISION_CONFLICT, ERROR_SERVICE_UNAVAILABLE, ERROR_UNAUTHORIZED, EffectiveCatalog,
+    EffectiveModelContract, EffectiveModelProtocols, EffectiveProtocolEvidence, ForwardLog,
+    ForwardLogClientKey, ForwardLogKeys, ForwardLogModels, ForwardLogQuery, ForwardLogSummary,
+    ForwardLogs, GatewayLog, GatewayLogQuery, GatewayLogs, GatewayStatus, KeyCreate, KeyUpdate,
+    MutationAck, MutationExpectation, PricingAdjustment, PricingAvailability, PricingLimits,
+    PricingModel, PricingMultiplierChange, PricingMultiplierWrite, PricingMultipliersUpdate,
+    PricingRefresh, PricingRefreshPolicy, PricingRefreshStatus, PricingRefreshUpdate,
+    PricingRevision, PricingSnapshot, PricingTimeWindow, ProtocolProbeRequest,
+    ProtocolProbeResponse, ProtocolProbeResult, ProtocolSwitchUpdate, ProtocolSwitches,
+    ProviderAccountChoice, ProviderCatalog, ProviderCatalogEntry, ProviderCatalogFormField,
+    ProviderCatalogRiskNotice, ProviderContractGroup, ProviderContracts, ProviderModelCapability,
+    ProviderOfferingChoice, ProviderPricing, ProxyListDirection, ProxyMode, ProxySupportedModel,
+    ProxyTestRequest, ProxyTestResponse, RoutingMode, Settings, SettingsUpdate, V3Error,
+    ZenFreeModel, ZenFreeModels, ZenFreeSettings, ZenFreeSettingsUpdate, contract_schema,
+    contract_schema_pretty,
 };
 
 #[cfg(debug_assertions)]
@@ -76,6 +81,7 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
             "/settings",
             get(settings::get_settings).put(settings::put_settings),
         )
+        .route("/settings/test-proxy", post(proxy_test::test_proxy))
         .route("/pricing", get(pricing::get_pricing))
         .route("/pricing/refresh", post(pricing::refresh_pricing))
         .route(
@@ -263,13 +269,25 @@ impl V3ApiError {
     }
 
     fn outbound_failed(state: &CoreState, message: impl Into<String>) -> Self {
+        Self::outbound_failed_at(
+            state.settings_revision(),
+            state.process_generation(),
+            message,
+        )
+    }
+
+    fn outbound_failed_at(
+        current_revision: u64,
+        process_generation: u64,
+        message: impl Into<String>,
+    ) -> Self {
         Self {
             status: StatusCode::BAD_GATEWAY,
             body: V3Error {
-                code: "outboundFailed".to_string(),
+                code: ERROR_OUTBOUND_FAILED.to_string(),
                 message: message.into(),
-                current_revision: Some(state.settings_revision()),
-                process_generation: Some(state.process_generation()),
+                current_revision: Some(current_revision),
+                process_generation: Some(process_generation),
             },
         }
     }

@@ -3,10 +3,12 @@
 //! Response objects always serialize nullable fields as `T | null` (never omitted).
 //! Request optional fields may be omitted; `expectedRevision` is required on every
 //! control-plane mutation. Pricing mutations also require `expectedPricingRevision`.
-//! Plaintext keys must not appear on `Settings` or provider/Zen/contract DTOs —
-//! `ConnectionInfo` is the only secret-bearing V3 DTO. Protocol path/switch tokens
-//! stay `chat_completions`, `responses`, and `messages`. Pricing wire DTOs are
-//! distinct from `kernel::pricing` and from stored provider pricing blobs.
+//! Operational diagnostics such as `POST /settings/test-proxy` are not mutations
+//! and neither require nor accept CAS tokens. Plaintext keys must not appear on
+//! `Settings` or provider/Zen/contract DTOs — `ConnectionInfo` is the only
+//! secret-bearing V3 DTO. Protocol path/switch tokens stay `chat_completions`,
+//! `responses`, and `messages`. Pricing wire DTOs are distinct from
+//! `kernel::pricing` and from stored provider pricing blobs.
 
 use schemars::JsonSchema;
 use schemars::generate::{SchemaGenerator, SchemaSettings};
@@ -113,6 +115,8 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "GatewayLogQuery",
     "ForwardLogQuery",
     "DailyCostQuery",
+    "ProxyTestRequest",
+    "ProxyTestResponse",
 ];
 
 pub const ERROR_UNAUTHORIZED: &str = "unauthorized";
@@ -126,6 +130,7 @@ pub const ERROR_CONFLICT: &str = "conflict";
 pub const ERROR_PRECONDITION_FAILED: &str = "preconditionFailed";
 pub const ERROR_SERVICE_UNAVAILABLE: &str = "serviceUnavailable";
 pub const ERROR_NOT_IMPLEMENTED: &str = "notImplemented";
+pub const ERROR_OUTBOUND_FAILED: &str = "outboundFailed";
 
 /// Live CAS token, process generation, and pricing snapshot id.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -416,6 +421,37 @@ pub struct SettingsUpdate {
     pub routing_mode: Option<RoutingMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_sticky: Option<bool>,
+}
+
+/// POST `/settings/test-proxy` body. This is an operational diagnostic, not a
+/// control-plane mutation: CAS tokens are neither required nor accepted.
+/// Unknown fields, including an upstream URL, are rejected. `proxyUrl` and
+/// `proxyListDirection` may be omitted; omitted direction keeps the persisted
+/// list-mode direction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProxyTestRequest {
+    pub proxy_mode: ProxyMode,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub proxy_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_list_direction: Option<ProxyListDirection>,
+}
+
+/// POST `/settings/test-proxy` result. Any diagnostic HTTP status is success.
+/// The body never includes proxy credentials, the diagnostic URL, or the
+/// upstream payload. `revision` and `processGeneration` are captured before
+/// network I/O and are not bumped.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProxyTestResponse {
+    pub proxy_mode: ProxyMode,
+    pub status: u16,
+    pub latency_ms: u64,
+    pub revision: u64,
+    pub process_generation: u64,
 }
 
 /// POST `/keys` body. CAS tokens are required; `name` is required. Unknown
@@ -1815,6 +1851,7 @@ pub fn contract_schema() -> Value {
     include_type::<ForwardLogClientKey>(&mut serialize);
     include_type::<ForwardLogKeys>(&mut serialize);
     include_type::<ForwardLogModels>(&mut serialize);
+    include_type::<ProxyTestResponse>(&mut serialize);
     let mut defs = serialize.take_definitions(true);
 
     let mut deserialize = SchemaSettings::draft2020_12().into_generator();
@@ -1843,6 +1880,7 @@ pub fn contract_schema() -> Value {
     include_type::<GatewayLogQuery>(&mut deserialize);
     include_type::<ForwardLogQuery>(&mut deserialize);
     include_type::<DailyCostQuery>(&mut deserialize);
+    include_type::<ProxyTestRequest>(&mut deserialize);
     for (name, schema) in deserialize.take_definitions(true) {
         defs.entry(name).or_insert(schema);
     }
@@ -2068,6 +2106,73 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn proxy_test_dtos_are_camel_case_and_reject_ssrf_and_cas_fields() {
+        let parsed: ProxyTestRequest = serde_json::from_value(json!({
+            "proxyMode": "direct"
+        }))
+        .unwrap();
+        assert_eq!(parsed.proxy_mode, ProxyMode::Direct);
+        assert!(parsed.proxy_url.is_empty());
+        assert!(parsed.proxy_list_direction.is_none());
+
+        let with_url: ProxyTestRequest = serde_json::from_value(json!({
+            "proxyMode": "manual",
+            "proxyUrl": "http://127.0.0.1:7890",
+            "proxyListDirection": "blacklist"
+        }))
+        .unwrap();
+        assert_eq!(with_url.proxy_mode, ProxyMode::Manual);
+        assert_eq!(with_url.proxy_url, "http://127.0.0.1:7890");
+        assert_eq!(
+            with_url.proxy_list_direction,
+            Some(ProxyListDirection::Blacklist)
+        );
+
+        assert!(
+            serde_json::from_value::<ProxyTestRequest>(json!({ "proxy_mode": "direct" })).is_err()
+        );
+        assert!(
+            serde_json::from_value::<ProxyTestRequest>(json!({ "proxyMode": "Direct" })).is_err()
+        );
+        assert!(
+            serde_json::from_value::<ProxyTestRequest>(json!({
+                "proxyMode": "direct",
+                "upstreamBaseUrl": "http://127.0.0.1"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ProxyTestRequest>(json!({
+                "proxyMode": "direct",
+                "expectedRevision": 1
+            }))
+            .is_err()
+        );
+
+        let response = ProxyTestResponse {
+            proxy_mode: ProxyMode::Direct,
+            status: 401,
+            latency_ms: 12,
+            revision: 7,
+            process_generation: 9,
+        };
+        let value = serde_json::to_value(&response).unwrap();
+        assert_eq!(
+            value,
+            json!({
+                "proxyMode": "direct",
+                "status": 401,
+                "latencyMs": 12,
+                "revision": 7,
+                "processGeneration": 9
+            })
+        );
+        assert!(value.get("latency_ms").is_none());
+        assert!(value.get("upstreamBaseUrl").is_none());
+        assert!(value.get("proxyUrl").is_none());
     }
 
     #[test]
@@ -3150,10 +3255,13 @@ mod tests {
         "DailyCostQuery",
     ];
 
+    const PROXY_TEST_CATALOG_TYPES: &[&str] = &["ProxyTestRequest", "ProxyTestResponse"];
+
     #[test]
     fn catalog_type_names_append_pricing_dtos_after_the_provider_prefix() {
         let prefix_len = ACCOUNTS_CATALOG_PREFIX.len() + PROVIDER_CATALOG_TYPES.len();
         let pricing_end = prefix_len + PRICING_CATALOG_TYPES.len();
+        let observability_end = pricing_end + OBSERVABILITY_CATALOG_TYPES.len();
         assert_eq!(
             &CATALOG_TYPE_NAMES[..ACCOUNTS_CATALOG_PREFIX.len()],
             ACCOUNTS_CATALOG_PREFIX
@@ -3167,12 +3275,16 @@ mod tests {
             PRICING_CATALOG_TYPES
         );
         assert_eq!(
-            &CATALOG_TYPE_NAMES[pricing_end..],
+            &CATALOG_TYPE_NAMES[pricing_end..observability_end],
             OBSERVABILITY_CATALOG_TYPES
         );
         assert_eq!(
+            &CATALOG_TYPE_NAMES[observability_end..],
+            PROXY_TEST_CATALOG_TYPES
+        );
+        assert_eq!(
             CATALOG_TYPE_NAMES.len(),
-            pricing_end + OBSERVABILITY_CATALOG_TYPES.len()
+            observability_end + PROXY_TEST_CATALOG_TYPES.len()
         );
     }
 
@@ -3693,5 +3805,70 @@ mod tests {
         assert_eq!(defs["ForwardLogQuery"]["additionalProperties"], false);
         assert_eq!(defs["GatewayLogQuery"]["additionalProperties"], false);
         assert_eq!(defs["DailyCostQuery"]["additionalProperties"], false);
+    }
+
+    #[test]
+    fn proxy_test_catalog_registers_without_cas_or_secret_fields() {
+        let schema = contract_schema();
+        let defs = schema["$defs"].as_object().expect("catalog $defs");
+        for name in PROXY_TEST_CATALOG_TYPES {
+            assert!(defs.contains_key(*name), "schema missing {name}");
+        }
+
+        let request_required = defs["ProxyTestRequest"]["required"]
+            .as_array()
+            .expect("ProxyTestRequest.required");
+        assert_eq!(request_required, &vec![json!("proxyMode")]);
+        assert_eq!(defs["ProxyTestRequest"]["additionalProperties"], false);
+        let request_props = defs["ProxyTestRequest"]["properties"]
+            .as_object()
+            .expect("ProxyTestRequest.properties");
+        assert!(request_props.contains_key("proxyUrl"));
+        assert!(request_props.contains_key("proxyListDirection"));
+        for forbidden in [
+            "expectedRevision",
+            "processGeneration",
+            "upstreamBaseUrl",
+            "upstream_base_url",
+            "proxy_url",
+            "key",
+            "gatewayKey",
+            "primaryKey",
+        ] {
+            assert!(
+                !request_props.contains_key(forbidden),
+                "ProxyTestRequest must not expose {forbidden}"
+            );
+        }
+
+        let response_required = defs["ProxyTestResponse"]["required"]
+            .as_array()
+            .expect("ProxyTestResponse.required");
+        assert_eq!(
+            response_required,
+            &vec![
+                json!("proxyMode"),
+                json!("status"),
+                json!("latencyMs"),
+                json!("revision"),
+                json!("processGeneration"),
+            ]
+        );
+        let response_props = defs["ProxyTestResponse"]["properties"]
+            .as_object()
+            .expect("ProxyTestResponse.properties");
+        for forbidden in [
+            "proxyUrl",
+            "upstreamBaseUrl",
+            "body",
+            "key",
+            "gatewayKey",
+            "latency_ms",
+        ] {
+            assert!(
+                !response_props.contains_key(forbidden),
+                "ProxyTestResponse must not expose {forbidden}"
+            );
+        }
     }
 }
