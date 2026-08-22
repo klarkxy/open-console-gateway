@@ -203,10 +203,14 @@ fn catalog_type_names_keep_the_frozen_prefix_and_append_pricing() {
         &CATALOG_TYPE_NAMES[ACCOUNTS_CATALOG_PREFIX.len()..prefix_len],
         PROVIDER_CATALOG_TYPES
     );
-    assert_eq!(&CATALOG_TYPE_NAMES[prefix_len..], PRICING_CATALOG_TYPES);
+    let pricing_end = prefix_len + PRICING_CATALOG_TYPES.len();
     assert_eq!(
-        CATALOG_TYPE_NAMES.len(),
-        prefix_len + PRICING_CATALOG_TYPES.len()
+        &CATALOG_TYPE_NAMES[prefix_len..pricing_end],
+        PRICING_CATALOG_TYPES
+    );
+    assert!(
+        CATALOG_TYPE_NAMES.len() >= pricing_end,
+        "later leases may append after the pricing catalog block"
     );
 }
 

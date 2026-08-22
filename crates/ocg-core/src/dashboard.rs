@@ -1,8 +1,8 @@
 use crate::alias;
-use crate::auth;
 use crate::browser::{
     BrowserCapabilities, BrowserOpenResult, BrowserProfileOperationKind, StagedBrowserProfiles,
 };
+use crate::dashboard_session;
 use crate::db::{ForwardLogQueryOptions, ReorderAccountsError};
 use crate::gateway::{
     diagnostics::{
@@ -256,8 +256,6 @@ fn content_type(ext: Option<&str>) -> &'static str {
     }
 }
 
-const SESSION_COOKIE: &str = "ocg_dashboard_session";
-
 #[derive(Serialize)]
 struct AuthStatus {
     local: bool,
@@ -275,15 +273,17 @@ async fn auth_status(
     State(state): State<CoreState>,
     headers: HeaderMap,
 ) -> Result<Json<AuthStatus>, ApiError> {
-    let local = is_local_dashboard_request(&state, &headers);
-    let initialized = {
-        let db = state.db.lock();
-        auth::load_admin(&db).map_err(ApiError::internal)?.is_some()
-    };
+    let snapshot = dashboard_session::status(
+        state.dashboard_local_mode(),
+        &state.db,
+        &state.dashboard_session_token,
+        &headers,
+    )
+    .map_err(ApiError::internal)?;
     Ok(Json(AuthStatus {
-        local,
-        initialized,
-        authenticated: local || has_dashboard_session(&state, &headers),
+        local: snapshot.local,
+        initialized: snapshot.initialized,
+        authenticated: snapshot.authenticated,
     }))
 }
 
@@ -292,18 +292,15 @@ async fn register_admin(
     headers: HeaderMap,
     Json(input): Json<AdminCredentials>,
 ) -> Result<Response, ApiError> {
-    let admin = auth::build_admin(&input.username, &input.password)
-        .map_err(|e| ApiError::bad_request(e.to_string()))?;
-    {
-        let db = state.db.lock();
-        if auth::load_admin(&db).map_err(ApiError::internal)?.is_some() {
-            return Err(ApiError::status(
-                StatusCode::CONFLICT,
-                "管理员已经创建，请直接登录",
-            ));
-        }
-        auth::save_admin(&db, &admin).map_err(ApiError::internal)?;
-    }
+    dashboard_session::register_admin(&state.db, &input.username, &input.password).map_err(
+        |error| match error {
+            dashboard_session::RegisterError::Invalid(message) => ApiError::bad_request(message),
+            dashboard_session::RegisterError::AlreadyExists => {
+                ApiError::status(StatusCode::CONFLICT, "管理员已经创建，请直接登录")
+            }
+            dashboard_session::RegisterError::Internal(message) => ApiError::internal(message),
+        },
+    )?;
     session_response(&state, &headers, StatusCode::CREATED).await
 }
 
@@ -312,14 +309,8 @@ async fn login_admin(
     headers: HeaderMap,
     Json(input): Json<AdminCredentials>,
 ) -> Result<Response, ApiError> {
-    let admin = {
-        let db = state.db.lock();
-        auth::load_admin(&db).map_err(ApiError::internal)?
-    };
-    let valid = admin
-        .as_ref()
-        .map(|admin| auth::verify_admin(admin, &input.username, &input.password))
-        .unwrap_or(false);
+    let valid = dashboard_session::credentials_match(&state.db, &input.username, &input.password)
+        .map_err(ApiError::internal)?;
     if !valid {
         return Err(ApiError::status(
             StatusCode::UNAUTHORIZED,
@@ -333,25 +324,19 @@ async fn logout_admin(
     State(state): State<CoreState>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    if !is_local_dashboard_request(&state, &headers) && !has_dashboard_session(&state, &headers) {
-        return Err(ApiError::status(
-            StatusCode::UNAUTHORIZED,
-            "dashboard session is required",
-        ));
-    }
-    let _browser_operation = state.browser.operation().await;
-    if !is_local_dashboard_request(&state, &headers) && !has_dashboard_session(&state, &headers) {
-        return Err(ApiError::status(
-            StatusCode::UNAUTHORIZED,
-            "dashboard session is required",
-        ));
-    }
-    state.browser.invalidate_remote_sessions();
-    *state.dashboard_session_token.lock() = uuid::Uuid::new_v4().simple().to_string();
+    dashboard_session::logout(
+        state.dashboard_local_mode(),
+        &state.dashboard_session_token,
+        &state.browser,
+        &headers,
+    )
+    .await
+    .map_err(|_| ApiError::status(StatusCode::UNAUTHORIZED, "dashboard session is required"))?;
     let mut response = StatusCode::NO_CONTENT.into_response();
-    response
-        .headers_mut()
-        .insert(header::SET_COOKIE, cookie_header("", &headers, true)?);
+    response.headers_mut().insert(
+        header::SET_COOKIE,
+        dashboard_session::cookie_header("", &headers, true).map_err(ApiError::internal)?,
+    );
     Ok(response)
 }
 
@@ -360,44 +345,19 @@ async fn require_dashboard_session(
     req: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    if is_local_dashboard_request(&state, req.headers())
-        || has_dashboard_session(&state, req.headers())
-    {
+    let authorized = {
+        let current = state.dashboard_session_token.lock();
+        dashboard_session::is_authorized(
+            state.dashboard_local_mode(),
+            current.as_str(),
+            req.headers(),
+        )
+    };
+    if authorized {
         Ok(next.run(req).await)
     } else {
         Err(StatusCode::UNAUTHORIZED)
     }
-}
-
-fn is_local_dashboard_request(state: &CoreState, headers: &HeaderMap) -> bool {
-    state.dashboard_local_mode()
-        && [
-            "forwarded",
-            "x-forwarded-for",
-            "x-forwarded-proto",
-            "x-real-ip",
-        ]
-        .iter()
-        .all(|name| !headers.contains_key(*name))
-}
-
-fn has_dashboard_session(state: &CoreState, headers: &HeaderMap) -> bool {
-    let current = state.dashboard_session_token.lock();
-    dashboard_session_value(headers)
-        .map(|value| value == current.as_str())
-        .unwrap_or(false)
-}
-
-fn dashboard_session_value(headers: &HeaderMap) -> Option<&str> {
-    headers
-        .get(header::COOKIE)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|cookies| {
-            cookies.split(';').find_map(|cookie| {
-                let (name, value) = cookie.trim().split_once('=')?;
-                (name == SESSION_COOKIE).then_some(value)
-            })
-        })
 }
 
 async fn session_response(
@@ -405,36 +365,15 @@ async fn session_response(
     headers: &HeaderMap,
     status: StatusCode,
 ) -> Result<Response, ApiError> {
-    let _browser_operation = state.browser.operation().await;
-    state.browser.invalidate_remote_sessions();
-    let session_token = uuid::Uuid::new_v4().simple().to_string();
-    *state.dashboard_session_token.lock() = session_token.clone();
+    let session_token =
+        dashboard_session::issue_session(&state.browser, &state.dashboard_session_token).await;
     let mut response = (status, Json(serde_json::json!({ "ok": true }))).into_response();
     response.headers_mut().insert(
         header::SET_COOKIE,
-        cookie_header(&session_token, headers, false)?,
+        dashboard_session::cookie_header(&session_token, headers, false)
+            .map_err(ApiError::internal)?,
     );
     Ok(response)
-}
-
-fn cookie_header(
-    value: &str,
-    request_headers: &HeaderMap,
-    clear: bool,
-) -> Result<HeaderValue, ApiError> {
-    let mut cookie =
-        format!("{SESSION_COOKIE}={value}; HttpOnly; SameSite=Strict; Path=/dashboard");
-    if clear {
-        cookie.push_str("; Max-Age=0");
-    }
-    if request_headers
-        .get("x-forwarded-proto")
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.eq_ignore_ascii_case("https"))
-    {
-        cookie.push_str("; Secure");
-    }
-    HeaderValue::from_str(&cookie).map_err(ApiError::internal)
 }
 
 #[derive(Debug)]
@@ -2418,11 +2357,12 @@ async fn proxy_browser_websocket(
 }
 
 fn dashboard_session_binding(state: &CoreState, headers: &HeaderMap) -> Result<String, ApiError> {
-    if is_local_dashboard_request(state, headers) {
+    if dashboard_session::is_local_dashboard_request(state.dashboard_local_mode(), headers) {
         return Ok("local-dashboard".to_string());
     }
-    if has_dashboard_session(state, headers) {
-        return dashboard_session_value(headers)
+    let current = state.dashboard_session_token.lock();
+    if dashboard_session::has_dashboard_session(current.as_str(), headers) {
+        return dashboard_session::session_cookie_value(headers)
             .map(str::to_string)
             .ok_or_else(|| {
                 ApiError::status(StatusCode::UNAUTHORIZED, "dashboard session is required")

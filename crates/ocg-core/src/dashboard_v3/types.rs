@@ -2,7 +2,8 @@
 //!
 //! Response objects always serialize nullable fields as `T | null` (never omitted).
 //! Request optional fields may be omitted; `expectedRevision` is required on every
-//! control-plane mutation. Pricing mutations also require `expectedPricingRevision`.
+//! control-plane mutation, including `/auth/register`, `/auth/login`, and
+//! `/auth/logout`. Pricing mutations also require `expectedPricingRevision`.
 //! Plaintext keys must not appear on `Settings` or provider/Zen/contract DTOs —
 //! `ConnectionInfo` is the only secret-bearing V3 DTO. Protocol path/switch tokens
 //! stay `chat_completions`, `responses`, and `messages`. Pricing wire DTOs are
@@ -97,6 +98,10 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "PricingMultiplierWrite",
     "ProviderPricing",
     "PricingAvailability",
+    "AuthStatus",
+    "AuthRegister",
+    "AuthLogin",
+    "AuthLogout",
 ];
 
 pub const ERROR_UNAUTHORIZED: &str = "unauthorized";
@@ -151,6 +156,53 @@ pub struct MutationExpectation {
 pub struct MutationAck {
     pub revision: u64,
     pub process_generation: u64,
+}
+
+/// Public dashboard authentication snapshot. Never carries a password,
+/// session token, Key, cipher, or secret.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AuthStatus {
+    pub local: bool,
+    pub initialized: bool,
+    pub authenticated: bool,
+    pub revision: u64,
+    pub process_generation: u64,
+}
+
+/// POST `/auth/register` body. CAS tokens, `username`, and `password` are
+/// required. `password` is write-only and never echoed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AuthRegister {
+    #[serde(flatten)]
+    pub expectation: MutationExpectation,
+    pub username: String,
+    pub password: String,
+}
+
+/// POST `/auth/login` body. Same required fields as [`AuthRegister`]; kept
+/// as a distinct catalog type so the two endpoints stay separately versionable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AuthLogin {
+    #[serde(flatten)]
+    pub expectation: MutationExpectation,
+    pub username: String,
+    pub password: String,
+}
+
+/// POST `/auth/logout` body. CAS tokens are required; unknown fields,
+/// including credentials, are rejected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AuthLogout {
+    #[serde(flatten)]
+    pub expectation: MutationExpectation,
 }
 
 /// Pricing snapshot identity. Distinct from the u64 settings CAS token.
@@ -1532,6 +1584,7 @@ pub fn contract_schema() -> Value {
     include_type::<PricingMultiplierChange>(&mut serialize);
     include_type::<ProviderPricing>(&mut serialize);
     include_type::<PricingAvailability>(&mut serialize);
+    include_type::<AuthStatus>(&mut serialize);
     let mut defs = serialize.take_definitions(true);
 
     let mut deserialize = SchemaSettings::draft2020_12().into_generator();
@@ -1557,6 +1610,9 @@ pub fn contract_schema() -> Value {
     include_type::<PricingRefreshPolicy>(&mut deserialize);
     include_type::<PricingMultipliersUpdate>(&mut deserialize);
     include_type::<PricingMultiplierWrite>(&mut deserialize);
+    include_type::<AuthRegister>(&mut deserialize);
+    include_type::<AuthLogin>(&mut deserialize);
+    include_type::<AuthLogout>(&mut deserialize);
     for (name, schema) in deserialize.take_definitions(true) {
         defs.entry(name).or_insert(schema);
     }
@@ -2809,6 +2865,8 @@ mod tests {
         "PricingAvailability",
     ];
 
+    const AUTH_CATALOG_TYPES: &[&str] = &["AuthStatus", "AuthRegister", "AuthLogin", "AuthLogout"];
+
     fn sample_pricing_snapshot() -> PricingSnapshot {
         PricingSnapshot {
             revision: 11,
@@ -2856,10 +2914,15 @@ mod tests {
             &CATALOG_TYPE_NAMES[ACCOUNTS_CATALOG_PREFIX.len()..prefix_len],
             PROVIDER_CATALOG_TYPES
         );
-        assert_eq!(&CATALOG_TYPE_NAMES[prefix_len..], PRICING_CATALOG_TYPES);
+        let pricing_end = prefix_len + PRICING_CATALOG_TYPES.len();
+        assert_eq!(
+            &CATALOG_TYPE_NAMES[prefix_len..pricing_end],
+            PRICING_CATALOG_TYPES
+        );
+        assert_eq!(&CATALOG_TYPE_NAMES[pricing_end..], AUTH_CATALOG_TYPES);
         assert_eq!(
             CATALOG_TYPE_NAMES.len(),
-            prefix_len + PRICING_CATALOG_TYPES.len()
+            pricing_end + AUTH_CATALOG_TYPES.len()
         );
     }
 
@@ -3104,5 +3167,116 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn auth_status_is_camel_case_and_secret_free() {
+        let status = AuthStatus {
+            local: false,
+            initialized: true,
+            authenticated: true,
+            revision: 11,
+            process_generation: 9,
+        };
+        let value = serde_json::to_value(&status).unwrap();
+        assert_eq!(
+            value,
+            json!({
+                "local": false,
+                "initialized": true,
+                "authenticated": true,
+                "revision": 11,
+                "processGeneration": 9,
+            })
+        );
+        let object = value.as_object().unwrap();
+        for forbidden in [
+            "password",
+            "key",
+            "token",
+            "cipher",
+            "secret",
+            "cookie",
+            "sessionToken",
+            "gatewayKey",
+        ] {
+            assert!(
+                !object.contains_key(forbidden),
+                "AuthStatus must not expose {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn auth_request_dtos_require_cas_and_reject_unknown_fields() {
+        let register: AuthRegister = serde_json::from_value(json!({
+            "expectedRevision": 3,
+            "processGeneration": 9,
+            "username": "admin",
+            "password": "password123"
+        }))
+        .unwrap();
+        assert_eq!(register.expectation.expected_revision, 3);
+        assert_eq!(register.expectation.process_generation, 9);
+        assert_eq!(register.username, "admin");
+        assert_eq!(register.password, "password123");
+
+        let login: AuthLogin = serde_json::from_value(json!({
+            "expectedRevision": 3,
+            "processGeneration": 9,
+            "username": "admin",
+            "password": "password123"
+        }))
+        .unwrap();
+        assert_eq!(login.username, "admin");
+
+        let logout: AuthLogout = serde_json::from_value(json!({
+            "expectedRevision": 3,
+            "processGeneration": 9
+        }))
+        .unwrap();
+        assert_eq!(logout.expectation.expected_revision, 3);
+
+        assert!(
+            serde_json::from_value::<AuthRegister>(json!({
+                "username": "admin",
+                "password": "password123"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<AuthLogin>(json!({
+                "expected_revision": 3,
+                "processGeneration": 9,
+                "username": "admin",
+                "password": "password123"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<AuthLogout>(json!({
+                "expectedRevision": 3,
+                "processGeneration": 9,
+                "username": "admin"
+            }))
+            .is_err()
+        );
+        for unknown in ["token", "secret", "key", "cipher", "sessionToken"] {
+            let mut body = json!({
+                "expectedRevision": 3,
+                "processGeneration": 9,
+                "username": "admin",
+                "password": "password123"
+            });
+            body[unknown] = json!("must-not-be-accepted");
+            assert!(
+                serde_json::from_value::<AuthRegister>(body.clone()).is_err(),
+                "{unknown}"
+            );
+            assert!(
+                serde_json::from_value::<AuthLogin>(body).is_err(),
+                "{unknown}"
+            );
+        }
     }
 }

@@ -2,12 +2,14 @@
 //!
 //! Mounted at `/dashboard/api/v3` beside the unchanged V2 `/dashboard/api`
 //! router. This module owns the shared DTO / error / CAS envelope, process
-//! generation, connection/settings reads, the settings write path, the
-//! access-key lifecycle, the local accounts control plane, and the local/Zen
-//! provider catalog, contracts, Zen Free control plane, pricing, and Go/Zen
-//! protocol probes. Custom protocol probes stay account-owned on V2.
+//! generation, public auth/session issuance, connection/settings reads, the
+//! settings write path, the access-key lifecycle, the local accounts control
+//! plane, and the local/Zen provider catalog, contracts, Zen Free control
+//! plane, pricing, and Go/Zen protocol probes. Custom protocol probes stay
+//! account-owned on V2.
 
 mod accounts;
+mod auth;
 mod connection;
 mod keys;
 mod pricing;
@@ -16,7 +18,7 @@ mod settings;
 mod types;
 
 use axum::extract::{Request, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::StatusCode;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post, put};
@@ -24,6 +26,7 @@ use axum::{Json, Router};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
+use crate::dashboard_session;
 use crate::state::CoreState;
 
 #[cfg(debug_assertions)]
@@ -34,19 +37,20 @@ pub use types::{
     AccountCustomConfigUpdate, AccountCustomConfigWrite, AccountList, AccountManagedCreate,
     AccountModelCapabilitiesUpdate, AccountModelCapability, AccountModelCapabilityWrite,
     AccountMutation, AccountOrder, AccountQuotaScope, AccountSetupStep, AccountSetupUpdate,
-    AccountType, AccountUpdate, AccountUpstreamProtocol, AccountVerificationStatus,
-    CATALOG_TYPE_NAMES, CapabilitySummary, CardCapabilitySummary, ConnectionInfo, ConnectionSubKey,
-    ContractScopeKind, ControlRevision, CustomEndpointContract, ERROR_CONFLICT, ERROR_INTERNAL,
-    ERROR_INVALID_JSON, ERROR_INVALID_REQUEST, ERROR_MISSING_EXPECTED_REVISION, ERROR_NOT_FOUND,
-    ERROR_NOT_IMPLEMENTED, ERROR_PRECONDITION_FAILED, ERROR_REVISION_CONFLICT,
-    ERROR_SERVICE_UNAVAILABLE, ERROR_UNAUTHORIZED, EffectiveCatalog, EffectiveModelContract,
-    EffectiveModelProtocols, EffectiveProtocolEvidence, KeyCreate, KeyUpdate, MutationAck,
-    MutationExpectation, PricingAdjustment, PricingAvailability, PricingLimits, PricingModel,
-    PricingMultiplierChange, PricingMultiplierWrite, PricingMultipliersUpdate, PricingRefresh,
-    PricingRefreshPolicy, PricingRefreshStatus, PricingRefreshUpdate, PricingRevision,
-    PricingSnapshot, PricingTimeWindow, ProtocolProbeRequest, ProtocolProbeResponse,
-    ProtocolProbeResult, ProtocolSwitchUpdate, ProtocolSwitches, ProviderAccountChoice,
-    ProviderCatalog, ProviderCatalogEntry, ProviderCatalogFormField, ProviderCatalogRiskNotice,
+    AccountType, AccountUpdate, AccountUpstreamProtocol, AccountVerificationStatus, AuthLogin,
+    AuthLogout, AuthRegister, AuthStatus, CATALOG_TYPE_NAMES, CapabilitySummary,
+    CardCapabilitySummary, ConnectionInfo, ConnectionSubKey, ContractScopeKind, ControlRevision,
+    CustomEndpointContract, ERROR_CONFLICT, ERROR_INTERNAL, ERROR_INVALID_JSON,
+    ERROR_INVALID_REQUEST, ERROR_MISSING_EXPECTED_REVISION, ERROR_NOT_FOUND, ERROR_NOT_IMPLEMENTED,
+    ERROR_PRECONDITION_FAILED, ERROR_REVISION_CONFLICT, ERROR_SERVICE_UNAVAILABLE,
+    ERROR_UNAUTHORIZED, EffectiveCatalog, EffectiveModelContract, EffectiveModelProtocols,
+    EffectiveProtocolEvidence, KeyCreate, KeyUpdate, MutationAck, MutationExpectation,
+    PricingAdjustment, PricingAvailability, PricingLimits, PricingModel, PricingMultiplierChange,
+    PricingMultiplierWrite, PricingMultipliersUpdate, PricingRefresh, PricingRefreshPolicy,
+    PricingRefreshStatus, PricingRefreshUpdate, PricingRevision, PricingSnapshot,
+    PricingTimeWindow, ProtocolProbeRequest, ProtocolProbeResponse, ProtocolProbeResult,
+    ProtocolSwitchUpdate, ProtocolSwitches, ProviderAccountChoice, ProviderCatalog,
+    ProviderCatalogEntry, ProviderCatalogFormField, ProviderCatalogRiskNotice,
     ProviderContractGroup, ProviderContracts, ProviderModelCapability, ProviderOfferingChoice,
     ProviderPricing, ProxyListDirection, ProxyMode, ProxySupportedModel, RoutingMode, Settings,
     SettingsUpdate, V3Error, ZenFreeModel, ZenFreeModels, ZenFreeSettings, ZenFreeSettingsUpdate,
@@ -59,11 +63,8 @@ pub use pricing::{
     install_official_pricing_fetch_for_tests,
 };
 
-/// Must match `dashboard.rs` `SESSION_COOKIE`. V2 owns login; V3 only checks it.
-const SESSION_COOKIE: &str = "ocg_dashboard_session";
-
 pub fn api_router(state: CoreState) -> Router<CoreState> {
-    Router::new()
+    let protected = Router::new()
         .route("/contract", get(get_contract))
         .route("/connection", get(connection::get_connection))
         .route(
@@ -152,7 +153,17 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
             "/providers/{provider_id}/protocol-probes",
             post(providers::run_provider_protocol_probes),
         )
-        .route_layer(middleware::from_fn_with_state(state, require_v3_session))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_v3_session,
+        ));
+
+    Router::new()
+        .route("/auth/status", get(auth::auth_status))
+        .route("/auth/register", post(auth::register_admin))
+        .route("/auth/login", post(auth::login_admin))
+        .route("/auth/logout", post(auth::logout_admin))
+        .merge(protected)
 }
 
 struct V3ApiError {
@@ -165,6 +176,18 @@ impl V3ApiError {
         Self {
             status: StatusCode::UNAUTHORIZED,
             body: V3Error::unauthorized(),
+        }
+    }
+
+    fn unauthorized_credentials() -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            body: V3Error {
+                code: ERROR_UNAUTHORIZED.to_string(),
+                message: "username or password is incorrect".to_string(),
+                current_revision: None,
+                process_generation: None,
+            },
         }
     }
 
@@ -286,44 +309,19 @@ impl IntoResponse for V3ApiError {
 }
 
 async fn require_v3_session(State(state): State<CoreState>, req: Request, next: Next) -> Response {
-    if is_local_dashboard_request(&state, req.headers())
-        || has_dashboard_session(&state, req.headers())
-    {
+    let authorized = {
+        let current = state.dashboard_session_token.lock();
+        dashboard_session::is_authorized(
+            state.dashboard_local_mode(),
+            current.as_str(),
+            req.headers(),
+        )
+    };
+    if authorized {
         next.run(req).await
     } else {
         V3ApiError::unauthorized().into_response()
     }
-}
-
-fn is_local_dashboard_request(state: &CoreState, headers: &HeaderMap) -> bool {
-    state.dashboard_local_mode()
-        && [
-            "forwarded",
-            "x-forwarded-for",
-            "x-forwarded-proto",
-            "x-real-ip",
-        ]
-        .iter()
-        .all(|name| !headers.contains_key(*name))
-}
-
-fn has_dashboard_session(state: &CoreState, headers: &HeaderMap) -> bool {
-    let current = state.dashboard_session_token.lock();
-    dashboard_session_value(headers)
-        .map(|value| value == current.as_str())
-        .unwrap_or(false)
-}
-
-fn dashboard_session_value(headers: &HeaderMap) -> Option<&str> {
-    headers
-        .get(header::COOKIE)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|cookies| {
-            cookies.split(';').find_map(|cookie| {
-                let (name, value) = cookie.trim().split_once('=')?;
-                (name == SESSION_COOKIE).then_some(value)
-            })
-        })
 }
 
 async fn get_contract(State(state): State<CoreState>) -> Json<ControlRevision> {
