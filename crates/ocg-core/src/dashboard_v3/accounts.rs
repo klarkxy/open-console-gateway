@@ -1,9 +1,10 @@
 //! Local account control plane: secret-free reads and lifecycle mutations.
 //!
-//! Upstream verify/test/usage/browser/protocol-probe/model-discovery stay on
-//! V2. This slice preserves those V2 local semantics (enablement, Custom
-//! invalidation, managed setup, delete profile staging) behind the V3 CAS
-//! envelope.
+//! Upstream verify/test/usage/browser/model-discovery stay on V2. Go/Zen
+//! protocol probes live on the Providers V3 route; Custom probes stay
+//! account-owned on V2. This slice preserves those V2 local semantics
+//! (enablement, Custom invalidation, managed setup, delete profile staging)
+//! behind the V3 CAS envelope.
 
 use axum::Json;
 use axum::body::Bytes;

@@ -401,6 +401,35 @@ fn upsert_contract_catalog_on(
     Ok(())
 }
 
+fn upsert_model_protocol_row_on(conn: &Connection, row: &PersistedModelProtocol) -> Result<()> {
+    conn.execute(
+        "INSERT INTO provider_contract_model_protocols (
+            scope_kind, scope_id, model_id, protocol, source, verified_at,
+            observed_at, last_probe_result, last_probe_at, last_probe_error
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+         ON CONFLICT(scope_kind, scope_id, model_id, protocol) DO UPDATE SET
+            source = excluded.source,
+            verified_at = excluded.verified_at,
+            observed_at = excluded.observed_at,
+            last_probe_result = excluded.last_probe_result,
+            last_probe_at = excluded.last_probe_at,
+            last_probe_error = excluded.last_probe_error",
+        params![
+            row.scope.kind_str(),
+            row.scope.id(),
+            row.model_id,
+            row.protocol.as_str(),
+            row.source.as_str(),
+            row.verified_at.map(|value| value.to_rfc3339()),
+            row.observed_at.map(|value| value.to_rfc3339()),
+            row.last_probe_result.map(|value| value.as_str()),
+            row.last_probe_at.map(|value| value.to_rfc3339()),
+            row.last_probe_error,
+        ],
+    )?;
+    Ok(())
+}
+
 fn bump_scope_revision_on(
     conn: &Connection,
     scope: &ContractScope,
@@ -2399,35 +2428,41 @@ impl Database {
     }
 
     pub fn upsert_model_protocol(&self, row: &PersistedModelProtocol) -> Result<PersistedScopeRow> {
+        self.upsert_model_protocols(std::slice::from_ref(row))
+    }
+
+    /// Persist a nonempty set of protocol observations and advance the nested
+    /// contract-scope revision exactly once, in a single SQLite transaction.
+    ///
+    /// All rows must share one [`ContractScope`]. Mixed scopes are rejected
+    /// before any write so a caller cannot commit a partial batch.
+    pub fn upsert_model_protocols(
+        &self,
+        rows: &[PersistedModelProtocol],
+    ) -> Result<PersistedScopeRow> {
+        let Some((first, rest)) = rows.split_first() else {
+            anyhow::bail!("protocol observation batch must be nonempty");
+        };
+        if let Some(other) = rest.iter().find(|row| row.scope != first.scope) {
+            anyhow::bail!(
+                "protocol observations mix contract scopes `{}:{}` and `{}:{}`",
+                first.scope.kind_str(),
+                first.scope.id(),
+                other.scope.kind_str(),
+                other.scope.id()
+            );
+        }
         let tx = self.conn.unchecked_transaction()?;
-        let now = row.observed_at.unwrap_or_else(Utc::now);
-        tx.execute(
-            "INSERT INTO provider_contract_model_protocols (
-                scope_kind, scope_id, model_id, protocol, source, verified_at,
-                observed_at, last_probe_result, last_probe_at, last_probe_error
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-             ON CONFLICT(scope_kind, scope_id, model_id, protocol) DO UPDATE SET
-                source = excluded.source,
-                verified_at = excluded.verified_at,
-                observed_at = excluded.observed_at,
-                last_probe_result = excluded.last_probe_result,
-                last_probe_at = excluded.last_probe_at,
-                last_probe_error = excluded.last_probe_error",
-            params![
-                row.scope.kind_str(),
-                row.scope.id(),
-                row.model_id,
-                row.protocol.as_str(),
-                row.source.as_str(),
-                row.verified_at.map(|value| value.to_rfc3339()),
-                row.observed_at.map(|value| value.to_rfc3339()),
-                row.last_probe_result.map(|value| value.as_str()),
-                row.last_probe_at.map(|value| value.to_rfc3339()),
-                row.last_probe_error,
-            ],
-        )?;
-        bump_scope_revision_on(&tx, &row.scope, now)?;
-        let scope = load_scope_on(&tx, &row.scope)?
+        for row in rows {
+            upsert_model_protocol_row_on(&tx, row)?;
+        }
+        let now = rows
+            .iter()
+            .rev()
+            .find_map(|row| row.observed_at)
+            .unwrap_or_else(Utc::now);
+        bump_scope_revision_on(&tx, &first.scope, now)?;
+        let scope = load_scope_on(&tx, &first.scope)?
             .ok_or_else(|| anyhow::anyhow!("contract scope was not persisted"))?;
         tx.commit()?;
         Ok(scope)
@@ -9978,6 +10013,125 @@ mod tests {
         assert_eq!(after_failed.revision, before_failed);
         assert!(
             db.load_model_protocol(&scope, "glm-5.3", UpstreamProtocolKind::Responses)
+                .unwrap()
+                .is_none()
+        );
+
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn probe_observation(
+        scope: ContractScope,
+        model_id: &str,
+        protocol: UpstreamProtocolKind,
+        now: DateTime<Utc>,
+    ) -> PersistedModelProtocol {
+        PersistedModelProtocol {
+            scope,
+            model_id: model_id.into(),
+            protocol,
+            source: ContractEvidenceSource::ProbeConfirmed,
+            verified_at: Some(now),
+            observed_at: Some(now),
+            last_probe_result: Some(ProbeResultKind::Success),
+            last_probe_at: Some(now),
+            last_probe_error: None,
+        }
+    }
+
+    #[test]
+    fn probe_observation_batch_upserts_atomically_and_bumps_scope_once() {
+        let dir = temp_data_dir("v26-probe-batch");
+        let db = Database::open(dir.clone()).unwrap();
+        let now = Utc::now();
+        let go = ContractScope::provider(OPENCODE_PROVIDER_ID);
+        let custom = ContractScope::custom_endpoint("custom-a");
+
+        let empty = db.upsert_model_protocols(&[]);
+        assert!(empty.is_err(), "{empty:?}");
+        assert!(empty.unwrap_err().to_string().contains("nonempty"));
+        assert!(db.load_persisted_scope(&go).unwrap().is_none());
+
+        let mixed = db.upsert_model_protocols(&[
+            probe_observation(
+                go.clone(),
+                "grok-4.5",
+                UpstreamProtocolKind::ChatCompletions,
+                now,
+            ),
+            probe_observation(
+                custom.clone(),
+                "local-model",
+                UpstreamProtocolKind::ChatCompletions,
+                now,
+            ),
+        ]);
+        assert!(mixed.is_err(), "{mixed:?}");
+        assert!(mixed.unwrap_err().to_string().contains("mix"));
+        assert!(db.load_persisted_scope(&go).unwrap().is_none());
+        assert!(db.load_persisted_scope(&custom).unwrap().is_none());
+        assert!(
+            db.load_model_protocol(&go, "grok-4.5", UpstreamProtocolKind::ChatCompletions)
+                .unwrap()
+                .is_none()
+        );
+
+        let persisted = db
+            .upsert_model_protocols(&[
+                probe_observation(
+                    go.clone(),
+                    "grok-4.5",
+                    UpstreamProtocolKind::ChatCompletions,
+                    now,
+                ),
+                probe_observation(go.clone(), "grok-4.5", UpstreamProtocolKind::Responses, now),
+            ])
+            .unwrap();
+        assert_eq!(persisted.revision, 2);
+        let after = db.load_persisted_scope(&go).unwrap().unwrap();
+        assert_eq!(after.revision, 2);
+        assert!(
+            db.load_model_protocol(&go, "grok-4.5", UpstreamProtocolKind::ChatCompletions)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            db.load_model_protocol(&go, "grok-4.5", UpstreamProtocolKind::Responses)
+                .unwrap()
+                .is_some()
+        );
+
+        db.conn
+            .execute_batch(
+                "CREATE TRIGGER fail_second_probe_observation_write
+                 BEFORE INSERT ON provider_contract_model_protocols
+                 WHEN NEW.protocol = 'messages'
+                 BEGIN SELECT RAISE(ABORT, 'injected second observation write failure'); END;",
+            )
+            .unwrap();
+        let before_failed = db.load_persisted_scope(&go).unwrap().unwrap().revision;
+        let failed = db.upsert_model_protocols(&[
+            probe_observation(
+                go.clone(),
+                "glm-5.3",
+                UpstreamProtocolKind::ChatCompletions,
+                now,
+            ),
+            probe_observation(go.clone(), "glm-5.3", UpstreamProtocolKind::Messages, now),
+        ]);
+        assert!(failed.is_err(), "{failed:?}");
+        assert_eq!(
+            db.load_persisted_scope(&go).unwrap().unwrap().revision,
+            before_failed
+        );
+        assert!(
+            db.load_model_protocol(&go, "glm-5.3", UpstreamProtocolKind::ChatCompletions)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            db.load_model_protocol(&go, "glm-5.3", UpstreamProtocolKind::Messages)
                 .unwrap()
                 .is_none()
         );

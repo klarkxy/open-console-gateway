@@ -109,6 +109,7 @@ pub const ERROR_NOT_FOUND: &str = "notFound";
 pub const ERROR_CONFLICT: &str = "conflict";
 pub const ERROR_PRECONDITION_FAILED: &str = "preconditionFailed";
 pub const ERROR_SERVICE_UNAVAILABLE: &str = "serviceUnavailable";
+pub const ERROR_NOT_IMPLEMENTED: &str = "notImplemented";
 
 /// Live CAS token, process generation, and pricing snapshot id.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -285,6 +286,19 @@ impl V3Error {
     ) -> Self {
         Self {
             code: ERROR_SERVICE_UNAVAILABLE.to_string(),
+            message: message.into(),
+            current_revision: Some(current_revision),
+            process_generation: Some(process_generation),
+        }
+    }
+
+    pub fn not_implemented(
+        message: impl Into<String>,
+        current_revision: u64,
+        process_generation: u64,
+    ) -> Self {
+        Self {
+            code: ERROR_NOT_IMPLEMENTED.to_string(),
             message: message.into(),
             current_revision: Some(current_revision),
             process_generation: Some(process_generation),
@@ -2026,6 +2040,24 @@ mod tests {
         assert_eq!(
             defs["V3Error"]["properties"]["code"]["type"], "string",
             "new error codes must not reshape the V3Error catalog definition"
+        );
+    }
+
+    #[test]
+    fn not_implemented_error_emits_stable_code_and_cas_tokens() {
+        let error = V3Error::not_implemented("protocol probes are not available", 11, 9);
+        let value = serde_json::to_value(&error).unwrap();
+        assert_eq!(value["code"], ERROR_NOT_IMPLEMENTED);
+        assert_eq!(value["code"], "notImplemented");
+        assert_eq!(value["message"], "protocol probes are not available");
+        assert_eq!(value["currentRevision"], 11);
+        assert_eq!(value["processGeneration"], 9);
+
+        let schema = contract_schema();
+        let defs = schema["$defs"].as_object().expect("catalog $defs");
+        assert_eq!(
+            defs["V3Error"]["properties"]["code"]["type"], "string",
+            "open string error codes must not reshape the V3Error catalog definition"
         );
     }
 

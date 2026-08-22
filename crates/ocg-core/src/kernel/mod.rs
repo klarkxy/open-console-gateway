@@ -64,7 +64,13 @@ mod dependency_guard {
         "pricing",
     ];
 
-    const EXPECTED_HOST_SCC: &[&str] = &["dashboard", "dashboard_v3", "gateway", "state"];
+    const EXPECTED_HOST_SCC: &[&str] = &[
+        "dashboard",
+        "dashboard_v3",
+        "gateway",
+        "protocol_probe",
+        "state",
+    ];
     const EXPECTED_CATALOG_SCC: &[&str] = &["go_usage", "http_client", "models", "provider"];
 
     #[test]
@@ -234,9 +240,34 @@ mod dependency_guard {
         assert!(
             !graph
                 .get("dashboard_v3")
-                .is_some_and(|edges| edges.contains("gateway")),
-            "dashboard_v3 must not depend on gateway"
+                .is_some_and(|edges| edges.contains("gateway") || edges.contains("dashboard")),
+            "dashboard_v3 must not depend on gateway or dashboard"
         );
+        assert!(
+            !graph.get("protocol_probe").is_some_and(|edges| {
+                edges.contains("dashboard") || edges.contains("dashboard_v3")
+            }),
+            "protocol_probe must not depend on dashboard or dashboard_v3"
+        );
+        assert!(
+            graph
+                .get("protocol_probe")
+                .is_some_and(|edges| { edges.contains("gateway") && edges.contains("state") }),
+            "protocol_probe may join the host SCC only via gateway/state"
+        );
+        let protocol_probe_source =
+            production_source(&read_to_string(&src_root.join("protocol_probe.rs")));
+        for needle in [
+            "forward_once",
+            "client_for",
+            "gateway::executor",
+            "gateway::forwarder",
+        ] {
+            assert!(
+                !protocol_probe_source.contains(needle),
+                "protocol_probe must not call {needle}"
+            );
+        }
         assert_eq!(
             graph.get("redaction").cloned().unwrap_or_default(),
             BTreeSet::new(),
@@ -264,7 +295,9 @@ mod dependency_guard {
         // inversion). This lease cut gateway_keys and usage_sync out of the
         // measured host SCC by depending on KeyHost/UsageSyncHost instead.
         // dashboard_v3 joined the remaining cycle when the contract kernel
-        // mounted at the gateway router. Inverting the remaining pure
+        // mounted at the gateway router. protocol_probe joins the same host
+        // SCC through gateway/state (shared admin probe transport) without a
+        // dashboard or dashboard_v3 edge. Inverting the remaining pure
         // catalog/sanitizer edges from provider_contracts into gateway also
         // dropped auth, db, and provider_contracts out of that cycle. A
         // separate catalog cycle (models/provider/go_usage/http_client) can

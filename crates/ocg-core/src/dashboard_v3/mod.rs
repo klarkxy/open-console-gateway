@@ -4,8 +4,8 @@
 //! router. This module owns the shared DTO / error / CAS envelope, process
 //! generation, connection/settings reads, the settings write path, the
 //! access-key lifecycle, the local accounts control plane, and the local/Zen
-//! provider catalog, contracts, and Zen Free control plane. Billable protocol
-//! probes stay off this router.
+//! provider catalog, contracts, Zen Free control plane, and Go/Zen protocol
+//! probes. Custom protocol probes stay account-owned on V2.
 
 mod accounts;
 mod connection;
@@ -37,10 +37,11 @@ pub use types::{
     CATALOG_TYPE_NAMES, CapabilitySummary, CardCapabilitySummary, ConnectionInfo, ConnectionSubKey,
     ContractScopeKind, ControlRevision, CustomEndpointContract, ERROR_CONFLICT, ERROR_INTERNAL,
     ERROR_INVALID_JSON, ERROR_INVALID_REQUEST, ERROR_MISSING_EXPECTED_REVISION, ERROR_NOT_FOUND,
-    ERROR_PRECONDITION_FAILED, ERROR_REVISION_CONFLICT, ERROR_SERVICE_UNAVAILABLE,
-    ERROR_UNAUTHORIZED, EffectiveCatalog, EffectiveModelContract, EffectiveModelProtocols,
-    EffectiveProtocolEvidence, KeyCreate, KeyUpdate, MutationAck, MutationExpectation,
-    PricingRevision, ProtocolSwitchUpdate, ProtocolSwitches, ProviderAccountChoice,
+    ERROR_NOT_IMPLEMENTED, ERROR_PRECONDITION_FAILED, ERROR_REVISION_CONFLICT,
+    ERROR_SERVICE_UNAVAILABLE, ERROR_UNAUTHORIZED, EffectiveCatalog, EffectiveModelContract,
+    EffectiveModelProtocols, EffectiveProtocolEvidence, KeyCreate, KeyUpdate, MutationAck,
+    MutationExpectation, PricingRevision, ProtocolProbeRequest, ProtocolProbeResponse,
+    ProtocolProbeResult, ProtocolSwitchUpdate, ProtocolSwitches, ProviderAccountChoice,
     ProviderCatalog, ProviderCatalogEntry, ProviderCatalogFormField, ProviderCatalogRiskNotice,
     ProviderContractGroup, ProviderContracts, ProviderModelCapability, ProviderOfferingChoice,
     ProxyListDirection, ProxyMode, ProxySupportedModel, RoutingMode, Settings, SettingsUpdate,
@@ -126,6 +127,10 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
         .route(
             "/provider-contracts/provider/{scope_id}/protocols/{protocol}",
             put(providers::put_provider_protocol_switch),
+        )
+        .route(
+            "/providers/{provider_id}/protocol-probes",
+            post(providers::run_provider_protocol_probes),
         )
         .route_layer(middleware::from_fn_with_state(state, require_v3_session))
 }
@@ -229,6 +234,17 @@ impl V3ApiError {
             status: StatusCode::SERVICE_UNAVAILABLE,
             body: V3Error::service_unavailable(
                 message.to_string(),
+                state.settings_revision(),
+                state.process_generation(),
+            ),
+        }
+    }
+
+    fn not_implemented(state: &CoreState, message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::NOT_IMPLEMENTED,
+            body: V3Error::not_implemented(
+                message,
                 state.settings_revision(),
                 state.process_generation(),
             ),

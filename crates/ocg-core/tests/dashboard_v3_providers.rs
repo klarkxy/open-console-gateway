@@ -1,5 +1,6 @@
 //! Dashboard V3 local/Zen providers control plane: auth, catalog, contracts,
-//! CAS, Zen refresh, and V2 coexistence. Protocol probes stay unmounted.
+//! CAS, Zen refresh, and V2 coexistence. Protocol probes live in
+//! `dashboard_v3_provider_probes.rs`.
 
 #[cfg(debug_assertions)]
 use axum::Router;
@@ -1172,7 +1173,10 @@ async fn dashboard_v3_protocol_put_enforces_cas_and_reloads_provider_scope_only(
         .send()
         .await
         .unwrap();
-    assert_eq!(probes.status(), StatusCode::NOT_FOUND);
+    let probes_status = probes.status();
+    let probes_body: Value = probes.json().await.unwrap_or(Value::Null);
+    assert_eq!(probes_status, StatusCode::BAD_REQUEST, "{probes_body}");
+    assert_v3_error(&probes_body, ERROR_INVALID_REQUEST);
 
     harness.stop();
 }
@@ -1203,7 +1207,6 @@ async fn dashboard_v3_provider_routes_coexist_with_v2_and_omit_v2_aliases() {
         "/providers/catalog",
         "/models/capabilities",
         &format!("/accounts/{ZEN_FREE_ACCOUNT_ID}/provider-models"),
-        "/providers/opencode/protocol-probes",
     ] {
         let response = harness
             .client

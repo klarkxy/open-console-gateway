@@ -2,13 +2,14 @@
 //!
 //! Catalog, contracts, model capabilities, and saved Zen models are local
 //! reads. Zen enablement and provider-scope protocol switches share the V3
-//! CAS envelope. Zen catalog refresh is the only outbound path; it uses the
-//! fixed official keyless directory and does not copy protocol-probe transport.
+//! CAS envelope. Zen catalog refresh uses the fixed official keyless directory.
+//! Go/Zen protocol probes share the crate-root transport; Custom probes stay
+//! account-owned on V2.
 
 use axum::Json;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 #[cfg(debug_assertions)]
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -27,14 +28,16 @@ use crate::kernel::protocol::supported_model_protocol_profiles;
 #[cfg(debug_assertions)]
 use crate::kernel::zen::{ZEN_MODELS_SOURCE_URL, parse_catalog};
 use crate::kernel::zen::{ZenFreeModelCatalog, model_views};
-use crate::models::Account as ModelAccount;
+use crate::models::{Account as ModelAccount, AppConfig};
+use crate::protocol_probe::{self, ProtocolProbeContext, ProtocolProbeRunError};
 use crate::provider::{
     BUILTIN_PLANS, BuiltinPlan, CUSTOM_PROVIDER_ID, ConnectionVerificationStatus, GO_OFFERING_ID,
-    OPENCODE_PROVIDER_ID, ProviderRegistry, ZEN_FREE_ACCOUNT_ID, default_verification_status,
+    OPENCODE_PROVIDER_ID, ProviderAdapterKind, ProviderRegistry, ZEN_FREE_ACCOUNT_ID,
+    default_verification_status,
 };
 use crate::provider_contracts::{
     self, ContractScope, EffectiveContractSet, EffectiveModelContract as DomainModelContract,
-    EffectiveProtocolEvidence as DomainProtocolEvidence,
+    EffectiveProtocolEvidence as DomainProtocolEvidence, PersistedModelProtocol,
     ProtocolSwitches as DomainProtocolSwitches,
 };
 use crate::state::CoreState;
@@ -44,10 +47,11 @@ use super::types::{
     CapabilitySummary, CardCapabilitySummary, ContractEvidenceSource, ContractScopeKind,
     ControlRevision, CustomEndpointContract, EffectiveCatalog, EffectiveModelContract,
     EffectiveModelProtocols, EffectiveProtocolEvidence, MutationExpectation, ProbeResultKind,
-    ProtocolSwitchUpdate, ProtocolSwitches, ProviderAccountChoice, ProviderCatalog,
-    ProviderCatalogEntry, ProviderCatalogFormField, ProviderCatalogRiskNotice,
-    ProviderContractGroup, ProviderContracts, ProviderModelCapability, ProviderOfferingChoice,
-    ZenFreeModel, ZenFreeModels, ZenFreeSettings, ZenFreeSettingsUpdate,
+    ProtocolProbeRequest, ProtocolProbeResponse, ProtocolProbeResult, ProtocolSwitchUpdate,
+    ProtocolSwitches, ProviderAccountChoice, ProviderCatalog, ProviderCatalogEntry,
+    ProviderCatalogFormField, ProviderCatalogRiskNotice, ProviderContractGroup, ProviderContracts,
+    ProviderModelCapability, ProviderOfferingChoice, ZenFreeModel, ZenFreeModels, ZenFreeSettings,
+    ZenFreeSettingsUpdate,
 };
 use super::{V3ApiError, check_expectation, parse_mutation_json};
 
@@ -235,6 +239,217 @@ pub(super) async fn put_provider_protocol_switch(
     Ok(Json(provider_contracts_from_state(
         &state, &contracts, &accounts, &statuses,
     )))
+}
+
+pub(super) async fn run_provider_protocol_probes(
+    State(state): State<CoreState>,
+    Path(provider_id): Path<String>,
+    body: Bytes,
+) -> Result<Json<ProtocolProbeResponse>, V3ApiError> {
+    let input = parse_mutation_json::<ProtocolProbeRequest>(&body)?;
+    let prepared = {
+        let _settings_update = state.settings_update.lock();
+        check_expectation(&state, &input.expectation)?;
+        prepare_protocol_probe(&state, &provider_id, &input)?
+    };
+    let outcomes = protocol_probe::run_protocol_probes(
+        &ProtocolProbeContext {
+            state: &state,
+            config: &prepared.config,
+            account: &prepared.account,
+            adapter: prepared.adapter,
+            model_id: &prepared.model_id,
+            custom_route: None,
+            now: prepared.now,
+        },
+        &prepared.scope,
+        &prepared.protocols,
+        &[],
+        |protocol| Ok(prepared.existing.get(&protocol).cloned().flatten()),
+        |_| Ok(()),
+    )
+    .await
+    .map_err(|error| match error {
+        ProtocolProbeRunError::Apply(message) => V3ApiError::invalid_request_at(&state, message),
+        ProtocolProbeRunError::Evidence(message) | ProtocolProbeRunError::Persist(message) => {
+            V3ApiError::internal(message)
+        }
+    })?;
+    let observations: Vec<_> = outcomes
+        .iter()
+        .filter_map(|outcome| outcome.observation.clone())
+        .collect();
+    let _settings_update = state.settings_update.lock();
+    persist_probe_observations(&state, &observations)?;
+    let revision = ControlRevision::from_state(&state);
+    let contract = state
+        .provider_contracts()
+        .scope(&prepared.scope)
+        .and_then(|scope| scope.model(&prepared.model_id).cloned())
+        .map(|model| model_contract_from_domain(&model));
+    Ok(Json(ProtocolProbeResponse {
+        account_id: prepared.account.id.clone(),
+        provider_id: prepared.provider_id,
+        model_id: prepared.model_id.clone(),
+        results: outcomes
+            .into_iter()
+            .map(|outcome| ProtocolProbeResult {
+                protocol: AccountUpstreamProtocol::from(outcome.protocol),
+                success: outcome.success,
+                skipped: outcome.skipped,
+                error: outcome.error,
+            })
+            .collect(),
+        contract,
+        revision: revision.revision,
+        process_generation: revision.process_generation,
+        pricing_revision: revision.pricing_revision,
+    }))
+}
+
+fn persist_probe_observations(
+    state: &CoreState,
+    observations: &[PersistedModelProtocol],
+) -> Result<(), V3ApiError> {
+    if observations.is_empty() {
+        return Ok(());
+    }
+    {
+        let db = state.db.lock();
+        db.upsert_model_protocols(observations)
+            .map_err(V3ApiError::internal)?;
+        // Advance CAS immediately after commit so a later reload/read
+        // failure cannot hide the persisted mutation behind an unchanged token.
+        let _revision = state.bump_settings_revision();
+        state
+            .reload_provider_contracts_locked(&db)
+            .map_err(V3ApiError::internal)?;
+    }
+    state.routing.reset();
+    Ok(())
+}
+
+struct PreparedProtocolProbe {
+    provider_id: String,
+    account: ModelAccount,
+    adapter: ProviderAdapterKind,
+    config: AppConfig,
+    scope: ContractScope,
+    model_id: String,
+    protocols: Vec<crate::provider::UpstreamProtocolKind>,
+    existing: HashMap<crate::provider::UpstreamProtocolKind, Option<PersistedModelProtocol>>,
+    now: DateTime<Utc>,
+}
+
+fn prepare_protocol_probe(
+    state: &CoreState,
+    provider_id: &str,
+    input: &ProtocolProbeRequest,
+) -> Result<PreparedProtocolProbe, V3ApiError> {
+    let adapter = match provider_contracts::adapter_kind_for_provider_scope(provider_id) {
+        Some(ProviderAdapterKind::ConfigurableHttp) => {
+            return Err(V3ApiError::invalid_request_at(
+                state,
+                "protocol probes for Custom API are account-owned",
+            ));
+        }
+        None => return Err(V3ApiError::not_found_at(state, "provider not found")),
+        Some(kind) if !kind.protocol_probe_supported() => {
+            return Err(V3ApiError::not_implemented(
+                state,
+                "protocol probes are not available for this Plan in this slice",
+            ));
+        }
+        Some(kind) => kind,
+    };
+    let model_id = input.model_id.trim();
+    if model_id.is_empty() {
+        return Err(V3ApiError::invalid_request_at(state, "modelId is required"));
+    }
+    if input.protocols.is_empty() {
+        return Err(V3ApiError::invalid_request_at(
+            state,
+            "at least one explicit upstream protocol is required",
+        ));
+    }
+    let protocols: Vec<_> = input
+        .protocols
+        .iter()
+        .copied()
+        .map(crate::provider::UpstreamProtocolKind::from)
+        .collect();
+    protocol_probe::require_unique_probe_protocols(&protocols)
+        .map_err(|message| V3ApiError::invalid_request_at(state, message))?;
+    let requested_account = input
+        .account_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let account_id = match adapter {
+        ProviderAdapterKind::OpenCodeGo => requested_account.ok_or_else(|| {
+            V3ApiError::invalid_request_at(
+                state,
+                "accountId is required for OpenCode Go protocol probes",
+            )
+        })?,
+        ProviderAdapterKind::ZenFree => match requested_account {
+            None => ZEN_FREE_ACCOUNT_ID,
+            Some(id) if id == ZEN_FREE_ACCOUNT_ID => ZEN_FREE_ACCOUNT_ID,
+            Some(_) => {
+                return Err(V3ApiError::invalid_request_at(
+                    state,
+                    "accountId must be the Zen Free singleton",
+                ));
+            }
+        },
+        ProviderAdapterKind::ConfigurableHttp
+        | ProviderAdapterKind::CommandCodeGoat
+        | ProviderAdapterKind::Scnet => {
+            unreachable!("zero-call adapters return before account resolution")
+        }
+    };
+    let account = state
+        .db
+        .lock()
+        .get_account(account_id)
+        .map_err(V3ApiError::internal)?
+        .ok_or_else(|| V3ApiError::not_found_at(state, "account not found"))?;
+    if account.provider_id != provider_id
+        || (adapter == ProviderAdapterKind::OpenCodeGo && account.offering_id != GO_OFFERING_ID)
+    {
+        return Err(V3ApiError::invalid_request_at(
+            state,
+            "account does not belong to this provider",
+        ));
+    }
+    let scope = ContractScope::from_account(&account).ok_or_else(|| {
+        V3ApiError::invalid_request_at(state, "account does not own a provider contract scope")
+    })?;
+    let now = Utc::now();
+    let mut existing = HashMap::new();
+    {
+        let db = state.db.lock();
+        for protocol in &protocols {
+            if provider_contracts::probe_may_add(adapter, model_id, *protocol, &[]) {
+                existing.insert(
+                    *protocol,
+                    db.load_model_protocol(&scope, model_id, *protocol)
+                        .map_err(V3ApiError::internal)?,
+                );
+            }
+        }
+    }
+    Ok(PreparedProtocolProbe {
+        provider_id: provider_id.to_string(),
+        account,
+        adapter,
+        config: state.config(),
+        scope,
+        model_id: model_id.to_string(),
+        protocols,
+        existing,
+        now,
+    })
 }
 
 fn validate_provider_scope(state: &CoreState, scope: &ContractScope) -> Result<(), V3ApiError> {

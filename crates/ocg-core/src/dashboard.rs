@@ -1592,51 +1592,69 @@ async fn run_account_protocol_probes(
     } else {
         Vec::new()
     };
-    let mut results = Vec::new();
-    let now = Utc::now();
-    for protocol in &input.protocols {
-        if !crate::provider_contracts::probe_may_add(adapter, model_id, *protocol, &declared) {
-            results.push(ProtocolProbeResultView {
-                protocol: protocol.as_str(),
-                success: false,
-                skipped: true,
-                error: Some("probe combination is outside the adapter safety ceiling".to_string()),
-            });
-            continue;
-        }
-        let existing = state
-            .db
-            .lock()
-            .load_model_protocol(&scope, model_id, *protocol)
-            .map_err(ApiError::internal)?;
-        let outcome = execute_protocol_probe(&state, &account, adapter, model_id, *protocol).await;
-        let (success, error) = match &outcome {
-            Ok(()) => (true, None),
-            Err(message) => (false, Some(message.clone())),
-        };
-        let persisted = crate::provider_contracts::apply_probe_observation(
-            existing.as_ref(),
-            scope.clone(),
-            model_id,
-            *protocol,
-            success,
-            error.clone(),
-            now,
-            true,
-        )
-        .map_err(ApiError::bad_request)?;
+    let custom_route = if adapter == crate::provider::ProviderAdapterKind::ConfigurableHttp {
         state
             .db
             .lock()
-            .upsert_model_protocol(&persisted)
-            .map_err(ApiError::internal)?;
-        results.push(ProtocolProbeResultView {
-            protocol: protocol.as_str(),
-            success,
-            skipped: false,
-            error,
-        });
-    }
+            .account_custom_config(&account.id)
+            .map_err(ApiError::internal)?
+            .map(|custom| crate::gateway::protocol::CustomRouteSpec {
+                base_url: custom.base_url,
+                auth_scheme: custom.auth_scheme,
+            })
+    } else {
+        None
+    };
+    let config = state.config();
+    let now = Utc::now();
+    let outcomes = crate::protocol_probe::run_protocol_probes(
+        &crate::protocol_probe::ProtocolProbeContext {
+            state: &state,
+            config: &config,
+            account: &account,
+            adapter,
+            model_id,
+            custom_route,
+            now,
+        },
+        &scope,
+        &input.protocols,
+        &declared,
+        |protocol| {
+            state
+                .db
+                .lock()
+                .load_model_protocol(&scope, model_id, protocol)
+                .map_err(|error| error.to_string())
+        },
+        |row| {
+            state
+                .db
+                .lock()
+                .upsert_model_protocol(row)
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        },
+    )
+    .await
+    .map_err(|error| match error {
+        crate::protocol_probe::ProtocolProbeRunError::Apply(message) => {
+            ApiError::bad_request(message)
+        }
+        crate::protocol_probe::ProtocolProbeRunError::Evidence(message)
+        | crate::protocol_probe::ProtocolProbeRunError::Persist(message) => {
+            ApiError::internal(message)
+        }
+    })?;
+    let results = outcomes
+        .into_iter()
+        .map(|outcome| ProtocolProbeResultView {
+            protocol: outcome.protocol.as_str(),
+            success: outcome.success,
+            skipped: outcome.skipped,
+            error: outcome.error,
+        })
+        .collect();
     state
         .reload_provider_contracts()
         .map_err(ApiError::internal)?;
@@ -1655,153 +1673,7 @@ async fn run_account_protocol_probes(
 fn require_unique_probe_protocols(
     protocols: &[crate::provider::UpstreamProtocolKind],
 ) -> Result<(), ApiError> {
-    let mut seen = HashSet::new();
-    for protocol in protocols {
-        if !seen.insert(*protocol) {
-            return Err(ApiError::bad_request("duplicate upstream protocol"));
-        }
-    }
-    Ok(())
-}
-
-async fn execute_protocol_probe(
-    state: &CoreState,
-    account: &Account,
-    adapter: crate::provider::ProviderAdapterKind,
-    model_id: &str,
-    protocol: crate::provider::UpstreamProtocolKind,
-) -> Result<(), String> {
-    use crate::custom_http::{
-        HttpInferenceTransport, HttpInferenceTransportSpec, InferenceHttpRequest,
-        json_content_headers,
-    };
-    use crate::gateway::protocol::RequestPlan;
-    use crate::models::UpstreamChannel;
-    use crate::provider_contracts::protocol_to_api;
-
-    let format = protocol_to_api(protocol);
-    let config = state.config();
-    let body = crate::custom::minimal_verification_body(protocol, model_id)
-        .map_err(|error| error.message)?;
-    let mut plan = RequestPlan {
-        client: format,
-        upstream: format,
-        model: model_id.to_string(),
-        client_model: model_id.to_string(),
-        stream: false,
-        body: bytes::Bytes::from(body.clone()),
-        channel: if adapter == crate::provider::ProviderAdapterKind::ZenFree {
-            UpstreamChannel::Free
-        } else {
-            UpstreamChannel::Go
-        },
-        upstream_base_override: None,
-        original_model: None,
-        allow_go_fallback: false,
-        resolved_alias: None,
-        custom_route: None,
-        service_tier: None,
-        custom_tools: Vec::new(),
-        namespace_tools: Vec::new(),
-        response_parallel_tool_calls: true,
-        response_tool_choice: serde_json::json!("auto"),
-        response_tools: Vec::new(),
-    };
-    if adapter == crate::provider::ProviderAdapterKind::ConfigurableHttp {
-        let custom = state
-            .db
-            .lock()
-            .account_custom_config(&account.id)
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| {
-                "Custom API accounts require a persisted base URL, protocol, and auth scheme"
-                    .to_string()
-            })?;
-        plan.custom_route = Some(crate::gateway::protocol::CustomRouteSpec {
-            base_url: custom.base_url,
-            auth_scheme: custom.auth_scheme,
-        });
-    }
-    let route = crate::gateway::provider_adapter::resolve_probe_route(account, &config, &plan)?;
-    let secret = if matches!(
-        route.auth,
-        crate::gateway::provider_adapter::UpstreamAuth::None
-    ) {
-        None
-    } else {
-        Some(
-            state
-                .decrypt_key(&account.key_cipher)
-                .map_err(|error| error.to_string())?,
-        )
-    };
-    let spec = if route.follow_redirects {
-        HttpInferenceTransportSpec::follow_redirects()
-    } else {
-        HttpInferenceTransportSpec::no_redirects()
-    };
-    let transport =
-        HttpInferenceTransport::build(&config, spec).map_err(|error| error.to_string())?;
-    let url = HttpInferenceTransport::join_endpoint(&route.base_url, &route.path)
-        .map_err(|error| error.to_string())?;
-    let extra = json_content_headers(protocol == crate::provider::UpstreamProtocolKind::Messages)
-        .map_err(|error| error.to_string())?;
-    let timeout = std::time::Duration::from_secs(config.non_stream_timeout_secs.clamp(5, 30));
-    let auth = match (route.auth, secret.as_deref()) {
-        (crate::gateway::provider_adapter::UpstreamAuth::None, _) => None,
-        (crate::gateway::provider_adapter::UpstreamAuth::XApiKey, Some(key)) => {
-            Some((crate::provider::UpstreamAuthScheme::XApiKey, key))
-        }
-        (crate::gateway::provider_adapter::UpstreamAuth::Bearer, Some(key)) => {
-            Some((crate::provider::UpstreamAuthScheme::Bearer, key))
-        }
-        (crate::gateway::provider_adapter::UpstreamAuth::OpenCodeProtocolDefault, Some(key))
-            if format == ApiFormat::Messages =>
-        {
-            Some((crate::provider::UpstreamAuthScheme::XApiKey, key))
-        }
-        (crate::gateway::provider_adapter::UpstreamAuth::OpenCodeProtocolDefault, Some(key)) => {
-            Some((crate::provider::UpstreamAuthScheme::Bearer, key))
-        }
-        (_, None) => {
-            return Err("account is missing a decrypted credential for this probe".to_string());
-        }
-    };
-    let response = transport
-        .send(InferenceHttpRequest {
-            method: reqwest::Method::POST,
-            url,
-            auth,
-            extra_headers: extra,
-            body: Some(body),
-            request_timeout: Some(timeout),
-        })
-        .await
-        .map_err(|error| {
-            crate::provider_contracts::sanitize_probe_error(&error.to_string(), secret.as_deref())
-        })?;
-    let status = response.status();
-    let bytes = HttpInferenceTransport::read_body_limited(
-        response,
-        crate::custom::MAX_CUSTOM_VERIFICATION_BODY_BYTES,
-    )
-    .await
-    .map_err(|error| {
-        crate::provider_contracts::sanitize_probe_error(&error.to_string(), secret.as_deref())
-    })?;
-    if !status.is_success() {
-        let raw = String::from_utf8_lossy(&bytes);
-        return Err(crate::provider_contracts::sanitize_probe_error(
-            &format!("upstream returned {} {raw}", status.as_u16()),
-            secret.as_deref(),
-        ));
-    }
-    let parsed: serde_json::Value = serde_json::from_slice(&bytes)
-        .map_err(|_| "protocol probe did not return a JSON object".to_string())?;
-    if !parsed.is_object() {
-        return Err("protocol probe did not return a JSON object".to_string());
-    }
-    Ok(())
+    crate::protocol_probe::require_unique_probe_protocols(protocols).map_err(ApiError::bad_request)
 }
 
 #[derive(Debug, Serialize)]
