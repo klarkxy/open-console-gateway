@@ -47,7 +47,7 @@ fn explicit_conversation_id(headers: &HeaderMap) -> Option<String> {
 
 fn namespaced_key(format: ApiFormat, model: &str, kind: &str, payload: &[u8]) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(format.as_routing_label().as_bytes());
+    hasher.update(routing_label(format).as_bytes());
     hasher.update([0]);
     hasher.update(model.as_bytes());
     hasher.update([0]);
@@ -71,14 +71,12 @@ mod hex {
     }
 }
 
-impl ApiFormat {
-    fn as_routing_label(self) -> &'static str {
-        match self {
-            Self::ChatCompletions => "chat_completions",
-            Self::Responses => "responses",
-            Self::Messages => "messages",
-            Self::Gemini => "gemini",
-        }
+fn routing_label(format: ApiFormat) -> &'static str {
+    match format {
+        ApiFormat::ChatCompletions => "chat_completions",
+        ApiFormat::Responses => "responses",
+        ApiFormat::Messages => "messages",
+        ApiFormat::Gemini => "gemini",
     }
 }
 

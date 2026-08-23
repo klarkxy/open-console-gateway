@@ -2792,6 +2792,7 @@ dependencies = [
  "bytes",
  "chrono",
  "futures-util",
+ "ocg-domain",
  "parking_lot",
  "reqwest 0.12.28",
  "rusqlite",
@@ -2800,11 +2801,22 @@ dependencies = [
  "serde_json",
  "sha1",
  "sha2",
+ "syn 2.0.118",
  "tokio",
  "tokio-tungstenite",
+ "toml 0.9.12+spec-1.1.0",
  "tower-http",
  "uuid",
  "windows",
+]
+
+[[package]]
+name = "ocg-domain"
+version = "1.8.2"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

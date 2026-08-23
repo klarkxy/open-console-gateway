@@ -2,6 +2,7 @@
 members = [
     "crates/ocg-browser-worker",
     "crates/ocg-core",
+    "crates/ocg-domain",
     "crates/ocg-cli",
     "src-tauri",
 ]

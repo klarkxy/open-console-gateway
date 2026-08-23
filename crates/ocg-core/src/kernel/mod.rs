@@ -1,10 +1,15 @@
 //! I/O-free Stage 1 kernels: identities, protocol catalogs, pricing types,
 //! and Zen catalog parse/normalize.
 //!
-//! These modules must not import db, state, dashboard, gateway execution,
-//! reqwest, rusqlite, tokio, filesystem, clocks, or process/host code.
-//! Existing public paths keep compatibility re-exports on the original
-//! modules.
+//! `catalog`, `ids`, `protocol`, and `zen` live in `ocg_domain` and are
+//! re-exported here through explicit facade modules so
+//! `ocg_core::kernel::{catalog,ids,protocol,zen}` keep compiling without
+//! widening crate-private items. `pricing` stays in this crate so
+//! [`pricing::PricingSnapshot`] retains inherent `estimate`/`estimate_at`
+//! methods in the host pricing module.
+//!
+//! Domain sources must not import db, state, dashboard, gateway execution,
+//! reqwest, rusqlite, tokio, axum, filesystem, clocks, or process/host code.
 
 pub mod catalog;
 pub mod ids;
@@ -17,39 +22,16 @@ mod dependency_guard {
     use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
     use std::path::{Path, PathBuf};
+    use syn::parse::Parser;
+    use syn::punctuated::Punctuated;
+    use syn::visit::Visit;
+    use syn::{Attribute, Item, Meta, Token, UseTree, Visibility};
+    use toml::{Table, Value};
 
-    const KERNEL_FILES: &[&str] = &[
-        "catalog.rs",
-        "ids.rs",
-        "pricing.rs",
-        "protocol.rs",
-        "zen.rs",
-    ];
-
-    const FORBIDDEN_USE_PREFIXES: &[&str] = &[
-        "use crate::db",
-        "use crate::state",
-        "use crate::dashboard",
-        "use crate::host_router",
-        "use crate::host_gateway",
-        "use crate::gateway_runtime",
-        "use crate::routing_runtime",
-        "use crate::gateway",
-        "use crate::http_client",
-        "use crate::custom",
-        "use crate::custom_http",
-        "use crate::auth",
-        "use crate::browser",
-        "use crate::console_usage",
-        "use crate::go_usage",
-        "use crate::usage_sync",
-        "use crate::gateway_keys",
-        "use reqwest",
-        "use rusqlite",
-        "use tokio",
-        "use std::fs",
-        "use std::process",
-    ];
+    const ALLOWED_DOMAIN_DEPENDENCIES: &[&str] = &["chrono", "serde", "serde_json"];
+    const ALLOWED_CHRONO_FEATURES: &[&str] = &["serde", "std"];
+    const FORBIDDEN_EXTERNAL_CRATES: &[&str] = &["reqwest", "rusqlite", "tokio", "axum"];
+    const FORBIDDEN_STD_MODULES: &[&str] = &["fs", "process"];
 
     const FORBIDDEN_KERNEL_CRATE_MODULES: &[&str] = &[
         "db",
@@ -76,45 +58,186 @@ mod dependency_guard {
 
     #[test]
     fn kernel_modules_do_not_import_io_or_control_plane() {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/kernel");
-        for name in KERNEL_FILES {
-            let path = root.join(name);
-            let source = fs::read_to_string(&path)
-                .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
-            let production = production_source(&source);
-            for line in production.lines() {
-                let trimmed = line.trim();
-                if trimmed.starts_with("use ") {
-                    for prefix in FORBIDDEN_USE_PREFIXES {
-                        assert!(
-                            !trimmed.starts_with(prefix),
-                            "{} imports I/O or control-plane code: {trimmed}",
-                            path.display()
-                        );
-                    }
+        let kernel_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/kernel");
+        let domain_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("ocg-domain")
+            .join("src");
+
+        let mut scanned = Vec::new();
+        visit_rust_files(&kernel_root, &mut |path| {
+            scanned.push(path.to_path_buf());
+            assert_production_is_io_free(path);
+            assert_no_blanket_domain_reexport(path);
+        });
+        visit_rust_files(&domain_root, &mut |path| {
+            scanned.push(path.to_path_buf());
+            assert_production_is_io_free(path);
+        });
+
+        assert!(
+            scanned.iter().any(|path| {
+                path.file_name().and_then(|name| name.to_str()) == Some("lib.rs")
+                    && path.components().any(|component| {
+                        component.as_os_str() == std::ffi::OsStr::new("ocg-domain")
+                    })
+            }),
+            "domain purity guard must recursively scan lib.rs, scanned={scanned:?}"
+        );
+        assert!(
+            kernel_root.join("pricing.rs").is_file(),
+            "kernel pricing.rs must remain in ocg-core"
+        );
+        assert!(
+            !domain_root.join("pricing.rs").exists(),
+            "PricingSnapshot must not move into ocg-domain"
+        );
+
+        let kernel_pricing = read_to_string(&kernel_root.join("pricing.rs"));
+        assert!(
+            kernel_pricing.contains("pub struct PricingSnapshot"),
+            "PricingSnapshot must stay owned by ocg-core kernel pricing"
+        );
+        assert!(
+            !kernel_pricing.contains("ocg_domain::pricing"),
+            "kernel pricing must not forward to ocg_domain::pricing"
+        );
+
+        assert_domain_manifest_clock_free();
+    }
+
+    #[test]
+    fn syntax_guard_rejects_grouped_std_io_imports() {
+        assert_guard_rejects("use std::{fs, process};");
+    }
+
+    #[test]
+    fn syntax_guard_rejects_multiline_grouped_domain_glob_reexports() {
+        let source = r#"
+            pub use ocg_domain::{
+                catalog::{
+                    *,
+                },
+            };
+        "#;
+        assert!(
+            std::panic::catch_unwind(|| {
+                let path = Path::new("compat.rs");
+                assert_no_blanket_domain_reexport_source(path, source);
+            })
+            .is_err(),
+            "nested grouped glob reexports must not bypass the compatibility facade guard"
+        );
+    }
+
+    #[test]
+    fn syntax_guard_rejects_whole_domain_crate_reexports() {
+        for source in [
+            "pub use ocg_domain as domain;",
+            "pub use ocg_domain::{self};",
+        ] {
+            assert!(
+                std::panic::catch_unwind(|| {
+                    assert_no_blanket_domain_reexport_source(Path::new("compat.rs"), source);
+                })
+                .is_err(),
+                "whole-crate reexports must not bypass the compatibility facade guard: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn syntax_guard_skips_cfg_test_associated_items_and_statements() {
+        let test_only = r#"
+            struct Fixture;
+
+            impl Fixture {
+                #[cfg(test)]
+                fn helper() {
+                    std::fs::read("fixture");
+                }
+
+                fn production() {
+                    #[cfg(test)]
+                    let _: std::fs::File = unreachable!();
+
+                    #[cfg(test)]
+                    std::fs::read("fixture");
                 }
             }
-            for module in crate_path_roots(&production) {
-                assert!(
-                    !FORBIDDEN_KERNEL_CRATE_MODULES.contains(&module.as_str()),
-                    "{} has a qualified production path into `{module}`",
-                    path.display()
-                );
+
+            trait FixtureTrait {
+                #[cfg(test)]
+                fn helper() {
+                    std::fs::read("fixture");
+                }
             }
-            for needle in ["Utc::now", "Instant::now", "SystemTime::now"] {
-                assert!(
-                    !production.contains(needle),
-                    "{} must not read a clock (`{needle}`)",
-                    path.display()
-                );
+
+            unsafe extern "C" {
+                #[cfg(test)]
+                static TEST_FILE: std::fs::File;
             }
+        "#;
+        assert_source_is_io_free(Path::new("fixture.rs"), test_only);
+
+        for production in [
+            r#"
+                struct Fixture;
+                impl Fixture {
+                    fn helper() {
+                        std::fs::read("fixture");
+                    }
+                }
+            "#,
+            r#"
+                fn production() {
+                    let _: std::fs::File = unreachable!();
+                }
+            "#,
+            r#"
+                fn production() {
+                    std::fs::read("fixture");
+                }
+            "#,
+            r#"
+                trait FixtureTrait {
+                    fn helper() {
+                        std::fs::read("fixture");
+                    }
+                }
+            "#,
+            r#"
+                unsafe extern "C" {
+                    static TEST_FILE: std::fs::File;
+                }
+            "#,
+        ] {
+            assert_guard_rejects(production);
         }
+    }
+
+    #[test]
+    fn manifest_guard_rejects_target_specific_dependencies() {
+        let manifest = format!(
+            "{}\n[target.'cfg(windows)'.dependencies]\nreqwest = \"0.12\"\n",
+            valid_domain_manifest()
+        );
+        assert_manifest_rejects(&manifest);
+    }
+
+    #[test]
+    fn manifest_guard_rejects_feature_based_chrono_clock_activation() {
+        let manifest = format!(
+            "{}\n[features]\nclock = [\"chrono/clock\"]\n",
+            valid_domain_manifest()
+        );
+        assert_manifest_rejects(&manifest);
     }
 
     #[test]
     fn alias_does_not_import_custom_module() {
         let src_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
-        let alias = production_source(&read_to_string(&src_root.join("alias.rs")));
+        let alias = read_to_string(&src_root.join("alias.rs"));
         assert!(
             !alias_imports_custom(&alias),
             "alias.rs must not import or reach crate::custom; use kernel::ids for the shared matcher"
@@ -171,17 +294,7 @@ mod dependency_guard {
         let src_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
         let path = src_root.join("redaction.rs");
         let production = production_source(&read_to_string(&path));
-        for line in production.lines() {
-            let trimmed = line.trim();
-            if trimmed.starts_with("use ") {
-                for prefix in FORBIDDEN_USE_PREFIXES {
-                    assert!(
-                        !trimmed.starts_with(prefix),
-                        "redaction.rs imports I/O or control-plane code: {trimmed}"
-                    );
-                }
-            }
-        }
+        assert_production_is_io_free(&path);
         for module in crate_path_roots(&production) {
             assert!(
                 !FORBIDDEN_KERNEL_CRATE_MODULES.contains(&module.as_str()),
@@ -207,17 +320,7 @@ mod dependency_guard {
         let src_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
         let path = src_root.join("upstream_limit.rs");
         let production = production_source(&read_to_string(&path));
-        for line in production.lines() {
-            let trimmed = line.trim();
-            if trimmed.starts_with("use ") {
-                for prefix in FORBIDDEN_USE_PREFIXES {
-                    assert!(
-                        !trimmed.starts_with(prefix),
-                        "upstream_limit.rs imports I/O or control-plane code: {trimmed}"
-                    );
-                }
-            }
-        }
+        assert_production_is_io_free(&path);
         let roots = crate_path_roots(&production);
         for module in &roots {
             assert!(
@@ -789,6 +892,715 @@ mod dependency_guard {
         names.iter().map(|name| (*name).to_string()).collect()
     }
 
+    fn assert_production_is_io_free(path: &Path) {
+        assert_source_is_io_free(path, &read_to_string(path));
+    }
+
+    fn assert_no_blanket_domain_reexport(path: &Path) {
+        assert_no_blanket_domain_reexport_source(path, &read_to_string(path));
+    }
+
+    fn assert_no_blanket_domain_reexport_source(path: &Path, source: &str) {
+        let parsed = parse_rust_file(path, source);
+        let mut visitor = DomainReexportVisitor::default();
+        visitor.visit_file(&parsed);
+        assert!(
+            visitor.blanket_reexports.is_empty(),
+            "{} must not blanket-reexport ocg_domain: {:?}",
+            path.display(),
+            visitor.blanket_reexports
+        );
+    }
+
+    fn assert_guard_rejects(source: &str) {
+        assert!(
+            std::panic::catch_unwind(|| {
+                assert_source_is_io_free(Path::new("fixture.rs"), source);
+            })
+            .is_err(),
+            "syntax guard must reject {source:?}"
+        );
+    }
+
+    fn assert_manifest_rejects(manifest: &str) {
+        assert!(
+            std::panic::catch_unwind(|| {
+                assert_domain_manifest_is_pure(Path::new("ocg-domain/Cargo.toml"), manifest);
+            })
+            .is_err(),
+            "manifest guard must reject adversarial manifest: {manifest}"
+        );
+    }
+
+    fn valid_domain_manifest() -> &'static str {
+        r#"
+            [package]
+            name = "ocg-domain"
+            version = "0.1.0"
+
+            [dependencies]
+            chrono = { version = "0.4", default-features = false, features = ["serde", "std"] }
+            serde = { version = "1", features = ["derive"] }
+            serde_json = "1"
+        "#
+    }
+
+    fn assert_domain_manifest_clock_free() {
+        let manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("ocg-domain")
+            .join("Cargo.toml");
+        assert_domain_manifest_is_pure(&manifest_path, &read_to_string(&manifest_path));
+    }
+
+    fn assert_domain_manifest_is_pure(manifest_path: &Path, manifest: &str) {
+        let manifest: Value = toml::from_str(manifest)
+            .unwrap_or_else(|error| panic!("parse {}: {error}", manifest_path.display()));
+        let root = manifest
+            .as_table()
+            .unwrap_or_else(|| panic!("{} must be a TOML table", manifest_path.display()));
+        let dependencies = root.get("dependencies").and_then(Value::as_table);
+        assert!(
+            dependencies.is_some_and(|table| !table.is_empty()),
+            "{} is missing [dependencies]",
+            manifest_path.display()
+        );
+        let dependency_tables = domain_dependency_tables(root, manifest_path);
+        let mut names = BTreeSet::new();
+        for (table_name, table) in &dependency_tables {
+            for (name, spec) in *table {
+                assert!(
+                    ALLOWED_DOMAIN_DEPENDENCIES.contains(&name.as_str()),
+                    "{} declares unexpected dependency `{name}` in [{table_name}]",
+                    manifest_path.display()
+                );
+                names.insert(name.as_str());
+                if name == "chrono" {
+                    assert_chrono_dependency_is_clock_free(manifest_path, table_name, spec);
+                }
+            }
+        }
+        for required in ["chrono", "serde", "serde_json"] {
+            assert!(
+                names.contains(required),
+                "{} must declare `{required}`",
+                manifest_path.display()
+            );
+        }
+        if let Some(features) = root.get("features") {
+            assert_features_do_not_activate_chrono(manifest_path, features);
+        }
+    }
+
+    fn domain_dependency_tables<'a>(
+        root: &'a Table,
+        manifest_path: &Path,
+    ) -> Vec<(String, &'a Table)> {
+        let mut tables = Vec::new();
+        for key in ["dependencies", "build-dependencies", "dev-dependencies"] {
+            if let Some(value) = root.get(key) {
+                let table = value.as_table().unwrap_or_else(|| {
+                    panic!("{} [{key}] must be a table", manifest_path.display())
+                });
+                tables.push((key.to_string(), table));
+            }
+        }
+        if let Some(targets) = root.get("target") {
+            let targets = targets
+                .as_table()
+                .unwrap_or_else(|| panic!("{} [target] must be a table", manifest_path.display()));
+            for (target, value) in targets {
+                let target_table = value.as_table().unwrap_or_else(|| {
+                    panic!(
+                        "{} [target.{target:?}] must be a table",
+                        manifest_path.display()
+                    )
+                });
+                for key in ["dependencies", "build-dependencies", "dev-dependencies"] {
+                    if let Some(value) = target_table.get(key) {
+                        let table = value.as_table().unwrap_or_else(|| {
+                            panic!(
+                                "{} [target.{target:?}.{key}] must be a table",
+                                manifest_path.display()
+                            )
+                        });
+                        tables.push((format!("target.{target:?}.{key}"), table));
+                    }
+                }
+            }
+        }
+        tables
+    }
+
+    fn assert_chrono_dependency_is_clock_free(
+        manifest_path: &Path,
+        table_name: &str,
+        spec: &Value,
+    ) {
+        let spec = spec.as_table().unwrap_or_else(|| {
+            panic!(
+                "{} [{table_name}] chrono must use an inline table with explicit clock-free settings",
+                manifest_path.display()
+            )
+        });
+        assert_eq!(
+            spec.get("default-features").and_then(Value::as_bool),
+            Some(false),
+            "{} [{table_name}] chrono must set default-features = false",
+            manifest_path.display()
+        );
+        let mut features = spec
+            .get("features")
+            .and_then(Value::as_array)
+            .unwrap_or_else(|| {
+                panic!(
+                    "{} [{table_name}] chrono must declare features = [\"serde\", \"std\"]",
+                    manifest_path.display()
+                )
+            })
+            .iter()
+            .map(|value| {
+                value.as_str().unwrap_or_else(|| {
+                    panic!(
+                        "{} [{table_name}] chrono features must be strings",
+                        manifest_path.display()
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        features.sort_unstable();
+        let mut allowed = ALLOWED_CHRONO_FEATURES.to_vec();
+        allowed.sort_unstable();
+        assert_eq!(
+            features,
+            allowed,
+            "{} [{table_name}] chrono features must be {ALLOWED_CHRONO_FEATURES:?}",
+            manifest_path.display()
+        );
+    }
+
+    fn assert_features_do_not_activate_chrono(manifest_path: &Path, features: &Value) {
+        let features = features
+            .as_table()
+            .unwrap_or_else(|| panic!("{} [features] must be a table", manifest_path.display()));
+        for (feature, members) in features {
+            let members = members.as_array().unwrap_or_else(|| {
+                panic!(
+                    "{} [features] `{feature}` must be an array",
+                    manifest_path.display()
+                )
+            });
+            for member in members {
+                let member = member.as_str().unwrap_or_else(|| {
+                    panic!(
+                        "{} [features] `{feature}` members must be strings",
+                        manifest_path.display()
+                    )
+                });
+                let dependency = member.strip_prefix("dep:").unwrap_or(member);
+                let package = dependency
+                    .split('/')
+                    .next()
+                    .unwrap_or_default()
+                    .trim_end_matches('?');
+                assert!(
+                    package != "chrono",
+                    "{} [features] `{feature}` must not activate chrono defaults or clock features ({member:?})",
+                    manifest_path.display()
+                );
+            }
+        }
+    }
+
+    fn assert_source_is_io_free(path: &Path, source: &str) {
+        let parsed = parse_rust_file(path, source);
+        let mut visitor = PurityVisitor::default();
+        visitor.visit_file(&parsed);
+        assert!(
+            visitor.forbidden_imports.is_empty(),
+            "{} imports I/O or control-plane code: {:?}",
+            path.display(),
+            visitor.forbidden_imports
+        );
+        assert!(
+            visitor.forbidden_paths.is_empty(),
+            "{} has a qualified I/O or control-plane path: {:?}",
+            path.display(),
+            visitor.forbidden_paths
+        );
+        assert!(
+            visitor.clock_paths.is_empty(),
+            "{} must not read a clock: {:?}",
+            path.display(),
+            visitor.clock_paths
+        );
+    }
+
+    fn parse_rust_file(path: &Path, source: &str) -> syn::File {
+        syn::parse_file(source)
+            .unwrap_or_else(|error| panic!("parse {} as Rust: {error}", path.display()))
+    }
+
+    #[derive(Default)]
+    struct PurityVisitor {
+        forbidden_imports: Vec<ImportPath>,
+        forbidden_paths: Vec<String>,
+        clock_paths: Vec<String>,
+    }
+
+    macro_rules! visit_cfg_attributed_node {
+        ($method:ident, $node:ty) => {
+            fn $method(&mut self, node: &'ast $node) {
+                if attributes_exclude_production(&node.attrs) {
+                    return;
+                }
+                syn::visit::$method(self, node);
+            }
+        };
+    }
+
+    impl<'ast> Visit<'ast> for PurityVisitor {
+        fn visit_file(&mut self, file: &'ast syn::File) {
+            if attributes_exclude_production(&file.attrs) {
+                return;
+            }
+            syn::visit::visit_file(self, file);
+        }
+
+        fn visit_item(&mut self, item: &'ast Item) {
+            if item_is_test_only(item) {
+                return;
+            }
+            syn::visit::visit_item(self, item);
+        }
+
+        fn visit_foreign_item(&mut self, item: &'ast syn::ForeignItem) {
+            if attributes_exclude_production(foreign_item_attributes(item)) {
+                return;
+            }
+            syn::visit::visit_foreign_item(self, item);
+        }
+
+        fn visit_impl_item(&mut self, item: &'ast syn::ImplItem) {
+            if attributes_exclude_production(impl_item_attributes(item)) {
+                return;
+            }
+            syn::visit::visit_impl_item(self, item);
+        }
+
+        fn visit_trait_item(&mut self, item: &'ast syn::TraitItem) {
+            if attributes_exclude_production(trait_item_attributes(item)) {
+                return;
+            }
+            syn::visit::visit_trait_item(self, item);
+        }
+
+        fn visit_expr(&mut self, expr: &'ast syn::Expr) {
+            if attributes_exclude_production(expr_attributes(expr)) {
+                return;
+            }
+            syn::visit::visit_expr(self, expr);
+        }
+
+        fn visit_pat(&mut self, pat: &'ast syn::Pat) {
+            if attributes_exclude_production(pat_attributes(pat)) {
+                return;
+            }
+            syn::visit::visit_pat(self, pat);
+        }
+
+        fn visit_generic_param(&mut self, param: &'ast syn::GenericParam) {
+            if attributes_exclude_production(generic_param_attributes(param)) {
+                return;
+            }
+            syn::visit::visit_generic_param(self, param);
+        }
+
+        visit_cfg_attributed_node!(visit_arm, syn::Arm);
+        visit_cfg_attributed_node!(visit_bare_fn_arg, syn::BareFnArg);
+        visit_cfg_attributed_node!(visit_bare_variadic, syn::BareVariadic);
+        visit_cfg_attributed_node!(visit_field, syn::Field);
+        visit_cfg_attributed_node!(visit_field_pat, syn::FieldPat);
+        visit_cfg_attributed_node!(visit_field_value, syn::FieldValue);
+        visit_cfg_attributed_node!(visit_local, syn::Local);
+        visit_cfg_attributed_node!(visit_receiver, syn::Receiver);
+        visit_cfg_attributed_node!(visit_stmt_macro, syn::StmtMacro);
+        visit_cfg_attributed_node!(visit_variadic, syn::Variadic);
+        visit_cfg_attributed_node!(visit_variant, syn::Variant);
+
+        fn visit_item_use(&mut self, item_use: &'ast syn::ItemUse) {
+            for import in flatten_use_tree(&item_use.tree) {
+                if import_is_forbidden(&import) {
+                    self.forbidden_imports.push(import);
+                }
+            }
+            syn::visit::visit_item_use(self, item_use);
+        }
+
+        fn visit_path(&mut self, path: &'ast syn::Path) {
+            let segments = path
+                .segments
+                .iter()
+                .map(|segment| segment.ident.to_string())
+                .collect::<Vec<_>>();
+            if path_is_forbidden(&segments) {
+                self.forbidden_paths.push(segments.join("::"));
+            }
+            if path_is_clock_read(&segments) {
+                self.clock_paths.push(segments.join("::"));
+            }
+            syn::visit::visit_path(self, path);
+        }
+    }
+
+    #[derive(Default)]
+    struct DomainReexportVisitor {
+        blanket_reexports: Vec<ImportPath>,
+    }
+
+    impl<'ast> Visit<'ast> for DomainReexportVisitor {
+        fn visit_item(&mut self, item: &'ast Item) {
+            if item_is_test_only(item) {
+                return;
+            }
+            syn::visit::visit_item(self, item);
+        }
+
+        fn visit_item_use(&mut self, item_use: &'ast syn::ItemUse) {
+            if matches!(item_use.vis, Visibility::Public(_)) {
+                self.blanket_reexports.extend(
+                    flatten_use_tree(&item_use.tree)
+                        .into_iter()
+                        .filter(is_blanket_domain_reexport),
+                );
+            }
+            syn::visit::visit_item_use(self, item_use);
+        }
+    }
+
+    fn item_is_test_only(item: &Item) -> bool {
+        attributes_exclude_production(item_attributes(item))
+    }
+
+    fn attributes_exclude_production(attributes: &[Attribute]) -> bool {
+        attributes.iter().any(attribute_excludes_production)
+    }
+
+    fn item_attributes(item: &Item) -> &[Attribute] {
+        match item {
+            Item::Const(item) => &item.attrs,
+            Item::Enum(item) => &item.attrs,
+            Item::ExternCrate(item) => &item.attrs,
+            Item::Fn(item) => &item.attrs,
+            Item::ForeignMod(item) => &item.attrs,
+            Item::Impl(item) => &item.attrs,
+            Item::Macro(item) => &item.attrs,
+            Item::Mod(item) => &item.attrs,
+            Item::Static(item) => &item.attrs,
+            Item::Struct(item) => &item.attrs,
+            Item::Trait(item) => &item.attrs,
+            Item::TraitAlias(item) => &item.attrs,
+            Item::Type(item) => &item.attrs,
+            Item::Union(item) => &item.attrs,
+            Item::Use(item) => &item.attrs,
+            Item::Verbatim(_) => &[],
+            _ => &[],
+        }
+    }
+
+    fn foreign_item_attributes(item: &syn::ForeignItem) -> &[Attribute] {
+        match item {
+            syn::ForeignItem::Fn(item) => &item.attrs,
+            syn::ForeignItem::Static(item) => &item.attrs,
+            syn::ForeignItem::Type(item) => &item.attrs,
+            syn::ForeignItem::Macro(item) => &item.attrs,
+            _ => &[],
+        }
+    }
+
+    fn impl_item_attributes(item: &syn::ImplItem) -> &[Attribute] {
+        match item {
+            syn::ImplItem::Const(item) => &item.attrs,
+            syn::ImplItem::Fn(item) => &item.attrs,
+            syn::ImplItem::Type(item) => &item.attrs,
+            syn::ImplItem::Macro(item) => &item.attrs,
+            _ => &[],
+        }
+    }
+
+    fn trait_item_attributes(item: &syn::TraitItem) -> &[Attribute] {
+        match item {
+            syn::TraitItem::Const(item) => &item.attrs,
+            syn::TraitItem::Fn(item) => &item.attrs,
+            syn::TraitItem::Type(item) => &item.attrs,
+            syn::TraitItem::Macro(item) => &item.attrs,
+            _ => &[],
+        }
+    }
+
+    fn generic_param_attributes(param: &syn::GenericParam) -> &[Attribute] {
+        match param {
+            syn::GenericParam::Lifetime(param) => &param.attrs,
+            syn::GenericParam::Type(param) => &param.attrs,
+            syn::GenericParam::Const(param) => &param.attrs,
+        }
+    }
+
+    fn expr_attributes(expr: &syn::Expr) -> &[Attribute] {
+        match expr {
+            syn::Expr::Array(expr) => &expr.attrs,
+            syn::Expr::Assign(expr) => &expr.attrs,
+            syn::Expr::Async(expr) => &expr.attrs,
+            syn::Expr::Await(expr) => &expr.attrs,
+            syn::Expr::Binary(expr) => &expr.attrs,
+            syn::Expr::Block(expr) => &expr.attrs,
+            syn::Expr::Break(expr) => &expr.attrs,
+            syn::Expr::Call(expr) => &expr.attrs,
+            syn::Expr::Cast(expr) => &expr.attrs,
+            syn::Expr::Closure(expr) => &expr.attrs,
+            syn::Expr::Const(expr) => &expr.attrs,
+            syn::Expr::Continue(expr) => &expr.attrs,
+            syn::Expr::Field(expr) => &expr.attrs,
+            syn::Expr::ForLoop(expr) => &expr.attrs,
+            syn::Expr::Group(expr) => &expr.attrs,
+            syn::Expr::If(expr) => &expr.attrs,
+            syn::Expr::Index(expr) => &expr.attrs,
+            syn::Expr::Infer(expr) => &expr.attrs,
+            syn::Expr::Let(expr) => &expr.attrs,
+            syn::Expr::Lit(expr) => &expr.attrs,
+            syn::Expr::Loop(expr) => &expr.attrs,
+            syn::Expr::Macro(expr) => &expr.attrs,
+            syn::Expr::Match(expr) => &expr.attrs,
+            syn::Expr::MethodCall(expr) => &expr.attrs,
+            syn::Expr::Paren(expr) => &expr.attrs,
+            syn::Expr::Path(expr) => &expr.attrs,
+            syn::Expr::Range(expr) => &expr.attrs,
+            syn::Expr::RawAddr(expr) => &expr.attrs,
+            syn::Expr::Reference(expr) => &expr.attrs,
+            syn::Expr::Repeat(expr) => &expr.attrs,
+            syn::Expr::Return(expr) => &expr.attrs,
+            syn::Expr::Struct(expr) => &expr.attrs,
+            syn::Expr::Try(expr) => &expr.attrs,
+            syn::Expr::TryBlock(expr) => &expr.attrs,
+            syn::Expr::Tuple(expr) => &expr.attrs,
+            syn::Expr::Unary(expr) => &expr.attrs,
+            syn::Expr::Unsafe(expr) => &expr.attrs,
+            syn::Expr::While(expr) => &expr.attrs,
+            syn::Expr::Yield(expr) => &expr.attrs,
+            _ => &[],
+        }
+    }
+
+    fn pat_attributes(pat: &syn::Pat) -> &[Attribute] {
+        match pat {
+            syn::Pat::Const(pat) => &pat.attrs,
+            syn::Pat::Ident(pat) => &pat.attrs,
+            syn::Pat::Lit(pat) => &pat.attrs,
+            syn::Pat::Macro(pat) => &pat.attrs,
+            syn::Pat::Or(pat) => &pat.attrs,
+            syn::Pat::Paren(pat) => &pat.attrs,
+            syn::Pat::Path(pat) => &pat.attrs,
+            syn::Pat::Range(pat) => &pat.attrs,
+            syn::Pat::Reference(pat) => &pat.attrs,
+            syn::Pat::Rest(pat) => &pat.attrs,
+            syn::Pat::Slice(pat) => &pat.attrs,
+            syn::Pat::Struct(pat) => &pat.attrs,
+            syn::Pat::Tuple(pat) => &pat.attrs,
+            syn::Pat::TupleStruct(pat) => &pat.attrs,
+            syn::Pat::Type(pat) => &pat.attrs,
+            syn::Pat::Wild(pat) => &pat.attrs,
+            _ => &[],
+        }
+    }
+
+    fn attribute_excludes_production(attribute: &Attribute) -> bool {
+        let Meta::List(meta) = &attribute.meta else {
+            return false;
+        };
+        if attribute.path().is_ident("cfg") {
+            return cfg_truth_in_production(meta) == CfgTruth::False;
+        }
+        if !attribute.path().is_ident("cfg_attr") {
+            return false;
+        }
+        let Ok(arguments) =
+            Punctuated::<Meta, Token![,]>::parse_terminated.parse2(meta.tokens.clone())
+        else {
+            return false;
+        };
+        let mut arguments = arguments.into_iter();
+        let Some(condition) = arguments.next() else {
+            return false;
+        };
+        if meta_truth_in_production(&condition) != CfgTruth::True {
+            return false;
+        }
+        arguments.any(|argument| {
+            matches!(
+                argument,
+                Meta::List(action) if action.path.is_ident("cfg")
+                    && cfg_truth_in_production(&action) == CfgTruth::False
+            )
+        })
+    }
+
+    #[derive(Clone, Copy, Eq, PartialEq)]
+    enum CfgTruth {
+        True,
+        False,
+        Unknown,
+    }
+
+    fn cfg_truth_in_production(meta: &syn::MetaList) -> CfgTruth {
+        meta.parse_args::<Meta>()
+            .map(|meta| meta_truth_in_production(&meta))
+            .unwrap_or(CfgTruth::Unknown)
+    }
+
+    fn meta_truth_in_production(meta: &Meta) -> CfgTruth {
+        match meta {
+            Meta::Path(path) if path.is_ident("test") => CfgTruth::False,
+            Meta::List(meta) if meta.path.is_ident("not") => {
+                let Ok(inner) = syn::parse2::<Meta>(meta.tokens.clone()) else {
+                    return CfgTruth::Unknown;
+                };
+                match meta_truth_in_production(&inner) {
+                    CfgTruth::True => CfgTruth::False,
+                    CfgTruth::False => CfgTruth::True,
+                    CfgTruth::Unknown => CfgTruth::Unknown,
+                }
+            }
+            Meta::List(meta) if meta.path.is_ident("all") => {
+                combine_cfg_truths(meta, CfgTruth::True, |left, right| match (left, right) {
+                    (CfgTruth::False, _) | (_, CfgTruth::False) => CfgTruth::False,
+                    (CfgTruth::True, CfgTruth::True) => CfgTruth::True,
+                    _ => CfgTruth::Unknown,
+                })
+            }
+            Meta::List(meta) if meta.path.is_ident("any") => {
+                combine_cfg_truths(meta, CfgTruth::False, |left, right| match (left, right) {
+                    (CfgTruth::True, _) | (_, CfgTruth::True) => CfgTruth::True,
+                    (CfgTruth::False, CfgTruth::False) => CfgTruth::False,
+                    _ => CfgTruth::Unknown,
+                })
+            }
+            _ => CfgTruth::Unknown,
+        }
+    }
+
+    fn combine_cfg_truths(
+        meta: &syn::MetaList,
+        initial: CfgTruth,
+        combine: impl Fn(CfgTruth, CfgTruth) -> CfgTruth,
+    ) -> CfgTruth {
+        let Ok(members) =
+            Punctuated::<Meta, Token![,]>::parse_terminated.parse2(meta.tokens.clone())
+        else {
+            return CfgTruth::Unknown;
+        };
+        members
+            .iter()
+            .map(meta_truth_in_production)
+            .fold(initial, combine)
+    }
+
+    #[derive(Debug, Clone)]
+    struct ImportPath {
+        segments: Vec<String>,
+        glob: bool,
+    }
+
+    fn flatten_use_tree(tree: &UseTree) -> Vec<ImportPath> {
+        let mut imports = Vec::new();
+        flatten_use_tree_into(tree, Vec::new(), &mut imports);
+        imports
+    }
+
+    fn flatten_use_tree_into(
+        tree: &UseTree,
+        mut prefix: Vec<String>,
+        imports: &mut Vec<ImportPath>,
+    ) {
+        match tree {
+            UseTree::Path(path) => {
+                prefix.push(path.ident.to_string());
+                flatten_use_tree_into(&path.tree, prefix, imports);
+            }
+            UseTree::Name(name) => {
+                prefix.push(name.ident.to_string());
+                imports.push(ImportPath {
+                    segments: prefix,
+                    glob: false,
+                });
+            }
+            UseTree::Rename(rename) => {
+                prefix.push(rename.ident.to_string());
+                imports.push(ImportPath {
+                    segments: prefix,
+                    glob: false,
+                });
+            }
+            UseTree::Glob(_) => imports.push(ImportPath {
+                segments: prefix,
+                glob: true,
+            }),
+            UseTree::Group(group) => {
+                for tree in &group.items {
+                    flatten_use_tree_into(tree, prefix.clone(), imports);
+                }
+            }
+        }
+    }
+
+    fn import_is_forbidden(import: &ImportPath) -> bool {
+        path_is_forbidden(&import.segments)
+    }
+
+    fn path_is_forbidden(segments: &[String]) -> bool {
+        match segments {
+            [root, module, ..]
+                if root == "crate" && FORBIDDEN_KERNEL_CRATE_MODULES.contains(&module.as_str()) =>
+            {
+                true
+            }
+            [root, ..] if FORBIDDEN_EXTERNAL_CRATES.contains(&root.as_str()) => true,
+            [root, module, ..]
+                if root == "std" && FORBIDDEN_STD_MODULES.contains(&module.as_str()) =>
+            {
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn path_is_clock_read(segments: &[String]) -> bool {
+        matches!(
+            segments,
+            [.., clock, now]
+                if matches!(clock.as_str(), "Utc" | "Local" | "Instant" | "SystemTime")
+                    && now == "now"
+        )
+    }
+
+    fn is_blanket_domain_reexport(import: &ImportPath) -> bool {
+        matches!(
+            import.segments.as_slice(),
+            [domain] if domain == "ocg_domain"
+        ) || matches!(
+            import.segments.as_slice(),
+            [domain, self_segment] if domain == "ocg_domain" && self_segment == "self"
+        ) || matches!(
+            import.segments.as_slice(),
+            [domain, module]
+                if domain == "ocg_domain"
+                    && ["catalog", "ids", "pricing", "protocol", "zen"].contains(&module.as_str())
+        ) || (import
+            .segments
+            .first()
+            .is_some_and(|segment| segment == "ocg_domain")
+            && import.glob)
+    }
+
     fn production_graph(
         src_root: &Path,
         modules: &BTreeSet<String>,
@@ -1149,25 +1961,19 @@ mod dependency_guard {
         roots
     }
 
-    // This is intentionally a narrow source guard, not Rust module resolution.
-    // `production_source` removes comments, strings, and cfg(test) fixtures first.
     fn alias_imports_custom(source: &str) -> bool {
-        source.split(';').any(|statement| {
-            let compact: String = statement.chars().filter(|ch| !ch.is_whitespace()).collect();
-            compact.contains("crate::custom")
-                || compact.contains("super::custom")
-                || grouped_import_contains_custom(&compact, "usecrate::{")
-                || grouped_import_contains_custom(&compact, "usesuper::{")
-        })
-    }
-
-    fn grouped_import_contains_custom(statement: &str, prefix: &str) -> bool {
-        let Some(items) = statement.strip_prefix(prefix) else {
-            return false;
-        };
-        items.split(',').any(|item| {
-            let item = item.trim_end_matches('}');
-            item == "custom" || item.starts_with("custom::")
+        let parsed = parse_rust_file(Path::new("alias.rs"), source);
+        parsed.items.into_iter().any(|item| {
+            let Item::Use(item_use) = item else {
+                return false;
+            };
+            flatten_use_tree(&item_use.tree).into_iter().any(|import| {
+                matches!(
+                    import.segments.as_slice(),
+                    [root, module, ..]
+                        if matches!(root.as_str(), "crate" | "super") && module == "custom"
+                )
+            })
         })
     }
 

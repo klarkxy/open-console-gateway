@@ -1,0 +1,14 @@
+[package]
+name = "ocg-domain"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license-file.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Pure domain identities, catalogs, protocol policy, and Zen model normalization for OCG Manager"
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["serde", "std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
