@@ -132,6 +132,7 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "AuthLogout",
     "ProxyTestRequest",
     "ProxyTestResponse",
+    "AccountManagedKeyVerify",
 ];
 
 pub const ERROR_UNAUTHORIZED: &str = "unauthorized";
@@ -773,6 +774,17 @@ pub struct AccountSetupUpdate {
     #[serde(flatten)]
     pub expectation: MutationExpectation,
     pub setup_step: AccountSetupStep,
+}
+
+/// POST `/accounts/{id}/setup/verify-key` body. CAS tokens and the write-only
+/// `key` are required. Unknown fields are rejected. The key is never echoed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AccountManagedKeyVerify {
+    #[serde(flatten)]
+    pub expectation: MutationExpectation,
+    pub key: String,
 }
 
 /// PUT `/accounts/{id}/custom-config` body. Protocol and auth scheme are
@@ -2059,6 +2071,7 @@ pub fn contract_schema() -> Value {
     include_type::<AccountUpdate>(&mut deserialize);
     include_type::<AccountOrder>(&mut deserialize);
     include_type::<AccountSetupUpdate>(&mut deserialize);
+    include_type::<AccountManagedKeyVerify>(&mut deserialize);
     include_type::<AccountCustomConfigUpdate>(&mut deserialize);
     include_type::<AccountCustomConfigWrite>(&mut deserialize);
     include_type::<AccountModelCapabilitiesUpdate>(&mut deserialize);
@@ -2612,6 +2625,32 @@ mod tests {
         assert_eq!(patched.enabled, Some(false));
         assert!(patched.key.is_none());
         assert!(patched.name.is_none());
+
+        let verify: AccountManagedKeyVerify = serde_json::from_value(json!({
+            "expectedRevision": 5,
+            "processGeneration": 9,
+            "key": "sk-secret"
+        }))
+        .unwrap();
+        assert_eq!(verify.expectation.expected_revision, 5);
+        assert_eq!(verify.expectation.process_generation, 9);
+        assert_eq!(verify.key, "sk-secret");
+        assert!(
+            serde_json::from_value::<AccountManagedKeyVerify>(json!({
+                "expectedRevision": 5,
+                "processGeneration": 9,
+                "key": "sk-secret",
+                "setupStep": "key_verification"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<AccountManagedKeyVerify>(json!({
+                "expectedRevision": 5,
+                "processGeneration": 9
+            }))
+            .is_err()
+        );
     }
 
     #[test]
@@ -3467,6 +3506,7 @@ mod tests {
     ];
 
     const PROXY_TEST_CATALOG_TYPES: &[&str] = &["ProxyTestRequest", "ProxyTestResponse"];
+    const MANAGED_KEY_VERIFY_CATALOG_TYPES: &[&str] = &["AccountManagedKeyVerify"];
 
     #[test]
     fn catalog_type_names_append_pricing_dtos_after_the_provider_prefix() {
@@ -3501,7 +3541,12 @@ mod tests {
             &CATALOG_TYPE_NAMES[auth_end..proxy_end],
             PROXY_TEST_CATALOG_TYPES
         );
-        assert_eq!(CATALOG_TYPE_NAMES.len(), proxy_end);
+        let managed_end = proxy_end + MANAGED_KEY_VERIFY_CATALOG_TYPES.len();
+        assert_eq!(
+            &CATALOG_TYPE_NAMES[proxy_end..managed_end],
+            MANAGED_KEY_VERIFY_CATALOG_TYPES
+        );
+        assert_eq!(CATALOG_TYPE_NAMES.len(), managed_end);
     }
 
     #[test]
@@ -4379,6 +4424,44 @@ mod tests {
             assert!(
                 !response_props.contains_key(forbidden),
                 "ProxyTestResponse must not expose {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn managed_key_verify_request_requires_cas_and_write_only_key() {
+        let schema = contract_schema();
+        let defs = schema["$defs"].as_object().expect("catalog $defs");
+        assert!(defs.contains_key("AccountManagedKeyVerify"));
+        assert_eq!(
+            defs["AccountManagedKeyVerify"]["additionalProperties"],
+            false
+        );
+        let required = defs["AccountManagedKeyVerify"]["required"]
+            .as_array()
+            .expect("AccountManagedKeyVerify.required");
+        for field in ["expectedRevision", "processGeneration", "key"] {
+            assert!(
+                required.iter().any(|value| value == field),
+                "{field} must be required"
+            );
+        }
+        assert_eq!(required.len(), 3);
+        let props = defs["AccountManagedKeyVerify"]["properties"]
+            .as_object()
+            .expect("AccountManagedKeyVerify.properties");
+        assert_eq!(props["key"]["type"], "string");
+        for forbidden in [
+            "keyCipher",
+            "gatewayKey",
+            "primaryKey",
+            "setupStep",
+            "account",
+            "expected_revision",
+        ] {
+            assert!(
+                !props.contains_key(forbidden),
+                "AccountManagedKeyVerify must not expose {forbidden}"
             );
         }
     }

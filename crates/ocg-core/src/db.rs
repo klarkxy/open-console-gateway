@@ -129,6 +129,62 @@ pub struct AccountUsageSyncSuccessMetadata {
 /// Never stores plaintext keys or upstream bodies.
 pub type AccountUsageSyncState = ProviderUsageSyncState;
 
+/// Row identity captured before an asynchronous managed-key verification.
+///
+/// `updated_at` is the row version for this schema. Keeping the original
+/// ciphertext in the fingerprint additionally catches the legacy V2 verify
+/// path, which can replace a candidate key without advancing the V3 control
+/// revision while the upstream request is in flight.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedKeyVerificationCas {
+    pub key_cipher: String,
+    pub updated_at: DateTime<Utc>,
+    pub provider_id: String,
+    pub offering_id: String,
+    pub account_type: AccountType,
+    pub setup_step: AccountSetupStep,
+}
+
+impl ManagedKeyVerificationCas {
+    pub fn from_account(account: &Account) -> Self {
+        Self {
+            key_cipher: account.key_cipher.clone(),
+            updated_at: account.updated_at,
+            provider_id: account.provider_id.clone(),
+            offering_id: account.offering_id.clone(),
+            account_type: account.account_type,
+            setup_step: account.setup_step,
+        }
+    }
+}
+
+/// Sanitized rate-limit state accepted as a successful managed-key probe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedKeyVerificationRateLimit {
+    pub until: DateTime<Utc>,
+    pub error: String,
+    pub window: Option<UsageWindowKind>,
+}
+
+/// Persistent result of one V3 managed-key verification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ManagedKeyVerificationWrite {
+    Verified {
+        rate_limit: Option<ManagedKeyVerificationRateLimit>,
+        account_name: String,
+    },
+    AuthFailed {
+        auth_error: String,
+    },
+    Pending,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManagedKeyVerificationCommit {
+    Applied,
+    Conflict,
+}
+
 #[derive(Debug)]
 pub enum ReorderAccountsError {
     DuplicateAccountId,
@@ -3559,6 +3615,135 @@ impl Database {
         Ok(changed == 1)
     }
 
+    /// Commit a V3 managed-key verification as one all-or-nothing SQLite
+    /// transaction. The initial row fingerprint is checked by the first write,
+    /// before the candidate ciphertext can replace a concurrent V2 update.
+    pub fn commit_managed_key_verification(
+        &self,
+        id: &str,
+        expected: &ManagedKeyVerificationCas,
+        candidate_key_cipher: &str,
+        write: &ManagedKeyVerificationWrite,
+    ) -> Result<ManagedKeyVerificationCommit> {
+        if matches!(write, ManagedKeyVerificationWrite::Verified { .. }) {
+            ensure_enabled_offering_is_routable(
+                &expected.provider_id,
+                &expected.offering_id,
+                true,
+            )?;
+        }
+
+        let now = Utc::now();
+        let now_rfc = now.to_rfc3339();
+        let tx = self.conn.unchecked_transaction()?;
+        let changed = tx.execute(
+            "UPDATE accounts
+             SET key_cipher = ?1, enabled = 0, auth_error = NULL, last_error = NULL,
+                 updated_at = ?2
+             WHERE id = ?3 AND key_cipher = ?4 AND updated_at = ?5
+               AND provider_id = ?6 AND offering_id = ?7
+               AND account_type = ?8 AND setup_step = ?9",
+            params![
+                candidate_key_cipher,
+                now_rfc,
+                id,
+                expected.key_cipher,
+                expected.updated_at.to_rfc3339(),
+                expected.provider_id,
+                expected.offering_id,
+                expected.account_type.as_str(),
+                expected.setup_step.as_str(),
+            ],
+        )?;
+        if changed != 1 {
+            return Ok(ManagedKeyVerificationCommit::Conflict);
+        }
+
+        match write {
+            ManagedKeyVerificationWrite::Verified {
+                rate_limit,
+                account_name,
+            } => {
+                if let Some(rate_limit) = rate_limit {
+                    let column = match rate_limit.window {
+                        Some(UsageWindowKind::FiveHours) => "cooldown_5h_until",
+                        Some(UsageWindowKind::Week) => "cooldown_week_until",
+                        Some(UsageWindowKind::Month) => "cooldown_month_until",
+                        Some(UsageWindowKind::Free) => "cooldown_free_until",
+                        None => "cooldown_generic_until",
+                    };
+                    let completed = tx.execute(
+                        &format!(
+                            "UPDATE accounts
+                             SET {column} = ?2, last_error = ?3,
+                                 setup_step = 'ready', enabled = 1, auth_error = NULL,
+                                 verification_status = CASE
+                                     WHEN verification_status = 'not_required'
+                                     THEN 'not_required' ELSE 'verified' END,
+                                 connection_verified_at = CASE
+                                     WHEN verification_status = 'not_required'
+                                     THEN NULL ELSE ?4 END,
+                                 verification_error = NULL, updated_at = ?4
+                             WHERE id = ?1 AND key_cipher = ?5"
+                        ),
+                        params![
+                            id,
+                            rate_limit.until.to_rfc3339(),
+                            rate_limit.error,
+                            now_rfc,
+                            candidate_key_cipher,
+                        ],
+                    )?;
+                    anyhow::ensure!(completed == 1, "managed verification row disappeared");
+                    let cooldown_until = Self::compute_cooldown_until(&tx, id, &now_rfc)?;
+                    tx.execute(
+                        "UPDATE accounts SET cooldown_until = ?2 WHERE id = ?1",
+                        params![id, cooldown_until],
+                    )?;
+                    if rate_limit.window == Some(UsageWindowKind::Free) {
+                        Self::upsert_free_channel_cooldown(&tx, &rate_limit.until.to_rfc3339())?;
+                    }
+                } else {
+                    let completed = tx.execute(
+                        "UPDATE accounts
+                         SET setup_step = 'ready', enabled = 1, auth_error = NULL,
+                             cooldown_until = NULL, cooldown_generic_until = NULL,
+                             cooldown_5h_until = NULL, cooldown_week_until = NULL,
+                             cooldown_month_until = NULL, cooldown_free_until = NULL,
+                             last_error = NULL,
+                             verification_status = CASE
+                                 WHEN verification_status = 'not_required'
+                                 THEN 'not_required' ELSE 'verified' END,
+                             connection_verified_at = CASE
+                                 WHEN verification_status = 'not_required'
+                                 THEN NULL ELSE ?2 END,
+                             verification_error = NULL, updated_at = ?2
+                         WHERE id = ?1 AND key_cipher = ?3",
+                        params![id, now_rfc, candidate_key_cipher],
+                    )?;
+                    anyhow::ensure!(completed == 1, "managed verification row disappeared");
+                }
+                tx.execute(
+                    "INSERT INTO gateway_logs (level, category, message, created_at)
+                     VALUES ('info', 'account', ?1, ?2)",
+                    params![format!("verified managed account {account_name}"), now_rfc],
+                )?;
+            }
+            ManagedKeyVerificationWrite::AuthFailed { auth_error } => {
+                let updated = tx.execute(
+                    "UPDATE accounts SET auth_error = ?2, updated_at = ?3
+                     WHERE id = ?1 AND key_cipher = ?4",
+                    params![id, auth_error, now_rfc, candidate_key_cipher],
+                )?;
+                anyhow::ensure!(updated == 1, "managed verification row disappeared");
+            }
+            ManagedKeyVerificationWrite::Pending => {}
+        }
+
+        tx.commit()?;
+        Ok(ManagedKeyVerificationCommit::Applied)
+    }
+
     /// Make a verified managed account routable only if the tested encrypted key
     /// is still the one stored in the row.
     pub fn complete_managed_setup_if_key_matches(
@@ -6130,6 +6315,95 @@ mod tests {
         let ready = db.get_account("managed").unwrap().unwrap();
         assert_eq!(ready.setup_step, AccountSetupStep::Ready);
         assert!(ready.enabled);
+
+        drop(db);
+        fs::remove_dir_all(dir).expect("test data dir should be removed");
+    }
+
+    #[test]
+    fn managed_key_verification_transaction_rolls_back_after_candidate_write_failure() {
+        let dir = temp_data_dir("managed-key-atomic-rollback");
+        let db = Database::open(dir.clone()).expect("db should open");
+        let mut managed = account("managed-atomic");
+        managed.account_type = AccountType::Managed;
+        managed.setup_step = AccountSetupStep::KeyVerification;
+        managed.key_cipher = "original-cipher".into();
+        managed.enabled = false;
+        db.create_account(&managed).expect("draft should save");
+        let cooldown = (Utc::now() + Duration::hours(2)).to_rfc3339();
+        db.conn
+            .execute(
+                "UPDATE accounts
+                 SET auth_error = 'original-auth', last_error = 'original-limit',
+                     cooldown_until = ?2, cooldown_generic_until = ?2,
+                     verification_error = 'original-verification'
+                 WHERE id = ?1",
+                params![managed.id, cooldown],
+            )
+            .expect("rollback sentinel state should save");
+        let before = db.get_account(&managed.id).unwrap().unwrap();
+        let before_verification = db.account_verification_state(&managed.id).unwrap().unwrap();
+
+        // The first transaction update writes the candidate while leaving the
+        // setup step unchanged. This trigger deterministically aborts the
+        // following completion update, after that first intended write.
+        db.conn
+            .execute_batch(
+                "CREATE TRIGGER fail_managed_verification_completion
+                 BEFORE UPDATE ON accounts
+                 WHEN OLD.id = 'managed-atomic'
+                      AND OLD.setup_step = 'key_verification'
+                      AND NEW.setup_step = 'ready'
+                 BEGIN
+                     SELECT RAISE(ABORT, 'injected managed verification completion failure');
+                 END;",
+            )
+            .expect("fault trigger should install");
+
+        let error = db
+            .commit_managed_key_verification(
+                &managed.id,
+                &ManagedKeyVerificationCas::from_account(&before),
+                "candidate-cipher",
+                &ManagedKeyVerificationWrite::Verified {
+                    rate_limit: None,
+                    account_name: managed.name.clone(),
+                },
+            )
+            .expect_err("second intended write should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("injected managed verification completion failure"),
+            "{error:#}"
+        );
+
+        let after = db.get_account(&managed.id).unwrap().unwrap();
+        let after_verification = db.account_verification_state(&managed.id).unwrap().unwrap();
+        assert_eq!(after.key_cipher, before.key_cipher);
+        assert_eq!(after.enabled, before.enabled);
+        assert_eq!(after.setup_step, before.setup_step);
+        assert_eq!(after.auth_error, before.auth_error);
+        assert_eq!(after.last_error, before.last_error);
+        assert_eq!(after.cooldown_until, before.cooldown_until);
+        assert_eq!(after.cooldown_generic_until, before.cooldown_generic_until);
+        assert_eq!(after.updated_at, before.updated_at);
+        assert_eq!(after_verification.status, before_verification.status);
+        assert_eq!(
+            after_verification.connection_verified_at,
+            before_verification.connection_verified_at
+        );
+        assert_eq!(
+            after_verification.verification_error,
+            before_verification.verification_error
+        );
+        assert!(
+            db.list_gateway_logs(10)
+                .unwrap()
+                .iter()
+                .all(|log| !log.message.contains("managed-atomic")),
+            "success log must roll back with the account writes"
+        );
 
         drop(db);
         fs::remove_dir_all(dir).expect("test data dir should be removed");
