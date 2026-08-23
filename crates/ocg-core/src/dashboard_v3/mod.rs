@@ -6,11 +6,12 @@
 //! access-key lifecycle, the local accounts control plane, local account usage
 //! calibration and provider-usage reads, the local/Zen provider catalog,
 //! contracts, Zen Free control plane, pricing, the settings proxy diagnostic,
-//! read-only observability, and Go/Zen
-//! protocol probes. Custom protocol probes stay account-owned on V2.
+//! read-only observability, Go/Zen protocol probes, and the Claude Desktop
+//! three-role model mapping. Custom protocol probes stay account-owned on V2.
 
 mod accounts;
 mod auth;
+mod claude_desktop;
 mod connection;
 mod keys;
 mod observability;
@@ -47,27 +48,27 @@ pub use types::{
     AccountMutation, AccountOrder, AccountQuotaScope, AccountSetupStep, AccountSetupUpdate,
     AccountType, AccountUpdate, AccountUpstreamProtocol, AccountUsageUpdate,
     AccountVerificationStatus, ApplicationModels, AuthLogin, AuthLogout, AuthRegister, AuthStatus,
-    CATALOG_TYPE_NAMES, CapabilitySummary, CardCapabilitySummary, ConnectionInfo, ConnectionSubKey,
-    ContractScopeKind, ControlRevision, CreditBalance, CustomEndpointContract, DailyCostByModel,
-    DailyCostQuery, DailyModelCost, DashboardSummary, ERROR_CONFLICT, ERROR_INTERNAL,
-    ERROR_INVALID_JSON, ERROR_INVALID_REQUEST, ERROR_MISSING_EXPECTED_REVISION, ERROR_NOT_FOUND,
-    ERROR_NOT_IMPLEMENTED, ERROR_OUTBOUND_FAILED, ERROR_PRECONDITION_FAILED,
-    ERROR_REVISION_CONFLICT, ERROR_SERVICE_UNAVAILABLE, ERROR_UNAUTHORIZED, EffectiveCatalog,
-    EffectiveModelContract, EffectiveModelProtocols, EffectiveProtocolEvidence, ForwardLog,
-    ForwardLogClientKey, ForwardLogKeys, ForwardLogModels, ForwardLogQuery, ForwardLogSummary,
-    ForwardLogs, GatewayLog, GatewayLogQuery, GatewayLogs, GatewayStatus, KeyCreate, KeyUpdate,
-    MutationAck, MutationExpectation, PricingAdjustment, PricingAvailability, PricingLimits,
-    PricingModel, PricingMultiplierChange, PricingMultiplierWrite, PricingMultipliersUpdate,
-    PricingRefresh, PricingRefreshPolicy, PricingRefreshStatus, PricingRefreshUpdate,
-    PricingRevision, PricingSnapshot, PricingTimeWindow, ProtocolProbeRequest,
-    ProtocolProbeResponse, ProtocolProbeResult, ProtocolSwitchUpdate, ProtocolSwitches,
-    ProviderAccountChoice, ProviderCatalog, ProviderCatalogEntry, ProviderCatalogFormField,
-    ProviderCatalogRiskNotice, ProviderContractGroup, ProviderContracts, ProviderModelCapability,
-    ProviderOfferingChoice, ProviderPricing, ProviderUsage, ProxyListDirection, ProxyMode,
-    ProxySupportedModel, ProxyTestRequest, ProxyTestResponse, QuotaWindow, RoutingMode, Settings,
-    SettingsUpdate, UsageAvailability, UsageMutation, UsageSyncState, UsageWindow, V3Error,
-    ZenFreeModel, ZenFreeModels, ZenFreeSettings, ZenFreeSettingsUpdate, contract_schema,
-    contract_schema_pretty,
+    CATALOG_TYPE_NAMES, CapabilitySummary, CardCapabilitySummary, ClaudeDesktopModels,
+    ClaudeDesktopModelsUpdate, ConnectionInfo, ConnectionSubKey, ContractScopeKind,
+    ControlRevision, CreditBalance, CustomEndpointContract, DailyCostByModel, DailyCostQuery,
+    DailyModelCost, DashboardSummary, ERROR_CONFLICT, ERROR_INTERNAL, ERROR_INVALID_JSON,
+    ERROR_INVALID_REQUEST, ERROR_MISSING_EXPECTED_REVISION, ERROR_NOT_FOUND, ERROR_NOT_IMPLEMENTED,
+    ERROR_OUTBOUND_FAILED, ERROR_PRECONDITION_FAILED, ERROR_REVISION_CONFLICT,
+    ERROR_SERVICE_UNAVAILABLE, ERROR_UNAUTHORIZED, EffectiveCatalog, EffectiveModelContract,
+    EffectiveModelProtocols, EffectiveProtocolEvidence, ForwardLog, ForwardLogClientKey,
+    ForwardLogKeys, ForwardLogModels, ForwardLogQuery, ForwardLogSummary, ForwardLogs, GatewayLog,
+    GatewayLogQuery, GatewayLogs, GatewayStatus, KeyCreate, KeyUpdate, MutationAck,
+    MutationExpectation, PricingAdjustment, PricingAvailability, PricingLimits, PricingModel,
+    PricingMultiplierChange, PricingMultiplierWrite, PricingMultipliersUpdate, PricingRefresh,
+    PricingRefreshPolicy, PricingRefreshStatus, PricingRefreshUpdate, PricingRevision,
+    PricingSnapshot, PricingTimeWindow, ProtocolProbeRequest, ProtocolProbeResponse,
+    ProtocolProbeResult, ProtocolSwitchUpdate, ProtocolSwitches, ProviderAccountChoice,
+    ProviderCatalog, ProviderCatalogEntry, ProviderCatalogFormField, ProviderCatalogRiskNotice,
+    ProviderContractGroup, ProviderContracts, ProviderModelCapability, ProviderOfferingChoice,
+    ProviderPricing, ProviderUsage, ProxyListDirection, ProxyMode, ProxySupportedModel,
+    ProxyTestRequest, ProxyTestResponse, QuotaWindow, RoutingMode, Settings, SettingsUpdate,
+    UsageAvailability, UsageMutation, UsageSyncState, UsageWindow, V3Error, ZenFreeModel,
+    ZenFreeModels, ZenFreeSettings, ZenFreeSettingsUpdate, contract_schema, contract_schema_pretty,
 };
 
 #[cfg(debug_assertions)]
@@ -85,6 +86,11 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
             get(settings::get_settings).put(settings::put_settings),
         )
         .route("/settings/test-proxy", post(proxy_test::test_proxy))
+        .route(
+            "/claude-desktop/models",
+            get(claude_desktop::get_claude_desktop_models)
+                .put(claude_desktop::put_claude_desktop_models),
+        )
         .route("/pricing", get(pricing::get_pricing))
         .route("/pricing/refresh", post(pricing::refresh_pricing))
         .route(
