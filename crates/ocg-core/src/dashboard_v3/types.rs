@@ -6,7 +6,11 @@
 //! `/auth/logout`. Pricing mutations also require `expectedPricingRevision`.
 //! Operational diagnostics such as `POST /settings/test-proxy` are not mutations
 //! and neither require nor accept CAS tokens. Custom model discovery is also an
-//! operational probe without `expectedRevision`. Plaintext keys must not appear on `Settings` or
+//! operational probe without `expectedRevision`. `GET /settings/check-update` and
+//! `GET /settings/update-status` are operational reads without CAS and do not bump
+//! revision. `POST /settings/install-update` is an in-memory control-plane mutation
+//! that requires `expectedRevision` and `processGeneration` but does not bump them.
+//! Plaintext keys must not appear on `Settings` or
 //! provider/Zen/contract DTOs — `ConnectionInfo` is the only secret-bearing
 //! V3 response DTO. `CustomModelDiscoveryRequest.apiKey` is write-only. Protocol path/switch tokens
 //! stay `chat_completions`, `responses`, and `messages`. Pricing wire DTOs are
@@ -135,6 +139,9 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "ProxyTestResponse",
     "CustomModelDiscoveryRequest",
     "CustomModelDiscoveryResponse",
+    "UpdateCheck",
+    "DesktopUpdate",
+    "InstallUpdate",
 ];
 
 pub const ERROR_UNAUTHORIZED: &str = "unauthorized";
@@ -1391,6 +1398,62 @@ pub struct CustomModelDiscoveryResponse {
     pub pricing_revision: String,
 }
 
+/// GET `/settings/check-update` result. Identity tokens are captured before
+/// the GitHub await and are not bumped. `releaseUrl` is the fixed public
+/// GitHub latest-release page, never the outbound API URL or a loopback seam.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpdateCheck {
+    pub current_version: String,
+    pub latest_version: String,
+    pub update_available: bool,
+    pub release_url: String,
+    pub install_supported: bool,
+    pub revision: u64,
+    pub process_generation: u64,
+}
+
+/// Desktop signed-update status machine as exposed by GET `/settings/update-status`
+/// and POST `/settings/install-update`. `total` and `error` stay required `T | null`.
+/// Identity tokens are the live CAS pair and are not bumped by polling or install.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DesktopUpdate {
+    pub phase: DesktopUpdatePhase,
+    pub downloaded: u64,
+    pub total: Option<u64>,
+    pub error: Option<String>,
+    pub current_version: String,
+    pub install_supported: bool,
+    pub revision: u64,
+    pub process_generation: u64,
+}
+
+/// Update-status phase. Wire values stay lowercase, matching V2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+#[schemars(rename_all = "lowercase")]
+pub enum DesktopUpdatePhase {
+    Idle,
+    Checking,
+    Downloading,
+    Installing,
+    Failed,
+}
+
+/// POST `/settings/install-update` body. CAS tokens and `expectedVersion` are
+/// required. Unknown fields are rejected. This mutation does not bump revision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InstallUpdate {
+    #[serde(flatten)]
+    pub expectation: MutationExpectation,
+    pub expected_version: String,
+}
+
 /// Contract scope kind. Wire values match V2 `provider` / `custom_endpoint`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -2082,6 +2145,8 @@ pub fn contract_schema() -> Value {
     include_type::<AuthStatus>(&mut serialize);
     include_type::<ProxyTestResponse>(&mut serialize);
     include_type::<CustomModelDiscoveryResponse>(&mut serialize);
+    include_type::<UpdateCheck>(&mut serialize);
+    include_type::<DesktopUpdate>(&mut serialize);
     let mut defs = serialize.take_definitions(true);
 
     let mut deserialize = SchemaSettings::draft2020_12().into_generator();
@@ -2116,6 +2181,7 @@ pub fn contract_schema() -> Value {
     include_type::<AuthLogout>(&mut deserialize);
     include_type::<ProxyTestRequest>(&mut deserialize);
     include_type::<CustomModelDiscoveryRequest>(&mut deserialize);
+    include_type::<InstallUpdate>(&mut deserialize);
     for (name, schema) in deserialize.take_definitions(true) {
         defs.entry(name).or_insert(schema);
     }
@@ -2738,6 +2804,23 @@ mod tests {
             Value::Object(map) => map.values().flat_map(json_string_values).collect(),
             _ => Vec::new(),
         }
+    }
+
+    fn schema_allows_null(schema: &Value) -> bool {
+        if schema.get("type").and_then(Value::as_str) == Some("null") {
+            return true;
+        }
+        if schema
+            .get("type")
+            .and_then(Value::as_array)
+            .is_some_and(|types| types.iter().any(|value| value == "null"))
+        {
+            return true;
+        }
+        schema
+            .get("anyOf")
+            .and_then(Value::as_array)
+            .is_some_and(|items| items.iter().any(schema_allows_null))
     }
 
     fn assert_secret_free(value: &Value) {
@@ -3495,6 +3578,181 @@ mod tests {
         );
     }
 
+    #[test]
+    fn updater_dtos_use_camel_case_nulls_and_install_requires_cas() {
+        let check = UpdateCheck {
+            current_version: "1.0.0".into(),
+            latest_version: "1.1.0".into(),
+            update_available: true,
+            release_url: "https://github.com/klarkxy/opencode-go-mgr/releases/latest".into(),
+            install_supported: false,
+            revision: 11,
+            process_generation: 9,
+        };
+        let check_value = serde_json::to_value(&check).unwrap();
+        assert_eq!(
+            check_value,
+            json!({
+                "currentVersion": "1.0.0",
+                "latestVersion": "1.1.0",
+                "updateAvailable": true,
+                "releaseUrl": "https://github.com/klarkxy/opencode-go-mgr/releases/latest",
+                "installSupported": false,
+                "revision": 11,
+                "processGeneration": 9,
+            })
+        );
+        assert!(check_value.get("current_version").is_none());
+        assert!(check_value.get("release_url").is_none());
+        assert_secret_free(&check_value);
+
+        let idle = DesktopUpdate {
+            phase: DesktopUpdatePhase::Idle,
+            downloaded: 0,
+            total: None,
+            error: None,
+            current_version: "1.0.0".into(),
+            install_supported: true,
+            revision: 11,
+            process_generation: 9,
+        };
+        let idle_value = serde_json::to_value(&idle).unwrap();
+        assert_eq!(
+            idle_value,
+            json!({
+                "phase": "idle",
+                "downloaded": 0,
+                "total": null,
+                "error": null,
+                "currentVersion": "1.0.0",
+                "installSupported": true,
+                "revision": 11,
+                "processGeneration": 9,
+            })
+        );
+        assert!(idle_value.get("current_version").is_none());
+        assert!(idle_value.get("install_supported").is_none());
+        assert_secret_free(&idle_value);
+
+        let failed = DesktopUpdate {
+            phase: DesktopUpdatePhase::Failed,
+            downloaded: 64,
+            total: Some(128),
+            error: Some("signature verification failed".into()),
+            ..idle
+        };
+        let failed_value = serde_json::to_value(&failed).unwrap();
+        assert_eq!(failed_value["phase"], "failed");
+        assert_eq!(failed_value["downloaded"], 64);
+        assert_eq!(failed_value["total"], 128);
+        assert_eq!(failed_value["error"], "signature verification failed");
+
+        let install: InstallUpdate = serde_json::from_value(json!({
+            "expectedRevision": 11,
+            "processGeneration": 9,
+            "expectedVersion": "1.1.0"
+        }))
+        .unwrap();
+        assert_eq!(install.expectation.expected_revision, 11);
+        assert_eq!(install.expectation.process_generation, 9);
+        assert_eq!(install.expected_version, "1.1.0");
+        assert!(
+            serde_json::from_value::<InstallUpdate>(json!({
+                "processGeneration": 9,
+                "expectedVersion": "1.1.0"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<InstallUpdate>(json!({
+                "expectedRevision": 11,
+                "processGeneration": 9,
+                "expected_version": "1.1.0"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<InstallUpdate>(json!({
+                "expectedRevision": 11,
+                "processGeneration": 9,
+                "expectedVersion": "1.1.0",
+                "key": "sk-secret"
+            }))
+            .is_err()
+        );
+
+        let schema = contract_schema();
+        let defs = schema["$defs"].as_object().expect("catalog $defs");
+        for name in UPDATER_CATALOG_TYPES {
+            assert!(defs.contains_key(*name), "schema missing {name}");
+        }
+
+        let check_required = defs["UpdateCheck"]["required"].as_array().unwrap();
+        assert_eq!(
+            check_required,
+            &vec![
+                json!("currentVersion"),
+                json!("latestVersion"),
+                json!("updateAvailable"),
+                json!("releaseUrl"),
+                json!("installSupported"),
+                json!("revision"),
+                json!("processGeneration"),
+            ]
+        );
+        assert!(
+            !defs["UpdateCheck"]["properties"]
+                .as_object()
+                .unwrap()
+                .contains_key("expectedRevision")
+        );
+
+        let status_required = defs["DesktopUpdate"]["required"].as_array().unwrap();
+        for field in [
+            "phase",
+            "downloaded",
+            "total",
+            "error",
+            "currentVersion",
+            "installSupported",
+            "revision",
+            "processGeneration",
+        ] {
+            assert!(
+                status_required.iter().any(|value| value == field),
+                "{field} must stay required so responses emit T|null"
+            );
+        }
+        let status_props = defs["DesktopUpdate"]["properties"].as_object().unwrap();
+        assert!(schema_allows_null(&status_props["total"]));
+        assert!(schema_allows_null(&status_props["error"]));
+        assert!(!schema_allows_null(&status_props["downloaded"]));
+        assert!(!status_props.contains_key("current_version"));
+        assert!(!status_props.contains_key("install_supported"));
+
+        let install_schema = &defs["InstallUpdate"];
+        assert_eq!(install_schema["additionalProperties"], false);
+        let install_required = install_schema["required"].as_array().unwrap();
+        assert_eq!(
+            install_required,
+            &vec![
+                json!("expectedRevision"),
+                json!("processGeneration"),
+                json!("expectedVersion"),
+            ]
+        );
+        assert!(
+            !install_schema["properties"]
+                .as_object()
+                .unwrap()
+                .contains_key("expected_version")
+        );
+        assert_eq!(
+            defs["DesktopUpdatePhase"]["enum"],
+            json!(["idle", "checking", "downloading", "installing", "failed"])
+        );
+    }
+
     const PROVIDER_CATALOG_TYPES: &[&str] = &[
         "ProviderCatalog",
         "ProviderCatalogEntry",
@@ -3614,6 +3872,8 @@ mod tests {
         "CustomModelDiscoveryResponse",
     ];
 
+    const UPDATER_CATALOG_TYPES: &[&str] = &["UpdateCheck", "DesktopUpdate", "InstallUpdate"];
+
     #[test]
     fn catalog_type_names_append_pricing_dtos_after_the_provider_prefix() {
         let prefix_len = ACCOUNTS_CATALOG_PREFIX.len() + PROVIDER_CATALOG_TYPES.len();
@@ -3652,7 +3912,13 @@ mod tests {
             &CATALOG_TYPE_NAMES[proxy_end..custom_discovery_end],
             CUSTOM_DISCOVERY_CATALOG_TYPES
         );
-        assert_eq!(CATALOG_TYPE_NAMES.len(), custom_discovery_end);
+        let updater_end = custom_discovery_end + UPDATER_CATALOG_TYPES.len();
+        assert_eq!(
+            &CATALOG_TYPE_NAMES[custom_discovery_end..updater_end],
+            UPDATER_CATALOG_TYPES
+        );
+        assert_eq!(CATALOG_TYPE_NAMES.len(), updater_end);
+        assert_eq!(CATALOG_TYPE_NAMES.len(), 103);
     }
 
     #[test]

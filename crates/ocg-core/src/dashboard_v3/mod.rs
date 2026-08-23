@@ -6,10 +6,14 @@
 //! access-key lifecycle, the local accounts control plane, local account usage
 //! calibration and provider-usage reads, the local/Zen provider catalog,
 //! contracts, Zen Free control plane, pricing, the settings proxy diagnostic,
-//! read-only observability, and Go/Zen protocol probes. Custom model discovery
-//! is an authenticated operational
-//! probe (no `expectedRevision`, no revision bump). Custom protocol probes
-//! stay account-owned on V2.
+//! session-protected desktop update check/status/install, read-only
+//! observability, and Go/Zen protocol probes. Custom model discovery is an
+//! authenticated operational probe (no `expectedRevision`, no revision bump).
+//! `GET /settings/check-update` and `GET /settings/update-status` are reads
+//! that capture revision/generation and never bump them.
+//! `POST /settings/install-update` requires CAS under `settings_update`, starts
+//! atomically, does not bump, and holds no network/DB lock. Custom protocol
+//! probes stay account-owned on V2.
 
 mod accounts;
 mod auth;
@@ -22,6 +26,7 @@ mod providers;
 mod proxy_test;
 mod settings;
 mod types;
+mod updater;
 mod usage;
 
 use axum::extract::{FromRequestParts, Query, Request, State};
@@ -53,31 +58,35 @@ pub use types::{
     CATALOG_TYPE_NAMES, CapabilitySummary, CardCapabilitySummary, ConnectionInfo, ConnectionSubKey,
     ContractScopeKind, ControlRevision, CreditBalance, CustomEndpointContract,
     CustomModelDiscoveryRequest, CustomModelDiscoveryResponse, DailyCostByModel, DailyCostQuery,
-    DailyModelCost, DashboardSummary, ERROR_CONFLICT, ERROR_INTERNAL, ERROR_INVALID_JSON,
-    ERROR_INVALID_REQUEST, ERROR_MISSING_EXPECTED_REVISION, ERROR_NOT_FOUND, ERROR_NOT_IMPLEMENTED,
-    ERROR_OUTBOUND_FAILED, ERROR_PRECONDITION_FAILED, ERROR_REVISION_CONFLICT,
-    ERROR_SERVICE_UNAVAILABLE, ERROR_UNAUTHORIZED, EffectiveCatalog, EffectiveModelContract,
-    EffectiveModelProtocols, EffectiveProtocolEvidence, ForwardLog, ForwardLogClientKey,
-    ForwardLogKeys, ForwardLogModels, ForwardLogQuery, ForwardLogSummary, ForwardLogs, GatewayLog,
-    GatewayLogQuery, GatewayLogs, GatewayStatus, KeyCreate, KeyUpdate, MutationAck,
-    MutationExpectation, PricingAdjustment, PricingAvailability, PricingLimits, PricingModel,
-    PricingMultiplierChange, PricingMultiplierWrite, PricingMultipliersUpdate, PricingRefresh,
-    PricingRefreshPolicy, PricingRefreshStatus, PricingRefreshUpdate, PricingRevision,
-    PricingSnapshot, PricingTimeWindow, ProtocolProbeRequest, ProtocolProbeResponse,
-    ProtocolProbeResult, ProtocolSwitchUpdate, ProtocolSwitches, ProviderAccountChoice,
-    ProviderCatalog, ProviderCatalogEntry, ProviderCatalogFormField, ProviderCatalogRiskNotice,
-    ProviderContractGroup, ProviderContracts, ProviderModelCapability, ProviderOfferingChoice,
-    ProviderPricing, ProviderUsage, ProxyListDirection, ProxyMode, ProxySupportedModel,
-    ProxyTestRequest, ProxyTestResponse, QuotaWindow, RoutingMode, Settings, SettingsUpdate,
-    UsageAvailability, UsageMutation, UsageSyncState, UsageWindow, V3Error, ZenFreeModel,
-    ZenFreeModels, ZenFreeSettings, ZenFreeSettingsUpdate, contract_schema, contract_schema_pretty,
+    DailyModelCost, DashboardSummary, DesktopUpdate, DesktopUpdatePhase, ERROR_CONFLICT,
+    ERROR_INTERNAL, ERROR_INVALID_JSON, ERROR_INVALID_REQUEST, ERROR_MISSING_EXPECTED_REVISION,
+    ERROR_NOT_FOUND, ERROR_NOT_IMPLEMENTED, ERROR_OUTBOUND_FAILED, ERROR_PRECONDITION_FAILED,
+    ERROR_REVISION_CONFLICT, ERROR_SERVICE_UNAVAILABLE, ERROR_UNAUTHORIZED, EffectiveCatalog,
+    EffectiveModelContract, EffectiveModelProtocols, EffectiveProtocolEvidence, ForwardLog,
+    ForwardLogClientKey, ForwardLogKeys, ForwardLogModels, ForwardLogQuery, ForwardLogSummary,
+    ForwardLogs, GatewayLog, GatewayLogQuery, GatewayLogs, GatewayStatus, InstallUpdate, KeyCreate,
+    KeyUpdate, MutationAck, MutationExpectation, PricingAdjustment, PricingAvailability,
+    PricingLimits, PricingModel, PricingMultiplierChange, PricingMultiplierWrite,
+    PricingMultipliersUpdate, PricingRefresh, PricingRefreshPolicy, PricingRefreshStatus,
+    PricingRefreshUpdate, PricingRevision, PricingSnapshot, PricingTimeWindow,
+    ProtocolProbeRequest, ProtocolProbeResponse, ProtocolProbeResult, ProtocolSwitchUpdate,
+    ProtocolSwitches, ProviderAccountChoice, ProviderCatalog, ProviderCatalogEntry,
+    ProviderCatalogFormField, ProviderCatalogRiskNotice, ProviderContractGroup, ProviderContracts,
+    ProviderModelCapability, ProviderOfferingChoice, ProviderPricing, ProviderUsage,
+    ProxyListDirection, ProxyMode, ProxySupportedModel, ProxyTestRequest, ProxyTestResponse,
+    QuotaWindow, RoutingMode, Settings, SettingsUpdate, UpdateCheck, UsageAvailability,
+    UsageMutation, UsageSyncState, UsageWindow, V3Error, ZenFreeModel, ZenFreeModels,
+    ZenFreeSettings, ZenFreeSettingsUpdate, contract_schema, contract_schema_pretty,
 };
+pub use updater::{GITHUB_LATEST_RELEASE_API, GITHUB_LATEST_RELEASE_URL};
 
 #[cfg(debug_assertions)]
 pub use pricing::{
     OfficialPricingFetchGuard, install_official_pricing_fetch_error_for_tests,
     install_official_pricing_fetch_for_tests,
 };
+#[cfg(debug_assertions)]
+pub use updater::{UpdateCheckUrlGuard, install_update_check_url_for_tests};
 
 pub fn api_router(state: CoreState) -> Router<CoreState> {
     let protected = Router::new()
@@ -88,6 +97,9 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
             get(settings::get_settings).put(settings::put_settings),
         )
         .route("/settings/test-proxy", post(proxy_test::test_proxy))
+        .route("/settings/check-update", get(updater::check_update))
+        .route("/settings/update-status", get(updater::get_update_status))
+        .route("/settings/install-update", post(updater::install_update))
         .route("/pricing", get(pricing::get_pricing))
         .route("/pricing/refresh", post(pricing::refresh_pricing))
         .route(
