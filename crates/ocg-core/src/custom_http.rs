@@ -144,8 +144,15 @@ pub fn apply_inference_request_timeout(
     }
 }
 
+/// Connect timeout for the provider-neutral inference HTTP adapter.
 pub fn inference_connect_timeout(config: &AppConfig) -> Duration {
     Duration::from_secs(config.connect_timeout_secs)
+}
+
+/// Custom verification and forwarding bound connection setup independently of
+/// the provider-neutral transport's process-wide timeout setting.
+fn custom_connect_timeout(config: &AppConfig) -> Duration {
+    Duration::from_secs(config.connect_timeout_secs.clamp(5, 60))
 }
 
 /// Construction spec for a provider-neutral inference HTTP client.
@@ -210,10 +217,18 @@ impl HttpInferenceTransport {
         config: &AppConfig,
         spec: HttpInferenceTransportSpec,
     ) -> Result<Self, InferenceHttpError> {
+        Self::build_with_connect_timeout(config, spec, Self::connect_timeout(config))
+    }
+
+    fn build_with_connect_timeout(
+        config: &AppConfig,
+        spec: HttpInferenceTransportSpec,
+        connect_timeout: Duration,
+    ) -> Result<Self, InferenceHttpError> {
         let client = crate::http_client::configured_builder(config)
             .map_err(|error| InferenceHttpError::Build(error.to_string()))?
             .redirect(spec.redirect.reqwest_policy())
-            .connect_timeout(Self::connect_timeout(config))
+            .connect_timeout(connect_timeout)
             .build()
             .map_err(|error| InferenceHttpError::Build(error.to_string()))?;
         Ok(Self {
@@ -372,9 +387,10 @@ pub fn build_custom_http_client(config: &AppConfig) -> Result<CustomHttpClient, 
     // Custom keeps redirect prohibition on this wrapper; the transport can
     // follow redirects when another adapter selects that spec.
     Ok(CustomHttpClient {
-        transport: HttpInferenceTransport::build(
+        transport: HttpInferenceTransport::build_with_connect_timeout(
             config,
             HttpInferenceTransportSpec::no_redirects(),
+            custom_connect_timeout(config),
         )?,
     })
 }
@@ -860,6 +876,50 @@ mod tests {
             inference_connect_timeout(&test_config(ProxyMode::Direct, "")),
             Duration::from_secs(5)
         );
+    }
+
+    #[test]
+    fn custom_connect_timeout_clamps_without_changing_neutral_transport_timeout() {
+        let mut config = test_config(ProxyMode::Direct, "");
+        for secs in [1_u64, 4] {
+            config.connect_timeout_secs = secs;
+            assert_eq!(
+                custom_connect_timeout(&config),
+                Duration::from_secs(5),
+                "Custom lower bound for {secs}"
+            );
+            assert_eq!(
+                HttpInferenceTransport::connect_timeout(&config),
+                Duration::from_secs(secs),
+                "neutral transport preserves {secs}"
+            );
+        }
+        for secs in [5_u64, 30, 60] {
+            config.connect_timeout_secs = secs;
+            assert_eq!(
+                custom_connect_timeout(&config),
+                Duration::from_secs(secs),
+                "Custom in-range {secs}"
+            );
+            assert_eq!(
+                HttpInferenceTransport::connect_timeout(&config),
+                Duration::from_secs(secs),
+                "neutral transport preserves {secs}"
+            );
+        }
+        for secs in [61_u64, 300] {
+            config.connect_timeout_secs = secs;
+            assert_eq!(
+                custom_connect_timeout(&config),
+                Duration::from_secs(60),
+                "Custom upper bound for {secs}"
+            );
+            assert_eq!(
+                HttpInferenceTransport::connect_timeout(&config),
+                Duration::from_secs(secs),
+                "neutral transport preserves {secs}"
+            );
+        }
     }
 
     #[test]

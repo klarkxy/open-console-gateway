@@ -3,11 +3,12 @@
 //! Mounted at `/dashboard/api/v3` beside the unchanged V2 `/dashboard/api`
 //! router. This module owns the shared DTO / error / CAS envelope, process
 //! generation, connection/settings reads, the settings write path, the
-//! access-key lifecycle, the local accounts control plane, the local/Zen
-//! provider catalog, contracts, Zen Free control plane, pricing, and
-//! read-only observability plus Go/Zen protocol probes. Custom protocol probes
-//! stay account-owned on V2.
+//! access-key lifecycle, the local accounts control plane including
+//! connection verify, the local/Zen provider catalog, contracts, Zen Free
+//! control plane, pricing, and read-only observability plus Go/Zen protocol
+//! probes. Custom protocol probes stay account-owned on V2.
 
+mod account_verify;
 mod accounts;
 mod connection;
 mod keys;
@@ -37,7 +38,7 @@ pub use types::{
     AccountCustomConfigUpdate, AccountCustomConfigWrite, AccountList, AccountManagedCreate,
     AccountModelCapabilitiesUpdate, AccountModelCapability, AccountModelCapabilityWrite,
     AccountMutation, AccountOrder, AccountQuotaScope, AccountSetupStep, AccountSetupUpdate,
-    AccountType, AccountUpdate, AccountUpstreamProtocol, AccountVerificationStatus,
+    AccountType, AccountUpdate, AccountUpstreamProtocol, AccountVerificationStatus, AccountVerify,
     ApplicationModels, CATALOG_TYPE_NAMES, CapabilitySummary, CardCapabilitySummary,
     ConnectionInfo, ConnectionSubKey, ContractScopeKind, ControlRevision, CustomEndpointContract,
     DailyCostByModel, DailyCostQuery, DailyModelCost, DashboardSummary, ERROR_CONFLICT,
@@ -59,6 +60,8 @@ pub use types::{
     contract_schema, contract_schema_pretty,
 };
 
+#[cfg(debug_assertions)]
+pub use account_verify::{CustomVerifyProbeGuard, install_custom_verify_probe_for_tests};
 #[cfg(debug_assertions)]
 pub use pricing::{
     OfficialPricingFetchGuard, install_official_pricing_fetch_error_for_tests,
@@ -128,6 +131,10 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
         .route(
             "/accounts/{id}/acknowledgements",
             post(accounts::create_account_acknowledgement),
+        )
+        .route(
+            "/accounts/{id}/verify",
+            post(account_verify::verify_account),
         )
         .route("/providers", get(providers::get_providers))
         .route(

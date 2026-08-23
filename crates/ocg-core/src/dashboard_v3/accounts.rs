@@ -796,7 +796,7 @@ fn require_custom_plan(
     }
 }
 
-fn load_model_account(state: &CoreState, id: &str) -> Result<ModelAccount, V3ApiError> {
+pub(super) fn load_model_account(state: &CoreState, id: &str) -> Result<ModelAccount, V3ApiError> {
     state
         .db
         .lock()
@@ -874,14 +874,14 @@ fn account_list_at(
     })
 }
 
-fn mutation_from_state(
+pub(super) fn mutation_from_state(
     state: &CoreState,
     account: ModelAccount,
 ) -> Result<AccountMutation, V3ApiError> {
     mutation_at(state, account, state.settings_revision())
 }
 
-fn mutation_at(
+pub(super) fn mutation_at(
     state: &CoreState,
     account: ModelAccount,
     revision: u64,
