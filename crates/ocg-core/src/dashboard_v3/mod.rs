@@ -4,7 +4,7 @@
 //! router. This module owns the shared DTO / error / CAS envelope, process
 //! generation, public auth/session issuance, connection/settings reads, the settings write path,
 //! access-key lifecycle, the local accounts control plane, local account usage
-//! calibration and provider-usage reads, the local/Zen provider catalog,
+//! calibration, official Go usage refresh, and provider-usage reads, the local/Zen provider catalog,
 //! contracts, Zen Free control plane, pricing, the settings proxy diagnostic,
 //! read-only observability, and Go/Zen
 //! protocol probes. Custom protocol probes stay account-owned on V2.
@@ -20,6 +20,7 @@ mod proxy_test;
 mod settings;
 mod types;
 mod usage;
+mod usage_refresh;
 
 use axum::extract::{FromRequestParts, Query, Request, State};
 use axum::http::StatusCode;
@@ -52,21 +53,22 @@ pub use types::{
     DailyCostQuery, DailyModelCost, DashboardSummary, ERROR_CONFLICT, ERROR_INTERNAL,
     ERROR_INVALID_JSON, ERROR_INVALID_REQUEST, ERROR_MISSING_EXPECTED_REVISION, ERROR_NOT_FOUND,
     ERROR_NOT_IMPLEMENTED, ERROR_OUTBOUND_FAILED, ERROR_PRECONDITION_FAILED,
-    ERROR_REVISION_CONFLICT, ERROR_SERVICE_UNAVAILABLE, ERROR_UNAUTHORIZED, EffectiveCatalog,
-    EffectiveModelContract, EffectiveModelProtocols, EffectiveProtocolEvidence, ForwardLog,
-    ForwardLogClientKey, ForwardLogKeys, ForwardLogModels, ForwardLogQuery, ForwardLogSummary,
-    ForwardLogs, GatewayLog, GatewayLogQuery, GatewayLogs, GatewayStatus, KeyCreate, KeyUpdate,
-    MutationAck, MutationExpectation, PricingAdjustment, PricingAvailability, PricingLimits,
-    PricingModel, PricingMultiplierChange, PricingMultiplierWrite, PricingMultipliersUpdate,
-    PricingRefresh, PricingRefreshPolicy, PricingRefreshStatus, PricingRefreshUpdate,
-    PricingRevision, PricingSnapshot, PricingTimeWindow, ProtocolProbeRequest,
-    ProtocolProbeResponse, ProtocolProbeResult, ProtocolSwitchUpdate, ProtocolSwitches,
-    ProviderAccountChoice, ProviderCatalog, ProviderCatalogEntry, ProviderCatalogFormField,
-    ProviderCatalogRiskNotice, ProviderContractGroup, ProviderContracts, ProviderModelCapability,
-    ProviderOfferingChoice, ProviderPricing, ProviderUsage, ProxyListDirection, ProxyMode,
-    ProxySupportedModel, ProxyTestRequest, ProxyTestResponse, QuotaWindow, RoutingMode, Settings,
-    SettingsUpdate, UsageAvailability, UsageMutation, UsageSyncState, UsageWindow, V3Error,
-    ZenFreeModel, ZenFreeModels, ZenFreeSettings, ZenFreeSettingsUpdate, contract_schema,
+    ERROR_REVISION_CONFLICT, ERROR_SERVICE_UNAVAILABLE, ERROR_THROTTLED, ERROR_UNAUTHORIZED,
+    EffectiveCatalog, EffectiveModelContract, EffectiveModelProtocols, EffectiveProtocolEvidence,
+    ForwardLog, ForwardLogClientKey, ForwardLogKeys, ForwardLogModels, ForwardLogQuery,
+    ForwardLogSummary, ForwardLogs, GatewayLog, GatewayLogQuery, GatewayLogs, GatewayStatus,
+    KeyCreate, KeyUpdate, MutationAck, MutationExpectation, PricingAdjustment, PricingAvailability,
+    PricingLimits, PricingModel, PricingMultiplierChange, PricingMultiplierWrite,
+    PricingMultipliersUpdate, PricingRefresh, PricingRefreshPolicy, PricingRefreshStatus,
+    PricingRefreshUpdate, PricingRevision, PricingSnapshot, PricingTimeWindow,
+    ProtocolProbeRequest, ProtocolProbeResponse, ProtocolProbeResult, ProtocolSwitchUpdate,
+    ProtocolSwitches, ProviderAccountChoice, ProviderCatalog, ProviderCatalogEntry,
+    ProviderCatalogFormField, ProviderCatalogRiskNotice, ProviderContractGroup, ProviderContracts,
+    ProviderModelCapability, ProviderOfferingChoice, ProviderPricing, ProviderUsage,
+    ProxyListDirection, ProxyMode, ProxySupportedModel, ProxyTestRequest, ProxyTestResponse,
+    QuotaWindow, RoutingMode, Settings, SettingsUpdate, UsageAvailability, UsageMutation,
+    UsageRefresh, UsageRefreshThrottleError, UsageRefreshUpdate, UsageSyncState, UsageWindow,
+    V3Error, ZenFreeModel, ZenFreeModels, ZenFreeSettings, ZenFreeSettingsUpdate, contract_schema,
     contract_schema_pretty,
 };
 
@@ -141,6 +143,10 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
         .route(
             "/accounts/{id}/usage",
             get(usage::get_account_usage).patch(usage::patch_account_usage),
+        )
+        .route(
+            "/accounts/{id}/usage/refresh",
+            post(usage_refresh::refresh_account_usage),
         )
         .route(
             "/accounts/{id}/provider-usage",

@@ -253,10 +253,20 @@ fn catalog_type_names_keep_the_frozen_prefix_and_pricing_block() {
         ["AuthStatus", "AuthRegister", "AuthLogin", "AuthLogout"]
     );
     assert_eq!(
-        &CATALOG_TYPE_NAMES[auth_end..],
+        &CATALOG_TYPE_NAMES[auth_end..auth_end + 2],
         ["ProxyTestRequest", "ProxyTestResponse"]
     );
-    assert_eq!(CATALOG_TYPE_NAMES.len(), auth_end + 2);
+    const USAGE_REFRESH_CATALOG_TYPES: &[&str] = &[
+        "UsageRefresh",
+        "UsageRefreshUpdate",
+        "UsageRefreshThrottleError",
+    ];
+    let usage_refresh_end = auth_end + 2 + USAGE_REFRESH_CATALOG_TYPES.len();
+    assert_eq!(
+        &CATALOG_TYPE_NAMES[auth_end + 2..usage_refresh_end],
+        USAGE_REFRESH_CATALOG_TYPES
+    );
+    assert_eq!(CATALOG_TYPE_NAMES.len(), usage_refresh_end);
 }
 
 #[test]

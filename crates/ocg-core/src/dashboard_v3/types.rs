@@ -2,10 +2,11 @@
 //!
 //! Response objects always serialize nullable fields as `T | null` (never omitted).
 //! Request optional fields may be omitted; `expectedRevision` is required on every
-//! control-plane mutation, including `/auth/register`, `/auth/login`, and
-//! `/auth/logout`. Pricing mutations also require `expectedPricingRevision`.
-//! Operational diagnostics such as `POST /settings/test-proxy` are not mutations
-//! and neither require nor accept CAS tokens. Plaintext keys must not appear on
+//! control-plane mutation, including `/auth/register`, `/auth/login`,
+//! `/auth/logout`, and `POST /accounts/{id}/usage/refresh`. Pricing mutations
+//! also require `expectedPricingRevision`. Operational diagnostics such as
+//! `POST /settings/test-proxy` are not mutations and neither require nor accept
+//! CAS tokens. Plaintext keys must not appear on
 //! `Settings` or provider/Zen/contract DTOs —
 //! `ConnectionInfo` is the only secret-bearing V3 DTO. Protocol path/switch tokens
 //! stay `chat_completions`, `responses`, and `messages`. Pricing wire DTOs are
@@ -132,6 +133,9 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "AuthLogout",
     "ProxyTestRequest",
     "ProxyTestResponse",
+    "UsageRefresh",
+    "UsageRefreshUpdate",
+    "UsageRefreshThrottleError",
 ];
 
 pub const ERROR_UNAUTHORIZED: &str = "unauthorized";
@@ -146,6 +150,7 @@ pub const ERROR_PRECONDITION_FAILED: &str = "preconditionFailed";
 pub const ERROR_SERVICE_UNAVAILABLE: &str = "serviceUnavailable";
 pub const ERROR_NOT_IMPLEMENTED: &str = "notImplemented";
 pub const ERROR_OUTBOUND_FAILED: &str = "outboundFailed";
+pub const ERROR_THROTTLED: &str = "throttled";
 
 /// Live CAS token, process generation, and pricing snapshot id.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1969,6 +1974,47 @@ pub enum UsageAvailability {
     LocalState,
 }
 
+/// POST `/accounts/{id}/usage/refresh` result. Nested `usage` is the V3
+/// window projection; `revision` is captured after the shared coordinator
+/// returns and is not advanced by official calibration.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UsageRefresh {
+    pub usage: UsageWindow,
+    pub source: String,
+    pub last_success_at: String,
+    pub next_allowed_at: String,
+    pub revision: u64,
+    pub process_generation: u64,
+}
+
+/// POST `/accounts/{id}/usage/refresh` body. CAS tokens are required;
+/// unknown fields, including Key material, are rejected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UsageRefreshUpdate {
+    #[serde(flatten)]
+    pub expectation: MutationExpectation,
+}
+
+/// Typed 429 body for `POST /accounts/{id}/usage/refresh`.
+///
+/// This preserves the stable V3 error fields while making the endpoint-only
+/// absolute retry time an explicit append-only contract instead of injecting
+/// an undeclared property into `V3Error`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UsageRefreshThrottleError {
+    pub code: String,
+    pub message: String,
+    pub current_revision: Option<u64>,
+    pub process_generation: Option<u64>,
+    pub next_allowed_at: String,
+}
+
 /// Deterministic JSON Schema catalog for the checked-in V3 contract.
 ///
 /// Response types are generated with the serialize contract so `Option` fields
@@ -2047,6 +2093,8 @@ pub fn contract_schema() -> Value {
     include_type::<UsageAvailability>(&mut serialize);
     include_type::<AuthStatus>(&mut serialize);
     include_type::<ProxyTestResponse>(&mut serialize);
+    include_type::<UsageRefresh>(&mut serialize);
+    include_type::<UsageRefreshThrottleError>(&mut serialize);
     let mut defs = serialize.take_definitions(true);
 
     let mut deserialize = SchemaSettings::draft2020_12().into_generator();
@@ -2080,6 +2128,7 @@ pub fn contract_schema() -> Value {
     include_type::<AuthLogin>(&mut deserialize);
     include_type::<AuthLogout>(&mut deserialize);
     include_type::<ProxyTestRequest>(&mut deserialize);
+    include_type::<UsageRefreshUpdate>(&mut deserialize);
     for (name, schema) in deserialize.take_definitions(true) {
         defs.entry(name).or_insert(schema);
     }
@@ -3467,6 +3516,11 @@ mod tests {
     ];
 
     const PROXY_TEST_CATALOG_TYPES: &[&str] = &["ProxyTestRequest", "ProxyTestResponse"];
+    const USAGE_REFRESH_CATALOG_TYPES: &[&str] = &[
+        "UsageRefresh",
+        "UsageRefreshUpdate",
+        "UsageRefreshThrottleError",
+    ];
 
     #[test]
     fn catalog_type_names_append_pricing_dtos_after_the_provider_prefix() {
@@ -3501,7 +3555,12 @@ mod tests {
             &CATALOG_TYPE_NAMES[auth_end..proxy_end],
             PROXY_TEST_CATALOG_TYPES
         );
-        assert_eq!(CATALOG_TYPE_NAMES.len(), proxy_end);
+        let usage_refresh_end = proxy_end + USAGE_REFRESH_CATALOG_TYPES.len();
+        assert_eq!(
+            &CATALOG_TYPE_NAMES[proxy_end..usage_refresh_end],
+            USAGE_REFRESH_CATALOG_TYPES
+        );
+        assert_eq!(CATALOG_TYPE_NAMES.len(), usage_refresh_end);
     }
 
     #[test]
@@ -4381,5 +4440,121 @@ mod tests {
                 "ProxyTestResponse must not expose {forbidden}"
             );
         }
+    }
+
+    #[test]
+    fn usage_refresh_dtos_are_camel_case_secret_free_and_append_only() {
+        let omitted: UsageRefreshUpdate = serde_json::from_value(json!({
+            "expectedRevision": 11,
+            "processGeneration": 9
+        }))
+        .unwrap();
+        assert_eq!(omitted.expectation.expected_revision, 11);
+        assert_eq!(omitted.expectation.process_generation, 9);
+        assert!(
+            serde_json::from_value::<UsageRefreshUpdate>(json!({
+                "expected_revision": 11,
+                "processGeneration": 9
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<UsageRefreshUpdate>(json!({
+                "expectedRevision": 11,
+                "processGeneration": 9,
+                "key": "sk-secret"
+            }))
+            .is_err()
+        );
+
+        let refresh = UsageRefresh {
+            usage: UsageWindow {
+                account_id: "acct-1".into(),
+                window_5h: 6.0,
+                window_week: 6.0,
+                window_month: 6.0,
+                resets_in_5h: None,
+                resets_in_week: None,
+                resets_in_month: None,
+                revision: 11,
+                process_generation: 9,
+                pricing_revision: Some("seed".into()),
+            },
+            source: "official_go_usage".into(),
+            last_success_at: "2026-08-18T12:00:00+00:00".into(),
+            next_allowed_at: "2026-08-18T12:00:15+00:00".into(),
+            revision: 11,
+            process_generation: 9,
+        };
+        let value = serde_json::to_value(&refresh).unwrap();
+        assert_eq!(value["source"], "official_go_usage");
+        assert_eq!(value["lastSuccessAt"], "2026-08-18T12:00:00+00:00");
+        assert_eq!(value["nextAllowedAt"], "2026-08-18T12:00:15+00:00");
+        assert_eq!(value["usage"]["window5h"], 6.0);
+        assert_eq!(value["usage"]["pricingRevision"], "seed");
+        assert_eq!(value["revision"], 11);
+        assert_eq!(value["processGeneration"], 9);
+        assert!(value.get("last_success_at").is_none());
+        assert!(value.get("next_allowed_at").is_none());
+        assert!(value.get("fetched_at").is_none());
+        assert_secret_free(&value);
+
+        let schema = contract_schema();
+        let defs = schema["$defs"].as_object().expect("catalog $defs");
+        for name in USAGE_REFRESH_CATALOG_TYPES {
+            assert!(defs.contains_key(*name), "schema missing {name}");
+        }
+        let request = &schema["$defs"]["UsageRefreshUpdate"];
+        assert_eq!(request["additionalProperties"], false);
+        let request_required = request["required"].as_array().unwrap();
+        assert!(
+            request_required
+                .iter()
+                .any(|value| value == "expectedRevision")
+        );
+        assert!(
+            request_required
+                .iter()
+                .any(|value| value == "processGeneration")
+        );
+        let response_required = schema["$defs"]["UsageRefresh"]["required"]
+            .as_array()
+            .unwrap();
+        for field in [
+            "usage",
+            "source",
+            "lastSuccessAt",
+            "nextAllowedAt",
+            "revision",
+            "processGeneration",
+        ] {
+            assert!(
+                response_required.iter().any(|value| value == field),
+                "{field} must stay required"
+            );
+        }
+        let response_props = schema["$defs"]["UsageRefresh"]["properties"]
+            .as_object()
+            .unwrap();
+        assert!(!response_props.contains_key("last_success_at"));
+        assert!(!response_props.contains_key("next_allowed_at"));
+        assert!(!response_props.contains_key("fetched_at"));
+        assert!(!response_props.contains_key("key"));
+
+        let throttle = UsageRefreshThrottleError {
+            code: ERROR_THROTTLED.into(),
+            message: "retry later".into(),
+            current_revision: Some(11),
+            process_generation: Some(9),
+            next_allowed_at: "2026-08-18T12:00:15+00:00".into(),
+        };
+        let throttle_value = serde_json::to_value(&throttle).unwrap();
+        assert_eq!(throttle_value["code"], ERROR_THROTTLED);
+        assert_eq!(throttle_value["nextAllowedAt"], "2026-08-18T12:00:15+00:00");
+        assert_eq!(
+            schema["$defs"]["UsageRefreshThrottleError"]["additionalProperties"],
+            false
+        );
+        assert_secret_free(&throttle_value);
     }
 }

@@ -908,11 +908,13 @@ async fn dashboard_v3_usage_coexists_with_v2_and_does_not_mount_legacy_aliases()
             "{}/accounts/{go_id}/usage/refresh",
             harness.v3_base
         ))
-        .json(&cas(&harness, json!({})))
+        .json(&json!({ "processGeneration": harness.state.process_generation() }))
         .send()
         .await
         .unwrap();
-    assert_eq!(v3_refresh.status(), StatusCode::NOT_FOUND);
+    assert_eq!(v3_refresh.status(), StatusCode::BAD_REQUEST);
+    let refresh_body: Value = v3_refresh.json().await.unwrap();
+    assert_eq!(refresh_body["code"], ERROR_MISSING_EXPECTED_REVISION);
 
     let v3_provider_model = harness
         .client

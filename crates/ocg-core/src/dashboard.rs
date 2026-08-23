@@ -3694,6 +3694,10 @@ fn map_official_usage_refresh_error(
         OfficialUsageRefreshError::Conflict(message) => {
             ApiError::status(StatusCode::CONFLICT, message)
         }
+        OfficialUsageRefreshError::CommitAuthorizationRejected => ApiError::status(
+            StatusCode::CONFLICT,
+            "control-plane revision changed while refreshing official Go usage",
+        ),
         OfficialUsageRefreshError::Throttled {
             next_allowed_at,
             retry_after_secs,

@@ -895,6 +895,37 @@ impl crate::usage_sync::UsageSyncHost for CoreState {
         let db = self.db.lock();
         f(&db)
     }
+
+    fn with_authorized_sync_store<F, R>(
+        &self,
+        authorization: &crate::usage_sync::UsageSyncCommitAuthorization,
+        f: F,
+    ) -> Result<R, crate::usage_sync::UsageSyncCommitAuthorizationRejected>
+    where
+        F: FnOnce(&Self::Store) -> R,
+    {
+        match authorization {
+            crate::usage_sync::UsageSyncCommitAuthorization::Unconditional => {
+                Ok(self.with_sync_store(f))
+            }
+            crate::usage_sync::UsageSyncCommitAuthorization::ControlRevision {
+                expected_revision,
+                process_generation,
+            } => {
+                // Lock order remains settings_update -> db. This synchronous
+                // reservation is acquired only after outbound work completes
+                // and is released before the coordinator awaits again.
+                let _settings_update = self.settings_update.lock();
+                if *expected_revision != self.settings_revision()
+                    || *process_generation != self.process_generation()
+                {
+                    return Err(crate::usage_sync::UsageSyncCommitAuthorizationRejected);
+                }
+                let db = self.db.lock();
+                Ok(f(&db))
+            }
+        }
+    }
 }
 
 fn client_root_url_override_from_env() -> crate::Result<Option<String>> {

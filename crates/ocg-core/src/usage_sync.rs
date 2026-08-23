@@ -80,6 +80,7 @@ pub enum OfficialUsageRefreshError {
     NotFound,
     NotEligible(&'static str),
     Conflict(&'static str),
+    CommitAuthorizationRejected,
     Throttled {
         next_allowed_at: DateTime<Utc>,
         retry_after_secs: u64,
@@ -93,6 +94,9 @@ impl std::fmt::Display for OfficialUsageRefreshError {
         match self {
             Self::NotFound => f.write_str("account not found"),
             Self::NotEligible(message) | Self::Conflict(message) => f.write_str(message),
+            Self::CommitAuthorizationRejected => {
+                f.write_str("control-plane revision changed while refreshing official Go usage")
+            }
             Self::Throttled {
                 retry_after_secs, ..
             } => write!(
@@ -124,6 +128,42 @@ pub struct OfficialUsageSyncSuccessMetadata {
     pub next_eligible_at: DateTime<Utc>,
     pub mark_expedited: bool,
 }
+
+/// Authorization owned by the caller that creates an in-flight refresh.
+///
+/// Unconditional authorization preserves the V2/manual/background behavior.
+/// Dashboard V3 supplies its control-plane CAS tokens so the host can hold its
+/// mutation gate while the coordinator performs the final database write.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum UsageSyncCommitAuthorization {
+    #[default]
+    Unconditional,
+    ControlRevision {
+        expected_revision: u64,
+        process_generation: u64,
+    },
+}
+
+impl UsageSyncCommitAuthorization {
+    pub fn control_revision(expected_revision: u64, process_generation: u64) -> Self {
+        Self::ControlRevision {
+            expected_revision,
+            process_generation,
+        }
+    }
+}
+
+/// Result plus the authorization owned by the in-flight leader. Dashboard V3
+/// uses this to distinguish its own guarded execution from a shared
+/// V2/background-owned execution before applying its caller-side CAS check.
+#[derive(Debug, Clone)]
+pub(crate) struct OfficialUsageRefreshObservation {
+    pub result: RefreshResult,
+    pub owner_authorization: UsageSyncCommitAuthorization,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UsageSyncCommitAuthorizationRejected;
 
 /// Persistence operations held under one database lock by [`UsageSyncHost`].
 pub trait UsageSyncStore {
@@ -182,12 +222,34 @@ pub trait UsageSyncHost: Clone + Send + Sync + 'static {
     fn with_sync_store<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&Self::Store) -> R;
+
+    /// Runs a persistence operation under the caller-owned commit guard.
+    /// Hosts that support guarded commits override this method and keep the
+    /// authorization check atomic with the store operation. The default keeps
+    /// all existing unconditional callers backward compatible and rejects an
+    /// unsupported guarded request fail-closed.
+    fn with_authorized_sync_store<F, R>(
+        &self,
+        authorization: &UsageSyncCommitAuthorization,
+        f: F,
+    ) -> Result<R, UsageSyncCommitAuthorizationRejected>
+    where
+        F: FnOnce(&Self::Store) -> R,
+    {
+        match authorization {
+            UsageSyncCommitAuthorization::Unconditional => Ok(self.with_sync_store(f)),
+            UsageSyncCommitAuthorization::ControlRevision { .. } => {
+                Err(UsageSyncCommitAuthorizationRejected)
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
 struct InflightEntry {
     generation: u64,
     future: RefreshFuture,
+    authorization: UsageSyncCommitAuthorization,
 }
 
 /// Process-wide gates for concurrency-1, in-flight dedupe, and wakeups.
@@ -729,25 +791,60 @@ pub async fn refresh_official_usage<H: UsageSyncHost>(
     state: &H,
     account_id: &str,
     trigger: UsageSyncTrigger,
-) -> Result<OfficialUsageRefreshSuccess, OfficialUsageRefreshError> {
+) -> RefreshResult {
+    refresh_official_usage_with_authorization(
+        state,
+        account_id,
+        trigger,
+        UsageSyncCommitAuthorization::Unconditional,
+    )
+    .await
+    .result
+}
+
+/// Guarded refresh entry used by Dashboard V3.
+///
+/// Dedupe ownership is intentionally leader-scoped: the authorization passed
+/// by the caller that creates the in-flight future governs its writes. A later
+/// follower observes that shared result but cannot veto an already-running
+/// V2/background-owned refresh with its unrelated CAS token.
+pub(crate) async fn refresh_official_usage_with_authorization<H: UsageSyncHost>(
+    state: &H,
+    account_id: &str,
+    trigger: UsageSyncTrigger,
+    authorization: UsageSyncCommitAuthorization,
+) -> OfficialUsageRefreshObservation {
     if trigger == UsageSyncTrigger::Manual {
         let now = state.usage_runtime().now();
-        let sync = state
-            .with_sync_store(|store| store.account_usage_sync_state(account_id))
-            .map_err(|e| OfficialUsageRefreshError::Internal(e.to_string()))?;
+        let sync = match state.with_sync_store(|store| store.account_usage_sync_state(account_id)) {
+            Ok(sync) => sync,
+            Err(error) => {
+                return OfficialUsageRefreshObservation {
+                    result: Err(OfficialUsageRefreshError::Internal(error.to_string())),
+                    owner_authorization: authorization,
+                };
+            }
+        };
         if let Some(until) = manual_next_allowed_at(sync.and_then(|s| s.last_attempt_at), now) {
             let retry_after_secs = (until - now).num_seconds().max(1) as u64;
-            return Err(OfficialUsageRefreshError::Throttled {
-                next_allowed_at: until,
-                retry_after_secs,
-            });
+            return OfficialUsageRefreshObservation {
+                result: Err(OfficialUsageRefreshError::Throttled {
+                    next_allowed_at: until,
+                    retry_after_secs,
+                }),
+                owner_authorization: authorization,
+            };
         }
     }
 
-    let (future, generation) = {
+    let (future, generation, owner_authorization) = {
         let mut inflight = state.usage_runtime().inflight.lock().await;
         if let Some(existing) = inflight.get(account_id) {
-            (existing.future.clone(), existing.generation)
+            (
+                existing.future.clone(),
+                existing.generation,
+                existing.authorization,
+            )
         } else {
             let account_id_owned = account_id.to_string();
             let state_cloned = state.clone();
@@ -756,8 +853,13 @@ pub async fn refresh_official_usage<H: UsageSyncHost>(
                 .inflight_generation
                 .fetch_add(1, Ordering::Relaxed);
             let shared = async move {
-                let result =
-                    execute_official_usage_refresh(&state_cloned, &account_id_owned, trigger).await;
+                let result = execute_official_usage_refresh(
+                    &state_cloned,
+                    &account_id_owned,
+                    trigger,
+                    &authorization,
+                )
+                .await;
                 Arc::new(result)
             }
             .boxed()
@@ -767,9 +869,10 @@ pub async fn refresh_official_usage<H: UsageSyncHost>(
                 InflightEntry {
                     generation,
                     future: shared.clone(),
+                    authorization,
                 },
             );
-            (shared, generation)
+            (shared, generation, authorization)
         }
     };
 
@@ -783,9 +886,12 @@ pub async fn refresh_official_usage<H: UsageSyncHost>(
         take_inflight_if_generation(&mut inflight, account_id, generation);
     }
 
-    match &*result {
-        Ok(success) => Ok(success.clone()),
-        Err(error) => Err(error.clone()),
+    OfficialUsageRefreshObservation {
+        result: match &*result {
+            Ok(success) => Ok(success.clone()),
+            Err(error) => Err(error.clone()),
+        },
+        owner_authorization,
     }
 }
 
@@ -793,6 +899,7 @@ async fn execute_official_usage_refresh(
     state: &impl UsageSyncHost,
     account_id: &str,
     trigger: UsageSyncTrigger,
+    authorization: &UsageSyncCommitAuthorization,
 ) -> Result<OfficialUsageRefreshSuccess, OfficialUsageRefreshError> {
     let _guard = state.usage_runtime().global.lock().await;
     let now = state.usage_runtime().now();
@@ -807,7 +914,7 @@ async fn execute_official_usage_refresh(
             Err(error) => {
                 // DB read failed after scheduler selected the account: treat as
                 // a begun attempt so the due stamp cannot busy-loop.
-                record_attempt_failure(state, account_id, now);
+                record_attempt_failure(state, account_id, now, authorization)?;
                 return Err(OfficialUsageRefreshError::Internal(error.to_string()));
             }
         }
@@ -831,7 +938,7 @@ async fn execute_official_usage_refresh(
     let plaintext = match state.decrypt_account_key(&key_cipher) {
         Ok(key) => key,
         Err(error) => {
-            record_attempt_failure(state, account_id, now);
+            record_attempt_failure(state, account_id, now, authorization)?;
             return Err(OfficialUsageRefreshError::Internal(error.to_string()));
         }
     };
@@ -850,7 +957,7 @@ async fn execute_official_usage_refresh(
     let snapshot = match snapshot {
         Ok(snapshot) => snapshot,
         Err(error) => {
-            record_attempt_failure(state, account_id, now);
+            record_attempt_failure(state, account_id, now, authorization)?;
             return Err(OfficialUsageRefreshError::Upstream(error));
         }
     };
@@ -861,7 +968,7 @@ async fn execute_official_usage_refresh(
         }) {
             Ok(active) => active,
             Err(error) => {
-                record_attempt_failure(state, account_id, now);
+                record_attempt_failure(state, account_id, now, authorization)?;
                 return Err(OfficialUsageRefreshError::Internal(error.to_string()));
             }
         }
@@ -871,29 +978,31 @@ async fn execute_official_usage_refresh(
         compute_next_after_success(now, active, snapshot.earliest_resets_in_minutes, jitter);
     let next_allowed = now + MANUAL_THROTTLE;
     let usage = {
-        let committed = state.with_sync_store(|store| {
-            store.commit_official_usage_sync_success(
-                account_id,
-                &key_cipher,
-                &snapshot,
-                &limits,
-                OfficialUsageSyncSuccessMetadata {
-                    now,
-                    next_eligible_at: next_eligible,
-                    mark_expedited: trigger == UsageSyncTrigger::Expedited,
-                },
-            )
-        });
+        let committed = state
+            .with_authorized_sync_store(authorization, |store| {
+                store.commit_official_usage_sync_success(
+                    account_id,
+                    &key_cipher,
+                    &snapshot,
+                    &limits,
+                    OfficialUsageSyncSuccessMetadata {
+                        now,
+                        next_eligible_at: next_eligible,
+                        mark_expedited: trigger == UsageSyncTrigger::Expedited,
+                    },
+                )
+            })
+            .map_err(|_| commit_authorization_conflict())?;
         match committed {
             Ok(Some(usage)) => usage,
             Ok(None) => {
-                record_attempt_failure(state, account_id, now);
+                record_attempt_failure(state, account_id, now, authorization)?;
                 return Err(OfficialUsageRefreshError::Conflict(
                     "account key or setup changed while refreshing official Go usage",
                 ));
             }
             Err(error) => {
-                record_attempt_failure(state, account_id, now);
+                record_attempt_failure(state, account_id, now, authorization)?;
                 return Err(OfficialUsageRefreshError::Internal(error.to_string()));
             }
         }
@@ -910,20 +1019,34 @@ async fn execute_official_usage_refresh(
 /// Record a safe retry/backoff outcome for any begun attempt that did not
 /// succeed. Never logs keys, ciphertext, or upstream bodies. If persistence
 /// itself fails, emit only a sanitized scheduler diagnostic.
-fn record_attempt_failure(state: &impl UsageSyncHost, account_id: &str, now: DateTime<Utc>) {
+fn record_attempt_failure(
+    state: &impl UsageSyncHost,
+    account_id: &str,
+    now: DateTime<Utc>,
+    authorization: &UsageSyncCommitAuthorization,
+) -> Result<(), OfficialUsageRefreshError> {
     let jitter = state.usage_runtime().jitter01();
-    state.with_sync_store(|store| {
-        let current = store.account_usage_sync_state(account_id).ok().flatten();
-        let streak = current.as_ref().map(|s| s.failure_streak).unwrap_or(0) + 1;
-        let next = compute_next_after_failure(now, streak as u32, jitter);
-        if let Err(error) = store.record_account_usage_sync_failure(account_id, now, streak, next) {
-            let _ = store.log_gateway(
-                "warn",
-                "usage_sync",
-                &format!("failed to persist usage-sync backoff for {account_id}: {error}"),
-            );
-        }
-    });
+    state
+        .with_authorized_sync_store(authorization, |store| {
+            let current = store.account_usage_sync_state(account_id).ok().flatten();
+            let streak = current.as_ref().map(|s| s.failure_streak).unwrap_or(0) + 1;
+            let next = compute_next_after_failure(now, streak as u32, jitter);
+            if let Err(error) =
+                store.record_account_usage_sync_failure(account_id, now, streak, next)
+            {
+                let _ = store.log_gateway(
+                    "warn",
+                    "usage_sync",
+                    &format!("failed to persist usage-sync backoff for {account_id}: {error}"),
+                );
+            }
+        })
+        .map_err(|_| commit_authorization_conflict())?;
+    Ok(())
+}
+
+fn commit_authorization_conflict() -> OfficialUsageRefreshError {
+    OfficialUsageRefreshError::CommitAuthorizationRejected
 }
 
 /// Dashboard helper: map sync metadata onto API fields.
@@ -1442,6 +1565,196 @@ mod tests {
         state.usage_sync.clear_test_seams();
         drop(state);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn stale_guarded_leader_blocks_success_for_all_deduped_waiters_without_mutation() {
+        let state = FakeUsageHost::new();
+        state.insert_ready_go("guarded", "sk-guarded");
+        let before = state.inner.sync.lock().get("guarded").cloned().unwrap();
+        let authorization = state.guarded_authorization();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let entered_fetch = Arc::new(Notify::new());
+        let release_fetch = Arc::new(Notify::new());
+        let calls_hook = calls.clone();
+        let entered_fetch_hook = entered_fetch.clone();
+        let release_fetch_hook = release_fetch.clone();
+        state.inner.runtime.set_fetch_for_test(move |_cfg, _key| {
+            calls_hook.fetch_add(1, AtomicOrdering::SeqCst);
+            let entered_fetch = entered_fetch_hook.clone();
+            let release_fetch = release_fetch_hook.clone();
+            Box::pin(async move {
+                entered_fetch.notify_one();
+                release_fetch.notified().await;
+                Ok(sample_snapshot())
+            })
+        });
+
+        let cleanup_arrived = Arc::new(Notify::new());
+        let cleanup_release = Arc::new(Notify::new());
+        let cleanup_arrived_hook = cleanup_arrived.clone();
+        let cleanup_release_hook = cleanup_release.clone();
+        state
+            .inner
+            .runtime
+            .set_before_inflight_cleanup_for_test(move || {
+                let cleanup_arrived = cleanup_arrived_hook.clone();
+                let cleanup_release = cleanup_release_hook.clone();
+                Box::pin(async move {
+                    cleanup_arrived.notify_one();
+                    cleanup_release.notified().await;
+                })
+            });
+
+        let guarded_state = state.clone();
+        let guarded = tokio::spawn(async move {
+            refresh_official_usage_with_authorization(
+                &guarded_state,
+                "guarded",
+                UsageSyncTrigger::Manual,
+                authorization,
+            )
+            .await
+            .result
+        });
+        entered_fetch.notified().await;
+        state.bump_settings_revision();
+        release_fetch.notify_one();
+        cleanup_arrived.notified().await;
+
+        // While the stale V3-owned result remains in the in-flight map, an
+        // unconditional V2 waiter must observe the same rejected result rather
+        // than converting that stale leader into an authorized writer.
+        let v2_state = state.clone();
+        let v2_follower = tokio::spawn(async move {
+            refresh_official_usage(&v2_state, "guarded", UsageSyncTrigger::Manual).await
+        });
+        cleanup_arrived.notified().await;
+        cleanup_release.notify_waiters();
+
+        for result in [guarded.await.unwrap(), v2_follower.await.unwrap()] {
+            assert!(
+                matches!(
+                    result,
+                    Err(OfficialUsageRefreshError::CommitAuthorizationRejected)
+                ),
+                "stale guarded leader must reject every waiter: {result:?}"
+            );
+        }
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(
+            state.inner.sync.lock().get("guarded").cloned().unwrap(),
+            before,
+            "stale success must not write calibration sync metadata"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_guarded_failure_does_not_write_attempt_or_backoff_metadata() {
+        let state = FakeUsageHost::new();
+        state.insert_ready_go("failure", "sk-failure");
+        let before = state.inner.sync.lock().get("failure").cloned().unwrap();
+        let authorization = state.guarded_authorization();
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let entered_hook = entered.clone();
+        let release_hook = release.clone();
+        state.inner.runtime.set_fetch_for_test(move |_cfg, _key| {
+            let entered = entered_hook.clone();
+            let release = release_hook.clone();
+            Box::pin(async move {
+                entered.notify_one();
+                release.notified().await;
+                Err(GoUsageError::Timeout)
+            })
+        });
+
+        let refresh_state = state.clone();
+        let refresh = tokio::spawn(async move {
+            refresh_official_usage_with_authorization(
+                &refresh_state,
+                "failure",
+                UsageSyncTrigger::Manual,
+                authorization,
+            )
+            .await
+            .result
+        });
+        entered.notified().await;
+        state.bump_settings_revision();
+        release.notify_one();
+
+        let result = refresh.await.unwrap();
+        assert!(
+            matches!(
+                result,
+                Err(OfficialUsageRefreshError::CommitAuthorizationRejected)
+            ),
+            "stale upstream failure must surface authorization conflict: {result:?}"
+        );
+        assert_eq!(
+            state.inner.sync.lock().get("failure").cloned().unwrap(),
+            before,
+            "stale failure must not write last_attempt/failure_streak/backoff"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_guarded_follower_cannot_veto_background_owned_inflight_result() {
+        let state = FakeUsageHost::new();
+        state.insert_ready_go("background", "sk-background");
+        let stale_follower_authorization = state.guarded_authorization();
+        state
+            .inner
+            .runtime
+            .set_fetch_for_test(move |_cfg, _key| Box::pin(async { Ok(sample_snapshot()) }));
+
+        let cleanup_arrived = Arc::new(Notify::new());
+        let cleanup_release = Arc::new(Notify::new());
+        let cleanup_arrived_hook = cleanup_arrived.clone();
+        let cleanup_release_hook = cleanup_release.clone();
+        state
+            .inner
+            .runtime
+            .set_before_inflight_cleanup_for_test(move || {
+                let cleanup_arrived = cleanup_arrived_hook.clone();
+                let cleanup_release = cleanup_release_hook.clone();
+                Box::pin(async move {
+                    cleanup_arrived.notify_one();
+                    cleanup_release.notified().await;
+                })
+            });
+
+        let background_state = state.clone();
+        let background = tokio::spawn(async move {
+            refresh_official_usage(&background_state, "background", UsageSyncTrigger::Scheduled)
+                .await
+        });
+        cleanup_arrived.notified().await;
+        state.bump_settings_revision();
+
+        // The background leader has already committed under unconditional V2
+        // semantics but remains in-flight until cleanup. A stale guarded
+        // follower may observe that result; its unrelated token cannot veto it.
+        let follower_state = state.clone();
+        let follower = tokio::spawn(async move {
+            refresh_official_usage_with_authorization(
+                &follower_state,
+                "background",
+                UsageSyncTrigger::Scheduled,
+                stale_follower_authorization,
+            )
+            .await
+            .result
+        });
+        cleanup_arrived.notified().await;
+        cleanup_release.notify_waiters();
+
+        background.await.unwrap().unwrap();
+        follower.await.unwrap().unwrap();
+        let sync = state.inner.sync.lock().get("background").cloned().unwrap();
+        assert!(sync.last_success_at.is_some());
+        assert_eq!(sync.failure_streak, 0);
     }
 
     #[tokio::test]
@@ -1983,6 +2296,7 @@ mod tests {
             InflightEntry {
                 generation: 1,
                 future: finished.clone(),
+                authorization: UsageSyncCommitAuthorization::Unconditional,
             },
         );
         assert!(take_inflight_if_generation(&mut map, "a", 1));
@@ -1991,6 +2305,7 @@ mod tests {
             InflightEntry {
                 generation: 2,
                 future: finished,
+                authorization: UsageSyncCommitAuthorization::Unconditional,
             },
         );
         assert!(!take_inflight_if_generation(&mut map, "a", 1));
@@ -2414,6 +2729,9 @@ mod tests {
 
     struct FakeUsageInner {
         runtime: UsageSyncRuntime,
+        settings_update: ParkingMutex<()>,
+        settings_revision: AtomicU64,
+        process_generation: u64,
         accounts: ParkingMutex<HashMap<String, Account>>,
         sync: ParkingMutex<HashMap<String, ProviderUsageSyncState>>,
         decrypts: ParkingMutex<HashMap<String, String>>,
@@ -2429,6 +2747,9 @@ mod tests {
             Self {
                 inner: Arc::new(FakeUsageInner {
                     runtime: UsageSyncRuntime::new(),
+                    settings_update: ParkingMutex::new(()),
+                    settings_revision: AtomicU64::new(1),
+                    process_generation: 7,
                     accounts: ParkingMutex::new(HashMap::new()),
                     sync: ParkingMutex::new(HashMap::new()),
                     decrypts: ParkingMutex::new(HashMap::new()),
@@ -2481,6 +2802,24 @@ mod tests {
                     last_expedited_at: None,
                 },
             );
+        }
+
+        fn settings_revision(&self) -> u64 {
+            self.inner.settings_revision.load(AtomicOrdering::Acquire)
+        }
+
+        fn bump_settings_revision(&self) -> u64 {
+            self.inner
+                .settings_revision
+                .fetch_add(1, AtomicOrdering::AcqRel)
+                + 1
+        }
+
+        fn guarded_authorization(&self) -> UsageSyncCommitAuthorization {
+            UsageSyncCommitAuthorization::control_revision(
+                self.settings_revision(),
+                self.inner.process_generation,
+            )
         }
     }
 
@@ -2616,6 +2955,31 @@ mod tests {
             F: FnOnce(&Self::Store) -> R,
         {
             f(&self.inner)
+        }
+
+        fn with_authorized_sync_store<F, R>(
+            &self,
+            authorization: &UsageSyncCommitAuthorization,
+            f: F,
+        ) -> Result<R, UsageSyncCommitAuthorizationRejected>
+        where
+            F: FnOnce(&Self::Store) -> R,
+        {
+            match authorization {
+                UsageSyncCommitAuthorization::Unconditional => Ok(self.with_sync_store(f)),
+                UsageSyncCommitAuthorization::ControlRevision {
+                    expected_revision,
+                    process_generation,
+                } => {
+                    let _settings_update = self.inner.settings_update.lock();
+                    if *expected_revision != self.settings_revision()
+                        || *process_generation != self.inner.process_generation
+                    {
+                        return Err(UsageSyncCommitAuthorizationRejected);
+                    }
+                    Ok(f(&self.inner))
+                }
+            }
         }
     }
 
