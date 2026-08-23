@@ -1,10 +1,11 @@
 //! Local account control plane: secret-free reads and lifecycle mutations.
 //!
-//! Upstream verify/test/usage/browser/model-discovery stay on V2. Go/Zen
-//! protocol probes live on the Providers V3 route; Custom probes stay
-//! account-owned on V2. This slice preserves those V2 local semantics
-//! (enablement, Custom invalidation, managed setup, delete profile staging)
-//! behind the V3 CAS envelope.
+//! Upstream verify/test/usage/model-discovery stay on V2. Browser runtime
+//! lives on the V3 browser routes and reuses this module's secret-free
+//! account DTO mapper. Go/Zen protocol probes live on the Providers V3
+//! route; Custom probes stay account-owned on V2. This slice preserves
+//! those V2 local semantics (enablement, Custom invalidation, managed
+//! setup, delete profile staging) behind the V3 CAS envelope.
 
 use axum::Json;
 use axum::body::Bytes;
@@ -881,7 +882,7 @@ fn mutation_from_state(
     mutation_at(state, account, state.settings_revision())
 }
 
-fn mutation_at(
+pub(super) fn mutation_at(
     state: &CoreState,
     account: ModelAccount,
     revision: u64,

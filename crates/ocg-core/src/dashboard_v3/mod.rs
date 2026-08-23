@@ -5,10 +5,12 @@
 //! generation, connection/settings reads, the settings write path, the
 //! access-key lifecycle, the local accounts control plane, local account usage
 //! calibration and provider-usage reads, the local/Zen provider catalog,
-//! contracts, Zen Free control plane, pricing, read-only observability, and
-//! Go/Zen protocol probes. Custom protocol probes stay account-owned on V2.
+//! contracts, Zen Free control plane, pricing, read-only observability,
+//! Go/Zen protocol probes, and the local/native/remote browser runtime. Custom
+//! protocol probes stay account-owned on V2.
 
 mod accounts;
+mod browser;
 mod connection;
 mod keys;
 mod observability;
@@ -23,7 +25,7 @@ use axum::http::request::Parts;
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, patch, post, put};
+use axum::routing::{delete, get, patch, post, put};
 use axum::{Json, Router};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -39,22 +41,23 @@ pub use types::{
     AccountModelCapabilitiesUpdate, AccountModelCapability, AccountModelCapabilityWrite,
     AccountMutation, AccountOrder, AccountQuotaScope, AccountSetupStep, AccountSetupUpdate,
     AccountType, AccountUpdate, AccountUpstreamProtocol, AccountUsageUpdate,
-    AccountVerificationStatus, ApplicationModels, CATALOG_TYPE_NAMES, CapabilitySummary,
+    AccountVerificationStatus, ApplicationModels, BrowserCapabilities, BrowserMode, BrowserOpen,
+    BrowserOpenRequest, BrowserTarget, CATALOG_TYPE_NAMES, CapabilitySummary,
     CardCapabilitySummary, ConnectionInfo, ConnectionSubKey, ContractScopeKind, ControlRevision,
     CreditBalance, CustomEndpointContract, DailyCostByModel, DailyCostQuery, DailyModelCost,
-    DashboardSummary, ERROR_CONFLICT, ERROR_INTERNAL, ERROR_INVALID_JSON, ERROR_INVALID_REQUEST,
-    ERROR_MISSING_EXPECTED_REVISION, ERROR_NOT_FOUND, ERROR_NOT_IMPLEMENTED,
-    ERROR_PRECONDITION_FAILED, ERROR_REVISION_CONFLICT, ERROR_SERVICE_UNAVAILABLE,
-    ERROR_UNAUTHORIZED, EffectiveCatalog, EffectiveModelContract, EffectiveModelProtocols,
-    EffectiveProtocolEvidence, ForwardLog, ForwardLogClientKey, ForwardLogKeys, ForwardLogModels,
-    ForwardLogQuery, ForwardLogSummary, ForwardLogs, GatewayLog, GatewayLogQuery, GatewayLogs,
-    GatewayStatus, KeyCreate, KeyUpdate, MutationAck, MutationExpectation, PricingAdjustment,
-    PricingAvailability, PricingLimits, PricingModel, PricingMultiplierChange,
-    PricingMultiplierWrite, PricingMultipliersUpdate, PricingRefresh, PricingRefreshPolicy,
-    PricingRefreshStatus, PricingRefreshUpdate, PricingRevision, PricingSnapshot,
-    PricingTimeWindow, ProtocolProbeRequest, ProtocolProbeResponse, ProtocolProbeResult,
-    ProtocolSwitchUpdate, ProtocolSwitches, ProviderAccountChoice, ProviderCatalog,
-    ProviderCatalogEntry, ProviderCatalogFormField, ProviderCatalogRiskNotice,
+    DashboardSummary, ERROR_CONFLICT, ERROR_FORBIDDEN, ERROR_GATEWAY_TIMEOUT, ERROR_GONE,
+    ERROR_INTERNAL, ERROR_INVALID_JSON, ERROR_INVALID_REQUEST, ERROR_MISSING_EXPECTED_REVISION,
+    ERROR_NOT_FOUND, ERROR_NOT_IMPLEMENTED, ERROR_PRECONDITION_FAILED, ERROR_REVISION_CONFLICT,
+    ERROR_SERVICE_UNAVAILABLE, ERROR_UNAUTHORIZED, EffectiveCatalog, EffectiveModelContract,
+    EffectiveModelProtocols, EffectiveProtocolEvidence, ForwardLog, ForwardLogClientKey,
+    ForwardLogKeys, ForwardLogModels, ForwardLogQuery, ForwardLogSummary, ForwardLogs, GatewayLog,
+    GatewayLogQuery, GatewayLogs, GatewayStatus, KeyCreate, KeyUpdate, MutationAck,
+    MutationExpectation, PricingAdjustment, PricingAvailability, PricingLimits, PricingModel,
+    PricingMultiplierChange, PricingMultiplierWrite, PricingMultipliersUpdate, PricingRefresh,
+    PricingRefreshPolicy, PricingRefreshStatus, PricingRefreshUpdate, PricingRevision,
+    PricingSnapshot, PricingTimeWindow, ProtocolProbeRequest, ProtocolProbeResponse,
+    ProtocolProbeResult, ProtocolSwitchUpdate, ProtocolSwitches, ProviderAccountChoice,
+    ProviderCatalog, ProviderCatalogEntry, ProviderCatalogFormField, ProviderCatalogRiskNotice,
     ProviderContractGroup, ProviderContracts, ProviderModelCapability, ProviderOfferingChoice,
     ProviderPricing, ProviderUsage, ProxyListDirection, ProxyMode, ProxySupportedModel,
     QuotaWindow, RoutingMode, Settings, SettingsUpdate, UsageAvailability, UsageMutation,
@@ -62,6 +65,8 @@ pub use types::{
     ZenFreeSettingsUpdate, contract_schema, contract_schema_pretty,
 };
 
+#[cfg(debug_assertions)]
+pub use browser::{BrowserProfilePurgeGuard, install_browser_profile_purge_error_for_tests};
 #[cfg(debug_assertions)]
 pub use pricing::{
     OfficialPricingFetchGuard, install_official_pricing_fetch_error_for_tests,
@@ -112,6 +117,14 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
                 .delete(accounts::delete_account),
         )
         .route("/accounts/{id}/toggle", post(accounts::toggle_account))
+        .route(
+            "/accounts/{id}/browser",
+            post(browser::open_account_browser),
+        )
+        .route(
+            "/accounts/{id}/browser-profile",
+            delete(browser::reset_account_browser_profile),
+        )
         .route(
             "/accounts/{id}/setup",
             patch(accounts::advance_account_setup),
@@ -168,6 +181,11 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
         .route(
             "/providers/{provider_id}/protocol-probes",
             post(providers::run_provider_protocol_probes),
+        )
+        .route("/browser/capabilities", get(browser::browser_capabilities))
+        .route(
+            "/browser/sessions/{token}/ws",
+            get(browser::browser_session_websocket),
         )
         .route("/gateway/status", get(observability::get_gateway_status))
         .route(
@@ -322,6 +340,39 @@ impl V3ApiError {
         Self {
             status: StatusCode::NOT_IMPLEMENTED,
             body: V3Error::not_implemented(
+                message,
+                state.settings_revision(),
+                state.process_generation(),
+            ),
+        }
+    }
+
+    fn forbidden_at(state: &CoreState, message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            body: V3Error::forbidden(
+                message,
+                state.settings_revision(),
+                state.process_generation(),
+            ),
+        }
+    }
+
+    fn gone(state: &CoreState, message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::GONE,
+            body: V3Error::gone(
+                message,
+                state.settings_revision(),
+                state.process_generation(),
+            ),
+        }
+    }
+
+    fn gateway_timeout(state: &CoreState, message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::GATEWAY_TIMEOUT,
+            body: V3Error::gateway_timeout(
                 message,
                 state.settings_revision(),
                 state.process_generation(),
