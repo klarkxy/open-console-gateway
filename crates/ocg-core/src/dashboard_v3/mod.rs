@@ -5,10 +5,13 @@
 //! generation, connection/settings reads, the settings write path, the
 //! access-key lifecycle, the local accounts control plane, and the local/Zen
 //! provider catalog, contracts, Zen Free control plane, pricing, and Go/Zen
-//! protocol probes. Custom protocol probes stay account-owned on V2.
+//! protocol probes. Custom model discovery is an authenticated operational
+//! probe (no `expectedRevision`, no revision bump). Custom protocol probes
+//! stay account-owned on V2.
 
 mod accounts;
 mod connection;
+mod custom_discovery;
 mod keys;
 mod pricing;
 mod providers;
@@ -36,17 +39,18 @@ pub use types::{
     AccountMutation, AccountOrder, AccountQuotaScope, AccountSetupStep, AccountSetupUpdate,
     AccountType, AccountUpdate, AccountUpstreamProtocol, AccountVerificationStatus,
     CATALOG_TYPE_NAMES, CapabilitySummary, CardCapabilitySummary, ConnectionInfo, ConnectionSubKey,
-    ContractScopeKind, ControlRevision, CustomEndpointContract, ERROR_CONFLICT, ERROR_INTERNAL,
-    ERROR_INVALID_JSON, ERROR_INVALID_REQUEST, ERROR_MISSING_EXPECTED_REVISION, ERROR_NOT_FOUND,
-    ERROR_NOT_IMPLEMENTED, ERROR_PRECONDITION_FAILED, ERROR_REVISION_CONFLICT,
-    ERROR_SERVICE_UNAVAILABLE, ERROR_UNAUTHORIZED, EffectiveCatalog, EffectiveModelContract,
-    EffectiveModelProtocols, EffectiveProtocolEvidence, KeyCreate, KeyUpdate, MutationAck,
-    MutationExpectation, PricingAdjustment, PricingAvailability, PricingLimits, PricingModel,
-    PricingMultiplierChange, PricingMultiplierWrite, PricingMultipliersUpdate, PricingRefresh,
-    PricingRefreshPolicy, PricingRefreshStatus, PricingRefreshUpdate, PricingRevision,
-    PricingSnapshot, PricingTimeWindow, ProtocolProbeRequest, ProtocolProbeResponse,
-    ProtocolProbeResult, ProtocolSwitchUpdate, ProtocolSwitches, ProviderAccountChoice,
-    ProviderCatalog, ProviderCatalogEntry, ProviderCatalogFormField, ProviderCatalogRiskNotice,
+    ContractScopeKind, ControlRevision, CustomEndpointContract, CustomModelDiscoveryRequest,
+    CustomModelDiscoveryResponse, ERROR_CONFLICT, ERROR_INTERNAL, ERROR_INVALID_JSON,
+    ERROR_INVALID_REQUEST, ERROR_MISSING_EXPECTED_REVISION, ERROR_NOT_FOUND, ERROR_NOT_IMPLEMENTED,
+    ERROR_PRECONDITION_FAILED, ERROR_REVISION_CONFLICT, ERROR_SERVICE_UNAVAILABLE,
+    ERROR_UNAUTHORIZED, EffectiveCatalog, EffectiveModelContract, EffectiveModelProtocols,
+    EffectiveProtocolEvidence, KeyCreate, KeyUpdate, MutationAck, MutationExpectation,
+    PricingAdjustment, PricingAvailability, PricingLimits, PricingModel, PricingMultiplierChange,
+    PricingMultiplierWrite, PricingMultipliersUpdate, PricingRefresh, PricingRefreshPolicy,
+    PricingRefreshStatus, PricingRefreshUpdate, PricingRevision, PricingSnapshot,
+    PricingTimeWindow, ProtocolProbeRequest, ProtocolProbeResponse, ProtocolProbeResult,
+    ProtocolSwitchUpdate, ProtocolSwitches, ProviderAccountChoice, ProviderCatalog,
+    ProviderCatalogEntry, ProviderCatalogFormField, ProviderCatalogRiskNotice,
     ProviderContractGroup, ProviderContracts, ProviderModelCapability, ProviderOfferingChoice,
     ProviderPricing, ProxyListDirection, ProxyMode, ProxySupportedModel, RoutingMode, Settings,
     SettingsUpdate, V3Error, ZenFreeModel, ZenFreeModels, ZenFreeSettings, ZenFreeSettingsUpdate,
@@ -151,6 +155,10 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
         .route(
             "/providers/{provider_id}/protocol-probes",
             post(providers::run_provider_protocol_probes),
+        )
+        .route(
+            "/custom/models/discover",
+            post(custom_discovery::discover_custom_models),
         )
         .route_layer(middleware::from_fn_with_state(state, require_v3_session))
 }
@@ -339,6 +347,17 @@ fn parse_mutation_json<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, V3ApiErro
     };
     if !object.contains_key("expectedRevision") {
         return Err(V3ApiError::missing_expected_revision());
+    }
+    serde_json::from_value(value).map_err(|_| V3ApiError::invalid_json())
+}
+
+/// Operational-body parser. Unknown fields and malformed JSON are
+/// `invalidJson`. Unlike [`parse_mutation_json`], this does not require
+/// `expectedRevision`.
+fn parse_json<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, V3ApiError> {
+    let value: Value = serde_json::from_slice(bytes).map_err(|_| V3ApiError::invalid_json())?;
+    if !value.is_object() {
+        return Err(V3ApiError::invalid_json());
     }
     serde_json::from_value(value).map_err(|_| V3ApiError::invalid_json())
 }
