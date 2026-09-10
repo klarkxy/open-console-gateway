@@ -2,7 +2,7 @@
 
 # Accounts
 
-**Add account** first distinguishes an existing connection from a new service. Choose an existing Provider to add another Key using its saved address, protocol and models — including a user-defined Provider saved from **Providers** that still has no Key. Choose a new service to browse Plan/API presets or add a platform site; saving a preset creates a Provider and its first account together. Connection summaries remain visible before entering a Key. Regional variants use a compact picker. Keys are collected only on this page.
+**Add account** first distinguishes an existing connection from a new service. Choose an existing Provider to add another Key using its saved address, protocol and models — including a user-defined Provider saved from **Providers** that still has no Key. Choose a new service to browse Plan/API presets or add a platform site; saving a preset creates a Provider and its first account together. Connection summaries remain visible before entering a Key. Regional variants use a compact picker. Keys are stored by the account service; you can add one here or from a Provider's detail with **Add Key**.
 
 **Enabled** describes configuration, not a successful upstream authentication or model test. Test results stay in the test dialog. User-defined Providers have no modeled subscription period, including those created from Plan presets: their accounts do not show an inferred purchase date, expiry countdown, or expiry alert. Existing stored purchase anchors are preserved for compatibility, but are not presented as confirmed billing facts.
 

@@ -3,10 +3,10 @@ import { PROVIDER_FAMILIES, type ProviderFamily } from "./provider-families.ts";
 import { PROVIDER_PRESETS } from "./provider-presets.ts";
 
 /**
- * Presentation logic for the Providers page: the rail lists connected catalog
- * entries (those with at least one account) grouped by offering. Built-in
- * and preset rows without an account stay off the rail the same way.
- * The add flow is a small browse → form state machine mirrored in the URL.
+ * Presentation logic for the Providers page: the rail lists saved connections
+ * grouped by offering. Unused built-in templates stay off the rail; persisted
+ * preset/custom rows stay visible even with no Key. The add flow is a small
+ * browse → form state machine mirrored in the URL.
  */
 
 const FAMILIES_BY_ID: ReadonlyMap<string, ProviderFamily> = new Map(
@@ -52,20 +52,54 @@ export function groupCatalogEntriesByOffering(
   };
 }
 
+function normalizeProviderId(id: string): string {
+  return id.trim().toLocaleLowerCase();
+}
+
 /**
- * Rail rows: every Provider that already has an account. Built-in seeds and
- * saved preset/custom definitions are treated the same: no account, no row.
+ * Rail rows: hide unused built-in templates; keep every persisted preset or
+ * custom connection, and any built-in that already has an account. Catalog
+ * order is preserved.
  */
-export function catalogEntriesWithAccounts(
+export function railCatalogEntries(
   entries: readonly ProviderCatalogEntry[],
   accountProviderIds: readonly string[],
 ): ProviderCatalogEntry[] {
   const connected = new Set(
-    accountProviderIds.map((id) => id.trim().toLocaleLowerCase()).filter(Boolean),
+    accountProviderIds.map(normalizeProviderId).filter(Boolean),
   );
   return entries.filter((entry) => (
-    connected.has(entry.provider_id.trim().toLocaleLowerCase())
+    entry.origin !== "builtin"
+    || connected.has(normalizeProviderId(entry.provider_id))
   ));
+}
+
+export type CatalogEntryCredentialState = "not_required" | "missing" | "present";
+
+/**
+ * Credential marker from persisted facts only: `credential_kind` and the
+ * account count the view already computed. No health or probe inference.
+ */
+export function catalogEntryCredentialState(
+  entry: Pick<ProviderCatalogEntry, "credential_kind">,
+  accountCount: number,
+): CatalogEntryCredentialState {
+  if (entry.credential_kind === "none") return "not_required";
+  if (accountCount === 0) return "missing";
+  return "present";
+}
+
+/** Account counts keyed by the same normalized provider id the rail uses. */
+export function accountCountByProviderId(
+  accounts: readonly { provider_id: string }[],
+): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const account of accounts) {
+    const id = normalizeProviderId(account.provider_id);
+    if (!id) continue;
+    counts.set(id, (counts.get(id) ?? 0) + 1);
+  }
+  return counts;
 }
 
 /** Case-insensitive rail filter over the display name and the provider id. */

@@ -317,6 +317,7 @@ import {
   planFamilyLabel,
 } from "../domain/plans.ts";
 import { isDynamicCatalogEntry } from "../domain/dynamic-provider.ts";
+import { accountCreateRequestInput } from "../domain/account-create-payload.ts";
 import { t, type MessageKey } from "../i18n/index.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
 import { applyAppViewSearchParams, readAccountAddDeepLink, readAccountDeepLink } from "./app-navigation.ts";
@@ -1013,10 +1014,7 @@ async function onFormSave(payload: AccountInput | AccountFormPayload) {
       busy.value = false;
     }
   } else {
-    const input = {
-      ...(payload as AccountInput),
-      key: payload.key || "",
-    };
+    const input = accountCreateRequestInput(payload as AccountInput);
     busy.value = true;
     try {
       const created = await dashboardApi.createAccount(input);

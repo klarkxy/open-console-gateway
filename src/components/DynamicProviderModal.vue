@@ -96,9 +96,6 @@
         <p v-if="fixedSeeded" class="fixed-models-summary">
           {{ t("默认模型：{models}", { models: fixedSeededModels.join(", ") }) }}
         </p>
-        <p v-if="!isEdit && props.context !== 'account' && dynamicAuthRequiresKey(draft.auth_kind)" class="field-hint full-width-field">
-          {{ t("保存供应商后，请到账号页添加 Key。") }}
-        </p>
         <n-form-item v-if="!isEdit && props.context === 'account' && (!fixedPreset || settingsOpen)" :label="t('第一个账号名称')">
           <n-input
             v-model:value="draft.account_name"
@@ -120,6 +117,9 @@
           />
           <p v-if="keyIsTemporary" class="field-hint">
             {{ t("此 Key 仅临时用于获取模型和测试模型，保存不会更新它；更换已保存的 Key 请到账号页。") }}
+          </p>
+          <p v-else-if="optionalCreateKeyHint" class="field-hint">
+            {{ t("可选。现在填写会同时创建第一个账号；留空则只保存连接，之后可在供应商详情或账号页补充 Key。") }}
           </p>
         </n-form-item>
         <n-form-item v-if="!isEdit && props.context === 'account' && (!fixedPreset || settingsOpen)" :label="t('备注')" class="full-width-field">
@@ -152,7 +152,7 @@
               {{ t("模型默认跟随供应商的协议与地址；仅当某个模型需要不同上游时才覆盖，鉴权始终使用供应商的 Key。") }}
             </p>
             <p v-if="probeKeyMissing" class="field-hint">
-              {{ t("获取模型和测试模型需要 Key；请保存后到账号页添加。") }}
+              {{ t("获取模型和测试模型需要 Key") }}
             </p>
             <p v-if="discoveryUnavailable" class="field-hint">
               {{ t("此预设未配置模型发现，请手动填写准确的模型 ID。") }}
@@ -467,10 +467,15 @@ const testTargetOptions = computed(() => testTargets.value.map((target, index) =
 })));
 const showKeyField = computed(() => {
   if (!isEdit.value) {
-    return props.context === "account" && dynamicAuthRequiresKey(draft.value.auth_kind);
+    return dynamicAuthRequiresKey(draft.value.auth_kind);
   }
   return dynamicAuthRequiresKey(draft.value.auth_kind) || props.provider?.auth_kind === "none";
 });
+const optionalCreateKeyHint = computed(() => (
+  !isEdit.value
+  && props.context !== "account"
+  && dynamicAuthRequiresKey(draft.value.auth_kind)
+));
 const probeKeyMissing = computed(() => (
   !isEdit.value
   && props.context !== "account"

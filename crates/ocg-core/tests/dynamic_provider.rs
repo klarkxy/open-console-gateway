@@ -1502,6 +1502,92 @@ async fn keyed_create_without_a_key_saves_the_definition_only() {
     harness.stop();
 }
 
+#[tokio::test]
+async fn deleting_the_last_account_keeps_the_dynamic_provider_definition() {
+    let harness = start_loopback("dyn-keep-after-delete").await;
+    let endpoint = "http://127.0.0.1:9";
+    let (status, created) = send_json(
+        &harness,
+        Method::POST,
+        "/providers",
+        &cas(
+            &harness,
+            create_body(
+                "KeepMe",
+                endpoint,
+                "chat_completions",
+                "bearer",
+                Some("sk-keep"),
+            ),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let provider_id = created["provider"]["id"].as_str().unwrap().to_string();
+    assert_eq!(created["provider"]["endpointUrl"], endpoint);
+    let account_id = account_id_for_provider(&harness, &provider_id).await;
+
+    let (status, deleted) = send_json(
+        &harness,
+        Method::DELETE,
+        &format!("/accounts/{account_id}"),
+        &cas(&harness, json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{deleted}");
+    assert!(
+        harness
+            .state
+            .db
+            .lock()
+            .list_accounts()
+            .unwrap()
+            .iter()
+            .all(|account| account.provider_id != provider_id)
+    );
+
+    let (status, loaded) = send_json(
+        &harness,
+        Method::GET,
+        &format!("/providers/{provider_id}"),
+        &Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{loaded}");
+    assert_eq!(loaded["endpointUrl"], endpoint);
+    assert_eq!(loaded["models"][0]["publicModel"], "lab-opus");
+    assert_eq!(loaded["models"][0]["upstreamModel"], "vendor/opus");
+
+    let (status, catalog) = send_json(&harness, Method::GET, "/providers", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{catalog}");
+    assert!(
+        catalog["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["providerId"] == provider_id),
+        "catalog must still list the definition: {catalog}"
+    );
+
+    let (status, second) = send_json(
+        &harness,
+        Method::POST,
+        "/accounts",
+        &cas(
+            &harness,
+            json!({
+                "providerId": provider_id,
+                "name": "Replacement Key",
+                "key": "sk-later"
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    assert_eq!(second["account"]["providerId"], provider_id);
+    harness.stop();
+}
+
 async fn account_id_for_provider(harness: &V3Harness, provider_id: &str) -> String {
     harness
         .state

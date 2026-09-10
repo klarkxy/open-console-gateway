@@ -57,7 +57,7 @@
             secondary
             size="small"
             block
-            :disabled="inlineFormBusy"
+            :disabled="inlineFormBusy || addKeyBusy"
             @click="openAddFlow"
           >
             {{ t("添加供应商") }}
@@ -72,7 +72,7 @@
             :options="mobileSelectOptions"
             filterable
             :aria-label="t('选择供应商范围')"
-            :disabled="actionLocked || inlineFormBusy"
+            :disabled="actionLocked || inlineFormBusy || addKeyBusy"
             :consistent-menu-width="false"
             @update:value="onMobileSelect"
           />
@@ -108,7 +108,7 @@
                 <a :href="addPreset.websiteUrl" target="_blank" rel="noopener noreferrer">{{ t("控制台") }}</a>
               </div>
             </div>
-            <n-button secondary size="small" :disabled="inlineFormBusy" @click="exitAddFlow">
+            <n-button secondary size="small" :disabled="inlineFormBusy || addKeyBusy" @click="exitAddFlow">
               {{ t("返回") }}
             </n-button>
           </div>
@@ -132,6 +132,12 @@
               <h2 id="provider-detail-title">{{ selectedEntry.display_name }}</h2>
               <div class="providers-catalog-meta">
                 <n-tag size="small" :bordered="false">{{ originLabel(selectedEntry.origin) }}</n-tag>
+                <n-tag
+                  v-if="accountsStore.loaded && selectedCredentialState === 'missing'"
+                  size="small"
+                  type="warning"
+                  :bordered="false"
+                >{{ t("待补充凭据") }}</n-tag>
               </div>
             </div>
             <n-space>
@@ -158,14 +164,27 @@
           </div>
 
           <n-alert
-            v-if="selectedHasNoAccount"
-            type="info"
+            v-if="accountsStore.loaded && selectedCredentialState === 'missing'"
+            type="warning"
             class="providers-definition-error"
-            :title="t('此供应商还没有账号。请到账号页添加 Key。')"
+            :title="t('待补充凭据')"
           >
-            <n-button size="small" secondary @click="openAccounts">
-              {{ t("打开账号页") }}
-            </n-button>
+            <p class="providers-note">{{ t("此连接已保存，但还没有 Key，暂不参与路由。添加 Key 后即可使用；不会自动测试。") }}</p>
+            <n-space>
+              <n-button
+                v-if="canAddKey"
+                size="small"
+                type="primary"
+                secondary
+                :disabled="actionLocked || inlineFormBusy || addKeyBusy"
+                @click="openAddKey"
+              >
+                {{ t("添加 Key") }}
+              </n-button>
+              <n-button size="small" secondary :disabled="addKeyBusy" @click="openAccounts">
+                {{ t("打开账号页") }}
+              </n-button>
+            </n-space>
           </n-alert>
 
           <n-alert
@@ -320,12 +339,12 @@
         <section v-else class="providers-section" :aria-label="t('暂无已接入的供应商')">
           <n-empty :description="t('暂无已接入的供应商')">
             <template #extra>
-              <p class="providers-note">{{ t("供应商在添加账号后才会出现在这里。") }}</p>
+              <p class="providers-note">{{ t("添加供应商后会出现在这里。") }}</p>
               <n-space>
                 <n-button type="primary" size="small" @click="openAccounts">
                   {{ t("打开账号页") }}
                 </n-button>
-                <n-button secondary size="small" :disabled="inlineFormBusy" @click="openAddFlow">
+                <n-button secondary size="small" :disabled="inlineFormBusy || addKeyBusy" @click="openAddFlow">
                   {{ t("添加供应商") }}
                 </n-button>
               </n-space>
@@ -340,6 +359,15 @@
       :provider="editingDefinition"
       @saved="onDynamicSaved"
       @conflict="onDynamicConflict"
+    />
+    <AccountFormModal
+      :show="showAddKeyModal"
+      :account="null"
+      :busy="addKeyBusy"
+      :catalog="catalog"
+      :plan="addKeyPlan"
+      @update:show="onAddKeyShow"
+      @save="onAddKeySave"
     />
     <span class="sr-only" aria-live="polite" aria-atomic="true">{{ actionLive }}</span>
   </div>
@@ -363,7 +391,7 @@ import {
   useMessage,
 } from "naive-ui";
 import type { MenuOption, SelectOption } from "naive-ui";
-import { DashboardRequestError } from "../api/dashboard";
+import { DashboardRequestError, dashboardApi, type AccountInput } from "../api/dashboard";
 import { isRevisionConflict, providerApi } from "../api/providers.ts";
 import { useAccountsStore } from "../stores/accounts.ts";
 import { useProvidersStore } from "../stores/providers.ts";
@@ -381,6 +409,7 @@ import ProviderPresetBrowser from "../components/ProviderPresetBrowser.vue";
 import ProviderSettingsPanel from "../components/ProviderSettingsPanel.vue";
 import PricingCatalog from "../components/PricingCatalog.vue";
 import DynamicProviderModal from "../components/DynamicProviderModal.vue";
+import AccountFormModal, { type AccountFormPayload } from "../components/AccountFormModal.vue";
 import ProviderBrandMark from "../components/ProviderBrandMark.vue";
 import { t } from "../i18n/index.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
@@ -402,14 +431,19 @@ import {
   protocolDisplayName,
 } from "../domain/provider-contracts.ts";
 import {
-  catalogEntriesWithAccounts,
+  accountCountByProviderId,
+  catalogEntryCredentialState,
   catalogEntryFamily,
   filterCatalogEntries,
   groupCatalogEntriesByOffering,
   providerAddStageFromQuery,
   providerAddStageToQuery,
+  railCatalogEntries as listedRailCatalogEntries,
   type ProviderAddStage,
 } from "../domain/provider-catalog.ts";
+import { accountCreateRequestInput } from "../domain/account-create-payload.ts";
+import { isDynamicCatalogEntry } from "../domain/dynamic-provider.ts";
+import { dynamicPlanDefinition, findPlanDefinition } from "../domain/plans.ts";
 import {
   PROVIDER_PRESETS,
   providerPresetOffering,
@@ -430,6 +464,8 @@ const contracts = ref<ProviderContractsResponse | null>(null);
 const catalog = ref<ProviderCatalogEntry[] | null>(null);
 const showEditModal = ref(false);
 const editingDefinition = ref<ProviderDefinitionView | null>(null);
+const showAddKeyModal = ref(false);
+const addKeyBusy = ref(false);
 /** In-flight save/test/discovery inside the embedded create form. */
 const inlineFormBusy = ref(false);
 /** Add flow shown in the main pane; the rail selection is kept underneath. */
@@ -465,12 +501,12 @@ const allCatalogEntries = computed(() => catalog.value ?? []);
 const accountProviderIds = computed(() => (
   accountsStore.accounts.map((account) => account.provider_id)
 ));
-function railCatalogEntries(): ProviderCatalogEntry[] {
-  const all = allCatalogEntries.value;
-  if (!accountsStore.loaded) return all;
-  return catalogEntriesWithAccounts(all, accountProviderIds.value);
-}
-const catalogEntries = computed(() => railCatalogEntries());
+const providerAccountCounts = computed(() => accountCountByProviderId(accountsStore.accounts));
+// Always apply the rail rule: with accounts unloaded (or failed), the empty
+// id set still keeps saved preset/custom rows and hides unused built-ins.
+const catalogEntries = computed(() => (
+  listedRailCatalogEntries(allCatalogEntries.value, accountProviderIds.value)
+));
 const scopes = computed(() => (
   contracts.value
     ? flattenProviderScopes(contracts.value, catalog.value)
@@ -480,13 +516,27 @@ const scopes = computed(() => (
 const selectedEntry = computed(() => (
   catalogEntries.value.find((entry) => entry.provider_id === selectedProviderId.value) ?? null
 ));
-const selectedHasNoAccount = computed(() => {
+const selectedCredentialState = computed(() => {
   const entry = selectedEntry.value;
-  if (!accountsStore.loaded || !entry) return false;
-  const id = entry.provider_id.trim().toLocaleLowerCase();
-  return !accountProviderIds.value.some((providerId) => (
-    providerId.trim().toLocaleLowerCase() === id
-  ));
+  if (!entry) return "not_required" as const;
+  const count = providerAccountCounts.value.get(entry.provider_id.trim().toLocaleLowerCase()) ?? 0;
+  return catalogEntryCredentialState(entry, count);
+});
+const addKeyPlan = computed(() => {
+  const entry = selectedEntry.value;
+  if (!entry) return null;
+  return isDynamicCatalogEntry(entry)
+    ? dynamicPlanDefinition(entry)
+    : findPlanDefinition(entry.provider_id) ?? null;
+});
+const canAddKey = computed(() => {
+  const entry = selectedEntry.value;
+  return Boolean(
+    entry
+    && entry.credential_kind !== "none"
+    && entry.creation_availability === "available"
+    && addKeyPlan.value
+  );
 });
 const selectedEntryFamily = computed(() => (
   selectedEntry.value
@@ -534,11 +584,26 @@ const railPanes = computed<Array<{ id: "plan" | "api"; label: "Plan" | "API"; op
   const filtered = filterCatalogEntries(catalogEntries.value, railQuery.value);
   const groups = groupCatalogEntriesByOffering(filtered);
   const toOptions = (list: readonly ProviderCatalogEntry[]): MenuOption[] => (
-    list.map((entry) => ({
-      key: entry.provider_id,
-      label: entry.display_name,
-      icon: () => h(ProviderBrandMark, { family: catalogEntryFamily(entry), size: RAIL_BRAND_SIZE }),
-    }))
+    list.map((entry) => {
+      const count = accountsStore.loaded
+        ? (providerAccountCounts.value.get(entry.provider_id.trim().toLocaleLowerCase()) ?? 0)
+        : null;
+      const missing = count !== null && catalogEntryCredentialState(entry, count) === "missing";
+      return {
+        key: entry.provider_id,
+        label: entry.display_name,
+        icon: () => h(ProviderBrandMark, { family: catalogEntryFamily(entry), size: RAIL_BRAND_SIZE }),
+        extra: missing
+          ? () => h("span", {
+            style: {
+              fontSize: "var(--ocg-font-xs)",
+              color: "var(--ocg-muted)",
+              fontWeight: "400",
+            },
+          }, t("待补充凭据"))
+          : undefined,
+      };
+    })
   );
   const panes: Array<{ id: "plan" | "api"; label: "Plan" | "API"; options: MenuOption[] }> = [];
   const planOptions = toOptions(groups.plan);
@@ -623,7 +688,7 @@ function applyFromQuery(fellBackNotice = false, preferProviderId?: string) {
   const query = readProviderPageQuery(window.location.search);
   addStage.value = providerAddStageFromQuery(query.add, query.preset);
   const wanted = preferProviderId ?? query.provider ?? selectedProviderId.value;
-  const entries = railCatalogEntries();
+  const entries = catalogEntries.value;
   if (entries.length === 0) {
     selectedProviderId.value = null;
     writeUrl();
@@ -644,7 +709,7 @@ function applyFromQuery(fellBackNotice = false, preferProviderId?: string) {
 function selectProvider(key: string | number) {
   // An embedded form with in-flight save/test/discovery must not be swapped
   // out; its stale-generation guards only cover responses, not dismissal.
-  if (inlineFormBusy.value) return;
+  if (inlineFormBusy.value || addKeyBusy.value) return;
   const providerId = String(key);
   if (!catalogEntries.value.some((entry) => entry.provider_id === providerId)) return;
   addStage.value = null;
@@ -662,19 +727,19 @@ function onMobileSelect(key: string | number) {
 }
 
 function openAddFlow() {
-  if (inlineFormBusy.value) return;
+  if (inlineFormBusy.value || addKeyBusy.value) return;
   addStage.value = { stage: "browse" };
   writeUrl();
 }
 
 function onPresetBrowserSelect(presetId: string | null) {
-  if (inlineFormBusy.value) return;
+  if (inlineFormBusy.value || addKeyBusy.value) return;
   addStage.value = { stage: "form", presetId };
   writeUrl();
 }
 
 function exitAddFlow() {
-  if (inlineFormBusy.value) return;
+  if (inlineFormBusy.value || addKeyBusy.value) return;
   addStage.value = null;
   writeUrl();
 }
@@ -766,9 +831,41 @@ async function onDynamicSaved(providerId: string): Promise<void> {
     id.trim().toLocaleLowerCase() === createdId
   ));
   if (created && !createdHasAccount) {
-    message.success(t("供应商已创建。请到账号页添加 Key。"));
+    message.success(t("供应商已保存，待补充凭据"));
   } else {
     message.success(created ? t("供应商已创建") : t("供应商已更新"));
+  }
+}
+
+function onAddKeyShow(visible: boolean): void {
+  if (!visible && addKeyBusy.value) return;
+  showAddKeyModal.value = visible;
+}
+
+function openAddKey(): void {
+  if (inlineFormBusy.value || actionLocked.value || addKeyBusy.value || !canAddKey.value) return;
+  showAddKeyModal.value = true;
+}
+
+async function onAddKeySave(payload: AccountInput | AccountFormPayload): Promise<void> {
+  if (inlineFormBusy.value || actionLocked.value || addKeyBusy.value) return;
+  const input = accountCreateRequestInput(payload as AccountInput);
+  addKeyBusy.value = true;
+  try {
+    await dashboardApi.createAccount(input);
+    message.success(t("账号已添加"));
+    showAddKeyModal.value = false;
+    await accountsStore.loadPresented();
+    await loadAll({ retain: true, preferProviderId: selectedProviderId.value ?? undefined });
+  } catch (error) {
+    if (isRevisionConflict(error) || (error instanceof DashboardRequestError && error.status === 409)) {
+      await loadAll({ retain: true });
+      message.warning(t("数据已更新，请检查后重新保存。不会自动重试。"));
+      return;
+    }
+    message.error(t("保存失败: {error}", { error: dashboardErrorDetail(error) }));
+  } finally {
+    addKeyBusy.value = false;
   }
 }
 
@@ -1036,6 +1133,7 @@ watch(selectedProviderId, () => {
   // The embedded form unmounts on selection change; its busy flags die with
   // it, so the navigation lock must not outlive the form.
   inlineFormBusy.value = false;
+  if (!addKeyBusy.value) showAddKeyModal.value = false;
 });
 
 watch(selectedEntry, (entry, previous) => {

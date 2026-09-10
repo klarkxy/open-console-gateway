@@ -14,15 +14,15 @@ The **Adapter Registry** stays static and sealed. User-defined Providers are typ
 
 ## Create from a preset
 
-Choose a [Plan or API preset](provider-presets.md) in **Accounts → Add account** to create the Provider and its first Key together, or in **Providers → Add Provider** to save the connection only. Fixed-address presets already set protocol, authentication, endpoint and a default chat model. Optional settings expose names and models. Azure and Bedrock also need their customer-specific address and model/deployment information. Switching presets clears the previous Key and mappings, then supplies the new preset's default model. Keys are entered only on **Accounts**.
+Choose a [Plan or API preset](provider-presets.md) in **Accounts → Add account** to create the Provider and its first Key together (a Key is required), or in **Providers → Add Provider** to save the connection with an optional Key. Fixed-address presets already set protocol, authentication, endpoint and a default chat model. Optional settings expose names and models. Azure and Bedrock also need their customer-specific address and model/deployment information. Switching presets clears the previous Key and mappings, then supplies the new preset's default model. On **Providers**, the Key is optional; on **Accounts**, a preset still requires a Key.
 
 ## Create a user-defined Provider manually
 
 1. Open **Providers**, choose **Add Provider** in the rail footer, then pick
    **Manual setup** in the preset browser.
 2. Enter a name, one API Endpoint, one upstream protocol (Chat Completions, Responses, or Messages), and one auth kind (Bearer, `x-api-key`, or none).
-3. Add at least one public-model → exact-upstream-ID mapping. **Fetch models** and **Test model** need a Key, so they stay on **Accounts** for keyed auth.
-4. Save. Keyed auth writes the definition only; add the Key on **Accounts**. A no-auth Provider creates one singleton account without a Key. The write is one atomic `POST /providers` and does not require a successful probe.
+3. Add at least one public-model → exact-upstream-ID mapping. **Fetch models** and **Test model** stay on this form but need a Key; for keyed auth they remain disabled until you enter one.
+4. Save. Keyed auth may include an optional Key: filling it creates the first account in the same write; leaving it empty saves the definition only (shown as **Missing credential** until you use **Add Key**). A no-auth Provider creates one singleton account without a Key. The write is one atomic `POST /providers` and does not require a successful probe.
 
 Edit replaces the whole Provider configuration through `PATCH /providers/{id}`. The Provider id is immutable. Changing no-auth to keyed auth requires an explicit replacement Key, written only to that singleton account. An already-keyed Provider rejects any Key on the Provider update; rotate Keys on **Accounts**. Delete is allowed only after every referencing account is removed; there is no cascade.
 

@@ -4,6 +4,7 @@ import { PLAN_DEFINITIONS } from "./plans.ts";
 import {
   accountCreatePayloadErrorKey,
   AccountCreatePayloadError,
+  accountCreateRequestInput,
   buildCreateAccountPayload,
 } from "./account-create-payload.ts";
 import { CUSTOM_ENDPOINT_URL_ISSUE_KEYS } from "./custom-account.ts";
@@ -117,6 +118,15 @@ test("dynamic Provider accounts omit Endpoint/protocol/models and skip Key when 
   const dynamicNone = { ...dynamicKeyed, credential_kind: "none" as const };
   const nonePayload = buildCreateAccountPayload(dynamicNone, { name: "Singleton", key: "" });
   assert.equal(nonePayload.key, "");
+});
+
+test("create request input keeps fields and coerces a missing Key to empty", () => {
+  assert.deepEqual(
+    accountCreateRequestInput({ name: "Lab", provider_id: "lab", key: "sk-lab" }),
+    { name: "Lab", provider_id: "lab", key: "sk-lab" },
+  );
+  assert.equal(accountCreateRequestInput({ name: "Lab", key: "" }).key, "");
+  assert.equal(accountCreateRequestInput({ name: "Lab", key: undefined as unknown as string }).key, "");
 });
 
 test("payload errors map to Endpoint keys and fall back for unknown failures", () => {
