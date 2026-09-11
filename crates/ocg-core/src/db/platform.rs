@@ -78,11 +78,37 @@ pub(super) fn merge_platforms_on(
             "imported platform identity conflicts with immutable origin"
         );
         conn.execute("INSERT INTO platform_accounts(id,kind,name,base_url,version) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(id) DO UPDATE SET name=excluded.name,version=excluded.version,snapshot=NULL",params![parent.id,kind,parent.name,parent.base_url,fresh_version()])?;
+        identity::persist_platform_identity(
+            conn,
+            &parent.id,
+            &parent.name,
+            &parent.base_url,
+            Utc::now(),
+        )?;
     }
     for link in links {
         let mut group = link.group.clone();
         group.verified = false;
         conn.execute("INSERT INTO platform_links(account_id,platform_account_id,group_json,version) VALUES(?1,?2,?3,?4) ON CONFLICT(account_id) DO UPDATE SET platform_account_id=excluded.platform_account_id,group_json=excluded.group_json,version=excluded.version,snapshot=NULL",params![link.account_id,link.platform_account_id,serde_json::to_string(&group)?,fresh_version()])?;
+        let parent_base: Option<String> = conn
+            .query_row(
+                "SELECT base_url FROM platform_accounts WHERE id=?1",
+                [&link.platform_account_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(base_url) = parent_base {
+            identity::update_account_identity_declaration(
+                conn,
+                &link.account_id,
+                Some(&ocg_domain::credential::DeclaredPlatformRelation {
+                    platform_account_id: link.platform_account_id.clone(),
+                    group: identity::platform_group_label(&group),
+                    parent_base_url: base_url,
+                }),
+                Utc::now(),
+            )?;
+        }
     }
     // Also restore materialization for destination links whose Key was imported from V4.
     let mut stmt=conn.prepare("SELECT l.account_id,p.base_url,COALESCE(c.upstream_protocol,''),a.provider_id FROM platform_links l JOIN platform_accounts p ON p.id=l.platform_account_id JOIN accounts a ON a.id=l.account_id LEFT JOIN account_custom_configs c ON c.account_id=l.account_id")?;
@@ -164,7 +190,10 @@ impl Database {
             !name.trim().is_empty() && name.len() <= 200,
             "invalid platform name"
         );
-        self.conn.execute("INSERT INTO platform_accounts(id,kind,name,base_url,credential_cipher,version) VALUES(?1,?2,?3,?4,?5,?6)", params![id, if kind == PlatformKind::NewApi { "new_api" } else { "sub2api" }, name.trim(), base_url, credential_cipher, fresh_version()])?;
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("INSERT INTO platform_accounts(id,kind,name,base_url,credential_cipher,version) VALUES(?1,?2,?3,?4,?5,?6)", params![id, if kind == PlatformKind::NewApi { "new_api" } else { "sub2api" }, name.trim(), base_url, credential_cipher, fresh_version()])?;
+        identity::persist_platform_identity(&tx, id, name.trim(), &base_url, Utc::now())?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -185,6 +214,11 @@ impl Database {
             params![id, name.trim()],
         )?;
         anyhow::ensure!(count == 1, "platform account not found");
+        let identity_id = ocg_domain::credential::identity_id_for_platform_account(id);
+        tx.execute(
+            "UPDATE upstream_identities SET label=?2, updated_at=?3 WHERE id=?1",
+            params![identity_id.as_str(), name.trim(), Utc::now().to_rfc3339()],
+        )?;
         if let Some(value) = credential {
             tx.execute(
                 "UPDATE platform_accounts SET credential_cipher=?2,snapshot=NULL WHERE id=?1",
@@ -205,12 +239,13 @@ impl Database {
             )? == 0,
             "unlink Keys before deleting the platform account"
         );
+        let tx = self.conn.unchecked_transaction()?;
         anyhow::ensure!(
-            self.conn
-                .execute("DELETE FROM platform_accounts WHERE id=?1", [id])?
-                == 1,
+            tx.execute("DELETE FROM platform_accounts WHERE id=?1", [id])? == 1,
             "platform account not found"
         );
+        identity::delete_platform_identity(&tx, id)?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -284,15 +319,28 @@ impl Database {
             },
         )?;
         tx.execute("INSERT INTO platform_links(account_id,platform_account_id,group_json,version) VALUES(?1,?2,?3,?4) ON CONFLICT(account_id) DO UPDATE SET platform_account_id=excluded.platform_account_id,group_json=excluded.group_json,version=excluded.version,snapshot=NULL",params![account_id,parent_id,serde_json::to_string(&group)?,fresh_version()])?;
+        identity::update_account_identity_declaration(
+            &tx,
+            account_id,
+            Some(&ocg_domain::credential::DeclaredPlatformRelation {
+                platform_account_id: parent_id.to_string(),
+                group: identity::platform_group_label(&group),
+                parent_base_url: parent.base_url,
+            }),
+            Utc::now(),
+        )?;
         tx.commit()?;
         Ok(())
     }
 
     pub(crate) fn unlink_platform_account(&self, account_id: &str) -> Result<()> {
-        self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
             "DELETE FROM platform_links WHERE account_id=?1",
             [account_id],
         )?;
+        identity::update_account_identity_declaration(&tx, account_id, None, Utc::now())?;
+        tx.commit()?;
         Ok(())
     }
 

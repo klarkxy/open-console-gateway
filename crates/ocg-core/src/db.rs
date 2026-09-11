@@ -39,6 +39,7 @@ pub struct Database {
     conn: Connection,
 }
 
+pub(crate) mod identity;
 mod platform;
 
 /// Local configuration for the one code-owned CPA external integration.
@@ -225,7 +226,7 @@ pub const PRE_V35_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v35.";
 /// database is rewritten to the unified providers/provider_models tables.
 pub const PRE_V42_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v42.";
 /// Highest schema this binary can open or migrate. Newer databases fail closed.
-pub const CURRENT_SCHEMA_VERSION: i32 = 44;
+pub const CURRENT_SCHEMA_VERSION: i32 = 45;
 /// Canonical source schema for the v35 provider-identity rewrite.
 pub const V34_SCHEMA_VERSION: i32 = 34;
 /// Historical v34 offering IDs. Used only by v1–v34 SQL and the v35 preflight
@@ -3341,6 +3342,20 @@ fn insert_account_row(
          ) VALUES (?1, NULL, NULL, NULL, 0, NULL)",
         [&account.id],
     )?;
+    let sort_order: i64 = conn.query_row(
+        "SELECT sort_order FROM accounts WHERE id = ?1",
+        [&account.id],
+        |row| row.get(0),
+    )?;
+    identity::persist_account_identity_model(
+        conn,
+        account,
+        purchase_date,
+        verification_status,
+        sort_order,
+        None,
+        Utc::now(),
+    )?;
     Ok(())
 }
 
@@ -3995,6 +4010,8 @@ impl Database {
         migrate_to_v42(&db.conn, &db_path, is_fresh)?;
         migrate_to_v43(&db.conn)?;
         migrate_to_v44(&db.conn)?;
+        identity::migrate_to_v45(&db.conn)?;
+        identity::ensure_identity_model_consistent(&db.conn)?;
         Ok(db)
     }
 
@@ -6644,7 +6661,10 @@ impl Database {
               WHERE scope_kind = 'provider' AND scope_id = ?1",
             [CPA_PROVIDER_ID],
         )?;
+        let identity_id = identity::account_identity_id(&tx, CPA_ACCOUNT_ID)?;
+        identity::delete_account_identity_satellites(&tx, CPA_ACCOUNT_ID)?;
         tx.execute("DELETE FROM accounts WHERE id = ?1", [CPA_ACCOUNT_ID])?;
+        identity::delete_orphan_identity_for_account(&tx, CPA_ACCOUNT_ID, identity_id.as_deref())?;
         tx.commit()?;
         Ok(())
     }
@@ -6796,7 +6816,10 @@ impl Database {
              WHERE scope_kind = ?1 AND scope_id = ?2",
             params![SCOPE_KIND_CUSTOM_ENDPOINT, id],
         )?;
+        let identity_id = identity::account_identity_id(&tx, id)?;
+        identity::delete_account_identity_satellites(&tx, id)?;
         tx.execute("DELETE FROM accounts WHERE id = ?1", [id])?;
+        identity::delete_orphan_identity_for_account(&tx, id, identity_id.as_deref())?;
         tx.commit()?;
         Ok(())
     }

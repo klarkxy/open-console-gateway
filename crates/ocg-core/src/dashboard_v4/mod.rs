@@ -6,6 +6,7 @@
 //! V3 error envelope. Handlers must not issue outbound network requests.
 
 mod connections;
+mod identities;
 mod onboarding;
 mod templates;
 mod types;
@@ -19,9 +20,9 @@ use crate::dashboard_v3::{ControlRevision, require_v3_session};
 use crate::state::CoreState;
 
 pub use types::{
-    CATALOG_TYPE_NAMES, ConnectionList, ConnectionSummary, OnboardingAuthorization,
-    OnboardingCommitRequest, OnboardingCommitResult, OnboardingConnection, OnboardingTarget,
-    ProviderTemplate, TemplateList, contract_schema, contract_schema_pretty,
+    CATALOG_TYPE_NAMES, ConnectionList, ConnectionSummary, IdentityList, IdentitySummary,
+    OnboardingAuthorization, OnboardingCommitRequest, OnboardingCommitResult, OnboardingConnection,
+    OnboardingTarget, ProviderTemplate, TemplateList, contract_schema, contract_schema_pretty,
 };
 
 pub fn api_router(state: CoreState) -> Router<CoreState> {
@@ -29,6 +30,7 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
         .route("/contract", get(get_contract))
         .route("/templates", get(templates::list_templates))
         .route("/connections", get(connections::list_connections))
+        .route("/accounts", get(identities::list_accounts))
         .route("/onboarding/commit", post(onboarding::commit))
         .route_layer(middleware::from_fn_with_state(state, require_v3_session))
 }

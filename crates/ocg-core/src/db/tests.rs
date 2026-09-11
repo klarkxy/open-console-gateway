@@ -424,7 +424,7 @@ fn v44_adds_dashboard_operations_on_v43_reopen_and_fresh_databases() {
     let fresh = temp_data_dir("v44-fresh");
     let db = open_with_host_cipher(fresh.clone()).unwrap();
     assert_eq!(schema_version_on(&db.conn).unwrap(), CURRENT_SCHEMA_VERSION);
-    assert_eq!(CURRENT_SCHEMA_VERSION, 44);
+    assert_eq!(CURRENT_SCHEMA_VERSION, 45);
     assert!(table_exists(&db.conn, "dashboard_operations").unwrap());
     drop(db);
     fs::remove_dir_all(fresh).unwrap();
@@ -445,6 +445,573 @@ fn v44_adds_dashboard_operations_on_v43_reopen_and_fresh_databases() {
     let db = open_with_host_cipher(dir.clone()).unwrap();
     assert_eq!(schema_version_on(&db.conn).unwrap(), CURRENT_SCHEMA_VERSION);
     assert!(table_exists(&db.conn, "dashboard_operations").unwrap());
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+fn rewind_identity_model_to_v44(conn: &Connection) {
+    conn.execute_batch(
+        "DROP TABLE IF EXISTS quota_pool_members;
+         DROP TABLE IF EXISTS quota_pools;
+         DROP TABLE IF EXISTS subscription_records;
+         DROP TABLE IF EXISTS onboarding_tasks;
+         DROP TABLE IF EXISTS legacy_identity_map;
+         DROP TABLE IF EXISTS credential_bindings;
+         DROP TABLE IF EXISTS credential_state;
+         DROP TABLE IF EXISTS upstream_identities;
+         UPDATE accounts SET identity_id = NULL;
+         DELETE FROM schema_version;
+         INSERT INTO schema_version(version) VALUES (44);",
+    )
+    .unwrap();
+}
+
+#[test]
+fn v45_fresh_database_is_current_and_v44_reopen_migrates() {
+    let fresh = temp_data_dir("v45-fresh");
+    let db = open_with_host_cipher(fresh.clone()).unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), CURRENT_SCHEMA_VERSION);
+    assert_eq!(CURRENT_SCHEMA_VERSION, 45);
+    for table in [
+        "upstream_identities",
+        "credential_state",
+        "credential_bindings",
+        "legacy_identity_map",
+        "onboarding_tasks",
+        "subscription_records",
+        "quota_pools",
+        "quota_pool_members",
+    ] {
+        assert!(table_exists(&db.conn, table).unwrap(), "{table}");
+    }
+    assert!(table_has_column(&db.conn, "accounts", "identity_id").unwrap());
+    drop(db);
+    fs::remove_dir_all(fresh).unwrap();
+
+    let dir = temp_data_dir("v45-from-v44");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    rewind_identity_model_to_v44(&db.conn);
+    assert_eq!(schema_version_on(&db.conn).unwrap(), 44);
+    assert!(!table_exists(&db.conn, "upstream_identities").unwrap());
+    drop(db);
+
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), CURRENT_SCHEMA_VERSION);
+    assert!(table_exists(&db.conn, "upstream_identities").unwrap());
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn v45_migrates_legacy_accounts_idempotently_without_changing_v3_rows() {
+    use crate::platform::{PlatformGroup, PlatformKind};
+    use ocg_domain::connection::{LegacyConnectionKind, connection_id_for_legacy};
+    use ocg_domain::credential::{
+        AuthState, IdentityConfidence, LegacyAccountFacts, anonymous_binding_id_for,
+        credential_id_for_legacy_account, derive_auth_state, identity_id_for_legacy_account,
+        identity_id_for_platform_account, legacy_account_objects,
+    };
+
+    let dir = temp_data_dir("v45-legacy-fixture");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    rewind_identity_model_to_v44(&db.conn);
+
+    let now = Utc::now();
+    let cooldown_5h = now + chrono::Duration::hours(5);
+    let cooldown_week = now + chrono::Duration::days(7);
+    let cooldown_5h_text = cooldown_5h.to_rfc3339();
+    let cooldown_week_text = cooldown_week.to_rfc3339();
+
+    let provider_id = uuid::Uuid::new_v4().to_string();
+    let runtime = crate::dynamic::DynamicProviderRuntime {
+        preset_id: None,
+        id: provider_id.clone(),
+        name: "Dynamic Lab".into(),
+        endpoint_url: "https://dyn.example/v1/chat/completions".into(),
+        upstream_protocol: crate::provider::UpstreamProtocolKind::ChatCompletions,
+        auth_kind: ocg_domain::dynamic::DynamicAuthKind::Bearer,
+        mappings: vec![ocg_domain::dynamic::DynamicModelMapping {
+            public_model: "lab-opus".into(),
+            upstream_model: "vendor/opus".into(),
+            upstream_override: None,
+        }],
+        created_at: now,
+        updated_at: now,
+        origin: ocg_domain::provider::ProviderOrigin::Custom,
+        offering: "api".to_string(),
+    };
+    let mut dynamic = account("dyn-keyed");
+    dynamic.provider_id = provider_id.clone();
+    dynamic.name = "Dynamic Key".into();
+    dynamic.key_cipher = fixture_account_key_cipher();
+    db.create_dynamic_provider(&runtime, &dynamic).unwrap();
+
+    let mut custom = account("custom-keyed");
+    custom.provider_id = CUSTOM_PROVIDER_ID.into();
+    custom.name = "Custom Key".into();
+    custom.key_cipher = fixture_account_key_cipher();
+    db.create_account_with_contract(
+        &custom,
+        Some(&AccountCustomConfigInput {
+            endpoint_url: "https://custom.example/v1/chat/completions".into(),
+            upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+        }),
+        &[AccountModelCapabilityInput {
+            public_model: "custom-model".into(),
+            upstream_model: "custom-model".into(),
+            protocol: UpstreamProtocolKind::ChatCompletions,
+            source: None,
+        }],
+    )
+    .unwrap();
+
+    let mut builtin = account("go-keyed");
+    builtin.name = "Go Key".into();
+    builtin.enabled = false;
+    builtin.auth_error = Some("auth failed".into());
+    builtin.key_cipher = fixture_account_key_cipher();
+    builtin.cooldown_5h_until = Some(cooldown_5h);
+    builtin.cooldown_week_until = Some(cooldown_week);
+    db.create_account(&builtin).unwrap();
+
+    let mut managed = account("managed-draft");
+    managed.name = "Managed Draft".into();
+    managed.account_type = AccountType::Managed;
+    managed.setup_step = AccountSetupStep::Payment;
+    managed.enabled = false;
+    managed.key_cipher.clear();
+    db.create_account(&managed).unwrap();
+
+    db.create_platform_account(
+        "parent-1",
+        PlatformKind::NewApi,
+        "Parent",
+        "https://new.example/v1",
+        Some("obfuscated-test-credential"),
+    )
+    .unwrap();
+    db.link_platform_account("custom-keyed", "parent-1", &PlatformGroup::default())
+        .unwrap();
+
+    db.conn
+        .execute(
+            "UPDATE accounts SET sort_order = CASE id
+                WHEN 'dyn-keyed' THEN 0
+                WHEN 'custom-keyed' THEN 1
+                WHEN 'go-keyed' THEN 2
+                WHEN 'managed-draft' THEN 3
+                ELSE sort_order END,
+                cooldown_5h_until = CASE WHEN id = 'go-keyed' THEN ?1 ELSE cooldown_5h_until END,
+                cooldown_week_until = CASE WHEN id = 'go-keyed' THEN ?2 ELSE cooldown_week_until END,
+                auth_error = CASE WHEN id = 'go-keyed' THEN 'auth failed' ELSE auth_error END,
+                enabled = CASE WHEN id = 'go-keyed' THEN 0 ELSE enabled END",
+            params![cooldown_5h_text, cooldown_week_text],
+        )
+        .unwrap();
+
+    let before = db.list_accounts().unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), 44);
+    drop(db);
+
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), 45);
+    let after = db.list_accounts().unwrap();
+    assert_eq!(
+        serde_json::to_value(&before).unwrap(),
+        serde_json::to_value(&after).unwrap()
+    );
+
+    let account_count: i64 = db
+        .conn
+        .query_row("SELECT COUNT(*) FROM accounts", [], |row| row.get(0))
+        .unwrap();
+    let identity_count: i64 = db
+        .conn
+        .query_row("SELECT COUNT(*) FROM upstream_identities", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let credential_count: i64 = db
+        .conn
+        .query_row("SELECT COUNT(*) FROM credential_state", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let binding_count: i64 = db
+        .conn
+        .query_row("SELECT COUNT(*) FROM credential_bindings", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(credential_count, account_count);
+    assert_eq!(binding_count, account_count);
+    assert_eq!(identity_count, account_count + 1);
+
+    for id in [
+        "go-keyed",
+        "dyn-keyed",
+        "custom-keyed",
+        "managed-draft",
+        ZEN_FREE_ACCOUNT_ID,
+    ] {
+        let identity = identity_id_for_legacy_account(id);
+        let credential = credential_id_for_legacy_account(id);
+        let stored_identity: String = db
+            .conn
+            .query_row(
+                "SELECT identity_id FROM accounts WHERE id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored_identity, identity.as_str(), "{id}");
+        let stored_credential: String = db
+            .conn
+            .query_row(
+                "SELECT credential_id FROM credential_state WHERE account_id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored_credential, credential.as_str(), "{id}");
+        let map: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM legacy_identity_map
+                 WHERE legacy_kind = 'account' AND legacy_id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(map, 3, "{id}");
+    }
+
+    let go_sort: i64 = db
+        .conn
+        .query_row(
+            "SELECT sort_order FROM accounts WHERE id = 'go-keyed'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(go_sort, 2);
+    let connection =
+        connection_id_for_legacy(LegacyConnectionKind::BuiltinProvider, OPENCODE_PROVIDER_ID);
+    let (_, credential, binding) = legacy_account_objects(
+        LegacyAccountFacts {
+            account_id: "go-keyed".into(),
+            name: "Go Key".into(),
+            notes: None,
+            enabled: false,
+            sort_order: 2,
+            has_auth_error: true,
+            verified: false,
+            anonymous: false,
+            declared_relation: None,
+        },
+        &connection,
+        &[],
+    );
+    assert_eq!(binding.routing_rank, 2);
+    assert_eq!(credential.auth_state, AuthState::Invalid);
+    assert_eq!(derive_auth_state(true, false), AuthState::Invalid);
+
+    let stored_5h: String = db
+        .conn
+        .query_row(
+            "SELECT cooldown_5h_until FROM accounts WHERE id = 'go-keyed'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let stored_week: String = db
+        .conn
+        .query_row(
+            "SELECT cooldown_week_until FROM accounts WHERE id = 'go-keyed'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored_5h, cooldown_5h_text);
+    assert_eq!(stored_week, cooldown_week_text);
+
+    let task: (String, String) = db
+        .conn
+        .query_row(
+            "SELECT step, state FROM onboarding_tasks WHERE account_id = 'managed-draft'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(task, ("payment".into(), "in_progress".into()));
+    let ready_tasks: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM onboarding_tasks WHERE account_id != 'managed-draft'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(ready_tasks, 0);
+
+    let subscriptions: Vec<String> = db
+        .conn
+        .prepare("SELECT account_id FROM subscription_records ORDER BY account_id")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .map(|row| row.unwrap())
+        .collect();
+    assert_eq!(subscriptions, vec!["go-keyed".to_string()]);
+
+    let custom_identity: (String, Option<String>) = db
+        .conn
+        .query_row(
+            "SELECT i.identity_confidence, i.authority_site
+             FROM accounts a JOIN upstream_identities i ON i.id = a.identity_id
+             WHERE a.id = 'custom-keyed'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(custom_identity.0, IdentityConfidence::Declared.as_str());
+    let stored_parent_base: String = db
+        .conn
+        .query_row(
+            "SELECT base_url FROM platform_accounts WHERE id = 'parent-1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        custom_identity.1.as_deref(),
+        Some(stored_parent_base.as_str())
+    );
+
+    let platform_identity = identity_id_for_platform_account("parent-1");
+    let platform_map: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM legacy_identity_map
+             WHERE legacy_kind = 'platform_account' AND legacy_id = 'parent-1'
+               AND new_kind = 'identity' AND new_id = ?1",
+            [platform_identity.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(platform_map, 1);
+
+    let quota_pools: i64 = db
+        .conn
+        .query_row("SELECT COUNT(*) FROM quota_pools", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(quota_pools, 0);
+
+    let zen_connection = connection_id_for_legacy(
+        LegacyConnectionKind::BuiltinProvider,
+        OPENCODE_ZEN_FREE_PROVIDER_ID,
+    );
+    let stored_zen_binding: String = db
+        .conn
+        .query_row(
+            "SELECT id FROM credential_bindings WHERE account_id = ?1",
+            [ZEN_FREE_ACCOUNT_ID],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        stored_zen_binding,
+        anonymous_binding_id_for(&zen_connection).as_str()
+    );
+
+    let before_second = (
+        identity_count,
+        credential_count,
+        binding_count,
+        db.conn
+            .query_row("SELECT COUNT(*) FROM legacy_identity_map", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+    );
+    {
+        let tx = db.conn.unchecked_transaction().unwrap();
+        crate::db::identity::migrate_v45_body(&tx).unwrap();
+        crate::db::identity::migrate_v45_body(&tx).unwrap();
+        tx.commit().unwrap();
+    }
+    let after_second = (
+        db.conn
+            .query_row("SELECT COUNT(*) FROM upstream_identities", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        db.conn
+            .query_row("SELECT COUNT(*) FROM credential_state", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        db.conn
+            .query_row("SELECT COUNT(*) FROM credential_bindings", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        db.conn
+            .query_row("SELECT COUNT(*) FROM legacy_identity_map", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+    );
+    assert_eq!(before_second, after_second);
+
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn v45_delete_linked_key_keeps_platform_parent_identity() {
+    use crate::platform::{PlatformGroup, PlatformKind};
+    use ocg_domain::credential::identity_id_for_platform_account;
+
+    let dir = temp_data_dir("v45-delete-keeps-parent");
+    let mut db = open_with_host_cipher(dir.clone()).unwrap();
+    let mut custom = account("linked-custom");
+    custom.provider_id = CUSTOM_PROVIDER_ID.into();
+    custom.key_cipher = fixture_account_key_cipher();
+    db.create_account_with_contract(
+        &custom,
+        Some(&AccountCustomConfigInput {
+            endpoint_url: "https://custom.example/v1/chat/completions".into(),
+            upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+        }),
+        &[AccountModelCapabilityInput {
+            public_model: "keep-parent".into(),
+            upstream_model: "keep-parent".into(),
+            protocol: UpstreamProtocolKind::ChatCompletions,
+            source: None,
+        }],
+    )
+    .unwrap();
+    db.create_platform_account(
+        "keep-parent",
+        PlatformKind::NewApi,
+        "Keep Parent",
+        "https://keep.example/v1",
+        Some("obfuscated-test-credential"),
+    )
+    .unwrap();
+    db.link_platform_account("linked-custom", "keep-parent", &PlatformGroup::default())
+        .unwrap();
+    let parent_identity = identity_id_for_platform_account("keep-parent");
+    db.delete_account("linked-custom").unwrap();
+    let parent_rows: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM upstream_identities WHERE id = ?1",
+            [parent_identity.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(parent_rows, 1);
+    let map: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM legacy_identity_map
+             WHERE legacy_kind = 'platform_account' AND legacy_id = 'keep-parent'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(map, 1);
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn v45_unlink_returns_identity_to_opaque() {
+    use crate::platform::{PlatformGroup, PlatformKind};
+    use ocg_domain::credential::IdentityConfidence;
+
+    let dir = temp_data_dir("v45-unlink-opaque");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let mut custom = account("unlink-custom");
+    custom.provider_id = CUSTOM_PROVIDER_ID.into();
+    custom.key_cipher = fixture_account_key_cipher();
+    db.create_account_with_contract(
+        &custom,
+        Some(&AccountCustomConfigInput {
+            endpoint_url: "https://custom.example/v1/chat/completions".into(),
+            upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+        }),
+        &[AccountModelCapabilityInput {
+            public_model: "unlink-model".into(),
+            upstream_model: "unlink-model".into(),
+            protocol: UpstreamProtocolKind::ChatCompletions,
+            source: None,
+        }],
+    )
+    .unwrap();
+    db.create_platform_account(
+        "unlink-parent",
+        PlatformKind::NewApi,
+        "Unlink Parent",
+        "https://unlink.example/v1",
+        Some("obfuscated-test-credential"),
+    )
+    .unwrap();
+    db.link_platform_account("unlink-custom", "unlink-parent", &PlatformGroup::default())
+        .unwrap();
+    db.unlink_platform_account("unlink-custom").unwrap();
+    let state: (String, Option<String>) = db
+        .conn
+        .query_row(
+            "SELECT i.identity_confidence, i.authority_site
+             FROM accounts a JOIN upstream_identities i ON i.id = a.identity_id
+             WHERE a.id = 'unlink-custom'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(state.0, IdentityConfidence::Opaque.as_str());
+    assert!(state.1.is_none());
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn v45_open_repairs_missing_satellites_and_list_fails_closed() {
+    let dir = temp_data_dir("v45-repair-fail-closed");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let mut keyed = account("repair-go");
+    keyed.key_cipher = fixture_account_key_cipher();
+    db.create_account(&keyed).unwrap();
+    db.conn
+        .execute(
+            "UPDATE accounts SET identity_id = NULL WHERE id = 'repair-go'",
+            [],
+        )
+        .unwrap();
+    db.conn
+        .execute(
+            "DELETE FROM credential_state WHERE account_id = 'repair-go'",
+            [],
+        )
+        .unwrap();
+    let listed = db.list_identity_model();
+    assert!(
+        listed.is_err(),
+        "list must not synthesize missing v45 satellites"
+    );
+    drop(db);
+
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let snapshot = db.list_identity_model().unwrap();
+    assert!(
+        snapshot
+            .accounts
+            .iter()
+            .any(|record| record.account.id == "repair-go" && !record.identity_id.is_empty())
+    );
     drop(db);
     fs::remove_dir_all(dir).unwrap();
 }
@@ -6166,6 +6733,25 @@ fn account_migration_batch_is_atomic_and_preserves_order() {
             .unwrap()
             .is_some()
     );
+    let imported_satellites: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM credential_state WHERE account_id IN ('migration-go', 'migration-custom')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(imported_satellites, 2);
+    let imported_identities: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM accounts
+             WHERE id IN ('migration-go', 'migration-custom') AND identity_id IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(imported_identities, 2);
 
     drop(db);
     fs::remove_dir_all(dir).unwrap();

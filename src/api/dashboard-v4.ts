@@ -11,6 +11,7 @@ import type { MutationExpectation } from "./generated/dashboard-v3.ts";
 import type {
   ConnectionList,
   ControlRevision,
+  IdentityList,
   OnboardingCommitRequest,
   OnboardingCommitResult,
   TemplateList,
@@ -20,6 +21,7 @@ export const dashboardV4 = {
   getContract: () => requestV4<ControlRevision>("/contract"),
   getTemplates: () => requestV4<TemplateList>("/templates"),
   getConnections: () => requestV4<ConnectionList>("/connections"),
+  getAccounts: () => requestV4<IdentityList>("/accounts"),
   commitOnboarding: (
     input: WithoutExpectation<OnboardingCommitRequest>,
     expectation: MutationExpectation,

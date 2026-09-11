@@ -26,6 +26,33 @@
       ],
       "type": "string"
     },
+    "AuthState": {
+      "enum": [
+        "unknown",
+        "valid",
+        "invalid"
+      ],
+      "type": "string"
+    },
+    "AuthorityRefDto": {
+      "additionalProperties": false,
+      "properties": {
+        "issuerOrSite": {
+          "type": "string"
+        },
+        "tenantOrSubject": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "issuerOrSite",
+        "tenantOrSubject"
+      ],
+      "type": "object"
+    },
     "AuthorizationState": {
       "description": "Local authorization projection. Unknown is not a verified success.",
       "enum": [
@@ -36,6 +63,50 @@
         "invalid"
       ],
       "type": "string"
+    },
+    "BindingDto": {
+      "additionalProperties": false,
+      "properties": {
+        "allowedEndpointIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "allowedOrigins": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "connectionId": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "modelScope": {
+          "$ref": "#/$defs/ModelScope"
+        },
+        "routingRank": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "connectionId",
+        "allowedEndpointIds",
+        "allowedOrigins",
+        "modelScope",
+        "enabled",
+        "routingRank"
+      ],
+      "type": "object"
     },
     "ConnectionEndpoint": {
       "additionalProperties": false,
@@ -267,6 +338,147 @@
       ],
       "type": "object"
     },
+    "CredentialDto": {
+      "additionalProperties": false,
+      "properties": {
+        "authState": {
+          "$ref": "#/$defs/AuthState"
+        },
+        "authStateVersion": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "expiresAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "hasMaterial": {
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "materialKind": {
+          "$ref": "#/$defs/MaterialKind"
+        },
+        "purpose": {
+          "$ref": "#/$defs/CredentialPurpose"
+        },
+        "secretRef": {
+          "type": "string"
+        },
+        "version": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "purpose",
+        "materialKind",
+        "secretRef",
+        "hasMaterial",
+        "version",
+        "enabled",
+        "authState",
+        "authStateVersion",
+        "expiresAt"
+      ],
+      "type": "object"
+    },
+    "CredentialPurpose": {
+      "enum": [
+        "inference",
+        "platform_observer"
+      ],
+      "type": "string"
+    },
+    "CredentialSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "bindings": {
+          "items": {
+            "$ref": "#/$defs/BindingDto"
+          },
+          "type": "array"
+        },
+        "credential": {
+          "$ref": "#/$defs/CredentialDto"
+        },
+        "lastError": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "legacy": {
+          "$ref": "#/$defs/IdentityLegacy"
+        },
+        "onboardingTask": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OnboardingTaskDto"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "quotaWindows": {
+          "items": {
+            "$ref": "#/$defs/QuotaWindowDto"
+          },
+          "type": "array"
+        },
+        "subject": {
+          "$ref": "#/$defs/RuntimeSubjectKind"
+        },
+        "subscription": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SubscriptionDto"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "credential",
+        "subject",
+        "bindings",
+        "quotaWindows",
+        "onboardingTask",
+        "subscription",
+        "lastError",
+        "legacy"
+      ],
+      "type": "object"
+    },
+    "DeclaredRelationDto": {
+      "additionalProperties": false,
+      "properties": {
+        "group": {
+          "type": "string"
+        },
+        "platformAccountId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "platformAccountId",
+        "group"
+      ],
+      "type": "object"
+    },
     "Eligibility": {
       "additionalProperties": false,
       "properties": {
@@ -351,6 +563,85 @@
       ],
       "type": "object"
     },
+    "IdentityConfidence": {
+      "enum": [
+        "opaque",
+        "declared"
+      ],
+      "type": "string"
+    },
+    "IdentityLegacy": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/IdentityLegacyKind"
+        }
+      },
+      "required": [
+        "kind",
+        "id"
+      ],
+      "type": "object"
+    },
+    "IdentityLegacyKind": {
+      "enum": [
+        "account",
+        "platform_account"
+      ],
+      "type": "string"
+    },
+    "IdentityList": {
+      "additionalProperties": false,
+      "properties": {
+        "identities": {
+          "items": {
+            "$ref": "#/$defs/IdentitySummary"
+          },
+          "type": "array"
+        },
+        "revision": {
+          "$ref": "#/$defs/ControlRevision"
+        }
+      },
+      "required": [
+        "revision",
+        "identities"
+      ],
+      "type": "object"
+    },
+    "IdentitySummary": {
+      "additionalProperties": false,
+      "properties": {
+        "credentials": {
+          "items": {
+            "$ref": "#/$defs/CredentialSummary"
+          },
+          "type": "array"
+        },
+        "declaredRelations": {
+          "items": {
+            "$ref": "#/$defs/DeclaredRelationDto"
+          },
+          "type": "array"
+        },
+        "identity": {
+          "$ref": "#/$defs/UpstreamAccountDto"
+        },
+        "legacy": {
+          "$ref": "#/$defs/IdentityLegacy"
+        }
+      },
+      "required": [
+        "identity",
+        "credentials",
+        "declaredRelations",
+        "legacy"
+      ],
+      "type": "object"
+    },
     "LegacyConnectionKind": {
       "description": "Pre-unification row a connection was projected from.",
       "enum": [
@@ -375,6 +666,48 @@
         "id"
       ],
       "type": "object"
+    },
+    "MaterialKind": {
+      "enum": [
+        "api_key",
+        "external_reference"
+      ],
+      "type": "string"
+    },
+    "ModelScope": {
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "all",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "only",
+              "type": "string"
+            },
+            "models": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "models"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "OfferingKind": {
       "enum": [
@@ -592,6 +925,43 @@
       ],
       "type": "object"
     },
+    "OnboardingTaskDto": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/OnboardingTaskKind"
+        },
+        "state": {
+          "$ref": "#/$defs/OnboardingTaskState"
+        },
+        "step": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "step",
+        "state"
+      ],
+      "type": "object"
+    },
+    "OnboardingTaskKind": {
+      "enum": [
+        "managed_registration"
+      ],
+      "type": "string"
+    },
+    "OnboardingTaskState": {
+      "enum": [
+        "in_progress",
+        "completed"
+      ],
+      "type": "string"
+    },
     "OnboardingUpstreamOverride": {
       "additionalProperties": false,
       "properties": {
@@ -693,6 +1063,142 @@
       ],
       "type": "object"
     },
+    "QuotaMetricDto": {
+      "additionalProperties": false,
+      "properties": {
+        "limit": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "remaining": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "remaining",
+        "limit"
+      ],
+      "type": "object"
+    },
+    "QuotaPeriod": {
+      "enum": [
+        "generic",
+        "five_hours",
+        "week",
+        "month",
+        "free"
+      ],
+      "type": "string"
+    },
+    "QuotaPolicyMode": {
+      "enum": [
+        "observe_only",
+        "authoritative_limit"
+      ],
+      "type": "string"
+    },
+    "QuotaSubject": {
+      "enum": [
+        "credential",
+        "egress"
+      ],
+      "type": "string"
+    },
+    "QuotaWindowDto": {
+      "additionalProperties": false,
+      "properties": {
+        "blockedUntil": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "metric": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/QuotaMetricDto"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "period": {
+          "$ref": "#/$defs/QuotaPeriod"
+        },
+        "policyMode": {
+          "$ref": "#/$defs/QuotaPolicyMode"
+        },
+        "relationConfidence": {
+          "$ref": "#/$defs/RelationConfidence"
+        },
+        "subject": {
+          "$ref": "#/$defs/QuotaSubject"
+        },
+        "subjectRef": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "subject",
+        "subjectRef",
+        "period",
+        "blockedUntil",
+        "metric",
+        "relationConfidence",
+        "policyMode"
+      ],
+      "type": "object"
+    },
+    "RelationConfidence": {
+      "enum": [
+        "unknown",
+        "declared"
+      ],
+      "type": "string"
+    },
+    "RuntimeSubjectKind": {
+      "enum": [
+        "account_credential",
+        "anonymous",
+        "external_runtime"
+      ],
+      "type": "string"
+    },
+    "SubscriptionDto": {
+      "additionalProperties": false,
+      "properties": {
+        "expiresOn": {
+          "type": "string"
+        },
+        "purchaseDate": {
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/SubscriptionSource"
+        }
+      },
+      "required": [
+        "source",
+        "purchaseDate",
+        "expiresOn"
+      ],
+      "type": "object"
+    },
+    "SubscriptionSource": {
+      "enum": [
+        "legacy_manual",
+        "managed_payment"
+      ],
+      "type": "string"
+    },
     "TemplateList": {
       "additionalProperties": false,
       "properties": {
@@ -732,6 +1238,48 @@
         "preset"
       ],
       "type": "string"
+    },
+    "UpstreamAccountDto": {
+      "additionalProperties": false,
+      "properties": {
+        "authorityRef": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AuthorityRefDto"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "identityConfidence": {
+          "$ref": "#/$defs/IdentityConfidence"
+        },
+        "label": {
+          "type": "string"
+        },
+        "notes": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "authorityRef",
+        "identityConfidence",
+        "enabled",
+        "notes"
+      ],
+      "type": "object"
     },
     "V3Error": {
       "additionalProperties": false,
@@ -821,6 +1369,39 @@
     },
     {
       "$ref": "#/$defs/OnboardingCommitResult"
+    },
+    {
+      "$ref": "#/$defs/IdentityList"
+    },
+    {
+      "$ref": "#/$defs/IdentitySummary"
+    },
+    {
+      "$ref": "#/$defs/UpstreamAccountDto"
+    },
+    {
+      "$ref": "#/$defs/CredentialSummary"
+    },
+    {
+      "$ref": "#/$defs/CredentialDto"
+    },
+    {
+      "$ref": "#/$defs/BindingDto"
+    },
+    {
+      "$ref": "#/$defs/QuotaWindowDto"
+    },
+    {
+      "$ref": "#/$defs/OnboardingTaskDto"
+    },
+    {
+      "$ref": "#/$defs/SubscriptionDto"
+    },
+    {
+      "$ref": "#/$defs/DeclaredRelationDto"
+    },
+    {
+      "$ref": "#/$defs/IdentityLegacy"
     }
   ],
   "title": "DashboardApiV4"

@@ -156,3 +156,71 @@ fn onboarding_commit_request_is_camel_case_and_includes_secret_in_canonical_json
     assert_eq!(result_value["targetIds"], json!([]));
     assert_eq!(result_value["replayed"], false);
 }
+
+#[test]
+fn identity_list_emits_camel_case_and_null_unknowns() {
+    let list = IdentityList {
+        revision: ControlRevision {
+            revision: 1,
+            process_generation: 2,
+            pricing_revision: "p".into(),
+        },
+        identities: vec![IdentitySummary {
+            identity: UpstreamAccountDto {
+                id: "id".into(),
+                label: "Lab".into(),
+                authority_ref: None,
+                identity_confidence: ocg_domain::credential::IdentityConfidence::Opaque,
+                enabled: true,
+                notes: None,
+            },
+            credentials: vec![CredentialSummary {
+                credential: CredentialDto {
+                    id: "cred".into(),
+                    purpose: ocg_domain::credential::CredentialPurpose::Inference,
+                    material_kind: ocg_domain::credential::MaterialKind::ApiKey,
+                    secret_ref: "account:a".into(),
+                    has_material: true,
+                    version: 1,
+                    enabled: true,
+                    auth_state: ocg_domain::credential::AuthState::Unknown,
+                    auth_state_version: 1,
+                    expires_at: None,
+                },
+                subject: ocg_domain::credential::RuntimeSubjectKind::AccountCredential,
+                bindings: Vec::new(),
+                quota_windows: Vec::new(),
+                onboarding_task: None,
+                subscription: None,
+                last_error: None,
+                legacy: IdentityLegacy {
+                    kind: IdentityLegacyKind::Account,
+                    id: "a".into(),
+                },
+            }],
+            declared_relations: Vec::new(),
+            legacy: IdentityLegacy {
+                kind: IdentityLegacyKind::Account,
+                id: "a".into(),
+            },
+        }],
+    };
+    let value = serde_json::to_value(&list).unwrap();
+    assert_eq!(
+        value["identities"][0]["identity"]["authorityRef"],
+        Value::Null
+    );
+    assert_eq!(
+        value["identities"][0]["credentials"][0]["subscription"],
+        Value::Null
+    );
+    assert_eq!(
+        value["identities"][0]["credentials"][0]["credential"]["expiresAt"],
+        Value::Null
+    );
+    assert_eq!(
+        value["identities"][0]["credentials"][0]["credential"]["secretRef"],
+        "account:a"
+    );
+    assert_eq!(value["identities"][0]["legacy"]["kind"], "account");
+}

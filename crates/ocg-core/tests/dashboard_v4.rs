@@ -1,10 +1,14 @@
 //! Dashboard V4 connection projection and onboarding commit.
 
+use chrono::{Duration, Utc};
+use ocg_core::models::{Account, AccountSetupStep, AccountType};
 use ocg_core::provider::{
     COMMAND_CODE_PROVIDER_ID, CPA_PROVIDER_ID, CUSTOM_PROVIDER_ID, KIMI_PROVIDER_ID,
-    MINIMAX_PROVIDER_ID, OLLAMA_PROVIDER_ID, OPENCODE_PROVIDER_ID,
+    MINIMAX_PROVIDER_ID, OLLAMA_PROVIDER_ID, OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID,
+    ZEN_FREE_ACCOUNT_ID, default_credential_kind, default_quota_scope,
 };
 use ocg_domain::connection::{LegacyConnectionKind, connection_id_for_legacy};
+use ocg_domain::credential::anonymous_binding_id_for;
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -977,6 +981,505 @@ async fn commit_makes_zero_outbound_requests() {
     assert!(
         calls.lock().expect("fake call log").is_empty(),
         "onboarding commit must not issue outbound requests"
+    );
+    harness.stop();
+}
+
+fn identities_of(body: &Value) -> &[Value] {
+    body["identities"].as_array().expect("identities array")
+}
+
+fn find_identity_legacy<'a>(body: &'a Value, kind: &str, id: &str) -> &'a Value {
+    identities_of(body)
+        .iter()
+        .find(|identity| identity["legacy"]["kind"] == kind && identity["legacy"]["id"] == id)
+        .unwrap_or_else(|| panic!("missing identity {kind}:{id} in {body}"))
+}
+
+#[tokio::test]
+async fn identities_project_one_container_one_credential_one_binding_per_account() {
+    let harness = start_loopback("v4-identities-shape").await;
+    let (status, created) = send_v3(
+        &harness,
+        Method::POST,
+        "/accounts",
+        &cas(
+            &harness,
+            json!({
+                "providerId": OPENCODE_PROVIDER_ID,
+                "name": "Go Key",
+                "key": "sk-go-identity"
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let account_id = created["account"]["id"].as_str().unwrap().to_string();
+    let (status, body) = send_v4(&harness, Method::GET, "/accounts", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let identity = find_identity_legacy(&body, "account", &account_id);
+    assert_eq!(identity["credentials"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        identity["credentials"][0]["bindings"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(identity["credentials"][0]["subject"], "account_credential");
+    harness.stop();
+}
+
+#[tokio::test]
+async fn identities_keep_platform_parent_and_linked_key_separate_with_declared_relation() {
+    let harness = start_loopback("v4-identities-platform").await;
+    let (status, parent) = send_v3(
+        &harness,
+        Method::POST,
+        "/platform-accounts",
+        &cas(
+            &harness,
+            json!({
+                "kind": "new_api",
+                "name": "Parent",
+                "baseUrl": "https://new.example/v1",
+                "userCredential": "sk-platform-observer"
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{parent}");
+    let parent_id = parent["accounts"][0]["id"].as_str().unwrap().to_string();
+    let (status, created) = send_v3(
+        &harness,
+        Method::POST,
+        "/accounts",
+        &cas(
+            &harness,
+            json!({
+                "providerId": CUSTOM_PROVIDER_ID,
+                "name": "Linked Custom",
+                "key": "sk-linked-custom",
+                "customConfig": {
+                    "endpointUrl": "https://old.example/v1/chat/completions",
+                    "upstreamProtocol": "chat_completions"
+                },
+                "modelCapabilities": [{
+                    "publicModel": "linked-model",
+                    "upstreamModel": "linked-model",
+                    "protocol": "chat_completions"
+                }]
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let account_id = created["account"]["id"].as_str().unwrap().to_string();
+    let (status, linked) = send_v3(
+        &harness,
+        Method::PUT,
+        &format!("/accounts/{account_id}/platform-link"),
+        &cas(
+            &harness,
+            json!({
+                "platformAccountId": parent_id,
+                "group": { "id": "default", "autoGroups": [], "verified": false }
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{linked}");
+
+    let (status, body) = send_v4(&harness, Method::GET, "/accounts", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let key = find_identity_legacy(&body, "account", &account_id);
+    let platform = find_identity_legacy(&body, "platform_account", &parent_id);
+    assert_ne!(key["identity"]["id"], platform["identity"]["id"]);
+    assert_eq!(key["identity"]["identityConfidence"], "declared");
+    assert_eq!(
+        key["identity"]["authorityRef"]["issuerOrSite"],
+        parent["accounts"][0]["baseUrl"]
+    );
+    assert_eq!(key["declaredRelations"][0]["platformAccountId"], parent_id);
+    assert!(platform["declaredRelations"].as_array().unwrap().is_empty());
+    assert_eq!(
+        platform["credentials"][0]["credential"]["purpose"],
+        "platform_observer"
+    );
+    assert_eq!(
+        platform["credentials"][0]["credential"]["hasMaterial"],
+        true
+    );
+    assert!(
+        platform["credentials"][0]["bindings"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    harness.stop();
+}
+
+#[tokio::test]
+async fn identities_omit_subscription_for_dynamic_accounts() {
+    let harness = start_loopback("v4-identities-d07").await;
+    let (status, created) = send_v3(
+        &harness,
+        Method::POST,
+        "/providers",
+        &cas(
+            &harness,
+            create_body(
+                "No Sub Lab",
+                "https://nosub.example/v1/chat/completions",
+                "chat_completions",
+                "bearer",
+                Some("sk-nosub"),
+            ),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let (status, go) = send_v3(
+        &harness,
+        Method::POST,
+        "/accounts",
+        &cas(
+            &harness,
+            json!({
+                "providerId": OPENCODE_PROVIDER_ID,
+                "name": "Go With Dates",
+                "key": "sk-go-sub"
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{go}");
+    let go_id = go["account"]["id"].as_str().unwrap().to_string();
+    let (status, custom) = send_v3(
+        &harness,
+        Method::POST,
+        "/accounts",
+        &cas(
+            &harness,
+            json!({
+                "providerId": CUSTOM_PROVIDER_ID,
+                "name": "Custom No Sub",
+                "key": "sk-custom-nosub",
+                "customConfig": {
+                    "endpointUrl": "https://c.example/v1/chat/completions",
+                    "upstreamProtocol": "chat_completions"
+                },
+                "modelCapabilities": [{
+                    "publicModel": "c-model",
+                    "upstreamModel": "c-model",
+                    "protocol": "chat_completions"
+                }]
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{custom}");
+    let custom_id = custom["account"]["id"].as_str().unwrap().to_string();
+    let (status, body) = send_v4(&harness, Method::GET, "/accounts", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let go_identity = find_identity_legacy(&body, "account", &go_id);
+    assert!(
+        go_identity["credentials"][0]["subscription"].is_object(),
+        "{go_identity}"
+    );
+    let custom_identity = find_identity_legacy(&body, "account", &custom_id);
+    assert!(
+        custom_identity["credentials"][0]["subscription"].is_null(),
+        "{custom_identity}"
+    );
+    let dynamic_identity = identities_of(&body)
+        .iter()
+        .find(|identity| {
+            identity["legacy"]["kind"] == "account" && identity["identity"]["label"] == "No Sub Lab"
+        })
+        .expect("dynamic identity");
+    assert!(
+        dynamic_identity["credentials"][0]["subscription"].is_null(),
+        "{dynamic_identity}"
+    );
+    assert!(
+        dynamic_identity["credentials"][0]["quotaWindows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|window| window["metric"].is_null()),
+        "{dynamic_identity}"
+    );
+    harness.stop();
+}
+
+#[tokio::test]
+async fn identities_are_secret_free() {
+    let harness = start_loopback("v4-identities-secrets").await;
+    let secret = "sk-must-not-appear-in-identities";
+    let (status, created) = send_v3(
+        &harness,
+        Method::POST,
+        "/accounts",
+        &cas(
+            &harness,
+            json!({
+                "providerId": OPENCODE_PROVIDER_ID,
+                "name": "Secret Key",
+                "key": secret
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let account_id = created["account"]["id"].as_str().unwrap();
+    let (status, body) = send_v4(&harness, Method::GET, "/accounts", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_secret_free(&body, &[secret]);
+    let identity = find_identity_legacy(&body, "account", account_id);
+    let secret_ref = identity["credentials"][0]["credential"]["secretRef"]
+        .as_str()
+        .unwrap();
+    assert_eq!(secret_ref, format!("account:{account_id}"));
+    assert!(!secret_ref.contains("cipher"));
+    harness.stop();
+}
+
+#[tokio::test]
+async fn identities_reflect_account_create_and_delete_through_v3() {
+    let harness = start_loopback("v4-identities-crud").await;
+    let (status, created) = send_v3(
+        &harness,
+        Method::POST,
+        "/accounts",
+        &cas(
+            &harness,
+            json!({
+                "providerId": OPENCODE_PROVIDER_ID,
+                "name": "Temp Key",
+                "key": "sk-temp"
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let account_id = created["account"]["id"].as_str().unwrap().to_string();
+    let (status, body) = send_v4(&harness, Method::GET, "/accounts", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    find_identity_legacy(&body, "account", &account_id);
+    let (status, deleted) = send_v3(
+        &harness,
+        Method::DELETE,
+        &format!("/accounts/{account_id}"),
+        &cas(&harness, json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{deleted}");
+    let (status, after) = send_v4(&harness, Method::GET, "/accounts", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{after}");
+    assert!(
+        identities_of(&after)
+            .iter()
+            .all(|identity| identity["legacy"]["id"] != account_id),
+        "{after}"
+    );
+    harness.stop();
+}
+
+#[tokio::test]
+async fn identities_make_zero_outbound_requests() {
+    let (upstream, calls, _stop) = start_fake_upstream(HashMap::new()).await;
+    let harness = start_loopback("v4-identities-no-outbound").await;
+    let (status, created) = send_v3(
+        &harness,
+        Method::POST,
+        "/providers",
+        &cas(
+            &harness,
+            create_body(
+                "Quiet Identities",
+                &format!("{upstream}/v1/chat/completions"),
+                "chat_completions",
+                "bearer",
+                Some("sk-quiet-identities"),
+            ),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let (status, body) = send_v4(&harness, Method::GET, "/accounts", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        calls.lock().expect("fake call log").is_empty(),
+        "V4 identities must not issue outbound requests"
+    );
+    harness.stop();
+}
+
+#[tokio::test]
+async fn identities_require_session() {
+    let harness = start_public("v4-identities-session").await;
+    let response = harness
+        .client
+        .get(format!("{}/accounts", v4_base(&harness)))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["code"], "unauthorized");
+    harness.stop();
+}
+
+#[tokio::test]
+async fn identities_redact_last_error_and_omit_when_cipher_is_unreadable() {
+    let harness = start_loopback("v4-identities-last-error").await;
+    let secret = "sk-must-redact-from-last-error";
+    let (status, created) = send_v3(
+        &harness,
+        Method::POST,
+        "/accounts",
+        &cas(
+            &harness,
+            json!({
+                "providerId": OPENCODE_PROVIDER_ID,
+                "name": "Redact Key",
+                "key": secret
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let account_id = created["account"]["id"].as_str().unwrap().to_string();
+    harness
+        .state
+        .db
+        .lock()
+        .set_account_cooldown(
+            &account_id,
+            Some(Utc::now() + Duration::hours(1)),
+            Some(&format!("rate limit echoed {secret}")),
+        )
+        .unwrap();
+    let (status, body) = send_v4(&harness, Method::GET, "/accounts", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_secret_free(&body, &[secret]);
+    let identity = find_identity_legacy(&body, "account", &account_id);
+    let last_error = identity["credentials"][0]["lastError"]
+        .as_str()
+        .expect("redacted lastError");
+    assert!(last_error.contains("rate limit echoed"), "{last_error}");
+    assert!(!last_error.contains(secret), "{last_error}");
+
+    let now = Utc::now();
+    let broken = Account {
+        id: "unreadable-last-error".into(),
+        provider_id: OPENCODE_PROVIDER_ID.into(),
+        credential_kind: default_credential_kind(),
+        quota_scope: default_quota_scope(),
+        name: "Unreadable".into(),
+        username: None,
+        password_cipher: None,
+        key_cipher: "not-a-valid-ciphertext".into(),
+        enabled: false,
+        account_type: AccountType::Key,
+        setup_step: AccountSetupStep::Ready,
+        referral_code: None,
+        purchase_date: String::new(),
+        expires_on: String::new(),
+        cooldown_until: None,
+        cooldown_generic_until: None,
+        cooldown_5h_until: None,
+        cooldown_week_until: None,
+        cooldown_month_until: None,
+        cooldown_free_until: None,
+        last_error: Some(format!("stored error {secret}")),
+        auth_error: None,
+        notes: None,
+        created_at: now,
+        updated_at: now,
+    };
+    harness.state.db.lock().create_account(&broken).unwrap();
+    let (status, after) = send_v4(&harness, Method::GET, "/accounts", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{after}");
+    assert_secret_free(&after, &[secret]);
+    let unreadable = find_identity_legacy(&after, "account", "unreadable-last-error");
+    assert!(
+        unreadable["credentials"][0]["lastError"].is_null(),
+        "{unreadable}"
+    );
+    harness.stop();
+}
+
+#[tokio::test]
+async fn identities_show_invalid_auth_and_exact_cooldown_instant() {
+    let harness = start_loopback("v4-identities-auth-cooldown").await;
+    let (status, created) = send_v3(
+        &harness,
+        Method::POST,
+        "/accounts",
+        &cas(
+            &harness,
+            json!({
+                "providerId": OPENCODE_PROVIDER_ID,
+                "name": "Cooling Key",
+                "key": "sk-cooling"
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let account_id = created["account"]["id"].as_str().unwrap().to_string();
+    let until = Utc::now() + Duration::hours(5);
+    harness
+        .state
+        .db
+        .lock()
+        .set_account_auth_error(&account_id, Some("auth failed"))
+        .unwrap();
+    harness
+        .state
+        .db
+        .lock()
+        .set_account_cooldown(&account_id, Some(until), Some("cooling"))
+        .unwrap();
+    let (status, body) = send_v4(&harness, Method::GET, "/accounts", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let identity = find_identity_legacy(&body, "account", &account_id);
+    assert_eq!(
+        identity["credentials"][0]["credential"]["authState"],
+        "invalid"
+    );
+    let windows = identity["credentials"][0]["quotaWindows"]
+        .as_array()
+        .unwrap();
+    let generic = windows
+        .iter()
+        .find(|window| window["period"] == "generic")
+        .expect("generic cooldown window");
+    let blocked = chrono::DateTime::parse_from_rfc3339(
+        generic["blockedUntil"].as_str().expect("blockedUntil"),
+    )
+    .unwrap()
+    .with_timezone(&Utc);
+    assert_eq!(blocked, until);
+    harness.stop();
+}
+
+#[tokio::test]
+async fn identities_project_zen_free_as_anonymous_with_stored_binding_id() {
+    let harness = start_loopback("v4-identities-zen-free").await;
+    let (status, body) = send_v4(&harness, Method::GET, "/accounts", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let zen = find_identity_legacy(&body, "account", ZEN_FREE_ACCOUNT_ID);
+    assert_eq!(zen["credentials"][0]["subject"], "anonymous");
+    let connection = connection_id_for_legacy(
+        LegacyConnectionKind::BuiltinProvider,
+        OPENCODE_ZEN_FREE_PROVIDER_ID,
+    );
+    assert_eq!(
+        zen["credentials"][0]["bindings"][0]["id"],
+        anonymous_binding_id_for(&connection).as_str()
     );
     harness.stop();
 }

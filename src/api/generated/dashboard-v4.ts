@@ -21,7 +21,18 @@ export type DashboardApiV4 =
   | OnboardingConnection
   | OnboardingAuthorization
   | OnboardingTarget
-  | OnboardingCommitResult;
+  | OnboardingCommitResult
+  | IdentityList
+  | IdentitySummary
+  | UpstreamAccountDto
+  | CredentialSummary
+  | CredentialDto
+  | BindingDto
+  | QuotaWindowDto
+  | OnboardingTaskDto
+  | SubscriptionDto
+  | DeclaredRelationDto
+  | IdentityLegacy;
 /**
  * Inference operation advertised by one endpoint. Mapped 1:1 from
  * [`UpstreamProtocolKind`].
@@ -105,6 +116,27 @@ export type OnboardingConnection =
  * Nullable on the wire because builtin rows leave the field empty.
  */
 export type ProviderDefinitionAuthKind = "bearer" | "x-api-key" | "none";
+export type ModelScope =
+  | {
+      kind: "all";
+    }
+  | {
+      kind: "only";
+      models: string[];
+    };
+export type AuthState = "unknown" | "valid" | "invalid";
+export type MaterialKind = "api_key" | "external_reference";
+export type CredentialPurpose = "inference" | "platform_observer";
+export type IdentityLegacyKind = "account" | "platform_account";
+export type OnboardingTaskKind = "managed_registration";
+export type OnboardingTaskState = "in_progress" | "completed";
+export type QuotaPeriod = "generic" | "five_hours" | "week" | "month" | "free";
+export type QuotaPolicyMode = "observe_only" | "authoritative_limit";
+export type RelationConfidence = "unknown" | "declared";
+export type QuotaSubject = "credential" | "egress";
+export type RuntimeSubjectKind = "account_credential" | "anonymous" | "external_runtime";
+export type SubscriptionSource = "legacy_manual" | "managed_payment";
+export type IdentityConfidence = "opaque" | "declared";
 
 /**
  * Live CAS token, process generation, and pricing snapshot id.
@@ -227,4 +259,89 @@ export interface OnboardingCommitResult {
   replayed: boolean;
   revision: ControlRevision;
   targetIds: string[];
+}
+export interface IdentityList {
+  identities: IdentitySummary[];
+  revision: ControlRevision;
+}
+export interface IdentitySummary {
+  credentials: CredentialSummary[];
+  declaredRelations: DeclaredRelationDto[];
+  identity: UpstreamAccountDto;
+  legacy: IdentityLegacy;
+}
+export interface CredentialSummary {
+  bindings: BindingDto[];
+  credential: CredentialDto;
+  lastError: string | null;
+  legacy: IdentityLegacy;
+  onboardingTask: OnboardingTaskDto | null;
+  quotaWindows: QuotaWindowDto[];
+  subject: RuntimeSubjectKind;
+  subscription: SubscriptionDto | null;
+}
+export interface BindingDto {
+  allowedEndpointIds: string[];
+  allowedOrigins: string[];
+  connectionId: string;
+  enabled: boolean;
+  id: string;
+  modelScope: ModelScope;
+  routingRank: number;
+}
+export interface CredentialDto {
+  authState: AuthState;
+  authStateVersion: number;
+  enabled: boolean;
+  expiresAt: string | null;
+  hasMaterial: boolean;
+  id: string;
+  materialKind: MaterialKind;
+  purpose: CredentialPurpose;
+  secretRef: string;
+  version: number;
+}
+export interface IdentityLegacy {
+  id: string;
+  kind: IdentityLegacyKind;
+}
+export interface OnboardingTaskDto {
+  id: string;
+  kind: OnboardingTaskKind;
+  state: OnboardingTaskState;
+  step: string;
+}
+export interface QuotaWindowDto {
+  blockedUntil: string | null;
+  metric: QuotaMetricDto | null;
+  period: QuotaPeriod;
+  policyMode: QuotaPolicyMode;
+  relationConfidence: RelationConfidence;
+  subject: QuotaSubject;
+  subjectRef: string;
+}
+export interface QuotaMetricDto {
+  limit: number | null;
+  remaining: number | null;
+}
+export interface SubscriptionDto {
+  expiresOn: string;
+  purchaseDate: string;
+  source: SubscriptionSource;
+}
+export interface DeclaredRelationDto {
+  group: string;
+  platformAccountId: string;
+}
+export interface UpstreamAccountDto {
+  authorityRef: AuthorityRefDto | null;
+  enabled: boolean;
+  id: string;
+  identityConfidence: IdentityConfidence;
+  label: string;
+  notes: string | null;
+}
+export interface AuthorityRefDto {
+  issuerOrSite: string;
+  tenantOrSubject: string | null;
 }

@@ -17,6 +17,11 @@ use ocg_domain::connection::{
     AuthorizationState, ConnectionLifecycle, ConnectionOrigin, EligibilityReason, EligibilityState,
     EndpointAuthScheme, EndpointOperation, LegacyConnectionKind,
 };
+use ocg_domain::credential::{
+    AuthState, CredentialPurpose, IdentityConfidence, MaterialKind, ModelScope, OnboardingTaskKind,
+    OnboardingTaskState, QuotaPeriod, QuotaPolicyMode, QuotaSubject, RelationConfidence,
+    RuntimeSubjectKind, SubscriptionSource,
+};
 
 /// JSON Schema `$defs` names for the V4 catalog.
 pub const CATALOG_TYPE_NAMES: &[&str] = &[
@@ -37,6 +42,17 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "OnboardingAuthorization",
     "OnboardingTarget",
     "OnboardingCommitResult",
+    "IdentityList",
+    "IdentitySummary",
+    "UpstreamAccountDto",
+    "CredentialSummary",
+    "CredentialDto",
+    "BindingDto",
+    "QuotaWindowDto",
+    "OnboardingTaskDto",
+    "SubscriptionDto",
+    "DeclaredRelationDto",
+    "IdentityLegacy",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -264,6 +280,151 @@ pub(crate) struct StoredOnboardingCommitResult {
     pub target_ids: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum IdentityLegacyKind {
+    Account,
+    PlatformAccount,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct IdentityLegacy {
+    pub kind: IdentityLegacyKind,
+    pub id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AuthorityRefDto {
+    pub issuer_or_site: String,
+    pub tenant_or_subject: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpstreamAccountDto {
+    pub id: String,
+    pub label: String,
+    pub authority_ref: Option<AuthorityRefDto>,
+    pub identity_confidence: IdentityConfidence,
+    pub enabled: bool,
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CredentialDto {
+    pub id: String,
+    pub purpose: CredentialPurpose,
+    pub material_kind: MaterialKind,
+    pub secret_ref: String,
+    pub has_material: bool,
+    pub version: u64,
+    pub enabled: bool,
+    pub auth_state: AuthState,
+    pub auth_state_version: u64,
+    pub expires_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BindingDto {
+    pub id: String,
+    pub connection_id: String,
+    pub allowed_endpoint_ids: Vec<String>,
+    pub allowed_origins: Vec<String>,
+    pub model_scope: ModelScope,
+    pub enabled: bool,
+    pub routing_rank: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QuotaWindowDto {
+    pub subject: QuotaSubject,
+    pub subject_ref: String,
+    pub period: QuotaPeriod,
+    pub blocked_until: Option<String>,
+    pub metric: Option<QuotaMetricDto>,
+    pub relation_confidence: RelationConfidence,
+    pub policy_mode: QuotaPolicyMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QuotaMetricDto {
+    pub remaining: Option<f64>,
+    pub limit: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OnboardingTaskDto {
+    pub id: String,
+    pub kind: OnboardingTaskKind,
+    pub step: String,
+    pub state: OnboardingTaskState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SubscriptionDto {
+    pub source: SubscriptionSource,
+    pub purchase_date: String,
+    pub expires_on: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DeclaredRelationDto {
+    pub platform_account_id: String,
+    pub group: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CredentialSummary {
+    pub credential: CredentialDto,
+    pub subject: RuntimeSubjectKind,
+    pub bindings: Vec<BindingDto>,
+    pub quota_windows: Vec<QuotaWindowDto>,
+    pub onboarding_task: Option<OnboardingTaskDto>,
+    pub subscription: Option<SubscriptionDto>,
+    pub last_error: Option<String>,
+    pub legacy: IdentityLegacy,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct IdentitySummary {
+    pub identity: UpstreamAccountDto,
+    pub credentials: Vec<CredentialSummary>,
+    pub declared_relations: Vec<DeclaredRelationDto>,
+    pub legacy: IdentityLegacy,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct IdentityList {
+    pub revision: ControlRevision,
+    pub identities: Vec<IdentitySummary>,
+}
+
 /// Deterministic JSON Schema catalog for the V4 contract.
 ///
 /// Generator settings match V3: draft 2020-12, serialize-mode for response
@@ -286,6 +447,17 @@ pub fn contract_schema() -> Value {
     include_type::<ConnectionSummary>(&mut serialize);
     include_type::<ConnectionList>(&mut serialize);
     include_type::<OnboardingCommitResult>(&mut serialize);
+    include_type::<IdentityList>(&mut serialize);
+    include_type::<IdentitySummary>(&mut serialize);
+    include_type::<UpstreamAccountDto>(&mut serialize);
+    include_type::<CredentialSummary>(&mut serialize);
+    include_type::<CredentialDto>(&mut serialize);
+    include_type::<BindingDto>(&mut serialize);
+    include_type::<QuotaWindowDto>(&mut serialize);
+    include_type::<OnboardingTaskDto>(&mut serialize);
+    include_type::<SubscriptionDto>(&mut serialize);
+    include_type::<DeclaredRelationDto>(&mut serialize);
+    include_type::<IdentityLegacy>(&mut serialize);
     let mut defs = serialize.take_definitions(true);
 
     let mut deserialize = SchemaSettings::draft2020_12().into_generator();
