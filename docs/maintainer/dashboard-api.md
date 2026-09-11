@@ -108,7 +108,8 @@ cannot be redacted safely), and `legacy`. The platform parent's
 `platform_observer` credential is a projection in this stage (no
 `credential_state` row). `authState` is local: `unknown` is never
 `valid`; `valid` requires the existing verification record. The Vue
-dashboard does not consume this route yet. Some enum values in the V4
+Accounts page overlays this projection for display only; mutations stay
+on V3. Some enum values in the V4
 catalog are reserved for the next stage and not yet produced:
 `subject: external_runtime`, `policyMode: observe_only`,
 `relationConfidence: unknown`, `subscription.source: managed_payment`,
@@ -166,9 +167,20 @@ refreshed CAS tokens still replays. Schema v44 stores each commit in
 than 30 days are pruned on insert; after pruning, the same `operationId` is a
 new write.
 
-The dashboard consumes `GET /connections` for the Providers rail and
-`POST /onboarding/commit` for user-defined Provider creation. It does not
-consume `GET /accounts` yet. The client generates a new `operationId` when
+`POST /credentials/{id}/rotate` replaces the Key on one projected
+credential. CAS tokens are required; there is no `operationId`. The
+credential id, binding, and quota relationship stay the same. `version`
+and `authStateVersion` increment together; `authState` becomes `unknown`;
+the underlying account's `auth_error` / `last_error` and verification
+result are cleared so the old version cannot pollute the new one. The
+body is `{ secretInput }` plus CAS tokens. The result is secret-free.
+Platform observer, anonymous, no-auth, and CPA credentials return `400`.
+Unknown ids return `404`. A stale CAS token returns `409` and writes
+nothing.
+
+The dashboard consumes `GET /connections` for the Providers rail,
+`POST /onboarding/commit` for user-defined Provider creation, and
+`GET /accounts` as a display overlay on the Accounts page. The client generates a new `operationId` when
 the draft changes, keeps that id across retries of an unchanged draft, and
 regenerates it after success. Editing, deleting, adding Keys to existing
 accounts, and all Accounts-page account operations stay on V3.
