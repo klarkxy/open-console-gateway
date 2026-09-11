@@ -74,8 +74,9 @@ The frozen contract is `schema/dashboard-api-v4.schema.json`, generated from
 `CATALOG_TYPE_NAMES` in `dashboard_v4/types.rs` is the ordered `$defs` catalog;
 appending must keep existing definitions byte-identical.
 
-Read-only routes remain `GET /contract`, `GET /templates`, and
-`GET /connections`. Those reads perform no outbound requests.
+Read-only routes remain `GET /contract`, `GET /templates`,
+`GET /connections`, and `GET /accounts`. Those reads perform no outbound
+requests.
 
 `GET /templates` is the read-only add catalog: the sealed built-ins (CPA
 excluded) plus the `custom-http` manual template. Presets are not part of it
@@ -87,6 +88,31 @@ individually; CPA is never a connection. Each connection carries lifecycle, auth
 eligibility with a reason, endpoints, model targets, and a legacy identity
 reference. Connection ids are deterministic UUIDv5 values derived from that
 legacy identity, never from names or URLs.
+
+`GET /accounts` returns `IdentityList { revision, identities[] }`. Each
+`IdentitySummary` carries `identity` (`id`, `label`, `authorityRef`
+`{ issuerOrSite, tenantOrSubject }`, `identityConfidence`, `enabled`,
+`notes`), `credentials[]`, identity-level `declaredRelations[]`
+(`platformAccountId`, `group`), and `legacy` (`kind` `account` |
+`platform_account`, `id`). The wire shape is nested:
+`credentials[].credential` (`id`, `purpose` `inference` |
+`platform_observer`, `materialKind` `api_key` | `external_reference`,
+`secretRef` — an opaque handle, never material, `hasMaterial`, `version`,
+`enabled`, `authState` `unknown` | `valid` | `invalid`,
+`authStateVersion`, `expiresAt` null when unknown) with siblings
+`subject` (`account_credential` | `anonymous`), `bindings[]` (`id`,
+`connectionId`, `allowedEndpointIds`, `allowedOrigins`, `modelScope`,
+`enabled`, `routingRank`), `quotaWindows[]`, `onboardingTask`,
+`subscription` (null when unknown), `lastError` (redacted; null when it
+cannot be redacted safely), and `legacy`. The platform parent's
+`platform_observer` credential is a projection in this stage (no
+`credential_state` row). `authState` is local: `unknown` is never
+`valid`; `valid` requires the existing verification record. The Vue
+dashboard does not consume this route yet. Some enum values in the V4
+catalog are reserved for the next stage and not yet produced:
+`subject: external_runtime`, `policyMode: observe_only`,
+`relationConfidence: unknown`, `subscription.source: managed_payment`,
+`onboardingTask.state: completed`.
 
 V4 does not treat authorization `unknown` as `valid`. Eligibility is a local
 projection, never upstream health.
@@ -141,11 +167,11 @@ than 30 days are pruned on insert; after pruning, the same `operationId` is a
 new write.
 
 The dashboard consumes `GET /connections` for the Providers rail and
-`POST /onboarding/commit` for user-defined Provider creation. The client
-generates a new `operationId` when the draft changes, keeps that id across
-retries of an unchanged draft, and regenerates it after success. Editing,
-deleting, adding Keys to existing accounts, and all Accounts-page account
-operations stay on V3.
+`POST /onboarding/commit` for user-defined Provider creation. It does not
+consume `GET /accounts` yet. The client generates a new `operationId` when
+the draft changes, keeps that id across retries of an unchanged draft, and
+regenerates it after success. Editing, deleting, adding Keys to existing
+accounts, and all Accounts-page account operations stay on V3.
 
 ## Settings mutation workflow
 

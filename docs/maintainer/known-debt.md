@@ -40,6 +40,8 @@ proposal or pull request, with corresponding code and documentation changes.
 - The V4 operation digest key (`dashboard_operation_digest_key`) lives in the
   same SQLite file as the obfuscated account Keys. A future authenticated
   local Key store should also move this key.
+- The `accounts` row still holds cooldown columns and Key material. The
+  identity model is satellite-based until the write switch in a later phase.
 
 ## Deliberate Non-Goals
 

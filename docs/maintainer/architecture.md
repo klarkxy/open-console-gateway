@@ -29,6 +29,8 @@ are typed data bound to Configurable HTTP.
 | `ocg-core` | SQLite, `CoreState`, Dashboard V3, adapters, gateway execution, usage sync, Host composition | Runtime plugin loading; adapter-owned DB or HTTP clients |
 | `ocg-cli` / `src-tauri` | Process composition for CLI and Desktop | A second control plane or direct WebView mutation path |
 
+`ocg-domain::credential` holds the identity/credential/binding vocabulary and the single legacy mapper.
+
 Compatibility facades remain in `ocg-core`, but new no-I/O catalog, selector,
 alias, and conversion behavior belongs in the lower crates.
 

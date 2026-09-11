@@ -28,6 +28,8 @@ Vue SPA              静态资源；只走 HTTP Dashboard V3 + V4
 | `ocg-core` | SQLite、`CoreState`、Dashboard V3、适配器、Gateway 执行、用量同步、Host 组合 | 运行时插件加载；适配器自持 DB 或 HTTP client |
 | `ocg-cli` / `src-tauri` | CLI 与 Desktop 进程组合 | 第二套控制面或 WebView 直接变更路径 |
 
+`ocg-domain::credential` 持有身份/凭据/绑定词汇以及唯一的遗留映射器。
+
 兼容 facade 继续留在 `ocg-core`，但新的无 I/O 目录、selector、Alias 与转换行为应进入
 下层 crate。
 

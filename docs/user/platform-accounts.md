@@ -8,7 +8,7 @@ Each site offers **Add Key** and **Link existing Key**. Add Key opens a Custom A
 
 On **Accounts**, open **Add account**, choose **New API** or **Sub2API** under **Platform accounts**, then enter the site URL and a name. The platform accounts section appears after an account is created. A parent groups your existing Custom API Keys; each Key keeps its model mappings, protocol, enablement, cooldown, and position in the global route order. Grouping does not create a new Provider or change fallback priority.
 
-Use the site's root URL, including any installation path. The platform and URL are fixed after creation. Link an existing Custom API Key explicitly, or add a Custom API account with the Key you paste and then link it. OCG does not fetch remote Key secrets. A manual association is not proof of remote ownership or model permission.
+Use the site's root URL, including any installation path. The platform and URL are fixed after creation. Link an existing Custom API Key explicitly, or add a Custom API account with the Key you paste and then link it. OCG does not fetch remote Key secrets. A manual association is not proof of remote ownership or model permission. A linked Key is recorded as a declared (not verified) relation to the platform account.
 
 An optional ordinary user credential enables user-scoped observations. It is stored separately from inference Keys and is never returned by the dashboard or included in a transfer bundle. Omitting it keeps Key-scoped reads available. Expired user credentials do not disable inference. Clearing the credential removes cached observations that depended on it.
 

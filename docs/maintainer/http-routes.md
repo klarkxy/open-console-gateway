@@ -2,17 +2,18 @@
 
 # HTTP Routes
 
-All routes share one port: inference, Dashboard V3, V2 tombstone, and SPA. See [Architecture](architecture.md).
+All routes share one port: inference, Dashboard V3, Dashboard V4, V2 tombstone, and SPA. See [Architecture](architecture.md).
 
 Retired `/dashboard/api/...` REST returns empty-body **401** when anonymous
 (auth runs before the tombstone) and **410**
 `{ "code": "dashboardV2Removed", "message": "Dashboard API V2 has been removed; refresh the page and retry." }`
 when authenticated, including loopback local mode. Unknown `/dashboard/api/...`
-paths that are not V3 and not a preserved family are also 410 once
-authenticated. Preserved `/dashboard/api` families (exact path, no trailing
-slash, no extra segments): `auth/status`, `auth/register`, `auth/login`,
-`auth/logout`, and `browser/sessions/{token}/ws` (non-empty token). Do not
-revive protected V2 REST; new JSON is V3.
+paths that are not V3, not V4, and not a preserved family are also 410 once
+authenticated. Unknown V4 paths are V4 `404`s, not tombstones. Preserved
+`/dashboard/api` families (exact path, no trailing slash, no extra
+segments): `auth/status`, `auth/register`, `auth/login`, `auth/logout`,
+and `browser/sessions/{token}/ws` (non-empty token). Do not revive
+protected V2 REST; new JSON is V3 or V4.
 
 ## Inference (unchanged paths)
 
@@ -70,6 +71,12 @@ Custom connection verify is `POST /accounts/{id}/verify`; model discovery is
 `POST /providers`, `GET|PATCH|DELETE /providers/{provider_id}`,
 `POST /providers/models/discover`, and `POST /providers/test`. Save succeeds
 independently of discovery and test; a real test may consume upstream quota.
+
+## Dashboard V4 (`/dashboard/api/v4`)
+
+Session-protected (see `dashboard_v4/mod.rs`): `GET /contract`,
+`GET /templates`, `GET /connections`, `GET /accounts`,
+`POST /onboarding/commit`.
 
 ## Static dashboard
 
