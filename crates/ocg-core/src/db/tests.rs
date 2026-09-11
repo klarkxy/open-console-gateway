@@ -420,6 +420,36 @@ fn v43_restores_auto_on_exclusive_cn_available_siblings() {
 }
 
 #[test]
+fn v44_adds_dashboard_operations_on_v43_reopen_and_fresh_databases() {
+    let fresh = temp_data_dir("v44-fresh");
+    let db = open_with_host_cipher(fresh.clone()).unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), CURRENT_SCHEMA_VERSION);
+    assert_eq!(CURRENT_SCHEMA_VERSION, 44);
+    assert!(table_exists(&db.conn, "dashboard_operations").unwrap());
+    drop(db);
+    fs::remove_dir_all(fresh).unwrap();
+
+    let dir = temp_data_dir("v44-from-v43");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    db.conn
+        .execute_batch(
+            "DROP TABLE dashboard_operations;
+             DELETE FROM schema_version;
+             INSERT INTO schema_version(version) VALUES (43);",
+        )
+        .unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), 43);
+    assert!(!table_exists(&db.conn, "dashboard_operations").unwrap());
+    drop(db);
+
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), CURRENT_SCHEMA_VERSION);
+    assert!(table_exists(&db.conn, "dashboard_operations").unwrap());
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn v42_dynamic_read_paths_hide_builtin_rows() {
     let dir = temp_data_dir("v42-filter-builtins");
     let db = open_with_host_cipher(dir.clone()).unwrap();
@@ -8631,6 +8661,145 @@ fn dynamic_provider_create_fault_rolls_back_provider_and_account() {
     );
     assert!(db.get_dynamic_provider(&provider_id).unwrap().is_none());
     assert_eq!(db.count_accounts_for_provider(&provider_id).unwrap(), 0);
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+fn onboarding_runtime(provider_id: &str, name: &str) -> crate::dynamic::DynamicProviderRuntime {
+    let now = Utc::now();
+    crate::dynamic::DynamicProviderRuntime {
+        preset_id: None,
+        id: provider_id.to_string(),
+        name: name.into(),
+        endpoint_url: "http://127.0.0.1:9".into(),
+        upstream_protocol: crate::provider::UpstreamProtocolKind::ChatCompletions,
+        auth_kind: ocg_domain::dynamic::DynamicAuthKind::Bearer,
+        mappings: vec![ocg_domain::dynamic::DynamicModelMapping {
+            public_model: "lab-opus".into(),
+            upstream_model: "vendor/opus".into(),
+            upstream_override: None,
+        }],
+        created_at: now,
+        updated_at: now,
+        origin: ocg_domain::provider::ProviderOrigin::Custom,
+        offering: "api".to_string(),
+    }
+}
+
+fn onboarding_operation(
+    operation_id: &str,
+    digest: &str,
+    result_json: &str,
+) -> NewDashboardOperation {
+    NewDashboardOperation {
+        operation_id: operation_id.to_string(),
+        kind: "onboarding_commit".into(),
+        payload_digest: digest.to_string(),
+        result_json: result_json.to_string(),
+    }
+}
+
+#[test]
+fn commit_transaction_fault_after_provider_insert_leaves_no_partial_rows() {
+    let dir = temp_data_dir("onboard-provider-fault");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let provider_id = uuid::Uuid::new_v4().to_string();
+    let runtime = onboarding_runtime(&provider_id, "FaultyOnboard");
+    let mut first = account("onboard-fault");
+    first.provider_id = provider_id.clone();
+    first.key_cipher = fixture_account_key_cipher();
+    let operation = onboarding_operation(
+        &uuid::Uuid::new_v4().to_string(),
+        "digest-not-a-secret",
+        r#"{"connectionId":"c","credentialId":"a","targetIds":[]}"#,
+    );
+    crate::db::dynamic_provider_fault::install("after_provider_insert");
+    let error = db
+        .commit_onboarding_new(&runtime, Some(&first), &operation)
+        .unwrap_err();
+    crate::db::dynamic_provider_fault::clear();
+    assert!(
+        error
+            .to_string()
+            .contains("injected dynamic provider fault")
+    );
+    assert!(db.get_dynamic_provider(&provider_id).unwrap().is_none());
+    assert_eq!(db.count_accounts_for_provider(&provider_id).unwrap(), 0);
+    assert!(
+        db.find_dashboard_operation(&operation.operation_id)
+            .unwrap()
+            .is_none()
+    );
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn dashboard_operations_prune_rows_older_than_30_days_on_insert() {
+    let dir = temp_data_dir("onboard-prune");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let old_id = uuid::Uuid::new_v4().to_string();
+    let old_time = (Utc::now() - Duration::days(31)).to_rfc3339();
+    db.conn
+        .execute(
+            "INSERT INTO dashboard_operations
+             (operation_id, kind, payload_digest, result_json, created_at)
+             VALUES (?1, 'onboarding_commit', 'old-digest', '{}', ?2)",
+            rusqlite::params![old_id, old_time],
+        )
+        .unwrap();
+    let provider_id = uuid::Uuid::new_v4().to_string();
+    let runtime = onboarding_runtime(&provider_id, "PruneOnboard");
+    let mut first = account("onboard-prune");
+    first.provider_id = provider_id.clone();
+    first.key_cipher = fixture_account_key_cipher();
+    let new_id = uuid::Uuid::new_v4().to_string();
+    db.commit_onboarding_new(
+        &runtime,
+        Some(&first),
+        &onboarding_operation(&new_id, "new-digest", "{}"),
+    )
+    .unwrap();
+    assert!(db.find_dashboard_operation(&old_id).unwrap().is_none());
+    assert!(db.find_dashboard_operation(&new_id).unwrap().is_some());
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn commit_responses_and_operation_rows_are_secret_free() {
+    let dir = temp_data_dir("onboard-secret-free");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let secret = "sk-super-secret-onboard-key";
+    let plaintext_body = r#"{"name":"Secret Lab","secretInput":"sk-super-secret-onboard-key"}"#;
+    let provider_id = uuid::Uuid::new_v4().to_string();
+    let runtime = onboarding_runtime(&provider_id, "SecretOnboard");
+    let mut first = account("onboard-secret");
+    first.provider_id = provider_id.clone();
+    first.key_cipher = fixture_account_key_cipher();
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    let result_json = r#"{"connectionId":"conn-1","credentialId":"acct-1","targetIds":["t1"]}"#;
+    db.commit_onboarding_new(
+        &runtime,
+        Some(&first),
+        &onboarding_operation(&operation_id, "hmac-digest-without-secret", result_json),
+    )
+    .unwrap();
+    let row = db
+        .find_dashboard_operation(&operation_id)
+        .unwrap()
+        .expect("operation row");
+    for haystack in [&row.result_json, &row.payload_digest] {
+        assert!(!haystack.contains(secret), "secret leaked in {haystack}");
+        assert!(
+            !haystack.contains(plaintext_body),
+            "plaintext body leaked in {haystack}"
+        );
+        assert!(
+            !haystack.contains(&first.key_cipher),
+            "key cipher leaked in {haystack}"
+        );
+    }
     drop(db);
     fs::remove_dir_all(dir).unwrap();
 }

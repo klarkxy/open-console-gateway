@@ -81,6 +81,29 @@ impl CpaCatalogModel {
     }
 }
 
+/// Persisted Dashboard V4 operation ledger row. `payload_digest` is HMAC-SHA256
+/// hex; `result_json` is secret-free.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DashboardOperationRow {
+    pub operation_id: String,
+    pub kind: String,
+    pub payload_digest: String,
+    pub result_json: String,
+    pub created_at: String,
+}
+
+/// Insert payload for a new dashboard operation row. `created_at` is assigned
+/// at write time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewDashboardOperation {
+    pub operation_id: String,
+    pub kind: String,
+    pub payload_digest: String,
+    pub result_json: String,
+}
+
+const DASHBOARD_OPERATION_PRUNE_DAYS: i64 = 30;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CpaCatalogRecord {
     pub models: Vec<CpaCatalogModel>,
@@ -202,7 +225,7 @@ pub const PRE_V35_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v35.";
 /// database is rewritten to the unified providers/provider_models tables.
 pub const PRE_V42_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v42.";
 /// Highest schema this binary can open or migrate. Newer databases fail closed.
-pub const CURRENT_SCHEMA_VERSION: i32 = 43;
+pub const CURRENT_SCHEMA_VERSION: i32 = 44;
 /// Canonical source schema for the v35 provider-identity rewrite.
 pub const V34_SCHEMA_VERSION: i32 = 34;
 /// Historical v34 offering IDs. Used only by v1–v34 SQL and the v35 preflight
@@ -2396,6 +2419,54 @@ fn load_dynamic_provider_runtime(
     })
 }
 
+fn find_dashboard_operation_on(
+    conn: &Connection,
+    operation_id: &str,
+) -> Result<Option<DashboardOperationRow>> {
+    conn.query_row(
+        "SELECT operation_id, kind, payload_digest, result_json, created_at
+         FROM dashboard_operations
+         WHERE operation_id = ?1",
+        [operation_id],
+        |row| {
+            Ok(DashboardOperationRow {
+                operation_id: row.get(0)?,
+                kind: row.get(1)?,
+                payload_digest: row.get(2)?,
+                result_json: row.get(3)?,
+                created_at: row.get(4)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn insert_dashboard_operation_on(
+    conn: &Connection,
+    operation: &NewDashboardOperation,
+) -> Result<()> {
+    let now = Utc::now();
+    let cutoff = (now - Duration::days(DASHBOARD_OPERATION_PRUNE_DAYS)).to_rfc3339();
+    conn.execute(
+        "DELETE FROM dashboard_operations WHERE created_at < ?1",
+        [&cutoff],
+    )?;
+    conn.execute(
+        "INSERT INTO dashboard_operations
+         (operation_id, kind, payload_digest, result_json, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            operation.operation_id,
+            operation.kind,
+            operation.payload_digest,
+            operation.result_json,
+            now.to_rfc3339(),
+        ],
+    )?;
+    Ok(())
+}
+
 fn insert_dynamic_provider_on(conn: &Connection, runtime: &DynamicProviderRuntime) -> Result<()> {
     let origin = runtime.origin.as_str();
     let offering = runtime.offering.as_str();
@@ -2677,6 +2748,32 @@ fn migrate_to_v43(conn: &Connection) -> Result<()> {
         )?;
     }
     tx.execute_batch("INSERT OR REPLACE INTO schema_version(version) VALUES (43);")?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// v44: additive dashboard operation ledger for idempotent V4 writes.
+/// Stores only a payload digest and a secret-free result — never the request body.
+fn migrate_to_v44(conn: &Connection) -> Result<()> {
+    if schema_version_on(conn)? >= 44 {
+        return Ok(());
+    }
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let version = schema_version_on(&tx)?;
+    if version >= 44 {
+        return Ok(());
+    }
+    anyhow::ensure!(version == 43, "v44 requires schema v43");
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS dashboard_operations (
+            operation_id TEXT PRIMARY KEY,
+            kind TEXT NOT NULL,
+            payload_digest TEXT NOT NULL,
+            result_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );",
+    )?;
+    tx.execute_batch("INSERT OR REPLACE INTO schema_version(version) VALUES (44);")?;
     tx.commit()?;
     Ok(())
 }
@@ -3897,6 +3994,7 @@ impl Database {
         migrate_to_v41(&db.conn)?;
         migrate_to_v42(&db.conn, &db_path, is_fresh)?;
         migrate_to_v43(&db.conn)?;
+        migrate_to_v44(&db.conn)?;
         Ok(db)
     }
 
@@ -5850,6 +5948,72 @@ impl Database {
         let snapshot = list_dynamic_providers_on(&tx)?;
         tx.commit()?;
         Ok(snapshot)
+    }
+
+    pub fn find_dashboard_operation(
+        &self,
+        operation_id: &str,
+    ) -> Result<Option<DashboardOperationRow>> {
+        find_dashboard_operation_on(&self.conn, operation_id)
+    }
+
+    /// Create a user-defined Provider (and optional first account) together with
+    /// the dashboard operation ledger row in one SQLite transaction.
+    pub fn commit_onboarding_new(
+        &self,
+        runtime: &DynamicProviderRuntime,
+        first_account: Option<&Account>,
+        operation: &NewDashboardOperation,
+    ) -> Result<Vec<DynamicProviderRuntime>> {
+        let tx = self.conn.unchecked_transaction()?;
+        insert_dynamic_provider_on(&tx, runtime)?;
+        dynamic_tx_fault("after_provider_insert")?;
+        if let Some(account) = first_account {
+            let purchase_date = if account.purchase_date.trim().is_empty() {
+                local_today()
+            } else {
+                normalize_purchase_date(&account.purchase_date)?
+            };
+            insert_account_row(
+                &tx,
+                account,
+                &purchase_date,
+                ConnectionVerificationStatus::NotRequired,
+            )?;
+            dynamic_tx_fault("after_account_insert")?;
+        }
+        insert_dashboard_operation_on(&tx, operation)?;
+        let snapshot = list_dynamic_providers_on(&tx)?;
+        tx.commit()?;
+        Ok(snapshot)
+    }
+
+    /// Add a Key account to an existing user-defined Provider together with the
+    /// dashboard operation ledger row in one SQLite transaction.
+    pub fn commit_onboarding_existing_account(
+        &self,
+        account: &Account,
+        operation: &NewDashboardOperation,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            account.id != ZEN_FREE_ACCOUNT_ID,
+            "Zen Free is database-owned and cannot be created through the generic account API"
+        );
+        ensure_account_provider_binding(self, account)?;
+        let purchase_date = if account.purchase_date.trim().is_empty() {
+            local_today()
+        } else {
+            normalize_purchase_date(&account.purchase_date)?
+        };
+        let verification_status = builtin_provider(&account.provider_id)
+            .map(default_verification_status)
+            .unwrap_or(ConnectionVerificationStatus::NotRequired);
+        let tx = self.conn.unchecked_transaction()?;
+        insert_account_row(&tx, account, &purchase_date, verification_status)?;
+        dynamic_tx_fault("after_account_insert")?;
+        insert_dashboard_operation_on(&tx, operation)?;
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn replace_dynamic_provider(
