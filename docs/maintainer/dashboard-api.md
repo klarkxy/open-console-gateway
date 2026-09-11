@@ -140,6 +140,13 @@ refreshed CAS tokens still replays. Schema v44 stores each commit in
 than 30 days are pruned on insert; after pruning, the same `operationId` is a
 new write.
 
+The dashboard consumes `GET /connections` for the Providers rail and
+`POST /onboarding/commit` for user-defined Provider creation. The client
+generates a new `operationId` when the draft changes, keeps that id across
+retries of an unchanged draft, and regenerates it after success. Editing,
+deleting, adding Keys to existing accounts, and all Accounts-page account
+operations stay on V3.
+
 ## Settings mutation workflow
 
 [![Dashboard V3 settings mutation workflow](../diagrams/dashboard-v3-mutation.visual-check.1440x900.light.png)](https://klarkxy.github.io/open-console-gateway/diagrams/dashboard-v3-mutation/)

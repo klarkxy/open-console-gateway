@@ -15,7 +15,7 @@ ocg-cli     -> ocg-core
 src-tauri   -> ocg-core
 
 ocg-browser-worker   separate process; no internal ocg-* dependency
-Vue SPA              static assets; HTTP Dashboard V3 only
+Vue SPA              static assets; HTTP Dashboard V3 + V4 only
 ```
 
 The **Adapter Registry** is static and sealed. Runtime Provider definitions
@@ -94,9 +94,10 @@ exact raw pins.
 
 ## Control plane
 
-The Vue SPA calls `/dashboard/api/v3` through `src/api/dashboard-v3.ts` and its
-presenters. A parallel additive `/dashboard/api/v4` sits beside frozen V3 and
-shares the same session; it now carries the onboarding commit mutation.
+The Vue SPA calls V3 through `src/api/dashboard-v3.ts` and V4 through
+`src/api/dashboard-v4.ts` (presenters in `src/api/connections.ts`). A parallel
+additive `/dashboard/api/v4` sits beside frozen V3 and shares the same session;
+it now carries the onboarding commit mutation.
 CAS-protected mutations carry `expectedRevision` and `processGeneration`;
 pricing writes also carry `expectedPricingRevision`. Operational reads and
 diagnostics that do not mutate state skip CAS.

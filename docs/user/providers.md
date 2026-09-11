@@ -2,7 +2,7 @@
 
 # Providers
 
-The rail lists persisted user-defined Providers (preset or custom) regardless of account count, plus built-in Providers that already have at least one account, grouped by Plan/API. Unused built-in templates stay off the rail and remain in the **Add Provider** catalog only. A keyed Provider with no account stays on the rail as **Missing credential**: it is saved, has no Key, and does not participate in routing; it is not tested automatically. **Add Key** on the detail opens the same credential editor used on **Accounts**, prefilled for that Provider. **Add Provider** in the rail footer opens the preset browser in the main pane, keeping available templates separate from configured Providers; existing preset bookmarks open the same embedded creation form. That form collects an optional Key for keyed auth: fill it to create the first account in the same write, or leave it empty to save the definition only. Saved connections retain their preset brand where provenance is known, without certifying an edited address as official. The model catalog has its own model search and enabled-state filter; searching the Provider list does not search models. Mapping tables keep both public and upstream names accessible on narrow screens.
+The rail lists the V4 connection projection: built-in Providers with at least one account, every user-defined Provider (with or without a Key), and each Custom API account as its own row, grouped by Plan/API. Unused built-in templates stay off the rail and remain in the **Add Provider** catalog only. Row and detail-header status comes from server-side projection fields only: **Missing credential** (authorization `missing`), **Disabled** (lifecycle `disabled` or all credentials disabled), **Invalid credential** (authorization `invalid`), **No enabled model** (eligibility reason `no_enabled_target`), **Cooling down** (eligibility `cooling`). These are local eligibility projections, never upstream health; `unknown` authorization shows no badge and is not verified. A keyed Provider with no Key stays on the rail as **Missing credential**: it is saved, has no Key, and does not participate in routing; it is not tested automatically. **Add Key** on the detail opens the same credential editor used on **Accounts**, prefilled for that Provider. A Custom API account row is a read-only summary (endpoint, protocol, mapped models); **Edit on Accounts** opens that account's editor on **Accounts**. Custom API configuration remains account-owned. The page selects by `connection=<id>`; older `provider=<id>` bookmarks still resolve to the matching built-in or user-defined connection. **Add Provider** in the rail footer opens the preset browser in the main pane, keeping available templates separate from configured Providers; existing preset bookmarks open the same embedded creation form. That form collects an optional Key for keyed auth: fill it to create the first account in the same write, or leave it empty to save the definition only. Saving a user-defined Provider from **Providers → Add Provider** or **Accounts → Add account** → preset commits once. If the network drops before a response, the dashboard retries automatically; saving the unchanged draft again replays that result instead of creating a second Provider. A conflicting revision reloads and keeps the draft without replaying. If an earlier save already took effect but the draft changed since, the dashboard reports that and reloads. Saved connections retain their preset brand where provenance is known, without certifying an edited address as official. The model catalog has its own model search and enabled-state filter; searching the Provider list does not search models. Mapping tables keep both public and upstream names accessible on narrow screens.
 
 Enabling a model force-enables every available protocol; it does not merely restore `auto`. Available upstreams always use the same chips: a visible chip can connect, and blue is the conversion default. Clicking a chip sets that default. The preference is remembered independently of enablement and travels in node migration packages. Restoring the official baseline clears it. Model and connection tests never enable a model or change its protocol choice.
 
@@ -18,7 +18,7 @@ Official presets initialize new Providers from documented defaults. Manual confi
 
 Defaults reviewed on **2026-09-09**: xAI uses [Responses](https://docs.x.ai/developers/model-capabilities/text/comparison); MiniMax uses [Messages with Bearer auth](https://platform.minimax.io/docs/api-reference/text-chat-anthropic). Other presets retain documented compatible defaults. Built-in model profiles and manual disabled states remain in effect.
 
-Preset creation groups searchable [channel presets](provider-presets.md) under Plan and API, then vendor and regional variant. These templates stay separate from the default list of configured connections. Fixed presets show the exact connection summary and seed an editable chat model. Azure and Bedrock still require their resource/regional address and deployment/model information. Saving from **Providers** can omit the Key and leave the definition as **Missing credential**, or include it to create the first account in the same write. Saving from **Accounts → Add account** still requires a Key and creates the Provider and its first account together. Saved configurations are never rewritten by template changes.
+Preset creation groups searchable [channel presets](provider-presets.md) under Plan and API, then vendor and regional variant. These templates stay separate from the default list of configured connections. Fixed presets show the exact connection summary and seed an editable chat model. Azure and Bedrock still require their resource/regional address and deployment/model information. Saving from **Providers** can omit the Key and leave the definition as **Missing credential**, or include it to create the first account in the same write. Saving from **Accounts → Add account** still requires a Key and creates the Provider and its first account together. Both entry points use the same onboarding commit. Saved configurations are never rewritten by template changes.
 
 Want to connect another upstream or contribute a built-in integration? Start with [Add a Provider](add-provider.md), which includes user-defined Providers, Custom API, and the sealed Adapter Registry path.
 
@@ -37,7 +37,7 @@ used as an account-owned path. Scopes are split like this:
 - `CustomEndpoint(account_id)` scopes keep Custom mappings account-owned.
   Edit those mappings on **Accounts**.
 
-Every Provider opens the same detail shell with up to three tabs. **Models**
+Built-in and user-defined Providers open the same detail shell with up to three tabs. **Models**
 is the default: built-in scopes show the model catalog (source line, refresh,
 official protocol baseline, and the protocol matrix), while user-defined
 Providers show their read-only model mappings with an edit entry. **Pricing**
@@ -47,9 +47,10 @@ user-defined rows offer edit/delete, and the **OpenCode Go** scope keeps the
 managed-signup **invite URL** here. It is a user-owned `opencode.ai` /
 `console.opencode.ai` HTTPS link (not a sealed origin). Fresh installs may
 ship a demo default; replace it with your own link before a real signup.
-Creating a managed draft can also edit and write this value back. The
-built-in **Custom API** row explains that models and endpoints are configured
-per account and links to **Accounts**. User-defined Providers are unpriced.
+Creating a managed draft can also edit and write this value back. A Custom
+API account row is a read-only summary (endpoint, protocol, mapped models);
+**Edit on Accounts** opens the account editor on **Accounts**. User-defined
+Providers are unpriced.
 
 **Aliases** is a separate core page because its read-only table spans every
 Provider contract, user-defined Provider mapping, and Custom account instead of

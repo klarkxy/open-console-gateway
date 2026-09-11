@@ -14,7 +14,7 @@ ocg-cli     -> ocg-core
 src-tauri   -> ocg-core
 
 ocg-browser-worker   独立进程；不依赖内部 ocg-* crate
-Vue SPA              静态资源；只走 HTTP Dashboard V3
+Vue SPA              静态资源；只走 HTTP Dashboard V3 + V4
 ```
 
 **Adapter Registry** 静态密封。运行时 Provider 定义是绑定 Configurable HTTP 的
@@ -84,7 +84,7 @@ Provider 目录与合约先于账号凭据解析。保存的发现行只能激�
 
 ## 控制面
 
-Vue SPA 通过 `src/api/dashboard-v3.ts` 及 presenter 调用 `/dashboard/api/v3`。
+Vue SPA 通过 `src/api/dashboard-v3.ts` 调用 V3，通过 `src/api/dashboard-v4.ts` 调用 V4（presenter 在 `src/api/connections.ts`）。
 并行的仅增量 `/dashboard/api/v4` 与冻结的 V3 并存，共用同一套会话；现已包含 onboarding commit 变更。
 受 CAS 保护的变更携带 `expectedRevision` 与 `processGeneration`；价格写入另带
 `expectedPricingRevision`。不变更状态的操作读取与诊断跳过 CAS。
