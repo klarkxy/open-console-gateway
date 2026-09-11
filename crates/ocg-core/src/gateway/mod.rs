@@ -13,6 +13,7 @@ pub mod protocol_stream;
 pub mod provider_adapter;
 mod response;
 pub mod routing;
+pub mod shadow;
 pub mod wire;
 
 use crate::state::CoreState;

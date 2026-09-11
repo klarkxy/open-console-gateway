@@ -17,6 +17,7 @@ use crate::gateway::materialize::{
 use crate::gateway::protocol::{MaterializeSpec, RequestPlan, materialize_parsed_request};
 use crate::gateway::response::{local_protocol_failure, protocol_error_response};
 use crate::gateway::routing::resolve_conversation_key;
+use crate::gateway::shadow::{ShadowPlanInput, maybe_compare_live_routes};
 
 use crate::http_client::{ForwardRouteSet, RouteLabel};
 use crate::kernel::pricing::PricingSnapshot;
@@ -277,6 +278,24 @@ impl GatewayExecutor {
                     );
                 }
             };
+            maybe_compare_live_routes(
+                &ShadowPlanInput {
+                    accounts: &accounts,
+                    config: &snapshots.config,
+                    parsed: &parsed,
+                    resolved: &snapshots.resolved,
+                    client_model: &client_model,
+                    routing_model: &routing_model,
+                    client_body: &client_body,
+                    free_available,
+                    custom_runtimes: &custom_runtimes,
+                    goat_runtimes: &goat_runtimes,
+                    cpa_base_url: snapshots.cpa_base_url.as_deref(),
+                    contracts: &snapshots.contracts,
+                    dynamics: &snapshots.dynamics,
+                },
+                &route_set,
+            );
             let excluded = loop_state
                 .failed_ids
                 .iter()

@@ -62,6 +62,10 @@ pub(crate) struct MaterializedRouteSet {
     pub routes: Vec<MaterializedCandidate>,
     pub free_only: bool,
     pub incompatibility: Option<String>,
+    /// Account/mapping rejection notes collected while building candidates.
+    /// Empty when every considered account produced a route. Live send ignores
+    /// this list; the read-only shadow planner surfaces it for compare.
+    pub rejected: Vec<String>,
 }
 
 /// Diagnostics are not a candidate protocol decision. If a resolution can use
@@ -707,6 +711,7 @@ fn collect_mapping_plans(
         routes,
         free_only,
         incompatibility,
+        rejected,
     })
 }
 
