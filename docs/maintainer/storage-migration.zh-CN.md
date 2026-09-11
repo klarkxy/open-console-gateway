@@ -6,7 +6,7 @@
 
 ## 数据目录与加密身份
 
-每次打开数据库都使用 Host 解析的 cipher（CLI、桌面、Docker 均为 `Database::open_with_cipher`）。迁移前会检查已有账号密文，解密错误会 fail closed。Key 存储使用非认证混淆，成功解码为 UTF-8 本身不能证明 cipher 身份正确。请保留原 cipher；改写密文无法修复不匹配。
+每次打开数据库都使用 Host 解析的 cipher（CLI、桌面、Docker 均为 `Database::open_with_cipher`）。迁移前会检查已有账号密文，解密错误会 fail closed。新写入使用已认证的 AES-256-GCM（`v2:`）。无前缀的旧 XOR 仍可解密，以便备份恢复；成功的 Host-cipher 打开会把这些行改写成 v2。XOR 恰好解出 UTF-8 不会被当成 v2 成功。请保留原 cipher；改写密文无法修复不匹配。
 
 | 形态 | 默认数据目录 | 加密身份 |
 | --- | --- | --- |
@@ -69,7 +69,7 @@ v44 增量创建 `dashboard_operations`，供 V4 幂等控制面提交使用：
 - `result_json` — 已存的无密钥结果
 - `created_at`
 
-摘要密钥是每库一份的随机 32 字节，惰性写入 `settings` 的 `dashboard_operation_digest_key`，任何 API 都不会返回它。该密钥与混淆后的账号 Key 同库存放，因此沿用既有本地存储威胁模型；它避免把已存摘要做成密钥的无键哈希，并不能防御持有数据库文件的攻击者。插入时会清理超过 30 天的行。该迁移只做加法，不另写迁移前备份（与 v43 相同）。回滚仍是既有的整目录恢复。
+摘要密钥是每库一份的随机 32 字节，惰性写入 `settings` 的 `dashboard_operation_digest_key`，任何 API 都不会返回它。该密钥与账号 Key 同库存放，因此沿用既有本地存储威胁模型；它避免把已存摘要做成密钥的无键哈希，并不能防御持有数据库文件的攻击者。插入时会清理超过 30 天的行。该迁移只做加法，不另写迁移前备份（与 v43 相同）。回滚仍是既有的整目录恢复。
 
 ## Schema v42 — 统一的供应商表
 

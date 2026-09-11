@@ -1,8 +1,14 @@
-//! Simple obfuscation for API keys.
+//! Local storage for API keys and saved login passwords.
 //!
-//! This is intentionally lightweight: keys are not stored in plain text on disk,
-//! but the scheme is NOT a substitute for a real KMS or AES-GCM. If stronger
-//! security is needed later, replace this module with `ring`/`aes-gcm`.
+//! New writes use authenticated AES-256-GCM (`v2:` + base64(nonce || ciphertext || tag)).
+//! The 32-byte AEAD key is SHA-256-derived from the Host MachineBound / StaticKey seed;
+//! the legacy FNV mixer is not used for v2. Decrypt accepts `v2:` only via AEAD
+//! (authentication failure is an explicit error, never a UTF-8 guess) and still
+//! reads unprefixed XOR of the old 16-byte-nonce shape so directory backups restore.
+//! Callers that persist should rewrite v2 after a successful legacy decrypt.
+//!
+//! This is still a local-disk bound, not a KMS: anyone with the matching Host seed
+//! can recover stored values. Errors never include plaintext Keys.
 //!
 //! Two cipher implementations are provided:
 //! - `MachineBoundCipher`: derives a key from Windows environment variables
@@ -11,14 +17,24 @@
 //! - `StaticKeyCipher`: derives a key from an arbitrary user-supplied secret,
 //!   suitable for headless / cross-platform / Docker deployments.
 
+use aes_gcm::aead::{Aead, KeyInit};
+use aes_gcm::{Aes256Gcm, Nonce};
 use anyhow::Context;
 use base64::{Engine, engine::general_purpose::STANDARD};
+use sha2::{Digest, Sha256};
 use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Write};
 use std::path::Path;
 
-const NONCE_LEN: usize = 16;
+const XOR_NONCE_LEN: usize = 16;
+const AEAD_NONCE_LEN: usize = 12;
+const AEAD_TAG_LEN: usize = 16;
+const AEAD_KEY_LEN: usize = 32;
+const AEAD_KDF_DOMAIN: &[u8] = b"ocg-local-key-cipher-v2";
+
+/// Prefix for AES-256-GCM local ciphertext (`v2:` + standard base64).
+pub const LOCAL_CIPHER_V2_PREFIX: &str = "v2:";
 
 /// Trait for pluggable key obfuscation.
 pub trait KeyCipher: Send + Sync {
@@ -26,9 +42,36 @@ pub trait KeyCipher: Send + Sync {
     fn decrypt(&self, ciphertext: &str) -> anyhow::Result<String>;
 }
 
-fn derive_key(seed: &[u8], len: usize) -> Vec<u8> {
-    // Simple key-expansion using a basic hash-like mixer. Good enough to stop
-    // casual plaintext inspection; explicitly not cryptographically secure.
+/// Errors from local Key encrypt/decrypt. Display and Debug never include
+/// plaintext, ciphertext, or host-seed material.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CryptoError {
+    InvalidCiphertext,
+    AuthenticationFailed,
+    LegacyDecryptFailed,
+    Internal,
+}
+
+impl std::fmt::Display for CryptoError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidCiphertext => write!(f, "invalid local key ciphertext"),
+            Self::AuthenticationFailed => write!(f, "local key authentication failed"),
+            Self::LegacyDecryptFailed => write!(f, "legacy local key ciphertext rejected"),
+            Self::Internal => write!(f, "local key cipher failed"),
+        }
+    }
+}
+
+impl std::error::Error for CryptoError {}
+
+/// Returns true when `ciphertext` is a non-empty pre-v2 XOR blob (no `v2:` prefix).
+pub fn is_legacy_local_ciphertext(ciphertext: &str) -> bool {
+    !ciphertext.is_empty() && !ciphertext.starts_with(LOCAL_CIPHER_V2_PREFIX)
+}
+
+fn derive_xor_key(seed: &[u8], len: usize) -> Vec<u8> {
+    // Legacy FNV-like mixer. Used only to read pre-v2 XOR rows.
     let mut key = Vec::with_capacity(len);
     let mut state: u64 = 0xcbf29ce484222325;
     let mut idx = 0;
@@ -46,36 +89,98 @@ fn derive_key(seed: &[u8], len: usize) -> Vec<u8> {
     key
 }
 
-fn xor_encrypt(plaintext: &str, key_seed: &[u8]) -> anyhow::Result<String> {
+fn derive_aead_key(seed: &[u8]) -> [u8; AEAD_KEY_LEN] {
+    let mut hasher = Sha256::new();
+    hasher.update(AEAD_KDF_DOMAIN);
+    hasher.update(seed);
+    hasher.finalize().into()
+}
+
+fn xor_encrypt(plaintext: &str, key_seed: &[u8]) -> Result<String, CryptoError> {
     if plaintext.is_empty() {
         return Ok(String::new());
     }
     let bytes = plaintext.as_bytes();
     let nonce: Vec<u8> = uuid::Uuid::new_v4().as_bytes().to_vec();
-    let key = derive_key(key_seed, bytes.len());
-    let mut cipher = Vec::with_capacity(NONCE_LEN + bytes.len());
+    let key = derive_xor_key(key_seed, bytes.len());
+    let mut cipher = Vec::with_capacity(XOR_NONCE_LEN + bytes.len());
     cipher.extend_from_slice(&nonce);
     for (i, b) in bytes.iter().enumerate() {
-        cipher.push(b ^ key[i] ^ nonce[i % NONCE_LEN]);
+        cipher.push(b ^ key[i] ^ nonce[i % XOR_NONCE_LEN]);
     }
     Ok(STANDARD.encode(&cipher))
 }
 
-fn xor_decrypt(ciphertext: &str, key_seed: &[u8]) -> anyhow::Result<String> {
+fn xor_decrypt(ciphertext: &str, key_seed: &[u8]) -> Result<String, CryptoError> {
     if ciphertext.is_empty() {
         return Ok(String::new());
     }
-    let cipher = STANDARD.decode(ciphertext)?;
-    if cipher.len() < NONCE_LEN {
-        anyhow::bail!("invalid cipher text");
+    let cipher = STANDARD
+        .decode(ciphertext)
+        .map_err(|_| CryptoError::InvalidCiphertext)?;
+    if cipher.len() < XOR_NONCE_LEN {
+        return Err(CryptoError::InvalidCiphertext);
     }
-    let (nonce, body) = cipher.split_at(NONCE_LEN);
-    let key = derive_key(key_seed, body.len());
+    let (nonce, body) = cipher.split_at(XOR_NONCE_LEN);
+    let key = derive_xor_key(key_seed, body.len());
     let mut plain = Vec::with_capacity(body.len());
     for (i, b) in body.iter().enumerate() {
-        plain.push(b ^ key[i] ^ nonce[i % NONCE_LEN]);
+        plain.push(b ^ key[i] ^ nonce[i % XOR_NONCE_LEN]);
     }
-    String::from_utf8(plain).map_err(|e| anyhow::anyhow!(e))
+    String::from_utf8(plain).map_err(|_| CryptoError::LegacyDecryptFailed)
+}
+
+fn aead_encrypt(plaintext: &str, key_seed: &[u8]) -> Result<String, CryptoError> {
+    if plaintext.is_empty() {
+        return Ok(String::new());
+    }
+    let key = derive_aead_key(key_seed);
+    let cipher = Aes256Gcm::new_from_slice(&key).map_err(|_| CryptoError::Internal)?;
+    let uuid = uuid::Uuid::new_v4();
+    let mut nonce_bytes = [0_u8; AEAD_NONCE_LEN];
+    nonce_bytes.copy_from_slice(&uuid.as_bytes()[..AEAD_NONCE_LEN]);
+    let nonce = Nonce::from_slice(&nonce_bytes);
+    let sealed = cipher
+        .encrypt(nonce, plaintext.as_bytes())
+        .map_err(|_| CryptoError::Internal)?;
+    let mut packed = Vec::with_capacity(AEAD_NONCE_LEN + sealed.len());
+    packed.extend_from_slice(&nonce_bytes);
+    packed.extend_from_slice(&sealed);
+    Ok(format!(
+        "{LOCAL_CIPHER_V2_PREFIX}{}",
+        STANDARD.encode(packed)
+    ))
+}
+
+fn aead_decrypt(encoded: &str, key_seed: &[u8]) -> Result<String, CryptoError> {
+    let packed = STANDARD
+        .decode(encoded)
+        .map_err(|_| CryptoError::InvalidCiphertext)?;
+    if packed.len() < AEAD_NONCE_LEN + AEAD_TAG_LEN {
+        return Err(CryptoError::InvalidCiphertext);
+    }
+    let (nonce_bytes, sealed) = packed.split_at(AEAD_NONCE_LEN);
+    let key = derive_aead_key(key_seed);
+    let cipher = Aes256Gcm::new_from_slice(&key).map_err(|_| CryptoError::Internal)?;
+    let nonce = Nonce::from_slice(nonce_bytes);
+    let plain = cipher
+        .decrypt(nonce, sealed)
+        .map_err(|_| CryptoError::AuthenticationFailed)?;
+    String::from_utf8(plain).map_err(|_| CryptoError::InvalidCiphertext)
+}
+
+fn encrypt_local(plaintext: &str, key_seed: &[u8]) -> Result<String, CryptoError> {
+    aead_encrypt(plaintext, key_seed)
+}
+
+fn decrypt_local(ciphertext: &str, key_seed: &[u8]) -> Result<String, CryptoError> {
+    if ciphertext.is_empty() {
+        return Ok(String::new());
+    }
+    if let Some(encoded) = ciphertext.strip_prefix(LOCAL_CIPHER_V2_PREFIX) {
+        return aead_decrypt(encoded, key_seed);
+    }
+    xor_decrypt(ciphertext, key_seed)
 }
 
 /// Original Windows machine-bound cipher.
@@ -104,11 +209,11 @@ impl MachineBoundCipher {
 
 impl KeyCipher for MachineBoundCipher {
     fn encrypt(&self, plaintext: &str) -> anyhow::Result<String> {
-        xor_encrypt(plaintext, &self.seed())
+        Ok(encrypt_local(plaintext, &self.seed())?)
     }
 
     fn decrypt(&self, ciphertext: &str) -> anyhow::Result<String> {
-        xor_decrypt(ciphertext, &self.seed())
+        Ok(decrypt_local(ciphertext, &self.seed())?)
     }
 }
 
@@ -123,6 +228,11 @@ impl StaticKeyCipher {
         Self {
             seed: secret.as_bytes().to_vec(),
         }
+    }
+
+    /// Write the pre-v2 XOR local format. Used to plant backup-shaped rows in tests.
+    pub fn encrypt_legacy(&self, plaintext: &str) -> anyhow::Result<String> {
+        Ok(xor_encrypt(plaintext, &self.seed)?)
     }
 }
 
@@ -183,11 +293,11 @@ pub fn load_or_create_static_cipher(data_dir: &Path) -> anyhow::Result<StaticKey
 
 impl KeyCipher for StaticKeyCipher {
     fn encrypt(&self, plaintext: &str) -> anyhow::Result<String> {
-        xor_encrypt(plaintext, &self.seed)
+        Ok(encrypt_local(plaintext, &self.seed)?)
     }
 
     fn decrypt(&self, ciphertext: &str) -> anyhow::Result<String> {
-        xor_decrypt(ciphertext, &self.seed)
+        Ok(decrypt_local(ciphertext, &self.seed)?)
     }
 }
 
@@ -199,12 +309,23 @@ mod tests {
         std::env::temp_dir().join(format!("ocg-crypto-{name}-{}", uuid::Uuid::new_v4()))
     }
 
+    fn assert_error_hides_secret(error: &anyhow::Error, secret: &str) {
+        let display = format!("{error}");
+        let debug = format!("{error:?}");
+        let alt = format!("{error:#}");
+        assert!(
+            !display.contains(secret) && !debug.contains(secret) && !alt.contains(secret),
+            "error must not include plaintext: display={display} debug={debug}"
+        );
+    }
+
     #[test]
     fn machine_bound_roundtrip() {
         let original = "sk-ocg-test-key-12345";
         let cipher = MachineBoundCipher::new();
         let encrypted = cipher.encrypt(original).unwrap();
         assert_ne!(encrypted, original);
+        assert!(encrypted.starts_with(LOCAL_CIPHER_V2_PREFIX));
         let decrypted = cipher.decrypt(&encrypted).unwrap();
         assert_eq!(decrypted, original);
     }
@@ -215,6 +336,7 @@ mod tests {
         let cipher = StaticKeyCipher::new("my-secret-key");
         let encrypted = cipher.encrypt(original).unwrap();
         assert_ne!(encrypted, original);
+        assert!(encrypted.starts_with(LOCAL_CIPHER_V2_PREFIX));
         let decrypted = cipher.decrypt(&encrypted).unwrap();
         assert_eq!(decrypted, original);
     }
@@ -248,24 +370,89 @@ mod tests {
         let enc = cipher.encrypt(original).unwrap();
         assert!(!enc.is_empty());
         assert_ne!(enc, original);
-        // base64 only — should not contain the plaintext substring
         assert!(!enc.contains("sk-ocg-secret"));
+        assert!(enc.starts_with(LOCAL_CIPHER_V2_PREFIX));
     }
 
-    /// Different secrets cannot decrypt each other's ciphertext — the cross-cipher incompatibility
-    /// that the README warns about for shared data dirs.
+    /// Different secrets cannot decrypt each other's v2 ciphertext.
     #[test]
-    fn static_key_wrong_secret_fails_to_decrypt() {
-        let enc = StaticKeyCipher::new("right-key")
-            .encrypt("payload")
-            .unwrap();
+    fn s05_wrong_key_fails_closed() {
+        let secret = "payload";
+        let enc = StaticKeyCipher::new("right-key").encrypt(secret).unwrap();
         let result = StaticKeyCipher::new("wrong-key").decrypt(&enc);
-        // XOR with a different key gives garbage; we accept either a UTF-8 error or a wrong-string
-        // result, but the result must NOT equal the original payload.
-        match result {
-            Err(_) => {}                       // invalid utf-8 — fine
-            Ok(s) => assert_ne!(s, "payload"), // decoded but wrong — still wrong
-        }
+        let error = result.expect_err("wrong AEAD key must fail closed");
+        assert_error_hides_secret(&error, secret);
+        assert_error_hides_secret(&error, "right-key");
+        assert_error_hides_secret(&error, "wrong-key");
+    }
+
+    #[test]
+    fn s05_truncated_v2_fails() {
+        let host = "truncated-host-secret";
+        let cipher = StaticKeyCipher::new(host);
+        let error = cipher
+            .decrypt(&format!("{LOCAL_CIPHER_V2_PREFIX}AAAA"))
+            .expect_err("truncated v2 must fail");
+        assert_error_hides_secret(&error, host);
+    }
+
+    #[test]
+    fn s05_corrupt_v2_fails() {
+        let secret = "sk-corrupt-probe";
+        let cipher = StaticKeyCipher::new("k");
+        let enc = cipher.encrypt(secret).unwrap();
+        let mut packed = STANDARD
+            .decode(enc.strip_prefix(LOCAL_CIPHER_V2_PREFIX).unwrap())
+            .unwrap();
+        let last = packed.len() - 1;
+        packed[last] ^= 0x5a;
+        let corrupt = format!("{LOCAL_CIPHER_V2_PREFIX}{}", STANDARD.encode(packed));
+        let error = cipher
+            .decrypt(&corrupt)
+            .expect_err("corrupt v2 must fail AEAD");
+        assert_error_hides_secret(&error, secret);
+        assert!(
+            !format!("{error}").contains(&enc) && !format!("{error:?}").contains(&enc),
+            "error must not echo ciphertext"
+        );
+    }
+
+    #[test]
+    fn v2_prefix_never_falls_back_to_xor_utf8() {
+        let cipher = StaticKeyCipher::new("k");
+        let legacy = xor_encrypt("hello", b"k").unwrap();
+        let disguised = format!("{LOCAL_CIPHER_V2_PREFIX}{legacy}");
+        let error = cipher
+            .decrypt(&disguised)
+            .expect_err("v2: must not succeed via XOR UTF-8");
+        assert_error_hides_secret(&error, "hello");
+    }
+
+    #[test]
+    fn s05_legacy_xor_written_by_xor_encrypt_still_decrypts() {
+        let seed = b"legacy-seed";
+        let original = "sk-legacy-xor-key";
+        let enc = xor_encrypt(original, seed).unwrap();
+        assert!(!enc.starts_with(LOCAL_CIPHER_V2_PREFIX));
+        assert!(is_legacy_local_ciphertext(&enc));
+        let cipher = StaticKeyCipher::new("legacy-seed");
+        assert_eq!(cipher.decrypt(&enc).unwrap(), original);
+        let planted = cipher.encrypt_legacy(original).unwrap();
+        assert!(!planted.is_empty());
+        assert!(is_legacy_local_ciphertext(&planted));
+        assert_eq!(cipher.decrypt(&planted).unwrap(), original);
+    }
+
+    #[test]
+    fn s05_reencrypt_roundtrip_is_v2() {
+        let cipher = StaticKeyCipher::new("legacy-seed");
+        let original = "sk-reencrypt";
+        let legacy = cipher.encrypt_legacy(original).unwrap();
+        let plain = cipher.decrypt(&legacy).unwrap();
+        let rewritten = cipher.encrypt(&plain).unwrap();
+        assert!(rewritten.starts_with(LOCAL_CIPHER_V2_PREFIX));
+        assert!(!is_legacy_local_ciphertext(&rewritten));
+        assert_eq!(cipher.decrypt(&rewritten).unwrap(), original);
     }
 
     /// Garbage base64 must error rather than panic.
@@ -275,12 +462,23 @@ mod tests {
         assert!(cipher.decrypt("!!!not-base64!!!").is_err());
     }
 
-    /// Valid base64 but too short (< NONCE_LEN bytes) must error.
+    /// Valid base64 but too short (< XOR nonce bytes) must error.
     #[test]
     fn static_key_rejects_short_ciphertext() {
         let cipher = StaticKeyCipher::new("k");
         // 4 bytes of valid base64 = "AAAA"
         assert!(cipher.decrypt("AAAA").is_err());
+    }
+
+    #[test]
+    fn s05_crypto_error_display_debug_contain_no_secret() {
+        let secret = "sk-must-not-appear-in-errors";
+        let error = CryptoError::AuthenticationFailed;
+        assert_error_hides_secret(&error.into(), secret);
+        let error = CryptoError::LegacyDecryptFailed;
+        assert_error_hides_secret(&anyhow::Error::from(error), secret);
+        let debug = format!("{:?}", CryptoError::InvalidCiphertext);
+        assert!(!debug.contains(secret));
     }
 
     #[test]

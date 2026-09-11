@@ -2865,11 +2865,13 @@ dependencies = [
 name = "ocg-infra"
 version = "2.2.1"
 dependencies = [
+ "aes-gcm",
  "anyhow",
  "base64 0.22.1",
  "futures-util",
  "reqwest 0.12.28",
  "rusqlite",
+ "sha2",
  "uuid",
 ]
 

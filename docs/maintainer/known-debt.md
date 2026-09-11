@@ -37,9 +37,10 @@ proposal or pull request, with corresponding code and documentation changes.
   per-protocol probing has no V3 counterpart; the historical V2
   account-owned probe path is 410. Custom verify and model discovery are the
   live Custom operational paths.
-- The V4 operation digest key (`dashboard_operation_digest_key`) lives in the
-  same SQLite file as the obfuscated account Keys. A future authenticated
-  local Key store should also move this key.
+- The V4 operation digest key (`dashboard_operation_digest_key`) still lives
+  in the same SQLite file as the account Keys (AES-256-GCM `v2:` ciphertext,
+  with legacy XOR readable until open-time repair). Authenticated local Key
+  storage does not move this digest key; it remains beside Keys.
 - The `accounts` row still holds cooldown columns and Key material. The
   identity model is satellite-based until the write switch in a later phase.
 

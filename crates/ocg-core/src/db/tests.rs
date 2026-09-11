@@ -1,6 +1,8 @@
 use super::*;
 use super::{V27MigrationFault, v27_test_hooks};
-use crate::crypto::{KeyCipher, StaticKeyCipher};
+use crate::crypto::{
+    KeyCipher, LOCAL_CIPHER_V2_PREFIX, StaticKeyCipher, is_legacy_local_ciphertext,
+};
 use std::fs;
 use std::sync::Arc;
 
@@ -1189,6 +1191,162 @@ fn rotate_increments_version_and_auth_state_version_together() {
     assert_eq!(repaired.version, 2);
     assert_eq!(repaired.auth_state_version, 2);
     assert_eq!(repaired.credential_id, rotated.credential_id);
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+fn probe_row(scope: ContractScope, model_id: &str, now: DateTime<Utc>) -> PersistedModelProtocol {
+    PersistedModelProtocol {
+        scope,
+        model_id: model_id.into(),
+        protocol: UpstreamProtocolKind::ChatCompletions,
+        source: ContractEvidenceSource::ProbeConfirmed,
+        verified_at: Some(now),
+        observed_at: Some(now),
+        last_probe_result: Some(ProbeResultKind::Success),
+        last_probe_at: Some(now),
+        last_probe_error: None,
+    }
+}
+
+#[test]
+fn o02_rotate_invalidates_custom_probe_evidence_and_keeps_builtin_catalog() {
+    let dir = temp_data_dir("o02-rotate-probe");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let mut custom = account("o02-custom");
+    custom.provider_id = CUSTOM_PROVIDER_ID.into();
+    custom.key_cipher = fixture_account_key_cipher();
+    db.create_account_with_contract(
+        &custom,
+        Some(&AccountCustomConfigInput {
+            endpoint_url: "https://o02.example/v1/chat/completions".into(),
+            upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+        }),
+        &[AccountModelCapabilityInput {
+            public_model: "lab-model".into(),
+            upstream_model: "lab-model".into(),
+            protocol: UpstreamProtocolKind::ChatCompletions,
+            source: None,
+        }],
+    )
+    .unwrap();
+    let mut go = account("o02-go");
+    go.key_cipher = fixture_account_key_cipher();
+    db.create_account(&go).unwrap();
+
+    let now = Utc::now();
+    let custom_scope = ContractScope::custom_endpoint("o02-custom");
+    let go_scope = ContractScope::provider(OPENCODE_PROVIDER_ID);
+    db.upsert_model_protocol(&probe_row(custom_scope.clone(), "lab-model", now))
+        .unwrap();
+    db.upsert_model_protocol(&probe_row(go_scope.clone(), "glm-5.2", now))
+        .unwrap();
+
+    db.rotate_account_credential("o02-custom", "replacement-custom")
+        .unwrap();
+    db.rotate_account_credential("o02-go", "replacement-go")
+        .unwrap();
+
+    assert!(
+        db.load_model_protocol(
+            &custom_scope,
+            "lab-model",
+            UpstreamProtocolKind::ChatCompletions
+        )
+        .unwrap()
+        .is_none(),
+        "rotated Custom Key must drop probe evidence"
+    );
+    assert!(
+        db.load_model_protocol(&go_scope, "glm-5.2", UpstreamProtocolKind::ChatCompletions)
+            .unwrap()
+            .is_some(),
+        "builtin catalog probe rows must survive a Go Key rotate"
+    );
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn o02_endpoint_change_invalidates_custom_and_dynamic_probe_evidence() {
+    let dir = temp_data_dir("o02-endpoint-probe");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let mut custom = account("o02-endpoint-custom");
+    custom.provider_id = CUSTOM_PROVIDER_ID.into();
+    custom.key_cipher = fixture_account_key_cipher();
+    db.create_account_with_contract(
+        &custom,
+        Some(&AccountCustomConfigInput {
+            endpoint_url: "https://old-o02.example/v1/chat/completions".into(),
+            upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+        }),
+        &[AccountModelCapabilityInput {
+            public_model: "lab-model".into(),
+            upstream_model: "lab-model".into(),
+            protocol: UpstreamProtocolKind::ChatCompletions,
+            source: None,
+        }],
+    )
+    .unwrap();
+    let now = Utc::now();
+    let provider_id = "o02-dyn";
+    let runtime = crate::dynamic::DynamicProviderRuntime {
+        preset_id: None,
+        id: provider_id.into(),
+        name: "O02 Dyn".into(),
+        endpoint_url: "https://dyn-old.example/v1/chat/completions".into(),
+        upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+        auth_kind: ocg_domain::dynamic::DynamicAuthKind::Bearer,
+        mappings: vec![ocg_domain::dynamic::DynamicModelMapping {
+            public_model: "lab".into(),
+            upstream_model: "vendor/lab".into(),
+            upstream_override: None,
+        }],
+        created_at: now,
+        updated_at: now,
+        origin: ocg_domain::provider::ProviderOrigin::Custom,
+        offering: "api".into(),
+    };
+    let mut dynamic = account("o02-dyn-key");
+    dynamic.provider_id = provider_id.into();
+    dynamic.key_cipher = fixture_account_key_cipher();
+    db.create_dynamic_provider(&runtime, &dynamic).unwrap();
+
+    let custom_scope = ContractScope::custom_endpoint("o02-endpoint-custom");
+    let dyn_scope = ContractScope::custom_endpoint("o02-dyn-key");
+    db.upsert_model_protocol(&probe_row(custom_scope.clone(), "lab-model", now))
+        .unwrap();
+    db.upsert_model_protocol(&probe_row(dyn_scope.clone(), "lab", now))
+        .unwrap();
+
+    db.upsert_account_custom_config(
+        "o02-endpoint-custom",
+        &AccountCustomConfigInput {
+            endpoint_url: "https://new-o02.example/v1/chat/completions".into(),
+            upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+        },
+    )
+    .unwrap();
+    let mut moved = runtime.clone();
+    moved.endpoint_url = "https://dyn-new.example/v1/chat/completions".into();
+    moved.updated_at = Utc::now();
+    db.replace_dynamic_provider(&moved, true, false, None)
+        .unwrap();
+
+    assert!(
+        db.load_model_protocol(
+            &custom_scope,
+            "lab-model",
+            UpstreamProtocolKind::ChatCompletions
+        )
+        .unwrap()
+        .is_none()
+    );
+    assert!(
+        db.load_model_protocol(&dyn_scope, "lab", UpstreamProtocolKind::ChatCompletions)
+            .unwrap()
+            .is_none()
+    );
     drop(db);
     fs::remove_dir_all(dir).unwrap();
 }
@@ -8788,7 +8946,7 @@ fn v27_wrong_cipher_fails_closed_without_claiming_v27() {
 }
 
 #[test]
-fn current_schema_wrong_host_cipher_fails_closed_without_rewriting_ciphertext() {
+fn s05_wrong_host_cipher_fails_closed_without_rewriting_ciphertext() {
     let cipher_a: Arc<dyn KeyCipher + Send + Sync> =
         Arc::new(StaticKeyCipher::new("alpha-host-secret"));
     let cipher_b: Arc<dyn KeyCipher + Send + Sync> =
@@ -8856,6 +9014,80 @@ fn current_schema_wrong_host_cipher_fails_closed_without_rewriting_ciphertext() 
     let loaded = recovered.get_account("enc-current").unwrap().unwrap();
     assert_eq!(loaded.key_cipher, key_before);
     assert_eq!(loaded.password_cipher, password_before);
+    drop(recovered);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn s05_legacy_xor_repairs_to_v2_with_correct_cipher() {
+    let cipher = StaticKeyCipher::new("legacy-repair-host");
+    let cipher_arc: Arc<dyn KeyCipher + Send + Sync> = Arc::new(cipher.clone());
+    let key_plain = "sk-legacy-repair-key";
+    let password_plain = "pw-legacy-repair-secret";
+    let dir = temp_data_dir("legacy-xor-repair");
+
+    let db = Database::open_with_cipher(dir.clone(), cipher_arc.clone()).unwrap();
+    let mut enc = account("legacy-repair");
+    enc.key_cipher = cipher.encrypt_legacy(key_plain).unwrap();
+    enc.password_cipher = Some(cipher.encrypt_legacy(password_plain).unwrap());
+    assert!(is_legacy_local_ciphertext(&enc.key_cipher));
+    assert!(is_legacy_local_ciphertext(
+        enc.password_cipher.as_deref().unwrap()
+    ));
+    db.create_account(&enc).unwrap();
+    let planted = db.get_account("legacy-repair").unwrap().unwrap();
+    assert!(is_legacy_local_ciphertext(&planted.key_cipher));
+    drop(db);
+
+    let db = Database::open_with_cipher(dir.clone(), cipher_arc.clone()).unwrap();
+    let loaded = db.get_account("legacy-repair").unwrap().unwrap();
+    assert!(
+        loaded.key_cipher.starts_with(LOCAL_CIPHER_V2_PREFIX),
+        "open-time repair must rewrite key_cipher to v2"
+    );
+    assert!(
+        loaded
+            .password_cipher
+            .as_deref()
+            .is_some_and(|value| value.starts_with(LOCAL_CIPHER_V2_PREFIX)),
+        "open-time repair must rewrite password_cipher to v2"
+    );
+    assert_eq!(cipher.decrypt(&loaded.key_cipher).unwrap(), key_plain);
+    assert_eq!(
+        cipher
+            .decrypt(loaded.password_cipher.as_deref().unwrap())
+            .unwrap(),
+        password_plain
+    );
+    let repaired_key = loaded.key_cipher.clone();
+    let repaired_password = loaded.password_cipher.clone();
+    drop(db);
+
+    let wrong: Arc<dyn KeyCipher + Send + Sync> =
+        Arc::new(StaticKeyCipher::new("wrong-repair-host"));
+    let error = match Database::open_with_cipher(dir.clone(), wrong) {
+        Ok(_) => panic!("wrong host cipher must fail closed after v2 repair"),
+        Err(error) => error,
+    };
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("host cipher rejected") && message.contains("key_cipher"),
+        "{message}"
+    );
+    assert!(
+        !message.contains(&repaired_key)
+            && !message.contains(repaired_password.as_deref().unwrap_or_default())
+            && !message.contains(key_plain)
+            && !message.contains(password_plain)
+            && !message.contains("legacy-repair-host")
+            && !message.contains("wrong-repair-host"),
+        "repair/probe errors must not leak ciphertext, plaintext, or host secrets: {message}"
+    );
+
+    let recovered = Database::open_with_cipher(dir.clone(), cipher_arc).unwrap();
+    let loaded = recovered.get_account("legacy-repair").unwrap().unwrap();
+    assert_eq!(loaded.key_cipher, repaired_key);
+    assert_eq!(loaded.password_cipher, repaired_password);
     drop(recovered);
     fs::remove_dir_all(dir).unwrap();
 }

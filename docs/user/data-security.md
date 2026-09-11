@@ -8,17 +8,19 @@ Protect the data directory: there is no remote recovery if it is lost.
 - **GUI data location.** Windows: `%USERPROFILE%\.ocg-mgr`. macOS / Linux:
   `~/.ocg-mgr`. CLI data defaults to `~/.ocg-mgr-cli` on every platform and
   can be overridden with `--data-dir <path>`.
-- **Credential storage.** Account keys and saved login passwords are
-  obfuscated before storage; this is not cryptographic protection. Dashboard
-  Access Keys live in `access_keys` (schema v27). The macOS / Linux GUI and
-  the CLI also place a `.encryption-key` file inside the data directory;
-  **back it up with the database** because losing it makes stored credentials
-  unreadable. Obfuscation is not a security boundary: anyone with the data
-  directory and its `.encryption-key`, or able to run the Windows GUI in the
-  original Windows user/machine context, can recover account keys and saved
-  login passwords. The dashboard SPA never writes Key plaintext to
+- **Credential storage.** Account keys and saved login passwords are stored
+  with AES-256-GCM (`v2:` ciphertext) derived from the Host cipher seed.
+  Older XOR-obfuscated rows still decrypt so a directory backup remains
+  restorable; a successful open rewrites them to v2. This is still a
+  local-disk bound, not a remote KMS: anyone with the data directory and its
+  `.encryption-key`, or able to run the Windows GUI in the original Windows
+  user/machine context, can recover account keys and saved login passwords.
+  Dashboard Access Keys live in `access_keys` (schema v27). The macOS /
+  Linux GUI and the CLI also place a `.encryption-key` file inside the data
+  directory; **back it up with the database** because losing it makes stored
+  credentials unreadable. The dashboard SPA never writes Key plaintext to
   `localStorage`; Connection Center secrets stay in memory until logout or
-  401.
+  401. Probe and repair errors do not print plaintext Keys.
 - **Browser profiles.** `browser-profiles/`, or Docker's
   `ocg-browser-profiles`, contains long-lived cookies and official-site login
   state and is not encrypted by Open Console Gateway at all. Protect, transfer, and

@@ -6,7 +6,7 @@ Operator contract for upgrades, backups, and rollback. Schema details are in [Pe
 
 ## Data directories and cipher identity
 
-Every database open uses the Host-resolved cipher (`Database::open_with_cipher` on CLI, desktop, and Docker). Stored account ciphertext is probed before migration and decryption errors fail closed. Key storage uses unauthenticated obfuscation: a successful UTF-8 decode alone cannot authenticate cipher identity. Retain the original cipher; rewriting ciphertext does not repair a mismatch.
+Every database open uses the Host-resolved cipher (`Database::open_with_cipher` on CLI, desktop, and Docker). Stored account ciphertext is probed before migration and decryption errors fail closed. New writes use authenticated AES-256-GCM (`v2:`). Unprefixed legacy XOR still decrypts so backups restore; a successful Host-cipher open rewrites those rows to v2. A successful UTF-8 decode of XOR is not treated as v2 success. Retain the original cipher; rewriting ciphertext does not repair a mismatch.
 
 | Surface | Default data directory | Cipher identity |
 | --- | --- | --- |
@@ -69,7 +69,7 @@ v44 additively creates `dashboard_operations` for V4 idempotent control-plane co
 - `result_json` — secret-free stored result
 - `created_at`
 
-The digest is keyed by a per-database random 32-byte value in `settings` under `dashboard_operation_digest_key`, created lazily and never returned by any API. This key lives in the same SQLite file as the obfuscated account Keys, so it shares the existing local-storage threat model; it prevents the stored digest from being an unkeyed hash of a secret, and it does not add protection against an attacker who holds the database file. Rows older than 30 days are pruned on insert. The migration is additive and does not create a pre-migration backup file (same as v43). Rollback remains the existing whole-directory restore.
+The digest is keyed by a per-database random 32-byte value in `settings` under `dashboard_operation_digest_key`, created lazily and never returned by any API. This key lives in the same SQLite file as the account Keys, so it shares the existing local-storage threat model; it prevents the stored digest from being an unkeyed hash of a secret, and it does not add protection against an attacker who holds the database file. Rows older than 30 days are pruned on insert. The migration is additive and does not create a pre-migration backup file (same as v43). Rollback remains the existing whole-directory restore.
 
 ## Schema v43 — preferred protocol CHECK and exclusive-radio repair
 

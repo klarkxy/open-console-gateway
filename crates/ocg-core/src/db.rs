@@ -1,4 +1,4 @@
-use crate::crypto::KeyCipher;
+use crate::crypto::{KeyCipher, is_legacy_local_ciphertext};
 use crate::custom::validate_custom_endpoint_url;
 use crate::dynamic::DynamicProviderRuntime;
 use crate::kernel::ids::{PRIMARY_KEY_ID, PRIMARY_KEY_NAME};
@@ -857,6 +857,27 @@ fn upsert_model_protocol_row_on(conn: &Connection, row: &PersistedModelProtocol)
     Ok(())
 }
 
+/// Drop probe observations for one contract scope and bump its revision.
+/// Explicit protocol overrides stay; they are operator policy, not probe evidence.
+pub(crate) fn invalidate_probe_evidence_on(
+    conn: &Connection,
+    scope: &ContractScope,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    if !table_exists(conn, "provider_contract_model_protocols")? {
+        return Ok(());
+    }
+    conn.execute(
+        "DELETE FROM provider_contract_model_protocols
+         WHERE scope_kind = ?1 AND scope_id = ?2",
+        params![scope.kind_str(), scope.id()],
+    )?;
+    if table_exists(conn, "provider_contract_scopes")? {
+        bump_scope_revision_on(conn, scope, now)?;
+    }
+    Ok(())
+}
+
 fn bump_scope_revision_on(
     conn: &Connection,
     scope: &ContractScope,
@@ -1066,6 +1087,114 @@ fn preflight_ciphertext_probes(conn: &Connection, cipher: Option<&dyn KeyCipher>
             probe_account_cipher(cipher, &id, "password_cipher", &value)?;
         }
     }
+    Ok(())
+}
+
+fn repair_legacy_account_ciphertext(conn: &Connection, cipher: &dyn KeyCipher) -> Result<()> {
+    if !table_exists(conn, "accounts")? {
+        return Ok(());
+    }
+    let has_key = table_has_column(conn, "accounts", "key_cipher")?;
+    let has_password = table_has_column(conn, "accounts", "password_cipher")?;
+    if !has_key && !has_password {
+        return Ok(());
+    }
+
+    let select_sql = match (has_key, has_password) {
+        (true, true) => "SELECT id, key_cipher, password_cipher FROM accounts",
+        (true, false) => "SELECT id, key_cipher, NULL FROM accounts",
+        (false, true) => "SELECT id, '', password_cipher FROM accounts",
+        (false, false) => return Ok(()),
+    };
+
+    let rows = {
+        let mut stmt = conn.prepare(select_sql)?;
+        stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    if !rows.iter().any(|(_, key, password)| {
+        is_legacy_local_ciphertext(key)
+            || password.as_deref().is_some_and(is_legacy_local_ciphertext)
+    }) {
+        return Ok(());
+    }
+
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let rows = {
+        let mut stmt = tx.prepare(select_sql)?;
+        stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+
+    let mut updates: Vec<(String, Option<String>, Option<String>)> = Vec::new();
+    for (id, key, password) in rows {
+        let new_key = if is_legacy_local_ciphertext(&key) {
+            let plaintext = cipher.decrypt(&key).with_context(|| {
+                format!("host cipher rejected account {id}.key_cipher during v2 repair")
+            })?;
+            Some(
+                cipher
+                    .encrypt(&plaintext)
+                    .with_context(|| format!("failed to rewrite account {id}.key_cipher to v2"))?,
+            )
+        } else {
+            None
+        };
+        let new_password = if let Some(value) = password.as_deref() {
+            if is_legacy_local_ciphertext(value) {
+                let plaintext = cipher.decrypt(value).with_context(|| {
+                    format!("host cipher rejected account {id}.password_cipher during v2 repair")
+                })?;
+                Some(cipher.encrypt(&plaintext).with_context(|| {
+                    format!("failed to rewrite account {id}.password_cipher to v2")
+                })?)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if new_key.is_some() || new_password.is_some() {
+            updates.push((id, new_key, new_password));
+        }
+    }
+
+    for (id, new_key, new_password) in updates {
+        match (new_key, new_password) {
+            (Some(key), Some(password)) => {
+                tx.execute(
+                    "UPDATE accounts SET key_cipher = ?1, password_cipher = ?2 WHERE id = ?3",
+                    params![key, password, id],
+                )?;
+            }
+            (Some(key), None) => {
+                tx.execute(
+                    "UPDATE accounts SET key_cipher = ?1 WHERE id = ?2",
+                    params![key, id],
+                )?;
+            }
+            (None, Some(password)) => {
+                tx.execute(
+                    "UPDATE accounts SET password_cipher = ?1 WHERE id = ?2",
+                    params![password, id],
+                )?;
+            }
+            (None, None) => {}
+        }
+    }
+    tx.commit()?;
     Ok(())
 }
 
@@ -3573,11 +3702,14 @@ fn persist_account_custom_config_on(
     let now = Utc::now().to_rfc3339();
     let existing = conn
         .query_row(
-            "SELECT upstream_protocol FROM account_custom_configs WHERE account_id = ?1",
+            "SELECT endpoint_url, upstream_protocol FROM account_custom_configs WHERE account_id = ?1",
             [account_id],
-            |row| row.get::<_, String>(0),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         )
         .optional()?;
+    let endpoint_changed = existing.as_ref().is_some_and(|(url, protocol)| {
+        url != &endpoint_url || protocol != input.upstream_protocol.as_str()
+    });
     if existing.is_some() {
         conn.execute(
             "UPDATE account_custom_configs
@@ -3604,6 +3736,13 @@ fn persist_account_custom_config_on(
         )?;
     }
     mark_required_verification_stale_on(conn, account_id)?;
+    if endpoint_changed {
+        invalidate_probe_evidence_on(
+            conn,
+            &ContractScope::custom_endpoint(account_id),
+            Utc::now(),
+        )?;
+    }
     Ok(())
 }
 
@@ -3964,8 +4103,10 @@ impl Database {
 
     /// Production open path: migrate with the already-resolved Host cipher.
     /// Persisted account key/password ciphertext is probed in place before
-    /// migration and is never rewritten. Decrypt failure fails closed; the
-    /// XOR obfuscation is not authenticated encryption.
+    /// migration. Decrypt failure fails closed. Authenticated `v2:` ciphertext
+    /// rejects a wrong host cipher; legacy XOR remains readable so backups
+    /// restore, then remaining legacy rows are rewritten to v2 in one
+    /// transaction.
     pub fn open_with_cipher(
         data_dir: PathBuf,
         cipher: Arc<dyn KeyCipher + Send + Sync>,
@@ -3986,9 +4127,10 @@ impl Database {
         let is_fresh = is_fresh_empty_database(&conn, existing_version)?;
         // Host-cipher opens probe persisted account key/password ciphertext
         // before migrate() can mutate the file. Decrypt failure fails closed.
-        // XOR obfuscation cannot authenticate every wrong-key UTF-8 result.
-        // Database::open (cipher None) skips this; v27 still probes when that
-        // rewrite runs. Empty or no-auth rows have nothing to decrypt.
+        // v2 AEAD rejects a wrong host cipher; legacy XOR is still readable
+        // so backups restore. Database::open (cipher None) skips this; v27
+        // still probes when that rewrite runs. Empty or no-auth rows have
+        // nothing to decrypt.
         if cipher.is_some() {
             preflight_ciphertext_probes(&conn, cipher)?;
         }
@@ -4022,6 +4164,9 @@ impl Database {
         migrate_to_v44(&db.conn)?;
         identity::migrate_to_v45(&db.conn)?;
         identity::ensure_identity_model_consistent(&db.conn)?;
+        if let Some(cipher) = cipher {
+            repair_legacy_account_ciphertext(&db.conn, cipher)?;
+        }
         Ok(db)
     }
 
@@ -6090,6 +6235,22 @@ impl Database {
                  WHERE lower(provider_id) = lower(?2)",
                 params![runtime.updated_at.to_rfc3339(), existing.id],
             )?;
+            let mut account_ids = Vec::new();
+            {
+                let mut stmt =
+                    tx.prepare("SELECT id FROM accounts WHERE lower(provider_id) = lower(?1)")?;
+                let rows = stmt.query_map([&existing.id], |row| row.get::<_, String>(0))?;
+                for id in rows {
+                    account_ids.push(id?);
+                }
+            }
+            for account_id in account_ids {
+                invalidate_probe_evidence_on(
+                    &tx,
+                    &ContractScope::custom_endpoint(&account_id),
+                    runtime.updated_at,
+                )?;
+            }
         }
         if clear_keys {
             tx.execute(

@@ -1050,6 +1050,7 @@ fn rotate_account_credential_on(
         updated == 1,
         "account {account_id} is missing credential_state after repair"
     );
+    invalidate_rotated_probe_evidence(&tx, account_id, &provider_id)?;
     let (stored_id, version, auth_state_version): (String, i64, i64) = tx.query_row(
         "SELECT credential_id, version, auth_state_version
          FROM credential_state WHERE account_id = ?1",
@@ -1063,6 +1064,36 @@ fn rotate_account_credential_on(
         version: version as u64,
         auth_state_version: auth_state_version as u64,
     })
+}
+
+fn invalidate_rotated_probe_evidence(
+    conn: &Connection,
+    account_id: &str,
+    provider_id: &str,
+) -> Result<()> {
+    // Configurable HTTP (Custom + user-defined) stores probe rows on the
+    // account's custom_endpoint scope. Builtin catalog scopes stay.
+    let now = Utc::now();
+    if provider_id == CUSTOM_PROVIDER_ID {
+        return invalidate_probe_evidence_on(
+            conn,
+            &ContractScope::custom_endpoint(account_id),
+            now,
+        );
+    }
+    let dynamic: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM providers
+             WHERE id = ?1 AND origin IS NOT NULL AND origin != 'builtin'",
+            [provider_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(0);
+    if dynamic > 0 {
+        invalidate_probe_evidence_on(conn, &ContractScope::custom_endpoint(account_id), now)?;
+    }
+    Ok(())
 }
 
 fn list_inference_bindings_on(conn: &Connection) -> Result<Vec<StoredInferenceBinding>> {

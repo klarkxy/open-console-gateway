@@ -1,8 +1,7 @@
-//! Simple obfuscation for API keys.
+//! Local Key storage facade (`ocg-infra::crypto`).
 //!
-//! This is intentionally lightweight: keys are not stored in plain text on disk,
-//! but the scheme is NOT a substitute for a real KMS or AES-GCM. If stronger
-//! security is needed later, replace this module with `ring`/`aes-gcm`.
+//! New writes are AES-256-GCM (`v2:`). Legacy XOR still decrypts so backups
+//! restore. This is a local-disk bound, not a KMS.
 //!
 //! Two cipher implementations are provided:
 //! - `MachineBoundCipher`: derives a key from Windows environment variables
@@ -13,5 +12,6 @@
 
 #[doc(inline)]
 pub use ocg_infra::crypto::{
-    KeyCipher, MachineBoundCipher, StaticKeyCipher, load_or_create_static_cipher,
+    KeyCipher, LOCAL_CIPHER_V2_PREFIX, MachineBoundCipher, StaticKeyCipher,
+    is_legacy_local_ciphertext, load_or_create_static_cipher,
 };
