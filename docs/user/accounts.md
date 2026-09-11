@@ -6,6 +6,8 @@
 
 **Enabled** describes configuration, not a successful upstream authentication or model test. Test results stay in the test dialog. User-defined Providers have no modeled subscription period, including those created from Plan presets: their accounts do not show an inferred purchase date, expiry countdown, or expiry alert. Existing stored purchase anchors are preserved for compatibility, but are not presented as confirmed billing facts.
 
+Accounts still edit through the same forms. Card status and relations come from the identity projection: a declared relation is not a verified wallet, and dynamic or Custom dates stay unknown unless V3 already stored a real purchase date.
+
 Accounts is the tenant list. A Provider and a Plan are the same product
 identity (`provider_id` only), and every card belongs to one Provider with one
 credential when that Provider requires it. Quota authority is Provider-specific:

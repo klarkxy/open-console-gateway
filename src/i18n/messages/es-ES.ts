@@ -660,5 +660,9 @@ export const esESMessages = {
   "新建须选择 Pro / Max / Team 并填写购买日期；未配置的既有账号仍可路由。": "Las cuentas nuevas deben elegir Pro / Max / Team y una fecha de compra; las existentes sin fila siguen siendo enrutables.",
   "请配置 Ollama 计费档位以显示本月额度": "Configura el nivel de facturación de Ollama para ver el cupo de este mes",
   "超出 {amount}": "exceso {amount}",
-  "缓存输入": "Entrada en caché"
+  "缓存输入": "Entrada en caché",
+  "声明关系": "Relación declarada",
+  "{count} 个凭据": "{count} credenciales",
+  "未提供": "No disponible",
+  "加载身份投影失败: {error}": "Error al cargar la proyección de identidad: {error}"
 } satisfies Messages;

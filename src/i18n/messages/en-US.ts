@@ -984,7 +984,11 @@ export const enUSMessages = {
   "仅看已启用": "Enabled only",
   "允许路由": "Allow routing",
   "测试 {model}": "Test {model}",
-  "默认模型": "Default models"
+  "默认模型": "Default models",
+  "声明关系": "Declared relation",
+  "{count} 个凭据": "{count} credentials",
+  "未提供": "Not provided",
+  "加载身份投影失败: {error}": "Failed to load identity projection: {error}"
 } as const;
 
 export type MessageKey = keyof typeof enUSMessages;

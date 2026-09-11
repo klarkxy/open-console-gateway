@@ -78,6 +78,19 @@
         >{{ t("重试") }}</n-button>
       </n-alert>
 
+      <n-alert
+        v-if="identitiesError"
+        type="warning"
+        :title="t('加载身份投影失败: {error}', { error: identitiesError })"
+      >
+        <n-button
+          size="small"
+          secondary
+          :loading="identitiesLoading"
+          @click="loadIdentitiesOverlay"
+        >{{ t("重试") }}</n-button>
+      </n-alert>
+
       <PlatformAccountsSection
         ref="platformSectionRef"
         :accounts="accounts"
@@ -109,6 +122,7 @@
           v-for="account in displayedAccounts"
           :key="account.id"
           :account="account"
+          :identity="identityForCard(account.id)"
           :catalog="providerCatalog"
           :usage="getUsage(account.id)"
           :provider-usage="providerUsageMap[account.id] ?? null"
@@ -285,6 +299,7 @@ import { PlusOutlined } from "@vicons/antd";
 import { DashboardRequestError, dashboardApi, isRevisionConflict } from "../api/dashboard";
 import { providerApi } from "../api/providers.ts";
 import { useAccountsStore } from "../stores/accounts.ts";
+import { useIdentitiesStore } from "../stores/identities.ts";
 import { useProvidersStore } from "../stores/providers.ts";
 import type { ProviderCatalogEntry } from "../api/providers.ts";
 import type {
@@ -344,10 +359,13 @@ import type { PlatformAccountFormPayload } from "../components/PlatformAccountFo
 const dialog = useDialog();
 const message = useMessage();
 const accountsStore = useAccountsStore();
+const identitiesStore = useIdentitiesStore();
 const providersStore = useProvidersStore();
 const accounts = ref<Account[]>([]);
 const accountListLoading = ref(true);
 const accountListError = ref("");
+const identitiesError = ref("");
+const identitiesLoading = computed(() => identitiesStore.loading);
 const testingAccountId = ref<string | null>(null);
 const providerSettingsSaving = ref<Record<string, boolean>>({});
 const purchaseDateSaving = ref<Record<string, boolean>>({});
@@ -616,6 +634,19 @@ async function onPresetAccountConflict(): Promise<void> {
 function resetFilters(): void {
   planFilter.value = "all";
   statusFilter.value = "all";
+}
+
+function identityForCard(accountId: string) {
+  return identitiesStore.byAccountId.get(accountId) ?? null;
+}
+
+async function loadIdentitiesOverlay(): Promise<void> {
+  try {
+    await identitiesStore.loadPresented();
+    identitiesError.value = "";
+  } catch (error) {
+    identitiesError.value = dashboardErrorDetail(error);
+  }
 }
 
 function onPlatformLinksChange(links: PlatformLink[], parents: { id: string; name: string }[]): void {
@@ -911,6 +942,7 @@ async function recoverManagedSetupConflict(accountId: string, error: unknown): P
 async function loadAccounts() {
   accountListLoading.value = true;
   accountListError.value = "";
+  const overlay = loadIdentitiesOverlay();
   try {
     const loaded = await accountsStore.loadPresented();
     accounts.value = loaded;
@@ -946,6 +978,7 @@ async function loadAccounts() {
   } finally {
     accountListLoading.value = false;
   }
+  await overlay;
 }
 
 async function loadRegistrationOptions(): Promise<void> {
@@ -1152,6 +1185,7 @@ async function reloadAfterControlPlaneConflict(): Promise<void> {
     if (!loadedIds.has(id)) removeAccountState(id);
   }
   accounts.value = loaded;
+  void loadIdentitiesOverlay();
   if (editingAccount.value) {
     const stillListed = reconcileEditingAccount(loaded, editingAccount.value.id);
     editingAccount.value = stillListed;

@@ -661,5 +661,9 @@ export const ptBRMessages = {
   "新建须选择 Pro / Max / Team 并填写购买日期；未配置的既有账号仍可路由。": "Contas novas devem escolher Pro / Max / Team e uma data de compra; contas existentes sem linha continuam roteáveis.",
   "请配置 Ollama 计费档位以显示本月额度": "Configure o nível de cobrança Ollama para mostrar a cota deste mês",
   "超出 {amount}": "excedente {amount}",
-  "缓存输入": "Entrada em cache"
+  "缓存输入": "Entrada em cache",
+  "声明关系": "Relação declarada",
+  "{count} 个凭据": "{count} credenciais",
+  "未提供": "Não informado",
+  "加载身份投影失败: {error}": "Falha ao carregar a projeção de identidade: {error}"
 } satisfies Messages;

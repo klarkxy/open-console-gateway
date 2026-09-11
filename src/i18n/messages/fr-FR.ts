@@ -661,5 +661,9 @@ export const frFRMessages = {
   "新建须选择 Pro / Max / Team 并填写购买日期；未配置的既有账号仍可路由。": "Un nouveau compte doit choisir Pro / Max / Team et une date d’achat ; les comptes existants sans ligne restent routables.",
   "请配置 Ollama 计费档位以显示本月额度": "Configurez le niveau de facturation Ollama pour afficher le quota du mois",
   "超出 {amount}": "dépassement {amount}",
-  "缓存输入": "Entrée en cache"
+  "缓存输入": "Entrée en cache",
+  "声明关系": "Relation déclarée",
+  "{count} 个凭据": "{count} identifiants",
+  "未提供": "Non fourni",
+  "加载身份投影失败: {error}": "Échec du chargement de la projection d’identité : {error}"
 } satisfies Messages;

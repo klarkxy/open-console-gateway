@@ -52,16 +52,37 @@
             >
               {{ planLabel(account, catalog) }}
             </n-tag>
-            <n-tooltip v-if="account.auth_error || isCooling(account, now)">
+            <n-tag
+              v-if="showsDeclaredRelation"
+              size="small"
+              :bordered="false"
+            >
+              {{ t("声明关系") }}
+            </n-tag>
+            <n-tag
+              v-if="credentialCountLabel"
+              size="small"
+              :bordered="false"
+            >
+              {{ credentialCountLabel }}
+            </n-tag>
+            <n-tooltip v-if="statusTooltip">
               <template #trigger>
-                <n-tag :type="accountStatusTagType(account, now)" size="small">
-                  {{ accountStatusLabel(account, now) }}
+                <n-tag :type="statusTagType" size="small">
+                  {{ statusLabel }}
                 </n-tag>
               </template>
-              {{ account.auth_error || cooldownDetails(account, now, limits) }}
+              {{ statusTooltip }}
             </n-tooltip>
-            <n-tag v-else :type="accountStatusTagType(account, now)" size="small">
-              {{ accountStatusLabel(account, now) }}
+            <n-tag v-else :type="statusTagType" size="small">
+              {{ statusLabel }}
+            </n-tag>
+            <n-tag
+              v-if="expiryDisplay === 'unknown'"
+              size="small"
+              :bordered="false"
+            >
+              {{ t("未提供") }}
             </n-tag>
             <n-popover
               v-if="hasValidityPeriod"
@@ -359,6 +380,7 @@ import {
   ReloadOutlined,
 } from "@vicons/antd";
 import type { Account, UsageWindow } from "../api/dashboard";
+import type { Identity } from "../api/identities.ts";
 import type {
   ProviderCatalogEntry,
   ProviderUsageResponse,
@@ -370,14 +392,20 @@ import {
   accountExpiryTagType,
   accountIsReady,
   accountRoutingDraftDescription,
-  accountStatusLabel,
-  accountStatusTagType,
   cooldownDetails,
   isUsageRefreshBlocked,
   managedStepLabel,
   usageRefreshTooltip,
   usageSyncCaption,
 } from "../domain/account-display.ts";
+import {
+  accountCredentialCountLabel,
+  accountExpiryDisplay,
+  accountShowsDeclaredRelation,
+  inferenceLastError,
+  presentedAccountStatusLabel,
+  presentedAccountStatusTagType,
+} from "../domain/account-identity.ts";
 import type { AccountMenuOption } from "../domain/account-display.ts";
 import {
   isCpaIntegrationAccount,
@@ -387,7 +415,7 @@ import {
 } from "../domain/account-providers.ts";
 import { isCustomApiAccount } from "../domain/custom-account.ts";
 import { localDateString } from "../domain/account-lifecycle.ts";
-import { planForAccount, planLabel } from "../domain/plans.ts";
+import { planLabel } from "../domain/plans.ts";
 import type { AccountUsageEdits, UsageLimitView } from "../domain/useAccountUsage.ts";
 import { t } from "../i18n/index.ts";
 import AccountUsageEditor from "./AccountUsageEditor.vue";
@@ -396,6 +424,7 @@ import ProviderQuotaSummary from "./ProviderQuotaSummary.vue";
 
 const props = defineProps<{
   account: Account;
+  identity?: Identity | null;
   catalog: readonly ProviderCatalogEntry[] | null;
   usage: UsageWindow;
   providerUsage: ProviderUsageResponse | null;
@@ -436,18 +465,30 @@ const isCustom = computed(() => isCustomApiAccount(props.account));
 const isOfficialCn = computed(() => isOfficialCnPlanAccount(props.account));
 const isOllamaCloud = computed(() => isOllamaCloudAccount(props.account));
 const ollamaNeedsBilling = computed(() => !props.account.ollama_billing_tier);
-const lifecyclePlan = computed(() => planForAccount(props.account, props.catalog));
+const overlayIdentity = computed(() => props.identity ?? null);
+const showsDeclaredRelation = computed(() => accountShowsDeclaredRelation(overlayIdentity.value));
+const credentialCountLabel = computed(() => accountCredentialCountLabel(overlayIdentity.value));
+const statusLabel = computed(() => (
+  presentedAccountStatusLabel(props.account, overlayIdentity.value, props.now)
+));
+const statusTagType = computed(() => (
+  presentedAccountStatusTagType(props.account, overlayIdentity.value, props.now)
+));
+const statusTooltip = computed(() => {
+  if (props.account.auth_error) return props.account.auth_error;
+  const overlayError = inferenceLastError(overlayIdentity.value);
+  if (overlayError) return overlayError;
+  if (isCooling(props.account, props.now)) return cooldownDetails(props.account, props.now, props.limits);
+  return "";
+});
+const expiryDisplay = computed(() => (
+  accountExpiryDisplay(props.account, overlayIdentity.value, props.catalog)
+));
 // Purchase/expiry UI is only for built-in billed families: Custom API, Zen
 // Free, and user-defined (dynamic) Providers model no billing cadence, so
-// their (possibly synthetic or blanked) dates stay hidden.
-const hasValidityPeriod = computed(() => (
-  accountIsReady(props.account)
-  && !!lifecyclePlan.value
-  && lifecyclePlan.value.id !== "custom-endpoint"
-  && !isZen.value
-  && !!props.account.purchase_date
-  && !!props.account.expires_on
-));
+// their (possibly synthetic or blanked) dates stay hidden unless V3 already
+// stored a real purchase date on a built-in card.
+const hasValidityPeriod = computed(() => expiryDisplay.value === "v3");
 const purchaseDatePopoverShown = ref(false);
 const purchaseDateDraft = ref<string | null>(props.account.purchase_date || null);
 const today = computed(() => localDateString(props.now));

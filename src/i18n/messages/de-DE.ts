@@ -660,5 +660,9 @@ export const deDEMessages = {
   "新建须选择 Pro / Max / Team 并填写购买日期；未配置的既有账号仍可路由。": "Neue Konten brauchen Pro / Max / Team und ein Kaufdatum; vorhandene Konten ohne Zeile bleiben routeable.",
   "请配置 Ollama 计费档位以显示本月额度": "Ollama-Abrechnungsstufe festlegen, um das monatliche Kontingent anzuzeigen",
   "超出 {amount}": "über {amount}",
-  "缓存输入": "Cached Input"
+  "缓存输入": "Cached Input",
+  "声明关系": "Deklarierte Beziehung",
+  "{count} 个凭据": "{count} Anmeldedaten",
+  "未提供": "Nicht angegeben",
+  "加载身份投影失败: {error}": "Identitätsprojektion konnte nicht geladen werden: {error}"
 } satisfies Messages;
