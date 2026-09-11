@@ -1,10 +1,10 @@
 //! Host HTTP router composition.
 //!
-//! Assembles the inference router with Dashboard V3, the retired V2 REST
+//! Assembles the inference router with Dashboard V3/V4, the retired V2 REST
 //! tombstone, public V2 auth, the V2 browser WebSocket, and dashboard assets.
 //! This module is the HTTP composition root: it depends on `gateway`,
-//! `dashboard`, and `dashboard_v3`. Those modules, and `state`, must not import
-//! this module.
+//! `dashboard`, `dashboard_v3`, and `dashboard_v4`. Those modules, and `state`,
+//! must not import this module.
 
 use crate::dashboard_session;
 use crate::gateway::listener::GatewayRouterHost;
@@ -40,6 +40,10 @@ pub fn build_router(state: CoreState) -> Router {
         .nest(
             "/dashboard/api/v3",
             crate::dashboard_v3::api_router(state.clone()),
+        )
+        .nest(
+            "/dashboard/api/v4",
+            crate::dashboard_v4::api_router(state.clone()),
         )
         .nest(
             "/dashboard/api",
@@ -82,7 +86,11 @@ async fn require_local_dashboard_authority(
         && (path == "/dashboard/api" || path.starts_with("/dashboard/api/"))
         && !dashboard_session::has_local_dashboard_authority(req.headers())
     {
-        if path == "/dashboard/api/v3" || path.starts_with("/dashboard/api/v3/") {
+        if path == "/dashboard/api/v3"
+            || path.starts_with("/dashboard/api/v3/")
+            || path == "/dashboard/api/v4"
+            || path.starts_with("/dashboard/api/v4/")
+        {
             return (
                 StatusCode::FORBIDDEN,
                 Json(crate::dashboard_v3::V3Error::forbidden(
@@ -167,7 +175,7 @@ fn v2_api_remainder(path: &str) -> Option<&str> {
     } else {
         path.strip_prefix("/dashboard/api/")?
     };
-    if rest == "v3" || rest.starts_with("v3/") {
+    if rest == "v3" || rest.starts_with("v3/") || rest == "v4" || rest.starts_with("v4/") {
         return None;
     }
     Some(rest)
@@ -221,6 +229,9 @@ mod tests {
             "/dashboard/api/v3",
             "/dashboard/api/v3/contract",
             "/dashboard/api/v3/accounts",
+            "/dashboard/api/v4",
+            "/dashboard/api/v4/contract",
+            "/dashboard/api/v4/connections",
             "/dashboard",
             "/dashboard/",
             "/dashboard/assets/index.js",
@@ -263,6 +274,9 @@ mod tests {
             "/dashboard/api/v3accounts",
             "/dashboard/api/V3/accounts",
             "/dashboard/api/v3-contract",
+            "/dashboard/api/v4connections",
+            "/dashboard/api/V4/connections",
+            "/dashboard/api/v4-contract",
         ] {
             assert!(
                 is_retired_legacy_v2_rest_path(path),
@@ -308,6 +322,10 @@ mod tests {
             "/dashboard/api/v3/",
             "/dashboard/api/v3/contract",
             "/dashboard/api/v3/accounts",
+            "/dashboard/api/v4",
+            "/dashboard/api/v4/",
+            "/dashboard/api/v4/contract",
+            "/dashboard/api/v4/connections",
             "/dashboard/api/v3/auth/status",
             "/dashboard/api/v3/browser/sessions/tok/ws",
             "/dashboard/api/v3/settings",

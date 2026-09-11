@@ -1,0 +1,578 @@
+{
+  "$comment": "Extensible Dashboard V4 contract catalog. Add new $defs for later DTOs; do not rename or reshape existing definitions. Connection and template listings are secret-free.",
+  "$defs": {
+    "AccountAuthScheme": {
+      "description": "Custom auth scheme. Wire values match V2 kebab-case.",
+      "enum": [
+        "bearer",
+        "x-api-key"
+      ],
+      "type": "string"
+    },
+    "AccountCredentialKind": {
+      "description": "Wire identity matching V2 `api_key` / `none`.",
+      "enum": [
+        "api_key",
+        "none"
+      ],
+      "type": "string"
+    },
+    "AccountUpstreamProtocol": {
+      "description": "Custom/upstream protocol. Wire values match V2 snake_case.",
+      "enum": [
+        "chat_completions",
+        "responses",
+        "messages"
+      ],
+      "type": "string"
+    },
+    "AuthorizationState": {
+      "description": "Local authorization projection. Unknown is not a verified success.",
+      "enum": [
+        "not_required",
+        "missing",
+        "unknown",
+        "valid",
+        "invalid"
+      ],
+      "type": "string"
+    },
+    "ConnectionEndpoint": {
+      "additionalProperties": false,
+      "properties": {
+        "authScheme": {
+          "$ref": "#/$defs/EndpointAuthScheme"
+        },
+        "connectionId": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "locked": {
+          "type": "boolean"
+        },
+        "operation": {
+          "$ref": "#/$defs/EndpointOperation"
+        },
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "wireProtocol": {
+          "$ref": "#/$defs/AccountUpstreamProtocol"
+        }
+      },
+      "required": [
+        "id",
+        "connectionId",
+        "operation",
+        "wireProtocol",
+        "url",
+        "authScheme",
+        "locked"
+      ],
+      "type": "object"
+    },
+    "ConnectionLifecycle": {
+      "description": "Whether the projected connection is currently intended to be used.",
+      "enum": [
+        "configured",
+        "disabled"
+      ],
+      "type": "string"
+    },
+    "ConnectionList": {
+      "additionalProperties": false,
+      "properties": {
+        "connections": {
+          "items": {
+            "$ref": "#/$defs/ConnectionSummary"
+          },
+          "type": "array"
+        },
+        "revision": {
+          "$ref": "#/$defs/ControlRevision"
+        }
+      },
+      "required": [
+        "revision",
+        "connections"
+      ],
+      "type": "object"
+    },
+    "ConnectionOrigin": {
+      "description": "Provenance of a projected connection.",
+      "enum": [
+        "builtin",
+        "preset",
+        "custom",
+        "custom_account"
+      ],
+      "type": "string"
+    },
+    "ConnectionSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "adapterKind": {
+          "type": "string"
+        },
+        "authorization": {
+          "$ref": "#/$defs/AuthorizationState"
+        },
+        "credentialCount": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "displayFamily": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "eligibility": {
+          "$ref": "#/$defs/Eligibility"
+        },
+        "enabledCredentialCount": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "endpoints": {
+          "items": {
+            "$ref": "#/$defs/ConnectionEndpoint"
+          },
+          "type": "array"
+        },
+        "id": {
+          "type": "string"
+        },
+        "legacy": {
+          "$ref": "#/$defs/LegacyIdentity"
+        },
+        "lifecycle": {
+          "$ref": "#/$defs/ConnectionLifecycle"
+        },
+        "name": {
+          "type": "string"
+        },
+        "offering": {
+          "$ref": "#/$defs/OfferingKind"
+        },
+        "origin": {
+          "$ref": "#/$defs/ConnectionOrigin"
+        },
+        "targetCount": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "targets": {
+          "items": {
+            "$ref": "#/$defs/ConnectionTarget"
+          },
+          "type": "array"
+        },
+        "templateRef": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplateRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "origin",
+        "templateRef",
+        "adapterKind",
+        "lifecycle",
+        "authorization",
+        "eligibility",
+        "credentialCount",
+        "enabledCredentialCount",
+        "targetCount",
+        "endpoints",
+        "targets",
+        "legacy",
+        "displayFamily",
+        "offering"
+      ],
+      "type": "object"
+    },
+    "ConnectionTarget": {
+      "additionalProperties": false,
+      "properties": {
+        "connectionId": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "endpointIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "id": {
+          "type": "string"
+        },
+        "publicName": {
+          "type": "string"
+        },
+        "upstreamModelId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "connectionId",
+        "publicName",
+        "upstreamModelId",
+        "endpointIds",
+        "enabled"
+      ],
+      "type": "object"
+    },
+    "ControlRevision": {
+      "additionalProperties": false,
+      "description": "Live CAS token, process generation, and pricing snapshot id.",
+      "properties": {
+        "pricingRevision": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "revision",
+        "processGeneration",
+        "pricingRevision"
+      ],
+      "type": "object"
+    },
+    "Eligibility": {
+      "additionalProperties": false,
+      "properties": {
+        "reason": {
+          "$ref": "#/$defs/EligibilityReason"
+        },
+        "state": {
+          "$ref": "#/$defs/EligibilityState"
+        }
+      },
+      "required": [
+        "state",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "EligibilityReason": {
+      "description": "Why a connection is eligible or not. `None` is a successful Eligible row.",
+      "enum": [
+        "missing_credential",
+        "all_credentials_disabled",
+        "all_credentials_invalid",
+        "cooling",
+        "no_enabled_target",
+        "connection_disabled",
+        "none"
+      ],
+      "type": "string"
+    },
+    "EligibilityState": {
+      "description": "Local attempt eligibility. Unknown authorization may still be Eligible.",
+      "enum": [
+        "eligible",
+        "ineligible",
+        "cooling"
+      ],
+      "type": "string"
+    },
+    "EndpointAuthScheme": {
+      "description": "Auth advertised on a connection endpoint. `Sealed` is used for built-in\nadapters whose scheme is owned by code, not by the projected row.",
+      "enum": [
+        "bearer",
+        "x-api-key",
+        "sealed",
+        "none"
+      ],
+      "type": "string"
+    },
+    "EndpointOperation": {
+      "description": "Inference operation advertised by one endpoint. Mapped 1:1 from\n[`UpstreamProtocolKind`].",
+      "enum": [
+        "chat_create",
+        "response_create",
+        "message_create"
+      ],
+      "type": "string"
+    },
+    "EndpointSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "locked": {
+          "type": "boolean"
+        },
+        "operation": {
+          "$ref": "#/$defs/EndpointOperation"
+        },
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "wireProtocol": {
+          "$ref": "#/$defs/AccountUpstreamProtocol"
+        }
+      },
+      "required": [
+        "operation",
+        "wireProtocol",
+        "url",
+        "locked"
+      ],
+      "type": "object"
+    },
+    "LegacyConnectionKind": {
+      "description": "Pre-unification row a connection was projected from.",
+      "enum": [
+        "builtin_provider",
+        "dynamic_provider",
+        "custom_account"
+      ],
+      "type": "string"
+    },
+    "LegacyIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/LegacyConnectionKind"
+        }
+      },
+      "required": [
+        "kind",
+        "id"
+      ],
+      "type": "object"
+    },
+    "OfferingKind": {
+      "enum": [
+        "plan",
+        "api"
+      ],
+      "type": "string"
+    },
+    "ProviderTemplate": {
+      "additionalProperties": false,
+      "properties": {
+        "adapterKind": {
+          "type": "string"
+        },
+        "authSchemes": {
+          "items": {
+            "$ref": "#/$defs/AccountAuthScheme"
+          },
+          "type": "array"
+        },
+        "credentialKind": {
+          "$ref": "#/$defs/AccountCredentialKind"
+        },
+        "defaultEndpoints": {
+          "items": {
+            "$ref": "#/$defs/EndpointSpec"
+          },
+          "type": "array"
+        },
+        "displayName": {
+          "type": "string"
+        },
+        "editableFields": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "familyId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "offeringTags": {
+          "items": {
+            "$ref": "#/$defs/OfferingKind"
+          },
+          "type": "array"
+        },
+        "source": {
+          "$ref": "#/$defs/TemplateSource"
+        },
+        "upstreamProtocols": {
+          "items": {
+            "$ref": "#/$defs/AccountUpstreamProtocol"
+          },
+          "type": "array"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "version",
+        "displayName",
+        "familyId",
+        "offeringTags",
+        "adapterKind",
+        "source",
+        "credentialKind",
+        "authSchemes",
+        "upstreamProtocols",
+        "editableFields",
+        "defaultEndpoints"
+      ],
+      "type": "object"
+    },
+    "TemplateList": {
+      "additionalProperties": false,
+      "properties": {
+        "templates": {
+          "items": {
+            "$ref": "#/$defs/ProviderTemplate"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "templates"
+      ],
+      "type": "object"
+    },
+    "TemplateRef": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "version"
+      ],
+      "type": "object"
+    },
+    "TemplateSource": {
+      "enum": [
+        "builtin",
+        "preset"
+      ],
+      "type": "string"
+    },
+    "V3Error": {
+      "additionalProperties": false,
+      "description": "Stable non-2xx JSON envelope for every Dashboard V3 error.",
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "currentRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "currentRevision",
+        "processGeneration"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "anyOf": [
+    {
+      "$ref": "#/$defs/ControlRevision"
+    },
+    {
+      "$ref": "#/$defs/V3Error"
+    },
+    {
+      "$ref": "#/$defs/EndpointSpec"
+    },
+    {
+      "$ref": "#/$defs/ProviderTemplate"
+    },
+    {
+      "$ref": "#/$defs/TemplateList"
+    },
+    {
+      "$ref": "#/$defs/ConnectionEndpoint"
+    },
+    {
+      "$ref": "#/$defs/ConnectionTarget"
+    },
+    {
+      "$ref": "#/$defs/LegacyIdentity"
+    },
+    {
+      "$ref": "#/$defs/Eligibility"
+    },
+    {
+      "$ref": "#/$defs/TemplateRef"
+    },
+    {
+      "$ref": "#/$defs/ConnectionSummary"
+    },
+    {
+      "$ref": "#/$defs/ConnectionList"
+    }
+  ],
+  "title": "DashboardApiV4"
+}

@@ -467,13 +467,13 @@ where
     }
 }
 
-struct V3ApiError {
+pub(crate) struct V3ApiError {
     status: StatusCode,
     body: V3Error,
 }
 
 impl V3ApiError {
-    fn unauthorized() -> Self {
+    pub(crate) fn unauthorized() -> Self {
         Self {
             status: StatusCode::UNAUTHORIZED,
             body: V3Error::unauthorized(),
@@ -651,7 +651,7 @@ impl V3ApiError {
         }
     }
 
-    fn internal(message: impl std::fmt::Display) -> Self {
+    pub(crate) fn internal(message: impl std::fmt::Display) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             body: V3Error::internal(message.to_string()),
@@ -665,7 +665,11 @@ impl IntoResponse for V3ApiError {
     }
 }
 
-async fn require_v3_session(State(state): State<CoreState>, req: Request, next: Next) -> Response {
+pub(crate) async fn require_v3_session(
+    State(state): State<CoreState>,
+    req: Request,
+    next: Next,
+) -> Response {
     let authorized = {
         let current = state.dashboard_session_token.lock();
         dashboard_session::is_authorized(

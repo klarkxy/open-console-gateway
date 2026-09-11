@@ -17,6 +17,8 @@
     "test:tooling": "node --experimental-strip-types --test \"scripts/*.test.mjs\"",
     "contract:v3:generate": "node scripts/dashboard-v3-contract.mjs --write",
     "contract:v3:check": "node scripts/dashboard-v3-contract.mjs --check",
+    "contract:v4:generate": "node scripts/dashboard-v4-contract.mjs --write",
+    "contract:v4:check": "node scripts/dashboard-v4-contract.mjs --check",
     "typecheck": "vue-tsc --noEmit",
     "test": "pnpm run test:web && pnpm run typecheck && pnpm exec vite build && pnpm run test:rust",
     "design:lint": "npx -y @google/design.md@0.3.0 lint DESIGN.md"
