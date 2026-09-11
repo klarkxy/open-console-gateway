@@ -346,7 +346,7 @@ fn reject_builtin_id(state: &CoreState, provider_id: &str) -> Result<(), V3ApiEr
     Ok(())
 }
 
-fn validate_wire_definition(
+pub(crate) fn validate_wire_definition(
     id: String,
     name: String,
     endpoint_url: String,
@@ -379,7 +379,7 @@ fn validate_wire_definition(
     })
 }
 
-fn runtime_from_definition(
+pub(crate) fn runtime_from_definition(
     definition: DynamicProviderDefinition,
     created_at: chrono::DateTime<Utc>,
     updated_at: chrono::DateTime<Utc>,
@@ -403,7 +403,7 @@ fn runtime_from_definition(
     }
 }
 
-fn first_account_key(
+pub(crate) fn first_account_key(
     state: &CoreState,
     auth_kind: DynamicAuthKind,
     key: Option<&str>,

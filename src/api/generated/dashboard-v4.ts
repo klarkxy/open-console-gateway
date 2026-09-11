@@ -16,7 +16,12 @@ export type DashboardApiV4 =
   | Eligibility
   | TemplateRef
   | ConnectionSummary
-  | ConnectionList;
+  | ConnectionList
+  | OnboardingCommitRequest
+  | OnboardingConnection
+  | OnboardingAuthorization
+  | OnboardingTarget
+  | OnboardingCommitResult;
 /**
  * Inference operation advertised by one endpoint. Mapped 1:1 from
  * [`UpstreamProtocolKind`].
@@ -72,6 +77,34 @@ export type ConnectionLifecycle = "configured" | "disabled";
  * Provenance of a projected connection.
  */
 export type ConnectionOrigin = "builtin" | "preset" | "custom" | "custom_account";
+export type OnboardingAuthorization =
+  | {
+      accountLabel?: string | null;
+      kind: "api_key";
+      notes?: string | null;
+      secretInput: string;
+    }
+  | {
+      kind: "none";
+    };
+export type OnboardingConnection =
+  | {
+      authKind: ProviderDefinitionAuthKind;
+      endpointUrl: string;
+      kind: "new";
+      name: string;
+      templateId: string;
+      upstreamProtocol: AccountUpstreamProtocol;
+    }
+  | {
+      connectionId: string;
+      kind: "existing";
+    };
+/**
+ * Auth kind owned by a Provider definition. Independent of protocol.
+ * Nullable on the wire because builtin rows leave the field empty.
+ */
+export type ProviderDefinitionAuthKind = "bearer" | "x-api-key" | "none";
 
 /**
  * Live CAS token, process generation, and pricing snapshot id.
@@ -163,4 +196,35 @@ export interface ConnectionSummary {
 export interface ConnectionList {
   connections: ConnectionSummary[];
   revision: ControlRevision;
+}
+/**
+ * Required process-scoped mutation precondition.
+ *
+ * Both fields travel at the top level of every mutation request. The random
+ * process generation prevents a revision captured before restart from being
+ * accepted by a fresh process whose in-memory counter reused the same value.
+ */
+export interface OnboardingCommitRequest {
+  authorization?: OnboardingAuthorization | null;
+  connection: OnboardingConnection;
+  expectedRevision: number;
+  operationId: string;
+  processGeneration: number;
+  targets: OnboardingTarget[];
+}
+export interface OnboardingTarget {
+  publicModel: string;
+  upstreamModel: string;
+  upstreamOverride?: OnboardingUpstreamOverride | null;
+}
+export interface OnboardingUpstreamOverride {
+  endpointUrl: string;
+  protocol: AccountUpstreamProtocol;
+}
+export interface OnboardingCommitResult {
+  connectionId: string;
+  credentialId: string | null;
+  replayed: boolean;
+  revision: ControlRevision;
+  targetIds: string[];
 }

@@ -1,4 +1,5 @@
 use super::*;
+use crate::dashboard_v3::{MutationExpectation, ProviderDefinitionAuthKind};
 use serde_json::json;
 
 #[test]
@@ -92,4 +93,66 @@ fn schema_catalog_names_v4_types_and_shared_error() {
             "{field} must stay required so responses emit T|null"
         );
     }
+}
+
+#[test]
+fn onboarding_commit_request_is_camel_case_and_includes_secret_in_canonical_json() {
+    let request = OnboardingCommitRequest {
+        expectation: MutationExpectation {
+            expected_revision: 3,
+            process_generation: 9,
+        },
+        operation_id: "11111111-1111-1111-1111-111111111111".into(),
+        connection: OnboardingConnection::New(OnboardingConnectionNew {
+            template_id: "custom-http".into(),
+            name: "Lab".into(),
+            endpoint_url: "https://lab.example/v1/chat/completions".into(),
+            upstream_protocol: AccountUpstreamProtocol::ChatCompletions,
+            auth_kind: ProviderDefinitionAuthKind::Bearer,
+        }),
+        authorization: Some(OnboardingAuthorization::ApiKey(
+            OnboardingAuthorizationApiKey {
+                secret_input: "sk-canonical".into(),
+                account_label: Some("Primary".into()),
+                notes: None,
+            },
+        )),
+        targets: vec![OnboardingTarget {
+            public_model: "lab-opus".into(),
+            upstream_model: "vendor/opus".into(),
+            upstream_override: None,
+        }],
+    };
+    let value = serde_json::to_value(&request).unwrap();
+    assert_eq!(value["expectedRevision"], 3);
+    assert_eq!(value["processGeneration"], 9);
+    assert_eq!(value["operationId"], "11111111-1111-1111-1111-111111111111");
+    assert_eq!(value["connection"]["kind"], "new");
+    assert_eq!(value["connection"]["templateId"], "custom-http");
+    assert_eq!(
+        value["connection"]["endpointUrl"],
+        "https://lab.example/v1/chat/completions"
+    );
+    assert_eq!(value["authorization"]["kind"], "api_key");
+    assert_eq!(value["authorization"]["secretInput"], "sk-canonical");
+    assert_eq!(value["authorization"]["accountLabel"], "Primary");
+    assert_eq!(value["authorization"]["notes"], Value::Null);
+    assert_eq!(value["targets"][0]["publicModel"], "lab-opus");
+    assert_eq!(value["targets"][0]["upstreamOverride"], Value::Null);
+    let result = OnboardingCommitResult {
+        revision: ControlRevision {
+            revision: 4,
+            process_generation: 9,
+            pricing_revision: "p".into(),
+        },
+        connection_id: "conn".into(),
+        credential_id: None,
+        target_ids: vec![],
+        replayed: false,
+    };
+    let result_value = serde_json::to_value(&result).unwrap();
+    assert_eq!(result_value["connectionId"], "conn");
+    assert_eq!(result_value["credentialId"], Value::Null);
+    assert_eq!(result_value["targetIds"], json!([]));
+    assert_eq!(result_value["replayed"], false);
 }

@@ -1,4 +1,4 @@
-//! Dashboard V4 read-only connection projection.
+//! Dashboard V4 connection projection and onboarding commit.
 
 use ocg_core::provider::{
     COMMAND_CODE_PROVIDER_ID, CPA_PROVIDER_ID, CUSTOM_PROVIDER_ID, KIMI_PROVIDER_ID,
@@ -454,6 +454,529 @@ async fn v4_contract_returns_live_revision() {
     assert_eq!(
         contract["pricingRevision"],
         harness.state.pricing_snapshot().revision
+    );
+    harness.stop();
+}
+
+fn commit_new_body(
+    name: &str,
+    endpoint: &str,
+    auth_kind: &str,
+    authorization: Option<Value>,
+    targets: Value,
+) -> Value {
+    let mut body = json!({
+        "connection": {
+            "kind": "new",
+            "templateId": "custom-http",
+            "name": name,
+            "endpointUrl": endpoint,
+            "upstreamProtocol": "chat_completions",
+            "authKind": auth_kind
+        },
+        "targets": targets
+    });
+    if let Some(authorization) = authorization {
+        body["authorization"] = authorization;
+    }
+    body
+}
+
+fn default_targets() -> Value {
+    json!([{
+        "publicModel": "lab-opus",
+        "upstreamModel": "vendor/opus"
+    }])
+}
+
+fn api_key_auth(secret: &str, label: Option<&str>) -> Value {
+    let mut auth = json!({
+        "kind": "api_key",
+        "secretInput": secret
+    });
+    if let Some(label) = label {
+        auth["accountLabel"] = json!(label);
+    }
+    auth
+}
+
+fn operation_id(tag: u16) -> String {
+    format!("aaaaaaaa-bbbb-4ccc-8ddd-{tag:012x}")
+}
+
+fn commit_cas(harness: &V3Harness, operation_id: &str, patch: Value) -> Value {
+    let mut body = cas(harness, patch);
+    body["operationId"] = json!(operation_id);
+    body
+}
+
+fn dynamic_provider_count(harness: &V3Harness) -> usize {
+    harness.state.dynamic_providers().len()
+}
+
+fn account_count_for(harness: &V3Harness, provider_id: &str) -> i64 {
+    harness
+        .state
+        .db
+        .lock()
+        .count_accounts_for_provider(provider_id)
+        .unwrap()
+}
+
+fn operation_exists(harness: &V3Harness, operation_id: &str) -> bool {
+    harness
+        .state
+        .db
+        .lock()
+        .find_dashboard_operation(operation_id)
+        .unwrap()
+        .is_some()
+}
+
+#[tokio::test]
+async fn commit_new_keyed_connection_with_api_key_creates_provider_and_first_account_atomically() {
+    let harness = start_loopback("v4-commit-new").await;
+    let operation_id = operation_id(1);
+    let secret = "sk-onboard-primary";
+    let body = commit_cas(
+        &harness,
+        &operation_id,
+        commit_new_body(
+            "Onboard Lab",
+            "https://onboard.example/v1/chat/completions",
+            "bearer",
+            Some(api_key_auth(secret, Some("Primary"))),
+            default_targets(),
+        ),
+    );
+    let before = harness.state.settings_revision();
+    let (status, result) = send_v4(&harness, Method::POST, "/onboarding/commit", &body).await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_secret_free(&result, &[secret]);
+    assert_eq!(result["replayed"], false);
+    assert_eq!(result["revision"]["revision"], before + 1);
+    assert!(result["credentialId"].as_str().is_some(), "{result}");
+    assert_eq!(dynamic_provider_count(&harness), 1);
+    let provider_id = harness.state.dynamic_providers()[0].id.clone();
+    assert_eq!(account_count_for(&harness, &provider_id), 1);
+    assert_eq!(
+        result["connectionId"],
+        connection_id_for_legacy(LegacyConnectionKind::DynamicProvider, &provider_id).as_str()
+    );
+    assert_eq!(result["targetIds"].as_array().map(Vec::len), Some(1));
+    harness.stop();
+}
+
+#[tokio::test]
+async fn commit_replay_with_same_operation_id_returns_stored_result_and_creates_nothing() {
+    let harness = start_loopback("v4-commit-replay").await;
+    let operation_id = operation_id(2);
+    let secret = "sk-onboard-replay";
+    let body = commit_cas(
+        &harness,
+        &operation_id,
+        commit_new_body(
+            "Replay Lab",
+            "https://replay.example/v1/chat/completions",
+            "bearer",
+            Some(api_key_auth(secret, None)),
+            default_targets(),
+        ),
+    );
+    let before = harness.state.settings_revision();
+    let (status, first) = send_v4(&harness, Method::POST, "/onboarding/commit", &body).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    let after_first = harness.state.settings_revision();
+    assert_eq!(after_first, before + 1);
+    let (status, second) = send_v4(&harness, Method::POST, "/onboarding/commit", &body).await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    assert_eq!(second["replayed"], true);
+    assert_eq!(second["connectionId"], first["connectionId"]);
+    assert_eq!(second["credentialId"], first["credentialId"]);
+    assert_eq!(second["targetIds"], first["targetIds"]);
+    assert_eq!(second["revision"]["revision"], after_first);
+    assert_eq!(harness.state.settings_revision(), after_first);
+    assert_eq!(dynamic_provider_count(&harness), 1);
+    let provider_id = harness.state.dynamic_providers()[0].id.clone();
+    assert_eq!(account_count_for(&harness, &provider_id), 1);
+    harness.stop();
+}
+
+#[tokio::test]
+async fn commit_replay_with_refreshed_cas_tokens_still_replays_and_creates_nothing() {
+    let harness = start_loopback("v4-commit-replay-cas").await;
+    let operation_id = operation_id(14);
+    let secret = "sk-onboard-replay-cas";
+    let first_body = commit_cas(
+        &harness,
+        &operation_id,
+        commit_new_body(
+            "Replay CAS Lab",
+            "https://replay-cas.example/v1/chat/completions",
+            "bearer",
+            Some(api_key_auth(secret, None)),
+            default_targets(),
+        ),
+    );
+    let (status, first) = send_v4(&harness, Method::POST, "/onboarding/commit", &first_body).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    let after_first = harness.state.settings_revision();
+    let (status, contract) = send_v4(&harness, Method::GET, "/contract", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{contract}");
+    assert_eq!(contract["revision"], after_first);
+
+    let mut retry = first_body;
+    retry["expectedRevision"] = contract["revision"].clone();
+    retry["processGeneration"] = contract["processGeneration"].clone();
+    let (status, second) = send_v4(&harness, Method::POST, "/onboarding/commit", &retry).await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    assert_eq!(second["replayed"], true);
+    assert_eq!(second["connectionId"], first["connectionId"]);
+    assert_eq!(second["credentialId"], first["credentialId"]);
+    assert_eq!(second["revision"]["revision"], after_first);
+    assert_eq!(harness.state.settings_revision(), after_first);
+    assert_eq!(dynamic_provider_count(&harness), 1);
+    let provider_id = harness.state.dynamic_providers()[0].id.clone();
+    assert_eq!(account_count_for(&harness, &provider_id), 1);
+    harness.stop();
+}
+
+#[tokio::test]
+async fn commit_same_operation_id_with_different_payload_is_rejected() {
+    let harness = start_loopback("v4-commit-mismatch").await;
+    let operation_id = operation_id(3);
+    let secret = "sk-onboard-mismatch";
+    let original = commit_cas(
+        &harness,
+        &operation_id,
+        commit_new_body(
+            "Mismatch Lab",
+            "https://mismatch.example/v1/chat/completions",
+            "bearer",
+            Some(api_key_auth(secret, None)),
+            default_targets(),
+        ),
+    );
+    let (status, first) = send_v4(&harness, Method::POST, "/onboarding/commit", &original).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    let provider_id = harness.state.dynamic_providers()[0].id.clone();
+
+    let mut different_name = original.clone();
+    different_name["connection"]["name"] = json!("Other Lab");
+    let (status, name_error) = send_v4(
+        &harness,
+        Method::POST,
+        "/onboarding/commit",
+        &different_name,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{name_error}");
+    assert_eq!(name_error["code"], "operationPayloadMismatch");
+    assert!(name_error.get("connectionId").is_none(), "{name_error}");
+    assert_ne!(name_error.get("replayed"), Some(&json!(true)));
+    assert_secret_free(&name_error, &[secret]);
+
+    let mut different_secret = original.clone();
+    different_secret["authorization"]["secretInput"] = json!("sk-other-secret");
+    let (status, secret_error) = send_v4(
+        &harness,
+        Method::POST,
+        "/onboarding/commit",
+        &different_secret,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{secret_error}");
+    assert_eq!(secret_error["code"], "operationPayloadMismatch");
+    assert!(secret_error.get("connectionId").is_none(), "{secret_error}");
+    assert_secret_free(&secret_error, &[secret, "sk-other-secret"]);
+
+    assert_eq!(dynamic_provider_count(&harness), 1);
+    assert_eq!(account_count_for(&harness, &provider_id), 1);
+    harness.stop();
+}
+
+#[tokio::test]
+async fn commit_without_authorization_on_keyed_template_saves_definition_only() {
+    let harness = start_loopback("v4-commit-definition").await;
+    let operation_id = operation_id(4);
+    let body = commit_cas(
+        &harness,
+        &operation_id,
+        commit_new_body(
+            "Definition Lab",
+            "https://definition.example/v1/chat/completions",
+            "bearer",
+            None,
+            default_targets(),
+        ),
+    );
+    let (status, result) = send_v4(&harness, Method::POST, "/onboarding/commit", &body).await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_eq!(result["credentialId"], Value::Null);
+    let provider_id = harness.state.dynamic_providers()[0].id.clone();
+    assert_eq!(account_count_for(&harness, &provider_id), 0);
+    let (status, connections) = send_v4(&harness, Method::GET, "/connections", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{connections}");
+    let connection = find_legacy(&connections, "dynamic_provider", &provider_id);
+    assert_eq!(connection["authorization"], "missing");
+    harness.stop();
+}
+
+#[tokio::test]
+async fn commit_none_auth_template_creates_singleton_and_rejects_api_key() {
+    let harness = start_loopback("v4-commit-none").await;
+    let rejected = commit_cas(
+        &harness,
+        &operation_id(5),
+        commit_new_body(
+            "None Lab",
+            "https://none.example/v1/chat/completions",
+            "none",
+            Some(api_key_auth("sk-should-reject", None)),
+            default_targets(),
+        ),
+    );
+    let (status, error) = send_v4(&harness, Method::POST, "/onboarding/commit", &rejected).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert_eq!(error["code"], "invalidRequest");
+    assert_eq!(dynamic_provider_count(&harness), 0);
+
+    let accepted = commit_cas(
+        &harness,
+        &operation_id(6),
+        commit_new_body(
+            "None Lab",
+            "https://none.example/v1/chat/completions",
+            "none",
+            Some(json!({ "kind": "none" })),
+            default_targets(),
+        ),
+    );
+    let (status, result) = send_v4(&harness, Method::POST, "/onboarding/commit", &accepted).await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert!(result["credentialId"].as_str().is_some(), "{result}");
+    let provider_id = harness.state.dynamic_providers()[0].id.clone();
+    assert_eq!(account_count_for(&harness, &provider_id), 1);
+    harness.stop();
+}
+
+#[tokio::test]
+async fn commit_existing_dynamic_connection_adds_second_key() {
+    let harness = start_loopback("v4-commit-existing").await;
+    let first = commit_cas(
+        &harness,
+        &operation_id(7),
+        commit_new_body(
+            "Two Key Lab",
+            "https://twokey.example/v1/chat/completions",
+            "bearer",
+            Some(api_key_auth("sk-first-key", Some("First"))),
+            default_targets(),
+        ),
+    );
+    let (status, created) = send_v4(&harness, Method::POST, "/onboarding/commit", &first).await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let connection_id = created["connectionId"].as_str().unwrap().to_string();
+    let provider_id = harness.state.dynamic_providers()[0].id.clone();
+
+    let second = commit_cas(
+        &harness,
+        &operation_id(8),
+        json!({
+            "connection": {
+                "kind": "existing",
+                "connectionId": connection_id
+            },
+            "authorization": api_key_auth("sk-second-key", Some("Second")),
+            "targets": []
+        }),
+    );
+    let (status, added) = send_v4(&harness, Method::POST, "/onboarding/commit", &second).await;
+    assert_eq!(status, StatusCode::OK, "{added}");
+    assert_eq!(added["connectionId"], connection_id);
+    assert_eq!(added["targetIds"], json!([]));
+    assert_ne!(added["credentialId"], created["credentialId"]);
+    assert_eq!(account_count_for(&harness, &provider_id), 2);
+    let (status, connections) = send_v4(&harness, Method::GET, "/connections", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{connections}");
+    let connection = find_legacy(&connections, "dynamic_provider", &provider_id);
+    assert_eq!(connection["credentialCount"], 2);
+    harness.stop();
+}
+
+#[tokio::test]
+async fn commit_existing_builtin_or_custom_connection_is_rejected() {
+    let harness = start_loopback("v4-commit-reject-legacy").await;
+    let builtin_id =
+        connection_id_for_legacy(LegacyConnectionKind::BuiltinProvider, OPENCODE_PROVIDER_ID);
+    let builtin = commit_cas(
+        &harness,
+        &operation_id(9),
+        json!({
+            "connection": {
+                "kind": "existing",
+                "connectionId": builtin_id.as_str()
+            },
+            "authorization": api_key_auth("sk-builtin", None),
+            "targets": []
+        }),
+    );
+    let (status, error) = send_v4(&harness, Method::POST, "/onboarding/commit", &builtin).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert_eq!(error["code"], "invalidRequest");
+    assert!(
+        error["message"]
+            .as_str()
+            .unwrap()
+            .contains("builtin and Custom API connections add Keys on Accounts"),
+        "{error}"
+    );
+
+    let (status, created) = send_v3(
+        &harness,
+        Method::POST,
+        "/accounts",
+        &cas(
+            &harness,
+            json!({
+                "providerId": CUSTOM_PROVIDER_ID,
+                "name": "Custom Reject",
+                "key": "sk-custom-reject",
+                "customConfig": {
+                    "endpointUrl": "https://custom-reject.example/v1/chat/completions",
+                    "upstreamProtocol": "chat_completions"
+                },
+                "modelCapabilities": [{
+                    "publicModel": "custom-model",
+                    "upstreamModel": "upstream-model",
+                    "protocol": "chat_completions"
+                }]
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let (status, connections) = send_v4(&harness, Method::GET, "/connections", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{connections}");
+    let custom = connections_of(&connections)
+        .iter()
+        .find(|connection| connection["legacy"]["kind"] == "custom_account")
+        .expect("custom connection");
+    let custom_commit = commit_cas(
+        &harness,
+        &operation_id(10),
+        json!({
+            "connection": {
+                "kind": "existing",
+                "connectionId": custom["id"]
+            },
+            "authorization": api_key_auth("sk-custom-second", None),
+            "targets": []
+        }),
+    );
+    let (status, error) =
+        send_v4(&harness, Method::POST, "/onboarding/commit", &custom_commit).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert_eq!(error["code"], "invalidRequest");
+    harness.stop();
+}
+
+#[tokio::test]
+async fn commit_cas_conflict_writes_nothing() {
+    let harness = start_loopback("v4-commit-cas").await;
+    let operation_id = operation_id(11);
+    let mut body = commit_cas(
+        &harness,
+        &operation_id,
+        commit_new_body(
+            "CAS Lab",
+            "https://cas.example/v1/chat/completions",
+            "bearer",
+            Some(api_key_auth("sk-cas", None)),
+            default_targets(),
+        ),
+    );
+    body["expectedRevision"] = json!(harness.state.settings_revision() + 99);
+    let (status, error) = send_v4(&harness, Method::POST, "/onboarding/commit", &body).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{error}");
+    assert_eq!(error["code"], "revisionConflict");
+    assert_eq!(dynamic_provider_count(&harness), 0);
+    assert!(!operation_exists(&harness, &operation_id));
+
+    let retry = commit_cas(
+        &harness,
+        &operation_id,
+        commit_new_body(
+            "CAS Lab",
+            "https://cas.example/v1/chat/completions",
+            "bearer",
+            Some(api_key_auth("sk-cas", None)),
+            default_targets(),
+        ),
+    );
+    let (status, result) = send_v4(&harness, Method::POST, "/onboarding/commit", &retry).await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_eq!(result["replayed"], false);
+    assert_eq!(dynamic_provider_count(&harness), 1);
+    harness.stop();
+}
+
+#[tokio::test]
+async fn commit_responses_and_operation_rows_are_secret_free() {
+    let harness = start_loopback("v4-commit-secret-free").await;
+    let secret = "sk-onboard-never-echo";
+    let operation_id = operation_id(12);
+    let body = commit_cas(
+        &harness,
+        &operation_id,
+        commit_new_body(
+            "Secret Free Lab",
+            "https://secret-free.example/v1/chat/completions",
+            "bearer",
+            Some(api_key_auth(secret, None)),
+            default_targets(),
+        ),
+    );
+    let (status, result) = send_v4(&harness, Method::POST, "/onboarding/commit", &body).await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_secret_free(&result, &[secret]);
+    let row = harness
+        .state
+        .db
+        .lock()
+        .find_dashboard_operation(&operation_id)
+        .unwrap()
+        .expect("operation row");
+    for haystack in [&row.result_json, &row.payload_digest] {
+        assert!(!haystack.contains(secret), "secret leaked in {haystack}");
+        assert!(
+            !haystack.contains("secretInput"),
+            "request field leaked in {haystack}"
+        );
+    }
+    harness.stop();
+}
+
+#[tokio::test]
+async fn commit_makes_zero_outbound_requests() {
+    let (upstream, calls, _stop) = start_fake_upstream(HashMap::new()).await;
+    let harness = start_loopback("v4-commit-no-outbound").await;
+    let body = commit_cas(
+        &harness,
+        &operation_id(13),
+        commit_new_body(
+            "Quiet Commit",
+            &format!("{upstream}/v1/chat/completions"),
+            "bearer",
+            Some(api_key_auth("sk-quiet-commit", None)),
+            default_targets(),
+        ),
+    );
+    let (status, result) = send_v4(&harness, Method::POST, "/onboarding/commit", &body).await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert!(
+        calls.lock().expect("fake call log").is_empty(),
+        "onboarding commit must not issue outbound requests"
     );
     harness.stop();
 }

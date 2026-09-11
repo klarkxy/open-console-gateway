@@ -235,6 +235,7 @@ pub const ERROR_GONE: &str = "gone";
 pub const ERROR_GATEWAY_TIMEOUT: &str = "gatewayTimeout";
 pub const ERROR_THROTTLED: &str = "throttled";
 pub const ERROR_BUILTIN_PROVIDER_IMMUTABLE: &str = "builtinProviderImmutable";
+pub const ERROR_OPERATION_PAYLOAD_MISMATCH: &str = "operationPayloadMismatch";
 
 /// Live CAS token, process generation, and pricing snapshot id.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -410,6 +411,19 @@ impl V3Error {
     ) -> Self {
         Self {
             code: ERROR_BUILTIN_PROVIDER_IMMUTABLE.to_string(),
+            message: message.into(),
+            current_revision: Some(current_revision),
+            process_generation: Some(process_generation),
+        }
+    }
+
+    pub fn operation_payload_mismatch(
+        message: impl Into<String>,
+        current_revision: u64,
+        process_generation: u64,
+    ) -> Self {
+        Self {
+            code: ERROR_OPERATION_PAYLOAD_MISMATCH.to_string(),
             message: message.into(),
             current_revision: Some(current_revision),
             process_generation: Some(process_generation),

@@ -1,8 +1,8 @@
 //! Shared Dashboard V4 wire types and the JSON Schema catalog.
 //!
-//! V4 is a parallel read-only projection. Response objects serialize nullable
-//! fields as `T | null`. Listings are secret-free. The error envelope reuses
-//! the V3 DTO so clients can share one decoder.
+//! V4 is a parallel additive control plane. Response objects serialize nullable
+//! fields as `T | null`. Listings and onboarding results are secret-free. The
+//! error envelope reuses the V3 DTO so clients can share one decoder.
 
 use schemars::JsonSchema;
 use schemars::generate::{SchemaGenerator, SchemaSettings};
@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use crate::dashboard_v3::{
-    AccountAuthScheme, AccountCredentialKind, AccountUpstreamProtocol, ControlRevision, V3Error,
+    AccountAuthScheme, AccountCredentialKind, AccountUpstreamProtocol, ControlRevision,
+    MutationExpectation, ProviderDefinitionAuthKind, V3Error,
 };
 use ocg_domain::connection::{
     AuthorizationState, ConnectionLifecycle, ConnectionOrigin, EligibilityReason, EligibilityState,
@@ -31,6 +32,11 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "TemplateRef",
     "ConnectionSummary",
     "ConnectionList",
+    "OnboardingCommitRequest",
+    "OnboardingConnection",
+    "OnboardingAuthorization",
+    "OnboardingTarget",
+    "OnboardingCommitResult",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -163,10 +169,106 @@ pub struct ConnectionList {
     pub connections: Vec<ConnectionSummary>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OnboardingCommitRequest {
+    #[serde(flatten)]
+    pub expectation: MutationExpectation,
+    pub operation_id: String,
+    pub connection: OnboardingConnection,
+    #[serde(default)]
+    pub authorization: Option<OnboardingAuthorization>,
+    pub targets: Vec<OnboardingTarget>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum OnboardingConnection {
+    New(OnboardingConnectionNew),
+    Existing(OnboardingConnectionExisting),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OnboardingConnectionNew {
+    pub template_id: String,
+    pub name: String,
+    pub endpoint_url: String,
+    pub upstream_protocol: AccountUpstreamProtocol,
+    pub auth_kind: ProviderDefinitionAuthKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OnboardingConnectionExisting {
+    pub connection_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum OnboardingAuthorization {
+    ApiKey(OnboardingAuthorizationApiKey),
+    None {},
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OnboardingAuthorizationApiKey {
+    pub secret_input: String,
+    #[serde(default)]
+    pub account_label: Option<String>,
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OnboardingTarget {
+    pub public_model: String,
+    pub upstream_model: String,
+    #[serde(default)]
+    pub upstream_override: Option<OnboardingUpstreamOverride>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OnboardingUpstreamOverride {
+    pub protocol: AccountUpstreamProtocol,
+    pub endpoint_url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OnboardingCommitResult {
+    pub revision: ControlRevision,
+    pub connection_id: String,
+    pub credential_id: Option<String>,
+    pub target_ids: Vec<String>,
+    pub replayed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct StoredOnboardingCommitResult {
+    pub connection_id: String,
+    pub credential_id: Option<String>,
+    pub target_ids: Vec<String>,
+}
+
 /// Deterministic JSON Schema catalog for the V4 contract.
 ///
 /// Generator settings match V3: draft 2020-12, serialize-mode for response
-/// DTOs so `Option` fields stay required `T | null`.
+/// DTOs so `Option` fields stay required `T | null`. Request DTOs use the
+/// deserialize contract so optional fields may be omitted.
 pub fn contract_schema() -> Value {
     let mut serialize = SchemaSettings::draft2020_12()
         .for_serialize()
@@ -183,7 +285,17 @@ pub fn contract_schema() -> Value {
     include_type::<TemplateRef>(&mut serialize);
     include_type::<ConnectionSummary>(&mut serialize);
     include_type::<ConnectionList>(&mut serialize);
-    let defs = serialize.take_definitions(true);
+    include_type::<OnboardingCommitResult>(&mut serialize);
+    let mut defs = serialize.take_definitions(true);
+
+    let mut deserialize = SchemaSettings::draft2020_12().into_generator();
+    include_type::<OnboardingCommitRequest>(&mut deserialize);
+    include_type::<OnboardingConnection>(&mut deserialize);
+    include_type::<OnboardingAuthorization>(&mut deserialize);
+    include_type::<OnboardingTarget>(&mut deserialize);
+    for (name, schema) in deserialize.take_definitions(true) {
+        defs.entry(name).or_insert(schema);
+    }
 
     for name in CATALOG_TYPE_NAMES {
         if !defs.contains_key(*name) {
@@ -194,7 +306,7 @@ pub fn contract_schema() -> Value {
     json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "DashboardApiV4",
-        "$comment": "Extensible Dashboard V4 contract catalog. Add new $defs for later DTOs; do not rename or reshape existing definitions. Connection and template listings are secret-free.",
+        "$comment": "Extensible Dashboard V4 contract catalog. Add new $defs for later DTOs; do not rename or reshape existing definitions. Connection and template listings are secret-free. OnboardingCommitRequest.secretInput is write-only.",
         "anyOf": catalog_refs(&defs),
         "$defs": defs })
 }

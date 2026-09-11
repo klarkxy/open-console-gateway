@@ -29,7 +29,7 @@ mod claude_desktop;
 mod connection;
 mod cpa;
 mod custom_discovery;
-mod dynamic_providers;
+pub(crate) mod dynamic_providers;
 mod keys;
 mod managed_key_verify;
 mod observability;
@@ -88,28 +88,29 @@ pub use types::{
     DashboardSummary, DesktopUpdate, DesktopUpdatePhase, ERROR_BUILTIN_PROVIDER_IMMUTABLE,
     ERROR_CONFLICT, ERROR_FORBIDDEN, ERROR_GATEWAY_TIMEOUT, ERROR_GONE, ERROR_INTERNAL,
     ERROR_INVALID_JSON, ERROR_INVALID_REQUEST, ERROR_MISSING_EXPECTED_REVISION, ERROR_NOT_FOUND,
-    ERROR_NOT_IMPLEMENTED, ERROR_OUTBOUND_FAILED, ERROR_PRECONDITION_FAILED,
-    ERROR_REVISION_CONFLICT, ERROR_SERVICE_UNAVAILABLE, ERROR_THROTTLED, ERROR_UNAUTHORIZED,
-    EffectiveCatalog, EffectiveModelContract, EffectiveModelProtocols, EffectiveProtocolEvidence,
-    ForwardLog, ForwardLogClientKey, ForwardLogKeys, ForwardLogModels, ForwardLogQuery,
-    ForwardLogSummary, ForwardLogs, GatewayLog, GatewayLogQuery, GatewayLogs, GatewayStatus,
-    InstallUpdate, KeyCreate, KeyUpdate, ModelProtocolOverride, ModelProtocolOverridesUpdate,
-    MutationAck, MutationExpectation, OllamaBillingTier, PricingAdjustment, PricingAvailability,
-    PricingLimits, PricingModel, PricingMultiplierChange, PricingMultiplierWrite,
-    PricingMultipliersUpdate, PricingRefresh, PricingRefreshPolicy, PricingRefreshStatus,
-    PricingRefreshUpdate, PricingRevision, PricingSnapshot, PricingTimeWindow,
-    ProtocolOverrideState, ProtocolProbeRequest, ProtocolProbeResponse, ProtocolProbeResult,
-    ProviderAccountChoice, ProviderCatalog, ProviderCatalogEntry, ProviderCatalogFormField,
-    ProviderCatalogRiskNotice, ProviderContractGroup, ProviderContracts, ProviderDefinition,
-    ProviderDefinitionAuthKind, ProviderDefinitionCreate, ProviderDefinitionDiscoverRequest,
-    ProviderDefinitionDiscoverResponse, ProviderDefinitionModel, ProviderDefinitionMutation,
-    ProviderDefinitionTestRequest, ProviderDefinitionTestResponse, ProviderDefinitionUpdate,
-    ProviderModelCapability, ProviderPricing, ProviderPricingRefresh, ProviderPricingRefreshUpdate,
-    ProviderUsage, ProxyListDirection, ProxyMode, ProxySupportedModel, ProxyTestRequest,
-    ProxyTestResponse, QuotaWindow, RoutingMode, Settings, SettingsUpdate, UpdateCheck,
-    UsageAvailability, UsageMutation, UsageRefresh, UsageRefreshThrottleError, UsageRefreshUpdate,
-    UsageSyncState, UsageWindow, V3Error, ZenFreeModel, ZenFreeModels, ZenFreeSettings,
-    ZenFreeSettingsUpdate, contract_schema, contract_schema_pretty,
+    ERROR_NOT_IMPLEMENTED, ERROR_OPERATION_PAYLOAD_MISMATCH, ERROR_OUTBOUND_FAILED,
+    ERROR_PRECONDITION_FAILED, ERROR_REVISION_CONFLICT, ERROR_SERVICE_UNAVAILABLE, ERROR_THROTTLED,
+    ERROR_UNAUTHORIZED, EffectiveCatalog, EffectiveModelContract, EffectiveModelProtocols,
+    EffectiveProtocolEvidence, ForwardLog, ForwardLogClientKey, ForwardLogKeys, ForwardLogModels,
+    ForwardLogQuery, ForwardLogSummary, ForwardLogs, GatewayLog, GatewayLogQuery, GatewayLogs,
+    GatewayStatus, InstallUpdate, KeyCreate, KeyUpdate, ModelProtocolOverride,
+    ModelProtocolOverridesUpdate, MutationAck, MutationExpectation, OllamaBillingTier,
+    PricingAdjustment, PricingAvailability, PricingLimits, PricingModel, PricingMultiplierChange,
+    PricingMultiplierWrite, PricingMultipliersUpdate, PricingRefresh, PricingRefreshPolicy,
+    PricingRefreshStatus, PricingRefreshUpdate, PricingRevision, PricingSnapshot,
+    PricingTimeWindow, ProtocolOverrideState, ProtocolProbeRequest, ProtocolProbeResponse,
+    ProtocolProbeResult, ProviderAccountChoice, ProviderCatalog, ProviderCatalogEntry,
+    ProviderCatalogFormField, ProviderCatalogRiskNotice, ProviderContractGroup, ProviderContracts,
+    ProviderDefinition, ProviderDefinitionAuthKind, ProviderDefinitionCreate,
+    ProviderDefinitionDiscoverRequest, ProviderDefinitionDiscoverResponse, ProviderDefinitionModel,
+    ProviderDefinitionMutation, ProviderDefinitionTestRequest, ProviderDefinitionTestResponse,
+    ProviderDefinitionUpdate, ProviderModelCapability, ProviderModelUpstreamOverride,
+    ProviderPricing, ProviderPricingRefresh, ProviderPricingRefreshUpdate, ProviderUsage,
+    ProxyListDirection, ProxyMode, ProxySupportedModel, ProxyTestRequest, ProxyTestResponse,
+    QuotaWindow, RoutingMode, Settings, SettingsUpdate, UpdateCheck, UsageAvailability,
+    UsageMutation, UsageRefresh, UsageRefreshThrottleError, UsageRefreshUpdate, UsageSyncState,
+    UsageWindow, V3Error, ZenFreeModel, ZenFreeModels, ZenFreeSettings, ZenFreeSettingsUpdate,
+    contract_schema, contract_schema_pretty,
 };
 pub use updater::{GITHUB_LATEST_RELEASE_API, GITHUB_LATEST_RELEASE_URL};
 
@@ -506,14 +507,14 @@ impl V3ApiError {
         }
     }
 
-    fn revision_conflict(state: &CoreState) -> Self {
+    pub(crate) fn revision_conflict(state: &CoreState) -> Self {
         Self {
             status: StatusCode::CONFLICT,
             body: V3Error::revision_conflict(state.settings_revision(), state.process_generation()),
         }
     }
 
-    fn invalid_request_at(state: &CoreState, message: impl Into<String>) -> Self {
+    pub(crate) fn invalid_request_at(state: &CoreState, message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
             body: V3Error::invalid_request_at(
@@ -539,7 +540,7 @@ impl V3ApiError {
         Self::not_found_at(state, "account not found")
     }
 
-    fn not_found_at(state: &CoreState, message: impl Into<String>) -> Self {
+    pub(crate) fn not_found_at(state: &CoreState, message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
             body: V3Error::not_found(
@@ -574,10 +575,24 @@ impl V3ApiError {
         }
     }
 
-    fn conflict_at(state: &CoreState, message: impl Into<String>) -> Self {
+    pub(crate) fn conflict_at(state: &CoreState, message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::CONFLICT,
             body: V3Error::conflict(
+                message,
+                state.settings_revision(),
+                state.process_generation(),
+            ),
+        }
+    }
+
+    pub(crate) fn operation_payload_mismatch(
+        state: &CoreState,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            body: V3Error::operation_payload_mismatch(
                 message,
                 state.settings_revision(),
                 state.process_generation(),
@@ -691,7 +706,7 @@ async fn get_contract(State(state): State<CoreState>) -> Json<ControlRevision> {
 
 /// Shared mutation-body parser: missing `expectedRevision` is a dedicated
 /// 400; anything else that is not valid JSON for `T` is `invalidJson`.
-fn parse_mutation_json<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, V3ApiError> {
+pub(crate) fn parse_mutation_json<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, V3ApiError> {
     let value: Value = serde_json::from_slice(bytes).map_err(|_| V3ApiError::invalid_json())?;
     let Some(object) = value.as_object() else {
         return Err(V3ApiError::invalid_json());
@@ -713,7 +728,7 @@ fn parse_json<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, V3ApiError> {
     serde_json::from_value(value).map_err(|_| V3ApiError::invalid_json())
 }
 
-fn check_expectation(
+pub(crate) fn check_expectation(
     state: &CoreState,
     expectation: &MutationExpectation,
 ) -> Result<(), V3ApiError> {

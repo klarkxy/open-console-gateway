@@ -1,5 +1,5 @@
 {
-  "$comment": "Extensible Dashboard V4 contract catalog. Add new $defs for later DTOs; do not rename or reshape existing definitions. Connection and template listings are secret-free.",
+  "$comment": "Extensible Dashboard V4 contract catalog. Add new $defs for later DTOs; do not rename or reshape existing definitions. Connection and template listings are secret-free. OnboardingCommitRequest.secretInput is write-only.",
   "$defs": {
     "AccountAuthScheme": {
       "description": "Custom auth scheme. Wire values match V2 kebab-case.",
@@ -383,6 +383,240 @@
       ],
       "type": "string"
     },
+    "OnboardingAuthorization": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "accountLabel": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "const": "api_key",
+              "type": "string"
+            },
+            "notes": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "secretInput": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "secretInput"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "none",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "OnboardingCommitRequest": {
+      "additionalProperties": false,
+      "description": "Required process-scoped mutation precondition.\n\nBoth fields travel at the top level of every mutation request. The random\nprocess generation prevents a revision captured before restart from being\naccepted by a fresh process whose in-memory counter reused the same value.",
+      "properties": {
+        "authorization": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OnboardingAuthorization"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "connection": {
+          "$ref": "#/$defs/OnboardingConnection"
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "operationId": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "targets": {
+          "items": {
+            "$ref": "#/$defs/OnboardingTarget"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "operationId",
+        "connection",
+        "targets"
+      ],
+      "type": "object"
+    },
+    "OnboardingCommitResult": {
+      "additionalProperties": false,
+      "properties": {
+        "connectionId": {
+          "type": "string"
+        },
+        "credentialId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "replayed": {
+          "type": "boolean"
+        },
+        "revision": {
+          "$ref": "#/$defs/ControlRevision"
+        },
+        "targetIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "revision",
+        "connectionId",
+        "credentialId",
+        "targetIds",
+        "replayed"
+      ],
+      "type": "object"
+    },
+    "OnboardingConnection": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "authKind": {
+              "$ref": "#/$defs/ProviderDefinitionAuthKind"
+            },
+            "endpointUrl": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "new",
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "templateId": {
+              "type": "string"
+            },
+            "upstreamProtocol": {
+              "$ref": "#/$defs/AccountUpstreamProtocol"
+            }
+          },
+          "required": [
+            "kind",
+            "templateId",
+            "name",
+            "endpointUrl",
+            "upstreamProtocol",
+            "authKind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "connectionId": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "existing",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "connectionId"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "OnboardingTarget": {
+      "additionalProperties": false,
+      "properties": {
+        "publicModel": {
+          "type": "string"
+        },
+        "upstreamModel": {
+          "type": "string"
+        },
+        "upstreamOverride": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OnboardingUpstreamOverride"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "publicModel",
+        "upstreamModel"
+      ],
+      "type": "object"
+    },
+    "OnboardingUpstreamOverride": {
+      "additionalProperties": false,
+      "properties": {
+        "endpointUrl": {
+          "type": "string"
+        },
+        "protocol": {
+          "$ref": "#/$defs/AccountUpstreamProtocol"
+        }
+      },
+      "required": [
+        "protocol",
+        "endpointUrl"
+      ],
+      "type": "object"
+    },
+    "ProviderDefinitionAuthKind": {
+      "description": "Auth kind owned by a Provider definition. Independent of protocol.\nNullable on the wire because builtin rows leave the field empty.",
+      "enum": [
+        "bearer",
+        "x-api-key",
+        "none"
+      ],
+      "type": "string"
+    },
     "ProviderTemplate": {
       "additionalProperties": false,
       "properties": {
@@ -572,6 +806,21 @@
     },
     {
       "$ref": "#/$defs/ConnectionList"
+    },
+    {
+      "$ref": "#/$defs/OnboardingCommitRequest"
+    },
+    {
+      "$ref": "#/$defs/OnboardingConnection"
+    },
+    {
+      "$ref": "#/$defs/OnboardingAuthorization"
+    },
+    {
+      "$ref": "#/$defs/OnboardingTarget"
+    },
+    {
+      "$ref": "#/$defs/OnboardingCommitResult"
     }
   ],
   "title": "DashboardApiV4"
