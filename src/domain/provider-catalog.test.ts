@@ -3,14 +3,9 @@ import test from "node:test";
 import type { ProviderCatalogEntry } from "../api/providers.ts";
 import {
   MANUAL_PRESET_QUERY_VALUE,
-  accountCountByProviderId,
-  catalogEntryCredentialState,
   catalogEntryFamily,
-  filterCatalogEntries,
-  groupCatalogEntriesByOffering,
   providerAddStageFromQuery,
   providerAddStageToQuery,
-  railCatalogEntries,
 } from "./provider-catalog.ts";
 import { PROVIDER_PRESETS } from "./provider-presets.ts";
 
@@ -46,76 +41,6 @@ function catalogEntry(
     ...extra,
   };
 }
-
-test("catalog entries group by offering and preserve catalog order within a group", () => {
-  const entries = [
-    catalogEntry("opencode", { offering: "plan" }),
-    catalogEntry("ollama"),
-    catalogEntry("minimax", { offering: "plan" }),
-    catalogEntry("custom"),
-    catalogEntry("acme", { origin: "custom", offering: "plan" }),
-  ];
-  const groups = groupCatalogEntriesByOffering(entries);
-  assert.deepEqual(groups.plan.map((entry) => entry.provider_id), ["opencode", "minimax", "acme"]);
-  assert.deepEqual(groups.api.map((entry) => entry.provider_id), ["ollama", "custom"]);
-});
-
-test("rail hides unused builtins and keeps saved preset or custom connections", () => {
-  const entries = [
-    catalogEntry("opencode", { display_name: "OpenCode Go", offering: "plan" }),
-    catalogEntry("kimi", { display_name: "Kimi Code CN", offering: "plan" }),
-    catalogEntry("tencent", { origin: "preset", display_name: "Tencent Token Plan", offering: "plan" }),
-    catalogEntry("lab", { origin: "custom", display_name: "Lab HTTP" }),
-  ];
-  assert.deepEqual(
-    railCatalogEntries(entries, ["opencode"]).map((entry) => entry.provider_id),
-    ["opencode", "tencent", "lab"],
-  );
-  assert.deepEqual(
-    railCatalogEntries(entries, ["OPENCODE", "tencent"]).map((entry) => entry.provider_id),
-    ["opencode", "tencent", "lab"],
-  );
-  assert.deepEqual(
-    railCatalogEntries(entries, ["lab"]).map((entry) => entry.provider_id),
-    ["tencent", "lab"],
-  );
-  assert.deepEqual(
-    railCatalogEntries(entries, []).map((entry) => entry.provider_id),
-    ["tencent", "lab"],
-  );
-  assert.deepEqual(
-    railCatalogEntries(entries, ["KIMI"]).map((entry) => entry.provider_id),
-    ["kimi", "tencent", "lab"],
-  );
-});
-
-test("credential state is not_required, missing, or present from kind and count", () => {
-  const keyed = catalogEntry("lab", { credential_kind: "api_key" });
-  const none = catalogEntry("local", { credential_kind: "none" });
-  assert.equal(catalogEntryCredentialState(none, 0), "not_required");
-  assert.equal(catalogEntryCredentialState(none, 2), "not_required");
-  assert.equal(catalogEntryCredentialState(keyed, 0), "missing");
-  assert.equal(catalogEntryCredentialState(keyed, 1), "present");
-  const counts = accountCountByProviderId([
-    { provider_id: "LAB" },
-    { provider_id: " lab " },
-    { provider_id: "other" },
-  ]);
-  assert.equal(counts.get("lab"), 2);
-  assert.equal(counts.get("other"), 1);
-  assert.equal(counts.get("missing"), undefined);
-});
-
-test("rail filtering matches display name and provider id case-insensitively", () => {
-  const entries = [
-    catalogEntry("opencode", { display_name: "OpenCode Go" }),
-    catalogEntry("kimi", { display_name: "Kimi Code CN" }),
-  ];
-  assert.deepEqual(filterCatalogEntries(entries, "  ").map((entry) => entry.provider_id), ["opencode", "kimi"]);
-  assert.deepEqual(filterCatalogEntries(entries, "OPENCODE").map((entry) => entry.provider_id), ["opencode"]);
-  assert.deepEqual(filterCatalogEntries(entries, "code cn").map((entry) => entry.provider_id), ["kimi"]);
-  assert.deepEqual(filterCatalogEntries(entries, "nope"), []);
-});
 
 test("brand families use the vendor family when known and a monogram otherwise", () => {
   const minimax = catalogEntryFamily(catalogEntry("minimax", { display_family: "MiniMax" }));

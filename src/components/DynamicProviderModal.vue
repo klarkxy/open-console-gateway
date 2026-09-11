@@ -65,6 +65,7 @@
         <n-form-item v-if="!fixedPreset || settingsOpen" :label="t('名称')" path="name">
           <n-input
             v-model:value="draft.name"
+            :disabled="busy"
             :input-props="{ 'aria-label': t('名称') }"
             :placeholder="t('例如：主号')"
           />
@@ -99,6 +100,7 @@
         <n-form-item v-if="!isEdit && props.context === 'account' && (!fixedPreset || settingsOpen)" :label="t('第一个账号名称')">
           <n-input
             v-model:value="draft.account_name"
+            :disabled="busy"
             :input-props="{ 'aria-label': t('第一个账号名称') }"
           />
         </n-form-item>
@@ -127,6 +129,7 @@
             v-model:value="draft.notes"
             type="textarea"
             :autosize="{ minRows: 2, maxRows: 6 }"
+            :disabled="busy"
             :input-props="{ 'aria-label': t('备注') }"
           />
         </n-form-item>
@@ -294,6 +297,8 @@ import {
   NSpace,
 } from "naive-ui";
 import { DownOutlined, RightOutlined } from "@vicons/antd";
+import { connectionsApi } from "../api/connections.ts";
+import { DashboardRequestError } from "../api/dashboard-v3.ts";
 import { isRevisionConflict, providerApi, type ProviderDefinitionView } from "../api/providers.ts";
 import { locale, t, type MessageKey } from "../i18n/index.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
@@ -314,7 +319,7 @@ import {
   DYNAMIC_PAID_TEST_WARNING_KEY,
   DYNAMIC_PROTOCOLS,
   DYNAMIC_PROVIDER_DRAFT_ERROR_KEYS,
-  buildProviderDefinitionCreateBody,
+  buildOnboardingCommitRequest,
   buildProviderDefinitionUpdateBody,
   completeDynamicTestTargets,
   dynamicAuthRequiresKey,
@@ -347,6 +352,11 @@ const props = defineProps<{
 const emit = defineEmits<{
   (event: "update:show", value: boolean): void;
   (event: "saved", providerId: string): void;
+  /**
+   * Create-mode V4 commit result. `saved` still emits the legacy provider id
+   * resolved from a follow-up connections list so existing hosts keep working.
+   */
+  (event: "committed", result: { connectionId: string; credentialId: string | null; replayed: boolean }): void;
   (event: "conflict"): void;
   /** Hosts embed the form and block dismissal while work is in flight. */
   (event: "busyChange", busy: boolean): void;
@@ -371,6 +381,12 @@ const selectedPresetId = ref(MANUAL_PRESET_ID);
 // Bumped on close/reopen and on every preset switch so a slow discovery or
 // test response from a previous context can never land in the current form.
 const requestGeneration = ref(0);
+/** Stable across retries of an unchanged draft; regenerated on any draft edit. */
+const operationId = ref(newOperationId());
+
+function newOperationId(): string {
+  return crypto.randomUUID();
+}
 
 const isEdit = computed(() => Boolean(props.provider));
 const createTitle = computed(() => (
@@ -597,6 +613,11 @@ watch(
   },
 );
 
+watch(draft, () => {
+  if (isEdit.value) return;
+  operationId.value = newOperationId();
+}, { deep: true });
+
 function onPresetChange(value: string): void {
   if (isEdit.value || busy.value || value === selectedPresetId.value) return;
   selectedPresetId.value = value;
@@ -724,6 +745,43 @@ function onSurfaceUpdateShow(visible: boolean): void {
   emit("update:show", visible);
 }
 
+function isRetryableNetworkFailure(error: unknown): boolean {
+  if (error instanceof TypeError) return true;
+  return typeof DOMException !== "undefined"
+    && error instanceof DOMException
+    && (error.name === "AbortError" || error.name === "TimeoutError");
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
+async function commitCreate() {
+  const body = buildOnboardingCommitRequest(draft.value, operationId.value);
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      return await connectionsApi.commitOnboarding(body);
+    } catch (error) {
+      lastError = error;
+      if (!isRetryableNetworkFailure(error) || attempt === 2) throw error;
+      await sleep(150 * (attempt + 1));
+    }
+  }
+  throw lastError;
+}
+
+async function resolveLegacyProviderId(connectionId: string): Promise<string> {
+  try {
+    const listed = await connectionsApi.list();
+    return listed.find((item) => item.id === connectionId)?.legacy.id ?? "";
+  } catch {
+    return "";
+  }
+}
+
 async function save(): Promise<void> {
   // Re-entrant submits (Enter key, double click) must not duplicate the write.
   if (busy.value) return;
@@ -740,18 +798,34 @@ async function save(): Promise<void> {
   formError.value = "";
   conflictNotice.value = "";
   try {
-    const saved = isEdit.value && props.provider
-      ? await providerApi.updateProviderDefinition(
+    if (isEdit.value && props.provider) {
+      const saved = await providerApi.updateProviderDefinition(
         props.provider.id,
         buildProviderDefinitionUpdateBody(draft.value, props.provider.auth_kind ?? ""),
-      )
-      : await providerApi.createProviderDefinition(buildProviderDefinitionCreateBody(draft.value));
+      );
+      draft.value = sanitizeProviderDefinitionDraft(draft.value);
+      emit("saved", saved.id);
+      emit("update:show", false);
+      return;
+    }
+    const result = await commitCreate();
+    const legacyId = await resolveLegacyProviderId(result.connection_id);
     draft.value = sanitizeProviderDefinitionDraft(draft.value);
-    emit("saved", saved.id);
+    operationId.value = newOperationId();
+    emit("committed", {
+      connectionId: result.connection_id,
+      credentialId: result.credential_id,
+      replayed: result.replayed,
+    });
+    emit("saved", legacyId);
     emit("update:show", false);
   } catch (cause) {
     if (isRevisionConflict(cause)) {
       conflictNotice.value = t("数据已更新，请检查后重新保存。不会自动重试。");
+      emit("conflict");
+    } else if (cause instanceof DashboardRequestError && cause.code === "operationPayloadMismatch") {
+      formError.value = t("之前的提交已生效，页面已刷新，请核对后再操作。");
+      operationId.value = newOperationId();
       emit("conflict");
     } else {
       formError.value = dashboardErrorDetail(cause);

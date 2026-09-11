@@ -15,7 +15,7 @@
     </div>
 
     <n-alert
-      v-else-if="loadError && !contracts"
+      v-else-if="loadError && !contracts && connections.length === 0"
       type="error"
       :title="t('加载供应商失败: {error}', { error: loadError })"
     >
@@ -39,10 +39,10 @@
           <section v-for="pane in railPanes" :key="pane.id" class="providers-rail-pane">
             <h3 class="providers-rail-pane__label">{{ pane.label }}</h3>
             <n-menu
-              :value="selectedProviderId"
+              :value="selectedConnectionId"
               :options="pane.options"
               :aria-label="`${t('选择供应商范围')} · ${pane.label}`"
-              @update:value="selectProvider"
+              @update:value="selectConnection"
             />
           </section>
           <p v-if="railFilteredOut" class="providers-rail-empty">
@@ -68,7 +68,7 @@
       <div class="providers-main">
         <div class="providers-mobile-nav">
           <n-select
-            :value="addStage ? ADD_SELECT_VALUE : selectedProviderId"
+            :value="addStage ? ADD_SELECT_VALUE : selectedConnectionId"
             :options="mobileSelectOptions"
             filterable
             :aria-label="t('选择供应商范围')"
@@ -79,7 +79,7 @@
         </div>
 
         <n-alert
-          v-if="loadError && contracts"
+          v-if="loadError && (contracts || connections.length > 0)"
           type="warning"
           :title="t('加载供应商失败: {error}', { error: loadError })"
         >
@@ -120,24 +120,84 @@
             :initial-preset-id="addStage.presetId"
             :preset-selection-locked="Boolean(addStage.presetId)"
             @saved="onDynamicSaved"
+            @committed="onDynamicCommitted"
             @conflict="onDynamicConflict"
             @busy-change="inlineFormBusy = $event"
           />
         </section>
 
+        <section
+          v-else-if="selectedConnection && isCustomAccountConnection"
+          class="providers-section"
+          aria-labelledby="provider-detail-title"
+        >
+          <div class="providers-catalog-head">
+            <div class="providers-catalog-heading providers-detail-heading">
+              <ProviderBrandMark :family="selectedConnectionFamily" :size="22" />
+              <h2 id="provider-detail-title">{{ selectedConnection.name }}</h2>
+              <div class="providers-catalog-meta">
+                <n-tag size="small" :bordered="false">{{ t("Custom API 账号") }}</n-tag>
+                <n-tag
+                  v-if="selectedStatus.label"
+                  size="small"
+                  :type="selectedStatus.kind === 'missing_credential' ? 'warning' : 'default'"
+                  :bordered="false"
+                >{{ statusLabelText(selectedStatus.label) }}</n-tag>
+              </div>
+            </div>
+          </div>
+          <dl class="providers-connection-facts" :aria-label="t('连接信息')">
+            <div class="providers-connection-facts__row">
+              <dt>{{ t("API 地址") }}</dt>
+              <dd><code>{{ customAccountEndpoint || t("未设置") }}</code></dd>
+            </div>
+            <div class="providers-connection-facts__row">
+              <dt>{{ t("上游协议") }}</dt>
+              <dd>{{ customAccountProtocol }}</dd>
+            </div>
+            <div class="providers-connection-facts__row">
+              <dt>{{ t("凭据数量") }}</dt>
+              <dd>{{ selectedConnection.credential_count }}</dd>
+            </div>
+            <div class="providers-connection-facts__row">
+              <dt>{{ t("模型数量") }}</dt>
+              <dd>{{ selectedConnection.target_count }}</dd>
+            </div>
+          </dl>
+          <div class="providers-connection-targets">
+            <table class="providers-connection-table">
+              <thead>
+                <tr>
+                  <th>{{ t("对外模型名") }}</th>
+                  <th>{{ t("上游模型 ID") }}</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="target in selectedConnection.targets" :key="target.id">
+                  <td><code>{{ target.public_name }}</code></td>
+                  <td><code>{{ target.upstream_model_id }}</code></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <n-button type="primary" size="small" @click="openAccountEditor(selectedConnection.legacy.id)">
+            {{ t("在账号页编辑") }}
+          </n-button>
+        </section>
+
         <section v-else-if="selectedEntry" class="providers-section" aria-labelledby="provider-detail-title">
           <div class="providers-catalog-head">
             <div class="providers-catalog-heading providers-detail-heading">
-              <ProviderBrandMark :family="selectedEntryFamily" :size="22" />
+              <ProviderBrandMark :family="selectedConnectionFamily" :size="22" />
               <h2 id="provider-detail-title">{{ selectedEntry.display_name }}</h2>
               <div class="providers-catalog-meta">
                 <n-tag size="small" :bordered="false">{{ originLabel(selectedEntry.origin) }}</n-tag>
                 <n-tag
-                  v-if="accountsStore.loaded && selectedCredentialState === 'missing'"
+                  v-if="selectedStatus.label"
                   size="small"
-                  type="warning"
+                  :type="selectedStatus.kind === 'missing_credential' ? 'warning' : 'default'"
                   :bordered="false"
-                >{{ t("待补充凭据") }}</n-tag>
+                >{{ statusLabelText(selectedStatus.label) }}</n-tag>
               </div>
             </div>
             <n-space>
@@ -164,7 +224,7 @@
           </div>
 
           <n-alert
-            v-if="accountsStore.loaded && selectedCredentialState === 'missing'"
+            v-if="selectedStatus.kind === 'missing_credential'"
             type="warning"
             class="providers-definition-error"
             :title="t('待补充凭据')"
@@ -185,6 +245,17 @@
                 {{ t("打开账号页") }}
               </n-button>
             </n-space>
+          </n-alert>
+
+          <n-alert
+            v-else-if="selectedStatus.kind === 'disabled' || selectedStatus.kind === 'invalid' || selectedStatus.kind === 'cooling'"
+            type="info"
+            class="providers-definition-error"
+            :title="statusLabelText(selectedStatus.label)"
+          >
+            <n-button size="small" secondary @click="openAccounts">
+              {{ t("打开账号页") }}
+            </n-button>
           </n-alert>
 
           <n-alert
@@ -355,9 +426,11 @@
     </div>
 
     <DynamicProviderModal
-      v-model:show="showEditModal"
+      :show="showEditModal"
       :provider="editingDefinition"
+      @update:show="onEditModalShow"
       @saved="onDynamicSaved"
+      @committed="onDynamicCommitted"
       @conflict="onDynamicConflict"
     />
     <AccountFormModal
@@ -391,6 +464,7 @@ import {
   useMessage,
 } from "naive-ui";
 import type { MenuOption, SelectOption } from "naive-ui";
+import type { Connection } from "../api/connections.ts";
 import { DashboardRequestError, dashboardApi, type AccountInput } from "../api/dashboard";
 import { isRevisionConflict, providerApi } from "../api/providers.ts";
 import { useAccountsStore } from "../stores/accounts.ts";
@@ -411,7 +485,7 @@ import PricingCatalog from "../components/PricingCatalog.vue";
 import DynamicProviderModal from "../components/DynamicProviderModal.vue";
 import AccountFormModal, { type AccountFormPayload } from "../components/AccountFormModal.vue";
 import ProviderBrandMark from "../components/ProviderBrandMark.vue";
-import { t } from "../i18n/index.ts";
+import { t, type MessageKey } from "../i18n/index.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
 import { formatDateTime } from "../utils/format.ts";
 import {
@@ -431,14 +505,18 @@ import {
   protocolDisplayName,
 } from "../domain/provider-contracts.ts";
 import {
-  accountCountByProviderId,
-  catalogEntryCredentialState,
+  catalogEntryForConnection,
+  connectionBrandFamily,
+  connectionForLegacyProvider,
+  connectionStatus,
+  filterConnections,
+  groupConnectionsByOffering,
+  selectedConnectionIdFromQuery,
+} from "../domain/connections.ts";
+import {
   catalogEntryFamily,
-  filterCatalogEntries,
-  groupCatalogEntriesByOffering,
   providerAddStageFromQuery,
   providerAddStageToQuery,
-  railCatalogEntries as listedRailCatalogEntries,
   type ProviderAddStage,
 } from "../domain/provider-catalog.ts";
 import { accountCreateRequestInput } from "../domain/account-create-payload.ts";
@@ -462,6 +540,7 @@ const accountsStore = useAccountsStore();
 const providersStore = useProvidersStore();
 const contracts = ref<ProviderContractsResponse | null>(null);
 const catalog = ref<ProviderCatalogEntry[] | null>(null);
+const connections = ref<Connection[]>([]);
 const showEditModal = ref(false);
 const editingDefinition = ref<ProviderDefinitionView | null>(null);
 const showAddKeyModal = ref(false);
@@ -473,7 +552,8 @@ const addStage = ref<ProviderAddStage | null>(null);
 const railQuery = ref("");
 const loading = ref(false);
 const loadError = ref("");
-const selectedProviderId = ref<string | null>(null);
+const selectedConnectionId = ref<string | null>(null);
+const lastCommittedConnectionId = ref<string | null>(null);
 const activeTab = ref<ProviderDetailTab>("models");
 const definitions = ref<Map<string, ProviderDefinitionView>>(new Map());
 const definitionLoading = ref(false);
@@ -498,29 +578,39 @@ const RAIL_BRAND_SIZE = 18;
 const ADD_SELECT_VALUE = "__add__";
 
 const allCatalogEntries = computed(() => catalog.value ?? []);
-const accountProviderIds = computed(() => (
-  accountsStore.accounts.map((account) => account.provider_id)
-));
-const providerAccountCounts = computed(() => accountCountByProviderId(accountsStore.accounts));
-// Always apply the rail rule: with accounts unloaded (or failed), the empty
-// id set still keeps saved preset/custom rows and hides unused built-ins.
-const catalogEntries = computed(() => (
-  listedRailCatalogEntries(allCatalogEntries.value, accountProviderIds.value)
-));
 const scopes = computed(() => (
   contracts.value
     ? flattenProviderScopes(contracts.value, catalog.value)
       .filter((scope) => scope.scope_kind === "provider")
     : []
 ));
-const selectedEntry = computed(() => (
-  catalogEntries.value.find((entry) => entry.provider_id === selectedProviderId.value) ?? null
+const selectedConnection = computed(() => (
+  connections.value.find((item) => item.id === selectedConnectionId.value) ?? null
 ));
-const selectedCredentialState = computed(() => {
-  const entry = selectedEntry.value;
-  if (!entry) return "not_required" as const;
-  const count = providerAccountCounts.value.get(entry.provider_id.trim().toLocaleLowerCase()) ?? 0;
-  return catalogEntryCredentialState(entry, count);
+const selectedEntry = computed(() => {
+  const connection = selectedConnection.value;
+  if (!connection) return null;
+  return catalogEntryForConnection(connection, allCatalogEntries.value);
+});
+const isCustomAccountConnection = computed(() => (
+  selectedConnection.value?.legacy.kind === "custom_account"
+));
+const selectedStatus = computed(() => (
+  selectedConnection.value
+    ? connectionStatus(selectedConnection.value)
+    : { kind: "ok" as const, label: null }
+));
+const selectedConnectionFamily = computed(() => (
+  selectedConnection.value
+    ? connectionBrandFamily(selectedConnection.value, allCatalogEntries.value)
+    : catalogEntryFamily({ provider_id: "", display_family: "", display_name: "" })
+));
+const customAccountEndpoint = computed(() => (
+  selectedConnection.value?.endpoints.find((endpoint) => endpoint.url)?.url ?? ""
+));
+const customAccountProtocol = computed(() => {
+  const protocol = selectedConnection.value?.endpoints[0]?.wire_protocol;
+  return protocol ? protocolDisplayName(protocol) : t("未设置");
 });
 const addKeyPlan = computed(() => {
   const entry = selectedEntry.value;
@@ -538,14 +628,10 @@ const canAddKey = computed(() => {
     && addKeyPlan.value
   );
 });
-const selectedEntryFamily = computed(() => (
-  selectedEntry.value
-    ? catalogEntryFamily(selectedEntry.value)
-    : catalogEntryFamily({ provider_id: "", display_family: "", display_name: "" })
-));
-const selectedDefinition = computed(() => (
-  selectedProviderId.value ? definitions.value.get(selectedProviderId.value) ?? null : null
-));
+const selectedDefinition = computed(() => {
+  const providerId = selectedEntry.value?.provider_id;
+  return providerId ? definitions.value.get(providerId) ?? null : null;
+});
 const activeScope = computed(() => {
   const entry = selectedEntry.value;
   if (!entry || entry.origin !== "builtin" || entry.provider_id === "custom") return null;
@@ -561,7 +647,9 @@ const addFormKey = computed(() => {
   const stage = addStage.value;
   return stage?.stage === "form" ? `add-form:${stage.presetId ?? "manual"}` : "add-form:none";
 });
-const initialLoading = computed(() => loading.value && !contracts.value && !catalog.value);
+const initialLoading = computed(() => (
+  loading.value && !contracts.value && !catalog.value && connections.value.length === 0 && !loadError.value
+));
 const actionLocked = computed(() => (
   catalogRefreshing.value
   || staticProtocolResetting.value
@@ -580,30 +668,35 @@ function originLabel(origin: ProviderCatalogEntry["origin"]): string {
   return t("自定义");
 }
 
+function statusLabelText(label: string | null): string {
+  return label ? t(label as MessageKey) : "";
+}
+
+function railStatusExtra(connection: Connection) {
+  const label = connectionStatus(connection).label;
+  if (!label) return undefined;
+  return () => h("span", {
+    style: {
+      fontSize: "var(--ocg-font-xs)",
+      color: "var(--ocg-muted)",
+      fontWeight: "400",
+    },
+  }, t(label as MessageKey));
+}
+
 const railPanes = computed<Array<{ id: "plan" | "api"; label: "Plan" | "API"; options: MenuOption[] }>>(() => {
-  const filtered = filterCatalogEntries(catalogEntries.value, railQuery.value);
-  const groups = groupCatalogEntriesByOffering(filtered);
-  const toOptions = (list: readonly ProviderCatalogEntry[]): MenuOption[] => (
-    list.map((entry) => {
-      const count = accountsStore.loaded
-        ? (providerAccountCounts.value.get(entry.provider_id.trim().toLocaleLowerCase()) ?? 0)
-        : null;
-      const missing = count !== null && catalogEntryCredentialState(entry, count) === "missing";
-      return {
-        key: entry.provider_id,
-        label: entry.display_name,
-        icon: () => h(ProviderBrandMark, { family: catalogEntryFamily(entry), size: RAIL_BRAND_SIZE }),
-        extra: missing
-          ? () => h("span", {
-            style: {
-              fontSize: "var(--ocg-font-xs)",
-              color: "var(--ocg-muted)",
-              fontWeight: "400",
-            },
-          }, t("待补充凭据"))
-          : undefined,
-      };
-    })
+  const filtered = filterConnections(connections.value, railQuery.value);
+  const groups = groupConnectionsByOffering(filtered);
+  const toOptions = (list: readonly Connection[]): MenuOption[] => (
+    list.map((item) => ({
+      key: item.id,
+      label: item.name,
+      icon: () => h(ProviderBrandMark, {
+        family: connectionBrandFamily(item, allCatalogEntries.value),
+        size: RAIL_BRAND_SIZE,
+      }),
+      extra: railStatusExtra(item),
+    }))
   );
   const panes: Array<{ id: "plan" | "api"; label: "Plan" | "API"; options: MenuOption[] }> = [];
   const planOptions = toOptions(groups.plan);
@@ -619,15 +712,21 @@ const railFilteredOut = computed(() => (
 const mobileSelectOptions = computed<SelectOption[]>(() => {
   // The mobile selector has its own built-in filter; the rail search query
   // must not shrink these options when the rail itself is hidden.
-  const groups = groupCatalogEntriesByOffering(catalogEntries.value);
+  const groups = groupConnectionsByOffering(connections.value);
+  const labelFor = (item: Connection, offering: "Plan" | "API"): string => {
+    const status = connectionStatus(item);
+    return status.label
+      ? `${item.name} · ${offering} · ${t(status.label as MessageKey)}`
+      : `${item.name} · ${offering}`;
+  };
   return [
-    ...groups.plan.map((entry) => ({
-      value: entry.provider_id,
-      label: `${entry.display_name} · Plan`,
+    ...groups.plan.map((item) => ({
+      value: item.id,
+      label: labelFor(item, "Plan"),
     })),
-    ...groups.api.map((entry) => ({
-      value: entry.provider_id,
-      label: `${entry.display_name} · API`,
+    ...groups.api.map((item) => ({
+      value: item.id,
+      label: labelFor(item, "API"),
     })),
     { value: ADD_SELECT_VALUE, label: t("添加供应商") },
   ];
@@ -676,7 +775,7 @@ function writeUrl() {
   if (!currentUrlIsProvidersView()) return;
   const stage = addStage.value;
   const url = applyAppViewSearchParams(new URL(window.location.href), "providers", {
-    ...(selectedProviderId.value ? { provider: selectedProviderId.value } : {}),
+    ...(selectedConnectionId.value ? { connection: selectedConnectionId.value } : {}),
     ...(stage
       ? providerAddStageToQuery(stage)
       : activeTab.value !== "models" ? { tab: activeTab.value } : {}),
@@ -684,36 +783,44 @@ function writeUrl() {
   window.history.replaceState(null, "", url);
 }
 
-function applyFromQuery(fellBackNotice = false, preferProviderId?: string) {
+function applyFromQuery(
+  fellBackNotice = false,
+  prefer?: { connectionId?: string; providerId?: string },
+) {
   const query = readProviderPageQuery(window.location.search);
   addStage.value = providerAddStageFromQuery(query.add, query.preset);
-  const wanted = preferProviderId ?? query.provider ?? selectedProviderId.value;
-  const entries = catalogEntries.value;
-  if (entries.length === 0) {
-    selectedProviderId.value = null;
+  const wanted = selectedConnectionIdFromQuery({
+    connection: prefer?.connectionId ?? query.connection,
+    provider: prefer?.providerId ?? query.provider,
+  }, connections.value)
+    ?? selectedConnectionId.value;
+  const rows = connections.value;
+  if (rows.length === 0) {
+    selectedConnectionId.value = null;
     writeUrl();
     return;
   }
-  const entry = entries.find((item) => item.provider_id === wanted) ?? entries[0]!;
-  if (fellBackNotice && wanted && entry.provider_id !== wanted) {
+  const row = rows.find((item) => item.id === wanted) ?? rows[0]!;
+  if (fellBackNotice && wanted && row.id !== wanted) {
     actionLive.value = t("已选择过期范围，已回到第一个供应商");
   }
-  selectedProviderId.value = entry.provider_id;
+  selectedConnectionId.value = row.id;
+  const entry = catalogEntryForConnection(row, allCatalogEntries.value);
   const candidate = query.tab ?? activeTab.value;
-  activeTab.value = candidate === "pricing" && entry.pricing_availability !== "available"
+  activeTab.value = candidate === "pricing" && entry?.pricing_availability !== "available"
     ? "models"
     : candidate;
   writeUrl();
 }
 
-function selectProvider(key: string | number) {
+function selectConnection(key: string | number) {
   // An embedded form with in-flight save/test/discovery must not be swapped
   // out; its stale-generation guards only cover responses, not dismissal.
   if (inlineFormBusy.value || addKeyBusy.value) return;
-  const providerId = String(key);
-  if (!catalogEntries.value.some((entry) => entry.provider_id === providerId)) return;
+  const connectionId = String(key);
+  if (!connections.value.some((item) => item.id === connectionId)) return;
   addStage.value = null;
-  selectedProviderId.value = providerId;
+  selectedConnectionId.value = connectionId;
   writeUrl();
 }
 
@@ -723,11 +830,13 @@ function onMobileSelect(key: string | number) {
     openAddFlow();
     return;
   }
-  selectProvider(value);
+  selectConnection(value);
 }
 
 function openAddFlow() {
   if (inlineFormBusy.value || addKeyBusy.value) return;
+  showEditModal.value = false;
+  editingDefinition.value = null;
   addStage.value = { stage: "browse" };
   writeUrl();
 }
@@ -746,6 +855,13 @@ function exitAddFlow() {
 
 function openAccounts() {
   const url = applyAppViewSearchParams(new URL(window.location.href), "accounts");
+  window.history.pushState(null, "", url);
+  window.dispatchEvent(new PopStateEvent("popstate"));
+}
+
+function openAccountEditor(accountId: string) {
+  const url = applyAppViewSearchParams(new URL(window.location.href), "accounts");
+  url.searchParams.set("account_id", accountId);
   window.history.pushState(null, "", url);
   window.dispatchEvent(new PopStateEvent("popstate"));
 }
@@ -782,31 +898,48 @@ function retryDefinition() {
   void ensureDefinition(entry.provider_id);
 }
 
-async function loadAll(options: { retain?: boolean; preferProviderId?: string } = {}): Promise<{ ok: boolean; error: string }> {
+async function loadAll(options: {
+  retain?: boolean;
+  preferConnectionId?: string;
+  preferProviderId?: string;
+} = {}): Promise<{ ok: boolean; error: string }> {
   if (loading.value) {
     return { ok: false, error: loadError.value };
   }
   loading.value = true;
   if (!options.retain) loadError.value = "";
   try {
-    const [contractsResult, catalogResult] = await Promise.allSettled([
+    const [contractsResult, catalogResult, connectionsResult] = await Promise.allSettled([
       providersStore.loadContracts(),
       providersStore.loadCatalog(),
+      providersStore.loadConnections(),
       accountsStore.loadPresented(),
     ]);
     if (catalogResult.status === "fulfilled") {
       catalog.value = catalogResult.value;
     }
+    if (connectionsResult.status === "fulfilled") {
+      connections.value = connectionsResult.value;
+    }
     if (contractsResult.status === "fulfilled") {
       contracts.value = normalizeProviderContractsResponse(contractsResult.value);
-      loadError.value = "";
-      applyFromQuery(true, options.preferProviderId);
-      return { ok: true, error: "" };
     }
-    applyFromQuery(true, options.preferProviderId);
-    const error = dashboardErrorDetail(contractsResult.reason);
-    loadError.value = error;
-    return { ok: false, error };
+    applyFromQuery(true, {
+      connectionId: options.preferConnectionId,
+      providerId: options.preferProviderId,
+    });
+    if (connectionsResult.status === "rejected") {
+      const error = dashboardErrorDetail(connectionsResult.reason);
+      loadError.value = error;
+      return { ok: false, error };
+    }
+    if (contractsResult.status === "rejected") {
+      const error = dashboardErrorDetail(contractsResult.reason);
+      loadError.value = error;
+      return { ok: false, error };
+    }
+    loadError.value = "";
+    return { ok: true, error: "" };
   } finally {
     loading.value = false;
   }
@@ -819,18 +952,29 @@ function openEdit(): void {
   showEditModal.value = true;
 }
 
+function onEditModalShow(visible: boolean): void {
+  showEditModal.value = visible;
+  if (!visible) editingDefinition.value = null;
+}
+
+function onDynamicCommitted(result: { connectionId: string }): void {
+  lastCommittedConnectionId.value = result.connectionId;
+}
+
 async function onDynamicSaved(providerId: string): Promise<void> {
-  const created = !editingDefinition.value;
+  // Create emits `committed` then `saved`; edit emits only `saved`.
+  const preferConnectionId = lastCommittedConnectionId.value ?? undefined;
+  const created = preferConnectionId !== undefined;
+  lastCommittedConnectionId.value = null;
   addStage.value = null;
   const next = new Map(definitions.value);
   next.delete(providerId);
   definitions.value = next;
-  await loadAll({ retain: true, preferProviderId: providerId });
-  const createdId = providerId.trim().toLocaleLowerCase();
-  const createdHasAccount = accountsStore.loaded && accountProviderIds.value.some((id) => (
-    id.trim().toLocaleLowerCase() === createdId
-  ));
-  if (created && !createdHasAccount) {
+  await loadAll({ retain: true, preferConnectionId, preferProviderId: providerId });
+  const createdConnection = preferConnectionId
+    ? connections.value.find((item) => item.id === preferConnectionId)
+    : connectionForLegacyProvider(connections.value, providerId);
+  if (created && createdConnection && connectionStatus(createdConnection).kind === "missing_credential") {
     message.success(t("供应商已保存，待补充凭据"));
   } else {
     message.success(created ? t("供应商已创建") : t("供应商已更新"));
@@ -856,7 +1000,7 @@ async function onAddKeySave(payload: AccountInput | AccountFormPayload): Promise
     message.success(t("账号已添加"));
     showAddKeyModal.value = false;
     await accountsStore.loadPresented();
-    await loadAll({ retain: true, preferProviderId: selectedProviderId.value ?? undefined });
+    await loadAll({ retain: true, preferConnectionId: selectedConnectionId.value ?? undefined });
   } catch (error) {
     if (isRevisionConflict(error) || (error instanceof DashboardRequestError && error.status === 409)) {
       await loadAll({ retain: true });
@@ -882,7 +1026,9 @@ async function deleteSelected(): Promise<void> {
     const next = new Map(definitions.value);
     next.delete(entry.provider_id);
     definitions.value = next;
-    selectedProviderId.value = catalogEntries.value.find((item) => item.provider_id !== entry.provider_id)?.provider_id ?? null;
+    selectedConnectionId.value = connections.value.find((item) => (
+      !(item.legacy.kind === "dynamic_provider" && item.legacy.id === entry.provider_id)
+    ))?.id ?? null;
     await loadAll({ retain: true });
   } catch (error) {
     if (isRevisionConflict(error) || (error instanceof DashboardRequestError && error.status === 409)) {
@@ -1129,7 +1275,7 @@ function onPopState() {
   applyFromQuery();
 }
 
-watch(selectedProviderId, () => {
+watch(selectedConnectionId, () => {
   // The embedded form unmounts on selection change; its busy flags die with
   // it, so the navigation lock must not outlive the form.
   inlineFormBusy.value = false;
@@ -1146,7 +1292,7 @@ watch(selectedEntry, (entry, previous) => {
   }
 });
 
-watch([selectedProviderId, activeTab, addStage], () => {
+watch([selectedConnectionId, activeTab, addStage], () => {
   writeUrl();
 });
 
@@ -1345,6 +1491,54 @@ onUnmounted(() => {
 }
 .providers-definition-error {
   margin-bottom: 12px;
+}
+.providers-connection-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 8px 16px;
+  margin: 0 0 16px;
+  padding: 10px 12px;
+  border: 1px solid var(--ocg-border);
+  border-radius: 10px;
+  background: var(--ocg-canvas);
+}
+.providers-connection-facts__row {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.providers-connection-facts dt {
+  color: var(--ocg-muted);
+  font-size: var(--ocg-font-xs);
+}
+.providers-connection-facts dd {
+  margin: 0;
+}
+.providers-connection-facts code {
+  overflow-wrap: anywhere;
+}
+.providers-connection-targets {
+  overflow-x: auto;
+  margin-bottom: 16px;
+}
+.providers-connection-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--ocg-font-sm);
+}
+.providers-connection-table th,
+.providers-connection-table td {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--ocg-border);
+  text-align: left;
+}
+.providers-connection-table th {
+  color: var(--ocg-muted);
+  font-size: var(--ocg-font-xs);
+  font-weight: 600;
+}
+.providers-connection-table td code {
+  overflow-wrap: anywhere;
 }
 
 @media (max-width: 720px) {

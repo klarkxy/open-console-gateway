@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  buildOnboardingCommitRequest,
   buildProviderDefinitionCreateBody,
   buildProviderDefinitionUpdateBody,
   completeDynamicTestTargets,
@@ -71,6 +72,59 @@ test("mapping validation requires one unique public model and allows repeated up
       { public_model: "sonnet", upstream_model: "vendor/a", upstream_override: null },
     ],
   );
+});
+
+test("onboarding commit maps a create draft onto the V4 payload", () => {
+  const draft = emptyProviderDefinitionDraft();
+  draft.name = "Lab";
+  draft.endpoint_url = "http://127.0.0.1:9";
+  draft.models = [{ public_model: "lab-opus", upstream_model: "vendor/opus" }];
+  draft.account_name = "Lab key";
+  draft.notes = "note";
+  const operationId = "11111111-1111-4111-8111-111111111111";
+  const omitted = buildOnboardingCommitRequest(draft, operationId);
+  assert.equal(omitted.operationId, operationId);
+  assert.deepEqual(omitted.connection, {
+    kind: "new",
+    templateId: "custom-http",
+    name: "Lab",
+    endpointUrl: "http://127.0.0.1:9",
+    upstreamProtocol: "chat_completions",
+    authKind: "bearer",
+  });
+  assert.equal(omitted.authorization, undefined);
+  draft.key = "sk-lab";
+  const keyed = buildOnboardingCommitRequest(draft, operationId);
+  assert.deepEqual(keyed.authorization, {
+    kind: "api_key",
+    secretInput: "sk-lab",
+    accountLabel: "Lab key",
+    notes: "note",
+  });
+  draft.auth_kind = "none";
+  draft.key = "should-not-send";
+  draft.preset_id = "openai";
+  const noneBody = buildOnboardingCommitRequest(draft, operationId);
+  assert.deepEqual(noneBody.authorization, { kind: "none" });
+  assert.equal(noneBody.connection.kind === "new" && noneBody.connection.templateId, "openai");
+  draft.preset_id = "";
+  draft.models = [
+    { public_model: "inherit-row", upstream_model: "vendor/a" },
+    {
+      public_model: "override-row",
+      upstream_model: "vendor/b",
+      upstream_override: { protocol: "messages", endpoint_url: "https://up.example.com/v1/messages" },
+    },
+  ];
+  const withOverride = buildOnboardingCommitRequest(draft, operationId);
+  assert.deepEqual(withOverride.targets, [
+    { publicModel: "inherit-row", upstreamModel: "vendor/a", upstreamOverride: null },
+    {
+      publicModel: "override-row",
+      upstreamModel: "vendor/b",
+      upstreamOverride: { protocol: "messages", endpointUrl: "https://up.example.com/v1/messages" },
+    },
+  ]);
 });
 
 test("create payload omits a Key unless one is supplied and never keeps blank mappings", () => {

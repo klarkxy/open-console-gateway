@@ -144,11 +144,23 @@ export function setControlRevisionSink(sink: ControlRevisionSink | null): void {
 function publishTokens(body: unknown): void {
   if (!controlRevisionSink || typeof body !== "object" || body === null) return;
   const record = body as Record<string, unknown>;
-  if (typeof record.revision !== "number" || typeof record.processGeneration !== "number") return;
+  if (typeof record.revision === "number" && typeof record.processGeneration === "number") {
+    controlRevisionSink({
+      revision: record.revision,
+      processGeneration: record.processGeneration,
+      pricingRevision: typeof record.pricingRevision === "string" ? record.pricingRevision : null,
+    });
+    return;
+  }
+  // V4 listings/commits nest `{ revision: ControlRevision }`.
+  const nested = record.revision;
+  if (typeof nested !== "object" || nested === null) return;
+  const nestedRecord = nested as Record<string, unknown>;
+  if (typeof nestedRecord.revision !== "number" || typeof nestedRecord.processGeneration !== "number") return;
   controlRevisionSink({
-    revision: record.revision,
-    processGeneration: record.processGeneration,
-    pricingRevision: typeof record.pricingRevision === "string" ? record.pricingRevision : null,
+    revision: nestedRecord.revision,
+    processGeneration: nestedRecord.processGeneration,
+    pricingRevision: typeof nestedRecord.pricingRevision === "string" ? nestedRecord.pricingRevision : null,
   });
 }
 
@@ -241,12 +253,12 @@ export function isRevisionConflict(error: unknown): error is DashboardConflictEr
     || (error instanceof DashboardRequestError && error.status === 409 && error.code === "revisionConflict");
 }
 
-function v3ApiBase(): string {
+function dashboardApiBase(base: "v3" | "v4"): string {
   if (window.location.pathname.startsWith("/dashboard")) {
-    return "/dashboard/api/v3";
+    return `/dashboard/api/${base}`;
   }
   // 回退仅覆盖 Gateway 监听默认端口 9042 的纯静态托管场景（如直接打开构建产物）
-  return "http://127.0.0.1:9042/dashboard/api/v3";
+  return `http://127.0.0.1:9042/dashboard/api/${base}`;
 }
 
 interface V3ErrorBody {
@@ -257,7 +269,8 @@ interface V3ErrorBody {
   nextAllowedAt?: unknown;
 }
 
-export async function requestV3<T>(
+export async function requestDashboard<T>(
+  base: "v3" | "v4",
   path: string,
   init: RequestInit = {},
   notifyAuthRequired = true,
@@ -266,7 +279,7 @@ export async function requestV3<T>(
   if (init.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
-  const response = await fetch(`${v3ApiBase()}${path}`, {
+  const response = await fetch(`${dashboardApiBase(base)}${path}`, {
     ...init,
     headers,
     credentials: "same-origin",
@@ -327,6 +340,22 @@ export async function requestV3<T>(
   return body;
 }
 
+export async function requestV3<T>(
+  path: string,
+  init: RequestInit = {},
+  notifyAuthRequired = true,
+): Promise<T> {
+  return requestDashboard<T>("v3", path, init, notifyAuthRequired);
+}
+
+export async function requestV4<T>(
+  path: string,
+  init: RequestInit = {},
+  notifyAuthRequired = true,
+): Promise<T> {
+  return requestDashboard<T>("v4", path, init, notifyAuthRequired);
+}
+
 function json(value: unknown): BodyInit {
   return JSON.stringify(value);
 }
@@ -334,7 +363,7 @@ function json(value: unknown): BodyInit {
 /** Mutation body without the CAS pair; the caller supplies it per attempt. */
 export type WithoutExpectation<T> = Omit<T, "expectedRevision" | "processGeneration">;
 
-function withExpectation<T extends object>(body: T, expectation: MutationExpectation): BodyInit {
+export function withExpectation<T extends object>(body: T, expectation: MutationExpectation): BodyInit {
   return json({ ...body, ...expectation });
 }
 
@@ -820,7 +849,7 @@ export const dashboardV3 = {
 
 export function browserSessionWebSocketUrl(token: string): string {
   const url = new URL(
-    `${v3ApiBase()}/browser/sessions/${encodeURIComponent(token)}/ws`,
+    `${dashboardApiBase("v3")}/browser/sessions/${encodeURIComponent(token)}/ws`,
     window.location.href,
   );
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";

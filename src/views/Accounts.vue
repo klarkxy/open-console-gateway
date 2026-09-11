@@ -285,6 +285,7 @@ import { PlusOutlined } from "@vicons/antd";
 import { DashboardRequestError, dashboardApi, isRevisionConflict } from "../api/dashboard";
 import { providerApi } from "../api/providers.ts";
 import { useAccountsStore } from "../stores/accounts.ts";
+import { useProvidersStore } from "../stores/providers.ts";
 import type { ProviderCatalogEntry } from "../api/providers.ts";
 import type {
   Account,
@@ -343,6 +344,7 @@ import type { PlatformAccountFormPayload } from "../components/PlatformAccountFo
 const dialog = useDialog();
 const message = useMessage();
 const accountsStore = useAccountsStore();
+const providersStore = useProvidersStore();
 const accounts = ref<Account[]>([]);
 const accountListLoading = ref(true);
 const accountListError = ref("");
@@ -592,13 +594,23 @@ async function handleCreatePlatform(payload: PlatformAccountFormPayload): Promis
 // The atomic create already saved supplier + first account; reload both lists
 // so the account and the new user-defined choice appear.
 async function onPresetAccountSaved(): Promise<void> {
-  await Promise.allSettled([loadAccounts(), loadProviderCatalog()]);
+  await Promise.allSettled([
+    loadAccounts(),
+    loadProviderCatalog(),
+    providersStore.loadCatalog(),
+    providersStore.loadConnections(),
+  ]);
   message.success(t("账号已添加"));
   showAddModal.value = false;
 }
 
 async function onPresetAccountConflict(): Promise<void> {
-  await Promise.allSettled([loadAccounts(), loadProviderCatalog()]);
+  await Promise.allSettled([
+    loadAccounts(),
+    loadProviderCatalog(),
+    providersStore.loadCatalog(),
+    providersStore.loadConnections(),
+  ]);
 }
 
 function resetFilters(): void {

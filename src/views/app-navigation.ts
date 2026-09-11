@@ -59,11 +59,13 @@ export const PROVIDER_DETAIL_TABS = ["models", "pricing", "settings"] as const;
 export type ProviderDetailTab = (typeof PROVIDER_DETAIL_TABS)[number];
 
 /**
- * Providers view deep link. `provider` is a catalog `provider_id`; `add`
- * opens the add flow (`preset` picks the embedded form's preset, or the
- * "manual" sentinel for the full manual form).
+ * Providers view deep link. `connection` is a V4 connection id; a leftover
+ * `provider` catalog id is still accepted on write by callers that only know
+ * the legacy identity (mapped on read). `add` opens the add flow (`preset`
+ * picks the embedded form's preset, or the "manual" sentinel).
  */
 export interface ProviderScopeQuery {
+  connection?: string;
   provider?: string;
   tab?: ProviderDetailTab;
   add?: boolean;
@@ -72,6 +74,7 @@ export interface ProviderScopeQuery {
 
 /** Normalized Providers query, with legacy scope_kind/scope_id/tab mapped. */
 export interface ProviderPageQuery {
+  connection: string | null;
   provider: string | null;
   tab: ProviderDetailTab | null;
   add: boolean;
@@ -105,6 +108,7 @@ export function normalizeProviderDetailTab(raw: string | null | undefined): Prov
  */
 export function readProviderPageQuery(search: string): ProviderPageQuery {
   const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
+  const connection = params.get("connection");
   let provider = params.get("provider");
   let add = params.get("add") === "1";
   let preset = params.get("preset");
@@ -119,6 +123,7 @@ export function readProviderPageQuery(search: string): ProviderPageQuery {
     }
   }
   return {
+    connection,
     provider,
     tab: normalizeProviderDetailTab(params.get("tab")),
     add,
@@ -157,6 +162,7 @@ export function applyAppViewSearchParams(
   url.searchParams.delete("scope_kind");
   url.searchParams.delete("scope_id");
   if (view !== "providers") {
+    url.searchParams.delete("connection");
     url.searchParams.delete("provider");
     url.searchParams.delete("preset");
     url.searchParams.delete("tab");
@@ -164,14 +170,21 @@ export function applyAppViewSearchParams(
   }
   if (scope === undefined) return url;
   if (scope === null) {
+    url.searchParams.delete("connection");
     url.searchParams.delete("provider");
     url.searchParams.delete("tab");
     url.searchParams.delete("add");
     url.searchParams.delete("preset");
     return url;
   }
-  if (scope.provider) url.searchParams.set("provider", scope.provider);
-  else url.searchParams.delete("provider");
+  if (scope.connection) {
+    url.searchParams.set("connection", scope.connection);
+    url.searchParams.delete("provider");
+  } else {
+    url.searchParams.delete("connection");
+    if (scope.provider) url.searchParams.set("provider", scope.provider);
+    else url.searchParams.delete("provider");
+  }
   if (scope.tab) url.searchParams.set("tab", scope.tab);
   else url.searchParams.delete("tab");
   if (scope.add) url.searchParams.set("add", "1");
