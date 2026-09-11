@@ -32,7 +32,9 @@ export type DashboardApiV4 =
   | OnboardingTaskDto
   | SubscriptionDto
   | DeclaredRelationDto
-  | IdentityLegacy;
+  | IdentityLegacy
+  | CredentialRotateRequest
+  | CredentialRotateResult;
 /**
  * Inference operation advertised by one endpoint. Mapped 1:1 from
  * [`UpstreamProtocolKind`].
@@ -344,4 +346,23 @@ export interface UpstreamAccountDto {
 export interface AuthorityRefDto {
   issuerOrSite: string;
   tenantOrSubject: string | null;
+}
+/**
+ * Required process-scoped mutation precondition.
+ *
+ * Both fields travel at the top level of every mutation request. The random
+ * process generation prevents a revision captured before restart from being
+ * accepted by a fresh process whose in-memory counter reused the same value.
+ */
+export interface CredentialRotateRequest {
+  expectedRevision: number;
+  processGeneration: number;
+  secretInput: string;
+}
+export interface CredentialRotateResult {
+  authStateVersion: number;
+  credentialId: string;
+  replayed: boolean;
+  revision: ControlRevision;
+  version: number;
 }

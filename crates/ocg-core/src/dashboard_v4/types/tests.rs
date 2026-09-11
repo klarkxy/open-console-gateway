@@ -1,5 +1,5 @@
 use super::*;
-use crate::dashboard_v3::{MutationExpectation, ProviderDefinitionAuthKind};
+use crate::dashboard_v3::{ControlRevision, MutationExpectation, ProviderDefinitionAuthKind};
 use serde_json::json;
 
 #[test]
@@ -223,4 +223,37 @@ fn identity_list_emits_camel_case_and_null_unknowns() {
         "account:a"
     );
     assert_eq!(value["identities"][0]["legacy"]["kind"], "account");
+}
+
+#[test]
+fn credential_rotate_request_is_camel_case_and_result_is_secret_free() {
+    let request = CredentialRotateRequest {
+        expectation: MutationExpectation {
+            expected_revision: 3,
+            process_generation: 9,
+        },
+        secret_input: "sk-rotate".into(),
+    };
+    let value = serde_json::to_value(&request).unwrap();
+    assert_eq!(value["expectedRevision"], 3);
+    assert_eq!(value["processGeneration"], 9);
+    assert_eq!(value["secretInput"], "sk-rotate");
+    assert!(value.get("operationId").is_none());
+    let result = CredentialRotateResult {
+        revision: ControlRevision {
+            revision: 4,
+            process_generation: 9,
+            pricing_revision: "p".into(),
+        },
+        credential_id: "cred".into(),
+        version: 2,
+        auth_state_version: 3,
+        replayed: false,
+    };
+    let result_value = serde_json::to_value(&result).unwrap();
+    assert_eq!(result_value["credentialId"], "cred");
+    assert_eq!(result_value["version"], 2);
+    assert_eq!(result_value["authStateVersion"], 3);
+    assert_eq!(result_value["replayed"], false);
+    assert!(result_value.get("secretInput").is_none());
 }

@@ -1017,6 +1017,69 @@ fn v45_open_repairs_missing_satellites_and_list_fails_closed() {
 }
 
 #[test]
+fn rotate_increments_version_and_auth_state_version_together() {
+    let dir = temp_data_dir("rotate-versions");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let mut keyed = account("rotate-go");
+    keyed.key_cipher = fixture_account_key_cipher();
+    keyed.auth_error = Some("stale-auth".into());
+    keyed.last_error = Some("stale-limit".into());
+    db.create_account(&keyed).unwrap();
+    let before: (i64, i64) = db
+        .conn
+        .query_row(
+            "SELECT version, auth_state_version FROM credential_state WHERE account_id = 'rotate-go'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(before, (1, 1));
+
+    let rotated = db
+        .rotate_account_credential("rotate-go", "replacement-cipher")
+        .unwrap();
+    assert_eq!(rotated.version, 2);
+    assert_eq!(rotated.auth_state_version, 2);
+    let after: (i64, i64, Option<String>, Option<String>, String) = db
+        .conn
+        .query_row(
+            "SELECT c.version, c.auth_state_version, a.auth_error, a.last_error, a.key_cipher
+             FROM credential_state c JOIN accounts a ON a.id = c.account_id
+             WHERE a.id = 'rotate-go'",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!((after.0, after.1), (2, 2));
+    assert!(after.2.is_none());
+    assert!(after.3.is_none());
+    assert_eq!(after.4, "replacement-cipher");
+
+    db.conn
+        .execute(
+            "DELETE FROM credential_state WHERE account_id = 'rotate-go'",
+            [],
+        )
+        .unwrap();
+    let repaired = db
+        .rotate_account_credential("rotate-go", "repaired-cipher")
+        .unwrap();
+    assert_eq!(repaired.version, 2);
+    assert_eq!(repaired.auth_state_version, 2);
+    assert_eq!(repaired.credential_id, rotated.credential_id);
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn v42_dynamic_read_paths_hide_builtin_rows() {
     let dir = temp_data_dir("v42-filter-builtins");
     let db = open_with_host_cipher(dir.clone()).unwrap();

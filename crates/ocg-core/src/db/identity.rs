@@ -3,8 +3,8 @@ use super::*;
 use ocg_domain::connection::{ConnectionId, LegacyConnectionKind, connection_id_for_legacy};
 use ocg_domain::credential::{
     CooldownFacts, DeclaredPlatformRelation, IdentityConfidence, LegacyAccountFacts, ModelScope,
-    OnboardingTaskKind, OnboardingTaskState, SubscriptionSource, identity_id_for_legacy_account,
-    identity_id_for_platform_account, legacy_account_objects,
+    OnboardingTaskKind, OnboardingTaskState, SubscriptionSource, credential_id_for_legacy_account,
+    identity_id_for_legacy_account, identity_id_for_platform_account, legacy_account_objects,
     onboarding_task_id_for_legacy_account,
 };
 
@@ -765,10 +765,106 @@ pub(crate) fn migrate_v45_body(tx: &Transaction<'_>) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RotatedCredential {
+    pub account_id: String,
+    pub credential_id: String,
+    pub version: u64,
+    pub auth_state_version: u64,
+}
+
 impl Database {
     pub fn list_identity_model(&self) -> Result<IdentityModelSnapshot> {
         list_identity_model_on(&self.conn)
     }
+
+    /// Replace the Key on one legacy account and bump both credential versions
+    /// in the same SQLite transaction. A missing `credential_state` row is
+    /// repaired with the deterministic id (version 1) then incremented.
+    pub fn rotate_account_credential(
+        &self,
+        account_id: &str,
+        key_cipher: &str,
+    ) -> Result<RotatedCredential> {
+        rotate_account_credential_on(&self.conn, account_id, key_cipher)
+    }
+}
+
+fn rotate_account_credential_on(
+    conn: &Connection,
+    account_id: &str,
+    key_cipher: &str,
+) -> Result<RotatedCredential> {
+    if !identity_model_writable(conn)? {
+        anyhow::bail!("identity model is not writable");
+    }
+    let credential_id = credential_id_for_legacy_account(account_id);
+    let now_rfc = Utc::now().to_rfc3339();
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let provider_id: String = tx
+        .query_row(
+            "SELECT provider_id FROM accounts WHERE id = ?1",
+            [account_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .ok_or_else(|| anyhow::anyhow!("account not found"))?;
+    let requires_verification = builtin_provider(&provider_id)
+        .is_some_and(|plan| plan.verification_policy == VerificationPolicy::Required);
+    let verification_status = if requires_verification {
+        ConnectionVerificationStatus::Pending
+    } else {
+        ConnectionVerificationStatus::NotRequired
+    };
+    let account_updated = tx.execute(
+        "UPDATE accounts SET
+            key_cipher = ?2,
+            auth_error = NULL,
+            last_error = NULL,
+            verification_status = ?3,
+            connection_verified_at = NULL,
+            verification_error = NULL,
+            updated_at = ?4
+         WHERE id = ?1",
+        params![
+            account_id,
+            key_cipher,
+            verification_status.as_str(),
+            now_rfc
+        ],
+    )?;
+    anyhow::ensure!(account_updated == 1, "account {account_id} was not updated");
+    tx.execute(
+        "INSERT OR IGNORE INTO credential_state (
+            account_id, credential_id, version, auth_state_version, rotated_at
+         ) VALUES (?1, ?2, 1, 1, NULL)",
+        params![account_id, credential_id.as_str()],
+    )?;
+    let updated = tx.execute(
+        "UPDATE credential_state
+         SET version = version + 1,
+             auth_state_version = auth_state_version + 1,
+             rotated_at = ?2
+         WHERE account_id = ?1",
+        params![account_id, now_rfc],
+    )?;
+    anyhow::ensure!(
+        updated == 1,
+        "account {account_id} is missing credential_state after repair"
+    );
+    let (stored_id, version, auth_state_version): (String, i64, i64) = tx.query_row(
+        "SELECT credential_id, version, auth_state_version
+         FROM credential_state WHERE account_id = ?1",
+        [account_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    tx.commit()?;
+    Ok(RotatedCredential {
+        account_id: account_id.to_string(),
+        credential_id: stored_id,
+        version: version as u64,
+        auth_state_version: auth_state_version as u64,
+    })
 }
 
 pub(crate) fn list_identity_model_on(conn: &Connection) -> Result<IdentityModelSnapshot> {

@@ -53,6 +53,8 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "SubscriptionDto",
     "DeclaredRelationDto",
     "IdentityLegacy",
+    "CredentialRotateRequest",
+    "CredentialRotateResult",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -425,6 +427,26 @@ pub struct IdentityList {
     pub identities: Vec<IdentitySummary>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CredentialRotateRequest {
+    #[serde(flatten)]
+    pub expectation: MutationExpectation,
+    pub secret_input: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CredentialRotateResult {
+    pub revision: ControlRevision,
+    pub credential_id: String,
+    pub version: u64,
+    pub auth_state_version: u64,
+    pub replayed: bool,
+}
+
 /// Deterministic JSON Schema catalog for the V4 contract.
 ///
 /// Generator settings match V3: draft 2020-12, serialize-mode for response
@@ -458,6 +480,7 @@ pub fn contract_schema() -> Value {
     include_type::<SubscriptionDto>(&mut serialize);
     include_type::<DeclaredRelationDto>(&mut serialize);
     include_type::<IdentityLegacy>(&mut serialize);
+    include_type::<CredentialRotateResult>(&mut serialize);
     let mut defs = serialize.take_definitions(true);
 
     let mut deserialize = SchemaSettings::draft2020_12().into_generator();
@@ -465,6 +488,7 @@ pub fn contract_schema() -> Value {
     include_type::<OnboardingConnection>(&mut deserialize);
     include_type::<OnboardingAuthorization>(&mut deserialize);
     include_type::<OnboardingTarget>(&mut deserialize);
+    include_type::<CredentialRotateRequest>(&mut deserialize);
     for (name, schema) in deserialize.take_definitions(true) {
         defs.entry(name).or_insert(schema);
     }
@@ -478,7 +502,7 @@ pub fn contract_schema() -> Value {
     json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "DashboardApiV4",
-        "$comment": "Extensible Dashboard V4 contract catalog. Add new $defs for later DTOs; do not rename or reshape existing definitions. Connection and template listings are secret-free. OnboardingCommitRequest.secretInput is write-only.",
+        "$comment": "Extensible Dashboard V4 contract catalog. Add new $defs for later DTOs; do not rename or reshape existing definitions. Connection and template listings are secret-free. OnboardingCommitRequest.secretInput and CredentialRotateRequest.secretInput are write-only.",
         "anyOf": catalog_refs(&defs),
         "$defs": defs })
 }

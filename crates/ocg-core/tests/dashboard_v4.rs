@@ -8,7 +8,10 @@ use ocg_core::provider::{
     ZEN_FREE_ACCOUNT_ID, default_credential_kind, default_quota_scope,
 };
 use ocg_domain::connection::{LegacyConnectionKind, connection_id_for_legacy};
-use ocg_domain::credential::anonymous_binding_id_for;
+use ocg_domain::credential::{
+    anonymous_binding_id_for, credential_id_for_legacy_account,
+    observer_credential_id_for_platform_account,
+};
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -1480,6 +1483,388 @@ async fn identities_project_zen_free_as_anonymous_with_stored_binding_id() {
     assert_eq!(
         zen["credentials"][0]["bindings"][0]["id"],
         anonymous_binding_id_for(&connection).as_str()
+    );
+    harness.stop();
+}
+
+fn credential_of<'a>(body: &'a Value, kind: &str, id: &str) -> &'a Value {
+    &find_identity_legacy(body, kind, id)["credentials"][0]
+}
+
+async fn create_go_account(harness: &V3Harness, name: &str, key: &str) -> String {
+    let (status, created) = send_v3(
+        harness,
+        Method::POST,
+        "/accounts",
+        &cas(
+            harness,
+            json!({
+                "providerId": OPENCODE_PROVIDER_ID,
+                "name": name,
+                "key": key
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    created["account"]["id"].as_str().unwrap().to_string()
+}
+
+#[tokio::test]
+async fn rotate_increments_version_keeps_ids_and_clears_old_auth_error() {
+    let harness = start_loopback("v4-rotate-d06").await;
+    let secret = "sk-rotate-d06";
+    let account_id = create_go_account(&harness, "Rotate D06", "sk-original-d06").await;
+    harness
+        .state
+        .db
+        .lock()
+        .set_account_auth_error(&account_id, Some("stale auth"))
+        .unwrap();
+    harness
+        .state
+        .db
+        .lock()
+        .set_account_cooldown(
+            &account_id,
+            Some(Utc::now() + Duration::hours(1)),
+            Some("stale last error"),
+        )
+        .unwrap();
+    let (status, before) = send_v4(&harness, Method::GET, "/accounts", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{before}");
+    let identity = find_identity_legacy(&before, "account", &account_id);
+    let credential = &identity["credentials"][0];
+    assert_eq!(credential["credential"]["authState"], "invalid");
+    let credential_id = credential["credential"]["id"].as_str().unwrap().to_string();
+    let identity_id = identity["identity"]["id"].as_str().unwrap().to_string();
+    let binding_id = credential["bindings"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let version = credential["credential"]["version"].as_u64().unwrap();
+    let auth_state_version = credential["credential"]["authStateVersion"]
+        .as_u64()
+        .unwrap();
+
+    let (status, result) = send_v4(
+        &harness,
+        Method::POST,
+        &format!("/credentials/{credential_id}/rotate"),
+        &cas(&harness, json!({ "secretInput": secret })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_eq!(result["credentialId"], credential_id);
+    assert_eq!(result["version"], version + 1);
+    assert_eq!(result["authStateVersion"], auth_state_version + 1);
+    assert_eq!(result["replayed"], false);
+
+    let (status, after) = send_v4(&harness, Method::GET, "/accounts", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{after}");
+    let identity = find_identity_legacy(&after, "account", &account_id);
+    let credential = &identity["credentials"][0];
+    assert_eq!(identity["identity"]["id"], identity_id);
+    assert_eq!(credential["credential"]["id"], credential_id);
+    assert_eq!(credential["bindings"][0]["id"], binding_id);
+    assert_eq!(credential["credential"]["version"], version + 1);
+    assert_eq!(
+        credential["credential"]["authStateVersion"],
+        auth_state_version + 1
+    );
+    assert_eq!(credential["credential"]["authState"], "unknown");
+    assert!(credential["lastError"].is_null(), "{credential}");
+    let stored = harness
+        .state
+        .db
+        .lock()
+        .get_account(&account_id)
+        .unwrap()
+        .expect("account");
+    assert!(stored.auth_error.is_none());
+    assert!(stored.last_error.is_none());
+    assert_eq!(
+        harness.state.decrypt_key(&stored.key_cipher).unwrap(),
+        secret
+    );
+    harness.stop();
+}
+
+#[tokio::test]
+async fn rotate_does_not_create_a_second_account_or_binding() {
+    let harness = start_loopback("v4-rotate-no-second").await;
+    let account_id = create_go_account(&harness, "Rotate Once", "sk-once").await;
+    let counts = |harness: &V3Harness| {
+        let db = harness.state.db.lock();
+        let accounts = db.list_accounts().unwrap().len();
+        let snapshot = db.list_identity_model().unwrap();
+        (
+            accounts,
+            snapshot.identities.len(),
+            snapshot.accounts.len(),
+            snapshot
+                .accounts
+                .iter()
+                .map(|record| record.binding_id.clone())
+                .collect::<std::collections::BTreeSet<_>>(),
+            snapshot
+                .accounts
+                .iter()
+                .map(|record| record.credential_id.clone())
+                .collect::<std::collections::BTreeSet<_>>(),
+        )
+    };
+    let before = counts(&harness);
+    let (status, listed) = send_v4(&harness, Method::GET, "/accounts", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    let credential_id = credential_of(&listed, "account", &account_id)["credential"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (status, result) = send_v4(
+        &harness,
+        Method::POST,
+        &format!("/credentials/{credential_id}/rotate"),
+        &cas(&harness, json!({ "secretInput": "sk-once-rotated" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_eq!(counts(&harness), before);
+    let (status, after) = send_v4(&harness, Method::GET, "/accounts", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{after}");
+    let identity = find_identity_legacy(&after, "account", &account_id);
+    assert_eq!(identity["credentials"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        identity["credentials"][0]["bindings"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    harness.stop();
+}
+
+#[tokio::test]
+async fn rotate_unknown_or_observer_or_anonymous_is_rejected() {
+    let harness = start_loopback("v4-rotate-rejected").await;
+    let (status, parent) = send_v3(
+        &harness,
+        Method::POST,
+        "/platform-accounts",
+        &cas(
+            &harness,
+            json!({
+                "kind": "new_api",
+                "name": "Observer Parent",
+                "baseUrl": "https://observer.example/v1",
+                "userCredential": "sk-observer"
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{parent}");
+    let parent_id = parent["accounts"][0]["id"].as_str().unwrap().to_string();
+    let observer_id = observer_credential_id_for_platform_account(&parent_id).to_string();
+    let anonymous_id = credential_id_for_legacy_account(ZEN_FREE_ACCOUNT_ID).to_string();
+    let (status, created) = send_v3(
+        &harness,
+        Method::POST,
+        "/providers",
+        &cas(
+            &harness,
+            create_body(
+                "No Auth Rotate",
+                "https://none-rotate.example/v1/chat/completions",
+                "chat_completions",
+                "none",
+                None,
+            ),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let (status, listed) = send_v4(&harness, Method::GET, "/accounts", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    let no_auth_account = identities_of(&listed)
+        .iter()
+        .find(|identity| {
+            identity["legacy"]["kind"] == "account"
+                && identity["identity"]["label"] == "No Auth Rotate"
+        })
+        .expect("no-auth identity");
+    let no_auth_id = no_auth_account["credentials"][0]["credential"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let unknown = send_v4(
+        &harness,
+        Method::POST,
+        "/credentials/00000000-0000-0000-0000-000000000000/rotate",
+        &cas(&harness, json!({ "secretInput": "sk-unused" })),
+    )
+    .await;
+    assert_eq!(unknown.0, StatusCode::NOT_FOUND, "{}", unknown.1);
+    assert_eq!(unknown.1["code"], "notFound");
+
+    let observer = send_v4(
+        &harness,
+        Method::POST,
+        &format!("/credentials/{observer_id}/rotate"),
+        &cas(&harness, json!({ "secretInput": "sk-unused" })),
+    )
+    .await;
+    assert_eq!(observer.0, StatusCode::BAD_REQUEST, "{}", observer.1);
+    assert_eq!(observer.1["code"], "invalidRequest");
+    assert!(
+        observer.1["message"]
+            .as_str()
+            .unwrap()
+            .contains("platform observer"),
+        "{}",
+        observer.1
+    );
+
+    let anonymous = send_v4(
+        &harness,
+        Method::POST,
+        &format!("/credentials/{anonymous_id}/rotate"),
+        &cas(&harness, json!({ "secretInput": "sk-unused" })),
+    )
+    .await;
+    assert_eq!(anonymous.0, StatusCode::BAD_REQUEST, "{}", anonymous.1);
+    assert_eq!(anonymous.1["code"], "invalidRequest");
+
+    let no_auth = send_v4(
+        &harness,
+        Method::POST,
+        &format!("/credentials/{no_auth_id}/rotate"),
+        &cas(&harness, json!({ "secretInput": "sk-unused" })),
+    )
+    .await;
+    assert_eq!(no_auth.0, StatusCode::BAD_REQUEST, "{}", no_auth.1);
+    assert_eq!(no_auth.1["code"], "invalidRequest");
+    harness.stop();
+}
+
+#[tokio::test]
+async fn rotate_cas_conflict_writes_nothing() {
+    let harness = start_loopback("v4-rotate-cas").await;
+    let account_id = create_go_account(&harness, "Rotate CAS", "sk-cas-original").await;
+    let before = harness
+        .state
+        .db
+        .lock()
+        .get_account(&account_id)
+        .unwrap()
+        .expect("account");
+    let (status, listed) = send_v4(&harness, Method::GET, "/accounts", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    let credential = credential_of(&listed, "account", &account_id);
+    let versions = (
+        credential["credential"]["version"].as_u64().unwrap(),
+        credential["credential"]["authStateVersion"]
+            .as_u64()
+            .unwrap(),
+    );
+    let credential_id = credential["credential"]["id"].as_str().unwrap().to_string();
+    let mut body = cas(&harness, json!({ "secretInput": "sk-cas-rotated" }));
+    body["expectedRevision"] = json!(harness.state.settings_revision() + 99);
+    let (status, error) = send_v4(
+        &harness,
+        Method::POST,
+        &format!("/credentials/{credential_id}/rotate"),
+        &body,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{error}");
+    assert_eq!(error["code"], "revisionConflict");
+    let after = harness
+        .state
+        .db
+        .lock()
+        .get_account(&account_id)
+        .unwrap()
+        .expect("account");
+    assert_eq!(after.key_cipher, before.key_cipher);
+    let (status, listed) = send_v4(&harness, Method::GET, "/accounts", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    let credential = credential_of(&listed, "account", &account_id);
+    assert_eq!(
+        (
+            credential["credential"]["version"].as_u64().unwrap(),
+            credential["credential"]["authStateVersion"]
+                .as_u64()
+                .unwrap(),
+        ),
+        versions
+    );
+    harness.stop();
+}
+
+#[tokio::test]
+async fn rotate_response_is_secret_free() {
+    let harness = start_loopback("v4-rotate-secret-free").await;
+    let secret = "sk-rotate-never-echo";
+    let account_id = create_go_account(&harness, "Rotate Secret", "sk-before-secret").await;
+    let credential_id = credential_id_for_legacy_account(&account_id).to_string();
+    let (status, result) = send_v4(
+        &harness,
+        Method::POST,
+        &format!("/credentials/{credential_id}/rotate"),
+        &cas(&harness, json!({ "secretInput": secret })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_secret_free(&result, &[secret, "sk-before-secret"]);
+    assert!(result.get("secretInput").is_none());
+    harness.stop();
+}
+
+#[tokio::test]
+async fn rotate_makes_zero_outbound_requests() {
+    let (upstream, calls, _stop) = start_fake_upstream(HashMap::new()).await;
+    let harness = start_loopback("v4-rotate-no-outbound").await;
+    let (status, created) = send_v3(
+        &harness,
+        Method::POST,
+        "/providers",
+        &cas(
+            &harness,
+            create_body(
+                "Quiet Rotate",
+                &format!("{upstream}/v1/chat/completions"),
+                "chat_completions",
+                "bearer",
+                Some("sk-quiet-rotate"),
+            ),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let (status, listed) = send_v4(&harness, Method::GET, "/accounts", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    let credential_id = identities_of(&listed)
+        .iter()
+        .find(|identity| {
+            identity["legacy"]["kind"] == "account"
+                && identity["identity"]["label"] == "Quiet Rotate"
+        })
+        .expect("dynamic identity")["credentials"][0]["credential"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (status, result) = send_v4(
+        &harness,
+        Method::POST,
+        &format!("/credentials/{credential_id}/rotate"),
+        &cas(&harness, json!({ "secretInput": "sk-quiet-rotated" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert!(
+        calls.lock().expect("fake call log").is_empty(),
+        "credential rotate must not issue outbound requests"
     );
     harness.stop();
 }

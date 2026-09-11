@@ -11,6 +11,8 @@ import type { MutationExpectation } from "./generated/dashboard-v3.ts";
 import type {
   ConnectionList,
   ControlRevision,
+  CredentialRotateRequest,
+  CredentialRotateResult,
   IdentityList,
   OnboardingCommitRequest,
   OnboardingCommitResult,
@@ -29,4 +31,15 @@ export const dashboardV4 = {
     method: "POST",
     body: withExpectation(input, expectation),
   }),
+  rotateCredential: (
+    id: string,
+    input: WithoutExpectation<CredentialRotateRequest>,
+    expectation: MutationExpectation,
+  ) => requestV4<CredentialRotateResult>(
+    `/credentials/${encodeURIComponent(id)}/rotate`,
+    {
+      method: "POST",
+      body: withExpectation(input, expectation),
+    },
+  ),
 };

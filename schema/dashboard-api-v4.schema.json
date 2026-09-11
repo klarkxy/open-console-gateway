@@ -1,5 +1,5 @@
 {
-  "$comment": "Extensible Dashboard V4 contract catalog. Add new $defs for later DTOs; do not rename or reshape existing definitions. Connection and template listings are secret-free. OnboardingCommitRequest.secretInput is write-only.",
+  "$comment": "Extensible Dashboard V4 contract catalog. Add new $defs for later DTOs; do not rename or reshape existing definitions. Connection and template listings are secret-free. OnboardingCommitRequest.secretInput and CredentialRotateRequest.secretInput are write-only.",
   "$defs": {
     "AccountAuthScheme": {
       "description": "Custom auth scheme. Wire values match V2 kebab-case.",
@@ -399,6 +399,63 @@
         "platform_observer"
       ],
       "type": "string"
+    },
+    "CredentialRotateRequest": {
+      "additionalProperties": false,
+      "description": "Required process-scoped mutation precondition.\n\nBoth fields travel at the top level of every mutation request. The random\nprocess generation prevents a revision captured before restart from being\naccepted by a fresh process whose in-memory counter reused the same value.",
+      "properties": {
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "secretInput": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "secretInput"
+      ],
+      "type": "object"
+    },
+    "CredentialRotateResult": {
+      "additionalProperties": false,
+      "properties": {
+        "authStateVersion": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "credentialId": {
+          "type": "string"
+        },
+        "replayed": {
+          "type": "boolean"
+        },
+        "revision": {
+          "$ref": "#/$defs/ControlRevision"
+        },
+        "version": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "revision",
+        "credentialId",
+        "version",
+        "authStateVersion",
+        "replayed"
+      ],
+      "type": "object"
     },
     "CredentialSummary": {
       "additionalProperties": false,
@@ -1402,6 +1459,12 @@
     },
     {
       "$ref": "#/$defs/IdentityLegacy"
+    },
+    {
+      "$ref": "#/$defs/CredentialRotateRequest"
+    },
+    {
+      "$ref": "#/$defs/CredentialRotateResult"
     }
   ],
   "title": "DashboardApiV4"
