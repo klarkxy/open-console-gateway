@@ -1868,3 +1868,311 @@ async fn rotate_makes_zero_outbound_requests() {
     );
     harness.stop();
 }
+
+#[tokio::test]
+async fn d05_second_product_reuses_identity_and_joins_declared_pool() {
+    let harness = start_loopback("v4-d05-second-product").await;
+    let account_id = create_go_account(&harness, "Plan Key", "sk-plan-d05").await;
+    let (status, listed) = send_v4(&harness, Method::GET, "/accounts", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    let identity = find_identity_legacy(&listed, "account", &account_id);
+    let identity_id = identity["identity"]["id"].as_str().unwrap().to_string();
+    let first_credential = identity["credentials"][0]["credential"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let first_binding = identity["credentials"][0]["bindings"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let (status, created) = send_v3(
+        &harness,
+        Method::POST,
+        "/providers",
+        &cas(
+            &harness,
+            create_body(
+                "API Product",
+                "https://api-d05.example/v1/chat/completions",
+                "chat_completions",
+                "bearer",
+                Some("sk-api-other-identity"),
+            ),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let (status, connections) = send_v4(&harness, Method::GET, "/connections", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{connections}");
+    let api_connection = connections["connections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|connection| connection["name"] == "API Product")
+        .expect("api connection")["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let plan_connection =
+        connection_id_for_legacy(LegacyConnectionKind::BuiltinProvider, OPENCODE_PROVIDER_ID)
+            .to_string();
+    assert_ne!(api_connection, plan_connection);
+
+    let (status, result) = send_v4(
+        &harness,
+        Method::POST,
+        &format!("/identities/{identity_id}/credentials"),
+        &cas(
+            &harness,
+            json!({
+                "connectionId": api_connection,
+                "secretInput": "sk-plan-api-d05"
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_eq!(result["identityId"], identity_id);
+    assert_eq!(result["connectionId"], api_connection);
+    assert_eq!(result["replayed"], false);
+    assert_secret_free(
+        &result,
+        &["sk-plan-api-d05", "sk-plan-d05", "sk-api-other-identity"],
+    );
+
+    let (status, after) = send_v4(&harness, Method::GET, "/accounts", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{after}");
+    let identity = identities_of(&after)
+        .iter()
+        .find(|item| item["identity"]["id"] == identity_id)
+        .expect("shared identity");
+    assert_eq!(identity["credentials"].as_array().unwrap().len(), 2);
+    let connection_ids: Vec<_> = identity["credentials"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|credential| credential["bindings"][0]["connectionId"].as_str().unwrap())
+        .collect();
+    assert!(connection_ids.contains(&plan_connection.as_str()));
+    assert!(connection_ids.contains(&api_connection.as_str()));
+    assert_ne!(result["credentialId"], first_credential);
+    assert_ne!(result["bindingId"], first_binding);
+
+    let members = harness
+        .state
+        .db
+        .lock()
+        .shared_pool_account_ids(&account_id)
+        .unwrap();
+    assert!(members.contains(&account_id));
+    assert!(members.contains(&result["accountId"].as_str().unwrap().to_string()));
+    assert_eq!(members.len(), 2);
+    harness.stop();
+}
+
+#[tokio::test]
+async fn d05_bindings_enable_independently_and_cas_miss_writes_nothing() {
+    let harness = start_loopback("v4-d05-binding-patch").await;
+    let account_id = create_go_account(&harness, "Scope A", "sk-scope-a").await;
+    let (status, listed) = send_v4(&harness, Method::GET, "/accounts", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    let identity = find_identity_legacy(&listed, "account", &account_id);
+    let identity_id = identity["identity"]["id"].as_str().unwrap().to_string();
+    let first_binding = identity["credentials"][0]["bindings"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let plan_connection = identity["credentials"][0]["bindings"][0]["connectionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let (status, second) = send_v4(
+        &harness,
+        Method::POST,
+        &format!("/identities/{identity_id}/credentials"),
+        &cas(
+            &harness,
+            json!({
+                "connectionId": plan_connection,
+                "secretInput": "sk-scope-b"
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    let second_binding = second["bindingId"].as_str().unwrap().to_string();
+
+    let (status, patched) = send_v4(
+        &harness,
+        Method::PATCH,
+        &format!("/bindings/{second_binding}"),
+        &cas(
+            &harness,
+            json!({
+                "enabled": false,
+                "modelScope": { "kind": "only", "models": ["glm-5.1"] }
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{patched}");
+    assert_eq!(patched["binding"]["id"], second_binding);
+    assert_eq!(patched["binding"]["enabled"], false);
+    assert_eq!(patched["binding"]["modelScope"]["kind"], "only");
+
+    let (status, after) = send_v4(&harness, Method::GET, "/accounts", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{after}");
+    let identity = identities_of(&after)
+        .iter()
+        .find(|item| item["identity"]["id"] == identity_id)
+        .expect("identity");
+    let bindings: Vec<&Value> = identity["credentials"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|credential| &credential["bindings"][0])
+        .collect();
+    let first = bindings
+        .iter()
+        .find(|binding| binding["id"] == first_binding)
+        .unwrap();
+    let second = bindings
+        .iter()
+        .find(|binding| binding["id"] == second_binding)
+        .unwrap();
+    assert_eq!(first["enabled"], true);
+    assert_eq!(first["modelScope"]["kind"], "all");
+    assert_eq!(second["enabled"], false);
+    assert_eq!(second["modelScope"]["kind"], "only");
+
+    let mut stale = cas(&harness, json!({ "enabled": true }));
+    stale["expectedRevision"] = json!(harness.state.settings_revision() + 99);
+    let (status, error) = send_v4(
+        &harness,
+        Method::PATCH,
+        &format!("/bindings/{second_binding}"),
+        &stale,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{error}");
+    assert_eq!(error["code"], "revisionConflict");
+    let (status, listed) = send_v4(&harness, Method::GET, "/accounts", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    let still = identities_of(&listed)
+        .iter()
+        .find(|item| item["identity"]["id"] == identity_id)
+        .expect("identity")["credentials"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|credential| credential["bindings"][0]["id"] == second_binding)
+        .unwrap();
+    assert_eq!(still["bindings"][0]["enabled"], false);
+    harness.stop();
+}
+
+#[tokio::test]
+async fn d02_exhausting_shared_pool_via_key_a_blocks_key_b() {
+    let harness = start_loopback("v4-d02-shared-quota").await;
+    let account_a = create_go_account(&harness, "Quota A", "sk-quota-a").await;
+    let (status, listed) = send_v4(&harness, Method::GET, "/accounts", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    let identity = find_identity_legacy(&listed, "account", &account_a);
+    let identity_id = identity["identity"]["id"].as_str().unwrap().to_string();
+    let plan_connection = identity["credentials"][0]["bindings"][0]["connectionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (status, second) = send_v4(
+        &harness,
+        Method::POST,
+        &format!("/identities/{identity_id}/credentials"),
+        &cas(
+            &harness,
+            json!({
+                "connectionId": plan_connection,
+                "secretInput": "sk-quota-b"
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    let account_b = second["accountId"].as_str().unwrap().to_string();
+    let until = Utc::now() + Duration::hours(3);
+    harness
+        .state
+        .db
+        .lock()
+        .set_account_rate_limit(&account_a, until, "429 pool empty", None)
+        .unwrap();
+    let stored_b = harness
+        .state
+        .db
+        .lock()
+        .get_account(&account_b)
+        .unwrap()
+        .expect("key b");
+    assert_eq!(stored_b.cooldown_generic_until, Some(until));
+    assert!(stored_b.is_cooling_for(ocg_core::models::UpstreamChannel::Go, Utc::now()));
+    harness.stop();
+}
+
+#[tokio::test]
+async fn binding_and_second_credential_reject_meaningless_targets() {
+    let harness = start_loopback("v4-d-class-rejects").await;
+    let zen_binding = {
+        let (status, listed) = send_v4(&harness, Method::GET, "/accounts", &Value::Null).await;
+        assert_eq!(status, StatusCode::OK, "{listed}");
+        find_identity_legacy(&listed, "account", ZEN_FREE_ACCOUNT_ID)["credentials"][0]["bindings"]
+            [0]["id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let unknown = send_v4(
+        &harness,
+        Method::PATCH,
+        "/bindings/00000000-0000-0000-0000-000000000000",
+        &cas(&harness, json!({ "enabled": false })),
+    )
+    .await;
+    assert_eq!(unknown.0, StatusCode::NOT_FOUND, "{}", unknown.1);
+    let zen = send_v4(
+        &harness,
+        Method::PATCH,
+        &format!("/bindings/{zen_binding}"),
+        &cas(&harness, json!({ "enabled": false })),
+    )
+    .await;
+    assert_eq!(zen.0, StatusCode::BAD_REQUEST, "{}", zen.1);
+
+    let account_id = create_go_account(&harness, "Reject Host", "sk-reject-host").await;
+    let (status, listed) = send_v4(&harness, Method::GET, "/accounts", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    let identity_id = find_identity_legacy(&listed, "account", &account_id)["identity"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let zen_connection = connection_id_for_legacy(
+        LegacyConnectionKind::BuiltinProvider,
+        OPENCODE_ZEN_FREE_PROVIDER_ID,
+    )
+    .to_string();
+    let rejected = send_v4(
+        &harness,
+        Method::POST,
+        &format!("/identities/{identity_id}/credentials"),
+        &cas(
+            &harness,
+            json!({
+                "connectionId": zen_connection,
+                "secretInput": "sk-unused"
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(rejected.0, StatusCode::BAD_REQUEST, "{}", rejected.1);
+    harness.stop();
+}

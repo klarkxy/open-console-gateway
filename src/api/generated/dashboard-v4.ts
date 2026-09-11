@@ -34,7 +34,11 @@ export type DashboardApiV4 =
   | DeclaredRelationDto
   | IdentityLegacy
   | CredentialRotateRequest
-  | CredentialRotateResult;
+  | CredentialRotateResult
+  | BindingPatchRequest
+  | BindingPatchResult
+  | IdentityCredentialCreateRequest
+  | IdentityCredentialCreateResult;
 /**
  * Inference operation advertised by one endpoint. Mapped 1:1 from
  * [`UpstreamProtocolKind`].
@@ -362,6 +366,47 @@ export interface CredentialRotateRequest {
 export interface CredentialRotateResult {
   authStateVersion: number;
   credentialId: string;
+  replayed: boolean;
+  revision: ControlRevision;
+  version: number;
+}
+/**
+ * Required process-scoped mutation precondition.
+ *
+ * Both fields travel at the top level of every mutation request. The random
+ * process generation prevents a revision captured before restart from being
+ * accepted by a fresh process whose in-memory counter reused the same value.
+ */
+export interface BindingPatchRequest {
+  enabled?: boolean | null;
+  expectedRevision: number;
+  modelScope?: ModelScope | null;
+  processGeneration: number;
+}
+export interface BindingPatchResult {
+  binding: BindingDto;
+  revision: ControlRevision;
+}
+/**
+ * Required process-scoped mutation precondition.
+ *
+ * Both fields travel at the top level of every mutation request. The random
+ * process generation prevents a revision captured before restart from being
+ * accepted by a fresh process whose in-memory counter reused the same value.
+ */
+export interface IdentityCredentialCreateRequest {
+  connectionId: string;
+  expectedRevision: number;
+  processGeneration: number;
+  secretInput: string;
+}
+export interface IdentityCredentialCreateResult {
+  accountId: string;
+  authStateVersion: number;
+  bindingId: string;
+  connectionId: string;
+  credentialId: string;
+  identityId: string;
   replayed: boolean;
   revision: ControlRevision;
   version: number;

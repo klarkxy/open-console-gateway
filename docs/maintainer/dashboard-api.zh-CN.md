@@ -30,7 +30,7 @@
 
 面板 JSON 位于 `/dashboard/api/v4`。它是冻结 V3 旁边的并行、仅增量控制面。V3 的 `$defs` 与路由不再增加新字段。
 
-V4 复用 V3 会话中间件。其列表返回与 V3 CAS 相同的 `ControlRevision`（`expectedRevision` / `processGeneration`）。V4 变更是 `POST /onboarding/commit` 与 `POST /credentials/{id}/rotate`，它们检查这两枚令牌；只读路由不检查。
+V4 复用 V3 会话中间件。其列表返回与 V3 CAS 相同的 `ControlRevision`（`expectedRevision` / `processGeneration`）。V4 变更是 `POST /onboarding/commit`、`POST /credentials/{id}/rotate`、`PATCH /bindings/{id}` 与 `POST /identities/{id}/credentials`，它们检查这两枚令牌；只读路由不检查。
 
 冻结契约是 `schema/dashboard-api-v4.schema.json`，由 `dashboard_v4::contract_schema_pretty()` 经 `crates/ocg-core/examples/export_dashboard_v4_schema.rs` 生成。生成的 TypeScript（`src/api/generated/dashboard-v4.ts`）只有类型，没有 HTTP 封装。`dashboard_v4/types.rs` 的 `CATALOG_TYPE_NAMES` 同样是有序 `$defs` 目录；追加时必须保持既有 definition 对象字节一致。
 
@@ -59,6 +59,10 @@ V4 不把授权 `unknown` 当作 `valid`。资格是本地投影，不是上游�
 **幂等操作。** `operationId` 与载荷摘要绑定一次提交：摘要是只对语义载荷——`operationId`、`connection`、`authorization`（因此覆盖密钥）与 `targets`——计算的 hex HMAC-SHA256；`expectedRevision` / `processGeneration` 不参与，所以刷新 CAS 令牌后的重试仍会重放。Schema v44 把每次提交存在 `dashboard_operations`；已存的 `result_json` 不含密钥。插入时会清理超过 30 天的行；被清理后，同一 `operationId` 视为新写入。
 
 `POST /credentials/{id}/rotate` 替换一条投影凭据上的 Key。必须带 CAS 令牌，没有 `operationId`。凭据 id、绑定与配额关系保持不变。`version` 与 `authStateVersion` 一起递增；`authState` 变为 `unknown`；底层账号的 `auth_error` / `last_error` 与验证结果会被清空，避免旧版本污染新 Key。请求体是 `{ secretInput }` 加上 CAS 令牌。结果不含密钥。平台观察者、匿名、无鉴权与 CPA 凭据返回 `400`。未知 id 返回 `404`。过期 CAS 令牌返回 `409` 且不写入。
+
+`PATCH /bindings/{id}` 编辑一条推理绑定。必须带 CAS 令牌，没有 `operationId`。请求体是 `{ modelScope?, enabled? }` 加上 CAS 令牌，至少要有其中一个字段。`modelScope` 为 `{ kind: "all" }` 或 `{ kind: "only", models: [...] }`（精确 id，沿用既有模型名归一化）。同一身份上各绑定的启停彼此独立。未知 id 返回 `404`。平台观察者、匿名、无鉴权与 CPA 绑定返回 `400`。过期 CAS 令牌返回 `409` 且不写入。结果为 `{ revision, binding }`，不含密钥。
+
+`POST /identities/{id}/credentials` 给已确认身份再加一把 Key。必须带 CAS 令牌，没有 `operationId`。请求体是 `{ connectionId, secretInput }` 加上 CAS 令牌。写入会新建一行 `accounts` 并复用既有 `identity_id`，插入 `credential_state` 与 `credential_bindings`，并把新账号加入该身份的额度池，全部落在同一 SQLite 事务中。不同的 `connectionId` 是第二件产品（D05）；同一 Plan connection 则是该产品上的另一把 Key。换 Key 不会另起一个新池。未知身份或 connection 返回 `404`。内置不可变 / Zen Free / CPA / 无鉴权 / Custom API / 平台观察者目标返回 `400`。过期 CAS 令牌返回 `409` 且不写入。结果不含密钥。
 
 面板用 `GET /connections` 渲染供应商页 rail，用 `POST /onboarding/commit` 创建用户定义供应商，并用 `GET /accounts` 作为账号页的展示叠加。客户端在草稿改动时生成新的 `operationId`，对未改动草稿的重试沿用同一 id，成功后再重新生成。编辑、删除、给已有账号添加 Key，以及账号页上的全部账号操作仍走 V3。
 

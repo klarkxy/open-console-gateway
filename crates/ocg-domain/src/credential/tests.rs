@@ -274,3 +274,40 @@ fn origin_from_endpoint_url_strips_path() {
     );
     assert_eq!(origin_from_endpoint_url("not-a-url"), None);
 }
+
+#[test]
+fn model_scope_all_allows_every_public_or_routing_id() {
+    assert!(model_scope_allows(&ModelScope::All, "glm-5.2"));
+    assert!(model_scope_allows(&ModelScope::All, "vendor/opus"));
+    assert!(model_scope_allows(&ModelScope::All, ""));
+}
+
+#[test]
+fn model_scope_only_is_normalized_exact_id_allowlist() {
+    let scope = ModelScope::Only {
+        models: vec!["glm-5.2".into(), "vendor/opus".into()],
+    };
+    assert!(model_scope_allows(&scope, "glm-5.2"));
+    assert!(model_scope_allows(&scope, "GLM 5.2"));
+    assert!(model_scope_allows(&scope, "glm_5.2"));
+    assert!(model_scope_allows(&scope, "vendor/opus"));
+    assert!(!model_scope_allows(&scope, "glm-5.1"));
+    assert!(!model_scope_allows(&scope, "other"));
+    assert!(!model_scope_allows(&scope, ""));
+    assert!(!model_scope_allows(
+        &ModelScope::Only { models: vec![] },
+        "glm-5.2"
+    ));
+}
+
+#[test]
+fn quota_pool_ids_are_deterministic_and_identity_scoped() {
+    let identity = identity_id_for_legacy_account("acct-1");
+    let first = quota_pool_id_for_identity(&identity);
+    assert_eq!(first, quota_pool_id_for_identity(identity.as_str()));
+    assert_ne!(
+        first.as_str(),
+        quota_pool_id_for_identity(identity_id_for_legacy_account("acct-2")).as_str()
+    );
+    assert_ne!(first.as_str(), identity.as_str());
+}

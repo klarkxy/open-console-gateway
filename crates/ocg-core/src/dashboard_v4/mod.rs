@@ -2,10 +2,11 @@
 //!
 //! Mounted at `/dashboard/api/v4` beside V3. This slice is a parallel
 //! additive control plane: read-only connection/template projections plus
-//! CAS-protected onboarding and credential-rotate writes. It reuses V3
+//! CAS-protected onboarding, binding, and credential writes. It reuses V3
 //! session middleware and the V3 error envelope. Handlers must not issue
 //! outbound network requests.
 
+mod bindings;
 mod connections;
 mod credentials;
 mod identities;
@@ -15,7 +16,7 @@ mod types;
 
 use axum::extract::State;
 use axum::middleware;
-use axum::routing::{get, post};
+use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 
 use crate::dashboard_v3::{ControlRevision, require_v3_session};
@@ -36,6 +37,11 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
         .route("/accounts", get(identities::list_accounts))
         .route("/onboarding/commit", post(onboarding::commit))
         .route("/credentials/{id}/rotate", post(credentials::rotate))
+        .route("/bindings/{id}", patch(bindings::patch))
+        .route(
+            "/identities/{id}/credentials",
+            post(identities::create_credential),
+        )
         .route_layer(middleware::from_fn_with_state(state, require_v3_session))
 }
 

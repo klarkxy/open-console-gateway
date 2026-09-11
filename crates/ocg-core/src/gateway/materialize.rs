@@ -46,6 +46,8 @@ use crate::provider::ProviderAdapterKind;
 use crate::provider_contracts::{ContractScope, EffectiveContractSet};
 use axum::http::StatusCode;
 use bytes::Bytes;
+use ocg_domain::credential::{ModelScope, model_scope_allows};
+use std::collections::HashMap;
 
 pub use crate::gateway::protocol::{
     parse_client_request as parse_client, parse_gemini_request as parse_gemini,
@@ -66,6 +68,34 @@ pub(crate) struct MaterializedRouteSet {
     /// Empty when every considered account produced a route. Live send ignores
     /// this list; the read-only shadow planner surfaces it for compare.
     pub rejected: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct InferenceBindingGate {
+    pub enabled: bool,
+    pub model_scope: ModelScope,
+}
+
+pub(crate) type InferenceBindingIndex = HashMap<String, InferenceBindingGate>;
+
+fn default_inference_binding() -> InferenceBindingGate {
+    InferenceBindingGate {
+        enabled: true,
+        model_scope: ModelScope::All,
+    }
+}
+
+fn binding_allows_requested_model(
+    scope: &ModelScope,
+    client_model: &str,
+    routing_model: &str,
+    plan_models: impl IntoIterator<Item = impl AsRef<str>>,
+) -> bool {
+    model_scope_allows(scope, routing_model)
+        || (client_model != routing_model && model_scope_allows(scope, client_model))
+        || plan_models
+            .into_iter()
+            .any(|model| model_scope_allows(scope, model.as_ref()))
 }
 
 /// Diagnostics are not a candidate protocol decision. If a resolution can use
@@ -222,7 +252,7 @@ struct MappingPlan {
     plan: RequestPlan,
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(dead_code, clippy::too_many_arguments)]
 pub(crate) fn materialize_account_routes(
     accounts: &[Account],
     config: &AppConfig,
@@ -237,6 +267,41 @@ pub(crate) fn materialize_account_routes(
     cpa_base_url: Option<&str>,
     contracts: &EffectiveContractSet,
     dynamics: &[crate::dynamic::DynamicProviderRuntime],
+) -> Result<MaterializedRouteSet, ProtocolError> {
+    materialize_account_routes_with_bindings(
+        accounts,
+        config,
+        parsed,
+        resolved,
+        client_model,
+        routing_model,
+        _client_body,
+        free_available,
+        custom_runtimes,
+        goat_runtimes,
+        cpa_base_url,
+        contracts,
+        dynamics,
+        &HashMap::new(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn materialize_account_routes_with_bindings(
+    accounts: &[Account],
+    config: &AppConfig,
+    parsed: &ParsedClientRequest,
+    resolved: &ResolvedModel,
+    client_model: &str,
+    routing_model: &str,
+    _client_body: &Bytes,
+    free_available: bool,
+    custom_runtimes: &std::collections::HashMap<String, CustomAccountRuntime>,
+    goat_runtimes: &std::collections::HashMap<String, GoatAccountRuntime>,
+    cpa_base_url: Option<&str>,
+    contracts: &EffectiveContractSet,
+    dynamics: &[crate::dynamic::DynamicProviderRuntime],
+    bindings: &InferenceBindingIndex,
 ) -> Result<MaterializedRouteSet, ProtocolError> {
     match resolved {
         ResolvedModel::PinnedRaw { mapping, .. } => {
@@ -270,6 +335,7 @@ pub(crate) fn materialize_account_routes(
                 goat_runtimes,
                 contracts,
                 dynamics,
+                bindings,
             )
         }
         ResolvedModel::Alias {
@@ -338,6 +404,7 @@ pub(crate) fn materialize_account_routes(
                 goat_runtimes,
                 contracts,
                 dynamics,
+                bindings,
             )
         }
     }
@@ -597,9 +664,37 @@ fn collect_mapping_plans(
     goat_runtimes: &std::collections::HashMap<String, GoatAccountRuntime>,
     contracts: &EffectiveContractSet,
     dynamics: &[crate::dynamic::DynamicProviderRuntime],
+    bindings: &InferenceBindingIndex,
 ) -> Result<MaterializedRouteSet, ProtocolError> {
     let mut routes = Vec::new();
     for account in accounts {
+        let binding = bindings
+            .get(&account.id)
+            .cloned()
+            .unwrap_or_else(default_inference_binding);
+        if !binding.enabled {
+            rejected.push(format!(
+                "{}/{} account `{}`: inference binding is disabled",
+                account.provider_id, account.provider_id, account.name
+            ));
+            continue;
+        }
+        let plan_models = plans.iter().filter_map(|candidate| {
+            (candidate.mapping.provider_id == account.provider_id)
+                .then_some(candidate.plan.model.as_str())
+        });
+        if !binding_allows_requested_model(
+            &binding.model_scope,
+            client_model,
+            routing_model,
+            plan_models,
+        ) {
+            rejected.push(format!(
+                "{}/{} account `{}`: model `{routing_model}` is outside binding model scope",
+                account.provider_id, account.provider_id, account.name
+            ));
+            continue;
+        }
         for candidate in &plans {
             if account.provider_id != candidate.mapping.provider_id {
                 continue;

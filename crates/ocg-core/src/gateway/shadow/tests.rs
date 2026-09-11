@@ -191,7 +191,14 @@ fn plan_input<'a>(
         cpa_base_url: None,
         contracts,
         dynamics,
+        bindings: empty_bindings(),
     }
+}
+
+fn empty_bindings() -> &'static crate::gateway::materialize::InferenceBindingIndex {
+    static EMPTY: std::sync::OnceLock<crate::gateway::materialize::InferenceBindingIndex> =
+        std::sync::OnceLock::new();
+    EMPTY.get_or_init(HashMap::new)
 }
 
 fn assert_attempts_match(live: &[ShadowAttempt], shadow: &[ShadowAttempt]) {

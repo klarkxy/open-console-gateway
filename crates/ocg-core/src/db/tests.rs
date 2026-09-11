@@ -805,7 +805,40 @@ fn v45_migrates_legacy_accounts_idempotently_without_changing_v3_rows() {
         .conn
         .query_row("SELECT COUNT(*) FROM quota_pools", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(quota_pools, 0);
+    assert_eq!(quota_pools, account_count);
+    let quota_members: i64 = db
+        .conn
+        .query_row("SELECT COUNT(*) FROM quota_pool_members", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(quota_members, account_count);
+    for id in [
+        "go-keyed",
+        "dyn-keyed",
+        "custom-keyed",
+        "managed-draft",
+        ZEN_FREE_ACCOUNT_ID,
+    ] {
+        let (subject_ref, confidence, mode, members): (String, String, String, i64) = db
+            .conn
+            .query_row(
+                "SELECT p.subject_ref, p.relation_confidence, p.policy_mode, COUNT(m.account_id)
+                 FROM quota_pools p
+                 JOIN accounts a ON a.identity_id = p.subject_ref
+                 JOIN quota_pool_members m ON m.pool_id = p.id
+                 WHERE a.id = ?1
+                 GROUP BY p.id",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        let identity = identity_id_for_legacy_account(id);
+        assert_eq!(subject_ref, identity.as_str(), "{id}");
+        assert_eq!(confidence, "unknown", "{id}");
+        assert_eq!(mode, "authoritative_limit", "{id}");
+        assert_eq!(members, 1, "{id}");
+    }
 
     let zen_connection = connection_id_for_legacy(
         LegacyConnectionKind::BuiltinProvider,
@@ -974,6 +1007,87 @@ fn v45_unlink_returns_identity_to_opaque() {
         .unwrap();
     assert_eq!(state.0, IdentityConfidence::Opaque.as_str());
     assert!(state.1.is_none());
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn d02_shared_identity_pool_fans_out_cooldown_to_sibling_key() {
+    use crate::models::{UpstreamChannel, local_today};
+    use crate::provider::ConnectionVerificationStatus;
+    use ocg_domain::credential::{identity_id_for_legacy_account, quota_pool_id_for_identity};
+
+    let dir = temp_data_dir("d02-shared-pool");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let mut first = account("pool-a");
+    first.name = "Pool A".into();
+    first.key_cipher = fixture_account_key_cipher();
+    db.create_account(&first).unwrap();
+    let identity_id: String = db
+        .conn
+        .query_row(
+            "SELECT identity_id FROM accounts WHERE id = 'pool-a'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        identity_id,
+        identity_id_for_legacy_account("pool-a").as_str()
+    );
+
+    let mut second = account("pool-b");
+    second.name = "Pool B".into();
+    second.key_cipher = fixture_account_key_cipher();
+    let created = db
+        .create_account_for_identity(
+            &identity_id,
+            &second,
+            &local_today(),
+            ConnectionVerificationStatus::NotRequired,
+        )
+        .unwrap();
+    assert_eq!(created.identity_id, identity_id);
+    assert_ne!(created.account_id, "pool-a");
+
+    let pool_id = quota_pool_id_for_identity(&identity_id);
+    let members: Vec<String> = db
+        .conn
+        .prepare("SELECT account_id FROM quota_pool_members WHERE pool_id = ?1 ORDER BY account_id")
+        .unwrap()
+        .query_map([pool_id.as_str()], |row| row.get(0))
+        .unwrap()
+        .map(|row| row.unwrap())
+        .collect();
+    assert_eq!(members, vec!["pool-a".to_string(), "pool-b".to_string()]);
+    let confidence: String = db
+        .conn
+        .query_row(
+            "SELECT relation_confidence FROM quota_pools WHERE id = ?1",
+            [pool_id.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(confidence, "declared");
+
+    let until = Utc::now() + chrono::Duration::hours(2);
+    db.set_account_rate_limit(
+        "pool-a",
+        until,
+        "429 exhausted",
+        Some(UsageWindowKind::FiveHours),
+    )
+    .unwrap();
+    let sibling = db.get_account("pool-b").unwrap().expect("sibling");
+    assert_eq!(sibling.cooldown_5h_until, Some(until));
+    assert!(sibling.is_cooling_for(UpstreamChannel::Go, Utc::now()));
+    assert_eq!(sibling.last_error.as_deref(), Some("429 exhausted"));
+    assert!(sibling.auth_error.is_none());
+
+    db.set_account_auth_error("pool-a", Some("401 only A"))
+        .unwrap();
+    let sibling = db.get_account("pool-b").unwrap().expect("sibling");
+    assert!(sibling.auth_error.is_none());
     drop(db);
     fs::remove_dir_all(dir).unwrap();
 }

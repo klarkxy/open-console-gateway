@@ -49,15 +49,15 @@ v45 把遗留 Account 拆成身份容器 / 凭据 / 绑定语义，但不搬移 
 - `onboarding_tasks` — `id`、`account_id`、`kind` `managed_registration`、`step`、`state` `in_progress` | `completed`、…
 - `subscription_records` — `account_id` 主键，`source` `legacy_manual` | `managed_payment`，`purchase_date`、`expires_on`、`recorded_at`
 - `quota_pools` — `id`、`subject_kind`、`subject_ref`、`relation_confidence`、`policy_mode`、`created_at`
-- `quota_pool_members` — `pool_id`、`account_id`（建空表；声明额度池在下一阶段）
+- `quota_pool_members` — `pool_id`、`account_id`（回填时每个身份一名成员；该身份上的第二份凭据加入同一池）
 
 附属行在同一事务中显式删除（DDL 声明了 `ON DELETE CASCADE`，但进程未启用 foreign-key pragma）。打开数据库时，v45 一致性检查用幂等回填补齐缺失的附属行；若仍不一致则 fail closed。
 
-迁移规则：每个既有账号恰好对应一个身份（`label` = 账号名，置信度 `opaque`）、一份凭据（`version` 1），以及一条绑定到该账号 connection 的记录（内置供应商 / 动态供应商 / Custom 账号自己的 connection），`model_scope=all`，`enabled` 等于账号启用状态。路由排序读取既有 `accounts.sort_order`，不另存一份。`legacy_identity_map` 记录账号 → 身份 / 凭据 / 绑定。尚未 `ready` 的托管账号写入一条 `onboarding_tasks`，状态 `in_progress`、步骤为当前步；已 ready 的托管账号不编造历史。只有已经公布购买/到期日的密封内置 Provider 账号才写入 `subscription_records`，`source` 为 `legacy_manual`。用户定义与 Custom API 账号不写：日期保持未知，不以零定价（D07）。平台关联：被关联 Key 的身份变为 `declared`，`authority_site` = 父账号 `base_url`；每个平台父账号自有身份，并带一份 `platform_observer` 凭据（管理凭据，从不用于推理）。父账号与被关联 Key 永不合并；关系保持已声明、未验证（D04）。冷却列不搬迁：投影为额度窗口（generic / 5h / week / month → subject `credential`；free → subject `egress` `free_channel`，declared、authoritative），精确保留已存时刻。未知指标为 `null`，绝不为零。迁移不创建额度池（不猜测共享额度）。路由不变。
+迁移规则：每个既有账号恰好对应一个身份（`label` = 账号名，置信度 `opaque`）、一份凭据（`version` 1），以及一条绑定到该账号 connection 的记录（内置供应商 / 动态供应商 / Custom 账号自己的 connection），`model_scope=all`，`enabled` 等于账号启用状态。路由排序读取既有 `accounts.sort_order`，不另存一份。`legacy_identity_map` 记录账号 → 身份 / 凭据 / 绑定。尚未 `ready` 的托管账号写入一条 `onboarding_tasks`，状态 `in_progress`、步骤为当前步；已 ready 的托管账号不编造历史。只有已经公布购买/到期日的密封内置 Provider 账号才写入 `subscription_records`，`source` 为 `legacy_manual`。用户定义与 Custom API 账号不写：日期保持未知，不以零定价（D07）。平台关联：被关联 Key 的身份变为 `declared`，`authority_site` = 父账号 `base_url`；每个平台父账号自有身份，并带一份 `platform_observer` 凭据（管理凭据，从不用于推理）。父账号与被关联 Key 永不合并；关系保持已声明、未验证（D04）。冷却列不搬迁：投影为额度窗口（generic / 5h / week / month → subject `credential`；free → subject `egress` `free_channel`，declared、authoritative），精确保留已存时刻。未知指标为 `null`，绝不为零。迁移为每个身份创建一个额度池（`subject` 为 credential / 身份 id，`relation_confidence` 为 unknown，`policy_mode` 为 authoritative_limit），从不写 `verified`。之后该身份上的第二份凭据加入同一池并把关系标为 `declared`。路由遵守已存的 `model_scope` 与绑定 `enabled`。
 
 每一次账号插入（V3 创建、托管创建、用户定义供应商首把 Key、V4 onboarding commit、节点导入）都通过与本迁移共用的唯一映射器，在同一事务写入附属行。平台关联 / 解除关联在同一事务更新被关联身份的置信度与站点。
 
-本阶段不轮换凭据、不编辑绑定、不创建声明额度池、不改迁移负载、不改路由，也不改账号页 UI。
+轮换、绑定编辑与第二份凭据写入是建立在这些附属表上的 V4 CAS 路径。迁移负载仍为 V5。本切片不改账号页 UI。
 
 ## Schema v44 — 面板操作记录
 

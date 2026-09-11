@@ -63,8 +63,9 @@ Dashboard V4 JSON is `/dashboard/api/v4`. It is a parallel, additive control
 plane beside frozen V3. V3 `$defs` and routes do not gain new fields.
 
 V4 reuses V3 session middleware. Its listings return the same `ControlRevision`
-(`expectedRevision` / `processGeneration`) that V3 uses for CAS. The one V4
-mutation is `POST /onboarding/commit`; it checks those tokens. Read routes
+(`expectedRevision` / `processGeneration`) that V3 uses for CAS. V4 mutations are `POST /onboarding/commit`,
+`POST /credentials/{id}/rotate`, `PATCH /bindings/{id}`, and
+`POST /identities/{id}/credentials`; they check those tokens. Read routes
 do not.
 
 The frozen contract is `schema/dashboard-api-v4.schema.json`, generated from
@@ -177,6 +178,28 @@ body is `{ secretInput }` plus CAS tokens. The result is secret-free.
 Platform observer, anonymous, no-auth, and CPA credentials return `400`.
 Unknown ids return `404`. A stale CAS token returns `409` and writes
 nothing.
+
+`PATCH /bindings/{id}` edits one inference binding. CAS tokens are
+required; there is no `operationId`. The body is `{ modelScope?, enabled? }`
+plus CAS tokens. At least one of `modelScope` or `enabled` is required.
+`modelScope` is `{ kind: "all" }` or `{ kind: "only", models: [...] }`
+(exact ids after the existing model-name normalization). Binding enablement
+is independent of the sibling binding on the same identity. Unknown ids
+return `404`. Platform observer, anonymous, no-auth, and CPA bindings
+return `400`. A stale CAS token returns `409` and writes nothing. The
+result is `{ revision, binding }` and is secret-free.
+
+`POST /identities/{id}/credentials` adds a second Key to a confirmed
+identity. CAS tokens are required; there is no `operationId`. The body is
+`{ connectionId, secretInput }` plus CAS tokens. The write creates a new
+`accounts` row that reuses the existing `identity_id`, inserts
+`credential_state` and `credential_bindings`, and joins the identity's
+quota pool in one SQLite transaction. A different `connectionId` is a
+second product (D05); the same Plan connection is another Key on that
+product. Switching Keys does not invent a fresh pool. Unknown identity or
+connection ids return `404`. Builtin-immutable / Zen Free / CPA / no-auth
+/ Custom API / platform-observer targets return `400`. A stale CAS token
+returns `409` and writes nothing. The result is secret-free.
 
 The dashboard consumes `GET /connections` for the Providers rail,
 `POST /onboarding/commit` for user-defined Provider creation, and

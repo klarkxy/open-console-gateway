@@ -3304,6 +3304,30 @@ fn insert_account_row(
     purchase_date: &str,
     verification_status: ConnectionVerificationStatus,
 ) -> Result<()> {
+    insert_account_columns(conn, account, purchase_date, verification_status)?;
+    let sort_order: i64 = conn.query_row(
+        "SELECT sort_order FROM accounts WHERE id = ?1",
+        [&account.id],
+        |row| row.get(0),
+    )?;
+    identity::persist_account_identity_model(
+        conn,
+        account,
+        purchase_date,
+        verification_status,
+        sort_order,
+        None,
+        Utc::now(),
+    )?;
+    Ok(())
+}
+
+pub(crate) fn insert_account_columns(
+    conn: &Connection,
+    account: &Account,
+    purchase_date: &str,
+    verification_status: ConnectionVerificationStatus,
+) -> Result<()> {
     conn.execute(
         "INSERT INTO accounts (id, name, username, password_cipher, key_cipher, enabled, referral_code, recharge_date, sort_order, cooldown_until, cooldown_generic_until, cooldown_5h_until, cooldown_week_until, cooldown_month_until, cooldown_free_until, last_error, auth_error, account_type, setup_step, notes, created_at, updated_at, provider_id, credential_kind, quota_scope, verification_status, connection_verified_at, verification_error)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM accounts), ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, NULL, NULL)",
@@ -3341,20 +3365,6 @@ fn insert_account_row(
             failure_streak, last_expedited_at
          ) VALUES (?1, NULL, NULL, NULL, 0, NULL)",
         [&account.id],
-    )?;
-    let sort_order: i64 = conn.query_row(
-        "SELECT sort_order FROM accounts WHERE id = ?1",
-        [&account.id],
-        |row| row.get(0),
-    )?;
-    identity::persist_account_identity_model(
-        conn,
-        account,
-        purchase_date,
-        verification_status,
-        sort_order,
-        None,
-        Utc::now(),
     )?;
     Ok(())
 }
@@ -8576,6 +8586,7 @@ impl Database {
                 params![id, new_cooldown],
             )?;
         }
+        identity::fanout_shared_pool_cooldown(&tx, id)?;
         tx.commit()?;
         Ok(())
     }
@@ -8686,6 +8697,10 @@ impl Database {
             // Keep the furthest observed deadline and commit it atomically with
             // the account-local compatibility copy when that row still exists.
             Self::upsert_free_channel_cooldown(&tx, &until.to_rfc3339())?;
+        }
+
+        if updated > 0 {
+            identity::fanout_shared_pool_cooldown(&tx, id)?;
         }
 
         // ponytail: 不再在 429 时设置 baseline。固定窗口的"重置"由 forward_logs 自然驱动；

@@ -16,7 +16,9 @@ use crate::provider::{
     ZEN_FREE_ACCOUNT_ID, ZEN_FREE_ACCOUNT_NAME,
 };
 use chrono::Utc;
+use ocg_domain::credential::ModelScope;
 use serde_json::json;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 const NO_IDS: &[String] = &[];
@@ -1144,4 +1146,112 @@ fn model_preference_survives_legacy_probe_evidence() {
         UpstreamProtocolKind::Responses
     );
     assert_eq!(after.routes[0].routing.account.id, "go-probe");
+}
+
+fn routes_for_with_bindings(
+    model: &str,
+    accounts: &[Account],
+    bindings: &InferenceBindingIndex,
+) -> MaterializedRouteSet {
+    let body = chat_body(model);
+    let parsed = parse_client_request(ApiFormat::ChatCompletions, body.clone()).unwrap();
+    let resolved = alias::resolve(model).unwrap();
+    materialize_account_routes_with_bindings(
+        accounts,
+        &AppConfig::default(),
+        &parsed,
+        &resolved,
+        &parsed.requested_model,
+        model,
+        &body,
+        true,
+        &HashMap::new(),
+        &HashMap::new(),
+        None,
+        &static_contracts(),
+        &[],
+        bindings,
+    )
+    .unwrap()
+}
+
+#[test]
+fn d01_model_scope_keeps_x_off_key_b_without_disabling_other_models() {
+    let accounts = [go_account("key-a"), go_account("key-b")];
+    let mut bindings = InferenceBindingIndex::new();
+    bindings.insert(
+        "key-a".into(),
+        InferenceBindingGate {
+            enabled: true,
+            model_scope: ModelScope::All,
+        },
+    );
+    bindings.insert(
+        "key-b".into(),
+        InferenceBindingGate {
+            enabled: true,
+            model_scope: ModelScope::Only {
+                models: vec!["glm-5.1".into()],
+            },
+        },
+    );
+
+    let request_x = routes_for_with_bindings("glm-5.2", &accounts, &bindings);
+    let x_ids: Vec<_> = request_x
+        .routes
+        .iter()
+        .map(|route| route.routing.account.id.as_str())
+        .collect();
+    assert_eq!(x_ids, vec!["key-a"]);
+    assert!(
+        request_x
+            .rejected
+            .iter()
+            .any(|reason| reason.contains("key-b") && reason.contains("model scope")),
+        "{:?}",
+        request_x.rejected
+    );
+
+    let request_other = routes_for_with_bindings("glm-5.1", &accounts, &bindings);
+    let other_ids: Vec<_> = request_other
+        .routes
+        .iter()
+        .map(|route| route.routing.account.id.as_str())
+        .collect();
+    assert_eq!(other_ids, vec!["key-a", "key-b"]);
+}
+
+#[test]
+fn d01_disabled_binding_is_skipped_and_default_all_preserves_routes() {
+    let accounts = [go_account("key-a"), go_account("key-b")];
+    let mut bindings = InferenceBindingIndex::new();
+    bindings.insert(
+        "key-b".into(),
+        InferenceBindingGate {
+            enabled: false,
+            model_scope: ModelScope::All,
+        },
+    );
+    let set = routes_for_with_bindings("glm-5.2", &accounts, &bindings);
+    let ids: Vec<_> = set
+        .routes
+        .iter()
+        .map(|route| route.routing.account.id.as_str())
+        .collect();
+    assert_eq!(ids, vec!["key-a"]);
+    assert!(
+        set.rejected
+            .iter()
+            .any(|reason| reason.contains("key-b") && reason.contains("disabled")),
+        "{:?}",
+        set.rejected
+    );
+
+    let unrestricted = routes_for("glm-5.2", &accounts, &AppConfig::default(), true);
+    let unrestricted_ids: Vec<_> = unrestricted
+        .routes
+        .iter()
+        .map(|route| route.routing.account.id.as_str())
+        .collect();
+    assert_eq!(unrestricted_ids, vec!["key-a", "key-b"]);
 }

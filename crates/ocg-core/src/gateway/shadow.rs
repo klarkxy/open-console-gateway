@@ -14,7 +14,8 @@ use crate::custom::CustomAccountRuntime;
 use crate::dynamic::DynamicProviderRuntime;
 use crate::gateway::attempt::{AttemptSpec, CredentialHandle};
 use crate::gateway::materialize::{
-    MaterializedCandidate, MaterializedRouteSet, materialize_account_routes,
+    InferenceBindingIndex, MaterializedCandidate, MaterializedRouteSet,
+    materialize_account_routes_with_bindings,
 };
 use crate::gateway::protocol::{ParsedClientRequest, ProtocolError, RequestPlan};
 use crate::gateway::provider_adapter;
@@ -51,6 +52,7 @@ pub(crate) struct ShadowPlanInput<'a> {
     pub cpa_base_url: Option<&'a str>,
     pub contracts: &'a EffectiveContractSet,
     pub dynamics: &'a [DynamicProviderRuntime],
+    pub bindings: &'a InferenceBindingIndex,
 }
 
 /// Comparable, secret-free view of one planned attempt.
@@ -177,7 +179,7 @@ pub(crate) fn shadow_recorded_outbound_sends() -> u64 {
 pub(crate) fn plan_shadow_attempts(
     input: &ShadowPlanInput<'_>,
 ) -> Result<ShadowPlan, ProtocolError> {
-    let set = materialize_account_routes(
+    let set = materialize_account_routes_with_bindings(
         input.accounts,
         input.config,
         input.parsed,
@@ -191,6 +193,7 @@ pub(crate) fn plan_shadow_attempts(
         input.cpa_base_url,
         input.contracts,
         input.dynamics,
+        input.bindings,
     )?;
     Ok(shadow_plan_from_materialized(
         &set,

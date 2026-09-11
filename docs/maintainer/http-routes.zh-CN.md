@@ -30,7 +30,7 @@ Go/Zen 协议探测是 `POST /providers/{provider_id}/protocol-probes`。Custom 
 
 ## Dashboard V4（`/dashboard/api/v4`）
 
-会话保护（见 `dashboard_v4/mod.rs`）：`GET /contract`、`GET /templates`、`GET /connections`、`GET /accounts`、`POST /onboarding/commit`、`POST /credentials/{id}/rotate`。
+会话保护（见 `dashboard_v4/mod.rs`）：`GET /contract`、`GET /templates`、`GET /connections`、`GET /accounts`、`POST /onboarding/commit`、`POST /credentials/{id}/rotate`、`PATCH /bindings/{id}`、`POST /identities/{id}/credentials`。
 
 ## 静态面板
 

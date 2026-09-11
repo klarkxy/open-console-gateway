@@ -3,9 +3,10 @@ use super::*;
 use ocg_domain::connection::{ConnectionId, LegacyConnectionKind, connection_id_for_legacy};
 use ocg_domain::credential::{
     CooldownFacts, DeclaredPlatformRelation, IdentityConfidence, LegacyAccountFacts, ModelScope,
-    OnboardingTaskKind, OnboardingTaskState, SubscriptionSource, credential_id_for_legacy_account,
-    identity_id_for_legacy_account, identity_id_for_platform_account, legacy_account_objects,
-    onboarding_task_id_for_legacy_account,
+    OnboardingTaskKind, OnboardingTaskState, QuotaPolicyMode, QuotaSubject, RelationConfidence,
+    SubscriptionSource, credential_id_for_legacy_account, identity_id_for_legacy_account,
+    identity_id_for_platform_account, legacy_account_objects,
+    onboarding_task_id_for_legacy_account, quota_pool_id_for_identity,
 };
 
 pub(crate) const IDENTITY_MODEL_VERSION: i32 = 45;
@@ -53,6 +54,8 @@ pub struct IdentityAccountRecord {
     pub credential_version: u64,
     pub auth_state_version: u64,
     pub binding_id: String,
+    pub binding_enabled: bool,
+    pub binding_model_scope: ModelScope,
     pub onboarding: Option<StoredOnboarding>,
     pub subscription: Option<StoredSubscription>,
     pub declared_relation: Option<DeclaredPlatformRelation>,
@@ -72,6 +75,24 @@ pub struct IdentityModelSnapshot {
     pub accounts: Vec<IdentityAccountRecord>,
     pub identities: Vec<StoredIdentity>,
     pub platform_parents: Vec<PlatformIdentityRecord>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StoredInferenceBinding {
+    pub account_id: String,
+    pub binding_id: String,
+    pub enabled: bool,
+    pub model_scope: ModelScope,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreatedIdentityCredential {
+    pub account_id: String,
+    pub identity_id: String,
+    pub credential_id: String,
+    pub binding_id: String,
+    pub version: u64,
+    pub auth_state_version: u64,
 }
 
 pub(crate) fn connection_legacy_for_account(
@@ -136,6 +157,28 @@ pub(crate) fn persist_account_identity_model(
     declared: Option<&DeclaredPlatformRelation>,
     now: DateTime<Utc>,
 ) -> Result<()> {
+    persist_account_identity_model_on(
+        conn,
+        account,
+        purchase_date,
+        verification_status,
+        sort_order,
+        declared,
+        now,
+        None,
+    )
+}
+
+pub(crate) fn persist_account_identity_model_on(
+    conn: &Connection,
+    account: &Account,
+    purchase_date: &str,
+    verification_status: ConnectionVerificationStatus,
+    sort_order: i64,
+    declared: Option<&DeclaredPlatformRelation>,
+    now: DateTime<Utc>,
+    identity_override: Option<&str>,
+) -> Result<()> {
     if !identity_model_writable(conn)? {
         return Ok(());
     }
@@ -154,22 +197,36 @@ pub(crate) fn persist_account_identity_model(
     let (identity, credential, binding) = legacy_account_objects(facts, &connection_id, &[]);
     let (legacy_kind, legacy_id) = connection_legacy_for_account(&account.provider_id, &account.id);
     let now_rfc = now.to_rfc3339();
-    upsert_identity(
-        conn,
-        identity.id.as_str(),
-        &identity.label,
-        identity.identity_confidence,
-        identity
-            .authority_ref
-            .as_ref()
-            .map(|authority| authority.issuer_or_site.as_str()),
-        identity.enabled,
-        identity.notes.as_deref(),
-        &now_rfc,
-    )?;
+    let identity_id = match identity_override {
+        Some(existing) => {
+            let exists: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM upstream_identities WHERE id = ?1",
+                [existing],
+                |row| row.get(0),
+            )?;
+            anyhow::ensure!(exists == 1, "identity {existing} not found");
+            existing.to_string()
+        }
+        None => {
+            upsert_identity(
+                conn,
+                identity.id.as_str(),
+                &identity.label,
+                identity.identity_confidence,
+                identity
+                    .authority_ref
+                    .as_ref()
+                    .map(|authority| authority.issuer_or_site.as_str()),
+                identity.enabled,
+                identity.notes.as_deref(),
+                &now_rfc,
+            )?;
+            identity.id.to_string()
+        }
+    };
     conn.execute(
         "UPDATE accounts SET identity_id = ?2 WHERE id = ?1",
-        params![account.id, identity.id.as_str()],
+        params![account.id, identity_id.as_str()],
     )?;
     conn.execute(
         "INSERT OR IGNORE INTO credential_state (
@@ -198,7 +255,7 @@ pub(crate) fn persist_account_identity_model(
         LEGACY_KIND_ACCOUNT,
         &account.id,
         NEW_KIND_IDENTITY,
-        identity.id.as_str(),
+        identity_id.as_str(),
     )?;
     insert_legacy_map(
         conn,
@@ -245,7 +302,94 @@ pub(crate) fn persist_account_identity_model(
             ],
         )?;
     }
+    ensure_identity_quota_pool(conn, &identity_id, &account.id, &now_rfc)?;
     Ok(())
+}
+
+fn parse_stored_model_scope(raw: &str) -> ModelScope {
+    serde_json::from_str(raw).unwrap_or(ModelScope::All)
+}
+
+fn ensure_identity_quota_pool(
+    conn: &Connection,
+    identity_id: &str,
+    account_id: &str,
+    now_rfc: &str,
+) -> Result<()> {
+    let pool_id = quota_pool_id_for_identity(identity_id);
+    conn.execute(
+        "INSERT INTO quota_pools (
+            id, subject_kind, subject_ref, relation_confidence, policy_mode, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(id) DO NOTHING",
+        params![
+            pool_id.as_str(),
+            QuotaSubject::Credential.as_str(),
+            identity_id,
+            RelationConfidence::Unknown.as_str(),
+            QuotaPolicyMode::AuthoritativeLimit.as_str(),
+            now_rfc,
+        ],
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO quota_pool_members (pool_id, account_id) VALUES (?1, ?2)",
+        params![pool_id.as_str(), account_id],
+    )?;
+    let members: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM quota_pool_members WHERE pool_id = ?1",
+        [pool_id.as_str()],
+        |row| row.get(0),
+    )?;
+    if members > 1 {
+        conn.execute(
+            "UPDATE quota_pools SET relation_confidence = ?2 WHERE id = ?1",
+            params![pool_id.as_str(), RelationConfidence::Declared.as_str()],
+        )?;
+    }
+    Ok(())
+}
+
+pub(crate) fn fanout_shared_pool_cooldown(
+    conn: &Connection,
+    source_account_id: &str,
+) -> Result<()> {
+    if !identity_model_writable(conn)? {
+        return Ok(());
+    }
+    if !table_exists(conn, "quota_pool_members")? {
+        return Ok(());
+    }
+    let now_rfc = Utc::now().to_rfc3339();
+    let siblings = shared_pool_siblings_on(conn, source_account_id)?;
+    for sibling in siblings {
+        conn.execute(
+            "UPDATE accounts SET
+                cooldown_until = (SELECT cooldown_until FROM accounts WHERE id = ?1),
+                cooldown_generic_until = (SELECT cooldown_generic_until FROM accounts WHERE id = ?1),
+                cooldown_5h_until = (SELECT cooldown_5h_until FROM accounts WHERE id = ?1),
+                cooldown_week_until = (SELECT cooldown_week_until FROM accounts WHERE id = ?1),
+                cooldown_month_until = (SELECT cooldown_month_until FROM accounts WHERE id = ?1),
+                cooldown_free_until = (SELECT cooldown_free_until FROM accounts WHERE id = ?1),
+                last_error = (SELECT last_error FROM accounts WHERE id = ?1),
+                updated_at = ?3
+             WHERE id = ?2",
+            params![source_account_id, sibling, now_rfc],
+        )?;
+    }
+    Ok(())
+}
+
+fn shared_pool_siblings_on(conn: &Connection, account_id: &str) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT m2.account_id
+         FROM quota_pool_members m1
+         JOIN quota_pool_members m2 ON m2.pool_id = m1.pool_id
+         WHERE m1.account_id = ?1 AND m2.account_id <> ?1",
+    )?;
+    let rows = stmt
+        .query_map([account_id], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<String>>>()?;
+    Ok(rows)
 }
 
 fn upsert_identity(
@@ -414,6 +558,13 @@ pub(crate) fn delete_account_identity_satellites(
         "DELETE FROM quota_pool_members WHERE account_id = ?1",
         [account_id],
     )?;
+    conn.execute(
+        "DELETE FROM quota_pools
+         WHERE NOT EXISTS (
+            SELECT 1 FROM quota_pool_members m WHERE m.pool_id = quota_pools.id
+         )",
+        [],
+    )?;
     Ok(())
 }
 
@@ -527,7 +678,14 @@ fn identity_account_violations(conn: &Connection) -> Result<i64> {
         [],
         |row| row.get(0),
     )?;
-    Ok(missing_identity + missing_credential + missing_binding)
+    let missing_pool: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM accounts a
+         WHERE a.identity_id IS NOT NULL AND a.identity_id <> ''
+           AND NOT EXISTS (SELECT 1 FROM quota_pool_members m WHERE m.account_id = a.id)",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(missing_identity + missing_credential + missing_binding + missing_pool)
 }
 
 pub(crate) fn ensure_identity_model_consistent(conn: &Connection) -> Result<()> {
@@ -788,6 +946,46 @@ impl Database {
     ) -> Result<RotatedCredential> {
         rotate_account_credential_on(&self.conn, account_id, key_cipher)
     }
+
+    pub fn list_inference_bindings(&self) -> Result<Vec<StoredInferenceBinding>> {
+        list_inference_bindings_on(&self.conn)
+    }
+
+    pub fn shared_pool_account_ids(&self, account_id: &str) -> Result<Vec<String>> {
+        if !identity_model_writable(&self.conn)? {
+            return Ok(Vec::new());
+        }
+        let mut ids = shared_pool_siblings_on(&self.conn, account_id)?;
+        ids.push(account_id.to_string());
+        ids.sort();
+        ids.dedup();
+        Ok(ids)
+    }
+
+    pub fn update_credential_binding(
+        &self,
+        binding_id: &str,
+        model_scope: Option<&ModelScope>,
+        enabled: Option<bool>,
+    ) -> Result<StoredInferenceBinding> {
+        update_credential_binding_on(&self.conn, binding_id, model_scope, enabled)
+    }
+
+    pub fn create_account_for_identity(
+        &self,
+        identity_id: &str,
+        account: &Account,
+        purchase_date: &str,
+        verification_status: ConnectionVerificationStatus,
+    ) -> Result<CreatedIdentityCredential> {
+        create_account_for_identity_on(
+            &self.conn,
+            identity_id,
+            account,
+            purchase_date,
+            verification_status,
+        )
+    }
 }
 
 fn rotate_account_credential_on(
@@ -867,6 +1065,123 @@ fn rotate_account_credential_on(
     })
 }
 
+fn list_inference_bindings_on(conn: &Connection) -> Result<Vec<StoredInferenceBinding>> {
+    if !identity_model_writable(conn)? {
+        return Ok(Vec::new());
+    }
+    let mut stmt =
+        conn.prepare("SELECT account_id, id, enabled, model_scope FROM credential_bindings")?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i32>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows
+        .into_iter()
+        .map(
+            |(account_id, binding_id, enabled, model_scope)| StoredInferenceBinding {
+                account_id,
+                binding_id,
+                enabled: enabled != 0,
+                model_scope: parse_stored_model_scope(&model_scope),
+            },
+        )
+        .collect())
+}
+
+fn update_credential_binding_on(
+    conn: &Connection,
+    binding_id: &str,
+    model_scope: Option<&ModelScope>,
+    enabled: Option<bool>,
+) -> Result<StoredInferenceBinding> {
+    if !identity_model_writable(conn)? {
+        anyhow::bail!("identity model is not writable");
+    }
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let existing: Option<(String, i32, String)> = tx
+        .query_row(
+            "SELECT account_id, enabled, model_scope FROM credential_bindings WHERE id = ?1",
+            [binding_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let Some((account_id, current_enabled, current_scope)) = existing else {
+        anyhow::bail!("binding not found");
+    };
+    let next_scope = match model_scope {
+        Some(scope) => serde_json::to_string(scope)?,
+        None => current_scope,
+    };
+    let next_enabled = enabled.map(|value| value as i32).unwrap_or(current_enabled);
+    let now_rfc = Utc::now().to_rfc3339();
+    tx.execute(
+        "UPDATE credential_bindings
+         SET model_scope = ?2, enabled = ?3, updated_at = ?4
+         WHERE id = ?1",
+        params![binding_id, next_scope, next_enabled, now_rfc],
+    )?;
+    tx.commit()?;
+    Ok(StoredInferenceBinding {
+        account_id,
+        binding_id: binding_id.to_string(),
+        enabled: next_enabled != 0,
+        model_scope: parse_stored_model_scope(&next_scope),
+    })
+}
+
+fn create_account_for_identity_on(
+    conn: &Connection,
+    identity_id: &str,
+    account: &Account,
+    purchase_date: &str,
+    verification_status: ConnectionVerificationStatus,
+) -> Result<CreatedIdentityCredential> {
+    if !identity_model_writable(conn)? {
+        anyhow::bail!("identity model is not writable");
+    }
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    super::insert_account_columns(&tx, account, purchase_date, verification_status)?;
+    let sort_order: i64 = tx.query_row(
+        "SELECT sort_order FROM accounts WHERE id = ?1",
+        [&account.id],
+        |row| row.get(0),
+    )?;
+    persist_account_identity_model_on(
+        &tx,
+        account,
+        purchase_date,
+        verification_status,
+        sort_order,
+        None,
+        Utc::now(),
+        Some(identity_id),
+    )?;
+    let (credential_id, version, auth_state_version, binding_id): (String, i64, i64, String) = tx
+        .query_row(
+        "SELECT c.credential_id, c.version, c.auth_state_version, b.id
+             FROM credential_state c
+             JOIN credential_bindings b ON b.account_id = c.account_id
+             WHERE c.account_id = ?1",
+        [&account.id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    )?;
+    tx.commit()?;
+    Ok(CreatedIdentityCredential {
+        account_id: account.id.clone(),
+        identity_id: identity_id.to_string(),
+        credential_id,
+        binding_id,
+        version: version as u64,
+        auth_state_version: auth_state_version as u64,
+    })
+}
+
 pub(crate) fn list_identity_model_on(conn: &Connection) -> Result<IdentityModelSnapshot> {
     let version = schema_version_on(conn)?;
     if version < IDENTITY_MODEL_VERSION {
@@ -924,12 +1239,25 @@ pub(crate) fn list_identity_model_on(conn: &Connection) -> Result<IdentityModelS
     drop(cred_stmt);
 
     let mut binding_map = std::collections::HashMap::new();
-    let mut bind_stmt = conn.prepare("SELECT account_id, id FROM credential_bindings")?;
+    let mut bind_stmt =
+        conn.prepare("SELECT account_id, id, enabled, model_scope FROM credential_bindings")?;
     for row in bind_stmt.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i32>(2)?,
+            row.get::<_, String>(3)?,
+        ))
     })? {
-        let (account_id, binding_id) = row?;
-        binding_map.insert(account_id, binding_id);
+        let (account_id, binding_id, enabled, model_scope) = row?;
+        binding_map.insert(
+            account_id,
+            (
+                binding_id,
+                enabled != 0,
+                parse_stored_model_scope(&model_scope),
+            ),
+        );
     }
     drop(bind_stmt);
 
@@ -1042,12 +1370,13 @@ pub(crate) fn list_identity_model_on(conn: &Connection) -> Result<IdentityModelS
                     account.id
                 )
             })?;
-        let binding_id = binding_map.get(&account.id).cloned().ok_or_else(|| {
-            anyhow::anyhow!(
-                "account {} is missing credential_bindings on schema v{version}",
-                account.id
-            )
-        })?;
+        let (binding_id, binding_enabled, binding_model_scope) =
+            binding_map.get(&account.id).cloned().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "account {} is missing credential_bindings on schema v{version}",
+                    account.id
+                )
+            })?;
         accounts.push(IdentityAccountRecord {
             declared_relation: declared_by_account.get(&account.id).cloned(),
             onboarding: onboarding_map.remove(&account.id),
@@ -1061,6 +1390,8 @@ pub(crate) fn list_identity_model_on(conn: &Connection) -> Result<IdentityModelS
             credential_version: credential_version as u64,
             auth_state_version: auth_state_version as u64,
             binding_id,
+            binding_enabled,
+            binding_model_scope,
         });
     }
 

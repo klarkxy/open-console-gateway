@@ -257,3 +257,57 @@ fn credential_rotate_request_is_camel_case_and_result_is_secret_free() {
     assert_eq!(result_value["replayed"], false);
     assert!(result_value.get("secretInput").is_none());
 }
+
+#[test]
+fn binding_patch_and_identity_credential_create_are_camel_case() {
+    let request = BindingPatchRequest {
+        expectation: MutationExpectation {
+            expected_revision: 3,
+            process_generation: 9,
+        },
+        model_scope: Some(ocg_domain::credential::ModelScope::Only {
+            models: vec!["glm-5.2".into()],
+        }),
+        enabled: Some(false),
+    };
+    let value = serde_json::to_value(&request).unwrap();
+    assert_eq!(value["expectedRevision"], 3);
+    assert_eq!(value["modelScope"]["kind"], "only");
+    assert_eq!(value["enabled"], false);
+    assert!(value.get("operationId").is_none());
+
+    let create = IdentityCredentialCreateRequest {
+        expectation: MutationExpectation {
+            expected_revision: 3,
+            process_generation: 9,
+        },
+        connection_id: "conn".into(),
+        secret_input: "sk-second".into(),
+    };
+    let create_value = serde_json::to_value(&create).unwrap();
+    assert_eq!(create_value["connectionId"], "conn");
+    assert_eq!(create_value["secretInput"], "sk-second");
+    assert!(create_value.get("operationId").is_none());
+
+    let result = IdentityCredentialCreateResult {
+        revision: ControlRevision {
+            revision: 4,
+            process_generation: 9,
+            pricing_revision: "p".into(),
+        },
+        identity_id: "id".into(),
+        credential_id: "cred".into(),
+        binding_id: "bind".into(),
+        account_id: "acct".into(),
+        connection_id: "conn".into(),
+        version: 1,
+        auth_state_version: 1,
+        replayed: false,
+    };
+    let result_value = serde_json::to_value(&result).unwrap();
+    assert_eq!(result_value["identityId"], "id");
+    assert_eq!(result_value["credentialId"], "cred");
+    assert_eq!(result_value["bindingId"], "bind");
+    assert_eq!(result_value["accountId"], "acct");
+    assert!(result_value.get("secretInput").is_none());
+}

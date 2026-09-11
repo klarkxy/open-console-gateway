@@ -5,6 +5,7 @@
 //! cannot drift.
 
 use crate::connection::{CONNECTION_ID_NAMESPACE, ConnectionId};
+use crate::ids::normalize_model_name;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -93,6 +94,29 @@ pub fn anonymous_binding_id_for(connection_id: &ConnectionId) -> BindingId {
 /// Deterministic onboarding task id for a legacy managed account.
 pub fn onboarding_task_id_for_legacy_account(account_id: &str) -> OnboardingTaskId {
     OnboardingTaskId(namespaced_uuid(&format!("onboarding:account:{account_id}")))
+}
+
+/// Deterministic quota pool id for one confirmed identity.
+pub fn quota_pool_id_for_identity(identity_id: impl AsRef<str>) -> QuotaPoolId {
+    QuotaPoolId(namespaced_uuid(&format!(
+        "quota_pool:identity:{}",
+        identity_id.as_ref()
+    )))
+}
+
+/// `All` admits every model. `Only` is an exact-id allowlist after
+/// [`normalize_model_name`] — no brand or prefix matching.
+pub fn model_scope_allows(scope: &ModelScope, public_or_routing_model: &str) -> bool {
+    match scope {
+        ModelScope::All => true,
+        ModelScope::Only { models } => {
+            let wanted = normalize_model_name(public_or_routing_model);
+            !wanted.is_empty()
+                && models
+                    .iter()
+                    .any(|model| normalize_model_name(model) == wanted)
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

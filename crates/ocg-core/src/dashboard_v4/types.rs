@@ -55,6 +55,10 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "IdentityLegacy",
     "CredentialRotateRequest",
     "CredentialRotateResult",
+    "BindingPatchRequest",
+    "BindingPatchResult",
+    "IdentityCredentialCreateRequest",
+    "IdentityCredentialCreateResult",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -447,6 +451,51 @@ pub struct CredentialRotateResult {
     pub replayed: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BindingPatchRequest {
+    #[serde(flatten)]
+    pub expectation: MutationExpectation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_scope: Option<ModelScope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BindingPatchResult {
+    pub revision: ControlRevision,
+    pub binding: BindingDto,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct IdentityCredentialCreateRequest {
+    #[serde(flatten)]
+    pub expectation: MutationExpectation,
+    pub connection_id: String,
+    pub secret_input: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct IdentityCredentialCreateResult {
+    pub revision: ControlRevision,
+    pub identity_id: String,
+    pub credential_id: String,
+    pub binding_id: String,
+    pub account_id: String,
+    pub connection_id: String,
+    pub version: u64,
+    pub auth_state_version: u64,
+    pub replayed: bool,
+}
+
 /// Deterministic JSON Schema catalog for the V4 contract.
 ///
 /// Generator settings match V3: draft 2020-12, serialize-mode for response
@@ -481,6 +530,8 @@ pub fn contract_schema() -> Value {
     include_type::<DeclaredRelationDto>(&mut serialize);
     include_type::<IdentityLegacy>(&mut serialize);
     include_type::<CredentialRotateResult>(&mut serialize);
+    include_type::<BindingPatchResult>(&mut serialize);
+    include_type::<IdentityCredentialCreateResult>(&mut serialize);
     let mut defs = serialize.take_definitions(true);
 
     let mut deserialize = SchemaSettings::draft2020_12().into_generator();
@@ -489,6 +540,8 @@ pub fn contract_schema() -> Value {
     include_type::<OnboardingAuthorization>(&mut deserialize);
     include_type::<OnboardingTarget>(&mut deserialize);
     include_type::<CredentialRotateRequest>(&mut deserialize);
+    include_type::<BindingPatchRequest>(&mut deserialize);
+    include_type::<IdentityCredentialCreateRequest>(&mut deserialize);
     for (name, schema) in deserialize.take_definitions(true) {
         defs.entry(name).or_insert(schema);
     }
@@ -502,7 +555,7 @@ pub fn contract_schema() -> Value {
     json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "DashboardApiV4",
-        "$comment": "Extensible Dashboard V4 contract catalog. Add new $defs for later DTOs; do not rename or reshape existing definitions. Connection and template listings are secret-free. OnboardingCommitRequest.secretInput and CredentialRotateRequest.secretInput are write-only.",
+        "$comment": "Extensible Dashboard V4 contract catalog. Add new $defs for later DTOs; do not rename or reshape existing definitions. Connection and template listings are secret-free. OnboardingCommitRequest.secretInput, CredentialRotateRequest.secretInput, and IdentityCredentialCreateRequest.secretInput are write-only.",
         "anyOf": catalog_refs(&defs),
         "$defs": defs })
 }

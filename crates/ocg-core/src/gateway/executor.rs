@@ -12,7 +12,8 @@ use crate::gateway::diagnostics::{
 };
 use crate::gateway::forwarder::{ForwardAction, forward_request, rate_limited_response};
 use crate::gateway::materialize::{
-    diagnostic_forced_upstream, materialize_account_routes, resolved_alias_from_model,
+    InferenceBindingGate, InferenceBindingIndex, diagnostic_forced_upstream,
+    materialize_account_routes_with_bindings, resolved_alias_from_model,
 };
 use crate::gateway::protocol::{MaterializeSpec, RequestPlan, materialize_parsed_request};
 use crate::gateway::response::{local_protocol_failure, protocol_error_response};
@@ -185,7 +186,7 @@ impl GatewayExecutor {
 
         loop {
             let (decision_wall, decision_mono) = state.sample_gateway_clock();
-            let (accounts, free_cooldown) = {
+            let (accounts, free_cooldown, bindings) = {
                 let db = state.db.lock();
                 let accounts = match db.list_accounts() {
                     Ok(accounts) => accounts,
@@ -223,7 +224,30 @@ impl GatewayExecutor {
                         );
                     }
                 };
-                (accounts, free_cooldown)
+                let bindings = match db.list_inference_bindings() {
+                    Ok(rows) => rows
+                        .into_iter()
+                        .map(|row| {
+                            (
+                                row.account_id,
+                                InferenceBindingGate {
+                                    enabled: row.enabled,
+                                    model_scope: row.model_scope,
+                                },
+                            )
+                        })
+                        .collect::<InferenceBindingIndex>(),
+                    Err(error) => {
+                        let message = format!("failed to load inference bindings: {error}");
+                        return protocol_error_response(
+                            client_format,
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            &message,
+                            None,
+                        );
+                    }
+                };
+                (accounts, free_cooldown, bindings)
             };
             let free_available = free_cooldown.is_none()
                 && !crate::routing_runtime::free_channel_is_exhausted_at(&accounts, decision_wall);
@@ -251,7 +275,7 @@ impl GatewayExecutor {
                     );
                 }
             };
-            let route_set = match materialize_account_routes(
+            let route_set = match materialize_account_routes_with_bindings(
                 &accounts,
                 &snapshots.config,
                 &parsed,
@@ -265,6 +289,7 @@ impl GatewayExecutor {
                 snapshots.cpa_base_url.as_deref(),
                 &snapshots.contracts,
                 &snapshots.dynamics,
+                &bindings,
             ) {
                 Ok(route_set) => route_set,
                 Err(error) => {
@@ -293,6 +318,7 @@ impl GatewayExecutor {
                     cpa_base_url: snapshots.cpa_base_url.as_deref(),
                     contracts: &snapshots.contracts,
                     dynamics: &snapshots.dynamics,
+                    bindings: &bindings,
                 },
                 &route_set,
             );

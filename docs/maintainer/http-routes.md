@@ -76,7 +76,8 @@ independently of discovery and test; a real test may consume upstream quota.
 
 Session-protected (see `dashboard_v4/mod.rs`): `GET /contract`,
 `GET /templates`, `GET /connections`, `GET /accounts`,
-`POST /onboarding/commit`, `POST /credentials/{id}/rotate`.
+`POST /onboarding/commit`, `POST /credentials/{id}/rotate`,
+`PATCH /bindings/{id}`, `POST /identities/{id}/credentials`.
 
 ## Static dashboard
 

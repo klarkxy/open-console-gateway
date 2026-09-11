@@ -9,10 +9,14 @@
 import { requestV4, withExpectation, type WithoutExpectation } from "./dashboard-v3.ts";
 import type { MutationExpectation } from "./generated/dashboard-v3.ts";
 import type {
+  BindingPatchRequest,
+  BindingPatchResult,
   ConnectionList,
   ControlRevision,
   CredentialRotateRequest,
   CredentialRotateResult,
+  IdentityCredentialCreateRequest,
+  IdentityCredentialCreateResult,
   IdentityList,
   OnboardingCommitRequest,
   OnboardingCommitResult,
@@ -37,6 +41,28 @@ export const dashboardV4 = {
     expectation: MutationExpectation,
   ) => requestV4<CredentialRotateResult>(
     `/credentials/${encodeURIComponent(id)}/rotate`,
+    {
+      method: "POST",
+      body: withExpectation(input, expectation),
+    },
+  ),
+  patchBinding: (
+    id: string,
+    input: WithoutExpectation<BindingPatchRequest>,
+    expectation: MutationExpectation,
+  ) => requestV4<BindingPatchResult>(
+    `/bindings/${encodeURIComponent(id)}`,
+    {
+      method: "PATCH",
+      body: withExpectation(input, expectation),
+    },
+  ),
+  createIdentityCredential: (
+    id: string,
+    input: WithoutExpectation<IdentityCredentialCreateRequest>,
+    expectation: MutationExpectation,
+  ) => requestV4<IdentityCredentialCreateResult>(
+    `/identities/${encodeURIComponent(id)}/credentials`,
     {
       method: "POST",
       body: withExpectation(input, expectation),

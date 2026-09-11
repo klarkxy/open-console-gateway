@@ -1,5 +1,5 @@
 {
-  "$comment": "Extensible Dashboard V4 contract catalog. Add new $defs for later DTOs; do not rename or reshape existing definitions. Connection and template listings are secret-free. OnboardingCommitRequest.secretInput and CredentialRotateRequest.secretInput are write-only.",
+  "$comment": "Extensible Dashboard V4 contract catalog. Add new $defs for later DTOs; do not rename or reshape existing definitions. Connection and template listings are secret-free. OnboardingCommitRequest.secretInput, CredentialRotateRequest.secretInput, and IdentityCredentialCreateRequest.secretInput are write-only.",
   "$defs": {
     "AccountAuthScheme": {
       "description": "Custom auth scheme. Wire values match V2 kebab-case.",
@@ -105,6 +105,59 @@
         "modelScope",
         "enabled",
         "routingRank"
+      ],
+      "type": "object"
+    },
+    "BindingPatchRequest": {
+      "additionalProperties": false,
+      "description": "Required process-scoped mutation precondition.\n\nBoth fields travel at the top level of every mutation request. The random\nprocess generation prevents a revision captured before restart from being\naccepted by a fresh process whose in-memory counter reused the same value.",
+      "properties": {
+        "enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "modelScope": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModelScope"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "BindingPatchResult": {
+      "additionalProperties": false,
+      "properties": {
+        "binding": {
+          "$ref": "#/$defs/BindingDto"
+        },
+        "revision": {
+          "$ref": "#/$defs/ControlRevision"
+        }
+      },
+      "required": [
+        "revision",
+        "binding"
       ],
       "type": "object"
     },
@@ -626,6 +679,83 @@
         "declared"
       ],
       "type": "string"
+    },
+    "IdentityCredentialCreateRequest": {
+      "additionalProperties": false,
+      "description": "Required process-scoped mutation precondition.\n\nBoth fields travel at the top level of every mutation request. The random\nprocess generation prevents a revision captured before restart from being\naccepted by a fresh process whose in-memory counter reused the same value.",
+      "properties": {
+        "connectionId": {
+          "type": "string"
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "secretInput": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "connectionId",
+        "secretInput"
+      ],
+      "type": "object"
+    },
+    "IdentityCredentialCreateResult": {
+      "additionalProperties": false,
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "authStateVersion": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "bindingId": {
+          "type": "string"
+        },
+        "connectionId": {
+          "type": "string"
+        },
+        "credentialId": {
+          "type": "string"
+        },
+        "identityId": {
+          "type": "string"
+        },
+        "replayed": {
+          "type": "boolean"
+        },
+        "revision": {
+          "$ref": "#/$defs/ControlRevision"
+        },
+        "version": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "revision",
+        "identityId",
+        "credentialId",
+        "bindingId",
+        "accountId",
+        "connectionId",
+        "version",
+        "authStateVersion",
+        "replayed"
+      ],
+      "type": "object"
     },
     "IdentityLegacy": {
       "additionalProperties": false,
@@ -1465,6 +1595,18 @@
     },
     {
       "$ref": "#/$defs/CredentialRotateResult"
+    },
+    {
+      "$ref": "#/$defs/BindingPatchRequest"
+    },
+    {
+      "$ref": "#/$defs/BindingPatchResult"
+    },
+    {
+      "$ref": "#/$defs/IdentityCredentialCreateRequest"
+    },
+    {
+      "$ref": "#/$defs/IdentityCredentialCreateResult"
     }
   ],
   "title": "DashboardApiV4"
