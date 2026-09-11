@@ -1,4 +1,4 @@
-//! Read-only V4 identity / credential / binding projection.
+//! V4 identity / credential / binding projection and second-credential writes.
 
 use axum::Json;
 use axum::body::Bytes;

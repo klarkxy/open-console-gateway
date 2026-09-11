@@ -679,24 +679,22 @@ fn collect_mapping_plans(
             ));
             continue;
         }
-        let plan_models = plans.iter().filter_map(|candidate| {
-            (candidate.mapping.provider_id == account.provider_id)
-                .then_some(candidate.plan.model.as_str())
-        });
-        if !binding_allows_requested_model(
-            &binding.model_scope,
-            client_model,
-            routing_model,
-            plan_models,
-        ) {
-            rejected.push(format!(
-                "{}/{} account `{}`: model `{routing_model}` is outside binding model scope",
-                account.provider_id, account.provider_id, account.name
-            ));
-            continue;
-        }
         for candidate in &plans {
             if account.provider_id != candidate.mapping.provider_id {
+                continue;
+            }
+            // Scope is per candidate. OR-ing every same-provider plan would let
+            // an allowlisted sibling model admit a request for X (D01).
+            if !binding_allows_requested_model(
+                &binding.model_scope,
+                client_model,
+                routing_model,
+                std::iter::once(candidate.plan.model.as_str()),
+            ) {
+                rejected.push(format!(
+                    "{}/{} account `{}`: model `{routing_model}` is outside binding model scope",
+                    account.provider_id, account.provider_id, account.name
+                ));
                 continue;
             }
             if routes.iter().any(|route: &MaterializedCandidate| {
