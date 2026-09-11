@@ -160,18 +160,20 @@ and profile are removed.
 ## Persistence
 
 `crates/ocg-core/src/db.rs` defines the SQLite schema, migrations, and
-queries. Current schema is **v37**. `provider_contracts.rs` owns provider
-contract scopes, per-model/per-protocol overrides, effective contract
-derivation, and model-protocol evidence. `models.rs` defines shared
-serde types and `AppConfig`. Key obfuscation is `ocg-infra::crypto`
-(facade `ocg_core::crypto`): this is lightweight obfuscation, not a KMS.
-Windows desktop uses `MachineBoundCipher`; CLI/Docker use
-`StaticKeyCipher` from `OCG_MANAGER_ENCRYPTION_KEY` or
-`<data-dir>/.encryption-key`. Production hosts must call
-`Database::open_with_cipher` so v27 ciphertext probes use the already
-resolved cipher. Account `key_cipher` / `password_cipher` are validated in
-place and **never re-encrypted**. A schema newer than this build supports
-fails closed.
+queries. Current schema is **v45**. Version history lives in
+[storage-migration.md](storage-migration.md). `provider_contracts.rs` owns
+provider contract scopes, per-model/per-protocol overrides, effective
+contract derivation, and model-protocol evidence. `models.rs` defines
+shared serde types and `AppConfig`. Local Key storage is
+`ocg-infra::crypto` (facade `ocg_core::crypto`): AES-256-GCM `v2:`
+ciphertext, not a KMS. Legacy XOR still decrypts; a correct
+`open_with_cipher` rewrites remaining account `key_cipher` /
+`password_cipher` rows to v2 in one transaction. Windows desktop uses
+`MachineBoundCipher`; CLI/Docker use `StaticKeyCipher` from
+`OCG_MANAGER_ENCRYPTION_KEY` or `<data-dir>/.encryption-key`. Production
+hosts must call `Database::open_with_cipher` so ciphertext probes use the
+already resolved cipher. A schema newer than this build supports fails
+closed.
 
 Historical versions still matter on upgrade:
 
