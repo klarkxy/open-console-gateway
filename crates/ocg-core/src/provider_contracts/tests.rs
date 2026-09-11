@@ -241,7 +241,7 @@ fn known_unsupported_profiles_do_not_inherit_a_provider_default() {
 }
 
 #[test]
-fn refresh_discovered_go_model_outside_preset_uses_provider_default_protocol() {
+fn o01_catalog_discovered_model_stays_off_until_explicitly_enabled() {
     let now = Utc::now();
     let scope = ContractScope::provider(OPENCODE_PROVIDER_ID);
     let mut persisted = empty_persisted();

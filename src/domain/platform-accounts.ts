@@ -3,6 +3,7 @@ import type {
   PlatformKind,
   PlatformLink,
   PlatformPrice,
+  PlatformQuota,
   PlatformQuotaKind,
   PlatformSnapshot,
 } from "../api/platform-accounts.ts";
@@ -78,6 +79,22 @@ export const PLATFORM_QUOTA_KIND_KEYS: Record<PlatformQuotaKind, string> = {
   subscription: "订阅",
   key_limit: "Key 额度",
 };
+
+/** Keep wallet / subscription / Key limits as separate scopes (O03). */
+export function quotasByKind(
+  quotas: readonly PlatformQuota[],
+): Record<PlatformQuotaKind, PlatformQuota[]> {
+  return {
+    wallet: quotas.filter((quota) => quota.kind === "wallet"),
+    subscription: quotas.filter((quota) => quota.kind === "subscription"),
+    key_limit: quotas.filter((quota) => quota.kind === "key_limit"),
+  };
+}
+
+/** There is no available-total across wallet, subscription, and Key limits. */
+export function combinedAvailableQuota(_quotas: readonly PlatformQuota[]): null {
+  return null;
+}
 
 export function linksForPlatform(
   links: readonly PlatformLink[],

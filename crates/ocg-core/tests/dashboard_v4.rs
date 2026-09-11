@@ -288,7 +288,7 @@ async fn connections_project_dynamic_provider_with_unverified_key_as_unknown_and
 }
 
 #[tokio::test]
-async fn connections_keep_two_custom_accounts_with_same_url_separate_and_ordered() {
+async fn d03_connections_keep_two_custom_accounts_with_same_url_separate_and_ordered() {
     let harness = start_loopback("v4-custom-pair").await;
     let shared = "https://same.example/v1/chat/completions";
     let mut ids = Vec::new();
@@ -929,7 +929,7 @@ async fn commit_cas_conflict_writes_nothing() {
 }
 
 #[tokio::test]
-async fn commit_responses_and_operation_rows_are_secret_free() {
+async fn s04_commit_responses_and_operation_rows_are_secret_free() {
     let harness = start_loopback("v4-commit-secret-free").await;
     let secret = "sk-onboard-never-echo";
     let operation_id = operation_id(12);
@@ -1034,7 +1034,7 @@ async fn identities_project_one_container_one_credential_one_binding_per_account
 }
 
 #[tokio::test]
-async fn identities_keep_platform_parent_and_linked_key_separate_with_declared_relation() {
+async fn d04_identities_keep_platform_parent_and_linked_key_separate_with_declared_relation() {
     let harness = start_loopback("v4-identities-platform").await;
     let (status, parent) = send_v3(
         &harness,
@@ -1123,7 +1123,7 @@ async fn identities_keep_platform_parent_and_linked_key_separate_with_declared_r
 }
 
 #[tokio::test]
-async fn identities_omit_subscription_for_dynamic_accounts() {
+async fn d07_identities_omit_subscription_for_dynamic_accounts() {
     let harness = start_loopback("v4-identities-d07").await;
     let (status, created) = send_v3(
         &harness,
@@ -1217,7 +1217,7 @@ async fn identities_omit_subscription_for_dynamic_accounts() {
 }
 
 #[tokio::test]
-async fn identities_are_secret_free() {
+async fn s04_identities_are_secret_free() {
     let harness = start_loopback("v4-identities-secrets").await;
     let secret = "sk-must-not-appear-in-identities";
     let (status, created) = send_v3(

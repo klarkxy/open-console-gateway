@@ -331,7 +331,7 @@ async fn new_api_key_only_reads_proven_models_and_key_quota() {
 }
 
 #[tokio::test]
-async fn new_api_user_and_key_separates_wallet_subscription_and_groups() {
+async fn o03_wallet_subscription_and_key_limits_are_not_summed() {
     let mut routes = HashMap::new();
     routes.insert(
         "/api/status".to_string(),
@@ -405,6 +405,24 @@ async fn new_api_user_and_key_separates_wallet_subscription_and_groups() {
     assert_eq!(sub.remaining, Some(1_750_000.0));
     assert_eq!(snapshot.billing_preference.as_deref(), Some("subscription"));
     assert_eq!(snapshot.wallet_overflow, Some(false));
+
+    let key_limit = snapshot
+        .quotas
+        .iter()
+        .find(|q| matches!(q.kind, PlatformQuotaKind::KeyLimit))
+        .expect("key limit");
+    assert_eq!(key_limit.used, Some(1.0));
+    assert_eq!(key_limit.remaining, Some(2.0));
+    assert_eq!(key_limit.limit, Some(3.0));
+    let invented_total =
+        wallet.remaining.unwrap() + sub.remaining.unwrap() + key_limit.remaining.unwrap();
+    assert!(
+        snapshot
+            .quotas
+            .iter()
+            .all(|q| q.remaining != Some(invented_total)),
+        "wallet, subscription, and Key limits must not be added into one available total"
+    );
 
     let auto = snapshot
         .groups
@@ -825,7 +843,7 @@ fn json_helpers_do_not_invent_zero_for_missing_values() {
 }
 
 #[tokio::test]
-async fn new_api_user_only_does_not_treat_storefront_as_model_permission() {
+async fn o01_storefront_listing_is_not_model_permission() {
     let mut routes = HashMap::new();
     routes.insert(
         "/api/status".to_string(),

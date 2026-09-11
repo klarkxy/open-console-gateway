@@ -17,6 +17,8 @@ import {
   platformPriceForModel,
   platformPriceRows,
   platformUnavailableReasonKey,
+  combinedAvailableQuota,
+  quotasByKind,
 } from "./platform-accounts.ts";
 
 test("platform inference endpoint mirrors the backend derivation per protocol", () => {
@@ -132,6 +134,38 @@ test("quota amounts carry their unit and never invent totals", () => {
   assert.equal(formatQuotaAmount(100, "", "en-US"), "100");
 });
 
+test("o03 wallet subscription and key limits stay separate and are never summed", () => {
+  const quotas = [
+    { kind: "wallet" as const, remaining: 100, used: 10, limit: 110, unit: "USD", scopeId: "w", unlimited: false, period: null, resetsAt: null, expiresAt: null, source: "user" },
+    { kind: "subscription" as const, remaining: 200, used: 20, limit: 220, unit: "USD", scopeId: "s", unlimited: false, period: "month", resetsAt: null, expiresAt: null, source: "sub" },
+    { kind: "key_limit" as const, remaining: 50, used: 5, limit: 55, unit: "USD", scopeId: "k", unlimited: false, period: "5h", resetsAt: null, expiresAt: null, source: "key" },
+  ];
+  const byKind = quotasByKind(quotas);
+  assert.equal(byKind.wallet.length, 1);
+  assert.equal(byKind.subscription.length, 1);
+  assert.equal(byKind.key_limit.length, 1);
+  assert.equal(byKind.wallet[0]?.remaining, 100);
+  assert.equal(byKind.subscription[0]?.remaining, 200);
+  assert.equal(byKind.key_limit[0]?.remaining, 50);
+  assert.equal(combinedAvailableQuota(quotas), null);
+  const inventedTotal = 100 + 200 + 50;
+  assert.notEqual(byKind.wallet[0]?.remaining, inventedTotal);
+  assert.notEqual(byKind.subscription[0]?.remaining, inventedTotal);
+  assert.notEqual(byKind.key_limit[0]?.remaining, inventedTotal);
+});
+
+test("o01 plaza candidates are discovery only and never an authorization proof", () => {
+  const candidates = platformModelCandidates(snapshot({
+    models: [{ id: "plaza-model", platform: "OpenAI", groupId: null, source: "storefront" }],
+  }), []);
+  assert.equal(candidates.length, 1);
+  assert.equal(candidates[0]?.alreadyMapped, false);
+  assert.equal(candidates[0]?.source, "storefront");
+  assert.ok(!("authorized" in (candidates[0] ?? {})));
+  assert.ok(!("permission" in (candidates[0] ?? {})));
+  assert.ok(!("granted" in (candidates[0] ?? {})));
+});
+
 test("platform time is empty for missing observations", () => {
   assert.equal(formatPlatformTime(0, "en-US"), "");
   assert.ok(formatPlatformTime(1_700_000_000, "en-US").length > 0);
@@ -148,6 +182,17 @@ test("platform rates are per token with a per-million tooltip", () => {
   // Non-ISO currency labels fall back to a plain suffix instead of throwing.
   const credits = formatPlatformRate(0.5, "credits", "en-US");
   assert.ok(credits?.label.includes("credits"));
+});
+
+test("o04 expired and stale prices are flagged and not treated as current quotes", () => {
+  assert.deepEqual(platformPriceFlags(price({ validUntil: 99 }), false, 100), ["expired"]);
+  assert.deepEqual(platformPriceFlags(price({ validUntil: 100 }), false, 100), ["expired"]);
+  assert.deepEqual(platformPriceFlags(price(), true, 100), ["stale"]);
+  const expiredRow = platformPriceRows(snapshot({
+    models: [{ id: "gpt-4o", platform: null, groupId: null, source: "storefront" }],
+    prices: [price({ validUntil: 99, input: 2 })],
+  }), 100)[0];
+  assert.ok(expiredRow?.flags.includes("expired"));
 });
 
 test("price flags distinguish reference, unavailable, expired, and stale", () => {

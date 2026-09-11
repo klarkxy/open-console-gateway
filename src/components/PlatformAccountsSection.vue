@@ -353,6 +353,7 @@ import {
   linkedAccountIdSet,
   platformGroupLabel,
   platformModelCandidates,
+  quotasByKind,
 } from "../domain/platform-accounts.ts";
 import { isCustomApiAccount } from "../domain/custom-account.ts";
 import { PLAN_DEFINITIONS } from "../domain/plans.ts";
@@ -467,7 +468,7 @@ function accountOf(accountId: string): Account | undefined {
 }
 
 function quotasOf(snapshot: PlatformSnapshot, kind: PlatformQuotaKind): PlatformQuota[] {
-  return snapshot.quotas.filter((quota) => quota.kind === kind);
+  return quotasByKind(snapshot.quotas)[kind];
 }
 
 function quotaAmount(value: number | null, unit: string): string {

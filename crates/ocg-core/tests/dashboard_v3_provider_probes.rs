@@ -1524,7 +1524,7 @@ async fn removed_and_zen_owned_go_catalog_models_cannot_be_probed() {
 }
 
 #[tokio::test]
-async fn transport_failure_returns_200_persists_observation_and_redacts_secrets() {
+async fn s04_probe_errors_and_logs_redact_secrets() {
     let harness = start_loopback("probes-failure").await;
     let origin = start_probe_origin(
         StatusCode::INTERNAL_SERVER_ERROR,

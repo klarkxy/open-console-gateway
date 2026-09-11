@@ -152,7 +152,7 @@ test("platform observer credentials are not inference Keys", () => {
   assert.equal(accountCredentialCountLabel(observerOnly), null);
 });
 
-test("declared relations are a declared tag, never a verified-wallet claim", () => {
+test("d04 declared relations are a declared tag, never a verified-wallet claim", () => {
   assert.equal(accountShowsDeclaredRelation(identity()), false);
   assert.equal(accountShowsDeclaredRelation(identity({
     declared_relations: [{ group: "team-a", platform_account_id: "plat-1" }],
@@ -173,7 +173,7 @@ test("multiple credentials show a count; a single credential adds no chrome", ()
   );
 });
 
-test("null V4 subscription hides invented dynamic dates and keeps real Go purchase dates", () => {
+test("d07 null V4 subscription hides invented dynamic dates and keeps real Go purchase dates", () => {
   const go = account();
   const labId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
   const catalog = [dynamicCatalog(labId)];
