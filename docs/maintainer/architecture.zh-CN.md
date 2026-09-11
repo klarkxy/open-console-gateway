@@ -85,7 +85,7 @@ Provider 目录与合约先于账号凭据解析。保存的发现行只能激�
 ## 控制面
 
 Vue SPA 通过 `src/api/dashboard-v3.ts` 及 presenter 调用 `/dashboard/api/v3`。
-并行的仅增量 `/dashboard/api/v4` 与冻结的 V3 并存，共用同一套会话；目前只读。
+并行的仅增量 `/dashboard/api/v4` 与冻结的 V3 并存，共用同一套会话；现已包含 onboarding commit 变更。
 受 CAS 保护的变更携带 `expectedRevision` 与 `processGeneration`；价格写入另带
 `expectedPricingRevision`。不变更状态的操作读取与诊断跳过 CAS。
 

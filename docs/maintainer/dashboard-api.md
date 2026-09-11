@@ -63,8 +63,9 @@ Dashboard V4 JSON is `/dashboard/api/v4`. It is a parallel, additive control
 plane beside frozen V3. V3 `$defs` and routes do not gain new fields.
 
 V4 reuses V3 session middleware. Its listings return the same `ControlRevision`
-(`expectedRevision` / `processGeneration`) that V3 uses for CAS; V4 has no
-mutations yet, so no V4 route checks CAS today.
+(`expectedRevision` / `processGeneration`) that V3 uses for CAS. The one V4
+mutation is `POST /onboarding/commit`; it checks those tokens. Read routes
+do not.
 
 The frozen contract is `schema/dashboard-api-v4.schema.json`, generated from
 `dashboard_v4::contract_schema_pretty()` by
@@ -73,7 +74,7 @@ The frozen contract is `schema/dashboard-api-v4.schema.json`, generated from
 `CATALOG_TYPE_NAMES` in `dashboard_v4/types.rs` is the ordered `$defs` catalog;
 appending must keep existing definitions byte-identical.
 
-The current surface is read-only: `GET /contract`, `GET /templates`, and
+Read-only routes remain `GET /contract`, `GET /templates`, and
 `GET /connections`. Those reads perform no outbound requests.
 
 `GET /templates` is the read-only add catalog: the sealed built-ins (CPA
@@ -89,6 +90,55 @@ legacy identity, never from names or URLs.
 
 V4 does not treat authorization `unknown` as `valid`. Eligibility is a local
 projection, never upstream health.
+
+`POST /onboarding/commit` body: `expectedRevision`, `processGeneration` (the
+same CAS tokens as V3), `operationId` (client-generated UUID), `connection`,
+optional `authorization`, and `targets`.
+
+`connection` is `kind: new` (`templateId` is `custom-http` or a preset id,
+plus `name`, `endpointUrl`, `upstreamProtocol`, `authKind`) or
+`kind: existing` (`connectionId`). `authorization` is `kind: api_key`
+(`secretInput`, optional `accountLabel` / `notes`) or `kind: none`.
+`targets` map a public model to an exact upstream model, with an optional
+per-target upstream override. `new` requires a non-empty `targets` list;
+`existing` requires it empty (model edits stay on V3 `PATCH /providers/{id}`).
+
+Evaluation order: (1) parse; (2) `operationId` must be a UUID; (3) take the
+`settings_update` lock, then idempotency lookup before CAS — if that `operationId` was already committed with the same
+payload digest, the stored secret-free result is returned with `replayed:
+true` and the current revision tokens, without checking CAS (the first write
+already moved the revision); the same `operationId` with a different payload
+returns `409` `operationPayloadMismatch` and writes nothing; (4) CAS check
+(`409` `revisionConflict`); (5) write.
+
+`new` reuses V3 user-defined Provider validation. Template ids pass through as
+opaque preset ids; Rust still does not load presets. Omitting `authorization`
+on keyed auth saves the definition only (V4 connections then show
+authorization `missing`); `api_key` requires a non-empty secret on keyed
+auth; `none` is valid only for no-auth templates, which always create the
+singleton account. The Provider row, optional first account row, and the
+operation record commit in one SQLite transaction; the dynamic-provider
+snapshot is installed after commit exactly as V3 does.
+
+`existing` in this stage accepts a new `api_key` only on user-defined
+(dynamic) Provider connections with keyed auth. Built-in and Custom API
+connection ids return `400` ("add Keys on Accounts"). Account row and
+operation record commit in one transaction, then the revision bump only
+(`reload_contracts=false`), the same as V3 plain account create.
+
+The result is `{ revision, connectionId, credentialId | null, targetIds,
+replayed }`. `connectionId` is the deterministic UUIDv5 of the dynamic
+Provider; `credentialId` is the account id; `targetIds` are UUIDv5 per public
+model. The response never contains the secret, ciphers, or the digest.
+
+**Idempotent operations.** `operationId` plus a payload digest bind a commit:
+the digest is hex HMAC-SHA256 over the semantic payload only — `operationId`,
+`connection`, `authorization` (so the secret is covered), and `targets`.
+`expectedRevision` / `processGeneration` are excluded, so a retry with
+refreshed CAS tokens still replays. Schema v44 stores each commit in
+`dashboard_operations`; the stored `result_json` is secret-free. Rows older
+than 30 days are pruned on insert; after pruning, the same `operationId` is a
+new write.
 
 ## Settings mutation workflow
 

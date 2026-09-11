@@ -96,10 +96,10 @@ exact raw pins.
 
 The Vue SPA calls `/dashboard/api/v3` through `src/api/dashboard-v3.ts` and its
 presenters. A parallel additive `/dashboard/api/v4` sits beside frozen V3 and
-shares the same session; it is read-only today. CAS-protected mutations carry
-`expectedRevision` and `processGeneration`; pricing writes also carry
-`expectedPricingRevision`. Operational reads and diagnostics that do not
-mutate state skip CAS.
+shares the same session; it now carries the onboarding commit mutation.
+CAS-protected mutations carry `expectedRevision` and `processGeneration`;
+pricing writes also carry `expectedPricingRevision`. Operational reads and
+diagnostics that do not mutate state skip CAS.
 
 The CLI calls the same HTTP-neutral services without an argv CAS token. Shared
 services own persistence and revision bumps for both the CLI and the frontend.
