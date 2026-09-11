@@ -71,7 +71,14 @@ CPA is the current instance of this path. Reuse its existing helpers where they
 fit; justify a shared framework with concrete requirements from the integrations
 that will use it.
 
-## Dashboard V3 endpoint changes
+## Dashboard V3 and V4 endpoint changes
+
+New provider, connection, or credential semantics go to `dashboard_v4`
+(`types.rs` and its `CATALOG_TYPE_NAMES`; routes in `dashboard_v4/mod.rs`).
+Run `pnpm run contract:v4:check`. V3 accepts no new DTO fields or routes;
+bug fixes only.
+
+Frozen V3 contract maintenance:
 
 1. Add or extend DTOs in `dashboard_v3/types.rs` and append new names to
    `CATALOG_TYPE_NAMES`. Do not change existing `$defs` objects.

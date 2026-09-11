@@ -36,7 +36,7 @@ Tauri 与 Vite；变量生效时，设置页以只读方式显示实际端口。
 | 单个 Rust crate | `cargo test -p <package>` |
 | Core / Dashboard V3 | `cargo test -p ocg-core <filter>` |
 | Desktop Host | `cargo test -p ocg-manager --lib` |
-| V3 Schema 或生成类型 | `pnpm run contract:v3:check` |
+| V3 或 V4 Schema 或生成类型 | `pnpm run contract:v3:check` / `pnpm run contract:v4:check` |
 | `DESIGN.md` / 主题 | `pnpm run design:lint` |
 
 `pnpm run test` 是跨前端/Rust 门禁。`pnpm run test:tooling` 覆盖

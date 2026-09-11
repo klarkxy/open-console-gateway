@@ -57,6 +57,39 @@ go through `src/api/dashboard.ts` presenters.
 handlers. Retired `/dashboard/api/...` REST paths are tombstoned in
 `host_router` before they reach `dashboard.rs`.
 
+## Dashboard V4
+
+Dashboard V4 JSON is `/dashboard/api/v4`. It is a parallel, additive control
+plane beside frozen V3. V3 `$defs` and routes do not gain new fields.
+
+V4 reuses V3 session middleware. Its listings return the same `ControlRevision`
+(`expectedRevision` / `processGeneration`) that V3 uses for CAS; V4 has no
+mutations yet, so no V4 route checks CAS today.
+
+The frozen contract is `schema/dashboard-api-v4.schema.json`, generated from
+`dashboard_v4::contract_schema_pretty()` by
+`crates/ocg-core/examples/export_dashboard_v4_schema.rs`. Generated TypeScript
+(`src/api/generated/dashboard-v4.ts`) is types only, with no HTTP wrappers.
+`CATALOG_TYPE_NAMES` in `dashboard_v4/types.rs` is the ordered `$defs` catalog;
+appending must keep existing definitions byte-identical.
+
+The current surface is read-only: `GET /contract`, `GET /templates`, and
+`GET /connections`. Those reads perform no outbound requests.
+
+`GET /templates` is the read-only add catalog: the sealed built-ins (CPA
+excluded) plus the `custom-http` manual template. Presets are not part of it
+yet. Templates have no user instances or secrets.
+
+`GET /connections` is a projection of saved instances: built-ins that already
+have an account, every user-defined Provider, and each Custom API account
+individually; CPA is never a connection. Each connection carries lifecycle, authorization state, local
+eligibility with a reason, endpoints, model targets, and a legacy identity
+reference. Connection ids are deterministic UUIDv5 values derived from that
+legacy identity, never from names or URLs.
+
+V4 does not treat authorization `unknown` as `valid`. Eligibility is a local
+projection, never upstream health.
+
 ## Settings mutation workflow
 
 [![Dashboard V3 settings mutation workflow](../diagrams/dashboard-v3-mutation.visual-check.1440x900.light.png)](https://klarkxy.github.io/open-console-gateway/diagrams/dashboard-v3-mutation/)
@@ -84,8 +117,9 @@ Protected Dashboard V2 REST is retired.
   tombstone).
 - Authenticated retired REST (including loopback local mode): **410** with
   `{ "code": "dashboardV2Removed", "message": "Dashboard API V2 has been removed; refresh the page and retry." }`.
-- Unknown `/dashboard/api/...` paths that are not V3 and not a preserved
-  family are also 410 once authenticated.
+- Unknown `/dashboard/api/...` paths that are not V3, not V4, and not a
+  preserved family are also 410 once authenticated. Unknown V4 paths are V4
+  `404`s, not tombstones.
 
 Preserved `/dashboard/api` families (exact path, no trailing slash, no
 extra segments):

@@ -34,7 +34,11 @@ Provider 注册表始终静态、密封。
 
 CPA 是此路径的当前实例。适合时复用已有 helper；需要抽取通用框架时，应以实际使用它的接入需求说明理由。
 
-## Dashboard V3 端点变更
+## Dashboard V3 与 V4 端点变更
+
+新的供应商、connection 或凭据语义进入 `dashboard_v4`（`types.rs` 及其 `CATALOG_TYPE_NAMES`；路由在 `dashboard_v4/mod.rs`），并运行 `pnpm run contract:v4:check`。V3 不再接受新的 DTO 字段或路由，只修缺陷。
+
+冻结 V3 契约的维护步骤：
 
 1. 在 `dashboard_v3/types.rs` 增加或扩展 DTO，并把新名字追加到 `CATALOG_TYPE_NAMES`；既有 `$defs` 不变。
 2. 在 `dashboard_v3/mod.rs` 挂路由；写入走 `parse_mutation_json` 与 `check_expectation`，保持秘密脱敏。

@@ -43,6 +43,7 @@ Vue SPA              静态资源；只走 HTTP Dashboard V3
     Claude Desktop 角色 Alias
     本地 GET /v1/models
   /dashboard/api/v3       当前 Dashboard 控制面
+  /dashboard/api/v4       并行、仅增量的 Dashboard 控制面
   /dashboard/api          保留 auth + browser WS；已退役 REST -> 410
   /dashboard/             Vue SPA 与静态资源
 ```
@@ -84,6 +85,7 @@ Provider 目录与合约先于账号凭据解析。保存的发现行只能激�
 ## 控制面
 
 Vue SPA 通过 `src/api/dashboard-v3.ts` 及 presenter 调用 `/dashboard/api/v3`。
+并行的仅增量 `/dashboard/api/v4` 与冻结的 V3 并存，共用同一套会话；目前只读。
 受 CAS 保护的变更携带 `expectedRevision` 与 `processGeneration`；价格写入另带
 `expectedPricingRevision`。不变更状态的操作读取与诊断跳过 CAS。
 

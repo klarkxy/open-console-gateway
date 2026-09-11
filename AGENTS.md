@@ -4,7 +4,7 @@ Open Console Gateway is a local multi-Plan console: Rust workspace, Vue 3 dashbo
 
 ## Boundaries that affect changes
 
-- The dashboard uses HTTP `/dashboard/api/v3`; mutations use CAS. Contract changes belong in `schema/dashboard-api-v3.schema.json` and generated types. Do not revive retired V2 REST or add Tauri `invoke` commands.
+- The dashboard uses HTTP `/dashboard/api/v3` (frozen) and `/dashboard/api/v4` (additive); mutations use CAS. Contract changes belong in the respective `schema/dashboard-api-v{3,4}.schema.json` and generated types. Do not revive retired V2 REST or add Tauri `invoke` commands. V4 contract changes require `pnpm run contract:v4:check`.
 - Provider and Plan share `provider_id`. Adapter implementations stay static/sealed; user-defined Provider data binds Configurable HTTP. Custom API is account-owned; CPA is a separate static external integration.
 - Preserve authentication, Key obfuscation/redaction, URL validation, cooldown state writes, SSE pass-through, data integrity, and supported compatibility. Do not reintroduce remote sync or an Admin API.
 - Changes to user-visible facts update paired English and `.zh-CN.md` guides. Keep capability tables in `docs/user/`, not the root README.

@@ -26,6 +26,22 @@
 
 `dashboard.rs` 提供 SPA 并保留 V2 鉴权与浏览器 WebSocket 处理器。已退役的 `/dashboard/api/...` REST 路径在到达 `dashboard.rs` 之前由 `host_router` 墓碑拦截。
 
+## Dashboard V4
+
+面板 JSON 位于 `/dashboard/api/v4`。它是冻结 V3 旁边的并行、仅增量控制面。V3 的 `$defs` 与路由不再增加新字段。
+
+V4 复用 V3 会话中间件。其列表返回与 V3 CAS 相同的 `ControlRevision`（`expectedRevision` / `processGeneration`）；V4 目前没有变更接口，因此当前没有任何 V4 路由检查 CAS。
+
+冻结契约是 `schema/dashboard-api-v4.schema.json`，由 `dashboard_v4::contract_schema_pretty()` 经 `crates/ocg-core/examples/export_dashboard_v4_schema.rs` 生成。生成的 TypeScript（`src/api/generated/dashboard-v4.ts`）只有类型，没有 HTTP 封装。`dashboard_v4/types.rs` 的 `CATALOG_TYPE_NAMES` 同样是有序 `$defs` 目录；追加时必须保持既有 definition 对象字节一致。
+
+当前表面只读：`GET /contract`、`GET /templates`、`GET /connections`。这些读取不会发出出站请求。
+
+`GET /templates` 是只读的添加目录：密封内置项（不含 CPA）加上 `custom-http` 手动模板。预设尚未纳入。模板没有用户实例或密钥。
+
+`GET /connections` 是已保存实例的投影：已有账号的内置项、每一个用户定义供应商，以及每个 Custom API 账号各自一条；CPA 永远不是 connection。每条 connection 携带生命周期、授权状态、带原因的本地资格、endpoints、模型目标，以及一份遗留身份引用。connection id 是由该遗留身份派生的确定性 UUIDv5，从不由名称或 URL 派生。
+
+V4 不把授权 `unknown` 当作 `valid`。资格是本地投影，不是上游健康。
+
 ## Settings 变更流程
 
 [![Dashboard V3 Settings 变更流程](../diagrams/dashboard-v3-mutation.visual-check.1440x900.light.png)](https://klarkxy.github.io/open-console-gateway/diagrams/dashboard-v3-mutation/)
@@ -42,7 +58,7 @@ CAS 成功后，Host 先持久化新设置并释放设置锁。只有端口发�
 
 - 匿名已退役 REST：空 body 的 **401**（鉴权先于墓碑）。
 - 已鉴权的已退役 REST（含回环本地模式）：**410**，body 为 `{ "code": "dashboardV2Removed", "message": "Dashboard API V2 has been removed; refresh the page and retry." }`。
-- 既非 V3 也非保留家族的未知 `/dashboard/api/...` 路径，在已鉴权时同样 410。
+- 既非 V3、非 V4，也非保留家族的未知 `/dashboard/api/...` 路径，在已鉴权时同样 410。未知的 V4 路径是 V4 的 `404`，不是墓碑。
 
 保留的 `/dashboard/api` 家族（精确路径，无尾斜杠，无额外段）：
 
