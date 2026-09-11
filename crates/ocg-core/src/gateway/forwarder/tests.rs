@@ -618,3 +618,44 @@ fn fallback_attempt_rebinds_from_the_live_link_snapshot() {
     drop(state);
     let _ = fs::remove_dir_all(dir);
 }
+
+#[test]
+fn s02_secret_bearing_snapshot_requests_do_not_follow_redirects() {
+    assert!(!crate::custom_http::follows_redirects_with_secret(
+        true, true
+    ));
+    assert!(crate::custom_http::follows_redirects_with_secret(
+        true, false
+    ));
+    let mut secret = reqwest::header::HeaderMap::new();
+    secret.insert(
+        reqwest::header::AUTHORIZATION,
+        reqwest::header::HeaderValue::from_static("Bearer sk-secret"),
+    );
+    assert!(headers_carry_upstream_secret(&secret));
+    assert!(!crate::custom_http::follows_redirects_with_secret(
+        true,
+        headers_carry_upstream_secret(&secret)
+    ));
+    assert!(!headers_carry_upstream_secret(
+        &reqwest::header::HeaderMap::new()
+    ));
+}
+
+#[test]
+fn s01_forward_grant_refuses_a_cross_origin_user_override() {
+    assert!(
+        crate::custom_http::ensure_secret_origin_granted(
+            "https://evil.example/v1/chat/completions",
+            &["https://lab.example/v1".to_string()],
+        )
+        .is_err()
+    );
+    assert!(
+        crate::custom_http::ensure_sealed_secret_origin(
+            "https://api.commandcode.ai/provider/v1/chat/completions",
+            crate::provider::COMMAND_CODE_GOAT_BASE_URL,
+        )
+        .is_ok()
+    );
+}

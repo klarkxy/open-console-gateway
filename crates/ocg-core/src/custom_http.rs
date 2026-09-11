@@ -36,9 +36,19 @@ pub struct CustomUrlTarget {
     pub host: CustomUrlHost,
 }
 
-/// Syntactic Custom inference-endpoint gate. Administrators explicitly trust Custom
-/// destinations, so any http/https origin is accepted. Credentials and
-/// non-HTTP(S) schemes stay rejected; DNS / IP / hostname policy is not applied.
+mod origin_grant;
+
+pub use origin_grant::{
+    OriginGrantError, enforce_attempt_secret_origin, ensure_sealed_secret_origin,
+    ensure_secret_origin_granted, follows_redirects_with_secret, inference_origin,
+    is_loopback_inference_origin, origins_match,
+};
+
+/// Syntactic Custom inference-endpoint gate. Administrators may select a public,
+/// LAN, or loopback local-model destination. Embedded credentials and
+/// non-HTTP(S) schemes stay rejected. Metadata, link-local, unspecified, and
+/// opaque IPv4-trick hosts are refused here so they never become an outbound
+/// Custom or dynamic URL.
 pub fn validate_custom_endpoint_url(value: &str) -> Result<String, ProviderBindingError> {
     let value = value.trim();
     if value.is_empty() {
@@ -161,12 +171,16 @@ pub fn inspect_custom_url(parsed: &reqwest::Url) -> Result<CustomUrlTarget, Prov
             "endpoint URL must not include credentials".to_string(),
         ));
     }
-    Ok(CustomUrlTarget {
+    let target = CustomUrlTarget {
         host: custom_url_host(parsed)?,
-    })
+    };
+    origin_grant::reject_unauthorized_custom_target(&target)?;
+    Ok(target)
 }
 
-fn custom_url_host(parsed: &reqwest::Url) -> Result<CustomUrlHost, ProviderBindingError> {
+pub(crate) fn custom_url_host(
+    parsed: &reqwest::Url,
+) -> Result<CustomUrlHost, ProviderBindingError> {
     let host = parsed.host().ok_or_else(|| {
         ProviderBindingError::InvalidCustomBaseUrl("endpoint URL must include a host".to_string())
     })?;
@@ -445,6 +459,7 @@ impl CustomHttpClient {
                     .to_string(),
             ));
         }
+        inspect_custom_url(&url).map_err(CustomHttpError::from)?;
         self.transport
             .send(InferenceHttpRequest {
                 method,

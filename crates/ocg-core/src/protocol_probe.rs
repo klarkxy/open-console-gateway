@@ -226,7 +226,10 @@ async fn execute_protocol_request(
                 .map_err(|error| (None, error.to_string()))?,
         )
     };
-    let spec = if route.follow_redirects {
+    let spec = if crate::custom_http::follows_redirects_with_secret(
+        route.follow_redirects,
+        secret.is_some(),
+    ) {
         HttpInferenceTransportSpec::follow_redirects()
     } else {
         HttpInferenceTransportSpec::no_redirects()
@@ -235,6 +238,37 @@ async fn execute_protocol_request(
         .map_err(|error| (None, error.to_string()))?;
     let url = HttpInferenceTransport::join_endpoint(&route.base_url, &route.path)
         .map_err(|error| (None, error.to_string()))?;
+    if secret.is_some() {
+        let isolated = matches!(
+            route.proxy_routing,
+            crate::gateway::attempt::ProxyRoutingModel::IsolatedTrustedAdmin
+        );
+        if isolated {
+            let persisted = plan
+                .custom_route
+                .as_ref()
+                .map(|route| route.endpoint_url.as_str())
+                .or_else(|| {
+                    crate::dynamic::find_runtime(dynamics, &account.provider_id)
+                        .map(|runtime| runtime.endpoint_url.as_str())
+                })
+                .ok_or_else(|| {
+                    (
+                        None,
+                        "refusing to send credentials: no persisted origin grant for this Key"
+                            .to_string(),
+                    )
+                })?;
+            crate::custom_http::ensure_secret_origin_granted(
+                url.as_str(),
+                &[persisted.to_string()],
+            )
+            .map_err(|error| (None, error.to_string()))?;
+        } else {
+            crate::custom_http::ensure_sealed_secret_origin(url.as_str(), &route.base_url)
+                .map_err(|error| (None, error.to_string()))?;
+        }
+    }
     let mut extra = json_content_headers(protocol == UpstreamProtocolKind::Messages)
         .map_err(|error| (None, error.to_string()))?;
     crate::gateway::forwarder::apply_provider_identity_headers(

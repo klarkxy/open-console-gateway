@@ -13,9 +13,9 @@ fn custom_endpoint_url_trusts_administrator_http_origins_and_rejects_credentials
     assert!(validate_custom_endpoint_url("http://api.example.com/v1/responses").is_ok());
     assert!(validate_custom_endpoint_url("https://192.168.1.8/v1/responses").is_ok());
     assert!(validate_custom_endpoint_url("http://10.0.0.1:9000/v1/messages").is_ok());
-    assert!(validate_custom_endpoint_url("https://169.254.169.254/latest").is_ok());
-    assert!(validate_custom_endpoint_url("http://metadata.google.internal/messages").is_ok());
-    assert!(validate_custom_endpoint_url("https://[::ffff:169.254.169.254]/responses").is_ok());
+    assert!(validate_custom_endpoint_url("https://169.254.169.254/latest").is_err());
+    assert!(validate_custom_endpoint_url("http://metadata.google.internal/messages").is_err());
+    assert!(validate_custom_endpoint_url("https://[::ffff:169.254.169.254]/responses").is_err());
     assert!(validate_custom_endpoint_url("https://[2001:db8::1]/v1/responses").is_ok());
     assert!(validate_custom_endpoint_url("https://user:pass@api.example.com/messages").is_err());
     assert!(validate_custom_endpoint_url("https://api.example.com/responses?x=1").is_err());
@@ -129,14 +129,11 @@ fn custom_url_host_uses_url_host_not_bracketed_host_str() {
             panic!("mapped loopback must stay an IP host, got {domain}")
         }
     }
-    let metadata = validate_custom_endpoint_url("https://[::ffff:169.254.169.254]/latest").unwrap();
-    let parsed = reqwest::Url::parse(&metadata).unwrap();
-    match inspect_custom_url(&parsed).unwrap().host {
-        CustomUrlHost::Ip(_) => {}
-        CustomUrlHost::Domain(domain) => {
-            panic!("mapped metadata IP must stay an IP host, got {domain}")
-        }
-    }
+    let metadata = reqwest::Url::parse("https://[::ffff:169.254.169.254]/latest").unwrap();
+    assert!(
+        inspect_custom_url(&metadata).is_err(),
+        "mapped metadata IP must be refused before outbound"
+    );
 }
 
 #[test]

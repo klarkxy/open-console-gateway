@@ -123,10 +123,12 @@ entry instead of guessing a directory URL. Discovery returns upstream IDs only.
 Choosing one imports a row with the public name and upstream ID exactly equal.
 Fetching does not save, verify, or enable the account.
 
-A trusted administrator may configure any syntactically valid HTTP or HTTPS
-origin, including LAN, loopback, and other self-selected destinations.
-URL-embedded credentials, query strings, and fragments are rejected. The gateway
+A trusted administrator may configure a public, LAN, or loopback HTTP or HTTPS
+origin. Metadata, link-local, and opaque IPv4-trick hosts (for example
+`169.254.169.254` or `metadata.google.internal`) are rejected. URL-embedded
+credentials, query strings, and fragments are rejected. The gateway
 rejects redirects and does not forward dashboard or client authentication.
+A model or endpoint override to another Origin does not inherit the stored Key.
 Chat Completions and Responses use `Authorization: Bearer <key>`; Messages uses
 `x-api-key: <key>`. A 401 does not retry with a different auth header. Root and
 `/v1` bases resolve through the same rule for discovery, verification, and

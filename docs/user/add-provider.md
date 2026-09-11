@@ -51,7 +51,7 @@ OCG resolves common base URLs consistently for model discovery, verification, an
 | A complete standard inference URL | Used exactly as entered | The sibling `/models` |
 | A non-standard complete path | Used exactly as entered | Not guessed; enter model IDs manually |
 
-The configured URL must be HTTP or HTTPS and have a host. Embedded credentials, query strings, and fragments are rejected. A trusted administrator may deliberately select a loopback, LAN, or public destination. OCG does not follow redirects.
+The configured URL must be HTTP or HTTPS and have a host. Embedded credentials, query strings, and fragments are rejected. A trusted administrator may deliberately select a loopback, LAN, or public destination. Metadata, link-local, and opaque IPv4-trick hosts are rejected. A per-model override to another Origin does not inherit the Provider Key. OCG does not follow redirects on secret-bearing requests.
 
 The selected protocol defines the wire contract:
 

@@ -67,8 +67,10 @@ Command Code 官方 `GET /models` 是公开的供应商级目录刷新。供应�
 
 Custom API 是已上线的受信管理员目的地。**账号** 是唯一可编辑映射的页面：每行把公开模型名（客户端请求的名称）与精确上游模型 ID（OCG 实际发送的名称）配对。账号卡保存一个 API 地址、一个上游协议（Chat Completions、Responses 或 Messages）和至少一条映射。该协议对账号内全部映射统一生效，也是 effective preferred protocol：同协议客户端请求直接透传，其他受支持客户端格式统一转换到它。见[协议转换](protocol-conversion.zh-CN.md)。推荐填写不带 `/v1` 的来源根地址：OCG 会自动补上 `/v1` 与所选协议路径；已经以 `/v1` 结尾的基址不会重复添加。现有标准完整 Endpoint 继续原样使用。**获取模型** 会从根地址或版本基址得到 `/v1/models`，也可从标准完整 Endpoint 推导同级 `/models`；非标准完整路径仍原样用于推理，但不猜测目录地址，保留手动添加模型。发现结果只返回上游 ID；选择导入时公开名称与上游 ID 原样相同。获取不会保存、验证或启用账号。
 
-受信管理员可配置任意语法合法的 HTTP 或 HTTPS 源，包括局域网、回环与其他自选目的地。URL
-内嵌凭据、query 与 fragment 会被拒绝。Gateway 拒绝重定向，也不会转发 dashboard 或客户端鉴权。Chat Completions 与 Responses 使用 `Authorization: Bearer <key>`；Messages 使用 `x-api-key: <key>`。401 不会换用另一种鉴权头重试。根地址和 `/v1` 基址在模型发现、验证与正式推理中采用同一补全规则；历史完整 Endpoint 仍原样请求。Custom HTTP 使用同一套进程级 Direct / Manual / Auto 代理策略；连接与请求超时按配置的连接超时夹到
+受信管理员可配置公网、局域网或回环 HTTP / HTTPS 源。元数据、链路本地以及不透明 IPv4 把戏主机（例如
+`169.254.169.254` 或 `metadata.google.internal`）会被拒绝。URL
+内嵌凭据、query 与 fragment 会被拒绝。Gateway 拒绝重定向，也不会转发 dashboard 或客户端鉴权。
+模型或 Endpoint 覆盖到另一 Origin 时，不会自动继承已保存的 Key。Chat Completions 与 Responses 使用 `Authorization: Bearer <key>`；Messages 使用 `x-api-key: <key>`。401 不会换用另一种鉴权头重试。根地址和 `/v1` 基址在模型发现、验证与正式推理中采用同一补全规则；历史完整 Endpoint 仍原样请求。Custom HTTP 使用同一套进程级 Direct / Manual / Auto 代理策略；连接与请求超时按配置的连接超时夹到
 5–60 秒。
 
 所有 ready 账号卡片使用同一个 **测试连接** 动作。弹窗提供可搜索的模型表格、单模型测试与顺序执行的 **测试全部**。每次测试只通过当前这一账号及其当前有效协议发送一次最小真实请求。测试留在该账号上：不切换其他账号，不走 Gateway fallback，不改变启停或冷却，也不写入 Provider 协议证据。结果只保留在当前弹窗；关闭后不再派发排队中的测试，已经发出的请求可按现有超时结束。测试可能消耗供应商额度。Provider 页的测试仍是独立的低频控制面，用于新增 Provider 模型时验证模型/协议能力，并可按其语义使用符合条件的账号回退。

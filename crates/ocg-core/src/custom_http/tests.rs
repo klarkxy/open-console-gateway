@@ -539,6 +539,94 @@ async fn http_inference_transport_redirect_policy_is_owned_by_the_spec() {
 }
 
 #[tokio::test]
+async fn s02_secret_bearing_follow_spec_refuses_before_any_hop() {
+    let second_hits = Arc::new(AtomicUsize::new(0));
+    let second = serve_http(200, "OK", &[], "second", second_hits.clone()).await;
+    let first_hits = Arc::new(AtomicUsize::new(0));
+    let location = format!("http://127.0.0.1:{}/next", second.port());
+    let first = serve_http(
+        302,
+        "Redirect",
+        &[("Location", location)],
+        "",
+        first_hits.clone(),
+    )
+    .await;
+    let follow = HttpInferenceTransport::build(
+        &test_config(ProxyMode::Direct, ""),
+        HttpInferenceTransportSpec::follow_redirects(),
+    )
+    .unwrap();
+    let url = reqwest::Url::parse(&format!("http://127.0.0.1:{}/start", first.port())).unwrap();
+    let error = follow
+        .send(InferenceHttpRequest {
+            method: reqwest::Method::GET,
+            url,
+            auth: Some((UpstreamAuthScheme::Bearer, "sk-secret")),
+            extra_headers: HeaderMap::new(),
+            body: None,
+            request_timeout: None,
+        })
+        .await
+        .expect_err("secret-bearing follow must fail closed");
+    let _ = error;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(first_hits.load(Ordering::SeqCst), 0);
+    assert_eq!(second_hits.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn s01_unauthorized_origin_never_receives_a_secret_bearing_connect() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let unauthorized = serve_http(200, "OK", &[], "secret", hits.clone()).await;
+    let target = format!(
+        "http://127.0.0.1:{}/v1/chat/completions",
+        unauthorized.port()
+    );
+    let granted = vec!["http://127.0.0.1:9/v1".to_string()];
+    assert!(
+        ensure_secret_origin_granted(&target, &granted).is_err(),
+        "a different port is a different Origin and must not inherit the Key"
+    );
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(hits.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn s03_metadata_targets_never_cause_a_secret_bearing_connect() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let bait = serve_http(200, "OK", &[], "metadata", hits.clone()).await;
+    let client = build_custom_http_client(&test_config(ProxyMode::Direct, "")).unwrap();
+    for value in [
+        "https://169.254.169.254/latest",
+        "http://metadata.google.internal/messages",
+        "http://0xa9fea9fe/latest",
+    ] {
+        let url = reqwest::Url::parse(value).unwrap();
+        let error = client
+            .send_isolated(
+                reqwest::Method::GET,
+                url,
+                UpstreamAuthScheme::Bearer,
+                "sk-secret",
+                HeaderMap::new(),
+                None,
+                None,
+            )
+            .await
+            .expect_err(value);
+        assert!(
+            matches!(error, CustomHttpError::InvalidUrl(_)),
+            "{value}: {error}"
+        );
+    }
+    let allowed = reqwest::Url::parse(&format!("http://127.0.0.1:{}/v1", bait.port())).unwrap();
+    let ok = send_get(&client, allowed).await.unwrap();
+    assert_eq!(ok.status(), StatusCode::OK);
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn redirects_are_not_followed_for_301_302_307_308() {
     for status in [301_u16, 302, 307, 308] {
         let second_hits = Arc::new(AtomicUsize::new(0));

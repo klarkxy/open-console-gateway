@@ -37,11 +37,13 @@ Protect the data directory: there is no remote recovery if it is lost.
   an Argon2 hash in SQLite. There is no self-service password recovery —
   protect the data directory.
 - **Custom API destinations.** Complete Custom inference Endpoints are
-  administrator-trusted. Any syntactically valid HTTP or HTTPS destination is
-  allowed, including LAN and loopback. URL-embedded credentials are rejected;
-  query strings and fragments are rejected; redirects are never
-  followed; dashboard and client credentials are never forwarded. Choose
-  destinations you intend to reach from this node.
+  administrator-trusted. Public, LAN, and loopback HTTP or HTTPS destinations
+  are allowed. Metadata, link-local, and opaque IPv4-trick hosts are rejected.
+  URL-embedded credentials are rejected; query strings and fragments are
+  rejected; secret-bearing requests never follow redirects; dashboard and
+  client credentials are never forwarded. A model override to another Origin
+  does not inherit the stored Key. Choose destinations you intend to reach
+  from this node.
 
 ---
 

@@ -275,6 +275,11 @@ impl HttpInferenceTransport {
         &self,
         request: InferenceHttpRequest<'_>,
     ) -> Result<reqwest::Response, InferenceHttpError> {
+        if request.auth.is_some() && self.spec.redirect() == InferenceRedirectPolicy::Follow {
+            return Err(InferenceHttpError::InvalidUrl(
+                "secret-bearing inference requests must not follow redirects".to_string(),
+            ));
+        }
         let mut builder = self.client.request(request.method, request.url);
         if let Some((scheme, api_key)) = request.auth {
             let headers = isolated_inference_headers(scheme, api_key)?;

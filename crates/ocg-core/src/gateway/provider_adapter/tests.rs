@@ -710,3 +710,115 @@ fn minimax_kimi_ollama_do_not_inherit_opencode_responses_for_shared_model_names(
     assert_eq!(ollama_chat.base_url, OLLAMA_CLOUD_BASE_URL);
     assert_eq!(ollama_chat.path, OLLAMA_CLOUD_CHAT_COMPLETIONS_PATH);
 }
+
+fn dynamic_runtime(
+    endpoint_url: &str,
+    override_url: Option<&str>,
+    auth_kind: ocg_domain::dynamic::DynamicAuthKind,
+) -> crate::dynamic::DynamicProviderRuntime {
+    crate::dynamic::DynamicProviderRuntime {
+        preset_id: None,
+        id: "11111111-1111-1111-1111-111111111111".into(),
+        name: "Lab".into(),
+        endpoint_url: endpoint_url.into(),
+        upstream_protocol: crate::provider::UpstreamProtocolKind::ChatCompletions,
+        auth_kind,
+        mappings: vec![ocg_domain::dynamic::DynamicModelMapping {
+            public_model: "lab".into(),
+            upstream_model: "vendor/lab".into(),
+            upstream_override: override_url.map(|url| {
+                ocg_domain::dynamic::DynamicModelUpstreamOverride {
+                    protocol: crate::provider::UpstreamProtocolKind::ChatCompletions,
+                    endpoint_url: url.into(),
+                }
+            }),
+        }],
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        origin: crate::provider::ProviderOrigin::Custom,
+        offering: "api".into(),
+    }
+}
+
+#[test]
+fn s01_dynamic_cross_origin_override_refuses_to_inherit_the_key() {
+    let config = AppConfig::default();
+    let runtime = dynamic_runtime(
+        "https://lab.example/v1",
+        Some("https://evil.example/v1"),
+        ocg_domain::dynamic::DynamicAuthKind::Bearer,
+    );
+    let account = account(
+        "dyn-1",
+        &runtime.id,
+        CredentialKind::ApiKey,
+        QuotaScope::Key,
+    );
+    let error = resolve_route_with_dynamics(
+        &account,
+        &config,
+        &chat_plan(
+            "vendor/lab",
+            UpstreamChannel::Go,
+            ApiFormat::ChatCompletions,
+            None,
+        ),
+        std::slice::from_ref(&runtime),
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("not authorized") || error.contains("refusing to send credentials"),
+        "{error}"
+    );
+
+    let same_origin = dynamic_runtime(
+        "https://lab.example/v1",
+        Some("https://lab.example/other/v1"),
+        ocg_domain::dynamic::DynamicAuthKind::Bearer,
+    );
+    let allowed = resolve_route_with_dynamics(
+        &account,
+        &config,
+        &chat_plan(
+            "vendor/lab",
+            UpstreamChannel::Go,
+            ApiFormat::ChatCompletions,
+            None,
+        ),
+        std::slice::from_ref(&same_origin),
+    )
+    .unwrap();
+    assert_eq!(allowed.base_url, "https://lab.example");
+    assert_eq!(allowed.path, "/other/v1/chat/completions");
+}
+
+#[test]
+fn s01_keyless_dynamic_override_may_use_another_origin() {
+    let config = AppConfig::default();
+    let runtime = dynamic_runtime(
+        "https://lab.example/v1",
+        Some("https://evil.example/v1"),
+        ocg_domain::dynamic::DynamicAuthKind::None,
+    );
+    let mut account = account(
+        "dyn-anon",
+        &runtime.id,
+        CredentialKind::None,
+        QuotaScope::Key,
+    );
+    account.key_cipher.clear();
+    let route = resolve_route_with_dynamics(
+        &account,
+        &config,
+        &chat_plan(
+            "vendor/lab",
+            UpstreamChannel::Go,
+            ApiFormat::ChatCompletions,
+            None,
+        ),
+        std::slice::from_ref(&runtime),
+    )
+    .unwrap();
+    assert_eq!(route.base_url, "https://evil.example");
+    assert_eq!(route.auth, UpstreamAuth::None);
+}

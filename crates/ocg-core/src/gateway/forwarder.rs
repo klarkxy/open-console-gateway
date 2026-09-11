@@ -193,10 +193,13 @@ async fn forward_once(
     body: bytes::Bytes,
     stream: bool,
 ) -> Result<ForwardOnceOutput> {
+    let secret_bearing = headers_carry_upstream_secret(&headers);
     let mut request = match spec.proxy_routing {
         ProxyRoutingModel::IsolatedTrustedAdmin => {
             let client = build_custom_http_client(config)?;
             let url = reqwest::Url::parse(url)?;
+            crate::custom_http::inspect_custom_url(&url)
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
             client.request(reqwest::Method::POST, url)
         }
         ProxyRoutingModel::ProcessWideNoRedirect => {
@@ -210,7 +213,18 @@ async fn forward_once(
             )?;
             client.post(url)
         }
-        ProxyRoutingModel::RequestEntrySnapshot => snapshot_client.post(url),
+        ProxyRoutingModel::RequestEntrySnapshot
+            if crate::custom_http::follows_redirects_with_secret(
+                spec.follow_redirects,
+                secret_bearing,
+            ) =>
+        {
+            snapshot_client.post(url)
+        }
+        ProxyRoutingModel::RequestEntrySnapshot => {
+            let client = crate::http_client::build_no_redirect_for_route(config, route)?;
+            client.post(url)
+        }
     };
     request = request.headers(headers).body(body);
     if !stream {
@@ -1029,7 +1043,46 @@ async fn forward_request_impl(
         reqwest::header::HeaderValue::from_static("application/json"),
     );
     let resolved_auth = attempt_spec.wire_auth();
+    let url = attempt_spec
+        .request_url()
+        .map_err(|error| anyhow::anyhow!(error))?;
     if matches!(resolved_auth, UpstreamAuth::Bearer | UpstreamAuth::XApiKey) {
+        if let Err(error) =
+            enforce_forward_secret_origin(account, plan, dynamics, &attempt_spec, &url)
+        {
+            let class = classify_preflight(PreflightKind::Route);
+            let message = error.to_string();
+            let failure = attempt_context.failure(FailureSpec {
+                error_source: "gateway",
+                error_stage: "provider_route",
+                downstream_status: Some(StatusCode::BAD_GATEWAY.as_u16()),
+                upstream_status: None,
+                upstream_wait_ms: None,
+                retry_action: Some(retry_action_name(forward_action_for_class(
+                    class,
+                    allow_same_account_retry,
+                    None,
+                ))),
+                upstream_headers: None,
+                upstream_error: None,
+                request_body: Some(client_body),
+            });
+            DbAttemptSink::new(&state.db.lock()).insert(
+                account,
+                &plan.model,
+                "error",
+                None,
+                metadata_metrics(
+                    &pricing_snapshot,
+                    plan.service_tier.as_deref(),
+                    "not_applicable",
+                ),
+                Some(&message),
+                &attempt_context,
+                Some(failure),
+            )?;
+            return Ok(account_preflight_failure(plan, message));
+        }
         let key = key
             .as_deref()
             .expect("credential-bearing provider route must decrypt a key");
@@ -1093,10 +1146,6 @@ async fn forward_request_impl(
         reqwest::header::ACCEPT_ENCODING,
         reqwest::header::HeaderValue::from_static("identity"),
     );
-
-    let url = attempt_spec
-        .request_url()
-        .map_err(|error| anyhow::anyhow!(error))?;
 
     let model = plan.model.clone();
     let send_headers = if attempt_spec.isolates_client_headers() {
@@ -2676,6 +2725,55 @@ fn join_chunks(chunks: Vec<bytes::Bytes>) -> bytes::Bytes {
         joined.extend_from_slice(&chunk);
     }
     joined.freeze()
+}
+
+pub(crate) fn headers_carry_upstream_secret(headers: &reqwest::header::HeaderMap) -> bool {
+    headers.keys().any(|name| {
+        matches!(
+            name.as_str(),
+            "authorization" | "x-api-key" | "x-goog-api-key"
+        )
+    })
+}
+
+fn persisted_user_endpoint<'a>(
+    account: &'a Account,
+    plan: &'a RequestPlan,
+    dynamics: &'a [crate::dynamic::DynamicProviderRuntime],
+    spec: &AttemptSpec,
+) -> Option<&'a str> {
+    if !matches!(spec.proxy_routing, ProxyRoutingModel::IsolatedTrustedAdmin) {
+        return None;
+    }
+    plan.custom_route
+        .as_ref()
+        .map(|route| route.endpoint_url.as_str())
+        .or_else(|| {
+            crate::dynamic::find_runtime(dynamics, &account.provider_id)
+                .map(|runtime| runtime.endpoint_url.as_str())
+        })
+}
+
+fn enforce_forward_secret_origin(
+    account: &Account,
+    plan: &RequestPlan,
+    dynamics: &[crate::dynamic::DynamicProviderRuntime],
+    spec: &AttemptSpec,
+    target_url: &str,
+) -> Result<(), crate::custom_http::OriginGrantError> {
+    if matches!(spec.proxy_routing, ProxyRoutingModel::IsolatedTrustedAdmin) {
+        let persisted =
+            persisted_user_endpoint(account, plan, dynamics, spec).ok_or_else(|| {
+                crate::custom_http::OriginGrantError::new(
+                    "refusing to send credentials: no persisted origin grant for this Key",
+                )
+            })?;
+        return crate::custom_http::ensure_secret_origin_granted(
+            target_url,
+            &[persisted.to_string()],
+        );
+    }
+    crate::custom_http::ensure_sealed_secret_origin(target_url, &spec.base_url)
 }
 
 fn ensure_safe_upstream_base_url(base: &str) -> Result<()> {

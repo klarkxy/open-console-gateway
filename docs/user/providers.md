@@ -8,7 +8,7 @@ Enabling a model force-enables every available protocol; it does not merely rest
 
 ## Protocol defaults and connection tests
 
-Each user-defined Provider supplies the default endpoint, protocol and authentication. A model inherits them unless its mapping has an explicit protocol and endpoint override. Clearing the override restores inheritance. Authentication remains Provider-owned. Different public aliases for one upstream model must resolve to the same route.
+Each user-defined Provider supplies the default endpoint, protocol and authentication. A model inherits them unless its mapping has an explicit protocol and endpoint override. Clearing the override restores inheritance. Authentication remains Provider-owned. A keyed override to another Origin does not inherit the Provider Key; the send is refused until that Origin is the persisted Provider URL or an explicit allowed origin. Different public aliases for one upstream model must resolve to the same route.
 
 Routing passes the client protocol through when that protocol is enabled. Otherwise the gateway converts to the model's preferred protocol, then to the first remaining enabled protocol in adapter fallback order. CPA is unchanged: it preserves supported Chat, Responses and Messages client formats; Gemini clients are converted to Chat.
 
