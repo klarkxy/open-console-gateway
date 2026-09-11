@@ -19,9 +19,9 @@ pub use ocg_domain::protocol::{
 };
 
 pub(crate) use ocg_gateway::protocol::{
-    NamespaceToolMapping, decode_anthropic_thinking_block, decode_chat_reasoning,
-    encode_anthropic_thinking_block, encode_chat_reasoning, sanitize_minimax_anthropic_usage,
-    sanitize_minimax_chat_usage,
+    LEGACY_TOOL_COMPAT_PROFILE, LEGACY_TOOL_COMPAT_VERSION, NamespaceToolMapping,
+    decode_anthropic_thinking_block, decode_chat_reasoning, encode_anthropic_thinking_block,
+    encode_chat_reasoning, sanitize_minimax_anthropic_usage, sanitize_minimax_chat_usage,
 };
 
 use ocg_gateway::protocol::{ResponseSynthesis, convert_request_json, convert_response_json};

@@ -199,7 +199,7 @@ fn same_protocol_redacts_a_secret_split_across_text_deltas() {
 }
 
 #[test]
-fn same_protocol_keeps_unknown_fields_after_a_false_key_prefix() {
+fn p05_same_protocol_keeps_unknown_fields_after_a_false_key_prefix() {
     let mut plan = plan(ApiFormat::ChatCompletions, ApiFormat::ChatCompletions);
     plan.client_model = "m".into();
     let mut converter = StreamConverter::new_with_known_secret(&plan, Some("sk-real"));

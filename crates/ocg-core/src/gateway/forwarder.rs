@@ -2892,7 +2892,7 @@ fn error_response(format: ApiFormat, message: &str, upstream: Option<&Value>) ->
     (StatusCode::BAD_GATEWAY, axum::Json(body)).into_response()
 }
 
-fn forward_action_for_class(
+pub(crate) fn forward_action_for_class(
     class: ProviderErrorClass,
     allow_same_account_retry: bool,
     rate_limit_window: Option<UsageWindowKind>,

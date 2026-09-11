@@ -122,9 +122,13 @@ The following fields return `400` instead of being silently ignored:
 - `input_image.file_id` (the gateway has no Files API)
 
 Function, custom, and namespace tools convert normally. Hosted tools such as
-`web_search`, `web_search_preview`, and `tool_search` cannot run on
-OpenCode-Go; their declarations are dropped in automatic tool mode, and
-forcing one returns `400`.
+`web_search`, `web_search_preview`, and `tool_search` cannot run on a converted
+OpenCode-Go path. If they are the only tools or are forced, the gateway
+returns `400` before outbound instead of stripping them and continuing.
+When function tools remain, hosted declarations may still drop under the
+versioned `legacy_compat` profile, and that downgrade is recorded; stored
+protocol configuration is not rewritten. Native Responses passthrough keeps
+hosted tools.
 
 ## Gemini is a client-only format
 

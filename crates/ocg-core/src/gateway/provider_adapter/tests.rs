@@ -1,6 +1,7 @@
 use super::*;
 use crate::crypto::{KeyCipher, StaticKeyCipher};
 use crate::gateway::protocol::{CustomRouteSpec, opencode_supports_upstream};
+use crate::gateway::wire::WireNormalization;
 use crate::models::{Account, AccountSetupStep, AccountType, AppConfig};
 use crate::provider::{
     COMMAND_CODE_GOAT_BASE_URL, COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
@@ -709,6 +710,48 @@ fn minimax_kimi_ollama_do_not_inherit_opencode_responses_for_shared_model_names(
     .unwrap();
     assert_eq!(ollama_chat.base_url, OLLAMA_CLOUD_BASE_URL);
     assert_eq!(ollama_chat.path, OLLAMA_CLOUD_CHAT_COMPLETIONS_PATH);
+}
+
+#[test]
+fn p06_ollama_cloud_attempt_normalizes_wire() {
+    let config = AppConfig::default();
+    let ollama = account(
+        "ollama-p06",
+        OLLAMA_PROVIDER_ID,
+        crate::provider::CredentialKind::ApiKey,
+        crate::provider::QuotaScope::Key,
+    );
+    let spec = resolve_account_test_route_with_dynamics(
+        &ollama,
+        &config,
+        &chat_plan(
+            "deepseek-v4-flash",
+            UpstreamChannel::Go,
+            ApiFormat::ChatCompletions,
+            None,
+        ),
+        &[],
+    )
+    .unwrap();
+    assert_eq!(spec.wire_normalization, WireNormalization::OllamaCloud);
+
+    let original = Bytes::from(
+        serde_json::to_vec(&json!({
+            "model": "deepseek-v4-flash",
+            "messages": [
+                {"role": "assistant", "content": "ok", "reasoning_content": "thought"}
+            ],
+            "max_tokens": 200_000
+        }))
+        .unwrap(),
+    );
+    let normalized = spec
+        .wire_normalization
+        .normalize_request_body(original.clone());
+    assert_ne!(normalized, original);
+    let value: serde_json::Value = serde_json::from_slice(&normalized).unwrap();
+    assert_eq!(value["messages"][0]["reasoning"], "thought");
+    assert_eq!(value["max_tokens"], 65535);
 }
 
 fn dynamic_runtime(

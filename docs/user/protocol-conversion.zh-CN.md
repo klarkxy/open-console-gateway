@@ -76,7 +76,7 @@ Gateway 协议端点默认最多接受 64 MiB 的 JSON 请求体。可在启动�
 - `background: true`
 - `input_image.file_id`（Gateway 没有 Files API）
 
-function、custom、namespace 工具正常转换。`web_search`、`web_search_preview`、 `tool_search` 等 OpenCode-Go 不支持的托管工具在自动工具模式下会被丢弃；显式强制使用则返回 `400`。
+function、custom、namespace 工具正常转换。`web_search`、`web_search_preview`、`tool_search` 等托管工具无法在转换后的 OpenCode-Go 路径上执行：若它们是唯一工具或被强制使用，Gateway 会在出站前返回 `400`，而不是悄悄去掉后继续生成。若请求里还留有 function 工具，托管声明仍可按带版本标记的 `legacy_compat` 策略丢弃，并记录这次降级；已保存的协议配置不会被改写。原生 Responses 透传会保留托管工具。
 
 ## Gemini 是客户端兼容层
 

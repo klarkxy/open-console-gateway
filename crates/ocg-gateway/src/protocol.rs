@@ -58,6 +58,23 @@ pub struct NamespaceToolMapping {
     pub custom: bool,
 }
 
+/// Versioned legacy tool-compat profile. Optional hosted-tool declarations may
+/// still be dropped during conversion; the drop is recorded and never rewrites
+/// stored protocol configuration.
+pub const LEGACY_TOOL_COMPAT_PROFILE: &str = "legacy_compat";
+pub const LEGACY_TOOL_COMPAT_VERSION: u32 = 1;
+
+/// Recorded downgrade when conversion drops optional hosted tools.
+///
+/// Public only as the cross-crate bridge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[doc(hidden)]
+pub struct LegacyToolCompat {
+    pub profile: &'static str,
+    pub version: u32,
+    pub dropped_hosted_tools: Vec<String>,
+}
+
 /// Whole-document request conversion result.
 ///
 /// Public only as the cross-crate bridge.
@@ -67,6 +84,7 @@ pub struct ConvertedRequestJson {
     pub body: Value,
     pub custom_tools: Vec<String>,
     pub namespace_tools: Vec<NamespaceToolMapping>,
+    pub legacy_tool_compat: Option<LegacyToolCompat>,
 }
 
 /// Host-injected synthesis metadata. The converter never reads the clock or
@@ -99,16 +117,18 @@ pub fn convert_request_json(
     body: Value,
 ) -> Result<ConvertedRequestJson, ConversionError> {
     validate_request_features(client, upstream, &body)?;
-    let tool_context = if client == ApiFormat::Responses {
-        responses_tool_context(&body)?
+    let converting = client != upstream;
+    let (tool_context, legacy_tool_compat) = if client == ApiFormat::Responses {
+        responses_tool_context(&body, converting)?
     } else {
-        ResponsesToolContext::default()
+        (ResponsesToolContext::default(), None)
     };
     let body = convert_request(client, upstream, body, &tool_context.namespace_tools)?;
     Ok(ConvertedRequestJson {
         body,
         custom_tools: tool_context.custom_tools,
         namespace_tools: tool_context.namespace_tools,
+        legacy_tool_compat,
     })
 }
 
@@ -830,7 +850,10 @@ struct ResponsesToolContext {
     namespace_tools: Vec<NamespaceToolMapping>,
 }
 
-fn responses_tool_context(body: &Value) -> Result<ResponsesToolContext, ConversionError> {
+fn responses_tool_context(
+    body: &Value,
+    converting: bool,
+) -> Result<(ResponsesToolContext, Option<LegacyToolCompat>), ConversionError> {
     let tools = body
         .get("tools")
         .and_then(Value::as_array)
@@ -847,6 +870,7 @@ fn responses_tool_context(body: &Value) -> Result<ResponsesToolContext, Conversi
         })
         .filter_map(|tool| tool.get("name").and_then(Value::as_str).map(str::to_string))
         .collect::<Vec<_>>();
+    let mut hosted_tools = Vec::new();
 
     for tool in tools {
         match tool.get("type").and_then(Value::as_str) {
@@ -881,7 +905,11 @@ fn responses_tool_context(body: &Value) -> Result<ResponsesToolContext, Conversi
                     });
                 }
             }
-            Some(kind) if is_hosted_tool(kind) => {}
+            Some(kind) if is_hosted_tool(kind) => {
+                if !hosted_tools.iter().any(|existing| existing == kind) {
+                    hosted_tools.push(kind.to_string());
+                }
+            }
             Some(kind) => {
                 return Err(ConversionError::new(format!(
                     "Responses tool type `{kind}` is not supported by protocol conversion"
@@ -891,9 +919,27 @@ fn responses_tool_context(body: &Value) -> Result<ResponsesToolContext, Conversi
         }
     }
 
+    if !converting {
+        if requires_tool(body.get("tool_choice"))
+            && used_names.is_empty()
+            && hosted_tools.is_empty()
+        {
+            return Err(ConversionError::new(
+                "Responses tool_choice `required` has no convertible function, custom, or namespace tool",
+            ));
+        }
+        return Ok((context, None));
+    }
+
     if let Some(kind) = forced_hosted_tool(body.get("tool_choice")) {
         return Err(ConversionError::new(format!(
             "Responses hosted tool `{kind}` cannot be forced through protocol conversion"
+        )));
+    }
+    if !hosted_tools.is_empty() && used_names.is_empty() {
+        return Err(ConversionError::new(format!(
+            "Responses hosted tool `{}` cannot be preserved by protocol conversion; refusing to strip it and continue",
+            hosted_tools[0]
         )));
     }
     if requires_tool(body.get("tool_choice")) && used_names.is_empty() {
@@ -901,7 +947,12 @@ fn responses_tool_context(body: &Value) -> Result<ResponsesToolContext, Conversi
             "Responses tool_choice `required` has no convertible function, custom, or namespace tool",
         ));
     }
-    Ok(context)
+    let legacy_tool_compat = (!hosted_tools.is_empty()).then(|| LegacyToolCompat {
+        profile: LEGACY_TOOL_COMPAT_PROFILE,
+        version: LEGACY_TOOL_COMPAT_VERSION,
+        dropped_hosted_tools: hosted_tools,
+    });
+    Ok((context, legacy_tool_compat))
 }
 
 fn required_tool_name<'a>(tool: &'a Value, label: &str) -> Result<&'a str, ConversionError> {

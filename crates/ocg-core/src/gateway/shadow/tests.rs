@@ -394,7 +394,7 @@ fn shadow_matches_live_for_builtin_go_alias_when_a_fixture_exists() {
 }
 
 #[test]
-fn enabling_shadow_does_not_increment_outbound_request_count() {
+fn r07_shadow_compare_does_not_dual_send() {
     let _guard = ShadowCompareGuard::enable();
     assert!(shadow_compare_enabled());
     let sends_before = shadow_recorded_outbound_sends();

@@ -663,7 +663,7 @@ fn goat_slash_raw_without_loopback_is_fail_closed() {
 }
 
 #[test]
-fn resolve_error_exposes_ambiguous_code() {
+fn r01_ambiguous_raw_model_id_fails_closed_without_outbound() {
     let error = protocol_error_from_resolve(crate::alias::ResolveError::Ambiguous {
         requested: "shared-raw".into(),
         mappings: vec![
@@ -681,7 +681,9 @@ fn resolve_error_exposes_ambiguous_code() {
             },
         ],
     });
+    assert_eq!(error.status, axum::http::StatusCode::BAD_REQUEST);
     assert_eq!(error.code, Some(crate::alias::AMBIGUOUS_MODEL_ID));
+    assert!(error.message.contains("shared-raw"), "{}", error.message);
 }
 
 #[test]
@@ -1254,4 +1256,281 @@ fn d01_disabled_binding_is_skipped_and_default_all_preserves_routes() {
         .map(|route| route.routing.account.id.as_str())
         .collect();
     assert_eq!(unrestricted_ids, vec!["key-a", "key-b"]);
+}
+
+fn routes_for_client(
+    client: ApiFormat,
+    model: &str,
+    accounts: &[Account],
+    contracts: &crate::provider_contracts::EffectiveContractSet,
+    custom_runtimes: &HashMap<String, CustomAccountRuntime>,
+    resolved: &ResolvedModel,
+) -> MaterializedRouteSet {
+    let body = Bytes::from(
+        serde_json::to_vec(&match client {
+            ApiFormat::Responses => json!({"model": model, "input": "hi", "store": false}),
+            ApiFormat::Messages => json!({
+                "model": model,
+                "max_tokens": 16,
+                "messages": [{"role": "user", "content": "hi"}]
+            }),
+            _ => json!({
+                "model": model,
+                "messages": [{"role": "user", "content": "hi"}]
+            }),
+        })
+        .unwrap(),
+    );
+    let parsed = parse_client_request(client, body.clone()).unwrap();
+    materialize_account_routes(
+        accounts,
+        &AppConfig::default(),
+        &parsed,
+        resolved,
+        &parsed.requested_model,
+        model,
+        &body,
+        true,
+        custom_runtimes,
+        &HashMap::new(),
+        None,
+        contracts,
+        &[],
+    )
+    .unwrap()
+}
+
+#[test]
+fn p03_changing_convert_default_keeps_other_native_capability() {
+    let accounts = [go_account("go-1")];
+    let resolved = alias::resolve("kimi-k3").unwrap();
+    let before = routes_for_client(
+        ApiFormat::ChatCompletions,
+        "kimi-k3",
+        &accounts,
+        &static_contracts(),
+        &HashMap::new(),
+        &resolved,
+    );
+    assert_eq!(before.routes[0].plan.upstream, ApiFormat::ChatCompletions);
+    let before_messages = routes_for_client(
+        ApiFormat::Messages,
+        "kimi-k3",
+        &accounts,
+        &static_contracts(),
+        &HashMap::new(),
+        &resolved,
+    );
+    assert_eq!(before_messages.routes[0].plan.upstream, ApiFormat::Messages);
+
+    let scope = crate::provider_contracts::ContractScope::provider(OPENCODE_PROVIDER_ID);
+    let mut persisted = crate::provider_contracts::PersistedContracts::default();
+    persisted.preferences.insert(
+        scope,
+        vec![("kimi-k3".into(), UpstreamProtocolKind::Messages)],
+    );
+    let contracts = crate::provider_contracts::build_effective_contracts(
+        &crate::zen_models::ZenFreeModelCatalog::default(),
+        &[],
+        persisted,
+    );
+    assert_eq!(
+        contracts
+            .providers
+            .get(OPENCODE_PROVIDER_ID)
+            .unwrap()
+            .model("kimi-k3")
+            .unwrap()
+            .preferred_protocol,
+        UpstreamProtocolKind::Messages
+    );
+
+    let after_chat = routes_for_client(
+        ApiFormat::ChatCompletions,
+        "kimi-k3",
+        &accounts,
+        &contracts,
+        &HashMap::new(),
+        &resolved,
+    );
+    let after_messages = routes_for_client(
+        ApiFormat::Messages,
+        "kimi-k3",
+        &accounts,
+        &contracts,
+        &HashMap::new(),
+        &resolved,
+    );
+    assert_eq!(
+        after_chat.routes[0].plan.upstream,
+        ApiFormat::ChatCompletions,
+        "changing the convert default must not drop native Chat"
+    );
+    assert_eq!(
+        after_messages.routes[0].plan.upstream,
+        ApiFormat::Messages,
+        "changing the convert default must not drop native Messages"
+    );
+}
+
+#[test]
+fn p04_does_not_skip_higher_priority_convertible_subscription_for_later_native() {
+    let go = go_account("sub-1");
+    let custom = custom_account("api-1");
+    let runtime = custom_runtime("api-1", "grok-4.5", UpstreamProtocolKind::ChatCompletions);
+    let contracts = contracts_for(std::slice::from_ref(&runtime));
+    let mut runtimes = HashMap::new();
+    runtimes.insert(custom.id.clone(), runtime);
+    let resolved = ResolvedModel::Alias {
+        requested: "grok-4.5".into(),
+        alias: "grok-4.5".into(),
+        mappings: vec![
+            crate::alias::ProviderMapping {
+                provider_id: OPENCODE_PROVIDER_ID.to_string(),
+                upstream_model: "grok-4.5".into(),
+                routeable: true,
+            },
+            crate::alias::ProviderMapping {
+                provider_id: CUSTOM_PROVIDER_ID.to_string(),
+                upstream_model: "grok-4.5".into(),
+                routeable: true,
+            },
+        ],
+    };
+    let set = routes_for_client(
+        ApiFormat::ChatCompletions,
+        "grok-4.5",
+        &[go, custom],
+        &contracts,
+        &runtimes,
+        &resolved,
+    );
+    let ids: Vec<_> = set
+        .routes
+        .iter()
+        .map(|route| route.routing.account.id.as_str())
+        .collect();
+    assert_eq!(ids, vec!["sub-1", "api-1"]);
+    assert_eq!(set.routes[0].plan.upstream, ApiFormat::Responses);
+    assert_eq!(set.routes[1].plan.upstream, ApiFormat::ChatCompletions);
+}
+
+#[test]
+fn r06_live_reread_skips_disabled_or_revoked_stale_snapshot() {
+    use crate::routing_runtime::account_is_available_for;
+
+    let snapshot = [go_account("a"), go_account("b")];
+    let first = routes_for("glm-5.2", &snapshot, &AppConfig::default(), true);
+    assert_eq!(first.routes.len(), 2);
+
+    let mut disabled = snapshot[1].clone();
+    disabled.enabled = false;
+    assert!(account_is_available_for(
+        &snapshot[1],
+        UpstreamChannel::Go,
+        &[]
+    ));
+    assert!(!account_is_available_for(
+        &disabled,
+        UpstreamChannel::Go,
+        &["a"]
+    ));
+
+    let mut revoked = snapshot[1].clone();
+    revoked.auth_error = Some("credential revoked".into());
+    assert!(!account_is_available_for(
+        &revoked,
+        UpstreamChannel::Go,
+        &[]
+    ));
+
+    let live = [snapshot[0].clone(), disabled];
+    let rematerialized = routes_for("glm-5.2", &live, &AppConfig::default(), true);
+    let usable: Vec<_> = rematerialized
+        .routes
+        .iter()
+        .filter(|route| {
+            account_is_available_for(&route.routing.account, route.routing.channel, &["a"])
+        })
+        .collect();
+    assert!(
+        usable.is_empty(),
+        "a live disable/revoke must skip the stale snapshot candidate: {:?}",
+        rematerialized
+            .routes
+            .iter()
+            .map(|route| (
+                route.routing.account.id.as_str(),
+                route.routing.account.enabled
+            ))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn r08_cpa_routing_does_not_assume_local_account_or_unbounded_retry() {
+    let resolved = alias::resolve_with_runtime_catalogs(
+        "vendor/cpa-new-model",
+        alias::RuntimeCatalogs {
+            cpa: &["vendor/cpa-new-model".to_string()],
+            ..alias::RuntimeCatalogs::default()
+        },
+    )
+    .unwrap();
+    let body = chat_body("vendor/cpa-new-model");
+    let parsed = parse_client_request(ApiFormat::ChatCompletions, body.clone()).unwrap();
+    let missing = materialize_account_routes(
+        &[cpa_account()],
+        &AppConfig::default(),
+        &parsed,
+        &resolved,
+        "vendor/cpa-new-model",
+        "vendor/cpa-new-model",
+        &body,
+        true,
+        &HashMap::new(),
+        &HashMap::new(),
+        None,
+        &static_contracts(),
+        &[],
+    );
+    assert!(
+        missing.is_err(),
+        "CPA without a configured base must fail closed"
+    );
+
+    let local = account(
+        "local-oauth-1",
+        CPA_PROVIDER_ID,
+        CredentialKind::ApiKey,
+        QuotaScope::Key,
+    );
+    let set = materialize_account_routes(
+        &[local],
+        &AppConfig::default(),
+        &parsed,
+        &resolved,
+        "vendor/cpa-new-model",
+        "vendor/cpa-new-model",
+        &body,
+        true,
+        &HashMap::new(),
+        &HashMap::new(),
+        Some(crate::cpa::DEFAULT_CPA_BASE_URL),
+        &static_contracts(),
+        &[],
+    )
+    .unwrap();
+    assert!(
+        set.routes.is_empty(),
+        "CPA must not invent a local OAuth/account candidate: {:?}",
+        set.rejected
+    );
+    assert!(
+        set.rejected
+            .iter()
+            .any(|reason| reason.contains("reserved") || reason.contains("CPA")),
+        "{:?}",
+        set.rejected
+    );
 }

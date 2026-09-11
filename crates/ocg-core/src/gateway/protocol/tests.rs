@@ -215,7 +215,7 @@ fn grok_converts_chat_and_messages_to_official_responses() {
 }
 
 #[test]
-fn kimi_k3_passthroughs_chat_and_messages() {
+fn p01_native_chat_and_messages_select_native_endpoints() {
     let chat = prepare_request(
         ApiFormat::ChatCompletions,
         bytes(json!({
@@ -599,7 +599,7 @@ fn responses_no_reasoning_maps_to_chat_thinking_disabled() {
 }
 
 #[test]
-fn responses_requires_explicit_store_false_and_rejects_stateful_async_fields() {
+fn p07_responses_requires_explicit_store_false_and_rejects_stateful_async_fields() {
     for store in [None, Some(Value::Null), Some(json!(true))] {
         let mut request = json!({"model":"minimax-m2.7","input":"hi"});
         if let Some(store) = store {
@@ -633,7 +633,7 @@ fn responses_requires_explicit_store_false_and_rejects_stateful_async_fields() {
 }
 
 #[test]
-fn cross_protocol_structured_formats_are_rejected() {
+fn p02_cross_protocol_structured_formats_are_rejected() {
     let cases = [
         (
             ApiFormat::Responses,
@@ -1700,6 +1700,103 @@ fn responses_hosted_tools_and_history_are_ignored_unless_forced() {
         });
         assert!(prepare_request(ApiFormat::Responses, bytes(request)).is_err());
     }
+}
+
+#[test]
+fn p05_same_protocol_keeps_unknown_native_request_fields() {
+    let plan = prepare_request(
+        ApiFormat::ChatCompletions,
+        bytes(json!({
+            "model": "hy3",
+            "messages": [{"role": "user", "content": "hi"}],
+            "vendor_extension": {"trace_id": "trace_1"},
+            "logprobs": true
+        })),
+    )
+    .expect("Chat-native unknown fields must survive passthrough");
+    assert_eq!(plan.client, ApiFormat::ChatCompletions);
+    assert_eq!(plan.upstream, ApiFormat::ChatCompletions);
+    let body: Value = serde_json::from_slice(&plan.body).unwrap();
+    assert_eq!(body["vendor_extension"]["trace_id"], "trace_1");
+    assert_eq!(body["logprobs"], true);
+}
+
+#[test]
+fn p08_strict_hosted_tools_fail_closed_before_outbound() {
+    for request in [
+        json!({
+            "model":"minimax-m2.7","input":"hi","store":false,
+            "tools":[{"type":"web_search"}]
+        }),
+        json!({
+            "model":"minimax-m2.7","input":"hi","store":false,
+            "tools":[{"type":"web_search"}],
+            "tool_choice":"required"
+        }),
+        json!({
+            "model":"minimax-m2.7","input":"hi","store":false,
+            "tools":[{"type":"web_search"}],
+            "tool_choice":{"type":"web_search"}
+        }),
+    ] {
+        let error = prepare_request(ApiFormat::Responses, bytes(request))
+            .expect_err("unsupported hosted tools must fail closed before outbound");
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert!(
+            error.message.contains("hosted tool") || error.message.contains("web_search"),
+            "{}",
+            error.message
+        );
+    }
+
+    let native = prepare_request(
+        ApiFormat::Responses,
+        bytes(json!({
+            "model":"grok-4.6","input":"hi","store":false,
+            "tools":[{"type":"web_search"}],
+            "tool_choice":{"type":"web_search"}
+        })),
+    )
+    .expect("native Responses must keep hosted tools");
+    assert_eq!(native.client, ApiFormat::Responses);
+    assert_eq!(native.upstream, ApiFormat::Responses);
+    let body: Value = serde_json::from_slice(&native.body).unwrap();
+    assert_eq!(body["tools"][0]["type"], "web_search");
+}
+
+#[test]
+fn p09_legacy_tool_compat_is_versioned_and_records_downgrade() {
+    let request = json!({
+        "model":"minimax-m2.7",
+        "store":false,
+        "input":"hi",
+        "tools":[
+            {"type":"function","name":"local","parameters":{"type":"object"}},
+            {"type":"web_search"}
+        ],
+        "tool_choice":"auto"
+    });
+    let before = request.clone();
+    let converted = ocg_gateway::protocol::convert_request_json(
+        ApiFormat::Responses,
+        ApiFormat::Messages,
+        request,
+    )
+    .expect("optional hosted tools may drop under versioned legacy_compat");
+    let downgrade = converted
+        .legacy_tool_compat
+        .expect("legacy drop must be recorded");
+    assert_eq!(downgrade.profile, LEGACY_TOOL_COMPAT_PROFILE);
+    assert_eq!(downgrade.version, LEGACY_TOOL_COMPAT_VERSION);
+    assert_eq!(
+        downgrade.dropped_hosted_tools,
+        vec!["web_search".to_string()]
+    );
+    assert_eq!(
+        before["tools"].as_array().unwrap().len(),
+        2,
+        "legacy_compat must not rewrite the caller's stored request config"
+    );
 }
 
 #[test]
