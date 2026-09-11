@@ -585,6 +585,7 @@ async fn import_accounts_inner(
     if let Some(node) = validated.node.as_deref() {
         validate_node_merge_against_current(&state, node)?;
     }
+    validate_platform_merge_against_current(&state, &validated.platform_accounts)?;
     let existing = current_logical_accounts(&state)?;
     let existing_ids = current_account_ids(&state)?;
     let mut records = Vec::new();
@@ -1917,6 +1918,7 @@ fn preview_against_current(
     if let Some(node) = validated.node.as_deref() {
         validate_node_merge_against_current(state, node)?;
     }
+    validate_platform_merge_against_current(state, &validated.platform_accounts)?;
     let existing = current_logical_accounts(state)?;
     let existing_ids = current_account_ids(state)?;
     let mut importable = 0_u64;
@@ -1990,6 +1992,31 @@ fn validate_node_merge_against_current(
             state,
             "the migration contains an Access Key value already owned by a different ID",
         ));
+    }
+    Ok(())
+}
+
+fn validate_platform_merge_against_current(
+    state: &CoreState,
+    parents: &[crate::platform::PortablePlatformAccount],
+) -> Result<(), V3ApiError> {
+    if parents.is_empty() {
+        return Ok(());
+    }
+    let existing = state
+        .db
+        .lock()
+        .list_platform_accounts()
+        .map_err(|_| V3ApiError::internal("failed to inspect destination platform accounts"))?;
+    for parent in parents {
+        if existing.iter().any(|row| {
+            row.id == parent.id && (row.kind != parent.kind || row.base_url != parent.base_url)
+        }) {
+            return Err(V3ApiError::conflict_at(
+                state,
+                "imported platform identity conflicts with immutable origin",
+            ));
+        }
     }
     Ok(())
 }
@@ -2275,6 +2302,124 @@ mod tests {
         assert!(!message.to_ascii_lowercase().contains("password"));
         assert!(!message.to_ascii_lowercase().contains("damaged"));
         assert!(message.contains(&PAYLOAD_VERSION.to_string()));
+    }
+
+    #[test]
+    fn future_payload_version_is_rejected_as_unsupported_not_wrong_password() {
+        use crate::crypto::{KeyCipher, StaticKeyCipher};
+        use crate::db::Database;
+        use crate::state::CoreStateInner;
+        use axum::http::StatusCode;
+        use std::fs;
+        use std::sync::Arc;
+
+        assert_eq!(PAYLOAD_VERSION, 5);
+        let mut payload = sample_payload();
+        payload.version = 6;
+        let bundle = encrypt_payload(&payload, "correct horse battery").unwrap();
+        let error = decrypt_and_validate(&bundle, "correct horse battery").unwrap_err();
+        assert!(
+            matches!(error, TransferError::UnsupportedVersion(6)),
+            "{error:?}"
+        );
+        assert!(!matches!(error, TransferError::InvalidBundle));
+
+        let dir = std::env::temp_dir().join(format!(
+            "ocg-transfer-future-payload-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let cipher: Arc<dyn KeyCipher + Send + Sync> =
+            Arc::new(StaticKeyCipher::new("v3-transfer-future-payload"));
+        let state = Arc::new(
+            CoreStateInner::new(Database::open(dir.clone()).unwrap(), dir.clone(), cipher).unwrap(),
+        );
+        let mapped = map_transfer_error(&state, error);
+        assert_eq!(mapped.status, StatusCode::BAD_REQUEST);
+        assert_eq!(mapped.body.code, super::super::ERROR_INVALID_REQUEST);
+        assert!(
+            mapped.body.message.contains("payload version 6"),
+            "{}",
+            mapped.body.message
+        );
+        assert!(
+            mapped
+                .body
+                .message
+                .contains(&format!("payload version {PAYLOAD_VERSION}")),
+            "{}",
+            mapped.body.message
+        );
+        let lower = mapped.body.message.to_ascii_lowercase();
+        assert!(!lower.contains("password"), "{}", mapped.body.message);
+        assert!(!lower.contains("damaged"), "{}", mapped.body.message);
+        drop(state);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn preview_rejects_same_platform_id_with_a_different_site() {
+        use crate::crypto::{KeyCipher, StaticKeyCipher};
+        use crate::db::Database;
+        use crate::platform::{PlatformKind, PortablePlatformAccount};
+        use crate::state::CoreStateInner;
+        use axum::http::StatusCode;
+        use std::fs;
+        use std::sync::Arc;
+
+        let parent_id = "00000000-0000-4000-8000-0000000000aa";
+        let dir = std::env::temp_dir().join(format!(
+            "ocg-transfer-platform-site-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let cipher: Arc<dyn KeyCipher + Send + Sync> =
+            Arc::new(StaticKeyCipher::new("v3-transfer-platform-site"));
+        let state = Arc::new(
+            CoreStateInner::new(Database::open(dir.clone()).unwrap(), dir.clone(), cipher).unwrap(),
+        );
+        state
+            .db
+            .lock()
+            .create_platform_account(
+                parent_id,
+                PlatformKind::NewApi,
+                "Destination site",
+                "https://dest.example",
+                None,
+            )
+            .unwrap();
+
+        let mut payload = sample_payload();
+        payload.platform_accounts = vec![PortablePlatformAccount {
+            id: parent_id.to_string(),
+            kind: PlatformKind::NewApi,
+            name: "Source site".into(),
+            base_url: "https://other.example".into(),
+        }];
+        let validated = validate_payload(payload).unwrap();
+        let error = preview_against_current(&state, &validated).unwrap_err();
+        assert_eq!(error.status, StatusCode::CONFLICT);
+        assert!(
+            error
+                .body
+                .message
+                .contains("imported platform identity conflicts with immutable origin"),
+            "{}",
+            error.body.message
+        );
+        assert_eq!(
+            state
+                .db
+                .lock()
+                .platform_account(parent_id)
+                .unwrap()
+                .unwrap()
+                .base_url,
+            "https://dest.example"
+        );
+        drop(state);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     fn sample_dynamic_provider(id: &str, name: &str) -> PortableProviderDefinition {

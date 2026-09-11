@@ -1548,6 +1548,275 @@ fn platform_link_failure_rolls_back_endpoint() {
     drop(db);
     fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn platform_key_survives_failed_link_and_retry_links_without_a_second_key() {
+    use crate::platform::{PlatformGroup, PlatformKind};
+    let dir = temp_data_dir("platform-key-link-retry");
+    let db = Database::open(dir.clone()).unwrap();
+    let mut key = account("platform-key");
+    key.provider_id = CUSTOM_PROVIDER_ID.into();
+    db.create_account_with_contract(
+        &key,
+        Some(&AccountCustomConfigInput {
+            endpoint_url: "https://old.example/v1/chat/completions".into(),
+            upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+        }),
+        &[AccountModelCapabilityInput {
+            public_model: "model-a".into(),
+            upstream_model: "model-a".into(),
+            protocol: UpstreamProtocolKind::ChatCompletions,
+            source: None,
+        }],
+    )
+    .unwrap();
+    db.create_platform_account(
+        "parent",
+        PlatformKind::NewApi,
+        "Parent",
+        "https://new.example",
+        None,
+    )
+    .unwrap();
+    db.conn
+        .execute_batch(
+            "CREATE TRIGGER reject_platform BEFORE INSERT ON platform_links BEGIN SELECT RAISE(ABORT,'injected failure'); END;",
+        )
+        .unwrap();
+    assert!(
+        db.link_platform_account(&key.id, "parent", &PlatformGroup::default())
+            .is_err()
+    );
+    let custom_ids: Vec<_> = db
+        .list_accounts()
+        .unwrap()
+        .into_iter()
+        .filter(|account| account.provider_id == CUSTOM_PROVIDER_ID)
+        .map(|account| account.id)
+        .collect();
+    assert_eq!(custom_ids, ["platform-key".to_string()]);
+    assert!(db.get_account("platform-key").unwrap().is_some());
+    assert!(db.list_platform_links().unwrap().is_empty());
+
+    db.conn
+        .execute_batch("DROP TRIGGER reject_platform;")
+        .unwrap();
+    db.link_platform_account(&key.id, "parent", &PlatformGroup::default())
+        .unwrap();
+    let custom_ids: Vec<_> = db
+        .list_accounts()
+        .unwrap()
+        .into_iter()
+        .filter(|account| account.provider_id == CUSTOM_PROVIDER_ID)
+        .map(|account| account.id)
+        .collect();
+    assert_eq!(custom_ids, ["platform-key".to_string()]);
+    let links = db.list_platform_links().unwrap();
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].account_id, "platform-key");
+    assert_eq!(links[0].platform_account_id, "parent");
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+fn node_import_record(
+    db: &Database,
+    accounts: Vec<AccountImportRecord>,
+    platform_accounts: Vec<crate::platform::PortablePlatformAccount>,
+    platform_links: Vec<crate::platform::PortablePlatformLink>,
+) -> NodeImportRecord {
+    let mut account_order: Vec<String> = db
+        .list_accounts()
+        .unwrap()
+        .into_iter()
+        .map(|account| account.id)
+        .collect();
+    for record in &accounts {
+        if !account_order.contains(&record.account.id) {
+            account_order.push(record.account.id.clone());
+        }
+    }
+    let config = crate::models::AppConfig {
+        gateway_key: "ocg-import-primary-key".into(),
+        ..crate::models::AppConfig::default()
+    };
+    NodeImportRecord {
+        platform_links_authoritative: true,
+        platform_accounts,
+        platform_links,
+        accounts,
+        account_order,
+        config_json: serde_json::to_string(&config).unwrap(),
+        sub_keys: Vec::new(),
+        zen_free_enabled: false,
+        zen_catalog: crate::kernel::zen::ZenFreeModelCatalog::default(),
+        provider_contracts: crate::provider_contracts::PersistedContracts::default(),
+        dynamic_providers: Vec::new(),
+    }
+}
+
+fn go_import_record(id: &str) -> AccountImportRecord {
+    AccountImportRecord {
+        account: account(id),
+        custom_config: None,
+        capabilities: Vec::new(),
+        verification_status: ConnectionVerificationStatus::NotRequired,
+        connection_verified_at: None,
+        ollama_billing_tier: None,
+    }
+}
+
+#[test]
+fn import_same_platform_id_different_site_writes_nothing() {
+    use crate::platform::{PlatformKind, PortablePlatformAccount};
+    let dir = temp_data_dir("import-platform-site-conflict");
+    let db = Database::open(dir.clone()).unwrap();
+    db.create_platform_account(
+        "00000000-0000-4000-8000-0000000000aa",
+        PlatformKind::NewApi,
+        "Destination",
+        "https://dest.example",
+        None,
+    )
+    .unwrap();
+    let before_accounts = db
+        .list_accounts()
+        .unwrap()
+        .into_iter()
+        .map(|account| account.id)
+        .collect::<Vec<_>>();
+    let before_primary = db.primary_access_key_value().unwrap();
+    let record = node_import_record(
+        &db,
+        vec![go_import_record("imported-go")],
+        vec![PortablePlatformAccount {
+            id: "00000000-0000-4000-8000-0000000000aa".into(),
+            kind: PlatformKind::NewApi,
+            name: "Source".into(),
+            base_url: "https://other.example".into(),
+        }],
+        Vec::new(),
+    );
+    let error = db
+        .import_node_state(&record, |_| -> Result<()> {
+            Err(anyhow::anyhow!("should not build a snapshot"))
+        })
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("imported platform identity conflicts with immutable origin"),
+        "{error}"
+    );
+    assert_eq!(
+        db.list_accounts()
+            .unwrap()
+            .into_iter()
+            .map(|account| account.id)
+            .collect::<Vec<_>>(),
+        before_accounts
+    );
+    assert!(db.get_account("imported-go").unwrap().is_none());
+    assert_eq!(
+        db.platform_account("00000000-0000-4000-8000-0000000000aa")
+            .unwrap()
+            .unwrap()
+            .base_url,
+        "https://dest.example"
+    );
+    assert_eq!(db.primary_access_key_value().unwrap(), before_primary);
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn import_node_state_does_not_commit_when_runtime_snapshot_fails() {
+    let dir = temp_data_dir("import-snapshot-fail");
+    let db = Database::open(dir.clone()).unwrap();
+    let before_accounts = db
+        .list_accounts()
+        .unwrap()
+        .into_iter()
+        .map(|account| account.id)
+        .collect::<Vec<_>>();
+    let before_primary = db.primary_access_key_value().unwrap();
+    let record = node_import_record(
+        &db,
+        vec![go_import_record("snapshot-go")],
+        Vec::new(),
+        Vec::new(),
+    );
+    let error = db
+        .import_node_state(&record, |_| -> Result<()> {
+            Err(anyhow::anyhow!("forced snapshot failure"))
+        })
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("forced snapshot failure"),
+        "{error}"
+    );
+    assert_eq!(
+        db.list_accounts()
+            .unwrap()
+            .into_iter()
+            .map(|account| account.id)
+            .collect::<Vec<_>>(),
+        before_accounts
+    );
+    assert!(db.get_account("snapshot-go").unwrap().is_none());
+    assert_eq!(db.primary_access_key_value().unwrap(), before_primary);
+    let satellites: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM credential_state WHERE account_id = 'snapshot-go'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(satellites, 0);
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn v45_keeps_forward_logs_interpretable_against_migrated_account_ids() {
+    let dir = temp_data_dir("v45-log-identity");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let mut go = account("go-log");
+    go.key_cipher = fixture_account_key_cipher();
+    db.create_account(&go).unwrap();
+    let mut log = forward_log("go-log", "success", 1.25);
+    log.model = "glm-5".into();
+    db.log_forward(&log).unwrap();
+    rewind_identity_model_to_v44(&db.conn);
+    drop(db);
+
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), CURRENT_SCHEMA_VERSION);
+    let account = db.get_account("go-log").unwrap().unwrap();
+    assert_eq!(account.id, "go-log");
+    let row = db
+        .list_forward_logs(10)
+        .unwrap()
+        .into_iter()
+        .find(|item| item.account_id == "go-log")
+        .expect("migrated account id must still resolve the log");
+    assert_eq!(row.account_id, account.id);
+    assert_eq!(row.model, "glm-5");
+    assert_eq!(row.status, "success");
+    let mapped: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM legacy_identity_map
+             WHERE legacy_kind = 'account' AND legacy_id = 'go-log'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(mapped, 3);
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
 const FIXTURE_ACCOUNT_PLAINTEXT: &str = "sk-fixture";
 
 fn test_host_cipher() -> Arc<dyn KeyCipher + Send + Sync> {
