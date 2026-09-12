@@ -3,7 +3,9 @@
 //! Custom destinations are administrator-trusted. Direct, Manual, and Auto all
 //! inherit the process-wide proxy policy from [`crate::http_client`]. The
 //! client never follows redirects, never forwards dashboard/client auth, and
-//! always composes isolated Bearer / `x-api-key` headers.
+//! always composes isolated Bearer / `x-api-key` headers. IsolatedTrustedAdmin
+//! connectors attach a destination DNS guard; an explicit or system proxy still
+//! owns destination DNS and is not forced Direct.
 //!
 //! Catalog-free transport mechanics live in [`ocg_infra::inference_http`]. This
 //! module maps [`AppConfig`] through [`crate::http_client::outbound_proxy_spec`]
@@ -16,6 +18,7 @@ use crate::provider::{ProviderBindingError, UpstreamAuthScheme, UpstreamProtocol
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::sync::Arc;
 use std::time::Duration;
 
 pub use ocg_infra::inference_http::{
@@ -36,6 +39,7 @@ pub struct CustomUrlTarget {
     pub host: CustomUrlHost,
 }
 
+mod dns;
 mod origin_grant;
 
 pub use origin_grant::{
@@ -310,19 +314,54 @@ impl HttpInferenceTransport {
         Self::build_with_connect_timeout(config, spec, Self::connect_timeout(config))
     }
 
+    /// IsolatedTrustedAdmin Custom/dynamic inference, stored/draft probes, and
+    /// discovery. Attaches the destination DNS guard on the connector actually
+    /// used to connect. Does not change proxy routing.
+    pub(crate) fn build_isolated_trusted_admin(
+        config: &AppConfig,
+        spec: HttpInferenceTransportSpec,
+    ) -> Result<Self, InferenceHttpError> {
+        Self::build_with_connect_timeout_and_dns(
+            config,
+            spec,
+            Self::connect_timeout(config),
+            Some(dns::isolated_destination_resolver()),
+        )
+    }
+
     fn build_with_connect_timeout(
         config: &AppConfig,
         spec: HttpInferenceTransportSpec,
         connect_timeout: Duration,
     ) -> Result<Self, InferenceHttpError> {
+        Self::build_with_connect_timeout_and_dns(config, spec, connect_timeout, None)
+    }
+
+    fn build_with_connect_timeout_and_dns(
+        config: &AppConfig,
+        spec: HttpInferenceTransportSpec,
+        connect_timeout: Duration,
+        dns_resolver: Option<Arc<dyn reqwest::dns::Resolve>>,
+    ) -> Result<Self, InferenceHttpError> {
         let mut proxy = crate::http_client::outbound_proxy_spec(config);
         proxy.connect_timeout = connect_timeout;
         Ok(Self {
-            inner: ocg_infra::inference_http::HttpInferenceTransport::build(
+            inner: ocg_infra::inference_http::HttpInferenceTransport::build_with_dns_resolver(
                 &proxy,
                 spec.to_infra(),
+                dns_resolver,
             )?,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn build_isolated_trusted_admin_with_dns_resolver(
+        config: &AppConfig,
+        spec: HttpInferenceTransportSpec,
+        connect_timeout: Duration,
+        resolver: Arc<dyn reqwest::dns::Resolve>,
+    ) -> Result<Self, InferenceHttpError> {
+        Self::build_with_connect_timeout_and_dns(config, spec, connect_timeout, Some(resolver))
     }
 
     pub fn spec(&self) -> HttpInferenceTransportSpec {
@@ -478,15 +517,35 @@ pub fn build_custom_http_client(config: &AppConfig) -> Result<CustomHttpClient, 
     // Connect timeout only. Non-stream callers apply `non_stream_timeout_secs`
     // per request; streaming must be able to outlive that total duration.
     // Custom keeps redirect prohibition on this wrapper; the transport can
-    // follow redirects when another adapter selects that spec.
+    // follow redirects when another adapter selects that spec. IsolatedTrustedAdmin
+    // attaches the destination DNS guard on this connector.
     Ok(CustomHttpClient {
-        transport: HttpInferenceTransport::build_with_connect_timeout(
+        transport: HttpInferenceTransport::build_with_connect_timeout_and_dns(
             config,
             HttpInferenceTransportSpec::no_redirects(),
             custom_connect_timeout(config),
+            Some(dns::isolated_destination_resolver()),
         )?,
     })
 }
+
+#[cfg(test)]
+pub(crate) fn build_custom_http_client_with_dns_resolver(
+    config: &AppConfig,
+    resolver: Arc<dyn reqwest::dns::Resolve>,
+) -> Result<CustomHttpClient, CustomHttpError> {
+    Ok(CustomHttpClient {
+        transport: HttpInferenceTransport::build_isolated_trusted_admin_with_dns_resolver(
+            config,
+            HttpInferenceTransportSpec::no_redirects(),
+            custom_connect_timeout(config),
+            resolver,
+        )?,
+    })
+}
+
+#[cfg(test)]
+pub(crate) use dns::{DestinationResolveLog, guarded_destination_resolver, recording_resolver};
 
 const FORBIDDEN_CLIENT_HEADERS: &[&str] = &[
     "cookie",

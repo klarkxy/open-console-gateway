@@ -119,6 +119,20 @@ fn s03_documented_local_model_destinations_stay_allowed() {
 }
 
 #[test]
+fn s03_dns_guard_reuses_the_url_host_ip_block_list() {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    assert!(is_blocked_custom_ip(IpAddr::V4(Ipv4Addr::new(
+        169, 254, 169, 254
+    ))));
+    assert!(is_blocked_custom_ip(IpAddr::V6(Ipv6Addr::new(
+        0xfd00, 0xec2, 0, 0, 0, 0, 0, 0x254
+    ))));
+    assert!(!is_blocked_custom_ip(IpAddr::V4(Ipv4Addr::new(
+        10, 0, 0, 1
+    ))));
+}
+
+#[test]
 fn s03_inspect_rejects_metadata_even_when_the_url_is_already_parsed() {
     let parsed = reqwest::Url::parse("https://[::ffff:169.254.169.254]/latest").unwrap();
     assert!(inspect_custom_url(&parsed).is_err());

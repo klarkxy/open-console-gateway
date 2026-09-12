@@ -4,6 +4,7 @@
 //! the caller. Product catalogs, model-name folding, and control-plane
 //! validation stay in the core compatibility facade.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -177,6 +178,18 @@ pub fn configured_builder(spec: &OutboundProxySpec) -> Result<reqwest::ClientBui
         },
     };
     Ok(builder)
+}
+
+/// Optional IsolatedTrustedAdmin DNS seam. Attaches `resolver` as the connector
+/// resolver without changing proxy routing. Sealed-adapter builders must keep
+/// calling [`configured_builder`] with no resolver. `ClientBuilder::resolve`
+/// overrides wrap *outside* this resolver and must not be used to inject
+/// destination answers under the guard.
+pub fn attach_dns_resolver(
+    builder: reqwest::ClientBuilder,
+    resolver: Arc<dyn reqwest::dns::Resolve>,
+) -> reqwest::ClientBuilder {
+    builder.dns_resolver2(resolver)
 }
 
 pub fn build(spec: &OutboundProxySpec) -> Result<reqwest::Client> {

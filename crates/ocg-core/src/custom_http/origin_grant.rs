@@ -1,10 +1,11 @@
 //! Origin grant and Custom URL destination trust (S01 / S03).
 //!
-//! Sealed adapter origins stay sealed. User-defined destinations must match the
-//! persisted validated URL (or an explicit extra allowed-origin set). Metadata,
-//! link-local, and opaque IPv4 tricks are never Custom destinations. Documented
-//! loopback / LAN local-model targets stay allowed and do not widen those
-//! exceptions to metadata hosts.
+//! Sealed adapter origins stay sealed. Isolated Custom/dynamic secret-bearing
+//! sends match stored binding `allowedOrigins` (and endpoint ids on the live
+//! send path). Editing the current Provider or Custom URL is not a grant.
+//! Metadata, link-local, and opaque IPv4 tricks are never Custom destinations.
+//! Documented loopback / LAN local-model targets stay allowed and do not widen
+//! those exceptions to metadata hosts.
 
 use super::{CustomUrlHost, CustomUrlTarget, custom_url_host, inspect_custom_url};
 use crate::provider::{
@@ -88,7 +89,7 @@ pub fn origins_match(left: &str, right: &str) -> bool {
 
 /// Host-side grant for one secret-bearing attempt.
 ///
-/// User-defined Custom / dynamic routes pass the persisted validated URL.
+/// User-defined Custom / dynamic routes pass stored binding Origins.
 /// Sealed adapters pass `None` and are checked against the official origin or
 /// the documented loopback test seam.
 pub fn enforce_attempt_secret_origin(
@@ -104,9 +105,9 @@ pub fn enforce_attempt_secret_origin(
 
 /// Refuse to attach a stored Key when `target_url` is outside the grant.
 ///
-/// The grant is the persisted validated URL plus any extra allowed origins
-/// (binding `allowedOrigins` when the caller has them). Changing a model
-/// override to another Origin does not inherit the Key.
+/// Isolated callers pass stored binding `allowedOrigins`. Changing a model
+/// override to another Origin does not inherit the Key unless that Origin was
+/// explicitly granted. Editing the current connection URL does not grant.
 pub fn ensure_secret_origin_granted(
     target_url: &str,
     granted_urls: &[String],
@@ -204,7 +205,9 @@ fn origin_of(parsed: &reqwest::Url) -> Option<InferenceOrigin> {
     })
 }
 
-fn is_blocked_custom_ip(ip: IpAddr) -> bool {
+/// Shared destination IP policy for URL-host inspection and the IsolatedTrustedAdmin
+/// connector DNS guard. Do not duplicate this list.
+pub(super) fn is_blocked_custom_ip(ip: IpAddr) -> bool {
     match ip.to_canonical() {
         IpAddr::V4(ip) => is_blocked_ipv4(ip),
         IpAddr::V6(ip) => is_blocked_ipv6(ip),
