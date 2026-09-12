@@ -9,6 +9,9 @@ use crate::custom_http::{
     HttpInferenceTransport, HttpInferenceTransportSpec, InferenceHttpRequest, json_content_headers,
 };
 use crate::gateway::attempt::UpstreamAuth;
+use crate::gateway::forwarder::{
+    LiveSendSelection, authorize_live_send_secret, confirm_live_send_secret,
+};
 use crate::gateway::protocol::{CustomRouteSpec, RequestPlan};
 use crate::gateway::provider_adapter::{
     resolve_account_test_route_with_dynamics, resolve_probe_route,
@@ -201,6 +204,7 @@ async fn execute_protocol_request(
         service_tier: None,
         custom_tools: Vec::new(),
         namespace_tools: Vec::new(),
+        legacy_tool_compat: None,
         response_parallel_tool_calls: true,
         response_tool_choice: serde_json::json!("auto"),
         response_tools: Vec::new(),
@@ -217,15 +221,22 @@ async fn execute_protocol_request(
         resolve_probe_route(account, ctx.config, &plan)
     }
     .map_err(|error| (None, error))?;
-    let secret = if matches!(route.auth, UpstreamAuth::None) {
-        None
-    } else {
-        Some(
-            ctx.state
-                .decrypt_key(&account.key_cipher)
-                .map_err(|error| (None, error.to_string()))?,
+    let selection = {
+        let db = ctx.state.db.lock();
+        let binding = db
+            .list_inference_bindings()
+            .ok()
+            .and_then(|rows| rows.into_iter().find(|row| row.account_id == account.id));
+        LiveSendSelection::from_binding(
+            account,
+            binding.as_ref(),
+            ctx.model_id,
+            ctx.model_id,
+            ctx.model_id,
         )
     };
+    let secret = authorize_live_send_secret(ctx.state, &selection, account, &plan, &route)
+        .map_err(|error| (None, error.to_string()))?;
     let spec = if crate::custom_http::follows_redirects_with_secret(
         route.follow_redirects,
         secret.is_some(),
@@ -234,41 +245,18 @@ async fn execute_protocol_request(
     } else {
         HttpInferenceTransportSpec::no_redirects()
     };
-    let transport = HttpInferenceTransport::build(ctx.config, spec)
-        .map_err(|error| (None, error.to_string()))?;
+    let isolated = matches!(
+        route.proxy_routing,
+        crate::gateway::attempt::ProxyRoutingModel::IsolatedTrustedAdmin
+    );
+    let transport = if isolated {
+        HttpInferenceTransport::build_isolated_trusted_admin(ctx.config, spec)
+    } else {
+        HttpInferenceTransport::build(ctx.config, spec)
+    }
+    .map_err(|error| (None, error.to_string()))?;
     let url = HttpInferenceTransport::join_endpoint(&route.base_url, &route.path)
         .map_err(|error| (None, error.to_string()))?;
-    if secret.is_some() {
-        let isolated = matches!(
-            route.proxy_routing,
-            crate::gateway::attempt::ProxyRoutingModel::IsolatedTrustedAdmin
-        );
-        if isolated {
-            let persisted = plan
-                .custom_route
-                .as_ref()
-                .map(|route| route.endpoint_url.as_str())
-                .or_else(|| {
-                    crate::dynamic::find_runtime(dynamics, &account.provider_id)
-                        .map(|runtime| runtime.endpoint_url.as_str())
-                })
-                .ok_or_else(|| {
-                    (
-                        None,
-                        "refusing to send credentials: no persisted origin grant for this Key"
-                            .to_string(),
-                    )
-                })?;
-            crate::custom_http::ensure_secret_origin_granted(
-                url.as_str(),
-                &[persisted.to_string()],
-            )
-            .map_err(|error| (None, error.to_string()))?;
-        } else {
-            crate::custom_http::ensure_sealed_secret_origin(url.as_str(), &route.base_url)
-                .map_err(|error| (None, error.to_string()))?;
-        }
-    }
     let mut extra = json_content_headers(protocol == UpstreamProtocolKind::Messages)
         .map_err(|error| (None, error.to_string()))?;
     crate::gateway::forwarder::apply_provider_identity_headers(
@@ -300,6 +288,8 @@ async fn execute_protocol_request(
             ));
         }
     };
+    confirm_live_send_secret(ctx.state, &selection, account, &plan, &route)
+        .map_err(|error| (None, error.to_string()))?;
     let response = transport
         .send(InferenceHttpRequest {
             method: reqwest::Method::POST,
@@ -382,35 +372,4 @@ fn non_null_probe_error(value: &serde_json::Value) -> Option<&serde_json::Value>
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn unique_protocols_preserve_caller_order_and_reject_duplicates() {
-        let unique = [
-            UpstreamProtocolKind::ChatCompletions,
-            UpstreamProtocolKind::Responses,
-        ];
-        require_unique_probe_protocols(&unique).expect("unique caller order is preserved");
-        require_unique_probe_protocols(&[
-            UpstreamProtocolKind::ChatCompletions,
-            UpstreamProtocolKind::Responses,
-            UpstreamProtocolKind::ChatCompletions,
-        ])
-        .expect_err("duplicates must fail locally");
-    }
-
-    #[test]
-    fn null_error_field_is_not_a_probe_failure() {
-        let success = serde_json::json!({ "id": "response-1", "error": null });
-        assert!(non_null_probe_error(&success).is_none());
-
-        let failure = serde_json::json!({ "error": { "message": "model unavailable" } });
-        assert_eq!(
-            non_null_probe_error(&failure)
-                .and_then(|error| error.get("message"))
-                .and_then(serde_json::Value::as_str),
-            Some("model unavailable")
-        );
-    }
-}
+mod tests;

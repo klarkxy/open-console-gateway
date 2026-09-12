@@ -618,13 +618,6 @@ fn resolve_dynamic_http(
             )
         })?;
     let route = runtime.effective_route(selected);
-    if runtime.auth_kind.requires_key() {
-        crate::custom_http::ensure_secret_origin_granted(
-            &route.endpoint_url,
-            std::slice::from_ref(&runtime.endpoint_url),
-        )
-        .map_err(|error| error.to_string())?;
-    }
     let protocol = protocol_kind_for(plan.upstream)?;
     if protocol != route.protocol {
         return Err(format!(

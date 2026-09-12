@@ -112,6 +112,24 @@
       "additionalProperties": false,
       "description": "Required process-scoped mutation precondition.\n\nBoth fields travel at the top level of every mutation request. The random\nprocess generation prevents a revision captured before restart from being\naccepted by a fresh process whose in-memory counter reused the same value.",
       "properties": {
+        "allowedEndpointIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "allowedOrigins": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "enabled": {
           "type": [
             "boolean",
@@ -201,10 +219,11 @@
       "type": "object"
     },
     "ConnectionLifecycle": {
-      "description": "Whether the projected connection is currently intended to be used.",
+      "description": "V4 connection lifecycle, including persisted onboarding drafts.\n\nDraft is control-plane only: routing snapshots never carry it.",
       "enum": [
         "configured",
-        "disabled"
+        "disabled",
+        "draft"
       ],
       "type": "string"
     },
@@ -541,6 +560,13 @@
             }
           ]
         },
+        "quotaPoolId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "quotaWindows": {
           "items": {
             "$ref": "#/$defs/QuotaWindowDto"
@@ -566,6 +592,7 @@
         "subject",
         "bindings",
         "quotaWindows",
+        "quotaPoolId",
         "onboardingTask",
         "subscription",
         "lastError",
@@ -684,6 +711,12 @@
       "additionalProperties": false,
       "description": "Required process-scoped mutation precondition.\n\nBoth fields travel at the top level of every mutation request. The random\nprocess generation prevents a revision captured before restart from being\naccepted by a fresh process whose in-memory counter reused the same value.",
       "properties": {
+        "accountLabel": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "connectionId": {
           "type": "string"
         },
@@ -692,10 +725,19 @@
           "minimum": 0,
           "type": "integer"
         },
+        "operationId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "processGeneration": {
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
+        },
+        "quotaSharing": {
+          "$ref": "#/$defs/QuotaSharing"
         },
         "secretInput": {
           "type": "string"
@@ -950,6 +992,13 @@
         }
       ]
     },
+    "OnboardingCommitMode": {
+      "enum": [
+        "draft",
+        "complete"
+      ],
+      "type": "string"
+    },
     "OnboardingCommitRequest": {
       "additionalProperties": false,
       "description": "Required process-scoped mutation precondition.\n\nBoth fields travel at the top level of every mutation request. The random\nprocess generation prevents a revision captured before restart from being\naccepted by a fresh process whose in-memory counter reused the same value.",
@@ -965,6 +1014,10 @@
           ],
           "default": null
         },
+        "authorizeCurrentEndpoint": {
+          "description": "Explicit consent to union safe current default/same-origin grants.\nIgnored unless `mode` is present; false is omitted from the digest.",
+          "type": "boolean"
+        },
         "connection": {
           "$ref": "#/$defs/OnboardingConnection"
         },
@@ -972,6 +1025,17 @@
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
+        },
+        "mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OnboardingCommitMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Omitted preserves legacy commit behavior and HMAC digest bytes."
         },
         "operationId": {
           "type": "string"
@@ -1000,6 +1064,14 @@
     "OnboardingCommitResult": {
       "additionalProperties": false,
       "properties": {
+        "accountId": {
+          "default": null,
+          "description": "Legacy receipts omit this; replay emits null via serde default.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "connectionId": {
           "type": "string"
         },
@@ -1027,7 +1099,8 @@
         "connectionId",
         "credentialId",
         "targetIds",
-        "replayed"
+        "replayed",
+        "accountId"
       ],
       "type": "object"
     },
@@ -1069,6 +1142,17 @@
         {
           "additionalProperties": false,
           "properties": {
+            "configuration": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/OnboardingConnectionNew"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Required when `mode` is present. Legacy mode-None existing rejects this."
+            },
             "connectionId": {
               "type": "string"
             },
@@ -1084,6 +1168,34 @@
           "type": "object"
         }
       ]
+    },
+    "OnboardingConnectionNew": {
+      "additionalProperties": false,
+      "properties": {
+        "authKind": {
+          "$ref": "#/$defs/ProviderDefinitionAuthKind"
+        },
+        "endpointUrl": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "templateId": {
+          "type": "string"
+        },
+        "upstreamProtocol": {
+          "$ref": "#/$defs/AccountUpstreamProtocol"
+        }
+      },
+      "required": [
+        "templateId",
+        "name",
+        "endpointUrl",
+        "upstreamProtocol",
+        "authKind"
+      ],
+      "type": "object"
     },
     "OnboardingTarget": {
       "additionalProperties": false,
@@ -1290,6 +1402,38 @@
         "authoritative_limit"
       ],
       "type": "string"
+    },
+    "QuotaSharing": {
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "independent",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "credentialId": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "shared",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "credentialId"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "QuotaSubject": {
       "enum": [
@@ -1546,6 +1690,9 @@
       "$ref": "#/$defs/OnboardingCommitRequest"
     },
     {
+      "$ref": "#/$defs/OnboardingCommitMode"
+    },
+    {
       "$ref": "#/$defs/OnboardingConnection"
     },
     {
@@ -1601,6 +1748,9 @@
     },
     {
       "$ref": "#/$defs/BindingPatchResult"
+    },
+    {
+      "$ref": "#/$defs/QuotaSharing"
     },
     {
       "$ref": "#/$defs/IdentityCredentialCreateRequest"

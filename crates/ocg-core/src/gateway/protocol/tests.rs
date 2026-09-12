@@ -28,6 +28,7 @@ fn plan_with_model(client: ApiFormat, upstream: ApiFormat, model: &str) -> Reque
         service_tier: None,
         custom_tools: Vec::new(),
         namespace_tools: Vec::new(),
+        legacy_tool_compat: None,
         response_parallel_tool_calls: true,
         response_tool_choice: json!("auto"),
         response_tools: Vec::new(),
@@ -1796,6 +1797,25 @@ fn p09_legacy_tool_compat_is_versioned_and_records_downgrade() {
         before["tools"].as_array().unwrap().len(),
         2,
         "legacy_compat must not rewrite the caller's stored request config"
+    );
+
+    let plan = prepare_request(ApiFormat::Responses, bytes(before.clone()))
+        .expect("legacy_compat conversion must still succeed for the request-plan consumer");
+    let carried = plan
+        .legacy_tool_compat
+        .as_ref()
+        .expect("RequestPlan must carry the converter's legacy_tool_compat marker");
+    assert_eq!(carried.profile, LEGACY_TOOL_COMPAT_PROFILE);
+    assert_eq!(carried.version, LEGACY_TOOL_COMPAT_VERSION);
+    assert_eq!(carried.dropped_hosted_tools, vec!["web_search".to_string()]);
+    let body: Value = serde_json::from_slice(&plan.body).unwrap();
+    assert!(
+        body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|tool| tool.get("type").and_then(Value::as_str) != Some("web_search")),
+        "conversion still drops hosted tools; stored request is unchanged"
     );
 }
 

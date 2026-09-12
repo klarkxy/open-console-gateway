@@ -90,6 +90,7 @@ fn chat_plan(
         service_tier: None,
         custom_tools: Vec::new(),
         namespace_tools: Vec::new(),
+        legacy_tool_compat: None,
         response_parallel_tool_calls: true,
         response_tool_choice: json!("auto"),
         response_tools: Vec::new(),
@@ -784,7 +785,7 @@ fn dynamic_runtime(
 }
 
 #[test]
-fn s01_dynamic_cross_origin_override_refuses_to_inherit_the_key() {
+fn s01_dynamic_override_resolves_configured_route_without_granting_the_key() {
     let config = AppConfig::default();
     let runtime = dynamic_runtime(
         "https://lab.example/v1",
@@ -797,7 +798,7 @@ fn s01_dynamic_cross_origin_override_refuses_to_inherit_the_key() {
         CredentialKind::ApiKey,
         QuotaScope::Key,
     );
-    let error = resolve_route_with_dynamics(
+    let foreign = resolve_route_with_dynamics(
         &account,
         &config,
         &chat_plan(
@@ -808,11 +809,12 @@ fn s01_dynamic_cross_origin_override_refuses_to_inherit_the_key() {
         ),
         std::slice::from_ref(&runtime),
     )
-    .unwrap_err();
-    assert!(
-        error.contains("not authorized") || error.contains("refusing to send credentials"),
-        "{error}"
-    );
+    .expect("route resolve is not the stored-grant gate");
+    assert_eq!(foreign.base_url, "https://evil.example");
+    assert!(matches!(
+        foreign.credential,
+        crate::gateway::attempt::CredentialHandle::Account { .. }
+    ));
 
     let same_origin = dynamic_runtime(
         "https://lab.example/v1",

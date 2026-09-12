@@ -4,10 +4,14 @@
 //! [`crate::connection::CONNECTION_ID_NAMESPACE`] so migrations and projections
 //! cannot drift.
 
-use crate::connection::{CONNECTION_ID_NAMESPACE, ConnectionId};
+use crate::connection::{
+    CONNECTION_ID_NAMESPACE, ConnectionId, EndpointOperation, endpoint_id_for,
+    endpoint_id_for_route,
+};
 use crate::ids::normalize_model_name;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use uuid::Uuid;
 
 #[cfg(feature = "schemars")]
@@ -101,6 +105,24 @@ pub fn quota_pool_id_for_identity(identity_id: impl AsRef<str>) -> QuotaPoolId {
     QuotaPoolId(namespaced_uuid(&format!(
         "quota_pool:identity:{}",
         identity_id.as_ref()
+    )))
+}
+
+/// Deterministic quota pool id for an explicit member set (sorted, unique).
+pub fn quota_pool_id_for_accounts<I, S>(account_ids: I) -> QuotaPoolId
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut ids: Vec<String> = account_ids
+        .into_iter()
+        .map(|id| id.as_ref().to_string())
+        .collect();
+    ids.sort();
+    ids.dedup();
+    QuotaPoolId(namespaced_uuid(&format!(
+        "quota_pool:accounts:{}",
+        ids.join(",")
     )))
 }
 
@@ -502,6 +524,7 @@ pub struct DeclaredPlatformRelation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CooldownFacts {
     pub account_id: String,
+    pub credential_id: String,
     pub generic: Option<DateTime<Utc>>,
     pub five_hours: Option<DateTime<Utc>>,
     pub week: Option<DateTime<Utc>>,
@@ -514,6 +537,74 @@ pub struct CooldownFacts {
 pub struct AssignedEndpoint {
     pub id: String,
     pub url: Option<String>,
+}
+
+/// One configured route used to assign connection endpoint ids.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteSpec {
+    pub operation: EndpointOperation,
+    pub url: Option<String>,
+}
+
+/// Assign endpoint ids the same way `/connections` does: first occurrence of
+/// each operation uses [`endpoint_id_for`]; later URLs for the same operation
+/// use [`endpoint_id_for_route`].
+pub fn assigned_endpoints_for_routes(
+    connection_id: &ConnectionId,
+    routes: &[RouteSpec],
+) -> Vec<AssignedEndpoint> {
+    let mut used_operations = HashSet::new();
+    routes
+        .iter()
+        .map(|route| {
+            let id = if used_operations.insert(route.operation) {
+                endpoint_id_for(connection_id, route.operation)
+            } else {
+                endpoint_id_for_route(
+                    connection_id,
+                    route.operation,
+                    route.url.as_deref().unwrap_or(""),
+                )
+            };
+            AssignedEndpoint {
+                id: id.to_string(),
+                url: route.url.clone(),
+            }
+        })
+        .collect()
+}
+
+/// Safe default grants for a new Key or one-time backfill.
+///
+/// Captures the default route and any additional configured routes that share
+/// that default origin. Sealed endpoints (no URL) are included and contribute
+/// no origins. A foreign-origin model override is not granted implicitly.
+pub fn safe_default_grants(endpoints: &[AssignedEndpoint]) -> (Vec<String>, Vec<String>) {
+    let default_origin = endpoints
+        .first()
+        .and_then(|endpoint| endpoint.url.as_deref().and_then(normalize_origin));
+    let mut ids = Vec::new();
+    let mut origins = Vec::new();
+    let mut seen_origins = HashSet::new();
+    for endpoint in endpoints {
+        let origin = endpoint.url.as_deref().and_then(normalize_origin);
+        let same_origin = match (&default_origin, &origin) {
+            (None, None) => true,
+            (Some(default), Some(got)) => default == got,
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+        };
+        if !same_origin {
+            continue;
+        }
+        ids.push(endpoint.id.clone());
+        if let Some(origin) = origin
+            && seen_origins.insert(origin.clone())
+        {
+            origins.push(origin);
+        }
+    }
+    (ids, origins)
 }
 
 /// Auth error wins; a verified row is Valid; otherwise Unknown.
@@ -530,32 +621,31 @@ pub fn derive_auth_state(has_auth_error: bool, verified: bool) -> AuthState {
 /// Active cooldown windows. Past timestamps are omitted; surviving instants
 /// are the stored values. Metric stays unknown — never a synthesized zero.
 pub fn cooldown_windows(facts: &CooldownFacts, now: DateTime<Utc>) -> Vec<QuotaWindow> {
-    let credential_id = credential_id_for_legacy_account(&facts.account_id);
     let mut windows = Vec::new();
     push_credential_window(
         &mut windows,
-        credential_id.as_str(),
+        &facts.credential_id,
         QuotaPeriod::Generic,
         facts.generic,
         now,
     );
     push_credential_window(
         &mut windows,
-        credential_id.as_str(),
+        &facts.credential_id,
         QuotaPeriod::FiveHours,
         facts.five_hours,
         now,
     );
     push_credential_window(
         &mut windows,
-        credential_id.as_str(),
+        &facts.credential_id,
         QuotaPeriod::Week,
         facts.week,
         now,
     );
     push_credential_window(
         &mut windows,
-        credential_id.as_str(),
+        &facts.credential_id,
         QuotaPeriod::Month,
         facts.month,
         now,
@@ -649,7 +739,7 @@ pub fn legacy_account_objects(
         .collect();
     let allowed_origins = endpoints
         .iter()
-        .filter_map(|endpoint| endpoint.url.as_deref().and_then(origin_from_endpoint_url))
+        .filter_map(|endpoint| endpoint.url.as_deref().and_then(normalize_origin))
         .collect();
     let binding = CredentialBinding {
         id: binding_id,
@@ -691,6 +781,34 @@ pub fn origin_from_endpoint_url(url: &str) -> Option<String> {
         return None;
     }
     Some(format!("{scheme}://{hostport}"))
+}
+
+/// Normalized Origin: HTTP(S) scheme + host [+ port], scheme/host lowercased.
+/// Accepts a full inference URL or an already-origin-shaped value.
+pub fn normalize_origin(value: &str) -> Option<String> {
+    let origin = origin_from_endpoint_url(value)?;
+    let (scheme, hostport) = origin.split_once("://")?;
+    let scheme = scheme.to_ascii_lowercase();
+    if scheme != "http" && scheme != "https" {
+        return None;
+    }
+    if hostport.is_empty() || hostport.contains('/') {
+        return None;
+    }
+    let normalized_hostport = if hostport.starts_with('[') {
+        hostport.to_string()
+    } else if let Some((host, port)) = hostport.rsplit_once(':')
+        && !host.is_empty()
+        && port.chars().all(|c| c.is_ascii_digit())
+    {
+        format!("{}:{port}", host.to_ascii_lowercase())
+    } else {
+        hostport.to_ascii_lowercase()
+    };
+    if normalized_hostport.is_empty() {
+        return None;
+    }
+    Some(format!("{scheme}://{normalized_hostport}"))
 }
 
 #[cfg(test)]

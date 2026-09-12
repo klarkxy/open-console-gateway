@@ -122,6 +122,8 @@ fn onboarding_commit_request_is_camel_case_and_includes_secret_in_canonical_json
             upstream_model: "vendor/opus".into(),
             upstream_override: None,
         }],
+        mode: None,
+        authorize_current_endpoint: false,
     };
     let value = serde_json::to_value(&request).unwrap();
     assert_eq!(value["expectedRevision"], 3);
@@ -149,12 +151,14 @@ fn onboarding_commit_request_is_camel_case_and_includes_secret_in_canonical_json
         credential_id: None,
         target_ids: vec![],
         replayed: false,
+        account_id: None,
     };
     let result_value = serde_json::to_value(&result).unwrap();
     assert_eq!(result_value["connectionId"], "conn");
     assert_eq!(result_value["credentialId"], Value::Null);
     assert_eq!(result_value["targetIds"], json!([]));
     assert_eq!(result_value["replayed"], false);
+    assert_eq!(result_value["accountId"], Value::Null);
 }
 
 #[test]
@@ -190,6 +194,7 @@ fn identity_list_emits_camel_case_and_null_unknowns() {
                 subject: ocg_domain::credential::RuntimeSubjectKind::AccountCredential,
                 bindings: Vec::new(),
                 quota_windows: Vec::new(),
+                quota_pool_id: None,
                 onboarding_task: None,
                 subscription: None,
                 last_error: None,
@@ -212,6 +217,10 @@ fn identity_list_emits_camel_case_and_null_unknowns() {
     );
     assert_eq!(
         value["identities"][0]["credentials"][0]["subscription"],
+        Value::Null
+    );
+    assert_eq!(
+        value["identities"][0]["credentials"][0]["quotaPoolId"],
         Value::Null
     );
     assert_eq!(
@@ -269,6 +278,8 @@ fn binding_patch_and_identity_credential_create_are_camel_case() {
             models: vec!["glm-5.2".into()],
         }),
         enabled: Some(false),
+        allowed_endpoint_ids: None,
+        allowed_origins: None,
     };
     let value = serde_json::to_value(&request).unwrap();
     assert_eq!(value["expectedRevision"], 3);
@@ -283,11 +294,41 @@ fn binding_patch_and_identity_credential_create_are_camel_case() {
         },
         connection_id: "conn".into(),
         secret_input: "sk-second".into(),
+        operation_id: None,
+        quota_sharing: QuotaSharing::Independent,
+        account_label: None,
     };
     let create_value = serde_json::to_value(&create).unwrap();
     assert_eq!(create_value["connectionId"], "conn");
     assert_eq!(create_value["secretInput"], "sk-second");
     assert!(create_value.get("operationId").is_none());
+    assert!(create_value.get("quotaSharing").is_none());
+    assert!(create_value.get("accountLabel").is_none());
+    let omitted: IdentityCredentialCreateRequest = serde_json::from_value(json!({
+        "expectedRevision": 3,
+        "processGeneration": 9,
+        "connectionId": "conn",
+        "secretInput": "sk-second"
+    }))
+    .unwrap();
+    assert_eq!(omitted.quota_sharing, QuotaSharing::Independent);
+    let shared: IdentityCredentialCreateRequest = serde_json::from_value(json!({
+        "expectedRevision": 3,
+        "processGeneration": 9,
+        "connectionId": "conn",
+        "secretInput": "sk-second",
+        "quotaSharing": { "kind": "shared", "credentialId": "cred-1" },
+        "accountLabel": "Key B",
+        "operationId": "00000000-0000-4000-8000-000000000001"
+    }))
+    .unwrap();
+    assert_eq!(
+        shared.quota_sharing,
+        QuotaSharing::Shared {
+            credential_id: "cred-1".into()
+        }
+    );
+    assert_eq!(shared.account_label.as_deref(), Some("Key B"));
 
     let result = IdentityCredentialCreateResult {
         revision: ControlRevision {

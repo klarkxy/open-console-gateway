@@ -11,8 +11,8 @@ use crate::gateway::classify::{
     rate_limit_fallback, rate_limit_window_and_cooldown, schedule_go_usage_sync,
 };
 use crate::gateway::diagnostics::{
-    ErrorDiagnostic, RequestTrace, api_format_name, emit_failure, redact_known_secret,
-    redact_known_secret_values, safe_upstream_headers,
+    ErrorDiagnostic, RequestTrace, api_format_name, emit_failure, emit_legacy_tool_compat,
+    redact_known_secret, redact_known_secret_values, safe_upstream_headers,
     sanitize_upstream_error_value_with_known_secret, serialize_diagnostic,
 };
 use crate::gateway::materialize::native_log_identity;
@@ -49,17 +49,69 @@ use std::time::{Duration as StdDuration, Instant};
 
 const MAX_UPSTREAM_ERROR_BODY_BYTES: usize = 64 * 1024;
 
-/// Temporary Host binding: decrypt via the process host for the account the
-/// outer loop already selected. `state.rs` is outside this lease; a later
-/// host slice should move this next to `KeyHost`.
+mod live_send;
+
+pub(crate) use live_send::{
+    LiveSendAuthError, LiveSendSelection, authorize_live_send_secret, confirm_live_send_secret,
+};
+
+/// Host secret resolution for the account the outer loop selected. Live
+/// account/binding/grant checks and decrypt share one DB read lock. Same-account
+/// retry reuses the original captured selection.
 pub(crate) struct HostCredentialResolver<'a> {
     state: &'a CoreState,
     account: &'a Account,
+    selection: &'a LiveSendSelection,
+    plan: &'a RequestPlan,
+    spec: &'a AttemptSpec,
 }
 
 impl<'a> HostCredentialResolver<'a> {
-    pub(crate) fn new(state: &'a CoreState, account: &'a Account) -> Self {
-        Self { state, account }
+    pub(crate) fn new(
+        state: &'a CoreState,
+        account: &'a Account,
+        selection: &'a LiveSendSelection,
+        plan: &'a RequestPlan,
+        spec: &'a AttemptSpec,
+    ) -> Self {
+        Self {
+            state,
+            account,
+            selection,
+            plan,
+            spec,
+        }
+    }
+
+    fn resolve_live(&self, handle: &CredentialHandle) -> Result<Option<String>, LiveSendAuthError> {
+        match handle {
+            CredentialHandle::None => Ok(None),
+            CredentialHandle::Account { id } => {
+                if id != &self.account.id {
+                    return Err(LiveSendAuthError::Unauthorized(
+                        "refusing to send credentials: selected credential is no longer authorized for this attempt"
+                            .into(),
+                    ));
+                }
+                authorize_live_send_secret(
+                    self.state,
+                    self.selection,
+                    self.account,
+                    self.plan,
+                    self.spec,
+                )
+            }
+        }
+    }
+
+    fn confirm_live(&self) -> Result<(), LiveSendAuthError> {
+        confirm_live_send_secret(
+            self.state,
+            self.selection,
+            self.account,
+            self.plan,
+            self.spec,
+        )
     }
 }
 
@@ -68,21 +120,12 @@ impl CredentialResolver for HostCredentialResolver<'_> {
         &self,
         handle: &CredentialHandle,
     ) -> Result<Option<String>, CredentialResolveError> {
-        match handle {
-            CredentialHandle::None => Ok(None),
-            CredentialHandle::Account { id } => {
-                if id != &self.account.id {
-                    return Err(CredentialResolveError::HandleMismatch {
-                        expected: self.account.id.clone(),
-                        actual: id.clone(),
-                    });
-                }
-                self.state
-                    .decrypt_key(&self.account.key_cipher)
-                    .map(Some)
-                    .map_err(CredentialResolveError::Decrypt)
+        self.resolve_live(handle).map_err(|error| match error {
+            LiveSendAuthError::Decrypt(inner) => CredentialResolveError::Decrypt(inner),
+            LiveSendAuthError::Unauthorized(message) => {
+                CredentialResolveError::Decrypt(anyhow::anyhow!(message))
             }
-        }
+        })
     }
 }
 
@@ -839,6 +882,7 @@ pub(crate) async fn forward_request(
     pricing_snapshot: Arc<PricingSnapshot>,
     client_key_id: Option<&str>,
     dynamics: &[crate::dynamic::DynamicProviderRuntime],
+    selection: &LiveSendSelection,
 ) -> Result<ForwardResult> {
     forward_request_impl(
         client,
@@ -855,6 +899,7 @@ pub(crate) async fn forward_request(
         pricing_snapshot,
         client_key_id,
         dynamics,
+        selection,
     )
     .await
 }
@@ -875,6 +920,7 @@ async fn forward_request_impl(
     pricing_snapshot: Arc<PricingSnapshot>,
     client_key_id: Option<&str>,
     dynamics: &[crate::dynamic::DynamicProviderRuntime],
+    selection: &LiveSendSelection,
 ) -> Result<ForwardResult> {
     let mut attempt_context =
         ForwardAttemptContext::new(trace, client_body.len(), attempt, plan, route);
@@ -953,12 +999,20 @@ async fn forward_request_impl(
     } else if attempt_spec.restricted_upstream_url() {
         ensure_safe_upstream_base_url(&attempt_spec.base_url)?;
     }
-    let resolver = HostCredentialResolver::new(state, account);
-    let key = match resolver.resolve_credential(&attempt_spec.credential) {
+    let resolver = HostCredentialResolver::new(state, account, selection, plan, &attempt_spec);
+    let key = match resolver.resolve_live(&attempt_spec.credential) {
         Ok(key) => key,
         Err(error) => {
-            let class = classify_preflight(PreflightKind::Decrypt);
-            let message = format!("failed to decrypt account credentials: {error}");
+            let class = if error.is_decrypt() {
+                classify_preflight(PreflightKind::Decrypt)
+            } else {
+                classify_preflight(PreflightKind::Route)
+            };
+            let message = if error.is_decrypt() {
+                format!("failed to decrypt account credentials: {error}")
+            } else {
+                error.to_string()
+            };
             let failure = attempt_context.failure(FailureSpec {
                 error_source: "gateway",
                 error_stage: "credential",
@@ -1047,42 +1101,6 @@ async fn forward_request_impl(
         .request_url()
         .map_err(|error| anyhow::anyhow!(error))?;
     if matches!(resolved_auth, UpstreamAuth::Bearer | UpstreamAuth::XApiKey) {
-        if let Err(error) =
-            enforce_forward_secret_origin(account, plan, dynamics, &attempt_spec, &url)
-        {
-            let class = classify_preflight(PreflightKind::Route);
-            let message = error.to_string();
-            let failure = attempt_context.failure(FailureSpec {
-                error_source: "gateway",
-                error_stage: "provider_route",
-                downstream_status: Some(StatusCode::BAD_GATEWAY.as_u16()),
-                upstream_status: None,
-                upstream_wait_ms: None,
-                retry_action: Some(retry_action_name(forward_action_for_class(
-                    class,
-                    allow_same_account_retry,
-                    None,
-                ))),
-                upstream_headers: None,
-                upstream_error: None,
-                request_body: Some(client_body),
-            });
-            DbAttemptSink::new(&state.db.lock()).insert(
-                account,
-                &plan.model,
-                "error",
-                None,
-                metadata_metrics(
-                    &pricing_snapshot,
-                    plan.service_tier.as_deref(),
-                    "not_applicable",
-                ),
-                Some(&message),
-                &attempt_context,
-                Some(failure),
-            )?;
-            return Ok(account_preflight_failure(plan, message));
-        }
         let key = key
             .as_deref()
             .expect("credential-bearing provider route must decrypt a key");
@@ -1171,6 +1189,58 @@ async fn forward_request_impl(
     } else {
         upstream_headers
     };
+
+    if let Err(error) = resolver.confirm_live() {
+        let class = if error.is_decrypt() {
+            classify_preflight(PreflightKind::Decrypt)
+        } else {
+            classify_preflight(PreflightKind::Route)
+        };
+        let message = if error.is_decrypt() {
+            format!("failed to decrypt account credentials: {error}")
+        } else {
+            error.to_string()
+        };
+        let failure = attempt_context.failure(FailureSpec {
+            error_source: "gateway",
+            error_stage: "credential",
+            downstream_status: Some(StatusCode::BAD_GATEWAY.as_u16()),
+            upstream_status: None,
+            upstream_wait_ms: None,
+            retry_action: Some(retry_action_name(forward_action_for_class(
+                class,
+                allow_same_account_retry,
+                None,
+            ))),
+            upstream_headers: None,
+            upstream_error: None,
+            request_body: Some(client_body),
+        });
+        DbAttemptSink::new(&state.db.lock()).insert(
+            account,
+            &plan.model,
+            "error",
+            None,
+            metadata_metrics(
+                &pricing_snapshot,
+                plan.service_tier.as_deref(),
+                "not_applicable",
+            ),
+            Some(&message),
+            &attempt_context,
+            Some(failure),
+        )?;
+        return Ok(account_preflight_failure(plan, message));
+    }
+
+    if let Some(compat) = &plan.legacy_tool_compat {
+        emit_legacy_tool_compat(
+            &trace.request_id,
+            compat.profile,
+            compat.version,
+            &compat.dropped_hosted_tools,
+        );
+    }
 
     let sent = forward_once(
         &attempt_spec,
@@ -2736,46 +2806,6 @@ pub(crate) fn headers_carry_upstream_secret(headers: &reqwest::header::HeaderMap
     })
 }
 
-fn persisted_user_endpoint<'a>(
-    account: &'a Account,
-    plan: &'a RequestPlan,
-    dynamics: &'a [crate::dynamic::DynamicProviderRuntime],
-    spec: &AttemptSpec,
-) -> Option<&'a str> {
-    if !matches!(spec.proxy_routing, ProxyRoutingModel::IsolatedTrustedAdmin) {
-        return None;
-    }
-    plan.custom_route
-        .as_ref()
-        .map(|route| route.endpoint_url.as_str())
-        .or_else(|| {
-            crate::dynamic::find_runtime(dynamics, &account.provider_id)
-                .map(|runtime| runtime.endpoint_url.as_str())
-        })
-}
-
-fn enforce_forward_secret_origin(
-    account: &Account,
-    plan: &RequestPlan,
-    dynamics: &[crate::dynamic::DynamicProviderRuntime],
-    spec: &AttemptSpec,
-    target_url: &str,
-) -> Result<(), crate::custom_http::OriginGrantError> {
-    if matches!(spec.proxy_routing, ProxyRoutingModel::IsolatedTrustedAdmin) {
-        let persisted =
-            persisted_user_endpoint(account, plan, dynamics, spec).ok_or_else(|| {
-                crate::custom_http::OriginGrantError::new(
-                    "refusing to send credentials: no persisted origin grant for this Key",
-                )
-            })?;
-        return crate::custom_http::ensure_secret_origin_granted(
-            target_url,
-            &[persisted.to_string()],
-        );
-    }
-    crate::custom_http::ensure_sealed_secret_origin(target_url, &spec.base_url)
-}
-
 fn ensure_safe_upstream_base_url(base: &str) -> Result<()> {
     let url = reqwest::Url::parse(base)?;
     match url.scheme() {
@@ -3935,98 +3965,6 @@ mod stream_outcome_guard_tests {
             "same-row finalize must leave one completed attempt: {}",
             logs[0].status
         );
-        drop(state);
-        let _ = fs::remove_dir_all(dir);
-    }
-}
-
-#[cfg(test)]
-mod host_credential_resolver_tests {
-    use super::*;
-    use crate::crypto::{KeyCipher, StaticKeyCipher};
-    use crate::db::Database;
-    use crate::models::{Account, AccountSetupStep, AccountType};
-    use crate::state::CoreStateInner;
-    use chrono::Utc;
-    use std::fs;
-    use std::path::PathBuf;
-    use std::sync::Arc;
-
-    fn temp_dir(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "ocg-host-resolver-{}-{}",
-            label,
-            uuid::Uuid::new_v4()
-        ));
-        fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    fn test_state(label: &str) -> (PathBuf, CoreState) {
-        let dir = temp_dir(label);
-        let cipher: Arc<dyn KeyCipher + Send + Sync> =
-            Arc::new(StaticKeyCipher::new("host-resolver"));
-        let db = Database::open(dir.clone()).unwrap();
-        let state = Arc::new(CoreStateInner::new(db, dir.clone(), cipher).unwrap());
-        (dir, state)
-    }
-
-    fn account(state: &CoreState, id: &str, plaintext: &str) -> Account {
-        let now = Utc::now();
-        Account {
-            id: id.into(),
-            provider_id: crate::provider::default_provider_id(),
-
-            credential_kind: crate::provider::default_credential_kind(),
-            quota_scope: crate::provider::default_quota_scope(),
-            name: id.into(),
-            username: None,
-            password_cipher: None,
-            key_cipher: state.encrypt_key(plaintext).unwrap(),
-            enabled: true,
-            account_type: AccountType::Key,
-            setup_step: AccountSetupStep::Ready,
-            referral_code: None,
-            purchase_date: String::new(),
-            expires_on: String::new(),
-            cooldown_until: None,
-            cooldown_generic_until: None,
-            cooldown_5h_until: None,
-            cooldown_week_until: None,
-            cooldown_month_until: None,
-            cooldown_free_until: None,
-            last_error: None,
-            auth_error: None,
-            notes: None,
-            created_at: now,
-            updated_at: now,
-        }
-    }
-
-    #[test]
-    fn host_credential_resolver_decrypts_matching_account_and_rejects_mismatch() {
-        let (dir, state) = test_state("host-resolver");
-        let account = account(&state, "acct-1", "sk-host-secret");
-        let resolver = HostCredentialResolver::new(&state, &account);
-        assert_eq!(
-            resolver
-                .resolve_credential(&CredentialHandle::Account {
-                    id: "acct-1".into()
-                })
-                .unwrap()
-                .as_deref(),
-            Some("sk-host-secret")
-        );
-        assert_eq!(
-            resolver
-                .resolve_credential(&CredentialHandle::None)
-                .unwrap(),
-            None
-        );
-        let mismatch = resolver
-            .resolve_credential(&CredentialHandle::Account { id: "other".into() })
-            .unwrap_err();
-        assert!(mismatch.to_string().contains("does not match"));
         drop(state);
         let _ = fs::remove_dir_all(dir);
     }

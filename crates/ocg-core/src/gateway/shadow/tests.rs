@@ -4,11 +4,14 @@ use crate::crypto::{KeyCipher, StaticKeyCipher};
 use crate::custom::CustomAccountRuntime;
 use crate::dynamic::DynamicProviderRuntime;
 use crate::gateway::attempt::{AttemptSpec, CredentialHandle};
-use crate::gateway::materialize::materialize_account_routes;
+use crate::gateway::materialize::{
+    InferenceBindingGate, materialize_account_routes, materialize_account_routes_with_bindings,
+};
 use crate::gateway::protocol::{ApiFormat, ParsedClientRequest, parse_client_request};
 use crate::gateway::provider_adapter;
 use crate::models::{
     Account, AccountCustomConfig, AccountModelCapability, AccountSetupStep, AccountType, AppConfig,
+    ProxyMode,
 };
 use crate::provider::{
     CUSTOM_PROVIDER_ID, ConnectionVerificationStatus, CredentialKind, OPENCODE_PROVIDER_ID,
@@ -16,10 +19,12 @@ use crate::provider::{
 };
 use bytes::Bytes;
 use chrono::Utc;
+use ocg_domain::credential::ModelScope;
 use ocg_domain::dynamic::{DynamicAuthKind, DynamicModelMapping};
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 const NO_IDS: &[String] = &[];
 const DYNAMIC_PROVIDER_ID: &str = "11111111-1111-1111-1111-111111111111";
@@ -394,12 +399,45 @@ fn shadow_matches_live_for_builtin_go_alias_when_a_fixture_exists() {
 }
 
 #[test]
-fn r07_shadow_compare_does_not_dual_send() {
-    let _guard = ShadowCompareGuard::enable();
-    assert!(shadow_compare_enabled());
-    let sends_before = shadow_recorded_outbound_sends();
-    let mismatches_before = shadow_mismatch_count();
+fn shadow_compare_env_accepts_only_trimmed_one() {
+    assert!(!shadow_compare_env_value_enables(None));
+    assert!(!shadow_compare_env_value_enables(Some("")));
+    assert!(!shadow_compare_env_value_enables(Some("0")));
+    assert!(!shadow_compare_env_value_enables(Some("true")));
+    assert!(!shadow_compare_env_value_enables(Some("on")));
+    assert!(!shadow_compare_env_value_enables(Some("yes")));
+    assert!(!shadow_compare_env_value_enables(Some("01")));
+    assert!(shadow_compare_env_value_enables(Some("1")));
+    assert!(shadow_compare_env_value_enables(Some(" 1 ")));
+    assert_eq!(SHADOW_COMPARE_ENV, "OCG_SHADOW_COMPARE");
+    assert_eq!(SHADOW_COMPARE_ENABLE_VALUE, "1");
+}
 
+#[test]
+fn shadow_diff_reports_reject_mismatch() {
+    let live = ShadowPlan {
+        attempts: Vec::new(),
+        rejects: vec!["live-reject".into()],
+    };
+    let shadow = ShadowPlan {
+        attempts: Vec::new(),
+        rejects: vec!["shadow-reject".into()],
+    };
+    let diffs = shadow_plan_diff(&live, &shadow);
+    assert!(
+        diffs.iter().any(|mismatch| matches!(
+            mismatch,
+            ShadowMismatch::Rejects {
+                live,
+                shadow
+            } if live == &["live-reject".to_string()] && shadow == &["shadow-reject".to_string()]
+        )),
+        "expected reject mismatch, got {diffs:?}"
+    );
+}
+
+#[test]
+fn shadow_matches_live_rejects_when_inference_binding_is_disabled() {
     let config = AppConfig::default();
     let accounts = [go_account("go-1")];
     let body = chat_body("glm-5.2");
@@ -408,7 +446,15 @@ fn r07_shadow_compare_does_not_dual_send() {
     let contracts = static_contracts();
     let empty_custom = HashMap::new();
     let goat_runtimes = HashMap::new();
-    let set = materialize_account_routes(
+    let mut bindings = HashMap::new();
+    bindings.insert(
+        "go-1".to_string(),
+        InferenceBindingGate {
+            enabled: false,
+            model_scope: ModelScope::All,
+        },
+    );
+    let set = materialize_account_routes_with_bindings(
         &accounts,
         &config,
         &parsed,
@@ -422,27 +468,39 @@ fn r07_shadow_compare_does_not_dual_send() {
         None,
         &contracts,
         &[],
+        &bindings,
     )
     .unwrap();
-    let input = plan_input(
-        &accounts,
-        &config,
-        &parsed,
-        &resolved,
-        &parsed.requested_model,
-        "glm-5.2",
-        &body,
-        &empty_custom,
-        &goat_runtimes,
-        &contracts,
-        &[],
+    let input = ShadowPlanInput {
+        accounts: &accounts,
+        config: &config,
+        parsed: &parsed,
+        resolved: &resolved,
+        client_model: &parsed.requested_model,
+        routing_model: "glm-5.2",
+        client_body: &body,
+        free_available: true,
+        custom_runtimes: &empty_custom,
+        goat_runtimes: &goat_runtimes,
+        cpa_base_url: None,
+        contracts: &contracts,
+        dynamics: &[],
+        bindings: &bindings,
+    };
+    let shadow = plan_shadow_attempts(&input).unwrap();
+    let live = shadow_plan_from_materialized(&set, &config, &[]);
+    assert!(live.attempts.is_empty(), "{live:?}");
+    assert!(
+        live.rejects
+            .iter()
+            .any(|reject| reject.contains("inference binding is disabled")),
+        "{live:?}"
     );
-    maybe_compare_live_routes(&input, &set);
-    let _ = plan_shadow_attempts(&input).unwrap();
-
-    assert_eq!(shadow_recorded_outbound_sends(), sends_before);
-    assert_eq!(shadow_recorded_outbound_sends(), 0);
-    assert_eq!(shadow_mismatch_count(), mismatches_before);
+    let diffs = shadow_plan_diff(&live, &shadow);
+    assert!(
+        diffs.is_empty(),
+        "live and shadow rejects diverged: {diffs:?}"
+    );
 }
 
 #[test]
@@ -503,4 +561,115 @@ fn mismatch_is_reported_and_does_not_alter_the_live_spec() {
     assert_eq!(live, live_before);
     assert_eq!(live_spec, live_spec_before);
     let _unused: &AttemptSpec = &live_spec;
+}
+
+#[tokio::test]
+async fn r07_gateway_path_sends_once_whether_compare_is_off_or_on() {
+    reset_shadow_compare_hook_entries();
+    assert!(
+        !shadow_compare_enabled(),
+        "compare must stay default-off without env or test override"
+    );
+
+    let hits = Arc::new(AtomicUsize::new(0));
+    let app = axum::Router::new()
+        .fallback(axum::routing::any(r07_count_ok))
+        .with_state(hits.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (stop_upstream, stop_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                let _ = stop_rx.await;
+            })
+            .await;
+    });
+    let base_url = format!("http://{addr}");
+
+    let dir = std::env::temp_dir().join(format!("ocg-shadow-r07-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("test"));
+    let db = crate::db::Database::open(dir.clone()).unwrap();
+    let state = Arc::new(crate::state::CoreStateInner::new(db, dir.clone(), cipher).unwrap());
+    let mut config = state.config();
+    config.gateway_key = "gw-test".into();
+    config.upstream_base_url = base_url;
+    config.proxy_mode = ProxyMode::Direct;
+    state.set_config(config).unwrap();
+    state.db.lock().create_account(&go_account("go-1")).unwrap();
+
+    let port = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().port()
+    };
+    let handle = crate::gateway::start_gateway(state.clone(), port)
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+
+    let off = client
+        .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+        .header(reqwest::header::AUTHORIZATION, "Bearer gw-test")
+        .json(&json!({
+            "model": "glm-5.2",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        off.status().is_success(),
+        "compare-off request failed: {} {}",
+        off.status(),
+        off.text().await.unwrap_or_default()
+    );
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    assert_eq!(shadow_compare_hook_entries(), 0);
+
+    let _guard = ShadowCompareGuard::enable();
+    assert!(shadow_compare_enabled());
+    let on = client
+        .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+        .header(reqwest::header::AUTHORIZATION, "Bearer gw-test")
+        .json(&json!({
+            "model": "glm-5.2",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        on.status().is_success(),
+        "compare-on request failed: {} {}",
+        on.status(),
+        on.text().await.unwrap_or_default()
+    );
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        2,
+        "each client request must send exactly once with compare on"
+    );
+    assert_eq!(
+        shadow_compare_hook_entries(),
+        1,
+        "enabled compare must run on the live gateway request path"
+    );
+
+    crate::gateway::stop_gateway(handle);
+    let _ = stop_upstream.send(());
+    drop(state);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+async fn r07_count_ok(
+    axum::extract::State(hits): axum::extract::State<Arc<AtomicUsize>>,
+) -> impl axum::response::IntoResponse {
+    hits.fetch_add(1, Ordering::SeqCst);
+    (
+        axum::http::StatusCode::OK,
+        [("content-type", "application/json")],
+        r#"{"id":"ok","object":"chat.completion","model":"glm-5.2","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#,
+    )
 }

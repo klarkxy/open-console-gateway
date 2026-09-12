@@ -1,5 +1,7 @@
 use super::*;
-use crate::connection::{LegacyConnectionKind, connection_id_for_legacy};
+use crate::connection::{
+    EndpointOperation, LegacyConnectionKind, connection_id_for_legacy, endpoint_id_for,
+};
 use chrono::TimeZone;
 
 fn sample_facts() -> LegacyAccountFacts {
@@ -88,6 +90,7 @@ fn cooldown_windows_omit_past_and_preserve_exact_future_instants() {
     let past = Utc.with_ymd_and_hms(2026, 9, 11, 1, 0, 0).unwrap();
     let facts = CooldownFacts {
         account_id: "acct-1".into(),
+        credential_id: credential_id_for_legacy_account("acct-1").to_string(),
         generic: Some(past),
         five_hours: Some(future),
         week: Some(future),
@@ -117,6 +120,36 @@ fn cooldown_windows_omit_past_and_preserve_exact_future_instants() {
     assert_eq!(free.subject, QuotaSubject::Egress);
     assert_eq!(free.subject_ref, "free_channel");
     assert_eq!(free.blocked_until, Some(future));
+}
+
+#[test]
+fn cooldown_windows_use_stored_credential_id_not_derived_account_id() {
+    let now = Utc.with_ymd_and_hms(2026, 9, 11, 3, 0, 0).unwrap();
+    let future = Utc.with_ymd_and_hms(2026, 9, 11, 8, 0, 0).unwrap();
+    let facts = CooldownFacts {
+        account_id: "acct-1".into(),
+        credential_id: "00000000-0000-4000-8000-importedcred01".into(),
+        generic: Some(future),
+        five_hours: None,
+        week: None,
+        month: None,
+        free: Some(future),
+    };
+    let windows = cooldown_windows(&facts, now);
+    let generic = windows
+        .iter()
+        .find(|window| window.period == QuotaPeriod::Generic)
+        .unwrap();
+    assert_eq!(
+        generic.subject_ref,
+        "00000000-0000-4000-8000-importedcred01"
+    );
+    let free = windows
+        .iter()
+        .find(|window| window.period == QuotaPeriod::Free)
+        .unwrap();
+    assert_eq!(free.subject_ref, "free_channel");
+    assert_eq!(free.relation_confidence, RelationConfidence::Declared);
 }
 
 #[test]
@@ -310,4 +343,109 @@ fn quota_pool_ids_are_deterministic_and_identity_scoped() {
         quota_pool_id_for_identity(identity_id_for_legacy_account("acct-2")).as_str()
     );
     assert_ne!(first.as_str(), identity.as_str());
+}
+
+#[test]
+fn quota_pool_ids_for_account_sets_are_sorted_and_distinct_from_identity_pools() {
+    let identity = identity_id_for_legacy_account("acct-1");
+    let pair = quota_pool_id_for_accounts(["b", "a"]);
+    assert_eq!(pair, quota_pool_id_for_accounts(["a", "b", "a"]));
+    assert_ne!(
+        pair.as_str(),
+        quota_pool_id_for_identity(&identity).as_str()
+    );
+    assert_ne!(
+        pair.as_str(),
+        quota_pool_id_for_accounts(["a", "c"]).as_str()
+    );
+}
+
+#[test]
+fn assigned_endpoints_for_routes_match_connection_id_rules() {
+    use crate::connection::endpoint_id_for_route;
+    let connection = connection_id_for_legacy(LegacyConnectionKind::DynamicProvider, "lab");
+    let endpoints = assigned_endpoints_for_routes(
+        &connection,
+        &[
+            RouteSpec {
+                operation: EndpointOperation::ChatCreate,
+                url: Some("https://lab.example/v1/chat/completions".into()),
+            },
+            RouteSpec {
+                operation: EndpointOperation::MessageCreate,
+                url: Some("https://lab.example/v1/messages".into()),
+            },
+            RouteSpec {
+                operation: EndpointOperation::ChatCreate,
+                url: Some("https://other.example/v1/chat/completions".into()),
+            },
+        ],
+    );
+    assert_eq!(
+        endpoints[0].id,
+        endpoint_id_for(&connection, EndpointOperation::ChatCreate).to_string()
+    );
+    assert_eq!(
+        endpoints[1].id,
+        endpoint_id_for(&connection, EndpointOperation::MessageCreate).to_string()
+    );
+    assert_eq!(
+        endpoints[2].id,
+        endpoint_id_for_route(
+            &connection,
+            EndpointOperation::ChatCreate,
+            "https://other.example/v1/chat/completions"
+        )
+        .to_string()
+    );
+}
+
+#[test]
+fn safe_default_grants_keep_same_origin_routes_and_drop_foreign_overrides() {
+    let (ids, origins) = safe_default_grants(&[
+        AssignedEndpoint {
+            id: "default".into(),
+            url: Some("https://lab.example/v1/chat/completions".into()),
+        },
+        AssignedEndpoint {
+            id: "same-origin".into(),
+            url: Some("https://lab.example/anthropic/v1/messages".into()),
+        },
+        AssignedEndpoint {
+            id: "foreign".into(),
+            url: Some("https://other.example/v1/chat/completions".into()),
+        },
+    ]);
+    assert_eq!(ids, vec!["default".to_string(), "same-origin".to_string()]);
+    assert_eq!(origins, vec!["https://lab.example".to_string()]);
+}
+
+#[test]
+fn safe_default_grants_for_sealed_adapters_have_ids_and_no_origins() {
+    let (ids, origins) = safe_default_grants(&[
+        AssignedEndpoint {
+            id: "chat".into(),
+            url: None,
+        },
+        AssignedEndpoint {
+            id: "messages".into(),
+            url: None,
+        },
+    ]);
+    assert_eq!(ids, vec!["chat".to_string(), "messages".to_string()]);
+    assert!(origins.is_empty());
+}
+
+#[test]
+fn normalize_origin_lowercases_scheme_and_host() {
+    assert_eq!(
+        normalize_origin("HTTPS://Lab.Example/v1/chat/completions"),
+        Some("https://lab.example".into())
+    );
+    assert_eq!(
+        normalize_origin("https://lab.example:8443"),
+        Some("https://lab.example:8443".into())
+    );
+    assert_eq!(normalize_origin("ftp://lab.example"), None);
+    assert_eq!(normalize_origin("not-a-url"), None);
 }

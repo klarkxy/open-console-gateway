@@ -17,6 +17,7 @@ fn plan(client: ApiFormat, upstream: ApiFormat) -> RequestPlan {
         service_tier: None,
         custom_tools: Vec::new(),
         namespace_tools: Vec::new(),
+        legacy_tool_compat: None,
         response_parallel_tool_calls: true,
         response_tool_choice: json!("auto"),
         response_tools: Vec::new(),

@@ -30,10 +30,19 @@ fn patch_locked(
 ) -> Result<BindingPatchResult, V3ApiError> {
     let _settings_update = state.settings_update.lock();
     check_expectation(state, &input.expectation)?;
-    if input.model_scope.is_none() && input.enabled.is_none() {
+    if input.allowed_endpoint_ids.is_some() != input.allowed_origins.is_some() {
         return Err(V3ApiError::invalid_request_at(
             state,
-            "modelScope or enabled is required",
+            "allowedEndpointIds and allowedOrigins must be set together",
+        ));
+    }
+    if input.model_scope.is_none()
+        && input.enabled.is_none()
+        && input.allowed_endpoint_ids.is_none()
+    {
+        return Err(V3ApiError::invalid_request_at(
+            state,
+            "modelScope, enabled, or grant fields are required",
         ));
     }
 
@@ -56,16 +65,15 @@ fn patch_locked(
         .ok_or_else(|| V3ApiError::not_found_at(state, "binding not found"))?;
     reject_meaningless_binding_mutation(state, record)?;
 
-    let updated = {
+    let (dynamic_providers, custom_runtimes) = {
         let db = state.db.lock();
-        db.update_credential_binding(binding_id, input.model_scope.as_ref(), input.enabled)
-            .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?
-    };
-    let dynamic_providers = state.dynamic_providers();
-    let custom_runtimes = {
-        let db = state.db.lock();
-        db.list_custom_account_runtimes()
-            .map_err(V3ApiError::internal)?
+        let dynamic_providers = db
+            .list_control_plane_dynamic_providers()
+            .map_err(V3ApiError::internal)?;
+        let custom_runtimes = db
+            .list_custom_account_runtimes()
+            .map_err(V3ApiError::internal)?;
+        (dynamic_providers, custom_runtimes)
     };
     let dynamic_by_id = dynamic_providers
         .iter()
@@ -77,6 +85,31 @@ fn patch_locked(
         .collect();
     let (connection_id, endpoints) =
         assigned_endpoints(&record.account, &dynamic_by_id, &custom_by_id);
+    let normalized_grants = if let (Some(ids), Some(origins)) = (
+        input.allowed_endpoint_ids.as_deref(),
+        input.allowed_origins.as_deref(),
+    ) {
+        Some(
+            super::identities::validate_binding_grants(&endpoints, ids, origins)
+                .map_err(|message| V3ApiError::invalid_request_at(state, message))?,
+        )
+    } else {
+        None
+    };
+
+    let updated = {
+        let db = state.db.lock();
+        db.update_credential_binding(
+            binding_id,
+            input.model_scope.as_ref(),
+            input.enabled,
+            normalized_grants.as_ref().map(|(ids, _)| ids.as_slice()),
+            normalized_grants
+                .as_ref()
+                .map(|(_, origins)| origins.as_slice()),
+        )
+        .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?
+    };
     state.bump_settings_revision();
     Ok(BindingPatchResult {
         revision: ControlRevision::from_state(state),

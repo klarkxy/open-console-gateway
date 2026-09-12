@@ -5,9 +5,16 @@
 //! credentials, never builds an HTTP client, and never calls Host send. Live
 //! `forward_once` remains the single outbound path.
 //!
-//! Compare is opt-in via a thread-local flag that defaults off. When enabled,
-//! the live path may log [`ShadowMismatch`] values after materialize/resolve
-//! and before send; it must not change the live [`AttemptSpec`] or send count.
+//! Compare is opt-in and default-off. Production enables it with environment
+//! `OCG_SHADOW_COMPARE=1` (only the exact trimmed value `1` enables; unset,
+//! empty, `0`, and any other value leave it off). Tests may force the flag
+//! per-thread without mutating process environment. When enabled, the live
+//! path may log [`ShadowMismatch`] values after materialize/resolve and
+//! before send; it must not change the live [`AttemptSpec`] or send count.
+//!
+//! This is consistency instrumentation on the live materialize/resolve path.
+//! Shadow rematerializes the same planner the live request already used; it
+//! does not claim independent algorithm parity.
 
 use crate::alias::ResolvedModel;
 use crate::custom::CustomAccountRuntime;
@@ -27,15 +34,21 @@ use crate::provider_contracts::EffectiveContractSet;
 use bytes::Bytes;
 use std::cell::Cell;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Environment flag that opts into live-path shadow compare. Default off.
+pub(crate) const SHADOW_COMPARE_ENV: &str = "OCG_SHADOW_COMPARE";
+/// Sole accepted enable value after trimming whitespace.
+pub(crate) const SHADOW_COMPARE_ENABLE_VALUE: &str = "1";
 
 thread_local! {
-    static SHADOW_COMPARE_ENABLED: Cell<bool> = const { Cell::new(false) };
+    /// Per-thread override. `None` falls through to the process environment.
+    static SHADOW_COMPARE_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
 }
 
-static SHADOW_MISMATCH_COUNT: AtomicU64 = AtomicU64::new(0);
 #[cfg(test)]
-static SHADOW_OUTBOUND_SENDS: AtomicU64 = AtomicU64::new(0);
+thread_local! {
+    static SHADOW_COMPARE_HOOK_ENTRIES: Cell<u64> = const { Cell::new(0) };
+}
 
 /// Same snapshots [`materialize_account_routes`] already consumes.
 pub(crate) struct ShadowPlanInput<'a> {
@@ -104,12 +117,16 @@ pub(crate) enum ShadowMismatch {
     MissingOnLive {
         account_id: String,
     },
+    Rejects {
+        live: Vec<String>,
+        shadow: Vec<String>,
+    },
 }
 
 impl ShadowMismatch {
     fn account_id(&self) -> Option<&str> {
         match self {
-            Self::Count { .. } => None,
+            Self::Count { .. } | Self::Rejects { .. } => None,
             Self::Field { account_id, .. }
             | Self::MissingOnShadow { account_id }
             | Self::MissingOnLive { account_id } => Some(account_id.as_str()),
@@ -119,6 +136,7 @@ impl ShadowMismatch {
     fn field_name(&self) -> &'static str {
         match self {
             Self::Count { .. } => "count",
+            Self::Rejects { .. } => "rejects",
             Self::Field { field, .. } => match field {
                 ShadowField::PublicName => "public_name",
                 ShadowField::UpstreamModel => "upstream_model",
@@ -138,15 +156,19 @@ impl ShadowMismatch {
 /// RAII enable for the default-off compare hook. Production never constructs this.
 #[cfg(test)]
 pub(crate) struct ShadowCompareGuard {
-    previous: bool,
+    previous: Option<bool>,
 }
 
 #[cfg(test)]
 impl ShadowCompareGuard {
     pub(crate) fn enable() -> Self {
-        let previous = SHADOW_COMPARE_ENABLED.with(|flag| {
+        Self::set(Some(true))
+    }
+
+    fn set(value: Option<bool>) -> Self {
+        let previous = SHADOW_COMPARE_OVERRIDE.with(|flag| {
             let previous = flag.get();
-            flag.set(true);
+            flag.set(value);
             previous
         });
         Self { previous }
@@ -156,23 +178,30 @@ impl ShadowCompareGuard {
 #[cfg(test)]
 impl Drop for ShadowCompareGuard {
     fn drop(&mut self) {
-        SHADOW_COMPARE_ENABLED.with(|flag| flag.set(self.previous));
+        SHADOW_COMPARE_OVERRIDE.with(|flag| flag.set(self.previous));
     }
 }
 
+pub(crate) fn shadow_compare_env_value_enables(value: Option<&str>) -> bool {
+    value.is_some_and(|value| value.trim() == SHADOW_COMPARE_ENABLE_VALUE)
+}
+
+fn env_shadow_compare_enabled() -> bool {
+    shadow_compare_env_value_enables(std::env::var(SHADOW_COMPARE_ENV).ok().as_deref())
+}
+
 pub(crate) fn shadow_compare_enabled() -> bool {
-    SHADOW_COMPARE_ENABLED.with(Cell::get)
+    SHADOW_COMPARE_OVERRIDE.with(|flag| flag.get().unwrap_or_else(env_shadow_compare_enabled))
 }
 
 #[cfg(test)]
-pub(crate) fn shadow_mismatch_count() -> u64 {
-    SHADOW_MISMATCH_COUNT.load(Ordering::Relaxed)
+pub(crate) fn shadow_compare_hook_entries() -> u64 {
+    SHADOW_COMPARE_HOOK_ENTRIES.with(Cell::get)
 }
 
-/// Host send counter owned by this module. The planner never increments it.
 #[cfg(test)]
-pub(crate) fn shadow_recorded_outbound_sends() -> u64 {
-    SHADOW_OUTBOUND_SENDS.load(Ordering::Relaxed)
+pub(crate) fn reset_shadow_compare_hook_entries() {
+    SHADOW_COMPARE_HOOK_ENTRIES.with(|count| count.set(0));
 }
 
 /// Plan the AttemptSpecs the live path would send, without Host send or decrypt.
@@ -213,6 +242,7 @@ fn shadow_plan_from_materialized(
     ShadowPlan { attempts, rejects }
 }
 
+#[cfg(test)]
 pub(crate) fn live_shadow_attempts(
     routes: &[MaterializedCandidate],
     config: &AppConfig,
@@ -371,6 +401,18 @@ pub(crate) fn shadow_diff(live: &[ShadowAttempt], shadow: &[ShadowAttempt]) -> V
     mismatches
 }
 
+/// Compare live and shadow plans, including rejected outcomes.
+pub(crate) fn shadow_plan_diff(live: &ShadowPlan, shadow: &ShadowPlan) -> Vec<ShadowMismatch> {
+    let mut mismatches = shadow_diff(&live.attempts, &shadow.attempts);
+    if live.rejects != shadow.rejects {
+        mismatches.push(ShadowMismatch::Rejects {
+            live: live.rejects.clone(),
+            shadow: shadow.rejects.clone(),
+        });
+    }
+    mismatches
+}
+
 fn push_field_mismatch(
     mismatches: &mut Vec<ShadowMismatch>,
     index: usize,
@@ -405,7 +447,6 @@ fn record_mismatches(mismatches: &[ShadowMismatch]) {
     if mismatches.is_empty() {
         return;
     }
-    SHADOW_MISMATCH_COUNT.fetch_add(mismatches.len() as u64, Ordering::Relaxed);
     for mismatch in mismatches {
         eprintln!(
             "OCG_SHADOW_MISMATCH {}",
@@ -423,14 +464,15 @@ pub(crate) fn maybe_compare_live_routes(input: &ShadowPlanInput<'_>, live: &Mate
     if !shadow_compare_enabled() {
         return;
     }
-    let live_attempts = live_shadow_attempts(&live.routes, input.config, input.dynamics);
+    #[cfg(test)]
+    SHADOW_COMPARE_HOOK_ENTRIES.with(|count| count.set(count.get() + 1));
+    let live_plan = shadow_plan_from_materialized(live, input.config, input.dynamics);
     match plan_shadow_attempts(input) {
         Ok(shadow) => {
-            let mismatches = shadow_diff(&live_attempts, &shadow.attempts);
+            let mismatches = shadow_plan_diff(&live_plan, &shadow);
             record_mismatches(&mismatches);
         }
         Err(error) => {
-            SHADOW_MISMATCH_COUNT.fetch_add(1, Ordering::Relaxed);
             eprintln!(
                 "OCG_SHADOW_MISMATCH {}",
                 serde_json::json!({

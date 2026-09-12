@@ -464,8 +464,8 @@ async fn routes_all_client_formats_to_each_models_native_protocol() {
         (
             "/v1/responses",
             "deepseek-v4-flash",
-            "/v1/chat/completions",
-            SUCCESS_BODY,
+            "/v1/responses",
+            RESPONSES_SUCCESS_BODY,
         ),
         ("/v1/responses", "hy3", "/v1/chat/completions", SUCCESS_BODY),
         (
@@ -483,8 +483,8 @@ async fn routes_all_client_formats_to_each_models_native_protocol() {
         (
             "/v1/messages",
             "deepseek-v4-flash",
-            "/v1/chat/completions",
-            SUCCESS_BODY,
+            "/v1/messages",
+            MESSAGES_SUCCESS_BODY,
         ),
         ("/v1/messages", "hy3", "/v1/chat/completions", SUCCESS_BODY),
         (
@@ -727,8 +727,8 @@ async fn inference_skips_accounts_with_unusable_stored_credentials() {
         (
             "/v1/responses",
             "deepseek-v4-flash",
-            "/v1/chat/completions",
-            SUCCESS_BODY,
+            "/v1/responses",
+            RESPONSES_SUCCESS_BODY,
         ),
         (
             "/v1/messages",
@@ -1126,6 +1126,79 @@ async fn stream_ending_before_downstream_output_retries_same_account_once() {
             .and_then(serde_json::Value::as_str),
         Some("retry_same_account")
     );
+}
+
+#[tokio::test]
+async fn r06_zero_output_sse_retry_does_not_resend_after_rotation() {
+    let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let state_slot: Arc<Mutex<Option<Arc<CoreStateInner>>>> = Arc::new(Mutex::new(None));
+    #[derive(Clone)]
+    struct MutatingEmptySse {
+        hits: Arc<std::sync::atomic::AtomicUsize>,
+        state: Arc<Mutex<Option<Arc<CoreStateInner>>>>,
+    }
+    async fn mutating_empty_sse(
+        axum::extract::State(state): axum::extract::State<MutatingEmptySse>,
+    ) -> impl IntoResponse {
+        let n = state.hits.fetch_add(1, Ordering::SeqCst);
+        if n == 0 {
+            if let Some(host) = state.state.lock().unwrap().clone() {
+                let rotated = host.encrypt_key("sk-test-rotated-retry").unwrap();
+                host.db
+                    .lock()
+                    .rotate_account_credential("acct-1", &rotated)
+                    .unwrap();
+            }
+        }
+        (StatusCode::OK, [("content-type", "text/event-stream")], "")
+    }
+    let app = Router::new()
+        .fallback(axum::routing::any(mutating_empty_sse))
+        .with_state(MutatingEmptySse {
+            hits: hits.clone(),
+            state: state_slot.clone(),
+        });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                let _ = stop_rx.await;
+            })
+            .await;
+    });
+    let (state, dir) = build_state(format!("http://{addr}"), &["key-1"]);
+    *state_slot.lock().unwrap() = Some(state.clone());
+    let h = FallbackHarness::from_state(state, dir).await;
+
+    let (status, body) = tokio::time::timeout(
+        StdDuration::from_secs(5),
+        protocol_stream_call(h.port, "/v1/chat/completions", "deepseek-v4-flash"),
+    )
+    .await
+    .expect("the zero-output retry should complete before the watchdog");
+    assert_ne!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        1,
+        "rotated captured retry must not send a second upstream request: {body}"
+    );
+    assert!(!body.contains("sk-test-rotated-retry"), "{body}");
+    assert!(!body.contains("key-1"), "{body}");
+    let logs = h.logs();
+    assert!(
+        logs.iter().any(|log| {
+            log.diagnostic
+                .as_ref()
+                .and_then(|value| value.get("retry_action"))
+                .and_then(serde_json::Value::as_str)
+                == Some("retry_same_account")
+        }),
+        "expected a real RetrySameAccount attempt: {logs:?}"
+    );
+
+    let _ = stop_tx.send(());
 }
 
 #[tokio::test]

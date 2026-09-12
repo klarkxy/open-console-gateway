@@ -3,6 +3,7 @@ use super::{V27MigrationFault, v27_test_hooks};
 use crate::crypto::{
     KeyCipher, LOCAL_CIPHER_V2_PREFIX, StaticKeyCipher, is_legacy_local_ciphertext,
 };
+use std::collections::HashSet;
 use std::fs;
 use std::sync::Arc;
 
@@ -426,7 +427,7 @@ fn v44_adds_dashboard_operations_on_v43_reopen_and_fresh_databases() {
     let fresh = temp_data_dir("v44-fresh");
     let db = open_with_host_cipher(fresh.clone()).unwrap();
     assert_eq!(schema_version_on(&db.conn).unwrap(), CURRENT_SCHEMA_VERSION);
-    assert_eq!(CURRENT_SCHEMA_VERSION, 45);
+    assert_eq!(CURRENT_SCHEMA_VERSION, 47);
     assert!(table_exists(&db.conn, "dashboard_operations").unwrap());
     drop(db);
     fs::remove_dir_all(fresh).unwrap();
@@ -473,7 +474,7 @@ fn v45_fresh_database_is_current_and_v44_reopen_migrates() {
     let fresh = temp_data_dir("v45-fresh");
     let db = open_with_host_cipher(fresh.clone()).unwrap();
     assert_eq!(schema_version_on(&db.conn).unwrap(), CURRENT_SCHEMA_VERSION);
-    assert_eq!(CURRENT_SCHEMA_VERSION, 45);
+    assert_eq!(CURRENT_SCHEMA_VERSION, 47);
     for table in [
         "upstream_identities",
         "credential_state",
@@ -487,6 +488,8 @@ fn v45_fresh_database_is_current_and_v44_reopen_migrates() {
         assert!(table_exists(&db.conn, table).unwrap(), "{table}");
     }
     assert!(table_has_column(&db.conn, "accounts", "identity_id").unwrap());
+    assert!(table_has_column(&db.conn, "credential_bindings", "allowed_endpoint_ids").unwrap());
+    assert!(table_has_column(&db.conn, "credential_bindings", "allowed_origins").unwrap());
     drop(db);
     fs::remove_dir_all(fresh).unwrap();
 
@@ -616,7 +619,7 @@ fn v45_migrates_legacy_accounts_idempotently_without_changing_v3_rows() {
     drop(db);
 
     let db = open_with_host_cipher(dir.clone()).unwrap();
-    assert_eq!(schema_version_on(&db.conn).unwrap(), 45);
+    assert_eq!(schema_version_on(&db.conn).unwrap(), CURRENT_SCHEMA_VERSION);
     let after = db.list_accounts().unwrap();
     assert_eq!(
         serde_json::to_value(&before).unwrap(),
@@ -1047,6 +1050,13 @@ fn d02_shared_identity_pool_fans_out_cooldown_to_sibling_key() {
             &second,
             &local_today(),
             ConnectionVerificationStatus::NotRequired,
+            crate::db::identity::QuotaSharingJoin::Shared {
+                source_credential_id: ocg_domain::credential::credential_id_for_legacy_account(
+                    "pool-a",
+                )
+                .to_string(),
+            },
+            None,
         )
         .unwrap();
     assert_eq!(created.identity_id, identity_id);
@@ -1128,6 +1138,421 @@ fn v45_open_repairs_missing_satellites_and_list_fails_closed() {
             .iter()
             .any(|record| record.account.id == "repair-go" && !record.identity_id.is_empty())
     );
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn identity_repair_preserves_existing_shared_graph_and_ids() {
+    use ocg_domain::credential::ModelScope;
+    let dir = temp_data_dir("repair-preserves-shared-graph");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let mut first = account("repair-shared-a");
+    first.key_cipher = fixture_account_key_cipher();
+    db.create_account(&first).unwrap();
+    let identity_id = db
+        .list_identity_model()
+        .unwrap()
+        .accounts
+        .into_iter()
+        .find(|row| row.account.id == first.id)
+        .unwrap()
+        .identity_id;
+    let mut second = account("repair-shared-b");
+    second.key_cipher = fixture_account_key_cipher();
+    db.create_account_for_identity(
+        &identity_id,
+        &second,
+        &local_today(),
+        ConnectionVerificationStatus::NotRequired,
+        crate::db::identity::QuotaSharingJoin::Shared {
+            source_credential_id: ocg_domain::credential::credential_id_for_legacy_account(
+                "repair-shared-a",
+            )
+            .to_string(),
+        },
+        None,
+    )
+    .unwrap();
+    let mut other = account("repair-unrelated");
+    other.key_cipher = fixture_account_key_cipher();
+    db.create_account(&other).unwrap();
+    let credential_id = "00000000-0000-4000-8000-000000000091";
+    let binding_id = "00000000-0000-4000-8000-000000000092";
+    let pool_id = "00000000-0000-4000-8000-000000000093";
+    let scope = ModelScope::Only {
+        models: vec!["glm-5.1".into()],
+    };
+    db.conn
+        .execute(
+            "UPDATE credential_state SET credential_id=?2, version=7,
+        auth_state_version=7 WHERE account_id=?1",
+            params![second.id, credential_id],
+        )
+        .unwrap();
+    db.conn
+        .execute(
+            "UPDATE credential_bindings SET id=?2, model_scope=?3,
+        enabled=0 WHERE account_id=?1",
+            params![
+                second.id,
+                binding_id,
+                serde_json::to_string(&scope).unwrap()
+            ],
+        )
+        .unwrap();
+    for (kind, id) in [("credential", credential_id), ("binding", binding_id)] {
+        db.conn
+            .execute(
+                "UPDATE legacy_identity_map SET new_id=?3 WHERE legacy_id=?1 AND new_kind=?2",
+                params![second.id, kind, id],
+            )
+            .unwrap();
+    }
+    let old_pool: String = db
+        .conn
+        .query_row(
+            "SELECT pool_id FROM quota_pool_members WHERE account_id=?1",
+            [&first.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    db.conn
+        .execute(
+            "INSERT INTO quota_pools SELECT ?2, subject_kind, subject_ref,
+        relation_confidence, policy_mode, created_at FROM quota_pools WHERE id=?1",
+            params![old_pool, pool_id],
+        )
+        .unwrap();
+    db.conn
+        .execute(
+            "UPDATE quota_pool_members SET pool_id=?2 WHERE pool_id=?1",
+            params![old_pool, pool_id],
+        )
+        .unwrap();
+    db.conn
+        .execute("DELETE FROM quota_pools WHERE id=?1", [&old_pool])
+        .unwrap();
+    db.conn
+        .execute(
+            "DELETE FROM credential_state WHERE account_id=?1",
+            [&other.id],
+        )
+        .unwrap();
+    drop(db);
+
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let snapshot = db.list_identity_model().unwrap();
+    let repaired = snapshot
+        .accounts
+        .iter()
+        .find(|row| row.account.id == second.id)
+        .unwrap();
+    assert_eq!(repaired.identity_id, identity_id);
+    assert_eq!(repaired.credential_id, credential_id);
+    assert_eq!(repaired.credential_version, 7);
+    assert_eq!(repaired.binding_id, binding_id);
+    assert!(!repaired.binding_enabled);
+    assert_eq!(repaired.binding_model_scope, scope);
+    assert_eq!(
+        db.shared_pool_account_ids(&first.id).unwrap(),
+        vec![first.id.clone(), second.id.clone()]
+    );
+    let pools: Vec<String> = db
+        .conn
+        .prepare("SELECT pool_id FROM quota_pool_members WHERE account_id=?1")
+        .unwrap()
+        .query_map([&second.id], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(pools, vec![pool_id]);
+    let bindings: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM credential_bindings WHERE account_id=?1",
+            [&second.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(bindings, 1);
+    assert!(
+        snapshot
+            .accounts
+            .iter()
+            .any(|row| row.account.id == other.id)
+    );
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn v46_backfills_grants_once_and_rotation_does_not_expand_them() {
+    use ocg_domain::credential::credential_id_for_legacy_account;
+
+    let dir = temp_data_dir("v46-grants-once");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let mut keyed = account("grant-go");
+    keyed.key_cipher = fixture_account_key_cipher();
+    db.create_account(&keyed).unwrap();
+    let stored = db
+        .list_identity_model()
+        .unwrap()
+        .accounts
+        .into_iter()
+        .find(|row| row.account.id == "grant-go")
+        .unwrap();
+    assert!(!stored.allowed_endpoint_ids.is_empty());
+    assert!(stored.allowed_origins.is_empty());
+    let original_ids = stored.allowed_endpoint_ids.clone();
+    db.conn
+        .execute(
+            "UPDATE credential_bindings SET allowed_endpoint_ids='[]', allowed_origins='[]'
+             WHERE account_id='grant-go'",
+            [],
+        )
+        .unwrap();
+    drop(db);
+
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let reopened = db
+        .list_identity_model()
+        .unwrap()
+        .accounts
+        .into_iter()
+        .find(|row| row.account.id == "grant-go")
+        .unwrap();
+    assert!(reopened.allowed_endpoint_ids.is_empty());
+    assert!(reopened.allowed_origins.is_empty());
+    db.rotate_account_credential("grant-go", &fixture_account_key_cipher())
+        .unwrap();
+    let rotated = db
+        .list_identity_model()
+        .unwrap()
+        .accounts
+        .into_iter()
+        .find(|row| row.account.id == "grant-go")
+        .unwrap();
+    assert!(rotated.allowed_endpoint_ids.is_empty());
+    assert_eq!(
+        rotated.credential_id,
+        credential_id_for_legacy_account("grant-go").as_str()
+    );
+    assert!(rotated.credential_version >= 2);
+    assert_ne!(original_ids, rotated.allowed_endpoint_ids);
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn v47_adds_onboarding_draft_on_v46_reopen_and_fresh_databases() {
+    let fresh = temp_data_dir("v47-fresh");
+    let db = open_with_host_cipher(fresh.clone()).unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), CURRENT_SCHEMA_VERSION);
+    assert_eq!(CURRENT_SCHEMA_VERSION, 47);
+    let columns = {
+        let mut stmt = db.conn.prepare("PRAGMA table_info(providers)").unwrap();
+        stmt.query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    };
+    assert!(
+        columns.iter().any(|name| name == "onboarding_draft"),
+        "{columns:?}"
+    );
+    drop(db);
+    fs::remove_dir_all(fresh).unwrap();
+
+    let dir = temp_data_dir("v47-from-v46");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    db.conn
+        .execute_batch(
+            "DELETE FROM schema_version;
+             INSERT INTO schema_version(version) VALUES (46);",
+        )
+        .unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), 46);
+    drop(db);
+
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), CURRENT_SCHEMA_VERSION);
+    let defaulted: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM providers WHERE onboarding_draft != 0",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(defaulted, 0, "existing rows migrate to configured");
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn list_dynamic_providers_excludes_drafts_and_control_plane_includes_them() {
+    let dir = temp_data_dir("draft-list-boundary");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let provider_id = uuid::Uuid::new_v4().to_string();
+    let runtime = onboarding_runtime(&provider_id, "DraftBoundary");
+    db.commit_onboarding_new(
+        &runtime,
+        None,
+        true,
+        &onboarding_operation(
+            &uuid::Uuid::new_v4().to_string(),
+            "draft-digest",
+            r#"{"connectionId":"c","credentialId":null,"targetIds":[]}"#,
+        ),
+    )
+    .unwrap();
+    assert!(
+        db.list_dynamic_providers()
+            .unwrap()
+            .iter()
+            .all(|row| row.id != provider_id)
+    );
+    assert!(
+        db.list_control_plane_dynamic_providers()
+            .unwrap()
+            .iter()
+            .any(|row| row.id == provider_id)
+    );
+    assert_eq!(
+        db.provider_is_onboarding_draft(&provider_id).unwrap(),
+        Some(true)
+    );
+    assert!(
+        db.onboarding_draft_provider_ids()
+            .unwrap()
+            .contains(&provider_id)
+    );
+    let loaded = db.get_dynamic_provider(&provider_id).unwrap().unwrap();
+    assert_eq!(loaded.id, provider_id);
+    db.replace_dynamic_provider(&runtime, false, false, None)
+        .unwrap();
+    assert_eq!(
+        db.provider_is_onboarding_draft(&provider_id).unwrap(),
+        Some(true),
+        "ordinary replace must preserve the draft flag"
+    );
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn second_identity_credential_is_independent_until_explicit_share() {
+    use crate::models::{UpstreamChannel, UsageWindowKind, local_today};
+    use crate::provider::ConnectionVerificationStatus;
+
+    let dir = temp_data_dir("independent-second-key");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let mut first = account("indep-a");
+    first.key_cipher = fixture_account_key_cipher();
+    db.create_account(&first).unwrap();
+    let identity_id: String = db
+        .conn
+        .query_row(
+            "SELECT identity_id FROM accounts WHERE id = 'indep-a'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut second = account("indep-b");
+    second.key_cipher = fixture_account_key_cipher();
+    db.create_account_for_identity(
+        &identity_id,
+        &second,
+        &local_today(),
+        ConnectionVerificationStatus::NotRequired,
+        crate::db::identity::QuotaSharingJoin::Independent,
+        None,
+    )
+    .unwrap();
+    let members = db.shared_pool_account_ids("indep-a").unwrap();
+    assert_eq!(members, vec!["indep-a".to_string()]);
+    let until = Utc::now() + chrono::Duration::hours(2);
+    db.set_account_rate_limit(
+        "indep-a",
+        until,
+        "429 exhausted",
+        Some(UsageWindowKind::FiveHours),
+    )
+    .unwrap();
+    let sibling = db.get_account("indep-b").unwrap().expect("sibling");
+    assert!(sibling.cooldown_5h_until.is_none());
+    assert!(!sibling.is_cooling_for(UpstreamChannel::Go, Utc::now()));
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn shared_pool_fanout_preserves_maxima_and_clear_still_propagates() {
+    use crate::models::{UsageWindowKind, local_today};
+    use crate::provider::ConnectionVerificationStatus;
+
+    let dir = temp_data_dir("shared-pool-max-fanout");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let mut first = account("max-a");
+    first.key_cipher = fixture_account_key_cipher();
+    db.create_account(&first).unwrap();
+    let identity_id: String = db
+        .conn
+        .query_row(
+            "SELECT identity_id FROM accounts WHERE id = 'max-a'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let source_credential: String = db
+        .conn
+        .query_row(
+            "SELECT credential_id FROM credential_state WHERE account_id = 'max-a'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut second = account("max-b");
+    second.key_cipher = fixture_account_key_cipher();
+    db.create_account_for_identity(
+        &identity_id,
+        &second,
+        &local_today(),
+        ConnectionVerificationStatus::NotRequired,
+        crate::db::identity::QuotaSharingJoin::Shared {
+            source_credential_id: source_credential,
+        },
+        None,
+    )
+    .unwrap();
+
+    let two_hours = Utc::now() + chrono::Duration::hours(2);
+    db.set_account_rate_limit(
+        "max-a",
+        two_hours,
+        "429 two hours",
+        Some(UsageWindowKind::FiveHours),
+    )
+    .unwrap();
+    let one_hour = Utc::now() + chrono::Duration::hours(1);
+    db.set_account_rate_limit(
+        "max-b",
+        one_hour,
+        "429 one hour",
+        Some(UsageWindowKind::FiveHours),
+    )
+    .unwrap();
+    let stored_a = db.get_account("max-a").unwrap().unwrap();
+    let stored_b = db.get_account("max-b").unwrap().unwrap();
+    assert_eq!(stored_a.cooldown_5h_until, Some(two_hours));
+    assert_eq!(stored_b.cooldown_5h_until, Some(two_hours));
+
+    db.clear_account_cooldown("max-a").unwrap();
+    let stored_a = db.get_account("max-a").unwrap().unwrap();
+    let stored_b = db.get_account("max-b").unwrap().unwrap();
+    assert!(stored_a.cooldown_5h_until.is_none());
+    assert!(stored_b.cooldown_5h_until.is_none());
     drop(db);
     fs::remove_dir_all(dir).unwrap();
 }
@@ -1924,6 +2349,8 @@ fn node_import_record(
         zen_catalog: crate::kernel::zen::ZenFreeModelCatalog::default(),
         provider_contracts: crate::provider_contracts::PersistedContracts::default(),
         dynamic_providers: Vec::new(),
+        identity_snapshot: None,
+        draft_provider_ids: HashSet::new(),
     }
 }
 
@@ -2046,6 +2473,100 @@ fn import_node_state_does_not_commit_when_runtime_snapshot_fails() {
         )
         .unwrap();
     assert_eq!(satellites, 0);
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn import_v6_identity_conflict_writes_nothing() {
+    use crate::db::identity::{
+        IdentityImportSnapshot, ImportedAccountIdentity, ImportedIdentity, ImportedQuotaPool,
+    };
+    use ocg_domain::credential::{
+        ModelScope, credential_id_for_legacy_account, identity_id_for_legacy_account,
+        quota_pool_id_for_identity,
+    };
+
+    let dir = temp_data_dir("import-v6-identity-conflict");
+    let db = Database::open(dir.clone()).unwrap();
+    db.import_accounts_with_contracts(&[go_import_record("dest-go")])
+        .unwrap();
+    let dest_identity = db
+        .list_identity_model()
+        .unwrap()
+        .accounts
+        .into_iter()
+        .find(|row| row.account.id == "dest-go")
+        .unwrap()
+        .identity_id;
+    let before_accounts = db
+        .list_accounts()
+        .unwrap()
+        .into_iter()
+        .map(|account| account.id)
+        .collect::<Vec<_>>();
+    let imported_id = "00000000-0000-4000-8000-0000000000b1";
+    let credential_id = credential_id_for_legacy_account(imported_id).to_string();
+    let binding_id = "00000000-0000-4000-8000-0000000000b2".to_string();
+    let mut record = node_import_record(
+        &db,
+        vec![go_import_record(imported_id)],
+        Vec::new(),
+        Vec::new(),
+    );
+    record.identity_snapshot = Some(IdentityImportSnapshot {
+        identities: vec![ImportedIdentity {
+            id: dest_identity.clone(),
+            label: "Shared".into(),
+            identity_confidence: "opaque".into(),
+            authority_site: None,
+            authority_subject: None,
+            enabled: true,
+            notes: None,
+        }],
+        accounts: vec![ImportedAccountIdentity {
+            account_id: imported_id.into(),
+            identity_id: dest_identity.clone(),
+            credential_id: credential_id.clone(),
+            credential_version: 1,
+            auth_state_version: 1,
+            binding_id: binding_id.clone(),
+            binding_enabled: true,
+            binding_model_scope: ModelScope::All,
+            allowed_endpoint_ids: Vec::new(),
+            allowed_origins: Vec::new(),
+        }],
+        quota_pools: vec![ImportedQuotaPool {
+            id: quota_pool_id_for_identity(&dest_identity).to_string(),
+            subject_kind: "credential".into(),
+            subject_ref: dest_identity.clone(),
+            relation_confidence: "unknown".into(),
+            policy_mode: "authoritative_limit".into(),
+            member_account_ids: vec![imported_id.into()],
+        }],
+    });
+    let error = db
+        .import_node_state(&record, |_| -> Result<()> { Ok(()) })
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("already attached to a destination-only account"),
+        "{error}"
+    );
+    assert_eq!(
+        db.list_accounts()
+            .unwrap()
+            .into_iter()
+            .map(|account| account.id)
+            .collect::<Vec<_>>(),
+        before_accounts
+    );
+    assert!(db.get_account(imported_id).unwrap().is_none());
+    assert_eq!(
+        identity_id_for_legacy_account("dest-go").to_string(),
+        dest_identity
+    );
     drop(db);
     fs::remove_dir_all(dir).unwrap();
 }
@@ -9979,7 +10500,7 @@ fn commit_transaction_fault_after_provider_insert_leaves_no_partial_rows() {
     );
     crate::db::dynamic_provider_fault::install("after_provider_insert");
     let error = db
-        .commit_onboarding_new(&runtime, Some(&first), &operation)
+        .commit_onboarding_new(&runtime, Some(&first), false, &operation)
         .unwrap_err();
     crate::db::dynamic_provider_fault::clear();
     assert!(
@@ -10021,6 +10542,7 @@ fn dashboard_operations_prune_rows_older_than_30_days_on_insert() {
     db.commit_onboarding_new(
         &runtime,
         Some(&first),
+        false,
         &onboarding_operation(&new_id, "new-digest", "{}"),
     )
     .unwrap();
@@ -10046,6 +10568,7 @@ fn commit_responses_and_operation_rows_are_secret_free() {
     db.commit_onboarding_new(
         &runtime,
         Some(&first),
+        false,
         &onboarding_operation(&operation_id, "hmac-digest-without-secret", result_json),
     )
     .unwrap();
@@ -10208,7 +10731,7 @@ fn imported_dynamic_auth_change_rejects_destination_only_accounts() {
         .unwrap();
 
     runtime.auth_kind = ocg_domain::dynamic::DynamicAuthKind::Bearer;
-    let error = upsert_imported_dynamic_provider_on(&db.conn, &runtime, &HashSet::new())
+    let error = upsert_imported_dynamic_provider_on(&db.conn, &runtime, &HashSet::new(), false)
         .expect_err("destination-only account must block an auth-boundary change");
     assert!(
         error.to_string().contains("destination-only accounts"),

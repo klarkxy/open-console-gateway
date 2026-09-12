@@ -10,7 +10,9 @@ use crate::alias;
 use crate::gateway::diagnostics::{
     ErrorDiagnostic, RequestTrace, emit_failure, log_request_failure, serialize_diagnostic,
 };
-use crate::gateway::forwarder::{ForwardAction, forward_request, rate_limited_response};
+use crate::gateway::forwarder::{
+    ForwardAction, LiveSendSelection, forward_request, rate_limited_response,
+};
 use crate::gateway::materialize::{
     InferenceBindingGate, InferenceBindingIndex, diagnostic_forced_upstream,
     materialize_account_routes_with_bindings, resolved_alias_from_model,
@@ -186,7 +188,7 @@ impl GatewayExecutor {
 
         loop {
             let (decision_wall, decision_mono) = state.sample_gateway_clock();
-            let (accounts, free_cooldown, bindings) = {
+            let (accounts, free_cooldown, stored_bindings) = {
                 let db = state.db.lock();
                 let accounts = match db.list_accounts() {
                     Ok(accounts) => accounts,
@@ -224,19 +226,8 @@ impl GatewayExecutor {
                         );
                     }
                 };
-                let bindings = match db.list_inference_bindings() {
-                    Ok(rows) => rows
-                        .into_iter()
-                        .map(|row| {
-                            (
-                                row.account_id,
-                                InferenceBindingGate {
-                                    enabled: row.enabled,
-                                    model_scope: row.model_scope,
-                                },
-                            )
-                        })
-                        .collect::<InferenceBindingIndex>(),
+                let stored_bindings = match db.list_inference_bindings() {
+                    Ok(rows) => rows,
                     Err(error) => {
                         let message = format!("failed to load inference bindings: {error}");
                         return protocol_error_response(
@@ -247,8 +238,20 @@ impl GatewayExecutor {
                         );
                     }
                 };
-                (accounts, free_cooldown, bindings)
+                (accounts, free_cooldown, stored_bindings)
             };
+            let bindings = stored_bindings
+                .iter()
+                .map(|row| {
+                    (
+                        row.account_id.clone(),
+                        InferenceBindingGate {
+                            enabled: row.enabled,
+                            model_scope: row.model_scope.clone(),
+                        },
+                    )
+                })
+                .collect::<InferenceBindingIndex>();
             let free_available = free_cooldown.is_none()
                 && !crate::routing_runtime::free_channel_is_exhausted_at(&accounts, decision_wall);
             let custom_runtimes = match state.db.lock().list_custom_account_runtimes() {
@@ -456,6 +459,15 @@ impl GatewayExecutor {
             };
             let account = route.routing.account;
             let active_plan = route.plan;
+            let selection = LiveSendSelection::from_binding(
+                &account,
+                stored_bindings
+                    .iter()
+                    .find(|row| row.account_id == account.id),
+                &client_model,
+                &routing_model,
+                &active_plan.model,
+            );
 
             let mut retried_same_account = false;
             loop {
@@ -483,6 +495,7 @@ impl GatewayExecutor {
                     snapshots.pricing.clone(),
                     client_key_id.as_deref(),
                     &snapshots.dynamics,
+                    &selection,
                 )
                 .await
                 {

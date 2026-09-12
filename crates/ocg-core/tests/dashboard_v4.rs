@@ -1,7 +1,7 @@
 //! Dashboard V4 connection projection and onboarding commit.
 
 use chrono::{Duration, Utc};
-use ocg_core::models::{Account, AccountSetupStep, AccountType};
+use ocg_core::models::{Account, AccountSetupStep, AccountType, ProxyMode};
 use ocg_core::provider::{
     COMMAND_CODE_PROVIDER_ID, CPA_PROVIDER_ID, CUSTOM_PROVIDER_ID, KIMI_PROVIDER_ID,
     MINIMAX_PROVIDER_ID, OLLAMA_PROVIDER_ID, OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID,
@@ -14,7 +14,7 @@ use ocg_domain::credential::{
 };
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 #[allow(dead_code)]
 #[path = "fixtures/fake_upstream.rs"]
@@ -22,7 +22,7 @@ mod fake_upstream;
 #[path = "fixtures/dashboard_v3/harness.rs"]
 mod harness;
 
-use fake_upstream::start_fake_upstream;
+use fake_upstream::{FakeReply, start_fake_upstream};
 use harness::{V3Harness, start_loopback, start_public};
 
 fn cas(harness: &V3Harness, patch: Value) -> Value {
@@ -563,9 +563,16 @@ async fn commit_new_keyed_connection_with_api_key_creates_provider_and_first_acc
     assert_eq!(result["replayed"], false);
     assert_eq!(result["revision"]["revision"], before + 1);
     assert!(result["credentialId"].as_str().is_some(), "{result}");
+    assert!(result["accountId"].as_str().is_some(), "{result}");
+    assert_ne!(result["credentialId"], result["accountId"], "{result}");
     assert_eq!(dynamic_provider_count(&harness), 1);
     let provider_id = harness.state.dynamic_providers()[0].id.clone();
     assert_eq!(account_count_for(&harness, &provider_id), 1);
+    let account_id = result["accountId"].as_str().unwrap();
+    assert_eq!(
+        result["credentialId"],
+        credential_id_for_legacy_account(account_id).as_str()
+    );
     assert_eq!(
         result["connectionId"],
         connection_id_for_legacy(LegacyConnectionKind::DynamicProvider, &provider_id).as_str()
@@ -1927,7 +1934,8 @@ async fn d05_second_product_reuses_identity_and_joins_declared_pool() {
             &harness,
             json!({
                 "connectionId": api_connection,
-                "secretInput": "sk-plan-api-d05"
+                "secretInput": "sk-plan-api-d05",
+                "quotaSharing": { "kind": "shared", "credentialId": first_credential }
             }),
         ),
     )
@@ -2093,7 +2101,11 @@ async fn d02_exhausting_shared_pool_via_key_a_blocks_key_b() {
             &harness,
             json!({
                 "connectionId": plan_connection,
-                "secretInput": "sk-quota-b"
+                "secretInput": "sk-quota-b",
+                "quotaSharing": {
+                    "kind": "shared",
+                    "credentialId": identity["credentials"][0]["credential"]["id"]
+                }
             }),
         ),
     )
@@ -2174,5 +2186,1098 @@ async fn binding_and_second_credential_reject_meaningless_targets() {
     )
     .await;
     assert_eq!(rejected.0, StatusCode::BAD_REQUEST, "{}", rejected.1);
+    harness.stop();
+}
+
+#[tokio::test]
+async fn saved_grants_are_facts_and_url_edits_do_not_expand_them() {
+    let harness = start_loopback("v4-grants-are-facts").await;
+    let (status, created) = send_v3(
+        &harness,
+        Method::POST,
+        "/providers",
+        &cas(
+            &harness,
+            create_body(
+                "Grant Lab",
+                "https://lab.example/v1/chat/completions",
+                "chat_completions",
+                "bearer",
+                Some("sk-grant-lab"),
+            ),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let (status, listed) = send_v4(&harness, Method::GET, "/accounts", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    let identity = identities_of(&listed)
+        .iter()
+        .find(|item| item["identity"]["label"] == "Grant Lab")
+        .expect("lab identity");
+    let binding = &identity["credentials"][0]["bindings"][0];
+    let binding_id = binding["id"].as_str().unwrap().to_string();
+    let original_ids = binding["allowedEndpointIds"].clone();
+    let original_origins = binding["allowedOrigins"].clone();
+    assert!(!original_ids.as_array().unwrap().is_empty());
+    assert_eq!(
+        original_origins.as_array().unwrap()[0],
+        "https://lab.example"
+    );
+
+    let provider_id = created["provider"]["id"].as_str().unwrap().to_string();
+    let mut runtime = harness
+        .state
+        .dynamic_providers()
+        .iter()
+        .find(|runtime| runtime.id == provider_id)
+        .cloned()
+        .expect("dynamic provider");
+    runtime.endpoint_url = "https://other.example/v1/chat/completions".into();
+    harness
+        .state
+        .db
+        .lock()
+        .replace_dynamic_provider(&runtime, false, false, None)
+        .unwrap();
+    let (status, after) = send_v4(&harness, Method::GET, "/accounts", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{after}");
+    let still = identities_of(&after)
+        .iter()
+        .find(|item| item["identity"]["label"] == "Grant Lab")
+        .expect("lab identity")["credentials"][0]["bindings"][0]
+        .clone();
+    assert_eq!(still["allowedEndpointIds"], original_ids);
+    assert_eq!(still["allowedOrigins"], original_origins);
+
+    let (status, patched) = send_v4(
+        &harness,
+        Method::PATCH,
+        &format!("/bindings/{binding_id}"),
+        &cas(
+            &harness,
+            json!({
+                "allowedEndpointIds": [],
+                "allowedOrigins": []
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{patched}");
+    assert_eq!(patched["binding"]["allowedEndpointIds"], json!([]));
+    assert_eq!(patched["binding"]["allowedOrigins"], json!([]));
+
+    let (status, rejected) = send_v4(
+        &harness,
+        Method::PATCH,
+        &format!("/bindings/{binding_id}"),
+        &cas(
+            &harness,
+            json!({
+                "allowedEndpointIds": ["not-an-endpoint"],
+                "allowedOrigins": ["https://lab.example"]
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected}");
+    let (status, listed) = send_v4(&harness, Method::GET, "/accounts", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    let still = identities_of(&listed)
+        .iter()
+        .find(|item| item["identity"]["label"] == "Grant Lab")
+        .expect("lab identity")["credentials"][0]["bindings"][0]
+        .clone();
+    assert_eq!(still["allowedEndpointIds"], json!([]));
+    harness.stop();
+}
+
+#[tokio::test]
+async fn independent_credentials_do_not_fanout_cooldown_and_cross_identity_share_is_rejected() {
+    let harness = start_loopback("v4-independent-quota").await;
+    let account_a = create_go_account(&harness, "Quota A", "sk-quota-a").await;
+    let account_other = create_go_account(&harness, "Other Identity", "sk-other").await;
+    let (status, listed) = send_v4(&harness, Method::GET, "/accounts", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    let identity = find_identity_legacy(&listed, "account", &account_a);
+    let identity_id = identity["identity"]["id"].as_str().unwrap().to_string();
+    let other_credential = find_identity_legacy(&listed, "account", &account_other)["credentials"]
+        [0]["credential"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let plan_connection = identity["credentials"][0]["bindings"][0]["connectionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (status, second) = send_v4(
+        &harness,
+        Method::POST,
+        &format!("/identities/{identity_id}/credentials"),
+        &cas(
+            &harness,
+            json!({
+                "connectionId": plan_connection,
+                "secretInput": "sk-quota-b"
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    let account_b = second["accountId"].as_str().unwrap().to_string();
+    let until = Utc::now() + Duration::hours(3);
+    harness
+        .state
+        .db
+        .lock()
+        .set_account_rate_limit(&account_a, until, "429 pool empty", None)
+        .unwrap();
+    let stored_b = harness
+        .state
+        .db
+        .lock()
+        .get_account(&account_b)
+        .unwrap()
+        .expect("key b");
+    assert!(stored_b.cooldown_generic_until.is_none());
+
+    let rejected = send_v4(
+        &harness,
+        Method::POST,
+        &format!("/identities/{identity_id}/credentials"),
+        &cas(
+            &harness,
+            json!({
+                "connectionId": plan_connection,
+                "secretInput": "sk-cross",
+                "quotaSharing": { "kind": "shared", "credentialId": other_credential }
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(rejected.0, StatusCode::BAD_REQUEST, "{}", rejected.1);
+    harness.stop();
+}
+
+#[tokio::test]
+async fn credential_create_operation_id_is_idempotent() {
+    let harness = start_loopback("v4-credential-operation").await;
+    let account_id = create_go_account(&harness, "Op Key", "sk-op-a").await;
+    let (status, listed) = send_v4(&harness, Method::GET, "/accounts", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    let identity = find_identity_legacy(&listed, "account", &account_id);
+    let identity_id = identity["identity"]["id"].as_str().unwrap().to_string();
+    let plan_connection = identity["credentials"][0]["bindings"][0]["connectionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let operation_id = operation_id(21);
+    let body = cas(
+        &harness,
+        json!({
+            "connectionId": plan_connection,
+            "secretInput": "sk-op-b",
+            "operationId": operation_id
+        }),
+    );
+    let (status, first) = send_v4(
+        &harness,
+        Method::POST,
+        &format!("/identities/{identity_id}/credentials"),
+        &body,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(first["replayed"], false);
+    let (status, replay) = send_v4(
+        &harness,
+        Method::POST,
+        &format!("/identities/{identity_id}/credentials"),
+        &body,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(replay["replayed"], true);
+    assert_eq!(replay["accountId"], first["accountId"]);
+    assert_eq!(replay["credentialId"], first["credentialId"]);
+    let mut different = body.clone();
+    different["secretInput"] = json!("sk-op-other");
+    let (status, mismatch) = send_v4(
+        &harness,
+        Method::POST,
+        &format!("/identities/{identity_id}/credentials"),
+        &different,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{mismatch}");
+    assert_eq!(mismatch["code"], "operationPayloadMismatch");
+    harness.stop();
+}
+
+#[tokio::test]
+async fn custom_account_create_captures_grants_once_after_config() {
+    let harness = start_loopback("v4-custom-grants-once").await;
+    let endpoint = "https://grant.example/v1/chat/completions";
+    let (status, created) = send_v3(
+        &harness,
+        Method::POST,
+        "/accounts",
+        &cas(
+            &harness,
+            json!({
+                "providerId": CUSTOM_PROVIDER_ID,
+                "name": "Grant Custom",
+                "key": "sk-grant-custom",
+                "customConfig": {
+                    "endpointUrl": endpoint,
+                    "upstreamProtocol": "chat_completions"
+                },
+                "modelCapabilities": [{
+                    "publicModel": "grant-model",
+                    "upstreamModel": "grant-model",
+                    "protocol": "chat_completions"
+                }]
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let account_id = created["account"]["id"].as_str().unwrap().to_string();
+    let (status, listed) = send_v4(&harness, Method::GET, "/accounts", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    let identity = find_identity_legacy(&listed, "account", &account_id);
+    let binding = &identity["credentials"][0]["bindings"][0];
+    let ids = binding["allowedEndpointIds"].as_array().unwrap();
+    assert_eq!(ids.len(), 1, "{binding}");
+    assert!(!ids[0].as_str().unwrap().is_empty());
+    assert_eq!(binding["allowedOrigins"], json!(["https://grant.example"]));
+
+    let (status, patched) = send_v4(
+        &harness,
+        Method::PATCH,
+        &format!("/bindings/{}", binding["id"].as_str().unwrap()),
+        &cas(
+            &harness,
+            json!({
+                "allowedEndpointIds": ids,
+                "allowedOrigins": [endpoint]
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{patched}");
+    assert_eq!(
+        patched["binding"]["allowedOrigins"],
+        json!(["https://grant.example"])
+    );
+    harness.stop();
+}
+
+#[tokio::test]
+async fn quota_pool_id_is_projected_without_cooldown_for_independent_and_shared_members() {
+    let harness = start_loopback("v4-quota-pool-id").await;
+    let account_a = create_go_account(&harness, "Pool Host", "sk-pool-a").await;
+    let (status, listed) = send_v4(&harness, Method::GET, "/accounts", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    let identity = find_identity_legacy(&listed, "account", &account_a);
+    let identity_id = identity["identity"]["id"].as_str().unwrap().to_string();
+    let first_credential = identity["credentials"][0]["credential"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let first_pool = identity["credentials"][0]["quotaPoolId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(!first_pool.is_empty());
+    assert!(
+        identity["credentials"][0]["quotaWindows"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let plan_connection = identity["credentials"][0]["bindings"][0]["connectionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let (status, independent) = send_v4(
+        &harness,
+        Method::POST,
+        &format!("/identities/{identity_id}/credentials"),
+        &cas(
+            &harness,
+            json!({
+                "connectionId": plan_connection,
+                "secretInput": "sk-pool-independent"
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{independent}");
+    let independent_id = independent["accountId"].as_str().unwrap().to_string();
+
+    let (status, shared) = send_v4(
+        &harness,
+        Method::POST,
+        &format!("/identities/{identity_id}/credentials"),
+        &cas(
+            &harness,
+            json!({
+                "connectionId": plan_connection,
+                "secretInput": "sk-pool-shared",
+                "quotaSharing": { "kind": "shared", "credentialId": first_credential }
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{shared}");
+    let shared_id = shared["accountId"].as_str().unwrap().to_string();
+
+    let (status, after) = send_v4(&harness, Method::GET, "/accounts", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{after}");
+    let identity = identities_of(&after)
+        .iter()
+        .find(|item| item["identity"]["id"] == identity_id)
+        .expect("identity");
+    let by_legacy: std::collections::HashMap<String, &Value> = identity["credentials"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|credential| {
+            (
+                credential["legacy"]["id"].as_str().unwrap().to_string(),
+                credential,
+            )
+        })
+        .collect();
+    assert_eq!(
+        by_legacy[&account_a]["quotaPoolId"].as_str().unwrap(),
+        first_pool
+    );
+    assert!(by_legacy[&independent_id]["quotaPoolId"].is_null());
+    assert_eq!(
+        by_legacy[&shared_id]["quotaPoolId"].as_str().unwrap(),
+        first_pool
+    );
+    for credential in by_legacy.values() {
+        assert!(credential["quotaWindows"].as_array().unwrap().is_empty());
+        assert!(!credential["credential"]["id"].as_str().unwrap().is_empty());
+    }
+    harness.stop();
+}
+
+const CHAT_OK: &str = r#"{"id":"ok","object":"chat.completion","model":"vendor/opus","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#;
+
+async fn listed_gateway_model_ids(harness: &V3Harness) -> Vec<String> {
+    let models = harness
+        .client
+        .get(format!(
+            "http://127.0.0.1:{}/v1/models",
+            harness.handle.port
+        ))
+        .bearer_auth(harness.state.config().gateway_key)
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    models["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|item| item["id"].as_str().map(str::to_string))
+        .collect()
+}
+
+async fn chat_completion(harness: &V3Harness, model: &str) -> (StatusCode, String) {
+    let response = harness
+        .client
+        .post(format!(
+            "http://127.0.0.1:{}/v1/chat/completions",
+            harness.handle.port
+        ))
+        .bearer_auth(harness.state.config().gateway_key)
+        .json(&json!({
+            "model": model,
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 1
+        }))
+        .send()
+        .await
+        .unwrap();
+    (response.status(), response.text().await.unwrap())
+}
+
+fn control_plane_draft_ids(harness: &V3Harness) -> Vec<String> {
+    harness
+        .state
+        .db
+        .lock()
+        .onboarding_draft_provider_ids()
+        .unwrap()
+        .into_iter()
+        .collect()
+}
+
+#[tokio::test]
+async fn draft_commit_allows_empty_targets_and_stays_off_runtime() {
+    let harness = start_loopback("v4-draft-empty").await;
+    let operation_id = operation_id(40);
+    let body = commit_cas(
+        &harness,
+        &operation_id,
+        json!({
+            "mode": "draft",
+            "connection": {
+                "kind": "new",
+                "templateId": "custom-http",
+                "name": "Empty Draft",
+                "endpointUrl": "https://draft-empty.example/v1/chat/completions",
+                "upstreamProtocol": "chat_completions",
+                "authKind": "bearer"
+            },
+            "targets": []
+        }),
+    );
+    let (status, result) = send_v4(&harness, Method::POST, "/onboarding/commit", &body).await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_eq!(result["credentialId"], Value::Null);
+    assert_eq!(result["accountId"], Value::Null);
+    assert_eq!(dynamic_provider_count(&harness), 0);
+    let draft_ids = control_plane_draft_ids(&harness);
+    assert_eq!(draft_ids.len(), 1);
+    let provider_id = draft_ids[0].clone();
+    let reopened = ocg_core::db::Database::open(harness.dir.clone()).unwrap();
+    assert!(
+        reopened
+            .list_dynamic_providers()
+            .unwrap()
+            .iter()
+            .all(|runtime| runtime.id != provider_id)
+    );
+    assert!(
+        reopened
+            .list_control_plane_dynamic_providers()
+            .unwrap()
+            .iter()
+            .any(|runtime| runtime.id == provider_id)
+    );
+    let (status, connections) = send_v4(&harness, Method::GET, "/connections", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{connections}");
+    let connection = find_legacy(&connections, "dynamic_provider", &provider_id);
+    assert_eq!(connection["lifecycle"], "draft");
+    assert_eq!(connection["eligibility"]["state"], "ineligible");
+    let (status, catalog) = send_v3(&harness, Method::GET, "/providers", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{catalog}");
+    let catalog_ids: Vec<&str> = catalog["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|entry| entry["providerId"].as_str())
+        .collect();
+    assert!(!catalog_ids.contains(&provider_id.as_str()), "{catalog}");
+    let gateway_key = harness.state.config().gateway_key.clone();
+    let models = harness
+        .client
+        .get(format!(
+            "http://127.0.0.1:{}/v1/models",
+            harness.handle.port
+        ))
+        .bearer_auth(gateway_key)
+        .send()
+        .await
+        .unwrap();
+    let models_status = models.status();
+    let models_body = models.json::<Value>().await.unwrap_or(Value::Null);
+    assert_eq!(models_status, StatusCode::OK, "{models_body}");
+    let model_text = models_body.to_string();
+    assert!(
+        !model_text.contains(&provider_id),
+        "gateway models leaked draft {models_body}"
+    );
+    harness.stop();
+}
+
+#[tokio::test]
+async fn explicit_draft_with_key_and_models_stays_nonsend() {
+    let secret = "sk-draft-keyed";
+    let mut replies = HashMap::new();
+    replies.insert(
+        secret.to_string(),
+        VecDeque::from([FakeReply {
+            status: 200,
+            body: CHAT_OK,
+        }]),
+    );
+    let (upstream, calls, _stop) = start_fake_upstream(replies).await;
+    let harness = start_loopback("v4-draft-keyed").await;
+    let mut config = harness.state.config();
+    config.proxy_mode = ProxyMode::Direct;
+    harness.state.set_config(config).unwrap();
+    let endpoint = format!("{upstream}/v1/chat/completions");
+    let public_model = "lab-opus";
+    let body = commit_cas(
+        &harness,
+        &operation_id(41),
+        json!({
+            "mode": "draft",
+            "connection": {
+                "kind": "new",
+                "templateId": "custom-http",
+                "name": "Keyed Draft",
+                "endpointUrl": endpoint,
+                "upstreamProtocol": "chat_completions",
+                "authKind": "bearer"
+            },
+            "authorization": api_key_auth(secret, Some("Draft Key")),
+            "targets": [{
+                "publicModel": public_model,
+                "upstreamModel": "vendor/opus"
+            }]
+        }),
+    );
+    let (status, result) = send_v4(&harness, Method::POST, "/onboarding/commit", &body).await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_secret_free(&result, &[secret]);
+    assert_eq!(dynamic_provider_count(&harness), 0);
+    let provider_id = control_plane_draft_ids(&harness)[0].clone();
+    assert_eq!(account_count_for(&harness, &provider_id), 1);
+    let (status, connections) = send_v4(&harness, Method::GET, "/connections", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{connections}");
+    let connection = find_legacy(&connections, "dynamic_provider", &provider_id);
+    assert_eq!(connection["lifecycle"], "draft");
+    assert_eq!(connection["eligibility"]["state"], "ineligible");
+    assert_eq!(connection["targetCount"], 1);
+    assert_eq!(connection["credentialCount"], 1);
+
+    let (status, catalog) = send_v3(&harness, Method::GET, "/providers", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{catalog}");
+    let catalog_ids: Vec<&str> = catalog["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|entry| entry["providerId"].as_str())
+        .collect();
+    assert!(!catalog_ids.contains(&provider_id.as_str()), "{catalog}");
+    let listed = listed_gateway_model_ids(&harness).await;
+    assert!(
+        !listed.iter().any(|id| id == public_model),
+        "draft public alias leaked into /v1/models: {listed:?}"
+    );
+    let (chat_status, chat_body) = chat_completion(&harness, public_model).await;
+    assert_ne!(chat_status, StatusCode::OK, "{chat_body}");
+    assert!(
+        calls.lock().expect("fake call log").is_empty(),
+        "draft must not send outbound gateway requests"
+    );
+
+    let reopened = ocg_core::db::Database::open(harness.dir.clone()).unwrap();
+    assert!(
+        reopened
+            .list_dynamic_providers()
+            .unwrap()
+            .iter()
+            .all(|runtime| runtime.id != provider_id)
+    );
+    drop(reopened);
+    let listed_after = listed_gateway_model_ids(&harness).await;
+    assert!(
+        !listed_after.iter().any(|id| id == public_model),
+        "restarted snapshot leaked draft alias: {listed_after:?}"
+    );
+    let (chat_status, chat_body) = chat_completion(&harness, public_model).await;
+    assert_ne!(chat_status, StatusCode::OK, "{chat_body}");
+    assert!(
+        calls.lock().expect("fake call log").is_empty(),
+        "reopen must not activate a draft send"
+    );
+
+    let complete = commit_cas(
+        &harness,
+        &operation_id(50),
+        json!({
+            "mode": "complete",
+            "connection": {
+                "kind": "existing",
+                "connectionId": result["connectionId"],
+                "configuration": {
+                    "templateId": "custom-http",
+                    "name": "Keyed Draft",
+                    "endpointUrl": endpoint,
+                    "upstreamProtocol": "chat_completions",
+                    "authKind": "bearer"
+                }
+            },
+            "targets": [{
+                "publicModel": public_model,
+                "upstreamModel": "vendor/opus"
+            }]
+        }),
+    );
+    let (status, completed) =
+        send_v4(&harness, Method::POST, "/onboarding/commit", &complete).await;
+    assert_eq!(status, StatusCode::OK, "{completed}");
+    assert_eq!(dynamic_provider_count(&harness), 1);
+    let listed_live = listed_gateway_model_ids(&harness).await;
+    assert!(
+        listed_live.iter().any(|id| id == public_model),
+        "completed connection missing public alias: {listed_live:?}"
+    );
+    let (chat_status, chat_body) = chat_completion(&harness, public_model).await;
+    assert_eq!(chat_status, StatusCode::OK, "{chat_body}");
+    assert_eq!(calls.lock().expect("fake call log").len(), 1);
+    harness.stop();
+}
+
+#[tokio::test]
+async fn complete_retains_saved_key_when_secret_blank() {
+    let harness = start_loopback("v4-draft-retain-key").await;
+    let secret = "sk-draft-retain";
+    let first = commit_cas(
+        &harness,
+        &operation_id(51),
+        json!({
+            "mode": "draft",
+            "connection": {
+                "kind": "new",
+                "templateId": "custom-http",
+                "name": "Retain Draft",
+                "endpointUrl": "https://retain-draft.example/v1/chat/completions",
+                "upstreamProtocol": "chat_completions",
+                "authKind": "bearer"
+            },
+            "authorization": api_key_auth(secret, Some("Kept")),
+            "targets": default_targets()
+        }),
+    );
+    let (status, drafted) = send_v4(&harness, Method::POST, "/onboarding/commit", &first).await;
+    assert_eq!(status, StatusCode::OK, "{drafted}");
+    let connection_id = drafted["connectionId"].as_str().unwrap().to_string();
+    let credential_id = drafted["credentialId"].as_str().unwrap().to_string();
+    let account_id = drafted["accountId"].as_str().unwrap().to_string();
+    let (status, listed) = send_v4(&harness, Method::GET, "/accounts", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    let before = credential_of(&listed, "account", &account_id);
+    let identity_id = find_identity_legacy(&listed, "account", &account_id)["identity"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let binding_id = before["bindings"][0]["id"].as_str().unwrap().to_string();
+    let complete = commit_cas(
+        &harness,
+        &operation_id(52),
+        json!({
+            "mode": "complete",
+            "connection": {
+                "kind": "existing",
+                "connectionId": connection_id,
+                "configuration": {
+                    "templateId": "custom-http",
+                    "name": "Retain Draft",
+                    "endpointUrl": "https://retain-draft.example/v1/chat/completions",
+                    "upstreamProtocol": "chat_completions",
+                    "authKind": "bearer"
+                }
+            },
+            "authorization": api_key_auth("", Some("Kept")),
+            "targets": default_targets()
+        }),
+    );
+    let (status, completed) =
+        send_v4(&harness, Method::POST, "/onboarding/commit", &complete).await;
+    assert_eq!(status, StatusCode::OK, "{completed}");
+    assert_eq!(completed["credentialId"], credential_id);
+    assert_eq!(completed["accountId"], account_id);
+    let (status, listed) = send_v4(&harness, Method::GET, "/accounts", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    let after = credential_of(&listed, "account", &account_id);
+    assert_eq!(after["credential"]["id"], credential_id);
+    assert_eq!(after["bindings"][0]["id"], binding_id);
+    assert_eq!(
+        find_identity_legacy(&listed, "account", &account_id)["identity"]["id"],
+        identity_id
+    );
+    harness.stop();
+}
+
+#[tokio::test]
+async fn auth_switch_requires_key_in_draft_and_complete_and_keeps_ids() {
+    let harness = start_loopback("v4-draft-auth-switch").await;
+    let draft = commit_cas(
+        &harness,
+        &operation_id(53),
+        json!({
+            "mode": "draft",
+            "connection": {
+                "kind": "new",
+                "templateId": "custom-http",
+                "name": "Auth Switch",
+                "endpointUrl": "http://127.0.0.1:9/v1",
+                "upstreamProtocol": "chat_completions",
+                "authKind": "none"
+            },
+            "targets": []
+        }),
+    );
+    let (status, drafted) = send_v4(&harness, Method::POST, "/onboarding/commit", &draft).await;
+    assert_eq!(status, StatusCode::OK, "{drafted}");
+    let connection_id = drafted["connectionId"].as_str().unwrap().to_string();
+    let provider_id = control_plane_draft_ids(&harness)[0].clone();
+    let complete = commit_cas(
+        &harness,
+        &operation_id(54),
+        json!({
+            "mode": "complete",
+            "authorizeCurrentEndpoint": true,
+            "connection": {
+                "kind": "existing",
+                "connectionId": connection_id,
+                "configuration": {
+                    "templateId": "custom-http",
+                    "name": "Auth Switch",
+                    "endpointUrl": "http://127.0.0.1:9/v1",
+                    "upstreamProtocol": "chat_completions",
+                    "authKind": "bearer"
+                }
+            },
+            "targets": default_targets()
+        }),
+    );
+    for intent in ["draft", "complete"] {
+        let mut attempted = complete.clone();
+        attempted["mode"] = json!(intent);
+        let (status, error) =
+            send_v4(&harness, Method::POST, "/onboarding/commit", &attempted).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{intent}: {error}");
+        assert_eq!(error["code"], "invalidRequest");
+        assert_eq!(
+            harness
+                .state
+                .db
+                .lock()
+                .get_dynamic_provider(&provider_id)
+                .unwrap()
+                .unwrap()
+                .auth_kind,
+            ocg_domain::dynamic::DynamicAuthKind::None
+        );
+    }
+    assert_eq!(dynamic_provider_count(&harness), 0);
+    assert_eq!(
+        harness
+            .state
+            .db
+            .lock()
+            .provider_is_onboarding_draft(&provider_id)
+            .unwrap(),
+        Some(true)
+    );
+    let (status, connections) = send_v4(&harness, Method::GET, "/connections", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{connections}");
+    let connection = find_legacy(&connections, "dynamic_provider", &provider_id);
+    assert_eq!(connection["lifecycle"], "draft");
+    let before = harness.state.db.lock().list_identity_model().unwrap();
+    let before = before
+        .accounts
+        .iter()
+        .find(|row| row.account.provider_id == provider_id)
+        .unwrap();
+    let mut with_key = complete;
+    with_key["authorization"] = api_key_auth("sk-synthetic-auth-switch", None);
+    let (status, completed) =
+        send_v4(&harness, Method::POST, "/onboarding/commit", &with_key).await;
+    assert_eq!(status, StatusCode::OK, "{completed}");
+    assert_eq!(completed["accountId"], drafted["accountId"]);
+    assert_eq!(completed["credentialId"], drafted["credentialId"]);
+    let after = harness.state.db.lock().list_identity_model().unwrap();
+    let after = after
+        .accounts
+        .iter()
+        .find(|row| row.account.provider_id == provider_id)
+        .unwrap();
+    assert_eq!(after.identity_id, before.identity_id);
+    assert_eq!(after.binding_id, before.binding_id);
+    assert_eq!(
+        after.account.credential_kind,
+        ocg_domain::catalog::CredentialKind::ApiKey
+    );
+    assert!(after.has_key_material);
+    harness.stop();
+}
+
+#[tokio::test]
+async fn resume_complete_keeps_same_ids_and_replays() {
+    let harness = start_loopback("v4-draft-resume").await;
+    let secret = "sk-draft-resume";
+    let first = commit_cas(
+        &harness,
+        &operation_id(42),
+        json!({
+            "mode": "draft",
+            "connection": {
+                "kind": "new",
+                "templateId": "custom-http",
+                "name": "Resume Draft",
+                "endpointUrl": "https://resume-draft.example/v1/chat/completions",
+                "upstreamProtocol": "chat_completions",
+                "authKind": "bearer"
+            },
+            "authorization": api_key_auth(secret, Some("Kept")),
+            "targets": default_targets()
+        }),
+    );
+    let (status, drafted) = send_v4(&harness, Method::POST, "/onboarding/commit", &first).await;
+    assert_eq!(status, StatusCode::OK, "{drafted}");
+    let connection_id = drafted["connectionId"].as_str().unwrap().to_string();
+    let credential_id = drafted["credentialId"].as_str().unwrap().to_string();
+    let account_id = drafted["accountId"].as_str().unwrap().to_string();
+    let provider_id = control_plane_draft_ids(&harness)[0].clone();
+    let complete = commit_cas(
+        &harness,
+        &operation_id(43),
+        json!({
+            "mode": "complete",
+            "connection": {
+                "kind": "existing",
+                "connectionId": connection_id,
+                "configuration": {
+                    "templateId": "custom-http",
+                    "name": "Resume Draft",
+                    "endpointUrl": "https://resume-draft.example/v1/chat/completions",
+                    "upstreamProtocol": "chat_completions",
+                    "authKind": "bearer"
+                }
+            },
+            "targets": default_targets()
+        }),
+    );
+    let (status, completed) =
+        send_v4(&harness, Method::POST, "/onboarding/commit", &complete).await;
+    assert_eq!(status, StatusCode::OK, "{completed}");
+    assert_eq!(completed["connectionId"], connection_id);
+    assert_eq!(completed["credentialId"], credential_id);
+    assert_eq!(completed["accountId"], account_id);
+    assert_eq!(dynamic_provider_count(&harness), 1);
+    assert_eq!(harness.state.dynamic_providers()[0].id, provider_id);
+    assert!(control_plane_draft_ids(&harness).is_empty());
+    assert_eq!(account_count_for(&harness, &provider_id), 1);
+    let (status, replayed) = send_v4(&harness, Method::POST, "/onboarding/commit", &complete).await;
+    assert_eq!(status, StatusCode::OK, "{replayed}");
+    assert_eq!(replayed["replayed"], true);
+    assert_eq!(replayed["credentialId"], credential_id);
+    assert_eq!(replayed["accountId"], account_id);
+    harness.stop();
+}
+
+#[tokio::test]
+async fn missing_key_complete_fails_atomically() {
+    let harness = start_loopback("v4-complete-missing-key").await;
+    let draft = commit_cas(
+        &harness,
+        &operation_id(44),
+        json!({
+            "mode": "draft",
+            "connection": {
+                "kind": "new",
+                "templateId": "custom-http",
+                "name": "No Key Draft",
+                "endpointUrl": "https://nokey.example/v1/chat/completions",
+                "upstreamProtocol": "chat_completions",
+                "authKind": "bearer"
+            },
+            "targets": default_targets()
+        }),
+    );
+    let (status, drafted) = send_v4(&harness, Method::POST, "/onboarding/commit", &draft).await;
+    assert_eq!(status, StatusCode::OK, "{drafted}");
+    let connection_id = drafted["connectionId"].clone();
+    let provider_id = control_plane_draft_ids(&harness)[0].clone();
+    let complete = commit_cas(
+        &harness,
+        &operation_id(45),
+        json!({
+            "mode": "complete",
+            "connection": {
+                "kind": "existing",
+                "connectionId": connection_id,
+                "configuration": {
+                    "templateId": "custom-http",
+                    "name": "No Key Draft",
+                    "endpointUrl": "https://nokey.example/v1/chat/completions",
+                    "upstreamProtocol": "chat_completions",
+                    "authKind": "bearer"
+                }
+            },
+            "targets": default_targets()
+        }),
+    );
+    let (status, error) = send_v4(&harness, Method::POST, "/onboarding/commit", &complete).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert_eq!(error["code"], "invalidRequest");
+    assert_eq!(dynamic_provider_count(&harness), 0);
+    assert_eq!(account_count_for(&harness, &provider_id), 0);
+    assert_eq!(
+        harness
+            .state
+            .db
+            .lock()
+            .provider_is_onboarding_draft(&provider_id)
+            .unwrap(),
+        Some(true)
+    );
+    assert!(!operation_exists(&harness, &operation_id(45)));
+    harness.stop();
+}
+
+#[tokio::test]
+async fn endpoint_edit_preserves_grants_until_explicit_authorize() {
+    let harness = start_loopback("v4-draft-authorize").await;
+    let secret = "sk-draft-grant";
+    let first = commit_cas(
+        &harness,
+        &operation_id(46),
+        json!({
+            "mode": "draft",
+            "connection": {
+                "kind": "new",
+                "templateId": "custom-http",
+                "name": "Grant Draft",
+                "endpointUrl": "https://grant-a.example/v1/chat/completions",
+                "upstreamProtocol": "chat_completions",
+                "authKind": "bearer"
+            },
+            "authorization": api_key_auth(secret, None),
+            "targets": default_targets()
+        }),
+    );
+    let (status, drafted) = send_v4(&harness, Method::POST, "/onboarding/commit", &first).await;
+    assert_eq!(status, StatusCode::OK, "{drafted}");
+    let connection_id = drafted["connectionId"].as_str().unwrap().to_string();
+    let account_id = drafted["accountId"].as_str().unwrap().to_string();
+    let (status, listed) = send_v4(&harness, Method::GET, "/accounts", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    let original_binding = credential_of(&listed, "account", &account_id)["bindings"][0].clone();
+    let refused = commit_cas(
+        &harness,
+        &operation_id(47),
+        json!({
+            "mode": "complete",
+            "connection": {
+                "kind": "existing",
+                "connectionId": connection_id,
+                "configuration": {
+                    "templateId": "custom-http",
+                    "name": "Grant Draft",
+                    "endpointUrl": "https://grant-b.example/v1/chat/completions",
+                    "upstreamProtocol": "chat_completions",
+                    "authKind": "bearer"
+                }
+            },
+            "targets": default_targets()
+        }),
+    );
+    let (status, error) = send_v4(&harness, Method::POST, "/onboarding/commit", &refused).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    let (status, listed) = send_v4(&harness, Method::GET, "/accounts", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    let preserved = &credential_of(&listed, "account", &account_id)["bindings"][0];
+    assert_eq!(
+        preserved["allowedEndpointIds"],
+        original_binding["allowedEndpointIds"]
+    );
+    assert_eq!(
+        preserved["allowedOrigins"],
+        original_binding["allowedOrigins"]
+    );
+    let authorized = commit_cas(
+        &harness,
+        &operation_id(48),
+        json!({
+            "mode": "complete",
+            "authorizeCurrentEndpoint": true,
+            "connection": {
+                "kind": "existing",
+                "connectionId": connection_id,
+                "configuration": {
+                    "templateId": "custom-http",
+                    "name": "Grant Draft",
+                    "endpointUrl": "https://grant-b.example/v1/chat/completions",
+                    "upstreamProtocol": "chat_completions",
+                    "authKind": "bearer"
+                }
+            },
+            "targets": default_targets()
+        }),
+    );
+    let (status, completed) =
+        send_v4(&harness, Method::POST, "/onboarding/commit", &authorized).await;
+    assert_eq!(status, StatusCode::OK, "{completed}");
+    let (status, listed) = send_v4(&harness, Method::GET, "/accounts", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    let updated = &credential_of(&listed, "account", &account_id)["bindings"][0];
+    let origins = updated["allowedOrigins"].as_array().unwrap();
+    assert!(
+        origins
+            .iter()
+            .any(|origin| origin.as_str().unwrap_or("").contains("grant-b.example")),
+        "{updated}"
+    );
+    harness.stop();
+}
+
+#[tokio::test]
+async fn v3_update_preserves_draft_flag() {
+    let harness = start_loopback("v4-draft-v3-update").await;
+    let body = commit_cas(
+        &harness,
+        &operation_id(49),
+        json!({
+            "mode": "draft",
+            "connection": {
+                "kind": "new",
+                "templateId": "custom-http",
+                "name": "Stay Draft",
+                "endpointUrl": "https://stay-draft.example/v1/chat/completions",
+                "upstreamProtocol": "chat_completions",
+                "authKind": "bearer"
+            },
+            "targets": default_targets()
+        }),
+    );
+    let (status, drafted) = send_v4(&harness, Method::POST, "/onboarding/commit", &body).await;
+    assert_eq!(status, StatusCode::OK, "{drafted}");
+    let provider_id = control_plane_draft_ids(&harness)[0].clone();
+    let (status, updated) = send_v3(
+        &harness,
+        Method::PATCH,
+        &format!("/providers/{provider_id}"),
+        &cas(
+            &harness,
+            json!({
+                "name": "Stay Draft Edited",
+                "endpointUrl": "https://stay-draft.example/v1/chat/completions",
+                "upstreamProtocol": "chat_completions",
+                "authKind": "bearer",
+                "models": [{
+                    "publicModel": "lab-opus",
+                    "upstreamModel": "vendor/opus"
+                }]
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(dynamic_provider_count(&harness), 0);
+    assert_eq!(
+        harness
+            .state
+            .db
+            .lock()
+            .provider_is_onboarding_draft(&provider_id)
+            .unwrap(),
+        Some(true)
+    );
     harness.stop();
 }

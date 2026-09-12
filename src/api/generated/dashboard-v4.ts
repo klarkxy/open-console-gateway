@@ -18,6 +18,7 @@ export type DashboardApiV4 =
   | ConnectionSummary
   | ConnectionList
   | OnboardingCommitRequest
+  | OnboardingCommitMode
   | OnboardingConnection
   | OnboardingAuthorization
   | OnboardingTarget
@@ -37,6 +38,7 @@ export type DashboardApiV4 =
   | CredentialRotateResult
   | BindingPatchRequest
   | BindingPatchResult
+  | QuotaSharing
   | IdentityCredentialCreateRequest
   | IdentityCredentialCreateResult;
 /**
@@ -87,9 +89,11 @@ export type EligibilityState = "eligible" | "ineligible" | "cooling";
  */
 export type AuthorizationState = "not_required" | "missing" | "unknown" | "valid" | "invalid";
 /**
- * Whether the projected connection is currently intended to be used.
+ * V4 connection lifecycle, including persisted onboarding drafts.
+ *
+ * Draft is control-plane only: routing snapshots never carry it.
  */
-export type ConnectionLifecycle = "configured" | "disabled";
+export type ConnectionLifecycle = "configured" | "disabled" | "draft";
 /**
  * Provenance of a projected connection.
  */
@@ -114,6 +118,10 @@ export type OnboardingConnection =
       upstreamProtocol: AccountUpstreamProtocol;
     }
   | {
+      /**
+       * Required when `mode` is present. Legacy mode-None existing rejects this.
+       */
+      configuration?: OnboardingConnectionNew | null;
       connectionId: string;
       kind: "existing";
     };
@@ -122,6 +130,7 @@ export type OnboardingConnection =
  * Nullable on the wire because builtin rows leave the field empty.
  */
 export type ProviderDefinitionAuthKind = "bearer" | "x-api-key" | "none";
+export type OnboardingCommitMode = "draft" | "complete";
 export type ModelScope =
   | {
       kind: "all";
@@ -143,6 +152,14 @@ export type QuotaSubject = "credential" | "egress";
 export type RuntimeSubjectKind = "account_credential" | "anonymous" | "external_runtime";
 export type SubscriptionSource = "legacy_manual" | "managed_payment";
 export type IdentityConfidence = "opaque" | "declared";
+export type QuotaSharing =
+  | {
+      kind: "independent";
+    }
+  | {
+      credentialId: string;
+      kind: "shared";
+    };
 
 /**
  * Live CAS token, process generation, and pricing snapshot id.
@@ -244,11 +261,27 @@ export interface ConnectionList {
  */
 export interface OnboardingCommitRequest {
   authorization?: OnboardingAuthorization | null;
+  /**
+   * Explicit consent to union safe current default/same-origin grants.
+   * Ignored unless `mode` is present; false is omitted from the digest.
+   */
+  authorizeCurrentEndpoint?: boolean;
   connection: OnboardingConnection;
   expectedRevision: number;
+  /**
+   * Omitted preserves legacy commit behavior and HMAC digest bytes.
+   */
+  mode?: OnboardingCommitMode | null;
   operationId: string;
   processGeneration: number;
   targets: OnboardingTarget[];
+}
+export interface OnboardingConnectionNew {
+  authKind: ProviderDefinitionAuthKind;
+  endpointUrl: string;
+  name: string;
+  templateId: string;
+  upstreamProtocol: AccountUpstreamProtocol;
 }
 export interface OnboardingTarget {
   publicModel: string;
@@ -260,6 +293,10 @@ export interface OnboardingUpstreamOverride {
   protocol: AccountUpstreamProtocol;
 }
 export interface OnboardingCommitResult {
+  /**
+   * Legacy receipts omit this; replay emits null via serde default.
+   */
+  accountId: string | null;
   connectionId: string;
   credentialId: string | null;
   replayed: boolean;
@@ -282,6 +319,7 @@ export interface CredentialSummary {
   lastError: string | null;
   legacy: IdentityLegacy;
   onboardingTask: OnboardingTaskDto | null;
+  quotaPoolId: string | null;
   quotaWindows: QuotaWindowDto[];
   subject: RuntimeSubjectKind;
   subscription: SubscriptionDto | null;
@@ -378,6 +416,8 @@ export interface CredentialRotateResult {
  * accepted by a fresh process whose in-memory counter reused the same value.
  */
 export interface BindingPatchRequest {
+  allowedEndpointIds?: string[] | null;
+  allowedOrigins?: string[] | null;
   enabled?: boolean | null;
   expectedRevision: number;
   modelScope?: ModelScope | null;
@@ -395,9 +435,12 @@ export interface BindingPatchResult {
  * accepted by a fresh process whose in-memory counter reused the same value.
  */
 export interface IdentityCredentialCreateRequest {
+  accountLabel?: string | null;
   connectionId: string;
   expectedRevision: number;
+  operationId?: string | null;
   processGeneration: number;
+  quotaSharing?: QuotaSharing;
   secretInput: string;
 }
 export interface IdentityCredentialCreateResult {

@@ -19,19 +19,19 @@ use crate::provider_contracts::EffectiveContractSet;
 use crate::state::CoreState;
 use ocg_domain::catalog::CredentialKind;
 use ocg_domain::connection::{
-    ConnectionId, ConnectionLifecycle, ConnectionOrigin, CredentialFacts, EndpointAuthScheme,
-    EndpointId, EndpointOperation, LegacyConnectionKind, connection_id_for_legacy,
-    cooling_all_usable, derive_authorization, derive_eligibility, endpoint_id_for,
-    endpoint_id_for_route, target_id_for,
+    ConnectionId, ConnectionLifecycle as DomainLifecycle, ConnectionOrigin, CredentialFacts,
+    EndpointAuthScheme, EndpointOperation, LegacyConnectionKind, connection_id_for_legacy,
+    cooling_all_usable, derive_authorization, derive_eligibility, endpoint_id_for, target_id_for,
 };
+use ocg_domain::credential::{RouteSpec, assigned_endpoints_for_routes};
 use ocg_domain::dynamic::DynamicAuthKind;
 use ocg_domain::ids::CUSTOM_PROVIDER_ID;
 use ocg_domain::provider::provider_origin_from_preset;
 
 use super::templates::{is_cpa_id, offering_kind};
 use super::types::{
-    ConnectionEndpoint, ConnectionList, ConnectionSummary, ConnectionTarget, Eligibility,
-    LegacyIdentity, OfferingKind, TemplateRef,
+    ConnectionEndpoint, ConnectionLifecycle, ConnectionList, ConnectionSummary, ConnectionTarget,
+    Eligibility, LegacyIdentity, OfferingKind, TemplateRef,
 };
 
 const TEMPLATE_VERSION: u32 = 1;
@@ -39,14 +39,20 @@ const TEMPLATE_VERSION: u32 = 1;
 pub(super) async fn list_connections(
     State(state): State<CoreState>,
 ) -> Result<Json<ConnectionList>, V3ApiError> {
+    let _settings_update = state.settings_update.lock();
     let now = Utc::now();
-    let dynamic_providers = state.dynamic_providers();
     let contracts = state.provider_contracts();
-    let (accounts, custom_runtimes) = {
+    let (accounts, custom_runtimes, dynamic_providers, draft_ids) = {
         let db = state.db.lock();
         let accounts = db.list_accounts().map_err(V3ApiError::internal)?;
         let custom_runtimes = db
             .list_custom_account_runtimes()
+            .map_err(V3ApiError::internal)?;
+        let dynamic_providers = db
+            .list_control_plane_dynamic_providers()
+            .map_err(V3ApiError::internal)?;
+        let draft_ids = db
+            .onboarding_draft_provider_ids()
             .map_err(V3ApiError::internal)?;
         let mut verification = HashMap::new();
         for account in &accounts {
@@ -69,6 +75,8 @@ pub(super) async fn list_connections(
                 })
                 .collect::<Vec<_>>(),
             custom_runtimes,
+            dynamic_providers,
+            draft_ids,
         )
     };
 
@@ -108,7 +116,12 @@ pub(super) async fn list_connections(
             .iter()
             .map(|index| (&accounts[*index].0, accounts[*index].1))
             .collect();
-        connections.push(project_dynamic(runtime, &group, now));
+        connections.push(project_dynamic(
+            runtime,
+            &group,
+            now,
+            draft_ids.contains(&runtime.id),
+        ));
     }
 
     let accounts_by_id: HashMap<&str, &(Account, ConnectionVerificationStatus)> = accounts
@@ -182,6 +195,7 @@ fn project_builtin(
         },
         display_family: Some(plan.display_family.to_string()),
         offering: offering_kind(builtin_offering(plan.provider_id)),
+        onboarding_draft: false,
     })
 }
 
@@ -189,6 +203,7 @@ fn project_dynamic(
     runtime: &DynamicProviderRuntime,
     accounts: &[(&Account, ConnectionVerificationStatus)],
     now: chrono::DateTime<Utc>,
+    onboarding_draft: bool,
 ) -> ConnectionSummary {
     let connection_id =
         connection_id_for_legacy(LegacyConnectionKind::DynamicProvider, &runtime.id);
@@ -223,6 +238,7 @@ fn project_dynamic(
         },
         display_family: None,
         offering: offering_kind(offering),
+        onboarding_draft,
     })
 }
 
@@ -280,6 +296,7 @@ fn project_custom(
         },
         display_family: Some("Custom".to_string()),
         offering: OfferingKind::Api,
+        onboarding_draft: false,
     })
 }
 
@@ -288,22 +305,15 @@ fn dynamic_routes(
     runtime: &DynamicProviderRuntime,
 ) -> (Vec<ConnectionEndpoint>, Vec<ConnectionTarget>) {
     let default_operation = EndpointOperation::from(runtime.upstream_protocol);
-    let default_id = endpoint_id_for(connection_id, default_operation);
     let auth = match runtime.auth_kind {
         DynamicAuthKind::Bearer => EndpointAuthScheme::Bearer,
         DynamicAuthKind::XApiKey => EndpointAuthScheme::XApiKey,
         DynamicAuthKind::None => EndpointAuthScheme::None,
     };
-    let mut endpoints = vec![endpoint_dto(
-        connection_id,
-        default_id.clone(),
-        default_operation,
-        runtime.upstream_protocol,
-        Some(runtime.endpoint_url.clone()),
-        auth,
-        false,
-    )];
-    let mut used_operations = HashSet::from([default_operation]);
+    let mut routes = vec![RouteSpec {
+        operation: default_operation,
+        url: Some(runtime.endpoint_url.clone()),
+    }];
     let mut seen_routes =
         HashSet::from([(runtime.upstream_protocol, runtime.endpoint_url.clone())]);
     for mapping in &runtime.mappings {
@@ -313,22 +323,28 @@ fn dynamic_routes(
         if !seen_routes.insert((override_route.protocol, override_route.endpoint_url.clone())) {
             continue;
         }
-        let operation = EndpointOperation::from(override_route.protocol);
-        let id = if used_operations.insert(operation) {
-            endpoint_id_for(connection_id, operation)
-        } else {
-            endpoint_id_for_route(connection_id, operation, &override_route.endpoint_url)
-        };
-        endpoints.push(endpoint_dto(
-            connection_id,
-            id,
-            operation,
-            override_route.protocol,
-            Some(override_route.endpoint_url.clone()),
-            auth,
-            false,
-        ));
+        routes.push(RouteSpec {
+            operation: EndpointOperation::from(override_route.protocol),
+            url: Some(override_route.endpoint_url.clone()),
+        });
     }
+    let assigned = assigned_endpoints_for_routes(connection_id, &routes);
+    let endpoints: Vec<ConnectionEndpoint> = assigned
+        .into_iter()
+        .zip(routes.into_iter())
+        .map(|(assigned, route)| {
+            let protocol = ocg_domain::catalog::UpstreamProtocolKind::from(route.operation);
+            endpoint_dto(
+                connection_id,
+                assigned.id,
+                route.operation,
+                protocol,
+                assigned.url,
+                auth,
+                false,
+            )
+        })
+        .collect();
 
     let targets = runtime
         .mappings
@@ -425,6 +441,7 @@ struct SummaryDraft<'a> {
     legacy: LegacyIdentity,
     display_family: Option<String>,
     offering: OfferingKind,
+    onboarding_draft: bool,
 }
 
 fn finish_summary(draft: SummaryDraft<'_>) -> ConnectionSummary {
@@ -442,23 +459,36 @@ fn finish_summary(draft: SummaryDraft<'_>) -> ConnectionSummary {
         legacy,
         display_family,
         offering,
+        onboarding_draft,
     } = draft;
-    let lifecycle = if !accounts.is_empty() && accounts.iter().all(|(account, _)| !account.enabled)
-    {
-        ConnectionLifecycle::Disabled
-    } else {
-        ConnectionLifecycle::Configured
-    };
+    let domain_lifecycle =
+        if !accounts.is_empty() && accounts.iter().all(|(account, _)| !account.enabled) {
+            DomainLifecycle::Disabled
+        } else {
+            DomainLifecycle::Configured
+        };
     let authorization = derive_authorization(credential_kind, facts);
     let enabled_target_count = targets.iter().filter(|target| target.enabled).count();
     let enabled_credential_count = facts.iter().filter(|fact| fact.enabled).count();
-    let (eligibility_state, eligibility_reason) = derive_eligibility(
-        lifecycle,
-        authorization,
-        enabled_target_count,
-        cooling_all_usable(facts),
-        enabled_credential_count,
-    );
+    let (eligibility_state, eligibility_reason) = if onboarding_draft {
+        (
+            ocg_domain::connection::EligibilityState::Ineligible,
+            ocg_domain::connection::EligibilityReason::ConnectionDisabled,
+        )
+    } else {
+        derive_eligibility(
+            domain_lifecycle,
+            authorization,
+            enabled_target_count,
+            cooling_all_usable(facts),
+            enabled_credential_count,
+        )
+    };
+    let lifecycle = if onboarding_draft {
+        ConnectionLifecycle::Draft
+    } else {
+        ConnectionLifecycle::from(domain_lifecycle)
+    };
     ConnectionSummary {
         id: connection_id.to_string(),
         name,
@@ -484,7 +514,7 @@ fn finish_summary(draft: SummaryDraft<'_>) -> ConnectionSummary {
 
 fn endpoint_dto(
     connection_id: &ConnectionId,
-    id: EndpointId,
+    id: impl AsRef<str>,
     operation: EndpointOperation,
     protocol: ocg_domain::catalog::UpstreamProtocolKind,
     url: Option<String>,
@@ -492,7 +522,7 @@ fn endpoint_dto(
     locked: bool,
 ) -> ConnectionEndpoint {
     ConnectionEndpoint {
-        id: id.to_string(),
+        id: id.as_ref().to_string(),
         connection_id: connection_id.to_string(),
         operation,
         wire_protocol: AccountUpstreamProtocol::from(protocol),

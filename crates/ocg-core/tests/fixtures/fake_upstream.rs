@@ -15,7 +15,7 @@ use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[derive(Clone)]
@@ -54,11 +54,100 @@ pub(crate) type FakeCalls = Arc<Mutex<Vec<FakeCall>>>;
 pub(crate) type DelayedChunks = Vec<(Duration, &'static str)>;
 pub(crate) type DelayedResponses = Arc<Mutex<VecDeque<DelayedChunks>>>;
 
+/// One inbound HTTP hit on a journaled loopback listener.
+///
+/// `seq` is a process-local monotonic index shared by every listener attached
+/// to the same [`SharedJournal`], so arrival order is not reconstructed from
+/// concatenated per-server counts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Arrival {
+    pub seq: u64,
+    pub listener: String,
+    pub elapsed_ms: u128,
+    pub key: String,
+    pub method: Method,
+    pub path: String,
+    pub authorization: Option<String>,
+    pub x_api_key: Option<String>,
+    pub anthropic_version: Option<String>,
+    pub body: String,
+}
+
+/// Chronological journal shared by independent loopback upstreams.
+#[derive(Clone)]
+pub(crate) struct SharedJournal {
+    inner: Arc<Mutex<Vec<Arrival>>>,
+    start: Instant,
+}
+
+impl SharedJournal {
+    pub(crate) fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(Vec::new())),
+            start: Instant::now(),
+        }
+    }
+
+    pub(crate) fn record(
+        &self,
+        listener: &str,
+        key: String,
+        method: Method,
+        path: String,
+        authorization: Option<String>,
+        x_api_key: Option<String>,
+        anthropic_version: Option<String>,
+        body: String,
+    ) {
+        let mut arrivals = self.inner.lock().expect("arrival journal lock");
+        let seq = arrivals.len() as u64;
+        arrivals.push(Arrival {
+            seq,
+            listener: listener.to_owned(),
+            elapsed_ms: self.start.elapsed().as_millis(),
+            key,
+            method,
+            path,
+            authorization,
+            x_api_key,
+            anthropic_version,
+            body,
+        });
+    }
+
+    pub(crate) fn snapshot(&self) -> Vec<Arrival> {
+        self.inner.lock().expect("arrival journal lock").clone()
+    }
+
+    pub(crate) fn listeners(&self) -> Vec<String> {
+        self.snapshot()
+            .into_iter()
+            .map(|arrival| arrival.listener)
+            .collect()
+    }
+
+    pub(crate) fn keys(&self) -> Vec<String> {
+        self.snapshot()
+            .into_iter()
+            .map(|arrival| arrival.key)
+            .collect()
+    }
+
+    pub(crate) fn paths(&self) -> Vec<String> {
+        self.snapshot()
+            .into_iter()
+            .map(|arrival| arrival.path)
+            .collect()
+    }
+}
+
 #[derive(Clone)]
 struct FakeState {
     replies: Replies,
     calls: FakeCalls,
     delay: Duration,
+    journal: Option<SharedJournal>,
+    listener: String,
 }
 
 #[derive(Clone)]
@@ -84,6 +173,27 @@ pub(crate) async fn start_fake_upstream_with_delay(
     replies: HashMap<String, VecDeque<FakeReply>>,
     delay: Duration,
 ) -> (String, FakeCalls, tokio::sync::oneshot::Sender<()>) {
+    start_fake_upstream_inner(replies, delay, None, String::new()).await
+}
+
+/// Start a loopback upstream that appends every hit to `journal` under `label`.
+///
+/// Independent listeners share one journal so tests can assert actual arrival
+/// order across distinct TCP endpoints.
+pub(crate) async fn start_fake_upstream_on_journal(
+    label: impl Into<String>,
+    replies: HashMap<String, VecDeque<FakeReply>>,
+    journal: SharedJournal,
+) -> (String, FakeCalls, tokio::sync::oneshot::Sender<()>) {
+    start_fake_upstream_inner(replies, Duration::ZERO, Some(journal), label.into()).await
+}
+
+async fn start_fake_upstream_inner(
+    replies: HashMap<String, VecDeque<FakeReply>>,
+    delay: Duration,
+    journal: Option<SharedJournal>,
+    listener: String,
+) -> (String, FakeCalls, tokio::sync::oneshot::Sender<()>) {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let app = Router::new()
         .fallback(any(fake_reply))
@@ -92,6 +202,8 @@ pub(crate) async fn start_fake_upstream_with_delay(
             replies: Arc::new(Mutex::new(replies)),
             calls: calls.clone(),
             delay,
+            journal,
+            listener,
         });
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
@@ -197,6 +309,20 @@ async fn fake_reply(
         .unwrap_or_default()
         .to_owned();
 
+    let path = uri.path().to_owned();
+    let anthropic_version = header(&headers, "anthropic-version");
+    if let Some(journal) = &state.journal {
+        journal.record(
+            &state.listener,
+            key.clone(),
+            method.clone(),
+            path.clone(),
+            authorization.clone(),
+            x_api_key.clone(),
+            anthropic_version.clone(),
+            body.clone(),
+        );
+    }
     state
         .calls
         .lock()
@@ -204,11 +330,11 @@ async fn fake_reply(
         .push(FakeCall {
             key: key.clone(),
             method,
-            path: uri.path().to_owned(),
+            path,
             authorization,
             x_api_key,
             x_goog_api_key,
-            anthropic_version: header(&headers, "anthropic-version"),
+            anthropic_version,
             body,
             accept_encoding: header(&headers, axum::http::header::ACCEPT_ENCODING),
             conversation_header: header(&headers, "x-ocg-conversation-id"),

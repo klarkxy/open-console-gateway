@@ -85,7 +85,7 @@ fn default_inference_binding() -> InferenceBindingGate {
     }
 }
 
-fn binding_allows_requested_model(
+pub(crate) fn binding_allows_requested_model(
     scope: &ModelScope,
     client_model: &str,
     routing_model: &str,

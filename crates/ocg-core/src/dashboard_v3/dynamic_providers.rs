@@ -354,6 +354,30 @@ pub(crate) fn validate_wire_definition(
     auth_kind: DynamicAuthKind,
     models: Vec<ProviderDefinitionModel>,
 ) -> Result<DynamicProviderDefinition, ocg_domain::provider::ProviderBindingError> {
+    validate_wire_definition_inner(id, name, endpoint_url, protocol, auth_kind, models, false)
+}
+
+/// Drafts may omit model targets. Configured writes still require at least one.
+pub(crate) fn validate_draft_wire_definition(
+    id: String,
+    name: String,
+    endpoint_url: String,
+    protocol: super::types::AccountUpstreamProtocol,
+    auth_kind: DynamicAuthKind,
+    models: Vec<ProviderDefinitionModel>,
+) -> Result<DynamicProviderDefinition, ocg_domain::provider::ProviderBindingError> {
+    validate_wire_definition_inner(id, name, endpoint_url, protocol, auth_kind, models, true)
+}
+
+fn validate_wire_definition_inner(
+    id: String,
+    name: String,
+    endpoint_url: String,
+    protocol: super::types::AccountUpstreamProtocol,
+    auth_kind: DynamicAuthKind,
+    models: Vec<ProviderDefinitionModel>,
+    allow_empty_mappings: bool,
+) -> Result<DynamicProviderDefinition, ocg_domain::provider::ProviderBindingError> {
     let endpoint_url = validate_custom_endpoint_url(&endpoint_url)?;
     let mappings = models
         .into_iter()
@@ -368,6 +392,26 @@ pub(crate) fn validate_wire_definition(
             }),
         })
         .collect::<Vec<_>>();
+    let mappings = if mappings.is_empty() {
+        if allow_empty_mappings {
+            Vec::new()
+        } else {
+            normalize_dynamic_mappings(&mappings)?
+        }
+    } else {
+        normalize_dynamic_mappings(&mappings)?
+    };
+    if mappings.is_empty() {
+        return Ok(DynamicProviderDefinition {
+            preset_id: None,
+            id,
+            name: normalize_dynamic_provider_name(&name)?,
+            endpoint_url,
+            upstream_protocol: protocol.into(),
+            auth_kind,
+            mappings,
+        });
+    }
     validate_definition(DynamicProviderDefinition {
         preset_id: None,
         id,
@@ -375,7 +419,7 @@ pub(crate) fn validate_wire_definition(
         endpoint_url,
         upstream_protocol: protocol.into(),
         auth_kind,
-        mappings: normalize_dynamic_mappings(&mappings)?,
+        mappings,
     })
 }
 

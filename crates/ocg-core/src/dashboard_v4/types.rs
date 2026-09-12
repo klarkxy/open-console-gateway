@@ -14,8 +14,9 @@ use crate::dashboard_v3::{
     MutationExpectation, ProviderDefinitionAuthKind, V3Error,
 };
 use ocg_domain::connection::{
-    AuthorizationState, ConnectionLifecycle, ConnectionOrigin, EligibilityReason, EligibilityState,
-    EndpointAuthScheme, EndpointOperation, LegacyConnectionKind,
+    AuthorizationState, ConnectionLifecycle as DomainConnectionLifecycle, ConnectionOrigin,
+    EligibilityReason, EligibilityState, EndpointAuthScheme, EndpointOperation,
+    LegacyConnectionKind,
 };
 use ocg_domain::credential::{
     AuthState, CredentialPurpose, IdentityConfidence, MaterialKind, ModelScope, OnboardingTaskKind,
@@ -38,6 +39,7 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "ConnectionSummary",
     "ConnectionList",
     "OnboardingCommitRequest",
+    "OnboardingCommitMode",
     "OnboardingConnection",
     "OnboardingAuthorization",
     "OnboardingTarget",
@@ -57,6 +59,7 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "CredentialRotateResult",
     "BindingPatchRequest",
     "BindingPatchResult",
+    "QuotaSharing",
     "IdentityCredentialCreateRequest",
     "IdentityCredentialCreateResult",
 ];
@@ -161,6 +164,27 @@ pub struct TemplateRef {
     pub version: u32,
 }
 
+/// V4 connection lifecycle, including persisted onboarding drafts.
+///
+/// Draft is control-plane only: routing snapshots never carry it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum ConnectionLifecycle {
+    Configured,
+    Disabled,
+    Draft,
+}
+
+impl From<DomainConnectionLifecycle> for ConnectionLifecycle {
+    fn from(value: DomainConnectionLifecycle) -> Self {
+        match value {
+            DomainConnectionLifecycle::Configured => Self::Configured,
+            DomainConnectionLifecycle::Disabled => Self::Disabled,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
@@ -202,6 +226,21 @@ pub struct OnboardingCommitRequest {
     #[serde(default)]
     pub authorization: Option<OnboardingAuthorization>,
     pub targets: Vec<OnboardingTarget>,
+    /// Omitted preserves legacy commit behavior and HMAC digest bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<OnboardingCommitMode>,
+    /// Explicit consent to union safe current default/same-origin grants.
+    /// Ignored unless `mode` is present; false is omitted from the digest.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub authorize_current_endpoint: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum OnboardingCommitMode {
+    Draft,
+    Complete,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -228,6 +267,9 @@ pub struct OnboardingConnectionNew {
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OnboardingConnectionExisting {
     pub connection_id: String,
+    /// Required when `mode` is present. Legacy mode-None existing rejects this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub configuration: Option<OnboardingConnectionNew>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -276,6 +318,9 @@ pub struct OnboardingCommitResult {
     pub credential_id: Option<String>,
     pub target_ids: Vec<String>,
     pub replayed: bool,
+    /// Legacy receipts omit this; replay emits null via serde default.
+    #[serde(default)]
+    pub account_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -284,6 +329,8 @@ pub(crate) struct StoredOnboardingCommitResult {
     pub connection_id: String,
     pub credential_id: Option<String>,
     pub target_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -407,6 +454,8 @@ pub struct CredentialSummary {
     pub subject: RuntimeSubjectKind,
     pub bindings: Vec<BindingDto>,
     pub quota_windows: Vec<QuotaWindowDto>,
+    #[serde(default)]
+    pub quota_pool_id: Option<String>,
     pub onboarding_task: Option<OnboardingTaskDto>,
     pub subscription: Option<SubscriptionDto>,
     pub last_error: Option<String>,
@@ -461,6 +510,10 @@ pub struct BindingPatchRequest {
     pub model_scope: Option<ModelScope>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_endpoint_ids: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_origins: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -471,6 +524,19 @@ pub struct BindingPatchResult {
     pub binding: BindingDto,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase")]
+pub enum QuotaSharing {
+    #[default]
+    Independent,
+    Shared {
+        #[serde(rename = "credentialId")]
+        #[schemars(rename = "credentialId")]
+        credential_id: String,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
@@ -479,6 +545,16 @@ pub struct IdentityCredentialCreateRequest {
     pub expectation: MutationExpectation,
     pub connection_id: String,
     pub secret_input: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "quota_sharing_is_independent")]
+    pub quota_sharing: QuotaSharing,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_label: Option<String>,
+}
+
+fn quota_sharing_is_independent(value: &QuotaSharing) -> bool {
+    matches!(value, QuotaSharing::Independent)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -531,16 +607,19 @@ pub fn contract_schema() -> Value {
     include_type::<IdentityLegacy>(&mut serialize);
     include_type::<CredentialRotateResult>(&mut serialize);
     include_type::<BindingPatchResult>(&mut serialize);
+    include_type::<QuotaSharing>(&mut serialize);
     include_type::<IdentityCredentialCreateResult>(&mut serialize);
     let mut defs = serialize.take_definitions(true);
 
     let mut deserialize = SchemaSettings::draft2020_12().into_generator();
     include_type::<OnboardingCommitRequest>(&mut deserialize);
+    include_type::<OnboardingCommitMode>(&mut deserialize);
     include_type::<OnboardingConnection>(&mut deserialize);
     include_type::<OnboardingAuthorization>(&mut deserialize);
     include_type::<OnboardingTarget>(&mut deserialize);
     include_type::<CredentialRotateRequest>(&mut deserialize);
     include_type::<BindingPatchRequest>(&mut deserialize);
+    include_type::<QuotaSharing>(&mut deserialize);
     include_type::<IdentityCredentialCreateRequest>(&mut deserialize);
     for (name, schema) in deserialize.take_definitions(true) {
         defs.entry(name).or_insert(schema);

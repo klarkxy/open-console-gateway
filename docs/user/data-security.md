@@ -30,9 +30,13 @@ Protect the data directory: there is no remote recovery if it is lost.
   file from the loopback dashboard; no separate administrator step-up is
   required. Account and Access Keys are encrypted with Argon2id plus
   AES-256-GCM. The migration password is not stored and cannot be recovered.
-  Treat the file and password as separate secrets. Browser profiles, login
-  passwords, logs, usage, source cooldown state, and machine-local host
-  settings are not included.
+  Treat the file and password as separate secrets. V6 preserves identity
+  grouping, credential and binding IDs, model restrictions, quota-pool
+  relationships, and cooldown deadlines. Import never shortens a later
+  destination cooldown. V4/V5 imports remain supported with their older
+  host-local cooldown behavior. Browser profiles, login passwords, logs,
+  usage, and machine-local host settings are not included. For a rollback,
+  restore a complete data-directory backup, including its encryption key.
 - **Plain HTTP warning.** A non-loopback `http://` root URL exposes the Key
   and request contents to the network. Use HTTPS or a trusted LAN only.
 - **Administrator password.** The single administrator password is stored as
@@ -43,9 +47,17 @@ Protect the data directory: there is no remote recovery if it is lost.
   are allowed. Metadata, link-local, and opaque IPv4-trick hosts are rejected.
   URL-embedded credentials are rejected; query strings and fragments are
   rejected; secret-bearing requests never follow redirects; dashboard and
-  client credentials are never forwarded. A model override to another Origin
-  does not inherit the stored Key. Choose destinations you intend to reach
-  from this node.
+  client credentials are never forwarded. Stored Custom and user-defined
+  Provider Keys send only to destinations listed on that Key's saved endpoint
+  and Origin grants. Official sealed Keys also require the saved protocol
+  endpoint ids; clearing them blocks send and stored-Key tests. Editing a
+  Provider or Custom URL does not add a grant.
+  An explicitly granted configured foreign Origin may send; an ungranted
+  override does not. Before decrypting or sending, the Gateway re-reads the
+  selected account, binding, Key version, model scope, and grants. Rotating
+  or disabling that Key, or narrowing its scope, fails that attempt instead
+  of sending the previous Key. Choose destinations you intend to reach from
+  this node.
 
 ---
 

@@ -16,8 +16,11 @@ use ocg_core::gateway::provider_adapter::{
 use ocg_core::models::{
     Account, AccountUpdate, AppConfig, ForwardLog, ProxyListDirection, ProxyMode, RoutingMode,
 };
-use ocg_core::provider::{COMMAND_CODE_PROVIDER_ID, OPENCODE_PROVIDER_ID, ZEN_FREE_ACCOUNT_ID};
+use ocg_core::provider::{
+    COMMAND_CODE_PROVIDER_ID, CUSTOM_PROVIDER_ID, OPENCODE_PROVIDER_ID, ZEN_FREE_ACCOUNT_ID,
+};
 use ocg_core::state::{CoreStateInner, GatewayHandle};
+use ocg_domain::credential::ModelScope;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::net::TcpListener as StdTcpListener;
@@ -30,8 +33,9 @@ use std::time::Duration as StdDuration;
 mod fake_upstream;
 
 pub(crate) use fake_upstream::{
-    DelayedChunks, FakeCall as MockCall, FakeCalls, FakeReply as MockReply,
-    start_delayed_fake_upstream, start_fake_upstream, start_raw_disconnect_upstream,
+    DelayedChunks, FakeCall as MockCall, FakeCalls, FakeReply as MockReply, SharedJournal,
+    start_delayed_fake_upstream, start_fake_upstream, start_fake_upstream_on_journal,
+    start_raw_disconnect_upstream,
 };
 
 pub(crate) const LIMITED_BODY: &str = r#"{"type":"error","error":{"type":"GoUsageLimitError","message":"Weekly usage limit reached. Resets in 3 days."}}"#;
@@ -678,6 +682,16 @@ pub(crate) fn force_enable_unroutable_account_for_loopback_test(data_dir: &Path,
         )
         .expect("loopback test enable poke should execute");
     assert_eq!(changed, 1, "loopback test account {account_id} must exist");
+    // This fixture inserts a disabled account, then enables the test route
+    // directly. Enable its independent binding too; ordinary account toggles
+    // must not override a binding the user explicitly disabled.
+    let binding_changed = conn
+        .execute(
+            "UPDATE credential_bindings SET enabled = 1 WHERE account_id = ?1",
+            [account_id],
+        )
+        .expect("loopback fixture binding should enable");
+    assert_eq!(binding_changed, 1, "loopback fixture binding must exist");
 }
 
 pub(crate) fn prepare_goat(
@@ -1164,5 +1178,296 @@ pub(crate) fn empty_forward_query() -> ForwardLogQueryOptions<'static> {
         end_time: None,
         sort_by: None,
         sort_order: None,
+    }
+}
+
+pub(crate) fn forbidden() -> MockReply {
+    reply(403, r#"{"error":{"message":"forbidden key"}}"#)
+}
+
+pub(crate) fn server_error() -> MockReply {
+    reply(500, r#"{"error":"temporary"}"#)
+}
+
+pub(crate) fn dashboard_cas(state: &CoreStateInner, patch: serde_json::Value) -> serde_json::Value {
+    let mut body = patch.as_object().cloned().unwrap_or_default();
+    body.insert(
+        "expectedRevision".into(),
+        serde_json::json!(state.settings_revision()),
+    );
+    body.insert(
+        "processGeneration".into(),
+        serde_json::json!(state.process_generation()),
+    );
+    serde_json::Value::Object(body)
+}
+
+pub(crate) async fn dashboard_json(
+    port: u16,
+    method: reqwest::Method,
+    api: &str,
+    path: &str,
+    body: Option<&serde_json::Value>,
+) -> (axum::http::StatusCode, serde_json::Value) {
+    let client = loopback_client();
+    let url = format!("http://127.0.0.1:{port}/dashboard/api/{api}{path}");
+    let request = client.request(method, url);
+    let request = match body {
+        Some(body) => request.json(body),
+        None => request,
+    };
+    let response = request.send().await.unwrap();
+    let status = response.status();
+    let parsed = response.json().await.unwrap_or(serde_json::Value::Null);
+    (status, parsed)
+}
+
+pub(crate) async fn v3_mutate(
+    port: u16,
+    state: &CoreStateInner,
+    path: &str,
+    patch: serde_json::Value,
+) -> (axum::http::StatusCode, serde_json::Value) {
+    dashboard_json(
+        port,
+        reqwest::Method::POST,
+        "v3",
+        path,
+        Some(&dashboard_cas(state, patch)),
+    )
+    .await
+}
+
+pub(crate) async fn v4_mutate(
+    port: u16,
+    state: &CoreStateInner,
+    path: &str,
+    patch: serde_json::Value,
+) -> (axum::http::StatusCode, serde_json::Value) {
+    dashboard_json(
+        port,
+        reqwest::Method::POST,
+        "v4",
+        path,
+        Some(&dashboard_cas(state, patch)),
+    )
+    .await
+}
+
+pub(crate) async fn v4_get(port: u16, path: &str) -> (axum::http::StatusCode, serde_json::Value) {
+    dashboard_json(port, reqwest::Method::GET, "v4", path, None).await
+}
+
+pub(crate) struct LabProvider {
+    pub provider_id: String,
+    pub account_id: Option<String>,
+}
+
+pub(crate) async fn create_dynamic_lab(
+    port: u16,
+    state: &CoreStateInner,
+    name: &str,
+    endpoint: &str,
+    key: Option<&str>,
+    public_model: &str,
+    upstream_model: &str,
+    protocol: &str,
+) -> LabProvider {
+    let auth_kind = if protocol == "messages" {
+        "x-api-key"
+    } else {
+        "bearer"
+    };
+    let mut patch = serde_json::json!({
+        "name": name,
+        "endpointUrl": endpoint,
+        "upstreamProtocol": protocol,
+        "authKind": auth_kind,
+        "models": [{
+            "publicModel": public_model,
+            "upstreamModel": upstream_model
+        }]
+    });
+    if let Some(key) = key {
+        patch["key"] = serde_json::json!(key);
+    }
+    let (status, created) = v3_mutate(port, state, "/providers", patch).await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{created}");
+    let provider_id = created["provider"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("dynamic provider id missing: {created}"))
+        .to_string();
+    let account_id = state
+        .db
+        .lock()
+        .list_accounts()
+        .unwrap()
+        .into_iter()
+        .find(|account| account.provider_id == provider_id)
+        .map(|account| account.id);
+    LabProvider {
+        provider_id,
+        account_id,
+    }
+}
+
+pub(crate) async fn create_custom_lab(
+    port: u16,
+    state: &CoreStateInner,
+    name: &str,
+    endpoint: &str,
+    key: &str,
+    model_id: &str,
+    protocol: &str,
+) -> String {
+    let (status, created) = v3_mutate(
+        port,
+        state,
+        "/accounts",
+        serde_json::json!({
+            "name": name,
+            "key": key,
+            "providerId": CUSTOM_PROVIDER_ID,
+            "customConfig": {
+                "endpointUrl": endpoint,
+                "upstreamProtocol": protocol
+            },
+            "modelCapabilities": [{
+                "modelId": model_id,
+                "protocol": protocol
+            }]
+        }),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{created}");
+    created["account"]["id"]
+        .as_str()
+        .or_else(|| created["id"].as_str())
+        .unwrap_or_else(|| panic!("custom account id missing: {created}"))
+        .to_string()
+}
+
+pub(crate) struct IdentityRefs {
+    pub identity_id: String,
+    pub credential_id: String,
+    pub binding_id: String,
+}
+
+pub(crate) fn identity_refs_for(state: &CoreStateInner, account_id: &str) -> IdentityRefs {
+    let record = state
+        .db
+        .lock()
+        .list_identity_model()
+        .unwrap()
+        .accounts
+        .into_iter()
+        .find(|record| record.account.id == account_id)
+        .unwrap_or_else(|| panic!("identity record missing for {account_id}"));
+    IdentityRefs {
+        identity_id: record.identity_id,
+        credential_id: record.credential_id,
+        binding_id: record.binding_id,
+    }
+}
+
+pub(crate) fn set_binding_gate(
+    state: &CoreStateInner,
+    account_id: &str,
+    enabled: Option<bool>,
+    model_scope: Option<ModelScope>,
+) {
+    let binding_id = identity_refs_for(state, account_id).binding_id;
+    state
+        .db
+        .lock()
+        .update_credential_binding(&binding_id, model_scope.as_ref(), enabled, None, None)
+        .unwrap();
+}
+
+pub(crate) fn reorder_first(state: &CoreStateInner, first: &[String]) {
+    let mut order = first.to_vec();
+    for account in state.db.lock().list_accounts().unwrap() {
+        if !order.iter().any(|id| id == &account.id) {
+            order.push(account.id);
+        }
+    }
+    state.db.lock().reorder_accounts(&order).unwrap();
+}
+
+pub(crate) fn sorted_logs(state: &CoreStateInner) -> Vec<ForwardLog> {
+    let mut logs = state.db.lock().list_forward_logs(50).unwrap();
+    logs.sort_by_key(|log| (log.request_id.clone(), log.attempt.unwrap_or(0), log.id));
+    logs
+}
+
+pub(crate) fn routing_evidence_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tmp/routing-acceptance")
+}
+
+pub(crate) fn write_routing_evidence(scenario: &str, payload: serde_json::Value) {
+    let dir = routing_evidence_dir();
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{scenario}.json"));
+    fs::write(&path, serde_json::to_vec_pretty(&payload).unwrap()).unwrap();
+}
+
+pub(crate) fn arrivals_json(journal: &SharedJournal) -> serde_json::Value {
+    serde_json::json!(
+        journal
+            .snapshot()
+            .into_iter()
+            .map(|arrival| {
+                serde_json::json!({
+                    "seq": arrival.seq,
+                    "listener": arrival.listener,
+                    "elapsedMs": arrival.elapsed_ms,
+                    "dummyKey": arrival.key,
+                    "method": arrival.method.to_string(),
+                    "path": arrival.path,
+                    "authorization": arrival.authorization,
+                    "xApiKey": arrival.x_api_key,
+                    "anthropicVersion": arrival.anthropic_version,
+                })
+            })
+            .collect::<Vec<_>>()
+    )
+}
+
+pub(crate) fn logs_json(logs: &[ForwardLog]) -> serde_json::Value {
+    serde_json::json!(
+        logs.iter()
+            .map(|log| {
+                serde_json::json!({
+                    "attempt": log.attempt,
+                    "accountId": log.account_id,
+                    "providerId": log.provider_id,
+                    "status": log.status,
+                    "httpStatus": log.http_status,
+                    "requestId": log.request_id,
+                    "model": log.model,
+                })
+            })
+            .collect::<Vec<_>>()
+    )
+}
+
+pub(crate) struct JournaledUpstream {
+    pub label: String,
+    pub url: String,
+    pub stop: tokio::sync::oneshot::Sender<()>,
+}
+
+pub(crate) async fn start_journaled_lab(
+    journal: &SharedJournal,
+    label: &str,
+    key: &str,
+    replies: &[MockReply],
+) -> JournaledUpstream {
+    let (url, _calls, stop) =
+        start_fake_upstream_on_journal(label, script(&[(key, replies)]), journal.clone()).await;
+    JournaledUpstream {
+        label: label.to_string(),
+        url,
+        stop,
     }
 }

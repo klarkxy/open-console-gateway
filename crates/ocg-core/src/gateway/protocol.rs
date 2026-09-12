@@ -19,7 +19,7 @@ pub use ocg_domain::protocol::{
 };
 
 pub(crate) use ocg_gateway::protocol::{
-    NamespaceToolMapping, decode_anthropic_thinking_block, decode_chat_reasoning,
+    LegacyToolCompat, NamespaceToolMapping, decode_anthropic_thinking_block, decode_chat_reasoning,
     encode_anthropic_thinking_block, encode_chat_reasoning, sanitize_minimax_anthropic_usage,
     sanitize_minimax_chat_usage,
 };
@@ -56,6 +56,10 @@ pub struct RequestPlan {
     pub(crate) service_tier: Option<String>,
     pub(crate) custom_tools: Vec<String>,
     pub(crate) namespace_tools: Vec<NamespaceToolMapping>,
+    /// Versioned legacy-compat drop recorded by conversion. Carried to the
+    /// forward attempt so runtime diagnostics can name the profile without
+    /// rewriting stored protocol configuration.
+    pub(crate) legacy_tool_compat: Option<LegacyToolCompat>,
     pub(crate) response_parallel_tool_calls: bool,
     pub(crate) response_tool_choice: Value,
     pub(crate) response_tools: Vec<Value>,
@@ -353,6 +357,7 @@ fn prepare_parsed_request(
         service_tier,
         custom_tools: converted.custom_tools,
         namespace_tools: converted.namespace_tools,
+        legacy_tool_compat: converted.legacy_tool_compat,
         response_parallel_tool_calls,
         response_tool_choice,
         response_tools,

@@ -4,13 +4,16 @@ use axum::Json;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
 use chrono::Utc;
+use hmac::{Hmac, Mac};
+use serde::Serialize;
+use sha2::Sha256;
 use std::collections::HashMap;
 
 use crate::dashboard_v3::dynamic_providers::first_account_key;
 use crate::dashboard_v3::{ControlRevision, V3ApiError, check_expectation, parse_mutation_json};
 use crate::db::identity::{
-    IdentityAccountRecord, IdentityModelSnapshot, PlatformIdentityRecord, StoredInferenceBinding,
-    cooldown_facts_for,
+    IdentityAccountRecord, IdentityModelSnapshot, PlatformIdentityRecord, QuotaSharingJoin,
+    StoredInferenceBinding, cooldown_facts_for,
 };
 use crate::dynamic::DynamicProviderRuntime;
 use crate::models::{Account, AccountSetupStep, AccountType, local_today};
@@ -26,8 +29,9 @@ use ocg_domain::connection::{
 };
 use ocg_domain::credential::{
     AssignedEndpoint, CredentialPurpose, LegacyAccountFacts, MaterialKind, OnboardingTaskKind,
-    OnboardingTaskState, RuntimeSubjectKind, SubscriptionSource, cooldown_windows,
-    identity_id_for_platform_account, legacy_account_objects,
+    OnboardingTaskState, QuotaPolicyMode, RelationConfidence, RouteSpec, RuntimeSubjectKind,
+    SubscriptionSource, assigned_endpoints_for_routes, cooldown_windows,
+    identity_id_for_platform_account, legacy_account_objects, normalize_origin,
     observer_credential_id_for_platform_account,
 };
 use ocg_domain::dynamic::DynamicAuthKind;
@@ -37,22 +41,28 @@ use ocg_domain::provider::ProviderOrigin;
 use super::types::{
     AuthorityRefDto, BindingDto, CredentialDto, CredentialSummary, DeclaredRelationDto,
     IdentityCredentialCreateRequest, IdentityCredentialCreateResult, IdentityLegacy,
-    IdentityLegacyKind, IdentityList, IdentitySummary, OnboardingTaskDto, QuotaWindowDto,
-    SubscriptionDto, UpstreamAccountDto,
+    IdentityLegacyKind, IdentityList, IdentitySummary, OnboardingTaskDto, QuotaSharing,
+    QuotaWindowDto, SubscriptionDto, UpstreamAccountDto,
 };
+
+const DIGEST_KEY_SETTING: &str = "dashboard_operation_digest_key";
+type HmacSha256 = Hmac<Sha256>;
 
 pub(super) async fn list_accounts(
     State(state): State<CoreState>,
 ) -> Result<Json<IdentityList>, V3ApiError> {
+    let _settings_update = state.settings_update.lock();
     let now = Utc::now();
-    let dynamic_providers = state.dynamic_providers();
-    let (snapshot, custom_runtimes) = {
+    let (snapshot, custom_runtimes, dynamic_providers) = {
         let db = state.db.lock();
         let snapshot = db.list_identity_model().map_err(V3ApiError::internal)?;
         let custom_runtimes = db
             .list_custom_account_runtimes()
             .map_err(V3ApiError::internal)?;
-        (snapshot, custom_runtimes)
+        let dynamic_providers = db
+            .list_control_plane_dynamic_providers()
+            .map_err(V3ApiError::internal)?;
+        (snapshot, custom_runtimes, dynamic_providers)
     };
 
     let identities =
@@ -78,6 +88,29 @@ fn create_credential_locked(
     input: IdentityCredentialCreateRequest,
 ) -> Result<IdentityCredentialCreateResult, V3ApiError> {
     let _settings_update = state.settings_update.lock();
+    if let Some(operation_id) = input.operation_id.as_deref() {
+        if uuid::Uuid::parse_str(operation_id).is_err() {
+            return Err(V3ApiError::invalid_request_at(
+                state,
+                "operationId must be a UUID",
+            ));
+        }
+        let digest = credential_create_digest(state, identity_id, &input)?;
+        if let Some(existing) = {
+            let db = state.db.lock();
+            db.find_dashboard_operation(operation_id)
+                .map_err(V3ApiError::internal)?
+        } {
+            if existing.payload_digest != digest {
+                return Err(V3ApiError::operation_payload_mismatch(
+                    state,
+                    "operationId was reused with a different payload",
+                ));
+            }
+            return replay_stored_credential(state, &existing.result_json);
+        }
+    }
+
     check_expectation(state, &input.expectation)?;
 
     let secret = input.secret_input.trim();
@@ -109,15 +142,22 @@ fn create_credential_locked(
         .ok_or_else(|| V3ApiError::not_found_at(state, "identity not found"))?;
 
     let target = resolve_connection_target(state, &snapshot, &input.connection_id)?;
+    let quota_sharing = resolve_quota_sharing(state, &snapshot, identity_id, &input.quota_sharing)?;
     let key_cipher = encrypt_connection_secret(state, &target, secret)?;
     let now = Utc::now();
     let account_id = uuid::Uuid::new_v4().to_string();
+    let label = input
+        .account_label
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(existing.account.name.as_str());
     let account = Account {
         id: account_id.clone(),
         provider_id: target.provider_id.clone(),
         credential_kind: target.credential_kind,
         quota_scope: target.quota_scope,
-        name: existing.account.name.clone(),
+        name: label.to_string(),
         username: None,
         password_cipher: None,
         key_cipher,
@@ -139,13 +179,24 @@ fn create_credential_locked(
         created_at: now,
         updated_at: now,
     };
+    let digest = if input.operation_id.is_some() {
+        Some(credential_create_digest(state, identity_id, &input)?)
+    } else {
+        None
+    };
     let created = {
         let db = state.db.lock();
+        let operation = match (input.operation_id.as_deref(), digest.as_deref()) {
+            (Some(operation_id), Some(digest)) => Some((operation_id, digest)),
+            _ => None,
+        };
         db.create_account_for_identity(
             identity_id,
             &account,
             &local_today(),
             target.verification_status,
+            quota_sharing,
+            operation,
         )
         .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?
     };
@@ -231,15 +282,16 @@ fn resolve_connection_target(
         });
     }
 
-    if let Some(runtime) = state
-        .dynamic_providers()
-        .iter()
-        .find(|runtime| {
-            connection_id_for_legacy(LegacyConnectionKind::DynamicProvider, &runtime.id).as_str()
-                == connection_id
-        })
-        .cloned()
-    {
+    let dynamic_providers = {
+        let db = state.db.lock();
+        db.list_control_plane_dynamic_providers()
+            .map_err(V3ApiError::internal)?
+    };
+    if let Some(runtime) = dynamic_providers.iter().find(|runtime| {
+        connection_id_for_legacy(LegacyConnectionKind::DynamicProvider, &runtime.id).as_str()
+            == connection_id
+    }) {
+        let runtime = runtime.clone();
         if runtime.auth_kind.is_singleton() || !runtime.auth_kind.requires_key() {
             return Err(V3ApiError::invalid_request_at(
                 state,
@@ -431,16 +483,44 @@ fn project_credential(
         RuntimeSubjectKind::AccountCredential
     };
     let last_error = redact_last_error(state, account);
-    let quota_windows = cooldown_windows(&cooldown_facts_for(account), now)
+    let pool_confidence =
+        record
+            .quota_relation_confidence
+            .as_deref()
+            .and_then(|value| match value {
+                "declared" => Some(RelationConfidence::Declared),
+                "unknown" => Some(RelationConfidence::Unknown),
+                _ => None,
+            });
+    let pool_policy = record
+        .quota_policy_mode
+        .as_deref()
+        .and_then(|value| match value {
+            "authoritative_limit" => Some(QuotaPolicyMode::AuthoritativeLimit),
+            "observe_only" => Some(QuotaPolicyMode::ObserveOnly),
+            _ => None,
+        });
+    let quota_windows = cooldown_windows(&cooldown_facts_for(account, &record.credential_id), now)
         .into_iter()
-        .map(|window| QuotaWindowDto {
-            subject: window.subject,
-            subject_ref: window.subject_ref,
-            period: window.period,
-            blocked_until: window.blocked_until.map(|until| until.to_rfc3339()),
-            metric: None,
-            relation_confidence: window.relation_confidence,
-            policy_mode: window.policy_mode,
+        .map(|window| {
+            let (relation_confidence, policy_mode) =
+                if window.subject == ocg_domain::credential::QuotaSubject::Egress {
+                    (window.relation_confidence, window.policy_mode)
+                } else {
+                    (
+                        pool_confidence.unwrap_or(window.relation_confidence),
+                        pool_policy.unwrap_or(window.policy_mode),
+                    )
+                };
+            QuotaWindowDto {
+                subject: window.subject,
+                subject_ref: window.subject_ref,
+                period: window.period,
+                blocked_until: window.blocked_until.map(|until| until.to_rfc3339()),
+                metric: None,
+                relation_confidence,
+                policy_mode,
+            }
         })
         .collect();
     let onboarding_task = record.onboarding.as_ref().map(|task| OnboardingTaskDto {
@@ -484,13 +564,14 @@ fn project_credential(
         bindings: vec![BindingDto {
             id: record.binding_id.clone(),
             connection_id: binding.connection_id.to_string(),
-            allowed_endpoint_ids: binding.allowed_endpoint_ids,
-            allowed_origins: binding.allowed_origins,
+            allowed_endpoint_ids: record.allowed_endpoint_ids.clone(),
+            allowed_origins: record.allowed_origins.clone(),
             model_scope: record.binding_model_scope.clone(),
             enabled: record.binding_enabled,
             routing_rank: binding.routing_rank,
         }],
         quota_windows,
+        quota_pool_id: record.quota_pool_id.clone(),
         onboarding_task,
         subscription,
         last_error,
@@ -536,6 +617,7 @@ fn project_platform_identity(parent: &PlatformIdentityRecord) -> IdentitySummary
             subject: RuntimeSubjectKind::AccountCredential,
             bindings: Vec::new(),
             quota_windows: Vec::new(),
+            quota_pool_id: None,
             onboarding_task: None,
             subscription: None,
             last_error: None,
@@ -573,8 +655,8 @@ pub(super) fn project_binding_dto(
     BindingDto {
         id: stored.binding_id.clone(),
         connection_id: connection_id.to_string(),
-        allowed_endpoint_ids: binding.allowed_endpoint_ids,
-        allowed_origins: binding.allowed_origins,
+        allowed_endpoint_ids: stored.allowed_endpoint_ids.clone(),
+        allowed_origins: stored.allowed_origins.clone(),
         model_scope: stored.model_scope.clone(),
         enabled: stored.enabled,
         routing_rank: binding.routing_rank,
@@ -622,13 +704,29 @@ pub(super) fn assigned_endpoints(
     if let Some(runtime) = dynamic_by_id.get(account.provider_id.as_str()) {
         let connection_id =
             connection_id_for_legacy(LegacyConnectionKind::DynamicProvider, &runtime.id);
-        let operation = EndpointOperation::from(runtime.upstream_protocol);
+        let mut routes = vec![RouteSpec {
+            operation: EndpointOperation::from(runtime.upstream_protocol),
+            url: Some(runtime.endpoint_url.clone()),
+        }];
+        let mut seen = std::collections::HashSet::from([(
+            runtime.upstream_protocol,
+            runtime.endpoint_url.clone(),
+        )]);
+        for mapping in &runtime.mappings {
+            let Some(override_route) = &mapping.upstream_override else {
+                continue;
+            };
+            if !seen.insert((override_route.protocol, override_route.endpoint_url.clone())) {
+                continue;
+            }
+            routes.push(RouteSpec {
+                operation: EndpointOperation::from(override_route.protocol),
+                url: Some(override_route.endpoint_url.clone()),
+            });
+        }
         return (
             connection_id.clone(),
-            vec![AssignedEndpoint {
-                id: endpoint_id_for(&connection_id, operation).to_string(),
-                url: Some(runtime.endpoint_url.clone()),
-            }],
+            assigned_endpoints_for_routes(&connection_id, &routes),
         );
     }
     let connection_id =
@@ -644,4 +742,171 @@ fn redact_last_error(state: &CoreState, account: &Account) -> Option<String> {
         state.decrypt_key(&account.key_cipher).ok()?
     };
     Some(redact_known_secret(error, &secret))
+}
+
+fn resolve_quota_sharing(
+    state: &CoreState,
+    snapshot: &IdentityModelSnapshot,
+    identity_id: &str,
+    sharing: &QuotaSharing,
+) -> Result<QuotaSharingJoin, V3ApiError> {
+    match sharing {
+        QuotaSharing::Independent => Ok(QuotaSharingJoin::Independent),
+        QuotaSharing::Shared { credential_id } => {
+            let source = snapshot.accounts.iter().find(|record| {
+                record.identity_id == identity_id && record.credential_id == *credential_id
+            });
+            let Some(source) = source else {
+                return Err(V3ApiError::invalid_request_at(
+                    state,
+                    "quota sharing requires an inference credential on the same identity",
+                ));
+            };
+            if source.account.credential_kind == CredentialKind::None {
+                return Err(V3ApiError::invalid_request_at(
+                    state,
+                    "anonymous and no-auth credentials cannot share quota",
+                ));
+            }
+            Ok(QuotaSharingJoin::Shared {
+                source_credential_id: credential_id.clone(),
+            })
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredCredentialCreateResult {
+    identity_id: String,
+    credential_id: String,
+    binding_id: String,
+    account_id: String,
+    connection_id: String,
+    version: u64,
+    auth_state_version: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CredentialCreateDigestPayload<'a> {
+    operation_id: &'a str,
+    identity_id: &'a str,
+    connection_id: &'a str,
+    secret_input: &'a str,
+    quota_sharing: &'a QuotaSharing,
+    account_label: &'a Option<String>,
+}
+
+fn credential_create_digest(
+    state: &CoreState,
+    identity_id: &str,
+    input: &IdentityCredentialCreateRequest,
+) -> Result<String, V3ApiError> {
+    let operation_id = input
+        .operation_id
+        .as_deref()
+        .ok_or_else(|| V3ApiError::internal("operationId is required to digest"))?;
+    let canonical = serde_json::to_vec(&CredentialCreateDigestPayload {
+        operation_id,
+        identity_id,
+        connection_id: &input.connection_id,
+        secret_input: &input.secret_input,
+        quota_sharing: &input.quota_sharing,
+        account_label: &input.account_label,
+    })
+    .map_err(V3ApiError::internal)?;
+    let key = digest_key(state)?;
+    let mut mac = HmacSha256::new_from_slice(&key).map_err(V3ApiError::internal)?;
+    mac.update(&canonical);
+    Ok(hex::encode(mac.finalize().into_bytes()))
+}
+
+fn digest_key(state: &CoreState) -> Result<[u8; 32], V3ApiError> {
+    let db = state.db.lock();
+    if let Some(existing) = db
+        .get_setting(DIGEST_KEY_SETTING)
+        .map_err(V3ApiError::internal)?
+    {
+        return parse_digest_key(&existing);
+    }
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes).map_err(V3ApiError::internal)?;
+    db.set_setting(DIGEST_KEY_SETTING, &hex::encode(bytes))
+        .map_err(V3ApiError::internal)?;
+    Ok(bytes)
+}
+
+fn parse_digest_key(value: &str) -> Result<[u8; 32], V3ApiError> {
+    let decoded = hex::decode(value).map_err(V3ApiError::internal)?;
+    decoded
+        .try_into()
+        .map_err(|_| V3ApiError::internal("dashboard operation digest key is not 32 bytes"))
+}
+
+fn replay_stored_credential(
+    state: &CoreState,
+    result_json: &str,
+) -> Result<IdentityCredentialCreateResult, V3ApiError> {
+    let stored: StoredCredentialCreateResult =
+        serde_json::from_str(result_json).map_err(V3ApiError::internal)?;
+    Ok(IdentityCredentialCreateResult {
+        revision: ControlRevision::from_state(state),
+        identity_id: stored.identity_id,
+        credential_id: stored.credential_id,
+        binding_id: stored.binding_id,
+        account_id: stored.account_id,
+        connection_id: stored.connection_id,
+        version: stored.version,
+        auth_state_version: stored.auth_state_version,
+        replayed: true,
+    })
+}
+
+pub(super) fn validate_binding_grants(
+    endpoints: &[AssignedEndpoint],
+    allowed_endpoint_ids: &[String],
+    allowed_origins: &[String],
+) -> Result<(Vec<String>, Vec<String>), String> {
+    let configured_ids: std::collections::HashSet<&str> = endpoints
+        .iter()
+        .map(|endpoint| endpoint.id.as_str())
+        .collect();
+    let mut ids = Vec::new();
+    let mut seen_ids = std::collections::HashSet::new();
+    for id in allowed_endpoint_ids {
+        let id = id.trim();
+        if id.is_empty() || !seen_ids.insert(id) || !configured_ids.contains(id) {
+            return Err("allowedEndpointIds contains a foreign, empty, or duplicate id".into());
+        }
+        ids.push(id.to_string());
+    }
+    let configured_origins: std::collections::HashSet<String> = endpoints
+        .iter()
+        .filter_map(|endpoint| endpoint.url.as_deref().and_then(normalize_origin))
+        .collect();
+    let mut origins = Vec::new();
+    let mut seen_origins = std::collections::HashSet::new();
+    for origin in allowed_origins {
+        let Some(normalized) = normalize_origin(origin) else {
+            return Err("allowedOrigins contains a malformed origin".into());
+        };
+        if !seen_origins.insert(normalized.clone()) || !configured_origins.contains(&normalized) {
+            return Err(
+                "allowedOrigins contains a nonconfigured, duplicate, or malformed origin".into(),
+            );
+        }
+        origins.push(normalized);
+    }
+    let granted_origins: std::collections::HashSet<String> = endpoints
+        .iter()
+        .filter(|endpoint| ids.iter().any(|id| id == &endpoint.id))
+        .filter_map(|endpoint| endpoint.url.as_deref().and_then(normalize_origin))
+        .collect();
+    if granted_origins != seen_origins {
+        return Err(
+            "allowedOrigins must match the origins of the granted configured endpoints".into(),
+        );
+    }
+    Ok((ids, origins))
 }

@@ -1306,7 +1306,7 @@ async fn keyed_provider_update_rejects_key_and_does_not_fan_out() {
 }
 
 #[tokio::test]
-async fn in_flight_request_keeps_frozen_snapshot_across_provider_patch() {
+async fn in_flight_fallback_stops_after_provider_destination_changes() {
     let mut replies = HashMap::new();
     replies.insert(
         "sk-first".to_string(),
@@ -1412,7 +1412,15 @@ async fn in_flight_request_keeps_frozen_snapshot_across_provider_patch() {
     let response = pending.await.unwrap();
     let status = response.status();
     let body = response.text().await.unwrap();
-    assert_eq!(status, StatusCode::OK, "{body}");
+    // Materialization remains frozen, but a later attempt must still pass
+    // the live destination gate. It cannot send to the old destination or
+    // silently retarget the captured request to the newly edited address.
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert!(
+        body.contains("destination is not the current granted route"),
+        "{body}"
+    );
+    assert_eq!(calls.lock().expect("fake call log").len(), 1);
     harness.stop();
 }
 
@@ -2336,5 +2344,42 @@ async fn dynamic_provider_offering_round_trips_for_preset_and_custom() {
     assert_eq!(api_loaded["offering"], "api");
     assert_eq!(api_loaded["origin"], "custom");
     assert!(api_loaded["presetId"].is_null(), "{api_loaded}");
+    harness.stop();
+}
+
+#[tokio::test]
+async fn v3_create_is_configured_not_a_draft() {
+    let harness = start_loopback("dyn-not-draft").await;
+    let (status, created) = send_json(
+        &harness,
+        Method::POST,
+        "/providers",
+        &cas(
+            &harness,
+            json!({
+                "name": "Live Lab",
+                "endpointUrl": "https://live-lab.example/v1/chat/completions",
+                "upstreamProtocol": "chat_completions",
+                "authKind": "bearer",
+                "models": [{
+                    "publicModel": "lab-opus",
+                    "upstreamModel": "vendor/opus"
+                }]
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let provider_id = created["provider"]["id"].as_str().unwrap().to_string();
+    assert_eq!(
+        harness
+            .state
+            .db
+            .lock()
+            .provider_is_onboarding_draft(&provider_id)
+            .unwrap(),
+        Some(false)
+    );
+    assert_eq!(harness.state.dynamic_providers().len(), 1);
     harness.stop();
 }
