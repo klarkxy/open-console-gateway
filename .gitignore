@@ -74,3 +74,7 @@ diff.txt
 
 # Agent session artifacts (audit reports, screenshots, scratch logs)
 .artifacts/
+
+# Local agent mockups and generated routing acceptance evidence
+.grok/
+/tmp/routing-acceptance/
