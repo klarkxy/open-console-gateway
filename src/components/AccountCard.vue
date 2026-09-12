@@ -78,6 +78,27 @@
               {{ statusLabel }}
             </n-tag>
             <n-tag
+              v-if="bindingDisabled"
+              size="small"
+              :bordered="false"
+            >
+              {{ t("绑定已禁用") }}
+            </n-tag>
+            <n-tag
+              v-if="modelRestrictionLabel"
+              size="small"
+              :bordered="false"
+            >
+              {{ modelRestrictionLabel }}
+            </n-tag>
+            <n-tag
+              v-if="quotaShareLabel"
+              size="small"
+              :bordered="false"
+            >
+              {{ quotaShareLabel }}
+            </n-tag>
+            <n-tag
               v-if="expiryDisplay === 'unknown'"
               size="small"
               :bordered="false"
@@ -405,6 +426,9 @@ import {
   inferenceLastError,
   presentedAccountStatusLabel,
   presentedAccountStatusTagType,
+  selectedBindingDisabled,
+  selectedModelRestrictionLabel,
+  selectedQuotaShareLabel,
 } from "../domain/account-identity.ts";
 import type { AccountMenuOption } from "../domain/account-display.ts";
 import {
@@ -439,6 +463,7 @@ const props = defineProps<{
   purchaseDateSaving: boolean;
   quotaLimitsFailed: boolean;
   menuOptions: AccountMenuOption[];
+  accountNames?: Readonly<Record<string, string>>;
 }>();
 
 const emit = defineEmits<{
@@ -476,11 +501,24 @@ const statusTagType = computed(() => (
 ));
 const statusTooltip = computed(() => {
   if (props.account.auth_error) return props.account.auth_error;
-  const overlayError = inferenceLastError(overlayIdentity.value);
+  const overlayError = inferenceLastError(overlayIdentity.value, props.account.id);
   if (overlayError) return overlayError;
   if (isCooling(props.account, props.now)) return cooldownDetails(props.account, props.now, props.limits);
   return "";
 });
+const bindingDisabled = computed(() => (
+  selectedBindingDisabled(overlayIdentity.value, props.account.id)
+));
+const modelRestrictionLabel = computed(() => (
+  selectedModelRestrictionLabel(overlayIdentity.value, props.account.id)
+));
+const quotaShareLabel = computed(() => (
+  selectedQuotaShareLabel(
+    overlayIdentity.value,
+    props.account.id,
+    (id) => props.accountNames?.[id] ?? null,
+  )
+));
 const expiryDisplay = computed(() => (
   accountExpiryDisplay(props.account, overlayIdentity.value, props.catalog)
 ));

@@ -26,7 +26,7 @@ Each upstream attempt freezes its own price evidence. A fallback Key uses its ow
 
 A linked Key's endpoint belongs to its parent. Unlinking keeps the Key, its materialized endpoint, and model configuration. Delete or unlink all children before deleting a parent; parent deletion never deletes Keys.
 
-New node exports use payload V5. They include parent definitions and associations alongside existing portable inference configuration, but exclude management credentials and observation snapshots. V4 bundles remain importable. Imported groups are unverified until fresh evidence is obtained. Import rejects a matching parent ID with a different platform or site URL as one atomic failure.
+New node exports use payload V6. They include parent definitions and associations alongside existing portable inference configuration, persisted onboarding drafts, and the identity snapshot, but exclude management credentials, platform observer secrets, and observation snapshots. Draft connections stay off routing after import until they are completed. V4 and V5 bundles remain importable. Imported groups are unverified until fresh evidence is obtained. Import rejects a matching parent ID with a different platform or site URL as one atomic failure.
 
 Back up the complete data directory before upgrading. Rollback restores that full backup; do not open a migrated database with an older binary. See [storage and migrations](../maintainer/storage-migration.md).
 

@@ -8,6 +8,10 @@
 
 Accounts still edit through the same forms. Card status and relations come from the identity projection: a declared relation is not a verified wallet, and dynamic or Custom dates stay unknown unless V3 already stored a real purchase date.
 
+A ready Key card can **Rotate Key**, **Add Key**, and **Edit binding** from the overflow menu. Rotate replaces only the Key this console will send on later requests for that card's credential (same credential id; version numbers increase). It is a local replacement: the provider-side credential is not revoked and stays under your control. **Add Key** creates another inference Key on the same identity, defaulting to that card's connection. Quota is independent unless you explicitly share with a selected inference Key on that identity; belonging to the same identity is not enough. After save, cards that actually share a stored quota pool show that relationship (naming the sibling Key when possible). A third Key on the same identity stays independent when it has its own pool or none. Custom API, Zen Free, CPA, no-auth, and observer credentials do not expose Add Key (Custom API still uses its dedicated account editor). If create does not return a definite result, the form keeps the submitted contents and operation: retry the same body, or cancel; do not change the form and submit again (that can create a duplicate Key).
+
+Edit binding changes that credential's enabled state, model scope (all models, or only the exact names you list), and — when you change it — destination consent: which configured endpoint this Key may be sent to (protocol and URL). Saved destination grants are facts; if a provider URL later changes, the saved Origin is shown and that endpoint stays unchecked until you explicitly allow the new destination. Changing only scope or enabled leaves destinations unchanged. Clearing both destination lists revokes access. Sealed official endpoints with no URL stay locked destinations and do not invent Origin strings. A disabled binding is shown on that card and does not flip the account enable switch. Zen Free, CPA, no-auth, and observer credentials do not expose rotate or binding. An identity can hold more than one Key; each card uses the credential whose legacy account id matches that card.
+
 Accounts is the tenant list. A Provider and a Plan are the same product
 identity (`provider_id` only), and every card belongs to one Provider with one
 credential when that Provider requires it. Quota authority is Provider-specific:
@@ -57,26 +61,34 @@ transfer it separately from the file; Open Console Gateway cannot recover it. Th
 operation remains available only from the node's loopback dashboard; forwarded
 scheme headers do not grant access to a remote dashboard.
 
-The current V4 payload moves usable ordinary accounts and their stable IDs,
+The current V6 payload moves usable ordinary accounts and their stable IDs,
 ready account Keys, Custom Endpoint/public-model → upstream-ID mappings and verification state,
 user-defined Providers (`providerId` only),
 the primary and active sub Access Keys, portable routing/proxy settings, Zen
-Free enablement/catalog, and Provider catalogs, evidence, and protocol
-overrides. Matching stable IDs are merged with package-owned portable fields;
-same-Plan or same-name rows with different IDs coexist. Existing destination
+Free enablement/catalog, Provider catalogs, evidence, and protocol
+overrides, and an explicit identity / credential / binding / quota-pool snapshot.
+Shared identities, a second credential on the same identity, binding model
+restrictions and enabled flags, and quota-pool membership and declared/unknown
+evidence are restored as stored. Matching stable IDs are merged with package-owned portable fields;
+same-Plan or same-name rows with different IDs coexist and independent same-URL
+accounts are not merged. Existing destination
 accounts keep their current order and position; source-only accounts append in
 package order. Destination-only Access Keys and Provider scopes are retained.
 
 Browser profiles/cookies, third-party login passwords, referral codes, logs,
-usage history, and source cooldown state do not move. Existing destination
-usage/cooldown history and browser data for a matching account ID stay in
+and usage history do not move. V6 carries source cooldown deadlines without
+shortening a later destination deadline; V4/V5 retain their older host-local
+cooldown behavior. Existing destination usage history and browser data stay in
 place; stale authentication and last-error flags are cleared when package
 account fields replace the stored credential.
 Machine-local listener/root URL, auto-start, and Dock settings also stay with
 the destination. Ready managed accounts keep their Key, but their browser login
 does not move; unfinished managed drafts are skipped. Import accepts payload
-V4 only; payload V1–V3 backups are rejected with an explicit
-unsupported-version error. The outer encrypted envelope remains version 1 and
+V4, V5, and V6. V4/V5 packages rebuild one identity, credential, All-scope
+binding, and identity quota pool per account. Payload V1–V3 and future V7
+backups are rejected with an explicit unsupported-version error. A V4/V5 file
+that already contains V6 identity fields is rejected rather than silently
+dropping them. The outer encrypted envelope remains version 1 and
 is distinct from the portable payload version.
 
 Every persistent mutation path rejects `enabled=true` for a catalogued

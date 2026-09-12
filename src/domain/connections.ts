@@ -10,6 +10,7 @@ import type { ProviderFamily } from "./provider-families.ts";
  */
 
 export type ConnectionStatusKind =
+  | "draft"
   | "missing_credential"
   | "disabled"
   | "invalid"
@@ -18,6 +19,7 @@ export type ConnectionStatusKind =
   | "ok";
 
 export const CONNECTION_STATUS_LABELS = {
+  draft: "草稿",
   missing_credential: "待补充凭据",
   disabled: "已停用",
   invalid: "凭据无效",
@@ -58,9 +60,18 @@ export function filterConnections(
  * Local eligibility projection only. `unknown` authorization is not a badge
  * and is never treated as verified success.
  */
+export function isOnboardingDraftConnection(
+  connection: Pick<Connection, "lifecycle">,
+): boolean {
+  return connection.lifecycle === "draft";
+}
+
 export function connectionStatus(
   connection: Pick<Connection, "authorization" | "lifecycle" | "eligibility">,
 ): ConnectionStatus {
+  if (isOnboardingDraftConnection(connection)) {
+    return { kind: "draft", label: CONNECTION_STATUS_LABELS.draft };
+  }
   const reason = connection.eligibility.reason;
   if (
     connection.lifecycle === "disabled"

@@ -15,6 +15,7 @@ import type {
   ProviderUsage as V3ProviderUsage,
   ProtocolOverrideState as V3ProtocolOverrideState,
   ProtocolProbeResponse as V3ProtocolProbeResponse,
+  MutationExpectation,
 } from "./generated/dashboard-v3.ts";
 import { presentAccount, presentPricing, type Account, type AccountProtocol, type PricingSnapshot } from "./dashboard-presenters.ts";
 
@@ -748,12 +749,15 @@ export const providerApi = {
   updateProviderDefinition: async (
     providerId: string,
     input: WithoutExpectation<import("./generated/dashboard-v3.ts").ProviderDefinitionUpdate>,
+    expectation?: MutationExpectation,
   ) => {
     const control = useControlPlaneStore();
-    if (!control.hasTokens()) await control.refresh();
+    if (!expectation && !control.hasTokens()) await control.refresh();
     try {
-      const value: V3ProviderDefinitionMutation = await control.runMutation((expectation) =>
-        dashboardV3.updateProviderDefinition(providerId, input, expectation));
+      const value: V3ProviderDefinitionMutation = await control.runMutation(
+        (tokens) => dashboardV3.updateProviderDefinition(providerId, input, tokens),
+        expectation,
+      );
       assertNoSecret(value);
       assertNoSecret(value.provider);
       return presentProviderDefinition(value.provider);

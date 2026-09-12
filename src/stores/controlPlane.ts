@@ -69,15 +69,24 @@ export const useControlPlaneStore = defineStore("controlPlane", () => {
     return { expectedRevision: revision.value, processGeneration: processGeneration.value };
   }
 
-  /** Run once. On 409 refresh tokens, but never replay the mutation. */
+  /**
+   * Run once. `captured` pins the tokens the editor loaded with; omit it to
+   * use the store's current pair. On 409 refresh tokens, but never replay.
+   * A failed `GET /contract` must not replace the original conflict.
+   */
   async function runMutation<T>(
     mutate: (expectation: MutationExpectation) => Promise<T>,
+    captured?: MutationExpectation,
   ): Promise<T> {
     try {
-      return await mutate(expectation());
+      return await mutate(captured ?? expectation());
     } catch (error) {
       if (!isRevisionConflict(error)) throw error;
-      await refresh();
+      try {
+        await refresh();
+      } catch {
+        // Keep the original 409 when the contract GET fails.
+      }
       throw error;
     }
   }

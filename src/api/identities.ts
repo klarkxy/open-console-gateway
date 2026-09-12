@@ -6,16 +6,25 @@
  * `legacy.kind+id` (V3 account id or platform_account id).
  */
 
+import { useControlPlaneStore } from "../stores/controlPlane.ts";
 import { dashboardV4 } from "./dashboard-v4.ts";
+import type { WithoutExpectation } from "./dashboard-v3.ts";
+import type { MutationExpectation } from "./generated/dashboard-v3.ts";
 import type {
   AuthState,
   AuthorityRefDto,
   BindingDto,
+  BindingPatchRequest,
+  BindingPatchResult,
   CredentialDto,
   CredentialPurpose,
+  CredentialRotateRequest,
+  CredentialRotateResult,
   CredentialSummary,
   DeclaredRelationDto,
   IdentityConfidence,
+  IdentityCredentialCreateRequest,
+  IdentityCredentialCreateResult,
   IdentityLegacy as V4IdentityLegacy,
   IdentityLegacyKind,
   IdentityList,
@@ -26,6 +35,7 @@ import type {
   QuotaMetricDto,
   QuotaPeriod,
   QuotaPolicyMode,
+  QuotaSharing,
   QuotaSubject,
   QuotaWindowDto,
   RelationConfidence,
@@ -44,11 +54,15 @@ export type {
   ModelScope,
   QuotaPeriod,
   QuotaPolicyMode,
+  QuotaSharing,
   QuotaSubject,
   RelationConfidence,
   RuntimeSubjectKind,
   SubscriptionSource,
 };
+
+export type IdentityCredentialCreateInput = WithoutExpectation<IdentityCredentialCreateRequest>;
+export type BindingPatchInput = WithoutExpectation<BindingPatchRequest>;
 
 export interface IdentityLegacy {
   kind: IdentityLegacyKind;
@@ -125,6 +139,7 @@ export interface IdentityCredential {
   last_error: string | null;
   legacy: IdentityLegacy;
   onboarding_task: IdentityOnboardingTask | null;
+  quota_pool_id: string | null;
   quota_windows: IdentityQuotaWindow[];
   subject: RuntimeSubjectKind;
   subscription: IdentitySubscription | null;
@@ -239,6 +254,7 @@ function presentCredential(value: CredentialSummary): IdentityCredential {
     last_error: value.lastError,
     legacy: presentLegacy(value.legacy),
     onboarding_task: presentOnboarding(value.onboardingTask),
+    quota_pool_id: value.quotaPoolId ?? null,
     quota_windows: value.quotaWindows.map(presentQuotaWindow),
     subject: value.subject,
     subscription: presentSubscription(value.subscription),
@@ -265,9 +281,139 @@ export function presentIdentityList(value: IdentityList): Identity[] {
   return value.identities.map(presentIdentity);
 }
 
+export interface IdentityListSnapshot {
+  identities: Identity[];
+  expectation: MutationExpectation;
+}
+
+export function presentIdentityListSnapshot(value: IdentityList): IdentityListSnapshot {
+  return {
+    identities: presentIdentityList(value),
+    expectation: {
+      expectedRevision: value.revision.revision,
+      processGeneration: value.revision.processGeneration,
+    },
+  };
+}
+
+export interface CreatedIdentityCredential {
+  account_id: string;
+  auth_state_version: number;
+  binding_id: string;
+  connection_id: string;
+  credential_id: string;
+  identity_id: string;
+  replayed: boolean;
+  version: number;
+}
+
+export interface RotatedCredential {
+  auth_state_version: number;
+  credential_id: string;
+  replayed: boolean;
+  version: number;
+}
+
+export interface PatchedBinding {
+  binding: IdentityBinding;
+}
+
+function presentRotatedCredential(value: CredentialRotateResult): RotatedCredential {
+  return {
+    auth_state_version: value.authStateVersion,
+    credential_id: value.credentialId,
+    replayed: value.replayed,
+    version: value.version,
+  };
+}
+
+function presentPatchedBinding(value: BindingPatchResult): PatchedBinding {
+  return { binding: presentBinding(value.binding) };
+}
+
+function presentCreatedCredential(value: IdentityCredentialCreateResult): CreatedIdentityCredential {
+  return {
+    account_id: value.accountId,
+    auth_state_version: value.authStateVersion,
+    binding_id: value.bindingId,
+    connection_id: value.connectionId,
+    credential_id: value.credentialId,
+    identity_id: value.identityId,
+    replayed: value.replayed,
+    version: value.version,
+  };
+}
+
+async function fetchIdentitySnapshot(): Promise<IdentityListSnapshot> {
+  const value = await dashboardV4.getAccounts();
+  return presentIdentityListSnapshot(value);
+}
+
+async function withCas<T>(
+  run: (expectation: MutationExpectation) => Promise<T>,
+  captured?: MutationExpectation,
+): Promise<T> {
+  const control = useControlPlaneStore();
+  if (!captured && !control.hasTokens()) await control.refresh();
+  return control.runMutation(run, captured);
+}
+
 export const identitiesApi = {
   list: async (): Promise<Identity[]> => {
-    const value = await dashboardV4.getAccounts();
-    return presentIdentityList(value);
+    const snapshot = await fetchIdentitySnapshot();
+    return snapshot.identities;
+  },
+  /**
+   * Presented identities plus the GET's own CAS pair. Callers that open an
+   * editor must capture this view pair; a later global control-plane GET
+   * must not silently rebase the draft.
+   */
+  listSnapshot: fetchIdentitySnapshot,
+  /**
+   * Replace the Key on one credential. Pass `expectation` from the open form
+   * so a later GET cannot silently rebase the draft. Omit it to use the
+   * store's current pair. `runMutation` never auto-replays a 409.
+   */
+  rotateCredential: async (
+    id: string,
+    input: WithoutExpectation<CredentialRotateRequest>,
+    expectation?: MutationExpectation,
+  ): Promise<RotatedCredential> => {
+    const value = await withCas(
+      (tokens) => dashboardV4.rotateCredential(id, input, tokens),
+      expectation,
+    );
+    return presentRotatedCredential(value);
+  },
+  /**
+   * Edit one inference binding's enabled flag and/or model scope. Same CAS
+   * pairing as rotate; a 409 refreshes tokens and surfaces the original error.
+   */
+  patchBinding: async (
+    id: string,
+    input: BindingPatchInput,
+    expectation?: MutationExpectation,
+  ): Promise<PatchedBinding> => {
+    const value = await withCas(
+      (tokens) => dashboardV4.patchBinding(id, input, tokens),
+      expectation,
+    );
+    return presentPatchedBinding(value);
+  },
+  /**
+   * Add an inference Key on an existing identity. Pass `expectation` from
+   * the open view so a newer global revision cannot rebase the draft.
+   * `runMutation` never auto-replays a 409.
+   */
+  createIdentityCredential: async (
+    id: string,
+    input: IdentityCredentialCreateInput,
+    expectation?: MutationExpectation,
+  ): Promise<CreatedIdentityCredential> => {
+    const value = await withCas(
+      (tokens) => dashboardV4.createIdentityCredential(id, input, tokens),
+      expectation,
+    );
+    return presentCreatedCredential(value);
   },
 };

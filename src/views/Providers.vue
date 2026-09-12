@@ -140,7 +140,7 @@
                 <n-tag
                   v-if="selectedStatus.label"
                   size="small"
-                  :type="selectedStatus.kind === 'missing_credential' ? 'warning' : 'default'"
+                  :type="selectedStatus.kind === 'missing_credential' || selectedStatus.kind === 'draft' ? 'warning' : 'default'"
                   :bordered="false"
                 >{{ statusLabelText(selectedStatus.label) }}</n-tag>
               </div>
@@ -195,14 +195,22 @@
                 <n-tag
                   v-if="selectedStatus.label"
                   size="small"
-                  :type="selectedStatus.kind === 'missing_credential' ? 'warning' : 'default'"
+                  :type="selectedStatus.kind === 'missing_credential' || selectedStatus.kind === 'draft' ? 'warning' : 'default'"
                   :bordered="false"
                 >{{ statusLabelText(selectedStatus.label) }}</n-tag>
               </div>
             </div>
             <n-space>
               <n-button
-                v-if="selectedEntry.editable"
+                v-if="isDraftConnection"
+                type="primary"
+                :disabled="actionLocked || definitionLoading || !selectedDefinition"
+                @click="openContinueSetup"
+              >
+                {{ t("继续设置") }}
+              </n-button>
+              <n-button
+                v-else-if="selectedEntry.editable"
                 secondary
                 :disabled="actionLocked || definitionLoading || !selectedDefinition"
                 @click="openEdit"
@@ -224,7 +232,26 @@
           </div>
 
           <n-alert
-            v-if="selectedStatus.kind === 'missing_credential'"
+            v-if="isDraftConnection"
+            type="warning"
+            class="providers-definition-error"
+            :title="t('草稿')"
+          >
+            <p class="providers-note">{{ t("此连接仍是草稿，不参与路由。继续设置可补全模型与 Key；不会自动测试。") }}</p>
+            <n-space>
+              <n-button
+                size="small"
+                type="primary"
+                :disabled="actionLocked || definitionLoading || !selectedDefinition"
+                @click="openContinueSetup"
+              >
+                {{ t("继续设置") }}
+              </n-button>
+            </n-space>
+          </n-alert>
+
+          <n-alert
+            v-else-if="selectedStatus.kind === 'missing_credential'"
             type="warning"
             class="providers-definition-error"
             :title="t('待补充凭据')"
@@ -384,7 +411,7 @@
                   v-else-if="selectedDefinition"
                   :models="selectedDefinition.models"
                   :editable="selectedEntry.editable"
-                  @edit="openEdit"
+                  @edit="openDefinitionEditor"
                 />
               </template>
             </n-tab-pane>
@@ -399,12 +426,40 @@
                 :definition="selectedDefinition"
                 :definition-loading="selectedEntry.origin !== 'builtin' && definitionLoading"
                 :action-locked="actionLocked"
-                @edit="openEdit"
+                @edit="openDefinitionEditor"
                 @delete="deleteSelected"
                 @open-accounts="openAccounts"
               />
             </n-tab-pane>
           </n-tabs>
+        </section>
+
+        <section
+          v-else-if="selectedConnection && isDraftConnection"
+          class="providers-section"
+          aria-labelledby="provider-detail-title"
+        >
+          <div class="providers-catalog-head">
+            <div class="providers-catalog-heading providers-detail-heading">
+              <ProviderBrandMark :family="selectedConnectionFamily" :size="22" />
+              <h2 id="provider-detail-title">{{ selectedConnection.name }}</h2>
+              <n-tag size="small" type="warning" :bordered="false">{{ t("草稿") }}</n-tag>
+            </div>
+            <n-space>
+              <n-button type="primary" :disabled="actionLocked || definitionLoading" @click="openContinueSetup">
+                {{ t("继续设置") }}
+              </n-button>
+              <n-popconfirm v-if="selectedDefinition?.deletable" :positive-text="t('删除')" :negative-text="t('取消')" @positive-click="deleteSelected">
+                <template #trigger>
+                  <n-button type="error" secondary :disabled="actionLocked">{{ t("删除供应商") }}</n-button>
+                </template>
+                {{ t("请先删除引用该供应商的账号，再删除供应商。不会级联删除账号。") }}
+              </n-popconfirm>
+            </n-space>
+          </div>
+          <n-alert type="warning" class="providers-definition-error" :title="t('草稿')">
+            <p class="providers-note">{{ t("此连接仍是草稿，不参与路由。继续设置可补全模型与 Key；不会自动测试。") }}</p>
+          </n-alert>
         </section>
 
         <section v-else class="providers-section" :aria-label="t('暂无已接入的供应商')">
@@ -428,6 +483,8 @@
     <DynamicProviderModal
       :show="showEditModal"
       :provider="editingDefinition"
+      :resume-connection-id="resumeConnectionId"
+      :has-saved-key="resumeHasSavedKey"
       @update:show="onEditModalShow"
       @saved="onDynamicSaved"
       @committed="onDynamicCommitted"
@@ -511,8 +568,10 @@ import {
   connectionStatus,
   filterConnections,
   groupConnectionsByOffering,
+  isOnboardingDraftConnection,
   selectedConnectionIdFromQuery,
 } from "../domain/connections.ts";
+
 import {
   catalogEntryFamily,
   providerAddStageFromQuery,
@@ -543,6 +602,8 @@ const catalog = ref<ProviderCatalogEntry[] | null>(null);
 const connections = ref<Connection[]>([]);
 const showEditModal = ref(false);
 const editingDefinition = ref<ProviderDefinitionView | null>(null);
+const resumeConnectionId = ref<string | null>(null);
+const resumeHasSavedKey = ref(false);
 const showAddKeyModal = ref(false);
 const addKeyBusy = ref(false);
 /** In-flight save/test/discovery inside the embedded create form. */
@@ -619,17 +680,22 @@ const addKeyPlan = computed(() => {
     ? dynamicPlanDefinition(entry)
     : findPlanDefinition(entry.provider_id) ?? null;
 });
+const isDraftConnection = computed(() => (
+  selectedConnection.value ? isOnboardingDraftConnection(selectedConnection.value) : false
+));
 const canAddKey = computed(() => {
   const entry = selectedEntry.value;
   return Boolean(
     entry
+    && !isDraftConnection.value
     && entry.credential_kind !== "none"
     && entry.creation_availability === "available"
     && addKeyPlan.value
   );
 });
 const selectedDefinition = computed(() => {
-  const providerId = selectedEntry.value?.provider_id;
+  const providerId = selectedEntry.value?.provider_id
+    ?? (selectedConnection.value?.legacy.kind === "dynamic_provider" ? selectedConnection.value.legacy.id : null);
   return providerId ? definitions.value.get(providerId) ?? null : null;
 });
 const activeScope = computed(() => {
@@ -873,23 +939,29 @@ function resetScopeActions() {
   probeSummary.value = null;
 }
 
-async function ensureDefinition(providerId: string) {
-  if (definitions.value.has(providerId)) return;
+async function loadDefinition(providerId: string): Promise<ProviderDefinitionView | null> {
   const generation = ++definitionGeneration;
   definitionLoading.value = true;
   definitionError.value = "";
   try {
     const definition = await providerApi.getProviderDefinition(providerId);
-    if (generation !== definitionGeneration) return;
+    if (generation !== definitionGeneration) return null;
     const next = new Map(definitions.value);
     next.set(providerId, definition);
     definitions.value = next;
+    return definition;
   } catch (error) {
-    if (generation !== definitionGeneration) return;
+    if (generation !== definitionGeneration) return null;
     definitionError.value = dashboardErrorDetail(error);
+    return null;
   } finally {
     if (generation === definitionGeneration) definitionLoading.value = false;
   }
+}
+
+async function ensureDefinition(providerId: string) {
+  if (definitions.value.has(providerId)) return;
+  await loadDefinition(providerId);
 }
 
 function retryDefinition() {
@@ -945,16 +1017,43 @@ async function loadAll(options: {
   }
 }
 
-function openEdit(): void {
-  const definition = selectedDefinition.value;
-  if (!definition || !selectedEntry.value?.editable) return;
+function openDefinitionEditor(): void {
+  if (isDraftConnection.value) {
+    void openContinueSetup();
+    return;
+  }
+  openEdit();
+}
+
+async function openEdit(): Promise<void> {
+  const entry = selectedEntry.value;
+  if (!entry?.editable || isDraftConnection.value) return;
+  const definition = await loadDefinition(entry.provider_id);
+  if (!definition) return;
+  resumeConnectionId.value = null;
+  resumeHasSavedKey.value = false;
+  editingDefinition.value = definition;
+  showEditModal.value = true;
+}
+
+async function openContinueSetup(): Promise<void> {
+  const connection = selectedConnection.value;
+  if (!connection || !isOnboardingDraftConnection(connection)) return;
+  const definition = await loadDefinition(connection.legacy.id);
+  if (!definition) return;
+  resumeConnectionId.value = connection.id;
+  resumeHasSavedKey.value = false;
   editingDefinition.value = definition;
   showEditModal.value = true;
 }
 
 function onEditModalShow(visible: boolean): void {
   showEditModal.value = visible;
-  if (!visible) editingDefinition.value = null;
+  if (!visible) {
+    editingDefinition.value = null;
+    resumeConnectionId.value = null;
+    resumeHasSavedKey.value = false;
+  }
 }
 
 function onDynamicCommitted(result: { connectionId: string }): void {
@@ -964,17 +1063,25 @@ function onDynamicCommitted(result: { connectionId: string }): void {
 async function onDynamicSaved(providerId: string): Promise<void> {
   // Create emits `committed` then `saved`; edit emits only `saved`.
   const preferConnectionId = lastCommittedConnectionId.value ?? undefined;
-  const created = preferConnectionId !== undefined;
+  const created = preferConnectionId !== undefined && resumeConnectionId.value === null;
   lastCommittedConnectionId.value = null;
   addStage.value = null;
+  resumeConnectionId.value = null;
+  resumeHasSavedKey.value = false;
   const next = new Map(definitions.value);
   next.delete(providerId);
   definitions.value = next;
-  await loadAll({ retain: true, preferConnectionId, preferProviderId: providerId });
+  const loaded = await loadAll({ retain: true, preferConnectionId, preferProviderId: providerId });
+  if (!loaded.ok) {
+    message.warning(t("已保存，但未能刷新列表。请手动刷新，不要再次提交。"));
+    return;
+  }
   const createdConnection = preferConnectionId
     ? connections.value.find((item) => item.id === preferConnectionId)
     : connectionForLegacyProvider(connections.value, providerId);
-  if (created && createdConnection && connectionStatus(createdConnection).kind === "missing_credential") {
+  if (createdConnection && isOnboardingDraftConnection(createdConnection)) {
+    message.success(t("草稿已保存"));
+  } else if (created && createdConnection && connectionStatus(createdConnection).kind === "missing_credential") {
     message.success(t("供应商已保存，待补充凭据"));
   } else {
     message.success(created ? t("供应商已创建") : t("供应商已更新"));
@@ -1019,15 +1126,17 @@ async function onDynamicConflict(): Promise<void> {
 
 async function deleteSelected(): Promise<void> {
   const entry = selectedEntry.value;
-  if (!entry || !entry.deletable) return;
+  const definition = selectedDefinition.value;
+  const providerId = entry?.provider_id ?? definition?.id;
+  if (!providerId || !(entry?.deletable ?? definition?.deletable)) return;
   try {
-    await providerApi.deleteProviderDefinition(entry.provider_id);
+    await providerApi.deleteProviderDefinition(providerId);
     message.success(t("供应商已删除"));
     const next = new Map(definitions.value);
-    next.delete(entry.provider_id);
+    next.delete(providerId);
     definitions.value = next;
     selectedConnectionId.value = connections.value.find((item) => (
-      !(item.legacy.kind === "dynamic_provider" && item.legacy.id === entry.provider_id)
+      !(item.legacy.kind === "dynamic_provider" && item.legacy.id === providerId)
     ))?.id ?? null;
     await loadAll({ retain: true });
   } catch (error) {
@@ -1280,6 +1389,12 @@ watch(selectedConnectionId, () => {
   // it, so the navigation lock must not outlive the form.
   inlineFormBusy.value = false;
   if (!addKeyBusy.value) showAddKeyModal.value = false;
+});
+
+watch(selectedConnection, (connection) => {
+  if (connection?.legacy.kind === "dynamic_provider" && connection.lifecycle === "draft") {
+    void ensureDefinition(connection.legacy.id);
+  }
 });
 
 watch(selectedEntry, (entry, previous) => {

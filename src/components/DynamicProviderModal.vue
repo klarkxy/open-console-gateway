@@ -1,16 +1,22 @@
 <template>
   <FormSurface
     :show="show"
-    :title="isEdit ? t('编辑供应商') : createTitle"
+    :title="formTitle"
     :embedded="embedded"
     modal-class="dynamic-provider-modal"
     modal-style="width: 720px; max-width: calc(100vw - 32px)"
     :close-on-esc="!busy"
     @update:show="onSurfaceUpdateShow"
   >
-    <n-form label-placement="top" @submit.prevent="save">
+    <n-form label-placement="top" @submit.prevent="onFormSubmit">
       <n-alert v-if="formError" type="error" class="form-error" role="alert">
         {{ formError }}
+      </n-alert>
+      <n-alert v-if="snapshotError" type="error" class="form-error" role="alert">
+        {{ snapshotError }}
+        <n-button size="small" secondary :loading="snapshotLoading" @click="captureFormSnapshot">
+          {{ t("重试") }}
+        </n-button>
       </n-alert>
       <n-alert v-if="testSuccess" type="success" class="form-error" role="status">
         {{ testSuccess }}
@@ -42,13 +48,13 @@
             <dd>{{ t("{count} 个", { count: fixedSeededModels.length }) }}</dd>
           </div>
         </dl>
-        <n-form-item v-if="!isEdit && !presetSelectionLocked" :label="t('供应商预设')" class="full-width-field">
+        <n-form-item v-if="isCreate && !presetSelectionLocked" :label="t('供应商预设')" class="full-width-field">
           <div class="preset-picker">
             <n-select
               :value="selectedPresetId"
               :options="presetOptions"
               filterable
-              :disabled="busy"
+              :disabled="fieldsLocked"
               :placeholder="t('搜索预设')"
               :aria-label="t('供应商预设')"
               @update:value="onPresetChange"
@@ -65,7 +71,7 @@
         <n-form-item v-if="!fixedPreset || settingsOpen" :label="t('名称')" path="name">
           <n-input
             v-model:value="draft.name"
-            :disabled="busy"
+            :disabled="fieldsLocked"
             :input-props="{ 'aria-label': t('名称') }"
             :placeholder="t('例如：主号')"
           />
@@ -74,14 +80,14 @@
           <n-select
             v-model:value="draft.auth_kind"
             :options="authOptions"
-            :disabled="busy"
+            :disabled="fieldsLocked"
             :aria-label="t('鉴权方式')"
           />
         </n-form-item>
         <n-form-item v-if="!fixedPreset || fixedEndpointRequired" :label="t('API 地址')" class="full-width-field">
           <n-input
             v-model:value="draft.endpoint_url"
-            :disabled="busy"
+            :disabled="fieldsLocked"
             :input-props="{ 'aria-label': t('API 地址') }"
             :placeholder="endpointPlaceholder"
           />
@@ -90,17 +96,17 @@
           <n-select
             v-model:value="draft.upstream_protocol"
             :options="protocolOptions"
-            :disabled="busy"
+            :disabled="fieldsLocked"
             :aria-label="t('上游协议')"
           />
         </n-form-item>
         <p v-if="fixedSeeded" class="fixed-models-summary">
           {{ t("默认模型：{models}", { models: fixedSeededModels.join(", ") }) }}
         </p>
-        <n-form-item v-if="!isEdit && props.context === 'account' && (!fixedPreset || settingsOpen)" :label="t('第一个账号名称')">
+        <n-form-item v-if="showFirstAccountFields && (!fixedPreset || settingsOpen)" :label="t('第一个账号名称')">
           <n-input
             v-model:value="draft.account_name"
-            :disabled="busy"
+            :disabled="fieldsLocked"
             :input-props="{ 'aria-label': t('第一个账号名称') }"
           />
         </n-form-item>
@@ -113,23 +119,26 @@
             v-model:value="draft.key"
             type="password"
             show-password-on="click"
-            :disabled="busy"
+            :disabled="fieldsLocked"
             :input-props="{ 'aria-label': t('API Key') }"
             :placeholder="keyPlaceholder"
           />
           <p v-if="keyIsTemporary" class="field-hint">
             {{ t("此 Key 仅临时用于获取模型和测试模型，保存不会更新它；更换已保存的 Key 请到账号页。") }}
           </p>
+          <p v-else-if="savedKeyRetainHint" class="field-hint">
+            {{ t("已保存 Key，留空则保留；填写新 Key 会在继续设置时轮换。") }}
+          </p>
           <p v-else-if="optionalCreateKeyHint" class="field-hint">
-            {{ t("可选。现在填写会同时创建第一个账号；留空则只保存连接，之后可在供应商详情或账号页补充 Key。") }}
+            {{ t("保存草稿可不填 Key。完成设置时，需要 Key 的鉴权必须填写。") }}
           </p>
         </n-form-item>
-        <n-form-item v-if="!isEdit && props.context === 'account' && (!fixedPreset || settingsOpen)" :label="t('备注')" class="full-width-field">
+        <n-form-item v-if="showFirstAccountFields && (!fixedPreset || settingsOpen)" :label="t('备注')" class="full-width-field">
           <n-input
             v-model:value="draft.notes"
             type="textarea"
             :autosize="{ minRows: 2, maxRows: 6 }"
-            :disabled="busy"
+            :disabled="fieldsLocked"
             :input-props="{ 'aria-label': t('备注') }"
           />
         </n-form-item>
@@ -160,10 +169,10 @@
             <p v-if="discoveryUnavailable" class="field-hint">
               {{ t("此预设未配置模型发现，请手动填写准确的模型 ID。") }}
             </p>
-            <p v-if="isEdit && endpointPreset" class="field-hint">
+            <p v-if="hydratingFromProvider && endpointPreset" class="field-hint">
               {{ t("当前 Endpoint 与预设“{preset}”匹配；模型发现与导入命名沿用该预设。", { preset: endpointPreset.name }) }}
             </p>
-            <p v-else-if="isEdit && templatePreset" class="field-hint">
+            <p v-else-if="hydratingFromProvider && templatePreset" class="field-hint">
               {{ t("来源预设模板：“{preset}”；当前 Endpoint 已自定义。", { preset: templatePreset.name }) }}
             </p>
             <n-alert v-if="discoveryError" type="error" :show-icon="false">{{ discoveryError }}</n-alert>
@@ -172,13 +181,13 @@
               <div class="mapping-row-main">
                 <n-input
                   v-model:value="row.public_model"
-                  :disabled="busy"
+                  :disabled="fieldsLocked"
                   :placeholder="t('对外模型名')"
                   :input-props="{ 'aria-label': t('对外模型名') }"
                 />
                 <n-input
                   v-model:value="row.upstream_model"
-                  :disabled="busy"
+                  :disabled="fieldsLocked"
                   :placeholder="t('上游模型 ID')"
                   :input-props="{ 'aria-label': t('上游模型 ID') }"
                 />
@@ -190,7 +199,7 @@
                 <n-select
                   :value="row.upstream_override ? 'override' : 'inherit'"
                   :options="routeModeOptions"
-                  :disabled="busy"
+                  :disabled="fieldsLocked"
                   :aria-label="t('上游连接')"
                   @update:value="(mode) => setMappingRouteMode(row, String(mode))"
                 />
@@ -198,12 +207,12 @@
                   <n-select
                     v-model:value="row.upstream_override.protocol"
                     :options="protocolOptions"
-                    :disabled="busy"
+                    :disabled="fieldsLocked"
                     :aria-label="t('覆盖的上游协议')"
                   />
                   <n-input
                     v-model:value="row.upstream_override.endpoint_url"
-                    :disabled="busy"
+                    :disabled="fieldsLocked"
                     :placeholder="t('覆盖的上游地址（必填）')"
                     :input-props="{ 'aria-label': t('覆盖的上游地址') }"
                   />
@@ -214,7 +223,7 @@
               <n-select
                 v-model:value="selectedDiscovery"
                 multiple
-                :disabled="busy"
+                :disabled="fieldsLocked"
                 :options="discoveredModels.map((model) => ({ label: model, value: model }))"
                 :placeholder="t('选择要导入的模型')"
                 :aria-label="t('选择要导入的模型')"
@@ -255,6 +264,22 @@
             {{ t("更多设置") }}
           </n-button>
         </div>
+        <n-form-item v-if="showAuthorizeCurrent" class="full-width-field">
+          <n-checkbox
+            :checked="authorizeCurrentEndpoint"
+            :disabled="fieldsLocked"
+            :aria-label="t('授权当前地址')"
+            @update:checked="(checked: boolean) => authorizeCurrentEndpoint = checked"
+          >
+            {{ t("授权当前地址") }}
+          </n-checkbox>
+          <p class="field-hint">
+            {{ t("当前目标：{origin}", { origin: destinationDisplay }) }}
+          </p>
+          <p class="field-hint">
+            {{ t("勾选后才会把当前默认/同源目标加入此 Key。打开或编辑不会自动授权。") }}
+          </p>
+        </n-form-item>
       </div>
     </n-form>
     <template #footer>
@@ -274,9 +299,41 @@
         </n-popconfirm>
         <n-space>
           <n-button v-if="!embedded" attr-type="button" :disabled="busy" @click="$emit('update:show', false)">{{ t("取消") }}</n-button>
-          <n-button type="primary" attr-type="submit" :loading="saving" :disabled="busy" @click="save">
-            {{ saving ? t("正在保存…") : (isEdit ? t("保存供应商") : createTitle) }}
+          <n-button
+            v-if="isConfiguredEdit"
+            type="primary"
+            attr-type="submit"
+            :loading="saving"
+            :disabled="busy"
+            @click="saveConfigured"
+          >
+            {{ saving ? t("正在保存…") : t("保存供应商") }}
           </n-button>
+          <template v-else>
+            <n-button
+              v-if="lastFailure !== 'uncertain'"
+              attr-type="button"
+              secondary
+              :loading="saving && lastIntent === 'draft'"
+              :disabled="busy"
+              @click="saveDraft"
+            >
+              {{ t("保存草稿") }}
+            </n-button>
+            <n-button
+              type="primary"
+              attr-type="submit"
+              :loading="saving && lastIntent !== 'draft'"
+              :disabled="busy"
+              @click="lastFailure === 'uncertain' ? retryLast() : completeSetup()"
+            >
+              {{
+                lastFailure === "uncertain"
+                  ? t("重试")
+                  : saving && lastIntent === "complete" ? t("正在保存…") : t("完成设置")
+              }}
+            </n-button>
+          </template>
         </n-space>
       </div>
     </template>
@@ -288,6 +345,7 @@ import { computed, onUnmounted, ref, watch } from "vue";
 import {
   NAlert,
   NButton,
+  NCheckbox,
   NForm,
   NFormItem,
   NIcon,
@@ -298,8 +356,11 @@ import {
 } from "naive-ui";
 import { DownOutlined, RightOutlined } from "@vicons/antd";
 import { connectionsApi } from "../api/connections.ts";
+import { identitiesApi } from "../api/identities.ts";
+import type { MutationExpectation } from "../api/generated/dashboard-v3.ts";
 import { DashboardRequestError } from "../api/dashboard-v3.ts";
 import { isRevisionConflict, providerApi, type ProviderDefinitionView } from "../api/providers.ts";
+import { useControlPlaneStore } from "../stores/controlPlane.ts";
 import { locale, t, type MessageKey } from "../i18n/index.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
 import { protocolDisplayName } from "../domain/provider-contracts.ts";
@@ -319,7 +380,6 @@ import {
   DYNAMIC_PAID_TEST_WARNING_KEY,
   DYNAMIC_PROTOCOLS,
   DYNAMIC_PROVIDER_DRAFT_ERROR_KEYS,
-  buildOnboardingCommitRequest,
   buildProviderDefinitionUpdateBody,
   completeDynamicTestTargets,
   dynamicAuthRequiresKey,
@@ -334,6 +394,21 @@ import {
   type ProviderDefinitionMapping,
   type DynamicUpstreamProtocol,
 } from "../domain/dynamic-provider.ts";
+import {
+  buildOnboardingCommitPayload,
+  destinationOriginFromEndpointUrl,
+  identityHasSavedMaterialForConnection,
+  isUncertainOnboardingFailure,
+  nextOnboardingOperationId,
+  onboardingMutationExpectation,
+  onboardingPayloadSignature,
+  onboardingUnknownLockedError,
+  shouldHydrateOnboardingForm,
+  shouldOfferAuthorizeCurrentEndpoint,
+  validateOnboardingDraft,
+  type OnboardingFailureKind,
+  type OnboardingIntent,
+} from "../domain/onboarding-draft.ts";
 import FormSurface from "./FormSurface.vue";
 
 const props = defineProps<{
@@ -347,16 +422,27 @@ const props = defineProps<{
   embedded?: boolean;
   /** Create mode only: the host rail owns preset choice, so hide the picker. */
   presetSelectionLocked?: boolean;
+  /** Resume a persisted onboarding draft; same connection/provider id. */
+  resumeConnectionId?: string | null;
+  /** V4 has-material projection; never a plaintext Key. */
+  hasSavedKey?: boolean;
 }>();
 
 const emit = defineEmits<{
   (event: "update:show", value: boolean): void;
   (event: "saved", providerId: string): void;
   /**
-   * Create-mode V4 commit result. `saved` still emits the legacy provider id
+   * Create/resume V4 commit result. `saved` still emits the legacy provider id
    * resolved from a follow-up connections list so existing hosts keep working.
    */
-  (event: "committed", result: { connectionId: string; credentialId: string | null; replayed: boolean }): void;
+  (event: "committed", result: {
+    connectionId: string;
+    credentialId: string | null;
+    accountId: string | null;
+    replayed: boolean;
+    mode: OnboardingIntent;
+    readbackFailed: boolean;
+  }): void;
   (event: "conflict"): void;
   /** Hosts embed the form and block dismissal while work is in flight. */
   (event: "busyChange", busy: boolean): void;
@@ -381,18 +467,39 @@ const selectedPresetId = ref(MANUAL_PRESET_ID);
 // Bumped on close/reopen and on every preset switch so a slow discovery or
 // test response from a previous context can never land in the current form.
 const requestGeneration = ref(0);
-/** Stable across retries of an unchanged draft; regenerated on any draft edit. */
-const operationId = ref(newOperationId());
+/** Reused only for an unknown-outcome retry of the same payload. */
+const operationId = ref<string | null>(null);
+const lastSignature = ref<string | null>(null);
+const lastFailure = ref<OnboardingFailureKind>("none");
+const lastIntent = ref<OnboardingIntent | null>(null);
+const capturedExpectation = ref<MutationExpectation | null>(null);
+const snapshotLoading = ref(false);
+const snapshotError = ref("");
+const authorizeCurrentEndpoint = ref(false);
+const savedKeyFromSnapshot = ref(false);
+let snapshotGeneration = 0;
+let committedWrite = false;
 
-function newOperationId(): string {
-  return crypto.randomUUID();
-}
-
-const isEdit = computed(() => Boolean(props.provider));
+const isResume = computed(() => Boolean(props.resumeConnectionId));
+const isConfiguredEdit = computed(() => Boolean(props.provider) && !isResume.value);
+const isCreate = computed(() => !isConfiguredEdit.value && !isResume.value);
+const hydratingFromProvider = computed(() => Boolean(props.provider));
+const effectiveHasSavedKey = computed(() => {
+  if (draft.value.auth_kind === "none" || props.provider?.auth_kind === "none") return false;
+  return savedKeyFromSnapshot.value;
+});
 const createTitle = computed(() => (
   props.context === "account" ? t("新增账号") : t("新建供应商")
 ));
-const busy = computed(() => saving.value || discovering.value || testing.value);
+const formTitle = computed(() => {
+  if (isConfiguredEdit.value) return t("编辑供应商");
+  if (isResume.value) return t("继续设置");
+  return createTitle.value;
+});
+const busy = computed(() => (
+  saving.value || discovering.value || testing.value || snapshotLoading.value
+));
+const fieldsLocked = computed(() => busy.value || lastFailure.value === "uncertain");
 // Hosts embedding this form block switching/closing on this signal.
 watch(busy, (value) => emit("busyChange", value));
 onUnmounted(() => {
@@ -400,23 +507,25 @@ onUnmounted(() => {
   // lock with a direct emit, and invalidate in-flight discovery/test via the
   // generation counter so an abandoned response can never commit anywhere.
   requestGeneration.value += 1;
+  snapshotGeneration += 1;
   saving.value = false;
   discovering.value = false;
   testing.value = false;
+  snapshotLoading.value = false;
   emit("busyChange", false);
 });
 const testNeedsConfirm = dynamicProviderActionNeedsConfirm("test");
 const paidTestWarningKey = DYNAMIC_PAID_TEST_WARNING_KEY;
 const selectedPreset = computed(() => (
-  isEdit.value ? null : PROVIDER_PRESETS.find((preset) => preset.id === selectedPresetId.value) ?? null
+  isCreate.value ? PROVIDER_PRESETS.find((preset) => preset.id === selectedPresetId.value) ?? null : null
 ));
-// Edit mode has no preset picker: persisted provenance (preset_id) wins, and
+// Edit/resume have no preset picker: persisted provenance (preset_id) wins, and
 // legacy rows fall back to safe endpoint/prefix inference. Template metadata
 // and the verified endpoint match stay separate so a modified custom URL is
 // never presented as the official endpoint, and an endpoint-only match never
 // prefixes previously unprefixed manual mappings.
 const editPreset = computed(() => (
-  isEdit.value
+  hydratingFromProvider.value
     ? resolveEditPreset(
       props.provider?.preset_id ?? draft.value.preset_id,
       draft.value.endpoint_url,
@@ -428,10 +537,10 @@ const editPreset = computed(() => (
 const endpointPreset = computed(() => editPreset.value?.endpointMatch ?? null);
 const templatePreset = computed(() => editPreset.value?.template ?? null);
 const effectivePreset = computed(() => (
-  isEdit.value ? editPreset.value?.discoveryPreset ?? null : selectedPreset.value
+  hydratingFromProvider.value ? editPreset.value?.discoveryPreset ?? null : selectedPreset.value
 ));
 const importPresetId = computed(() => (
-  isEdit.value ? editPreset.value?.importPresetId ?? null : selectedPreset.value?.id ?? null
+  hydratingFromProvider.value ? editPreset.value?.importPresetId ?? null : selectedPreset.value?.id ?? null
 ));
 const presetOptions = computed(() => {
   const manual = { label: t("手动（自定义）"), value: MANUAL_PRESET_ID };
@@ -460,7 +569,7 @@ const discoveryUnavailable = computed(() => (
  * and a configured preset endpoint are pinned by the preset and never offered
  * as controls. Edit mode and manual creation keep every existing control.
  */
-const fixedPreset = computed(() => (isEdit.value ? null : selectedPreset.value));
+const fixedPreset = computed(() => (isCreate.value ? selectedPreset.value : null));
 const fixedSeededModels = computed(() => (
   fixedPreset.value ? providerPresetDefaultModels(fixedPreset.value) : []
 ));
@@ -482,19 +591,28 @@ const testTargetOptions = computed(() => testTargets.value.map((target, index) =
   label: `${target.public_model} → ${target.upstream_model}`,
 })));
 const showKeyField = computed(() => {
-  if (!isEdit.value) {
+  if (!isConfiguredEdit.value) {
     return dynamicAuthRequiresKey(draft.value.auth_kind);
   }
   return dynamicAuthRequiresKey(draft.value.auth_kind) || props.provider?.auth_kind === "none";
 });
+const showFirstAccountFields = computed(() => (
+  !isConfiguredEdit.value
+  && (isCreate.value || !effectiveHasSavedKey.value)
+  && props.context === "account"
+));
 const optionalCreateKeyHint = computed(() => (
-  !isEdit.value
-  && props.context !== "account"
+  !isConfiguredEdit.value
+  && dynamicAuthRequiresKey(draft.value.auth_kind)
+  && !effectiveHasSavedKey.value
+));
+const savedKeyRetainHint = computed(() => (
+  isResume.value
+  && effectiveHasSavedKey.value
   && dynamicAuthRequiresKey(draft.value.auth_kind)
 ));
 const probeKeyMissing = computed(() => (
-  !isEdit.value
-  && props.context !== "account"
+  !isConfiguredEdit.value
   && dynamicAuthRequiresKey(draft.value.auth_kind)
   && !draft.value.key.trim()
 ));
@@ -502,12 +620,24 @@ const probeKeyMissing = computed(() => (
 // otherwise stored Keys belong to Accounts and this field only feeds
 // discovery/test, so the save-time hint would be misleading.
 const keySavedOnUpdate = computed(() => (
-  isEdit.value && props.provider?.auth_kind === "none" && dynamicAuthRequiresKey(draft.value.auth_kind)
+  isConfiguredEdit.value && props.provider?.auth_kind === "none" && dynamicAuthRequiresKey(draft.value.auth_kind)
 ));
-const keyIsTemporary = computed(() => isEdit.value && !keySavedOnUpdate.value);
+const keyIsTemporary = computed(() => isConfiguredEdit.value && !keySavedOnUpdate.value);
 const keyPlaceholder = computed(() => {
-  if (!isEdit.value) return "sk-...";
+  if (savedKeyRetainHint.value) return t("已设置");
+  if (!isConfiguredEdit.value) return "sk-...";
   return keySavedOnUpdate.value ? t("Key 只会在保存或测试时发送，不会重新显示。") : t("已设置");
+});
+const showAuthorizeCurrent = computed(() => (
+  !isConfiguredEdit.value
+  && shouldOfferAuthorizeCurrentEndpoint({
+    intent: "complete",
+    hasSavedKey: effectiveHasSavedKey.value,
+  })
+));
+const destinationDisplay = computed(() => {
+  const url = draft.value.endpoint_url.trim();
+  return destinationOriginFromEndpointUrl(url) || url || t("未设置");
 });
 const endpointPlaceholder = computed(() => {
   const preset = selectedPreset.value;
@@ -527,7 +657,7 @@ const routeModeOptions = computed(() => [
 ]);
 
 function setMappingRouteMode(row: ProviderDefinitionMapping, mode: string): void {
-  if (busy.value) return;
+  if (fieldsLocked.value) return;
   if (mode === "override") {
     if (row.upstream_override) return;
     row.upstream_override = {
@@ -543,14 +673,35 @@ const authOptions = computed(() => DYNAMIC_AUTH_KINDS.map((value) => ({
   label: value === "none" ? t("无鉴权") : value === "bearer" ? "Bearer" : "x-api-key",
 })));
 
+let formWasVisible = false;
+
 watch(
-  () => [props.show, props.provider, props.initialPresetId] as const,
+  () => [props.show, props.provider, props.initialPresetId, props.resumeConnectionId] as const,
   ([visible, provider]) => {
-    // Any close/reopen invalidates in-flight discovery/test responses.
+    const justOpened = shouldHydrateOnboardingForm({
+      visible,
+      wasVisible: formWasVisible,
+    });
+    if (!visible) {
+      requestGeneration.value += 1;
+      formWasVisible = false;
+      draft.value = sanitizeProviderDefinitionDraft(draft.value);
+      lastFailure.value = "none";
+      lastSignature.value = null;
+      operationId.value = null;
+      lastIntent.value = null;
+      capturedExpectation.value = null;
+      savedKeyFromSnapshot.value = false;
+      snapshotError.value = "";
+      committedWrite = false;
+      return;
+    }
+    if (!justOpened) return;
+    formWasVisible = true;
     requestGeneration.value += 1;
     testTargetIndex.value = 0;
     settingsOpen.value = false;
-    if (!visible) return;
+    authorizeCurrentEndpoint.value = false;
     formError.value = "";
     conflictNotice.value = "";
     testSuccess.value = "";
@@ -559,6 +710,12 @@ watch(
     discoveredModels.value = [];
     selectedDiscovery.value = [];
     selectedPresetId.value = MANUAL_PRESET_ID;
+    lastFailure.value = "none";
+    lastSignature.value = null;
+    operationId.value = null;
+    lastIntent.value = null;
+    committedWrite = false;
+    savedKeyFromSnapshot.value = false;
     if (provider) {
       draft.value = {
         name: provider.name,
@@ -567,11 +724,13 @@ watch(
         auth_kind: provider.auth_kind ?? "",
         // Edit roundtrip preserves each row's override exactly; absent/null
         // means the row inherits the supplier default.
-        models: provider.models.map((model) => ({
-          public_model: model.public_model,
-          upstream_model: model.upstream_model,
-          upstream_override: model.upstream_override ? { ...model.upstream_override } : null,
-        })),
+        models: provider.models.length > 0
+          ? provider.models.map((model) => ({
+            public_model: model.public_model,
+            upstream_model: model.upstream_model,
+            upstream_override: model.upstream_override ? { ...model.upstream_override } : null,
+          }))
+          : [{ public_model: "", upstream_model: "" }],
         account_name: "",
         notes: "",
         key: "",
@@ -579,6 +738,10 @@ watch(
         // field on PATCH so a legacy manual row is preserved, not cleared.
         preset_id: provider.preset_id ?? undefined,
       };
+      capturedExpectation.value = onboardingMutationExpectation({
+        existingDefinition: provider,
+      });
+      if (props.resumeConnectionId) void captureResumeSavedKey();
     } else {
       // Every create open starts from a clean draft (no Key or models carry
       // over), then the explicit preset from the chooser is applied on top.
@@ -590,6 +753,7 @@ watch(
         selectedPresetId.value = preset.id;
         draft.value = applyProviderPresetToDraft(draft.value, preset);
       }
+      void captureFormSnapshot();
     }
   },
   { immediate: true },
@@ -613,13 +777,12 @@ watch(
   },
 );
 
-watch(draft, () => {
-  if (isEdit.value) return;
-  operationId.value = newOperationId();
-}, { deep: true });
+watch(() => draft.value.endpoint_url, () => {
+  authorizeCurrentEndpoint.value = false;
+});
 
 function onPresetChange(value: string): void {
-  if (isEdit.value || busy.value || value === selectedPresetId.value) return;
+  if (!isCreate.value || fieldsLocked.value || value === selectedPresetId.value) return;
   selectedPresetId.value = value;
   requestGeneration.value += 1;
   testTargetIndex.value = 0;
@@ -636,17 +799,17 @@ function onPresetChange(value: string): void {
 }
 
 function addMapping(): void {
-  if (busy.value) return;
+  if (fieldsLocked.value) return;
   draft.value.models.push({ public_model: "", upstream_model: "", upstream_override: null });
 }
 
 function removeMapping(index: number): void {
-  if (busy.value || draft.value.models.length < 2) return;
+  if (fieldsLocked.value || draft.value.models.length < 2) return;
   draft.value.models.splice(index, 1);
 }
 
 function importDiscovered(): void {
-  if (busy.value) return;
+  if (fieldsLocked.value) return;
   const presetId = importPresetId.value;
   const existing = new Set(draft.value.models.map((row) => row.public_model.trim().toLocaleLowerCase()));
   for (const model of selectedDiscovery.value) {
@@ -745,50 +908,128 @@ function onSurfaceUpdateShow(visible: boolean): void {
   emit("update:show", visible);
 }
 
-function isRetryableNetworkFailure(error: unknown): boolean {
-  if (error instanceof TypeError) return true;
-  return typeof DOMException !== "undefined"
-    && error instanceof DOMException
-    && (error.name === "AbortError" || error.name === "TimeoutError");
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    window.setTimeout(resolve, ms);
-  });
-}
-
-async function commitCreate() {
-  const body = buildOnboardingCommitRequest(draft.value, operationId.value);
-  let lastError: unknown;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    try {
-      return await connectionsApi.commitOnboarding(body);
-    } catch (error) {
-      lastError = error;
-      if (!isRetryableNetworkFailure(error) || attempt === 2) throw error;
-      await sleep(150 * (attempt + 1));
-    }
+async function captureFormSnapshot(): Promise<void> {
+  const generation = ++snapshotGeneration;
+  snapshotLoading.value = true;
+  snapshotError.value = "";
+  try {
+    const snapshot = await connectionsApi.listSnapshot();
+    if (generation !== snapshotGeneration) return;
+    capturedExpectation.value = onboardingMutationExpectation({
+      createListExpectation: snapshot.expectation,
+    });
+  } catch (error) {
+    if (generation !== snapshotGeneration) return;
+    snapshotError.value = t("加载草稿失败: {error}", { error: dashboardErrorDetail(error) });
+  } finally {
+    if (generation === snapshotGeneration) snapshotLoading.value = false;
   }
-  throw lastError;
 }
 
-async function resolveLegacyProviderId(connectionId: string): Promise<string> {
+async function captureResumeSavedKey(): Promise<void> {
+  const connectionId = props.resumeConnectionId;
+  if (!connectionId || draft.value.auth_kind === "none" || props.provider?.auth_kind === "none") {
+    savedKeyFromSnapshot.value = false;
+    return;
+  }
+  const generation = snapshotGeneration;
+  try {
+    const snapshot = await identitiesApi.listSnapshot();
+    if (generation !== snapshotGeneration) return;
+    savedKeyFromSnapshot.value = identityHasSavedMaterialForConnection(
+      snapshot.identities,
+      connectionId,
+    );
+  } catch {
+    if (generation !== snapshotGeneration) return;
+    savedKeyFromSnapshot.value = false;
+  }
+}
+
+function adoptRefreshedExpectation(): void {
+  const control = useControlPlaneStore();
+  if (!control.hasTokens()) return;
+  capturedExpectation.value = control.expectation();
+}
+
+function buildIntentPayload(intent: OnboardingIntent) {
+  const nextSignature = onboardingPayloadSignature(buildOnboardingCommitPayload({
+    draft: draft.value,
+    operationId: operationId.value ?? "00000000-0000-4000-8000-000000000000",
+    mode: intent,
+    connectionId: props.resumeConnectionId,
+    hasSavedKey: effectiveHasSavedKey.value,
+    previousAuthKind: props.provider?.auth_kind ?? "",
+    authorizeCurrentEndpoint: intent === "complete" && authorizeCurrentEndpoint.value,
+  }));
+  const nextId = nextOnboardingOperationId({
+    previousId: operationId.value,
+    previousSignature: lastSignature.value,
+    nextSignature,
+    lastFailure: lastFailure.value,
+  });
+  const payload = buildOnboardingCommitPayload({
+    draft: draft.value,
+    operationId: nextId,
+    mode: intent,
+    connectionId: props.resumeConnectionId,
+    hasSavedKey: effectiveHasSavedKey.value,
+    previousAuthKind: props.provider?.auth_kind ?? "",
+    authorizeCurrentEndpoint: intent === "complete" && authorizeCurrentEndpoint.value,
+  });
+  return { payload, signature: onboardingPayloadSignature(payload) };
+}
+
+async function resolveLegacyProviderId(connectionId: string): Promise<{
+  id: string;
+  readbackFailed: boolean;
+}> {
   try {
     const listed = await connectionsApi.list();
-    return listed.find((item) => item.id === connectionId)?.legacy.id ?? "";
+    return {
+      id: listed.find((item) => item.id === connectionId)?.legacy.id
+        ?? props.provider?.id
+        ?? "",
+      readbackFailed: false,
+    };
   } catch {
-    return "";
+    return { id: props.provider?.id ?? "", readbackFailed: true };
   }
 }
 
-async function save(): Promise<void> {
-  // Re-entrant submits (Enter key, double click) must not duplicate the write.
-  if (busy.value) return;
+function onFormSubmit(): void {
+  if (isConfiguredEdit.value) {
+    void saveConfigured();
+    return;
+  }
+  if (lastFailure.value === "uncertain") {
+    retryLast();
+    return;
+  }
+  void completeSetup();
+}
+
+function retryLast(): void {
+  if (lastIntent.value === "draft") {
+    void saveDraft();
+    return;
+  }
+  void completeSetup();
+}
+
+async function saveDraft(): Promise<void> {
+  await commitOnboarding("draft");
+}
+
+async function completeSetup(): Promise<void> {
+  await commitOnboarding("complete");
+}
+
+async function saveConfigured(): Promise<void> {
+  if (busy.value || !props.provider) return;
   const error = validateProviderDefinitionDraft(draft.value, {
-    mode: isEdit.value ? "edit" : "create",
-    previousAuthKind: props.provider?.auth_kind ?? "",
-    requireKey: !isEdit.value && props.context === "account",
+    mode: "edit",
+    previousAuthKind: props.provider.auth_kind ?? "",
   });
   if (error) {
     formError.value = t(DYNAMIC_PROVIDER_DRAFT_ERROR_KEYS[error] as MessageKey);
@@ -798,36 +1039,112 @@ async function save(): Promise<void> {
   formError.value = "";
   conflictNotice.value = "";
   try {
-    if (isEdit.value && props.provider) {
-      const saved = await providerApi.updateProviderDefinition(
-        props.provider.id,
-        buildProviderDefinitionUpdateBody(draft.value, props.provider.auth_kind ?? ""),
-      );
-      draft.value = sanitizeProviderDefinitionDraft(draft.value);
-      emit("saved", saved.id);
-      emit("update:show", false);
-      return;
-    }
-    const result = await commitCreate();
-    const legacyId = await resolveLegacyProviderId(result.connection_id);
+    const saved = await providerApi.updateProviderDefinition(
+      props.provider.id,
+      buildProviderDefinitionUpdateBody(draft.value, props.provider.auth_kind ?? ""),
+      capturedExpectation.value ?? undefined,
+    );
     draft.value = sanitizeProviderDefinitionDraft(draft.value);
-    operationId.value = newOperationId();
-    emit("committed", {
-      connectionId: result.connection_id,
-      credentialId: result.credential_id,
-      replayed: result.replayed,
-    });
-    emit("saved", legacyId);
+    emit("saved", saved.id);
     emit("update:show", false);
   } catch (cause) {
     if (isRevisionConflict(cause)) {
       conflictNotice.value = t("数据已更新，请检查后重新保存。不会自动重试。");
-      emit("conflict");
-    } else if (cause instanceof DashboardRequestError && cause.code === "operationPayloadMismatch") {
-      formError.value = t("之前的提交已生效，页面已刷新，请核对后再操作。");
-      operationId.value = newOperationId();
+      adoptRefreshedExpectation();
       emit("conflict");
     } else {
+      formError.value = dashboardErrorDetail(cause);
+    }
+  } finally {
+    saving.value = false;
+  }
+}
+
+async function commitOnboarding(intent: OnboardingIntent): Promise<void> {
+  if (busy.value || committedWrite) return;
+  if (lastFailure.value === "uncertain" && lastIntent.value && lastIntent.value !== intent) {
+    formError.value = t("提交结果未知，请用原内容重试或取消。不能改内容后再提交。");
+    return;
+  }
+  const error = validateOnboardingDraft(draft.value, {
+    intent,
+    hasSavedKey: effectiveHasSavedKey.value,
+    previousAuthKind: props.provider?.auth_kind ?? "",
+  });
+  if (error) {
+    formError.value = t(DYNAMIC_PROVIDER_DRAFT_ERROR_KEYS[error] as MessageKey);
+    return;
+  }
+  if (!capturedExpectation.value) {
+    if (props.provider) {
+      capturedExpectation.value = onboardingMutationExpectation({
+        existingDefinition: props.provider,
+      });
+    } else {
+      await captureFormSnapshot();
+    }
+    if (!capturedExpectation.value) {
+      formError.value = snapshotError.value || t("加载草稿失败: {error}", { error: t("保存失败，请重试") });
+      return;
+    }
+  }
+  let payload;
+  let signature: string;
+  try {
+    ({ payload, signature } = buildIntentPayload(intent));
+  } catch (cause) {
+    if (onboardingUnknownLockedError(cause)) {
+      formError.value = t("提交结果未知，请用原内容重试或取消。不能改内容后再提交。");
+      return;
+    }
+    const key = cause instanceof Error ? cause.message : "";
+    formError.value = key in DYNAMIC_PROVIDER_DRAFT_ERROR_KEYS
+      ? t(DYNAMIC_PROVIDER_DRAFT_ERROR_KEYS[key as keyof typeof DYNAMIC_PROVIDER_DRAFT_ERROR_KEYS] as MessageKey)
+      : dashboardErrorDetail(cause);
+    return;
+  }
+  lastIntent.value = intent;
+  operationId.value = payload.operationId;
+  lastSignature.value = signature;
+  saving.value = true;
+  formError.value = "";
+  conflictNotice.value = "";
+  try {
+    const result = await connectionsApi.commitOnboarding(payload, capturedExpectation.value);
+    committedWrite = true;
+    lastFailure.value = "none";
+    const readback = await resolveLegacyProviderId(result.connection_id);
+    draft.value = sanitizeProviderDefinitionDraft(draft.value);
+    emit("committed", {
+      connectionId: result.connection_id,
+      credentialId: result.credential_id,
+      accountId: result.account_id,
+      replayed: result.replayed,
+      mode: intent,
+      readbackFailed: readback.readbackFailed,
+    });
+    emit("saved", readback.id);
+    emit("update:show", false);
+  } catch (cause) {
+    if (committedWrite) {
+      return;
+    }
+    if (isRevisionConflict(cause)) {
+      lastFailure.value = "definitive";
+      conflictNotice.value = t("数据已更新，请检查后重新保存。不会自动重试。");
+      adoptRefreshedExpectation();
+      emit("conflict");
+    } else if (cause instanceof DashboardRequestError && cause.code === "operationPayloadMismatch") {
+      lastFailure.value = "definitive";
+      formError.value = t("之前的提交已生效，页面已刷新，请核对后再操作。");
+      operationId.value = null;
+      lastSignature.value = null;
+      emit("conflict");
+    } else if (isUncertainOnboardingFailure(cause)) {
+      lastFailure.value = "uncertain";
+      formError.value = t("提交结果未知，供应商可能已保存。请用相同内容重试，不要修改后再提交。");
+    } else {
+      lastFailure.value = "definitive";
       formError.value = dashboardErrorDetail(cause);
     }
   } finally {

@@ -7,11 +7,17 @@ import {
   accountCredentialCountLabel,
   accountExpiryDisplay,
   accountShowsDeclaredRelation,
+  credentialForAccount,
   identityForAccount,
   inferenceAuthState,
   inferenceCredentials,
+  inferenceLastError,
   presentedAccountStatusLabel,
   presentedAccountStatusTagType,
+  selectedBindingDisabled,
+  selectedModelRestrictionLabel,
+  selectedQuotaShareLabel,
+  sharedQuotaSiblings,
   v3AccountShowsExpiry,
 } from "./account-identity.ts";
 
@@ -72,6 +78,7 @@ function credential(overrides: Partial<IdentityCredential> = {}): IdentityCreden
     quota_windows: [],
     subject: "account_credential",
     subscription: null,
+    quota_pool_id: null,
     ...overrides,
   };
 }
@@ -132,6 +139,81 @@ test("overlay matches the V3 account id via legacy.kind+id and ignores platform 
   assert.equal(identityForAccount(rows, "missing"), null);
 });
 
+test("a multi-key identity is found by credential.legacy and never the first sibling", () => {
+  const sibling = credential({
+    credential: {
+      ...credential().credential,
+      id: "cred-2",
+      auth_state: "invalid",
+    },
+    last_error: "401-sibling",
+    legacy: { kind: "account", id: "acc-2" },
+    subscription: { expires_on: "2026-12-01", purchase_date: "2026-11-01", source: "legacy_manual" },
+  });
+  const row = identity({
+    legacy: { kind: "account", id: "acc-1" },
+    credentials: [sibling, credential({
+      credential: { ...credential().credential, auth_state: "valid" },
+    })],
+  });
+
+  assert.equal(identityForAccount([row], "acc-2")?.identity.id, "ident-1");
+  assert.equal(credentialForAccount(row, "acc-2")?.credential.id, "cred-2");
+  assert.equal(credentialForAccount(row, "acc-1")?.credential.id, "cred-1");
+  assert.equal(credentialForAccount(row, "missing"), null);
+
+  assert.equal(inferenceAuthState(row, "acc-1"), "valid");
+  assert.equal(inferenceAuthState(row, "acc-2"), "invalid");
+  assert.equal(inferenceLastError(row, "acc-1"), null);
+  assert.equal(inferenceLastError(row, "acc-2"), "401-sibling");
+  assert.equal(presentedAccountStatusLabel(account({ id: "acc-1" }), row), "已启用");
+  assert.equal(presentedAccountStatusLabel(account({ id: "acc-2" }), row), "不可用");
+  assert.equal(accountExpiryDisplay(account({ id: "acc-1" }), row, null), "v3");
+});
+
+test("selected binding disabled and model restriction stay on this card, not a sibling", () => {
+  const sibling = credential({
+    credential: {
+      ...credential().credential,
+      id: "cred-2",
+      auth_state: "invalid",
+    },
+    last_error: "401-sibling",
+    legacy: { kind: "account", id: "acc-2" },
+    bindings: [{
+      id: "bind-sib",
+      connection_id: "conn-1",
+      allowed_endpoint_ids: [],
+      allowed_origins: [],
+      model_scope: { kind: "all" },
+      enabled: true,
+      routing_rank: 0,
+    }],
+  });
+  const selected = credential({
+    credential: { ...credential().credential, auth_state: "unknown" },
+    bindings: [{
+      id: "bind-1",
+      connection_id: "conn-1",
+      allowed_endpoint_ids: [],
+      allowed_origins: [],
+      model_scope: { kind: "only", models: ["model-x"] },
+      enabled: false,
+      routing_rank: 0,
+    }],
+  });
+  const row = identity({ credentials: [sibling, selected] });
+
+  assert.equal(selectedBindingDisabled(row, "acc-1"), true);
+  assert.equal(selectedBindingDisabled(row, "acc-2"), false);
+  assert.equal(selectedModelRestrictionLabel(row, "acc-1"), "仅 model-x");
+  assert.equal(selectedModelRestrictionLabel(row, "acc-2"), null);
+  assert.equal(presentedAccountStatusLabel(account({ id: "acc-1" }), row), "待验证");
+  assert.equal(presentedAccountStatusLabel(account({ id: "acc-2" }), row), "不可用");
+  assert.equal(presentedAccountStatusTagType(account({ id: "acc-1" }), row), "warning");
+  assert.equal(presentedAccountStatusTagType(account({ id: "acc-2" }), row), "error");
+});
+
 test("platform observer credentials are not inference Keys", () => {
   const observer = credential({
     credential: {
@@ -143,11 +225,11 @@ test("platform observer credentials are not inference Keys", () => {
   });
   const row = identity({ credentials: [observer, credential()] });
   assert.deepEqual(inferenceCredentials(row).map((item) => item.credential.id), ["cred-1"]);
-  assert.equal(inferenceAuthState(row), "unknown");
+  assert.equal(inferenceAuthState(row, "acc-1"), "unknown");
 
   const observerOnly = identity({ credentials: [observer] });
   assert.deepEqual(inferenceCredentials(observerOnly), []);
-  assert.equal(inferenceAuthState(observerOnly), null);
+  assert.equal(inferenceAuthState(observerOnly, "acc-1"), null);
   assert.equal(presentedAccountStatusLabel(account(), observerOnly), "已启用");
   assert.equal(accountCredentialCountLabel(observerOnly), null);
 });
@@ -251,4 +333,49 @@ test("authState unknown is 待验证, invalid is auth_error, and valid does not 
 
   assert.equal(presentedAccountStatusLabel(ready, null), "已启用");
   assert.equal(presentedAccountStatusTagType(ready, null), "default");
+});
+
+test("quota pool id names shared siblings and leaves an independent third Key alone", () => {
+  const names = (id: string) => ({ "acc-1": "Key A", "acc-2": "Key B", "acc-3": "Key C" }[id] ?? null);
+  const sharedA = credential({
+    credential: { ...credential().credential, id: "cred-a" },
+    legacy: { kind: "account", id: "acc-1" },
+    quota_pool_id: "pool-ab",
+    quota_windows: [],
+  });
+  const sharedB = credential({
+    credential: { ...credential().credential, id: "cred-b" },
+    legacy: { kind: "account", id: "acc-2" },
+    quota_pool_id: "pool-ab",
+    quota_windows: [],
+  });
+  const independent = credential({
+    credential: { ...credential().credential, id: "cred-c" },
+    legacy: { kind: "account", id: "acc-3" },
+    quota_pool_id: "pool-c",
+    quota_windows: [],
+  });
+  const none = credential({
+    credential: { ...credential().credential, id: "cred-d" },
+    legacy: { kind: "account", id: "acc-4" },
+    quota_pool_id: null,
+    quota_windows: [],
+  });
+  const row = identity({
+    credentials: [sharedA, sharedB, independent, none],
+  });
+
+  assert.deepEqual(sharedQuotaSiblings(row, "acc-1").map((item) => item.credential.id), ["cred-b"]);
+  assert.deepEqual(sharedQuotaSiblings(row, "acc-2").map((item) => item.credential.id), ["cred-a"]);
+  assert.deepEqual(sharedQuotaSiblings(row, "acc-3"), []);
+  assert.deepEqual(sharedQuotaSiblings(row, "acc-4"), []);
+  assert.equal(selectedQuotaShareLabel(row, "acc-1", names), "与 Key B 共享额度");
+  assert.equal(selectedQuotaShareLabel(row, "acc-2", names), "与 Key A 共享额度");
+  assert.equal(selectedQuotaShareLabel(row, "acc-3", names), null);
+  assert.equal(selectedQuotaShareLabel(row, "acc-4", names), null);
+  assert.equal(selectedQuotaShareLabel(identity({
+    credentials: [credential({ quota_pool_id: "solo", quota_windows: [] })],
+  }), "acc-1", names), null);
+  assert.equal(inferenceAuthState(row, "acc-1"), "unknown");
+  assert.equal(inferenceLastError(row, "acc-2"), null);
 });

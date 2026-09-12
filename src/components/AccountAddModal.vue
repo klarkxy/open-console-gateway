@@ -135,7 +135,7 @@
         </header>
 
         <p v-if="detail.kind === 'family' || detail.kind === 'preset'" class="account-add-outcome">
-          {{ t("选择预设将创建一个新供应商，并同时添加它的第一个账号。") }}
+          {{ t("选择预设后可先保存草稿，或完成设置以创建供应商并添加第一个账号。草稿请到供应商页继续。") }}
         </p>
 
         <div
@@ -215,7 +215,8 @@
           :initial-preset-id="currentPreset.id"
           preset-selection-locked
           context="account"
-          @saved="(providerId) => emit('presetSaved', providerId)"
+          @saved="onPresetSaved"
+          @committed="onPresetCommitted"
           @conflict="emit('presetConflict')"
           @busy-change="embeddedFormBusy = $event"
         />
@@ -249,6 +250,7 @@ import {
   NSpin,
   NTag,
   NTooltip,
+  useMessage,
 } from "naive-ui";
 import {
   KeyOutlined,
@@ -288,6 +290,8 @@ import PlatformAccountFormModal, {
   type PlatformAccountFormPayload,
 } from "./PlatformAccountFormModal.vue";
 import ProviderBrandMark from "./ProviderBrandMark.vue";
+import { applyAppViewSearchParams } from "../views/app-navigation.ts";
+import type { OnboardingIntent } from "../domain/onboarding-draft.ts";
 
 const props = defineProps<{
   show: boolean;
@@ -322,6 +326,7 @@ const emit = defineEmits<{
 }>();
 
 useLocalizedModalCloseLabel(toRef(props, "show"), "account-add-modal");
+const message = useMessage();
 
 const selectedOptionId = ref<string>("");
 const selectedVariantId = ref<string>("");
@@ -573,6 +578,37 @@ function onRailKeydown(event: KeyboardEvent): void {
   void nextTick(() => {
     document.getElementById(`account-add-option-${next}`)?.scrollIntoView({ block: "nearest" });
   });
+}
+
+let lastCommitWasDraft = false;
+
+function onPresetCommitted(result: {
+  connectionId: string;
+  mode: OnboardingIntent;
+  readbackFailed?: boolean;
+}): void {
+  lastCommitWasDraft = result.mode === "draft";
+  if (result.readbackFailed) {
+    message.warning(t("已保存，但未能刷新列表。请手动刷新，不要再次提交。"));
+  }
+  if (!lastCommitWasDraft) return;
+  if (!result.readbackFailed) {
+    message.success(t("草稿已保存，请到供应商页继续设置"));
+  }
+  const url = applyAppViewSearchParams(new URL(window.location.href), "providers", {
+    connection: result.connectionId,
+  });
+  window.history.pushState(null, "", url);
+  window.dispatchEvent(new PopStateEvent("popstate"));
+}
+
+function onPresetSaved(providerId: string): void {
+  if (lastCommitWasDraft) {
+    lastCommitWasDraft = false;
+    emit("update:show", false);
+    return;
+  }
+  emit("presetSaved", providerId);
 }
 
 function onOuterUpdateShow(value: boolean): void {

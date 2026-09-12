@@ -136,7 +136,8 @@
           :usage-refresh-loading="!!usageRefreshLoading[account.id]"
           :purchase-date-saving="busy || !!purchaseDateSaving[account.id]"
           :quota-limits-failed="!!quotaLimitsError"
-          :menu-options="accountMenuOptions(account, now)"
+          :menu-options="cardMenuOptions(account)"
+          :account-names="accountNamesById"
           @order-keydown="handleOrderKeydown($event, account.id)"
           @order-drag-start="startAccountDrag($event, account.id)"
           @toggle="toggleAccount(account.id)"
@@ -275,6 +276,30 @@
       :mode="transferMode"
       @imported="handleAccountsImported"
     />
+
+    <AccountCredentialModal
+      :show="showCredentialModal"
+      :mode="credentialModalMode"
+      :binding="credentialModalBinding"
+      :connection="credentialModalConnection"
+      :unsupported-reason="credentialModalUnsupported"
+      :busy="busy"
+      @update:show="setCredentialModalVisible"
+      @rotate="onRotateCredential"
+      @save-binding="onPatchBinding"
+    />
+
+    <IdentityCredentialCreateModal
+      ref="createModalRef"
+      :show="showCreateModal"
+      :unsupported-reason="createModalUnsupported"
+      :busy="busy"
+      :default-connection-id="createModalConnectionId"
+      :connections="createModalConnections"
+      :share-targets="createModalShareTargets"
+      @update:show="setCreateModalVisible"
+      @create="onCreateIdentityCredential"
+    />
   </div>
 </template>
 
@@ -301,6 +326,7 @@ import { providerApi } from "../api/providers.ts";
 import { useAccountsStore } from "../stores/accounts.ts";
 import { useIdentitiesStore } from "../stores/identities.ts";
 import { useProvidersStore } from "../stores/providers.ts";
+import type { MutationExpectation } from "../api/generated/dashboard-v3.ts";
 import type { ProviderCatalogEntry } from "../api/providers.ts";
 import type {
   Account,
@@ -312,6 +338,16 @@ import type {
 } from "../api/dashboard";
 import { isCooling } from "../domain/accounts-usage.ts";
 import { accountIsReady, accountMenuOptions } from "../domain/account-display.ts";
+import {
+  accountCredentialMenuOptions,
+  connectionAllowsIdentityCredentialCreate,
+  credentialWriteSupport,
+  isUncertainCreateFailure,
+  shareableInferenceCredentials,
+  type CredentialEditorMode,
+} from "../domain/account-credential.ts";
+import { identitiesApi } from "../api/identities.ts";
+import type { BindingPatchInput, IdentityCredentialCreateInput } from "../api/identities.ts";
 import { DEFAULT_PROVIDER_ID, isCommandCodeGoatAccount, isOllamaCloudAccount, isOfficialCnPlanAccount, isZenFreeAccount } from "../domain/account-providers.ts";
 import {
   executeCustomAccountEdit,
@@ -353,6 +389,8 @@ import AccountConnectionTestModal from "../components/AccountConnectionTestModal
 import AccountFormModal, { type AccountFormPayload } from "../components/AccountFormModal.vue";
 import ManagedAccountWizard from "../components/ManagedAccountWizard.vue";
 import AccountTransferModal from "../components/AccountTransferModal.vue";
+import AccountCredentialModal from "../components/AccountCredentialModal.vue";
+import IdentityCredentialCreateModal from "../components/IdentityCredentialCreateModal.vue";
 import PlatformAccountsSection from "../components/PlatformAccountsSection.vue";
 import type { PlatformAccountFormPayload } from "../components/PlatformAccountFormModal.vue";
 
@@ -370,6 +408,14 @@ const testingAccountId = ref<string | null>(null);
 const providerSettingsSaving = ref<Record<string, boolean>>({});
 const purchaseDateSaving = ref<Record<string, boolean>>({});
 const showModal = ref(false);
+const showCredentialModal = ref(false);
+const credentialModalMode = ref<CredentialEditorMode>("rotate");
+const credentialModalAccountId = ref<string | null>(null);
+const credentialModalExpectation = ref<MutationExpectation | null>(null);
+const showCreateModal = ref(false);
+const createModalAccountId = ref<string | null>(null);
+const createModalExpectation = ref<MutationExpectation | null>(null);
+const createModalRef = ref<InstanceType<typeof IdentityCredentialCreateModal> | null>(null);
 const showAddModal = ref(false);
 /** One-shot chooser preselection from the `add` deep link; cleared on close. */
 const addInitialOptionId = ref<string | null>(null);
@@ -522,7 +568,86 @@ const statusFilterOptions = computed(() => [
 
 
 
+const credentialModalAccount = computed(() => (
+  credentialModalAccountId.value
+    ? accounts.value.find((account) => account.id === credentialModalAccountId.value) ?? null
+    : null
+));
+const credentialModalSupport = computed(() => (
+  credentialModalAccount.value
+    ? credentialWriteSupport(credentialModalAccount.value, identityForCard(credentialModalAccount.value.id))
+    : null
+));
+const credentialModalBinding = computed(() => credentialModalSupport.value?.bindingRecord ?? null);
+const credentialModalConnection = computed(() => {
+  const connectionId = credentialModalBinding.value?.connection_id;
+  if (!connectionId) return null;
+  return providersStore.connections?.find((connection) => connection.id === connectionId) ?? null;
+});
+const credentialModalUnsupported = computed(() => {
+  if (!showCredentialModal.value) return null;
+  const support = credentialModalSupport.value;
+  if (!support) return t("无法确定当前卡片的凭据");
+  if (credentialModalMode.value === "rotate" && !support.rotate) return support.unsupportedReason;
+  if (credentialModalMode.value === "binding" && !support.binding) return support.unsupportedReason;
+  return null;
+});
+
+const createModalAccount = computed(() => (
+  createModalAccountId.value
+    ? accounts.value.find((account) => account.id === createModalAccountId.value) ?? null
+    : null
+));
+const createModalSupport = computed(() => (
+  createModalAccount.value
+    ? credentialWriteSupport(createModalAccount.value, identityForCard(createModalAccount.value.id))
+    : null
+));
+const createModalUnsupported = computed(() => {
+  if (!showCreateModal.value) return null;
+  const support = createModalSupport.value;
+  if (!support?.create) return support?.unsupportedReason || t("无法确定当前卡片的凭据");
+  return null;
+});
+const createModalConnectionId = computed(() => (
+  createModalSupport.value?.bindingRecord?.connection_id ?? ""
+));
+const createModalConnections = computed(() => (
+  (providersStore.connections ?? []).filter(connectionAllowsIdentityCredentialCreate)
+));
+const createModalShareTargets = computed(() => {
+  const identity = createModalAccount.value
+    ? identityForCard(createModalAccount.value.id)
+    : null;
+  return shareableInferenceCredentials(identity).map((row) => {
+    const account = accounts.value.find((item) => item.id === row.legacy.id);
+    return { id: row.credential.id, label: account?.name || row.legacy.id };
+  });
+});
+
+function cardMenuOptions(account: Account) {
+  const base = accountMenuOptions(account, now.value);
+  const extra = accountCredentialMenuOptions(account, identityForCard(account.id));
+  if (extra.length === 0) return base;
+  const editAt = base.findIndex((option) => option.key === "edit");
+  if (editAt < 0) return [...base, ...extra];
+  return [...base.slice(0, editAt + 1), ...extra, ...base.slice(editAt + 1)];
+}
+
 function handleMenuSelect(key: string | number, accountId: string) {
+  if (busy.value) return;
+  if (key === "rotate-key") {
+    void openCredentialModal(accountId, "rotate");
+    return;
+  }
+  if (key === "edit-binding") {
+    void openCredentialModal(accountId, "binding");
+    return;
+  }
+  if (key === "add-key") {
+    void openCreateModal(accountId);
+    return;
+  }
   if (key === "open-cpa") {
     openCpa();
   } else if (key === "open-console") {
@@ -636,8 +761,217 @@ function resetFilters(): void {
   statusFilter.value = "all";
 }
 
+const accountNamesById = computed(() => {
+  const names: Record<string, string> = {};
+  for (const account of accounts.value) names[account.id] = account.name;
+  return names;
+});
+
 function identityForCard(accountId: string) {
   return identitiesStore.byAccountId.get(accountId) ?? null;
+}
+
+async function captureIdentityViewExpectation(): Promise<MutationExpectation | null> {
+  if (identitiesStore.snapshotExpectation) return identitiesStore.snapshotExpectation;
+  await loadIdentitiesOverlay();
+  return identitiesStore.snapshotExpectation;
+}
+
+async function openCredentialModal(accountId: string, mode: CredentialEditorMode): Promise<void> {
+  if (busy.value) return;
+  const account = accounts.value.find((item) => item.id === accountId);
+  if (!account) return;
+  const support = credentialWriteSupport(account, identityForCard(accountId));
+  if (mode === "rotate" && !support.rotate) {
+    if (support.unsupportedReason) message.warning(support.unsupportedReason);
+    return;
+  }
+  if (mode === "binding" && !support.binding) {
+    if (support.unsupportedReason) message.warning(support.unsupportedReason);
+    return;
+  }
+  try {
+    const expectation = await captureIdentityViewExpectation();
+    if (!expectation) {
+      message.error(t("加载身份投影失败: {error}", { error: identitiesError.value || t("保存失败，请重试") }));
+      return;
+    }
+    credentialModalExpectation.value = expectation;
+    if (mode === "binding" && !providersStore.connections) {
+      await providersStore.loadConnections().catch(() => undefined);
+    }
+  } catch (error) {
+    message.error(t("加载账号失败: {error}", { error: dashboardErrorDetail(error) }));
+    return;
+  }
+  credentialModalAccountId.value = accountId;
+  credentialModalMode.value = mode;
+  showCredentialModal.value = true;
+}
+
+async function openCreateModal(accountId: string): Promise<void> {
+  if (busy.value) return;
+  const account = accounts.value.find((item) => item.id === accountId);
+  if (!account) return;
+  const support = credentialWriteSupport(account, identityForCard(accountId));
+  if (!support.create) {
+    if (support.unsupportedReason) message.warning(support.unsupportedReason);
+    return;
+  }
+  try {
+    const expectation = await captureIdentityViewExpectation();
+    if (!expectation) {
+      message.error(t("加载身份投影失败: {error}", { error: identitiesError.value || t("保存失败，请重试") }));
+      return;
+    }
+    createModalExpectation.value = expectation;
+    if (!providersStore.connections) {
+      await providersStore.loadConnections().catch(() => undefined);
+    }
+  } catch (error) {
+    message.error(t("加载账号失败: {error}", { error: dashboardErrorDetail(error) }));
+    return;
+  }
+  createModalAccountId.value = accountId;
+  showCreateModal.value = true;
+}
+
+function setCredentialModalVisible(show: boolean): void {
+  if (!show && busy.value) return;
+  showCredentialModal.value = show;
+  if (!show) {
+    credentialModalAccountId.value = null;
+    credentialModalExpectation.value = null;
+  }
+}
+
+function setCreateModalVisible(show: boolean): void {
+  if (!show && busy.value) return;
+  showCreateModal.value = show;
+  if (!show) {
+    createModalAccountId.value = null;
+    createModalExpectation.value = null;
+  }
+}
+
+async function refreshAccountsAndIdentities(): Promise<void> {
+  const loaded = await accountsStore.loadPresented();
+  accounts.value = loaded;
+  await loadIdentitiesOverlay();
+}
+
+async function recoverCredentialMutationConflict(error: unknown): Promise<boolean> {
+  if (!isRevisionConflict(error)) return false;
+  const reloaded = await reloadControlPlaneView();
+  if (reloaded) {
+    credentialModalExpectation.value = identitiesStore.snapshotExpectation;
+    createModalExpectation.value = identitiesStore.snapshotExpectation;
+    message.warning(t("凭据设置已被其他操作修改，已重新加载最新状态，请重试"));
+  } else {
+    message.warning(t("凭据设置已被其他操作修改，未能加载最新状态，请稍后重试"));
+  }
+  return true;
+}
+
+async function onRotateCredential(payload: { secretInput: string }): Promise<void> {
+  if (busy.value) return;
+  const support = credentialModalSupport.value;
+  const credentialId = support?.credential?.credential.id;
+  if (!support?.rotate || !credentialId) {
+    message.warning(support?.unsupportedReason || t("无法确定当前卡片的凭据"));
+    return;
+  }
+  busy.value = true;
+  try {
+    await identitiesApi.rotateCredential(
+      credentialId,
+      payload,
+      credentialModalExpectation.value ?? undefined,
+    );
+    showCredentialModal.value = false;
+    credentialModalAccountId.value = null;
+    credentialModalExpectation.value = null;
+    try {
+      await refreshAccountsAndIdentities();
+    } catch (refreshError) {
+      message.error(t("加载账号失败: {error}", { error: dashboardErrorDetail(refreshError) }));
+    }
+    message.success(t("Key 已轮换"));
+  } catch (error) {
+    if (await recoverCredentialMutationConflict(error)) return;
+    message.error(t("轮换 Key 失败: {error}", { error: dashboardErrorDetail(error) }));
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function onPatchBinding(payload: BindingPatchInput): Promise<void> {
+  if (busy.value) return;
+  const support = credentialModalSupport.value;
+  const bindingId = support?.bindingRecord?.id;
+  if (!support?.binding || !bindingId) {
+    message.warning(support?.unsupportedReason || t("无法确定当前卡片的凭据"));
+    return;
+  }
+  busy.value = true;
+  try {
+    await identitiesApi.patchBinding(
+      bindingId,
+      payload,
+      credentialModalExpectation.value ?? undefined,
+    );
+    showCredentialModal.value = false;
+    credentialModalAccountId.value = null;
+    credentialModalExpectation.value = null;
+    try {
+      await refreshAccountsAndIdentities();
+    } catch (refreshError) {
+      message.error(t("加载账号失败: {error}", { error: dashboardErrorDetail(refreshError) }));
+    }
+    message.success(t("绑定已更新"));
+  } catch (error) {
+    if (await recoverCredentialMutationConflict(error)) return;
+    message.error(t("更新绑定失败: {error}", { error: dashboardErrorDetail(error) }));
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function onCreateIdentityCredential(payload: IdentityCredentialCreateInput): Promise<void> {
+  if (busy.value) return;
+  const support = createModalSupport.value;
+  const identityId = support?.identityId;
+  if (!support?.create || !identityId) {
+    message.warning(support?.unsupportedReason || t("无法确定当前卡片的凭据"));
+    return;
+  }
+  busy.value = true;
+  try {
+    await identitiesApi.createIdentityCredential(
+      identityId,
+      payload,
+      createModalExpectation.value ?? undefined,
+    );
+    showCreateModal.value = false;
+    createModalAccountId.value = null;
+    createModalExpectation.value = null;
+    try {
+      await refreshAccountsAndIdentities();
+    } catch (refreshError) {
+      message.error(t("加载账号失败: {error}", { error: dashboardErrorDetail(refreshError) }));
+    }
+    message.success(t("Key 已添加"));
+  } catch (error) {
+    createModalRef.value?.noteFailure(error);
+    if (await recoverCredentialMutationConflict(error)) return;
+    if (isUncertainCreateFailure(error)) {
+      message.warning(t("创建结果未知，Key 可能已添加。请用相同内容重试，不要修改后再提交。"));
+    } else {
+      message.error(t("添加 Key 失败: {error}", { error: dashboardErrorDetail(error) }));
+    }
+  } finally {
+    busy.value = false;
+  }
 }
 
 async function loadIdentitiesOverlay(): Promise<void> {
@@ -1171,13 +1505,13 @@ async function toggleAccount(id: string) {
   }
 }
 
-async function reloadAfterControlPlaneConflict(): Promise<void> {
+async function reloadControlPlaneView(): Promise<boolean> {
   const knownIds = new Set(accounts.value.map(({ id }) => id));
   let loaded: Account[];
   try {
     loaded = await accountsStore.loadPresented();
   } catch {
-    return;
+    return false;
   }
 
   const loadedIds = new Set(loaded.map(({ id }) => id));
@@ -1185,7 +1519,7 @@ async function reloadAfterControlPlaneConflict(): Promise<void> {
     if (!loadedIds.has(id)) removeAccountState(id);
   }
   accounts.value = loaded;
-  void loadIdentitiesOverlay();
+  await loadIdentitiesOverlay();
   if (editingAccount.value) {
     const stillListed = reconcileEditingAccount(loaded, editingAccount.value.id);
     editingAccount.value = stillListed;
@@ -1197,6 +1531,21 @@ async function reloadAfterControlPlaneConflict(): Promise<void> {
     showManagedWizard.value = false;
     managedWizardAccountId.value = null;
   }
+  if (credentialModalAccountId.value && !loadedIds.has(credentialModalAccountId.value)) {
+    showCredentialModal.value = false;
+    credentialModalAccountId.value = null;
+    credentialModalExpectation.value = null;
+  }
+  if (createModalAccountId.value && !loadedIds.has(createModalAccountId.value)) {
+    showCreateModal.value = false;
+    createModalAccountId.value = null;
+    createModalExpectation.value = null;
+  }
+  return true;
+}
+
+async function reloadAfterControlPlaneConflict(): Promise<void> {
+  await reloadControlPlaneView();
 }
 
 async function recoverAccountMutationConflict(error: unknown): Promise<boolean> {

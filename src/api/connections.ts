@@ -1,5 +1,6 @@
 import { dashboardV4 } from "./dashboard-v4.ts";
 import type { WithoutExpectation } from "./dashboard-v3.ts";
+import type { MutationExpectation } from "./generated/dashboard-v3.ts";
 import { useControlPlaneStore } from "../stores/controlPlane.ts";
 import type {
   AccountUpstreamProtocol,
@@ -16,6 +17,7 @@ import type {
   LegacyConnectionKind,
   LegacyIdentity as V4LegacyIdentity,
   OfferingKind,
+  ConnectionList,
   OnboardingCommitRequest,
   OnboardingCommitResult,
   TemplateRef,
@@ -90,8 +92,14 @@ export interface Connection {
 export interface OnboardingCommitView {
   connection_id: string;
   credential_id: string | null;
+  account_id: string | null;
   replayed: boolean;
   target_ids: string[];
+}
+
+export interface ConnectionListSnapshot {
+  connections: Connection[];
+  expectation: MutationExpectation;
 }
 
 function presentEndpoint(value: V4ConnectionEndpoint): ConnectionEndpoint {
@@ -154,31 +162,63 @@ function presentOnboardingCommit(value: OnboardingCommitResult): OnboardingCommi
   return {
     connection_id: value.connectionId,
     credential_id: value.credentialId,
+    account_id: value.accountId ?? null,
     replayed: value.replayed,
     target_ids: [...value.targetIds],
   };
 }
 
+export function presentConnectionListSnapshot(value: ConnectionList): ConnectionListSnapshot {
+  return {
+    connections: value.connections.map(presentConnection),
+    expectation: {
+      expectedRevision: value.revision.revision,
+      processGeneration: value.revision.processGeneration,
+    },
+  };
+}
+
+async function fetchConnectionSnapshot(): Promise<ConnectionListSnapshot> {
+  const value = await dashboardV4.getConnections();
+  return presentConnectionListSnapshot(value);
+}
+
+async function withCas<T>(
+  run: (expectation: MutationExpectation) => Promise<T>,
+  captured?: MutationExpectation,
+): Promise<T> {
+  const control = useControlPlaneStore();
+  if (!captured && !control.hasTokens()) await control.refresh();
+  return control.runMutation(run, captured);
+}
+
 export const connectionsApi = {
   list: async (): Promise<Connection[]> => {
-    const value = await dashboardV4.getConnections();
-    return value.connections.map(presentConnection);
+    const snapshot = await fetchConnectionSnapshot();
+    return snapshot.connections;
   },
   /**
+   * Presented connections plus the GET's own CAS pair. Callers that open an
+   * editor must capture this view pair; a later global control-plane GET
+   * must not silently rebase the draft.
+   */
+  listSnapshot: fetchConnectionSnapshot,
+  /**
    * CAS tokens come from the same control-plane store `providerApi` uses.
-   * Callers pass the semantic payload only; `runMutation` attaches the pair.
+   * Pass `expectation` from the open form so a later GET cannot silently
+   * rebase the draft. Omit it to use the store's current pair.
    * Nested V4 `revision` tokens are published by `requestV4` (no presenter
-   * re-sync). On 409, `runMutation` already refreshes via V3 `GET /contract`;
-   * a discarded connections GET cannot update the store list and must not
-   * replace the original `revisionConflict`.
+   * re-sync). On 409, `runMutation` already refreshes via V3 `GET /contract`
+   * and never auto-replays.
    */
   commitOnboarding: async (
     input: WithoutExpectation<OnboardingCommitRequest>,
+    expectation?: MutationExpectation,
   ): Promise<OnboardingCommitView> => {
-    const control = useControlPlaneStore();
-    if (!control.hasTokens()) await control.refresh();
-    const value = await control.runMutation((expectation) =>
-      dashboardV4.commitOnboarding(input, expectation));
+    const value = await withCas(
+      (tokens) => dashboardV4.commitOnboarding(input, tokens),
+      expectation,
+    );
     return presentOnboardingCommit(value);
   },
 };

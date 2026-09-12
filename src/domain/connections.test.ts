@@ -7,6 +7,7 @@ import {
   connectionBrandFamily,
   connectionForLegacyProvider,
   connectionStatus,
+  isOnboardingDraftConnection,
   filterConnections,
   groupConnectionsByOffering,
   selectedConnectionIdFromQuery,
@@ -89,6 +90,18 @@ test("connection filter matches name, legacy id, and display family case-insensi
 });
 
 test("connectionStatus uses only authorization, lifecycle, and eligibility", () => {
+  assert.equal(connectionStatus(connection({
+    lifecycle: "draft",
+    authorization: "missing",
+    eligibility: { state: "ineligible", reason: "connection_disabled" },
+  })).kind, "draft");
+  assert.equal(connectionStatus(connection({
+    lifecycle: "draft",
+    authorization: "valid",
+    eligibility: { state: "ineligible", reason: "missing_credential" },
+  })).label, "草稿");
+  assert.equal(isOnboardingDraftConnection(connection({ lifecycle: "draft" })), true);
+  assert.equal(isOnboardingDraftConnection(connection({ lifecycle: "configured" })), false);
   assert.equal(connectionStatus(connection({
     lifecycle: "disabled",
     authorization: "missing",

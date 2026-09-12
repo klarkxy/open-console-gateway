@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { connectionsApi, presentConnection } from "./connections.ts";
+import { connectionsApi, presentConnection, presentConnectionListSnapshot } from "./connections.ts";
 import type { ConnectionSummary } from "./generated/dashboard-v4.ts";
 import { useControlPlaneStore } from "../stores/controlPlane.ts";
 import { installFetchMock, setupControlPlane } from "../test-helpers/dashboard-v3-fetch.ts";
@@ -88,6 +88,126 @@ test("connectionsApi.list presents the V4 projection and syncs nested CAS tokens
   assert.equal(control.pricingRevision, "p2");
 });
 
+test("presentConnectionListSnapshot pairs the GET revision with presented rows", () => {
+  const snapshot = presentConnectionListSnapshot({
+    revision: { revision: 4, processGeneration: 11, pricingRevision: "p2" },
+    connections: [summary({ lifecycle: "draft", credentialCount: 1 })],
+  });
+  assert.equal(snapshot.connections[0]?.lifecycle, "draft");
+  assert.equal(snapshot.connections[0]?.credential_count, 1);
+  assert.deepEqual(snapshot.expectation, { expectedRevision: 4, processGeneration: 11 });
+});
+
+test("connectionsApi.listSnapshot returns presented connections plus the GET pair", async () => {
+  setupControlPlane(9, 11, "p1");
+  installFetchMock(({ url, method }) => {
+    if (url.endsWith("/connections") && method === "GET") {
+      return {
+        revision: { revision: 4, processGeneration: 11, pricingRevision: "p2" },
+        connections: [summary({ lifecycle: "draft" })],
+      };
+    }
+    throw new Error(`unexpected request ${url}`);
+  });
+
+  const snapshot = await connectionsApi.listSnapshot();
+  assert.equal(snapshot.connections[0]?.lifecycle, "draft");
+  assert.deepEqual(snapshot.expectation, { expectedRevision: 4, processGeneration: 11 });
+  const control = useControlPlaneStore();
+  assert.equal(control.revision, 9);
+});
+
+test("connectionsApi.commitOnboarding uses a captured expectation even after the store advances", async () => {
+  setupControlPlane(4, 11, "p1");
+  useControlPlaneStore().sync({ revision: 8, processGeneration: 11, pricingRevision: "p1" });
+  const requests = installFetchMock(({ url, method }) => {
+    if (url.endsWith("/onboarding/commit") && method === "POST") {
+      return {
+        connectionId: "conn-1",
+        credentialId: "cred-real",
+        accountId: "acc-1",
+        replayed: false,
+        revision: { revision: 9, processGeneration: 11, pricingRevision: "p1" },
+        targetIds: ["tgt-1"],
+      };
+    }
+    throw new Error(`unexpected request ${url}`);
+  });
+
+  const result = await connectionsApi.commitOnboarding(
+    {
+      operationId: "11111111-1111-4111-8111-111111111111",
+      mode: "complete",
+      connection: {
+        kind: "existing",
+        connectionId: "conn-1",
+        configuration: {
+          templateId: "custom-http",
+          name: "Lab",
+          endpointUrl: "http://127.0.0.1:9",
+          upstreamProtocol: "chat_completions",
+          authKind: "bearer",
+        },
+      },
+      targets: [{ publicModel: "lab-opus", upstreamModel: "vendor/opus" }],
+    },
+    { expectedRevision: 4, processGeneration: 11 },
+  );
+  assert.equal(result.connection_id, "conn-1");
+  assert.equal(result.credential_id, "cred-real");
+  assert.equal(result.account_id, "acc-1");
+  assert.deepEqual(requests[0]?.body, {
+    operationId: "11111111-1111-4111-8111-111111111111",
+    mode: "complete",
+    connection: {
+      kind: "existing",
+      connectionId: "conn-1",
+      configuration: {
+        templateId: "custom-http",
+        name: "Lab",
+        endpointUrl: "http://127.0.0.1:9",
+        upstreamProtocol: "chat_completions",
+        authKind: "bearer",
+      },
+    },
+    targets: [{ publicModel: "lab-opus", upstreamModel: "vendor/opus" }],
+    expectedRevision: 4,
+    processGeneration: 11,
+  });
+});
+
+test("onboarding receipt keeps historic credential ids distinct from account ids", async () => {
+  setupControlPlane(4, 11, "p1");
+  installFetchMock(({ url, method }) => {
+    if (url.endsWith("/onboarding/commit") && method === "POST") {
+      return {
+        connectionId: "conn-1",
+        credentialId: "acc-historic",
+        replayed: true,
+        revision: { revision: 9, processGeneration: 11, pricingRevision: "p3" },
+        targetIds: ["tgt-1"],
+      };
+    }
+    throw new Error(`unexpected request ${url}`);
+  });
+
+  const result = await connectionsApi.commitOnboarding({
+    operationId: "11111111-1111-4111-8111-111111111111",
+    connection: {
+      kind: "new",
+      templateId: "custom-http",
+      name: "Lab",
+      endpointUrl: "http://127.0.0.1:9",
+      upstreamProtocol: "chat_completions",
+      authKind: "bearer",
+    },
+    targets: [{ publicModel: "lab-opus", upstreamModel: "vendor/opus" }],
+  });
+  assert.equal(result.credential_id, "acc-historic");
+  assert.equal(result.account_id, null);
+  assert.equal(result.replayed, true);
+});
+
 test("connectionsApi.commitOnboarding does not replay a 409 revisionConflict", async () => {
   setupControlPlane(4, 11, "p1");
   let commits = 0;
@@ -157,6 +277,7 @@ test("connectionsApi.commitOnboarding publishes nested V4 CAS tokens", async () 
   });
   assert.equal(result.connection_id, "conn-1");
   assert.equal(result.replayed, false);
+  assert.equal(result.account_id, null);
   const control = useControlPlaneStore();
   assert.equal(control.revision, 9);
   assert.equal(control.processGeneration, 11);

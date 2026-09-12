@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { providerApi } from "./providers.ts";
+import { useControlPlaneStore } from "../stores/controlPlane.ts";
 import { installFetchMock, setupControlPlane } from "../test-helpers/dashboard-v3-fetch.ts";
 
 test("dynamic Provider create omits Key from the presented response and does not replay 409", async () => {
@@ -100,6 +101,48 @@ test("dynamic Provider update 409 refreshes catalog and provider without replayi
   assert.equal(requests.filter((request) => request.method === "PATCH").length, 1);
   assert.ok(requests.some((request) => request.url.endsWith("/providers") && request.method === "GET"));
   assert.ok(requests.some((request) => request.url.endsWith("/providers/lab-id") && request.method === "GET"));
+});
+
+test("dynamic Provider update uses a captured definition pair even after the store advances", async () => {
+  setupControlPlane(4, 11, "p1");
+  useControlPlaneStore().sync({ revision: 8, processGeneration: 11, pricingRevision: "p1" });
+  const requests = installFetchMock(({ url, method }) => {
+    if (url.endsWith("/providers/lab-id") && method === "PATCH") {
+      return {
+        provider: {
+          id: "lab-id",
+          name: "Lab",
+          origin: "custom",
+          offering: "api",
+          editable: true,
+          deletable: true,
+          endpointUrl: "http://127.0.0.1:9",
+          upstreamProtocol: "chat_completions",
+          authKind: "bearer",
+          models: [{ publicModel: "lab-opus", upstreamModel: "vendor/opus" }],
+          createdAt: "2026-01-01T00:00:00Z",
+          updatedAt: "2026-01-01T00:00:00Z",
+          revision: 5,
+          processGeneration: 11,
+        },
+        revision: 5,
+        processGeneration: 11,
+        pricingRevision: "p1",
+      };
+    }
+    throw new Error(`unexpected request ${method} ${url}`);
+  });
+
+  await providerApi.updateProviderDefinition("lab-id", {
+    name: "Lab Local",
+    endpointUrl: "http://127.0.0.1:9",
+    upstreamProtocol: "chat_completions",
+    authKind: "bearer",
+    models: [{ publicModel: "lab-opus", upstreamModel: "vendor/opus" }],
+  }, { expectedRevision: 4, processGeneration: 11 });
+  assert.equal(requests[0]?.body?.expectedRevision, 4);
+  assert.equal(requests[0]?.body?.processGeneration, 11);
+  assert.equal(requests[0]?.body?.name, "Lab Local");
 });
 
 test("dynamic Provider discover and test never persist a Key in the presented result", async () => {
