@@ -1689,7 +1689,6 @@ const CUSTOM_DISCOVERY_CATALOG_TYPES: &[&str] = &[
     "CustomModelDiscoveryRequest",
     "CustomModelDiscoveryResponse",
 ];
-const CLAUDE_DESKTOP_CATALOG_TYPES: &[&str] = &["ClaudeDesktopModels", "ClaudeDesktopModelsUpdate"];
 
 const UPDATER_CATALOG_TYPES: &[&str] = &["UpdateCheck", "DesktopUpdate", "InstallUpdate"];
 const USAGE_REFRESH_CATALOG_TYPES: &[&str] = &[
@@ -1797,14 +1796,9 @@ fn catalog_type_names_append_pricing_dtos_after_the_provider_prefix() {
         &CATALOG_TYPE_NAMES[proxy_end..custom_discovery_end],
         CUSTOM_DISCOVERY_CATALOG_TYPES
     );
-    let claude_end = custom_discovery_end + CLAUDE_DESKTOP_CATALOG_TYPES.len();
+    let account_verify_end = custom_discovery_end + 1;
     assert_eq!(
-        &CATALOG_TYPE_NAMES[custom_discovery_end..claude_end],
-        CLAUDE_DESKTOP_CATALOG_TYPES
-    );
-    let account_verify_end = claude_end + 1;
-    assert_eq!(
-        &CATALOG_TYPE_NAMES[claude_end..account_verify_end],
+        &CATALOG_TYPE_NAMES[custom_discovery_end..account_verify_end],
         ["AccountVerify"]
     );
     let browser_end = account_verify_end + BROWSER_CATALOG_TYPES.len();
@@ -2741,141 +2735,6 @@ fn proxy_test_catalog_registers_without_cas_or_secret_fields() {
         assert!(
             !response_props.contains_key(forbidden),
             "ProxyTestResponse must not expose {forbidden}"
-        );
-    }
-}
-
-#[test]
-fn claude_desktop_models_are_camel_case_cas_and_secret_free() {
-    let models = ClaudeDesktopModels {
-        sonnet: "glm-5.2".into(),
-        opus: "grok-4.5".into(),
-        haiku: "mimo-v2.5".into(),
-        revision: 11,
-        process_generation: 9,
-    };
-    let value = serde_json::to_value(&models).unwrap();
-    assert_eq!(
-        value,
-        json!({
-            "sonnet": "glm-5.2",
-            "opus": "grok-4.5",
-            "haiku": "mimo-v2.5",
-            "revision": 11,
-            "processGeneration": 9 })
-    );
-    let object = value.as_object().unwrap();
-    for forbidden in [
-        "pricingRevision",
-        "pricing_revision",
-        "key",
-        "gatewayKey",
-        "gateway_key",
-        "primaryKey",
-        "cipher",
-        "secret",
-        "token",
-    ] {
-        assert!(
-            !object.contains_key(forbidden),
-            "ClaudeDesktopModels must not expose {forbidden}"
-        );
-    }
-
-    let parsed: ClaudeDesktopModelsUpdate = serde_json::from_value(json!({
-        "expectedRevision": 11,
-        "processGeneration": 9,
-        "sonnet": "glm-5.2",
-        "opus": "",
-        "haiku": "mimo-v2.5"
-    }))
-    .unwrap();
-    assert_eq!(parsed.expectation.expected_revision, 11);
-    assert_eq!(parsed.expectation.process_generation, 9);
-    assert_eq!(parsed.sonnet, "glm-5.2");
-    assert_eq!(parsed.opus, "");
-    assert_eq!(parsed.haiku, "mimo-v2.5");
-
-    assert!(
-        serde_json::from_value::<ClaudeDesktopModelsUpdate>(json!({
-            "processGeneration": 9,
-            "sonnet": "glm-5.2",
-            "opus": "",
-            "haiku": ""
-        }))
-        .is_err()
-    );
-    assert!(
-        serde_json::from_value::<ClaudeDesktopModelsUpdate>(json!({
-            "expectedRevision": 11,
-            "processGeneration": 9,
-            "opus": "",
-            "haiku": ""
-        }))
-        .is_err()
-    );
-    assert!(
-        serde_json::from_value::<ClaudeDesktopModelsUpdate>(json!({
-            "expectedRevision": 11,
-            "processGeneration": 9,
-            "sonnet": "glm-5.2",
-            "opus": "",
-            "haiku": "",
-            "gatewayKey": "ocg-secret"
-        }))
-        .is_err()
-    );
-}
-
-#[test]
-fn claude_desktop_catalog_registers_required_roles_and_cas() {
-    let schema = contract_schema();
-    let defs = schema["$defs"].as_object().expect("catalog $defs");
-    for name in CLAUDE_DESKTOP_CATALOG_TYPES {
-        assert!(defs.contains_key(*name), "schema missing {name}");
-        assert_eq!(defs[*name]["additionalProperties"], false);
-    }
-
-    let response_required = defs["ClaudeDesktopModels"]["required"]
-        .as_array()
-        .expect("ClaudeDesktopModels.required");
-    assert_eq!(
-        response_required,
-        &vec![
-            json!("sonnet"),
-            json!("opus"),
-            json!("haiku"),
-            json!("revision"),
-            json!("processGeneration"),
-        ]
-    );
-    let response_props = defs["ClaudeDesktopModels"]["properties"]
-        .as_object()
-        .expect("ClaudeDesktopModels.properties");
-    assert!(!response_props.contains_key("pricingRevision"));
-    assert!(!response_props.contains_key("key"));
-    assert!(!response_props.contains_key("gatewayKey"));
-
-    let update_required = defs["ClaudeDesktopModelsUpdate"]["required"]
-        .as_array()
-        .expect("ClaudeDesktopModelsUpdate.required");
-    assert_eq!(
-        update_required,
-        &vec![
-            json!("expectedRevision"),
-            json!("processGeneration"),
-            json!("sonnet"),
-            json!("opus"),
-            json!("haiku"),
-        ]
-    );
-    let update_props = defs["ClaudeDesktopModelsUpdate"]["properties"]
-        .as_object()
-        .expect("ClaudeDesktopModelsUpdate.properties");
-    for forbidden in ["key", "gatewayKey", "primaryKey", "pricingRevision"] {
-        assert!(
-            !update_props.contains_key(forbidden),
-            "ClaudeDesktopModelsUpdate must not expose {forbidden}"
         );
     }
 }

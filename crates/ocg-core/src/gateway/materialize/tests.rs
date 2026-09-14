@@ -805,10 +805,10 @@ fn parse_helpers_are_reexported_for_adapters() {
 }
 
 #[test]
-fn claude_desktop_identity_keeps_client_name_and_mapped_alias() {
+fn materialize_keeps_client_name_and_mapped_upstream_alias() {
     let body = Bytes::from(
         serde_json::to_vec(&json!({
-            "model": crate::models::CLAUDE_DESKTOP_OPUS_ALIAS,
+            "model": "client-opus",
             "max_tokens": 1,
             "messages": [{"role": "user", "content": "hi"}]
         }))
@@ -831,10 +831,7 @@ fn claude_desktop_identity_keeps_client_name_and_mapped_alias() {
     )
     .unwrap();
     let identity = native_log_identity(&plan);
-    assert_eq!(
-        identity.requested_model,
-        crate::models::CLAUDE_DESKTOP_OPUS_ALIAS
-    );
+    assert_eq!(identity.requested_model, "client-opus");
     assert_eq!(identity.resolved_alias.as_deref(), Some("glm-5.2"));
     assert_eq!(identity.upstream_model, "glm-5.2");
 }

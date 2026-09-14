@@ -103,8 +103,6 @@ export type DashboardApiV3 =
   | ProxyTestResponse
   | CustomModelDiscoveryRequest
   | CustomModelDiscoveryResponse
-  | ClaudeDesktopModels
-  | ClaudeDesktopModelsUpdate
   | AccountVerify
   | BrowserMode
   | BrowserTarget
@@ -1466,30 +1464,6 @@ export interface CustomModelDiscoveryResponse {
   processGeneration: number;
   revision: number;
   truncated: boolean;
-}
-/**
- * GET/PUT `/claude-desktop/models` resource. Distinct from `AppConfig` and
- * from `models::ClaudeDesktopModels`. Role values are the resolved mapping
- * (empty roles inherit the first configured model). CAS tokens follow the
- * Settings convention: `revision` and `processGeneration` only.
- */
-export interface ClaudeDesktopModels {
-  haiku: string;
-  opus: string;
-  processGeneration: number;
-  revision: number;
-  sonnet: string;
-}
-/**
- * PUT `/claude-desktop/models` body. CAS tokens and all three roles are
- * required. Unknown fields, including any Key material, are rejected.
- */
-export interface ClaudeDesktopModelsUpdate {
-  expectedRevision: number;
-  haiku: string;
-  opus: string;
-  processGeneration: number;
-  sonnet: string;
 }
 /**
  * POST `/accounts/{id}/verify` body. CAS tokens are required. Unknown

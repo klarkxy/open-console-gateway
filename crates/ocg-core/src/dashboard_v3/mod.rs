@@ -9,8 +9,7 @@
 //! provider-usage reads, the local/Zen provider catalog,
 //! contracts, Zen Free control plane, pricing, the settings proxy diagnostic,
 //! session-protected desktop update check/status/install, read-only
-//! observability, Go/Zen protocol probes, the Claude Desktop three-role model
-//! mapping, the local/native/remote browser runtime, and managed-account Key
+//! observability, Go/Zen protocol probes, the local/native/remote browser runtime, and managed-account Key
 //! verification. Custom model discovery is an authenticated operational probe
 //! (no `expectedRevision`, no revision bump).
 //! `GET /settings/check-update` and `GET /settings/update-status` are reads
@@ -25,7 +24,6 @@ mod account_verify;
 mod accounts;
 mod auth;
 mod browser;
-mod claude_desktop;
 mod connection;
 mod cpa;
 mod custom_discovery;
@@ -76,41 +74,41 @@ pub use types::{
     AccountSetupUpdate, AccountType, AccountUpdate, AccountUpstreamProtocol, AccountUsageUpdate,
     AccountVerificationStatus, AccountVerify, ApplicationModels, AuthLogin, AuthLogout,
     AuthRegister, AuthStatus, BrowserCapabilities, BrowserMode, BrowserOpen, BrowserOpenRequest,
-    BrowserTarget, CATALOG_TYPE_NAMES, CapabilitySummary, CardCapabilitySummary,
-    ClaudeDesktopModels, ClaudeDesktopModelsUpdate, ConnectionInfo, ConnectionSubKey,
-    ContractScopeKind, ControlRevision, CpaAccount, CpaAccountDelete, CpaAccountStatusUpdate,
-    CpaAccounts, CpaConnectionReport, CpaIntegration, CpaIntegrationUpdate, CpaModel, CpaModels,
-    CpaOAuthProvider, CpaOAuthSessionDelete, CpaOAuthStart, CpaOAuthStartRequest, CpaOAuthStatus,
-    CpaQuotaReset, CpaRuntime, CpaRuntimeCheck, CpaRuntimeInstall, CpaRuntimeKey,
-    CpaRuntimeKeyCreated, CpaRuntimeKeys, CpaRuntimeLogs, CpaRuntimePhase, CpaTestRequest,
-    CreditBalance, CustomEndpointContract, CustomModelDiscoveryRequest,
-    CustomModelDiscoveryResponse, DailyModelTokens, DailyTokensByModel, DailyTokensQuery,
-    DashboardSummary, DesktopUpdate, DesktopUpdatePhase, ERROR_BUILTIN_PROVIDER_IMMUTABLE,
-    ERROR_CONFLICT, ERROR_FORBIDDEN, ERROR_GATEWAY_TIMEOUT, ERROR_GONE, ERROR_INTERNAL,
-    ERROR_INVALID_JSON, ERROR_INVALID_REQUEST, ERROR_MISSING_EXPECTED_REVISION, ERROR_NOT_FOUND,
-    ERROR_NOT_IMPLEMENTED, ERROR_OPERATION_PAYLOAD_MISMATCH, ERROR_OUTBOUND_FAILED,
-    ERROR_PRECONDITION_FAILED, ERROR_REVISION_CONFLICT, ERROR_SERVICE_UNAVAILABLE, ERROR_THROTTLED,
-    ERROR_UNAUTHORIZED, EffectiveCatalog, EffectiveModelContract, EffectiveModelProtocols,
-    EffectiveProtocolEvidence, ForwardLog, ForwardLogClientKey, ForwardLogKeys, ForwardLogModels,
-    ForwardLogQuery, ForwardLogSummary, ForwardLogs, GatewayLog, GatewayLogQuery, GatewayLogs,
-    GatewayStatus, InstallUpdate, KeyCreate, KeyUpdate, ModelProtocolOverride,
-    ModelProtocolOverridesUpdate, MutationAck, MutationExpectation, OllamaBillingTier,
-    PricingAdjustment, PricingAvailability, PricingLimits, PricingModel, PricingMultiplierChange,
-    PricingMultiplierWrite, PricingMultipliersUpdate, PricingRefresh, PricingRefreshPolicy,
-    PricingRefreshStatus, PricingRefreshUpdate, PricingRevision, PricingSnapshot,
-    PricingTimeWindow, ProtocolOverrideState, ProtocolProbeRequest, ProtocolProbeResponse,
-    ProtocolProbeResult, ProviderAccountChoice, ProviderCatalog, ProviderCatalogEntry,
-    ProviderCatalogFormField, ProviderCatalogRiskNotice, ProviderContractGroup, ProviderContracts,
-    ProviderDefinition, ProviderDefinitionAuthKind, ProviderDefinitionCreate,
-    ProviderDefinitionDiscoverRequest, ProviderDefinitionDiscoverResponse, ProviderDefinitionModel,
-    ProviderDefinitionMutation, ProviderDefinitionTestRequest, ProviderDefinitionTestResponse,
-    ProviderDefinitionUpdate, ProviderModelCapability, ProviderModelUpstreamOverride,
-    ProviderPricing, ProviderPricingRefresh, ProviderPricingRefreshUpdate, ProviderUsage,
-    ProxyListDirection, ProxyMode, ProxySupportedModel, ProxyTestRequest, ProxyTestResponse,
-    QuotaWindow, RoutingMode, Settings, SettingsUpdate, UpdateCheck, UsageAvailability,
-    UsageMutation, UsageRefresh, UsageRefreshThrottleError, UsageRefreshUpdate, UsageSyncState,
-    UsageWindow, V3Error, ZenFreeModel, ZenFreeModels, ZenFreeSettings, ZenFreeSettingsUpdate,
-    contract_schema, contract_schema_pretty,
+    BrowserTarget, CATALOG_TYPE_NAMES, CapabilitySummary, CardCapabilitySummary, ConnectionInfo,
+    ConnectionSubKey, ContractScopeKind, ControlRevision, CpaAccount, CpaAccountDelete,
+    CpaAccountStatusUpdate, CpaAccounts, CpaConnectionReport, CpaIntegration, CpaIntegrationUpdate,
+    CpaModel, CpaModels, CpaOAuthProvider, CpaOAuthSessionDelete, CpaOAuthStart,
+    CpaOAuthStartRequest, CpaOAuthStatus, CpaQuotaReset, CpaRuntime, CpaRuntimeCheck,
+    CpaRuntimeInstall, CpaRuntimeKey, CpaRuntimeKeyCreated, CpaRuntimeKeys, CpaRuntimeLogs,
+    CpaRuntimePhase, CpaTestRequest, CreditBalance, CustomEndpointContract,
+    CustomModelDiscoveryRequest, CustomModelDiscoveryResponse, DailyModelTokens,
+    DailyTokensByModel, DailyTokensQuery, DashboardSummary, DesktopUpdate, DesktopUpdatePhase,
+    ERROR_BUILTIN_PROVIDER_IMMUTABLE, ERROR_CONFLICT, ERROR_FORBIDDEN, ERROR_GATEWAY_TIMEOUT,
+    ERROR_GONE, ERROR_INTERNAL, ERROR_INVALID_JSON, ERROR_INVALID_REQUEST,
+    ERROR_MISSING_EXPECTED_REVISION, ERROR_NOT_FOUND, ERROR_NOT_IMPLEMENTED,
+    ERROR_OPERATION_PAYLOAD_MISMATCH, ERROR_OUTBOUND_FAILED, ERROR_PRECONDITION_FAILED,
+    ERROR_REVISION_CONFLICT, ERROR_SERVICE_UNAVAILABLE, ERROR_THROTTLED, ERROR_UNAUTHORIZED,
+    EffectiveCatalog, EffectiveModelContract, EffectiveModelProtocols, EffectiveProtocolEvidence,
+    ForwardLog, ForwardLogClientKey, ForwardLogKeys, ForwardLogModels, ForwardLogQuery,
+    ForwardLogSummary, ForwardLogs, GatewayLog, GatewayLogQuery, GatewayLogs, GatewayStatus,
+    InstallUpdate, KeyCreate, KeyUpdate, ModelProtocolOverride, ModelProtocolOverridesUpdate,
+    MutationAck, MutationExpectation, OllamaBillingTier, PricingAdjustment, PricingAvailability,
+    PricingLimits, PricingModel, PricingMultiplierChange, PricingMultiplierWrite,
+    PricingMultipliersUpdate, PricingRefresh, PricingRefreshPolicy, PricingRefreshStatus,
+    PricingRefreshUpdate, PricingRevision, PricingSnapshot, PricingTimeWindow,
+    ProtocolOverrideState, ProtocolProbeRequest, ProtocolProbeResponse, ProtocolProbeResult,
+    ProviderAccountChoice, ProviderCatalog, ProviderCatalogEntry, ProviderCatalogFormField,
+    ProviderCatalogRiskNotice, ProviderContractGroup, ProviderContracts, ProviderDefinition,
+    ProviderDefinitionAuthKind, ProviderDefinitionCreate, ProviderDefinitionDiscoverRequest,
+    ProviderDefinitionDiscoverResponse, ProviderDefinitionModel, ProviderDefinitionMutation,
+    ProviderDefinitionTestRequest, ProviderDefinitionTestResponse, ProviderDefinitionUpdate,
+    ProviderModelCapability, ProviderModelUpstreamOverride, ProviderPricing,
+    ProviderPricingRefresh, ProviderPricingRefreshUpdate, ProviderUsage, ProxyListDirection,
+    ProxyMode, ProxySupportedModel, ProxyTestRequest, ProxyTestResponse, QuotaWindow, RoutingMode,
+    Settings, SettingsUpdate, UpdateCheck, UsageAvailability, UsageMutation, UsageRefresh,
+    UsageRefreshThrottleError, UsageRefreshUpdate, UsageSyncState, UsageWindow, V3Error,
+    ZenFreeModel, ZenFreeModels, ZenFreeSettings, ZenFreeSettingsUpdate, contract_schema,
+    contract_schema_pretty,
 };
 pub use updater::{GITHUB_LATEST_RELEASE_API, GITHUB_LATEST_RELEASE_URL};
 
@@ -260,11 +258,6 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
             get(settings::get_settings).put(settings::put_settings),
         )
         .route("/settings/test-proxy", post(proxy_test::test_proxy))
-        .route(
-            "/claude-desktop/models",
-            get(claude_desktop::get_claude_desktop_models)
-                .put(claude_desktop::put_claude_desktop_models),
-        )
         .route("/settings/check-update", get(updater::check_update))
         .route("/settings/update-status", get(updater::get_update_status))
         .route("/settings/install-update", post(updater::install_update))

@@ -24,10 +24,8 @@
 //!    catalog snapshot. The official slash raw ID pins to command-code/goat
 //!    without stealing Go kebab aliases.
 //!
-//! OpenCode Go and Zen Free are implemented here. Claude Desktop
-//! `sonnet` / `opus` / `haiku` aliases are rewritten to a configured Go
-//! model before resolution; the original Claude name is kept as
-//! `RequestPlan.client_model`.
+//! OpenCode Go, Zen Free, and the shared Configurable HTTP materialization
+//! boundary are implemented here.
 
 use crate::alias::{ProviderMapping, ResolveError, ResolvedModel};
 use crate::custom::CustomAccountRuntime;

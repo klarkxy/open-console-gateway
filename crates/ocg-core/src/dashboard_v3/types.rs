@@ -140,8 +140,6 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "ProxyTestResponse",
     "CustomModelDiscoveryRequest",
     "CustomModelDiscoveryResponse",
-    "ClaudeDesktopModels",
-    "ClaudeDesktopModelsUpdate",
     "AccountVerify",
     "BrowserMode",
     "BrowserTarget",
@@ -666,34 +664,6 @@ pub struct ProxyTestResponse {
     pub latency_ms: u64,
     pub revision: u64,
     pub process_generation: u64,
-}
-
-/// GET/PUT `/claude-desktop/models` resource. Distinct from `AppConfig` and
-/// from `models::ClaudeDesktopModels`. Role values are the resolved mapping
-/// (empty roles inherit the first configured model). CAS tokens follow the
-/// Settings convention: `revision` and `processGeneration` only.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-#[schemars(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ClaudeDesktopModels {
-    pub sonnet: String,
-    pub opus: String,
-    pub haiku: String,
-    pub revision: u64,
-    pub process_generation: u64,
-}
-
-/// PUT `/claude-desktop/models` body. CAS tokens and all three roles are
-/// required. Unknown fields, including any Key material, are rejected.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-#[schemars(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ClaudeDesktopModelsUpdate {
-    #[serde(flatten)]
-    pub expectation: MutationExpectation,
-    pub sonnet: String,
-    pub opus: String,
-    pub haiku: String,
 }
 
 /// POST `/keys` body. CAS tokens are required; `name` is required. Unknown
@@ -3262,7 +3232,6 @@ pub fn contract_schema() -> Value {
     include_type::<AuthStatus>(&mut serialize);
     include_type::<ProxyTestResponse>(&mut serialize);
     include_type::<CustomModelDiscoveryResponse>(&mut serialize);
-    include_type::<ClaudeDesktopModels>(&mut serialize);
     include_type::<BrowserMode>(&mut serialize);
     include_type::<BrowserCapabilities>(&mut serialize);
     include_type::<BrowserOpen>(&mut serialize);
@@ -3340,7 +3309,6 @@ pub fn contract_schema() -> Value {
     include_type::<AuthLogout>(&mut deserialize);
     include_type::<ProxyTestRequest>(&mut deserialize);
     include_type::<CustomModelDiscoveryRequest>(&mut deserialize);
-    include_type::<ClaudeDesktopModelsUpdate>(&mut deserialize);
     include_type::<BrowserOpenRequest>(&mut deserialize);
     include_type::<BrowserTarget>(&mut deserialize);
     include_type::<InstallUpdate>(&mut deserialize);

@@ -1457,72 +1457,6 @@
       ],
       "type": "object"
     },
-    "ClaudeDesktopModels": {
-      "additionalProperties": false,
-      "description": "GET/PUT `/claude-desktop/models` resource. Distinct from `AppConfig` and\nfrom `models::ClaudeDesktopModels`. Role values are the resolved mapping\n(empty roles inherit the first configured model). CAS tokens follow the\nSettings convention: `revision` and `processGeneration` only.",
-      "properties": {
-        "haiku": {
-          "type": "string"
-        },
-        "opus": {
-          "type": "string"
-        },
-        "processGeneration": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "revision": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "sonnet": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "sonnet",
-        "opus",
-        "haiku",
-        "revision",
-        "processGeneration"
-      ],
-      "type": "object"
-    },
-    "ClaudeDesktopModelsUpdate": {
-      "additionalProperties": false,
-      "description": "PUT `/claude-desktop/models` body. CAS tokens and all three roles are\nrequired. Unknown fields, including any Key material, are rejected.",
-      "properties": {
-        "expectedRevision": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "haiku": {
-          "type": "string"
-        },
-        "opus": {
-          "type": "string"
-        },
-        "processGeneration": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "sonnet": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "expectedRevision",
-        "processGeneration",
-        "sonnet",
-        "opus",
-        "haiku"
-      ],
-      "type": "object"
-    },
     "ConnectionInfo": {
       "additionalProperties": false,
       "description": "Lightweight connection-center payload. The only V3 DTO allowed to carry\nplaintext primary and sub Key values.",
@@ -7608,12 +7542,6 @@
     },
     {
       "$ref": "#/$defs/CustomModelDiscoveryResponse"
-    },
-    {
-      "$ref": "#/$defs/ClaudeDesktopModels"
-    },
-    {
-      "$ref": "#/$defs/ClaudeDesktopModelsUpdate"
     },
     {
       "$ref": "#/$defs/AccountVerify"

@@ -2,8 +2,8 @@
 //!
 //! [`GatewayExecutor`] owns the request-entry snapshot, candidate selection,
 //! same-account retry, and account fallback loop. The handler retains
-//! trace/auth, client parse/format validation, Claude Desktop rewrite, and
-//! Alias resolution. Single-attempt forwarding stays in [`super::forwarder`].
+//! trace/auth, client parse/format validation, and Alias resolution.
+//! Single-attempt forwarding stays in [`super::forwarder`].
 //! This slice does not consolidate decision policy.
 
 use crate::alias;
