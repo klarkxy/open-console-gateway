@@ -6,6 +6,9 @@
 
 #![allow(dead_code)]
 
+#[path = "refreshed_go_catalog.rs"]
+mod refreshed_go_catalog;
+
 use ocg_core::alias;
 use ocg_core::crypto::{KeyCipher, StaticKeyCipher};
 use ocg_core::db::{Database, ForwardLogQueryOptions};
@@ -195,6 +198,8 @@ pub(crate) fn build_state_with_routing(
         };
         state.db.lock().create_account(&account).unwrap();
     }
+    refreshed_go_catalog::persist_refreshed_go_catalog(&state);
+    refreshed_go_catalog::persist_enabled_zen_catalog(&state);
 
     (state, dir)
 }
@@ -547,7 +552,7 @@ pub(crate) async fn chat_with_conversation(
     user: &str,
 ) -> (u16, String) {
     let request = loopback_client()
-        .post(format!("http://127.0.0.1:{}/v1/chat/completions", port))
+        .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
         .header(reqwest::header::AUTHORIZATION, "Bearer gw-test")
         .header(reqwest::header::ACCEPT_ENCODING, "gzip")
         .json(&serde_json::json!({
@@ -617,6 +622,11 @@ pub(crate) fn create_goat_account(
     account.enabled = false;
     state.db.lock().create_account(&account).unwrap();
     force_enable_unroutable_account_for_loopback_test(&state.data_dir, &account.id);
+    persist_goat_verified_catalog(
+        state,
+        account_id,
+        ocg_core::provider::COMMAND_CODE_GOAT_INCLUDED_MODEL_IDS,
+    );
     assert!(
         state
             .db
@@ -1263,6 +1273,8 @@ pub(crate) struct LabProvider {
     pub account_id: Option<String>,
 }
 
+// Keep each lab scene fact explicit; packing would only meet the 7-arg lint threshold.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn create_dynamic_lab(
     port: u16,
     state: &CoreStateInner,
@@ -1305,6 +1317,16 @@ pub(crate) async fn create_dynamic_lab(
         .into_iter()
         .find(|account| account.provider_id == provider_id)
         .map(|account| account.id);
+    if let Some(id) = &account_id {
+        let (status, body) = v3_mutate(
+            port,
+            state,
+            &format!("/accounts/{id}/toggle"),
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    }
     LabProvider {
         provider_id,
         account_id,
@@ -1340,11 +1362,20 @@ pub(crate) async fn create_custom_lab(
     )
     .await;
     assert_eq!(status, axum::http::StatusCode::OK, "{created}");
-    created["account"]["id"]
+    let id = created["account"]["id"]
         .as_str()
         .or_else(|| created["id"].as_str())
         .unwrap_or_else(|| panic!("custom account id missing: {created}"))
-        .to_string()
+        .to_string();
+    let (status, body) = v3_mutate(
+        port,
+        state,
+        &format!("/accounts/{id}/toggle"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    id
 }
 
 pub(crate) struct IdentityRefs {

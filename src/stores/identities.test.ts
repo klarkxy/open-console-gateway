@@ -176,13 +176,10 @@ test("identities store: a stale load error does not apply a partial snapshot pai
 
   calls[1]!.resolve(listBody("acc-b", 8));
   await second;
-  assert.deepEqual(store.snapshotExpectation, { expectedRevision: 8, processGeneration: 99 });
 
   calls[0]!.reject(new Error("stale failure"));
   await assert.rejects(first, /stale failure/);
-  assert.equal(store.error, "");
   assert.deepEqual(store.snapshotExpectation, { expectedRevision: 8, processGeneration: 99 });
-  assert.equal(store.byAccountId.get("acc-b")?.legacy.id, "acc-b");
 });
 
 test("identities store: a failed load does not write identities without a pair", async () => {

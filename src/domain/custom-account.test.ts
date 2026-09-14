@@ -4,7 +4,6 @@ import {
   customEndpointUrlIssue,
   customApiUrlSupportsModelDiscovery,
   customApiUrlNeedsManualModels,
-  expandCustomModelCapabilities,
   normalizeCustomCapabilities,
   CustomCapabilityError,
 } from "./custom-account.ts";
@@ -37,13 +36,11 @@ test("common API bases and legacy standard paths enable model discovery", () => 
   assert.ok(customApiUrlNeedsManualModels("https://api.example.com/custom/infer", "messages"));
 });
 
-test("one protocol expands each model once and rejects mismatched rows", () => {
-  const rows = expandCustomModelCapabilities(["m1", "m2"], "messages");
-  assert.deepEqual(rows, [
+test("one protocol normalizes each model once and rejects mismatched rows", () => {
+  assert.deepEqual(normalizeCustomCapabilities([
     { public_model: "m1", upstream_model: "m1", protocol: "messages" },
     { public_model: "m2", upstream_model: "m2", protocol: "messages" },
-  ]);
-  assert.deepEqual(normalizeCustomCapabilities(rows, "messages"), [
+  ], "messages"), [
     { public_model: "m1", upstream_model: "m1", protocol: "messages", source: "manual" },
     { public_model: "m2", upstream_model: "m2", protocol: "messages", source: "manual" },
   ]);

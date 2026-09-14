@@ -91,18 +91,6 @@ export function quotasByKind(
   };
 }
 
-/** There is no available-total across wallet, subscription, and Key limits. */
-export function combinedAvailableQuota(_quotas: readonly PlatformQuota[]): null {
-  return null;
-}
-
-export function linksForPlatform(
-  links: readonly PlatformLink[],
-  platformAccountId: string,
-): PlatformLink[] {
-  return links.filter((link) => link.platformAccountId === platformAccountId);
-}
-
 export function linkForAccount(
   links: readonly PlatformLink[],
   accountId: string,

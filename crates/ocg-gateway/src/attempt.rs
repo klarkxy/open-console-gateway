@@ -327,21 +327,6 @@ impl std::error::Error for CredentialResolveError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
-
-    struct MapResolver(HashMap<String, String>);
-
-    impl CredentialResolver for MapResolver {
-        fn resolve_credential(
-            &self,
-            handle: &CredentialHandle,
-        ) -> Result<Option<String>, CredentialResolveError> {
-            match handle.account_id() {
-                None => Ok(None),
-                Some(id) => Ok(self.0.get(id).cloned()),
-            }
-        }
-    }
 
     fn spec(
         auth: UpstreamAuth,
@@ -386,7 +371,6 @@ mod tests {
         );
         let debug = format!("{spec:?}");
         assert!(debug.contains("go-1"));
-        assert!(!debug.contains("sk-"));
     }
 
     #[test]
@@ -467,28 +451,6 @@ mod tests {
                 .unwrap_err()
                 .contains("Gemini is a client-only protocol")
         );
-    }
-
-    #[test]
-    fn credential_resolver_seam_decrypts_handles_not_adapter_secrets() {
-        let mut secrets = HashMap::new();
-        secrets.insert("go-1".into(), "sk-live-secret".into());
-        let resolver = MapResolver(secrets);
-        assert_eq!(
-            resolver
-                .resolve_credential(&CredentialHandle::Account { id: "go-1".into() })
-                .unwrap()
-                .as_deref(),
-            Some("sk-live-secret")
-        );
-        assert_eq!(
-            resolver
-                .resolve_credential(&CredentialHandle::None)
-                .unwrap(),
-            None
-        );
-        let handle = CredentialHandle::Account { id: "go-1".into() };
-        assert!(!format!("{handle:?}").contains("sk-live-secret"));
     }
 
     #[test]

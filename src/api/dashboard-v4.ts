@@ -12,7 +12,10 @@ import type {
   BindingPatchRequest,
   BindingPatchResult,
   ConnectionList,
-  ControlRevision,
+  CatalogModelsRemoveRequest,
+  CatalogModelsRemoveResult,
+  CpaCatalog,
+  CpaCatalogUpdate,
   CredentialRotateRequest,
   CredentialRotateResult,
   IdentityCredentialCreateRequest,
@@ -20,12 +23,9 @@ import type {
   IdentityList,
   OnboardingCommitRequest,
   OnboardingCommitResult,
-  TemplateList,
 } from "./generated/dashboard-v4.ts";
 
 export const dashboardV4 = {
-  getContract: () => requestV4<ControlRevision>("/contract"),
-  getTemplates: () => requestV4<TemplateList>("/templates"),
   getConnections: () => requestV4<ConnectionList>("/connections"),
   getAccounts: () => requestV4<IdentityList>("/accounts"),
   commitOnboarding: (
@@ -63,6 +63,26 @@ export const dashboardV4 = {
     expectation: MutationExpectation,
   ) => requestV4<IdentityCredentialCreateResult>(
     `/identities/${encodeURIComponent(id)}/credentials`,
+    {
+      method: "POST",
+      body: withExpectation(input, expectation),
+    },
+  ),
+  getCpaCatalog: () => requestV4<CpaCatalog>("/cpa/models"),
+  putCpaCatalog: (
+    input: WithoutExpectation<CpaCatalogUpdate>,
+    expectation: MutationExpectation,
+  ) => requestV4<CpaCatalog>("/cpa/models", {
+    method: "PUT",
+    body: withExpectation(input, expectation),
+  }),
+  removeCatalogModels: (
+    scopeKind: "provider" | "custom_endpoint",
+    scopeId: string,
+    input: WithoutExpectation<CatalogModelsRemoveRequest>,
+    expectation: MutationExpectation,
+  ) => requestV4<CatalogModelsRemoveResult>(
+    `/provider-contracts/${encodeURIComponent(scopeKind)}/${encodeURIComponent(scopeId)}/catalog/remove`,
     {
       method: "POST",
       body: withExpectation(input, expectation),

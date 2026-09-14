@@ -21,7 +21,7 @@ fn temp_data_dir(label: &str) -> PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    dir.push(format!("ocg-core-test-{}-{}", label, nanos));
+    dir.push(format!("ocg-core-test-{label}-{nanos}"));
     fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -136,8 +136,7 @@ fn core_state_generates_gateway_key_on_first_run_and_persists() {
     let key1 = state.config().gateway_key;
     assert!(
         key1.starts_with("ocg-"),
-        "expected auto-generated gateway key, got {:?}",
-        key1
+        "expected auto-generated gateway key, got {key1:?}"
     );
 
     // Reopen — same key, persisted in settings table.

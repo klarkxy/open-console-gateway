@@ -33,7 +33,7 @@ GUI 或 CLI 启动时会原地执行 SQLite 迁移。打开新版二进制前：
 
 ## Schema v27 与 pre-v3 快照
 
-`CURRENT_SCHEMA_VERSION = 47`（`crates/ocg-core/src/db.rs`）。打开历史库会先规范迁移到 v26，再由 v27 重写把主 Key 与全部 `sub_gateway_keys` 行复制进一张 `access_keys` 表（主 Key 固定 id `00000000-0000-0000-0000-000000000001`），删除 `sub_gateway_keys`，并删除 `accounts` 上遗留的五列 `usage_sync_*`（用量同步元数据在 `provider_usage_sync_state`）。v33 新增 Custom 精确上游模型身份；v34 新增 CPA 单例配置表，但不会导入或导出 CPA 状态。v35 把 Provider/Plan 身份收成只有 `provider_id`：先预检每一个已知的 v34 provider/offering 对，未知对与会丢数据的复合键冲突在写入前失败，再重建受影响的表，使 offering 列不存在。v36 增量创建过 `ollama_cloud_usage_state`（未发布的 Cookie 用量抓取）。v37 删除该表且不动账号 Key 与日志，并创建 `ollama_cloud_billing`。v42 把类型化用户定义 Provider 表与密封 Adapter 种子目录统一：把 `dynamic_providers` / `dynamic_provider_models` 重命名为 `providers` / `provider_models`，新增 `origin`（`builtin` | `preset` | `custom`）、`adapter_kind`、`offering`（`plan` | `api`）与 `endpoint_per_account` 列，把七个密封 builtin 适配器（OpenCode Go、Zen Free、Command Code GOAT、MiniMax CN、Kimi CN、Ollama Cloud、Custom API——但不含静态外部接入 CPA）以 `builtin` 行种入表中，这些行的属性列只是展示镜像，并在 dynamic 读路径上加 `origin` 过滤。v41 的 `provider_model_protocol_preferences` 表上 `provider_id` CHECK 已被去掉（`protocol ∈ ('chat_completions', 'messages')` 的 CHECK 保留）。账号 `key_cipher` / `password_cipher` 用 Host cipher 就地校验，**不会重新加密**。v44 增量创建 `dashboard_operations`，供 V4 幂等提交使用，不另写迁移前备份（与 v43 相同）。v45 增量创建身份/凭据/绑定附属表与 `accounts.identity_id`，不另写迁移前备份（与 v43/v44 相同）。v46 增量持久化绑定 `allowed_endpoint_ids` / `allowed_origins` JSON，并从安全的已分配连接端点一次性回填；不另写迁移前备份。v47 增量持久化 `providers.onboarding_draft`（`0` 已配置，`1` 草稿）；既有行保持已配置，不会从缺字段推断草稿。路由列表查询排除草稿；控制面列表、入职续写、V4 投影和 V6 导出包含草稿。不另写迁移前备份。
+`CURRENT_SCHEMA_VERSION = 48`（`crates/ocg-core/src/db.rs`）。打开历史库会先规范迁移到 v26，再由 v27 重写把主 Key 与全部 `sub_gateway_keys` 行复制进一张 `access_keys` 表（主 Key 固定 id `00000000-0000-0000-0000-000000000001`），删除 `sub_gateway_keys`，并删除 `accounts` 上遗留的五列 `usage_sync_*`（用量同步元数据在 `provider_usage_sync_state`）。v33 新增 Custom 精确上游模型身份；v34 新增 CPA 单例配置表，但不会导入或导出 CPA 状态。v35 把 Provider/Plan 身份收成只有 `provider_id`：先预检每一个已知的 v34 provider/offering 对，未知对与会丢数据的复合键冲突在写入前失败，再重建受影响的表，使 offering 列不存在。v36 增量创建过 `ollama_cloud_usage_state`（未发布的 Cookie 用量抓取）。v37 删除该表且不动账号 Key 与日志，并创建 `ollama_cloud_billing`。v42 把类型化用户定义 Provider 表与密封 Adapter 种子目录统一：把 `dynamic_providers` / `dynamic_provider_models` 重命名为 `providers` / `provider_models`，新增 `origin`（`builtin` | `preset` | `custom`）、`adapter_kind`、`offering`（`plan` | `api`）与 `endpoint_per_account` 列，把七个密封 builtin 适配器（OpenCode Go、Zen Free、Command Code GOAT、MiniMax CN、Kimi CN、Ollama Cloud、Custom API——但不含静态外部接入 CPA）以 `builtin` 行种入表中，这些行的属性列只是展示镜像，并在 dynamic 读路径上加 `origin` 过滤。v41 的 `provider_model_protocol_preferences` 表上 `provider_id` CHECK 已被去掉（`protocol ∈ ('chat_completions', 'messages')` 的 CHECK 保留）。账号 `key_cipher` / `password_cipher` 用 Host cipher 就地校验，**不会重新加密**。v44 增量创建 `dashboard_operations`，供 V4 幂等提交使用，不另写迁移前备份（与 v43 相同）。v45 增量创建身份/凭据/绑定附属表与 `accounts.identity_id`，不另写迁移前备份（与 v43/v44 相同）。v46 增量持久化绑定 `allowed_endpoint_ids` / `allowed_origins` JSON，并从安全的已分配连接端点一次性回填；不另写迁移前备份。v47 增量持久化 `providers.onboarding_draft`（`0` 已配置，`1` 草稿）；既有行保持已配置，不会从缺字段推断草稿。路由列表查询排除草稿；控制面列表、入职续写、V4 投影和 V6 导出包含草稿。不另写迁移前备份。v48 删除四列无运行语义的字段（`provider_contract_scopes` 协议开关与 `accounts.free_alias_enabled`）以及空的遗留 `dynamic_providers` / `dynamic_provider_models`；非空遗留会拒绝升级并保持 schema 47。非空 v47 库会写一份唯一的 pre-v48 快照。
 
 ## Schema v45 — 身份 / 凭据 / 绑定附属表
 
@@ -49,11 +49,11 @@ v45 把遗留 Account 拆成身份容器 / 凭据 / 绑定语义，但不搬移 
 - `onboarding_tasks` — `id`、`account_id`、`kind` `managed_registration`、`step`、`state` `in_progress` | `completed`、…
 - `subscription_records` — `account_id` 主键，`source` `legacy_manual` | `managed_payment`，`purchase_date`、`expires_on`、`recorded_at`
 - `quota_pools` — `id`、`subject_kind`、`subject_ref`、`relation_confidence`、`policy_mode`、`created_at`
-- `quota_pool_members` — `pool_id`、`account_id`（回填时每个身份一名成员；该身份上的第二份凭据加入同一池）
+- `quota_pool_members` — `pool_id`、`account_id`（回填时每个身份一名成员；新增凭据默认使用独立额度池，只有显式选择共享才加入已有池）
 
-附属行在同一事务中显式删除（DDL 声明了 `ON DELETE CASCADE`，但进程未启用 foreign-key pragma）。打开数据库时，v45 一致性检查用幂等回填补齐缺失的附属行；若仍不一致则 fail closed。
+附属行在同一事务中显式删除（DDL 声明了 `ON DELETE CASCADE`，但进程未启用 foreign-key pragma）。打开数据库时，v45 一致性检查用幂等回填补齐缺失的附属行；若仍不一致则 fail closed。v45 回填时，缺少必需的 `accounts` 列会通过普通 SQL 错误使打开失败，不会被跳过。
 
-迁移规则：每个既有账号恰好对应一个身份（`label` = 账号名，置信度 `opaque`）、一份凭据（`version` 1），以及一条绑定到该账号 connection 的记录（内置供应商 / 动态供应商 / Custom 账号自己的 connection），`model_scope=all`，`enabled` 等于账号启用状态。路由排序读取既有 `accounts.sort_order`，不另存一份。`legacy_identity_map` 记录账号 → 身份 / 凭据 / 绑定。尚未 `ready` 的托管账号写入一条 `onboarding_tasks`，状态 `in_progress`、步骤为当前步；已 ready 的托管账号不编造历史。只有已经公布购买/到期日的密封内置 Provider 账号才写入 `subscription_records`，`source` 为 `legacy_manual`。用户定义与 Custom API 账号不写：日期保持未知，不以零定价（D07）。平台关联：被关联 Key 的身份变为 `declared`，`authority_site` = 父账号 `base_url`；每个平台父账号自有身份，并带一份 `platform_observer` 凭据（管理凭据，从不用于推理）。父账号与被关联 Key 永不合并；关系保持已声明、未验证（D04）。冷却列不搬迁：投影为额度窗口（generic / 5h / week / month → subject `credential`；free → subject `egress` `free_channel`，declared、authoritative），精确保留已存时刻。未知指标为 `null`，绝不为零。迁移为每个身份创建一个额度池（`subject` 为 credential / 身份 id，`relation_confidence` 为 unknown，`policy_mode` 为 authoritative_limit），从不写 `verified`。之后该身份上的第二份凭据加入同一池并把关系标为 `declared`。路由遵守已存的 `model_scope` 与绑定 `enabled`。
+迁移规则：每个既有账号恰好对应一个身份（`label` = 账号名，置信度 `opaque`）、一份凭据（`version` 1），以及一条绑定到该账号 connection 的记录（内置供应商 / 动态供应商 / Custom 账号自己的 connection），`model_scope=all`，绑定默认 `enabled=true`。账号启用开关继续控制能否进入路由；单独禁用的绑定在重开和修复时保持禁用。路由排序读取既有 `accounts.sort_order`，不另存一份。`legacy_identity_map` 记录账号 → 身份 / 凭据 / 绑定。尚未 `ready` 的托管账号写入一条 `onboarding_tasks`，状态 `in_progress`、步骤为当前步；已 ready 的托管账号不编造历史。只有已经公布购买/到期日的密封内置 Provider 账号才写入 `subscription_records`，`source` 为 `legacy_manual`。用户定义与 Custom API 账号不写：日期保持未知，不以零定价（D07）。平台关联：被关联 Key 的身份变为 `declared`，`authority_site` = 父账号 `base_url`；每个平台父账号自有身份，并带一份 `platform_observer` 凭据（管理凭据，从不用于推理）。父账号与被关联 Key 永不合并；关系保持已声明、未验证（D04）。冷却列不搬迁：投影为额度窗口（generic / 5h / week / month → subject `credential`；free → subject `egress` `free_channel`，declared、authoritative），精确保留已存时刻。未知指标为 `null`，绝不为零。迁移为每个身份创建一个额度池（`subject` 为 credential / 身份 id，`relation_confidence` 为 unknown，`policy_mode` 为 authoritative_limit），从不写 `verified`。在当前 v46 写入路径下，新增凭据默认独立；显式与同身份凭据共享时才加入其额度池，并把关系标为 `declared`。路由遵守已存的 `model_scope` 与绑定 `enabled`。
 
 每一次账号插入（V3 创建、托管创建、用户定义供应商首把 Key、V4 onboarding commit、节点导入）都通过与本迁移共用的唯一映射器，在同一事务写入附属行。平台关联 / 解除关联在同一事务更新被关联身份的置信度与站点。
 
@@ -78,6 +78,26 @@ v47 把入职生命周期加在既有 `providers` 行上：
 
 既有行迁移为已配置。草稿可以省略 Key 和模型目标；即使草稿已有 Key 和模型，也不会进入路由、别名、目录或网关。普通 V3 Provider 写入会保留该标志，不会把草稿静默变成可路由。通过 V4 入职 `mode=complete` 完成草稿时，会在同一事务中连同操作回执清掉该标志。V6 节点导出包含草稿，且每个可移植 Provider 必须带 `onboardingDraft`；V4/V5 包不得带该字段。空白模型列表只对草稿合法。不另写迁移前备份（只做加法，与 v43–v46 相同）。回滚仍是既有的整目录恢复。
 
+## Schema v48 — 无运行语义的列与空遗留表
+
+v48 删除四列已无运行语义的字段：
+
+- `provider_contract_scopes.chat_completions_enabled`
+- `provider_contract_scopes.responses_enabled`
+- `provider_contract_scopes.messages_enabled` — 自 v31 起不再读取；实际启停是模型协议覆盖与偏好表
+- `accounts.free_alias_enabled` — 惰性 `0`；Zen Free 使用 `accounts.enabled`
+
+同时，仅在遗留的 `dynamic_providers` / `dynamic_provider_models` 存在且为空时删除它们（索引随表删除）。v47 源上任一非空遗留会在任何删除或升版本前 fail closed；schema 保持 47，行原样保留。当前 schema 的库不会擅自删除非空遗留行。
+
+在非空 v47 库做 v48 写入前，进程会写入一份唯一、不覆盖的同目录快照：
+
+```text
+data.sqlite.pre-v48.<timestamp>.bak
+data.sqlite.pre-v48.<timestamp>.bak.sha256
+```
+
+快照是独立的 v47 SQLite 文件（`VACUUM INTO`）；sidecar 第一字段是 `.bak` 的小写 SHA-256。全新空目录直接创建当前 schema，不写这份副本。没有降级路径；回滚需恢复升级前的整个数据目录。
+
 ## Schema v44 — 面板操作记录
 
 v44 增量创建 `dashboard_operations`，供 V4 幂等控制面提交使用：
@@ -99,7 +119,7 @@ v42 把 `dynamic_providers` / `dynamic_provider_models` 重命名为 `providers`
 - `offering` —— `plan` | `api`。builtin 行从 `ocg_domain::provider::builtin_offering(provider_id)` 取；dynamic 行通过 `ocg_domain::provider::preset_offering(preset_id)` 从 `preset_id` 推导（仅 custom 的行默认为 `api`）。
 - `endpoint_per_account` —— builtin 行除 Custom API（值为 `1`）外都为 `0`；dynamic 行一律 `0`。
 
-v41 的 `provider_model_protocol_preferences` 表被重建，去掉了它原本的 `provider_id` CHECK（现在 `origin` 可查，row 可以属于 builtin 或 dynamic id）；`protocol ∈ ('chat_completions', 'messages')` 的 CHECK 保留到 v43。该 CHECK 是 v41 schema 中唯一引用 origin 概念的 provider_id 约束，因此不需要改其他表。
+v41 的 `provider_model_protocol_preferences` 表被重建，去掉了它原本的 `provider_id` CHECK（现在 `origin` 可查，row 可以属于 builtin 或 dynamic id）；`protocol ∈ ('chat_completions', 'messages')` 的 CHECK 保留到 v43。该 CHECK 是 v41 schema 中唯一引用 origin 概念的 provider_id 约束，因此不需要改其他表。已经迁到当前 schema 的库再次打开时，不会重新创建 `dynamic_providers` / `dynamic_provider_models`。schema v48 仅在这些遗留表存在且为空时删除它们。v47 源上的非空遗留会拒绝升级并保持 schema 47；当前 schema 的库不会擅自删除非空遗留行。
 
 ## Schema v43 — 首选协议 CHECK 与互斥单选修复
 
@@ -133,7 +153,7 @@ Schema v40 为 `provider_models` 增加可空的 `upstream_override` JSON，保�
 
 ## Schema v31 — 按模型/按协议覆盖
 
-v31 创建 `provider_contract_model_protocol_overrides` 表。每行对应一个合约范围 × 模型 × 协议，`state` 取值 `force_on` / `force_off`；无行即表示“自动”。复合主键为 `(scope_kind, scope_id, model_id, protocol)`。`provider_contract_scopes` 的开关列仍保留在数据库中以保证向后兼容。effective 合约推导读取 `provider_contract_model_protocol_overrides`。
+v31 创建 `provider_contract_model_protocol_overrides` 表。每行对应一个合约范围 × 模型 × 协议，`state` 取值 `force_on` / `force_off`；无行即表示“自动”。复合主键为 `(scope_kind, scope_id, model_id, protocol)`。`provider_contract_scopes` 的开关列在 v48 之前仍保留在数据库中以保证向后兼容。effective 合约推导读取 `provider_contract_model_protocol_overrides`。
 
 ## Schema v32 — Custom 单协议完整 Endpoint
 

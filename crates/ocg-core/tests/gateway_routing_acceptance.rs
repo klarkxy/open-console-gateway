@@ -328,6 +328,7 @@ async fn shared_quota_skips_sibling_credential_on_429() {
         .as_str()
         .unwrap_or_else(|| panic!("sibling account id missing: {created}"))
         .to_string();
+    h.set_enabled(&sibling_id, true);
     let pool = h
         .state
         .db

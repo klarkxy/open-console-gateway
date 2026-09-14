@@ -114,6 +114,12 @@ pub use types::{
 };
 pub use updater::{GITHUB_LATEST_RELEASE_API, GITHUB_LATEST_RELEASE_URL};
 
+pub use crate::official_protocols::OfficialProtocolBaseline;
+#[cfg(debug_assertions)]
+pub use crate::official_protocols::{
+    OfficialProtocolFetchGuard, install_official_protocol_fetch_fallback_chat_for_tests,
+    install_official_protocol_fetch_for_tests,
+};
 #[cfg(debug_assertions)]
 pub use account_verify::{CustomVerifyProbeGuard, install_custom_verify_probe_for_tests};
 #[cfg(debug_assertions)]
@@ -600,7 +606,7 @@ impl V3ApiError {
         }
     }
 
-    fn precondition_failed_at(state: &CoreState, message: impl Into<String>) -> Self {
+    pub(crate) fn precondition_failed_at(state: &CoreState, message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::PRECONDITION_FAILED,
             body: V3Error::precondition_failed(

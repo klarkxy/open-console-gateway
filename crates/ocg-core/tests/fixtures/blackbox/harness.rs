@@ -11,7 +11,7 @@
 use ocg_core::crypto::{KeyCipher, StaticKeyCipher};
 use ocg_core::db::Database;
 use ocg_core::gateway;
-use ocg_core::models::ProxyMode;
+use ocg_core::models::{AccountUpdate, ProxyMode};
 use ocg_core::state::{CoreStateInner, GatewayHandle};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
@@ -24,6 +24,8 @@ use std::time::Duration;
 
 #[path = "../fake_upstream.rs"]
 mod fake_upstream;
+#[path = "../refreshed_go_catalog.rs"]
+mod refreshed_go_catalog;
 
 pub(crate) use fake_upstream::FakeReply;
 use fake_upstream::{FakeCall, FakeCalls, start_fake_upstream, start_raw_disconnect_upstream};
@@ -123,6 +125,7 @@ impl BlackBoxHarness {
         };
         config.upstream_base_url = upstream_base_url.clone();
         state.set_config(config).unwrap();
+        refreshed_go_catalog::persist_refreshed_go_catalog(&state);
 
         let handle =
             gateway::start_gateway_on(state.clone(), SocketAddr::from(([127, 0, 0, 1], 0)))
@@ -258,7 +261,26 @@ impl BlackBoxHarness {
             }))
             .await;
         assert_eq!(status, StatusCode::OK, "create Go account: {body}");
-        body
+        let id = body["id"].as_str().expect("created Go account id");
+        self.enable_stored_account(id);
+        self.account_by_id(id).await
+    }
+
+    pub(crate) fn enable_stored_account(&self, id: &str) {
+        self.state
+            .db
+            .lock()
+            .update_account(
+                id,
+                &AccountUpdate {
+                    enabled: Some(true),
+                    ..AccountUpdate::default()
+                },
+                None,
+                None,
+            )
+            .unwrap();
+        self.state.reload_provider_contracts().unwrap();
     }
 
     pub(crate) async fn account_by_id(&self, id: &str) -> Value {
@@ -380,6 +402,7 @@ pub(crate) async fn start_with_disconnect_upstream() -> BlackBoxHarness {
     config.proxy_mode = ProxyMode::Direct;
     config.upstream_base_url = format!("{}/zen/go", base.trim_end_matches('/'));
     state.set_config(config).unwrap();
+    refreshed_go_catalog::persist_refreshed_go_catalog(&state);
     let handle = gateway::start_gateway_on(state.clone(), SocketAddr::from(([127, 0, 0, 1], 0)))
         .await
         .unwrap();

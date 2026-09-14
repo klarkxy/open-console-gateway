@@ -4,47 +4,6 @@ import { providerApi } from "./providers.ts";
 import { useControlPlaneStore } from "../stores/controlPlane.ts";
 import { installFetchMock, setupControlPlane } from "../test-helpers/dashboard-v3-fetch.ts";
 
-test("dynamic Provider create omits Key from the presented response and does not replay 409", async () => {
-  setupControlPlane(4, 11, "p1");
-  let createCalls = 0;
-  const requests = installFetchMock(({ url, method }) => {
-    if (url.endsWith("/providers") && method === "POST") {
-      createCalls += 1;
-      if (createCalls === 1) {
-        return new Response(JSON.stringify({
-          code: "revisionConflict",
-          message: "revision conflict",
-          currentRevision: 5,
-          processGeneration: 11,
-        }), { status: 409, headers: { "Content-Type": "application/json" } });
-      }
-      throw new Error("create must not auto-replay");
-    }
-    if (url.endsWith("/providers") && method === "GET") {
-      return { entries: [], revision: 5, processGeneration: 11, pricingRevision: "p1" };
-    }
-    if (url.endsWith("/contract") && method === "GET") {
-      return { revision: 5, processGeneration: 11, pricingRevision: "p1" };
-    }
-    throw new Error(`unexpected request ${url}`);
-  });
-
-  await assert.rejects(
-    () => providerApi.createProviderDefinition({
-      name: "Lab",
-      endpointUrl: "http://127.0.0.1:9",
-      upstreamProtocol: "chat_completions",
-      authKind: "bearer",
-      models: [{ publicModel: "lab-opus", upstreamModel: "vendor/opus" }],
-      key: "sk-lab",
-    }),
-    (error: unknown) => error instanceof Error && error.message.includes("revision conflict"),
-  );
-  assert.equal(requests.filter((request) => request.method === "POST").length, 1);
-  assert.equal(requests[0]?.body?.key, "sk-lab");
-  assert.ok(requests.some((request) => request.url.endsWith("/providers") && request.method === "GET"));
-});
-
 test("dynamic Provider update 409 refreshes catalog and provider without replaying PATCH", async () => {
   setupControlPlane(4, 11, "p1");
   let patchCalls = 0;
@@ -234,6 +193,44 @@ test("unified catalog refresh sends only the selected contract scope and CAS tok
     method: "POST",
     body: { expectedRevision: 12, processGeneration: 42 },
   }]);
+});
+
+test("catalog remove posts V4 model ids then reloads contracts", async () => {
+  setupControlPlane(12, 42, "p1");
+  const requests = installFetchMock(({ url, method }) => {
+    if (url.endsWith("/provider-contracts/provider/opencode/catalog/remove") && method === "POST") {
+      return {
+        revision: { revision: 13, processGeneration: 42, pricingRevision: "p1" },
+        removedIds: ["drop-me"],
+        catalogModels: ["keep-me"],
+      };
+    }
+    if (url.endsWith("/provider-contracts") && method === "GET") {
+      return {
+        revision: 13,
+        processGeneration: 42,
+        pricingRevision: "p1",
+        providers: [],
+        customEndpoints: [],
+      };
+    }
+    throw new Error(`unexpected request ${method} ${url}`);
+  });
+
+  await providerApi.removeContractCatalogModels("provider", "opencode", ["drop-me"]);
+
+  assert.deepEqual(requests, [
+    {
+      url: "/dashboard/api/v4/provider-contracts/provider/opencode/catalog/remove",
+      method: "POST",
+      body: { modelIds: ["drop-me"], expectedRevision: 12, processGeneration: 42 },
+    },
+    {
+      url: "/dashboard/api/v3/provider-contracts",
+      method: "GET",
+      body: null,
+    },
+  ]);
 });
 
 test("Custom endpoint protocol probe stays blocked while overrides use the model-protocol-overrides route", async () => {

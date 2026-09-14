@@ -198,6 +198,7 @@ async fn new_port_rebind_binds_first_updates_active_port_and_stops_old() {
     let old_port = install_listener(&state).await;
     assert_eq!(state.active_gateway_port(), old_port);
     assert_serving(old_port, &key).await;
+    let upstream_base_url = state.config().upstream_base_url.clone();
 
     // Port 0 is never the live handle port, so rebind takes the bind-first path.
     let new_port = GatewayLifecycle::rebind(state.clone(), loopback(0))
@@ -211,6 +212,14 @@ async fn new_port_rebind_binds_first_updates_active_port_and_stops_old() {
     assert_eq!(state.process_generation(), generation);
     assert_eq!(state.config().gateway_port, configured_port);
     assert_eq!(state.config().gateway_key, key);
+
+    shutdown(&state).await;
+    assert!(state.gateway.lock().is_none());
+    assert_eq!(state.settings_revision(), revision);
+    assert_eq!(state.process_generation(), generation);
+    assert_eq!(state.config().gateway_port, configured_port);
+    assert_eq!(state.config().gateway_key, key);
+    assert_eq!(state.config().upstream_base_url, upstream_base_url);
 
     cleanup(dir, state).await;
 }
@@ -249,37 +258,6 @@ async fn failed_new_port_bind_keeps_old_listener_and_active_port() {
     );
 
     cleanup(dir, state).await;
-}
-
-#[tokio::test]
-async fn rebind_does_not_change_settings_revision_or_process_generation() {
-    let (dir, state) = temp_state("revision");
-    let revision = state.settings_revision();
-    let generation = state.process_generation();
-    let config = state.config();
-
-    let port = install_listener(&state).await;
-    assert_eq!(state.settings_revision(), revision);
-    assert_eq!(state.process_generation(), generation);
-
-    GatewayLifecycle::rebind(state.clone(), loopback(port))
-        .await
-        .expect("same-port rebind should succeed");
-    let moved = GatewayLifecycle::rebind(state.clone(), loopback(0))
-        .await
-        .expect("new-port rebind should succeed");
-    assert_ne!(moved, port);
-
-    shutdown(&state).await;
-    assert!(state.gateway.lock().is_none());
-    assert_eq!(state.settings_revision(), revision);
-    assert_eq!(state.process_generation(), generation);
-    assert_eq!(state.config().gateway_port, config.gateway_port);
-    assert_eq!(state.config().gateway_key, config.gateway_key);
-    assert_eq!(state.config().upstream_base_url, config.upstream_base_url);
-
-    drop(state);
-    let _ = fs::remove_dir_all(dir);
 }
 
 #[tokio::test]

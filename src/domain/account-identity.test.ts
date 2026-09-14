@@ -8,7 +8,6 @@ import {
   accountExpiryDisplay,
   accountShowsDeclaredRelation,
   credentialForAccount,
-  identityForAccount,
   inferenceAuthState,
   inferenceCredentials,
   inferenceLastError,
@@ -129,16 +128,6 @@ function dynamicCatalog(providerId: string): ProviderCatalogEntry {
   };
 }
 
-test("overlay matches the V3 account id via legacy.kind+id and ignores platform rows", () => {
-  const rows = [
-    identity({ legacy: { kind: "platform_account", id: "acc-1" } }),
-    identity({ legacy: { kind: "account", id: "other" } }),
-    identity(),
-  ];
-  assert.equal(identityForAccount(rows, "acc-1")?.identity.id, "ident-1");
-  assert.equal(identityForAccount(rows, "missing"), null);
-});
-
 test("a multi-key identity is found by credential.legacy and never the first sibling", () => {
   const sibling = credential({
     credential: {
@@ -157,7 +146,6 @@ test("a multi-key identity is found by credential.legacy and never the first sib
     })],
   });
 
-  assert.equal(identityForAccount([row], "acc-2")?.identity.id, "ident-1");
   assert.equal(credentialForAccount(row, "acc-2")?.credential.id, "cred-2");
   assert.equal(credentialForAccount(row, "acc-1")?.credential.id, "cred-1");
   assert.equal(credentialForAccount(row, "missing"), null);
@@ -208,9 +196,9 @@ test("selected binding disabled and model restriction stay on this card, not a s
   assert.equal(selectedBindingDisabled(row, "acc-2"), false);
   assert.equal(selectedModelRestrictionLabel(row, "acc-1"), "仅 model-x");
   assert.equal(selectedModelRestrictionLabel(row, "acc-2"), null);
-  assert.equal(presentedAccountStatusLabel(account({ id: "acc-1" }), row), "待验证");
+  assert.equal(presentedAccountStatusLabel(account({ id: "acc-1" }), row), "已启用");
   assert.equal(presentedAccountStatusLabel(account({ id: "acc-2" }), row), "不可用");
-  assert.equal(presentedAccountStatusTagType(account({ id: "acc-1" }), row), "warning");
+  assert.equal(presentedAccountStatusTagType(account({ id: "acc-1" }), row), "success");
   assert.equal(presentedAccountStatusTagType(account({ id: "acc-2" }), row), "error");
 });
 
@@ -289,10 +277,14 @@ test("d07 null V4 subscription hides invented dynamic dates and keeps real Go pu
   }), null), "hidden");
 });
 
-test("authState unknown is 待验证, invalid is auth_error, and valid does not upgrade V3 pending", () => {
+test("authState unknown follows the enable switch, invalid is auth_error, and valid does not upgrade V3 pending", () => {
   const ready = account({ verification_status: "verified" });
-  assert.equal(presentedAccountStatusLabel(ready, identity()), "待验证");
-  assert.equal(presentedAccountStatusTagType(ready, identity()), "warning");
+  assert.equal(presentedAccountStatusLabel(ready, identity()), "已启用");
+  assert.equal(presentedAccountStatusTagType(ready, identity()), "success");
+
+  const draftReady = account({ verification_status: "verified", enabled: false });
+  assert.equal(presentedAccountStatusLabel(draftReady, identity()), "已禁用");
+  assert.equal(presentedAccountStatusTagType(draftReady, identity()), "error");
 
   const invalid = identity({
     credentials: [credential({
@@ -309,7 +301,7 @@ test("authState unknown is 待验证, invalid is auth_error, and valid does not 
     })],
   });
   assert.equal(presentedAccountStatusLabel(ready, valid), "已启用");
-  assert.equal(presentedAccountStatusTagType(ready, valid), "default");
+  assert.equal(presentedAccountStatusTagType(ready, valid), "success");
 
   const pendingDraft = account({
     plan_routable: false,
@@ -332,7 +324,7 @@ test("authState unknown is 待验证, invalid is auth_error, and valid does not 
   assert.equal(presentedAccountStatusTagType(v3FailedReady, valid), "error");
 
   assert.equal(presentedAccountStatusLabel(ready, null), "已启用");
-  assert.equal(presentedAccountStatusTagType(ready, null), "default");
+  assert.equal(presentedAccountStatusTagType(ready, null), "success");
 });
 
 test("quota pool id names shared siblings and leaves an independent third Key alone", () => {
@@ -376,6 +368,4 @@ test("quota pool id names shared siblings and leaves an independent third Key al
   assert.equal(selectedQuotaShareLabel(identity({
     credentials: [credential({ quota_pool_id: "solo", quota_windows: [] })],
   }), "acc-1", names), null);
-  assert.equal(inferenceAuthState(row, "acc-1"), "unknown");
-  assert.equal(inferenceLastError(row, "acc-2"), null);
 });

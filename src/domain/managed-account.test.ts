@@ -2,24 +2,22 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   DEFAULT_OPENCODE_INVITE_URL,
+  MANAGED_SETUP_STEPS,
   browserViewUrl,
-  nextSetupStep,
   normalizeOpenCodeInviteUrl,
-  setupBrowserTarget,
   setupStepIndex,
 } from "./managed-account.ts";
 
-test("managed signup steps advance in order and map to allowed browser targets", () => {
+test("managed wizard steps keep google_account through ready in order and index", () => {
+  assert.deepEqual(MANAGED_SETUP_STEPS, [
+    "google_account",
+    "opencode_registration",
+    "payment",
+    "key_verification",
+    "ready",
+  ]);
   assert.equal(setupStepIndex("google_account"), 0);
-  assert.equal(nextSetupStep("google_account"), "opencode_registration");
-  assert.equal(nextSetupStep("opencode_registration"), "payment");
-  assert.equal(nextSetupStep("payment"), "key_verification");
-  assert.equal(nextSetupStep("key_verification"), "ready");
-  assert.equal(nextSetupStep("ready"), null);
-  assert.equal(setupBrowserTarget("google_account"), "google_signup");
-  assert.equal(setupBrowserTarget("opencode_registration"), "invite");
-  assert.equal(setupBrowserTarget("payment"), "console");
-  assert.equal(setupBrowserTarget("key_verification"), "console");
+  assert.equal(setupStepIndex("ready"), MANAGED_SETUP_STEPS.length - 1);
 });
 
 test("OpenCode invite URLs are HTTPS, credential-free, bounded, and host allowlisted", () => {

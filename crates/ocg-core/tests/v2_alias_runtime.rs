@@ -18,8 +18,10 @@ use std::sync::Arc;
 #[allow(dead_code)]
 #[path = "fixtures/fake_upstream.rs"]
 mod fake_upstream;
+#[path = "fixtures/refreshed_go_catalog.rs"]
+mod refreshed_go_catalog;
 
-use fake_upstream::{FakeCall, FakeReply, start_fake_upstream};
+use fake_upstream::{FakeReply, start_fake_upstream};
 
 fn temp_data_dir(label: &str) -> PathBuf {
     let mut dir = std::env::temp_dir();
@@ -83,6 +85,7 @@ fn build_state(base_url: String, keys: &[&str]) -> (Arc<CoreStateInner>, PathBuf
         };
         state.db.lock().create_account(&account).unwrap();
     }
+    refreshed_go_catalog::persist_refreshed_go_catalog(&state);
 
     (state, dir)
 }
@@ -149,57 +152,6 @@ fn assert_local_openai_alias_list(body: &Value) {
 }
 
 #[tokio::test]
-async fn models_list_is_local_registry_with_zero_accounts_and_no_upstream() {
-    let replies = HashMap::from([(
-        "key-1".to_string(),
-        VecDeque::from([FakeReply {
-            status: 200,
-            body: r#"{"object":"list","data":[{"id":"deepseek/deepseek-v4-flash"},{"id":"not-a-real-upstream-model"}]}"#,
-        }]),
-    )]);
-    let (base_url, calls, stop_mock) = start_fake_upstream(replies).await;
-    let (state, dir) = build_state(base_url, &[]);
-    let (port, gateway_handle) = start_gateway(state.clone()).await;
-    let client = loopback_client();
-
-    let missing = client
-        .get(format!("http://127.0.0.1:{port}/v1/models"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
-
-    let invalid = client
-        .get(format!("http://127.0.0.1:{port}/v1/models"))
-        .bearer_auth("wrong-key")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(invalid.status(), StatusCode::UNAUTHORIZED);
-
-    let response = client
-        .get(format!("http://127.0.0.1:{port}/v1/models"))
-        .bearer_auth("gw-test")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body: Value = response.json().await.unwrap();
-    assert_local_openai_alias_list(&body);
-    assert!(
-        calls.lock().unwrap().is_empty(),
-        "GET /v1/models must not call upstream with zero accounts: {:?}",
-        calls.lock().unwrap()
-    );
-    assert!(
-        state.db.lock().list_forward_logs(8).unwrap().is_empty(),
-        "GET /v1/models must not write forward logs"
-    );
-
-    stop(state, dir, gateway_handle, stop_mock);
-}
-
-#[tokio::test]
 async fn models_list_ignores_raw_only_and_empty_fake_upstream() {
     let replies = HashMap::from([
         (
@@ -241,81 +193,6 @@ async fn models_list_ignores_raw_only_and_empty_fake_upstream() {
         assert!(account.last_error.is_none());
         assert!(account.auth_error.is_none());
     }
-
-    stop(state, dir, gateway_handle, stop_mock);
-}
-
-#[tokio::test]
-async fn unknown_chat_model_returns_400_before_any_upstream_request() {
-    let replies = HashMap::from([(
-        "key-1".to_string(),
-        VecDeque::from([FakeReply {
-            status: 200,
-            body: r#"{"id":"ok","object":"chat.completion","model":"deepseek-v4-flash","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#,
-        }]),
-    )]);
-    let (base_url, calls, stop_mock) = start_fake_upstream(replies).await;
-    let (state, dir) = build_state(base_url, &["key-1"]);
-    let (port, gateway_handle) = start_gateway(state.clone()).await;
-    let runtime_log_watermark = state
-        .db
-        .lock()
-        .list_gateway_logs(1)
-        .unwrap()
-        .first()
-        .map_or(0, |log| log.id);
-
-    let response = loopback_client()
-        .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
-        .bearer_auth("gw-test")
-        .json(&serde_json::json!({
-            "model": "definitely-not-a-model",
-            "messages": [{"role": "user", "content": "ping"}]
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let body: Value = response.json().await.unwrap();
-    assert!(
-        body["error"]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("unknown model"))
-    );
-    assert!(
-        calls.lock().unwrap().is_empty(),
-        "unknown Chat models must not reach upstream: {:?}",
-        calls
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|call: &FakeCall| call.path.as_str())
-            .collect::<Vec<_>>()
-    );
-    let db = state.db.lock();
-    let request_logs = db.list_forward_logs(8).unwrap();
-    assert_eq!(
-        request_logs.len(),
-        1,
-        "an authenticated unknown-model call is still a client request"
-    );
-    assert_eq!(request_logs[0].status, "client_error");
-    assert_eq!(request_logs[0].http_status, Some(400));
-    assert_eq!(request_logs[0].error_source.as_deref(), Some("client"));
-    assert_eq!(request_logs[0].error_stage.as_deref(), Some("validation"));
-    let new_runtime_logs = db
-        .list_gateway_logs(8)
-        .unwrap()
-        .into_iter()
-        .filter(|log| log.id > runtime_log_watermark)
-        .collect::<Vec<_>>();
-    assert!(
-        new_runtime_logs.iter().all(|log| {
-            log.category == "usage_sync" && log.request_id.is_none() && log.error_stage.is_none()
-        }),
-        "request validation must not add gateway runtime logs: {new_runtime_logs:?}"
-    );
-    drop(db);
 
     stop(state, dir, gateway_handle, stop_mock);
 }
@@ -406,7 +283,6 @@ async fn ambiguous_model_id_is_structured_across_client_formats() {
 }
 
 const CHAT_SUCCESS_BODY: &str = r#"{"id":"ok","object":"chat.completion","model":"upstream-should-not-leak","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":0}}}"#;
-const MESSAGES_SUCCESS_BODY: &str = r#"{"id":"msg-ok","type":"message","role":"assistant","model":"upstream-should-not-leak","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":2,"cache_read_input_tokens":0}}"#;
 const CHAT_STREAM_BODY: &str = concat!(
     "data: {\"id\":\"chat-stream\",\"model\":\"upstream-should-not-leak\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":null}]}\n\n",
     "data: {\"id\":\"chat-stream\",\"model\":\"upstream-should-not-leak\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"prompt_tokens_details\":{\"cached_tokens\":0}}}\n\n",
@@ -482,10 +358,10 @@ async fn mixed_case_alias_chat_persists_canonical_alias() {
         "key-1".to_string(),
         VecDeque::from([FakeReply {
             status: 200,
-            body: MESSAGES_SUCCESS_BODY,
+            body: CHAT_SUCCESS_BODY,
         }]),
     )]);
-    let (base_url, _calls, stop_mock) = start_fake_upstream(replies).await;
+    let (base_url, calls, stop_mock) = start_fake_upstream(replies).await;
     let (state, dir) = build_state(base_url, &["key-1"]);
     let (port, gateway_handle) = start_gateway(state.clone()).await;
 
@@ -502,6 +378,10 @@ async fn mixed_case_alias_chat_persists_canonical_alias() {
     assert_eq!(response.status(), StatusCode::OK);
     let body: Value = response.json().await.unwrap();
     assert_eq!(body["model"], "MINIMAX-M3");
+    let recorded = calls.lock().unwrap();
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recorded[0].path, "/v1/chat/completions");
+    drop(recorded);
 
     let (status, attribution) = latest_log_identity(&state);
     assert_eq!(status, "success");

@@ -4,7 +4,7 @@
 
 The rail lists the V4 connection projection: built-in Providers with at least one account, every user-defined Provider (with or without a Key, including persisted onboarding drafts), and each Custom API account as its own row, grouped by Plan/API. Unused built-in templates stay off the rail and remain in the **Add Provider** catalog only. Row and detail-header status comes from server-side projection fields only: **Draft** (lifecycle `draft`), **Missing credential** (authorization `missing` on a configured connection), **Disabled** (lifecycle `disabled` or all credentials disabled), **Invalid credential** (authorization `invalid`), **No enabled model** (eligibility reason `no_enabled_target`), **Cooling down** (eligibility `cooling`). These are local eligibility projections, never upstream health; `unknown` authorization shows no badge and is not verified. A draft stays on the rail with **Continue setup** and is not routed; it does not open **Add Key** merely because a credential is missing. **Continue setup** reloads that Provider's current definition and pairs save with that view's revision; a none-auth draft is not treated as having a saved Key. A configured keyed Provider with no Key stays on the rail as **Missing credential**: it is saved, has no Key, and does not participate in routing; it is not tested automatically. **Add Key** on a configured detail opens the same credential editor used on **Accounts**, prefilled for that Provider. A Custom API account row is a read-only summary (endpoint, protocol, mapped models); **Edit on Accounts** opens that account's editor on **Accounts**. Custom API configuration remains account-owned. The page selects by `connection=<id>`; older `provider=<id>` bookmarks still resolve to the matching built-in or user-defined connection. **Add Provider** in the rail footer opens the preset browser in the main pane, keeping available templates separate from configured Providers; existing preset bookmarks open the same embedded creation form. That form can **Save draft** once name and URL are valid (Key and models may be omitted) or **Complete setup** (models required, and a Key for keyed auth). Fetch models and Test model stay explicit. Saving or completing a user-defined Provider from **Providers → Add Provider** or **Accounts → Add account** → preset commits once through onboarding. A draft saved from Accounts continues on Providers. Reopening a draft uses the same connection ID, keeps a blank Key field to retain saved material, and rotates only when a new Key is provided. Completing with a saved Key shows the current destination Origin/URL and an unchecked authorize-current-address control; opening or editing never grants. If the network drops before a response, the form reports an unknown outcome, locks the fields, and retries the same payload and operation on explicit Retry. A conflicting revision reloads tokens for review and keeps the input without replaying. Configured Providers still use ordinary edit, never turning a live Provider into a draft. Saved connections retain their preset brand where provenance is known, without certifying an edited address as official. The model catalog has its own model search and enabled-state filter; searching the Provider list does not search models. Mapping tables keep both public and upstream names accessible on narrow screens.
 
-Enabling a model force-enables every available protocol; it does not merely restore `auto`. Available upstreams always use the same chips: a visible chip can connect, and blue is the conversion default. Clicking a chip sets that default. The preference is remembered independently of enablement and travels in node migration packages. Restoring the official baseline clears it. Model and connection tests never enable a model or change its protocol choice.
+Enabling a model force-enables every available protocol; it does not merely restore `auto`. Available upstreams always use the same chips: a visible chip can connect, and blue is the conversion default. Clicking a chip sets that default. The preference is remembered independently of enablement and travels in node migration packages. Model and connection tests never enable a model or change its protocol choice.
 
 ## Protocol defaults and connection tests
 
@@ -27,24 +27,24 @@ Want to connect another upstream or contribute a built-in integration? Start wit
 **Providers** is the supplier control plane — the page you land on when an old
 bookmark still ends in `?view=pricing`.
 
-The Adapter Registry stays static and sealed. Built-in Providers and
-user-defined Providers share this page, labelled **Built-in**, **Official
-preset**, or **Custom** by origin. Custom API is a Configurable HTTP adapter
-used as an account-owned path. Scopes are split like this:
+The Adapter Registry stays static and sealed. Sealed adapters and
+user-defined Providers share this page, labelled **Provider preset** or
+**Custom**. Custom API is a Configurable HTTP adapter used as an
+account-owned path. Scopes are split like this:
 
-- `Provider(contract_scope_id)` for one exact built-in Provider contract.
+- `Provider(contract_scope_id)` for one exact sealed Provider contract.
   Existing scope IDs keep their historical Provider-shaped values.
 - User-defined Providers persist as typed definitions and bind Configurable
   HTTP. Their Endpoint, protocol, auth kind, and mappings are edited here.
 - `CustomEndpoint(account_id)` scopes keep Custom mappings account-owned.
   Edit those mappings on **Accounts**.
 
-Built-in and user-defined Providers open the same detail shell with up to three tabs. **Models**
-is the default: built-in scopes show the model catalog (source line, refresh,
-official protocol baseline, and the protocol matrix), while user-defined
+Provider-preset and user-defined Providers open the same detail shell with up to three tabs. **Models**
+is the default: provider-preset scopes show the model catalog (source line, refresh,
+and the protocol matrix), while user-defined
 Providers show their read-only model mappings with an edit entry. **Pricing**
 appears only when the Provider has pricing. **Settings** shows the connection
-facts; built-in rows are read-only (provided by the official adapter),
+facts; provider-preset rows are read-only (provided by the official adapter),
 user-defined rows offer edit/delete, and the **OpenCode Go** scope keeps the
 managed-signup **invite URL** here. It is a user-owned `opencode.ai` /
 `console.opencode.ai` HTTPS link (not a sealed origin). Fresh installs may
@@ -55,29 +55,35 @@ API account row is a read-only summary (endpoint, protocol, mapped models);
 Providers are unpriced.
 
 **Aliases** is a separate core page because its read-only table spans every
-Provider contract, user-defined Provider mapping, and Custom account instead of
-the selected Provider. It aggregates existing contracts and account capabilities
-into public names with their configuration state, enabled-account counts, and
-exact upstream identities. These are configuration facts, not a guarantee that
-a request will succeed. Overlapping public names and upstream IDs are flagged
-for inspection. Search by public name, upstream ID, or Provider; **Edit mappings**
-opens the relevant Custom account editor on **Accounts**.
+currently enabled account instead of the selected Provider. It lists only
+Providers that have at least one enabled account, including CPA as its own
+Provider. Public names and exact upstream identities come from those
+Providers' contracts, user-defined mappings, Custom capabilities, and the
+selected CPA catalog. Overlapping public names and upstream IDs are flagged
+for inspection. Search by public name, upstream ID, or Provider.
 
-**Model catalog** is local. Each scope renders one row per current catalog model with columns: model (alias plus raw upstream ID), upstream protocol, enable, and a row action. Every model uses the same chips for its available upstreams; a visible chip can connect, and blue is the conversion default. MiniMax CN and Kimi Code CN start with Chat Completions and Messages; neither advertises Responses. The enable switch turns the model on or off for routing: on force-enables every available protocol, off removes the model from routing and from `GET /v1/models`. The switch updates immediately while the CAS-protected save runs in the background; only the affected row shows saving progress. Batch actions move out of per-column controls into a single scope-level toolbar with **Enable all** and **Disable all** that apply to every model in the scope.
+**Model catalog** is local. Each scope renders one row per current catalog model with columns: model (alias plus raw upstream ID), upstream protocol, enable, and row actions. Every model uses the same chips for its available upstreams; a visible chip can connect, and blue is the conversion default. MiniMax CN and Kimi Code CN start with Chat Completions and Messages; neither advertises Responses. The enable switch turns the model on or off for routing: on force-enables every available protocol, off removes the model from routing and from `GET /v1/models`. The switch updates immediately while the CAS-protected save runs in the background; only the affected row shows saving progress. **Select** opens multi-select: a checkbox column appears, and the toolbar trailing slot becomes **On**, **Off**, and **Delete** for the checked rows. Each row can also delete that model from the persisted local catalog. A deleted ID stops routing; **Refresh model catalog** may add official IDs back, off by default.
+
+Deleting the last Zen Free model leaves an empty catalog across reloads and restarts. Only an explicit catalog refresh can bring official IDs back. If a deletion is saved but the subsequent runtime reload fails, removed IDs still stop accepting new requests; the operation reports the reload error.
 
 Underlying static, preset, and probe evidence remains in the contract, but is not surfaced as a separate badge in the per-model list. `auto` remains the stored default until an explicit switch writes an override. Connection tests record observations only. A Key rotate or Endpoint/protocol change on a Custom or user-defined connection drops that account's probe observations so the old result cannot speak for the new Key or URL. Failed account attempts are reported and retained as evidence, but never pin the shared protocol `force_off`; only an explicit switch can do that.
 
-For the built-in **OpenCode Go**, **Zen Free**, **Command Code GOAT**,
-**MiniMax CN**, and **Kimi Code CN** scopes, the catalog header offers
-**Restore official protocol baseline**. It makes no upstream request, keeps the
-current model catalog, clears manual switches and probe evidence, and restores
-the development-time official baseline reviewed on **2026-09-06**. OpenCode
-Go and known Zen rows default to the one upstream endpoint documented for each
-model. GOAT uses Messages for Anthropic model IDs and Chat Completions for the
-other Provider families, with newly discovered non-preset models still off by
-default. MiniMax CN and Kimi Code CN both default to Chat Completions and
-Messages; neither advertises Responses. The current effective target protocol
-stays in effect until an explicit row change rewrites it.
+Every refreshable scope takes its model list from that Provider's official
+`/models` catalog when you **Refresh model catalog**. Protocols come from
+official documentation on that same action. **OpenCode Go** reads the
+Endpoints table on `https://opencode.ai/docs/go/`. **Zen Free** refreshes
+`https://opencode.ai/zen/v1/models` and looks up the paid id (strip
+`-free`) in that same table. **Command Code GOAT** reads
+`https://commandcode.ai/docs/provider`; a per-model table wins when
+present, otherwise Anthropic IDs use Messages and the rest use Chat
+Completions. `stealth/ox-alpha` stays without a protocol. A model the
+document omits, or a failed fetch, defaults to Chat Completions. Refresh
+keeps existing manual switches and probes. **MiniMax CN** and **Kimi Code
+CN** refresh their official `/models` directories and apply the documented
+family: Chat Completions and Messages, never Responses. There is no
+separate restore-to-snapshot action. Newly discovered non-preset Command
+Code models stay off until you enable them. The current effective target
+protocol stays in effect until an explicit row change rewrites it.
 
 The compact source line, refresh action, and model list share one content panel.
 Every refreshable scope uses the same action. OpenCode Go refreshes from the
@@ -96,18 +102,16 @@ lowercase kebab Aliases. Kimi maps `kimi-for-coding` → `kimi-k2.7-code`,
 `kimi-for-coding-highspeed` → `kimi-k2.7-code-highspeed`, `k3` → `kimi-k3`,
 and `k3-256k` → `kimi-k3-256k`. Forwarding retains every exact upstream ID.
 
-Before the first successful refresh, the built-in static catalog is the initial
-preset. After success, the saved official snapshot is authoritative and
-replaces that preset. Models newly added by a refresh appear in the list. For
+Before the first successful refresh the catalog is empty: there is no
+checked-in model list. After success, the saved official `/models` snapshot is
+authoritative. Models newly added by a refresh appear in the list. For
 OpenCode Go, Zen Free, and Command Code, the new rows default to off (the
-upstream protocol is the documented default and the enable switch is off) until
-you explicitly turn one on. A refreshed model the checked-in preset does not
-know still falls back to the provider's official default protocol — Chat
-Completions for OpenCode Go and Zen Free — so the row stays operable instead of
-showing "No protocol available". MiniMax CN and Kimi Code CN new rows default to
-their sealed target protocol; Responses stays unsupported. Existing overrides
-and probe results for surviving models are preserved. A failed or empty refresh
-keeps the previous snapshot.
+upstream protocol comes from official documentation, or Chat Completions when
+the document omits the model) until you explicitly turn one on. MiniMax CN and
+Kimi Code CN new rows default to their documented family — Chat Completions and
+Messages; Responses stays unsupported. Existing overrides and probe results for
+surviving models are preserved. A failed or empty refresh keeps the previous
+snapshot.
 
 Custom API continues to use account-owned public-name → upstream-ID mappings;
 discovery never silently replaces them. The account form **Fetch models** action

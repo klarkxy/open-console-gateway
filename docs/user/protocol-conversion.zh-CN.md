@@ -2,17 +2,21 @@
 
 # 协议转换
 
-Open Console Gateway 在一个端口上提供五种客户端协议，再把每份请求转换成上游 Plan 所需的格式。转换过程是确定性的：解析 Alias、检查账号资格、应用适配器上限与已保存的供应商合约、检查按模型/按协议的 effective 状态，然后决定透传或转换。强制关闭或全局关闭的协议优先于模型声明。
+Open Console Gateway 在一个端口上提供五种客户端协议，再把每份请求转换成上游 Plan 所需的格式。转换过程是确定性的：解析 Alias、检查账号资格、应用适配器上限与已保存的供应商合约、检查按模型/按协议的 effective 状态，然后决定透传或转换。显式关闭上游协议的设置优先于基线支持。
 
-每个已知 OpenCode Go 模型从硬编码的 **推荐协议** 与 **已验证可用协议集合** 起步，由测试账号探测后写入代码。协议选择使用已保存的合约。在 **供应商** 页探测成功只能在该适配器上限内确认或新增支持，失败会被记录，但不会删除静态能力。客户端协议在集合内且 effective 启用时透传；否则 **请求体** 转到推荐上游协议，**响应体** 或 SSE 流转回客户端协议。供应商目录里的全部供应商（含用户定义 Configurable HTTP，每条 mapping 一个协议）共用这条规则。Custom API 同样转到该账号声明的上游协议，再遵守该端点的合约与按模型覆盖。CPA 不在此转换默认控制范围内，行为不变。转换覆盖文本、system、图像、工具调用与结果、推理内容、完成状态、错误与 usage 字段。`grok-4.6`、`grok-4.5` 与 `gpt-5.6-luna` 均仅支持 Responses；`glm-5.3` 与 `glm-5.2` 均仅支持 Chat。其他客户端格式（包括 Gemini）会转换，不会触发上游协议试探。
+协议选择使用已保存的供应商合约。显式刷新目录时导入官方模型列表和协议基线：Go、Zen 使用 Go 文档，Command Code 使用自己的供应商文档，MiniMax CN / Kimi Code CN 使用文档声明的 Chat 与 Messages 家族。Go、Zen、Command Code 在文档缺少模型或抓取失败时回退到 Chat。已保存的覆盖与探测证据仍受密封适配器约束。刷新和启用操作见[供应商](providers.zh-CN.md)；推理请求不会刷新目录，也不会通过尝试另一种上游协议来发现支持。
 
-| 推荐上游协议 | 模型 |
+客户端协议在当前模型合约中启用时，请求和响应透传；否则 **请求体** 转到已启用的首选协议，或适配器回退顺序中的第一个可用协议，**响应体** 或 SSE 流转回客户端协议。Gemini 始终转换到已启用的上游协议。供应商目录里的全部供应商（含用户定义 Configurable HTTP，每条 mapping 一个协议）共用这条规则。Custom API 同样转到该账号声明的上游协议，再遵守该端点的合约与按模型覆盖。CPA 不在此转换默认控制范围内，行为不变。转换覆盖文本、system、图像、工具调用与结果、推理内容、完成状态、错误与 usage 字段。SSE 用量、错误和终止状态按事件顺序解析，支持同一次响应混用 LF 与 CRLF 事件分隔符。
+
+下表记录代码内的别名配置，不代表供应商当前可用性。刷新写入的官方基线与已保存的启用状态决定 **供应商** 页显示的实际默认协议和可用协议。
+
+| 别名参考偏好 | 模型 |
 | --- | --- |
 | OpenAI Chat Completions | `glm-5.3-flash`、`glm-5.3`、`glm-5.2`、`glm-5.1`、`glm-5`、`kimi-k3`、`kimi-k2.7-code`、`kimi-k2.6`、`kimi-k2.5`、`deepseek-v4-pro`、`deepseek-v4-flash`、`deepseek-v4-flash-vision-exp`、`mimo-v2.5`、`mimo-v2.5-pro`、`hy3`、`longcat-2.0`、`big-pickle`、`deepseek-v4-flash-free`、`mimo-v2.5-free`、`nemotron-3-ultra-free`、`nemotron-3.5-lightning-free`、`ling-3.0-flash-fin-free`、`hy4-preview` |
 | OpenAI Responses | `grok-4.6`、`grok-4.5`、`gpt-5.6-luna`、`muse-spark-1.2`、`muse-spark-1.2-contributor`、`muse-spark-1.2-contributor-free`、`muse-spark-1.3-contributor-free` |
 | Anthropic Messages | `minimax-m3`、`minimax-m2.7`、`minimax-m2.7-highspeed`、`minimax-m2.5`、`minimax-m2.5-highspeed`、`qwen3.8-max`、`qwen3.8-flash`、`qwen3.7-max`、`qwen3.7-plus`、`qwen3.6-plus`、`qwen3.5-plus` |
 
-透传矩阵（检入的官方基线：2026-09-06 推荐端点，加上 2026-08-27 Go `live_supported` 额外路径）。✓ = 客户端协议原样转发；空 = 基线没有该协议的直接透传证据。模型是否可路由仍由 Provider 目录与 effective 合约决定；已知但不符合准入条件的模型会在本机被拒绝，不会转换或发送到上游。权威来源：`crates/ocg-domain/src/protocol.rs` 的 `MODEL_PROTOCOLS`。
+别名配置参考（检入的 2026-09-06 偏好及 2026-08-27 Go `live_supported` 路径）。✓ 表示代码配置中记录了该协议，不保证当前直接透传。模型和协议是否可路由由 Provider 目录与 effective 合约决定。参考配置位于 `crates/ocg-domain/src/protocol.rs` 的 `MODEL_PROTOCOLS`。
 
 `reasoning.effort` 别名（转发或转换前应用）：`muse-spark-1.2`、 `muse-spark-1.2-contributor`、`muse-spark-1.2-contributor-free` 与 `muse-spark-1.3-contributor-free` 把 `max` 映射为 `xhigh`（上游拒绝 `max`）；其他模型的 `reasoning.effort` 原样透传。
 

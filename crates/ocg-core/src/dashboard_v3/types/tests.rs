@@ -602,12 +602,24 @@ fn custom_capability_writes_accept_only_canonical_or_legacy_shapes() {
 }
 
 #[test]
-fn service_unavailable_error_emits_stable_code_and_cas_tokens() {
-    let error = V3Error::service_unavailable("browser stop failed", 11, 9);
-    let value = serde_json::to_value(&error).unwrap();
-    assert_eq!(value["code"], ERROR_SERVICE_UNAVAILABLE);
-    assert_eq!(value["currentRevision"], 11);
-    assert_eq!(value["processGeneration"], 9);
+fn service_unavailable_and_not_implemented_errors_emit_stable_code_and_cas_tokens() {
+    for (label, error, code) in [
+        (
+            "service_unavailable",
+            V3Error::service_unavailable("browser stop failed", 11, 9),
+            ERROR_SERVICE_UNAVAILABLE,
+        ),
+        (
+            "not_implemented",
+            V3Error::not_implemented("protocol probes are not available", 11, 9),
+            ERROR_NOT_IMPLEMENTED,
+        ),
+    ] {
+        let value = serde_json::to_value(&error).unwrap();
+        assert_eq!(value["code"], code, "{label}");
+        assert_eq!(value["currentRevision"], 11, "{label}");
+        assert_eq!(value["processGeneration"], 9, "{label}");
+    }
 }
 
 #[test]
@@ -667,15 +679,6 @@ fn browser_dtos_are_distinct_secret_free_and_emit_required_nulls() {
         }))
         .is_err()
     );
-}
-
-#[test]
-fn not_implemented_error_emits_stable_code_and_cas_tokens() {
-    let error = V3Error::not_implemented("protocol probes are not available", 11, 9);
-    let value = serde_json::to_value(&error).unwrap();
-    assert_eq!(value["code"], ERROR_NOT_IMPLEMENTED);
-    assert_eq!(value["currentRevision"], 11);
-    assert_eq!(value["processGeneration"], 9);
 }
 
 const ACCOUNTS_CATALOG_PREFIX: &[&str] = &[

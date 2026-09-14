@@ -57,7 +57,6 @@ import type {
   DashboardSummary,
   DesktopUpdate,
   ProviderDefinition,
-  ProviderDefinitionCreate,
   ProviderDefinitionDiscoverRequest,
   ProviderDefinitionDiscoverResponse,
   ProviderDefinitionMutation,
@@ -81,7 +80,6 @@ import type {
   ProtocolProbeResponse,
   ProviderCatalog,
   ProviderContracts,
-  ProviderModelCapability,
   ProviderPricing,
   ProviderPricingRefresh,
   ProviderPricingRefreshUpdate,
@@ -94,7 +92,6 @@ import type {
   UsageMutation,
   UsageRefresh,
   UsageWindow,
-  ZenFreeModels,
   ZenFreeSettings,
   ZenFreeSettingsUpdate,
 } from "./generated/dashboard-v3.ts";
@@ -665,11 +662,6 @@ export const dashboardV3 = {
       method: "PUT",
       body: withExpectation(update, expectation),
     }),
-  verifyAccount: (id: string, expectation: MutationExpectation) =>
-    requestV3<AccountMutation>(`/accounts/${encode(id)}/verify`, {
-      method: "POST",
-      body: mutation(expectation),
-    }),
   testAccountModel: (id: string, modelId: string) =>
     requestV3<AccountModelTestResponse>(`/accounts/${encode(id)}/model-tests`, {
       method: "POST",
@@ -729,13 +721,6 @@ export const dashboardV3 = {
   getProviders: () => requestV3<ProviderCatalog>("/providers"),
   getProviderDefinition: (providerId: string) =>
     requestV3<ProviderDefinition>(`/providers/${encode(providerId)}`),
-  createProviderDefinition: (
-    input: WithoutExpectation<ProviderDefinitionCreate>,
-    expectation: MutationExpectation,
-  ) => requestV3<ProviderDefinitionMutation>("/providers", {
-    method: "POST",
-    body: withExpectation(input, expectation),
-  }),
   updateProviderDefinition: (
     providerId: string,
     input: WithoutExpectation<ProviderDefinitionUpdate>,
@@ -759,19 +744,11 @@ export const dashboardV3 = {
       method: "POST",
       body: json(input),
     }),
-  getProviderModelCapabilities: () =>
-    requestV3<ProviderModelCapability[]>("/providers/model-capabilities"),
   getZenFreeSettings: () => requestV3<ZenFreeSettings>("/providers/zen-free"),
   patchZenFreeSettings: (enabled: boolean, expectation: MutationExpectation) =>
     requestV3<ZenFreeSettings>("/providers/zen-free", {
       method: "PATCH",
       body: withExpectation({ enabled } satisfies WithoutExpectation<ZenFreeSettingsUpdate>, expectation),
-    }),
-  getZenFreeModels: () => requestV3<ZenFreeModels>("/providers/zen-free/models"),
-  refreshZenFreeModels: (expectation: MutationExpectation) =>
-    requestV3<ZenFreeModels>("/providers/zen-free/models/refresh", {
-      method: "POST",
-      body: mutation(expectation),
     }),
   getProviderContracts: () => requestV3<ProviderContracts>("/provider-contracts"),
   refreshContractCatalog: (

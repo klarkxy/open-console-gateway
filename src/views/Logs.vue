@@ -258,7 +258,7 @@
           @update:page="changeForwardPage"
         >
           <template #empty>
-            <n-empty :description="t('记录推理转发和协议探测请求；运行日志只记录进程与控制面事件')" />
+            <n-empty :description="t('暂无请求日志')" />
           </template>
         </n-data-table>
       </n-tab-pane>
@@ -1231,7 +1231,8 @@ onUnmounted(cleanup);
   overflow: auto;
 }
 
-.advanced-filter-toggle { display: none; }
+.advanced-filter-toggle { display: inline-flex; margin-bottom: 12px; }
+.filter-bar:not(.show-advanced) .advanced-filter { display: none; }
 
 @media (max-width: 860px) {
   .time-range-panel {
@@ -1258,8 +1259,6 @@ onUnmounted(cleanup);
 }
 
 @media (max-width: 560px) {
-  .advanced-filter-toggle { display: inline-flex; margin-bottom: 12px; }
-  .filter-bar:not(.show-advanced) .advanced-filter { display: none; }
   .stat-card { padding: 10px; }
   .stats-row { margin-bottom: 12px; }
   .logs-card {

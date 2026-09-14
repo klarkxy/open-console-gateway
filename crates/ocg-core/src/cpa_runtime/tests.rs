@@ -63,11 +63,7 @@ fn write_tar_gz_symlink(name: &str, target: &str) -> Vec<u8> {
 }
 
 #[test]
-fn windows_asset_name_is_exact() {
-    assert_eq!(
-        windows_amd64_asset_name("7.2.147"),
-        "CLIProxyAPI_7.2.147_windows_amd64.zip"
-    );
+fn windows_release_version_rejects_path_unsafe_names() {
     assert!(normalize_release_version("v7.2.147").is_ok());
     assert!(normalize_release_version("../7.2").is_err());
     for unsafe_version in [".", "..", "CON", "7.2.", "7..2", "v"] {
@@ -928,6 +924,8 @@ async fn failed_rollback_restores_config_manifest_and_former_running_version() {
             vec!["current-model".into()],
         )
         .unwrap();
+    let catalog_before = state.db.lock().cpa_model_catalog().unwrap();
+    let routing_before = state.cpa_model_catalog();
     let host = Arc::new(RecordingHost::new(true));
     state.set_cpa_runtime_host(host.clone());
 
@@ -946,22 +944,23 @@ async fn failed_rollback_restores_config_manifest_and_former_running_version() {
         host.starts.lock().last().map(String::as_str),
         Some("7.2.147")
     );
-    assert_eq!(state.cpa_model_catalog().as_ref(), &["current-model"]);
+    assert_eq!(state.db.lock().cpa_model_catalog().unwrap(), catalog_before);
+    assert_eq!(state.cpa_model_catalog().as_ref(), routing_before.as_ref());
     drop(state);
     fs::remove_dir_all(dir).unwrap();
 }
 
 #[tokio::test]
-async fn successful_rollback_replaces_catalog_and_bumps_once() {
-    assert_successful_rollback_catalog(vec!["rollback-model".into()]).await;
+async fn successful_rollback_replaces_or_clears_catalog_and_bumps_once() {
+    for (label, models) in [
+        ("nonempty-catalog", vec!["rollback-model".into()]),
+        ("empty-catalog", vec![]),
+    ] {
+        assert_successful_rollback_catalog(label, models).await;
+    }
 }
 
-#[tokio::test]
-async fn successful_rollback_to_empty_catalog_clears_stale_models_and_bumps_once() {
-    assert_successful_rollback_catalog(vec![]).await;
-}
-
-async fn assert_successful_rollback_catalog(expected_models: Vec<String>) {
+async fn assert_successful_rollback_catalog(label: &str, expected_models: Vec<String>) {
     use axum::extract::State;
     use axum::routing::get;
     use axum::{Json, Router};
@@ -1040,8 +1039,12 @@ async fn assert_successful_rollback_catalog(expected_models: Vec<String>) {
         .await
         .unwrap();
 
-    assert_eq!(state.settings_revision(), revision + 1);
-    assert_eq!(state.cpa_model_catalog().as_ref(), &expected_models);
+    assert_eq!(state.settings_revision(), revision + 1, "{label}");
+    assert_eq!(
+        state.cpa_model_catalog().as_ref(),
+        &expected_models,
+        "{label}"
+    );
     let managed = load_managed(&dir).unwrap().unwrap();
     assert_eq!(managed.current_version, "7.2.140");
     assert_eq!(managed.previous_version.as_deref(), Some("7.2.147"));
@@ -1161,10 +1164,6 @@ async fn download_follows_a_redirect_and_keeps_the_exact_bytes() {
         .await
         .unwrap();
     assert_eq!(bytes, b"payload-bytes");
-    assert_eq!(
-        format!("{:x}", Sha256::digest(&bytes)),
-        format!("{:x}", Sha256::digest(b"payload-bytes"))
-    );
 }
 
 #[tokio::test]

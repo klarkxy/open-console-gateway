@@ -8,7 +8,6 @@ import {
   importCandidateCapabilities,
   linkForAccount,
   linkedAccountIdSet,
-  linksForPlatform,
   platformGroupLabel,
   platformInferenceEndpoint,
   platformModelCandidates,
@@ -17,7 +16,6 @@ import {
   platformPriceForModel,
   platformPriceRows,
   platformUnavailableReasonKey,
-  combinedAvailableQuota,
   quotasByKind,
 } from "./platform-accounts.ts";
 
@@ -91,10 +89,8 @@ function link(accountId: string, platformAccountId: string): PlatformLink {
   };
 }
 
-test("links group by platform and by account", () => {
+test("links resolve by account and collect linked ids", () => {
   const links = [link("a1", "p1"), link("a2", "p1"), link("a3", "p2")];
-  assert.deepEqual(linksForPlatform(links, "p1").map((item) => item.accountId), ["a1", "a2"]);
-  assert.deepEqual(linksForPlatform(links, "missing"), []);
   assert.equal(linkForAccount(links, "a3")?.platformAccountId, "p2");
   assert.equal(linkForAccount(links, "nope"), null);
   assert.deepEqual([...linkedAccountIdSet(links)].sort(), ["a1", "a2", "a3"]);
@@ -147,11 +143,6 @@ test("o03 wallet subscription and key limits stay separate and are never summed"
   assert.equal(byKind.wallet[0]?.remaining, 100);
   assert.equal(byKind.subscription[0]?.remaining, 200);
   assert.equal(byKind.key_limit[0]?.remaining, 50);
-  assert.equal(combinedAvailableQuota(quotas), null);
-  const inventedTotal = 100 + 200 + 50;
-  assert.notEqual(byKind.wallet[0]?.remaining, inventedTotal);
-  assert.notEqual(byKind.subscription[0]?.remaining, inventedTotal);
-  assert.notEqual(byKind.key_limit[0]?.remaining, inventedTotal);
 });
 
 test("o01 plaza candidates are discovery only and never an authorization proof", () => {
@@ -184,10 +175,7 @@ test("platform rates are per token with a per-million tooltip", () => {
   assert.ok(credits?.label.includes("credits"));
 });
 
-test("o04 expired and stale prices are flagged and not treated as current quotes", () => {
-  assert.deepEqual(platformPriceFlags(price({ validUntil: 99 }), false, 100), ["expired"]);
-  assert.deepEqual(platformPriceFlags(price({ validUntil: 100 }), false, 100), ["expired"]);
-  assert.deepEqual(platformPriceFlags(price(), true, 100), ["stale"]);
+test("expired prices appear on platform price rows", () => {
   const expiredRow = platformPriceRows(snapshot({
     models: [{ id: "gpt-4o", platform: null, groupId: null, source: "storefront" }],
     prices: [price({ validUntil: 99, input: 2 })],

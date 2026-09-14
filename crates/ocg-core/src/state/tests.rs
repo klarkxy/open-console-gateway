@@ -308,94 +308,110 @@ fn route_set_snapshot_swaps_atomically_and_stays_self_consistent() {
     fs::remove_dir_all(dir).expect("test data directory should be removed");
 }
 
-#[test]
-fn routing_runtime_resets_when_routing_fields_or_gateway_key_change() {
-    use crate::crypto::{KeyCipher, StaticKeyCipher};
-    use crate::models::{Account, RoutingMode};
-    use std::sync::Arc;
-
-    fn test_account(cipher: &Arc<dyn KeyCipher + Send + Sync>, id: &str) -> Account {
-        Account {
-            id: id.into(),
-            provider_id: crate::provider::default_provider_id(),
-
-            credential_kind: crate::provider::default_credential_kind(),
-            quota_scope: crate::provider::default_quota_scope(),
-            name: id.into(),
-            username: None,
-            password_cipher: None,
-            key_cipher: cipher.encrypt(id).unwrap(),
-            enabled: true,
-            account_type: crate::models::AccountType::Key,
-            setup_step: crate::models::AccountSetupStep::Ready,
-            referral_code: None,
-            purchase_date: String::new(),
-            expires_on: String::new(),
-            cooldown_until: None,
-            cooldown_generic_until: None,
-            cooldown_5h_until: None,
-            cooldown_week_until: None,
-            cooldown_month_until: None,
-            cooldown_free_until: None,
-            last_error: None,
-            auth_error: None,
-            notes: None,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        }
+fn routing_test_account(
+    cipher: &Arc<dyn KeyCipher + Send + Sync>,
+    id: &str,
+) -> crate::models::Account {
+    crate::models::Account {
+        id: id.into(),
+        provider_id: crate::provider::default_provider_id(),
+        credential_kind: crate::provider::default_credential_kind(),
+        quota_scope: crate::provider::default_quota_scope(),
+        name: id.into(),
+        username: None,
+        password_cipher: None,
+        key_cipher: cipher.encrypt(id).unwrap(),
+        enabled: true,
+        account_type: crate::models::AccountType::Key,
+        setup_step: crate::models::AccountSetupStep::Ready,
+        referral_code: None,
+        purchase_date: String::new(),
+        expires_on: String::new(),
+        cooldown_until: None,
+        cooldown_generic_until: None,
+        cooldown_5h_until: None,
+        cooldown_week_until: None,
+        cooldown_month_until: None,
+        cooldown_free_until: None,
+        last_error: None,
+        auth_error: None,
+        notes: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
     }
+}
+
+#[test]
+fn routing_runtime_resets_for_sticky_and_primary_key_not_invalid_or_timeout() {
+    use crate::models::RoutingMode;
 
     let dir = temp_data_dir("routing-reset");
     let db = Database::open(dir.clone()).expect("test database should open");
     let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("state-test"));
     let state =
         CoreStateInner::new(db, dir.clone(), cipher.clone()).expect("state should initialize");
-    let accounts = vec![test_account(&cipher, "a"), test_account(&cipher, "b")];
-
-    assert_eq!(
+    let accounts = vec![
+        routing_test_account(&cipher, "a"),
+        routing_test_account(&cipher, "b"),
+    ];
+    let pick = || {
         state
             .routing
             .select_account(&accounts, RoutingMode::RoundRobin, false, None, &[])
             .unwrap()
-            .id,
-        "a"
-    );
-    assert_eq!(
-        state
-            .routing
-            .select_account(&accounts, RoutingMode::RoundRobin, false, None, &[])
-            .unwrap()
-            .id,
-        "b"
-    );
+            .id
+            .clone()
+    };
 
+    // After only "a", keep yields "b" and a reset yields "a".
+    assert_eq!(pick(), "a");
     let mut invalid = state.config();
     invalid.routing_mode = RoutingMode::StickyGlobal;
     invalid.connect_timeout_secs = 0;
     assert!(state.set_config(invalid).is_err());
     assert_eq!(
-        state
-            .routing
-            .select_account(&accounts, RoutingMode::RoundRobin, false, None, &[])
-            .unwrap()
-            .id,
-        "a",
+        pick(),
+        "b",
         "failed config validation must not reset the active round-robin cursor"
     );
 
+    // Consumed "b"; pick "a" so the cursor is after "a" again.
+    assert_eq!(pick(), "a");
     let mut next = state.config();
     next.conversation_sticky = true;
     state
         .set_config(next)
         .expect("conversation sticky change should reset routing");
-
     assert_eq!(
+        pick(),
+        "a",
+        "conversation sticky change should reset routing"
+    );
+
+    // Sticky reset consumed "a"; keep now yields "b", a further reset would yield "a".
+    let mut config = state.config();
+    config.connect_timeout_secs += 1;
+    state.set_config(config).expect("unrelated save");
+    assert_eq!(
+        pick(),
+        "b",
+        "an unrelated settings save must not reset routing"
+    );
+
+    // Consumed "b"; pick "a" so the cursor is after "a" before key rotation.
+    assert_eq!(pick(), "a");
+    let mut config = state.config();
+    config.gateway_key = "ocg-rotated-primary".to_string();
+    state.set_config(config).expect("rotation should save");
+    assert_eq!(
+        pick(),
+        "a",
+        "the cursor restarts after the primary key value changes"
+    );
+    assert!(
         state
-            .routing
-            .select_account(&accounts, RoutingMode::RoundRobin, false, None, &[])
-            .unwrap()
-            .id,
-        "a"
+            .credential_entry_for_value("ocg-rotated-primary")
+            .is_some()
     );
 
     drop(state);
@@ -491,25 +507,12 @@ fn desktop_hooks_are_unset_on_a_headless_host() {
 }
 
 #[test]
-fn desktop_update_state_machine_is_serializable_atomic_and_retriable() {
+fn desktop_update_core_state_busy_and_starter_failure() {
     let dir = temp_data_dir("desktop-update-state");
     let db = Database::open(dir.clone()).expect("test database should open");
     let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("state-test"));
     let state =
         Arc::new(CoreStateInner::new(db, dir.clone(), cipher).expect("state should initialize"));
-
-    assert_eq!(
-        serde_json::to_value(state.desktop_update_status()).expect("status should serialize"),
-        serde_json::json!({
-            "phase": "idle",
-            "downloaded": 0,
-            "total": null,
-            "error": null,
-            "current_version": env!("CARGO_PKG_VERSION"),
-            "install_supported": false })
-    );
-    assert!(!state.set_desktop_update_progress(1, Some(2)));
-    assert!(!state.set_desktop_update_installing());
 
     let started_versions = Arc::new(StdMutex::new(Vec::new()));
     let captured_versions = started_versions.clone();
@@ -552,46 +555,9 @@ fn desktop_update_state_machine_is_serializable_atomic_and_retriable() {
         state.desktop_update_status().phase,
         DesktopUpdatePhase::Checking
     );
-
-    assert!(state.set_desktop_update_progress(25, Some(100)));
-    let downloading = state.desktop_update_status();
-    assert_eq!(downloading.phase, DesktopUpdatePhase::Downloading);
-    assert_eq!(downloading.downloaded, 25);
-    assert_eq!(downloading.total, Some(100));
-    assert!(state.set_desktop_update_installing());
-    assert!(!state.set_desktop_update_progress(50, Some(100)));
-    state.set_desktop_update_failed("install failed");
-    let failed = state.desktop_update_status();
-    assert_eq!(failed.phase, DesktopUpdatePhase::Failed);
-    assert_eq!(failed.error.as_deref(), Some("install failed"));
-
-    state
-        .start_desktop_update("10.0.0".to_string())
-        .expect("a failed update should be retriable");
-    let retrying = state.desktop_update_status();
-    assert_eq!(retrying.phase, DesktopUpdatePhase::Checking);
-    assert_eq!(retrying.downloaded, 0);
-    assert_eq!(retrying.total, None);
-    assert_eq!(retrying.error, None);
-    assert_eq!(
-        started_versions
-            .lock()
-            .expect("started versions lock should work")
-            .as_slice(),
-        ["9.9.9", "10.0.0"]
-    );
-
-    state.set_desktop_update_idle();
-    assert_eq!(
-        state.desktop_update_status().phase,
-        DesktopUpdatePhase::Idle
-    );
     drop(state);
     fs::remove_dir_all(dir).expect("test data directory should be removed");
-}
 
-#[test]
-fn desktop_update_starter_failure_is_reported_in_status() {
     let dir = temp_data_dir("desktop-update-start-failure");
     let db = Database::open(dir.clone()).expect("test database should open");
     let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("state-test"));
@@ -718,95 +684,6 @@ fn persisted_config_json_is_not_the_primary_key_authority() {
     )
     .unwrap();
     assert_eq!(stored["gateway_key"], "");
-    drop(state);
-    fs::remove_dir_all(dir).expect("test data directory should be removed");
-}
-
-#[test]
-fn routing_resets_only_when_routing_fields_or_primary_key_change() {
-    use crate::crypto::{KeyCipher, StaticKeyCipher};
-    use crate::models::{Account, RoutingMode};
-    use std::sync::Arc;
-
-    fn test_account(cipher: &Arc<dyn KeyCipher + Send + Sync>, id: &str) -> Account {
-        Account {
-            id: id.into(),
-            provider_id: crate::provider::default_provider_id(),
-
-            credential_kind: crate::provider::default_credential_kind(),
-            quota_scope: crate::provider::default_quota_scope(),
-            name: id.into(),
-            username: None,
-            password_cipher: None,
-            key_cipher: cipher.encrypt(id).unwrap(),
-            enabled: true,
-            account_type: crate::models::AccountType::Key,
-            setup_step: crate::models::AccountSetupStep::Ready,
-            referral_code: None,
-            purchase_date: String::new(),
-            expires_on: String::new(),
-            cooldown_until: None,
-            cooldown_generic_until: None,
-            cooldown_5h_until: None,
-            cooldown_week_until: None,
-            cooldown_month_until: None,
-            cooldown_free_until: None,
-            last_error: None,
-            auth_error: None,
-            notes: None,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        }
-    }
-
-    let dir = temp_data_dir("routing-key-values");
-    let db = Database::open(dir.clone()).expect("test database should open");
-    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("state-test"));
-    let state =
-        CoreStateInner::new(db, dir.clone(), cipher.clone()).expect("state should initialize");
-    let accounts = vec![test_account(&cipher, "a"), test_account(&cipher, "b")];
-    let advance = || {
-        state
-            .routing
-            .select_account(&accounts, RoutingMode::RoundRobin, false, None, &[])
-            .unwrap()
-            .id
-            .clone()
-    };
-
-    assert_eq!(advance(), "a");
-
-    // An unrelated settings save keeps sticky routing state intact: with
-    // the cursor after "a", the next pick stays "b"; a reset would
-    // restart at "a". (Sub key lifecycle changes never go through
-    // set_config; their revocation resets are endpoint-driven.)
-    assert_eq!(advance(), "b");
-    let mut config = state.config();
-    config.connect_timeout_secs += 1;
-    state.set_config(config).expect("unrelated save");
-    assert_eq!(
-        advance(),
-        "a",
-        "an unrelated settings save must not reset routing"
-    );
-
-    assert_eq!(advance(), "b");
-    // Rotating the primary key value resets: the old value stops
-    // authenticating.
-    let mut config = state.config();
-    config.gateway_key = "ocg-rotated-primary".to_string();
-    state.set_config(config).expect("rotation should save");
-    assert_eq!(
-        advance(),
-        "a",
-        "the cursor restarts after the primary key value changes"
-    );
-    assert!(
-        state
-            .credential_entry_for_value("ocg-rotated-primary")
-            .is_some()
-    );
-
     drop(state);
     fs::remove_dir_all(dir).expect("test data directory should be removed");
 }

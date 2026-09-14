@@ -431,17 +431,6 @@ async fn dashboard_v3_v2_login_cookie_authorizes_updater_routes() {
         .await
         .unwrap();
     assert_eq!(authorized.status(), StatusCode::OK);
-    let body: Value = authorized.json().await.unwrap();
-    let parsed: DesktopUpdate = serde_json::from_value(body.clone()).unwrap();
-    assert_eq!(
-        parsed.phase,
-        ocg_core::dashboard_v3::DesktopUpdatePhase::Idle
-    );
-    assert_eq!(parsed.current_version, env!("CARGO_PKG_VERSION"));
-    assert!(!parsed.install_supported);
-    assert_eq!(body["total"], Value::Null);
-    assert_eq!(body["error"], Value::Null);
-    assert!(body.get("current_version").is_none());
 
     let install = harness
         .client

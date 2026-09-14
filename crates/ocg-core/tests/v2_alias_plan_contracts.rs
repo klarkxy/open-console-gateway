@@ -140,6 +140,35 @@ async fn unmapped_raw_upstream_id_is_rejected() {
 async fn zen_free_explicit_free_model_stays_anonymous() {
     let harness = BlackBoxHarness::start_with_chat_success(&[GO_ACCOUNT_KEY]).await;
     let _go = harness.create_go_account("go-main", GO_ACCOUNT_KEY).await;
+    harness
+        .state
+        .activate_zen_free_model_catalog(ocg_core::kernel::zen::ZenFreeModelCatalog {
+            models: vec![FREE_MODEL.to_string()],
+            refreshed_at: Some(chrono::Utc::now()),
+            source_url: ocg_core::kernel::zen::ZEN_MODELS_SOURCE_URL.to_string(),
+        })
+        .unwrap();
+    {
+        let now = chrono::Utc::now();
+        let scope = ocg_core::provider_contracts::ContractScope::provider(
+            ocg_core::provider::OPENCODE_ZEN_FREE_PROVIDER_ID,
+        );
+        harness
+            .state
+            .db
+            .lock()
+            .set_model_protocol_overrides(
+                &scope,
+                &[(
+                    FREE_MODEL.to_string(),
+                    ocg_core::provider::UpstreamProtocolKind::ChatCompletions,
+                    ocg_core::provider_contracts::ProtocolOverrideState::ForceOn,
+                )],
+                now,
+            )
+            .unwrap();
+        harness.state.reload_provider_contracts().unwrap();
+    }
     let revision = harness.settings_revision().await;
     let (status, body) = harness
         .patch_json(
@@ -205,6 +234,10 @@ async fn goat_creates_live_while_custom_creates_a_pending_draft() {
         "Command Code's public catalog must not be presented as Key verification: {goat}"
     );
     assert_eq!(
+        goat["verificationRuntimeAvailability"].as_str(),
+        Some("not_applicable")
+    );
+    assert_eq!(
         goat["creationAvailability"].as_str(),
         Some("available"),
         "GOAT accounts must be creatable: {goat}"
@@ -219,8 +252,8 @@ async fn goat_creates_live_while_custom_creates_a_pending_draft() {
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(
-        body["enabled"], true,
-        "GOAT must be immediately eligible when ready and keyed: {body}"
+        body["enabled"], false,
+        "new GOAT Key accounts stay disabled until the operator enables them: {body}"
     );
     assert_eq!(
         body["verificationStatus"].as_str(),
@@ -231,6 +264,25 @@ async fn goat_creates_live_while_custom_creates_a_pending_draft() {
         body.get("key").is_none(),
         "account JSON must not return a Key field: {body}"
     );
+    let goat_id = body["id"].as_str().expect("account id").to_string();
+    let stored = harness.account_by_id(&goat_id).await;
+    assert_eq!(
+        stored["enabled"], false,
+        "GOAT create must not auto-enable: {stored}"
+    );
+    assert_eq!(
+        stored["verificationStatus"].as_str(),
+        Some("not_required"),
+        "GOAT account must not expose a pending Key-verification state: {stored}"
+    );
+    assert!(
+        stored["connectionVerifiedAt"].is_null()
+            || stored
+                .get("connectionVerifiedAt")
+                .is_none_or(|value| value.as_str().is_none_or(|stamp| stamp.is_empty())),
+        "connection_verified_at must remain unset: {stored}"
+    );
+    assert!(stored.get("key").is_none(), "{stored}");
 
     let (status, body) = harness
         .create_account(custom_create_payload(
@@ -243,8 +295,8 @@ async fn goat_creates_live_while_custom_creates_a_pending_draft() {
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(
-        body["enabled"], true,
-        "Custom creates enabled while verification stays pending: {body}"
+        body["enabled"], false,
+        "Custom creates disabled while verification stays pending: {body}"
     );
     assert_eq!(
         body["verificationStatus"].as_str(),
@@ -291,6 +343,9 @@ async fn disabled_goat_is_not_selected_for_alias_routing() {
         }))
         .await;
     assert_eq!(status, StatusCode::OK, "{goat}");
+    let goat_id = goat["id"].as_str().unwrap();
+    harness.enable_stored_account(goat_id);
+    let goat = harness.account_by_id(goat_id).await;
     assert_eq!(goat["enabled"], true, "{goat}");
     let (status, goat) = harness
         .patch_json(
@@ -313,54 +368,6 @@ async fn disabled_goat_is_not_selected_for_alias_routing() {
         .unwrap_or_else(|| panic!("expected a forward log: {logs}"));
     assert_eq!(item["accountId"], go["id"]);
     assert_ne!(item["accountId"], goat["id"]);
-    harness.shutdown();
-}
-
-/// GOAT verification is not applicable because its public catalog is not a Key check.
-#[tokio::test]
-async fn goat_account_reports_verification_not_applicable() {
-    let harness = BlackBoxHarness::start().await;
-    let (status, account) = harness
-        .create_account(json!({
-            "providerId": COMMAND_CODE_PROVIDER_ID,
-            "name": "goat-verify",
-            "key": GOAT_ACCOUNT_KEY,
-            "expectedRevision": harness.settings_revision().await
-        }))
-        .await;
-    assert_eq!(status, StatusCode::OK, "{account}");
-    assert_eq!(account["enabled"], true, "{account}");
-    assert_eq!(
-        account["verificationStatus"].as_str(),
-        Some("not_required"),
-        "{account}"
-    );
-    let goat_id = account["id"].as_str().expect("account id").to_string();
-    let catalog = harness.catalog().await;
-    let goat = catalog_entry(&catalog, COMMAND_CODE_PROVIDER_ID).unwrap();
-    assert_eq!(
-        goat["verificationRuntimeAvailability"].as_str(),
-        Some("not_applicable")
-    );
-
-    let stored = harness.account_by_id(&goat_id).await;
-    assert_eq!(
-        stored["enabled"], true,
-        "GOAT account enabled state must not be gated by directory refresh: {stored}"
-    );
-    assert_eq!(
-        stored["verificationStatus"].as_str(),
-        Some("not_required"),
-        "GOAT account must not expose a pending Key-verification state: {stored}"
-    );
-    assert!(
-        stored["connectionVerifiedAt"].is_null()
-            || stored
-                .get("connectionVerifiedAt")
-                .is_none_or(|value| value.as_str().is_none_or(|stamp| stamp.is_empty())),
-        "connection_verified_at must remain unset: {stored}"
-    );
-    assert!(stored.get("key").is_none(), "{stored}");
     harness.shutdown();
 }
 

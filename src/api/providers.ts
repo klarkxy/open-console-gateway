@@ -1,4 +1,5 @@
 import { dashboardV3, isRevisionConflict, type WithoutExpectation } from "./dashboard-v3.ts";
+import { dashboardV4 } from "./dashboard-v4.ts";
 import { useControlPlaneStore } from "../stores/controlPlane.ts";
 import type {
   AccountCredentialKind,
@@ -680,12 +681,21 @@ export const providerApi = {
       dashboardV3.refreshContractCatalog(scopeKind, scopeId, expectation)
     ));
   },
-  resetStaticModelProtocols: async (scopeId: string) => {
+  removeContractCatalogModels: async (
+    scopeKind: ContractScopeKind,
+    scopeId: string,
+    modelIds: string[],
+  ) => {
     const control = useControlPlaneStore();
     if (!control.hasTokens()) await control.refresh();
-    return presentContracts(await control.runMutation((expectation) =>
-      dashboardV3.resetStaticModelProtocols(scopeId, expectation)
-    ));
+    try {
+      await control.runMutation((expectation) =>
+        dashboardV4.removeCatalogModels(scopeKind, scopeId, { modelIds }, expectation));
+    } catch (cause) {
+      if (isRevisionConflict(cause)) await dashboardV3.getProviderContracts();
+      throw cause;
+    }
+    return presentContracts(await dashboardV3.getProviderContracts());
   },
   getProviderContracts: async () => presentContracts(await dashboardV3.getProviderContracts()),
   updateModelProtocolOverrides: async (
@@ -729,22 +739,6 @@ export const providerApi = {
     const value = await dashboardV3.getProviderDefinition(providerId);
     assertNoSecret(value);
     return presentProviderDefinition(value);
-  },
-  createProviderDefinition: async (
-    input: WithoutExpectation<import("./generated/dashboard-v3.ts").ProviderDefinitionCreate>,
-  ) => {
-    const control = useControlPlaneStore();
-    if (!control.hasTokens()) await control.refresh();
-    try {
-      const value: V3ProviderDefinitionMutation = await control.runMutation((expectation) =>
-        dashboardV3.createProviderDefinition(input, expectation));
-      assertNoSecret(value);
-      assertNoSecret(value.provider);
-      return presentProviderDefinition(value.provider);
-    } catch (cause) {
-      if (isRevisionConflict(cause)) await dashboardV3.getProviders();
-      throw cause;
-    }
   },
   updateProviderDefinition: async (
     providerId: string,

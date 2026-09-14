@@ -444,7 +444,7 @@ async fn dashboard_v3_list_and_detail_are_secret_free() {
     let created_account = mutation_account(&created);
     assert_eq!(created_account.username.as_deref(), Some("user"));
     assert_eq!(created_account.notes.as_deref(), Some("keep this"));
-    assert!(created_account.enabled);
+    assert!(!created_account.enabled);
     assert_eq!(
         created_account.verification_status,
         AccountVerificationStatus::NotRequired
@@ -608,8 +608,7 @@ async fn dashboard_v3_create_gates_for_go_custom_goat_and_zen() {
     .await;
     assert_eq!(status, StatusCode::OK, "{go}");
     let go = mutation_account(&go);
-    assert!(go.enabled);
-    assert_eq!(go.provider_id, OPENCODE_PROVIDER_ID);
+    assert!(!go.enabled);
     assert_eq!(go.provider_id, OPENCODE_PROVIDER_ID);
     assert_eq!(
         go.verification_status,
@@ -634,7 +633,7 @@ async fn dashboard_v3_create_gates_for_go_custom_goat_and_zen() {
     .await;
     assert_eq!(status, StatusCode::OK, "{goat}");
     let goat = mutation_account(&goat);
-    assert!(goat.enabled);
+    assert!(!goat.enabled);
     assert_eq!(
         goat.verification_status,
         AccountVerificationStatus::NotRequired
@@ -657,6 +656,7 @@ async fn dashboard_v3_create_gates_for_go_custom_goat_and_zen() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{custom_err}");
 
+    let before_custom = harness.state.settings_revision();
     let (status, custom) = send_json(
         &harness,
         Method::POST,
@@ -667,15 +667,21 @@ async fn dashboard_v3_create_gates_for_go_custom_goat_and_zen() {
                 "name": "Custom",
                 "key": "custom-key",
                 "providerId": CUSTOM_PROVIDER_ID,
-                "customConfig": custom_write(),
-                "modelCapabilities": [custom_capability()]
+                "customConfig": {
+                    "endpointUrl": "http://127.0.0.1:1/chat/completions",
+                    "upstreamProtocol": "chat_completions"
+                },
+                "modelCapabilities": [{
+                    "modelId": "dash-custom-model",
+                    "protocol": "chat_completions"
+                }]
             }),
         ),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{custom}");
     let custom = mutation_account(&custom);
-    assert!(custom.enabled);
+    assert!(!custom.enabled);
     assert_eq!(
         custom.verification_status,
         AccountVerificationStatus::Pending
@@ -683,10 +689,17 @@ async fn dashboard_v3_create_gates_for_go_custom_goat_and_zen() {
     assert!(custom.plan_routable);
     assert_eq!(
         custom.custom_config.as_ref().unwrap().endpoint_url,
-        "https://api.example.com/v1/messages"
+        "http://127.0.0.1:1/chat/completions"
     );
-    assert_eq!(custom.model_capabilities[0].public_model, "org/model");
-    assert_eq!(custom.model_capabilities[0].upstream_model, "org/model");
+    assert_eq!(
+        custom.model_capabilities[0].public_model,
+        "dash-custom-model"
+    );
+    assert_eq!(
+        custom.model_capabilities[0].upstream_model,
+        "dash-custom-model"
+    );
+    assert_eq!(harness.state.settings_revision(), before_custom + 1);
 
     let (status, zen) = send_json(
         &harness,
@@ -720,6 +733,7 @@ async fn dashboard_v3_update_toggle_reorder_setup_and_cooldown() {
     .await;
     assert_eq!(status, StatusCode::OK, "{created}");
     let go_id = mutation_account(&created).id;
+    harness.enable_account(&go_id);
     let after_create = harness.state.settings_revision();
 
     let (status, renamed) = send_json(
@@ -1066,6 +1080,7 @@ async fn dashboard_v3_custom_invalidation_ack_and_enable_gates() {
     .await;
     assert_eq!(status, StatusCode::OK, "{goat}");
     let goat_id = mutation_account(&goat).id;
+    harness.enable_account(&goat_id);
     let before_goat = harness.state.settings_revision();
     let (status, goat_disable) = send_json(
         &harness,
@@ -1576,7 +1591,7 @@ async fn retired_v2_account_mutations_do_not_create_or_toggle() {
         .get_json(&format!("{}/accounts/{v3_id}", harness.v3_base))
         .await;
     assert_eq!(status, StatusCode::OK);
-    assert!(parse_account(&detail).enabled);
+    assert!(!parse_account(&detail).enabled);
 
     let (status, toggled) = send_json(
         &harness,
@@ -1586,7 +1601,7 @@ async fn retired_v2_account_mutations_do_not_create_or_toggle() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{toggled}");
-    assert!(!mutation_account(&toggled).enabled);
+    assert!(mutation_account(&toggled).enabled);
 
     harness.stop();
 }
@@ -1627,7 +1642,7 @@ async fn dynamic_accounts_are_plan_routable_and_stale_uuid_accounts_are_not() {
     let provider_id = created["provider"]["id"].as_str().unwrap().to_string();
     let account = find_account_for_provider(&harness, &provider_id).await;
     assert!(account.plan_routable);
-    assert!(account.enabled);
+    assert!(!account.enabled);
 
     let (status, detail) = harness
         .get_json(&format!("{}/accounts/{}", harness.v3_base, account.id))

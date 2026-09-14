@@ -4,7 +4,6 @@ import { CredentialEditorError } from "./account-credential.ts";
 import { emptyProviderDefinitionDraft } from "./dynamic-provider.ts";
 import {
   buildOnboardingCommitPayload,
-  connectionHasSavedKey,
   destinationOriginFromEndpointUrl,
   expectationFromProviderDefinition,
   identityHasSavedMaterialForConnection,
@@ -93,6 +92,7 @@ test("complete payload includes Key and models; authorize is omitted until check
   draft.models = [{ public_model: "opus", upstream_model: "vendor/opus" }];
   draft.key = "sk-lab";
   draft.account_name = "Lab key";
+  draft.notes = "note";
   const payload = buildOnboardingCommitPayload({
     draft,
     operationId: "11111111-1111-4111-8111-111111111111",
@@ -105,9 +105,40 @@ test("complete payload includes Key and models; authorize is omitted until check
     kind: "api_key",
     secretInput: "sk-lab",
     accountLabel: "Lab key",
+    notes: "note",
   });
   assert.deepEqual(payload.targets, [
     { publicModel: "opus", upstreamModel: "vendor/opus", upstreamOverride: null },
+  ]);
+});
+
+test("complete payload maps an explicit override and none-auth never sends a secret", () => {
+  const draft = validDraft();
+  draft.auth_kind = "none";
+  draft.key = "should-not-send";
+  draft.account_name = "Lab key";
+  draft.notes = "note";
+  draft.models = [
+    { public_model: "inherit-row", upstream_model: "vendor/a" },
+    {
+      public_model: "override-row",
+      upstream_model: "vendor/b",
+      upstream_override: { protocol: "messages", endpoint_url: "https://up.example.com/v1/messages" },
+    },
+  ];
+  const payload = buildOnboardingCommitPayload({
+    draft,
+    operationId: "11111111-1111-4111-8111-111111111111",
+    mode: "complete",
+  });
+  assert.deepEqual(payload.authorization, { kind: "none" });
+  assert.deepEqual(payload.targets, [
+    { publicModel: "inherit-row", upstreamModel: "vendor/a", upstreamOverride: null },
+    {
+      publicModel: "override-row",
+      upstreamModel: "vendor/b",
+      upstreamOverride: { protocol: "messages", endpointUrl: "https://up.example.com/v1/messages" },
+    },
   ]);
 });
 
@@ -262,10 +293,7 @@ test("network unknown is retryable; 409 and auth failures are not", () => {
   assert.equal(isUncertainOnboardingFailure(new DashboardAuthError("auth")), false);
 });
 
-test("saved-key indicator never treats none-auth or missing material as a Key", () => {
-  const keyed = { id: "conn-1", authorization: "unknown" as const };
-  const noneAuth = { id: "conn-1", authorization: "not_required" as const };
-  const missing = { id: "conn-1", authorization: "missing" as const };
+test("saved-key indicator requires api_key material on the exact connection and account", () => {
   const identities = [{
     credentials: [{
       credential: { has_material: true, material_kind: "api_key" },
@@ -273,21 +301,28 @@ test("saved-key indicator never treats none-auth or missing material as a Key", 
       legacy: { kind: "account", id: "acc-1" },
     }],
   }];
-  assert.equal(connectionHasSavedKey(noneAuth, { authKind: "none", identities }), false);
-  assert.equal(connectionHasSavedKey(missing, { authKind: "bearer", identities }), false);
-  assert.equal(connectionHasSavedKey(keyed, { authKind: "bearer" }), false);
-  assert.equal(connectionHasSavedKey(keyed, { authKind: "bearer", identities }), true);
-  assert.equal(connectionHasSavedKey(keyed, {
-    authKind: "bearer",
-    identities,
-    legacyAccountId: "acc-other",
-  }), false);
-  assert.equal(connectionHasSavedKey(keyed, {
-    authKind: "bearer",
-    identities,
-    legacyAccountId: "acc-1",
-  }), true);
+  assert.equal(identityHasSavedMaterialForConnection([], "conn-1"), false);
+  assert.equal(identityHasSavedMaterialForConnection(identities, ""), false);
+  assert.equal(identityHasSavedMaterialForConnection(identities, "conn-1"), true);
   assert.equal(identityHasSavedMaterialForConnection(identities, "conn-other"), false);
+  assert.equal(identityHasSavedMaterialForConnection(identities, "conn-1", "acc-other"), false);
+  assert.equal(identityHasSavedMaterialForConnection(identities, "conn-1", "acc-1"), true);
+  const missingMaterial = [{
+    credentials: [{
+      credential: { has_material: false, material_kind: "api_key" },
+      bindings: [{ connection_id: "conn-1" }],
+      legacy: { kind: "account", id: "acc-1" },
+    }],
+  }];
+  assert.equal(identityHasSavedMaterialForConnection(missingMaterial, "conn-1"), false);
+  const notApiKey = [{
+    credentials: [{
+      credential: { has_material: true, material_kind: "none" },
+      bindings: [{ connection_id: "conn-1" }],
+      legacy: { kind: "account", id: "acc-1" },
+    }],
+  }];
+  assert.equal(identityHasSavedMaterialForConnection(notApiKey, "conn-1"), false);
   assert.equal(shouldOfferAuthorizeCurrentEndpoint({
     intent: "complete",
     hasSavedKey: true,
@@ -300,6 +335,9 @@ test("saved-key indicator never treats none-auth or missing material as a Key", 
     intent: "complete",
     hasSavedKey: false,
   }), false);
+});
+
+test("destination origin lowercases host and keeps an explicit 443 port", () => {
   assert.equal(
     destinationOriginFromEndpointUrl("https://API.Example.com:443/v1/chat"),
     "https://api.example.com:443",

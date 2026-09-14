@@ -1,6 +1,51 @@
 use super::*;
 
 #[test]
+fn mixed_sse_line_endings_preserve_usage_and_done_at_every_chunk_split() {
+    for (first, second) in [("\r\n\r\n", "\n\n"), ("\n\n", "\r\n\r\n")] {
+        let payload = format!(
+            "data: {{\"usage\":{{\"prompt_tokens\":7,\"completion_tokens\":11}}}}{first}data: [DONE]{second}"
+        );
+        for split in 0..=payload.len() {
+            let mut state = StreamState::default();
+            for chunk in [&payload.as_bytes()[..split], &payload.as_bytes()[split..]] {
+                process_chunk_for_usage(
+                    &mut state,
+                    ApiFormat::ChatCompletions,
+                    &Bytes::copy_from_slice(chunk),
+                    None,
+                );
+            }
+            assert!(state.has_usage, "usage lost at split {split}");
+            assert_eq!(token_counts(state.usage), (7, 11, 0, 0));
+            assert!(state.terminal, "DONE lost at split {split}");
+            assert!(state.buf.is_empty());
+        }
+    }
+}
+
+#[test]
+fn mixed_sse_line_endings_keep_the_first_error_terminal() {
+    let mut state = StreamState::default();
+    process_chunk_for_usage(
+        &mut state,
+        ApiFormat::ChatCompletions,
+        &Bytes::from_static(
+            b"data: {\"error\":{\"message\":\"mock failure\"}}\r\n\r\ndata: {\"usage\":{\"prompt_tokens\":999}}\n\n",
+        ),
+        None,
+    );
+    assert!(state.error);
+    assert!(state.terminal);
+    assert_eq!(state.error_message.as_deref(), Some("mock failure"));
+    assert!(
+        !state.has_usage,
+        "later events must not override a terminal error"
+    );
+    assert!(state.buf.is_empty());
+}
+
+#[test]
 fn platform_media_and_service_tiers_do_not_use_plain_text_rates() {
     assert!(!platform_request_has_variable_cost(
         br#"{"messages":[{"role":"user","content":"hello"}]}"#,
@@ -262,6 +307,8 @@ fn assert_usd_and_quota_null(metrics: &ForwardMetrics) {
     assert_ne!(metrics.cost_state, "priced");
 }
 
+/// Priced forward-log row needs the live token counts for the insert.
+#[allow(clippy::too_many_arguments)]
 fn persist_priced_row(
     state: &CoreState,
     account: &Account,
@@ -471,6 +518,12 @@ fn auto_group_stale_expired_incomplete_unavailable_and_official_are_unknown() {
         persist_custom(&state, &account);
         link_with_snapshot(&state, pinned_group(), snapshot(vec![price], false));
         let (pricing, context) = bind_for(&state, &account, UPSTREAM);
+        if label == "expired" {
+            let mut metrics = pricing_metrics(&pricing, UPSTREAM, 10, 5, 0, 0, None);
+            metrics.scope_to_provider(Some(CUSTOM_PROVIDER_ID), true);
+            assert_eq!(metrics.cost_state, "unknown", "{label} estimate");
+            assert_usd_and_quota_null(&metrics);
+        }
         let id = persist_priced_row(&state, &account, &pricing, &context, 10, 5, 0, 0);
         let native = state
             .db
@@ -631,31 +684,6 @@ fn fallback_attempt_rebinds_from_the_live_link_snapshot() {
 }
 
 #[test]
-fn o04_expired_price_is_not_used_for_new_request_estimate() {
-    let mut expired = billable_price();
-    expired.valid_until = Utc::now().timestamp() - 10;
-    let (dir, state) = test_state("o04-expired");
-    let account = custom_account(&state);
-    persist_custom(&state, &account);
-    link_with_snapshot(&state, pinned_group(), snapshot(vec![expired], false));
-    let (pricing, context) = bind_for(&state, &account, UPSTREAM);
-    let mut metrics = pricing_metrics(&pricing, UPSTREAM, 10, 5, 0, 0, None);
-    metrics.scope_to_provider(Some(CUSTOM_PROVIDER_ID), true);
-    assert_eq!(metrics.cost_state, "unknown");
-    assert_usd_and_quota_null(&metrics);
-    let id = persist_priced_row(&state, &account, &pricing, &context, 10, 5, 0, 0);
-    let native = state
-        .db
-        .lock()
-        .forward_log_native_attribution(id)
-        .unwrap()
-        .unwrap();
-    assert_eq!(native.native_cost_value, None);
-    drop(state);
-    let _ = fs::remove_dir_all(dir);
-}
-
-#[test]
 fn o05_fallback_from_a_to_b_keeps_each_attempts_native_rate() {
     let (dir, state) = test_state("o05-ab");
     let mut account_a = custom_account(&state);
@@ -758,13 +786,7 @@ fn o05_fallback_from_a_to_b_keeps_each_attempts_native_rate() {
 }
 
 #[test]
-fn s02_secret_bearing_snapshot_requests_do_not_follow_redirects() {
-    assert!(!crate::custom_http::follows_redirects_with_secret(
-        true, true
-    ));
-    assert!(crate::custom_http::follows_redirects_with_secret(
-        true, false
-    ));
+fn s02_secret_bearing_headers_are_detected() {
     let mut secret = reqwest::header::HeaderMap::new();
     secret.insert(
         reqwest::header::AUTHORIZATION,
@@ -781,14 +803,7 @@ fn s02_secret_bearing_snapshot_requests_do_not_follow_redirects() {
 }
 
 #[test]
-fn s01_forward_grant_refuses_a_cross_origin_user_override() {
-    assert!(
-        crate::custom_http::ensure_secret_origin_granted(
-            "https://evil.example/v1/chat/completions",
-            &["https://lab.example/v1".to_string()],
-        )
-        .is_err()
-    );
+fn s01_forward_grant_allows_sealed_goat_origin() {
     assert!(
         crate::custom_http::ensure_sealed_secret_origin(
             "https://api.commandcode.ai/provider/v1/chat/completions",

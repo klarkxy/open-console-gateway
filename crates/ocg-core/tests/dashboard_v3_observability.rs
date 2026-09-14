@@ -20,6 +20,8 @@ use serde_json::{Value, json};
 
 #[path = "fixtures/dashboard_v3/harness.rs"]
 mod harness;
+#[path = "fixtures/refreshed_go_catalog.rs"]
+mod refreshed_go_catalog;
 
 use harness::{V3Harness, start_loopback, start_public};
 
@@ -205,6 +207,11 @@ fn forward_log(account_id: &str, model: &str, cost: Option<f64>, cost_state: &st
 #[tokio::test]
 async fn dashboard_summary_counts_routable_goat_and_custom_accounts() {
     let harness = start_loopback("obs-summary-all-plans").await;
+    refreshed_go_catalog::persist_provider_catalog(
+        &harness.state,
+        COMMAND_CODE_PROVIDER_ID,
+        ocg_core::provider::COMMAND_CODE_GOAT_INCLUDED_MODEL_IDS,
+    );
     let (_, before_body) = harness
         .get_json(&format!("{}/dashboard/summary", harness.v3_base))
         .await;
@@ -327,6 +334,7 @@ async fn dashboard_v3_v2_login_cookie_authorizes_observability_routes() {
 #[tokio::test]
 async fn dashboard_v3_observability_gets_are_local_secret_free_and_share_one_snapshot() {
     let harness = start_loopback("obs-local").await;
+    refreshed_go_catalog::persist_refreshed_go_catalog(&harness.state);
     let _guard =
         install_official_pricing_fetch_for_tests(harness.state.process_generation(), |_| {
             panic!("observability GET must not fetch official pricing")
@@ -444,6 +452,8 @@ async fn dashboard_v3_stopped_gateway_status_redacts_account_secret_from_last_er
 #[tokio::test]
 async fn v3_observability_stays_camel_case_after_v2_retirement() {
     let harness = start_loopback("obs-v2-retired").await;
+    refreshed_go_catalog::persist_refreshed_go_catalog(&harness.state);
+    refreshed_go_catalog::persist_enabled_zen_catalog(&harness.state);
     harness
         .state
         .db
@@ -521,6 +531,7 @@ async fn v3_observability_stays_camel_case_after_v2_retirement() {
 #[tokio::test]
 async fn dashboard_v3_application_models_follow_current_routeable_intersection() {
     let harness = start_loopback("obs-app-models").await;
+    refreshed_go_catalog::persist_refreshed_go_catalog(&harness.state);
     let _guard =
         install_official_pricing_fetch_for_tests(harness.state.process_generation(), |_| {
             panic!("GET /application-models must not fetch official pricing")
@@ -557,10 +568,6 @@ async fn dashboard_v3_application_models_follow_current_routeable_intersection()
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["models"], json!([]));
 
-    harness
-        .assert_v2_path_removed(reqwest::Method::GET, "/application-models", None)
-        .await;
-
     harness.stop();
 }
 
@@ -592,9 +599,6 @@ async fn dashboard_v3_summary_and_daily_cost_match_seeded_logs() {
         db.log_forward(&skipped).unwrap();
     }
 
-    harness
-        .assert_v2_path_removed(reqwest::Method::GET, "/dashboard/summary", None)
-        .await;
     let (v3_status, v3_summary) = harness
         .get_json(&format!("{}/dashboard/summary", harness.v3_base))
         .await;

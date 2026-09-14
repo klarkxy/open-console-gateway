@@ -19,6 +19,9 @@
       <n-alert v-if="externalError" type="error" class="form-error" role="alert">
         {{ externalError }}
       </n-alert>
+      <p v-if="!isEdit" class="field-hint">
+        {{ t("创建后默认关闭；验通后请自行启用，测试连接不会自动打开。") }}
+      </p>
       <p v-if="platformParent && !isDynamicPlan" class="connection-summary__note form-error">
         {{ t("Endpoint 与协议路径由平台账号 {name} 托管；账号只保存名称、Key 与模型映射。", { name: platformParent.name }) }}
       </p>
@@ -38,7 +41,7 @@
           </div>
           <div class="connection-summary__row">
             <dt>{{ t("上游协议") }}</dt>
-            <dd>{{ dynamicDetail.upstream_protocol ? protocolDisplayName(dynamicDetail.upstream_protocol) : t("内置") }}</dd>
+            <dd>{{ dynamicDetail.upstream_protocol ? protocolDisplayName(dynamicDetail.upstream_protocol) : t("供应商预设") }}</dd>
           </div>
           <div class="connection-summary__row">
             <dt>{{ t("模型映射") }}</dt>

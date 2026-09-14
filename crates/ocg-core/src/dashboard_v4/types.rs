@@ -62,6 +62,11 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "QuotaSharing",
     "IdentityCredentialCreateRequest",
     "IdentityCredentialCreateResult",
+    "CpaCatalogEntry",
+    "CpaCatalog",
+    "CpaCatalogUpdate",
+    "CatalogModelsRemoveRequest",
+    "CatalogModelsRemoveResult",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -572,6 +577,55 @@ pub struct IdentityCredentialCreateResult {
     pub replayed: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CpaCatalogEntry {
+    pub id: String,
+    pub owned_by: Option<String>,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CpaCatalog {
+    pub revision: ControlRevision,
+    pub models: Vec<CpaCatalogEntry>,
+    pub source_url: Option<String>,
+    pub refreshed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CpaCatalogUpdate {
+    #[serde(flatten)]
+    pub expectation: MutationExpectation,
+    pub enabled_ids: Vec<String>,
+}
+
+/// Remove models from a persisted built-in Provider catalog snapshot.
+///
+/// Local-only. An official catalog refresh may add the same IDs back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CatalogModelsRemoveRequest {
+    #[serde(flatten)]
+    pub expectation: MutationExpectation,
+    pub model_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CatalogModelsRemoveResult {
+    pub revision: ControlRevision,
+    pub removed_ids: Vec<String>,
+    pub catalog_models: Vec<String>,
+}
+
 /// Deterministic JSON Schema catalog for the V4 contract.
 ///
 /// Generator settings match V3: draft 2020-12, serialize-mode for response
@@ -609,6 +663,9 @@ pub fn contract_schema() -> Value {
     include_type::<BindingPatchResult>(&mut serialize);
     include_type::<QuotaSharing>(&mut serialize);
     include_type::<IdentityCredentialCreateResult>(&mut serialize);
+    include_type::<CpaCatalogEntry>(&mut serialize);
+    include_type::<CpaCatalog>(&mut serialize);
+    include_type::<CatalogModelsRemoveResult>(&mut serialize);
     let mut defs = serialize.take_definitions(true);
 
     let mut deserialize = SchemaSettings::draft2020_12().into_generator();
@@ -621,6 +678,8 @@ pub fn contract_schema() -> Value {
     include_type::<BindingPatchRequest>(&mut deserialize);
     include_type::<QuotaSharing>(&mut deserialize);
     include_type::<IdentityCredentialCreateRequest>(&mut deserialize);
+    include_type::<CpaCatalogUpdate>(&mut deserialize);
+    include_type::<CatalogModelsRemoveRequest>(&mut deserialize);
     for (name, schema) in deserialize.take_definitions(true) {
         defs.entry(name).or_insert(schema);
     }

@@ -318,8 +318,7 @@ pub fn derive_custom_models_endpoint(
     };
     resolved.models.ok_or_else(|| CustomModelDiscoveryFailure {
         message: format!(
-            "cannot derive Custom /models endpoint: use an API root, a base ending in `/v1`, or a {:?} endpoint ending with `{suffix}`; add model IDs manually for non-standard paths",
-            protocol
+            "cannot derive Custom /models endpoint: use an API root, a base ending in `/v1`, or a {protocol:?} endpoint ending with `{suffix}`; add model IDs manually for non-standard paths"
         ) })
 }
 

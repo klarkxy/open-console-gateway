@@ -331,7 +331,7 @@ fn dynamic_routes(
     let assigned = assigned_endpoints_for_routes(connection_id, &routes);
     let endpoints: Vec<ConnectionEndpoint> = assigned
         .into_iter()
-        .zip(routes.into_iter())
+        .zip(routes)
         .map(|(assigned, route)| {
             let protocol = ocg_domain::catalog::UpstreamProtocolKind::from(route.operation);
             endpoint_dto(

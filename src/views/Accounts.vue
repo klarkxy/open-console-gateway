@@ -2,12 +2,21 @@
   <div class="accounts-view">
     <n-space vertical :size="16" class="accounts-content">
       <div class="accounts-toolbar">
+        <n-space wrap class="accounts-actions">
+          <n-button type="primary" @click="openAddModal">
+            <template #icon>
+              <n-icon :component="PlusOutlined" />
+            </template>
+            {{ t("新增账号") }}
+          </n-button>
+          <n-button @click="openTransfer('import')">{{ t("导入账号") }}</n-button>
+          <n-button @click="openTransfer('export')">{{ t("导出账号") }}</n-button>
+        </n-space>
         <div
           v-if="!accountListLoading && !accountListError && accounts.length > 0"
           class="accounts-filter-bar"
         >
           <div class="filter-field">
-            <span class="filter-label">{{ t("按方案筛选") }}</span>
             <n-select
               v-model:value="planFilter"
               :options="planFilterOptions"
@@ -18,7 +27,6 @@
             />
           </div>
           <div class="filter-field">
-            <span class="filter-label">{{ t("按状态筛选") }}</span>
             <n-select
               v-model:value="statusFilter"
               :options="statusFilterOptions"
@@ -29,16 +37,6 @@
             />
           </div>
         </div>
-        <n-space wrap class="accounts-actions">
-          <n-button @click="openTransfer('import')">{{ t("导入账号") }}</n-button>
-          <n-button @click="openTransfer('export')">{{ t("导出账号") }}</n-button>
-          <n-button type="primary" @click="openAddModal">
-            <template #icon>
-              <n-icon :component="PlusOutlined" />
-            </template>
-            {{ t("新增账号") }}
-          </n-button>
-        </n-space>
       </div>
 
       <span id="account-order-instructions" class="sr-only">
@@ -162,6 +160,7 @@
       v-model:show="showAddModal"
       :catalog="providerCatalog"
       :catalog-loading="catalogLoading"
+      :connections="providersStore.connections"
       :managed-available="managedRegistrationAvailable"
       :managed-reason="managedRegistrationReason"
       :invite-missing="!opencodeInviteUrl"
@@ -699,6 +698,7 @@ function openAddModal(): void {
   editingAccount.value = null;
   addInitialOptionId.value = null;
   showAddModal.value = true;
+  void providersStore.loadConnections().catch(() => undefined);
 }
 
 /**
@@ -715,6 +715,7 @@ function applyAccountAddDeepLink(): void {
   editingAccount.value = null;
   addInitialOptionId.value = optionId;
   showAddModal.value = true;
+  void providersStore.loadConnections().catch(() => undefined);
 }
 
 function openTransfer(mode: "import" | "export"): void {
@@ -723,7 +724,10 @@ function openTransfer(mode: "import" | "export"): void {
 }
 
 async function handleAccountsImported(count: number): Promise<void> {
-  await loadAccounts();
+  await Promise.allSettled([
+    loadAccounts(),
+    providersStore.loadConnections(),
+  ]);
   message.success(t("节点配置迁移完成：处理 {count} 项账号。", { count }));
 }
 
@@ -1113,6 +1117,7 @@ async function createManagedAccount(): Promise<void> {
       ...(username ? { username } : {}),
     });
     addAccount(created);
+    void providersStore.loadConnections().catch(() => undefined);
     showManagedCreate.value = false;
     managedWizardAccountId.value = created.id;
     showManagedWizard.value = true;
@@ -1355,7 +1360,11 @@ async function initializeAccounts() {
   const catalogPromise = loadProviderCatalog();
   await loadQuotaLimits();
   await loadAccounts();
-  await Promise.allSettled([registrationOptions, catalogPromise]);
+  await Promise.allSettled([
+    registrationOptions,
+    catalogPromise,
+    providersStore.loadConnections(),
+  ]);
 }
 
 async function onFormSave(payload: AccountInput | AccountFormPayload) {
@@ -1398,6 +1407,7 @@ async function onFormSave(payload: AccountInput | AccountFormPayload) {
     try {
       const created = await dashboardApi.createAccount(input);
       addAccount(created);
+      void providersStore.loadConnections().catch(() => undefined);
       message.success(t("账号已添加"));
       // Go uses official usage; GOAT and Ollama project locally priced OCG request logs.
       if (accountHasUsageDisplay(created) && accountIsReady(created)) {
@@ -1519,7 +1529,10 @@ async function reloadControlPlaneView(): Promise<boolean> {
     if (!loadedIds.has(id)) removeAccountState(id);
   }
   accounts.value = loaded;
-  await loadIdentitiesOverlay();
+  await Promise.allSettled([
+    loadIdentitiesOverlay(),
+    providersStore.loadConnections(),
+  ]);
   if (editingAccount.value) {
     const stillListed = reconcileEditingAccount(loaded, editingAccount.value.id);
     editingAccount.value = stillListed;
@@ -1591,6 +1604,7 @@ async function deleteAccount(id: string) {
     await dashboardApi.deleteAccount(id);
     message.success(t("账号已删除"));
     removeAccountState(id);
+    void providersStore.loadConnections().catch(() => undefined);
   } catch (e) {
     if (await recoverAccountMutationConflict(e)) return;
     message.error(t("删除失败: {error}", { error: dashboardErrorDetail(e) }));
@@ -1665,15 +1679,14 @@ onUnmounted(() => {
 .accounts-toolbar {
   display: flex;
   flex-wrap: wrap;
-  align-items: flex-end;
-  justify-content: space-between;
+  align-items: center;
+  justify-content: flex-start;
   gap: 12px 16px;
   min-width: 0;
 }
 
 .accounts-actions {
   flex: 0 0 auto;
-  margin-left: auto;
 }
 
 .account-list {
@@ -1689,9 +1702,9 @@ onUnmounted(() => {
 .accounts-filter-bar {
   display: flex;
   flex-wrap: wrap;
-  align-items: flex-end;
+  align-items: center;
   gap: 12px;
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   min-width: 0;
 }
 

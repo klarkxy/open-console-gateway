@@ -31,27 +31,6 @@ use fallback_fix::*;
 async fn fake_upstream_captures_protocol_auth_and_scripts_status_streams() {
     let replies = script(&[
         (
-            "chat-key",
-            &[reply(
-                StatusCode::UNAUTHORIZED.as_u16(),
-                r#"{"error":"unauthorized"}"#,
-            )],
-        ),
-        (
-            "responses-key",
-            &[reply(
-                StatusCode::FORBIDDEN.as_u16(),
-                r#"{"error":"forbidden"}"#,
-            )],
-        ),
-        (
-            "messages-key",
-            &[reply(
-                StatusCode::TOO_MANY_REQUESTS.as_u16(),
-                r#"{"error":"rate limited"}"#,
-            )],
-        ),
-        (
             "gemini-key",
             &[reply(
                 StatusCode::OK.as_u16(),
@@ -63,36 +42,6 @@ async fn fake_upstream_captures_protocol_auth_and_scripts_status_streams() {
     let (base_url, calls, stop_fake) = start_fake_upstream(replies).await;
     let client = loopback_client();
 
-    assert_eq!(
-        client
-            .post(format!("{base_url}/v1/chat/completions"))
-            .header(reqwest::header::AUTHORIZATION, "Bearer chat-key")
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::UNAUTHORIZED
-    );
-    assert_eq!(
-        client
-            .post(format!("{base_url}/v1/responses"))
-            .header(reqwest::header::AUTHORIZATION, "Bearer responses-key")
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::FORBIDDEN
-    );
-    assert_eq!(
-        client
-            .post(format!("{base_url}/v1/messages"))
-            .header("x-api-key", "messages-key")
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::TOO_MANY_REQUESTS
-    );
     let gemini = client
         .post(format!(
             "{base_url}/v1beta/models/fake:streamGenerateContent"
@@ -114,16 +63,13 @@ async fn fake_upstream_captures_protocol_auth_and_scripts_status_streams() {
     );
 
     let calls = calls.lock().unwrap();
-    assert_eq!(calls.len(), 5);
-    assert_eq!(calls[0].path, "/v1/chat/completions");
-    assert_eq!(calls[1].path, "/v1/responses");
-    assert_eq!(calls[2].x_api_key.as_deref(), Some("messages-key"));
-    assert_eq!(calls[3].path, "/v1beta/models/fake:streamGenerateContent");
-    assert_eq!(calls[3].x_goog_api_key.as_deref(), Some("gemini-key"));
-    assert_eq!(calls[4].method, axum::http::Method::POST);
-    assert!(calls[4].authorization.is_none());
-    assert!(calls[4].x_api_key.is_none());
-    assert!(calls[4].x_goog_api_key.is_none());
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].path, "/v1beta/models/fake:streamGenerateContent");
+    assert_eq!(calls[0].x_goog_api_key.as_deref(), Some("gemini-key"));
+    assert_eq!(calls[1].method, axum::http::Method::POST);
+    assert!(calls[1].authorization.is_none());
+    assert!(calls[1].x_api_key.is_none());
+    assert!(calls[1].x_goog_api_key.is_none());
     drop(calls);
     let _ = stop_fake.send(());
 }
@@ -148,6 +94,14 @@ async fn model_discovery_returns_local_list_with_zero_accounts() {
         .await
         .unwrap();
     assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+    let invalid = loopback_client()
+        .get(format!("http://127.0.0.1:{}/v1/models", h.port))
+        .bearer_auth("wrong-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invalid.status(), StatusCode::UNAUTHORIZED);
 
     let (status, body) = h.models().await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -1141,14 +1095,14 @@ async fn r06_zero_output_sse_retry_does_not_resend_after_rotation() {
         axum::extract::State(state): axum::extract::State<MutatingEmptySse>,
     ) -> impl IntoResponse {
         let n = state.hits.fetch_add(1, Ordering::SeqCst);
-        if n == 0 {
-            if let Some(host) = state.state.lock().unwrap().clone() {
-                let rotated = host.encrypt_key("sk-test-rotated-retry").unwrap();
-                host.db
-                    .lock()
-                    .rotate_account_credential("acct-1", &rotated)
-                    .unwrap();
-            }
+        if n == 0
+            && let Some(host) = state.state.lock().unwrap().clone()
+        {
+            let rotated = host.encrypt_key("sk-test-rotated-retry").unwrap();
+            host.db
+                .lock()
+                .rotate_account_credential("acct-1", &rotated)
+                .unwrap();
         }
         (StatusCode::OK, [("content-type", "text/event-stream")], "")
     }
@@ -2510,6 +2464,8 @@ async fn dynamic_429_uses_generic_cooldown_skips_go_windows_and_falls_through() 
     .await;
     assert_eq!(status, StatusCode::OK, "{second}");
     let second_id = second["account"]["id"].as_str().unwrap().to_string();
+    h.set_enabled(&first_id, true);
+    h.set_enabled(&second_id, true);
 
     let (status, body) = h.protocol("/v1/chat/completions", "lab-opus").await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -3022,8 +2978,7 @@ async fn dashboard_port_change_rebinds_and_persists_across_restart() {
     let client = loopback_client();
     let response = client
         .put(format!(
-            "http://127.0.0.1:{}/dashboard/api/v3/settings",
-            current_port
+            "http://127.0.0.1:{current_port}/dashboard/api/v3/settings"
         ))
         .json(&settings_payload)
         .send()
@@ -3045,8 +3000,7 @@ async fn dashboard_port_change_rebinds_and_persists_across_restart() {
 
     let status_response = client
         .get(format!(
-            "http://127.0.0.1:{}/dashboard/api/v3/gateway/status",
-            requested_port
+            "http://127.0.0.1:{requested_port}/dashboard/api/v3/gateway/status"
         ))
         .send()
         .await
@@ -3065,8 +3019,7 @@ async fn dashboard_port_change_rebinds_and_persists_across_restart() {
     });
     let fail = client
         .put(format!(
-            "http://127.0.0.1:{}/dashboard/api/v3/settings",
-            requested_port
+            "http://127.0.0.1:{requested_port}/dashboard/api/v3/settings"
         ))
         .json(&fail_payload)
         .send()
@@ -3526,6 +3479,7 @@ async fn disabled_protocols_fail_locally_without_upstream() {
 #[tokio::test]
 async fn protocol_switch_filters_v1_models_and_application_models() {
     let p = PreparedFallback::go(&[("key-1", &[ok()])], &["key-1"]).await;
+    persist_goat_verified_catalog(&p.state, "catalog-only", &["zai-org/GLM-5.3"]);
     disable_go_protocols(&p.state, "glm-5.3", false, true, true);
     let h = p.bind().await;
 

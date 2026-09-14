@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { Connection } from "../api/connections.ts";
 import type { ProviderCatalogEntry } from "../api/providers.ts";
 import {
   buildChooserGroups,
@@ -7,6 +8,7 @@ import {
   chooserOptionIconKey,
   chooserSelectOptions,
   chooserUniverse,
+  defaultChooserMode,
   defaultChooserOptionId,
   describeChooserSelection,
   isValidChooserOption,
@@ -17,6 +19,7 @@ import {
 } from "./account-add-chooser.ts";
 import { buildPlatformKindOptions } from "./platform-accounts.ts";
 import { familyOf } from "./provider-families.ts";
+import { splitPlanOptionsByOffering } from "./account-plan-options.ts";
 import { PROVIDER_PRESETS, providerPresetOffering } from "./provider-presets.ts";
 
 function catalogEntry(
@@ -69,9 +72,41 @@ function presetById(id: string) {
   return preset;
 }
 
-test("connections mode: Plan keeps the five built-in subscriptions; API heads Custom API; no presets or platforms", () => {
-  const groups = buildChooserGroups(fullCatalog(), null, "", "connections");
-  assert.deepEqual(groups.map((group) => group.id), ["plan", "api"]);
+function builtinConnection(providerId: string, extra: Partial<Connection> = {}): Connection {
+  return {
+    id: `conn-${providerId}`,
+    name: providerId,
+    origin: "builtin",
+    template_ref: { id: providerId, version: 1 },
+    adapter_kind: "sealed",
+    lifecycle: "configured",
+    authorization: "valid",
+    eligibility: { state: "eligible", reason: "none" },
+    credential_count: 1,
+    enabled_credential_count: 1,
+    target_count: 1,
+    endpoints: [],
+    targets: [],
+    legacy: { kind: "builtin_provider", id: providerId },
+    display_family: providerId,
+    offering: "plan",
+    ...extra,
+  };
+}
+
+function planConnections(): Connection[] {
+  return [
+    builtinConnection("opencode"),
+    builtinConnection("command-code"),
+    builtinConnection("minimax"),
+    builtinConnection("kimi"),
+    builtinConnection("ollama"),
+  ];
+}
+
+test("connections mode lists only built-ins that still have a V4 connection", () => {
+  const groups = buildChooserGroups(fullCatalog(), null, "", "connections", planConnections());
+  assert.deepEqual(groups.map((group) => group.id), ["plan"]);
 
   const planIds = groups[0]!.options.map((option) => option.optionId);
   assert.deepEqual(planIds, [
@@ -81,30 +116,69 @@ test("connections mode: Plan keeps the five built-in subscriptions; API heads Cu
     "kimi-cn",
     "ollama-cloud",
   ]);
-
-  const apiIds = groups[1]!.options.map((option) => option.optionId);
-  assert.deepEqual(apiIds, ["custom-endpoint"]);
 });
 
-test("services mode: preset families group by offering and platform kinds trail the API group", () => {
-  const groups = buildChooserGroups(fullCatalog(), null, "", "services");
+test("deleting the last built-in account moves that family to new services", () => {
+  const remaining = [
+    builtinConnection("command-code"),
+    builtinConnection("minimax"),
+    builtinConnection("kimi"),
+  ];
+  const connections = buildChooserGroups(fullCatalog(), null, "", "connections", remaining);
+  assert.deepEqual(
+    connections[0]!.options.map((option) => option.optionId),
+    ["command-code-goat", "minimax-cn", "kimi-cn"],
+  );
+
+  const services = buildChooserGroups(fullCatalog(), null, "", "services", remaining);
+  const serviceIds = visibleChooserOptions(services).map((option) => option.optionId);
+  assert.ok(serviceIds.includes("opencode-go"));
+  assert.ok(serviceIds.includes("ollama-cloud"));
+  assert.ok(serviceIds.includes("custom-endpoint"));
+  assert.equal(serviceIds.includes("command-code-goat"), false);
+  assert.equal(defaultChooserMode(fullCatalog(), null, remaining), "connections");
+});
+
+test("unused catalog and empty projection put every built-in template on new services", () => {
+  assert.deepEqual(buildChooserGroups(fullCatalog(), null, "", "connections", []), []);
+  assert.equal(defaultChooserMode(fullCatalog(), null, []), "services");
+  assert.equal(defaultChooserMode(fullCatalog(), null, null), "services");
+
+  const services = buildChooserGroups(fullCatalog(), null, "", "services", []);
+  assert.deepEqual(
+    services[0]!.options.slice(0, 5).map((option) => option.optionId),
+    ["opencode-go", "command-code-goat", "minimax-cn", "kimi-cn", "ollama-cloud"],
+  );
+  assert.equal(services[1]!.options[0]!.optionId, "custom-endpoint");
+});
+
+test("services mode: unused built-ins head each group; presets and platforms follow", () => {
+  const groups = buildChooserGroups(fullCatalog(), null, "", "services", planConnections());
   const planIds = groups[0]!.options.map((option) => option.optionId);
+  const planFamilyIds = planIds.filter((id) => id.startsWith("family:plan:"));
   const planFamilyCount = new Set(
     PROVIDER_PRESETS
       .filter((preset) => providerPresetOffering(preset) === "plan")
       .map((preset) => preset.family ?? preset.id),
   ).size;
-  assert.equal(planIds.length, planFamilyCount);
+  assert.equal(planFamilyIds.length, planFamilyCount);
   assert.ok(planIds.every((id) => id.startsWith("family:plan:")));
 
   const apiIds = groups[1]!.options.map((option) => option.optionId);
+  assert.equal(apiIds[0], "custom-endpoint");
   assert.deepEqual(apiIds.slice(-2), ["platform:new_api", "platform:sub2api"]);
   const familyApiIds = apiIds.filter((id) => id.startsWith("family:api:"));
   assert.equal(familyApiIds.length, new Set(familyApiIds).size);
+
+  const visible = visibleChooserOptions(groups);
+  assert.deepEqual(visible.map((option) => option.optionId), [
+    ...groups[0]!.options.map((option) => option.optionId),
+    ...groups[1]!.options.map((option) => option.optionId),
+  ]);
 });
 
 test("family ids carry the offering: the same vendor appears once per group without collision", () => {
-  const groups = buildChooserGroups(fullCatalog(), null, "", "services");
+  const groups = buildChooserGroups(fullCatalog(), null, "", "services", planConnections());
   const planFamilyOptions = groups[0]!.options
     .filter((option): option is PresetFamilyOption => "family" in option);
   const apiFamilyOptions = groups[1]!.options
@@ -120,13 +194,13 @@ test("family ids carry the offering: the same vendor appears once per group with
 
   // Universe ids are unique across both groups and both modes.
   for (const mode of ["connections", "services"] as const) {
-    const ids = chooserUniverse(fullCatalog(), null, mode).map((option) => option.optionId);
+    const ids = chooserUniverse(fullCatalog(), null, mode, planConnections()).map((option) => option.optionId);
     assert.equal(ids.length, new Set(ids).size, `${mode} universe must have unique option ids`);
   }
 });
 
 test("Zhipu appears once per offering group with 2 variants each", () => {
-  const groups = buildChooserGroups(fullCatalog(), null, "", "services");
+  const groups = buildChooserGroups(fullCatalog(), null, "", "services", planConnections());
   const zhipuPlan = (groups[0]!.options as ChooserOption[]).find(
     (option) => "family" in option && option.optionId === "family:plan:zhipu",
   ) as PresetFamilyOption;
@@ -146,7 +220,7 @@ test("Zhipu appears once per offering group with 2 variants each", () => {
 });
 
 test("search flattens presets to variant rows carrying the offering-scoped familyOptionId", () => {
-  const groups = buildChooserGroups(fullCatalog(), null, "enterprise lite", "services");
+  const groups = buildChooserGroups(fullCatalog(), null, "enterprise lite", "services", planConnections());
   const presetRows = groups.flatMap((group) => group.options).filter(
     (option): option is Extract<ChooserOption, { preset: unknown }> => "preset" in option,
   );
@@ -160,7 +234,7 @@ test("search flattens presets to variant rows carrying the offering-scoped famil
 
 test("search matches family labels, variants, and endpoint hosts in a single pass", () => {
   // Family label: every tencent variant of both offerings flattens out.
-  const byFamily = buildChooserGroups(fullCatalog(), null, "tencent", "services");
+  const byFamily = buildChooserGroups(fullCatalog(), null, "tencent", "services", planConnections());
   const familyRows = byFamily.flatMap((group) => group.options).filter(
     (option): option is Extract<ChooserOption, { preset: unknown }> => "preset" in option,
   );
@@ -173,7 +247,7 @@ test("search matches family labels, variants, and endpoint hosts in a single pas
   // Endpoint host: a host query reaches the matching preset directly.
   const deepseek = presetById("deepseek");
   const host = new URL(deepseek.endpointUrl).host;
-  const byHost = buildChooserGroups(fullCatalog(), null, host, "services");
+  const byHost = buildChooserGroups(fullCatalog(), null, host, "services", planConnections());
   const hostRows = byHost.flatMap((group) => group.options).filter(
     (option): option is Extract<ChooserOption, { preset: unknown }> => "preset" in option,
   );
@@ -181,18 +255,18 @@ test("search matches family labels, variants, and endpoint hosts in a single pas
 
   // Connections options and platform kinds still filter by label.
   for (const [query, expected] of [[" Custom ", "custom-endpoint"], ["new api", "platform:new_api"], ["Ollama", "ollama-cloud"]] as const) {
-    const mode = chooserModeForOptionId(expected);
+    const mode = chooserModeForOptionId(expected, fullCatalog(), null, planConnections());
     assert.deepEqual(
-      visibleChooserOptions(buildChooserGroups(fullCatalog(), null, query, mode)).map((item) => item.optionId),
+      visibleChooserOptions(buildChooserGroups(fullCatalog(), null, query, mode, planConnections())).map((item) => item.optionId),
       [expected],
     );
   }
-  assert.equal(visibleChooserOptions(buildChooserGroups(fullCatalog(), null, "no-such-preset", "services")).length, 0);
+  assert.equal(visibleChooserOptions(buildChooserGroups(fullCatalog(), null, "no-such-preset", "services", planConnections())).length, 0);
 });
 
 test("resolveChooserSelection maps flattened rows to family + variant and keeps the family valid after the query clears", () => {
-  const queried = visibleChooserOptions(buildChooserGroups(fullCatalog(), null, "enterprise lite", "services"));
-  const universe = chooserUniverse(fullCatalog(), null, "services");
+  const queried = visibleChooserOptions(buildChooserGroups(fullCatalog(), null, "enterprise lite", "services", planConnections()));
+  const universe = chooserUniverse(fullCatalog(), null, "services", planConnections());
   // The flattened row is not in the family-shaped universe; resolution must
   // consult the visible options first.
   assert.equal(isValidChooserOption(universe, "preset:tencent-enterprise-lite"), false);
@@ -214,9 +288,18 @@ test("resolveChooserSelection maps flattened rows to family + variant and keeps 
 });
 
 test("chooserModeForOptionId routes deep links to the right tab", () => {
-  assert.equal(chooserModeForOptionId("custom-endpoint"), "connections");
-  assert.equal(chooserModeForOptionId("opencode-go"), "connections");
-  assert.equal(chooserModeForOptionId("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"), "connections");
+  const catalog = [
+    ...fullCatalog(),
+    catalogEntry("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", {
+      display_name: "Lab",
+      model_source: "dynamic_provider",
+      routable: true,
+    }),
+  ];
+  assert.equal(chooserModeForOptionId("custom-endpoint", catalog, null, planConnections()), "services");
+  assert.equal(chooserModeForOptionId("opencode-go", catalog, null, planConnections()), "connections");
+  assert.equal(chooserModeForOptionId("opencode-go", catalog, null, []), "services");
+  assert.equal(chooserModeForOptionId("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", catalog, null, []), "connections");
   assert.equal(chooserModeForOptionId("family:plan:tencent"), "services");
   assert.equal(chooserModeForOptionId("preset:azure-openai"), "services");
   assert.equal(chooserModeForOptionId("platform:new_api"), "services");
@@ -240,33 +323,28 @@ test("saved user-defined Providers follow their persisted preset offering in con
   const presetIds = new Map<string, string | null>([
     ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", planPreset.id],
   ]);
-  const groups = buildChooserGroups(catalog, presetIds, "", "connections");
+  const split = splitPlanOptionsByOffering(catalog, presetIds);
+  const groups = buildChooserGroups(catalog, presetIds, "", "connections", planConnections());
   assert.deepEqual(
     groups[0]!.options.map((option) => option.optionId),
-    ["opencode-go", "command-code-goat", "minimax-cn", "kimi-cn", "ollama-cloud", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+    split.plan.map((option) => option.optionId),
   );
-  const apiIds = groups[1]!.options.map((option) => option.optionId);
-  assert.deepEqual(apiIds, ["custom-endpoint", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"]);
+  assert.deepEqual(
+    groups[1]!.options.map((option) => option.optionId),
+    split.api.filter((option) => option.source === "user-defined").map((option) => option.optionId),
+  );
 });
 
-test("default selection skips disabled options and falls back to the first option", () => {
-  assert.equal(defaultChooserOptionId(chooserUniverse(null, null, "connections")), "opencode-go");
-  assert.equal(defaultChooserOptionId(chooserUniverse(fullCatalog(), null, "connections")), "opencode-go");
-  assert.equal(defaultChooserOptionId(chooserUniverse(fullCatalog(), null, "services")).startsWith("family:plan:"), true);
+test("default selection uses the first option and falls back to empty", () => {
+  assert.equal(defaultChooserOptionId(chooserUniverse(null, null, "connections", planConnections())), "opencode-go");
+  assert.equal(defaultChooserOptionId(chooserUniverse(fullCatalog(), null, "connections", planConnections())), "opencode-go");
+  assert.ok(defaultChooserOptionId(chooserUniverse(fullCatalog(), null, "services", planConnections())).startsWith("family:plan:"));
+  assert.equal(defaultChooserOptionId(chooserUniverse(fullCatalog(), null, "services", [])), "opencode-go");
   assert.equal(defaultChooserOptionId([]), "");
 });
 
-test("visible options follow rail order across both groups", () => {
-  const groups = buildChooserGroups(fullCatalog(), null, "", "services");
-  const visible = visibleChooserOptions(groups);
-  assert.deepEqual(visible.map((option) => option.optionId), [
-    ...groups[0]!.options.map((option) => option.optionId),
-    ...groups[1]!.options.map((option) => option.optionId),
-  ]);
-});
-
 test("phone select groups mirror the services rail and suffix family variant counts", () => {
-  const groups = buildChooserGroups(fullCatalog(), null, "", "services");
+  const groups = buildChooserGroups(fullCatalog(), null, "", "services", planConnections());
   const select = chooserSelectOptions(groups, "用户定义");
   assert.deepEqual(select.map((group) => group.key), ["plan", "api"]);
   // Family options with > 1 variant get a count suffix; single-variant ones
@@ -299,8 +377,8 @@ test("phone select marks user-defined entries in connections mode", () => {
 });
 
 test("describeChooserSelection covers plan, family, preset, and platform details", () => {
-  const connections = chooserUniverse(fullCatalog(), null, "connections");
-  const services = chooserUniverse(fullCatalog(), null, "services");
+  const connections = chooserUniverse(fullCatalog(), null, "connections", planConnections());
+  const services = chooserUniverse(fullCatalog(), null, "services", planConnections());
   const byId = (options: ChooserOption[], id: string): ChooserOption => (
     options.find((option) => option.optionId === id)!
   );
@@ -314,7 +392,7 @@ test("describeChooserSelection covers plan, family, preset, and platform details
     links: null,
   });
 
-  const custom = describeChooserSelection(byId(connections, "custom-endpoint"));
+  const custom = describeChooserSelection(byId(services, "custom-endpoint"));
   assert.equal(custom.kind, "plan");
   assert.deepEqual(custom.tag, { label: "自定义端点", type: "default" });
 

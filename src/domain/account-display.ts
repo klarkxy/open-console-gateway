@@ -100,16 +100,16 @@ export function accountStatusLabel(account: Account, now = Date.now()): string {
 
 export function accountStatusTagType(account: Account, now = Date.now()): AccountStatusTagType {
   if (isZenFreeAccount(account)) {
-    if (!account.enabled) return "default";
-    return isFreeCooling(account, now) ? "warning" : "default";
+    if (!account.enabled) return "error";
+    return isFreeCooling(account, now) ? "warning" : "success";
   }
   if (!accountIsReady(account)) return "warning";
   const draftLabel = accountRoutingDraftLabel(account);
   if (draftLabel) return draftLabel === "验证失败" ? "error" : "warning";
   if (account.auth_error) return "error";
-  if (!account.enabled) return "default";
+  if (!account.enabled) return "error";
   if (isCooling(account, now)) return "warning";
-  return "default";
+  return "success";
 }
 
 function accountExpiryDays(account: Pick<Account, "expires_on">, now = Date.now()): number {
@@ -160,13 +160,6 @@ export function managedStepLabel(step: AccountSetupStep): string {
   }
 }
 
-export function isUsageRefreshBlocked(account: Account, now = Date.now()): boolean {
-  const next = account.usage_sync_next_allowed_at;
-  if (!next) return false;
-  const ts = Date.parse(next);
-  return Number.isFinite(ts) && ts > now;
-}
-
 function formatUsageSyncTime(value: string | null | undefined): string {
   if (!value) return t("尚未官方同步");
   const ts = Date.parse(value);
@@ -174,22 +167,13 @@ function formatUsageSyncTime(value: string | null | undefined): string {
   return new Date(ts).toLocaleString();
 }
 
-export function usageSyncCaption(account: Account, now = Date.now()): string {
-  const last = account.usage_sync_last_success_at
+export function usageSyncCaption(account: Account): string {
+  return account.usage_sync_last_success_at
     ? t("上次官方同步: {time}", { time: formatUsageSyncTime(account.usage_sync_last_success_at) })
     : t("尚未官方同步");
-  if (!isUsageRefreshBlocked(account, now)) return last;
-  return `${last} · ${t("刷新额度冷却中，请于 {time} 后重试", {
-    time: formatUsageSyncTime(account.usage_sync_next_allowed_at),
-  })}`;
 }
 
-export function usageRefreshTooltip(account: Account, now = Date.now()): string {
-  if (isUsageRefreshBlocked(account, now)) {
-    return t("刷新额度冷却中，请于 {time} 后重试", {
-      time: formatUsageSyncTime(account.usage_sync_next_allowed_at),
-    });
-  }
+export function usageRefreshTooltip(): string {
   return t("从 OpenCode 官方用量刷新额度");
 }
 

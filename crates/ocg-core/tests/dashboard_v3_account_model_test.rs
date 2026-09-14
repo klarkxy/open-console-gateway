@@ -15,6 +15,8 @@ use std::sync::{Arc, Mutex};
 
 #[path = "fixtures/dashboard_v3/harness.rs"]
 mod harness;
+#[path = "fixtures/refreshed_go_catalog.rs"]
+mod refreshed_go_catalog;
 
 use harness::{V3Harness, start_loopback};
 
@@ -142,6 +144,18 @@ async fn create_go_account(harness: &V3Harness, name: &str, key: &str) -> String
     body["account"]["id"].as_str().unwrap().to_string()
 }
 
+fn disable_inference_binding(harness: &V3Harness, account_id: &str) {
+    let db = harness.state.db.lock();
+    let binding = db
+        .list_inference_bindings()
+        .unwrap()
+        .into_iter()
+        .find(|row| row.account_id == account_id)
+        .expect("inference binding");
+    db.update_credential_binding(&binding.binding_id, None, Some(false), None, None)
+        .unwrap();
+}
+
 fn point_upstream(harness: &V3Harness, origin: &ProbeOrigin) {
     let mut config = harness.state.config();
     config.upstream_base_url = origin.url.clone();
@@ -151,8 +165,9 @@ fn point_upstream(harness: &V3Harness, origin: &ProbeOrigin) {
 }
 
 #[tokio::test]
-async fn model_test_locks_the_requested_disabled_cooling_account_and_does_not_mutate_it() {
+async fn exact_account_probe_keeps_target_and_honors_live_authorization() {
     let harness = start_loopback("account-model-test-locked").await;
+    refreshed_go_catalog::persist_refreshed_go_catalog(&harness.state);
     let origin = start_origin().await;
     point_upstream(&harness, &origin);
     let target = create_go_account(&harness, "Target", TARGET_KEY).await;
@@ -167,14 +182,6 @@ async fn model_test_locks_the_requested_disabled_cooling_account_and_does_not_mu
             Some("pre-existing cooldown"),
         )
         .unwrap();
-    let (disabled_status, disabled) = send_json(
-        &harness,
-        Method::PATCH,
-        &format!("/accounts/{target}"),
-        cas(&harness, json!({"enabled": false})),
-    )
-    .await;
-    assert_eq!(disabled_status, StatusCode::OK, "{disabled}");
     let before_revision = harness.state.settings_revision();
     let before = harness
         .state
@@ -183,6 +190,8 @@ async fn model_test_locks_the_requested_disabled_cooling_account_and_does_not_mu
         .get_account(&target)
         .unwrap()
         .unwrap();
+    assert!(!before.enabled);
+    assert!(before.cooldown_until.is_some());
 
     let (status, body) = send_json(
         &harness,
@@ -194,9 +203,9 @@ async fn model_test_locks_the_requested_disabled_cooling_account_and_does_not_mu
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["accountId"], target);
     assert_eq!(body["modelId"], "grok-4.5");
-    assert_eq!(body["success"], false);
-    assert_eq!(body["httpStatus"], 401);
-    assert!(body["durationMs"].as_u64().is_some());
+    assert_eq!(body["success"], false, "{body}");
+    assert_eq!(body["httpStatus"], 401, "{body}");
+    assert!(body["durationMs"].as_u64().is_some(), "{body}");
     assert!(!body.to_string().contains(TARGET_KEY), "{body}");
     assert_eq!(harness.state.settings_revision(), before_revision);
     let after = harness
@@ -208,14 +217,73 @@ async fn model_test_locks_the_requested_disabled_cooling_account_and_does_not_mu
         .unwrap();
     assert!(!after.enabled);
     assert_eq!(after.cooldown_until, before.cooldown_until);
-    let calls = origin.calls.lock().unwrap();
-    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(after.auth_error, before.auth_error);
     let target_authorization = format!("Bearer {TARGET_KEY}");
+    {
+        let calls = origin.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!(
+            calls[0].authorization.as_deref(),
+            Some(target_authorization.as_str())
+        );
+        assert_eq!(calls[0].path, "/v1/responses");
+    }
+
+    disable_inference_binding(&harness, &target);
+    let disabled_revision = harness.state.settings_revision();
+    let disabled_before = harness
+        .state
+        .db
+        .lock()
+        .get_account(&target)
+        .unwrap()
+        .unwrap();
+    assert!(!disabled_before.enabled);
+    assert_eq!(disabled_before.cooldown_until, before.cooldown_until);
+
+    let (status, body) = send_json(
+        &harness,
+        Method::POST,
+        &format!("/accounts/{target}/model-tests"),
+        json!({"modelId":"grok-4.5"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["accountId"], target);
+    assert_eq!(body["modelId"], "grok-4.5");
     assert_eq!(
-        calls[0].authorization.as_deref(),
-        Some(target_authorization.as_str())
+        body["success"], false,
+        "binding-disabled stored-key probe must fail closed: {body}"
     );
-    assert_eq!(calls[0].path, "/v1/responses");
+    assert_eq!(
+        body["httpStatus"],
+        Value::Null,
+        "binding-disabled stored-key probe must not reach upstream: {body}"
+    );
+    assert!(body["durationMs"].as_u64().is_some(), "{body}");
+    assert!(!body.to_string().contains(TARGET_KEY), "{body}");
+    assert_eq!(harness.state.settings_revision(), disabled_revision);
+    let disabled_after = harness
+        .state
+        .db
+        .lock()
+        .get_account(&target)
+        .unwrap()
+        .unwrap();
+    assert!(!disabled_after.enabled);
+    assert_eq!(
+        disabled_after.cooldown_until,
+        disabled_before.cooldown_until
+    );
+    assert_eq!(disabled_after.auth_error, disabled_before.auth_error);
+    {
+        let calls = origin.calls.lock().unwrap();
+        assert_eq!(
+            calls.len(),
+            1,
+            "binding-disabled stored-key must add zero origin hits and must not use a sibling: {calls:?}"
+        );
+    }
     harness.stop();
 }
 
@@ -267,6 +335,7 @@ async fn custom_model_test_uses_the_declared_protocol_and_route_without_secrets(
     .await;
     assert_eq!(status, StatusCode::OK, "{created}");
     let account = created["account"]["id"].as_str().unwrap();
+    harness.enable_account(account);
     let before_revision = harness.state.settings_revision();
     let (status, body) = send_json(
         &harness,
@@ -344,7 +413,7 @@ struct DynamicExactCase {
 }
 
 #[tokio::test]
-async fn dynamic_exact_account_tests_cover_bearer_x_api_key_and_none() {
+async fn dynamic_exact_account_probes_preserve_auth_and_honor_disablement() {
     let cases = [
         DynamicExactCase {
             label: "account-model-test-dyn-bearer",
@@ -405,6 +474,7 @@ async fn dynamic_exact_account_tests_cover_bearer_x_api_key_and_none() {
         assert_eq!(status, StatusCode::OK, "{} {created}", case.label);
         let provider_id = created["provider"]["id"].as_str().unwrap().to_string();
         let account = account_id_for_provider(&harness, &provider_id).await;
+        harness.enable_account(&account);
         if let Some(sibling_key) = case.sibling_key {
             let (status, sibling) = send_json(
                 &harness,
@@ -422,14 +492,6 @@ async fn dynamic_exact_account_tests_cover_bearer_x_api_key_and_none() {
             .await;
             assert_eq!(status, StatusCode::OK, "{} {sibling}", case.label);
         }
-        let (disabled_status, disabled) = send_json(
-            &harness,
-            Method::PATCH,
-            &format!("/accounts/{account}"),
-            cas(&harness, json!({"enabled": false})),
-        )
-        .await;
-        assert_eq!(disabled_status, StatusCode::OK, "{} {disabled}", case.label);
         harness
             .state
             .db
@@ -448,7 +510,7 @@ async fn dynamic_exact_account_tests_cover_bearer_x_api_key_and_none() {
             .get_account(&account)
             .unwrap()
             .unwrap();
-        assert!(!before.enabled);
+        assert!(before.enabled, "{} {before:?}", case.label);
         assert!(before.cooldown_until.is_some());
 
         let (status, body) = send_json(
@@ -462,8 +524,8 @@ async fn dynamic_exact_account_tests_cover_bearer_x_api_key_and_none() {
         assert_eq!(body["accountId"], account);
         assert_eq!(body["modelId"], "lab-opus");
         assert_eq!(body["protocol"], case.protocol);
-        assert_eq!(body["success"], true);
-        assert_eq!(body["httpStatus"], 200);
+        assert_eq!(body["success"], true, "{} {body}", case.label);
+        assert_eq!(body["httpStatus"], 200, "{} {body}", case.label);
         if let Some(key) = case.key {
             assert!(!body.to_string().contains(key), "{} {body}", case.label);
         }
@@ -475,19 +537,83 @@ async fn dynamic_exact_account_tests_cover_bearer_x_api_key_and_none() {
             .get_account(&account)
             .unwrap()
             .unwrap();
-        assert!(!after.enabled);
         assert_eq!(after.enabled, before.enabled);
         assert_eq!(after.cooldown_until, before.cooldown_until);
         assert_eq!(after.auth_error, before.auth_error);
-        let calls = origin.calls.lock().unwrap();
-        assert_eq!(calls.len(), 1, "{} {calls:?}", case.label);
-        assert_eq!(calls[0].path, case.expected_path);
-        assert_eq!(calls[0].body["model"], "vendor/opus");
-        assert_eq!(
-            calls[0].authorization.as_deref(),
-            case.expected_authorization
-        );
-        assert_eq!(calls[0].x_api_key.as_deref(), case.expected_x_api_key);
+        {
+            let calls = origin.calls.lock().unwrap();
+            assert_eq!(calls.len(), 1, "{} {calls:?}", case.label);
+            assert_eq!(calls[0].path, case.expected_path);
+            assert_eq!(calls[0].body["model"], "vendor/opus");
+            assert_eq!(
+                calls[0].authorization.as_deref(),
+                case.expected_authorization
+            );
+            assert_eq!(calls[0].x_api_key.as_deref(), case.expected_x_api_key);
+        }
+
+        if case.key.is_some() {
+            disable_inference_binding(&harness, &account);
+            let disabled_revision = harness.state.settings_revision();
+            let disabled_before = harness
+                .state
+                .db
+                .lock()
+                .get_account(&account)
+                .unwrap()
+                .unwrap();
+            assert!(disabled_before.enabled);
+            assert_eq!(disabled_before.cooldown_until, before.cooldown_until);
+
+            let (status, body) = send_json(
+                &harness,
+                Method::POST,
+                &format!("/accounts/{account}/model-tests"),
+                json!({"modelId":"lab-opus"}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{} {body}", case.label);
+            assert_eq!(body["accountId"], account);
+            assert_eq!(body["modelId"], "lab-opus");
+            assert_eq!(body["protocol"], case.protocol);
+            assert_eq!(
+                body["success"], false,
+                "{} binding-disabled stored-key probe must fail closed: {body}",
+                case.label
+            );
+            assert_eq!(
+                body["httpStatus"],
+                Value::Null,
+                "{} binding-disabled stored-key probe must not reach upstream: {body}",
+                case.label
+            );
+            if let Some(key) = case.key {
+                assert!(!body.to_string().contains(key), "{} {body}", case.label);
+            }
+            assert_eq!(harness.state.settings_revision(), disabled_revision);
+            let disabled_after = harness
+                .state
+                .db
+                .lock()
+                .get_account(&account)
+                .unwrap()
+                .unwrap();
+            assert!(disabled_after.enabled);
+            assert_eq!(
+                disabled_after.cooldown_until,
+                disabled_before.cooldown_until
+            );
+            assert_eq!(disabled_after.auth_error, disabled_before.auth_error);
+            {
+                let calls = origin.calls.lock().unwrap();
+                assert_eq!(
+                    calls.len(),
+                    1,
+                    "{} binding-disabled stored-key must add zero origin hits and must not use a sibling: {calls:?}",
+                    case.label
+                );
+            }
+        }
         harness.stop();
     }
 }

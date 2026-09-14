@@ -4,6 +4,9 @@ import {
   CPA_LOG_TAIL_LINES,
   CPA_OAUTH_PROVIDERS,
   cpaAccountKey,
+  cpaCliImportAlreadyPresent,
+  cpaCliImportFilenameToken,
+  cpaOAuthProviderForCliAccount,
   cpaClientKeysAvailable,
   cpaLogTail,
   cpaManagedRuntimeConfirmed,
@@ -131,7 +134,7 @@ test("busy phases are exactly the lifecycle phases that block controls", () => {
   assert.ok(!isCpaPhaseBusy("failed"));
 });
 
-test("every control is disabled while busy, unsupported, or an unowned installed runtime", () => {
+test("control availability follows install/run/version state", () => {
   const updateCheck = {
     currentVersion: "1.0.0",
     latestVersion: "1.1.0",
@@ -141,23 +144,17 @@ test("every control is disabled while busy, unsupported, or an unowned installed
     updateAvailable: true,
   };
   const allOff = { install: false, start: false, stop: false, checkUpdate: false, update: false, rollback: false, remove: false };
-  assert.deepEqual(cpaRuntimeControls({ runtime: runtime(), busy: true, updateCheck }), allOff);
-  assert.deepEqual(
-    cpaRuntimeControls({ runtime: runtime({ phase: "downloading" }), busy: false, updateCheck }),
-    allOff,
-  );
-  assert.deepEqual(
-    cpaRuntimeControls({ runtime: runtime({ supported: false }), busy: false, updateCheck }),
-    allOff,
-  );
-  assert.deepEqual(
-    cpaRuntimeControls({ runtime: runtime({ owned: false }), busy: false, updateCheck }),
-    allOff,
-  );
-  assert.deepEqual(cpaRuntimeControls({ runtime: null, busy: false, updateCheck }), allOff);
-});
+  const blocked = [
+    { label: "busy flag", args: { runtime: runtime(), busy: true, updateCheck } },
+    { label: "downloading phase", args: { runtime: runtime({ phase: "downloading" }), busy: false, updateCheck } },
+    { label: "unsupported", args: { runtime: runtime({ supported: false }), busy: false, updateCheck } },
+    { label: "unowned installed", args: { runtime: runtime({ owned: false }), busy: false, updateCheck } },
+    { label: "missing runtime", args: { runtime: null, busy: false, updateCheck } },
+  ];
+  for (const { label, args } of blocked) {
+    assert.deepEqual(cpaRuntimeControls(args), allOff, label);
+  }
 
-test("control availability follows install/run/version state", () => {
   const noUpdate = { updateCheck: null, busy: false };
   const installedRunning = cpaRuntimeControls({ runtime: runtime(), ...noUpdate });
   assert.deepEqual(installedRunning, {
@@ -249,15 +246,19 @@ test("account identity is name plus optional authIndex", () => {
   assert.equal(cpaAccountKey({ name: "acc", authIndex: null }), "acc:");
 });
 
-test("quota renders scalars directly and falls back to JSON or a dash", () => {
+test("quota hides empty CPA trackers and renders scalars or JSON", () => {
   assert.equal(formatCpaQuota("100/200"), "100/200");
   assert.equal(formatCpaQuota(42), "42");
   assert.equal(formatCpaQuota({ remaining: 5 }), '{"remaining":5}');
-  assert.equal(formatCpaQuota(null), "—");
-  assert.equal(formatCpaQuota(undefined), "—");
+  assert.equal(formatCpaQuota({ signals: { gpt: { used: 1 } } }), '{"signals":{"gpt":{"used":1}}}');
+  assert.equal(formatCpaQuota(null), null);
+  assert.equal(formatCpaQuota(undefined), null);
+  assert.equal(formatCpaQuota({}), null);
+  assert.equal(formatCpaQuota({ signals: {} }), null);
+  assert.equal(formatCpaQuota({ signals: { gpt: {} } }), null);
   const circular: Record<string, unknown> = {};
   circular.self = circular;
-  assert.equal(formatCpaQuota(circular), "—");
+  assert.equal(formatCpaQuota(circular), null);
 });
 
 test("OAuth provider registry keeps the fixed five providers in order", () => {
@@ -265,6 +266,23 @@ test("OAuth provider registry keeps the fixed five providers in order", () => {
     CPA_OAUTH_PROVIDERS.map(({ id }) => id),
     ["codex", "anthropic", "antigravity", "kimi", "xai"],
   );
+});
+
+test("CLI import filename tokens match CPA account names", () => {
+  assert.equal(cpaCliImportFilenameToken("codex"), "codex");
+  assert.equal(cpaCliImportFilenameToken("anthropic"), "claude");
+  assert.equal(cpaCliImportFilenameToken("kimi"), "kimi");
+  const accounts = [
+    { name: "ocg-cli-codex-a1b2c3.json" },
+    { name: "ocg-cli-claude-f0e1d2.json" },
+    { name: "chatgpt-oauth.json" },
+  ];
+  assert.ok(cpaCliImportAlreadyPresent("codex", accounts));
+  assert.ok(cpaCliImportAlreadyPresent("anthropic", accounts));
+  assert.ok(!cpaCliImportAlreadyPresent("kimi", accounts));
+  assert.ok(!cpaCliImportAlreadyPresent("codex", [{ name: "codex-work.json" }]));
+  assert.equal(cpaOAuthProviderForCliAccount({ name: "ocg-cli-claude-f0e1d2.json" }), "anthropic");
+  assert.equal(cpaOAuthProviderForCliAccount({ name: "chatgpt-oauth.json" }), null);
 });
 
 test("OAuth polling stops on terminal statuses and refreshes accounts only on success", () => {

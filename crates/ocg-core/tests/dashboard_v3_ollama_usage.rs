@@ -354,7 +354,7 @@ async fn ollama_paid_tier_requires_purchase_date_and_publishes_month_credits() {
 }
 
 #[tokio::test]
-async fn ollama_billing_is_carried_in_export_payloads() {
+async fn ollama_export_payload_includes_a_bundle() {
     let harness = start_loopback("ollama-export-billing").await;
     let mut account = base_ollama_account("ollama-export-1");
     account.purchase_date = "2026-08-01".into();

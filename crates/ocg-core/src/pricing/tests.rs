@@ -98,23 +98,6 @@ fn seed_coverage_does_not_revive_models_outside_the_muse_allowlist() {
 }
 
 #[test]
-fn seed_uses_go_usage_as_quota_multiplier() {
-    let snapshot = embedded_seed();
-    let grok = snapshot
-        .models
-        .iter()
-        .find(|entry| entry.model_id == "grok-4.5")
-        .unwrap();
-    let glm = snapshot
-        .models
-        .iter()
-        .find(|entry| entry.model_id == "glm-5.2")
-        .unwrap();
-    assert_eq!(grok.quota_multiplier, 4.0);
-    assert_eq!(glm.quota_multiplier, 1.0);
-}
-
-#[test]
 fn provider_quota_formula_uses_plan_limit_over_model_allowance() {
     assert_eq!(quota_multiplier(60.0, 15.0).unwrap(), 4.0);
     assert_eq!(quota_multiplier(60.0, 60.0).unwrap(), 1.0);

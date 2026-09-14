@@ -18,9 +18,10 @@ use crate::db::ReorderAccountsError;
 use crate::models::{
     Account as ModelAccount, AccountCustomConfigInput, AccountModelCapabilityInput,
     AccountSetupStep as ModelSetupStep, AccountType as ModelAccountType,
-    AccountUpdate as ModelAccountUpdate, normalize_account_notes, normalize_purchase_date,
+    AccountUpdate as ModelAccountUpdate, NEW_READY_KEY_ACCOUNT_ENABLED, normalize_account_notes,
+    normalize_purchase_date,
 };
-use crate::provider::{CreationAvailability, ProviderRegistry, default_provider_id};
+use crate::provider::{CreationAvailability, default_provider_id};
 use crate::redaction::redact_known_secret;
 use crate::state::CoreState;
 
@@ -180,7 +181,7 @@ fn create_dynamic_account_locked(
         key_cipher: state
             .encrypt_key(input.key.trim())
             .map_err(V3ApiError::internal)?,
-        enabled: true,
+        enabled: NEW_READY_KEY_ACCOUNT_ENABLED,
         account_type: ModelAccountType::Key,
         setup_step: ModelSetupStep::Ready,
         referral_code: None,
@@ -305,10 +306,7 @@ fn create_account_locked(
             ));
         }
     }
-    let enable_requires_verification = ProviderRegistry::get(plan.provider_id)
-        .is_some_and(|descriptor| descriptor.card_actions.enable_requires_verification);
-    let enabled = crate::provider::provider_allows_enablement(plan.provider_id)
-        && !enable_requires_verification;
+    let enabled = NEW_READY_KEY_ACCOUNT_ENABLED;
     let purchase_date = match input.purchase_date {
         Some(value) if !value.trim().is_empty() => normalize_purchase_date(&value)
             .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?,
@@ -701,7 +699,7 @@ fn put_custom_config_locked(
         {
             let old = db.account_custom_config(id).map_err(V3ApiError::internal)?;
             if config.endpoint_url != endpoint
-                && !old.is_some_and(|c| c.endpoint_url == config.endpoint_url)
+                && old.is_none_or(|c| c.endpoint_url != config.endpoint_url)
             {
                 return Err(V3ApiError::invalid_request_at(
                     state,

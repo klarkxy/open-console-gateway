@@ -255,7 +255,8 @@ async fn connections_project_keyless_dynamic_provider_as_missing_credential_and_
 }
 
 #[tokio::test]
-async fn connections_project_dynamic_provider_with_unverified_key_as_unknown_and_eligible() {
+async fn connections_project_dynamic_provider_with_unverified_disabled_key_as_unknown_and_ineligible()
+ {
     let harness = start_loopback("v4-unverified").await;
     let (status, created) = send_v3(
         &harness,
@@ -280,10 +281,11 @@ async fn connections_project_dynamic_provider_with_unverified_key_as_unknown_and
     assert_secret_free(&body, &["sk-unverified"]);
     let connection = find_legacy(&body, "dynamic_provider", id);
     assert_eq!(connection["authorization"], "unknown");
-    assert_eq!(connection["eligibility"]["state"], "eligible");
-    assert_eq!(connection["eligibility"]["reason"], "none");
+    assert_eq!(connection["lifecycle"], "disabled");
+    assert_eq!(connection["eligibility"]["state"], "ineligible");
+    assert_eq!(connection["eligibility"]["reason"], "connection_disabled");
     assert_eq!(connection["credentialCount"], 1);
-    assert_eq!(connection["enabledCredentialCount"], 1);
+    assert_eq!(connection["enabledCredentialCount"], 0);
     harness.stop();
 }
 
@@ -436,15 +438,17 @@ async fn v4_listing_makes_zero_outbound_requests() {
 #[tokio::test]
 async fn v4_requires_session_like_v3() {
     let harness = start_public("v4-session").await;
-    let response = harness
-        .client
-        .get(format!("{}/contract", v4_base(&harness)))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    let body: Value = response.json().await.unwrap();
-    assert_eq!(body["code"], "unauthorized");
+    for path in ["/contract", "/accounts"] {
+        let response = harness
+            .client
+            .get(format!("{}{path}", v4_base(&harness)))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
+        let body: Value = response.json().await.unwrap();
+        assert_eq!(body["code"], "unauthorized", "{path}");
+    }
     harness.stop();
 }
 
@@ -1327,21 +1331,6 @@ async fn identities_make_zero_outbound_requests() {
 }
 
 #[tokio::test]
-async fn identities_require_session() {
-    let harness = start_public("v4-identities-session").await;
-    let response = harness
-        .client
-        .get(format!("{}/accounts", v4_base(&harness)))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    let body: Value = response.json().await.unwrap();
-    assert_eq!(body["code"], "unauthorized");
-    harness.stop();
-}
-
-#[tokio::test]
 async fn identities_redact_last_error_and_omit_when_cipher_is_unreadable() {
     let harness = start_loopback("v4-identities-last-error").await;
     let secret = "sk-must-redact-from-last-error";
@@ -1514,7 +1503,9 @@ async fn create_go_account(harness: &V3Harness, name: &str, key: &str) -> String
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{created}");
-    created["account"]["id"].as_str().unwrap().to_string()
+    let id = created["account"]["id"].as_str().unwrap().to_string();
+    harness.enable_account(&id);
+    id
 }
 
 #[tokio::test]
@@ -2820,6 +2811,8 @@ async fn explicit_draft_with_key_and_models_stays_nonsend() {
         send_v4(&harness, Method::POST, "/onboarding/commit", &complete).await;
     assert_eq!(status, StatusCode::OK, "{completed}");
     assert_eq!(dynamic_provider_count(&harness), 1);
+    let account_id = result["accountId"].as_str().expect("draft account id");
+    harness.enable_account(account_id);
     let listed_live = listed_gateway_model_ids(&harness).await;
     assert!(
         listed_live.iter().any(|id| id == public_model),
@@ -3279,5 +3272,391 @@ async fn v3_update_preserves_draft_flag() {
             .unwrap(),
         Some(true)
     );
+    harness.stop();
+}
+
+#[tokio::test]
+async fn cpa_catalog_selection_is_local_and_cas_protected() {
+    let harness = start_loopback("v4-cpa-catalog").await;
+    let (status, empty) = send_v4(&harness, Method::GET, "/cpa/models", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{empty}");
+    assert_eq!(empty["models"], json!([]));
+
+    let (status, rejected) = send_v4(
+        &harness,
+        Method::PUT,
+        "/cpa/models",
+        &cas(&harness, json!({ "enabledIds": ["gpt-5"] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED, "{rejected}");
+
+    harness
+        .state
+        .activate_cpa_model_catalog(
+            vec![
+                ocg_core::db::CpaCatalogModel {
+                    id: "gpt-5".into(),
+                    owned_by: Some("openai".into()),
+                    enabled: true,
+                },
+                ocg_core::db::CpaCatalogModel {
+                    id: "claude".into(),
+                    owned_by: Some("anthropic".into()),
+                    enabled: false,
+                },
+            ],
+            "http://127.0.0.1:8317",
+            chrono::Utc::now(),
+        )
+        .unwrap();
+
+    let (status, listed) = send_v4(&harness, Method::GET, "/cpa/models", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    assert_eq!(listed["models"][0]["id"], "gpt-5");
+    assert_eq!(listed["models"][0]["enabled"], true);
+    assert_eq!(listed["models"][1]["id"], "claude");
+    assert_eq!(listed["models"][1]["enabled"], false);
+    assert_eq!(harness.state.cpa_model_catalog().as_ref(), &["gpt-5"]);
+
+    let (status, unknown) = send_v4(
+        &harness,
+        Method::PUT,
+        "/cpa/models",
+        &cas(&harness, json!({ "enabledIds": ["missing"] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{unknown}");
+
+    let (status, updated) = send_v4(
+        &harness,
+        Method::PUT,
+        "/cpa/models",
+        &cas(&harness, json!({ "enabledIds": ["claude"] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(updated["models"][0]["enabled"], false);
+    assert_eq!(updated["models"][1]["enabled"], true);
+    assert_eq!(harness.state.cpa_model_catalog().as_ref(), &["claude"]);
+    harness.stop();
+}
+
+#[tokio::test]
+async fn provider_catalog_remove_is_local_and_cas_protected() {
+    use ocg_core::provider_contracts::{CATALOG_SOURCE_OPENCODE_MODELS, ContractScope};
+
+    let harness = start_loopback("v4-catalog-remove").await;
+    let (status, missing) = send_v4(
+        &harness,
+        Method::POST,
+        &format!("/provider-contracts/provider/{OPENCODE_PROVIDER_ID}/catalog/remove"),
+        &cas(&harness, json!({ "modelIds": ["drop-me"] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED, "{missing}");
+
+    let now = Utc::now();
+    harness
+        .state
+        .db
+        .lock()
+        .set_contract_catalog(
+            &ContractScope::provider(OPENCODE_PROVIDER_ID),
+            &["keep-me".into(), "drop-me".into()],
+            Some(now),
+            CATALOG_SOURCE_OPENCODE_MODELS,
+            "https://example.test/models",
+            now,
+        )
+        .unwrap();
+    harness.state.reload_provider_contracts().unwrap();
+
+    let (status, rejected) = send_v4(
+        &harness,
+        Method::POST,
+        &format!("/provider-contracts/provider/{OPENCODE_PROVIDER_ID}/catalog/remove"),
+        &cas(&harness, json!({ "modelIds": ["unknown"] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected}");
+
+    let (status, custom) = send_v4(
+        &harness,
+        Method::POST,
+        "/provider-contracts/custom_endpoint/acct-1/catalog/remove",
+        &cas(&harness, json!({ "modelIds": ["drop-me"] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{custom}");
+
+    let before = harness.state.settings_revision();
+    let (status, removed) = send_v4(
+        &harness,
+        Method::POST,
+        &format!("/provider-contracts/provider/{OPENCODE_PROVIDER_ID}/catalog/remove"),
+        &cas(&harness, json!({ "modelIds": ["drop-me"] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{removed}");
+    assert_eq!(removed["removedIds"], json!(["drop-me"]));
+    assert_eq!(removed["catalogModels"], json!(["keep-me"]));
+    assert_eq!(removed["revision"]["revision"], before + 1);
+    let stored = harness
+        .state
+        .db
+        .lock()
+        .load_persisted_scope(&ContractScope::provider(OPENCODE_PROVIDER_ID))
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.catalog_models, vec!["keep-me"]);
+    assert!(
+        harness
+            .state
+            .provider_contracts()
+            .scope(&ContractScope::provider(OPENCODE_PROVIDER_ID))
+            .is_some_and(|contract| {
+                contract.model("keep-me").is_some() && contract.model("drop-me").is_none()
+            })
+    );
+    harness.stop();
+}
+
+#[tokio::test]
+async fn zen_catalog_remove_last_and_all_stay_empty_after_reload() {
+    use ocg_core::kernel::zen::ZenFreeModelCatalog;
+    use ocg_core::provider_contracts::ContractScope;
+
+    let harness = start_loopback("v4-zen-catalog-remove-empty").await;
+    let now = Utc::now();
+    let scope = ContractScope::provider(OPENCODE_ZEN_FREE_PROVIDER_ID);
+    harness
+        .state
+        .activate_zen_free_model_catalog(ZenFreeModelCatalog {
+            models: vec!["review-model-free".into(), "second-free".into()],
+            refreshed_at: Some(now),
+            source_url: "https://example.test/zen".into(),
+        })
+        .unwrap();
+
+    let (status, last) = send_v4(
+        &harness,
+        Method::POST,
+        &format!("/provider-contracts/provider/{OPENCODE_ZEN_FREE_PROVIDER_ID}/catalog/remove"),
+        &cas(&harness, json!({ "modelIds": ["second-free"] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{last}");
+    assert_eq!(last["catalogModels"], json!(["review-model-free"]));
+
+    let before = harness.state.settings_revision();
+    let (status, removed) = send_v4(
+        &harness,
+        Method::POST,
+        &format!("/provider-contracts/provider/{OPENCODE_ZEN_FREE_PROVIDER_ID}/catalog/remove"),
+        &cas(&harness, json!({ "modelIds": ["review-model-free"] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{removed}");
+    assert_eq!(removed["removedIds"], json!(["review-model-free"]));
+    assert_eq!(removed["catalogModels"], json!([]));
+    assert_eq!(removed["revision"]["revision"], before + 1);
+    assert!(
+        harness
+            .state
+            .provider_contracts()
+            .scope(&scope)
+            .is_some_and(|contract| {
+                contract.catalog.models.is_empty()
+                    && contract.model("review-model-free").is_none()
+                    && !contract.model_has_enabled_protocol("review-model-free")
+            })
+    );
+
+    harness.state.reload_provider_contracts().unwrap();
+    assert!(
+        harness
+            .state
+            .provider_contracts()
+            .scope(&scope)
+            .is_some_and(|contract| contract.catalog.models.is_empty())
+    );
+
+    let reopened = ocg_core::db::Database::open(harness.dir.clone()).unwrap();
+    let snapshot = reopened.zen_free_model_catalog().unwrap().unwrap();
+    assert_eq!(snapshot.models, vec!["review-model-free", "second-free"]);
+    let restored = ocg_core::provider_contracts::build_effective_contracts(
+        &snapshot,
+        &[],
+        reopened.load_persisted_contracts().unwrap(),
+    );
+    assert!(restored.scope(&scope).unwrap().catalog.models.is_empty());
+    drop(reopened);
+
+    harness
+        .state
+        .activate_zen_free_model_catalog(ZenFreeModelCatalog {
+            models: vec!["again-free".into(), "more-free".into()],
+            refreshed_at: Some(Utc::now()),
+            source_url: "https://example.test/zen".into(),
+        })
+        .unwrap();
+    let (status, cleared) = send_v4(
+        &harness,
+        Method::POST,
+        &format!("/provider-contracts/provider/{OPENCODE_ZEN_FREE_PROVIDER_ID}/catalog/remove"),
+        &cas(&harness, json!({ "modelIds": ["again-free", "more-free"] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{cleared}");
+    assert_eq!(cleared["catalogModels"], json!([]));
+    assert!(
+        harness
+            .state
+            .provider_contracts()
+            .scope(&scope)
+            .is_some_and(|contract| contract.catalog.models.is_empty()
+                && contract.model("again-free").is_none())
+    );
+    harness.stop();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn catalog_remove_same_cas_allows_only_one_concurrent_success() {
+    use ocg_core::provider_contracts::{CATALOG_SOURCE_OPENCODE_MODELS, ContractScope};
+
+    let harness = start_loopback("v4-catalog-remove-cas").await;
+    let now = Utc::now();
+    harness
+        .state
+        .db
+        .lock()
+        .set_contract_catalog(
+            &ContractScope::provider(OPENCODE_PROVIDER_ID),
+            &["model-a".into(), "model-b".into()],
+            Some(now),
+            CATALOG_SOURCE_OPENCODE_MODELS,
+            "https://example.test/models",
+            now,
+        )
+        .unwrap();
+    harness.state.reload_provider_contracts().unwrap();
+
+    let before = harness.state.settings_revision();
+    let generation = harness.state.process_generation();
+    let path = format!("/provider-contracts/provider/{OPENCODE_PROVIDER_ID}/catalog/remove");
+    let body_a = json!({
+        "expectedRevision": before,
+        "processGeneration": generation,
+        "modelIds": ["model-a"],
+    });
+    let body_b = json!({
+        "expectedRevision": before,
+        "processGeneration": generation,
+        "modelIds": ["model-b"],
+    });
+    let first = send_v4(&harness, Method::POST, &path, &body_a);
+    let second = send_v4(&harness, Method::POST, &path, &body_b);
+    let (first, second) = tokio::join!(first, second);
+    let statuses = [first.0, second.0];
+    let ok = statuses
+        .iter()
+        .filter(|status| **status == StatusCode::OK)
+        .count();
+    let conflict = statuses
+        .iter()
+        .filter(|status| **status == StatusCode::CONFLICT)
+        .count();
+    assert_eq!(ok, 1, "{first:?} {second:?}");
+    assert_eq!(conflict, 1, "{first:?} {second:?}");
+    let loser = if first.0 == StatusCode::CONFLICT {
+        &first.1
+    } else {
+        &second.1
+    };
+    assert_eq!(loser["code"], "revisionConflict");
+    assert_eq!(harness.state.settings_revision(), before + 1);
+    let stored = harness
+        .state
+        .db
+        .lock()
+        .load_persisted_scope(&ContractScope::provider(OPENCODE_PROVIDER_ID))
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.catalog_models.len(), 1);
+    harness.stop();
+}
+
+#[tokio::test]
+async fn catalog_remove_advances_revision_before_reload_failure() {
+    use ocg_core::provider_contracts::{CATALOG_SOURCE_OPENCODE_MODELS, ContractScope};
+
+    let harness = start_loopback("v4-catalog-remove-reload-fail").await;
+    let now = Utc::now();
+    let scope = ContractScope::provider(OPENCODE_PROVIDER_ID);
+    harness
+        .state
+        .db
+        .lock()
+        .set_contract_catalog(
+            &scope,
+            &["keep-me".into(), "drop-me".into()],
+            Some(now),
+            CATALOG_SOURCE_OPENCODE_MODELS,
+            "https://example.test/models",
+            now,
+        )
+        .unwrap();
+    harness.state.reload_provider_contracts().unwrap();
+    let before = harness.state.settings_revision();
+    let before_contracts = harness.state.provider_contracts();
+
+    let conn = rusqlite::Connection::open(harness.dir.join("data.sqlite")).unwrap();
+    conn.busy_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER corrupt_catalog_remove_post_commit
+         AFTER UPDATE ON provider_contract_scopes
+         BEGIN
+             INSERT INTO provider_contract_model_protocols
+               (scope_kind, scope_id, model_id, protocol, source)
+             VALUES (NEW.scope_kind, NEW.scope_id, 'corrupt', 'chat_completions', 'invalid-after-commit');
+         END;",
+    )
+    .unwrap();
+
+    let (status, body) = send_v4(
+        &harness,
+        Method::POST,
+        &format!("/provider-contracts/provider/{OPENCODE_PROVIDER_ID}/catalog/remove"),
+        &cas(&harness, json!({ "modelIds": ["drop-me"] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert_eq!(body["code"], "internal");
+    assert_eq!(harness.state.settings_revision(), before + 1);
+    let stored = harness
+        .state
+        .db
+        .lock()
+        .load_persisted_scope(&scope)
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.catalog_models, vec!["keep-me"]);
+    let after_contracts = harness.state.provider_contracts();
+    let after_scope = after_contracts.scope(&scope).unwrap();
+    assert_eq!(after_scope.catalog.models, vec!["keep-me"]);
+    assert!(after_scope.model("drop-me").is_none());
+    assert!(!after_scope.model_has_enabled_protocol("drop-me"));
+    assert_eq!(
+        after_scope.model("keep-me"),
+        before_contracts.scope(&scope).unwrap().model("keep-me")
+    );
+    for (provider, before_scope) in &before_contracts.providers {
+        if provider != scope.id() {
+            assert_eq!(after_contracts.providers.get(provider), Some(before_scope));
+        }
+    }
+    drop(conn);
     harness.stop();
 }

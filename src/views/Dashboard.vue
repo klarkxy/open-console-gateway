@@ -169,21 +169,21 @@
       <div class="card-head">
         <div>
           <h3 class="card-title">{{ t("需要关注") }}</h3>
-          <span class="card-desc">{{ attentionDesc }}</span>
+          <span v-if="accountsLoaded && attentionItems.length === 0" class="card-desc">{{ t("所有账号状态正常") }}</span>
+          <span v-else-if="accountsLoaded" class="card-desc">{{ attentionDesc }}</span>
         </div>
         <n-button
           v-if="accountsLoaded && attentionItems.length > 0"
           size="small"
           @click="goToAccounts"
         >
-          {{ t("前往账号页处理") }}
+          {{ t("去处理") }}
         </n-button>
       </div>
       <div v-if="!accountsLoaded" class="section-state">
         {{ loading ? t("加载中…") : t("仪表盘数据加载失败") }}
       </div>
-      <n-empty v-else-if="attentionItems.length === 0" :description="t('所有账号状态正常')" />
-      <div v-else class="attention-list" role="list">
+      <div v-else-if="attentionItems.length > 0" class="attention-list" role="list">
         <button
           v-for="item in attentionItems"
           :key="item.accountId"

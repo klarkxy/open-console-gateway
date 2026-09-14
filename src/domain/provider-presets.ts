@@ -159,15 +159,6 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = Object.freeze(
   parseProviderPresets(presetsJson),
 );
 
-export function groupProviderPresets(
-  presets: readonly ProviderPreset[],
-): { official: ProviderPreset[]; aggregator: ProviderPreset[] } {
-  return {
-    official: presets.filter((preset) => preset.category === "official"),
-    aggregator: presets.filter((preset) => preset.category === "aggregator"),
-  };
-}
-
 /**
  * User-visible offering group from metadata only. Rows without an explicit
  * offering are general API offerings; nothing is inferred from names.
@@ -265,7 +256,8 @@ export function applyProviderPresetToDraft(
     upstream_protocol: preset ? preset.protocol : base.upstream_protocol,
     auth_kind: preset ? preset.authKind : base.auth_kind,
     // Persisted provenance follows the explicit picker choice: the exact
-    // preset ID, or "" for a manual switch (create omits, update clears).
+    // preset ID, or "" for a manual switch (onboarding commit maps "" to
+    // templateId "custom-http"; update with empty presetId still clears).
     preset_id: preset ? preset.id : "",
     models: seeds.length > 0
       ? seeds.map((id) => ({

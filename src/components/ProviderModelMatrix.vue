@@ -6,37 +6,89 @@
       </n-tag>
     </div>
     <div class="matrix-toolbar" v-if="allMatrixModels.length > 0">
-      <n-input
-        v-model:value="modelQuery"
+      <div class="matrix-toolbar__filters">
+        <n-input
+          v-model:value="modelQuery"
+          size="small"
+          clearable
+          class="matrix-search"
+          :placeholder="t('搜索模型名或别名')"
+          :input-props="{ 'aria-label': t('搜索模型名或别名') }"
+        />
+        <label class="matrix-enabled-filter">
+          <n-switch size="small" v-model:value="enabledOnly" :aria-label="t('仅看已启用')" />
+          <span>{{ t("仅看已启用") }}</span>
+        </label>
+      </div>
+      <n-button
+        v-if="!selecting"
+        secondary
         size="small"
-        clearable
-        class="matrix-search"
-        :placeholder="t('搜索模型名或别名')"
-        :input-props="{ 'aria-label': t('搜索模型名或别名') }"
-      />
-      <label class="matrix-enabled-filter">
-        <n-switch size="small" v-model:value="enabledOnly" :aria-label="t('仅看已启用')" />
-        <span>{{ t("仅看已启用") }}</span>
-      </label>
-      <span class="matrix-toolbar__label">{{ t("批量") }}</span>
-      <n-button
-        text
-        size="tiny"
-        :disabled="!canBatch || batchSaving || props.actionLocked"
-        :loading="batchSaving"
-        @click="applyBatch(true)"
+        :disabled="props.actionLocked || props.removing"
+        @click="enterSelectMode"
       >
-        {{ t("全部开启") }}
+        {{ t("多选") }}
       </n-button>
-      <n-button
-        text
-        size="tiny"
-        :disabled="!canBatch || batchSaving || props.actionLocked"
-        :loading="batchSaving"
-        @click="applyBatch(false)"
+      <div
+        v-else
+        class="matrix-toolbar__select"
+        role="toolbar"
+        :aria-label="t('多选')"
       >
-        {{ t("全部关闭") }}
-      </n-button>
+        <span class="matrix-select-count" :data-empty="selectedCount === 0 ? 'true' : 'false'">
+          {{ t("已选 {count} 个模型", { count: selectedCount }) }}
+        </span>
+        <n-button-group size="small">
+          <n-button
+            :disabled="!canMutateSelection"
+            :loading="batchSaving || props.removing"
+            @click="applyBatch(true)"
+          >
+            {{ t("开启") }}
+          </n-button>
+          <n-button
+            :disabled="!canMutateSelection"
+            :loading="batchSaving || props.removing"
+            @click="applyBatch(false)"
+          >
+            {{ t("关闭") }}
+          </n-button>
+        </n-button-group>
+        <n-popconfirm
+          :positive-text="t('删除')"
+          :disabled="!canMutateSelection || props.removing"
+          @positive-click="removeSelected"
+        >
+          <template #trigger>
+            <n-button
+              text
+              size="small"
+              type="error"
+              :disabled="!canMutateSelection || props.removing"
+              :loading="props.removing"
+            >
+              {{ t("删除") }}
+            </n-button>
+          </template>
+          {{ t("删除已选的 {count} 个模型？从本地目录移除后不再路由。下次刷新官方目录时，它们可能再次出现并默认关闭。", { count: selectedCount }) }}
+        </n-popconfirm>
+        <n-tooltip trigger="hover">
+          <template #trigger>
+            <n-button
+              circle
+              quaternary
+              :disabled="props.actionLocked || props.removing"
+              :aria-label="t('退出多选')"
+              @click="exitSelectMode"
+            >
+              <template #icon>
+                <n-icon :component="CloseOutlined" />
+              </template>
+            </n-button>
+          </template>
+          {{ t("退出多选") }}
+        </n-tooltip>
+      </div>
     </div>
     <p v-if="allMatrixModels.length > 0 && matrixModels.length === 0" class="matrix-empty" role="status">
       {{ t("无匹配模型") }}
@@ -45,19 +97,41 @@
       <table class="matrix-table">
         <thead>
           <tr>
+            <th
+              v-if="selecting"
+              class="matrix-cell matrix-cell--select-header"
+            >
+              <n-checkbox
+                :checked="allVisibleSelected"
+                :indeterminate="someVisibleSelected"
+                :disabled="matrixModels.length === 0 || props.actionLocked || props.removing"
+                :aria-label="t('全选当前列表')"
+                @update:checked="toggleVisibleSelection"
+              />
+            </th>
             <th class="matrix-cell matrix-cell--model-header">{{ t("模型") }}</th>
             <th class="matrix-cell matrix-cell--protocol-header">
-              {{ t("上游协议") }}
-              <span class="matrix-protocol-hint">{{ t("显示表示可通；蓝色为转换默认") }}</span>
+              <n-tooltip trigger="hover">
+                <template #trigger>{{ t("上游协议") }}</template>
+                {{ t("显示表示可通；蓝色为转换默认") }}
+              </n-tooltip>
             </th>
             <th class="matrix-cell matrix-cell--state-header">{{ t("允许路由") }}</th>
-            <th v-if="probeSupported" class="matrix-cell matrix-cell--actions-header">
+            <th class="matrix-cell matrix-cell--actions-header">
               {{ t("操作") }}
             </th>
           </tr>
         </thead>
         <tbody>
-          <tr v-for="modelId in matrixModels" :key="modelId">
+          <tr v-for="modelId in matrixModels" :key="modelId" :class="{ 'is-selected': selecting && isSelected(modelId) }">
+            <td v-if="selecting" class="matrix-cell matrix-cell--select">
+              <n-checkbox
+                :checked="isSelected(modelId)"
+                :disabled="props.actionLocked || props.removing"
+                :aria-label="t('选择 {model}', { model: modelId })"
+                @update:checked="(on: boolean) => setSelected(modelId, on)"
+              />
+            </td>
             <td class="matrix-cell matrix-cell--model">
               <code>{{ modelAlias(modelId) || modelId }}</code>
               <code
@@ -81,7 +155,7 @@
                     'matrix-chip--on': rowProtocolOn(modelId, choice),
                     'matrix-chip--preferred': rowPreferred(modelId) === choice,
                   }"
-                  :disabled="props.actionLocked || rowProbing(modelId) || rowSaving(modelId)"
+                  :disabled="rowEditLocked(modelId)"
                   :aria-pressed="rowProtocolOn(modelId, choice) && rowPreferred(modelId) === choice"
                   @click="preferRowProtocol(modelId, choice)"
                 >
@@ -98,13 +172,14 @@
                 size="small"
                 :value="rowEnabled(modelId)"
                 :loading="rowSaving(modelId) && !rowProbing(modelId)"
-                :disabled="props.actionLocked || rowProbing(modelId) || !rowControllable(modelId)"
+                :disabled="rowEditLocked(modelId) || !rowControllable(modelId)"
                 :aria-label="`${modelId} ${t('允许路由')}`"
                 @update:value="(on: boolean) => toggleRow(modelId, on)"
               />
             </td>
-            <td v-if="probeSupported" class="matrix-cell matrix-cell--actions">
+            <td class="matrix-cell matrix-cell--actions">
               <n-popconfirm
+                v-if="probeSupported"
                 @positive-click="runRowProbe(modelId)"
               >
                 <template #trigger>
@@ -114,7 +189,7 @@
                         text
                         size="tiny"
                         :loading="rowProbing(modelId)"
-                        :disabled="props.actionLocked || rowSaving(modelId) || rowProbing(modelId)"
+                        :disabled="rowEditLocked(modelId)"
                         :aria-label="t('测试 {model}', { model: modelId })"
                       >
                         <template #icon>
@@ -127,6 +202,32 @@
                 </template>
                 {{ t("将按当前生效的协议发送一次最小真实请求测试连接，可能消耗额度；测试只作观测，不会开启路由。是否继续？") }}
               </n-popconfirm>
+              <n-popconfirm
+                :positive-text="t('删除')"
+                :disabled="rowActionLocked(modelId)"
+                @positive-click="removeRows([modelId])"
+              >
+                <template #trigger>
+                  <n-tooltip trigger="hover">
+                    <template #trigger>
+                      <n-button
+                        text
+                        size="tiny"
+                        type="error"
+                        :disabled="rowActionLocked(modelId)"
+                        :loading="props.removing"
+                        :aria-label="t('删除模型')"
+                      >
+                        <template #icon>
+                          <n-icon :component="DeleteOutlined" />
+                        </template>
+                      </n-button>
+                    </template>
+                    {{ t("删除模型") }}
+                  </n-tooltip>
+                </template>
+                {{ t("删除此模型？从本地目录移除后不再路由。下次刷新官方目录时，它可能再次出现并默认关闭。") }}
+              </n-popconfirm>
             </td>
           </tr>
         </tbody>
@@ -136,9 +237,11 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import {
   NButton,
+  NButtonGroup,
+  NCheckbox,
   NIcon,
   NInput,
   NPopconfirm,
@@ -146,7 +249,7 @@ import {
   NTag,
   NTooltip,
 } from "naive-ui";
-import { ApiOutlined } from "@vicons/antd";
+import { ApiOutlined, CloseOutlined, DeleteOutlined } from "@vicons/antd";
 import type {
   ContractScopeKind,
   ModelProtocolOverrideUpdate,
@@ -172,6 +275,7 @@ const props = defineProps<{
   pendingOverrideKeys?: Set<string>;
   probingModels?: Set<string>;
   actionLocked?: boolean;
+  removing?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -184,11 +288,14 @@ const emit = defineEmits<{
     },
   ): void;
   (e: "probe", payload: { modelId: string }): void;
+  (e: "remove", payload: { modelIds: string[] }): void;
   (e: "error", message: string): void;
 }>();
 
 const modelQuery = ref("");
 const enabledOnly = ref(false);
+const selecting = ref(false);
+const selectedIds = ref(new Set<string>());
 
 const allMatrixModels = computed(() => {
   return [...new Set(props.scope.catalog.models)].sort();
@@ -212,6 +319,19 @@ const matrixModels = computed(() => {
 const probeSupported = computed(() => (
   props.scope.card.protocol_probe && props.scope.provider_id !== CPA_PROVIDER_ID
 ));
+
+watch(() => props.scope.key, () => {
+  selecting.value = false;
+  selectedIds.value = new Set();
+  modelQuery.value = "";
+  enabledOnly.value = false;
+});
+
+watch(allMatrixModels, (models) => {
+  const known = new Set(models);
+  const next = new Set([...selectedIds.value].filter((modelId) => known.has(modelId)));
+  if (next.size !== selectedIds.value.size) selectedIds.value = next;
+});
 
 function modelContract(modelId: string): ProviderScopeView["models"][number] | undefined {
   return props.scope.models.find((model) => model.model_id === modelId);
@@ -276,7 +396,34 @@ function rowSaving(modelId: string): boolean {
   return rowKeys(modelId).some((key) => pending.has(key));
 }
 
-const canBatch = computed(() => matrixModels.value.length > 0);
+function rowActionLocked(modelId: string): boolean {
+  return Boolean(
+    props.actionLocked
+    || props.removing
+    || rowProbing(modelId)
+    || rowSaving(modelId),
+  );
+}
+
+function rowEditLocked(modelId: string): boolean {
+  return selecting.value || rowActionLocked(modelId);
+}
+
+const selectedCount = computed(() => selectedIds.value.size);
+const canMutateSelection = computed(() => (
+  selectedCount.value > 0
+  && !batchSaving.value
+  && !props.actionLocked
+  && !props.removing
+));
+const allVisibleSelected = computed(() => (
+  matrixModels.value.length > 0
+  && matrixModels.value.every((modelId) => selectedIds.value.has(modelId))
+));
+const someVisibleSelected = computed(() => {
+  if (allVisibleSelected.value) return false;
+  return matrixModels.value.some((modelId) => selectedIds.value.has(modelId));
+});
 const batchSaving = computed(() => {
   const pending = props.pendingOverrideKeys;
   if (!pending || pending.size === 0) return false;
@@ -307,9 +454,54 @@ function preferRowProtocol(modelId: string, protocol: ProviderProtocol): void {
   emitOverrides(buildPreferredProtocolOverrides(props.scope, modelId, protocol));
 }
 
+function selectedModelIds(): string[] {
+  return allMatrixModels.value.filter((modelId) => selectedIds.value.has(modelId));
+}
+
 function applyBatch(on: boolean): void {
-  if (!canBatch.value) return;
-  emitOverrides(buildModelToggleOverrides(props.scope, matrixModels.value, on));
+  const modelIds = selectedModelIds();
+  if (modelIds.length === 0) return;
+  emitOverrides(buildModelToggleOverrides(props.scope, modelIds, on));
+}
+
+function removeRows(modelIds: string[]): void {
+  const known = new Set(allMatrixModels.value);
+  const next = modelIds.filter((modelId) => known.has(modelId));
+  if (next.length === 0) return;
+  emit("remove", { modelIds: next });
+}
+
+function removeSelected(): void {
+  removeRows(selectedModelIds());
+}
+
+function enterSelectMode(): void {
+  selecting.value = true;
+}
+
+function exitSelectMode(): void {
+  selecting.value = false;
+  selectedIds.value = new Set();
+}
+
+function isSelected(modelId: string): boolean {
+  return selectedIds.value.has(modelId);
+}
+
+function setSelected(modelId: string, on: boolean): void {
+  const next = new Set(selectedIds.value);
+  if (on) next.add(modelId);
+  else next.delete(modelId);
+  selectedIds.value = next;
+}
+
+function toggleVisibleSelection(on: boolean): void {
+  const next = new Set(selectedIds.value);
+  for (const modelId of matrixModels.value) {
+    if (on) next.add(modelId);
+    else next.delete(modelId);
+  }
+  selectedIds.value = next;
 }
 
 function runRowProbe(modelId: string): void {
@@ -326,11 +518,19 @@ function runRowProbe(modelId: string): void {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  gap: 12px;
   margin-bottom: 8px;
 }
+.matrix-toolbar__filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
 .matrix-search {
-  max-width: 240px;
+  width: 240px;
+  max-width: 100%;
 }
 .matrix-enabled-filter {
   display: inline-flex;
@@ -344,9 +544,22 @@ function runRowProbe(modelId: string): void {
   color: var(--ocg-muted);
   font-size: var(--ocg-font-xs);
 }
-.matrix-toolbar__label {
+.matrix-toolbar__select {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 10px;
+  padding-left: 12px;
+  border-left: 1px solid var(--ocg-divider);
+}
+.matrix-select-count {
+  color: var(--ocg-ink);
+  font-size: var(--ocg-font-sm);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.matrix-select-count[data-empty="true"] {
   color: var(--ocg-muted);
-  font-size: var(--ocg-font-xs);
 }
 .matrix-scroll {
   overflow-x: auto;
@@ -357,6 +570,12 @@ function runRowProbe(modelId: string): void {
   border-collapse: collapse;
   font-size: var(--ocg-font-sm);
 }
+.matrix-table tbody tr.is-selected td {
+  background: color-mix(in srgb, var(--ocg-ink) 8%, var(--ocg-surface));
+}
+.matrix-table tbody tr.is-selected td:first-child {
+  box-shadow: inset 2px 0 0 var(--ocg-primary);
+}
 .matrix-cell {
   padding: 10px 12px;
   border-bottom: 1px solid var(--ocg-divider);
@@ -366,7 +585,8 @@ function runRowProbe(modelId: string): void {
 .matrix-cell--model-header,
 .matrix-cell--protocol-header,
 .matrix-cell--state-header,
-.matrix-cell--actions-header {
+.matrix-cell--actions-header,
+.matrix-cell--select-header {
   position: sticky;
   top: 0;
   z-index: 1;
@@ -374,6 +594,12 @@ function runRowProbe(modelId: string): void {
   font-size: var(--ocg-font-xs);
   font-weight: 600;
   background: var(--ocg-surface);
+}
+.matrix-cell--select,
+.matrix-cell--select-header {
+  width: 40px;
+  padding-left: 12px;
+  padding-right: 0;
 }
 .matrix-cell--model {
   min-width: 200px;
@@ -442,7 +668,7 @@ function runRowProbe(modelId: string): void {
   width: 88px;
 }
 .matrix-cell--actions {
-  width: 64px;
+  width: 88px;
   white-space: nowrap;
 }
 .matrix-switch {

@@ -1,9 +1,12 @@
+import type { Connection } from "../api/connections.ts";
 import type { ProviderCatalogEntry } from "../api/providers.ts";
 import type { MessageKey } from "../i18n/index.ts";
 import {
   splitPlanOptionsByOffering,
+  type PlanOfferingSplit,
   type PlanOption,
 } from "./account-plan-options.ts";
+import { connectionForLegacyProvider } from "./connections.ts";
 import {
   buildPlatformKindOptions,
   PLATFORM_KIND_OPTION_ID_PREFIX,
@@ -59,38 +62,102 @@ export interface ChooserGroup {
 }
 
 /**
- * User-visible chooser mode. "connections" lists existing connections the
- * user can add an account to (built-in families, saved user-defined
- * Providers, and the explicit Custom API entry); "services" browses new
- * services to create (vendor preset families plus platform kinds).
+ * User-visible chooser mode. "connections" lists the same V4 connection
+ * projection as Providers: built-in families that still have at least one
+ * account, plus saved user-defined Providers (with or without a Key).
+ * "services" browses new services: unused built-in templates (including
+ * Custom API), vendor preset families, and platform kinds.
  */
 export type ChooserMode = "connections" | "services";
 
 /**
- * Mode an option id belongs to. Preset and platform options are always new
- * services; plan-family options (built-in or saved user-defined Providers)
- * are existing connections.
+ * Built-in Custom API is always a new-connection template. Other built-ins
+ * are existing connections only while the V4 projection still lists them.
+ * Saved user-defined Providers stay on the connections side from the catalog
+ * even before the projection arrives, matching Providers (definition rows
+ * remain after the last Key is removed).
  */
-export function chooserModeForOptionId(optionId: string): ChooserMode {
-  return optionId.startsWith("family:")
+function isExistingConnectionOption(
+  option: PlanOption,
+  connections: readonly Connection[] | null | undefined,
+): boolean {
+  if (option.source === "user-defined") return true;
+  if (option.plan.kind === "custom") return false;
+  if (!connections) return false;
+  return Boolean(connectionForLegacyProvider(connections, option.plan.provider_id));
+}
+
+function partitionPlanOptions(
+  catalog: readonly ProviderCatalogEntry[] | null | undefined,
+  dynamicPresetIds: ReadonlyMap<string, string | null> | null | undefined,
+  connections: readonly Connection[] | null | undefined,
+): { existing: PlanOfferingSplit; unused: PlanOfferingSplit } {
+  const split = splitPlanOptionsByOffering(catalog, dynamicPresetIds);
+  const pick = (options: readonly PlanOption[], existing: boolean): PlanOption[] => (
+    options.filter((option) => isExistingConnectionOption(option, connections) === existing)
+  );
+  return {
+    existing: { plan: pick(split.plan, true), api: pick(split.api, true) },
+    unused: { plan: pick(split.plan, false), api: pick(split.api, false) },
+  };
+}
+
+function chooserGroupsFrom(
+  plan: readonly ChooserOption[],
+  api: readonly ChooserOption[],
+): ChooserGroup[] {
+  const groups: ChooserGroup[] = [];
+  if (plan.length > 0) groups.push({ id: "plan", label: "Plan", options: [...plan] });
+  if (api.length > 0) groups.push({ id: "api", label: "API", options: [...api] });
+  return groups;
+}
+
+/**
+ * Mode an option id belongs to. Preset and platform options are always new
+ * services. Built-in plan ids follow the V4 projection: a family with at
+ * least one account stays on existing connections; an unused template
+ * (including Custom API) opens the new-service tab.
+ */
+export function chooserModeForOptionId(
+  optionId: string,
+  catalog?: readonly ProviderCatalogEntry[] | null,
+  dynamicPresetIds?: ReadonlyMap<string, string | null> | null,
+  connections?: readonly Connection[] | null,
+): ChooserMode {
+  if (
+    optionId.startsWith("family:")
     || optionId.startsWith("preset:")
     || optionId.startsWith(PLATFORM_KIND_OPTION_ID_PREFIX)
-    ? "services"
-    : "connections";
+  ) {
+    return "services";
+  }
+  const existing = chooserUniverse(catalog, dynamicPresetIds, "connections", connections);
+  return existing.some((option) => option.optionId === optionId) ? "connections" : "services";
+}
+
+/** Default tab: existing connections when any remain, otherwise new services. */
+export function defaultChooserMode(
+  catalog: readonly ProviderCatalogEntry[] | null | undefined,
+  dynamicPresetIds: ReadonlyMap<string, string | null> | null | undefined,
+  connections: readonly Connection[] | null | undefined,
+): ChooserMode {
+  return chooserUniverse(catalog, dynamicPresetIds, "connections", connections).length > 0
+    ? "connections"
+    : "services";
 }
 
 /**
  * Family option ids carry the offering so the same vendor family can appear
  * once in the Plan group and once in the API group without an id collision.
  */
-export function presetFamilyOptionId(
+function presetFamilyOptionId(
   family: ProviderFamily,
   offering: ProviderPresetOffering,
 ): string {
   return `family:${offering}:${family.id}`;
 }
 
-export function toPresetChooserOption(
+function toPresetChooserOption(
   preset: ProviderPreset,
   offering: ProviderPresetOffering,
   family: ProviderFamily = familyOf(preset),
@@ -128,20 +195,14 @@ function planBrandIconKey(planId: string): string | null {
   return familyId ? `family:${familyId}` : null;
 }
 
-export function chooserOptionKind(option: ChooserOption): "plan" | "family" | "preset" | "platform" {
-  if ("plan" in option) return "plan";
-  if ("family" in option) return "family";
-  if ("preset" in option) return "preset";
-  return "platform";
-}
-
 /**
- * Visible groups for the rail in the given mode. "connections": saved
- * connections only — built-in Plan families head the Plan group, Custom API
- * heads the API group, and account-owned user-defined Providers follow their
- * persisted preset's offering via `dynamicPresetIds`. "services": new-service
- * browsing — vendor preset families grouped by offering, with platform kinds
- * trailing the API group. The preset search query filters every visible
+ * Visible groups for the rail in the given mode. "connections": the V4
+ * connection projection only — built-in families that still have an account
+ * head the Plan group, and saved user-defined Providers follow their
+ * persisted preset's offering via `dynamicPresetIds`. "services": unused
+ * built-in templates (Custom API included) plus vendor preset families
+ * grouped by offering, with platform kinds trailing the API group. Empty
+ * offering groups are omitted. The preset search query filters every visible
  * option in the active mode, including plans and platform kinds. When the
  * query is empty, presets in each offering group are collapsed into
  * per-family options so the rail shows vendors instead of every variant;
@@ -155,24 +216,17 @@ export function buildChooserGroups(
   dynamicPresetIds: ReadonlyMap<string, string | null> | null | undefined,
   query: string,
   mode: ChooserMode,
+  connections?: readonly Connection[] | null,
 ): ChooserGroup[] {
-  const split = splitPlanOptionsByOffering(catalog, dynamicPresetIds);
+  const { existing, unused } = partitionPlanOptions(catalog, dynamicPresetIds, connections);
   const normalized = query.trim().toLocaleLowerCase();
   const matches = (label: string) => label.toLocaleLowerCase().includes(normalized);
 
   if (mode === "connections") {
-    return [
-      {
-        id: "plan",
-        label: "Plan",
-        options: split.plan.filter((option) => matches(option.label)),
-      },
-      {
-        id: "api",
-        label: "API",
-        options: split.api.filter((option) => matches(option.label)),
-      },
-    ];
+    return chooserGroupsFrom(
+      existing.plan.filter((option) => matches(option.label)),
+      existing.api.filter((option) => matches(option.label)),
+    );
   }
 
   let planPresetOptions: ChooserOption[];
@@ -193,47 +247,34 @@ export function buildChooserGroups(
       .map((group) => toPresetFamilyOption(group.family, group.presets, "api"));
   }
 
-  return [
-    {
-      id: "plan",
-      label: "Plan",
-      options: planPresetOptions,
-    },
-    {
-      id: "api",
-      label: "API",
-      options: [
-        ...apiPresetOptions,
-        ...buildPlatformKindOptions().filter((option) => matches(option.label)),
-      ],
-    },
-  ];
+  return chooserGroupsFrom(
+    [
+      ...unused.plan.filter((option) => matches(option.label)),
+      ...planPresetOptions,
+    ],
+    [
+      ...unused.api.filter((option) => matches(option.label)),
+      ...apiPresetOptions,
+      ...buildPlatformKindOptions().filter((option) => matches(option.label)),
+    ],
+  );
 }
 
 /**
  * The unfiltered option universe for one mode. Selection validity and the
  * default selection use this full list so typing in the preset search never
  * blanks the selected detail. The services universe holds the query-empty
- * shape (family options), so picking a flattened search row resolves back to
- * its parent family and stays valid when the query is cleared.
+ * shape (unused built-in templates plus family options), so picking a
+ * flattened search row resolves back to its parent family and stays valid
+ * when the query is cleared.
  */
 export function chooserUniverse(
   catalog: readonly ProviderCatalogEntry[] | null | undefined,
   dynamicPresetIds: ReadonlyMap<string, string | null> | null | undefined,
   mode: ChooserMode,
+  connections?: readonly Connection[] | null,
 ): ChooserOption[] {
-  const split = splitPlanOptionsByOffering(catalog, dynamicPresetIds);
-  if (mode === "connections") {
-    return [...split.plan, ...split.api];
-  }
-  const offeringPresets = groupProviderPresetsByOffering(PROVIDER_PRESETS);
-  const familyOptions: ChooserOption[] = [
-    ...groupPresetsByFamily(offeringPresets.plan)
-      .map((group) => toPresetFamilyOption(group.family, group.presets, "plan")),
-    ...groupPresetsByFamily(offeringPresets.api)
-      .map((group) => toPresetFamilyOption(group.family, group.presets, "api")),
-  ];
-  return [...familyOptions, ...buildPlatformKindOptions()];
+  return visibleChooserOptions(buildChooserGroups(catalog, dynamicPresetIds, "", mode, connections));
 }
 
 /** Visible (filtered) options in rail order; arrow-key navigation follows it. */

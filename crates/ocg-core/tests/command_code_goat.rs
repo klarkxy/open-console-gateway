@@ -8,30 +8,13 @@ use ocg_core::gateway::protocol::{
     ApiFormat, command_code_model_protocol, command_code_supports_upstream,
     command_code_upstream_path, opencode_supports_upstream,
 };
-use ocg_core::gateway::provider_adapter::{
-    command_code_goat_official_url, command_code_goat_transport_spec,
-};
 use ocg_core::provider::{
-    COMMAND_CODE_GOAT_BASE_URL, COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS,
-    COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM, COMMAND_CODE_PROVIDER_ID,
+    COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS, COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
+    COMMAND_CODE_PROVIDER_ID,
 };
 
 #[test]
-fn official_base_path_auth_and_public_catalog_contract_stay_fixed() {
-    let spec = command_code_goat_transport_spec();
-    assert_eq!(spec.base_url, COMMAND_CODE_GOAT_BASE_URL);
-    assert_eq!(spec.host, "api.commandcode.ai");
-    assert_eq!(spec.chat_completions_path, "/chat/completions");
-    assert_eq!(spec.auth_scheme.as_str(), "bearer");
-    assert!(!spec.follow_redirects);
-    assert_eq!(spec.zdr_header_name, None);
-    assert!(spec.public_catalog_refresh);
-    assert_eq!(
-        command_code_goat_official_url(ApiFormat::ChatCompletions).unwrap(),
-        "https://api.commandcode.ai/provider/v1/chat/completions"
-    );
-    assert!(command_code_goat_official_url(ApiFormat::Responses).is_err());
-
+fn goat_plan_is_routable_and_verification_not_applicable() {
     let plan = ocg_core::provider::builtin_provider(COMMAND_CODE_PROVIDER_ID).unwrap();
     assert!(plan.routable);
     assert_eq!(plan.verification_runtime_availability, "not_applicable");
@@ -79,7 +62,10 @@ fn slash_raw_pin_is_chat_only_and_not_an_opencode_protocol_row() {
                     .all(|mapping| mapping.is_opencode_go() || mapping.is_zen_free())
             );
             assert!(mappings.iter().any(|mapping| mapping.is_opencode_go()));
-            assert!(mappings.iter().any(|mapping| mapping.is_zen_free()));
+            assert!(
+                !mappings.iter().any(|mapping| mapping.is_zen_free()),
+                "Zen routes require an explicitly refreshed catalog"
+            );
             assert!(
                 mappings
                     .iter()

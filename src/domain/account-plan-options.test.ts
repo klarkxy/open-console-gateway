@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ProviderCatalogEntry } from "../api/providers.ts";
-import { buildPlanChooserGroups, buildPlanOptions, splitPlanOptionsByOffering } from "./account-plan-options.ts";
-import { providerScopeOffering } from "./plans.ts";
+import { buildPlanOptions, splitPlanOptionsByOffering } from "./account-plan-options.ts";
 import { PROVIDER_PRESETS, providerPresetOffering } from "./provider-presets.ts";
 
 function catalogEntry(
@@ -49,7 +48,7 @@ test("empty or failed catalogs keep the explicit OpenCode Go import option", () 
   }
 });
 
-test("add-account chooser omits singleton Zen Free and groups remaining families", () => {
+test("add-account chooser omits singleton Zen Free and lists remaining families", () => {
   const catalog = [
     catalogEntry("opencode", {
       display_name: "OpenCode Go Catalog",
@@ -68,14 +67,6 @@ test("add-account chooser omits singleton Zen Free and groups remaining families
     "ollama-cloud",
     "custom-endpoint",
   ]);
-  assert.deepEqual(
-    buildPlanChooserGroups(catalog).map((group) => [group.id, group.options.map(({ plan }) => plan.id)]),
-    [
-      ["available", ["opencode-go", "custom-endpoint"]],
-      ["draft", ["command-code-goat"]],
-      ["unavailable", ["minimax-cn", "kimi-cn", "ollama-cloud"]],
-    ],
-  );
 });
 
 test("user-defined Providers appear in Add Account and none-auth stays a singleton", () => {
@@ -139,15 +130,6 @@ test("offering split puts built-in subscriptions in Plan and Custom API first in
   assert.equal(goat.disabledReason, "该方案暂不可用");
 });
 
-test("scope offering: only explicit paid families are Plan; free, custom, unknown are API", () => {
-  for (const paid of ["opencode", "command-code", "minimax", "kimi", "ollama"]) {
-    assert.equal(providerScopeOffering(paid), "plan");
-  }
-  assert.equal(providerScopeOffering("opencode-zen-free"), "api");
-  assert.equal(providerScopeOffering("custom"), "api");
-  assert.equal(providerScopeOffering("never-heard-of-it"), "api");
-});
-
 test("saved dynamic Providers follow their persisted preset offering; Custom API stays first", () => {
   const planPreset = PROVIDER_PRESETS.find((preset) => providerPresetOffering(preset) === "plan");
   assert.ok(planPreset, "primary-populated data must contain plan-offering presets");
@@ -186,22 +168,25 @@ test("saved dynamic Providers follow their persisted preset offering; Custom API
 });
 
 test("GOAT follows the catalog without inventing a Key-verification gate", () => {
-  const routable = buildPlanChooserGroups([
+  const routable = buildPlanOptions([
     catalogEntry("command-code", { routable: true, creation_availability: "available" }),
   ]);
-  const available = routable.find((group) => group.id === "available")!;
-  const goat = available.options.find(({ plan }) => plan.id === "command-code-goat")!;
+  const goat = routable.find(({ plan }) => plan.id === "command-code-goat")!;
   assert.equal(goat.disabled, false);
   assert.equal(goat.creationHint, "");
+  assert.equal(
+    splitPlanOptionsByOffering([
+      catalogEntry("command-code", { routable: true, creation_availability: "available" }),
+    ]).plan.some(({ plan }) => plan.id === "command-code-goat"),
+    true,
+  );
 
-  const draft = buildPlanChooserGroups([
+  const unroutable = buildPlanOptions([
     catalogEntry("command-code", { routable: false, creation_availability: "available" }),
   ]);
-  const draftGoat = draft
-    .find((group) => group.id === "draft")!
-    .options.find(({ plan }) => plan.id === "command-code-goat")!;
-  assert.equal(draftGoat.disabled, false);
-  assert.equal(draftGoat.creationHint, "");
+  const unroutableGoat = unroutable.find(({ plan }) => plan.id === "command-code-goat")!;
+  assert.equal(unroutableGoat.disabled, false);
+  assert.equal(unroutableGoat.creationHint, "");
 });
 
 test("catalog gaps use local reasons and do not leak backend English", () => {

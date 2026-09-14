@@ -1,8 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  buildOnboardingCommitRequest,
-  buildProviderDefinitionCreateBody,
   buildProviderDefinitionUpdateBody,
   completeDynamicTestTargets,
   dynamicAuthRequiresKey,
@@ -74,60 +72,7 @@ test("mapping validation requires one unique public model and allows repeated up
   );
 });
 
-test("onboarding commit maps a create draft onto the V4 payload", () => {
-  const draft = emptyProviderDefinitionDraft();
-  draft.name = "Lab";
-  draft.endpoint_url = "http://127.0.0.1:9";
-  draft.models = [{ public_model: "lab-opus", upstream_model: "vendor/opus" }];
-  draft.account_name = "Lab key";
-  draft.notes = "note";
-  const operationId = "11111111-1111-4111-8111-111111111111";
-  const omitted = buildOnboardingCommitRequest(draft, operationId);
-  assert.equal(omitted.operationId, operationId);
-  assert.deepEqual(omitted.connection, {
-    kind: "new",
-    templateId: "custom-http",
-    name: "Lab",
-    endpointUrl: "http://127.0.0.1:9",
-    upstreamProtocol: "chat_completions",
-    authKind: "bearer",
-  });
-  assert.equal(omitted.authorization, undefined);
-  draft.key = "sk-lab";
-  const keyed = buildOnboardingCommitRequest(draft, operationId);
-  assert.deepEqual(keyed.authorization, {
-    kind: "api_key",
-    secretInput: "sk-lab",
-    accountLabel: "Lab key",
-    notes: "note",
-  });
-  draft.auth_kind = "none";
-  draft.key = "should-not-send";
-  draft.preset_id = "openai";
-  const noneBody = buildOnboardingCommitRequest(draft, operationId);
-  assert.deepEqual(noneBody.authorization, { kind: "none" });
-  assert.equal(noneBody.connection.kind === "new" && noneBody.connection.templateId, "openai");
-  draft.preset_id = "";
-  draft.models = [
-    { public_model: "inherit-row", upstream_model: "vendor/a" },
-    {
-      public_model: "override-row",
-      upstream_model: "vendor/b",
-      upstream_override: { protocol: "messages", endpoint_url: "https://up.example.com/v1/messages" },
-    },
-  ];
-  const withOverride = buildOnboardingCommitRequest(draft, operationId);
-  assert.deepEqual(withOverride.targets, [
-    { publicModel: "inherit-row", upstreamModel: "vendor/a", upstreamOverride: null },
-    {
-      publicModel: "override-row",
-      upstreamModel: "vendor/b",
-      upstreamOverride: { protocol: "messages", endpointUrl: "https://up.example.com/v1/messages" },
-    },
-  ]);
-});
-
-test("create payload omits a Key unless one is supplied and never keeps blank mappings", () => {
+test("create validation requires a Key only when asked; none-auth is not keyed", () => {
   const draft = emptyProviderDefinitionDraft();
   draft.name = "Lab";
   draft.endpoint_url = "http://127.0.0.1:9";
@@ -137,16 +82,13 @@ test("create payload omits a Key unless one is supplied and never keeps blank ma
     validateProviderDefinitionDraft(draft, { mode: "create", requireKey: true }),
     "missing_key",
   );
-  const body = buildProviderDefinitionCreateBody(draft);
-  assert.equal(body.key, undefined);
-  assert.equal(body.authKind, "bearer");
   draft.key = "sk-lab";
-  assert.equal(buildProviderDefinitionCreateBody(draft).key, "sk-lab");
   assert.equal(validateProviderDefinitionDraft(draft, { mode: "create", requireKey: true }), null);
   draft.auth_kind = "none";
   draft.key = "should-not-send";
-  const noneBody = buildProviderDefinitionCreateBody(draft);
-  assert.equal(noneBody.key, undefined);
+  assert.equal(validateProviderDefinitionDraft(draft, { mode: "create" }), null);
+  draft.key = "";
+  assert.equal(validateProviderDefinitionDraft(draft, { mode: "create" }), null);
   assert.ok(dynamicAuthRequiresKey("bearer"));
   assert.equal(dynamicAuthRequiresKey("none"), false);
 });
@@ -166,7 +108,7 @@ test("edit from none to keyed requires an explicit replacement Key", () => {
   assert.equal(body.key, "sk-now");
 });
 
-test("ordinary keyed edit omits a discover/test Key while create still sends it", () => {
+test("ordinary keyed edit omits a discover/test Key", () => {
   const draft = emptyProviderDefinitionDraft();
   draft.name = "Lab";
   draft.endpoint_url = "http://127.0.0.1:9";
@@ -176,26 +118,15 @@ test("ordinary keyed edit omits a discover/test Key while create still sends it"
   const update = buildProviderDefinitionUpdateBody(draft, "bearer");
   assert.equal("key" in update, false);
   assert.equal(update.key, undefined);
-  const created = buildProviderDefinitionCreateBody(draft);
-  assert.equal(created.key, "sk-probe");
 });
 
-test("sanitization drops the write-only Key from draft and response-shaped records", () => {
+test("sanitization drops the write-only Key from a draft and keeps the draft name", () => {
   const draft = emptyProviderDefinitionDraft();
   draft.key = "sk-secret";
-  assert.equal(sanitizeProviderDefinitionDraft(draft).key, "");
-});
-
-test("save does not require discovery or a prior model test", () => {
-  const draft = emptyProviderDefinitionDraft();
   draft.name = "Lab";
-  draft.endpoint_url = "http://127.0.0.1:9";
-  draft.auth_kind = "none";
-  draft.models = [{ public_model: "lab-opus", upstream_model: "vendor/opus" }];
-  assert.equal(validateProviderDefinitionDraft(draft, { mode: "create" }), null);
-  const body = buildProviderDefinitionCreateBody(draft);
-  assert.equal(body.key, undefined);
-  assert.equal(body.models.length, 1);
+  const sanitized = sanitizeProviderDefinitionDraft(draft);
+  assert.equal(sanitized.key, "");
+  assert.equal(sanitized.name, "Lab");
 });
 
 test("paid tests and deletes require confirmation; Enter submits save", () => {
@@ -296,7 +227,7 @@ test("an override requires an explicit well-formed endpoint and never guesses si
   );
 });
 
-test("create and edit bodies roundtrip the override; null on edit clears it", () => {
+test("edit body roundtrips the override; null on edit clears it", () => {
   const draft = emptyProviderDefinitionDraft();
   draft.name = "Lab";
   draft.endpoint_url = "https://api.example.com/v1/responses";
@@ -310,8 +241,10 @@ test("create and edit bodies roundtrip the override; null on edit clears it", ()
       upstream_override: { protocol: "messages", endpoint_url: "https://up.example.com/v1/messages" },
     },
   ];
-  const created = buildProviderDefinitionCreateBody(draft);
-  assert.deepEqual(created.models, [
+  // Edit sends the full model list: a preserved override rides through,
+  // and null explicitly returns the row to the supplier default.
+  const updated = buildProviderDefinitionUpdateBody(draft, "none");
+  assert.deepEqual(updated.models, [
     { publicModel: "inherit-row", upstreamModel: "vendor/a", upstreamOverride: null },
     {
       publicModel: "override-row",
@@ -319,10 +252,6 @@ test("create and edit bodies roundtrip the override; null on edit clears it", ()
       upstreamOverride: { protocol: "messages", endpointUrl: "https://up.example.com/v1/messages" },
     },
   ]);
-  // Edit sends the same full model list: a preserved override rides through,
-  // and null explicitly returns the row to the supplier default.
-  const updated = buildProviderDefinitionUpdateBody(draft, "none");
-  assert.deepEqual(updated.models, created.models);
   const cleared = buildProviderDefinitionUpdateBody({
     ...draft,
     models: draft.models.map((model) => ({ ...model, upstream_override: null })),

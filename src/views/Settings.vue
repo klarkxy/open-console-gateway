@@ -9,9 +9,6 @@
       <n-form :model="config" label-placement="top" :show-feedback="false">
         <section class="settings-subsection proxy-settings" aria-labelledby="proxy-title">
           <h3 id="proxy-title">{{ t("出站代理") }}</h3>
-          <p class="field-caption routing-intro">
-            {{ proxyIntro }}
-          </p>
           <n-radio-group
             v-model:value="config.proxy_mode"
             name="proxy-mode"
@@ -183,9 +180,6 @@
         </section>
         <section class="settings-subsection" aria-labelledby="routing-title">
           <h3 id="routing-title">{{ t("账号路由") }}</h3>
-          <p class="field-caption routing-intro">
-            {{ t("基础路由方案同一时刻只能选一个；对话粘性是可叠加开关，不会替换基础方案。") }}
-          </p>
           <n-radio-group
             v-model:value="config.routing_mode"
             name="routing-mode"
@@ -207,8 +201,6 @@
               </n-radio>
               <div :id="`routing-option-desc-${option.value}`">
                 <p class="field-caption">{{ t(option.behavior) }}</p>
-                <p class="field-caption">{{ t(option.pros) }}</p>
-                <p class="field-caption">{{ t(option.cons) }}</p>
               </div>
             </div>
           </n-radio-group>
@@ -225,7 +217,7 @@
               </n-switch>
             </div>
             <p class="field-caption">
-              {{ t("优先使用请求头 X-OCG-Conversation-Id；未提供时用 Prompt 指纹启发式（system/tools/首条 user）。无法生成会话 key 时回退基础路由。指纹可能把相似会话绑到同一账号。") }}
+              {{ t("同一对话尽量走同一账号。可带 X-OCG-Conversation-Id，否则用 Prompt 指纹。") }}
             </p>
           </div>
         </section>
@@ -244,7 +236,6 @@
                 <template #suffix>{{ t("秒") }}</template>
               <template #minus-icon><span aria-hidden="true">−</span><span class="sr-only">{{ t('减少{field}', { field: t('连接超时（秒）') }) }}</span></template>
               <template #add-icon><span aria-hidden="true">+</span><span class="sr-only">{{ t('增加{field}', { field: t('连接超时（秒）') }) }}</span></template></n-input-number>
-              <span class="field-caption">{{ t("建立上游连接的初始超时（秒）") }}</span>
             </div>
           </n-form-item>
           <n-form-item :label="t('非流式总超时')">
@@ -260,7 +251,6 @@
                 <template #suffix>{{ t("秒") }}</template>
               <template #minus-icon><span aria-hidden="true">−</span><span class="sr-only">{{ t('减少{field}', { field: t('非流式总超时（秒）') }) }}</span></template>
               <template #add-icon><span aria-hidden="true">+</span><span class="sr-only">{{ t('增加{field}', { field: t('非流式总超时（秒）') }) }}</span></template></n-input-number>
-              <span class="field-caption">{{ t("非流式请求从发起到完整响应的总超时（秒）") }}</span>
             </div>
           </n-form-item>
           <n-form-item :label="t('流式空闲超时')">
@@ -276,7 +266,6 @@
                 <template #suffix>{{ t("秒") }}</template>
               <template #minus-icon><span aria-hidden="true">−</span><span class="sr-only">{{ t('减少{field}', { field: t('流式空闲超时（秒）') }) }}</span></template>
               <template #add-icon><span aria-hidden="true">+</span><span class="sr-only">{{ t('增加{field}', { field: t('流式空闲超时（秒）') }) }}</span></template></n-input-number>
-              <span class="field-caption">{{ t("流式响应两次数据块之间的最大空闲时间（秒）") }}</span>
             </div>
           </n-form-item>
         </section>
@@ -300,7 +289,6 @@
         <div class="settings-head">
           <div>
             <h2 id="appearance-title"><n-icon class="section-icon" :component="BgColorsOutlined" aria-hidden="true" /> {{ t("外观") }}</h2>
-            <p>{{ t("当前：{theme}", { theme: themeLabel }) }}</p>
           </div>
         </div>
         <div class="theme-grid" role="group" :aria-label="t('选择主题')">
@@ -491,7 +479,7 @@ import {
   writeUpdateTarget,
 } from "./settings-update-state";
 
-const { themeName, resolvedTheme } = defineProps<{
+const { themeName } = defineProps<{
   themeName: ThemeName;
   resolvedTheme: ResolvedTheme;
 }>();
@@ -582,12 +570,6 @@ const routingModeOptions: Array<{
   },
 ];
 
-const themeLabel = computed(() => {
-  const selected = t((THEME_OPTIONS.find((option) => option.value === themeName)?.label ?? "默认") as MessageKey);
-  if (themeName !== "default") return selected;
-  const resolved = t((THEME_OPTIONS.find((option) => option.value === resolvedTheme)?.label ?? "皓白") as MessageKey);
-  return t("默认 · {theme}", { theme: resolved });
-});
 const proxyModeHelp = computed(() => {
   const help: Record<ProxyMode, MessageKey> = {
     auto: "自动读取 HTTP_PROXY、HTTPS_PROXY、ALL_PROXY、NO_PROXY；Windows 也会读取系统代理，未配置时直连。",
@@ -597,12 +579,6 @@ const proxyModeHelp = computed(() => {
   };
   return t(help[config.value.proxy_mode]);
 });
-
-const proxyIntro = computed(() => (
-  config.value.proxy_mode === "list"
-    ? t("名单模式按模型分流聊天转发；非聊天出站（账号测试、用量、价格、升级检查）走方向默认段。")
-    : t("统一用于模型转发、账号测试、用量与价格刷新等 OpenCode 出站请求。")
-));
 
 const proxyTestHelp = computed(() => (
   config.value.proxy_mode === "list"

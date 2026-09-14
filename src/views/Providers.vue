@@ -1,9 +1,5 @@
 <template>
   <div class="providers-page">
-    <header class="providers-header">
-      <h1>{{ t("供应商") }}</h1>
-    </header>
-
     <div
       v-if="initialLoading"
       class="providers-state"
@@ -311,9 +307,6 @@
                     <span v-if="activeScope.catalog.refreshed_at">
                       {{ t("刷新时间") }} · {{ formatDateTime(activeScope.catalog.refreshed_at) }}
                     </span>
-                    <span v-if="activeScope.static_protocol_snapshot_date">
-                      {{ t("官方协议基线 {date}；未列出的协议默认关闭", { date: activeScope.static_protocol_snapshot_date }) }}
-                    </span>
                   </div>
                   <div class="providers-catalog-actions">
                     <n-button
@@ -326,22 +319,6 @@
                     >
                       {{ catalogRefreshing ? t("正在刷新模型目录…") : t("刷新模型目录") }}
                     </n-button>
-                    <n-popconfirm
-                      v-if="staticProtocolResetVisible"
-                      @positive-click="resetStaticProtocols"
-                    >
-                      <template #trigger>
-                        <n-button
-                          secondary
-                          size="small"
-                          :loading="staticProtocolResetting"
-                          :disabled="actionLocked"
-                        >
-                          {{ t("恢复官方协议基线") }}
-                        </n-button>
-                      </template>
-                      {{ staticProtocolResetConfirmation }}
-                    </n-popconfirm>
                   </div>
                 </div>
                 <n-alert
@@ -379,13 +356,16 @@
                   :title="t('连接测试失败: {error}', { error: probeError })"
                 />
                 <ProviderModelMatrix
+                  :key="activeScope.key"
                   :scope="activeScope"
                   :optimistic-overrides="optimisticOverrides"
                   :pending-override-keys="pendingOverrideKeys"
                   :probing-models="probingModels"
                   :action-locked="matrixActionLocked"
+                  :removing="catalogRemoving"
                   @update:overrides="updateOverrides"
                   @probe="runModelProbe"
+                  @remove="removeCatalogModels"
                   @error="matrixError = $event"
                 />
               </template>
@@ -620,7 +600,7 @@ const definitions = ref<Map<string, ProviderDefinitionView>>(new Map());
 const definitionLoading = ref(false);
 const definitionError = ref("");
 const catalogRefreshing = ref(false);
-const staticProtocolResetting = ref(false);
+const catalogRemoving = ref(false);
 const catalogRefreshError = ref("");
 const matrixError = ref("");
 const probeError = ref("");
@@ -718,20 +698,19 @@ const initialLoading = computed(() => (
 ));
 const actionLocked = computed(() => (
   catalogRefreshing.value
-  || staticProtocolResetting.value
+  || catalogRemoving.value
   || probingModels.value.size > 0
   || pendingOverrideKeys.value.size > 0
 ));
 const matrixActionLocked = computed(() => (
   catalogRefreshing.value
-  || staticProtocolResetting.value
+  || catalogRemoving.value
   || probingModels.value.size > 0
 ));
 
 function originLabel(origin: ProviderCatalogEntry["origin"]): string {
-  if (origin === "builtin") return t("内置");
-  if (origin === "preset") return t("官方预设");
-  return t("自定义");
+  if (origin === "custom") return t("自定义");
+  return t("供应商预设");
 }
 
 function statusLabelText(label: string | null): string {
@@ -800,15 +779,6 @@ const mobileSelectOptions = computed<SelectOption[]>(() => {
 const catalogRefreshVisible = computed(() => {
   const scope = activeScope.value;
   return Boolean(scope && catalogRefreshSupported(scope));
-});
-const staticProtocolResetVisible = computed(() => (
-  Boolean(activeScope.value?.static_protocol_snapshot_date)
-));
-const staticProtocolResetConfirmation = computed(() => {
-  const scope = activeScope.value;
-  return t("不会请求上游；将清除手动开关和探测判断，保留当前目录，恢复 {date} 开发时官方协议基线，并关闭基线中没有的协议。是否继续？", {
-    date: scope?.static_protocol_snapshot_date ?? "",
-  });
 });
 const safeSourceUrl = computed(() => {
   const url = activeScope.value?.catalog.source_url ?? "";
@@ -1149,6 +1119,34 @@ async function deleteSelected(): Promise<void> {
   }
 }
 
+async function removeCatalogModels(payload: { modelIds: string[] }) {
+  const scope = activeScope.value;
+  if (!scope || catalogRemoving.value || payload.modelIds.length === 0) return;
+  catalogRemoving.value = true;
+  matrixError.value = "";
+  try {
+    const refreshed = await providersStore.removeContractCatalogModels(
+      scope.scope_kind,
+      scope.scope_id,
+      payload.modelIds,
+    );
+    contracts.value = normalizeProviderContractsResponse(refreshed);
+    actionLive.value = t("已从目录删除模型");
+    message.success(t("已从目录删除模型"));
+  } catch (error) {
+    if (error instanceof DashboardRequestError && error.status === 409) {
+      await loadAll({ retain: true });
+      actionLive.value = t("供应商设置已在其他位置更新，已重新加载，请重试");
+      message.warning(t("供应商设置已在其他位置更新，已重新加载，请重试"));
+    } else {
+      matrixError.value = dashboardErrorDetail(error);
+      message.error(t("删除模型失败: {error}", { error: matrixError.value }));
+    }
+  } finally {
+    catalogRemoving.value = false;
+  }
+}
+
 async function refreshCatalog() {
   const scope = activeScope.value;
   if (!scope || !catalogRefreshVisible.value || catalogRefreshing.value) return;
@@ -1165,26 +1163,6 @@ async function refreshCatalog() {
     message.error(t("刷新模型目录失败: {error}", { error: catalogRefreshError.value }));
   } finally {
     catalogRefreshing.value = false;
-  }
-}
-
-async function resetStaticProtocols() {
-  const scope = activeScope.value;
-  if (!scope || !staticProtocolResetVisible.value || actionLocked.value) return;
-  staticProtocolResetting.value = true;
-  matrixError.value = "";
-  probeError.value = "";
-  try {
-    const response = await providersStore.resetStaticModelProtocols(scope.scope_id);
-    contracts.value = normalizeProviderContractsResponse(response);
-    applyFromQuery();
-    actionLive.value = t("已恢复官方协议基线");
-    message.success(t("已恢复官方协议基线"));
-  } catch (error) {
-    matrixError.value = dashboardErrorDetail(error);
-    message.error(t("恢复官方协议基线失败: {error}", { error: matrixError.value }));
-  } finally {
-    staticProtocolResetting.value = false;
   }
 }
 
@@ -1434,18 +1412,6 @@ onUnmounted(() => {
   max-width: 1440px;
   margin: 0 auto;
   overflow: hidden;
-}
-.providers-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 16px;
-}
-.providers-header h1 {
-  margin: 0;
-  color: var(--ocg-ink);
-  font: 700 var(--ocg-font-xl)/1.3 "Bahnschrift", "Segoe UI Variable Display", sans-serif;
 }
 .providers-note {
   margin: 0 0 12px;

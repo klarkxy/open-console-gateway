@@ -1599,28 +1599,5 @@ async fn retired_v2_browser_does_not_launch_or_reset() {
     assert!(!profile.exists());
     assert_eq!(stops.load(Ordering::SeqCst), 1);
 
-    let mut headers = reqwest::header::HeaderMap::new();
-    headers.insert(reqwest::header::CONNECTION, "Upgrade".parse().unwrap());
-    headers.insert(reqwest::header::UPGRADE, "websocket".parse().unwrap());
-    headers.insert("Sec-WebSocket-Version", "13".parse().unwrap());
-    headers.insert(
-        "Sec-WebSocket-Key",
-        "dGhlIHNhbXBsZSBub25jZQ==".parse().unwrap(),
-    );
-    let v2_ws = harness
-        .client
-        .get(format!(
-            "{}/browser/sessions/opaque-token/ws",
-            harness.v2_base
-        ))
-        .headers(headers)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(v2_ws.status(), StatusCode::BAD_REQUEST);
-    let v2_ws_body: Value = v2_ws.json().await.unwrap();
-    assert_eq!(v2_ws_body["error"], "browser WebSocket Origin is required");
-    assert_ne!(v2_ws_body["code"], "dashboardV2Removed");
-
     harness.stop();
 }

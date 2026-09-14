@@ -83,27 +83,22 @@ fn endpoint_operation_maps_one_to_one_with_upstream_protocol() {
 }
 
 #[test]
-fn authorization_none_kind_is_not_required() {
+fn authorization_state_table() {
     assert_eq!(
         derive_authorization(CredentialKind::None, &[]),
-        AuthorizationState::NotRequired
+        AuthorizationState::NotRequired,
+        "none-empty"
     );
     assert_eq!(
         derive_authorization(CredentialKind::None, &[fact(true, true, false, false)]),
-        AuthorizationState::NotRequired
+        AuthorizationState::NotRequired,
+        "none-with-facts"
     );
-}
-
-#[test]
-fn authorization_zero_credentials_is_missing() {
     assert_eq!(
         derive_authorization(CredentialKind::ApiKey, &[]),
-        AuthorizationState::Missing
+        AuthorizationState::Missing,
+        "zero-credentials"
     );
-}
-
-#[test]
-fn authorization_verified_enabled_credential_is_valid() {
     assert_eq!(
         derive_authorization(
             CredentialKind::ApiKey,
@@ -112,20 +107,14 @@ fn authorization_verified_enabled_credential_is_valid() {
                 fact(true, false, true, false)
             ]
         ),
-        AuthorizationState::Valid
+        AuthorizationState::Valid,
+        "verified-enabled"
     );
-}
-
-#[test]
-fn authorization_enabled_unverified_credential_is_unknown() {
     assert_eq!(
         derive_authorization(CredentialKind::ApiKey, &[fact(true, false, false, false)]),
-        AuthorizationState::Unknown
+        AuthorizationState::Unknown,
+        "enabled-unverified"
     );
-}
-
-#[test]
-fn authorization_all_auth_errors_is_invalid() {
     assert_eq!(
         derive_authorization(
             CredentialKind::ApiKey,
@@ -134,12 +123,9 @@ fn authorization_all_auth_errors_is_invalid() {
                 fact(false, true, false, false)
             ]
         ),
-        AuthorizationState::Invalid
+        AuthorizationState::Invalid,
+        "all-auth-errors"
     );
-}
-
-#[test]
-fn authorization_all_disabled_without_universal_auth_error_is_unknown() {
     assert_eq!(
         derive_authorization(
             CredentialKind::ApiKey,
@@ -148,12 +134,13 @@ fn authorization_all_disabled_without_universal_auth_error_is_unknown() {
                 fact(false, true, false, false)
             ]
         ),
-        AuthorizationState::Unknown
+        AuthorizationState::Unknown,
+        "all-disabled-not-universal-error"
     );
 }
 
 #[test]
-fn eligibility_disabled_lifecycle_wins() {
+fn eligibility_state_table() {
     assert_eq!(
         derive_eligibility(
             ConnectionLifecycle::Disabled,
@@ -165,12 +152,9 @@ fn eligibility_disabled_lifecycle_wins() {
         (
             EligibilityState::Ineligible,
             EligibilityReason::ConnectionDisabled
-        )
+        ),
+        "disabled-lifecycle"
     );
-}
-
-#[test]
-fn eligibility_missing_credential() {
     assert_eq!(
         derive_eligibility(
             ConnectionLifecycle::Configured,
@@ -182,12 +166,9 @@ fn eligibility_missing_credential() {
         (
             EligibilityState::Ineligible,
             EligibilityReason::MissingCredential
-        )
+        ),
+        "missing-credential"
     );
-}
-
-#[test]
-fn eligibility_all_credentials_disabled() {
     assert_eq!(
         derive_eligibility(
             ConnectionLifecycle::Configured,
@@ -199,12 +180,9 @@ fn eligibility_all_credentials_disabled() {
         (
             EligibilityState::Ineligible,
             EligibilityReason::AllCredentialsDisabled
-        )
+        ),
+        "all-credentials-disabled"
     );
-}
-
-#[test]
-fn eligibility_all_credentials_invalid() {
     assert_eq!(
         derive_eligibility(
             ConnectionLifecycle::Configured,
@@ -216,12 +194,9 @@ fn eligibility_all_credentials_invalid() {
         (
             EligibilityState::Ineligible,
             EligibilityReason::AllCredentialsInvalid
-        )
+        ),
+        "all-credentials-invalid"
     );
-}
-
-#[test]
-fn eligibility_no_enabled_target() {
     assert_eq!(
         derive_eligibility(
             ConnectionLifecycle::Configured,
@@ -233,12 +208,9 @@ fn eligibility_no_enabled_target() {
         (
             EligibilityState::Ineligible,
             EligibilityReason::NoEnabledTarget
-        )
+        ),
+        "no-enabled-target"
     );
-}
-
-#[test]
-fn eligibility_cooling_usable_credentials() {
     assert_eq!(
         derive_eligibility(
             ConnectionLifecycle::Configured,
@@ -247,12 +219,9 @@ fn eligibility_cooling_usable_credentials() {
             true,
             1
         ),
-        (EligibilityState::Cooling, EligibilityReason::Cooling)
+        (EligibilityState::Cooling, EligibilityReason::Cooling),
+        "cooling-usable"
     );
-}
-
-#[test]
-fn eligibility_unknown_authorization_can_still_be_eligible() {
     assert_eq!(
         derive_eligibility(
             ConnectionLifecycle::Configured,
@@ -261,12 +230,9 @@ fn eligibility_unknown_authorization_can_still_be_eligible() {
             false,
             1
         ),
-        (EligibilityState::Eligible, EligibilityReason::None)
+        (EligibilityState::Eligible, EligibilityReason::None),
+        "unknown-still-eligible"
     );
-}
-
-#[test]
-fn eligibility_not_required_ignores_zero_enabled_credentials() {
     assert_eq!(
         derive_eligibility(
             ConnectionLifecycle::Configured,
@@ -275,7 +241,8 @@ fn eligibility_not_required_ignores_zero_enabled_credentials() {
             false,
             0
         ),
-        (EligibilityState::Eligible, EligibilityReason::None)
+        (EligibilityState::Eligible, EligibilityReason::None),
+        "not-required-zero-credentials"
     );
 }
 

@@ -2,6 +2,11 @@
 .github
 .learnings
 .codegraph
+.artifacts
+.grok
+.verify-gui-install
+.release-tmp-*
+.release-backup-*
 node_modules
 .pnpm-store
 target

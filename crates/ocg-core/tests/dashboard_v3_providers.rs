@@ -44,6 +44,27 @@ mod harness;
 
 use harness::{V3Harness, start_loopback, start_public};
 
+fn persist_catalog(harness: &V3Harness, provider_id: &str, models: &[&str], source: &str) {
+    let now = chrono::Utc::now();
+    harness
+        .state
+        .db
+        .lock()
+        .set_contract_catalog(
+            &ContractScope::provider(provider_id),
+            &models
+                .iter()
+                .map(|model| (*model).to_string())
+                .collect::<Vec<_>>(),
+            Some(now),
+            source,
+            "https://example.test/models",
+            now,
+        )
+        .unwrap();
+    harness.state.reload_provider_contracts().unwrap();
+}
+
 #[cfg(debug_assertions)]
 struct ZenUrlOverride {
     process_generation: u64,
@@ -477,8 +498,8 @@ async fn dashboard_v3_providers_catalog_covers_all_plan_facts_nulls_and_camel_ca
     assert_eq!(goat["verificationRuntimeAvailability"], "not_applicable");
     let goat_aliases = goat["modelAliases"].as_array().expect("GOAT aliases");
     assert!(
-        !goat_aliases.is_empty(),
-        "live GOAT must publish code-owned aliases: {goat_aliases:?}"
+        goat_aliases.is_empty(),
+        "unfetched GOAT must not publish leftover catalog aliases: {goat_aliases:?}"
     );
     assert_eq!(goat["keyPrefix"], Value::Null);
 
@@ -498,10 +519,13 @@ async fn dashboard_v3_providers_catalog_covers_all_plan_facts_nulls_and_camel_ca
     assert_eq!(zen["singleton"], true);
     assert!(zen["creationUnavailableReason"].is_string());
     let aliases = zen["modelAliases"].as_array().unwrap();
-    assert!(!aliases.iter().any(|alias| alias == "mimo-v2.5-free"));
     assert!(
-        aliases.iter().any(|alias| alias == "mimo-v2.5"),
-        "Zen aliases must include the de-suffixed snapshot alias: {aliases:?}"
+        !aliases.iter().any(|alias| alias == "mimo-v2.5-free"),
+        "{aliases:?}"
+    );
+    assert!(
+        !aliases.iter().any(|alias| alias == "mimo-v2.5"),
+        "unfetched Zen must not publish a leftover seed alias: {aliases:?}"
     );
 
     harness.stop();
@@ -670,6 +694,12 @@ async fn dashboard_v3_model_capabilities_are_go_protocol_rows_including_grok_45(
 #[tokio::test]
 async fn dashboard_v3_provider_contracts_project_builtin_scopes_and_custom_endpoints() {
     let harness = start_loopback("providers-contracts").await;
+    persist_catalog(
+        &harness,
+        KIMI_PROVIDER_ID,
+        &["kimi-for-coding", "kimi-k3"],
+        CATALOG_SOURCE_KIMI_CN_MODELS,
+    );
     let (status, body) = get_v3(&harness, "/provider-contracts").await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_secret_free(&body, &[]);
@@ -813,7 +843,17 @@ async fn dashboard_v3_provider_contracts_hide_zen_free_models_from_go_scope() {
             .collect::<Vec<_>>()
     );
 
-    // Zen Free keeps listing its own free models.
+    persist_catalog(
+        &harness,
+        OPENCODE_ZEN_FREE_PROVIDER_ID,
+        &["mimo-v2.5-free"],
+        CATALOG_SOURCE_OFFICIAL_ZEN,
+    );
+    let (status, body) = get_v3(&harness, "/provider-contracts").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let parsed: ProviderContracts = serde_json::from_value(body.clone()).expect("contracts");
+
+    // Zen Free keeps listing its own refreshed free models.
     let zen = parsed
         .providers
         .iter()
@@ -962,10 +1002,9 @@ async fn dashboard_v3_zen_saved_models_are_the_persisted_snapshot() {
     assert_eq!(parsed.source_url, ZEN_MODELS_SOURCE_URL);
     assert!(parsed.refreshed_at.is_none());
     assert!(
-        parsed
-            .models
-            .iter()
-            .any(|model| model.model_id == "mimo-v2.5-free" && model.alias == "mimo-v2.5")
+        parsed.models.is_empty(),
+        "unfetched Zen must not keep leftover seed models: {:?}",
+        parsed.models
     );
     assert_eq!(body["refreshedAt"], Value::Null);
     assert!(body.get("refreshed_at").is_none());
@@ -1270,6 +1309,12 @@ async fn dashboard_v3_zen_refresh_source_overrides_do_not_cross_talk_across_harn
 #[tokio::test]
 async fn dashboard_v3_provider_model_protocol_overrides_enforces_cas_and_persists() {
     let harness = start_loopback("providers-overrides").await;
+    persist_catalog(
+        &harness,
+        OPENCODE_PROVIDER_ID,
+        &["glm-5.2", "grok-4.5"],
+        CATALOG_SOURCE_OPENCODE_MODELS,
+    );
     let (status, listed) = get_v3(&harness, "/provider-contracts").await;
     assert_eq!(status, StatusCode::OK, "{listed}");
     let before = harness.state.settings_revision();

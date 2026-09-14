@@ -352,3 +352,62 @@ fn binding_patch_and_identity_credential_create_are_camel_case() {
     assert_eq!(result_value["accountId"], "acct");
     assert!(result_value.get("secretInput").is_none());
 }
+
+#[test]
+fn cpa_catalog_is_camel_case() {
+    let catalog = CpaCatalog {
+        revision: ControlRevision {
+            revision: 3,
+            process_generation: 1,
+            pricing_revision: "p".into(),
+        },
+        models: vec![CpaCatalogEntry {
+            id: "gpt-5".into(),
+            owned_by: Some("openai".into()),
+            enabled: true,
+        }],
+        source_url: Some("http://127.0.0.1:8317".into()),
+        refreshed_at: Some("2026-09-12T00:00:00Z".into()),
+    };
+    let value = serde_json::to_value(&catalog).unwrap();
+    assert_eq!(value["models"][0]["ownedBy"], "openai");
+    assert_eq!(value["models"][0]["enabled"], true);
+    assert_eq!(value["sourceUrl"], "http://127.0.0.1:8317");
+    let update = CpaCatalogUpdate {
+        expectation: MutationExpectation {
+            expected_revision: 3,
+            process_generation: 1,
+        },
+        enabled_ids: vec!["gpt-5".into()],
+    };
+    let update_value = serde_json::to_value(&update).unwrap();
+    assert_eq!(update_value["enabledIds"], json!(["gpt-5"]));
+    assert_eq!(update_value["expectedRevision"], 3);
+}
+
+#[test]
+fn catalog_models_remove_request_is_camel_case() {
+    let request = CatalogModelsRemoveRequest {
+        expectation: MutationExpectation {
+            expected_revision: 4,
+            process_generation: 2,
+        },
+        model_ids: vec!["drop-me".into()],
+    };
+    let value = serde_json::to_value(&request).unwrap();
+    assert_eq!(value["modelIds"], json!(["drop-me"]));
+    assert_eq!(value["expectedRevision"], 4);
+    assert_eq!(value["processGeneration"], 2);
+    let result = CatalogModelsRemoveResult {
+        revision: ControlRevision {
+            revision: 5,
+            process_generation: 2,
+            pricing_revision: "p".into(),
+        },
+        removed_ids: vec!["drop-me".into()],
+        catalog_models: vec!["keep-me".into()],
+    };
+    let result_value = serde_json::to_value(&result).unwrap();
+    assert_eq!(result_value["removedIds"], json!(["drop-me"]));
+    assert_eq!(result_value["catalogModels"], json!(["keep-me"]));
+}

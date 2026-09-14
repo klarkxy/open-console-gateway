@@ -67,6 +67,17 @@ fn assert_no_store(headers: &reqwest::header::HeaderMap) {
     );
 }
 
+async fn send_json_no_store(
+    harness: &V3Harness,
+    method: Method,
+    path: &str,
+    body: &Value,
+) -> (StatusCode, Value) {
+    let (status, headers, body) = send_json(harness, method, path, body).await;
+    assert_no_store(&headers);
+    (status, body)
+}
+
 async fn create_source_accounts(harness: &V3Harness) {
     let (status, _, body) = send_json(
         harness,
@@ -116,6 +127,19 @@ async fn create_source_accounts(harness: &V3Harness) {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
+    let ids: Vec<String> = harness
+        .state
+        .db
+        .lock()
+        .list_accounts()
+        .unwrap()
+        .into_iter()
+        .filter(|account| account.provider_id != OPENCODE_ZEN_FREE_PROVIDER_ID)
+        .map(|account| account.id)
+        .collect();
+    for id in ids {
+        harness.enable_account(&id);
+    }
 }
 
 fn custom_pending_but_enabled(harness: &V3Harness) -> String {
@@ -129,7 +153,21 @@ fn custom_pending_but_enabled(harness: &V3Harness) -> String {
         .find(|account| account.provider_id == CUSTOM_PROVIDER_ID)
         .map(|account| (account.id, account.enabled))
         .unwrap();
-    assert!(enabled, "Custom creation should default to enabled");
+    if !enabled {
+        harness.enable_account(&id);
+    }
+    let enabled = harness
+        .state
+        .db
+        .lock()
+        .get_account(&id)
+        .unwrap()
+        .unwrap()
+        .enabled;
+    assert!(
+        enabled,
+        "Custom pending accounts can be enabled without verify"
+    );
     assert_eq!(
         harness
             .state
@@ -188,7 +226,7 @@ async fn encrypted_account_migration_moves_keys_without_exposing_them() {
         ocg_core::gateway_keys::create_sub_key(&source.state, "Migrated client").unwrap()
     };
 
-    let (status, headers, body) = send_json(
+    let (status, body) = send_json_no_store(
         &source,
         Method::POST,
         "/accounts/transfer/export",
@@ -198,7 +236,6 @@ async fn encrypted_account_migration_moves_keys_without_exposing_them() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_no_store(&headers);
     assert_eq!(body["exportedAccounts"], 3);
     assert_eq!(body["skippedAccounts"], 0);
     let encoded = body.to_string();
@@ -207,7 +244,7 @@ async fn encrypted_account_migration_moves_keys_without_exposing_them() {
     assert!(!encoded.contains(GOAT_KEY));
     let bundle = body["bundle"].as_str().unwrap().to_string();
 
-    let (status, headers, body) = send_json(
+    let (status, body) = send_json_no_store(
         &source,
         Method::POST,
         "/accounts/transfer/export",
@@ -217,7 +254,6 @@ async fn encrypted_account_migration_moves_keys_without_exposing_them() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-    assert_no_store(&headers);
 
     let target = start_loopback("account-transfer-target").await;
     let (status, _, body) = send_json(
@@ -232,7 +268,7 @@ async fn encrypted_account_migration_moves_keys_without_exposing_them() {
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let target_extra_id = body["account"]["id"].as_str().unwrap().to_string();
-    let (status, headers, preview) = send_json(
+    let (status, preview) = send_json_no_store(
         &target,
         Method::POST,
         "/accounts/transfer/preview",
@@ -240,7 +276,6 @@ async fn encrypted_account_migration_moves_keys_without_exposing_them() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{preview}");
-    assert_no_store(&headers);
     assert_eq!(preview["importableAccounts"], 3);
     assert_eq!(preview["duplicateAccounts"], 0);
     assert_eq!(preview["items"].as_array().unwrap().len(), 3);
@@ -287,7 +322,7 @@ async fn encrypted_account_migration_moves_keys_without_exposing_them() {
     assert_eq!(target.state.db.lock().list_accounts().unwrap().len(), 2);
 
     let before = target.state.settings_revision();
-    let (status, headers, imported) = send_json(
+    let (status, imported) = send_json_no_store(
         &target,
         Method::POST,
         "/accounts/transfer/import",
@@ -298,7 +333,6 @@ async fn encrypted_account_migration_moves_keys_without_exposing_them() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{imported}");
-    assert_no_store(&headers);
     assert_eq!(imported["importedAccounts"], 3);
     assert_eq!(imported["duplicateAccounts"], 0);
     assert_eq!(target.state.settings_revision(), before + 1);
@@ -432,7 +466,7 @@ async fn encrypted_account_migration_moves_keys_without_exposing_them() {
         ]
     );
 
-    let (status, headers, body) = send_json(
+    let (status, body) = send_json_no_store(
         &target,
         Method::POST,
         "/accounts/transfer/preview",
@@ -440,7 +474,6 @@ async fn encrypted_account_migration_moves_keys_without_exposing_them() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-    assert_no_store(&headers);
     assert!(!body.to_string().contains(GO_KEY));
     assert!(!body.to_string().contains(CUSTOM_KEY));
     assert!(!body.to_string().contains(GOAT_KEY));
@@ -526,7 +559,7 @@ async fn encrypted_account_migration_moves_keys_without_exposing_them() {
         .into_iter()
         .map(|account| account.id)
         .collect::<Vec<_>>();
-    let (status, headers, body) = send_json(
+    let (status, body) = send_json_no_store(
         &collision_target,
         Method::POST,
         "/accounts/transfer/preview",
@@ -534,9 +567,8 @@ async fn encrypted_account_migration_moves_keys_without_exposing_them() {
     )
     .await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
-    assert_no_store(&headers);
     assert!(!body.to_string().contains(&source_sub_key.key));
-    let (status, headers, body) = send_json(
+    let (status, body) = send_json_no_store(
         &collision_target,
         Method::POST,
         "/accounts/transfer/import",
@@ -547,7 +579,6 @@ async fn encrypted_account_migration_moves_keys_without_exposing_them() {
     )
     .await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
-    assert_no_store(&headers);
     assert_eq!(
         collision_target.state.config().gateway_key,
         collision_primary

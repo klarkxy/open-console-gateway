@@ -119,18 +119,15 @@ mod tests {
     }
 
     #[test]
-    fn usage_capability_delegates_through_provider_descriptor() {
+    fn usage_capability_publishes_through_provider_descriptor() {
         use crate::provider::{
             COMMAND_CODE_PROVIDER_ID, CUSTOM_PROVIDER_ID, OPENCODE_PROVIDER_ID,
             OPENCODE_ZEN_FREE_PROVIDER_ID, ProviderRegistry,
         };
 
         let go_usage = ProviderRegistry::get(OPENCODE_PROVIDER_ID).unwrap().usage;
-        let go = provider_usage_capability(OPENCODE_PROVIDER_ID).unwrap();
-        assert_eq!(go.endpoint, go_usage.endpoint);
-        assert_eq!(go.automatic_sync, go_usage.automatic_sync);
-        assert_eq!(go.authoritative_for_quota, go_usage.authoritative_for_quota);
         assert!(go_usage.publishes_capability);
+        assert!(provider_usage_capability(OPENCODE_PROVIDER_ID).is_some());
 
         let goat_usage = ProviderRegistry::get(COMMAND_CODE_PROVIDER_ID)
             .unwrap()

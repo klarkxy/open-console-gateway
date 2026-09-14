@@ -937,76 +937,53 @@ async fn retired_v2_discovery_does_not_call_upstream() {
 
 #[tokio::test]
 async fn supplied_key_hostile_upstream_ids_are_dropped_without_echoing_plaintext() {
-    let harness = start_loopback("discover-supplied-reflection").await;
-    let origin = start_discovery_origin(OriginScript::Fixed {
-        status: StatusCode::OK,
-        body: hostile_discovery_body(CUSTOM_KEY),
-    })
-    .await;
-    point_direct(&harness);
-    let before = harness.state.settings_revision();
-    let generation = harness.state.process_generation();
+    for (label, stored_account) in [("supplied-key", false), ("stored-accountId", true)] {
+        let harness_label = format!("discover-{label}-reflection");
+        let harness = start_loopback(&harness_label).await;
+        let origin = start_discovery_origin(OriginScript::Fixed {
+            status: StatusCode::OK,
+            body: hostile_discovery_body(CUSTOM_KEY),
+        })
+        .await;
+        point_direct(&harness);
+        let account_id = if stored_account {
+            Some(create_custom_account(&harness, &origin.url, "bearer").await)
+        } else {
+            None
+        };
+        let before = harness.state.settings_revision();
+        let generation = harness.state.process_generation();
+        let before_contracts = stored_account.then(|| harness.state.provider_contracts());
+        let request = if let Some(account_id) = account_id {
+            json!({
+                "endpointUrl": inference_endpoint(&origin.url, "chat_completions"),
+                "upstreamProtocol": "chat_completions",
+                "accountId": account_id
+            })
+        } else {
+            discover_body(&origin.url, "chat_completions", "bearer", Some(CUSTOM_KEY))
+        };
 
-    let (status, body) = send_json(
-        &harness,
-        Method::POST,
-        "/custom/models/discover",
-        &discover_body(&origin.url, "chat_completions", "bearer", Some(CUSTOM_KEY)),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    let parsed = parse_discovery(&body);
-    assert_eq!(parsed.models, vec!["org/model-a", "org/model-b"]);
-    assert!(!parsed.truncated);
-    assert_eq!(parsed.revision, before);
-    assert_eq!(parsed.process_generation, generation);
-    assert!(body.get("error").is_none(), "{body}");
-    assert_secret_free(&body, &[CUSTOM_KEY]);
-    assert_no_plaintext_in_log_facing_values(&harness, CUSTOM_KEY);
-    assert_eq!(origin.call_count(), 1);
-    assert_eq!(harness.state.settings_revision(), before);
-    harness.stop();
-}
-
-#[tokio::test]
-async fn stored_key_hostile_upstream_ids_are_dropped_without_echoing_plaintext() {
-    let harness = start_loopback("discover-stored-reflection").await;
-    let origin = start_discovery_origin(OriginScript::Fixed {
-        status: StatusCode::OK,
-        body: hostile_discovery_body(CUSTOM_KEY),
-    })
-    .await;
-    point_direct(&harness);
-    let account_id = create_custom_account(&harness, &origin.url, "bearer").await;
-    let before = harness.state.settings_revision();
-    let generation = harness.state.process_generation();
-    let before_contracts = harness.state.provider_contracts();
-
-    let (status, body) = send_json(
-        &harness,
-        Method::POST,
-        "/custom/models/discover",
-        &json!({
-            "endpointUrl": inference_endpoint(&origin.url, "chat_completions"),
-            "upstreamProtocol": "chat_completions",
-            "accountId": account_id
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    let parsed = parse_discovery(&body);
-    assert_eq!(parsed.models, vec!["org/model-a", "org/model-b"]);
-    assert!(!parsed.truncated);
-    assert_eq!(parsed.revision, before);
-    assert_eq!(parsed.process_generation, generation);
-    assert!(body.get("error").is_none(), "{body}");
-    assert_secret_free(&body, &[CUSTOM_KEY]);
-    assert_no_plaintext_in_log_facing_values(&harness, CUSTOM_KEY);
-    assert_eq!(origin.call_count(), 1);
-    assert_eq!(harness.state.settings_revision(), before);
-    assert_eq!(
-        before_contracts.as_ref(),
-        harness.state.provider_contracts().as_ref()
-    );
-    harness.stop();
+        let (status, body) =
+            send_json(&harness, Method::POST, "/custom/models/discover", &request).await;
+        assert_eq!(status, StatusCode::OK, "{label} {body}");
+        let parsed = parse_discovery(&body);
+        assert_eq!(parsed.models, vec!["org/model-a", "org/model-b"], "{label}");
+        assert!(!parsed.truncated, "{label}");
+        assert_eq!(parsed.revision, before, "{label}");
+        assert_eq!(parsed.process_generation, generation, "{label}");
+        assert!(body.get("error").is_none(), "{label} {body}");
+        assert_secret_free(&body, &[CUSTOM_KEY]);
+        assert_no_plaintext_in_log_facing_values(&harness, CUSTOM_KEY);
+        assert_eq!(origin.call_count(), 1, "{label}");
+        assert_eq!(harness.state.settings_revision(), before, "{label}");
+        if let Some(before_contracts) = before_contracts {
+            assert_eq!(
+                before_contracts.as_ref(),
+                harness.state.provider_contracts().as_ref(),
+                "{label}"
+            );
+        }
+        harness.stop();
+    }
 }

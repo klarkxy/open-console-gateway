@@ -40,7 +40,12 @@ export type DashboardApiV4 =
   | BindingPatchResult
   | QuotaSharing
   | IdentityCredentialCreateRequest
-  | IdentityCredentialCreateResult;
+  | IdentityCredentialCreateResult
+  | CpaCatalogEntry
+  | CpaCatalog
+  | CpaCatalogUpdate
+  | CatalogModelsRemoveRequest
+  | CatalogModelsRemoveResult;
 /**
  * Inference operation advertised by one endpoint. Mapped 1:1 from
  * [`UpstreamProtocolKind`].
@@ -453,4 +458,42 @@ export interface IdentityCredentialCreateResult {
   replayed: boolean;
   revision: ControlRevision;
   version: number;
+}
+export interface CpaCatalogEntry {
+  enabled: boolean;
+  id: string;
+  ownedBy: string | null;
+}
+export interface CpaCatalog {
+  models: CpaCatalogEntry[];
+  refreshedAt: string | null;
+  revision: ControlRevision;
+  sourceUrl: string | null;
+}
+/**
+ * Required process-scoped mutation precondition.
+ *
+ * Both fields travel at the top level of every mutation request. The random
+ * process generation prevents a revision captured before restart from being
+ * accepted by a fresh process whose in-memory counter reused the same value.
+ */
+export interface CpaCatalogUpdate {
+  enabledIds: string[];
+  expectedRevision: number;
+  processGeneration: number;
+}
+/**
+ * Remove models from a persisted built-in Provider catalog snapshot.
+ *
+ * Local-only. An official catalog refresh may add the same IDs back.
+ */
+export interface CatalogModelsRemoveRequest {
+  expectedRevision: number;
+  modelIds: string[];
+  processGeneration: number;
+}
+export interface CatalogModelsRemoveResult {
+  catalogModels: string[];
+  removedIds: string[];
+  revision: ControlRevision;
 }

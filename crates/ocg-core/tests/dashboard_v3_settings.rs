@@ -9,6 +9,8 @@ use serde_json::{Map, Value, json};
 
 #[path = "fixtures/dashboard_v3/harness.rs"]
 mod harness;
+#[path = "fixtures/refreshed_go_catalog.rs"]
+mod refreshed_go_catalog;
 
 use harness::{V3Harness, start_loopback, start_public};
 
@@ -468,6 +470,9 @@ async fn dashboard_v3_successful_write_bumps_revision_exactly_once() {
 #[tokio::test]
 async fn dashboard_v3_list_proxy_write_validates_then_dedupes_known_ids() {
     let harness = start_loopback("settings-proxy-list").await;
+    refreshed_go_catalog::persist_refreshed_go_catalog(&harness.state);
+    refreshed_go_catalog::persist_provider_catalog(&harness.state, "minimax", &["MiniMax-M3"]);
+    refreshed_go_catalog::persist_provider_catalog(&harness.state, "kimi", &["kimi-for-coding"]);
     let before = harness.state.settings_revision();
 
     let (status, body) = put_json(

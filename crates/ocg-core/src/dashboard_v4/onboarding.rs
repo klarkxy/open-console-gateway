@@ -28,7 +28,8 @@ use crate::dashboard_v3::{
 use crate::db::NewDashboardOperation;
 use crate::dynamic::{DynamicProviderRuntime, collides_with_known_id, normalize_preset_id};
 use crate::models::{
-    Account as ModelAccount, AccountType as ModelAccountType, normalize_account_notes,
+    Account as ModelAccount, AccountType as ModelAccountType, NEW_READY_KEY_ACCOUNT_ENABLED,
+    normalize_account_notes,
 };
 use crate::provider::BUILTIN_PROVIDERS;
 use crate::state::CoreState;
@@ -106,6 +107,8 @@ pub(crate) fn commit_locked(
     }
 }
 
+/// CAS commit keeps connection, authorization, targets, and mode as separate facts.
+#[allow(clippy::too_many_arguments)]
 fn commit_new(
     state: &CoreState,
     operation_id: &str,
@@ -218,6 +221,8 @@ fn finish_new(
     Ok(committed_result(state, stored))
 }
 
+/// Existing-connection commit keeps the same explicit CAS facts as `commit_new`.
+#[allow(clippy::too_many_arguments)]
 fn commit_existing(
     state: &CoreState,
     operation_id: &str,
@@ -334,6 +339,8 @@ fn commit_existing_second_key(
     Ok(committed_result(state, stored))
 }
 
+/// Draft resume is one CAS write over configuration, auth, targets, and mode.
+#[allow(clippy::too_many_arguments)]
 fn resume_existing_draft(
     state: &CoreState,
     operation_id: &str,
@@ -469,13 +476,7 @@ fn resume_existing_draft(
         } else if let Some(key_cipher) = key_cipher {
             rotate = Some((account.id.clone(), key_cipher));
         }
-        if runtime.auth_kind != existing.auth_kind && rotate.is_some() {
-            sync_auth = Some((
-                account.id.clone(),
-                runtime.auth_kind.credential_kind().as_str().to_string(),
-                runtime.auth_kind.quota_scope().as_str().to_string(),
-            ));
-        } else if runtime.auth_kind != existing.auth_kind && !changing_from_none {
+        if runtime.auth_kind != existing.auth_kind && (rotate.is_some() || !changing_from_none) {
             sync_auth = Some((
                 account.id.clone(),
                 runtime.auth_kind.credential_kind().as_str().to_string(),
@@ -507,10 +508,10 @@ fn resume_existing_draft(
 
     if !draft {
         if let Some(record) = saved_record {
-            if !record.account.enabled || !record.binding_enabled {
+            if !record.binding_enabled {
                 return Err(V3ApiError::invalid_request_at(
                     state,
-                    "complete requires an enabled credential and binding",
+                    "complete requires an enabled binding",
                 ));
             }
             let has_required_key =
@@ -614,24 +615,25 @@ fn reject_malformed_resume_authorization(
                 ));
             }
         }
-        Some(OnboardingAuthorization::ApiKey(_)) => {
-            if !auth_kind.requires_key() {
-                return Err(V3ApiError::invalid_request_at(
-                    state,
-                    "api_key authorization is not valid when authKind is none",
-                ));
-            }
+        Some(OnboardingAuthorization::ApiKey(_)) if !auth_kind.requires_key() => {
+            return Err(V3ApiError::invalid_request_at(
+                state,
+                "api_key authorization is not valid when authKind is none",
+            ));
         }
-        None => {}
+        Some(OnboardingAuthorization::ApiKey(_)) | None => {}
     }
     Ok(())
 }
+
+/// Cipher, label, and notes (`None` = leave, `Some(None)` = clear).
+type ResumeKeyPatch = (Option<String>, Option<String>, Option<Option<String>>);
 
 fn resume_saved_key_update(
     state: &CoreState,
     auth_kind: DynamicAuthKind,
     authorization: &Option<OnboardingAuthorization>,
-) -> Result<(Option<String>, Option<String>, Option<Option<String>>), V3ApiError> {
+) -> Result<ResumeKeyPatch, V3ApiError> {
     let Some(authorization) = authorization else {
         return Ok((None, None, None));
     };
@@ -662,6 +664,9 @@ fn resume_saved_key_update(
     }
 }
 
+/// Account id plus stored endpoint-id / origin grant arrays.
+type BindingGrantUnion = (String, Vec<String>, Vec<String>);
+
 fn resolve_complete_grants(
     state: &CoreState,
     runtime: &DynamicProviderRuntime,
@@ -669,7 +674,7 @@ fn resolve_complete_grants(
     newly_created: bool,
     authorize_current_endpoint: bool,
     saved_record: Option<&crate::db::identity::IdentityAccountRecord>,
-) -> Result<Option<(String, Vec<String>, Vec<String>)>, V3ApiError> {
+) -> Result<Option<BindingGrantUnion>, V3ApiError> {
     if newly_created {
         return Ok(None);
     }
@@ -865,7 +870,7 @@ fn dynamic_provider_account(
         username: None,
         password_cipher: None,
         key_cipher,
-        enabled: true,
+        enabled: NEW_READY_KEY_ACCOUNT_ENABLED,
         account_type: ModelAccountType::Key,
         setup_step: crate::models::AccountSetupStep::Ready,
         referral_code: None,

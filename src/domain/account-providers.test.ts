@@ -28,5 +28,4 @@ test("ollama cloud plan definition follows the sealed registry identities", () =
   const plan = findPlanDefinition(OLLAMA_PROVIDER_ID);
   assert.ok(plan, "the plan definition must exist");
   assert.equal(plan.provider_id, OLLAMA_PROVIDER_ID);
-  assert.ok(isOllamaCloudAccount({ provider_id: plan.provider_id }));
 });

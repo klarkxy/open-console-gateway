@@ -7,7 +7,10 @@ use serde_json::Value;
 use crate::provider::{ConnectionVerificationStatus, OPENCODE_GO_BASE_URL, UpstreamProtocolKind};
 
 pub use crate::kernel::ids::DEFAULT_ACCOUNT_TEST_MODEL;
-pub use ocg_domain::account::{Account, AccountSetupStep, AccountType, UpstreamChannel};
+pub use ocg_domain::account::{
+    Account, AccountSetupStep, AccountType, DEFAULT_INFERENCE_BINDING_ENABLED,
+    NEW_READY_KEY_ACCOUNT_ENABLED, UpstreamChannel,
+};
 
 /// Maximum persisted freeform account note length, counted in Unicode scalars.
 pub const MAX_ACCOUNT_NOTES_CHARS: usize = 4000;

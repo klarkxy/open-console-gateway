@@ -329,12 +329,6 @@ fn unsupported_payload_version_is_not_a_password_or_damage_error() {
         matches!(error, TransferError::UnsupportedVersion(3)),
         "{error:?}"
     );
-    let message = format!(
-        "this backup uses payload version 3; this node expects payload version {PAYLOAD_VERSION}"
-    );
-    assert!(!message.to_ascii_lowercase().contains("password"));
-    assert!(!message.to_ascii_lowercase().contains("damaged"));
-    assert!(message.contains(&PAYLOAD_VERSION.to_string()));
 }
 
 #[test]

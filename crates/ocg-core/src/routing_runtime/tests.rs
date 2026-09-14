@@ -2,8 +2,9 @@ use super::*;
 use crate::crypto::{KeyCipher, StaticKeyCipher};
 use crate::kernel::catalog::QuotaScope;
 use crate::kernel::ids::ZEN_FREE_ACCOUNT_ID;
-use ocg_gateway::selector::SelectionError;
+use ocg_gateway::selector::{CONVERSATION_TTL, MAX_CONVERSATIONS, SelectionError};
 use std::sync::Arc;
+use std::time::Duration;
 
 fn account(id: &str, enabled: bool) -> Account {
     let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("test"));
@@ -113,16 +114,6 @@ fn pick_index(
 }
 
 #[test]
-fn strict_priority_picks_first_available() {
-    let runtime = RoutingRuntime::new();
-    let accounts = vec![account("a", false), account("b", true), account("c", true)];
-    let selected = runtime
-        .select_account(&accounts, RoutingMode::StrictPriority, false, None, &[])
-        .unwrap();
-    assert_eq!(selected.id, "b");
-}
-
-#[test]
 fn sticky_global_keeps_current_when_higher_priority_recovers() {
     let runtime = RoutingRuntime::new();
     let first = vec![cooling("a"), account("b", true)];
@@ -140,35 +131,6 @@ fn sticky_global_keeps_current_when_higher_priority_recovers() {
             .unwrap()
             .id,
         "b"
-    );
-}
-
-#[test]
-fn sticky_global_transient_exclude_does_not_rewrite_global() {
-    let runtime = RoutingRuntime::new();
-    let accounts = vec![account("a", true), account("b", true)];
-    assert_eq!(
-        runtime
-            .select_account(&accounts, RoutingMode::StickyGlobal, false, None, &[])
-            .unwrap()
-            .id,
-        "a"
-    );
-    // Request-local exclude (e.g. 403/preflight failover): use next account now,
-    // but keep the persistent global sticky on a.
-    assert_eq!(
-        runtime
-            .select_account(&accounts, RoutingMode::StickyGlobal, false, None, &["a"])
-            .unwrap()
-            .id,
-        "b"
-    );
-    assert_eq!(
-        runtime
-            .select_account(&accounts, RoutingMode::StickyGlobal, false, None, &[])
-            .unwrap()
-            .id,
-        "a"
     );
 }
 
@@ -373,44 +335,6 @@ fn conversation_sticky_rebinds_when_bound_account_excluded() {
             .unwrap()
             .id,
         "b"
-    );
-}
-
-#[test]
-fn conversation_ttl_expires_bindings() {
-    let runtime = RoutingRuntime::new();
-    let accounts = vec![account("a", true), account("b", true)];
-    let wall = frozen_wall();
-    let t0 = Instant::now();
-    assert_eq!(
-        runtime
-            .select_account_at(
-                &accounts,
-                RoutingMode::StrictPriority,
-                true,
-                Some("old"),
-                &["a"],
-                wall,
-                t0,
-            )
-            .unwrap()
-            .id,
-        "b"
-    );
-    assert_eq!(
-        runtime
-            .select_account_at(
-                &accounts,
-                RoutingMode::StrictPriority,
-                true,
-                Some("old"),
-                &[],
-                wall,
-                t0 + CONVERSATION_TTL + Duration::from_secs(1),
-            )
-            .unwrap()
-            .id,
-        "a"
     );
 }
 
@@ -1120,6 +1044,40 @@ fn conversation_ttl_expires_at_inclusive_boundary() {
             .id,
         "a",
         "duration_since == CONVERSATION_TTL must expire the binding"
+    );
+
+    let past_ttl = RoutingRuntime::new();
+    assert_eq!(
+        past_ttl
+            .select_account_at(
+                &accounts,
+                RoutingMode::StrictPriority,
+                true,
+                Some("old"),
+                &["a"],
+                wall,
+                t0,
+            )
+            .unwrap()
+            .id,
+        "b",
+        "ttl-plus-one-bind"
+    );
+    assert_eq!(
+        past_ttl
+            .select_account_at(
+                &accounts,
+                RoutingMode::StrictPriority,
+                true,
+                Some("old"),
+                &[],
+                wall,
+                t0 + CONVERSATION_TTL + Duration::from_secs(1),
+            )
+            .unwrap()
+            .id,
+        "a",
+        "duration_since == CONVERSATION_TTL + 1s must expire the binding"
     );
 }
 

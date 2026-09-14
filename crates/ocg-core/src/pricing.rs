@@ -395,7 +395,7 @@ pub async fn fetch_ollama_pricing_snapshot(
     parse_ollama_html(&html)
 }
 
-async fn fetch_approved_host_html(
+pub(crate) async fn fetch_approved_host_html(
     config: &crate::models::AppConfig,
     url: &str,
     host: &'static str,
@@ -1958,7 +1958,7 @@ fn parse_document_updated_at(html: &str) -> Result<String> {
     Ok(value.to_string())
 }
 
-fn has_headers(table: &[Vec<String>], expected: &[&str]) -> bool {
+pub(crate) fn has_headers(table: &[Vec<String>], expected: &[&str]) -> bool {
     table.first().is_some_and(|row| {
         let actual = row
             .iter()
@@ -1973,7 +1973,7 @@ fn has_headers(table: &[Vec<String>], expected: &[&str]) -> bool {
     })
 }
 
-fn extract_tables(html: &str) -> Result<Vec<Vec<Vec<String>>>> {
+pub(crate) fn extract_tables(html: &str) -> Result<Vec<Vec<Vec<String>>>> {
     let mut tables = Vec::new();
     let mut remainder = html;
     while let Some(start) = remainder.find("<table") {
@@ -2029,7 +2029,7 @@ fn extract_cells(row: &str) -> Result<Vec<String>> {
     Ok(cells)
 }
 
-fn strip_tags(input: &str) -> String {
+pub(crate) fn strip_tags(input: &str) -> String {
     let mut output = String::with_capacity(input.len());
     let mut in_tag = false;
     let mut characters = input.chars().peekable();
@@ -2087,7 +2087,7 @@ fn decode_entities(input: &str) -> String {
     output
 }
 
-fn collapse_whitespace(input: &str) -> String {
+pub(crate) fn collapse_whitespace(input: &str) -> String {
     input.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 

@@ -201,7 +201,7 @@ async fn get_json(
     Ok(Fetched { value })
 }
 
-fn payload<'a>(value: &'a Value) -> &'a Value {
+fn payload(value: &Value) -> &Value {
     value.get("data").unwrap_or(value)
 }
 
@@ -1293,12 +1293,11 @@ fn parse_sub2_plaza_prices(
         let group_id = json_i64(group.get("id"))
             .map(|id| id.to_string())
             .or_else(|| json_str(group.get("id")).map(str::to_string));
-        if let Some(selected) = selected {
-            if group_id.as_deref() != Some(selected)
-                && json_str(group.get("name")) != Some(selected)
-            {
-                continue;
-            }
+        if let Some(selected) = selected
+            && group_id.as_deref() != Some(selected)
+            && json_str(group.get("name")) != Some(selected)
+        {
+            continue;
         }
         let peak_enabled =
             billing_peak_enabled || json_bool(group.get("peak_rate_enabled")).unwrap_or(false);

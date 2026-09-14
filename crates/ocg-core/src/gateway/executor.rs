@@ -595,30 +595,31 @@ fn routing_selector_invariant(failure: SelectorInvariant) -> (StatusCode, String
 #[cfg(test)]
 mod tests {
     #[test]
-    fn duplicate_selection_error_maps_to_internal_selector_invariant() {
-        let error = ocg_gateway::selector::SelectionError::DuplicateAccountId {
-            first: 0,
-            duplicate: 2,
-        };
-        let (status, message) =
-            super::routing_selector_invariant(super::SelectorInvariant::Duplicate(error));
-        assert_eq!(status, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(
-            message,
-            "routing selector invariant: duplicate account id at candidate index 2 (first seen at 0)"
-        );
-    }
-
-    #[test]
-    fn out_of_range_selected_index_maps_to_internal_selector_invariant() {
-        let (status, message) =
-            super::routing_selector_invariant(super::SelectorInvariant::CandidateIndexOutOfRange {
-                selected_index: 9,
-            });
-        assert_eq!(status, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(
-            message,
-            "routing selector invariant: candidate index 9 is out of range"
-        );
+    fn selector_invariant_maps_to_internal_error() {
+        for (label, failure, expected) in [
+            (
+                "duplicate",
+                super::SelectorInvariant::Duplicate(
+                    ocg_gateway::selector::SelectionError::DuplicateAccountId {
+                        first: 0,
+                        duplicate: 2,
+                    },
+                ),
+                "routing selector invariant: duplicate account id at candidate index 2 (first seen at 0)",
+            ),
+            (
+                "index-out-of-range",
+                super::SelectorInvariant::CandidateIndexOutOfRange { selected_index: 9 },
+                "routing selector invariant: candidate index 9 is out of range",
+            ),
+        ] {
+            let (status, message) = super::routing_selector_invariant(failure);
+            assert_eq!(
+                status,
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "{label}"
+            );
+            assert_eq!(message, expected, "{label}");
+        }
     }
 }

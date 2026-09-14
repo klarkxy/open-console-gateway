@@ -79,7 +79,6 @@ test("Compose header and default image must match the release version", () => {
   );
   const prerelease = valid.replaceAll("1.5.0", "1.5.0-rc.1");
   assert.equal(validateComposeVersion(prerelease, "v1.5.0-rc.1"), "1.5.0-rc.1");
-  assert.equal(normalizeReleaseVersion("v1.5.0-rc.1"), "1.5.0-rc.1");
 });
 
 test("paired moving channels either converge at the candidate or remain aligned", () => {

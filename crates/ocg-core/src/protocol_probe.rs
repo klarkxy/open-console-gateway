@@ -10,7 +10,7 @@ use crate::custom_http::{
 };
 use crate::gateway::attempt::UpstreamAuth;
 use crate::gateway::forwarder::{
-    LiveSendSelection, authorize_live_send_secret, confirm_live_send_secret,
+    LiveSendAccountGate, LiveSendSelection, authorize_live_send_secret, confirm_live_send_secret,
 };
 use crate::gateway::protocol::{CustomRouteSpec, RequestPlan};
 use crate::gateway::provider_adapter::{
@@ -235,8 +235,15 @@ async fn execute_protocol_request(
             ctx.model_id,
         )
     };
-    let secret = authorize_live_send_secret(ctx.state, &selection, account, &plan, &route)
-        .map_err(|error| (None, error.to_string()))?;
+    let secret = authorize_live_send_secret(
+        ctx.state,
+        &selection,
+        account,
+        &plan,
+        &route,
+        LiveSendAccountGate::AllowDisabled,
+    )
+    .map_err(|error| (None, error.to_string()))?;
     let spec = if crate::custom_http::follows_redirects_with_secret(
         route.follow_redirects,
         secret.is_some(),
@@ -288,8 +295,15 @@ async fn execute_protocol_request(
             ));
         }
     };
-    confirm_live_send_secret(ctx.state, &selection, account, &plan, &route)
-        .map_err(|error| (None, error.to_string()))?;
+    confirm_live_send_secret(
+        ctx.state,
+        &selection,
+        account,
+        &plan,
+        &route,
+        LiveSendAccountGate::AllowDisabled,
+    )
+    .map_err(|error| (None, error.to_string()))?;
     let response = transport
         .send(InferenceHttpRequest {
             method: reqwest::Method::POST,

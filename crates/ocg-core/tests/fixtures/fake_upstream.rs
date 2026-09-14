@@ -88,6 +88,8 @@ impl SharedJournal {
         }
     }
 
+    // Keep each observed request field explicit in the shared test journal.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn record(
         &self,
         listener: &str,

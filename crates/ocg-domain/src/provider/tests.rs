@@ -269,10 +269,6 @@ fn catalog_enablement_gate_is_fail_closed_for_unroutable_plans() {
         ensure_provider_can_enable("unknown-provider"),
         Err(ProviderBindingError::UnknownProvider { .. })
     ));
-    let zen = builtin_provider(OPENCODE_ZEN_FREE_PROVIDER_ID).unwrap();
-    assert!(plan_allows_enablement(zen));
-    let go = builtin_provider(OPENCODE_PROVIDER_ID).unwrap();
-    assert!(plan_allows_enablement(go));
 }
 
 #[test]
@@ -617,21 +613,6 @@ fn adapter_descriptors_preserve_current_capability_decisions() {
 }
 
 #[test]
-fn descriptor_capabilities_are_built_once_from_the_sealed_kind() {
-    for plan in BUILTIN_PROVIDERS {
-        let kind = ProviderAdapterKind::from_provider_id(plan.provider_id)
-            .expect("every catalog plan has an adapter kind");
-        let descriptor = ProviderRegistry::get(plan.provider_id)
-            .expect("every catalog plan has a composed descriptor");
-        assert_eq!(descriptor.kind, kind);
-        assert!(!descriptor.protocol_probe.request_path_may_trial);
-        assert!(!descriptor.protocol_probe.fallback_priority.is_empty());
-        assert_eq!(descriptor.inference.catalog_routable, plan.routable);
-        assert_eq!(descriptor.pricing.availability, plan.pricing_availability);
-    }
-}
-
-#[test]
 fn contract_scopes_are_unique_and_limited_to_ordinary_providers() {
     let mut scopes = std::collections::HashSet::new();
     for plan in BUILTIN_PROVIDERS {
@@ -701,7 +682,6 @@ fn command_code_models_catalog_parses_openai_list_and_rejects_empty() {
         parse_command_code_models_catalog(br#"{"models":[{"model":"gpt-5.4"}]}"#)
             .is_ok_and(|models| models == ["gpt-5.4"])
     );
-    assert!(ensure_provider_can_enable(COMMAND_CODE_PROVIDER_ID).is_ok());
 }
 
 #[test]

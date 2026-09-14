@@ -126,14 +126,15 @@ async fn create_verified_enabled_custom(
         }))
         .await;
     assert_eq!(status, StatusCode::OK, "{draft}");
-    assert_eq!(draft["enabled"], true, "{draft}");
+    assert_eq!(draft["enabled"], false, "{draft}");
     assert_eq!(draft["verificationStatus"].as_str(), Some("pending"));
     let id = draft["id"].as_str().unwrap().to_string();
+    harness.enable_stored_account(&id);
     let (status, verified) = verify_account(harness, &id).await;
     assert_eq!(status, StatusCode::OK, "{verified}");
     assert_eq!(
         verified["enabled"], true,
-        "verify must keep the default-enabled card: {verified}"
+        "verify must not change an enabled card: {verified}"
     );
     assert_eq!(
         verified["verificationStatus"].as_str(),
@@ -169,8 +170,9 @@ async fn create_verified_enabled_custom_mapping(
         }))
         .await;
     assert_eq!(status, StatusCode::OK, "{draft}");
-    let id = draft["id"].as_str().unwrap();
-    let (status, verified) = verify_account(harness, id).await;
+    let id = draft["id"].as_str().unwrap().to_string();
+    harness.enable_stored_account(&id);
+    let (status, verified) = verify_account(harness, &id).await;
     assert_eq!(status, StatusCode::OK, "{verified}");
     verified
 }
@@ -207,8 +209,8 @@ async fn verification_failure_persists_failed_without_enabling() {
     let (status, body) = verify_account(&harness, &id).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(
-        body["enabled"], true,
-        "failed verify must not disable a default-enabled Custom card: {body}"
+        body["enabled"], false,
+        "failed verify must not change the card's enabled state: {body}"
     );
     assert_eq!(
         body["verificationStatus"].as_str(),
@@ -1463,8 +1465,8 @@ async fn oversized_verification_body_fails_cleanly() {
     let (status, body) = verify_account(&harness, &id).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(
-        body["enabled"], true,
-        "failed verify must not disable a default-enabled Custom card: {body}"
+        body["enabled"], false,
+        "failed verify must not change the card's enabled state: {body}"
     );
     assert_eq!(body["verificationStatus"].as_str(), Some("failed"));
     assert!(

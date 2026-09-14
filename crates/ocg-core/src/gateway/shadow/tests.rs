@@ -135,13 +135,46 @@ fn custom_runtime(account_id: &str, model_id: &str) -> CustomAccountRuntime {
     }
 }
 
+fn refreshed_go_persisted() -> crate::provider_contracts::PersistedContracts {
+    let now = Utc::now();
+    let scope = crate::provider_contracts::ContractScope::provider(OPENCODE_PROVIDER_ID);
+    let mut persisted = crate::provider_contracts::PersistedContracts::default();
+    persisted.scopes.insert(
+        scope.clone(),
+        crate::provider_contracts::PersistedScopeRow {
+            scope: scope.clone(),
+            catalog_models: vec!["glm-5.2".into()],
+            catalog_refreshed_at: Some(now),
+            catalog_source: crate::provider_contracts::CATALOG_SOURCE_OPENCODE_MODELS.into(),
+            catalog_source_url: crate::provider::OPENCODE_GO_BASE_URL.into(),
+            revision: 1,
+            updated_at: now,
+        },
+    );
+    persisted.evidence.insert(
+        scope.clone(),
+        vec![crate::provider_contracts::PersistedModelProtocol {
+            scope,
+            model_id: "glm-5.2".into(),
+            protocol: UpstreamProtocolKind::ChatCompletions,
+            source: crate::provider_contracts::ContractEvidenceSource::Static,
+            verified_at: None,
+            observed_at: None,
+            last_probe_result: None,
+            last_probe_at: None,
+            last_probe_error: None,
+        }],
+    );
+    persisted
+}
+
 fn contracts_for(
     runtimes: &[CustomAccountRuntime],
 ) -> crate::provider_contracts::EffectiveContractSet {
     crate::provider_contracts::build_effective_contracts(
         &crate::zen_models::ZenFreeModelCatalog::default(),
         runtimes,
-        crate::provider_contracts::PersistedContracts::default(),
+        refreshed_go_persisted(),
     )
 }
 
@@ -169,6 +202,8 @@ fn dynamic_runtime() -> DynamicProviderRuntime {
     }
 }
 
+/// Shadow plan snapshot needs the full routing scene as distinct borrows.
+#[allow(clippy::too_many_arguments)]
 fn plan_input<'a>(
     accounts: &'a [Account],
     config: &'a AppConfig,
@@ -299,7 +334,7 @@ fn shadow_matches_live_materialize_for_dynamic_and_custom_fixtures() {
     )
     .unwrap();
     let empty_custom = HashMap::new();
-    let static_contracts = static_contracts();
+    let base_contracts = static_contracts();
     let dyn_set = materialize_account_routes(
         std::slice::from_ref(&dyn_account),
         &config,
@@ -312,7 +347,7 @@ fn shadow_matches_live_materialize_for_dynamic_and_custom_fixtures() {
         &empty_custom,
         &HashMap::new(),
         None,
-        &static_contracts,
+        &base_contracts,
         &dynamics,
     )
     .unwrap();
@@ -326,7 +361,7 @@ fn shadow_matches_live_materialize_for_dynamic_and_custom_fixtures() {
         &dyn_body,
         &empty_custom,
         &goat_runtimes,
-        &static_contracts,
+        &base_contracts,
         &dynamics,
     );
     let dyn_shadow = plan_shadow_attempts(&dyn_input).unwrap();
@@ -342,12 +377,8 @@ fn shadow_matches_live_materialize_for_dynamic_and_custom_fixtures() {
         CredentialHandle::Account { id: "dyn-1".into() }
     );
     assert_attempts_match(&dyn_live, &dyn_shadow.attempts);
-}
 
-#[test]
-fn shadow_matches_live_for_builtin_go_alias_when_a_fixture_exists() {
     // Cheap fixture from materialize/tests.rs: glm-5.2 is a published Go alias.
-    let config = AppConfig::default();
     let accounts = [go_account("go-1")];
     let body = chat_body("glm-5.2");
     let parsed = parse_client_request(ApiFormat::ChatCompletions, body.clone()).unwrap();
@@ -386,14 +417,19 @@ fn shadow_matches_live_for_builtin_go_alias_when_a_fixture_exists() {
     );
     let shadow = plan_shadow_attempts(&input).unwrap();
     let live = live_shadow_attempts(&set.routes, &config, &[]);
-    assert_eq!(live.len(), 1);
-    assert_eq!(live[0].account_id, "go-1");
-    assert_eq!(live[0].upstream_model, "glm-5.2");
-    assert_eq!(live[0].adapter_kind, ProviderAdapterKind::OpenCodeGo);
-    assert_eq!(live[0].protocol, ApiFormat::ChatCompletions);
+    assert_eq!(live.len(), 1, "go-alias");
+    assert_eq!(live[0].account_id, "go-1", "go-alias");
+    assert_eq!(live[0].upstream_model, "glm-5.2", "go-alias");
+    assert_eq!(
+        live[0].adapter_kind,
+        ProviderAdapterKind::OpenCodeGo,
+        "go-alias"
+    );
+    assert_eq!(live[0].protocol, ApiFormat::ChatCompletions, "go-alias");
     assert_eq!(
         live[0].credential_handle,
-        CredentialHandle::Account { id: "go-1".into() }
+        CredentialHandle::Account { id: "go-1".into() },
+        "go-alias"
     );
     assert_attempts_match(&live, &shadow.attempts);
 }
@@ -598,6 +634,33 @@ async fn r07_gateway_path_sends_once_whether_compare_is_off_or_on() {
     config.proxy_mode = ProxyMode::Direct;
     state.set_config(config).unwrap();
     state.db.lock().create_account(&go_account("go-1")).unwrap();
+    let now = Utc::now();
+    state
+        .db
+        .lock()
+        .set_contract_catalog(
+            &crate::provider_contracts::ContractScope::provider(OPENCODE_PROVIDER_ID),
+            &["glm-5.2".to_string()],
+            Some(now),
+            crate::provider_contracts::CATALOG_SOURCE_OPENCODE_MODELS,
+            crate::provider::OPENCODE_GO_BASE_URL,
+            now,
+        )
+        .unwrap();
+    state
+        .db
+        .lock()
+        .apply_official_protocol_baseline(
+            &crate::provider_contracts::ContractScope::provider(OPENCODE_PROVIDER_ID),
+            &["glm-5.2".to_string()],
+            &crate::official_protocols::OfficialProtocolBaseline::mapped([(
+                "glm-5.2",
+                UpstreamProtocolKind::ChatCompletions,
+            )]),
+            now,
+        )
+        .unwrap();
+    state.reload_provider_contracts().unwrap();
 
     let port = {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

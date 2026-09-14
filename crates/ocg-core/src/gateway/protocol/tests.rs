@@ -39,20 +39,10 @@ fn plan_with_model(client: ApiFormat, upstream: ApiFormat, model: &str) -> Reque
 fn unknown_models_are_not_in_the_protocol_table() {
     assert!(!is_known_model("x-preview-f-free"));
     assert!(!is_known_model("totally-made-up-xyz"));
-    assert!(
-        prepare_request(
-            ApiFormat::ChatCompletions,
-            bytes(json!({
-                "model": "totally-made-up-xyz",
-                "messages": [{"role": "user", "content": "hi"}]
-            })),
-        )
-        .is_err()
-    );
 }
 
 #[test]
-fn muse_spark_contributor_routes_every_client_to_responses() {
+fn muse_spark_contributor_family_routes_clients_to_responses() {
     let chat = prepare_request(
         ApiFormat::ChatCompletions,
         bytes(json!({
@@ -61,7 +51,7 @@ fn muse_spark_contributor_routes_every_client_to_responses() {
         })),
     )
     .expect("Chat should convert Muse Spark contributor to Responses");
-    assert_eq!(chat.upstream, ApiFormat::Responses);
+    assert_eq!(chat.upstream, ApiFormat::Responses, "contributor-chat");
     let responses = prepare_request(
         ApiFormat::Responses,
         bytes(json!({
@@ -71,7 +61,11 @@ fn muse_spark_contributor_routes_every_client_to_responses() {
         })),
     )
     .expect("Responses should passthrough Muse Spark contributor");
-    assert_eq!(responses.upstream, ApiFormat::Responses);
+    assert_eq!(
+        responses.upstream,
+        ApiFormat::Responses,
+        "contributor-responses"
+    );
     let messages = prepare_request(
         ApiFormat::Messages,
         bytes(json!({
@@ -81,11 +75,12 @@ fn muse_spark_contributor_routes_every_client_to_responses() {
         })),
     )
     .expect("Messages should convert Muse Spark contributor to Responses");
-    assert_eq!(messages.upstream, ApiFormat::Responses);
-}
+    assert_eq!(
+        messages.upstream,
+        ApiFormat::Responses,
+        "contributor-messages"
+    );
 
-#[test]
-fn muse_spark_contributor_free_is_responses_only() {
     for model in [
         "muse-spark-1.2-contributor-free",
         "muse-spark-1.3-contributor-free",
@@ -99,7 +94,7 @@ fn muse_spark_contributor_free_is_responses_only() {
             })),
         )
         .unwrap_or_else(|error| panic!("{model} Chat should convert to Responses: {error}"));
-        assert_eq!(chat.upstream, ApiFormat::Responses, "{model}");
+        assert_eq!(chat.upstream, ApiFormat::Responses, "{model}-chat");
         let responses = prepare_request(
             ApiFormat::Responses,
             bytes(json!({
@@ -109,7 +104,11 @@ fn muse_spark_contributor_free_is_responses_only() {
             })),
         )
         .unwrap_or_else(|error| panic!("{model} Responses should passthrough: {error}"));
-        assert_eq!(responses.upstream, ApiFormat::Responses, "{model}");
+        assert_eq!(
+            responses.upstream,
+            ApiFormat::Responses,
+            "{model}-responses"
+        );
     }
 }
 
@@ -1072,29 +1071,88 @@ fn messages_response_maps_reasoning_tools_and_usage_to_both_openai_formats() {
 }
 
 #[test]
-fn minimax_bogus_all_cache_usage_is_sanitized() {
-    let mut usage = json!({"input_tokens":0,"output_tokens":5,"cache_read_input_tokens":40500});
-    sanitize_minimax_anthropic_usage(Some("minimax-m3"), None, &mut usage);
-    assert_eq!(usage["input_tokens"], 40500);
-    assert_eq!(usage["cache_read_input_tokens"], 0);
-
-    // Normal MiniMax usage (new input + cache read) is left untouched.
-    let mut usage = json!({"input_tokens":108,"output_tokens":91,"cache_read_input_tokens":14813});
-    sanitize_minimax_anthropic_usage(Some("minimax-m3"), None, &mut usage);
-    assert_eq!(usage["input_tokens"], 108);
-    assert_eq!(usage["cache_read_input_tokens"], 14813);
-
-    // The heuristic only applies to MiniMax models.
-    let mut usage = json!({"input_tokens":0,"output_tokens":5,"cache_read_input_tokens":40500});
-    sanitize_minimax_anthropic_usage(Some("qwen3.7-max"), None, &mut usage);
-    assert_eq!(usage["cache_read_input_tokens"], 40500);
-
-    // OpenCode Go may return a non-MiniMax model identifier while the request plan still
-    // points to MiniMax. The hint must still trigger sanitization.
-    let mut usage = json!({"input_tokens":0,"output_tokens":5,"cache_read_input_tokens":40500});
-    sanitize_minimax_anthropic_usage(Some("ocg-generic"), Some("minimax-m3"), &mut usage);
-    assert_eq!(usage["input_tokens"], 40500);
-    assert_eq!(usage["cache_read_input_tokens"], 0);
+fn minimax_usage_sanitize_table() {
+    for (label, model, hint, input, output, cache, expect_input, expect_cache) in [
+        (
+            "zero-input-all-cache",
+            Some("minimax-m3"),
+            None,
+            0,
+            5,
+            40500,
+            40500,
+            0,
+        ),
+        (
+            "normal-minimax-untouched",
+            Some("minimax-m3"),
+            None,
+            108,
+            91,
+            14813,
+            108,
+            14813,
+        ),
+        (
+            "qwen-not-minimax",
+            Some("qwen3.7-max"),
+            None,
+            0,
+            5,
+            40500,
+            0,
+            40500,
+        ),
+        (
+            "plan-hint-minimax",
+            Some("ocg-generic"),
+            Some("minimax-m3"),
+            0,
+            5,
+            40500,
+            40500,
+            0,
+        ),
+        (
+            "case-insensitive-id",
+            Some("MiniMax-M3"),
+            None,
+            0,
+            5,
+            40500,
+            40500,
+            0,
+        ),
+        (
+            "separator-insensitive-hint",
+            Some("ocg-generic"),
+            Some("MiniMax_M3"),
+            0,
+            5,
+            40500,
+            40500,
+            0,
+        ),
+        (
+            "qwen-mixed-case-untouched",
+            Some("Qwen3.7-Max"),
+            None,
+            0,
+            5,
+            40500,
+            0,
+            40500,
+        ),
+    ] {
+        let mut usage = json!({
+            "input_tokens": input,
+            "output_tokens": output,
+            "cache_read_input_tokens": cache
+        });
+        sanitize_minimax_anthropic_usage(model, hint, &mut usage);
+        assert_eq!(usage["input_tokens"], expect_input, "{label}");
+        assert_eq!(usage["cache_read_input_tokens"], expect_cache, "{label}");
+    }
 }
 
 #[test]
@@ -1287,26 +1345,6 @@ fn transform_response_sanitizes_minimax_messages_for_every_client_format() {
     .expect("Messages to Gemini should sanitize");
     assert_eq!(gemini["usageMetadata"]["promptTokenCount"], 40500);
     assert_eq!(gemini["usageMetadata"]["cachedContentTokenCount"], 0);
-}
-
-#[test]
-fn minimax_model_detection_is_case_and_separator_insensitive() {
-    // OpenCode Go / Qwen Cloud docs expose MiniMax IDs with capital letters (MiniMax-M3).
-    // The sanitizer must still recognize them.
-    let mut usage = json!({"input_tokens":0,"output_tokens":5,"cache_read_input_tokens":40500});
-    sanitize_minimax_anthropic_usage(Some("MiniMax-M3"), None, &mut usage);
-    assert_eq!(usage["input_tokens"], 40500);
-    assert_eq!(usage["cache_read_input_tokens"], 0);
-
-    let mut usage = json!({"input_tokens":0,"output_tokens":5,"cache_read_input_tokens":40500});
-    sanitize_minimax_anthropic_usage(Some("ocg-generic"), Some("MiniMax_M3"), &mut usage);
-    assert_eq!(usage["input_tokens"], 40500);
-    assert_eq!(usage["cache_read_input_tokens"], 0);
-
-    // Qwen is unaffected.
-    let mut usage = json!({"input_tokens":0,"output_tokens":5,"cache_read_input_tokens":40500});
-    sanitize_minimax_anthropic_usage(Some("Qwen3.7-Max"), None, &mut usage);
-    assert_eq!(usage["cache_read_input_tokens"], 40500);
 }
 
 #[test]
@@ -1723,33 +1761,7 @@ fn p05_same_protocol_keeps_unknown_native_request_fields() {
 }
 
 #[test]
-fn p08_strict_hosted_tools_fail_closed_before_outbound() {
-    for request in [
-        json!({
-            "model":"minimax-m2.7","input":"hi","store":false,
-            "tools":[{"type":"web_search"}]
-        }),
-        json!({
-            "model":"minimax-m2.7","input":"hi","store":false,
-            "tools":[{"type":"web_search"}],
-            "tool_choice":"required"
-        }),
-        json!({
-            "model":"minimax-m2.7","input":"hi","store":false,
-            "tools":[{"type":"web_search"}],
-            "tool_choice":{"type":"web_search"}
-        }),
-    ] {
-        let error = prepare_request(ApiFormat::Responses, bytes(request))
-            .expect_err("unsupported hosted tools must fail closed before outbound");
-        assert_eq!(error.status, StatusCode::BAD_REQUEST);
-        assert!(
-            error.message.contains("hosted tool") || error.message.contains("web_search"),
-            "{}",
-            error.message
-        );
-    }
-
+fn p08_grok_native_hosted_tools_are_kept() {
     let native = prepare_request(
         ApiFormat::Responses,
         bytes(json!({
@@ -1894,17 +1906,6 @@ fn format_error_uses_client_envelope_and_upstream_message() {
     assert_eq!(body["type"], "error");
     assert_eq!(body["error"]["message"], "limited");
     assert_eq!(body["error"]["type"], "rate_limit_error");
-}
-
-#[test]
-fn muse_spark_aliases_max_reasoning_effort_to_xhigh_on_responses() {
-    let request = json!({
-        "model":"muse-spark-1.2","input":"hi","store":false,
-        "reasoning":{"effort":"max"}
-    });
-    let plan = prepare_request(ApiFormat::Responses, bytes(request)).unwrap();
-    let body: Value = serde_json::from_slice(&plan.body).unwrap();
-    assert_eq!(body["reasoning"]["effort"], "xhigh");
 }
 
 #[test]

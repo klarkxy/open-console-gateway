@@ -1,5 +1,3 @@
-import type { WithoutExpectation } from "../api/dashboard-v3.ts";
-import type { OnboardingCommitRequest } from "../api/generated/dashboard-v4.ts";
 import type { ProviderCatalogEntry } from "../api/providers.ts";
 import { customEndpointUrlIssue } from "./custom-account.ts";
 
@@ -267,94 +265,6 @@ export function validateProviderDefinitionDraft(
     return "missing_replacement_key";
   }
   return null;
-}
-
-export function buildProviderDefinitionCreateBody(draft: ProviderDefinitionDraft): {
-  name: string;
-  endpointUrl: string;
-  upstreamProtocol: DynamicUpstreamProtocol;
-  authKind: DynamicAuthKind;
-  models: Array<{
-    publicModel: string;
-    upstreamModel: string;
-    /** Explicit per-model upstream; null inherits the supplier default. */
-    upstreamOverride: { protocol: DynamicUpstreamProtocol; endpointUrl: string } | null;
-  }>;
-  accountName?: string;
-  notes?: string;
-  key?: string;
-  presetId?: string;
-} {
-  const error = validateProviderDefinitionDraft(draft, { mode: "create" });
-  if (error) throw new Error(error);
-  const models = normalizeDynamicMappings(draft.models);
-  if (typeof models === "string") throw new Error(models);
-  const body: ReturnType<typeof buildProviderDefinitionCreateBody> = {
-    name: draft.name.trim(),
-    endpointUrl: draft.endpoint_url.trim(),
-    upstreamProtocol: draft.upstream_protocol as DynamicUpstreamProtocol,
-    authKind: draft.auth_kind as DynamicAuthKind,
-    models: models.map((mapping) => ({
-      publicModel: mapping.public_model,
-      upstreamModel: mapping.upstream_model,
-      upstreamOverride: mapping.upstream_override
-        ? { protocol: mapping.upstream_override.protocol, endpointUrl: mapping.upstream_override.endpoint_url }
-        : null,
-    })),
-  };
-  const accountName = draft.account_name.trim();
-  if (accountName) body.accountName = accountName;
-  const notes = draft.notes.trim();
-  if (notes) body.notes = notes;
-  const key = draft.key.trim();
-  if (dynamicAuthRequiresKey(draft.auth_kind) && key) body.key = key;
-  // Create omits provenance when manual; only a concrete preset ID is sent.
-  if (draft.preset_id) body.presetId = draft.preset_id;
-  return body;
-}
-
-export function buildOnboardingCommitRequest(
-  draft: ProviderDefinitionDraft,
-  operationId: string,
-): WithoutExpectation<OnboardingCommitRequest> {
-  const error = validateProviderDefinitionDraft(draft, { mode: "create" });
-  if (error) throw new Error(error);
-  const models = normalizeDynamicMappings(draft.models);
-  if (typeof models === "string") throw new Error(models);
-  const body: WithoutExpectation<OnboardingCommitRequest> = {
-    operationId,
-    connection: {
-      kind: "new",
-      templateId: draft.preset_id || "custom-http",
-      name: draft.name.trim(),
-      endpointUrl: draft.endpoint_url.trim(),
-      upstreamProtocol: draft.upstream_protocol as DynamicUpstreamProtocol,
-      authKind: draft.auth_kind as DynamicAuthKind,
-    },
-    targets: models.map((mapping) => ({
-      publicModel: mapping.public_model,
-      upstreamModel: mapping.upstream_model,
-      upstreamOverride: mapping.upstream_override
-        ? { protocol: mapping.upstream_override.protocol, endpointUrl: mapping.upstream_override.endpoint_url }
-        : null,
-    })),
-  };
-  if (draft.auth_kind === "none") {
-    body.authorization = { kind: "none" };
-  } else if (dynamicAuthRequiresKey(draft.auth_kind)) {
-    const secretInput = draft.key.trim();
-    if (secretInput) {
-      const accountLabel = draft.account_name.trim();
-      const notes = draft.notes.trim();
-      body.authorization = {
-        kind: "api_key",
-        secretInput,
-        ...(accountLabel ? { accountLabel } : {}),
-        ...(notes ? { notes } : {}),
-      };
-    }
-  }
-  return body;
 }
 
 export function buildProviderDefinitionUpdateBody(

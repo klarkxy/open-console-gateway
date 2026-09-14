@@ -118,18 +118,6 @@ export function customApiUrlNeedsManualModels(
     && !customApiUrlSupportsModelDiscovery(endpointUrl, protocol);
 }
 
-/** Discovery maps each exact upstream ID to the same public name by default. */
-export function expandCustomModelCapabilities(
-  modelIds: readonly string[],
-  upstreamProtocol: AccountProtocol,
-): Pick<AccountModelCapabilityInput, "public_model" | "upstream_model" | "protocol">[] {
-  return modelIds.map((model) => ({
-    public_model: model,
-    upstream_model: model,
-    protocol: upstreamProtocol,
-  }));
-}
-
 export function normalizeCustomCapabilities(
   capabilities: readonly Pick<AccountModelCapabilityInput, "public_model" | "upstream_model" | "protocol">[],
   upstreamProtocol: AccountProtocol,

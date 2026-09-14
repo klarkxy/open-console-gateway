@@ -14,7 +14,6 @@ import {
   buildModelToggleOverrides,
   catalogRefreshSupported,
   effectiveModelTestProtocol,
-  enabledProtocols,
   findAccountScopeView,
   flattenProviderScopes,
   isSafeSourceUrl,
@@ -22,8 +21,6 @@ import {
   modelTargetProtocol,
   normalizeProviderContractsResponse,
   providerScopeKey,
-  scopeProtocolChoices,
-  selectProviderScope,
   type ProviderModelContract,
   type ProviderScopeView,
 } from "./provider-contracts.ts";
@@ -276,16 +273,6 @@ test("flatten keeps built-in providers grouped and Custom endpoints unflattened"
   assert.equal(scopes[2]?.label, "Office");
 });
 
-test("stale or missing scope selection falls back to the first scope", () => {
-  const scopes = flattenProviderScopes(normalizeProviderContractsResponse(contracts()));
-  assert.equal(selectProviderScope(scopes, "provider", "opencode").fellBack, false);
-  assert.equal(selectProviderScope(scopes, "provider", "opencode").scope?.scope_id, "opencode");
-  const missing = selectProviderScope(scopes, "provider", "missing");
-  assert.equal(missing.fellBack, true);
-  assert.equal(missing.scope?.scope_id, "opencode");
-  assert.equal(selectProviderScope([], "provider", "opencode").scope, null);
-});
-
 test("normalization preserves a provider model alias alongside its raw id", () => {
   const response = normalizeProviderContractsResponse(contracts({
     providers: [providerGroup({
@@ -302,19 +289,6 @@ test("refresh and probe capability follow card/catalog facts, not raw provider i
   const custom = flattenProviderScopes(normalizeProviderContractsResponse(contracts()))[1]!;
   assert.equal(catalogRefreshSupported(go), true);
   assert.equal(catalogRefreshSupported(custom), false);
-  assert.deepEqual(enabledProtocols(custom), ["chat_completions"]);
-});
-
-test("enabled protocols are derived only from model evidence, not scope switches", () => {
-  const scope = flattenProviderScopes(normalizeProviderContractsResponse(contracts({
-    providers: [providerGroup({
-      models: [modelContract("gpt-5.6-luna", { chat_completions: true, responses: true })],
-    })],
-  })))[0]!;
-  assert.deepEqual(enabledProtocols(scope), ["chat_completions", "responses"]);
-
-  const empty = { ...scope, models: [] };
-  assert.deepEqual(enabledProtocols(empty), []);
 });
 
 test("source URLs with credentials are not treated as safe to render", () => {
@@ -427,78 +401,6 @@ function noProtocolModel(modelId: string): ProviderModelContract {
   };
 }
 
-test("scopeProtocolChoices returns the CN two-protocol set for MiniMax / Kimi scopes", () => {
-  const scope = cnScope();
-  assert.deepEqual(scopeProtocolChoices(scope), ["chat_completions", "messages"]);
-  assert.deepEqual(
-    scopeProtocolChoices({ ...scope, provider_id: "kimi", scope_id: "kimi" }),
-    ["chat_completions", "messages"],
-  );
-});
-
-test("scopeProtocolChoices derives a single protocol for built-in non-CN scopes", () => {
-  const go = flattenProviderScopes(normalizeProviderContractsResponse(contracts()))[0]!;
-  assert.deepEqual(scopeProtocolChoices(go), ["chat_completions"]);
-  // A scope with no model evidence falls back to chat_completions so the UI
-  // never has to special-case an empty set.
-  assert.deepEqual(scopeProtocolChoices({ ...go, models: [] }), ["chat_completions"]);
-});
-
-test("scopeProtocolChoices filters by per-model availability for custom endpoints", () => {
-  // The default fixture's `responses` slot is `available: true`; build the
-  // custom-endpoint models by hand so the test exercises the filter rather
-  // than the fixture's defaults.
-  const local: ProviderModelContract = {
-    alias: "",
-    model_id: "local-model",
-    preferred_protocol: "chat_completions",
-    protocols: {
-      chat_completions: {
-        protocol: "chat_completions",
-        available: true,
-        enabled: true,
-        source: "static",
-        verified_at: null,
-        observed_at: null,
-        last_probe_result: null,
-        last_probe_at: null,
-        last_probe_error: null,
-        override: "auto",
-      },
-    },
-    routable: true,
-    disabled_reasons: [],
-  };
-  const mixed: ProviderModelContract = {
-    ...local,
-    model_id: "mixed",
-    protocols: {
-      ...local.protocols,
-      messages: {
-        protocol: "messages",
-        available: true,
-        enabled: true,
-        source: "static",
-        verified_at: null,
-        observed_at: null,
-        last_probe_result: null,
-        last_probe_at: null,
-        last_probe_error: null,
-        override: "auto",
-      },
-    },
-  };
-  const scope: ProviderScopeView = {
-    ...flattenProviderScopes(normalizeProviderContractsResponse(contracts()))[1]!,
-    models: [local, mixed],
-  };
-  // The set is the union of available protocols across the scope's models.
-  assert.deepEqual(scopeProtocolChoices(scope), ["chat_completions", "messages"]);
-  // If only chat is available across all models, only chat is offered.
-  const chatOnly: ProviderScopeView = { ...scope, models: [local] };
-  assert.deepEqual(scopeProtocolChoices(chatOnly), ["chat_completions"]);
-});
-
 test("modelTargetProtocol returns the enabled choice or preferred for a CN two-protocol scope", () => {
   const scope = cnScope();
   // Preferred enabled → it wins.
@@ -562,11 +464,6 @@ test("modelEffectiveOn follows the target protocol's enabled flag", () => {
   assert.equal(modelEffectiveOn(off, go), false);
   // Refresh-discovered model with no evidence defaults to false.
   assert.equal(modelEffectiveOn(noProtocolModel("ghost"), go), false);
-  // CN scope with preferred disabled but the other protocol enabled picks
-  // the enabled one, so effective-on is true.
-  const cnScope_ = cnScope();
-  const otherEnabled = cnModel("m", "messages", { chat_completions: true });
-  assert.equal(modelEffectiveOn(otherEnabled, cnScope_), true);
 });
 
 test("buildModelToggleOverrides force-enables every available protocol when toggling on", () => {

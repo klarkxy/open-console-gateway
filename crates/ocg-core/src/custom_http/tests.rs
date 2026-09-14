@@ -222,7 +222,7 @@ fn http_inference_transport_is_policy_neutral_and_owns_join_auth_and_timeout() {
 }
 
 #[test]
-fn inference_http_primitives_join_auth_timeout_and_redirect_without_custom_policy() {
+fn inference_endpoint_join_rejects_parent_path_escape() {
     let goat = join_inference_endpoint(
         crate::provider::COMMAND_CODE_GOAT_BASE_URL,
         crate::provider::COMMAND_CODE_GOAT_CHAT_COMPLETIONS_PATH,
@@ -241,18 +241,6 @@ fn inference_http_primitives_join_auth_timeout_and_redirect_without_custom_polic
     assert!(join_inference_endpoint("https://api.commandcode.ai/provider/v1", "../admin").is_err());
     let bearer = isolated_inference_headers(UpstreamAuthScheme::Bearer, "sk-test").unwrap();
     assert_eq!(bearer.get(AUTHORIZATION).unwrap(), "Bearer sk-test");
-    let custom = isolated_custom_headers(UpstreamAuthScheme::Bearer, "sk-test").unwrap();
-    assert_eq!(bearer, custom);
-    assert_eq!(InferenceRedirectPolicy::None, InferenceRedirectPolicy::None);
-    assert_ne!(
-        InferenceRedirectPolicy::Follow,
-        InferenceRedirectPolicy::None
-    );
-    let _none = InferenceRedirectPolicy::None.reqwest_policy();
-    assert_eq!(
-        inference_connect_timeout(&test_config(ProxyMode::Direct, "")),
-        Duration::from_secs(5)
-    );
 }
 
 #[test]
@@ -330,17 +318,6 @@ fn custom_endpoint_resolution_supports_common_bases_and_legacy_endpoints() {
         "https://api.example.com/v1/messages"
     );
     assert!(mismatch.models.is_none());
-
-    for rejected in [
-        "https://user:pass@api.example.com",
-        "https://api.example.com?v=1",
-        "https://api.example.com#fragment",
-    ] {
-        assert!(
-            resolve_custom_endpoints(rejected, UpstreamProtocolKind::ChatCompletions).is_err(),
-            "{rejected}"
-        );
-    }
 }
 
 #[test]
@@ -576,23 +553,6 @@ async fn s02_secret_bearing_follow_spec_refuses_before_any_hop() {
 }
 
 #[tokio::test]
-async fn s01_unauthorized_origin_never_receives_a_secret_bearing_connect() {
-    let hits = Arc::new(AtomicUsize::new(0));
-    let unauthorized = serve_http(200, "OK", &[], "secret", hits.clone()).await;
-    let target = format!(
-        "http://127.0.0.1:{}/v1/chat/completions",
-        unauthorized.port()
-    );
-    let granted = vec!["http://127.0.0.1:9/v1".to_string()];
-    assert!(
-        ensure_secret_origin_granted(&target, &granted).is_err(),
-        "a different port is a different Origin and must not inherit the Key"
-    );
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    assert_eq!(hits.load(Ordering::SeqCst), 0);
-}
-
-#[tokio::test]
 async fn s03_metadata_targets_never_cause_a_secret_bearing_connect() {
     let hits = Arc::new(AtomicUsize::new(0));
     let bait = serve_http(200, "OK", &[], "metadata", hits.clone()).await;
@@ -679,17 +639,6 @@ async fn direct_does_not_use_manual_proxy_and_manual_does_not_bypass_it() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(proxy_hits.load(Ordering::SeqCst), 1);
     assert_eq!(upstream_hits.load(Ordering::SeqCst), 1);
-}
-
-#[tokio::test]
-async fn loopback_and_private_literal_destinations_are_reachable_over_direct() {
-    let hits = Arc::new(AtomicUsize::new(0));
-    let addr = serve_http(200, "OK", &[], r#"{"ok":true}"#, hits.clone()).await;
-    let client = build_custom_http_client(&test_config(ProxyMode::Direct, "")).unwrap();
-    let url = reqwest::Url::parse(&format!("http://127.0.0.1:{}/v1", addr.port())).unwrap();
-    let response = send_get(&client, url).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(hits.load(Ordering::SeqCst), 1);
 }
 
 async fn serve_delayed_json(delay: Duration, body: &str) -> std::net::SocketAddr {

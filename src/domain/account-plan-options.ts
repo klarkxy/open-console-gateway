@@ -4,7 +4,6 @@ import type { PlanDefinition } from "./plans.ts";
 import {
   PLAN_DEFINITIONS,
   dynamicPlanDefinition,
-  findCatalogEntry,
   planFamilyLabel,
   planCreateDisabledReason,
 } from "./plans.ts";
@@ -15,8 +14,6 @@ import { providerPresetOfferingForId } from "./provider-presets.ts";
  * Plan-option list for the Add Account chooser. Backend-owned singletons
  * (Zen Free) are omitted: they are not created here. Remaining families stay
  * visible so unavailable choices still explain why they cannot be created.
- * Unroutable-but-creatable families appear as drafts instead of implying they
- * will route.
  */
 
 export interface PlanOption {
@@ -29,31 +26,6 @@ export interface PlanOption {
   /** Honest copy for selectable-but-not-yet-routable families. */
   creationHint: MessageKey | "";
   managed: boolean;
-}
-
-export type PlanChooserGroupId = "available" | "draft" | "unavailable";
-
-export interface PlanChooserGroup {
-  id: PlanChooserGroupId;
-  label: MessageKey;
-  options: PlanOption[];
-}
-
-const GROUP_ORDER: readonly PlanChooserGroupId[] = ["available", "draft", "unavailable"];
-
-const GROUP_LABEL: Record<PlanChooserGroupId, MessageKey> = {
-  available: "可添加",
-  draft: "草稿方案",
-  unavailable: "暂不可用",
-};
-
-/** True when the family's provider is routable according to the catalog. */
-function planFamilyRoutable(
-  plan: PlanDefinition,
-  catalog: readonly ProviderCatalogEntry[] | null | undefined,
-): boolean {
-  if (!catalog?.length) return false;
-  return findCatalogEntry(catalog, plan.provider_id)?.routable === true;
 }
 
 function builtinOption(
@@ -101,31 +73,6 @@ export function buildPlanOptions(
     .filter(isDynamicCatalogEntry)
     .map(dynamicOption);
   return [...builtin, ...dynamic];
-}
-
-export function planChooserGroupId(
-  option: PlanOption,
-  catalog: readonly ProviderCatalogEntry[] | null | undefined,
-): PlanChooserGroupId {
-  if (option.disabled) return "unavailable";
-  if (!catalog?.length) return "available";
-  return planFamilyRoutable(option.plan, catalog) ? "available" : "draft";
-}
-
-export function buildPlanChooserGroups(
-  catalog: readonly ProviderCatalogEntry[] | null | undefined,
-): PlanChooserGroup[] {
-  const buckets: Record<PlanChooserGroupId, PlanOption[]> = {
-    available: [],
-    draft: [],
-    unavailable: [],
-  };
-  for (const option of buildPlanOptions(catalog)) {
-    buckets[planChooserGroupId(option, catalog)].push(option);
-  }
-  return GROUP_ORDER
-    .filter((id) => buckets[id].length > 0)
-    .map((id) => ({ id, label: GROUP_LABEL[id], options: buckets[id] }));
 }
 
 export interface PlanOfferingSplit {

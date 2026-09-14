@@ -9,7 +9,9 @@ use axum::routing::any;
 use ocg_core::dashboard_v3::{
     AccountUpstreamProtocol, ERROR_INTERNAL, ERROR_INVALID_JSON, ERROR_INVALID_REQUEST,
     ERROR_MISSING_EXPECTED_REVISION, ERROR_NOT_FOUND, ERROR_REVISION_CONFLICT, ERROR_UNAUTHORIZED,
-    ProtocolProbeResponse,
+    OfficialProtocolBaseline, ProtocolProbeResponse,
+    install_official_protocol_fetch_fallback_chat_for_tests,
+    install_official_protocol_fetch_for_tests,
 };
 use ocg_core::gateway::provider_adapter::install_goat_loopback_route_for_test;
 use ocg_core::models::{ProxyListDirection, ProxyMode};
@@ -18,8 +20,8 @@ use ocg_core::provider::{
     OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID, UpstreamProtocolKind,
 };
 use ocg_core::provider_contracts::{
-    CATALOG_SOURCE_OPENCODE_MODELS, ContractScope, PersistedModelProtocol, ProbeResultKind,
-    ProtocolOverrideState,
+    CATALOG_SOURCE_OPENCODE_MODELS, ContractEvidenceSource, ContractScope, PersistedModelProtocol,
+    ProbeResultKind, ProtocolOverrideState,
 };
 use reqwest::{Method, StatusCode};
 use serde_json::{Map, Value, json};
@@ -30,6 +32,76 @@ use std::time::Duration;
 mod harness;
 
 use harness::{V3Harness, start_loopback, start_public};
+
+fn seed_probe_catalogs(harness: &V3Harness) {
+    let now = chrono::Utc::now();
+    {
+        let db = harness.state.db.lock();
+        for (provider_id, models, source) in [
+            (
+                OPENCODE_PROVIDER_ID,
+                &["grok-4.5", "glm-5.2", "glm-5.3", "future-go-model"][..],
+                CATALOG_SOURCE_OPENCODE_MODELS,
+            ),
+            (
+                OPENCODE_ZEN_FREE_PROVIDER_ID,
+                &["mimo-v2.5-free"][..],
+                "official_zen",
+            ),
+            (
+                MINIMAX_PROVIDER_ID,
+                &["MiniMax-M3"][..],
+                "minimax_cn_get_models",
+            ),
+            (KIMI_PROVIDER_ID, &["kimi-k3"][..], "kimi_cn_get_models"),
+            (
+                COMMAND_CODE_PROVIDER_ID,
+                &[
+                    "claude-fable-5",
+                    "deepseek/deepseek-v4-flash",
+                    "claude-sonnet-5",
+                ][..],
+                "command_code_get_models",
+            ),
+        ] {
+            db.set_contract_catalog(
+                &ContractScope::provider(provider_id),
+                &models
+                    .iter()
+                    .map(|model| (*model).to_string())
+                    .collect::<Vec<_>>(),
+                Some(now),
+                source,
+                "https://example.test/models",
+                now,
+            )
+            .unwrap();
+        }
+        db.apply_official_protocol_baseline(
+            &ContractScope::provider(OPENCODE_PROVIDER_ID),
+            &[
+                "grok-4.5".to_string(),
+                "glm-5.2".to_string(),
+                "glm-5.3".to_string(),
+                "future-go-model".to_string(),
+            ],
+            &OfficialProtocolBaseline::mapped([
+                ("grok-4.5", UpstreamProtocolKind::Responses),
+                ("glm-5.2", UpstreamProtocolKind::ChatCompletions),
+                ("glm-5.3", UpstreamProtocolKind::ChatCompletions),
+            ]),
+            now,
+        )
+        .unwrap();
+    }
+    harness.state.reload_provider_contracts().unwrap();
+}
+
+async fn start_probes(name: &str) -> V3Harness {
+    let harness = start_loopback(name).await;
+    seed_probe_catalogs(&harness);
+    harness
+}
 
 const GO_KEY: &str = "sk-probe-secret-key";
 const CUSTOM_KEY: &str = "custom-x-api-key";
@@ -331,10 +403,12 @@ async fn create_go_account_with(harness: &V3Harness, name: &str, key: &str) -> S
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{created}");
-    created["account"]["id"]
+    let id = created["account"]["id"]
         .as_str()
         .expect("created Go account id")
-        .to_string()
+        .to_string();
+    harness.enable_account(&id);
+    id
 }
 
 async fn create_goat_account(harness: &V3Harness) -> String {
@@ -353,10 +427,12 @@ async fn create_goat_account(harness: &V3Harness) -> String {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{created}");
-    created["account"]["id"]
+    let id = created["account"]["id"]
         .as_str()
         .expect("created GOAT account id")
-        .to_string()
+        .to_string();
+    harness.enable_account(&id);
+    id
 }
 
 fn point_upstream(harness: &V3Harness, base_url: &str) {
@@ -444,7 +520,7 @@ async fn opencode_static_protocol_reset_requires_the_v3_session() {
 #[tokio::test]
 async fn opencode_static_protocol_reset_is_cas_protected_and_restores_current_catalog_deterministically()
  {
-    let harness = start_loopback("static-protocol-reset").await;
+    let harness = start_probes("static-protocol-reset").await;
     let scope = go_scope();
     let models = vec!["grok-4.5".to_string(), "future-go-model".to_string()];
     let now = chrono::Utc::now();
@@ -462,6 +538,10 @@ async fn opencode_static_protocol_reset_is_cas_protected_and_restores_current_ca
         )
         .unwrap();
     harness.state.reload_provider_contracts().unwrap();
+    let _docs =
+        install_official_protocol_fetch_for_tests(harness.state.process_generation(), |_| {
+            OfficialProtocolBaseline::mapped([("grok-4.5", UpstreamProtocolKind::Responses)])
+        });
 
     let stale = json!({
         "expectedRevision": harness.state.settings_revision().saturating_sub(1),
@@ -522,10 +602,10 @@ async fn opencode_static_protocol_reset_is_cas_protected_and_restores_current_ca
         .iter()
         .find(|model| model["modelId"] == "future-go-model")
         .unwrap();
-    for protocol in ["chat_completions", "responses", "messages"] {
-        assert_eq!(future["protocols"][protocol]["override"], "force_off");
-        assert_eq!(future["protocols"][protocol]["enabled"], false);
-    }
+    assert_eq!(future["protocols"]["chat_completions"]["override"], "auto");
+    assert_eq!(future["protocols"]["chat_completions"]["enabled"], true);
+    assert_eq!(future["protocols"]["responses"]["override"], "force_off");
+    assert_eq!(future["protocols"]["messages"]["override"], "force_off");
     let (status, repeat) = send_json(
         &harness,
         Method::POST,
@@ -546,10 +626,61 @@ async fn opencode_static_protocol_reset_is_cas_protected_and_restores_current_ca
 }
 
 #[tokio::test]
-async fn zen_static_protocol_reset_restores_official_pairs_and_defaults_other_catalog_pairs_off() {
-    let harness = start_loopback("zen-static-protocol-reset").await;
+async fn opencode_static_protocol_reset_defaults_to_chat_when_official_docs_are_unavailable() {
+    let harness = start_probes("static-protocol-reset-docs-fallback").await;
+    let scope = go_scope();
+    let models = vec!["grok-4.5".to_string()];
+    let now = chrono::Utc::now();
+    harness
+        .state
+        .db
+        .lock()
+        .set_contract_catalog(
+            &scope,
+            &models,
+            Some(now),
+            CATALOG_SOURCE_OPENCODE_MODELS,
+            "https://example.test/models",
+            now,
+        )
+        .unwrap();
+    harness.state.reload_provider_contracts().unwrap();
+    let (status, reset) = send_json(
+        &harness,
+        Method::POST,
+        &static_reset_path(),
+        &cas(&harness, json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{reset}");
+    let opencode = reset["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|provider| provider["providerId"] == OPENCODE_PROVIDER_ID)
+        .unwrap();
+    let grok = opencode["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["modelId"] == "grok-4.5")
+        .unwrap();
+    assert_eq!(grok["protocols"]["chat_completions"]["override"], "auto");
+    assert_eq!(grok["protocols"]["chat_completions"]["enabled"], true);
+    assert_eq!(grok["protocols"]["responses"]["override"], "force_off");
+    assert_eq!(grok["protocols"]["messages"]["override"], "force_off");
+    harness.stop();
+}
+
+#[tokio::test]
+async fn zen_static_protocol_reset_uses_go_docs_and_defaults_unknown_to_chat() {
+    let harness = start_probes("zen-static-protocol-reset").await;
     let scope = ContractScope::provider(OPENCODE_ZEN_FREE_PROVIDER_ID);
-    let models = vec!["mimo-v2.5-free".to_string(), "future-free".to_string()];
+    let models = vec![
+        "mimo-v2.5-free".to_string(),
+        "grok-4.6-free".to_string(),
+        "future-free".to_string(),
+    ];
     let now = chrono::Utc::now();
     harness
         .state
@@ -565,6 +696,13 @@ async fn zen_static_protocol_reset_restores_official_pairs_and_defaults_other_ca
         )
         .unwrap();
     harness.state.reload_provider_contracts().unwrap();
+    let _docs =
+        install_official_protocol_fetch_for_tests(harness.state.process_generation(), |_| {
+            OfficialProtocolBaseline::mapped([
+                ("mimo-v2.5", UpstreamProtocolKind::ChatCompletions),
+                ("grok-4.6", UpstreamProtocolKind::Responses),
+            ])
+        });
     let stale = json!({"expectedRevision": harness.state.settings_revision().saturating_sub(1), "processGeneration": harness.state.process_generation()});
     let (status, stale_body) = send_json(
         &harness,
@@ -600,16 +738,29 @@ async fn zen_static_protocol_reset_restores_official_pairs_and_defaults_other_ca
         "auto"
     );
     assert_eq!(official["protocols"]["chat_completions"]["enabled"], true);
+    assert!(official["protocols"]["responses"].is_null());
+    assert!(official["protocols"]["messages"].is_null());
+    let grok = zen["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["modelId"] == "grok-4.6-free")
+        .unwrap();
+    assert_eq!(grok["protocols"]["responses"]["override"], "auto");
+    assert_eq!(grok["protocols"]["responses"]["enabled"], true);
+    assert_eq!(
+        grok["protocols"]["chat_completions"]["override"],
+        "force_off"
+    );
+    assert!(grok["protocols"]["messages"].is_null());
     let future = zen["models"]
         .as_array()
         .unwrap()
         .iter()
         .find(|model| model["modelId"] == "future-free")
         .unwrap();
-    assert_eq!(
-        future["protocols"]["chat_completions"]["override"],
-        "force_off"
-    );
+    assert_eq!(future["protocols"]["chat_completions"]["override"], "auto");
+    assert_eq!(future["protocols"]["chat_completions"]["enabled"], true);
     assert!(future["protocols"]["responses"].is_null());
     assert!(future["protocols"]["messages"].is_null());
     harness.stop();
@@ -617,7 +768,7 @@ async fn zen_static_protocol_reset_restores_official_pairs_and_defaults_other_ca
 
 #[tokio::test]
 async fn goat_static_protocol_reset_restores_official_family_without_enabling_extra_models() {
-    let harness = start_loopback("goat-static-protocol-reset").await;
+    let harness = start_probes("goat-static-protocol-reset").await;
     let scope = ContractScope::provider(COMMAND_CODE_PROVIDER_ID);
     let models = vec![
         "claude-fable-5".to_string(),
@@ -639,6 +790,10 @@ async fn goat_static_protocol_reset_restores_official_family_without_enabling_ex
         )
         .unwrap();
     harness.state.reload_provider_contracts().unwrap();
+    let _docs =
+        install_official_protocol_fetch_for_tests(harness.state.process_generation(), |_| {
+            OfficialProtocolBaseline::FamilyRule
+        });
     let (status, reset) = send_json(
         &harness,
         Method::POST,
@@ -709,7 +864,7 @@ async fn goat_static_protocol_reset_restores_official_family_without_enabling_ex
 
 #[tokio::test]
 async fn fixed_provider_resets_restore_documented_chat_and_messages() {
-    let harness = start_loopback("fixed-provider-official-protocol-reset").await;
+    let harness = start_probes("fixed-provider-official-protocol-reset").await;
     let now = chrono::Utc::now();
     for (provider_id, model_id) in [
         (MINIMAX_PROVIDER_ID, "MiniMax-New"),
@@ -769,7 +924,7 @@ async fn fixed_provider_resets_restore_documented_chat_and_messages() {
 
 #[tokio::test]
 async fn fixed_provider_overrides_reject_protocols_outside_official_ceiling() {
-    let harness = start_loopback("fixed-provider-override-ceiling").await;
+    let harness = start_probes("fixed-provider-override-ceiling").await;
     let (status, rejected) = send_json(
         &harness,
         Method::PUT,
@@ -807,7 +962,7 @@ async fn fixed_provider_overrides_reject_protocols_outside_official_ceiling() {
 
 #[tokio::test]
 async fn protocol_probes_require_cas_and_reject_stale_tokens_with_zero_upstream() {
-    let harness = start_loopback("probes-cas").await;
+    let harness = start_probes("probes-cas").await;
     let origin = start_probe_origin(StatusCode::OK, SUCCESS_BODY, Duration::ZERO).await;
     point_upstream(&harness, &origin.url);
     let account_id = create_go_account(&harness).await;
@@ -852,7 +1007,7 @@ async fn protocol_probes_require_cas_and_reject_stale_tokens_with_zero_upstream(
 
 #[tokio::test]
 async fn protocol_probes_zero_call_gates_do_not_touch_upstream() {
-    let harness = start_loopback("probes-zero-call").await;
+    let harness = start_probes("probes-zero-call").await;
     let origin = start_probe_origin(StatusCode::OK, SUCCESS_BODY, Duration::ZERO).await;
     point_upstream(&harness, &origin.url);
     let account_id = create_go_account(&harness).await;
@@ -987,7 +1142,7 @@ async fn protocol_probes_zero_call_gates_do_not_touch_upstream() {
 
 #[tokio::test]
 async fn go_protocol_probes_send_one_admin_post_per_protocol_with_correct_path_and_auth() {
-    let harness = start_loopback("probes-go-n").await;
+    let harness = start_probes("probes-go-n").await;
     let origin = start_probe_origin(StatusCode::OK, SUCCESS_BODY, Duration::ZERO).await;
     point_upstream(&harness, &origin.url);
     create_go_account(&harness).await;
@@ -1047,7 +1202,7 @@ async fn go_protocol_probes_send_one_admin_post_per_protocol_with_correct_path_a
 
 #[tokio::test]
 async fn goat_protocol_probes_use_only_each_models_sealed_native_family_path() {
-    let harness = start_loopback("probes-goat-native-family").await;
+    let harness = start_probes("probes-goat-native-family").await;
     let origin = start_probe_origin(StatusCode::OK, SUCCESS_BODY, Duration::ZERO).await;
     let account_id = create_goat_account(&harness).await;
     let _route = install_goat_loopback_route_for_test(&account_id, &origin.url).unwrap();
@@ -1134,7 +1289,7 @@ async fn goat_protocol_probes_use_only_each_models_sealed_native_family_path() {
 #[tokio::test]
 async fn protocol_probe_falls_back_to_the_next_eligible_account() {
     const BAD_KEY: &str = "sk-probe-first-unavailable";
-    let harness = start_loopback("probes-account-fallback").await;
+    let harness = start_probes("probes-account-fallback").await;
     let origin = start_fallback_probe_origin(BAD_KEY).await;
     point_upstream(&harness, &origin.url);
     let first_id = create_go_account_with(&harness, "First unavailable", BAD_KEY).await;
@@ -1216,7 +1371,7 @@ async fn protocol_probe_falls_back_to_the_next_eligible_account() {
 
 #[tokio::test]
 async fn protocol_probe_without_eligible_accounts_is_a_zero_call_rejection() {
-    let harness = start_loopback("probes-no-eligible-account").await;
+    let harness = start_probes("probes-no-eligible-account").await;
     let origin = start_probe_origin(StatusCode::OK, SUCCESS_BODY, Duration::ZERO).await;
     point_upstream(&harness, &origin.url);
     let before = harness.state.settings_revision();
@@ -1252,7 +1407,7 @@ async fn protocol_probe_without_eligible_accounts_is_a_zero_call_rejection() {
 
 #[tokio::test]
 async fn zen_protocol_probe_omits_auth_and_selects_the_singleton_internally() {
-    let harness = start_loopback("probes-zen").await;
+    let harness = start_probes("probes-zen").await;
     let origin = start_probe_origin(StatusCode::OK, SUCCESS_BODY, Duration::ZERO).await;
     point_upstream(&harness, &format!("{}/zen/go", origin.url));
     let (status, body) = send_json(
@@ -1284,7 +1439,7 @@ async fn zen_protocol_probe_omits_auth_and_selects_the_singleton_internally() {
 
 #[tokio::test]
 async fn model_outside_provider_catalog_is_rejected_without_bump_or_upstream() {
-    let harness = start_loopback("probes-ceiling").await;
+    let harness = start_probes("probes-ceiling").await;
     let origin = start_probe_origin(StatusCode::OK, SUCCESS_BODY, Duration::ZERO).await;
     point_upstream(&harness, &origin.url);
     let account_id = create_go_account(&harness).await;
@@ -1313,7 +1468,7 @@ async fn model_outside_provider_catalog_is_rejected_without_bump_or_upstream() {
 
 #[tokio::test]
 async fn fetched_catalog_model_probes_all_protocols_and_writes_request_logs() {
-    let harness = start_loopback("probes-fetched-model").await;
+    let harness = start_probes("probes-fetched-model").await;
     let origin = start_probe_origin(StatusCode::OK, SUCCESS_BODY, Duration::ZERO).await;
     point_upstream(&harness, &origin.url);
     let account_id = create_go_account(&harness).await;
@@ -1407,7 +1562,7 @@ async fn fetched_catalog_model_probes_all_protocols_and_writes_request_logs() {
 
 #[tokio::test]
 async fn removed_and_zen_owned_go_catalog_models_cannot_be_probed() {
-    let harness = start_loopback("probes-current-catalog-only").await;
+    let harness = start_probes("probes-current-catalog-only").await;
     let origin = start_probe_origin(StatusCode::OK, SUCCESS_BODY, Duration::ZERO).await;
     point_upstream(&harness, &origin.url);
     let account_id = create_go_account(&harness).await;
@@ -1525,7 +1680,7 @@ async fn removed_and_zen_owned_go_catalog_models_cannot_be_probed() {
 
 #[tokio::test]
 async fn s04_probe_errors_and_logs_redact_secrets() {
-    let harness = start_loopback("probes-failure").await;
+    let harness = start_probes("probes-failure").await;
     let origin = start_probe_origin(
         StatusCode::INTERNAL_SERVER_ERROR,
         &format!(r#"{{"error":"leaked {GO_KEY}"}}"#),
@@ -1596,7 +1751,7 @@ async fn s04_probe_errors_and_logs_redact_secrets() {
 
 #[tokio::test]
 async fn connection_test_success_and_failure_never_change_protocol_overrides() {
-    let harness = start_loopback("probes-write-overrides").await;
+    let harness = start_probes("probes-write-overrides").await;
     let ok_origin = start_probe_origin(StatusCode::OK, SUCCESS_BODY, Duration::ZERO).await;
     point_upstream(&harness, &ok_origin.url);
     let account_id = create_go_account(&harness).await;
@@ -1695,7 +1850,7 @@ async fn connection_test_success_and_failure_never_change_protocol_overrides() {
 
 #[tokio::test]
 async fn successful_test_records_observation_and_does_not_forward_dashboard_headers() {
-    let harness = start_loopback("probes-success-headers").await;
+    let harness = start_probes("probes-success-headers").await;
     let origin = start_probe_origin(StatusCode::OK, SUCCESS_BODY, Duration::ZERO).await;
     point_upstream(&harness, &origin.url);
     let account_id = create_go_account(&harness).await;
@@ -1755,7 +1910,7 @@ async fn successful_test_records_observation_and_does_not_forward_dashboard_head
 
 #[tokio::test]
 async fn protocol_probes_use_the_default_proxy_leg_not_the_model_exception() {
-    let harness = start_loopback("probes-proxy-leg").await;
+    let harness = start_probes("probes-proxy-leg").await;
     let origin = start_probe_origin(StatusCode::OK, SUCCESS_BODY, Duration::ZERO).await;
     let account_id = create_go_account(&harness).await;
     let mut config = harness.state.config();
@@ -1794,11 +1949,16 @@ async fn protocol_probes_use_the_default_proxy_leg_not_the_model_exception() {
 
 #[tokio::test]
 async fn cas_change_during_outbound_rejects_probe_commit() {
-    let harness = start_loopback("probes-cas-during").await;
+    let harness = start_probes("probes-cas-during").await;
     let origin = start_probe_origin(StatusCode::OK, SUCCESS_BODY, Duration::from_millis(400)).await;
     point_upstream(&harness, &origin.url);
     let account_id = create_go_account(&harness).await;
     let before = harness.state.settings_revision();
+    let start_scope = go_scope_revision(&harness);
+    assert!(
+        start_scope.is_some(),
+        "seeded Go catalog persists a contract scope"
+    );
     let payload = cas(
         &harness,
         json!({
@@ -1822,7 +1982,7 @@ async fn cas_change_during_outbound_rejects_probe_commit() {
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert_eq!(body["code"], ERROR_REVISION_CONFLICT);
     assert_eq!(harness.state.settings_revision(), mid);
-    assert_eq!(go_scope_revision(&harness), None);
+    assert_eq!(go_scope_revision(&harness), start_scope);
     assert_eq!(origin.call_count(), 1);
     let db = harness.state.db.lock();
     let request_logs = db.list_forward_logs(100).unwrap();
@@ -1848,12 +2008,16 @@ async fn cas_change_during_outbound_rejects_probe_commit() {
 
 #[tokio::test]
 async fn two_protocol_success_stores_both_rows_and_bumps_nested_scope_once() {
-    let harness = start_loopback("probes-batch-success").await;
+    let harness = start_probes("probes-batch-success").await;
     let origin = start_probe_origin(StatusCode::OK, SUCCESS_BODY, Duration::ZERO).await;
     point_upstream(&harness, &origin.url);
     let account_id = create_go_account(&harness).await;
     let before = harness.state.settings_revision();
-    assert_eq!(go_scope_revision(&harness), None);
+    let start_scope = go_scope_revision(&harness);
+    assert!(
+        start_scope.is_some(),
+        "seeded Go catalog persists a contract scope"
+    );
 
     let (status, body) = send_json(
         &harness,
@@ -1880,7 +2044,10 @@ async fn two_protocol_success_stores_both_rows_and_bumps_nested_scope_once() {
     );
     assert_eq!(parsed.revision, before + 1);
     assert_eq!(harness.state.settings_revision(), before + 1);
-    assert_eq!(go_scope_revision(&harness), Some(2));
+    assert_eq!(
+        go_scope_revision(&harness),
+        start_scope.map(|revision| revision + 1)
+    );
     assert!(load_go_evidence(&harness, UpstreamProtocolKind::ChatCompletions).is_some());
     assert!(load_go_evidence(&harness, UpstreamProtocolKind::Responses).is_some());
     let stored = harness
@@ -1897,13 +2064,17 @@ async fn two_protocol_success_stores_both_rows_and_bumps_nested_scope_once() {
 
 #[tokio::test]
 async fn two_protocol_batch_rolls_back_when_second_observation_write_fails() {
-    let harness = start_loopback("probes-batch-fault").await;
+    let harness = start_probes("probes-batch-fault").await;
     let origin = start_probe_origin(StatusCode::OK, SUCCESS_BODY, Duration::ZERO).await;
     point_upstream(&harness, &origin.url);
     let account_id = create_go_account(&harness).await;
     let before = harness.state.settings_revision();
     let before_contracts = harness.state.provider_contracts();
-    assert_eq!(go_scope_revision(&harness), None);
+    let start_scope = go_scope_revision(&harness);
+    assert!(
+        start_scope.is_some(),
+        "seeded Go catalog persists a contract scope"
+    );
 
     let conn = open_sqlite(&harness);
     conn.execute_batch(
@@ -1934,9 +2105,12 @@ async fn two_protocol_batch_rolls_back_when_second_observation_write_fails() {
     assert_v3_error(&body, ERROR_INTERNAL);
     assert_eq!(origin.call_count(), 2);
     assert_eq!(harness.state.settings_revision(), before);
-    assert_eq!(go_scope_revision(&harness), None);
+    assert_eq!(go_scope_revision(&harness), start_scope);
     assert!(load_go_evidence(&harness, UpstreamProtocolKind::ChatCompletions).is_none());
-    assert!(load_go_evidence(&harness, UpstreamProtocolKind::Responses).is_none());
+    let responses = load_go_evidence(&harness, UpstreamProtocolKind::Responses)
+        .expect("rolled-back probe must keep the official-docs Responses row");
+    assert_eq!(responses.source, ContractEvidenceSource::Static);
+    assert_eq!(responses.last_probe_result, None);
     assert_eq!(
         before_contracts.as_ref(),
         harness.state.provider_contracts().as_ref()
@@ -1947,13 +2121,17 @@ async fn two_protocol_batch_rolls_back_when_second_observation_write_fails() {
 
 #[tokio::test]
 async fn probe_commit_advances_global_revision_before_reload_failure() {
-    let harness = start_loopback("probes-reload-fail").await;
+    let harness = start_probes("probes-reload-fail").await;
     let origin = start_probe_origin(StatusCode::OK, SUCCESS_BODY, Duration::ZERO).await;
     point_upstream(&harness, &origin.url);
     let account_id = create_go_account(&harness).await;
     let before = harness.state.settings_revision();
     let before_contracts = harness.state.provider_contracts();
-    assert_eq!(go_scope_revision(&harness), None);
+    let start_scope = go_scope_revision(&harness);
+    assert!(
+        start_scope.is_some(),
+        "seeded Go catalog persists a contract scope"
+    );
 
     let conn = open_sqlite(&harness);
     conn.execute_batch(
@@ -1988,7 +2166,10 @@ async fn probe_commit_advances_global_revision_before_reload_failure() {
     assert_v3_error(&body, ERROR_INTERNAL);
     assert_eq!(origin.call_count(), 1);
     assert_eq!(harness.state.settings_revision(), before + 1);
-    assert_eq!(go_scope_revision(&harness), Some(2));
+    assert_eq!(
+        go_scope_revision(&harness),
+        start_scope.map(|revision| revision + 1)
+    );
     let stored_source: String = conn
         .query_row(
             "SELECT source FROM provider_contract_model_protocols
@@ -2009,7 +2190,7 @@ async fn probe_commit_advances_global_revision_before_reload_failure() {
 
 #[tokio::test]
 async fn static_reset_advances_global_revision_before_reload_failure() {
-    let harness = start_loopback("static-reset-reload-fail").await;
+    let harness = start_probes("static-reset-reload-fail").await;
     let now = chrono::Utc::now();
     harness
         .state
@@ -2025,6 +2206,8 @@ async fn static_reset_advances_global_revision_before_reload_failure() {
         )
         .unwrap();
     harness.state.reload_provider_contracts().unwrap();
+    let _docs =
+        install_official_protocol_fetch_fallback_chat_for_tests(harness.state.process_generation());
     let before = harness.state.settings_revision();
     let before_contracts = harness.state.provider_contracts();
     let conn = open_sqlite(&harness);
@@ -2078,7 +2261,7 @@ async fn static_reset_advances_global_revision_before_reload_failure() {
 
 #[tokio::test]
 async fn retired_account_owned_probes_do_not_call_upstream() {
-    let harness = start_loopback("probes-v2-retired").await;
+    let harness = start_probes("probes-v2-retired").await;
     let origin = start_probe_origin(StatusCode::OK, SUCCESS_BODY, Duration::ZERO).await;
     point_upstream(&harness, &origin.url);
     let account_id = create_go_account(&harness).await;
@@ -2138,6 +2321,296 @@ async fn retired_account_owned_probes_do_not_call_upstream() {
         .unwrap()
         .unwrap();
     assert_eq!(stored.provider_id, CUSTOM_PROVIDER_ID);
-    assert!(stored.enabled);
+    assert!(!stored.enabled);
+    harness.stop();
+}
+
+fn seed_zen_official(harness: &V3Harness, pairs: &[(&str, UpstreamProtocolKind)]) {
+    let now = chrono::Utc::now();
+    let models: Vec<String> = pairs
+        .iter()
+        .map(|(model, _)| (*model).to_string())
+        .collect();
+    let scope = ContractScope::provider(OPENCODE_ZEN_FREE_PROVIDER_ID);
+    {
+        let db = harness.state.db.lock();
+        db.set_contract_catalog(
+            &scope,
+            &models,
+            Some(now),
+            "official_zen",
+            "https://example.test/zen",
+            now,
+        )
+        .unwrap();
+        db.apply_official_protocol_baseline(
+            &scope,
+            &models,
+            &OfficialProtocolBaseline::mapped(pairs.iter().map(|(model, protocol)| {
+                (model.strip_suffix("-free").unwrap_or(model), *protocol)
+            })),
+            now,
+        )
+        .unwrap();
+    }
+    harness.state.reload_provider_contracts().unwrap();
+}
+
+#[tokio::test]
+async fn zen_structural_ceiling_rejects_responses_until_official_static_evidence() {
+    let harness = start_probes("zen-protocol-ceiling").await;
+    let now = chrono::Utc::now();
+    let scope = ContractScope::provider(OPENCODE_ZEN_FREE_PROVIDER_ID);
+    harness
+        .state
+        .db
+        .lock()
+        .set_contract_catalog(
+            &scope,
+            &["review-model-free".to_string()],
+            Some(now),
+            "official_zen",
+            "https://example.test/zen",
+            now,
+        )
+        .unwrap();
+    harness.state.reload_provider_contracts().unwrap();
+
+    let overrides_path = format!(
+        "/provider-contracts/provider/{OPENCODE_ZEN_FREE_PROVIDER_ID}/model-protocol-overrides"
+    );
+    let (status, rejected) = send_json(
+        &harness,
+        Method::PUT,
+        &overrides_path,
+        &cas(
+            &harness,
+            json!({
+                "overrides": [{
+                    "modelId": "review-model-free",
+                    "protocol": "responses",
+                    "state": "force_on",
+                    "preferred": true
+                }]
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected}");
+    assert_v3_error(&rejected, ERROR_INVALID_REQUEST);
+
+    let (status, unprobeable) = send_json(
+        &harness,
+        Method::POST,
+        &probe_path(OPENCODE_ZEN_FREE_PROVIDER_ID),
+        &cas(
+            &harness,
+            json!({
+                "modelId": "review-model-free",
+                "protocols": ["responses"]
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{unprobeable}");
+    assert_v3_error(&unprobeable, ERROR_INVALID_REQUEST);
+    harness.stop();
+}
+
+#[tokio::test]
+async fn zen_official_static_responses_and_messages_are_writable_and_probeable() {
+    let harness = start_probes("zen-official-protocols").await;
+    seed_zen_official(
+        &harness,
+        &[
+            ("review-model-free", UpstreamProtocolKind::Responses),
+            ("messages-model-free", UpstreamProtocolKind::Messages),
+        ],
+    );
+    let origin = start_probe_origin(StatusCode::OK, SUCCESS_BODY, Duration::ZERO).await;
+    point_upstream(&harness, &format!("{}/zen/go", origin.url));
+
+    let overrides_path = format!(
+        "/provider-contracts/provider/{OPENCODE_ZEN_FREE_PROVIDER_ID}/model-protocol-overrides"
+    );
+    let (status, responses_saved) = send_json(
+        &harness,
+        Method::PUT,
+        &overrides_path,
+        &cas(
+            &harness,
+            json!({
+                "overrides": [
+                    {
+                        "modelId": "review-model-free",
+                        "protocol": "responses",
+                        "state": "force_on",
+                        "preferred": true
+                    },
+                    {
+                        "modelId": "review-model-free",
+                        "protocol": "chat_completions",
+                        "state": "force_off"
+                    }
+                ]
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{responses_saved}");
+    let (status, messages_saved) = send_json(
+        &harness,
+        Method::PUT,
+        &overrides_path,
+        &cas(
+            &harness,
+            json!({
+                "overrides": [
+                    {
+                        "modelId": "messages-model-free",
+                        "protocol": "messages",
+                        "state": "force_on",
+                        "preferred": true
+                    }
+                ]
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{messages_saved}");
+
+    let zen = harness
+        .state
+        .provider_contracts()
+        .scope(&ContractScope::provider(OPENCODE_ZEN_FREE_PROVIDER_ID))
+        .cloned()
+        .unwrap();
+    let responses = zen.model("review-model-free").unwrap();
+    assert!(responses.protocols["responses"].enabled);
+    assert_eq!(
+        responses.preferred_protocol,
+        UpstreamProtocolKind::Responses
+    );
+    let messages = zen.model("messages-model-free").unwrap();
+    assert!(messages.protocols["messages"].enabled);
+    assert_eq!(messages.preferred_protocol, UpstreamProtocolKind::Messages);
+
+    let (status, probed_responses) = send_json(
+        &harness,
+        Method::POST,
+        &probe_path(OPENCODE_ZEN_FREE_PROVIDER_ID),
+        &cas(
+            &harness,
+            json!({
+                "modelId": "review-model-free",
+                "protocols": ["responses"]
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{probed_responses}");
+    let parsed = parse_probe(&probed_responses);
+    assert_eq!(parsed.results.len(), 1);
+    assert_eq!(
+        parsed.results[0].protocol,
+        AccountUpstreamProtocol::Responses
+    );
+    assert!(parsed.results[0].success);
+
+    let (status, probed_messages) = send_json(
+        &harness,
+        Method::POST,
+        &probe_path(OPENCODE_ZEN_FREE_PROVIDER_ID),
+        &cas(
+            &harness,
+            json!({
+                "modelId": "messages-model-free",
+                "protocols": ["messages"]
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{probed_messages}");
+    let parsed = parse_probe(&probed_messages);
+    assert_eq!(parsed.results.len(), 1);
+    assert_eq!(
+        parsed.results[0].protocol,
+        AccountUpstreamProtocol::Messages
+    );
+    assert!(parsed.results[0].success);
+    harness.stop();
+}
+
+#[tokio::test]
+async fn zen_probe_observed_evidence_does_not_expand_sealed_admission() {
+    let harness = start_probes("zen-probe-evidence-ceiling").await;
+    seed_zen_official(
+        &harness,
+        &[("review-model-free", UpstreamProtocolKind::Responses)],
+    );
+    let now = chrono::Utc::now();
+    harness
+        .state
+        .db
+        .lock()
+        .upsert_model_protocol(&PersistedModelProtocol {
+            scope: ContractScope::provider(OPENCODE_ZEN_FREE_PROVIDER_ID),
+            model_id: "review-model-free".into(),
+            protocol: UpstreamProtocolKind::Messages,
+            source: ContractEvidenceSource::ProbeObserved,
+            verified_at: Some(now),
+            observed_at: Some(now),
+            last_probe_result: Some(ProbeResultKind::Success),
+            last_probe_at: Some(now),
+            last_probe_error: None,
+        })
+        .unwrap();
+    harness.state.reload_provider_contracts().unwrap();
+
+    let overrides_path = format!(
+        "/provider-contracts/provider/{OPENCODE_ZEN_FREE_PROVIDER_ID}/model-protocol-overrides"
+    );
+    let (status, rejected) = send_json(
+        &harness,
+        Method::PUT,
+        &overrides_path,
+        &cas(
+            &harness,
+            json!({
+                "overrides": [{
+                    "modelId": "review-model-free",
+                    "protocol": "messages",
+                    "state": "force_on"
+                }]
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected}");
+    assert_v3_error(&rejected, ERROR_INVALID_REQUEST);
+
+    let (status, unprobeable) = send_json(
+        &harness,
+        Method::POST,
+        &probe_path(OPENCODE_ZEN_FREE_PROVIDER_ID),
+        &cas(
+            &harness,
+            json!({
+                "modelId": "review-model-free",
+                "protocols": ["messages"]
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{unprobeable}");
+    assert_v3_error(&unprobeable, ERROR_INVALID_REQUEST);
+    let model = harness
+        .state
+        .provider_contracts()
+        .scope(&ContractScope::provider(OPENCODE_ZEN_FREE_PROVIDER_ID))
+        .and_then(|contract| contract.model("review-model-free").cloned())
+        .unwrap();
+    assert!(model.protocols.contains_key("responses"));
+    assert!(!model.protocols.contains_key("messages"));
     harness.stop();
 }

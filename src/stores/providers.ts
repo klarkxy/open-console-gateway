@@ -76,11 +76,13 @@ export const useProvidersStore = defineStore("providers", () => {
     return result;
   }
 
-  async function resetStaticModelProtocols(
+  async function removeContractCatalogModels(
+    scopeKind: ContractScopeKind,
     scopeId: string,
+    modelIds: string[],
   ): Promise<ProviderContractsResponse> {
     try {
-      const result = await providerApi.resetStaticModelProtocols(scopeId);
+      const result = await providerApi.removeContractCatalogModels(scopeKind, scopeId, modelIds);
       contractsGeneration += 1;
       contracts.value = result;
       loading.value = false;
@@ -118,7 +120,7 @@ export const useProvidersStore = defineStore("providers", () => {
     loadConnections,
     loadContracts,
     refreshContractCatalog,
-    resetStaticModelProtocols,
+    removeContractCatalogModels,
     putModelProtocolOverrides,
   };
 });

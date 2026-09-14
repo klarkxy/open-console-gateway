@@ -29,6 +29,7 @@ async fn cpa_model_catalog_get_returns_the_persisted_snapshot() {
             vec![CpaCatalogModel {
                 id: "gpt-5".into(),
                 owned_by: Some("openai".into()),
+                enabled: true,
             }],
             "http://127.0.0.1:8317",
             chrono::Utc::now(),

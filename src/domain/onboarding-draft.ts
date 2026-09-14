@@ -1,6 +1,5 @@
 import type { WithoutExpectation } from "../api/dashboard-v3.ts";
 import type { MutationExpectation } from "../api/generated/dashboard-v3.ts";
-import type { Connection } from "../api/connections.ts";
 import type { ProviderDefinitionView } from "../api/providers.ts";
 import type {
   OnboardingCommitMode,
@@ -35,33 +34,10 @@ type IdentitySavedKeyRow = {
 };
 
 /**
- * A none-auth row is never a saved Key, even when an anonymous account makes
- * `credential_count > 0`. A Key is claimed only from identity `has_material`
- * on an api_key bound to this exact connection.
+ * A Key is claimed only from identity `has_material` on an api_key bound to
+ * this exact connection. Callers that treat none-auth as never-saved (the
+ * modal's `effectiveHasSavedKey`) must apply that gate themselves.
  */
-export function connectionHasSavedKey(
-  connection: Pick<Connection, "id" | "authorization"> | null | undefined,
-  options: {
-    authKind?: string | null;
-    identities?: readonly IdentitySavedKeyRow[] | null;
-    legacyAccountId?: string | null;
-  } = {},
-): boolean {
-  if (!connection || options.authKind === "none") return false;
-  if (
-    connection.authorization === "not_required"
-    || connection.authorization === "missing"
-  ) {
-    return false;
-  }
-  if (!options.identities) return false;
-  return identityHasSavedMaterialForConnection(
-    options.identities,
-    connection.id,
-    options.legacyAccountId,
-  );
-}
-
 export function identityHasSavedMaterialForConnection(
   identities: readonly IdentitySavedKeyRow[],
   connectionId: string,

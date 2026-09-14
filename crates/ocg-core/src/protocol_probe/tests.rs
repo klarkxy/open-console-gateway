@@ -211,8 +211,10 @@ async fn stored_key_probe_does_not_send_to_ungranted_destination() {
         db.update_credential_binding(&binding.binding_id, None, None, Some(&[]), Some(&[]))
             .unwrap();
     }
-    let mut config = AppConfig::default();
-    config.proxy_mode = ProxyMode::Direct;
+    let config = AppConfig {
+        proxy_mode: ProxyMode::Direct,
+        ..AppConfig::default()
+    };
     let error = super::execute_account_model_test(super::AccountModelTestInput {
         state: &state,
         config: &config,
@@ -365,9 +367,11 @@ async fn stored_key_probe_honors_cleared_sealed_endpoint_grant() {
         db.update_credential_binding(&binding.binding_id, None, None, Some(&[]), Some(&[]))
             .unwrap();
     }
-    let mut config = AppConfig::default();
-    config.proxy_mode = ProxyMode::Direct;
-    config.upstream_base_url = format!("http://{addr}");
+    let config = AppConfig {
+        proxy_mode: ProxyMode::Direct,
+        upstream_base_url: format!("http://{addr}"),
+        ..AppConfig::default()
+    };
     let error = super::execute_account_model_test(super::AccountModelTestInput {
         state: &state,
         config: &config,

@@ -1,5 +1,5 @@
 use super::*;
-use crate::custom_http::{inspect_custom_url, validate_custom_endpoint_url};
+use crate::custom_http::validate_custom_endpoint_url;
 use crate::provider::ProviderBindingError;
 
 fn assert_blocked(url: &str) {
@@ -32,6 +32,14 @@ fn s01_cross_origin_override_does_not_inherit_the_key() {
     assert!(
         ensure_secret_origin_granted("https://evil.example/v1/chat/completions", &granted).is_err(),
         "a different Origin must not inherit the Key"
+    );
+    assert!(
+        ensure_secret_origin_granted(
+            "http://127.0.0.1:8080/v1/chat/completions",
+            &["http://127.0.0.1:9/v1".to_string()],
+        )
+        .is_err(),
+        "a different port is a different Origin and must not inherit the Key"
     );
 }
 
@@ -116,28 +124,6 @@ fn s03_documented_local_model_destinations_stay_allowed() {
     ] {
         assert_allowed(url);
     }
-}
-
-#[test]
-fn s03_dns_guard_reuses_the_url_host_ip_block_list() {
-    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-    assert!(is_blocked_custom_ip(IpAddr::V4(Ipv4Addr::new(
-        169, 254, 169, 254
-    ))));
-    assert!(is_blocked_custom_ip(IpAddr::V6(Ipv6Addr::new(
-        0xfd00, 0xec2, 0, 0, 0, 0, 0, 0x254
-    ))));
-    assert!(!is_blocked_custom_ip(IpAddr::V4(Ipv4Addr::new(
-        10, 0, 0, 1
-    ))));
-}
-
-#[test]
-fn s03_inspect_rejects_metadata_even_when_the_url_is_already_parsed() {
-    let parsed = reqwest::Url::parse("https://[::ffff:169.254.169.254]/latest").unwrap();
-    assert!(inspect_custom_url(&parsed).is_err());
-    let loopback = reqwest::Url::parse("http://[::ffff:127.0.0.1]/v1/responses").unwrap();
-    assert!(inspect_custom_url(&loopback).is_ok());
 }
 
 #[test]

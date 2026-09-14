@@ -1,5 +1,6 @@
 //! Additive identity / credential / binding satellites (schema v45).
 use super::*;
+use ocg_domain::account::DEFAULT_INFERENCE_BINDING_ENABLED;
 use ocg_domain::connection::{
     ConnectionId, EndpointOperation, LegacyConnectionKind, connection_id_for_legacy,
 };
@@ -308,6 +309,8 @@ pub(crate) fn persist_account_identity_model(
     )
 }
 
+/// One write covers identity, credential, binding, cooldown, and optional override.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn persist_account_identity_model_on(
     conn: &Connection,
     account: &Account,
@@ -424,7 +427,7 @@ pub(crate) fn persist_account_identity_model_on(
                     legacy_kind.as_str(),
                     legacy_id,
                     model_scope,
-                    account.enabled as i32,
+                    DEFAULT_INFERENCE_BINDING_ENABLED as i32,
                     now_rfc,
                 ],
             )?;
@@ -440,7 +443,7 @@ pub(crate) fn persist_account_identity_model_on(
                     legacy_kind.as_str(),
                     legacy_id,
                     model_scope,
-                    account.enabled as i32,
+                    DEFAULT_INFERENCE_BINDING_ENABLED as i32,
                     now_rfc,
                 ],
             )?;
@@ -794,6 +797,8 @@ fn shared_pool_siblings_on(conn: &Connection, account_id: &str) -> Result<Vec<St
     Ok(rows)
 }
 
+/// Identity row columns plus shared created/updated timestamp in one SQL write.
+#[allow(clippy::too_many_arguments)]
 fn upsert_identity(
     conn: &Connection,
     id: &str,
@@ -1055,7 +1060,6 @@ pub(crate) fn migrate_to_v45(conn: &Connection) -> Result<()> {
         return Ok(());
     }
     anyhow::ensure!(version == 44, "v45 requires schema v44");
-    create_identity_tables(&tx)?;
     migrate_v45_body(&tx)?;
     tx.execute_batch("INSERT OR REPLACE INTO schema_version(version) VALUES (45);")?;
     tx.commit()?;
@@ -1116,9 +1120,6 @@ pub(crate) fn ensure_identity_model_consistent(conn: &Connection) -> Result<()> 
             && table_exists(conn, "credential_bindings")?,
         "schema version {version} is missing identity model tables"
     );
-    if !accounts_ready_for_identity_backfill(conn)? {
-        return Ok(());
-    }
     if identity_account_violations(conn)? == 0 {
         return Ok(());
     }
@@ -1209,48 +1210,10 @@ fn create_identity_tables(tx: &Transaction<'_>) -> Result<()> {
     Ok(())
 }
 
-fn accounts_ready_for_identity_backfill(conn: &Connection) -> Result<bool> {
-    // Historical stub fixtures (v14+) only add columns each step introduces.
-    // Skip the account walk when the modern accounts shape is not present so
-    // those opens still reach schema 45.
-    for column in [
-        "name",
-        "username",
-        "password_cipher",
-        "key_cipher",
-        "enabled",
-        "referral_code",
-        "recharge_date",
-        "cooldown_until",
-        "cooldown_generic_until",
-        "cooldown_5h_until",
-        "cooldown_week_until",
-        "cooldown_month_until",
-        "cooldown_free_until",
-        "last_error",
-        "created_at",
-        "updated_at",
-        "auth_error",
-        "account_type",
-        "setup_step",
-        "notes",
-        "provider_id",
-        "credential_kind",
-        "quota_scope",
-        "sort_order",
-        "verification_status",
-    ] {
-        if !table_has_column(conn, "accounts", column)? {
-            return Ok(false);
-        }
-    }
-    Ok(true)
-}
-
 pub(crate) fn migrate_v45_body(tx: &Transaction<'_>) -> Result<()> {
     create_identity_tables(tx)?;
     let now = Utc::now();
-    let rows = if accounts_ready_for_identity_backfill(tx)? {
+    let rows = {
         let mut stmt = tx.prepare(
             "SELECT id, name, username, password_cipher, key_cipher, enabled, referral_code,
                     recharge_date, cooldown_until, cooldown_generic_until, cooldown_5h_until,
@@ -1271,8 +1234,6 @@ pub(crate) fn migrate_v45_body(tx: &Transaction<'_>) -> Result<()> {
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?
-    } else {
-        Vec::new()
     };
 
     let mut links = Vec::new();
@@ -1644,7 +1605,8 @@ fn update_credential_binding_on(
     );
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
     let grants_ready = binding_grant_columns_ready(&tx)?;
-    let existing: Option<(String, i32, String, Option<String>, Option<String>)> = if grants_ready {
+    type BindingGrantRow = (String, i32, String, Option<String>, Option<String>);
+    let existing: Option<BindingGrantRow> = if grants_ready {
         tx.query_row(
             "SELECT account_id, enabled, model_scope, allowed_endpoint_ids, allowed_origins
              FROM credential_bindings WHERE id = ?1",
@@ -1882,6 +1844,15 @@ fn join_explicit_quota_share(
 }
 
 fn merge_pool_cooldown_maxima(conn: &Connection, pool_id: &str) -> Result<()> {
+    type SharedPoolCooldownRow = (
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
     let mut stmt = conn.prepare(
         "SELECT a.id, a.cooldown_until, a.cooldown_generic_until, a.cooldown_5h_until,
                 a.cooldown_week_until, a.cooldown_month_until, a.cooldown_free_until
@@ -1889,7 +1860,7 @@ fn merge_pool_cooldown_maxima(conn: &Connection, pool_id: &str) -> Result<()> {
          JOIN accounts a ON a.id = m.account_id
          WHERE m.pool_id = ?1",
     )?;
-    let rows = stmt
+    let rows: Vec<SharedPoolCooldownRow> = stmt
         .query_map([pool_id], |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -1906,17 +1877,7 @@ fn merge_pool_cooldown_maxima(conn: &Connection, pool_id: &str) -> Result<()> {
     if rows.len() < 2 {
         return Ok(());
     }
-    let max_of = |pick: fn(
-        &(
-            _,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-        ),
-    ) -> &Option<String>| {
+    let max_of = |pick: fn(&SharedPoolCooldownRow) -> &Option<String>| {
         rows.iter()
             .filter_map(|row| pick(row).as_ref())
             .max()

@@ -106,11 +106,6 @@ export function findAccountScopeView(
   ));
 }
 
-export const CN_PROTOCOL_CHOICES: readonly ProviderProtocol[] = [
-  "chat_completions",
-  "messages",
-];
-
 /** Protocols the contract marks available for this model. */
 export function modelAvailableProtocols(
   model: ProviderModelContract,
@@ -118,31 +113,6 @@ export function modelAvailableProtocols(
   return PROVIDER_PROTOCOLS.filter((protocol) => (
     model.protocols[protocol]?.available === true
   ));
-}
-
-/**
- * The set of upstream protocols a scope allows an operator to choose from.
- * Custom endpoints → the union of available protocols across models.
- * Built-in scopes mix per-model static protocols, so this is only a fallback
- * marker; the row UI uses {@link modelAvailableProtocols}.
- */
-export function scopeProtocolChoices(scope: ProviderScopeView): ProviderProtocol[] {
-  if (scope.scope_kind === "custom_endpoint") {
-    return PROVIDER_PROTOCOLS.filter((protocol) => (
-      scope.models.some((model) => model.protocols[protocol]?.available === true)
-    ));
-  }
-  if (scope.provider_id === "minimax" || scope.provider_id === "kimi") {
-    return [...CN_PROTOCOL_CHOICES];
-  }
-  for (const model of scope.models) {
-    for (const protocol of PROVIDER_PROTOCOLS) {
-      if (model.protocols[protocol]) {
-        return [protocol];
-      }
-    }
-  }
-  return ["chat_completions"];
 }
 
 /**
@@ -310,49 +280,6 @@ export function buildPreferredProtocolOverrides(
   }));
 }
 
-/** Toggle one available protocol. Turning off the last enabled protocol disables the row. */
-export function buildProtocolEnabledOverrides(
-  scope: ProviderScopeView,
-  modelId: string,
-  protocol: ProviderProtocol,
-  on: boolean,
-): ModelProtocolOverrideUpdate[] {
-  const model = scope.models.find((entry) => entry.model_id === modelId);
-  if (!model) return [];
-  const available = modelAvailableProtocols(model);
-  if (!available.includes(protocol)) return [];
-  if (on) {
-    return [{ model_id: modelId, protocol, state: "force_on" }];
-  }
-  const othersOn = available.filter((choice) => (
-    choice !== protocol && model.protocols[choice]?.enabled === true
-  ));
-  if (othersOn.length === 0) {
-    return buildModelToggleOverrides(scope, [modelId], false);
-  }
-  const overrides: ModelProtocolOverrideUpdate[] = [
-    { model_id: modelId, protocol, state: "force_off" },
-  ];
-  if (model.preferred_protocol === protocol) {
-    overrides.push({
-      model_id: modelId,
-      protocol: othersOn[0]!,
-      state: "force_on",
-      preferred: true,
-    });
-  }
-  return overrides;
-}
-
-/** @deprecated Use {@link buildPreferredProtocolOverrides}. */
-export function buildModelProtocolSwitchOverrides(
-  scope: ProviderScopeView,
-  modelId: string,
-  protocol: ProviderProtocol,
-): ModelProtocolOverrideUpdate[] {
-  return buildPreferredProtocolOverrides(scope, modelId, protocol);
-}
-
 export function protocolDisplayName(protocol: ProviderProtocol): string {
   if (protocol === "chat_completions") return "Chat Completions";
   if (protocol === "responses") return "Responses";
@@ -443,27 +370,8 @@ export function flattenProviderScopes(
   return [...providers, ...custom];
 }
 
-export function selectProviderScope(
-  scopes: readonly ProviderScopeView[],
-  scopeKind: string | null | undefined,
-  scopeId: string | null | undefined,
-): { scope: ProviderScopeView | null; fellBack: boolean } {
-  if (scopes.length === 0) return { scope: null, fellBack: false };
-  const match = scopes.find((scope) => (
-    scope.scope_kind === scopeKind && scope.scope_id === scopeId
-  ));
-  if (match) return { scope: match, fellBack: false };
-  return { scope: scopes[0] ?? null, fellBack: Boolean(scopeKind || scopeId) };
-}
-
 export function catalogRefreshSupported(scope: Pick<ProviderScopeView, "card" | "catalog">): boolean {
   return scope.card.catalog_refresh || scope.catalog.refresh_supported;
-}
-
-export function enabledProtocols(scope: Pick<ProviderScopeView, "models">): ProviderProtocol[] {
-  return PROVIDER_PROTOCOLS.filter((protocol) => (
-    scope.models.some((model) => model.protocols[protocol]?.enabled)
-  ));
 }
 
 function mergeModelContract(

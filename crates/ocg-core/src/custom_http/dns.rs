@@ -146,7 +146,7 @@ impl Resolve for RecordingResolver {
                             .lock()
                             .expect("resolve log")
                             .push(message.to_string());
-                        return Err(Box::new(io::Error::new(io::ErrorKind::Other, message)) as _);
+                        return Err(Box::new(io::Error::other(message)) as _);
                     }
                     log.returned
                         .lock()

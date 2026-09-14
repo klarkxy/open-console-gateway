@@ -122,42 +122,23 @@ test("status buckets mirror the card status labels", () => {
   assert.equal(accountStatusKey(account({ enabled: false }), NOW), "disabled");
   assert.equal(accountStatusKey(account({ auth_error: "401" }), NOW), "auth-error");
   assert.equal(accountStatusKey(account({ setup_step: "payment" }), NOW), "registering");
-  assert.equal(
-    accountStatusKey(account({
-      enabled: false,
-      provider_id: "custom",
-      plan_routable: true,
-      verification_status: "pending",
-    }), NOW),
-    "disabled",
-  );
-  assert.equal(
-    accountStatusKey(account({
-      enabled: false,
-      provider_id: "custom",
-      plan_routable: false,
-      verification_status: "failed",
-    }), NOW),
-    "disabled",
-  );
-  assert.equal(
-    accountStatusKey(account({
-      enabled: false,
-      provider_id: "custom",
-      plan_routable: true,
-      verification_status: "failed",
-    }), NOW),
-    "disabled",
-  );
-  assert.equal(
-    accountStatusKey(account({
-      enabled: false,
-      provider_id: "custom",
-      plan_routable: false,
-      verification_status: "pending",
-    }), NOW),
-    "disabled",
-  );
+  for (const [plan_routable, verification_status] of [
+    [true, "pending"],
+    [false, "failed"],
+    [true, "failed"],
+    [false, "pending"],
+  ] as const) {
+    assert.equal(
+      accountStatusKey(account({
+        enabled: false,
+        provider_id: "custom",
+        plan_routable,
+        verification_status,
+      }), NOW),
+      "disabled",
+      `${plan_routable}/${verification_status}`,
+    );
+  }
   assert.equal(
     accountStatusKey(account({ cooldown_until: "2026-08-21T13:00:00Z" }), NOW),
     "cooling",

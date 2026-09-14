@@ -52,7 +52,8 @@ const MAX_UPSTREAM_ERROR_BODY_BYTES: usize = 64 * 1024;
 mod live_send;
 
 pub(crate) use live_send::{
-    LiveSendAuthError, LiveSendSelection, authorize_live_send_secret, confirm_live_send_secret,
+    LiveSendAccountGate, LiveSendAuthError, LiveSendSelection, authorize_live_send_secret,
+    confirm_live_send_secret,
 };
 
 /// Host secret resolution for the account the outer loop selected. Live
@@ -99,6 +100,7 @@ impl<'a> HostCredentialResolver<'a> {
                     self.account,
                     self.plan,
                     self.spec,
+                    LiveSendAccountGate::RequireEnabled,
                 )
             }
         }
@@ -111,6 +113,7 @@ impl<'a> HostCredentialResolver<'a> {
             self.account,
             self.plan,
             self.spec,
+            LiveSendAccountGate::RequireEnabled,
         )
     }
 }
@@ -494,16 +497,16 @@ fn platform_price_for_attempt(
     let link = links
         .into_iter()
         .find(|link| link.account_id == account.id)?;
-    if !db
+    if db
         .get_account(&account.id)
         .ok()
         .flatten()
-        .is_some_and(|current| current.key_cipher == account.key_cipher)
+        .is_none_or(|current| current.key_cipher != account.key_cipher)
         || endpoint.is_some_and(|url| {
-            !db.account_custom_config(&account.id)
+            db.account_custom_config(&account.id)
                 .ok()
                 .flatten()
-                .is_some_and(|config| config.endpoint_url == url)
+                .is_none_or(|config| config.endpoint_url != url)
         })
     {
         return Some(PlatformAttemptPrice::Unknown {
@@ -1921,10 +1924,8 @@ async fn forward_request_impl(
                     }
                 }
                 Err(_) => {
-                    let detail = format!(
-                        "upstream stream idle timeout after {}s",
-                        stream_idle_timeout_secs
-                    );
+                    let detail =
+                        format!("upstream stream idle timeout after {stream_idle_timeout_secs}s");
                     match handle_pre_output_stream_failure(
                         state,
                         &st,
@@ -2082,8 +2083,7 @@ async fn forward_request_impl(
                             (Vec::new(), true)
                         } else {
                             let detail = format!(
-                                "upstream stream idle timeout after {}s",
-                                stream_idle_timeout_secs
+                                "upstream stream idle timeout after {stream_idle_timeout_secs}s"
                             );
                             let msg = outcome_unknown_message(&detail);
                             {
@@ -2312,7 +2312,7 @@ async fn forward_request_impl(
                             let _ = db.log_gateway(
                                 "warn",
                                 "forwarder",
-                                &format!("failed to finalize streaming row {}: {}", initial_id, e),
+                                &format!("failed to finalize streaming row {initial_id}: {e}"),
                             );
                         }
                         guard.disarm();
@@ -2811,7 +2811,7 @@ fn ensure_safe_upstream_base_url(base: &str) -> Result<()> {
     match url.scheme() {
         "https" => Ok(()),
         "http" if is_loopback_host(&url) => Ok(()),
-        scheme => anyhow::bail!("unsafe upstream scheme or host: {}", scheme),
+        scheme => anyhow::bail!("unsafe upstream scheme or host: {scheme}"),
     }
 }
 
@@ -3213,22 +3213,10 @@ struct StreamState {
 // DeepSeek flash reasoning bursts before the trailing usage chunk could be parsed.
 const MAX_SSE_BUF: usize = 8 * 1024 * 1024;
 
-// ponytail: SSE spec allows \n\n OR \r\n\r\n as event boundaries. Match both
-// so Windows-origin / proxy-CRLF upstreams don't accumulate buffer forever.
+// Accept LF and CRLF event boundaries in wire order, including mixed endings.
 fn find_event_boundary(buf: &[u8]) -> Option<usize> {
-    // \n\n
-    for i in 0..buf.len().saturating_sub(1) {
-        if buf[i] == b'\n' && buf[i + 1] == b'\n' {
-            return Some(i);
-        }
-    }
-    // \r\n\r\n
-    for i in 0..buf.len().saturating_sub(3) {
-        if &buf[i..i + 4] == b"\r\n\r\n" {
-            return Some(i);
-        }
-    }
-    None
+    (0..buf.len().saturating_sub(1))
+        .find(|&i| buf[i..].starts_with(b"\n\n") || buf[i..].starts_with(b"\r\n\r\n"))
 }
 
 fn event_boundary_len(buf: &[u8], start: usize) -> usize {

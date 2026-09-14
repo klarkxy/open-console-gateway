@@ -198,16 +198,6 @@ export function planFamilyLabel(
   return plan.label;
 }
 
-/**
- * User-visible offering of a saved provider scope. Only the explicit built-in
- * paid families (OpenCode Go, GOAT, MiniMax CN, Kimi CN, Ollama) are Plan;
- * free (Zen Free), Custom, and unknown providers are API.
- */
-export function providerScopeOffering(providerId: string): "plan" | "api" {
-  const kind = findPlanDefinition(providerId)?.kind;
-  return kind === "quota" || kind === "api-key" ? "plan" : "api";
-}
-
 /** Reason the family cannot be created, or null when it is creatable. */
 export function planCreateDisabledReason(
   plan: PlanDefinition,

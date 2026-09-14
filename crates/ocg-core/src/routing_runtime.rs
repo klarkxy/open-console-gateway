@@ -11,13 +11,10 @@ use crate::provider::ProviderAdapterKind;
 use chrono::{DateTime, Utc};
 use ocg_gateway::selector::{BaseAvailability, Candidate as GatewayCandidate, SelectionPolicy};
 use parking_lot::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 #[cfg(test)]
 use crate::kernel::ids::OPENCODE_ZEN_FREE_PROVIDER_ID;
-
-pub const CONVERSATION_TTL: Duration = ocg_gateway::selector::CONVERSATION_TTL;
-pub const MAX_CONVERSATIONS: usize = ocg_gateway::selector::MAX_CONVERSATIONS;
 
 #[derive(Debug, Default)]
 pub struct RoutingRuntime {
@@ -85,31 +82,6 @@ impl RoutingRuntime {
         )
     }
 
-    /// Select an account for a generation request and update sticky/round-robin state.
-    #[allow(clippy::too_many_arguments)]
-    pub fn select_account_for(
-        &self,
-        accounts: &[Account],
-        mode: RoutingMode,
-        conversation_sticky: bool,
-        conversation_key: Option<&str>,
-        channel: UpstreamChannel,
-        resolved_model: &str,
-        exclude_ids: &[&str],
-    ) -> Option<Account> {
-        self.select_account_for_at(
-            accounts,
-            mode,
-            conversation_sticky,
-            conversation_key,
-            channel,
-            resolved_model,
-            exclude_ids,
-            Utc::now(),
-            Instant::now(),
-        )
-    }
-
     /// Select an account against an explicit wall/mono pair.
     #[allow(clippy::too_many_arguments)]
     pub fn select_account_for_at(
@@ -143,28 +115,6 @@ impl RoutingRuntime {
             mono,
         )
         .map(|candidate| candidate.account)
-    }
-
-    /// Select one already capability-filtered route target. Candidates retain
-    /// database order, while each carries its own provider channel and resolved
-    /// model (for example, a Zen mapped model beside later paid accounts).
-    pub fn select_candidate(
-        &self,
-        candidates: &[RoutingCandidate],
-        mode: RoutingMode,
-        conversation_sticky: bool,
-        conversation_key: Option<&str>,
-        exclude_ids: &[&str],
-    ) -> Option<RoutingCandidate> {
-        self.select_candidate_at(
-            candidates,
-            mode,
-            conversation_sticky,
-            conversation_key,
-            exclude_ids,
-            Utc::now(),
-            Instant::now(),
-        )
     }
 
     /// Select one capability-filtered route target against an explicit wall/mono pair.

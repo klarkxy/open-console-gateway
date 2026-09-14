@@ -179,6 +179,60 @@
       ],
       "type": "object"
     },
+    "CatalogModelsRemoveRequest": {
+      "additionalProperties": false,
+      "description": "Remove models from a persisted built-in Provider catalog snapshot.\n\nLocal-only. An official catalog refresh may add the same IDs back.",
+      "properties": {
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "modelIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "modelIds"
+      ],
+      "type": "object"
+    },
+    "CatalogModelsRemoveResult": {
+      "additionalProperties": false,
+      "properties": {
+        "catalogModels": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "removedIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "revision": {
+          "$ref": "#/$defs/ControlRevision"
+        }
+      },
+      "required": [
+        "revision",
+        "removedIds",
+        "catalogModels"
+      ],
+      "type": "object"
+    },
     "ConnectionEndpoint": {
       "additionalProperties": false,
       "properties": {
@@ -407,6 +461,90 @@
         "revision",
         "processGeneration",
         "pricingRevision"
+      ],
+      "type": "object"
+    },
+    "CpaCatalog": {
+      "additionalProperties": false,
+      "properties": {
+        "models": {
+          "items": {
+            "$ref": "#/$defs/CpaCatalogEntry"
+          },
+          "type": "array"
+        },
+        "refreshedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "revision": {
+          "$ref": "#/$defs/ControlRevision"
+        },
+        "sourceUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "revision",
+        "models",
+        "sourceUrl",
+        "refreshedAt"
+      ],
+      "type": "object"
+    },
+    "CpaCatalogEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "ownedBy": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "ownedBy",
+        "enabled"
+      ],
+      "type": "object"
+    },
+    "CpaCatalogUpdate": {
+      "additionalProperties": false,
+      "description": "Required process-scoped mutation precondition.\n\nBoth fields travel at the top level of every mutation request. The random\nprocess generation prevents a revision captured before restart from being\naccepted by a fresh process whose in-memory counter reused the same value.",
+      "properties": {
+        "enabledIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "enabledIds"
       ],
       "type": "object"
     },
@@ -1757,6 +1895,21 @@
     },
     {
       "$ref": "#/$defs/IdentityCredentialCreateResult"
+    },
+    {
+      "$ref": "#/$defs/CpaCatalogEntry"
+    },
+    {
+      "$ref": "#/$defs/CpaCatalog"
+    },
+    {
+      "$ref": "#/$defs/CpaCatalogUpdate"
+    },
+    {
+      "$ref": "#/$defs/CatalogModelsRemoveRequest"
+    },
+    {
+      "$ref": "#/$defs/CatalogModelsRemoveResult"
     }
   ],
   "title": "DashboardApiV4"

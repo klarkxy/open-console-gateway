@@ -100,7 +100,7 @@
               >{{ option.presets.length }}</span>
             </button>
           </section>
-          <p v-if="presetSearchMiss" class="account-add-empty" role="status">{{ t("无匹配选项") }}</p>
+          <p v-if="railEmptyMessage" class="account-add-empty" role="status">{{ railEmptyMessage }}</p>
         </div>
       </aside>
 
@@ -135,7 +135,7 @@
         </header>
 
         <p v-if="detail.kind === 'family' || detail.kind === 'preset'" class="account-add-outcome">
-          {{ t("选择预设后可先保存草稿，或完成设置以创建供应商并添加第一个账号。草稿请到供应商页继续。") }}
+          {{ t("可先存草稿，或一次建好供应商和第一个账号。草稿在供应商页继续。") }}
         </p>
 
         <div
@@ -268,6 +268,7 @@ import {
   chooserOptionIconKey,
   chooserSelectOptions,
   chooserUniverse,
+  defaultChooserMode,
   defaultChooserOptionId,
   describeChooserSelection,
   isChooserOptionDisabled,
@@ -282,6 +283,7 @@ import { PROVIDER_FAMILIES, familyOf, type ProviderFamily } from "../domain/prov
 import { PROVIDER_PRESETS, type ProviderPreset } from "../domain/provider-presets.ts";
 import { isDynamicCatalogEntry } from "../domain/dynamic-provider.ts";
 import { providerApi } from "../api/providers.ts";
+import type { Connection } from "../api/connections.ts";
 import type { AccountInput } from "../api/dashboard.ts";
 import type { ProviderCatalogEntry } from "../api/providers.ts";
 import AccountFormModal, { type AccountFormPayload } from "./AccountFormModal.vue";
@@ -297,6 +299,8 @@ const props = defineProps<{
   show: boolean;
   catalog: readonly ProviderCatalogEntry[] | null | undefined;
   catalogLoading: boolean;
+  /** V4 connection projection; unused built-ins stay out of Existing connections. */
+  connections?: readonly Connection[] | null;
   managedAvailable: boolean;
   managedReason: string;
   inviteMissing: boolean;
@@ -389,17 +393,29 @@ watch(
 );
 
 const chooserGroups = computed(() => (
-  buildChooserGroups(props.catalog, dynamicPresetIds.value, presetQuery.value, mode.value)
+  buildChooserGroups(
+    props.catalog,
+    dynamicPresetIds.value,
+    presetQuery.value,
+    mode.value,
+    props.connections,
+  )
 ));
-const universe = computed(() => chooserUniverse(props.catalog, dynamicPresetIds.value, mode.value));
+const universe = computed(() => (
+  chooserUniverse(props.catalog, dynamicPresetIds.value, mode.value, props.connections)
+));
 const navOptions = computed(() => visibleChooserOptions(chooserGroups.value));
 // The phone selector owns its filter, so it always lists the full option
 // universe of the active mode — never the hidden desktop search query.
 const selectOptions = computed(() => chooserSelectOptions(
-  buildChooserGroups(props.catalog, dynamicPresetIds.value, "", mode.value),
+  buildChooserGroups(props.catalog, dynamicPresetIds.value, "", mode.value, props.connections),
   t("用户定义"),
 ));
-const presetSearchMiss = computed(() => Boolean(presetQuery.value.trim()) && navOptions.value.length === 0);
+const railEmptyMessage = computed(() => {
+  if (navOptions.value.length > 0) return "";
+  if (presetQuery.value.trim()) return t("无匹配选项");
+  return mode.value === "connections" ? t("暂无已有连接") : t("无匹配选项");
+});
 
 const selected = computed(() => (
   universe.value.find((option) => option.optionId === selectedOptionId.value) ?? null
@@ -547,9 +563,21 @@ watch(
       selectedVariantId.value = "";
       // Existing connections are the default view; a deep link into a preset
       // or platform option opens the new-service browsing mode directly.
-      const nextMode = initialOptionId ? chooserModeForOptionId(initialOptionId) : "connections";
+      const nextMode = initialOptionId
+        ? chooserModeForOptionId(
+          initialOptionId,
+          props.catalog,
+          dynamicPresetIds.value,
+          props.connections,
+        )
+        : defaultChooserMode(props.catalog, dynamicPresetIds.value, props.connections);
       mode.value = nextMode;
-      const nextOptions = chooserUniverse(props.catalog, dynamicPresetIds.value, nextMode);
+      const nextOptions = chooserUniverse(
+        props.catalog,
+        dynamicPresetIds.value,
+        nextMode,
+        props.connections,
+      );
       if (initialOptionId && isValidChooserOption(nextOptions, initialOptionId)) {
         selectedOptionId.value = initialOptionId;
         return;

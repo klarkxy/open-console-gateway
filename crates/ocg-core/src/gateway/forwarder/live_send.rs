@@ -31,6 +31,18 @@ use std::fmt;
 
 const UNAUTHORIZED_ATTEMPT: &str =
     "refusing to send credentials: selected credential is no longer authorized for this attempt";
+
+/// Whether a disabled account card may still decrypt and send.
+///
+/// The account switch is the routing draft/live gate. Operational model
+/// tests and protocol probes must keep working on a disabled card so the
+/// operator can check the Key before turning the card on. Binding enablement,
+/// version, scope, and destination grants still apply.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LiveSendAccountGate {
+    RequireEnabled,
+    AllowDisabled,
+}
 const MISSING_GRANT: &str = "refusing to send credentials: no persisted origin grant for this Key";
 const ENDPOINT_NOT_GRANTED: &str =
     "refusing to send credentials: the endpoint is not authorized for this Key";
@@ -111,6 +123,7 @@ pub(crate) fn authorize_live_send_secret(
     account: &Account,
     plan: &RequestPlan,
     spec: &AttemptSpec,
+    account_gate: LiveSendAccountGate,
 ) -> Result<Option<String>, LiveSendAuthError> {
     match &spec.credential {
         CredentialHandle::None => Ok(None),
@@ -119,7 +132,7 @@ pub(crate) fn authorize_live_send_secret(
                 return Err(LiveSendAuthError::unauthorized(UNAUTHORIZED_ATTEMPT));
             }
             let db = state.db.lock();
-            verify_live_send(&db, selection, account, plan, spec)?;
+            verify_live_send(&db, selection, account, plan, spec, account_gate)?;
             state
                 .decrypt_key(&selection.key_cipher)
                 .map(Some)
@@ -136,6 +149,7 @@ pub(crate) fn confirm_live_send_secret(
     account: &Account,
     plan: &RequestPlan,
     spec: &AttemptSpec,
+    account_gate: LiveSendAccountGate,
 ) -> Result<(), LiveSendAuthError> {
     match &spec.credential {
         CredentialHandle::None => Ok(()),
@@ -144,7 +158,7 @@ pub(crate) fn confirm_live_send_secret(
                 return Err(LiveSendAuthError::unauthorized(UNAUTHORIZED_ATTEMPT));
             }
             let db = state.db.lock();
-            verify_live_send(&db, selection, account, plan, spec)
+            verify_live_send(&db, selection, account, plan, spec, account_gate)
         }
     }
 }
@@ -155,18 +169,19 @@ fn verify_live_send(
     account: &Account,
     plan: &RequestPlan,
     spec: &AttemptSpec,
+    account_gate: LiveSendAccountGate,
 ) -> Result<(), LiveSendAuthError> {
     let target_url = spec
         .request_url()
-        .map_err(|error| LiveSendAuthError::unauthorized(error))?;
+        .map_err(LiveSendAuthError::unauthorized)?;
     if spec.is_local_external_integration() || account.provider_id == CPA_PROVIDER_ID {
         if let Some(live_account) = db
             .get_account(&selection.account_id)
             .map_err(|error| LiveSendAuthError::unauthorized(error.to_string()))?
+            && ((account_gate == LiveSendAccountGate::RequireEnabled && !live_account.enabled)
+                || live_account.key_cipher != selection.key_cipher)
         {
-            if !live_account.enabled || live_account.key_cipher != selection.key_cipher {
-                return Err(LiveSendAuthError::unauthorized(UNAUTHORIZED_ATTEMPT));
-            }
+            return Err(LiveSendAuthError::unauthorized(UNAUTHORIZED_ATTEMPT));
         }
         ensure_sealed_secret_origin(&target_url, &spec.base_url)?;
         return Ok(());
@@ -176,7 +191,7 @@ fn verify_live_send(
         .get_account(&selection.account_id)
         .map_err(|error| LiveSendAuthError::unauthorized(error.to_string()))?
         .ok_or_else(|| LiveSendAuthError::unauthorized(UNAUTHORIZED_ATTEMPT))?;
-    if !live_account.enabled {
+    if account_gate == LiveSendAccountGate::RequireEnabled && !live_account.enabled {
         return Err(LiveSendAuthError::unauthorized(UNAUTHORIZED_ATTEMPT));
     }
     let binding = db
@@ -265,7 +280,7 @@ fn live_isolated_route(
         }
         let spec_url = spec
             .request_url()
-            .map_err(|error| LiveSendAuthError::unauthorized(error))?;
+            .map_err(LiveSendAuthError::unauthorized)?;
         if !inference_urls_match(&spec_url, &current) {
             return Err(LiveSendAuthError::unauthorized(ROUTE_CHANGED));
         }
@@ -318,7 +333,7 @@ fn live_isolated_route(
     let current = resolve_inference_url(&live_route.endpoint_url, live_route.protocol)?;
     let spec_url = spec
         .request_url()
-        .map_err(|error| LiveSendAuthError::unauthorized(error))?;
+        .map_err(LiveSendAuthError::unauthorized)?;
     if !inference_urls_match(&spec_url, &current) {
         return Err(LiveSendAuthError::unauthorized(ROUTE_CHANGED));
     }

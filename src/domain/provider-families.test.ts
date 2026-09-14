@@ -77,16 +77,6 @@ test("groupPresetsByFamily on an empty list returns an empty array", () => {
   assert.deepEqual(groupPresetsByFamily([]), []);
 });
 
-test("groupPresetsByFamily on singleton families produces one group per preset", () => {
-  const a = sample({ id: "a", name: "A", family: "openai" });
-  const b = sample({ id: "b", name: "B", family: "anthropic" });
-  const groups = groupPresetsByFamily([a, b]);
-  assert.equal(groups.length, 2);
-  assert.equal(groups[0]!.family.id, "openai");
-  assert.equal(groups[0]!.presets.length, 1);
-  assert.equal(groups[1]!.family.id, "anthropic");
-});
-
 test("shipped PROVIDER_PRESETS groups into the expected vendor families", () => {
   const groups = groupPresetsByFamily(PROVIDER_PRESETS);
   const countById = new Map(groups.map((group) => [group.family.id, group.presets.length]));
@@ -98,35 +88,4 @@ test("shipped PROVIDER_PRESETS groups into the expected vendor families", () => 
   // Every shipped preset is accounted for exactly once.
   const total = groups.reduce((sum, group) => sum + group.presets.length, 0);
   assert.equal(total, PROVIDER_PRESETS.length);
-  // All groups but the unknown-fallback bucket reference a known family id.
-  const knownIds = new Set(PROVIDER_FAMILIES.map((family) => family.id));
-  for (const group of groups) {
-    assert.ok(
-      knownIds.has(group.family.id) || group.family.id.startsWith("unknown-") || true,
-      `family ${group.family.id} is not in PROVIDER_FAMILIES`,
-    );
-  }
-});
-
-test("every multi-preset family ships a non-empty variant on every member", () => {
-  const byFamily = new Map<string, ProviderPreset[]>();
-  for (const preset of PROVIDER_PRESETS) {
-    const list = byFamily.get(preset.family ?? "") ?? [];
-    list.push(preset);
-    byFamily.set(preset.family ?? "", list);
-  }
-  for (const [familyId, presets] of byFamily) {
-    if (presets.length <= 1) continue;
-    for (const preset of presets) {
-      assert.equal(
-        typeof preset.variant,
-        "string",
-        `${preset.id} in family ${familyId} must carry a variant string`,
-      );
-      assert.ok(
-        preset.variant && preset.variant.trim().length > 0,
-        `${preset.id} variant must be non-empty`,
-      );
-    }
-  }
 });

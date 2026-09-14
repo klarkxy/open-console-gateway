@@ -2023,13 +2023,13 @@ fn validate_identity_snapshot(
                 prefix()
             )));
         }
-        if let ModelScope::Only { models } = &binding_model_scope {
-            if models.is_empty() || models.iter().any(|model| model.trim().is_empty()) {
-                return Err(TransferError::Invalid(format!(
-                    "{} has an invalid binding model scope",
-                    prefix()
-                )));
-            }
+        if let ModelScope::Only { models } = &binding_model_scope
+            && (models.is_empty() || models.iter().any(|model| model.trim().is_empty()))
+        {
+            return Err(TransferError::Invalid(format!(
+                "{} has an invalid binding model scope",
+                prefix()
+            )));
         }
         let link = ImportedAccountIdentity {
             account_id: account_id.to_string(),

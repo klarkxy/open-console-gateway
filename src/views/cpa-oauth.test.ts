@@ -36,11 +36,13 @@ function cpaHarnessPlugin() {
       export const NCard = pass; export const NEmpty = pass; export const NForm = pass;
       export const NFormItem = pass; export const NInput = pass; export const NSpin = pass; export const NSpace = pass;
       export const NSwitch = pass; export const NTabPane = pass; export const NTabs = pass; export const NTag = pass;
+      export const NTooltip = pass;
       export const useDialog = () => ({ warning: (options) => options.onPositiveClick?.() });
       export const useMessage = () => ({ error() {}, success() {}, warning() {} });
     `,
     api: `
       export const dashboardV3 = new Proxy({}, { get: (_, key) => (...args) => globalThis.__cpaComponentApi[key](...args) });
+      export const dashboardV4 = new Proxy({}, { get: (_, key) => (...args) => globalThis.__cpaComponentApi[key](...args) });
     `,
     store: `
       export const useControlPlaneStore = () => ({
@@ -64,6 +66,7 @@ function cpaHarnessPlugin() {
   const sources: Record<string, string> = {
     "naive-ui": "naive",
     "../api/dashboard-v3.ts": "api",
+    "../api/dashboard-v4.ts": "api",
     "../stores/controlPlane.ts": "store",
     "../i18n/index.ts": "i18n",
     "../utils/errors.ts": "errors",
@@ -220,13 +223,17 @@ function button(root: HostNode, label: string): HostNode {
   return found;
 }
 
+function importButton(root: HostNode, provider: string): HostNode {
+  return button(root, `导入 ${provider}`);
+}
+
 function oauthComponentApi(overrides: CpaApi): CpaApi {
   return {
     getCpaIntegration: async () => integration(),
     getCpaRuntime: async () => runtime(),
     getCpaAccounts: async () => ({ accounts: [] }),
     getCpaRuntimeKeys: async () => ({ keys: [], processGeneration: 1, revision: 1 }),
-    getCpaModels: async () => ({ models: [], sourceUrl: null, refreshedAt: null, processGeneration: 1, revision: 1 }),
+    getCpaCatalog: async () => ({ models: [], sourceUrl: null, refreshedAt: null, revision: { revision: 1, processGeneration: 1, pricingRevision: "p" } }),
     getCpaCliImports: async () => ({ sources: [] }),
     importCpaCliAccount: async () => { throw new Error("importCpaCliAccount not stubbed"); },
     cancelCpaOAuth: async () => ({ revision: 1, processGeneration: 1 }),
@@ -557,12 +564,6 @@ test("a non-Codex device flow keeps the generic instruction without ChatGPT copy
   } finally { mounted.app.unmount(); }
 });
 
-function buttons(root: HostNode, label: string): HostNode[] {
-  return root.children.flatMap(function walk(node): HostNode[] {
-    return [node, ...node.children.flatMap(walk)];
-  }).filter((node) => node.type === "button" && text(node).trim() === label);
-}
-
 test("CLI import lists dynamic availability with unsupported and missing reasons", async () => {
   const mounted = await mount(oauthComponentApi({
     getCpaCliImports: async () => ({ sources: [
@@ -576,15 +577,16 @@ test("CLI import lists dynamic availability with unsupported and missing reasons
     const page = text(mounted.root);
     assert.match(page, /导入本机 CLI 已登录账号/);
     assert.match(page, /源文件不会被修改/, "the one-time copy and shared-authorization trade-off is explained");
-    for (const label of ["Codex", "Claude", "Kimi"]) assert.match(page, new RegExp(label), `fixed provider label ${label}`);
-    assert.match(page, /codex-cli/);
-    assert.match(page, /未发现凭据文件/, "a supported-but-missing source shows the backend reason");
-    assert.match(page, /导入支持仍在评估中/, "an unsupported source shows the backend reason");
-    const importButtons = buttons(mounted.root, "导入");
-    assert.equal(importButtons.length, 3, "one import action per discovered source");
-    assert.ok(!importButtons[0].props.disabled, "an available source can be imported");
-    assert.ok(importButtons[1].props.disabled, "a missing source cannot be imported");
-    assert.ok(importButtons[2].props.disabled, "an unsupported source cannot be imported");
+    for (const label of ["导入 Codex", "导入 Claude", "导入 Kimi"]) {
+      assert.match(page, new RegExp(label), `fixed provider action ${label}`);
+    }
+    assert.match(page, /Claude、Kimi 无法从本机导入，请改用上方登录/, "blocked sources collapse into one tip");
+    assert.match(page, /未发现凭据文件/, "hover detail keeps the backend reason");
+    assert.match(page, /导入支持仍在评估中/, "hover detail keeps the unsupported reason");
+    assert.equal("secondary" in importButton(mounted.root, "Codex").props, true, "import uses the same secondary buttons as fresh login");
+    assert.ok(!importButton(mounted.root, "Codex").props.disabled, "an available source can be imported");
+    assert.ok(importButton(mounted.root, "Claude").props.disabled, "a missing source cannot be imported");
+    assert.ok(importButton(mounted.root, "Kimi").props.disabled, "an unsupported source cannot be imported");
   } finally { mounted.app.unmount(); }
 });
 
@@ -604,13 +606,14 @@ test("import sends only the provider payload and refreshes accounts on imported"
   try {
     await settle();
     const accountReadsAfterLoad = accountReads;
-    await (button(mounted.root, "导入").props.onClick as () => Promise<void>)();
+    await (importButton(mounted.root, "Codex").props.onClick as () => Promise<void>)();
     await settle();
     assert.deepEqual(imports[0], { provider: "codex" }, "the payload carries no secret, path, or source text");
     assert.equal(Object.keys(imports[0] as object).length, 1, "the payload is exactly the provider");
     assert.ok(accountReads > accountReadsAfterLoad, "a confirmed import refreshes the account list");
     assert.match(text(mounted.root), /已导入 Codex 账号。/, "the notice names the provider label");
     assert.doesNotMatch(text(mounted.root), /ocg-cli-codex-a1b2c3\.json/, "the hashed implementation filename is never rendered");
+    assert.ok(importButton(mounted.root, "Codex").props.disabled, "an imported source is greyed out");
   } finally { mounted.app.unmount(); }
 });
 
@@ -626,11 +629,49 @@ test("alreadyImported refreshes accounts and explains no duplicate was created",
   try {
     await settle();
     const accountReadsAfterLoad = accountReads;
-    await (button(mounted.root, "导入").props.onClick as () => Promise<void>)();
+    await (importButton(mounted.root, "Claude").props.onClick as () => Promise<void>)();
     await settle();
     assert.ok(accountReads > accountReadsAfterLoad, "an already-imported account still refreshes the list");
     assert.match(text(mounted.root), /Claude 账号已存在，无需重复导入。/, "the notice names the provider label");
     assert.doesNotMatch(text(mounted.root), /ocg-cli-anthropic-f0e1d2\.json/, "the hashed implementation filename is never rendered");
+    assert.ok(importButton(mounted.root, "Claude").props.disabled, "an already-imported source is greyed out");
+  } finally { mounted.app.unmount(); }
+});
+
+test("an existing CLI-imported account greys that provider on load", async () => {
+  const mounted = await mount(oauthComponentApi({
+    getCpaCliImports: async () => ({ sources: [
+      { provider: "codex", source: "codex-cli", supported: true, available: true, reason: null },
+      { provider: "kimi", source: "kimi-cli", supported: true, available: true, reason: null },
+    ] }),
+    getCpaAccounts: async () => ({ accounts: [{
+      authIndex: "1", disabled: false, email: null, label: "Codex", mutable: true,
+      name: "ocg-cli-codex-a1b2c3.json", provider: "codex", quota: null, runtimeOnly: false,
+      status: "ok", statusMessage: null, unavailable: false,
+    }] }),
+  }));
+  try {
+    await settle();
+    assert.ok(importButton(mounted.root, "Codex").props.disabled, "a previously imported CLI account greys Import");
+    assert.ok(!importButton(mounted.root, "Kimi").props.disabled, "a different available source stays importable");
+  } finally { mounted.app.unmount(); }
+});
+
+test("empty CPA quota is omitted from the account row", async () => {
+  const mounted = await mount(oauthComponentApi({
+    getCpaAccounts: async () => ({ accounts: [{
+      authIndex: "1", disabled: false, email: "a@b.com", label: "user", mutable: true,
+      name: "codex-1", provider: "codex", quota: { signals: {} }, runtimeOnly: false,
+      status: "active", statusMessage: null, unavailable: false,
+    }] }),
+  }));
+  try {
+    await settle();
+    const page = text(mounted.root);
+    assert.match(page, /user/);
+    assert.match(page, /重置配额/);
+    assert.doesNotMatch(page, /signals/);
+    assert.doesNotMatch(page, /配额 ·/);
   } finally { mounted.app.unmount(); }
 });
 
@@ -646,11 +687,12 @@ test("unconfirmed import warns to refresh before retrying and does not refresh a
   try {
     await settle();
     const accountReadsAfterLoad = accountReads;
-    await (button(mounted.root, "导入").props.onClick as () => Promise<void>)();
+    await (importButton(mounted.root, "Codex").props.onClick as () => Promise<void>)();
     await settle();
     assert.equal(accountReads, accountReadsAfterLoad, "an unconfirmed outcome never refreshes the list implicitly");
     assert.match(text(mounted.root), /导入结果未确认：请先刷新账号列表/, "the refresh-before-retry warning is shown");
     assert.match(text(mounted.root), /幂等/, "the idempotent retry is explained");
+    assert.ok(!importButton(mounted.root, "Codex").props.disabled, "an unconfirmed import stays retryable");
   } finally { mounted.app.unmount(); }
 });
 
@@ -671,10 +713,10 @@ test("CLI import and OAuth flows are mutually exclusive single-flight actions", 
     await settle();
     await (button(mounted.root, "Codex 浏览器登录").props.onClick as () => Promise<void>)();
     await settle();
-    assert.ok(button(mounted.root, "导入").props.disabled, "an active OAuth flow disables import");
+    assert.ok(importButton(mounted.root, "Codex").props.disabled, "an active OAuth flow disables import");
     await (button(mounted.root, "取消当前授权").props.onClick as () => Promise<void>)();
     await settle();
-    const importClick = (button(mounted.root, "导入").props.onClick as () => Promise<void>)();
+    const importClick = (importButton(mounted.root, "Codex").props.onClick as () => Promise<void>)();
     await settle();
     assert.ok(button(mounted.root, "Codex 浏览器登录").props.disabled, "an in-flight import disables OAuth starts");
     assert.ok(button(mounted.root, "Codex 设备码登录").props.disabled, "the device start is equally blocked");
@@ -712,7 +754,7 @@ test("CLI discovery failure keeps every fresh-login path working and allows manu
     await (button(mounted.root, "重新检测").props.onClick as () => Promise<void>)();
     await settle();
     assert.equal(discoveries, 2, "re-detect re-runs discovery only on demand");
-    assert.match(text(mounted.root), /codex-cli/, "the recovered discovery renders its sources");
+    assert.match(text(mounted.root), /导入 Codex/, "the recovered discovery renders its sources");
   } finally { mounted.app.unmount(); }
 });
 
@@ -731,7 +773,7 @@ test("unconfirmed import offers a manual account-list refresh without retrying t
   }));
   try {
     await settle();
-    await (button(mounted.root, "导入").props.onClick as () => Promise<void>)();
+    await (importButton(mounted.root, "Codex").props.onClick as () => Promise<void>)();
     await settle();
     assert.match(text(mounted.root), /导入结果未确认/);
     const accountReadsBeforeRefresh = accountReads;
@@ -753,14 +795,14 @@ test("a superseding page load ignores the older CLI discovery response", async (
     },
   }));
   try {
-    await (button(mounted.root, "重试").props.onClick as () => Promise<void>)();
+    await (button(mounted.root, "刷新").props.onClick as () => Promise<void>)();
     await settle();
     await settle();
-    assert.match(text(mounted.root), /codex-cli/, "the newer discovery renders");
+    assert.match(text(mounted.root), /导入 Codex/, "the newer discovery renders");
     staleDiscovery.resolve({ sources: [{ provider: "xai", source: "late-marker-cli", supported: true, available: true, reason: null }] });
     await settle();
-    assert.doesNotMatch(text(mounted.root), /late-marker-cli/, "the stale discovery response is ignored");
-    assert.match(text(mounted.root), /codex-cli/, "the newer discovery result stays");
+    assert.doesNotMatch(text(mounted.root), /导入 xAI/, "the stale discovery response is ignored");
+    assert.match(text(mounted.root), /导入 Codex/, "the newer discovery result stays");
   } finally { mounted.app.unmount(); }
 });
 
@@ -789,7 +831,7 @@ test("a CLI import response arriving after disconnect is ignored without any und
   }));
   try {
     await settle();
-    const importClick = (button(mounted.root, "导入").props.onClick as () => Promise<void>)();
+    const importClick = (importButton(mounted.root, "Codex").props.onClick as () => Promise<void>)();
     await settle();
     await (button(mounted.root, "断开并清除").props.onClick as () => Promise<void>)();
     await settle();
@@ -815,7 +857,7 @@ test("CLI discovery and import responses after unmount are ignored", async () =>
   first.app.unmount();
   staleDiscovery.resolve(undefined);
   await settle();
-  assert.doesNotMatch(text(first.root), /late-marker-cli/, "the discovery response after unmount is not applied");
+  assert.doesNotMatch(text(first.root), /导入 xAI/, "the discovery response after unmount is not applied");
 
   const importRequest = deferred<unknown>();
   let accountReads = 0;
@@ -830,7 +872,7 @@ test("CLI discovery and import responses after unmount are ignored", async () =>
     getCpaAccounts: async () => { accountReads += 1; return { accounts: [] }; },
   }));
   await settle();
-  void (button(second.root, "导入").props.onClick as () => Promise<void>)();
+  void (importButton(second.root, "Codex").props.onClick as () => Promise<void>)();
   await settle();
   const accountReadsBeforeUnmount = accountReads;
   second.app.unmount();

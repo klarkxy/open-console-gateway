@@ -116,6 +116,8 @@ async fn discovered_model_probes_and_routes_all_three_client_formats_with_stream
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{created}");
+        let provider_id = created["provider"]["id"].as_str().unwrap().to_string();
+        enable_accounts_for_provider(&harness, &provider_id);
         assert!(
             listed_gateway_model_ids(&harness)
                 .await
@@ -658,6 +660,7 @@ async fn two_keyed_accounts_select_and_fallback() {
     .await;
     assert_eq!(status, StatusCode::OK, "{second}");
     let second_account_id = second["account"]["id"].as_str().unwrap().to_string();
+    enable_accounts_for_provider(&harness, &provider_id);
     let (gw_status, body) = chat_completion(&harness, "lab-opus").await;
     assert_eq!(gw_status, StatusCode::OK, "{body}");
     let logs = harness.state.db.lock().list_forward_logs(8).unwrap();
@@ -723,6 +726,8 @@ async fn none_auth_dynamic_provider_forwards_without_upstream_auth() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{created}");
+    let provider_id = created["provider"]["id"].as_str().unwrap().to_string();
+    enable_accounts_for_provider(&harness, &provider_id);
 
     let response = harness
         .client
@@ -846,6 +851,8 @@ async fn raw_shaped_public_models_are_listed_under_public_name_only() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{created}");
+    let provider_id = created["provider"]["id"].as_str().unwrap().to_string();
+    enable_accounts_for_provider(&harness, &provider_id);
 
     let ids = listed_gateway_model_ids(&harness).await;
     for public in ["org/same", "org/public", "lab_model", "lab model"] {
@@ -925,6 +932,8 @@ async fn public_alias_aggregates_across_dynamic_providers() {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{created}");
+        let provider_id = created["provider"]["id"].as_str().unwrap().to_string();
+        enable_accounts_for_provider(&harness, &provider_id);
     }
     let models = harness
         .client
@@ -1361,6 +1370,7 @@ async fn in_flight_fallback_stops_after_provider_destination_changes() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{second}");
+    enable_accounts_for_provider(&harness, &provider_id);
 
     let client = harness.client.clone();
     let port = harness.handle.port;
@@ -1596,6 +1606,22 @@ async fn deleting_the_last_account_keeps_the_dynamic_provider_definition() {
     harness.stop();
 }
 
+fn enable_accounts_for_provider(harness: &V3Harness, provider_id: &str) {
+    let ids: Vec<String> = harness
+        .state
+        .db
+        .lock()
+        .list_accounts()
+        .unwrap()
+        .into_iter()
+        .filter(|account| account.provider_id == provider_id)
+        .map(|account| account.id)
+        .collect();
+    for id in ids {
+        harness.enable_account(&id);
+    }
+}
+
 async fn account_id_for_provider(harness: &V3Harness, provider_id: &str) -> String {
     harness
         .state
@@ -1648,7 +1674,10 @@ async fn keyed_dynamic_account_can_disable_and_re_enable() {
         .get_account(&account_id)
         .unwrap()
         .unwrap();
-    assert!(before.enabled);
+    assert!(!before.enabled);
+    let (status, enabled) = toggle_account(&harness, &account_id).await;
+    assert_eq!(status, StatusCode::OK, "{enabled}");
+    assert_eq!(enabled["account"]["enabled"], true);
     let mut revision = harness.state.settings_revision();
 
     let (status, disabled) = toggle_account(&harness, &account_id).await;
@@ -1713,12 +1742,15 @@ async fn dynamic_none_auth_singleton_can_disable_and_re_enable_without_a_key() {
         .get_account(&account_id)
         .unwrap()
         .unwrap();
-    assert!(stored.enabled);
+    assert!(!stored.enabled);
     assert!(stored.key_cipher.is_empty());
     assert_eq!(
         stored.credential_kind,
         ocg_core::provider::CredentialKind::None
     );
+    let (status, enabled) = toggle_account(&harness, &account_id).await;
+    assert_eq!(status, StatusCode::OK, "{enabled}");
+    assert_eq!(enabled["account"]["enabled"], true);
     let mut revision = harness.state.settings_revision();
 
     let (status, disabled) = toggle_account(&harness, &account_id).await;
@@ -1810,6 +1842,8 @@ async fn inherited_chat_and_overridden_messages_use_effective_routes() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{created}");
+    let provider_id = created["provider"]["id"].as_str().unwrap().to_string();
+    enable_accounts_for_provider(&harness, &provider_id);
     let models = created["provider"]["models"].as_array().unwrap();
     assert!(models[0].get("upstreamOverride").is_none(), "{created}");
     assert_eq!(models[1]["upstreamOverride"]["protocol"], "messages");
@@ -1817,7 +1851,6 @@ async fn inherited_chat_and_overridden_messages_use_effective_routes() {
         models[1]["upstreamOverride"]["endpointUrl"],
         messages_endpoint
     );
-    let provider_id = created["provider"]["id"].as_str().unwrap().to_string();
     let listed = listed_gateway_model_ids(&harness).await;
     assert!(listed.contains(&"lab-chat".to_string()), "{listed:?}");
     assert!(listed.contains(&"lab-messages".to_string()), "{listed:?}");
@@ -1884,41 +1917,42 @@ async fn inherited_chat_and_overridden_messages_use_effective_routes() {
         assert_eq!(tested["modelId"], model);
     }
 
-    let recorded = calls.lock().unwrap();
-    assert_eq!(recorded.len(), 8, "{recorded:?}");
-    for call in recorded
-        .iter()
-        .take(3)
-        .chain(recorded.iter().skip(6).take(1))
     {
-        assert_eq!(call.path, "/v1/chat/completions", "{call:?}");
-        assert_eq!(
-            serde_json::from_str::<Value>(&call.body).unwrap()["model"],
-            "vendor/chat"
-        );
-        assert_eq!(call.authorization.as_deref(), Some("Bearer sk-override"));
-        assert!(call.x_api_key.is_none(), "{call:?}");
+        let recorded = calls.lock().unwrap();
+        assert_eq!(recorded.len(), 8, "{recorded:?}");
+        for call in recorded
+            .iter()
+            .take(3)
+            .chain(recorded.iter().skip(6).take(1))
+        {
+            assert_eq!(call.path, "/v1/chat/completions", "{call:?}");
+            assert_eq!(
+                serde_json::from_str::<Value>(&call.body).unwrap()["model"],
+                "vendor/chat"
+            );
+            assert_eq!(call.authorization.as_deref(), Some("Bearer sk-override"));
+            assert!(call.x_api_key.is_none(), "{call:?}");
+        }
+        for call in recorded
+            .iter()
+            .skip(3)
+            .take(3)
+            .chain(recorded.iter().skip(7).take(1))
+        {
+            assert_eq!(call.path, "/anthropic/v1/messages", "{call:?}");
+            assert_eq!(
+                serde_json::from_str::<Value>(&call.body).unwrap()["model"],
+                "vendor/messages"
+            );
+            assert_eq!(
+                call.authorization.as_deref(),
+                Some("Bearer sk-override"),
+                "auth stays supplier-owned on a Messages override"
+            );
+            assert!(call.x_api_key.is_none(), "{call:?}");
+            assert!(call.anthropic_version.is_some(), "{call:?}");
+        }
     }
-    for call in recorded
-        .iter()
-        .skip(3)
-        .take(3)
-        .chain(recorded.iter().skip(7).take(1))
-    {
-        assert_eq!(call.path, "/anthropic/v1/messages", "{call:?}");
-        assert_eq!(
-            serde_json::from_str::<Value>(&call.body).unwrap()["model"],
-            "vendor/messages"
-        );
-        assert_eq!(
-            call.authorization.as_deref(),
-            Some("Bearer sk-override"),
-            "auth stays supplier-owned on a Messages override"
-        );
-        assert!(call.x_api_key.is_none(), "{call:?}");
-        assert!(call.anthropic_version.is_some(), "{call:?}");
-    }
-    drop(recorded);
 
     let (status, updated) = send_json(
         &harness,

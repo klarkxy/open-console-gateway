@@ -359,10 +359,6 @@ async function withCas<T>(
 }
 
 export const identitiesApi = {
-  list: async (): Promise<Identity[]> => {
-    const snapshot = await fetchIdentitySnapshot();
-    return snapshot.identities;
-  },
   /**
    * Presented identities plus the GET's own CAS pair. Callers that open an
    * editor must capture this view pair; a later global control-plane GET

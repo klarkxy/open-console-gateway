@@ -350,7 +350,12 @@ async function main() {
     const listenerPorts = (started?.listeners || lab.listeners || []).map((item) => ({ id: item.id, port: item.port }));
     if (gatewayPid) stopPid(gatewayPid);
     await lab.close();
-    await new Promise((resolve) => setTimeout(resolve, 600));
+    // Wait on owned-process exit and its listener, rather than one timing sample.
+    const deadline = Date.now() + 10000;
+    while ((gatewayPid && processAlive(gatewayPid)) || (owned.gatewayPort && await portOpen(owned.gatewayPort))) {
+      if (Date.now() >= deadline) break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
     const gatewayAlive = gatewayPid ? processAlive(gatewayPid) : false;
     const gatewayPortStillOpen = owned.gatewayPort ? await portOpen(owned.gatewayPort) : false;
     const listeners = [];
@@ -494,6 +499,7 @@ async function main() {
       slot.connectionId = receipt.connectionId;
       slot.accountId = receipt.accountId;
       slot.credentialId = receipt.credentialId;
+      await api.setEnabled(slot.accountId, true);
     }
 
     const identities = await api.identities();
@@ -809,6 +815,7 @@ async function main() {
             allowedOrigins: bravoCred.binding.allowedOrigins,
           });
         }
+        await api.setEnabled(siblingAccountId, true);
         await api.setEnabled(routeSlots[1].accountId, false);
         await api.reorder([routeSlots[0].accountId, siblingAccountId, routeSlots[2].accountId]);
         lab.script("alpha", [{ kind: "http", status: 429, body: { error: { message: "Resets in 5 minutes", type: "rate_limit_error" } } }]);

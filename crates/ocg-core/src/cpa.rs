@@ -595,6 +595,7 @@ fn parse_models(value: &Value) -> Result<Vec<CpaCatalogModel>, CpaError> {
         models.push(CpaCatalogModel {
             id: id.to_string(),
             owned_by,
+            enabled: true,
         });
     }
     // A newly installed CPA has no OAuth accounts and legitimately lists no models.
@@ -797,10 +798,12 @@ mod tests {
                 CpaCatalogModel {
                     id: "gpt-5".into(),
                     owned_by: Some("openai".into()),
+                    enabled: true,
                 },
                 CpaCatalogModel {
                     id: "claude".into(),
                     owned_by: Some("anthropic".into()),
+                    enabled: true,
                 },
             ]
         );

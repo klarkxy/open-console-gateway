@@ -84,6 +84,11 @@ async fn public_auth_status_and_v3_contract_are_reachable() {
         parsed.pricing_revision,
         harness.state.pricing_snapshot().revision
     );
+    let second = harness
+        .get_json(&format!("{}/contract", harness.v3_base))
+        .await
+        .1;
+    assert_eq!(contract["processGeneration"], second["processGeneration"]);
 
     harness.stop();
 }
@@ -164,20 +169,5 @@ async fn v3_session_cookie_from_v2_login_authorizes_contract_routes() {
         harness.state.process_generation()
     );
 
-    harness.stop();
-}
-
-#[tokio::test]
-async fn http_process_generation_is_stable_within_one_core_state() {
-    let harness = start_loopback("http-generation").await;
-    let first = harness
-        .get_json(&format!("{}/contract", harness.v3_base))
-        .await
-        .1;
-    let second = harness
-        .get_json(&format!("{}/contract", harness.v3_base))
-        .await
-        .1;
-    assert_eq!(first["processGeneration"], second["processGeneration"]);
     harness.stop();
 }

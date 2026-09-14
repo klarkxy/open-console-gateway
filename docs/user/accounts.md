@@ -2,11 +2,11 @@
 
 # Accounts
 
-**Add account** first distinguishes an existing connection from a new service. Choose an existing Provider to add another Key using its saved address, protocol and models — including a user-defined Provider saved from **Providers** that still has no Key. Choose a new service to browse Plan/API presets or add a platform site; saving a preset creates a Provider and its first account together. Saving a preset from **Add account** uses the same onboarding commit as **Providers**. Connection summaries remain visible before entering a Key. Regional variants use a compact picker. Keys are stored by the account service; you can add one here or from a Provider's detail with **Add Key**.
+**Add account** first distinguishes an existing connection from a new service. Existing connections use the same projection as **Providers**: built-in Providers that still have at least one account, and every saved user-defined Provider (with or without a Key). Deleting the last account of a built-in family removes it from existing connections and returns it to the new-service templates. Choose an existing connection to add another Key using its saved address, protocol and models. Choose a new service to browse unused built-in templates, Plan/API presets, Custom API, or a platform site; saving a preset creates a Provider and its first account together. Saving a preset from **Add account** uses the same onboarding commit as **Providers**. Connection summaries remain visible before entering a Key. Regional variants use a compact picker. Keys are stored by the account service; you can add one here or from a Provider's detail with **Add Key**.
 
-**Enabled** describes configuration, not a successful upstream authentication or model test. Test results stay in the test dialog. User-defined Providers have no modeled subscription period, including those created from Plan presets: their accounts do not show an inferred purchase date, expiry countdown, or expiry alert. Existing stored purchase anchors are preserved for compatibility, but are not presented as confirmed billing facts.
+**Enabled** means the card may enter routing. New Key accounts, including Custom API and user-defined Providers, are created disabled. Test connection does not turn the switch on; enable the card after you have checked it. Already-enabled accounts stay as stored. Test results stay in the test dialog. User-defined Providers have no modeled subscription period, including those created from Plan presets: their accounts do not show an inferred purchase date, expiry countdown, or expiry alert. Existing stored purchase anchors are preserved for compatibility, but are not presented as confirmed billing facts.
 
-Accounts still edit through the same forms. Card status and relations come from the identity projection: a declared relation is not a verified wallet, and dynamic or Custom dates stay unknown unless V3 already stored a real purchase date.
+Accounts still edit through the same forms. Ready, routable cards show enabled, disabled, cooling, or unavailable. Card relations come from the identity projection: a declared relation is not a verified wallet, and dynamic or Custom dates stay unknown unless V3 already stored a real purchase date.
 
 A ready Key card can **Rotate Key**, **Add Key**, and **Edit binding** from the overflow menu. Rotate replaces only the Key this console will send on later requests for that card's credential (same credential id; version numbers increase). It is a local replacement: the provider-side credential is not revoked and stays under your control. **Add Key** creates another inference Key on the same identity, defaulting to that card's connection. Quota is independent unless you explicitly share with a selected inference Key on that identity; belonging to the same identity is not enough. After save, cards that actually share a stored quota pool show that relationship (naming the sibling Key when possible). A third Key on the same identity stays independent when it has its own pool or none. Custom API, Zen Free, CPA, no-auth, and observer credentials do not expose Add Key (Custom API still uses its dedicated account editor). If create does not return a definite result, the form keeps the submitted contents and operation: retry the same body, or cancel; do not change the form and submit again (that can create a duplicate Key).
 
@@ -50,7 +50,7 @@ The Adapter Registry is sealed. Built-in Provider families are:
 | MiniMax CN Token Plan | `minimax` | Yes | Dedicated `sk-cp` Key; fixed official Chat and Messages routes, authenticated model directory, and manual official Token Plan usage refresh |
 | Kimi Code CN | `kimi` | Yes | Dedicated Kimi Code Key; fixed official Chat and Messages routes, authenticated model directory, and manual official weekly/rate-window usage refresh |
 | Ollama Cloud | `ollama` | Yes | Fixed-origin Chat Completions only (`https://ollama.com`, Bearer); public keyless catalog refresh; account billing tier (Pro $60 / Max $300 / Team $1000 USD Credits per billing month) plus purchase date; local monthly soft-credit estimate from official per-request usage and the manual `https://ollama.com/pricing` table; unconfigured existing accounts stay routeable with no meter |
-| Custom API | `custom` | Yes | Trusted-administrator destination; one API URL, one account-wide upstream protocol, and public-name → upstream-ID mappings per account; common base URLs are completed automatically; new accounts default on; eligible public names appear on `/v1/models`; unpriced/unknown cost, no quota debit |
+| Custom API | `custom` | Yes | Trusted-administrator destination; one API URL, one account-wide upstream protocol, and public-name → upstream-ID mappings per account; common base URLs are completed automatically; new accounts default off; eligible public names appear on `/v1/models`; unpriced/unknown cost, no quota debit |
 
 ## Move a node configuration
 
@@ -96,7 +96,7 @@ Every persistent mutation path rejects `enabled=true` for a catalogued
 GOAT catalog refresh updates the model directory; Key auth is observed from
 inference 401/403. An enabled, ready account with a non-empty Key can route
 models enabled in the Provider matrix. A newly created, routable Custom API
-account defaults to enabled. Editing the Endpoint, capabilities, Key, or
+account defaults to disabled. Editing the Endpoint, capabilities, Key, or
 protocol preserves its enabled state. Disabled drafts remain saveable.
 
 Use only the official provider API **Key** for OpenCode Go, Command Code GOAT,
@@ -175,7 +175,7 @@ unpriced: logs record `cost_state=unknown` with no quota debit, and Custom has
 no provider usage refresh. `MODEL_PROTOCOLS` remains Go-specific; Custom
 converts the client protocol to the account's single upstream protocol.
 
-Use the existing-connection choices to add another Key without creating a second Provider. New-service choices contain Plan/API presets, Custom API and platform types. Search matches vendor, variant, preset name and endpoint host. Selecting a result retains its exact variant when the search clears. Zen Free is a backend-owned singleton, managed only from the account list; OpenCode Go retains its optional managed-registration action where the host supports it.
+Use the existing-connection choices to add another Key without creating a second Provider. New-service choices contain unused built-in templates, Plan/API presets, Custom API and platform types. Search matches vendor, variant, preset name and endpoint host. Selecting a result retains its exact variant when the search clears. Zen Free is a backend-owned singleton, managed only from the account list; OpenCode Go retains its optional managed-registration action where the host supports it.
 
 - A **Key account** stores one officially distributable OpenCode Go API key.
 - A **managed account** immediately creates a disabled, recoverable draft, then
@@ -258,7 +258,7 @@ free cooldown rather than a key quota.
   a fetch: new schedules are spread across the first 0–15 minutes. **Refresh
   quota** runs the same path on demand with a 15-second per-account server
   throttle (Retry-After / next-allowed). The card shows the last successful
-  official sync time and any temporary retry wait. Local estimates that reach
+  official sync time. Local estimates that reach
   ≥80% may trigger one expedited sync per 15 minutes. A real inference `429`
   still writes the existing cooldown/selector state and additionally schedules
   an official reconciliation about 1–2 minutes later; official failures or

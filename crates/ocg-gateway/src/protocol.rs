@@ -947,7 +947,7 @@ fn responses_tool_context(
             "Responses tool_choice `required` has no convertible function, custom, or namespace tool",
         ));
     }
-    let legacy_tool_compat = (!hosted_tools.is_empty()).then(|| LegacyToolCompat {
+    let legacy_tool_compat = (!hosted_tools.is_empty()).then_some(LegacyToolCompat {
         profile: LEGACY_TOOL_COMPAT_PROFILE,
         version: LEGACY_TOOL_COMPAT_VERSION,
         dropped_hosted_tools: hosted_tools,

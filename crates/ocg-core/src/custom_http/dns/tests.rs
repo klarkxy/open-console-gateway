@@ -231,47 +231,37 @@ async fn unguarded_inner_does_not_look_like_a_guard_rejection() {
 }
 
 #[tokio::test]
-async fn injected_inner_metadata_v4_is_rejected_by_guard_before_connect() {
-    let hits = Arc::new(AtomicUsize::new(0));
-    let mock = serve_http(hits.clone()).await;
-    let inner = StaticResolver::one("imds.test", vec![addr(IpAddr::V4(METADATA_V4))]);
-    let (resolver, log) = guarded_recording(inner);
-    let client =
-        build_custom_http_client_with_dns_resolver(&test_config(ProxyMode::Direct, ""), resolver)
-            .unwrap();
-    let url = reqwest::Url::parse(&format!("http://imds.test:{}/v1", mock.port())).unwrap();
-    let error = send_isolated(&client, url)
-        .await
-        .expect_err("guarded metadata A must not connect");
-    log.assert_guard_rejected("imds.test");
-    assert_no_secret(&error);
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    assert_eq!(hits.load(Ordering::SeqCst), 0);
-}
-
-#[tokio::test]
-async fn injected_inner_metadata_v6_and_link_local_are_rejected_by_guard_before_connect() {
-    let hits = Arc::new(AtomicUsize::new(0));
-    let mock = serve_http(hits.clone()).await;
-    let inner = StaticResolver::one(
-        "imds6.test",
-        vec![
-            addr(IpAddr::V6(AWS_IMDS_V6)),
-            addr(IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1))),
-        ],
-    );
-    let (resolver, log) = guarded_recording(inner);
-    let client =
-        build_custom_http_client_with_dns_resolver(&test_config(ProxyMode::Direct, ""), resolver)
-            .unwrap();
-    let url = reqwest::Url::parse(&format!("http://imds6.test:{}/v1", mock.port())).unwrap();
-    let error = send_isolated(&client, url)
-        .await
-        .expect_err("guarded metadata AAAA must not connect");
-    log.assert_guard_rejected("imds6.test");
-    assert_no_secret(&error);
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    assert_eq!(hits.load(Ordering::SeqCst), 0);
+async fn injected_inner_metadata_is_rejected_by_guard_before_connect() {
+    for (label, host, addrs) in [
+        ("A", "imds.test", vec![addr(IpAddr::V4(METADATA_V4))]),
+        (
+            "AAAA-and-fe80",
+            "imds6.test",
+            vec![
+                addr(IpAddr::V6(AWS_IMDS_V6)),
+                addr(IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1))),
+            ],
+        ),
+    ] {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let mock = serve_http(hits.clone()).await;
+        let inner = StaticResolver::one(host, addrs);
+        let (resolver, log) = guarded_recording(inner);
+        let client = build_custom_http_client_with_dns_resolver(
+            &test_config(ProxyMode::Direct, ""),
+            resolver,
+        )
+        .unwrap();
+        let url = reqwest::Url::parse(&format!("http://{host}:{}/v1", mock.port())).unwrap();
+        let error = match send_isolated(&client, url).await {
+            Err(error) => error,
+            Ok(_) => panic!("guarded metadata {label} must not connect"),
+        };
+        log.assert_guard_rejected(host);
+        assert_no_secret(&error);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "{label} zero hits");
+    }
 }
 
 #[tokio::test]

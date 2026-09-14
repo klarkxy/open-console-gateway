@@ -273,7 +273,7 @@ impl CoreStateInner {
         let zen_free_models = db.zen_free_model_catalog()?.unwrap_or_default();
         let cpa_models = db
             .cpa_model_catalog()?
-            .map(|catalog| crate::db::CpaCatalogModel::ids(&catalog.models))
+            .map(|catalog| crate::db::CpaCatalogModel::enabled_ids(&catalog.models))
             .unwrap_or_default();
         let custom_runtimes = db.list_custom_account_runtimes()?;
         let dynamic_providers = db.list_dynamic_providers()?;
@@ -421,7 +421,7 @@ impl CoreStateInner {
         source_url: &str,
         refreshed_at: chrono::DateTime<chrono::Utc>,
     ) -> crate::Result<()> {
-        let ids = crate::db::CpaCatalogModel::ids(&models);
+        let ids = crate::db::CpaCatalogModel::enabled_ids(&models);
         let zen = self.zen_free_model_catalog();
         let contracts = self.provider_contracts();
         let provider_models = sealed_proxy_model_ids(&contracts, &ids);
@@ -440,6 +440,45 @@ impl CoreStateInner {
         }
         self.routing.reset();
         Ok(())
+    }
+
+    /// Replace the routed CPA catalog subset. Unknown IDs are rejected; an
+    /// empty selection publishes no CPA models.
+    pub fn set_cpa_model_routing(&self, enabled_ids: &[String]) -> crate::Result<()> {
+        let catalog = {
+            let db = self.db.lock();
+            db.cpa_model_catalog()?
+        };
+        let Some(catalog) = catalog else {
+            anyhow::bail!("CPA model catalog has not been refreshed");
+        };
+        let known: std::collections::HashSet<&str> = catalog
+            .models
+            .iter()
+            .map(|model| model.id.as_str())
+            .collect();
+        let enabled_ids: Vec<String> = enabled_ids.iter().map(|id| id.trim().to_string()).collect();
+        for id in &enabled_ids {
+            anyhow::ensure!(
+                known.contains(id.as_str()),
+                "enabledIds must be models from the saved CPA catalog"
+            );
+        }
+        let selected: std::collections::HashSet<&str> =
+            enabled_ids.iter().map(String::as_str).collect();
+        let models = catalog
+            .models
+            .into_iter()
+            .map(|mut model| {
+                model.enabled = selected.contains(model.id.as_str());
+                model
+            })
+            .collect();
+        self.activate_cpa_model_catalog(
+            models,
+            &catalog.source_url,
+            catalog.refreshed_at.unwrap_or_else(chrono::Utc::now),
+        )
     }
 
     /// Atomically remove OCG-owned CPA configuration, singleton account, and
@@ -587,6 +626,23 @@ impl CoreStateInner {
         *self.dynamic_providers.write() = Arc::new(providers);
         self.routing.reset();
         self.settings_revision.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// A committed catalog removal must restrict admission even if unrelated
+    /// persisted data prevents a full reload. Caller holds settings_update.
+    pub(crate) fn restrict_provider_catalog_after_reload_failure(
+        &self,
+        row: &crate::provider_contracts::PersistedScopeRow,
+    ) {
+        let mut active = self.provider_contracts.write();
+        let set = Arc::make_mut(&mut active);
+        if let Some(contract) = set.providers.get_mut(row.scope.id()) {
+            contract
+                .models
+                .retain(|_, model| row.catalog_models.contains(&model.model_id));
+            contract.catalog.models.clone_from(&row.catalog_models);
+            contract.revision = row.revision;
+        }
     }
 
     pub fn reload_provider_contracts_locked(&self, db: &Database) -> crate::Result<()> {

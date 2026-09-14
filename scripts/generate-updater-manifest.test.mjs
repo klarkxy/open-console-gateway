@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -92,6 +92,7 @@ test("writeUpdaterManifest creates latest.json", () => {
       repository: "klarkxy/open-console-gateway",
     });
     assert.equal(output, join(directory, "latest.json"));
+    assert.equal(existsSync(output), true);
   });
 });
 

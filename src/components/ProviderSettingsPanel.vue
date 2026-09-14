@@ -36,7 +36,7 @@
       </dl>
 
       <p v-if="entry.origin === 'builtin' && entry.provider_id !== 'custom'" class="provider-settings-note">
-        {{ t("内置供应商的连接由官方适配器提供。") }}
+        {{ t("供应商连接由官方适配器提供。") }}
       </p>
       <p v-if="entry.origin !== 'builtin'" class="provider-settings-note">
         {{ t("该供应商没有价格或官方用量。") }}

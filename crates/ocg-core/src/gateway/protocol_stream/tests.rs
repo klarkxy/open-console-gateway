@@ -41,11 +41,11 @@ fn convert(client: ApiFormat, upstream: ApiFormat, source: &str) -> String {
 }
 
 #[test]
-fn chat_passthrough_rewrites_model_to_client_name() {
-    let mut plan = plan(ApiFormat::ChatCompletions, ApiFormat::ChatCompletions);
-    plan.model = "deepseek-v4-flash-free".into();
-    plan.client_model = "deepseek-v4-flash".into();
-    let mut converter = StreamConverter::new(&plan);
+fn stream_rewrites_model_fields_to_client_name() {
+    let mut chat_plan = plan(ApiFormat::ChatCompletions, ApiFormat::ChatCompletions);
+    chat_plan.model = "deepseek-v4-flash-free".into();
+    chat_plan.client_model = "deepseek-v4-flash".into();
+    let mut converter = StreamConverter::new(&chat_plan);
     let input = concat!(
         "data: {\"id\":\"chat-stream\",\"model\":\"upstream-should-not-leak\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":null}]}\n\n",
         "data: [DONE]\n\n"
@@ -54,16 +54,16 @@ fn chat_passthrough_rewrites_model_to_client_name() {
         .process_chunk(Bytes::from_static(input.as_bytes()))
         .unwrap();
     let text = String::from_utf8(output.concat()).unwrap();
-    assert!(text.contains("\"model\":\"deepseek-v4-flash\""));
-    assert!(!text.contains("upstream-should-not-leak"));
-}
+    assert!(
+        text.contains("\"model\":\"deepseek-v4-flash\""),
+        "chat-model"
+    );
+    assert!(!text.contains("upstream-should-not-leak"), "chat-leak");
 
-#[test]
-fn messages_passthrough_rewrites_model_to_client_name() {
-    let mut plan = plan(ApiFormat::Messages, ApiFormat::Messages);
-    plan.model = "glm-5.2".into();
-    plan.client_model = "claude-sonnet-4-6".into();
-    let mut converter = StreamConverter::new(&plan);
+    let mut messages_plan = plan(ApiFormat::Messages, ApiFormat::Messages);
+    messages_plan.model = "glm-5.2".into();
+    messages_plan.client_model = "claude-sonnet-4-6".into();
+    let mut converter = StreamConverter::new(&messages_plan);
     let input = concat!(
         "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"model\":\"upstream-should-not-leak\"}}\n\n",
         "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
@@ -72,17 +72,17 @@ fn messages_passthrough_rewrites_model_to_client_name() {
         .process_chunk(Bytes::from_static(input.as_bytes()))
         .unwrap();
     let text = String::from_utf8(output.concat()).unwrap();
-    assert!(text.contains("\"model\":\"claude-sonnet-4-6\""));
-    assert!(!text.contains("upstream-should-not-leak"));
-    assert!(text.contains("\"type\":\"message_stop\""));
-}
+    assert!(
+        text.contains("\"model\":\"claude-sonnet-4-6\""),
+        "messages-model"
+    );
+    assert!(!text.contains("upstream-should-not-leak"), "messages-leak");
+    assert!(text.contains("\"type\":\"message_stop\""), "messages-stop");
 
-#[test]
-fn gemini_stream_rewrites_model_version_to_client_name() {
-    let mut plan = plan(ApiFormat::Gemini, ApiFormat::ChatCompletions);
-    plan.model = "deepseek-v4-flash-free".into();
-    plan.client_model = "deepseek-v4-flash".into();
-    let mut converter = StreamConverter::new(&plan);
+    let mut gemini_plan = plan(ApiFormat::Gemini, ApiFormat::ChatCompletions);
+    gemini_plan.model = "deepseek-v4-flash-free".into();
+    gemini_plan.client_model = "deepseek-v4-flash".into();
+    let mut converter = StreamConverter::new(&gemini_plan);
     let input = concat!(
         "data: {\"id\":\"chat-stream\",\"model\":\"upstream-should-not-leak\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\n",
         "data: [DONE]\n\n"
@@ -91,8 +91,11 @@ fn gemini_stream_rewrites_model_version_to_client_name() {
         .process_chunk(Bytes::from_static(input.as_bytes()))
         .unwrap();
     let text = String::from_utf8(output.concat()).unwrap();
-    assert!(text.contains("\"modelVersion\":\"deepseek-v4-flash\""));
-    assert!(!text.contains("upstream-should-not-leak"));
+    assert!(
+        text.contains("\"modelVersion\":\"deepseek-v4-flash\""),
+        "gemini-model-version"
+    );
+    assert!(!text.contains("upstream-should-not-leak"), "gemini-leak");
 }
 
 fn messages_text(output: &str) -> String {

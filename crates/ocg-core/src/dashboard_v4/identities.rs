@@ -16,10 +16,12 @@ use crate::db::identity::{
     StoredInferenceBinding, cooldown_facts_for,
 };
 use crate::dynamic::DynamicProviderRuntime;
-use crate::models::{Account, AccountSetupStep, AccountType, local_today};
+use crate::models::{
+    Account, AccountSetupStep, AccountType, NEW_READY_KEY_ACCOUNT_ENABLED, local_today,
+};
 use crate::provider::{
-    CPA_PROVIDER_ID, ConnectionVerificationStatus, CreationAvailability, ProviderRegistry,
-    builtin_provider, validate_plan_key,
+    CPA_PROVIDER_ID, ConnectionVerificationStatus, CreationAvailability, builtin_provider,
+    validate_plan_key,
 };
 use crate::redaction::redact_known_secret;
 use crate::state::CoreState;
@@ -267,16 +269,12 @@ fn resolve_connection_target(
                 "Custom API connections require the dedicated account endpoint",
             ));
         }
-        let enable_requires_verification = ProviderRegistry::get(plan.provider_id)
-            .is_some_and(|descriptor| descriptor.card_actions.enable_requires_verification);
-        let enabled = crate::provider::provider_allows_enablement(plan.provider_id)
-            && !enable_requires_verification;
         return Ok(ConnectionTarget {
             connection_id: connection_id.to_string(),
             provider_id: plan.provider_id.to_string(),
             credential_kind: plan.credential_kind,
             quota_scope: plan.quota_scope,
-            enabled,
+            enabled: NEW_READY_KEY_ACCOUNT_ENABLED,
             verification_status: default_verification_status(plan),
             auth_kind: None,
         });
@@ -306,10 +304,10 @@ fn resolve_connection_target(
         }
         return Ok(ConnectionTarget {
             connection_id: connection_id.to_string(),
-            provider_id: runtime.id,
+            provider_id: runtime.id.clone(),
             credential_kind: runtime.auth_kind.credential_kind(),
             quota_scope: runtime.auth_kind.quota_scope(),
-            enabled: true,
+            enabled: NEW_READY_KEY_ACCOUNT_ENABLED,
             verification_status: ConnectionVerificationStatus::NotRequired,
             auth_kind: Some(runtime.auth_kind),
         });

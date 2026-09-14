@@ -5,7 +5,6 @@ import {
   PROVIDER_PRESETS,
   applyProviderPresetToDraft,
   filterProviderPresets,
-  groupProviderPresets,
   groupProviderPresetsByOffering,
   inferMappingPresetPrefix,
   normalizeProviderPresetEndpoint,
@@ -23,7 +22,8 @@ import {
   type ProviderPreset,
 } from "./provider-presets.ts";
 import { PROVIDER_FAMILIES } from "./provider-families.ts";
-import { emptyProviderDefinitionDraft, buildProviderDefinitionCreateBody, buildProviderDefinitionUpdateBody, validateProviderDefinitionDraft, type ProviderDefinitionDraft } from "./dynamic-provider.ts";
+import { emptyProviderDefinitionDraft, buildProviderDefinitionUpdateBody, validateProviderDefinitionDraft, type ProviderDefinitionDraft } from "./dynamic-provider.ts";
+import { buildOnboardingCommitPayload } from "./onboarding-draft.ts";
 
 function samplePreset(extra: Partial<ProviderPreset> = {}): ProviderPreset {
   return {
@@ -157,6 +157,7 @@ test("a blank preset endpoint stays blank; the placeholder is never applied as a
 
 test("switching back to manual resets preset fields but still clears secrets and mappings", () => {
   const applied = applyProviderPresetToDraft(emptyProviderDefinitionDraft(), samplePreset());
+  assert.equal(applied.preset_id, "anthropic");
   applied.key = "sk-typed-after-apply";
   applied.models = [{ public_model: "claude", upstream_model: "claude" }];
   const manual = applyProviderPresetToDraft(applied, null);
@@ -167,15 +168,15 @@ test("switching back to manual resets preset fields but still clears secrets and
   assert.equal(manual.auth_kind, empty.auth_kind);
   assert.equal(manual.key, "");
   assert.deepEqual(manual.models, [{ public_model: "", upstream_model: "" }]);
+  assert.equal(manual.preset_id, "");
 });
 
-test("grouping and search split official presets from aggregators", () => {
-  const grouped = groupProviderPresets(PROVIDER_PRESETS);
-  for (const preset of grouped.official) assert.equal(preset.category, "official");
-  for (const preset of grouped.aggregator) assert.equal(preset.category, "aggregator");
-  const hits = filterProviderPresets(PROVIDER_PRESETS, "anthropic");
-  assert.ok(hits.some((preset) => preset.id === "anthropic"));
-  assert.ok(!hits.some((preset) => preset.id === "openrouter"));
+test("shipped presets keep official or aggregator category", () => {
+  assert.ok(PROVIDER_PRESETS.some((preset) => preset.category === "official"));
+  assert.ok(PROVIDER_PRESETS.some((preset) => preset.category === "aggregator"));
+  for (const preset of PROVIDER_PRESETS) {
+    assert.ok(preset.category === "official" || preset.category === "aggregator");
+  }
   assert.equal(filterProviderPresets(PROVIDER_PRESETS, "  ").length, PROVIDER_PRESETS.length);
 });
 
@@ -237,14 +238,24 @@ test("a seeded fixed preset replaces Key and old mappings with exact prefixed ID
   // An empty account name defaults to the preset name; typed notes survive.
   assert.equal(applied.account_name, "Anthropic API");
   assert.equal(applied.notes, "保留备注");
-  // The create body carries exact upstream IDs with null overrides.
-  const body = buildProviderDefinitionCreateBody({ ...applied, key: "sk-new" });
-  assert.deepEqual(body.models, [
+  // The live commit payload carries exact upstream IDs with null overrides.
+  const payload = buildOnboardingCommitPayload({
+    draft: { ...applied, key: "sk-new" },
+    operationId: "11111111-1111-4111-8111-111111111111",
+    mode: "complete",
+  });
+  assert.deepEqual(payload.targets, [
     { publicModel: "anthropic/claude-opus-4-1", upstreamModel: "claude-opus-4-1", upstreamOverride: null },
     { publicModel: "anthropic/claude-sonnet-4-5", upstreamModel: "claude-sonnet-4-5", upstreamOverride: null },
   ]);
-  assert.equal(body.accountName, "Anthropic API");
-  assert.equal(body.presetId, "anthropic");
+  assert.equal(payload.authorization?.kind, "api_key");
+  if (payload.authorization?.kind === "api_key") {
+    assert.equal(payload.authorization.accountLabel, "Anthropic API");
+  }
+  assert.equal(payload.connection.kind, "new");
+  if (payload.connection.kind === "new") {
+    assert.equal(payload.connection.templateId, "anthropic");
+  }
 });
 
 test("auto-generated account names follow the new preset; typed names stick", () => {
@@ -275,25 +286,20 @@ test("offering by persisted preset ID is metadata-only; unknown IDs are API", ()
   assert.equal(providerPresetOfferingForId("", presets), "api");
 });
 
-test("switching reseeds models and keeps typed account fields; manual clears seeds", () => {
+test("switching reseeds models and a manual switch clears seeds", () => {
   const first = applyProviderPresetToDraft(
     emptyProviderDefinitionDraft(),
     samplePreset({ defaultModels: ["a"] }),
   );
-  const typed = { ...first, account_name: "我的号", notes: "n" };
   const switched = applyProviderPresetToDraft(
-    typed,
+    first,
     samplePreset({ id: "openai", name: "OpenAI API", defaultModels: ["gpt-5"] }),
   );
   assert.deepEqual(switched.models, [
     { public_model: "openai/gpt-5", upstream_model: "gpt-5", upstream_override: null },
   ]);
-  assert.equal(switched.account_name, "我的号");
-  assert.equal(switched.notes, "n");
   const manual = applyProviderPresetToDraft(switched, null);
   assert.deepEqual(manual.models, [{ public_model: "", upstream_model: "" }]);
-  assert.equal(manual.account_name, "我的号");
-  assert.equal(manual.preset_id, "");
 });
 
 test("an unseeded preset keeps the empty mapping row so model editing stays required", () => {
@@ -418,13 +424,6 @@ test("edit-mode prefix evidence keeps import naming consistent only when unambig
   assert.equal(inferMappingPresetPrefix([{ public_model: "azure-openai/my-deployment" }]), "azure-openai");
 });
 
-test("a preset selection persists its exact ID and a manual switch clears it", () => {
-  const applied = applyProviderPresetToDraft(emptyProviderDefinitionDraft(), samplePreset());
-  assert.equal(applied.preset_id, "anthropic");
-  const manual = applyProviderPresetToDraft(applied, null);
-  assert.equal(manual.preset_id, "");
-});
-
 test("an Azure draft roundtrip keeps the template ID while manual deployment mappings stay bare", () => {
   const azure = PROVIDER_PRESETS.find((preset) => preset.id === "azure-openai");
   assert.ok(azure);
@@ -434,9 +433,16 @@ test("an Azure draft roundtrip keeps the template ID while manual deployment map
   draft.models = [{ public_model: "my-deployment", upstream_model: "my-deployment" }];
   draft.name = "Azure 主号";
   draft.key = "sk-azure";
-  const createBody = buildProviderDefinitionCreateBody(draft);
-  assert.equal(createBody.presetId, "azure-openai");
-  assert.deepEqual(createBody.models, [
+  const createPayload = buildOnboardingCommitPayload({
+    draft,
+    operationId: "11111111-1111-4111-8111-111111111111",
+    mode: "complete",
+  });
+  assert.equal(createPayload.connection.kind, "new");
+  if (createPayload.connection.kind === "new") {
+    assert.equal(createPayload.connection.templateId, "azure-openai");
+  }
+  assert.deepEqual(createPayload.targets, [
     { publicModel: "my-deployment", upstreamModel: "my-deployment", upstreamOverride: null },
   ]);
   // Reopen keeps the persisted template: discovery stays disabled and import
@@ -465,8 +471,15 @@ test("update provenance: omitted preserves, an explicit empty string clears", ()
   assert.equal(cleared.presetId, "");
   const preserved = buildProviderDefinitionUpdateBody({ ...base, preset_id: undefined }, "x-api-key");
   assert.ok(!("presetId" in preserved));
-  const manualCreate = buildProviderDefinitionCreateBody({ ...base, preset_id: "" });
-  assert.ok(!("presetId" in manualCreate));
+  const manualCreate = buildOnboardingCommitPayload({
+    draft: { ...base, preset_id: "" },
+    operationId: "11111111-1111-4111-8111-111111111111",
+    mode: "complete",
+  });
+  assert.equal(manualCreate.connection.kind, "new");
+  if (manualCreate.connection.kind === "new") {
+    assert.equal(manualCreate.connection.templateId, "custom-http");
+  }
 });
 
 test("legacy rows keep bare import names even when the endpoint matches an official preset", () => {

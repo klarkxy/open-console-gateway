@@ -203,9 +203,6 @@ export const dashboardApi = {
   verifyManagedAccountKey: (id: string, key: string): Promise<Account> =>
     mutatedAccount(withCas((expectation) => dashboardV3.verifyManagedAccountKey(id, key, expectation))),
 
-  verifyAccountConnection: (id: string): Promise<Account> =>
-    mutatedAccount(withCas((expectation) => dashboardV3.verifyAccount(id, expectation))),
-
   testAccountModel: (id: string, modelId: string): Promise<AccountModelTestResponse> =>
     dashboardV3.testAccountModel(id, modelId),
 

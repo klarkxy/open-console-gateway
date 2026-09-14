@@ -274,7 +274,6 @@ async fn dashboard_v3_pricing_routes_require_the_v3_session() {
 
     for path in [
         "/providers/opencode/pricing",
-        "/providers/opencode/pricing",
         "/providers/command-code/pricing",
     ] {
         let response = harness

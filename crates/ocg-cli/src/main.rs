@@ -290,7 +290,7 @@ async fn key_command(
                 .db
                 .lock()
                 .get_account(&id)?
-                .ok_or_else(|| anyhow::anyhow!("key not found: {}", id))?;
+                .ok_or_else(|| anyhow::anyhow!("key not found: {id}"))?;
             account_control::delete_account(&state, &id, None).await?;
             println!("removed key {} ({})", id, account.name);
         }
@@ -368,7 +368,7 @@ async fn ping_one(
 ) -> (u16, String) {
     let key = match state.decrypt_key(&account.key_cipher) {
         Ok(k) => k,
-        Err(e) => return (0, format!("decrypt failed: {}", e)),
+        Err(e) => return (0, format!("decrypt failed: {e}")),
     };
     let (config, client) = state.upstream_context();
     let url = format!(
@@ -383,7 +383,7 @@ async fn ping_one(
     let started = std::time::Instant::now();
     let resp = client
         .post(&url)
-        .header("Authorization", format!("Bearer {}", key))
+        .header("Authorization", format!("Bearer {key}"))
         .header("Content-Type", "application/json")
         .json(&body)
         .timeout(std::time::Duration::from_secs(
@@ -443,7 +443,7 @@ async fn ping_keys(
                         anyhow::bail!("account setup is not complete and cannot be pinged")
                     }
                 }
-                None => anyhow::bail!("key not found: {}", i),
+                None => anyhow::bail!("key not found: {i}"),
             },
             None => db
                 .list_accounts()?
@@ -451,7 +451,6 @@ async fn ping_keys(
                 .filter(|a| {
                     a.credential_kind == CredentialKind::ApiKey
                         && a.provider_id == ocg_core::provider::OPENCODE_PROVIDER_ID
-                        && a.enabled
                         && a.setup_step.is_ready()
                         && !a.key_cipher.is_empty()
                 })
@@ -459,7 +458,7 @@ async fn ping_keys(
         }
     };
     if targets.is_empty() {
-        println!("no enabled keys to ping");
+        println!("no keys to ping");
         return Ok(());
     }
     println!(

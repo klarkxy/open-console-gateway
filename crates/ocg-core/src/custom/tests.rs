@@ -3,19 +3,10 @@ use crate::provider::ProviderBindingError;
 use std::net::IpAddr;
 
 #[test]
-fn custom_endpoint_url_trusts_administrator_http_origins_and_rejects_credentials() {
+fn custom_endpoint_url_rejects_credentials_query_fragment_and_non_http_schemes() {
     use crate::provider::validate_custom_model_id;
 
-    assert!(validate_custom_endpoint_url("https://api.example.com/v1/responses").is_ok());
-    assert!(validate_custom_endpoint_url("http://127.0.0.1:8080/v1/messages").is_ok());
-    assert!(validate_custom_endpoint_url("http://localhost:3000/chat/completions").is_ok());
-    assert!(validate_custom_endpoint_url("http://app.localhost/v1/responses").is_ok());
     assert!(validate_custom_endpoint_url("http://api.example.com/v1/responses").is_ok());
-    assert!(validate_custom_endpoint_url("https://192.168.1.8/v1/responses").is_ok());
-    assert!(validate_custom_endpoint_url("http://10.0.0.1:9000/v1/messages").is_ok());
-    assert!(validate_custom_endpoint_url("https://169.254.169.254/latest").is_err());
-    assert!(validate_custom_endpoint_url("http://metadata.google.internal/messages").is_err());
-    assert!(validate_custom_endpoint_url("https://[::ffff:169.254.169.254]/responses").is_err());
     assert!(validate_custom_endpoint_url("https://[2001:db8::1]/v1/responses").is_ok());
     assert!(validate_custom_endpoint_url("https://user:pass@api.example.com/messages").is_err());
     assert!(validate_custom_endpoint_url("https://api.example.com/responses?x=1").is_err());

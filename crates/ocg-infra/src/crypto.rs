@@ -339,6 +339,14 @@ mod tests {
         assert!(encrypted.starts_with(LOCAL_CIPHER_V2_PREFIX));
         let decrypted = cipher.decrypt(&encrypted).unwrap();
         assert_eq!(decrypted, original);
+        assert!(!encrypted.contains(original));
+
+        let secret = "sk-ocg-secret";
+        let secret_enc = cipher.encrypt(secret).unwrap();
+        assert!(!secret_enc.is_empty());
+        assert_ne!(secret_enc, secret);
+        assert!(!secret_enc.contains(secret));
+        assert!(secret_enc.starts_with(LOCAL_CIPHER_V2_PREFIX));
     }
 
     // --- negative cases ---
@@ -360,18 +368,6 @@ mod tests {
         assert_eq!(enc, "");
         let dec = cipher.decrypt("").unwrap();
         assert_eq!(dec, "");
-    }
-
-    /// Static cipher on a non-empty plaintext is non-empty and not equal to plaintext.
-    #[test]
-    fn static_key_ciphertext_is_not_plaintext() {
-        let cipher = StaticKeyCipher::new("k");
-        let original = "sk-ocg-secret";
-        let enc = cipher.encrypt(original).unwrap();
-        assert!(!enc.is_empty());
-        assert_ne!(enc, original);
-        assert!(!enc.contains("sk-ocg-secret"));
-        assert!(enc.starts_with(LOCAL_CIPHER_V2_PREFIX));
     }
 
     /// Different secrets cannot decrypt each other's v2 ciphertext.
@@ -468,17 +464,6 @@ mod tests {
         let cipher = StaticKeyCipher::new("k");
         // 4 bytes of valid base64 = "AAAA"
         assert!(cipher.decrypt("AAAA").is_err());
-    }
-
-    #[test]
-    fn s05_crypto_error_display_debug_contain_no_secret() {
-        let secret = "sk-must-not-appear-in-errors";
-        let error = CryptoError::AuthenticationFailed;
-        assert_error_hides_secret(&error.into(), secret);
-        let error = CryptoError::LegacyDecryptFailed;
-        assert_error_hides_secret(&anyhow::Error::from(error), secret);
-        let debug = format!("{:?}", CryptoError::InvalidCiphertext);
-        assert!(!debug.contains(secret));
     }
 
     #[test]

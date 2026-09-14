@@ -158,7 +158,3 @@ export function selectedConnectionIdFromQuery(
   }
   return null;
 }
-
-export function connectionPageWrite(connectionId: string | null): { connection?: string } {
-  return connectionId ? { connection: connectionId } : {};
-}

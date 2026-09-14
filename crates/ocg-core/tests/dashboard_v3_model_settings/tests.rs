@@ -1,3 +1,6 @@
+#[path = "../fixtures/refreshed_go_catalog.rs"]
+mod refreshed_go_catalog;
+
 use super::harness::{V3Harness, start_loopback};
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
@@ -32,6 +35,8 @@ fn minimax(body: &Value) -> &Value {
 #[tokio::test]
 async fn cn_protocol_choice_survives_disable_reload_transfer_and_static_reset() {
     let h = start_loopback("cn-choice").await;
+    refreshed_go_catalog::persist_provider_catalog(&h.state, "minimax", &["MiniMax-M3"]);
+    refreshed_go_catalog::persist_provider_catalog(&h.state, "opencode", &["grok-4.5"]);
     let path = "/provider-contracts/provider/minimax/model-protocol-overrides";
     let (status, selected) = mutate(&h, Method::PUT, path, json!({"overrides":[
         {"modelId":"MiniMax-M3","protocol":"chat_completions","state":"force_on","preferred":true},
@@ -128,6 +133,8 @@ async fn cn_protocol_choice_survives_disable_reload_transfer_and_static_reset() 
 #[tokio::test]
 async fn invalid_preferences_reject_the_whole_override_batch() {
     let h = start_loopback("invalid-cn-choice").await;
+    refreshed_go_catalog::persist_provider_catalog(&h.state, "minimax", &["MiniMax-M3"]);
+    refreshed_go_catalog::persist_provider_catalog(&h.state, "opencode", &["grok-4.5"]);
     let before = h.state.settings_revision();
     for overrides in [
         json!([

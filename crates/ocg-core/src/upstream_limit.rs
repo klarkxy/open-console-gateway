@@ -97,11 +97,11 @@ mod tests {
             ),
             Some(Duration::hours(21) + Duration::minutes(10))
         );
-    }
-
-    #[test]
-    fn parses_with_extra_whitespace() {
-        assert_eq!(parse_reset("Resets in  1  day."), Some(Duration::days(1)));
+        assert_eq!(
+            parse_reset("Resets in  1  day."),
+            Some(Duration::days(1)),
+            "extra-whitespace"
+        );
     }
 
     #[test]

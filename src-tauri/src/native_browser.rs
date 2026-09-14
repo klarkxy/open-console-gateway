@@ -734,42 +734,32 @@ mod tests {
     }
 
     #[test]
-    fn host_open_rejects_invalid_account_id_before_launch() {
-        let processes = Arc::new(Mutex::new(BrowserProcessState::default()));
-        let error = open_external_browser(
-            PathBuf::from("."),
-            processes,
-            "../other",
-            "https://opencode.ai/auth",
-        )
-        .unwrap_err();
-        assert_eq!(error, "invalid account id");
-    }
-
-    #[test]
-    fn host_open_rejects_non_https_url_before_launch() {
-        let processes = Arc::new(Mutex::new(BrowserProcessState::default()));
-        let error = open_external_browser(
-            PathBuf::from("."),
-            processes,
-            "account-1",
-            "http://opencode.ai/auth",
-        )
-        .unwrap_err();
-        assert_eq!(error, "browser URL must be an absolute HTTPS URL");
-    }
-
-    #[test]
-    fn host_open_rejects_credential_url_before_launch() {
-        let processes = Arc::new(Mutex::new(BrowserProcessState::default()));
-        let error = open_external_browser(
-            PathBuf::from("."),
-            processes,
-            "account-1",
-            "https://user:pass@opencode.ai/",
-        )
-        .unwrap_err();
-        assert_eq!(error, "browser URL must not include credentials");
+    fn host_open_rejects_invalid_account_id_and_urls_before_launch() {
+        for (label, account_id, url, expected) in [
+            (
+                "invalid account id",
+                "../other",
+                "https://opencode.ai/auth",
+                "invalid account id",
+            ),
+            (
+                "non-https url",
+                "account-1",
+                "http://opencode.ai/auth",
+                "browser URL must be an absolute HTTPS URL",
+            ),
+            (
+                "credential url",
+                "account-1",
+                "https://user:pass@opencode.ai/",
+                "browser URL must not include credentials",
+            ),
+        ] {
+            let processes = Arc::new(Mutex::new(BrowserProcessState::default()));
+            let error =
+                open_external_browser(PathBuf::from("."), processes, account_id, url).unwrap_err();
+            assert_eq!(error, expected, "{label}");
+        }
     }
 
     #[test]

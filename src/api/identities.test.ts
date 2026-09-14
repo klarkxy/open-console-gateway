@@ -4,8 +4,6 @@ import {
   identitiesApi,
   identityJoinKey,
   presentIdentity,
-  presentIdentityList,
-  presentIdentityListSnapshot,
 } from "./identities.ts";
 import { DashboardConflictError } from "./dashboard-v3.ts";
 import type { IdentitySummary } from "./generated/dashboard-v4.ts";
@@ -133,7 +131,7 @@ test("identityJoinKey distinguishes account and platform_account rows", () => {
   );
 });
 
-test("identitiesApi.list presents the V4 projection and syncs nested CAS tokens", async () => {
+test("identitiesApi.listSnapshot presents the V4 projection and syncs nested CAS tokens", async () => {
   setupControlPlane(4, 11, "p1");
   installFetchMock(({ url, method }) => {
     if (url.endsWith("/accounts") && method === "GET") {
@@ -146,14 +144,11 @@ test("identitiesApi.list presents the V4 projection and syncs nested CAS tokens"
     throw new Error(`unexpected request ${url}`);
   });
 
-  const listed = await identitiesApi.list();
+  const snapshot = await identitiesApi.listSnapshot();
+  const listed = snapshot.identities;
   assert.equal(listed.length, 1);
   assert.equal(listed[0]?.legacy.id, "acc-1");
   assert.equal(listed[0]?.credentials[0]?.credential.auth_state, "unknown");
-  assert.deepEqual(presentIdentityList({
-    identities: [summary()],
-    revision: { revision: 8, processGeneration: 11, pricingRevision: "p2" },
-  }).map((row) => identityJoinKey(row.legacy)), ["account+acc-1"]);
   const control = useControlPlaneStore();
   assert.equal(control.revision, 8);
   assert.equal(control.processGeneration, 11);
@@ -358,10 +353,6 @@ test("identitiesApi.listSnapshot returns presented identities plus the GET pair"
   const snapshot = await identitiesApi.listSnapshot();
   assert.equal(snapshot.identities[0]?.legacy.id, "acc-1");
   assert.deepEqual(snapshot.expectation, { expectedRevision: 4, processGeneration: 11 });
-  assert.deepEqual(presentIdentityListSnapshot({
-    identities: [summary()],
-    revision: { revision: 4, processGeneration: 11, pricingRevision: "p2" },
-  }).expectation, { expectedRevision: 4, processGeneration: 11 });
   const control = useControlPlaneStore();
   assert.equal(control.revision, 9);
 });

@@ -126,8 +126,7 @@
                     size="small"
                     :bordered="false"
                   >
-                    {{ accountExpiryLabel(account, now) }} ·
-                    {{ t("到期于 {date}", { date: account.expires_on }) }}
+                    {{ accountExpiryLabel(account, now) }}
                   </n-tag>
                 </n-button>
               </template>
@@ -196,13 +195,13 @@
                 size="small"
                 :aria-label="t('刷新额度')"
                 :loading="usageRefreshLoading"
-                :disabled="(!isOfficialCn && isUsageRefreshBlocked(account, now)) || usageLoading || !!usageLoadError"
+                :disabled="usageLoading || !!usageLoadError"
                 @click="emit('refresh-usage')"
               >
                 <template #icon><n-icon :component="ReloadOutlined" /></template>
               </n-button>
             </template>
-            {{ isOfficialCn ? t("刷新额度") : usageRefreshTooltip(account, now) }}
+            {{ isOfficialCn ? t("刷新额度") : usageRefreshTooltip() }}
           </n-tooltip>
         </div>
 
@@ -363,7 +362,7 @@
         v-if="!usageLoadError"
         class="usage-sync-meta"
       >
-        {{ usageSyncCaption(account, now) }}
+        {{ usageSyncCaption(account) }}
       </p>
     </div>
     <div v-else-if="isOfficialCn" class="official-plan-usage">
@@ -414,7 +413,6 @@ import {
   accountIsReady,
   accountRoutingDraftDescription,
   cooldownDetails,
-  isUsageRefreshBlocked,
   managedStepLabel,
   usageRefreshTooltip,
   usageSyncCaption,

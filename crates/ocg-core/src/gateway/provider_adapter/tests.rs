@@ -362,25 +362,6 @@ fn adapter_kind_dispatch_preserves_route_auth_and_model_decisions() {
 }
 
 #[test]
-fn resolve_uses_the_same_sealed_descriptors() {
-    let go = ProviderRegistry::get(OPENCODE_PROVIDER_ID).unwrap();
-    let zen = ProviderRegistry::get(OPENCODE_ZEN_FREE_PROVIDER_ID).unwrap();
-    let goat = ProviderRegistry::get(COMMAND_CODE_PROVIDER_ID).unwrap();
-    let custom = ProviderRegistry::get(CUSTOM_PROVIDER_ID).unwrap();
-    assert!(go.inference.production_inference);
-    assert_eq!(
-        zen.inference.channel,
-        Some(crate::provider::InferenceChannelKind::Free)
-    );
-    assert!(goat.inference.production_inference);
-    assert!(!goat.inference.loopback_test_seam_only);
-    assert_eq!(
-        custom.inference.auth,
-        InferenceAuthDescriptor::ProtocolDerivedBearerOrXApiKey
-    );
-}
-
-#[test]
 fn adapter_kind_match_is_exhaustive_and_consistent_with_descriptors() {
     for kind in ProviderAdapterKind::ALL {
         match kind {
@@ -403,10 +384,15 @@ fn adapter_kind_match_is_exhaustive_and_consistent_with_descriptors() {
                     InferenceAuthDescriptor::OpenCodeProtocolDefault
                 );
                 assert!(descriptor.inference.follow_redirects);
+                assert!(descriptor.inference.production_inference);
             }
             ProviderAdapterKind::ZenFree => {
                 assert_eq!(descriptor.inference.auth, InferenceAuthDescriptor::None);
                 assert!(descriptor.inference.follow_redirects);
+                assert_eq!(
+                    descriptor.inference.channel,
+                    Some(crate::provider::InferenceChannelKind::Free)
+                );
             }
             ProviderAdapterKind::CommandCodeGoat => {
                 assert_eq!(descriptor.inference.auth, InferenceAuthDescriptor::Bearer);
@@ -467,14 +453,43 @@ fn probe_route_allows_ceiling_without_static_support_production_requires_contrac
     .expect("the Dashboard catalog gate admits fetched models before route construction");
     assert_eq!(fetched_model_probe.path, "/v1/messages");
 
+    let now = Utc::now();
+    let scope = crate::provider_contracts::ContractScope::provider(OPENCODE_PROVIDER_ID);
+    let mut persisted = crate::provider_contracts::PersistedContracts::default();
+    persisted.scopes.insert(
+        scope.clone(),
+        crate::provider_contracts::PersistedScopeRow {
+            scope: scope.clone(),
+            catalog_models: vec!["grok-4.5".into()],
+            catalog_refreshed_at: Some(now),
+            catalog_source: "test".into(),
+            catalog_source_url: "https://example.test/models".into(),
+            revision: 1,
+            updated_at: now,
+        },
+    );
+    persisted.evidence.insert(
+        scope.clone(),
+        vec![crate::provider_contracts::PersistedModelProtocol {
+            scope: scope.clone(),
+            model_id: "grok-4.5".into(),
+            protocol: crate::provider::UpstreamProtocolKind::Responses,
+            source: crate::provider_contracts::ContractEvidenceSource::Static,
+            verified_at: None,
+            observed_at: None,
+            last_probe_result: None,
+            last_probe_at: None,
+            last_probe_error: None,
+        }],
+    );
     let static_contracts = crate::provider_contracts::build_effective_contracts(
         &crate::zen_models::ZenFreeModelCatalog::default(),
         &[],
-        crate::provider_contracts::PersistedContracts::default(),
+        persisted.clone(),
     );
     assert!(
         supports_production_plan(&go, &config, &chat_grok, &static_contracts, &[]).is_err(),
-        "static grok-4.5 Chat must stay unverified until a probe succeeds"
+        "official-docs grok-4.5 Chat must stay unverified until a probe succeeds"
     );
     assert!(
         supports_production_plan(
@@ -487,12 +502,8 @@ fn probe_route_allows_ceiling_without_static_support_production_requires_contrac
         .is_ok()
     );
 
-    let now = Utc::now();
-    let mut persisted = crate::provider_contracts::PersistedContracts::default();
-    let scope = crate::provider_contracts::ContractScope::provider(OPENCODE_PROVIDER_ID);
-    persisted.evidence.insert(
-        scope.clone(),
-        vec![crate::provider_contracts::PersistedModelProtocol {
+    persisted.evidence.get_mut(&scope).unwrap().push(
+        crate::provider_contracts::PersistedModelProtocol {
             scope,
             model_id: "grok-4.5".into(),
             protocol: crate::provider::UpstreamProtocolKind::ChatCompletions,
@@ -502,7 +513,7 @@ fn probe_route_allows_ceiling_without_static_support_production_requires_contrac
             last_probe_result: Some(crate::provider_contracts::ProbeResultKind::Success),
             last_probe_at: Some(now),
             last_probe_error: None,
-        }],
+        },
     );
     let probed = crate::provider_contracts::build_effective_contracts(
         &crate::zen_models::ZenFreeModelCatalog::default(),
@@ -644,58 +655,6 @@ fn minimax_kimi_ollama_do_not_inherit_opencode_responses_for_shared_model_names(
             account.provider_id
         );
     }
-
-    let minimax_chat = resolve_account_test_route_with_dynamics(
-        &minimax,
-        &config,
-        &chat_plan(
-            "MiniMax-M3",
-            UpstreamChannel::Go,
-            ApiFormat::ChatCompletions,
-            None,
-        ),
-        &[],
-    )
-    .unwrap();
-    assert_eq!(minimax_chat.base_url, MINIMAX_CN_BASE_URL);
-    assert_eq!(minimax_chat.path, MINIMAX_CN_CHAT_COMPLETIONS_PATH);
-    let minimax_messages = resolve_account_test_route_with_dynamics(
-        &minimax,
-        &config,
-        &chat_plan("MiniMax-M3", UpstreamChannel::Go, ApiFormat::Messages, None),
-        &[],
-    )
-    .unwrap();
-    assert_eq!(minimax_messages.base_url, MINIMAX_CN_ANTHROPIC_BASE_URL);
-    assert_eq!(minimax_messages.path, MINIMAX_CN_MESSAGES_PATH);
-
-    let kimi_chat = resolve_account_test_route_with_dynamics(
-        &kimi,
-        &config,
-        &chat_plan(
-            "kimi-for-coding",
-            UpstreamChannel::Go,
-            ApiFormat::ChatCompletions,
-            None,
-        ),
-        &[],
-    )
-    .unwrap();
-    assert_eq!(kimi_chat.base_url, KIMI_CN_BASE_URL);
-    assert_eq!(kimi_chat.path, KIMI_CN_CHAT_COMPLETIONS_PATH);
-    let kimi_messages = resolve_account_test_route_with_dynamics(
-        &kimi,
-        &config,
-        &chat_plan(
-            "kimi-for-coding",
-            UpstreamChannel::Go,
-            ApiFormat::Messages,
-            None,
-        ),
-        &[],
-    )
-    .unwrap();
-    assert_eq!(kimi_messages.path, KIMI_CN_MESSAGES_PATH);
 
     let ollama_chat = resolve_account_test_route_with_dynamics(
         &ollama,

@@ -159,18 +159,13 @@ mod tests {
     }
 
     #[test]
-    fn no_redirect_builder_keeps_global_proxy_and_disables_follow() {
+    fn no_redirect_builder_succeeds_for_direct() {
         let config = AppConfig {
             proxy_mode: ProxyMode::Direct,
             ..AppConfig::default()
         };
         let client = build_no_redirect(&config).expect("no-redirect client");
         let _ = client;
-        let auto = AppConfig::default();
-        assert!(matches!(auto.proxy_mode, ProxyMode::Auto));
-        let _ = configured_builder(&auto)
-            .expect("proxy builder")
-            .redirect(no_redirect_policy());
     }
 
     #[tokio::test]

@@ -6,6 +6,10 @@
 
 #![allow(dead_code)]
 
+#[path = "../refreshed_go_catalog.rs"]
+mod refreshed_go_catalog;
+pub(crate) use refreshed_go_catalog::{persist_enabled_zen_catalog, persist_refreshed_go_catalog};
+
 use axum::Router;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -94,6 +98,8 @@ pub(crate) fn build_go_state(base_url: String, keys: &[&str]) -> (Arc<CoreStateI
         };
         state.db.lock().create_account(&account).unwrap();
     }
+    persist_refreshed_go_catalog(&state);
+    persist_enabled_zen_catalog(&state);
     (state, dir)
 }
 

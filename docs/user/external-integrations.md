@@ -61,14 +61,18 @@ hosts are rejected. Do not reuse an Open Console Gateway Key as either CPA key.
    use CPA's loopback callback ports; Kimi and xAI use their device-code flow.
    OCG never runs an OAuth callback server and does not restore an old flow
    after a refresh or restart.
-4. Open **Model catalog** and refresh it. The tab lists the saved snapshot:
-   each model ID and the source CPA reported (`owned_by`). A fresh install can
-   start with an empty catalog; refresh after OAuth accounts exist. Then enable
-   the CPA subscription pool. Its single **CPA subscription pool** card on
-   Accounts can be ordered and enabled/disabled like other route candidates,
-   but cannot expose a Key, be deleted, or stand in for individual CPA OAuth
-   accounts. For a managed runtime, extra direct-client keys live on Overview
-   rather than a separate tab; daily use goes through the OCG Access Key.
+4. Open **Model catalog** and refresh it. The tab shows the saved snapshot as
+   selectable cards grouped by the source CPA reported (`owned_by`). A
+   highlighted card joins routing; unselected IDs stay in the snapshot but are
+   not published. A first refresh, and models newly added by a later refresh,
+   stay off until you select them. Catalogs saved before this selection flag
+   keep routing every ID until you change them. A fresh install can start with
+   an empty catalog; refresh after OAuth accounts exist. Then enable the CPA
+   subscription pool. Its single **CPA subscription pool** card on Accounts can
+   be ordered and enabled/disabled like other route candidates, but cannot
+   expose a Key, be deleted, or stand in for individual CPA OAuth accounts. For
+   a managed runtime, extra direct-client keys live on Overview rather than a
+   separate tab; daily use goes through the OCG Access Key.
 
 Disabling the pool removes it from routing without forgetting CPA setup.
 **Disconnect and clear** removes OCG's CPA configuration, the pool card, and
@@ -111,6 +115,14 @@ that runs the CLI; remote dashboards cannot access these sources.
 | Kimi Code | `$KIMI_CODE_HOME/credentials/kimi-code.json`, default `~/.kimi-code/credentials/kimi-code.json` | Official Kimi Code OAuth file format |
 | Grok CLI | `$GROK_HOME/auth.json`, default `~/.grok/auth.json` | Standard `https://auth.x.ai` OIDC entry with CPA's matching client ID; other keys/issuers are rejected |
 | Antigravity | Not supported | No stable compatible local credential storage contract is established; use CPA login |
+
+Sources that cannot be imported from this machine collapse into one tip; hover
+for the detection reason and use Fresh sign-in above.
+
+The **quota** on each account row is CPA's own local usage record for that OAuth
+account, not the provider's official plan allowance. Empty records are hidden.
+**Reset quota** clears CPA's counter only; it does not reset anything at the
+provider.
 
 Import is a one-time copy. OCG does not edit the CLI source, persist OAuth tokens
 in its database, display them, or keep the two stores synchronized. CPA owns the

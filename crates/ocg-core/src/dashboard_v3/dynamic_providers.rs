@@ -15,7 +15,7 @@ use crate::custom::validate_custom_endpoint_url;
 use crate::dynamic::{DynamicProviderRuntime, collides_with_known_id, validate_definition};
 use crate::models::{
     Account as ModelAccount, AccountCustomConfig, AccountCustomConfigInput, AccountModelCapability,
-    AccountType, normalize_account_notes,
+    AccountType, NEW_READY_KEY_ACCOUNT_ENABLED, normalize_account_notes,
 };
 use crate::redaction::redact_known_secret;
 use crate::state::CoreState;
@@ -207,7 +207,7 @@ fn create_locked(
             username: None,
             password_cipher: None,
             key_cipher,
-            enabled: true,
+            enabled: NEW_READY_KEY_ACCOUNT_ENABLED,
             account_type: AccountType::Key,
             setup_step: crate::models::AccountSetupStep::Ready,
             referral_code: None,

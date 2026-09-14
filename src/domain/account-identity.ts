@@ -28,18 +28,6 @@ import { planForAccount } from "./plans.ts";
  * a verified-wallet claim, and they never trigger probes.
  */
 
-export function identityForAccount(
-  identities: readonly Identity[],
-  accountId: string,
-): Identity | null {
-  const key = identityJoinKey({ kind: "account", id: accountId });
-  const byIdentityLegacy = identities.find((row) => identityJoinKey(row.legacy) === key);
-  if (byIdentityLegacy) return byIdentityLegacy;
-  return identities.find((row) => (
-    row.credentials.some((credential) => identityJoinKey(credential.legacy) === key)
-  )) ?? null;
-}
-
 /**
  * The credential whose `legacy` account id matches this card.
  * An identity can hold several Keys; never fall back to a sibling.
@@ -221,7 +209,7 @@ export function presentedAccountStatusLabel(
   if (isCooling(account, now)) {
     return t("冷却中·剩 {time}", { time: formatCooldownRemaining(account, now) });
   }
-  if (auth === "unknown") return t("待验证");
+  // Unknown auth is not a third card state. The enable switch is the draft/live gate.
   return t("已启用");
 }
 
@@ -235,8 +223,7 @@ export function presentedAccountStatusTagType(
   }
   const auth = inferenceAuthState(identity, account.id);
   if (auth === "invalid" || account.auth_error) return "error";
-  if (!account.enabled) return "default";
+  if (!account.enabled) return "error";
   if (isCooling(account, now)) return "warning";
-  if (auth === "unknown") return "warning";
-  return "default";
+  return "success";
 }
