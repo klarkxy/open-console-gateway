@@ -15,13 +15,11 @@ Gateway 监听 `http://<bind>:<port>`，暴露以下端点：
 | `POST` | `/v1/chat/completions` | OpenAI Chat Completions |
 | `POST` | `/v1/responses` | OpenAI Responses |
 | `POST` | `/v1/messages` | Anthropic Messages |
-| `GET`  | `/v1/models` | 带鉴权的本地列表：代码持有且当前可路由的 Go 与密封 CN Alias、已保存的用户定义 Provider 公开模型，以及当前有有效启用协议的合格 Custom ID |
+| `GET`  | `/v1/models` | 带鉴权的本地列表：代码持有且当前可路由的 Go 与密封 CN Alias、已保存的用户定义 Provider 公开模型，以及当前有有效启用协议的合格 Custom ID；**别名**页关闭的对外名称不会出现 |
 | `POST` | `/v1beta/models/{model}:generateContent` | Gemini 非流式生成；`/v1/...` 同样可用 |
 | `POST` | `/v1beta/models/{model}:streamGenerateContent` | Gemini SSE 生成；`/v1/...` 同样可用 |
 | `POST` | `/v1beta/models/{model}:countTokens` | 返回 `501`，Gemini CLI 可回退到本地估算 |
 | `POST` | `/v1beta/models/{model}:embedContent` | 返回 `501`；当前不支持 embeddings |
-| `GET`  | `/claude-desktop/v1/models` | Claude Desktop 可选别名列表 |
-| `POST` | `/claude-desktop/v1/messages` | Claude Desktop Messages；改写三个 Claude 模型别名 |
 | `GET`  | `/dashboard/` | Vue 3 管理面板（HTML） |
 | `*`    | `/dashboard/api/v3/...` | 当前管理面板 JSON API |
 | `*`    | `/dashboard/api/...` | 已退役的 V2 REST（已登录返回 410 `dashboardV2Removed`），不含已标明的 V2 鉴权与浏览器 WebSocket 兼容路由 |
@@ -41,7 +39,7 @@ Gateway API 必须携带 **Key**，支持 `Authorization: Bearer <key>`、`x-api
 
 客户端发送 **别名**：本地注册表中的稳定小写 kebab-case 名称。内置 Alias 权威由代码持有：最早 OpenCode Go 静态协议表加上精确密封的 MiniMax CN、Kimi CN 与选定 GOAT 长名称映射。Alias 拼写仍可大小写折叠，例如 `GLM-5.2`。
 
-带鉴权的 `GET /v1/models` 先按注册表顺序列出当前可路由的代码授权 Alias，再并入已保存的用户定义 Provider 公开模型，以及不与这些 Alias 冲突、同样有有效启用协议的合格 Custom 能力 ID（`owned_by` 为 `custom`）。该列表使用已保存的本地状态。显式目录刷新更新已保存的供应商映射与合约。列表读取不会写转发日志。已保存的 Zen `-free` 行保留精确 raw pin 并公布去掉后缀后的 Alias；Command 模型可以加入任一代码持有的 Alias；MiniMax/Kimi 模型只激活精确密封的 CN 映射；未来未知的 Command/MiniMax/Kimi 行不能动态创建任意 Alias。合格 Custom ID 来自 enabled + ready 且有 Key 的 Custom 账号（验证为可选）。
+带鉴权的 `GET /v1/models` 先按注册表顺序列出当前可路由的代码授权 Alias，再并入已保存的用户定义 Provider 公开模型，以及不与这些 Alias 冲突、同样有有效启用协议的合格 Custom 能力 ID（`owned_by` 为 `custom`）。**别名**页关闭的对外名称不会出现在该列表中，但仍可按名称调用。该列表使用已保存的本地状态。显式目录刷新更新已保存的供应商映射与合约。列表读取不会写转发日志。已保存的 Zen `-free` 行保留精确 raw pin 并公布去掉后缀后的 Alias；Command 模型可以加入任一代码持有的 Alias；MiniMax/Kimi 模型只激活精确密封的 CN 映射；未来未知的 Command/MiniMax/Kimi 行不能动态创建任意 Alias。合格 Custom ID 来自 enabled + ready 且有 Key 的 Custom 账号（验证为可选）。
 
 受保护的 `GET /dashboard/api/v3/application-models` 是另一份本地列表：当前可路由的 OpenCode Go 别名与当前 OpenCode Go 价格快照求交。highspeed 变体继承基价行。空交集返回 `[]`。该列表不含 Custom ID，并使用已保存的本地状态。
 
@@ -56,8 +54,6 @@ Gateway API 必须携带 **Key**，支持 `Authorization: Bearer <key>`、`x-api
 - `upstream_model` — 实际发送到该账号上游的精确模型 ID
 
 以及 `provider_id`。原生成本字段可选。
-
-Claude Desktop 仍是独立的三角色别名层（`claude-sonnet-4-6`、`claude-opus-4-6`、`claude-haiku-4-5-20251001`），先改写为已保存的 `sonnet` / `opus` / `haiku` 映射，再进入 Alias 解析。`GET /claude-desktop/v1/models` 公布这三个角色别名。
 
 ---
 

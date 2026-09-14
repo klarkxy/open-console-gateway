@@ -56,9 +56,8 @@ get billed for a bad guess.
   enabled, ready, and has a non-empty Key, then check that the model's supported
   protocol is enabled in the **Providers** matrix. Public `/models` refresh does
   not validate the Key; an invalid Key surfaces as inference 401/403.
-- **A saved Custom API still does not route.** New accounts default to
-  disabled. Enable the card after you have checked it, then confirm it is ready,
-  its Key is non-empty, and the requested model is declared. Verification does
+- **A saved Custom API still does not route.** Confirm the card is enabled and
+  ready, its Key is non-empty, and the requested model is declared. Verification does
   not flip the switch. Verify sends one minimal request in the selected
   protocol to the resolved inference Endpoint and expects a `2xx` JSON response.
   Changing the API URL, Key, declared models, or protocol re-pends verification

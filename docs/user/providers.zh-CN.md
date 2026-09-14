@@ -32,9 +32,9 @@
 - 用户定义供应商作为类型化定义持久化，并绑定 Configurable HTTP。它们的 Endpoint、协议、鉴权方式和映射在本页编辑。
 - `CustomEndpoint(account_id)` 范围内的 Custom 映射仍归账号所有。这些映射在**账号**页编辑。
 
-供应商预设与用户定义供应商共用同一个详情壳，最多三个页签。**模型** 是默认页签：供应商预设显示模型目录（来源行、刷新与协议矩阵），用户定义供应商显示只读模型映射并提供编辑入口。**价格** 只在该供应商有价格时出现。**设置** 展示连接信息：供应商预设行只读（由官方适配器提供），用户定义行可编辑/删除；**OpenCode Go** 的托管注册 **邀请链接** 也在这个页签。它是用户自有的 `opencode.ai` / `console.opencode.ai` HTTPS 链接（不是密封源）。新安装可能带有演示默认值；正式注册前请改为你自己的链接。创建托管草稿时也可直接编辑并写回此处。Custom API 账号行是只读摘要（端点、协议、已映射模型）；**在账号页编辑** 打开 **账号** 页中的账号编辑器。用户定义供应商未定价。
+供应商预设与用户定义供应商共用同一个详情壳，最多三个页签。**模型** 是默认页签：供应商预设显示模型目录（来源行、刷新与协议矩阵），用户定义供应商显示只读模型映射并提供编辑入口。**价格** 始终显示所选供应商的目录状态（`available`、`unpriced`、`unavailable` 或不适用），没有快照时不会编造价格行。**设置** 展示连接信息：供应商预设行只读（由官方适配器提供），用户定义行可编辑/删除；**OpenCode Go** 的托管注册 **邀请链接** 也在这个页签。它是用户自有的 `opencode.ai` / `console.opencode.ai` HTTPS 链接（不是密封源）。新安装可能带有演示默认值；正式注册前请改为你自己的链接。创建托管草稿时也可直接编辑并写回此处。Custom API 账号行是只读摘要（端点、协议、已映射模型）；**在账号页编辑** 打开 **账号** 页中的账号编辑器。用户定义供应商未定价。
 
-**别名** 是独立的核心页面，因为它的只读表覆盖当前已启用账号，而不是某一个选中的供应商。表里只出现至少有一个启用账号的供应商，并把 CPA 单独列成一个供应商。公开名称和精确上游身份来自这些供应商的合约、用户定义映射、Custom 能力，以及已选中的 CPA 目录。公开名称与其他上游 ID 重叠时会显示检查提示。可以按公开名称、上游 ID 或供应商搜索。
+**别名** 是独立的核心页面，因为它的表覆盖当前已启用账号，而不是某一个选中的供应商。表里只出现至少有一个启用账号的供应商，并把 CPA 单独列成一个供应商。公开名称和精确上游身份来自这些供应商的合约、用户定义映射、Custom 能力，以及已选中的 CPA 目录。公开名称与其他上游 ID 重叠时会显示检查提示。可以按公开名称、上游 ID 或供应商搜索。对外模型名左侧的开关控制是否对下游列出该名称：默认开启，会出现在已鉴权的 `GET /v1/models` 中；关闭后该列表不再包含它。关闭的名称仍留在本页，知道名称的客户端仍可调用。供应商目录上的启用开关仍然决定是否参与路由。
 
 **模型目录** 是本地的。每个范围按当前目录中每个模型一行渲染，列依次为：模型（别名加原始上游 ID）、上游协议、启用、操作。可用上游一律用同一种芯片，亮着表示可通，蓝色为转换默认。MiniMax CN 与 Kimi Code CN 一开始就是 Chat Completions 与 Messages，不宣称 Responses。**启用** 开关控制模型是否参与路由：开启即强制启用全部 available 协议，关闭则模型退出路由，也不会出现在 `GET /v1/models` 中。开关会先立即更新显示，再在后台执行带 CAS 保护的保存，只有受影响的行显示保存进度。**多选** 进入多选模式：表格左侧出现复选框，工具栏右侧的 **开启**、**关闭** 与 **删除** 只作用于已勾选的行。每一行也可以单独从本地目录删除该模型。删除后该 ID 不再路由；**刷新模型目录** 时，官方仍提供的 ID 可能再次出现并默认关闭。
 
@@ -44,7 +44,7 @@
 
 可刷新范围都在 **刷新模型目录** 时从该供应商官方 `/models` 取模型列表，并在同一次动作里按官方文档写入协议。**OpenCode Go** 读取 `https://opencode.ai/docs/go/` 的 Endpoints 表。**Zen Free** 刷新 `https://opencode.ai/zen/v1/models`，去掉 `-free` 后再查同一张表。**Command Code GOAT** 读取 `https://commandcode.ai/docs/provider`：有分模型表用表，否则 Anthropic ID 用 Messages，其余用 Chat Completions。`stealth/ox-alpha` 不给协议。文档没有的模型，或抓取失败时，默认 Chat Completions。刷新保留已有的手动开关和探测。**MiniMax CN** 与 **Kimi Code CN** 刷新各自官方 `/models`，并按文档家族规则同时支持 Chat Completions 与 Messages，不宣称 Responses。面板不再提供单独的恢复快照动作。新发现的非预设 Command Code 模型默认关闭。当前 effective 目标协议保持生效，直到显式改写该行。
 
-轻量来源信息、刷新动作与模型列表共用同一块内容区域。所有可刷新的范围使用同一个动作：OpenCode Go 由后端选择符合条件的 Go 账号访问官方鉴权目录；Zen Free 访问固定的官方无鉴权目录 `https://opencode.ai/zen/v1/models`；Command Code 直接访问固定的公开官方 `/models` 目录，不选择账号。刷新始终由用户显式触发。
+轻量来源信息、刷新动作与模型列表共用同一块内容区域。所有可刷新的范围使用同一个动作：OpenCode Go 由后端选择符合条件的 Go 账号访问官方鉴权目录；Zen Free 访问固定的官方无鉴权目录 `https://opencode.ai/zen/v1/models`；Command Code 直接访问固定的公开官方 `/models` 目录，不选择账号。刷新是控制面动作：供应商页按钮，以及面板为该供应商保存第一张就绪账号时自动做的一次刷新。只要账号就绪且有已存 Key，即使账号开关仍关闭也可以取目录。
 
 MiniMax 与 Kimi 需要一个符合条件的账号 Key。MiniMax 刷新 `https://api.minimaxi.com/v1/models`；Kimi 刷新 `https://api.kimi.com/coding/v1/models`。保存的模型只激活代码内的密封映射；无法匹配的模型保留为精确 raw ID。MiniMax 把 M3、M2.7/M2.5/M2.1 的标准与 highspeed 变体，以及 M2 映射到对应的小写 kebab Alias。Kimi 映射为 `kimi-for-coding` → `kimi-k2.7-code`、`kimi-for-coding-highspeed` → `kimi-k2.7-code-highspeed`、`k3` → `kimi-k3`、`k3-256k` → `kimi-k3-256k`。转发始终保留每个准确的上游 ID。
 
@@ -58,9 +58,9 @@ Custom API 继续使用账号所有的公开名称 → 上游 ID 映射，发现
 
 适配器开放连接测试的内置供应商行提供 **测试** 按钮，测试当前有效配置选择的协议。供应商会按已保存的路由顺序自动尝试符合条件的账号，并在首次成功后停止。OpenCode Go 与 Zen Free 使用各自可构造的协议集合；GOAT 只测试密封的原生家族路径（Anthropic ID 使用 Messages，其他 ID 使用 Chat Completions）；MiniMax CN 与 Kimi Code CN 测试密封的 Chat Completions 与 Messages 路径。Custom 端点测试仍由具体账号所有。模型必须属于当前供应商目录，包括静态表尚未收录的新拉取模型。Popconfirm 会提示这些真实最小请求可能消耗额度。页面会在列表上方逐项展示成功、失败或跳过状态、HTTP 状态、可读的上游错误消息，以及上游给出时的安全帮助/计费链接；每个真实账号尝试都会写入脱敏的请求日志，协议探测内容不会进入运行日志。单个账号失败不会禁用其他符合条件账号可以服务的协议。
 
-**价格** 按所选供应商限定范围。**刷新价格表** 只抓取并校验当前所选 Provider 自己的官方来源。OpenCode 与 Command Code 的 revision 和最后成功快照彼此独立；一个失败不会动另一个。以后某个 Provider 若包含多个有价格的 Plan，一次操作也只刷新该 Provider 内的 Plan。刷新仍只能手动发起：
+**价格** 按所选供应商限定范围。默认目录投影按目录顺序包含所有 `offering=plan` 且 V3 `pricingAvailability=available` 的行。快照按 `provider_id` 请求和缓存；渲染器按返回的 `models` 或 `values` 结构选择表格，并从 token 范围、`time_window` 与 `adjustments` 生成档位；未知 adjustment 标签原样显示。来源链接只取后端快照。刷新要求 V3 定价可用，倍率编辑还要求 V4 `pricingMultiplierEditable=true`；V4 不可用时保持只读。\n\n**刷新价格表** 只抓取并校验当前所选 Provider 自己的官方来源。OpenCode 与 Command Code 的 revision 和最后成功快照彼此独立；一个失败不会动另一个。以后某个 Provider 若包含多个有价格的 Plan，一次操作也只刷新该 Provider 内的 Plan。刷新仍只能手动发起：
 
-- OpenCode Go 展示 revision、文档更新时间、token 单价、`Usage` 和额度扣减倍率，点击刷新后才会访问 `https://opencode.ai/docs/go/`。抓取或校验失败时继续使用最后一次成功快照。allowance 不是额度池、不会参与路由，只用于推导扣减倍率（“月额度 / Usage”）。临时覆盖会创建新的持久化 revision，供后续估算使用。
+- OpenCode Go 展示 revision、文档更新时间、token 单价、`Usage`（官方文档现在把这一列叫 **Monthly limit**）和额度扣减倍率，点击刷新后才会访问 `https://opencode.ai/docs/go/`。抓取或校验失败时继续使用最后一次成功快照。allowance 不是额度池、不会参与路由，只用于推导扣减倍率（“账号月窗口 / 模型月额度”）。临时覆盖会创建新的持久化 revision，供后续估算使用。
 - Command Code GOAT 展示从 `https://commandcode.ai/docs/plans/goat` 保存的官方费率快照。带分时费率的模型会保留官方每日高峰窗口（UTC 01:00–04:00、06:00–10:00）及独立的输入、输出、缓存读取价格。每个已定价模型的应用倍率都可手动修改并保存；新请求使用保存后的 Provider revision 计算，缺失或歧义行仍为 unpriced。刷新若将覆盖手动倍率会先请求确认。它与 OpenCode Go 分开；账号卡会把 OCG 内已定价请求日志投影到本地 `$14 / $35 / $70` 三个窗口，并允许手工修正。Command Code 没有可机读的用量 API。
 - Zen Free 未定价（额度按出口 IP 共享）。
 - Custom API 为 unpriced：成功转发记 `cost_state=unknown`，不扣额度，也没有官方用量刷新。

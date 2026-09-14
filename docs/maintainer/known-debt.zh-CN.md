@@ -13,7 +13,6 @@
 - 旧 `profiles/<account_id>` WebView Profile 升级后仍留在旧引擎上，因此首次需要重新登录。旧路径只保留用于重置/删除时的安全清理。
 - Responses 端点是无状态。`previous_response_id`、`conversation`、 `store: true`、`background: true` 返回 `400`。详见 `protocol.rs` 和[限制](../user/limits.zh-CN.md)。
 - Gemini 是客户端兼容格式。转发、`400` 与 `501` 行为见[限制](../user/limits.zh-CN.md)和[协议转换](../user/protocol-conversion.zh-CN.md)。
-- Claude Desktop 公布三个固定 Claude 别名，再映射到受支持的实际模型。
 - Command Code GOAT 没有可机读的官方用量端点。其公开模型目录不能验证已保存 Key，因此鉴权失败只能从真实推理 401/403 得知。Custom API 仍是独立的已上线路由，遵循受信管理员边界（`custom.rs` + `custom_http.rs`）。
 - 按模型/按协议覆盖已在 V3。Custom 账号级按协议探测暂无 V3 对应端点；历史 V2 账号侧探测路径已 410。Custom 验证与模型发现是现行路径。
 - V4 操作摘要密钥（`dashboard_operation_digest_key`）仍与账号 Key 同库存放（账号 Key 现为 AES-256-GCM `v2:` 密文，旧 XOR 行在打开修复前仍可读）。本机已认证 Key 存储并未把该摘要密钥迁出，它仍紧挨着 Key。

@@ -52,15 +52,16 @@ time.
 
 The 5-hour, weekly, and monthly bars are local estimates, driven by what the
 gateway actually forwards — not by the upstream's authoritative billing. Token
-rates, window limits, and each model's `Usage` all come from the active
-OpenCode Go USD snapshot.
+rates, window limits, and each model's `Usage` (official **Monthly limit**)
+all come from the active OpenCode Go USD snapshot.
 
-- The official multiplier defaults to `monthly limit / Usage`. A user can
-  override it for a temporary promotion; subsequent requests use the active
-  persisted value, and refresh never overwrites it without confirmation.
-- `deepseek-v4-pro` (DS V4 Pro), `deepseek-v4-flash`, `mimo-v2.5-pro`, and Grok
-  currently have a `$15` Usage allowance, which corresponds to a
-  `60 / 15 = 4x` multiplier.
+- The official multiplier defaults to `account monthly window / model monthly
+  limit`. A user can override it for a temporary promotion; subsequent
+  requests use the active persisted value, and refresh never overwrites it
+  without confirmation.
+- Current official examples against the `$60` account monthly window: `$15`
+  models such as `deepseek-v4-pro`, `mimo-v2.5-pro`, and Grok 4.6 use
+  `60 / 15 = 4x`; `$30` models such as `deepseek-v4-flash` use `2x`.
 - The applicable local MiniMax adjustment is applied last. No supplier API
   price, CNY value, or exchange rate participates in the calculation.
 

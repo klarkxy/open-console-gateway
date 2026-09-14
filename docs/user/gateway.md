@@ -15,13 +15,11 @@ The gateway listens on `http://<bind>:<port>` and exposes these endpoints:
 | `POST` | `/v1/chat/completions` | OpenAI Chat Completions |
 | `POST` | `/v1/responses` | OpenAI Responses |
 | `POST` | `/v1/messages` | Anthropic Messages |
-| `GET`  | `/v1/models` | Authenticated local list: routeable code-owned Go and sealed CN aliases, saved user-defined Provider public models, and eligible Custom IDs that currently have an effective enabled protocol |
+| `GET`  | `/v1/models` | Authenticated local list: routeable code-owned Go and sealed CN aliases, saved user-defined Provider public models, and eligible Custom IDs that currently have an effective enabled protocol, minus public names turned off on **Aliases** |
 | `POST` | `/v1beta/models/{model}:generateContent` | Gemini non-stream generation (`/v1/models/...` is also accepted) |
 | `POST` | `/v1beta/models/{model}:streamGenerateContent` | Gemini SSE generation (`/v1/models/...` is also accepted) |
 | `POST` | `/v1beta/models/{model}:countTokens` | Returns `501`; Gemini CLI can fall back to local estimation |
 | `POST` | `/v1beta/models/{model}:embedContent` | Returns `501`; embeddings are not supported |
-| `GET`  | `/claude-desktop/v1/models` | Claude Desktop alias model list |
-| `POST` | `/claude-desktop/v1/messages` | Claude Desktop Messages with alias rewriting |
 | `GET`  | `/dashboard/` | Vue 3 dashboard (HTML) |
 | `*`    | `/dashboard/api/v3/...` | Current dashboard JSON API |
 | `*`    | `/dashboard/api/...` | Retired V2 REST (authenticated 410 `dashboardV2Removed`), except the labeled V2 auth and browser-WebSocket compatibility routes |
@@ -41,7 +39,7 @@ Dashboard auth depends on the listener bind. The current SPA uses `/dashboard/ap
 
 Clients send **aliases**: stable lowercase kebab-case names from the local registry. Built-in Alias authority is code-owned: the original static OpenCode Go protocol table plus sealed exact MiniMax CN, Kimi CN, and selected GOAT long-name maps. Case-folded Alias spellings such as `GLM-5.2` are accepted.
 
-Authenticated `GET /v1/models` returns the currently routeable code-owned Aliases in registry order, then appends saved user-defined Provider public models and eligible Custom capability IDs that do not collide with those Aliases (`owned_by` is `custom`) and also have an effective enabled protocol. The list uses saved local state. Explicit catalog refreshes update saved Provider mappings and contracts. The list read does not write a forward log. Saved Zen `-free` rows keep the exact raw pin and publish the suffix-stripped Alias; saved Command rows may join any code-owned Alias; saved MiniMax/Kimi rows activate only exact sealed CN mappings. Unknown future Command/MiniMax/Kimi rows cannot create arbitrary Aliases. Eligible Custom IDs come from enabled + ready Custom accounts that have a key (verification is optional).
+Authenticated `GET /v1/models` returns the currently routeable code-owned Aliases in registry order, then appends saved user-defined Provider public models and eligible Custom capability IDs that do not collide with those Aliases (`owned_by` is `custom`) and also have an effective enabled protocol. Public names turned off on **Aliases** are omitted from this list and remain routable. The list uses saved local state. Explicit catalog refreshes update saved Provider mappings and contracts. The list read does not write a forward log. Saved Zen `-free` rows keep the exact raw pin and publish the suffix-stripped Alias; saved Command rows may join any code-owned Alias; saved MiniMax/Kimi rows activate only exact sealed CN mappings. Unknown future Command/MiniMax/Kimi rows cannot create arbitrary Aliases. Eligible Custom IDs come from enabled + ready Custom accounts that have a key (verification is optional).
 
 Protected `GET /dashboard/api/v3/application-models` is a different local list: currently routeable OpenCode Go aliases intersected with the active OpenCode Go pricing snapshot. Highspeed variants inherit the base row. An empty intersection returns `[]`. The list excludes Custom IDs and uses saved local state.
 
@@ -56,8 +54,6 @@ Forward logs separate the request identity from the upstream identity:
 - `upstream_model` — the exact model ID actually sent to that account's upstream
 
 plus `provider_id`. Native cost fields are optional.
-
-Claude Desktop keeps its own three-role alias layer (`claude-sonnet-4-6`, `claude-opus-4-6`, and `claude-haiku-4-5-20251001`). These are rewritten to the stored `sonnet` / `opus` / `haiku` mapping before Alias resolution. `GET /claude-desktop/v1/models` advertises those three role aliases.
 
 ---
 

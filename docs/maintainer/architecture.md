@@ -43,7 +43,6 @@ alias, and conversion behavior belongs in the lower crates.
   inference routes
     OpenAI Chat / Responses / Anthropic Messages
     Gemini generateContent / streamGenerateContent
-    Claude Desktop role aliases
     local GET /v1/models
   /dashboard/api/v3       current Dashboard control plane
   /dashboard/api/v4       parallel, additive Dashboard control plane
@@ -59,7 +58,7 @@ The SPA remains an HTTP client. Desktop capabilities are registered into
 Inference is implemented under `crates/ocg-core/src/gateway/`:
 
 1. `handler.rs` assigns the request id, authenticates a client Key, parses the
-   client protocol, rewrites Claude Desktop roles, and resolves model identity.
+   client protocol, and resolves model identity.
 2. `GatewayExecutor` captures one request-entry snapshot for pricing, proxy
    routes, contracts, and Alias resolution. Fallback iterations re-read live
    account state, eligible Custom runtimes, and Zen Free cooldown. Protocol

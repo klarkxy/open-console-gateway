@@ -60,7 +60,6 @@ These reads use saved local state. Catalog refreshes are explicit actions on
 | --- | --- |
 | Authenticated `GET /v1/models` | Currently routeable code-owned Aliases, saved Zen/Command/CN mappings, saved user-defined Provider public models, and eligible Custom declared IDs |
 | `GET /dashboard/api/v3/application-models` | Go-routeable Aliases intersected with the current Go pricing snapshot; excludes Custom API, user-defined Providers, and CN Plans |
-| `GET /claude-desktop/v1/models` | The three Claude Desktop role aliases only |
 
 Saved catalog rows keep exact raw pins until code assigns an Alias. A Custom ID
 that collides with a published built-in Alias is excluded from publication.
@@ -68,8 +67,8 @@ that collides with a published built-in Alias is excluded from publication.
 ## Protocol conversion
 
 Clients may use OpenAI Chat Completions, OpenAI Responses, Anthropic Messages,
-Gemini `generateContent` / `streamGenerateContent`, or Claude Desktop entry
-points. A supported and enabled client/upstream pair passes through; otherwise
+or Gemini `generateContent` / `streamGenerateContent` entry points. A supported
+and enabled client/upstream pair passes through; otherwise
 the whole request and response are converted to and from the model's effective
 upstream protocol. Gemini is a client format: the gateway converts it to the
 selected Plan's Chat Completions or Messages upstream.

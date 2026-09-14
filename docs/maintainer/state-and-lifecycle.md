@@ -30,10 +30,9 @@ Primary/sub values are mutually exclusive
 (`gateway_keys::ensure_primary_value_allowed`) on dashboard, settings, and
 sub-key enable paths.
 
-`AppConfig` uses serde defaults for backward-compatible loading. A pre-1.3
-config without `claude_desktop_models` receives default Sonnet
-`minimax-m3` and is rewritten. Ordinary settings saves preserve the
-dedicated Claude Desktop mapping. Downstream client root URL priority:
+`AppConfig` uses serde defaults for backward-compatible loading. Unknown
+historical fields are ignored on load and omitted by the next canonical
+settings write. Downstream client root URL priority:
 non-empty `OCG_CLIENT_ROOT_URL` (read-only, never written back) > SQLite
 manual value > frontend derivation from production origin / dev Gateway
 port.

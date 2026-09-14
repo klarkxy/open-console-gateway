@@ -14,15 +14,13 @@
 | POST | `/v1/responses` | OpenAI Responses（无状态；`store` / `previous_response_id` / `conversation` / `background` → 400） |
 | POST | `/v1/messages` | Anthropic Messages |
 | GET | `/v1/models` | 本地列表；需要鉴权 |
-| POST | `/claude-desktop/v1/messages` | 角色别名改写后走 Messages |
-| GET | `/claude-desktop/v1/models` | 三个角色别名 |
 | POST | `/v1beta/models/{model}:*` 与 `/v1/models/{model}:*` | Gemini 客户端格式 |
 
 ## Dashboard V3（`/dashboard/api/v3`）
 
 公开：`/auth/status`、`/auth/register`、`/auth/login`、`/auth/logout`。
 
-会话保护（非穷尽；见 `dashboard_v3/mod.rs`）：`/contract`、`/connection`、 `/settings`、`/settings/test-proxy`、`/claude-desktop/models`、 `/settings/check-update`、`/settings/update-status`、 `/settings/install-update`、`/providers/{provider_id}/pricing`、 `/providers/{provider_id}/pricing/refresh`、 `/providers/{provider_id}/pricing/multipliers`、`/keys`、`/keys/primary/regenerate`、`/keys/{id}`、`/keys/{id}/regenerate`、 `/accounts`、`/accounts/managed`、`/accounts/order`、`/accounts/{id}`、 `/accounts/{id}/toggle`、`/accounts/{id}/browser`、 `/accounts/{id}/browser-profile`、`/accounts/{id}/setup`、 `/accounts/{id}/setup/verify-key`、`/accounts/{id}/reset-cooldown`、 `/accounts/{id}/custom-config`、`/accounts/{id}/model-capabilities`、 `/accounts/{id}/acknowledgements`、`/accounts/{id}/usage`、 `/accounts/{id}/usage/refresh`、`/accounts/{id}/provider-usage`、 `/accounts/{id}/verify`、`/providers`、`/providers/{provider_id}`、`/providers/models/discover`、`/providers/test`、`/providers/model-capabilities`、 `/providers/zen-free`、`/providers/zen-free/models`、 `/providers/zen-free/models/refresh`、 `/providers/{provider_id}/models/refresh`、`/provider-contracts`、 `/provider-contracts/provider/{scope_id}/model-protocol-overrides`、 `/provider-contracts/custom-endpoint/{scope_id}/model-protocol-overrides`、 `/providers/{provider_id}/protocol-probes`、`/browser/capabilities`、 `/browser/sessions/{token}/ws`、`/gateway/status`、 `/application-models`、`/dashboard/summary`、 `/dashboard/daily-tokens-by-model`、`/logs/gateway`、`/logs/forward`、 `/logs/forward/models`、`/logs/forward/keys`、 `/custom/models/discover`。
+会话保护（非穷尽；见 `dashboard_v3/mod.rs`）：`/contract`、`/connection`、 `/settings`、`/settings/test-proxy`、 `/settings/check-update`、`/settings/update-status`、 `/settings/install-update`、`/providers/{provider_id}/pricing`、 `/providers/{provider_id}/pricing/refresh`、 `/providers/{provider_id}/pricing/multipliers`、`/keys`、`/keys/primary/regenerate`、`/keys/{id}`、`/keys/{id}/regenerate`、 `/accounts`、`/accounts/managed`、`/accounts/order`、`/accounts/{id}`、 `/accounts/{id}/toggle`、`/accounts/{id}/browser`、 `/accounts/{id}/browser-profile`、`/accounts/{id}/setup`、 `/accounts/{id}/setup/verify-key`、`/accounts/{id}/reset-cooldown`、 `/accounts/{id}/custom-config`、`/accounts/{id}/model-capabilities`、 `/accounts/{id}/acknowledgements`、`/accounts/{id}/usage`、 `/accounts/{id}/usage/refresh`、`/accounts/{id}/provider-usage`、 `/accounts/{id}/verify`、`/providers`、`/providers/{provider_id}`、`/providers/models/discover`、`/providers/test`、`/providers/model-capabilities`、 `/providers/zen-free`、`/providers/zen-free/models`、 `/providers/zen-free/models/refresh`、 `/providers/{provider_id}/models/refresh`、`/provider-contracts`、 `/provider-contracts/provider/{scope_id}/model-protocol-overrides`、 `/provider-contracts/custom-endpoint/{scope_id}/model-protocol-overrides`、 `/providers/{provider_id}/protocol-probes`、`/browser/capabilities`、 `/browser/sessions/{token}/ws`、`/gateway/status`、 `/application-models`、`/dashboard/summary`、 `/dashboard/daily-tokens-by-model`、`/logs/gateway`、`/logs/forward`、 `/logs/forward/models`、`/logs/forward/keys`、 `/custom/models/discover`。
 
 `GET /contract` 返回当前进程的 live revision / generation token（`revision`、`processGeneration`、`pricingRevision`）。
 
@@ -30,7 +28,7 @@ Go/Zen 协议探测是 `POST /providers/{provider_id}/protocol-probes`。Custom 
 
 ## Dashboard V4（`/dashboard/api/v4`）
 
-会话保护（见 `dashboard_v4/mod.rs`）：`GET /contract`、`GET /templates`、`GET /connections`、`GET /accounts`、`POST /onboarding/commit`、`POST /credentials/{id}/rotate`、`PATCH /bindings/{id}`、`POST /identities/{id}/credentials`。
+会话保护（见 `dashboard_v4/mod.rs`）：`GET /contract`、`GET /templates`、`GET /connections`、`GET /accounts`、`POST /onboarding/commit`、`POST /credentials/{id}/rotate`、`PATCH /bindings/{id}`、`POST /identities/{id}/credentials`、`GET|PATCH /alias-publication`。
 
 ## 静态面板
 

@@ -94,9 +94,12 @@ The **Settings** view holds the gateway's persistent configuration:
   incurring model usage. In list mode it probes only the
   direction's default leg, not a listed model's real forwarding path.
 - **Per-model list** (fourth proxy mode) — routes chat forwarding per model
-  instead of process-wide. Pick a direction and check models from the known
-  registry; the list accepts exact known model ids only (no patterns or
-  free-text). With the **whitelist** direction, listed models
+  instead of process-wide. Pick a direction and check exact upstream model IDs
+  from enabled Provider contracts, eligible Custom capabilities, user-defined
+  Provider mappings, and the active CPA catalog. Public Aliases are not added;
+  the list accepts no patterns or free-text. An old saved ID that disappears
+  from those sources remains inert and is removed on the next save. With the
+  **whitelist** direction, listed models
   connect through the proxy URL while every unlisted model
   connects directly (ignoring system/environment proxies, exactly like force
   direct). The **blacklist** direction inverts this: listed models connect

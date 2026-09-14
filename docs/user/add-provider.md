@@ -35,7 +35,7 @@ Backups use payload V4 with `providerId` only and include every saved user-defin
 1. Open **Accounts** and choose **Add account** → **Custom API**.
 2. Enter a name, the upstream API Key, one API URL, and one upstream protocol: **Chat Completions**, **Responses**, or **Messages**.
 3. Add at least one mapping: a public model name clients request and the exact upstream model ID. **Fetch models** can fill the draft from upstream IDs when the upstream exposes the optional model-list interface below.
-4. Save the account. It stays disabled until you enable it. **Test connection** is an optional real, potentially billable request through that exact account and does not turn the switch on.
+4. Save the account. A ready Key account starts enabled. **Test connection** is an optional real, potentially billable request through that exact account and does not change the switch.
 5. Call authenticated `GET /v1/models` on Open Console Gateway and confirm the routeable public name is published, then send one inference request.
 
 One Custom account uses one upstream protocol for every mapping on that card. Matching client traffic passes through; other supported client formats are converted to the selected upstream protocol. **Fetch models** returns upstream IDs only; importing one makes `public model = upstream ID` exactly, without suffix stripping or generated Aliases. You may then edit the public name while retaining the exact upstream ID.

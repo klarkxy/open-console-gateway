@@ -28,8 +28,7 @@
 
 - [ ] 质量门、签名 `release:check` 与所选平台冒烟全绿；四份版本清单、
       `compose.example.yaml` 与 `Cargo.lock` 中的 workspace 包条目一致。
-- [ ] 对受影响的客户端路径完成文本与工具调用。Claude Desktop 角色映射改动需覆盖
-      Claude Desktop（针对仍保留的 Gateway 角色映射），Gemini 兼容性改动需覆盖 Gemini CLI。
+- [ ] 对受影响的客户端路径完成文本与工具调用。Gemini 兼容性改动需覆盖 Gemini CLI。
       已退役的应用子系统、教程生成与自动连接器不再作为发布验收对象。
       检查接入中心显示的 Key 已脱敏，复制结果是所选 Key。
 - [ ] 可选托管注册（登录身份 → 邀请链接 → OpenCode 登录 → 支付前确认 →

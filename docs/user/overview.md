@@ -31,7 +31,7 @@ The gateway does four jobs, in roughly the order you would expect:
 
 Desktop, CLI, and Docker all run one `ocg-core` process on `127.0.0.1:9042`.
 The dashboard opens in your system browser; clients hit `/v1` in OpenAI,
-Anthropic, Gemini, or Claude Desktop format.
+Anthropic, or Gemini format.
 
 The consolidated [architecture diagram](architecture.md#one-local-node) shows
 the control plane, inference plane, SQLite state, and the separate client-Key

@@ -42,7 +42,6 @@ Vue SPA              静态资源；只走 HTTP Dashboard V3 + V4
   推理入口
     OpenAI Chat / Responses / Anthropic Messages
     Gemini generateContent / streamGenerateContent
-    Claude Desktop 角色 Alias
     本地 GET /v1/models
   /dashboard/api/v3       当前 Dashboard 控制面
   /dashboard/api/v4       并行、仅增量的 Dashboard 控制面
@@ -56,8 +55,7 @@ SPA 始终是 HTTP 客户端。Desktop capability 注册进 `CoreState`。
 
 推理实现位于 `crates/ocg-core/src/gateway/`：
 
-1. `handler.rs` 分配 request id、验证客户端 Key、解析客户端协议、重写 Claude Desktop
-   角色并解析模型身份。
+1. `handler.rs` 分配 request id、验证客户端 Key、解析客户端协议并解析模型身份。
 2. `GatewayExecutor` 在请求入口捕获一次价格、代理路由、合约与 Alias 解析快照。fallback
    每轮重读实时账号状态、合格 Custom runtime 与 Zen Free 冷却。协议选择使用该次保存的
    合约。

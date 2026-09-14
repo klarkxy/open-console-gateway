@@ -16,7 +16,6 @@ Copy the **Key** and URLs from **Connection Center**. Choose the interface the c
 | OpenAI Responses | `http://127.0.0.1:9042/v1` | `POST /v1/responses` | `Authorization: Bearer <key>` |
 | Anthropic Messages | `http://127.0.0.1:9042` when the client appends `/v1/messages` | `POST /v1/messages` | `x-api-key: <key>` |
 | Gemini | `http://127.0.0.1:9042` with API version `v1beta` | `POST /v1beta/models/{model}:generateContent` or `:streamGenerateContent` | `x-goog-api-key: <key>` |
-| Claude Desktop Gateway | `http://127.0.0.1:9042/claude-desktop` | `POST /claude-desktop/v1/messages` | Static API key / Bearer |
 
 If a client asks for a **complete endpoint** instead of a base URL, use the request path shown above. If it automatically adds `/v1`, give it the root; if it expects an OpenAI API base, usually give it the `/v1` base. The client's official documentation decides which form is correct.
 

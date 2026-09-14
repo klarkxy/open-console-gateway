@@ -13,7 +13,7 @@ Open Console Gateway 出问题，通常先怀疑有别的进程占了 `127.0.0.1
 - **Gateway 返回 `429` 并提示 "all accounts cooling down"。**所有已启用账号都在冷却。等最近的恢复时间，或新增/启用其他账号。
 - **Gateway 因模型名返回 `400`。**请发送带鉴权的 `GET /v1/models` 公布的别名或合格 Custom ID。含 `/`、`_` 或空白的名称是原始 ID，不是 kebab 别名。未知名称和重叠的原始 ID 会 fail-closed，且不会调用上游。
 - **Command Code GOAT 没有产生路由。**确认账号已启用、ready 且 Key 非空，并检查 **供应商** 矩阵中该模型的受支持协议是否开启。公开 `/models` 刷新不验证 Key；真实无效 Key 会在推理时返回 401/403。
-- **保存 Custom API 后仍无法路由。**新账号默认关闭，请先自行启用，再检查账号已 ready、Key 非空且请求模型已声明。验证不会打开开关。验证动作只用所选协议向解析后的推理 Endpoint 发送一次最小请求，并要求返回 `2xx` JSON；更改 API 地址、Key、声明模型或协议会使验证状态变为 `pending`，但保持该卡当前的启用状态。
+- **保存 Custom API 后仍无法路由。**请确认账号已启用且 ready、Key 非空且请求模型已声明。验证不会改变开关。验证动作只用所选协议向解析后的推理 Endpoint 发送一次最小请求，并要求返回 `2xx` JSON；更改 API 地址、Key、声明模型或协议会使验证状态变为 `pending`，但保持该卡当前的启用状态。
 - **Gemini 请求因 `safetySettings` 返回 `400`。**Gateway 无法把 Google 的安全阈值等价映射到 Chat/Messages 上游，因此拒绝非空数组。删除该字段后重试；Chat/Messages 上游使用自己的策略。
 - **Docker 首次注册的 `OCG_ADMIN_PASSWORD` 没生效。**这两个变量只在数据库还没有管理员时生效，请使用数据库里已有的管理员账号。只有在确认备份有效且确实要完全重置时才重建 `ocg-data` 与 `ocg-browser-profiles`——这会删除全部账号、凭据、设置、Cookie 和浏览器 Profile。
 - **SmartScreen / Gatekeeper 弹窗警告。**当前 Windows 包未签名、macOS 应用使用 ad-hoc 签名。首次启动请用 **Open Anyway** 放行，警告本身不代表篡改。

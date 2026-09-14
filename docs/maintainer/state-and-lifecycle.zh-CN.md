@@ -15,7 +15,7 @@
 
 主/子 Key 值互斥由 `gateway_keys::ensure_primary_value_allowed` 在 dashboard、settings 与子 Key 启用路径强制。
 
-`AppConfig` 使用 serde 默认值做向后兼容加载。1.3 之前没有 `claude_desktop_models` 的配置会得到默认 Sonnet 目标 `minimax-m3`，并被规范写回。常规 settings 保存会保留专用的 Claude Desktop 映射。下游访问根地址优先级：非空 `OCG_CLIENT_ROOT_URL`（只读，不会写回 SQLite）> SQLite 手工值 > 前端按生产 origin / 开发 Gateway 端口自动推导。
+`AppConfig` 使用 serde 默认值做向后兼容加载。历史未知字段在读取时被忽略，并在下次规范 settings 写回时省略。下游访问根地址优先级：非空 `OCG_CLIENT_ROOT_URL`（只读，不会写回 SQLite）> SQLite 手工值 > 前端按生产 origin / 开发 Gateway 端口自动推导。
 
 **回环监听时** 直接访问跳过登录。带标准反向代理转发头但没 Cookie 的请求仍需登录。**非回环监听** 走单管理员模型：密码以 Argon2 哈希存 SQLite，登录下发 HttpOnly 会话 Cookie。Docker 用 **同时设置的** `OCG_ADMIN_USERNAME` 与 `OCG_ADMIN_PASSWORD` 引导首个管理员；只设一个会启动失败；不提供时由首位注册者创建。
 

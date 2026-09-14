@@ -32,11 +32,6 @@ curl "$BASE/v1/messages" -H "x-api-key: $KEY" \
   -H "anthropic-version: 2023-06-01" -H "Content-Type: application/json" \
   -d '{"model":"deepseek-v4-flash","max_tokens":16,"messages":[{"role":"user","content":"ping"}]}'
 
-# Claude Desktop: 别名会改写为已保存的 sonnet/opus/haiku 映射
-curl "$BASE/claude-desktop/v1/messages" -H "x-api-key: $KEY" \
-  -H "anthropic-version: 2023-06-01" -H "Content-Type: application/json" \
-  -d '{"model":"claude-sonnet-4-6","max_tokens":16,"messages":[{"role":"user","content":"ping"}]}'
-
 # Gemini generateContent
 curl "$BASE/v1beta/models/deepseek-v4-flash:generateContent" \
   -H "x-goog-api-key: $KEY" -H "Content-Type: application/json" \

@@ -53,15 +53,14 @@ Configurable HTTP。
 | --- | --- |
 | 已鉴权 `GET /v1/models` | 当前可路由的代码持有 Alias、已保存 Zen/Command/CN 映射、用户定义 Provider 公开模型，以及符合条件的 Custom 声明 ID |
 | `GET /dashboard/api/v3/application-models` | Go 可路由 Alias 与当前 Go 价格快照的交集；不含 Custom API、用户定义 Provider 与 CN Plan |
-| `GET /claude-desktop/v1/models` | 只公布三个 Claude Desktop 角色 Alias |
 
 保存目录行在代码分配 Alias 前只保留精确 raw pin。与已公布内置 Alias 冲突的
 Custom ID 不会进入公布列表。
 
 ## 协议转换
 
-客户端可以使用 OpenAI Chat Completions、OpenAI Responses、Anthropic Messages、
-Gemini `generateContent` / `streamGenerateContent` 或 Claude Desktop 入口。客户端与
+客户端可以使用 OpenAI Chat Completions、OpenAI Responses、Anthropic Messages 或
+Gemini `generateContent` / `streamGenerateContent` 入口。客户端与
 上游协议组合同时受支持且启用时直接透传；否则整份请求与响应会转换到模型的 effective
 上游协议，再转换回来。Gemini 是客户端格式：Gateway 把它转换到所选 Plan 的
 Chat Completions 或 Messages 上游。

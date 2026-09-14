@@ -23,8 +23,6 @@ protected V2 REST; new JSON is V3 or V4.
 | POST | `/v1/responses` | OpenAI Responses (stateless; `store` / `previous_response_id` / `conversation` / `background` → 400) |
 | POST | `/v1/messages` | Anthropic Messages |
 | GET | `/v1/models` | Local list; auth required |
-| POST | `/claude-desktop/v1/messages` | Role alias rewrite then Messages |
-| GET | `/claude-desktop/v1/models` | Three role aliases |
 | POST | `/v1beta/models/{model}:*` and `/v1/models/{model}:*` | Gemini client format |
 
 ## Dashboard V3 (`/dashboard/api/v3`)
@@ -33,7 +31,7 @@ Public: `/auth/status`, `/auth/register`, `/auth/login`, `/auth/logout`.
 
 Session-protected (non-exhaustive; see `dashboard_v3/mod.rs`):
 `/contract`, `/connection`, `/settings`, `/settings/test-proxy`,
-`/claude-desktop/models`, `/settings/check-update`,
+`/settings/check-update`,
 `/settings/update-status`, `/settings/install-update`,
 `/providers/{provider_id}/pricing`,
 `/providers/{provider_id}/pricing/refresh`,
@@ -77,7 +75,7 @@ independently of discovery and test; a real test may consume upstream quota.
 Session-protected (see `dashboard_v4/mod.rs`): `GET /contract`,
 `GET /templates`, `GET /connections`, `GET /accounts`,
 `POST /onboarding/commit`, `POST /credentials/{id}/rotate`,
-`PATCH /bindings/{id}`, `POST /identities/{id}/credentials`.
+`PATCH /bindings/{id}`, `POST /identities/{id}/credentials`, `GET|PATCH /alias-publication`.
 
 ## Static dashboard
 

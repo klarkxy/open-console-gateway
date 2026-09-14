@@ -101,8 +101,7 @@ map `max` → `xhigh` (upstream rejects `max`). Other models pass
 
 Unknown model names return `400` on every supported client format — Chat
 Completions, Responses, Messages, and Gemini `generateContent` /
-`streamGenerateContent` — and unknown Claude Desktop aliases do too. See
-[Aliases](gateway.md#aliases).
+`streamGenerateContent`. See [Aliases](gateway.md#aliases).
 
 Gateway protocol endpoints accept JSON request bodies up to 64 MiB by default.
 Set `OCG_MAX_REQUEST_BODY_BYTES` to a positive integer in bytes (for example,
@@ -166,18 +165,6 @@ Unconvertible fields return `400`:
 - `countTokens` and `embedContent` return `501 UNIMPLEMENTED`; Gemini CLI can
   fall back to local token estimation, and the gateway has no embeddings
   route.
-
-## Claude Desktop aliases
-
-The dedicated entry accepts only the advertised aliases
-`claude-sonnet-4-6`, `claude-opus-4-6`, and `claude-haiku-4-5-20251001`.
-Before entering the existing Messages conversion path, the gateway rewrites
-the alias to the actual model in the stored `sonnet` / `opus` / `haiku`
-mapping. Model capabilities, tool support, and context limits in the response
-still follow the actual model. The mapping is serialized inside `AppConfig`
-and updated through `PUT /dashboard/api/v3/claude-desktop/models`; omitted
-roles inherit the first configured role, and the dashboard returns the
-resolved three-role mapping.
 
 ---
 

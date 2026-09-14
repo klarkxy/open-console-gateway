@@ -33,7 +33,7 @@ GUI 或 CLI 启动时会原地执行 SQLite 迁移。打开新版二进制前：
 
 ## Schema v27 与 pre-v3 快照
 
-`CURRENT_SCHEMA_VERSION = 48`（`crates/ocg-core/src/db.rs`）。打开历史库会先规范迁移到 v26，再由 v27 重写把主 Key 与全部 `sub_gateway_keys` 行复制进一张 `access_keys` 表（主 Key 固定 id `00000000-0000-0000-0000-000000000001`），删除 `sub_gateway_keys`，并删除 `accounts` 上遗留的五列 `usage_sync_*`（用量同步元数据在 `provider_usage_sync_state`）。v33 新增 Custom 精确上游模型身份；v34 新增 CPA 单例配置表，但不会导入或导出 CPA 状态。v35 把 Provider/Plan 身份收成只有 `provider_id`：先预检每一个已知的 v34 provider/offering 对，未知对与会丢数据的复合键冲突在写入前失败，再重建受影响的表，使 offering 列不存在。v36 增量创建过 `ollama_cloud_usage_state`（未发布的 Cookie 用量抓取）。v37 删除该表且不动账号 Key 与日志，并创建 `ollama_cloud_billing`。v42 把类型化用户定义 Provider 表与密封 Adapter 种子目录统一：把 `dynamic_providers` / `dynamic_provider_models` 重命名为 `providers` / `provider_models`，新增 `origin`（`builtin` | `preset` | `custom`）、`adapter_kind`、`offering`（`plan` | `api`）与 `endpoint_per_account` 列，把七个密封 builtin 适配器（OpenCode Go、Zen Free、Command Code GOAT、MiniMax CN、Kimi CN、Ollama Cloud、Custom API——但不含静态外部接入 CPA）以 `builtin` 行种入表中，这些行的属性列只是展示镜像，并在 dynamic 读路径上加 `origin` 过滤。v41 的 `provider_model_protocol_preferences` 表上 `provider_id` CHECK 已被去掉（`protocol ∈ ('chat_completions', 'messages')` 的 CHECK 保留）。账号 `key_cipher` / `password_cipher` 用 Host cipher 就地校验，**不会重新加密**。v44 增量创建 `dashboard_operations`，供 V4 幂等提交使用，不另写迁移前备份（与 v43 相同）。v45 增量创建身份/凭据/绑定附属表与 `accounts.identity_id`，不另写迁移前备份（与 v43/v44 相同）。v46 增量持久化绑定 `allowed_endpoint_ids` / `allowed_origins` JSON，并从安全的已分配连接端点一次性回填；不另写迁移前备份。v47 增量持久化 `providers.onboarding_draft`（`0` 已配置，`1` 草稿）；既有行保持已配置，不会从缺字段推断草稿。路由列表查询排除草稿；控制面列表、入职续写、V4 投影和 V6 导出包含草稿。不另写迁移前备份。v48 删除四列无运行语义的字段（`provider_contract_scopes` 协议开关与 `accounts.free_alias_enabled`）以及空的遗留 `dynamic_providers` / `dynamic_provider_models`；非空遗留会拒绝升级并保持 schema 47。非空 v47 库会写一份唯一的 pre-v48 快照。
+`CURRENT_SCHEMA_VERSION = 49`（`crates/ocg-core/src/db.rs`）。打开历史库会先规范迁移到 v26，再由 v27 重写把主 Key 与全部 `sub_gateway_keys` 行复制进一张 `access_keys` 表（主 Key 固定 id `00000000-0000-0000-0000-000000000001`），删除 `sub_gateway_keys`，并删除 `accounts` 上遗留的五列 `usage_sync_*`（用量同步元数据在 `provider_usage_sync_state`）。v33 新增 Custom 精确上游模型身份；v34 新增 CPA 单例配置表，但不会导入或导出 CPA 状态。v35 把 Provider/Plan 身份收成只有 `provider_id`：先预检每一个已知的 v34 provider/offering 对，未知对与会丢数据的复合键冲突在写入前失败，再重建受影响的表，使 offering 列不存在。v36 增量创建过 `ollama_cloud_usage_state`（未发布的 Cookie 用量抓取）。v37 删除该表且不动账号 Key 与日志，并创建 `ollama_cloud_billing`。v42 把类型化用户定义 Provider 表与密封 Adapter 种子目录统一：把 `dynamic_providers` / `dynamic_provider_models` 重命名为 `providers` / `provider_models`，新增 `origin`（`builtin` | `preset` | `custom`）、`adapter_kind`、`offering`（`plan` | `api`）与 `endpoint_per_account` 列，把七个密封 builtin 适配器（OpenCode Go、Zen Free、Command Code GOAT、MiniMax CN、Kimi CN、Ollama Cloud、Custom API——但不含静态外部接入 CPA）以 `builtin` 行种入表中，这些行的属性列只是展示镜像，并在 dynamic 读路径上加 `origin` 过滤。v41 的 `provider_model_protocol_preferences` 表上 `provider_id` CHECK 已被去掉（`protocol ∈ ('chat_completions', 'messages')` 的 CHECK 保留）。账号 `key_cipher` / `password_cipher` 用 Host cipher 就地校验，**不会重新加密**。v44 增量创建 `dashboard_operations`，供 V4 幂等提交使用，不另写迁移前备份（与 v43 相同）。v45 增量创建身份/凭据/绑定附属表与 `accounts.identity_id`，不另写迁移前备份（与 v43/v44 相同）。v46 增量持久化绑定 `allowed_endpoint_ids` / `allowed_origins` JSON，并从安全的已分配连接端点一次性回填；不另写迁移前备份。v47 增量持久化 `providers.onboarding_draft`（`0` 已配置，`1` 草稿）；既有行保持已配置，不会从缺字段推断草稿。路由列表查询排除草稿；控制面列表、入职续写、V4 投影和 V6 导出包含草稿。不另写迁移前备份。v48 删除四列无运行语义的字段（`provider_contract_scopes` 协议开关与 `accounts.free_alias_enabled`）以及空的遗留 `dynamic_providers` / `dynamic_provider_models`；非空遗留会拒绝升级并保持 schema 47。非空 v47 库会写一份唯一的 pre-v48 快照。
 
 ## Schema v45 — 身份 / 凭据 / 绑定附属表
 
@@ -77,6 +77,15 @@ v47 把入职生命周期加在既有 `providers` 行上：
 - `providers.onboarding_draft` — 整型布尔，`NOT NULL DEFAULT 0`
 
 既有行迁移为已配置。草稿可以省略 Key 和模型目标；即使草稿已有 Key 和模型，也不会进入路由、别名、目录或网关。普通 V3 Provider 写入会保留该标志，不会把草稿静默变成可路由。通过 V4 入职 `mode=complete` 完成草稿时，会在同一事务中连同操作回执清掉该标志。V6 节点导出包含草稿，且每个可移植 Provider 必须带 `onboardingDraft`；V4/V5 包不得带该字段。空白模型列表只对草稿合法。不另写迁移前备份（只做加法，与 v43–v46 相同）。回滚仍是既有的整目录恢复。
+
+## Schema v49 — 不对下游列出的对外模型名
+
+v49 增量创建 `unpublished_public_models`，保存已鉴权 `GET /v1/models` 中隐藏的对外名称：
+
+- `public_model` — 主键，按大小写折叠存储
+- `updated_at`
+
+未出现的名称默认对外展示。隐藏名称仍可路由。写入路径是 `PATCH /dashboard/api/v4/alias-publication`。节点迁移不携带此表。不另写迁移前备份（只做加法，与 v43–v47 相同）。回滚仍是既有的整目录恢复。
 
 ## Schema v48 — 无运行语义的列与空遗留表
 

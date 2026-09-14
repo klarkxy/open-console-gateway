@@ -27,8 +27,6 @@ proposal or pull request, with corresponding code and documentation changes.
 - Gemini is a client compatibility format. Forwarding, `400`, and `501`
   behavior is listed in [Limits](../user/limits.md) and
   [Protocol conversion](../user/protocol-conversion.md).
-- Claude Desktop advertises three fixed Claude aliases, mapped to the
-  supported actual models.
 - Command Code GOAT has no machine-readable usage endpoint. Its public model
   directory cannot validate a stored Key, so authentication failure is only
   known from real inference 401/403. Custom API remains a distinct live route

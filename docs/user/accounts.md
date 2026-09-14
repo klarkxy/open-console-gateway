@@ -4,7 +4,9 @@
 
 **Add account** first distinguishes an existing connection from a new service. Existing connections use the same projection as **Providers**: built-in Providers that still have at least one account, and every saved user-defined Provider (with or without a Key). Deleting the last account of a built-in family removes it from existing connections and returns it to the new-service templates. Choose an existing connection to add another Key using its saved address, protocol and models. Choose a new service to browse unused built-in templates, Plan/API presets, Custom API, or a platform site; saving a preset creates a Provider and its first account together. Saving a preset from **Add account** uses the same onboarding commit as **Providers**. Connection summaries remain visible before entering a Key. Regional variants use a compact picker. Keys are stored by the account service; you can add one here or from a Provider's detail with **Add Key**.
 
-**Enabled** means the card may enter routing. New Key accounts, including Custom API and user-defined Providers, are created disabled. Test connection does not turn the switch on; enable the card after you have checked it. Already-enabled accounts stay as stored. Test results stay in the test dialog. User-defined Providers have no modeled subscription period, including those created from Plan presets: their accounts do not show an inferred purchase date, expiry countdown, or expiry alert. Existing stored purchase anchors are preserved for compatibility, but are not presented as confirmed billing facts.
+Provider choices are projected in the exact order returned by the V3 Provider Catalog, and `provider_id` is the chooser, filter, dialog, and cache key. A successful empty catalog stays empty. If the catalog cannot be loaded, only the OpenCode Go creation form remains available; an existing Zen Free singleton can still be displayed, while every other built-in, Custom, and user-defined entry fails closed. Names, Plan/API grouping, creation status, and form fields come from each catalog row. After the first ready account for a sealed Provider is saved, the dashboard consults that Provider's existing contract capability before refreshing its model catalog; another Key does not refresh again. A capability or refresh failure never rolls back the saved account and can be retried from **Providers → Refresh model catalog**.
+
+**Enabled** means the card may enter routing. New ready Key accounts, including Custom API and user-defined Providers, start enabled. Test connection does not change the switch. Already-enabled or disabled accounts stay as stored. Test results stay in the test dialog. User-defined Providers have no modeled subscription period, including those created from Plan presets: their accounts do not show an inferred purchase date, expiry countdown, or expiry alert. Existing stored purchase anchors are preserved for compatibility, but are not presented as confirmed billing facts.
 
 Accounts still edit through the same forms. Ready, routable cards show enabled, disabled, cooling, or unavailable. Card relations come from the identity projection: a declared relation is not a verified wallet, and dynamic or Custom dates stay unknown unless V3 already stored a real purchase date.
 
@@ -28,7 +30,11 @@ Endpoint/protocol/mappings, and scoped pricing live on **Providers**.
 A user-defined Provider account only stores Key (when auth requires it), notes,
 enablement, and runtime state. Custom API is the exception: that account still
 owns Endpoint, protocol, and model mappings. No-auth user-defined Providers
-expose one singleton account and reject a second. GOAT cards show a clearly
+expose one singleton account and reject a second.
+
+Quota cards follow catalog capabilities instead of Provider IDs. `usageAvailability=available` loads Provider quota windows and enables the refresh action. `manualUsageCalibration=true` additionally loads the local calibration object for editing, while the card itself still renders the Provider windows. Other rows show no quota strip; Zen Free keeps its separate egress cooldown. Known MiniMax/Kimi window names remain friendly, and unknown window names are humanized without changing stored wire values.
+
+GOAT cards show a clearly
 labelled local estimate: priced OCG request logs accumulate against the public
 `$14 / $35 / $70` windows. Command Code exposes no machine-readable usage API.
 Traffic outside OCG and unpriced rows are not included; manual calibration can
@@ -50,7 +56,7 @@ The Adapter Registry is sealed. Built-in Provider families are:
 | MiniMax CN Token Plan | `minimax` | Yes | Dedicated `sk-cp` Key; fixed official Chat and Messages routes, authenticated model directory, and manual official Token Plan usage refresh |
 | Kimi Code CN | `kimi` | Yes | Dedicated Kimi Code Key; fixed official Chat and Messages routes, authenticated model directory, and manual official weekly/rate-window usage refresh |
 | Ollama Cloud | `ollama` | Yes | Fixed-origin Chat Completions only (`https://ollama.com`, Bearer); public keyless catalog refresh; account billing tier (Pro $60 / Max $300 / Team $1000 USD Credits per billing month) plus purchase date; local monthly soft-credit estimate from official per-request usage and the manual `https://ollama.com/pricing` table; unconfigured existing accounts stay routeable with no meter |
-| Custom API | `custom` | Yes | Trusted-administrator destination; one API URL, one account-wide upstream protocol, and public-name → upstream-ID mappings per account; common base URLs are completed automatically; new accounts default off; eligible public names appear on `/v1/models`; unpriced/unknown cost, no quota debit |
+| Custom API | `custom` | Yes | Trusted-administrator destination; one API URL, one account-wide upstream protocol, and public-name → upstream-ID mappings per account; common base URLs are completed automatically; new accounts start enabled; eligible public names appear on `/v1/models`; unpriced/unknown cost, no quota debit |
 
 ## Move a node configuration
 
@@ -96,8 +102,11 @@ Every persistent mutation path rejects `enabled=true` for a catalogued
 GOAT catalog refresh updates the model directory; Key auth is observed from
 inference 401/403. An enabled, ready account with a non-empty Key can route
 models enabled in the Provider matrix. A newly created, routable Custom API
-account defaults to disabled. Editing the Endpoint, capabilities, Key, or
-protocol preserves its enabled state. Disabled drafts remain saveable.
+account starts enabled. Editing the Endpoint, capabilities, Key, or
+protocol preserves its enabled state. Disabled drafts remain saveable. Saving
+the first ready account for a refreshable built-in Provider also runs that
+Provider's **Refresh model catalog** once. Adding another Key to an existing
+connection does not. The account is created even if the refresh fails.
 
 Use only the official provider API **Key** for OpenCode Go, Command Code GOAT,
 MiniMax Token Plan, or Kimi Code. Browser cookies and reverse-proxy credentials

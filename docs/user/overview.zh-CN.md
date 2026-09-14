@@ -14,8 +14,7 @@ Gateway 只做四件事，顺序基本符合直觉：
 ## 一个节点长什么样
 
 桌面端、CLI 和 Docker 都运行同一个 `ocg-core` 进程，默认绑定 `127.0.0.1:9042`。
-面板在系统浏览器里打开；AI 客户端用 OpenAI、Anthropic、Gemini 或 Claude Desktop
-格式访问 `/v1`。
+面板在系统浏览器里打开；AI 客户端用 OpenAI、Anthropic 或 Gemini 格式访问 `/v1`。
 
 整合后的[架构图](architecture.zh-CN.md#一个本地节点)展示控制面、推理面、SQLite
 状态，以及彼此独立的客户端 Key 与账号凭据路径。

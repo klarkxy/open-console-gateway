@@ -43,7 +43,8 @@ Provider-preset and user-defined Providers open the same detail shell with up to
 is the default: provider-preset scopes show the model catalog (source line, refresh,
 and the protocol matrix), while user-defined
 Providers show their read-only model mappings with an edit entry. **Pricing**
-appears only when the Provider has pricing. **Settings** shows the connection
+always shows the selected Provider's catalog state (`available`, `unpriced`,
+`unavailable`, or not applicable) without inventing rows. **Settings** shows the connection
 facts; provider-preset rows are read-only (provided by the official adapter),
 user-defined rows offer edit/delete, and the **OpenCode Go** scope keeps the
 managed-signup **invite URL** here. It is a user-owned `opencode.ai` /
@@ -54,13 +55,18 @@ API account row is a read-only summary (endpoint, protocol, mapped models);
 **Edit on Accounts** opens the account editor on **Accounts**. User-defined
 Providers are unpriced.
 
-**Aliases** is a separate core page because its read-only table spans every
+**Aliases** is a separate core page because its table spans every
 currently enabled account instead of the selected Provider. It lists only
 Providers that have at least one enabled account, including CPA as its own
 Provider. Public names and exact upstream identities come from those
 Providers' contracts, user-defined mappings, Custom capabilities, and the
 selected CPA catalog. Overlapping public names and upstream IDs are flagged
 for inspection. Search by public name, upstream ID, or Provider.
+The switch to the left of each public name controls downstream listing:
+on (the default) advertises that name on authenticated `GET /v1/models`;
+off omits it from that list. Hidden names stay on this page and remain
+routable if a client already knows them. Provider catalog enablement still
+gates routing.
 
 **Model catalog** is local. Each scope renders one row per current catalog model with columns: model (alias plus raw upstream ID), upstream protocol, enable, and row actions. Every model uses the same chips for its available upstreams; a visible chip can connect, and blue is the conversion default. MiniMax CN and Kimi Code CN start with Chat Completions and Messages; neither advertises Responses. The enable switch turns the model on or off for routing: on force-enables every available protocol, off removes the model from routing and from `GET /v1/models`. The switch updates immediately while the CAS-protected save runs in the background; only the affected row shows saving progress. **Select** opens multi-select: a checkbox column appears, and the toolbar trailing slot becomes **On**, **Off**, and **Delete** for the checked rows. Each row can also delete that model from the persisted local catalog. A deleted ID stops routing; **Refresh model catalog** may add official IDs back, off by default.
 
@@ -90,8 +96,10 @@ Every refreshable scope uses the same action. OpenCode Go refreshes from the
 official authenticated model endpoint with a backend-selected eligible Go
 account, Zen Free uses the fixed keyless directory
 `https://opencode.ai/zen/v1/models`, and Command Code uses its fixed public
-official `/models` directory without selecting an account. Refresh is always
-explicit.
+official `/models` directory without selecting an account. Refresh is a
+control-plane action: the Providers button, and one automatic refresh when the
+dashboard saves the first ready account for that Provider. A ready stored Key
+is enough even if the account is still disabled for routing.
 
 MiniMax and Kimi require an eligible account Key. MiniMax refreshes
 `https://api.minimaxi.com/v1/models`; Kimi refreshes
@@ -153,19 +161,21 @@ when one is supplied. Every actual account attempt is recorded as a
 redacted request log; probe traffic never enters Runtime Logs. One account
 failure never disables a protocol that another eligible account can serve.
 
-**Pricing** is scoped to the selected provider. **Refresh price table** only
-hits the official source owned by that Provider. OpenCode and Command Code
+**Pricing** is scoped to the selected provider. The default catalog projection includes every `offering=plan` row whose V3 `pricingAvailability` is `available`, in catalog order. Snapshots are requested and cached by `provider_id`; the renderer selects the returned `models` or `values` structure, derives token-range/time-window/adjustment variants, and preserves unknown adjustment labels. Source links come only from the returned snapshot. Refresh requires V3 pricing availability, while multiplier editing additionally requires V4 `pricingMultiplierEditable=true`; if V4 is unavailable, pricing is read-only.
+
+**Refresh price table** only hits the official source owned by that Provider. OpenCode and Command Code
 keep separate revisions and last-good snapshots; one failing does not touch
 the other. If a Provider later owns several priced Plans, the same action
 refreshes those Plans only. Refresh stays manual:
 
-- OpenCode Go shows revision, documentation timestamp, token rates, `Usage`,
+- OpenCode Go shows revision, documentation timestamp, token rates, `Usage`
+  (the official docs now label that column **Monthly limit**),
   and the quota-debit multiplier, and can fetch
   `https://opencode.ai/docs/go/` after you press refresh. A failed fetch or
   validation keeps the last successful snapshot. The allowance is not a quota
   pool and does not route requests: it only derives that debit multiplier
-  (`monthly limit / Usage`). Saving a temporary override creates a new
-  persistent revision for later estimates.
+  (`account monthly window / model monthly limit`). Saving a temporary
+  override creates a new persistent revision for later estimates.
 - Command Code GOAT shows its saved official rate snapshot from
   `https://commandcode.ai/docs/plans/goat`. Models with scheduled pricing retain
   the official daily peak windows (01:00–04:00 and 06:00–10:00 UTC) and their
