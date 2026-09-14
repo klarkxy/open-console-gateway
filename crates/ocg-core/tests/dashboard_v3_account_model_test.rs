@@ -190,7 +190,7 @@ async fn exact_account_probe_keeps_target_and_honors_live_authorization() {
         .get_account(&target)
         .unwrap()
         .unwrap();
-    assert!(!before.enabled);
+    assert!(before.enabled);
     assert!(before.cooldown_until.is_some());
 
     let (status, body) = send_json(
@@ -215,7 +215,7 @@ async fn exact_account_probe_keeps_target_and_honors_live_authorization() {
         .get_account(&target)
         .unwrap()
         .unwrap();
-    assert!(!after.enabled);
+    assert!(after.enabled);
     assert_eq!(after.cooldown_until, before.cooldown_until);
     assert_eq!(after.auth_error, before.auth_error);
     let target_authorization = format!("Bearer {TARGET_KEY}");
@@ -238,7 +238,7 @@ async fn exact_account_probe_keeps_target_and_honors_live_authorization() {
         .get_account(&target)
         .unwrap()
         .unwrap();
-    assert!(!disabled_before.enabled);
+    assert!(disabled_before.enabled);
     assert_eq!(disabled_before.cooldown_until, before.cooldown_until);
 
     let (status, body) = send_json(
@@ -270,7 +270,7 @@ async fn exact_account_probe_keeps_target_and_honors_live_authorization() {
         .get_account(&target)
         .unwrap()
         .unwrap();
-    assert!(!disabled_after.enabled);
+    assert!(disabled_after.enabled);
     assert_eq!(
         disabled_after.cooldown_until,
         disabled_before.cooldown_until

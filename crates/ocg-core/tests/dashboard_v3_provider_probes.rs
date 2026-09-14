@@ -2302,6 +2302,7 @@ async fn retired_account_owned_probes_do_not_call_upstream() {
     .await;
     assert_eq!(status, StatusCode::OK, "{custom}");
     let custom_id = custom["account"]["id"].as_str().unwrap().to_string();
+    let initially_enabled = custom["account"]["enabled"].as_bool().unwrap();
     harness
         .assert_v2_path_removed(
             Method::POST,
@@ -2321,7 +2322,7 @@ async fn retired_account_owned_probes_do_not_call_upstream() {
         .unwrap()
         .unwrap();
     assert_eq!(stored.provider_id, CUSTOM_PROVIDER_ID);
-    assert!(!stored.enabled);
+    assert_eq!(stored.enabled, initially_enabled);
     harness.stop();
 }
 

@@ -419,7 +419,7 @@ async fn cli_enable_rejects_unroutable_catalog_plans_without_mutation() {
         .into_iter()
         .find(|account| account.name == "go-main")
         .unwrap();
-    assert!(!go.enabled);
+    assert!(go.enabled);
     key_command(
         dir.clone(),
         cipher.clone(),
@@ -725,7 +725,7 @@ async fn cli_key_mutations_share_control_plane_revision_in_process() {
         .find(|account| account.name == "go-cas")
         .expect("CLI key add must be visible to the live serve CoreState via SQLite");
     assert_eq!(go.provider_id, OPENCODE_PROVIDER_ID);
-    assert!(!go.enabled);
+    assert!(go.enabled);
     assert_eq!(go.setup_step, AccountSetupStep::Ready);
     assert_eq!(go.credential_kind, CredentialKind::ApiKey);
     assert_eq!(

@@ -444,7 +444,7 @@ async fn dashboard_v3_list_and_detail_are_secret_free() {
     let created_account = mutation_account(&created);
     assert_eq!(created_account.username.as_deref(), Some("user"));
     assert_eq!(created_account.notes.as_deref(), Some("keep this"));
-    assert!(!created_account.enabled);
+    assert!(created_account.enabled);
     assert_eq!(
         created_account.verification_status,
         AccountVerificationStatus::NotRequired
@@ -608,7 +608,7 @@ async fn dashboard_v3_create_gates_for_go_custom_goat_and_zen() {
     .await;
     assert_eq!(status, StatusCode::OK, "{go}");
     let go = mutation_account(&go);
-    assert!(!go.enabled);
+    assert!(go.enabled);
     assert_eq!(go.provider_id, OPENCODE_PROVIDER_ID);
     assert_eq!(
         go.verification_status,
@@ -633,7 +633,7 @@ async fn dashboard_v3_create_gates_for_go_custom_goat_and_zen() {
     .await;
     assert_eq!(status, StatusCode::OK, "{goat}");
     let goat = mutation_account(&goat);
-    assert!(!goat.enabled);
+    assert!(goat.enabled);
     assert_eq!(
         goat.verification_status,
         AccountVerificationStatus::NotRequired
@@ -681,7 +681,7 @@ async fn dashboard_v3_create_gates_for_go_custom_goat_and_zen() {
     .await;
     assert_eq!(status, StatusCode::OK, "{custom}");
     let custom = mutation_account(&custom);
-    assert!(!custom.enabled);
+    assert!(custom.enabled);
     assert_eq!(
         custom.verification_status,
         AccountVerificationStatus::Pending
@@ -1591,7 +1591,7 @@ async fn retired_v2_account_mutations_do_not_create_or_toggle() {
         .get_json(&format!("{}/accounts/{v3_id}", harness.v3_base))
         .await;
     assert_eq!(status, StatusCode::OK);
-    assert!(!parse_account(&detail).enabled);
+    assert!(parse_account(&detail).enabled);
 
     let (status, toggled) = send_json(
         &harness,
@@ -1601,7 +1601,7 @@ async fn retired_v2_account_mutations_do_not_create_or_toggle() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{toggled}");
-    assert!(mutation_account(&toggled).enabled);
+    assert!(!mutation_account(&toggled).enabled);
 
     harness.stop();
 }
@@ -1642,7 +1642,7 @@ async fn dynamic_accounts_are_plan_routable_and_stale_uuid_accounts_are_not() {
     let provider_id = created["provider"]["id"].as_str().unwrap().to_string();
     let account = find_account_for_provider(&harness, &provider_id).await;
     assert!(account.plan_routable);
-    assert!(!account.enabled);
+    assert!(account.enabled);
 
     let (status, detail) = harness
         .get_json(&format!("{}/accounts/{}", harness.v3_base, account.id))

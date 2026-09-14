@@ -1674,10 +1674,7 @@ async fn keyed_dynamic_account_can_disable_and_re_enable() {
         .get_account(&account_id)
         .unwrap()
         .unwrap();
-    assert!(!before.enabled);
-    let (status, enabled) = toggle_account(&harness, &account_id).await;
-    assert_eq!(status, StatusCode::OK, "{enabled}");
-    assert_eq!(enabled["account"]["enabled"], true);
+    assert!(before.enabled);
     let mut revision = harness.state.settings_revision();
 
     let (status, disabled) = toggle_account(&harness, &account_id).await;
@@ -1742,15 +1739,12 @@ async fn dynamic_none_auth_singleton_can_disable_and_re_enable_without_a_key() {
         .get_account(&account_id)
         .unwrap()
         .unwrap();
-    assert!(!stored.enabled);
+    assert!(stored.enabled);
     assert!(stored.key_cipher.is_empty());
     assert_eq!(
         stored.credential_kind,
         ocg_core::provider::CredentialKind::None
     );
-    let (status, enabled) = toggle_account(&harness, &account_id).await;
-    assert_eq!(status, StatusCode::OK, "{enabled}");
-    assert_eq!(enabled["account"]["enabled"], true);
     let mut revision = harness.state.settings_revision();
 
     let (status, disabled) = toggle_account(&harness, &account_id).await;

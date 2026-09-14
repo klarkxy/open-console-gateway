@@ -110,7 +110,7 @@ async fn dashboard_cas_is_not_shared_with_cli_or_tauri_shaped_db_writes() {
     let dashboard_revision = created["revision"].as_u64().unwrap();
     assert_eq!(dashboard_revision, revision_after_config + 1);
     assert_eq!(state.settings_revision(), dashboard_revision);
-    assert_eq!(created["account"]["enabled"], false);
+    assert_eq!(created["account"]["enabled"], true);
 
     let stale = client
         .post(format!("{base}/accounts"))

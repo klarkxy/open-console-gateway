@@ -252,8 +252,8 @@ async fn goat_creates_live_while_custom_creates_a_pending_draft() {
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(
-        body["enabled"], false,
-        "new GOAT Key accounts stay disabled until the operator enables them: {body}"
+        body["enabled"], true,
+        "new GOAT Key accounts start enabled: {body}"
     );
     assert_eq!(
         body["verificationStatus"].as_str(),
@@ -267,8 +267,8 @@ async fn goat_creates_live_while_custom_creates_a_pending_draft() {
     let goat_id = body["id"].as_str().expect("account id").to_string();
     let stored = harness.account_by_id(&goat_id).await;
     assert_eq!(
-        stored["enabled"], false,
-        "GOAT create must not auto-enable: {stored}"
+        stored["enabled"], true,
+        "GOAT create must persist the default enabled switch: {stored}"
     );
     assert_eq!(
         stored["verificationStatus"].as_str(),
@@ -295,8 +295,8 @@ async fn goat_creates_live_while_custom_creates_a_pending_draft() {
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(
-        body["enabled"], false,
-        "Custom creates disabled while verification stays pending: {body}"
+        body["enabled"], true,
+        "Custom creates enabled while verification stays pending: {body}"
     );
     assert_eq!(
         body["verificationStatus"].as_str(),

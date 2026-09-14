@@ -548,17 +548,17 @@ mod tests {
             Some("  secret  ".into()),
         )
         .unwrap();
-        assert!(!created.enabled);
+        assert!(created.enabled);
         assert_eq!(created.provider_id, OPENCODE_PROVIDER_ID);
         assert_eq!(created.username.as_deref(), Some("alice"));
         assert_eq!(state.settings_revision(), before + 1);
 
-        let enabled = set_account_enabled(&state, &created.id, true).unwrap();
-        assert!(enabled.enabled);
-        assert_eq!(state.settings_revision(), before + 2);
-
         let disabled = set_account_enabled(&state, &created.id, false).unwrap();
         assert!(!disabled.enabled);
+        assert_eq!(state.settings_revision(), before + 2);
+
+        let enabled = set_account_enabled(&state, &created.id, true).unwrap();
+        assert!(enabled.enabled);
         assert_eq!(state.settings_revision(), before + 3);
 
         // Custom verification is an optional tool: a pending Custom account

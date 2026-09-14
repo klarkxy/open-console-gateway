@@ -89,14 +89,16 @@ async fn platform_refresh_fallback_stream_and_stale_price_end_to_end() {
         let (status,key)=send(&h,Method::POST,"/accounts",cas(&h,json!({"name":group,"providerId":"custom","key":format!("{group}-key"),"customConfig":{"endpointUrl":format!("{origin}/v1/chat/completions"),"upstreamProtocol":"chat_completions"},"modelCapabilities":[{"publicModel":"platform-e2e-model","upstreamModel":"platform-e2e-model","protocol":"chat_completions"}]}))).await;
         assert_eq!(status, StatusCode::OK, "{key}");
         let key_id = key["account"]["id"].as_str().unwrap().to_string();
-        let (status, enabled) = send(
-            &h,
-            Method::POST,
-            &format!("/accounts/{key_id}/toggle"),
-            cas(&h, json!({})),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{enabled}");
+        if key["account"]["enabled"] == false {
+            let (status, enabled) = send(
+                &h,
+                Method::POST,
+                &format!("/accounts/{key_id}/toggle"),
+                cas(&h, json!({})),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{enabled}");
+        }
         let (status,linked)=send(&h,Method::PUT,&format!("/accounts/{key_id}/platform-link"),cas(&h,json!({"platformAccountId":id,"group":{"id":group,"platform":null,"autoGroups":[],"verified":false}}))).await;
         assert_eq!(status, StatusCode::OK, "{linked}");
         let (status, refreshed) = send(

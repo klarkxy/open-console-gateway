@@ -126,7 +126,7 @@ async fn create_verified_enabled_custom(
         }))
         .await;
     assert_eq!(status, StatusCode::OK, "{draft}");
-    assert_eq!(draft["enabled"], false, "{draft}");
+    assert_eq!(draft["enabled"], true, "{draft}");
     assert_eq!(draft["verificationStatus"].as_str(), Some("pending"));
     let id = draft["id"].as_str().unwrap().to_string();
     harness.enable_stored_account(&id);
@@ -209,7 +209,7 @@ async fn verification_failure_persists_failed_without_enabling() {
     let (status, body) = verify_account(&harness, &id).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(
-        body["enabled"], false,
+        body["enabled"], true,
         "failed verify must not change the card's enabled state: {body}"
     );
     assert_eq!(
@@ -1465,7 +1465,7 @@ async fn oversized_verification_body_fails_cleanly() {
     let (status, body) = verify_account(&harness, &id).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(
-        body["enabled"], false,
+        body["enabled"], true,
         "failed verify must not change the card's enabled state: {body}"
     );
     assert_eq!(body["verificationStatus"].as_str(), Some("failed"));
