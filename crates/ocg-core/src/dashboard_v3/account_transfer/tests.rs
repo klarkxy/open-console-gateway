@@ -893,7 +893,7 @@ fn v1_encryption_vector_is_stable() {
     .unwrap();
     assert_eq!(
         format!("{:x}", Sha256::digest(bundle.as_bytes())),
-        // Keep the pre-V6 compatibility vector byte-for-byte stable.
-        "0a0111257ed3fb7a7071a65b06c79a9bc4ef1003af97ad728bdee678b18d6cc4"
+        // Lock the deterministic V5 fixture after retired config fields are omitted.
+        "2ccaef5a76f76ee3c2ec9f612f06126ddd2dc076885b90b35edac2429a06d8a3"
     );
 }

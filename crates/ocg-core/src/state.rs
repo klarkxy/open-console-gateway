@@ -9,6 +9,7 @@ use crate::models::{
 use crate::pricing::{embedded_seed, ensure_current_adjustment_policy, ensure_seed_model_coverage};
 use crate::routing_runtime::RoutingRuntime;
 use parking_lot::{Mutex, RwLock};
+use std::collections::HashSet;
 use std::fmt;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -27,8 +28,8 @@ const CLIENT_ROOT_URL_ENV: &str = "OCG_CLIENT_ROOT_URL";
 
 // Note: Mutex lock ordering is (1) settings_update, (2) db, (3) config,
 // (4) http_client, (5) gateway, (6) pricing, (7) zen_free_models,
-// (8) cpa_models, (9) provider_contracts, (10) dynamic_providers, (11) routing,
-// (12) credential_snapshot.
+// (8) cpa_models, (9) unpublished_public_models, (10) provider_contracts,
+// (11) dynamic_providers, (12) routing, (13) credential_snapshot.
 // The CPA runtime status mutex is never held while acquiring another sync lock.
 // `activate_zen_free_model_catalog` acquires db → http_client →
 // zen_free_models → provider_contracts, then drops those before
@@ -85,6 +86,7 @@ pub struct CoreStateInner {
     pub pricing_refresh: tokio::sync::Mutex<()>,
     zen_free_models: RwLock<Arc<crate::kernel::zen::ZenFreeModelCatalog>>,
     cpa_models: RwLock<Arc<Vec<String>>>,
+    unpublished_public_models: RwLock<Arc<HashSet<String>>>,
     pub zen_free_models_refresh: tokio::sync::Mutex<()>,
     pub provider_models_refresh: tokio::sync::Mutex<()>,
     pub provider_usage_refresh: tokio::sync::Mutex<()>,
@@ -121,19 +123,106 @@ pub(crate) struct ImportedNodeRuntime {
     credentials: crate::gateway_keys::CredentialSnapshot,
 }
 
-fn sealed_proxy_model_ids(
+/// One exact upstream model id the executor can send, used by Settings
+/// `proxy_supported_models` and list-mode route-set construction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProxyModelCandidate {
+    pub id: String,
+    pub preferred_protocol: String,
+    pub zen_free: bool,
+}
+
+pub(crate) fn build_proxy_model_candidates(
     contracts: &crate::provider_contracts::EffectiveContractSet,
+    custom_runtimes: &[crate::custom::CustomAccountRuntime],
+    dynamic_providers: &[crate::dynamic::DynamicProviderRuntime],
     cpa_models: &[String],
-) -> Vec<String> {
-    [
-        crate::kernel::ids::MINIMAX_PROVIDER_ID,
-        crate::kernel::ids::KIMI_PROVIDER_ID,
-    ]
-    .into_iter()
-    .filter_map(|provider_id| contracts.provider_offering(provider_id))
-    .flat_map(|contract| contract.catalog.models.iter().cloned())
-    .chain(cpa_models.iter().cloned())
-    .collect()
+) -> Vec<ProxyModelCandidate> {
+    use crate::kernel::ids::normalize_model_name;
+    use crate::provider::ProviderAdapterKind;
+    use std::collections::BTreeMap;
+
+    let mut by_key: BTreeMap<String, ProxyModelCandidate> = BTreeMap::new();
+    let mut insert = |id: &str, preferred_protocol: &str, zen_free: bool| {
+        let id = id.trim();
+        if id.is_empty() {
+            return;
+        }
+        let key = normalize_model_name(id);
+        let entry = by_key.entry(key).or_insert_with(|| ProxyModelCandidate {
+            id: id.to_string(),
+            preferred_protocol: preferred_protocol.to_string(),
+            zen_free,
+        });
+        if zen_free {
+            entry.zen_free = true;
+        }
+    };
+
+    for contract in contracts.providers.values() {
+        let zen_free = contract.adapter_kind == ProviderAdapterKind::ZenFree;
+        for model in contract.models.values() {
+            if !model.has_enabled_protocol() {
+                continue;
+            }
+            let protocol = if model
+                .protocols
+                .get(model.preferred_protocol.as_str())
+                .is_some_and(|row| row.enabled)
+            {
+                model.preferred_protocol.as_str()
+            } else {
+                model
+                    .enabled_protocols()
+                    .first()
+                    .map(|protocol| protocol.as_str())
+                    .unwrap_or(model.preferred_protocol.as_str())
+            };
+            insert(&model.model_id, protocol, zen_free);
+        }
+    }
+
+    for runtime in custom_runtimes.iter().filter(|runtime| runtime.eligible()) {
+        for capability in &runtime.capabilities {
+            insert(
+                &capability.upstream_model,
+                capability.protocol.as_str(),
+                false,
+            );
+        }
+    }
+
+    for provider in dynamic_providers {
+        for mapping in &provider.mappings {
+            let protocol = provider.effective_route(mapping).protocol;
+            insert(&mapping.upstream_model, protocol.as_str(), false);
+        }
+    }
+
+    for id in cpa_models {
+        insert(id, "chat_completions", false);
+    }
+
+    by_key.into_values().collect()
+}
+
+fn proxy_candidate_ids(candidates: &[ProxyModelCandidate]) -> Vec<String> {
+    candidates
+        .iter()
+        .map(|candidate| candidate.id.clone())
+        .collect()
+}
+
+fn build_proxy_route_set(
+    config: &crate::models::AppConfig,
+    contracts: &crate::provider_contracts::EffectiveContractSet,
+    custom_runtimes: &[crate::custom::CustomAccountRuntime],
+    dynamic_providers: &[crate::dynamic::DynamicProviderRuntime],
+    cpa_models: &[String],
+) -> crate::Result<crate::http_client::ForwardRouteSet> {
+    let candidates =
+        build_proxy_model_candidates(contracts, custom_runtimes, dynamic_providers, cpa_models);
+    crate::http_client::build_route_set_from_known_models(config, &proxy_candidate_ids(&candidates))
 }
 
 /// Host-effect failures from [`CoreStateInner::apply_host_settings`].
@@ -275,6 +364,10 @@ impl CoreStateInner {
             .cpa_model_catalog()?
             .map(|catalog| crate::db::CpaCatalogModel::enabled_ids(&catalog.models))
             .unwrap_or_default();
+        let unpublished_public_models = db
+            .list_unpublished_public_models()?
+            .into_iter()
+            .collect::<HashSet<_>>();
         let custom_runtimes = db.list_custom_account_runtimes()?;
         let dynamic_providers = db.list_dynamic_providers()?;
         let provider_contracts = crate::provider_contracts::build_effective_contracts(
@@ -282,11 +375,12 @@ impl CoreStateInner {
             &custom_runtimes,
             db.load_persisted_contracts()?,
         );
-        let provider_models = sealed_proxy_model_ids(&provider_contracts, &cpa_models);
-        let http_client = crate::http_client::build_route_set_with_provider_models(
+        let http_client = build_proxy_route_set(
             &config,
-            &zen_free_models,
-            &provider_models,
+            &provider_contracts,
+            &custom_runtimes,
+            &dynamic_providers,
+            &cpa_models,
         )?;
         Ok(Self {
             db: Mutex::new(db),
@@ -315,6 +409,7 @@ impl CoreStateInner {
             pricing_refresh: tokio::sync::Mutex::new(()),
             zen_free_models: RwLock::new(Arc::new(zen_free_models)),
             cpa_models: RwLock::new(Arc::new(cpa_models)),
+            unpublished_public_models: RwLock::new(Arc::new(unpublished_public_models)),
             zen_free_models_refresh: tokio::sync::Mutex::new(()),
             provider_models_refresh: tokio::sync::Mutex::new(()),
             provider_usage_refresh: tokio::sync::Mutex::new(()),
@@ -415,6 +510,34 @@ impl CoreStateInner {
         self.cpa_models.read().clone()
     }
 
+    pub fn unpublished_public_models(&self) -> Arc<HashSet<String>> {
+        self.unpublished_public_models.read().clone()
+    }
+
+    pub fn unpublished_public_model_list(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.unpublished_public_models().iter().cloned().collect();
+        names.sort();
+        names
+    }
+
+    /// Hide or restore one public name on `GET /v1/models`. Routing is unchanged.
+    /// `public_model` must already be a normalized key.
+    pub fn set_public_model_published(
+        &self,
+        public_model: &str,
+        published: bool,
+    ) -> crate::Result<Vec<String>> {
+        let db = self.db.lock();
+        if published {
+            db.remove_unpublished_public_model(public_model)?;
+        } else {
+            db.upsert_unpublished_public_model(public_model)?;
+        }
+        let unpublished = db.list_unpublished_public_models()?;
+        *self.unpublished_public_models.write() = Arc::new(unpublished.iter().cloned().collect());
+        Ok(unpublished)
+    }
+
     pub fn activate_cpa_model_catalog(
         &self,
         models: Vec<crate::db::CpaCatalogModel>,
@@ -422,13 +545,13 @@ impl CoreStateInner {
         refreshed_at: chrono::DateTime<chrono::Utc>,
     ) -> crate::Result<()> {
         let ids = crate::db::CpaCatalogModel::enabled_ids(&models);
-        let zen = self.zen_free_model_catalog();
-        let contracts = self.provider_contracts();
-        let provider_models = sealed_proxy_model_ids(&contracts, &ids);
-        let route_set = crate::http_client::build_route_set_with_provider_models(
+        let custom = self.db.lock().list_custom_account_runtimes()?;
+        let route_set = build_proxy_route_set(
             &self.config(),
-            &zen,
-            &provider_models,
+            &self.provider_contracts(),
+            &custom,
+            &self.dynamic_providers(),
+            &ids,
         )?;
         {
             let db = self.db.lock();
@@ -484,13 +607,13 @@ impl CoreStateInner {
     /// Atomically remove OCG-owned CPA configuration, singleton account, and
     /// catalog snapshot. CPA auth files and OAuth state remain external.
     pub fn disconnect_cpa_integration(&self) -> crate::Result<()> {
-        let zen = self.zen_free_model_catalog();
-        let contracts = self.provider_contracts();
-        let provider_models = sealed_proxy_model_ids(&contracts, &[]);
-        let route_set = crate::http_client::build_route_set_with_provider_models(
+        let custom = self.db.lock().list_custom_account_runtimes()?;
+        let route_set = build_proxy_route_set(
             &self.config(),
-            &zen,
-            &provider_models,
+            &self.provider_contracts(),
+            &custom,
+            &self.dynamic_providers(),
+            &[],
         )?;
         {
             let db = self.db.lock();
@@ -515,27 +638,27 @@ impl CoreStateInner {
             ))
             .map(|contract| contract.catalog.models.clone())
             .unwrap_or_default();
-        let contracts_snapshot = self.provider_contracts();
+        let dynamics = self.dynamic_providers();
         let cpa_models = self.cpa_model_catalog();
-        let provider_models = sealed_proxy_model_ids(&contracts_snapshot, &cpa_models);
-        let route_set = crate::http_client::build_route_set_with_provider_models(
-            &self.config(),
-            &catalog,
-            &provider_models,
-        )?;
-        {
+        let config = self.config();
+        let (new_contracts, route_set) = {
             let db = self.db.lock();
+            db.set_zen_free_model_catalog_with_default_off(&catalog, &previous_models)?;
+            let custom = db.list_custom_account_runtimes()?;
+            let persisted = db.load_persisted_contracts()?;
+            let new_contracts =
+                crate::provider_contracts::build_effective_contracts(&catalog, &custom, persisted);
+            let route_set =
+                build_proxy_route_set(&config, &new_contracts, &custom, &dynamics, &cpa_models)?;
+            (new_contracts, route_set)
+        };
+        {
             let mut http_client = self.http_client.lock();
             let mut active = self.zen_free_models.write();
             let mut contracts = self.provider_contracts.write();
-            db.set_zen_free_model_catalog_with_default_off(&catalog, &previous_models)?;
-            *active = Arc::new(catalog);
-            *contracts = Arc::new(crate::provider_contracts::build_effective_contracts(
-                &active,
-                &db.list_custom_account_runtimes()?,
-                db.load_persisted_contracts()?,
-            ));
             *http_client = Arc::new(route_set);
+            *active = Arc::new(catalog);
+            *contracts = Arc::new(new_contracts);
         }
         self.routing.reset();
         Ok(())
@@ -552,6 +675,15 @@ impl CoreStateInner {
 
     pub fn reload_dynamic_providers_locked(&self, db: &Database) -> crate::Result<()> {
         let loaded = db.list_dynamic_providers()?;
+        let custom = db.list_custom_account_runtimes()?;
+        let route_set = build_proxy_route_set(
+            &self.config(),
+            &self.provider_contracts(),
+            &custom,
+            &loaded,
+            &self.cpa_model_catalog(),
+        )?;
+        *self.http_client.lock() = Arc::new(route_set);
         *self.dynamic_providers.write() = Arc::new(loaded);
         Ok(())
     }
@@ -580,20 +712,22 @@ impl CoreStateInner {
         // startup may rewrite the byte representation later.
         let _ = needs_persist;
         let zen = db.zen_free_model_catalog()?.unwrap_or_default();
+        let custom = db.list_custom_account_runtimes()?;
         let contracts = crate::provider_contracts::build_effective_contracts(
             &zen,
-            &db.list_custom_account_runtimes()?,
+            &custom,
             db.load_persisted_contracts()?,
         );
+        let dynamic_providers = db.list_dynamic_providers()?;
         let cpa_models = self.cpa_model_catalog();
-        let provider_models = sealed_proxy_model_ids(&contracts, &cpa_models);
-        let route_set = crate::http_client::build_route_set_with_provider_models(
+        let route_set = build_proxy_route_set(
             &config,
-            &zen,
-            &provider_models,
+            &contracts,
+            &custom,
+            &dynamic_providers,
+            &cpa_models,
         )?;
         let credentials = crate::gateway_keys::build_credential_snapshot(db, &config.gateway_key)?;
-        let dynamic_providers = db.list_dynamic_providers()?;
         Ok(ImportedNodeRuntime {
             config,
             http_client: route_set,
@@ -617,15 +751,25 @@ impl CoreStateInner {
         self.settings_revision.fetch_add(1, Ordering::AcqRel);
     }
 
-    /// Install a dynamic Provider snapshot built before the matching SQLite
-    /// commit. Assignment and the revision bump cannot fail.
+    /// Install a dynamic Provider snapshot. The fallible route set is built
+    /// from the incoming snapshot before the in-memory assignment.
     pub(crate) fn install_dynamic_providers_snapshot(
         &self,
         providers: Vec<crate::dynamic::DynamicProviderRuntime>,
-    ) {
+    ) -> crate::Result<()> {
+        let custom = self.db.lock().list_custom_account_runtimes()?;
+        let route_set = build_proxy_route_set(
+            &self.config(),
+            &self.provider_contracts(),
+            &custom,
+            &providers,
+            &self.cpa_model_catalog(),
+        )?;
+        *self.http_client.lock() = Arc::new(route_set);
         *self.dynamic_providers.write() = Arc::new(providers);
         self.routing.reset();
         self.settings_revision.fetch_add(1, Ordering::AcqRel);
+        Ok(())
     }
 
     /// A committed catalog removal must restrict admission even if unrelated
@@ -634,30 +778,58 @@ impl CoreStateInner {
         &self,
         row: &crate::provider_contracts::PersistedScopeRow,
     ) {
-        let mut active = self.provider_contracts.write();
-        let set = Arc::make_mut(&mut active);
-        if let Some(contract) = set.providers.get_mut(row.scope.id()) {
-            contract
-                .models
-                .retain(|_, model| row.catalog_models.contains(&model.model_id));
-            contract.catalog.models.clone_from(&row.catalog_models);
-            contract.revision = row.revision;
+        {
+            let mut active = self.provider_contracts.write();
+            let set = Arc::make_mut(&mut active);
+            if let Some(contract) = set.providers.get_mut(row.scope.id()) {
+                contract
+                    .models
+                    .retain(|_, model| row.catalog_models.contains(&model.model_id));
+                contract.catalog.models.clone_from(&row.catalog_models);
+                contract.revision = row.revision;
+            }
+        }
+
+        // The durable removal must also make a stale proxy-list membership
+        // inert. Prefer a full candidate rebuild from the now-restricted
+        // contract snapshot. If the same corrupt persistence that broke the
+        // reload also prevents reading Custom runtimes, install the
+        // conservative empty-known-model route set: whitelist falls back to
+        // direct and blacklist falls back to proxy for every stale entry.
+        let config = self.config();
+        let rebuilt = self
+            .db
+            .lock()
+            .list_custom_account_runtimes()
+            .and_then(|custom| {
+                build_proxy_route_set(
+                    &config,
+                    &self.provider_contracts(),
+                    &custom,
+                    &self.dynamic_providers(),
+                    &self.cpa_model_catalog(),
+                )
+            })
+            .or_else(|_| crate::http_client::build_route_set_from_known_models(&config, &[]));
+        if let Ok(route_set) = rebuilt {
+            *self.http_client.lock() = Arc::new(route_set);
         }
     }
 
     pub fn reload_provider_contracts_locked(&self, db: &Database) -> crate::Result<()> {
         let zen = self.zen_free_model_catalog();
+        let custom = db.list_custom_account_runtimes()?;
         let set = crate::provider_contracts::build_effective_contracts(
             &zen,
-            &db.list_custom_account_runtimes()?,
+            &custom,
             db.load_persisted_contracts()?,
         );
-        let cpa_models = self.cpa_model_catalog();
-        let provider_models = sealed_proxy_model_ids(&set, &cpa_models);
-        let route_set = crate::http_client::build_route_set_with_provider_models(
+        let route_set = build_proxy_route_set(
             &self.config(),
-            &zen,
-            &provider_models,
+            &set,
+            &custom,
+            &self.dynamic_providers(),
+            &self.cpa_model_catalog(),
         )?;
         *self.http_client.lock() = Arc::new(route_set);
         *self.provider_contracts.write() = Arc::new(set);
@@ -822,21 +994,19 @@ impl CoreStateInner {
                 config.gateway_port = persisted.gateway_port;
             }
         }
-        config.claude_desktop_models.normalize();
         config.opencode_invite_url = normalize_opencode_invite_url(&config.opencode_invite_url)
             .map_err(anyhow::Error::msg)?;
         config.proxy_url = normalize_proxy_url(config.proxy_mode, &config.proxy_url)
             .map_err(anyhow::Error::msg)?;
         // validate() enforces the non-blank primary key on every write path.
         config.validate().map_err(anyhow::Error::msg)?;
-        let zen_catalog = self.zen_free_model_catalog();
-        let contracts = self.provider_contracts();
-        let cpa_models = self.cpa_model_catalog();
-        let provider_models = sealed_proxy_model_ids(&contracts, &cpa_models);
-        let http_client = crate::http_client::build_route_set_with_provider_models(
+        let custom = self.db.lock().list_custom_account_runtimes()?;
+        let http_client = build_proxy_route_set(
             &config,
-            &zen_catalog,
-            &provider_models,
+            &self.provider_contracts(),
+            &custom,
+            &self.dynamic_providers(),
+            &self.cpa_model_catalog(),
         )?;
         Ok((config, http_client))
     }
@@ -1561,7 +1731,6 @@ fn load_config(db: &Database) -> crate::Result<(AppConfig, bool)> {
     let mut needs_persist = if let Some(value) = db.get_setting("config")? {
         config = serde_json::from_str(&value)?;
         stored_gateway_key = config.gateway_key.clone();
-        config.claude_desktop_models.normalize();
         let mut compare = config.clone();
         compare.gateway_key = stored_gateway_key.clone();
         serde_json::to_string(&compare)? != value

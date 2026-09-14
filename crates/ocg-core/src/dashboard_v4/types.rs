@@ -67,6 +67,8 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "CpaCatalogUpdate",
     "CatalogModelsRemoveRequest",
     "CatalogModelsRemoveResult",
+    "AliasPublication",
+    "AliasPublicationUpdate",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -111,6 +113,7 @@ pub struct ProviderTemplate {
     pub upstream_protocols: Vec<AccountUpstreamProtocol>,
     pub editable_fields: Vec<String>,
     pub default_endpoints: Vec<EndpointSpec>,
+    pub pricing_multiplier_editable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -626,6 +629,29 @@ pub struct CatalogModelsRemoveResult {
     pub catalog_models: Vec<String>,
 }
 
+/// Public names currently hidden from authenticated `GET /v1/models`.
+///
+/// Missing names default to published. Hidden names remain routable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AliasPublication {
+    pub revision: ControlRevision,
+    pub unpublished: Vec<String>,
+}
+
+/// Toggle one public name's downstream listing. `publicModel` is
+/// case-folded on write.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AliasPublicationUpdate {
+    #[serde(flatten)]
+    pub expectation: MutationExpectation,
+    pub public_model: String,
+    pub published: bool,
+}
+
 /// Deterministic JSON Schema catalog for the V4 contract.
 ///
 /// Generator settings match V3: draft 2020-12, serialize-mode for response
@@ -666,6 +692,7 @@ pub fn contract_schema() -> Value {
     include_type::<CpaCatalogEntry>(&mut serialize);
     include_type::<CpaCatalog>(&mut serialize);
     include_type::<CatalogModelsRemoveResult>(&mut serialize);
+    include_type::<AliasPublication>(&mut serialize);
     let mut defs = serialize.take_definitions(true);
 
     let mut deserialize = SchemaSettings::draft2020_12().into_generator();
@@ -680,6 +707,7 @@ pub fn contract_schema() -> Value {
     include_type::<IdentityCredentialCreateRequest>(&mut deserialize);
     include_type::<CpaCatalogUpdate>(&mut deserialize);
     include_type::<CatalogModelsRemoveRequest>(&mut deserialize);
+    include_type::<AliasPublicationUpdate>(&mut deserialize);
     for (name, schema) in deserialize.take_definitions(true) {
         defs.entry(name).or_insert(schema);
     }

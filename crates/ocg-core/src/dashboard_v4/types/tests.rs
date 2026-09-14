@@ -23,10 +23,12 @@ fn wire_fields_are_camel_case() {
                 url: None,
                 locked: false,
             }],
+            pricing_multiplier_editable: false,
         }],
     };
     let value = serde_json::to_value(&list).unwrap();
     assert_eq!(value["templates"][0]["displayName"], "Custom HTTP");
+    assert_eq!(value["templates"][0]["pricingMultiplierEditable"], false);
     assert_eq!(value["templates"][0]["familyId"], Value::Null);
     assert_eq!(value["templates"][0]["offeringTags"], json!(["api"]));
     assert_eq!(value["templates"][0]["adapterKind"], "configurable_http");
@@ -410,4 +412,31 @@ fn catalog_models_remove_request_is_camel_case() {
     let result_value = serde_json::to_value(&result).unwrap();
     assert_eq!(result_value["removedIds"], json!(["drop-me"]));
     assert_eq!(result_value["catalogModels"], json!(["keep-me"]));
+}
+
+#[test]
+fn alias_publication_is_camel_case() {
+    let publication = AliasPublication {
+        revision: ControlRevision {
+            revision: 6,
+            process_generation: 2,
+            pricing_revision: "p".into(),
+        },
+        unpublished: vec!["deepseek-v4-flashnh".into()],
+    };
+    let value = serde_json::to_value(&publication).unwrap();
+    assert_eq!(value["unpublished"], json!(["deepseek-v4-flashnh"]));
+    assert_eq!(value["revision"]["revision"], 6);
+    let update = AliasPublicationUpdate {
+        expectation: MutationExpectation {
+            expected_revision: 6,
+            process_generation: 2,
+        },
+        public_model: "DeepSeek-V4-FlashNH".into(),
+        published: false,
+    };
+    let update_value = serde_json::to_value(&update).unwrap();
+    assert_eq!(update_value["publicModel"], "DeepSeek-V4-FlashNH");
+    assert_eq!(update_value["published"], false);
+    assert_eq!(update_value["expectedRevision"], 6);
 }

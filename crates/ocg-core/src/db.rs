@@ -280,7 +280,7 @@ pub const PRE_V42_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v42.";
 /// database drops inert columns and empty leftover dynamic provider tables.
 pub const PRE_V48_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v48.";
 /// Highest schema this binary can open or migrate. Newer databases fail closed.
-pub const CURRENT_SCHEMA_VERSION: i32 = 48;
+pub const CURRENT_SCHEMA_VERSION: i32 = 49;
 /// Canonical source schema for the v48 inert-column / empty-table cleanup.
 pub const V47_SCHEMA_VERSION: i32 = 47;
 /// Canonical source schema for the v35 provider-identity rewrite.
@@ -3260,6 +3260,29 @@ fn migrate_v48_body(tx: &Transaction<'_>) -> Result<()> {
     Ok(())
 }
 
+/// v49: unpublished public model names hidden from `GET /v1/models`.
+/// Missing names stay published. Additive; no pre-migration backup.
+fn migrate_to_v49(conn: &Connection) -> Result<()> {
+    if schema_version_on(conn)? >= 49 {
+        return Ok(());
+    }
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let version = schema_version_on(&tx)?;
+    if version >= 49 {
+        return Ok(());
+    }
+    anyhow::ensure!(version == 48, "v49 requires schema v48");
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS unpublished_public_models (
+            public_model TEXT PRIMARY KEY,
+            updated_at TEXT NOT NULL
+        );",
+    )?;
+    tx.execute_batch("INSERT OR REPLACE INTO schema_version(version) VALUES (49);")?;
+    tx.commit()?;
+    Ok(())
+}
+
 fn migrate_v42_body(tx: &Transaction<'_>) -> Result<()> {
     let now = Utc::now().to_rfc3339();
     let v41_dynamic_providers_exists = table_exists(tx, "dynamic_providers")?;
@@ -4519,6 +4542,7 @@ impl Database {
         identity::migrate_to_v46(&db.conn)?;
         migrate_to_v47(&db.conn)?;
         migrate_to_v48(&db.conn, &db_path, is_fresh)?;
+        migrate_to_v49(&db.conn)?;
         identity::ensure_identity_model_consistent(&db.conn)?;
         if let Some(cipher) = cipher {
             repair_legacy_account_ciphertext(&db.conn, cipher)?;
@@ -8662,6 +8686,33 @@ impl Database {
             })
             .optional()
             .map_err(|e| e.into())
+    }
+
+    /// Public names hidden from authenticated `GET /v1/models`, sorted.
+    pub fn list_unpublished_public_models(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT public_model FROM unpublished_public_models ORDER BY public_model COLLATE NOCASE",
+        )?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|error| error.into())
+    }
+
+    pub fn upsert_unpublished_public_model(&self, public_model: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO unpublished_public_models (public_model, updated_at)
+             VALUES (?1, ?2)",
+            params![public_model, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_unpublished_public_model(&self, public_model: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM unpublished_public_models WHERE public_model = ?1",
+            [public_model],
+        )?;
+        Ok(())
     }
 
     /// Return the active egress-IP-wide Zen free cooldown, if any.

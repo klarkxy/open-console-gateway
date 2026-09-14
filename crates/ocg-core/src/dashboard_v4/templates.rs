@@ -1,11 +1,11 @@
 //! Read-only V4 template catalog. Built-ins plus the manual `custom-http`
-//! template. Presets stay frontend-only until Rust loads
-//! `resources/provider-presets.json`.
+//! template. Preset forms remain frontend-owned; Rust consumes only the
+//! offering projection generated from the same `resources/provider-presets.json`.
 
 use axum::Json;
 
 use crate::dashboard_v3::{AccountAuthScheme, AccountCredentialKind, AccountUpstreamProtocol};
-use crate::provider::{BUILTIN_PROVIDERS, ProviderAdapterKind, builtin_offering};
+use crate::provider::{BUILTIN_PROVIDERS, ProviderAdapterKind, ProviderRegistry, builtin_offering};
 use ocg_domain::catalog::UpstreamProtocolKind;
 use ocg_domain::connection::EndpointOperation;
 use ocg_domain::ids::CPA_PROVIDER_ID;
@@ -74,6 +74,10 @@ fn template_from_builtin(plan: &crate::provider::BuiltinProvider) -> ProviderTem
                 locked: true,
             })
             .collect(),
+        pricing_multiplier_editable: ProviderRegistry::get(plan.provider_id)
+            .expect("builtin catalog rows have a sealed descriptor")
+            .pricing
+            .multiplier_editable,
     }
 }
 
@@ -107,6 +111,7 @@ fn custom_http_template() -> ProviderTemplate {
                 locked: false,
             })
             .collect(),
+        pricing_multiplier_editable: false,
     }
 }
 

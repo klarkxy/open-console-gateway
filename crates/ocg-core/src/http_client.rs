@@ -2,12 +2,10 @@
 //!
 //! Catalog-stripped client construction lives in [`ocg_infra::http`]. This
 //! module maps [`AppConfig`] onto that spec, filters list membership through
-//! the supported-model and Zen catalogs, and folds lookup keys with
+//! the caller-supplied exact upstream ids, and folds lookup keys with
 //! [`normalize_model_name`] before infra exact-match.
 
-use crate::kernel::ids::{is_free_model, normalize_model_name};
-use crate::kernel::protocol::supported_model_ids;
-use crate::kernel::zen::ZenFreeModelCatalog;
+use crate::kernel::ids::normalize_model_name;
 use crate::models::{AppConfig, ProxyListDirection, ProxyMode};
 use std::time::Duration;
 
@@ -55,31 +53,12 @@ impl ForwardRouteSet {
 /// Registry ids normalized once at build time; empty or stale entries
 /// simply never match (total function over any persisted shape).
 ///
-/// Stale entries — ids a newer registry removed — are dropped here so they
-/// stay inert even if a client explicitly requests that exact id, matching the
-/// load-path tolerance contract ("removed entries match nothing").
-fn normalized_known_list(
-    models: &[String],
-    zen_catalog: &ZenFreeModelCatalog,
-    provider_models: &[String],
-) -> Vec<String> {
-    let known: std::collections::HashSet<String> = supported_model_ids()
-        .filter(|id| {
-            (*id != "big-pickle" && !is_free_model(id))
-                || zen_catalog.models.iter().any(|model| model == id)
-        })
-        .map(normalize_model_name)
-        .chain(
-            zen_catalog
-                .models
-                .iter()
-                .map(|model| normalize_model_name(model)),
-        )
-        .chain(
-            provider_models
-                .iter()
-                .map(|model| normalize_model_name(model)),
-        )
+/// Stale entries — ids a newer candidate set no longer contains — are dropped
+/// here so they stay inert even if a client explicitly requests that exact id.
+fn normalized_known_list(models: &[String], known_models: &[String]) -> Vec<String> {
+    let known: std::collections::HashSet<String> = known_models
+        .iter()
+        .map(|model| normalize_model_name(model))
         .collect();
     models
         .iter()
@@ -116,27 +95,24 @@ pub(crate) fn build(config: &AppConfig) -> crate::Result<reqwest::Client> {
 }
 
 /// Builds the full route set from one config generation. List mode builds both
-/// legs against the catalog-filtered membership list; every other mode builds
+/// legs against the candidate-filtered membership list; every other mode builds
 /// exactly the process-wide client. All modes go through
 /// [`ocg_infra::http::build_route_set`] so the reqwest client and audit label
 /// are generated atomically from one [`ocg_infra::http::OutboundProxySpec`].
 #[cfg(test)]
 pub(crate) fn build_route_set(
     config: &AppConfig,
-    zen_catalog: &ZenFreeModelCatalog,
+    known_models: &[String],
 ) -> crate::Result<ForwardRouteSet> {
-    build_route_set_with_provider_models(config, zen_catalog, &[])
+    build_route_set_from_known_models(config, known_models)
 }
 
-pub(crate) fn build_route_set_with_provider_models(
+pub(crate) fn build_route_set_from_known_models(
     config: &AppConfig,
-    zen_catalog: &ZenFreeModelCatalog,
-    provider_models: &[String],
+    known_models: &[String],
 ) -> crate::Result<ForwardRouteSet> {
     let list = match config.proxy_mode {
-        ProxyMode::List => {
-            normalized_known_list(&config.proxy_list_models, zen_catalog, provider_models)
-        }
+        ProxyMode::List => normalized_known_list(&config.proxy_list_models, known_models),
         ProxyMode::Auto | ProxyMode::Manual | ProxyMode::Direct => Vec::new(),
     };
     Ok(ForwardRouteSet(ocg_infra::http::build_route_set(
@@ -148,14 +124,13 @@ pub(crate) fn build_route_set_with_provider_models(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kernel::zen::ZEN_MODELS_SOURCE_URL;
     use axum::Router;
     use axum::http::StatusCode;
     use axum::response::Redirect;
     use axum::routing::get;
 
-    fn zen_catalog() -> ZenFreeModelCatalog {
-        ZenFreeModelCatalog::default()
+    fn known(ids: &[&str]) -> Vec<String> {
+        ids.iter().map(|id| (*id).to_string()).collect()
     }
 
     #[test]
@@ -238,7 +213,7 @@ mod tests {
                 ProxyListDirection::Whitelist,
                 &["gpt-5.6-luna", "removed-model"],
             ),
-            &zen_catalog(),
+            &known(&["gpt-5.6-luna"]),
         )
         .unwrap();
         assert_eq!(whitelist.client_for("gpt-5.6-luna").1, RouteLabel::Proxy);
@@ -257,7 +232,7 @@ mod tests {
         // Blacklist inverts both legs.
         let blacklist = build_route_set(
             &list_config(ProxyListDirection::Blacklist, &["grok-4.5"]),
-            &zen_catalog(),
+            &known(&["grok-4.5", "glm-5.3"]),
         )
         .unwrap();
         assert_eq!(blacklist.client_for("grok-4.5").1, RouteLabel::Direct);
@@ -266,7 +241,7 @@ mod tests {
         // Empty list: whitelist = all direct, blacklist = all proxy.
         let empty_whitelist = build_route_set(
             &list_config(ProxyListDirection::Whitelist, &[]),
-            &zen_catalog(),
+            &known(&["gpt-5.6-luna"]),
         )
         .unwrap();
         assert_eq!(
@@ -275,7 +250,7 @@ mod tests {
         );
         let empty_blacklist = build_route_set(
             &list_config(ProxyListDirection::Blacklist, &[]),
-            &zen_catalog(),
+            &known(&["gpt-5.6-luna"]),
         )
         .unwrap();
         assert_eq!(
@@ -302,7 +277,7 @@ mod tests {
                 proxy_list_models: vec!["gpt-5.6-luna".to_string()],
                 ..AppConfig::default()
             };
-            let route_set = build_route_set(&config, &zen_catalog()).unwrap();
+            let route_set = build_route_set(&config, &known(&["gpt-5.6-luna"])).unwrap();
             assert_eq!(route_set.client_for("gpt-5.6-luna").1, label);
             assert_eq!(route_set.client_for("glm-5.3").1, label);
             let (client, resolved) = route_set.client_for("gpt-5.6-luna");
@@ -320,12 +295,7 @@ mod tests {
             ProxyListDirection::Whitelist,
             &["brand-new-promo-free", "mimo-v2.5-free"],
         );
-        let refreshed = ZenFreeModelCatalog {
-            models: vec!["brand-new-promo-free".to_string()],
-            refreshed_at: None,
-            source_url: ZEN_MODELS_SOURCE_URL.to_string(),
-        };
-        let routes = build_route_set(&config, &refreshed).unwrap();
+        let routes = build_route_set(&config, &known(&["brand-new-promo-free"])).unwrap();
         assert_eq!(
             routes.client_for("brand-new-promo-free").1,
             RouteLabel::Proxy
@@ -342,9 +312,8 @@ mod tests {
             proxy_list_models: vec!["MiniMax-M3".to_string(), "kimi-for-coding".to_string()],
             ..AppConfig::default()
         };
-        let provider_models = ["MiniMax-M3".to_string(), "kimi-for-coding".to_string()];
         let routes =
-            build_route_set_with_provider_models(&config, &zen_catalog(), &provider_models)
+            build_route_set_from_known_models(&config, &known(&["MiniMax-M3", "kimi-for-coding"]))
                 .unwrap();
         assert_eq!(routes.client_for("MiniMax-M3").1, RouteLabel::Proxy);
         assert_eq!(routes.client_for("kimi-for-coding").1, RouteLabel::Proxy);

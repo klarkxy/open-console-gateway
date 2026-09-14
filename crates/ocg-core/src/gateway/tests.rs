@@ -45,7 +45,6 @@ async fn gateway_request_body_limit_override_covers_all_inference_routes() {
         "/v1/chat/completions",
         "/v1/responses",
         "/v1/messages",
-        "/claude-desktop/v1/messages",
         "/v1beta/models/test:generateContent",
         "/v1/models/test:streamGenerateContent",
     ] {
@@ -222,9 +221,6 @@ async fn unauthorized_and_expected_fallback_requests_are_not_persisted() {
             .get(format!("{root}/v1/models"))
             .bearer_auth("wrong-key"),
         client
-            .get(format!("{root}/claude-desktop/v1/models"))
-            .header("x-api-key", "wrong-key"),
-        client
             .post(format!("{root}/v1/chat/completions"))
             .bearer_auth("wrong-key")
             .json(&chat_body),
@@ -234,10 +230,6 @@ async fn unauthorized_and_expected_fallback_requests_are_not_persisted() {
             .json(&responses_body),
         client
             .post(format!("{root}/v1/messages"))
-            .header("x-api-key", "wrong-key")
-            .json(&messages_body),
-        client
-            .post(format!("{root}/claude-desktop/v1/messages"))
             .header("x-api-key", "wrong-key")
             .json(&messages_body),
         client
@@ -377,7 +369,7 @@ async fn unauthorized_and_expected_fallback_requests_are_not_persisted() {
 }
 
 #[tokio::test]
-async fn claude_desktop_routes_are_wired_and_protected() {
+async fn gemini_routes_stay_wired_and_claude_desktop_is_a_normal_404() {
     let mut dir = std::env::temp_dir();
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -491,46 +483,41 @@ async fn claude_desktop_routes_are_wired_and_protected() {
         .expect("unknown Gemini action should complete");
     assert_eq!(unknown_action.status(), StatusCode::NOT_FOUND);
 
-    let unauthorized = client
-        .get(format!("{root}/claude-desktop/v1/models"))
-        .send()
-        .await
-        .expect("models request should complete");
-    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
-
-    let models = client
-        .get(format!("{root}/claude-desktop/v1/models"))
-        .header("x-api-key", "gateway-test-key")
-        .send()
-        .await
-        .expect("authorized models request should complete");
-    assert_eq!(models.status(), StatusCode::OK);
-    let models: serde_json::Value = models.json().await.expect("models response should be JSON");
-    assert_eq!(models["data"][0]["id"], "claude-sonnet-4-6");
-
+    for path in [
+        "/claude-desktop/v1/models",
+        "/claude-desktop/v1/messages",
+        "/dashboard/api/v3/claude-desktop/models",
+    ] {
+        let response = client
+            .get(format!("{root}{path}"))
+            .header("x-api-key", "gateway-test-key")
+            .send()
+            .await
+            .expect("retired Claude Desktop route should complete");
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "{path} must be a normal 404"
+        );
+        assert_ne!(response.status(), StatusCode::GONE);
+        assert_ne!(response.status(), StatusCode::MOVED_PERMANENTLY);
+        assert_ne!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+    }
     let messages = client
         .post(format!("{root}/claude-desktop/v1/messages"))
+        .header("x-api-key", "gateway-test-key")
         .json(&json!({"model":"claude-sonnet-4-6","max_tokens":1,"messages":[]}))
         .send()
         .await
-        .expect("messages request should complete");
-    assert_eq!(messages.status(), StatusCode::UNAUTHORIZED);
-    let unsupported = client
-        .post(format!("{root}/claude-desktop/v1/messages"))
-        .header("x-api-key", "gateway-test-key")
-        .json(&json!({"model":"claude-unknown","max_tokens":1,"messages":[]}))
+        .expect("retired public messages route should complete");
+    assert_eq!(messages.status(), StatusCode::NOT_FOUND);
+    let ordinary_messages = client
+        .post(format!("{root}/v1/messages"))
+        .json(&json!({"model":"minimax-m3","max_tokens":1,"messages":[]}))
         .send()
         .await
-        .expect("authorized messages request should complete");
-    assert_eq!(unsupported.status(), StatusCode::BAD_REQUEST);
-
-    let dashboard = client
-        .get(format!("{root}/dashboard/api/claude-desktop/models"))
-        .header("x-forwarded-for", "203.0.113.1")
-        .send()
-        .await
-        .expect("dashboard request should complete");
-    assert_eq!(dashboard.status(), StatusCode::UNAUTHORIZED);
+        .expect("ordinary messages route should complete");
+    assert_eq!(ordinary_messages.status(), StatusCode::UNAUTHORIZED);
 
     let retired = client
         .put(format!("{root}/dashboard/api/claude-desktop/models"))
@@ -539,49 +526,6 @@ async fn claude_desktop_routes_are_wired_and_protected() {
         .await
         .expect("retired V2 dashboard update should complete");
     assert_eq!(retired.status(), StatusCode::GONE);
-
-    let invalid = client
-        .put(format!("{root}/dashboard/api/v3/claude-desktop/models"))
-        .json(&json!({
-            "expectedRevision": state.settings_revision(),
-            "processGeneration": state.process_generation(),
-            "sonnet": "",
-            "opus": "",
-            "haiku": ""
-        }))
-        .send()
-        .await
-        .expect("dashboard update should complete");
-    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
-
-    let updated = client
-        .put(format!("{root}/dashboard/api/v3/claude-desktop/models"))
-        .json(&json!({
-            "expectedRevision": state.settings_revision(),
-            "processGeneration": state.process_generation(),
-            "sonnet": "",
-            "opus": "glm-5.2",
-            "haiku": ""
-        }))
-        .send()
-        .await
-        .expect("dashboard update should complete");
-    assert_eq!(updated.status(), StatusCode::OK);
-    let updated: serde_json::Value = updated.json().await.expect("update should return JSON");
-    assert_eq!(updated["sonnet"], "glm-5.2");
-    assert_eq!(updated["opus"], "glm-5.2");
-    assert_eq!(updated["haiku"], "glm-5.2");
-    let fetched: serde_json::Value = client
-        .get(format!("{root}/dashboard/api/v3/claude-desktop/models"))
-        .send()
-        .await
-        .expect("dashboard models request should complete")
-        .json()
-        .await
-        .expect("dashboard models response should be JSON");
-    assert_eq!(fetched["sonnet"], updated["sonnet"]);
-    assert_eq!(fetched["opus"], updated["opus"]);
-    assert_eq!(fetched["haiku"], updated["haiku"]);
 
     let _ = handle.shutdown.send(());
     handle.task.await.expect("test gateway should stop");

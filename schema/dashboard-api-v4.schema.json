@@ -26,6 +26,55 @@
       ],
       "type": "string"
     },
+    "AliasPublication": {
+      "additionalProperties": false,
+      "description": "Public names currently hidden from authenticated `GET /v1/models`.\n\nMissing names default to published. Hidden names remain routable.",
+      "properties": {
+        "revision": {
+          "$ref": "#/$defs/ControlRevision"
+        },
+        "unpublished": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "revision",
+        "unpublished"
+      ],
+      "type": "object"
+    },
+    "AliasPublicationUpdate": {
+      "additionalProperties": false,
+      "description": "Toggle one public name's downstream listing. `publicModel` is\ncase-folded on write.",
+      "properties": {
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "publicModel": {
+          "type": "string"
+        },
+        "published": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "publicModel",
+        "published"
+      ],
+      "type": "object"
+    },
     "AuthState": {
       "enum": [
         "unknown",
@@ -1469,6 +1518,9 @@
           },
           "type": "array"
         },
+        "pricingMultiplierEditable": {
+          "type": "boolean"
+        },
         "source": {
           "$ref": "#/$defs/TemplateSource"
         },
@@ -1496,7 +1548,8 @@
         "authSchemes",
         "upstreamProtocols",
         "editableFields",
-        "defaultEndpoints"
+        "defaultEndpoints",
+        "pricingMultiplierEditable"
       ],
       "type": "object"
     },
@@ -1910,6 +1963,12 @@
     },
     {
       "$ref": "#/$defs/CatalogModelsRemoveResult"
+    },
+    {
+      "$ref": "#/$defs/AliasPublication"
+    },
+    {
+      "$ref": "#/$defs/AliasPublicationUpdate"
     }
   ],
   "title": "DashboardApiV4"

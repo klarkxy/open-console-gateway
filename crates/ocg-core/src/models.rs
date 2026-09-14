@@ -308,7 +308,6 @@ pub struct AppConfig {
     pub stream_idle_timeout_secs: u64,
     pub routing_mode: RoutingMode,
     pub conversation_sticky: bool,
-    pub claude_desktop_models: ClaudeDesktopModels,
 }
 
 impl Default for AppConfig {
@@ -330,106 +329,9 @@ impl Default for AppConfig {
             stream_idle_timeout_secs: 300,
             routing_mode: RoutingMode::StrictPriority,
             conversation_sticky: false,
-            claude_desktop_models: ClaudeDesktopModels::default(),
         }
     }
 }
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ClaudeDesktopModels {
-    pub sonnet: String,
-    pub opus: String,
-    pub haiku: String,
-}
-
-impl Default for ClaudeDesktopModels {
-    fn default() -> Self {
-        Self {
-            sonnet: "minimax-m3".to_string(),
-            opus: String::new(),
-            haiku: String::new(),
-        }
-    }
-}
-
-impl ClaudeDesktopModels {
-    pub fn normalize(&mut self) {
-        self.sonnet = self.sonnet.trim().to_string();
-        self.opus = self.opus.trim().to_string();
-        self.haiku = self.haiku.trim().to_string();
-    }
-
-    pub fn validate(&self) -> Result<(), String> {
-        if self.first_configured().is_none() {
-            return Err("at least one Claude Desktop model is required".to_string());
-        }
-        for (role, model) in [
-            ("sonnet", self.sonnet.as_str()),
-            ("opus", self.opus.as_str()),
-            ("haiku", self.haiku.as_str()),
-        ] {
-            if model.is_empty() {
-                continue;
-            }
-            if crate::kernel::ids::is_free_model(model) {
-                return Err(format!(
-                    "Claude Desktop {role} model `{model}` cannot be a Zen free model"
-                ));
-            }
-            if !crate::kernel::protocol::supported_model_ids().any(|supported| supported == model) {
-                return Err(format!("unsupported Claude Desktop {role} model `{model}`"));
-            }
-        }
-        Ok(())
-    }
-
-    pub fn resolved(&self) -> Self {
-        let fallback = self.first_configured().unwrap_or_default();
-        Self {
-            sonnet: if self.sonnet.is_empty() {
-                fallback.to_string()
-            } else {
-                self.sonnet.clone()
-            },
-            opus: if self.opus.is_empty() {
-                fallback.to_string()
-            } else {
-                self.opus.clone()
-            },
-            haiku: if self.haiku.is_empty() {
-                fallback.to_string()
-            } else {
-                self.haiku.clone()
-            },
-        }
-    }
-
-    pub(crate) fn model_for_alias(&self, alias: &str) -> Option<&str> {
-        let configured = match alias {
-            CLAUDE_DESKTOP_SONNET_ALIAS => self.sonnet.as_str(),
-            CLAUDE_DESKTOP_OPUS_ALIAS => self.opus.as_str(),
-            CLAUDE_DESKTOP_HAIKU_ALIAS => self.haiku.as_str(),
-            _ => return None,
-        };
-        (!configured.is_empty())
-            .then_some(configured)
-            .or_else(|| self.first_configured())
-    }
-
-    fn first_configured(&self) -> Option<&str> {
-        [
-            self.sonnet.as_str(),
-            self.opus.as_str(),
-            self.haiku.as_str(),
-        ]
-        .into_iter()
-        .find(|model| !model.is_empty())
-    }
-}
-
-pub const CLAUDE_DESKTOP_SONNET_ALIAS: &str = "claude-sonnet-4-6";
-pub const CLAUDE_DESKTOP_OPUS_ALIAS: &str = "claude-opus-4-6";
-pub const CLAUDE_DESKTOP_HAIKU_ALIAS: &str = "claude-haiku-4-5-20251001";
 
 /// Validates and canonicalizes the optional URL shown to downstream clients.
 pub fn normalize_client_root_url(value: &str) -> Result<String, String> {
@@ -486,7 +388,7 @@ impl AppConfig {
         normalize_proxy_url(self.proxy_mode, &self.proxy_url)?;
         normalize_opencode_invite_url(&self.opencode_invite_url)?;
         // routing_mode is validated by serde enum decoding; unknown values never reach here.
-        self.claude_desktop_models.validate()
+        Ok(())
     }
 
     pub fn validate_timeouts(&self) -> Result<(), String> {

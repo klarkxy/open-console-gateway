@@ -250,6 +250,26 @@ enum GoCommandCatalogAccount<'a> {
     None,
 }
 
+/// Catalog fetch is control-plane, not routing: a ready stored Key is enough
+/// even when the new account is still disabled.
+fn account_can_supply_catalog_refresh_key(account: &ModelAccount) -> bool {
+    account.setup_step.is_ready()
+        && !account.key_cipher.trim().is_empty()
+        && account.auth_error.is_none()
+}
+
+fn select_catalog_refresh_account(
+    accounts: impl IntoIterator<Item = ModelAccount>,
+    provider_id: &str,
+) -> Option<ModelAccount> {
+    accounts
+        .into_iter()
+        .filter(|account| {
+            account.provider_id == provider_id && account_can_supply_catalog_refresh_key(account)
+        })
+        .max_by_key(|account| account.enabled)
+}
+
 struct GoCommandCatalogRefresh {
     provider_id: String,
     account_id: Option<String>,
@@ -300,32 +320,22 @@ async fn refresh_go_or_command_catalog(
                 }
                 Some(account)
             }
-            (id, GoCommandCatalogAccount::Eligible) if id == OPENCODE_PROVIDER_ID => {
-                let now = Utc::now();
-                Some(
+            (id, GoCommandCatalogAccount::Eligible) if id == OPENCODE_PROVIDER_ID => Some(
+                select_catalog_refresh_account(
                     state
                         .db
                         .lock()
                         .list_accounts()
-                        .map_err(V3ApiError::internal)?
-                        .into_iter()
-                        .find(|account| {
-                            account.provider_id == OPENCODE_PROVIDER_ID
-                                && account_is_available_for_at(
-                                    account,
-                                    UpstreamChannel::Go,
-                                    &[],
-                                    now,
-                                )
-                        })
-                        .ok_or_else(|| {
-                            V3ApiError::invalid_request_at(
-                                state,
-                                "no eligible OpenCode Go account is available for catalog refresh",
-                            )
-                        })?,
+                        .map_err(V3ApiError::internal)?,
+                    OPENCODE_PROVIDER_ID,
                 )
-            }
+                .ok_or_else(|| {
+                    V3ApiError::invalid_request_at(
+                        state,
+                        "no eligible OpenCode Go account is available for catalog refresh",
+                    )
+                })?,
+            ),
             (id, GoCommandCatalogAccount::None) if id == COMMAND_CODE_PROVIDER_ID => None,
             _ => {
                 return Err(V3ApiError::invalid_request_at(
@@ -601,23 +611,20 @@ pub(super) async fn refresh_contract_catalog(
             let _settings_update = state.settings_update.lock();
             check_expectation(&state, &expectation)?;
             validate_provider_scope(&state, &scope)?;
-            let now = Utc::now();
-            let account = state
-                .db
-                .lock()
-                .list_accounts()
-                .map_err(V3ApiError::internal)?
-                .into_iter()
-                .find(|account| {
-                    account.provider_id == scope_id
-                        && account_is_available_for_at(account, UpstreamChannel::Go, &[], now)
-                })
-                .ok_or_else(|| {
-                    V3ApiError::invalid_request_at(
-                        &state,
-                        "no eligible account is available for provider catalog refresh",
-                    )
-                })?;
+            let account = select_catalog_refresh_account(
+                state
+                    .db
+                    .lock()
+                    .list_accounts()
+                    .map_err(V3ApiError::internal)?,
+                &scope_id,
+            )
+            .ok_or_else(|| {
+                V3ApiError::invalid_request_at(
+                    &state,
+                    "no eligible account is available for provider catalog refresh",
+                )
+            })?;
             let key = state
                 .decrypt_key(&account.key_cipher)
                 .map_err(V3ApiError::internal)?;
@@ -1908,6 +1915,111 @@ fn override_state_from_domain(state: DomainProtocolOverrideState) -> ProtocolOve
         DomainProtocolOverrideState::Auto => ProtocolOverrideState::Auto,
         DomainProtocolOverrideState::ForceOn => ProtocolOverrideState::ForceOn,
         DomainProtocolOverrideState::ForceOff => ProtocolOverrideState::ForceOff,
+    }
+}
+
+#[cfg(test)]
+mod catalog_refresh_account_tests {
+    use super::{account_can_supply_catalog_refresh_key, select_catalog_refresh_account};
+    use crate::models::{Account, AccountSetupStep, AccountType};
+    use crate::provider::{CredentialKind, OPENCODE_PROVIDER_ID, QuotaScope};
+    use chrono::Utc;
+
+    fn go_account(
+        id: &str,
+        enabled: bool,
+        setup_step: AccountSetupStep,
+        key: &str,
+        auth_error: Option<&str>,
+    ) -> Account {
+        let now = Utc::now();
+        Account {
+            id: id.to_string(),
+            provider_id: OPENCODE_PROVIDER_ID.to_string(),
+            credential_kind: CredentialKind::ApiKey,
+            quota_scope: QuotaScope::Key,
+            name: id.to_string(),
+            username: None,
+            password_cipher: None,
+            key_cipher: key.to_string(),
+            enabled,
+            account_type: AccountType::Key,
+            setup_step,
+            referral_code: None,
+            purchase_date: String::new(),
+            expires_on: String::new(),
+            cooldown_until: None,
+            cooldown_generic_until: None,
+            cooldown_5h_until: None,
+            cooldown_week_until: None,
+            cooldown_month_until: None,
+            cooldown_free_until: None,
+            last_error: None,
+            auth_error: auth_error.map(str::to_string),
+            notes: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn a_disabled_ready_key_can_supply_catalog_refresh() {
+        let disabled = go_account("go-off", false, AccountSetupStep::Ready, "cipher", None);
+        assert!(account_can_supply_catalog_refresh_key(&disabled));
+        assert_eq!(
+            select_catalog_refresh_account([disabled.clone()], OPENCODE_PROVIDER_ID)
+                .map(|account| account.id),
+            Some("go-off".into())
+        );
+    }
+
+    #[test]
+    fn catalog_refresh_prefers_an_enabled_ready_key() {
+        let disabled = go_account("go-off", false, AccountSetupStep::Ready, "cipher-off", None);
+        let enabled = go_account("go-on", true, AccountSetupStep::Ready, "cipher-on", None);
+        assert_eq!(
+            select_catalog_refresh_account([disabled, enabled], OPENCODE_PROVIDER_ID)
+                .map(|account| account.id),
+            Some("go-on".into())
+        );
+    }
+
+    #[test]
+    fn drafts_empty_keys_and_auth_errors_cannot_refresh() {
+        assert!(!account_can_supply_catalog_refresh_key(&go_account(
+            "draft",
+            true,
+            AccountSetupStep::KeyVerification,
+            "cipher",
+            None,
+        )));
+        assert!(!account_can_supply_catalog_refresh_key(&go_account(
+            "empty",
+            true,
+            AccountSetupStep::Ready,
+            "  ",
+            None,
+        )));
+        assert!(!account_can_supply_catalog_refresh_key(&go_account(
+            "auth",
+            true,
+            AccountSetupStep::Ready,
+            "cipher",
+            Some("upstream 401"),
+        )));
+        assert!(
+            select_catalog_refresh_account(
+                [go_account(
+                    "draft",
+                    true,
+                    AccountSetupStep::KeyVerification,
+                    "cipher",
+                    None,
+                )],
+                OPENCODE_PROVIDER_ID
+            )
+            .is_none()
+        );
     }
 }
 

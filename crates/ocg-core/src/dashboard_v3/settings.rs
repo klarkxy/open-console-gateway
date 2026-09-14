@@ -4,13 +4,11 @@ use axum::Json;
 use axum::body::Bytes;
 use axum::extract::State;
 
-use crate::kernel::ids::is_free_model;
-use crate::kernel::protocol::{ApiFormat, supported_model_protocols};
 use crate::models::{
     AppConfig, ProxyListDirection as AppProxyListDirection, ProxyMode as AppProxyMode,
     RoutingMode as AppRoutingMode, normalize_client_root_url,
 };
-use crate::state::{CoreState, HostSettingsError};
+use crate::state::{CoreState, HostSettingsError, build_proxy_model_candidates};
 
 use super::types::{
     ProxyListDirection, ProxyMode, ProxySupportedModel, RoutingMode, Settings, SettingsUpdate,
@@ -263,54 +261,24 @@ fn settings_from_state(state: &CoreState) -> Settings {
 }
 
 fn proxy_supported_models(state: &CoreState) -> Vec<ProxySupportedModel> {
-    let zen_catalog = state.zen_free_model_catalog();
-    let zen_ids = zen_catalog
-        .models
-        .iter()
-        .cloned()
-        .collect::<std::collections::HashSet<_>>();
-    let mut models = supported_model_protocols()
-        .filter_map(|(id, preferred)| {
-            let legacy_zen = id == "big-pickle" || is_free_model(id);
-            (!legacy_zen || zen_ids.contains(id)).then(|| ProxySupportedModel {
-                id: id.to_string(),
-                preferred_protocol: preferred_protocol_name(preferred).to_string(),
-                zen_free: legacy_zen,
-            })
-        })
-        .collect::<Vec<_>>();
-    let mut known = models
-        .iter()
-        .map(|model| model.id.clone())
-        .collect::<std::collections::HashSet<_>>();
-    for id in &zen_catalog.models {
-        if known.insert(id.clone()) {
-            models.push(ProxySupportedModel {
-                id: id.clone(),
-                preferred_protocol: preferred_protocol_name(ApiFormat::ChatCompletions).to_string(),
-                zen_free: true,
-            });
-        }
-    }
-    let contracts = state.provider_contracts();
-    for provider_id in [
-        crate::kernel::ids::MINIMAX_PROVIDER_ID,
-        crate::kernel::ids::KIMI_PROVIDER_ID,
-    ] {
-        let Some(contract) = contracts.provider_offering(provider_id) else {
-            continue;
-        };
-        for id in &contract.catalog.models {
-            if known.insert(id.clone()) {
-                models.push(ProxySupportedModel {
-                    id: id.clone(),
-                    preferred_protocol: preferred_protocol_name(ApiFormat::ChatCompletions)
-                        .to_string(),
-                    zen_free: false,
-                });
-            }
-        }
-    }
+    let custom = state
+        .db
+        .lock()
+        .list_custom_account_runtimes()
+        .unwrap_or_default();
+    let mut models = build_proxy_model_candidates(
+        &state.provider_contracts(),
+        &custom,
+        &state.dynamic_providers(),
+        &state.cpa_model_catalog(),
+    )
+    .into_iter()
+    .map(|candidate| ProxySupportedModel {
+        id: candidate.id,
+        preferred_protocol: candidate.preferred_protocol,
+        zen_free: candidate.zen_free,
+    })
+    .collect::<Vec<_>>();
     models.sort_by(|left, right| left.id.cmp(&right.id));
     models
 }
@@ -326,27 +294,36 @@ fn validate_proxy_list(state: &CoreState, config: &mut AppConfig) -> Result<(), 
         .into_iter()
         .map(|model| model.id)
         .collect::<std::collections::HashSet<_>>();
+    let persisted = state
+        .config()
+        .proxy_list_models
+        .into_iter()
+        .map(|model| model.trim().to_string())
+        .collect::<std::collections::HashSet<_>>();
     let mut deduped: Vec<String> = Vec::new();
     for model in config.proxy_list_models.iter() {
         let model = model.trim();
+        if model.is_empty() {
+            continue;
+        }
         if !known.contains(model) {
-            return Err(format!("unknown model in proxy list: `{model}`"));
+            if persisted.contains(model) {
+                // A once-valid persisted entry may disappear with its
+                // catalog. It stays inert on read and is pruned by the next
+                // save, but a newly submitted unknown id still fails closed.
+                continue;
+            }
+            return Err(format!("proxy list model `{model}` is not supported"));
         }
         if !deduped.iter().any(|existing| existing == model) {
             deduped.push(model.to_string());
         }
     }
+    if deduped.is_empty() {
+        return Err("list proxy mode requires at least one model".to_string());
+    }
     config.proxy_list_models = deduped;
     Ok(())
-}
-
-fn preferred_protocol_name(format: ApiFormat) -> &'static str {
-    match format {
-        ApiFormat::ChatCompletions => "chat_completions",
-        ApiFormat::Responses => "responses",
-        ApiFormat::Messages => "messages",
-        ApiFormat::Gemini => "gemini",
-    }
 }
 
 fn v3_proxy_mode(mode: AppProxyMode) -> ProxyMode {

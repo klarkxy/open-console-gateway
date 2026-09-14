@@ -152,15 +152,25 @@ pub fn build_no_redirect_for_label(
     spec: &OutboundProxySpec,
     label: RouteLabel,
 ) -> Result<reqwest::Client> {
+    Ok(configured_builder_for_label(spec, label)?
+        .redirect(no_redirect_policy())
+        .connect_timeout(spec.connect_timeout)
+        .build()?)
+}
+
+/// Build the connector for a route label selected from a matching
+/// [`ForwardRouteSet`]. This keeps adapter-owned redirect and DNS policy on the
+/// same proxy/direct leg as the request-entry route decision.
+pub fn configured_builder_for_label(
+    spec: &OutboundProxySpec,
+    label: RouteLabel,
+) -> Result<reqwest::ClientBuilder> {
     let builder = match label {
         RouteLabel::Auto => tuned(reqwest::Client::builder()),
         RouteLabel::Proxy => proxy_leg_builder(&spec.proxy_url)?,
         RouteLabel::Direct => direct_leg_builder(),
     };
-    Ok(builder
-        .redirect(no_redirect_policy())
-        .connect_timeout(spec.connect_timeout)
-        .build()?)
+    Ok(builder)
 }
 
 /// Applies the process-wide outbound proxy policy while leaving callers free to

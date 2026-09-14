@@ -1,7 +1,7 @@
 //! Dashboard V4 connection projection and onboarding commit.
 
 use chrono::{Duration, Utc};
-use ocg_core::models::{Account, AccountSetupStep, AccountType, ProxyMode};
+use ocg_core::models::{Account, AccountSetupStep, AccountType, AccountUpdate, ProxyMode};
 use ocg_core::provider::{
     COMMAND_CODE_PROVIDER_ID, CPA_PROVIDER_ID, CUSTOM_PROVIDER_ID, KIMI_PROVIDER_ID,
     MINIMAX_PROVIDER_ID, OLLAMA_PROVIDER_ID, OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID,
@@ -203,6 +203,7 @@ async fn templates_list_builtins_and_custom_http_without_secrets_or_instances() 
         .unwrap();
     assert_eq!(custom_http["adapterKind"], "configurable_http");
     assert_eq!(custom_http["source"], "builtin");
+    assert_eq!(custom_http["pricingMultiplierEditable"], false);
     assert_eq!(
         custom_http["editableFields"],
         json!([
@@ -220,6 +221,14 @@ async fn templates_list_builtins_and_custom_http_without_secrets_or_instances() 
         .find(|template| template["id"] == OPENCODE_PROVIDER_ID)
         .unwrap();
     assert_eq!(sealed["editableFields"], json!([]));
+    assert_eq!(sealed["pricingMultiplierEditable"], true);
+    let goat = templates["templates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|template| template["id"] == COMMAND_CODE_PROVIDER_ID)
+        .unwrap();
+    assert_eq!(goat["pricingMultiplierEditable"], true);
     harness.stop();
 }
 
@@ -255,8 +264,8 @@ async fn connections_project_keyless_dynamic_provider_as_missing_credential_and_
 }
 
 #[tokio::test]
-async fn connections_project_dynamic_provider_with_unverified_disabled_key_as_unknown_and_ineligible()
- {
+async fn connections_project_dynamic_provider_with_unverified_enabled_key_as_unknown_and_eligible()
+{
     let harness = start_loopback("v4-unverified").await;
     let (status, created) = send_v3(
         &harness,
@@ -280,6 +289,31 @@ async fn connections_project_dynamic_provider_with_unverified_disabled_key_as_un
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_secret_free(&body, &["sk-unverified"]);
     let connection = find_legacy(&body, "dynamic_provider", id);
+    assert_eq!(connection["authorization"], "unknown");
+    assert_eq!(connection["lifecycle"], "configured");
+    assert_eq!(connection["eligibility"]["state"], "eligible");
+    assert_eq!(connection["eligibility"]["reason"], "none");
+    assert_eq!(connection["credentialCount"], 1);
+    assert_eq!(connection["enabledCredentialCount"], 1);
+
+    let account_id = first_account_id_for(&harness, id);
+    harness
+        .state
+        .db
+        .lock()
+        .update_account(
+            &account_id,
+            &AccountUpdate {
+                enabled: Some(false),
+                ..AccountUpdate::default()
+            },
+            None,
+            None,
+        )
+        .unwrap();
+    let (status, disabled) = send_v4(&harness, Method::GET, "/connections", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{disabled}");
+    let connection = find_legacy(&disabled, "dynamic_provider", id);
     assert_eq!(connection["authorization"], "unknown");
     assert_eq!(connection["lifecycle"], "disabled");
     assert_eq!(connection["eligibility"]["state"], "ineligible");
@@ -532,6 +566,19 @@ fn account_count_for(harness: &V3Harness, provider_id: &str) -> i64 {
         .lock()
         .count_accounts_for_provider(provider_id)
         .unwrap()
+}
+
+fn first_account_id_for(harness: &V3Harness, provider_id: &str) -> String {
+    harness
+        .state
+        .db
+        .lock()
+        .list_accounts()
+        .unwrap()
+        .into_iter()
+        .find(|account| account.provider_id == provider_id)
+        .map(|account| account.id)
+        .unwrap_or_else(|| panic!("missing account for {provider_id}"))
 }
 
 fn operation_exists(harness: &V3Harness, operation_id: &str) -> bool {
@@ -3658,5 +3705,130 @@ async fn catalog_remove_advances_revision_before_reload_failure() {
         }
     }
     drop(conn);
+    harness.stop();
+}
+
+#[tokio::test]
+async fn alias_publication_hides_public_name_from_v1_models_but_keeps_routing() {
+    let secret = "sk-alias-pub";
+    let mut replies = HashMap::new();
+    replies.insert(
+        secret.to_string(),
+        VecDeque::from([FakeReply {
+            status: 200,
+            body: CHAT_OK,
+        }]),
+    );
+    let (upstream, calls, _stop) = start_fake_upstream(replies).await;
+    let harness = start_loopback("v4-alias-publication").await;
+    let mut config = harness.state.config();
+    config.proxy_mode = ProxyMode::Direct;
+    harness.state.set_config(config).unwrap();
+    let (status, created) = send_v3(
+        &harness,
+        Method::POST,
+        "/providers",
+        &cas(
+            &harness,
+            create_body(
+                "Publication Lab",
+                &format!("{upstream}/v1/chat/completions"),
+                "chat_completions",
+                "bearer",
+                Some(secret),
+            ),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let provider_id = created["provider"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("provider id missing: {created}"))
+        .to_string();
+    let account_id = harness
+        .state
+        .db
+        .lock()
+        .list_accounts()
+        .unwrap()
+        .into_iter()
+        .find(|account| account.provider_id == provider_id)
+        .map(|account| account.id)
+        .unwrap_or_else(|| panic!("missing account after create: {created}"));
+    harness.enable_account(&account_id);
+
+    let listed = listed_gateway_model_ids(&harness).await;
+    assert!(
+        listed.iter().any(|id| id == "lab-opus"),
+        "live public alias missing: {listed:?}"
+    );
+
+    let (status, publication) =
+        send_v4(&harness, Method::GET, "/alias-publication", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{publication}");
+    assert_eq!(publication["unpublished"], json!([]));
+
+    let (status, hidden) = send_v4(
+        &harness,
+        Method::PATCH,
+        "/alias-publication",
+        &cas(
+            &harness,
+            json!({
+                "publicModel": "Lab-Opus",
+                "published": false
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{hidden}");
+    assert_eq!(hidden["unpublished"], json!(["lab-opus"]));
+    let listed_hidden = listed_gateway_model_ids(&harness).await;
+    assert!(
+        !listed_hidden
+            .iter()
+            .any(|id| id.eq_ignore_ascii_case("lab-opus")),
+        "hidden alias leaked into /v1/models: {listed_hidden:?}"
+    );
+
+    let (chat_status, chat_body) = chat_completion(&harness, "lab-opus").await;
+    assert_eq!(chat_status, StatusCode::OK, "{chat_body}");
+    assert_eq!(calls.lock().expect("fake call log").len(), 1);
+
+    let (status, shown) = send_v4(
+        &harness,
+        Method::PATCH,
+        "/alias-publication",
+        &cas(
+            &harness,
+            json!({
+                "publicModel": "lab-opus",
+                "published": true
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{shown}");
+    assert_eq!(shown["unpublished"], json!([]));
+    let listed_again = listed_gateway_model_ids(&harness).await;
+    assert!(
+        listed_again.iter().any(|id| id == "lab-opus"),
+        "restored alias missing: {listed_again:?}"
+    );
+
+    let (status, invalid) = send_v4(
+        &harness,
+        Method::PATCH,
+        "/alias-publication",
+        &cas(
+            &harness,
+            json!({
+                "publicModel": "  ",
+                "published": false
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{invalid}");
     harness.stop();
 }

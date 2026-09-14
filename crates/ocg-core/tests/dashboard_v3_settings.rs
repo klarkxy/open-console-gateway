@@ -491,6 +491,35 @@ async fn dashboard_v3_list_proxy_write_validates_then_dedupes_known_ids() {
     assert_v3_error(&body, ERROR_INVALID_REQUEST);
     assert_eq!(harness.state.settings_revision(), before);
 
+    // Historical entries that disappeared from the current candidate set are
+    // different from newly invented ids: they remain inert and are pruned by
+    // the next settings save.
+    let mut legacy = harness.state.config();
+    legacy.proxy_mode = ocg_core::models::ProxyMode::List;
+    legacy.proxy_url = "http://127.0.0.1:7890".to_string();
+    legacy.proxy_list_models = vec!["gpt-5.6-luna".to_string(), "wildcard-*".to_string()];
+    harness.state.set_config(legacy).unwrap();
+    let before = harness.state.settings_revision();
+    let (status, body) = put_json(
+        &harness,
+        &cas_patch(
+            &harness,
+            json!({
+                "proxyMode": "list",
+                "proxyUrl": "http://127.0.0.1:7890",
+                "proxyListModels": ["gpt-5.6-luna", "wildcard-*"]
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        harness.state.config().proxy_list_models,
+        vec!["gpt-5.6-luna".to_string()]
+    );
+    assert_eq!(harness.state.settings_revision(), before + 1);
+    let before = harness.state.settings_revision();
+
     let (status, body) = put_json(
         &harness,
         &cas_patch(

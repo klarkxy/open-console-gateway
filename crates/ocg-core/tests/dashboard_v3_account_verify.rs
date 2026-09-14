@@ -18,7 +18,7 @@ use ocg_core::dashboard_v3::{
     install_official_protocol_fetch_fallback_chat_for_tests,
 };
 use ocg_core::gateway::provider_adapter::install_goat_catalog_origin_for_test;
-use ocg_core::models::ProxyMode;
+use ocg_core::models::{AccountUpdate, ProxyMode};
 use ocg_core::provider::{
     COMMAND_CODE_PROVIDER_ID, CUSTOM_PROVIDER_ID, OPENCODE_PROVIDER_ID, ZEN_FREE_ACCOUNT_ID,
 };
@@ -473,7 +473,7 @@ async fn create_custom_account(
     .await;
     assert_eq!(status, StatusCode::OK, "{created}");
     let account = mutation_account(&created);
-    assert!(!account.enabled);
+    assert!(account.enabled);
     assert_eq!(
         account.verification_status,
         AccountVerificationStatus::Pending
@@ -682,7 +682,7 @@ async fn unknown_offerings_fail_closed_without_touching_goat_or_upstream() {
         .get_account(&goat_id)
         .unwrap()
         .unwrap();
-    assert!(!stored.enabled);
+    assert!(stored.enabled);
     harness.stop();
 }
 
@@ -708,7 +708,7 @@ async fn goat_verify_is_not_applicable_and_never_fetches_the_public_catalog() {
     .await;
     assert_eq!(status, StatusCode::OK, "{response}");
     let account = mutation_account(&response);
-    assert!(!account.enabled);
+    assert!(account.enabled);
     assert_eq!(
         account.verification_status,
         AccountVerificationStatus::NotRequired
@@ -932,6 +932,70 @@ async fn unified_catalog_refresh_selects_an_eligible_account_and_defaults_new_mo
 }
 
 #[tokio::test]
+async fn unified_catalog_refresh_uses_a_disabled_ready_key() {
+    let harness = start_loopback("unified-catalog-refresh-disabled-key").await;
+    force_direct_proxy(&harness);
+    let go_origin = start_origin(
+        StatusCode::OK,
+        r#"{"object":"list","data":[{"id":"glm-5.3"}]}"#,
+        Duration::ZERO,
+    )
+    .await;
+    let mut config = harness.state.config();
+    config.upstream_base_url = format!("{}/provider/v1", go_origin.url);
+    harness.state.set_config(config).unwrap();
+    let account_id = create_go_account(&harness).await;
+    harness
+        .state
+        .db
+        .lock()
+        .update_account(
+            &account_id,
+            &AccountUpdate {
+                enabled: Some(false),
+                ..AccountUpdate::default()
+            },
+            None,
+            None,
+        )
+        .unwrap();
+    assert!(
+        !harness
+            .state
+            .db
+            .lock()
+            .get_account(&account_id)
+            .unwrap()
+            .unwrap()
+            .enabled
+    );
+    let _docs =
+        install_official_protocol_fetch_fallback_chat_for_tests(harness.state.process_generation());
+
+    let (status, contracts) = send_json(
+        &harness,
+        Method::POST,
+        "/provider-contracts/provider/opencode/catalog/refresh",
+        &cas(&harness, json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{contracts}");
+    assert_eq!(go_origin.call_count(), 1);
+    assert_eq!(
+        go_origin.calls.lock().unwrap()[0].authorization.as_deref(),
+        Some("Bearer sk-go-verify")
+    );
+    let go = contracts["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|provider| provider["providerId"] == OPENCODE_PROVIDER_ID)
+        .expect("OpenCode Go provider contract");
+    assert_eq!(go["catalog"]["models"], json!(["glm-5.3"]));
+    harness.stop();
+}
+
+#[tokio::test]
 async fn command_code_contract_refresh_defaults_new_rows_off_and_legacy_route_stays_wire_compatible()
  {
     let harness = start_loopback("command-code-contract-catalog-refresh").await;
@@ -1066,7 +1130,7 @@ async fn go_model_refresh_filters_zen_free_models_before_persisting() {
 }
 
 #[tokio::test]
-async fn custom_verify_success_persists_verified_without_enabling_and_bumps_once() {
+async fn custom_verify_success_persists_verified_without_flipping_enable_and_bumps_once() {
     let harness = start_loopback("verify-custom-ok").await;
     force_direct_proxy(&harness);
     let origin = start_origin(StatusCode::OK, SUCCESS_BODY, Duration::ZERO).await;
@@ -1092,7 +1156,7 @@ async fn custom_verify_success_persists_verified_without_enabling_and_bumps_once
     assert_eq!(status, StatusCode::OK, "{body}");
     let account = mutation_account(&body);
     assert!(
-        !account.enabled,
+        account.enabled,
         "verify must not change the card's enabled state"
     );
     assert_eq!(
@@ -1230,7 +1294,8 @@ async fn custom_verify_probes_only_the_single_declared_protocol() {
 }
 
 #[tokio::test]
-async fn custom_verify_failure_401_429_redirect_and_oversize_persist_failed_without_enabling() {
+async fn custom_verify_failure_401_429_redirect_and_oversize_persist_failed_without_flipping_enable()
+ {
     let harness = start_loopback("verify-custom-fail").await;
     force_direct_proxy(&harness);
 
@@ -1257,7 +1322,7 @@ async fn custom_verify_failure_401_429_redirect_and_oversize_persist_failed_with
     assert_ne!(status, StatusCode::UNAUTHORIZED);
     let account = mutation_account(&body);
     assert!(
-        !account.enabled,
+        account.enabled,
         "failed verify must not change the card's enabled state"
     );
     assert_eq!(
@@ -1359,7 +1424,7 @@ async fn custom_verify_failure_401_429_redirect_and_oversize_persist_failed_with
     assert_eq!(status, StatusCode::OK, "{body}");
     let account = mutation_account(&body);
     assert!(
-        !account.enabled,
+        account.enabled,
         "failed verify must not change the card's enabled state"
     );
     assert_eq!(
@@ -1424,7 +1489,7 @@ async fn stale_after_network_does_not_commit_or_bump() {
         .account_verification_state(&id)
         .unwrap()
         .unwrap();
-    assert!(!stored.enabled);
+    assert!(stored.enabled);
     assert_eq!(
         verification.status,
         ocg_core::provider::ConnectionVerificationStatus::Pending
@@ -1520,7 +1585,7 @@ async fn retired_v2_account_verify_does_not_mutate() {
         .get_account(&goat_id)
         .unwrap()
         .unwrap();
-    assert!(!stored_goat.enabled);
+    assert!(stored_goat.enabled);
 
     let v2_custom = harness
         .client
@@ -1542,7 +1607,7 @@ async fn retired_v2_account_verify_does_not_mutate() {
         mutation_account(&v3_custom).verification_status,
         ocg_core::dashboard_v3::AccountVerificationStatus::Verified
     );
-    assert!(!mutation_account(&v3_custom).enabled);
+    assert!(mutation_account(&v3_custom).enabled);
     harness.stop();
 }
 

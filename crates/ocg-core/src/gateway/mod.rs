@@ -66,14 +66,6 @@ fn inference_router_with_body_limit(state: CoreState, body_limit: usize) -> Rout
         .route("/v1/messages", post(handler::messages))
         .route("/v1/models", get(handler::models))
         .route(
-            "/claude-desktop/v1/messages",
-            post(handler::claude_desktop_messages),
-        )
-        .route(
-            "/claude-desktop/v1/models",
-            get(handler::claude_desktop_models),
-        )
-        .route(
             "/v1beta/models/{*model_action}",
             post(handler::gemini_model_action),
         )

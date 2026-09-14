@@ -236,7 +236,9 @@ fn create_locked(
         }
         .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?
     };
-    state.install_dynamic_providers_snapshot(snapshot);
+    state
+        .install_dynamic_providers_snapshot(snapshot)
+        .map_err(V3ApiError::internal)?;
     Ok(provider_mutation(state, runtime, state.settings_revision()))
 }
 
@@ -312,7 +314,9 @@ fn update_locked(
         )
         .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?
     };
-    state.install_dynamic_providers_snapshot(snapshot);
+    state
+        .install_dynamic_providers_snapshot(snapshot)
+        .map_err(V3ApiError::internal)?;
     Ok(provider_mutation(state, runtime, state.settings_revision()))
 }
 
@@ -329,7 +333,9 @@ fn delete_locked(
         db.delete_dynamic_provider(provider_id)
             .map_err(|error| map_delete_error(state, error))?
     };
-    state.install_dynamic_providers_snapshot(snapshot);
+    state
+        .install_dynamic_providers_snapshot(snapshot)
+        .map_err(V3ApiError::internal)?;
     Ok(MutationAck {
         revision: state.settings_revision(),
         process_generation: state.process_generation(),

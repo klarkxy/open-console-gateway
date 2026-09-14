@@ -1,9 +1,10 @@
 use super::{
-    CoreStateInner, DesktopUpdatePhase, DesktopUpdateStartError, normalize_client_root_url_override,
+    CoreStateInner, DesktopUpdatePhase, DesktopUpdateStartError, build_proxy_model_candidates,
+    normalize_client_root_url_override,
 };
 use crate::crypto::{KeyCipher, StaticKeyCipher};
 use crate::db::Database;
-use crate::models::{AppConfig, ProxyMode};
+use crate::models::{AppConfig, ProxyListDirection, ProxyMode};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Barrier, Mutex as StdMutex};
@@ -55,6 +56,66 @@ fn process_host_adapts_key_and_usage_sync_seams() {
     assert_usage_host(&state);
     drop(state);
     let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn reload_failure_restriction_rebuilds_proxy_membership() {
+    use crate::provider::OPENCODE_PROVIDER_ID;
+    use crate::provider_contracts::{CATALOG_SOURCE_OPENCODE_MODELS, ContractScope};
+    use chrono::Utc;
+
+    let dir = temp_data_dir("restrict-proxy-membership");
+    let db = Database::open(dir.clone()).expect("test database should open");
+    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("state-test"));
+    let state = CoreStateInner::new(db, dir.clone(), cipher).expect("state should initialize");
+    let scope = ContractScope::provider(OPENCODE_PROVIDER_ID);
+    let now = Utc::now();
+    state
+        .db
+        .lock()
+        .set_contract_catalog(
+            &scope,
+            &["gpt-5.6-luna".into(), "gpt-5.6-sol".into()],
+            Some(now),
+            CATALOG_SOURCE_OPENCODE_MODELS,
+            "https://example.test/models",
+            now,
+        )
+        .unwrap();
+    state.reload_provider_contracts().unwrap();
+    let mut config = state.config();
+    config.proxy_mode = ProxyMode::List;
+    config.proxy_url = "http://127.0.0.1:9".into();
+    config.proxy_list_direction = ProxyListDirection::Whitelist;
+    config.proxy_list_models = vec!["gpt-5.6-luna".into(), "gpt-5.6-sol".into()];
+    state.set_config(config).unwrap();
+    assert_eq!(
+        state
+            .forward_route_set()
+            .client_for("gpt-5.6-sol")
+            .1
+            .as_str(),
+        "proxy"
+    );
+
+    let row = state
+        .db
+        .lock()
+        .remove_contract_catalog_models(&scope, &["gpt-5.6-sol".into()], now)
+        .unwrap();
+    state.restrict_provider_catalog_after_reload_failure(&row);
+    assert_eq!(
+        state
+            .forward_route_set()
+            .client_for("gpt-5.6-sol")
+            .1
+            .as_str(),
+        "direct",
+        "removed upstream ids must be inert even on the reload-failure path"
+    );
+
+    drop(state);
+    fs::remove_dir_all(dir).expect("test data directory should be removed");
 }
 
 #[test]
@@ -284,6 +345,23 @@ fn route_set_snapshot_swaps_atomically_and_stays_self_consistent() {
         ),
         "non-list generations resolve to the single process-wide client"
     );
+
+    let now = chrono::Utc::now();
+    let scope =
+        crate::provider_contracts::ContractScope::provider(crate::provider::OPENCODE_PROVIDER_ID);
+    state
+        .db
+        .lock()
+        .set_contract_catalog(
+            &scope,
+            &["gpt-5.6-luna".into()],
+            Some(now),
+            crate::provider_contracts::CATALOG_SOURCE_OPENCODE_MODELS,
+            "https://example.test/models",
+            now,
+        )
+        .unwrap();
+    state.reload_provider_contracts().unwrap();
 
     let mut list_config = state.config();
     list_config.gateway_key = "gw".into();
@@ -701,7 +779,14 @@ fn legacy_config_gets_persisted_desktop_defaults() {
         let legacy_object = legacy
             .as_object_mut()
             .expect("test config should be an object");
-        legacy_object.remove("claude_desktop_models");
+        legacy_object.insert(
+            "claude_desktop_models".into(),
+            serde_json::json!({
+                "sonnet": "minimax-m3",
+                "opus": "",
+                "haiku": ""
+            }),
+        );
         legacy_object.remove("show_dock_icon");
         legacy_object.remove("routing_mode");
         legacy_object.remove("conversation_sticky");
@@ -713,10 +798,6 @@ fn legacy_config_gets_persisted_desktop_defaults() {
     let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("state-test"));
     let state = CoreStateInner::new(db, dir.clone(), cipher).expect("state should initialize");
 
-    assert_eq!(
-        state.config().claude_desktop_models.resolved(),
-        AppConfig::default().claude_desktop_models.resolved()
-    );
     assert!(state.config().show_dock_icon);
     assert_eq!(
         state.config().routing_mode,
@@ -731,7 +812,10 @@ fn legacy_config_gets_persisted_desktop_defaults() {
         .get_setting("config")
         .expect("stored config should be readable")
         .expect("stored config should exist");
-    assert!(stored.contains("claude_desktop_models"));
+    assert!(
+        !stored.contains("claude_desktop_models"),
+        "canonical rewrite must drop the retired field: {stored}"
+    );
     assert!(stored.contains("show_dock_icon"));
     assert!(stored.contains("proxy_mode"));
     assert!(stored.contains("proxy_url"));
@@ -782,4 +866,117 @@ fn zen_activation_and_contract_reload_share_documented_lock_order() {
     reloader.join().expect("reloader thread");
     drop(state);
     fs::remove_dir_all(dir).expect("test data directory should be removed");
+}
+
+#[test]
+fn zen_activation_installs_the_just_persisted_catalog_with_new_models_off() {
+    let dir = temp_data_dir("zen-activation-snapshot");
+    let db = Database::open(dir.clone()).expect("test database should open");
+    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("state-test"));
+    let state = CoreStateInner::new(db, dir.clone(), cipher).expect("state should initialize");
+
+    let mut config = state.config();
+    config.proxy_mode = ProxyMode::List;
+    config.proxy_url = "http://127.0.0.1:9".into();
+    config.proxy_list_direction = ProxyListDirection::Whitelist;
+    config.proxy_list_models = vec!["first-free".into(), "replacement-free".into()];
+    state.set_config(config).unwrap();
+
+    for model in ["first-free", "replacement-free"] {
+        state
+            .activate_zen_free_model_catalog(crate::kernel::zen::ZenFreeModelCatalog {
+                models: vec![model.into()],
+                refreshed_at: Some(chrono::Utc::now()),
+                source_url: crate::kernel::zen::ZEN_MODELS_SOURCE_URL.into(),
+            })
+            .unwrap();
+
+        let scope = crate::provider_contracts::ContractScope::provider(
+            crate::provider::OPENCODE_ZEN_FREE_PROVIDER_ID,
+        );
+        let contract = state.provider_contracts().scope(&scope).cloned().unwrap();
+        assert_eq!(contract.catalog.models, [model]);
+        assert!(
+            contract
+                .models
+                .values()
+                .find(|row| row.model_id == model)
+                .is_some_and(|row| !row.has_enabled_protocol()),
+            "new Zen catalog rows must be installed default-off"
+        );
+        assert_eq!(
+            state.forward_route_set().client_for(model).1.as_str(),
+            "direct",
+            "default-off Zen rows must stay out of the proxy exception set"
+        );
+    }
+
+    drop(state);
+    fs::remove_dir_all(dir).expect("test data directory should be removed");
+}
+
+#[test]
+fn proxy_candidates_use_exact_upstream_ids_not_public_aliases() {
+    let now = chrono::Utc::now();
+    let custom_runtime = crate::custom::CustomAccountRuntime {
+        account_id: "custom-1".into(),
+        enabled: true,
+        verification_status: crate::provider::ConnectionVerificationStatus::Verified,
+        setup_ready: true,
+        has_key: true,
+        config: crate::models::AccountCustomConfig {
+            account_id: "custom-1".into(),
+            endpoint_url: "https://api.example.com/v1/messages".into(),
+            upstream_protocol: crate::provider::UpstreamProtocolKind::Messages,
+            created_at: now,
+            updated_at: now,
+        },
+        capabilities: vec![crate::models::AccountModelCapability {
+            account_id: "custom-1".into(),
+            public_model: "lab-opus".into(),
+            upstream_model: "vendor/opus".into(),
+            protocol: crate::provider::UpstreamProtocolKind::Messages,
+            verified_at: None,
+            source: "declared".into(),
+        }],
+    };
+    let mut inactive_custom = custom_runtime.clone();
+    inactive_custom.account_id = "custom-disabled".into();
+    inactive_custom.enabled = false;
+    inactive_custom.capabilities[0].public_model = "disabled-public".into();
+    inactive_custom.capabilities[0].upstream_model = "vendor/disabled".into();
+    let custom = [custom_runtime, inactive_custom];
+    let dynamics = [crate::dynamic::DynamicProviderRuntime {
+        preset_id: None,
+        id: "11111111-1111-1111-1111-111111111111".into(),
+        name: "Lab".into(),
+        endpoint_url: "https://lab.example/v1/chat/completions".into(),
+        upstream_protocol: crate::provider::UpstreamProtocolKind::ChatCompletions,
+        auth_kind: ocg_domain::dynamic::DynamicAuthKind::Bearer,
+        mappings: vec![ocg_domain::dynamic::DynamicModelMapping {
+            public_model: "lab-chat".into(),
+            upstream_model: "vendor/chat".into(),
+            upstream_override: None,
+        }],
+        created_at: now,
+        updated_at: now,
+        origin: crate::provider::ProviderOrigin::Custom,
+        offering: "api".into(),
+    }];
+    let candidates = build_proxy_model_candidates(
+        &crate::provider_contracts::EffectiveContractSet::default(),
+        &custom,
+        &dynamics,
+        &["cpa-model".into()],
+    );
+    let ids: Vec<&str> = candidates
+        .iter()
+        .map(|candidate| candidate.id.as_str())
+        .collect();
+    assert!(ids.contains(&"vendor/opus"), "{ids:?}");
+    assert!(ids.contains(&"vendor/chat"), "{ids:?}");
+    assert!(ids.contains(&"cpa-model"), "{ids:?}");
+    assert!(!ids.contains(&"vendor/disabled"), "{ids:?}");
+    assert!(!ids.contains(&"lab-opus"), "{ids:?}");
+    assert!(!ids.contains(&"lab-chat"), "{ids:?}");
 }

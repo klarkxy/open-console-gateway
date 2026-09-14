@@ -45,7 +45,9 @@ export type DashboardApiV4 =
   | CpaCatalog
   | CpaCatalogUpdate
   | CatalogModelsRemoveRequest
-  | CatalogModelsRemoveResult;
+  | CatalogModelsRemoveResult
+  | AliasPublication
+  | AliasPublicationUpdate;
 /**
  * Inference operation advertised by one endpoint. Mapped 1:1 from
  * [`UpstreamProtocolKind`].
@@ -199,6 +201,7 @@ export interface ProviderTemplate {
   familyId: string | null;
   id: string;
   offeringTags: OfferingKind[];
+  pricingMultiplierEditable: boolean;
   source: TemplateSource;
   upstreamProtocols: AccountUpstreamProtocol[];
   version: number;
@@ -496,4 +499,23 @@ export interface CatalogModelsRemoveResult {
   catalogModels: string[];
   removedIds: string[];
   revision: ControlRevision;
+}
+/**
+ * Public names currently hidden from authenticated `GET /v1/models`.
+ *
+ * Missing names default to published. Hidden names remain routable.
+ */
+export interface AliasPublication {
+  revision: ControlRevision;
+  unpublished: string[];
+}
+/**
+ * Toggle one public name's downstream listing. `publicModel` is
+ * case-folded on write.
+ */
+export interface AliasPublicationUpdate {
+  expectedRevision: number;
+  processGeneration: number;
+  publicModel: string;
+  published: boolean;
 }

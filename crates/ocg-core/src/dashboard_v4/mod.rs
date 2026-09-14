@@ -2,9 +2,10 @@
 //!
 //! Mounted at `/dashboard/api/v4` beside V3. This slice is a parallel
 //! additive control plane: read-only connection/template projections plus
-//! CAS-protected onboarding, binding, credential, local CPA catalog, and
-//! built-in Provider catalog writes. It reuses V3 session middleware and
-//! the V3 error envelope. Handlers must not issue outbound network requests.
+//! CAS-protected onboarding, binding, credential, local CPA catalog,
+//! built-in Provider catalog writes, and alias publication. It reuses V3
+//! session middleware and the V3 error envelope. Handlers must not issue
+//! outbound network requests.
 
 mod bindings;
 mod catalog;
@@ -13,6 +14,7 @@ mod cpa;
 mod credentials;
 mod identities;
 mod onboarding;
+mod publication;
 mod templates;
 mod types;
 
@@ -48,6 +50,10 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
         .route(
             "/provider-contracts/{scope_kind}/{scope_id}/catalog/remove",
             post(catalog::remove_models),
+        )
+        .route(
+            "/alias-publication",
+            get(publication::get_publication).patch(publication::patch_publication),
         )
         .route_layer(middleware::from_fn_with_state(state, require_v3_session))
 }

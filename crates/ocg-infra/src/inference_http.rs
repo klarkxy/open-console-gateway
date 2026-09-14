@@ -13,7 +13,8 @@ use futures_util::StreamExt;
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
 
 use crate::http::{
-    OutboundProxySpec, ProxyMode, attach_dns_resolver, configured_builder, no_redirect_policy,
+    OutboundProxySpec, ProxyMode, RouteLabel, attach_dns_resolver, configured_builder,
+    configured_builder_for_label, no_redirect_policy,
 };
 
 /// Redirect policy for an inference HTTP client. Follow versus none is chosen
@@ -247,6 +248,31 @@ impl HttpInferenceTransport {
         dns_resolver: Option<Arc<dyn reqwest::dns::Resolve>>,
     ) -> Result<Self, InferenceHttpError> {
         let mut builder = configured_builder(proxy)
+            .map_err(|error| InferenceHttpError::Build(error.to_string()))?
+            .redirect(spec.redirect().reqwest_policy())
+            .connect_timeout(proxy.connect_timeout);
+        if let Some(resolver) = dns_resolver {
+            builder = attach_dns_resolver(builder, resolver);
+        }
+        let client = builder
+            .build()
+            .map_err(|error| InferenceHttpError::Build(error.to_string()))?;
+        Ok(Self {
+            client,
+            proxy_mode: proxy.mode,
+            spec,
+        })
+    }
+
+    /// Build on an already-selected request-entry proxy/direct leg while
+    /// retaining this transport's redirect and destination-DNS policy.
+    pub fn build_for_route_with_dns_resolver(
+        proxy: &OutboundProxySpec,
+        route: RouteLabel,
+        spec: HttpInferenceTransportSpec,
+        dns_resolver: Option<Arc<dyn reqwest::dns::Resolve>>,
+    ) -> Result<Self, InferenceHttpError> {
+        let mut builder = configured_builder_for_label(proxy, route)
             .map_err(|error| InferenceHttpError::Build(error.to_string()))?
             .redirect(spec.redirect().reqwest_policy())
             .connect_timeout(proxy.connect_timeout);

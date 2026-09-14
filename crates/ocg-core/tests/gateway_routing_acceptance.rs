@@ -10,7 +10,7 @@
 //! origin hits whether shadow is on or off.
 
 use axum::http::StatusCode;
-use ocg_core::models::RoutingMode;
+use ocg_core::models::{ProxyListDirection, ProxyMode, RoutingMode};
 use ocg_core::provider::{
     COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS, COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
     COMMAND_CODE_PROVIDER_ID, CUSTOM_PROVIDER_ID, OPENCODE_PROVIDER_ID,
@@ -76,6 +76,87 @@ async fn bind_three_dynamic_labs(
     let ids = [ids[0].clone(), ids[1].clone(), ids[2].clone()];
     reorder_first(&h.state, &ids);
     ThreeLabs { h, journal, ids }
+}
+
+#[tokio::test]
+async fn proxy_list_matches_the_materialized_upstream_id_in_both_directions() {
+    let journal = SharedJournal::new();
+    let origin = start_journaled_lab(&journal, "origin", DUMMY_A, &[ok()]).await;
+    let proxy = start_journaled_lab(&journal, "proxy", DUMMY_A, &[ok(), ok()]).await;
+    let (state, dir) = build_state_with_routing(
+        "http://127.0.0.1:1".into(),
+        &[],
+        RoutingMode::StrictPriority,
+        false,
+    );
+    let mut h = FallbackHarness::from_state(state, dir).await;
+    create_dynamic_lab(
+        h.port,
+        &h.state,
+        "proxy-id-lab",
+        &origin.url,
+        Some(DUMMY_A),
+        ROUTE_MODEL,
+        UPSTREAM_MODEL,
+        "chat_completions",
+    )
+    .await;
+    let (settings_status, settings) =
+        dashboard_json(h.port, reqwest::Method::GET, "v3", "/settings", None).await;
+    assert_eq!(settings_status, StatusCode::OK, "{settings}");
+    assert!(
+        settings["proxySupportedModels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["id"] == UPSTREAM_MODEL),
+        "dynamic upstream id is missing from proxy candidates: {settings}"
+    );
+
+    let mut config = h.state.config();
+    config.proxy_mode = ProxyMode::List;
+    config.proxy_url = proxy.url.clone();
+    config.proxy_list_models = vec![UPSTREAM_MODEL.into()];
+    config.proxy_list_direction = ProxyListDirection::Whitelist;
+    h.state.set_config(config.clone()).unwrap();
+    let (status, body) = h.protocol("/v1/chat/completions", ROUTE_MODEL).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let proxy_log = sorted_logs(&h.state).pop().unwrap();
+    let proxy_attribution = h
+        .state
+        .db
+        .lock()
+        .forward_log_native_attribution(proxy_log.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        proxy_attribution.upstream_model.as_deref(),
+        Some(UPSTREAM_MODEL)
+    );
+    assert_eq!(proxy_log.route, "proxy");
+    assert_eq!(journal.listeners(), ["proxy"]);
+
+    config.proxy_list_direction = ProxyListDirection::Blacklist;
+    h.state.set_config(config).unwrap();
+    let (status, body) = h.protocol("/v1/chat/completions", ROUTE_MODEL).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(journal.listeners(), ["proxy", "origin"]);
+    let direct_log = sorted_logs(&h.state).pop().unwrap();
+    let direct_attribution = h
+        .state
+        .db
+        .lock()
+        .forward_log_native_attribution(direct_log.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        direct_attribution.upstream_model.as_deref(),
+        Some(UPSTREAM_MODEL)
+    );
+
+    h.push_stop(origin.stop);
+    h.push_stop(proxy.stop);
+    h.stop();
 }
 
 fn evidence(

@@ -1,5 +1,6 @@
 pub mod account_control;
 pub mod alias;
+pub(crate) mod alias_publication;
 pub mod auth;
 pub mod browser;
 pub(crate) mod control;

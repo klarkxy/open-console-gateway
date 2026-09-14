@@ -894,7 +894,7 @@ async fn failed_rebind_compensation_still_restores_after_revision_only_bump() {
 }
 
 #[tokio::test]
-async fn failed_http_rebind_releases_sync_gate_and_preserves_later_key_and_claude_writes() {
+async fn failed_http_rebind_releases_sync_gate_and_preserves_later_key_writes() {
     let (state, dir) = new_state("http-compensate-live-config");
     let (held_port, shutdown_seen, release) = install_held_listener(&state).await;
 
@@ -954,25 +954,6 @@ async fn failed_http_rebind_releases_sync_gate_and_preserves_later_key_and_claud
     .await
     .expect("settings request should persist before its listener await");
 
-    let claude = tokio::time::timeout(
-        Duration::from_secs(2),
-        client
-            .put(format!(
-                "http://127.0.0.1:{serving_port}/dashboard/api/v3/claude-desktop/models"
-            ))
-            .json(&json!({
-                "expectedRevision": state.settings_revision(),
-                "processGeneration": state.process_generation(),
-                "sonnet": "glm-5.2",
-                "opus": "",
-                "haiku": "" }))
-            .send(),
-    )
-    .await
-    .expect("Claude writer must not block on settings_update across the listener await")
-    .expect("Claude writer should receive a response");
-    assert_eq!(claude.status(), StatusCode::OK);
-
     let primary_before = state.config().gateway_key;
     let key = tokio::time::timeout(
         Duration::from_secs(2),
@@ -1008,7 +989,6 @@ async fn failed_http_rebind_releases_sync_gate_and_preserves_later_key_and_claud
     assert_eq!(live.gateway_port, serving_port);
     assert_eq!(state.active_gateway_port(), serving_port);
     assert_eq!(live.gateway_key, primary_after);
-    assert_eq!(live.claude_desktop_models.sonnet, "glm-5.2");
     assert_eq!(
         state.settings_revision(),
         revision_after_writers + 1,
@@ -1027,7 +1007,6 @@ async fn failed_http_rebind_releases_sync_gate_and_preserves_later_key_and_claud
         Some(primary_after.as_str())
     );
     assert_eq!(stored.gateway_key, "");
-    assert_eq!(stored.claude_desktop_models.sonnet, "glm-5.2");
 
     let handle = state.gateway.lock().take();
     if let Some(handle) = handle {

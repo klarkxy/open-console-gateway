@@ -1378,6 +1378,45 @@ fn v47_adds_onboarding_draft_to_existing_v46_rows() {
 }
 
 #[test]
+fn v49_adds_unpublished_public_models_on_v48_reopen_and_fresh_databases() {
+    let fresh = temp_data_dir("v49-fresh");
+    let db = open_with_host_cipher(fresh.clone()).unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), CURRENT_SCHEMA_VERSION);
+    assert!(table_exists(&db.conn, "unpublished_public_models").unwrap());
+    assert!(db.list_unpublished_public_models().unwrap().is_empty());
+    drop(db);
+    fs::remove_dir_all(fresh).unwrap();
+
+    let dir = temp_data_dir("v49-from-v48");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    db.conn
+        .execute_batch(
+            "DROP TABLE unpublished_public_models;
+             DELETE FROM schema_version;
+             INSERT INTO schema_version(version) VALUES (48);",
+        )
+        .unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), 48);
+    assert!(!table_exists(&db.conn, "unpublished_public_models").unwrap());
+    drop(db);
+
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), CURRENT_SCHEMA_VERSION);
+    assert!(table_exists(&db.conn, "unpublished_public_models").unwrap());
+    db.upsert_unpublished_public_model("deepseek-v4-flashnh")
+        .unwrap();
+    assert_eq!(
+        db.list_unpublished_public_models().unwrap(),
+        vec!["deepseek-v4-flashnh".to_string()]
+    );
+    db.remove_unpublished_public_model("deepseek-v4-flashnh")
+        .unwrap();
+    assert!(db.list_unpublished_public_models().unwrap().is_empty());
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn list_dynamic_providers_excludes_drafts_and_control_plane_includes_them() {
     let dir = temp_data_dir("draft-list-boundary");
     let db = open_with_host_cipher(dir.clone()).unwrap();

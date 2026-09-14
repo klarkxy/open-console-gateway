@@ -1309,19 +1309,19 @@ pub(crate) async fn create_dynamic_lab(
         .as_str()
         .unwrap_or_else(|| panic!("dynamic provider id missing: {created}"))
         .to_string();
-    let account_id = state
+    let account = state
         .db
         .lock()
         .list_accounts()
         .unwrap()
         .into_iter()
-        .find(|account| account.provider_id == provider_id)
-        .map(|account| account.id);
-    if let Some(id) = &account_id {
+        .find(|account| account.provider_id == provider_id);
+    let account_id = account.as_ref().map(|account| account.id.clone());
+    if let Some(account) = account.filter(|account| !account.enabled) {
         let (status, body) = v3_mutate(
             port,
             state,
-            &format!("/accounts/{id}/toggle"),
+            &format!("/accounts/{}/toggle", account.id),
             serde_json::json!({}),
         )
         .await;
@@ -1367,14 +1367,16 @@ pub(crate) async fn create_custom_lab(
         .or_else(|| created["id"].as_str())
         .unwrap_or_else(|| panic!("custom account id missing: {created}"))
         .to_string();
-    let (status, body) = v3_mutate(
-        port,
-        state,
-        &format!("/accounts/{id}/toggle"),
-        serde_json::json!({}),
-    )
-    .await;
-    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    if created["account"]["enabled"] == false {
+        let (status, body) = v3_mutate(
+            port,
+            state,
+            &format!("/accounts/{id}/toggle"),
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    }
     id
 }
 

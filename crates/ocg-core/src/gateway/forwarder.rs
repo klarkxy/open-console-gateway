@@ -1,4 +1,4 @@
-use crate::custom_http::{build_custom_http_client, json_content_headers};
+use crate::custom_http::{build_custom_http_client_for_route, json_content_headers};
 use crate::db::{Database, ForwardLogDiagnosticUpdate};
 use crate::gateway::attempt::{
     AttemptSpec, AttemptTimeouts, AttemptTransportError, CredentialHandle, CredentialResolveError,
@@ -242,7 +242,7 @@ async fn forward_once(
     let secret_bearing = headers_carry_upstream_secret(&headers);
     let mut request = match spec.proxy_routing {
         ProxyRoutingModel::IsolatedTrustedAdmin => {
-            let client = build_custom_http_client(config)?;
+            let client = build_custom_http_client_for_route(config, route)?;
             let url = reqwest::Url::parse(url)?;
             crate::custom_http::inspect_custom_url(&url)
                 .map_err(|error| anyhow::anyhow!(error.to_string()))?;

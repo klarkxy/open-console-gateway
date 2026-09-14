@@ -11,9 +11,6 @@ use crate::gateway::response::{
     local_protocol_failure, protocol_error_from, protocol_error_response,
 };
 use crate::kernel::protocol::ApiFormat;
-use crate::models::{
-    CLAUDE_DESKTOP_HAIKU_ALIAS, CLAUDE_DESKTOP_OPUS_ALIAS, CLAUDE_DESKTOP_SONNET_ALIAS,
-};
 use crate::state::CoreState;
 use axum::body::{Body, Bytes};
 use axum::extract::{Extension, Path, State};
@@ -115,56 +112,6 @@ pub async fn messages(
     body: Bytes,
 ) -> axum::response::Response {
     proxy_handler(state, trace, headers, body, ApiFormat::Messages).await
-}
-
-pub async fn claude_desktop_messages(
-    State(state): State<CoreState>,
-    Extension(trace): Extension<RequestTrace>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> axum::response::Response {
-    proxy_handler_inner(state, trace, headers, body, ApiFormat::Messages, true).await
-}
-
-pub async fn claude_desktop_models(
-    State(state): State<CoreState>,
-    headers: HeaderMap,
-) -> axum::response::Response {
-    if !check_auth(&headers, &state) {
-        return protocol_error_response(
-            ApiFormat::Messages,
-            StatusCode::UNAUTHORIZED,
-            "invalid gateway key",
-            None,
-        );
-    }
-
-    axum::Json(serde_json::json!({
-        "data": [
-            {
-                "type": "model",
-                "id": CLAUDE_DESKTOP_SONNET_ALIAS,
-                "display_name": "Claude Sonnet 4.6",
-                "created_at": "2026-02-17T00:00:00Z"
-            },
-            {
-                "type": "model",
-                "id": CLAUDE_DESKTOP_OPUS_ALIAS,
-                "display_name": "Claude Opus 4.6",
-                "created_at": "2026-02-05T00:00:00Z"
-            },
-            {
-                "type": "model",
-                "id": CLAUDE_DESKTOP_HAIKU_ALIAS,
-                "display_name": "Claude Haiku 4.5",
-                "created_at": "2025-10-01T00:00:00Z"
-            }
-        ],
-        "has_more": false,
-        "first_id": CLAUDE_DESKTOP_SONNET_ALIAS,
-        "last_id": CLAUDE_DESKTOP_HAIKU_ALIAS
-    }))
-    .into_response()
 }
 
 pub async fn gemini_model_action(
@@ -287,10 +234,14 @@ fn published_alias_models_response(state: &CoreState) -> axum::response::Respons
         ollama_pinned: &ollama_pinned_ids,
         extra: &extra,
     };
+    let unpublished = state.unpublished_public_models();
     let published = crate::alias::published_routeable_aliases_with_runtime_catalogs(catalogs);
     let mut data: Vec<serde_json::Value> = published
         .iter()
-        .filter(|item| published_alias_has_enabled_protocol(item, catalogs, &contracts, &dynamics))
+        .filter(|item| {
+            crate::alias_publication::is_downstream_visible(&item.alias, &unpublished)
+                && published_alias_has_enabled_protocol(item, catalogs, &contracts, &dynamics)
+        })
         .map(|item| {
             serde_json::json!({
                 "id": item.alias,
@@ -307,6 +258,9 @@ fn published_alias_models_response(state: &CoreState) -> axum::response::Respons
                 if mappings.iter().any(|mapping| mapping.is_custom_api() && mapping.routeable)
         );
         if !routeable_custom_alias {
+            continue;
+        }
+        if !crate::alias_publication::is_downstream_visible(id, &unpublished) {
             continue;
         }
         if data.iter().any(|item| {
@@ -330,6 +284,7 @@ fn published_alias_models_response(state: &CoreState) -> axum::response::Respons
                 if mapping.provider_id == crate::provider::CPA_PROVIDER_ID && mapping.routeable
         );
         if exact_cpa_raw
+            && crate::alias_publication::is_downstream_visible(id, &unpublished)
             && !data
                 .iter()
                 .any(|item| item.get("id").and_then(|value| value.as_str()) == Some(id))
@@ -345,6 +300,9 @@ fn published_alias_models_response(state: &CoreState) -> axum::response::Respons
     for catalog in &extra {
         for (public_model, _upstream_model) in &catalog.mappings {
             if published_model_ids_contain(&data, public_model) {
+                continue;
+            }
+            if !crate::alias_publication::is_downstream_visible(public_model, &unpublished) {
                 continue;
             }
             if !model_has_enabled_protocol(public_model, catalogs, &contracts, &dynamics) {
@@ -480,7 +438,7 @@ async fn proxy_handler(
     body: Bytes,
     client_format: ApiFormat,
 ) -> axum::response::Response {
-    proxy_handler_inner(state, trace, headers, body, client_format, false).await
+    proxy_handler_inner(state, trace, headers, body, client_format).await
 }
 
 async fn proxy_handler_inner(
@@ -489,7 +447,6 @@ async fn proxy_handler_inner(
     headers: HeaderMap,
     body: Bytes,
     client_format: ApiFormat,
-    claude_desktop: bool,
 ) -> axum::response::Response {
     let config = state.config();
     let client_body_bytes = body.len();
@@ -518,29 +475,7 @@ async fn proxy_handler_inner(
         }
     };
     let client_model = parsed.requested_model.clone();
-    let routing_model = if claude_desktop {
-        match config
-            .claude_desktop_models
-            .model_for_alias(&parsed.requested_model)
-        {
-            Some(model) => model.to_string(),
-            None => {
-                return local_protocol_failure(
-                    &state,
-                    &trace,
-                    ApiFormat::Messages,
-                    ProtocolError::new(format!(
-                        "unsupported Claude Desktop model alias `{}`",
-                        parsed.requested_model
-                    )),
-                    Some(client_body_bytes),
-                    Some(&client_body),
-                );
-            }
-        }
-    } else {
-        parsed.requested_model.clone()
-    };
+    let routing_model = parsed.requested_model.clone();
     let contracts = state.provider_contracts();
     let go_model_ids =
         provider_catalog_model_ids(&contracts, crate::provider::OPENCODE_PROVIDER_ID);
@@ -612,33 +547,6 @@ async fn proxy_handler_inner(
         dynamics,
     )
     .await
-}
-
-#[cfg(test)]
-fn rewrite_claude_desktop_model(
-    body: &Bytes,
-    models: &crate::models::ClaudeDesktopModels,
-) -> Result<Bytes, ProtocolError> {
-    let mut request: serde_json::Value = serde_json::from_slice(body)
-        .map_err(|error| ProtocolError::new(format!("invalid JSON request: {error}")))?;
-    let object = request
-        .as_object_mut()
-        .ok_or_else(|| ProtocolError::new("request must be a JSON object"))?;
-    let alias = object
-        .get("model")
-        .and_then(serde_json::Value::as_str)
-        .filter(|model| !model.is_empty())
-        .ok_or_else(|| ProtocolError::new("request model is required"))?;
-    let model = models
-        .model_for_alias(alias)
-        .ok_or_else(|| {
-            ProtocolError::new(format!("unsupported Claude Desktop model alias `{alias}`"))
-        })?
-        .to_string();
-    object.insert("model".to_string(), serde_json::Value::String(model));
-    serde_json::to_vec(&request)
-        .map(Bytes::from)
-        .map_err(|error| ProtocolError::new(format!("failed to encode request: {error}")))
 }
 
 async fn gemini_proxy_handler(
@@ -872,20 +780,11 @@ fn local_failure_response(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        active_cpa_model_ids, check_auth, extract_client_key_id, rewrite_claude_desktop_model,
-    };
-    use crate::gateway::materialize::resolved_alias_from_model;
-    use crate::gateway::protocol::{
-        ApiFormat, MaterializeSpec, materialize_parsed_request, parse_client_request,
-        prepare_request,
-    };
+    use super::{active_cpa_model_ids, check_auth, extract_client_key_id};
     use crate::gateway_keys::{CredentialEntry, CredentialSnapshot, PRIMARY_KEY_ID};
-    use crate::models::{AppConfig, CLAUDE_DESKTOP_OPUS_ALIAS, ClaudeDesktopModels};
+    use crate::models::AppConfig;
     use crate::state::{CoreState, CoreStateInner};
-    use axum::body::Bytes;
     use axum::http::{HeaderMap, HeaderValue};
-    use serde_json::json;
     use std::collections::HashMap;
 
     /// Owns the temp data dir and releases the SQLite connection (and thus
@@ -1040,68 +939,6 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("x-api-key", HeaderValue::from_static("ocg-laptop"));
         assert!(!check_auth(&headers, &state));
-    }
-
-    #[test]
-    fn claude_desktop_alias_is_rewritten_before_messages_preparation() {
-        let models = ClaudeDesktopModels {
-            sonnet: "glm-5.2".to_string(),
-            opus: String::new(),
-            haiku: String::new(),
-        };
-        let body = Bytes::from(
-            serde_json::to_vec(&json!({
-                "model": CLAUDE_DESKTOP_OPUS_ALIAS,
-                "max_tokens": 1,
-                "messages": [{"role":"user","content":"hi"}]
-            }))
-            .expect("test request should serialize"),
-        );
-
-        let rewritten =
-            rewrite_claude_desktop_model(&body, &models).expect("known alias should be rewritten");
-        let plan = prepare_request(ApiFormat::Messages, rewritten)
-            .expect("rewritten request should use the existing preparation path");
-
-        assert_eq!(plan.model, "glm-5.2");
-        // The current protocol snapshot exposes glm-5.2 through Chat only, so
-        // the Claude Desktop Messages request is converted after alias rewrite.
-        assert_eq!(plan.upstream, ApiFormat::ChatCompletions);
-
-        let parsed = parse_client_request(ApiFormat::Messages, body).expect("parse once");
-        assert_eq!(parsed.requested_model, CLAUDE_DESKTOP_OPUS_ALIAS);
-        let mapped = models
-            .model_for_alias(&parsed.requested_model)
-            .expect("opus inherits sonnet");
-        let resolved = crate::alias::resolve(mapped).expect("mapped Go alias");
-        assert!(matches!(
-            resolved,
-            crate::alias::ResolvedModel::Alias { ref alias, .. } if alias == "glm-5.2"
-        ));
-        let plan = materialize_parsed_request(
-            &parsed,
-            &MaterializeSpec {
-                client_model: parsed.requested_model.clone(),
-                upstream_model: mapped.to_string(),
-                resolved_alias: resolved_alias_from_model(&resolved),
-                channel: crate::models::UpstreamChannel::Go,
-                upstream_base_override: None,
-                original_model: None,
-                allow_go_fallback: false,
-                forced_upstream: None,
-                custom_route: None,
-            },
-        )
-        .expect("Claude Desktop keeps the original alias as client_model");
-        assert_eq!(plan.model, "glm-5.2");
-        assert_eq!(plan.client_model, CLAUDE_DESKTOP_OPUS_ALIAS);
-        assert_eq!(
-            crate::gateway::materialize::native_log_identity(&plan)
-                .resolved_alias
-                .as_deref(),
-            Some("glm-5.2")
-        );
-        assert_eq!(plan.upstream, ApiFormat::ChatCompletions);
     }
 
     #[test]

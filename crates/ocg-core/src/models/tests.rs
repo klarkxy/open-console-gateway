@@ -1,48 +1,24 @@
 use super::{
-    AppConfig, CLAUDE_DESKTOP_HAIKU_ALIAS, CLAUDE_DESKTOP_OPUS_ALIAS, CLAUDE_DESKTOP_SONNET_ALIAS,
-    ClaudeDesktopModels, DEFAULT_OPENCODE_INVITE_URL, MAX_ACCOUNT_NOTES_CHARS, ProxyListDirection,
-    ProxyMode, RoutingMode, normalize_account_notes, normalize_opencode_invite_url,
-    normalize_proxy_url, normalize_purchase_date, purchase_expires_on,
+    AppConfig, DEFAULT_OPENCODE_INVITE_URL, MAX_ACCOUNT_NOTES_CHARS, ProxyListDirection, ProxyMode,
+    RoutingMode, normalize_account_notes, normalize_opencode_invite_url, normalize_proxy_url,
+    normalize_purchase_date, purchase_expires_on,
 };
 
 #[test]
-fn claude_desktop_models_map_aliases_and_inherit_by_role_priority() {
-    let models = ClaudeDesktopModels {
-        sonnet: String::new(),
-        opus: "glm-5.2".to_string(),
-        haiku: "mimo-v2.5".to_string(),
-    };
-
-    assert_eq!(
-        models.model_for_alias(CLAUDE_DESKTOP_SONNET_ALIAS),
-        Some("glm-5.2")
-    );
-    assert_eq!(
-        models.model_for_alias(CLAUDE_DESKTOP_OPUS_ALIAS),
-        Some("glm-5.2")
-    );
-    assert_eq!(
-        models.model_for_alias(CLAUDE_DESKTOP_HAIKU_ALIAS),
-        Some("mimo-v2.5")
-    );
-    assert_eq!(models.model_for_alias("claude-unknown"), None);
-}
-
-#[test]
-fn claude_desktop_models_reject_unknown_and_all_empty_values() {
-    let empty = ClaudeDesktopModels {
-        sonnet: String::new(),
-        opus: String::new(),
-        haiku: String::new(),
-    };
-    assert!(empty.validate().is_err());
-
-    let unknown = ClaudeDesktopModels {
-        sonnet: "not-a-supported-model".to_string(),
-        ..ClaudeDesktopModels::default()
-    };
-    assert!(unknown.validate().is_err());
-    assert!(ClaudeDesktopModels::default().validate().is_ok());
+fn legacy_claude_desktop_models_field_is_ignored_on_load() {
+    let encoded = serde_json::json!({
+        "gateway_key": "ocg-keep",
+        "claude_desktop_models": {
+            "sonnet": "minimax-m3",
+            "opus": "glm-5.2",
+            "haiku": ""
+        }
+    });
+    let config: AppConfig =
+        serde_json::from_value(encoded).expect("legacy claude_desktop_models must deserialize");
+    assert_eq!(config.gateway_key, "ocg-keep");
+    let roundtrip = serde_json::to_value(&config).expect("config should serialize");
+    assert!(roundtrip.get("claude_desktop_models").is_none());
 }
 
 #[test]

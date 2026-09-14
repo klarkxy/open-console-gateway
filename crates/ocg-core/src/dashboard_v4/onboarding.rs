@@ -217,7 +217,9 @@ fn finish_new(
         )
         .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?
     };
-    state.install_dynamic_providers_snapshot(snapshot);
+    state
+        .install_dynamic_providers_snapshot(snapshot)
+        .map_err(V3ApiError::internal)?;
     Ok(committed_result(state, stored))
 }
 
@@ -592,7 +594,9 @@ fn resume_existing_draft(
         )
         .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?
     };
-    state.install_dynamic_providers_snapshot(snapshot);
+    state
+        .install_dynamic_providers_snapshot(snapshot)
+        .map_err(V3ApiError::internal)?;
     Ok(committed_result(state, stored))
 }
 

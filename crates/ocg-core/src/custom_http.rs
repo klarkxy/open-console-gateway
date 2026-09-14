@@ -529,6 +529,24 @@ pub fn build_custom_http_client(config: &AppConfig) -> Result<CustomHttpClient, 
     })
 }
 
+pub(crate) fn build_custom_http_client_for_route(
+    config: &AppConfig,
+    route: crate::http_client::RouteLabel,
+) -> Result<CustomHttpClient, CustomHttpError> {
+    let mut proxy = crate::http_client::outbound_proxy_spec(config);
+    proxy.connect_timeout = custom_connect_timeout(config);
+    Ok(CustomHttpClient {
+        transport: HttpInferenceTransport {
+            inner: ocg_infra::inference_http::HttpInferenceTransport::build_for_route_with_dns_resolver(
+                &proxy,
+                route,
+                HttpInferenceTransportSpec::no_redirects().to_infra(),
+                Some(dns::isolated_destination_resolver()),
+            )?,
+        },
+    })
+}
+
 #[cfg(test)]
 pub(crate) fn build_custom_http_client_with_dns_resolver(
     config: &AppConfig,
