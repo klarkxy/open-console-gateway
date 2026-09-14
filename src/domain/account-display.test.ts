@@ -8,7 +8,6 @@ import {
   accountRoutingDraftLabel,
   accountStatusLabel,
   accountStatusTagType,
-  isUsageRefreshBlocked,
   usageSyncCaption,
 } from "./account-display.ts";
 
@@ -92,7 +91,7 @@ test("draft status replaces disabled instead of rendering a second competing sta
 
   const ordinaryDisabled = draftAccount({ plan_routable: true, verification_status: "verified" });
   assert.equal(accountStatusLabel(ordinaryDisabled), "已禁用");
-  assert.equal(accountStatusTagType(ordinaryDisabled), "default");
+  assert.equal(accountStatusTagType(ordinaryDisabled), "error");
 });
 
 test("CPA accounts expose only the jump to their external-integration page", () => {
@@ -151,7 +150,7 @@ test("routable Custom accounts follow live enablement rather than legacy verific
 
   const pending = custom();
   assert.equal(accountStatusLabel(pending), "已禁用");
-  assert.equal(accountStatusTagType(pending), "default");
+  assert.equal(accountStatusTagType(pending), "error");
   assert.equal(accountStatusLabel(custom({ verification_status: "failed" })), "已禁用");
   assert.equal(accountStatusLabel(custom({ verification_status: "verified" })), "已禁用");
   assert.deepEqual(accountMenuOptions(custom(), Date.now()).map(({ key }) => key), ["edit", "delete"]);
@@ -168,7 +167,10 @@ test("GOAT account states are live without a verification phase", () => {
   });
 
   assert.equal(accountStatusLabel(goat()), "已禁用");
-  assert.equal(accountStatusLabel(goat({ enabled: true })), "可用");
+  assert.equal(accountStatusTagType(goat()), "error");
+  // Ready + enabled is the routing-on configuration state, not an availability claim.
+  assert.equal(accountStatusLabel(goat({ enabled: true })), "已启用");
+  assert.equal(accountStatusTagType(goat({ enabled: true })), "success");
   assert.equal(accountStatusLabel(goat({ plan_routable: false })), "等待支持");
 });
 
@@ -187,14 +189,12 @@ test("upstream auth failure is a distinct unavailable state, not cooldown", () =
   );
 });
 
-test("usage sync captions distinguish never-synced, last success, and refresh cooldown", () => {
-  const now = Date.parse("2026-08-21T00:00:00Z");
+test("usage sync captions show last success or never-synced, never a refresh cooldown", () => {
   const neverSynced = draftAccount({
     plan_routable: true,
     verification_status: "verified",
   });
-  assert.equal(isUsageRefreshBlocked(neverSynced, now), false);
-  assert.equal(usageSyncCaption(neverSynced, now), "尚未官方同步");
+  assert.equal(usageSyncCaption(neverSynced), "尚未官方同步");
 
   const cooling = draftAccount({
     plan_routable: true,
@@ -202,7 +202,6 @@ test("usage sync captions distinguish never-synced, last success, and refresh co
     usage_sync_last_success_at: "2026-08-20T12:00:00Z",
     usage_sync_next_allowed_at: "2026-08-21T00:01:00Z",
   });
-  assert.equal(isUsageRefreshBlocked(cooling, now), true);
-  assert.match(usageSyncCaption(cooling, now), /上次官方同步:/);
-  assert.match(usageSyncCaption(cooling, now), /刷新额度冷却中，请于 .+ 后重试/);
+  assert.match(usageSyncCaption(cooling), /上次官方同步:/);
+  assert.doesNotMatch(usageSyncCaption(cooling), /刷新额度冷却中/);
 });

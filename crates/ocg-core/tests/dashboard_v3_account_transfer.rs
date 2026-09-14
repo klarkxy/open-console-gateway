@@ -67,6 +67,17 @@ fn assert_no_store(headers: &reqwest::header::HeaderMap) {
     );
 }
 
+async fn send_json_no_store(
+    harness: &V3Harness,
+    method: Method,
+    path: &str,
+    body: &Value,
+) -> (StatusCode, Value) {
+    let (status, headers, body) = send_json(harness, method, path, body).await;
+    assert_no_store(&headers);
+    (status, body)
+}
+
 async fn create_source_accounts(harness: &V3Harness) {
     let (status, _, body) = send_json(
         harness,
@@ -116,6 +127,19 @@ async fn create_source_accounts(harness: &V3Harness) {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
+    let ids: Vec<String> = harness
+        .state
+        .db
+        .lock()
+        .list_accounts()
+        .unwrap()
+        .into_iter()
+        .filter(|account| account.provider_id != OPENCODE_ZEN_FREE_PROVIDER_ID)
+        .map(|account| account.id)
+        .collect();
+    for id in ids {
+        harness.enable_account(&id);
+    }
 }
 
 fn custom_pending_but_enabled(harness: &V3Harness) -> String {
@@ -129,7 +153,21 @@ fn custom_pending_but_enabled(harness: &V3Harness) -> String {
         .find(|account| account.provider_id == CUSTOM_PROVIDER_ID)
         .map(|account| (account.id, account.enabled))
         .unwrap();
-    assert!(enabled, "Custom creation should default to enabled");
+    if !enabled {
+        harness.enable_account(&id);
+    }
+    let enabled = harness
+        .state
+        .db
+        .lock()
+        .get_account(&id)
+        .unwrap()
+        .unwrap()
+        .enabled;
+    assert!(
+        enabled,
+        "Custom pending accounts can be enabled without verify"
+    );
     assert_eq!(
         harness
             .state
@@ -188,7 +226,7 @@ async fn encrypted_account_migration_moves_keys_without_exposing_them() {
         ocg_core::gateway_keys::create_sub_key(&source.state, "Migrated client").unwrap()
     };
 
-    let (status, headers, body) = send_json(
+    let (status, body) = send_json_no_store(
         &source,
         Method::POST,
         "/accounts/transfer/export",
@@ -198,7 +236,6 @@ async fn encrypted_account_migration_moves_keys_without_exposing_them() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_no_store(&headers);
     assert_eq!(body["exportedAccounts"], 3);
     assert_eq!(body["skippedAccounts"], 0);
     let encoded = body.to_string();
@@ -207,7 +244,7 @@ async fn encrypted_account_migration_moves_keys_without_exposing_them() {
     assert!(!encoded.contains(GOAT_KEY));
     let bundle = body["bundle"].as_str().unwrap().to_string();
 
-    let (status, headers, body) = send_json(
+    let (status, body) = send_json_no_store(
         &source,
         Method::POST,
         "/accounts/transfer/export",
@@ -217,7 +254,6 @@ async fn encrypted_account_migration_moves_keys_without_exposing_them() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-    assert_no_store(&headers);
 
     let target = start_loopback("account-transfer-target").await;
     let (status, _, body) = send_json(
@@ -232,7 +268,7 @@ async fn encrypted_account_migration_moves_keys_without_exposing_them() {
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let target_extra_id = body["account"]["id"].as_str().unwrap().to_string();
-    let (status, headers, preview) = send_json(
+    let (status, preview) = send_json_no_store(
         &target,
         Method::POST,
         "/accounts/transfer/preview",
@@ -240,7 +276,6 @@ async fn encrypted_account_migration_moves_keys_without_exposing_them() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{preview}");
-    assert_no_store(&headers);
     assert_eq!(preview["importableAccounts"], 3);
     assert_eq!(preview["duplicateAccounts"], 0);
     assert_eq!(preview["items"].as_array().unwrap().len(), 3);
@@ -287,7 +322,7 @@ async fn encrypted_account_migration_moves_keys_without_exposing_them() {
     assert_eq!(target.state.db.lock().list_accounts().unwrap().len(), 2);
 
     let before = target.state.settings_revision();
-    let (status, headers, imported) = send_json(
+    let (status, imported) = send_json_no_store(
         &target,
         Method::POST,
         "/accounts/transfer/import",
@@ -298,7 +333,6 @@ async fn encrypted_account_migration_moves_keys_without_exposing_them() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{imported}");
-    assert_no_store(&headers);
     assert_eq!(imported["importedAccounts"], 3);
     assert_eq!(imported["duplicateAccounts"], 0);
     assert_eq!(target.state.settings_revision(), before + 1);
@@ -432,7 +466,7 @@ async fn encrypted_account_migration_moves_keys_without_exposing_them() {
         ]
     );
 
-    let (status, headers, body) = send_json(
+    let (status, body) = send_json_no_store(
         &target,
         Method::POST,
         "/accounts/transfer/preview",
@@ -440,7 +474,6 @@ async fn encrypted_account_migration_moves_keys_without_exposing_them() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-    assert_no_store(&headers);
     assert!(!body.to_string().contains(GO_KEY));
     assert!(!body.to_string().contains(CUSTOM_KEY));
     assert!(!body.to_string().contains(GOAT_KEY));
@@ -526,7 +559,7 @@ async fn encrypted_account_migration_moves_keys_without_exposing_them() {
         .into_iter()
         .map(|account| account.id)
         .collect::<Vec<_>>();
-    let (status, headers, body) = send_json(
+    let (status, body) = send_json_no_store(
         &collision_target,
         Method::POST,
         "/accounts/transfer/preview",
@@ -534,9 +567,8 @@ async fn encrypted_account_migration_moves_keys_without_exposing_them() {
     )
     .await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
-    assert_no_store(&headers);
     assert!(!body.to_string().contains(&source_sub_key.key));
-    let (status, headers, body) = send_json(
+    let (status, body) = send_json_no_store(
         &collision_target,
         Method::POST,
         "/accounts/transfer/import",
@@ -547,7 +579,6 @@ async fn encrypted_account_migration_moves_keys_without_exposing_them() {
     )
     .await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
-    assert_no_store(&headers);
     assert_eq!(
         collision_target.state.config().gateway_key,
         collision_primary
@@ -738,6 +769,322 @@ async fn node_migration_merges_dynamic_providers_by_stable_id() {
             .get_dynamic_provider(&dest_only_id)
             .unwrap()
             .is_some()
+    );
+
+    source.stop();
+    target.stop();
+}
+
+fn v4_base(harness: &V3Harness) -> String {
+    harness
+        .v3_base
+        .replacen("/dashboard/api/v3", "/dashboard/api/v4", 1)
+}
+
+async fn send_v4(
+    harness: &V3Harness,
+    method: Method,
+    path: &str,
+    body: &Value,
+) -> (StatusCode, Value) {
+    let response = harness
+        .client
+        .request(method, format!("{}{path}", v4_base(harness)))
+        .json(body)
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let parsed = response.json().await.unwrap_or(Value::Null);
+    (status, parsed)
+}
+
+fn identities_of(body: &Value) -> &[Value] {
+    body["identities"].as_array().expect("identities array")
+}
+
+#[tokio::test]
+async fn v6_roundtrip_preserves_shared_identity_and_binding_scopes() {
+    let _migration_guard = MIGRATION_TEST_LOCK.lock().await;
+    let source = start_loopback("account-transfer-v6-identity-source").await;
+    let (status, _, created) = send_json(
+        &source,
+        Method::POST,
+        "/accounts",
+        &cas(
+            &source,
+            json!({ "name": "Shared Go", "key": "sk-v6-identity-a" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let first_account_id = created["account"]["id"].as_str().unwrap().to_string();
+    let (status, listed) = send_v4(&source, Method::GET, "/accounts", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    let identity = identities_of(&listed)
+        .iter()
+        .find(|item| {
+            item["legacy"]["kind"] == "account" && item["legacy"]["id"] == first_account_id
+        })
+        .expect("source identity");
+    let identity_id = identity["identity"]["id"].as_str().unwrap().to_string();
+    let first_binding = identity["credentials"][0]["bindings"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let first_grants = identity["credentials"][0]["bindings"][0]["allowedEndpointIds"].clone();
+    let plan_connection = identity["credentials"][0]["bindings"][0]["connectionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let (status, second) = send_v4(
+        &source,
+        Method::POST,
+        &format!("/identities/{identity_id}/credentials"),
+        &cas(
+            &source,
+            json!({
+                "connectionId": plan_connection,
+                "secretInput": "sk-v6-identity-b",
+                "quotaSharing": {
+                    "kind": "shared",
+                    "credentialId": identity["credentials"][0]["credential"]["id"]
+                }
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    let second_account_id = second["accountId"].as_str().unwrap().to_string();
+    let second_binding = second["bindingId"].as_str().unwrap().to_string();
+    let blocked_until = Utc::now() + chrono::Duration::hours(2);
+    source
+        .state
+        .db
+        .lock()
+        .set_account_cooldown(
+            &first_account_id,
+            Some(blocked_until),
+            Some("synthetic shared limit"),
+        )
+        .unwrap();
+    let (status, patched) = send_v4(
+        &source,
+        Method::PATCH,
+        &format!("/bindings/{second_binding}"),
+        &cas(
+            &source,
+            json!({
+                "enabled": false,
+                "modelScope": { "kind": "only", "models": ["glm-5.1"] }
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{patched}");
+
+    let (status, _, exported) = send_json(
+        &source,
+        Method::POST,
+        "/accounts/transfer/export",
+        &json!({ "bundlePassword": BUNDLE_PASSWORD }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{exported}");
+    assert_eq!(exported["exportedAccounts"], 2);
+    let bundle = exported["bundle"].as_str().unwrap().to_string();
+    assert!(!bundle.contains("sk-v6-identity-a"));
+    assert!(!bundle.contains("sk-v6-identity-b"));
+
+    let target = start_loopback("account-transfer-v6-identity-target").await;
+    let before = target.state.db.lock().list_accounts().unwrap().len();
+    let (status, _, imported) = send_json(
+        &target,
+        Method::POST,
+        "/accounts/transfer/import",
+        &cas(
+            &target,
+            json!({ "password": BUNDLE_PASSWORD, "bundle": bundle }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{imported}");
+    assert_eq!(imported["importedAccounts"], 2);
+    let accounts = target.state.db.lock().list_accounts().unwrap();
+    assert_eq!(accounts.len(), before + 2);
+    assert!(
+        accounts
+            .iter()
+            .any(|account| account.id == first_account_id)
+    );
+    assert!(
+        accounts
+            .iter()
+            .any(|account| account.id == second_account_id)
+    );
+    let first = accounts
+        .iter()
+        .find(|account| account.id == first_account_id)
+        .unwrap();
+    let second_account = accounts
+        .iter()
+        .find(|account| account.id == second_account_id)
+        .unwrap();
+    assert_eq!(
+        target.state.decrypt_key(&first.key_cipher).unwrap(),
+        "sk-v6-identity-a"
+    );
+    assert_eq!(
+        target
+            .state
+            .decrypt_key(&second_account.key_cipher)
+            .unwrap(),
+        "sk-v6-identity-b"
+    );
+
+    let (status, after) = send_v4(&target, Method::GET, "/accounts", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{after}");
+    let identity = identities_of(&after)
+        .iter()
+        .find(|item| item["identity"]["id"] == identity_id)
+        .expect("imported shared identity");
+    assert_eq!(identity["credentials"].as_array().unwrap().len(), 2);
+    let bindings: Vec<&Value> = identity["credentials"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|credential| &credential["bindings"][0])
+        .collect();
+    let first_imported = bindings
+        .iter()
+        .find(|binding| binding["id"] == first_binding)
+        .unwrap();
+    let second_imported = bindings
+        .iter()
+        .find(|binding| binding["id"] == second_binding)
+        .unwrap();
+    assert_eq!(first_imported["enabled"], true);
+    assert_eq!(first_imported["modelScope"]["kind"], "all");
+    assert_eq!(second_imported["enabled"], false);
+    assert_eq!(second_imported["modelScope"]["kind"], "only");
+    assert_eq!(second_imported["modelScope"]["models"][0], "glm-5.1");
+    assert_eq!(first_imported["allowedEndpointIds"], first_grants);
+    assert!(
+        !first_imported["allowedEndpointIds"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let members = target
+        .state
+        .db
+        .lock()
+        .shared_pool_account_ids(&first_account_id)
+        .unwrap();
+    assert_eq!(members.len(), 2);
+    assert!(members.contains(&first_account_id));
+    assert!(members.contains(&second_account_id));
+    for id in [&first_account_id, &second_account_id] {
+        let account = target.state.db.lock().get_account(id).unwrap().unwrap();
+        assert_eq!(account.cooldown_generic_until, Some(blocked_until));
+        assert!(account.is_cooling_at(Utc::now()));
+    }
+
+    source.stop();
+    target.stop();
+}
+
+#[tokio::test]
+async fn v6_draft_provider_roundtrip_stays_off_runtime() {
+    let _migration_guard = MIGRATION_TEST_LOCK.lock().await;
+    let source = start_loopback("draft-transfer-source").await;
+    let v4_base = source
+        .v3_base
+        .replacen("/dashboard/api/v3", "/dashboard/api/v4", 1);
+    let mut body = json!({
+        "mode": "draft",
+        "operationId": "aaaaaaaa-bbbb-4ccc-8ddd-0000000000aa",
+        "connection": {
+            "kind": "new",
+            "templateId": "custom-http",
+            "name": "Draft Transfer",
+            "endpointUrl": "https://draft-transfer.example/v1/chat/completions",
+            "upstreamProtocol": "chat_completions",
+            "authKind": "bearer"
+        },
+        "targets": []
+    });
+    body["expectedRevision"] = json!(source.state.settings_revision());
+    body["processGeneration"] = json!(source.state.process_generation());
+    let response = source
+        .client
+        .post(format!("{v4_base}/onboarding/commit"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let drafted = response.json::<Value>().await.unwrap_or(Value::Null);
+    assert_eq!(status, StatusCode::OK, "{drafted}");
+    let provider_id = source
+        .state
+        .db
+        .lock()
+        .onboarding_draft_provider_ids()
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    assert!(source.state.dynamic_providers().is_empty());
+
+    let (status, _, exported) = send_json(
+        &source,
+        Method::POST,
+        "/accounts/transfer/export",
+        &json!({ "bundlePassword": BUNDLE_PASSWORD }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{exported}");
+    let bundle = exported["bundle"].as_str().unwrap().to_string();
+
+    let target = start_loopback("draft-transfer-target").await;
+    let (status, _, imported) = send_json(
+        &target,
+        Method::POST,
+        "/accounts/transfer/import",
+        &cas(
+            &target,
+            json!({ "password": BUNDLE_PASSWORD, "bundle": bundle }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{imported}");
+    assert!(
+        target
+            .state
+            .dynamic_providers()
+            .iter()
+            .all(|runtime| runtime.id != provider_id)
+    );
+    assert_eq!(
+        target
+            .state
+            .db
+            .lock()
+            .provider_is_onboarding_draft(&provider_id)
+            .unwrap(),
+        Some(true)
+    );
+    assert!(
+        target
+            .state
+            .db
+            .lock()
+            .list_control_plane_dynamic_providers()
+            .unwrap()
+            .iter()
+            .any(|runtime| runtime.id == provider_id && runtime.mappings.is_empty())
     );
 
     source.stop();

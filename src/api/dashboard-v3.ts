@@ -20,20 +20,12 @@ import type {
   AccountSetupUpdate,
   AccountUpdate,
   AccountUsageUpdate,
-  ApplicationModels,
-  ApplicationConnectorCommitRequest,
-  ApplicationConnectorCommitResult,
-  ApplicationConnectorPreview,
-  ApplicationConnectorPreviewRequest,
-  ApplicationConnectors,
   AuthLogin,
   AuthRegister,
   AuthStatus,
   BrowserCapabilities,
   BrowserOpen,
   BrowserOpenRequest,
-  ClaudeDesktopModels,
-  ClaudeDesktopModelsUpdate,
   ConnectionInfo,
   CpaAccountDelete,
   CpaAccountStatusUpdate,
@@ -64,14 +56,13 @@ import type {
   DailyTokensByModel,
   DashboardSummary,
   DesktopUpdate,
-  DynamicProvider,
-  DynamicProviderCreate,
-  DynamicProviderDiscoverRequest,
-  DynamicProviderDiscoverResponse,
-  DynamicProviderMutation,
-  DynamicProviderTestRequest,
-  DynamicProviderTestResponse,
-  DynamicProviderUpdate,
+  ProviderDefinition,
+  ProviderDefinitionDiscoverRequest,
+  ProviderDefinitionDiscoverResponse,
+  ProviderDefinitionMutation,
+  ProviderDefinitionTestRequest,
+  ProviderDefinitionTestResponse,
+  ProviderDefinitionUpdate,
   ForwardLogKeys,
   ForwardLogModels,
   ForwardLogQuery,
@@ -85,12 +76,10 @@ import type {
   MutationAck,
   MutationExpectation,
   PricingMultipliersUpdate,
-  PricingSnapshot,
   ProtocolProbeRequest,
   ProtocolProbeResponse,
   ProviderCatalog,
   ProviderContracts,
-  ProviderModelCapability,
   ProviderPricing,
   ProviderPricingRefresh,
   ProviderPricingRefreshUpdate,
@@ -103,7 +92,6 @@ import type {
   UsageMutation,
   UsageRefresh,
   UsageWindow,
-  ZenFreeModels,
   ZenFreeSettings,
   ZenFreeSettingsUpdate,
 } from "./generated/dashboard-v3.ts";
@@ -153,11 +141,23 @@ export function setControlRevisionSink(sink: ControlRevisionSink | null): void {
 function publishTokens(body: unknown): void {
   if (!controlRevisionSink || typeof body !== "object" || body === null) return;
   const record = body as Record<string, unknown>;
-  if (typeof record.revision !== "number" || typeof record.processGeneration !== "number") return;
+  if (typeof record.revision === "number" && typeof record.processGeneration === "number") {
+    controlRevisionSink({
+      revision: record.revision,
+      processGeneration: record.processGeneration,
+      pricingRevision: typeof record.pricingRevision === "string" ? record.pricingRevision : null,
+    });
+    return;
+  }
+  // V4 listings/commits nest `{ revision: ControlRevision }`.
+  const nested = record.revision;
+  if (typeof nested !== "object" || nested === null) return;
+  const nestedRecord = nested as Record<string, unknown>;
+  if (typeof nestedRecord.revision !== "number" || typeof nestedRecord.processGeneration !== "number") return;
   controlRevisionSink({
-    revision: record.revision,
-    processGeneration: record.processGeneration,
-    pricingRevision: typeof record.pricingRevision === "string" ? record.pricingRevision : null,
+    revision: nestedRecord.revision,
+    processGeneration: nestedRecord.processGeneration,
+    pricingRevision: typeof nestedRecord.pricingRevision === "string" ? nestedRecord.pricingRevision : null,
   });
 }
 
@@ -239,7 +239,7 @@ export class DashboardThrottledError extends DashboardRequestError {
 }
 
 /** Structured upgrade/refresh guidance surfaced on old-API 410 responses. */
-export function goneGuidance(): string {
+function goneGuidance(): string {
   // This is intentionally a stable transport-level fallback, outside the
   // generated i18n key union. Shell-level UI may localize it further.
   return "页面版本与服务不匹配，请刷新页面后重试；若仍失败请升级到最新版本";
@@ -250,12 +250,12 @@ export function isRevisionConflict(error: unknown): error is DashboardConflictEr
     || (error instanceof DashboardRequestError && error.status === 409 && error.code === "revisionConflict");
 }
 
-export function v3ApiBase(): string {
+function dashboardApiBase(base: "v3" | "v4"): string {
   if (window.location.pathname.startsWith("/dashboard")) {
-    return "/dashboard/api/v3";
+    return `/dashboard/api/${base}`;
   }
   // 回退仅覆盖 Gateway 监听默认端口 9042 的纯静态托管场景（如直接打开构建产物）
-  return "http://127.0.0.1:9042/dashboard/api/v3";
+  return `http://127.0.0.1:9042/dashboard/api/${base}`;
 }
 
 interface V3ErrorBody {
@@ -266,7 +266,8 @@ interface V3ErrorBody {
   nextAllowedAt?: unknown;
 }
 
-export async function requestV3<T>(
+export async function requestDashboard<T>(
+  base: "v3" | "v4",
   path: string,
   init: RequestInit = {},
   notifyAuthRequired = true,
@@ -275,7 +276,7 @@ export async function requestV3<T>(
   if (init.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
-  const response = await fetch(`${v3ApiBase()}${path}`, {
+  const response = await fetch(`${dashboardApiBase(base)}${path}`, {
     ...init,
     headers,
     credentials: "same-origin",
@@ -336,6 +337,22 @@ export async function requestV3<T>(
   return body;
 }
 
+export async function requestV3<T>(
+  path: string,
+  init: RequestInit = {},
+  notifyAuthRequired = true,
+): Promise<T> {
+  return requestDashboard<T>("v3", path, init, notifyAuthRequired);
+}
+
+export async function requestV4<T>(
+  path: string,
+  init: RequestInit = {},
+  notifyAuthRequired = true,
+): Promise<T> {
+  return requestDashboard<T>("v4", path, init, notifyAuthRequired);
+}
+
 function json(value: unknown): BodyInit {
   return JSON.stringify(value);
 }
@@ -343,7 +360,7 @@ function json(value: unknown): BodyInit {
 /** Mutation body without the CAS pair; the caller supplies it per attempt. */
 export type WithoutExpectation<T> = Omit<T, "expectedRevision" | "processGeneration">;
 
-function withExpectation<T extends object>(body: T, expectation: MutationExpectation): BodyInit {
+export function withExpectation<T extends object>(body: T, expectation: MutationExpectation): BodyInit {
   return json({ ...body, ...expectation });
 }
 
@@ -515,22 +532,6 @@ export const dashboardV3 = {
       },
     ),
 
-  // --- local Desktop application connectors ---
-  getApplicationConnectors: () => requestV3<ApplicationConnectors>("/applications/connectors"),
-  previewApplicationConnector: (id: string, input: ApplicationConnectorPreviewRequest) =>
-    requestV3<ApplicationConnectorPreview>(`/applications/connectors/${encode(id)}/preview`, {
-      method: "POST",
-      body: json(input),
-    }),
-  commitApplicationConnector: (
-    id: string,
-    input: WithoutExpectation<ApplicationConnectorCommitRequest>,
-    expectation: MutationExpectation,
-  ) => requestV3<ApplicationConnectorCommitResult>(`/applications/connectors/${encode(id)}/commit`, {
-    method: "POST",
-    body: withExpectation(input, expectation),
-  }),
-
   // --- access keys ---
   createKey: (name: string, expectation: MutationExpectation) =>
     requestV3<MutationAck>("/keys", {
@@ -570,15 +571,6 @@ export const dashboardV3 = {
       method: "POST",
       body: json(input),
     }),
-  getClaudeDesktopModels: () => requestV3<ClaudeDesktopModels>("/claude-desktop/models"),
-  putClaudeDesktopModels: (
-    models: WithoutExpectation<ClaudeDesktopModelsUpdate>,
-    expectation: MutationExpectation,
-  ) =>
-    requestV3<ClaudeDesktopModels>("/claude-desktop/models", {
-      method: "PUT",
-      body: withExpectation(models, expectation),
-    }),
 
   // --- desktop updater ---
   checkForUpdate: () => requestV3<UpdateCheck>("/settings/check-update"),
@@ -598,14 +590,6 @@ export const dashboardV3 = {
     method: "POST",
     body: withExpectation(refresh, expectation),
   }),
-  putPricingMultipliers: (
-    update: WithoutExpectation<PricingMultipliersUpdate>,
-    expectation: MutationExpectation,
-  ) =>
-    requestV3<PricingSnapshot>("/providers/opencode/pricing/multipliers", {
-      method: "PUT",
-      body: withExpectation(update, expectation),
-    }),
   putProviderPricingMultipliers: (
     providerId: string,
     update: WithoutExpectation<PricingMultipliersUpdate>,
@@ -678,11 +662,6 @@ export const dashboardV3 = {
       method: "PUT",
       body: withExpectation(update, expectation),
     }),
-  verifyAccount: (id: string, expectation: MutationExpectation) =>
-    requestV3<AccountMutation>(`/accounts/${encode(id)}/verify`, {
-      method: "POST",
-      body: mutation(expectation),
-    }),
   testAccountModel: (id: string, modelId: string) =>
     requestV3<AccountModelTestResponse>(`/accounts/${encode(id)}/model-tests`, {
       method: "POST",
@@ -740,51 +719,36 @@ export const dashboardV3 = {
 
   // --- providers ---
   getProviders: () => requestV3<ProviderCatalog>("/providers"),
-  getDynamicProvider: (providerId: string) =>
-    requestV3<DynamicProvider>(`/providers/${encode(providerId)}`),
-  createDynamicProvider: (
-    input: WithoutExpectation<DynamicProviderCreate>,
-    expectation: MutationExpectation,
-  ) => requestV3<DynamicProviderMutation>("/providers", {
-    method: "POST",
-    body: withExpectation(input, expectation),
-  }),
-  updateDynamicProvider: (
+  getProviderDefinition: (providerId: string) =>
+    requestV3<ProviderDefinition>(`/providers/${encode(providerId)}`),
+  updateProviderDefinition: (
     providerId: string,
-    input: WithoutExpectation<DynamicProviderUpdate>,
+    input: WithoutExpectation<ProviderDefinitionUpdate>,
     expectation: MutationExpectation,
-  ) => requestV3<DynamicProviderMutation>(`/providers/${encode(providerId)}`, {
+  ) => requestV3<ProviderDefinitionMutation>(`/providers/${encode(providerId)}`, {
     method: "PATCH",
     body: withExpectation(input, expectation),
   }),
-  deleteDynamicProvider: (providerId: string, expectation: MutationExpectation) =>
+  deleteProviderDefinition: (providerId: string, expectation: MutationExpectation) =>
     requestV3<MutationAck>(`/providers/${encode(providerId)}`, {
       method: "DELETE",
       body: mutation(expectation),
     }),
-  discoverDynamicProviderModels: (input: DynamicProviderDiscoverRequest) =>
-    requestV3<DynamicProviderDiscoverResponse>("/providers/models/discover", {
+  discoverProviderDefinitionModels: (input: ProviderDefinitionDiscoverRequest) =>
+    requestV3<ProviderDefinitionDiscoverResponse>("/providers/models/discover", {
       method: "POST",
       body: json(input),
     }),
-  testDynamicProvider: (input: DynamicProviderTestRequest) =>
-    requestV3<DynamicProviderTestResponse>("/providers/test", {
+  testProviderDefinition: (input: ProviderDefinitionTestRequest) =>
+    requestV3<ProviderDefinitionTestResponse>("/providers/test", {
       method: "POST",
       body: json(input),
     }),
-  getProviderModelCapabilities: () =>
-    requestV3<ProviderModelCapability[]>("/providers/model-capabilities"),
   getZenFreeSettings: () => requestV3<ZenFreeSettings>("/providers/zen-free"),
   patchZenFreeSettings: (enabled: boolean, expectation: MutationExpectation) =>
     requestV3<ZenFreeSettings>("/providers/zen-free", {
       method: "PATCH",
       body: withExpectation({ enabled } satisfies WithoutExpectation<ZenFreeSettingsUpdate>, expectation),
-    }),
-  getZenFreeModels: () => requestV3<ZenFreeModels>("/providers/zen-free/models"),
-  refreshZenFreeModels: (expectation: MutationExpectation) =>
-    requestV3<ZenFreeModels>("/providers/zen-free/models/refresh", {
-      method: "POST",
-      body: mutation(expectation),
     }),
   getProviderContracts: () => requestV3<ProviderContracts>("/provider-contracts"),
   refreshContractCatalog: (
@@ -829,7 +793,6 @@ export const dashboardV3 = {
     }),
 
   // --- observability (read-only, page-local state) ---
-  getApplicationModels: () => requestV3<ApplicationModels>("/application-models"),
   getDashboardSummary: () => requestV3<DashboardSummary>("/dashboard/summary"),
   getDailyTokensByModel: (days?: number) =>
     requestV3<DailyTokensByModel>(`/dashboard/daily-tokens-by-model?days=${days ?? 30}`),
@@ -863,7 +826,7 @@ export const dashboardV3 = {
 
 export function browserSessionWebSocketUrl(token: string): string {
   const url = new URL(
-    `${v3ApiBase()}/browser/sessions/${encodeURIComponent(token)}/ws`,
+    `${dashboardApiBase("v3")}/browser/sessions/${encodeURIComponent(token)}/ws`,
     window.location.href,
   );
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";

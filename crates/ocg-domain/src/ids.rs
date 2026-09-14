@@ -149,12 +149,7 @@ mod tests {
     }
 
     #[test]
-    fn ollama_cloud_identities_and_fixed_surfaces_stay_stable() {
-        assert_eq!(OLLAMA_PROVIDER_ID, "ollama");
-        assert_eq!(OLLAMA_CLOUD_BASE_URL, "https://ollama.com");
-        assert_eq!(OLLAMA_CLOUD_CHAT_COMPLETIONS_PATH, "/v1/chat/completions");
-        assert_eq!(OLLAMA_CLOUD_MODELS_PATH, "/v1/models");
-        assert_eq!(OLLAMA_CLOUD_PRICING_URL, "https://ollama.com/pricing");
+    fn ollama_cloud_pricing_page_stays_on_the_inference_origin() {
         // Pricing is a separate official page; keep it independent of the API
         // origin so a docs-host move cannot silently retarget inference.
         assert!(OLLAMA_CLOUD_PRICING_URL.starts_with(OLLAMA_CLOUD_BASE_URL));

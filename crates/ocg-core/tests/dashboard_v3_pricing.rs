@@ -1,4 +1,4 @@
-//! Dashboard V3 pricing HTTP adapter: auth, CAS, shapes, provider facts, V2 coexistence.
+//! Dashboard V3 pricing HTTP adapter: auth, CAS, shapes, provider facts, retired V2 paths.
 
 use ocg_core::dashboard_v3::PricingAvailability;
 use ocg_core::dashboard_v3::{
@@ -273,7 +273,6 @@ async fn dashboard_v3_pricing_routes_require_the_v3_session() {
     let harness = start_public("pricing-auth").await;
 
     for path in [
-        "/providers/opencode/pricing",
         "/providers/opencode/pricing",
         "/providers/command-code/pricing",
     ] {
@@ -631,9 +630,9 @@ async fn dashboard_v3_stale_revision_generation_or_pricing_revision_is_409() {
 }
 
 #[tokio::test]
-async fn dashboard_v3_v2_write_conflicts_on_pricing_revision_without_bumping_u64() {
-    let harness = start_loopback("pricing-v2-write").await;
-    let (revision, generation, pricing_revision) = cas_tokens(&harness);
+async fn retired_v2_pricing_write_does_not_bump() {
+    let harness = start_loopback("pricing-v2-retired").await;
+    let (revision, _generation, pricing_revision) = cas_tokens(&harness);
 
     harness
         .assert_v2_path_removed(
@@ -647,63 +646,6 @@ async fn dashboard_v3_v2_write_conflicts_on_pricing_revision_without_bumping_u64
         .await;
     assert_eq!(harness.state.settings_revision(), revision);
     assert_eq!(harness.state.pricing_snapshot().revision, pricing_revision);
-
-    let (status, written) = send_json(
-        &harness,
-        Method::PUT,
-        "/providers/opencode/pricing/multipliers",
-        &json!({
-            "expectedRevision": revision,
-            "processGeneration": generation,
-            "expectedPricingRevision": pricing_revision,
-            "multipliers": [{ "modelId": "grok-4.5", "multiplier": 3.25 }]
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{written}");
-    let written_pricing_revision = written["pricingRevision"].as_str().unwrap().to_string();
-    assert_ne!(written_pricing_revision, pricing_revision);
-    assert_eq!(harness.state.settings_revision(), revision + 1);
-    assert_eq!(
-        harness.state.pricing_snapshot().revision,
-        written_pricing_revision
-    );
-
-    let (status, provider) = harness
-        .get_json(&format!("{}/providers/opencode/pricing", harness.v3_base))
-        .await;
-    assert_eq!(status, StatusCode::OK, "{provider}");
-    let v3 = &provider["snapshot"];
-    assert_eq!(v3["revision"], revision + 1);
-    assert_eq!(v3["pricingRevision"], written_pricing_revision);
-    let grok = v3["models"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|model| model["modelId"] == "grok-4.5")
-        .unwrap();
-    assert_eq!(grok["quotaMultiplier"], 3.25);
-
-    let (status, body) = send_json(
-        &harness,
-        Method::PUT,
-        "/providers/opencode/pricing/multipliers",
-        &json!({
-            "expectedRevision": revision,
-            "processGeneration": generation,
-            "expectedPricingRevision": pricing_revision,
-            "multipliers": [{ "modelId": "glm-5.2", "multiplier": 1.5 }]
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CONFLICT, "{body}");
-    assert_v3_error(&body, ERROR_REVISION_CONFLICT);
-    assert_eq!(body["currentRevision"], revision + 1);
-    assert_eq!(harness.state.settings_revision(), revision + 1);
-    assert_eq!(
-        harness.state.pricing_snapshot().revision,
-        written_pricing_revision
-    );
 
     harness.stop();
 }
@@ -1424,7 +1366,7 @@ async fn dashboard_v3_refresh_returns_409_when_fetch_activates_pricing_after_pre
 }
 
 #[tokio::test]
-async fn dashboard_v3_provider_pricing_stays_internally_equal_under_concurrent_v2_activation() {
+async fn dashboard_v3_provider_pricing_stays_internally_equal_under_concurrent_activation() {
     let harness = start_loopback("pricing-coherent-http").await;
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let stop_flag = stop.clone();

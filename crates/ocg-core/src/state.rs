@@ -1,10 +1,3 @@
-use crate::application_connectors::{
-    ApplicationConnectorAction, ApplicationConnectorCapabilities, ApplicationConnectorCommit,
-    ApplicationConnectorCommitResult, ApplicationConnectorError, ApplicationConnectorErrorKind,
-    ApplicationConnectorHost, ApplicationConnectorHostOperation, ApplicationConnectorHostRequest,
-    ApplicationConnectorHostResult, ApplicationConnectorId, ApplicationConnectorInspection,
-    ApplicationConnectorPreview, ApplicationConnectorResult, ApplicationConnectorSecret,
-};
 use crate::crypto::KeyCipher;
 use crate::db::Database;
 use crate::desktop::DesktopCapabilities;
@@ -15,9 +8,7 @@ use crate::models::{
 };
 use crate::pricing::{embedded_seed, ensure_current_adjustment_policy, ensure_seed_model_coverage};
 use crate::routing_runtime::RoutingRuntime;
-use ocg_domain::ids::PRIMARY_KEY_ID;
 use parking_lot::{Mutex, RwLock};
-use std::collections::BTreeMap;
 use std::fmt;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -88,8 +79,6 @@ pub struct CoreStateInner {
     dashboard_public_listeners: AtomicU64,
     /// Process-level auto-start, Dock, and desktop-update hooks. Unset in CLI/Docker.
     desktop: DesktopCapabilities,
-    /// Process-level local application connector Host hook. Unset in CLI/Docker.
-    application_connector_capabilities: ApplicationConnectorCapabilities,
     pub dashboard_dir: Mutex<Option<PathBuf>>,
     http_client: Mutex<Arc<crate::http_client::ForwardRouteSet>>,
     pricing: RwLock<Arc<PricingSnapshot>>,
@@ -147,40 +136,6 @@ fn sealed_proxy_model_ids(
     .collect()
 }
 
-fn normalize_connector_values(
-    input: BTreeMap<String, String>,
-) -> ApplicationConnectorResult<BTreeMap<String, String>> {
-    let mut output = BTreeMap::new();
-    for (key, value) in input {
-        let (key, value) = (key.trim(), value.trim());
-        if key.is_empty()
-            || key.len() > 128
-            || value.len() > 4096
-            || key.contains(['\r', '\n', '='])
-        {
-            return Err(ApplicationConnectorError::new(
-                ApplicationConnectorErrorKind::InvalidRequest,
-                "invalid model selection",
-            ));
-        }
-        if !value.is_empty() {
-            output.insert(key.into(), value.into());
-        }
-    }
-    Ok(output)
-}
-
-fn connector_internal(error: anyhow::Error) -> ApplicationConnectorError {
-    ApplicationConnectorError::new(ApplicationConnectorErrorKind::Internal, error.to_string())
-}
-
-fn connector_invalid_host() -> ApplicationConnectorError {
-    ApplicationConnectorError::new(
-        ApplicationConnectorErrorKind::Internal,
-        "application connector Host returned an invalid response",
-    )
-}
-
 /// Host-effect failures from [`CoreStateInner::apply_host_settings`].
 ///
 /// Adapters map variants onto their existing status/code/message without
@@ -195,9 +150,9 @@ pub enum HostSettingsError {
 }
 
 impl HostSettingsError {
-    pub const AUTO_START_UNAVAILABLE: &'static str = "auto-start is unavailable in this runtime";
+    pub const AUTO_START_UNAVAILABLE: &'static str = crate::desktop::AUTO_START_UNAVAILABLE;
     pub const DOCK_VISIBILITY_UNAVAILABLE: &'static str =
-        "Dock visibility is unavailable in this runtime";
+        crate::desktop::DOCK_VISIBILITY_UNAVAILABLE;
 }
 
 impl fmt::Display for HostSettingsError {
@@ -318,7 +273,7 @@ impl CoreStateInner {
         let zen_free_models = db.zen_free_model_catalog()?.unwrap_or_default();
         let cpa_models = db
             .cpa_model_catalog()?
-            .map(|catalog| crate::db::CpaCatalogModel::ids(&catalog.models))
+            .map(|catalog| crate::db::CpaCatalogModel::enabled_ids(&catalog.models))
             .unwrap_or_default();
         let custom_runtimes = db.list_custom_account_runtimes()?;
         let dynamic_providers = db.list_dynamic_providers()?;
@@ -354,7 +309,6 @@ impl CoreStateInner {
             dashboard_local_mode: AtomicBool::new(false),
             dashboard_public_listeners: AtomicU64::new(0),
             desktop: DesktopCapabilities::new(),
-            application_connector_capabilities: ApplicationConnectorCapabilities::new(),
             dashboard_dir: Mutex::new(None),
             http_client: Mutex::new(Arc::new(http_client)),
             pricing: RwLock::new(Arc::new(pricing)),
@@ -467,7 +421,7 @@ impl CoreStateInner {
         source_url: &str,
         refreshed_at: chrono::DateTime<chrono::Utc>,
     ) -> crate::Result<()> {
-        let ids = crate::db::CpaCatalogModel::ids(&models);
+        let ids = crate::db::CpaCatalogModel::enabled_ids(&models);
         let zen = self.zen_free_model_catalog();
         let contracts = self.provider_contracts();
         let provider_models = sealed_proxy_model_ids(&contracts, &ids);
@@ -486,6 +440,45 @@ impl CoreStateInner {
         }
         self.routing.reset();
         Ok(())
+    }
+
+    /// Replace the routed CPA catalog subset. Unknown IDs are rejected; an
+    /// empty selection publishes no CPA models.
+    pub fn set_cpa_model_routing(&self, enabled_ids: &[String]) -> crate::Result<()> {
+        let catalog = {
+            let db = self.db.lock();
+            db.cpa_model_catalog()?
+        };
+        let Some(catalog) = catalog else {
+            anyhow::bail!("CPA model catalog has not been refreshed");
+        };
+        let known: std::collections::HashSet<&str> = catalog
+            .models
+            .iter()
+            .map(|model| model.id.as_str())
+            .collect();
+        let enabled_ids: Vec<String> = enabled_ids.iter().map(|id| id.trim().to_string()).collect();
+        for id in &enabled_ids {
+            anyhow::ensure!(
+                known.contains(id.as_str()),
+                "enabledIds must be models from the saved CPA catalog"
+            );
+        }
+        let selected: std::collections::HashSet<&str> =
+            enabled_ids.iter().map(String::as_str).collect();
+        let models = catalog
+            .models
+            .into_iter()
+            .map(|mut model| {
+                model.enabled = selected.contains(model.id.as_str());
+                model
+            })
+            .collect();
+        self.activate_cpa_model_catalog(
+            models,
+            &catalog.source_url,
+            catalog.refreshed_at.unwrap_or_else(chrono::Utc::now),
+        )
     }
 
     /// Atomically remove OCG-owned CPA configuration, singleton account, and
@@ -635,6 +628,23 @@ impl CoreStateInner {
         self.settings_revision.fetch_add(1, Ordering::AcqRel);
     }
 
+    /// A committed catalog removal must restrict admission even if unrelated
+    /// persisted data prevents a full reload. Caller holds settings_update.
+    pub(crate) fn restrict_provider_catalog_after_reload_failure(
+        &self,
+        row: &crate::provider_contracts::PersistedScopeRow,
+    ) {
+        let mut active = self.provider_contracts.write();
+        let set = Arc::make_mut(&mut active);
+        if let Some(contract) = set.providers.get_mut(row.scope.id()) {
+            contract
+                .models
+                .retain(|_, model| row.catalog_models.contains(&model.model_id));
+            contract.catalog.models.clone_from(&row.catalog_models);
+            contract.revision = row.revision;
+        }
+    }
+
     pub fn reload_provider_contracts_locked(&self, db: &Database) -> crate::Result<()> {
         let zen = self.zen_free_model_catalog();
         let set = crate::provider_contracts::build_effective_contracts(
@@ -740,138 +750,6 @@ impl CoreStateInner {
 
     pub fn set_auto_start_sync(&self, sync: AutoStartSync) {
         self.desktop.set_auto_start_sync(sync);
-    }
-
-    pub fn set_application_connector_host(
-        &self,
-        host: ApplicationConnectorHost,
-        executable: PathBuf,
-    ) {
-        self.application_connector_capabilities
-            .set_host(host, executable);
-    }
-
-    pub fn application_connector_supported(&self) -> bool {
-        self.application_connector_capabilities.supported()
-    }
-
-    pub fn application_connectors(
-        &self,
-    ) -> ApplicationConnectorResult<Vec<ApplicationConnectorInspection>> {
-        match self.call_connector(
-            ApplicationConnectorHostOperation::List,
-            ApplicationConnectorId::ClaudeCode,
-            ApplicationConnectorAction::Restore,
-            None,
-            BTreeMap::new(),
-            None,
-        )? {
-            ApplicationConnectorHostResult::Inspections(value) => Ok(value),
-            _ => Err(connector_invalid_host()),
-        }
-    }
-
-    pub fn preview_application_connector(
-        &self,
-        id: ApplicationConnectorId,
-        action: ApplicationConnectorAction,
-        key_id: Option<&str>,
-        model_values: BTreeMap<String, String>,
-    ) -> ApplicationConnectorResult<ApplicationConnectorPreview> {
-        match self.call_connector(
-            ApplicationConnectorHostOperation::Preview,
-            id,
-            action,
-            key_id,
-            model_values,
-            None,
-        )? {
-            ApplicationConnectorHostResult::Preview(value) => Ok(value),
-            _ => Err(connector_invalid_host()),
-        }
-    }
-
-    pub fn commit_application_connector(
-        &self,
-        commit: ApplicationConnectorCommit,
-    ) -> ApplicationConnectorResult<ApplicationConnectorCommitResult> {
-        match self.call_connector(
-            ApplicationConnectorHostOperation::Commit,
-            commit.id,
-            commit.action,
-            commit.key_id.as_deref(),
-            commit.model_values,
-            Some(commit.preview_fingerprint),
-        )? {
-            ApplicationConnectorHostResult::Committed(value) => Ok(value),
-            _ => Err(connector_invalid_host()),
-        }
-    }
-
-    fn call_connector(
-        &self,
-        operation: ApplicationConnectorHostOperation,
-        id: ApplicationConnectorId,
-        action: ApplicationConnectorAction,
-        key_id: Option<&str>,
-        model_values: BTreeMap<String, String>,
-        preview_fingerprint: Option<String>,
-    ) -> ApplicationConnectorResult<ApplicationConnectorHostResult> {
-        let model_values = normalize_connector_values(model_values)?;
-        let (key_id, secret) =
-            if action == ApplicationConnectorAction::Connect && !id.uses_native_credentials() {
-                let id = key_id.ok_or_else(|| {
-                    ApplicationConnectorError::new(
-                        ApplicationConnectorErrorKind::InvalidRequest,
-                        "an enabled access key is required",
-                    )
-                })?;
-                (
-                    Some(id.to_owned()),
-                    Some(ApplicationConnectorSecret::new(self.connector_key(id)?)),
-                )
-            } else {
-                (None, None)
-            };
-        self.application_connector_capabilities
-            .call(ApplicationConnectorHostRequest {
-                operation,
-                id,
-                action,
-                key_id,
-                secret,
-                model_values,
-                gateway_url: format!("http://127.0.0.1:{}", self.active_gateway_port()),
-                data_dir: self.data_dir(),
-                desktop_executable: self.application_connector_capabilities.executable(),
-                preview_fingerprint,
-            })
-    }
-
-    fn connector_key(&self, id: &str) -> ApplicationConnectorResult<String> {
-        let db = self.db.lock();
-        if id == PRIMARY_KEY_ID {
-            return db
-                .primary_access_key_value()
-                .map_err(connector_internal)?
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| {
-                    ApplicationConnectorError::new(
-                        ApplicationConnectorErrorKind::NotFound,
-                        "requested access key is unavailable",
-                    )
-                });
-        }
-        db.get_sub_gateway_key(id)
-            .map_err(connector_internal)?
-            .filter(|key| key.authenticates())
-            .map(|key| key.key)
-            .ok_or_else(|| {
-                ApplicationConnectorError::new(
-                    ApplicationConnectorErrorKind::NotFound,
-                    "requested access key is unavailable",
-                )
-            })
     }
 
     pub fn auto_start_supported(&self) -> bool {

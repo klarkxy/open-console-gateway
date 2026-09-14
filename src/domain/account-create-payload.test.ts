@@ -4,8 +4,10 @@ import { PLAN_DEFINITIONS } from "./plans.ts";
 import {
   accountCreatePayloadErrorKey,
   AccountCreatePayloadError,
+  accountCreateRequestInput,
   buildCreateAccountPayload,
 } from "./account-create-payload.ts";
+import { CUSTOM_ENDPOINT_URL_ISSUE_KEYS } from "./custom-account.ts";
 import type { AccountCreatePayloadErrorCode } from "./account-create-payload.ts";
 
 const goPlan = PLAN_DEFINITIONS.find((p) => p.id === "opencode-go")!;
@@ -118,10 +120,20 @@ test("dynamic Provider accounts omit Endpoint/protocol/models and skip Key when 
   assert.equal(nonePayload.key, "");
 });
 
-test("payload error messages remain usable without a legacy config vocabulary", () => {
-  assert.equal(
-    accountCreatePayloadErrorKey(new AccountCreatePayloadError("missing_endpoint_url")),
-    "请填写 API 地址",
+test("create request input keeps fields and coerces a missing Key to empty", () => {
+  assert.deepEqual(
+    accountCreateRequestInput({ name: "Lab", provider_id: "lab", key: "sk-lab" }),
+    { name: "Lab", provider_id: "lab", key: "sk-lab" },
   );
-  assert.equal(accountCreatePayloadErrorKey(new Error("internal")), "账号创建失败，请重试");
+  assert.equal(accountCreateRequestInput({ name: "Lab", key: "" }).key, "");
+  assert.equal(accountCreateRequestInput({ name: "Lab", key: undefined as unknown as string }).key, "");
+});
+
+test("payload errors map to Endpoint keys and fall back for unknown failures", () => {
+  const endpoint = accountCreatePayloadErrorKey(new AccountCreatePayloadError("missing_endpoint_url"));
+  assert.equal(endpoint, CUSTOM_ENDPOINT_URL_ISSUE_KEYS.empty);
+  assert.equal(
+    accountCreatePayloadErrorKey(new Error("internal")),
+    accountCreatePayloadErrorKey(new AccountCreatePayloadError("custom_fields_not_allowed")),
+  );
 });

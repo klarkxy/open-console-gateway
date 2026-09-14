@@ -15,7 +15,7 @@ ocg-cli     -> ocg-core
 src-tauri   -> ocg-core
 
 ocg-browser-worker   separate process; no internal ocg-* dependency
-Vue SPA              static assets; HTTP Dashboard V3 only
+Vue SPA              static assets; HTTP Dashboard V3 + V4 only
 ```
 
 The **Adapter Registry** is static and sealed. Runtime Provider definitions
@@ -28,6 +28,8 @@ are typed data bound to Configurable HTTP.
 | `ocg-infra` | Key obfuscation, proxy-aware HTTP helpers, inference transport, SQLite log statements | Product catalogs, Dashboard DTOs, routing policy |
 | `ocg-core` | SQLite, `CoreState`, Dashboard V3, adapters, gateway execution, usage sync, Host composition | Runtime plugin loading; adapter-owned DB or HTTP clients |
 | `ocg-cli` / `src-tauri` | Process composition for CLI and Desktop | A second control plane or direct WebView mutation path |
+
+`ocg-domain::credential` holds the identity/credential/binding vocabulary and the single legacy mapper.
 
 Compatibility facades remain in `ocg-core`, but new no-I/O catalog, selector,
 alias, and conversion behavior belongs in the lower crates.
@@ -44,6 +46,7 @@ alias, and conversion behavior belongs in the lower crates.
     Claude Desktop role aliases
     local GET /v1/models
   /dashboard/api/v3       current Dashboard control plane
+  /dashboard/api/v4       parallel, additive Dashboard control plane
   /dashboard/api          preserved auth + browser WS; retired REST -> 410
   /dashboard/             Vue SPA and assets
 ```
@@ -93,10 +96,13 @@ exact raw pins.
 
 ## Control plane
 
-The Vue SPA calls `/dashboard/api/v3` through `src/api/dashboard-v3.ts` and its
-presenters. CAS-protected mutations carry `expectedRevision` and
-`processGeneration`; pricing writes also carry `expectedPricingRevision`.
-Operational reads and diagnostics that do not mutate state skip CAS.
+The Vue SPA calls V3 through `src/api/dashboard-v3.ts` and V4 through
+`src/api/dashboard-v4.ts` (presenters in `src/api/connections.ts`). A parallel
+additive `/dashboard/api/v4` sits beside frozen V3 and shares the same session;
+it now carries the onboarding commit mutation.
+CAS-protected mutations carry `expectedRevision` and `processGeneration`;
+pricing writes also carry `expectedPricingRevision`. Operational reads and
+diagnostics that do not mutate state skip CAS.
 
 The CLI calls the same HTTP-neutral services without an argv CAS token. Shared
 services own persistence and revision bumps for both the CLI and the frontend.

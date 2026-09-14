@@ -36,8 +36,8 @@ pub use crate::custom_http::{
     CustomUrlHost, CustomUrlTarget, inspect_custom_url, validate_custom_endpoint_url,
 };
 
-/// Upper bound for a Custom verification response. The probe only needs a 2xx
-/// JSON object; anything larger is rejected without certifying the account.
+/// Upper bound for a protocol-correct verification response. Larger bodies
+/// are rejected without certifying the account.
 pub const MAX_CUSTOM_VERIFICATION_BODY_BYTES: usize = 64 * 1024;
 
 /// Discovery is an interactive dashboard aid, not an unbounded upstream
@@ -318,8 +318,7 @@ pub fn derive_custom_models_endpoint(
     };
     resolved.models.ok_or_else(|| CustomModelDiscoveryFailure {
         message: format!(
-            "cannot derive Custom /models endpoint: use an API root, a base ending in `/v1`, or a {:?} endpoint ending with `{suffix}`; add model IDs manually for non-standard paths",
-            protocol
+            "cannot derive Custom /models endpoint: use an API root, a base ending in `/v1`, or a {protocol:?} endpoint ending with `{suffix}`; add model IDs manually for non-standard paths"
         ) })
 }
 
@@ -541,7 +540,8 @@ pub fn minimal_verification_body(
         UpstreamProtocolKind::Responses => json!({
             "model": model_id,
             "input": "ping",
-            "max_output_tokens": 1,
+            // OpenAI-compatible Responses rejects budgets below 16.
+            "max_output_tokens": 16,
             "store": false,
             "stream": false
         }),
@@ -558,7 +558,8 @@ pub fn minimal_verification_body(
 }
 
 /// POST one protocol-correct non-stream request to the resolved inference endpoint.
-/// Only a 2xx JSON object proves verified. Never uses GET /models or mutates capabilities.
+/// Requires a successful response in the requested protocol, not arbitrary JSON.
+/// Never uses GET /models or mutates capabilities.
 pub async fn probe_custom_connection(
     config: &AppConfig,
     custom_config: &AccountCustomConfig,
@@ -623,7 +624,7 @@ async fn probe_custom_protocol(
             auth.map(|scheme| (scheme, api_key)),
             extra,
             Some(body),
-            Some(Duration::from_secs(config.non_stream_timeout_secs)),
+            Some(Duration::from_secs(config.non_stream_timeout_secs.min(30))),
         )
         .await
         .map_err(|error| CustomVerifyFailure {
@@ -631,7 +632,7 @@ async fn probe_custom_protocol(
         })?;
     let status = response.status();
     let bytes = read_custom_verification_body(response).await?;
-    prove_verified_json_object(status, &bytes)
+    prove_verified_protocol_response(status, &bytes, protocol)
 }
 
 async fn read_custom_verification_body(
@@ -655,7 +656,11 @@ fn oversized_verification_body() -> CustomVerifyFailure {
     }
 }
 
-fn prove_verified_json_object(status: StatusCode, body: &[u8]) -> Result<(), CustomVerifyFailure> {
+pub(crate) fn prove_verified_protocol_response(
+    status: StatusCode,
+    body: &[u8],
+    protocol: UpstreamProtocolKind,
+) -> Result<(), CustomVerifyFailure> {
     if !status.is_success() {
         return Err(CustomVerifyFailure {
             message: format!("Custom verification upstream returned {}", status.as_u16()),
@@ -667,6 +672,42 @@ fn prove_verified_json_object(status: StatusCode, body: &[u8]) -> Result<(), Cus
     if !parsed.is_object() {
         return Err(CustomVerifyFailure {
             message: "Custom verification did not return a JSON object".to_string(),
+        });
+    }
+    if parsed.get("error").is_some_and(|error| !error.is_null())
+        || parsed.get("type").and_then(Value::as_str) == Some("error")
+    {
+        return Err(CustomVerifyFailure {
+            message: "upstream returned a protocol error".to_string(),
+        });
+    }
+    let valid = match protocol {
+        UpstreamProtocolKind::ChatCompletions => parsed
+            .get("choices")
+            .and_then(Value::as_array)
+            .is_some_and(|choices| {
+                !choices.is_empty()
+                    && choices
+                        .iter()
+                        .all(|choice| choice.get("message").is_some_and(Value::is_object))
+            }),
+        UpstreamProtocolKind::Responses => {
+            parsed.get("object").and_then(Value::as_str) == Some("response")
+                && parsed.get("output").is_some_and(Value::is_array)
+                && !matches!(
+                    parsed.get("status").and_then(Value::as_str),
+                    Some("failed" | "cancelled" | "queued" | "in_progress")
+                )
+        }
+        UpstreamProtocolKind::Messages => {
+            parsed.get("type").and_then(Value::as_str) == Some("message")
+                && parsed.get("role").and_then(Value::as_str) == Some("assistant")
+                && parsed.get("content").is_some_and(Value::is_array)
+        }
+    };
+    if !valid {
+        return Err(CustomVerifyFailure {
+            message: format!("upstream response does not match {protocol:?}"),
         });
     }
     Ok(())

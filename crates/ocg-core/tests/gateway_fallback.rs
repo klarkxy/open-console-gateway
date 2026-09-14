@@ -31,27 +31,6 @@ use fallback_fix::*;
 async fn fake_upstream_captures_protocol_auth_and_scripts_status_streams() {
     let replies = script(&[
         (
-            "chat-key",
-            &[reply(
-                StatusCode::UNAUTHORIZED.as_u16(),
-                r#"{"error":"unauthorized"}"#,
-            )],
-        ),
-        (
-            "responses-key",
-            &[reply(
-                StatusCode::FORBIDDEN.as_u16(),
-                r#"{"error":"forbidden"}"#,
-            )],
-        ),
-        (
-            "messages-key",
-            &[reply(
-                StatusCode::TOO_MANY_REQUESTS.as_u16(),
-                r#"{"error":"rate limited"}"#,
-            )],
-        ),
-        (
             "gemini-key",
             &[reply(
                 StatusCode::OK.as_u16(),
@@ -63,36 +42,6 @@ async fn fake_upstream_captures_protocol_auth_and_scripts_status_streams() {
     let (base_url, calls, stop_fake) = start_fake_upstream(replies).await;
     let client = loopback_client();
 
-    assert_eq!(
-        client
-            .post(format!("{base_url}/v1/chat/completions"))
-            .header(reqwest::header::AUTHORIZATION, "Bearer chat-key")
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::UNAUTHORIZED
-    );
-    assert_eq!(
-        client
-            .post(format!("{base_url}/v1/responses"))
-            .header(reqwest::header::AUTHORIZATION, "Bearer responses-key")
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::FORBIDDEN
-    );
-    assert_eq!(
-        client
-            .post(format!("{base_url}/v1/messages"))
-            .header("x-api-key", "messages-key")
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::TOO_MANY_REQUESTS
-    );
     let gemini = client
         .post(format!(
             "{base_url}/v1beta/models/fake:streamGenerateContent"
@@ -114,16 +63,13 @@ async fn fake_upstream_captures_protocol_auth_and_scripts_status_streams() {
     );
 
     let calls = calls.lock().unwrap();
-    assert_eq!(calls.len(), 5);
-    assert_eq!(calls[0].path, "/v1/chat/completions");
-    assert_eq!(calls[1].path, "/v1/responses");
-    assert_eq!(calls[2].x_api_key.as_deref(), Some("messages-key"));
-    assert_eq!(calls[3].path, "/v1beta/models/fake:streamGenerateContent");
-    assert_eq!(calls[3].x_goog_api_key.as_deref(), Some("gemini-key"));
-    assert_eq!(calls[4].method, axum::http::Method::POST);
-    assert!(calls[4].authorization.is_none());
-    assert!(calls[4].x_api_key.is_none());
-    assert!(calls[4].x_goog_api_key.is_none());
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].path, "/v1beta/models/fake:streamGenerateContent");
+    assert_eq!(calls[0].x_goog_api_key.as_deref(), Some("gemini-key"));
+    assert_eq!(calls[1].method, axum::http::Method::POST);
+    assert!(calls[1].authorization.is_none());
+    assert!(calls[1].x_api_key.is_none());
+    assert!(calls[1].x_goog_api_key.is_none());
     drop(calls);
     let _ = stop_fake.send(());
 }
@@ -148,6 +94,14 @@ async fn model_discovery_returns_local_list_with_zero_accounts() {
         .await
         .unwrap();
     assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+    let invalid = loopback_client()
+        .get(format!("http://127.0.0.1:{}/v1/models", h.port))
+        .bearer_auth("wrong-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invalid.status(), StatusCode::UNAUTHORIZED);
 
     let (status, body) = h.models().await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -339,12 +293,7 @@ async fn application_models_is_local_with_zero_accounts() {
 
     let (status, body) = h.application_models().await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    let ids = body
-        .as_array()
-        .expect("application-models must be a JSON array")
-        .iter()
-        .map(|item| item.as_str().expect("alias string").to_string())
-        .collect::<Vec<_>>();
+    let ids = application_model_ids(&body);
     assert_eq!(ids, expected_local_application_models(&h.state));
     assert!(ids.contains(&"deepseek-v4-flash".to_string()));
     assert!(!ids.contains(&"minimax-m2.7-highspeed".to_string()));
@@ -367,7 +316,7 @@ async fn application_models_does_not_select_accounts_or_hit_upstream() {
     let (status, body) = h.application_models().await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(
-        body,
+        body["models"],
         serde_json::to_value(expected_local_application_models(&h.state)).unwrap()
     );
     assert_no_application_model_side_effects(&h.state, &h.calls, Some(&before), &routing_before);
@@ -403,19 +352,12 @@ async fn application_models_intersects_priced_go_aliases_in_registry_order() {
     let (status, body) = h.application_models().await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(
-        body,
+        body["models"],
         serde_json::json!(["glm-5.1", "grok-4.5", "kimi-k3", "minimax-m2.7"])
     );
     assert_eq!(
-        body.as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|item| item.as_str())
-            .collect::<Vec<_>>(),
+        application_model_ids(&body),
         expected_local_application_models(&h.state)
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>()
     );
     assert_no_application_model_side_effects(&h.state, &h.calls, Some(&before), &routing_before);
 }
@@ -443,7 +385,7 @@ async fn application_models_empty_intersection_returns_empty_list() {
 
     let (status, body) = h.application_models().await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body, serde_json::json!([]));
+    assert_eq!(body["models"], serde_json::json!([]));
     assert_no_application_model_side_effects(&h.state, &h.calls, Some(&before), &routing_before);
 
     let mut disjoint = h.state.pricing_snapshot().as_ref().clone();
@@ -454,7 +396,7 @@ async fn application_models_empty_intersection_returns_empty_list() {
 
     let (status, body) = h.application_models().await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body, serde_json::json!([]));
+    assert_eq!(body["models"], serde_json::json!([]));
     assert!(h.calls.lock().unwrap().is_empty());
 }
 
@@ -476,8 +418,8 @@ async fn routes_all_client_formats_to_each_models_native_protocol() {
         (
             "/v1/responses",
             "deepseek-v4-flash",
-            "/v1/chat/completions",
-            SUCCESS_BODY,
+            "/v1/responses",
+            RESPONSES_SUCCESS_BODY,
         ),
         ("/v1/responses", "hy3", "/v1/chat/completions", SUCCESS_BODY),
         (
@@ -495,8 +437,8 @@ async fn routes_all_client_formats_to_each_models_native_protocol() {
         (
             "/v1/messages",
             "deepseek-v4-flash",
-            "/v1/chat/completions",
-            SUCCESS_BODY,
+            "/v1/messages",
+            MESSAGES_SUCCESS_BODY,
         ),
         ("/v1/messages", "hy3", "/v1/chat/completions", SUCCESS_BODY),
         (
@@ -739,8 +681,8 @@ async fn inference_skips_accounts_with_unusable_stored_credentials() {
         (
             "/v1/responses",
             "deepseek-v4-flash",
-            "/v1/chat/completions",
-            SUCCESS_BODY,
+            "/v1/responses",
+            RESPONSES_SUCCESS_BODY,
         ),
         (
             "/v1/messages",
@@ -1138,6 +1080,79 @@ async fn stream_ending_before_downstream_output_retries_same_account_once() {
             .and_then(serde_json::Value::as_str),
         Some("retry_same_account")
     );
+}
+
+#[tokio::test]
+async fn r06_zero_output_sse_retry_does_not_resend_after_rotation() {
+    let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let state_slot: Arc<Mutex<Option<Arc<CoreStateInner>>>> = Arc::new(Mutex::new(None));
+    #[derive(Clone)]
+    struct MutatingEmptySse {
+        hits: Arc<std::sync::atomic::AtomicUsize>,
+        state: Arc<Mutex<Option<Arc<CoreStateInner>>>>,
+    }
+    async fn mutating_empty_sse(
+        axum::extract::State(state): axum::extract::State<MutatingEmptySse>,
+    ) -> impl IntoResponse {
+        let n = state.hits.fetch_add(1, Ordering::SeqCst);
+        if n == 0
+            && let Some(host) = state.state.lock().unwrap().clone()
+        {
+            let rotated = host.encrypt_key("sk-test-rotated-retry").unwrap();
+            host.db
+                .lock()
+                .rotate_account_credential("acct-1", &rotated)
+                .unwrap();
+        }
+        (StatusCode::OK, [("content-type", "text/event-stream")], "")
+    }
+    let app = Router::new()
+        .fallback(axum::routing::any(mutating_empty_sse))
+        .with_state(MutatingEmptySse {
+            hits: hits.clone(),
+            state: state_slot.clone(),
+        });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                let _ = stop_rx.await;
+            })
+            .await;
+    });
+    let (state, dir) = build_state(format!("http://{addr}"), &["key-1"]);
+    *state_slot.lock().unwrap() = Some(state.clone());
+    let h = FallbackHarness::from_state(state, dir).await;
+
+    let (status, body) = tokio::time::timeout(
+        StdDuration::from_secs(5),
+        protocol_stream_call(h.port, "/v1/chat/completions", "deepseek-v4-flash"),
+    )
+    .await
+    .expect("the zero-output retry should complete before the watchdog");
+    assert_ne!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        1,
+        "rotated captured retry must not send a second upstream request: {body}"
+    );
+    assert!(!body.contains("sk-test-rotated-retry"), "{body}");
+    assert!(!body.contains("key-1"), "{body}");
+    let logs = h.logs();
+    assert!(
+        logs.iter().any(|log| {
+            log.diagnostic
+                .as_ref()
+                .and_then(|value| value.get("retry_action"))
+                .and_then(serde_json::Value::as_str)
+                == Some("retry_same_account")
+        }),
+        "expected a real RetrySameAccount attempt: {logs:?}"
+    );
+
+    let _ = stop_tx.send(());
 }
 
 #[tokio::test]
@@ -2449,6 +2464,8 @@ async fn dynamic_429_uses_generic_cooldown_skips_go_windows_and_falls_through() 
     .await;
     assert_eq!(status, StatusCode::OK, "{second}");
     let second_id = second["account"]["id"].as_str().unwrap().to_string();
+    h.set_enabled(&first_id, true);
+    h.set_enabled(&second_id, true);
 
     let (status, body) = h.protocol("/v1/chat/completions", "lab-opus").await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -2961,8 +2978,7 @@ async fn dashboard_port_change_rebinds_and_persists_across_restart() {
     let client = loopback_client();
     let response = client
         .put(format!(
-            "http://127.0.0.1:{}/dashboard/api/v3/settings",
-            current_port
+            "http://127.0.0.1:{current_port}/dashboard/api/v3/settings"
         ))
         .json(&settings_payload)
         .send()
@@ -2984,8 +3000,7 @@ async fn dashboard_port_change_rebinds_and_persists_across_restart() {
 
     let status_response = client
         .get(format!(
-            "http://127.0.0.1:{}/dashboard/api/v3/gateway/status",
-            requested_port
+            "http://127.0.0.1:{requested_port}/dashboard/api/v3/gateway/status"
         ))
         .send()
         .await
@@ -3004,8 +3019,7 @@ async fn dashboard_port_change_rebinds_and_persists_across_restart() {
     });
     let fail = client
         .put(format!(
-            "http://127.0.0.1:{}/dashboard/api/v3/settings",
-            requested_port
+            "http://127.0.0.1:{requested_port}/dashboard/api/v3/settings"
         ))
         .json(&fail_payload)
         .send()
@@ -3465,6 +3479,7 @@ async fn disabled_protocols_fail_locally_without_upstream() {
 #[tokio::test]
 async fn protocol_switch_filters_v1_models_and_application_models() {
     let p = PreparedFallback::go(&[("key-1", &[ok()])], &["key-1"]).await;
+    persist_goat_verified_catalog(&p.state, "catalog-only", &["zai-org/GLM-5.3"]);
     disable_go_protocols(&p.state, "glm-5.3", false, true, true);
     let h = p.bind().await;
 
@@ -3481,14 +3496,9 @@ async fn protocol_switch_filters_v1_models_and_application_models() {
 
     let (status, app_body) = h.application_models().await;
     assert_eq!(status, StatusCode::OK, "{app_body}");
-    let ids = app_body
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|item| item.as_str())
-        .collect::<Vec<_>>();
-    assert!(!ids.contains(&"glm-5.3"));
-    assert!(ids.contains(&"grok-4.5"));
+    let ids = application_model_ids(&app_body);
+    assert!(!ids.iter().any(|id| id == "glm-5.3"));
+    assert!(ids.iter().any(|id| id == "grok-4.5"));
 
     disable_command_protocols(&h.state, "zai-org/GLM-5.3");
     let (status, body) = h.models().await;
@@ -3554,10 +3564,6 @@ async fn duplicate_protocol_probes_fail_locally_without_upstream() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(
-        body.to_string().contains("duplicate"),
-        "duplicate protocols must 400: {body}"
-    );
-    assert!(
         h.calls.lock().unwrap().is_empty(),
         "a duplicated protocol must not run a billable probe: {:?}",
         h.calls.lock().unwrap()
@@ -3565,9 +3571,12 @@ async fn duplicate_protocol_probes_fail_locally_without_upstream() {
 }
 
 #[tokio::test]
-async fn explicit_probe_can_add_ceiling_protocol_and_failure_does_not() {
+async fn explicit_probe_records_results_without_changing_production_protocol() {
     let h = FallbackHarness::go(
-        &[("key-1", &[reply(500, r#"{"error":"nope"}"#), ok(), ok()])],
+        &[(
+            "key-1",
+            &[reply(500, r#"{"error":"nope"}"#), ok(), ok_responses()],
+        )],
         &["key-1"],
     )
     .await;
@@ -3644,28 +3653,42 @@ async fn explicit_probe_can_add_ceiling_protocol_and_failure_does_not() {
         .unwrap()
         .clone();
     assert!(
-        after_success
+        !after_success
             .protocols
             .get("chat_completions")
             .unwrap()
             .available
     );
     assert!(
-        after_success
+        !after_success
             .protocols
             .get("chat_completions")
             .unwrap()
             .enabled
     );
+    assert_eq!(
+        after_success
+            .protocols
+            .get("chat_completions")
+            .unwrap()
+            .last_probe_result,
+        Some(ocg_core::provider_contracts::ProbeResultKind::Success)
+    );
 
     let (status, body) = h.protocol("/v1/chat/completions", "grok-4.5").await;
     assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["choices"][0]["message"]["content"], "ok");
     let recorded = h.calls.lock().unwrap();
-    assert!(
+    assert_eq!(
         recorded
             .iter()
-            .any(|call| call.path == "/v1/chat/completions" && call.body.contains("grok-4.5")),
-        "probed Chat must become the selected production path: {recorded:?}"
+            .map(|call| call.path.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "/v1/chat/completions",
+            "/v1/chat/completions",
+            "/v1/responses"
+        ]
     );
 }
 

@@ -419,7 +419,7 @@ async fn cli_enable_rejects_unroutable_catalog_plans_without_mutation() {
         .into_iter()
         .find(|account| account.name == "go-main")
         .unwrap();
-    assert!(go.enabled);
+    assert!(!go.enabled);
     key_command(
         dir.clone(),
         cipher.clone(),
@@ -580,28 +580,33 @@ async fn ping_keys_hits_configured_upstream_and_handles_empty_targets() {
     let missing = ping_keys(&state, Some("nope"), "deepseek-v4-flash", "ping", 3).await;
     assert!(missing.is_err());
 
-    // Reopen with a different cipher so decrypt fails while the account still exists.
-    let wrong_cipher: Arc<dyn KeyCipher + Send + Sync> =
-        Arc::new(StaticKeyCipher::new("other-secret"));
-    let wrong_state = build_state(dir.clone(), wrong_cipher).unwrap();
-    let wrong_id = wrong_state
+    let key_cipher_before = state
         .db
         .lock()
-        .list_accounts()
+        .get_account(&account_id)
         .unwrap()
-        .into_iter()
-        .find(|account| account.name == "pingable")
+        .expect("pingable account")
+        .key_cipher;
+    let wrong_cipher: Arc<dyn KeyCipher + Send + Sync> =
+        Arc::new(StaticKeyCipher::new("other-secret"));
+    let open_error = match build_state(dir.clone(), wrong_cipher) {
+        Ok(_) => panic!("wrong host cipher must fail closed on open, not during ping"),
+        Err(error) => format!("{error:#}"),
+    };
+    assert!(open_error.contains("host cipher rejected"), "{open_error}");
+    assert!(
+        !open_error.contains("sk-ping"),
+        "wrong-cipher open must not leak the plaintext key: {open_error}"
+    );
+
+    let recovered = build_state(dir.clone(), cipher).unwrap();
+    let restored = recovered
+        .db
+        .lock()
+        .get_account(&account_id)
         .unwrap()
-        .id;
-    ping_keys(
-        &wrong_state,
-        Some(wrong_id.as_str()),
-        "deepseek-v4-flash",
-        "ping",
-        3,
-    )
-    .await
-    .unwrap();
+        .expect("account still exists after rejected open");
+    assert_eq!(restored.key_cipher, key_cipher_before);
 
     server.abort();
     let _ = std::fs::remove_dir_all(dir);
@@ -720,7 +725,7 @@ async fn cli_key_mutations_share_control_plane_revision_in_process() {
         .find(|account| account.name == "go-cas")
         .expect("CLI key add must be visible to the live serve CoreState via SQLite");
     assert_eq!(go.provider_id, OPENCODE_PROVIDER_ID);
-    assert!(go.enabled);
+    assert!(!go.enabled);
     assert_eq!(go.setup_step, AccountSetupStep::Ready);
     assert_eq!(go.credential_kind, CredentialKind::ApiKey);
     assert_eq!(

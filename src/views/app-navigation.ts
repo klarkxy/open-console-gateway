@@ -39,7 +39,7 @@ export const APP_NAVIGATION = [
 export type AppNavigationViewKey = (typeof APP_NAVIGATION)[number]["key"];
 export type AppViewKey = AppNavigationViewKey | "browser";
 
-export const APP_VIEW_KEYS: readonly AppViewKey[] = [
+const APP_VIEW_KEYS: readonly AppViewKey[] = [
   ...APP_NAVIGATION.map(({ key }) => key),
   "browser",
 ];
@@ -47,16 +47,38 @@ export const APP_VIEW_KEYS: readonly AppViewKey[] = [
 export const CORE_APP_NAVIGATION = APP_NAVIGATION.filter(({ group }) => group === "core");
 export const EXTENSION_APP_NAVIGATION = APP_NAVIGATION.filter(({ group }) => group === "extensions");
 
-export const LEGACY_PRICING_VIEW = "pricing";
-export const PROVIDERS_VIEW: AppViewKey = "providers";
+const LEGACY_PRICING_VIEW = "pricing";
+const PROVIDERS_VIEW: AppViewKey = "providers";
+/** Legacy Providers tab value; deep links carrying it resolve to Settings. */
 export const PROVIDER_OTHER_TAB = "other";
+const LEGACY_PROVIDER_CATALOG_TAB = "catalog";
 
 const viewKeySet = new Set<string>(APP_VIEW_KEYS);
 
+export const PROVIDER_DETAIL_TABS = ["models", "pricing", "settings"] as const;
+export type ProviderDetailTab = (typeof PROVIDER_DETAIL_TABS)[number];
+
+/**
+ * Providers view deep link. `connection` is a V4 connection id; a leftover
+ * `provider` catalog id is still accepted on write by callers that only know
+ * the legacy identity (mapped on read). `add` opens the add flow (`preset`
+ * picks the embedded form's preset, or the "manual" sentinel).
+ */
 export interface ProviderScopeQuery {
-  scope_kind?: string;
-  scope_id?: string;
-  tab?: string;
+  connection?: string;
+  provider?: string;
+  tab?: ProviderDetailTab;
+  add?: boolean;
+  preset?: string;
+}
+
+/** Normalized Providers query, with legacy scope_kind/scope_id/tab mapped. */
+export interface ProviderPageQuery {
+  connection: string | null;
+  provider: string | null;
+  tab: ProviderDetailTab | null;
+  add: boolean;
+  preset: string | null;
 }
 
 export function isLegacyPricingView(raw: string | null | undefined): boolean {
@@ -69,16 +91,43 @@ export function resolveAppViewKey(raw: string | null | undefined): AppViewKey {
   return viewKeySet.has(raw) ? raw as AppViewKey : "dashboard";
 }
 
-export function readProviderScopeQuery(search: string): {
-  scope_kind: string | null;
-  scope_id: string | null;
-  tab: string | null;
-} {
+export function normalizeProviderDetailTab(raw: string | null | undefined): ProviderDetailTab | null {
+  if (!raw) return null;
+  if (raw === LEGACY_PROVIDER_CATALOG_TAB) return "models";
+  if (raw === PROVIDER_OTHER_TAB) return "settings";
+  return (PROVIDER_DETAIL_TABS as readonly string[]).includes(raw)
+    ? raw as ProviderDetailTab
+    : null;
+}
+
+/**
+ * Reads the Providers query. Legacy `scope_kind`/`scope_id` links keep
+ * working: `provider` and `dynamic` scopes map to `provider=<id>`, `preset`
+ * maps to the add flow, and account-owned `custom_endpoint` scopes degrade
+ * to the default selection (their matrix lives on Accounts).
+ */
+export function readProviderPageQuery(search: string): ProviderPageQuery {
   const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
+  const connection = params.get("connection");
+  let provider = params.get("provider");
+  let add = params.get("add") === "1";
+  let preset = params.get("preset");
+  const legacyKind = params.get("scope_kind");
+  const legacyId = params.get("scope_id");
+  if (!provider && legacyKind && legacyId) {
+    if (legacyKind === "provider" || legacyKind === "dynamic") {
+      provider = legacyId;
+    } else if (legacyKind === "preset") {
+      add = true;
+      preset = preset ?? legacyId;
+    }
+  }
   return {
-    scope_kind: params.get("scope_kind"),
-    scope_id: params.get("scope_id"),
-    tab: params.get("tab"),
+    connection,
+    provider,
+    tab: normalizeProviderDetailTab(params.get("tab")),
+    add,
+    preset,
   };
 }
 
@@ -87,31 +136,60 @@ export function readAccountDeepLink(search: string): string | null {
   return params.get("account_id");
 }
 
+/**
+ * One-shot "open Add Account with this chooser option" deep link (Accounts
+ * view only). Only an explicit Accounts view qualifies — a missing or
+ * different view returns null. Consumers must delete the parameter on use so
+ * a reload or a close/reopen cycle never reopens the modal.
+ */
+export function readAccountAddDeepLink(search: string): string | null {
+  const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
+  if (resolveAppViewKey(params.get("view")) !== "accounts") return null;
+  return params.get("add");
+}
+
 export function applyAppViewSearchParams(
   url: URL,
   view: AppViewKey,
   scope?: ProviderScopeQuery | null,
 ): URL {
   url.searchParams.set("view", view);
-  if (view !== "accounts") url.searchParams.delete("account_id");
+  if (view !== "accounts") {
+    url.searchParams.delete("account_id");
+    if (view !== "providers") url.searchParams.delete("add");
+  }
+  // Legacy Providers parameters are never written anymore, only mapped on read.
+  url.searchParams.delete("scope_kind");
+  url.searchParams.delete("scope_id");
   if (view !== "providers") {
-    url.searchParams.delete("scope_kind");
-    url.searchParams.delete("scope_id");
+    url.searchParams.delete("connection");
+    url.searchParams.delete("provider");
+    url.searchParams.delete("preset");
     url.searchParams.delete("tab");
     return url;
   }
   if (scope === undefined) return url;
   if (scope === null) {
-    url.searchParams.delete("scope_kind");
-    url.searchParams.delete("scope_id");
+    url.searchParams.delete("connection");
+    url.searchParams.delete("provider");
     url.searchParams.delete("tab");
+    url.searchParams.delete("add");
+    url.searchParams.delete("preset");
     return url;
   }
-  if (scope.scope_kind) url.searchParams.set("scope_kind", scope.scope_kind);
-  else url.searchParams.delete("scope_kind");
-  if (scope.scope_id) url.searchParams.set("scope_id", scope.scope_id);
-  else url.searchParams.delete("scope_id");
+  if (scope.connection) {
+    url.searchParams.set("connection", scope.connection);
+    url.searchParams.delete("provider");
+  } else {
+    url.searchParams.delete("connection");
+    if (scope.provider) url.searchParams.set("provider", scope.provider);
+    else url.searchParams.delete("provider");
+  }
   if (scope.tab) url.searchParams.set("tab", scope.tab);
   else url.searchParams.delete("tab");
+  if (scope.add) url.searchParams.set("add", "1");
+  else url.searchParams.delete("add");
+  if (scope.preset) url.searchParams.set("preset", scope.preset);
+  else url.searchParams.delete("preset");
   return url;
 }

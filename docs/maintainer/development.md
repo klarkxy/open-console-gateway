@@ -41,7 +41,7 @@ covers the changed boundary:
 | One Rust crate | `cargo test -p <package>` |
 | Core / Dashboard V3 | `cargo test -p ocg-core <filter>` |
 | Desktop Host | `cargo test -p ocg-manager --lib` |
-| V3 schema or generated types | `pnpm run contract:v3:check` |
+| V3 or V4 schema or generated types | `pnpm run contract:v3:check` / `pnpm run contract:v4:check` |
 | `DESIGN.md` / theme | `pnpm run design:lint` |
 
 `pnpm run test` is the cross-frontend/Rust gate. `pnpm run test:tooling`
@@ -53,9 +53,6 @@ covers `scripts/*.test.mjs` and is a release/tooling gate, not part of
 Rust unit tests live in sibling `tests.rs` modules (`src/db.rs` declares
 `mod tests;` and the tests are in `src/db/tests.rs`). Do not add tests that
 assert on source text, workflow YAML, or documentation prose.
-
-The legacy Applications code, including `src/views/application-guides.ts`, is
-retired and pending cleanup; see the [retirement notice](../user/applications.md).
 
 CLI sandbox (OpenCode Go cards only; no Custom, sub keys, or settings):
 

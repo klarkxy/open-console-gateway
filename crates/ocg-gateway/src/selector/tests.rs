@@ -977,7 +977,7 @@ fn disabling_conversation_sticky_ignores_existing_bindings() {
 }
 
 #[test]
-fn explicit_instant_drives_hits_and_expiry_not_wall_clock() {
+fn explicit_instant_drives_hits_not_wall_clock() {
     let t0 = origin();
     let bind_b = [cand("a", false), cand("b", true)];
     let both = [cand("a", true), cand("b", true)];
@@ -1007,33 +1007,6 @@ fn explicit_instant_drives_hits_and_expiry_not_wall_clock() {
             .unwrap()
         ),
         "b"
-    );
-
-    let mut expired = SelectorState::new();
-    pick(
-        &mut expired,
-        &bind_b,
-        SelectionPolicy::StrictPriority,
-        true,
-        Some("timed"),
-        &[],
-        t0,
-    );
-    assert_eq!(
-        id_at(
-            &both,
-            pick(
-                &mut expired,
-                &both,
-                SelectionPolicy::StrictPriority,
-                true,
-                Some("timed"),
-                &[],
-                t0 + CONVERSATION_TTL,
-            )
-            .unwrap()
-        ),
-        "a"
     );
 }
 

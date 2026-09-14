@@ -9,9 +9,7 @@ Pi/DSH integration templates. These are no longer supported contribution or
 release-acceptance paths. A replacement will be designed separately; its scope
 and delivery date are not defined here.
 
-Some implementation files and endpoints remain in the repository pending code
-cleanup. Their presence does not mean the old subsystem is supported. This
-retirement notice does not remove installed client configuration or plugins.
+This retirement notice does not remove installed client configuration or plugins.
 
 For a client that accepts a base URL, Key, and model ID, use the ordinary
 [Gateway interface](gateway.md), [first-client guide](first-client.md), and

@@ -6,6 +6,69 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+#[test]
+fn official_presets_resolve_to_their_exact_inference_endpoints() {
+    // Exercise the shipped data through the same resolver used by discovery,
+    // verification and forwarding, including nested v3/v4/compatibility paths.
+    let presets: Vec<serde_json::Value> =
+        serde_json::from_str(include_str!("../../../../resources/provider-presets.json")).unwrap();
+    assert!(!presets.is_empty());
+    for preset in presets {
+        let id = preset["id"].as_str().unwrap();
+        let endpoint = preset["endpointUrl"].as_str().unwrap();
+        let protocol =
+            UpstreamProtocolKind::try_from(preset["protocol"].as_str().unwrap()).unwrap();
+        let auth =
+            ocg_domain::dynamic::DynamicAuthKind::try_from(preset["authKind"].as_str().unwrap())
+                .unwrap();
+        assert!(auth.requires_key(), "{id}");
+        if endpoint.is_empty() {
+            assert!(
+                resolve_custom_endpoints(endpoint, protocol).is_err(),
+                "{id}"
+            );
+            continue;
+        }
+        let resolved = resolve_custom_endpoints(endpoint, protocol).unwrap();
+        assert_eq!(resolved.inference.as_str(), endpoint, "{id}");
+        assert_eq!(resolved.inference.scheme(), "https", "{id}");
+        assert!(resolved.inference.query().is_none(), "{id}");
+        let headers =
+            isolated_inference_headers(auth.upstream_auth().unwrap(), "preset-test-key").unwrap();
+        match auth {
+            ocg_domain::dynamic::DynamicAuthKind::Bearer => {
+                assert_eq!(headers[AUTHORIZATION], "Bearer preset-test-key", "{id}");
+                assert!(!headers.contains_key("x-api-key"), "{id}");
+            }
+            ocg_domain::dynamic::DynamicAuthKind::XApiKey => {
+                assert_eq!(headers["x-api-key"], "preset-test-key", "{id}");
+                assert!(!headers.contains_key(AUTHORIZATION), "{id}");
+            }
+            ocg_domain::dynamic::DynamicAuthKind::None => unreachable!(),
+        }
+        if preset["modelDiscovery"].as_bool() != Some(false) {
+            let models = resolved.models.expect(id);
+            assert_eq!(models.origin(), resolved.inference.origin(), "{id}");
+            assert!(models.path().ends_with("/models"), "{id}");
+        }
+    }
+}
+
+#[test]
+fn preset_offerings_mirror_matches_shipped_presets() {
+    // ocg-domain freezes a point-in-time mirror of the JSON `offering` field
+    // for the v42 seed and create paths. A plan preset missing from the mirror
+    // would silently persist as "api", so pin every shipped id here.
+    let presets: Vec<serde_json::Value> =
+        serde_json::from_str(include_str!("../../../../resources/provider-presets.json")).unwrap();
+    assert!(!presets.is_empty());
+    for preset in &presets {
+        let id = preset["id"].as_str().unwrap();
+        let expected = preset["offering"].as_str().unwrap_or("api");
+        assert_eq!(ocg_domain::provider::preset_offering(id), expected, "{id}");
+    }
+}
+
 fn test_config(mode: ProxyMode, proxy_url: &str) -> AppConfig {
     AppConfig {
         proxy_mode: mode,
@@ -159,7 +222,7 @@ fn http_inference_transport_is_policy_neutral_and_owns_join_auth_and_timeout() {
 }
 
 #[test]
-fn inference_http_primitives_join_auth_timeout_and_redirect_without_custom_policy() {
+fn inference_endpoint_join_rejects_parent_path_escape() {
     let goat = join_inference_endpoint(
         crate::provider::COMMAND_CODE_GOAT_BASE_URL,
         crate::provider::COMMAND_CODE_GOAT_CHAT_COMPLETIONS_PATH,
@@ -178,18 +241,6 @@ fn inference_http_primitives_join_auth_timeout_and_redirect_without_custom_polic
     assert!(join_inference_endpoint("https://api.commandcode.ai/provider/v1", "../admin").is_err());
     let bearer = isolated_inference_headers(UpstreamAuthScheme::Bearer, "sk-test").unwrap();
     assert_eq!(bearer.get(AUTHORIZATION).unwrap(), "Bearer sk-test");
-    let custom = isolated_custom_headers(UpstreamAuthScheme::Bearer, "sk-test").unwrap();
-    assert_eq!(bearer, custom);
-    assert_eq!(InferenceRedirectPolicy::None, InferenceRedirectPolicy::None);
-    assert_ne!(
-        InferenceRedirectPolicy::Follow,
-        InferenceRedirectPolicy::None
-    );
-    let _none = InferenceRedirectPolicy::None.reqwest_policy();
-    assert_eq!(
-        inference_connect_timeout(&test_config(ProxyMode::Direct, "")),
-        Duration::from_secs(5)
-    );
 }
 
 #[test]
@@ -267,17 +318,6 @@ fn custom_endpoint_resolution_supports_common_bases_and_legacy_endpoints() {
         "https://api.example.com/v1/messages"
     );
     assert!(mismatch.models.is_none());
-
-    for rejected in [
-        "https://user:pass@api.example.com",
-        "https://api.example.com?v=1",
-        "https://api.example.com#fragment",
-    ] {
-        assert!(
-            resolve_custom_endpoints(rejected, UpstreamProtocolKind::ChatCompletions).is_err(),
-            "{rejected}"
-        );
-    }
 }
 
 #[test]
@@ -476,6 +516,77 @@ async fn http_inference_transport_redirect_policy_is_owned_by_the_spec() {
 }
 
 #[tokio::test]
+async fn s02_secret_bearing_follow_spec_refuses_before_any_hop() {
+    let second_hits = Arc::new(AtomicUsize::new(0));
+    let second = serve_http(200, "OK", &[], "second", second_hits.clone()).await;
+    let first_hits = Arc::new(AtomicUsize::new(0));
+    let location = format!("http://127.0.0.1:{}/next", second.port());
+    let first = serve_http(
+        302,
+        "Redirect",
+        &[("Location", location)],
+        "",
+        first_hits.clone(),
+    )
+    .await;
+    let follow = HttpInferenceTransport::build(
+        &test_config(ProxyMode::Direct, ""),
+        HttpInferenceTransportSpec::follow_redirects(),
+    )
+    .unwrap();
+    let url = reqwest::Url::parse(&format!("http://127.0.0.1:{}/start", first.port())).unwrap();
+    let error = follow
+        .send(InferenceHttpRequest {
+            method: reqwest::Method::GET,
+            url,
+            auth: Some((UpstreamAuthScheme::Bearer, "sk-secret")),
+            extra_headers: HeaderMap::new(),
+            body: None,
+            request_timeout: None,
+        })
+        .await
+        .expect_err("secret-bearing follow must fail closed");
+    let _ = error;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(first_hits.load(Ordering::SeqCst), 0);
+    assert_eq!(second_hits.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn s03_metadata_targets_never_cause_a_secret_bearing_connect() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let bait = serve_http(200, "OK", &[], "metadata", hits.clone()).await;
+    let client = build_custom_http_client(&test_config(ProxyMode::Direct, "")).unwrap();
+    for value in [
+        "https://169.254.169.254/latest",
+        "http://metadata.google.internal/messages",
+        "http://0xa9fea9fe/latest",
+    ] {
+        let url = reqwest::Url::parse(value).unwrap();
+        let error = client
+            .send_isolated(
+                reqwest::Method::GET,
+                url,
+                UpstreamAuthScheme::Bearer,
+                "sk-secret",
+                HeaderMap::new(),
+                None,
+                None,
+            )
+            .await
+            .expect_err(value);
+        assert!(
+            matches!(error, CustomHttpError::InvalidUrl(_)),
+            "{value}: {error}"
+        );
+    }
+    let allowed = reqwest::Url::parse(&format!("http://127.0.0.1:{}/v1", bait.port())).unwrap();
+    let ok = send_get(&client, allowed).await.unwrap();
+    assert_eq!(ok.status(), StatusCode::OK);
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn redirects_are_not_followed_for_301_302_307_308() {
     for status in [301_u16, 302, 307, 308] {
         let second_hits = Arc::new(AtomicUsize::new(0));
@@ -528,17 +639,6 @@ async fn direct_does_not_use_manual_proxy_and_manual_does_not_bypass_it() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(proxy_hits.load(Ordering::SeqCst), 1);
     assert_eq!(upstream_hits.load(Ordering::SeqCst), 1);
-}
-
-#[tokio::test]
-async fn loopback_and_private_literal_destinations_are_reachable_over_direct() {
-    let hits = Arc::new(AtomicUsize::new(0));
-    let addr = serve_http(200, "OK", &[], r#"{"ok":true}"#, hits.clone()).await;
-    let client = build_custom_http_client(&test_config(ProxyMode::Direct, "")).unwrap();
-    let url = reqwest::Url::parse(&format!("http://127.0.0.1:{}/v1", addr.port())).unwrap();
-    let response = send_get(&client, url).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(hits.load(Ordering::SeqCst), 1);
 }
 
 async fn serve_delayed_json(delay: Duration, body: &str) -> std::net::SocketAddr {

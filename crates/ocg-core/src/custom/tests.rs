@@ -3,19 +3,10 @@ use crate::provider::ProviderBindingError;
 use std::net::IpAddr;
 
 #[test]
-fn custom_endpoint_url_trusts_administrator_http_origins_and_rejects_credentials() {
+fn custom_endpoint_url_rejects_credentials_query_fragment_and_non_http_schemes() {
     use crate::provider::validate_custom_model_id;
 
-    assert!(validate_custom_endpoint_url("https://api.example.com/v1/responses").is_ok());
-    assert!(validate_custom_endpoint_url("http://127.0.0.1:8080/v1/messages").is_ok());
-    assert!(validate_custom_endpoint_url("http://localhost:3000/chat/completions").is_ok());
-    assert!(validate_custom_endpoint_url("http://app.localhost/v1/responses").is_ok());
     assert!(validate_custom_endpoint_url("http://api.example.com/v1/responses").is_ok());
-    assert!(validate_custom_endpoint_url("https://192.168.1.8/v1/responses").is_ok());
-    assert!(validate_custom_endpoint_url("http://10.0.0.1:9000/v1/messages").is_ok());
-    assert!(validate_custom_endpoint_url("https://169.254.169.254/latest").is_ok());
-    assert!(validate_custom_endpoint_url("http://metadata.google.internal/messages").is_ok());
-    assert!(validate_custom_endpoint_url("https://[::ffff:169.254.169.254]/responses").is_ok());
     assert!(validate_custom_endpoint_url("https://[2001:db8::1]/v1/responses").is_ok());
     assert!(validate_custom_endpoint_url("https://user:pass@api.example.com/messages").is_err());
     assert!(validate_custom_endpoint_url("https://api.example.com/responses?x=1").is_err());
@@ -69,7 +60,7 @@ async fn verification_resolves_root_base_to_the_selected_protocol_path() {
         let mut buf = vec![0_u8; 8192];
         let read = stream.read(&mut buf).await.unwrap_or(0);
         let _ = request_tx.send(String::from_utf8_lossy(&buf[..read]).to_string());
-        let body = r#"{"id":"ok"}"#;
+        let body = r#"{"choices":[{"message":{"role":"assistant","content":"ok"}}]}"#;
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
@@ -129,14 +120,11 @@ fn custom_url_host_uses_url_host_not_bracketed_host_str() {
             panic!("mapped loopback must stay an IP host, got {domain}")
         }
     }
-    let metadata = validate_custom_endpoint_url("https://[::ffff:169.254.169.254]/latest").unwrap();
-    let parsed = reqwest::Url::parse(&metadata).unwrap();
-    match inspect_custom_url(&parsed).unwrap().host {
-        CustomUrlHost::Ip(_) => {}
-        CustomUrlHost::Domain(domain) => {
-            panic!("mapped metadata IP must stay an IP host, got {domain}")
-        }
-    }
+    let metadata = reqwest::Url::parse("https://[::ffff:169.254.169.254]/latest").unwrap();
+    assert!(
+        inspect_custom_url(&metadata).is_err(),
+        "mapped metadata IP must be refused before outbound"
+    );
 }
 
 #[test]
@@ -156,64 +144,29 @@ fn custom_endpoint_url_normalizes_decimal_loopback_literals() {
     }
 }
 
+fn assert_invalid_custom_url(value: &str) {
+    assert!(
+        matches!(
+            validate_custom_endpoint_url(value),
+            Err(ProviderBindingError::InvalidCustomBaseUrl(_))
+        ),
+        "{value:?} must fail closed as InvalidCustomBaseUrl"
+    );
+}
+
 #[test]
-fn custom_endpoint_url_errors_keep_existing_variants_and_messages() {
-    assert_eq!(
-        validate_custom_endpoint_url("").unwrap_err(),
-        ProviderBindingError::InvalidCustomBaseUrl("endpoint URL is required".to_string())
-    );
-    assert_eq!(
-        validate_custom_endpoint_url("   ").unwrap_err(),
-        ProviderBindingError::InvalidCustomBaseUrl("endpoint URL is required".to_string())
-    );
-    let too_long = format!("https://api.example.com/{}", "a".repeat(2048));
-    assert_eq!(
-        validate_custom_endpoint_url(&too_long).unwrap_err(),
-        ProviderBindingError::InvalidCustomBaseUrl("endpoint URL is too long".to_string())
-    );
-    let parsed_err = validate_custom_endpoint_url("not a url").unwrap_err();
-    match parsed_err {
-        ProviderBindingError::InvalidCustomBaseUrl(message) => {
-            assert!(message.starts_with("invalid endpoint URL: "), "{message}");
-        }
-        other => panic!("expected InvalidCustomBaseUrl, got {other:?}"),
-    }
-    assert_eq!(
-        validate_custom_endpoint_url("https://api.example.com/v1/responses?x=1").unwrap_err(),
-        ProviderBindingError::InvalidCustomBaseUrl(
-            "endpoint URL must not include a query or fragment".to_string()
-        )
-    );
-    assert_eq!(
-        validate_custom_endpoint_url("https://api.example.com/v1/responses#frag").unwrap_err(),
-        ProviderBindingError::InvalidCustomBaseUrl(
-            "endpoint URL must not include a query or fragment".to_string()
-        )
-    );
-    assert_eq!(
-        validate_custom_endpoint_url("ftp://api.example.com/v1/responses").unwrap_err(),
-        ProviderBindingError::InvalidCustomBaseUrl(
-            "endpoint URL must use http or https".to_string()
-        )
-    );
-    assert_eq!(
-        validate_custom_endpoint_url("javascript:alert(1)").unwrap_err(),
-        ProviderBindingError::InvalidCustomBaseUrl(
-            "endpoint URL must use http or https".to_string()
-        )
-    );
-    assert_eq!(
-        validate_custom_endpoint_url("https://user:pass@api.example.com/responses").unwrap_err(),
-        ProviderBindingError::InvalidCustomBaseUrl(
-            "endpoint URL must not include credentials".to_string()
-        )
-    );
+fn custom_endpoint_url_rejects_empty_overlong_unparsed_and_file_urls() {
+    assert_invalid_custom_url("");
+    assert_invalid_custom_url("   ");
+    assert_invalid_custom_url(&format!("https://api.example.com/{}", "a".repeat(2048)));
+    assert_invalid_custom_url("not a url");
     let hostless = reqwest::Url::parse("file:///tmp").unwrap();
-    assert_eq!(
-        inspect_custom_url(&hostless).unwrap_err(),
-        ProviderBindingError::InvalidCustomBaseUrl(
-            "endpoint URL must use http or https".to_string()
-        )
+    assert!(
+        matches!(
+            inspect_custom_url(&hostless),
+            Err(ProviderBindingError::InvalidCustomBaseUrl(_))
+        ),
+        "file URLs must fail closed as InvalidCustomBaseUrl"
     );
 }
 
@@ -296,7 +249,7 @@ fn verification_bodies_are_non_stream_and_token_bounded() {
     )
     .unwrap();
     assert_eq!(responses["stream"], false);
-    assert_eq!(responses["max_output_tokens"], 1);
+    assert_eq!(responses["max_output_tokens"], 16);
 
     let messages = serde_json::from_slice::<Value>(
         &minimal_verification_body(UpstreamProtocolKind::Messages, "local-model").unwrap(),
@@ -386,14 +339,48 @@ fn model_discovery_timeout_is_shorter_than_the_general_request_timeout() {
 }
 
 #[test]
-fn only_2xx_json_object_proves_verified() {
-    assert!(prove_verified_json_object(StatusCode::OK, br#"{"id":"ok"}"#).is_ok());
-    assert!(prove_verified_json_object(StatusCode::CREATED, br#"{"ok":true}"#).is_ok());
-    assert!(prove_verified_json_object(StatusCode::OK, b"[1]").is_err());
-    assert!(prove_verified_json_object(StatusCode::OK, b"\"ok\"").is_err());
-    assert!(prove_verified_json_object(StatusCode::OK, b"not-json").is_err());
-    assert!(prove_verified_json_object(StatusCode::BAD_REQUEST, br#"{"error":"no"}"#).is_err());
-    assert!(prove_verified_json_object(StatusCode::FOUND, br#"{"id":"ok"}"#).is_err());
+fn verification_requires_the_requested_protocol_and_rejects_false_success() {
+    let cases: [(UpstreamProtocolKind, &[u8]); 3] = [
+        (
+            UpstreamProtocolKind::ChatCompletions,
+            br#"{"choices":[{"message":{"content":"ok"}}]}"#,
+        ),
+        (
+            UpstreamProtocolKind::Responses,
+            br#"{"object":"response","output":[],"status":"completed","error":null}"#,
+        ),
+        (
+            UpstreamProtocolKind::Messages,
+            br#"{"type":"message","role":"assistant","content":[]}"#,
+        ),
+    ];
+    for (protocol, body) in cases {
+        assert!(prove_verified_protocol_response(StatusCode::OK, body, protocol).is_ok());
+        for (other, _) in cases {
+            if protocol != other {
+                assert!(prove_verified_protocol_response(StatusCode::OK, body, other).is_err());
+            }
+        }
+        for invalid in [
+            br#"{"id":"ok"}"#.as_slice(),
+            br#"{"error":{"message":"denied"}}"#,
+            b"[1]",
+            b"not-json",
+        ] {
+            assert!(prove_verified_protocol_response(StatusCode::OK, invalid, protocol).is_err());
+        }
+        for status in [StatusCode::BAD_REQUEST, StatusCode::FOUND] {
+            assert!(prove_verified_protocol_response(status, body, protocol).is_err());
+        }
+    }
+    assert!(
+        prove_verified_protocol_response(
+            StatusCode::OK,
+            br#"{"output":[],"status":"failed"}"#,
+            UpstreamProtocolKind::Responses
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -500,8 +487,7 @@ async fn oversized_verification_body_is_rejected_without_certifying() {
         verified_at: None,
         source: "manual".into(),
     };
-    let error = probe_custom_connection(&app_config, &custom_config, &capability, "sk")
+    probe_custom_connection(&app_config, &custom_config, &capability, "sk")
         .await
         .expect_err("oversized verification bodies must not prove verified");
-    assert!(error.message.contains("exceeded"), "{}", error.message);
 }

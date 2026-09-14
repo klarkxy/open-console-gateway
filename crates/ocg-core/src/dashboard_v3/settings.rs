@@ -3,7 +3,6 @@
 use axum::Json;
 use axum::body::Bytes;
 use axum::extract::State;
-use serde_json::Value;
 
 use crate::kernel::ids::is_free_model;
 use crate::kernel::protocol::{ApiFormat, supported_model_protocols};
@@ -16,7 +15,7 @@ use crate::state::{CoreState, HostSettingsError};
 use super::types::{
     ProxyListDirection, ProxyMode, ProxySupportedModel, RoutingMode, Settings, SettingsUpdate,
 };
-use super::{MutationAck, V3ApiError};
+use super::{MutationAck, V3ApiError, check_expectation, parse_mutation_json};
 
 pub(super) async fn get_settings(State(state): State<CoreState>) -> Json<Settings> {
     let _settings_update = state.settings_update.lock();
@@ -27,19 +26,8 @@ pub(super) async fn put_settings(
     State(state): State<CoreState>,
     body: Bytes,
 ) -> Result<Json<MutationAck>, V3ApiError> {
-    let update = parse_settings_update(&body)?;
+    let update = parse_mutation_json::<SettingsUpdate>(&body)?;
     update_settings(&state, update).await.map(Json)
-}
-
-fn parse_settings_update(bytes: &[u8]) -> Result<SettingsUpdate, V3ApiError> {
-    let value: Value = serde_json::from_slice(bytes).map_err(|_| V3ApiError::invalid_json())?;
-    let Some(object) = value.as_object() else {
-        return Err(V3ApiError::invalid_json());
-    };
-    if !object.contains_key("expectedRevision") {
-        return Err(V3ApiError::missing_expected_revision());
-    }
-    serde_json::from_value(value).map_err(|_| V3ApiError::invalid_json())
 }
 
 /// Validates, then commits one settings patch. Bumps the unified revision
@@ -56,11 +44,7 @@ async fn update_settings(
     let changed_fields = changed_setting_fields(&update).join(",");
     let (previous_config, config, committed_revision) = {
         let _settings_update = state.settings_update.lock();
-        if update.expectation.expected_revision != state.settings_revision()
-            || update.expectation.process_generation != state.process_generation()
-        {
-            return Err(V3ApiError::revision_conflict(state));
-        }
+        check_expectation(state, &update.expectation)?;
         if state.gateway_port_from_env() && update.gateway_port.is_some() {
             return Err(V3ApiError::invalid_request_at(
                 state,

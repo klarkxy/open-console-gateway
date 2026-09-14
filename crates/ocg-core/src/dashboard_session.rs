@@ -1,11 +1,10 @@
-//! Shared Dashboard V2/V3 session and single-admin authentication policy.
+//! Shared Dashboard V3 session and single-admin authentication policy.
 //!
 //! Cookie attributes, loopback trust, forwarded-header fail-closed checks,
 //! Argon2 register/login, session rotation, and remote-browser invalidation
-//! live here so V2 and V3 cannot diverge. Wire envelopes stay in each
-//! dashboard module. Callers pass a database mutex, browser runtime, session
-//! token mutex, local-mode flag, and request headers — this module does not
-//! import host state.
+//! live here. Wire envelopes stay in the dashboard_v3 module. Callers pass a
+//! database mutex, browser runtime, session token mutex, local-mode flag, and
+//! request headers — this module does not import host state.
 //!
 //! Registration persists the first administrator only and does **not** bump
 //! `settings_revision`, matching historical V2 `/auth/register` semantics.

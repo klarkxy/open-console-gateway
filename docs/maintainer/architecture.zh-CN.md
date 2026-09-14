@@ -14,7 +14,7 @@ ocg-cli     -> ocg-core
 src-tauri   -> ocg-core
 
 ocg-browser-worker   独立进程；不依赖内部 ocg-* crate
-Vue SPA              静态资源；只走 HTTP Dashboard V3
+Vue SPA              静态资源；只走 HTTP Dashboard V3 + V4
 ```
 
 **Adapter Registry** 静态密封。运行时 Provider 定义是绑定 Configurable HTTP 的
@@ -27,6 +27,8 @@ Vue SPA              静态资源；只走 HTTP Dashboard V3
 | `ocg-infra` | Key 混淆、代理感知 HTTP helper、推理传输、SQLite 日志语句 | 产品目录、Dashboard DTO、路由策略 |
 | `ocg-core` | SQLite、`CoreState`、Dashboard V3、适配器、Gateway 执行、用量同步、Host 组合 | 运行时插件加载；适配器自持 DB 或 HTTP client |
 | `ocg-cli` / `src-tauri` | CLI 与 Desktop 进程组合 | 第二套控制面或 WebView 直接变更路径 |
+
+`ocg-domain::credential` 持有身份/凭据/绑定词汇以及唯一的遗留映射器。
 
 兼容 facade 继续留在 `ocg-core`，但新的无 I/O 目录、selector、Alias 与转换行为应进入
 下层 crate。
@@ -43,6 +45,7 @@ Vue SPA              静态资源；只走 HTTP Dashboard V3
     Claude Desktop 角色 Alias
     本地 GET /v1/models
   /dashboard/api/v3       当前 Dashboard 控制面
+  /dashboard/api/v4       并行、仅增量的 Dashboard 控制面
   /dashboard/api          保留 auth + browser WS；已退役 REST -> 410
   /dashboard/             Vue SPA 与静态资源
 ```
@@ -83,7 +86,8 @@ Provider 目录与合约先于账号凭据解析。保存的发现行只能激�
 
 ## 控制面
 
-Vue SPA 通过 `src/api/dashboard-v3.ts` 及 presenter 调用 `/dashboard/api/v3`。
+Vue SPA 通过 `src/api/dashboard-v3.ts` 调用 V3，通过 `src/api/dashboard-v4.ts` 调用 V4（presenter 在 `src/api/connections.ts`）。
+并行的仅增量 `/dashboard/api/v4` 与冻结的 V3 并存，共用同一套会话；现已包含 onboarding commit 变更。
 受 CAS 保护的变更携带 `expectedRevision` 与 `processGeneration`；价格写入另带
 `expectedPricingRevision`。不变更状态的操作读取与诊断跳过 CAS。
 

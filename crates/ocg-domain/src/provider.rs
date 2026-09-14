@@ -13,6 +13,8 @@ use crate::ids::{
     KIMI_PROVIDER_ID, MINIMAX_PROVIDER_ID, OLLAMA_PROVIDER_ID, OPENCODE_PROVIDER_ID,
     OPENCODE_ZEN_FREE_PROVIDER_ID, ZEN_FREE_ACCOUNT_ID,
 };
+#[cfg(feature = "schemars")]
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -626,6 +628,120 @@ pub const BUILTIN_PROVIDERS: [BuiltinProvider; 8] = [
     },
 ];
 
+/// Migration-period mirror of `resources/provider-presets.json` `offering`
+/// field, point-in-time. Plan-offering preset ids resolve to `"plan"`, every
+/// other preset id (and unknown values) resolve to `"api"`. The persisted
+/// `providers.offering` column is seeded from this map when a row carries a
+/// `preset_id`; non-preset rows stay `"api"`.
+const PRESET_OFFERINGS: &[(&str, &str)] = &[
+    ("zhipu-coding", "plan"),
+    ("zai-coding", "plan"),
+    ("tencent-token", "plan"),
+    ("tencent-token-intl", "plan"),
+    ("tencent-enterprise-pro", "plan"),
+    ("tencent-enterprise-pro-intl", "plan"),
+    ("tencent-enterprise-lite", "plan"),
+    ("tencent-enterprise-lite-intl", "plan"),
+    ("bailian-coding", "plan"),
+    ("qwencloud-coding", "plan"),
+    ("qwencloud-token", "plan"),
+    ("volcengine-agent", "plan"),
+    ("volcengine-coding", "plan"),
+    ("byteplus-coding", "plan"),
+    ("qianfan-coding", "plan"),
+    ("qianfan-token-team", "plan"),
+    ("stepfun-plan", "plan"),
+    ("stepfun-plan-intl", "plan"),
+    ("xiaomi-mimo-token", "plan"),
+    ("streamlake-coding", "plan"),
+    ("compshare-coding", "plan"),
+    ("atlascloud", "plan"),
+];
+
+/// Resolve the persisted `offering` for a dynamic Provider that carries a
+/// `preset_id`. Plan-offering presets map to `"plan"`, every other value maps
+/// to `"api"`. Stable identifier: builtin adapters do not consume this.
+pub fn preset_offering(preset_id: &str) -> &'static str {
+    let trimmed = preset_id.trim();
+    if trimmed.is_empty() {
+        return "api";
+    }
+    PRESET_OFFERINGS
+        .iter()
+        .find(|(id, _)| *id == trimmed)
+        .map(|(_, offering)| *offering)
+        .unwrap_or("api")
+}
+
+/// Sealed offering for builtin adapters: paid families are Plans, free and
+/// account-owned surfaces are API. Point-in-time mirror of the v42 seed.
+pub fn builtin_offering(provider_id: &str) -> &'static str {
+    match provider_id {
+        OPENCODE_PROVIDER_ID
+        | COMMAND_CODE_PROVIDER_ID
+        | MINIMAX_PROVIDER_ID
+        | KIMI_PROVIDER_ID
+        | OLLAMA_PROVIDER_ID => "plan",
+        _ => "api",
+    }
+}
+
+/// Provenance of a row in the unified `providers` table. The column is
+/// additive in v42 and never feeds routing decisions: builtin adapters stay
+/// sealed, and dynamic rows keep their `ConfigurableHttp` adapter path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(JsonSchema))]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schemars", schemars(rename_all = "snake_case"))]
+pub enum ProviderOrigin {
+    Builtin,
+    Preset,
+    Custom,
+}
+
+impl ProviderOrigin {
+    pub const ALL: [Self; 3] = [Self::Builtin, Self::Preset, Self::Custom];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Builtin => "builtin",
+            Self::Preset => "preset",
+            Self::Custom => "custom",
+        }
+    }
+}
+
+impl fmt::Display for ProviderOrigin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl TryFrom<&str> for ProviderOrigin {
+    type Error = ProviderBindingError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "builtin" => Ok(Self::Builtin),
+            "preset" => Ok(Self::Preset),
+            "custom" => Ok(Self::Custom),
+            other => Err(ProviderBindingError::UnknownUpstreamProtocol(
+                other.to_string(),
+            )),
+        }
+    }
+}
+
+/// Resolve the persisted `origin` for a dynamic Provider. Preset-bearing rows
+/// are `preset`; manual rows are `custom`. Builtin rows are never constructed
+/// through this path.
+pub fn provider_origin_from_preset(preset_id: Option<&str>) -> ProviderOrigin {
+    match preset_id {
+        Some(value) if !value.trim().is_empty() => ProviderOrigin::Preset,
+        _ => ProviderOrigin::Custom,
+    }
+}
+
 pub fn default_provider_id() -> String {
     OPENCODE_PROVIDER_ID.to_string()
 }
@@ -950,7 +1066,6 @@ pub enum StructuralProbeCeiling {
 pub struct ProtocolProbeDescriptor {
     pub request_path_may_trial: bool,
     pub matrix: ProtocolMatrixKind,
-    pub unknown_zen_free_defaults_to_chat: bool,
     pub fallback_priority: &'static [UpstreamProtocolKind],
     /// Dedicated admin probe surface. Request paths must stay false.
     pub explicit_probe: bool,
@@ -1064,7 +1179,6 @@ fn open_code_go_capabilities(plan: BuiltinProvider) -> ProviderCapabilities {
         protocol_probe: ProtocolProbeDescriptor {
             request_path_may_trial: false,
             matrix: ProtocolMatrixKind::OpenCodeModelProtocols,
-            unknown_zen_free_defaults_to_chat: false,
             fallback_priority: PROTOCOL_FALLBACK_CHAT_RESPONSES_MESSAGES,
             explicit_probe: true,
             structural_ceiling: StructuralProbeCeiling::OpenCodeConstructable,
@@ -1129,7 +1243,6 @@ fn zen_free_capabilities(plan: BuiltinProvider) -> ProviderCapabilities {
         protocol_probe: ProtocolProbeDescriptor {
             request_path_may_trial: false,
             matrix: ProtocolMatrixKind::OpenCodeModelProtocols,
-            unknown_zen_free_defaults_to_chat: true,
             fallback_priority: PROTOCOL_FALLBACK_CHAT_RESPONSES_MESSAGES,
             explicit_probe: true,
             structural_ceiling: StructuralProbeCeiling::ZenFreeConstructable,
@@ -1194,7 +1307,6 @@ fn command_code_goat_capabilities(plan: BuiltinProvider) -> ProviderCapabilities
         protocol_probe: ProtocolProbeDescriptor {
             request_path_may_trial: false,
             matrix: ProtocolMatrixKind::CommandCodeNative,
-            unknown_zen_free_defaults_to_chat: false,
             fallback_priority: PROTOCOL_FALLBACK_CHAT_MESSAGES,
             explicit_probe: true,
             structural_ceiling: StructuralProbeCeiling::CommandCodeConstructable,
@@ -1259,7 +1371,6 @@ fn minimax_cn_capabilities(plan: BuiltinProvider) -> ProviderCapabilities {
         protocol_probe: ProtocolProbeDescriptor {
             request_path_may_trial: false,
             matrix: ProtocolMatrixKind::FixedProviderProtocols,
-            unknown_zen_free_defaults_to_chat: false,
             fallback_priority: &CHAT_MESSAGES_PROTOCOLS,
             explicit_probe: true,
             structural_ceiling: StructuralProbeCeiling::Fixed(&CHAT_MESSAGES_PROTOCOLS),
@@ -1324,7 +1435,6 @@ fn ollama_cloud_capabilities(plan: BuiltinProvider) -> ProviderCapabilities {
         protocol_probe: ProtocolProbeDescriptor {
             request_path_may_trial: false,
             matrix: ProtocolMatrixKind::FixedProviderProtocols,
-            unknown_zen_free_defaults_to_chat: false,
             fallback_priority: &CHAT_PROTOCOLS,
             explicit_probe: false,
             structural_ceiling: StructuralProbeCeiling::Unavailable,
@@ -1389,7 +1499,6 @@ fn kimi_cn_capabilities(plan: BuiltinProvider) -> ProviderCapabilities {
         protocol_probe: ProtocolProbeDescriptor {
             request_path_may_trial: false,
             matrix: ProtocolMatrixKind::FixedProviderProtocols,
-            unknown_zen_free_defaults_to_chat: false,
             fallback_priority: &CHAT_MESSAGES_PROTOCOLS,
             explicit_probe: true,
             structural_ceiling: StructuralProbeCeiling::Fixed(&CHAT_MESSAGES_PROTOCOLS),
@@ -1454,7 +1563,6 @@ fn configurable_http_capabilities(plan: BuiltinProvider) -> ProviderCapabilities
         protocol_probe: ProtocolProbeDescriptor {
             request_path_may_trial: false,
             matrix: ProtocolMatrixKind::AccountDeclaredProtocol,
-            unknown_zen_free_defaults_to_chat: false,
             fallback_priority: PROTOCOL_FALLBACK_CHAT_RESPONSES_MESSAGES,
             explicit_probe: false,
             structural_ceiling: StructuralProbeCeiling::Unavailable,
@@ -1521,7 +1629,6 @@ fn cpa_capabilities(plan: BuiltinProvider) -> ProviderCapabilities {
         protocol_probe: ProtocolProbeDescriptor {
             request_path_may_trial: false,
             matrix: ProtocolMatrixKind::FixedStandardProtocols,
-            unknown_zen_free_defaults_to_chat: false,
             fallback_priority: PROTOCOL_FALLBACK_CHAT_RESPONSES_MESSAGES,
             explicit_probe: false,
             structural_ceiling: StructuralProbeCeiling::Unavailable,

@@ -1,13 +1,10 @@
 import { computed, ref } from "vue";
 import { defineStore } from "pinia";
 import { dashboardApi, isRevisionConflict } from "../api/dashboard.ts";
-import type {
-  AppConfig,
-  ClaudeDesktopModels,
-} from "../api/dashboard.ts";
+import type { AppConfig } from "../api/dashboard.ts";
 
 /**
- * Application settings plus the Claude Desktop three-role mapping.
+ * Application settings.
  *
  * The Settings resource never carries Key plaintext (that lives in the
  * connection store). Update-check / install progress is transient and stays
@@ -15,14 +12,12 @@ import type {
  */
 export const useSettingsStore = defineStore("settings", () => {
   const settings = ref<AppConfig | null>(null);
-  const claudeDesktop = ref<ClaudeDesktopModels | null>(null);
   const loading = ref(false);
   const error = ref("");
 
   // Overlapping loads resolve out of order; only the latest request commits
   // state. Stale calls still return/throw to their own caller unchanged.
   let loadGeneration = 0;
-  let claudeDesktopGeneration = 0;
 
   async function load(): Promise<AppConfig> {
     const generation = ++loadGeneration;
@@ -59,34 +54,11 @@ export const useSettingsStore = defineStore("settings", () => {
     return settings.value;
   }
 
-  async function loadClaudeDesktop(): Promise<ClaudeDesktopModels> {
-    const generation = ++claudeDesktopGeneration;
-    const result = await dashboardApi.getClaudeDesktopModels();
-    if (generation !== claudeDesktopGeneration) return result;
-    claudeDesktop.value = result;
-    return result;
-  }
-
-  async function putClaudeDesktop(models: ClaudeDesktopModels): Promise<ClaudeDesktopModels> {
-    try {
-      const result = await dashboardApi.updateClaudeDesktopModels(models);
-      claudeDesktopGeneration += 1;
-      claudeDesktop.value = result;
-      return result;
-    } catch (cause) {
-      if (isRevisionConflict(cause)) await loadClaudeDesktop();
-      throw cause;
-    }
-  }
-
   return {
     settings: computed(() => settings.value),
-    claudeDesktop: computed(() => claudeDesktop.value),
     loading: computed(() => loading.value),
     error: computed(() => error.value),
     loadPresented,
     putPresented,
-    loadClaudeDesktop,
-    putClaudeDesktop,
   };
 });

@@ -1,0 +1,989 @@
+[
+  {
+    "id": "openai",
+    "name": "OpenAI API",
+    "category": "official",
+    "family": "openai",
+    "offering": "api",
+    "defaultModels": ["gpt-5.6-luna"],
+    "endpointUrl": "https://api.openai.com/v1/responses",
+    "protocol": "responses",
+    "authKind": "bearer",
+    "docsUrl": "https://developers.openai.com/api/reference/overview",
+    "websiteUrl": "https://platform.openai.com/api-keys",
+    "note": {
+      "en": "Use an OpenAI API Key with separate API billing. Model access depends on your project.",
+      "zh": "使用 OpenAI API Key，API 独立计费；可用模型取决于项目权限。"
+    }
+  },
+  {
+    "id": "anthropic",
+    "name": "Anthropic API",
+    "category": "official",
+    "family": "anthropic",
+    "offering": "api",
+    "defaultModels": ["claude-haiku-4-5-20251001"],
+    "endpointUrl": "https://api.anthropic.com/v1/messages",
+    "protocol": "messages",
+    "authKind": "x-api-key",
+    "docsUrl": "https://platform.claude.com/docs/en/api/overview",
+    "websiteUrl": "https://console.anthropic.com/",
+    "note": {
+      "en": "Use an Anthropic API Key. Claude subscriptions use a separate billing system.",
+      "zh": "使用 Anthropic API Key；Claude 订阅与 API 分开计费。"
+    }
+  },
+  {
+    "id": "gemini",
+    "name": "Google Gemini API",
+    "category": "official",
+    "family": "google",
+    "offering": "api",
+    "defaultModels": ["gemini-3.8-flash"],
+    "endpointUrl": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+    "protocol": "chat_completions",
+    "authKind": "bearer",
+    "docsUrl": "https://ai.google.dev/gemini-api/docs/openai",
+    "websiteUrl": "https://aistudio.google.com/apikey",
+    "note": {
+      "en": "Uses Google's official OpenAI-compatible endpoint and a Gemini API Key. Select a chat-capable model.",
+      "zh": "使用 Google 官方 OpenAI 兼容端点和 Gemini API Key；请选择支持对话的模型。"
+    }
+  },
+  {
+    "id": "xai",
+    "name": "xAI (Grok) API",
+    "category": "official",
+    "family": "xai",
+    "offering": "api",
+    "defaultModels": ["grok-4.6"],
+    "endpointUrl": "https://api.x.ai/v1/responses",
+    "protocol": "responses",
+    "authKind": "bearer",
+    "docsUrl": "https://docs.x.ai/developers/quickstart",
+    "websiteUrl": "https://console.x.ai/",
+    "note": {
+      "en": "Use an xAI API Key; a Grok subscription is separate from API billing.",
+      "zh": "使用 xAI API Key；Grok 订阅与 API 分开计费。"
+    }
+  },
+  {
+    "id": "azure-openai",
+    "name": "Azure OpenAI v1",
+    "category": "official",
+    "family": "microsoft",
+    "offering": "api",
+    "endpointUrl": "",
+    "protocol": "responses",
+    "authKind": "bearer",
+    "docsUrl": "https://learn.microsoft.com/en-us/azure/foundry/openai/api-version-lifecycle",
+    "websiteUrl": "https://ai.azure.com/",
+    "note": {
+      "en": "Enter your resource's full v1 Responses URL and use its API Key. The upstream model must be your deployment name.",
+      "zh": "填写资源的完整 v1 Responses 地址，使用该资源的 API Key；上游模型 ID 应填部署名称。"
+    },
+    "endpointPlaceholder": "https://YOUR-RESOURCE.openai.azure.com/openai/v1/responses",
+    "modelDiscovery": false
+  },
+  {
+    "id": "bedrock",
+    "name": "AWS Bedrock (API Key)",
+    "category": "official",
+    "family": "aws",
+    "offering": "api",
+    "endpointUrl": "",
+    "protocol": "responses",
+    "authKind": "bearer",
+    "docsUrl": "https://docs.aws.amazon.com/bedrock/latest/userguide/bedrock-mantle.html",
+    "websiteUrl": "https://console.aws.amazon.com/bedrock/",
+    "note": {
+      "en": "Enter the regional OpenAI-compatible Responses endpoint from AWS and a Bedrock API Key. AK/SK signing and automatic token refresh are not provided.",
+      "zh": "填写 AWS 文档中对应地区的 OpenAI 兼容 Responses 端点，使用 Bedrock API Key；不提供 AK/SK 签名和令牌自动刷新。"
+    },
+    "endpointPlaceholder": "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1/responses",
+    "modelDiscovery": true
+  },
+  {
+    "id": "deepseek",
+    "name": "DeepSeek API",
+    "category": "official",
+    "family": "deepseek",
+    "offering": "api",
+    "defaultModels": ["deepseek-v4-flash"],
+    "endpointUrl": "https://api.deepseek.com/chat/completions",
+    "protocol": "chat_completions",
+    "authKind": "bearer",
+    "docsUrl": "https://api-docs.deepseek.com/",
+    "websiteUrl": "https://platform.deepseek.com/api_keys",
+    "note": {
+      "en": "Use the exact model ID from DeepSeek's API catalog.",
+      "zh": "使用 DeepSeek API 目录中的准确模型 ID。"
+    }
+  },
+  {
+    "id": "moonshot",
+    "name": "Kimi / Moonshot API",
+    "category": "official",
+    "family": "moonshot",
+    "offering": "api",
+    "defaultModels": ["kimi-k2.6"],
+    "endpointUrl": "https://api.moonshot.cn/v1/chat/completions",
+    "protocol": "chat_completions",
+    "authKind": "bearer",
+    "docsUrl": "https://platform.kimi.com/docs/api/overview",
+    "websiteUrl": "https://platform.kimi.com/console/api-keys",
+    "note": {
+      "en": "This is the Moonshot API. For Kimi Code subscription accounts, use the existing Kimi CN provider.",
+      "zh": "这是 Moonshot 按量 API；Kimi Code 订阅账号请使用已有 Kimi CN 供应商。"
+    }
+  },
+  {
+    "id": "zhipu",
+    "name": "Zhipu GLM API",
+    "category": "official",
+    "family": "zhipu",
+    "offering": "api",
+    "variant": "GLM API (CN)",
+    "defaultModels": ["glm-5.3"],
+    "endpointUrl": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+    "protocol": "chat_completions",
+    "authKind": "bearer",
+    "docsUrl": "https://docs.bigmodel.cn/cn/guide/develop/http/introduction",
+    "websiteUrl": "https://open.bigmodel.cn/",
+    "note": {
+      "en": "General API endpoint; separate from Coding Plan usage.",
+      "zh": "通用按量 API，与 Coding Plan 额度分开。"
+    }
+  },
+  {
+    "id": "zhipu-coding",
+    "name": "Zhipu GLM Coding Plan",
+    "category": "official",
+    "family": "zhipu",
+    "offering": "plan",
+    "variant": "Coding Plan (CN)",
+    "defaultModels": ["glm-5.3"],
+    "endpointUrl": "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions",
+    "protocol": "chat_completions",
+    "authKind": "bearer",
+    "docsUrl": "https://docs.bigmodel.cn/cn/guide/develop/cursor",
+    "websiteUrl": "https://open.bigmodel.cn/",
+    "note": {
+      "en": "Dedicated Coding Plan endpoint. Use a plan-enabled Key and follow the plan's supported use cases.",
+      "zh": "Coding Plan 专用端点；使用已开通套餐的 Key，并遵循套餐支持的使用场景。"
+    },
+    "modelDiscovery": false
+  },
+  {
+    "id": "zai",
+    "name": "Z.AI GLM API",
+    "category": "official",
+    "family": "zhipu",
+    "offering": "api",
+    "variant": "GLM API (Global)",
+    "defaultModels": ["glm-5.3"],
+    "endpointUrl": "https://api.z.ai/api/paas/v4/chat/completions",
+    "protocol": "chat_completions",
+    "authKind": "bearer",
+    "docsUrl": "https://docs.z.ai/api-reference/introduction",
+    "websiteUrl": "https://z.ai/manage-apikey/apikey-list",
+    "note": {
+      "en": "General API endpoint; separate from Coding Plan usage.",
+      "zh": "通用按量 API，与 Coding Plan 额度分开。"
+    }
+  },
+  {
+    "id": "zai-coding",
+    "name": "Z.AI GLM Coding Plan",
+    "category": "official",
+    "family": "zhipu",
+    "offering": "plan",
+    "variant": "Coding Plan (Global)",
+    "defaultModels": ["glm-5.3"],
+    "endpointUrl": "https://api.z.ai/api/coding/paas/v4/chat/completions",
+    "protocol": "chat_completions",
+    "authKind": "bearer",
+    "docsUrl": "https://docs.z.ai/devpack/tool/others",
+    "websiteUrl": "https://z.ai/manage-apikey/apikey-list",
+    "note": {
+      "en": "Dedicated Coding Plan endpoint. Use a plan-enabled Key and follow the plan's supported use cases.",
+      "zh": "Coding Plan 专用端点；使用已开通套餐的 Key，并遵循套餐支持的使用场景。"
+    },
+    "modelDiscovery": false
+  },
+  {
+    "id": "minimax-api-cn",
+    "name": "MiniMax API (CN)",
+    "category": "official",
+    "family": "minimax",
+    "offering": "api",
+    "variant": "API (CN)",
+    "defaultModels": ["MiniMax-M2.5"],
+    "endpointUrl": "https://api.minimax.cn/anthropic/v1/messages",
+    "protocol": "messages",
+    "authKind": "bearer",
+    "docsUrl": "https://platform.minimaxi.com/docs/api-reference/text-anthropic-api",
+    "websiteUrl": "https://platform.minimaxi.com/",
+    "note": {
+      "en": "Use a CN API Key. For CN Token Plan usage tracking, use the existing MiniMax CN provider.",
+      "zh": "使用国内站 API Key；需要国内 Token Plan 用量统计时，请使用已有 MiniMax CN 供应商。"
+    }
+  },
+  {
+    "id": "minimax-api-intl",
+    "name": "MiniMax API / Token Plan (Global)",
+    "category": "official",
+    "family": "minimax",
+    "offering": "api",
+    "variant": "API / Token Plan (Global)",
+    "defaultModels": ["MiniMax-M3"],
+    "endpointUrl": "https://api.minimax.io/anthropic/v1/messages",
+    "protocol": "messages",
+    "authKind": "bearer",
+    "docsUrl": "https://platform.minimax.io/docs/api-reference/text-anthropic-api",
+    "websiteUrl": "https://platform.minimax.io/",
+    "note": {
+      "en": "Use a Global API or Token Plan Key as appropriate. CN Keys are separate; official usage and pricing are not synced here.",
+      "zh": "按需使用国际站 API 或 Token Plan Key，不能与国内站 Key 混用；此处不同步官方用量和价格。"
+    }
+  },
+  {
+    "id": "longcat",
+    "name": "LongCat API",
+    "category": "official",
+    "family": "longcat",
+    "offering": "api",
+    "defaultModels": ["LongCat-2.0"],
+    "endpointUrl": "https://api.longcat.chat/openai/v1/chat/completions",
+    "protocol": "chat_completions",
+    "authKind": "bearer",
+    "docsUrl": "https://longcat.chat/platform/docs/api/chat.html",
+    "websiteUrl": "https://longcat.chat/platform/api_keys",
+    "note": {
+      "en": "Use the LongCat platform API Key and exact model ID.",
+      "zh": "使用 LongCat 开放平台 API Key 和准确模型 ID。"
+    }
+  },
+  {
+    "id": "tencent-hunyuan",
+    "name": "Tencent Hunyuan / TokenHub API",
+    "category": "official",
+    "family": "tencent",
+    "offering": "api",
+    "variant": "TokenHub API (CN)",
+    "defaultModels": ["hy3"],
+    "endpointUrl": "https://tokenhub.tencentmaas.com/v1/chat/completions",
+    "protocol": "chat_completions",
+    "authKind": "bearer",
+    "docsUrl": "https://cloud.tencent.com/document/product/1823/130078",
+    "websiteUrl": "https://console.cloud.tencent.com/tokenhub/apikey",
+    "note": {
+      "en": "Pay-as-you-go API in Guangzhou. Use a TokenHub API Key.",
+      "zh": "广州地域按量 API，使用 TokenHub API Key。"
+    },
+    "modelDiscovery": true
+  },
+  {
+    "id": "tencent-token",
+    "name": "Tencent Token Plan (CN)",
+    "category": "official",
+    "family": "tencent",
+    "offering": "plan",
+    "variant": "Token Plan (CN)",
+    "defaultModels": ["tc-code-latest"],
+    "endpointUrl": "https://api.lkeap.cloud.tencent.com/plan/v3/chat/completions",
+    "protocol": "chat_completions",
+    "authKind": "bearer",
+    "docsUrl": "https://cloud.tencent.com/document/product/1823/130119",
+    "websiteUrl": "https://console.cloud.tencent.com/tokenhub/",
+    "note": {
+      "en": "Personal Token Plan endpoint with its dedicated Key. Enterprise Plans use different endpoints.",
+      "zh": "个人 Token Plan 专用端点，使用套餐 Key；企业套餐有不同端点。"
+    },
+    "modelDiscovery": false
+  },
+  {
+    "id": "tencent-token-intl",
+    "name": "Tencent Token Plan (Global)",
+    "category": "official",
+    "family": "tencent",
+    "offering": "plan",
+    "variant": "Token Plan (Global)",
+    "defaultModels": ["auto"],
+    "endpointUrl": "https://tokenhub-intl.tencentcloudmaas.com/plan/v3/chat/completions",
+    "protocol": "chat_completions",
+    "authKind": "bearer",
+    "docsUrl": "https://www.tencentcloud.com/document/product/1300/81037",
+    "websiteUrl": "https://console.tencentcloud.com/tokenhub/",
+    "note": {
+      "en": "International personal Token Plan in Singapore. Use its dedicated regional Key.",
+      "zh": "国际站新加坡个人 Token Plan，使用对应地区的套餐 Key。"
+    },
+    "modelDiscovery": false
+  },
+  {
+    "id": "tencent-enterprise-pro",
+    "name": "Tencent Token Plan Enterprise Pro (CN)",
+    "category": "official",
+    "family": "tencent",
+    "offering": "plan",
+    "variant": "Enterprise Pro (CN)",
+    "defaultModels": ["auto"],
+    "endpointUrl": "https://tokenhub.tencentmaas.com/plan/v3/chat/completions",
+    "protocol": "chat_completions",
+    "authKind": "bearer",
+    "docsUrl": "https://cloud.tencent.com/document/product/1823/130659",
+    "websiteUrl": "https://console.cloud.tencent.com/tokenhub/",
+    "note": {
+      "en": "Guangzhou CN enterprise endpoint and Key. Select a model covered by the enterprise plan.",
+      "zh": "国内站广州企业套餐端点与 Key。请选择企业套餐支持的模型。"
+    },
+    "modelDiscovery": false
+  },
+  {
+    "id": "tencent-enterprise-pro-intl",
+    "name": "Tencent Token Plan Enterprise Pro (Global)",
+    "category": "official",
+    "family": "tencent",
+    "offering": "plan",
+    "variant": "Enterprise Pro (Global)",
+    "defaultModels": ["auto"],
+    "endpointUrl": "https://tokenhub-intl.tencentcloudmaas.com/plan/v3/chat/completions",
+    "protocol": "chat_completions",
+    "authKind": "bearer",
+    "docsUrl": "https://www.tencentcloud.com/document/product/1300/81489",
+    "websiteUrl": "https://console.tencentcloud.com/tokenhub/",
+    "note": {
+      "en": "Singapore international enterprise endpoint and Key. Select a model covered by the enterprise plan.",
+      "zh": "国际站新加坡企业套餐端点与 Key。请选择企业套餐支持的模型。"
+    },
+    "modelDiscovery": false
+  },
+  {
+    "id": "tencent-enterprise-lite",
+    "name": "Tencent Token Plan Enterprise Lite (CN)",
+    "category": "official",
+    "family": "tencent",
+    "offering": "plan",
+    "variant": "Enterprise Lite (CN)",
+    "defaultModels": ["auto"],
+    "endpointUrl": "https://tokenhub.tencentmaas.com/plan/v3/chat/completions",
+    "protocol": "chat_completions",
+    "authKind": "bearer",
+    "docsUrl": "https://cloud.tencent.com/document/product/1823/131173",
+    "websiteUrl": "https://console.cloud.tencent.com/tokenhub/",
+    "note": {
+      "en": "Guangzhou CN enterprise endpoint and Key. Lite uses the auto model.",
+      "zh": "国内站广州企业套餐端点与 Key。Lite 使用 auto 模型。"
+    },
+    "modelDiscovery": false
+  },
+  {
+    "id": "tencent-enterprise-lite-intl",
+    "name": "Tencent Token Plan Enterprise Lite (Global)",
+    "category": "official",
+    "family": "tencent",
+    "offering": "plan",
+    "variant": "Enterprise Lite (Global)",
+    "defaultModels": ["auto"],
+    "endpointUrl": "https://tokenhub-intl.tencentcloudmaas.com/plan/v3/chat/completions",
+    "protocol": "chat_completions",
+    "authKind": "bearer",
+    "docsUrl": "https://www.tencentcloud.com/document/product/1300/81490",
+    "websiteUrl": "https://console.tencentcloud.com/tokenhub/",
+    "note": {
+      "en": "Singapore international enterprise endpoint and Key. Lite uses the auto model.",
+      "zh": "国际站新加坡企业套餐端点与 Key。Lite 使用 auto 模型。"
+    },
+    "modelDiscovery": false
+  },
+  {
+    "id": "bailian",
+    "name": "Alibaba Bailian API (CN)",
+    "category": "official",
+    "family": "alibaba",
+    "offering": "api",
+    "variant": "Bailian API (CN)",
+    "defaultModels": ["qwen3.8-flash"],
+    "endpointUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+    "protocol": "chat_completions",
+    "authKind": "bearer",
+    "docsUrl": "https://help.aliyun.com/zh/model-studio/base-url",
+    "websiteUrl": "https://bailian.console.aliyun.com/",
+    "note": {
+      "en": "Beijing pay-as-you-go API. Keys are scoped by region and billing plan.",
+      "zh": "北京地域按量 API，Key 按地区和计费方案区分。"
+    },
+    "modelDiscovery": true
+  },
+  {
+    "id": "bailian-coding",
+    "name": "Alibaba Bailian Coding Plan (CN)",
+    "category": "official",
+    "family": "alibaba",
+    "offering": "plan",
+    "variant": "Bailian Coding Plan (CN)",
+    "defaultModels": ["qwen3.7-plus"],
+    "endpointUrl": "https://coding.dashscope.aliyuncs.com/v1/chat/completions",
+    "protocol": "chat_completions",
+    "authKind": "bearer",
+    "docsUrl": "https://help.aliyun.com/zh/model-studio/coding-plan",
+    "websiteUrl": "https://bailian.console.aliyun.com/",
+    "note": {
+      "en": "Dedicated Coding Plan Key; only interactive use in supported AI tools, not backend services.",
+      "zh": "使用 Coding Plan 专用 Key；仅限支持的 AI 工具交互式使用，不用于后端服务。"
+    },
+    "modelDiscovery": false
+  },
+  {
+    "id": "qwencloud",
+    "name": "QwenCloud API (Global)",
+    "category": "official",
+    "family": "alibaba",
+    "offering": "api",
+    "variant": "QwenCloud API (Global)",
+    "defaultModels": ["qwen3.8-flash"],
+    "endpointUrl": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions",
+    "protocol": "chat_completions",
+    "authKind": "bearer",
+    "docsUrl": "https://www.alibabacloud.com/help/en/model-studio/base-url",
+    "websiteUrl": "https://home.qwencloud.com/api-keys",
+    "note": {
+      "en": "Singapore pay-as-you-go endpoint. Use an international site Key for this region.",
+      "zh": "新加坡按量 API 端点，使用国际站对应地区的 Key。"
+    },
+    "modelDiscovery": true
+  },
+  {
+    "id": "qwencloud-coding",
+    "name": "QwenCloud Coding Plan (Global)",
+    "category": "official",
+    "family": "alibaba",
+    "offering": "plan",
+    "variant": "QwenCloud Coding Plan (Global)",
+    "defaultModels": ["qwen3.7-plus"],
+    "endpointUrl": "https://coding-intl.dashscope.aliyuncs.com/v1/chat/completions",
+    "protocol": "chat_completions",
+    "authKind": "bearer",
+    "docsUrl": "https://www.alibabacloud.com/help/en/model-studio/coding-plan",
+    "websiteUrl": "https://home.qwencloud.com/api-keys",
+    "note": {
+      "en": "Dedicated international Coding Plan Key; only supported interactive AI-tool use.",
+      "zh": "使用国际站 Coding Plan 专用 Key；仅限套餐支持的交互式 AI 工具场景。"
+    },
+    "modelDiscovery": false
+  },
+  {
+    "id": "qwencloud-token",
+    "name": "QwenCloud Token Plan (Global)",
+    "category": "official",
+    "family": "alibaba",
+    "offering": "plan",
+    "variant": "QwenCloud Token Plan (Global)",
+    "defaultModels": ["qwen3.6-flash"],
+    "endpointUrl": "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/chat/completions",
+    "protocol": "chat_completions",
+    "authKind": "bearer",
+    "docsUrl": "https://www.alibabacloud.com/help/en/model-studio/base-url",
+    "websiteUrl": "https://home.qwencloud.com/api-keys",
+    "note": {
+      "en": "Singapore Token Plan Key and endpoint; separate from Coding Plan and pay-as-you-go.",
+      "zh": "新加坡 Token Plan 专用 Key 与端点，与 Coding Plan 和按量 API 分开。"
+    },
+    "modelDiscovery": false
+  },
+  {
+    "id": "volcengine",
+    "name": "Volcengine Ark / Doubao API",
+    "category": "official",
+    "family": "bytedance",
+    "offering": "api",
+    "variant": "Ark API (CN)",
+    "defaultModels": ["doubao-seed-2-1-pro-260628"],
+    "endpointUrl": "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
+    "protocol": "chat_completions",
+    "authKind": "bearer",
+    "docsUrl": "https://www.volcengine.com/docs/ark/chat-api",
+    "websiteUrl": "https://console.volcengine.com/ark/",
+    "note": {
+      "en": "Use an Ark API Key and a model ID or your inference endpoint ID from the console.",
+      "zh": "使用火山方舟 API Key，上游模型 ID 填控制台中的模型 ID 或推理接入点 ID。"
+    },
+    "modelDiscovery": false
+  },
+  {
+    "id": "volcengine-agent",
+    "name": "Volcengine Agent Plan",
+    "category": "official",
+    "family": "bytedance",
+    "offering": "plan",
+    "variant": "Agent Plan (CN)",
+    "defaultModels": ["doubao-seed-1.6"],
+    "endpointUrl": "https://ark.cn-beijing.volces.com/api/plan/v3/chat/completions",
+    "protocol": "chat_completions",
+    "authKind": "bearer",
+    "docsUrl": "https://www.volcengine.com/docs/82379/2160841",
+    "websiteUrl": "https://console.volcengine.com/ark/",
+    "note": {
+      "en": "Dedicated Agent Plan endpoint. Its Key and model set differ from pay-as-you-go.",
+      "zh": "Agent Plan 专用端点，Key 和模型范围与按量 API 分开。"
+    },
+    "modelDiscovery": false
+  },
+  {
+    "id": "volcengine-coding",
+    "name": "Volcengine Coding Plan",
+    "category": "official",
+    "family": "bytedance",
+    "offering": "plan",
+    "variant": "Coding Plan (CN)",
+    "defaultModels": ["ark-code-latest"],
+    "endpointUrl": "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions",
+    "protocol": "chat_completions",
+    "authKind": "bearer",
+    "docsUrl": "https://www.volcengine.com/docs/82379/1928261",
+    "websiteUrl": "https://console.volcengine.com/ark/",
+    "note": {
+      "en": "Use the Coding Plan Key and supported coding models. Do not replace this URL with the pay-as-you-go endpoint.",
+      "zh": "使用 Coding Plan Key 和套餐支持的模型，不要将地址替换为按量 API 端点。"
+    },
+    "modelDiscovery": false
+  },
+  {
+    "id": "byteplus-coding",
+    "name": "BytePlus Coding Plan",
+    "category": "official",
+    "family": "bytedance",
+    "offering": "plan",
+    "variant": "Coding Plan (Global)",
+    "defaultModels": ["ark-code-latest"],
+    "endpointUrl": "https://ark.ap-southeast.bytepluses.com/api/coding/v3/chat/completions",
+    "protocol": "chat_completions",
+    "authKind": "bearer",
+    "docsUrl": "https://docs.byteplus.com/en/docs/ModelArk/1928261",
+    "websiteUrl": "https://console.byteplus.com/ark/",
+    "note": {
+      "en": "Singapore Coding Plan endpoint and dedicated Key. The pay-as-you-go endpoint is separate.",
+      "zh": "新加坡 Coding Plan 端点与专用 Key，按量 API 使用不同端点。"
+    },
+    "modelDiscovery": false
+  },
+  {
+    "id": "qianfan",
+    "name": "Baidu Qianfan API",
+    "category": "official",
+    "family": "baidu",
+    "offering": "api",
+    "variant": "API",
+    "defaultModels": ["ernie-5.0"],
+    "endpointUrl": "https://qianfan.baidubce.com/v2/chat/completions",
+    "protocol": "chat_completions",
+    "authKind": "bearer",
+    "docsUrl": "https://cloud.baidu.com/doc/qianfan/s/Hmh4suq26",
+    "websiteUrl": "https://console.bce.baidu.com/qianfan/",
+    "note": {
+      "en": "General pay-as-you-go API. Subscription Keys need their dedicated plan endpoints.",
+      "zh": "通用按量 API，订阅 Key 应使用对应套餐专用端点。"
+    },
+    "modelDiscovery": false
+  },
+  {
+    "id": "qianfan-coding",
+    "name": "Baidu Qianfan Coding Plan",
+    "category": "official",
+    "family": "baidu",
+    "offering": "plan",
+    "variant": "Coding Plan",
+    "defaultModels": ["qianfan-code-latest"],
+    "endpointUrl": "https://qianfan.baidubce.com/v2/coding/chat/completions",
+    "protocol": "chat_completions",
+    "authKind": "bearer",
+    "docsUrl": "https://cloud.baidu.com/doc/qianfan/s/imlg0beiu",
+    "websiteUrl": "https://console.bce.baidu.com/qianfan/",
+    "note": {
+      "en": "For existing Coding Plan subscriptions. Use that plan's dedicated Key.",
+      "zh": "适用于已有 Coding Plan 订阅，使用该套餐专用 Key。"
+    },
+    "modelDiscovery": false
+  },
+  {
+    "id": "qianfan-token-team",
+    "name": "Baidu Qianfan Token Plan (Team)",
+    "category": "official",
+    "family": "baidu",
+    "offering": "plan",
+    "variant": "Token Plan (Team)",
+    "defaultModels": ["glm-5.2"],
+    "endpointUrl": "https://qianfan.baidubce.com/v2/tokenplan/team/chat/completions",
+    "protocol": "chat_completions",
+    "authKind": "bearer",
+    "docsUrl": "https://cloud.baidu.com/doc/qianfan/s/smqeup7hm",
+    "websiteUrl": "https://console.bce.baidu.com/qianfan/",
+    "note": {
+      "en": "Team/enterprise Token Plan endpoint. Do not use a personal-plan Key here.",
+      "zh": "团队/企业 Token Plan 专用端点，不要在此使用个人套餐 Key。"
+    },
+    "modelDiscovery": false
+  },
+  {
+    "id": "stepfun-api",
+    "name": "StepFun API (CN)",
+    "category": "official",
+    "family": "stepfun",
+    "offering": "api",
+    "variant": "API (CN)",
+    "defaultModels": ["step-3.5-flash"],
+    "endpointUrl": "https://api.stepfun.com/v1/chat/completions",
+    "protocol": "chat_completions",
+    "authKind": "bearer",
+    "docsUrl": "https://platform.stepfun.com/docs/zh/api-reference/chat/chat-completion-create",
+    "websiteUrl": "https://platform.stepfun.com/interface-key",
+    "note": {
+      "en": "Pay-as-you-go API; Step Plan uses a separate path.",
+      "zh": "按量 API；Step Plan 使用不同路径。"
+    },
+    "modelDiscovery": true
+  },
+  {
+    "id": "stepfun-plan",
+    "name": "StepFun Step Plan (CN)",
+    "category": "official",
+    "family": "stepfun",
+    "offering": "plan",
+    "variant": "Step Plan (CN)",
+    "defaultModels": ["step-router-v1"],
+    "endpointUrl": "https://api.stepfun.com/step_plan/v1/chat/completions",
+    "protocol": "chat_completions",
+    "authKind": "bearer",
+    "docsUrl": "https://platform.stepfun.com/docs/zh/step-plan/integrations/reasoning-api",
+    "websiteUrl": "https://platform.stepfun.com/interface-key",
+    "note": {
+      "en": "Use a Step Plan Key for this region. The plan path must be retained.",
+      "zh": "使用该地区的 Step Plan Key，并保留套餐专用路径。"
+    },
+    "modelDiscovery": false
+  },
+  {
+    "id": "stepfun-api-intl",
+    "name": "StepFun API (Global)",
+    "category": "official",
+    "family": "stepfun",
+    "offering": "api",
+    "variant": "API (Global)",
+    "defaultModels": ["step-3.5-flash"],
+    "endpointUrl": "https://api.stepfun.ai/v1/chat/completions",
+    "protocol": "chat_completions",
+    "authKind": "bearer",
+    "docsUrl": "https://platform.stepfun.ai/docs/en/api-reference/chat/chat-completion-create",
+    "websiteUrl": "https://platform.stepfun.ai/interface-key",
+    "note": {
+      "en": "Pay-as-you-go API; Step Plan uses a separate path.",
+      "zh": "按量 API；Step Plan 使用不同路径。"
+    },
+    "modelDiscovery": true
+  },
+  {
+    "id": "stepfun-plan-intl",
+    "name": "StepFun Step Plan (Global)",
+    "category": "official",
+    "family": "stepfun",
+    "offering": "plan",
+    "variant": "Step Plan (Global)",
+    "defaultModels": ["step-3.5-flash"],
+    "endpointUrl": "https://api.stepfun.ai/step_plan/v1/chat/completions",
+    "protocol": "chat_completions",
+    "authKind": "bearer",
+    "docsUrl": "https://platform.stepfun.ai/docs/en/step-plan/integrations/reasoning-api",
+    "websiteUrl": "https://platform.stepfun.ai/interface-key",
+    "note": {
+      "en": "Use a Step Plan Key for this region. The plan path must be retained.",
+      "zh": "使用该地区的 Step Plan Key，并保留套餐专用路径。"
+    },
+    "modelDiscovery": false
+  },
+  {
+    "id": "xiaomi-mimo",
+    "name": "Xiaomi MiMo API",
+    "category": "official",
+    "family": "xiaomi",
+    "offering": "api",
+    "variant": "API",
+    "defaultModels": ["mimo-v2.5"],
+    "endpointUrl": "https://api.xiaomimimo.com/v1/chat/completions",
+    "protocol": "chat_completions",
+    "authKind": "bearer",
+    "docsUrl": "https://mimo.mi.com/docs/zh-CN/quick-start/faq/api-integration",
+    "websiteUrl": "https://platform.xiaomimimo.com/",
+    "note": {
+      "en": "Pay-as-you-go API Key. MiMo accepts Bearer authentication.",
+      "zh": "按量 API Key；MiMo 支持 Bearer 鉴权。"
+    },
+    "modelDiscovery": false
+  },
+  {
+    "id": "xiaomi-mimo-token",
+    "name": "Xiaomi MiMo Token Plan (CN)",
+    "category": "official",
+    "family": "xiaomi",
+    "offering": "plan",
+    "variant": "Token Plan (CN)",
+    "defaultModels": ["mimo-v2.5"],
+    "endpointUrl": "https://token-plan-cn.xiaomimimo.com/v1/chat/completions",
+    "protocol": "chat_completions",
+    "authKind": "bearer",
+    "docsUrl": "https://mimo.mi.com/docs/zh-CN/tokenplan/integration/tools-overview",
+    "websiteUrl": "https://platform.xiaomimimo.com/",
+    "note": {
+      "en": "China Token Plan Key and endpoint. Pay-as-you-go and Token Plan Keys are not interchangeable.",
+      "zh": "中国区 Token Plan 专用 Key 和端点，不能与按量 API Key 混用。"
+    },
+    "modelDiscovery": false
+  },
+  {
+    "id": "ant-ling",
+    "name": "BaiLing / Ant Ling API",
+    "category": "official",
+    "family": "ant-ling",
+    "offering": "api",
+    "defaultModels": ["Ling-3.0-flash"],
+    "endpointUrl": "https://api.ant-ling.com/v1/chat/completions",
+    "protocol": "chat_completions",
+    "authKind": "bearer",
+    "docsUrl": "https://developer.ant-ling.com/zh-CN/docs/api-reference/openai/",
+    "websiteUrl": "https://chat.ant-ling.com/",
+    "note": {
+      "en": "Uses the current Ant Ling API domain. Create a token in the Ant Ling API console.",
+      "zh": "使用当前 Ant Ling API 域名，在百灵 API 控制台创建令牌。"
+    },
+    "modelDiscovery": false
+  },
+  {
+    "id": "streamlake",
+    "name": "KAT-Coder / StreamLake API",
+    "category": "official",
+    "family": "streamlake",
+    "offering": "api",
+    "variant": "API",
+    "defaultModels": ["kat-coder-pro-v2.5"],
+    "endpointUrl": "https://vanchin.streamlake.ai/api/gateway/v1/endpoints/chat/completions",
+    "protocol": "chat_completions",
+    "authKind": "bearer",
+    "docsUrl": "https://www.streamlake.ai/document/DOC/mg6k6nlp8j6qxicx4c9",
+    "websiteUrl": "https://console.streamlake.ai/",
+    "note": {
+      "en": "Pay-as-you-go endpoint composed from the official OpenAI-compatible Base URL. Enter the model ID shown in your console.",
+      "zh": "按官方 OpenAI 兼容 Base URL 拼接的按量端点；填写控制台中的模型 ID。"
+    },
+    "modelDiscovery": false
+  },
+  {
+    "id": "streamlake-coding",
+    "name": "KAT-Coder / StreamLake Coding Plan",
+    "category": "official",
+    "family": "streamlake",
+    "offering": "plan",
+    "variant": "Coding Plan",
+    "defaultModels": ["kat-coder-pro-v2.5"],
+    "endpointUrl": "https://vanchin.streamlake.ai/api/gateway/coding/v1/chat/completions",
+    "protocol": "chat_completions",
+    "authKind": "bearer",
+    "docsUrl": "https://www.streamlake.ai/document/DOC/mg6k6nlp8j6qxicx4c9",
+    "websiteUrl": "https://console.streamlake.ai/",
+    "note": {
+      "en": "Official Coding Plan Base URL with the standard Chat Completions path. Use the plan's API Key.",
+      "zh": "官方 Coding Plan Base URL 加标准 Chat Completions 路径，使用套餐 API Key。"
+    },
+    "modelDiscovery": false
+  },
+  {
+    "id": "openrouter",
+    "name": "OpenRouter",
+    "category": "aggregator",
+    "family": "openrouter",
+    "offering": "api",
+    "defaultModels": ["~openai/gpt-latest"],
+    "endpointUrl": "https://openrouter.ai/api/v1/chat/completions",
+    "protocol": "chat_completions",
+    "authKind": "bearer",
+    "docsUrl": "https://openrouter.ai/docs/quickstart",
+    "websiteUrl": "https://openrouter.ai/settings/keys",
+    "note": {
+      "en": "Use exact provider/model IDs. Choose chat models from the catalog.",
+      "zh": "使用完整 provider/model ID，从目录中选择对话模型。"
+    }
+  },
+  {
+    "id": "siliconflow-cn",
+    "name": "SiliconFlow (CN)",
+    "category": "aggregator",
+    "family": "siliconflow",
+    "offering": "api",
+    "variant": "CN",
+    "defaultModels": ["deepseek-ai/DeepSeek-V4-Flash"],
+    "endpointUrl": "https://api.siliconflow.cn/v1/chat/completions",
+    "protocol": "chat_completions",
+    "authKind": "bearer",
+    "docsUrl": "https://docs.siliconflow.cn/docs/userguide/quickstart",
+    "websiteUrl": "https://cloud.siliconflow.cn/",
+    "note": {
+      "en": "Use a China-site Key and exact model ID, including any Pro/ prefix.",
+      "zh": "使用国内站 Key 和完整模型 ID，保留 Pro/ 等前缀。"
+    }
+  },
+  {
+    "id": "siliconflow-intl",
+    "name": "SiliconFlow (Global)",
+    "category": "aggregator",
+    "family": "siliconflow",
+    "offering": "api",
+    "variant": "Global",
+    "defaultModels": ["deepseek-ai/DeepSeek-V4-Flash"],
+    "endpointUrl": "https://api.siliconflow.com/v1/chat/completions",
+    "protocol": "chat_completions",
+    "authKind": "bearer",
+    "docsUrl": "https://docs.siliconflow.com/en/userguide/quickstart",
+    "websiteUrl": "https://cloud.siliconflow.com/",
+    "note": {
+      "en": "Use a Global-site Key and select a chat-capable model.",
+      "zh": "使用国际站 Key，并选择支持对话的模型。"
+    }
+  },
+  {
+    "id": "nvidia",
+    "name": "NVIDIA API Catalog",
+    "category": "aggregator",
+    "family": "nvidia",
+    "offering": "api",
+    "defaultModels": ["deepseek-ai/deepseek-v4-flash"],
+    "endpointUrl": "https://integrate.api.nvidia.com/v1/chat/completions",
+    "protocol": "chat_completions",
+    "authKind": "bearer",
+    "docsUrl": "https://docs.api.nvidia.com/nim/reference/llm-apis",
+    "websiteUrl": "https://build.nvidia.com/",
+    "note": {
+      "en": "Use an NVIDIA API Key for hosted LLM APIs; select a supported chat model.",
+      "zh": "使用 NVIDIA 托管 LLM API 的 Key，选择支持对话的模型。"
+    }
+  },
+  {
+    "id": "modelscope",
+    "name": "ModelScope API Inference",
+    "category": "aggregator",
+    "family": "modelscope",
+    "offering": "api",
+    "defaultModels": ["Qwen/Qwen3.5-35B-A3B"],
+    "endpointUrl": "https://api-inference.modelscope.cn/v1/chat/completions",
+    "protocol": "chat_completions",
+    "authKind": "bearer",
+    "docsUrl": "https://modelscope.cn/docs/model-service/API-Inference/intro",
+    "websiteUrl": "https://modelscope.cn/",
+    "note": {
+      "en": "Use a ModelScope access token. Only models marked for API inference can be called.",
+      "zh": "使用 ModelScope 访问令牌；只有标记为 API 推理的模型才能调用。"
+    }
+  },
+  {
+    "id": "ppio",
+    "name": "PPIO",
+    "category": "aggregator",
+    "family": "ppio",
+    "offering": "api",
+    "defaultModels": ["deepseek/deepseek-r1"],
+    "endpointUrl": "https://api.ppio.com/openai/v1/chat/completions",
+    "protocol": "chat_completions",
+    "authKind": "bearer",
+    "docsUrl": "https://ppio.com/docs/models/reference-llm-create-chat-completion",
+    "websiteUrl": "https://ppio.com/",
+    "note": {
+      "en": "Use PPIO's API Key and full model ID.",
+      "zh": "使用 PPIO API Key 和完整模型 ID。"
+    }
+  },
+  {
+    "id": "qiniu",
+    "name": "Qiniu AI",
+    "category": "aggregator",
+    "family": "qiniu",
+    "offering": "api",
+    "defaultModels": ["deepseek-v3"],
+    "endpointUrl": "https://api.qnaigc.com/v1/chat/completions",
+    "protocol": "chat_completions",
+    "authKind": "bearer",
+    "docsUrl": "https://developer.qiniu.com/aitokenapi/13379/real-time-ai-interface-api",
+    "websiteUrl": "https://portal.qiniu.com/",
+    "note": {
+      "en": "Use a Qiniu AI Token API Key, not object-storage AK/SK.",
+      "zh": "使用七牛 AI Token API Key，不是对象存储 AK/SK。"
+    }
+  },
+  {
+    "id": "novita",
+    "name": "Novita AI",
+    "category": "aggregator",
+    "family": "novita",
+    "offering": "api",
+    "defaultModels": ["meta-llama/llama-3.1-8b-instruct"],
+    "endpointUrl": "https://api.novita.ai/openai/v1/chat/completions",
+    "protocol": "chat_completions",
+    "authKind": "bearer",
+    "docsUrl": "https://docs.novita.ai/api-reference/model-apis-llm-create-chat-completion",
+    "websiteUrl": "https://novita.ai/",
+    "note": {
+      "en": "Use a Novita API Key and a model from its LLM catalog.",
+      "zh": "使用 Novita API Key 和其 LLM 目录中的模型。"
+    }
+  },
+  {
+    "id": "compshare",
+    "name": "Compshare ModelVerse",
+    "category": "aggregator",
+    "family": "compshare",
+    "offering": "api",
+    "variant": "ModelVerse API",
+    "defaultModels": ["deepseek-ai/DeepSeek-R1"],
+    "endpointUrl": "https://api.modelverse.cn/v1/chat/completions",
+    "protocol": "chat_completions",
+    "authKind": "bearer",
+    "docsUrl": "https://compshare.cn/docs/modelverse/models/text_api/openai_compatible",
+    "websiteUrl": "https://www.compshare.cn/",
+    "note": {
+      "en": "Use the pay-as-you-go Key; Coding Plan has its own endpoint and Key.",
+      "zh": "使用按量 API Key；Coding Plan 有独立端点和 Key。"
+    }
+  },
+  {
+    "id": "compshare-coding",
+    "name": "Compshare Coding Plan",
+    "category": "aggregator",
+    "family": "compshare",
+    "offering": "plan",
+    "variant": "Coding Plan",
+    "defaultModels": ["deepseek-v4-pro"],
+    "endpointUrl": "https://cp.compshare.cn/v1/chat/completions",
+    "protocol": "chat_completions",
+    "authKind": "bearer",
+    "docsUrl": "https://compshare.cn/docs/modelverse/codingfaq",
+    "websiteUrl": "https://www.compshare.cn/",
+    "note": {
+      "en": "Use the dedicated Key from plan management and a plan-supported model.",
+      "zh": "使用套餐管理中的专用 Key，以及套餐支持的模型。"
+    }
+  },
+  {
+    "id": "atlascloud",
+    "name": "AtlasCloud Coding Plan",
+    "category": "aggregator",
+    "family": "atlascloud",
+    "offering": "plan",
+    "defaultModels": ["zai-org/glm-5.1"],
+    "endpointUrl": "https://api.atlascloud.ai/v1/chat/completions",
+    "protocol": "chat_completions",
+    "authKind": "bearer",
+    "docsUrl": "https://www.atlascloud.ai/docs/coding-plan/api",
+    "websiteUrl": "https://www.atlascloud.ai/console/coding-plan",
+    "note": {
+      "en": "Use the Coding Plan Key from Plan Management; it is separate from the standard API Key.",
+      "zh": "使用套餐管理中的 Coding Plan Key，与普通 API Key 分开。"
+    }
+  }
+]

@@ -1,6 +1,6 @@
 import type { AppConfig } from "../api/dashboard";
 
-export const EDITABLE_SETTING_KEYS = [
+const EDITABLE_SETTING_KEYS = [
   "gateway_port",
   "proxy_mode",
   "proxy_url",

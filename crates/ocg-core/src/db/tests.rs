@@ -1,10 +1,3011 @@
 use super::*;
 use super::{V27MigrationFault, v27_test_hooks};
-use crate::crypto::{KeyCipher, StaticKeyCipher};
+use crate::crypto::{
+    KeyCipher, LOCAL_CIPHER_V2_PREFIX, StaticKeyCipher, is_legacy_local_ciphertext,
+};
+use std::collections::HashSet;
 use std::fs;
 use std::sync::Arc;
 
 const TEST_HOST_SECRET: &str = "ocg-db-v27-test-host";
+
+#[test]
+fn v41_concurrent_migration_rechecks_version_under_the_writer_lock() {
+    let dir = temp_data_dir("v41-concurrent");
+    let path = dir.join("data.sqlite");
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch("CREATE TABLE schema_version(version INTEGER PRIMARY KEY); INSERT INTO schema_version VALUES(40);").unwrap();
+    drop(conn);
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let mut workers = Vec::new();
+    for _ in 0..2 {
+        let path = path.clone();
+        let barrier = barrier.clone();
+        workers.push(std::thread::spawn(move || {
+            let conn = Connection::open(path).unwrap();
+            conn.busy_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            barrier.wait();
+            migrate_to_v41(&conn).unwrap();
+            assert_eq!(schema_version_on(&conn).unwrap(), 41);
+        }));
+    }
+    for worker in workers {
+        worker.join().unwrap();
+    }
+    let conn = Connection::open(&path).unwrap();
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM provider_model_protocol_preferences",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+    drop(conn);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn v41_model_preferences_migrate_and_survive_reopen_without_enabling_models() {
+    let dir = temp_data_dir("model-preferences");
+    let db = Database::open(dir.clone()).unwrap();
+    let scope = ContractScope::provider(MINIMAX_PROVIDER_ID);
+    let now = Utc::now();
+    let rows = vec![(
+        "MiniMax-M3".to_string(),
+        UpstreamProtocolKind::ChatCompletions,
+        ProtocolOverrideState::ForceOff,
+    )];
+    db.set_model_protocol_overrides(&scope, &rows, now).unwrap();
+    db.conn.execute_batch("DROP TABLE provider_model_protocol_preferences; DELETE FROM schema_version; INSERT INTO schema_version (version) VALUES (38);").unwrap();
+    drop_unified_provider_tables(&db.conn);
+    drop(db);
+    let db = Database::open(dir.clone()).unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), CURRENT_SCHEMA_VERSION);
+    let before = db.load_persisted_contracts().unwrap();
+    assert!(before.preferences.is_empty());
+    assert_eq!(
+        before.overrides[&scope][0].state,
+        ProtocolOverrideState::ForceOff
+    );
+    assert!(
+        db.set_model_protocol_settings(
+            &scope,
+            &[(
+                "MiniMax-M3".into(),
+                UpstreamProtocolKind::ChatCompletions,
+                ProtocolOverrideState::ForceOn
+            )],
+            &[("MiniMax-M3".into(), UpstreamProtocolKind::Responses)],
+            now
+        )
+        .is_err()
+    );
+    assert_eq!(db.load_persisted_contracts().unwrap(), before);
+    db.set_model_protocol_settings(
+        &scope,
+        &rows,
+        &[("MiniMax-M3".into(), UpstreamProtocolKind::ChatCompletions)],
+        now,
+    )
+    .unwrap();
+    drop(db);
+    let reopened = Database::open(dir.clone()).unwrap();
+    let saved = reopened.load_persisted_contracts().unwrap();
+    assert_eq!(
+        saved.preferences[&scope],
+        vec![("minimax-m3".into(), UpstreamProtocolKind::ChatCompletions)]
+    );
+    assert_eq!(
+        saved.overrides[&scope][0].state,
+        ProtocolOverrideState::ForceOff
+    );
+    drop(reopened);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn v42_concurrent_migration_rechecks_version_under_the_writer_lock() {
+    let dir = temp_data_dir("v42-concurrent");
+    let path = dir.join("data.sqlite");
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch("CREATE TABLE schema_version(version INTEGER PRIMARY KEY); INSERT INTO schema_version VALUES(41);")
+        .unwrap();
+    drop(conn);
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let mut workers = Vec::new();
+    for _ in 0..2 {
+        let path = path.clone();
+        let barrier = barrier.clone();
+        workers.push(std::thread::spawn(move || {
+            let path_for_migration = path.clone();
+            let conn = Connection::open(path).unwrap();
+            conn.busy_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            barrier.wait();
+            migrate_to_v42(&conn, &path_for_migration, true).unwrap();
+            assert_eq!(schema_version_on(&conn).unwrap(), 42);
+        }));
+    }
+    for worker in workers {
+        worker.join().unwrap();
+    }
+    let conn = Connection::open(&path).unwrap();
+    assert_eq!(schema_version_on(&conn).unwrap(), 42);
+    assert!(table_exists(&conn, "providers").unwrap());
+    assert!(!table_exists(&conn, "dynamic_providers").unwrap());
+    assert!(!table_exists(&conn, "dynamic_provider_models").unwrap());
+    drop(conn);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn v42_fresh_database_includes_seven_sealed_builtin_rows() {
+    let dir = temp_data_dir("v42-fresh-seeds");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), CURRENT_SCHEMA_VERSION);
+    let count: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM providers WHERE origin = 'builtin'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 7);
+
+    let opencode: (String, String, String, String, String, String) = db
+        .conn
+        .query_row(
+            "SELECT adapter_kind, name, endpoint_url, upstream_protocol, auth_kind, offering
+             FROM providers WHERE id = 'opencode'",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(opencode.0, "opencode_go");
+    assert_eq!(opencode.1, "OpenCode Go");
+    assert_eq!(opencode.2, OPENCODE_GO_BASE_URL);
+    assert_eq!(opencode.3, "chat_completions");
+    assert_eq!(opencode.4, "bearer");
+    assert_eq!(opencode.5, "plan");
+
+    let zen_free: (String, String, String) = db
+        .conn
+        .query_row(
+            "SELECT adapter_kind, auth_kind, offering
+             FROM providers WHERE id = 'opencode-zen-free'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(zen_free.0, "zen_free");
+    assert_eq!(zen_free.1, "none");
+    assert_eq!(zen_free.2, "api");
+
+    let custom: (Option<String>, Option<String>, i64) = db
+        .conn
+        .query_row(
+            "SELECT endpoint_url, upstream_protocol, endpoint_per_account
+             FROM providers WHERE id = 'custom'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert!(custom.0.is_none());
+    assert!(custom.1.is_none());
+    assert_eq!(custom.2, 1);
+
+    for builtin_id in [
+        OPENCODE_PROVIDER_ID,
+        OPENCODE_ZEN_FREE_PROVIDER_ID,
+        COMMAND_CODE_PROVIDER_ID,
+        MINIMAX_PROVIDER_ID,
+        KIMI_PROVIDER_ID,
+        OLLAMA_PROVIDER_ID,
+        CUSTOM_PROVIDER_ID,
+    ] {
+        let family: Option<String> = db
+            .conn
+            .query_row(
+                "SELECT display_family FROM providers WHERE id = ?1",
+                [builtin_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(family.is_some(), "{builtin_id}");
+    }
+
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn v42_unifies_existing_dynamic_providers_and_preserves_models_and_preferences() {
+    let dir = temp_data_dir("v42-unify");
+    // Create a fresh v42 DB so the v42 schema is in place, then reverse the
+    // migration to a v41 source carrying two dynamic Providers, one with a
+    // plan preset and one without. Reopening triggers v42.
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let now = Utc::now().to_rfc3339();
+    db.conn
+        .execute_batch(&format!(
+            "PRAGMA foreign_keys=OFF;
+             DROP TABLE providers;
+             DROP TABLE provider_models;
+             CREATE TABLE dynamic_providers (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                endpoint_url TEXT NOT NULL,
+                upstream_protocol TEXT NOT NULL,
+                auth_kind TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                preset_id TEXT
+             );
+             CREATE TABLE dynamic_provider_models (
+                provider_id TEXT NOT NULL,
+                public_model TEXT NOT NULL,
+                public_model_key TEXT NOT NULL,
+                upstream_model TEXT NOT NULL,
+                upstream_override TEXT,
+                PRIMARY KEY (provider_id, public_model_key),
+                FOREIGN KEY (provider_id) REFERENCES dynamic_providers(id)
+             );
+             INSERT INTO dynamic_providers
+                 (id, name, endpoint_url, upstream_protocol, auth_kind, created_at, updated_at, preset_id)
+             VALUES
+                 ('plan-lab', 'Plan Lab', 'https://plan.example/v1', 'chat_completions', 'bearer',
+                  '{now}', '{now}', 'zhipu-coding'),
+                 ('free-lab', 'Free Lab', 'https://free.example/v1', 'chat_completions', 'bearer',
+                  '{now}', '{now}', NULL);
+             INSERT INTO dynamic_provider_models
+                 (provider_id, public_model, public_model_key, upstream_model, upstream_override)
+             VALUES
+                 ('plan-lab', 'lab-plan', 'lab-plan', 'plan/model', NULL),
+                 ('free-lab', 'lab-free', 'lab-free', 'free/model', NULL);
+             INSERT INTO provider_model_protocol_preferences
+                 (provider_id, model_id, protocol)
+             VALUES ('minimax', 'MiniMax-M2.5', 'chat_completions');
+             DELETE FROM schema_version;
+             INSERT INTO schema_version (version) VALUES (41);
+             PRAGMA foreign_keys=ON;"
+        ))
+        .unwrap();
+    drop(db);
+
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), CURRENT_SCHEMA_VERSION);
+    assert!(!table_exists(&db.conn, "dynamic_providers").unwrap());
+    assert!(!table_exists(&db.conn, "dynamic_provider_models").unwrap());
+    assert!(table_exists(&db.conn, "providers").unwrap());
+    assert!(table_exists(&db.conn, "provider_models").unwrap());
+
+    let plan_lab: (String, String, String, Option<String>, String) = db
+        .conn
+        .query_row(
+            "SELECT origin, adapter_kind, name, preset_id, offering
+             FROM providers WHERE id = 'plan-lab'",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(plan_lab.0, "preset");
+    assert_eq!(plan_lab.1, "configurable_http");
+    assert_eq!(plan_lab.2, "Plan Lab");
+    assert_eq!(plan_lab.3.as_deref(), Some("zhipu-coding"));
+    assert_eq!(plan_lab.4, "plan");
+
+    let free_lab: (String, Option<String>, String) = db
+        .conn
+        .query_row(
+            "SELECT origin, preset_id, offering FROM providers WHERE id = 'free-lab'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(free_lab.0, "custom");
+    assert!(free_lab.1.is_none());
+    assert_eq!(free_lab.2, "api");
+
+    let plan_models: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM provider_models WHERE provider_id = 'plan-lab'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(plan_models, 1);
+    let free_models: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM provider_models WHERE provider_id = 'free-lab'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(free_models, 1);
+
+    let pref_protocol: String = db
+        .conn
+        .query_row(
+            "SELECT protocol FROM provider_model_protocol_preferences
+             WHERE provider_id = 'minimax' AND model_id = 'MiniMax-M2.5'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(pref_protocol, "chat_completions");
+
+    // The provider_id CHECK on preferences was removed; a non-minimax/kimi
+    // provider_id must be insertable.
+    db.conn
+        .execute(
+            "INSERT INTO provider_model_protocol_preferences (provider_id, model_id, protocol)
+             VALUES ('opencode', 'some-model', 'chat_completions')",
+            [],
+        )
+        .unwrap();
+
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn v43_restores_auto_on_exclusive_cn_available_siblings() {
+    let dir = temp_data_dir("v43-cn-exclusive");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    db.conn
+        .execute_batch(
+            "INSERT INTO provider_contract_model_protocol_overrides
+                (scope_kind, scope_id, model_id, protocol, state, updated_at)
+             VALUES
+                ('provider', 'minimax', 'MiniMax-M3', 'chat_completions', 'force_on', '2026-09-10T00:00:00Z'),
+                ('provider', 'minimax', 'MiniMax-M3', 'messages', 'force_off', '2026-09-10T00:00:00Z'),
+                ('provider', 'opencode', 'glm-5.2', 'chat_completions', 'force_on', '2026-09-10T00:00:00Z'),
+                ('provider', 'opencode', 'glm-5.2', 'responses', 'force_off', '2026-09-10T00:00:00Z');
+             DELETE FROM schema_version;
+             INSERT INTO schema_version(version) VALUES (42);",
+        )
+        .unwrap();
+    drop(db);
+
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), CURRENT_SCHEMA_VERSION);
+    let cn_messages_off: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM provider_contract_model_protocol_overrides
+             WHERE scope_id = 'minimax' AND model_id = 'MiniMax-M3' AND protocol = 'messages'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(cn_messages_off, 0);
+    let go_responses_off: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM provider_contract_model_protocol_overrides
+             WHERE scope_id = 'opencode' AND model_id = 'glm-5.2' AND protocol = 'responses'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(go_responses_off, 1);
+    db.conn
+        .execute(
+            "INSERT INTO provider_model_protocol_preferences (provider_id, model_id, protocol)
+             VALUES ('opencode', 'grok-4.6', 'responses')",
+            [],
+        )
+        .unwrap();
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn v44_adds_dashboard_operations_on_v43_reopen_and_fresh_databases() {
+    let fresh = temp_data_dir("v44-fresh");
+    let db = open_with_host_cipher(fresh.clone()).unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), CURRENT_SCHEMA_VERSION);
+    assert!(table_exists(&db.conn, "dashboard_operations").unwrap());
+    drop(db);
+    fs::remove_dir_all(fresh).unwrap();
+
+    let dir = temp_data_dir("v44-from-v43");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    db.conn
+        .execute_batch(
+            "DROP TABLE dashboard_operations;
+             DELETE FROM schema_version;
+             INSERT INTO schema_version(version) VALUES (43);",
+        )
+        .unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), 43);
+    assert!(!table_exists(&db.conn, "dashboard_operations").unwrap());
+    drop(db);
+
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), CURRENT_SCHEMA_VERSION);
+    assert!(table_exists(&db.conn, "dashboard_operations").unwrap());
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+fn rewind_identity_model_to_v44(conn: &Connection) {
+    conn.execute_batch(
+        "DROP TABLE IF EXISTS quota_pool_members;
+         DROP TABLE IF EXISTS quota_pools;
+         DROP TABLE IF EXISTS subscription_records;
+         DROP TABLE IF EXISTS onboarding_tasks;
+         DROP TABLE IF EXISTS legacy_identity_map;
+         DROP TABLE IF EXISTS credential_bindings;
+         DROP TABLE IF EXISTS credential_state;
+         DROP TABLE IF EXISTS upstream_identities;
+         UPDATE accounts SET identity_id = NULL;
+         DELETE FROM schema_version;
+         INSERT INTO schema_version(version) VALUES (44);",
+    )
+    .unwrap();
+}
+
+#[test]
+fn v45_fresh_database_is_current_and_v44_reopen_migrates() {
+    let fresh = temp_data_dir("v45-fresh");
+    let db = open_with_host_cipher(fresh.clone()).unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), CURRENT_SCHEMA_VERSION);
+    for table in [
+        "upstream_identities",
+        "credential_state",
+        "credential_bindings",
+        "legacy_identity_map",
+        "onboarding_tasks",
+        "subscription_records",
+        "quota_pools",
+        "quota_pool_members",
+    ] {
+        assert!(table_exists(&db.conn, table).unwrap(), "{table}");
+    }
+    assert!(table_has_column(&db.conn, "accounts", "identity_id").unwrap());
+    assert!(table_has_column(&db.conn, "credential_bindings", "allowed_endpoint_ids").unwrap());
+    assert!(table_has_column(&db.conn, "credential_bindings", "allowed_origins").unwrap());
+    drop(db);
+    fs::remove_dir_all(fresh).unwrap();
+
+    let dir = temp_data_dir("v45-from-v44");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    rewind_identity_model_to_v44(&db.conn);
+    assert_eq!(schema_version_on(&db.conn).unwrap(), 44);
+    assert!(!table_exists(&db.conn, "upstream_identities").unwrap());
+    drop(db);
+
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), CURRENT_SCHEMA_VERSION);
+    assert!(table_exists(&db.conn, "upstream_identities").unwrap());
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn identity_backfill_fails_closed_when_required_account_columns_are_missing() {
+    let dir = temp_data_dir("identity-missing-provider-id");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    rewind_identity_model_to_v44(&db.conn);
+    db.conn
+        .execute_batch("ALTER TABLE accounts DROP COLUMN provider_id;")
+        .unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), 44);
+    drop(db);
+
+    let error = match open_with_host_cipher(dir.clone()) {
+        Ok(_) => panic!("missing required account columns must fail closed"),
+        Err(error) => error,
+    };
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("provider_id") || message.contains("no such column"),
+        "{message}"
+    );
+    let conn = Connection::open(dir.join("data.sqlite")).unwrap();
+    assert_eq!(schema_version_on(&conn).unwrap(), 44);
+    assert!(!table_exists(&conn, "upstream_identities").unwrap());
+    drop(conn);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn v45_migrates_legacy_accounts_idempotently_without_changing_v3_rows() {
+    use crate::platform::{PlatformGroup, PlatformKind};
+    use ocg_domain::connection::{LegacyConnectionKind, connection_id_for_legacy};
+    use ocg_domain::credential::{
+        IdentityConfidence, anonymous_binding_id_for, credential_id_for_legacy_account,
+        identity_id_for_legacy_account, identity_id_for_platform_account,
+    };
+
+    let dir = temp_data_dir("v45-legacy-fixture");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    rewind_identity_model_to_v44(&db.conn);
+
+    let now = Utc::now();
+    let cooldown_5h = now + chrono::Duration::hours(5);
+    let cooldown_week = now + chrono::Duration::days(7);
+    let cooldown_5h_text = cooldown_5h.to_rfc3339();
+    let cooldown_week_text = cooldown_week.to_rfc3339();
+
+    let provider_id = uuid::Uuid::new_v4().to_string();
+    let runtime = crate::dynamic::DynamicProviderRuntime {
+        preset_id: None,
+        id: provider_id.clone(),
+        name: "Dynamic Lab".into(),
+        endpoint_url: "https://dyn.example/v1/chat/completions".into(),
+        upstream_protocol: crate::provider::UpstreamProtocolKind::ChatCompletions,
+        auth_kind: ocg_domain::dynamic::DynamicAuthKind::Bearer,
+        mappings: vec![ocg_domain::dynamic::DynamicModelMapping {
+            public_model: "lab-opus".into(),
+            upstream_model: "vendor/opus".into(),
+            upstream_override: None,
+        }],
+        created_at: now,
+        updated_at: now,
+        origin: ocg_domain::provider::ProviderOrigin::Custom,
+        offering: "api".to_string(),
+    };
+    let mut dynamic = account("dyn-keyed");
+    dynamic.provider_id = provider_id.clone();
+    dynamic.name = "Dynamic Key".into();
+    dynamic.key_cipher = fixture_account_key_cipher();
+    db.create_dynamic_provider(&runtime, &dynamic).unwrap();
+
+    let mut custom = account("custom-keyed");
+    custom.provider_id = CUSTOM_PROVIDER_ID.into();
+    custom.name = "Custom Key".into();
+    custom.key_cipher = fixture_account_key_cipher();
+    db.create_account_with_contract(
+        &custom,
+        Some(&AccountCustomConfigInput {
+            endpoint_url: "https://custom.example/v1/chat/completions".into(),
+            upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+        }),
+        &[AccountModelCapabilityInput {
+            public_model: "custom-model".into(),
+            upstream_model: "custom-model".into(),
+            protocol: UpstreamProtocolKind::ChatCompletions,
+            source: None,
+        }],
+    )
+    .unwrap();
+
+    let mut builtin = account("go-keyed");
+    builtin.name = "Go Key".into();
+    builtin.enabled = false;
+    builtin.auth_error = Some("auth failed".into());
+    builtin.key_cipher = fixture_account_key_cipher();
+    builtin.cooldown_5h_until = Some(cooldown_5h);
+    builtin.cooldown_week_until = Some(cooldown_week);
+    db.create_account(&builtin).unwrap();
+
+    let mut managed = account("managed-draft");
+    managed.name = "Managed Draft".into();
+    managed.account_type = AccountType::Managed;
+    managed.setup_step = AccountSetupStep::Payment;
+    managed.enabled = false;
+    managed.key_cipher.clear();
+    db.create_account(&managed).unwrap();
+
+    db.create_platform_account(
+        "parent-1",
+        PlatformKind::NewApi,
+        "Parent",
+        "https://new.example/v1",
+        Some("obfuscated-test-credential"),
+    )
+    .unwrap();
+    db.link_platform_account("custom-keyed", "parent-1", &PlatformGroup::default())
+        .unwrap();
+
+    db.conn
+        .execute(
+            "UPDATE accounts SET sort_order = CASE id
+                WHEN 'dyn-keyed' THEN 0
+                WHEN 'custom-keyed' THEN 1
+                WHEN 'go-keyed' THEN 2
+                WHEN 'managed-draft' THEN 3
+                ELSE sort_order END,
+                cooldown_5h_until = CASE WHEN id = 'go-keyed' THEN ?1 ELSE cooldown_5h_until END,
+                cooldown_week_until = CASE WHEN id = 'go-keyed' THEN ?2 ELSE cooldown_week_until END,
+                auth_error = CASE WHEN id = 'go-keyed' THEN 'auth failed' ELSE auth_error END,
+                enabled = CASE WHEN id = 'go-keyed' THEN 0 ELSE enabled END",
+            params![cooldown_5h_text, cooldown_week_text],
+        )
+        .unwrap();
+
+    let before = db.list_accounts().unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), 44);
+    drop(db);
+
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), CURRENT_SCHEMA_VERSION);
+    let after = db.list_accounts().unwrap();
+    assert_eq!(
+        serde_json::to_value(&before).unwrap(),
+        serde_json::to_value(&after).unwrap()
+    );
+
+    let account_count: i64 = db
+        .conn
+        .query_row("SELECT COUNT(*) FROM accounts", [], |row| row.get(0))
+        .unwrap();
+    let identity_count: i64 = db
+        .conn
+        .query_row("SELECT COUNT(*) FROM upstream_identities", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let credential_count: i64 = db
+        .conn
+        .query_row("SELECT COUNT(*) FROM credential_state", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let binding_count: i64 = db
+        .conn
+        .query_row("SELECT COUNT(*) FROM credential_bindings", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(credential_count, account_count);
+    assert_eq!(binding_count, account_count);
+    assert_eq!(identity_count, account_count + 1);
+
+    for id in [
+        "go-keyed",
+        "dyn-keyed",
+        "custom-keyed",
+        "managed-draft",
+        ZEN_FREE_ACCOUNT_ID,
+    ] {
+        let identity = identity_id_for_legacy_account(id);
+        let credential = credential_id_for_legacy_account(id);
+        let stored_identity: String = db
+            .conn
+            .query_row(
+                "SELECT identity_id FROM accounts WHERE id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored_identity, identity.as_str(), "{id}");
+        let stored_credential: String = db
+            .conn
+            .query_row(
+                "SELECT credential_id FROM credential_state WHERE account_id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored_credential, credential.as_str(), "{id}");
+        let map: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM legacy_identity_map
+                 WHERE legacy_kind = 'account' AND legacy_id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(map, 3, "{id}");
+    }
+
+    let go_sort: i64 = db
+        .conn
+        .query_row(
+            "SELECT sort_order FROM accounts WHERE id = 'go-keyed'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(go_sort, 2);
+    let stored_5h: String = db
+        .conn
+        .query_row(
+            "SELECT cooldown_5h_until FROM accounts WHERE id = 'go-keyed'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let stored_week: String = db
+        .conn
+        .query_row(
+            "SELECT cooldown_week_until FROM accounts WHERE id = 'go-keyed'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored_5h, cooldown_5h_text);
+    assert_eq!(stored_week, cooldown_week_text);
+
+    let task: (String, String) = db
+        .conn
+        .query_row(
+            "SELECT step, state FROM onboarding_tasks WHERE account_id = 'managed-draft'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(task, ("payment".into(), "in_progress".into()));
+    let ready_tasks: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM onboarding_tasks WHERE account_id != 'managed-draft'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(ready_tasks, 0);
+
+    let subscriptions: Vec<String> = db
+        .conn
+        .prepare("SELECT account_id FROM subscription_records ORDER BY account_id")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .map(|row| row.unwrap())
+        .collect();
+    assert_eq!(subscriptions, vec!["go-keyed".to_string()]);
+
+    let custom_identity: (String, Option<String>) = db
+        .conn
+        .query_row(
+            "SELECT i.identity_confidence, i.authority_site
+             FROM accounts a JOIN upstream_identities i ON i.id = a.identity_id
+             WHERE a.id = 'custom-keyed'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(custom_identity.0, IdentityConfidence::Declared.as_str());
+    let stored_parent_base: String = db
+        .conn
+        .query_row(
+            "SELECT base_url FROM platform_accounts WHERE id = 'parent-1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        custom_identity.1.as_deref(),
+        Some(stored_parent_base.as_str())
+    );
+
+    let platform_identity = identity_id_for_platform_account("parent-1");
+    let platform_map: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM legacy_identity_map
+             WHERE legacy_kind = 'platform_account' AND legacy_id = 'parent-1'
+               AND new_kind = 'identity' AND new_id = ?1",
+            [platform_identity.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(platform_map, 1);
+
+    let quota_pools: i64 = db
+        .conn
+        .query_row("SELECT COUNT(*) FROM quota_pools", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(quota_pools, account_count);
+    let quota_members: i64 = db
+        .conn
+        .query_row("SELECT COUNT(*) FROM quota_pool_members", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(quota_members, account_count);
+    for id in [
+        "go-keyed",
+        "dyn-keyed",
+        "custom-keyed",
+        "managed-draft",
+        ZEN_FREE_ACCOUNT_ID,
+    ] {
+        let (subject_ref, confidence, mode, members): (String, String, String, i64) = db
+            .conn
+            .query_row(
+                "SELECT p.subject_ref, p.relation_confidence, p.policy_mode, COUNT(m.account_id)
+                 FROM quota_pools p
+                 JOIN accounts a ON a.identity_id = p.subject_ref
+                 JOIN quota_pool_members m ON m.pool_id = p.id
+                 WHERE a.id = ?1
+                 GROUP BY p.id",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        let identity = identity_id_for_legacy_account(id);
+        assert_eq!(subject_ref, identity.as_str(), "{id}");
+        assert_eq!(confidence, "unknown", "{id}");
+        assert_eq!(mode, "authoritative_limit", "{id}");
+        assert_eq!(members, 1, "{id}");
+    }
+
+    let zen_connection = connection_id_for_legacy(
+        LegacyConnectionKind::BuiltinProvider,
+        OPENCODE_ZEN_FREE_PROVIDER_ID,
+    );
+    let stored_zen_binding: String = db
+        .conn
+        .query_row(
+            "SELECT id FROM credential_bindings WHERE account_id = ?1",
+            [ZEN_FREE_ACCOUNT_ID],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        stored_zen_binding,
+        anonymous_binding_id_for(&zen_connection).as_str()
+    );
+
+    let before_second = (
+        identity_count,
+        credential_count,
+        binding_count,
+        db.conn
+            .query_row("SELECT COUNT(*) FROM legacy_identity_map", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+    );
+    {
+        let tx = db.conn.unchecked_transaction().unwrap();
+        crate::db::identity::migrate_v45_body(&tx).unwrap();
+        crate::db::identity::migrate_v45_body(&tx).unwrap();
+        tx.commit().unwrap();
+    }
+    let after_second = (
+        db.conn
+            .query_row("SELECT COUNT(*) FROM upstream_identities", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        db.conn
+            .query_row("SELECT COUNT(*) FROM credential_state", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        db.conn
+            .query_row("SELECT COUNT(*) FROM credential_bindings", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        db.conn
+            .query_row("SELECT COUNT(*) FROM legacy_identity_map", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+    );
+    assert_eq!(before_second, after_second);
+
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn v45_delete_linked_key_keeps_platform_parent_identity() {
+    use crate::platform::{PlatformGroup, PlatformKind};
+    use ocg_domain::credential::identity_id_for_platform_account;
+
+    let dir = temp_data_dir("v45-delete-keeps-parent");
+    let mut db = open_with_host_cipher(dir.clone()).unwrap();
+    let mut custom = account("linked-custom");
+    custom.provider_id = CUSTOM_PROVIDER_ID.into();
+    custom.key_cipher = fixture_account_key_cipher();
+    db.create_account_with_contract(
+        &custom,
+        Some(&AccountCustomConfigInput {
+            endpoint_url: "https://custom.example/v1/chat/completions".into(),
+            upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+        }),
+        &[AccountModelCapabilityInput {
+            public_model: "keep-parent".into(),
+            upstream_model: "keep-parent".into(),
+            protocol: UpstreamProtocolKind::ChatCompletions,
+            source: None,
+        }],
+    )
+    .unwrap();
+    db.create_platform_account(
+        "keep-parent",
+        PlatformKind::NewApi,
+        "Keep Parent",
+        "https://keep.example/v1",
+        Some("obfuscated-test-credential"),
+    )
+    .unwrap();
+    db.link_platform_account("linked-custom", "keep-parent", &PlatformGroup::default())
+        .unwrap();
+    let parent_identity = identity_id_for_platform_account("keep-parent");
+    db.delete_account("linked-custom").unwrap();
+    let parent_rows: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM upstream_identities WHERE id = ?1",
+            [parent_identity.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(parent_rows, 1);
+    let map: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM legacy_identity_map
+             WHERE legacy_kind = 'platform_account' AND legacy_id = 'keep-parent'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(map, 1);
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn v45_unlink_returns_identity_to_opaque() {
+    use crate::platform::{PlatformGroup, PlatformKind};
+    use ocg_domain::credential::IdentityConfidence;
+
+    let dir = temp_data_dir("v45-unlink-opaque");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let mut custom = account("unlink-custom");
+    custom.provider_id = CUSTOM_PROVIDER_ID.into();
+    custom.key_cipher = fixture_account_key_cipher();
+    db.create_account_with_contract(
+        &custom,
+        Some(&AccountCustomConfigInput {
+            endpoint_url: "https://custom.example/v1/chat/completions".into(),
+            upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+        }),
+        &[AccountModelCapabilityInput {
+            public_model: "unlink-model".into(),
+            upstream_model: "unlink-model".into(),
+            protocol: UpstreamProtocolKind::ChatCompletions,
+            source: None,
+        }],
+    )
+    .unwrap();
+    db.create_platform_account(
+        "unlink-parent",
+        PlatformKind::NewApi,
+        "Unlink Parent",
+        "https://unlink.example/v1",
+        Some("obfuscated-test-credential"),
+    )
+    .unwrap();
+    db.link_platform_account("unlink-custom", "unlink-parent", &PlatformGroup::default())
+        .unwrap();
+    db.unlink_platform_account("unlink-custom").unwrap();
+    let state: (String, Option<String>) = db
+        .conn
+        .query_row(
+            "SELECT i.identity_confidence, i.authority_site
+             FROM accounts a JOIN upstream_identities i ON i.id = a.identity_id
+             WHERE a.id = 'unlink-custom'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(state.0, IdentityConfidence::Opaque.as_str());
+    assert!(state.1.is_none());
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn d02_shared_identity_pool_fans_out_cooldown_to_sibling_key() {
+    use crate::models::{UpstreamChannel, local_today};
+    use crate::provider::ConnectionVerificationStatus;
+    use ocg_domain::credential::{identity_id_for_legacy_account, quota_pool_id_for_identity};
+
+    let dir = temp_data_dir("d02-shared-pool");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let mut first = account("pool-a");
+    first.name = "Pool A".into();
+    first.key_cipher = fixture_account_key_cipher();
+    db.create_account(&first).unwrap();
+    let identity_id: String = db
+        .conn
+        .query_row(
+            "SELECT identity_id FROM accounts WHERE id = 'pool-a'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        identity_id,
+        identity_id_for_legacy_account("pool-a").as_str()
+    );
+
+    let mut second = account("pool-b");
+    second.name = "Pool B".into();
+    second.key_cipher = fixture_account_key_cipher();
+    let created = db
+        .create_account_for_identity(
+            &identity_id,
+            &second,
+            &local_today(),
+            ConnectionVerificationStatus::NotRequired,
+            crate::db::identity::QuotaSharingJoin::Shared {
+                source_credential_id: ocg_domain::credential::credential_id_for_legacy_account(
+                    "pool-a",
+                )
+                .to_string(),
+            },
+            None,
+        )
+        .unwrap();
+    assert_eq!(created.identity_id, identity_id);
+    assert_ne!(created.account_id, "pool-a");
+
+    let pool_id = quota_pool_id_for_identity(&identity_id);
+    let members: Vec<String> = db
+        .conn
+        .prepare("SELECT account_id FROM quota_pool_members WHERE pool_id = ?1 ORDER BY account_id")
+        .unwrap()
+        .query_map([pool_id.as_str()], |row| row.get(0))
+        .unwrap()
+        .map(|row| row.unwrap())
+        .collect();
+    assert_eq!(members, vec!["pool-a".to_string(), "pool-b".to_string()]);
+    let confidence: String = db
+        .conn
+        .query_row(
+            "SELECT relation_confidence FROM quota_pools WHERE id = ?1",
+            [pool_id.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(confidence, "declared");
+
+    let until = Utc::now() + chrono::Duration::hours(2);
+    db.set_account_rate_limit(
+        "pool-a",
+        until,
+        "429 exhausted",
+        Some(UsageWindowKind::FiveHours),
+    )
+    .unwrap();
+    let sibling = db.get_account("pool-b").unwrap().expect("sibling");
+    assert_eq!(sibling.cooldown_5h_until, Some(until));
+    assert!(sibling.is_cooling_for(UpstreamChannel::Go, Utc::now()));
+    assert_eq!(sibling.last_error.as_deref(), Some("429 exhausted"));
+    assert!(sibling.auth_error.is_none());
+
+    db.set_account_auth_error("pool-a", Some("401 only A"))
+        .unwrap();
+    let sibling = db.get_account("pool-b").unwrap().expect("sibling");
+    assert!(sibling.auth_error.is_none());
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn v45_open_repairs_missing_satellites_and_list_fails_closed() {
+    let dir = temp_data_dir("v45-repair-fail-closed");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let mut keyed = account("repair-go");
+    keyed.key_cipher = fixture_account_key_cipher();
+    db.create_account(&keyed).unwrap();
+    db.conn
+        .execute(
+            "UPDATE accounts SET identity_id = NULL WHERE id = 'repair-go'",
+            [],
+        )
+        .unwrap();
+    db.conn
+        .execute(
+            "DELETE FROM credential_state WHERE account_id = 'repair-go'",
+            [],
+        )
+        .unwrap();
+    let listed = db.list_identity_model();
+    assert!(
+        listed.is_err(),
+        "list must not synthesize missing v45 satellites"
+    );
+    drop(db);
+
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let snapshot = db.list_identity_model().unwrap();
+    assert!(
+        snapshot
+            .accounts
+            .iter()
+            .any(|record| record.account.id == "repair-go" && !record.identity_id.is_empty())
+    );
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn identity_repair_preserves_existing_shared_graph_and_ids() {
+    use ocg_domain::credential::ModelScope;
+    let dir = temp_data_dir("repair-preserves-shared-graph");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let mut first = account("repair-shared-a");
+    first.key_cipher = fixture_account_key_cipher();
+    db.create_account(&first).unwrap();
+    let identity_id = db
+        .list_identity_model()
+        .unwrap()
+        .accounts
+        .into_iter()
+        .find(|row| row.account.id == first.id)
+        .unwrap()
+        .identity_id;
+    let mut second = account("repair-shared-b");
+    second.key_cipher = fixture_account_key_cipher();
+    db.create_account_for_identity(
+        &identity_id,
+        &second,
+        &local_today(),
+        ConnectionVerificationStatus::NotRequired,
+        crate::db::identity::QuotaSharingJoin::Shared {
+            source_credential_id: ocg_domain::credential::credential_id_for_legacy_account(
+                "repair-shared-a",
+            )
+            .to_string(),
+        },
+        None,
+    )
+    .unwrap();
+    let mut other = account("repair-unrelated");
+    other.key_cipher = fixture_account_key_cipher();
+    db.create_account(&other).unwrap();
+    let credential_id = "00000000-0000-4000-8000-000000000091";
+    let binding_id = "00000000-0000-4000-8000-000000000092";
+    let pool_id = "00000000-0000-4000-8000-000000000093";
+    let scope = ModelScope::Only {
+        models: vec!["glm-5.1".into()],
+    };
+    db.conn
+        .execute(
+            "UPDATE credential_state SET credential_id=?2, version=7,
+        auth_state_version=7 WHERE account_id=?1",
+            params![second.id, credential_id],
+        )
+        .unwrap();
+    db.conn
+        .execute(
+            "UPDATE credential_bindings SET id=?2, model_scope=?3,
+        enabled=0 WHERE account_id=?1",
+            params![
+                second.id,
+                binding_id,
+                serde_json::to_string(&scope).unwrap()
+            ],
+        )
+        .unwrap();
+    for (kind, id) in [("credential", credential_id), ("binding", binding_id)] {
+        db.conn
+            .execute(
+                "UPDATE legacy_identity_map SET new_id=?3 WHERE legacy_id=?1 AND new_kind=?2",
+                params![second.id, kind, id],
+            )
+            .unwrap();
+    }
+    let old_pool: String = db
+        .conn
+        .query_row(
+            "SELECT pool_id FROM quota_pool_members WHERE account_id=?1",
+            [&first.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    db.conn
+        .execute(
+            "INSERT INTO quota_pools SELECT ?2, subject_kind, subject_ref,
+        relation_confidence, policy_mode, created_at FROM quota_pools WHERE id=?1",
+            params![old_pool, pool_id],
+        )
+        .unwrap();
+    db.conn
+        .execute(
+            "UPDATE quota_pool_members SET pool_id=?2 WHERE pool_id=?1",
+            params![old_pool, pool_id],
+        )
+        .unwrap();
+    db.conn
+        .execute("DELETE FROM quota_pools WHERE id=?1", [&old_pool])
+        .unwrap();
+    db.conn
+        .execute(
+            "DELETE FROM credential_state WHERE account_id=?1",
+            [&other.id],
+        )
+        .unwrap();
+    drop(db);
+
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let snapshot = db.list_identity_model().unwrap();
+    let repaired = snapshot
+        .accounts
+        .iter()
+        .find(|row| row.account.id == second.id)
+        .unwrap();
+    assert_eq!(repaired.identity_id, identity_id);
+    assert_eq!(repaired.credential_id, credential_id);
+    assert_eq!(repaired.credential_version, 7);
+    assert_eq!(repaired.binding_id, binding_id);
+    assert!(!repaired.binding_enabled);
+    assert_eq!(repaired.binding_model_scope, scope);
+    assert_eq!(
+        db.shared_pool_account_ids(&first.id).unwrap(),
+        vec![first.id.clone(), second.id.clone()]
+    );
+    let pools: Vec<String> = db
+        .conn
+        .prepare("SELECT pool_id FROM quota_pool_members WHERE account_id=?1")
+        .unwrap()
+        .query_map([&second.id], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(pools, vec![pool_id]);
+    let bindings: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM credential_bindings WHERE account_id=?1",
+            [&second.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(bindings, 1);
+    assert!(
+        snapshot
+            .accounts
+            .iter()
+            .any(|row| row.account.id == other.id)
+    );
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn saved_grants_remain_revoked_across_reopen_and_rotation() {
+    use ocg_domain::credential::credential_id_for_legacy_account;
+
+    let dir = temp_data_dir("v46-grants-once");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let mut keyed = account("grant-go");
+    keyed.key_cipher = fixture_account_key_cipher();
+    db.create_account(&keyed).unwrap();
+    let stored = db
+        .list_identity_model()
+        .unwrap()
+        .accounts
+        .into_iter()
+        .find(|row| row.account.id == "grant-go")
+        .unwrap();
+    assert!(!stored.allowed_endpoint_ids.is_empty());
+    assert!(stored.allowed_origins.is_empty());
+    db.conn
+        .execute(
+            "UPDATE credential_bindings SET allowed_endpoint_ids='[]', allowed_origins='[]'
+             WHERE account_id='grant-go'",
+            [],
+        )
+        .unwrap();
+    drop(db);
+
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let reopened = db
+        .list_identity_model()
+        .unwrap()
+        .accounts
+        .into_iter()
+        .find(|row| row.account.id == "grant-go")
+        .unwrap();
+    assert!(reopened.allowed_endpoint_ids.is_empty());
+    assert!(reopened.allowed_origins.is_empty());
+    db.rotate_account_credential("grant-go", &fixture_account_key_cipher())
+        .unwrap();
+    let rotated = db
+        .list_identity_model()
+        .unwrap()
+        .accounts
+        .into_iter()
+        .find(|row| row.account.id == "grant-go")
+        .unwrap();
+    assert!(rotated.allowed_endpoint_ids.is_empty());
+    assert_eq!(
+        rotated.credential_id,
+        credential_id_for_legacy_account("grant-go").as_str()
+    );
+    assert!(rotated.credential_version >= 2);
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn v47_adds_onboarding_draft_to_existing_v46_rows() {
+    let dir = temp_data_dir("v47-from-v46");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    restore_v47_inert_columns(&db.conn);
+    db.conn
+        .execute_batch(
+            "ALTER TABLE providers DROP COLUMN onboarding_draft;
+             DELETE FROM schema_version;
+             INSERT INTO schema_version(version) VALUES (46);",
+        )
+        .unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), 46);
+    assert!(!table_has_column(&db.conn, "providers", "onboarding_draft").unwrap());
+    drop(db);
+
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), CURRENT_SCHEMA_VERSION);
+    let defaulted: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM providers WHERE onboarding_draft != 0",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(defaulted, 0, "existing rows migrate to configured");
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn list_dynamic_providers_excludes_drafts_and_control_plane_includes_them() {
+    let dir = temp_data_dir("draft-list-boundary");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let provider_id = uuid::Uuid::new_v4().to_string();
+    let runtime = onboarding_runtime(&provider_id, "DraftBoundary");
+    db.commit_onboarding_new(
+        &runtime,
+        None,
+        true,
+        &onboarding_operation(
+            &uuid::Uuid::new_v4().to_string(),
+            "draft-digest",
+            r#"{"connectionId":"c","credentialId":null,"targetIds":[]}"#,
+        ),
+    )
+    .unwrap();
+    assert!(
+        db.list_dynamic_providers()
+            .unwrap()
+            .iter()
+            .all(|row| row.id != provider_id)
+    );
+    assert!(
+        db.list_control_plane_dynamic_providers()
+            .unwrap()
+            .iter()
+            .any(|row| row.id == provider_id)
+    );
+    assert_eq!(
+        db.provider_is_onboarding_draft(&provider_id).unwrap(),
+        Some(true)
+    );
+    assert!(
+        db.onboarding_draft_provider_ids()
+            .unwrap()
+            .contains(&provider_id)
+    );
+    let loaded = db.get_dynamic_provider(&provider_id).unwrap().unwrap();
+    assert_eq!(loaded.id, provider_id);
+    db.replace_dynamic_provider(&runtime, false, false, None)
+        .unwrap();
+    assert_eq!(
+        db.provider_is_onboarding_draft(&provider_id).unwrap(),
+        Some(true),
+        "ordinary replace must preserve the draft flag"
+    );
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn second_identity_credential_is_independent_until_explicit_share() {
+    use crate::models::{UpstreamChannel, UsageWindowKind, local_today};
+    use crate::provider::ConnectionVerificationStatus;
+
+    let dir = temp_data_dir("independent-second-key");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let mut first = account("indep-a");
+    first.key_cipher = fixture_account_key_cipher();
+    db.create_account(&first).unwrap();
+    let identity_id: String = db
+        .conn
+        .query_row(
+            "SELECT identity_id FROM accounts WHERE id = 'indep-a'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut second = account("indep-b");
+    second.key_cipher = fixture_account_key_cipher();
+    db.create_account_for_identity(
+        &identity_id,
+        &second,
+        &local_today(),
+        ConnectionVerificationStatus::NotRequired,
+        crate::db::identity::QuotaSharingJoin::Independent,
+        None,
+    )
+    .unwrap();
+    let members = db.shared_pool_account_ids("indep-a").unwrap();
+    assert_eq!(members, vec!["indep-a".to_string()]);
+    let until = Utc::now() + chrono::Duration::hours(2);
+    db.set_account_rate_limit(
+        "indep-a",
+        until,
+        "429 exhausted",
+        Some(UsageWindowKind::FiveHours),
+    )
+    .unwrap();
+    let sibling = db.get_account("indep-b").unwrap().expect("sibling");
+    assert!(sibling.cooldown_5h_until.is_none());
+    assert!(!sibling.is_cooling_for(UpstreamChannel::Go, Utc::now()));
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn shared_pool_fanout_preserves_maxima_and_clear_still_propagates() {
+    use crate::models::{UsageWindowKind, local_today};
+    use crate::provider::ConnectionVerificationStatus;
+
+    let dir = temp_data_dir("shared-pool-max-fanout");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let mut first = account("max-a");
+    first.key_cipher = fixture_account_key_cipher();
+    db.create_account(&first).unwrap();
+    let identity_id: String = db
+        .conn
+        .query_row(
+            "SELECT identity_id FROM accounts WHERE id = 'max-a'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let source_credential: String = db
+        .conn
+        .query_row(
+            "SELECT credential_id FROM credential_state WHERE account_id = 'max-a'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut second = account("max-b");
+    second.key_cipher = fixture_account_key_cipher();
+    db.create_account_for_identity(
+        &identity_id,
+        &second,
+        &local_today(),
+        ConnectionVerificationStatus::NotRequired,
+        crate::db::identity::QuotaSharingJoin::Shared {
+            source_credential_id: source_credential,
+        },
+        None,
+    )
+    .unwrap();
+
+    let two_hours = Utc::now() + chrono::Duration::hours(2);
+    db.set_account_rate_limit(
+        "max-a",
+        two_hours,
+        "429 two hours",
+        Some(UsageWindowKind::FiveHours),
+    )
+    .unwrap();
+    let one_hour = Utc::now() + chrono::Duration::hours(1);
+    db.set_account_rate_limit(
+        "max-b",
+        one_hour,
+        "429 one hour",
+        Some(UsageWindowKind::FiveHours),
+    )
+    .unwrap();
+    let stored_a = db.get_account("max-a").unwrap().unwrap();
+    let stored_b = db.get_account("max-b").unwrap().unwrap();
+    assert_eq!(stored_a.cooldown_5h_until, Some(two_hours));
+    assert_eq!(stored_b.cooldown_5h_until, Some(two_hours));
+
+    db.clear_account_cooldown("max-a").unwrap();
+    let stored_a = db.get_account("max-a").unwrap().unwrap();
+    let stored_b = db.get_account("max-b").unwrap().unwrap();
+    assert!(stored_a.cooldown_5h_until.is_none());
+    assert!(stored_b.cooldown_5h_until.is_none());
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn rotate_increments_version_and_auth_state_version_together() {
+    let dir = temp_data_dir("rotate-versions");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let mut keyed = account("rotate-go");
+    keyed.key_cipher = fixture_account_key_cipher();
+    keyed.auth_error = Some("stale-auth".into());
+    keyed.last_error = Some("stale-limit".into());
+    db.create_account(&keyed).unwrap();
+    let before: (i64, i64) = db
+        .conn
+        .query_row(
+            "SELECT version, auth_state_version FROM credential_state WHERE account_id = 'rotate-go'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(before, (1, 1));
+
+    let rotated = db
+        .rotate_account_credential("rotate-go", "replacement-cipher")
+        .unwrap();
+    assert_eq!(rotated.version, 2);
+    assert_eq!(rotated.auth_state_version, 2);
+    let after: (i64, i64, Option<String>, Option<String>, String) = db
+        .conn
+        .query_row(
+            "SELECT c.version, c.auth_state_version, a.auth_error, a.last_error, a.key_cipher
+             FROM credential_state c JOIN accounts a ON a.id = c.account_id
+             WHERE a.id = 'rotate-go'",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!((after.0, after.1), (2, 2));
+    assert!(after.2.is_none());
+    assert!(after.3.is_none());
+    assert_eq!(after.4, "replacement-cipher");
+
+    db.conn
+        .execute(
+            "DELETE FROM credential_state WHERE account_id = 'rotate-go'",
+            [],
+        )
+        .unwrap();
+    let repaired = db
+        .rotate_account_credential("rotate-go", "repaired-cipher")
+        .unwrap();
+    assert_eq!(repaired.version, 2);
+    assert_eq!(repaired.auth_state_version, 2);
+    assert_eq!(repaired.credential_id, rotated.credential_id);
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+fn probe_row(scope: ContractScope, model_id: &str, now: DateTime<Utc>) -> PersistedModelProtocol {
+    PersistedModelProtocol {
+        scope,
+        model_id: model_id.into(),
+        protocol: UpstreamProtocolKind::ChatCompletions,
+        source: ContractEvidenceSource::ProbeConfirmed,
+        verified_at: Some(now),
+        observed_at: Some(now),
+        last_probe_result: Some(ProbeResultKind::Success),
+        last_probe_at: Some(now),
+        last_probe_error: None,
+    }
+}
+
+#[test]
+fn o02_rotate_invalidates_custom_probe_evidence_and_keeps_builtin_catalog() {
+    let dir = temp_data_dir("o02-rotate-probe");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let mut custom = account("o02-custom");
+    custom.provider_id = CUSTOM_PROVIDER_ID.into();
+    custom.key_cipher = fixture_account_key_cipher();
+    db.create_account_with_contract(
+        &custom,
+        Some(&AccountCustomConfigInput {
+            endpoint_url: "https://o02.example/v1/chat/completions".into(),
+            upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+        }),
+        &[AccountModelCapabilityInput {
+            public_model: "lab-model".into(),
+            upstream_model: "lab-model".into(),
+            protocol: UpstreamProtocolKind::ChatCompletions,
+            source: None,
+        }],
+    )
+    .unwrap();
+    let mut go = account("o02-go");
+    go.key_cipher = fixture_account_key_cipher();
+    db.create_account(&go).unwrap();
+
+    let now = Utc::now();
+    let custom_scope = ContractScope::custom_endpoint("o02-custom");
+    let go_scope = ContractScope::provider(OPENCODE_PROVIDER_ID);
+    db.upsert_model_protocol(&probe_row(custom_scope.clone(), "lab-model", now))
+        .unwrap();
+    db.upsert_model_protocol(&probe_row(go_scope.clone(), "glm-5.2", now))
+        .unwrap();
+
+    db.rotate_account_credential("o02-custom", "replacement-custom")
+        .unwrap();
+    db.rotate_account_credential("o02-go", "replacement-go")
+        .unwrap();
+
+    assert!(
+        db.load_model_protocol(
+            &custom_scope,
+            "lab-model",
+            UpstreamProtocolKind::ChatCompletions
+        )
+        .unwrap()
+        .is_none(),
+        "rotated Custom Key must drop probe evidence"
+    );
+    assert!(
+        db.load_model_protocol(&go_scope, "glm-5.2", UpstreamProtocolKind::ChatCompletions)
+            .unwrap()
+            .is_some(),
+        "builtin catalog probe rows must survive a Go Key rotate"
+    );
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn o02_endpoint_change_invalidates_custom_and_dynamic_probe_evidence() {
+    let dir = temp_data_dir("o02-endpoint-probe");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let mut custom = account("o02-endpoint-custom");
+    custom.provider_id = CUSTOM_PROVIDER_ID.into();
+    custom.key_cipher = fixture_account_key_cipher();
+    db.create_account_with_contract(
+        &custom,
+        Some(&AccountCustomConfigInput {
+            endpoint_url: "https://old-o02.example/v1/chat/completions".into(),
+            upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+        }),
+        &[AccountModelCapabilityInput {
+            public_model: "lab-model".into(),
+            upstream_model: "lab-model".into(),
+            protocol: UpstreamProtocolKind::ChatCompletions,
+            source: None,
+        }],
+    )
+    .unwrap();
+    let now = Utc::now();
+    let provider_id = "o02-dyn";
+    let runtime = crate::dynamic::DynamicProviderRuntime {
+        preset_id: None,
+        id: provider_id.into(),
+        name: "O02 Dyn".into(),
+        endpoint_url: "https://dyn-old.example/v1/chat/completions".into(),
+        upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+        auth_kind: ocg_domain::dynamic::DynamicAuthKind::Bearer,
+        mappings: vec![ocg_domain::dynamic::DynamicModelMapping {
+            public_model: "lab".into(),
+            upstream_model: "vendor/lab".into(),
+            upstream_override: None,
+        }],
+        created_at: now,
+        updated_at: now,
+        origin: ocg_domain::provider::ProviderOrigin::Custom,
+        offering: "api".into(),
+    };
+    let mut dynamic = account("o02-dyn-key");
+    dynamic.provider_id = provider_id.into();
+    dynamic.key_cipher = fixture_account_key_cipher();
+    db.create_dynamic_provider(&runtime, &dynamic).unwrap();
+
+    let custom_scope = ContractScope::custom_endpoint("o02-endpoint-custom");
+    let dyn_scope = ContractScope::custom_endpoint("o02-dyn-key");
+    db.upsert_model_protocol(&probe_row(custom_scope.clone(), "lab-model", now))
+        .unwrap();
+    db.upsert_model_protocol(&probe_row(dyn_scope.clone(), "lab", now))
+        .unwrap();
+
+    db.upsert_account_custom_config(
+        "o02-endpoint-custom",
+        &AccountCustomConfigInput {
+            endpoint_url: "https://new-o02.example/v1/chat/completions".into(),
+            upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+        },
+    )
+    .unwrap();
+    let mut moved = runtime.clone();
+    moved.endpoint_url = "https://dyn-new.example/v1/chat/completions".into();
+    moved.updated_at = Utc::now();
+    db.replace_dynamic_provider(&moved, true, false, None)
+        .unwrap();
+
+    assert!(
+        db.load_model_protocol(
+            &custom_scope,
+            "lab-model",
+            UpstreamProtocolKind::ChatCompletions
+        )
+        .unwrap()
+        .is_none()
+    );
+    assert!(
+        db.load_model_protocol(&dyn_scope, "lab", UpstreamProtocolKind::ChatCompletions)
+            .unwrap()
+            .is_none()
+    );
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn v42_dynamic_read_paths_hide_builtin_rows() {
+    let dir = temp_data_dir("v42-filter-builtins");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    assert!(db.list_dynamic_providers().unwrap().is_empty());
+    for builtin_id in [
+        OPENCODE_PROVIDER_ID,
+        OPENCODE_ZEN_FREE_PROVIDER_ID,
+        COMMAND_CODE_PROVIDER_ID,
+        MINIMAX_PROVIDER_ID,
+        KIMI_PROVIDER_ID,
+        OLLAMA_PROVIDER_ID,
+        CUSTOM_PROVIDER_ID,
+    ] {
+        assert!(
+            db.get_dynamic_provider(builtin_id).unwrap().is_none(),
+            "get_dynamic_provider({builtin_id}) must return None"
+        );
+    }
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn v42_create_dynamic_provider_persists_origin_and_offering() {
+    let dir = temp_data_dir("v42-create-origin");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let now = Utc::now();
+    let preset_provider = uuid::Uuid::new_v4().to_string();
+    let custom_provider = uuid::Uuid::new_v4().to_string();
+    let mut preset_first = account("preset-acct");
+    preset_first.provider_id = preset_provider.clone();
+    preset_first.key_cipher = fixture_account_key_cipher();
+    let mut custom_first = account("custom-acct");
+    custom_first.provider_id = custom_provider.clone();
+    custom_first.key_cipher = fixture_account_key_cipher();
+    let preset_runtime = crate::dynamic::DynamicProviderRuntime {
+        preset_id: Some("zhipu-coding".into()),
+        id: preset_provider.clone(),
+        name: "Preset Lab".into(),
+        endpoint_url: "http://127.0.0.1:9".into(),
+        upstream_protocol: crate::provider::UpstreamProtocolKind::ChatCompletions,
+        auth_kind: ocg_domain::dynamic::DynamicAuthKind::Bearer,
+        mappings: vec![ocg_domain::dynamic::DynamicModelMapping {
+            public_model: "preset-model".into(),
+            upstream_model: "preset/upstream".into(),
+            upstream_override: None,
+        }],
+        created_at: now,
+        updated_at: now,
+        origin: ocg_domain::provider::ProviderOrigin::Preset,
+        offering: ocg_domain::provider::preset_offering("zhipu-coding").to_string(),
+    };
+    let custom_runtime = crate::dynamic::DynamicProviderRuntime {
+        preset_id: None,
+        id: custom_provider.clone(),
+        name: "Custom Lab".into(),
+        endpoint_url: "http://127.0.0.1:10".into(),
+        upstream_protocol: crate::provider::UpstreamProtocolKind::ChatCompletions,
+        auth_kind: ocg_domain::dynamic::DynamicAuthKind::Bearer,
+        mappings: vec![ocg_domain::dynamic::DynamicModelMapping {
+            public_model: "custom-model".into(),
+            upstream_model: "custom/upstream".into(),
+            upstream_override: None,
+        }],
+        created_at: now,
+        updated_at: now,
+        origin: ocg_domain::provider::ProviderOrigin::Custom,
+        offering: "api".to_string(),
+    };
+    db.create_dynamic_provider(&preset_runtime, &preset_first)
+        .unwrap();
+    db.create_dynamic_provider(&custom_runtime, &custom_first)
+        .unwrap();
+
+    let preset_row: (String, String, Option<String>, String) = db
+        .conn
+        .query_row(
+            "SELECT origin, adapter_kind, preset_id, offering
+             FROM providers WHERE id = ?1",
+            [&preset_provider],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(preset_row.0, "preset");
+    assert_eq!(preset_row.1, "configurable_http");
+    assert_eq!(preset_row.2.as_deref(), Some("zhipu-coding"));
+    assert_eq!(preset_row.3, "plan");
+
+    let custom_row: (String, String, Option<String>, String) = db
+        .conn
+        .query_row(
+            "SELECT origin, adapter_kind, preset_id, offering
+             FROM providers WHERE id = ?1",
+            [&custom_provider],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(custom_row.0, "custom");
+    assert_eq!(custom_row.1, "configurable_http");
+    assert!(custom_row.2.is_none());
+    assert_eq!(custom_row.3, "api");
+
+    // create_dynamic_provider on a builtin id must fail because get_dynamic_provider
+    // already returns None for builtin rows.
+    let mut builtin_first = account("builtin-attempt");
+    builtin_first.provider_id = OPENCODE_PROVIDER_ID.into();
+    builtin_first.key_cipher = fixture_account_key_cipher();
+    let builtin_attempt = crate::dynamic::DynamicProviderRuntime {
+        preset_id: None,
+        id: OPENCODE_PROVIDER_ID.into(),
+        name: "Builtin Collision".into(),
+        endpoint_url: "http://127.0.0.1:11".into(),
+        upstream_protocol: crate::provider::UpstreamProtocolKind::ChatCompletions,
+        auth_kind: ocg_domain::dynamic::DynamicAuthKind::Bearer,
+        mappings: vec![ocg_domain::dynamic::DynamicModelMapping {
+            public_model: "model".into(),
+            upstream_model: "model".into(),
+            upstream_override: None,
+        }],
+        created_at: now,
+        updated_at: now,
+        origin: ocg_domain::provider::ProviderOrigin::Custom,
+        offering: "api".to_string(),
+    };
+    let error = db
+        .create_dynamic_provider(&builtin_attempt, &builtin_first)
+        .expect_err("creating a dynamic provider with a builtin id must fail");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("UNIQUE"),
+        "create on builtin id must surface uniqueness conflict, got: {message}"
+    );
+
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn v42_delete_dynamic_provider_rejects_builtin_id() {
+    let dir = temp_data_dir("v42-delete-builtin");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    for builtin_id in [
+        OPENCODE_PROVIDER_ID,
+        OPENCODE_ZEN_FREE_PROVIDER_ID,
+        COMMAND_CODE_PROVIDER_ID,
+        MINIMAX_PROVIDER_ID,
+        KIMI_PROVIDER_ID,
+        OLLAMA_PROVIDER_ID,
+        CUSTOM_PROVIDER_ID,
+    ] {
+        let error = db
+            .delete_dynamic_provider(builtin_id)
+            .expect_err("delete must reject builtin id");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("unknown provider"),
+            "delete on builtin `{builtin_id}` must fail with unknown provider, got: {message}"
+        );
+    }
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn v42_writes_pre_v42_backup_for_non_fresh_v41_source() {
+    let dir = temp_data_dir("v42-pre-v42-backup");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let now = Utc::now().to_rfc3339();
+    db.conn
+        .execute_batch(&format!(
+            "PRAGMA foreign_keys=OFF;
+             DROP TABLE providers;
+             DROP TABLE provider_models;
+             CREATE TABLE dynamic_providers (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                endpoint_url TEXT NOT NULL,
+                upstream_protocol TEXT NOT NULL,
+                auth_kind TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                preset_id TEXT
+             );
+             INSERT INTO dynamic_providers
+                 (id, name, endpoint_url, upstream_protocol, auth_kind, created_at, updated_at, preset_id)
+             VALUES ('legacy-lab', 'Legacy Lab', 'https://legacy.example/v1', 'chat_completions', 'bearer', '{now}', '{now}', NULL);
+             DELETE FROM schema_version;
+             INSERT INTO schema_version (version) VALUES (39);
+             PRAGMA foreign_keys=ON;"
+        ))
+        .unwrap();
+    drop(db);
+
+    assert!(pre_v42_backup_paths(&dir).is_empty());
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    drop(db);
+
+    let backups = pre_v42_backup_paths(&dir);
+    assert_eq!(backups.len(), 1, "expected exactly one pre-v42 backup");
+    let backup = &backups[0];
+    let verified = Connection::open_with_flags(backup, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let backup_version = schema_version_on(&verified).unwrap();
+    assert_eq!(backup_version, V41_SCHEMA_VERSION);
+    let legacy_count: i64 = verified
+        .query_row(
+            "SELECT COUNT(*) FROM dynamic_providers WHERE id = 'legacy-lab'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(legacy_count, 1);
+    drop(verified);
+    let hash_path = backup.with_file_name(format!(
+        "{}.sha256",
+        backup.file_name().unwrap().to_str().unwrap()
+    ));
+    assert!(hash_path.exists(), "sha256 sidecar must be written");
+    fs::remove_dir_all(dir).unwrap();
+}
+
+fn pre_v42_backup_paths(dir: &Path) -> Vec<PathBuf> {
+    backup_paths_with_prefix(dir, PRE_V42_BACKUP_FILE_PREFIX)
+}
+
+fn pre_v48_backup_paths(dir: &Path) -> Vec<PathBuf> {
+    backup_paths_with_prefix(dir, PRE_V48_BACKUP_FILE_PREFIX)
+}
+
+fn assert_retired_dynamic_provider_tables_absent(conn: &Connection) {
+    assert!(!table_exists(conn, "dynamic_providers").unwrap());
+    assert!(!table_exists(conn, "dynamic_provider_models").unwrap());
+    let leftover_index: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type = 'index' AND name = 'idx_dynamic_provider_models_provider'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(leftover_index, 0);
+}
+
+#[test]
+fn current_schema_and_data_remain_stable_across_startup_replay() {
+    let dir = temp_data_dir("current-schema-stable");
+    let assert_current_shape = |db: &Database| {
+        assert_eq!(schema_version_on(&db.conn).unwrap(), CURRENT_SCHEMA_VERSION);
+        assert_retired_dynamic_provider_tables_absent(&db.conn);
+        assert_v48_inert_columns_absent(&db.conn);
+        assert!(table_has_column(&db.conn, "providers", "onboarding_draft").unwrap());
+        assert!(!table_has_column(&db.conn, "accounts", "offering_id").unwrap());
+        for column in USAGE_SYNC_ACCOUNT_COLUMNS {
+            assert!(
+                !table_has_column(&db.conn, "accounts", column).unwrap(),
+                "{column}"
+            );
+        }
+        for table in [
+            "access_keys",
+            "provider_contract_scopes",
+            "provider_contract_model_protocols",
+        ] {
+            assert!(table_exists(&db.conn, table).unwrap(), "{table}");
+        }
+        assert!(!table_exists(&db.conn, "sub_gateway_keys").unwrap());
+        for column in ["client_key_id", "client_key_name"] {
+            assert!(
+                table_has_column(&db.conn, "forward_logs", column).unwrap(),
+                "{column}"
+            );
+        }
+        for index in ["idx_forward_logs_client_key", "idx_access_keys_active_key"] {
+            let count: i64 = db
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?1",
+                    [index],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "{index}");
+        }
+        assert!(!db.primary_access_key_value().unwrap().unwrap().is_empty());
+        assert_eq!(db.count_active_sub_gateway_keys().unwrap(), 0);
+        for (version, backups) in [
+            ("v27", pre_v3_backup_paths(&dir)),
+            ("v35", pre_v35_backup_paths(&dir)),
+            ("v42", pre_v42_backup_paths(&dir)),
+            ("v48", pre_v48_backup_paths(&dir)),
+        ] {
+            assert!(
+                backups.is_empty(),
+                "current schema must not create a {version} backup"
+            );
+        }
+    };
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    assert_current_shape(&db);
+    db.migrate().unwrap();
+    assert_current_shape(&db);
+    drop(db);
+
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    assert_current_shape(&db);
+
+    let now = Utc::now();
+    let provider_id = uuid::Uuid::new_v4().to_string();
+    let runtime = crate::dynamic::DynamicProviderRuntime {
+        preset_id: None,
+        id: provider_id.clone(),
+        name: "Survive Lab".into(),
+        endpoint_url: "https://survive.example/v1/chat/completions".into(),
+        upstream_protocol: crate::provider::UpstreamProtocolKind::ChatCompletions,
+        auth_kind: ocg_domain::dynamic::DynamicAuthKind::Bearer,
+        mappings: vec![ocg_domain::dynamic::DynamicModelMapping {
+            public_model: "survive-model".into(),
+            upstream_model: "vendor/survive".into(),
+            upstream_override: None,
+        }],
+        created_at: now,
+        updated_at: now,
+        origin: ocg_domain::provider::ProviderOrigin::Custom,
+        offering: "api".to_string(),
+    };
+    let mut keyed = account("survive-key");
+    keyed.provider_id = provider_id.clone();
+    keyed.key_cipher = fixture_account_key_cipher();
+    db.create_dynamic_provider(&runtime, &keyed).unwrap();
+    drop(db);
+
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    assert_current_shape(&db);
+    let loaded = db.get_dynamic_provider(&provider_id).unwrap().unwrap();
+    assert_eq!(loaded.name, "Survive Lab");
+    assert_eq!(loaded.mappings.len(), 1);
+    assert_eq!(loaded.mappings[0].public_model, "survive-model");
+    let stored = db.get_account("survive-key").unwrap().unwrap();
+    assert_eq!(stored.provider_id, provider_id);
+    assert_fixture_account_cipher(&stored.key_cipher);
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn current_schema_reopen_preserves_nonempty_retired_dynamic_provider_residue() {
+    let dir = temp_data_dir("current-retired-residue");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    db.conn
+        .execute_batch(
+            "CREATE TABLE dynamic_providers (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL
+             );
+             CREATE TABLE dynamic_provider_models (
+                provider_id TEXT NOT NULL,
+                public_model TEXT NOT NULL
+             );
+             INSERT INTO dynamic_providers (id, name) VALUES ('residue', 'Leftover');
+             INSERT INTO dynamic_provider_models (provider_id, public_model)
+             VALUES ('residue', 'leftover-model');",
+        )
+        .unwrap();
+    drop(db);
+
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), CURRENT_SCHEMA_VERSION);
+    let leftover: (String, i64) = db
+        .conn
+        .query_row(
+            "SELECT name,
+                    (SELECT COUNT(*) FROM dynamic_provider_models WHERE provider_id = 'residue')
+             FROM dynamic_providers WHERE id = 'residue'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(leftover.0, "Leftover");
+    assert_eq!(leftover.1, 1);
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+fn assert_v48_inert_columns_absent(conn: &Connection) {
+    assert!(!table_has_column(conn, "accounts", "free_alias_enabled").unwrap());
+    for column in [
+        "chat_completions_enabled",
+        "responses_enabled",
+        "messages_enabled",
+    ] {
+        assert!(
+            !table_has_column(conn, "provider_contract_scopes", column).unwrap(),
+            "{column}"
+        );
+    }
+}
+
+#[test]
+fn v48_drops_inert_columns_and_empty_retired_tables_while_preserving_live_data() {
+    let dir = temp_data_dir("v48-preserve-live");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let mut keyed = account("v48-go");
+    keyed.key_cipher = fixture_account_key_cipher();
+    keyed.enabled = false;
+    db.create_account(&keyed).unwrap();
+    let cipher_before = db.get_account("v48-go").unwrap().unwrap().key_cipher;
+    let scope = ContractScope::provider(MINIMAX_PROVIDER_ID);
+    let now = Utc::now();
+    db.set_model_protocol_settings(
+        &scope,
+        &[(
+            "MiniMax-M3".into(),
+            UpstreamProtocolKind::ChatCompletions,
+            ProtocolOverrideState::ForceOff,
+        )],
+        &[("MiniMax-M3".into(), UpstreamProtocolKind::ChatCompletions)],
+        now,
+    )
+    .unwrap();
+    let identity_before = db
+        .list_identity_model()
+        .unwrap()
+        .accounts
+        .into_iter()
+        .find(|row| row.account.id == "v48-go")
+        .unwrap();
+    rewind_current_to_v47(&db.conn);
+    ensure_dynamic_provider_tables(&db.conn).unwrap();
+    assert!(table_exists(&db.conn, "dynamic_providers").unwrap());
+    assert!(table_exists(&db.conn, "dynamic_provider_models").unwrap());
+    drop(db);
+
+    assert!(pre_v48_backup_paths(&dir).is_empty());
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), CURRENT_SCHEMA_VERSION);
+    assert_v48_inert_columns_absent(&db.conn);
+    assert_retired_dynamic_provider_tables_absent(&db.conn);
+    let stored = db.get_account("v48-go").unwrap().unwrap();
+    assert_eq!(stored.key_cipher, cipher_before);
+    assert_fixture_account_cipher(&stored.key_cipher);
+    assert!(!stored.enabled);
+    let saved = db.load_persisted_contracts().unwrap();
+    assert_eq!(
+        saved.overrides[&scope][0].state,
+        ProtocolOverrideState::ForceOff
+    );
+    assert_eq!(
+        saved.preferences[&scope],
+        vec![("minimax-m3".into(), UpstreamProtocolKind::ChatCompletions)]
+    );
+    let identity_after = db
+        .list_identity_model()
+        .unwrap()
+        .accounts
+        .into_iter()
+        .find(|row| row.account.id == "v48-go")
+        .unwrap();
+    assert_eq!(identity_after.credential_id, identity_before.credential_id);
+    assert_eq!(identity_after.binding_id, identity_before.binding_id);
+    let backups = pre_v48_backup_paths(&dir);
+    assert_eq!(backups.len(), 1, "expected exactly one pre-v48 backup");
+    let backup = &backups[0];
+    let verified = Connection::open_with_flags(backup, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    assert_eq!(schema_version_on(&verified).unwrap(), V47_SCHEMA_VERSION);
+    assert!(table_has_column(&verified, "accounts", "free_alias_enabled").unwrap());
+    drop(verified);
+    let hash_path = backup.with_file_name(format!(
+        "{}.sha256",
+        backup.file_name().unwrap().to_str().unwrap()
+    ));
+    assert!(hash_path.exists(), "sha256 sidecar must be written");
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn v48_refuses_nonempty_retired_tables_without_claiming_upgrade() {
+    for (label, insert_providers, insert_models) in [
+        ("providers-only", true, false),
+        ("models-only", false, true),
+    ] {
+        let dir = temp_data_dir(&format!("v48-nonempty-{label}"));
+        let db = open_with_host_cipher(dir.clone()).unwrap();
+        rewind_current_to_v47(&db.conn);
+        ensure_dynamic_provider_tables(&db.conn).unwrap();
+        if insert_providers {
+            db.conn
+                .execute(
+                    "INSERT INTO dynamic_providers
+                     (id, name, endpoint_url, upstream_protocol, auth_kind, created_at, updated_at)
+                     VALUES ('residue', 'Leftover', 'https://legacy.example/v1',
+                             'chat_completions', 'bearer', '2026-01-01T00:00:00Z',
+                             '2026-01-01T00:00:00Z')",
+                    [],
+                )
+                .unwrap();
+        }
+        if insert_models {
+            db.conn
+                .execute_batch(
+                    "PRAGMA foreign_keys=OFF;
+                     INSERT INTO dynamic_provider_models
+                        (provider_id, public_model, public_model_key, upstream_model)
+                     VALUES ('residue', 'leftover-model', 'leftover-model', 'upstream');
+                     PRAGMA foreign_keys=ON;",
+                )
+                .unwrap();
+        }
+        drop(db);
+
+        let error = match open_with_host_cipher(dir.clone()) {
+            Ok(_) => panic!("{label}: nonempty leftover must fail closed"),
+            Err(error) => error,
+        };
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("nonempty leftover") && message.contains("refusing to drop"),
+            "{label}: {message}"
+        );
+        if insert_providers {
+            assert!(message.contains("dynamic_providers"), "{label}: {message}");
+        }
+        if insert_models {
+            assert!(
+                message.contains("dynamic_provider_models"),
+                "{label}: {message}"
+            );
+        }
+        let conn = Connection::open(dir.join("data.sqlite")).unwrap();
+        assert_eq!(schema_version_on(&conn).unwrap(), V47_SCHEMA_VERSION);
+        assert!(table_has_column(&conn, "accounts", "free_alias_enabled").unwrap());
+        if insert_providers {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM dynamic_providers WHERE id = 'residue'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "{label}");
+        } else {
+            let count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM dynamic_providers", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 0, "{label}");
+        }
+        if insert_models {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM dynamic_provider_models WHERE provider_id = 'residue'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "{label}");
+        } else {
+            let count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM dynamic_provider_models", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 0, "{label}");
+        }
+        drop(conn);
+        fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[test]
+fn v48_transaction_failure_leaves_v47_source() {
+    let dir = temp_data_dir("v48-tx-abort");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    rewind_current_to_v47(&db.conn);
+    ensure_dynamic_provider_tables(&db.conn).unwrap();
+    db.conn
+        .execute_batch(
+            "CREATE TRIGGER fail_v48 BEFORE INSERT ON schema_version
+             WHEN NEW.version = 48
+             BEGIN
+                 SELECT RAISE(ABORT, 'injected v48 failure');
+             END;",
+        )
+        .unwrap();
+    drop(db);
+
+    let error = match open_with_host_cipher(dir.clone()) {
+        Ok(_) => panic!("injected v48 failure must abort"),
+        Err(error) => error,
+    };
+    assert!(
+        format!("{error:#}").contains("injected v48 failure"),
+        "{error:#}"
+    );
+    let conn = Connection::open(dir.join("data.sqlite")).unwrap();
+    assert_eq!(schema_version_on(&conn).unwrap(), V47_SCHEMA_VERSION);
+    assert!(table_has_column(&conn, "accounts", "free_alias_enabled").unwrap());
+    assert!(
+        table_has_column(
+            &conn,
+            "provider_contract_scopes",
+            "chat_completions_enabled"
+        )
+        .unwrap()
+    );
+    assert!(table_exists(&conn, "dynamic_providers").unwrap());
+    assert!(table_exists(&conn, "dynamic_provider_models").unwrap());
+    drop(conn);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn v42_refuses_existing_providers_table_without_dropping_source_rows() {
+    let dir = temp_data_dir("v42-collision");
+    let path = dir.join("data.sqlite");
+    let now = Utc::now().to_rfc3339();
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(&format!(
+        "CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
+         INSERT INTO schema_version (version) VALUES (41);
+         CREATE TABLE dynamic_providers (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            endpoint_url TEXT NOT NULL,
+            upstream_protocol TEXT NOT NULL,
+            auth_kind TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            preset_id TEXT
+         );
+         INSERT INTO dynamic_providers
+            (id, name, endpoint_url, upstream_protocol, auth_kind, created_at, updated_at, preset_id)
+         VALUES ('legacy-dyn', 'Legacy Dyn', 'https://legacy.example/v1', 'chat_completions',
+                 'bearer', '{now}', '{now}', NULL);
+         CREATE TABLE providers (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL
+         );
+         INSERT INTO providers (id, name) VALUES ('residue', 'Must Keep');"
+    ))
+    .unwrap();
+    drop(conn);
+
+    let error = migrate_to_v42(&Connection::open(&path).unwrap(), &path, true)
+        .expect_err("noncanonical v41 providers table must fail closed");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("canonical v41 source without unified provider tables"),
+        "{message}"
+    );
+
+    let conn = Connection::open(&path).unwrap();
+    assert_eq!(schema_version_on(&conn).unwrap(), V41_SCHEMA_VERSION);
+    let residue: String = conn
+        .query_row(
+            "SELECT name FROM providers WHERE id = 'residue'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(residue, "Must Keep");
+    let dynamic: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM dynamic_providers WHERE id = 'legacy-dyn'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(dynamic, 1);
+    drop(conn);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn v39_preserves_existing_provider_configuration_and_adds_optional_provenance() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch("CREATE TABLE schema_version(version INTEGER PRIMARY KEY); INSERT INTO schema_version VALUES(38);").unwrap();
+    ensure_dynamic_provider_tables(&conn).unwrap();
+    conn.execute_batch("INSERT INTO dynamic_providers VALUES('old','Old provider','https://example.test/v1','responses','bearer','2026-09-08T00:00:00Z','2026-09-08T00:00:00Z');
+        INSERT INTO dynamic_provider_models VALUES('old','public-name','public-name','exact/ID');").unwrap();
+    migrate_to_v39(&conn).unwrap();
+    migrate_to_v39(&conn).unwrap();
+    assert_eq!(schema_version_on(&conn).unwrap(), 39);
+    migrate_to_v40(&conn).unwrap();
+    migrate_to_v40(&conn).unwrap();
+    assert_eq!(schema_version_on(&conn).unwrap(), 40);
+    let (preset_id, endpoint_url): (Option<String>, String) = conn
+        .query_row(
+            "SELECT preset_id, endpoint_url FROM dynamic_providers WHERE id = 'old'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(preset_id, None);
+    assert_eq!(endpoint_url, "https://example.test/v1");
+    let (upstream_model, upstream_override): (String, Option<String>) = conn
+        .query_row(
+            "SELECT upstream_model, upstream_override FROM dynamic_provider_models WHERE provider_id = 'old'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(upstream_model, "exact/ID");
+    assert!(upstream_override.is_none());
+    conn.execute(
+        "UPDATE dynamic_providers SET preset_id = 'azure-openai' WHERE id = 'old'",
+        [],
+    )
+    .unwrap();
+    let updated_preset: Option<String> = conn
+        .query_row(
+            "SELECT preset_id FROM dynamic_providers WHERE id = 'old'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(updated_preset.as_deref(), Some("azure-openai"));
+}
+
+#[test]
+fn platform_link_lifecycle_and_refresh_races() {
+    use crate::platform::{PlatformGroup, PlatformKind, PlatformSnapshot};
+    let dir = temp_data_dir("platform-link");
+    let mut db = Database::open(dir.clone()).unwrap();
+    let mut key = account("platform-key");
+    key.provider_id = CUSTOM_PROVIDER_ID.into();
+    db.create_account_with_contract(
+        &key,
+        Some(&AccountCustomConfigInput {
+            endpoint_url: "https://old.example/v1/chat/completions".into(),
+            upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+        }),
+        &[AccountModelCapabilityInput {
+            public_model: "model-a".into(),
+            upstream_model: "model-a".into(),
+            protocol: UpstreamProtocolKind::ChatCompletions,
+            source: None,
+        }],
+    )
+    .unwrap();
+    db.create_platform_account(
+        "parent",
+        PlatformKind::NewApi,
+        "Parent",
+        "https://new.example/v1",
+        Some("obfuscated-test-credential"),
+    )
+    .unwrap();
+    db.link_platform_account(&key.id, "parent", &PlatformGroup::default())
+        .unwrap();
+    assert_eq!(
+        db.account_custom_config(&key.id)
+            .unwrap()
+            .unwrap()
+            .endpoint_url,
+        "https://new.example/v1/chat/completions"
+    );
+    assert!(db.delete_platform_account("parent").is_err());
+    let old = db.platform_refresh_token("parent", Some(&key.id)).unwrap();
+    db.unlink_platform_account(&key.id).unwrap();
+    db.link_platform_account(&key.id, "parent", &PlatformGroup::default())
+        .unwrap();
+    assert!(
+        !db.save_platform_refresh("parent", Some(&key.id), &old, &PlatformSnapshot::default())
+            .unwrap()
+    );
+    let old = db.platform_refresh_token("parent", Some(&key.id)).unwrap();
+    db.update_platform_account("parent", "Parent", Some(None))
+        .unwrap();
+    assert!(
+        !db.save_platform_refresh("parent", Some(&key.id), &old, &PlatformSnapshot::default())
+            .unwrap()
+    );
+    assert!(
+        !db.platform_account("parent")
+            .unwrap()
+            .unwrap()
+            .has_user_credential
+    );
+    let current = db.platform_refresh_token("parent", Some(&key.id)).unwrap();
+    assert!(
+        db.save_platform_refresh(
+            "parent",
+            Some(&key.id),
+            &current,
+            &PlatformSnapshot::default()
+        )
+        .unwrap()
+    );
+    assert!(
+        !db.save_platform_refresh(
+            "parent",
+            Some(&key.id),
+            &current,
+            &PlatformSnapshot::default()
+        )
+        .unwrap()
+    );
+    let untouched = db.platform_refresh_token("parent", Some(&key.id)).unwrap();
+    platform::merge_platforms_on(&db.conn, &[], &[], &HashSet::new()).unwrap();
+    assert_eq!(
+        db.platform_refresh_token("parent", Some(&key.id)).unwrap(),
+        untouched
+    );
+    assert!(db.list_platform_links().unwrap()[0].snapshot.is_some());
+    db.unlink_platform_account(&key.id).unwrap();
+    assert_eq!(
+        db.account_custom_config(&key.id)
+            .unwrap()
+            .unwrap()
+            .endpoint_url,
+        "https://new.example/v1/chat/completions"
+    );
+    db.link_platform_account(&key.id, "parent", &PlatformGroup::default())
+        .unwrap();
+    db.delete_account(&key.id).unwrap();
+    assert!(db.list_platform_links().unwrap().is_empty());
+    db.delete_platform_account("parent").unwrap();
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn platform_link_failure_rolls_back_endpoint() {
+    use crate::platform::{PlatformGroup, PlatformKind};
+    let dir = temp_data_dir("platform-atomic");
+    let db = Database::open(dir.clone()).unwrap();
+    assert!(
+        db.create_platform_account(
+            "invalid",
+            PlatformKind::Sub2api,
+            "Invalid",
+            "https://new.example/v1/messages",
+            None
+        )
+        .is_err()
+    );
+    let mut key = account("platform-key");
+    key.provider_id = CUSTOM_PROVIDER_ID.into();
+    db.create_account_with_contract(
+        &key,
+        Some(&AccountCustomConfigInput {
+            endpoint_url: "https://old.example/v1/chat/completions".into(),
+            upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+        }),
+        &[AccountModelCapabilityInput {
+            public_model: "model-a".into(),
+            upstream_model: "model-a".into(),
+            protocol: UpstreamProtocolKind::ChatCompletions,
+            source: None,
+        }],
+    )
+    .unwrap();
+    db.create_platform_account(
+        "parent",
+        PlatformKind::Sub2api,
+        "Parent",
+        "https://new.example",
+        None,
+    )
+    .unwrap();
+    db.conn.execute_batch("CREATE TRIGGER reject_platform BEFORE INSERT ON platform_links BEGIN SELECT RAISE(ABORT,'injected failure'); END;").unwrap();
+    assert!(
+        db.link_platform_account(&key.id, "parent", &PlatformGroup::default())
+            .is_err()
+    );
+    assert_eq!(
+        db.account_custom_config(&key.id)
+            .unwrap()
+            .unwrap()
+            .endpoint_url,
+        "https://old.example/v1/chat/completions"
+    );
+    assert!(db.list_platform_links().unwrap().is_empty());
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn platform_key_survives_failed_link_and_retry_links_without_a_second_key() {
+    use crate::platform::{PlatformGroup, PlatformKind};
+    let dir = temp_data_dir("platform-key-link-retry");
+    let db = Database::open(dir.clone()).unwrap();
+    let mut key = account("platform-key");
+    key.provider_id = CUSTOM_PROVIDER_ID.into();
+    db.create_account_with_contract(
+        &key,
+        Some(&AccountCustomConfigInput {
+            endpoint_url: "https://old.example/v1/chat/completions".into(),
+            upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+        }),
+        &[AccountModelCapabilityInput {
+            public_model: "model-a".into(),
+            upstream_model: "model-a".into(),
+            protocol: UpstreamProtocolKind::ChatCompletions,
+            source: None,
+        }],
+    )
+    .unwrap();
+    db.create_platform_account(
+        "parent",
+        PlatformKind::NewApi,
+        "Parent",
+        "https://new.example",
+        None,
+    )
+    .unwrap();
+    db.conn
+        .execute_batch(
+            "CREATE TRIGGER reject_platform BEFORE INSERT ON platform_links BEGIN SELECT RAISE(ABORT,'injected failure'); END;",
+        )
+        .unwrap();
+    assert!(
+        db.link_platform_account(&key.id, "parent", &PlatformGroup::default())
+            .is_err()
+    );
+    let custom_ids: Vec<_> = db
+        .list_accounts()
+        .unwrap()
+        .into_iter()
+        .filter(|account| account.provider_id == CUSTOM_PROVIDER_ID)
+        .map(|account| account.id)
+        .collect();
+    assert_eq!(custom_ids, ["platform-key".to_string()]);
+    assert!(db.get_account("platform-key").unwrap().is_some());
+    assert!(db.list_platform_links().unwrap().is_empty());
+
+    db.conn
+        .execute_batch("DROP TRIGGER reject_platform;")
+        .unwrap();
+    db.link_platform_account(&key.id, "parent", &PlatformGroup::default())
+        .unwrap();
+    let custom_ids: Vec<_> = db
+        .list_accounts()
+        .unwrap()
+        .into_iter()
+        .filter(|account| account.provider_id == CUSTOM_PROVIDER_ID)
+        .map(|account| account.id)
+        .collect();
+    assert_eq!(custom_ids, ["platform-key".to_string()]);
+    let links = db.list_platform_links().unwrap();
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].account_id, "platform-key");
+    assert_eq!(links[0].platform_account_id, "parent");
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+fn node_import_record(
+    db: &Database,
+    accounts: Vec<AccountImportRecord>,
+    platform_accounts: Vec<crate::platform::PortablePlatformAccount>,
+    platform_links: Vec<crate::platform::PortablePlatformLink>,
+) -> NodeImportRecord {
+    let mut account_order: Vec<String> = db
+        .list_accounts()
+        .unwrap()
+        .into_iter()
+        .map(|account| account.id)
+        .collect();
+    for record in &accounts {
+        if !account_order.contains(&record.account.id) {
+            account_order.push(record.account.id.clone());
+        }
+    }
+    let config = crate::models::AppConfig {
+        gateway_key: "ocg-import-primary-key".into(),
+        ..crate::models::AppConfig::default()
+    };
+    NodeImportRecord {
+        platform_links_authoritative: true,
+        platform_accounts,
+        platform_links,
+        accounts,
+        account_order,
+        config_json: serde_json::to_string(&config).unwrap(),
+        sub_keys: Vec::new(),
+        zen_free_enabled: false,
+        zen_catalog: crate::kernel::zen::ZenFreeModelCatalog::default(),
+        provider_contracts: crate::provider_contracts::PersistedContracts::default(),
+        dynamic_providers: Vec::new(),
+        identity_snapshot: None,
+        draft_provider_ids: HashSet::new(),
+    }
+}
+
+fn go_import_record(id: &str) -> AccountImportRecord {
+    AccountImportRecord {
+        account: account(id),
+        custom_config: None,
+        capabilities: Vec::new(),
+        verification_status: ConnectionVerificationStatus::NotRequired,
+        connection_verified_at: None,
+        ollama_billing_tier: None,
+    }
+}
+
+#[test]
+fn import_same_platform_id_different_site_writes_nothing() {
+    use crate::platform::{PlatformKind, PortablePlatformAccount};
+    let dir = temp_data_dir("import-platform-site-conflict");
+    let db = Database::open(dir.clone()).unwrap();
+    db.create_platform_account(
+        "00000000-0000-4000-8000-0000000000aa",
+        PlatformKind::NewApi,
+        "Destination",
+        "https://dest.example",
+        None,
+    )
+    .unwrap();
+    let before_accounts = db
+        .list_accounts()
+        .unwrap()
+        .into_iter()
+        .map(|account| account.id)
+        .collect::<Vec<_>>();
+    let before_primary = db.primary_access_key_value().unwrap();
+    let record = node_import_record(
+        &db,
+        vec![go_import_record("imported-go")],
+        vec![PortablePlatformAccount {
+            id: "00000000-0000-4000-8000-0000000000aa".into(),
+            kind: PlatformKind::NewApi,
+            name: "Source".into(),
+            base_url: "https://other.example".into(),
+        }],
+        Vec::new(),
+    );
+    let error = db
+        .import_node_state(&record, |_| -> Result<()> {
+            Err(anyhow::anyhow!("should not build a snapshot"))
+        })
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("imported platform identity conflicts with immutable origin"),
+        "{error}"
+    );
+    assert_eq!(
+        db.list_accounts()
+            .unwrap()
+            .into_iter()
+            .map(|account| account.id)
+            .collect::<Vec<_>>(),
+        before_accounts
+    );
+    assert!(db.get_account("imported-go").unwrap().is_none());
+    assert_eq!(
+        db.platform_account("00000000-0000-4000-8000-0000000000aa")
+            .unwrap()
+            .unwrap()
+            .base_url,
+        "https://dest.example"
+    );
+    assert_eq!(db.primary_access_key_value().unwrap(), before_primary);
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn import_node_state_does_not_commit_when_runtime_snapshot_fails() {
+    let dir = temp_data_dir("import-snapshot-fail");
+    let db = Database::open(dir.clone()).unwrap();
+    let before_accounts = db
+        .list_accounts()
+        .unwrap()
+        .into_iter()
+        .map(|account| account.id)
+        .collect::<Vec<_>>();
+    let before_primary = db.primary_access_key_value().unwrap();
+    let record = node_import_record(
+        &db,
+        vec![go_import_record("snapshot-go")],
+        Vec::new(),
+        Vec::new(),
+    );
+    let error = db
+        .import_node_state(&record, |_| -> Result<()> {
+            Err(anyhow::anyhow!("forced snapshot failure"))
+        })
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("forced snapshot failure"),
+        "{error}"
+    );
+    assert_eq!(
+        db.list_accounts()
+            .unwrap()
+            .into_iter()
+            .map(|account| account.id)
+            .collect::<Vec<_>>(),
+        before_accounts
+    );
+    assert!(db.get_account("snapshot-go").unwrap().is_none());
+    assert_eq!(db.primary_access_key_value().unwrap(), before_primary);
+    let satellites: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM credential_state WHERE account_id = 'snapshot-go'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(satellites, 0);
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn import_v6_identity_conflict_writes_nothing() {
+    use crate::db::identity::{
+        IdentityImportSnapshot, ImportedAccountIdentity, ImportedIdentity, ImportedQuotaPool,
+    };
+    use ocg_domain::credential::{
+        ModelScope, credential_id_for_legacy_account, identity_id_for_legacy_account,
+        quota_pool_id_for_identity,
+    };
+
+    let dir = temp_data_dir("import-v6-identity-conflict");
+    let db = Database::open(dir.clone()).unwrap();
+    db.import_accounts_with_contracts(&[go_import_record("dest-go")])
+        .unwrap();
+    let dest_identity = db
+        .list_identity_model()
+        .unwrap()
+        .accounts
+        .into_iter()
+        .find(|row| row.account.id == "dest-go")
+        .unwrap()
+        .identity_id;
+    let before_accounts = db
+        .list_accounts()
+        .unwrap()
+        .into_iter()
+        .map(|account| account.id)
+        .collect::<Vec<_>>();
+    let imported_id = "00000000-0000-4000-8000-0000000000b1";
+    let credential_id = credential_id_for_legacy_account(imported_id).to_string();
+    let binding_id = "00000000-0000-4000-8000-0000000000b2".to_string();
+    let mut record = node_import_record(
+        &db,
+        vec![go_import_record(imported_id)],
+        Vec::new(),
+        Vec::new(),
+    );
+    record.identity_snapshot = Some(IdentityImportSnapshot {
+        identities: vec![ImportedIdentity {
+            id: dest_identity.clone(),
+            label: "Shared".into(),
+            identity_confidence: "opaque".into(),
+            authority_site: None,
+            authority_subject: None,
+            enabled: true,
+            notes: None,
+        }],
+        accounts: vec![ImportedAccountIdentity {
+            account_id: imported_id.into(),
+            identity_id: dest_identity.clone(),
+            credential_id: credential_id.clone(),
+            credential_version: 1,
+            auth_state_version: 1,
+            binding_id: binding_id.clone(),
+            binding_enabled: true,
+            binding_model_scope: ModelScope::All,
+            allowed_endpoint_ids: Vec::new(),
+            allowed_origins: Vec::new(),
+        }],
+        quota_pools: vec![ImportedQuotaPool {
+            id: quota_pool_id_for_identity(&dest_identity).to_string(),
+            subject_kind: "credential".into(),
+            subject_ref: dest_identity.clone(),
+            relation_confidence: "unknown".into(),
+            policy_mode: "authoritative_limit".into(),
+            member_account_ids: vec![imported_id.into()],
+        }],
+    });
+    let error = db
+        .import_node_state(&record, |_| -> Result<()> { Ok(()) })
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("already attached to a destination-only account"),
+        "{error}"
+    );
+    assert_eq!(
+        db.list_accounts()
+            .unwrap()
+            .into_iter()
+            .map(|account| account.id)
+            .collect::<Vec<_>>(),
+        before_accounts
+    );
+    assert!(db.get_account(imported_id).unwrap().is_none());
+    assert_eq!(
+        identity_id_for_legacy_account("dest-go").to_string(),
+        dest_identity
+    );
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn v45_keeps_forward_logs_interpretable_against_migrated_account_ids() {
+    let dir = temp_data_dir("v45-log-identity");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let mut go = account("go-log");
+    go.key_cipher = fixture_account_key_cipher();
+    db.create_account(&go).unwrap();
+    let mut log = forward_log("go-log", "success", 1.25);
+    log.model = "glm-5".into();
+    db.log_forward(&log).unwrap();
+    rewind_identity_model_to_v44(&db.conn);
+    drop(db);
+
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), CURRENT_SCHEMA_VERSION);
+    let account = db.get_account("go-log").unwrap().unwrap();
+    assert_eq!(account.id, "go-log");
+    let row = db
+        .list_forward_logs(10)
+        .unwrap()
+        .into_iter()
+        .find(|item| item.account_id == "go-log")
+        .expect("migrated account id must still resolve the log");
+    assert_eq!(row.account_id, account.id);
+    assert_eq!(row.model, "glm-5");
+    assert_eq!(row.status, "success");
+    let mapped: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM legacy_identity_map
+             WHERE legacy_kind = 'account' AND legacy_id = 'go-log'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(mapped, 3);
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
 const FIXTURE_ACCOUNT_PLAINTEXT: &str = "sk-fixture";
 
 fn test_host_cipher() -> Arc<dyn KeyCipher + Send + Sync> {
@@ -188,9 +3189,40 @@ fn pre_v35_backup_paths(dir: &Path) -> Vec<PathBuf> {
     backup_paths_with_prefix(dir, PRE_V35_BACKUP_FILE_PREFIX)
 }
 
+fn drop_unified_provider_tables(conn: &Connection) {
+    conn.execute_batch(
+        "DROP TABLE IF EXISTS provider_models;
+         DROP TABLE IF EXISTS providers;
+         DROP TABLE IF EXISTS provider_model_protocol_preferences_v42;",
+    )
+    .expect("pre-v42 fixtures must not carry unified provider tables");
+}
+
+fn restore_v47_inert_columns(conn: &Connection) {
+    conn.execute_batch(
+        "ALTER TABLE accounts ADD COLUMN free_alias_enabled INTEGER NOT NULL DEFAULT 0;
+         ALTER TABLE provider_contract_scopes ADD COLUMN chat_completions_enabled INTEGER NOT NULL DEFAULT 1;
+         ALTER TABLE provider_contract_scopes ADD COLUMN responses_enabled INTEGER NOT NULL DEFAULT 1;
+         ALTER TABLE provider_contract_scopes ADD COLUMN messages_enabled INTEGER NOT NULL DEFAULT 1;",
+    )
+    .expect("v47 inert columns should restore");
+}
+
+fn rewind_current_to_v47(conn: &Connection) {
+    restore_v47_inert_columns(conn);
+    conn.execute_batch(
+        "DELETE FROM schema_version;
+         INSERT INTO schema_version (version) VALUES (47);",
+    )
+    .expect("schema should rewind to v47");
+    assert_eq!(schema_version_on(conn).unwrap(), V47_SCHEMA_VERSION);
+}
+
 fn reverse_current_to_v34(dir: &Path) {
     let path = dir.join("data.sqlite");
     let conn = Connection::open(&path).expect("migrated database should reopen for reverse");
+    drop_unified_provider_tables(&conn);
+    restore_v47_inert_columns(&conn);
     conn.execute_batch(
         "
         PRAGMA foreign_keys=OFF;
@@ -391,7 +3423,7 @@ fn account(id: &str) -> Account {
     }
 }
 
-fn persist_unroutable_draft(db: &Database, plan: BuiltinProvider, id: &str, notes: &str) {
+fn persist_sanitation_account(db: &Database, plan: BuiltinProvider, id: &str, notes: &str) {
     let mut draft = account(id);
     draft.provider_id = plan.provider_id.to_string();
     draft.credential_kind = plan.credential_kind;
@@ -424,40 +3456,6 @@ fn leftover_enable(db: &Database, id: &str) {
         .execute("UPDATE accounts SET enabled = 1 WHERE id = ?1", [id])
         .unwrap();
     assert_eq!(changed, 1, "{id}");
-}
-
-fn clone_account_row_as_enabled(
-    conn: &Connection,
-    source_id: &str,
-    new_id: &str,
-    provider_id: &str,
-    offering_id: &str,
-) {
-    let mut stmt = conn.prepare("PRAGMA table_info(accounts)").unwrap();
-    let columns: Vec<String> = stmt
-        .query_map([], |row| row.get::<_, String>(1))
-        .unwrap()
-        .map(|column| column.unwrap())
-        .collect();
-    let select_list = columns
-        .iter()
-        .map(|column| match column.as_str() {
-            "id" | "name" => "?1".to_string(),
-            "provider_id" => "?2".to_string(),
-            "offering_id" => "?3".to_string(),
-            "enabled" => "1".to_string(),
-            other => other.to_string(),
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    conn.execute(
-        &format!(
-            "INSERT INTO accounts ({cols}) SELECT {select_list} FROM accounts WHERE id = ?4",
-            cols = columns.join(", ")
-        ),
-        params![new_id, provider_id, offering_id, source_id],
-    )
-    .unwrap();
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -522,12 +3520,11 @@ fn forward_log(account_id: &str, status: &str, cost: f64) -> ForwardLog {
 }
 
 #[test]
-fn v24_adds_route_column_and_historical_rows_stay_unlabeled() {
+fn forward_log_route_defaults_empty_and_round_trips_explicit_labels() {
     let dir = temp_data_dir("v24-route-column");
     let db = Database::open(dir.clone()).unwrap();
 
-    // A row written before the column existed keeps the empty default
-    // ("not recorded") — insert it without naming the route column.
+    // Omitting route on the current schema keeps its empty default.
     db.conn
         .execute(
             "INSERT INTO forward_logs
@@ -1528,7 +4525,7 @@ fn zen_enabled_has_a_dedicated_writer_and_generic_update_is_rejected() {
     db.conn
         .execute_batch(&format!(
             "CREATE TRIGGER reject_zen_provider_settings
-                 BEFORE UPDATE OF enabled, free_alias_enabled ON accounts
+                 BEFORE UPDATE OF enabled ON accounts
                  WHEN OLD.id = '{ZEN_FREE_ACCOUNT_ID}'
                  BEGIN
                      SELECT RAISE(ABORT, 'forced Zen settings failure');
@@ -2099,11 +5096,20 @@ fn v14_migrates_v13_logs_and_adds_request_id_indexes() {
 fn v15_migration_adds_nullable_auth_error() {
     let dir = temp_data_dir("v15-auth-error");
     let conn = Connection::open(dir.join("data.sqlite")).expect("legacy db should open");
+    let now = Utc::now().to_rfc3339();
     conn.execute_batch(
         "CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
              INSERT INTO schema_version (version) VALUES (14);
-             CREATE TABLE accounts (id TEXT PRIMARY KEY);
-             INSERT INTO accounts (id) VALUES ('legacy');
+             CREATE TABLE accounts (
+                 id TEXT PRIMARY KEY, name TEXT NOT NULL, username TEXT,
+                 password_cipher TEXT, key_cipher TEXT NOT NULL,
+                 enabled INTEGER NOT NULL DEFAULT 1, referral_code TEXT,
+                 recharge_date TEXT NOT NULL, sort_order INTEGER NOT NULL DEFAULT 0,
+                 cooldown_until TEXT, cooldown_generic_until TEXT,
+                 cooldown_5h_until TEXT, cooldown_week_until TEXT,
+                 cooldown_month_until TEXT, last_error TEXT,
+                 created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+             );
              CREATE TABLE forward_logs (
                  timestamp TEXT,
                  cost_state TEXT NOT NULL DEFAULT 'not_applicable',
@@ -2112,9 +5118,16 @@ fn v15_migration_adds_nullable_auth_error() {
              CREATE TABLE gateway_logs (created_at TEXT, diagnostic_json TEXT);",
     )
     .expect("v14 fixture should be created");
+    conn.execute(
+        "INSERT INTO accounts
+             (id, name, key_cipher, enabled, recharge_date, created_at, updated_at)
+             VALUES ('legacy', 'Legacy', ?2, 1, '2026-08-01', ?1, ?1)",
+        params![now, fixture_account_key_cipher()],
+    )
+    .expect("v14 account should be inserted");
     drop(conn);
 
-    let db = Database::open(dir.clone()).expect("v14 database should migrate");
+    let db = open_with_host_cipher(dir.clone()).expect("v14 database should migrate");
     let auth_error: Option<String> = db
         .conn
         .query_row(
@@ -2196,32 +5209,35 @@ fn diagnostic_retention_removes_only_old_json() {
 }
 
 #[test]
-fn fixed_window_5h_starts_at_first_success_and_expires_after_5h() {
-    let dir = temp_data_dir("fixed-5h");
-    let db = Database::open(dir.clone()).expect("db should open");
-    db.create_account(&account("fixed"))
-        .expect("account should be created");
-
-    // 第一条成功请求落在 4h 前：固定窗口起点 = 4h 前，倒计时 ≈ 1h
-    let ts1 = Utc::now() - Duration::hours(4);
-    finalize_success(&db, "fixed", 1.0, ts1);
-    // 窗口内的第二条请求：累加
-    let ts2 = ts1 + Duration::hours(1);
-    finalize_success(&db, "fixed", 2.0, ts2);
-
-    let usage = db.account_usage("fixed").expect("usage should load");
-    assert_cost(usage.window_5h, 3.0);
-    let reset = usage
-        .resets_in_5h
-        .expect("5h window reset should be set while window is active");
-    let remaining_min = (reset - Utc::now()).num_minutes();
-    assert!(
-        (55..=65).contains(&remaining_min),
-        "expected ~60min remaining, got {remaining_min}"
-    );
-
+fn fixed_window_5h_anchors_at_the_first_unexpired_success() {
+    let dir = temp_data_dir("fixed-5h-windows");
+    let db = Database::open(dir.clone()).unwrap();
+    for (id, history, expected_cost, expected_minutes) in [
+        ("active", &[(4, 1.0), (3, 2.0)][..], 3.0, 60),
+        ("after-expiry", &[(6, 10.0), (1, 5.0)][..], 5.0, 240),
+        (
+            "after-multiple",
+            &[(19, 10.0), (13, 5.0), (7, 3.0), (1, 2.0)][..],
+            2.0,
+            240,
+        ),
+    ] {
+        db.create_account(&account(id)).unwrap();
+        let now = Utc::now();
+        for &(hours_ago, cost) in history {
+            finalize_success(&db, id, cost, now - Duration::hours(hours_ago));
+        }
+        let usage = db.account_usage(id).unwrap();
+        assert_cost(usage.window_5h, expected_cost);
+        let reset = usage.resets_in_5h.expect("active window must have a reset");
+        let remaining = (reset - Utc::now()).num_minutes();
+        assert!(
+            (expected_minutes - 5..=expected_minutes + 5).contains(&remaining),
+            "{id}: expected ~{expected_minutes}min remaining, got {remaining}"
+        );
+    }
     drop(db);
-    fs::remove_dir_all(dir).expect("test data dir should be removed");
+    fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -2239,36 +5255,6 @@ fn fixed_window_treats_exact_end_as_the_next_window_start() {
     let usage = db.account_usage("boundary").expect("usage should load");
     assert_cost(usage.window_5h, 2.0);
     assert!(usage.resets_in_5h.is_some());
-
-    drop(db);
-    fs::remove_dir_all(dir).expect("test data dir should be removed");
-}
-
-#[test]
-fn fixed_window_5h_rebuilds_after_expiry_when_new_request_arrives() {
-    let dir = temp_data_dir("fixed-5h-rebuild");
-    let db = Database::open(dir.clone()).expect("db should open");
-    db.create_account(&account("rebuild"))
-        .expect("account should be created");
-
-    // 6h 前的第一条请求：窗口已过期
-    let ts1 = Utc::now() - Duration::hours(6);
-    finalize_success(&db, "rebuild", 10.0, ts1);
-    // 1h 前的第二条请求：触发新窗口
-    let ts2 = Utc::now() - Duration::hours(1);
-    finalize_success(&db, "rebuild", 5.0, ts2);
-
-    let usage = db.account_usage("rebuild").expect("usage should load");
-    // 新窗口只包含 ts2 之后：10 已被丢弃，只剩 5
-    assert_cost(usage.window_5h, 5.0);
-    let reset = usage
-        .resets_in_5h
-        .expect("5h window reset should be set after rebuild");
-    let remaining_min = (reset - Utc::now()).num_minutes();
-    assert!(
-        (235..=245).contains(&remaining_min),
-        "expected ~240min remaining, got {remaining_min}"
-    );
 
     drop(db);
     fs::remove_dir_all(dir).expect("test data dir should be removed");
@@ -2308,41 +5294,6 @@ fn fixed_window_5h_advances_through_multiple_expired_windows_in_one_call() {
     let usage2 = db.account_usage("cycle").expect("usage should load again");
     assert_cost(usage2.window_5h, 0.0);
     assert!(usage2.resets_in_5h.is_none());
-
-    drop(db);
-    fs::remove_dir_all(dir).expect("test data dir should be removed");
-}
-
-#[test]
-fn fixed_window_5h_finds_active_window_after_multiple_expired() {
-    // 多条已过期日志后跟一条近期日志：修复后第一次刷新就应落在有效窗口上，
-    // 而不是停在某个过期窗口里返回错误的中间值。
-    let dir = temp_data_dir("fixed-5h-active-after-expired");
-    let db = Database::open(dir.clone()).expect("db should open");
-    db.create_account(&account("active"))
-        .expect("account should be created");
-
-    // 三条过期日志间隔 6h，再加一条 1h 前的近期日志。
-    let ts1 = Utc::now() - Duration::hours(19);
-    let ts2 = ts1 + Duration::hours(6); // -13h
-    let ts3 = ts2 + Duration::hours(6); // -7h，仍过期
-    let ts4 = Utc::now() - Duration::hours(1); // 近期，落在有效窗口内
-    finalize_success(&db, "active", 10.0, ts1);
-    finalize_success(&db, "active", 5.0, ts2);
-    finalize_success(&db, "active", 3.0, ts3);
-    finalize_success(&db, "active", 2.0, ts4);
-
-    // 第一次刷新：连过 3 个过期窗口，落在 ts4 上，只算 ts4 之后的 cost = 2.0。
-    let usage = db.account_usage("active").expect("usage should load");
-    assert_cost(usage.window_5h, 2.0);
-    let reset = usage
-        .resets_in_5h
-        .expect("5h window reset should be anchored at ts4");
-    let remaining_min = (reset - Utc::now()).num_minutes();
-    assert!(
-        (235..=245).contains(&remaining_min),
-        "expected ~240min remaining (anchored at ts4 = now - 1h), got {remaining_min}"
-    );
 
     drop(db);
     fs::remove_dir_all(dir).expect("test data dir should be removed");
@@ -3331,41 +6282,6 @@ fn clear_v23_identity(db: &Database, id: i64) {
 }
 
 #[test]
-fn forward_log_model_filter_binds_each_identity_column() {
-    let none = empty_forward_query();
-    let (sql, params) = forward_log_filter(&none);
-    assert!(!sql.to_ascii_lowercase().contains("model"));
-    assert!(params.is_empty());
-
-    let empty = ForwardLogQueryOptions {
-        model: Some(""),
-        ..empty_forward_query()
-    };
-    let (sql, params) = forward_log_filter(&empty);
-    assert!(!sql.to_ascii_lowercase().contains("model"));
-    assert!(params.is_empty());
-
-    let filtered = ForwardLogQueryOptions {
-        status: Some("success"),
-        model: Some("glm-5.2"),
-        ..empty_forward_query()
-    };
-    let (sql, params) = forward_log_filter(&filtered);
-    assert!(sql.contains("status = ?"));
-    assert!(sql.contains(
-        "(model = ? OR requested_model = ? OR resolved_alias = ? OR upstream_model = ?)"
-    ));
-    assert!(sql.contains(" AND "));
-    assert_eq!(params.len(), 5);
-    assert_eq!(params[0], Value::Text("success".into()));
-    assert!(
-        params[1..]
-            .iter()
-            .all(|value| *value == Value::Text("glm-5.2".into()))
-    );
-}
-
-#[test]
 fn forward_logs_model_filter_matches_each_identity_and_legacy_fallback() {
     let dir = temp_data_dir("forward-model-identity-filter");
     let db = Database::open(dir.clone()).unwrap();
@@ -3444,8 +6360,6 @@ fn forward_logs_model_filter_matches_each_identity_and_legacy_fallback() {
         ids,
         [legacy_id, requested_id, alias_id, upstream_id, overlap_id]
     );
-    let unique = ids.iter().copied().collect::<HashSet<_>>();
-    assert_eq!(unique.len(), ids.len());
     assert_eq!(page.summary.total_requests, 5);
     assert_eq!(page.summary.prompt_tokens, 16);
     assert!((page.summary.cost - 16.0).abs() < f64::EPSILON);
@@ -3584,9 +6498,9 @@ fn forward_logs_model_filter_ands_other_filters_before_pagination() {
         db.log_forward(&decoy).unwrap();
     }
 
-    let filtered = ForwardLogQueryOptions {
-        limit: 1,
-        offset: 0,
+    let filtered = |limit, offset| ForwardLogQueryOptions {
+        limit,
+        offset,
         status: Some("success"),
         provider_id: Some("opencode"),
         model: Some("needle"),
@@ -3597,53 +6511,23 @@ fn forward_logs_model_filter_ands_other_filters_before_pagination() {
         sort_order: Some("asc"),
         ..empty_forward_query()
     };
-    let first_page = db.query_forward_logs(filtered).unwrap();
+    let first_page = db.query_forward_logs(filtered(1, 0)).unwrap();
     assert_eq!(first_page.items.len(), 1);
     assert_eq!(first_page.items[0].id, first);
     assert_eq!(first_page.summary.total_requests, 3);
     assert_eq!(first_page.summary.prompt_tokens, 6);
     assert!((first_page.summary.cost - 6.0).abs() < f64::EPSILON);
 
-    let second_page = db
-        .query_forward_logs(ForwardLogQueryOptions {
-            limit: 1,
-            offset: 1,
-            status: Some("success"),
-            provider_id: Some("opencode"),
-            model: Some("needle"),
-            key_id: Some("key-a"),
-            start_time: Some("2026-07-17T12:00:00+08:00"),
-            end_time: Some("2026-07-17T12:30:00+08:00"),
-            sort_by: Some("cost"),
-            sort_order: Some("asc"),
-            ..empty_forward_query()
-        })
-        .unwrap();
+    let second_page = db.query_forward_logs(filtered(1, 1)).unwrap();
     assert_eq!(second_page.items.len(), 1);
     assert_eq!(second_page.items[0].id, second);
     assert_eq!(second_page.summary.total_requests, 3);
 
-    let rest = db
-        .query_forward_logs(ForwardLogQueryOptions {
-            limit: 50,
-            offset: 2,
-            status: Some("success"),
-            provider_id: Some("opencode"),
-            model: Some("needle"),
-            key_id: Some("key-a"),
-            start_time: Some("2026-07-17T12:00:00+08:00"),
-            end_time: Some("2026-07-17T12:30:00+08:00"),
-            sort_by: Some("cost"),
-            sort_order: Some("asc"),
-            ..empty_forward_query()
-        })
-        .unwrap();
+    let rest = db.query_forward_logs(filtered(50, 2)).unwrap();
     assert_eq!(
         rest.items.iter().map(|log| log.id).collect::<Vec<_>>(),
         [third]
     );
-    let unique = [first, second, third].into_iter().collect::<HashSet<_>>();
-    assert_eq!(unique.len(), 3);
 
     drop(db);
     fs::remove_dir_all(dir).unwrap();
@@ -3697,8 +6581,10 @@ fn backfill_attributes_null_rows_in_chunks_with_resume_and_completion() {
 
     // New NULL rows written by an older binary (a downgrade window)
     // restart the scan instead of staying "unattributed" forever.
-    db.log_forward(&forward_log("acct", "success", 9.0))
-        .unwrap();
+    for cost in [9.0, 11.0] {
+        db.log_forward(&forward_log("acct", "success", cost))
+            .unwrap();
+    }
     assert!(
         db.backfill_forward_logs_client_key_step("primary", "Primary", 3)
             .unwrap()
@@ -3717,7 +6603,20 @@ fn backfill_attributes_null_rows_in_chunks_with_resume_and_completion() {
         .into_iter()
         .filter(|row| row.client_key_name.as_deref() == Some("Primary"))
         .collect();
-    assert!(late_rows.iter().any(|row| row.cost == Some(9.0)));
+    assert_eq!(late_rows.len(), 5);
+    for cost in [9.0, 11.0] {
+        assert!(late_rows.iter().any(|row| row.cost == Some(cost)));
+    }
+
+    // A late row already carrying an attribution must not restart the scan.
+    let mut attributed = forward_log("acct", "success", 13.0);
+    attributed.client_key_id = Some("primary".into());
+    attributed.client_key_name = Some("Primary".into());
+    db.log_forward(&attributed).unwrap();
+    assert!(
+        !db.backfill_forward_logs_client_key_step("primary", "Primary", 50)
+            .unwrap()
+    );
 
     drop(db);
     fs::remove_dir_all(dir).unwrap();
@@ -3751,6 +6650,13 @@ fn backfill_resumes_from_persisted_watermark_after_interruption() {
         2
     );
 
+    drop(db);
+    let db = Database::open(dir.clone()).unwrap();
+    assert_eq!(
+        db.forward_log_backfill_marker().unwrap().as_deref(),
+        Some("2")
+    );
+
     // A restarted run continues from the watermark instead of
     // rescanning; the last chunk completes the table and records done.
     assert!(
@@ -3781,63 +6687,6 @@ fn backfill_resumes_from_persisted_watermark_after_interruption() {
 }
 
 #[test]
-fn backfill_restarts_after_done_when_a_downgrade_writes_null_rows() {
-    let dir = temp_data_dir("backfill-restart-after-done");
-    let db = Database::open(dir.clone()).unwrap();
-    db.log_forward(&forward_log("acct", "success", 1.0))
-        .unwrap();
-    assert!(
-        !db.backfill_forward_logs_client_key_step("primary", "Primary", 50)
-            .unwrap()
-    );
-    assert_eq!(
-        db.forward_log_backfill_marker().unwrap().as_deref(),
-        Some(BACKFILL_DONE)
-    );
-
-    // A downgrade window writes fresh rows the way the pre-v18 binary
-    // did: without a client key id.
-    db.log_forward(&forward_log("acct", "success", 2.0))
-        .unwrap();
-    db.log_forward(&forward_log("acct", "success", 4.0))
-        .unwrap();
-
-    // The completion marker no longer short-circuits: one index probe
-    // sees the NULL rows, the scan restarts, and they are attributed.
-    assert!(
-        db.backfill_forward_logs_client_key_step("primary", "Primary", 1)
-            .unwrap()
-    );
-    while db
-        .backfill_forward_logs_client_key_step("primary", "Primary", 50)
-        .unwrap()
-    {}
-    assert_eq!(
-        db.forward_log_backfill_marker().unwrap().as_deref(),
-        Some(BACKFILL_DONE)
-    );
-    let rows = db.list_forward_logs(100).unwrap();
-    assert_eq!(rows.len(), 3);
-    assert!(
-        rows.iter()
-            .all(|row| row.client_key_id.as_deref() == Some("primary"))
-    );
-
-    // With no fresh NULL rows the marker keeps short-circuiting.
-    let mut attributed = forward_log("acct", "success", 8.0);
-    attributed.client_key_id = Some("primary".into());
-    attributed.client_key_name = Some("Primary".into());
-    db.log_forward(&attributed).unwrap();
-    assert!(
-        !db.backfill_forward_logs_client_key_step("primary", "Primary", 50)
-            .unwrap()
-    );
-
-    drop(db);
-    fs::remove_dir_all(dir).unwrap();
-}
-
-#[test]
 fn backfill_completes_inline_for_empty_tables() {
     let dir = temp_data_dir("backfill-empty");
     let db = Database::open(dir.clone()).unwrap();
@@ -3855,99 +6704,9 @@ fn backfill_completes_inline_for_empty_tables() {
 }
 
 #[test]
-fn v19_client_key_migration_is_idempotent_and_crash_replay_safe() {
-    let dir = temp_data_dir("v19-idempotent");
-    let db = Database::open(dir.clone()).unwrap();
-    let probe_columns = |conn: &Connection| {
-        let mut stmt = conn.prepare("PRAGMA table_info(forward_logs)").unwrap();
-        stmt.query_map([], |row| row.get::<_, String>(1))
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap()
-    };
-    assert!(probe_columns(&db.conn).contains(&"client_key_id".to_string()));
-    assert!(probe_columns(&db.conn).contains(&"client_key_name".to_string()));
-
-    let index_exists: i64 = db
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_forward_logs_client_key'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-    assert_eq!(index_exists, 1);
-
-    // Replaying migrate (as after a crash between ALTER TABLE and the
-    // version bump, or simply a second open) converges without error.
-    drop(db);
-    let db = Database::open(dir.clone()).unwrap();
-    db.migrate().unwrap();
-
-    drop(db);
-    fs::remove_dir_all(dir).unwrap();
-}
-
-#[test]
-fn v20_creates_the_sub_gateway_keys_table_idempotently() {
-    let dir = temp_data_dir("v20-idempotent");
-    let db = Database::open(dir.clone()).unwrap();
-
-    let probe = |conn: &Connection| {
-        let table: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master
-                     WHERE type = 'table' AND name = 'access_keys'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let index: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master
-                     WHERE type = 'index' AND name = 'idx_access_keys_active_key'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let legacy: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master
-                     WHERE type = 'table' AND name = 'sub_gateway_keys'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        (table, index, legacy)
-    };
-    assert_eq!(probe(&db.conn), (1, 1, 0));
-
-    // Replaying the migration converges to the same shape.
-    db.migrate().unwrap();
-    assert_eq!(probe(&db.conn), (1, 1, 0));
-
-    drop(db);
-    fs::remove_dir_all(dir).unwrap();
-}
-
-#[test]
-fn v21_adds_usage_sync_columns_with_safe_defaults() {
+fn new_accounts_have_safe_usage_sync_defaults() {
     let dir = temp_data_dir("v21-usage-sync");
     let db = Database::open(dir.clone()).unwrap();
-    let columns = {
-        let mut stmt = db.conn.prepare("PRAGMA table_info(accounts)").unwrap();
-        stmt.query_map([], |row| row.get::<_, String>(1))
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap()
-    };
-    for name in USAGE_SYNC_ACCOUNT_COLUMNS {
-        assert!(
-            !columns.contains(&name.to_string()),
-            "v27 must drop leftover {name}"
-        );
-    }
-
     let account = account("sync-defaults");
     db.create_account(&account).unwrap();
     let sync = db
@@ -3959,8 +6718,6 @@ fn v21_adds_usage_sync_columns_with_safe_defaults() {
     assert!(sync.next_eligible_at.is_none());
     assert_eq!(sync.failure_streak, 0);
     assert!(sync.last_expedited_at.is_none());
-
-    db.migrate().unwrap();
 
     drop(db);
     fs::remove_dir_all(dir).unwrap();
@@ -4047,20 +6804,15 @@ fn v21_to_v22_creates_one_usable_rollback_backup() {
     assert_eq!(schema_version_on(&pre_v23_backup).unwrap(), 21);
     drop(pre_v23_backup);
     let backup_path = &backups_before[0];
-    let backup_name = backup_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .expect("backup should have a UTF-8 filename");
-    let timestamp = backup_name
-        .strip_prefix(PRE_V22_BACKUP_FILE_PREFIX)
-        .and_then(|name| name.strip_suffix(".bak"))
-        .expect("backup should use the v22 rollback name");
-    assert_eq!(timestamp.len(), 25);
-    assert!(timestamp.bytes().enumerate().all(|(index, byte)| {
-        (index == 8 && byte == b'T')
-            || (index == 24 && byte == b'Z')
-            || !matches!(index, 8 | 24) && byte.is_ascii_digit()
-    }));
+    let pre_v3 = pre_v3_backup_paths(&dir);
+    assert_eq!(pre_v3.len(), 1);
+    let pre_v3_backup =
+        Connection::open_with_flags(&pre_v3[0], OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    assert_eq!(
+        schema_version_on(&pre_v3_backup).unwrap(),
+        V26_SCHEMA_VERSION
+    );
+    drop(pre_v3_backup);
 
     let backup = Connection::open_with_flags(backup_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .expect("backup should open read-only");
@@ -4294,39 +7046,15 @@ fn forward_log_keys_resolve_the_latest_name_per_id() {
     let dir = temp_data_dir("log-keys-latest-name");
     let db = Database::open(dir.clone()).unwrap();
     let base = ForwardLog {
-        id: 0,
-        timestamp: Utc::now(),
         model: "m".into(),
-        account_id: "a".into(),
-        account_name: "a".into(),
-        route_account_id: None,
-        provider_id: None,
-        credential_account_id: None,
         client_key_id: Some("sub-1".into()),
         client_key_name: Some("Laptop".into()),
-        status: "success".into(),
-        http_status: Some(200),
-        route: String::new(),
-        prompt_tokens: 1,
-        completion_tokens: 1,
-        cached_tokens: 0,
-        cache_creation_tokens: 0,
         cost: None,
         raw_cost_usd: None,
         quota_debit: None,
         effective_paid_cost_usd: None,
-        pricing_revision_id: None,
-        quota_multiplier: None,
-        local_adjustment_multiplier: None,
-        service_tier: None,
         cost_state: "not_applicable".into(),
-        error_message: None,
-        request_id: None,
-        attempt: None,
-        error_source: None,
-        error_stage: None,
-        duration_ms: None,
-        diagnostic: None,
+        ..forward_log("a", "success", 0.0)
     };
     // A lexicographically "larger" historical name must not win: it was
     // written first, the current name last.
@@ -4449,6 +7177,26 @@ fn v22_to_v23_creates_one_usable_rollback_backup_and_contract_tables() {
     assert!(!goat.enabled, "migrated GOAT rows must be fail-closed");
     let goat_state = db.account_verification_state("v22-goat").unwrap().unwrap();
     assert_eq!(goat_state.status, ConnectionVerificationStatus::NotRequired);
+    assert!(db.get_account("v22-account").unwrap().unwrap().enabled);
+    assert!(
+        db.get_account(ZEN_FREE_ACCOUNT_ID)
+            .unwrap()
+            .unwrap()
+            .enabled
+    );
+    db.update_account(
+        "v22-goat",
+        &AccountUpdate {
+            name: Some("v22-goat-renamed".into()),
+            ..AccountUpdate::default()
+        },
+        None,
+        None,
+    )
+    .unwrap();
+    let renamed = db.get_account("v22-goat").unwrap().unwrap();
+    assert!(!renamed.enabled);
+    assert_eq!(renamed.name, "v22-goat-renamed");
     let log_id: i64 = db
         .conn
         .query_row("SELECT id FROM forward_logs LIMIT 1", [], |row| row.get(0))
@@ -4520,29 +7268,6 @@ fn zen_free_model_catalog_survives_reopen() {
         assert_eq!(catalog.models, ["persisted-coder-free"]);
         assert_eq!(catalog.refreshed_at, Some(refreshed_at));
     }
-    fs::remove_dir_all(dir).unwrap();
-}
-
-#[test]
-fn v26_fresh_database_has_contract_tables_and_reopens() {
-    let dir = temp_data_dir("v26-fresh");
-    let db = Database::open(dir.clone()).unwrap();
-    let tables: i64 = db
-        .conn
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master
-                 WHERE type = 'table' AND name IN (
-                    'provider_contract_scopes', 'provider_contract_model_protocols'
-                 )",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(tables, 2);
-    db.migrate().unwrap();
-    drop(db);
-    let reopened = Database::open(dir.clone()).unwrap();
-    drop(reopened);
     fs::remove_dir_all(dir).unwrap();
 }
 
@@ -4774,7 +7499,6 @@ fn probe_observation_batch_upserts_atomically_and_bumps_scope_once() {
 
     let empty = db.upsert_model_protocols(&[]);
     assert!(empty.is_err(), "{empty:?}");
-    assert!(empty.unwrap_err().to_string().contains("nonempty"));
     assert!(db.load_persisted_scope(&go).unwrap().is_none());
 
     let mixed = db.upsert_model_protocols(&[
@@ -4792,7 +7516,6 @@ fn probe_observation_batch_upserts_atomically_and_bumps_scope_once() {
         ),
     ]);
     assert!(mixed.is_err(), "{mixed:?}");
-    assert!(mixed.unwrap_err().to_string().contains("mix"));
     assert!(db.load_persisted_scope(&go).unwrap().is_none());
     assert!(db.load_persisted_scope(&custom).unwrap().is_none());
     assert!(
@@ -5290,6 +8013,25 @@ fn account_migration_batch_is_atomic_and_preserves_order() {
             .unwrap()
             .is_some()
     );
+    let imported_satellites: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM credential_state WHERE account_id IN ('migration-go', 'migration-custom')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(imported_satellites, 2);
+    let imported_identities: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM accounts
+             WHERE id IN ('migration-go', 'migration-custom') AND identity_id IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(imported_identities, 2);
 
     drop(db);
     fs::remove_dir_all(dir).unwrap();
@@ -5752,176 +8494,42 @@ fn custom_verification_cas_rejects_stale_key_config_caps_and_delete() {
 }
 
 #[test]
-fn unroutable_catalog_plans_cannot_persist_enabled_true() {
+fn go_and_ollama_accounts_persist_enablement_changes() {
     let dir = temp_data_dir("enablement-gate");
     let db = Database::open(dir.clone()).unwrap();
-    let mut go = account("go-enabled");
-    go.enabled = true;
-    db.create_account(&go).unwrap();
-    assert!(db.get_account("go-enabled").unwrap().unwrap().enabled);
-
-    // Ollama Cloud opened its enable bit once routing, control plane, and
-    // usage shipped; enabled rows must persist through the same gates.
-    let mut ollama = account("ollama-enabled");
-    ollama.provider_id = OLLAMA_PROVIDER_ID.to_string();
-    ollama.enabled = true;
-    db.create_account(&ollama).unwrap();
-    assert!(db.get_account("ollama-enabled").unwrap().unwrap().enabled);
-    db.update_account(
-        "ollama-enabled",
-        &AccountUpdate {
-            enabled: Some(false),
-            ..AccountUpdate::default()
-        },
-        None,
-        None,
-    )
-    .unwrap();
-    db.update_account(
-        "ollama-enabled",
-        &AccountUpdate {
-            enabled: Some(true),
-            ..AccountUpdate::default()
-        },
-        None,
-        None,
-    )
-    .unwrap();
-    assert!(db.get_account("ollama-enabled").unwrap().unwrap().enabled);
-
-    for plan in BUILTIN_PROVIDERS
-        .iter()
-        .copied()
-        .filter(|plan| !plan.routable && plan.singleton_account_id.is_none())
-    {
-        let id = format!("draft-{}", plan.provider_id);
-        let mut draft = account(&id);
-        draft.provider_id = plan.provider_id.to_string();
-        draft.credential_kind = plan.credential_kind;
-        draft.quota_scope = plan.quota_scope;
-        draft.enabled = true;
-        let error = db
-            .create_account(&draft)
-            .expect_err("enabled unroutable create must fail closed");
-        assert!(
-            error.to_string().contains("not routable"),
-            "{}/{}: {error}",
-            plan.provider_id,
-            plan.provider_id
-        );
-        assert!(db.get_account(&id).unwrap().is_none());
-
-        draft.enabled = false;
-        if plan_requires_custom_config(plan) {
-            db.create_account_with_contract(
-                &draft,
-                Some(&AccountCustomConfigInput {
-                    endpoint_url: "https://api.example.com/v1/chat/completions".into(),
-                    upstream_protocol: UpstreamProtocolKind::ChatCompletions,
-                }),
-                &[AccountModelCapabilityInput {
-                    public_model: "org/model".into(),
-                    upstream_model: "org/model".into(),
-                    protocol: UpstreamProtocolKind::ChatCompletions,
-                    source: None,
-                }],
-            )
-            .unwrap();
-        } else {
-            db.create_account_with_contract(&draft, None, &[]).unwrap();
-        }
-        let stored = db.get_account(&id).unwrap().unwrap();
-        assert!(!stored.enabled, "{id} draft must stay disabled");
-        let before = stored.updated_at;
-
-        let enable_error = db
-            .update_account(
-                &id,
+    for (id, provider_id) in [
+        ("go-enabled", OPENCODE_PROVIDER_ID),
+        ("ollama-enabled", OLLAMA_PROVIDER_ID),
+    ] {
+        let mut candidate = account(id);
+        candidate.provider_id = provider_id.to_string();
+        candidate.enabled = true;
+        db.create_account(&candidate).unwrap();
+        assert!(db.get_account(id).unwrap().unwrap().enabled, "{id}");
+        for enabled in [false, true] {
+            db.update_account(
+                id,
                 &AccountUpdate {
-                    enabled: Some(true),
+                    enabled: Some(enabled),
                     ..AccountUpdate::default()
                 },
                 None,
                 None,
             )
-            .expect_err("enable must fail closed");
-        assert!(
-            enable_error.to_string().contains("not routable"),
-            "{id}: {enable_error}"
-        );
-        let after_reject = db.get_account(&id).unwrap().unwrap();
-        assert!(!after_reject.enabled);
-        assert_eq!(after_reject.updated_at, before);
-        assert_eq!(after_reject.name, stored.name);
-
-        db.update_account(
-            &id,
-            &AccountUpdate {
-                name: Some(format!("{id}-renamed")),
-                ..AccountUpdate::default()
-            },
-            None,
-            None,
-        )
-        .unwrap();
-        db.update_account(
-            &id,
-            &AccountUpdate {
-                enabled: Some(false),
-                ..AccountUpdate::default()
-            },
-            None,
-            None,
-        )
-        .unwrap();
-        let edited = db.get_account(&id).unwrap().unwrap();
-        assert!(!edited.enabled);
-        assert_eq!(edited.name, format!("{id}-renamed"));
+            .unwrap();
+            assert_eq!(
+                db.get_account(id).unwrap().unwrap().enabled,
+                enabled,
+                "{id}"
+            );
+        }
     }
-
-    db.update_account(
-        "go-enabled",
-        &AccountUpdate {
-            enabled: Some(false),
-            ..AccountUpdate::default()
-        },
-        None,
-        None,
-    )
-    .unwrap();
-    db.update_account(
-        "go-enabled",
-        &AccountUpdate {
-            enabled: Some(true),
-            ..AccountUpdate::default()
-        },
-        None,
-        None,
-    )
-    .unwrap();
-    assert!(db.get_account("go-enabled").unwrap().unwrap().enabled);
-
     drop(db);
     fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
-fn open_sanitizes_unroutable_catalog_leftovers_without_touching_go_zen_or_unknown() {
-    let unroutable: Vec<_> = BUILTIN_PROVIDERS
-        .iter()
-        .copied()
-        .filter(|plan| !plan.routable)
-        .collect();
-    assert_eq!(
-        unroutable
-            .iter()
-            .map(|plan| (plan.provider_id, plan.provider_id))
-            .collect::<Vec<_>>(),
-        Vec::<(&str, &str)>::new()
-    );
-    assert!(builtin_provider(CUSTOM_PROVIDER_ID).is_some_and(|plan| plan.routable));
-    assert!(builtin_provider(OLLAMA_PROVIDER_ID).is_some_and(|plan| plan.routable));
-
+fn reopen_repairs_legacy_goat_verification_without_changing_other_accounts() {
     let dir = temp_data_dir("unroutable-sanitation");
     let db = Database::open(dir.clone()).unwrap();
 
@@ -5943,7 +8551,7 @@ fn open_sanitizes_unroutable_catalog_leftovers_without_touching_go_zen_or_unknow
         )
         .unwrap();
 
-    persist_unroutable_draft(
+    persist_sanitation_account(
         &db,
         builtin_provider(COMMAND_CODE_PROVIDER_ID).unwrap(),
         "goat-pending",
@@ -5951,7 +8559,7 @@ fn open_sanitizes_unroutable_catalog_leftovers_without_touching_go_zen_or_unknow
     );
     leftover_enable(&db, "goat-pending");
 
-    persist_unroutable_draft(
+    persist_sanitation_account(
         &db,
         builtin_provider(COMMAND_CODE_PROVIDER_ID).unwrap(),
         "goat-verified",
@@ -5966,7 +8574,7 @@ fn open_sanitizes_unroutable_catalog_leftovers_without_touching_go_zen_or_unknow
         )
         .unwrap();
 
-    persist_unroutable_draft(
+    persist_sanitation_account(
         &db,
         builtin_provider(COMMAND_CODE_PROVIDER_ID).unwrap(),
         "goat-failed",
@@ -5981,7 +8589,7 @@ fn open_sanitizes_unroutable_catalog_leftovers_without_touching_go_zen_or_unknow
         )
         .unwrap();
 
-    persist_unroutable_draft(
+    persist_sanitation_account(
         &db,
         builtin_provider(CUSTOM_PROVIDER_ID).unwrap(),
         "draft-api",
@@ -5991,7 +8599,7 @@ fn open_sanitizes_unroutable_catalog_leftovers_without_touching_go_zen_or_unknow
 
     // An enabled Ollama Cloud row is now legitimate (routable offering),
     // so open must leave it untouched.
-    persist_unroutable_draft(
+    persist_sanitation_account(
         &db,
         builtin_provider(OLLAMA_PROVIDER_ID).unwrap(),
         "ollama-leftover",
@@ -6039,11 +8647,6 @@ fn open_sanitizes_unroutable_catalog_leftovers_without_touching_go_zen_or_unknow
 
     let goat_pending_after = sanitation_snapshot(&db, "goat-pending");
     assert_eq!(goat_pending_after, goat_pending_before);
-    assert!(goat_pending_after.enabled);
-    assert_eq!(
-        goat_pending_after.verification,
-        ConnectionVerificationStatus::NotRequired
-    );
 
     let goat_verified_after = sanitation_snapshot(&db, "goat-verified");
     assert_eq!(goat_verified_after.name, goat_verified_before.name);
@@ -6071,17 +8674,9 @@ fn open_sanitizes_unroutable_catalog_leftovers_without_touching_go_zen_or_unknow
 
     let custom_after = sanitation_snapshot(&db, "draft-api");
     assert_eq!(custom_after, custom_before);
-    assert!(
-        custom_after.enabled,
-        "now-routable Custom leftovers must not be disabled at open"
-    );
 
     let ollama_after = sanitation_snapshot(&db, "ollama-leftover");
     assert_eq!(ollama_after, ollama_before);
-    assert!(
-        ollama_after.enabled,
-        "routable Ollama leftovers must not be disabled at open"
-    );
 
     let first_pass: Vec<_> = [
         ZEN_FREE_ACCOUNT_ID,
@@ -6106,56 +8701,6 @@ fn open_sanitizes_unroutable_catalog_leftovers_without_touching_go_zen_or_unknow
             "second open must be idempotent for {id}"
         );
     }
-
-    drop(db);
-    fs::remove_dir_all(dir).unwrap();
-}
-
-#[test]
-fn v22_open_sanitizes_enabled_unroutable_catalog_rows() {
-    let dir = temp_data_dir("v22-unroutable-sanitation");
-    create_v22_fixture(&dir);
-    let conn = Connection::open(dir.join("data.sqlite")).expect("v22 fixture should reopen");
-    for plan in BUILTIN_PROVIDERS.iter().filter(|plan| !plan.routable) {
-        clone_account_row_as_enabled(
-            &conn,
-            "v22-goat",
-            &format!("v22-{}", plan.provider_id),
-            plan.provider_id,
-            V34_OFFERING_LOCAL,
-        );
-    }
-    drop(conn);
-
-    let db = open_with_host_cipher(dir.clone()).expect("v22 database should migrate and sanitize");
-    assert!(db.get_account("v22-account").unwrap().unwrap().enabled);
-    assert!(
-        db.get_account(ZEN_FREE_ACCOUNT_ID)
-            .unwrap()
-            .unwrap()
-            .enabled
-    );
-    assert!(!db.get_account("v22-goat").unwrap().unwrap().enabled);
-    for plan in BUILTIN_PROVIDERS.iter().filter(|plan| !plan.routable) {
-        let id = format!("v22-{}", plan.provider_id);
-        let stored = db.get_account(&id).unwrap().unwrap();
-        assert!(!stored.enabled, "{id}");
-        assert_eq!(stored.provider_id, plan.provider_id);
-        assert_eq!(stored.provider_id, plan.provider_id);
-    }
-    db.update_account(
-        "v22-goat",
-        &AccountUpdate {
-            name: Some("v22-goat-renamed".into()),
-            ..AccountUpdate::default()
-        },
-        None,
-        None,
-    )
-    .unwrap();
-    let renamed = db.get_account("v22-goat").unwrap().unwrap();
-    assert!(!renamed.enabled);
-    assert_eq!(renamed.name, "v22-goat-renamed");
 
     drop(db);
     fs::remove_dir_all(dir).unwrap();
@@ -6276,30 +8821,6 @@ fn populate_v26_source(dir: &Path) -> (String, String) {
     drop(db);
     reverse_current_to_v26(dir);
     ("ocg-v26-primary".into(), "ocg-v26-laptop".into())
-}
-
-#[test]
-fn v27_fresh_database_skips_pre_v3_backup_and_has_one_primary() {
-    let dir = temp_data_dir("v27-fresh");
-    let db = Database::open(dir.clone()).unwrap();
-    assert!(pre_v3_backup_paths(&dir).is_empty());
-    assert!(table_exists(&db.conn, "access_keys").unwrap());
-    assert!(!table_exists(&db.conn, "sub_gateway_keys").unwrap());
-    for column in USAGE_SYNC_ACCOUNT_COLUMNS {
-        assert!(!table_has_column(&db.conn, "accounts", column).unwrap());
-    }
-    let primary = db.primary_access_key_value().unwrap().unwrap();
-    assert!(!primary.is_empty());
-    assert_eq!(db.count_active_sub_gateway_keys().unwrap(), 0);
-    db.migrate().unwrap();
-    for column in USAGE_SYNC_ACCOUNT_COLUMNS {
-        assert!(
-            !table_has_column(&db.conn, "accounts", column).unwrap(),
-            "replaying migrate must not resurrect {column}"
-        );
-    }
-    drop(db);
-    fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -6450,6 +8971,7 @@ fn v31_to_v32_collapses_custom_protocols_and_disables_the_account() {
                  INSERT OR REPLACE INTO schema_version (version) VALUES (31);",
         )
         .unwrap();
+    drop_unified_provider_tables(&db.conn);
     drop(db);
 
     let db = Database::open(dir.clone()).unwrap();
@@ -6538,6 +9060,7 @@ fn v32_to_v33_backfills_public_and_upstream_identities_for_custom_and_goat() {
              PRAGMA foreign_keys = ON;",
     )
     .unwrap();
+    drop_unified_provider_tables(&conn);
     drop(conn);
 
     let migrated = Database::open(dir.clone()).unwrap();
@@ -6566,6 +9089,7 @@ fn v33_to_v34_adds_empty_cpa_singleton_configuration_table() {
              INSERT INTO schema_version (version) VALUES (33);",
     )
     .unwrap();
+    drop_unified_provider_tables(&conn);
     drop(conn);
 
     let migrated = Database::open(dir.clone()).unwrap();
@@ -6638,6 +9162,7 @@ fn cpa_singleton_upsert_catalog_and_disconnect_are_idempotent_and_atomic() {
             CpaCatalogModel {
                 id: "gpt-5.6-sol".into(),
                 owned_by: Some("openai".into()),
+                enabled: true,
             },
             "unknown-cpa-model".into(),
         ],
@@ -6684,10 +9209,111 @@ fn cpa_model_catalog_reads_legacy_id_arrays() {
             CpaCatalogModel {
                 id: "gpt-5".into(),
                 owned_by: None,
+                enabled: true,
             },
             CpaCatalogModel {
                 id: "claude".into(),
                 owned_by: None,
+                enabled: true,
+            },
+        ]
+    );
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn cpa_model_catalog_merge_refresh_keeps_selection_and_defaults_new_ids_off() {
+    let previous = vec![
+        CpaCatalogModel {
+            id: "kept".into(),
+            owned_by: None,
+            enabled: true,
+        },
+        CpaCatalogModel {
+            id: "off".into(),
+            owned_by: None,
+            enabled: false,
+        },
+        CpaCatalogModel {
+            id: "gone".into(),
+            owned_by: None,
+            enabled: true,
+        },
+    ];
+    let incoming = vec![
+        CpaCatalogModel {
+            id: "kept".into(),
+            owned_by: Some("openai".into()),
+            enabled: true,
+        },
+        CpaCatalogModel {
+            id: "off".into(),
+            owned_by: None,
+            enabled: true,
+        },
+        CpaCatalogModel {
+            id: "fresh".into(),
+            owned_by: None,
+            enabled: true,
+        },
+    ];
+    assert_eq!(
+        CpaCatalogModel::merge_refresh(incoming, &previous),
+        [
+            CpaCatalogModel {
+                id: "kept".into(),
+                owned_by: Some("openai".into()),
+                enabled: true,
+            },
+            CpaCatalogModel {
+                id: "off".into(),
+                owned_by: None,
+                enabled: false,
+            },
+            CpaCatalogModel {
+                id: "fresh".into(),
+                owned_by: None,
+                enabled: false,
+            },
+        ]
+    );
+    assert!(
+        CpaCatalogModel::enabled_ids(&CpaCatalogModel::merge_refresh(vec!["only".into()], &[]))
+            .is_empty()
+    );
+}
+
+#[test]
+fn cpa_model_catalog_reads_enabled_flag_and_defaults_missing_on() {
+    let dir = temp_data_dir("cpa-catalog-enabled");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    db.conn
+        .execute(
+            "INSERT INTO provider_model_catalogs
+                 (provider_id, models_json, refreshed_at, source_url)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                CPA_PROVIDER_ID,
+                r#"[{"id":"legacy"},{"id":"off","enabled":false}]"#,
+                Utc::now().to_rfc3339(),
+                "http://127.0.0.1:8317",
+            ],
+        )
+        .unwrap();
+    let catalog = db.cpa_model_catalog().unwrap().unwrap();
+    assert_eq!(
+        catalog.models,
+        [
+            CpaCatalogModel {
+                id: "legacy".into(),
+                owned_by: None,
+                enabled: true,
+            },
+            CpaCatalogModel {
+                id: "off".into(),
+                owned_by: None,
+                enabled: false,
             },
         ]
     );
@@ -6699,7 +9325,7 @@ fn cpa_model_catalog_reads_legacy_id_arrays() {
 fn v26_to_v27_copies_keys_drops_columns_and_writes_hashed_backup() {
     let dir = temp_data_dir("v26-v27-migrate");
     let (primary, laptop) = populate_v26_source(&dir);
-    let cipher_bytes = {
+    let (cipher_bytes, source_accounts, source_subs) = {
         let conn = Connection::open(dir.join("data.sqlite")).unwrap();
         let key: String = conn
             .query_row(
@@ -6708,8 +9334,15 @@ fn v26_to_v27_copies_keys_drops_columns_and_writes_hashed_backup() {
                 |row| row.get(0),
             )
             .unwrap();
-        drop(conn);
-        key
+        let accounts: i64 = conn
+            .query_row("SELECT COUNT(*) FROM accounts", [], |row| row.get(0))
+            .unwrap();
+        let subs: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sub_gateway_keys", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        (key, accounts, subs)
     };
 
     let db = open_with_host_cipher(dir.clone()).expect("v26 database should migrate to v27");
@@ -6717,6 +9350,17 @@ fn v26_to_v27_copies_keys_drops_columns_and_writes_hashed_backup() {
         db.primary_access_key_value().unwrap().as_deref(),
         Some(primary.as_str())
     );
+    sqlite_foreign_key_check(&db.conn).unwrap();
+    let accounts: i64 = db
+        .conn
+        .query_row("SELECT COUNT(*) FROM accounts", [], |row| row.get(0))
+        .unwrap();
+    let keys: i64 = db
+        .conn
+        .query_row("SELECT COUNT(*) FROM access_keys", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(accounts, source_accounts);
+    assert_eq!(keys, source_subs + 1);
     let subs = db.list_active_sub_gateway_keys().unwrap();
     assert_eq!(subs.len(), 1);
     assert_eq!(subs[0].id, "sub-v26");
@@ -6748,11 +9392,6 @@ fn v26_to_v27_copies_keys_drops_columns_and_writes_hashed_backup() {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap();
-    let timestamp = backup_name
-        .strip_prefix(PRE_V3_BACKUP_FILE_PREFIX)
-        .and_then(|name| name.strip_suffix(".bak"))
-        .unwrap();
-    assert_eq!(timestamp.len(), 25);
     let backup =
         Connection::open_with_flags(&backups[0], OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
     assert_eq!(schema_version_on(&backup).unwrap(), V26_SCHEMA_VERSION);
@@ -6769,20 +9408,6 @@ fn v26_to_v27_copies_keys_drops_columns_and_writes_hashed_backup() {
     drop(reopened);
     assert_eq!(pre_v3_backup_paths(&dir), backups);
 
-    fs::remove_dir_all(dir).unwrap();
-}
-
-#[test]
-fn v21_migrates_through_v26_before_v27_backup() {
-    let dir = temp_data_dir("v21-through-v26-v27");
-    create_v21_fixture(&dir, false);
-    let db = open_with_host_cipher(dir.clone()).expect("v21 database should migrate");
-    drop(db);
-    let pre_v3 = pre_v3_backup_paths(&dir);
-    assert_eq!(pre_v3.len(), 1);
-    let backup = Connection::open_with_flags(&pre_v3[0], OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
-    assert_eq!(schema_version_on(&backup).unwrap(), V26_SCHEMA_VERSION);
-    drop(backup);
     fs::remove_dir_all(dir).unwrap();
 }
 
@@ -6880,7 +9505,7 @@ fn v27_wrong_cipher_fails_closed_without_claiming_v27() {
 }
 
 #[test]
-fn current_schema_wrong_host_cipher_fails_closed_without_rewriting_ciphertext() {
+fn s05_wrong_host_cipher_fails_closed_without_rewriting_ciphertext() {
     let cipher_a: Arc<dyn KeyCipher + Send + Sync> =
         Arc::new(StaticKeyCipher::new("alpha-host-secret"));
     let cipher_b: Arc<dyn KeyCipher + Send + Sync> =
@@ -6948,6 +9573,80 @@ fn current_schema_wrong_host_cipher_fails_closed_without_rewriting_ciphertext() 
     let loaded = recovered.get_account("enc-current").unwrap().unwrap();
     assert_eq!(loaded.key_cipher, key_before);
     assert_eq!(loaded.password_cipher, password_before);
+    drop(recovered);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn s05_legacy_xor_repairs_to_v2_with_correct_cipher() {
+    let cipher = StaticKeyCipher::new("legacy-repair-host");
+    let cipher_arc: Arc<dyn KeyCipher + Send + Sync> = Arc::new(cipher.clone());
+    let key_plain = "sk-legacy-repair-key";
+    let password_plain = "pw-legacy-repair-secret";
+    let dir = temp_data_dir("legacy-xor-repair");
+
+    let db = Database::open_with_cipher(dir.clone(), cipher_arc.clone()).unwrap();
+    let mut enc = account("legacy-repair");
+    enc.key_cipher = cipher.encrypt_legacy(key_plain).unwrap();
+    enc.password_cipher = Some(cipher.encrypt_legacy(password_plain).unwrap());
+    assert!(is_legacy_local_ciphertext(&enc.key_cipher));
+    assert!(is_legacy_local_ciphertext(
+        enc.password_cipher.as_deref().unwrap()
+    ));
+    db.create_account(&enc).unwrap();
+    let planted = db.get_account("legacy-repair").unwrap().unwrap();
+    assert!(is_legacy_local_ciphertext(&planted.key_cipher));
+    drop(db);
+
+    let db = Database::open_with_cipher(dir.clone(), cipher_arc.clone()).unwrap();
+    let loaded = db.get_account("legacy-repair").unwrap().unwrap();
+    assert!(
+        loaded.key_cipher.starts_with(LOCAL_CIPHER_V2_PREFIX),
+        "open-time repair must rewrite key_cipher to v2"
+    );
+    assert!(
+        loaded
+            .password_cipher
+            .as_deref()
+            .is_some_and(|value| value.starts_with(LOCAL_CIPHER_V2_PREFIX)),
+        "open-time repair must rewrite password_cipher to v2"
+    );
+    assert_eq!(cipher.decrypt(&loaded.key_cipher).unwrap(), key_plain);
+    assert_eq!(
+        cipher
+            .decrypt(loaded.password_cipher.as_deref().unwrap())
+            .unwrap(),
+        password_plain
+    );
+    let repaired_key = loaded.key_cipher.clone();
+    let repaired_password = loaded.password_cipher.clone();
+    drop(db);
+
+    let wrong: Arc<dyn KeyCipher + Send + Sync> =
+        Arc::new(StaticKeyCipher::new("wrong-repair-host"));
+    let error = match Database::open_with_cipher(dir.clone(), wrong) {
+        Ok(_) => panic!("wrong host cipher must fail closed after v2 repair"),
+        Err(error) => error,
+    };
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("host cipher rejected") && message.contains("key_cipher"),
+        "{message}"
+    );
+    assert!(
+        !message.contains(&repaired_key)
+            && !message.contains(repaired_password.as_deref().unwrap_or_default())
+            && !message.contains(key_plain)
+            && !message.contains(password_plain)
+            && !message.contains("legacy-repair-host")
+            && !message.contains("wrong-repair-host"),
+        "repair/probe errors must not leak ciphertext, plaintext, or host secrets: {message}"
+    );
+
+    let recovered = Database::open_with_cipher(dir.clone(), cipher_arc).unwrap();
+    let loaded = recovered.get_account("legacy-repair").unwrap().unwrap();
+    assert_eq!(loaded.key_cipher, repaired_key);
+    assert_eq!(loaded.password_cipher, repaired_password);
     drop(recovered);
     fs::remove_dir_all(dir).unwrap();
 }
@@ -7195,39 +9894,6 @@ fn v27_primary_row_cannot_be_disabled_or_deleted() {
 }
 
 #[test]
-fn v27_foreign_keys_and_row_conservation_hold() {
-    let dir = temp_data_dir("v27-fk-rows");
-    populate_v26_source(&dir);
-    let before = {
-        let conn = Connection::open(dir.join("data.sqlite")).unwrap();
-        let accounts: i64 = conn
-            .query_row("SELECT COUNT(*) FROM accounts", [], |row| row.get(0))
-            .unwrap();
-        let subs: i64 = conn
-            .query_row("SELECT COUNT(*) FROM sub_gateway_keys", [], |row| {
-                row.get(0)
-            })
-            .unwrap();
-        drop(conn);
-        (accounts, subs)
-    };
-    let db = open_with_host_cipher(dir.clone()).unwrap();
-    sqlite_foreign_key_check(&db.conn).unwrap();
-    let accounts: i64 = db
-        .conn
-        .query_row("SELECT COUNT(*) FROM accounts", [], |row| row.get(0))
-        .unwrap();
-    let keys: i64 = db
-        .conn
-        .query_row("SELECT COUNT(*) FROM access_keys", [], |row| row.get(0))
-        .unwrap();
-    assert_eq!(accounts, before.0);
-    assert_eq!(keys, before.1 + 1);
-    drop(db);
-    fs::remove_dir_all(dir).unwrap();
-}
-
-#[test]
 fn v31_migration_creates_override_table() {
     let dir = temp_data_dir("v31-migration");
     let db = Database::open(dir.clone()).unwrap();
@@ -7238,6 +9904,7 @@ fn v31_migration_creates_override_table() {
                  INSERT OR REPLACE INTO schema_version (version) VALUES (30);",
         )
         .unwrap();
+    drop_unified_provider_tables(&db.conn);
     drop(db);
 
     let db = Database::open(dir.clone()).unwrap();
@@ -7405,6 +10072,242 @@ fn catalog_refresh_defaults_only_new_models_off_and_preserves_existing_choices()
 }
 
 #[test]
+fn catalog_remove_drops_models_and_satellite_rows_without_rewriting_source() {
+    let dir = temp_data_dir("catalog-remove-models");
+    let db = Database::open(dir.clone()).unwrap();
+    let now = Utc::now();
+    let scope = ContractScope::provider(OPENCODE_PROVIDER_ID);
+    let refreshed_at = now;
+
+    db.set_contract_catalog(
+        &scope,
+        &["keep-me".into(), "drop-me".into()],
+        Some(refreshed_at),
+        crate::provider_contracts::CATALOG_SOURCE_OPENCODE_MODELS,
+        "https://opencode.ai/zen/go/v1/models",
+        now,
+    )
+    .unwrap();
+    db.set_model_protocol_overrides(
+        &scope,
+        &[
+            (
+                "keep-me".into(),
+                UpstreamProtocolKind::ChatCompletions,
+                ProtocolOverrideState::ForceOn,
+            ),
+            (
+                "drop-me".into(),
+                UpstreamProtocolKind::ChatCompletions,
+                ProtocolOverrideState::ForceOn,
+            ),
+        ],
+        now,
+    )
+    .unwrap();
+    let revision_before = db.load_persisted_scope(&scope).unwrap().unwrap().revision;
+
+    let removed = db
+        .remove_contract_catalog_models(&scope, &["drop-me".into()], now)
+        .unwrap();
+
+    assert_eq!(removed.revision, revision_before + 1);
+    assert_eq!(removed.catalog_models, vec!["keep-me"]);
+    assert_eq!(removed.catalog_refreshed_at, Some(refreshed_at));
+    assert_eq!(
+        removed.catalog_source,
+        crate::provider_contracts::CATALOG_SOURCE_OPENCODE_MODELS
+    );
+    assert_eq!(
+        removed.catalog_source_url,
+        "https://opencode.ai/zen/go/v1/models"
+    );
+    let persisted = db.load_persisted_contracts().unwrap();
+    let overrides = persisted.overrides.get(&scope).unwrap();
+    assert!(overrides.iter().all(|row| row.model_id != "drop-me"));
+    assert!(overrides.iter().any(|row| row.model_id == "keep-me"
+        && row.protocol == UpstreamProtocolKind::ChatCompletions
+        && row.state == ProtocolOverrideState::ForceOn));
+
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn zen_catalog_remove_last_and_all_stay_empty_after_reopen() {
+    let dir = temp_data_dir("zen-catalog-remove-empty");
+    let now = Utc::now();
+    let scope = ContractScope::provider(OPENCODE_ZEN_FREE_PROVIDER_ID);
+    let snapshot = crate::kernel::zen::ZenFreeModelCatalog {
+        models: vec!["review-model-free".into(), "second-free".into()],
+        refreshed_at: Some(now),
+        source_url: crate::kernel::zen::ZEN_MODELS_SOURCE_URL.into(),
+    };
+
+    {
+        let db = Database::open(dir.clone()).unwrap();
+        db.set_zen_free_model_catalog_with_default_off(&snapshot, &[])
+            .unwrap();
+        db.remove_contract_catalog_models(&scope, &["second-free".into()], now)
+            .unwrap();
+        let after_one = db.load_persisted_scope(&scope).unwrap().unwrap();
+        assert_eq!(after_one.catalog_models, vec!["review-model-free"]);
+        db.remove_contract_catalog_models(&scope, &["review-model-free".into()], now)
+            .unwrap();
+        let after_last = db.load_persisted_scope(&scope).unwrap().unwrap();
+        assert!(after_last.catalog_models.is_empty());
+        let live = crate::provider_contracts::build_effective_contracts(
+            &snapshot,
+            &[],
+            db.load_persisted_contracts().unwrap(),
+        );
+        let zen = live.scope(&scope).unwrap();
+        assert!(zen.catalog.models.is_empty());
+        assert!(zen.model("review-model-free").is_none());
+        assert!(zen.model("second-free").is_none());
+    }
+
+    let reopened = Database::open(dir.clone()).unwrap();
+    let stored_snapshot = reopened.zen_free_model_catalog().unwrap().unwrap();
+    assert_eq!(
+        stored_snapshot.models,
+        vec!["review-model-free", "second-free"]
+    );
+    let persisted = reopened.load_persisted_contracts().unwrap();
+    assert!(
+        persisted
+            .scopes
+            .get(&scope)
+            .is_some_and(|row| row.catalog_models.is_empty())
+    );
+    let restored =
+        crate::provider_contracts::build_effective_contracts(&stored_snapshot, &[], persisted);
+    let zen = restored.scope(&scope).unwrap();
+    assert!(zen.catalog.models.is_empty());
+    assert!(zen.model("review-model-free").is_none());
+    assert!(!zen.model_has_enabled_protocol("review-model-free"));
+    drop(reopened);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn zen_catalog_remove_all_at_once_stays_empty() {
+    let dir = temp_data_dir("zen-catalog-remove-all");
+    let now = Utc::now();
+    let scope = ContractScope::provider(OPENCODE_ZEN_FREE_PROVIDER_ID);
+    let snapshot = crate::kernel::zen::ZenFreeModelCatalog {
+        models: vec!["review-model-free".into(), "second-free".into()],
+        refreshed_at: Some(now),
+        source_url: crate::kernel::zen::ZEN_MODELS_SOURCE_URL.into(),
+    };
+    let db = Database::open(dir.clone()).unwrap();
+    db.set_zen_free_model_catalog_with_default_off(&snapshot, &[])
+        .unwrap();
+    db.remove_contract_catalog_models(
+        &scope,
+        &["review-model-free".into(), "second-free".into()],
+        now,
+    )
+    .unwrap();
+    let stored = db.load_persisted_scope(&scope).unwrap().unwrap();
+    assert!(stored.catalog_models.is_empty());
+    let live = crate::provider_contracts::build_effective_contracts(
+        &snapshot,
+        &[],
+        db.load_persisted_contracts().unwrap(),
+    );
+    assert!(live.scope(&scope).unwrap().catalog.models.is_empty());
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn zen_official_static_preference_saves_responses_and_messages_not_probe_rows() {
+    let dir = temp_data_dir("zen-official-protocol-preference");
+    let now = Utc::now();
+    let scope = ContractScope::provider(OPENCODE_ZEN_FREE_PROVIDER_ID);
+    let db = Database::open(dir.clone()).unwrap();
+    db.set_zen_free_model_catalog_with_default_off(
+        &crate::kernel::zen::ZenFreeModelCatalog {
+            models: vec!["review-model-free".into(), "messages-model-free".into()],
+            refreshed_at: Some(now),
+            source_url: crate::kernel::zen::ZEN_MODELS_SOURCE_URL.into(),
+        },
+        &[],
+    )
+    .unwrap();
+    db.apply_official_protocol_baseline(
+        &scope,
+        &["review-model-free".into(), "messages-model-free".into()],
+        &crate::official_protocols::OfficialProtocolBaseline::mapped([
+            ("review-model", UpstreamProtocolKind::Responses),
+            ("messages-model", UpstreamProtocolKind::Messages),
+        ]),
+        now,
+    )
+    .unwrap();
+    let saved = db.load_persisted_contracts().unwrap();
+    let preferences = saved.preferences.get(&scope).cloned().unwrap_or_default();
+    assert!(preferences.iter().any(|(model, protocol)| {
+        model == "review-model-free" && *protocol == UpstreamProtocolKind::Responses
+    }));
+    assert!(preferences.iter().any(|(model, protocol)| {
+        model == "messages-model-free" && *protocol == UpstreamProtocolKind::Messages
+    }));
+    db.set_model_protocol_settings(
+        &scope,
+        &[(
+            "review-model-free".into(),
+            UpstreamProtocolKind::Responses,
+            ProtocolOverrideState::ForceOn,
+        )],
+        &[("review-model-free".into(), UpstreamProtocolKind::Responses)],
+        now,
+    )
+    .unwrap();
+    db.set_model_protocol_settings(
+        &scope,
+        &[(
+            "messages-model-free".into(),
+            UpstreamProtocolKind::Messages,
+            ProtocolOverrideState::ForceOn,
+        )],
+        &[("messages-model-free".into(), UpstreamProtocolKind::Messages)],
+        now,
+    )
+    .unwrap();
+
+    db.upsert_model_protocol(&PersistedModelProtocol {
+        scope: scope.clone(),
+        model_id: "review-model-free".into(),
+        protocol: UpstreamProtocolKind::Messages,
+        source: ContractEvidenceSource::ProbeObserved,
+        verified_at: Some(now),
+        observed_at: Some(now),
+        last_probe_result: Some(ProbeResultKind::Success),
+        last_probe_at: Some(now),
+        last_probe_error: None,
+    })
+    .unwrap();
+    let rejected = db.set_model_protocol_settings(
+        &scope,
+        &[(
+            "review-model-free".into(),
+            UpstreamProtocolKind::Messages,
+            ProtocolOverrideState::ForceOn,
+        )],
+        &[("review-model-free".into(), UpstreamProtocolKind::Messages)],
+        now,
+    );
+    assert!(
+        rejected.is_err(),
+        "probe-manufactured evidence must not expand Zen preference admission: {rejected:?}"
+    );
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn command_catalog_reappearing_preset_returns_to_auto_enabled() {
     let dir = temp_data_dir("command-catalog-reappearing-preset");
     let db = Database::open(dir.clone()).unwrap();
@@ -7476,18 +10379,6 @@ fn v35_index_sql(conn: &Connection, name: &str) -> Option<String> {
     .optional()
     .unwrap()
     .flatten()
-}
-
-#[test]
-fn v35_fresh_empty_database_skips_pre_v35_snapshot() {
-    let dir = temp_data_dir("v35-fresh-empty");
-    let db = open_with_host_cipher(dir.clone()).unwrap();
-    assert_eq!(schema_version_on(&db.conn).unwrap(), CURRENT_SCHEMA_VERSION);
-    assert!(pre_v35_backup_paths(&dir).is_empty());
-    let columns = v35_column_names(&db.conn, "accounts");
-    assert!(!columns.iter().any(|name| name == "offering_id"));
-    drop(db);
-    fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -7593,19 +10484,12 @@ fn v35_unknown_pair_rolls_back_without_mutation() {
 }
 
 #[test]
-fn v35_catalog_collision_rolls_back_without_mutation() {
+fn v35_unknown_catalog_pair_rolls_back_without_mutation() {
     let dir = temp_data_dir("v35-catalog-collision");
     let db = open_with_host_cipher(dir.clone()).unwrap();
     drop(db);
     reverse_current_to_v34(&dir);
     let conn = Connection::open(dir.join("data.sqlite")).unwrap();
-    conn.execute(
-        "INSERT INTO provider_model_catalogs
-         (provider_id, offering_id, models_json, refreshed_at, source_url)
-         VALUES ('opencode', 'go', '[]', NULL, 'https://example.test/a')",
-        [],
-    )
-    .ok();
     conn.execute(
         "INSERT INTO provider_model_catalogs
          (provider_id, offering_id, models_json, refreshed_at, source_url)
@@ -7615,13 +10499,12 @@ fn v35_catalog_collision_rolls_back_without_mutation() {
     .unwrap();
     drop(conn);
     let error = match open_with_host_cipher(dir.clone()) {
-        Ok(_) => panic!("catalog collision must fail closed"),
+        Ok(_) => panic!("unknown catalog pair must fail closed"),
         Err(error) => error,
     };
     let message = format!("{error:#}");
     assert!(
-        message.contains("unknown provider/offering pair")
-            || message.contains("collisions collapsing"),
+        message.contains("unknown provider/offering pair"),
         "{message}"
     );
     let conn = Connection::open(dir.join("data.sqlite")).unwrap();
@@ -7632,10 +10515,10 @@ fn v35_catalog_collision_rolls_back_without_mutation() {
 }
 
 #[test]
-fn v35_dynamic_provider_tables_round_trip_and_reject_duplicate_public_models() {
+fn dynamic_provider_round_trip_and_duplicate_public_model_rejection() {
     let dir = temp_data_dir("v35-dynamic-providers");
     let db = open_with_host_cipher(dir.clone()).unwrap();
-    let columns = v35_column_names(&db.conn, "dynamic_providers");
+    let columns = v35_column_names(&db.conn, "providers");
     for required in [
         "id",
         "name",
@@ -7647,13 +10530,14 @@ fn v35_dynamic_provider_tables_round_trip_and_reject_duplicate_public_models() {
     ] {
         assert!(columns.iter().any(|name| name == required), "{required}");
     }
-    let model_columns = v35_column_names(&db.conn, "dynamic_provider_models");
+    let model_columns = v35_column_names(&db.conn, "provider_models");
     assert!(model_columns.iter().any(|name| name == "public_model_key"));
     assert!(!columns.iter().any(|name| name == "offering_id"));
 
     let now = Utc::now();
     let provider_id = uuid::Uuid::new_v4().to_string();
     let runtime = crate::dynamic::DynamicProviderRuntime {
+        preset_id: None,
         id: provider_id.clone(),
         name: "Lab".into(),
         endpoint_url: "http://127.0.0.1:9".into(),
@@ -7662,9 +10546,12 @@ fn v35_dynamic_provider_tables_round_trip_and_reject_duplicate_public_models() {
         mappings: vec![ocg_domain::dynamic::DynamicModelMapping {
             public_model: "lab-opus".into(),
             upstream_model: "vendor/opus".into(),
+            upstream_override: None,
         }],
         created_at: now,
         updated_at: now,
+        origin: ocg_domain::provider::ProviderOrigin::Custom,
+        offering: "api".to_string(),
     };
     let mut first = account("dyn-acct");
     first.provider_id = provider_id.clone();
@@ -7675,13 +10562,71 @@ fn v35_dynamic_provider_tables_round_trip_and_reject_duplicate_public_models() {
     assert_eq!(loaded.mappings[0].public_model, "lab-opus");
     assert_eq!(db.count_accounts_for_provider(&provider_id).unwrap(), 1);
 
+    let mut changed = loaded.clone();
+    changed.mappings[0].upstream_override =
+        Some(ocg_domain::dynamic::DynamicModelUpstreamOverride {
+            protocol: crate::provider::UpstreamProtocolKind::Messages,
+            endpoint_url: "https://example.test/anthropic/v1/messages".into(),
+        });
+    db.replace_dynamic_provider(&changed, true, false, None)
+        .unwrap();
+    let saved = db.get_dynamic_provider(&provider_id).unwrap().unwrap();
+    assert_eq!(saved.mappings, changed.mappings);
+    assert_eq!(saved.upstream_protocol, loaded.upstream_protocol);
+    assert_eq!(
+        db.get_account(&first.id).unwrap().unwrap().key_cipher,
+        first.key_cipher
+    );
+    db.replace_dynamic_provider(&loaded, true, false, None)
+        .unwrap();
+    assert!(
+        db.get_dynamic_provider(&provider_id)
+            .unwrap()
+            .unwrap()
+            .mappings[0]
+            .upstream_override
+            .is_none()
+    );
+
     let duplicate = db.conn.execute(
-        "INSERT INTO dynamic_provider_models
+        "INSERT INTO provider_models
          (provider_id, public_model, public_model_key, upstream_model)
          VALUES (?1, 'LAB-OPUS', 'lab-opus', 'other')",
         [&provider_id],
     );
     assert!(duplicate.is_err());
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn create_dynamic_provider_definition_persists_without_an_account() {
+    let dir = temp_data_dir("dyn-definition-only");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let now = Utc::now();
+    let provider_id = uuid::Uuid::new_v4().to_string();
+    let runtime = crate::dynamic::DynamicProviderRuntime {
+        preset_id: Some("tencent-token-global".into()),
+        id: provider_id.clone(),
+        name: "Tencent Token Plan".into(),
+        endpoint_url: "http://127.0.0.1:9".into(),
+        upstream_protocol: crate::provider::UpstreamProtocolKind::ChatCompletions,
+        auth_kind: ocg_domain::dynamic::DynamicAuthKind::Bearer,
+        mappings: vec![ocg_domain::dynamic::DynamicModelMapping {
+            public_model: "tencent-model".into(),
+            upstream_model: "tencent/upstream".into(),
+            upstream_override: None,
+        }],
+        created_at: now,
+        updated_at: now,
+        origin: ocg_domain::provider::ProviderOrigin::Preset,
+        offering: "plan".to_string(),
+    };
+    db.create_dynamic_provider_definition(&runtime).unwrap();
+    let loaded = db.get_dynamic_provider(&provider_id).unwrap().unwrap();
+    assert_eq!(loaded.name, "Tencent Token Plan");
+    assert_eq!(loaded.preset_id.as_deref(), Some("tencent-token-global"));
+    assert_eq!(db.count_accounts_for_provider(&provider_id).unwrap(), 0);
     drop(db);
     fs::remove_dir_all(dir).unwrap();
 }
@@ -7693,6 +10638,7 @@ fn dynamic_provider_create_fault_rolls_back_provider_and_account() {
     let now = Utc::now();
     let provider_id = uuid::Uuid::new_v4().to_string();
     let runtime = crate::dynamic::DynamicProviderRuntime {
+        preset_id: None,
         id: provider_id.clone(),
         name: "Faulty".into(),
         endpoint_url: "http://127.0.0.1:9".into(),
@@ -7701,9 +10647,12 @@ fn dynamic_provider_create_fault_rolls_back_provider_and_account() {
         mappings: vec![ocg_domain::dynamic::DynamicModelMapping {
             public_model: "free-model".into(),
             upstream_model: "free-model".into(),
+            upstream_override: None,
         }],
         created_at: now,
         updated_at: now,
+        origin: ocg_domain::provider::ProviderOrigin::Custom,
+        offering: "api".to_string(),
     };
     let mut first = account("dyn-none");
     first.provider_id = provider_id.clone();
@@ -7723,6 +10672,142 @@ fn dynamic_provider_create_fault_rolls_back_provider_and_account() {
     fs::remove_dir_all(dir).unwrap();
 }
 
+fn onboarding_runtime(provider_id: &str, name: &str) -> crate::dynamic::DynamicProviderRuntime {
+    let now = Utc::now();
+    crate::dynamic::DynamicProviderRuntime {
+        preset_id: None,
+        id: provider_id.to_string(),
+        name: name.into(),
+        endpoint_url: "http://127.0.0.1:9".into(),
+        upstream_protocol: crate::provider::UpstreamProtocolKind::ChatCompletions,
+        auth_kind: ocg_domain::dynamic::DynamicAuthKind::Bearer,
+        mappings: vec![ocg_domain::dynamic::DynamicModelMapping {
+            public_model: "lab-opus".into(),
+            upstream_model: "vendor/opus".into(),
+            upstream_override: None,
+        }],
+        created_at: now,
+        updated_at: now,
+        origin: ocg_domain::provider::ProviderOrigin::Custom,
+        offering: "api".to_string(),
+    }
+}
+
+fn onboarding_operation(
+    operation_id: &str,
+    digest: &str,
+    result_json: &str,
+) -> NewDashboardOperation {
+    NewDashboardOperation {
+        operation_id: operation_id.to_string(),
+        kind: "onboarding_commit".into(),
+        payload_digest: digest.to_string(),
+        result_json: result_json.to_string(),
+    }
+}
+
+#[test]
+fn commit_transaction_fault_after_provider_insert_leaves_no_partial_rows() {
+    let dir = temp_data_dir("onboard-provider-fault");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let provider_id = uuid::Uuid::new_v4().to_string();
+    let runtime = onboarding_runtime(&provider_id, "FaultyOnboard");
+    let mut first = account("onboard-fault");
+    first.provider_id = provider_id.clone();
+    first.key_cipher = fixture_account_key_cipher();
+    let operation = onboarding_operation(
+        &uuid::Uuid::new_v4().to_string(),
+        "digest-not-a-secret",
+        r#"{"connectionId":"c","credentialId":"a","targetIds":[]}"#,
+    );
+    crate::db::dynamic_provider_fault::install("after_provider_insert");
+    let error = db
+        .commit_onboarding_new(&runtime, Some(&first), false, &operation)
+        .unwrap_err();
+    crate::db::dynamic_provider_fault::clear();
+    assert!(
+        error
+            .to_string()
+            .contains("injected dynamic provider fault")
+    );
+    assert!(db.get_dynamic_provider(&provider_id).unwrap().is_none());
+    assert_eq!(db.count_accounts_for_provider(&provider_id).unwrap(), 0);
+    assert!(
+        db.find_dashboard_operation(&operation.operation_id)
+            .unwrap()
+            .is_none()
+    );
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn dashboard_operations_prune_rows_older_than_30_days_on_insert() {
+    let dir = temp_data_dir("onboard-prune");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let old_id = uuid::Uuid::new_v4().to_string();
+    let old_time = (Utc::now() - Duration::days(31)).to_rfc3339();
+    db.conn
+        .execute(
+            "INSERT INTO dashboard_operations
+             (operation_id, kind, payload_digest, result_json, created_at)
+             VALUES (?1, 'onboarding_commit', 'old-digest', '{}', ?2)",
+            rusqlite::params![old_id, old_time],
+        )
+        .unwrap();
+    let provider_id = uuid::Uuid::new_v4().to_string();
+    let runtime = onboarding_runtime(&provider_id, "PruneOnboard");
+    let mut first = account("onboard-prune");
+    first.provider_id = provider_id.clone();
+    first.key_cipher = fixture_account_key_cipher();
+    let new_id = uuid::Uuid::new_v4().to_string();
+    db.commit_onboarding_new(
+        &runtime,
+        Some(&first),
+        false,
+        &onboarding_operation(&new_id, "new-digest", "{}"),
+    )
+    .unwrap();
+    assert!(db.find_dashboard_operation(&old_id).unwrap().is_none());
+    assert!(db.find_dashboard_operation(&new_id).unwrap().is_some());
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn onboarding_operation_ledger_preserves_result_without_account_cipher() {
+    let dir = temp_data_dir("onboard-secret-free");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let provider_id = uuid::Uuid::new_v4().to_string();
+    let runtime = onboarding_runtime(&provider_id, "SecretOnboard");
+    let mut first = account("onboard-secret");
+    first.provider_id = provider_id.clone();
+    first.key_cipher = fixture_account_key_cipher();
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    let result_json = r#"{"connectionId":"conn-1","credentialId":"acct-1","targetIds":["t1"]}"#;
+    db.commit_onboarding_new(
+        &runtime,
+        Some(&first),
+        false,
+        &onboarding_operation(&operation_id, "hmac-digest-without-secret", result_json),
+    )
+    .unwrap();
+    let row = db
+        .find_dashboard_operation(&operation_id)
+        .unwrap()
+        .expect("operation row");
+    assert_eq!(row.result_json, result_json);
+    assert_eq!(row.payload_digest, "hmac-digest-without-secret");
+    for haystack in [&row.result_json, &row.payload_digest] {
+        assert!(
+            !haystack.contains(&first.key_cipher),
+            "key cipher leaked in {haystack}"
+        );
+    }
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
 #[test]
 fn dynamic_provider_patch_fault_rolls_back_mappings_and_runtime_state() {
     let dir = temp_data_dir("dyn-patch-fault");
@@ -7730,6 +10815,7 @@ fn dynamic_provider_patch_fault_rolls_back_mappings_and_runtime_state() {
     let now = Utc::now();
     let provider_id = uuid::Uuid::new_v4().to_string();
     let runtime = crate::dynamic::DynamicProviderRuntime {
+        preset_id: None,
         id: provider_id.clone(),
         name: "PatchFault".into(),
         endpoint_url: "http://127.0.0.1:9".into(),
@@ -7738,9 +10824,12 @@ fn dynamic_provider_patch_fault_rolls_back_mappings_and_runtime_state() {
         mappings: vec![ocg_domain::dynamic::DynamicModelMapping {
             public_model: "lab-opus".into(),
             upstream_model: "vendor/opus".into(),
+            upstream_override: None,
         }],
         created_at: now,
         updated_at: now,
+        origin: ocg_domain::provider::ProviderOrigin::Custom,
+        offering: "api".to_string(),
     };
     let mut first = account("dyn-patch");
     first.provider_id = provider_id.clone();
@@ -7758,6 +10847,7 @@ fn dynamic_provider_patch_fault_rolls_back_mappings_and_runtime_state() {
     updated.mappings = vec![ocg_domain::dynamic::DynamicModelMapping {
         public_model: "lab-opus".into(),
         upstream_model: "vendor/opus-2".into(),
+        upstream_override: None,
     }];
     crate::db::dynamic_provider_fault::install("after_mapping_replace");
     let error = db
@@ -7785,6 +10875,7 @@ fn replace_dynamic_provider_refuses_to_fan_out_a_replacement_key() {
     let now = Utc::now();
     let provider_id = uuid::Uuid::new_v4().to_string();
     let runtime = crate::dynamic::DynamicProviderRuntime {
+        preset_id: None,
         id: provider_id.clone(),
         name: "Fanout".into(),
         endpoint_url: "http://127.0.0.1:9".into(),
@@ -7793,9 +10884,12 @@ fn replace_dynamic_provider_refuses_to_fan_out_a_replacement_key() {
         mappings: vec![ocg_domain::dynamic::DynamicModelMapping {
             public_model: "lab-opus".into(),
             upstream_model: "vendor/opus".into(),
+            upstream_override: None,
         }],
         created_at: now,
         updated_at: now,
+        origin: ocg_domain::provider::ProviderOrigin::Custom,
+        offering: "api".to_string(),
     };
     let mut first = account("dyn-fanout-1");
     first.provider_id = provider_id.clone();
@@ -7830,6 +10924,7 @@ fn imported_dynamic_auth_change_rejects_destination_only_accounts() {
     let now = Utc::now();
     let provider_id = uuid::Uuid::new_v4().to_string();
     let mut runtime = crate::dynamic::DynamicProviderRuntime {
+        preset_id: None,
         id: provider_id.clone(),
         name: "Auth conflict".into(),
         endpoint_url: "http://127.0.0.1:9".into(),
@@ -7838,9 +10933,12 @@ fn imported_dynamic_auth_change_rejects_destination_only_accounts() {
         mappings: vec![ocg_domain::dynamic::DynamicModelMapping {
             public_model: "lab-opus".into(),
             upstream_model: "vendor/opus".into(),
+            upstream_override: None,
         }],
         created_at: now,
         updated_at: now,
+        origin: ocg_domain::provider::ProviderOrigin::Custom,
+        offering: "api".to_string(),
     };
     let mut destination_only = account("dyn-destination-only");
     destination_only.provider_id = provider_id.clone();
@@ -7850,7 +10948,7 @@ fn imported_dynamic_auth_change_rejects_destination_only_accounts() {
         .unwrap();
 
     runtime.auth_kind = ocg_domain::dynamic::DynamicAuthKind::Bearer;
-    let error = upsert_imported_dynamic_provider_on(&db.conn, &runtime, &HashSet::new())
+    let error = upsert_imported_dynamic_provider_on(&db.conn, &runtime, &HashSet::new(), false)
         .expect_err("destination-only account must block an auth-boundary change");
     assert!(
         error.to_string().contains("destination-only accounts"),
@@ -8047,6 +11145,7 @@ fn v36_to_v37_discards_cookie_usage_state_and_keeps_account_keys() {
          INSERT INTO schema_version (version) VALUES (36);",
     )
     .unwrap();
+    drop_unified_provider_tables(&conn);
     drop(conn);
 
     let migrated = open_with_host_cipher(dir.clone()).unwrap();

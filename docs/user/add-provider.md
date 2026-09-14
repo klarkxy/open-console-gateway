@@ -6,20 +6,23 @@ Use this guide when you want Open Console Gateway to route to another upstream s
 
 | Goal | Path | Repository change |
 | --- | --- | --- |
-| Add a named Provider this node can reuse across accounts | **Providers** → **New Provider** (user-defined) | No |
+| Add a named Provider this node can reuse across accounts | **Providers** → **Add Provider** (user-defined) | No |
 | Connect one OpenAI- or Anthropic-compatible endpoint on a single account | Add a **Custom API** account | No |
 | Ship a named built-in Provider (the product's Provider/Plan identity) to every Open Console Gateway user | Add a sealed built-in Provider | Yes, reviewed code and tests |
 
 The **Adapter Registry** stays static and sealed. User-defined Providers are typed persisted definitions; every one binds the code-owned Configurable HTTP adapter. OCG never loads user scripts, plugins, or binaries. Unknown `provider_id` values fail closed unless they match a saved definition. Custom API remains a distinct account-owned path: it keeps Endpoint, protocol, and model mappings on the account card.
 
-## Create a user-defined Provider
+## Create from a preset
 
-1. Open **Providers** and choose **New Provider**.
+Choose a [Plan or API preset](provider-presets.md) in **Accounts → Add account** to create the Provider and its first Key together (a Key is required), or in **Providers → Add Provider** to save the connection with an optional Key. Fixed-address presets already set protocol, authentication, endpoint and a default chat model. Optional settings expose names and models. Azure and Bedrock also need their customer-specific address and model/deployment information. Switching presets clears the previous Key and mappings, then supplies the new preset's default model. On **Providers**, the Key is optional; on **Accounts**, a preset still requires a Key. Save from either entry commits through `POST /dashboard/api/v4/onboarding/commit`.
+
+## Create a user-defined Provider manually
+
+1. Open **Providers**, choose **Add Provider** in the rail footer, then pick
+   **Manual setup** in the preset browser.
 2. Enter a name, one API Endpoint, one upstream protocol (Chat Completions, Responses, or Messages), and one auth kind (Bearer, `x-api-key`, or none).
-3. Add at least one public-model → exact-upstream-ID mapping. **Fetch models** is optional and does not save.
-4. If auth requires a Key, enter the first account name and a write-only Key. A no-auth Provider creates one singleton account without a Key.
-5. **Test model** is optional. Confirm the warning first: a real test can consume upstream quota or incur charges.
-6. Save. The write is one atomic `POST /providers` and does not require a successful probe.
+3. Add at least one public-model → exact-upstream-ID mapping. **Fetch models** and **Test model** stay on this form but need a Key; for keyed auth they remain disabled until you enter one.
+4. Save. Keyed auth may include an optional Key: filling it creates the first account in the same write; leaving it empty saves the definition only (shown as **Missing credential** until you use **Add Key**). A no-auth Provider creates one singleton account without a Key. The write goes through `POST /dashboard/api/v4/onboarding/commit` and does not require a successful probe. If the network drops before a response, the dashboard retries the same commit automatically; saving the unchanged draft again replays the stored result instead of creating a second Provider.
 
 Edit replaces the whole Provider configuration through `PATCH /providers/{id}`. The Provider id is immutable. Changing no-auth to keyed auth requires an explicit replacement Key, written only to that singleton account. An already-keyed Provider rejects any Key on the Provider update; rotate Keys on **Accounts**. Delete is allowed only after every referencing account is removed; there is no cascade.
 
@@ -32,7 +35,7 @@ Backups use payload V4 with `providerId` only and include every saved user-defin
 1. Open **Accounts** and choose **Add account** → **Custom API**.
 2. Enter a name, the upstream API Key, one API URL, and one upstream protocol: **Chat Completions**, **Responses**, or **Messages**.
 3. Add at least one mapping: a public model name clients request and the exact upstream model ID. **Fetch models** can fill the draft from upstream IDs when the upstream exposes the optional model-list interface below.
-4. Save the account. A valid new account is enabled by default; **Test connection** is an optional real, potentially billable request through that exact account.
+4. Save the account. It stays disabled until you enable it. **Test connection** is an optional real, potentially billable request through that exact account and does not turn the switch on.
 5. Call authenticated `GET /v1/models` on Open Console Gateway and confirm the routeable public name is published, then send one inference request.
 
 One Custom account uses one upstream protocol for every mapping on that card. Matching client traffic passes through; other supported client formats are converted to the selected upstream protocol. **Fetch models** returns upstream IDs only; importing one makes `public model = upstream ID` exactly, without suffix stripping or generated Aliases. You may then edit the public name while retaining the exact upstream ID.
@@ -48,7 +51,7 @@ OCG resolves common base URLs consistently for model discovery, verification, an
 | A complete standard inference URL | Used exactly as entered | The sibling `/models` |
 | A non-standard complete path | Used exactly as entered | Not guessed; enter model IDs manually |
 
-The configured URL must be HTTP or HTTPS and have a host. Embedded credentials, query strings, and fragments are rejected. A trusted administrator may deliberately select a loopback, LAN, or public destination. OCG does not follow redirects.
+The configured URL must be HTTP or HTTPS and have a host. Embedded credentials, query strings, and fragments are rejected. A trusted administrator may deliberately select a loopback, LAN, or public destination. Metadata, link-local, and opaque IPv4-trick hosts are rejected. A per-model override to another Origin does not inherit the Provider Key. OCG does not follow redirects on secret-bearing requests.
 
 The selected protocol defines the wire contract:
 

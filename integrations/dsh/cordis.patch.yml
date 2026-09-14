@@ -1,7 +1,0 @@
-# DSH skips an id-targeted patch when the row does not already exist. Insert a
-# single OCG-owned companion plugin instead. It registers only the
-# `ocg-manager` route with a fixed credential reference, so the base llm-pi-ai
-# instance and routes contributed by other bundles remain untouched.
-- insert:
-    - id: ocg-manager-dsh
-      name: ocg-manager-dsh

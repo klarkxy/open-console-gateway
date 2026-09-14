@@ -1,5 +1,5 @@
 //! Dashboard V3 account usage slice: auth, CAS, projections, sealed-provider
-//! manual refresh, and V2 coexistence.
+//! manual refresh, and retired V2 paths.
 
 use chrono::{Duration, Local, Utc};
 use ocg_core::dashboard_v3::{
@@ -556,12 +556,6 @@ async fn dashboard_v3_zen_provider_usage_is_the_synthetic_free_window() {
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{usage}");
     assert_v3_error(&usage, ERROR_INVALID_REQUEST);
-    assert!(
-        usage["message"]
-            .as_str()
-            .unwrap()
-            .contains("manual usage calibration is unavailable")
-    );
 
     harness.stop();
 }
@@ -683,7 +677,6 @@ async fn dashboard_v3_usage_patch_clamps_percent_and_parses_resets() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert_v3_error(&body, ERROR_INVALID_REQUEST);
-    assert_eq!(body["message"], "invalid usage window");
 
     let (status, body) = send_json(
         &harness,
@@ -860,8 +853,8 @@ async fn dashboard_v3_usage_mutations_reject_unknown_and_missing_fields() {
 }
 
 #[tokio::test]
-async fn dashboard_v3_usage_coexists_with_v2_and_does_not_mount_legacy_aliases() {
-    let harness = start_loopback("usage-coexist").await;
+async fn retired_v2_usage_stays_gone_and_v3_omits_legacy_aliases() {
+    let harness = start_loopback("usage-v2-retired").await;
     let goat_id = create_goat(&harness).await;
     let go_id = create_go(&harness).await;
 

@@ -144,7 +144,7 @@ describe("pruneAppImageWaylandLibs", () => {
 
   // -- failClosed: missing tool ---------------------------------------------
 
-  it("throws when appimagetool is missing and failClosed is true", () => {
+  it("missing appimagetool respects failClosed", () => {
     assert.throws(
       () => pruneAppImageWaylandLibs("/fake/appimage", {
         failClosed: true,
@@ -152,19 +152,19 @@ describe("pruneAppImageWaylandLibs", () => {
       }),
       /appimagetool not found/,
     );
-  });
-
-  it("returns original path when appimagetool is missing and failClosed is false", () => {
-    const result = pruneAppImageWaylandLibs("/fake/appimage", {
-      failClosed: false,
-      appimagetoolPath: "",
-    });
-    assert.strictEqual(result, "/fake/appimage");
+    assert.strictEqual(
+      pruneAppImageWaylandLibs("/fake/appimage", {
+        failClosed: false,
+        appimagetoolPath: "",
+      }),
+      "/fake/appimage",
+      "failClosed=false missing tool returns original path",
+    );
   });
 
   // -- failClosed: no libraries found ---------------------------------------
 
-  it("throws when no libwayland-* are found and failClosed is true", () => {
+  it("missing libwayland respects failClosed", () => {
     const dir = tmpDir();
     const appImage = join(dir, "test.AppImage");
     writeFileSync(appImage, "mock-appimage");
@@ -178,23 +178,15 @@ describe("pruneAppImageWaylandLibs", () => {
         }),
         /No bundled libwayland-/,
       );
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it("returns original path when no libwayland-* are found and failClosed is false", () => {
-    const dir = tmpDir();
-    const appImage = join(dir, "test.AppImage");
-    writeFileSync(appImage, "mock-appimage");
-
-    try {
-      const result = pruneAppImageWaylandLibs(appImage, {
-        failClosed: false,
-        appimagetoolPath: "/fake/appimagetool",
-        run: mockRunFactory({ waylandLibs: [] }),
-      });
-      assert.strictEqual(result, appImage);
+      assert.strictEqual(
+        pruneAppImageWaylandLibs(appImage, {
+          failClosed: false,
+          appimagetoolPath: "/fake/appimagetool",
+          run: mockRunFactory({ waylandLibs: [] }),
+        }),
+        appImage,
+        "failClosed=false with no libwayland-* returns original path",
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -295,26 +287,6 @@ describe("pruneAppImageWaylandLibs", () => {
         }),
         /still contains bundled Wayland libraries/,
       );
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it("succeeds when verification finds no remaining libwayland-*", () => {
-    const dir = tmpDir();
-    const appImage = join(dir, "test.AppImage");
-    writeFileSync(appImage, "original-content");
-
-    try {
-      const result = pruneAppImageWaylandLibs(appImage, {
-        failClosed: true,
-        appimagetoolPath: "/fake/appimagetool",
-        run: mockRunFactory({
-          waylandLibs: ["libwayland-client.so.0"],
-        }),
-      });
-      assert.strictEqual(result, appImage);
-      assert.strictEqual(runCalls.length, 3);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

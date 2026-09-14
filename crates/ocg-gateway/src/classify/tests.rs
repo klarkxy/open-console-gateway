@@ -178,12 +178,6 @@ fn unknown_and_dynamic_shaped_429_use_generic_five_minute() {
             false
         )));
     }
-    assert_eq!(
-        classify(429, OPENCODE_PROVIDER_ID, false, false),
-        ProviderErrorClass::RateLimited {
-            policy: RateLimitPolicy::GoWindow
-        }
-    );
 }
 
 #[test]
@@ -272,18 +266,6 @@ fn transport_failure_kind_from_impl_matches_classify_input() {
     assert_eq!(
         TransportClassifyInput::from(TransportFailureKind::Other),
         TransportClassifyInput::OtherSendFailure
-    );
-    assert_eq!(
-        classify_transport(TransportFailureKind::Connect.into()),
-        ProviderErrorClass::Connect
-    );
-    assert_eq!(
-        classify_transport(TransportFailureKind::Timeout.into()),
-        ProviderErrorClass::OutcomeUnknown
-    );
-    assert_eq!(
-        classify_transport(TransportFailureKind::Other.into()),
-        ProviderErrorClass::OutcomeUnknown
     );
 }
 

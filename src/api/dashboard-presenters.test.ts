@@ -43,73 +43,26 @@ function assertAlwaysSentFields(input: ReturnType<typeof settingsUpdateInput>, v
   assert.equal(input.streamIdleTimeoutSecs, value.stream_idle_timeout_secs);
 }
 
-test("settingsUpdateInput omits showDockIcon when dock visibility is unsupported (Windows)", () => {
-  const value = appConfig({ auto_start: true, auto_start_supported: true, dock_visibility_supported: false });
-  const input = settingsUpdateInput(value);
-  assert.equal(input.autoStart, true);
-  assert.equal("showDockIcon" in input, false);
-  assert.equal(Object.hasOwn(input, "showDockIcon"), false);
-  assertAlwaysSentFields(input, value);
-});
-
-test("settingsUpdateInput sends autoStart false when auto start is supported but disabled (Windows)", () => {
-  const value = appConfig({ auto_start: false, auto_start_supported: true, dock_visibility_supported: false });
-  const input = settingsUpdateInput(value);
-  assert.equal("autoStart" in input, true);
-  assert.equal(input.autoStart, false);
-  assert.equal("showDockIcon" in input, false);
-  assertAlwaysSentFields(input, value);
-});
-
-test("settingsUpdateInput omits autoStart and showDockIcon when neither capability is supported", () => {
-  const value = appConfig({ auto_start: true, auto_start_supported: false, show_dock_icon: true, dock_visibility_supported: false });
-  const input = settingsUpdateInput(value);
-  assert.equal("autoStart" in input, false);
-  assert.equal("showDockIcon" in input, false);
-  assert.equal(Object.hasOwn(input, "autoStart"), false);
-  assert.equal(Object.hasOwn(input, "showDockIcon"), false);
-  assertAlwaysSentFields(input, value);
-});
-
-test("settingsUpdateInput sends both autoStart and showDockIcon when both capabilities are supported", () => {
-  const value = appConfig({
-    auto_start: true,
-    auto_start_supported: true,
-    show_dock_icon: true,
-    dock_visibility_supported: true,
-  });
-  const input = settingsUpdateInput(value);
-  assert.equal(input.autoStart, true);
-  assert.equal(input.showDockIcon, true);
-  assertAlwaysSentFields(input, value);
-});
-
-test("settingsUpdateInput sends supported capabilities set to false instead of omitting them", () => {
-  const value = appConfig({
-    auto_start: false,
-    auto_start_supported: true,
-    show_dock_icon: false,
-    dock_visibility_supported: true,
-  });
-  const input = settingsUpdateInput(value);
-  assert.equal("autoStart" in input, true);
-  assert.equal("showDockIcon" in input, true);
-  assert.equal(input.autoStart, false);
-  assert.equal(input.showDockIcon, false);
-});
-
-test("settingsUpdateInput omits autoStart and sends showDockIcon when only dock visibility is supported", () => {
-  const on = appConfig({ auto_start_supported: false, show_dock_icon: true, dock_visibility_supported: true });
-  const inputOn = settingsUpdateInput(on);
-  assert.equal("autoStart" in inputOn, false);
-  assert.equal(inputOn.showDockIcon, true);
-  assertAlwaysSentFields(inputOn, on);
-
-  const off = appConfig({ auto_start_supported: false, show_dock_icon: false, dock_visibility_supported: true });
-  const inputOff = settingsUpdateInput(off);
-  assert.equal("autoStart" in inputOff, false);
-  assert.equal("showDockIcon" in inputOff, true);
-  assert.equal(inputOff.showDockIcon, false);
+test("settingsUpdateInput sends supported capabilities including false and omits unsupported ones", () => {
+  const cases: Array<[Partial<AppConfig>, { autoStart?: boolean; showDockIcon?: boolean }]> = [
+    [{ auto_start: true, auto_start_supported: true, dock_visibility_supported: false }, { autoStart: true }],
+    [{ auto_start: false, auto_start_supported: true, dock_visibility_supported: false }, { autoStart: false }],
+    [{ auto_start: true, auto_start_supported: false, show_dock_icon: true, dock_visibility_supported: false }, {}],
+    [{ auto_start: true, auto_start_supported: true, show_dock_icon: true, dock_visibility_supported: true }, { autoStart: true, showDockIcon: true }],
+    [{ auto_start: false, auto_start_supported: true, show_dock_icon: false, dock_visibility_supported: true }, { autoStart: false, showDockIcon: false }],
+    [{ auto_start_supported: false, show_dock_icon: true, dock_visibility_supported: true }, { showDockIcon: true }],
+    [{ auto_start_supported: false, show_dock_icon: false, dock_visibility_supported: true }, { showDockIcon: false }],
+  ];
+  for (const [config, expected] of cases) {
+    const value = appConfig(config);
+    const input = settingsUpdateInput(value);
+    for (const field of ["autoStart", "showDockIcon"] as const) {
+      const present = Object.hasOwn(expected, field);
+      assert.equal(Object.hasOwn(input, field), present, `${field} ${JSON.stringify(config)}`);
+      if (present) assert.equal(input[field], expected[field], `${field} ${JSON.stringify(config)}`);
+    }
+    assertAlwaysSentFields(input, value);
+  }
 });
 
 test("settingsUpdateInput omits gatewayPort when gateway port comes from the environment", () => {

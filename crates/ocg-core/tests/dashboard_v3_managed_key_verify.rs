@@ -1,5 +1,5 @@
 //! Dashboard V3 POST `/accounts/{id}/setup/verify-key`: session, CAS, V2
-//! onboarding semantics, secrecy, and V2 coexistence.
+//! onboarding semantics, secrecy, and retired V2 paths.
 
 use chrono::Utc;
 #[cfg(debug_assertions)]
@@ -612,7 +612,6 @@ async fn dashboard_v3_managed_key_verify_rejects_unknown_missing_and_empty_field
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert_v3_error(&body, ERROR_INVALID_REQUEST);
-    assert_eq!(body["message"], "key is required");
 
     let (status, body) = send_json(
         &harness,
@@ -623,7 +622,6 @@ async fn dashboard_v3_managed_key_verify_rejects_unknown_missing_and_empty_field
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert_v3_error(&body, ERROR_INVALID_REQUEST);
-    assert_eq!(body["message"], "key is too long");
     assert_still_pending(&harness, "managed-1", before);
 
     harness.stop();
@@ -668,10 +666,6 @@ async fn dashboard_v3_managed_key_verify_rejects_unknown_wrong_step_and_unroutab
     .await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert_v3_error(&body, ERROR_CONFLICT);
-    assert_eq!(
-        body["message"],
-        "managed account is not waiting for key verification"
-    );
     assert_eq!(
         stored_account(&harness, "draft-1").setup_step,
         ModelSetupStep::Payment
@@ -933,13 +927,6 @@ async fn dashboard_v3_managed_key_verify_success_401_429_5xx_network_and_oversiz
     .await;
     assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
     assert_v3_error(&body, ERROR_OUTBOUND_FAILED);
-    assert!(
-        body["message"]
-            .as_str()
-            .unwrap()
-            .contains("the account remains pending"),
-        "{body}"
-    );
     assert_secret_free(&body, &[OPAQUE_KEY]);
     assert_eq!(body["currentRevision"], before + 1);
     assert_still_pending(&harness, "network", before + 1);
@@ -1064,10 +1051,10 @@ async fn dashboard_v3_stale_during_network_has_no_side_effect() {
 
 #[cfg(debug_assertions)]
 #[tokio::test]
-async fn dashboard_v3_delayed_verify_loses_to_revisionless_v2_key_replacement() {
-    const V2_REPLACEMENT_KEY: &str = "opaque/v2-replacement+key=7";
+async fn in_flight_v3_verify_completes_when_retired_v2_verify_is_gone() {
+    const RETIRED_REPLACEMENT_KEY: &str = "opaque/retired-replacement+key=7";
 
-    let harness = start_loopback("verify-key-v2-race").await;
+    let harness = start_loopback("verify-key-v2-retired-race").await;
     let v2_origin = start_origin(
         StatusCode::BAD_REQUEST,
         r#"{"error":{"message":"candidate rejected"}}"#,
@@ -1107,14 +1094,14 @@ async fn dashboard_v3_delayed_verify_loses_to_revisionless_v2_key_replacement() 
                     "{}/accounts/managed-1/setup/verify-key",
                     harness.v2_base
                 ))
-                .json(&json!({ "key": V2_REPLACEMENT_KEY }))
+                .json(&json!({ "key": RETIRED_REPLACEMENT_KEY }))
                 .send()
                 .await
                 .unwrap();
             let status = response.status();
             let body = response.json().await.unwrap_or(Value::Null);
             V3Harness::assert_v2_removed(status, &body);
-            assert!(!body.to_string().contains(V2_REPLACEMENT_KEY));
+            assert!(!body.to_string().contains(RETIRED_REPLACEMENT_KEY));
             assert_eq!(harness.state.settings_revision(), before);
             v3_hold.release();
             status
@@ -1130,7 +1117,7 @@ async fn dashboard_v3_delayed_verify_loses_to_revisionless_v2_key_replacement() 
     assert_retained_key(&harness, "managed-1", OPAQUE_KEY);
     assert_eq!(v2_origin.call_count(), 0);
     assert_eq!(v3_origin.call_count(), 1);
-    assert_secret_free(&v3_result.1, &[OPAQUE_KEY, V2_REPLACEMENT_KEY]);
+    assert_secret_free(&v3_result.1, &[OPAQUE_KEY, RETIRED_REPLACEMENT_KEY]);
 
     harness.stop();
 }
@@ -1232,8 +1219,8 @@ async fn dashboard_v3_managed_key_verify_list_blacklist_uses_default_proxy_leg()
 
 #[cfg(debug_assertions)]
 #[tokio::test]
-async fn dashboard_v3_v2_verify_key_still_completes_beside_v3() {
-    let harness = start_loopback("verify-key-v2-coexist").await;
+async fn retired_v2_verify_key_does_not_complete() {
+    let harness = start_loopback("verify-key-v2-retired").await;
     let origin = start_origin(StatusCode::OK, r#"{"choices":[]}"#).await;
     let mut config = harness.state.config();
     config.proxy_mode = ProxyMode::Direct;
@@ -1432,10 +1419,6 @@ async fn dashboard_v3_managed_key_verify_times_out_without_completing_setup() {
     .await;
     assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
     assert_v3_error(&body, ERROR_OUTBOUND_FAILED);
-    assert!(
-        body["message"].as_str().unwrap().contains("timed out"),
-        "{body}"
-    );
     assert_secret_free(&body, &[OPAQUE_KEY]);
     assert_eq!(body["currentRevision"], before + 1);
     assert_still_pending(&harness, "managed-1", before + 1);

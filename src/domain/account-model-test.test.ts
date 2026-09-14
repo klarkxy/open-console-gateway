@@ -60,6 +60,10 @@ function dynamicCatalog(
 ): ProviderCatalogEntry {
   return {
     provider_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    origin: "preset",
+    editable: true,
+    deletable: true,
+    offering: "api",
     display_name: "Lab",
     display_family: "Lab",
     credential_kind: "api_key",

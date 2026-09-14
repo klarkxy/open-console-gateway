@@ -4,18 +4,16 @@ import type { PlanDefinition } from "./plans.ts";
 import {
   PLAN_DEFINITIONS,
   dynamicPlanDefinition,
-  findCatalogEntry,
   planFamilyLabel,
   planCreateDisabledReason,
 } from "./plans.ts";
 import { isDynamicCatalogEntry } from "./dynamic-provider.ts";
+import { providerPresetOfferingForId } from "./provider-presets.ts";
 
 /**
  * Plan-option list for the Add Account chooser. Backend-owned singletons
  * (Zen Free) are omitted: they are not created here. Remaining families stay
  * visible so unavailable choices still explain why they cannot be created.
- * Unroutable-but-creatable families appear as drafts instead of implying they
- * will route.
  */
 
 export interface PlanOption {
@@ -30,44 +28,6 @@ export interface PlanOption {
   managed: boolean;
 }
 
-export type PlanChooserGroupId = "available" | "draft" | "unavailable";
-
-export interface PlanChooserGroup {
-  id: PlanChooserGroupId;
-  label: MessageKey;
-  options: PlanOption[];
-}
-
-const GROUP_ORDER: readonly PlanChooserGroupId[] = ["available", "draft", "unavailable"];
-
-const GROUP_LABEL: Record<PlanChooserGroupId, MessageKey> = {
-  available: "可添加",
-  draft: "草稿方案",
-  unavailable: "暂不可用",
-};
-
-/**
- * Human-readable hint shown for selectable families whose post-create state
- * needs honest copy. GOAT is live without a Key-verification gate; Custom is
- * enabled by default and exposes account-scoped connection tests afterwards.
- */
-function planCreationHint(
-  plan: PlanDefinition,
-  _catalog: readonly ProviderCatalogEntry[] | null | undefined,
-): MessageKey | "" {
-  if (plan.id === "custom-endpoint") return "创建后默认启用；可随时通过账号卡片测试连接。";
-  return "";
-}
-
-/** True when the family's provider is routable according to the catalog. */
-function planFamilyRoutable(
-  plan: PlanDefinition,
-  catalog: readonly ProviderCatalogEntry[] | null | undefined,
-): boolean {
-  if (!catalog?.length) return false;
-  return findCatalogEntry(catalog, plan.provider_id)?.routable === true;
-}
-
 function builtinOption(
   plan: PlanDefinition,
   catalog: readonly ProviderCatalogEntry[] | null | undefined,
@@ -80,7 +40,7 @@ function builtinOption(
     source: "builtin",
     disabled: Boolean(reason),
     disabledReason: reason ?? "",
-    creationHint: reason ? "" : planCreationHint(plan, catalog),
+    creationHint: "",
     managed: !reason && plan.managed_registration,
   };
 }
@@ -115,27 +75,36 @@ export function buildPlanOptions(
   return [...builtin, ...dynamic];
 }
 
-export function planChooserGroupId(
-  option: PlanOption,
-  catalog: readonly ProviderCatalogEntry[] | null | undefined,
-): PlanChooserGroupId {
-  if (option.disabled) return "unavailable";
-  if (!catalog?.length) return "available";
-  return planFamilyRoutable(option.plan, catalog) ? "available" : "draft";
+export interface PlanOfferingSplit {
+  /** Built-in subscription families first, then saved plan-offering Providers. */
+  plan: PlanOption[];
+  /** Custom API first, then account-owned user-defined API Providers. */
+  api: PlanOption[];
 }
 
-export function buildPlanChooserGroups(
+/**
+ * Offering split for the Add Account chooser. Structural only: the custom
+ * plan kind heads the API side and every option keeps its own disabled reason
+ * instead of a status group. Saved user-defined Providers follow their
+ * persisted preset's offering via `dynamicPresetIds` (provider_id → preset_id
+ * from the dynamic Provider detail); unknown or unloaded IDs are API.
+ */
+export function splitPlanOptionsByOffering(
   catalog: readonly ProviderCatalogEntry[] | null | undefined,
-): PlanChooserGroup[] {
-  const buckets: Record<PlanChooserGroupId, PlanOption[]> = {
-    available: [],
-    draft: [],
-    unavailable: [],
+  dynamicPresetIds?: ReadonlyMap<string, string | null> | null,
+): PlanOfferingSplit {
+  const options = buildPlanOptions(catalog);
+  const dynamicOffering = (option: PlanOption): "plan" | "api" => (
+    providerPresetOfferingForId(dynamicPresetIds?.get(option.optionId))
+  );
+  return {
+    plan: [
+      ...options.filter((option) => option.source === "builtin" && option.plan.kind !== "custom"),
+      ...options.filter((option) => option.source === "user-defined" && dynamicOffering(option) === "plan"),
+    ],
+    api: [
+      ...options.filter((option) => option.source === "builtin" && option.plan.kind === "custom"),
+      ...options.filter((option) => option.source === "user-defined" && dynamicOffering(option) === "api"),
+    ],
   };
-  for (const option of buildPlanOptions(catalog)) {
-    buckets[planChooserGroupId(option, catalog)].push(option);
-  }
-  return GROUP_ORDER
-    .filter((id) => buckets[id].length > 0)
-    .map((id) => ({ id, label: GROUP_LABEL[id], options: buckets[id] }));
 }

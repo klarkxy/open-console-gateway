@@ -88,6 +88,19 @@ test("Custom API ignores legacy lifecycle dates", () => {
   assert.deepEqual(buildNeedsAttention([custom], NOW), []);
 });
 
+test("user-defined (dynamic) Provider accounts never raise expiry attention", () => {
+  // No built-in plan owns this provider id and no billing cadence is modeled
+  // for user-defined Providers; even a synthetic stored date is ignored.
+  const dynamic = account({
+    id: "dyn",
+    name: "Lab",
+    provider_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    purchase_date: "2026-07-01",
+    expires_on: "2026-08-01",
+  });
+  assert.deepEqual(buildNeedsAttention([dynamic], NOW), []);
+});
+
 test("zen free cooling is reported through the shared free lane", () => {
   const zen = account({
     id: "zen",
@@ -109,42 +122,23 @@ test("status buckets mirror the card status labels", () => {
   assert.equal(accountStatusKey(account({ enabled: false }), NOW), "disabled");
   assert.equal(accountStatusKey(account({ auth_error: "401" }), NOW), "auth-error");
   assert.equal(accountStatusKey(account({ setup_step: "payment" }), NOW), "registering");
-  assert.equal(
-    accountStatusKey(account({
-      enabled: false,
-      provider_id: "custom",
-      plan_routable: true,
-      verification_status: "pending",
-    }), NOW),
-    "disabled",
-  );
-  assert.equal(
-    accountStatusKey(account({
-      enabled: false,
-      provider_id: "custom",
-      plan_routable: false,
-      verification_status: "failed",
-    }), NOW),
-    "disabled",
-  );
-  assert.equal(
-    accountStatusKey(account({
-      enabled: false,
-      provider_id: "custom",
-      plan_routable: true,
-      verification_status: "failed",
-    }), NOW),
-    "disabled",
-  );
-  assert.equal(
-    accountStatusKey(account({
-      enabled: false,
-      provider_id: "custom",
-      plan_routable: false,
-      verification_status: "pending",
-    }), NOW),
-    "disabled",
-  );
+  for (const [plan_routable, verification_status] of [
+    [true, "pending"],
+    [false, "failed"],
+    [true, "failed"],
+    [false, "pending"],
+  ] as const) {
+    assert.equal(
+      accountStatusKey(account({
+        enabled: false,
+        provider_id: "custom",
+        plan_routable,
+        verification_status,
+      }), NOW),
+      "disabled",
+      `${plan_routable}/${verification_status}`,
+    );
+  }
   assert.equal(
     accountStatusKey(account({ cooldown_until: "2026-08-21T13:00:00Z" }), NOW),
     "cooling",

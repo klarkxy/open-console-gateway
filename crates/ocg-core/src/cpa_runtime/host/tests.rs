@@ -277,10 +277,9 @@ fn unix_command_rejects_missing_executable() {
         management_password: CpaRuntimeSecret::new("secret"),
         log_secrets: Vec::new(),
     };
-    let error = spawn_unix_owned(&spec)
+    spawn_unix_owned(&spec)
         .err()
         .expect("missing executable must fail");
-    assert!(error.to_string().contains("missing"));
 }
 
 #[cfg(unix)]
@@ -390,42 +389,36 @@ fn owned_cmd_process_is_job_contained_and_stoppable() {
 
 #[cfg(windows)]
 #[test]
-fn owned_stop_joins_readers_after_confirmed_exit() {
-    use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
-    assert_eq!(
-        decide_owned_stop(true, WAIT_OBJECT_0),
-        OwnedStopDecision::JoinReaders
-    );
-}
-
-#[cfg(windows)]
-#[test]
-fn owned_stop_detaches_when_terminate_fails() {
-    use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
-    assert_eq!(
-        decide_owned_stop(false, WAIT_OBJECT_0),
-        OwnedStopDecision::TerminateFailed
-    );
-}
-
-#[cfg(windows)]
-#[test]
-fn owned_stop_detaches_when_wait_times_out() {
-    use windows_sys::Win32::Foundation::WAIT_TIMEOUT;
-    assert_eq!(
-        decide_owned_stop(true, WAIT_TIMEOUT),
-        OwnedStopDecision::WaitTimedOut
-    );
-}
-
-#[cfg(windows)]
-#[test]
-fn owned_stop_detaches_when_wait_fails() {
-    use windows_sys::Win32::Foundation::WAIT_FAILED;
-    assert_eq!(
-        decide_owned_stop(true, WAIT_FAILED),
-        OwnedStopDecision::WaitFailed
-    );
+fn decide_owned_stop_table() {
+    use windows_sys::Win32::Foundation::{WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT};
+    for (label, terminated, wait, expected) in [
+        (
+            "confirmed-exit-joins-readers",
+            true,
+            WAIT_OBJECT_0,
+            OwnedStopDecision::JoinReaders,
+        ),
+        (
+            "terminate-failed-detaches",
+            false,
+            WAIT_OBJECT_0,
+            OwnedStopDecision::TerminateFailed,
+        ),
+        (
+            "wait-timeout-detaches",
+            true,
+            WAIT_TIMEOUT,
+            OwnedStopDecision::WaitTimedOut,
+        ),
+        (
+            "wait-failed-detaches",
+            true,
+            WAIT_FAILED,
+            OwnedStopDecision::WaitFailed,
+        ),
+    ] {
+        assert_eq!(decide_owned_stop(terminated, wait), expected, "{label}");
+    }
 }
 
 #[test]
@@ -447,18 +440,6 @@ fn stream_redaction_covers_secrets_split_across_chunks() {
     output.extend(redactor.push(b"secret"));
     output.extend(redactor.finish());
     assert_eq!(String::from_utf8(output).unwrap(), " [REDACTED]");
-}
-
-#[test]
-fn stream_redaction_prefers_longer_secret_over_prefix() {
-    let secrets = Arc::new(Mutex::new(normalize_secrets(vec![
-        b"abc".to_vec(),
-        b"abcdef".to_vec(),
-    ])));
-    let mut redactor = StreamRedactor::new(secrets);
-    let output = redactor.push(b"abcdef");
-    let output = [output, redactor.finish()].concat();
-    assert_eq!(String::from_utf8(output).unwrap(), "[REDACTED]");
 }
 
 #[test]

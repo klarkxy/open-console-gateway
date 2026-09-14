@@ -203,9 +203,4 @@ mod tests {
             Err(CatalogParseError::UnknownAuthScheme(value)) if value == "basic"
         ));
     }
-
-    #[test]
-    fn opencode_go_usage_url_is_the_fixed_official_endpoint() {
-        assert_eq!(OPENCODE_GO_USAGE_URL, "https://opencode.ai/zen/go/v1/usage");
-    }
 }

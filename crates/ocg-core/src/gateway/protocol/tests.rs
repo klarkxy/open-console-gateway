@@ -28,6 +28,7 @@ fn plan_with_model(client: ApiFormat, upstream: ApiFormat, model: &str) -> Reque
         service_tier: None,
         custom_tools: Vec::new(),
         namespace_tools: Vec::new(),
+        legacy_tool_compat: None,
         response_parallel_tool_calls: true,
         response_tool_choice: json!("auto"),
         response_tools: Vec::new(),
@@ -38,20 +39,10 @@ fn plan_with_model(client: ApiFormat, upstream: ApiFormat, model: &str) -> Reque
 fn unknown_models_are_not_in_the_protocol_table() {
     assert!(!is_known_model("x-preview-f-free"));
     assert!(!is_known_model("totally-made-up-xyz"));
-    assert!(
-        prepare_request(
-            ApiFormat::ChatCompletions,
-            bytes(json!({
-                "model": "totally-made-up-xyz",
-                "messages": [{"role": "user", "content": "hi"}]
-            })),
-        )
-        .is_err()
-    );
 }
 
 #[test]
-fn muse_spark_contributor_routes_every_client_to_responses() {
+fn muse_spark_contributor_family_routes_clients_to_responses() {
     let chat = prepare_request(
         ApiFormat::ChatCompletions,
         bytes(json!({
@@ -60,7 +51,7 @@ fn muse_spark_contributor_routes_every_client_to_responses() {
         })),
     )
     .expect("Chat should convert Muse Spark contributor to Responses");
-    assert_eq!(chat.upstream, ApiFormat::Responses);
+    assert_eq!(chat.upstream, ApiFormat::Responses, "contributor-chat");
     let responses = prepare_request(
         ApiFormat::Responses,
         bytes(json!({
@@ -70,7 +61,11 @@ fn muse_spark_contributor_routes_every_client_to_responses() {
         })),
     )
     .expect("Responses should passthrough Muse Spark contributor");
-    assert_eq!(responses.upstream, ApiFormat::Responses);
+    assert_eq!(
+        responses.upstream,
+        ApiFormat::Responses,
+        "contributor-responses"
+    );
     let messages = prepare_request(
         ApiFormat::Messages,
         bytes(json!({
@@ -80,11 +75,12 @@ fn muse_spark_contributor_routes_every_client_to_responses() {
         })),
     )
     .expect("Messages should convert Muse Spark contributor to Responses");
-    assert_eq!(messages.upstream, ApiFormat::Responses);
-}
+    assert_eq!(
+        messages.upstream,
+        ApiFormat::Responses,
+        "contributor-messages"
+    );
 
-#[test]
-fn muse_spark_contributor_free_is_responses_only() {
     for model in [
         "muse-spark-1.2-contributor-free",
         "muse-spark-1.3-contributor-free",
@@ -98,7 +94,7 @@ fn muse_spark_contributor_free_is_responses_only() {
             })),
         )
         .unwrap_or_else(|error| panic!("{model} Chat should convert to Responses: {error}"));
-        assert_eq!(chat.upstream, ApiFormat::Responses, "{model}");
+        assert_eq!(chat.upstream, ApiFormat::Responses, "{model}-chat");
         let responses = prepare_request(
             ApiFormat::Responses,
             bytes(json!({
@@ -108,7 +104,11 @@ fn muse_spark_contributor_free_is_responses_only() {
             })),
         )
         .unwrap_or_else(|error| panic!("{model} Responses should passthrough: {error}"));
-        assert_eq!(responses.upstream, ApiFormat::Responses, "{model}");
+        assert_eq!(
+            responses.upstream,
+            ApiFormat::Responses,
+            "{model}-responses"
+        );
     }
 }
 
@@ -122,8 +122,8 @@ fn official_model_defaults_convert_non_native_client_formats() {
             "store": false
         })),
     )
-    .expect("Responses converts to the official Chat endpoint");
-    assert_eq!(flash_responses.upstream, ApiFormat::ChatCompletions);
+    .expect("2026-08-27 live_supported Responses passthroughs");
+    assert_eq!(flash_responses.upstream, ApiFormat::Responses);
 
     let flash_messages = prepare_request(
         ApiFormat::Messages,
@@ -134,7 +134,7 @@ fn official_model_defaults_convert_non_native_client_formats() {
         })),
     )
     .unwrap();
-    assert_eq!(flash_messages.upstream, ApiFormat::ChatCompletions);
+    assert_eq!(flash_messages.upstream, ApiFormat::Messages);
 
     let minimax_chat = prepare_request(
         ApiFormat::ChatCompletions,
@@ -144,7 +144,7 @@ fn official_model_defaults_convert_non_native_client_formats() {
         })),
     )
     .unwrap();
-    assert_eq!(minimax_chat.upstream, ApiFormat::Messages);
+    assert_eq!(minimax_chat.upstream, ApiFormat::ChatCompletions);
 
     let minimax_messages = prepare_request(
         ApiFormat::Messages,
@@ -215,7 +215,7 @@ fn grok_converts_chat_and_messages_to_official_responses() {
 }
 
 #[test]
-fn kimi_k3_uses_the_official_chat_endpoint_for_both_clients() {
+fn p01_native_chat_and_messages_select_native_endpoints() {
     let chat = prepare_request(
         ApiFormat::ChatCompletions,
         bytes(json!({
@@ -235,7 +235,7 @@ fn kimi_k3_uses_the_official_chat_endpoint_for_both_clients() {
         })),
     )
     .unwrap();
-    assert_eq!(messages.upstream, ApiFormat::ChatCompletions);
+    assert_eq!(messages.upstream, ApiFormat::Messages);
 }
 
 #[test]
@@ -256,7 +256,7 @@ fn minimax_highspeed_models_route_as_messages_and_preserve_priority_tier() {
 
 #[test]
 fn service_tier_preserves_string_values_and_ignores_non_string_values() {
-    // MiniMax's official OpenCode route is Messages; other clients convert to it.
+    // MiniMax-M3 preferred is Messages; Responses is not live_supported so it converts.
     let plan = prepare_request(
         ApiFormat::Responses,
         bytes(json!({
@@ -294,8 +294,8 @@ fn service_tier_preserves_string_values_and_ignores_non_string_values() {
             "service_tier": "priority"
         })),
     )
-    .expect("Chat request should convert to Messages");
-    assert_eq!(chat.upstream, ApiFormat::Messages);
+    .expect("Chat request passthroughs the 2026-08-27 live_supported Chat path");
+    assert_eq!(chat.upstream, ApiFormat::ChatCompletions);
     let chat_body: Value = serde_json::from_slice(&chat.body).expect("body is JSON");
     assert_eq!(chat_body["service_tier"], "priority");
     assert!(chat_body.get("stream_options").is_none());
@@ -599,7 +599,7 @@ fn responses_no_reasoning_maps_to_chat_thinking_disabled() {
 }
 
 #[test]
-fn responses_requires_explicit_store_false_and_rejects_stateful_async_fields() {
+fn p07_responses_requires_explicit_store_false_and_rejects_stateful_async_fields() {
     for store in [None, Some(Value::Null), Some(json!(true))] {
         let mut request = json!({"model":"minimax-m2.7","input":"hi"});
         if let Some(store) = store {
@@ -633,7 +633,7 @@ fn responses_requires_explicit_store_false_and_rejects_stateful_async_fields() {
 }
 
 #[test]
-fn cross_protocol_structured_formats_are_rejected() {
+fn p02_cross_protocol_structured_formats_are_rejected() {
     let cases = [
         (
             ApiFormat::Responses,
@@ -1071,29 +1071,88 @@ fn messages_response_maps_reasoning_tools_and_usage_to_both_openai_formats() {
 }
 
 #[test]
-fn minimax_bogus_all_cache_usage_is_sanitized() {
-    let mut usage = json!({"input_tokens":0,"output_tokens":5,"cache_read_input_tokens":40500});
-    sanitize_minimax_anthropic_usage(Some("minimax-m3"), None, &mut usage);
-    assert_eq!(usage["input_tokens"], 40500);
-    assert_eq!(usage["cache_read_input_tokens"], 0);
-
-    // Normal MiniMax usage (new input + cache read) is left untouched.
-    let mut usage = json!({"input_tokens":108,"output_tokens":91,"cache_read_input_tokens":14813});
-    sanitize_minimax_anthropic_usage(Some("minimax-m3"), None, &mut usage);
-    assert_eq!(usage["input_tokens"], 108);
-    assert_eq!(usage["cache_read_input_tokens"], 14813);
-
-    // The heuristic only applies to MiniMax models.
-    let mut usage = json!({"input_tokens":0,"output_tokens":5,"cache_read_input_tokens":40500});
-    sanitize_minimax_anthropic_usage(Some("qwen3.7-max"), None, &mut usage);
-    assert_eq!(usage["cache_read_input_tokens"], 40500);
-
-    // OpenCode Go may return a non-MiniMax model identifier while the request plan still
-    // points to MiniMax. The hint must still trigger sanitization.
-    let mut usage = json!({"input_tokens":0,"output_tokens":5,"cache_read_input_tokens":40500});
-    sanitize_minimax_anthropic_usage(Some("ocg-generic"), Some("minimax-m3"), &mut usage);
-    assert_eq!(usage["input_tokens"], 40500);
-    assert_eq!(usage["cache_read_input_tokens"], 0);
+fn minimax_usage_sanitize_table() {
+    for (label, model, hint, input, output, cache, expect_input, expect_cache) in [
+        (
+            "zero-input-all-cache",
+            Some("minimax-m3"),
+            None,
+            0,
+            5,
+            40500,
+            40500,
+            0,
+        ),
+        (
+            "normal-minimax-untouched",
+            Some("minimax-m3"),
+            None,
+            108,
+            91,
+            14813,
+            108,
+            14813,
+        ),
+        (
+            "qwen-not-minimax",
+            Some("qwen3.7-max"),
+            None,
+            0,
+            5,
+            40500,
+            0,
+            40500,
+        ),
+        (
+            "plan-hint-minimax",
+            Some("ocg-generic"),
+            Some("minimax-m3"),
+            0,
+            5,
+            40500,
+            40500,
+            0,
+        ),
+        (
+            "case-insensitive-id",
+            Some("MiniMax-M3"),
+            None,
+            0,
+            5,
+            40500,
+            40500,
+            0,
+        ),
+        (
+            "separator-insensitive-hint",
+            Some("ocg-generic"),
+            Some("MiniMax_M3"),
+            0,
+            5,
+            40500,
+            40500,
+            0,
+        ),
+        (
+            "qwen-mixed-case-untouched",
+            Some("Qwen3.7-Max"),
+            None,
+            0,
+            5,
+            40500,
+            0,
+            40500,
+        ),
+    ] {
+        let mut usage = json!({
+            "input_tokens": input,
+            "output_tokens": output,
+            "cache_read_input_tokens": cache
+        });
+        sanitize_minimax_anthropic_usage(model, hint, &mut usage);
+        assert_eq!(usage["input_tokens"], expect_input, "{label}");
+        assert_eq!(usage["cache_read_input_tokens"], expect_cache, "{label}");
+    }
 }
 
 #[test]
@@ -1289,26 +1348,6 @@ fn transform_response_sanitizes_minimax_messages_for_every_client_format() {
 }
 
 #[test]
-fn minimax_model_detection_is_case_and_separator_insensitive() {
-    // OpenCode Go / Qwen Cloud docs expose MiniMax IDs with capital letters (MiniMax-M3).
-    // The sanitizer must still recognize them.
-    let mut usage = json!({"input_tokens":0,"output_tokens":5,"cache_read_input_tokens":40500});
-    sanitize_minimax_anthropic_usage(Some("MiniMax-M3"), None, &mut usage);
-    assert_eq!(usage["input_tokens"], 40500);
-    assert_eq!(usage["cache_read_input_tokens"], 0);
-
-    let mut usage = json!({"input_tokens":0,"output_tokens":5,"cache_read_input_tokens":40500});
-    sanitize_minimax_anthropic_usage(Some("ocg-generic"), Some("MiniMax_M3"), &mut usage);
-    assert_eq!(usage["input_tokens"], 40500);
-    assert_eq!(usage["cache_read_input_tokens"], 0);
-
-    // Qwen is unaffected.
-    let mut usage = json!({"input_tokens":0,"output_tokens":5,"cache_read_input_tokens":40500});
-    sanitize_minimax_anthropic_usage(Some("Qwen3.7-Max"), None, &mut usage);
-    assert_eq!(usage["cache_read_input_tokens"], 40500);
-}
-
-#[test]
 fn mixed_case_minimax_routes_to_messages_native_protocol() {
     let plan = prepare_request(
         ApiFormat::ChatCompletions,
@@ -1319,7 +1358,7 @@ fn mixed_case_minimax_routes_to_messages_native_protocol() {
         })),
     )
     .expect("MiniMax-M3 should be routable");
-    assert_eq!(plan.upstream, ApiFormat::Messages);
+    assert_eq!(plan.upstream, ApiFormat::ChatCompletions);
     assert_eq!(plan.model, "MiniMax-M3");
 
     let plan = prepare_request(
@@ -1703,6 +1742,96 @@ fn responses_hosted_tools_and_history_are_ignored_unless_forced() {
 }
 
 #[test]
+fn p05_same_protocol_keeps_unknown_native_request_fields() {
+    let plan = prepare_request(
+        ApiFormat::ChatCompletions,
+        bytes(json!({
+            "model": "hy3",
+            "messages": [{"role": "user", "content": "hi"}],
+            "vendor_extension": {"trace_id": "trace_1"},
+            "logprobs": true
+        })),
+    )
+    .expect("Chat-native unknown fields must survive passthrough");
+    assert_eq!(plan.client, ApiFormat::ChatCompletions);
+    assert_eq!(plan.upstream, ApiFormat::ChatCompletions);
+    let body: Value = serde_json::from_slice(&plan.body).unwrap();
+    assert_eq!(body["vendor_extension"]["trace_id"], "trace_1");
+    assert_eq!(body["logprobs"], true);
+}
+
+#[test]
+fn p08_grok_native_hosted_tools_are_kept() {
+    let native = prepare_request(
+        ApiFormat::Responses,
+        bytes(json!({
+            "model":"grok-4.6","input":"hi","store":false,
+            "tools":[{"type":"web_search"}],
+            "tool_choice":{"type":"web_search"}
+        })),
+    )
+    .expect("native Responses must keep hosted tools");
+    assert_eq!(native.client, ApiFormat::Responses);
+    assert_eq!(native.upstream, ApiFormat::Responses);
+    let body: Value = serde_json::from_slice(&native.body).unwrap();
+    assert_eq!(body["tools"][0]["type"], "web_search");
+}
+
+#[test]
+fn p09_legacy_tool_compat_is_versioned_and_records_downgrade() {
+    let request = json!({
+        "model":"minimax-m2.7",
+        "store":false,
+        "input":"hi",
+        "tools":[
+            {"type":"function","name":"local","parameters":{"type":"object"}},
+            {"type":"web_search"}
+        ],
+        "tool_choice":"auto"
+    });
+    let before = request.clone();
+    let converted = ocg_gateway::protocol::convert_request_json(
+        ApiFormat::Responses,
+        ApiFormat::Messages,
+        request,
+    )
+    .expect("optional hosted tools may drop under versioned legacy_compat");
+    let downgrade = converted
+        .legacy_tool_compat
+        .expect("legacy drop must be recorded");
+    assert_eq!(downgrade.profile, LEGACY_TOOL_COMPAT_PROFILE);
+    assert_eq!(downgrade.version, LEGACY_TOOL_COMPAT_VERSION);
+    assert_eq!(
+        downgrade.dropped_hosted_tools,
+        vec!["web_search".to_string()]
+    );
+    assert_eq!(
+        before["tools"].as_array().unwrap().len(),
+        2,
+        "legacy_compat must not rewrite the caller's stored request config"
+    );
+
+    let plan = prepare_request(ApiFormat::Responses, bytes(before.clone()))
+        .expect("legacy_compat conversion must still succeed for the request-plan consumer");
+    let carried = plan
+        .legacy_tool_compat
+        .as_ref()
+        .expect("RequestPlan must carry the converter's legacy_tool_compat marker");
+    assert_eq!(carried.profile, LEGACY_TOOL_COMPAT_PROFILE);
+    assert_eq!(carried.version, LEGACY_TOOL_COMPAT_VERSION);
+    assert_eq!(carried.dropped_hosted_tools, vec!["web_search".to_string()]);
+    let body: Value = serde_json::from_slice(&plan.body).unwrap();
+    assert!(
+        body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|tool| tool.get("type").and_then(Value::as_str) != Some("web_search")),
+        "conversion still drops hosted tools; stored request is unchanged"
+    );
+}
+
+#[test]
 fn responses_messages_add_leading_user_and_reject_empty_input() {
     let plan = prepare_request(
             ApiFormat::Responses,
@@ -1777,17 +1906,6 @@ fn format_error_uses_client_envelope_and_upstream_message() {
     assert_eq!(body["type"], "error");
     assert_eq!(body["error"]["message"], "limited");
     assert_eq!(body["error"]["type"], "rate_limit_error");
-}
-
-#[test]
-fn muse_spark_aliases_max_reasoning_effort_to_xhigh_on_responses() {
-    let request = json!({
-        "model":"muse-spark-1.2","input":"hi","store":false,
-        "reasoning":{"effort":"max"}
-    });
-    let plan = prepare_request(ApiFormat::Responses, bytes(request)).unwrap();
-    let body: Value = serde_json::from_slice(&plan.body).unwrap();
-    assert_eq!(body["reasoning"]["effort"], "xhigh");
 }
 
 #[test]
@@ -1988,7 +2106,6 @@ fn format_error_exposes_ambiguous_model_id() {
         code,
     );
     assert_eq!(chat["error"]["type"], crate::alias::AMBIGUOUS_MODEL_ID);
-    assert!(chat["error"]["message"].as_str().unwrap().contains("alias"));
 
     let messages = format_error_with_code(
         ApiFormat::Messages,

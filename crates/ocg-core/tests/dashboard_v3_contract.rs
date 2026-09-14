@@ -1,4 +1,4 @@
-//! Dashboard V3 contract kernel: schema drift, coexistence, auth, and process generation.
+//! Dashboard V3 contract kernel: schema drift, public auth, and process generation.
 
 use ocg_core::dashboard_v3::{ControlRevision, contract_schema_pretty};
 use reqwest::StatusCode;
@@ -57,8 +57,8 @@ fn process_generation_is_stable_per_core_state_and_differs_across_fresh_states()
 }
 
 #[tokio::test]
-async fn v2_coexists_with_v3_contract_routes() {
-    let harness = start_loopback("coexist").await;
+async fn public_auth_status_and_v3_contract_are_reachable() {
+    let harness = start_loopback("public-auth-contract").await;
     let auth = harness
         .client
         .get(format!("{}/auth/status", harness.v2_base))
@@ -84,6 +84,11 @@ async fn v2_coexists_with_v3_contract_routes() {
         parsed.pricing_revision,
         harness.state.pricing_snapshot().revision
     );
+    let second = harness
+        .get_json(&format!("{}/contract", harness.v3_base))
+        .await
+        .1;
+    assert_eq!(contract["processGeneration"], second["processGeneration"]);
 
     harness.stop();
 }
@@ -164,20 +169,5 @@ async fn v3_session_cookie_from_v2_login_authorizes_contract_routes() {
         harness.state.process_generation()
     );
 
-    harness.stop();
-}
-
-#[tokio::test]
-async fn http_process_generation_is_stable_within_one_core_state() {
-    let harness = start_loopback("http-generation").await;
-    let first = harness
-        .get_json(&format!("{}/contract", harness.v3_base))
-        .await
-        .1;
-    let second = harness
-        .get_json(&format!("{}/contract", harness.v3_base))
-        .await
-        .1;
-    assert_eq!(first["processGeneration"], second["processGeneration"]);
     harness.stop();
 }

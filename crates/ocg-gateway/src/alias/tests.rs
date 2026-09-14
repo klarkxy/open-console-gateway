@@ -194,8 +194,25 @@ fn is_published_alias(name: &str) -> bool {
     matches!(resolve(name), Ok(ResolvedModel::Alias { .. }))
 }
 
-fn seeded_free_models() -> Vec<String> {
-    ZenFreeModelCatalog::default().models
+/// A refreshed Zen Free catalog used only as a test fixture. The builtin
+/// registry stays empty until an official `/models` snapshot is supplied.
+fn example_zen_free_catalog() -> Vec<String> {
+    [
+        "deepseek-v4-flash-free",
+        "ling-3.0-flash-fin-free",
+        "mimo-v2.5-free",
+        "muse-spark-1.2-contributor-free",
+        "muse-spark-1.3-contributor-free",
+        "nemotron-3-ultra-free",
+        "nemotron-3.5-lightning-free",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
+fn resolve_with_example_zen(requested: &str) -> Result<ResolvedModel, ResolveError> {
+    resolve_with_provider_models(requested, &example_zen_free_catalog(), &[])
 }
 
 #[test]
@@ -245,7 +262,7 @@ fn raw_looking_names_do_not_collapse_onto_kebab_aliases() {
 
 #[test]
 fn free_ids_are_exact_pins_and_only_stripped_aliases_are_published() {
-    let resolved = resolve("deepseek-v4-flash-free").expect("Zen model id");
+    let resolved = resolve_with_example_zen("deepseek-v4-flash-free").expect("Zen model id");
     match resolved {
         ResolvedModel::PinnedRaw { mapping, .. } => {
             assert!(mapping.is_zen_free());
@@ -254,19 +271,30 @@ fn free_ids_are_exact_pins_and_only_stripped_aliases_are_published() {
         other => panic!("expected raw pin, got {other:?}"),
     }
     assert!(matches!(
-        resolve("deepseek-v4-flash"),
+        resolve_with_example_zen("deepseek-v4-flash"),
         Ok(ResolvedModel::Alias { mappings, .. }) if mappings.iter().any(ProviderMapping::is_zen_free)
     ));
     assert!(
-        !published_aliases()
+        !published_routeable_aliases_with_zen(&example_zen_free_catalog())
             .iter()
-            .any(|alias| alias == "deepseek-v4-flash-free")
+            .any(|entry| entry.alias == "deepseek-v4-flash-free")
+    );
+    assert!(
+        resolve("deepseek-v4-flash-free").is_err(),
+        "unfetched Zen must not leave a leftover seed pin in the builtin registry"
     );
 }
 
 #[test]
 fn shared_aliases_record_go_and_zen_mappings_in_the_registry() {
     match resolve("mimo-v2.5").unwrap() {
+        ResolvedModel::Alias { mappings, .. } => {
+            assert_eq!(mappings.len(), 1);
+            assert!(mappings[0].is_opencode_go());
+        }
+        other => panic!("expected Go-only builtin alias, got {other:?}"),
+    }
+    match resolve_with_example_zen("mimo-v2.5").unwrap() {
         ResolvedModel::Alias { mappings, .. } => {
             assert_eq!(mappings.len(), 2);
             assert!(mappings[0].is_opencode_go());
@@ -494,28 +522,24 @@ fn refreshed_zen_models_derive_stripped_aliases_from_the_free_suffix() {
 #[test]
 fn registry_covers_every_opencode_protocol_id() {
     let aliases = published_aliases();
-    let free_models = seeded_free_models();
+    let free_models = example_zen_free_catalog();
     for id in supported_model_ids() {
-        if id == "big-pickle" || (is_free_model(id) && !free_models.iter().any(|free| free == id)) {
+        if id == "big-pickle" || is_free_model(id) {
             continue;
         }
-        let expected_alias = if is_free_model(id) {
-            stripped_free_alias(id).expect("free protocol id has a stripped alias")
-        } else {
-            id
-        };
         assert!(
-            aliases.iter().any(|alias| alias == expected_alias),
+            aliases.iter().any(|alias| alias == id),
             "MODEL_PROTOCOLS id `{id}` must have an alias"
         );
     }
+    let published_zen = published_routeable_aliases_with_zen(&free_models);
     for id in &free_models {
-        let alias = stripped_free_alias(id).expect("seeded Zen ids end in -free");
+        let alias = stripped_free_alias(id).expect("refreshed Zen ids end in -free");
         assert!(
-            aliases.iter().any(|item| item == alias),
+            published_zen.iter().any(|item| item.alias == alias),
             "Zen `-free` catalog rows must publish the stripped alias `{alias}`"
         );
-        assert!(resolve(id).unwrap().routeable_mappings()[0].is_zen_free());
+        assert!(resolve_with_example_zen(id).unwrap().routeable_mappings()[0].is_zen_free());
     }
     assert!(!aliases.iter().any(|alias| alias.contains("goat")));
     assert!(
@@ -614,9 +638,8 @@ fn slash_prefixed_goat_raw_pins_to_command_code_and_does_not_steal_go() {
                 .iter()
                 .filter(|mapping| mapping.routeable)
                 .collect::<Vec<_>>();
-            assert_eq!(routeable.len(), 2);
+            assert_eq!(routeable.len(), 1);
             assert!(routeable.iter().any(|mapping| mapping.is_opencode_go()));
-            assert!(routeable.iter().any(|mapping| mapping.is_zen_free()));
             assert_eq!(
                 routeable
                     .iter()
@@ -627,6 +650,18 @@ fn slash_prefixed_goat_raw_pins_to_command_code_and_does_not_steal_go() {
             );
         }
         other => panic!("expected published Go alias, got {other:?}"),
+    }
+    match resolve_with_example_zen(COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS).unwrap() {
+        ResolvedModel::Alias { mappings, .. } => {
+            let routeable = mappings
+                .iter()
+                .filter(|mapping| mapping.routeable)
+                .collect::<Vec<_>>();
+            assert_eq!(routeable.len(), 2);
+            assert!(routeable.iter().any(|mapping| mapping.is_opencode_go()));
+            assert!(routeable.iter().any(|mapping| mapping.is_zen_free()));
+        }
+        other => panic!("refreshed Zen must join the Go kebab alias, got {other:?}"),
     }
     assert!(is_published_alias(
         COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS
@@ -863,8 +898,18 @@ fn fail_closed_raw_mapping_is_not_routeable() {
 #[test]
 fn catalog_aliases_are_routeable_mappings_in_registry_order() {
     let go = routeable_aliases_for(OPENCODE_PROVIDER_ID);
-    let zen = routeable_aliases_for(OPENCODE_ZEN_FREE_PROVIDER_ID);
-    let free_models = seeded_free_models();
+    let free_models = example_zen_free_catalog();
+    assert!(
+        routeable_aliases_for(OPENCODE_ZEN_FREE_PROVIDER_ID).is_empty(),
+        "unfetched Zen must not publish leftover seed aliases"
+    );
+    let zen = routeable_aliases_for_with_extended_catalogs(
+        OPENCODE_ZEN_FREE_PROVIDER_ID,
+        &free_models,
+        &[],
+        &[],
+        &[],
+    );
     assert!(!go.is_empty());
     assert!(!zen.is_empty());
     let mut sorted_go = go.clone();

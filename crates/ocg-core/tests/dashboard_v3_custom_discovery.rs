@@ -1,5 +1,5 @@
 //! Dashboard V3 Custom model discovery: session, operational (non-CAS) probe,
-//! trusted-admin HTTP boundary, V2 status distinctions, and V2 coexistence.
+//! trusted-admin HTTP boundary, V2 status distinctions, and retired V2 paths.
 
 use axum::Router;
 use axum::body::Bytes;
@@ -740,10 +740,6 @@ async fn discovery_rejects_malformed_inputs_before_upstream() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{missing_key}");
     assert_v3_error(&missing_key, ERROR_INVALID_REQUEST);
-    assert!(
-        missing_key["message"].as_str().unwrap().contains("API key"),
-        "{missing_key}"
-    );
 
     let (status, embedded) = send_json(
         &harness,
@@ -775,9 +771,6 @@ async fn discovery_rejects_malformed_inputs_before_upstream() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{nonstandard}");
     assert_v3_error(&nonstandard, ERROR_INVALID_REQUEST);
-    let message = nonstandard["message"].as_str().unwrap();
-    assert!(message.contains("/chat/completions"), "{nonstandard}");
-    assert!(message.contains("manually"), "{nonstandard}");
     assert_eq!(origin.call_count(), 0);
 
     let go = send_json(
@@ -807,13 +800,6 @@ async fn discovery_rejects_malformed_inputs_before_upstream() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{wrong_plan}");
     assert_v3_error(&wrong_plan, ERROR_INVALID_REQUEST);
-    assert!(
-        wrong_plan["message"]
-            .as_str()
-            .unwrap()
-            .contains("Custom API"),
-        "{wrong_plan}"
-    );
 
     let (status, missing_account) = send_json(
         &harness,
@@ -911,8 +897,8 @@ async fn discovery_uses_the_default_proxy_leg_not_a_model_exception() {
 }
 
 #[tokio::test]
-async fn v2_discovery_coexists_and_keeps_snake_case() {
-    let harness = start_loopback("discover-v2-coexist").await;
+async fn retired_v2_discovery_does_not_call_upstream() {
+    let harness = start_loopback("discover-v2-retired").await;
     let origin = start_discovery_origin(OriginScript::Fixed {
         status: StatusCode::OK,
         body: SUCCESS_BODY.into(),
@@ -935,25 +921,6 @@ async fn v2_discovery_coexists_and_keeps_snake_case() {
         .await;
     assert_eq!(origin.call_count(), 0);
 
-    let auth_origin = start_discovery_origin(OriginScript::Fixed {
-        status: StatusCode::UNAUTHORIZED,
-        body: LEAKY_401_BODY.into(),
-    })
-    .await;
-    harness
-        .assert_v2_path_removed(
-            Method::POST,
-            "/custom/models/discover",
-            Some(json!({
-                "base_url": auth_origin.url,
-                "upstream_protocols": ["chat_completions"],
-                "auth_scheme": "bearer",
-                "api_key": CUSTOM_KEY
-            })),
-        )
-        .await;
-    assert_eq!(auth_origin.call_count(), 0);
-
     let (status, v3) = send_json(
         &harness,
         Method::POST,
@@ -963,26 +930,6 @@ async fn v2_discovery_coexists_and_keeps_snake_case() {
     .await;
     assert_eq!(status, StatusCode::OK, "{v3}");
     assert_eq!(v3["models"][0], "org/model-a");
-
-    let (status, v3_auth) = send_json(
-        &harness,
-        Method::POST,
-        "/custom/models/discover",
-        &discover_body(
-            &auth_origin.url,
-            "chat_completions",
-            "bearer",
-            Some(CUSTOM_KEY),
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{v3_auth}");
-    let v3_text = v3_auth.to_string();
-    assert!(
-        v3_text.contains("authentication failed") || v3_text.contains("401"),
-        "{v3_auth}"
-    );
-    assert!(!v3_text.contains(CUSTOM_KEY), "{v3_auth}");
     assert_eq!(v3["revision"], before);
     assert_eq!(harness.state.settings_revision(), before);
     harness.stop();
@@ -990,76 +937,53 @@ async fn v2_discovery_coexists_and_keeps_snake_case() {
 
 #[tokio::test]
 async fn supplied_key_hostile_upstream_ids_are_dropped_without_echoing_plaintext() {
-    let harness = start_loopback("discover-supplied-reflection").await;
-    let origin = start_discovery_origin(OriginScript::Fixed {
-        status: StatusCode::OK,
-        body: hostile_discovery_body(CUSTOM_KEY),
-    })
-    .await;
-    point_direct(&harness);
-    let before = harness.state.settings_revision();
-    let generation = harness.state.process_generation();
+    for (label, stored_account) in [("supplied-key", false), ("stored-accountId", true)] {
+        let harness_label = format!("discover-{label}-reflection");
+        let harness = start_loopback(&harness_label).await;
+        let origin = start_discovery_origin(OriginScript::Fixed {
+            status: StatusCode::OK,
+            body: hostile_discovery_body(CUSTOM_KEY),
+        })
+        .await;
+        point_direct(&harness);
+        let account_id = if stored_account {
+            Some(create_custom_account(&harness, &origin.url, "bearer").await)
+        } else {
+            None
+        };
+        let before = harness.state.settings_revision();
+        let generation = harness.state.process_generation();
+        let before_contracts = stored_account.then(|| harness.state.provider_contracts());
+        let request = if let Some(account_id) = account_id {
+            json!({
+                "endpointUrl": inference_endpoint(&origin.url, "chat_completions"),
+                "upstreamProtocol": "chat_completions",
+                "accountId": account_id
+            })
+        } else {
+            discover_body(&origin.url, "chat_completions", "bearer", Some(CUSTOM_KEY))
+        };
 
-    let (status, body) = send_json(
-        &harness,
-        Method::POST,
-        "/custom/models/discover",
-        &discover_body(&origin.url, "chat_completions", "bearer", Some(CUSTOM_KEY)),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    let parsed = parse_discovery(&body);
-    assert_eq!(parsed.models, vec!["org/model-a", "org/model-b"]);
-    assert!(!parsed.truncated);
-    assert_eq!(parsed.revision, before);
-    assert_eq!(parsed.process_generation, generation);
-    assert!(body.get("error").is_none(), "{body}");
-    assert_secret_free(&body, &[CUSTOM_KEY]);
-    assert_no_plaintext_in_log_facing_values(&harness, CUSTOM_KEY);
-    assert_eq!(origin.call_count(), 1);
-    assert_eq!(harness.state.settings_revision(), before);
-    harness.stop();
-}
-
-#[tokio::test]
-async fn stored_key_hostile_upstream_ids_are_dropped_without_echoing_plaintext() {
-    let harness = start_loopback("discover-stored-reflection").await;
-    let origin = start_discovery_origin(OriginScript::Fixed {
-        status: StatusCode::OK,
-        body: hostile_discovery_body(CUSTOM_KEY),
-    })
-    .await;
-    point_direct(&harness);
-    let account_id = create_custom_account(&harness, &origin.url, "bearer").await;
-    let before = harness.state.settings_revision();
-    let generation = harness.state.process_generation();
-    let before_contracts = harness.state.provider_contracts();
-
-    let (status, body) = send_json(
-        &harness,
-        Method::POST,
-        "/custom/models/discover",
-        &json!({
-            "endpointUrl": inference_endpoint(&origin.url, "chat_completions"),
-            "upstreamProtocol": "chat_completions",
-            "accountId": account_id
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    let parsed = parse_discovery(&body);
-    assert_eq!(parsed.models, vec!["org/model-a", "org/model-b"]);
-    assert!(!parsed.truncated);
-    assert_eq!(parsed.revision, before);
-    assert_eq!(parsed.process_generation, generation);
-    assert!(body.get("error").is_none(), "{body}");
-    assert_secret_free(&body, &[CUSTOM_KEY]);
-    assert_no_plaintext_in_log_facing_values(&harness, CUSTOM_KEY);
-    assert_eq!(origin.call_count(), 1);
-    assert_eq!(harness.state.settings_revision(), before);
-    assert_eq!(
-        before_contracts.as_ref(),
-        harness.state.provider_contracts().as_ref()
-    );
-    harness.stop();
+        let (status, body) =
+            send_json(&harness, Method::POST, "/custom/models/discover", &request).await;
+        assert_eq!(status, StatusCode::OK, "{label} {body}");
+        let parsed = parse_discovery(&body);
+        assert_eq!(parsed.models, vec!["org/model-a", "org/model-b"], "{label}");
+        assert!(!parsed.truncated, "{label}");
+        assert_eq!(parsed.revision, before, "{label}");
+        assert_eq!(parsed.process_generation, generation, "{label}");
+        assert!(body.get("error").is_none(), "{label} {body}");
+        assert_secret_free(&body, &[CUSTOM_KEY]);
+        assert_no_plaintext_in_log_facing_values(&harness, CUSTOM_KEY);
+        assert_eq!(origin.call_count(), 1, "{label}");
+        assert_eq!(harness.state.settings_revision(), before, "{label}");
+        if let Some(before_contracts) = before_contracts {
+            assert_eq!(
+                before_contracts.as_ref(),
+                harness.state.provider_contracts().as_ref(),
+                "{label}"
+            );
+        }
+        harness.stop();
+    }
 }

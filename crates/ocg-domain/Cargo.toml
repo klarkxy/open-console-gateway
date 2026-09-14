@@ -10,5 +10,11 @@ description = "Pure domain identities, catalogs, protocol policy, and Zen model 
 
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["serde", "std"] }
+schemars = { version = "1.2", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+uuid = { version = "1", features = ["v5"] }
+
+[features]
+default = []
+schemars = ["dep:schemars"]

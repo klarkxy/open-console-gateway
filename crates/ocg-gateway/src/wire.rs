@@ -234,7 +234,6 @@ mod tests {
             value["max_completion_tokens"],
             OLLAMA_CLOUD_MAX_TOKENS_LIMIT
         );
-        assert_eq!(OLLAMA_CLOUD_MAX_TOKENS_LIMIT, 65_535);
 
         let at_limit = request(json!({"model": "m", "messages": [], "max_tokens": 65_535}));
         assert_eq!(

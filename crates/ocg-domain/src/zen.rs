@@ -13,16 +13,6 @@ pub const ZEN_MODELS_SOURCE_URL: &str = "https://opencode.ai/zen/v1/models";
 pub(crate) const MAX_MODELS: usize = 256;
 pub(crate) const MAX_MODEL_ID_CHARS: usize = 200;
 
-const SEEDED_FREE_MODELS: &[&str] = &[
-    "deepseek-v4-flash-free",
-    "ling-3.0-flash-fin-free",
-    "mimo-v2.5-free",
-    "muse-spark-1.2-contributor-free",
-    "muse-spark-1.3-contributor-free",
-    "nemotron-3-ultra-free",
-    "nemotron-3.5-lightning-free",
-];
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ZenFreeModelCatalog {
     pub models: Vec<String>,
@@ -33,10 +23,7 @@ pub struct ZenFreeModelCatalog {
 impl Default for ZenFreeModelCatalog {
     fn default() -> Self {
         Self {
-            models: SEEDED_FREE_MODELS
-                .iter()
-                .map(|id| (*id).to_string())
-                .collect(),
+            models: Vec::new(),
             refreshed_at: None,
             source_url: ZEN_MODELS_SOURCE_URL.to_string(),
         }

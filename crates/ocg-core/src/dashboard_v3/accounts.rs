@@ -18,9 +18,10 @@ use crate::db::ReorderAccountsError;
 use crate::models::{
     Account as ModelAccount, AccountCustomConfigInput, AccountModelCapabilityInput,
     AccountSetupStep as ModelSetupStep, AccountType as ModelAccountType,
-    AccountUpdate as ModelAccountUpdate, normalize_account_notes, normalize_purchase_date,
+    AccountUpdate as ModelAccountUpdate, NEW_READY_KEY_ACCOUNT_ENABLED, normalize_account_notes,
+    normalize_purchase_date,
 };
-use crate::provider::{CreationAvailability, ProviderRegistry, default_provider_id};
+use crate::provider::{CreationAvailability, default_provider_id};
 use crate::redaction::redact_known_secret;
 use crate::state::CoreState;
 
@@ -180,7 +181,7 @@ fn create_dynamic_account_locked(
         key_cipher: state
             .encrypt_key(input.key.trim())
             .map_err(V3ApiError::internal)?,
-        enabled: true,
+        enabled: NEW_READY_KEY_ACCOUNT_ENABLED,
         account_type: ModelAccountType::Key,
         setup_step: ModelSetupStep::Ready,
         referral_code: None,
@@ -305,10 +306,7 @@ fn create_account_locked(
             ));
         }
     }
-    let enable_requires_verification = ProviderRegistry::get(plan.provider_id)
-        .is_some_and(|descriptor| descriptor.card_actions.enable_requires_verification);
-    let enabled = crate::provider::provider_allows_enablement(plan.provider_id)
-        && !enable_requires_verification;
+    let enabled = NEW_READY_KEY_ACCOUNT_ENABLED;
     let purchase_date = match input.purchase_date {
         Some(value) if !value.trim().is_empty() => normalize_purchase_date(&value)
             .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?,
@@ -689,10 +687,28 @@ fn put_custom_config_locked(
         &account,
         "custom config is only available for Custom API accounts",
     )?;
-    let config = AccountCustomConfigInput {
+    let mut config = AccountCustomConfigInput {
         endpoint_url: input.endpoint_url,
         upstream_protocol: input.upstream_protocol.into(),
     };
+    {
+        let db = state.db.lock();
+        if let Some(endpoint) = db
+            .platform_endpoint(id, config.upstream_protocol)
+            .map_err(V3ApiError::internal)?
+        {
+            let old = db.account_custom_config(id).map_err(V3ApiError::internal)?;
+            if config.endpoint_url != endpoint
+                && old.is_none_or(|c| c.endpoint_url != config.endpoint_url)
+            {
+                return Err(V3ApiError::invalid_request_at(
+                    state,
+                    "endpoint belongs to the platform account; unlink the Key to change it",
+                ));
+            }
+            config.endpoint_url = endpoint;
+        }
+    }
     let capabilities = input
         .model_capabilities
         .iter()
@@ -893,6 +909,10 @@ fn account_from_state(state: &CoreState, account: ModelAccount) -> Result<Accoun
         })
     };
     let plan = crate::provider::builtin_provider(&account.provider_id);
+    // A stored legacy purchase anchor is not evidence of a dynamic Provider's
+    // billing cadence or credential expiry. Keep storage intact, but do not
+    // publish invented subscription dates for these account-owned Keys.
+    let has_builtin_lifecycle = plan.is_some();
     Ok(Account {
         id: account.id.clone(),
         provider_id: account.provider_id.clone(),
@@ -904,8 +924,16 @@ fn account_from_state(state: &CoreState, account: ModelAccount) -> Result<Accoun
         enabled: account.enabled,
         account_type: account.account_type.into(),
         setup_step: account.setup_step.into(),
-        purchase_date: account.purchase_date,
-        expires_on: account.expires_on,
+        purchase_date: if has_builtin_lifecycle {
+            account.purchase_date
+        } else {
+            String::new()
+        },
+        expires_on: if has_builtin_lifecycle {
+            account.expires_on
+        } else {
+            String::new()
+        },
         cooldown_until: account.cooldown_until.map(|t| t.to_rfc3339()),
         cooldown_generic_until: account.cooldown_generic_until.map(|t| t.to_rfc3339()),
         cooldown_5h_until: account.cooldown_5h_until.map(|t| t.to_rfc3339()),

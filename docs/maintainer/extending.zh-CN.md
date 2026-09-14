@@ -2,7 +2,7 @@
 
 # 扩展 Open Console Gateway
 
-供应商适配器与外部接入是当前扩展路径。下文的旧应用连接器路径已退役。
+供应商适配器与外部接入是当前扩展路径。
 
 ## 1. 供应商或套餐：静态、密封
 
@@ -11,14 +11,17 @@
 1. 在 `ocg-domain`（`ids.rs`、`provider.rs`）加入身份与目录事实，穷尽扩展 `ProviderAdapterKind`，并保持每个静态 Provider 的合约范围稳定。Provider 与 Plan 是同一个 `provider_id` 身份。Custom 保持 `ConfigurableHttp`。
 2. 在 `ocg-domain::protocol` 加所需协议行，在 `ocg-gateway::alias` 加 Alias mapping。请求路径使用已保存的合约。
 3. 在 `ocg-core` 实现只返回 `AttemptSpec` 的 `resolve_route`。适配器不能持有 DB、`CoreState` 或原始 reqwest client。
-4. 控制面与路由语义未完成前保持 fail closed，完成后测试 domain、gateway 与 core 边界。
+4. 在 schema v42 的 builtin 种子中登记该密封适配器，使统一 `providers` 表以 `builtin` 行的形式在 V3 Provider 目录中暴露。行的 `endpoint_url` / `upstream_protocol` / `auth_kind` / `offering` / `endpoint_per_account` 列是密封注册表的展示镜像——流量与路由仍然只走密封适配器代码常量，绝不读取已种子化的行。同时把新 id 加入 `ocg-domain::provider` 的 `builtin_offering` 映射（付费家族为 `plan`，免费或账号所有为 `api`）。CPA 是静态外部接入，**不**进种子表：不要在这里登记。
+5. 控制面与路由语义未完成前保持 fail closed，完成后测试 domain、gateway 与 core 边界。
 
 Provider 注册表始终静态、密封。
 每个静态 Provider 在自己的单一 `provider_id` 身份下拥有目录、证据与覆盖状态。
 
+新增 **preset**（`resources/provider-presets.json` 中的用户定义供应商模板）只需在 JSON 中加入条目；若该 preset 声明 `plan` offering，还需在 `ocg-domain::provider` 的 `PRESET_OFFERINGS` 映射中加入一条，使 `preset_offering(preset_id)` 返回 `"plan"`。其他 preset 保持默认 `"api"`。
+
 ## 2. 旧应用连接器：已退役
 
-旧 Applications 子系统、教程生成、自动连接器与 Pi/DSH 模板已整套退役，不再扩展这套实现。残留代码待清理，后续新方案另行设计，见[退役说明](../user/applications.zh-CN.md)。
+旧 Applications 子系统、教程生成、自动连接器与 Pi/DSH 模板的实现已经移除，不再扩展这套实现。后续新方案另行设计，见[退役说明](../user/applications.zh-CN.md)。
 
 ## 3. 外部接入：静态本机服务适配器
 
@@ -31,7 +34,11 @@ Provider 注册表始终静态、密封。
 
 CPA 是此路径的当前实例。适合时复用已有 helper；需要抽取通用框架时，应以实际使用它的接入需求说明理由。
 
-## Dashboard V3 端点变更
+## Dashboard V3 与 V4 端点变更
+
+新的供应商、connection 或凭据语义进入 `dashboard_v4`（`types.rs` 及其 `CATALOG_TYPE_NAMES`；路由在 `dashboard_v4/mod.rs`），并运行 `pnpm run contract:v4:check`。V3 不再接受新的 DTO 字段或路由，只修缺陷。
+
+冻结 V3 契约的维护步骤：
 
 1. 在 `dashboard_v3/types.rs` 增加或扩展 DTO，并把新名字追加到 `CATALOG_TYPE_NAMES`；既有 `$defs` 不变。
 2. 在 `dashboard_v3/mod.rs` 挂路由；写入走 `parse_mutation_json` 与 `check_expectation`，保持秘密脱敏。

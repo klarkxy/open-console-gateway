@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  APP_NAVIGATION,
-  APP_NAVIGATION_GROUPS,
   CORE_APP_NAVIGATION,
   EXTENSION_APP_NAVIGATION,
   PROVIDER_OTHER_TAB,
   applyAppViewSearchParams,
   isLegacyPricingView,
-  readProviderScopeQuery,
+  normalizeProviderDetailTab,
+  readAccountAddDeepLink,
+  readProviderPageQuery,
   resolveAppViewKey,
 } from "./app-navigation.ts";
 
@@ -18,8 +18,6 @@ test("navigation metadata keeps the fixed core order and exposes CPA under Exten
     ["dashboard", "keys", "accounts", "providers", "aliases", "logs", "settings"],
   );
   assert.deepEqual(EXTENSION_APP_NAVIGATION.map(({ key }) => key), ["cpa"]);
-  assert.equal(APP_NAVIGATION_GROUPS.extensions.label, "扩展");
-  assert.equal(APP_NAVIGATION.find(({ key }) => key === "cpa")?.label, "CPA");
 });
 
 test("legacy pricing view keys resolve to providers without inventing a second entry", () => {
@@ -33,53 +31,148 @@ test("legacy pricing view keys resolve to providers without inventing a second e
 });
 
 test("provider deep-link query fields round-trip on the providers view", () => {
-  assert.deepEqual(readProviderScopeQuery("?view=providers&scope_kind=provider&scope_id=command-code"), {
-    scope_kind: "provider",
-    scope_id: "command-code",
+  assert.deepEqual(readProviderPageQuery("?view=providers&provider=command-code"), {
+    connection: null,
+    provider: "command-code",
     tab: null,
+    add: false,
+    preset: null,
   });
   const url = applyAppViewSearchParams(
     new URL("http://127.0.0.1:9042/dashboard/?view=accounts"),
     "providers",
-    { scope_kind: "custom_endpoint", scope_id: "acc-9" },
+    { provider: "minimax", tab: "pricing" },
   );
   assert.equal(url.searchParams.get("view"), "providers");
-  assert.equal(url.searchParams.get("scope_kind"), "custom_endpoint");
-  assert.equal(url.searchParams.get("scope_id"), "acc-9");
-  assert.equal(url.searchParams.get("tab"), null);
+  assert.equal(url.searchParams.get("provider"), "minimax");
+  assert.equal(url.searchParams.get("connection"), null);
+  assert.equal(url.searchParams.get("tab"), "pricing");
+  assert.deepEqual(readProviderPageQuery(url.search), {
+    connection: null,
+    provider: "minimax",
+    tab: "pricing",
+    add: false,
+    preset: null,
+  });
 });
 
-test("the OpenCode Go Other tab round-trips on the providers view", () => {
-  assert.deepEqual(
-    readProviderScopeQuery("?view=providers&scope_kind=provider&scope_id=opencode&tab=other"),
-    {
-      scope_kind: "provider",
-      scope_id: "opencode",
-      tab: PROVIDER_OTHER_TAB,
-    },
-  );
+test("writing a connection id emits connection= and strips a leftover provider=", () => {
   const url = applyAppViewSearchParams(
+    new URL("http://127.0.0.1:9042/dashboard/?view=providers&provider=opencode"),
+    "providers",
+    { connection: "uuid-open", tab: "settings" },
+  );
+  assert.equal(url.searchParams.get("connection"), "uuid-open");
+  assert.equal(url.searchParams.get("provider"), null);
+  assert.deepEqual(readProviderPageQuery(url.search), {
+    connection: "uuid-open",
+    provider: null,
+    tab: "settings",
+    add: false,
+    preset: null,
+  });
+});
+
+test("the add flow round-trips with and without a preset", () => {
+  const browse = applyAppViewSearchParams(
     new URL("http://127.0.0.1:9042/dashboard/?view=accounts"),
     "providers",
-    { scope_kind: "provider", scope_id: "opencode", tab: PROVIDER_OTHER_TAB },
+    { add: true },
   );
-  assert.equal(url.searchParams.get("tab"), PROVIDER_OTHER_TAB);
-  const catalog = applyAppViewSearchParams(url, "providers", {
-    scope_kind: "provider",
-    scope_id: "opencode",
+  assert.deepEqual(readProviderPageQuery(browse.search), {
+    connection: null,
+    provider: null,
+    tab: null,
+    add: true,
+    preset: null,
   });
-  assert.equal(catalog.searchParams.get("tab"), null);
+  const form = applyAppViewSearchParams(
+    new URL("http://127.0.0.1:9042/dashboard/?view=accounts"),
+    "providers",
+    { add: true, preset: "openai" },
+  );
+  assert.equal(form.searchParams.get("add"), "1");
+  assert.equal(form.searchParams.get("preset"), "openai");
+  assert.deepEqual(readProviderPageQuery(form.search), {
+    connection: null,
+    provider: null,
+    tab: null,
+    add: true,
+    preset: "openai",
+  });
 });
 
-test("leaving providers strips scope query fields", () => {
+test("legacy provider scope links map onto the new query", () => {
+  assert.deepEqual(
+    readProviderPageQuery("?view=providers&scope_kind=provider&scope_id=command-code"),
+    { connection: null, provider: "command-code", tab: null, add: false, preset: null },
+  );
+  assert.deepEqual(
+    readProviderPageQuery("?view=providers&scope_kind=dynamic&scope_id=acme"),
+    { connection: null, provider: "acme", tab: null, add: false, preset: null },
+  );
+  assert.deepEqual(
+    readProviderPageQuery("?view=providers&scope_kind=preset&scope_id=openai"),
+    { connection: null, provider: null, tab: null, add: true, preset: "openai" },
+  );
+  // Account-owned custom endpoint scopes have no provider row; degrade to the
+  // default selection instead of failing.
+  assert.deepEqual(
+    readProviderPageQuery("?view=providers&scope_kind=custom_endpoint&scope_id=acc-9"),
+    { connection: null, provider: null, tab: null, add: false, preset: null },
+  );
+  // An explicit new-style parameter always wins over a stale legacy one.
+  assert.deepEqual(
+    readProviderPageQuery("?view=providers&provider=kimi&scope_kind=provider&scope_id=opencode"),
+    { connection: null, provider: "kimi", tab: null, add: false, preset: null },
+  );
+});
+
+test("legacy provider tab values map onto the detail tabs", () => {
+  assert.equal(normalizeProviderDetailTab("catalog"), "models");
+  assert.equal(normalizeProviderDetailTab(PROVIDER_OTHER_TAB), "settings");
+  assert.equal(normalizeProviderDetailTab("models"), "models");
+  assert.equal(normalizeProviderDetailTab("pricing"), "pricing");
+  assert.equal(normalizeProviderDetailTab("settings"), "settings");
+  assert.equal(normalizeProviderDetailTab("nope"), null);
+  assert.equal(normalizeProviderDetailTab(null), null);
+  assert.deepEqual(
+    readProviderPageQuery("?view=providers&scope_kind=provider&scope_id=opencode&tab=other"),
+    { connection: null, provider: "opencode", tab: "settings", add: false, preset: null },
+  );
+  assert.deepEqual(
+    readProviderPageQuery("?view=providers&provider=opencode&tab=catalog"),
+    { connection: null, provider: "opencode", tab: "models", add: false, preset: null },
+  );
+});
+
+test("leaving providers strips provider query fields", () => {
   const url = applyAppViewSearchParams(
-    new URL("http://127.0.0.1:9042/dashboard/?view=providers&scope_kind=provider&scope_id=opencode&tab=other"),
+    new URL("http://127.0.0.1:9042/dashboard/?view=providers&provider=opencode&connection=uuid-open&tab=settings&add=1&preset=openai"),
     "logs",
   );
   assert.equal(url.searchParams.get("view"), "logs");
+  assert.equal(url.searchParams.get("connection"), null);
+  assert.equal(url.searchParams.get("provider"), null);
+  assert.equal(url.searchParams.get("tab"), null);
+  assert.equal(url.searchParams.get("add"), null);
+  assert.equal(url.searchParams.get("preset"), null);
+});
+
+test("writing the providers view never re-emits legacy scope parameters", () => {
+  const url = applyAppViewSearchParams(
+    new URL("http://127.0.0.1:9042/dashboard/?view=providers&scope_kind=provider&scope_id=opencode&tab=other"),
+    "providers",
+    { provider: "opencode", tab: "settings" },
+  );
   assert.equal(url.searchParams.get("scope_kind"), null);
   assert.equal(url.searchParams.get("scope_id"), null);
-  assert.equal(url.searchParams.get("tab"), null);
+  assert.equal(url.searchParams.get("provider"), "opencode");
+  assert.equal(url.searchParams.get("tab"), "settings");
+  // Leaving the view strips any stale legacy parameter too.
+  const logs = applyAppViewSearchParams(url, "logs");
+  assert.equal(logs.searchParams.get("scope_kind"), null);
+  assert.equal(logs.searchParams.get("tab"), null);
 });
 
 test("leaving Accounts strips a stale account deep-link parameter", () => {
@@ -89,4 +182,36 @@ test("leaving Accounts strips a stale account deep-link parameter", () => {
   );
   assert.equal(url.searchParams.get("view"), "providers");
   assert.equal(url.searchParams.get("account_id"), null);
+});
+
+test("the add-account deep link reads on Accounts and is stripped elsewhere", () => {
+  assert.equal(readAccountAddDeepLink("?view=accounts&add=custom-endpoint"), "custom-endpoint");
+  assert.equal(readAccountAddDeepLink("?view=accounts"), null);
+  // Wrong or missing view never qualifies, even with the parameter present.
+  assert.equal(readAccountAddDeepLink("?view=providers&add=custom-endpoint"), null);
+  assert.equal(readAccountAddDeepLink("?view=keys&add=custom-endpoint"), null);
+  assert.equal(readAccountAddDeepLink("?add=custom-endpoint"), null);
+  assert.equal(readAccountAddDeepLink(""), null);
+  const url = applyAppViewSearchParams(
+    new URL("http://127.0.0.1:9042/dashboard/?view=accounts&add=custom-endpoint"),
+    "logs",
+  );
+  assert.equal(url.searchParams.get("view"), "logs");
+  assert.equal(url.searchParams.get("add"), null);
+  const stay = applyAppViewSearchParams(
+    new URL("http://127.0.0.1:9042/dashboard/?view=providers&provider=openai"),
+    "accounts",
+  );
+  assert.equal(stay.searchParams.get("view"), "accounts");
+  assert.equal(stay.searchParams.get("provider"), null);
+});
+
+test("the Accounts add deep link survives a providers write untouched", () => {
+  // `add` is shared between the Accounts chooser deep link and the Providers
+  // add flow; writing one view's params must not clear the other's.
+  const url = applyAppViewSearchParams(
+    new URL("http://127.0.0.1:9042/dashboard/?view=accounts&add=custom-endpoint"),
+    "accounts",
+  );
+  assert.equal(url.searchParams.get("add"), "custom-endpoint");
 });

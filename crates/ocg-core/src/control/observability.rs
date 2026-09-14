@@ -1,4 +1,4 @@
-//! Local observability reads shared by Dashboard V2 and V3.
+//! Local observability reads for Dashboard V3.
 //!
 //! Every function is a runtime/SQLite read. None of these paths issue outbound
 //! HTTP. Secret redaction matches the historical V2 diagnostic/account-secret

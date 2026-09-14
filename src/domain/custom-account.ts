@@ -13,7 +13,7 @@ import type {
  * localhost, and metadata addresses. Client-side validation only rejects
  * malformed input, non-http(s) schemes, and URL-embedded credentials.
  */
-export const CUSTOM_PROVIDER_ID = "custom";
+const CUSTOM_PROVIDER_ID = "custom";
 
 export function isCustomApiAccount(
   account: Pick<Account, "provider_id">,
@@ -30,7 +30,7 @@ export const CUSTOM_ENDPOINT_URL_ISSUE_KEYS = {
   with_credentials: "Endpoint 不能包含用户名或密码",
 } as const satisfies Record<CustomEndpointUrlIssue, string>;
 
-export const MAX_CUSTOM_MODEL_ID_CHARS = 200;
+const MAX_CUSTOM_MODEL_ID_CHARS = 200;
 
 export type CustomCapabilityIssue =
   | "missing"
@@ -40,16 +40,6 @@ export type CustomCapabilityIssue =
   | "upstream_model_too_long"
   | "upstream_model_has_control_character"
   | "protocol_mismatch";
-
-export const CUSTOM_CAPABILITY_ISSUE_KEYS = {
-  missing: "请至少添加一个模型能力",
-  duplicate_public_model: "对外模型名不能重复",
-  public_model_too_long: "对外模型名最多 200 个字符",
-  public_model_has_control_character: "对外模型名不能包含控制字符",
-  upstream_model_too_long: "上游模型 ID 最多 200 个字符",
-  upstream_model_has_control_character: "上游模型 ID 不能包含控制字符",
-  protocol_mismatch: "模型能力必须使用所选上游协议",
-} as const satisfies Record<CustomCapabilityIssue, string>;
 
 export class CustomCapabilityError extends Error {
   readonly issue: CustomCapabilityIssue;
@@ -76,7 +66,7 @@ export function customEndpointUrlIssue(value: string): CustomEndpointUrlIssue | 
 }
 
 /** Comparison identity only; the submitted API URL preserves administrator input. */
-export function canonicalCustomEndpointUrl(value: string): string {
+function canonicalCustomEndpointUrl(value: string): string {
   const parsed = new URL(value.trim());
   if (parsed.username || parsed.password) {
     throw new Error("Custom Endpoint must not contain credentials");
@@ -126,18 +116,6 @@ export function customApiUrlNeedsManualModels(
 ): boolean {
   return customEndpointUrlIssue(endpointUrl) === null
     && !customApiUrlSupportsModelDiscovery(endpointUrl, protocol);
-}
-
-/** Discovery maps each exact upstream ID to the same public name by default. */
-export function expandCustomModelCapabilities(
-  modelIds: readonly string[],
-  upstreamProtocol: AccountProtocol,
-): Pick<AccountModelCapabilityInput, "public_model" | "upstream_model" | "protocol">[] {
-  return modelIds.map((model) => ({
-    public_model: model,
-    upstream_model: model,
-    protocol: upstreamProtocol,
-  }));
 }
 
 export function normalizeCustomCapabilities(
@@ -194,8 +172,6 @@ export type CustomAccountEditPlan = {
 export type CustomAccountEditWriters = {
   account: (update: AccountUpdate) => Promise<void>;
   customConfig: (config: AccountCustomConfigUpdateInput) => Promise<void>;
-  /** Accepted for source compatibility; edits now atomically use customConfig. */
-  capabilities?: (capabilities: AccountModelCapabilityInput[]) => Promise<void>;
 };
 
 function sameCapabilities(

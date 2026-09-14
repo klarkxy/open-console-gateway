@@ -4,6 +4,15 @@
 
 The dashboard is the gateway's own single-page Vue 3 interface. **Dashboard**, **Access Keys**, **Accounts**, **Providers**, **Aliases**, **Logs**, and **Settings** are its seven fixed core views in the left rail (or horizontal menu below 1024px). A divider below Settings starts the optional **Extensions** group; CPA is its local-only entry. On a Windows x64, macOS, or Linux x64 desktop app or CLI, that page can also install and manually start an OCG-owned CPA runtime; other platforms keep connect-only CPA. Theme and language switches and a sign-out button live in the header. It speaks ten languages — 简体中文, 繁體中文, English, 日本語, 한국어, Español, Français, Deutsch, Português (Brasil), and Русский — with 简体中文 as the default. Your choice persists in `localStorage` under `ocg-manager.locale`; when persistence is unavailable, the in-memory locale still works for the session.
 
+## Finding and editing configuration
+
+The Add account search filters plans, presets, saved Providers, and platform
+types together. Changing the search does not discard the selected form.
+On narrow screens, provider tables scroll inside their panel while the scope
+selector and catalog actions remain visible. Logs keep status, model, and time
+filters in view; **More filters** reveals the rest and shows how many of those
+filters are active. CPA pages guide you back to Overview when setup is needed.
+
 ## Dashboard V3
 
 The current SPA talks only to **`/dashboard/api/v3`**. All views — Connection Center, Access Keys, Accounts, Providers, Aliases, Logs, Settings — plus login, register, and logout use that path. Writes carry `expectedRevision` and `processGeneration` for CAS; if another tab saves first, the server returns HTTP 409 with code `revisionConflict`. The SPA refreshes its control tokens and the affected resource, but never auto-replays the rejected change; review the current value and submit again. These tokens are process-local, so separate processes sharing one data directory are not a coordinated CAS domain. The OpenCode Go pricing snapshot uses its own `pricingRevision`, independent of the settings tokens.

@@ -14,10 +14,10 @@
       </n-alert>
       <n-form label-placement="top" @submit.prevent="exportBundle">
         <n-form-item :label="t('迁移包密码')" :feedback="t('至少 12 个字符；此密码只用于加密迁移文件，密码丢失后无法找回。')" required>
-          <n-input v-model:value="bundlePassword" type="password" show-password-on="click" autocomplete="new-password" :disabled="operationLocked" />
+          <n-input v-model:value="bundlePassword" :input-props="{ 'aria-label': t('迁移包密码') }" type="password" show-password-on="click" autocomplete="new-password" :disabled="operationLocked" />
         </n-form-item>
         <n-form-item :label="t('确认迁移包密码')" required>
-          <n-input v-model:value="bundlePasswordConfirmation" type="password" show-password-on="click" autocomplete="new-password" :disabled="operationLocked" />
+          <n-input v-model:value="bundlePasswordConfirmation" :input-props="{ 'aria-label': t('确认迁移包密码') }" type="password" show-password-on="click" autocomplete="new-password" :disabled="operationLocked" />
         </n-form-item>
       </n-form>
       <p class="transfer-lifecycle">{{ t('同 ID 记录会在目标端原位置归并；目标端现有顺序保持不变，迁移包中新增的账号按包内顺序接在后面。浏览器 Profile/Cookie、登录密码、邀请码、日志、用量、冷却状态及系统专属设置不会迁移；未完成的托管注册草稿会跳过。') }}</p>
@@ -42,6 +42,7 @@
         accept=".ocgbackup,application/json"
         :disabled="operationLocked"
         aria-describedby="account-transfer-file-help"
+        :aria-label="t('迁移包文件')"
         @change="readBundleFile"
       />
       <n-form label-placement="top" @submit.prevent="previewBundle">
@@ -52,7 +53,7 @@
           </n-space>
         </n-form-item>
         <n-form-item :label="t('迁移包密码')" required>
-          <n-input v-model:value="bundlePassword" type="password" show-password-on="click" autocomplete="current-password" :disabled="operationLocked" @update:value="clearPreview" />
+          <n-input v-model:value="bundlePassword" :input-props="{ 'aria-label': t('迁移包密码') }" type="password" show-password-on="click" autocomplete="current-password" :disabled="operationLocked" @update:value="clearPreview" />
         </n-form-item>
       </n-form>
       <p class="transfer-lifecycle">{{ t('同 ID 记录会采用迁移包内容但保留目标端位置；目标端现有顺序不变，新增账号按迁移包顺序接在后面。导入后原有主/子 Key、可用账号、Custom API、Zen Free 与模型路由设置可直接继续使用。') }}</p>
@@ -98,6 +99,7 @@ import { dashboardApi } from "../api/dashboard.ts";
 import type { AccountImportDisposition, AccountImportPreview } from "../api/generated/dashboard-v3.ts";
 import { t } from "../i18n/index.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
+import { useLocalizedModalCloseLabel } from "../utils/modal-close-label.ts";
 
 const MAX_BUNDLE_BYTES = 4 * 1024 * 1024;
 
@@ -130,6 +132,7 @@ const visible = computed({
   set: (value: boolean) => emit("update:show", value),
 });
 const operationLocked = computed(() => busy.value || previewing.value);
+useLocalizedModalCloseLabel(visible, "account-transfer-modal");
 const canExport = computed(() => (
   bundlePassword.value.length >= 12
   && bundlePassword.value === bundlePasswordConfirmation.value

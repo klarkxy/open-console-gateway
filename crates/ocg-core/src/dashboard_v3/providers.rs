@@ -12,7 +12,7 @@ use axum::extract::{Path, State};
 use chrono::{DateTime, Utc};
 #[cfg(debug_assertions)]
 use std::collections::BTreeMap;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[cfg(debug_assertions)]
 use futures_util::StreamExt;
@@ -36,7 +36,8 @@ use crate::provider::{
     BUILTIN_PROVIDERS, BuiltinProvider, COMMAND_CODE_PROVIDER_ID, CUSTOM_PROVIDER_ID,
     ConnectionVerificationStatus, KIMI_CN_BASE_URL, KIMI_PROVIDER_ID, MINIMAX_CN_BASE_URL,
     MINIMAX_PROVIDER_ID, OLLAMA_PROVIDER_ID, OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID,
-    ProviderAdapterKind, ProviderRegistry, ZEN_FREE_ACCOUNT_ID, default_verification_status,
+    ProviderAdapterKind, ProviderOrigin, ProviderRegistry, ZEN_FREE_ACCOUNT_ID, builtin_offering,
+    default_verification_status,
 };
 use crate::provider_contracts::{
     self, ContractScope, EffectiveContractSet, EffectiveModelContract as DomainModelContract,
@@ -195,6 +196,12 @@ pub(super) async fn refresh_zen_free_models(
         check_expectation(&state, &expectation)?;
         state.config()
     };
+    let official_protocols = crate::official_protocols::fetch_official_protocol_baseline(
+        &config,
+        OPENCODE_ZEN_FREE_PROVIDER_ID,
+        state.process_generation(),
+    )
+    .await;
     let fetched = fetch_zen_free_catalog(&state, &config).await;
     let _settings_update = state.settings_update.lock();
     let catalog = match fetched {
@@ -212,10 +219,26 @@ pub(super) async fn refresh_zen_free_models(
             "Zen model catalog contains no model IDs ending in `-free`",
         ));
     }
-    let model_count = catalog.models.len();
+    let models = catalog.models.clone();
+    let model_count = models.len();
     state
         .activate_zen_free_model_catalog(catalog)
         .map_err(V3ApiError::internal)?;
+    let now = Utc::now();
+    {
+        let db = state.db.lock();
+        db.apply_official_protocol_baseline(
+            &ContractScope::provider(OPENCODE_ZEN_FREE_PROVIDER_ID),
+            &models,
+            &official_protocols,
+            now,
+        )
+        .map_err(V3ApiError::internal)?;
+        state
+            .reload_provider_contracts_locked(&db)
+            .map_err(V3ApiError::internal)?;
+    }
+    state.routing.reset();
     let revision = state.bump_settings_revision();
     audit_catalog_success(&state, OPENCODE_ZEN_FREE_PROVIDER_ID, model_count, revision);
     Ok(Json(zen_free_models_from_state(&state)))
@@ -386,6 +409,12 @@ async fn refresh_go_or_command_catalog(
             },
         ));
     }
+    let official_protocols = crate::official_protocols::fetch_official_protocol_baseline(
+        &config,
+        provider_id,
+        state.process_generation(),
+    )
+    .await;
     // Zen Free owns every `-free` id; keep them out of the persisted Go
     // catalog so they never reach the Go provider-contracts surface.
     let models = if provider_id == OPENCODE_PROVIDER_ID {
@@ -430,6 +459,8 @@ async fn refresh_go_or_command_catalog(
             &source_url,
         )
         .map_err(V3ApiError::internal)?;
+        db.apply_official_protocol_baseline(&scope, &models, &official_protocols, now)
+            .map_err(V3ApiError::internal)?;
         state
             .reload_provider_contracts_locked(&db)
             .map_err(V3ApiError::internal)?;
@@ -696,7 +727,7 @@ fn validate_provider_protocol_overrides(
     scope_id: &str,
     overrides: &[ModelProtocolOverride],
 ) -> Result<(), V3ApiError> {
-    let descriptor = provider_contracts::provider_scope_descriptor(scope_id)
+    provider_contracts::provider_scope_descriptor(scope_id)
         .ok_or_else(|| V3ApiError::not_found_at(state, "provider not found"))?;
     let contracts = state.provider_contracts();
     let scope = contracts
@@ -711,11 +742,7 @@ fn validate_provider_protocol_overrides(
             )
         })?;
         let protocol = crate::provider::UpstreamProtocolKind::from(item.protocol);
-        let ceiling = provider_contracts::safety_ceiling_protocols(
-            descriptor.protocol_probe,
-            &model.model_id,
-        );
-        if !ceiling.contains(&protocol) {
+        if !model.protocols.contains_key(protocol.as_str()) {
             return Err(V3ApiError::invalid_request_at(
                 state,
                 "protocol is outside this provider's documented capability ceiling",
@@ -725,36 +752,61 @@ fn validate_provider_protocol_overrides(
     Ok(())
 }
 
-/// Restore a built-in provider's current catalog to its development-time
-/// official protocol baseline. This never contacts an upstream: it clears all
-/// manual/probe evidence and makes baseline-unknown pairs explicitly off.
+/// V3 route: rewrite the current catalog to official-docs or snapshot
+/// protocols. The dashboard no longer exposes this; catalog refresh writes
+/// the same evidence. OpenCode Go, Zen Free, and Command Code fetch official
+/// docs (missing models default to Chat). Snapshot providers stay local.
 pub(super) async fn reset_provider_model_protocols_to_static(
     State(state): State<CoreState>,
     Path(scope_id): Path<String>,
     body: Bytes,
 ) -> Result<Json<ProviderContracts>, V3ApiError> {
     let expectation = parse_mutation_json::<MutationExpectation>(&body)?;
-    let _settings_update = state.settings_update.lock();
-    check_expectation(&state, &expectation)?;
-    if provider_contracts::static_protocol_snapshot_date(&scope_id).is_none() {
-        return Err(V3ApiError::invalid_request_at(
-            &state,
-            "this provider does not support restoring an official protocol baseline",
-        ));
-    }
-    let scope = ContractScope::parse(provider_contracts::SCOPE_KIND_PROVIDER, &scope_id)
-        .map_err(|message| V3ApiError::invalid_request_at(&state, message))?;
-    validate_provider_scope(&state, &scope)?;
-    let models = state
-        .provider_contracts()
-        .scope(&scope)
-        .map(|contract| contract.catalog.models.to_vec())
-        .ok_or_else(|| V3ApiError::not_found_at(&state, "provider scope not found"))?;
+    let docs_baseline = crate::official_protocols::uses_official_docs_protocol_baseline(&scope_id);
+    let (scope, models, config) = {
+        let _settings_update = state.settings_update.lock();
+        check_expectation(&state, &expectation)?;
+        if provider_contracts::static_protocol_snapshot_date(&scope_id).is_none() && !docs_baseline
+        {
+            return Err(V3ApiError::invalid_request_at(
+                &state,
+                "this provider does not support restoring an official protocol baseline",
+            ));
+        }
+        let scope = ContractScope::parse(provider_contracts::SCOPE_KIND_PROVIDER, &scope_id)
+            .map_err(|message| V3ApiError::invalid_request_at(&state, message))?;
+        validate_provider_scope(&state, &scope)?;
+        let models = state
+            .provider_contracts()
+            .scope(&scope)
+            .map(|contract| contract.catalog.models.to_vec())
+            .ok_or_else(|| V3ApiError::not_found_at(&state, "provider scope not found"))?;
+        (scope, models, state.config())
+    };
+    let official = if docs_baseline {
+        Some(
+            crate::official_protocols::fetch_official_protocol_baseline(
+                &config,
+                &scope_id,
+                state.process_generation(),
+            )
+            .await,
+        )
+    } else {
+        None
+    };
     let now = Utc::now();
     let revision = {
+        let _settings_update = state.settings_update.lock();
+        check_expectation(&state, &expectation)?;
         let db = state.db.lock();
-        db.reset_provider_static_model_protocols(&scope, &models, now)
-            .map_err(V3ApiError::internal)?;
+        if let Some(baseline) = official.as_ref() {
+            db.reset_provider_docs_model_protocols(&scope, &models, baseline, now)
+                .map_err(V3ApiError::internal)?;
+        } else {
+            db.reset_provider_static_model_protocols(&scope, &models, now)
+                .map_err(V3ApiError::internal)?;
+        }
         // The reset transaction is already durable. Advance CAS before the
         // fallible reload so persisted state can never hide behind an old token.
         let revision = state.bump_settings_revision();
@@ -821,8 +873,28 @@ fn commit_model_protocol_overrides(
         ));
     }
     let mut rows = Vec::with_capacity(overrides.len());
+    let mut preferences = Vec::new();
+    let mut preferred_models = std::collections::HashSet::new();
     for item in overrides {
         let protocol = crate::provider::UpstreamProtocolKind::from(item.protocol);
+        if item.preferred == Some(true) {
+            let on_model = state
+                .provider_contracts()
+                .scope(scope)
+                .and_then(|contract| contract.model(&item.model_id))
+                .is_some_and(|model| model.protocols.contains_key(protocol.as_str()));
+            if scope.kind_str() != "provider"
+                || !provider_contracts::selectable_model_protocol(scope.id(), protocol)
+                || !on_model
+                || !preferred_models.insert(item.model_id.trim().to_ascii_lowercase())
+            {
+                return Err(V3ApiError::invalid_request_at(
+                    state,
+                    "one preferred protocol per model is allowed",
+                ));
+            }
+            preferences.push((item.model_id.trim().to_ascii_lowercase(), protocol));
+        }
         rows.push((
             item.model_id,
             protocol,
@@ -832,7 +904,7 @@ fn commit_model_protocol_overrides(
     let now = Utc::now();
     {
         let db = state.db.lock();
-        db.set_model_protocol_overrides(scope, &rows, now)
+        db.set_model_protocol_settings(scope, &rows, &preferences, now)
             .map_err(V3ApiError::internal)?;
         state
             .reload_provider_contracts_locked(&db)
@@ -890,24 +962,9 @@ pub(super) async fn run_provider_protocol_probes(
         .iter()
         .filter_map(|outcome| outcome.observation.clone())
         .collect();
-    // A provider-level probe answers whether any currently routable account can
-    // serve the protocol. Positive evidence may enable it; account/transport
-    // failures must never create a provider-global force_off.
-    let overrides: Vec<(
-        String,
-        crate::provider::UpstreamProtocolKind,
-        DomainProtocolOverrideState,
-    )> = outcomes
-        .iter()
-        .filter(|outcome| !outcome.skipped && outcome.success)
-        .map(|outcome| {
-            (
-                prepared.model_id.clone(),
-                outcome.protocol,
-                DomainProtocolOverrideState::ForceOn,
-            )
-        })
-        .collect();
+    // Connection tests record observations only. Protocol enablement and
+    // preference are configuration, never a side effect of testing.
+    let overrides = Vec::new();
     let _settings_update = state.settings_update.lock();
     check_expectation(&state, &prepared.expectation)?;
     ensure_probe_model_is_current(
@@ -1136,10 +1193,15 @@ fn prepare_protocol_probe(
         .collect();
     protocol_probe::require_unique_probe_protocols(&requested_protocols)
         .map_err(|message| V3ApiError::invalid_request_at(state, message))?;
-    let ceiling = provider_contracts::safety_ceiling_protocols(descriptor.protocol_probe, model_id);
+    let probeable = state
+        .provider_contracts()
+        .scope(&scope)
+        .and_then(|contract| contract.model(model_id))
+        .map(|model| model.protocols.keys().cloned().collect::<HashSet<_>>())
+        .unwrap_or_default();
     let protocols = requested_protocols
         .into_iter()
-        .filter(|protocol| ceiling.contains(protocol))
+        .filter(|protocol| probeable.contains(protocol.as_str()))
         .collect::<Vec<_>>();
     if protocols.is_empty() {
         return Err(V3ApiError::invalid_request_at(
@@ -1320,8 +1382,13 @@ fn dynamic_catalog_entry(runtime: &crate::dynamic::DynamicProviderRuntime) -> Pr
         Some(scheme) => vec![AccountAuthScheme::from(scheme)],
         None => Vec::new(),
     };
+    let editable = !matches!(runtime.origin, ProviderOrigin::Builtin);
     ProviderCatalogEntry {
         provider_id: runtime.id.clone(),
+        origin: runtime.origin,
+        editable,
+        deletable: editable,
+        offering: runtime.offering.clone(),
         display_name: runtime.name.clone(),
         display_family: runtime.name.clone(),
         credential_kind: runtime.auth_kind.credential_kind().into(),
@@ -1347,7 +1414,18 @@ fn dynamic_catalog_entry(runtime: &crate::dynamic::DynamicProviderRuntime) -> Pr
         model_source: "dynamic_provider".into(),
         key_prefix: None,
         auth_schemes,
-        upstream_protocols: vec![AccountUpstreamProtocol::from(runtime.upstream_protocol)],
+        upstream_protocols: {
+            let mut protocols = vec![AccountUpstreamProtocol::from(runtime.upstream_protocol)];
+            for mapping in &runtime.mappings {
+                if let Some(value) = &mapping.upstream_override {
+                    let protocol = AccountUpstreamProtocol::from(value.protocol);
+                    if !protocols.contains(&protocol) {
+                        protocols.push(protocol);
+                    }
+                }
+            }
+            protocols
+        },
         form_fields: {
             let mut fields = vec![ProviderCatalogFormField {
                 id: "name".into(),
@@ -1391,6 +1469,10 @@ fn catalog_entry(
     ProviderCatalogEntry {
         provider_id: plan.provider_id.to_string(),
 
+        origin: ProviderOrigin::Builtin,
+        editable: false,
+        deletable: false,
+        offering: builtin_offering(plan.provider_id).to_string(),
         display_name: plan.display_name.to_string(),
         display_family: plan.display_family.to_string(),
         credential_kind: plan.credential_kind.into(),

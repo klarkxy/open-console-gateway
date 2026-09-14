@@ -3,9 +3,9 @@
 //! Plaintext upstream Keys are decrypted and re-encrypted only inside the Host.
 //! The dashboard receives a versioned Argon2id + AES-256-GCM envelope, plus
 //! secret-free previews/results. Browser profiles, cookies, logs, usage, and
-//! cooldowns remain host-local; portable configuration and credentials move.
+//! V6 also preserves cooldown deadlines; V4/V5 retain their host-local policy.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
 use aes_gcm::aead::{Aead, KeyInit, Payload};
@@ -23,12 +23,16 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::dashboard_session;
+use crate::db::identity::{
+    IdentityImportSnapshot, ImportedAccountIdentity, ImportedIdentity, ImportedQuotaPool,
+};
 use crate::db::{AccountImportRecord, NodeImportRecord};
 use crate::models::{
     Account as ModelAccount, AccountCustomConfigInput, AccountModelCapabilityInput,
     AccountSetupStep as ModelSetupStep, AccountType as ModelAccountType, AppConfig, SubGatewayKey,
     normalize_account_notes, normalize_purchase_date,
 };
+use ocg_domain::credential::ModelScope;
 use ocg_domain::dynamic::{DynamicAuthKind, DynamicModelMapping, DynamicProviderDefinition};
 
 use crate::dynamic::DynamicProviderRuntime;
@@ -39,7 +43,7 @@ use crate::provider::{
 use crate::provider_contracts::{
     ContractEvidenceSource, ContractScope, ContractScopeKind, PersistedContracts,
     PersistedModelProtocol, PersistedModelProtocolOverride, PersistedScopeRow, ProbeResultKind,
-    ProtocolOverrideState,
+    ProtocolOverrideState, build_effective_contracts, exclusive_available_force_off_repairs,
 };
 use crate::state::CoreState;
 
@@ -56,7 +60,9 @@ const ENVELOPE_VERSION: u32 = 1;
 const LEGACY_PAYLOAD_VERSION: u32 = 1;
 #[cfg(test)]
 const NODE_PAYLOAD_VERSION: u32 = 2;
-const PAYLOAD_VERSION: u32 = 4;
+const PAYLOAD_VERSION: u32 = 6;
+const MIN_SUPPORTED_PAYLOAD_VERSION: u32 = 4;
+const V5_PAYLOAD_VERSION: u32 = 5;
 const AAD: &[u8] = b"ocg-manager-account-backup:v1:argon2id-m65536-t3-p1:aes-256-gcm";
 const ARGON_MEMORY_KIB: u32 = 64 * 1024;
 const ARGON_ITERATIONS: u32 = 3;
@@ -94,11 +100,19 @@ struct EncryptedEnvelope {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PortablePayload {
+    #[serde(default)]
+    platform_accounts: Vec<crate::platform::PortablePlatformAccount>,
+    #[serde(default)]
+    platform_links: Vec<crate::platform::PortablePlatformLink>,
     version: u32,
     exported_at: String,
     accounts: Vec<PortableAccount>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    dynamic_providers: Vec<PortableDynamicProvider>,
+    dynamic_providers: Vec<PortableProviderDefinition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    identities: Vec<PortableIdentity>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    quota_pools: Vec<PortableQuotaPool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     node: Option<PortableNodeState>,
 }
@@ -128,6 +142,63 @@ struct PortableAccount {
     model_capabilities: Vec<PortableModelCapability>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     ollama_billing_tier: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    identity_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    credential_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    credential_version: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    auth_state_version: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    binding_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    binding_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    binding_model_scope: Option<ModelScope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    allowed_endpoint_ids: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    allowed_origins: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cooldowns: Option<PortableCooldowns>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PortableCooldowns {
+    until: Option<DateTime<Utc>>,
+    generic: Option<DateTime<Utc>>,
+    five_hours: Option<DateTime<Utc>>,
+    week: Option<DateTime<Utc>>,
+    month: Option<DateTime<Utc>>,
+    free: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PortableIdentity {
+    id: String,
+    label: String,
+    identity_confidence: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    authority_site: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    authority_subject: Option<String>,
+    enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    notes: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PortableQuotaPool {
+    id: String,
+    subject_kind: String,
+    subject_ref: String,
+    relation_confidence: String,
+    policy_mode: String,
+    member_account_ids: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -169,6 +240,15 @@ struct PortableProviderContract {
     catalog_source_url: String,
     evidence: Vec<PortableProtocolEvidence>,
     overrides: Vec<PortableProtocolOverride>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    preferences: Vec<PortableProtocolPreference>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PortableProtocolPreference {
+    model_id: String,
+    protocol: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -198,20 +278,34 @@ struct PortableCustomConfig {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct PortableDynamicProvider {
+struct PortableProviderDefinition {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    preset_id: Option<String>,
     id: String,
     name: String,
     endpoint_url: String,
     upstream_protocol: String,
     auth_kind: String,
-    models: Vec<PortableDynamicModel>,
+    models: Vec<PortableProviderDefinitionModel>,
+    /// Required on V6 packages; must be absent on V4/V5.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    onboarding_draft: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct PortableDynamicModel {
+struct PortableProviderDefinitionModel {
     public_model: String,
     upstream_model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    upstream_override: Option<PortableProviderDefinitionModelOverride>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PortableProviderDefinitionModelOverride {
+    protocol: String,
+    endpoint_url: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -242,6 +336,8 @@ impl Zeroize for PortablePayload {
         self.exported_at.zeroize();
         self.accounts.zeroize();
         self.dynamic_providers.zeroize();
+        self.identities.zeroize();
+        self.quota_pools.zeroize();
         self.node.zeroize();
     }
 }
@@ -264,6 +360,39 @@ impl Zeroize for PortableAccount {
         self.custom_config.zeroize();
         self.model_capabilities.zeroize();
         self.ollama_billing_tier.zeroize();
+        self.identity_id.zeroize();
+        self.credential_id.zeroize();
+        self.credential_version.zeroize();
+        self.auth_state_version.zeroize();
+        self.binding_id.zeroize();
+        self.binding_enabled.zeroize();
+        self.binding_model_scope = None;
+        self.allowed_endpoint_ids.zeroize();
+        self.allowed_origins.zeroize();
+        self.cooldowns = None;
+    }
+}
+
+impl Zeroize for PortableIdentity {
+    fn zeroize(&mut self) {
+        self.id.zeroize();
+        self.label.zeroize();
+        self.identity_confidence.zeroize();
+        self.authority_site.zeroize();
+        self.authority_subject.zeroize();
+        self.enabled.zeroize();
+        self.notes.zeroize();
+    }
+}
+
+impl Zeroize for PortableQuotaPool {
+    fn zeroize(&mut self) {
+        self.id.zeroize();
+        self.subject_kind.zeroize();
+        self.subject_ref.zeroize();
+        self.relation_confidence.zeroize();
+        self.policy_mode.zeroize();
+        self.member_account_ids.zeroize();
     }
 }
 
@@ -307,6 +436,7 @@ impl Zeroize for PortableProviderContract {
         self.catalog_source_url.zeroize();
         self.evidence.zeroize();
         self.overrides.zeroize();
+        self.preferences.zeroize();
     }
 }
 
@@ -328,6 +458,13 @@ impl Zeroize for PortableProtocolOverride {
     }
 }
 
+impl Zeroize for PortableProtocolPreference {
+    fn zeroize(&mut self) {
+        self.model_id.zeroize();
+        self.protocol.zeroize();
+    }
+}
+
 impl Zeroize for PortableCustomConfig {
     fn zeroize(&mut self) {
         self.endpoint_url.zeroize();
@@ -335,8 +472,9 @@ impl Zeroize for PortableCustomConfig {
     }
 }
 
-impl Zeroize for PortableDynamicProvider {
+impl Zeroize for PortableProviderDefinition {
     fn zeroize(&mut self) {
+        self.preset_id.zeroize();
         self.id.zeroize();
         self.name.zeroize();
         self.endpoint_url.zeroize();
@@ -346,10 +484,14 @@ impl Zeroize for PortableDynamicProvider {
     }
 }
 
-impl Zeroize for PortableDynamicModel {
+impl Zeroize for PortableProviderDefinitionModel {
     fn zeroize(&mut self) {
         self.public_model.zeroize();
         self.upstream_model.zeroize();
+        if let Some(value) = self.upstream_override.as_mut() {
+            value.protocol.zeroize();
+            value.endpoint_url.zeroize();
+        }
     }
 }
 
@@ -391,14 +533,21 @@ struct ValidatedAccount {
     ollama_billing_tier: Option<crate::provider::OllamaBillingTier>,
     credential_kind: CredentialKind,
     quota_scope: QuotaScope,
+    identity: Option<ImportedAccountIdentity>,
+    cooldowns: PortableCooldowns,
 }
 
 #[derive(Debug)]
 struct ValidatedMigration {
+    platform_links_authoritative: bool,
+    platform_accounts: Vec<crate::platform::PortablePlatformAccount>,
+    platform_links: Vec<crate::platform::PortablePlatformLink>,
     exported_at: String,
     accounts: Vec<ValidatedAccount>,
     node: Option<Zeroizing<PortableNodeState>>,
     dynamic_providers: Vec<DynamicProviderRuntime>,
+    draft_provider_ids: HashSet<String>,
+    identity_snapshot: Option<IdentityImportSnapshot>,
 }
 
 #[derive(Debug)]
@@ -545,11 +694,15 @@ async fn import_accounts_inner(
     if let Some(node) = validated.node.as_deref() {
         validate_node_merge_against_current(&state, node)?;
     }
+    validate_platform_merge_against_current(&state, &validated.platform_accounts)?;
+    validate_identity_merge_against_current(&state, &validated)?;
     let existing = current_logical_accounts(&state)?;
     let existing_ids = current_account_ids(&state)?;
     let mut records = Vec::new();
     let mut items = Vec::with_capacity(validated.accounts.len());
     let mut duplicate_accounts = 0_u64;
+    let mut account_id_map = HashMap::new();
+    let mut imported_account_ids = HashSet::new();
     for account in validated.accounts {
         let logical = logical_key(&account.provider_id, &account.name);
         if !is_node_migration && existing.contains(&logical) {
@@ -567,6 +720,10 @@ async fn import_accounts_inner(
             .clone()
             .filter(|_| is_node_migration)
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        if let Some(source_id) = account.id.as_ref() {
+            account_id_map.insert(source_id.clone(), id.clone());
+        }
+        imported_account_ids.insert(id.clone());
         let key_cipher = if account.key.is_empty() {
             String::new()
         } else {
@@ -590,12 +747,12 @@ async fn import_accounts_inner(
             referral_code: None,
             purchase_date: account.purchase_date.clone(),
             expires_on: account.expires_on.clone(),
-            cooldown_until: None,
-            cooldown_generic_until: None,
-            cooldown_5h_until: None,
-            cooldown_week_until: None,
-            cooldown_month_until: None,
-            cooldown_free_until: None,
+            cooldown_until: account.cooldowns.until,
+            cooldown_generic_until: account.cooldowns.generic,
+            cooldown_5h_until: account.cooldowns.five_hours,
+            cooldown_week_until: account.cooldowns.week,
+            cooldown_month_until: account.cooldowns.month,
+            cooldown_free_until: account.cooldowns.free,
             last_error: None,
             auth_error: None,
             notes: account.notes.clone(),
@@ -623,6 +780,29 @@ async fn import_accounts_inner(
     }
 
     let imported_accounts = records.len() as u64;
+    let identity_snapshot = match validated.identity_snapshot.as_ref() {
+        Some(snapshot) => {
+            let remapped = snapshot
+                .remap_account_ids(&account_id_map)
+                .filter_account_ids(&imported_account_ids);
+            if remapped.accounts.len() != imported_account_ids.len() {
+                return Err(V3ApiError::invalid_request_at(
+                    &state,
+                    "imported identity snapshot does not cover the selected accounts",
+                ));
+            }
+            if let Some(conflict) = state
+                .db
+                .lock()
+                .identity_import_conflict(&remapped, &imported_account_ids)
+                .map_err(|_| V3ApiError::internal("failed to inspect destination identity model"))?
+            {
+                return Err(V3ApiError::conflict_at(&state, conflict));
+            }
+            Some(remapped)
+        }
+        None => None,
+    };
     let revision = if records.is_empty() && !is_node_migration {
         state.settings_revision()
     } else if let Some(mut node) = validated.node {
@@ -654,6 +834,9 @@ async fn import_accounts_inner(
             })
             .collect::<Result<Vec<_>, V3ApiError>>()?;
         let node_record = NodeImportRecord {
+            platform_links_authoritative: validated.platform_links_authoritative,
+            platform_accounts: validated.platform_accounts,
+            platform_links: validated.platform_links,
             accounts: records,
             account_order: node.account_order.clone(),
             config_json: serde_json::to_string(&node.config)
@@ -677,6 +860,8 @@ async fn import_accounts_inner(
             provider_contracts: persisted_contracts_from_portable(&node.provider_contracts, now)
                 .map_err(|error| V3ApiError::invalid_request_at(&state, error))?,
             dynamic_providers: validated.dynamic_providers,
+            identity_snapshot,
+            draft_provider_ids: validated.draft_provider_ids,
         };
         let runtime = state
             .db
@@ -710,7 +895,16 @@ async fn import_accounts_inner(
 fn export_payload(state: &CoreState) -> Result<(PortablePayload, u64, u64), TransferError> {
     let _settings_update = state.settings_update.lock();
     let revision = state.settings_revision();
-    let (snapshots, sub_keys, persisted_contracts, dynamic_runtimes) = {
+    let (
+        snapshots,
+        sub_keys,
+        persisted_contracts,
+        (dynamic_runtimes, draft_provider_ids),
+        identity_model,
+        quota_pools,
+        platform_accounts,
+        platform_links,
+    ) = {
         let db = state.db.lock();
         let accounts = db.list_accounts().map_err(|_| TransferError::Internal)?;
         let snapshots = accounts
@@ -735,9 +929,51 @@ fn export_payload(state: &CoreState) -> Result<(PortablePayload, u64, u64), Tran
             .load_persisted_contracts()
             .map_err(|_| TransferError::Internal)?;
         let dynamic_runtimes = db
-            .list_dynamic_providers()
+            .list_control_plane_dynamic_providers()
             .map_err(|_| TransferError::Internal)?;
-        (snapshots, sub_keys, persisted_contracts, dynamic_runtimes)
+        let draft_provider_ids = db
+            .onboarding_draft_provider_ids()
+            .map_err(|_| TransferError::Internal)?;
+        let identity_model = db
+            .list_identity_model()
+            .map_err(|_| TransferError::Internal)?;
+        let quota_pools = db.list_quota_pools().map_err(|_| TransferError::Internal)?;
+        let parents = db
+            .list_platform_accounts()
+            .map_err(|_| TransferError::Internal)?
+            .into_iter()
+            .map(|p| crate::platform::PortablePlatformAccount {
+                id: p.id,
+                kind: p.kind,
+                name: p.name,
+                base_url: p.base_url,
+            })
+            .collect::<Vec<_>>();
+        let links = db
+            .list_platform_links()
+            .map_err(|_| TransferError::Internal)?
+            .into_iter()
+            .map(|l| {
+                let mut group = l.group;
+                group.verified = false;
+                group.subscription_type = None;
+                crate::platform::PortablePlatformLink {
+                    account_id: l.account_id,
+                    platform_account_id: l.platform_account_id,
+                    group,
+                }
+            })
+            .collect::<Vec<_>>();
+        (
+            snapshots,
+            sub_keys,
+            persisted_contracts,
+            (dynamic_runtimes, draft_provider_ids),
+            identity_model,
+            quota_pools,
+            parents,
+            links,
+        )
     };
     let mut accounts = Zeroizing::new(Vec::new());
     let mut account_order = Vec::new();
@@ -807,8 +1043,13 @@ fn export_payload(state: &CoreState) -> Result<(PortablePayload, u64, u64), Tran
                 // catalogs and evidence are carried separately in node V2.
                 (None, Vec::new())
             };
+        let identity_row = identity_model
+            .accounts
+            .iter()
+            .find(|row| row.account.id == account.id)
+            .ok_or(TransferError::Internal)?;
         accounts.push(PortableAccount {
-            id: Some(account.id),
+            id: Some(account.id.clone()),
             provider_id: account.provider_id,
 
             name: account.name,
@@ -828,6 +1069,23 @@ fn export_payload(state: &CoreState) -> Result<(PortablePayload, u64, u64), Tran
             custom_config,
             model_capabilities,
             ollama_billing_tier: ollama_billing.map(|tier| tier.as_str().to_string()),
+            identity_id: Some(identity_row.identity_id.clone()),
+            credential_id: Some(identity_row.credential_id.clone()),
+            credential_version: Some(identity_row.credential_version),
+            auth_state_version: Some(identity_row.auth_state_version),
+            binding_id: Some(identity_row.binding_id.clone()),
+            binding_enabled: Some(identity_row.binding_enabled),
+            binding_model_scope: Some(identity_row.binding_model_scope.clone()),
+            allowed_endpoint_ids: Some(identity_row.allowed_endpoint_ids.clone()),
+            allowed_origins: Some(identity_row.allowed_origins.clone()),
+            cooldowns: Some(PortableCooldowns {
+                until: account.cooldown_until,
+                generic: account.cooldown_generic_until,
+                five_hours: account.cooldown_5h_until,
+                week: account.cooldown_week_until,
+                month: account.cooldown_month_until,
+                free: account.cooldown_free_until,
+            }),
         });
     }
     if accounts.len() > MAX_ACCOUNTS {
@@ -887,36 +1145,114 @@ fn export_payload(state: &CoreState) -> Result<(PortablePayload, u64, u64), Tran
                 catalog_source_url: row.catalog_source_url.clone(),
                 evidence,
                 overrides,
+                preferences: persisted_contracts
+                    .preferences
+                    .get(&row.scope)
+                    .into_iter()
+                    .flatten()
+                    .map(|(model_id, protocol)| PortableProtocolPreference {
+                        model_id: model_id.clone(),
+                        protocol: protocol.as_str().to_string(),
+                    })
+                    .collect(),
             }
         })
         .collect::<Vec<_>>();
     provider_contracts.sort_by(|left, right| left.provider_id.cmp(&right.provider_id));
     let mut portable_dynamics = dynamic_runtimes
         .into_iter()
-        .map(|runtime| PortableDynamicProvider {
-            id: runtime.id,
-            name: runtime.name,
-            endpoint_url: runtime.endpoint_url,
-            upstream_protocol: runtime.upstream_protocol.as_str().to_string(),
-            auth_kind: runtime.auth_kind.as_str().to_string(),
-            models: runtime
-                .mappings
-                .into_iter()
-                .map(|mapping| PortableDynamicModel {
-                    public_model: mapping.public_model,
-                    upstream_model: mapping.upstream_model,
-                })
-                .collect(),
+        .map(|runtime| {
+            let onboarding_draft = draft_provider_ids.contains(&runtime.id);
+            PortableProviderDefinition {
+                preset_id: runtime.preset_id,
+                id: runtime.id,
+                name: runtime.name,
+                endpoint_url: runtime.endpoint_url,
+                upstream_protocol: runtime.upstream_protocol.as_str().to_string(),
+                auth_kind: runtime.auth_kind.as_str().to_string(),
+                models: runtime
+                    .mappings
+                    .into_iter()
+                    .map(|mapping| PortableProviderDefinitionModel {
+                        public_model: mapping.public_model,
+                        upstream_model: mapping.upstream_model,
+                        upstream_override: mapping.upstream_override.map(|value| {
+                            PortableProviderDefinitionModelOverride {
+                                protocol: value.protocol.as_str().to_string(),
+                                endpoint_url: value.endpoint_url,
+                            }
+                        }),
+                    })
+                    .collect(),
+                onboarding_draft: Some(onboarding_draft),
+            }
         })
         .collect::<Vec<_>>();
     portable_dynamics.sort_by(|left, right| left.id.cmp(&right.id));
+    let exported_ids = accounts
+        .iter()
+        .filter_map(|account| account.id.clone())
+        .collect::<HashSet<_>>();
+    let exported_identity_ids = accounts
+        .iter()
+        .filter_map(|account| account.identity_id.clone())
+        .collect::<HashSet<_>>();
+    let mut identities = identity_model
+        .identities
+        .into_iter()
+        .filter(|identity| exported_identity_ids.contains(&identity.id))
+        .map(|identity| PortableIdentity {
+            id: identity.id,
+            label: identity.label,
+            identity_confidence: identity.identity_confidence,
+            authority_site: identity.authority_site,
+            authority_subject: identity.authority_subject,
+            enabled: identity.enabled,
+            notes: identity.notes,
+        })
+        .collect::<Vec<_>>();
+    identities.sort_by(|left, right| left.id.cmp(&right.id));
+    let mut portable_quota_pools = quota_pools
+        .into_iter()
+        .filter_map(|pool| {
+            let members = pool
+                .member_account_ids
+                .into_iter()
+                .filter(|id| exported_ids.contains(id))
+                .collect::<Vec<_>>();
+            if members.is_empty() {
+                None
+            } else {
+                Some(PortableQuotaPool {
+                    id: pool.id,
+                    subject_kind: pool.subject_kind,
+                    subject_ref: pool.subject_ref,
+                    relation_confidence: pool.relation_confidence,
+                    policy_mode: pool.policy_mode,
+                    member_account_ids: members,
+                })
+            }
+        })
+        .collect::<Vec<_>>();
+    portable_quota_pools.sort_by(|left, right| left.id.cmp(&right.id));
     let zen_catalog = state.zen_free_model_catalog();
     Ok((
         PortablePayload {
+            platform_accounts,
+            platform_links: platform_links
+                .into_iter()
+                .filter(|l| {
+                    accounts
+                        .iter()
+                        .any(|a| a.id.as_deref() == Some(l.account_id.as_str()))
+                })
+                .collect(),
             version: PAYLOAD_VERSION,
             exported_at: Utc::now().to_rfc3339(),
             accounts: std::mem::take(&mut *accounts),
             dynamic_providers: portable_dynamics,
+            identities,
+            quota_pools: portable_quota_pools,
             node: Some(PortableNodeState {
                 config: state.config(),
                 access_keys,
@@ -1022,7 +1358,8 @@ fn decrypt_and_validate(bundle: &str, password: &str) -> Result<ValidatedMigrati
     let value: serde_json::Value =
         serde_json::from_slice(plaintext.as_slice()).map_err(|_| TransferError::InvalidBundle)?;
     match value.get("version").and_then(|version| version.as_u64()) {
-        Some(version) if version == u64::from(PAYLOAD_VERSION) => {}
+        Some(version)
+            if (MIN_SUPPORTED_PAYLOAD_VERSION..=PAYLOAD_VERSION).contains(&(version as u32)) => {}
         Some(version) => return Err(TransferError::UnsupportedVersion(version as u32)),
         None => return Err(TransferError::InvalidBundle),
     }
@@ -1044,8 +1381,26 @@ fn derive_key(password: &str, salt: &[u8]) -> Result<Zeroizing<[u8; 32]>, Transf
 
 fn validate_payload(payload: PortablePayload) -> Result<ValidatedMigration, TransferError> {
     let mut payload = Zeroizing::new(payload);
-    if payload.version != PAYLOAD_VERSION {
+    if !(MIN_SUPPORTED_PAYLOAD_VERSION..=PAYLOAD_VERSION).contains(&payload.version) {
         return Err(TransferError::UnsupportedVersion(payload.version));
+    }
+    let has_identity_semantics = !payload.identities.is_empty()
+        || !payload.quota_pools.is_empty()
+        || payload.accounts.iter().any(|account| {
+            account.identity_id.is_some()
+                || account.credential_id.is_some()
+                || account.binding_id.is_some()
+                || account.binding_model_scope.is_some()
+                || account.binding_enabled.is_some()
+                || account.allowed_endpoint_ids.is_some()
+                || account.allowed_origins.is_some()
+                || account.cooldowns.is_some()
+        });
+    if payload.version < PAYLOAD_VERSION && has_identity_semantics {
+        return Err(TransferError::Invalid(
+            "this backup carries identity semantics that cannot be imported as a V4/V5 package"
+                .to_string(),
+        ));
     }
     if payload.accounts.len() > MAX_ACCOUNTS || payload.node.is_none() {
         return Err(TransferError::InvalidBundle);
@@ -1057,10 +1412,12 @@ fn validate_payload(payload: PortablePayload) -> Result<ValidatedMigration, Tran
         return Err(TransferError::InvalidBundle);
     }
     let exported_at = payload.exported_at.clone();
-    let validated_dynamics = validate_portable_dynamic_providers(&payload.dynamic_providers)?;
+    let (validated_dynamics, draft_provider_ids) =
+        validate_portable_dynamic_providers(&payload.dynamic_providers, payload.version)?;
     let mut logical = HashSet::new();
     let mut account_ids = HashSet::new();
     let mut validated = Vec::with_capacity(payload.accounts.len());
+    let carries_cooldowns = payload.version == PAYLOAD_VERSION;
     for (index, account) in payload.accounts.iter_mut().enumerate() {
         let prefix = || format!("account {}", index + 1);
         let id = match account.id.as_deref().map(str::trim) {
@@ -1418,7 +1775,50 @@ fn validate_payload(payload: PortablePayload) -> Result<ValidatedMigration, Tran
                 .map(|runtime| runtime.auth_kind.quota_scope())
                 .or_else(|| plan.map(|plan| plan.quota_scope))
                 .expect("imported account provider was resolved"),
+            identity: None,
+            cooldowns: if carries_cooldowns {
+                account.cooldowns.clone().ok_or_else(|| {
+                    TransferError::Invalid(format!("{} is missing its cooldown snapshot", prefix()))
+                })?
+            } else {
+                PortableCooldowns::default()
+            },
         });
+    }
+    if payload.platform_accounts.len() > MAX_ACCOUNTS || payload.platform_links.len() > MAX_ACCOUNTS
+    {
+        return Err(TransferError::InvalidBundle);
+    }
+    if payload.version == 4
+        && (!payload.platform_accounts.is_empty() || !payload.platform_links.is_empty())
+    {
+        return Err(TransferError::InvalidBundle);
+    }
+    let mut parent_ids = HashSet::new();
+    for parent in &mut payload.platform_accounts {
+        if uuid::Uuid::parse_str(&parent.id).is_err()
+            || !parent_ids.insert(parent.id.clone())
+            || parent.name.trim().is_empty()
+            || parent.name.len() > 200
+        {
+            return Err(TransferError::InvalidBundle);
+        }
+        parent.base_url = crate::platform::validate_platform_base_url(&parent.base_url)
+            .map_err(|_| TransferError::InvalidBundle)?;
+    }
+    let mut linked_ids = HashSet::new();
+    for link in &mut payload.platform_links {
+        if !parent_ids.contains(&link.platform_account_id)
+            || !linked_ids.insert(link.account_id.clone())
+            || !validated.iter().any(|a| {
+                a.id.as_deref() == Some(link.account_id.as_str())
+                    && crate::provider::is_custom_api(&a.provider_id)
+            })
+        {
+            return Err(TransferError::InvalidBundle);
+        }
+        link.group.verified = false;
+        link.group.subscription_type = None;
     }
     let node = payload
         .node
@@ -1426,20 +1826,335 @@ fn validate_payload(payload: PortablePayload) -> Result<ValidatedMigration, Tran
         .map(|node| validate_node_state(node, &validated))
         .transpose()?
         .map(Zeroizing::new);
+    let identity_snapshot = if payload.version == PAYLOAD_VERSION {
+        Some(validate_identity_snapshot(
+            &payload.identities,
+            &payload.quota_pools,
+            &payload.accounts,
+            &mut validated,
+        )?)
+    } else {
+        None
+    };
     Ok(ValidatedMigration {
+        platform_links_authoritative: payload.version >= V5_PAYLOAD_VERSION,
+        platform_accounts: payload.platform_accounts.clone(),
+        platform_links: payload.platform_links.clone(),
         exported_at,
         accounts: validated,
         node,
         dynamic_providers: validated_dynamics,
+        draft_provider_ids,
+        identity_snapshot,
+    })
+}
+
+fn validate_identity_snapshot(
+    identities: &[PortableIdentity],
+    quota_pools: &[PortableQuotaPool],
+    accounts: &[PortableAccount],
+    validated: &mut [ValidatedAccount],
+) -> Result<IdentityImportSnapshot, TransferError> {
+    if accounts.is_empty() {
+        if !identities.is_empty() || !quota_pools.is_empty() {
+            return Err(TransferError::Invalid(
+                "identity snapshot references accounts that are not in the package".to_string(),
+            ));
+        }
+        return Ok(IdentityImportSnapshot {
+            identities: Vec::new(),
+            accounts: Vec::new(),
+            quota_pools: Vec::new(),
+        });
+    }
+    let account_ids = validated
+        .iter()
+        .filter_map(|account| account.id.clone())
+        .collect::<HashSet<_>>();
+    let mut identity_ids = HashSet::new();
+    let mut imported_identities = Vec::with_capacity(identities.len());
+    for (index, identity) in identities.iter().enumerate() {
+        let prefix = || format!("identity {}", index + 1);
+        if uuid::Uuid::parse_str(identity.id.trim()).is_err()
+            || !identity_ids.insert(identity.id.trim().to_string())
+            || identity.label.trim().is_empty()
+            || identity.label.chars().count() > MAX_NAME_CHARS
+        {
+            return Err(TransferError::Invalid(format!(
+                "{} has an invalid identity id or label",
+                prefix()
+            )));
+        }
+        match identity.identity_confidence.as_str() {
+            "opaque" | "declared" => {}
+            "verified" => {
+                return Err(TransferError::Invalid(format!(
+                    "{} must not claim a verified relation",
+                    prefix()
+                )));
+            }
+            _ => {
+                return Err(TransferError::Invalid(format!(
+                    "{} has an invalid identity confidence",
+                    prefix()
+                )));
+            }
+        }
+        imported_identities.push(ImportedIdentity {
+            id: identity.id.trim().to_string(),
+            label: identity.label.trim().to_string(),
+            identity_confidence: identity.identity_confidence.clone(),
+            authority_site: identity.authority_site.clone().and_then(trim_optional),
+            authority_subject: identity.authority_subject.clone().and_then(trim_optional),
+            enabled: identity.enabled,
+            notes: identity.notes.clone().and_then(trim_optional),
+        });
+    }
+    let mut credential_ids = HashSet::new();
+    let mut binding_ids = HashSet::new();
+    let mut linked = Vec::with_capacity(validated.len());
+    for (index, account) in accounts.iter().enumerate() {
+        let prefix = || format!("account {}", index + 1);
+        let account_id = account.id.as_deref().map(str::trim).ok_or_else(|| {
+            TransferError::Invalid(format!("{} is missing its account id", prefix()))
+        })?;
+        let identity_id = account
+            .identity_id
+            .as_deref()
+            .map(str::trim)
+            .ok_or_else(|| {
+                TransferError::Invalid(format!("{} is missing its identity id", prefix()))
+            })?;
+        let credential_id = account
+            .credential_id
+            .as_deref()
+            .map(str::trim)
+            .ok_or_else(|| {
+                TransferError::Invalid(format!("{} is missing its credential id", prefix()))
+            })?;
+        let binding_id = account
+            .binding_id
+            .as_deref()
+            .map(str::trim)
+            .ok_or_else(|| {
+                TransferError::Invalid(format!("{} is missing its binding id", prefix()))
+            })?;
+        let credential_version = account.credential_version.ok_or_else(|| {
+            TransferError::Invalid(format!("{} is missing its credential version", prefix()))
+        })?;
+        let auth_state_version = account.auth_state_version.ok_or_else(|| {
+            TransferError::Invalid(format!(
+                "{} is missing its credential auth-state version",
+                prefix()
+            ))
+        })?;
+        let binding_enabled = account.binding_enabled.ok_or_else(|| {
+            TransferError::Invalid(format!("{} is missing its binding enabled flag", prefix()))
+        })?;
+        if credential_version == 0
+            || credential_version > i64::MAX as u64
+            || auth_state_version == 0
+            || auth_state_version > i64::MAX as u64
+        {
+            return Err(TransferError::Invalid(format!(
+                "{} has an out-of-range credential version",
+                prefix()
+            )));
+        }
+        let binding_model_scope = account.binding_model_scope.clone().ok_or_else(|| {
+            TransferError::Invalid(format!("{} is missing its binding model scope", prefix()))
+        })?;
+        let allowed_endpoint_ids = account.allowed_endpoint_ids.clone().ok_or_else(|| {
+            TransferError::Invalid(format!(
+                "{} is missing its binding endpoint grants",
+                prefix()
+            ))
+        })?;
+        let allowed_origins = account.allowed_origins.clone().ok_or_else(|| {
+            TransferError::Invalid(format!("{} is missing its binding origin grants", prefix()))
+        })?;
+        let mut seen_ids = HashSet::new();
+        for id in &allowed_endpoint_ids {
+            if id.trim().is_empty()
+                || uuid::Uuid::parse_str(id.trim()).is_err()
+                || !seen_ids.insert(id.trim().to_string())
+            {
+                return Err(TransferError::Invalid(format!(
+                    "{} has a malformed binding endpoint grant",
+                    prefix()
+                )));
+            }
+        }
+        let mut seen_origins = HashSet::new();
+        for origin in &allowed_origins {
+            let Some(normalized) = ocg_domain::credential::normalize_origin(origin) else {
+                return Err(TransferError::Invalid(format!(
+                    "{} has a malformed binding origin grant",
+                    prefix()
+                )));
+            };
+            if !seen_origins.insert(normalized) {
+                return Err(TransferError::Invalid(format!(
+                    "{} has a duplicate binding origin grant",
+                    prefix()
+                )));
+            }
+        }
+        if uuid::Uuid::parse_str(identity_id).is_err()
+            || uuid::Uuid::parse_str(credential_id).is_err()
+            || uuid::Uuid::parse_str(binding_id).is_err()
+        {
+            return Err(TransferError::Invalid(format!(
+                "{} has an invalid identity, credential, or binding id",
+                prefix()
+            )));
+        }
+        if !identity_ids.contains(identity_id) {
+            return Err(TransferError::Invalid(format!(
+                "{} references an identity that is not in the package",
+                prefix()
+            )));
+        }
+        if !credential_ids.insert(credential_id.to_string())
+            || !binding_ids.insert(binding_id.to_string())
+        {
+            return Err(TransferError::Invalid(format!(
+                "{} duplicates a credential or binding id in the package",
+                prefix()
+            )));
+        }
+        if let ModelScope::Only { models } = &binding_model_scope
+            && (models.is_empty() || models.iter().any(|model| model.trim().is_empty()))
+        {
+            return Err(TransferError::Invalid(format!(
+                "{} has an invalid binding model scope",
+                prefix()
+            )));
+        }
+        let link = ImportedAccountIdentity {
+            account_id: account_id.to_string(),
+            identity_id: identity_id.to_string(),
+            credential_id: credential_id.to_string(),
+            credential_version,
+            auth_state_version,
+            binding_id: binding_id.to_string(),
+            binding_enabled,
+            binding_model_scope,
+            allowed_endpoint_ids: allowed_endpoint_ids
+                .into_iter()
+                .map(|id| id.trim().to_string())
+                .collect(),
+            allowed_origins: allowed_origins
+                .into_iter()
+                .filter_map(|origin| ocg_domain::credential::normalize_origin(&origin))
+                .collect(),
+        };
+        validated[index].identity = Some(link.clone());
+        linked.push(link);
+    }
+    let referenced_identities = linked
+        .iter()
+        .map(|row| row.identity_id.clone())
+        .collect::<HashSet<_>>();
+    if referenced_identities.len() != identity_ids.len() {
+        return Err(TransferError::Invalid(
+            "identity snapshot contains an identity that is not referenced by any account"
+                .to_string(),
+        ));
+    }
+    let mut pool_ids = HashSet::new();
+    let mut covered_accounts = HashSet::new();
+    let mut imported_pools = Vec::with_capacity(quota_pools.len());
+    for (index, pool) in quota_pools.iter().enumerate() {
+        let prefix = || format!("quota pool {}", index + 1);
+        if uuid::Uuid::parse_str(pool.id.trim()).is_err()
+            || !pool_ids.insert(pool.id.trim().to_string())
+            || pool.member_account_ids.is_empty()
+        {
+            return Err(TransferError::Invalid(format!(
+                "{} has an invalid id or no members",
+                prefix()
+            )));
+        }
+        match pool.subject_kind.as_str() {
+            "credential" | "egress" => {}
+            _ => {
+                return Err(TransferError::Invalid(format!(
+                    "{} has an invalid subject",
+                    prefix()
+                )));
+            }
+        }
+        match pool.relation_confidence.as_str() {
+            "unknown" | "declared" => {}
+            "verified" => {
+                return Err(TransferError::Invalid(format!(
+                    "{} must not claim a verified relation",
+                    prefix()
+                )));
+            }
+            _ => {
+                return Err(TransferError::Invalid(format!(
+                    "{} has an invalid relation confidence",
+                    prefix()
+                )));
+            }
+        }
+        match pool.policy_mode.as_str() {
+            "observe_only" | "authoritative_limit" => {}
+            _ => {
+                return Err(TransferError::Invalid(format!(
+                    "{} has an invalid policy mode",
+                    prefix()
+                )));
+            }
+        }
+        let mut members = Vec::with_capacity(pool.member_account_ids.len());
+        let mut seen_members = HashSet::new();
+        for member in &pool.member_account_ids {
+            let member = member.trim();
+            if member.is_empty()
+                || !account_ids.contains(member)
+                || !seen_members.insert(member.to_string())
+            {
+                return Err(TransferError::Invalid(format!(
+                    "{} references a missing, duplicate, or unknown account",
+                    prefix()
+                )));
+            }
+            covered_accounts.insert(member.to_string());
+            members.push(member.to_string());
+        }
+        imported_pools.push(ImportedQuotaPool {
+            id: pool.id.trim().to_string(),
+            subject_kind: pool.subject_kind.clone(),
+            subject_ref: pool.subject_ref.trim().to_string(),
+            relation_confidence: pool.relation_confidence.clone(),
+            policy_mode: pool.policy_mode.clone(),
+            member_account_ids: members,
+        });
+    }
+    if !covered_accounts.is_subset(&account_ids) {
+        return Err(TransferError::Invalid(
+            "quota pool snapshot references an account that is not in the package".to_string(),
+        ));
+    }
+    Ok(IdentityImportSnapshot {
+        identities: imported_identities,
+        accounts: linked,
+        quota_pools: imported_pools,
     })
 }
 
 fn validate_portable_dynamic_providers(
-    providers: &[PortableDynamicProvider],
-) -> Result<Vec<DynamicProviderRuntime>, TransferError> {
+    providers: &[PortableProviderDefinition],
+    payload_version: u32,
+) -> Result<(Vec<DynamicProviderRuntime>, HashSet<String>), TransferError> {
     let now = Utc::now();
     let mut seen_ids = HashSet::new();
     let mut validated = Vec::with_capacity(providers.len());
+    let mut draft_ids = HashSet::new();
+    let require_draft_flag = payload_version == PAYLOAD_VERSION;
     for (index, provider) in providers.iter().enumerate() {
         let prefix = || format!("dynamic provider {}", index + 1);
         let id = provider.id.trim();
@@ -1458,6 +2173,22 @@ fn validate_portable_dynamic_providers(
                 prefix()
             )));
         }
+        let onboarding_draft = match provider.onboarding_draft {
+            Some(flag) if require_draft_flag => flag,
+            None if require_draft_flag => {
+                return Err(TransferError::Invalid(format!(
+                    "{} is missing required onboardingDraft",
+                    prefix()
+                )));
+            }
+            Some(_) => {
+                return Err(TransferError::Invalid(format!(
+                    "{} carries onboardingDraft which cannot be imported as a V4/V5 package",
+                    prefix()
+                )));
+            }
+            None => false,
+        };
         let auth_kind = DynamicAuthKind::try_from(provider.auth_kind.trim()).map_err(|_| {
             TransferError::Invalid(format!("{} has an invalid auth kind", prefix()))
         })?;
@@ -1470,21 +2201,73 @@ fn validate_portable_dynamic_providers(
         let mappings = provider
             .models
             .iter()
-            .map(|model| DynamicModelMapping {
-                public_model: model.public_model.clone(),
-                upstream_model: model.upstream_model.clone(),
+            .map(|model| {
+                Ok(DynamicModelMapping {
+                    public_model: model.public_model.clone(),
+                    upstream_model: model.upstream_model.clone(),
+                    upstream_override: model
+                        .upstream_override
+                        .as_ref()
+                        .map(|value| {
+                            Ok::<_, TransferError>(
+                                ocg_domain::dynamic::DynamicModelUpstreamOverride {
+                                    protocol: UpstreamProtocolKind::try_from(
+                                        value.protocol.as_str(),
+                                    )
+                                    .map_err(|_| {
+                                        TransferError::Invalid(format!(
+                                            "{} has an invalid model protocol override",
+                                            prefix()
+                                        ))
+                                    })?,
+                                    endpoint_url: value.endpoint_url.clone(),
+                                },
+                            )
+                        })
+                        .transpose()?,
+                })
             })
-            .collect::<Vec<_>>();
-        let definition = crate::dynamic::validate_definition(DynamicProviderDefinition {
-            id: id.to_string(),
-            name: provider.name.clone(),
-            endpoint_url,
-            upstream_protocol: protocol,
-            auth_kind,
-            mappings,
-        })
-        .map_err(|error| TransferError::Invalid(format!("{} is invalid: {error}", prefix())))?;
+            .collect::<Result<Vec<_>, TransferError>>()?;
+        if mappings.is_empty() && !onboarding_draft {
+            return Err(TransferError::Invalid(format!(
+                "{} has no model mappings",
+                prefix()
+            )));
+        }
+        let definition = if mappings.is_empty() {
+            DynamicProviderDefinition {
+                preset_id: provider.preset_id.clone(),
+                id: id.to_string(),
+                name: ocg_domain::dynamic::normalize_dynamic_provider_name(&provider.name)
+                    .map_err(|error| {
+                        TransferError::Invalid(format!("{} is invalid: {error}", prefix()))
+                    })?,
+                endpoint_url,
+                upstream_protocol: protocol,
+                auth_kind,
+                mappings,
+            }
+        } else {
+            crate::dynamic::validate_definition(DynamicProviderDefinition {
+                preset_id: provider.preset_id.clone(),
+                id: id.to_string(),
+                name: provider.name.clone(),
+                endpoint_url,
+                upstream_protocol: protocol,
+                auth_kind,
+                mappings,
+            })
+            .map_err(|error| TransferError::Invalid(format!("{} is invalid: {error}", prefix())))?
+        };
+        let preset_for_origin = definition.preset_id.as_deref();
+        let origin = ocg_domain::provider::provider_origin_from_preset(preset_for_origin);
+        let offering =
+            ocg_domain::provider::preset_offering(preset_for_origin.unwrap_or("")).to_string();
+        if onboarding_draft {
+            draft_ids.insert(definition.id.clone());
+        }
         validated.push(DynamicProviderRuntime {
+            preset_id: definition.preset_id,
             id: definition.id,
             name: definition.name,
             endpoint_url: definition.endpoint_url,
@@ -1493,9 +2276,11 @@ fn validate_portable_dynamic_providers(
             mappings: definition.mappings,
             created_at: now,
             updated_at: now,
+            origin,
+            offering,
         });
     }
-    Ok(validated)
+    Ok((validated, draft_ids))
 }
 
 fn validate_node_state(
@@ -1691,9 +2476,44 @@ fn persisted_contracts_from_portable(
                 updated_at: default_time,
             });
         }
-        persisted.overrides.insert(scope, override_rows);
+        persisted.overrides.insert(scope.clone(), override_rows);
+        let mut preference_rows = Vec::new();
+        let mut preference_keys = HashSet::new();
+        for preference in &contract.preferences {
+            let model_id = preference.model_id.trim().to_ascii_lowercase();
+            let protocol = UpstreamProtocolKind::try_from(preference.protocol.as_str())
+                .map_err(|_| "node migration contains an invalid preferred protocol".to_string())?;
+            if model_id.is_empty()
+                || !crate::provider_contracts::selectable_model_protocol(scope_id, protocol)
+                || !preference_keys.insert(model_id.clone())
+            {
+                return Err(
+                    "node migration contains an invalid or duplicate model protocol preference"
+                        .to_string(),
+                );
+            }
+            preference_rows.push((model_id, protocol));
+        }
+        persisted.preferences.insert(scope, preference_rows);
     }
+    apply_exclusive_available_override_repair(&mut persisted);
     Ok(persisted)
+}
+
+fn apply_exclusive_available_override_repair(persisted: &mut PersistedContracts) {
+    let set = build_effective_contracts(
+        &crate::kernel::zen::ZenFreeModelCatalog::default(),
+        &[],
+        persisted.clone(),
+    );
+    let repairs = exclusive_available_force_off_repairs(&set, persisted);
+    for (scope, model_id, protocol) in repairs {
+        if let Some(rows) = persisted.overrides.get_mut(&scope) {
+            rows.retain(|row| {
+                !(row.model_id.eq_ignore_ascii_case(&model_id) && row.protocol == protocol)
+            });
+        }
+    }
 }
 
 fn preview_against_current(
@@ -1705,6 +2525,8 @@ fn preview_against_current(
     if let Some(node) = validated.node.as_deref() {
         validate_node_merge_against_current(state, node)?;
     }
+    validate_platform_merge_against_current(state, &validated.platform_accounts)?;
+    validate_identity_merge_against_current(state, validated)?;
     let existing = current_logical_accounts(state)?;
     let existing_ids = current_account_ids(state)?;
     let mut importable = 0_u64;
@@ -1778,6 +2600,54 @@ fn validate_node_merge_against_current(
             state,
             "the migration contains an Access Key value already owned by a different ID",
         ));
+    }
+    Ok(())
+}
+
+fn validate_platform_merge_against_current(
+    state: &CoreState,
+    parents: &[crate::platform::PortablePlatformAccount],
+) -> Result<(), V3ApiError> {
+    if parents.is_empty() {
+        return Ok(());
+    }
+    let existing = state
+        .db
+        .lock()
+        .list_platform_accounts()
+        .map_err(|_| V3ApiError::internal("failed to inspect destination platform accounts"))?;
+    for parent in parents {
+        if existing.iter().any(|row| {
+            row.id == parent.id && (row.kind != parent.kind || row.base_url != parent.base_url)
+        }) {
+            return Err(V3ApiError::conflict_at(
+                state,
+                "imported platform identity conflicts with immutable origin",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_identity_merge_against_current(
+    state: &CoreState,
+    validated: &ValidatedMigration,
+) -> Result<(), V3ApiError> {
+    let Some(snapshot) = validated.identity_snapshot.as_ref() else {
+        return Ok(());
+    };
+    let imported = validated
+        .accounts
+        .iter()
+        .filter_map(|account| account.id.clone())
+        .collect::<HashSet<_>>();
+    if let Some(conflict) = state
+        .db
+        .lock()
+        .identity_import_conflict(snapshot, &imported)
+        .map_err(|_| V3ApiError::internal("failed to inspect destination identity model"))?
+    {
+        return Err(V3ApiError::conflict_at(state, conflict));
     }
     Ok(())
 }
@@ -1911,393 +2781,4 @@ pub(super) async fn add_no_store(response: Response) -> Response {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn sample_account(name: impl Into<String>) -> PortableAccount {
-        PortableAccount {
-            id: None,
-            provider_id: "opencode".to_string(),
-
-            name: name.into(),
-            username: Some("user@example.com".to_string()),
-            key: "sk-ocg-test-secret".to_string(),
-            enabled: true,
-            account_type: "key".to_string(),
-            setup_step: "ready".to_string(),
-            purchase_date: "2026-08-01".to_string(),
-            expires_on: String::new(),
-            notes: Some("portable".to_string()),
-            verification_status: None,
-            connection_verified_at: None,
-            custom_config: None,
-            model_capabilities: Vec::new(),
-            ollama_billing_tier: None,
-        }
-    }
-
-    fn sample_payload() -> PortablePayload {
-        let account_id = "00000000-0000-4000-8000-000000000041";
-        let mut account = sample_account("Primary");
-        account.id = Some(account_id.to_string());
-        PortablePayload {
-            version: PAYLOAD_VERSION,
-            exported_at: "2026-08-29T00:00:00Z".to_string(),
-            accounts: vec![account],
-            dynamic_providers: Vec::new(),
-            node: Some(sample_node(account_id)),
-        }
-    }
-
-    fn sample_custom_account() -> PortableAccount {
-        PortableAccount {
-            id: None,
-            provider_id: crate::kernel::ids::CUSTOM_PROVIDER_ID.to_string(),
-
-            name: "Mapped Custom".to_string(),
-            username: None,
-            key: "sk-custom-test-secret".to_string(),
-            enabled: true,
-            account_type: "key".to_string(),
-            setup_step: "ready".to_string(),
-            purchase_date: String::new(),
-            expires_on: String::new(),
-            notes: None,
-            verification_status: Some("pending".to_string()),
-            connection_verified_at: None,
-            custom_config: Some(PortableCustomConfig {
-                endpoint_url: "https://api.example.com/v1/chat/completions".to_string(),
-                upstream_protocol: "chat_completions".to_string(),
-            }),
-            model_capabilities: Vec::new(),
-            ollama_billing_tier: None,
-        }
-    }
-
-    fn sample_node(account_id: &str) -> PortableNodeState {
-        let config = AppConfig {
-            gateway_key: "ocg-transfer-primary-key".to_string(),
-            ..AppConfig::default()
-        };
-        PortableNodeState {
-            config,
-            access_keys: Vec::new(),
-            zen_free: PortableZenFree {
-                enabled: false,
-                models: Vec::new(),
-                refreshed_at: None,
-                source_url: String::new(),
-            },
-            account_order: vec![
-                crate::kernel::ids::ZEN_FREE_ACCOUNT_ID.to_string(),
-                account_id.to_string(),
-            ],
-            provider_contracts: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn encrypted_bundle_round_trips_without_plaintext_secret() {
-        let payload = sample_payload();
-        let bundle = encrypt_payload(&payload, "correct horse battery").unwrap();
-        let second = encrypt_payload(&payload, "correct horse battery").unwrap();
-        assert_ne!(
-            bundle, second,
-            "OS randomness must produce a fresh envelope"
-        );
-        assert!(!bundle.contains("sk-ocg-test-secret"));
-        let migration = decrypt_and_validate(&bundle, "correct horse battery").unwrap();
-        assert_eq!(migration.accounts.len(), 1);
-        assert_eq!(migration.accounts[0].key.as_str(), "sk-ocg-test-secret");
-    }
-
-    #[test]
-    fn payload_v1_v2_and_v3_are_rejected_without_a_legacy_offering_parser() {
-        for version in [LEGACY_PAYLOAD_VERSION, NODE_PAYLOAD_VERSION, 3] {
-            let mut account = sample_custom_account();
-            let node = if version >= NODE_PAYLOAD_VERSION {
-                let account_id = "00000000-0000-4000-8000-000000000042";
-                account.id = Some(account_id.to_string());
-                Some(sample_node(account_id))
-            } else {
-                None
-            };
-            let error = validate_payload(PortablePayload {
-                version,
-                exported_at: "2026-08-29T00:00:00Z".to_string(),
-                accounts: vec![account],
-                dynamic_providers: Vec::new(),
-                node,
-            })
-            .unwrap_err();
-            assert!(
-                matches!(error, TransferError::UnsupportedVersion(found) if found == version),
-                "{error:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn unsupported_payload_version_is_not_a_password_or_damage_error() {
-        let mut payload = sample_payload();
-        payload.version = 3;
-        let bundle = encrypt_payload(&payload, "correct horse battery").unwrap();
-        let error = decrypt_and_validate(&bundle, "correct horse battery").unwrap_err();
-        assert!(
-            matches!(error, TransferError::UnsupportedVersion(3)),
-            "{error:?}"
-        );
-        let message = format!(
-            "this backup uses payload version 3; this node expects payload version {PAYLOAD_VERSION}"
-        );
-        assert!(!message.to_ascii_lowercase().contains("password"));
-        assert!(!message.to_ascii_lowercase().contains("damaged"));
-        assert!(message.contains(&PAYLOAD_VERSION.to_string()));
-    }
-
-    fn sample_dynamic_provider(id: &str, name: &str) -> PortableDynamicProvider {
-        PortableDynamicProvider {
-            id: id.to_string(),
-            name: name.to_string(),
-            endpoint_url: "http://127.0.0.1:9/v1".to_string(),
-            upstream_protocol: "chat_completions".to_string(),
-            auth_kind: "bearer".to_string(),
-            models: vec![PortableDynamicModel {
-                public_model: "lab-opus".to_string(),
-                upstream_model: "vendor/opus".to_string(),
-            }],
-        }
-    }
-
-    #[test]
-    fn dynamic_provider_definitions_are_validated_and_dangling_ids_fail() {
-        let provider_id = "00000000-0000-4000-8000-0000000000aa";
-        let account_id = "00000000-0000-4000-8000-0000000000ab";
-        let mut account = sample_account("Lab");
-        account.id = Some(account_id.to_string());
-        account.provider_id = provider_id.to_string();
-        let payload = PortablePayload {
-            version: PAYLOAD_VERSION,
-            exported_at: "2026-08-29T00:00:00Z".to_string(),
-            accounts: vec![account],
-            dynamic_providers: vec![sample_dynamic_provider(provider_id, "Lab")],
-            node: Some(sample_node(account_id)),
-        };
-        let validated = validate_payload(payload).unwrap();
-        assert_eq!(validated.dynamic_providers.len(), 1);
-        assert_eq!(validated.dynamic_providers[0].name, "Lab");
-        assert_eq!(
-            validated.accounts[0].credential_kind,
-            crate::provider::CredentialKind::ApiKey
-        );
-
-        let mut dangling_account = sample_account("Lab");
-        dangling_account.id = Some(account_id.to_string());
-        dangling_account.provider_id = provider_id.to_string();
-        let dangling = PortablePayload {
-            version: PAYLOAD_VERSION,
-            exported_at: "2026-08-29T00:00:00Z".to_string(),
-            accounts: vec![dangling_account],
-            dynamic_providers: Vec::new(),
-            node: Some(sample_node(account_id)),
-        };
-        let error = validate_payload(dangling).unwrap_err();
-        assert!(
-            matches!(error, TransferError::Invalid(ref message) if message.contains("unknown provider")),
-            "{error:?}"
-        );
-    }
-
-    #[test]
-    fn v3_exports_canonical_model_mapping_inside_the_v1_envelope() {
-        let account_id = "00000000-0000-4000-8000-000000000043";
-        let mut account = sample_custom_account();
-        account.id = Some(account_id.to_string());
-        account.model_capabilities = vec![PortableModelCapability::Canonical(
-            PortableModelCapabilityCanonical {
-                public_model: "deepseek-v4-flash".to_string(),
-                upstream_model: "deepseek-v4-flash:0731".to_string(),
-                protocol: "chat_completions".to_string(),
-            },
-        )];
-        let payload = PortablePayload {
-            version: PAYLOAD_VERSION,
-            exported_at: "2026-08-29T00:00:00Z".to_string(),
-            accounts: vec![account],
-            dynamic_providers: Vec::new(),
-            node: Some(sample_node(account_id)),
-        };
-        let json = serde_json::to_value(&payload).unwrap();
-        let capability = &json["accounts"][0]["modelCapabilities"][0];
-        assert_eq!(capability["publicModel"], "deepseek-v4-flash");
-        assert_eq!(capability["upstreamModel"], "deepseek-v4-flash:0731");
-        assert!(capability.get("modelId").is_none());
-
-        let bundle = encrypt_payload(&payload, "correct horse battery").unwrap();
-        let envelope: EncryptedEnvelope = serde_json::from_str(&bundle).unwrap();
-        assert_eq!(envelope.version, ENVELOPE_VERSION);
-        let validated = decrypt_and_validate(&bundle, "correct horse battery").unwrap();
-        let capability = &validated.accounts[0].capabilities[0];
-        assert_eq!(capability.public_model, "deepseek-v4-flash");
-        assert_eq!(capability.upstream_model, "deepseek-v4-flash:0731");
-    }
-
-    #[test]
-    fn wrong_password_and_tampering_share_invalid_bundle_result() {
-        let bundle = encrypt_payload(&sample_payload(), "correct horse battery").unwrap();
-        assert!(matches!(
-            decrypt_and_validate(&bundle, "wrong password value"),
-            Err(TransferError::InvalidBundle)
-        ));
-        let mut envelope: EncryptedEnvelope = serde_json::from_str(&bundle).unwrap();
-        let mut ciphertext = STANDARD.decode(&envelope.ciphertext).unwrap();
-        ciphertext[0] ^= 1;
-        envelope.ciphertext = STANDARD.encode(ciphertext);
-        assert!(matches!(
-            decrypt_and_validate(
-                &serde_json::to_string(&envelope).unwrap(),
-                "correct horse battery"
-            ),
-            Err(TransferError::InvalidBundle)
-        ));
-
-        let mut wrong_version: EncryptedEnvelope = serde_json::from_str(&bundle).unwrap();
-        wrong_version.version += 1;
-        assert!(matches!(
-            decrypt_and_validate(
-                &serde_json::to_string(&wrong_version).unwrap(),
-                "correct horse battery"
-            ),
-            Err(TransferError::InvalidBundle)
-        ));
-
-        let mut wrong_nonce: EncryptedEnvelope = serde_json::from_str(&bundle).unwrap();
-        wrong_nonce.nonce = STANDARD.encode([0_u8; NONCE_LEN - 1]);
-        assert!(matches!(
-            decrypt_and_validate(
-                &serde_json::to_string(&wrong_nonce).unwrap(),
-                "correct horse battery"
-            ),
-            Err(TransferError::InvalidBundle)
-        ));
-    }
-
-    #[test]
-    fn duplicate_rows_inside_bundle_fail_closed() {
-        let mut payload = sample_payload();
-        payload.accounts.push(PortableAccount {
-            id: None,
-            provider_id: "opencode".to_string(),
-
-            name: "Primary".to_string(),
-            username: None,
-            key: "sk-ocg-another-secret".to_string(),
-            enabled: false,
-            account_type: "key".to_string(),
-            setup_step: "ready".to_string(),
-            purchase_date: String::new(),
-            expires_on: String::new(),
-            notes: None,
-            verification_status: None,
-            connection_verified_at: None,
-            custom_config: None,
-            model_capabilities: Vec::new(),
-            ollama_billing_tier: None,
-        });
-        let bundle = encrypt_payload(&payload, "correct horse battery").unwrap();
-        assert!(matches!(
-            decrypt_and_validate(&bundle, "correct horse battery"),
-            Err(TransferError::Invalid(_))
-        ));
-    }
-
-    #[test]
-    fn managed_lifecycle_is_normalized_without_browser_identity() {
-        assert!(!migration_exports_key(
-            ModelAccountType::Managed,
-            ModelSetupStep::Payment
-        ));
-        assert!(migration_exports_key(
-            ModelAccountType::Managed,
-            ModelSetupStep::Ready
-        ));
-        let mut draft = sample_payload();
-        draft.accounts[0].account_type = "managed".to_string();
-        draft.accounts[0].setup_step = "payment".to_string();
-        draft.accounts[0].enabled = true;
-        let draft = validate_payload(draft).unwrap();
-        assert_eq!(draft.accounts[0].setup_step, ModelSetupStep::GoogleAccount);
-        assert!(!draft.accounts[0].enabled);
-        assert!(draft.accounts[0].key.is_empty());
-
-        let mut ready = sample_payload();
-        ready.accounts[0].account_type = "managed".to_string();
-        let ready = validate_payload(ready).unwrap();
-        assert_eq!(ready.accounts[0].setup_step, ModelSetupStep::Ready);
-        assert!(ready.accounts[0].enabled);
-        assert_eq!(ready.accounts[0].key.as_str(), "sk-ocg-test-secret");
-    }
-
-    #[test]
-    fn account_count_and_decoded_ciphertext_limits_fail_closed() {
-        let mut payload = sample_payload();
-        let node = payload
-            .node
-            .as_mut()
-            .expect("v4 payload includes node state");
-        for index in 1..MAX_ACCOUNTS {
-            let id = format!("00000000-0000-4000-8000-{:012x}", 0x41 + index);
-            let mut extra = sample_account(format!("Account {index}"));
-            extra.id = Some(id.clone());
-            payload.accounts.push(extra);
-            node.account_order.push(id);
-        }
-        assert_eq!(
-            validate_payload(payload).unwrap().accounts.len(),
-            MAX_ACCOUNTS
-        );
-
-        let mut oversized = sample_payload();
-        for index in 1..=MAX_ACCOUNTS {
-            oversized
-                .accounts
-                .push(sample_account(format!("Account {index}")));
-        }
-        assert!(matches!(
-            validate_payload(oversized),
-            Err(TransferError::InvalidBundle)
-        ));
-
-        let envelope = EncryptedEnvelope {
-            format: ENVELOPE_FORMAT.to_string(),
-            version: ENVELOPE_VERSION,
-            salt: STANDARD.encode([0_u8; SALT_LEN]),
-            nonce: STANDARD.encode([0_u8; NONCE_LEN]),
-            ciphertext: STANDARD.encode(vec![0_u8; MAX_PLAINTEXT_BYTES + 33]),
-        };
-        assert!(matches!(
-            decrypt_and_validate(
-                &serde_json::to_string(&envelope).unwrap(),
-                "correct horse battery"
-            ),
-            Err(TransferError::InvalidBundle)
-        ));
-    }
-
-    #[test]
-    fn v1_encryption_vector_is_stable() {
-        use sha2::{Digest, Sha256};
-
-        let bundle = encrypt_payload_with_material(
-            &sample_payload(),
-            "correct horse battery",
-            [7_u8; SALT_LEN],
-            [9_u8; NONCE_LEN],
-        )
-        .unwrap();
-        assert_eq!(
-            format!("{:x}", Sha256::digest(bundle.as_bytes())),
-            "afa7b6590844628ec70a76f6ed213c02033141ee9488db4842dc8cdf90c4c2b8"
-        );
-    }
-}
+mod tests;

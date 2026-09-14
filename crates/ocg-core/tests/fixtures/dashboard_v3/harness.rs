@@ -3,9 +3,13 @@
 #![allow(dead_code)]
 
 use ocg_core::crypto::{KeyCipher, StaticKeyCipher};
+use ocg_core::dashboard_v3::{
+    OfficialProtocolFetchGuard, install_official_protocol_fetch_fallback_chat_for_tests,
+};
 use ocg_core::db::Database;
 use ocg_core::gateway;
 use ocg_core::host_router::{DASHBOARD_V2_REMOVED_CODE, DASHBOARD_V2_REMOVED_MESSAGE};
+use ocg_core::models::AccountUpdate;
 use ocg_core::state::{CoreStateInner, GatewayHandle};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
@@ -21,6 +25,8 @@ pub(crate) struct V3Harness {
     pub client: reqwest::Client,
     pub v2_base: String,
     pub v3_base: String,
+    #[allow(dead_code)]
+    official_protocol_guard: OfficialProtocolFetchGuard,
 }
 
 pub(crate) fn temp_data_dir(label: &str) -> PathBuf {
@@ -75,6 +81,8 @@ async fn start_on(label: &str, addr: SocketAddr) -> V3Harness {
         .await
         .unwrap();
     let host = format!("http://127.0.0.1:{}", handle.port);
+    let official_protocol_guard =
+        install_official_protocol_fetch_fallback_chat_for_tests(state.process_generation());
     V3Harness {
         state,
         dir,
@@ -82,6 +90,7 @@ async fn start_on(label: &str, addr: SocketAddr) -> V3Harness {
         client: loopback_client(),
         v2_base: format!("{host}/dashboard/api"),
         v3_base: format!("{host}/dashboard/api/v3"),
+        official_protocol_guard,
     }
 }
 
@@ -119,6 +128,23 @@ impl V3Harness {
         let status = response.status();
         let body = response.json().await.unwrap_or(Value::Null);
         Self::assert_v2_removed(status, &body);
+    }
+
+    pub(crate) fn enable_account(&self, id: &str) {
+        self.state
+            .db
+            .lock()
+            .update_account(
+                id,
+                &AccountUpdate {
+                    enabled: Some(true),
+                    ..AccountUpdate::default()
+                },
+                None,
+                None,
+            )
+            .unwrap();
+        self.state.reload_provider_contracts().unwrap();
     }
 
     pub(crate) fn stop(self) {

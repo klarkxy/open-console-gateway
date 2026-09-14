@@ -2,9 +2,9 @@
   <section class="keys-page" aria-labelledby="gateway-keys-title">
     <div class="keys-card">
       <div class="keys-head">
-        <h2 id="gateway-keys-title">{{ t("接入 Key") }}</h2>
+        <h2 id="gateway-keys-title" class="sr-only">{{ t("接入 Key") }}</h2>
         <p class="field-caption">
-          {{ t("主 Key 恒为有效，只能重置；子 Key 可分给不同设备，用量按 Key 记录，删除为软删除，历史日志保留归因。") }}
+          {{ t("主 Key 只能重置。子 Key 可分给不同设备。") }}
         </p>
       </div>
 

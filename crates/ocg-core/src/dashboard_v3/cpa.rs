@@ -293,10 +293,21 @@ pub(super) async fn refresh_models(
         check_expectation(&state, &expectation)?;
     }
     let (client, base_url) = saved_client(&state)?;
-    let models = client
+    let incoming = client
         .models()
         .await
         .map_err(|error| map_cpa_error(&state, error))?;
+    let previous = {
+        let db = state.db.lock();
+        db.cpa_model_catalog().map_err(V3ApiError::internal)?
+    };
+    let models = crate::db::CpaCatalogModel::merge_refresh(
+        incoming,
+        previous
+            .as_ref()
+            .map(|item| item.models.as_slice())
+            .unwrap_or(&[]),
+    );
     let _settings = state.settings_update.lock();
     check_expectation(&state, &expectation)?;
     let refreshed_at = Utc::now();
@@ -1531,6 +1542,16 @@ mod tests {
         assert_eq!(error.body.process_generation, Some(generation));
     }
 
+    fn assert_stale_side_effect(
+        error: V3ApiError,
+        revision: u64,
+        generation: u64,
+        counter: &AtomicUsize,
+    ) {
+        assert_stale_conflict(error, revision, generation);
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+
     #[tokio::test]
     async fn successful_cpa_side_effects_bump_revision_and_reject_stale_tokens() {
         let (dir, state) = test_state("side-effect-cas");
@@ -1574,8 +1595,7 @@ mod tests {
         )
         .await
         .expect_err("stale account status token must 409");
-        assert_stale_conflict(error, ack.revision, generation);
-        assert_eq!(fake.status.load(Ordering::SeqCst), 1);
+        assert_stale_side_effect(error, ack.revision, generation, &fake.status);
 
         let before = state.settings_revision();
         let Json(ack) = unwrap_ok(
@@ -1594,8 +1614,7 @@ mod tests {
         )
         .await
         .expect_err("stale account delete token must 409");
-        assert_stale_conflict(error, ack.revision, generation);
-        assert_eq!(fake.delete.load(Ordering::SeqCst), 1);
+        assert_stale_side_effect(error, ack.revision, generation, &fake.delete);
 
         let before = state.settings_revision();
         let Json(ack) = unwrap_ok(
@@ -1614,8 +1633,7 @@ mod tests {
         )
         .await
         .expect_err("stale quota reset token must 409");
-        assert_stale_conflict(error, ack.revision, generation);
-        assert_eq!(fake.reset.load(Ordering::SeqCst), 1);
+        assert_stale_side_effect(error, ack.revision, generation, &fake.reset);
 
         let before = state.settings_revision();
         let Json(started) = unwrap_ok(
@@ -1634,8 +1652,7 @@ mod tests {
         )
         .await
         .expect_err("stale oauth start token must 409");
-        assert_stale_conflict(error, started.revision, generation);
-        assert_eq!(fake.oauth_start.load(Ordering::SeqCst), 1);
+        assert_stale_side_effect(error, started.revision, generation, &fake.oauth_start);
 
         let before = state.settings_revision();
         let Json(ack) = unwrap_ok(
@@ -1654,8 +1671,7 @@ mod tests {
         )
         .await
         .expect_err("stale oauth cancel token must 409");
-        assert_stale_conflict(error, ack.revision, generation);
-        assert_eq!(fake.oauth_cancel.load(Ordering::SeqCst), 1);
+        assert_stale_side_effect(error, ack.revision, generation, &fake.oauth_cancel);
 
         drop(state);
         std::fs::remove_dir_all(dir).unwrap();

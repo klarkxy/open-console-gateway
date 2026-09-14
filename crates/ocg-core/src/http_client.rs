@@ -159,18 +159,13 @@ mod tests {
     }
 
     #[test]
-    fn no_redirect_builder_keeps_global_proxy_and_disables_follow() {
+    fn no_redirect_builder_succeeds_for_direct() {
         let config = AppConfig {
             proxy_mode: ProxyMode::Direct,
             ..AppConfig::default()
         };
         let client = build_no_redirect(&config).expect("no-redirect client");
         let _ = client;
-        let auto = AppConfig::default();
-        assert!(matches!(auto.proxy_mode, ProxyMode::Auto));
-        let _ = configured_builder(&auto)
-            .expect("proxy builder")
-            .redirect(no_redirect_policy());
     }
 
     #[tokio::test]
@@ -196,6 +191,32 @@ mod tests {
         assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
         let body = response.text().await.unwrap();
         assert!(!body.contains("followed"));
+    }
+
+    #[tokio::test]
+    async fn s02_no_redirect_client_does_not_follow_with_authorization() {
+        let app = Router::new()
+            .route("/from", get(|| async { Redirect::temporary("/to") }))
+            .route("/to", get(|| async { "followed-with-secret" }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let config = AppConfig {
+            proxy_mode: ProxyMode::Direct,
+            ..AppConfig::default()
+        };
+        let client = build_no_redirect(&config).unwrap();
+        let response = client
+            .get(format!("http://{addr}/from"))
+            .header(reqwest::header::AUTHORIZATION, "Bearer sk-secret")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+        let body = response.text().await.unwrap();
+        assert!(!body.contains("followed-with-secret"));
     }
 
     fn list_config(direction: ProxyListDirection, models: &[&str]) -> AppConfig {

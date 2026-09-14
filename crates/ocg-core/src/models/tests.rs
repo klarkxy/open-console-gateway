@@ -4,14 +4,6 @@ use super::{
     ProxyMode, RoutingMode, normalize_account_notes, normalize_opencode_invite_url,
     normalize_proxy_url, normalize_purchase_date, purchase_expires_on,
 };
-use ocg_domain::account::{AccountSetupStep, AccountType, UpstreamChannel};
-
-#[test]
-fn account_wire_identities_keep_canonical_strings() {
-    assert_eq!(AccountType::Key.as_str(), "key");
-    assert_eq!(AccountSetupStep::Ready.as_str(), "ready");
-    let _ = UpstreamChannel::Go;
-}
 
 #[test]
 fn claude_desktop_models_map_aliases_and_inherit_by_role_priority() {

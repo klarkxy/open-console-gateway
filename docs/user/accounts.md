@@ -2,6 +2,16 @@
 
 # Accounts
 
+**Add account** first distinguishes an existing connection from a new service. Existing connections use the same projection as **Providers**: built-in Providers that still have at least one account, and every saved user-defined Provider (with or without a Key). Deleting the last account of a built-in family removes it from existing connections and returns it to the new-service templates. Choose an existing connection to add another Key using its saved address, protocol and models. Choose a new service to browse unused built-in templates, Plan/API presets, Custom API, or a platform site; saving a preset creates a Provider and its first account together. Saving a preset from **Add account** uses the same onboarding commit as **Providers**. Connection summaries remain visible before entering a Key. Regional variants use a compact picker. Keys are stored by the account service; you can add one here or from a Provider's detail with **Add Key**.
+
+**Enabled** means the card may enter routing. New Key accounts, including Custom API and user-defined Providers, are created disabled. Test connection does not turn the switch on; enable the card after you have checked it. Already-enabled accounts stay as stored. Test results stay in the test dialog. User-defined Providers have no modeled subscription period, including those created from Plan presets: their accounts do not show an inferred purchase date, expiry countdown, or expiry alert. Existing stored purchase anchors are preserved for compatibility, but are not presented as confirmed billing facts.
+
+Accounts still edit through the same forms. Ready, routable cards show enabled, disabled, cooling, or unavailable. Card relations come from the identity projection: a declared relation is not a verified wallet, and dynamic or Custom dates stay unknown unless V3 already stored a real purchase date.
+
+A ready Key card can **Rotate Key**, **Add Key**, and **Edit binding** from the overflow menu. Rotate replaces only the Key this console will send on later requests for that card's credential (same credential id; version numbers increase). It is a local replacement: the provider-side credential is not revoked and stays under your control. **Add Key** creates another inference Key on the same identity, defaulting to that card's connection. Quota is independent unless you explicitly share with a selected inference Key on that identity; belonging to the same identity is not enough. After save, cards that actually share a stored quota pool show that relationship (naming the sibling Key when possible). A third Key on the same identity stays independent when it has its own pool or none. Custom API, Zen Free, CPA, no-auth, and observer credentials do not expose Add Key (Custom API still uses its dedicated account editor). If create does not return a definite result, the form keeps the submitted contents and operation: retry the same body, or cancel; do not change the form and submit again (that can create a duplicate Key).
+
+Edit binding changes that credential's enabled state, model scope (all models, or only the exact names you list), and — when you change it — destination consent: which configured endpoint this Key may be sent to (protocol and URL). Saved destination grants are facts; if a provider URL later changes, the saved Origin is shown and that endpoint stays unchecked until you explicitly allow the new destination. Changing only scope or enabled leaves destinations unchanged. Clearing both destination lists revokes access. Sealed official endpoints with no URL stay locked destinations and do not invent Origin strings. A disabled binding is shown on that card and does not flip the account enable switch. Zen Free, CPA, no-auth, and observer credentials do not expose rotate or binding. An identity can hold more than one Key; each card uses the credential whose legacy account id matches that card.
+
 Accounts is the tenant list. A Provider and a Plan are the same product
 identity (`provider_id` only), and every card belongs to one Provider with one
 credential when that Provider requires it. Quota authority is Provider-specific:
@@ -40,7 +50,7 @@ The Adapter Registry is sealed. Built-in Provider families are:
 | MiniMax CN Token Plan | `minimax` | Yes | Dedicated `sk-cp` Key; fixed official Chat and Messages routes, authenticated model directory, and manual official Token Plan usage refresh |
 | Kimi Code CN | `kimi` | Yes | Dedicated Kimi Code Key; fixed official Chat and Messages routes, authenticated model directory, and manual official weekly/rate-window usage refresh |
 | Ollama Cloud | `ollama` | Yes | Fixed-origin Chat Completions only (`https://ollama.com`, Bearer); public keyless catalog refresh; account billing tier (Pro $60 / Max $300 / Team $1000 USD Credits per billing month) plus purchase date; local monthly soft-credit estimate from official per-request usage and the manual `https://ollama.com/pricing` table; unconfigured existing accounts stay routeable with no meter |
-| Custom API | `custom` | Yes | Trusted-administrator destination; one API URL, one account-wide upstream protocol, and public-name → upstream-ID mappings per account; common base URLs are completed automatically; new accounts default on; eligible public names appear on `/v1/models`; unpriced/unknown cost, no quota debit |
+| Custom API | `custom` | Yes | Trusted-administrator destination; one API URL, one account-wide upstream protocol, and public-name → upstream-ID mappings per account; common base URLs are completed automatically; new accounts default off; eligible public names appear on `/v1/models`; unpriced/unknown cost, no quota debit |
 
 ## Move a node configuration
 
@@ -51,26 +61,34 @@ transfer it separately from the file; Open Console Gateway cannot recover it. Th
 operation remains available only from the node's loopback dashboard; forwarded
 scheme headers do not grant access to a remote dashboard.
 
-The current V4 payload moves usable ordinary accounts and their stable IDs,
+The current V6 payload moves usable ordinary accounts and their stable IDs,
 ready account Keys, Custom Endpoint/public-model → upstream-ID mappings and verification state,
 user-defined Providers (`providerId` only),
 the primary and active sub Access Keys, portable routing/proxy settings, Zen
-Free enablement/catalog, and Provider catalogs, evidence, and protocol
-overrides. Matching stable IDs are merged with package-owned portable fields;
-same-Plan or same-name rows with different IDs coexist. Existing destination
+Free enablement/catalog, Provider catalogs, evidence, and protocol
+overrides, and an explicit identity / credential / binding / quota-pool snapshot.
+Shared identities, a second credential on the same identity, binding model
+restrictions and enabled flags, and quota-pool membership and declared/unknown
+evidence are restored as stored. Matching stable IDs are merged with package-owned portable fields;
+same-Plan or same-name rows with different IDs coexist and independent same-URL
+accounts are not merged. Existing destination
 accounts keep their current order and position; source-only accounts append in
 package order. Destination-only Access Keys and Provider scopes are retained.
 
 Browser profiles/cookies, third-party login passwords, referral codes, logs,
-usage history, and source cooldown state do not move. Existing destination
-usage/cooldown history and browser data for a matching account ID stay in
+and usage history do not move. V6 carries source cooldown deadlines without
+shortening a later destination deadline; V4/V5 retain their older host-local
+cooldown behavior. Existing destination usage history and browser data stay in
 place; stale authentication and last-error flags are cleared when package
 account fields replace the stored credential.
 Machine-local listener/root URL, auto-start, and Dock settings also stay with
 the destination. Ready managed accounts keep their Key, but their browser login
 does not move; unfinished managed drafts are skipped. Import accepts payload
-V4 only; payload V1–V3 backups are rejected with an explicit
-unsupported-version error. The outer encrypted envelope remains version 1 and
+V4, V5, and V6. V4/V5 packages rebuild one identity, credential, All-scope
+binding, and identity quota pool per account. Payload V1–V3 and future V7
+backups are rejected with an explicit unsupported-version error. A V4/V5 file
+that already contains V6 identity fields is rejected rather than silently
+dropping them. The outer encrypted envelope remains version 1 and
 is distinct from the portable payload version.
 
 Every persistent mutation path rejects `enabled=true` for a catalogued
@@ -78,7 +96,7 @@ Every persistent mutation path rejects `enabled=true` for a catalogued
 GOAT catalog refresh updates the model directory; Key auth is observed from
 inference 401/403. An enabled, ready account with a non-empty Key can route
 models enabled in the Provider matrix. A newly created, routable Custom API
-account defaults to enabled. Editing the Endpoint, capabilities, Key, or
+account defaults to disabled. Editing the Endpoint, capabilities, Key, or
 protocol preserves its enabled state. Disabled drafts remain saveable.
 
 Use only the official provider API **Key** for OpenCode Go, Command Code GOAT,
@@ -117,10 +135,12 @@ entry instead of guessing a directory URL. Discovery returns upstream IDs only.
 Choosing one imports a row with the public name and upstream ID exactly equal.
 Fetching does not save, verify, or enable the account.
 
-A trusted administrator may configure any syntactically valid HTTP or HTTPS
-origin, including LAN, loopback, and other self-selected destinations.
-URL-embedded credentials, query strings, and fragments are rejected. The gateway
+A trusted administrator may configure a public, LAN, or loopback HTTP or HTTPS
+origin. Metadata, link-local, and opaque IPv4-trick hosts (for example
+`169.254.169.254` or `metadata.google.internal`) are rejected. URL-embedded
+credentials, query strings, and fragments are rejected. The gateway
 rejects redirects and does not forward dashboard or client authentication.
+A model or endpoint override to another Origin does not inherit the stored Key.
 Chat Completions and Responses use `Authorization: Bearer <key>`; Messages uses
 `x-api-key: <key>`. A 401 does not retry with a different auth header. Root and
 `/v1` bases resolve through the same rule for discovery, verification, and
@@ -155,11 +175,7 @@ unpriced: logs record `cost_state=unknown` with no quota debit, and Custom has
 no provider usage refresh. `MODEL_PROTOCOLS` remains Go-specific; Custom
 converts the client protocol to the account's single upstream protocol.
 
-**Add account** is a grouped plan list with a detail pane (**Ready to add** /
-**Draft plans** / **Unavailable**). Zen Free is a backend-owned singleton and
-is not listed there; enable or disable it on the account list.
-Selecting OpenCode Go still offers **Import existing Key** and **Register new
-account (Beta)** in the detail pane:
+Use the existing-connection choices to add another Key without creating a second Provider. New-service choices contain unused built-in templates, Plan/API presets, Custom API and platform types. Search matches vendor, variant, preset name and endpoint host. Selecting a result retains its exact variant when the search clears. Zen Free is a backend-owned singleton, managed only from the account list; OpenCode Go retains its optional managed-registration action where the host supports it.
 
 - A **Key account** stores one officially distributable OpenCode Go API key.
 - A **managed account** immediately creates a disabled, recoverable draft, then
@@ -177,7 +193,7 @@ from the OpenCode Go provider; fresh installs may ship a demo default). Edit it
 in place: it must be an HTTPS URL no longer than 2,048 characters, contain no
 username or password, and use exactly `opencode.ai` or `console.opencode.ai` as
 its host. If it differs from the saved value, it is written back to
-**Providers → OpenCode Go → Other**. Changes affect later invite-page opens
+**Providers → OpenCode Go → Settings**. Changes affect later invite-page opens
 only; they do not rewrite completed accounts. Replace the demo default with your
 own invite link before a real signup, or referral credit goes to the link owner.
 
@@ -242,7 +258,7 @@ free cooldown rather than a key quota.
   a fetch: new schedules are spread across the first 0–15 minutes. **Refresh
   quota** runs the same path on demand with a 15-second per-account server
   throttle (Retry-After / next-allowed). The card shows the last successful
-  official sync time and any temporary retry wait. Local estimates that reach
+  official sync time. Local estimates that reach
   ≥80% may trigger one expedited sync per 15 minutes. A real inference `429`
   still writes the existing cooldown/selector state and additionally schedules
   an official reconciliation about 1–2 minutes later; official failures or

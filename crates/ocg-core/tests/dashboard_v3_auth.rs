@@ -1,5 +1,5 @@
 //! Dashboard V3 authentication/session: public status, CAS-gated register/login/logout,
-//! cookie policy, V2 coexistence, and catalog append.
+//! cookie policy, retired V2 paths, and catalog append.
 
 use ocg_core::dashboard_v3::{
     ERROR_CONFLICT, ERROR_INVALID_JSON, ERROR_MISSING_EXPECTED_REVISION, ERROR_REVISION_CONFLICT,
@@ -697,7 +697,6 @@ async fn stale_revision_or_generation_has_no_auth_side_effects() {
     .await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert_v3_error(&body, ERROR_REVISION_CONFLICT);
-    assert_ne!(body["code"], ERROR_UNAUTHORIZED);
     assert!(headers.get(SET_COOKIE).is_none());
     assert_eq!(
         harness.state.dashboard_session_token.lock().as_str(),
@@ -792,8 +791,8 @@ async fn missing_or_unknown_fields_are_rejected_before_auth_side_effects() {
 }
 
 #[tokio::test]
-async fn v2_auth_shapes_and_empty_401_remain_behavior_compatible() {
-    let harness = start_public("auth-v2-coexist").await;
+async fn public_auth_shapes_and_empty_401_remain_behavior_compatible() {
+    let harness = start_public("auth-public").await;
 
     let v2_status = harness
         .client

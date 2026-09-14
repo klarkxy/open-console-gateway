@@ -603,14 +603,29 @@ fn resolve_dynamic_http(
     if runtime.auth_kind.requires_key() && account.key_cipher.trim().is_empty() {
         return Err(format!("account `{}` has no stored Key", account.name));
     }
+    let selected = runtime
+        .mapping_for_upstream(&plan.model)
+        .or_else(|| runtime.mapping_for_public(&plan.model))
+        .or_else(|| {
+            plan.resolved_alias
+                .as_deref()
+                .and_then(|alias| runtime.mapping_for_public(alias))
+        })
+        .ok_or_else(|| {
+            format!(
+                "dynamic provider `{}` has no mapping for `{}`",
+                runtime.name, plan.model
+            )
+        })?;
+    let route = runtime.effective_route(selected);
     let protocol = protocol_kind_for(plan.upstream)?;
-    if protocol != runtime.upstream_protocol {
+    if protocol != route.protocol {
         return Err(format!(
-            "dynamic provider `{}` only supports {:?}",
-            runtime.name, runtime.upstream_protocol
+            "dynamic provider `{}` model `{}` only supports {:?}",
+            runtime.name, selected.public_model, route.protocol
         ));
     }
-    let endpoint = resolve_custom_endpoints(&runtime.endpoint_url, protocol)
+    let endpoint = resolve_custom_endpoints(&route.endpoint_url, protocol)
         .map_err(|error| error.to_string())?
         .inference;
     let endpoint_path = endpoint.path().to_string();

@@ -6,12 +6,15 @@
 //! config, Custom URL trust, and provider auth enums stay in the owning adapter.
 
 use std::fmt;
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::StreamExt;
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
 
-use crate::http::{OutboundProxySpec, ProxyMode, configured_builder, no_redirect_policy};
+use crate::http::{
+    OutboundProxySpec, ProxyMode, attach_dns_resolver, configured_builder, no_redirect_policy,
+};
 
 /// Redirect policy for an inference HTTP client. Follow versus none is chosen
 /// by the owning adapter; this crate does not attach a product-specific policy.
@@ -231,10 +234,26 @@ impl HttpInferenceTransport {
         proxy: &OutboundProxySpec,
         spec: HttpInferenceTransportSpec,
     ) -> Result<Self, InferenceHttpError> {
-        let client = configured_builder(proxy)
+        Self::build_with_dns_resolver(proxy, spec, None)
+    }
+
+    /// Same client as [`Self::build`], with an optional connector DNS resolver.
+    /// IsolatedTrustedAdmin Custom/dynamic callers pass a destination guard.
+    /// Sealed-adapter callers keep `None`. Proxy routing is unchanged: a
+    /// configured or system proxy still owns destination DNS.
+    pub fn build_with_dns_resolver(
+        proxy: &OutboundProxySpec,
+        spec: HttpInferenceTransportSpec,
+        dns_resolver: Option<Arc<dyn reqwest::dns::Resolve>>,
+    ) -> Result<Self, InferenceHttpError> {
+        let mut builder = configured_builder(proxy)
             .map_err(|error| InferenceHttpError::Build(error.to_string()))?
             .redirect(spec.redirect().reqwest_policy())
-            .connect_timeout(proxy.connect_timeout)
+            .connect_timeout(proxy.connect_timeout);
+        if let Some(resolver) = dns_resolver {
+            builder = attach_dns_resolver(builder, resolver);
+        }
+        let client = builder
             .build()
             .map_err(|error| InferenceHttpError::Build(error.to_string()))?;
         Ok(Self {
@@ -275,6 +294,11 @@ impl HttpInferenceTransport {
         &self,
         request: InferenceHttpRequest<'_>,
     ) -> Result<reqwest::Response, InferenceHttpError> {
+        if request.auth.is_some() && self.spec.redirect() == InferenceRedirectPolicy::Follow {
+            return Err(InferenceHttpError::InvalidUrl(
+                "secret-bearing inference requests must not follow redirects".to_string(),
+            ));
+        }
         let mut builder = self.client.request(request.method, request.url);
         if let Some((scheme, api_key)) = request.auth {
             let headers = isolated_inference_headers(scheme, api_key)?;

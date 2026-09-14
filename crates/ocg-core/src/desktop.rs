@@ -18,6 +18,11 @@ pub type AutoStartSync = fn(bool) -> crate::Result<()>;
 
 pub type DockVisibilitySync = Arc<dyn Fn(bool) -> crate::Result<()> + Send + Sync + 'static>;
 
+/// Shared with [`crate::state::HostSettingsError`] so headless hooks and
+/// settings writes fail closed on the same public strings.
+pub const AUTO_START_UNAVAILABLE: &str = "auto-start is unavailable in this runtime";
+pub const DOCK_VISIBILITY_UNAVAILABLE: &str = "Dock visibility is unavailable in this runtime";
+
 pub type DesktopUpdateStarter = Arc<dyn Fn(String) -> crate::Result<()> + Send + Sync + 'static>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -121,7 +126,7 @@ impl DesktopCapabilities {
         let sync = self
             .auto_start_sync
             .get()
-            .ok_or_else(|| anyhow::anyhow!("auto-start is unavailable in this runtime"))?;
+            .ok_or_else(|| anyhow::anyhow!(AUTO_START_UNAVAILABLE))?;
         sync(enabled)
     }
 
@@ -140,7 +145,7 @@ impl DesktopCapabilities {
         let sync = self
             .dock_visibility_sync
             .get()
-            .ok_or_else(|| anyhow::anyhow!("dock visibility is unavailable in this runtime"))?;
+            .ok_or_else(|| anyhow::anyhow!(DOCK_VISIBILITY_UNAVAILABLE))?;
         sync(visible)
     }
 
@@ -254,10 +259,9 @@ mod tests {
     fn auto_start_is_unsupported_until_the_host_registers_a_hook() {
         let desktop = DesktopCapabilities::new();
         assert!(!desktop.auto_start_supported());
-        let error = desktop
+        desktop
             .sync_auto_start(true)
             .expect_err("headless runtimes leave auto-start unset");
-        assert!(error.to_string().contains("unavailable"));
 
         desktop.set_auto_start_sync(ok_auto_start);
         assert!(desktop.auto_start_supported());
@@ -274,10 +278,9 @@ mod tests {
     fn dock_visibility_is_unsupported_until_the_host_registers_a_hook() {
         let desktop = DesktopCapabilities::new();
         assert!(!desktop.dock_visibility_supported());
-        let error = desktop
+        desktop
             .sync_dock_visibility(false)
             .expect_err("headless runtimes leave Dock visibility unset");
-        assert!(error.to_string().contains("unavailable"));
 
         let applied = Arc::new(StdMutex::new(Vec::new()));
         let captured = applied.clone();

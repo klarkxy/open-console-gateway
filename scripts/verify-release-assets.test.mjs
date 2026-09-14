@@ -95,7 +95,7 @@ test("release verification rejects payload and server digest drift", async () =>
   });
 });
 
-test("release verification rejects missing and unexpected assets", async () => {
+test("release verification rejects missing assets", async () => {
   await withReleaseFixture(async ({ directory }) => {
     rmSync(join(directory, `ocg-manager-cli_${VERSION}_windows-x64.zip`));
     await assert.rejects(

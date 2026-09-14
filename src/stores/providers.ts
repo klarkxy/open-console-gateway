@@ -1,5 +1,6 @@
 import { computed, ref } from "vue";
 import { defineStore } from "pinia";
+import { connectionsApi, type Connection } from "../api/connections.ts";
 import { isRevisionConflict } from "../api/dashboard.ts";
 import { providerApi } from "../api/providers.ts";
 import type {
@@ -16,6 +17,7 @@ import type {
 export const useProvidersStore = defineStore("providers", () => {
   const catalog = ref<ProviderCatalogEntry[] | null>(null);
   const contracts = ref<ProviderContractsResponse | null>(null);
+  const connections = ref<Connection[] | null>(null);
   const loading = ref(false);
   const error = ref("");
 
@@ -25,12 +27,21 @@ export const useProvidersStore = defineStore("providers", () => {
   // return/throw to their own caller unchanged.
   let catalogGeneration = 0;
   let contractsGeneration = 0;
+  let connectionsGeneration = 0;
 
   async function loadCatalog(): Promise<ProviderCatalogEntry[]> {
     const generation = ++catalogGeneration;
     const result = await providerApi.getProviderCatalog();
     if (generation !== catalogGeneration) return result;
     catalog.value = result;
+    return result;
+  }
+
+  async function loadConnections(): Promise<Connection[]> {
+    const generation = ++connectionsGeneration;
+    const result = await connectionsApi.list();
+    if (generation !== connectionsGeneration) return result;
+    connections.value = result;
     return result;
   }
 
@@ -65,11 +76,13 @@ export const useProvidersStore = defineStore("providers", () => {
     return result;
   }
 
-  async function resetStaticModelProtocols(
+  async function removeContractCatalogModels(
+    scopeKind: ContractScopeKind,
     scopeId: string,
+    modelIds: string[],
   ): Promise<ProviderContractsResponse> {
     try {
-      const result = await providerApi.resetStaticModelProtocols(scopeId);
+      const result = await providerApi.removeContractCatalogModels(scopeKind, scopeId, modelIds);
       contractsGeneration += 1;
       contracts.value = result;
       loading.value = false;
@@ -100,12 +113,14 @@ export const useProvidersStore = defineStore("providers", () => {
   return {
     catalog: computed(() => catalog.value),
     contracts: computed(() => contracts.value),
+    connections: computed(() => connections.value),
     loading: computed(() => loading.value),
     error: computed(() => error.value),
     loadCatalog,
+    loadConnections,
     loadContracts,
     refreshContractCatalog,
-    resetStaticModelProtocols,
+    removeContractCatalogModels,
     putModelProtocolOverrides,
   };
 });

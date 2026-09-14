@@ -16,7 +16,9 @@ use crate::provider::{
     ZEN_FREE_ACCOUNT_ID, ZEN_FREE_ACCOUNT_NAME,
 };
 use chrono::Utc;
+use ocg_domain::credential::ModelScope;
 use serde_json::json;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 const NO_IDS: &[String] = &[];
@@ -163,14 +165,120 @@ fn goat_account(id: &str) -> Account {
     )
 }
 
+fn example_zen_catalog() -> crate::zen_models::ZenFreeModelCatalog {
+    crate::zen_models::ZenFreeModelCatalog {
+        models: vec!["mimo-v2.5-free".into()],
+        refreshed_at: Some(Utc::now()),
+        source_url: crate::kernel::zen::ZEN_MODELS_SOURCE_URL.to_string(),
+    }
+}
+
+fn persist_provider_catalog(
+    persisted: &mut crate::provider_contracts::PersistedContracts,
+    provider_id: &str,
+    models: &[&str],
+    source: &str,
+    source_url: &str,
+) {
+    let now = Utc::now();
+    let scope = crate::provider_contracts::ContractScope::provider(provider_id);
+    persisted.scopes.insert(
+        scope.clone(),
+        crate::provider_contracts::PersistedScopeRow {
+            scope,
+            catalog_models: models.iter().map(|model| (*model).to_string()).collect(),
+            catalog_refreshed_at: Some(now),
+            catalog_source: source.into(),
+            catalog_source_url: source_url.into(),
+            revision: 1,
+            updated_at: now,
+        },
+    );
+}
+
+fn persist_official_docs(
+    persisted: &mut crate::provider_contracts::PersistedContracts,
+    provider_id: &str,
+    pairs: &[(&str, UpstreamProtocolKind)],
+) {
+    let scope = crate::provider_contracts::ContractScope::provider(provider_id);
+    persisted.evidence.insert(
+        scope.clone(),
+        pairs
+            .iter()
+            .map(
+                |(model_id, protocol)| crate::provider_contracts::PersistedModelProtocol {
+                    scope: scope.clone(),
+                    model_id: (*model_id).into(),
+                    protocol: *protocol,
+                    source: crate::provider_contracts::ContractEvidenceSource::Static,
+                    verified_at: None,
+                    observed_at: None,
+                    last_probe_result: None,
+                    last_probe_at: None,
+                    last_probe_error: None,
+                },
+            )
+            .collect(),
+    );
+}
+
+fn refreshed_persisted() -> crate::provider_contracts::PersistedContracts {
+    let mut persisted = crate::provider_contracts::PersistedContracts::default();
+    persist_provider_catalog(
+        &mut persisted,
+        OPENCODE_PROVIDER_ID,
+        &[
+            "glm-5.1",
+            "glm-5.2",
+            "grok-4.5",
+            "deepseek-v4-flash",
+            "mimo-v2.5",
+            "minimax-m3",
+            "MiniMax-M3",
+            "kimi-k3",
+        ],
+        crate::provider_contracts::CATALOG_SOURCE_OPENCODE_MODELS,
+        crate::provider::OPENCODE_GO_BASE_URL,
+    );
+    persist_official_docs(
+        &mut persisted,
+        OPENCODE_PROVIDER_ID,
+        &[
+            ("glm-5.1", UpstreamProtocolKind::ChatCompletions),
+            ("glm-5.2", UpstreamProtocolKind::ChatCompletions),
+            ("grok-4.5", UpstreamProtocolKind::Responses),
+            ("deepseek-v4-flash", UpstreamProtocolKind::ChatCompletions),
+            ("mimo-v2.5", UpstreamProtocolKind::ChatCompletions),
+            ("minimax-m3", UpstreamProtocolKind::ChatCompletions),
+            ("MiniMax-M3", UpstreamProtocolKind::ChatCompletions),
+            ("kimi-k3", UpstreamProtocolKind::ChatCompletions),
+            ("kimi-k3", UpstreamProtocolKind::Messages),
+        ],
+    );
+    persisted
+}
+
 fn static_contracts() -> crate::provider_contracts::EffectiveContractSet {
     contracts_for(&[])
+}
+
+fn resolve_model(model: &str) -> ResolvedModel {
+    let zen = example_zen_catalog().models;
+    alias::resolve_with_runtime_catalogs(
+        model,
+        alias::RuntimeCatalogs {
+            zen_free: &zen,
+            ..alias::RuntimeCatalogs::default()
+        },
+    )
+    .unwrap()
 }
 
 fn goat_contracts(models: &[&str]) -> crate::provider_contracts::EffectiveContractSet {
     let now = Utc::now();
     let scope = crate::provider_contracts::ContractScope::provider(COMMAND_CODE_PROVIDER_ID);
-    let mut persisted = crate::provider_contracts::PersistedContracts::default();
+    let mut persisted = refreshed_persisted();
     persisted.scopes.insert(
         scope.clone(),
         crate::provider_contracts::PersistedScopeRow {
@@ -204,20 +312,16 @@ fn goat_contracts(models: &[&str]) -> crate::provider_contracts::EffectiveContra
             )
             .collect(),
     );
-    crate::provider_contracts::build_effective_contracts(
-        &crate::zen_models::ZenFreeModelCatalog::default(),
-        &[],
-        persisted,
-    )
+    crate::provider_contracts::build_effective_contracts(&example_zen_catalog(), &[], persisted)
 }
 
 fn contracts_for(
     runtimes: &[CustomAccountRuntime],
 ) -> crate::provider_contracts::EffectiveContractSet {
     crate::provider_contracts::build_effective_contracts(
-        &crate::zen_models::ZenFreeModelCatalog::default(),
+        &example_zen_catalog(),
         runtimes,
-        crate::provider_contracts::PersistedContracts::default(),
+        refreshed_persisted(),
     )
 }
 
@@ -239,7 +343,7 @@ fn routes_for_with_contracts(
 ) -> MaterializedRouteSet {
     let body = chat_body(model);
     let parsed = parse_client_request(ApiFormat::ChatCompletions, body.clone()).unwrap();
-    let resolved = alias::resolve(model).unwrap();
+    let resolved = resolve_model(model);
     materialize_account_routes(
         accounts,
         config,
@@ -280,41 +384,62 @@ fn go_alias_materializes_opencode_go_candidates() {
 }
 
 #[test]
-fn unknown_cpa_raw_model_defaults_to_chat_and_uses_local_base() {
-    let model = "vendor/cpa-new-model";
-    let cpa_models = vec![model.to_string()];
-    let resolved = alias::resolve_with_runtime_catalogs(
-        model,
-        alias::RuntimeCatalogs {
-            cpa: &cpa_models,
-            ..alias::RuntimeCatalogs::default()
-        },
-    )
-    .unwrap();
-    let body = chat_body(model);
-    let parsed = parse_client_request(ApiFormat::ChatCompletions, body.clone()).unwrap();
-    let set = materialize_account_routes(
-        &[cpa_account()],
-        &AppConfig::default(),
-        &parsed,
-        &resolved,
-        model,
-        model,
-        &body,
-        true,
-        &std::collections::HashMap::new(),
-        &std::collections::HashMap::new(),
-        Some(crate::cpa::DEFAULT_CPA_BASE_URL),
-        &static_contracts(),
-        &[],
-    )
-    .unwrap();
-    assert_eq!(set.routes.len(), 1);
-    assert_eq!(set.routes[0].plan.upstream, ApiFormat::ChatCompletions);
-    assert_eq!(
-        set.routes[0].plan.upstream_base_override.as_deref(),
-        Some(crate::cpa::DEFAULT_CPA_BASE_URL)
-    );
+fn cpa_preserves_client_protocol_for_known_and_unknown_models() {
+    for model in ["vendor/cpa-new-model", "grok-4.5"] {
+        let cpa_models = vec![model.to_string()];
+        let resolved = alias::resolve_with_runtime_catalogs(
+            model,
+            alias::RuntimeCatalogs {
+                cpa: &cpa_models,
+                ..alias::RuntimeCatalogs::default()
+            },
+        )
+        .unwrap();
+        for client in [
+            ApiFormat::ChatCompletions,
+            ApiFormat::Responses,
+            ApiFormat::Messages,
+            ApiFormat::Gemini,
+        ] {
+            let body = Bytes::from(serde_json::to_vec(&match client {
+                ApiFormat::Responses => json!({"model":model,"input":"hi","store":false}),
+        ApiFormat::Gemini => json!({"contents":[{"role":"user","parts":[{"text":"hi"}]}]}),
+        _ => json!({"model":model,"messages":[{"role":"user","content":"hi"}],"max_tokens":16}),
+    }).unwrap());
+            let parsed = if client == ApiFormat::Gemini {
+                parse_gemini(model.into(), false, body.clone()).unwrap()
+            } else {
+                parse_client_request(client, body.clone()).unwrap()
+            };
+            let set = materialize_account_routes(
+                &[cpa_account()],
+                &AppConfig::default(),
+                &parsed,
+                &resolved,
+                model,
+                model,
+                &body,
+                true,
+                &std::collections::HashMap::new(),
+                &std::collections::HashMap::new(),
+                Some(crate::cpa::DEFAULT_CPA_BASE_URL),
+                &static_contracts(),
+                &[],
+            )
+            .unwrap();
+            assert_eq!(set.routes.len(), 1);
+            let expected = if client == ApiFormat::Gemini {
+                ApiFormat::ChatCompletions
+            } else {
+                client
+            };
+            assert_eq!(set.routes[0].plan.upstream, expected, "{model} {client:?}");
+            assert_eq!(
+                set.routes[0].plan.upstream_base_override.as_deref(),
+                Some(crate::cpa::DEFAULT_CPA_BASE_URL)
+            );
+        }
+    }
 }
 
 #[test]
@@ -323,7 +448,7 @@ fn mixed_case_go_alias_preserves_requested_casing() {
     let set = routes_for("MiniMax-M3", &[go_account("go-1")], &config, true);
     assert_eq!(set.routes[0].plan.model, "MiniMax-M3");
     assert_eq!(set.routes[0].plan.client_model, "MiniMax-M3");
-    assert_eq!(set.routes[0].plan.upstream, ApiFormat::Messages);
+    assert_eq!(set.routes[0].plan.upstream, ApiFormat::ChatCompletions);
     let identity = native_log_identity(&set.routes[0].plan);
     assert_eq!(identity.requested_model, "MiniMax-M3");
     assert_eq!(identity.resolved_alias.as_deref(), Some("minimax-m3"));
@@ -640,7 +765,7 @@ fn goat_slash_raw_without_loopback_is_fail_closed() {
 }
 
 #[test]
-fn resolve_error_exposes_ambiguous_code() {
+fn r01_ambiguous_raw_model_id_fails_closed_without_outbound() {
     let error = protocol_error_from_resolve(crate::alias::ResolveError::Ambiguous {
         requested: "shared-raw".into(),
         mappings: vec![
@@ -658,8 +783,9 @@ fn resolve_error_exposes_ambiguous_code() {
             },
         ],
     });
+    assert_eq!(error.status, axum::http::StatusCode::BAD_REQUEST);
     assert_eq!(error.code, Some(crate::alias::AMBIGUOUS_MODEL_ID));
-    assert!(error.message.contains("alias"));
+    assert!(error.message.contains("shared-raw"), "{}", error.message);
 }
 
 #[test]
@@ -1049,7 +1175,7 @@ fn custom_without_scope_contract_does_not_produce_a_candidate() {
 }
 
 #[test]
-fn probed_opencode_protocol_is_selected_after_contract_evidence() {
+fn model_preference_survives_legacy_probe_evidence() {
     let body = chat_body("grok-4.5");
     let parsed = parse_client_request(ApiFormat::ChatCompletions, body.clone()).unwrap();
     let resolved = alias::resolve("grok-4.5").unwrap();
@@ -1074,11 +1200,10 @@ fn probed_opencode_protocol_is_selected_after_contract_evidence() {
     assert_eq!(before.routes[0].plan.upstream, ApiFormat::Responses);
 
     let now = Utc::now();
-    let mut persisted = crate::provider_contracts::PersistedContracts::default();
+    let mut persisted = refreshed_persisted();
     let scope = crate::provider_contracts::ContractScope::provider(OPENCODE_PROVIDER_ID);
-    persisted.evidence.insert(
-        scope.clone(),
-        vec![crate::provider_contracts::PersistedModelProtocol {
+    persisted.evidence.entry(scope.clone()).or_default().push(
+        crate::provider_contracts::PersistedModelProtocol {
             scope,
             model_id: "grok-4.5".into(),
             protocol: UpstreamProtocolKind::ChatCompletions,
@@ -1088,10 +1213,10 @@ fn probed_opencode_protocol_is_selected_after_contract_evidence() {
             last_probe_result: Some(crate::provider_contracts::ProbeResultKind::Success),
             last_probe_at: Some(now),
             last_probe_error: None,
-        }],
+        },
     );
     let contracts = crate::provider_contracts::build_effective_contracts(
-        &crate::zen_models::ZenFreeModelCatalog::default(),
+        &example_zen_catalog(),
         &[],
         persisted,
     );
@@ -1113,5 +1238,400 @@ fn probed_opencode_protocol_is_selected_after_contract_evidence() {
     .unwrap();
     assert_eq!(after.routes.len(), 1);
     assert_eq!(after.routes[0].plan.upstream, ApiFormat::ChatCompletions);
+    assert_eq!(
+        contracts
+            .providers
+            .get(OPENCODE_PROVIDER_ID)
+            .unwrap()
+            .model("grok-4.5")
+            .unwrap()
+            .preferred_protocol,
+        UpstreamProtocolKind::Responses
+    );
     assert_eq!(after.routes[0].routing.account.id, "go-probe");
+}
+
+fn routes_for_with_bindings(
+    model: &str,
+    accounts: &[Account],
+    bindings: &InferenceBindingIndex,
+) -> MaterializedRouteSet {
+    let body = chat_body(model);
+    let parsed = parse_client_request(ApiFormat::ChatCompletions, body.clone()).unwrap();
+    let resolved = resolve_model(model);
+    materialize_account_routes_with_bindings(
+        accounts,
+        &AppConfig::default(),
+        &parsed,
+        &resolved,
+        &parsed.requested_model,
+        model,
+        &body,
+        true,
+        &HashMap::new(),
+        &HashMap::new(),
+        None,
+        &static_contracts(),
+        &[],
+        bindings,
+    )
+    .unwrap()
+}
+
+#[test]
+fn d01_model_scope_keeps_x_off_key_b_without_disabling_other_models() {
+    let accounts = [go_account("key-a"), go_account("key-b")];
+    let mut bindings = InferenceBindingIndex::new();
+    bindings.insert(
+        "key-a".into(),
+        InferenceBindingGate {
+            enabled: true,
+            model_scope: ModelScope::All,
+        },
+    );
+    bindings.insert(
+        "key-b".into(),
+        InferenceBindingGate {
+            enabled: true,
+            model_scope: ModelScope::Only {
+                models: vec!["glm-5.1".into()],
+            },
+        },
+    );
+
+    let request_x = routes_for_with_bindings("glm-5.2", &accounts, &bindings);
+    let x_ids: Vec<_> = request_x
+        .routes
+        .iter()
+        .map(|route| route.routing.account.id.as_str())
+        .collect();
+    assert_eq!(x_ids, vec!["key-a"]);
+    assert!(
+        request_x
+            .rejected
+            .iter()
+            .any(|reason| reason.contains("key-b") && reason.contains("model scope")),
+        "{:?}",
+        request_x.rejected
+    );
+
+    let request_other = routes_for_with_bindings("glm-5.1", &accounts, &bindings);
+    let other_ids: Vec<_> = request_other
+        .routes
+        .iter()
+        .map(|route| route.routing.account.id.as_str())
+        .collect();
+    assert_eq!(other_ids, vec!["key-a", "key-b"]);
+}
+
+#[test]
+fn d01_disabled_binding_is_skipped_and_default_all_preserves_routes() {
+    let accounts = [go_account("key-a"), go_account("key-b")];
+    let mut bindings = InferenceBindingIndex::new();
+    bindings.insert(
+        "key-b".into(),
+        InferenceBindingGate {
+            enabled: false,
+            model_scope: ModelScope::All,
+        },
+    );
+    let set = routes_for_with_bindings("glm-5.2", &accounts, &bindings);
+    let ids: Vec<_> = set
+        .routes
+        .iter()
+        .map(|route| route.routing.account.id.as_str())
+        .collect();
+    assert_eq!(ids, vec!["key-a"]);
+    assert!(
+        set.rejected
+            .iter()
+            .any(|reason| reason.contains("key-b") && reason.contains("disabled")),
+        "{:?}",
+        set.rejected
+    );
+
+    let unrestricted = routes_for("glm-5.2", &accounts, &AppConfig::default(), true);
+    let unrestricted_ids: Vec<_> = unrestricted
+        .routes
+        .iter()
+        .map(|route| route.routing.account.id.as_str())
+        .collect();
+    assert_eq!(unrestricted_ids, vec!["key-a", "key-b"]);
+}
+
+fn routes_for_client(
+    client: ApiFormat,
+    model: &str,
+    accounts: &[Account],
+    contracts: &crate::provider_contracts::EffectiveContractSet,
+    custom_runtimes: &HashMap<String, CustomAccountRuntime>,
+    resolved: &ResolvedModel,
+) -> MaterializedRouteSet {
+    let body = Bytes::from(
+        serde_json::to_vec(&match client {
+            ApiFormat::Responses => json!({"model": model, "input": "hi", "store": false}),
+            ApiFormat::Messages => json!({
+                "model": model,
+                "max_tokens": 16,
+                "messages": [{"role": "user", "content": "hi"}]
+            }),
+            _ => json!({
+                "model": model,
+                "messages": [{"role": "user", "content": "hi"}]
+            }),
+        })
+        .unwrap(),
+    );
+    let parsed = parse_client_request(client, body.clone()).unwrap();
+    materialize_account_routes(
+        accounts,
+        &AppConfig::default(),
+        &parsed,
+        resolved,
+        &parsed.requested_model,
+        model,
+        &body,
+        true,
+        custom_runtimes,
+        &HashMap::new(),
+        None,
+        contracts,
+        &[],
+    )
+    .unwrap()
+}
+
+#[test]
+fn p03_changing_convert_default_keeps_other_native_capability() {
+    let accounts = [go_account("go-1")];
+    let resolved = alias::resolve("kimi-k3").unwrap();
+    let before = routes_for_client(
+        ApiFormat::ChatCompletions,
+        "kimi-k3",
+        &accounts,
+        &static_contracts(),
+        &HashMap::new(),
+        &resolved,
+    );
+    assert_eq!(before.routes[0].plan.upstream, ApiFormat::ChatCompletions);
+    let before_messages = routes_for_client(
+        ApiFormat::Messages,
+        "kimi-k3",
+        &accounts,
+        &static_contracts(),
+        &HashMap::new(),
+        &resolved,
+    );
+    assert_eq!(before_messages.routes[0].plan.upstream, ApiFormat::Messages);
+
+    let scope = crate::provider_contracts::ContractScope::provider(OPENCODE_PROVIDER_ID);
+    let mut persisted = refreshed_persisted();
+    persisted.preferences.insert(
+        scope,
+        vec![("kimi-k3".into(), UpstreamProtocolKind::Messages)],
+    );
+    let contracts = crate::provider_contracts::build_effective_contracts(
+        &example_zen_catalog(),
+        &[],
+        persisted,
+    );
+    assert_eq!(
+        contracts
+            .providers
+            .get(OPENCODE_PROVIDER_ID)
+            .unwrap()
+            .model("kimi-k3")
+            .unwrap()
+            .preferred_protocol,
+        UpstreamProtocolKind::Messages
+    );
+
+    let after_chat = routes_for_client(
+        ApiFormat::ChatCompletions,
+        "kimi-k3",
+        &accounts,
+        &contracts,
+        &HashMap::new(),
+        &resolved,
+    );
+    let after_messages = routes_for_client(
+        ApiFormat::Messages,
+        "kimi-k3",
+        &accounts,
+        &contracts,
+        &HashMap::new(),
+        &resolved,
+    );
+    assert_eq!(
+        after_chat.routes[0].plan.upstream,
+        ApiFormat::ChatCompletions,
+        "changing the convert default must not drop native Chat"
+    );
+    assert_eq!(
+        after_messages.routes[0].plan.upstream,
+        ApiFormat::Messages,
+        "changing the convert default must not drop native Messages"
+    );
+}
+
+#[test]
+fn p04_does_not_skip_higher_priority_convertible_subscription_for_later_native() {
+    let go = go_account("sub-1");
+    let custom = custom_account("api-1");
+    let runtime = custom_runtime("api-1", "grok-4.5", UpstreamProtocolKind::ChatCompletions);
+    let contracts = contracts_for(std::slice::from_ref(&runtime));
+    let mut runtimes = HashMap::new();
+    runtimes.insert(custom.id.clone(), runtime);
+    let resolved = ResolvedModel::Alias {
+        requested: "grok-4.5".into(),
+        alias: "grok-4.5".into(),
+        mappings: vec![
+            crate::alias::ProviderMapping {
+                provider_id: OPENCODE_PROVIDER_ID.to_string(),
+                upstream_model: "grok-4.5".into(),
+                routeable: true,
+            },
+            crate::alias::ProviderMapping {
+                provider_id: CUSTOM_PROVIDER_ID.to_string(),
+                upstream_model: "grok-4.5".into(),
+                routeable: true,
+            },
+        ],
+    };
+    let set = routes_for_client(
+        ApiFormat::ChatCompletions,
+        "grok-4.5",
+        &[go, custom],
+        &contracts,
+        &runtimes,
+        &resolved,
+    );
+    let ids: Vec<_> = set
+        .routes
+        .iter()
+        .map(|route| route.routing.account.id.as_str())
+        .collect();
+    assert_eq!(ids, vec!["sub-1", "api-1"]);
+    assert_eq!(set.routes[0].plan.upstream, ApiFormat::Responses);
+    assert_eq!(set.routes[1].plan.upstream, ApiFormat::ChatCompletions);
+}
+
+#[test]
+fn r06_live_reread_skips_disabled_or_revoked_stale_snapshot() {
+    use crate::routing_runtime::account_is_available_for;
+
+    let snapshot = [go_account("a"), go_account("b")];
+    let first = routes_for("glm-5.2", &snapshot, &AppConfig::default(), true);
+    assert_eq!(first.routes.len(), 2);
+
+    let mut disabled = snapshot[1].clone();
+    disabled.enabled = false;
+    assert!(account_is_available_for(
+        &snapshot[1],
+        UpstreamChannel::Go,
+        &[]
+    ));
+    assert!(!account_is_available_for(
+        &disabled,
+        UpstreamChannel::Go,
+        &["a"]
+    ));
+
+    let mut revoked = snapshot[1].clone();
+    revoked.auth_error = Some("credential revoked".into());
+    assert!(!account_is_available_for(
+        &revoked,
+        UpstreamChannel::Go,
+        &[]
+    ));
+
+    let live = [snapshot[0].clone(), disabled];
+    let rematerialized = routes_for("glm-5.2", &live, &AppConfig::default(), true);
+    let usable: Vec<_> = rematerialized
+        .routes
+        .iter()
+        .filter(|route| {
+            account_is_available_for(&route.routing.account, route.routing.channel, &["a"])
+        })
+        .collect();
+    assert!(
+        usable.is_empty(),
+        "a live disable/revoke must skip the stale snapshot candidate: {:?}",
+        rematerialized
+            .routes
+            .iter()
+            .map(|route| (
+                route.routing.account.id.as_str(),
+                route.routing.account.enabled
+            ))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn r08_cpa_routing_does_not_assume_local_account_or_unbounded_retry() {
+    let resolved = alias::resolve_with_runtime_catalogs(
+        "vendor/cpa-new-model",
+        alias::RuntimeCatalogs {
+            cpa: &["vendor/cpa-new-model".to_string()],
+            ..alias::RuntimeCatalogs::default()
+        },
+    )
+    .unwrap();
+    let body = chat_body("vendor/cpa-new-model");
+    let parsed = parse_client_request(ApiFormat::ChatCompletions, body.clone()).unwrap();
+    let missing = materialize_account_routes(
+        &[cpa_account()],
+        &AppConfig::default(),
+        &parsed,
+        &resolved,
+        "vendor/cpa-new-model",
+        "vendor/cpa-new-model",
+        &body,
+        true,
+        &HashMap::new(),
+        &HashMap::new(),
+        None,
+        &static_contracts(),
+        &[],
+    );
+    assert!(
+        missing.is_err(),
+        "CPA without a configured base must fail closed"
+    );
+
+    let local = account(
+        "local-oauth-1",
+        CPA_PROVIDER_ID,
+        CredentialKind::ApiKey,
+        QuotaScope::Key,
+    );
+    let set = materialize_account_routes(
+        &[local],
+        &AppConfig::default(),
+        &parsed,
+        &resolved,
+        "vendor/cpa-new-model",
+        "vendor/cpa-new-model",
+        &body,
+        true,
+        &HashMap::new(),
+        &HashMap::new(),
+        Some(crate::cpa::DEFAULT_CPA_BASE_URL),
+        &static_contracts(),
+        &[],
+    )
+    .unwrap();
+    assert!(
+        set.routes.is_empty(),
+        "CPA must not invent a local OAuth/account candidate: {:?}",
+        set.rejected
+    );
+    assert!(
+        set.rejected
+            .iter()
+            .any(|reason| reason.contains("reserved") || reason.contains("CPA")),
+        "{:?}",
+        set.rejected
+    );
 }

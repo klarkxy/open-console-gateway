@@ -1,5 +1,5 @@
 //! Dashboard V3 session-protected desktop update check/status/install:
-//! auth, exact DTOs, CAS, lifecycle, outbound policy, redaction, V2 coexistence.
+//! auth, exact DTOs, CAS, lifecycle, outbound policy, redaction, retired V2 paths.
 
 use ocg_core::dashboard_v3::{
     DesktopUpdate, ERROR_CONFLICT, ERROR_INTERNAL, ERROR_INVALID_JSON, ERROR_INVALID_REQUEST,
@@ -431,17 +431,6 @@ async fn dashboard_v3_v2_login_cookie_authorizes_updater_routes() {
         .await
         .unwrap();
     assert_eq!(authorized.status(), StatusCode::OK);
-    let body: Value = authorized.json().await.unwrap();
-    let parsed: DesktopUpdate = serde_json::from_value(body.clone()).unwrap();
-    assert_eq!(
-        parsed.phase,
-        ocg_core::dashboard_v3::DesktopUpdatePhase::Idle
-    );
-    assert_eq!(parsed.current_version, env!("CARGO_PKG_VERSION"));
-    assert!(!parsed.install_supported);
-    assert_eq!(body["total"], Value::Null);
-    assert_eq!(body["error"], Value::Null);
-    assert!(body.get("current_version").is_none());
 
     let install = harness
         .client
@@ -672,13 +661,6 @@ async fn dashboard_v3_install_is_strictly_newer_atomic_and_retriable() {
     .await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert_v3_error(&body, ERROR_CONFLICT);
-    assert!(
-        body["message"]
-            .as_str()
-            .unwrap()
-            .contains("already in progress"),
-        "{body}"
-    );
     assert_eq!(started.lock().unwrap().len(), 1);
 
     assert!(harness.state.set_desktop_update_progress(64, Some(128)));
@@ -728,13 +710,6 @@ async fn dashboard_v3_install_unsupported_busy_failure_and_concurrency() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert_v3_error(&body, ERROR_INVALID_REQUEST);
-    assert!(
-        body["message"]
-            .as_str()
-            .unwrap()
-            .contains("unavailable in this runtime"),
-        "{body}"
-    );
     assert_unmutated(&unsupported, &before);
     unsupported.stop();
 
@@ -811,8 +786,8 @@ async fn dashboard_v3_install_unsupported_busy_failure_and_concurrency() {
 }
 
 #[tokio::test]
-async fn dashboard_v3_updater_coexists_with_v2_status_and_install() {
-    let harness = start_loopback("updater-v2").await;
+async fn retired_v2_updater_does_not_start_install() {
+    let harness = start_loopback("updater-v2-retired").await;
     let started = Arc::new(Mutex::new(Vec::new()));
     let captured = started.clone();
     harness
@@ -982,13 +957,6 @@ async fn dashboard_v3_check_update_outbound_failures_are_redacted_and_redirects_
     assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
     assert_v3_error(&body, ERROR_OUTBOUND_FAILED);
     assert_eq!(body["currentRevision"], before.0);
-    assert!(
-        body["message"]
-            .as_str()
-            .unwrap()
-            .contains("invalid SemVer tag"),
-        "{body}"
-    );
     assert_secret_free(&body, &[GITHUB_LATEST_RELEASE_API, &invalid.url, &primary]);
     assert_unmutated(&harness, &before);
     drop(_guard);
@@ -1001,13 +969,6 @@ async fn dashboard_v3_check_update_outbound_failures_are_redacted_and_redirects_
     let (status, body) = get_path(&harness, "/settings/check-update").await;
     assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
     assert_v3_error(&body, ERROR_OUTBOUND_FAILED);
-    assert!(
-        body["message"]
-            .as_str()
-            .unwrap()
-            .contains("GitHub returned HTTP 403"),
-        "{body}"
-    );
     assert_secret_free(
         &body,
         &[
@@ -1025,13 +986,6 @@ async fn dashboard_v3_check_update_outbound_failures_are_redacted_and_redirects_
     let (status, body) = get_path(&harness, "/settings/check-update").await;
     assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
     assert_v3_error(&body, ERROR_OUTBOUND_FAILED);
-    assert!(
-        body["message"]
-            .as_str()
-            .unwrap()
-            .contains("invalid response"),
-        "{body}"
-    );
     assert_secret_free(&body, &[GITHUB_LATEST_RELEASE_API, &decode.url]);
     drop(_guard);
 

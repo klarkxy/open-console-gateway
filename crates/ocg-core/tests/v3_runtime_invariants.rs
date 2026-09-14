@@ -144,6 +144,8 @@ fn go_state_with_keys_and_clock(
         };
         state.db.lock().create_account(&account).unwrap();
     }
+    persist_refreshed_go_catalog(&state);
+    persist_enabled_zen_catalog(&state);
     (state, dir)
 }
 

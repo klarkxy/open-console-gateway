@@ -27,6 +27,8 @@ use std::time::Duration as StdDuration;
 #[path = "fixtures/fake_upstream.rs"]
 #[allow(dead_code)] // the shared fixture carries delayed/raw helpers this suite never exercises
 mod fake_upstream;
+#[path = "fixtures/refreshed_go_catalog.rs"]
+mod refreshed_go_catalog;
 
 use fake_upstream::{FakeReply, start_fake_upstream};
 
@@ -331,6 +333,7 @@ async fn mixed_candidate_chain_keeps_go_attempt_bytes_identical() {
     let (state, dir) = build_state(base_url.clone());
     persist_ollama_catalog(&state, &["deepseek-v4-flash:0731", "gpt-oss:120b"]);
 
+    refreshed_go_catalog::persist_refreshed_go_catalog(&state);
     // Go account sorts first: the shared alias is served by Go.
     let mut go = base_account(&state, "go-1", GO_KEY);
     go.provider_id = ocg_core::provider::OPENCODE_PROVIDER_ID.into();

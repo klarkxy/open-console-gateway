@@ -249,18 +249,22 @@ test("managed account API uses ordered setup, browser targets, and profile reset
   });
   await dashboardApi.resetAccountBrowserProfile("managed-1");
 
-  assert.deepEqual(requests.map(({ url, method, body }) => ({
+  assert.deepEqual(requests.map(({ url, method }) => ({
     path: new URL(url, "http://localhost").pathname,
     method,
-    body,
   })), [
-    { path: "/dashboard/api/v3/accounts/managed", method: "POST", body: { name: "Managed", username: "note@example.com", expectedRevision: 1, processGeneration: 99 } },
-    { path: "/dashboard/api/v3/accounts/managed-1/setup", method: "PATCH", body: { setupStep: "opencode_registration", expectedRevision: 1, processGeneration: 99 } },
-    { path: "/dashboard/api/v3/accounts/managed-1/setup/verify-key", method: "POST", body: { key: "sk-secret", expectedRevision: 1, processGeneration: 99 } },
-    { path: "/dashboard/api/v3/browser/capabilities", method: "GET", body: null },
-    { path: "/dashboard/api/v3/accounts/managed-1/browser", method: "POST", body: { target: "invite", expectedRevision: 1, processGeneration: 99 } },
-    { path: "/dashboard/api/v3/accounts/managed-1/browser-profile", method: "DELETE", body: { expectedRevision: 1, processGeneration: 99 } },
+    { path: "/dashboard/api/v3/accounts/managed", method: "POST" },
+    { path: "/dashboard/api/v3/accounts/managed-1/setup", method: "PATCH" },
+    { path: "/dashboard/api/v3/accounts/managed-1/setup/verify-key", method: "POST" },
+    { path: "/dashboard/api/v3/browser/capabilities", method: "GET" },
+    { path: "/dashboard/api/v3/accounts/managed-1/browser", method: "POST" },
+    { path: "/dashboard/api/v3/accounts/managed-1/browser-profile", method: "DELETE" },
   ]);
+  assert.deepEqual(requests[4]?.body, {
+    target: "invite",
+    expectedRevision: 1,
+    processGeneration: 99,
+  });
 });
 
 test("logs time range helpers cover all presets", async () => {

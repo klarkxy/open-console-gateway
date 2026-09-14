@@ -8,6 +8,7 @@
             clearable
             class="request-id-filter"
             :placeholder="t('按请求 ID 精确搜索')"
+              :input-props="{ 'aria-label': t('请求 ID') }"
           />
           <n-tooltip trigger="hover">
             <template #trigger>
@@ -62,13 +63,17 @@
             <div class="stat-value">{{ formatNumber(forwardTotals.prompt_tokens + forwardTotals.completion_tokens) }}</div>
           </div>
         </div>
-        <div class="filter-bar">
-          <div class="filter-field request-id-field">
+        <n-button class="advanced-filter-toggle" size="small" :aria-expanded="showAdvancedFilters" aria-controls="request-log-filters" @click="showAdvancedFilters = !showAdvancedFilters">
+          {{ showAdvancedFilters ? t('收起筛选') : t('更多筛选（{count}）', { count: advancedFilterCount }) }}
+        </n-button>
+        <div id="request-log-filters" class="filter-bar" :class="{ 'show-advanced': showAdvancedFilters }">
+          <div class="filter-field request-id-field advanced-filter">
             <span class="filter-label">{{ t("请求 ID") }}</span>
             <n-input
               v-model:value="requestIdFilter"
               clearable
               :placeholder="t('按请求 ID 精确搜索')"
+              :input-props="{ 'aria-label': t('请求 ID') }"
             />
           </div>
           <div class="filter-field">
@@ -77,14 +82,16 @@
               v-model:value="statusFilter"
               :options="statusOptions"
               :placeholder="t('状态')"
+              :aria-label="t('状态')"
             />
           </div>
-          <div class="filter-field">
+          <div class="filter-field advanced-filter">
             <span class="filter-label">{{ t("账号") }}</span>
             <n-select
               v-model:value="accountFilter"
               :options="accountOptions"
               :placeholder="t('账号')"
+              :aria-label="t('账号')"
             />
           </div>
           <div class="filter-field">
@@ -93,18 +100,20 @@
               v-model:value="modelFilter"
               :options="modelOptions"
               :placeholder="t('模型')"
+              :aria-label="t('模型')"
             />
           </div>
-          <div class="filter-field key-filter-field">
+          <div class="filter-field key-filter-field advanced-filter">
             <span class="filter-label">{{ t("接入 Key") }}</span>
             <n-select
               v-model:value="keyFilter"
               :options="keyOptions"
               :placeholder="t('接入 Key')"
+              :aria-label="t('接入 Key')"
               :consistent-menu-width="false"
             />
           </div>
-          <div class="filter-field">
+          <div class="filter-field advanced-filter">
             <span class="filter-label">{{ t("服务商") }}</span>
             <n-select
               v-model:value="providerFilter"
@@ -114,7 +123,7 @@
               :consistent-menu-width="false"
             />
           </div>
-          <div class="filter-field">
+          <div class="filter-field advanced-filter">
             <span class="filter-label">{{ t("路由账号") }}</span>
             <n-select
               v-model:value="routeAccountFilter"
@@ -124,7 +133,7 @@
               :consistent-menu-width="false"
             />
           </div>
-          <div class="filter-field">
+          <div class="filter-field advanced-filter">
             <span class="filter-label">{{ t("凭证账号") }}</span>
             <n-select
               v-model:value="credentialAccountFilter"
@@ -180,12 +189,13 @@
               </div>
             </n-popover>
           </div>
-          <div class="filter-field">
+          <div class="filter-field advanced-filter">
             <span class="filter-label">{{ t("排序") }}</span>
             <n-select
               v-model:value="sortBy"
               :options="sortOptions"
               :placeholder="t('排序')"
+              :aria-label="t('排序')"
               :consistent-menu-width="false"
               class="sort-select"
             />
@@ -242,13 +252,13 @@
           :row-key="logRowKey"
           :loading="forwardLoading"
           :pagination="forwardPagination"
-          :scroll-x="2000"
+          :scroll-x="2150"
           remote
           size="small"
           @update:page="changeForwardPage"
         >
           <template #empty>
-            <n-empty :description="t('记录推理转发和协议探测请求；运行日志只记录进程与控制面事件')" />
+            <n-empty :description="t('暂无请求日志')" />
           </template>
         </n-data-table>
       </n-tab-pane>
@@ -301,6 +311,7 @@ import {
   forwardLogTotalTokens,
   forwardLogUpstreamModel,
 } from "./forward-log-display.ts";
+import { formatNativeCostEstimate, forwardLogNativeEstimate } from "../domain/native-cost.ts";
 
 type LogTab = "gateway" | "forward";
 type SortBy = "timestamp" | "attempt" | "prompt_tokens" | "completion_tokens" | "cached_tokens" | "cost";
@@ -342,6 +353,13 @@ const sortBy = ref<SortBy>(
   querySort !== null && sortValues.has(querySort as SortBy) ? querySort as SortBy : "timestamp",
 );
 const sortOrder = ref<SortOrder>(queryOrder === "asc" || queryOrder === "desc" ? queryOrder : "desc");
+const advancedFilterCount = computed(() => [
+  requestIdFilter.value, accountFilter.value, keyFilter.value, providerFilter.value,
+  routeAccountFilter.value, credentialAccountFilter.value,
+  sortBy.value !== 'timestamp' ? sortBy.value : '',
+].filter(Boolean).length);
+const showAdvancedFilters = ref(advancedFilterCount.value > 0);
+
 function parseQueryTimeRange(): [number, number] | null {
   const start = query.get("start");
   const end = query.get("end");
@@ -521,6 +539,13 @@ function formatQuotaCost(row: ForwardLog): string {
   return formatCost(row.cost, 5);
 }
 
+// Original-currency platform token estimate; never a quota debit or wallet
+// charge, so it renders in its own column and is never summed with USD.
+function formatNativeCost(row: ForwardLog): string {
+  const estimate = forwardLogNativeEstimate(row);
+  return estimate ? formatNativeCostEstimate(estimate, locale.value) : "—";
+}
+
 async function copyText(target: string, value: string, label: string) {
   try {
     await copy(target, value, label);
@@ -635,6 +660,16 @@ function renderProviderCost(row: ForwardLog) {
     [t("额度扣减"), costValue(row.quota_debit)],
     [t("有效付费成本"), costValue(row.effective_paid_cost_usd)],
   ];
+  // Platform-native estimate: original currency, frozen pricing provenance,
+  // and the actual wallet debit stays unknown — never implied by the estimate.
+  const estimate = forwardLogNativeEstimate(row);
+  if (estimate) {
+    items.push(
+      [t("平台估算（原始货币）"), formatNativeCostEstimate(estimate, locale.value)],
+      [t("计价来源（冻结）"), row.pricing_revision_id ?? t("未知")],
+      [t("实际平台扣减"), t("未知")],
+    );
+  }
   return h("section", [
     h("h4", t("服务商与费用")),
     h("dl", { class: "diagnostic-meta" }, items.flatMap(([label, value]) => [
@@ -762,6 +797,7 @@ const forwardColumns = computed(() => [
   { title: t("缓存"), key: "cached_tokens", width: 92, align: "right" as const, render: (row: ForwardLog) => formatNumber(row.cached_tokens) },
   { title: t("缓存写"), key: "cache_creation_tokens", width: 92, align: "right" as const, render: (row: ForwardLog) => formatNumber(row.cache_creation_tokens) },
   { title: t("额度消耗（估算）"), key: "cost", width: 152, align: "right" as const, render: formatQuotaCost },
+  { title: t("平台估算（原始货币）"), key: "native_cost", width: 150, align: "right" as const, render: formatNativeCost },
   { title: t("错误"), key: "error_message", minWidth: 220, ellipsis: { tooltip: true } },
 ]);
 
@@ -1195,6 +1231,9 @@ onUnmounted(cleanup);
   overflow: auto;
 }
 
+.advanced-filter-toggle { display: inline-flex; margin-bottom: 12px; }
+.filter-bar:not(.show-advanced) .advanced-filter { display: none; }
+
 @media (max-width: 860px) {
   .time-range-panel {
     flex-direction: column;
@@ -1220,11 +1259,13 @@ onUnmounted(cleanup);
 }
 
 @media (max-width: 560px) {
+  .stat-card { padding: 10px; }
+  .stats-row { margin-bottom: 12px; }
   .logs-card {
     padding: 2px 12px 12px;
   }
   .stats-row {
-    grid-template-columns: repeat(2, 1fr);
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
   .filter-field {
     flex: 1 1 140px;

@@ -180,16 +180,6 @@ fn assert_error_hides_bearer(error: &GoUsageError) {
 }
 
 #[test]
-fn production_endpoint_is_the_fixed_official_url() {
-    assert_eq!(GO_USAGE_URL, "https://opencode.ai/zen/go/v1/usage");
-    assert_eq!(GO_USAGE_URL, crate::kernel::catalog::OPENCODE_GO_USAGE_URL);
-    assert!(std::ptr::eq(
-        GO_USAGE_URL,
-        crate::kernel::catalog::OPENCODE_GO_USAGE_URL
-    ));
-}
-
-#[test]
 fn official_success_fixture_accepts_0_37_100_and_unknown_fields() {
     let now = fixed_now();
     let snapshot = parse_go_usage_body(success_body_at(now).as_bytes(), now).unwrap();

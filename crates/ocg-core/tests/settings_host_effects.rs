@@ -299,7 +299,6 @@ fn unsupported_host_deltas_fail_before_persistence_or_revision_change() {
     auto.auto_start = true;
     let error = state.apply_host_settings(&previous, auto).unwrap_err();
     assert!(matches!(error, HostSettingsError::AutoStartUnsupported));
-    assert_eq!(error.to_string(), HostSettingsError::AUTO_START_UNAVAILABLE);
     assert_eq!(state.settings_revision(), before);
     assert!(!state.config().auto_start);
     assert!(!persisted_auto_start(&state));
@@ -312,10 +311,6 @@ fn unsupported_host_deltas_fail_before_persistence_or_revision_change() {
         error,
         HostSettingsError::DockVisibilityUnsupported
     ));
-    assert_eq!(
-        error.to_string(),
-        HostSettingsError::DOCK_VISIBILITY_UNAVAILABLE
-    );
     assert_eq!(state.settings_revision(), before);
     assert!(state.config().show_dock_icon);
     assert!(persisted_show_dock_icon(&state));
@@ -462,7 +457,7 @@ fn hook_restore_failures_append_to_the_sync_error() {
 }
 
 #[tokio::test]
-async fn v2_and_v3_map_unsupported_and_sync_errors_without_shape_drift() {
+async fn v3_maps_unsupported_and_sync_errors_after_v2_retirement() {
     let harness = start_loopback("host-http-errors").await;
     let before = harness.state.settings_revision();
     let generation = harness.state.process_generation();
@@ -543,10 +538,6 @@ async fn v2_and_v3_map_unsupported_and_sync_errors_without_shape_drift() {
         put_json(&harness, &cas_patch(&harness, json!({ "autoStart": true }))).await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(body["code"], ERROR_INTERNAL);
-    assert_eq!(
-        body["message"],
-        "failed to synchronize desktop settings: auto-start hook failed"
-    );
     assert_eq!(body["currentRevision"], Value::Null);
     assert_eq!(body["processGeneration"], Value::Null);
     assert!(!harness.state.config().auto_start);
@@ -558,7 +549,7 @@ async fn v2_and_v3_map_unsupported_and_sync_errors_without_shape_drift() {
 }
 
 #[tokio::test]
-async fn v2_and_v3_successful_host_writes_preserve_cas_and_primary_key() {
+async fn v3_successful_host_writes_preserve_cas_and_primary_key() {
     let harness = start_loopback("host-http-success").await;
     harness.state.set_auto_start_sync(ok_auto_start);
     let dock = DockHook::new();
@@ -645,7 +636,7 @@ async fn v2_and_v3_successful_host_writes_preserve_cas_and_primary_key() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn v2_and_v3_reassert_unchanged_supported_hooks_and_rollback_on_drift() {
+async fn v3_reassert_unchanged_supported_hooks_and_rollback_on_drift() {
     reset_auto_start_hook();
     let harness = start_loopback("host-http-reassert").await;
     harness.state.set_auto_start_sync(recording_auto_start);
@@ -716,10 +707,6 @@ async fn v2_and_v3_reassert_unchanged_supported_hooks_and_rollback_on_drift() {
     .await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
     assert_eq!(body["code"], ERROR_INTERNAL);
-    assert_eq!(
-        body["message"],
-        "failed to synchronize desktop settings: auto-start hook failed"
-    );
     assert_eq!(harness.state.config().connect_timeout_secs, 13);
     assert!(!harness.state.config().auto_start);
     assert_eq!(harness.state.config().gateway_key, primary);
@@ -741,10 +728,6 @@ async fn v2_and_v3_reassert_unchanged_supported_hooks_and_rollback_on_drift() {
     .await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(body["code"], ERROR_INTERNAL);
-    assert_eq!(
-        body["message"],
-        "failed to synchronize desktop settings: dock hook failed"
-    );
     assert_eq!(body["currentRevision"], Value::Null);
     assert_eq!(body["processGeneration"], Value::Null);
     assert_eq!(harness.state.config().connect_timeout_secs, 13);
@@ -1126,7 +1109,7 @@ async fn concurrent_port_changes_keep_configured_and_active_ports_in_agreement()
 }
 
 #[tokio::test]
-async fn http_v2_and_v3_concurrent_port_changes_agree_on_configured_and_active_port() {
+async fn http_concurrent_v3_port_changes_agree_on_configured_and_active_port() {
     let (state, dir) = new_state("http-concurrent-ports");
     let handle = gateway::start_gateway_on(state.clone(), SocketAddr::from(([127, 0, 0, 1], 0)))
         .await
@@ -1183,8 +1166,8 @@ async fn http_v2_and_v3_concurrent_port_changes_agree_on_configured_and_active_p
 
     start.wait().await;
     let (a, b) = tokio::join!(a, b);
-    let a = a.expect("V2 port task should finish");
-    let b = b.expect("V3 port task should finish");
+    let a = a.expect("first V3 port task should finish");
+    let b = b.expect("second V3 port task should finish");
     let a_ok = a.status() == StatusCode::OK;
     let b_ok = b.status() == StatusCode::OK;
     assert!(

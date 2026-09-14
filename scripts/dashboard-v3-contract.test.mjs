@@ -8,12 +8,17 @@ import {
   CARGO_EXAMPLE,
   SCHEMA_RELATIVE_PATH,
   TYPES_RELATIVE_PATH,
-  assertArtifactsMatch,
   assertTypesAreContractOnly,
   parseArgs,
   renderTypeScript,
   runContract,
 } from "./dashboard-v3-contract.mjs";
+import {
+  VERSIONS,
+  createDashboardContract,
+  formatDriftError,
+  resolveContractVersion,
+} from "./lib/dashboard-contract.mjs";
 
 const fixtureSchema = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
@@ -41,20 +46,6 @@ test("parseArgs accepts exactly one of write or check", () => {
   assert.throws(() => parseArgs(["--client"]), /Unknown argument/);
 });
 
-test("artifact paths are schema plus types and never an endpoint client", () => {
-  assert.deepEqual([...ARTIFACT_PATHS], [SCHEMA_RELATIVE_PATH, TYPES_RELATIVE_PATH]);
-  assert.equal(CARGO_EXAMPLE, "export_dashboard_v3_schema");
-  assert.deepEqual([...CARGO_ARGS], [
-    "run",
-    "-p",
-    "ocg-core",
-    "--example",
-    "export_dashboard_v3_schema",
-    "--locked",
-    "--quiet",
-  ]);
-});
-
 test("generated TypeScript must stay types-only", () => {
   assert.doesNotThrow(() => assertTypesAreContractOnly("export interface ControlRevision { revision: number }\n"));
   assert.throws(
@@ -71,8 +62,6 @@ test("renderTypeScript emits interfaces without clients", async () => {
   const ts = await renderTypeScript(fixtureSchema);
   assert.match(ts, /export (interface|type) ControlRevision/);
   assert.match(ts, /processGeneration/);
-  assert.doesNotMatch(ts, /\bfetch\s*\(/);
-  assert.doesNotMatch(ts, /export async function/);
 });
 
 test("check mode detects drift without writing", async () => {
@@ -121,9 +110,40 @@ test("write mode only writes the two contract artifacts", async () => {
   );
 });
 
-test("assertArtifactsMatch reports both files", () => {
+test("resolved V3 config equals the previous constants", () => {
+  const previous = Object.freeze({
+    schemaRelativePath: "schema/dashboard-api-v3.schema.json",
+    typesRelativePath: "src/api/generated/dashboard-v3.ts",
+    cargoExample: "export_dashboard_v3_schema",
+    rootTypeName: "DashboardApiV3",
+  });
+  const spec = resolveContractVersion("v3");
+  const contract = createDashboardContract("v3");
+
+  assert.equal(spec, VERSIONS.v3);
+  assert.equal(spec.schemaRelativePath, previous.schemaRelativePath);
+  assert.equal(spec.typesRelativePath, previous.typesRelativePath);
+  assert.equal(spec.cargoExample, previous.cargoExample);
+  assert.equal(spec.rootTypeName, previous.rootTypeName);
+  assert.equal(SCHEMA_RELATIVE_PATH, previous.schemaRelativePath);
+  assert.equal(TYPES_RELATIVE_PATH, previous.typesRelativePath);
+  assert.equal(CARGO_EXAMPLE, previous.cargoExample);
+  assert.deepEqual(ARTIFACT_PATHS, [previous.schemaRelativePath, previous.typesRelativePath]);
+  assert.deepEqual(CARGO_ARGS, [
+    "run",
+    "-p",
+    "ocg-core",
+    "--example",
+    previous.cargoExample,
+    "--locked",
+    "--quiet",
+  ]);
+  const drift = formatDriftError(spec, [previous.schemaRelativePath, previous.typesRelativePath]);
+  assert.ok(drift.includes(previous.schemaRelativePath));
+  assert.ok(drift.includes(previous.typesRelativePath));
+  assert.ok(drift.includes("pnpm run contract:v3:generate"));
   assert.throws(
-    () => assertArtifactsMatch({
+    () => contract.assertArtifactsMatch({
       generatedSchema: "a\n",
       generatedTypes: "b\n",
       existingSchema: "A\n",

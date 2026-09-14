@@ -12,7 +12,7 @@ interface UpdateTargetStorage {
   removeItem(key: string): void;
 }
 
-export function normalizeUpdateTarget(value: string | null | undefined): string {
+function normalizeUpdateTarget(value: string | null | undefined): string {
   const trimmed = value?.trim() ?? "";
   const match = /^v?(\d+)\.(\d+)\.(\d+)$/.exec(trimmed);
   return match ? `${match[1]}.${match[2]}.${match[3]}` : "";

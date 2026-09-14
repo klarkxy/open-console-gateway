@@ -1,10 +1,10 @@
 //! Host HTTP router composition.
 //!
-//! Assembles the inference router with Dashboard V3, the retired V2 REST
+//! Assembles the inference router with Dashboard V3/V4, the retired V2 REST
 //! tombstone, public V2 auth, the V2 browser WebSocket, and dashboard assets.
 //! This module is the HTTP composition root: it depends on `gateway`,
-//! `dashboard`, and `dashboard_v3`. Those modules, and `state`, must not import
-//! this module.
+//! `dashboard`, `dashboard_v3`, and `dashboard_v4`. Those modules, and `state`,
+//! must not import this module.
 
 use crate::dashboard_session;
 use crate::gateway::listener::GatewayRouterHost;
@@ -40,6 +40,10 @@ pub fn build_router(state: CoreState) -> Router {
         .nest(
             "/dashboard/api/v3",
             crate::dashboard_v3::api_router(state.clone()),
+        )
+        .nest(
+            "/dashboard/api/v4",
+            crate::dashboard_v4::api_router(state.clone()),
         )
         .nest(
             "/dashboard/api",
@@ -82,7 +86,11 @@ async fn require_local_dashboard_authority(
         && (path == "/dashboard/api" || path.starts_with("/dashboard/api/"))
         && !dashboard_session::has_local_dashboard_authority(req.headers())
     {
-        if path == "/dashboard/api/v3" || path.starts_with("/dashboard/api/v3/") {
+        if path == "/dashboard/api/v3"
+            || path.starts_with("/dashboard/api/v3/")
+            || path == "/dashboard/api/v4"
+            || path.starts_with("/dashboard/api/v4/")
+        {
             return (
                 StatusCode::FORBIDDEN,
                 Json(crate::dashboard_v3::V3Error::forbidden(
@@ -167,7 +175,7 @@ fn v2_api_remainder(path: &str) -> Option<&str> {
     } else {
         path.strip_prefix("/dashboard/api/")?
     };
-    if rest == "v3" || rest.starts_with("v3/") {
+    if rest == "v3" || rest.starts_with("v3/") || rest == "v4" || rest.starts_with("v4/") {
         return None;
     }
     Some(rest)
@@ -195,7 +203,7 @@ mod tests {
     use super::is_retired_legacy_v2_rest_path;
 
     #[test]
-    fn classifies_retired_and_preserved_paths() {
+    fn host_router_path_matrix_classifies_retired_and_preserved() {
         for path in [
             "/dashboard/api",
             "/dashboard/api/",
@@ -206,39 +214,6 @@ mod tests {
             "/dashboard/api/browser/capabilities",
             "/dashboard/api/browser/sessions/tok",
             "/dashboard/api/does-not-exist",
-        ] {
-            assert!(
-                is_retired_legacy_v2_rest_path(path),
-                "{path} should be retired V2 REST"
-            );
-        }
-        for path in [
-            "/dashboard/api/auth/status",
-            "/dashboard/api/auth/register",
-            "/dashboard/api/auth/login",
-            "/dashboard/api/auth/logout",
-            "/dashboard/api/browser/sessions/opaque-token/ws",
-            "/dashboard/api/v3",
-            "/dashboard/api/v3/contract",
-            "/dashboard/api/v3/accounts",
-            "/dashboard",
-            "/dashboard/",
-            "/dashboard/assets/index.js",
-            "/v1/models",
-            "/v1/chat/completions",
-            "/v1beta/models/m:generateContent",
-            "/claude-desktop/v1/models",
-        ] {
-            assert!(
-                !is_retired_legacy_v2_rest_path(path),
-                "{path} must stay out of the V2 REST tombstone"
-            );
-        }
-    }
-
-    #[test]
-    fn similar_looking_paths_cannot_bypass_the_tombstone() {
-        for path in [
             "/dashboard/api/auth",
             "/dashboard/api/auth/",
             "/dashboard/api/auth/status/extra",
@@ -251,8 +226,8 @@ mod tests {
             "/dashboard/api/auth/statusx",
             "/dashboard/api/authentication/status",
             "/dashboard/api/v2/auth/status",
+            "/dashboard/api/auth/logout/",
             "/dashboard/api/browser/sessions//ws",
-            "/dashboard/api/browser/sessions/tok",
             "/dashboard/api/browser/sessions/tok/websocket",
             "/dashboard/api/browser/sessions/tok/ws/extra",
             "/dashboard/api/browser/sessions/tok/ws/",
@@ -260,19 +235,16 @@ mod tests {
             "/dashboard/api/browser/sessions/tok/ws/../ws",
             "/dashboard/api/browser/session/tok/ws",
             "/dashboard/api/browser/sessions/tok/ws/extra/",
+            "/dashboard/api/browser/sessions/opaque-token/ws/",
             "/dashboard/api/v3accounts",
             "/dashboard/api/V3/accounts",
             "/dashboard/api/v3-contract",
+            "/dashboard/api/v4connections",
+            "/dashboard/api/V4/connections",
+            "/dashboard/api/v4-contract",
         ] {
-            assert!(
-                is_retired_legacy_v2_rest_path(path),
-                "{path} must not bypass the V2 REST tombstone"
-            );
+            assert!(is_retired_legacy_v2_rest_path(path), "{path}");
         }
-    }
-
-    #[test]
-    fn only_exact_auth_and_nonempty_browser_ws_are_preserved() {
         for path in [
             "/dashboard/api/auth/status",
             "/dashboard/api/auth/register",
@@ -280,30 +252,6 @@ mod tests {
             "/dashboard/api/auth/logout",
             "/dashboard/api/browser/sessions/opaque-token/ws",
             "/dashboard/api/browser/sessions/a/ws",
-        ] {
-            assert!(
-                !is_retired_legacy_v2_rest_path(path),
-                "{path} is an exact preserved V2 family"
-            );
-        }
-        for path in [
-            "/dashboard/api/auth/status/",
-            "/dashboard/api/auth/logout/",
-            "/dashboard/api/auth/status/extra",
-            "/dashboard/api/browser/sessions//ws",
-            "/dashboard/api/browser/sessions/opaque-token/ws/",
-            "/dashboard/api/browser/sessions/tok/ws/extra",
-        ] {
-            assert!(
-                is_retired_legacy_v2_rest_path(path),
-                "{path} is not an exact preserved V2 family"
-            );
-        }
-    }
-
-    #[test]
-    fn v3_inference_and_static_paths_stay_outside_the_nested_tombstone() {
-        for path in [
             "/dashboard/api/v3",
             "/dashboard/api/v3/",
             "/dashboard/api/v3/contract",
@@ -311,6 +259,18 @@ mod tests {
             "/dashboard/api/v3/auth/status",
             "/dashboard/api/v3/browser/sessions/tok/ws",
             "/dashboard/api/v3/settings",
+            "/dashboard/api/v4",
+            "/dashboard/api/v4/",
+            "/dashboard/api/v4/contract",
+            "/dashboard/api/v4/connections",
+            "/dashboard/api/v4/onboarding/commit",
+            "/dashboard/api/v4/credentials/abc/rotate",
+            "/dashboard/api/v4/bindings/abc",
+            "/dashboard/api/v4/identities/abc/credentials",
+            "/dashboard",
+            "/dashboard/",
+            "/dashboard/assets/index.js",
+            "/dashboard/assets/app.css",
             "/v3/contract",
             "/v1/models",
             "/v1/chat/completions",
@@ -319,15 +279,8 @@ mod tests {
             "/v1/models/m:generateContent",
             "/claude-desktop/v1/models",
             "/claude-desktop/v1/messages",
-            "/dashboard",
-            "/dashboard/",
-            "/dashboard/assets/index.js",
-            "/dashboard/assets/app.css",
         ] {
-            assert!(
-                !is_retired_legacy_v2_rest_path(path),
-                "{path} must stay outside the nested V2 REST tombstone"
-            );
+            assert!(!is_retired_legacy_v2_rest_path(path), "{path}");
         }
     }
 }

@@ -389,6 +389,24 @@ async fn claude_desktop_routes_are_wired_and_protected() {
     let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("test"));
     let state = Arc::new(CoreStateInner::new(db, dir.clone(), cipher).expect("state should load"));
     let mut config = state.config();
+    // Exercise wired routes with a saved catalog, independently of account availability.
+    state
+        .db
+        .lock()
+        .set_contract_catalog(
+            &crate::provider_contracts::ContractScope::provider(
+                crate::provider::OPENCODE_PROVIDER_ID,
+            ),
+            &crate::kernel::protocol::supported_model_ids()
+                .map(str::to_string)
+                .collect::<Vec<_>>(),
+            Some(chrono::Utc::now()),
+            "test_refreshed_catalog",
+            "https://example.test/models",
+            chrono::Utc::now(),
+        )
+        .unwrap();
+    state.reload_provider_contracts().unwrap();
     // Pin the primary key value for the test requests.
     config.gateway_key = "gateway-test-key".to_string();
     state.set_config(config).expect("test config should save");

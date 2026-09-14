@@ -39,11 +39,15 @@ ocg-manager-cli
 └── status        Show data dir, gateway port/key, upstream, account totals
 ```
 
-Headless bootstrap in three commands:
+`key add` stores a disabled OpenCode Go draft. Enable it after you have checked the Key (`key ping`, then `key enable`).
+
+Headless bootstrap:
 
 ```bash
 ./ocg-manager-cli key add main sk-...
 ./ocg-manager-cli key list
+./ocg-manager-cli key ping <id>
+./ocg-manager-cli key enable <id>
 ./ocg-manager-cli serve --port 9042
 ```
 

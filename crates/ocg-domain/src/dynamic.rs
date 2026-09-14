@@ -74,14 +74,27 @@ impl TryFrom<&str> for DynamicAuthKind {
 
 /// One public-to-upstream mapping owned by a dynamic Provider.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DynamicModelUpstreamOverride {
+    pub protocol: UpstreamProtocolKind,
+    pub endpoint_url: String,
+}
+
+/// Absent overrides inherit the Provider's endpoint and protocol. Authentication
+/// remains Provider-owned; protocol names never imply an authentication scheme.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DynamicModelMapping {
     pub public_model: String,
     pub upstream_model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_override: Option<DynamicModelUpstreamOverride>,
 }
 
 /// Normalized dynamic Provider definition used by persistence and routing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DynamicProviderDefinition {
+    /// Optional configuration-template provenance; never a routing identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset_id: Option<String>,
     pub id: String,
     pub name: String,
     pub endpoint_url: String,
@@ -151,6 +164,7 @@ pub fn normalize_dynamic_mappings(
         normalized.push(DynamicModelMapping {
             public_model,
             upstream_model,
+            upstream_override: mapping.upstream_override.clone(),
         });
     }
     Ok(normalized)
@@ -170,14 +184,16 @@ mod tests {
             DynamicModelMapping {
                 public_model: "Gpt-4".into(),
                 upstream_model: "gpt-4-upstream".into(),
+                upstream_override: None,
             },
             DynamicModelMapping {
                 public_model: "gpt-4".into(),
                 upstream_model: "other".into(),
+                upstream_override: None,
             },
         ])
         .unwrap_err();
-        assert!(error.to_string().contains("duplicate public model"));
+        assert!(matches!(error, ProviderBindingError::InvalidModelId(_)));
     }
 
     #[test]

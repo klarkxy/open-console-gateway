@@ -1,4 +1,4 @@
-use crate::crypto::KeyCipher;
+use crate::crypto::{KeyCipher, is_legacy_local_ciphertext};
 use crate::custom::validate_custom_endpoint_url;
 use crate::dynamic::DynamicProviderRuntime;
 use crate::kernel::ids::{PRIMARY_KEY_ID, PRIMARY_KEY_NAME};
@@ -11,6 +11,7 @@ use crate::provider_contracts::{
     CATALOG_SOURCE_COMMAND_CODE_MODELS, CATALOG_SOURCE_OFFICIAL_ZEN, ContractEvidenceSource,
     ContractScope, PersistedContracts, PersistedModelProtocol, PersistedModelProtocolOverride,
     PersistedScopeRow, ProbeResultKind, ProtocolOverrideState, SCOPE_KIND_CUSTOM_ENDPOINT,
+    SCOPE_KIND_PROVIDER,
 };
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Local, NaiveDate, TimeZone, Utc};
@@ -27,7 +28,7 @@ use serde::de::Error as SerdeError;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fmt,
     fs::OpenOptions,
     io::{Read, Write},
@@ -39,6 +40,9 @@ pub struct Database {
     conn: Connection,
 }
 
+pub(crate) mod identity;
+mod platform;
+
 /// Local configuration for the one code-owned CPA external integration.
 /// Both credential values stay encrypted outside the short-lived V3 write path.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,19 +52,31 @@ pub struct CpaIntegrationRecord {
     pub management_key_cipher: String,
 }
 
+fn cpa_catalog_enabled_default() -> bool {
+    true
+}
+
 /// One row from the persisted CPA `/v1/models` snapshot.
 /// `owned_by` is CPA's reported source when present; legacy ID-only snapshots
 /// keep it empty until the next explicit refresh.
+/// Missing `enabled` stays on so existing catalogs keep routing until the next
+/// refresh; newly discovered IDs after that default off.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CpaCatalogModel {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owned_by: Option<String>,
+    #[serde(default = "cpa_catalog_enabled_default")]
+    pub enabled: bool,
 }
 
 impl From<String> for CpaCatalogModel {
     fn from(id: String) -> Self {
-        Self { id, owned_by: None }
+        Self {
+            id,
+            owned_by: None,
+            enabled: true,
+        }
     }
 }
 
@@ -69,6 +85,7 @@ impl From<&str> for CpaCatalogModel {
         Self {
             id: id.to_string(),
             owned_by: None,
+            enabled: true,
         }
     }
 }
@@ -77,7 +94,56 @@ impl CpaCatalogModel {
     pub fn ids(models: &[Self]) -> Vec<String> {
         models.iter().map(|model| model.id.clone()).collect()
     }
+
+    pub fn enabled_ids(models: &[Self]) -> Vec<String> {
+        models
+            .iter()
+            .filter(|model| model.enabled)
+            .map(|model| model.id.clone())
+            .collect()
+    }
+
+    /// Keep prior selection for IDs that still exist; new IDs stay off.
+    pub fn merge_refresh(incoming: Vec<Self>, previous: &[Self]) -> Vec<Self> {
+        let previous_enabled: HashMap<&str, bool> = previous
+            .iter()
+            .map(|model| (model.id.as_str(), model.enabled))
+            .collect();
+        incoming
+            .into_iter()
+            .map(|mut model| {
+                model.enabled = previous_enabled
+                    .get(model.id.as_str())
+                    .copied()
+                    .unwrap_or(false);
+                model
+            })
+            .collect()
+    }
 }
+
+/// Persisted Dashboard V4 operation ledger row. `payload_digest` is HMAC-SHA256
+/// hex; `result_json` is secret-free.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DashboardOperationRow {
+    pub operation_id: String,
+    pub kind: String,
+    pub payload_digest: String,
+    pub result_json: String,
+    pub created_at: String,
+}
+
+/// Insert payload for a new dashboard operation row. `created_at` is assigned
+/// at write time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewDashboardOperation {
+    pub operation_id: String,
+    pub kind: String,
+    pub payload_digest: String,
+    pub result_json: String,
+}
+
+const DASHBOARD_OPERATION_PRUNE_DAYS: i64 = 30;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CpaCatalogRecord {
@@ -105,6 +171,7 @@ fn parse_cpa_catalog_models(models_json: &str) -> Result<Vec<CpaCatalogModel>, s
                 CpaCatalogModel {
                     id: id.to_string(),
                     owned_by: None,
+                    enabled: true,
                 }
             }
             serde_json::Value::Object(object) => {
@@ -123,9 +190,14 @@ fn parse_cpa_catalog_models(models_json: &str) -> Result<Vec<CpaCatalogModel>, s
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
                     .map(str::to_string);
+                let enabled = object
+                    .get("enabled")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(true);
                 CpaCatalogModel {
                     id: id.to_string(),
                     owned_by,
+                    enabled,
                 }
             }
             _ => continue,
@@ -156,6 +228,9 @@ pub struct AccountImportRecord {
 /// transaction.
 #[derive(Debug, Clone)]
 pub struct NodeImportRecord {
+    pub platform_links_authoritative: bool,
+    pub platform_accounts: Vec<crate::platform::PortablePlatformAccount>,
+    pub platform_links: Vec<crate::platform::PortablePlatformLink>,
     pub accounts: Vec<AccountImportRecord>,
     pub account_order: Vec<String>,
     pub config_json: String,
@@ -164,6 +239,11 @@ pub struct NodeImportRecord {
     pub zen_catalog: crate::kernel::zen::ZenFreeModelCatalog,
     pub provider_contracts: PersistedContracts,
     pub dynamic_providers: Vec<DynamicProviderRuntime>,
+    /// V6 portable identity/credential/binding/quota-pool snapshot. `None`
+    /// keeps the v45 1:1 satellite mapper used for V4/V5 packages.
+    pub(crate) identity_snapshot: Option<identity::IdentityImportSnapshot>,
+    /// Provider ids that stay persisted drafts. Routing snapshots exclude them.
+    pub draft_provider_ids: HashSet<String>,
 }
 
 /// Settings key holding the forward-log client-key backfill watermark
@@ -193,8 +273,16 @@ pub const PRE_V3_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v3.";
 /// Unique never-overwritten SQLite snapshot taken before a non-empty v34
 /// database is rewritten to provider-only identity in v35.
 pub const PRE_V35_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v35.";
+/// Unique never-overwritten SQLite snapshot taken before a non-empty v41
+/// database is rewritten to the unified providers/provider_models tables.
+pub const PRE_V42_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v42.";
+/// Unique never-overwritten SQLite snapshot taken before a non-empty v47
+/// database drops inert columns and empty leftover dynamic provider tables.
+pub const PRE_V48_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v48.";
 /// Highest schema this binary can open or migrate. Newer databases fail closed.
-pub const CURRENT_SCHEMA_VERSION: i32 = 37;
+pub const CURRENT_SCHEMA_VERSION: i32 = 48;
+/// Canonical source schema for the v48 inert-column / empty-table cleanup.
+pub const V47_SCHEMA_VERSION: i32 = 47;
 /// Canonical source schema for the v35 provider-identity rewrite.
 pub const V34_SCHEMA_VERSION: i32 = 34;
 /// Historical v34 offering IDs. Used only by v1–v34 SQL and the v35 preflight
@@ -218,6 +306,8 @@ pub const V27_SCHEMA_VERSION: i32 = 27;
 /// Schema the v27 rewrite expects as its committed source. Historical databases
 /// always migrate through this version first.
 pub const V26_SCHEMA_VERSION: i32 = 26;
+/// Canonical source schema for the v42 unified providers rewrite.
+pub const V41_SCHEMA_VERSION: i32 = 41;
 /// Bounded retries of the whole v27 preflight/backup when a writer races the
 /// captured `PRAGMA data_version`.
 const V27_WRITER_RACE_RETRIES: u32 = 8;
@@ -608,6 +698,74 @@ fn load_scope_on(conn: &Connection, scope: &ContractScope) -> Result<Option<Pers
     .map_err(Into::into)
 }
 
+fn load_scope_evidence_on(
+    conn: &Connection,
+    scope: &ContractScope,
+) -> Result<Vec<PersistedModelProtocol>> {
+    let mut stmt = conn.prepare(
+        "SELECT scope_kind, scope_id, model_id, protocol, source, verified_at,
+                observed_at, last_probe_result, last_probe_at, last_probe_error
+         FROM provider_contract_model_protocols
+         WHERE scope_kind = ?1 AND scope_id = ?2",
+    )?;
+    let rows = stmt.query_map(
+        params![scope.kind_str(), scope.id()],
+        persist_evidence_from_row,
+    )?;
+    let mut evidence = Vec::new();
+    for row in rows {
+        evidence.push(row?);
+    }
+    Ok(evidence)
+}
+
+fn preference_protocol_allowed(
+    conn: &Connection,
+    scope: &ContractScope,
+    model_id: &str,
+    protocol: UpstreamProtocolKind,
+) -> Result<bool> {
+    if scope.kind_str() != "provider"
+        || !crate::provider_contracts::selectable_model_protocol(scope.id(), protocol)
+    {
+        return Ok(false);
+    }
+    let Some(descriptor) = crate::provider_contracts::provider_scope_descriptor(scope.id()) else {
+        return Ok(true);
+    };
+    let evidence = load_scope_evidence_on(conn, scope)?;
+    Ok(crate::provider_contracts::admitted_protocols(
+        descriptor.kind,
+        descriptor.protocol_probe,
+        model_id,
+        &evidence,
+    )
+    .contains(&protocol))
+}
+
+fn set_model_protocol_preferences_on(
+    conn: &Connection,
+    scope: &ContractScope,
+    preferences: &[(String, UpstreamProtocolKind)],
+) -> Result<()> {
+    let mut seen = HashSet::new();
+    for (model_id, protocol) in preferences {
+        let model_key = model_id.trim().to_ascii_lowercase();
+        anyhow::ensure!(
+            preference_protocol_allowed(conn, scope, model_id, *protocol)?
+                && !model_key.is_empty()
+                && seen.insert(model_key.clone()),
+            "invalid or duplicate model protocol preference"
+        );
+        conn.execute(
+            "INSERT INTO provider_model_protocol_preferences(provider_id,model_id,protocol)
+             VALUES(?1,?2,?3) ON CONFLICT(provider_id,model_id) DO UPDATE SET protocol=excluded.protocol",
+            params![scope.id(), model_key, protocol.as_str()],
+        )?;
+    }
+    Ok(())
+}
+
 fn ensure_contract_scope_row(
     conn: &Connection,
     scope: &ContractScope,
@@ -617,12 +775,36 @@ fn ensure_contract_scope_row(
         "INSERT INTO provider_contract_scopes (
             scope_kind, scope_id, catalog_models_json, catalog_refreshed_at,
             catalog_source, catalog_source_url,
-            chat_completions_enabled, responses_enabled, messages_enabled,
             revision, updated_at
-         ) VALUES (?1, ?2, '[]', NULL, '', '', 1, 1, 1, 1, ?3)
+         ) VALUES (?1, ?2, '[]', NULL, '', '', 1, ?3)
          ON CONFLICT(scope_kind, scope_id) DO NOTHING",
         params![scope.kind_str(), scope.id(), now.to_rfc3339()],
     )?;
+    Ok(())
+}
+
+fn purge_removed_catalog_model_on(
+    conn: &Connection,
+    scope: &ContractScope,
+    model_id: &str,
+) -> Result<()> {
+    conn.execute(
+        "DELETE FROM provider_contract_model_protocol_overrides
+         WHERE scope_kind = ?1 AND scope_id = ?2 AND model_id = ?3",
+        params![scope.kind_str(), scope.id(), model_id],
+    )?;
+    conn.execute(
+        "DELETE FROM provider_contract_model_protocols
+         WHERE scope_kind = ?1 AND scope_id = ?2 AND model_id = ?3",
+        params![scope.kind_str(), scope.id(), model_id],
+    )?;
+    if scope.kind_str() == SCOPE_KIND_PROVIDER {
+        conn.execute(
+            "DELETE FROM provider_model_protocol_preferences
+             WHERE provider_id = ?1 AND model_id = ?2",
+            params![scope.id(), model_id],
+        )?;
+    }
     Ok(())
 }
 
@@ -640,9 +822,8 @@ fn upsert_contract_catalog_on(
         "INSERT INTO provider_contract_scopes (
             scope_kind, scope_id, catalog_models_json, catalog_refreshed_at,
             catalog_source, catalog_source_url,
-            chat_completions_enabled, responses_enabled, messages_enabled,
             revision, updated_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, 1, 1, 1, ?7)
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7)
          ON CONFLICT(scope_kind, scope_id) DO UPDATE SET
             catalog_models_json = excluded.catalog_models_json,
             catalog_refreshed_at = excluded.catalog_refreshed_at,
@@ -694,6 +875,86 @@ fn set_model_protocol_override_on(
                 ],
             )?;
         }
+    }
+    Ok(())
+}
+
+fn clear_provider_protocol_judgments_on(conn: &Connection, scope: &ContractScope) -> Result<()> {
+    conn.execute(
+        "DELETE FROM provider_model_protocol_preferences WHERE provider_id=?1",
+        [scope.id()],
+    )?;
+    conn.execute(
+        "DELETE FROM provider_contract_model_protocols
+         WHERE scope_kind = ?1 AND scope_id = ?2",
+        params![scope.kind_str(), scope.id()],
+    )?;
+    conn.execute(
+        "DELETE FROM provider_contract_model_protocol_overrides
+         WHERE scope_kind = ?1 AND scope_id = ?2",
+        params![scope.kind_str(), scope.id()],
+    )?;
+    Ok(())
+}
+
+fn apply_official_protocol_baseline_on(
+    conn: &Connection,
+    scope: &ContractScope,
+    current_models: &[String],
+    baseline: &crate::official_protocols::OfficialProtocolBaseline,
+    now: DateTime<Utc>,
+    force_off_extras: bool,
+) -> Result<()> {
+    if !force_off_extras {
+        conn.execute(
+            "DELETE FROM provider_contract_model_protocols
+             WHERE scope_kind = ?1 AND scope_id = ?2 AND source = 'static'",
+            params![scope.kind_str(), scope.id()],
+        )?;
+    }
+    let mut preferences = Vec::new();
+    for model_id in current_models {
+        let official = baseline.protocol_for(scope.id(), model_id);
+        if let Some(protocol) = official {
+            upsert_model_protocol_row_on(
+                conn,
+                &PersistedModelProtocol {
+                    scope: scope.clone(),
+                    model_id: model_id.clone(),
+                    protocol,
+                    source: ContractEvidenceSource::Static,
+                    verified_at: None,
+                    observed_at: None,
+                    last_probe_result: None,
+                    last_probe_at: None,
+                    last_probe_error: None,
+                },
+            )?;
+            if preference_protocol_allowed(conn, scope, model_id, protocol)? {
+                preferences.push((model_id.clone(), protocol));
+            }
+        }
+        if force_off_extras {
+            for protocol in [
+                UpstreamProtocolKind::ChatCompletions,
+                UpstreamProtocolKind::Responses,
+                UpstreamProtocolKind::Messages,
+            ] {
+                if official != Some(protocol) {
+                    set_model_protocol_override_on(
+                        conn,
+                        scope,
+                        model_id,
+                        protocol,
+                        ProtocolOverrideState::ForceOff,
+                        now,
+                    )?;
+                }
+            }
+        }
+    }
+    if !preferences.is_empty() {
+        set_model_protocol_preferences_on(conn, scope, &preferences)?;
     }
     Ok(())
 }
@@ -778,6 +1039,27 @@ fn upsert_model_protocol_row_on(conn: &Connection, row: &PersistedModelProtocol)
             row.last_probe_error,
         ],
     )?;
+    Ok(())
+}
+
+/// Drop probe observations for one contract scope and bump its revision.
+/// Explicit protocol overrides stay; they are operator policy, not probe evidence.
+pub(crate) fn invalidate_probe_evidence_on(
+    conn: &Connection,
+    scope: &ContractScope,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    if !table_exists(conn, "provider_contract_model_protocols")? {
+        return Ok(());
+    }
+    conn.execute(
+        "DELETE FROM provider_contract_model_protocols
+         WHERE scope_kind = ?1 AND scope_id = ?2",
+        params![scope.kind_str(), scope.id()],
+    )?;
+    if table_exists(conn, "provider_contract_scopes")? {
+        bump_scope_revision_on(conn, scope, now)?;
+    }
     Ok(())
 }
 
@@ -990,6 +1272,114 @@ fn preflight_ciphertext_probes(conn: &Connection, cipher: Option<&dyn KeyCipher>
             probe_account_cipher(cipher, &id, "password_cipher", &value)?;
         }
     }
+    Ok(())
+}
+
+fn repair_legacy_account_ciphertext(conn: &Connection, cipher: &dyn KeyCipher) -> Result<()> {
+    if !table_exists(conn, "accounts")? {
+        return Ok(());
+    }
+    let has_key = table_has_column(conn, "accounts", "key_cipher")?;
+    let has_password = table_has_column(conn, "accounts", "password_cipher")?;
+    if !has_key && !has_password {
+        return Ok(());
+    }
+
+    let select_sql = match (has_key, has_password) {
+        (true, true) => "SELECT id, key_cipher, password_cipher FROM accounts",
+        (true, false) => "SELECT id, key_cipher, NULL FROM accounts",
+        (false, true) => "SELECT id, '', password_cipher FROM accounts",
+        (false, false) => return Ok(()),
+    };
+
+    let rows = {
+        let mut stmt = conn.prepare(select_sql)?;
+        stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    if !rows.iter().any(|(_, key, password)| {
+        is_legacy_local_ciphertext(key)
+            || password.as_deref().is_some_and(is_legacy_local_ciphertext)
+    }) {
+        return Ok(());
+    }
+
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let rows = {
+        let mut stmt = tx.prepare(select_sql)?;
+        stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+
+    let mut updates: Vec<(String, Option<String>, Option<String>)> = Vec::new();
+    for (id, key, password) in rows {
+        let new_key = if is_legacy_local_ciphertext(&key) {
+            let plaintext = cipher.decrypt(&key).with_context(|| {
+                format!("host cipher rejected account {id}.key_cipher during v2 repair")
+            })?;
+            Some(
+                cipher
+                    .encrypt(&plaintext)
+                    .with_context(|| format!("failed to rewrite account {id}.key_cipher to v2"))?,
+            )
+        } else {
+            None
+        };
+        let new_password = if let Some(value) = password.as_deref() {
+            if is_legacy_local_ciphertext(value) {
+                let plaintext = cipher.decrypt(value).with_context(|| {
+                    format!("host cipher rejected account {id}.password_cipher during v2 repair")
+                })?;
+                Some(cipher.encrypt(&plaintext).with_context(|| {
+                    format!("failed to rewrite account {id}.password_cipher to v2")
+                })?)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if new_key.is_some() || new_password.is_some() {
+            updates.push((id, new_key, new_password));
+        }
+    }
+
+    for (id, new_key, new_password) in updates {
+        match (new_key, new_password) {
+            (Some(key), Some(password)) => {
+                tx.execute(
+                    "UPDATE accounts SET key_cipher = ?1, password_cipher = ?2 WHERE id = ?3",
+                    params![key, password, id],
+                )?;
+            }
+            (Some(key), None) => {
+                tx.execute(
+                    "UPDATE accounts SET key_cipher = ?1 WHERE id = ?2",
+                    params![key, id],
+                )?;
+            }
+            (None, Some(password)) => {
+                tx.execute(
+                    "UPDATE accounts SET password_cipher = ?1 WHERE id = ?2",
+                    params![password, id],
+                )?;
+            }
+            (None, None) => {}
+        }
+    }
+    tx.commit()?;
     Ok(())
 }
 
@@ -1942,20 +2332,45 @@ fn preflight_v35_identity(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn verify_pre_v35_backup(path: &Path) -> Result<()> {
-    sqlite_quick_check(&Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )?)?;
-    verify_schema_backup(path, PRE_V35_BACKUP_FILE_PREFIX, V34_SCHEMA_VERSION)?;
-    Ok(())
+fn create_pre_v35_backup(conn: &Connection, db_path: &Path) -> Result<PathBuf> {
+    create_pre_version_backup(
+        conn,
+        db_path,
+        PRE_V35_BACKUP_FILE_PREFIX,
+        V34_SCHEMA_VERSION,
+    )
 }
 
-fn create_pre_v35_backup(conn: &Connection, db_path: &Path) -> Result<PathBuf> {
+/// v42: same online snapshot pattern as v35, but the v41 source already
+/// hosts the `dynamic_providers` / `dynamic_provider_models` pair that v42
+/// renames.
+fn create_pre_v42_backup(conn: &Connection, db_path: &Path) -> Result<PathBuf> {
+    create_pre_version_backup(
+        conn,
+        db_path,
+        PRE_V42_BACKUP_FILE_PREFIX,
+        V41_SCHEMA_VERSION,
+    )
+}
+
+fn create_pre_v48_backup(conn: &Connection, db_path: &Path) -> Result<PathBuf> {
+    create_pre_version_backup(
+        conn,
+        db_path,
+        PRE_V48_BACKUP_FILE_PREFIX,
+        V47_SCHEMA_VERSION,
+    )
+}
+
+fn create_pre_version_backup(
+    conn: &Connection,
+    db_path: &Path,
+    prefix: &str,
+    source_version: i32,
+) -> Result<PathBuf> {
     for _ in 0..8 {
         let timestamp = Utc::now().format("%Y%m%dT%H%M%S%9fZ");
-        let backup_path =
-            db_path.with_file_name(format!("{PRE_V35_BACKUP_FILE_PREFIX}{timestamp}.bak"));
+        let backup_path = db_path.with_file_name(format!("{prefix}{timestamp}.bak"));
         if backup_path.exists() {
             std::thread::sleep(std::time::Duration::from_millis(1));
             continue;
@@ -1964,15 +2379,15 @@ fn create_pre_v35_backup(conn: &Connection, db_path: &Path) -> Result<PathBuf> {
         conn.execute("VACUUM main INTO ?1", [&backup_value])
             .with_context(|| {
                 format!(
-                    "failed to create pre-v35 database backup {}",
+                    "failed to create {prefix} database backup {}",
                     backup_path.display()
                 )
             })?;
-        verify_pre_v35_backup(&backup_path)?;
+        verify_schema_backup(&backup_path, prefix, source_version)?;
         write_backup_sha256_evidence(&backup_path)?;
         return Ok(backup_path);
     }
-    anyhow::bail!("failed to allocate a unique pre-v35 backup filename")
+    anyhow::bail!("failed to allocate a unique {prefix} backup filename")
 }
 
 fn migrate_v35_body(tx: &Transaction<'_>) -> Result<()> {
@@ -2067,11 +2482,32 @@ fn dynamic_tx_fault(point: &'static str) -> Result<()> {
 }
 
 fn list_dynamic_providers_on(conn: &Connection) -> Result<Vec<DynamicProviderRuntime>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, name, endpoint_url, upstream_protocol, auth_kind, created_at, updated_at
-         FROM dynamic_providers
-         ORDER BY created_at ASC, id ASC",
-    )?;
+    list_dynamic_providers_filtered_on(conn, false)
+}
+
+fn list_control_plane_dynamic_providers_on(
+    conn: &Connection,
+) -> Result<Vec<DynamicProviderRuntime>> {
+    list_dynamic_providers_filtered_on(conn, true)
+}
+
+fn list_dynamic_providers_filtered_on(
+    conn: &Connection,
+    include_drafts: bool,
+) -> Result<Vec<DynamicProviderRuntime>> {
+    let sql = if include_drafts {
+        "SELECT id, name, endpoint_url, upstream_protocol, auth_kind, created_at, updated_at, preset_id, origin, offering
+         FROM providers
+         WHERE origin IN ('preset', 'custom')
+         ORDER BY created_at ASC, id ASC"
+    } else {
+        "SELECT id, name, endpoint_url, upstream_protocol, auth_kind, created_at, updated_at, preset_id, origin, offering
+         FROM providers
+         WHERE origin IN ('preset', 'custom')
+           AND COALESCE(onboarding_draft, 0) = 0
+         ORDER BY created_at ASC, id ASC"
+    };
+    let mut stmt = conn.prepare(sql)?;
     let rows = stmt.query_map([], |row| {
         Ok((
             row.get::<_, String>(0)?,
@@ -2081,14 +2517,29 @@ fn list_dynamic_providers_on(conn: &Connection) -> Result<Vec<DynamicProviderRun
             row.get::<_, String>(4)?,
             row.get::<_, String>(5)?,
             row.get::<_, String>(6)?,
+            row.get::<_, Option<String>>(7)?,
+            row.get::<_, String>(8)?,
+            row.get::<_, String>(9)?,
         ))
     })?;
     let mut providers = Vec::new();
     for row in rows {
-        let (id, name, endpoint_url, protocol, auth_kind, created_at, updated_at) = row?;
+        let (
+            id,
+            name,
+            endpoint_url,
+            protocol,
+            auth_kind,
+            created_at,
+            updated_at,
+            preset_id,
+            origin,
+            offering,
+        ) = row?;
         providers.push(load_dynamic_provider_runtime(
             conn,
             DynamicProviderRow {
+                preset_id,
                 id,
                 name,
                 endpoint_url,
@@ -2096,6 +2547,8 @@ fn list_dynamic_providers_on(conn: &Connection) -> Result<Vec<DynamicProviderRun
                 auth_kind,
                 created_at,
                 updated_at,
+                origin,
+                offering,
             },
         )?);
     }
@@ -2108,9 +2561,9 @@ fn get_dynamic_provider_on(
 ) -> Result<Option<DynamicProviderRuntime>> {
     let row = conn
         .query_row(
-            "SELECT id, name, endpoint_url, upstream_protocol, auth_kind, created_at, updated_at
-             FROM dynamic_providers
-             WHERE lower(id) = lower(?1)",
+            "SELECT id, name, endpoint_url, upstream_protocol, auth_kind, created_at, updated_at, preset_id, origin, offering
+             FROM providers
+             WHERE lower(id) = lower(?1) AND origin IN ('preset', 'custom')",
             [provider_id],
             |row| {
                 Ok((
@@ -2121,16 +2574,32 @@ fn get_dynamic_provider_on(
                     row.get::<_, String>(4)?,
                     row.get::<_, String>(5)?,
                     row.get::<_, String>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, String>(9)?,
                 ))
             },
         )
         .optional()?;
-    let Some((id, name, endpoint_url, protocol, auth_kind, created_at, updated_at)) = row else {
+    let Some((
+        id,
+        name,
+        endpoint_url,
+        protocol,
+        auth_kind,
+        created_at,
+        updated_at,
+        preset_id,
+        origin,
+        offering,
+    )) = row
+    else {
         return Ok(None);
     };
     Ok(Some(load_dynamic_provider_runtime(
         conn,
         DynamicProviderRow {
+            preset_id,
             id,
             name,
             endpoint_url,
@@ -2138,11 +2607,107 @@ fn get_dynamic_provider_on(
             auth_kind,
             created_at,
             updated_at,
+            origin,
+            offering,
+        },
+    )?))
+}
+
+fn onboarding_draft_provider_ids_on(conn: &Connection) -> Result<HashSet<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT id FROM providers
+         WHERE origin IN ('preset', 'custom')
+           AND COALESCE(onboarding_draft, 0) != 0",
+    )?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    let mut ids = HashSet::new();
+    for id in rows {
+        ids.insert(id?);
+    }
+    Ok(ids)
+}
+
+fn provider_is_onboarding_draft_on(conn: &Connection, provider_id: &str) -> Result<Option<bool>> {
+    conn.query_row(
+        "SELECT COALESCE(onboarding_draft, 0) FROM providers
+         WHERE lower(id) = lower(?1) AND origin IN ('preset', 'custom')",
+        [provider_id],
+        |row| row.get::<_, i32>(0),
+    )
+    .optional()
+    .map(|value| value.map(|flag| flag != 0))
+    .map_err(Into::into)
+}
+
+/// Read a single row from the unified `providers` table without filtering on
+/// `origin`. Used by the public read path to surface builtin seeds alongside
+/// dynamic rows. Returns `None` when the id is unknown.
+fn get_provider_definition_on(
+    conn: &Connection,
+    provider_id: &str,
+) -> Result<Option<DynamicProviderRuntime>> {
+    let row = conn
+        .query_row(
+            "SELECT id, name, endpoint_url, upstream_protocol, auth_kind, created_at, updated_at, preset_id, origin, offering
+             FROM providers
+             WHERE lower(id) = lower(?1)",
+            [provider_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, String>(9)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((
+        id,
+        name,
+        endpoint_url_opt,
+        protocol_opt,
+        auth_kind_opt,
+        created_at,
+        updated_at,
+        preset_id,
+        origin,
+        offering,
+    )) = row
+    else {
+        return Ok(None);
+    };
+    // Builtin rows leave endpoint_url/upstream_protocol/auth_kind as NULL;
+    // synthesize safe placeholders the loader can parse so the runtime shape
+    // stays uniform. The handler then maps to `Option<...>` on the wire.
+    let endpoint_url = endpoint_url_opt.unwrap_or_default();
+    let protocol = protocol_opt.unwrap_or_else(|| "chat_completions".to_string());
+    let auth_kind = auth_kind_opt.unwrap_or_else(|| "bearer".to_string());
+    Ok(Some(load_dynamic_provider_runtime(
+        conn,
+        DynamicProviderRow {
+            preset_id,
+            id,
+            name,
+            endpoint_url,
+            protocol,
+            auth_kind,
+            created_at,
+            updated_at,
+            origin,
+            offering,
         },
     )?))
 }
 
 struct DynamicProviderRow {
+    preset_id: Option<String>,
     id: String,
     name: String,
     endpoint_url: String,
@@ -2150,6 +2715,8 @@ struct DynamicProviderRow {
     auth_kind: String,
     created_at: String,
     updated_at: String,
+    origin: String,
+    offering: String,
 }
 
 fn load_dynamic_provider_runtime(
@@ -2162,8 +2729,8 @@ fn load_dynamic_provider_runtime(
     let auth_kind = DynamicAuthKind::try_from(provider.auth_kind.as_str())
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     let mut stmt = conn.prepare(
-        "SELECT public_model, upstream_model
-         FROM dynamic_provider_models
+        "SELECT public_model, upstream_model, upstream_override
+         FROM provider_models
          WHERE provider_id = ?1
          ORDER BY public_model_key ASC",
     )?;
@@ -2171,6 +2738,18 @@ fn load_dynamic_provider_runtime(
         Ok(DynamicModelMapping {
             public_model: row.get(0)?,
             upstream_model: row.get(1)?,
+            upstream_override: row
+                .get::<_, Option<String>>(2)?
+                .map(|value| {
+                    serde_json::from_str(&value).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            2,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })
+                })
+                .transpose()?,
         })
     })?;
     let mut mappings = Vec::new();
@@ -2193,7 +2772,10 @@ fn load_dynamic_provider_runtime(
                 provider.id
             )
         })?;
+    let origin = ocg_domain::provider::ProviderOrigin::try_from(provider.origin.as_str())
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     Ok(DynamicProviderRuntime {
+        preset_id: provider.preset_id,
         id: provider.id,
         name: provider.name,
         endpoint_url: provider.endpoint_url,
@@ -2202,22 +2784,84 @@ fn load_dynamic_provider_runtime(
         mappings,
         created_at,
         updated_at,
+        origin,
+        offering: provider.offering,
     })
 }
 
-fn insert_dynamic_provider_on(conn: &Connection, runtime: &DynamicProviderRuntime) -> Result<()> {
+fn find_dashboard_operation_on(
+    conn: &Connection,
+    operation_id: &str,
+) -> Result<Option<DashboardOperationRow>> {
+    conn.query_row(
+        "SELECT operation_id, kind, payload_digest, result_json, created_at
+         FROM dashboard_operations
+         WHERE operation_id = ?1",
+        [operation_id],
+        |row| {
+            Ok(DashboardOperationRow {
+                operation_id: row.get(0)?,
+                kind: row.get(1)?,
+                payload_digest: row.get(2)?,
+                result_json: row.get(3)?,
+                created_at: row.get(4)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn insert_dashboard_operation_on(
+    conn: &Connection,
+    operation: &NewDashboardOperation,
+) -> Result<()> {
+    let now = Utc::now();
+    let cutoff = (now - Duration::days(DASHBOARD_OPERATION_PRUNE_DAYS)).to_rfc3339();
     conn.execute(
-        "INSERT INTO dynamic_providers
-         (id, name, endpoint_url, upstream_protocol, auth_kind, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "DELETE FROM dashboard_operations WHERE created_at < ?1",
+        [&cutoff],
+    )?;
+    conn.execute(
+        "INSERT INTO dashboard_operations
+         (operation_id, kind, payload_digest, result_json, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            operation.operation_id,
+            operation.kind,
+            operation.payload_digest,
+            operation.result_json,
+            now.to_rfc3339(),
+        ],
+    )?;
+    Ok(())
+}
+
+fn insert_dynamic_provider_on(
+    conn: &Connection,
+    runtime: &DynamicProviderRuntime,
+    onboarding_draft: bool,
+) -> Result<()> {
+    let origin = runtime.origin.as_str();
+    let offering = runtime.offering.as_str();
+    conn.execute(
+        "INSERT INTO providers
+         (id, origin, adapter_kind, name, endpoint_url, upstream_protocol,
+          auth_kind, preset_id, offering, display_family, endpoint_per_account,
+          created_at, updated_at, onboarding_draft)
+         VALUES (?1, ?2, 'configurable_http', ?3, ?4, ?5, ?6, ?7, ?8, NULL, 0, ?9, ?10, ?11)",
         params![
             runtime.id,
+            origin,
             runtime.name,
             runtime.endpoint_url,
             runtime.upstream_protocol.as_str(),
             runtime.auth_kind.as_str(),
+            runtime.preset_id,
+            offering,
             runtime.created_at.to_rfc3339(),
             runtime.updated_at.to_rfc3339(),
+            onboarding_draft as i32,
         ],
     )?;
     insert_dynamic_provider_models_on(conn, &runtime.id, &runtime.mappings)
@@ -2236,6 +2880,7 @@ fn upsert_imported_dynamic_provider_on(
     conn: &Connection,
     runtime: &DynamicProviderRuntime,
     imported_account_ids: &HashSet<String>,
+    onboarding_draft: bool,
 ) -> Result<()> {
     anyhow::ensure!(
         builtin_provider(&runtime.id).is_none(),
@@ -2256,8 +2901,9 @@ fn upsert_imported_dynamic_provider_on(
             }
         }
         conn.execute(
-            "UPDATE dynamic_providers
-             SET name = ?1, endpoint_url = ?2, upstream_protocol = ?3, auth_kind = ?4, updated_at = ?5
+            "UPDATE providers
+             SET name = ?1, endpoint_url = ?2, upstream_protocol = ?3, auth_kind = ?4,
+                 updated_at = ?5, preset_id = ?7, offering = ?8, onboarding_draft = ?9
              WHERE id = ?6",
             params![
                 runtime.name,
@@ -2266,15 +2912,18 @@ fn upsert_imported_dynamic_provider_on(
                 runtime.auth_kind.as_str(),
                 runtime.updated_at.to_rfc3339(),
                 existing.id,
+                runtime.preset_id,
+                runtime.offering.as_str(),
+                onboarding_draft as i32,
             ],
         )?;
         conn.execute(
-            "DELETE FROM dynamic_provider_models WHERE provider_id = ?1",
+            "DELETE FROM provider_models WHERE provider_id = ?1",
             [&existing.id],
         )?;
         insert_dynamic_provider_models_on(conn, &existing.id, &runtime.mappings)
     } else {
-        insert_dynamic_provider_on(conn, runtime)
+        insert_dynamic_provider_on(conn, runtime, onboarding_draft)
     }
 }
 
@@ -2299,9 +2948,9 @@ fn insert_dynamic_provider_models_on(
     mappings: &[DynamicModelMapping],
 ) -> Result<()> {
     let mut stmt = conn.prepare(
-        "INSERT INTO dynamic_provider_models
-         (provider_id, public_model, public_model_key, upstream_model)
-         VALUES (?1, ?2, ?3, ?4)",
+        "INSERT INTO provider_models
+         (provider_id, public_model, public_model_key, upstream_model, upstream_override)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
     )?;
     for mapping in mappings {
         stmt.execute(params![
@@ -2309,6 +2958,11 @@ fn insert_dynamic_provider_models_on(
             mapping.public_model,
             mapping.public_model.to_ascii_lowercase(),
             mapping.upstream_model,
+            mapping
+                .upstream_override
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?,
         ])?;
     }
     Ok(())
@@ -2336,6 +2990,588 @@ fn ensure_dynamic_provider_tables(conn: &Connection) -> Result<()> {
          CREATE INDEX IF NOT EXISTS idx_dynamic_provider_models_provider
             ON dynamic_provider_models(provider_id);",
     )?;
+    Ok(())
+}
+
+/// Missing model overrides inherit the existing Provider defaults unchanged.
+fn migrate_to_v40(conn: &Connection) -> Result<()> {
+    if schema_version_on(conn)? >= 40 {
+        return Ok(());
+    }
+    let tx = conn.unchecked_transaction()?;
+    let version = schema_version_on(&tx)?;
+    if version >= 40 {
+        return Ok(());
+    }
+    anyhow::ensure!(version == 39, "v40 requires schema v39");
+    ensure_column(&tx, "dynamic_provider_models", "upstream_override", "TEXT")?;
+    tx.execute_batch("INSERT OR REPLACE INTO schema_version(version) VALUES(40);")?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Model enablement and the selected preferred protocol have independent lifetimes.
+fn migrate_to_v41(conn: &Connection) -> Result<()> {
+    if schema_version_on(conn)? >= 41 {
+        return Ok(());
+    }
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let version = schema_version_on(&tx)?;
+    if version >= 41 {
+        return Ok(());
+    }
+    anyhow::ensure!(version == 40, "v41 requires schema v40");
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS provider_model_protocol_preferences (
+            provider_id TEXT NOT NULL CHECK(provider_id IN ('minimax', 'kimi')),
+            model_id TEXT NOT NULL,
+            protocol TEXT NOT NULL CHECK(protocol IN ('chat_completions', 'messages')),
+            PRIMARY KEY(provider_id, model_id)
+         );
+         INSERT OR REPLACE INTO schema_version(version) VALUES(41);",
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// v42: unify the dynamic Provider table with the sealed builtin catalog.
+/// The v41 source still carries `dynamic_providers` / `dynamic_provider_models`;
+/// the rewrite creates `providers` / `provider_models` with `origin` and
+/// `offering` columns and seeds the seven sealed adapters as `builtin` rows.
+/// The data mirror for builtin rows never feeds routing — traffic keeps using
+/// the sealed adapter code constants.
+fn migrate_to_v42(conn: &Connection, db_path: &Path, is_fresh: bool) -> Result<()> {
+    // Read once before the writer lock: a concurrent migration can commit
+    // between two reads, so checking `>= 42` and `== 41` separately is racy.
+    let source_version = schema_version_on(conn)?;
+    if source_version >= 42 {
+        return Ok(());
+    }
+    anyhow::ensure!(
+        source_version == V41_SCHEMA_VERSION,
+        "v42 requires a canonical schema v41 source"
+    );
+    if !is_fresh {
+        create_pre_v42_backup(conn, db_path)?;
+    }
+    sqlite_quick_check(conn)?;
+    with_foreign_keys_off(conn, || {
+        let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+        let version_locked = schema_version_on(&tx)?;
+        if version_locked >= 42 {
+            tx.rollback()?;
+            return Ok(());
+        }
+        anyhow::ensure!(
+            version_locked == V41_SCHEMA_VERSION,
+            "v42 writer lock observed schema {version_locked}, expected {V41_SCHEMA_VERSION}"
+        );
+        migrate_v42_body(&tx)?;
+        tx.execute_batch("INSERT OR REPLACE INTO schema_version (version) VALUES (42);")?;
+        sqlite_quick_check(&tx)?;
+        sqlite_foreign_key_check(&tx)?;
+        tx.commit()?;
+        Ok(())
+    })
+}
+
+/// v43: allow Responses as a stored preferred protocol, and restore Auto on
+/// available CN sibling protocols that the exclusive radio force_off'd.
+fn migrate_to_v43(conn: &Connection) -> Result<()> {
+    if schema_version_on(conn)? >= 43 {
+        return Ok(());
+    }
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let version = schema_version_on(&tx)?;
+    if version >= 43 {
+        return Ok(());
+    }
+    anyhow::ensure!(version == 42, "v43 requires schema v42");
+    if table_exists(&tx, "provider_model_protocol_preferences")? {
+        tx.execute_batch(
+            "CREATE TABLE provider_model_protocol_preferences_v43 AS
+                 SELECT provider_id, model_id, protocol
+                   FROM provider_model_protocol_preferences;
+             DROP TABLE provider_model_protocol_preferences;
+             CREATE TABLE provider_model_protocol_preferences (
+                provider_id TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                protocol TEXT NOT NULL CHECK(protocol IN ('chat_completions', 'responses', 'messages')),
+                PRIMARY KEY(provider_id, model_id)
+             );
+             INSERT INTO provider_model_protocol_preferences (provider_id, model_id, protocol)
+             SELECT provider_id, model_id, protocol FROM provider_model_protocol_preferences_v43;
+             DROP TABLE provider_model_protocol_preferences_v43;",
+        )?;
+    }
+    if table_exists(&tx, "provider_contract_model_protocol_overrides")? {
+        tx.execute(
+            "DELETE FROM provider_contract_model_protocol_overrides
+             WHERE state = 'force_off'
+               AND scope_kind = 'provider'
+               AND scope_id IN (?1, ?2)
+               AND protocol IN ('chat_completions', 'messages')
+               AND EXISTS (
+                 SELECT 1
+                 FROM provider_contract_model_protocol_overrides AS sibling
+                 WHERE sibling.scope_kind = provider_contract_model_protocol_overrides.scope_kind
+                   AND sibling.scope_id = provider_contract_model_protocol_overrides.scope_id
+                   AND sibling.model_id = provider_contract_model_protocol_overrides.model_id
+                   AND sibling.state = 'force_on'
+                   AND sibling.protocol IN ('chat_completions', 'messages')
+                   AND sibling.protocol != provider_contract_model_protocol_overrides.protocol
+               )",
+            params![MINIMAX_PROVIDER_ID, KIMI_PROVIDER_ID],
+        )?;
+    }
+    tx.execute_batch("INSERT OR REPLACE INTO schema_version(version) VALUES (43);")?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// v44: additive dashboard operation ledger for idempotent V4 writes.
+/// Stores only a payload digest and a secret-free result — never the request body.
+fn migrate_to_v44(conn: &Connection) -> Result<()> {
+    if schema_version_on(conn)? >= 44 {
+        return Ok(());
+    }
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let version = schema_version_on(&tx)?;
+    if version >= 44 {
+        return Ok(());
+    }
+    anyhow::ensure!(version == 43, "v44 requires schema v43");
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS dashboard_operations (
+            operation_id TEXT PRIMARY KEY,
+            kind TEXT NOT NULL,
+            payload_digest TEXT NOT NULL,
+            result_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );",
+    )?;
+    tx.execute_batch("INSERT OR REPLACE INTO schema_version(version) VALUES (44);")?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// v47: persisted onboarding draft flag on the unified `providers` row.
+/// Existing rows stay configured (`0`). Draft is never inferred from missing fields.
+fn migrate_to_v47(conn: &Connection) -> Result<()> {
+    if schema_version_on(conn)? >= 47 {
+        return Ok(());
+    }
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let version = schema_version_on(&tx)?;
+    if version >= 47 {
+        return Ok(());
+    }
+    anyhow::ensure!(version == 46, "v47 requires schema v46");
+    anyhow::ensure!(
+        table_exists(&tx, "providers")?,
+        "v47 requires the unified providers table"
+    );
+    ensure_column(
+        &tx,
+        "providers",
+        "onboarding_draft",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    tx.execute_batch("INSERT OR REPLACE INTO schema_version(version) VALUES (47);")?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn retired_dynamic_table_row_count(conn: &Connection, table: &str) -> Result<Option<i64>> {
+    if !table_exists(conn, table)? {
+        return Ok(None);
+    }
+    Ok(Some(conn.query_row(
+        &format!("SELECT COUNT(*) FROM {table}"),
+        [],
+        |row| row.get(0),
+    )?))
+}
+
+fn ensure_retired_dynamic_tables_empty(conn: &Connection) -> Result<()> {
+    let mut nonempty = Vec::new();
+    for table in ["dynamic_providers", "dynamic_provider_models"] {
+        if let Some(count) = retired_dynamic_table_row_count(conn, table)?
+            && count > 0
+        {
+            nonempty.push(format!("{table} ({count} rows)"));
+        }
+    }
+    anyhow::ensure!(
+        nonempty.is_empty(),
+        "v48 found nonempty leftover {}; refusing to drop or claim schema 48",
+        nonempty.join(" and ")
+    );
+    Ok(())
+}
+
+/// v48: drop inert protocol-switch and free-alias columns, and empty leftover
+/// `dynamic_providers` / `dynamic_provider_models` tables from the v42 reopen bug.
+/// Nonempty leftovers fail closed and keep schema 47.
+fn migrate_to_v48(conn: &Connection, db_path: &Path, is_fresh: bool) -> Result<()> {
+    let source_version = schema_version_on(conn)?;
+    if source_version >= 48 {
+        return Ok(());
+    }
+    anyhow::ensure!(
+        source_version == V47_SCHEMA_VERSION,
+        "v48 requires a canonical schema v47 source"
+    );
+    ensure_retired_dynamic_tables_empty(conn)?;
+    if !is_fresh {
+        create_pre_v48_backup(conn, db_path)?;
+    }
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let version_locked = schema_version_on(&tx)?;
+    if version_locked >= 48 {
+        tx.rollback()?;
+        return Ok(());
+    }
+    anyhow::ensure!(
+        version_locked == V47_SCHEMA_VERSION,
+        "v48 writer lock observed schema {version_locked}, expected {V47_SCHEMA_VERSION}"
+    );
+    ensure_retired_dynamic_tables_empty(&tx)?;
+    migrate_v48_body(&tx)?;
+    tx.execute_batch("INSERT OR REPLACE INTO schema_version (version) VALUES (48);")?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn migrate_v48_body(tx: &Transaction<'_>) -> Result<()> {
+    for table in ["dynamic_provider_models", "dynamic_providers"] {
+        if table_exists(tx, table)? {
+            tx.execute(&format!("DROP TABLE {table}"), [])?;
+        }
+    }
+    for column in [
+        "chat_completions_enabled",
+        "responses_enabled",
+        "messages_enabled",
+    ] {
+        drop_column_if_exists(tx, "provider_contract_scopes", column)?;
+    }
+    drop_column_if_exists(tx, "accounts", "free_alias_enabled")?;
+    Ok(())
+}
+
+fn migrate_v42_body(tx: &Transaction<'_>) -> Result<()> {
+    let now = Utc::now().to_rfc3339();
+    let v41_dynamic_providers_exists = table_exists(tx, "dynamic_providers")?;
+    let v41_dynamic_models_exists = table_exists(tx, "dynamic_provider_models")?;
+    let v41_preferences_exists = table_exists(tx, "provider_model_protocol_preferences")?;
+
+    anyhow::ensure!(
+        !table_exists(tx, "providers")? && !table_exists(tx, "provider_models")?,
+        "v42 requires a canonical v41 source without unified provider tables"
+    );
+    anyhow::ensure!(
+        !table_exists(tx, "provider_model_protocol_preferences_v42")?,
+        "v42 requires a canonical v41 source without leftover provider_model_protocol_preferences_v42"
+    );
+
+    tx.execute_batch(
+        "CREATE TABLE providers_new (
+            id TEXT PRIMARY KEY,
+            origin TEXT NOT NULL CHECK(origin IN ('builtin','preset','custom')),
+            adapter_kind TEXT NOT NULL,
+            name TEXT NOT NULL,
+            endpoint_url TEXT,
+            upstream_protocol TEXT,
+            auth_kind TEXT,
+            preset_id TEXT,
+            offering TEXT NOT NULL DEFAULT 'api' CHECK(offering IN ('plan','api')),
+            display_family TEXT,
+            endpoint_per_account INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+         );
+         CREATE TABLE provider_models_new (
+            provider_id TEXT NOT NULL,
+            public_model TEXT NOT NULL,
+            public_model_key TEXT NOT NULL,
+            upstream_model TEXT NOT NULL,
+            upstream_override TEXT,
+            PRIMARY KEY (provider_id, public_model_key),
+            FOREIGN KEY (provider_id) REFERENCES providers(id) ON DELETE CASCADE
+         );",
+    )?;
+
+    if v41_dynamic_providers_exists {
+        copy_dynamic_providers_to_providers_new_v42(tx)?;
+    }
+
+    seed_builtin_providers_v42(tx, &now)?;
+
+    if v41_dynamic_providers_exists {
+        tx.execute_batch("DROP TABLE dynamic_providers;")?;
+    }
+    tx.execute_batch("ALTER TABLE providers_new RENAME TO providers;")?;
+
+    if v41_dynamic_models_exists {
+        tx.execute(
+            "INSERT INTO provider_models_new
+                (provider_id, public_model, public_model_key, upstream_model, upstream_override)
+             SELECT provider_id, public_model, public_model_key, upstream_model, upstream_override
+               FROM dynamic_provider_models",
+            [],
+        )?;
+    }
+    if v41_dynamic_models_exists {
+        tx.execute_batch("DROP TABLE dynamic_provider_models;")?;
+    }
+    tx.execute_batch(
+        "ALTER TABLE provider_models_new RENAME TO provider_models;
+         CREATE INDEX IF NOT EXISTS idx_provider_models_provider
+            ON provider_models(provider_id);",
+    )?;
+
+    if v41_preferences_exists {
+        tx.execute_batch(
+            "CREATE TABLE provider_model_protocol_preferences_v42 AS
+                 SELECT provider_id, model_id, protocol
+                   FROM provider_model_protocol_preferences;
+             DROP TABLE provider_model_protocol_preferences;",
+        )?;
+        tx.execute_batch(
+            "CREATE TABLE provider_model_protocol_preferences (
+                provider_id TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                protocol TEXT NOT NULL CHECK(protocol IN ('chat_completions', 'messages')),
+                PRIMARY KEY(provider_id, model_id)
+             );
+             INSERT INTO provider_model_protocol_preferences (provider_id, model_id, protocol)
+             SELECT provider_id, model_id, protocol FROM provider_model_protocol_preferences_v42;
+             DROP TABLE provider_model_protocol_preferences_v42;",
+        )?;
+    } else {
+        tx.execute_batch(
+            "CREATE TABLE provider_model_protocol_preferences (
+                provider_id TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                protocol TEXT NOT NULL CHECK(protocol IN ('chat_completions', 'messages')),
+                PRIMARY KEY(provider_id, model_id)
+             );",
+        )?;
+    }
+
+    Ok(())
+}
+
+fn copy_dynamic_providers_to_providers_new_v42(tx: &Transaction<'_>) -> Result<()> {
+    let mut stmt = tx.prepare(
+        "SELECT id, name, endpoint_url, upstream_protocol, auth_kind,
+                preset_id, created_at, updated_at
+           FROM dynamic_providers",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, Option<String>>(5)?,
+            row.get::<_, String>(6)?,
+            row.get::<_, String>(7)?,
+        ))
+    })?;
+    let mut collected = Vec::new();
+    for row in rows {
+        collected.push(row?);
+    }
+    drop(stmt);
+    for (id, name, endpoint_url, upstream_protocol, auth_kind, preset_id, created_at, updated_at) in
+        collected
+    {
+        let origin = if preset_id.is_some() {
+            "preset"
+        } else {
+            "custom"
+        };
+        let offering = preset_id
+            .as_deref()
+            .map(ocg_domain::provider::preset_offering)
+            .unwrap_or("api");
+        tx.execute(
+            "INSERT INTO providers_new
+                (id, origin, adapter_kind, name, endpoint_url, upstream_protocol,
+                 auth_kind, preset_id, offering, display_family, endpoint_per_account,
+                 created_at, updated_at)
+             VALUES (?1, ?2, 'configurable_http', ?3, ?4, ?5, ?6, ?7, ?8, NULL, 0, ?9, ?10)",
+            params![
+                id,
+                origin,
+                name,
+                endpoint_url,
+                upstream_protocol,
+                auth_kind,
+                preset_id,
+                offering,
+                created_at,
+                updated_at,
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+fn seed_builtin_providers_v42(tx: &Transaction<'_>, now: &str) -> Result<()> {
+    use ocg_domain::provider::ProviderAdapterKind;
+    type BuiltinProviderSeed = (
+        &'static str,
+        ProviderAdapterKind,
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static str,
+        i32,
+    );
+    let seeds: [BuiltinProviderSeed; 7] = [
+        (
+            OPENCODE_PROVIDER_ID,
+            ProviderAdapterKind::OpenCodeGo,
+            "OpenCode Go",
+            OPENCODE_GO_BASE_URL,
+            "chat_completions",
+            "bearer",
+            "plan",
+            "OpenCode",
+            0,
+        ),
+        (
+            OPENCODE_ZEN_FREE_PROVIDER_ID,
+            ProviderAdapterKind::ZenFree,
+            "OpenCode Zen Free",
+            OPENCODE_ZEN_BASE_URL,
+            "chat_completions",
+            "none",
+            "api",
+            "OpenCode",
+            0,
+        ),
+        (
+            COMMAND_CODE_PROVIDER_ID,
+            ProviderAdapterKind::CommandCodeGoat,
+            "Command Code GOAT",
+            COMMAND_CODE_GOAT_BASE_URL,
+            "chat_completions",
+            "bearer",
+            "plan",
+            "Command Code",
+            0,
+        ),
+        (
+            MINIMAX_PROVIDER_ID,
+            ProviderAdapterKind::MiniMaxCn,
+            "MiniMax CN Token Plan",
+            MINIMAX_CN_BASE_URL,
+            "chat_completions",
+            "bearer",
+            "plan",
+            "MiniMax",
+            0,
+        ),
+        (
+            KIMI_PROVIDER_ID,
+            ProviderAdapterKind::KimiCn,
+            "Kimi Code CN",
+            KIMI_CN_BASE_URL,
+            "chat_completions",
+            "bearer",
+            "plan",
+            "Kimi",
+            0,
+        ),
+        (
+            OLLAMA_PROVIDER_ID,
+            ProviderAdapterKind::OllamaCloud,
+            "Ollama Cloud",
+            OLLAMA_CLOUD_BASE_URL,
+            "chat_completions",
+            "bearer",
+            "plan",
+            "Ollama",
+            0,
+        ),
+        (
+            CUSTOM_PROVIDER_ID,
+            ProviderAdapterKind::ConfigurableHttp,
+            "Custom API",
+            "",
+            "",
+            "bearer",
+            "api",
+            "Custom",
+            1,
+        ),
+    ];
+    for (
+        id,
+        kind,
+        name,
+        endpoint_url,
+        upstream_protocol,
+        auth_kind,
+        offering,
+        display_family,
+        endpoint_per_account,
+    ) in seeds
+    {
+        let endpoint_url = if endpoint_url.is_empty() {
+            None
+        } else {
+            Some(endpoint_url)
+        };
+        let upstream_protocol = if upstream_protocol.is_empty() {
+            None
+        } else {
+            Some(upstream_protocol)
+        };
+        tx.execute(
+            "INSERT INTO providers_new
+                (id, origin, adapter_kind, name, endpoint_url, upstream_protocol,
+                 auth_kind, preset_id, offering, display_family, endpoint_per_account,
+                 created_at, updated_at)
+             VALUES (?1, 'builtin', ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?10, ?10)",
+            params![
+                id,
+                kind.as_str(),
+                name,
+                endpoint_url,
+                upstream_protocol,
+                auth_kind,
+                offering,
+                display_family,
+                endpoint_per_account,
+                now,
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+/// v39 preserves template provenance independently of routing configuration.
+fn migrate_to_v39(conn: &Connection) -> Result<()> {
+    if schema_version_on(conn)? >= 39 {
+        return Ok(());
+    }
+    let tx = conn.unchecked_transaction()?;
+    let version = schema_version_on(&tx)?;
+    if version >= 39 {
+        return Ok(());
+    }
+    anyhow::ensure!(version == 38, "v39 requires schema v38");
+    ensure_column(&tx, "dynamic_providers", "preset_id", "TEXT")?;
+    tx.execute_batch("INSERT OR REPLACE INTO schema_version(version) VALUES(39);")?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -2539,6 +3775,30 @@ mod v27_test_hooks {
 }
 
 fn insert_account_row(
+    conn: &Connection,
+    account: &Account,
+    purchase_date: &str,
+    verification_status: ConnectionVerificationStatus,
+) -> Result<()> {
+    insert_account_columns(conn, account, purchase_date, verification_status)?;
+    let sort_order: i64 = conn.query_row(
+        "SELECT sort_order FROM accounts WHERE id = ?1",
+        [&account.id],
+        |row| row.get(0),
+    )?;
+    identity::persist_account_identity_model(
+        conn,
+        account,
+        purchase_date,
+        verification_status,
+        sort_order,
+        None,
+        Utc::now(),
+    )?;
+    Ok(())
+}
+
+pub(crate) fn insert_account_columns(
     conn: &Connection,
     account: &Account,
     purchase_date: &str,
@@ -2789,11 +4049,14 @@ fn persist_account_custom_config_on(
     let now = Utc::now().to_rfc3339();
     let existing = conn
         .query_row(
-            "SELECT upstream_protocol FROM account_custom_configs WHERE account_id = ?1",
+            "SELECT endpoint_url, upstream_protocol FROM account_custom_configs WHERE account_id = ?1",
             [account_id],
-            |row| row.get::<_, String>(0),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         )
         .optional()?;
+    let endpoint_changed = existing.as_ref().is_some_and(|(url, protocol)| {
+        url != &endpoint_url || protocol != input.upstream_protocol.as_str()
+    });
     if existing.is_some() {
         conn.execute(
             "UPDATE account_custom_configs
@@ -2819,7 +4082,15 @@ fn persist_account_custom_config_on(
             ],
         )?;
     }
+    identity::fill_uninitialized_binding_grants_on(conn, Some(account_id))?;
     mark_required_verification_stale_on(conn, account_id)?;
+    if endpoint_changed {
+        invalidate_probe_evidence_on(
+            conn,
+            &ContractScope::custom_endpoint(account_id),
+            Utc::now(),
+        )?;
+    }
     Ok(())
 }
 
@@ -3168,6 +4439,9 @@ fn ensure_account_provider_binding(db: &Database, account: &Account) -> Result<(
     Ok(())
 }
 
+/// Account id, optional name, and notes (`None` = leave, `Some(None)` = clear).
+type OnboardingAccountMeta<'a> = (&'a str, Option<&'a str>, Option<Option<&'a str>>);
+
 impl Database {
     /// Test/open convenience. Production hosts must call
     /// [`Self::open_with_cipher`] so account ciphertext probes use the
@@ -3180,8 +4454,10 @@ impl Database {
 
     /// Production open path: migrate with the already-resolved Host cipher.
     /// Persisted account key/password ciphertext is probed in place before
-    /// migration and is never rewritten. Decrypt failure fails closed; the
-    /// XOR obfuscation is not authenticated encryption.
+    /// migration. Decrypt failure fails closed. Authenticated `v2:` ciphertext
+    /// rejects a wrong host cipher; legacy XOR remains readable so backups
+    /// restore, then remaining legacy rows are rewritten to v2 in one
+    /// transaction.
     pub fn open_with_cipher(
         data_dir: PathBuf,
         cipher: Arc<dyn KeyCipher + Send + Sync>,
@@ -3202,9 +4478,10 @@ impl Database {
         let is_fresh = is_fresh_empty_database(&conn, existing_version)?;
         // Host-cipher opens probe persisted account key/password ciphertext
         // before migrate() can mutate the file. Decrypt failure fails closed.
-        // XOR obfuscation cannot authenticate every wrong-key UTF-8 result.
-        // Database::open (cipher None) skips this; v27 still probes when that
-        // rewrite runs. Empty or no-auth rows have nothing to decrypt.
+        // v2 AEAD rejects a wrong host cipher; legacy XOR is still readable
+        // so backups restore. Database::open (cipher None) skips this; v27
+        // still probes when that rewrite runs. Empty or no-auth rows have
+        // nothing to decrypt.
         if cipher.is_some() {
             preflight_ciphertext_probes(&conn, cipher)?;
         }
@@ -3228,7 +4505,24 @@ impl Database {
         migrate_to_v35(&db.conn, &db_path, is_fresh)?;
         migrate_to_v36(&db.conn)?;
         migrate_to_v37(&db.conn)?;
-        ensure_dynamic_provider_tables(&db.conn)?;
+        platform::migrate_to_v38(&db.conn)?;
+        if schema_version_on(&db.conn)? < 42 {
+            ensure_dynamic_provider_tables(&db.conn)?;
+        }
+        migrate_to_v39(&db.conn)?;
+        migrate_to_v40(&db.conn)?;
+        migrate_to_v41(&db.conn)?;
+        migrate_to_v42(&db.conn, &db_path, is_fresh)?;
+        migrate_to_v43(&db.conn)?;
+        migrate_to_v44(&db.conn)?;
+        identity::migrate_to_v45(&db.conn)?;
+        identity::migrate_to_v46(&db.conn)?;
+        migrate_to_v47(&db.conn)?;
+        migrate_to_v48(&db.conn, &db_path, is_fresh)?;
+        identity::ensure_identity_model_consistent(&db.conn)?;
+        if let Some(cipher) = cipher {
+            repair_legacy_account_ciphertext(&db.conn, cipher)?;
+        }
         Ok(db)
     }
 
@@ -4492,16 +5786,6 @@ impl Database {
             Self::upsert_free_channel_cooldown(&tx, &until)?;
         }
 
-        // `free_alias_enabled` was a development-era projection of the former
-        // Deny/Explicit/Prefer policy. Zen Free is now enabled or disabled as a
-        // normal ordered provider account; keep the legacy column inert without
-        // rewriting timestamps or requiring a destructive table rebuild.
-        tx.execute(
-            "UPDATE accounts SET free_alias_enabled = 0
-             WHERE free_alias_enabled <> 0",
-            [],
-        )?;
-
         tx.commit()?;
         Ok(())
     }
@@ -4635,6 +5919,27 @@ impl Database {
         let mut persisted = PersistedContracts::default();
         {
             let mut stmt = self.conn.prepare(
+                "SELECT provider_id, model_id, protocol FROM provider_model_protocol_preferences ORDER BY provider_id, model_id",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?;
+            for row in rows {
+                let (provider_id, model_id, protocol) = row?;
+                let protocol = UpstreamProtocolKind::try_from(protocol.as_str())?;
+                persisted
+                    .preferences
+                    .entry(ContractScope::provider(&provider_id))
+                    .or_default()
+                    .push((model_id, protocol));
+            }
+        }
+        {
+            let mut stmt = self.conn.prepare(
                 "SELECT scope_kind, scope_id, catalog_models_json, catalog_refreshed_at,
                         catalog_source, catalog_source_url, revision, updated_at
                  FROM provider_contract_scopes",
@@ -4710,6 +6015,58 @@ impl Database {
         Ok(row)
     }
 
+    /// Drop models from the persisted local catalog snapshot.
+    ///
+    /// Source metadata and `refreshed_at` stay as last written. An official
+    /// refresh may add the same IDs back as new (default off). Satellite
+    /// override, preference, and probe rows for the removed IDs are deleted
+    /// so they cannot resurrect the models.
+    pub fn remove_contract_catalog_models(
+        &self,
+        scope: &ContractScope,
+        model_ids: &[String],
+        now: DateTime<Utc>,
+    ) -> Result<PersistedScopeRow> {
+        anyhow::ensure!(
+            !model_ids.is_empty(),
+            "catalog model remove batch must be nonempty"
+        );
+        let tx = self.conn.unchecked_transaction()?;
+        let current = load_scope_on(&tx, scope)?
+            .ok_or_else(|| anyhow::anyhow!("contract scope was not persisted"))?;
+        let known: HashSet<&str> = current.catalog_models.iter().map(String::as_str).collect();
+        let mut seen = HashSet::new();
+        for model_id in model_ids {
+            anyhow::ensure!(
+                known.contains(model_id.as_str()) && seen.insert(model_id.as_str()),
+                "catalog model remove must name distinct models from the saved catalog"
+            );
+        }
+        let remove: HashSet<&str> = model_ids.iter().map(String::as_str).collect();
+        let remaining: Vec<String> = current
+            .catalog_models
+            .iter()
+            .filter(|model_id| !remove.contains(model_id.as_str()))
+            .cloned()
+            .collect();
+        upsert_contract_catalog_on(
+            &tx,
+            scope,
+            &remaining,
+            current.catalog_refreshed_at,
+            &current.catalog_source,
+            &current.catalog_source_url,
+            now,
+        )?;
+        for model_id in model_ids {
+            purge_removed_catalog_model_on(&tx, scope, model_id)?;
+        }
+        let row = load_scope_on(&tx, scope)?
+            .ok_or_else(|| anyhow::anyhow!("contract scope was not persisted"))?;
+        tx.commit()?;
+        Ok(row)
+    }
+
     pub fn refresh_contract_catalog_with_default_off(
         &self,
         scope: &ContractScope,
@@ -4742,6 +6099,19 @@ impl Database {
         rows: &[(String, UpstreamProtocolKind, ProtocolOverrideState)],
         now: DateTime<Utc>,
     ) -> Result<PersistedScopeRow> {
+        self.set_model_protocol_settings(scope, rows, &[], now)
+    }
+
+    /// `preferences` is merged into the saved preferred protocol choices; an empty
+    /// slice leaves existing preferences untouched. Only
+    /// `reset_provider_static_model_protocols` clears them.
+    pub fn set_model_protocol_settings(
+        &self,
+        scope: &ContractScope,
+        rows: &[(String, UpstreamProtocolKind, ProtocolOverrideState)],
+        preferences: &[(String, UpstreamProtocolKind)],
+        now: DateTime<Utc>,
+    ) -> Result<PersistedScopeRow> {
         anyhow::ensure!(
             !rows.is_empty(),
             "model protocol override batch must be nonempty"
@@ -4751,11 +6121,61 @@ impl Database {
         for (model_id, protocol, state) in rows {
             set_model_protocol_override_on(&tx, scope, model_id, *protocol, *state, now)?;
         }
+        set_model_protocol_preferences_on(&tx, scope, preferences)?;
         bump_scope_revision_on(&tx, scope, now)?;
         let scope = load_scope_on(&tx, scope)?
             .ok_or_else(|| anyhow::anyhow!("contract scope was not persisted"))?;
         tx.commit()?;
         Ok(scope)
+    }
+
+    /// Clear mutable protocol judgments and apply an official-docs baseline
+    /// for OpenCode Go or Command Code. Documented protocols stay Auto with
+    /// Static evidence; missing models default to Chat.
+    pub fn reset_provider_docs_model_protocols(
+        &self,
+        scope: &ContractScope,
+        current_models: &[String],
+        baseline: &crate::official_protocols::OfficialProtocolBaseline,
+        now: DateTime<Utc>,
+    ) -> Result<PersistedScopeRow> {
+        anyhow::ensure!(
+            scope.kind_str() == crate::provider_contracts::SCOPE_KIND_PROVIDER
+                && crate::official_protocols::uses_official_docs_protocol_baseline(scope.id()),
+            "docs protocol reset is only valid for OpenCode Go, Zen Free, or Command Code"
+        );
+        let tx = self.conn.unchecked_transaction()?;
+        ensure_contract_scope_row(&tx, scope, now)?;
+        clear_provider_protocol_judgments_on(&tx, scope)?;
+        apply_official_protocol_baseline_on(&tx, scope, current_models, baseline, now, true)?;
+        bump_scope_revision_on(&tx, scope, now)?;
+        let row = load_scope_on(&tx, scope)?
+            .ok_or_else(|| anyhow::anyhow!("contract scope was not persisted"))?;
+        tx.commit()?;
+        Ok(row)
+    }
+
+    /// Persist official-docs protocols without clearing user overrides.
+    pub fn apply_official_protocol_baseline(
+        &self,
+        scope: &ContractScope,
+        current_models: &[String],
+        baseline: &crate::official_protocols::OfficialProtocolBaseline,
+        now: DateTime<Utc>,
+    ) -> Result<PersistedScopeRow> {
+        anyhow::ensure!(
+            scope.kind_str() == crate::provider_contracts::SCOPE_KIND_PROVIDER
+                && crate::official_protocols::uses_official_docs_protocol_baseline(scope.id()),
+            "official protocol apply is only valid for OpenCode Go, Zen Free, or Command Code"
+        );
+        let tx = self.conn.unchecked_transaction()?;
+        ensure_contract_scope_row(&tx, scope, now)?;
+        apply_official_protocol_baseline_on(&tx, scope, current_models, baseline, now, false)?;
+        bump_scope_revision_on(&tx, scope, now)?;
+        let row = load_scope_on(&tx, scope)?
+            .ok_or_else(|| anyhow::anyhow!("contract scope was not persisted"))?;
+        tx.commit()?;
+        Ok(row)
     }
 
     /// Clear mutable protocol judgments for a built-in snapshot provider while
@@ -4776,16 +6196,7 @@ impl Database {
         );
         let tx = self.conn.unchecked_transaction()?;
         ensure_contract_scope_row(&tx, scope, now)?;
-        tx.execute(
-            "DELETE FROM provider_contract_model_protocols
-             WHERE scope_kind = ?1 AND scope_id = ?2",
-            params![scope.kind_str(), scope.id()],
-        )?;
-        tx.execute(
-            "DELETE FROM provider_contract_model_protocol_overrides
-             WHERE scope_kind = ?1 AND scope_id = ?2",
-            params![scope.kind_str(), scope.id()],
-        )?;
+        clear_provider_protocol_judgments_on(&tx, scope)?;
         let descriptor = crate::provider_contracts::provider_scope_descriptor(scope.id())
             .expect("validated built-in snapshot provider");
         for model_id in current_models {
@@ -5086,11 +6497,56 @@ impl Database {
         list_dynamic_providers_on(&self.conn)
     }
 
+    /// Control-plane listing: configured rows plus persisted onboarding drafts.
+    pub fn list_control_plane_dynamic_providers(&self) -> Result<Vec<DynamicProviderRuntime>> {
+        list_control_plane_dynamic_providers_on(&self.conn)
+    }
+
+    pub fn onboarding_draft_provider_ids(&self) -> Result<HashSet<String>> {
+        onboarding_draft_provider_ids_on(&self.conn)
+    }
+
+    pub fn provider_is_onboarding_draft(&self, provider_id: &str) -> Result<Option<bool>> {
+        provider_is_onboarding_draft_on(&self.conn, provider_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replace_credential_id(
+        &self,
+        account_id: &str,
+        credential_id: &str,
+    ) -> Result<()> {
+        let updated = self.conn.execute(
+            "UPDATE credential_state SET credential_id = ?2 WHERE account_id = ?1",
+            params![account_id, credential_id],
+        )?;
+        anyhow::ensure!(
+            updated == 1,
+            "account {account_id} is missing credential_state"
+        );
+        self.conn.execute(
+            "UPDATE legacy_identity_map SET new_id = ?2
+             WHERE legacy_id = ?1 AND new_kind = 'credential'",
+            params![account_id, credential_id],
+        )?;
+        Ok(())
+    }
+
     pub fn get_dynamic_provider(
         &self,
         provider_id: &str,
     ) -> Result<Option<DynamicProviderRuntime>> {
         get_dynamic_provider_on(&self.conn, provider_id)
+    }
+
+    /// Read any `providers` row (builtin preset/custom) by id. Used by the
+    /// public GET to surface the unified view; the handler still rejects
+    /// PATCH/DELETE on builtin rows.
+    pub fn get_provider_definition(
+        &self,
+        provider_id: &str,
+    ) -> Result<Option<DynamicProviderRuntime>> {
+        get_provider_definition_on(&self.conn, provider_id)
     }
 
     pub fn count_accounts_for_provider(&self, provider_id: &str) -> Result<i64> {
@@ -5103,7 +6559,7 @@ impl Database {
         first_account: &Account,
     ) -> Result<Vec<DynamicProviderRuntime>> {
         let tx = self.conn.unchecked_transaction()?;
-        insert_dynamic_provider_on(&tx, runtime)?;
+        insert_dynamic_provider_on(&tx, runtime, false)?;
         dynamic_tx_fault("after_provider_insert")?;
         let purchase_date = if first_account.purchase_date.trim().is_empty() {
             local_today()
@@ -5122,6 +6578,190 @@ impl Database {
         Ok(snapshot)
     }
 
+    /// Persist a user-defined Provider with no first account.
+    /// Keyed definitions use this when the Key will be added later on Accounts.
+    pub fn create_dynamic_provider_definition(
+        &self,
+        runtime: &DynamicProviderRuntime,
+    ) -> Result<Vec<DynamicProviderRuntime>> {
+        let tx = self.conn.unchecked_transaction()?;
+        insert_dynamic_provider_on(&tx, runtime, false)?;
+        let snapshot = list_dynamic_providers_on(&tx)?;
+        tx.commit()?;
+        Ok(snapshot)
+    }
+
+    pub fn find_dashboard_operation(
+        &self,
+        operation_id: &str,
+    ) -> Result<Option<DashboardOperationRow>> {
+        find_dashboard_operation_on(&self.conn, operation_id)
+    }
+
+    /// Create a user-defined Provider (and optional first account) together with
+    /// the dashboard operation ledger row in one SQLite transaction.
+    pub fn commit_onboarding_new(
+        &self,
+        runtime: &DynamicProviderRuntime,
+        first_account: Option<&Account>,
+        onboarding_draft: bool,
+        operation: &NewDashboardOperation,
+    ) -> Result<Vec<DynamicProviderRuntime>> {
+        let tx = self.conn.unchecked_transaction()?;
+        insert_dynamic_provider_on(&tx, runtime, onboarding_draft)?;
+        dynamic_tx_fault("after_provider_insert")?;
+        if let Some(account) = first_account {
+            let purchase_date = if account.purchase_date.trim().is_empty() {
+                local_today()
+            } else {
+                normalize_purchase_date(&account.purchase_date)?
+            };
+            insert_account_row(
+                &tx,
+                account,
+                &purchase_date,
+                ConnectionVerificationStatus::NotRequired,
+            )?;
+            dynamic_tx_fault("after_account_insert")?;
+        }
+        insert_dashboard_operation_on(&tx, operation)?;
+        let snapshot = list_dynamic_providers_on(&tx)?;
+        tx.commit()?;
+        Ok(snapshot)
+    }
+
+    /// Add a Key account to an existing user-defined Provider together with the
+    /// dashboard operation ledger row in one SQLite transaction.
+    pub fn commit_onboarding_existing_account(
+        &self,
+        account: &Account,
+        operation: &NewDashboardOperation,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            account.id != ZEN_FREE_ACCOUNT_ID,
+            "Zen Free is database-owned and cannot be created through the generic account API"
+        );
+        ensure_account_provider_binding(self, account)?;
+        let purchase_date = if account.purchase_date.trim().is_empty() {
+            local_today()
+        } else {
+            normalize_purchase_date(&account.purchase_date)?
+        };
+        let verification_status = builtin_provider(&account.provider_id)
+            .map(default_verification_status)
+            .unwrap_or(ConnectionVerificationStatus::NotRequired);
+        let tx = self.conn.unchecked_transaction()?;
+        insert_account_row(&tx, account, &purchase_date, verification_status)?;
+        dynamic_tx_fault("after_account_insert")?;
+        insert_dashboard_operation_on(&tx, operation)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Resume or complete a stored draft in one transaction with the ledger row.
+    /// Routing snapshot excludes remaining drafts.
+    /// One transaction: provider snapshot, account create/rotate, grants, auth sync, ledger.
+    #[allow(clippy::too_many_arguments)]
+    pub fn commit_onboarding_resume(
+        &self,
+        runtime: &DynamicProviderRuntime,
+        onboarding_draft: bool,
+        create_account: Option<&Account>,
+        rotate: Option<(&str, &str)>,
+        account_meta: Option<OnboardingAccountMeta<'_>>,
+        grant_union: Option<(&str, &[String], &[String])>,
+        sync_auth: Option<(&str, &str, &str)>,
+        operation: &NewDashboardOperation,
+    ) -> Result<Vec<DynamicProviderRuntime>> {
+        let tx = self.conn.unchecked_transaction()?;
+        let existing = get_dynamic_provider_on(&tx, &runtime.id)?
+            .ok_or_else(|| anyhow::anyhow!("unknown provider `{}`", runtime.id))?;
+        tx.execute(
+            "UPDATE providers
+             SET name = ?1, endpoint_url = ?2, upstream_protocol = ?3, auth_kind = ?4,
+                 updated_at = ?5, preset_id = ?7, offering = ?8, onboarding_draft = ?9
+             WHERE id = ?6",
+            params![
+                runtime.name,
+                runtime.endpoint_url,
+                runtime.upstream_protocol.as_str(),
+                runtime.auth_kind.as_str(),
+                runtime.updated_at.to_rfc3339(),
+                existing.id,
+                runtime.preset_id,
+                runtime.offering.as_str(),
+                onboarding_draft as i32,
+            ],
+        )?;
+        tx.execute(
+            "DELETE FROM provider_models WHERE provider_id = ?1",
+            [&existing.id],
+        )?;
+        insert_dynamic_provider_models_on(&tx, &existing.id, &runtime.mappings)?;
+        dynamic_tx_fault("after_mapping_replace")?;
+        if let Some(account) = create_account {
+            let purchase_date = if account.purchase_date.trim().is_empty() {
+                local_today()
+            } else {
+                normalize_purchase_date(&account.purchase_date)?
+            };
+            insert_account_row(
+                &tx,
+                account,
+                &purchase_date,
+                ConnectionVerificationStatus::NotRequired,
+            )?;
+            dynamic_tx_fault("after_account_insert")?;
+        }
+        if let Some((account_id, key_cipher)) = rotate {
+            identity::rotate_account_credential_in(&tx, account_id, key_cipher)?;
+        }
+        if let Some((account_id, name, notes)) = account_meta {
+            let now = Utc::now().to_rfc3339();
+            match (name, notes) {
+                (Some(name), Some(notes)) => {
+                    tx.execute(
+                        "UPDATE accounts SET name = ?2, notes = ?3, updated_at = ?4 WHERE id = ?1",
+                        params![account_id, name, notes, now],
+                    )?;
+                }
+                (Some(name), None) => {
+                    tx.execute(
+                        "UPDATE accounts SET name = ?2, updated_at = ?3 WHERE id = ?1",
+                        params![account_id, name, now],
+                    )?;
+                }
+                (None, Some(notes)) => {
+                    tx.execute(
+                        "UPDATE accounts SET notes = ?2, updated_at = ?3 WHERE id = ?1",
+                        params![account_id, notes, now],
+                    )?;
+                }
+                (None, None) => {}
+            }
+        }
+        if let Some((account_id, ids, origins)) = grant_union {
+            identity::replace_binding_grants_for_account_on(&tx, account_id, ids, origins)?;
+        }
+        if let Some((account_id, credential_kind, quota_scope)) = sync_auth {
+            tx.execute(
+                "UPDATE accounts SET credential_kind = ?2, quota_scope = ?3,
+                     setup_step = 'ready', updated_at = ?4
+                 WHERE id = ?1",
+                params![
+                    account_id,
+                    credential_kind,
+                    quota_scope,
+                    Utc::now().to_rfc3339(),
+                ],
+            )?;
+        }
+        insert_dashboard_operation_on(&tx, operation)?;
+        let snapshot = list_dynamic_providers_on(&tx)?;
+        tx.commit()?;
+        Ok(snapshot)
+    }
+
     pub fn replace_dynamic_provider(
         &self,
         runtime: &DynamicProviderRuntime,
@@ -5133,8 +6773,9 @@ impl Database {
         let existing = get_dynamic_provider_on(&tx, &runtime.id)?
             .ok_or_else(|| anyhow::anyhow!("unknown provider `{}`", runtime.id))?;
         tx.execute(
-            "UPDATE dynamic_providers
-             SET name = ?1, endpoint_url = ?2, upstream_protocol = ?3, auth_kind = ?4, updated_at = ?5
+            "UPDATE providers
+             SET name = ?1, endpoint_url = ?2, upstream_protocol = ?3, auth_kind = ?4,
+                 updated_at = ?5, preset_id = ?7, offering = ?8
              WHERE id = ?6",
             params![
                 runtime.name,
@@ -5143,10 +6784,12 @@ impl Database {
                 runtime.auth_kind.as_str(),
                 runtime.updated_at.to_rfc3339(),
                 existing.id,
+                runtime.preset_id,
+                runtime.offering.as_str(),
             ],
         )?;
         tx.execute(
-            "DELETE FROM dynamic_provider_models WHERE provider_id = ?1",
+            "DELETE FROM provider_models WHERE provider_id = ?1",
             [&existing.id],
         )?;
         insert_dynamic_provider_models_on(&tx, &existing.id, &runtime.mappings)?;
@@ -5166,6 +6809,22 @@ impl Database {
                  WHERE lower(provider_id) = lower(?2)",
                 params![runtime.updated_at.to_rfc3339(), existing.id],
             )?;
+            let mut account_ids = Vec::new();
+            {
+                let mut stmt =
+                    tx.prepare("SELECT id FROM accounts WHERE lower(provider_id) = lower(?1)")?;
+                let rows = stmt.query_map([&existing.id], |row| row.get::<_, String>(0))?;
+                for id in rows {
+                    account_ids.push(id?);
+                }
+            }
+            for account_id in account_ids {
+                invalidate_probe_evidence_on(
+                    &tx,
+                    &ContractScope::custom_endpoint(&account_id),
+                    runtime.updated_at,
+                )?;
+            }
         }
         if clear_keys {
             tx.execute(
@@ -5229,13 +6888,10 @@ impl Database {
             "dynamic provider still has {count} referencing account(s)"
         );
         tx.execute(
-            "DELETE FROM dynamic_provider_models WHERE provider_id = ?1",
+            "DELETE FROM provider_models WHERE provider_id = ?1",
             [&existing.id],
         )?;
-        tx.execute(
-            "DELETE FROM dynamic_providers WHERE id = ?1",
-            [&existing.id],
-        )?;
+        tx.execute("DELETE FROM providers WHERE id = ?1", [&existing.id])?;
         let snapshot = list_dynamic_providers_on(&tx)?;
         tx.commit()?;
         Ok(snapshot)
@@ -5278,11 +6934,74 @@ impl Database {
             .map(|record| record.account.id.to_ascii_lowercase())
             .collect::<HashSet<_>>();
         for runtime in &record.dynamic_providers {
-            upsert_imported_dynamic_provider_on(&tx, runtime, &imported_account_ids)?;
+            let onboarding_draft = record.draft_provider_ids.contains(&runtime.id)
+                || record
+                    .draft_provider_ids
+                    .iter()
+                    .any(|id| id.eq_ignore_ascii_case(&runtime.id));
+            upsert_imported_dynamic_provider_on(
+                &tx,
+                runtime,
+                &imported_account_ids,
+                onboarding_draft,
+            )?;
+        }
+        if record.platform_links_authoritative {
+            for account in &record.accounts {
+                tx.execute(
+                    "DELETE FROM platform_links WHERE account_id=?1",
+                    [&account.account.id],
+                )?;
+            }
         }
         for account in &record.accounts {
             merge_import_account_on(&tx, account)?;
+            if record.identity_snapshot.is_some() {
+                // V6 carries cooldowns. Merging a package must not shorten a
+                // deadline already observed on the destination host.
+                let current = self
+                    .get_account(&account.account.id)?
+                    .ok_or_else(|| anyhow::anyhow!("imported account is missing"))?;
+                let source = &account.account;
+                let generic = current
+                    .cooldown_generic_until
+                    .max(source.cooldown_generic_until);
+                let five_hours = current.cooldown_5h_until.max(source.cooldown_5h_until);
+                let week = current.cooldown_week_until.max(source.cooldown_week_until);
+                let month = current
+                    .cooldown_month_until
+                    .max(source.cooldown_month_until);
+                let free = current.cooldown_free_until.max(source.cooldown_free_until);
+                let until = current
+                    .cooldown_until
+                    .max(source.cooldown_until)
+                    .max(generic)
+                    .max(five_hours)
+                    .max(week)
+                    .max(month)
+                    .max(free);
+                tx.execute(
+                    "UPDATE accounts SET cooldown_until=?2, cooldown_generic_until=?3,
+                         cooldown_5h_until=?4, cooldown_week_until=?5,
+                         cooldown_month_until=?6, cooldown_free_until=?7 WHERE id=?1",
+                    params![
+                        source.id,
+                        until.map(|v| v.to_rfc3339()),
+                        generic.map(|v| v.to_rfc3339()),
+                        five_hours.map(|v| v.to_rfc3339()),
+                        week.map(|v| v.to_rfc3339()),
+                        month.map(|v| v.to_rfc3339()),
+                        free.map(|v| v.to_rfc3339())
+                    ],
+                )?;
+            }
         }
+        platform::merge_platforms_on(
+            &tx,
+            &record.platform_accounts,
+            &record.platform_links,
+            &imported_account_ids,
+        )?;
 
         let (sanitized, primary) = sanitize_config_json_primary_key(&record.config_json)?;
         let primary =
@@ -5328,7 +7047,7 @@ impl Database {
         );
 
         let zen_changed = tx.execute(
-            "UPDATE accounts SET enabled = ?2, free_alias_enabled = 0, updated_at = ?3
+            "UPDATE accounts SET enabled = ?2, updated_at = ?3
              WHERE id = ?1 AND provider_id = ?4 ",
             params![
                 ZEN_FREE_ACCOUNT_ID,
@@ -5431,8 +7150,25 @@ impl Database {
                     override_row.updated_at,
                 )?;
             }
+            tx.execute(
+                "DELETE FROM provider_model_protocol_preferences WHERE provider_id=?1",
+                [scope.id()],
+            )?;
+            set_model_protocol_preferences_on(
+                &tx,
+                scope,
+                record
+                    .provider_contracts
+                    .preferences
+                    .get(scope)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]),
+            )?;
         }
 
+        if let Some(snapshot) = &record.identity_snapshot {
+            identity::restore_imported_identity_snapshot_on(&tx, snapshot, &imported_account_ids)?;
+        }
         ensure_dynamic_singleton_accounts_on(&tx)?;
         sqlite_foreign_key_check(&tx)?;
         // The callback reads through this same SQLite connection, so it sees
@@ -5564,6 +7300,12 @@ impl Database {
         }
         if let Some(tier) = ollama_billing {
             set_ollama_cloud_billing_tier_on(&tx, id, tier)?;
+        }
+        if key_replaced {
+            tx.execute(
+                "UPDATE platform_links SET snapshot=NULL,version=version+1 WHERE account_id=?1",
+                [id],
+            )?;
         }
         tx.commit()?;
         Ok(())
@@ -5716,7 +7458,10 @@ impl Database {
               WHERE scope_kind = 'provider' AND scope_id = ?1",
             [CPA_PROVIDER_ID],
         )?;
+        let identity_id = identity::account_identity_id(&tx, CPA_ACCOUNT_ID)?;
+        identity::delete_account_identity_satellites(&tx, CPA_ACCOUNT_ID)?;
         tx.execute("DELETE FROM accounts WHERE id = ?1", [CPA_ACCOUNT_ID])?;
+        identity::delete_orphan_identity_for_account(&tx, CPA_ACCOUNT_ID, identity_id.as_deref())?;
         tx.commit()?;
         Ok(())
     }
@@ -5814,12 +7559,10 @@ impl Database {
     }
 
     /// The Zen Free singleton has one canonical user setting: enabled.
-    /// The retired `free_alias_enabled` column is forced to zero for rollback
-    /// compatibility but no longer participates in runtime behavior.
     pub fn set_zen_free_enabled(&self, enabled: bool) -> Result<()> {
         ensure_enabled_provider_is_routable(OPENCODE_ZEN_FREE_PROVIDER_ID, enabled)?;
         let changed = self.conn.execute(
-            "UPDATE accounts SET enabled = ?2, free_alias_enabled = 0, updated_at = ?3
+            "UPDATE accounts SET enabled = ?2, updated_at = ?3
              WHERE id = ?1 AND provider_id = ?4",
             params![
                 ZEN_FREE_ACCOUNT_ID,
@@ -5839,6 +7582,7 @@ impl Database {
         );
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM quota_windows WHERE account_id = ?1", [id])?;
+        tx.execute("DELETE FROM platform_links WHERE account_id = ?1", [id])?;
         tx.execute("DELETE FROM credit_balances WHERE account_id = ?1", [id])?;
         tx.execute(
             "DELETE FROM provider_usage_sync_state WHERE account_id = ?1",
@@ -5867,7 +7611,10 @@ impl Database {
              WHERE scope_kind = ?1 AND scope_id = ?2",
             params![SCOPE_KIND_CUSTOM_ENDPOINT, id],
         )?;
+        let identity_id = identity::account_identity_id(&tx, id)?;
+        identity::delete_account_identity_satellites(&tx, id)?;
         tx.execute("DELETE FROM accounts WHERE id = ?1", [id])?;
+        identity::delete_orphan_identity_for_account(&tx, id, identity_id.as_deref())?;
         tx.commit()?;
         Ok(())
     }
@@ -6153,7 +7900,10 @@ impl Database {
         })?;
         let mut runtimes = Vec::new();
         for row in rows {
-            let (account_id, enabled, verification_status, setup_ready, has_key, config) = row?;
+            let (account_id, enabled, verification_status, setup_ready, has_key, mut config) = row?;
+            if let Some(endpoint) = self.platform_endpoint(&account_id, config.upstream_protocol)? {
+                config.endpoint_url = endpoint;
+            }
             let capabilities = self.list_account_model_capabilities_declared(&account_id)?;
             runtimes.push(crate::custom::CustomAccountRuntime {
                 account_id,
@@ -7621,6 +9371,7 @@ impl Database {
                 params![id, new_cooldown],
             )?;
         }
+        identity::fanout_shared_pool_cooldown(&tx, id, !(until.is_none() && err.is_none()))?;
         tx.commit()?;
         Ok(())
     }
@@ -7731,6 +9482,10 @@ impl Database {
             // Keep the furthest observed deadline and commit it atomically with
             // the account-local compatibility copy when that row still exists.
             Self::upsert_free_channel_cooldown(&tx, &until.to_rfc3339())?;
+        }
+
+        if updated > 0 {
+            identity::fanout_shared_pool_cooldown(&tx, id, true)?;
         }
 
         // ponytail: 不再在 429 时设置 baseline。固定窗口的"重置"由 forward_logs 自然驱动；
@@ -9092,7 +10847,7 @@ fn parse_datetime(s: String) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(&s)
         .map(|dt| dt.with_timezone(&Utc))
         .unwrap_or_else(|e| {
-            eprintln!("error: failed to parse datetime '{}': {}, using now", s, e);
+            eprintln!("error: failed to parse datetime '{s}': {e}, using now");
             Utc::now()
         })
 }

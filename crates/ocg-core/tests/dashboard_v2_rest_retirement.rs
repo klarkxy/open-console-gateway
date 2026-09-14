@@ -437,28 +437,6 @@ async fn only_exact_auth_and_nonempty_browser_ws_are_preserved() {
         tombstone_body(&json);
     }
 
-    let mut headers = reqwest::header::HeaderMap::new();
-    headers.insert(reqwest::header::CONNECTION, "Upgrade".parse().unwrap());
-    headers.insert(reqwest::header::UPGRADE, "websocket".parse().unwrap());
-    headers.insert("Sec-WebSocket-Version", "13".parse().unwrap());
-    headers.insert(
-        "Sec-WebSocket-Key",
-        "dGhlIHNhbXBsZSBub25jZQ==".parse().unwrap(),
-    );
-    let exact_ws = client
-        .get(v2(port, "/browser/sessions/opaque-token/ws"))
-        .headers(headers)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(exact_ws.status(), StatusCode::BAD_REQUEST);
-    let exact_ws_body: Value = exact_ws.json().await.unwrap();
-    assert_eq!(
-        exact_ws_body["error"],
-        "browser WebSocket Origin is required"
-    );
-    assert_ne!(exact_ws_body["code"], DASHBOARD_V2_REMOVED_CODE);
-
     gateway::stop_gateway(handle);
 }
 

@@ -2,12 +2,21 @@
   <div class="accounts-view">
     <n-space vertical :size="16" class="accounts-content">
       <div class="accounts-toolbar">
+        <n-space wrap class="accounts-actions">
+          <n-button type="primary" @click="openAddModal">
+            <template #icon>
+              <n-icon :component="PlusOutlined" />
+            </template>
+            {{ t("新增账号") }}
+          </n-button>
+          <n-button @click="openTransfer('import')">{{ t("导入账号") }}</n-button>
+          <n-button @click="openTransfer('export')">{{ t("导出账号") }}</n-button>
+        </n-space>
         <div
           v-if="!accountListLoading && !accountListError && accounts.length > 0"
           class="accounts-filter-bar"
         >
           <div class="filter-field">
-            <span class="filter-label">{{ t("按方案筛选") }}</span>
             <n-select
               v-model:value="planFilter"
               :options="planFilterOptions"
@@ -18,7 +27,6 @@
             />
           </div>
           <div class="filter-field">
-            <span class="filter-label">{{ t("按状态筛选") }}</span>
             <n-select
               v-model:value="statusFilter"
               :options="statusFilterOptions"
@@ -29,16 +37,6 @@
             />
           </div>
         </div>
-        <n-space wrap class="accounts-actions">
-          <n-button @click="openTransfer('import')">{{ t("导入账号") }}</n-button>
-          <n-button @click="openTransfer('export')">{{ t("导出账号") }}</n-button>
-          <n-button type="primary" @click="openAddModal">
-            <template #icon>
-              <n-icon :component="PlusOutlined" />
-            </template>
-            {{ t("新增账号") }}
-          </n-button>
-        </n-space>
       </div>
 
       <span id="account-order-instructions" class="sr-only">
@@ -78,6 +76,28 @@
         >{{ t("重试") }}</n-button>
       </n-alert>
 
+      <n-alert
+        v-if="identitiesError"
+        type="warning"
+        :title="t('加载身份投影失败: {error}', { error: identitiesError })"
+      >
+        <n-button
+          size="small"
+          secondary
+          :loading="identitiesLoading"
+          @click="loadIdentitiesOverlay"
+        >{{ t("重试") }}</n-button>
+      </n-alert>
+
+      <PlatformAccountsSection
+        ref="platformSectionRef"
+        :accounts="accounts"
+        :catalog="providerCatalog"
+        @changed="loadAccounts"
+        @account-updated="replaceAccount"
+        @links-change="onPlatformLinksChange"
+      />
+
       <n-empty
         v-if="!accountListLoading && !accountListError && displayedAccounts.length === 0"
         :description="t('暂无账号')"
@@ -100,6 +120,7 @@
           v-for="account in displayedAccounts"
           :key="account.id"
           :account="account"
+          :identity="identityForCard(account.id)"
           :catalog="providerCatalog"
           :usage="getUsage(account.id)"
           :provider-usage="providerUsageMap[account.id] ?? null"
@@ -113,7 +134,8 @@
           :usage-refresh-loading="!!usageRefreshLoading[account.id]"
           :purchase-date-saving="busy || !!purchaseDateSaving[account.id]"
           :quota-limits-failed="!!quotaLimitsError"
-          :menu-options="accountMenuOptions(account, now)"
+          :menu-options="cardMenuOptions(account)"
+          :account-names="accountNamesById"
           @order-keydown="handleOrderKeydown($event, account.id)"
           @order-drag-start="startAccountDrag($event, account.id)"
           @toggle="toggleAccount(account.id)"
@@ -138,13 +160,19 @@
       v-model:show="showAddModal"
       :catalog="providerCatalog"
       :catalog-loading="catalogLoading"
+      :connections="providersStore.connections"
       :managed-available="managedRegistrationAvailable"
       :managed-reason="managedRegistrationReason"
       :invite-missing="!opencodeInviteUrl"
-      @import-key="openCreateModal(OPENCODE_GO_PLAN)"
+      :create-busy="busy"
+      :platform-busy="platformMutating"
+      :initial-option-id="addInitialOptionId"
       @register-managed="openManagedCreateModal"
       @open-invite-url="openInviteUrl"
-      @select-plan="handleSelectPlan"
+      @save-account="onFormSave"
+      @create-platform="handleCreatePlatform"
+      @preset-saved="onPresetAccountSaved"
+      @preset-conflict="onPresetAccountConflict"
     />
 
     <AccountFormModal
@@ -152,8 +180,9 @@
       :account="editingAccount"
       :is-cooling="editingAccount ? isCooling(editingAccount, now) : false"
       :busy="busy"
-      :plan="selectedPlanForCreate"
       :catalog="providerCatalog"
+      :endpoint-locked="!!editingPlatformLink"
+      :endpoint-lock-hint="editingEndpointLockHint"
       @update:show="setAccountFormVisible"
       @save="onFormSave"
       @reset-cooldown="resetCooldown(editingAccount!.id)"
@@ -246,6 +275,30 @@
       :mode="transferMode"
       @imported="handleAccountsImported"
     />
+
+    <AccountCredentialModal
+      :show="showCredentialModal"
+      :mode="credentialModalMode"
+      :binding="credentialModalBinding"
+      :connection="credentialModalConnection"
+      :unsupported-reason="credentialModalUnsupported"
+      :busy="busy"
+      @update:show="setCredentialModalVisible"
+      @rotate="onRotateCredential"
+      @save-binding="onPatchBinding"
+    />
+
+    <IdentityCredentialCreateModal
+      ref="createModalRef"
+      :show="showCreateModal"
+      :unsupported-reason="createModalUnsupported"
+      :busy="busy"
+      :default-connection-id="createModalConnectionId"
+      :connections="createModalConnections"
+      :share-targets="createModalShareTargets"
+      @update:show="setCreateModalVisible"
+      @create="onCreateIdentityCredential"
+    />
   </div>
 </template>
 
@@ -270,6 +323,9 @@ import { PlusOutlined } from "@vicons/antd";
 import { DashboardRequestError, dashboardApi, isRevisionConflict } from "../api/dashboard";
 import { providerApi } from "../api/providers.ts";
 import { useAccountsStore } from "../stores/accounts.ts";
+import { useIdentitiesStore } from "../stores/identities.ts";
+import { useProvidersStore } from "../stores/providers.ts";
+import type { MutationExpectation } from "../api/generated/dashboard-v3.ts";
 import type { ProviderCatalogEntry } from "../api/providers.ts";
 import type {
   Account,
@@ -281,11 +337,23 @@ import type {
 } from "../api/dashboard";
 import { isCooling } from "../domain/accounts-usage.ts";
 import { accountIsReady, accountMenuOptions } from "../domain/account-display.ts";
+import {
+  accountCredentialMenuOptions,
+  connectionAllowsIdentityCredentialCreate,
+  credentialWriteSupport,
+  isUncertainCreateFailure,
+  shareableInferenceCredentials,
+  type CredentialEditorMode,
+} from "../domain/account-credential.ts";
+import { identitiesApi } from "../api/identities.ts";
+import type { BindingPatchInput, IdentityCredentialCreateInput } from "../api/identities.ts";
 import { DEFAULT_PROVIDER_ID, isCommandCodeGoatAccount, isOllamaCloudAccount, isOfficialCnPlanAccount, isZenFreeAccount } from "../domain/account-providers.ts";
 import {
   executeCustomAccountEdit,
   isCustomApiAccount,
 } from "../domain/custom-account.ts";
+import { linkForAccount } from "../domain/platform-accounts.ts";
+import type { PlatformLink } from "../api/platform-accounts.ts";
 import { useAccountUsage } from "../domain/useAccountUsage.ts";
 import { useAccountOrder } from "./useAccountOrder.ts";
 import {
@@ -295,16 +363,15 @@ import {
   type AccountStatusFilter,
 } from "./account-filters.ts";
 import {
-  OPENCODE_GO_PLAN,
   PLAN_DEFINITIONS,
   dynamicPlanDefinition,
   planFamilyLabel,
-  type PlanDefinition,
 } from "../domain/plans.ts";
 import { isDynamicCatalogEntry } from "../domain/dynamic-provider.ts";
+import { accountCreateRequestInput } from "../domain/account-create-payload.ts";
 import { t, type MessageKey } from "../i18n/index.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
-import { applyAppViewSearchParams, PROVIDER_OTHER_TAB, readAccountDeepLink } from "./app-navigation.ts";
+import { applyAppViewSearchParams, readAccountAddDeepLink, readAccountDeepLink } from "./app-navigation.ts";
 import { mapWithConcurrency } from "../utils/async.ts";
 import { useLocalizedModalCloseLabel } from "../utils/modal-close-label.ts";
 import {
@@ -321,20 +388,36 @@ import AccountConnectionTestModal from "../components/AccountConnectionTestModal
 import AccountFormModal, { type AccountFormPayload } from "../components/AccountFormModal.vue";
 import ManagedAccountWizard from "../components/ManagedAccountWizard.vue";
 import AccountTransferModal from "../components/AccountTransferModal.vue";
+import AccountCredentialModal from "../components/AccountCredentialModal.vue";
+import IdentityCredentialCreateModal from "../components/IdentityCredentialCreateModal.vue";
+import PlatformAccountsSection from "../components/PlatformAccountsSection.vue";
+import type { PlatformAccountFormPayload } from "../components/PlatformAccountFormModal.vue";
 
 const dialog = useDialog();
 const message = useMessage();
 const accountsStore = useAccountsStore();
+const identitiesStore = useIdentitiesStore();
+const providersStore = useProvidersStore();
 const accounts = ref<Account[]>([]);
 const accountListLoading = ref(true);
 const accountListError = ref("");
+const identitiesError = ref("");
+const identitiesLoading = computed(() => identitiesStore.loading);
 const testingAccountId = ref<string | null>(null);
 const providerSettingsSaving = ref<Record<string, boolean>>({});
 const purchaseDateSaving = ref<Record<string, boolean>>({});
-/** Settings revision from `GET /settings`, used for conditional Zen writes. */
-const settingsRevision = ref<number | null>(null);
 const showModal = ref(false);
+const showCredentialModal = ref(false);
+const credentialModalMode = ref<CredentialEditorMode>("rotate");
+const credentialModalAccountId = ref<string | null>(null);
+const credentialModalExpectation = ref<MutationExpectation | null>(null);
+const showCreateModal = ref(false);
+const createModalAccountId = ref<string | null>(null);
+const createModalExpectation = ref<MutationExpectation | null>(null);
+const createModalRef = ref<InstanceType<typeof IdentityCredentialCreateModal> | null>(null);
 const showAddModal = ref(false);
+/** One-shot chooser preselection from the `add` deep link; cleared on close. */
+const addInitialOptionId = ref<string | null>(null);
 const showTransfer = ref(false);
 const transferMode = ref<"import" | "export">("import");
 const showManagedCreate = ref(false);
@@ -361,13 +444,27 @@ const openingBrowserTarget = ref<BrowserTarget | null>(null);
 const busy = ref(false);
 const now = ref(Date.now());
 const planFilter = ref<AccountPlanFilter>("all");
+const platformSectionRef = ref<InstanceType<typeof PlatformAccountsSection> | null>(null);
+const platformLinks = ref<PlatformLink[]>([]);
+const platformParents = ref<{ id: string; name: string }[]>([]);
+const editingPlatformLink = computed(() => (
+  editingAccount.value ? linkForAccount(platformLinks.value, editingAccount.value.id) : null
+));
+const editingEndpointLockHint = computed(() => {
+  const link = editingPlatformLink.value;
+  if (!link) return "";
+  const parentName = platformParents.value.find((parent) => parent.id === link.platformAccountId)?.name;
+  return parentName
+    ? t("已关联平台账号 {name}，Endpoint 由平台托管", { name: parentName })
+    : t("已关联平台账号，Endpoint 由平台托管");
+});
 const OLLAMA_WEBSITE_URL = "https://ollama.com";
 
 const statusFilter = ref<AccountStatusFilter>("all");
 const providerCatalog = ref<ProviderCatalogEntry[] | null>(null);
 const catalogLoading = ref(false);
 const catalogError = ref("");
-const selectedPlanForCreate = ref<PlanDefinition | null>(null);
+const platformMutating = computed(() => Boolean(platformSectionRef.value?.mutating));
 
 const {
   quotaLimits,
@@ -402,8 +499,6 @@ const {
 } = useAccountOrder({
   accounts,
   busy,
-  revision: settingsRevision,
-  runWithFreshRevision: runWithFreshSettingsRevision,
   reloadAfterRevisionConflict: reloadAfterControlPlaneConflict,
 });
 
@@ -463,7 +558,7 @@ const planFilterOptions = computed(() => [
 
 const statusFilterOptions = computed(() => [
   { value: "all", label: t("全部状态") },
-  { value: "available", label: t("可用") },
+  { value: "available", label: t("已启用") },
   { value: "cooling", label: t("冷却中") },
   { value: "auth-error", label: t("不可用") },
   { value: "disabled", label: t("已禁用") },
@@ -472,7 +567,86 @@ const statusFilterOptions = computed(() => [
 
 
 
+const credentialModalAccount = computed(() => (
+  credentialModalAccountId.value
+    ? accounts.value.find((account) => account.id === credentialModalAccountId.value) ?? null
+    : null
+));
+const credentialModalSupport = computed(() => (
+  credentialModalAccount.value
+    ? credentialWriteSupport(credentialModalAccount.value, identityForCard(credentialModalAccount.value.id))
+    : null
+));
+const credentialModalBinding = computed(() => credentialModalSupport.value?.bindingRecord ?? null);
+const credentialModalConnection = computed(() => {
+  const connectionId = credentialModalBinding.value?.connection_id;
+  if (!connectionId) return null;
+  return providersStore.connections?.find((connection) => connection.id === connectionId) ?? null;
+});
+const credentialModalUnsupported = computed(() => {
+  if (!showCredentialModal.value) return null;
+  const support = credentialModalSupport.value;
+  if (!support) return t("无法确定当前卡片的凭据");
+  if (credentialModalMode.value === "rotate" && !support.rotate) return support.unsupportedReason;
+  if (credentialModalMode.value === "binding" && !support.binding) return support.unsupportedReason;
+  return null;
+});
+
+const createModalAccount = computed(() => (
+  createModalAccountId.value
+    ? accounts.value.find((account) => account.id === createModalAccountId.value) ?? null
+    : null
+));
+const createModalSupport = computed(() => (
+  createModalAccount.value
+    ? credentialWriteSupport(createModalAccount.value, identityForCard(createModalAccount.value.id))
+    : null
+));
+const createModalUnsupported = computed(() => {
+  if (!showCreateModal.value) return null;
+  const support = createModalSupport.value;
+  if (!support?.create) return support?.unsupportedReason || t("无法确定当前卡片的凭据");
+  return null;
+});
+const createModalConnectionId = computed(() => (
+  createModalSupport.value?.bindingRecord?.connection_id ?? ""
+));
+const createModalConnections = computed(() => (
+  (providersStore.connections ?? []).filter(connectionAllowsIdentityCredentialCreate)
+));
+const createModalShareTargets = computed(() => {
+  const identity = createModalAccount.value
+    ? identityForCard(createModalAccount.value.id)
+    : null;
+  return shareableInferenceCredentials(identity).map((row) => {
+    const account = accounts.value.find((item) => item.id === row.legacy.id);
+    return { id: row.credential.id, label: account?.name || row.legacy.id };
+  });
+});
+
+function cardMenuOptions(account: Account) {
+  const base = accountMenuOptions(account, now.value);
+  const extra = accountCredentialMenuOptions(account, identityForCard(account.id));
+  if (extra.length === 0) return base;
+  const editAt = base.findIndex((option) => option.key === "edit");
+  if (editAt < 0) return [...base, ...extra];
+  return [...base.slice(0, editAt + 1), ...extra, ...base.slice(editAt + 1)];
+}
+
 function handleMenuSelect(key: string | number, accountId: string) {
+  if (busy.value) return;
+  if (key === "rotate-key") {
+    void openCredentialModal(accountId, "rotate");
+    return;
+  }
+  if (key === "edit-binding") {
+    void openCredentialModal(accountId, "binding");
+    return;
+  }
+  if (key === "add-key") {
+    void openCreateModal(accountId);
+    return;
+  }
   if (key === "open-cpa") {
     openCpa();
   } else if (key === "open-console") {
@@ -519,7 +693,29 @@ function openCpa(): void {
 }
 
 function openAddModal(): void {
+  // Add Account owns creation now; a stale edit target would turn the
+  // chooser's save payload into an update of the previously edited account.
+  editingAccount.value = null;
+  addInitialOptionId.value = null;
   showAddModal.value = true;
+  void providersStore.loadConnections().catch(() => undefined);
+}
+
+/**
+ * One-shot deep link (Suppliers Custom API row): open Add Account with the
+ * requested chooser option preselected. The parameter is deleted before the
+ * modal opens so a reload or close never replays it.
+ */
+function applyAccountAddDeepLink(): void {
+  const optionId = readAccountAddDeepLink(window.location.search);
+  if (!optionId) return;
+  const url = new URL(window.location.href);
+  url.searchParams.delete("add");
+  window.history.replaceState(null, "", url);
+  editingAccount.value = null;
+  addInitialOptionId.value = optionId;
+  showAddModal.value = true;
+  void providersStore.loadConnections().catch(() => undefined);
 }
 
 function openTransfer(mode: "import" | "export"): void {
@@ -528,24 +724,272 @@ function openTransfer(mode: "import" | "export"): void {
 }
 
 async function handleAccountsImported(count: number): Promise<void> {
-  await loadAccounts();
+  await Promise.allSettled([
+    loadAccounts(),
+    providersStore.loadConnections(),
+  ]);
   message.success(t("节点配置迁移完成：处理 {count} 项账号。", { count }));
 }
 
-function openCreateModal(plan?: PlanDefinition): void {
-  showAddModal.value = false;
-  editingAccount.value = null;
-  selectedPlanForCreate.value = plan ?? null;
-  showModal.value = true;
+// The chooser's embedded platform form delegates the write to the section so
+// validation, CAS conflict recovery, and the card reload stay in one place.
+async function handleCreatePlatform(payload: PlatformAccountFormPayload): Promise<void> {
+  const created = await platformSectionRef.value?.createPlatform(payload);
+  if (created) showAddModal.value = false;
 }
 
-function handleSelectPlan(plan: PlanDefinition): void {
-  openCreateModal(plan);
+// The atomic create already saved supplier + first account; reload both lists
+// so the account and the new user-defined choice appear.
+async function onPresetAccountSaved(): Promise<void> {
+  await Promise.allSettled([
+    loadAccounts(),
+    loadProviderCatalog(),
+    providersStore.loadCatalog(),
+    providersStore.loadConnections(),
+  ]);
+  message.success(t("账号已添加"));
+  showAddModal.value = false;
+}
+
+async function onPresetAccountConflict(): Promise<void> {
+  await Promise.allSettled([
+    loadAccounts(),
+    loadProviderCatalog(),
+    providersStore.loadCatalog(),
+    providersStore.loadConnections(),
+  ]);
 }
 
 function resetFilters(): void {
   planFilter.value = "all";
   statusFilter.value = "all";
+}
+
+const accountNamesById = computed(() => {
+  const names: Record<string, string> = {};
+  for (const account of accounts.value) names[account.id] = account.name;
+  return names;
+});
+
+function identityForCard(accountId: string) {
+  return identitiesStore.byAccountId.get(accountId) ?? null;
+}
+
+async function captureIdentityViewExpectation(): Promise<MutationExpectation | null> {
+  if (identitiesStore.snapshotExpectation) return identitiesStore.snapshotExpectation;
+  await loadIdentitiesOverlay();
+  return identitiesStore.snapshotExpectation;
+}
+
+async function openCredentialModal(accountId: string, mode: CredentialEditorMode): Promise<void> {
+  if (busy.value) return;
+  const account = accounts.value.find((item) => item.id === accountId);
+  if (!account) return;
+  const support = credentialWriteSupport(account, identityForCard(accountId));
+  if (mode === "rotate" && !support.rotate) {
+    if (support.unsupportedReason) message.warning(support.unsupportedReason);
+    return;
+  }
+  if (mode === "binding" && !support.binding) {
+    if (support.unsupportedReason) message.warning(support.unsupportedReason);
+    return;
+  }
+  try {
+    const expectation = await captureIdentityViewExpectation();
+    if (!expectation) {
+      message.error(t("加载身份投影失败: {error}", { error: identitiesError.value || t("保存失败，请重试") }));
+      return;
+    }
+    credentialModalExpectation.value = expectation;
+    if (mode === "binding" && !providersStore.connections) {
+      await providersStore.loadConnections().catch(() => undefined);
+    }
+  } catch (error) {
+    message.error(t("加载账号失败: {error}", { error: dashboardErrorDetail(error) }));
+    return;
+  }
+  credentialModalAccountId.value = accountId;
+  credentialModalMode.value = mode;
+  showCredentialModal.value = true;
+}
+
+async function openCreateModal(accountId: string): Promise<void> {
+  if (busy.value) return;
+  const account = accounts.value.find((item) => item.id === accountId);
+  if (!account) return;
+  const support = credentialWriteSupport(account, identityForCard(accountId));
+  if (!support.create) {
+    if (support.unsupportedReason) message.warning(support.unsupportedReason);
+    return;
+  }
+  try {
+    const expectation = await captureIdentityViewExpectation();
+    if (!expectation) {
+      message.error(t("加载身份投影失败: {error}", { error: identitiesError.value || t("保存失败，请重试") }));
+      return;
+    }
+    createModalExpectation.value = expectation;
+    if (!providersStore.connections) {
+      await providersStore.loadConnections().catch(() => undefined);
+    }
+  } catch (error) {
+    message.error(t("加载账号失败: {error}", { error: dashboardErrorDetail(error) }));
+    return;
+  }
+  createModalAccountId.value = accountId;
+  showCreateModal.value = true;
+}
+
+function setCredentialModalVisible(show: boolean): void {
+  if (!show && busy.value) return;
+  showCredentialModal.value = show;
+  if (!show) {
+    credentialModalAccountId.value = null;
+    credentialModalExpectation.value = null;
+  }
+}
+
+function setCreateModalVisible(show: boolean): void {
+  if (!show && busy.value) return;
+  showCreateModal.value = show;
+  if (!show) {
+    createModalAccountId.value = null;
+    createModalExpectation.value = null;
+  }
+}
+
+async function refreshAccountsAndIdentities(): Promise<void> {
+  const loaded = await accountsStore.loadPresented();
+  accounts.value = loaded;
+  await loadIdentitiesOverlay();
+}
+
+async function recoverCredentialMutationConflict(error: unknown): Promise<boolean> {
+  if (!isRevisionConflict(error)) return false;
+  const reloaded = await reloadControlPlaneView();
+  if (reloaded) {
+    credentialModalExpectation.value = identitiesStore.snapshotExpectation;
+    createModalExpectation.value = identitiesStore.snapshotExpectation;
+    message.warning(t("凭据设置已被其他操作修改，已重新加载最新状态，请重试"));
+  } else {
+    message.warning(t("凭据设置已被其他操作修改，未能加载最新状态，请稍后重试"));
+  }
+  return true;
+}
+
+async function onRotateCredential(payload: { secretInput: string }): Promise<void> {
+  if (busy.value) return;
+  const support = credentialModalSupport.value;
+  const credentialId = support?.credential?.credential.id;
+  if (!support?.rotate || !credentialId) {
+    message.warning(support?.unsupportedReason || t("无法确定当前卡片的凭据"));
+    return;
+  }
+  busy.value = true;
+  try {
+    await identitiesApi.rotateCredential(
+      credentialId,
+      payload,
+      credentialModalExpectation.value ?? undefined,
+    );
+    showCredentialModal.value = false;
+    credentialModalAccountId.value = null;
+    credentialModalExpectation.value = null;
+    try {
+      await refreshAccountsAndIdentities();
+    } catch (refreshError) {
+      message.error(t("加载账号失败: {error}", { error: dashboardErrorDetail(refreshError) }));
+    }
+    message.success(t("Key 已轮换"));
+  } catch (error) {
+    if (await recoverCredentialMutationConflict(error)) return;
+    message.error(t("轮换 Key 失败: {error}", { error: dashboardErrorDetail(error) }));
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function onPatchBinding(payload: BindingPatchInput): Promise<void> {
+  if (busy.value) return;
+  const support = credentialModalSupport.value;
+  const bindingId = support?.bindingRecord?.id;
+  if (!support?.binding || !bindingId) {
+    message.warning(support?.unsupportedReason || t("无法确定当前卡片的凭据"));
+    return;
+  }
+  busy.value = true;
+  try {
+    await identitiesApi.patchBinding(
+      bindingId,
+      payload,
+      credentialModalExpectation.value ?? undefined,
+    );
+    showCredentialModal.value = false;
+    credentialModalAccountId.value = null;
+    credentialModalExpectation.value = null;
+    try {
+      await refreshAccountsAndIdentities();
+    } catch (refreshError) {
+      message.error(t("加载账号失败: {error}", { error: dashboardErrorDetail(refreshError) }));
+    }
+    message.success(t("绑定已更新"));
+  } catch (error) {
+    if (await recoverCredentialMutationConflict(error)) return;
+    message.error(t("更新绑定失败: {error}", { error: dashboardErrorDetail(error) }));
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function onCreateIdentityCredential(payload: IdentityCredentialCreateInput): Promise<void> {
+  if (busy.value) return;
+  const support = createModalSupport.value;
+  const identityId = support?.identityId;
+  if (!support?.create || !identityId) {
+    message.warning(support?.unsupportedReason || t("无法确定当前卡片的凭据"));
+    return;
+  }
+  busy.value = true;
+  try {
+    await identitiesApi.createIdentityCredential(
+      identityId,
+      payload,
+      createModalExpectation.value ?? undefined,
+    );
+    showCreateModal.value = false;
+    createModalAccountId.value = null;
+    createModalExpectation.value = null;
+    try {
+      await refreshAccountsAndIdentities();
+    } catch (refreshError) {
+      message.error(t("加载账号失败: {error}", { error: dashboardErrorDetail(refreshError) }));
+    }
+    message.success(t("Key 已添加"));
+  } catch (error) {
+    createModalRef.value?.noteFailure(error);
+    if (await recoverCredentialMutationConflict(error)) return;
+    if (isUncertainCreateFailure(error)) {
+      message.warning(t("创建结果未知，Key 可能已添加。请用相同内容重试，不要修改后再提交。"));
+    } else {
+      message.error(t("添加 Key 失败: {error}", { error: dashboardErrorDetail(error) }));
+    }
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function loadIdentitiesOverlay(): Promise<void> {
+  try {
+    await identitiesStore.loadPresented();
+    identitiesError.value = "";
+  } catch (error) {
+    identitiesError.value = dashboardErrorDetail(error);
+  }
+}
+
+function onPlatformLinksChange(links: PlatformLink[], parents: { id: string; name: string }[]): void {
+  platformLinks.value = links;
+  platformParents.value = parents;
 }
 
 function openManagedCreateModal(): void {
@@ -570,13 +1014,11 @@ function normalizeManagedInviteDraft(): void {
 async function ensureInviteUrlSaved(inviteUrl: string): Promise<void> {
   if (inviteUrl === opencodeInviteUrl.value) return;
   const settings = await dashboardApi.getSettings();
-  settingsRevision.value = settings.revision;
-  const result = await dashboardApi.updateSettings({
+  await dashboardApi.updateSettings({
     ...settings,
     opencode_invite_url: inviteUrl,
   });
   opencodeInviteUrl.value = inviteUrl;
-  settingsRevision.value = result.revision;
 }
 
 function setManagedCreateVisible(show: boolean): void {
@@ -594,9 +1036,8 @@ function openManagedWizard(accountId: string): void {
 function openInviteUrl(): void {
   showAddModal.value = false;
   const url = applyAppViewSearchParams(new URL(window.location.href), "providers", {
-    scope_kind: "provider",
-    scope_id: DEFAULT_PROVIDER_ID,
-    tab: PROVIDER_OTHER_TAB,
+    provider: DEFAULT_PROVIDER_ID,
+    tab: "settings",
   });
   url.searchParams.delete("session");
   url.hash = "";
@@ -646,6 +1087,10 @@ watch(showModal, (show) => {
   if (!show) clearAccountDeepLink();
 });
 
+watch(showAddModal, (show) => {
+  if (!show) addInitialOptionId.value = null;
+});
+
 async function createManagedAccount(): Promise<void> {
   const name = managedDraft.value.name.trim();
   if (!name || busy.value || !managedRegistrationAvailable.value || !canCreateManagedDraft.value) {
@@ -667,11 +1112,12 @@ async function createManagedAccount(): Promise<void> {
   try {
     await ensureInviteUrlSaved(inviteUrl);
     const username = managedDraft.value.username.trim();
-    const created = await runWithFreshSettingsRevision(() => dashboardApi.createManagedAccount({
+    const created = await dashboardApi.createManagedAccount({
       name,
       ...(username ? { username } : {}),
-    }));
+    });
     addAccount(created);
+    void providersStore.loadConnections().catch(() => undefined);
     showManagedCreate.value = false;
     managedWizardAccountId.value = created.id;
     showManagedWizard.value = true;
@@ -688,9 +1134,7 @@ async function advanceManagedSetup(accountId: string, setupStep: AccountSetupSte
   if (busy.value) return;
   busy.value = true;
   try {
-    const updated = await runWithFreshSettingsRevision(() => (
-      dashboardApi.advanceAccountSetup(accountId, setupStep)
-    ));
+    const updated = await dashboardApi.advanceAccountSetup(accountId, setupStep);
     replaceAccount(updated);
     message.success(t("注册进度已保存"));
   } catch (error) {
@@ -706,9 +1150,7 @@ async function verifyManagedKey(accountId: string, key: string): Promise<void> {
   if (busy.value) return;
   busy.value = true;
   try {
-    const updated = await runWithFreshSettingsRevision(() => (
-      dashboardApi.verifyManagedAccountKey(accountId, key)
-    ));
+    const updated = await dashboardApi.verifyManagedAccountKey(accountId, key);
     replaceAccount(updated);
     if (accountIsReady(updated)) {
       showManagedWizard.value = false;
@@ -763,9 +1205,7 @@ async function openAccountBrowser(accountId: string, target: BrowserTarget): Pro
 
 async function resetBrowserProfile(accountId: string): Promise<void> {
   try {
-    const updated = await runWithFreshSettingsRevision(() => (
-      dashboardApi.resetAccountBrowserProfile(accountId)
-    ));
+    const updated = await dashboardApi.resetAccountBrowserProfile(accountId);
     replaceAccount(updated);
     if (!accountIsReady(updated)) {
       delete usageMap.value[accountId];
@@ -780,13 +1220,11 @@ async function resetBrowserProfile(accountId: string): Promise<void> {
 
 function replaceAccount(account: Account): void {
   accounts.value = accounts.value.map((item) => (item.id === account.id ? account : item));
-  settingsRevision.value = account.revision ?? settingsRevision.value;
   if (editingAccount.value?.id === account.id) editingAccount.value = account;
 }
 
 function addAccount(account: Account): void {
   accounts.value = [...accounts.value, account];
-  settingsRevision.value = account.revision ?? settingsRevision.value;
 }
 
 function removeAccountState(id: string): void {
@@ -811,7 +1249,6 @@ function accountHasUsageDisplay(account: Account): boolean {
 async function refreshAccountState(id: string): Promise<Account | null> {
   const loaded = await accountsStore.loadPresented();
   accounts.value = loaded;
-  settingsRevision.value = loaded[0]?.revision ?? settingsRevision.value;
   const account = loaded.find((item) => item.id === id);
   if (!account) {
     removeAccountState(id);
@@ -844,10 +1281,10 @@ async function recoverManagedSetupConflict(accountId: string, error: unknown): P
 async function loadAccounts() {
   accountListLoading.value = true;
   accountListError.value = "";
+  const overlay = loadIdentitiesOverlay();
   try {
     const loaded = await accountsStore.loadPresented();
     accounts.value = loaded;
-    settingsRevision.value = loaded[0]?.revision ?? settingsRevision.value;
     applyAccountDeepLink();
     // 限流并发拉取用量，避免账号多时 N 次请求同时打到后端；Zen Free 无 Key 维度用量。
     // GOAT 的本地估算不依赖 OpenCode Go 定价快照是否加载成功。
@@ -880,6 +1317,7 @@ async function loadAccounts() {
   } finally {
     accountListLoading.value = false;
   }
+  await overlay;
 }
 
 async function loadRegistrationOptions(): Promise<void> {
@@ -889,10 +1327,8 @@ async function loadRegistrationOptions(): Promise<void> {
   ]);
   if (settingsResult.status === "fulfilled") {
     opencodeInviteUrl.value = settingsResult.value.opencode_invite_url || "";
-    settingsRevision.value = settingsResult.value.revision;
   } else {
     opencodeInviteUrl.value = "";
-    settingsRevision.value = null;
   }
   if (browserResult.status === "fulfilled") {
     browserCapabilities.value = browserResult.value;
@@ -924,7 +1360,11 @@ async function initializeAccounts() {
   const catalogPromise = loadProviderCatalog();
   await loadQuotaLimits();
   await loadAccounts();
-  await Promise.allSettled([registrationOptions, catalogPromise]);
+  await Promise.allSettled([
+    registrationOptions,
+    catalogPromise,
+    providersStore.loadConnections(),
+  ]);
 }
 
 async function onFormSave(payload: AccountInput | AccountFormPayload) {
@@ -947,7 +1387,7 @@ async function onFormSave(payload: AccountInput | AccountFormPayload) {
     }
     busy.value = true;
     try {
-      const saved = await runWithFreshSettingsRevision(() => dashboardApi.updateAccount(editing.id, update));
+      const saved = await dashboardApi.updateAccount(editing.id, update);
       replaceAccount(saved);
       // purchase_date defines the monthly usage window and changing it clears
       // the persisted calibration offset, so the local usage snapshot must be
@@ -962,21 +1402,21 @@ async function onFormSave(payload: AccountInput | AccountFormPayload) {
       busy.value = false;
     }
   } else {
-    const input = {
-      ...(payload as AccountInput),
-      key: payload.key || "",
-    };
+    const input = accountCreateRequestInput(payload as AccountInput);
     busy.value = true;
     try {
-      const created = await runWithFreshSettingsRevision(() => dashboardApi.createAccount(input));
+      const created = await dashboardApi.createAccount(input);
       addAccount(created);
-      settingsRevision.value = created.revision ?? settingsRevision.value;
+      void providersStore.loadConnections().catch(() => undefined);
       message.success(t("账号已添加"));
       // Go uses official usage; GOAT and Ollama project locally priced OCG request logs.
       if (accountHasUsageDisplay(created) && accountIsReady(created)) {
         await loadAccountUsage(created.id);
       }
       showModal.value = false;
+      // Create payloads arrive from the Add Account chooser's embedded form;
+      // only a successful create closes it, so a failed save keeps the draft.
+      showAddModal.value = false;
     } catch (e) {
       if (await recoverAccountMutationConflict(e)) return;
       message.error(t("保存失败: {error}", { error: dashboardErrorDetail(e) }));
@@ -999,9 +1439,9 @@ async function updatePurchaseDate(accountId: string, purchaseDate: string): Prom
 
   purchaseDateSaving.value[accountId] = true;
   try {
-    const saved = await runWithFreshSettingsRevision(() => dashboardApi.updateAccount(accountId, {
+    const saved = await dashboardApi.updateAccount(accountId, {
       purchase_date: purchaseDate,
-    }));
+    });
     replaceAccount(saved);
     if (accountHasUsageDisplay(saved)) await loadAccountUsage(saved.id);
     message.success(t("购买日期已更新"));
@@ -1036,18 +1476,10 @@ async function saveCustomAccountEdit(
   try {
     await executeCustomAccountEdit(editing, payload, {
       account: async (update) => {
-        replaceAccount(await runWithFreshSettingsRevision(() => dashboardApi.updateAccount(editing.id, update)));
+        replaceAccount(await dashboardApi.updateAccount(editing.id, update));
       },
       customConfig: async (config) => {
-        replaceAccount(await runWithFreshSettingsRevision(() => dashboardApi.updateAccountCustomConfig(
-          editing.id,
-          config,
-        )));
-      },
-      capabilities: async (capabilities) => {
-        replaceAccount(await runWithFreshSettingsRevision(() => (
-          dashboardApi.updateAccountModelCapabilities(editing.id, capabilities)
-        )));
+        replaceAccount(await dashboardApi.updateAccountCustomConfig(editing.id, config));
       },
     });
 
@@ -1075,7 +1507,7 @@ async function toggleAccount(id: string) {
     return;
   }
   try {
-    const updated = await runWithFreshSettingsRevision(() => dashboardApi.toggleAccount(id));
+    const updated = await dashboardApi.toggleAccount(id);
     replaceAccount(updated);
   } catch (e) {
     if (await recoverAccountMutationConflict(e)) return;
@@ -1083,29 +1515,24 @@ async function toggleAccount(id: string) {
   }
 }
 
-async function runWithFreshSettingsRevision<T>(
-  mutation: () => Promise<T>,
-): Promise<T> {
-  return mutation();
-}
-
-async function reloadAfterControlPlaneConflict(): Promise<void> {
+async function reloadControlPlaneView(): Promise<boolean> {
   const knownIds = new Set(accounts.value.map(({ id }) => id));
-  const [settingsResult, accountsResult] = await Promise.allSettled([
-    dashboardApi.getSettings(),
-    accountsStore.loadPresented(),
-  ]);
-  settingsRevision.value = settingsResult.status === "fulfilled"
-    ? settingsResult.value.revision
-    : null;
-  if (accountsResult.status !== "fulfilled") return;
+  let loaded: Account[];
+  try {
+    loaded = await accountsStore.loadPresented();
+  } catch {
+    return false;
+  }
 
-  const loaded = accountsResult.value;
   const loadedIds = new Set(loaded.map(({ id }) => id));
   for (const id of knownIds) {
     if (!loadedIds.has(id)) removeAccountState(id);
   }
   accounts.value = loaded;
+  await Promise.allSettled([
+    loadIdentitiesOverlay(),
+    providersStore.loadConnections(),
+  ]);
   if (editingAccount.value) {
     const stillListed = reconcileEditingAccount(loaded, editingAccount.value.id);
     editingAccount.value = stillListed;
@@ -1117,6 +1544,21 @@ async function reloadAfterControlPlaneConflict(): Promise<void> {
     showManagedWizard.value = false;
     managedWizardAccountId.value = null;
   }
+  if (credentialModalAccountId.value && !loadedIds.has(credentialModalAccountId.value)) {
+    showCredentialModal.value = false;
+    credentialModalAccountId.value = null;
+    credentialModalExpectation.value = null;
+  }
+  if (createModalAccountId.value && !loadedIds.has(createModalAccountId.value)) {
+    showCreateModal.value = false;
+    createModalAccountId.value = null;
+    createModalExpectation.value = null;
+  }
+  return true;
+}
+
+async function reloadAfterControlPlaneConflict(): Promise<void> {
+  await reloadControlPlaneView();
 }
 
 async function recoverAccountMutationConflict(error: unknown): Promise<boolean> {
@@ -1143,10 +1585,9 @@ async function saveZenProviderSettings(
   if (providerSettingsSaving.value[account.id]) return;
   providerSettingsSaving.value[account.id] = true;
   try {
-    const result = await runWithFreshSettingsRevision(() => providerApi.updateProviderSettings(account.id, {
+    const result = await providerApi.updateProviderSettings(account.id, {
       enabled,
-    }));
-    settingsRevision.value = result.revision;
+    });
     replaceAccount(result.account);
     if (successMessage) message.success(successMessage);
   } catch (error) {
@@ -1160,13 +1601,10 @@ async function saveZenProviderSettings(
 
 async function deleteAccount(id: string) {
   try {
-    await runWithFreshSettingsRevision(() => dashboardApi.deleteAccount(id));
-    // DELETE returns the new revision in a response header; the shared JSON
-    // transport intentionally stays body-only, so reload it before the next
-    // mutation instead of guessing the counter.
-    settingsRevision.value = null;
+    await dashboardApi.deleteAccount(id);
     message.success(t("账号已删除"));
     removeAccountState(id);
+    void providersStore.loadConnections().catch(() => undefined);
   } catch (e) {
     if (await recoverAccountMutationConflict(e)) return;
     message.error(t("删除失败: {error}", { error: dashboardErrorDetail(e) }));
@@ -1175,9 +1613,7 @@ async function deleteAccount(id: string) {
 
 async function resetCooldown(id: string) {
   try {
-    const updated = await runWithFreshSettingsRevision(() => (
-      dashboardApi.resetAccountCooldown(id)
-    ));
+    const updated = await dashboardApi.resetAccountCooldown(id);
     replaceAccount(updated);
     message.success(t("已重置冷却"));
   } catch (e) {
@@ -1205,6 +1641,7 @@ function stopClock() {
 }
 
 onMounted(() => {
+  applyAccountAddDeepLink();
   void initializeAccounts();
 });
 // This view is kept alive by App.vue; coarse states (cooling tags, editor
@@ -1213,9 +1650,12 @@ onMounted(() => {
 onActivated(() => {
   startClock();
   now.value = Date.now();
+  applyAccountAddDeepLink();
   applyCachedAccountDeepLink();
-  if (activatedOnce) void initializeAccounts();
-  else activatedOnce = true;
+  if (activatedOnce) {
+    void initializeAccounts();
+    platformSectionRef.value?.reload();
+  } else activatedOnce = true;
 });
 onDeactivated(stopClock);
 onUnmounted(() => {
@@ -1239,15 +1679,14 @@ onUnmounted(() => {
 .accounts-toolbar {
   display: flex;
   flex-wrap: wrap;
-  align-items: flex-end;
-  justify-content: space-between;
+  align-items: center;
+  justify-content: flex-start;
   gap: 12px 16px;
   min-width: 0;
 }
 
 .accounts-actions {
   flex: 0 0 auto;
-  margin-left: auto;
 }
 
 .account-list {
@@ -1263,9 +1702,9 @@ onUnmounted(() => {
 .accounts-filter-bar {
   display: flex;
   flex-wrap: wrap;
-  align-items: flex-end;
+  align-items: center;
   gap: 12px;
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   min-width: 0;
 }
 

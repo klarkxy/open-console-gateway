@@ -7,9 +7,6 @@
 
 ## 已知缺口
 
-- 旧应用子系统已整套退役；教程生成、Desktop 连接器、Pi/DSH 模板、相关 API 与测试仍待代码清理。
-  后续新方案另行设计，见[退役说明](../user/applications.zh-CN.md)。
-
 - `auto_start` 受能力门控：Windows x64、macOS 和 Linux x64 的 release / 已安装 Tauri 进程注入登录自启同步钩子。开发构建、CLI、Docker 面板不暴露该开关。Dock 可见性仅 macOS Tauri。
 - 生成的 Tauri schema 文件会让 diff 变吵；只在 Tauri 配置确实改动时才需要修改它们。
 - 流式用量仅在上游发出 usage chunk 时精确；Chat 流式请求会设置 `stream_options.include_usage`。没有 chunk 时 Go 行记为 `success_no_usage`； Zen 无 usage 的成功仍为 `success` / `free`。
@@ -19,6 +16,8 @@
 - Claude Desktop 公布三个固定 Claude 别名，再映射到受支持的实际模型。
 - Command Code GOAT 没有可机读的官方用量端点。其公开模型目录不能验证已保存 Key，因此鉴权失败只能从真实推理 401/403 得知。Custom API 仍是独立的已上线路由，遵循受信管理员边界（`custom.rs` + `custom_http.rs`）。
 - 按模型/按协议覆盖已在 V3。Custom 账号级按协议探测暂无 V3 对应端点；历史 V2 账号侧探测路径已 410。Custom 验证与模型发现是现行路径。
+- V4 操作摘要密钥（`dashboard_operation_digest_key`）仍与账号 Key 同库存放（账号 Key 现为 AES-256-GCM `v2:` 密文，旧 XOR 行在打开修复前仍可读）。本机已认证 Key 存储并未把该摘要密钥迁出，它仍紧挨着 Key。
+- `accounts` 行仍持有冷却列与 Key 材料；身份模型在后续阶段的写入切换之前仍是附属表方案。
 
 ## 明确非目标
 

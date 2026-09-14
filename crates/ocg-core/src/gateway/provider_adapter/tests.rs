@@ -1,6 +1,7 @@
 use super::*;
 use crate::crypto::{KeyCipher, StaticKeyCipher};
 use crate::gateway::protocol::{CustomRouteSpec, opencode_supports_upstream};
+use crate::gateway::wire::WireNormalization;
 use crate::models::{Account, AccountSetupStep, AccountType, AppConfig};
 use crate::provider::{
     COMMAND_CODE_GOAT_BASE_URL, COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
@@ -89,6 +90,7 @@ fn chat_plan(
         service_tier: None,
         custom_tools: Vec::new(),
         namespace_tools: Vec::new(),
+        legacy_tool_compat: None,
         response_parallel_tool_calls: true,
         response_tool_choice: json!("auto"),
         response_tools: Vec::new(),
@@ -360,25 +362,6 @@ fn adapter_kind_dispatch_preserves_route_auth_and_model_decisions() {
 }
 
 #[test]
-fn resolve_uses_the_same_sealed_descriptors() {
-    let go = ProviderRegistry::get(OPENCODE_PROVIDER_ID).unwrap();
-    let zen = ProviderRegistry::get(OPENCODE_ZEN_FREE_PROVIDER_ID).unwrap();
-    let goat = ProviderRegistry::get(COMMAND_CODE_PROVIDER_ID).unwrap();
-    let custom = ProviderRegistry::get(CUSTOM_PROVIDER_ID).unwrap();
-    assert!(go.inference.production_inference);
-    assert_eq!(
-        zen.inference.channel,
-        Some(crate::provider::InferenceChannelKind::Free)
-    );
-    assert!(goat.inference.production_inference);
-    assert!(!goat.inference.loopback_test_seam_only);
-    assert_eq!(
-        custom.inference.auth,
-        InferenceAuthDescriptor::ProtocolDerivedBearerOrXApiKey
-    );
-}
-
-#[test]
 fn adapter_kind_match_is_exhaustive_and_consistent_with_descriptors() {
     for kind in ProviderAdapterKind::ALL {
         match kind {
@@ -401,10 +384,15 @@ fn adapter_kind_match_is_exhaustive_and_consistent_with_descriptors() {
                     InferenceAuthDescriptor::OpenCodeProtocolDefault
                 );
                 assert!(descriptor.inference.follow_redirects);
+                assert!(descriptor.inference.production_inference);
             }
             ProviderAdapterKind::ZenFree => {
                 assert_eq!(descriptor.inference.auth, InferenceAuthDescriptor::None);
                 assert!(descriptor.inference.follow_redirects);
+                assert_eq!(
+                    descriptor.inference.channel,
+                    Some(crate::provider::InferenceChannelKind::Free)
+                );
             }
             ProviderAdapterKind::CommandCodeGoat => {
                 assert_eq!(descriptor.inference.auth, InferenceAuthDescriptor::Bearer);
@@ -465,14 +453,43 @@ fn probe_route_allows_ceiling_without_static_support_production_requires_contrac
     .expect("the Dashboard catalog gate admits fetched models before route construction");
     assert_eq!(fetched_model_probe.path, "/v1/messages");
 
+    let now = Utc::now();
+    let scope = crate::provider_contracts::ContractScope::provider(OPENCODE_PROVIDER_ID);
+    let mut persisted = crate::provider_contracts::PersistedContracts::default();
+    persisted.scopes.insert(
+        scope.clone(),
+        crate::provider_contracts::PersistedScopeRow {
+            scope: scope.clone(),
+            catalog_models: vec!["grok-4.5".into()],
+            catalog_refreshed_at: Some(now),
+            catalog_source: "test".into(),
+            catalog_source_url: "https://example.test/models".into(),
+            revision: 1,
+            updated_at: now,
+        },
+    );
+    persisted.evidence.insert(
+        scope.clone(),
+        vec![crate::provider_contracts::PersistedModelProtocol {
+            scope: scope.clone(),
+            model_id: "grok-4.5".into(),
+            protocol: crate::provider::UpstreamProtocolKind::Responses,
+            source: crate::provider_contracts::ContractEvidenceSource::Static,
+            verified_at: None,
+            observed_at: None,
+            last_probe_result: None,
+            last_probe_at: None,
+            last_probe_error: None,
+        }],
+    );
     let static_contracts = crate::provider_contracts::build_effective_contracts(
         &crate::zen_models::ZenFreeModelCatalog::default(),
         &[],
-        crate::provider_contracts::PersistedContracts::default(),
+        persisted.clone(),
     );
     assert!(
         supports_production_plan(&go, &config, &chat_grok, &static_contracts, &[]).is_err(),
-        "static grok-4.5 Chat must stay unverified until a probe succeeds"
+        "official-docs grok-4.5 Chat must stay unverified until a probe succeeds"
     );
     assert!(
         supports_production_plan(
@@ -485,12 +502,8 @@ fn probe_route_allows_ceiling_without_static_support_production_requires_contrac
         .is_ok()
     );
 
-    let now = Utc::now();
-    let mut persisted = crate::provider_contracts::PersistedContracts::default();
-    let scope = crate::provider_contracts::ContractScope::provider(OPENCODE_PROVIDER_ID);
-    persisted.evidence.insert(
-        scope.clone(),
-        vec![crate::provider_contracts::PersistedModelProtocol {
+    persisted.evidence.get_mut(&scope).unwrap().push(
+        crate::provider_contracts::PersistedModelProtocol {
             scope,
             model_id: "grok-4.5".into(),
             protocol: crate::provider::UpstreamProtocolKind::ChatCompletions,
@@ -500,7 +513,7 @@ fn probe_route_allows_ceiling_without_static_support_production_requires_contrac
             last_probe_result: Some(crate::provider_contracts::ProbeResultKind::Success),
             last_probe_at: Some(now),
             last_probe_error: None,
-        }],
+        },
     );
     let probed = crate::provider_contracts::build_effective_contracts(
         &crate::zen_models::ZenFreeModelCatalog::default(),
@@ -643,58 +656,6 @@ fn minimax_kimi_ollama_do_not_inherit_opencode_responses_for_shared_model_names(
         );
     }
 
-    let minimax_chat = resolve_account_test_route_with_dynamics(
-        &minimax,
-        &config,
-        &chat_plan(
-            "MiniMax-M3",
-            UpstreamChannel::Go,
-            ApiFormat::ChatCompletions,
-            None,
-        ),
-        &[],
-    )
-    .unwrap();
-    assert_eq!(minimax_chat.base_url, MINIMAX_CN_BASE_URL);
-    assert_eq!(minimax_chat.path, MINIMAX_CN_CHAT_COMPLETIONS_PATH);
-    let minimax_messages = resolve_account_test_route_with_dynamics(
-        &minimax,
-        &config,
-        &chat_plan("MiniMax-M3", UpstreamChannel::Go, ApiFormat::Messages, None),
-        &[],
-    )
-    .unwrap();
-    assert_eq!(minimax_messages.base_url, MINIMAX_CN_ANTHROPIC_BASE_URL);
-    assert_eq!(minimax_messages.path, MINIMAX_CN_MESSAGES_PATH);
-
-    let kimi_chat = resolve_account_test_route_with_dynamics(
-        &kimi,
-        &config,
-        &chat_plan(
-            "kimi-for-coding",
-            UpstreamChannel::Go,
-            ApiFormat::ChatCompletions,
-            None,
-        ),
-        &[],
-    )
-    .unwrap();
-    assert_eq!(kimi_chat.base_url, KIMI_CN_BASE_URL);
-    assert_eq!(kimi_chat.path, KIMI_CN_CHAT_COMPLETIONS_PATH);
-    let kimi_messages = resolve_account_test_route_with_dynamics(
-        &kimi,
-        &config,
-        &chat_plan(
-            "kimi-for-coding",
-            UpstreamChannel::Go,
-            ApiFormat::Messages,
-            None,
-        ),
-        &[],
-    )
-    .unwrap();
-    assert_eq!(kimi_messages.path, KIMI_CN_MESSAGES_PATH);
-
     let ollama_chat = resolve_account_test_route_with_dynamics(
         &ollama,
         &config,
@@ -709,4 +670,159 @@ fn minimax_kimi_ollama_do_not_inherit_opencode_responses_for_shared_model_names(
     .unwrap();
     assert_eq!(ollama_chat.base_url, OLLAMA_CLOUD_BASE_URL);
     assert_eq!(ollama_chat.path, OLLAMA_CLOUD_CHAT_COMPLETIONS_PATH);
+}
+
+#[test]
+fn p06_ollama_cloud_attempt_normalizes_wire() {
+    let config = AppConfig::default();
+    let ollama = account(
+        "ollama-p06",
+        OLLAMA_PROVIDER_ID,
+        crate::provider::CredentialKind::ApiKey,
+        crate::provider::QuotaScope::Key,
+    );
+    let spec = resolve_account_test_route_with_dynamics(
+        &ollama,
+        &config,
+        &chat_plan(
+            "deepseek-v4-flash",
+            UpstreamChannel::Go,
+            ApiFormat::ChatCompletions,
+            None,
+        ),
+        &[],
+    )
+    .unwrap();
+    assert_eq!(spec.wire_normalization, WireNormalization::OllamaCloud);
+
+    let original = Bytes::from(
+        serde_json::to_vec(&json!({
+            "model": "deepseek-v4-flash",
+            "messages": [
+                {"role": "assistant", "content": "ok", "reasoning_content": "thought"}
+            ],
+            "max_tokens": 200_000
+        }))
+        .unwrap(),
+    );
+    let normalized = spec
+        .wire_normalization
+        .normalize_request_body(original.clone());
+    assert_ne!(normalized, original);
+    let value: serde_json::Value = serde_json::from_slice(&normalized).unwrap();
+    assert_eq!(value["messages"][0]["reasoning"], "thought");
+    assert_eq!(value["max_tokens"], 65535);
+}
+
+fn dynamic_runtime(
+    endpoint_url: &str,
+    override_url: Option<&str>,
+    auth_kind: ocg_domain::dynamic::DynamicAuthKind,
+) -> crate::dynamic::DynamicProviderRuntime {
+    crate::dynamic::DynamicProviderRuntime {
+        preset_id: None,
+        id: "11111111-1111-1111-1111-111111111111".into(),
+        name: "Lab".into(),
+        endpoint_url: endpoint_url.into(),
+        upstream_protocol: crate::provider::UpstreamProtocolKind::ChatCompletions,
+        auth_kind,
+        mappings: vec![ocg_domain::dynamic::DynamicModelMapping {
+            public_model: "lab".into(),
+            upstream_model: "vendor/lab".into(),
+            upstream_override: override_url.map(|url| {
+                ocg_domain::dynamic::DynamicModelUpstreamOverride {
+                    protocol: crate::provider::UpstreamProtocolKind::ChatCompletions,
+                    endpoint_url: url.into(),
+                }
+            }),
+        }],
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        origin: crate::provider::ProviderOrigin::Custom,
+        offering: "api".into(),
+    }
+}
+
+#[test]
+fn s01_dynamic_override_resolves_configured_route_without_granting_the_key() {
+    let config = AppConfig::default();
+    let runtime = dynamic_runtime(
+        "https://lab.example/v1",
+        Some("https://evil.example/v1"),
+        ocg_domain::dynamic::DynamicAuthKind::Bearer,
+    );
+    let account = account(
+        "dyn-1",
+        &runtime.id,
+        CredentialKind::ApiKey,
+        QuotaScope::Key,
+    );
+    let foreign = resolve_route_with_dynamics(
+        &account,
+        &config,
+        &chat_plan(
+            "vendor/lab",
+            UpstreamChannel::Go,
+            ApiFormat::ChatCompletions,
+            None,
+        ),
+        std::slice::from_ref(&runtime),
+    )
+    .expect("route resolve is not the stored-grant gate");
+    assert_eq!(foreign.base_url, "https://evil.example");
+    assert!(matches!(
+        foreign.credential,
+        crate::gateway::attempt::CredentialHandle::Account { .. }
+    ));
+
+    let same_origin = dynamic_runtime(
+        "https://lab.example/v1",
+        Some("https://lab.example/other/v1"),
+        ocg_domain::dynamic::DynamicAuthKind::Bearer,
+    );
+    let allowed = resolve_route_with_dynamics(
+        &account,
+        &config,
+        &chat_plan(
+            "vendor/lab",
+            UpstreamChannel::Go,
+            ApiFormat::ChatCompletions,
+            None,
+        ),
+        std::slice::from_ref(&same_origin),
+    )
+    .unwrap();
+    assert_eq!(allowed.base_url, "https://lab.example");
+    assert_eq!(allowed.path, "/other/v1/chat/completions");
+}
+
+#[test]
+fn s01_keyless_dynamic_override_may_use_another_origin() {
+    let config = AppConfig::default();
+    let runtime = dynamic_runtime(
+        "https://lab.example/v1",
+        Some("https://evil.example/v1"),
+        ocg_domain::dynamic::DynamicAuthKind::None,
+    );
+    let mut account = account(
+        "dyn-anon",
+        &runtime.id,
+        CredentialKind::None,
+        QuotaScope::Key,
+    );
+    account.key_cipher.clear();
+    let route = resolve_route_with_dynamics(
+        &account,
+        &config,
+        &chat_plan(
+            "vendor/lab",
+            UpstreamChannel::Go,
+            ApiFormat::ChatCompletions,
+            None,
+        ),
+        std::slice::from_ref(&runtime),
+    )
+    .unwrap();
+    assert_eq!(route.base_url, "https://evil.example");
+    assert_eq!(route.auth, UpstreamAuth::None);
 }

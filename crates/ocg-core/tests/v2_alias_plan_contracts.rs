@@ -11,7 +11,7 @@
 use reqwest::StatusCode;
 use serde_json::json;
 
-#[path = "fixtures/v2/harness.rs"]
+#[path = "fixtures/blackbox/harness.rs"]
 mod harness;
 
 use harness::*;
@@ -27,7 +27,7 @@ async fn reorder_account_first(harness: &BlackBoxHarness, account_id: &str) {
         .collect::<Vec<_>>();
     account_ids.sort_by_key(|id| if id == account_id { 0 } else { 1 });
     let (status, body) = harness
-        .put_json("/accounts/order", &json!({ "account_ids": account_ids }))
+        .put_json("/accounts/order", &json!({ "accountIds": account_ids }))
         .await;
     assert_eq!(status, StatusCode::OK, "account reorder failed: {body}");
 }
@@ -39,10 +39,10 @@ async fn unknown_offering_create_fails_closed() {
     let before = harness.accounts().await;
     let (status, body) = harness
         .create_account(json!({
-            "provider_id": "not-a-provider",
+            "providerId": "not-a-provider",
             "name": "should-not-exist",
             "key": GO_ACCOUNT_KEY,
-            "expected_revision": harness.settings_revision().await
+            "expectedRevision": harness.settings_revision().await
         }))
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
@@ -79,82 +79,57 @@ async fn unique_raw_upstream_id_pins_to_one_provider_and_skips_go() {
     let logs = harness.forward_logs().await;
     for item in logs["items"].as_array().unwrap_or(&Vec::new()) {
         assert_ne!(
-            item["provider_id"].as_str(),
+            item["providerId"].as_str(),
             Some(OPENCODE_PROVIDER_ID),
             "raw GOAT id was attributed to Go: {item}"
         );
         assert_ne!(
-            item["account_id"], go["id"],
+            item["accountId"], go["id"],
             "raw GOAT id was routed to the Go account: {item}"
         );
     }
     harness.shutdown();
 }
 
-/// A raw upstream ID mapped to more than one Plan is rejected as
-/// `ambiguous_model_id` and never reaches an upstream.
+/// An unmapped raw upstream ID fails closed and never reaches an upstream.
 ///
-/// Live catalog/registry currently has no overlapping raw IDs unless an
-/// eligible Custom capability collides with a distinct provider mapping.
 /// Structured `ambiguous_model_id` coverage lives in
 /// `v2_alias_runtime::ambiguous_model_id_is_structured_across_client_formats`.
 #[tokio::test]
-async fn ambiguous_raw_upstream_id_is_rejected() {
+async fn unmapped_raw_upstream_id_is_rejected() {
     let harness =
         BlackBoxHarness::start_with_chat_success(&[GO_ACCOUNT_KEY, CUSTOM_ACCOUNT_KEY]).await;
     let _go = harness.create_go_account("go-main", GO_ACCOUNT_KEY).await;
     let catalog = harness.catalog().await;
-    let overlaps = overlapping_raw_ids(&catalog);
     let custom =
         catalog_entry(&catalog, CUSTOM_PROVIDER_ID).expect("catalog must include custom/api");
     assert_eq!(
         custom["routable"], true,
-        "v2-contract: custom/api is catalog-routable: {custom}"
+        "custom/api is catalog-routable: {custom}"
     );
     assert_eq!(
-        custom["verification_runtime_availability"].as_str(),
+        custom["verificationRuntimeAvailability"].as_str(),
         Some("available"),
-        "v2-contract: custom/api verification runtime is available: {custom}"
+        "custom/api verification runtime is available: {custom}"
     );
 
-    if overlaps.is_empty() {
-        // Disabled pending Custom drafts do not publish overlapping raw IDs.
-        let (status, body) = harness.chat(CUSTOM_OVERLAP_RAW_ID).await;
-        assert_ne!(
-            status,
-            StatusCode::OK,
-            "unmapped raw id {CUSTOM_OVERLAP_RAW_ID} must fail closed rather than fall through to Go: {body}"
-        );
-        assert_ne!(
-            error_type(&body),
-            Some(AMBIGUOUS_ERROR_TYPE),
-            "live registry has no overlapping raw ids; {CUSTOM_OVERLAP_RAW_ID} is not an invented Custom ambiguous route: {body}"
-        );
-    } else {
-        for (raw, _) in overlaps {
-            let (status, body) = harness.chat(&raw).await;
-            assert_eq!(
-                status,
-                StatusCode::BAD_REQUEST,
-                "overlapping raw id {raw} must fail closed: {body}"
-            );
-            assert_eq!(
-                error_type(&body),
-                Some(AMBIGUOUS_ERROR_TYPE),
-                "overlapping raw id {raw} must return {AMBIGUOUS_ERROR_TYPE}: {body}"
-            );
-            assert!(
-                error_message(&body).to_ascii_lowercase().contains("alias"),
-                "ambiguous error should point the client at an alias: {body}"
-            );
-        }
-    }
+    let (status, body) = harness.chat(CUSTOM_OVERLAP_RAW_ID).await;
+    assert_ne!(
+        status,
+        StatusCode::OK,
+        "unmapped raw id {CUSTOM_OVERLAP_RAW_ID} must fail closed rather than fall through to Go: {body}"
+    );
+    assert_ne!(
+        error_type(&body),
+        Some(AMBIGUOUS_ERROR_TYPE),
+        "live registry has no overlapping raw ids; {CUSTOM_OVERLAP_RAW_ID} is not an invented Custom ambiguous route: {body}"
+    );
     assert!(
         harness
             .fake_call_keys()
             .into_iter()
             .all(|key| key != GO_ACCOUNT_KEY && key != CUSTOM_ACCOUNT_KEY),
-        "ambiguous or unmapped raw ids must not call any upstream: {:?}",
+        "unmapped raw ids must not call any upstream: {:?}",
         harness.fake_calls()
     );
     harness.shutdown();
@@ -165,13 +140,42 @@ async fn ambiguous_raw_upstream_id_is_rejected() {
 async fn zen_free_explicit_free_model_stays_anonymous() {
     let harness = BlackBoxHarness::start_with_chat_success(&[GO_ACCOUNT_KEY]).await;
     let _go = harness.create_go_account("go-main", GO_ACCOUNT_KEY).await;
+    harness
+        .state
+        .activate_zen_free_model_catalog(ocg_core::kernel::zen::ZenFreeModelCatalog {
+            models: vec![FREE_MODEL.to_string()],
+            refreshed_at: Some(chrono::Utc::now()),
+            source_url: ocg_core::kernel::zen::ZEN_MODELS_SOURCE_URL.to_string(),
+        })
+        .unwrap();
+    {
+        let now = chrono::Utc::now();
+        let scope = ocg_core::provider_contracts::ContractScope::provider(
+            ocg_core::provider::OPENCODE_ZEN_FREE_PROVIDER_ID,
+        );
+        harness
+            .state
+            .db
+            .lock()
+            .set_model_protocol_overrides(
+                &scope,
+                &[(
+                    FREE_MODEL.to_string(),
+                    ocg_core::provider::UpstreamProtocolKind::ChatCompletions,
+                    ocg_core::provider_contracts::ProtocolOverrideState::ForceOn,
+                )],
+                now,
+            )
+            .unwrap();
+        harness.state.reload_provider_contracts().unwrap();
+    }
     let revision = harness.settings_revision().await;
     let (status, body) = harness
         .patch_json(
             "/providers/zen-free",
             &json!({
                 "enabled": true,
-                "expected_revision": revision
+                "expectedRevision": revision
             }),
         )
         .await;
@@ -203,8 +207,8 @@ async fn go_import_remains_immediately_routable_without_verification() {
     let harness = BlackBoxHarness::start_with_chat_success(&[GO_ACCOUNT_KEY]).await;
     let account = harness.create_go_account("go-main", GO_ACCOUNT_KEY).await;
     assert_eq!(account["enabled"], true, "{account}");
-    assert_eq!(account["setup_step"], "ready", "{account}");
-    let status = account["verification_status"]
+    assert_eq!(account["setupStep"], "ready", "{account}");
+    let status = account["verificationStatus"]
         .as_str()
         .unwrap_or("not_required");
     assert_eq!(
@@ -225,37 +229,60 @@ async fn goat_creates_live_while_custom_creates_a_pending_draft() {
     let goat = catalog_entry(&catalog, COMMAND_CODE_PROVIDER_ID)
         .expect("catalog must include command-code/goat");
     assert_eq!(
-        goat["verification_policy"].as_str(),
+        goat["verificationPolicy"].as_str(),
         Some("not_required"),
         "Command Code's public catalog must not be presented as Key verification: {goat}"
     );
     assert_eq!(
-        goat["creation_availability"].as_str(),
+        goat["verificationRuntimeAvailability"].as_str(),
+        Some("not_applicable")
+    );
+    assert_eq!(
+        goat["creationAvailability"].as_str(),
         Some("available"),
         "GOAT accounts must be creatable: {goat}"
     );
     let (status, body) = harness
         .create_account(json!({
-            "provider_id": COMMAND_CODE_PROVIDER_ID,
+            "providerId": COMMAND_CODE_PROVIDER_ID,
             "name": "goat-live",
             "key": GOAT_ACCOUNT_KEY,
-            "expected_revision": harness.settings_revision().await
+            "expectedRevision": harness.settings_revision().await
         }))
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(
-        body["enabled"], true,
-        "GOAT must be immediately eligible when ready and keyed: {body}"
+        body["enabled"], false,
+        "new GOAT Key accounts stay disabled until the operator enables them: {body}"
     );
     assert_eq!(
-        body["verification_status"].as_str(),
+        body["verificationStatus"].as_str(),
         Some("not_required"),
         "GOAT directory refresh is not account verification: {body}"
     );
-    assert_eq!(
-        body["key"], "",
-        "account JSON must not return the Key: {body}"
+    assert!(
+        body.get("key").is_none(),
+        "account JSON must not return a Key field: {body}"
     );
+    let goat_id = body["id"].as_str().expect("account id").to_string();
+    let stored = harness.account_by_id(&goat_id).await;
+    assert_eq!(
+        stored["enabled"], false,
+        "GOAT create must not auto-enable: {stored}"
+    );
+    assert_eq!(
+        stored["verificationStatus"].as_str(),
+        Some("not_required"),
+        "GOAT account must not expose a pending Key-verification state: {stored}"
+    );
+    assert!(
+        stored["connectionVerifiedAt"].is_null()
+            || stored
+                .get("connectionVerifiedAt")
+                .is_none_or(|value| value.as_str().is_none_or(|stamp| stamp.is_empty())),
+        "connection_verified_at must remain unset: {stored}"
+    );
+    assert!(stored.get("key").is_none(), "{stored}");
 
     let (status, body) = harness
         .create_account(custom_create_payload(
@@ -268,33 +295,33 @@ async fn goat_creates_live_while_custom_creates_a_pending_draft() {
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(
-        body["enabled"], true,
-        "Custom creates enabled while verification stays pending: {body}"
+        body["enabled"], false,
+        "Custom creates disabled while verification stays pending: {body}"
     );
     assert_eq!(
-        body["verification_status"].as_str(),
+        body["verificationStatus"].as_str(),
         Some("pending"),
         "Custom draft verification_status: {body}"
     );
     assert_eq!(
-        body["plan_routable"], true,
+        body["planRoutable"], true,
         "Custom is catalog-routable: {body}"
     );
     assert_eq!(
-        body["custom_config"]["endpoint_url"]
+        body["customConfig"]["endpointUrl"]
             .as_str()
             .map(|value| value.trim_end_matches("/chat/completions")),
         Some(harness.upstream_base_url.trim_end_matches('/')),
         "Custom create must persist the complete custom_config.endpoint_url: {body}"
     );
-    let capabilities = body["model_capabilities"]
+    let capabilities = body["modelCapabilities"]
         .as_array()
         .cloned()
         .unwrap_or_default();
     assert!(
         capabilities.iter().any(|item| {
-            item["public_model"] == CUSTOM_UNROUTABLE_MODEL_ID
-                && item["upstream_model"] == CUSTOM_UNROUTABLE_MODEL_ID
+            item["publicModel"] == CUSTOM_UNROUTABLE_MODEL_ID
+                && item["upstreamModel"] == CUSTOM_UNROUTABLE_MODEL_ID
         }),
         "Custom create must persist model_capabilities: {body}"
     );
@@ -309,13 +336,16 @@ async fn disabled_goat_is_not_selected_for_alias_routing() {
     let go = harness.create_go_account("go-main", GO_ACCOUNT_KEY).await;
     let (status, goat) = harness
         .create_account(json!({
-            "provider_id": COMMAND_CODE_PROVIDER_ID,
+            "providerId": COMMAND_CODE_PROVIDER_ID,
             "name": "goat-disabled",
             "key": GOAT_ACCOUNT_KEY,
-            "expected_revision": harness.settings_revision().await
+            "expectedRevision": harness.settings_revision().await
         }))
         .await;
     assert_eq!(status, StatusCode::OK, "{goat}");
+    let goat_id = goat["id"].as_str().unwrap();
+    harness.enable_stored_account(goat_id);
+    let goat = harness.account_by_id(goat_id).await;
     assert_eq!(goat["enabled"], true, "{goat}");
     let (status, goat) = harness
         .patch_json(
@@ -324,6 +354,7 @@ async fn disabled_goat_is_not_selected_for_alias_routing() {
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{goat}");
+    let goat = mutation_account(goat);
     assert_eq!(goat["enabled"], false, "{goat}");
     reorder_account_first(&harness, go["id"].as_str().unwrap()).await;
 
@@ -335,56 +366,8 @@ async fn disabled_goat_is_not_selected_for_alias_routing() {
         .as_array()
         .and_then(|items| items.first())
         .unwrap_or_else(|| panic!("expected a forward log: {logs}"));
-    assert_eq!(item["account_id"], go["id"]);
-    assert_ne!(item["account_id"], goat["id"]);
-    harness.shutdown();
-}
-
-/// GOAT verification is not applicable because its public catalog is not a Key check.
-#[tokio::test]
-async fn goat_account_reports_verification_not_applicable() {
-    let harness = BlackBoxHarness::start().await;
-    let (status, account) = harness
-        .create_account(json!({
-            "provider_id": COMMAND_CODE_PROVIDER_ID,
-            "name": "goat-verify",
-            "key": GOAT_ACCOUNT_KEY,
-            "expected_revision": harness.settings_revision().await
-        }))
-        .await;
-    assert_eq!(status, StatusCode::OK, "{account}");
-    assert_eq!(account["enabled"], true, "{account}");
-    assert_eq!(
-        account["verification_status"].as_str(),
-        Some("not_required"),
-        "{account}"
-    );
-    let goat_id = account["id"].as_str().expect("account id").to_string();
-    let catalog = harness.catalog().await;
-    let goat = catalog_entry(&catalog, COMMAND_CODE_PROVIDER_ID).unwrap();
-    assert_eq!(
-        goat["verification_runtime_availability"].as_str(),
-        Some("not_applicable")
-    );
-
-    let stored = harness.account_by_id(&goat_id).await;
-    assert_eq!(
-        stored["enabled"], true,
-        "GOAT account enabled state must not be gated by directory refresh: {stored}"
-    );
-    assert_eq!(
-        stored["verification_status"].as_str(),
-        Some("not_required"),
-        "GOAT account must not expose a pending Key-verification state: {stored}"
-    );
-    assert!(
-        stored["connection_verified_at"].is_null()
-            || stored
-                .get("connection_verified_at")
-                .is_none_or(|value| value.as_str().is_none_or(|stamp| stamp.is_empty())),
-        "connection_verified_at must remain unset: {stored}"
-    );
-    assert_eq!(stored["key"], "", "{stored}");
+    assert_eq!(item["accountId"], go["id"]);
+    assert_ne!(item["accountId"], goat["id"]);
     harness.shutdown();
 }
 
@@ -393,8 +376,8 @@ async fn goat_account_reports_verification_not_applicable() {
 async fn account_secrets_absent_from_json_errors_and_logs() {
     let harness = BlackBoxHarness::start_with_chat_success(&[GO_ACCOUNT_KEY]).await;
     let account = harness.create_go_account("go-secret", GO_ACCOUNT_KEY).await;
-    assert_eq!(account["key"], "");
-    assert_eq!(account["password"], "");
+    assert!(account.get("key").is_none(), "{account}");
+    assert!(account.get("password").is_none(), "{account}");
     assert!(!json_contains_secret(&account, GO_ACCOUNT_KEY));
 
     let listed = harness.accounts().await;
@@ -426,7 +409,7 @@ async fn account_secrets_absent_from_json_errors_and_logs() {
 /// After the client has seen output, alias routing must not hop accounts.
 #[tokio::test]
 async fn alias_stream_does_not_cross_account_retry_after_output() {
-    let harness = start_v2_with_disconnect_upstream().await;
+    let harness = start_with_disconnect_upstream().await;
     let first = harness.create_go_account("go-one", GO_ACCOUNT_KEY).await;
     let _second = harness.create_go_account("go-two", GO_ACCOUNT_KEY_2).await;
     reorder_account_first(&harness, first["id"].as_str().unwrap()).await;
@@ -463,7 +446,7 @@ async fn alias_stream_does_not_cross_account_retry_after_output() {
     let items = logs["items"].as_array().cloned().unwrap_or_default();
     let account_ids: Vec<String> = items
         .iter()
-        .filter_map(|item| item["account_id"].as_str().map(str::to_string))
+        .filter_map(|item| item["accountId"].as_str().map(str::to_string))
         .collect();
     let unique: std::collections::HashSet<_> = account_ids.iter().cloned().collect();
     assert_eq!(

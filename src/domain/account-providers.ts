@@ -25,9 +25,9 @@ export type ProviderOffering = {
 /** Existing and migrated accounts default to OpenCode Go. */
 export const DEFAULT_PROVIDER_ID = "opencode";
 
-export const COMMAND_CODE_PROVIDER_ID = "command-code";
-export const MINIMAX_PROVIDER_ID = "minimax";
-export const KIMI_PROVIDER_ID = "kimi";
+const COMMAND_CODE_PROVIDER_ID = "command-code";
+const MINIMAX_PROVIDER_ID = "minimax";
+const KIMI_PROVIDER_ID = "kimi";
 export const OLLAMA_PROVIDER_ID = "ollama";
 
 /** Built-in singleton Zen Free account; created and owned by the backend. */
@@ -35,7 +35,7 @@ export const ZEN_FREE_ACCOUNT_ID = "00000000-0000-0000-0000-000000000002";
 export const ZEN_FREE_PROVIDER_ID = "opencode-zen-free";
 
 /** Static external-integration singleton; it is routable but not a Provider Plan. */
-export const CPA_ACCOUNT_ID = "00000000-0000-0000-0000-000000000003";
+const CPA_ACCOUNT_ID = "00000000-0000-0000-0000-000000000003";
 export const CPA_PROVIDER_ID = "cpa";
 
 const ALL_PROVIDER_OFFERINGS: readonly ProviderOffering[] = PLAN_DEFINITIONS.map((plan) => ({
@@ -76,13 +76,9 @@ export function isOfficialCnPlanAccount(
   return account.provider_id === MINIMAX_PROVIDER_ID || account.provider_id === KIMI_PROVIDER_ID;
 }
 
-/** Ollama Cloud accounts scrape usage with an account-level web Cookie. */
+/** Sealed Ollama Cloud Key accounts; billing is account-scoped, not Cookie scrape. */
 export function isOllamaCloudAccount(
   account: Pick<Account, "provider_id">,
 ): boolean {
   return account.provider_id === OLLAMA_PROVIDER_ID;
-}
-
-export function findProviderOffering(providerId: string): ProviderOffering | undefined {
-  return ALL_PROVIDER_OFFERINGS.find((offering) => offering.provider_id === providerId);
 }

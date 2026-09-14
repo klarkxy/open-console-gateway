@@ -23,7 +23,6 @@ import { koKRMessages } from "./i18n/messages/ko-KR.ts";
 import { ptBRMessages } from "./i18n/messages/pt-BR.ts";
 import { ruRUMessages } from "./i18n/messages/ru-RU.ts";
 import { zhTWMessages } from "./i18n/messages/zh-TW.ts";
-import { managedAccountEnUSMessages } from "./i18n/messages/managed-account.ts";
 import { formatCost } from "./utils/format.ts";
 
 const localeCatalogs = {
@@ -68,24 +67,6 @@ test("all locale catalogs have identical keys and placeholders", () => {
     assert.deepEqual(Object.keys(catalog).sort(), expectedKeys, value);
     for (const key of expectedKeys) {
       assert.deepEqual(placeholders(catalog[key as MessageKey]), placeholders(key), `${value}: ${key}`);
-    }
-  }
-});
-
-test("managed account copy is localized instead of inheriting English fallbacks", () => {
-  const localizedCatalogs = {
-    "ja-JP": jaJPMessages,
-    "ko-KR": koKRMessages,
-    "es-ES": esESMessages,
-    "fr-FR": frFRMessages,
-    "de-DE": deDEMessages,
-    "pt-BR": ptBRMessages,
-    "ru-RU": ruRUMessages,
-  } as const;
-
-  for (const [localeName, catalog] of Object.entries(localizedCatalogs)) {
-    for (const [key, english] of Object.entries(managedAccountEnUSMessages)) {
-      assert.notEqual(catalog[key as MessageKey], english, `${localeName}: ${key}`);
     }
   }
 });

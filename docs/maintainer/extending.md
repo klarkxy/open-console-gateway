@@ -3,7 +3,6 @@
 # Extending Open Console Gateway
 
 Provider adapters and external integrations are the current extension paths.
-The legacy application-connector path below is retired.
 
 ## 1. Provider or Plan: sealed and static
 
@@ -18,18 +17,33 @@ catalog, protocol, key, and failure contract.
    `ocg-gateway::alias`. The request path uses the saved contract.
 3. Implement `resolve_route` in `ocg-core` so it returns an `AttemptSpec`
    only. Adapters cannot own DB, `CoreState`, or a raw reqwest client.
-4. Fail closed until control-plane and routing semantics exist, then test the
+4. Register the sealed adapter in the schema v42 builtin seed so the unified
+   `providers` table exposes it as a `builtin` row in the V3 Provider
+   catalog. The row's `endpoint_url` / `upstream_protocol` / `auth_kind` /
+   `offering` / `endpoint_per_account` columns are display mirrors of the
+   sealed registry — traffic and routing still flow through the sealed
+   adapter code constants, never through the seeded row. Add the new id to
+   the `builtin_offering` map in `ocg-domain::provider` (`plan` for paid
+   families, `api` for free or account-owned surfaces). CPA is the static
+   external integration and is **not** seeded: do not add it here.
+5. Fail closed until control-plane and routing semantics exist, then test the
    domain, gateway, and core boundaries.
 
 The Provider registry remains static and sealed.
 Each static Provider owns its catalog, evidence, and override state under its
 single `provider_id` identity.
 
+A new **preset** (the user-defined Provider template list in
+`resources/provider-presets.json`) needs only the JSON entry plus, if the
+preset advertises a `plan` offering, an entry in the `PRESET_OFFERINGS` map
+in `ocg-domain::provider` so `preset_offering(preset_id)` returns `"plan"`.
+Other presets keep the default `"api"` value.
+
 ## 2. Legacy application connectors: retired
 
 The old Applications subsystem, guide generation, automatic connectors, and
-Pi/DSH templates are retired. Do not extend this implementation. Remaining code
-is pending cleanup; a replacement will be designed separately. See the
+Pi/DSH templates have been removed. Do not extend that implementation. A
+replacement will be designed separately. See the
 [retirement notice](../user/applications.md).
 
 ## 3. External integration: static local-service adapter
@@ -57,7 +71,14 @@ CPA is the current instance of this path. Reuse its existing helpers where they
 fit; justify a shared framework with concrete requirements from the integrations
 that will use it.
 
-## Dashboard V3 endpoint changes
+## Dashboard V3 and V4 endpoint changes
+
+New provider, connection, or credential semantics go to `dashboard_v4`
+(`types.rs` and its `CATALOG_TYPE_NAMES`; routes in `dashboard_v4/mod.rs`).
+Run `pnpm run contract:v4:check`. V3 accepts no new DTO fields or routes;
+bug fixes only.
+
+Frozen V3 contract maintenance:
 
 1. Add or extend DTOs in `dashboard_v3/types.rs` and append new names to
    `CATALOG_TYPE_NAMES`. Do not change existing `$defs` objects.

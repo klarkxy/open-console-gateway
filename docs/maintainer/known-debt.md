@@ -9,10 +9,6 @@ proposal or pull request, with corresponding code and documentation changes.
 
 ## Known Debt
 
-- The legacy Applications subsystem is retired. Its guide generation, Desktop
-  connectors, Pi/DSH templates, related APIs, and tests still need code cleanup.
-  A replacement will be designed separately; see the [retirement notice](../user/applications.md).
-
 - Auto-start is capability-gated: Windows x64, macOS, and Linux x64
   release/installed Tauri processes inject the login-start sync hook.
   Development builds, the CLI, and Docker dashboards do not expose the
@@ -41,6 +37,12 @@ proposal or pull request, with corresponding code and documentation changes.
   per-protocol probing has no V3 counterpart; the historical V2
   account-owned probe path is 410. Custom verify and model discovery are the
   live Custom operational paths.
+- The V4 operation digest key (`dashboard_operation_digest_key`) still lives
+  in the same SQLite file as the account Keys (AES-256-GCM `v2:` ciphertext,
+  with legacy XOR readable until open-time repair). Authenticated local Key
+  storage does not move this digest key; it remains beside Keys.
+- The `accounts` row still holds cooldown columns and Key material. The
+  identity model is satellite-based until the write switch in a later phase.
 
 ## Deliberate Non-Goals
 

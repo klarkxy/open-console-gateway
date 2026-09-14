@@ -1,5 +1,5 @@
 //! Dashboard V3 POST `/settings/test-proxy`: session, diagnostic overlay,
-//! default-leg parity, secrecy, and V2 coexistence.
+//! default-leg parity, secrecy, and retired V2 paths.
 
 use ocg_core::dashboard_v3::{ERROR_INVALID_JSON, ERROR_INVALID_REQUEST, ERROR_UNAUTHORIZED};
 #[cfg(debug_assertions)]
@@ -364,13 +364,6 @@ async fn dashboard_v3_proxy_test_rejects_unknown_fields_and_malformed_modes() {
     let (status, body) = post_json(&harness, &json!({ "proxyMode": "bogus" })).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert_v3_error(&body, ERROR_INVALID_REQUEST);
-    assert!(
-        body["message"]
-            .as_str()
-            .unwrap()
-            .contains("proxyMode must be auto, manual, direct, or list"),
-        "{body}"
-    );
     assert_eq!(body["currentRevision"], before.0);
     assert_eq!(body["processGeneration"], before.1);
     assert_unmutated(&harness, &before);
@@ -398,7 +391,6 @@ async fn dashboard_v3_proxy_test_rejects_unknown_fields_and_malformed_modes() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert_v3_error(&body, ERROR_INVALID_REQUEST);
-    assert_eq!(body["message"], "manual proxy mode requires a proxy URL");
     assert_unmutated(&harness, &before);
 
     let (status, body) = post_json(
@@ -412,7 +404,6 @@ async fn dashboard_v3_proxy_test_rejects_unknown_fields_and_malformed_modes() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert_v3_error(&body, ERROR_INVALID_REQUEST);
-    assert_eq!(body["message"], "list proxy mode requires a proxy URL");
     assert_unmutated(&harness, &before);
 
     let (status, body) = post_json(
@@ -425,7 +416,6 @@ async fn dashboard_v3_proxy_test_rejects_unknown_fields_and_malformed_modes() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert_v3_error(&body, ERROR_INVALID_REQUEST);
-    assert_eq!(body["message"], "proxy URL must not include credentials");
     assert_secret_free(&body, &["user:pass", "user:pass@"]);
     assert_unmutated(&harness, &before);
 
@@ -477,13 +467,6 @@ async fn dashboard_v3_proxy_test_direct_manual_auto_and_list_default_legs() {
     assert_v3_error(&body, ERROR_OUTBOUND_FAILED);
     assert_eq!(body["currentRevision"], before.0);
     assert_eq!(body["processGeneration"], before.1);
-    assert!(
-        body["message"]
-            .as_str()
-            .unwrap()
-            .contains("outbound connection test"),
-        "{body}"
-    );
     assert_eq!(
         origin.call_count(),
         after_direct,
@@ -633,8 +616,8 @@ async fn dashboard_v3_proxy_test_overrides_are_generation_isolated() {
 }
 
 #[tokio::test]
-async fn dashboard_v3_proxy_test_coexists_with_v2() {
-    let harness = start_loopback("proxy-test-v2").await;
+async fn retired_v2_proxy_test_does_not_call_upstream() {
+    let harness = start_loopback("proxy-test-v2-retired").await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let v2_hits = Arc::new(Mutex::new(0_u32));

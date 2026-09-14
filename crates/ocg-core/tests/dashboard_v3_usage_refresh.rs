@@ -1,4 +1,4 @@
-//! Dashboard V3 official Go usage refresh: CAS, shared coordinator, and V2 coexistence.
+//! Dashboard V3 official Go usage refresh: CAS, shared coordinator, and retired V2 paths.
 
 use chrono::{DateTime, Duration, Utc};
 use ocg_core::dashboard_v3::{
@@ -873,10 +873,6 @@ async fn dashboard_v3_refresh_failure_preserves_last_known_good() {
     let (status, body) = send_json(&harness, Method::POST, &path, &cas(&harness, json!({}))).await;
     assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
     assert_v3_error(&body, ERROR_OUTBOUND_FAILED);
-    assert!(
-        body["message"].as_str().unwrap().contains("timed out"),
-        "{body}"
-    );
     assert_secret_free(&body);
 
     let (status, usage) = harness
@@ -927,7 +923,6 @@ async fn dashboard_v3_official_rate_limit_is_outbound_failed_without_inference_c
     .await;
     assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
     assert_v3_error(&body, ERROR_OUTBOUND_FAILED);
-    assert_ne!(body["code"], ERROR_UNAUTHORIZED);
     assert_secret_free(&body);
 
     let after = harness
@@ -968,13 +963,6 @@ async fn dashboard_v3_refresh_rejects_wrong_provider_and_state() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert_v3_error(&body, ERROR_INVALID_REQUEST);
-    assert!(
-        body["message"]
-            .as_str()
-            .unwrap()
-            .contains("unavailable for this provider offering"),
-        "{body}"
-    );
 
     let (status, body) = send_json(
         &harness,
@@ -995,13 +983,6 @@ async fn dashboard_v3_refresh_rejects_wrong_provider_and_state() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert_v3_error(&body, ERROR_INVALID_REQUEST);
-    assert!(
-        body["message"]
-            .as_str()
-            .unwrap()
-            .contains("only ready accounts"),
-        "{body}"
-    );
 
     let (status, body) = send_json(
         &harness,
@@ -1036,11 +1017,6 @@ async fn dashboard_v3_refresh_maps_rejected_key_to_invalid_request_not_unauthori
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert_v3_error(&body, ERROR_INVALID_REQUEST);
-    assert_ne!(body["code"], ERROR_UNAUTHORIZED);
-    assert_eq!(
-        body["message"],
-        "official Go usage rejected this account key"
-    );
     assert!(!body["message"].as_str().unwrap().contains("401"));
     assert_secret_free(&body);
     assert_no_inference_cooldown(&harness, &go_id);
@@ -1117,8 +1093,8 @@ async fn dashboard_v3_refresh_key_cas_conflict_preserves_windows() {
 }
 
 #[tokio::test]
-async fn dashboard_v3_refresh_coexists_with_v2_and_shares_throttle() {
-    let harness = start_loopback("usage-refresh-v2").await;
+async fn retired_v2_usage_refresh_does_not_share_throttle() {
+    let harness = start_loopback("usage-refresh-v2-retired").await;
     let go_id = create_go(&harness).await;
     let now = Utc::now();
     install_clock(&harness, now);

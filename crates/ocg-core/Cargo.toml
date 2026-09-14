@@ -18,7 +18,7 @@ bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
 futures-util = "0.3"
 getrandom = "0.3"
-ocg-domain = { path = "../ocg-domain" }
+ocg-domain = { path = "../ocg-domain", features = ["schemars"] }
 ocg-gateway = { path = "../ocg-gateway" }
 ocg-infra = { path = "../ocg-infra" }
 parking_lot = "0.12"
@@ -31,6 +31,8 @@ rusqlite = { version = "0.33", features = ["bundled"] }
 schemars = { version = "1.2.2", features = ["chrono04"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+hex = "0.4"
+hmac = "0.12"
 sha1 = "0.10"
 sha2 = "0.10"
 tokio = { version = "1", features = ["full"] }

@@ -43,7 +43,9 @@ only for a strictly newer stable SemVer. Prerelease tags set
 
 Windows GUI smoke is `scripts/smoke-windows-release.ps1` (V3 CAS for
 auto-start and the in-place NSIS `/UPDATE` path). macOS checks universal
-`lipo` plus ad-hoc `codesign`. Linux launches the AppImage under Xvfb.
+`lipo` plus ad-hoc `codesign`, and re-runs Unix CPA process-ownership
+tests (`cpa_runtime::host`) that Linux already covered in quality.yml.
+Linux launches the AppImage under Xvfb.
 
 ## Updater signing
 

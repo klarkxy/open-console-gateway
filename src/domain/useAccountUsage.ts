@@ -22,7 +22,7 @@ import {
   windowResetsAt,
 } from "./accounts-usage.ts";
 import type { UsageEditState, UsageKey } from "./accounts-usage.ts";
-import { accountIsReady, isUsageRefreshBlocked } from "./account-display.ts";
+import { accountIsReady } from "./account-display.ts";
 import {
   isCommandCodeGoatAccount,
   isOfficialCnPlanAccount,
@@ -263,11 +263,7 @@ export function useAccountUsage(accounts: Ref<Account[]>, now: Ref<number>) {
   async function refreshAccountUsage(accountId: string): Promise<void> {
     const account = accounts.value.find((item) => item.id === accountId);
     if (!account) return;
-    if (
-      usageRefreshLoading.value[accountId]
-      || usageLoading.value[accountId]
-      || (!isOfficialCnPlanAccount(account) && isUsageRefreshBlocked(account))
-    ) {
+    if (usageRefreshLoading.value[accountId] || usageLoading.value[accountId]) {
       return;
     }
     usageRefreshLoading.value = { ...usageRefreshLoading.value, [accountId]: true };

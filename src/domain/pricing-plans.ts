@@ -57,7 +57,7 @@ export interface PlanPricingDisplay {
  */
 export type ProviderSnapshots = Partial<Record<PlanId, ProviderPricingResponse>>;
 
-export const PRICING_PLAN_IDS = [
+const PRICING_PLAN_IDS = [
   "opencode-go",
   "command-code-goat",
   "ollama-cloud",

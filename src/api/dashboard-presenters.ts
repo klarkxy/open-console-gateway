@@ -238,12 +238,6 @@ export interface UpdateStatus {
   install_supported: boolean;
 }
 
-export interface ClaudeDesktopModels {
-  sonnet: string;
-  opus: string;
-  haiku: string;
-}
-
 export interface GatewayLog {
   id: number;
   level: string;

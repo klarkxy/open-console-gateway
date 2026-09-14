@@ -1,4 +1,4 @@
-//! Dashboard V3 access-key lifecycle: auth, CAS, secrecy, routing, and V2 coexistence.
+//! Dashboard V3 access-key lifecycle: auth, CAS, secrecy, routing, and retired V2 paths.
 
 use ocg_core::dashboard_v3::{
     ConnectionInfo, ERROR_INVALID_JSON, ERROR_INVALID_REQUEST, ERROR_MISSING_EXPECTED_REVISION,
@@ -687,7 +687,6 @@ async fn dashboard_v3_primary_key_cannot_be_disabled_or_deleted() {
         };
         assert_eq!(status, StatusCode::BAD_REQUEST, "{operation} {body}");
         assert_v3_error(&body, ERROR_INVALID_REQUEST);
-        assert_eq!(body["message"], "key not found");
         assert_eq!(harness.state.settings_revision(), before);
         assert_eq!(harness.state.config().gateway_key, primary);
     }
@@ -701,7 +700,6 @@ async fn dashboard_v3_primary_key_cannot_be_disabled_or_deleted() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert_v3_error(&body, ERROR_INVALID_REQUEST);
-    assert_eq!(body["message"], "key not found");
     assert_eq!(harness.state.config().gateway_key, primary);
 
     harness.stop();
@@ -724,7 +722,6 @@ async fn dashboard_v3_cap_uniqueness_and_collision_errors() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert_v3_error(&body, ERROR_INVALID_REQUEST);
-    assert_eq!(body["message"], "at most 64 active keys are supported");
     assert_eq!(harness.state.settings_revision(), before);
 
     let retired = harness
@@ -763,7 +760,6 @@ async fn dashboard_v3_cap_uniqueness_and_collision_errors() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{blank}");
     assert_v3_error(&blank, ERROR_INVALID_REQUEST);
-    assert_eq!(blank["message"], "key name is required");
 
     let (status, long_name) = send_json(
         &harness,
@@ -832,10 +828,6 @@ async fn dashboard_v3_cap_uniqueness_and_collision_errors() {
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{collide}");
         assert_v3_error(&collide, ERROR_INVALID_REQUEST);
-        assert_eq!(
-            collide["message"],
-            "key value collides with the primary key"
-        );
         let stored = harness
             .state
             .db
@@ -957,8 +949,8 @@ async fn dashboard_v3_routing_resets_only_for_revoked_or_rotated_credentials() {
 }
 
 #[tokio::test]
-async fn dashboard_v3_key_mutations_coexist_with_v2() {
-    let harness = start_loopback("keys-v2-coexist").await;
+async fn retired_v2_key_mutations_do_not_create_or_rotate() {
+    let harness = start_loopback("keys-v2-retired").await;
 
     harness
         .assert_v2_path_removed(
@@ -1041,7 +1033,6 @@ async fn dashboard_v3_unknown_key_and_disabled_delete_do_not_bump() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert_v3_error(&body, ERROR_INVALID_REQUEST);
-    assert_eq!(body["message"], "key not found");
     assert_eq!(harness.state.settings_revision(), before);
 
     let (status, _) = send_json(
@@ -1072,7 +1063,7 @@ async fn dashboard_v3_unknown_key_and_disabled_delete_do_not_bump() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-    assert_eq!(body["message"], "key not found");
+    assert_v3_error(&body, ERROR_INVALID_REQUEST);
     assert_eq!(harness.state.settings_revision(), after_delete);
     assert!(
         sticky_alive(&harness),

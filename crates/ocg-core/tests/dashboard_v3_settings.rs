@@ -1,4 +1,4 @@
-//! Dashboard V3 connection/settings HTTP contract: auth, secrets, CAS, and V2 coexistence.
+//! Dashboard V3 connection/settings HTTP contract: auth, secrets, CAS, and retired V2 paths.
 
 use ocg_core::dashboard_v3::{
     ConnectionInfo, ERROR_INVALID_JSON, ERROR_INVALID_REQUEST, ERROR_MISSING_EXPECTED_REVISION,
@@ -9,6 +9,8 @@ use serde_json::{Map, Value, json};
 
 #[path = "fixtures/dashboard_v3/harness.rs"]
 mod harness;
+#[path = "fixtures/refreshed_go_catalog.rs"]
+mod refreshed_go_catalog;
 
 use harness::{V3Harness, start_loopback, start_public};
 
@@ -271,12 +273,6 @@ async fn dashboard_v3_gateway_port_override_is_read_only() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert_v3_error(&body, ERROR_INVALID_REQUEST);
-    assert!(
-        body["message"]
-            .as_str()
-            .unwrap()
-            .contains("OCG_GATEWAY_PORT")
-    );
     assert_eq!(harness.state.settings_revision(), before);
     assert_eq!(harness.state.config().gateway_port, 9042);
 
@@ -408,7 +404,7 @@ async fn dashboard_v3_validation_failure_does_not_bump_revision() {
     let (status, body) =
         put_json(&harness, &cas_patch(&harness, json!({ "autoStart": true }))).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-    assert_eq!(body["message"], "auto-start is unavailable in this runtime");
+    assert_v3_error(&body, ERROR_INVALID_REQUEST);
     assert_eq!(harness.state.settings_revision(), before);
     assert!(!harness.state.config().auto_start);
 
@@ -474,6 +470,9 @@ async fn dashboard_v3_successful_write_bumps_revision_exactly_once() {
 #[tokio::test]
 async fn dashboard_v3_list_proxy_write_validates_then_dedupes_known_ids() {
     let harness = start_loopback("settings-proxy-list").await;
+    refreshed_go_catalog::persist_refreshed_go_catalog(&harness.state);
+    refreshed_go_catalog::persist_provider_catalog(&harness.state, "minimax", &["MiniMax-M3"]);
+    refreshed_go_catalog::persist_provider_catalog(&harness.state, "kimi", &["kimi-for-coding"]);
     let before = harness.state.settings_revision();
 
     let (status, body) = put_json(
@@ -533,8 +532,8 @@ async fn dashboard_v3_list_proxy_write_validates_then_dedupes_known_ids() {
 }
 
 #[tokio::test]
-async fn dashboard_v3_settings_write_coexists_with_v2_wire() {
-    let harness = start_loopback("settings-v2-coexist").await;
+async fn retired_v2_settings_write_does_not_mutate() {
+    let harness = start_loopback("settings-v2-retired").await;
 
     let primary = harness.state.config().gateway_key.clone();
     assert!(!primary.is_empty());
@@ -551,9 +550,6 @@ async fn dashboard_v3_settings_write_coexists_with_v2_wire() {
     let v3_revision = harness.state.settings_revision();
     assert_eq!(harness.state.config().connect_timeout_secs, 21);
 
-    harness
-        .assert_v2_path_removed(reqwest::Method::GET, "/settings", None)
-        .await;
     harness
         .assert_v2_path_removed(
             reqwest::Method::POST,

@@ -21,10 +21,7 @@ import type {
   AccountModelCapabilitiesUpdate,
   AccountSetupStep,
   AccountUsageUpdate,
-  ApplicationConnectorCommitRequest,
-  ApplicationConnectorPreviewRequest,
   AuthStatus,
-  ClaudeDesktopModelsUpdate,
   ForwardLogQuery as V3ForwardLogQuery,
   KeyUpdate,
   MutationExpectation,
@@ -139,13 +136,6 @@ export const dashboardApi = {
     dashboardV3.logoutAdmin(expectation),
 
   getConnection: async (): Promise<ConnectionInfo> => presentConnection(await dashboardV3.getConnection()),
-  getApplicationConnectors: () => dashboardV3.getApplicationConnectors(),
-  previewApplicationConnector: (id: string, input: ApplicationConnectorPreviewRequest) =>
-    dashboardV3.previewApplicationConnector(id, input),
-  commitApplicationConnector: (
-    id: string,
-    input: WithoutExpectation<ApplicationConnectorCommitRequest>,
-  ) => withCas((expectation) => dashboardV3.commitApplicationConnector(id, input, expectation)),
   createKey: async (name: string, expectation: MutationExpectation): Promise<void> => {
     await dashboardV3.createKey(name, expectation);
   },
@@ -212,9 +202,6 @@ export const dashboardApi = {
 
   verifyManagedAccountKey: (id: string, key: string): Promise<Account> =>
     mutatedAccount(withCas((expectation) => dashboardV3.verifyManagedAccountKey(id, key, expectation))),
-
-  verifyAccountConnection: (id: string): Promise<Account> =>
-    mutatedAccount(withCas((expectation) => dashboardV3.verifyAccount(id, expectation))),
 
   testAccountModel: (id: string, modelId: string): Promise<AccountModelTestResponse> =>
     dashboardV3.testAccountModel(id, modelId),
@@ -324,27 +311,19 @@ export const dashboardApi = {
   updatePricingMultipliers: async (expectedPricingRevision: string, multipliers: PricingMultiplierUpdate[]) => {
     const controlPlane = useControlPlaneStore();
     if (!controlPlane.hasTokens()) await controlPlane.refresh();
-    return presentPricing(await controlPlane.runMutation((expectation) => dashboardV3.putPricingMultipliers({
-      expectedPricingRevision,
-      multipliers: multipliers.map((multiplier) => ({
-        modelId: multiplier.model_id,
-        multiplier: multiplier.multiplier,
-      })),
-    }, expectation)));
-  },
-
-  getApplicationModels: async () => (await dashboardV3.getApplicationModels()).models,
-  getClaudeDesktopModels: async () => {
-    const value = await dashboardV3.getClaudeDesktopModels();
-    return { sonnet: value.sonnet, opus: value.opus, haiku: value.haiku };
-  },
-  updateClaudeDesktopModels: async (models: { sonnet: string; opus: string; haiku: string }) => {
-    const result = await withCas((expectation) => dashboardV3.putClaudeDesktopModels({
-      sonnet: models.sonnet,
-      opus: models.opus,
-      haiku: models.haiku,
-    } satisfies WithoutExpectation<ClaudeDesktopModelsUpdate>, expectation));
-    return { sonnet: result.sonnet, opus: result.opus, haiku: result.haiku };
+    const result = await controlPlane.runMutation((expectation) => dashboardV3.putProviderPricingMultipliers(
+      "opencode",
+      {
+        expectedPricingRevision,
+        multipliers: multipliers.map((multiplier) => ({
+          modelId: multiplier.model_id,
+          multiplier: multiplier.multiplier,
+        })),
+      },
+      expectation,
+    ));
+    if (!result.snapshot) throw new Error("OpenCode Go pricing snapshot is not available");
+    return presentPricing(result.snapshot);
   },
 
   checkForUpdate: async () => presentUpdateCheck(await dashboardV3.checkForUpdate()),

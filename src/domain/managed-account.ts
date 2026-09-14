@@ -1,4 +1,4 @@
-import type { AccountSetupStep, BrowserTarget } from "../api/dashboard";
+import type { AccountSetupStep } from "../api/dashboard";
 
 export const DEFAULT_OPENCODE_INVITE_URL =
   "https://opencode.ai/go?ref=68XPB6NP8V";
@@ -13,20 +13,6 @@ export const MANAGED_SETUP_STEPS: readonly AccountSetupStep[] = [
 
 export function setupStepIndex(step: AccountSetupStep): number {
   return MANAGED_SETUP_STEPS.indexOf(step);
-}
-
-export function nextSetupStep(step: AccountSetupStep): AccountSetupStep | null {
-  const index = setupStepIndex(step);
-  return index >= 0 && index < MANAGED_SETUP_STEPS.length - 1
-    ? MANAGED_SETUP_STEPS[index + 1]
-    : null;
-}
-
-export function setupBrowserTarget(step: AccountSetupStep): BrowserTarget | null {
-  if (step === "google_account") return "google_signup";
-  if (step === "opencode_registration") return "invite";
-  if (step === "payment" || step === "key_verification" || step === "ready") return "console";
-  return null;
 }
 
 export function normalizeOpenCodeInviteUrl(value: string): string {

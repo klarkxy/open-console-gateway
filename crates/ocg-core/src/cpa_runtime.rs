@@ -1854,6 +1854,18 @@ impl CoreStateInner {
             created_at: existing.as_ref().map_or(now, |item| item.created_at),
             updated_at: now,
         };
+        let previous = self
+            .db
+            .lock()
+            .cpa_model_catalog()
+            .map_err(|error| CpaRuntimeError::Failed(error.to_string()))?;
+        let models = CpaCatalogModel::merge_refresh(
+            models,
+            previous
+                .as_ref()
+                .map(|item| item.models.as_slice())
+                .unwrap_or(&[]),
+        );
         self.db
             .lock()
             .upsert_cpa_integration(&account, &base_url, &management_key_cipher)

@@ -13,7 +13,7 @@ import { isDynamicCatalogEntry } from "./dynamic-provider.ts";
  * the stable ordering, family ids, and fallback metadata.
  *
  * Availability is never hardcoded: creation/routing/pricing semantics are
- * resolved from `/dashboard/api/providers/catalog`. Legacy families
+ * resolved from `/dashboard/api/v3/providers`. Legacy families
  * (OpenCode Go, Zen Free) keep pre-catalog fallback behavior when the catalog
  * is unreachable; every other family fails closed in that case.
  */

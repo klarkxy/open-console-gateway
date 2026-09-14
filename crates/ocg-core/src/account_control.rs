@@ -8,7 +8,8 @@
 
 use crate::browser::{BrowserProfileOperationKind, StagedBrowserProfiles};
 use crate::models::{
-    Account, AccountSetupStep, AccountType, AccountUpdate, normalize_account_notes,
+    Account, AccountSetupStep, AccountType, AccountUpdate, NEW_READY_KEY_ACCOUNT_ENABLED,
+    normalize_account_notes,
 };
 use crate::provider::{
     CPA_ACCOUNT_ID, ConnectionVerificationStatus, OPENCODE_PROVIDER_ID, VerificationPolicy,
@@ -208,7 +209,7 @@ fn create_go_api_key_locked(
         key_cipher: host
             .encrypt_key(key.trim())
             .map_err(AccountControlError::Internal)?,
-        enabled: true,
+        enabled: NEW_READY_KEY_ACCOUNT_ENABLED,
         account_type: AccountType::Key,
         setup_step: AccountSetupStep::Ready,
         referral_code: None,
@@ -547,18 +548,17 @@ mod tests {
             Some("  secret  ".into()),
         )
         .unwrap();
-        assert!(created.enabled);
-        assert_eq!(created.provider_id, OPENCODE_PROVIDER_ID);
+        assert!(!created.enabled);
         assert_eq!(created.provider_id, OPENCODE_PROVIDER_ID);
         assert_eq!(created.username.as_deref(), Some("alice"));
         assert_eq!(state.settings_revision(), before + 1);
 
-        let disabled = set_account_enabled(&state, &created.id, false).unwrap();
-        assert!(!disabled.enabled);
-        assert_eq!(state.settings_revision(), before + 2);
-
         let enabled = set_account_enabled(&state, &created.id, true).unwrap();
         assert!(enabled.enabled);
+        assert_eq!(state.settings_revision(), before + 2);
+
+        let disabled = set_account_enabled(&state, &created.id, false).unwrap();
+        assert!(!disabled.enabled);
         assert_eq!(state.settings_revision(), before + 3);
 
         // Custom verification is an optional tool: a pending Custom account
@@ -601,17 +601,21 @@ mod tests {
         let now = Utc::now();
         let provider_id = uuid::Uuid::new_v4().to_string();
         let runtime = crate::dynamic::DynamicProviderRuntime {
+            preset_id: None,
             id: provider_id.clone(),
             name: "Lab".into(),
             endpoint_url: "http://127.0.0.1:9".into(),
             upstream_protocol: crate::provider::UpstreamProtocolKind::ChatCompletions,
             auth_kind: ocg_domain::dynamic::DynamicAuthKind::None,
             mappings: vec![ocg_domain::dynamic::DynamicModelMapping {
+                upstream_override: None,
                 public_model: "lab-opus".into(),
                 upstream_model: "vendor/opus".into(),
             }],
             created_at: now,
             updated_at: now,
+            origin: ocg_domain::provider::ProviderOrigin::Custom,
+            offering: "api".to_string(),
         };
         let mut account = custom_pending(&state, "dyn-none");
         account.provider_id = provider_id.clone();

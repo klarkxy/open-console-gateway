@@ -9,6 +9,10 @@ import { OPENCODE_GO_PLAN, type PlanDefinition } from "./plans.ts";
 function goCatalog(form_fields: ProviderCatalogEntry["form_fields"]): ProviderCatalogEntry {
   return {
     provider_id: "opencode",
+    origin: "builtin",
+    editable: false,
+    deletable: false,
+    offering: "plan",
     display_name: "OpenCode Go",
     display_family: "OpenCode",
     credential_kind: "api_key",
@@ -63,4 +67,28 @@ test("dynamic Provider account fields are name/Key/notes and never Endpoint or m
   assert.deepEqual(fields.map((field) => field.id), ["name", "key", "notes"]);
   const nonePlan = { ...plan, credential_kind: "none" as const };
   assert.deepEqual(resolveAccountFormFields(nonePlan, undefined).map((field) => field.id), ["name", "notes"]);
+});
+
+test("dynamic Provider fields drop catalog-declared lifecycle dates", () => {
+  const plan: PlanDefinition = {
+    ...OPENCODE_GO_PLAN,
+    id: "dynamic-http",
+    provider_id: "11111111-1111-4111-8111-111111111111",
+    legacy: false,
+  };
+  const entry: ProviderCatalogEntry = {
+    ...goCatalog([
+      { id: "name", kind: "text", required: true, immutable_after_create: false },
+      { id: "key", kind: "secret", required: true, immutable_after_create: false },
+      { id: "purchase_date", kind: "date", required: false, immutable_after_create: false },
+    ]),
+    provider_id: plan.provider_id,
+    model_source: "dynamic_provider",
+  };
+  // User-defined Providers model no billing cadence; a stale catalog row
+  // cannot resurrect the purchase-date field.
+  assert.deepEqual(
+    resolveAccountFormFields(plan, entry).map((field) => field.id),
+    ["name", "key"],
+  );
 });

@@ -34,8 +34,9 @@ impl ApiFormat {
 /// Hardcoded OpenCode-Go protocol profiles.
 ///
 /// `preferred` matches the official Go docs endpoint table. `supported` is the
-/// set of upstream protocols verified with a test account; update only after a
-/// fresh probe. Request paths never trial protocols (double-billing risk).
+/// set of upstream protocols verified with a test account, including extra
+/// 2026-08-27 `live_supported` paths; update only after a fresh probe.
+/// Request paths never trial protocols (double-billing risk).
 ///
 /// Public only as the cross-crate bridge; `ocg_core::kernel::protocol` keeps
 /// this type and its fields crate-private.
@@ -67,6 +68,14 @@ pub const OFFICIAL_PROTOCOL_BASELINE_DATE: &str = "2026-09-06";
 const CHAT_ONLY: &[ApiFormat] = &[ApiFormat::ChatCompletions];
 const RESPONSES_ONLY: &[ApiFormat] = &[ApiFormat::Responses];
 const MESSAGES_ONLY: &[ApiFormat] = &[ApiFormat::Messages];
+/// 2026-08-27 Go probe: both Chat and Messages returned live_supported.
+const CHAT_AND_MESSAGES: &[ApiFormat] = &[ApiFormat::ChatCompletions, ApiFormat::Messages];
+/// 2026-08-27 Go probe: Chat, Responses, and Messages all returned live_supported.
+const CHAT_RESPONSES_MESSAGES: &[ApiFormat] = &[
+    ApiFormat::ChatCompletions,
+    ApiFormat::Responses,
+    ApiFormat::Messages,
+];
 
 const MODEL_PROTOCOLS: &[ModelProtocol] = &[
     ModelProtocol {
@@ -144,7 +153,7 @@ const MODEL_PROTOCOLS: &[ModelProtocol] = &[
     ModelProtocol {
         id: "kimi-k3",
         preferred: ApiFormat::ChatCompletions,
-        supported: CHAT_ONLY,
+        supported: CHAT_AND_MESSAGES,
         effort_aliases: NO_EFFORT_ALIASES,
     },
     ModelProtocol {
@@ -168,19 +177,19 @@ const MODEL_PROTOCOLS: &[ModelProtocol] = &[
     ModelProtocol {
         id: "deepseek-v4-pro",
         preferred: ApiFormat::ChatCompletions,
-        supported: CHAT_ONLY,
+        supported: CHAT_RESPONSES_MESSAGES,
         effort_aliases: NO_EFFORT_ALIASES,
     },
     ModelProtocol {
         id: "deepseek-v4-flash",
         preferred: ApiFormat::ChatCompletions,
-        supported: CHAT_ONLY,
+        supported: CHAT_RESPONSES_MESSAGES,
         effort_aliases: NO_EFFORT_ALIASES,
     },
     ModelProtocol {
         id: "deepseek-v4-flash-vision-exp",
         preferred: ApiFormat::ChatCompletions,
-        supported: CHAT_ONLY,
+        supported: CHAT_RESPONSES_MESSAGES,
         effort_aliases: NO_EFFORT_ALIASES,
     },
     ModelProtocol {
@@ -210,7 +219,7 @@ const MODEL_PROTOCOLS: &[ModelProtocol] = &[
     ModelProtocol {
         id: "minimax-m3",
         preferred: ApiFormat::Messages,
-        supported: MESSAGES_ONLY,
+        supported: CHAT_AND_MESSAGES,
         effort_aliases: NO_EFFORT_ALIASES,
     },
     ModelProtocol {
@@ -228,7 +237,7 @@ const MODEL_PROTOCOLS: &[ModelProtocol] = &[
     ModelProtocol {
         id: "minimax-m2.5",
         preferred: ApiFormat::Messages,
-        supported: MESSAGES_ONLY,
+        supported: CHAT_AND_MESSAGES,
         effort_aliases: NO_EFFORT_ALIASES,
     },
     ModelProtocol {
@@ -240,7 +249,7 @@ const MODEL_PROTOCOLS: &[ModelProtocol] = &[
     ModelProtocol {
         id: "qwen3.8-max",
         preferred: ApiFormat::Messages,
-        supported: MESSAGES_ONLY,
+        supported: CHAT_AND_MESSAGES,
         effort_aliases: NO_EFFORT_ALIASES,
     },
     ModelProtocol {
@@ -252,25 +261,25 @@ const MODEL_PROTOCOLS: &[ModelProtocol] = &[
     ModelProtocol {
         id: "qwen3.7-max",
         preferred: ApiFormat::Messages,
-        supported: MESSAGES_ONLY,
+        supported: CHAT_AND_MESSAGES,
         effort_aliases: NO_EFFORT_ALIASES,
     },
     ModelProtocol {
         id: "qwen3.7-plus",
         preferred: ApiFormat::Messages,
-        supported: MESSAGES_ONLY,
+        supported: CHAT_AND_MESSAGES,
         effort_aliases: NO_EFFORT_ALIASES,
     },
     ModelProtocol {
         id: "qwen3.6-plus",
         preferred: ApiFormat::Messages,
-        supported: MESSAGES_ONLY,
+        supported: CHAT_AND_MESSAGES,
         effort_aliases: NO_EFFORT_ALIASES,
     },
     ModelProtocol {
         id: "qwen3.5-plus",
         preferred: ApiFormat::Messages,
-        supported: MESSAGES_ONLY,
+        supported: CHAT_AND_MESSAGES,
         effort_aliases: NO_EFFORT_ALIASES,
     },
     ModelProtocol {
@@ -524,8 +533,8 @@ pub fn supported_model_protocols() -> impl Iterator<Item = (&'static str, ApiFor
 }
 
 /// Returns the canonical model ID, official preferred protocol, and the
-/// checked-in official default protocols. Additional compatibility belongs to
-/// persisted explicit-probe evidence, not this table.
+/// checked-in verified protocols (official preferred plus 2026-08-27
+/// live_supported extra paths). Later probe observations persist separately.
 pub fn supported_model_protocol_profiles()
 -> impl Iterator<Item = (&'static str, ApiFormat, &'static [ApiFormat])> {
     MODEL_PROTOCOLS
@@ -552,13 +561,39 @@ mod tests {
 
     #[test]
     fn official_support_matches_each_model_preference() {
+        for profile in MODEL_PROTOCOLS {
+            if profile.supported.is_empty() {
+                continue;
+            }
+            assert!(
+                profile.supported.contains(&profile.preferred),
+                "{} preferred must be in supported",
+                profile.id
+            );
+        }
+        // 2026-08-27 Go live_supported matrix: extra Chat/Messages/Responses
+        // paths stay available alongside the official preferred endpoint.
         assert!(opencode_supports_upstream(
             "deepseek-v4-flash",
             ApiFormat::ChatCompletions
         ));
-        assert!(!opencode_supports_upstream(
+        assert!(opencode_supports_upstream(
             "deepseek-v4-flash",
             ApiFormat::Responses
+        ));
+        assert!(opencode_supports_upstream(
+            "deepseek-v4-flash",
+            ApiFormat::Messages
+        ));
+        assert!(opencode_supports_upstream("kimi-k3", ApiFormat::Messages));
+        assert!(!opencode_supports_upstream("kimi-k3", ApiFormat::Responses));
+        assert!(opencode_supports_upstream(
+            "minimax-m3",
+            ApiFormat::ChatCompletions
+        ));
+        assert!(!opencode_supports_upstream(
+            "grok-4.6",
+            ApiFormat::ChatCompletions
         ));
     }
 

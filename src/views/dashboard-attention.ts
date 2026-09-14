@@ -2,7 +2,7 @@ import type { Account } from "../api/dashboard.ts";
 import { isCooling, isFreeCooling } from "../domain/accounts-usage.ts";
 import { daysUntilDate } from "../domain/account-lifecycle.ts";
 import { isZenFreeAccount } from "../domain/account-providers.ts";
-import { isCustomApiAccount } from "../domain/custom-account.ts";
+import { planForAccount } from "../domain/plans.ts";
 
 /**
  * The Dashboard "needs attention" area: a single honest list of accounts that
@@ -48,7 +48,13 @@ export function buildNeedsAttention(
       continue;
     }
     if (ready && account.enabled) {
-      const expiryDays = !isCustomApiAccount(account)
+      // Only built-in billed families model a purchase/expiry cadence. Custom
+      // API, Zen Free, and user-defined (dynamic) Providers carry no lifecycle
+      // dates, so their accounts never raise expiry attention — a synthetic or
+      // blanked date there is not a billing fact.
+      const plan = planForAccount(account);
+      const expiryDays = plan
+        && plan.id !== "custom-endpoint"
         && !isZenFreeAccount(account)
         && account.expires_on
         ? daysUntilDate(account.expires_on, now)

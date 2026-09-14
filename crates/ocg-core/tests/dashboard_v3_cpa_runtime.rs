@@ -65,9 +65,10 @@ async fn cpa_runtime_mutations_fail_closed_without_a_host() {
     let body: serde_json::Value = response.json().await.unwrap();
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert_eq!(body["code"], ERROR_INVALID_REQUEST);
-    assert!(body["message"].as_str().unwrap().contains("Windows x64"));
-    assert!(body["message"].as_str().unwrap().contains("macOS"));
-    assert!(body["message"].as_str().unwrap().contains("Linux x64"));
+    assert_eq!(
+        body["message"].as_str(),
+        Some(ocg_core::cpa_runtime::UNAVAILABLE_REASON)
+    );
     harness.stop();
 }
 

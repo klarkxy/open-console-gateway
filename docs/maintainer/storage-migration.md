@@ -6,7 +6,7 @@ Operator contract for upgrades, backups, and rollback. Schema details are in [Pe
 
 ## Data directories and cipher identity
 
-Every database open uses the Host-resolved cipher (`Database::open_with_cipher` on CLI, desktop, and Docker). Stored account ciphertext is probed before migration and decryption errors fail closed. Key storage uses unauthenticated obfuscation: a successful UTF-8 decode alone cannot authenticate cipher identity. Retain the original cipher; rewriting ciphertext does not repair a mismatch.
+Every database open uses the Host-resolved cipher (`Database::open_with_cipher` on CLI, desktop, and Docker). Stored account ciphertext is probed before migration and decryption errors fail closed. New writes use authenticated AES-256-GCM (`v2:`). Unprefixed legacy XOR still decrypts so backups restore; a successful Host-cipher open rewrites those rows to v2. A successful UTF-8 decode of XOR is not treated as v2 success. Retain the original cipher; rewriting ciphertext does not repair a mismatch.
 
 | Surface | Default data directory | Cipher identity |
 | --- | --- | --- |
@@ -33,11 +33,127 @@ Downgrades are not supported: never point an older binary at a migrated database
 
 ## Schema v27 and the pre-v3 snapshot
 
-`CURRENT_SCHEMA_VERSION = 37` (`crates/ocg-core/src/db.rs`). Opening a historical database first migrates canonically to v26, then the v27 rewrite copies the primary Key and every `sub_gateway_keys` row into one `access_keys` table (live primary id `00000000-0000-0000-0000-000000000001`), drops `sub_gateway_keys`, and drops the five legacy `accounts.usage_sync_*` columns (usage-sync metadata lives in `provider_usage_sync_state`). v33 adds the exact Custom upstream model identity; v34 adds the singleton CPA configuration table without importing or exporting CPA state. v35 collapses Provider/Plan identity to `provider_id` only: it preflights every known v34 provider/offering pair, refuses unknown pairs and lossy composite-key collisions before mutation, then rebuilds affected tables so offering columns are absent. v36 additively created `ollama_cloud_usage_state` for the unreleased Cookie-usage scrape. v37 drops that table without touching account Keys or logs, and creates `ollama_cloud_billing`. Account `key_cipher` / `password_cipher` bytes are validated with the Host cipher and never re-encrypted.
+`CURRENT_SCHEMA_VERSION = 48` (`crates/ocg-core/src/db.rs`). Opening a historical database first migrates canonically to v26, then the v27 rewrite copies the primary Key and every `sub_gateway_keys` row into one `access_keys` table (live primary id `00000000-0000-0000-0000-000000000001`), drops `sub_gateway_keys`, and drops the five legacy `accounts.usage_sync_*` columns (usage-sync metadata lives in `provider_usage_sync_state`). v33 adds the exact Custom upstream model identity; v34 adds the singleton CPA configuration table without importing or exporting CPA state. v35 collapses Provider/Plan identity to `provider_id` only: it preflights every known v34 provider/offering pair, refuses unknown pairs and lossy composite-key collisions before mutation, then rebuilds affected tables so offering columns are absent. v36 additively created `ollama_cloud_usage_state` for the unreleased Cookie-usage scrape. v37 drops that table without touching account Keys or logs, and creates `ollama_cloud_billing`. v42 unifies the typed user-defined Provider table with a sealed-Adapter seed catalog by renaming `dynamic_providers` / `dynamic_provider_models` to `providers` / `provider_models`, adding `origin` (`builtin` | `preset` | `custom`), `adapter_kind`, `offering` (`plan` | `api`), and `endpoint_per_account` columns, seeding the seven sealed builtin adapters (OpenCode Go, Zen Free, Command Code GOAT, MiniMax CN, Kimi CN, Ollama Cloud, Custom API — but not CPA, the static external integration) as `builtin` rows whose attribute columns are display mirrors, and filtering dynamic read paths on `origin`. The v41 `provider_model_protocol_preferences` `provider_id` CHECK is dropped (the protocol CHECK on `(chat_completions | messages)` is kept until v43). Account `key_cipher` / `password_cipher` bytes are validated with the Host cipher and never re-encrypted. v44 additively creates `dashboard_operations` for V4 idempotent commits, with no pre-migration backup file (like v43). v45 additively creates identity/credential/binding satellite tables and `accounts.identity_id`, with no pre-migration backup file (like v43/v44). v46 additively persists binding `allowed_endpoint_ids` / `allowed_origins` JSON and backfills them once from safe assigned connection endpoints; no pre-migration backup file. v47 additively persists `providers.onboarding_draft` (`0` configured, `1` draft); existing rows stay configured and draft is never inferred from missing fields. Routing list queries exclude drafts; control-plane listing, onboarding resume, V4 projections, and V6 export include them. No pre-migration backup file. v48 drops four inert columns (`provider_contract_scopes` protocol switches and `accounts.free_alias_enabled`) and empty leftover `dynamic_providers` / `dynamic_provider_models`; nonempty leftovers refuse the upgrade and keep schema 47. Non-empty v47 libraries get a unique pre-v48 snapshot.
+
+## Schema v45 — identity / credential / binding satellites
+
+v45 splits the legacy Account into identity-container / credential / binding semantics without moving Key material. The `accounts` row remains the physical credential. Additive satellite tables carry what that row could not express. All new ids are deterministic UUIDv5 values over the same namespace as connection ids, so the migration is idempotent and retry-safe. No pre-migration backup file (additive, like v43/v44). Rollback remains the existing whole-directory restore.
+
+Tables:
+
+- `upstream_identities` — `id`, `label`, `identity_confidence` (`opaque` | `declared`), `authority_site`, `authority_subject`, `enabled`, `notes`, `created_at`, `updated_at`
+- `accounts.identity_id` — new column
+- `credential_state` — `account_id` PK → `accounts`, `credential_id` UNIQUE, `version` = 1, `auth_state_version` = 1, `rotated_at`
+- `credential_bindings` — `id`, `account_id`, `connection_legacy_kind`, `connection_legacy_id`, `model_scope` JSON `{kind:all}` | `{kind:only,models}`, `enabled`, `created_at`, `updated_at`
+- `legacy_identity_map` — `legacy_kind`, `legacy_id`, `new_kind`, `new_id`, `migration_version`
+- `onboarding_tasks` — `id`, `account_id`, `kind` `managed_registration`, `step`, `state` `in_progress` | `completed`, …
+- `subscription_records` — `account_id` PK, `source` `legacy_manual` | `managed_payment`, `purchase_date`, `expires_on`, `recorded_at`
+- `quota_pools` — `id`, `subject_kind`, `subject_ref`, `relation_confidence`, `policy_mode`, `created_at`
+- `quota_pool_members` — `pool_id`, `account_id` (one member per backfilled identity; additional credentials use independent pools unless sharing is explicitly selected)
+
+Satellite rows are deleted explicitly in the same transaction (the DDL declares `ON DELETE CASCADE` but the process does not enable the foreign-key pragma). On open, a v45 consistency check repairs missing satellite rows with the idempotent backfill and fails closed if inconsistencies remain. During v45 backfill, missing required `accounts` columns fail the open through ordinary SQL errors; they are not skipped.
+
+Migration rules: each existing account becomes exactly one identity (label = account name, confidence `opaque`), one credential (`version` 1), and one binding to the account's connection (builtin provider / dynamic provider / the Custom account's own connection) with `model_scope=all` and binding `enabled=true`. The account enable switch remains the routing gate; an independently disabled binding stays disabled across reopen/repair. Routing rank is the existing `accounts.sort_order` (read from `accounts`, not duplicated). `legacy_identity_map` records account → identity / credential / binding. Managed accounts that are not yet `ready` get one `onboarding_tasks` row `in_progress` at the current step; ready managed accounts get no fabricated history. Only accounts of sealed built-in Providers that already publish purchase/expiry dates get a `subscription_records` row with source `legacy_manual`. User-defined and Custom API accounts get none: dates stay unknown, and nothing is priced at zero (D07). Platform links: the linked Key's identity becomes `declared` with `authority_site` = parent `base_url`; each platform parent gets its own identity with a `platform_observer` credential (the management credential, never used for inference). Parents and linked Keys are never merged; the relation stays declared, not verified (D04). Cooldowns are not moved: they are projected as quota windows (generic / 5h / week / month → subject `credential`; free → subject `egress` `free_channel`, declared, authoritative) and preserve the exact stored instants. An unknown metric is `null`, never zero. Migration creates one quota pool per identity (`subject` credential / identity id, `relation_confidence` unknown, `policy_mode` authoritative_limit). It never writes `verified`. Under the current v46 write path, a later credential is independent by default; explicitly sharing with a same-identity credential joins its pool and marks the relation `declared`. Routing honors stored `model_scope` and binding `enabled`.
+
+Every account insert (V3 create, managed create, user-defined Provider first Key, V4 onboarding commit, node import, V4 identity credential create) writes the satellite rows in the same transaction via the single mapper shared with this migration. Platform link / unlink updates the linked identity's confidence and site in the same transaction.
+
+Rotate, binding edits, and second-credential writes are V4 CAS paths on top of these satellites. New node exports use portable payload V6 (envelope remains v1). V6 carries an explicit identity / credential / binding / quota-pool snapshot so shared identities, second credentials, binding `model_scope` / `enabled`, saved grants, and quota-pool membership survive round-trip to a fresh database. V4 and V5 packages remain importable through the existing 1:1 deterministic satellite mapper (one identity, credential, All-scope binding, identity quota pool, and one-time safe grants per account). A V4/V5 package that already contains those V6 fields is rejected rather than silently stripped. Payload V7 and newer are rejected with an explicit unsupported-version error. The Accounts page UI is unchanged in this slice. Physical accounts and v45 satellites are unchanged; the frozen V3 outer HTTP transfer DTO is unchanged.
+
+## Schema v46 — persisted binding grants
+
+v46 additively stores credential-binding grants as saved facts:
+
+- `credential_bindings.allowed_endpoint_ids` — JSON string array of connection endpoint ids
+- `credential_bindings.allowed_origins` — JSON string array of normalized Origins (`scheme://host[:port]`)
+
+Empty arrays mean no grant. NULL is only valid during the one-time migration; v46 backfills existing rows once from the currently configured assigned connection endpoints (same ids as `/connections`). New Keys capture that same safe default: sealed adapters stay on static official endpoint scope with no origins; Custom and dynamic default URLs include same-origin existing route endpoints; a foreign-Origin model override is not granted implicitly. Rotation, connection/URL/model edits, repair, and reopen never manufacture or expand saved grants. Explicit grants are preserved through repair/reopen/import.
+
+V4 `BindingDto.allowedEndpointIds` / `allowedOrigins` project those stored facts. Optional PATCH of both grant fields together validates ids and normalized Origins against currently configured selected connection endpoints and rejects foreign ids, malformed origins, and nonconfigured origins atomically; accepted values are stored in canonical form; empty both revokes. Optional `POST /identities/{id}/credentials` `quotaSharing` is `{kind:"independent"}` by default (including omitted old clients) or `{kind:"shared", credentialId}` for an explicit same-identity inference credential. Different Keys on the same identity no longer share quota by default. Existing v45 identity pools are preserved. Explicit join uses the source pool if any, otherwise creates a pool containing only the selected source and the new member. Ordinary shared-pool cooldown writes keep the maximum per-window deadline across members (including the source); an explicit manual clear still clears the pool. `GET /accounts` `CredentialSummary.quotaPoolId` projects stored pool membership (`null` when the credential is not a member), including singleton identity pools and even when `quotaWindows` is empty. Optional `operationId` reuses the v44 HMAC dashboard-operation ledger. V6 portable identity graphs require grants and reject malformed references before the import transaction; V4/V5 imports still receive one-time safe grants. No pre-migration backup file (additive, like v43–v45). Rollback remains the existing whole-directory restore.
+
+## Schema v47 — persisted onboarding drafts
+
+v47 additively stores onboarding lifecycle on the existing `providers` row:
+
+- `providers.onboarding_draft` — integer boolean, `NOT NULL DEFAULT 0`
+
+Existing rows migrate to configured. A draft may omit Key and model targets; an explicit draft that already has a Key and models still stays off routing, aliases, catalog, and the gateway. Ordinary V3 provider upsert/update preserves the flag and does not silently enable a draft. Completing a draft through V4 onboarding with `mode=complete` clears the flag in the same transaction as the operation receipt. V6 node export includes drafts and requires `onboardingDraft` on each portable provider; V4/V5 packages must omit that field. Blank model lists are valid only for drafts. No pre-migration backup file (additive, like v43–v46). Rollback remains the existing whole-directory restore.
+
+## Schema v48 — inert columns and empty leftover tables
+
+v48 removes four columns that no longer have runtime meaning:
+
+- `provider_contract_scopes.chat_completions_enabled`
+- `provider_contract_scopes.responses_enabled`
+- `provider_contract_scopes.messages_enabled` — unread since v31; live enablement is the model protocol override and preference tables
+- `accounts.free_alias_enabled` — inert `0`; Zen Free uses `accounts.enabled`
+
+It also drops leftover `dynamic_providers` / `dynamic_provider_models` (and their indexes) when those tables exist and are empty. A nonempty leftover on a v47 source fails closed before any drop or version claim; schema stays 47 and the rows are left in place. A current-schema database does not delete nonempty leftover rows.
+
+Before any v48 write on a non-empty v47 database, the process writes a unique never-overwritten sibling snapshot:
+
+```text
+data.sqlite.pre-v48.<timestamp>.bak
+data.sqlite.pre-v48.<timestamp>.bak.sha256
+```
+
+The snapshot is a standalone v47 SQLite file (`VACUUM INTO`); the sidecar's first field is the lowercase SHA-256 of the `.bak`. A brand-new empty directory creates the current schema directly and does not write this copy. There is no down-migration; roll back by restoring the whole pre-upgrade data directory.
+
+## Schema v44 — dashboard operations
+
+v44 additively creates `dashboard_operations` for V4 idempotent control-plane commits:
+
+- `operation_id` — primary key
+- `kind`
+- `payload_digest` — hex HMAC-SHA256 over the semantic payload (`operationId`, `connection`, `authorization` including the secret, `targets`); CAS tokens are excluded
+- `result_json` — secret-free stored result
+- `created_at`
+
+The digest is keyed by a per-database random 32-byte value in `settings` under `dashboard_operation_digest_key`, created lazily and never returned by any API. This key lives in the same SQLite file as the account Keys, so it shares the existing local-storage threat model; it prevents the stored digest from being an unkeyed hash of a secret, and it does not add protection against an attacker who holds the database file. Rows older than 30 days are pruned on insert. The migration is additive and does not create a pre-migration backup file (same as v43). Rollback remains the existing whole-directory restore.
+
+## Schema v43 — preferred protocol CHECK and exclusive-radio repair
+
+v43 rebuilds `provider_model_protocol_preferences` so `protocol` may be `chat_completions`, `responses`, or `messages`. It then deletes MiniMax/Kimi `force_off` override rows that sat next to a sibling `force_on` on Chat or Messages, restoring Auto so both available protocols can passthrough. Go `force_off` rows on unavailable siblings are left in place. V5 import applies the same exclusive-available repair in memory. No extra snapshot file. Roll back by restoring the whole pre-upgrade data directory.
+
+## Schema v42 — unified provider table
+
+v42 replaces `dynamic_providers` and `dynamic_provider_models` with `providers` and `provider_models`, and adds four new columns to `providers`:
+
+- `origin` — `builtin` | `preset` | `custom`. Builtin rows are display mirrors of the seven sealed Adapter seeds (OpenCode Go, Zen Free, Command Code GOAT, MiniMax CN, Kimi CN, Ollama Cloud, Custom API); CPA is the static external integration and is **not** seeded. Preset rows track preset-derived dynamic Providers; custom rows track manually authored dynamic Providers.
+- `adapter_kind` — mirrors the sealed `ProviderAdapterKind` for builtin rows, `configurable_http` for every dynamic row.
+- `offering` — `plan` | `api`. Builtin rows are seeded from `ocg_domain::provider::builtin_offering(provider_id)`; dynamic rows are derived from `preset_id` via `ocg_domain::provider::preset_offering(preset_id)` (custom-only rows default to `api`).
+- `endpoint_per_account` — `0` for builtin rows except Custom API (which is `1`); always `0` for dynamic rows.
+
+The v41 `provider_model_protocol_preferences` table is rebuilt without its `provider_id` CHECK now that `origin` is queryable; the `protocol ∈ ('chat_completions', 'messages')` CHECK is kept. The CHECK on `provider_id` was the only provider-id constraint that referenced origin, so no other table needed changes. Opening an already-migrated current-schema database does not recreate `dynamic_providers` or `dynamic_provider_models`. Schema v48 drops those leftover names only when they exist and are empty. A nonempty leftover on a v47 source refuses the upgrade and keeps schema 47; a current-schema database does not delete nonempty leftover rows.
+
+v42 does **not** change the v35 Provider single-identity contract: builtin adapter routing, CPA integration, Custom API, and dynamic Configurable HTTP bindings all behave as before. Dynamic read paths add `origin IN ('preset', 'custom')` so builtin seeds never feed routing. V5 transfer payloads still carry dynamic definitions only; builtin rows are derived from the registry, and the import derives `origin` / `offering` from `preset_id` to keep cross-version compatibility.
+
+Before any v42 rewrite on a non-empty v41 database, the process writes a unique never-overwritten sibling snapshot:
+
+```text
+data.sqlite.pre-v42.<timestamp>.bak
+data.sqlite.pre-v42.<timestamp>.bak.sha256
+```
+
+The snapshot is a standalone v41 SQLite file (`VACUUM INTO`, `quick_check` on both sides); the sidecar's first field is the lowercase SHA-256 of the `.bak`. A brand-new empty directory creates the current schema directly and does not write this copy. Verify the sidecar from the data directory before any restore:
+
+```bash
+sha256sum -c data.sqlite.pre-v42.<timestamp>.bak.sha256      # Linux
+shasum -a 256 -c data.sqlite.pre-v42.<timestamp>.bak.sha256  # macOS
+```
+
+Downgrade is the existing whole-directory restore; there is no down-migration path.
+
+## Schema v41 — selected model protocol
+
+v41 adds provider_model_protocol_preferences for the sealed MiniMax CN and Kimi CN scopes. It stores the chosen Chat/Messages protocol independently of per-protocol enable overrides. Migration is additive and does not change existing routes, Keys or account dates. Preference and override writes share one transaction. Static-baseline reset clears the choice. V5 transfer contracts carry an optional preferences collection; older packages without it remain importable. Roll back by restoring the whole pre-upgrade data directory. (The v42 rebuild drops the table's `provider_id` CHECK so rows may also belong to builtin or dynamic ids; the `protocol` CHECK is preserved.)
+
+## Schema v40 — model route overrides
+
+Schema v40 adds nullable `provider_models.upstream_override` JSON containing an explicit model protocol and endpoint. Null inherits the unchanged Provider defaults; no account credentials or existing routes are rewritten. Provider replacement and node import persist the full model list atomically. V5 node packages carry the optional `upstreamOverride`; older packages without it retain inheritance. Older readers reject the unknown field rather than silently dropping model routing settings. Downgrade by restoring the pre-upgrade data-directory backup. (The v42 rename above also renames the table to `provider_models`; the column and its semantics are unchanged.)
 
 ## Schema v31 — per-model/per-protocol overrides
 
-v31 creates the `provider_contract_model_protocol_overrides` table. It stores one row per contract scope × model × protocol, with `state` ∈ `force_on` / `force_off`; an absent row means "auto". The composite primary key is `(scope_kind, scope_id, model_id, protocol)`. The `provider_contract_scopes` switch columns remain in the database for backward compatibility. Effective contract derivation reads `provider_contract_model_protocol_overrides`.
+v31 creates the `provider_contract_model_protocol_overrides` table. It stores one row per contract scope × model × protocol, with `state` ∈ `force_on` / `force_off`; an absent row means "auto". The composite primary key is `(scope_kind, scope_id, model_id, protocol)`. The `provider_contract_scopes` switch columns remain in the database for backward compatibility until v48. Effective contract derivation reads `provider_contract_model_protocol_overrides`.
 
 ## Schema v32 — single-protocol Custom Endpoint
 
@@ -45,7 +161,7 @@ v32 replaces `account_custom_configs.base_url`, JSON `upstream_protocols`, and `
 
 ## Schema v35 — Provider single identity
 
-v35 removes the offering dimension. Provider and Plan are one product identity keyed by `provider_id`. Known v34 pairs map as `opencode/go`, `opencode-zen-free/anonymous-free`, `command-code/goat`, `minimax/cn`, `kimi/cn`, `custom/api`, and `cpa/local`. Unknown pairs and composite-key collisions fail closed before any write. The rebuild preserves accounts, ciphertext bytes, logs, pricing/catalog rows, contracts, Custom configs/capabilities, settings, and access keys. The same schema version also stores typed user-defined Providers in `dynamic_providers` and `dynamic_provider_models`. Node backups export payload V4 with `providerId` only, plus an optional/defaulted user-defined Provider definition collection. Payload V1–V3 are rejected with an explicit unsupported-version error.
+v35 removes the offering dimension. Provider and Plan are one product identity keyed by `provider_id`. Known v34 pairs map as `opencode/go`, `opencode-zen-free/anonymous-free`, `command-code/goat`, `minimax/cn`, `kimi/cn`, `custom/api`, and `cpa/local`. Unknown pairs and composite-key collisions fail closed before any write. The rebuild preserves accounts, ciphertext bytes, logs, pricing/catalog rows, contracts, Custom configs/capabilities, settings, and access keys. The same schema version also stores typed user-defined Providers in `dynamic_providers` and `dynamic_provider_models` (both renamed to `providers` / `provider_models` in v42). Node backups export payload V4 with `providerId` only, plus an optional/defaulted user-defined Provider definition collection. Payload V1–V3, and any version other than 4, 5, or 6 (including a future V7 package), are rejected with an explicit unsupported-version error. This binary exports payload V6. V4/V5 imports still rebuild identity satellites with the deterministic 1:1 mapper.
 
 Before any destructive v35 rebuild on a non-empty v34 database, the process writes a unique never-overwritten sibling snapshot:
 
@@ -83,6 +199,12 @@ deletion removes the usage state; clearing the Cookie deletes the row and
 returns the capability to the unconfigured state. The migration is additive:
 existing tables, rows, and routing facts stay as they are. It does not create
 a new backup family. Rollback remains the existing whole-directory restore.
+
+## Schema v38 — platform account ownership
+
+v38 adds `platform_accounts` and `platform_links`. Existing account IDs, Keys, order, cooldowns, models, and logs are preserved. Parent origins are immutable; links reference existing Custom API accounts. Linking and endpoint materialization share one transaction. Parent deletion is restricted while linked Keys exist; child deletion removes its link.
+
+New node exports use payload V6 and omit platform management credentials, platform observer secrets, and observation snapshots. V4 and V5 imports remain supported. Imported associations are unverified, and a parent ID with conflicting kind/origin rejects the complete import transaction. Rollback uses the existing whole-directory backup procedure; v38 adds no separate backup system.
 
 ## Schema v37 — Ollama Cloud billing
 
@@ -136,3 +258,7 @@ A failed v27 transaction rolls back: the live file must remain schema 26 with `s
 
 ---
 [Maintainer guide index](../MAINTAINER.md) · [简体中文](storage-migration.zh-CN.md) · [Docs index](../README.md)
+
+## Schema v39 — preset provenance
+
+v39 adds a nullable `preset_id` to user-defined Providers. It preserves the selected configuration template when endpoints are resource-specific or names are edited; it never controls routing or platform-instance identity. Existing rows remain unclassified. V5 transfer payloads carry this optional field; older payloads without it remain accepted.

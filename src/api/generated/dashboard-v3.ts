@@ -132,15 +132,6 @@ export type DashboardApiV3 =
   | AccountImportDisposition
   | AccountImportRequest
   | AccountImportResult
-  | ApplicationConnectorAction
-  | ApplicationConnectorStatus
-  | ApplicationConnectorChange
-  | ApplicationConnectorItem
-  | ApplicationConnectors
-  | ApplicationConnectorPreviewRequest
-  | ApplicationConnectorPreview
-  | ApplicationConnectorCommitRequest
-  | ApplicationConnectorCommitResult
   | CpaIntegration
   | CpaIntegrationUpdate
   | CpaTestRequest
@@ -169,17 +160,25 @@ export type DashboardApiV3 =
   | CpaRuntimeKey
   | CpaRuntimeKeys
   | CpaRuntimeKeyCreated
-  | DynamicProviderAuthKind
-  | DynamicProviderModel
-  | DynamicProvider
-  | DynamicProviderCreate
-  | DynamicProviderUpdate
-  | DynamicProviderMutation
-  | DynamicProviderDiscoverRequest
-  | DynamicProviderDiscoverResponse
-  | DynamicProviderTestRequest
-  | DynamicProviderTestResponse
-  | OllamaBillingTier;
+  | ProviderDefinitionAuthKind
+  | ProviderDefinitionModel
+  | ProviderDefinition
+  | ProviderDefinitionCreate
+  | ProviderDefinitionUpdate
+  | ProviderDefinitionMutation
+  | ProviderDefinitionDiscoverRequest
+  | ProviderDefinitionDiscoverResponse
+  | ProviderDefinitionTestRequest
+  | ProviderDefinitionTestResponse
+  | OllamaBillingTier
+  | PlatformAccounts
+  | PlatformAccount
+  | PlatformLink
+  | PlatformSnapshot
+  | PlatformCreate
+  | PlatformUpdate
+  | PlatformLinkWrite
+  | PlatformRefresh;
 /**
  * Which listed models take the list-mode exception leg.
  */
@@ -283,23 +282,16 @@ export type BrowserTarget = "google_signup" | "google_login" | "github_signup" |
  */
 export type DesktopUpdatePhase = "idle" | "checking" | "downloading" | "installing" | "failed";
 export type AccountImportDisposition = "import" | "imported" | "merge" | "merged" | "duplicate";
-/**
- * Operation supported by the local Desktop application-connector Host.
- */
-export type ApplicationConnectorAction = "connect" | "restore";
-/**
- * Secret-free connector state. Automatic writes exist only in the local
- * Desktop Host; every other runtime reports `unsupported_runtime`.
- */
-export type ApplicationConnectorStatus =
-  "unsupported_runtime" | "not_detected" | "manual_only" | "ready" | "connected" | "conflict" | "partial";
 export type CpaOAuthProvider = "codex" | "anthropic" | "antigravity" | "kimi" | "xai";
 export type CpaCliImportOutcome = "imported" | "alreadyImported" | "unconfirmed";
 export type CpaRuntimePhase = "idle" | "checking" | "downloading" | "installing" | "starting" | "failed";
 /**
- * Auth kind owned by a dynamic Provider. Independent of protocol.
+ * Auth kind owned by a Provider definition. Independent of protocol.
+ * Nullable on the wire because builtin rows leave the field empty.
  */
-export type DynamicProviderAuthKind = "bearer" | "x-api-key" | "none";
+export type ProviderDefinitionAuthKind = "bearer" | "x-api-key" | "none";
+export type PlatformKind = "new_api" | "sub2api";
+export type PlatformQuotaKind = "wallet" | "subscription" | "key_limit";
 
 /**
  * Live CAS token, process generation, and pricing snapshot id.
@@ -657,14 +649,34 @@ export interface ProviderCatalogEntry {
   creationAvailability: string;
   creationUnavailableReason: string | null;
   credentialKind: AccountCredentialKind;
+  /**
+   * Whether the dashboard may DELETE this entry. Same rules as `editable`.
+   */
+  deletable: boolean;
   displayFamily: string;
   displayName: string;
+  /**
+   * Whether the dashboard may PATCH this entry. Always `false` for
+   * `builtin` rows; `true` for `preset`/`custom`.
+   */
+  editable: boolean;
   formFields: ProviderCatalogFormField[];
   keyPrefix: string | null;
   managedRegistration: boolean;
   manualUsageCalibration: boolean;
   modelAliases: string[];
   modelSource: string;
+  /**
+   * Plan/api offering label carried by the catalog row. Builtin rows use
+   * the sealed builtin map; dynamic rows mirror the persisted `offering`.
+   */
+  offering: string;
+  /**
+   * Row provenance in the unified `providers` table. Wire values:
+   * `builtin` (sealed adapter), `preset` (preset-derived dynamic row),
+   * `custom` (manual dynamic row).
+   */
+  origin: "builtin" | "preset" | "custom";
   pricingAvailability: string;
   providerId: string;
   quotaScope: AccountQuotaScope;
@@ -876,6 +888,11 @@ export interface ModelProtocolOverridesUpdate {
  */
 export interface ModelProtocolOverride {
   modelId: string;
+  /**
+   * Remember this conversion-default protocol, even while disabled.
+   * Omitted or false preserves the saved choice; static reset clears it.
+   */
+  preferred?: boolean;
   protocol: AccountUpstreamProtocol;
   state: ProtocolOverrideState;
 }
@@ -1074,7 +1091,7 @@ export interface GatewayStatus {
   upstreamBaseUrl: string;
 }
 /**
- * Local Applications picker: Go routable Alias 鈭?current pricing snapshot.
+ * Local Go-routable Alias ∩ current Go pricing snapshot (no request-time upstream).
  */
 export interface ApplicationModels {
   models: string[];
@@ -1718,84 +1735,6 @@ export interface AccountImportResult {
   revision: number;
 }
 /**
- * One redacted field-level change. Sensitive values are represented by a
- * fixed mask; this DTO never carries a plaintext Key or whole config file.
- */
-export interface ApplicationConnectorChange {
-  after: string | null;
-  before: string | null;
-  field: string;
-  sensitive: boolean;
-}
-/**
- * One of the eight statically supported local client surfaces.
- */
-export interface ApplicationConnectorItem {
-  automatic: boolean;
-  detail: string | null;
-  detected: boolean;
-  id: string;
-  status: ApplicationConnectorStatus;
-  targetPaths: string[];
-}
-/**
- * GET `/applications/connectors` response.
- */
-export interface ApplicationConnectors {
-  items: ApplicationConnectorItem[];
-  processGeneration: number;
-  revision: number;
-}
-/**
- * POST `/applications/connectors/{id}/preview` request. Paths, Gateway URLs,
- * config text and Key material are intentionally not accepted from callers.
- */
-export interface ApplicationConnectorPreviewRequest {
-  action: ApplicationConnectorAction;
-  keyId?: string | null;
-  modelValues?: {
-    [k: string]: string;
-  };
-}
-/**
- * Redacted preview tied to the current target-file state by `fingerprint`.
- */
-export interface ApplicationConnectorPreview {
-  action: ApplicationConnectorAction;
-  changes: ApplicationConnectorChange[];
-  detail: string | null;
-  fingerprint: string;
-  id: string;
-  processGeneration: number;
-  revision: number;
-  status: ApplicationConnectorStatus;
-  targetPaths: string[];
-}
-/**
- * POST `/applications/connectors/{id}/commit` request. CAS protects the OCG
- * selection while `previewFingerprint` protects the external config files.
- */
-export interface ApplicationConnectorCommitRequest {
-  action: ApplicationConnectorAction;
-  expectedRevision: number;
-  keyId?: string | null;
-  modelValues?: {
-    [k: string]: string;
-  };
-  previewFingerprint: string;
-  processGeneration: number;
-}
-/**
- * Successful commit result. The settings revision advances exactly once for
- * a real external write and stays unchanged for a verified no-op.
- */
-export interface ApplicationConnectorCommitResult {
-  changed: boolean;
-  connector: ApplicationConnectorItem;
-  processGeneration: number;
-  revision: number;
-}
-/**
  * Secret-free singleton configuration for the local CPA external integration.
  */
 export interface CpaIntegration {
@@ -2071,69 +2010,114 @@ export interface CpaRuntimeKeyCreated {
   revision: number;
   secret: string;
 }
-/**
- * One public-to-upstream mapping owned by a dynamic Provider.
- */
-export interface DynamicProviderModel {
+export interface ProviderDefinitionModel {
   publicModel: string;
   upstreamModel: string;
+  upstreamOverride?: ProviderModelUpstreamOverride | null;
 }
 /**
- * Secret-free dynamic Provider definition.
+ * One public-to-upstream mapping owned by a Provider definition.
  */
-export interface DynamicProvider {
-  authKind: DynamicProviderAuthKind;
-  createdAt: string;
+export interface ProviderModelUpstreamOverride {
   endpointUrl: string;
+  protocol: AccountUpstreamProtocol;
+}
+/**
+ * Secret-free Provider definition. Surfaces both builtin and dynamic rows
+ * through the same wire shape. `endpointUrl` / `upstreamProtocol` /
+ * `authKind` are nullable because builtin rows leave them empty (the sealed
+ * adapter drives those at call time).
+ */
+export interface ProviderDefinition {
+  /**
+   * Nullable: builtin rows leave the field empty.
+   */
+  authKind?: ProviderDefinitionAuthKind | null;
+  createdAt: string;
+  /**
+   * Whether the dashboard may DELETE this row. Always `false` for builtin.
+   */
+  deletable: boolean;
+  /**
+   * Whether the dashboard may PATCH this row. Always `false` for builtin.
+   */
+  editable: boolean;
+  /**
+   * Nullable: builtin rows leave the field empty.
+   */
+  endpointUrl?: string | null;
   id: string;
-  models: DynamicProviderModel[];
+  /**
+   * Empty for builtin rows; builtin catalogs feed the contract projection.
+   */
+  models: ProviderDefinitionModel[];
   name: string;
+  /**
+   * Plan/api offering label persisted alongside the row.
+   */
+  offering: string;
+  /**
+   * Row provenance: `builtin` | `preset` | `custom`.
+   */
+  origin: "builtin" | "preset" | "custom";
+  presetId?: string | null;
   processGeneration: number;
   revision: number;
   updatedAt: string;
-  upstreamProtocol: AccountUpstreamProtocol;
+  /**
+   * Nullable: builtin rows leave the field empty.
+   */
+  upstreamProtocol?: AccountUpstreamProtocol | null;
 }
 /**
- * POST `/providers` body. Creates the definition, mappings, and first account.
+ * POST `/providers` body. Creates the definition and mappings.
+ * A Key on keyed auth creates the first account in the same write (Accounts add).
+ * Keyed auth may omit `key` to save the definition only; add Keys on Accounts.
+ * No-auth always creates the singleton account.
  */
-export interface DynamicProviderCreate {
+export interface ProviderDefinitionCreate {
   accountName?: string | null;
-  authKind: DynamicProviderAuthKind;
+  authKind: ProviderDefinitionAuthKind;
   endpointUrl: string;
   expectedRevision: number;
   key?: string | null;
-  models: DynamicProviderModel[];
+  models: ProviderDefinitionModel[];
   name: string;
   notes?: string | null;
+  presetId?: string | null;
   processGeneration: number;
   upstreamProtocol: AccountUpstreamProtocol;
 }
 /**
  * PATCH `/providers/{providerId}` body. Full replacement of mutable config.
  */
-export interface DynamicProviderUpdate {
-  authKind: DynamicProviderAuthKind;
+export interface ProviderDefinitionUpdate {
+  authKind: ProviderDefinitionAuthKind;
   endpointUrl: string;
   expectedRevision: number;
   key?: string | null;
-  models: DynamicProviderModel[];
+  models: ProviderDefinitionModel[];
   name: string;
+  /**
+   * Omitted/null preserves provenance; an empty string clears it.
+   */
+  presetId?: string | null;
   processGeneration: number;
   upstreamProtocol: AccountUpstreamProtocol;
 }
 /**
- * Mutation result for a dynamic Provider write.
+ * Mutation result for a Provider definition write.
  */
-export interface DynamicProviderMutation {
+export interface ProviderDefinitionMutation {
   processGeneration: number;
-  provider: DynamicProvider;
+  provider: ProviderDefinition;
   revision: number;
 }
 /**
  * POST `/providers/models/discover` body. Operational probe; no CAS bump.
  */
-export interface DynamicProviderDiscoverRequest {
-  authKind: DynamicProviderAuthKind;
+export interface ProviderDefinitionDiscoverRequest {
+  authKind: ProviderDefinitionAuthKind;
   endpointUrl: string;
   key?: string | null;
   upstreamProtocol: AccountUpstreamProtocol;
@@ -2141,7 +2125,7 @@ export interface DynamicProviderDiscoverRequest {
 /**
  * Discovery result. Never includes the submitted Key.
  */
-export interface DynamicProviderDiscoverResponse {
+export interface ProviderDefinitionDiscoverResponse {
   models: string[];
   processGeneration: number;
   revision: number;
@@ -2150,8 +2134,8 @@ export interface DynamicProviderDiscoverResponse {
 /**
  * POST `/providers/test` body. Operational probe; no CAS bump.
  */
-export interface DynamicProviderTestRequest {
-  authKind: DynamicProviderAuthKind;
+export interface ProviderDefinitionTestRequest {
+  authKind: ProviderDefinitionAuthKind;
   endpointUrl: string;
   key?: string | null;
   publicModel: string;
@@ -2161,9 +2145,145 @@ export interface DynamicProviderTestRequest {
 /**
  * Model-test result. Never includes the submitted Key.
  */
-export interface DynamicProviderTestResponse {
+export interface ProviderDefinitionTestResponse {
   error: string | null;
   ok: boolean;
   processGeneration: number;
   revision: number;
+}
+export interface PlatformAccounts {
+  accounts: PlatformAccount[];
+  links: PlatformLink[];
+  processGeneration: number;
+  revision: number;
+}
+export interface PlatformAccount {
+  baseUrl: string;
+  hasUserCredential: boolean;
+  id: string;
+  kind: PlatformKind;
+  name: string;
+  snapshot: PlatformSnapshot | null;
+  version: number;
+}
+export interface PlatformSnapshot {
+  billingPreference: string | null;
+  /**
+   * Fixed component/error codes only, never upstream bodies or credentials.
+   */
+  errors: string[];
+  groups: PlatformGroup[];
+  models: PlatformModel[];
+  observedAt: number;
+  prices: PlatformPrice[];
+  quotas: PlatformQuota[];
+  stale: boolean;
+  walletOverflow: boolean | null;
+}
+export interface PlatformGroup {
+  autoGroups: string[];
+  id: string | null;
+  platform: string | null;
+  subscriptionType: string | null;
+  verified: boolean;
+}
+export interface PlatformModel {
+  groupId: string | null;
+  id: string;
+  platform: string | null;
+  /**
+   * A storefront row is never proof of inference permission.
+   */
+  source: string;
+}
+export interface PlatformPrice {
+  cacheRead: number | null;
+  cacheWrite: number | null;
+  currency: string;
+  groupId: string | null;
+  /**
+   * All numeric rates are currency per token, never per million tokens.
+   */
+  input: number | null;
+  model: string;
+  officialReference: boolean;
+  output: number | null;
+  source: string;
+  unavailableReason: string | null;
+  validUntil: number;
+}
+export interface PlatformQuota {
+  expiresAt: number | null;
+  kind: PlatformQuotaKind;
+  limit: number | null;
+  period: string | null;
+  remaining: number | null;
+  resetsAt: number | null;
+  scopeId: string;
+  source: string;
+  unit: string;
+  unlimited: boolean;
+  used: number | null;
+}
+export interface PlatformLink {
+  accountId: string;
+  group: PlatformGroup;
+  platformAccountId: string;
+  snapshot: PlatformSnapshot | null;
+}
+/**
+ * Required process-scoped mutation precondition.
+ *
+ * Both fields travel at the top level of every mutation request. The random
+ * process generation prevents a revision captured before restart from being
+ * accepted by a fresh process whose in-memory counter reused the same value.
+ */
+export interface PlatformCreate {
+  baseUrl: string;
+  expectedRevision: number;
+  kind: PlatformKind;
+  name: string;
+  processGeneration: number;
+  userCredential?: string | null;
+}
+/**
+ * Required process-scoped mutation precondition.
+ *
+ * Both fields travel at the top level of every mutation request. The random
+ * process generation prevents a revision captured before restart from being
+ * accepted by a fresh process whose in-memory counter reused the same value.
+ */
+export interface PlatformUpdate {
+  expectedRevision: number;
+  name: string;
+  processGeneration: number;
+  /**
+   * Omitted/null preserves, empty clears.
+   */
+  userCredential?: string | null;
+}
+/**
+ * Required process-scoped mutation precondition.
+ *
+ * Both fields travel at the top level of every mutation request. The random
+ * process generation prevents a revision captured before restart from being
+ * accepted by a fresh process whose in-memory counter reused the same value.
+ */
+export interface PlatformLinkWrite {
+  expectedRevision: number;
+  group: PlatformGroup;
+  platformAccountId: string;
+  processGeneration: number;
+}
+/**
+ * Required process-scoped mutation precondition.
+ *
+ * Both fields travel at the top level of every mutation request. The random
+ * process generation prevents a revision captured before restart from being
+ * accepted by a fresh process whose in-memory counter reused the same value.
+ */
+export interface PlatformRefresh {
+  accountId?: string | null;
+  expectedRevision: number;
+  processGeneration: number;
 }

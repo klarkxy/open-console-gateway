@@ -174,7 +174,9 @@ jobs:
       - run: pnpm install --frozen-lockfile
 
       - name: Test Unix CPA process ownership
-        if: runner.os != 'Windows'
+        # Linux already runs this crate in quality.yml. macOS is the only
+        # remaining CI Rust leg for these #[cfg(unix)] ownership tests.
+        if: runner.os == 'macOS'
         run: cargo test -p ocg-core --lib cpa_runtime::host --locked
 
       # The signing pair and public-key continuity were already proven by

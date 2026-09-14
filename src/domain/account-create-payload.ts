@@ -168,3 +168,14 @@ export function buildCreateAccountPayload(
 
   return payload;
 }
+
+/**
+ * Create-form emit → V3 create body. Empty or omitted Key becomes "".
+ * Shared by Accounts and the Providers "Add Key" path.
+ */
+export function accountCreateRequestInput(payload: AccountInput): AccountInput {
+  return {
+    ...payload,
+    key: payload.key || "",
+  };
+}

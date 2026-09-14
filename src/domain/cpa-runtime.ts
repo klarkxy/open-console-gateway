@@ -55,7 +55,7 @@ export function cpaRuntimeMode(
 }
 
 /** A fresh supported host may install; an installed runtime must be OCG-owned. */
-export function cpaRuntimeLifecycleEditable(
+function cpaRuntimeLifecycleEditable(
   runtime: Pick<CpaRuntime, "supported" | "owned" | "installed"> | null,
 ): boolean {
   return !!runtime && runtime.supported && (!runtime.installed || runtime.owned);
@@ -69,7 +69,7 @@ export function cpaClientKeysAvailable(
 }
 
 /** Non-terminal phases reported while a lifecycle operation is in flight. */
-export const CPA_BUSY_PHASES: readonly CpaRuntimePhase[] = [
+const CPA_BUSY_PHASES: readonly CpaRuntimePhase[] = [
   "checking",
   "downloading",
   "installing",
@@ -156,22 +156,29 @@ export function partitionCpaRuntimeKeys(keys: readonly CpaRuntimeKey[]): CpaRunt
   return { protectedKeys, directKeys };
 }
 
-export type CpaCatalogGroup = {
+export type CpaCatalogRow = {
+  id: string;
+  ownedBy?: string | null;
+};
+
+export type CpaCatalogGroup<T extends CpaCatalogRow = CpaModel> = {
   source: string;
-  models: CpaModel[];
+  models: T[];
 };
 
 /** Group the persisted CPA snapshot by CPA-reported `ownedBy`, unknown last. */
-export function groupCpaCatalogModels(models: readonly CpaModel[]): CpaCatalogGroup[] {
-  const groups = new Map<string, CpaModel[]>();
+export function groupCpaCatalogModels<T extends CpaCatalogRow>(
+  models: readonly T[],
+): CpaCatalogGroup<T>[] {
+  const groups = new Map<string, T[]>();
   for (const model of models) {
     const source = model.ownedBy?.trim() ?? "";
     const rows = groups.get(source);
     if (rows) rows.push(model);
     else groups.set(source, [model]);
   }
-  const known: CpaCatalogGroup[] = [];
-  let unknown: CpaCatalogGroup | null = null;
+  const known: CpaCatalogGroup<T>[] = [];
+  let unknown: CpaCatalogGroup<T> | null = null;
   for (const [source, rows] of groups) {
     rows.sort((left, right) => left.id.localeCompare(right.id));
     const group = { source, models: rows };
@@ -187,14 +194,30 @@ export function cpaAccountKey(account: Pick<CpaAccount, "name" | "authIndex">): 
   return `${account.name}:${account.authIndex ?? ""}`;
 }
 
-/** Quota payloads are opaque (`any`); render scalars directly and JSON otherwise. */
-export function formatCpaQuota(value: unknown): string {
-  if (typeof value === "string" || typeof value === "number") return String(value);
-  if (value === null || value === undefined) return "—";
+function isVacuousCpaQuota(value: unknown, seen = new WeakSet<object>()): boolean {
+  if (value === null || value === undefined) return true;
+  if (typeof value === "string") return value.trim() === "";
+  if (typeof value === "number") return !Number.isFinite(value);
+  if (typeof value !== "object") return true;
+  if (seen.has(value)) return true;
+  seen.add(value);
+  if (Array.isArray(value)) return value.length === 0 || value.every((item) => isVacuousCpaQuota(item, seen));
+  const entries = Object.values(value as Record<string, unknown>);
+  return entries.length === 0 || entries.every((item) => isVacuousCpaQuota(item, seen));
+}
+
+/**
+ * Quota payloads are opaque CPA trackers. Hide empty `{ signals: {} }` shells;
+ * render scalars directly and JSON otherwise.
+ */
+export function formatCpaQuota(value: unknown): string | null {
+  if (isVacuousCpaQuota(value)) return null;
+  if (typeof value === "string") return value.trim();
+  if (typeof value === "number") return String(value);
   try {
-    return JSON.stringify(value) ?? "—";
+    return JSON.stringify(value);
   } catch {
-    return "—";
+    return null;
   }
 }
 
@@ -206,6 +229,35 @@ export const CPA_OAUTH_PROVIDERS: ReadonlyArray<{ id: CpaOAuthProvider; label: s
   { id: "kimi", label: "Kimi" },
   { id: "xai", label: "xAI" },
 ];
+
+/**
+ * CPA account filename token for a CLI import. Anthropic logins are stored as
+ * `claude`; every other OAuth provider keeps its id.
+ */
+export function cpaCliImportFilenameToken(provider: CpaOAuthProvider): string {
+  return provider === "anthropic" ? "claude" : provider;
+}
+
+/** True when a CPA account was created by importing this provider's local CLI. */
+export function cpaCliImportAlreadyPresent(
+  provider: CpaOAuthProvider,
+  accounts: readonly Pick<CpaAccount, "name">[],
+): boolean {
+  const prefix = `ocg-cli-${cpaCliImportFilenameToken(provider)}-`.toLowerCase();
+  return accounts.some((account) => account.name.toLowerCase().startsWith(prefix));
+}
+
+/** Reverse of `cpaCliImportAlreadyPresent` for the account being deleted. */
+export function cpaOAuthProviderForCliAccount(
+  account: Pick<CpaAccount, "name">,
+): CpaOAuthProvider | null {
+  const name = account.name.toLowerCase();
+  for (const { id } of CPA_OAUTH_PROVIDERS) {
+    const prefix = `ocg-cli-${cpaCliImportFilenameToken(id)}-`.toLowerCase();
+    if (name.startsWith(prefix)) return id;
+  }
+  return null;
+}
 
 const CPA_OAUTH_TERMINAL_STATUSES = ["ok", "completed", "success", "cancelled", "failed", "expired", "error"];
 const CPA_OAUTH_SUCCESS_STATUSES = ["ok", "success", "completed"];

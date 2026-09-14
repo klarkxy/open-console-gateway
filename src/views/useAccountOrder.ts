@@ -27,15 +27,11 @@ function sameAccountOrder(left: readonly Account[], right: readonly Account[]): 
 export function useAccountOrder(options: {
   accounts: Ref<Account[]>;
   busy: Ref<boolean>;
-  revision: Ref<number | null>;
-  runWithFreshRevision: <T>(mutation: () => Promise<T>) => Promise<T>;
   reloadAfterRevisionConflict: () => Promise<void>;
 }) {
   const {
     accounts,
     busy,
-    revision,
-    runWithFreshRevision,
     reloadAfterRevisionConflict,
   } = options;
   const message = useMessage();
@@ -60,11 +56,8 @@ export function useAccountOrder(options: {
     if (sameAccountOrder(previous, accounts.value)) return;
     orderSaving.value = true;
     try {
-      const saved = await runWithFreshRevision(() => (
-        dashboardApi.reorderAccounts(accounts.value.map(({ id }) => id))
-      ));
+      const saved = await dashboardApi.reorderAccounts(accounts.value.map(({ id }) => id));
       accounts.value = saved;
-      revision.value = saved[0]?.revision ?? revision.value;
       const moved = accounts.value.find(({ id }) => id === movedAccountId);
       const position = accounts.value.findIndex(({ id }) => id === movedAccountId) + 1;
       if (moved && position > 0) {

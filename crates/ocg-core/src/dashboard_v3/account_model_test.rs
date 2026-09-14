@@ -12,11 +12,13 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::dynamic::DynamicProviderRuntime;
+use crate::kernel::protocol::ApiFormat;
 use crate::models::Account as ModelAccount;
 use crate::provider::{
-    ProviderAdapterKind, UpstreamProtocolKind, builtin_provider, plan_requires_custom_config,
+    ProviderAdapterKind, UpstreamProtocolKind, builtin_provider, is_cpa_external_integration,
+    plan_requires_custom_config,
 };
-use crate::provider_contracts::ContractScope;
+use crate::provider_contracts::{ContractScope, protocol_from_api, select_upstream_protocol};
 use crate::state::CoreState;
 
 use super::accounts::load_model_account;
@@ -91,14 +93,15 @@ fn prepare_account_model_test(
         let mapping = runtime.mapping_for_public(model_id).ok_or_else(|| {
             V3ApiError::invalid_request_at(state, "model is not routable for this provider")
         })?;
+        let route = runtime.effective_route(mapping);
         return Ok(PreparedAccountModelTest {
             account,
             config: state.config(),
             adapter: ProviderAdapterKind::ConfigurableHttp,
             public_model: model_id.to_string(),
             upstream_model: mapping.upstream_model.clone(),
-            protocol: runtime.upstream_protocol,
-            custom_endpoint_url: None,
+            protocol: route.protocol,
+            custom_endpoint_url: Some(route.endpoint_url),
             dynamics,
         });
     }
@@ -143,14 +146,26 @@ fn prepare_account_model_test(
         let scope = ContractScope::from_account(&account)
             .ok_or_else(|| V3ApiError::invalid_request_at(state, "unknown provider offering"))?;
         let contracts = state.provider_contracts();
-        let protocol = contracts
+        let contract = contracts
             .scope(&scope)
-            .and_then(|scope| scope.model(model_id))
-            .filter(|model| model.routable)
-            .ok_or_else(|| {
-                V3ApiError::invalid_request_at(state, "model is not routable for this provider")
-            })?;
-        (protocol.preferred_protocol, None, model_id.to_string())
+            .ok_or_else(|| V3ApiError::invalid_request_at(state, "unknown provider offering"))?;
+        if !contract.model(model_id).is_some_and(|model| model.routable) {
+            return Err(V3ApiError::invalid_request_at(
+                state,
+                "model is not routable for this provider",
+            ));
+        }
+        let client = if is_cpa_external_integration(&account.provider_id) {
+            ApiFormat::ChatCompletions
+        } else {
+            ApiFormat::Gemini
+        };
+        let selected = select_upstream_protocol(contract, client, model_id)
+            .map_err(|error| V3ApiError::invalid_request_at(state, error.message))?;
+        let protocol = protocol_from_api(selected).ok_or_else(|| {
+            V3ApiError::invalid_request_at(state, "model is not routable for this provider")
+        })?;
+        (protocol, None, model_id.to_string())
     };
 
     Ok(PreparedAccountModelTest {

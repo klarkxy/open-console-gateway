@@ -46,7 +46,7 @@ fail before selection.
 | **Providers** | Built-in catalogs, model/protocol contracts, pricing scopes, typed user-defined Provider Endpoint/auth/mappings | Custom API mappings stay on the account card |
 | **Custom API account** | One API URL, one account-wide upstream protocol, public-model → upstream-ID mappings | Shared Provider definitions live on **Providers** |
 | **Extensions / CPA** | A static local external-integration boundary | Built-in routing families stay under **Accounts** / **Providers** |
-| **Legacy Applications** | Retired; remaining guide and connector code awaits cleanup | Clients use the ordinary Gateway API |
+| **Legacy Applications** | Retired | Clients use the ordinary Gateway API |
 
 The Adapter Registry is static and sealed. User-defined Providers persist as
 typed data and always bind Configurable HTTP.

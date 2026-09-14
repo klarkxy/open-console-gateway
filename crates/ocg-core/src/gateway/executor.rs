@@ -10,13 +10,17 @@ use crate::alias;
 use crate::gateway::diagnostics::{
     ErrorDiagnostic, RequestTrace, emit_failure, log_request_failure, serialize_diagnostic,
 };
-use crate::gateway::forwarder::{ForwardAction, forward_request, rate_limited_response};
+use crate::gateway::forwarder::{
+    ForwardAction, LiveSendSelection, forward_request, rate_limited_response,
+};
 use crate::gateway::materialize::{
-    diagnostic_forced_upstream, materialize_account_routes, resolved_alias_from_model,
+    InferenceBindingGate, InferenceBindingIndex, diagnostic_forced_upstream,
+    materialize_account_routes_with_bindings, resolved_alias_from_model,
 };
 use crate::gateway::protocol::{MaterializeSpec, RequestPlan, materialize_parsed_request};
 use crate::gateway::response::{local_protocol_failure, protocol_error_response};
 use crate::gateway::routing::resolve_conversation_key;
+use crate::gateway::shadow::{ShadowPlanInput, maybe_compare_live_routes};
 
 use crate::http_client::{ForwardRouteSet, RouteLabel};
 use crate::kernel::pricing::PricingSnapshot;
@@ -184,7 +188,7 @@ impl GatewayExecutor {
 
         loop {
             let (decision_wall, decision_mono) = state.sample_gateway_clock();
-            let (accounts, free_cooldown) = {
+            let (accounts, free_cooldown, stored_bindings) = {
                 let db = state.db.lock();
                 let accounts = match db.list_accounts() {
                     Ok(accounts) => accounts,
@@ -222,8 +226,32 @@ impl GatewayExecutor {
                         );
                     }
                 };
-                (accounts, free_cooldown)
+                let stored_bindings = match db.list_inference_bindings() {
+                    Ok(rows) => rows,
+                    Err(error) => {
+                        let message = format!("failed to load inference bindings: {error}");
+                        return protocol_error_response(
+                            client_format,
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            &message,
+                            None,
+                        );
+                    }
+                };
+                (accounts, free_cooldown, stored_bindings)
             };
+            let bindings = stored_bindings
+                .iter()
+                .map(|row| {
+                    (
+                        row.account_id.clone(),
+                        InferenceBindingGate {
+                            enabled: row.enabled,
+                            model_scope: row.model_scope.clone(),
+                        },
+                    )
+                })
+                .collect::<InferenceBindingIndex>();
             let free_available = free_cooldown.is_none()
                 && !crate::routing_runtime::free_channel_is_exhausted_at(&accounts, decision_wall);
             let custom_runtimes = match state.db.lock().list_custom_account_runtimes() {
@@ -250,7 +278,7 @@ impl GatewayExecutor {
                     );
                 }
             };
-            let route_set = match materialize_account_routes(
+            let route_set = match materialize_account_routes_with_bindings(
                 &accounts,
                 &snapshots.config,
                 &parsed,
@@ -264,6 +292,7 @@ impl GatewayExecutor {
                 snapshots.cpa_base_url.as_deref(),
                 &snapshots.contracts,
                 &snapshots.dynamics,
+                &bindings,
             ) {
                 Ok(route_set) => route_set,
                 Err(error) => {
@@ -277,6 +306,25 @@ impl GatewayExecutor {
                     );
                 }
             };
+            maybe_compare_live_routes(
+                &ShadowPlanInput {
+                    accounts: &accounts,
+                    config: &snapshots.config,
+                    parsed: &parsed,
+                    resolved: &snapshots.resolved,
+                    client_model: &client_model,
+                    routing_model: &routing_model,
+                    client_body: &client_body,
+                    free_available,
+                    custom_runtimes: &custom_runtimes,
+                    goat_runtimes: &goat_runtimes,
+                    cpa_base_url: snapshots.cpa_base_url.as_deref(),
+                    contracts: &snapshots.contracts,
+                    dynamics: &snapshots.dynamics,
+                    bindings: &bindings,
+                },
+                &route_set,
+            );
             let excluded = loop_state
                 .failed_ids
                 .iter()
@@ -411,6 +459,15 @@ impl GatewayExecutor {
             };
             let account = route.routing.account;
             let active_plan = route.plan;
+            let selection = LiveSendSelection::from_binding(
+                &account,
+                stored_bindings
+                    .iter()
+                    .find(|row| row.account_id == account.id),
+                &client_model,
+                &routing_model,
+                &active_plan.model,
+            );
 
             let mut retried_same_account = false;
             loop {
@@ -438,6 +495,7 @@ impl GatewayExecutor {
                     snapshots.pricing.clone(),
                     client_key_id.as_deref(),
                     &snapshots.dynamics,
+                    &selection,
                 )
                 .await
                 {
@@ -537,30 +595,31 @@ fn routing_selector_invariant(failure: SelectorInvariant) -> (StatusCode, String
 #[cfg(test)]
 mod tests {
     #[test]
-    fn duplicate_selection_error_maps_to_internal_selector_invariant() {
-        let error = ocg_gateway::selector::SelectionError::DuplicateAccountId {
-            first: 0,
-            duplicate: 2,
-        };
-        let (status, message) =
-            super::routing_selector_invariant(super::SelectorInvariant::Duplicate(error));
-        assert_eq!(status, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(
-            message,
-            "routing selector invariant: duplicate account id at candidate index 2 (first seen at 0)"
-        );
-    }
-
-    #[test]
-    fn out_of_range_selected_index_maps_to_internal_selector_invariant() {
-        let (status, message) =
-            super::routing_selector_invariant(super::SelectorInvariant::CandidateIndexOutOfRange {
-                selected_index: 9,
-            });
-        assert_eq!(status, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(
-            message,
-            "routing selector invariant: candidate index 9 is out of range"
-        );
+    fn selector_invariant_maps_to_internal_error() {
+        for (label, failure, expected) in [
+            (
+                "duplicate",
+                super::SelectorInvariant::Duplicate(
+                    ocg_gateway::selector::SelectionError::DuplicateAccountId {
+                        first: 0,
+                        duplicate: 2,
+                    },
+                ),
+                "routing selector invariant: duplicate account id at candidate index 2 (first seen at 0)",
+            ),
+            (
+                "index-out-of-range",
+                super::SelectorInvariant::CandidateIndexOutOfRange { selected_index: 9 },
+                "routing selector invariant: candidate index 9 is out of range",
+            ),
+        ] {
+            let (status, message) = super::routing_selector_invariant(failure);
+            assert_eq!(
+                status,
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "{label}"
+            );
+            assert_eq!(message, expected, "{label}");
+        }
     }
 }

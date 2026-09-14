@@ -20,17 +20,6 @@ function customAccount(id: string) {
   });
 }
 
-test("verify posts to the verify route with CAS tokens", async () => {
-  setupControlPlane(7);
-  const requests = installFetchMock(() => ({ account: customAccount("custom-1") }));
-
-  await dashboardApi.verifyAccountConnection("custom-1");
-
-  assert.equal(requests[0]?.url, "/dashboard/api/v3/accounts/custom-1/verify");
-  assert.equal(requests[0]?.method, "POST");
-  assert.deepEqual(requests[0]?.body, { expectedRevision: 7, processGeneration: 99 });
-});
-
 test("account model tests target one encoded account without CAS tokens", async () => {
   setupControlPlane(7);
   const requests = installFetchMock(() => ({

@@ -210,7 +210,7 @@ function timeWindowKey(model: PricingModel): string {
 
 /**
  * Converts flat API pricing into tree rows without changing the model IDs that
- * applications submit. A grouped parent is the standard tier with full prices;
+ * clients submit. A grouped parent is the standard tier with full prices;
  * only upgrade tiers are nested beneath it.
  */
 export function buildPricingTableRows(

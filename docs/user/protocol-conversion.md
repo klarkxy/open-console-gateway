@@ -7,36 +7,46 @@ request into whatever the upstream Plan actually understands. The conversion
 layer is deterministic: it resolves the Alias, checks account
 eligibility, applies the adapter ceiling and saved provider contract, checks
 the per-model/per-protocol effective state, and only then passthroughs or
-converts. A force_off or globally closed protocol wins — even if the model
-claims it supports it.
+converts. Explicit upstream protocol disablement takes precedence over
+baseline support.
 
-Each known OpenCode Go model starts from a hardcoded **preferred** protocol
-and a **supported** set, maintained after test-account probes. Protocol
-selection uses the saved contract. A successful probe on **Providers** can
-confirm or add support only within that adapter ceiling; failures are recorded
-but never remove static capability. If the client protocol is supported and
-effectively enabled, request and response pass through. Otherwise the gateway
-converts the **request body** to the preferred upstream protocol and the
-**response body** — or SSE stream — back to the client protocol. Custom API
+Protocol selection uses the saved provider contract. Explicit catalog refresh
+imports the official model list and protocol baseline: Go and Zen use the Go
+documentation, Command Code uses its provider documentation, and MiniMax CN / Kimi
+Code CN use their documented Chat and Messages family. Go, Zen, and Command Code
+fall back to Chat when the document omits a model or cannot be fetched. Saved
+overrides and probe evidence remain constrained by the sealed adapter. See
+[Providers](providers.md) for refresh and enablement controls; inference never
+refreshes a catalog or tries another upstream protocol to discover support.
+
+If the client protocol is enabled in the current model contract, request and
+response pass through. Otherwise the gateway converts the **request body** to
+the enabled preferred protocol, or the first remaining enabled protocol in adapter
+fallback order, and the **response body** — or SSE stream — back to the client
+protocol. Gemini always converts to an enabled upstream protocol. This rule
+applies to every Providers-catalog supplier, including user-defined
+Configurable HTTP mappings (one protocol per mapping). Custom API
 does the same to the account's declared upstream protocol, then honors that
-endpoint's contract and per-model overrides. Conversion covers text, system
+endpoint's contract and per-model overrides. CPA is unchanged and is not
+part of this conversion-default control. Conversion covers text, system
 instructions, images, tool calls and results, reasoning content, completion
-status, errors, and usage fields. `grok-4.6`, `grok-4.5`, and
-`gpt-5.6-luna` are Responses-only; `glm-5.3` and `glm-5.2` are Chat-only.
-Other client formats, including Gemini, convert instead of triggering an
-upstream protocol trial.
+status, errors, and usage fields. SSE usage, errors, and terminal state are
+parsed in event order, including responses that mix LF and CRLF event separators.
 
-| Preferred upstream | Models |
+The tables below describe code-owned alias profiles, not current provider
+availability. Refresh-written official baselines and saved enablement determine
+the actual default and available protocols shown on **Providers**.
+
+| Reference alias preference | Models |
 | --- | --- |
 | OpenAI Chat Completions | `glm-5.3-flash`, `glm-5.3`, `glm-5.2`, `glm-5.1`, `glm-5`, `kimi-k3`, `kimi-k2.7-code`, `kimi-k2.6`, `kimi-k2.5`, `deepseek-v4-pro`, `deepseek-v4-flash`, `deepseek-v4-flash-vision-exp`, `mimo-v2.5`, `mimo-v2.5-pro`, `hy3`, `longcat-2.0`, `big-pickle`, `deepseek-v4-flash-free`, `mimo-v2.5-free`, `nemotron-3-ultra-free`, `nemotron-3.5-lightning-free`, `ling-3.0-flash-fin-free`, `hy4-preview` |
 | OpenAI Responses | `grok-4.6`, `grok-4.5`, `gpt-5.6-luna`, `muse-spark-1.2`, `muse-spark-1.2-contributor`, `muse-spark-1.2-contributor-free`, `muse-spark-1.3-contributor-free` |
 | Anthropic Messages | `minimax-m3`, `minimax-m2.7`, `minimax-m2.7-highspeed`, `minimax-m2.5`, `minimax-m2.5-highspeed`, `qwen3.8-max`, `qwen3.8-flash`, `qwen3.7-max`, `qwen3.7-plus`, `qwen3.6-plus`, `qwen3.5-plus` |
 
-Passthrough matrix (checked-in official baseline, 2026-09-06). ✓ = the client
-protocol is forwarded as-is; empty = the baseline has no direct-passthrough
-evidence for that protocol. Provider catalogs and effective contracts still
-decide whether the model is routeable; a known but inadmissible model is
-rejected locally rather than converted or sent upstream. Source of truth:
+Alias-profile reference (the checked-in 2026-09-06 preferences and 2026-08-27
+Go `live_supported` paths). ✓ marks support in that code profile; it does not
+promise current direct passthrough. Provider catalogs and effective contracts
+decide whether a model and protocol are routable. The reference profiles live in
 `MODEL_PROTOCOLS` in `crates/ocg-domain/src/protocol.rs`.
 
 `reasoning.effort` aliases (applied before forwarding or conversion):
@@ -59,13 +69,13 @@ map `max` → `xhigh` (upstream rejects `max`). Other models pass
 | `muse-spark-1.2-contributor` | Responses | | ✓ | |
 | `muse-spark-1.2-contributor-free` | Responses | | ✓ | |
 | `muse-spark-1.3-contributor-free` | Responses | | ✓ | |
-| `kimi-k3` | Chat | ✓ | | |
+| `kimi-k3` | Chat | ✓ | | ✓ |
 | `kimi-k2.7-code` | Chat | ✓ | | |
 | `kimi-k2.6` | Chat | ✓ | | |
 | `kimi-k2.5` | Chat | ✓ | | |
-| `deepseek-v4-pro` | Chat | ✓ | | |
-| `deepseek-v4-flash` | Chat | ✓ | | |
-| `deepseek-v4-flash-vision-exp` | Chat | ✓ | | |
+| `deepseek-v4-pro` | Chat | ✓ | ✓ | ✓ |
+| `deepseek-v4-flash` | Chat | ✓ | ✓ | ✓ |
+| `deepseek-v4-flash-vision-exp` | Chat | ✓ | ✓ | ✓ |
 | `mimo-v2.5` | Chat | ✓ | | |
 | `mimo-v2.5-pro` | Chat | ✓ | | |
 | `hy3` | Chat | ✓ | | |
@@ -77,17 +87,17 @@ map `max` → `xhigh` (upstream rejects `max`). Other models pass
 | `nemotron-3.5-lightning-free` | Chat | ✓ | | |
 | `ling-3.0-flash-fin-free` | Chat | ✓ | | |
 | `hy4-preview` | Chat | ✓ | | |
-| `minimax-m3` | Messages | | | ✓ |
+| `minimax-m3` | Messages | ✓ | | ✓ |
 | `minimax-m2.7` | Messages | | | ✓ |
 | `minimax-m2.7-highspeed` | Messages | | | |
-| `minimax-m2.5` | Messages | | | ✓ |
+| `minimax-m2.5` | Messages | ✓ | | ✓ |
 | `minimax-m2.5-highspeed` | Messages | | | |
-| `qwen3.8-max` | Messages | | | ✓ |
+| `qwen3.8-max` | Messages | ✓ | | ✓ |
 | `qwen3.8-flash` | Messages | | | ✓ |
-| `qwen3.7-max` | Messages | | | ✓ |
-| `qwen3.7-plus` | Messages | | | ✓ |
-| `qwen3.6-plus` | Messages | | | ✓ |
-| `qwen3.5-plus` | Messages | | | ✓ |
+| `qwen3.7-max` | Messages | ✓ | | ✓ |
+| `qwen3.7-plus` | Messages | ✓ | | ✓ |
+| `qwen3.6-plus` | Messages | ✓ | | ✓ |
+| `qwen3.5-plus` | Messages | ✓ | | ✓ |
 
 Unknown model names return `400` on every supported client format — Chat
 Completions, Responses, Messages, and Gemini `generateContent` /
@@ -118,9 +128,13 @@ The following fields return `400` instead of being silently ignored:
 - `input_image.file_id` (the gateway has no Files API)
 
 Function, custom, and namespace tools convert normally. Hosted tools such as
-`web_search`, `web_search_preview`, and `tool_search` cannot run on
-OpenCode-Go; their declarations are dropped in automatic tool mode, and
-forcing one returns `400`.
+`web_search`, `web_search_preview`, and `tool_search` cannot run on a converted
+OpenCode-Go path. If they are the only tools or are forced, the gateway
+returns `400` before outbound instead of stripping them and continuing.
+When function tools remain, hosted declarations may still drop under the
+versioned `legacy_compat` profile, and that downgrade is recorded; stored
+protocol configuration is not rewritten. Native Responses passthrough keeps
+hosted tools.
 
 ## Gemini is a client-only format
 

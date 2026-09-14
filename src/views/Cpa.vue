@@ -1,21 +1,16 @@
 <template>
   <div class="cpa-page">
-    <header class="cpa-header">
-      <div>
-        <h1>{{ t("CPA 本机接入") }}</h1>
-        <p>{{ modeDescription }}</p>
-      </div>
-      <n-button secondary :loading="loading" @click="load">
-        {{ t("重试") }}
-      </n-button>
-    </header>
-
     <n-alert v-if="loadError" type="error" :title="t('加载 CPA 失败: {error}', { error: loadError })">
       <n-button size="small" secondary :loading="loading" @click="load">{{ t("重试") }}</n-button>
     </n-alert>
 
     <template v-else-if="integration">
       <n-tabs v-model:value="activeTab" type="line" animated class="cpa-tabs" display-directive="if">
+        <template #suffix>
+          <n-button secondary size="small" :loading="loading" @click="load">
+            {{ t("刷新") }}
+          </n-button>
+        </template>
         <n-tab-pane name="overview" :tab="t('概览')">
       <section class="cpa-section" aria-labelledby="cpa-overview-title">
         <h2 id="cpa-overview-title" class="cpa-section-title sr-only">{{ t("概览") }}</h2>
@@ -211,8 +206,6 @@
               >{{ t("添加客户端 Key") }}</n-button>
             </n-space>
           </template>
-          <p class="cpa-help">{{ t("OCG 使用受保护的路由 Key 访问 CPA；只有直连 CPA 时才需要额外 Key。") }}</p>
-
           <n-alert v-if="revealedSecret" type="success" class="cpa-secret" :title="t('新 Key 仅显示这一次')">
             <p>{{ t("请立即复制并妥善保存；关闭后将无法再次查看。") }}</p>
             <div class="cpa-secret-row">
@@ -238,8 +231,12 @@
                     <strong class="mono">{{ key.hint }}</strong>
                     <n-tag type="info" size="small">{{ t("OCG 路由 Key") }}</n-tag>
                   </div>
-                  <span class="cpa-muted">{{ t("指纹") }} · {{ key.fingerprint }}</span>
-                  <span class="cpa-muted">{{ t("由 OCG 管理的路由 Key，不能删除。") }}</span>
+                  <n-tooltip trigger="hover">
+                    <template #trigger>
+                      <span class="cpa-muted">{{ t("指纹") }} · {{ key.fingerprint.slice(0, 12) }}…</span>
+                    </template>
+                    {{ key.fingerprint }}
+                  </n-tooltip>
                 </div>
                 <n-button
                   size="small"
@@ -252,7 +249,12 @@
               <article v-for="key in keyPartition.directKeys" :key="key.fingerprint" class="cpa-key-row">
                 <div class="cpa-account-main">
                   <strong class="mono">{{ key.hint }}</strong>
-                  <span class="cpa-muted">{{ t("指纹") }} · {{ key.fingerprint }}</span>
+                  <n-tooltip trigger="hover">
+                    <template #trigger>
+                      <span class="cpa-muted">{{ t("指纹") }} · {{ key.fingerprint.slice(0, 12) }}…</span>
+                    </template>
+                    {{ key.fingerprint }}
+                  </n-tooltip>
                 </div>
                 <n-space wrap>
                   <n-button
@@ -284,9 +286,6 @@
         <h2 id="cpa-accounts-title" class="cpa-section-title sr-only">{{ t("账号") }}</h2>
 
         <n-card size="small" :title="t('CPA OAuth 账号')" class="cpa-card">
-          <template #header-extra>
-            <span class="cpa-muted">{{ t("OAuth 凭据由 CPA 保存；本机导入仅临时读取。") }}</span>
-          </template>
           <div class="cpa-cli-import-head"><strong>{{ t("新登录") }}</strong></div>
           <n-space wrap class="oauth-providers">
             <template v-for="provider in CPA_OAUTH_PROVIDERS" :key="provider.id">
@@ -367,28 +366,35 @@
               <n-button size="small" quaternary :loading="cliImportsLoading" @click="loadCliImports">{{ t("重新检测") }}</n-button>
             </div>
             <p class="cpa-help">
-              {{ t("仅在点击导入时读取本机 CLI 的登录信息并一次性复制到 CPA，源文件不会被修改。导入后与源 CLI 共享同一份授权，令牌刷新失败时可能需要重新登录。") }}
+              {{ t("导入时复制到 CPA，源文件不会被修改。") }}
             </p>
             <n-alert v-if="cliImportsError" type="warning" :title="t('检测本机 CLI 账号失败: {error}', { error: cliImportsError })">
               <n-button size="small" secondary :loading="cliImportsLoading" @click="loadCliImports">{{ t("重试") }}</n-button>
             </n-alert>
             <div v-else-if="cliImportsLoading && cliImports.length === 0" class="cpa-state"><n-spin size="small" /></div>
-            <div v-else-if="cliImports.length" class="cpa-key-list">
-              <article v-for="source in cliImports" :key="source.provider" class="cpa-key-row">
-                <div class="cpa-account-main">
-                  <strong>{{ cliImportProviderLabel(source.provider) }}</strong>
-                  <span class="cpa-muted mono">{{ source.source }}</span>
-                  <span v-if="!source.supported" class="cpa-muted">{{ source.reason ?? t("暂不支持导入该来源") }}</span>
-                  <span v-else-if="!source.available" class="cpa-muted">{{ source.reason ?? t("未检测到本机登录信息") }}</span>
-                </div>
+            <template v-else-if="cliImports.length">
+              <n-space wrap class="oauth-providers">
                 <n-button
-                  size="small"
-                  :disabled="!integration.configured || !source.supported || !source.available || !!oauth || !!oauthStartingAction || (!!cliImporting && cliImporting !== source.provider)"
+                  v-for="source in cliImports"
+                  :key="source.provider"
+                  secondary
+                  :disabled="cliImportDisabled(source)"
                   :loading="cliImporting === source.provider"
                   @click="importCliAccount(source)"
-                >{{ t("导入") }}</n-button>
-              </article>
-            </div>
+                >{{ t("导入 {provider}", { provider: cliImportProviderLabel(source.provider) }) }}</n-button>
+              </n-space>
+              <p v-if="cliImportBlockedSources.length" class="cpa-help cpa-cli-import-tip">
+                <n-tooltip trigger="hover">
+                  <template #trigger>
+                    <span class="cpa-cli-import-tip-text">{{ cliImportBlockedTip }}</span>
+                  </template>
+                  <p
+                    v-for="source in cliImportBlockedSources"
+                    :key="`${source.provider}-reason`"
+                  >{{ cliImportBlockedText(source) }}</p>
+                </n-tooltip>
+              </p>
+            </template>
             <p v-else class="cpa-help">{{ t("未检测到可导入的本机 CLI 账号。") }}</p>
             <n-alert v-if="cliImportNotice" :type="cliImportNotice.type" class="cpa-oauth-status" :show-icon="false">
               <p>{{ cliImportNotice.text }}</p>
@@ -419,15 +425,20 @@
                 </div>
                 <span class="cpa-muted">{{ account.provider }}<template v-if="account.email"> · {{ account.email }}</template></span>
                 <span v-if="account.statusMessage" class="cpa-muted">{{ account.statusMessage }}</span>
-                <span v-if="account.quota !== null" class="cpa-muted">{{ t("配额") }} · {{ formatCpaQuota(account.quota) }}</span>
+                <span v-if="formatCpaQuota(account.quota)" class="cpa-muted">{{ t("配额") }} · {{ formatCpaQuota(account.quota) }}</span>
               </div>
               <n-space v-if="account.mutable && !account.runtimeOnly && account.authIndex" wrap>
                 <n-button size="small" :loading="accountAction === cpaAccountKey(account)" @click="setAccountStatus(account, !account.disabled)">
                   {{ account.disabled ? t("启用") : t("停用") }}
                 </n-button>
-                <n-button v-if="account.authIndex" size="small" :loading="accountAction === cpaAccountKey(account)" @click="resetQuota(account)">
-                  {{ t("重置配额") }}
-                </n-button>
+                <n-tooltip v-if="account.authIndex" trigger="hover">
+                  <template #trigger>
+                    <n-button size="small" :loading="accountAction === cpaAccountKey(account)" @click="resetQuota(account)">
+                      {{ t("重置配额") }}
+                    </n-button>
+                  </template>
+                  {{ t("清除 CPA 为本账号记录的本机用量，不会重置供应商官方额度。") }}
+                </n-tooltip>
                 <n-button size="small" type="error" secondary :loading="accountAction === cpaAccountKey(account)" @click="confirmDeleteAccount(account)">
                   {{ t("删除") }}
                 </n-button>
@@ -445,16 +456,33 @@
           <div class="cpa-catalog-head">
             <div class="cpa-catalog-meta">
               <span>{{ modelCatalogDetail }}</span>
+              <span v-if="catalogModels.length">{{ t("已选 {selected} / {total}", { selected: catalogSelectedCount, total: catalogModels.length }) }}</span>
               <span v-if="catalogSourceUrl" class="mono">{{ t("来源") }} · {{ catalogSourceUrl }}</span>
             </div>
-            <n-button
-              type="primary"
-              :disabled="!integration.configured"
-              :loading="refreshingModels"
-              @click="refreshModels"
-            >{{ catalogRefreshingLabel }}</n-button>
+            <n-space wrap>
+              <n-button
+                size="small"
+                :disabled="!catalogModels.length || catalogAllEnabled"
+                @click="setCatalogEnabledAll(true)"
+              >{{ t("全部开启") }}</n-button>
+              <n-button
+                size="small"
+                :disabled="!catalogModels.length || catalogNoneEnabled"
+                @click="setCatalogEnabledAll(false)"
+              >{{ t("全部关闭") }}</n-button>
+              <n-button
+                type="primary"
+                :disabled="!integration.configured"
+                :loading="refreshingModels"
+                @click="refreshModels"
+              >{{ catalogRefreshingLabel }}</n-button>
+            </n-space>
           </div>
-          <div v-if="catalogLoading" class="cpa-state"><n-spin size="small" /></div>
+          <p v-if="catalogModels.length" class="cpa-help">{{ t("点选加入路由；新发现的默认关闭。") }}</p>
+          <n-alert v-if="!integration.configured" type="info" :title="t('请先在概览中配置并启动 CPA，再刷新模型目录。')">
+            <n-button size="small" @click="activeTab = 'overview'">{{ t('返回概览') }}</n-button>
+          </n-alert>
+          <div v-else-if="catalogLoading" class="cpa-state"><n-spin size="small" /></div>
           <n-alert v-else-if="catalogError" type="error" :title="t('加载模型目录失败: {error}', { error: catalogError })">
             <n-button size="small" secondary @click="loadCatalog">{{ t("重试") }}</n-button>
           </n-alert>
@@ -462,11 +490,20 @@
           <div v-else class="cpa-catalog-groups">
             <section v-for="group in catalogGroups" :key="group.source || 'unknown'" class="cpa-catalog-group">
               <h3>{{ group.source || t("未知来源") }} · {{ group.models.length }}</h3>
-              <ul>
-                <li v-for="model in group.models" :key="model.id">
+              <div class="cpa-catalog-cards">
+                <button
+                  v-for="model in group.models"
+                  :key="model.id"
+                  type="button"
+                  class="cpa-catalog-card"
+                  :class="{ 'is-selected': model.enabled }"
+                  :aria-pressed="model.enabled"
+                  :aria-label="model.id"
+                  @click="toggleCatalogModel(model)"
+                >
                   <code class="mono">{{ model.id }}</code>
-                </li>
-              </ul>
+                </button>
+              </div>
             </section>
           </div>
         </n-card>
@@ -478,10 +515,13 @@
         <h2 id="cpa-logs-title" class="cpa-section-title sr-only">{{ t("运行时日志") }}</h2>
 
         <n-card size="small" class="cpa-card">
-          <template #header-extra>
+          <template v-if="runtime?.installed" #header-extra>
             <n-button size="small" quaternary :loading="logsLoading" @click="refreshLogs">{{ t("刷新日志") }}</n-button>
           </template>
-          <div v-if="logsLoading" class="cpa-state"><n-spin size="small" /></div>
+          <n-alert v-if="!runtime?.installed" type="info" :title="t('CPA 尚未安装，请先在概览中安装。')">
+            <n-button size="small" @click="activeTab = 'overview'">{{ t('返回概览') }}</n-button>
+          </n-alert>
+          <div v-else-if="logsLoading" class="cpa-state"><n-spin size="small" /></div>
           <n-alert v-else-if="logsError" type="error" :title="t('加载 CPA 运行时日志失败: {error}', { error: logsError })">
             <n-button size="small" secondary @click="refreshLogs">{{ t("重试") }}</n-button>
           </n-alert>
@@ -519,6 +559,7 @@ import {
   NTabPane,
   NTabs,
   NTag,
+  NTooltip,
   useDialog,
   useMessage,
 } from "naive-ui";
@@ -527,7 +568,6 @@ import type {
   CpaCliImports,
   CpaConnectionReport,
   CpaIntegration,
-  CpaModel,
   CpaOAuthProvider,
   CpaOAuthStart,
   CpaRuntime,
@@ -538,6 +578,8 @@ import type {
   MutationExpectation,
 } from "../api/generated/dashboard-v3.ts";
 import { dashboardV3 } from "../api/dashboard-v3.ts";
+import { dashboardV4 } from "../api/dashboard-v4.ts";
+import type { CpaCatalog, CpaCatalogEntry } from "../api/generated/dashboard-v4.ts";
 import { useControlPlaneStore } from "../stores/controlPlane.ts";
 import { t } from "../i18n/index.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
@@ -545,6 +587,8 @@ import { useClipboard } from "../utils/format.ts";
 import {
   CPA_OAUTH_PROVIDERS,
   cpaAccountKey,
+  cpaCliImportAlreadyPresent,
+  cpaOAuthProviderForCliAccount,
   cpaClientKeysAvailable,
   cpaLogTail,
   cpaManagedRuntimeConfirmed,
@@ -572,7 +616,7 @@ const loadError = ref("");
 const saving = ref(false);
 const testing = ref(false);
 const refreshingModels = ref(false);
-const catalogModels = ref<CpaModel[]>([]);
+const catalogModels = ref<CpaCatalogEntry[]>([]);
 const catalogSourceUrl = ref<string | null>(null);
 const catalogLoading = ref(false);
 const catalogError = ref("");
@@ -601,6 +645,9 @@ const cliImportsError = ref("");
 // Single-flight provider key, mutually exclusive with any OAuth flow.
 const cliImporting = ref<string | null>(null);
 const cliImportNotice = ref<{ type: "success" | "warning"; text: string } | null>(null);
+// Providers confirmed imported this session. Complements account-name detection
+// so a successful import greys out immediately even if the account list is empty.
+const importedCliProviders = ref<CpaOAuthProvider[]>([]);
 
 const runtime = ref<CpaRuntime | null>(null);
 const runtimeError = ref("");
@@ -652,17 +699,39 @@ const controls = computed(() => cpaRuntimeControls({
 }));
 const keyPartition = computed(() => partitionCpaRuntimeKeys(runtimeKeys.value));
 const catalogGroups = computed(() => groupCpaCatalogModels(catalogModels.value));
+const catalogSelectedCount = computed(() => catalogModels.value.filter((model) => model.enabled).length);
+const catalogAllEnabled = computed(() => (
+  catalogModels.value.length > 0 && catalogSelectedCount.value === catalogModels.value.length
+));
+const catalogNoneEnabled = computed(() => catalogSelectedCount.value === 0);
 const catalogRefreshingLabel = computed(() => (
   refreshingModels.value ? t("正在刷新模型目录…") : t("刷新模型目录")
 ));
+// Catalog writes stay serial, but every click captures its own target snapshot
+// at enqueue time: a slow PUT response must never overwrite a newer selection.
+// Only the latest write of the current generation may apply a response or run
+// an error resync. Load, model refresh, disconnect, and page exit bump the
+// generation so queued writes from before them return quietly instead of
+// resurrecting a cleared integration or overwriting freshly loaded data.
+let catalogWriteGeneration = 0;
+let catalogWriteSeq = 0;
+let catalogWriteChain = Promise.resolve();
+
+function bumpCatalogWriteGeneration(): void {
+  catalogWriteGeneration += 1;
+}
+
+type CatalogWriteEpoch = { generation: number; seq: number };
+
+function currentCatalogWrite(): CatalogWriteEpoch {
+  return { generation: catalogWriteGeneration, seq: catalogWriteSeq };
+}
+
+function isCurrentCatalogWrite(epoch: CatalogWriteEpoch): boolean {
+  return epoch.generation === catalogWriteGeneration && epoch.seq === catalogWriteSeq;
+}
 const stdoutTail = computed(() => cpaLogTail(logs.value?.stdout ?? ""));
 const stderrTail = computed(() => cpaLogTail(logs.value?.stderr ?? ""));
-
-const modeDescription = computed(() => (
-  mode.value === "managed"
-    ? t("CPA 由 OCG 在本机托管安装与运行。OAuth 凭据始终由 CPA 保存。")
-    : t("将 OCG 连接到你自行安装的本机 CLI Proxy API。OAuth 凭据始终由 CPA 保存。")
-));
 
 const runtimeStateDetail = computed(() => {
   if (!runtime.value || !runtime.value.installed) return t("未安装");
@@ -718,6 +787,7 @@ async function runMutation<T>(run: (expectation: MutationExpectation) => Promise
 async function load(): Promise<void> {
   bumpRuntimePollGeneration();
   bumpCliImportGeneration();
+  bumpCatalogWriteGeneration();
   const generation = runtimePollGeneration;
   loading.value = true;
   loadError.value = "";
@@ -818,7 +888,11 @@ async function setRoutingEnabled(enabled: boolean): Promise<void> {
   }
 }
 
-function applyCatalog(snapshot: { models: CpaModel[]; sourceUrl: string | null; refreshedAt: string | null }): void {
+function catalogEnabledIds(models: readonly CpaCatalogEntry[]): string[] {
+  return models.filter((model) => model.enabled).map((model) => model.id);
+}
+
+function applyCatalog(snapshot: Pick<CpaCatalog, "models" | "sourceUrl" | "refreshedAt">): void {
   catalogModels.value = snapshot.models;
   catalogSourceUrl.value = snapshot.sourceUrl;
   catalogError.value = "";
@@ -837,12 +911,21 @@ function resetCatalog(): void {
   catalogError.value = "";
 }
 
+async function fetchCatalog(epoch?: CatalogWriteEpoch): Promise<void> {
+  const snapshot = await dashboardV4.getCpaCatalog();
+  // A read that started before a newer selection intent, or before a newer
+  // loaded generation, must not overwrite either one when it resolves.
+  if (epoch && !isCurrentCatalogWrite(epoch)) return;
+  applyCatalog(snapshot);
+}
+
 async function loadCatalog(): Promise<void> {
   if (catalogLoading.value) return;
   catalogLoading.value = true;
   catalogError.value = "";
+  const epoch = currentCatalogWrite();
   try {
-    applyCatalog(await dashboardV3.getCpaModels());
+    await fetchCatalog(epoch);
   } catch (error) {
     catalogError.value = dashboardErrorDetail(error);
   } finally {
@@ -850,13 +933,58 @@ async function loadCatalog(): Promise<void> {
   }
 }
 
+function persistCatalogSelection(): void {
+  const generation = catalogWriteGeneration;
+  const seq = (catalogWriteSeq += 1);
+  const enabledIds = catalogEnabledIds(catalogModels.value);
+  const isCurrentWrite = () => generation === catalogWriteGeneration && seq === catalogWriteSeq;
+  catalogWriteChain = catalogWriteChain.then(async () => {
+    if (!isCurrentWrite()) return;
+    try {
+      const snapshot = await runMutation((expectation) => dashboardV4.putCpaCatalog({ enabledIds }, expectation));
+      // A newer click or a newer loaded generation owns the UI now.
+      if (!isCurrentWrite()) return;
+      applyCatalog(snapshot);
+    } catch (error) {
+      if (!isCurrentWrite()) return;
+      const detail = dashboardErrorDetail(error);
+      try {
+        await fetchCatalog({ generation, seq });
+        // A newer click owns the selection now; its own save reports the outcome.
+        if (!isCurrentWrite()) return;
+      } catch (reloadError) {
+        if (!isCurrentWrite()) return;
+        catalogError.value = dashboardErrorDetail(reloadError);
+      }
+      message.error(t("CPA 模型选择失败: {error}", { error: detail }));
+    }
+  });
+}
+
+function toggleCatalogModel(model: CpaCatalogEntry): void {
+  catalogModels.value = catalogModels.value.map((row) => (
+    row.id === model.id ? { ...row, enabled: !row.enabled } : row
+  ));
+  persistCatalogSelection();
+}
+
+function setCatalogEnabledAll(enabled: boolean): void {
+  catalogModels.value = catalogModels.value.map((row) => ({ ...row, enabled }));
+  persistCatalogSelection();
+}
+
 async function refreshModels(): Promise<void> {
   if (refreshingModels.value) return;
+  bumpCatalogWriteGeneration();
+  const epoch = currentCatalogWrite();
   refreshingModels.value = true;
   try {
-    const models = await runMutation((expectation) => dashboardV3.refreshCpaModels(expectation));
-    applyCatalog(models);
-    message.success(t("模型目录已刷新，共 {count} 个模型", { count: models.models.length }));
+    await runMutation((expectation) => dashboardV3.refreshCpaModels(expectation));
+    const snapshot = await dashboardV4.getCpaCatalog();
+    // A selection made while the refresh was in flight owns the UI now;
+    // its own save applies instead of this older snapshot.
+    if (isCurrentCatalogWrite(epoch)) applyCatalog(snapshot);
+    message.success(t("模型目录已刷新，共 {count} 个模型", { count: snapshot.models.length }));
   } catch (error) {
     message.error(t("CPA 模型刷新失败: {error}", { error: dashboardErrorDetail(error) }));
   } finally {
@@ -926,6 +1054,10 @@ async function deleteAccount(account: CpaAccount): Promise<void> {
       authIndex: account.authIndex!,
     }, expectation));
     await loadAccounts();
+    const importedProvider = cpaOAuthProviderForCliAccount(account);
+    if (importedProvider && !cpaCliImportAlreadyPresent(importedProvider, cpaAccounts.value)) {
+      unmarkCliProviderImported(importedProvider);
+    }
   } catch (error) {
     message.error(t("CPA 账号操作失败: {error}", { error: dashboardErrorDetail(error) }));
   } finally {
@@ -1060,10 +1192,53 @@ function cliImportProviderLabel(provider: CpaOAuthProvider): string {
   return CPA_OAUTH_PROVIDERS.find((entry) => entry.id === provider)?.label ?? provider;
 }
 
+function cliImportAlreadyDone(provider: CpaOAuthProvider): boolean {
+  return importedCliProviders.value.includes(provider)
+    || cpaCliImportAlreadyPresent(provider, cpaAccounts.value);
+}
+
+function cliImportDisabled(source: CpaCliImportSource): boolean {
+  return !integration.value?.configured
+    || !source.supported
+    || !source.available
+    || cliImportAlreadyDone(source.provider)
+    || !!oauth.value
+    || !!oauthStartingAction.value
+    || (!!cliImporting.value && cliImporting.value !== source.provider);
+}
+
+const cliImportBlockedSources = computed(() => (
+  cliImports.value.filter((source) => !source.supported || !source.available)
+));
+
+const cliImportBlockedTip = computed(() => {
+  const providers = cliImportBlockedSources.value
+    .map((source) => cliImportProviderLabel(source.provider))
+    .join("、");
+  return t("{providers} 无法从本机导入，请改用上方登录。", { providers });
+});
+
+function cliImportBlockedText(source: CpaCliImportSource): string {
+  const reason = source.reason
+    ?? (!source.supported ? t("暂不支持导入该来源") : t("未检测到本机登录信息"));
+  return `${cliImportProviderLabel(source.provider)} · ${source.source} · ${reason}`;
+}
+
+function markCliProviderImported(provider: CpaOAuthProvider): void {
+  if (!importedCliProviders.value.includes(provider)) {
+    importedCliProviders.value = [...importedCliProviders.value, provider];
+  }
+}
+
+function unmarkCliProviderImported(provider: CpaOAuthProvider): void {
+  importedCliProviders.value = importedCliProviders.value.filter((id) => id !== provider);
+}
+
 function resetCliImports(): void {
   cliImports.value = [];
   cliImportsError.value = "";
   cliImportNotice.value = null;
+  importedCliProviders.value = [];
 }
 
 // Discovery and import responses older than the latest load, disconnect, or
@@ -1099,6 +1274,7 @@ async function loadCliImports(): Promise<void> {
 async function importCliAccount(source: CpaCliImportSource): Promise<void> {
   if (cliImporting.value || oauth.value || oauthStartingAction.value) return;
   if (!integration.value?.configured || !source.supported || !source.available) return;
+  if (cliImportAlreadyDone(source.provider)) return;
   const generation = cliImportGeneration;
   cliImporting.value = source.provider;
   cliImportNotice.value = null;
@@ -1113,6 +1289,7 @@ async function importCliAccount(source: CpaCliImportSource): Promise<void> {
     } else {
       // Product copy names the provider, never the hashed implementation file.
       const provider = cliImportProviderLabel(result.provider);
+      markCliProviderImported(result.provider);
       cliImportNotice.value = {
         type: "success",
         text: result.outcome === "alreadyImported"
@@ -1148,6 +1325,7 @@ function confirmDisconnect(): void {
 
 async function disconnect(): Promise<void> {
   bumpCliImportGeneration();
+  bumpCatalogWriteGeneration();
   disconnecting.value = true;
   try {
     await runMutation((expectation) => dashboardV3.deleteCpaIntegration(expectation));
@@ -1337,14 +1515,14 @@ function confirmRemoveRuntime(): void {
 
 // Logs live in their own tab: load them on first visit, and fall back to the
 // overview tab if the active pane disappears with the managed runtime.
-watch([activeTab, mode], () => {
+watch([activeTab, mode, () => runtime.value?.installed], () => {
   if (activeTab.value === "keys") activeTab.value = "overview";
   if (activeTab.value === "logs" && mode.value !== "managed") activeTab.value = "overview";
   if (activeTab.value === "logs" && !logs.value && !logsLoading.value) void refreshLogs();
 });
 
 async function refreshLogs(): Promise<void> {
-  if (logsLoading.value) return;
+  if (logsLoading.value || !runtime.value?.installed) return;
   logsLoading.value = true;
   logsError.value = "";
   try {
@@ -1453,21 +1631,21 @@ onDeactivated(() => {
   cancelOAuthOnLeave();
   bumpRuntimePollGeneration();
   bumpCliImportGeneration();
+  bumpCatalogWriteGeneration();
 });
 onBeforeUnmount(() => {
   window.removeEventListener("pagehide", cancelOAuthOnLeave);
   cancelOAuthOnLeave();
   bumpRuntimePollGeneration();
   bumpCliImportGeneration();
+  bumpCatalogWriteGeneration();
   cleanupClipboard();
 });
 </script>
 
 <style scoped>
 .cpa-page { display: grid; gap: 16px; max-width: 1060px; }
-.cpa-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
-.cpa-header h1 { margin: 0; color: var(--ocg-ink); font-size: var(--ocg-font-xl); }
-.cpa-header p, .cpa-help, .cpa-danger p { margin: 6px 0 0; color: var(--ocg-muted); line-height: 1.6; }
+.cpa-help, .cpa-danger p { margin: 6px 0 0; color: var(--ocg-muted); line-height: 1.6; }
 .cpa-section { display: grid; gap: 12px; }
 .cpa-section-title { margin: 8px 0 0; color: var(--ocg-ink); font-size: var(--ocg-font-lg); }
 .cpa-tabs :deep(.n-tabs-nav) { margin-bottom: 12px; }
@@ -1509,15 +1687,33 @@ onBeforeUnmount(() => {
 }
 .cpa-cli-import { display: grid; gap: 8px; margin-top: 16px; }
 .cpa-cli-import-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 2px; color: var(--ocg-ink); }
-.cpa-cli-import .cpa-key-list { margin-top: 0; }
 .cpa-cli-import .cpa-help { margin: 0; }
+.cpa-cli-import-tip { width: fit-content; max-width: 100%; }
+.cpa-cli-import-tip-text {
+  border-bottom: 1px dotted currentColor;
+  cursor: help;
+}
 .cpa-state { display: grid; justify-content: center; padding: 20px; }
 .cpa-catalog-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .cpa-catalog-meta { display: flex; flex-wrap: wrap; gap: 8px 16px; color: var(--ocg-muted); font-size: var(--ocg-font-sm); }
 .cpa-catalog-groups { display: grid; gap: 16px; margin-top: 14px; }
 .cpa-catalog-group h3 { margin: 0 0 8px; color: var(--ocg-muted); font-size: var(--ocg-font-sm); font-weight: 600; }
-.cpa-catalog-group ul { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
-.cpa-catalog-group li { padding: 8px 12px; border: 1px solid var(--ocg-divider); border-radius: 10px; }
+.cpa-catalog-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 8px; }
+.cpa-catalog-card {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--ocg-divider);
+  border-radius: 10px;
+  background: var(--ocg-surface);
+  color: var(--ocg-ink);
+  text-align: left;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.cpa-catalog-card.is-selected {
+  border-color: var(--ocg-success);
+  background: var(--ocg-success-soft);
+}
 .cpa-account-list, .cpa-key-list { display: grid; gap: 8px; margin-top: 14px; }
 .cpa-account-row, .cpa-key-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px; border: 1px solid var(--ocg-divider); border-radius: 10px; }
 .cpa-account-main { display: grid; gap: 4px; min-width: 0; }
@@ -1535,7 +1731,7 @@ onBeforeUnmount(() => {
 }
 .cpa-danger { border-color: color-mix(in srgb, var(--ocg-error) 34%, var(--ocg-divider)); }
 @media (max-width: 760px) {
-  .cpa-header, .cpa-account-row, .cpa-key-row, .cpa-catalog-head { align-items: stretch; flex-direction: column; }
+  .cpa-account-row, .cpa-key-row, .cpa-catalog-head { align-items: stretch; flex-direction: column; }
   .cpa-status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 </style>

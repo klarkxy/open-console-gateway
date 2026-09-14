@@ -9,6 +9,15 @@ use crate::provider::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// Ready Key accounts are created disabled. The operator enables them after
+/// checking the connection. Import, toggle, and managed Key-verify keep their
+/// own stored or completed state. Connection tests never flip this.
+pub const NEW_READY_KEY_ACCOUNT_ENABLED: bool = false;
+
+/// The default All-scope inference binding stays authorized. The account
+/// switch is the draft/live gate; Edit binding can still disable that Key.
+pub const DEFAULT_INFERENCE_BINDING_ENABLED: bool = true;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Account {
     pub id: String,

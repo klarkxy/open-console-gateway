@@ -1821,6 +1821,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
+name = "hmac"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
+dependencies = [
+ "digest",
+]
+
+[[package]]
 name = "html5ever"
 version = "0.38.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2777,7 +2786,7 @@ dependencies = [
 
 [[package]]
 name = "ocg-browser-worker"
-version = "2.2.1"
+version = "2.3.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2793,7 +2802,7 @@ dependencies = [
 
 [[package]]
 name = "ocg-core"
-version = "2.2.1"
+version = "2.3.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2805,6 +2814,8 @@ dependencies = [
  "flate2",
  "futures-util",
  "getrandom 0.3.4",
+ "hex",
+ "hmac",
  "nix",
  "ocg-domain",
  "ocg-gateway",
@@ -2830,16 +2841,18 @@ dependencies = [
 
 [[package]]
 name = "ocg-domain"
-version = "2.2.1"
+version = "2.3.0"
 dependencies = [
  "chrono",
+ "schemars 1.2.2",
  "serde",
  "serde_json",
+ "uuid",
 ]
 
 [[package]]
 name = "ocg-gateway"
-version = "2.2.1"
+version = "2.3.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2850,19 +2863,21 @@ dependencies = [
 
 [[package]]
 name = "ocg-infra"
-version = "2.2.1"
+version = "2.3.0"
 dependencies = [
+ "aes-gcm",
  "anyhow",
  "base64 0.22.1",
  "futures-util",
  "reqwest 0.12.28",
  "rusqlite",
+ "sha2",
  "uuid",
 ]
 
 [[package]]
 name = "ocg-manager"
-version = "2.2.1"
+version = "2.3.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2872,22 +2887,19 @@ dependencies = [
  "parking_lot",
  "serde",
  "serde_json",
- "serde_yaml",
- "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-shell",
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
  "tokio",
- "toml_edit 0.25.12+spec-1.1.0",
  "uuid",
  "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "ocg-manager-cli"
-version = "2.2.1"
+version = "2.3.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4028,19 +4040,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "serde_yaml"
-version = "0.9.34+deprecated"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a8b1a1a2ebf674015cc02edccce75287f1a0130d394307b36743c2f5d504b47"
-dependencies = [
- "indexmap 2.14.0",
- "itoa",
- "ryu",
- "serde",
- "unsafe-libyaml",
-]
-
-[[package]]
 name = "serialize-to-javascript"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4081,6 +4080,12 @@ dependencies = [
  "cpufeatures 0.2.17",
  "digest",
 ]
+
+[[package]]
+name = "sha1_smol"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbfa15b3dddfee50a0fff136974b3e1bde555604ba463834a7eb7deb6417705d"
 
 [[package]]
 name = "sha2"
@@ -5030,7 +5035,6 @@ dependencies = [
  "indexmap 2.14.0",
  "toml_datetime 1.1.1+spec-1.1.0",
  "toml_parser",
- "toml_writer",
  "winnow 1.0.3",
 ]
 
@@ -5260,12 +5264,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "unsafe-libyaml"
-version = "0.2.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
-
-[[package]]
 name = "untrusted"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5317,6 +5315,7 @@ dependencies = [
  "getrandom 0.4.3",
  "js-sys",
  "serde_core",
+ "sha1_smol",
  "wasm-bindgen",
 ]
 

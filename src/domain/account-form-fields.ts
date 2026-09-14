@@ -19,7 +19,11 @@ export function resolveAccountFormFields(
 ): ProviderCatalogFormField[] {
   if (!plan) return [];
   if (plan.id === "dynamic-http") {
-    const fields = [...(catalogEntry?.form_fields ?? [])];
+    // User-defined Providers model no billing cadence: lifecycle date fields
+    // never apply to their accounts, even if a stale catalog row declares
+    // them.
+    const fields = [...(catalogEntry?.form_fields ?? [])]
+      .filter((field) => field.id !== "purchase_date");
     if (fields.length > 0) return fields;
     const fallback: ProviderCatalogFormField[] = [
       { id: "name", kind: "text", required: true, immutable_after_create: false },

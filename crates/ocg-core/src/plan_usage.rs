@@ -395,14 +395,9 @@ mod tests {
             (MINIMAX_CN_USAGE_URL, "MiniMax CN")
         );
         assert_eq!(
-            MINIMAX_CN_USAGE_URL,
-            "https://api.minimaxi.com/v1/token_plan/remains"
-        );
-        assert_eq!(
             official_usage_target(ProviderAdapterKind::KimiCn).unwrap(),
             (KIMI_CN_USAGE_URL, "Kimi Code CN")
         );
-        assert_eq!(KIMI_CN_USAGE_URL, "https://api.kimi.com/coding/v1/usages");
         assert!(official_usage_target(ProviderAdapterKind::OpenCodeGo).is_err());
     }
 

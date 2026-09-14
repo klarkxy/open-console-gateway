@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-#[path = "fixtures/v2/harness.rs"]
+#[path = "fixtures/blackbox/harness.rs"]
 mod harness;
 
 use harness::*;
@@ -56,21 +56,31 @@ fn protocol_success_replies(
 }
 
 async fn verify_account(harness: &BlackBoxHarness, id: &str) -> (StatusCode, Value) {
-    harness
+    let (status, body) = harness
         .post_json(
             &format!("/accounts/{id}/verify"),
-            &json!({ "expected_revision": harness.settings_revision().await }),
+            &json!({ "expectedRevision": harness.settings_revision().await }),
         )
-        .await
+        .await;
+    if status.is_success() {
+        (status, mutation_account(body))
+    } else {
+        (status, body)
+    }
 }
 
 async fn toggle_account(harness: &BlackBoxHarness, id: &str) -> (StatusCode, Value) {
-    harness
+    let (status, body) = harness
         .post_json(
             &format!("/accounts/{id}/toggle"),
-            &json!({ "expected_revision": harness.settings_revision().await }),
+            &json!({ "expectedRevision": harness.settings_revision().await }),
         )
-        .await
+        .await;
+    if status.is_success() {
+        (status, mutation_account(body))
+    } else {
+        (status, body)
+    }
 }
 
 async fn ensure_account_enabled(harness: &BlackBoxHarness, id: &str) {
@@ -101,32 +111,33 @@ async fn create_verified_enabled_custom(
     let endpoint = custom_endpoint(&origin, protocol);
     let (status, draft) = harness
         .create_account(json!({
-            "provider_id": CUSTOM_PROVIDER_ID,
+            "providerId": CUSTOM_PROVIDER_ID,
             "name": name,
             "key": key,
-            "expected_revision": harness.settings_revision().await,
-            "custom_config": {
-                "endpoint_url": endpoint,
-                "upstream_protocol": protocol
+            "expectedRevision": harness.settings_revision().await,
+            "customConfig": {
+                "endpointUrl": endpoint,
+                "upstreamProtocol": protocol
             },
-            "model_capabilities": [{
-                "model_id": model_id,
+            "modelCapabilities": [{
+                "modelId": model_id,
                 "protocol": protocol
             }]
         }))
         .await;
     assert_eq!(status, StatusCode::OK, "{draft}");
-    assert_eq!(draft["enabled"], true, "{draft}");
-    assert_eq!(draft["verification_status"].as_str(), Some("pending"));
+    assert_eq!(draft["enabled"], false, "{draft}");
+    assert_eq!(draft["verificationStatus"].as_str(), Some("pending"));
     let id = draft["id"].as_str().unwrap().to_string();
+    harness.enable_stored_account(&id);
     let (status, verified) = verify_account(harness, &id).await;
     assert_eq!(status, StatusCode::OK, "{verified}");
     assert_eq!(
         verified["enabled"], true,
-        "verify must keep the default-enabled card: {verified}"
+        "verify must not change an enabled card: {verified}"
     );
     assert_eq!(
-        verified["verification_status"].as_str(),
+        verified["verificationStatus"].as_str(),
         Some("verified"),
         "{verified}"
     );
@@ -143,24 +154,25 @@ async fn create_verified_enabled_custom_mapping(
     let origin = custom_origin(harness);
     let (status, draft) = harness
         .create_account(json!({
-            "provider_id": CUSTOM_PROVIDER_ID,
+            "providerId": CUSTOM_PROVIDER_ID,
             "name": name,
             "key": key,
-            "expected_revision": harness.settings_revision().await,
-            "custom_config": {
-                "endpoint_url": custom_endpoint(&origin, "chat_completions"),
-                "upstream_protocol": "chat_completions"
+            "expectedRevision": harness.settings_revision().await,
+            "customConfig": {
+                "endpointUrl": custom_endpoint(&origin, "chat_completions"),
+                "upstreamProtocol": "chat_completions"
             },
-            "model_capabilities": [{
-                "public_model": public_model,
-                "upstream_model": upstream_model,
+            "modelCapabilities": [{
+                "publicModel": public_model,
+                "upstreamModel": upstream_model,
                 "protocol": "chat_completions"
             }]
         }))
         .await;
     assert_eq!(status, StatusCode::OK, "{draft}");
-    let id = draft["id"].as_str().unwrap();
-    let (status, verified) = verify_account(harness, id).await;
+    let id = draft["id"].as_str().unwrap().to_string();
+    harness.enable_stored_account(&id);
+    let (status, verified) = verify_account(harness, &id).await;
     assert_eq!(status, StatusCode::OK, "{verified}");
     verified
 }
@@ -172,11 +184,11 @@ async fn custom_catalog_is_routable_with_available_verification() {
     let custom = catalog_entry(&catalog, CUSTOM_PROVIDER_ID).unwrap();
     assert_eq!(custom["routable"], true, "{custom}");
     assert_eq!(
-        custom["verification_runtime_availability"].as_str(),
+        custom["verificationRuntimeAvailability"].as_str(),
         Some("available")
     );
-    assert_eq!(custom["pricing_availability"].as_str(), Some("unpriced"));
-    assert_eq!(custom["usage_availability"].as_str(), Some("unavailable"));
+    assert_eq!(custom["pricingAvailability"].as_str(), Some("unpriced"));
+    assert_eq!(custom["usageAvailability"].as_str(), Some("unavailable"));
     harness.shutdown();
 }
 
@@ -197,16 +209,16 @@ async fn verification_failure_persists_failed_without_enabling() {
     let (status, body) = verify_account(&harness, &id).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(
-        body["enabled"], true,
-        "failed verify must not disable a default-enabled Custom card: {body}"
+        body["enabled"], false,
+        "failed verify must not change the card's enabled state: {body}"
     );
     assert_eq!(
-        body["verification_status"].as_str(),
+        body["verificationStatus"].as_str(),
         Some("failed"),
         "{body}"
     );
     assert!(
-        body["verification_error"]
+        body["verificationError"]
             .as_str()
             .is_some_and(|error| !error.is_empty()),
         "{body}"
@@ -279,11 +291,11 @@ async fn chat_bearer_verifies_lists_resolves_and_logs_unknown_cost() {
         .as_array()
         .and_then(|items| items.first())
         .unwrap();
-    assert_eq!(item["provider_id"].as_str(), Some(CUSTOM_PROVIDER_ID));
-    assert_eq!(item["account_id"], account["id"]);
-    assert_eq!(item["requested_model"].as_str(), Some(CUSTOM_MODEL));
-    assert_eq!(item["upstream_model"].as_str(), Some(CUSTOM_MODEL));
-    assert_eq!(item["cost_state"].as_str(), Some("unknown"));
+    assert_eq!(item["providerId"].as_str(), Some(CUSTOM_PROVIDER_ID));
+    assert_eq!(item["accountId"], account["id"]);
+    assert_eq!(item["requestedModel"].as_str(), Some(CUSTOM_MODEL));
+    assert_eq!(item["upstreamModel"].as_str(), Some(CUSTOM_MODEL));
+    assert_eq!(item["costState"].as_str(), Some("unknown"));
     assert!(item["cost"].is_null(), "{item}");
     harness.shutdown();
 }
@@ -332,10 +344,10 @@ async fn public_custom_alias_materializes_upstream_model_and_logs_all_three_iden
         .as_array()
         .and_then(|items| items.first())
         .unwrap();
-    assert_eq!(item["account_id"], account["id"]);
-    assert_eq!(item["requested_model"], MAPPED_PUBLIC_MODEL);
-    assert_eq!(item["resolved_alias"], MAPPED_PUBLIC_MODEL);
-    assert_eq!(item["upstream_model"], MAPPED_UPSTREAM_MODEL);
+    assert_eq!(item["accountId"], account["id"]);
+    assert_eq!(item["requestedModel"], MAPPED_PUBLIC_MODEL);
+    assert_eq!(item["resolvedAlias"], MAPPED_PUBLIC_MODEL);
+    assert_eq!(item["upstreamModel"], MAPPED_UPSTREAM_MODEL);
     harness.shutdown();
 }
 
@@ -492,7 +504,7 @@ async fn overlap_keeps_go_mapping_and_undeclared_models_are_excluded() {
         }
     });
     let (status, body) = harness
-        .put_json("/accounts/order", &json!({ "account_ids": account_ids }))
+        .put_json("/accounts/order", &json!({ "accountIds": account_ids }))
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let _ = custom;
@@ -505,8 +517,8 @@ async fn overlap_keeps_go_mapping_and_undeclared_models_are_excluded() {
         .as_array()
         .and_then(|items| items.first())
         .unwrap();
-    assert_eq!(item["account_id"], go["id"]);
-    assert_eq!(item["provider_id"].as_str(), Some(OPENCODE_PROVIDER_ID));
+    assert_eq!(item["accountId"], go["id"]);
+    assert_eq!(item["providerId"].as_str(), Some(OPENCODE_PROVIDER_ID));
 
     let (status, body) = harness.chat(CUSTOM_MODEL).await;
     assert_ne!(
@@ -519,10 +531,9 @@ async fn overlap_keeps_go_mapping_and_undeclared_models_are_excluded() {
     let logs = harness.forward_logs().await;
     let items = logs["items"].as_array().cloned().unwrap_or_default();
     assert!(
-        items
-            .iter()
-            .any(|item| item["account_id"] == other["id"]
-                && item["requested_model"] == CUSTOM_MODEL_2),
+        items.iter().any(
+            |item| item["accountId"] == other["id"] && item["requestedModel"] == CUSTOM_MODEL_2
+        ),
         "{items:?}"
     );
     harness.shutdown();
@@ -578,28 +589,29 @@ async fn same_custom_model_uses_account_order_and_config_change_stales() {
     );
     let logs = harness.forward_logs().await;
     let items = logs["items"].as_array().cloned().unwrap_or_default();
-    assert!(items.iter().any(|item| item["account_id"] == second["id"]));
+    assert!(items.iter().any(|item| item["accountId"] == second["id"]));
 
     let (status, updated) = harness
         .put_json(
             &format!("/accounts/{}/custom-config", first["id"].as_str().unwrap()),
             &json!({
-                "endpoint_url": format!("{}/v2/chat/completions", custom_origin(&harness)),
-                "upstream_protocol": "chat_completions",
-                "model_capabilities": [{
-                    "model_id": CUSTOM_MODEL,
+                "endpointUrl": format!("{}/v2/chat/completions", custom_origin(&harness)),
+                "upstreamProtocol": "chat_completions",
+                "modelCapabilities": [{
+                    "modelId": CUSTOM_MODEL,
                     "protocol": "chat_completions"
                 }]
             }),
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{updated}");
+    let updated = mutation_account(updated);
     assert_eq!(
         updated["enabled"], true,
         "config edits keep the account enabled: {updated}"
     );
     assert_eq!(
-        updated["verification_status"].as_str(),
+        updated["verificationStatus"].as_str(),
         Some("pending"),
         "{updated}"
     );
@@ -608,21 +620,21 @@ async fn same_custom_model_uses_account_order_and_config_change_stales() {
 
 #[tokio::test]
 async fn custom_stream_does_not_cross_account_retry_after_output() {
-    let harness = start_v2_with_disconnect_upstream().await;
+    let harness = start_with_disconnect_upstream().await;
     let origin = custom_origin(&harness);
     let first = {
         let (status, draft) = harness
             .create_account(json!({
-                "provider_id": CUSTOM_PROVIDER_ID,
+                "providerId": CUSTOM_PROVIDER_ID,
                 "name": "custom-one",
                 "key": CUSTOM_ACCOUNT_KEY,
-                "expected_revision": harness.settings_revision().await,
-                "custom_config": {
-                    "endpoint_url": custom_endpoint(&origin, "chat_completions"),
-                    "upstream_protocol": "chat_completions"
+                "expectedRevision": harness.settings_revision().await,
+                "customConfig": {
+                    "endpointUrl": custom_endpoint(&origin, "chat_completions"),
+                    "upstreamProtocol": "chat_completions"
                 },
-                "model_capabilities": [{
-                    "model_id": CUSTOM_MODEL,
+                "modelCapabilities": [{
+                    "modelId": CUSTOM_MODEL,
                     "protocol": "chat_completions"
                 }]
             }))
@@ -647,16 +659,16 @@ async fn custom_stream_does_not_cross_account_retry_after_output() {
     let second_id = {
         let (status, draft) = harness
             .create_account(json!({
-                "provider_id": CUSTOM_PROVIDER_ID,
+                "providerId": CUSTOM_PROVIDER_ID,
                 "name": "custom-two",
                 "key": CUSTOM_KEY_2,
-                "expected_revision": harness.settings_revision().await,
-                "custom_config": {
-                    "endpoint_url": custom_endpoint(&origin, "chat_completions"),
-                    "upstream_protocol": "chat_completions"
+                "expectedRevision": harness.settings_revision().await,
+                "customConfig": {
+                    "endpointUrl": custom_endpoint(&origin, "chat_completions"),
+                    "upstreamProtocol": "chat_completions"
                 },
-                "model_capabilities": [{
-                    "model_id": CUSTOM_MODEL,
+                "modelCapabilities": [{
+                    "modelId": CUSTOM_MODEL,
                     "protocol": "chat_completions"
                 }]
             }))
@@ -759,22 +771,22 @@ async fn create_pending_custom(
     let endpoint = custom_endpoint(base_url, protocol);
     let (status, draft) = harness
         .create_account(json!({
-            "provider_id": CUSTOM_PROVIDER_ID,
+            "providerId": CUSTOM_PROVIDER_ID,
             "name": name,
             "key": key,
-            "expected_revision": harness.settings_revision().await,
-            "custom_config": {
-                "endpoint_url": endpoint,
-                "upstream_protocol": protocol
+            "expectedRevision": harness.settings_revision().await,
+            "customConfig": {
+                "endpointUrl": endpoint,
+                "upstreamProtocol": protocol
             },
-            "model_capabilities": [{
-                "model_id": model_id,
+            "modelCapabilities": [{
+                "modelId": model_id,
                 "protocol": protocol
             }]
         }))
         .await;
     assert_eq!(status, StatusCode::OK, "{draft}");
-    assert_eq!(draft["verification_status"].as_str(), Some("pending"));
+    assert_eq!(draft["verificationStatus"].as_str(), Some("pending"));
     draft
 }
 
@@ -923,21 +935,26 @@ async fn mark_verified_and_enable(harness: &BlackBoxHarness, id: &str) {
 }
 
 async fn patch_account_key(harness: &BlackBoxHarness, id: &str, key: &str) -> (StatusCode, Value) {
-    harness
+    let (status, body) = harness
         .patch_json(
             &format!("/accounts/{id}"),
             &json!({
                 "key": key,
-                "expected_revision": harness.settings_revision().await
+                "expectedRevision": harness.settings_revision().await
             }),
         )
-        .await
+        .await;
+    if status.is_success() {
+        (status, mutation_account(body))
+    } else {
+        (status, body)
+    }
 }
 
 #[tokio::test]
 async fn delayed_verify_probe_conflicts_on_key_config_caps_delete_and_concurrent() {
     async fn delayed_key_race() {
-        let held = HeldJsonServer::start(200, r#"{"id":"ok"}"#).await;
+        let held = HeldJsonServer::start(200, SUCCESS_CHAT_BODY).await;
         let harness = BlackBoxHarness::start().await;
         let draft = create_pending_custom(
             &harness,
@@ -959,17 +976,17 @@ async fn delayed_verify_probe_conflicts_on_key_config_caps_delete_and_concurrent
         held.wait_hits(1).await;
         let (status, updated) = patch_account_key(&harness, &id, CUSTOM_KEY_2).await;
         assert_eq!(status, StatusCode::OK, "{updated}");
-        assert_eq!(updated["verification_status"].as_str(), Some("pending"));
+        assert_eq!(updated["verificationStatus"].as_str(), Some("pending"));
         held.release();
         let response = verify.await.unwrap();
         assert_eq!(response.status(), StatusCode::CONFLICT);
         let after = harness.account_by_id(&id).await;
-        assert_eq!(after["verification_status"].as_str(), Some("pending"));
+        assert_eq!(after["verificationStatus"].as_str(), Some("pending"));
         harness.shutdown();
     }
 
     async fn delayed_config_race() {
-        let held = HeldJsonServer::start(200, r#"{"id":"ok"}"#).await;
+        let held = HeldJsonServer::start(200, SUCCESS_CHAT_BODY).await;
         let harness = BlackBoxHarness::start().await;
         let draft = create_pending_custom(
             &harness,
@@ -993,10 +1010,10 @@ async fn delayed_verify_probe_conflicts_on_key_config_caps_delete_and_concurrent
             .put_json(
                 &format!("/accounts/{id}/custom-config"),
                 &json!({
-                    "endpoint_url": "http://127.0.0.1:1/v1/chat/completions",
-                    "upstream_protocol": "chat_completions",
-                    "model_capabilities": [{
-                        "model_id": CUSTOM_MODEL,
+                    "endpointUrl": "http://127.0.0.1:1/v1/chat/completions",
+                    "upstreamProtocol": "chat_completions",
+                    "modelCapabilities": [{
+                        "modelId": CUSTOM_MODEL,
                         "protocol": "chat_completions"
                     }]
                 }),
@@ -1007,16 +1024,16 @@ async fn delayed_verify_probe_conflicts_on_key_config_caps_delete_and_concurrent
         let response = verify.await.unwrap();
         assert_eq!(response.status(), StatusCode::CONFLICT);
         let after = harness.account_by_id(&id).await;
-        assert_eq!(after["verification_status"].as_str(), Some("pending"));
+        assert_eq!(after["verificationStatus"].as_str(), Some("pending"));
         assert_eq!(
-            after["custom_config"]["endpoint_url"].as_str(),
+            after["customConfig"]["endpointUrl"].as_str(),
             Some("http://127.0.0.1:1/v1/chat/completions")
         );
         harness.shutdown();
     }
 
     async fn delayed_capability_race() {
-        let held = HeldJsonServer::start(200, r#"{"id":"ok"}"#).await;
+        let held = HeldJsonServer::start(200, SUCCESS_CHAT_BODY).await;
         let harness = BlackBoxHarness::start().await;
         let draft = create_pending_custom(
             &harness,
@@ -1041,8 +1058,8 @@ async fn delayed_verify_probe_conflicts_on_key_config_caps_delete_and_concurrent
                 &format!("/accounts/{id}/model-capabilities"),
                 &json!({
                     "capabilities": [{
-                        "public_model": CUSTOM_MODEL,
-                        "upstream_model": CUSTOM_MODEL_2,
+                        "publicModel": CUSTOM_MODEL,
+                        "upstreamModel": CUSTOM_MODEL_2,
                         "protocol": "chat_completions"
                     }]
                 }),
@@ -1053,17 +1070,17 @@ async fn delayed_verify_probe_conflicts_on_key_config_caps_delete_and_concurrent
         let response = verify.await.unwrap();
         assert_eq!(response.status(), StatusCode::CONFLICT);
         let after = harness.account_by_id(&id).await;
-        assert_eq!(after["verification_status"].as_str(), Some("pending"));
-        assert_eq!(after["model_capabilities"][0]["public_model"], CUSTOM_MODEL);
+        assert_eq!(after["verificationStatus"].as_str(), Some("pending"));
+        assert_eq!(after["modelCapabilities"][0]["publicModel"], CUSTOM_MODEL);
         assert_eq!(
-            after["model_capabilities"][0]["upstream_model"],
+            after["modelCapabilities"][0]["upstreamModel"],
             CUSTOM_MODEL_2
         );
         harness.shutdown();
     }
 
     async fn delayed_delete_race() {
-        let held = HeldJsonServer::start(200, r#"{"id":"ok"}"#).await;
+        let held = HeldJsonServer::start(200, SUCCESS_CHAT_BODY).await;
         let harness = BlackBoxHarness::start().await;
         let draft = create_pending_custom(
             &harness,
@@ -1102,7 +1119,7 @@ async fn delayed_verify_probe_conflicts_on_key_config_caps_delete_and_concurrent
     }
 
     async fn delayed_concurrent_verifies() {
-        let held = HeldJsonServer::start(200, r#"{"id":"ok"}"#).await;
+        let held = HeldJsonServer::start(200, SUCCESS_CHAT_BODY).await;
         let harness = BlackBoxHarness::start().await;
         let draft = create_pending_custom(
             &harness,
@@ -1133,7 +1150,7 @@ async fn delayed_verify_probe_conflicts_on_key_config_caps_delete_and_concurrent
             "concurrent verifies must certify once and 409 the other: {statuses:?}"
         );
         let after = harness.account_by_id(&id).await;
-        assert_eq!(after["verification_status"].as_str(), Some("verified"));
+        assert_eq!(after["verificationStatus"].as_str(), Some("verified"));
         harness.shutdown();
     }
 
@@ -1448,12 +1465,12 @@ async fn oversized_verification_body_fails_cleanly() {
     let (status, body) = verify_account(&harness, &id).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(
-        body["enabled"], true,
-        "failed verify must not disable a default-enabled Custom card: {body}"
+        body["enabled"], false,
+        "failed verify must not change the card's enabled state: {body}"
     );
-    assert_eq!(body["verification_status"].as_str(), Some("failed"));
+    assert_eq!(body["verificationStatus"].as_str(), Some("failed"));
     assert!(
-        body["verification_error"]
+        body["verificationError"]
             .as_str()
             .is_some_and(|error| error.contains("exceeded")),
         "{body}"
@@ -1495,11 +1512,11 @@ async fn custom_429_is_generic_and_does_not_parse_go_windows() {
     assert_ne!(status, StatusCode::OK, "{body}");
     let after = harness.account_by_id(&id).await;
     assert!(
-        after["cooldown_generic_until"].as_str().is_some(),
+        after["cooldownGenericUntil"].as_str().is_some(),
         "Custom 429 must persist a generic cooldown: {after}"
     );
     assert!(
-        after["cooldown_5h_until"].is_null(),
+        after["cooldown5hUntil"].is_null(),
         "Custom 429 must not parse Go 5-hour windows: {after}"
     );
     let (again_status, again_body) = harness.chat(CUSTOM_MODEL).await;

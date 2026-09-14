@@ -39,7 +39,8 @@
 
 Windows GUI 冒烟是 `scripts/smoke-windows-release.ps1`（自启用 V3 CAS，
 NSIS `/UPDATE` 原地升级）。macOS 检查 universal `lipo` 与 ad-hoc
-`codesign`。Linux 在 Xvfb 下启动 AppImage。
+`codesign`，并重跑 Linux quality.yml 已覆盖的 Unix CPA 进程归属测试
+（`cpa_runtime::host`）。Linux 在 Xvfb 下启动 AppImage。
 
 ## 升级签名
 

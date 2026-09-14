@@ -54,6 +54,19 @@ function compactTokenFormatter(): Intl.NumberFormat {
   return formatter;
 }
 
+/** Locale-aware date+time for timestamps; invalid input renders verbatim. */
+export function formatDateTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat(locale.value, {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
 /** Format a number as USD currency with adaptive or caller-specified decimal places. */
 export function formatCost(value: number, digits?: number): string {
   const fractionDigits = digits ?? (value !== 0 && Math.abs(value) < 0.01 ? 4 : 2);

@@ -142,7 +142,7 @@ impl GatewayLifecycle {
                 let _ = shutdown_rx.await;
             });
             if let Err(e) = server.await {
-                eprintln!("gateway server error: {}", e);
+                eprintln!("gateway server error: {e}");
                 task_state.log_runtime_event(
                     "error",
                     "gateway",

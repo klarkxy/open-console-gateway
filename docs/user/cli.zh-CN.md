@@ -28,11 +28,15 @@ ocg-manager-cli
 └── status        Show data dir, gateway port/key, upstream, account totals
 ```
 
+`key add` 写入的是关闭的 OpenCode Go 草稿。确认 Key 可用后（`key ping`，再 `key enable`）再打开。
+
 无头 Gateway 的最快搭法：
 
 ```bash
 ./ocg-manager-cli key add main sk-...
 ./ocg-manager-cli key list
+./ocg-manager-cli key ping <id>
+./ocg-manager-cli key enable <id>
 ./ocg-manager-cli serve --port 9042
 ```
 

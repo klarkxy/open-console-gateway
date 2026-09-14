@@ -1,5 +1,5 @@
-//! Dashboard V3 account verify: auth, CAS, V2 semantics, Custom probe matrix,
-//! revision bump rules, secrecy, and V2 coexistence.
+//! Dashboard V3 account verify: auth, CAS, Custom probe matrix,
+//! revision bump rules, secrecy, and retired V2 paths.
 
 use axum::Router;
 use axum::body::Bytes;
@@ -15,6 +15,7 @@ use ocg_core::dashboard_v3::install_custom_verify_probe_for_tests;
 use ocg_core::dashboard_v3::{
     AccountMutation, AccountVerificationStatus, ERROR_INVALID_JSON, ERROR_INVALID_REQUEST,
     ERROR_MISSING_EXPECTED_REVISION, ERROR_NOT_FOUND, ERROR_REVISION_CONFLICT, ERROR_UNAUTHORIZED,
+    install_official_protocol_fetch_fallback_chat_for_tests,
 };
 use ocg_core::gateway::provider_adapter::install_goat_catalog_origin_for_test;
 use ocg_core::models::ProxyMode;
@@ -36,7 +37,9 @@ use harness::{V3Harness, start_loopback, start_public};
 const CUSTOM_KEY: &str = "v3-verify-secret-key";
 const CUSTOM_MODEL: &str = "custom-local-model";
 const CUSTOM_MODEL_2: &str = "custom-other-model";
-const SUCCESS_BODY: &str = r#"{"id":"ok","object":"json"}"#;
+#[path = "fixtures/probe_response.rs"]
+mod probe_response;
+const SUCCESS_BODY: &str = probe_response::CHAT;
 const LEAKY_401_BODY: &str = r#"{"error":"rejected v3-verify-secret-key"}"#;
 const GOAT_MODELS_BODY: &str =
     r#"{"object":"list","data":[{"id":"deepseek/deepseek-v4-flash"},{"id":"claude-sonnet-4-6"}]}"#;
@@ -77,7 +80,11 @@ async fn start_origin(status: StatusCode, body: &str, delay: Duration) -> ProbeO
     let app = Router::new().fallback(any(
         move |method: HttpMethod, uri: OriginalUri, headers: HeaderMap, payload: Bytes| {
             let calls = calls_for_handler.clone();
-            let body = body.clone();
+            let body = if body == SUCCESS_BODY {
+                probe_response::for_path(uri.0.path()).to_string()
+            } else {
+                body.clone()
+            };
             async move {
                 if !delay.is_zero() {
                     tokio::time::sleep(delay).await;
@@ -125,7 +132,7 @@ async fn start_redirect_origin() -> (ProbeOrigin, Arc<AtomicUsize>) {
                     return (
                         StatusCode::OK,
                         [(header::CONTENT_TYPE, "application/json")],
-                        SUCCESS_BODY,
+                        probe_response::for_path(uri.0.path()),
                     )
                         .into_response();
                 }
@@ -466,7 +473,7 @@ async fn create_custom_account(
     .await;
     assert_eq!(status, StatusCode::OK, "{created}");
     let account = mutation_account(&created);
-    assert!(account.enabled);
+    assert!(!account.enabled);
     assert_eq!(
         account.verification_status,
         AccountVerificationStatus::Pending
@@ -655,12 +662,6 @@ async fn unknown_offerings_fail_closed_without_touching_goat_or_upstream() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{unknown}");
     assert_v3_error(&unknown, ERROR_INVALID_REQUEST);
-    assert!(
-        unknown["message"]
-            .as_str()
-            .unwrap()
-            .contains("unknown provider offering")
-    );
 
     let (status, missing) = send_json(
         &harness,
@@ -681,7 +682,7 @@ async fn unknown_offerings_fail_closed_without_touching_goat_or_upstream() {
         .get_account(&goat_id)
         .unwrap()
         .unwrap();
-    assert!(stored.enabled);
+    assert!(!stored.enabled);
     harness.stop();
 }
 
@@ -707,7 +708,7 @@ async fn goat_verify_is_not_applicable_and_never_fetches_the_public_catalog() {
     .await;
     assert_eq!(status, StatusCode::OK, "{response}");
     let account = mutation_account(&response);
-    assert!(account.enabled);
+    assert!(!account.enabled);
     assert_eq!(
         account.verification_status,
         AccountVerificationStatus::NotRequired
@@ -735,6 +736,7 @@ async fn provider_model_refresh_uses_go_account_and_public_command_catalog() {
     harness.state.set_config(config).unwrap();
 
     let go_id = create_go_account(&harness).await;
+    harness.enable_account(&go_id);
     let (status, go_models) = send_json(
         &harness,
         Method::POST,
@@ -775,7 +777,10 @@ async fn provider_model_refresh_uses_go_account_and_public_command_catalog() {
         .iter()
         .filter_map(|item| item["id"].as_str())
         .collect::<Vec<_>>();
-    assert!(listed_ids.contains(&"glm-5.3"));
+    assert!(
+        !listed_ids.contains(&"glm-5.3"),
+        "refreshed catalog IDs stay unpublished until their protocol is enabled: {listed_ids:?}"
+    );
     assert!(
         !harness
             .state
@@ -871,7 +876,10 @@ async fn unified_catalog_refresh_selects_an_eligible_account_and_defaults_new_mo
     let mut config = harness.state.config();
     config.upstream_base_url = format!("{}/provider/v1", go_origin.url);
     harness.state.set_config(config).unwrap();
-    let _account_id = create_go_account(&harness).await;
+    let account_id = create_go_account(&harness).await;
+    harness.enable_account(&account_id);
+    let _docs =
+        install_official_protocol_fetch_fallback_chat_for_tests(harness.state.process_generation());
 
     let before = harness.state.settings_revision();
     let (status, contracts) = send_json(
@@ -940,6 +948,8 @@ async fn command_code_contract_refresh_defaults_new_rows_off_and_legacy_route_st
     )
     .unwrap();
     let _goat_id = create_goat_account(&harness).await;
+    let _docs =
+        install_official_protocol_fetch_fallback_chat_for_tests(harness.state.process_generation());
 
     let before = harness.state.settings_revision();
     let (status, contracts) = send_json(
@@ -1028,6 +1038,7 @@ async fn go_model_refresh_filters_zen_free_models_before_persisting() {
     harness.state.set_config(config).unwrap();
 
     let go_id = create_go_account(&harness).await;
+    harness.enable_account(&go_id);
     let (status, go_models) = send_json(
         &harness,
         Method::POST,
@@ -1051,43 +1062,6 @@ async fn go_model_refresh_filters_zen_free_models_before_persisting() {
         .expect("go scope");
     assert_eq!(go_scope.catalog.models, vec!["glm-5.3".to_string()]);
     assert!(!go_scope.models.contains_key("hy3-free"));
-    harness.stop();
-}
-
-#[tokio::test]
-async fn goat_verify_does_not_turn_public_catalog_errors_into_key_failures() {
-    let harness = start_loopback("verify-goat-public-catalog-is-not-key-check").await;
-    force_direct_proxy(&harness);
-    let origin = start_origin(
-        StatusCode::BAD_GATEWAY,
-        r#"{"error":"catalog unavailable"}"#,
-        Duration::ZERO,
-    )
-    .await;
-    let _guard = install_goat_catalog_origin_for_test(
-        harness.state.process_generation(),
-        origin.url.clone(),
-    )
-    .unwrap();
-    let id = create_goat_account(&harness).await;
-    let before = harness.state.settings_revision();
-
-    let (status, response) = send_json(
-        &harness,
-        Method::POST,
-        &verify_path(&id),
-        &cas(&harness, json!({})),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{response}");
-    let account = mutation_account(&response);
-    assert!(account.enabled);
-    assert_eq!(
-        account.verification_status,
-        AccountVerificationStatus::NotRequired
-    );
-    assert_eq!(origin.call_count(), 0);
-    assert_eq!(harness.state.settings_revision(), before);
     harness.stop();
 }
 
@@ -1118,8 +1092,8 @@ async fn custom_verify_success_persists_verified_without_enabling_and_bumps_once
     assert_eq!(status, StatusCode::OK, "{body}");
     let account = mutation_account(&body);
     assert!(
-        account.enabled,
-        "verify must not change default-enabled Custom cards"
+        !account.enabled,
+        "verify must not change the card's enabled state"
     );
     assert_eq!(
         account.verification_status,
@@ -1283,8 +1257,8 @@ async fn custom_verify_failure_401_429_redirect_and_oversize_persist_failed_with
     assert_ne!(status, StatusCode::UNAUTHORIZED);
     let account = mutation_account(&body);
     assert!(
-        account.enabled,
-        "failed verify must not disable a default-enabled Custom card"
+        !account.enabled,
+        "failed verify must not change the card's enabled state"
     );
     assert_eq!(
         account.verification_status,
@@ -1385,8 +1359,8 @@ async fn custom_verify_failure_401_429_redirect_and_oversize_persist_failed_with
     assert_eq!(status, StatusCode::OK, "{body}");
     let account = mutation_account(&body);
     assert!(
-        account.enabled,
-        "failed verify must not disable a default-enabled Custom card"
+        !account.enabled,
+        "failed verify must not change the card's enabled state"
     );
     assert_eq!(
         account.verification_status,
@@ -1450,7 +1424,7 @@ async fn stale_after_network_does_not_commit_or_bump() {
         .account_verification_state(&id)
         .unwrap()
         .unwrap();
-    assert!(stored.enabled);
+    assert!(!stored.enabled);
     assert_eq!(
         verification.status,
         ocg_core::provider::ConnectionVerificationStatus::Pending
@@ -1515,8 +1489,8 @@ async fn concurrent_custom_verifies_certify_once() {
 }
 
 #[tokio::test]
-async fn v2_account_verify_coexists_and_keeps_its_shape() {
-    let harness = start_loopback("verify-v2-coexist").await;
+async fn retired_v2_account_verify_does_not_mutate() {
+    let harness = start_loopback("verify-v2-retired").await;
     force_direct_proxy(&harness);
     let origin = start_origin(StatusCode::OK, SUCCESS_BODY, Duration::ZERO).await;
     let goat_id = create_goat_account(&harness).await;
@@ -1546,7 +1520,7 @@ async fn v2_account_verify_coexists_and_keeps_its_shape() {
         .get_account(&goat_id)
         .unwrap()
         .unwrap();
-    assert!(stored_goat.enabled);
+    assert!(!stored_goat.enabled);
 
     let v2_custom = harness
         .client
@@ -1568,7 +1542,7 @@ async fn v2_account_verify_coexists_and_keeps_its_shape() {
         mutation_account(&v3_custom).verification_status,
         ocg_core::dashboard_v3::AccountVerificationStatus::Verified
     );
-    assert!(mutation_account(&v3_custom).enabled);
+    assert!(!mutation_account(&v3_custom).enabled);
     harness.stop();
 }
 

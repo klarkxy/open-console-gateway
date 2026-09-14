@@ -1,9 +1,9 @@
 //! Dashboard V3 GET/PUT `/claude-desktop/models`: defaults, CAS, validation,
-//! secrecy, V2 coexistence, and catalog append.
+//! secrecy, retired V2 paths, and catalog append.
 
 use ocg_core::dashboard_v3::{
     ClaudeDesktopModels, ERROR_INVALID_JSON, ERROR_INVALID_REQUEST,
-    ERROR_MISSING_EXPECTED_REVISION, ERROR_REVISION_CONFLICT, ERROR_UNAUTHORIZED, contract_schema,
+    ERROR_MISSING_EXPECTED_REVISION, ERROR_REVISION_CONFLICT, ERROR_UNAUTHORIZED,
 };
 use ocg_core::models::{
     CLAUDE_DESKTOP_HAIKU_ALIAS, CLAUDE_DESKTOP_OPUS_ALIAS, CLAUDE_DESKTOP_SONNET_ALIAS,
@@ -15,8 +15,6 @@ use serde_json::{Map, Value, json};
 mod harness;
 
 use harness::{V3Harness, start_loopback, start_public};
-
-const CLAUDE_DESKTOP_CATALOG_TYPES: &[&str] = &["ClaudeDesktopModels", "ClaudeDesktopModelsUpdate"];
 
 const SECRET_FIELD_NAMES: &[&str] = &[
     "key",
@@ -149,15 +147,6 @@ fn assert_unrelated_config(harness: &V3Harness, before: &ocg_core::models::AppCo
     assert_eq!(after.show_dock_icon, before.show_dock_icon);
     assert_eq!(after.opencode_invite_url, before.opencode_invite_url);
     assert_eq!(after.client_root_url, before.client_root_url);
-}
-
-#[test]
-fn catalog_type_names_append_claude_desktop_after_custom_discovery() {
-    let schema = contract_schema();
-    let defs = schema["$defs"].as_object().expect("$defs");
-    for name in CLAUDE_DESKTOP_CATALOG_TYPES {
-        assert_eq!(defs[*name]["additionalProperties"], false);
-    }
 }
 
 #[tokio::test]
@@ -675,8 +664,8 @@ async fn dashboard_v3_claude_desktop_noop_mapping_does_not_bump_revision() {
 }
 
 #[tokio::test]
-async fn dashboard_v3_claude_desktop_coexists_with_v2() {
-    let harness = start_loopback("claude-desktop-v2-coexist").await;
+async fn retired_v2_claude_desktop_does_not_mutate() {
+    let harness = start_loopback("claude-desktop-v2-retired").await;
     let primary = harness.state.config().gateway_key.clone();
 
     harness
@@ -698,9 +687,6 @@ async fn dashboard_v3_claude_desktop_coexists_with_v2() {
     assert_eq!(status, StatusCode::OK);
     let v3_revision = harness.state.settings_revision();
 
-    harness
-        .assert_v2_path_removed(reqwest::Method::GET, "/claude-desktop/models", None)
-        .await;
     harness
         .assert_v2_path_removed(
             reqwest::Method::PUT,

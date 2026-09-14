@@ -26,6 +26,46 @@
 
 `dashboard.rs` 提供 SPA 并保留 V2 鉴权与浏览器 WebSocket 处理器。已退役的 `/dashboard/api/...` REST 路径在到达 `dashboard.rs` 之前由 `host_router` 墓碑拦截。
 
+## Dashboard V4
+
+面板 JSON 位于 `/dashboard/api/v4`。它是冻结 V3 旁边的并行、仅增量控制面。V3 的 `$defs` 与路由不再增加新字段。
+
+V4 复用 V3 会话中间件。其列表返回与 V3 CAS 相同的 `ControlRevision`（`expectedRevision` / `processGeneration`）。V4 变更是 `POST /onboarding/commit`、`POST /credentials/{id}/rotate`、`PATCH /bindings/{id}` 与 `POST /identities/{id}/credentials`，它们检查这两枚令牌；只读路由不检查。
+
+冻结契约是 `schema/dashboard-api-v4.schema.json`，由 `dashboard_v4::contract_schema_pretty()` 经 `crates/ocg-core/examples/export_dashboard_v4_schema.rs` 生成。生成的 TypeScript（`src/api/generated/dashboard-v4.ts`）只有类型，没有 HTTP 封装。`dashboard_v4/types.rs` 的 `CATALOG_TYPE_NAMES` 同样是有序 `$defs` 目录；追加时必须保持既有 definition 对象字节一致。
+
+只读路由仍为 `GET /contract`、`GET /templates`、`GET /connections`、`GET /accounts`。这些读取不会发出出站请求。
+
+`GET /templates` 是只读的添加目录：密封内置项（不含 CPA）加上 `custom-http` 手动模板。预设尚未纳入。模板没有用户实例或密钥。
+
+`GET /connections` 是已保存实例的投影：已有账号的内置项、每一个用户定义供应商，以及每个 Custom API 账号各自一条；CPA 永远不是 connection。每条 connection 携带生命周期、授权状态、带原因的本地资格、endpoints、模型目标，以及一份遗留身份引用。connection id 是由该遗留身份派生的确定性 UUIDv5，从不由名称或 URL 派生。
+
+`GET /accounts` 返回 `IdentityList { revision, identities[] }`。每条 `IdentitySummary` 携带 `identity`（`id`、`label`、`authorityRef` `{ issuerOrSite, tenantOrSubject }`、`identityConfidence`、`enabled`、`notes`）、`credentials[]`、身份级 `declaredRelations[]`（`platformAccountId`、`group`）以及 `legacy`（`kind` `account` | `platform_account`，`id`）。载荷形状是嵌套的：`credentials[].credential`（`id`、`purpose` `inference` | `platform_observer`、`materialKind` `api_key` | `external_reference`、`secretRef`——不透明句柄，绝不是材料本身、`hasMaterial`、`version`、`enabled`、`authState` `unknown` | `valid` | `invalid`、`authStateVersion`、未知时 `expiresAt` 为 null），同级字段为 `subject`（`account_credential` | `anonymous`）、`bindings[]`（`id`、`connectionId`、`allowedEndpointIds`、`allowedOrigins`、`modelScope`、`enabled`、`routingRank`）、`quotaWindows[]`、`onboardingTask`、`subscription`（未知时为 null）、`lastError`（已脱敏；无法安全脱敏时为 null）与 `legacy`。平台父账号的 `platform_observer` 凭据在本阶段是投影，没有 `credential_state` 行。`authState` 是本地状态：`unknown` 绝不是 `valid`；`valid` 需要既有验证记录。Vue 账号页只把该投影叠加到展示上；变更仍走 V3。V4 目录中部分枚举值留给下一阶段，本阶段尚未产出：`subject: external_runtime`、`policyMode: observe_only`、`relationConfidence: unknown`、`subscription.source: managed_payment`、`onboardingTask.state: completed`。
+
+V4 不把授权 `unknown` 当作 `valid`。资格是本地投影，不是上游健康。
+
+`POST /onboarding/commit` 请求体：`expectedRevision`、`processGeneration`（与 V3 相同的 CAS 令牌）、`operationId`（客户端生成的 UUID）、`connection`、可选 `authorization`，以及 `targets`。
+
+`connection` 为 `kind: new`（`templateId` 是 `custom-http` 或预设 id，外加 `name`、`endpointUrl`、`upstreamProtocol`、`authKind`）或 `kind: existing`（`connectionId`）。`authorization` 为 `kind: api_key`（`secretInput`，可选 `accountLabel` / `notes`）或 `kind: none`。`targets` 把公开模型映射到精确上游模型，可带每条目的上游覆盖。`new` 要求 `targets` 非空；`existing` 必须为空（模型编辑仍走 V3 `PATCH /providers/{id}`）。
+
+求值顺序：(1) 解析；(2) `operationId` 必须是 UUID；(3) 先取 `settings_update` 锁，再在 CAS 之前做幂等查找——若该 `operationId` 已用同一载荷摘要提交过，则直接返回已存的无密钥结果，并带 `replayed: true` 与当前 revision 令牌，不再检查 CAS（首次写入已经推进 revision）；同一 `operationId` 配不同载荷返回 `409` `operationPayloadMismatch`，不写入；(4) CAS 检查（`409` `revisionConflict`）；(5) 写入。
+
+`new` 复用 V3 用户定义供应商校验。模板 id 作为不透明预设 id 透传；Rust 仍不加载预设。keyed 鉴权下省略 `authorization` 只保存定义（随后 V4 connection 的授权为 `missing`）；`api_key` 在 keyed 鉴权下要求非空密钥；`none` 仅对无鉴权模板有效，且总会创建单例账号。供应商行、可选的首个账号行与操作记录在同一 SQLite 事务中提交；提交后按 V3 同样方式安装动态供应商快照。
+
+本阶段的 `existing` 只接受用户定义（dynamic）且为 keyed 鉴权的 connection 新增 `api_key`。内置与 Custom API 的 connection id 返回 `400`（“add Keys on Accounts”）。账号行与操作记录在同一事务中提交，随后只推进 revision（`reload_contracts=false`），与 V3 普通账号创建一致。
+
+结果为 `{ revision, connectionId, credentialId | null, targetIds, replayed }`。`connectionId` 是动态供应商的确定性 UUIDv5；`credentialId` 是账号 id；`targetIds` 是每个公开模型的 UUIDv5。响应从不包含密钥、密文或摘要。
+
+**幂等操作。** `operationId` 与载荷摘要绑定一次提交：摘要是只对语义载荷——`operationId`、`connection`、`authorization`（因此覆盖密钥）与 `targets`——计算的 hex HMAC-SHA256；`expectedRevision` / `processGeneration` 不参与，所以刷新 CAS 令牌后的重试仍会重放。Schema v44 把每次提交存在 `dashboard_operations`；已存的 `result_json` 不含密钥。插入时会清理超过 30 天的行；被清理后，同一 `operationId` 视为新写入。
+
+`POST /credentials/{id}/rotate` 替换一条投影凭据上的 Key。必须带 CAS 令牌，没有 `operationId`。凭据 id、绑定与配额关系保持不变。`version` 与 `authStateVersion` 一起递增；`authState` 变为 `unknown`；底层账号的 `auth_error` / `last_error` 与验证结果会被清空，避免旧版本污染新 Key。请求体是 `{ secretInput }` 加上 CAS 令牌。结果不含密钥。平台观察者、匿名、无鉴权与 CPA 凭据返回 `400`。未知 id 返回 `404`。过期 CAS 令牌返回 `409` 且不写入。
+
+`PATCH /bindings/{id}` 编辑一条推理绑定。必须带 CAS 令牌，没有 `operationId`。请求体是 `{ modelScope?, enabled? }` 加上 CAS 令牌，至少要有其中一个字段。`modelScope` 为 `{ kind: "all" }` 或 `{ kind: "only", models: [...] }`（精确 id，沿用既有模型名归一化）。同一身份上各绑定的启停彼此独立。未知 id 返回 `404`。平台观察者、匿名、无鉴权与 CPA 绑定返回 `400`。过期 CAS 令牌返回 `409` 且不写入。结果为 `{ revision, binding }`，不含密钥。
+
+`POST /identities/{id}/credentials` 给已确认身份再加一把 Key。必须带 CAS 令牌，没有 `operationId`。请求体是 `{ connectionId, secretInput }` 加上 CAS 令牌。写入会新建一行 `accounts` 并复用既有 `identity_id`，插入 `credential_state` 与 `credential_bindings`，并把新账号加入该身份的额度池，全部落在同一 SQLite 事务中。不同的 `connectionId` 是第二件产品（D05）；同一 Plan connection 则是该产品上的另一把 Key。换 Key 不会另起一个新池。未知身份或 connection 返回 `404`。内置不可变 / Zen Free / CPA / 无鉴权 / Custom API / 平台观察者目标返回 `400`。过期 CAS 令牌返回 `409` 且不写入。结果不含密钥。
+
+面板用 `GET /connections` 渲染供应商页 rail，用 `POST /onboarding/commit` 创建用户定义供应商，并用 `GET /accounts` 作为账号页的展示叠加。客户端在草稿改动时生成新的 `operationId`，对未改动草稿的重试沿用同一 id，成功后再重新生成。编辑、删除、给已有账号添加 Key，以及账号页上的全部账号操作仍走 V3。
+
 ## Settings 变更流程
 
 [![Dashboard V3 Settings 变更流程](../diagrams/dashboard-v3-mutation.visual-check.1440x900.light.png)](https://klarkxy.github.io/open-console-gateway/diagrams/dashboard-v3-mutation/)
@@ -42,7 +82,7 @@ CAS 成功后，Host 先持久化新设置并释放设置锁。只有端口发�
 
 - 匿名已退役 REST：空 body 的 **401**（鉴权先于墓碑）。
 - 已鉴权的已退役 REST（含回环本地模式）：**410**，body 为 `{ "code": "dashboardV2Removed", "message": "Dashboard API V2 has been removed; refresh the page and retry." }`。
-- 既非 V3 也非保留家族的未知 `/dashboard/api/...` 路径，在已鉴权时同样 410。
+- 既非 V3、非 V4，也非保留家族的未知 `/dashboard/api/...` 路径，在已鉴权时同样 410。未知的 V4 路径是 V4 的 `404`，不是墓碑。
 
 保留的 `/dashboard/api` 家族（精确路径，无尾斜杠，无额外段）：
 

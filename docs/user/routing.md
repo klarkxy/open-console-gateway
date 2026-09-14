@@ -13,6 +13,13 @@ from the Accounts view. The selector skips:
   `429`).
 - Accounts whose saved provider contract has no effective enabled upstream
   protocol for the resolved model.
+- Keys whose inference binding is disabled, or whose binding `modelScope`
+  does not include the requested public/routing model. A sibling Key on the
+  same connection keeps its own allow-list.
+
+Keys that share a **declared quota pool** also share cooldown: exhausting the
+pool through one Key blocks the others. Matching names do not create a shared
+pool. Switching Keys on the same identity does not invent a fresh pool.
 
 A `429` with a recognized `Resets in …` phrase writes `cooldown_until` and
 the gateway tries the next account. `403` fails over without writing a
