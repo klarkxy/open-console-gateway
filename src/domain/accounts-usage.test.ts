@@ -10,8 +10,10 @@ import {
   isCooling,
   isFreeCooling,
   isUsageLimitReached,
+  mergeCalibratedProviderUsage,
   mergeUsageEdit,
   normalizeUsagePercent,
+  providerQuotaWindowLabel,
   resetTimeForWindow,
   resetsFieldsToMinutes,
   resetsFirstFieldMax,
@@ -174,6 +176,85 @@ test("normalizes manually entered percentages to the supported range and precisi
   assert.equal(usagePercentFromCost(180, 100), 100);
 });
 
+test("manual calibration updates the visible provider window and preserves siblings", () => {
+  const current = {
+    account_id: "acc-1",
+    provider_id: "command-code",
+    availability: "local_state",
+    quota_windows: [
+      {
+        account_id: "acc-1",
+        window_kind: "five_hours",
+        used: 10,
+        limit_value: 14,
+        started_at: null,
+        resets_at: "2026-09-14T05:00:00Z",
+        calibration_offset: 1,
+        unit: "usd",
+        source: "command-code-goat-local",
+        observed_at: null,
+        updated_at: "2026-09-14T00:00:00Z",
+      },
+      {
+        account_id: "acc-1",
+        window_kind: "week",
+        used: 20,
+        limit_value: 35,
+        started_at: null,
+        resets_at: null,
+        calibration_offset: 2,
+        unit: "usd",
+        source: "command-code-goat-local",
+        observed_at: null,
+        updated_at: "2026-09-14T00:00:00Z",
+      },
+    ],
+    credit_balances: [],
+    sync_state: null,
+  };
+  const usage = {
+    account_id: "acc-1",
+    window_5h: 7,
+    window_week: 21,
+    window_month: 0,
+    resets_in_5h: "2026-09-14T06:00:00Z",
+    resets_in_week: null,
+    resets_in_month: null,
+    revision: 8,
+    process_generation: 99,
+    pricing_revision: null,
+  };
+
+  const merged = mergeCalibratedProviderUsage(
+    current,
+    "window_5h",
+    usage,
+    "2026-09-14T01:00:00Z",
+  )!;
+  assert.equal(merged.quota_windows[0]?.used, 7);
+  assert.equal(merged.quota_windows[0]?.resets_at, "2026-09-14T06:00:00Z");
+  assert.equal(merged.quota_windows[0]?.updated_at, "2026-09-14T01:00:00Z");
+  assert.deepEqual(merged.quota_windows[1], current.quota_windows[1]);
+
+  const weekUsage = {
+    ...usage,
+    window_week: 17.5,
+    resets_in_week: "2026-09-20T00:00:00Z",
+  };
+  const afterConcurrentWindow = mergeCalibratedProviderUsage(
+    merged,
+    "window_week",
+    weekUsage,
+    "2026-09-14T01:00:01Z",
+  )!;
+  assert.equal(afterConcurrentWindow.quota_windows[0]?.used, 7);
+  assert.equal(afterConcurrentWindow.quota_windows[1]?.used, 17.5);
+  assert.equal(
+    afterConcurrentWindow.quota_windows[1]?.resets_at,
+    "2026-09-20T00:00:00Z",
+  );
+});
+
 test("usage refresh preserves dirty drafts unless a real 429 reset that window", () => {
   const dirty: UsageEditState = {
     draft: 75,
@@ -322,4 +403,28 @@ test("usage API patches the selected window and percent, and refreshes with POST
     expectedRevision: 7,
     processGeneration: 99,
   });
+});
+
+test("provider quota labels preserve known windows and humanize unknown scopes", () => {
+  const labels = {
+    fiveHours: "5 hours",
+    week: "This week",
+    month: "This month",
+    hours: (count: number) => `${count} hours`,
+  };
+  assert.equal(providerQuotaWindowLabel({
+    window_kind: "kimi_5h",
+    started_at: null,
+    resets_at: null,
+  }, labels), "5 hours");
+  assert.equal(providerQuotaWindowLabel({
+    window_kind: "minimax_current:text_generation",
+    started_at: "2026-09-14T00:00:00Z",
+    resets_at: "2026-09-14T06:00:00Z",
+  }, labels), "6 hours · Text generation");
+  assert.equal(providerQuotaWindowLabel({
+    window_kind: "future_burst_window",
+    started_at: null,
+    resets_at: null,
+  }, labels), "Future burst window");
 });

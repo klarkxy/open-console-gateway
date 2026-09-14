@@ -10,6 +10,7 @@ import {
   isZenFreeAccount,
 } from "./account-providers.ts";
 import { findPlanDefinition } from "./plans.ts";
+import { OPENCODE_GO_PLAN } from "./plans.ts";
 
 test("Zen Free offering is the egress-IP sealed route", () => {
   assert.equal(ZEN_FREE_OFFERING.quota_scope, "egress-ip");
@@ -24,8 +25,13 @@ test("ollama cloud account predicate matches the sealed family exactly", () => {
   assert.ok(!isOllamaCloudAccount({ provider_id: "kimi" }));
 });
 
-test("ollama cloud plan definition follows the sealed registry identities", () => {
-  const plan = findPlanDefinition(OLLAMA_PROVIDER_ID);
-  assert.ok(plan, "the plan definition must exist");
+test("ollama surface exists only when the catalog supplies it", () => {
+  assert.equal(findPlanDefinition(OLLAMA_PROVIDER_ID), undefined);
+  const plan = findPlanDefinition(OLLAMA_PROVIDER_ID, [{
+    ...OPENCODE_GO_PLAN,
+    provider_id: OLLAMA_PROVIDER_ID,
+    display_name: "Ollama Cloud",
+  }]);
+  assert.ok(plan);
   assert.equal(plan.provider_id, OLLAMA_PROVIDER_ID);
 });

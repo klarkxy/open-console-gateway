@@ -339,9 +339,9 @@ const presetQuery = ref("");
 const mode = ref<ChooserMode>("connections");
 /**
  * provider_id → persisted preset_id for saved user-defined Providers, loaded
- * once per catalog revision so their preset offering can group them. Entries
- * that fail to load stay absent (API). Selection is by optionId, so a late
- * completion only re-slots rail items and never unmounts an open form.
+ * only to preserve known brand artwork. Offering and ordering always come
+ * from the catalog row. Selection is by optionId, so a late completion never
+ * unmounts an open form.
  */
 const dynamicPresetIds = ref<ReadonlyMap<string, string | null>>(new Map());
 let dynamicPresetGeneration = 0;
@@ -654,11 +654,11 @@ const FAMILY_BY_ID: ReadonlyMap<string, ProviderFamily> = new Map(
 );
 
 const ICONS: Record<string, Component> = {
-  "opencode-go": CloudOutlined,
-  "command-code-goat": ApiOutlined,
-  "minimax-cn": ApiOutlined,
-  "kimi-cn": ApiOutlined,
-  "custom-endpoint": SwapOutlined,
+  opencode: CloudOutlined,
+  "command-code": ApiOutlined,
+  minimax: ApiOutlined,
+  kimi: ApiOutlined,
+  custom: SwapOutlined,
   api: ApiOutlined,
   database: DatabaseOutlined,
 };

@@ -1,6 +1,85 @@
 import type { Account, UsageWindow } from "../api/dashboard";
+import type { ProviderQuotaWindow, ProviderUsageResponse } from "../api/providers.ts";
 
 export type UsageKey = "window_5h" | "window_week" | "window_month";
+
+const PROVIDER_WINDOW_KIND: Record<UsageKey, string> = {
+  window_5h: "five_hours",
+  window_week: "week",
+  window_month: "month",
+};
+
+export function mergeCalibratedProviderUsage(
+  current: ProviderUsageResponse | undefined,
+  key: UsageKey,
+  usage: UsageWindow,
+  updatedAt: string,
+): ProviderUsageResponse | undefined {
+  if (!current) return undefined;
+  const windowKind = PROVIDER_WINDOW_KIND[key];
+  const resetsAt = key === "window_5h"
+    ? usage.resets_in_5h
+    : key === "window_week"
+      ? usage.resets_in_week
+      : usage.resets_in_month;
+  let matched = false;
+  const quotaWindows = current.quota_windows.map((window) => {
+    if (window.window_kind !== windowKind) return window;
+    matched = true;
+    return {
+      ...window,
+      used: usage[key],
+      resets_at: resetsAt,
+      updated_at: updatedAt,
+    };
+  });
+  return matched ? { ...current, quota_windows: quotaWindows } : current;
+}
+
+export interface ProviderWindowLabels {
+  fiveHours: string;
+  week: string;
+  month: string;
+  hours: (count: number) => string;
+}
+
+function humanizeWindowPart(value: string): string {
+  const normalized = value.replaceAll(/[_:-]+/g, " ").trim();
+  return normalized ? normalized[0]!.toUpperCase() + normalized.slice(1) : normalized;
+}
+
+/**
+ * Pure display adapter for provider-defined quota windows. Known historical
+ * wire names remain friendly; unknown names get a safe humanized fallback.
+ */
+export function providerQuotaWindowLabel(
+  window: Pick<ProviderQuotaWindow, "window_kind" | "started_at" | "resets_at">,
+  labels: ProviderWindowLabels,
+): string {
+  const kind = window.window_kind.trim();
+  const normalized = kind.toLowerCase();
+  if (normalized === "five_hours" || normalized === "5h" || normalized === "kimi_5h") {
+    return labels.fiveHours;
+  }
+  if (normalized === "week" || normalized === "weekly" || normalized === "kimi_usage") {
+    return labels.week;
+  }
+  if (normalized === "month" || normalized === "monthly") return labels.month;
+
+  const scope = kind.includes(":") ? humanizeWindowPart(kind.slice(kind.indexOf(":") + 1)) : "";
+  if (normalized.startsWith("minimax_weekly:")) {
+    return scope ? `${labels.week} · ${scope}` : labels.week;
+  }
+
+  const started = window.started_at ? Date.parse(window.started_at) : Number.NaN;
+  const resets = window.resets_at ? Date.parse(window.resets_at) : Number.NaN;
+  const hours = Math.round((resets - started) / 3_600_000);
+  if (Number.isFinite(hours) && hours > 0) {
+    const period = hours === 5 ? labels.fiveHours : hours === 168 ? labels.week : labels.hours(hours);
+    return scope ? `${period} · ${scope}` : period;
+  }
+  return humanizeWindowPart(kind) || kind;
+}
 
 export type UsageEditState = {
   draft: number;

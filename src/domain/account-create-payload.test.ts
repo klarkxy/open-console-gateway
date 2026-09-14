@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { PLAN_DEFINITIONS } from "./plans.ts";
+import { OPENCODE_GO_PLAN, type ProviderSurface } from "./plans.ts";
 import {
   accountCreatePayloadErrorKey,
   AccountCreatePayloadError,
@@ -10,9 +10,22 @@ import {
 import { CUSTOM_ENDPOINT_URL_ISSUE_KEYS } from "./custom-account.ts";
 import type { AccountCreatePayloadErrorCode } from "./account-create-payload.ts";
 
-const goPlan = PLAN_DEFINITIONS.find((p) => p.id === "opencode-go")!;
-const goatPlan = PLAN_DEFINITIONS.find((p) => p.id === "command-code-goat")!;
-const customPlan = PLAN_DEFINITIONS.find((p) => p.id === "custom-endpoint")!;
+function surface(providerId: string, extra: Partial<ProviderSurface> = {}): ProviderSurface {
+  return {
+    ...OPENCODE_GO_PLAN,
+    id: providerId,
+    provider_id: providerId,
+    display_name: providerId,
+    label: providerId,
+    legacy: false,
+    managed_registration: false,
+    ...extra,
+  };
+}
+
+const goPlan = OPENCODE_GO_PLAN;
+const goatPlan = surface("command-code", { kind: "api-key" });
+const customPlan = surface("custom", { kind: "custom", offering: "api" });
 
 test("Custom payload uses one API URL and expands every model to its protocol", () => {
   const payload = buildCreateAccountPayload(customPlan, {
@@ -98,9 +111,10 @@ test("non-Custom plans reject Custom-only fields", () => {
 test("dynamic Provider accounts omit Endpoint/protocol/models and skip Key when none-auth", () => {
   const dynamicKeyed = {
     ...goatPlan,
-    id: "dynamic-http" as const,
+    id: "11111111-1111-4111-8111-111111111111",
     provider_id: "11111111-1111-4111-8111-111111111111",
     label: "Lab",
+    dynamic: true,
   };
   assert.throws(
     () => buildCreateAccountPayload(dynamicKeyed, {

@@ -112,19 +112,6 @@ function groupRow(model: PricingModel, children: PricingTableRow[]): PricingTabl
   };
 }
 
-function pricingAdjustment(
-  model: PricingModel,
-  label: string,
-  multiplier: number,
-  appliesTo: string,
-): PricingAdjustment {
-  return model.adjustments.find((adjustment) => adjustment.label.toLowerCase() === label.toLowerCase()) ?? {
-    label,
-    multiplier,
-    applies_to: appliesTo,
-  };
-}
-
 function materializedVariant(
   model: PricingModel,
   adjustment: PricingAdjustment,
@@ -144,46 +131,14 @@ function materializedVariant(
   }, rowKey, "variant", displayName);
 }
 
-function buildMinimaxM3Rows(model: PricingModel, labels: PricingTableLabels): PricingTableRow {
-  const allRates = "input,output,cache_read,cache_write";
-  const longContext = pricingAdjustment(model, ">512K input", 2, allRates);
-  const priority = pricingAdjustment(model, "priority service tier", 1.5, allRates);
-  const longContextPriority = pricingAdjustment(model, ">512K + priority", 3, allRates);
-  return groupRow(model, [
-    materializedVariant(
-      model,
-      longContext,
-      `variant:${model.model_id}:min-512001`,
-      labels.minimaxM3Upper,
-    ),
-    materializedVariant(
-      model,
-      priority,
-      `variant:${model.model_id}:priority`,
-      labels.priorityService,
-    ),
-    materializedVariant(
-      model,
-      longContextPriority,
-      `variant:${model.model_id}:min-512001-priority`,
-      labels.minimaxM3UpperPriority,
-    ),
-  ]);
-}
-
-function buildMinimaxHighspeedRows(model: PricingModel, labels: PricingTableLabels): PricingTableRow {
-  const highspeed = pricingAdjustment(
-    model,
-    "highspeed alias",
-    2,
-    "input,output",
-  );
-  return groupRow(model, [materializedVariant(
-    model,
-    highspeed,
-    `variant:${model.model_id}:highspeed`,
-    labels.highspeed,
-  )]);
+function adjustmentLabel(adjustment: PricingAdjustment, labels: PricingTableLabels): string {
+  switch (adjustment.label.trim().toLowerCase()) {
+    case "highspeed alias": return labels.highspeed;
+    case ">512k input": return labels.minimaxM3Upper;
+    case "priority service tier": return labels.priorityService;
+    case ">512k + priority": return labels.minimaxM3UpperPriority;
+    default: return adjustment.label;
+  }
 }
 
 function timeWindowRank(model: PricingModel): number {
@@ -208,6 +163,31 @@ function timeWindowKey(model: PricingModel): string {
   return model.time_window ?? "always";
 }
 
+function tierLabel(model: PricingModel): string {
+  const explicit = variantLabel(model.display_name || model.model_id);
+  if (explicit !== (model.display_name || model.model_id)) return explicit;
+  const bounds = model.min_input_tokens != null || model.max_input_tokens != null
+    ? `${model.min_input_tokens ?? 0}–${model.max_input_tokens ?? "∞"} input tokens`
+    : "";
+  const time = model.time_window && model.time_window !== "always"
+    ? model.time_window.replaceAll("_", " ")
+    : "";
+  return [bounds, time].filter(Boolean).join(" · ") || explicit;
+}
+
+function adjustmentRows(
+  model: PricingModel,
+  labels: PricingTableLabels,
+  prefix: string,
+): PricingTableRow[] {
+  return model.adjustments.map((adjustment, index) => materializedVariant(
+    model,
+    adjustment,
+    `${prefix}:adjustment:${index}:${adjustment.label}`,
+    adjustmentLabel(adjustment, labels),
+  ));
+}
+
 /**
  * Converts flat API pricing into tree rows without changing the model IDs that
  * clients submit. A grouped parent is the standard tier with full prices;
@@ -228,23 +208,25 @@ export function buildPricingTableRows(
   for (const [modelId, entries] of modelsById) {
     const first = entries[0];
     if (!first) continue;
-    if (modelId === "minimax-m3" && entries.length === 1) {
-      rows.push(buildMinimaxM3Rows(first, labels));
-      continue;
-    }
-    if ((modelId === "minimax-m2.5" || modelId === "minimax-m2.7") && entries.length === 1) {
-      rows.push(buildMinimaxHighspeedRows(first, labels));
-      continue;
-    }
     if (entries.length > 1) {
       const [standard, ...upgrades] = [...entries].sort(comparePricingTiers);
       if (!standard) continue;
-      rows.push(groupRow(standard, upgrades.map((entry, index) => modelRow(
-        entry,
-        `variant:${modelId}:${entry.min_input_tokens ?? "none"}:${entry.max_input_tokens ?? "none"}:${timeWindowKey(entry)}:${index}`,
-        "variant",
-        variantLabel(entry.display_name || entry.model_id),
-      ))));
+      const children = [
+        ...adjustmentRows(standard, labels, `variant:${modelId}:base`),
+        ...upgrades.flatMap((entry, index) => {
+          const key = `variant:${modelId}:${entry.min_input_tokens ?? "none"}:${entry.max_input_tokens ?? "none"}:${timeWindowKey(entry)}:${index}`;
+          return [
+            modelRow(entry, key, "variant", tierLabel(entry)),
+            ...adjustmentRows(entry, labels, key),
+          ];
+        }),
+      ];
+      rows.push(groupRow(standard, children));
+      continue;
+    }
+    const adjustments = adjustmentRows(first, labels, `variant:${modelId}:base`);
+    if (adjustments.length > 0) {
+      rows.push(groupRow(first, adjustments));
       continue;
     }
     rows.push(modelRow(

@@ -3,7 +3,7 @@ import type {
   AccountCredentialKind,
   AccountQuotaScope,
 } from "../api/dashboard";
-import { PLAN_DEFINITIONS } from "./plans.ts";
+import { ZEN_FREE_PLAN } from "./plans.ts";
 
 /**
  * Built-in provider registry. The backend owns the DTO fields
@@ -38,17 +38,13 @@ export const ZEN_FREE_PROVIDER_ID = "opencode-zen-free";
 const CPA_ACCOUNT_ID = "00000000-0000-0000-0000-000000000003";
 export const CPA_PROVIDER_ID = "cpa";
 
-const ALL_PROVIDER_OFFERINGS: readonly ProviderOffering[] = PLAN_DEFINITIONS.map((plan) => ({
-  provider_id: plan.provider_id,
-  label: plan.label,
-  credential_kind: plan.credential_kind,
-  quota_scope: plan.quota_scope,
-  managed_registration: plan.managed_registration,
-}));
-
-export const ZEN_FREE_OFFERING: ProviderOffering = ALL_PROVIDER_OFFERINGS.find((offering) => (
-  offering.provider_id === ZEN_FREE_PROVIDER_ID
-))!;
+export const ZEN_FREE_OFFERING: ProviderOffering = {
+  provider_id: ZEN_FREE_PLAN.provider_id,
+  label: ZEN_FREE_PLAN.label,
+  credential_kind: ZEN_FREE_PLAN.credential_kind,
+  quota_scope: ZEN_FREE_PLAN.quota_scope,
+  managed_registration: ZEN_FREE_PLAN.managed_registration,
+};
 
 export function isZenFreeAccount(
   account: Pick<Account, "id" | "provider_id">,

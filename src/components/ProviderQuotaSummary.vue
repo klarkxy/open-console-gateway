@@ -45,37 +45,20 @@ import { NProgress } from "naive-ui";
 import { computed } from "vue";
 import type { ProviderQuotaWindow, ProviderUsageResponse } from "../api/providers.ts";
 import { formatCooldownRemainingUntil } from "../domain/account-display.ts";
+import { providerQuotaWindowLabel } from "../domain/accounts-usage.ts";
 import { t } from "../i18n/index.ts";
 
 const props = defineProps<{ usage: ProviderUsageResponse | null; now: number }>();
 
-const displayedWindows = computed(() => (
-  props.usage?.quota_windows.filter((window) => {
-    const kind = window.window_kind.toLowerCase();
-    return !(kind.startsWith("minimax_") && kind.endsWith(":video"));
-  }) ?? []
-));
-
-function scopeLabel(value: string): string {
-  const normalized = value.replaceAll("_", " ").trim();
-  return normalized ? normalized[0].toUpperCase() + normalized.slice(1) : normalized;
-}
+const displayedWindows = computed(() => props.usage?.quota_windows ?? []);
 
 function windowLabel(window: ProviderQuotaWindow): string {
-  const kind = window.window_kind;
-  if (kind.startsWith("minimax_current:")) {
-    const started = window.started_at ? Date.parse(window.started_at) : Number.NaN;
-    const ended = window.resets_at ? Date.parse(window.resets_at) : Number.NaN;
-    const hours = Math.round((ended - started) / 3_600_000);
-    const period = Number.isFinite(hours) && hours > 0 ? `${hours}${t("小时")}` : "";
-    const scope = scopeLabel(kind.slice(16));
-    return period ? `${period} · ${scope}` : scope;
-  }
-  if (kind.startsWith("minimax_weekly:")) return `${t("本周")} · ${scopeLabel(kind.slice(15))}`;
-  if (kind === "kimi_usage") return t("本周");
-  if (kind === "kimi_5h") return t("5小时");
-  if (kind === "month") return t("本月");
-  return scopeLabel(kind);
+  return providerQuotaWindowLabel(window, {
+    fiveHours: t("5小时"),
+    week: t("本周"),
+    month: t("本月"),
+    hours: (count) => `${count}${t("小时")}`,
+  });
 }
 
 function usedPercent(window: ProviderQuotaWindow): number {
@@ -85,7 +68,7 @@ function usedPercent(window: ProviderQuotaWindow): number {
 
 function usedLabel(window: ProviderQuotaWindow): string {
   if (window.limit_value === null) return "∞";
-  if (window.unit === "percent" || window.window_kind.startsWith("kimi_")) {
+  if (window.unit === "percent") {
     return `${usedPercent(window).toLocaleString(undefined, { maximumFractionDigits: 1 })}%`;
   }
   const used = window.used.toLocaleString();

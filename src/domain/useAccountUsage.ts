@@ -5,12 +5,14 @@ import { DashboardRequestError, dashboardApi } from "../api/dashboard";
 import type { Account, PricingLimits, UsageWindow } from "../api/dashboard";
 import { providerApi } from "../api/providers.ts";
 import type {
+  ProviderCatalogEntry,
   ProviderQuotaWindow,
   ProviderUsageResponse,
 } from "../api/providers.ts";
 import {
   defaultResetsInMinutes,
   isUsageLimitReached,
+  mergeCalibratedProviderUsage,
   mergeUsageEdit,
   normalizeUsagePercent,
   resetsFieldsToMinutes,
@@ -23,11 +25,7 @@ import {
 } from "./accounts-usage.ts";
 import type { UsageEditState, UsageKey } from "./accounts-usage.ts";
 import { accountIsReady } from "./account-display.ts";
-import {
-  isCommandCodeGoatAccount,
-  isOfficialCnPlanAccount,
-  isOllamaCloudAccount,
-} from "./account-providers.ts";
+import { findPlanDefinition } from "./plans.ts";
 import { t } from "../i18n/index.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
 import { mapWithConcurrency } from "../utils/async.ts";
@@ -44,7 +42,11 @@ export type UsageLimitView = { key: UsageKey; label: string; limit: number };
  * windows project locally priced OCG request logs and allow an explicit
  * manual correction. Ollama accounts without a billing row skip the meter.
  */
-export function useAccountUsage(accounts: Ref<Account[]>, now: Ref<number>) {
+export function useAccountUsage(
+  accounts: Ref<Account[]>,
+  now: Ref<number>,
+  catalog: Ref<ProviderCatalogEntry[] | null>,
+) {
   const message = useMessage();
 
   const quotaLimits = ref<PricingLimits | null>(null);
@@ -64,7 +66,8 @@ export function useAccountUsage(accounts: Ref<Account[]>, now: Ref<number>) {
   function usageLimitsFor(account: Account): UsageLimitView[] {
     const providerLimits = providerUsageLimits.value[account.id];
     if (providerLimits?.length) return providerLimits;
-    const limits = account.provider_id === "opencode"
+    const surface = findPlanDefinition(account.provider_id, catalog.value);
+    const limits = surface?.legacy && account.provider_id === "opencode"
       ? quotaLimits.value
       : null;
     if (!limits) return [];
@@ -73,6 +76,17 @@ export function useAccountUsage(accounts: Ref<Account[]>, now: Ref<number>) {
       { key: "window_week", label: t("本周"), limit: limits.window_week },
       { key: "window_month", label: t("本月"), limit: limits.window_month },
     ];
+  }
+
+  function usageCapabilities(account: Account): {
+    providerWindows: boolean;
+    refresh: boolean;
+    manual: boolean;
+  } {
+    const surface = findPlanDefinition(account.provider_id, catalog.value);
+    const manual = surface?.manual_usage_calibration === true;
+    const refresh = surface?.usage_availability === "available";
+    return { providerWindows: refresh || manual, refresh, manual };
   }
 
   function limitsFromProviderWindows(windows: ProviderQuotaWindow[]): UsageLimitView[] {
@@ -237,6 +251,18 @@ export function useAccountUsage(accounts: Ref<Account[]>, now: Ref<number>) {
         ...(key === "window_week" ? { resets_in_week: usage.resets_in_week } : {}),
         ...(key === "window_month" ? { resets_in_month: usage.resets_in_month } : {}),
       };
+      const patchedProviderUsage = mergeCalibratedProviderUsage(
+        providerUsageMap.value[accountId],
+        key,
+        usage,
+        new Date().toISOString(),
+      );
+      if (patchedProviderUsage) {
+        providerUsageMap.value = {
+          ...providerUsageMap.value,
+          [accountId]: patchedProviderUsage,
+        };
+      }
       const saved = usagePercentFromCost(usage[key], usageLimit(accountId, key));
       edit.draft = saved;
       edit.saved = saved;
@@ -262,26 +288,28 @@ export function useAccountUsage(accounts: Ref<Account[]>, now: Ref<number>) {
 
   async function refreshAccountUsage(accountId: string): Promise<void> {
     const account = accounts.value.find((item) => item.id === accountId);
-    if (!account) return;
+    if (!account || !usageCapabilities(account).refresh) return;
     if (usageRefreshLoading.value[accountId] || usageLoading.value[accountId]) {
       return;
     }
     usageRefreshLoading.value = { ...usageRefreshLoading.value, [accountId]: true };
     try {
-      if (isOfficialCnPlanAccount(account)) {
-        const result = await providerApi.refreshProviderUsage(accountId);
-        providerUsageMap.value = { ...providerUsageMap.value, [accountId]: result };
-        message.success(t("成功"));
-        return;
-      }
-      const result = await dashboardApi.refreshAccountUsage(accountId);
-      usageMap.value[accountId] = result.usage;
-      syncUsageEdits(accountId, result.usage);
+      const result = await providerApi.refreshProviderUsage(accountId);
+      providerUsageMap.value = { ...providerUsageMap.value, [accountId]: result };
+      providerUsageLimits.value = {
+        ...providerUsageLimits.value,
+        [accountId]: limitsFromProviderWindows(result.quota_windows),
+      };
       patchAccountUsageSync(accountId, {
-        usage_sync_last_success_at: result.last_success_at,
-        usage_sync_next_allowed_at: result.next_allowed_at,
+        usage_sync_last_success_at: result.sync_state?.last_success_at ?? null,
+        usage_sync_next_allowed_at: result.sync_state?.next_eligible_at ?? null,
       });
-      message.success(t("额度已从 OpenCode 官方用量刷新"));
+      if (usageCapabilities(account).manual) {
+        const usage = await dashboardApi.getAccountUsage(accountId);
+        usageMap.value[accountId] = usage;
+        syncUsageEdits(accountId, usage);
+      }
+      message.success(t("成功"));
     } catch (error) {
       if (error instanceof DashboardRequestError && error.status === 429) {
         const nextAllowed = error.nextAllowedAt;
@@ -322,45 +350,30 @@ export function useAccountUsage(accounts: Ref<Account[]>, now: Ref<number>) {
     usageLoadErrors.value[accountId] = null;
     try {
       const account = accounts.value.find(({ id }) => id === accountId);
-      if (account && isOllamaCloudAccount(account)) {
-        const providerUsage = await providerApi.getProviderUsage(accountId);
-        providerUsageMap.value = { ...providerUsageMap.value, [accountId]: providerUsage };
-        providerUsageLimits.value = {
-          ...providerUsageLimits.value,
-          [accountId]: limitsFromProviderWindows(providerUsage.quota_windows),
-        };
-        const paid = account.ollama_billing_tier === "pro"
-          || account.ollama_billing_tier === "max"
-          || account.ollama_billing_tier === "team";
-        if (paid) {
-          const usage = await dashboardApi.getAccountUsage(accountId);
-          usageMap.value[accountId] = usage;
-          syncUsageEdits(accountId, usage);
-        } else {
-          usageMap.value[accountId] = blankUsage(accountId);
-        }
-        return;
-      }
-      if (account && isOfficialCnPlanAccount(account)) {
-        const providerUsage = await providerApi.getProviderUsage(accountId);
-        providerUsageMap.value = { ...providerUsageMap.value, [accountId]: providerUsage };
-        usageMap.value[accountId] = blankUsage(accountId);
-        return;
-      }
-      const [usage, providerUsage] = await Promise.all([
-        dashboardApi.getAccountUsage(accountId),
-        account && isCommandCodeGoatAccount(account)
+      if (!account) return;
+      const capabilities = usageCapabilities(account);
+      if (!capabilities.providerWindows && !capabilities.manual) return;
+      const [providerUsage, usage] = await Promise.all([
+        capabilities.providerWindows
           ? providerApi.getProviderUsage(accountId)
+          : Promise.resolve(null),
+        capabilities.manual
+          ? dashboardApi.getAccountUsage(accountId)
           : Promise.resolve(null),
       ]);
       if (providerUsage) {
+        providerUsageMap.value = { ...providerUsageMap.value, [accountId]: providerUsage };
         providerUsageLimits.value = {
           ...providerUsageLimits.value,
           [accountId]: limitsFromProviderWindows(providerUsage.quota_windows),
         };
       }
-      usageMap.value[accountId] = usage;
-      syncUsageEdits(accountId, usage);
+      if (usage) {
+        usageMap.value[accountId] = usage;
+        syncUsageEdits(accountId, usage);
+      } else {
+        usageMap.value[accountId] = blankUsage(accountId);
+      }
     } catch (error) {
       usageLoadErrors.value[accountId] = dashboardErrorDetail(error);
     } finally {
@@ -373,7 +386,7 @@ export function useAccountUsage(accounts: Ref<Account[]>, now: Ref<number>) {
     await mapWithConcurrency(
       accounts.value.filter((account) => (
         accountIsReady(account)
-        && account.provider_id === "opencode"
+        && (usageCapabilities(account).providerWindows || usageCapabilities(account).manual)
       )),
       4,
       (account) => loadAccountUsage(account.id),

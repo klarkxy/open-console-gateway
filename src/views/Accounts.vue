@@ -347,7 +347,7 @@ import {
 } from "../domain/account-credential.ts";
 import { identitiesApi } from "../api/identities.ts";
 import type { BindingPatchInput, IdentityCredentialCreateInput } from "../api/identities.ts";
-import { DEFAULT_PROVIDER_ID, isCommandCodeGoatAccount, isOllamaCloudAccount, isOfficialCnPlanAccount, isZenFreeAccount } from "../domain/account-providers.ts";
+import { DEFAULT_PROVIDER_ID, isZenFreeAccount } from "../domain/account-providers.ts";
 import {
   executeCustomAccountEdit,
   isCustomApiAccount,
@@ -363,12 +363,15 @@ import {
   type AccountStatusFilter,
 } from "./account-filters.ts";
 import {
-  PLAN_DEFINITIONS,
-  dynamicPlanDefinition,
+  findPlanDefinition,
   planFamilyLabel,
+  providerSurfaces,
 } from "../domain/plans.ts";
-import { isDynamicCatalogEntry } from "../domain/dynamic-provider.ts";
 import { accountCreateRequestInput } from "../domain/account-create-payload.ts";
+import {
+  isFirstReadyProviderAccount,
+  shouldRefreshCatalogForNewProviderAccount,
+} from "../domain/provider-catalog-refresh.ts";
 import { t, type MessageKey } from "../i18n/index.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
 import { applyAppViewSearchParams, readAccountAddDeepLink, readAccountDeepLink } from "./app-navigation.ts";
@@ -467,7 +470,6 @@ const catalogError = ref("");
 const platformMutating = computed(() => Boolean(platformSectionRef.value?.mutating));
 
 const {
-  quotaLimits,
   quotaLimitsLoading,
   quotaLimitsError,
   usageLimitsFor,
@@ -487,7 +489,7 @@ const {
   loadQuotaLimits,
   loadAccountUsage,
   retryQuotaLimits,
-} = useAccountUsage(accounts, now);
+} = useAccountUsage(accounts, now, providerCatalog);
 
 const {
   orderSaving,
@@ -548,10 +550,9 @@ const planFilterOptions = computed(() => [
   { value: "all", label: t("全部方案") },
   ...plansInUse(
     accounts.value,
-    PLAN_DEFINITIONS,
-    (providerCatalog.value ?? []).filter(isDynamicCatalogEntry).map(dynamicPlanDefinition),
+    providerSurfaces(providerCatalog.value),
   ).map((plan) => ({
-    value: plan.id === "dynamic-http" ? plan.provider_id : plan.id,
+    value: plan.provider_id,
     label: planFamilyLabel(plan, providerCatalog.value),
   })),
 ]);
@@ -1155,6 +1156,7 @@ async function verifyManagedKey(accountId: string, key: string): Promise<void> {
     if (accountIsReady(updated)) {
       showManagedWizard.value = false;
       await loadAccountUsage(updated.id);
+      await refreshCatalogIfNewProvider(updated);
       message.success(isCooling(updated, now.value)
         ? t("Key 有效，账号已启用并按上游响应进入冷却")
         : t("Key 验证成功，账号已启用"));
@@ -1227,6 +1229,21 @@ function addAccount(account: Account): void {
   accounts.value = [...accounts.value, account];
 }
 
+async function refreshCatalogIfNewProvider(account: Account): Promise<void> {
+  if (!isFirstReadyProviderAccount(account, accounts.value)) return;
+  const surface = findPlanDefinition(account.provider_id, providerCatalog.value);
+  if (!surface || surface.dynamic || surface.kind === "custom") return;
+  try {
+    const contracts = await providersStore.loadContracts();
+    if (!shouldRefreshCatalogForNewProviderAccount(account, accounts.value, contracts)) return;
+    await providersStore.refreshContractCatalog("provider", account.provider_id);
+    message.success(t("已刷新模型目录"));
+  } catch (error) {
+    message.warning(t("刷新模型目录失败: {error}", { error: dashboardErrorDetail(error) }));
+    message.info(`${t("供应商")} → ${t("刷新模型目录")}`);
+  }
+}
+
 function removeAccountState(id: string): void {
   accounts.value = accounts.value.filter((item) => item.id !== id);
   delete usageMap.value[id];
@@ -1240,10 +1257,9 @@ function removeAccountState(id: string): void {
 }
 
 function accountHasUsageDisplay(account: Account): boolean {
-  return isCommandCodeGoatAccount(account)
-    || isOfficialCnPlanAccount(account)
-    || isOllamaCloudAccount(account)
-    || account.provider_id === "opencode";
+  const surface = findPlanDefinition(account.provider_id, providerCatalog.value);
+  return surface?.usage_availability === "available"
+    || surface?.manual_usage_calibration === true;
 }
 
 async function refreshAccountState(id: string): Promise<Account | null> {
@@ -1286,26 +1302,12 @@ async function loadAccounts() {
     const loaded = await accountsStore.loadPresented();
     accounts.value = loaded;
     applyAccountDeepLink();
-    // 限流并发拉取用量，避免账号多时 N 次请求同时打到后端；Zen Free 无 Key 维度用量。
-    // GOAT 的本地估算不依赖 OpenCode Go 定价快照是否加载成功。
-    if (
-      quotaLimits.value
-      || loaded.some(isCommandCodeGoatAccount)
-      || loaded.some(isOfficialCnPlanAccount)
-      || loaded.some(isOllamaCloudAccount)
-    ) {
+    // Limit concurrent provider/local usage reads for large account lists.
+    if (loaded.some(accountHasUsageDisplay)) {
       await mapWithConcurrency(
         loaded.filter((account) => (
           accountIsReady(account)
-          && (
-            isCommandCodeGoatAccount(account)
-            || isOfficialCnPlanAccount(account)
-            || isOllamaCloudAccount(account)
-            || (
-              quotaLimits.value
-              && account.provider_id === "opencode"
-            )
-          )
+          && accountHasUsageDisplay(account)
         )),
         4,
         (account) => loadAccountUsage(account.id),
@@ -1357,12 +1359,11 @@ async function loadProviderCatalog(): Promise<void> {
 
 async function initializeAccounts() {
   const registrationOptions = loadRegistrationOptions();
-  const catalogPromise = loadProviderCatalog();
+  await loadProviderCatalog();
   await loadQuotaLimits();
   await loadAccounts();
   await Promise.allSettled([
     registrationOptions,
-    catalogPromise,
     providersStore.loadConnections(),
   ]);
 }
@@ -1409,6 +1410,7 @@ async function onFormSave(payload: AccountInput | AccountFormPayload) {
       addAccount(created);
       void providersStore.loadConnections().catch(() => undefined);
       message.success(t("账号已添加"));
+      await refreshCatalogIfNewProvider(created);
       // Go uses official usage; GOAT and Ollama project locally priced OCG request logs.
       if (accountHasUsageDisplay(created) && accountIsReady(created)) {
         await loadAccountUsage(created.id);

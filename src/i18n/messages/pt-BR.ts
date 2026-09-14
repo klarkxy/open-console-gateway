@@ -645,7 +645,7 @@ export const ptBRMessages = {
   "保存协议覆盖失败: {error}": "Falha ao salvar a substituição de protocolo: {error}",
   "操作": "Ações",
   "测试": "Testar",
-  "创建后默认关闭；验通后请自行启用，测试连接不会自动打开。": "Criada desativada. Ative depois de conferir a conexão; o teste não liga o cartão.",
+  "创建后默认启用，可立即参与路由。测试连接不会改变开关。": "Criada ativada e pronta para rotear. O teste de conexão não altera o interruptor.",
   "测试连接：{name}": "Testar conexão: {name}",
   "测试将锁定当前账号发送最小真实请求，不会切换其他账号；可能产生少量服务商费用。": "Os testes enviam solicitações reais mínimas somente por esta conta, sem trocar de conta, e podem gerar uma pequena cobrança do provedor.",
   "筛选模型": "Filtrar modelos",

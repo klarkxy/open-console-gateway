@@ -644,7 +644,7 @@ export const deDEMessages = {
   "保存协议覆盖失败: {error}": "Protokollüberschreibung konnte nicht gespeichert werden: {error}",
   "操作": "Aktionen",
   "测试": "Test",
-  "创建后默认关闭；验通后请自行启用，测试连接不会自动打开。": "Wird deaktiviert erstellt. Nach der Prüfung selbst aktivieren; der Verbindungstest schaltet die Karte nicht ein.",
+  "创建后默认启用，可立即参与路由。测试连接不会改变开关。": "Wird aktiviert erstellt und kann sofort routen. Der Verbindungstest ändert den Schalter nicht.",
   "测试连接：{name}": "Verbindung testen: {name}",
   "测试将锁定当前账号发送最小真实请求，不会切换其他账号；可能产生少量服务商费用。": "Tests senden minimale echte Anfragen nur über dieses Konto, ohne Kontowechsel, und können geringe Anbietergebühren verursachen.",
   "筛选模型": "Modelle filtern",

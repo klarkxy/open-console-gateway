@@ -644,7 +644,7 @@ export const esESMessages = {
   "保存协议覆盖失败: {error}": "No se pudo guardar la anulación del protocolo: {error}",
   "操作": "Acciones",
   "测试": "Prueba",
-  "创建后默认关闭；验通后请自行启用，测试连接不会自动打开。": "Se crea desactivada. Actívala cuando hayas comprobado la conexión; la prueba no enciende la tarjeta.",
+  "创建后默认启用，可立即参与路由。测试连接不会改变开关。": "Se crea activada y lista para enrutar. La prueba de conexión no cambia el interruptor.",
   "测试连接：{name}": "Probar conexión: {name}",
   "测试将锁定当前账号发送最小真实请求，不会切换其他账号；可能产生少量服务商费用。": "Las pruebas envían solicitudes reales mínimas solo mediante esta cuenta, sin cambiar de cuenta, y pueden generar un pequeño coste del proveedor.",
   "筛选模型": "Filtrar modelos",

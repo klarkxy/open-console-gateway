@@ -356,7 +356,7 @@ import {
   quotasByKind,
 } from "../domain/platform-accounts.ts";
 import { isCustomApiAccount } from "../domain/custom-account.ts";
-import { PLAN_DEFINITIONS } from "../domain/plans.ts";
+import { findPlanDefinition } from "../domain/plans.ts";
 import { locale, t, type MessageKey } from "../i18n/index.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
 import AccountFormModal, { type AccountFormPayload } from "./AccountFormModal.vue";
@@ -415,7 +415,7 @@ const addKeyError = ref("");
 const pendingLink = ref<{ accountId: string; parentId: string } | null>(null);
 
 const customApiPlan = computed(() => (
-  PLAN_DEFINITIONS.find((plan) => plan.id === "custom-endpoint") ?? null
+  findPlanDefinition("custom", props.catalog) ?? null
 ));
 
 const importTarget = ref<{ account: Account; link: PlatformLink } | null>(null);

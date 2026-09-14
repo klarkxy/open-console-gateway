@@ -645,7 +645,7 @@ export const frFRMessages = {
   "保存协议覆盖失败: {error}": "Échec de l’enregistrement du remplacement de protocole : {error}",
   "操作": "Actions",
   "测试": "Tester",
-  "创建后默认关闭；验通后请自行启用，测试连接不会自动打开。": "Créé désactivé. Activez-le après avoir vérifié la connexion ; le test ne l’allume pas.",
+  "创建后默认启用，可立即参与路由。测试连接不会改变开关。": "Créé activé et prêt à router. Le test de connexion ne change pas l’interrupteur.",
   "测试连接：{name}": "Tester la connexion : {name}",
   "测试将锁定当前账号发送最小真实请求，不会切换其他账号；可能产生少量服务商费用。": "Les tests envoient des requêtes réelles minimales uniquement via ce compte, sans changer de compte, et peuvent entraîner de faibles frais.",
   "筛选模型": "Filtrer les modèles",

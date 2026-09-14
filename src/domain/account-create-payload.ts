@@ -88,11 +88,11 @@ export function buildCreateAccountPayload(
   values: AccountCreateFormValues,
 ): AccountInput {
   if (!values.name.trim()) throw new AccountCreatePayloadError("missing_name");
-  const isDynamic = plan.id === "dynamic-http";
+  const isDynamic = plan.dynamic;
   const requiresKey = plan.credential_kind !== "none";
   if (requiresKey && !values.key.trim()) throw new AccountCreatePayloadError("missing_key");
 
-  const isCustom = plan.id === "custom-endpoint";
+  const isCustom = plan.kind === "custom";
   const payload: AccountInput = {
     name: values.name.trim(),
     provider_id: plan.provider_id,

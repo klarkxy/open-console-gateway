@@ -54,7 +54,7 @@ export function buildNeedsAttention(
       // blanked date there is not a billing fact.
       const plan = planForAccount(account);
       const expiryDays = plan
-        && plan.id !== "custom-endpoint"
+        && plan.kind !== "custom"
         && !isZenFreeAccount(account)
         && account.expires_on
         ? daysUntilDate(account.expires_on, now)

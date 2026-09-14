@@ -3,7 +3,7 @@ import test from "node:test";
 import type { Account } from "../api/dashboard.ts";
 import { buildNeedsAttention } from "./dashboard-attention.ts";
 import { accountPlanKey, accountStatusKey, filterAccounts, plansInUse } from "./account-filters.ts";
-import { PLAN_DEFINITIONS } from "../domain/plans.ts";
+import { providerSurfaces } from "../domain/plans.ts";
 
 const NOW = Date.parse("2026-08-21T12:00:00Z");
 
@@ -163,9 +163,9 @@ test("plan and status filters keep the existing priority order", () => {
     account({ id: "c", name: "C", auth_error: "401" }),
   ];
   assert.deepEqual(filterAccounts(accounts, "all", "all", NOW).map((a) => a.id), ["a", "b", "c"]);
-  assert.deepEqual(filterAccounts(accounts, "zen-free", "all", NOW).map((a) => a.id), ["b"]);
+  assert.deepEqual(filterAccounts(accounts, "opencode-zen-free", "all", NOW).map((a) => a.id), ["b"]);
   assert.deepEqual(filterAccounts(accounts, "all", "auth-error", NOW).map((a) => a.id), ["c"]);
-  assert.deepEqual(filterAccounts(accounts, "opencode-go", "available", NOW).map((a) => a.id), ["a"]);
+  assert.deepEqual(filterAccounts(accounts, "opencode", "available", NOW).map((a) => a.id), ["a"]);
   // Unknown providers fall back to the raw provider id.
   assert.equal(
     accountPlanKey(account({ provider_id: "else" })),
@@ -184,13 +184,13 @@ test("plan and status filters keep the existing priority order", () => {
   );
 });
 
-test("plansInUse follows registry order, not account order", () => {
+test("plansInUse follows catalog projection order, not account order", () => {
   const accounts = [
     account({ id: "b", name: "B", provider_id: "opencode-zen-free" }),
     account({ id: "a", name: "A" }),
   ];
   assert.deepEqual(
-    plansInUse(accounts, PLAN_DEFINITIONS).map((plan) => plan.id),
-    ["opencode-go", "zen-free"],
+    plansInUse(accounts, providerSurfaces(null)).map((plan) => plan.id),
+    ["opencode", "opencode-zen-free"],
   );
 });

@@ -186,7 +186,7 @@
           </n-tooltip>
         </div>
 
-        <div v-if="(isGo || isOfficialCn) && accountIsReady(account)" class="account-action account-action--secondary">
+        <div v-if="usageRefreshAvailable && accountIsReady(account)" class="account-action account-action--secondary">
           <n-tooltip trigger="hover">
             <template #trigger>
               <n-button
@@ -201,7 +201,7 @@
                 <template #icon><n-icon :component="ReloadOutlined" /></template>
               </n-button>
             </template>
-            {{ isOfficialCn ? t("刷新额度") : usageRefreshTooltip() }}
+            {{ t("刷新额度") }}
           </n-tooltip>
         </div>
 
@@ -307,7 +307,7 @@
     <div v-else-if="isOllamaCloud && ollamaNeedsBilling" class="provider-unconfigured" role="status">
       <p>{{ t("请配置 Ollama 计费档位以显示本月额度") }}</p>
     </div>
-    <div v-else-if="manualUsageCalibration" class="manual-usage-block">
+    <div v-else-if="usageDisplayAvailable" class="official-plan-usage">
       <div v-if="usageLoadError" class="usage-load-error" role="alert">
         <span>{{ t("用量加载失败") }}</span>
         <n-button
@@ -320,13 +320,7 @@
           {{ t("重试") }}
         </n-button>
       </div>
-      <UsageStrip
-        v-else
-        :account="account"
-        :usage="usage"
-        :limits="limits"
-        :editing="!!edits"
-      />
+      <ProviderQuotaSummary v-else :usage="providerUsage" :now="now" />
     </div>
     <div v-else-if="isCustom" class="custom-endpoint">
       <div class="custom-endpoint__meta">
@@ -338,44 +332,6 @@
         </span>
       </div>
     </div>
-    <div v-else-if="isGo && !quotaLimitsFailed">
-      <div v-if="usageLoadError" class="usage-load-error" role="alert">
-        <span>{{ t("用量加载失败") }}</span>
-        <n-button
-          text
-          size="tiny"
-          type="primary"
-          :loading="usageLoading"
-          @click="emit('reload-usage')"
-        >
-          {{ t("重试") }}
-        </n-button>
-      </div>
-      <UsageStrip
-        v-else
-        :account="account"
-        :usage="usage"
-        :limits="limits"
-        :editing="!!edits"
-      />
-      <p
-        v-if="!usageLoadError"
-        class="usage-sync-meta"
-      >
-        {{ usageSyncCaption(account) }}
-      </p>
-    </div>
-    <div v-else-if="isOfficialCn" class="official-plan-usage">
-      <div v-if="usageLoadError" class="usage-load-error" role="alert">
-        <span>{{ t("用量加载失败") }}</span>
-        <n-button text size="tiny" type="primary" :loading="usageLoading" @click="emit('reload-usage')">
-          {{ t("重试") }}
-        </n-button>
-      </div>
-      <ProviderQuotaSummary v-else :usage="providerUsage" :now="now" />
-    </div>
-
-
   </n-card>
 </template>
 
@@ -414,8 +370,6 @@ import {
   accountRoutingDraftDescription,
   cooldownDetails,
   managedStepLabel,
-  usageRefreshTooltip,
-  usageSyncCaption,
 } from "../domain/account-display.ts";
 import {
   accountCredentialCountLabel,
@@ -432,16 +386,14 @@ import type { AccountMenuOption } from "../domain/account-display.ts";
 import {
   isCpaIntegrationAccount,
   isOllamaCloudAccount,
-  isOfficialCnPlanAccount,
   isZenFreeAccount,
 } from "../domain/account-providers.ts";
 import { isCustomApiAccount } from "../domain/custom-account.ts";
 import { localDateString } from "../domain/account-lifecycle.ts";
-import { planLabel } from "../domain/plans.ts";
+import { findPlanDefinition, planLabel } from "../domain/plans.ts";
 import type { AccountUsageEdits, UsageLimitView } from "../domain/useAccountUsage.ts";
 import { t } from "../i18n/index.ts";
 import AccountUsageEditor from "./AccountUsageEditor.vue";
-import UsageStrip from "./UsageStrip.vue";
 import ProviderQuotaSummary from "./ProviderQuotaSummary.vue";
 
 const props = defineProps<{
@@ -483,9 +435,7 @@ const emit = defineEmits<{
 
 const isZen = computed(() => isZenFreeAccount(props.account));
 const isCpa = computed(() => isCpaIntegrationAccount(props.account));
-const isGo = computed(() => props.account.provider_id === "opencode");
 const isCustom = computed(() => isCustomApiAccount(props.account));
-const isOfficialCn = computed(() => isOfficialCnPlanAccount(props.account));
 const isOllamaCloud = computed(() => isOllamaCloudAccount(props.account));
 const ollamaNeedsBilling = computed(() => !props.account.ollama_billing_tier);
 const overlayIdentity = computed(() => props.identity ?? null);
@@ -534,12 +484,14 @@ const canSavePurchaseDate = computed(() => (
   && purchaseDateDraft.value <= today.value
   && purchaseDateDraft.value !== props.account.purchase_date
 ));
-const plan = computed(() => props.catalog?.find((entry) => (
-  entry.provider_id === props.account.provider_id
-)));
+const plan = computed(() => findPlanDefinition(props.account.provider_id, props.catalog));
 // Manual calibration display is catalog-driven: no hardcoded per-plan meters.
 const manualUsageCalibration = computed(() => (
   plan.value?.manual_usage_calibration ?? false
+));
+const usageRefreshAvailable = computed(() => plan.value?.usage_availability === "available");
+const usageDisplayAvailable = computed(() => (
+  usageRefreshAvailable.value || manualUsageCalibration.value
 ));
 const toggleBlockedReason = computed(() => {
   if (!props.account.plan_routable) return t("该方案暂不可路由");

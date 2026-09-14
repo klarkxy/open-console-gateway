@@ -53,10 +53,7 @@
             </n-alert>
             <p v-else>{{ t(pricingDisplay(group).messageKey) }}</p>
           </div>
-          <div
-            v-if="group.content.kind === 'opencode-go' || group.content.kind === 'goat-reference' || group.content.kind === 'ollama-reference'"
-            class="pricing-actions"
-          >
+          <div v-if="group.pricingAvailability === 'available'" class="pricing-actions">
             <n-button
               v-if="pricingSourceUrl(group)"
               tag="a"
@@ -66,36 +63,36 @@
               rel="noopener noreferrer"
             >{{ t("官方来源") }}</n-button>
             <n-button
+              v-if="canRefresh(group)"
               type="primary"
               :loading="refreshing"
-              :disabled="loading || refreshing || savingModelId !== null || confirmationOpen || (Boolean(providerId) && !providerRefreshRevision)"
+              :disabled="loading || refreshing || savingModelId !== null || confirmationOpen || !providerRefreshRevision"
               @click="requestPricingRefresh"
             >{{ refreshing ? t("正在刷新…") : t("刷新价格表") }}</n-button>
           </div>
         </div>
 
-        <template v-if="group.content.kind === 'opencode-go'">
+        <template v-if="group.content.kind === 'models'">
             <n-alert v-if="refreshError" type="warning" :title="t('刷新额度价格表失败: {error}', { error: refreshError })" />
 
             <n-spin :show="loading">
-              <template v-if="snapshot && pricingDisplay(group).state === 'available-table'">
+              <template v-if="pricingDisplay(group).state === 'available-table'">
                 <dl class="pricing-ledger pricing-ledger--compact">
                   <div class="pricing-ledger__revision">
                     <dt>{{ t("修订版本") }}</dt>
-                    <dd><code>{{ snapshot.revision }}</code></dd>
+                    <dd><code>{{ group.content.snapshot.revision }}</code></dd>
                   </div>
                   <div>
                     <dt>{{ t("启用时间") }}</dt>
-                    <dd>{{ formatTimestamp(snapshot.activated_at) }}</dd>
+                    <dd>{{ formatTimestamp(group.content.snapshot.activated_at) }}</dd>
                   </div>
                   <div>
                     <dt>{{ t("文档更新时间") }}</dt>
-                    <dd>{{ snapshot.document_updated_at ? formatTimestamp(snapshot.document_updated_at) : "—" }}</dd>
+                    <dd>{{ group.content.snapshot.document_updated_at ? formatTimestamp(group.content.snapshot.document_updated_at) : "—" }}</dd>
                   </div>
                 </dl>
 
                 <p class="pricing-note">
-                  {{ t("模型价格为 OpenCode Go 表中的美元/百万 tokens；官方倍率用于换算额度消耗，可按活动手动调整。") }}
                   {{ t("未知价格不会参与费用估算") }}
                 </p>
                 <n-data-table
@@ -113,26 +110,20 @@
         </template>
 
         <ProviderPricingReference
-          v-else-if="group.content.kind === 'goat-reference'"
-          kind="goat"
+          v-else-if="group.content.kind === 'values'"
           :snapshot="group.content.snapshot"
           :saving-model-id="savingModelId"
           :disabled="refreshing"
+          :editable="pricingMultiplierEditable(group)"
           @save-multiplier="(modelId, multiplier) => saveProviderMultiplier(group, modelId, multiplier)"
         />
-        <ProviderPricingReference
-          v-else-if="group.content.kind === 'ollama-reference'"
-          kind="ollama"
-          :snapshot="group.content.snapshot"
-          :disabled="refreshing"
-        />
         <n-alert
-          v-if="(group.content.kind === 'goat-reference' || group.content.kind === 'ollama-reference') && refreshError"
+          v-if="group.content.kind === 'values' && refreshError"
           type="warning"
           :title="t('刷新额度价格表失败: {error}', { error: refreshError })"
         />
 
-        <template v-else-if="pricingDisplay(group).state === 'available-table' && group.content.snapshot">
+        <template v-else-if="group.content.kind === 'opaque' && pricingDisplay(group).state === 'available-table'">
             <dl class="pricing-ledger pricing-ledger--compact">
               <div>
                 <dt>{{ t("修订版本") }}</dt>
@@ -184,12 +175,14 @@ import {
 import type { DataTableColumns, DataTableRowKey } from "naive-ui";
 import { CheckOutlined, CloseOutlined, RightOutlined } from "@vicons/antd";
 import { DashboardRequestError, dashboardApi } from "../api/dashboard";
+import { dashboardV4 } from "../api/dashboard-v4.ts";
 import type {
   PricingMultiplierChange,
   PricingSnapshot,
 } from "../api/dashboard";
 import { providerApi } from "../api/providers.ts";
 import type { ProviderCatalogEntry } from "../api/providers.ts";
+import type { ProviderTemplate } from "../api/generated/dashboard-v4.ts";
 import ProviderPricingReference from "./ProviderPricingReference.vue";
 import { locale, t } from "../i18n/index.ts";
 import {
@@ -197,12 +190,10 @@ import {
   formatPricingMultiplier,
   formatPricingRate,
 } from "../domain/pricing-view.ts";
-import { GOAT_PRICING_REFERENCE } from "../domain/pricing-references.ts";
 import type { PricingTableRow } from "../domain/pricing-view.ts";
-import type { PlanId } from "../domain/plans.ts";
+import { providerSurfaces } from "../domain/plans.ts";
 import {
   buildScopedPlanPricingGroups,
-  PRICING_PLAN_DEFINITIONS,
   resolvePlanPricingDisplay,
 } from "../domain/pricing-plans.ts";
 import type { PlanPricingGroup, ProviderSnapshots } from "../domain/pricing-plans.ts";
@@ -226,30 +217,40 @@ const expandedRowKeys = ref<DataTableRowKey[]>([]);
 const loadError = ref("");
 const refreshError = ref("");
 const providerSnapshots = ref<ProviderSnapshots>({});
-const providerSnapshotErrors = ref<Partial<Record<PlanId, string>>>({});
-const activePlanId = ref<PlanId>("opencode-go");
-
-const tableRows = computed(() => buildPricingTableRows(snapshot.value?.models ?? [], {
-  highspeed: t("高速别名"),
-  minimaxM3Upper: t("> 512K 输入"),
-  priorityService: t("优先服务"),
-  minimaxM3UpperPriority: t("> 512K 输入 + 优先服务"),
-}));
+const providerSnapshotErrors = ref<Partial<Record<string, string>>>({});
+const providerTemplates = ref<ProviderTemplate[]>([]);
+const activePlanId = ref<string>("");
 
 const planGroups = computed<PlanPricingGroup[]>(() => (
   buildScopedPlanPricingGroups(props.providerId, catalog.value, snapshot.value, providerSnapshots.value)
 ));
 
+const activeGroup = computed(() => planGroups.value.find(({ plan }) => (
+  plan.provider_id === activePlanId.value
+)) ?? planGroups.value[0] ?? null);
+
+const tableRows = computed(() => buildPricingTableRows(
+  activeGroup.value?.content.kind === "models" ? activeGroup.value.content.snapshot.models : [],
+  {
+  highspeed: t("高速别名"),
+  minimaxM3Upper: t("> 512K 输入"),
+  priorityService: t("优先服务"),
+  minimaxM3UpperPriority: t("> 512K 输入 + 优先服务"),
+  },
+));
+
 const providerRefreshRevision = computed<string | undefined>(() => {
-  if (props.providerId === "opencode") return snapshot.value?.revision;
-  const group = planGroups.value.find(({ plan }) => plan.id === activePlanId.value)
-    ?? planGroups.value[0];
-  return group ? providerSnapshots.value[group.plan.id]?.provider_pricing_revision : undefined;
+  const group = activeGroup.value;
+  if (!group) return undefined;
+  return providerSnapshots.value[group.plan.provider_id]?.provider_pricing_revision
+    ?? (group.plan.provider_id === "opencode" ? snapshot.value?.revision : undefined);
 });
 
 function pricingError(group: PlanPricingGroup): string | null {
-  if (group.plan.id === "opencode-go") return !snapshot.value ? loadError.value || null : null;
-  return providerSnapshotErrors.value[group.plan.id] ?? null;
+  return providerSnapshotErrors.value[group.plan.provider_id]
+    ?? (catalog.value == null && group.plan.provider_id === "opencode" && !snapshot.value
+      ? loadError.value || null
+      : null);
 }
 
 function pricingDisplay(group: PlanPricingGroup) {
@@ -257,18 +258,11 @@ function pricingDisplay(group: PlanPricingGroup) {
 }
 
 function pricingSourceUrl(group: PlanPricingGroup): string {
-  if (group.content.kind === "opencode-go") return snapshot.value?.source_url ?? "";
-  if (group.content.kind === "goat-reference") {
-    return group.content.snapshot?.source_url ?? GOAT_PRICING_REFERENCE.sourceUrl;
-  }
-  if (group.content.kind === "ollama-reference") {
-    return group.content.snapshot?.source_url ?? "https://ollama.com/pricing";
-  }
-  return "";
+  return group.content.kind === "none" ? "" : group.content.snapshot.source_url;
 }
 
 function retryGroupPricing(group: PlanPricingGroup) {
-  if (group.plan.id === "opencode-go") {
+  if (catalog.value == null && group.plan.provider_id === "opencode") {
     void loadPricing();
   } else if (catalog.value) {
     void loadProviderSnapshots(catalog.value);
@@ -286,7 +280,9 @@ async function loadProviderCatalog() {
   try {
     catalog.value = await providerApi.getProviderCatalog();
   } catch (error) {
+    catalog.value = null;
     catalogError.value = error instanceof Error ? error.message : String(error);
+    if (props.providerId === "opencode" || !props.providerId) await loadPricing();
   } finally {
     catalogLoading.value = false;
   }
@@ -296,25 +292,22 @@ async function loadProviderCatalog() {
 // catalog marks as pricing-available. Failures are swallowed so a missing
 // endpoint or an in-flight backend change never breaks the page.
 async function loadProviderSnapshots(catalogValue: ProviderCatalogEntry[]) {
-  const availablePlans = PRICING_PLAN_DEFINITIONS.map((plan) => {
-    const entry = catalogValue.find((item) => item.provider_id === plan.provider_id);
-    return { plan, entry };
-  }).filter(({ plan, entry }) => (
-    plan.id !== "opencode-go"
-    && entry?.pricing_availability === "available"
+  const availablePlans = providerSurfaces(catalogValue).filter((plan) => (
+    plan.pricing_availability === "available"
+    && (!props.providerId || plan.provider_id === props.providerId)
   ));
 
   const results = await Promise.allSettled(
-    availablePlans.map(({ plan }) => providerApi.getProviderPricing(plan.provider_id)),
+    availablePlans.map((plan) => providerApi.getProviderPricing(plan.provider_id)),
   );
   const next: ProviderSnapshots = {};
-  const nextErrors: Partial<Record<PlanId, string>> = {};
+  const nextErrors: Partial<Record<string, string>> = {};
   results.forEach((result, index) => {
-    const { plan } = availablePlans[index]!;
+    const plan = availablePlans[index]!;
     if (result.status === "fulfilled" && plan) {
-      next[plan.id] = result.value;
+      next[plan.provider_id] = result.value;
     } else if (result.status === "rejected" && plan) {
-      nextErrors[plan.id] = result.reason instanceof Error
+      nextErrors[plan.provider_id] = result.reason instanceof Error
         ? result.reason.message
         : String(result.reason);
     }
@@ -324,10 +317,28 @@ async function loadProviderSnapshots(catalogValue: ProviderCatalogEntry[]) {
 }
 
 watch(catalog, (catalogValue) => {
-  if (catalogValue) {
+  if (catalogValue !== null) {
     void loadProviderSnapshots(catalogValue);
   }
 }, { immediate: true });
+
+async function loadProviderTemplates(): Promise<void> {
+  try {
+    providerTemplates.value = (await dashboardV4.getTemplates()).templates;
+  } catch {
+    // V4 absence is an intentional read-only downgrade.
+    providerTemplates.value = [];
+  }
+}
+
+function pricingMultiplierEditable(group: PlanPricingGroup): boolean {
+  const template = providerTemplates.value.find((item) => item.id === group.plan.provider_id);
+  return template?.pricingMultiplierEditable === true;
+}
+
+function canRefresh(group: PlanPricingGroup): boolean {
+  return group.pricingAvailability === "available";
+}
 
 function formatRate(value: number | null) {
   return formatPricingRate(value, locale.value);
@@ -403,7 +414,10 @@ function renderModel(row: PricingTableRow) {
 }
 
 function snapshotMultiplier(modelId: string): number {
-  return snapshot.value?.models.find(({ model_id }) => model_id === modelId)?.quota_multiplier ?? 1;
+  const group = activeGroup.value;
+  return group?.content.kind === "models"
+    ? group.content.snapshot.models.find(({ model_id }) => model_id === modelId)?.quota_multiplier ?? 1
+    : 1;
 }
 
 function hasMultiplierDraft(modelId: string): boolean {
@@ -435,12 +449,8 @@ function discardMultiplierDraft(modelId: string) {
 
 async function reloadPricingAfterRevisionChange(): Promise<string | null> {
   try {
-    if (props.providerId !== "opencode") {
-      if (!catalog.value) await loadProviderCatalog();
-      if (catalog.value) await loadProviderSnapshots(catalog.value);
-    } else {
-      snapshot.value = await dashboardApi.getPricing();
-    }
+    if (catalog.value) await loadProviderSnapshots(catalog.value);
+    else await loadPricing();
     message.warning(t("价格表已在其他位置更新，已重新加载"));
     return null;
   } catch (error) {
@@ -449,12 +459,22 @@ async function reloadPricingAfterRevisionChange(): Promise<string | null> {
 }
 
 async function saveMultiplier(modelId: string) {
-  const active = snapshot.value;
+  const group = activeGroup.value;
+  const active = group?.content.kind === "models" ? group.content.snapshot : null;
   const multiplier = multiplierValue(modelId);
-  if (!active || !hasMultiplierDraft(modelId) || !validMultiplier(multiplier) || savingModelId.value) return;
+  if (!group || !active || !pricingMultiplierEditable(group)
+    || !hasMultiplierDraft(modelId) || !validMultiplier(multiplier) || savingModelId.value) return;
   savingModelId.value = modelId;
   try {
-    snapshot.value = await dashboardApi.updatePricingMultipliers(active.revision, [{ model_id: modelId, multiplier }]);
+    const result = await providerApi.updateProviderPricingMultipliers(
+      group.plan.provider_id,
+      active.revision,
+      [{ model_id: modelId, multiplier }],
+    );
+    providerSnapshots.value = {
+      ...providerSnapshots.value,
+      [group.plan.provider_id]: result,
+    };
     discardMultiplierDraft(modelId);
     message.success(t("官方倍率已保存"));
   } catch (error) {
@@ -481,7 +501,7 @@ async function saveProviderMultiplier(
   modelId: string,
   multiplier: number,
 ) {
-  if (group.content.kind !== "goat-reference" || !group.content.snapshot || savingModelId.value) return;
+  if (group.content.kind !== "values" || !pricingMultiplierEditable(group) || savingModelId.value) return;
   savingModelId.value = modelId;
   try {
     const result = await providerApi.updateProviderPricingMultipliers(
@@ -489,12 +509,7 @@ async function saveProviderMultiplier(
       group.content.snapshot.revision,
       [{ model_id: modelId, multiplier }],
     );
-    const updated = result.snapshot;
-    if (updated && "values" in updated) {
-      providerSnapshots.value = { ...providerSnapshots.value, [group.plan.id]: updated };
-    } else if (catalog.value) {
-      await loadProviderSnapshots(catalog.value);
-    }
+    providerSnapshots.value = { ...providerSnapshots.value, [group.plan.provider_id]: result };
     message.success(t("官方倍率已保存"));
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
@@ -538,6 +553,9 @@ function renderMultiplierAction(
 
 function renderMultiplierEditor(row: PricingTableRow) {
   if (!row.editable_multiplier) return "";
+  if (!activeGroup.value || !pricingMultiplierEditable(activeGroup.value)) {
+    return formatPricingMultiplier(row.quota_multiplier);
+  }
   const value = multiplierValue(row.model_id);
   const dirty = hasMultiplierDraft(row.model_id);
   const valid = validMultiplier(value);
@@ -618,7 +636,10 @@ async function loadPricing() {
 type MultiplierPolicy = "keep_current" | "use_official";
 
 function multiplierDisplayName(modelId: string): string {
-  return snapshot.value?.models.find(({ model_id }) => model_id === modelId)?.display_name || modelId;
+  const group = activeGroup.value;
+  return group?.content.kind === "models"
+    ? group.content.snapshot.models.find(({ model_id }) => model_id === modelId)?.display_name || modelId
+    : modelId;
 }
 
 function renderMultiplierChanges(changes: readonly PricingMultiplierChange[]) {
@@ -689,10 +710,12 @@ async function performPricingRefresh(
   expectedOfficialContentHash?: string,
 ) {
   if (refreshing.value) return;
+  const group = activeGroup.value;
+  if (!group || !canRefresh(group)) return;
   refreshing.value = true;
   refreshError.value = "";
   try {
-    const result = await dashboardApi.refreshProviderPricing(props.providerId, {
+    const result = await dashboardApi.refreshProviderPricing(group.plan.provider_id, {
       policy,
       expected_provider_revision: expectedRevision,
       expected_official_content_hash: expectedOfficialContentHash,
@@ -708,16 +731,16 @@ async function performPricingRefresh(
         result.official_content_hash,
       );
     } else if (result.refresh_status === "success") {
-      if (props.providerId === "opencode") await loadPricing();
       if (catalog.value) await loadProviderSnapshots(catalog.value);
+      else if (group.plan.provider_id === "opencode") await loadPricing();
       message.success(policy === "keep_current"
         ? t("价格表已更新，已保留当前倍率")
         : policy === "use_official"
           ? t("价格表已更新，已采用最新官方倍率")
           : t("价格表已更新"));
     } else if (result.refresh_status === "unchanged") {
-      if (props.providerId === "opencode") await loadPricing();
       if (catalog.value) await loadProviderSnapshots(catalog.value);
+      else if (group.plan.provider_id === "opencode") await loadPricing();
       message.info(t("价格表没有变化"));
     } else {
       refreshError.value = result.error || t("价格表刷新失败，详见页面提示");
@@ -748,12 +771,11 @@ watch(planGroups, (groups) => {
 });
 
 watch(() => props.providerId, (id) => {
-  if (id === "opencode" && !snapshot.value && !loading.value) void loadPricing();
+  if (catalog.value) void loadProviderSnapshots(catalog.value);
+  else if ((id === "opencode" || !id) && !snapshot.value && !loading.value) void loadPricing();
 });
 
-onMounted(() => {
-  if (props.providerId === "opencode") void loadPricing();
-});
+onMounted(() => void loadProviderTemplates());
 onMounted(() => void loadProviderCatalog());
 </script>
 

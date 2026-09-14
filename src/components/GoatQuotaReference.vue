@@ -38,17 +38,16 @@ import { CheckOutlined, CloseOutlined } from "@vicons/antd";
 import { locale, t } from "../i18n/index.ts";
 import type { ProviderNeutralPricingSnapshot } from "../api/providers.ts";
 import { formatPricingRate } from "../domain/pricing-view.ts";
-import {
-  type GoatOfficialRate,
-} from "../domain/pricing-references.ts";
+
+type OfficialRate = number | "free" | null;
 
 interface GoatPricingRow {
   modelId: string;
   model: string;
-  input: GoatOfficialRate;
-  output: GoatOfficialRate;
-  cacheRead: GoatOfficialRate;
-  cacheWrite: GoatOfficialRate;
+  input: OfficialRate;
+  output: OfficialRate;
+  cacheRead: OfficialRate;
+  cacheWrite: OfficialRate;
   quotaMultiplier: number | null;
 }
 
@@ -56,6 +55,7 @@ const props = defineProps<{
   snapshot?: ProviderNeutralPricingSnapshot | null;
   savingModelId?: string | null;
   disabled?: boolean;
+  editable?: boolean;
 }>();
 const emit = defineEmits<{
   "save-multiplier": [modelId: string, multiplier: number];
@@ -101,7 +101,7 @@ function formatTimestamp(value: string): string {
   }).format(date);
 }
 
-function renderOfficialRate(value: GoatOfficialRate) {
+function renderOfficialRate(value: OfficialRate) {
   if (value === "free") return t("免费");
   const formatted = formatPricingRate(value, locale.value);
   if (!formatted.exact) return formatted.label;
@@ -168,6 +168,7 @@ function renderMultiplierAction(
 
 function renderQuotaMultiplier(row: GoatPricingRow) {
   if (row.quotaMultiplier === null || !props.snapshot) return "—";
+  if (!props.editable) return `×${row.quotaMultiplier.toLocaleString()}`;
   const value = multiplierValue(row);
   const dirty = hasDraft(row.modelId);
   const valid = validMultiplier(value);

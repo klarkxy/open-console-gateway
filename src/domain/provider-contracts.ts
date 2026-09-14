@@ -13,9 +13,7 @@ import type {
   ProviderProtocol,
 } from "../api/providers.ts";
 import {
-  planFamilyLabel,
-  planForAccount,
-  PLAN_DEFINITIONS,
+  findCatalogEntry,
 } from "./plans.ts";
 
 export const PROVIDER_PROTOCOLS: readonly ProviderProtocol[] = [
@@ -94,8 +92,7 @@ export function findAccountScopeView(
   scopes: readonly ProviderScopeView[],
   account: Pick<Account, "id" | "provider_id">,
 ): ProviderScopeView | undefined {
-  const plan = planForAccount(account);
-  if (plan?.kind === "custom") {
+  if (account.provider_id === "custom") {
     return scopes.find((scope) => (
       scope.scope_kind === "custom_endpoint" && scope.scope_id === account.id
     ));
@@ -312,9 +309,7 @@ function providerLabel(
   providerId: string,
   catalog: readonly ProviderCatalogEntry[] | null | undefined,
 ): string {
-  const plan = PLAN_DEFINITIONS.find((item) => item.provider_id === providerId);
-  if (plan) return planFamilyLabel(plan, catalog);
-  return providerId;
+  return findCatalogEntry(catalog, providerId)?.display_name.trim() || providerId;
 }
 
 function customEndpointLabel(
@@ -323,8 +318,7 @@ function customEndpointLabel(
 ): string {
   const name = endpoint.account.name.trim();
   if (name) return name;
-  const plan = PLAN_DEFINITIONS.find((item) => item.kind === "custom");
-  return plan ? planFamilyLabel(plan, catalog) : endpoint.scope_id;
+  return findCatalogEntry(catalog, "custom")?.display_name.trim() || endpoint.scope_id;
 }
 
 export function flattenProviderScopes(

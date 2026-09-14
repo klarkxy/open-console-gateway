@@ -185,9 +185,9 @@ function toPresetFamilyOption(
 
 /** Plan options whose rail/detail icon is the vendor brand mark, not a generic glyph. */
 const PLAN_BRAND_FAMILY_ID: ReadonlyMap<string, string> = new Map([
-  ["kimi-cn", "moonshot"],
-  ["minimax-cn", "minimax"],
-  ["ollama-cloud", "ollama"],
+  ["kimi", "moonshot"],
+  ["minimax", "minimax"],
+  ["ollama", "ollama"],
 ]);
 
 function planBrandIconKey(planId: string): string | null {
@@ -198,8 +198,9 @@ function planBrandIconKey(planId: string): string | null {
 /**
  * Visible groups for the rail in the given mode. "connections": the V4
  * connection projection only — built-in families that still have an account
- * head the Plan group, and saved user-defined Providers follow their
- * persisted preset's offering via `dynamicPresetIds`. "services": unused
+ * head the Plan group, and saved user-defined Providers follow their catalog
+ * offering. `dynamicPresetIds` is retained only for caller-side brand artwork.
+ * "services": unused
  * built-in templates (Custom API included) plus vendor preset families
  * grouped by offering, with platform kinds trailing the API group. Empty
  * offering groups are omitted. The preset search query filters every visible
@@ -421,7 +422,6 @@ export function describeChooserSelection(
   let tag: ChooserDetail["tag"] = null;
   if (option.source === "user-defined") tag = { label: "用户定义", type: "default" };
   else if (option.plan.kind === "custom") tag = { label: "自定义端点", type: "default" };
-  else if (option.plan.id === "dynamic-http") tag = { label: "用户定义", type: "default" };
   return {
     kind: "plan",
     iconKey: planBrandIconKey(option.plan.id) ?? option.plan.id,

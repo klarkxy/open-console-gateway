@@ -1,147 +1,148 @@
+import type { Account } from "../api/dashboard.ts";
 import type {
-  Account,
-  AccountCredentialKind,
-  AccountQuotaScope,
-} from "../api/dashboard.ts";
-import type { ProviderCatalogEntry } from "../api/providers.ts";
+  ProviderCatalogEntry,
+  ProviderCatalogFormField,
+} from "../api/providers.ts";
 import type { MessageKey } from "../i18n/index.ts";
-import { isDynamicCatalogEntry } from "./dynamic-provider.ts";
-
-/**
- * The hardcoded plan families of the console. A family maps to one
- * backend provider. The backend owns the DTO fields; this module owns
- * the stable ordering, family ids, and fallback metadata.
- *
- * Availability is never hardcoded: creation/routing/pricing semantics are
- * resolved from `/dashboard/api/v3/providers`. Legacy families
- * (OpenCode Go, Zen Free) keep pre-catalog fallback behavior when the catalog
- * is unreachable; every other family fails closed in that case.
- */
-
-export type PlanId =
-  | "opencode-go"
-  | "zen-free"
-  | "command-code-goat"
-  | "minimax-cn"
-  | "kimi-cn"
-  | "ollama-cloud"
-  | "custom-endpoint"
-  | "dynamic-http";
 
 export type PlanKind = "quota" | "free" | "api-key" | "custom";
 
-export interface PlanDefinition {
-  id: PlanId;
-  provider_id: string;
-  /** Brand label; shown only when the catalog is absent. */
+/**
+ * Open frontend projection of one V3 Provider Catalog row. `id` is the
+ * backend-owned provider id used by filters, dialogs, pricing, and cards.
+ */
+export interface ProviderSurface extends ProviderCatalogEntry {
+  id: string;
   label: string;
   kind: PlanKind;
-  credential_kind: AccountCredentialKind;
-  quota_scope: AccountQuotaScope;
-  /** Singleton families (Zen Free) are created and owned by the backend. */
-  singleton: boolean;
-  /** Managed registration wizard availability (OpenCode Go only). */
-  managed_registration: boolean;
-  /** Legacy families keep their pre-catalog behavior when the catalog fails. */
+  /** True only for the two offline compatibility surfaces. */
   legacy: boolean;
+  /** User-defined Provider definitions own endpoint/protocol/model mappings. */
+  dynamic: boolean;
 }
 
-export const PLAN_DEFINITIONS: readonly PlanDefinition[] = [
+/** Kept as a source-compatible name while consumers move to ProviderSurface. */
+export type PlanDefinition = ProviderSurface;
+
+const LEGACY_GO_FIELDS: ProviderCatalogFormField[] = [
+  { id: "name", kind: "text", required: true, immutable_after_create: false },
+  { id: "key", kind: "secret", required: true, immutable_after_create: false },
+  { id: "purchase_date", kind: "date", required: false, immutable_after_create: false },
+  { id: "notes", kind: "text", required: false, immutable_after_create: false },
+];
+
+const OFFLINE_SURFACES: readonly ProviderSurface[] = [
   {
-    id: "opencode-go",
+    id: "opencode",
     provider_id: "opencode",
+    origin: "builtin",
+    editable: false,
+    deletable: false,
+    offering: "plan",
+    display_name: "OpenCode Go",
+    display_family: "OpenCode",
     label: "OpenCode Go",
     kind: "quota",
     credential_kind: "api_key",
     quota_scope: "key",
     singleton: false,
+    creation_availability: "available",
+    creation_unavailable_reason: null,
+    verification_policy: "required",
+    verification_runtime_availability: "available",
+    routable: true,
     managed_registration: true,
+    pricing_availability: "available",
+    usage_availability: "available",
+    manual_usage_calibration: false,
+    quota_unit: "tokens",
+    model_source: "opencode_get_models",
+    key_prefix: null,
+    auth_schemes: ["bearer"],
+    upstream_protocols: ["chat_completions", "responses", "messages"],
+    form_fields: LEGACY_GO_FIELDS,
+    model_aliases: [],
     legacy: true,
+    dynamic: false,
   },
   {
-    id: "zen-free",
+    id: "opencode-zen-free",
     provider_id: "opencode-zen-free",
+    origin: "builtin",
+    editable: false,
+    deletable: false,
+    offering: "plan",
+    display_name: "Zen Free",
+    display_family: "OpenCode",
     label: "Zen Free",
     kind: "free",
     credential_kind: "none",
     quota_scope: "egress-ip",
     singleton: true,
+    creation_availability: "unavailable",
+    creation_unavailable_reason: "singleton_managed",
+    verification_policy: "not_required",
+    verification_runtime_availability: "not_applicable",
+    routable: true,
     managed_registration: false,
+    pricing_availability: "not_applicable",
+    usage_availability: "unavailable",
+    manual_usage_calibration: false,
+    quota_unit: "requests",
+    model_source: "official_zen",
+    key_prefix: null,
+    auth_schemes: [],
+    upstream_protocols: ["chat_completions", "responses", "messages"],
+    form_fields: [],
+    model_aliases: [],
     legacy: true,
-  },
-  {
-    id: "command-code-goat",
-    provider_id: "command-code",
-    label: "Command Code GOAT",
-    kind: "api-key",
-    credential_kind: "api_key",
-    quota_scope: "key",
-    singleton: false,
-    managed_registration: false,
-    legacy: false,
-  },
-  {
-    id: "minimax-cn",
-    provider_id: "minimax",
-    label: "MiniMax CN Token Plan",
-    kind: "api-key",
-    credential_kind: "api_key",
-    quota_scope: "key",
-    singleton: false,
-    managed_registration: false,
-    legacy: false,
-  },
-  {
-    id: "kimi-cn",
-    provider_id: "kimi",
-    label: "Kimi Code CN",
-    kind: "api-key",
-    credential_kind: "api_key",
-    quota_scope: "key",
-    singleton: false,
-    managed_registration: false,
-    legacy: false,
-  },
-  {
-    id: "ollama-cloud",
-    provider_id: "ollama",
-    label: "Ollama Cloud",
-    kind: "api-key",
-    credential_kind: "api_key",
-    quota_scope: "key",
-    singleton: false,
-    managed_registration: false,
-    legacy: false,
-  },
-  {
-    id: "custom-endpoint",
-    provider_id: "custom",
-    label: "Custom API",
-    kind: "custom",
-    credential_kind: "api_key",
-    quota_scope: "key",
-    singleton: false,
-    managed_registration: false,
-    legacy: false,
+    dynamic: false,
   },
 ];
 
-export function dynamicPlanDefinition(entry: ProviderCatalogEntry): PlanDefinition {
+function surfaceKind(entry: ProviderCatalogEntry): PlanKind {
+  if (entry.provider_id === "custom") return "custom";
+  if (entry.credential_kind === "none") return "free";
+  if (entry.offering === "plan" && entry.usage_availability !== "unavailable") return "quota";
+  return "api-key";
+}
+
+export function providerSurfaceFromCatalog(entry: ProviderCatalogEntry): ProviderSurface {
+  const label = entry.display_name.trim() || entry.provider_id;
   return {
-    id: "dynamic-http",
-    provider_id: entry.provider_id,
-    label: entry.display_name || entry.provider_id,
-    kind: entry.credential_kind === "none" ? "free" : "api-key",
-    credential_kind: entry.credential_kind,
-    quota_scope: entry.quota_scope,
-    singleton: entry.singleton,
-    managed_registration: false,
+    ...entry,
+    id: entry.provider_id,
+    label,
+    kind: surfaceKind(entry),
     legacy: false,
+    dynamic: entry.model_source === "dynamic_provider",
+    form_fields: entry.form_fields.map((field) => ({ ...field })),
+    auth_schemes: [...entry.auth_schemes],
+    upstream_protocols: [...entry.upstream_protocols],
+    model_aliases: [...entry.model_aliases],
   };
 }
 
-/** Stable legacy import target; the chooser must never open without a plan. */
-export const OPENCODE_GO_PLAN = PLAN_DEFINITIONS.find((plan) => plan.id === "opencode-go")!;
+/**
+ * Catalog success is complete authority, including an empty array. Only an
+ * unavailable catalog receives the narrow Go/Zen offline projection.
+ */
+export function providerSurfaces(
+  catalog: readonly ProviderCatalogEntry[] | null | undefined,
+): ProviderSurface[] {
+  if (catalog != null) return catalog.map(providerSurfaceFromCatalog);
+  return OFFLINE_SURFACES.map((surface) => ({
+    ...surface,
+    form_fields: surface.form_fields.map((field) => ({ ...field })),
+    auth_schemes: [...surface.auth_schemes],
+    upstream_protocols: [...surface.upstream_protocols],
+    model_aliases: [...surface.model_aliases],
+  }));
+}
+
+/** Stable fallback import target; the chooser must never open without a plan. */
+export const OPENCODE_GO_PLAN = OFFLINE_SURFACES[0]!;
+export const ZEN_FREE_PLAN = OFFLINE_SURFACES[1]!;
 
 export function findCatalogEntry(
   catalog: readonly ProviderCatalogEntry[] | null | undefined,
@@ -150,65 +151,52 @@ export function findCatalogEntry(
   return catalog?.find((entry) => entry.provider_id === providerId);
 }
 
-/**
- * Find a family definition by the exact backend provider id.
- * Custom maps to "custom-endpoint".
- */
-export function findPlanDefinition(providerId: string): PlanDefinition | undefined {
-  return PLAN_DEFINITIONS.find((plan) => plan.provider_id === providerId);
+export function findPlanDefinition(
+  providerId: string,
+  catalog?: readonly ProviderCatalogEntry[] | null,
+): ProviderSurface | undefined {
+  return providerSurfaces(catalog).find((surface) => surface.provider_id === providerId);
 }
 
-/** The family an account belongs to; unknown providers return null (render raw). */
+/** Compatibility helper for callers that already know a row is dynamic. */
+export function dynamicPlanDefinition(entry: ProviderCatalogEntry): ProviderSurface {
+  return providerSurfaceFromCatalog(entry);
+}
+
+/** The provider surface an account belongs to; unknown providers return null. */
 export function planForAccount(
   account: Pick<Account, "provider_id">,
   catalog?: readonly ProviderCatalogEntry[] | null,
-): PlanDefinition | null {
-  const builtin = findPlanDefinition(account.provider_id);
-  if (builtin) return builtin;
-  const entry = findCatalogEntry(catalog, account.provider_id);
-  if (entry && isDynamicCatalogEntry(entry)) return dynamicPlanDefinition(entry);
-  return null;
+): ProviderSurface | null {
+  return findPlanDefinition(account.provider_id, catalog) ?? null;
 }
 
-/**
- * Display label for a provider. Prefers the catalog's display_name, then the
- * static family label, then the raw provider id.
- */
+/** Catalog display name, narrow offline label, then the raw provider id. */
 export function planLabel(
   account: Pick<Account, "provider_id">,
   catalog?: readonly ProviderCatalogEntry[] | null,
 ): string {
-  const entry = findCatalogEntry(catalog, account.provider_id);
-  if (entry?.display_name) return entry.display_name;
-  const definition = findPlanDefinition(account.provider_id);
-  if (definition) return definition.label;
-  return account.provider_id;
+  return findPlanDefinition(account.provider_id, catalog)?.label ?? account.provider_id;
 }
 
-/**
- * Label for a plan-family control. Prefers the catalog display name for the
- * family's provider, then the static family label.
- */
 export function planFamilyLabel(
-  plan: PlanDefinition,
+  plan: ProviderSurface,
   catalog?: readonly ProviderCatalogEntry[] | null,
 ): string {
-  const entry = findCatalogEntry(catalog, plan.provider_id);
-  if (entry?.display_name.trim()) return entry.display_name.trim();
-  return plan.label;
+  return findCatalogEntry(catalog, plan.provider_id)?.display_name.trim()
+    || plan.label
+    || plan.provider_id;
 }
 
-/** Reason the family cannot be created, or null when it is creatable. */
+/** Reason this catalog surface cannot create an account, or null when allowed. */
 export function planCreateDisabledReason(
-  plan: PlanDefinition,
+  plan: ProviderSurface,
   catalog: readonly ProviderCatalogEntry[] | null | undefined,
 ): MessageKey | null {
   if (plan.singleton) return "单例方案由系统自动管理";
-  if (!catalog?.length) return plan.legacy ? null : "服务商目录加载失败";
+  if (catalog == null) return plan.provider_id === "opencode" ? null : "服务商目录加载失败";
   const entry = findCatalogEntry(catalog, plan.provider_id);
   if (!entry) return "服务商目录未提供该方案";
-  if (entry.creation_availability !== "available") {
-    return "该方案暂不可用";
-  }
+  if (entry.creation_availability !== "available") return "该方案暂不可用";
   return null;
 }

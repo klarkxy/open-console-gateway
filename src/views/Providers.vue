@@ -396,7 +396,7 @@
               </template>
             </n-tab-pane>
 
-            <n-tab-pane v-if="pricingAvailable" name="pricing" :tab="t('模型价格')">
+            <n-tab-pane name="pricing" :tab="t('模型价格')">
               <PricingCatalog :provider-id="selectedEntry.provider_id" />
             </n-tab-pane>
 
@@ -559,8 +559,7 @@ import {
   type ProviderAddStage,
 } from "../domain/provider-catalog.ts";
 import { accountCreateRequestInput } from "../domain/account-create-payload.ts";
-import { isDynamicCatalogEntry } from "../domain/dynamic-provider.ts";
-import { dynamicPlanDefinition, findPlanDefinition } from "../domain/plans.ts";
+import { providerSurfaceFromCatalog } from "../domain/plans.ts";
 import {
   PROVIDER_PRESETS,
   providerPresetOffering,
@@ -656,9 +655,7 @@ const customAccountProtocol = computed(() => {
 const addKeyPlan = computed(() => {
   const entry = selectedEntry.value;
   if (!entry) return null;
-  return isDynamicCatalogEntry(entry)
-    ? dynamicPlanDefinition(entry)
-    : findPlanDefinition(entry.provider_id) ?? null;
+  return providerSurfaceFromCatalog(entry);
 });
 const isDraftConnection = computed(() => (
   selectedConnection.value ? isOnboardingDraftConnection(selectedConnection.value) : false
@@ -683,7 +680,6 @@ const activeScope = computed(() => {
   if (!entry || entry.origin !== "builtin" || entry.provider_id === "custom") return null;
   return scopes.value.find((scope) => scope.provider_id === entry.provider_id) ?? null;
 });
-const pricingAvailable = computed(() => selectedEntry.value?.pricing_availability === "available");
 const addPreset = computed(() => {
   const stage = addStage.value;
   if (!stage || stage.stage !== "form" || !stage.presetId) return null;
@@ -841,11 +837,8 @@ function applyFromQuery(
     actionLive.value = t("已选择过期范围，已回到第一个供应商");
   }
   selectedConnectionId.value = row.id;
-  const entry = catalogEntryForConnection(row, allCatalogEntries.value);
   const candidate = query.tab ?? activeTab.value;
-  activeTab.value = candidate === "pricing" && entry?.pricing_availability !== "available"
-    ? "models"
-    : candidate;
+  activeTab.value = candidate;
   writeUrl();
 }
 
@@ -1380,9 +1373,6 @@ watch(selectedEntry, (entry, previous) => {
   resetScopeActions();
   definitionError.value = "";
   if (entry && entry.origin !== "builtin") void ensureDefinition(entry.provider_id);
-  if (entry && activeTab.value === "pricing" && entry.pricing_availability !== "available") {
-    activeTab.value = "models";
-  }
 });
 
 watch([selectedConnectionId, activeTab, addStage], () => {

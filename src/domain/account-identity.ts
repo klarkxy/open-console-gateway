@@ -156,7 +156,7 @@ function inventsLifecycleDates(
   catalog: readonly ProviderCatalogEntry[] | null,
 ): boolean {
   if (isCustomApiAccount(account)) return true;
-  return planForAccount(account, catalog)?.id === "dynamic-http";
+  return planForAccount(account, catalog)?.dynamic === true;
 }
 
 /** V3 card expiry: built-in billed families with stored dates. Custom/Zen hide. */
@@ -167,7 +167,7 @@ export function v3AccountShowsExpiry(
   const plan = planForAccount(account, catalog);
   return accountIsReady(account)
     && !!plan
-    && plan.id !== "custom-endpoint"
+    && plan.kind !== "custom"
     && !isZenFreeAccount(account)
     && !!account.purchase_date
     && !!account.expires_on;

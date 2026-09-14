@@ -20,7 +20,7 @@
         {{ externalError }}
       </n-alert>
       <p v-if="!isEdit" class="field-hint">
-        {{ t("创建后默认关闭；验通后请自行启用，测试连接不会自动打开。") }}
+        {{ t("创建后默认启用，可立即参与路由。测试连接不会改变开关。") }}
       </p>
       <p v-if="platformParent && !isDynamicPlan" class="connection-summary__note form-error">
         {{ t("Endpoint 与协议路径由平台账号 {name} 托管；账号只保存名称、Key 与模型映射。", { name: platformParent.name }) }}
@@ -451,15 +451,15 @@ const effectivePlan = computed<PlanDefinition | null>(() => {
   return props.plan;
 });
 
-const isCustomPlan = computed(() => effectivePlan.value?.id === "custom-endpoint");
-const isOllamaPlan = computed(() => effectivePlan.value?.id === "ollama-cloud");
+const isCustomPlan = computed(() => effectivePlan.value?.kind === "custom");
+const isOllamaPlan = computed(() => effectivePlan.value?.provider_id === "ollama");
 const ollamaBillingOptions = [
   { value: "pro", label: "Pro · $60" },
   { value: "max", label: "Max · $300" },
   { value: "team", label: "Team · $1000" },
 ];
 const ollamaPaidTier = computed(() => form.value.ollamaBillingTier !== null);
-const isDynamicPlan = computed(() => effectivePlan.value?.id === "dynamic-http");
+const isDynamicPlan = computed(() => effectivePlan.value?.dynamic === true);
 
 const catalogEntry = computed<ProviderCatalogEntry | undefined>(() => {
   const plan = effectivePlan.value;

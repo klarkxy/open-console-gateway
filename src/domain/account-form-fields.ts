@@ -9,37 +9,24 @@ const LEGACY_GO_FIELDS: readonly ProviderCatalogFormField[] = [
 ];
 
 /**
- * Resolve creation fields from the catalog without allowing a missing, empty,
- * or partially deployed catalog to remove the legacy OpenCode Go Key path.
- * Non-legacy plans remain catalog-owned and therefore fail closed.
+ * Resolve creation fields from the catalog. A successful catalog row is
+ * authoritative; only the offline Go surface supplies compatibility fields.
  */
 export function resolveAccountFormFields(
   plan: PlanDefinition | null,
   catalogEntry: ProviderCatalogEntry | undefined,
 ): ProviderCatalogFormField[] {
   if (!plan) return [];
-  if (plan.id === "dynamic-http") {
+  const fields = [...(catalogEntry?.form_fields ?? plan.form_fields)];
+  if (plan.dynamic) {
     // User-defined Providers model no billing cadence: lifecycle date fields
     // never apply to their accounts, even if a stale catalog row declares
     // them.
-    const fields = [...(catalogEntry?.form_fields ?? [])]
-      .filter((field) => field.id !== "purchase_date");
-    if (fields.length > 0) return fields;
-    const fallback: ProviderCatalogFormField[] = [
-      { id: "name", kind: "text", required: true, immutable_after_create: false },
-      { id: "notes", kind: "text", required: false, immutable_after_create: false },
-    ];
-    if (plan.credential_kind !== "none") {
-      fallback.splice(1, 0, { id: "key", kind: "secret", required: true, immutable_after_create: false });
-    }
-    return fallback;
+    return fields.filter((field) => field.id !== "purchase_date");
   }
-  if (plan.id !== "opencode-go") return [...(catalogEntry?.form_fields ?? [])];
-
-  const fields = [...(catalogEntry?.form_fields ?? [])];
-  const ids = new Set(fields.map(({ id }) => id));
-  for (const fallback of LEGACY_GO_FIELDS) {
-    if (!ids.has(fallback.id)) fields.push({ ...fallback });
+  if (catalogEntry) return fields;
+  if (plan.legacy && plan.provider_id === "opencode") {
+    return LEGACY_GO_FIELDS.map((field) => ({ ...field }));
   }
-  return fields;
+  return [];
 }

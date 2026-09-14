@@ -166,3 +166,17 @@ test("MiniMax roots retain standard rates while every upgrade is materialized be
   assert.equal(m27?.children?.[0]?.cache_read, 0.06);
   assert.equal(m27?.children?.[0]?.cache_write, 0.375);
 });
+
+test("unknown adjustment labels are preserved without a model-id branch", () => {
+  const rows = buildPricingTableRows([
+    pricingModel({
+      model_id: "future-model",
+      display_name: "Future Model",
+      adjustments: [{ label: "weekend boost", multiplier: 1.25, applies_to: "input,output" }],
+    }),
+  ], pricingLabels);
+  assert.equal(rows[0]?.kind, "group");
+  assert.equal(rows[0]?.children?.[0]?.display_name, "weekend boost");
+  assert.equal(rows[0]?.children?.[0]?.input, 1.25);
+  assert.equal(rows[0]?.children?.[0]?.output, 2.5);
+});

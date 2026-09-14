@@ -1,6 +1,5 @@
 import type { Account } from "../api/dashboard.ts";
 import type { PlanDefinition } from "../domain/plans.ts";
-import { planForAccount } from "../domain/plans.ts";
 import { isCooling, isFreeCooling } from "../domain/accounts-usage.ts";
 import { isZenFreeAccount } from "../domain/account-providers.ts";
 
@@ -32,11 +31,9 @@ export function accountStatusKey(account: Account, now: number = Date.now()): Ac
   return isCooling(account, now) ? "cooling" : "available";
 }
 
-/** The plan family id an account belongs to, or the raw provider id for unknown plans. */
+/** Provider ids are the stable catalog/filter key. */
 export function accountPlanKey(account: Pick<Account, "provider_id">): string {
-  const plan: PlanDefinition | null = planForAccount(account);
-  if (plan?.id === "dynamic-http") return account.provider_id;
-  return plan ? plan.id : account.provider_id;
+  return account.provider_id;
 }
 
 export function filterAccounts(
@@ -52,14 +49,17 @@ export function filterAccounts(
   });
 }
 
-/** Plans that have at least one account, in stable registry order. */
+/** Provider surfaces that have at least one account, in catalog order. */
 export function plansInUse(
   accounts: readonly Account[],
   registry: readonly PlanDefinition[],
   extras: readonly PlanDefinition[] = [],
 ): PlanDefinition[] {
   const used = new Set(accounts.map((account) => accountPlanKey(account)));
-  const builtin = registry.filter((plan) => used.has(plan.id));
-  const extra = extras.filter((plan) => used.has(plan.provider_id) || used.has(plan.id));
-  return [...builtin, ...extra];
+  const seen = new Set<string>();
+  return [...registry, ...extras].filter((plan) => {
+    if (!used.has(plan.provider_id) || seen.has(plan.provider_id)) return false;
+    seen.add(plan.provider_id);
+    return true;
+  });
 }
