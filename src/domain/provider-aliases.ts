@@ -68,10 +68,24 @@ function providerPlanLabel(scope: ProviderScopeView): string {
   return scope.label;
 }
 
+/** Case-folded public name used by downstream publication. */
+export function publicModelPublicationKey(name: string): string {
+  return name.trim().toLowerCase();
+}
+
+/** Default on: missing names stay visible to downstream `GET /v1/models`. */
+export function isPublicModelPublished(
+  name: string,
+  unpublished: readonly string[],
+): boolean {
+  const key = publicModelPublicationKey(name);
+  return !unpublished.some((item) => publicModelPublicationKey(item) === key);
+}
+
 /**
  * This is a read-only cross-reference. Provider contracts describe built-in
- * Alias resolution; account capabilities describe Custom mappings. No new
- * catalog or state is introduced for the table.
+ * Alias resolution; account capabilities describe Custom mappings. Downstream
+ * listing publication is separate operator state.
  */
 export function providerAliasRows(
   scopes: readonly ProviderScopeView[],

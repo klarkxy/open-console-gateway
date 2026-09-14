@@ -60,6 +60,20 @@
         </n-button>
       </n-alert>
 
+      <n-alert
+        v-if="publicationLoadError"
+        type="warning"
+        :title="t('加载对外展示失败: {error}', { error: publicationLoadError })"
+      >
+        <n-button size="small" secondary :loading="loading" @click="loadAliases({ retain: true })">
+          {{ t("重试") }}
+        </n-button>
+      </n-alert>
+      <n-alert
+        v-if="publicationSaveError"
+        type="warning"
+        :title="t('更新对外展示失败: {error}', { error: publicationSaveError })"
+      />
       <n-empty v-if="aliasGroups.length === 0" :description="search.trim() ? t('无匹配模型') : t('暂无 Alias')" />
       <div v-else class="aliases-table-wrap" tabindex="0" role="region" :aria-label="t('模型映射')">
         <table class="aliases-table">
@@ -72,8 +86,28 @@
           </thead>
           <tbody v-for="group in aliasGroups" :key="group.public_model">
             <tr v-for="(row, index) in group.rows" :key="row.key">
-              <td v-if="index === 0" :rowspan="group.rows.length" class="aliases-name">
-                <code>{{ group.public_model }}</code>
+              <td
+                v-if="index === 0"
+                :rowspan="group.rows.length"
+                class="aliases-name"
+                :class="{ 'aliases-unpublished': !group.published }"
+              >
+                <div class="aliases-name-row">
+                  <n-tooltip trigger="hover">
+                    <template #trigger>
+                      <n-switch
+                        size="small"
+                        :value="group.published"
+                        :disabled="!publicationReady || Boolean(saving[group.public_model])"
+                        :loading="Boolean(saving[group.public_model])"
+                        :aria-label="t('对下游展示此模型')"
+                        @update:value="(published) => setPublished(group.public_model, published)"
+                      />
+                    </template>
+                    {{ t("关闭后下游不再列出此模型，仍可用该名称调用。") }}
+                  </n-tooltip>
+                  <code>{{ group.public_model }}</code>
+                </div>
                 <p v-if="groupHasOverlap(group.rows)" class="alias-warning">{{ t('名称与其他上游 ID 重叠，请检查调用名称。') }}</p>
               </td>
               <td>{{ row.provider_plan }}</td>
@@ -88,7 +122,7 @@
 
 <script setup lang="ts">
 import { computed, onActivated, onMounted, ref } from "vue";
-import { NAlert, NButton, NEmpty, NInput, NSpin } from "naive-ui";
+import { NAlert, NButton, NEmpty, NInput, NSpin, NSwitch, NTooltip } from "naive-ui";
 import type { Account } from "../api/dashboard.ts";
 import type {
   ProviderDefinitionView,
@@ -100,13 +134,22 @@ import type { CpaCatalogEntry } from "../api/generated/dashboard-v4.ts";
 import { providerApi } from "../api/providers.ts";
 import { isDynamicCatalogEntry } from "../domain/dynamic-provider.ts";
 import { flattenProviderScopes, normalizeProviderContractsResponse } from "../domain/provider-contracts.ts";
-import { aliasNameOverlaps, mergeProviderAliasRows, type ProviderAliasRow } from "../domain/provider-aliases.ts";
+import { isRevisionConflict } from "../api/dashboard.ts";
+import {
+  aliasNameOverlaps,
+  isPublicModelPublished,
+  mergeProviderAliasRows,
+  publicModelPublicationKey,
+  type ProviderAliasRow,
+} from "../domain/provider-aliases.ts";
 import { t } from "../i18n/index.ts";
 import { useAccountsStore } from "../stores/accounts.ts";
+import { useControlPlaneStore } from "../stores/controlPlane.ts";
 import { useProvidersStore } from "../stores/providers.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
 
 const accountsStore = useAccountsStore();
+const controlPlane = useControlPlaneStore();
 const providersStore = useProvidersStore();
 const contracts = ref<ProviderContractsResponse | null>(null);
 const catalog = ref<ProviderCatalogEntry[] | null>(null);
@@ -119,6 +162,11 @@ const loadError = ref("");
 const accountsLoadError = ref("");
 const dynamicLoadError = ref("");
 const cpaLoadError = ref("");
+const unpublished = ref<string[]>([]);
+const publicationReady = ref(false);
+const publicationLoadError = ref("");
+const publicationSaveError = ref("");
+const saving = ref<Record<string, boolean>>({});
 let activatedOnce = false;
 
 const initialLoading = computed(() => loading.value && !contracts.value);
@@ -143,12 +191,51 @@ const aliasGroups = computed(() => {
     else groups.set(key, [row]);
   }
   return [...groups.values()]
-    .map((rows) => ({ public_model: rows[0]?.public_model ?? "", rows }))
+    .map((rows) => ({
+      public_model: rows[0]?.public_model ?? "",
+      published: isPublicModelPublished(rows[0]?.public_model ?? "", unpublished.value),
+      rows,
+    }))
     .sort((left, right) => left.public_model.localeCompare(right.public_model));
 });
 
 function groupHasOverlap(rows: readonly ProviderAliasRow[]): boolean {
   return rows.some((row) => aliasNameOverlaps(row, aliasRows.value));
+}
+
+async function setPublished(publicModel: string, published: boolean): Promise<void> {
+  const key = publicModelPublicationKey(publicModel);
+  const previous = unpublished.value;
+  unpublished.value = published
+    ? previous.filter((name) => publicModelPublicationKey(name) !== key)
+    : previous.some((name) => publicModelPublicationKey(name) === key)
+      ? previous
+      : [...previous, key];
+  saving.value = { ...saving.value, [publicModel]: true };
+  try {
+    if (!controlPlane.hasTokens()) await controlPlane.refresh();
+    const result = await controlPlane.runMutation((expectation) => (
+      dashboardV4.patchAliasPublication({ publicModel, published }, expectation)
+    ));
+    unpublished.value = result.unpublished;
+    publicationSaveError.value = "";
+  } catch (error) {
+    unpublished.value = previous;
+    if (isRevisionConflict(error)) {
+      try {
+        const snapshot = await dashboardV4.getAliasPublication();
+        unpublished.value = snapshot.unpublished;
+        publicationReady.value = true;
+      } catch {
+        // Keep the reverted optimistic state when reload also fails.
+      }
+    }
+    publicationSaveError.value = dashboardErrorDetail(error);
+  } finally {
+    const next = { ...saving.value };
+    delete next[publicModel];
+    saving.value = next;
+  }
 }
 
 async function loadAliases(options: { retain?: boolean } = {}): Promise<void> {
@@ -158,14 +245,24 @@ async function loadAliases(options: { retain?: boolean } = {}): Promise<void> {
     loadError.value = "";
     dynamicLoadError.value = "";
     cpaLoadError.value = "";
+    publicationLoadError.value = "";
   }
   try {
-    const [contractsResult, catalogResult, accountsResult, cpaResult] = await Promise.allSettled([
+    const [contractsResult, catalogResult, accountsResult, cpaResult, publicationResult] = await Promise.allSettled([
       providersStore.loadContracts(),
       providersStore.loadCatalog(),
       accountsStore.loadPresented(),
       dashboardV4.getCpaCatalog(),
+      dashboardV4.getAliasPublication(),
     ]);
+    if (publicationResult.status === "fulfilled") {
+      unpublished.value = publicationResult.value.unpublished;
+      publicationReady.value = true;
+      publicationLoadError.value = "";
+    } else {
+      publicationLoadError.value = dashboardErrorDetail(publicationResult.reason);
+      if (!options.retain) publicationReady.value = false;
+    }
     if (cpaResult.status === "fulfilled") {
       cpaModels.value = cpaResult.value.models;
       cpaLoadError.value = "";
@@ -258,6 +355,14 @@ onActivated(() => {
   overflow-x: auto;
 }
 .aliases-search { margin-bottom: 16px; }
+.aliases-name-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.aliases-unpublished {
+  opacity: 0.55;
+}
 .alias-warning { color: var(--ocg-warning); margin: 4px 0 0; }
 .aliases-table {
   width: 100%;

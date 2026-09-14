@@ -10,6 +10,8 @@ import {
   providerAliasRows,
   aliasAccountCounts,
   aliasNameOverlaps,
+  isPublicModelPublished,
+  publicModelPublicationKey,
 } from "./provider-aliases.ts";
 
 const protocol = {
@@ -247,6 +249,13 @@ test("CPA catalog IDs join a code-owned Alias when one exists", () => {
       custom_account_id: null,
     }],
   );
+});
+
+test("publication defaults on and folds public names", () => {
+  assert.equal(publicModelPublicationKey("  DeepSeek-V4-FlashNH  "), "deepseek-v4-flashnh");
+  assert.equal(isPublicModelPublished("DeepSeek-V4-FlashNH", []), true);
+  assert.equal(isPublicModelPublished("DeepSeek-V4-FlashNH", ["deepseek-v4-flashnh"]), false);
+  assert.equal(isPublicModelPublished("glm-5.1", ["deepseek-v4-flashnh"]), true);
 });
 
 test("CPA rows stay hidden when the subscription pool is disabled", () => {

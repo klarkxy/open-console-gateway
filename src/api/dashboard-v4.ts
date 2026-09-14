@@ -12,6 +12,8 @@ import type {
   BindingPatchRequest,
   BindingPatchResult,
   ConnectionList,
+  AliasPublication,
+  AliasPublicationUpdate,
   CatalogModelsRemoveRequest,
   CatalogModelsRemoveResult,
   CpaCatalog,
@@ -23,9 +25,11 @@ import type {
   IdentityList,
   OnboardingCommitRequest,
   OnboardingCommitResult,
+  TemplateList,
 } from "./generated/dashboard-v4.ts";
 
 export const dashboardV4 = {
+  getTemplates: () => requestV4<TemplateList>("/templates"),
   getConnections: () => requestV4<ConnectionList>("/connections"),
   getAccounts: () => requestV4<IdentityList>("/accounts"),
   commitOnboarding: (
@@ -74,6 +78,14 @@ export const dashboardV4 = {
     expectation: MutationExpectation,
   ) => requestV4<CpaCatalog>("/cpa/models", {
     method: "PUT",
+    body: withExpectation(input, expectation),
+  }),
+  getAliasPublication: () => requestV4<AliasPublication>("/alias-publication"),
+  patchAliasPublication: (
+    input: WithoutExpectation<AliasPublicationUpdate>,
+    expectation: MutationExpectation,
+  ) => requestV4<AliasPublication>("/alias-publication", {
+    method: "PATCH",
     body: withExpectation(input, expectation),
   }),
   removeCatalogModels: (
