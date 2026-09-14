@@ -628,39 +628,13 @@ pub const BUILTIN_PROVIDERS: [BuiltinProvider; 8] = [
     },
 ];
 
-/// Migration-period mirror of `resources/provider-presets.json` `offering`
-/// field, point-in-time. Plan-offering preset ids resolve to `"plan"`, every
-/// other preset id (and unknown values) resolve to `"api"`. The persisted
-/// `providers.offering` column is seeded from this map when a row carries a
-/// `preset_id`; non-preset rows stay `"api"`.
-const PRESET_OFFERINGS: &[(&str, &str)] = &[
-    ("zhipu-coding", "plan"),
-    ("zai-coding", "plan"),
-    ("tencent-token", "plan"),
-    ("tencent-token-intl", "plan"),
-    ("tencent-enterprise-pro", "plan"),
-    ("tencent-enterprise-pro-intl", "plan"),
-    ("tencent-enterprise-lite", "plan"),
-    ("tencent-enterprise-lite-intl", "plan"),
-    ("bailian-coding", "plan"),
-    ("qwencloud-coding", "plan"),
-    ("qwencloud-token", "plan"),
-    ("volcengine-agent", "plan"),
-    ("volcengine-coding", "plan"),
-    ("byteplus-coding", "plan"),
-    ("qianfan-coding", "plan"),
-    ("qianfan-token-team", "plan"),
-    ("stepfun-plan", "plan"),
-    ("stepfun-plan-intl", "plan"),
-    ("xiaomi-mimo-token", "plan"),
-    ("streamlake-coding", "plan"),
-    ("compshare-coding", "plan"),
-    ("atlascloud", "plan"),
-];
+include!(concat!(env!("OUT_DIR"), "/preset_offerings.rs"));
 
 /// Resolve the persisted `offering` for a dynamic Provider that carries a
-/// `preset_id`. Plan-offering presets map to `"plan"`, every other value maps
-/// to `"api"`. Stable identifier: builtin adapters do not consume this.
+/// `preset_id`. The table is generated at build time from
+/// `resources/provider-presets.json`. Plan-offering presets map to `"plan"`;
+/// missing, unknown, or empty ids map to `"api"`. Builtin adapters do not
+/// consume this.
 pub fn preset_offering(preset_id: &str) -> &'static str {
     let trimmed = preset_id.trim();
     if trimmed.is_empty() {
@@ -1108,6 +1082,7 @@ pub struct UsageDescriptor {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PricingDescriptor {
     pub availability: &'static str,
+    pub multiplier_editable: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1152,6 +1127,10 @@ impl ProviderAdapterKind {
 fn catalog_pricing(plan: BuiltinProvider) -> PricingDescriptor {
     PricingDescriptor {
         availability: plan.pricing_availability,
+        multiplier_editable: matches!(
+            plan.provider_id,
+            OPENCODE_PROVIDER_ID | COMMAND_CODE_PROVIDER_ID
+        ),
     }
 }
 
