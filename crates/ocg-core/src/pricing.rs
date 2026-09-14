@@ -1406,9 +1406,9 @@ fn same_source_redirect(attempt: Attempt<'_>) -> reqwest::redirect::Action {
 pub fn parse_official_html(html: &str) -> Result<PricingSnapshot> {
     let plain = collapse_whitespace(&strip_tags(html));
     let limits = PricingLimits {
-        window_5h: parse_limit(&plain, "5 hour limit")?,
-        window_week: parse_limit(&plain, "Weekly limit")?,
-        window_month: parse_limit(&plain, "Monthly limit")?,
+        window_5h: parse_limit(&plain, &["5-hour limit", "5 hour limit"])?,
+        window_week: parse_limit(&plain, &["Weekly limit"])?,
+        window_month: parse_limit(&plain, &["Monthly limit"])?,
     };
     if limits.window_5h <= 0.0 || limits.window_week <= 0.0 || limits.window_month <= 0.0 {
         bail!("OpenCode Go usage limits must be positive");
@@ -1416,19 +1416,7 @@ pub fn parse_official_html(html: &str) -> Result<PricingSnapshot> {
     let tables = extract_tables(html)?;
     let pricing_table = tables
         .iter()
-        .find(|table| {
-            has_headers(
-                table,
-                &[
-                    "model",
-                    "input",
-                    "output",
-                    "cached read",
-                    "cached write",
-                    "usage",
-                ],
-            )
-        })
+        .find(|table| is_go_pricing_table(table))
         .ok_or_else(|| anyhow!("OpenCode Go pricing table was not found"))?;
     let endpoint_table = tables
         .iter()
@@ -1491,11 +1479,7 @@ pub fn parse_official_html(html: &str) -> Result<PricingSnapshot> {
         let cache_read = parse_dollar(&row[3], false)?
             .ok_or_else(|| anyhow!("{display_name} is missing cache-read price"))?;
         let cache_write = parse_dollar(&row[4], true)?;
-        let usage = parse_dollar(&row[5], false)?
-            .ok_or_else(|| anyhow!("{display_name} is missing Usage"))?;
-        if usage <= 0.0 {
-            bail!("{display_name} Usage must be positive");
-        }
+        let usage = parse_usage_allowance(&row[5], &display_name)?;
         models.push(PricingModel {
             model_id: id,
             display_name,
@@ -1538,6 +1522,9 @@ pub fn parse_official_html(html: &str) -> Result<PricingSnapshot> {
     }
     if covered.contains("gpt-5.6-luna") {
         validate_token_tiers(&models, "gpt-5.6-luna", 272_000)?;
+    }
+    if covered.contains("grok-4.6") {
+        validate_token_tiers(&models, "grok-4.6", 200_000)?;
     }
     validate_time_windows(&models)?;
 
@@ -1874,7 +1861,8 @@ fn canonical_display_name(name: &str) -> String {
 }
 
 fn parse_token_tier(name: &str) -> Result<(Option<i64>, Option<i64>)> {
-    // Official Go docs use ≤ / > token tiers (256K for Qwen, 272K for Luna).
+    // Official Go docs use ≤ / > token tiers (200K for Grok 4.6, 256K for Qwen,
+    // 272K for Luna).
     for boundary in [272_000_i64, 256_000, 200_000] {
         let label = format!("{}K", boundary / 1000);
         let label_lower = label.to_ascii_lowercase();
@@ -1900,6 +1888,74 @@ fn is_unpriced_promo_row(row: &[String]) -> bool {
     row.len() == 6 && row.iter().skip(1).all(|cell| is_placeholder_price(cell))
 }
 
+fn is_go_pricing_table(table: &[Vec<String>]) -> bool {
+    // Official docs renamed the last column from Usage to Monthly limit.
+    // Both headers describe the same per-model monthly allowance.
+    has_headers(
+        table,
+        &[
+            "model",
+            "input",
+            "output",
+            "cached read",
+            "cached write",
+            "usage",
+        ],
+    ) || has_headers(
+        table,
+        &[
+            "model",
+            "input",
+            "output",
+            "cached read",
+            "cached write",
+            "monthly limit",
+        ],
+    )
+}
+
+fn parse_usage_allowance(value: &str, display_name: &str) -> Result<f64> {
+    // Promo cells publish the base and current limits together, e.g.
+    // "$15 $60 4x · Ends Sep 20". The larger dollar amount is the current
+    // advertised monthly allowance used for the official multiplier.
+    let usage = dollar_amounts(value)
+        .into_iter()
+        .max_by(|left, right| left.total_cmp(right))
+        .ok_or_else(|| anyhow!("{display_name} is missing Usage"))?;
+    if usage <= 0.0 {
+        bail!("{display_name} Usage must be positive");
+    }
+    Ok(usage)
+}
+
+fn dollar_amounts(value: &str) -> Vec<f64> {
+    let mut amounts = Vec::new();
+    let mut remainder = value;
+    while let Some(start) = remainder.find('$') {
+        remainder = &remainder[start + 1..];
+        let mut number = String::new();
+        let mut consumed = 0;
+        for character in remainder.chars() {
+            if character.is_ascii_digit() || character == '.' {
+                number.push(character);
+                consumed += character.len_utf8();
+            } else if character == ',' && !number.is_empty() {
+                consumed += character.len_utf8();
+            } else {
+                break;
+            }
+        }
+        remainder = remainder.get(consumed..).unwrap_or("");
+        if let Ok(parsed) = number.parse::<f64>()
+            && parsed.is_finite()
+            && parsed >= 0.0
+        {
+            amounts.push(parsed);
+        }
+    }
+    amounts
+}
+
 fn parse_dollar(value: &str, allow_dash: bool) -> Result<Option<f64>> {
     let value = value.trim();
     if allow_dash && matches!(value, "-" | "—" | "–") {
@@ -1918,7 +1974,19 @@ fn parse_dollar(value: &str, allow_dash: bool) -> Result<Option<f64>> {
     Ok(Some(parsed))
 }
 
-fn parse_limit(plain: &str, marker: &str) -> Result<f64> {
+fn parse_limit(plain: &str, markers: &[&str]) -> Result<f64> {
+    for marker in markers {
+        if let Ok(value) = parse_limit_after(plain, marker) {
+            return Ok(value);
+        }
+    }
+    bail!(
+        "OpenCode Go page is missing {}",
+        markers.first().copied().unwrap_or("usage limit")
+    )
+}
+
+fn parse_limit_after(plain: &str, marker: &str) -> Result<f64> {
     let start = plain
         .find(marker)
         .ok_or_else(|| anyhow!("OpenCode Go page is missing {marker}"))?;
@@ -1926,15 +1994,28 @@ fn parse_limit(plain: &str, marker: &str) -> Result<f64> {
     let dollar = tail
         .find('$')
         .ok_or_else(|| anyhow!("OpenCode Go page is missing USD value after {marker}"))?;
-    let value = tail[dollar..]
+    let after_dollar = &tail[dollar..];
+    let value = after_dollar
         .split_whitespace()
         .next()
         .ok_or_else(|| anyhow!("OpenCode Go page is missing USD value after {marker}"))?;
-    parse_dollar(
+    let parsed = parse_dollar(
         value.trim_end_matches(|c: char| !c.is_ascii_digit() && c != '.'),
         false,
     )?
-    .ok_or_else(|| anyhow!("OpenCode Go page is missing USD value after {marker}"))
+    .ok_or_else(|| anyhow!("OpenCode Go page is missing USD value after {marker}"))?;
+    // The worked example is "5-hour limit — $12 of usage". Requiring that
+    // phrase keeps the table's "Monthly limit" header from being read as the
+    // account-level window when it appears first in a future page layout.
+    let after_value = after_dollar
+        .get(value.len()..)
+        .unwrap_or("")
+        .trim_start()
+        .to_ascii_lowercase();
+    if !after_value.starts_with("of usage") {
+        bail!("OpenCode Go page is missing USD value after {marker}");
+    }
+    Ok(parsed)
 }
 
 fn parse_document_updated_at(html: &str) -> Result<String> {

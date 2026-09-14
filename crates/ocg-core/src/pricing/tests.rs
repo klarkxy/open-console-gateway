@@ -632,6 +632,78 @@ fn cache_write_dash_falls_back_to_new_input_price() {
 }
 
 #[test]
+fn parses_current_official_document_shape() {
+    let snapshot = parse_official_html(include_str!(
+        "../../tests/fixtures/opencode-go-current.html"
+    ))
+    .unwrap();
+    assert_eq!(snapshot.limits.window_5h, 12.0);
+    assert_eq!(snapshot.limits.window_week, 30.0);
+    assert_eq!(snapshot.limits.window_month, 60.0);
+    assert_eq!(snapshot.document_updated_at, "2026-09-13T21:38:53.000Z");
+
+    let flash = snapshot
+        .models
+        .iter()
+        .find(|model| model.model_id == "glm-5.3-flash")
+        .unwrap();
+    assert_eq!(flash.usage, 60.0);
+    assert_eq!(flash.quota_multiplier, 1.0);
+
+    let grok_tiers = snapshot
+        .models
+        .iter()
+        .filter(|model| model.model_id == "grok-4.6")
+        .collect::<Vec<_>>();
+    assert_eq!(grok_tiers.len(), 2);
+    assert!(
+        grok_tiers
+            .iter()
+            .any(|tier| tier.max_input_tokens == Some(200_000))
+    );
+    assert!(
+        grok_tiers
+            .iter()
+            .any(|tier| tier.min_input_tokens == Some(200_001))
+    );
+    assert!(grok_tiers.iter().all(|tier| tier.usage == 15.0));
+    assert!(grok_tiers.iter().all(|tier| tier.quota_multiplier == 4.0));
+
+    let promo = snapshot
+        .models
+        .iter()
+        .filter(|model| model.model_id == "deepseek-v4.1-flash")
+        .collect::<Vec<_>>();
+    assert_eq!(promo.len(), 2);
+    assert!(promo.iter().all(|model| model.usage == 60.0));
+    assert!(promo.iter().all(|model| model.quota_multiplier == 1.0));
+    assert!(
+        promo
+            .iter()
+            .any(|model| model.time_window == super::PricingTimeWindow::Peak)
+    );
+    assert!(
+        promo
+            .iter()
+            .any(|model| model.time_window == super::PricingTimeWindow::OffPeak)
+    );
+}
+
+#[test]
+fn rejects_incomplete_grok_200k_tiers() {
+    let fixture = include_str!("../../tests/fixtures/opencode-go-current.html").replace(
+        "<tr><td>Grok 4.6 (&gt; 200K tokens)</td><td>$4.00</td><td>$12.00</td><td>$1.00</td><td>-</td><td><strong>$15</strong></td></tr>",
+        "",
+    );
+    assert!(
+        parse_official_html(&fixture)
+            .unwrap_err()
+            .to_string()
+            .contains("must contain complete 200K pricing tiers")
+    );
+}
+
+#[test]
 fn parses_official_fixture() {
     let snapshot =
         parse_official_html(include_str!("../../tests/fixtures/opencode-go.html")).unwrap();
