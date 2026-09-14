@@ -351,9 +351,43 @@ async fn dashboard_v3_usage_missing_account_is_json_404() {
 }
 
 #[tokio::test]
-async fn provider_usage_refresh_rejects_non_cn_plans_before_outbound_io() {
+async fn provider_usage_refresh_rejects_non_refreshable_plans_before_outbound_io() {
     let harness = start_loopback("usage-refresh-wrong-plan").await;
+    let (status, body) = send_json(
+        &harness,
+        Method::POST,
+        &format!("/accounts/{ZEN_FREE_ACCOUNT_ID}/provider-usage"),
+        &cas(&harness, json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_v3_error(&body, ERROR_INVALID_REQUEST);
+    assert_secret_free(&body);
+    harness.stop();
+}
+
+#[tokio::test]
+async fn provider_usage_refresh_reuses_official_go_coordinator_and_returns_provider_usage() {
+    let harness = start_loopback("usage-refresh-go-provider").await;
     let go_id = create_go(&harness).await;
+    let now = Utc::now();
+    harness.state.usage_sync.set_clock_for_test(move || now);
+    harness.state.usage_sync.set_jitter_for_test(|| 0.0);
+    harness.state.usage_sync.set_fetch_for_test(|_cfg, _key| {
+        Box::pin(async {
+            Ok(ocg_core::go_usage::GoUsageSnapshot {
+                rolling_status: ocg_core::go_usage::GoUsageWindowStatus::Ok,
+                weekly_status: ocg_core::go_usage::GoUsageWindowStatus::Ok,
+                monthly_status: ocg_core::go_usage::GoUsageWindowStatus::Ok,
+                rolling_percent: 50.0,
+                weekly_percent: 20.0,
+                monthly_percent: 10.0,
+                rolling_resets_in_minutes: 180,
+                weekly_resets_in_minutes: 1_440,
+                earliest_resets_in_minutes: 180,
+            })
+        })
+    });
     let (status, body) = send_json(
         &harness,
         Method::POST,
@@ -361,9 +395,14 @@ async fn provider_usage_refresh_rejects_non_cn_plans_before_outbound_io() {
         &cas(&harness, json!({})),
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-    assert_v3_error(&body, ERROR_INVALID_REQUEST);
+    assert_eq!(status, StatusCode::OK, "{body}");
     assert_secret_free(&body);
+    let parsed = parse_provider_usage(&body);
+    assert_eq!(
+        parsed.availability,
+        ocg_core::dashboard_v3::UsageAvailability::Available
+    );
+    assert_eq!(parsed.quota_windows.len(), 3);
     harness.stop();
 }
 

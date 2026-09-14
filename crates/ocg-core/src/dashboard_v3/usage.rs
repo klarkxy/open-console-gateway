@@ -1,10 +1,11 @@
 //! Local account usage reads and live-calibration writes.
 //!
 //! GET/PATCH `/accounts/{id}/usage` and GET `/accounts/{id}/provider-usage`
-//! reuse the current Database/provider projections. POST on provider usage is
-//! limited to the two sealed CN Plan clients and replaces their snapshots
-//! under CAS. There is no legacy alias or plugin/trait hierarchy. Usage
-//! calibration does not bump `settings_revision`.
+//! reuse the current Database/provider projections. POST on provider usage
+//! refreshes MiniMax/Kimi snapshots under CAS and, for OpenCode Go, reuses
+//! the official usage coordinator then returns `ProviderUsage`. There is no
+//! legacy alias or plugin/trait hierarchy. Usage calibration does not bump
+//! `settings_revision`.
 
 use axum::Json;
 use axum::body::Bytes;
@@ -22,11 +23,13 @@ use crate::provider::{
     OllamaBillingTier, ProviderAdapterKind, ProviderRegistry, QUOTA_WINDOW_FREE,
 };
 use crate::state::CoreState;
+use crate::usage_sync::{UsageSyncCommitAuthorization, UsageSyncTrigger};
 
 use super::types::{
     AccountUsageUpdate, CreditBalance, MutationExpectation, ProviderUsage, QuotaWindow,
     UsageAvailability, UsageMutation, UsageSyncState, UsageWindow,
 };
+use super::usage_refresh::{RefreshApiError, map_refresh_error};
 use super::{V3ApiError, check_expectation, parse_mutation_json};
 
 struct CapturedPricing {
@@ -61,8 +64,29 @@ pub(super) async fn refresh_provider_usage(
     State(state): State<CoreState>,
     Path(id): Path<String>,
     body: Bytes,
-) -> Result<Json<ProviderUsage>, V3ApiError> {
+) -> Result<Json<ProviderUsage>, RefreshApiError> {
     let expectation = parse_mutation_json::<MutationExpectation>(&body)?;
+    let adapter = {
+        let _settings_update = state.settings_update.lock();
+        check_expectation(&state, &expectation)?;
+        let db = state.db.lock();
+        let account = load_account(&db, &state, &id)?;
+        ProviderAdapterKind::from_provider_id(&account.provider_id)
+            .ok_or_else(|| V3ApiError::invalid_request_at(&state, "unknown provider offering"))?
+    };
+    match adapter {
+        ProviderAdapterKind::OpenCodeGo => {
+            return refresh_go_provider_usage(&state, &id, &expectation).await;
+        }
+        ProviderAdapterKind::MiniMaxCn | ProviderAdapterKind::KimiCn => {}
+        _ => {
+            return Err(V3ApiError::invalid_request_at(
+                &state,
+                "this Plan does not expose an official manual usage refresh",
+            )
+            .into());
+        }
+    }
     let _refresh = state.provider_usage_refresh.try_lock().map_err(|_| {
         V3ApiError::conflict_at(&state, "provider usage refresh is already running")
     })?;
@@ -73,20 +97,12 @@ pub(super) async fn refresh_provider_usage(
         let account = load_account(&db, &state, &id)?;
         let adapter = ProviderAdapterKind::from_provider_id(&account.provider_id)
             .ok_or_else(|| V3ApiError::invalid_request_at(&state, "unknown provider offering"))?;
-        if !matches!(
-            adapter,
-            ProviderAdapterKind::MiniMaxCn | ProviderAdapterKind::KimiCn
-        ) {
-            return Err(V3ApiError::invalid_request_at(
-                &state,
-                "this Plan does not expose an official manual usage refresh",
-            ));
-        }
         if account.key_cipher.trim().is_empty() {
             return Err(V3ApiError::invalid_request_at(
                 &state,
                 "the selected account has no stored Key",
-            ));
+            )
+            .into());
         }
         let key = state
             .decrypt_key(&account.key_cipher)
@@ -105,7 +121,7 @@ pub(super) async fn refresh_provider_usage(
                     account_snapshot.provider_id
                 ),
             );
-            return Err(V3ApiError::outbound_failed(&state, message));
+            return Err(V3ApiError::outbound_failed(&state, message).into());
         }
     };
     let window_count = windows.len();
@@ -122,7 +138,8 @@ pub(super) async fn refresh_provider_usage(
             return Err(V3ApiError::conflict_at(
                 &state,
                 "the account changed while provider usage was being refreshed",
-            ));
+            )
+            .into());
         }
         let source = match adapter {
             ProviderAdapterKind::MiniMaxCn => crate::plan_usage::MINIMAX_USAGE_SOURCE,
@@ -140,7 +157,41 @@ pub(super) async fn refresh_provider_usage(
             account_snapshot.provider_id
         ),
     );
-    provider_usage_locked(&state, &id).map(Json)
+    provider_usage_locked(&state, &id)
+        .map(Json)
+        .map_err(RefreshApiError::from)
+}
+
+async fn refresh_go_provider_usage(
+    state: &CoreState,
+    id: &str,
+    expectation: &MutationExpectation,
+) -> Result<Json<ProviderUsage>, RefreshApiError> {
+    {
+        let _settings_update = state.settings_update.lock();
+        check_expectation(state, expectation)?;
+    }
+    let authorization = UsageSyncCommitAuthorization::control_revision(
+        expectation.expected_revision,
+        expectation.process_generation,
+    );
+    let observation = crate::usage_sync::refresh_official_usage_with_authorization(
+        state,
+        id,
+        UsageSyncTrigger::Manual,
+        authorization,
+    )
+    .await;
+    if observation.owner_authorization != authorization {
+        let _settings_update = state.settings_update.lock();
+        check_expectation(state, expectation)?;
+    }
+    match observation.result {
+        Ok(_) => provider_usage_locked(state, id)
+            .map(Json)
+            .map_err(RefreshApiError::from),
+        Err(error) => Err(map_refresh_error(state, error)),
+    }
 }
 
 fn account_usage_locked(state: &CoreState, id: &str) -> Result<UsageWindow, V3ApiError> {

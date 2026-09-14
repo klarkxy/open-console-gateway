@@ -135,7 +135,10 @@ fn rfc3339_opt(value: Option<DateTime<Utc>>) -> Option<String> {
     value.map(|value| value.to_rfc3339())
 }
 
-fn map_refresh_error(state: &CoreState, error: OfficialUsageRefreshError) -> RefreshApiError {
+pub(super) fn map_refresh_error(
+    state: &CoreState,
+    error: OfficialUsageRefreshError,
+) -> RefreshApiError {
     match error {
         OfficialUsageRefreshError::NotFound => V3ApiError::not_found(state).into(),
         OfficialUsageRefreshError::NotEligible(message) => {
