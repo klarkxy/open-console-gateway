@@ -642,6 +642,29 @@ fn write_unix_script(path: &Path, body: &str) {
 }
 
 #[cfg(unix)]
+fn unix_shell_command(
+    script: PathBuf,
+    display: &str,
+    extra_args: Vec<OsString>,
+    timeout: Duration,
+) -> CommandSpec {
+    // cargo test runs this crate's tests as threads in one process. A sibling
+    // thread can fork while write_unix_script still holds a write fd; the child
+    // inherits that fd until exec, so Linux execve of the same inode returns
+    // ETXTBSY (rust-lang/rust#114554). /bin/sh is a stable inode and opens the
+    // script O_RDONLY, which is allowed while a writer exists.
+    let mut args = Vec::with_capacity(extra_args.len() + 1);
+    args.push(script.into_os_string());
+    args.extend(extra_args);
+    CommandSpec {
+        executable: PathBuf::from("/bin/sh"),
+        display_executable: display.into(),
+        args,
+        timeout,
+    }
+}
+
+#[cfg(unix)]
 fn unix_pid_gone_or_zombie(pid: i32) -> bool {
     let output = std::process::Command::new("ps")
         .args(["-o", "stat=", "-p", &pid.to_string()])
@@ -678,12 +701,12 @@ exit 0"#,
     );
 
     let started = Instant::now();
-    let result = ProcessCommandRunner.run(&CommandSpec {
-        executable: script,
-        display_executable: "hold-stdout".into(),
-        args: vec![OsString::from(pidfile.as_os_str())],
-        timeout: Duration::from_secs(2),
-    });
+    let result = ProcessCommandRunner.run(&unix_shell_command(
+        script,
+        "hold-stdout",
+        vec![OsString::from(pidfile.as_os_str())],
+        Duration::from_secs(2),
+    ));
     let elapsed = started.elapsed();
     assert!(
         elapsed < Duration::from_secs(8),
@@ -726,12 +749,12 @@ exec sleep 60"#,
 
     let started = Instant::now();
     let error = ProcessCommandRunner
-        .run(&CommandSpec {
-            executable: script,
-            display_executable: "sleep-leader".into(),
-            args: vec![OsString::from(pidfile.as_os_str())],
-            timeout: Duration::from_millis(400),
-        })
+        .run(&unix_shell_command(
+            script,
+            "sleep-leader",
+            vec![OsString::from(pidfile.as_os_str())],
+            Duration::from_millis(400),
+        ))
         .expect_err("sleeping process group must time out");
     let elapsed = started.elapsed();
     assert!(
@@ -765,12 +788,12 @@ fn unix_command_returns_short_process_output() {
     let script = root.join("echo-output");
     write_unix_script(&script, "printf 'hello-dsh\\n'");
     let output = ProcessCommandRunner
-        .run(&CommandSpec {
-            executable: script,
-            display_executable: "echo-output".into(),
-            args: Vec::new(),
-            timeout: Duration::from_secs(5),
-        })
+        .run(&unix_shell_command(
+            script,
+            "echo-output",
+            Vec::new(),
+            Duration::from_secs(5),
+        ))
         .unwrap();
     assert!(output.success, "stderr={}", output.stderr);
     assert_eq!(output.stdout.trim(), "hello-dsh");
