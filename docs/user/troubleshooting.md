@@ -32,7 +32,7 @@ get billed for a bad guess.
   Managed-account Key verification and Custom **Verify connection** still
   record `auth_error` on 401 in those flows.
 - **The dashboard says the page version does not match the service.** A cached
-  older SPA hit retired `/dashboard/api` REST (not `/dashboard/api/v3`) and
+  older SPA hit the tombstoned `/dashboard/api` REST (not `/dashboard/api/v3`) and
   received HTTP 410. Refresh the page; if that is not enough, install the
   matching desktop, CLI, or Docker build.
 - **A dashboard save failed with a conflict / 409.** Another tab in the same

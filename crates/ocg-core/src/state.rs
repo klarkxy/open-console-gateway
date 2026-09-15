@@ -952,6 +952,14 @@ impl CoreStateInner {
         self.desktop.desktop_update_supported()
     }
 
+    pub fn set_dsh_application_host(&self, host: crate::dsh_application::DshApplicationHost) {
+        self.desktop.set_dsh_application_host(host);
+    }
+
+    pub fn dsh_application_host(&self) -> Option<crate::dsh_application::DshApplicationHost> {
+        self.desktop.dsh_application_host()
+    }
+
     pub fn desktop_update_status(&self) -> DesktopUpdateStatus {
         self.desktop.desktop_update_status()
     }

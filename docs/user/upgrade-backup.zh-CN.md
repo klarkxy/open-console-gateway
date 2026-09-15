@@ -6,13 +6,13 @@
 
 Windows 应用内更新会在 OCG Manager 升级为 Open Console Gateway 时保留原安装目录。手动运行安装器时，请选择原目录以替换旧安装。升级保留数据目录与开机启动设置，迁移已有桌面和开始菜单快捷方式，并将已安装应用记录更新为新名称。
 
-## 数据库迁移与接入 Key（schema v37）
+## 数据库迁移与接入 Key（schema v49）
 
-数据库 schema 是 **v37**，历史库启动时原地迁移。从单 Key 版本升级会保留既有凭证为 **主 Key**（id 固定为 `00000000-0000-0000-0000-000000000001`），客户端无需改动即可继续鉴权。主 Key 与额外子 Key 共用 `access_keys` 表：未删除子 Key 最多 64 把，删除为软删除，保留名称用于日志归因并清除明文。
+数据库 schema 是 **v49**，历史库启动时原地迁移。从单 Key 版本升级会保留既有凭证为 **主 Key**（id 固定为 `00000000-0000-0000-0000-000000000001`），客户端无需改动即可继续鉴权。主 Key 与额外子 Key 共用 `access_keys` 表：未删除子 Key 最多 64 把，删除为软删除，保留名称用于日志归因并清除明文。
 
-已有（非空）库会先规范迁移到 v26，再由 v27 重写把主 Key 与全部 `sub_gateway_keys` 行复制进 `access_keys` 表，删除 `sub_gateway_keys`，并删除 `accounts` 上遗留的五列 `usage_sync_*`。任何 v27 写入前，库会得到同级快照 `data.sqlite.pre-v3.<timestamp>.bak` 及 SHA-256 sidecar。v35 会在 fail-closed 预检后去掉 offering 维度，非空 v34 库另写 `data.sqlite.pre-v35.<timestamp>.bak`。全新空数据目录直接创建 schema v37，不写这些副本。快照只是回滚点，不能替代完整备份：恢复前先校验 sidecar。旧版程序无法打开已迁移的数据库——单 Key 时代不识额外 Key，已撤销的值也不会因降级复活。
+已有（非空）库会先规范迁移到 v26，再由 v27 重写把主 Key 与全部 `sub_gateway_keys` 行复制进 `access_keys` 表，删除 `sub_gateway_keys`，并删除 `accounts` 上遗留的五列 `usage_sync_*`。任何 v27 写入前，库会得到同级快照 `data.sqlite.pre-v3.<timestamp>.bak` 及 SHA-256 sidecar。全新空数据目录直接创建 schema v49，不写这些副本。快照只是回滚点，不能替代完整备份：恢复前先校验 sidecar。旧版程序无法打开已迁移的数据库——单 Key 时代不识额外 Key，已撤销的值也不会因降级复活。
 
-v29 从目录中移除 SCNet Token Plans，并在迁移期间删除所有现有 SCNet 账号行。每次启动时，历史 Command Code GOAT 验证状态都会统一为 `not_required`，因为公开目录不是 Key 验证；Custom API 的 enabled 状态保留。OpenCode Go、Zen Free 与未知 provider 身份不受影响。v35 同时保存 `dynamic_providers` / `dynamic_provider_models`；节点备份导出只含 `providerId` 的 payload V4，并包含已保存的用户定义供应商定义。更旧的 payload V1–V3 备份会被明确的不支持版本错误拒绝；那不是密码错误，也不是文件损坏。
+v29 从目录中移除 SCNet Token Plans，并在迁移期间删除所有现有 SCNet 账号行。每次启动时，历史 Command Code GOAT 验证状态都会统一为 `not_required`，因为公开目录不是 Key 验证；Custom API 的 enabled 状态保留。OpenCode Go、Zen Free 与未知 provider 身份不受影响。
 
 v30 将 Custom API 的 `account_custom_configs` 从单一 `upstream_protocol` 列扩展为 JSON `upstream_protocols` 集合，按旧值回填每个现有 Custom 账号。Custom 配置/能力编辑保持账号启用，但将 `verification_status` 重置为 `pending`。
 
@@ -22,7 +22,21 @@ v32 将 Custom API 的 base URL、协议集合与可配置鉴权收敛为一个�
 
 v33 新增 `account_model_capabilities.upstream_model`。历史映射行会以此前的公开 `model_id` 回填，因此升级后既有路由保持不变；新建 Custom 行可使用不同的公开名称与上游名称。
 
-v36 曾加入尚未发布的 Ollama Cookie 用量状态；v37 删除该表，并新增账号级 Ollama Cloud 计费档位（Free/Pro/Max/Team）。
+v35 在已知 v34 配对的 fail-closed 预检后，把 Provider/Plan 身份收敛为仅 `provider_id`，并把类型化用户定义供应商保存在 `dynamic_providers` / `dynamic_provider_models`。非空 v34 库会先写 `data.sqlite.pre-v35.<timestamp>.bak`。
+
+v36 曾加入尚未发布的 Ollama Cookie 用量状态；v37 删除该表，并新增账号级 Ollama Cloud 计费档位（Pro/Max/Team）。
+
+v38 新增 `platform_accounts` / `platform_links`，承载账号归属的平台 Key（New API / Sub2API 母账号）。v39 记录供应商预设来源（`preset_id`）；v40 新增按模型 `upstream_override`；v41 新增 MiniMax/Kimi 按模型首选协议表。
+
+v42 把用户定义供应商与密封内置目录统一为同一对 `providers` / `provider_models` 表。非空 v41 库会先写 `data.sqlite.pre-v42.<timestamp>.bak` 及 SHA-256 sidecar。
+
+v43 允许 Responses 作为已保存的首选协议；v44 新增不含秘密的 `dashboard_operations` 台账，支撑面板 V4 写入幂等。v45 新增身份、凭据、绑定与配额池卫星表，并按既有账号回填；v46 在凭据绑定上新增已保存的端点与 Origin 授权。v47 在 `providers` 行上持久化 onboarding 草稿标记。
+
+v48 删除失效的协议开关列与 `free_alias_enabled` 列，以及空的旧动态供应商表。非空 v47 库会先写 `data.sqlite.pre-v48.<timestamp>.bak` 及 SHA-256 sidecar，非空遗留表会 fail-closed 拒绝迁移而不是被删除。v49 新增 `unpublished_public_models`（增量变更，不做迁移前备份）。
+
+### 节点备份载荷
+
+节点备份当前导出 payload V6（含 `providerId` 与身份快照），并包含已保存的用户定义供应商定义。V4/V5 备份仍可导入，沿用旧的冷却仅本机行为；payload V1–V3 备份会被明确的不支持版本错误拒绝——那不是密码错误，也不是文件损坏。
 
 ## 备份
 

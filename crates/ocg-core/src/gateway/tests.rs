@@ -369,13 +369,13 @@ async fn unauthorized_and_expected_fallback_requests_are_not_persisted() {
 }
 
 #[tokio::test]
-async fn gemini_routes_stay_wired_and_claude_desktop_is_a_normal_404() {
+async fn gemini_and_messages_routes_stay_wired() {
     let mut dir = std::env::temp_dir();
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system clock should be valid")
         .as_nanos();
-    dir.push(format!("ocg-claude-desktop-routes-{nanos}"));
+    dir.push(format!("ocg-client-routes-{nanos}"));
     fs::create_dir_all(&dir).expect("test data directory should be created");
     let db = Database::open(dir.clone()).expect("test database should open");
     let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("test"));
@@ -483,34 +483,6 @@ async fn gemini_routes_stay_wired_and_claude_desktop_is_a_normal_404() {
         .expect("unknown Gemini action should complete");
     assert_eq!(unknown_action.status(), StatusCode::NOT_FOUND);
 
-    for path in [
-        "/claude-desktop/v1/models",
-        "/claude-desktop/v1/messages",
-        "/dashboard/api/v3/claude-desktop/models",
-    ] {
-        let response = client
-            .get(format!("{root}{path}"))
-            .header("x-api-key", "gateway-test-key")
-            .send()
-            .await
-            .expect("retired Claude Desktop route should complete");
-        assert_eq!(
-            response.status(),
-            StatusCode::NOT_FOUND,
-            "{path} must be a normal 404"
-        );
-        assert_ne!(response.status(), StatusCode::GONE);
-        assert_ne!(response.status(), StatusCode::MOVED_PERMANENTLY);
-        assert_ne!(response.status(), StatusCode::TEMPORARY_REDIRECT);
-    }
-    let messages = client
-        .post(format!("{root}/claude-desktop/v1/messages"))
-        .header("x-api-key", "gateway-test-key")
-        .json(&json!({"model":"claude-sonnet-4-6","max_tokens":1,"messages":[]}))
-        .send()
-        .await
-        .expect("retired public messages route should complete");
-    assert_eq!(messages.status(), StatusCode::NOT_FOUND);
     let ordinary_messages = client
         .post(format!("{root}/v1/messages"))
         .json(&json!({"model":"minimax-m3","max_tokens":1,"messages":[]}))
@@ -518,14 +490,6 @@ async fn gemini_routes_stay_wired_and_claude_desktop_is_a_normal_404() {
         .await
         .expect("ordinary messages route should complete");
     assert_eq!(ordinary_messages.status(), StatusCode::UNAUTHORIZED);
-
-    let retired = client
-        .put(format!("{root}/dashboard/api/claude-desktop/models"))
-        .json(&json!({"sonnet":"","opus":"","haiku":""}))
-        .send()
-        .await
-        .expect("retired V2 dashboard update should complete");
-    assert_eq!(retired.status(), StatusCode::GONE);
 
     let _ = handle.shutdown.send(());
     handle.task.await.expect("test gateway should stop");

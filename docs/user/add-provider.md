@@ -28,7 +28,7 @@ Edit replaces the whole Provider configuration through `PATCH /providers/{id}`. 
 
 Provider-owned fields stay on **Providers**. Account **Key**, enablement, order, notes, cooldown, and tests stay on **Accounts**. User-defined Providers are always unpriced: no official usage, quota estimate, or pricing rows. Request logs still attribute provider, account, and model.
 
-Backups use payload V4 with `providerId` only and include every saved user-defined Provider definition. Schema v35 stores `dynamic_providers` and `dynamic_provider_models`.
+Node backups export payload V6 with `providerId` only for every saved user-defined Provider definition; payload V4 and V5 bundles remain importable. The current SQLite schema (v49) stores user-defined Providers in the unified `providers` and `provider_models` tables.
 
 ## Connect a compatible upstream now
 
@@ -87,7 +87,7 @@ A built-in integration is appropriate only when the Provider needs product-owned
 2. Add only verified protocol facts to `crates/ocg-domain/src/protocol.rs`. Request routing uses the saved contract.
 3. Add code-owned client Alias mappings in `crates/ocg-gateway/src/alias.rs`. Preserve exact upstream IDs and reject ambiguous raw IDs; a discovered row must not silently invent a public Alias.
 4. Implement the host route resolver in `ocg-core`. The adapter returns an `AttemptSpec`; database access, Key decryption, proxy selection, and outbound HTTP remain host-owned.
-5. Add the account and **Providers** control-plane/UI workflow, including catalog refresh, enablement, verification, errors, cooldown, pricing, and usage only where the Provider actually supports them. Dashboard writes use `/dashboard/api/v3` CAS.
+5. Add the account and **Providers** control-plane/UI workflow, including catalog refresh, enablement, verification, errors, cooldown, pricing, and usage only where the Provider actually supports them. All dashboard writes use CAS: user-defined Provider creation goes through the V4 onboarding commit (`/dashboard/api/v4`); Provider definition edits and the account operations that remain on V3 use `/dashboard/api/v3`; Key rotation, binding edits, and additional identity credentials use V4.
 6. Update the paired user guides and tests. Run the checks in [Development](../maintainer/development.md) for the crates and UI you touched.
 
 Before opening a contribution, write down the upstream origin, auth scheme, catalog source, supported model/protocol pairs, streaming behavior, error semantics, quota/price source, and a non-billable validation plan. Keep the new family fail-closed until its complete routing and control-plane path exists.

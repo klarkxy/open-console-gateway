@@ -1647,8 +1647,8 @@ onMounted(() => {
   void initializeAccounts();
 });
 // This view is kept alive by App.vue; coarse states (cooling tags, editor
-// enablement) recompute on a 15s clock, while UsageStrip keeps its own 1s
-// countdown. Returning to the view refreshes server-side cooldown changes.
+// enablement) recompute on a 15s clock. Returning to the view refreshes
+// server-side cooldown changes.
 onActivated(() => {
   startClock();
   now.value = Date.now();

@@ -5,15 +5,18 @@ import { after, before, test } from "node:test";
 import { pathToFileURL } from "node:url";
 import { build } from "vite";
 import vue from "@vitejs/plugin-vue";
-import { createRenderer, ssrContextKey, type App, type Component } from "vue";
-
-type HostNode = {
-  children: HostNode[];
-  parent?: HostNode;
-  props: Record<string, unknown>;
-  text?: string;
-  type: string;
-};
+import { ssrContextKey, type App, type Component } from "vue";
+import {
+  button,
+  createVueHostRenderer,
+  deferred,
+  fireTimers,
+  installTestWindow,
+  settle,
+  text,
+  type HostNode,
+  type TestWindow,
+} from "../test-helpers/vue-host-runtime.ts";
 
 type CpaApi = Record<string, (...args: unknown[]) => Promise<unknown>>;
 
@@ -87,32 +90,7 @@ function cpaHarnessPlugin() {
   };
 }
 
-const renderer = createRenderer<HostNode, HostNode>({
-  createComment: (text) => ({ children: [], props: {}, text, type: "comment" }),
-  createElement: (type) => ({ children: [], props: {}, type }),
-  createText: (text) => ({ children: [], props: {}, text, type: "text" }),
-  insert: (child, parent, anchor) => {
-    child.parent = parent;
-    const index = anchor ? parent.children.indexOf(anchor) : -1;
-    if (index >= 0) parent.children.splice(index, 0, child);
-    else parent.children.push(child);
-  },
-  nextSibling: (node) => {
-    if (!node.parent) return null;
-    const index = node.parent.children.indexOf(node);
-    return index >= 0 ? node.parent.children[index + 1] ?? null : null;
-  },
-  parentNode: (node) => node.parent ?? null,
-  patchProp: (node, key, _previous, next) => { node.props[key] = next; },
-  remove: (node) => {
-    if (!node.parent) return;
-    const index = node.parent.children.indexOf(node);
-    if (index >= 0) node.parent.children.splice(index, 1);
-    node.parent = undefined;
-  },
-  setElementText: (node, text) => { node.children = []; node.text = text; },
-  setText: (node, text) => { node.text = text; },
-});
+const renderer = createVueHostRenderer();
 
 function integration(overrides: Record<string, unknown> = {}) {
   return {
@@ -133,83 +111,14 @@ function runtime(overrides: Record<string, unknown> = {}) {
   };
 }
 
-type TestWindow = {
-  addEventListener(): void;
-  removeEventListener(): void;
-  open(): void;
-  clearInterval(id?: number): void;
-  clearTimeout(id?: number): void;
-  setInterval(fn: () => void): number;
-  setTimeout(fn: () => void): number;
-  __timers: Map<number, () => void>;
-};
-
-async function settle(): Promise<void> {
-  for (let index = 0; index < 12; index += 1) await Promise.resolve();
-}
-
-function installWindow(): TestWindow {
-  const timers = new Map<number, () => void>();
-  let next = 1;
-  const clear = (id?: number) => {
-    if (typeof id === "number") timers.delete(id);
-  };
-  const set = (fn: () => void) => {
-    const id = next++;
-    timers.set(id, fn);
-    return id;
-  };
-  const testWindow: TestWindow = {
-    addEventListener() {},
-    removeEventListener() {},
-    open() {},
-    clearInterval: clear,
-    clearTimeout: clear,
-    setInterval: set,
-    setTimeout: set,
-    __timers: timers,
-  };
-  (globalThis as unknown as { window?: TestWindow }).window = testWindow;
-  return testWindow;
-}
-
-async function fireTimers(testWindow: TestWindow): Promise<void> {
-  const fns = [...testWindow.__timers.values()];
-  testWindow.__timers.clear();
-  for (const fn of fns) fn();
-  await settle();
-}
-
-function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (error: unknown) => void } {
-  let resolve!: (value: T) => void;
-  let reject!: (error: unknown) => void;
-  const promise = new Promise<T>((nextResolve, nextReject) => {
-    resolve = nextResolve;
-    reject = nextReject;
-  });
-  return { promise, resolve, reject };
-}
-
 type RecordedMessage = { type: string; args: unknown[] };
 
 function recordedMessages(): RecordedMessage[] {
   return (globalThis as unknown as { __cpaMessages?: RecordedMessage[] }).__cpaMessages ?? [];
 }
 
-function text(node: HostNode): string {
-  return `${node.text ?? ""}${node.children.map(text).join("")}`;
-}
-
-function button(root: HostNode, label: string): HostNode {
-  const found = root.children.flatMap(function walk(node): HostNode[] {
-    return [node, ...node.children.flatMap(walk)];
-  }).find((node) => node.type === "button" && text(node).trim() === label);
-  assert.ok(found, `button ${label} should render`);
-  return found;
-}
-
 async function mount(componentApi: CpaApi): Promise<{ app: App; root: HostNode; window: TestWindow }> {
-  const testWindow = installWindow();
+  const testWindow = installTestWindow();
   (globalThis as unknown as { __cpaMessages?: RecordedMessage[] }).__cpaMessages = [];
   api = {
     getCpaCatalog: async () => ({ models: [], sourceUrl: null, refreshedAt: null, revision: { revision: 1, processGeneration: 1, pricingRevision: "p" } }),

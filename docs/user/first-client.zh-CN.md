@@ -11,7 +11,7 @@ Gateway 启动后，接入客户端主要是复制配置。请使用接入中心
 
 **Key** 是你唯一要交给客户端的秘密。它接受三种请求头形态——`Authorization: Bearer <key>`、Anthropic 风格的 `x-api-key: <key>`、Gemini 风格的 `x-goog-api-key: <key>`。Gateway 从 SQLite 取出 OpenCode-Go 账号 Key，并自行注入上游。
 
-五类兼容入口的最小 POSIX shell 检查：
+四类兼容入口的最小 POSIX shell 检查：
 
 ```bash
 BASE=http://127.0.0.1:9042

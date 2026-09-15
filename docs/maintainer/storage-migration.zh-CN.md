@@ -203,6 +203,10 @@ v38 新增 `platform_accounts` 与 `platform_links`，保留既有账号 ID、Ke
 
 新节点导出使用 V6 负载，不包含平台管理凭证、平台观察密钥和缓存观察值；仍支持 V4 与 V5 导入。导入关联保持未验证，同一父账号 ID 的平台类型或地址冲突会使整笔导入回滚。回滚沿用完整目录备份恢复，v38 不增加另一套备份机制。
 
+## Schema v39 — 预设来源
+
+v39 为用户定义供应商增加可空的 `preset_id`，在资源地址需要自填或名称修改后保留选择的配置模板。它不控制路由，也不是平台实例身份；既有行保持未分类。V5 迁移负载携带该可选字段，仍接受没有此字段的旧负载。
+
 ## Schema v37 — Ollama Cloud 计费档位
 
 v37 删除 `ollama_cloud_usage_state`（未发布的 Cookie 抓取，包括混淆 Cookie 与上次成功快照），并创建 `ollama_cloud_billing`：
@@ -248,7 +252,3 @@ Windows 上用 `Get-FileHash -Algorithm SHA256` 与 sidecar 第一个字段比�
 ---
 
 [维护者指南索引](../MAINTAINER.zh-CN.md) · [English](storage-migration.md) · [文档索引](../README.zh-CN.md)
-
-## Schema v39 — 预设来源
-
-v39 为用户定义供应商增加可空的 `preset_id`，在资源地址需要自填或名称修改后保留选择的配置模板。它不控制路由，也不是平台实例身份；既有行保持未分类。V5 迁移负载携带该可选字段，仍接受没有此字段的旧负载。

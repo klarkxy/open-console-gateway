@@ -7,7 +7,8 @@
    plus default images in `compose.example.yaml`.
 2. Refresh lockfiles with the usual Cargo/pnpm commands, then run
    `pnpm run test`, `pnpm run test:tooling`, `pnpm run design:lint`,
-   `pnpm run contract:v3:check`, `pnpm run release:check`, and
+   `pnpm run contract:v3:check`, `pnpm run contract:v4:check`,
+   `pnpm run release:check`, and
    `pnpm run build`. Commit generated lockfile diffs; do not hand-edit them.
 3. Review the previous-tag diff and current-platform `release/` payloads,
    then commit version, lockfile, documentation, and release-note changes.
@@ -29,15 +30,15 @@ patch version.
 Protocol, schema, CAS, and local-list behavior belong in `cargo test` /
 `pnpm run test`, not this list. Select real-client checks by the affected
 Gateway protocols. Record the tested client versions, platforms, results,
-and omissions in the release evidence; previous runs do not grant exemptions.
+and omissions in the release notes; previous runs do not grant exemptions.
 
 - [ ] Quality gate, signed `release:check`, and selected platform smokes
       are green; the four version manifests, `compose.example.yaml`, and
       workspace `Cargo.lock` entries agree.
-- [ ] Exercise affected client paths with text and tool calls. Include Claude
-      Desktop when its retained Gateway role mapping changes and Gemini CLI when
-      Gemini compatibility changes. The retired Applications subsystem, guide
-      generation, and automatic connectors are outside release acceptance.
+- [ ] Exercise affected client paths with text and tool calls (for example,
+      Gemini CLI when Gemini compatibility changes). The DSH Applications
+      flow is in scope when it changes, including its native plugin and CLI
+      smokes.
       Verify that Connection Center masks displayed Keys and copies the selected Key.
 - [ ] Optional managed onboarding (sign-in identity → invite URL →
       OpenCode login → payment review → key paste). Real payment only when

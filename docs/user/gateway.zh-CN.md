@@ -2,7 +2,7 @@
 
 # Gateway 行为
 
-Open Console Gateway 在 `127.0.0.1:9042` 只暴露一个 HTTP 入口，同时讲五种客户端协议，并把请求转给 OpenCode Go、Zen Free、Command Code GOAT、MiniMax CN、Kimi Code CN、Ollama Cloud 或 Custom API 中胜出的合格账号卡。
+Open Console Gateway 在 `127.0.0.1:9042` 只暴露一个 HTTP 入口，同时讲四种客户端协议，并把请求转给 OpenCode Go、Zen Free、Command Code GOAT、MiniMax CN、Kimi Code CN、Ollama Cloud 或 Custom API 中胜出的合格账号卡。
 
 Ollama Cloud 是可路由的密封固定源 Plan（`https://ollama.com`）：只走 Chat Completions，Bearer。已保存或原始目录 ID 不会进入 `GET /v1/models`，也不会加入 Go Alias 注册表。实际上游 429 走通用冷却与回退。
 
@@ -21,8 +21,9 @@ Gateway 监听 `http://<bind>:<port>`，暴露以下端点：
 | `POST` | `/v1beta/models/{model}:countTokens` | 返回 `501`，Gemini CLI 可回退到本地估算 |
 | `POST` | `/v1beta/models/{model}:embedContent` | 返回 `501`；当前不支持 embeddings |
 | `GET`  | `/dashboard/` | Vue 3 管理面板（HTML） |
-| `*`    | `/dashboard/api/v3/...` | 当前管理面板 JSON API |
-| `*`    | `/dashboard/api/...` | 已退役的 V2 REST（已登录返回 410 `dashboardV2Removed`），不含已标明的 V2 鉴权与浏览器 WebSocket 兼容路由 |
+| `*`    | `/dashboard/api/v3/...` | 冻结的面板 JSON 控制面（CAS 变更）；同时承载面板鉴权与浏览器 WebSocket |
+| `*`    | `/dashboard/api/v4/...` | 与 V3 并行的仅增量面板 JSON 控制面（onboarding、凭据/绑定写入、DSH 安装） |
+| `*`    | `/dashboard/api/...` | V2 REST 墓碑（已登录返回 410 `dashboardV2Removed`），不含已标明的 V2 鉴权与浏览器 WebSocket 兼容路由 |
 
 默认监听 `127.0.0.1:9042`。CLI 可用 `serve --host 0.0.0.0` 覆盖监听地址，用 `serve --port <port>` 覆盖端口。桌面端同样绑定回环，并由 Tauri 单实例锁防止两个托盘程序争抢端口。没有 HTTP 健康检查端点；Docker 只检查容器内部的 TCP `9042`。
 

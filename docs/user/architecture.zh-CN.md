@@ -13,7 +13,7 @@ Open Console Gateway 是一个本地节点。Desktop、CLI 与 Docker 只是承�
 
 Dashboard 与推理入口共用 `9042`，但使用两类不同凭据。客户端 **Key** 用于 AI
 工具向 Open Console Gateway 鉴权；选定账号后，账号凭据只会发往该账号配置的上游，Zen
-Free 没有凭据。Vue SPA 通过 HTTP Dashboard V3 通信。
+Free 没有凭据。Vue SPA 通过 HTTP Dashboard V3 与 V4 通信。
 
 ## 请求生命周期
 
@@ -40,7 +40,7 @@ Free 没有凭据。Vue SPA 通过 HTTP Dashboard V3 通信。
 | **供应商** | 内置目录、模型/协议合约、价格范围，以及用户定义 Provider 的 Endpoint/鉴权/映射 | Custom API 映射留在账号卡 |
 | **Custom API 账号** | 一个 API URL、一个账号级上游协议、公开模型 → 上游 ID 映射 | 共享 Provider 定义在 **供应商** |
 | **扩展 / CPA** | 一个静态本机外部集成边界 | 内置路由家族仍在 **账号** / **供应商** |
-| **旧应用功能** | 已退役 | 客户端使用普通 Gateway API |
+| **应用 / DSH** | 安装到 DSH `web` profile 的 OCG 自有插件 | 客户端使用普通 Gateway API |
 
 Adapter Registry 静态密封。用户定义 Provider 仅作为类型化数据持久化，并始终绑定
 Configurable HTTP。
@@ -75,6 +75,7 @@ Chat Completions 或 Messages 上游。
 | 添加账号并排序 | [账号](accounts.zh-CN.md)、[路由](routing.zh-CN.md) |
 | 管理目录与合约 | [供应商](providers.zh-CN.md) |
 | 理解 Alias 与错误 | [Gateway](gateway.zh-CN.md) |
+| 接入 DSH 插件 | [应用](applications.zh-CN.md) |
 | 查看 crate 与 Host 边界 | [维护者架构](../maintainer/architecture.zh-CN.md) |
 
 ---

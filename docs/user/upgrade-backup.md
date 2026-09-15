@@ -16,9 +16,9 @@ keeps the data directory and auto-start setting, migrates existing desktop and
 Start-menu shortcuts, and replaces the old installed-app registration with the
 new product name.
 
-## Database Migration And Access Keys (Schema v37)
+## Database Migration And Access Keys (Schema v49)
 
-The database schema is **v37**; historical databases migrate in place on
+The database schema is **v49**; historical databases migrate in place on
 startup. Upgrading from a single-key version keeps your existing credential
 as the **primary key** (fixed id
 `00000000-0000-0000-0000-000000000001`), so clients keep authenticating
@@ -31,7 +31,7 @@ rewrite copies the primary Key and every `sub_gateway_keys` row into
 `access_keys`, drops `sub_gateway_keys`, and drops the legacy
 `accounts.usage_sync_*` columns. Before any v27 write the database receives a
 sibling snapshot `data.sqlite.pre-v3.<timestamp>.bak` plus a SHA-256 sidecar.
-A fresh empty data directory creates schema v37 directly and skips the
+A fresh empty data directory creates schema v49 directly and skips the
 snapshot. That snapshot is a v26 rollback point, not a substitute for a
 complete backup; verify the sidecar before restoring it, and restore it only
 onto a v26-capable binary or to retry a v27 open that never committed. Never
@@ -66,14 +66,41 @@ routing exactly. New Custom rows may use distinct public and upstream names.
 
 v35 collapses Provider/Plan identity to `provider_id` only after a fail-closed
 preflight of known v34 pairs, and stores typed user-defined Providers in
-`dynamic_providers` / `dynamic_provider_models`. Non-empty v34 libraries also
-write `data.sqlite.pre-v35.<timestamp>.bak`. Node backups export payload V4
-with `providerId` only, including saved user-defined Provider definitions.
-Older payload V1–V3 backups are rejected with an explicit unsupported-version
-error; that is not a wrong password or a damaged file.
+`dynamic_providers` / `dynamic_provider_models`. Non-empty v34 databases also
+write `data.sqlite.pre-v35.<timestamp>.bak`.
 
 v36 briefly added the unreleased Ollama Cookie-usage state. v37 removes that
-table and adds account-scoped Ollama Cloud billing tiers (Free/Pro/Max/Team).
+table and adds account-scoped Ollama Cloud billing tiers (Pro/Max/Team).
+
+v38 adds `platform_accounts` / `platform_links` for account-owned platform
+Keys (New API / Sub2API parents). v39 records Provider preset provenance
+(`preset_id`); v40 adds per-model `upstream_override`; v41 adds the
+MiniMax/Kimi per-model preferred-protocol table.
+
+v42 unifies user-defined Providers and the sealed builtin catalog into one
+`providers` / `provider_models` pair. Non-empty v41 databases write
+`data.sqlite.pre-v42.<timestamp>.bak` plus a SHA-256 sidecar first.
+
+v43 admits Responses as a stored preferred protocol; v44 adds the
+secret-free `dashboard_operations` ledger behind idempotent dashboard V4
+writes. v45 adds the identity / credential / binding / quota-pool satellite
+tables and backfills them from existing accounts; v46 adds saved endpoint
+and Origin grants on credential bindings. v47 persists the onboarding-draft
+flag on `providers`.
+
+v48 drops inert protocol-switch and `free_alias_enabled` columns and the
+empty legacy dynamic-Provider tables. Non-empty v47 databases write
+`data.sqlite.pre-v48.<timestamp>.bak` plus a SHA-256 sidecar first, and
+nonempty leftovers fail closed instead of being dropped. v49 adds
+`unpublished_public_models` (additive; no pre-migration backup).
+
+### Portable Node Backup Payloads
+
+Node backups export payload V6 with `providerId` plus the identity snapshot,
+including saved user-defined Provider definitions. V4/V5 backups remain
+importable with their older host-local cooldown behavior. Payload V1–V3
+backups are rejected with an explicit unsupported-version error; that is not
+a wrong password or a damaged file.
 
 ## Backup
 

@@ -81,6 +81,18 @@ export function providerQuotaWindowLabel(
   return humanizeWindowPart(kind) || kind;
 }
 
+/**
+ * MiniMax emits a per-model video quota lane next to the text windows; those
+ * rows stay out of the summary grid. Matches the normalized wire names
+ * (`minimax_current:<model>:video`, `minimax_weekly:<model>:video`).
+ */
+export function isMiniMaxVideoQuotaWindow(
+  window: Pick<ProviderQuotaWindow, "window_kind">,
+): boolean {
+  const kind = window.window_kind.trim().toLowerCase();
+  return kind.startsWith("minimax_") && kind.endsWith(":video");
+}
+
 export type UsageEditState = {
   draft: number;
   saved: number;

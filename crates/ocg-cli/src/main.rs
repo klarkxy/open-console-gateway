@@ -164,6 +164,11 @@ fn build_state(
     Ok(Arc::new(CoreStateInner::new(db, data_dir, cipher)?))
 }
 
+fn register_dsh_application_host(_state: &Arc<CoreStateInner>) {
+    #[cfg(feature = "dsh-local-host")]
+    ocg_core::dsh_application_host::register(_state);
+}
+
 async fn serve(
     data_dir: PathBuf,
     cipher: Arc<dyn KeyCipher + Send + Sync>,
@@ -188,6 +193,7 @@ async fn start_serve(
 ) -> Result<Arc<CoreStateInner>> {
     let state = build_state(data_dir, cipher)?;
     ocg_core::cpa_runtime::host::register_owned_host(&state);
+    register_dsh_application_host(&state);
     let executable = if dashboard_dir.is_none() {
         std::env::current_exe().ok()
     } else {

@@ -24,23 +24,23 @@
 
 前端：Pinia store 直接调用 `dashboardV3`。仍使用旧字段名的页面走 `src/api/dashboard.ts` presenter。
 
-`dashboard.rs` 提供 SPA 并保留 V2 鉴权与浏览器 WebSocket 处理器。已退役的 `/dashboard/api/...` REST 路径在到达 `dashboard.rs` 之前由 `host_router` 墓碑拦截。
+`dashboard.rs` 提供 SPA 并保留 V2 鉴权与浏览器 WebSocket 处理器。保留家族之外的 `/dashboard/api/...` REST 路径在到达 `dashboard.rs` 之前由 `host_router` 墓碑拦截。
 
 ## Dashboard V4
 
 面板 JSON 位于 `/dashboard/api/v4`。它是冻结 V3 旁边的并行、仅增量控制面。V3 的 `$defs` 与路由不再增加新字段。
 
-V4 复用 V3 会话中间件。其列表返回与 V3 CAS 相同的 `ControlRevision`（`expectedRevision` / `processGeneration`）。V4 变更是 `POST /onboarding/commit`、`POST /credentials/{id}/rotate`、`PATCH /bindings/{id}` 与 `POST /identities/{id}/credentials`，它们检查这两枚令牌；只读路由不检查。
+V4 复用 V3 会话中间件。其列表返回与 V3 CAS 相同的 `ControlRevision`（`expectedRevision` / `processGeneration`）。V4 变更是 `POST /onboarding/commit`、`POST /credentials/{id}/rotate`、`PATCH /bindings/{id}`、`POST /identities/{id}/credentials`、`POST /applications/dsh`（同时绑定 GET 检查指纹）、`PUT /cpa/models`、`POST /provider-contracts/{scope_kind}/{scope_id}/catalog/remove` 与 `PATCH /alias-publication`，它们检查这两枚令牌；只读路由不检查。
 
-冻结契约是 `schema/dashboard-api-v4.schema.json`，由 `dashboard_v4::contract_schema_pretty()` 经 `crates/ocg-core/examples/export_dashboard_v4_schema.rs` 生成。生成的 TypeScript（`src/api/generated/dashboard-v4.ts`）只有类型，没有 HTTP 封装。`dashboard_v4/types.rs` 的 `CATALOG_TYPE_NAMES` 同样是有序 `$defs` 目录；追加时必须保持既有 definition 对象字节一致。
+已检入的仅增量 V4 契约是 `schema/dashboard-api-v4.schema.json`，由 `dashboard_v4::contract_schema_pretty()` 经 `crates/ocg-core/examples/export_dashboard_v4_schema.rs` 生成。生成的 TypeScript（`src/api/generated/dashboard-v4.ts`）只有类型，没有 HTTP 封装。`dashboard_v4/types.rs` 的 `CATALOG_TYPE_NAMES` 同样是有序 `$defs` 目录；追加时必须保持既有 definition 对象字节一致。
 
-只读路由仍为 `GET /contract`、`GET /templates`、`GET /connections`、`GET /accounts`。这些读取不会发出出站请求。
+只读路由为 `GET /contract`、`GET /templates`、`GET /connections`、`GET /accounts`、`GET /applications/dsh`、`GET /cpa/models` 与 `GET /alias-publication`。这些读取不会发出出站请求。
 
 `GET /templates` 是只读的添加目录：密封内置项（不含 CPA）加上 `custom-http` 手动模板。预设尚未纳入。模板没有用户实例或密钥。
 
 `GET /connections` 是已保存实例的投影：已有账号的内置项、每一个用户定义供应商，以及每个 Custom API 账号各自一条；CPA 永远不是 connection。每条 connection 携带生命周期、授权状态、带原因的本地资格、endpoints、模型目标，以及一份遗留身份引用。connection id 是由该遗留身份派生的确定性 UUIDv5，从不由名称或 URL 派生。
 
-`GET /accounts` 返回 `IdentityList { revision, identities[] }`。每条 `IdentitySummary` 携带 `identity`（`id`、`label`、`authorityRef` `{ issuerOrSite, tenantOrSubject }`、`identityConfidence`、`enabled`、`notes`）、`credentials[]`、身份级 `declaredRelations[]`（`platformAccountId`、`group`）以及 `legacy`（`kind` `account` | `platform_account`，`id`）。载荷形状是嵌套的：`credentials[].credential`（`id`、`purpose` `inference` | `platform_observer`、`materialKind` `api_key` | `external_reference`、`secretRef`——不透明句柄，绝不是材料本身、`hasMaterial`、`version`、`enabled`、`authState` `unknown` | `valid` | `invalid`、`authStateVersion`、未知时 `expiresAt` 为 null），同级字段为 `subject`（`account_credential` | `anonymous`）、`bindings[]`（`id`、`connectionId`、`allowedEndpointIds`、`allowedOrigins`、`modelScope`、`enabled`、`routingRank`）、`quotaWindows[]`、`onboardingTask`、`subscription`（未知时为 null）、`lastError`（已脱敏；无法安全脱敏时为 null）与 `legacy`。平台父账号的 `platform_observer` 凭据在本阶段是投影，没有 `credential_state` 行。`authState` 是本地状态：`unknown` 绝不是 `valid`；`valid` 需要既有验证记录。Vue 账号页只把该投影叠加到展示上；变更仍走 V3。V4 目录中部分枚举值留给下一阶段，本阶段尚未产出：`subject: external_runtime`、`policyMode: observe_only`、`relationConfidence: unknown`、`subscription.source: managed_payment`、`onboardingTask.state: completed`。
+`GET /accounts` 返回 `IdentityList { revision, identities[] }`。每条 `IdentitySummary` 携带 `identity`（`id`、`label`、`authorityRef` `{ issuerOrSite, tenantOrSubject }`、`identityConfidence`、`enabled`、`notes`）、`credentials[]`、身份级 `declaredRelations[]`（`platformAccountId`、`group`）以及 `legacy`（`kind` `account` | `platform_account`，`id`）。载荷形状是嵌套的：`credentials[].credential`（`id`、`purpose` `inference` | `platform_observer`、`materialKind` `api_key` | `external_reference`、`secretRef`——不透明句柄，绝不是材料本身、`hasMaterial`、`version`、`enabled`、`authState` `unknown` | `valid` | `invalid`、`authStateVersion`、未知时 `expiresAt` 为 null），同级字段为 `subject`（`account_credential` | `anonymous`）、`bindings[]`（`id`、`connectionId`、`allowedEndpointIds`、`allowedOrigins`、`modelScope`、`enabled`、`routingRank`）、`quotaWindows[]`、`onboardingTask`、`subscription`（未知时为 null）、`lastError`（已脱敏；无法安全脱敏时为 null）与 `legacy`。平台父账号的 `platform_observer` 凭据在本阶段是投影，没有 `credential_state` 行。`authState` 是本地状态：`unknown` 绝不是 `valid`；`valid` 需要既有验证记录。Vue 账号页只把该投影叠加到展示上；Key 轮换、绑定编辑与身份内新增凭据走 V4，其余账号变更仍走 V3。V4 目录中部分枚举值留给下一阶段，本阶段尚未产出：`subject: external_runtime`、`policyMode: observe_only`、`relationConfidence: unknown`、`subscription.source: managed_payment`、`onboardingTask.state: completed`。
 
 V4 不把授权 `unknown` 当作 `valid`。资格是本地投影，不是上游健康。
 
@@ -64,7 +64,7 @@ V4 不把授权 `unknown` 当作 `valid`。资格是本地投影，不是上游�
 
 `POST /identities/{id}/credentials` 给已确认身份再加一把 Key。必须带 CAS 令牌，没有 `operationId`。请求体是 `{ connectionId, secretInput }` 加上 CAS 令牌。写入会新建一行 `accounts` 并复用既有 `identity_id`，插入 `credential_state` 与 `credential_bindings`，并把新账号加入该身份的额度池，全部落在同一 SQLite 事务中。不同的 `connectionId` 是第二件产品（D05）；同一 Plan connection 则是该产品上的另一把 Key。换 Key 不会另起一个新池。未知身份或 connection 返回 `404`。内置不可变 / Zen Free / CPA / 无鉴权 / Custom API / 平台观察者目标返回 `400`。过期 CAS 令牌返回 `409` 且不写入。结果不含密钥。
 
-面板用 `GET /connections` 渲染供应商页 rail，用 `POST /onboarding/commit` 创建用户定义供应商，并用 `GET /accounts` 作为账号页的展示叠加。客户端在草稿改动时生成新的 `operationId`，对未改动草稿的重试沿用同一 id，成功后再重新生成。编辑、删除、给已有账号添加 Key，以及账号页上的全部账号操作仍走 V3。
+面板用 `GET /connections` 渲染供应商页 rail，用 `POST /onboarding/commit` 创建用户定义供应商，并用 `GET /accounts` 作为账号页的展示叠加。客户端在草稿改动时生成新的 `operationId`，对未改动草稿的重试沿用同一 id，成功后再重新生成。编辑与删除账号以及账号页上的其余账号操作仍走 V3；Key 轮换、绑定编辑与给既有身份新增 Key 使用 V4。
 
 ## Settings 变更流程
 
@@ -76,12 +76,12 @@ V4 不把授权 `unknown` 当作 `valid`。资格是本地投影，不是上游�
 
 CAS 成功后，Host 先持久化新设置并释放设置锁。只有端口发生变化且监听器正在运行时才会重绑。若重绑失败，请求以 `internal` 代码返回 `500`。补偿逻辑仅在实时配置仍等于本次失败写入的端口时恢复旧端口，避免覆盖随后成功的写入。
 
-## 已退役的 V2 REST
+## V2 REST 墓碑
 
-受保护的 Dashboard V2 REST 已退役。
+受保护的 Dashboard V2 REST 统一返回固定墓碑。
 
-- 匿名已退役 REST：空 body 的 **401**（鉴权先于墓碑）。
-- 已鉴权的已退役 REST（含回环本地模式）：**410**，body 为 `{ "code": "dashboardV2Removed", "message": "Dashboard API V2 has been removed; refresh the page and retry." }`。
+- 匿名 V2 REST：空 body 的 **401**（鉴权先于墓碑）。
+- 已鉴权的 V2 REST（含回环本地模式）：**410**，body 为 `{ "code": "dashboardV2Removed", "message": "Dashboard API V2 has been removed; refresh the page and retry." }`。
 - 既非 V3、非 V4，也非保留家族的未知 `/dashboard/api/...` 路径，在已鉴权时同样 410。未知的 V4 路径是 V4 的 `404`，不是墓碑。
 
 保留的 `/dashboard/api` 家族（精确路径，无尾斜杠，无额外段）：
@@ -89,7 +89,7 @@ CAS 成功后，Host 先持久化新设置并释放设置锁。只有端口发�
 - `auth/status`、`auth/register`、`auth/login`、`auth/logout`
 - `browser/sessions/{token}/ws`（token 非空）
 
-V3 鉴权与浏览器 WebSocket 位于 `/dashboard/api/v3/...`；Vue 外壳使用 V3。推理路由、面板 HTML 与 `/dashboard/assets/...` 不在墓碑范围内。
+V3 鉴权与浏览器 WebSocket 位于 `/dashboard/api/v3/...`；Vue 外壳使用这些 V3 路由，当前产品页面同时调用 `/dashboard/api/v4/...` 下仅增量的 V4 路由。推理路由、面板 HTML 与 `/dashboard/assets/...` 不在墓碑范围内。
 
 ---
 

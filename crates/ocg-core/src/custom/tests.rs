@@ -173,8 +173,8 @@ fn custom_endpoint_url_rejects_empty_overlong_unparsed_and_file_urls() {
 #[test]
 fn custom_runtime_identity_is_configurable_http_not_a_base_class() {
     use crate::provider::{
-        COMMAND_CODE_PROVIDER_ID, OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID,
-        ProviderAdapterKind, ProviderRegistry,
+        COMMAND_CODE_PROVIDER_ID, CUSTOM_PROVIDER_ID, OPENCODE_PROVIDER_ID,
+        OPENCODE_ZEN_FREE_PROVIDER_ID, ProviderAdapterKind, ProviderRegistry,
     };
     assert_eq!(
         ProviderAdapterKind::from_provider_id(CUSTOM_PROVIDER_ID),

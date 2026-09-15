@@ -39,12 +39,12 @@ preset advertises a `plan` offering, an entry in the `PRESET_OFFERINGS` map
 in `ocg-domain::provider` so `preset_offering(preset_id)` returns `"plan"`.
 Other presets keep the default `"api"` value.
 
-## 2. Legacy application connectors: retired
+## 2. Applications
 
-The old Applications subsystem, guide generation, automatic connectors, and
-Pi/DSH templates have been removed. Do not extend that implementation. A
-replacement will be designed separately. See the
-[retirement notice](../user/applications.md).
+The Applications page currently contains one DSH-specific V4 flow and one
+OCG-owned package; it is not a generic registry or a promised extension point.
+Add a second application only from its concrete install, credential, lifecycle,
+and acceptance contract. See [Applications](../user/applications.md).
 
 ## 3. External integration: static local-service adapter
 

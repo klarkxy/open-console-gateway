@@ -215,6 +215,10 @@ v38 adds `platform_accounts` and `platform_links`. Existing account IDs, Keys, o
 
 New node exports use payload V6 and omit platform management credentials, platform observer secrets, and observation snapshots. V4 and V5 imports remain supported. Imported associations are unverified, and a parent ID with conflicting kind/origin rejects the complete import transaction. Rollback uses the existing whole-directory backup procedure; v38 adds no separate backup system.
 
+## Schema v39 — preset provenance
+
+v39 adds a nullable `preset_id` to user-defined Providers. It preserves the selected configuration template when endpoints are resource-specific or names are edited; it never controls routing or platform-instance identity. Existing rows remain unclassified. V5 transfer payloads carry this optional field; older payloads without it remain accepted.
+
 ## Schema v37 — Ollama Cloud billing
 
 v37 drops `ollama_cloud_usage_state` (the unreleased Cookie scrape, including
@@ -267,7 +271,3 @@ A failed v27 transaction rolls back: the live file must remain schema 26 with `s
 
 ---
 [Maintainer guide index](../MAINTAINER.md) · [简体中文](storage-migration.zh-CN.md) · [Docs index](../README.md)
-
-## Schema v39 — preset provenance
-
-v39 adds a nullable `preset_id` to user-defined Providers. It preserves the selected configuration template when endpoints are resource-specific or names are edited; it never controls routing or platform-instance identity. Existing rows remain unclassified. V5 transfer payloads carry this optional field; older payloads without it remain accepted.

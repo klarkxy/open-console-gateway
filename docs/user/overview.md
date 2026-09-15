@@ -10,7 +10,8 @@ keyed only by `provider_id`; each account card belongs to one such Provider.
 Clients send **aliases** from the local registry or eligible Custom model IDs;
 live routing includes OpenCode Go, Zen Free, Command Code GOAT, MiniMax CN
 Token Plan, Kimi Code CN, Custom API, and saved user-defined Providers. The Vue 3 dashboard is at
-`/dashboard/` and the current SPA talks JSON at `/dashboard/api/v3`. Each node
+`/dashboard/` and the current SPA talks JSON at `/dashboard/api/v3` and
+`/dashboard/api/v4`. Each node
 stores its own data locally.
 
 The gateway does four jobs, in roughly the order you would expect:

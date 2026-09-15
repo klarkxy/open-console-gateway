@@ -8,7 +8,6 @@ This guide is for people running Open Console Gateway as a desktop app, a headle
 
 - [Add a Provider](user/add-provider.md) — Create a user-defined Provider, connect one compatible upstream through Custom API, or contribute a sealed built-in Provider with its complete HTTP and routing contract.
 - [Manual Client Setup](user/add-application.md) — Connect a client directly through the Gateway API.
-
 - [New API and Sub2API accounts](user/platform-accounts.md) — Group multiple Custom API Keys, refresh scoped quotas and prices, and preserve global routing order.
 
 ## Chapters
@@ -18,8 +17,8 @@ This guide is for people running Open Console Gateway as a desktop app, a headle
 - [Install And First Run](user/install.md) — Windows, macOS, and Linux installers; the SmartScreen ritual included.
 - [Connect Your First Client](user/first-client.md) — Copy the Key and base URL, then prove it with one request.
 - [Upgrade, Backup, Restore, And Uninstall](user/upgrade-backup.md) — Updater channel, manual upgrade, backup, restore, and uninstall.
-- [The Dashboard](user/dashboard.md) — The seven core views, Extensions group, i18n, and Connection Center.
-- [Legacy Applications — Retired](user/applications.md) — Retirement scope.
+- [The Dashboard](user/dashboard.md) — The eight core views, Extensions group, i18n, and Connection Center.
+- [Applications](user/applications.md) — The DSH plugin installation flow, recovery, and removal.
 - [Accounts](user/accounts.md) — Plans, credentials, ordering, quota behavior, and managed onboarding.
 - [Providers](user/providers.md) — Catalog, provider contracts, per-model protocol overrides, probes, and user-defined Providers.
 - [Logs And Settings](user/logs-settings.md) — Request logs, settings, proxy modes, and theme.

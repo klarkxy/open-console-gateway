@@ -20,7 +20,7 @@ header shapes — `Authorization: Bearer <key>`, Anthropic-style
 `x-api-key: <key>`, or Gemini-style `x-goog-api-key: <key>`. The gateway
 pulls the upstream OpenCode-Go account key from SQLite and injects it itself.
 
-Minimal POSIX-shell checks for all five client formats:
+Minimal POSIX-shell checks for all four client formats:
 
 ```bash
 BASE=http://127.0.0.1:9042

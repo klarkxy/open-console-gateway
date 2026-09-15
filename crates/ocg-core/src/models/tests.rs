@@ -5,23 +5,6 @@ use super::{
 };
 
 #[test]
-fn legacy_claude_desktop_models_field_is_ignored_on_load() {
-    let encoded = serde_json::json!({
-        "gateway_key": "ocg-keep",
-        "claude_desktop_models": {
-            "sonnet": "minimax-m3",
-            "opus": "glm-5.2",
-            "haiku": ""
-        }
-    });
-    let config: AppConfig =
-        serde_json::from_value(encoded).expect("legacy claude_desktop_models must deserialize");
-    assert_eq!(config.gateway_key, "ocg-keep");
-    let roundtrip = serde_json::to_value(&config).expect("config should serialize");
-    assert!(roundtrip.get("claude_desktop_models").is_none());
-}
-
-#[test]
 fn account_notes_trim_empty_and_reject_overlong() {
     assert_eq!(normalize_account_notes("").unwrap(), None);
     assert_eq!(normalize_account_notes("   ").unwrap(), None);
@@ -276,12 +259,7 @@ fn legacy_config_without_list_fields_loads_with_defaults() {
         "stream_idle_timeout_secs": 300,
         "routing_mode": "strict-priority",
         "conversation_sticky": false,
-        "free_model_routing": "explicit",
-        "claude_desktop_models": {
-            "sonnet": "minimax-m3",
-            "opus": "",
-            "haiku": ""
-        }
+        "free_model_routing": "explicit"
     });
     let config: AppConfig = serde_json::from_value(legacy).expect("legacy config loads");
     assert_eq!(config.proxy_list_direction, ProxyListDirection::Whitelist);
@@ -320,8 +298,7 @@ fn persisted_list_with_stale_ids_loads_and_never_matches() {
         "proxy_mode": "list",
         "proxy_url": "http://127.0.0.1:7890",
         "proxy_list_direction": "whitelist",
-        "proxy_list_models": ["gpt-5.6-luna", "removed-model"],
-        "claude_desktop_models": { "sonnet": "minimax-m3", "opus": "", "haiku": "" }
+        "proxy_list_models": ["gpt-5.6-luna", "removed-model"]
     }))
     .expect("stale list entries must load");
     config

@@ -54,7 +54,7 @@ Pinia stores call `dashboardV3` directly. Pages that still use older field names
 go through `src/api/dashboard.ts` presenters.
 
 `dashboard.rs` serves the SPA and preserves the V2 auth and browser WebSocket
-handlers. Retired `/dashboard/api/...` REST paths are tombstoned in
+handlers. Other `/dashboard/api/...` REST paths are tombstoned in
 `host_router` before they reach `dashboard.rs`.
 
 ## Dashboard V4
@@ -64,19 +64,23 @@ plane beside frozen V3. V3 `$defs` and routes do not gain new fields.
 
 V4 reuses V3 session middleware. Its listings return the same `ControlRevision`
 (`expectedRevision` / `processGeneration`) that V3 uses for CAS. V4 mutations are `POST /onboarding/commit`,
-`POST /credentials/{id}/rotate`, `PATCH /bindings/{id}`, and
-`POST /identities/{id}/credentials`; they check those tokens. Read routes
+`POST /credentials/{id}/rotate`, `PATCH /bindings/{id}`,
+`POST /identities/{id}/credentials`, `POST /applications/dsh` (which also
+binds the GET inspection fingerprint), `PUT /cpa/models`,
+`POST /provider-contracts/{scope_kind}/{scope_id}/catalog/remove`, and
+`PATCH /alias-publication`; they check those tokens. Read routes
 do not.
 
-The frozen contract is `schema/dashboard-api-v4.schema.json`, generated from
+The checked-in additive V4 contract is `schema/dashboard-api-v4.schema.json`, generated from
 `dashboard_v4::contract_schema_pretty()` by
 `crates/ocg-core/examples/export_dashboard_v4_schema.rs`. Generated TypeScript
 (`src/api/generated/dashboard-v4.ts`) is types only, with no HTTP wrappers.
 `CATALOG_TYPE_NAMES` in `dashboard_v4/types.rs` is the ordered `$defs` catalog;
 appending must keep existing definitions byte-identical.
 
-Read-only routes remain `GET /contract`, `GET /templates`,
-`GET /connections`, and `GET /accounts`. Those reads perform no outbound
+Read-only routes are `GET /contract`, `GET /templates`,
+`GET /connections`, `GET /accounts`, `GET /applications/dsh`,
+`GET /cpa/models`, and `GET /alias-publication`. Those reads perform no outbound
 requests.
 
 `GET /templates` is the read-only add catalog: the sealed built-ins (CPA
@@ -109,8 +113,9 @@ cannot be redacted safely), and `legacy`. The platform parent's
 `platform_observer` credential is a projection in this stage (no
 `credential_state` row). `authState` is local: `unknown` is never
 `valid`; `valid` requires the existing verification record. The Vue
-Accounts page overlays this projection for display only; mutations stay
-on V3. Some enum values in the V4
+Accounts page overlays this projection for display; Key rotation, binding
+edits, and additional identity credentials use V4, while the remaining
+account mutations stay on V3. Some enum values in the V4
 catalog are reserved for the next stage and not yet produced:
 `subject: external_runtime`, `policyMode: observe_only`,
 `relationConfidence: unknown`, `subscription.source: managed_payment`,
@@ -205,8 +210,9 @@ The dashboard consumes `GET /connections` for the Providers rail,
 `POST /onboarding/commit` for user-defined Provider creation, and
 `GET /accounts` as a display overlay on the Accounts page. The client generates a new `operationId` when
 the draft changes, keeps that id across retries of an unchanged draft, and
-regenerates it after success. Editing, deleting, adding Keys to existing
-accounts, and all Accounts-page account operations stay on V3.
+regenerates it after success. Editing and deleting accounts and the
+remaining Accounts-page operations stay on V3; Key rotation, binding edits,
+and adding a Key to an existing identity use V4.
 
 ## Settings mutation workflow
 
@@ -227,13 +233,13 @@ listener is running. If rebind fails, the request returns `500` with code
 still contains the failed committed port, so a later successful write is not
 overwritten.
 
-## Retired V2 REST
+## V2 REST tombstone
 
-Protected Dashboard V2 REST is retired.
+Protected Dashboard V2 REST answers with a fixed tombstone.
 
-- Anonymous retired REST: empty-body **401** (auth runs before the
+- Anonymous V2 REST: empty-body **401** (auth runs before the
   tombstone).
-- Authenticated retired REST (including loopback local mode): **410** with
+- Authenticated V2 REST (including loopback local mode): **410** with
   `{ "code": "dashboardV2Removed", "message": "Dashboard API V2 has been removed; refresh the page and retry." }`.
 - Unknown `/dashboard/api/...` paths that are not V3, not V4, and not a
   preserved family are also 410 once authenticated. Unknown V4 paths are V4
@@ -246,8 +252,9 @@ extra segments):
 - `browser/sessions/{token}/ws` (non-empty token)
 
 V3 auth and browser WebSocket live under `/dashboard/api/v3/...`; the Vue
-shell uses them. Inference routes, dashboard HTML, and `/dashboard/assets/...`
-are outside the tombstone.
+shell uses them, and current product views also call the additive V4 routes
+under `/dashboard/api/v4/...`. Inference routes, dashboard HTML, and
+`/dashboard/assets/...` are outside the tombstone.
 
 ---
 

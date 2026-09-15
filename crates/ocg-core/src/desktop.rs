@@ -4,7 +4,8 @@
 //! [`DesktopCapabilities`] is a concrete process/Host facade, not a plugin
 //! trait. It owns the OnceLock hooks and the update status machine. Hosts
 //! register auto-start before listener bind and Dock/updater during setup;
-//! CLI and Docker leave the hooks unset.
+//! Native CLI builds may register the DSH application host; Docker and other
+//! headless builds leave local-only capabilities unset.
 //!
 //! This module does not import the process host, sqlite, or gateway runtime
 //! and stays a DAG leaf outside the remaining host SCC.
@@ -98,6 +99,7 @@ pub struct DesktopCapabilities {
     auto_start_sync: OnceLock<AutoStartSync>,
     dock_visibility_sync: OnceLock<DockVisibilitySync>,
     desktop_update_starter: OnceLock<DesktopUpdateStarter>,
+    dsh_application_host: OnceLock<crate::dsh_application::DshApplicationHost>,
     desktop_update_status: Mutex<DesktopUpdateStatus>,
 }
 
@@ -107,6 +109,7 @@ impl DesktopCapabilities {
             auto_start_sync: OnceLock::new(),
             dock_visibility_sync: OnceLock::new(),
             desktop_update_starter: OnceLock::new(),
+            dsh_application_host: OnceLock::new(),
             desktop_update_status: Mutex::new(DesktopUpdateStatus::new()),
         }
     }
@@ -159,6 +162,17 @@ impl DesktopCapabilities {
 
     pub fn desktop_update_supported(&self) -> bool {
         self.desktop_update_starter.get().is_some()
+    }
+
+    pub fn set_dsh_application_host(&self, host: crate::dsh_application::DshApplicationHost) {
+        assert!(
+            self.dsh_application_host.set(host).is_ok(),
+            "DSH application host is already configured"
+        );
+    }
+
+    pub fn dsh_application_host(&self) -> Option<crate::dsh_application::DshApplicationHost> {
+        self.dsh_application_host.get().cloned()
     }
 
     pub fn desktop_update_status(&self) -> DesktopUpdateStatus {

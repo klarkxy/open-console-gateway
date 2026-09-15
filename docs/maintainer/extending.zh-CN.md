@@ -19,9 +19,9 @@ Provider 注册表始终静态、密封。
 
 新增 **preset**（`resources/provider-presets.json` 中的用户定义供应商模板）只需在 JSON 中加入条目；若该 preset 声明 `plan` offering，还需在 `ocg-domain::provider` 的 `PRESET_OFFERINGS` 映射中加入一条，使 `preset_offering(preset_id)` 返回 `"plan"`。其他 preset 保持默认 `"api"`。
 
-## 2. 旧应用连接器：已退役
+## 2. 应用
 
-旧 Applications 子系统、教程生成、自动连接器与 Pi/DSH 模板的实现已经移除，不再扩展这套实现。后续新方案另行设计，见[退役说明](../user/applications.zh-CN.md)。
+应用页目前只有一个 DSH 专用 V4 流程和一份 OCG 自有插件包；它不是通用注册表，也不是承诺开放的扩展点。只有第二个应用具备明确的安装、凭据、生命周期与验收契约时，才按该具体需求增加。见[应用](../user/applications.zh-CN.md)。
 
 ## 3. 外部接入：静态本机服务适配器
 

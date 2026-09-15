@@ -3,9 +3,9 @@ use crate::alias::{self, ResolvedModel, RuntimeCatalogs};
 use crate::crypto::{KeyCipher, StaticKeyCipher};
 use crate::custom::CustomAccountRuntime;
 use crate::dynamic::DynamicProviderRuntime;
-use crate::gateway::attempt::{AttemptSpec, CredentialHandle};
+use crate::gateway::attempt::CredentialHandle;
 use crate::gateway::materialize::{
-    InferenceBindingGate, materialize_account_routes, materialize_account_routes_with_bindings,
+    InferenceBindingGate, MaterializedRouteSet, materialize_account_routes_with_bindings,
 };
 use crate::gateway::protocol::{ApiFormat, ParsedClientRequest, parse_client_request};
 use crate::gateway::provider_adapter;
@@ -211,7 +211,6 @@ fn plan_input<'a>(
     resolved: &'a ResolvedModel,
     client_model: &'a str,
     routing_model: &'a str,
-    client_body: &'a Bytes,
     custom_runtimes: &'a HashMap<String, CustomAccountRuntime>,
     goat_runtimes: &'a HashMap<String, crate::goat::GoatAccountRuntime>,
     contracts: &'a crate::provider_contracts::EffectiveContractSet,
@@ -224,7 +223,6 @@ fn plan_input<'a>(
         resolved,
         client_model,
         routing_model,
-        client_body,
         free_available: true,
         custom_runtimes,
         goat_runtimes,
@@ -233,6 +231,39 @@ fn plan_input<'a>(
         dynamics,
         bindings: empty_bindings(),
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn materialize_account_routes(
+    accounts: &[Account],
+    config: &AppConfig,
+    parsed: &ParsedClientRequest,
+    resolved: &ResolvedModel,
+    client_model: &str,
+    routing_model: &str,
+    _client_body: &Bytes,
+    free_available: bool,
+    custom_runtimes: &HashMap<String, CustomAccountRuntime>,
+    goat_runtimes: &HashMap<String, crate::goat::GoatAccountRuntime>,
+    cpa_base_url: Option<&str>,
+    contracts: &crate::provider_contracts::EffectiveContractSet,
+    dynamics: &[DynamicProviderRuntime],
+) -> Result<MaterializedRouteSet, crate::gateway::protocol::ProtocolError> {
+    materialize_account_routes_with_bindings(
+        accounts,
+        config,
+        parsed,
+        resolved,
+        client_model,
+        routing_model,
+        free_available,
+        custom_runtimes,
+        goat_runtimes,
+        cpa_base_url,
+        contracts,
+        dynamics,
+        &HashMap::new(),
+    )
 }
 
 fn empty_bindings() -> &'static crate::gateway::materialize::InferenceBindingIndex {
@@ -294,7 +325,6 @@ fn shadow_matches_live_materialize_for_dynamic_and_custom_fixtures() {
         &custom_resolved,
         &custom_parsed.requested_model,
         "local-custom",
-        &custom_body,
         &custom_runtimes,
         &goat_runtimes,
         &contracts,
@@ -358,7 +388,6 @@ fn shadow_matches_live_materialize_for_dynamic_and_custom_fixtures() {
         &dyn_resolved,
         &dyn_parsed.requested_model,
         DYNAMIC_PUBLIC,
-        &dyn_body,
         &empty_custom,
         &goat_runtimes,
         &base_contracts,
@@ -409,7 +438,6 @@ fn shadow_matches_live_materialize_for_dynamic_and_custom_fixtures() {
         &resolved,
         &parsed.requested_model,
         "glm-5.2",
-        &body,
         &empty_custom,
         &goat_runtimes,
         &contracts,
@@ -497,7 +525,6 @@ fn shadow_matches_live_rejects_when_inference_binding_is_disabled() {
         &resolved,
         &parsed.requested_model,
         "glm-5.2",
-        &body,
         true,
         &empty_custom,
         &goat_runtimes,
@@ -514,7 +541,6 @@ fn shadow_matches_live_rejects_when_inference_binding_is_disabled() {
         resolved: &resolved,
         client_model: &parsed.requested_model,
         routing_model: "glm-5.2",
-        client_body: &body,
         free_available: true,
         custom_runtimes: &empty_custom,
         goat_runtimes: &goat_runtimes,
@@ -566,9 +592,7 @@ fn mismatch_is_reported_and_does_not_alter_the_live_spec() {
     let live_spec =
         provider_adapter::resolve_route_with_dynamics(&account, &config, &set.routes[0].plan, &[])
             .unwrap();
-    let live_spec_before = live_spec.clone();
     let live = shadow_attempt_from_live(&account, &set.routes[0].plan, &live_spec, &[]);
-    let live_before = live.clone();
     let mut shadow = live.clone();
     shadow.upstream_model = "not-the-live-model".into();
     shadow.endpoint = Some("https://example.invalid/v1/chat/completions".into());
@@ -594,9 +618,6 @@ fn mismatch_is_reported_and_does_not_alter_the_live_spec() {
         )),
         "expected endpoint mismatch, got {diffs:?}"
     );
-    assert_eq!(live, live_before);
-    assert_eq!(live_spec, live_spec_before);
-    let _unused: &AttemptSpec = &live_spec;
 }
 
 #[tokio::test]

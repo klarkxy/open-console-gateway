@@ -9,7 +9,7 @@ and `linux/arm64`, and Docker picks the right variant. Save the release's
 commands below. You can also use a checkout of the matching tag.
 
 ```bash
-git clone --branch v2.2.1 --depth 1 https://github.com/klarkxy/open-console-gateway.git
+git clone --branch v2.4.0 --depth 1 https://github.com/klarkxy/open-console-gateway.git
 cd open-console-gateway
 cp .env.example .env
 # PowerShell: Copy-Item .env.example .env
@@ -32,7 +32,7 @@ these existing image names so upgrades continue on the same channels.
 - The checkout's `compose.yaml` defaults to `latest`; the Release
   `compose.example.yaml` pins its matching full version.
 - For repeatable production deployments, set `OCG_IMAGE` in `.env` to a full
-  release tag such as `ghcr.io/klarkxy/opencode-go-mgr:2.2.1`.
+  release tag such as `ghcr.io/klarkxy/opencode-go-mgr:2.4.0`.
 - Full-version and `sha-<commit>` tags identify one release and are intended
   not to move; `1.5` and `latest` do. Only a digest such as
   `ghcr.io/klarkxy/opencode-go-mgr@sha256:...` is truly immutable.
@@ -214,13 +214,13 @@ provenance, and a GitHub signed provenance attestation. Inspect and verify a
 release with:
 
 ```bash
-docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr:2.2.1
-docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr-browser:2.2.1
+docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr:2.4.0
+docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr-browser:2.4.0
 gh attestation verify \
-  oci://ghcr.io/klarkxy/opencode-go-mgr:2.2.1 \
+  oci://ghcr.io/klarkxy/opencode-go-mgr:2.4.0 \
   --repo klarkxy/open-console-gateway
 gh attestation verify \
-  oci://ghcr.io/klarkxy/opencode-go-mgr-browser:2.2.1 \
+  oci://ghcr.io/klarkxy/opencode-go-mgr-browser:2.4.0 \
   --repo klarkxy/open-console-gateway
 ```
 

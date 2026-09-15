@@ -779,14 +779,6 @@ fn legacy_config_gets_persisted_desktop_defaults() {
         let legacy_object = legacy
             .as_object_mut()
             .expect("test config should be an object");
-        legacy_object.insert(
-            "claude_desktop_models".into(),
-            serde_json::json!({
-                "sonnet": "minimax-m3",
-                "opus": "",
-                "haiku": ""
-            }),
-        );
         legacy_object.remove("show_dock_icon");
         legacy_object.remove("routing_mode");
         legacy_object.remove("conversation_sticky");
@@ -812,10 +804,6 @@ fn legacy_config_gets_persisted_desktop_defaults() {
         .get_setting("config")
         .expect("stored config should be readable")
         .expect("stored config should exist");
-    assert!(
-        !stored.contains("claude_desktop_models"),
-        "canonical rewrite must drop the retired field: {stored}"
-    );
     assert!(stored.contains("show_dock_icon"));
     assert!(stored.contains("proxy_mode"));
     assert!(stored.contains("proxy_url"));

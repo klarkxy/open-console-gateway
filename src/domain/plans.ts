@@ -158,11 +158,6 @@ export function findPlanDefinition(
   return providerSurfaces(catalog).find((surface) => surface.provider_id === providerId);
 }
 
-/** Compatibility helper for callers that already know a row is dynamic. */
-export function dynamicPlanDefinition(entry: ProviderCatalogEntry): ProviderSurface {
-  return providerSurfaceFromCatalog(entry);
-}
-
 /** The provider surface an account belongs to; unknown providers return null. */
 export function planForAccount(
   account: Pick<Account, "provider_id">,

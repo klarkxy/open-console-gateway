@@ -2,7 +2,7 @@
 
 # Protocol Conversion
 
-Open Console Gateway speaks five client protocols on one port, then translates each
+Open Console Gateway speaks four client protocols on one port, then translates each
 request into whatever the upstream Plan actually understands. The conversion
 layer is deterministic: it resolves the Alias, checks account
 eligibility, applies the adapter ceiling and saved provider contract, checks

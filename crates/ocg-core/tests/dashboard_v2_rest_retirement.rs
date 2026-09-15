@@ -301,7 +301,6 @@ async fn static_inference_and_v3_families_are_not_captured() {
         "/v1/models",
         "/v1/chat/completions",
         "/v1beta/models/minimax-m3:generateContent",
-        "/claude-desktop/v1/models",
     ] {
         let response = client.get(format!("{root}{path}")).send().await.unwrap();
         assert_ne!(

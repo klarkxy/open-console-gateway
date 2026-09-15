@@ -173,10 +173,6 @@ export function usageSyncCaption(account: Account): string {
     : t("尚未官方同步");
 }
 
-export function usageRefreshTooltip(): string {
-  return t("从 OpenCode 官方用量刷新额度");
-}
-
 export function accountMenuOptions(account: Account, now = Date.now()): AccountMenuOption[] {
   const options: AccountMenuOption[] = [];
   // CPA is a static external-integration singleton. Account ordering and its

@@ -3,7 +3,7 @@
 # External Integrations
 
 External integrations are optional, locally supported services that extend OCG
-Manager. The dashboard keeps its seven core views; supported surfaces appear
+Manager. The dashboard keeps its eight core views; supported surfaces appear
 in the general **Extensions** group below the Settings divider.
 
 ## CPA

@@ -7,7 +7,8 @@
    `X.Y.Z-beta.N`）。
 2. 用常规 Cargo/pnpm 命令刷新 lockfile，再运行 `pnpm run test`、
    `pnpm run test:tooling`、`pnpm run design:lint`、
-   `pnpm run contract:v3:check`、`pnpm run release:check` 和
+   `pnpm run contract:v3:check`、`pnpm run contract:v4:check`、
+   `pnpm run release:check` 和
    `pnpm run build`。提交工具生成的 lockfile 差异，不要手改。
 3. 复核相对上一个 tag 的 diff 和当前平台的 `release/` payload，然后提交
    版本、lockfile、文档与 Release notes。
@@ -24,13 +25,13 @@
 ## CI 覆盖不到的人工检查
 
 协议、schema、CAS 与本地列表行为属于 `cargo test` / `pnpm run test`，不放进
-本清单。按受影响的 Gateway 协议选择真实客户端检查，并在发布证据中记录客户端版本、平台、结果与未执行项；此前验证的排除项不自动沿用。
+本清单。按受影响的 Gateway 协议选择真实客户端检查，并在发布说明中记录客户端版本、平台、结果与未执行项；此前验证的排除项不自动沿用。
 
 - [ ] 质量门、签名 `release:check` 与所选平台冒烟全绿；四份版本清单、
       `compose.example.yaml` 与 `Cargo.lock` 中的 workspace 包条目一致。
-- [ ] 对受影响的客户端路径完成文本与工具调用。Gemini 兼容性改动需覆盖 Gemini CLI。
-      已退役的应用子系统、教程生成与自动连接器不再作为发布验收对象。
-      检查接入中心显示的 Key 已脱敏，复制结果是所选 Key。
+- [ ] 对受影响的客户端路径完成文本与工具调用（例如 Gemini 兼容性改动时覆盖
+      Gemini CLI）。DSH Applications 流发生改动时覆盖该流程，包括原生插件与
+      CLI 冒烟。检查接入中心显示的 Key 已脱敏，复制结果是所选 Key。
 - [ ] 可选托管注册（登录身份 → 邀请链接 → OpenCode 登录 → 支付前确认 →
       Key 回填）。真实支付只在明确打算时执行。对已完成 Key 账号与托管账号
       验证官方 `/zen/go/v1/usage` 的额度刷新。

@@ -15,7 +15,7 @@ Protect the data directory: there is no remote recovery if it is lost.
   local-disk bound, not a remote KMS: anyone with the data directory and its
   `.encryption-key`, or able to run the Windows GUI in the original Windows
   user/machine context, can recover account keys and saved login passwords.
-  Dashboard Access Keys live in `access_keys` (schema v27). The macOS /
+  Dashboard Access Keys live in the `access_keys` table. The macOS /
   Linux GUI and the CLI also place a `.encryption-key` file inside the data
   directory; **back it up with the database** because losing it makes stored
   credentials unreadable. The dashboard SPA never writes Key plaintext to

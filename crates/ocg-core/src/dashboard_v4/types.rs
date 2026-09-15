@@ -69,7 +69,49 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "CatalogModelsRemoveResult",
     "AliasPublication",
     "AliasPublicationUpdate",
+    "DshApplicationStatus",
+    "DshApplication",
+    "DshApplicationInstallRequest",
 ];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum DshApplicationStatus {
+    UnsupportedRuntime,
+    NotDetected,
+    Ready,
+    Installed,
+    Incompatible,
+    Conflict,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DshApplication {
+    pub status: DshApplicationStatus,
+    pub detected: bool,
+    pub installed: bool,
+    pub install_supported: bool,
+    pub activation_required: bool,
+    pub version: Option<String>,
+    pub detail: Option<String>,
+    pub target_paths: Vec<String>,
+    pub fingerprint: Option<String>,
+    pub revision: ControlRevision,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DshApplicationInstallRequest {
+    #[serde(flatten)]
+    #[schemars(flatten)]
+    pub expectation: MutationExpectation,
+    pub key_id: String,
+    pub expected_fingerprint: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -693,6 +735,8 @@ pub fn contract_schema() -> Value {
     include_type::<CpaCatalog>(&mut serialize);
     include_type::<CatalogModelsRemoveResult>(&mut serialize);
     include_type::<AliasPublication>(&mut serialize);
+    include_type::<DshApplicationStatus>(&mut serialize);
+    include_type::<DshApplication>(&mut serialize);
     let mut defs = serialize.take_definitions(true);
 
     let mut deserialize = SchemaSettings::draft2020_12().into_generator();
@@ -708,6 +752,7 @@ pub fn contract_schema() -> Value {
     include_type::<CpaCatalogUpdate>(&mut deserialize);
     include_type::<CatalogModelsRemoveRequest>(&mut deserialize);
     include_type::<AliasPublicationUpdate>(&mut deserialize);
+    include_type::<DshApplicationInstallRequest>(&mut deserialize);
     for (name, schema) in deserialize.take_definitions(true) {
         defs.entry(name).or_insert(schema);
     }

@@ -84,7 +84,6 @@ fn chat_plan(
         channel,
         upstream_base_override: None,
         original_model: None,
-        allow_go_fallback: false,
         resolved_alias: Some(model.into()),
         custom_route,
         service_tier: None,

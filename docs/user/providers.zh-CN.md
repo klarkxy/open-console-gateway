@@ -58,7 +58,9 @@ Custom API 继续使用账号所有的公开名称 → 上游 ID 映射，发现
 
 适配器开放连接测试的内置供应商行提供 **测试** 按钮，测试当前有效配置选择的协议。供应商会按已保存的路由顺序自动尝试符合条件的账号，并在首次成功后停止。OpenCode Go 与 Zen Free 使用各自可构造的协议集合；GOAT 只测试密封的原生家族路径（Anthropic ID 使用 Messages，其他 ID 使用 Chat Completions）；MiniMax CN 与 Kimi Code CN 测试密封的 Chat Completions 与 Messages 路径。Custom 端点测试仍由具体账号所有。模型必须属于当前供应商目录，包括静态表尚未收录的新拉取模型。Popconfirm 会提示这些真实最小请求可能消耗额度。页面会在列表上方逐项展示成功、失败或跳过状态、HTTP 状态、可读的上游错误消息，以及上游给出时的安全帮助/计费链接；每个真实账号尝试都会写入脱敏的请求日志，协议探测内容不会进入运行日志。单个账号失败不会禁用其他符合条件账号可以服务的协议。
 
-**价格** 按所选供应商限定范围。默认目录投影按目录顺序包含所有 `offering=plan` 且 V3 `pricingAvailability=available` 的行。快照按 `provider_id` 请求和缓存；渲染器按返回的 `models` 或 `values` 结构选择表格，并从 token 范围、`time_window` 与 `adjustments` 生成档位；未知 adjustment 标签原样显示。来源链接只取后端快照。刷新要求 V3 定价可用，倍率编辑还要求 V4 `pricingMultiplierEditable=true`；V4 不可用时保持只读。\n\n**刷新价格表** 只抓取并校验当前所选 Provider 自己的官方来源。OpenCode 与 Command Code 的 revision 和最后成功快照彼此独立；一个失败不会动另一个。以后某个 Provider 若包含多个有价格的 Plan，一次操作也只刷新该 Provider 内的 Plan。刷新仍只能手动发起：
+**价格** 按所选供应商限定范围。默认目录投影按目录顺序包含所有 `offering=plan` 且 V3 `pricingAvailability=available` 的行。快照按 `provider_id` 请求和缓存；渲染器按返回的 `models` 或 `values` 结构选择表格，并从 token 范围、`time_window` 与 `adjustments` 生成档位；未知 adjustment 标签原样显示。来源链接只取后端快照。刷新要求 V3 定价可用，倍率编辑还要求 V4 `pricingMultiplierEditable=true`；V4 不可用时保持只读。
+
+**刷新价格表** 只抓取并校验当前所选 Provider 自己的官方来源。OpenCode 与 Command Code 的 revision 和最后成功快照彼此独立；一个失败不会动另一个。以后某个 Provider 若包含多个有价格的 Plan，一次操作也只刷新该 Provider 内的 Plan。刷新仍只能手动发起：
 
 - OpenCode Go 展示 revision、文档更新时间、token 单价、`Usage`（官方文档现在把这一列叫 **Monthly limit**）和额度扣减倍率，点击刷新后才会访问 `https://opencode.ai/docs/go/`。抓取或校验失败时继续使用最后一次成功快照。allowance 不是额度池、不会参与路由，只用于推导扣减倍率（“账号月窗口 / 模型月额度”）。临时覆盖会创建新的持久化 revision，供后续估算使用。
 - Command Code GOAT 展示从 `https://commandcode.ai/docs/plans/goat` 保存的官方费率快照。带分时费率的模型会保留官方每日高峰窗口（UTC 01:00–04:00、06:00–10:00）及独立的输入、输出、缓存读取价格。每个已定价模型的应用倍率都可手动修改并保存；新请求使用保存后的 Provider revision 计算，缺失或歧义行仍为 unpriced。刷新若将覆盖手动倍率会先请求确认。它与 OpenCode Go 分开；账号卡会把 OCG 内已定价请求日志投影到本地 `$14 / $35 / $70` 三个窗口，并允许手工修正。Command Code 没有可机读的用量 API。

@@ -8,7 +8,7 @@
 
 锁顺序：(1) `settings_update`，(2) `db`，(3) `config`，(4) `http_client`， (5) `gateway`，(6) `pricing`，(7) `zen_free_models`，(8) `provider_contracts`，(9) `routing`，(10) `credential_snapshot`。反向获取会造成死锁；持有 `routing` 锁时不应执行 DB 或网络 I/O。异步闸口：设置写同时重绑时， `settings_host_effects`（持久化 → 监听器重绑 → 补偿）先于 `gateway_lifecycle`。这些 await 期间应释放 `parking_lot` 锁。
 
-从 schema v27 起，权威表是 `access_keys`。两层凭证共用该表（当前 schema v37）和一份鉴权快照：
+从 schema v27 起，权威表是 `access_keys`。两层凭证共用该表（当前 schema v49）和一份鉴权快照：
 
 - 主 Key：固定 id `00000000-0000-0000-0000-000000000001`，显示名 `"Primary"`。始终启用，没有删除入口。公开 `AppConfig` 与面板 API 仍暴露 `gateway_key`；v27 之后经消毒的 config JSON 把 `gateway_key` 存为 `""`。
 - 子 Key：非主行，活跃上限 64，软删保留身份/名称并清除明文。只经 `/dashboard/api/v3/keys*` 生命周期 API 变更。CLI 没有子 Key 命令。
@@ -25,7 +25,7 @@
 
 schema v16 给账号增加 `account_type`（`key | managed`）与 `setup_step` （`google_account → opencode_registration → payment → key_verification → ready`）。旧行迁移为 `key + ready`。托管草稿立即持久化为空 Key、`enabled=false`；选择器、启用接口和路由都必须同时要求 `ready` 与非空 Key。步骤名 `google_account` 在 UI 上展示为「登录身份」，可跳过。
 
-`AppConfig::default()` 的 `opencode_invite_url` 带演示默认值（`DEFAULT_OPENCODE_INVITE_URL`）。规范化后只接受最长 2048 字符、无用户名密码的 HTTPS URL，主机严格限定为 `opencode.ai` 或 `console.opencode.ai`。面板在 OpenCode Go 供应商的 **其他** 页签编辑该值。创建托管草稿时可编辑邀请链接；与已保存值不同时写回 SQLite。注册/支付/验证码仍由用户在浏览器中完成，Key 由用户复制回填；Open Console Gateway 不会使用 CDP 自动填表或代点支付。
+`AppConfig::default()` 的 `opencode_invite_url` 带演示默认值（`DEFAULT_OPENCODE_INVITE_URL`）。规范化后只接受最长 2048 字符、无用户名密码的 HTTPS URL，主机严格限定为 `opencode.ai` 或 `console.opencode.ai`。面板在 OpenCode Go 供应商的 **设置** 页签编辑该值。创建托管草稿时可编辑邀请链接；与已保存值不同时写回 SQLite。注册/支付/验证码仍由用户在浏览器中完成，Key 由用户复制回填；Open Console Gateway 不会使用 CDP 自动填表或代点支付。
 
 托管状态允许 **向前一步** 或 **回退到任意更早的未完成步骤**。普通 setup PATCH 只写这些步骤变更；独立的 Key 验证请求写入 `ready`。Key 实测返回 `2xx` 时进入 `ready + enabled`；`429` 同样证明 Key 有效并写入冷却；其他 HTTP 响应——包括重定向、`429` 以外的 `4xx` 与 `5xx`——以及网络或超时错误都保持 `key_verification`。
 
@@ -63,7 +63,7 @@ Profile 删除先停浏览器，校验账号 ID 防目录穿越，再把新旧 P
 
 ## 持久化
 
-`crates/ocg-core/src/db.rs` 定义 SQLite schema、迁移与查询。当前 schema 是 **v45**。版本沿革见 [storage-migration.zh-CN.md](storage-migration.zh-CN.md)。`provider_contracts.rs` 负责供应商合约范围、按模型/按协议覆盖、effective 合约推导与模型协议证据。`models.rs` 定义共享 serde 类型和 `AppConfig`。本机 Key 存放在 `ocg-infra::crypto`（门面 `ocg_core::crypto`）：AES-256-GCM `v2:` 密文，不是 KMS。旧 XOR 仍可解密；正确的 `open_with_cipher` 会在同一事务里把剩余账号 `key_cipher` / `password_cipher` 改写成 v2。Windows 桌面使用 `MachineBoundCipher`；CLI/Docker 使用来自 `OCG_MANAGER_ENCRYPTION_KEY` 或 `<data-dir>/.encryption-key` 的 `StaticKeyCipher`。生产宿主必须调用 `Database::open_with_cipher`，让密文探测使用已经解析的 cipher。比本构建支持的更新 schema 会 fail closed。
+`crates/ocg-core/src/db.rs` 定义 SQLite schema、迁移与查询。当前 schema 是 **v49**。版本沿革见 [storage-migration.zh-CN.md](storage-migration.zh-CN.md)。`provider_contracts.rs` 负责供应商合约范围、按模型/按协议覆盖、effective 合约推导与模型协议证据。`models.rs` 定义共享 serde 类型和 `AppConfig`。本机 Key 存放在 `ocg-infra::crypto`（门面 `ocg_core::crypto`）：AES-256-GCM `v2:` 密文，不是 KMS。旧 XOR 仍可解密；正确的 `open_with_cipher` 会在同一事务里把剩余账号 `key_cipher` / `password_cipher` 改写成 v2。Windows 桌面使用 `MachineBoundCipher`；CLI/Docker 使用来自 `OCG_MANAGER_ENCRYPTION_KEY` 或 `<data-dir>/.encryption-key` 的 `StaticKeyCipher`。生产宿主必须调用 `Database::open_with_cipher`，让密文探测使用已经解析的 cipher。比本构建支持的更新 schema 会 fail closed。
 
 升级路径上历史版本仍然重要：
 

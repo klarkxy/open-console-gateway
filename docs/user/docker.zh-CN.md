@@ -8,7 +8,7 @@ Docker 版在同一个端口 `9042` 上无头提供 Dashboard 和 Gateway。镜�
 的仓库：
 
 ```bash
-git clone --branch v2.2.1 --depth 1 https://github.com/klarkxy/open-console-gateway.git
+git clone --branch v2.4.0 --depth 1 https://github.com/klarkxy/open-console-gateway.git
 cd open-console-gateway
 cp .env.example .env
 # PowerShell: Copy-Item .env.example .env
@@ -30,7 +30,7 @@ docker compose ps
 - 仓库源码里的 `compose.yaml` 默认用 `latest`；Release 的
   `compose.example.yaml` 钉死对应完整版本。
 - 生产部署建议在 `.env` 中用 `OCG_IMAGE` 固定完整版本标签，例如
-  `ghcr.io/klarkxy/opencode-go-mgr:2.2.1`。
+  `ghcr.io/klarkxy/opencode-go-mgr:2.4.0`。
 - 完整版本与 `sha-<commit>` 标签指向单次发布，按策略不应移动；
   `1.5` 与 `latest` 会继续移动。技术上只有 digest
   `ghcr.io/klarkxy/opencode-go-mgr@sha256:...` 真正不可变。
@@ -177,13 +177,13 @@ curl --fail http://127.0.0.1:9042/dashboard/
 的 provenance attestation。可这样检查发布版本：
 
 ```bash
-docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr:2.2.1
-docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr-browser:2.2.1
+docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr:2.4.0
+docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr-browser:2.4.0
 gh attestation verify \
-  oci://ghcr.io/klarkxy/opencode-go-mgr:2.2.1 \
+  oci://ghcr.io/klarkxy/opencode-go-mgr:2.4.0 \
   --repo klarkxy/open-console-gateway
 gh attestation verify \
-  oci://ghcr.io/klarkxy/opencode-go-mgr-browser:2.2.1 \
+  oci://ghcr.io/klarkxy/opencode-go-mgr-browser:2.4.0 \
   --repo klarkxy/open-console-gateway
 ```
 

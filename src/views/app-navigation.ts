@@ -12,6 +12,7 @@ export type AppNavigationIcon =
   | "accounts"
   | "providers"
   | "aliases"
+  | "applications"
   | "logs"
   | "settings"
   | "cpa";
@@ -31,6 +32,7 @@ export const APP_NAVIGATION = [
   { key: "accounts", label: "账号", icon: "accounts", group: "core" },
   { key: "providers", label: "供应商", icon: "providers", group: "core" },
   { key: "aliases", label: "别名", icon: "aliases", group: "core" },
+  { key: "applications", label: "应用", icon: "applications", group: "core" },
   { key: "logs", label: "日志", icon: "logs", group: "core" },
   { key: "settings", label: "设置", icon: "settings", group: "core" },
   { key: "cpa", label: "CPA", icon: "cpa", group: "extensions" },
@@ -136,16 +138,22 @@ export function readAccountDeepLink(search: string): string | null {
   return params.get("account_id");
 }
 
+/** Legacy chooser id for built-in Custom API, from before ids became provider ids. */
+const LEGACY_CUSTOM_ENDPOINT_OPTION_ID = "custom-endpoint";
+
 /**
  * One-shot "open Add Account with this chooser option" deep link (Accounts
  * view only). Only an explicit Accounts view qualifies — a missing or
- * different view returns null. Consumers must delete the parameter on use so
- * a reload or a close/reopen cycle never reopens the modal.
+ * different view returns null. The legacy `custom-endpoint` value maps to the
+ * current Custom API chooser id so old bookmarks keep working; every other
+ * value passes through unchanged. Consumers must delete the parameter on use
+ * so a reload or a close/reopen cycle never reopens the modal.
  */
 export function readAccountAddDeepLink(search: string): string | null {
   const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
   if (resolveAppViewKey(params.get("view")) !== "accounts") return null;
-  return params.get("add");
+  const add = params.get("add");
+  return add === LEGACY_CUSTOM_ENDPOINT_OPTION_ID ? "custom" : add;
 }
 
 export function applyAppViewSearchParams(
@@ -158,6 +166,8 @@ export function applyAppViewSearchParams(
     url.searchParams.delete("account_id");
     if (view !== "providers") url.searchParams.delete("add");
   }
+  // The Applications child tab (`app=dsh`) is scoped to its own view.
+  if (view !== "applications") url.searchParams.delete("app");
   // Legacy Providers parameters are never written anymore, only mapped on read.
   url.searchParams.delete("scope_kind");
   url.searchParams.delete("scope_id");

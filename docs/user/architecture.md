@@ -16,7 +16,7 @@ trace relationships, or export another format.
 The Dashboard and inference endpoints share port `9042`, but they use different
 credentials. A client **Key** authenticates an AI tool to Open Console Gateway. After
 selection, the account credential is sent only to that account's configured
-upstream; Zen Free has no credential. The Vue SPA talks HTTP Dashboard V3.
+upstream; Zen Free has no credential. The Vue SPA talks HTTP Dashboard V3 and V4.
 
 ## Request lifecycle
 
@@ -46,7 +46,7 @@ fail before selection.
 | **Providers** | Built-in catalogs, model/protocol contracts, pricing scopes, typed user-defined Provider Endpoint/auth/mappings | Custom API mappings stay on the account card |
 | **Custom API account** | One API URL, one account-wide upstream protocol, public-model → upstream-ID mappings | Shared Provider definitions live on **Providers** |
 | **Extensions / CPA** | A static local external-integration boundary | Built-in routing families stay under **Accounts** / **Providers** |
-| **Legacy Applications** | Retired | Clients use the ordinary Gateway API |
+| **Applications / DSH** | The OCG-owned plugin installed into DSH's `web` profile | Clients use the ordinary Gateway API |
 
 The Adapter Registry is static and sealed. User-defined Providers persist as
 typed data and always bind Configurable HTTP.
@@ -84,6 +84,7 @@ The complete preferred/supported matrix and conversion limits live in
 | Add and order accounts | [Accounts](accounts.md), [Routing](routing.md) |
 | Manage catalogs and contracts | [Providers](providers.md) |
 | Understand aliases and errors | [Gateway](gateway.md) |
+| Connect the DSH plugin | [Applications](applications.md) |
 | Inspect the crate and Host boundaries | [Maintainer architecture](../maintainer/architecture.md) |
 
 ---

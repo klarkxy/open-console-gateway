@@ -9,6 +9,7 @@ import { mapWithConcurrency } from "../utils/async.ts";
 import {
   isCooling,
   isFreeCooling,
+  isMiniMaxVideoQuotaWindow,
   isUsageLimitReached,
   mergeCalibratedProviderUsage,
   mergeUsageEdit,
@@ -427,4 +428,25 @@ test("provider quota labels preserve known windows and humanize unknown scopes",
     started_at: null,
     resets_at: null,
   }, labels), "Future burst window");
+});
+
+test("MiniMax video quota lanes stay hidden while text windows remain visible", () => {
+  const hidden = [
+    "minimax_current:m2:video",
+    "minimax_weekly:m2:video",
+    " MiniMax_Current:M2:Video ",
+  ];
+  for (const window_kind of hidden) {
+    assert.equal(isMiniMaxVideoQuotaWindow({ window_kind }), true, window_kind);
+  }
+  const visible = [
+    "minimax_current:text_generation",
+    "minimax_weekly:text_generation",
+    "minimax_video_usage",
+    "five_hours",
+    "week",
+  ];
+  for (const window_kind of visible) {
+    assert.equal(isMiniMaxVideoQuotaWindow({ window_kind }), false, window_kind);
+  }
 });

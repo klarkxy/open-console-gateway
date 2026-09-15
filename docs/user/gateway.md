@@ -2,7 +2,7 @@
 
 # Gateway Behavior
 
-Open Console Gateway exposes one HTTP surface on `127.0.0.1:9042` that speaks five client protocols and routes requests to whichever eligible OpenCode Go, Zen Free, Command Code GOAT, MiniMax CN, Kimi Code CN, Ollama Cloud, or Custom API account wins selection.
+Open Console Gateway exposes one HTTP surface on `127.0.0.1:9042` that speaks four client protocols and routes requests to whichever eligible OpenCode Go, Zen Free, Command Code GOAT, MiniMax CN, Kimi Code CN, Ollama Cloud, or Custom API account wins selection.
 
 Ollama Cloud is a routable sealed fixed-origin Plan (`https://ollama.com`): Chat Completions only, Bearer. Its saved and raw catalog IDs do not join `GET /v1/models` or the Go Alias registry. An actual upstream 429 uses the generic cooldown and fallback path.
 
@@ -21,8 +21,9 @@ The gateway listens on `http://<bind>:<port>` and exposes these endpoints:
 | `POST` | `/v1beta/models/{model}:countTokens` | Returns `501`; Gemini CLI can fall back to local estimation |
 | `POST` | `/v1beta/models/{model}:embedContent` | Returns `501`; embeddings are not supported |
 | `GET`  | `/dashboard/` | Vue 3 dashboard (HTML) |
-| `*`    | `/dashboard/api/v3/...` | Current dashboard JSON API |
-| `*`    | `/dashboard/api/...` | Retired V2 REST (authenticated 410 `dashboardV2Removed`), except the labeled V2 auth and browser-WebSocket compatibility routes |
+| `*`    | `/dashboard/api/v3/...` | Frozen dashboard JSON control plane (CAS mutations); also dashboard auth and browser WebSocket |
+| `*`    | `/dashboard/api/v4/...` | Additive dashboard JSON control plane beside V3 (onboarding, credential/binding writes, DSH install) |
+| `*`    | `/dashboard/api/...` | V2 REST tombstone (authenticated 410 `dashboardV2Removed`), except the labeled V2 auth and browser-WebSocket compatibility routes |
 
 Default bind is `127.0.0.1:9042`. Override with `serve --host 0.0.0.0` and `serve --port <port>` in the CLI. The desktop app also binds loopback and uses Tauri's single-instance lock so two tray icons do not fight over the port. There is no HTTP health endpoint; Docker only checks TCP `9042` from inside the container.
 

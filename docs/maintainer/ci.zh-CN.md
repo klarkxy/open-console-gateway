@@ -9,7 +9,7 @@
 在 pull request 与 `main` 上直接运行，也可由生产 tag 通过 `workflow_call`
 调用。手动候选构建跳过。三条并行 job：
 
-- **Web** — `contract:v3:check`、`typecheck`、`test:web`、Vite 生产构建、
+- **Web** — `contract:v3:check`、`contract:v4:check`、`typecheck`、`test:web`、Vite 生产构建、
   `DESIGN.md` lint，以及
   `docker compose -f compose.example.yaml config --quiet`。
   `pnpm run test:tooling` 不在此 job。

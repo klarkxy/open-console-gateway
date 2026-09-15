@@ -1,0 +1,5 @@
+# The DSH package manager adds this bundle to the selected profile. Keep the
+# row package-owned and leave the base llm-pi-ai instance untouched.
+- insert:
+    - id: open-console-gateway
+      name: '@open-console-gateway/dsh-plugin'

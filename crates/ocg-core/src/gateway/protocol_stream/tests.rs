@@ -11,7 +11,6 @@ fn plan(client: ApiFormat, upstream: ApiFormat) -> RequestPlan {
         channel: crate::models::UpstreamChannel::Go,
         upstream_base_override: None,
         original_model: None,
-        allow_go_fallback: false,
         resolved_alias: None,
         custom_route: None,
         service_tier: None,

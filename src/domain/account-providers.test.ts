@@ -4,7 +4,6 @@ import { test } from "node:test";
 import {
   OLLAMA_PROVIDER_ID,
   ZEN_FREE_ACCOUNT_ID,
-  ZEN_FREE_OFFERING,
   ZEN_FREE_PROVIDER_ID,
   isOllamaCloudAccount,
   isZenFreeAccount,
@@ -12,8 +11,7 @@ import {
 import { findPlanDefinition } from "./plans.ts";
 import { OPENCODE_GO_PLAN } from "./plans.ts";
 
-test("Zen Free offering is the egress-IP sealed route", () => {
-  assert.equal(ZEN_FREE_OFFERING.quota_scope, "egress-ip");
+test("Zen Free account predicate matches the sealed singleton and provider", () => {
   assert.equal(isZenFreeAccount({ id: ZEN_FREE_ACCOUNT_ID, provider_id: "opencode" }), true);
   assert.equal(isZenFreeAccount({ id: "other", provider_id: ZEN_FREE_PROVIDER_ID }), true);
   assert.equal(isZenFreeAccount({ id: "other", provider_id: "opencode" }), false);

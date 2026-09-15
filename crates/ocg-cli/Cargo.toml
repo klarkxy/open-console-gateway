@@ -8,6 +8,10 @@ repository.workspace = true
 rust-version.workspace = true
 description = "Headless CLI for Open Console Gateway"
 
+[features]
+default = ["dsh-local-host"]
+dsh-local-host = ["ocg-core/dsh-local-host"]
+
 [[bin]]
 name = "ocg-manager-cli"
 path = "src/main.rs"
@@ -17,6 +21,8 @@ ocg-core = { path = "../ocg-core" }
 anyhow = "1"
 tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
-serde_json = "1"

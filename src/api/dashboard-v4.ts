@@ -20,6 +20,8 @@ import type {
   CpaCatalogUpdate,
   CredentialRotateRequest,
   CredentialRotateResult,
+  DshApplication,
+  DshApplicationInstallRequest,
   IdentityCredentialCreateRequest,
   IdentityCredentialCreateResult,
   IdentityList,
@@ -100,4 +102,12 @@ export const dashboardV4 = {
       body: withExpectation(input, expectation),
     },
   ),
+  getDshApplication: () => requestV4<DshApplication>("/applications/dsh"),
+  installDshApplication: (
+    input: WithoutExpectation<DshApplicationInstallRequest>,
+    expectation: MutationExpectation,
+  ) => requestV4<DshApplication>("/applications/dsh", {
+    method: "POST",
+    body: withExpectation(input, expectation),
+  }),
 };

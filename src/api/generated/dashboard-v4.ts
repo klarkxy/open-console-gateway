@@ -47,7 +47,10 @@ export type DashboardApiV4 =
   | CatalogModelsRemoveRequest
   | CatalogModelsRemoveResult
   | AliasPublication
-  | AliasPublicationUpdate;
+  | AliasPublicationUpdate
+  | DshApplicationStatus
+  | DshApplication
+  | DshApplicationInstallRequest;
 /**
  * Inference operation advertised by one endpoint. Mapped 1:1 from
  * [`UpstreamProtocolKind`].
@@ -167,6 +170,8 @@ export type QuotaSharing =
       credentialId: string;
       kind: "shared";
     };
+export type DshApplicationStatus =
+  "unsupported_runtime" | "not_detected" | "ready" | "installed" | "incompatible" | "conflict";
 
 /**
  * Live CAS token, process generation, and pricing snapshot id.
@@ -518,4 +523,29 @@ export interface AliasPublicationUpdate {
   processGeneration: number;
   publicModel: string;
   published: boolean;
+}
+export interface DshApplication {
+  activationRequired: boolean;
+  detail: string | null;
+  detected: boolean;
+  fingerprint: string | null;
+  installSupported: boolean;
+  installed: boolean;
+  revision: ControlRevision;
+  status: DshApplicationStatus;
+  targetPaths: string[];
+  version: string | null;
+}
+/**
+ * Required process-scoped mutation precondition.
+ *
+ * Both fields travel at the top level of every mutation request. The random
+ * process generation prevents a revision captured before restart from being
+ * accepted by a fresh process whose in-memory counter reused the same value.
+ */
+export interface DshApplicationInstallRequest {
+  expectedFingerprint: string;
+  expectedRevision: number;
+  keyId: string;
+  processGeneration: number;
 }

@@ -245,6 +245,7 @@ import StackedBarChart from "../components/StackedBarChart.vue";
 import { PRIMARY_KEY_ID, dashboardApi } from "../api/dashboard";
 import { useAccountsStore } from "../stores/accounts.ts";
 import { useConnectionStore } from "../stores/connection.ts";
+import { useProvidersStore } from "../stores/providers.ts";
 import type {
   Account,
   ConnectionInfo,
@@ -276,6 +277,7 @@ const emit = defineEmits<{
 const message = useMessage();
 const accountsStore = useAccountsStore();
 const connectionStore = useConnectionStore();
+const providersStore = useProvidersStore();
 const { copiedTarget, copy, cleanup } = useClipboard();
 const characterImage = new URL("../../assets/opencode-mascot.png", import.meta.url).href;
 const accounts = ref<Account[]>([]);
@@ -363,7 +365,7 @@ const serviceApiUrl = computed(() => connectionUrls.value.apiBaseUrl);
 
 const attentionItems = computed<AttentionItem[]>(() => {
   if (!accountsLoaded.value) return [];
-  return buildNeedsAttention(accounts.value, lifecycleNow.value);
+  return buildNeedsAttention(accounts.value, lifecycleNow.value, providersStore.catalog);
 });
 
 const attentionDesc = computed(() => {
@@ -462,11 +464,12 @@ async function loadDashboard() {
   tokensLoaded.value = false;
   accounts.value = [];
   dailyTokens.value = [];
-  const [loadedAccounts, connection, loadedSummary, tokens] = await Promise.allSettled([
+  const [loadedAccounts, connection, loadedSummary, tokens, catalog] = await Promise.allSettled([
     accountsStore.loadPresented(),
     connectionStore.load(),
     dashboardApi.getDashboardSummary(),
     dashboardApi.getDailyTokensByModel(30),
+    providersStore.loadCatalog(),
   ]);
   if (loadedAccounts.status === "fulfilled") {
     accounts.value = loadedAccounts.value;
@@ -480,7 +483,7 @@ async function loadDashboard() {
     dailyTokens.value = tokens.value;
     tokensLoaded.value = true;
   }
-  dashboardError.value = [loadedAccounts, connection, loadedSummary, tokens].some((result) => result.status === "rejected");
+  dashboardError.value = [loadedAccounts, connection, loadedSummary, tokens, catalog].some((result) => result.status === "rejected");
   if (dashboardError.value) {
     message.error(t("部分仪表盘数据加载失败"));
   }

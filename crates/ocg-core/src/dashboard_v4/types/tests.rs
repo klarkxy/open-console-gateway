@@ -440,3 +440,40 @@ fn alias_publication_is_camel_case() {
     assert_eq!(update_value["published"], false);
     assert_eq!(update_value["expectedRevision"], 6);
 }
+
+#[test]
+fn dsh_application_contract_is_camel_case_and_secret_free() {
+    let application = DshApplication {
+        status: DshApplicationStatus::Ready,
+        detected: true,
+        installed: false,
+        install_supported: true,
+        activation_required: false,
+        version: Some("0.1.5-rc.2".into()),
+        detail: Some("ready".into()),
+        target_paths: vec!["DSH web profile".into()],
+        fingerprint: Some("abc".into()),
+        revision: ControlRevision {
+            revision: 7,
+            process_generation: 2,
+            pricing_revision: "p".into(),
+        },
+    };
+    let value = serde_json::to_value(&application).unwrap();
+    assert_eq!(value["installSupported"], true);
+    assert_eq!(value["activationRequired"], false);
+    assert_eq!(value["targetPaths"], json!(["DSH web profile"]));
+    assert_eq!(value["status"], "ready");
+    assert!(value.get("key").is_none());
+
+    let request: DshApplicationInstallRequest = serde_json::from_value(json!({
+        "expectedRevision": 7,
+        "processGeneration": 2,
+        "keyId": "primary",
+        "expectedFingerprint": "abc"
+    }))
+    .unwrap();
+    assert_eq!(request.key_id, "primary");
+    assert_eq!(request.expected_fingerprint, "abc");
+    assert_eq!(request.expectation.expected_revision, 7);
+}

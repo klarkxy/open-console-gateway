@@ -5,8 +5,10 @@
 - **Keep the crate DAG.** Domain and gateway stay I/O-free. Facades reexport
   item-by-item. Adapters return `AttemptSpec`. `forward_once` is one upstream
   call. Dashboard V3 does not import `gateway`.
-- **No Tauri `invoke()` paths.** The Vue data path is HTTP `/dashboard/api/v3`.
-- **Do not revive protected V2 REST.** New JSON is V3. The 410 tombstone stays.
+- **No Tauri `invoke()` paths.** The Vue data path is HTTP `/dashboard/api/v3`
+  and `/dashboard/api/v4`.
+- **Protected V2 REST stays tombstoned.** New dashboard JSON is V3 or V4. The
+  410 tombstone stays.
 - **Do not weaken security boundaries.** Gateway authentication, key
   obfuscation, URL validation, cooldown writes, SSE pass-through, and the
   ConnectionInfo secret boundary stay.
@@ -37,12 +39,13 @@
   model choices, agent roles, and local tool paths in user-level configuration.
   Contributors can use their own editors, assistants, and review workflow;
   repository requirements concern the resulting change and its verification.
-- Separate current behavior, project design decisions, and dated evidence.
-  Explain design constraints by their compatibility, ownership, or usability
-  purpose. Record a run's environment, revision, coverage, and omitted checks
-  in its evidence report; a one-run exclusion is not a future release exemption
-  or a feature-retirement decision. Examples use placeholders or documented
-  product defaults, not a maintainer's private paths, accounts, or network setup.
+- Separate current behavior from project design decisions. Explain design
+  constraints by their compatibility, ownership, or usability purpose.
+  Run-specific verification — a run's environment, revision, coverage, and
+  omitted checks — belongs in the current release notes and CI results; a
+  one-run exclusion is not a future release exemption. Examples use
+  placeholders or documented product defaults, not a maintainer's private
+  paths, accounts, or network setup.
 
 ---
 

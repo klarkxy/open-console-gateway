@@ -17,16 +17,6 @@ Open Console Gateway 文档按读者拆分。先打开与你角色匹配的指�
 | 贡献者 | [CONTRIBUTORS.md](CONTRIBUTORS.md) | 中英同页 / bilingual | 社区贡献者 |
 | 设计与编码助手 | [../DESIGN.md](../DESIGN.md) · [../AGENTS.md](../AGENTS.md) | 英文来源 | 视觉系统与项目约束 |
 
-## 验证记录
-
-这些报告保留某次验证的提交版本、环境、结果与证据边界，作为指南的补充；它们不定义当前支持范围、未来测试豁免或产品路线图。
-
-| 记录 | English | 简体中文 |
-| --- | --- | --- |
-| 2.2.0 候选，2026-09-07 | [Review](evidence/release-readiness/2026-09-07/README.md) | [评审](evidence/release-readiness/2026-09-07/README.zh-CN.md) |
-| Zen Free 协议，2026-09-06 | [Snapshot](maintainer/evidence/protocol-probes/2026-09-06/README.md) | [快照](maintainer/evidence/protocol-probes/2026-09-06/README.zh-CN.md) |
-| 内置协议，2026-08-27 | [Snapshot](maintainer/evidence/protocol-probes/2026-08-27/README.md) | [快照](maintainer/evidence/protocol-probes/2026-08-27/README.zh-CN.md) |
-
 ## 编辑文档
 
 成对指南的约定见 [maintainer/conventions.zh-CN.md](maintainer/conventions.zh-CN.md)。

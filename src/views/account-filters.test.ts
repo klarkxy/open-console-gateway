@@ -4,6 +4,7 @@ import type { Account } from "../api/dashboard.ts";
 import { buildNeedsAttention } from "./dashboard-attention.ts";
 import { accountPlanKey, accountStatusKey, filterAccounts, plansInUse } from "./account-filters.ts";
 import { providerSurfaces } from "../domain/plans.ts";
+import type { ProviderCatalogEntry } from "../api/providers.ts";
 
 const NOW = Date.parse("2026-08-21T12:00:00Z");
 
@@ -193,4 +194,99 @@ test("plansInUse follows catalog projection order, not account order", () => {
     plansInUse(accounts, providerSurfaces(null)).map((plan) => plan.id),
     ["opencode", "opencode-zen-free"],
   );
+});
+
+function catalogRow(provider_id: string, extra: Partial<ProviderCatalogEntry> = {}): ProviderCatalogEntry {
+  return {
+    provider_id,
+    origin: "builtin",
+    editable: false,
+    deletable: false,
+    offering: "plan",
+    display_name: provider_id,
+    display_family: provider_id,
+    credential_kind: "api_key",
+    quota_scope: "key",
+    singleton: false,
+    creation_availability: "available",
+    verification_policy: "required",
+    verification_runtime_availability: "available",
+    routable: true,
+    managed_registration: false,
+    pricing_availability: "available",
+    usage_availability: "available",
+    manual_usage_calibration: false,
+    quota_unit: "tokens",
+    model_source: "invented_catalog",
+    key_prefix: null,
+    auth_schemes: ["bearer"],
+    upstream_protocols: ["chat_completions"],
+    form_fields: [{ id: "key", kind: "secret", required: true, immutable_after_create: false }],
+    model_aliases: [],
+    ...extra,
+  };
+}
+
+test("expired built-in billed accounts raise attention only from catalog facts", () => {
+  // The catalog is the authority on built-in billed families; with its rows
+  // present, GOAT, MiniMax, Kimi, and Ollama expiry surfaces.
+  const catalog = [
+    catalogRow("command-code"),
+    catalogRow("minimax"),
+    catalogRow("kimi"),
+    catalogRow("ollama"),
+  ];
+  const expired = { purchase_date: "2026-07-01", expires_on: "2026-08-01" };
+  const accounts = [
+    account({ id: "goat", name: "GOAT", provider_id: "command-code", ...expired }),
+    account({ id: "kimi", name: "Kimi", provider_id: "kimi", ...expired }),
+    account({ id: "mm", name: "MiniMax", provider_id: "minimax", ...expired }),
+    account({ id: "ol", name: "Ollama", provider_id: "ollama", ...expired }),
+  ];
+  assert.deepEqual(
+    buildNeedsAttention(accounts, NOW, catalog).map((item) => [item.accountId, item.reason]),
+    [
+      ["goat", "expired"],
+      ["kimi", "expired"],
+      ["mm", "expired"],
+      ["ol", "expired"],
+    ],
+  );
+  // A successful but empty catalog is authoritative: nothing is invented.
+  assert.deepEqual(buildNeedsAttention(accounts, NOW, []), []);
+});
+
+test("null catalog keeps only the narrow offline Go/Zen fallback", () => {
+  const expired = { purchase_date: "2026-07-01", expires_on: "2026-08-01" };
+  const accounts = [
+    account({ id: "go", name: "Go", provider_id: "opencode", ...expired }),
+    account({ id: "goat", name: "GOAT", provider_id: "command-code", ...expired }),
+  ];
+  assert.deepEqual(
+    buildNeedsAttention(accounts, NOW, null).map((item) => item.accountId),
+    ["go"],
+  );
+});
+
+test("custom, dynamic, CPA, and Zen accounts stay excluded with catalog facts", () => {
+  const catalog = [
+    catalogRow("custom"),
+    catalogRow("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", {
+      origin: "custom",
+      model_source: "dynamic_provider",
+    }),
+    catalogRow("opencode-zen-free", {
+      credential_kind: "none",
+      quota_scope: "egress-ip",
+      usage_availability: "unavailable",
+    }),
+  ];
+  const expired = { purchase_date: "2026-07-01", expires_on: "2026-08-01" };
+  const accounts = [
+    account({ id: "custom", name: "Custom", provider_id: "custom", ...expired }),
+    account({ id: "dyn", name: "Lab", provider_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", ...expired }),
+    account({ id: "cpa", name: "CPA", provider_id: "cpa", ...expired }),
+    account({ id: "zen", name: "Zen", provider_id: "opencode-zen-free", ...expired }),
+  ];
+  assert.deepEqual(buildNeedsAttention(accounts, NOW, catalog), []);
 });

@@ -19,6 +19,10 @@ Keys, Custom destinations, per-model protocol overrides, and catalogs stay on
 the dashboard. CLI writes bump that process's settings revision directly; there is
 no `--expectedRevision` flag.
 
+While native `serve` is running, **Applications > DSH** can install the OCG
+plugin into a DSH owned by the same OS user on that machine. The official
+Docker image does not support this local installation.
+
 ```text
 ocg-manager-cli
 ├── serve         Start the gateway server

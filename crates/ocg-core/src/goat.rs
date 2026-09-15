@@ -7,8 +7,8 @@
 use crate::http_client;
 use crate::models::AppConfig;
 use crate::provider::{
-    COMMAND_CODE_GOAT_BASE_URL, COMMAND_CODE_GOAT_MODELS_PATH, COMMAND_CODE_PROVIDER_ID,
-    ConnectionVerificationStatus, is_command_code_goat, parse_provider_models_catalog,
+    COMMAND_CODE_GOAT_BASE_URL, COMMAND_CODE_GOAT_MODELS_PATH, ConnectionVerificationStatus,
+    parse_provider_models_catalog,
 };
 use std::collections::HashMap;
 use std::fmt;
@@ -101,13 +101,13 @@ fn ensure_loopback_origin(origin: &str) -> Result<(), String> {
 
 impl GoatAccountRuntime {
     pub fn eligible(&self) -> bool {
-        self.enabled
-            && self.setup_ready
-            && self.has_key
-            && is_command_code_goat(COMMAND_CODE_PROVIDER_ID)
+        self.enabled && self.setup_ready && self.has_key
     }
 
-    pub fn serves(&self, _requested: &str) -> bool {
+    /// Compatibility alias for [`Self::eligible`]. The requested model id is
+    /// unused: GOAT model supply is the Provider contract, not this runtime.
+    pub fn serves(&self, requested: &str) -> bool {
+        let _ = requested;
         self.eligible()
     }
 }
@@ -384,8 +384,19 @@ mod tests {
     #[test]
     fn account_eligibility_does_not_reinterpret_the_provider_model_preset() {
         let pending = runtime(true, ConnectionVerificationStatus::Pending);
+        assert!(pending.eligible());
         assert!(pending.serves("any-model-in-the-provider-contract"));
-        assert!(!runtime(false, ConnectionVerificationStatus::Verified).eligible());
+        assert_eq!(
+            pending.serves("any-model-in-the-provider-contract"),
+            pending.eligible()
+        );
+        let disabled = runtime(false, ConnectionVerificationStatus::Verified);
+        assert!(!disabled.eligible());
+        assert!(!disabled.serves("any-model-in-the-provider-contract"));
+        let mut missing_key = runtime(true, ConnectionVerificationStatus::Verified);
+        missing_key.has_key = false;
+        assert!(!missing_key.eligible());
+        assert_eq!(missing_key.serves("catalog-model"), missing_key.eligible());
     }
 
     #[test]

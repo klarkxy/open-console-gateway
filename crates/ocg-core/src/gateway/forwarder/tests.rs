@@ -887,7 +887,6 @@ async fn p09_forward_attempt_emits_carried_legacy_tool_compat() {
             channel: UpstreamChannel::Go,
             upstream_base_override: None,
             original_model: None,
-            allow_go_fallback: false,
             forced_upstream: Some(ApiFormat::ChatCompletions),
             custom_route: Some(CustomRouteSpec {
                 endpoint_url: endpoint_url.clone(),
@@ -1042,7 +1041,6 @@ fn chat_plan(model: &str, custom_endpoint: Option<&str>) -> RequestPlan {
         channel: UpstreamChannel::Go,
         upstream_base_override: None,
         original_model: None,
-        allow_go_fallback: false,
         resolved_alias: Some(model.into()),
         custom_route: custom_endpoint.map(|endpoint_url| CustomRouteSpec {
             endpoint_url: endpoint_url.to_string(),

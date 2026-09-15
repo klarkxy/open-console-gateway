@@ -1,0 +1,23 @@
+{
+  "name": "@open-console-gateway/dsh-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Open Console Gateway model provider for DSH",
+  "type": "module",
+  "main": "./index.js",
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-llm": ">=0.1.5-rc.1 <0.1.6",
+    "@deepseek-ai/dsh-llm-pi-ai": ">=0.1.5-rc.1 <0.1.6",
+    "@earendil-works/pi-ai": ">=0.85.1 <0.86.0"
+  }
+}

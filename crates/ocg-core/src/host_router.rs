@@ -277,8 +277,6 @@ mod tests {
             "/v1/responses",
             "/v1beta/models/m:generateContent",
             "/v1/models/m:generateContent",
-            "/claude-desktop/v1/models",
-            "/claude-desktop/v1/messages",
         ] {
             assert!(!is_retired_legacy_v2_rest_path(path), "{path}");
         }

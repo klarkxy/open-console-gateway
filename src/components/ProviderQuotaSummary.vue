@@ -45,12 +45,14 @@ import { NProgress } from "naive-ui";
 import { computed } from "vue";
 import type { ProviderQuotaWindow, ProviderUsageResponse } from "../api/providers.ts";
 import { formatCooldownRemainingUntil } from "../domain/account-display.ts";
-import { providerQuotaWindowLabel } from "../domain/accounts-usage.ts";
+import { isMiniMaxVideoQuotaWindow, providerQuotaWindowLabel } from "../domain/accounts-usage.ts";
 import { t } from "../i18n/index.ts";
 
 const props = defineProps<{ usage: ProviderUsageResponse | null; now: number }>();
 
-const displayedWindows = computed(() => props.usage?.quota_windows ?? []);
+const displayedWindows = computed(() => (
+  props.usage?.quota_windows.filter((window) => !isMiniMaxVideoQuotaWindow(window)) ?? []
+));
 
 function windowLabel(window: ProviderQuotaWindow): string {
   return providerQuotaWindowLabel(window, {

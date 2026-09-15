@@ -313,6 +313,24 @@ async fn fake_reply(
 
     let path = uri.path().to_owned();
     let anthropic_version = header(&headers, "anthropic-version");
+    let user_agent = header(&headers, axum::http::header::USER_AGENT);
+    // A machine-level listener scanner on some Windows hosts probes each new
+    // loopback port with this exact unauthenticated root request. It is not a
+    // Gateway attempt and must not consume or pollute deterministic fixtures.
+    let external_listener_probe = method == Method::GET
+        && path == "/"
+        && key.is_empty()
+        && authorization.is_none()
+        && x_api_key.is_none()
+        && x_goog_api_key.is_none()
+        && user_agent.as_deref() == Some("WebSocket++/0.8.2");
+    if external_listener_probe {
+        return (
+            StatusCode::NOT_FOUND,
+            [("content-type", "application/json")],
+            "{}",
+        );
+    }
     if let Some(journal) = &state.journal {
         journal.record(
             &state.listener,
@@ -346,7 +364,7 @@ async fn fake_reply(
             opencode_project: header(&headers, "x-opencode-project"),
             session_id: header(&headers, "x-session-id"),
             session_affinity: header(&headers, "x-session-affinity"),
-            user_agent: header(&headers, axum::http::header::USER_AGENT),
+            user_agent,
             cookie: header(&headers, "cookie"),
         });
 

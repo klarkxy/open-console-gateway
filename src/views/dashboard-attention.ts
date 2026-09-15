@@ -1,4 +1,5 @@
 import type { Account } from "../api/dashboard.ts";
+import type { ProviderCatalogEntry } from "../api/providers.ts";
 import { isCooling, isFreeCooling } from "../domain/accounts-usage.ts";
 import { daysUntilDate } from "../domain/account-lifecycle.ts";
 import { isZenFreeAccount } from "../domain/account-providers.ts";
@@ -39,6 +40,7 @@ function accountCooling(account: Account, now: number): boolean {
 export function buildNeedsAttention(
   accounts: readonly Account[],
   now: number = Date.now(),
+  catalog?: readonly ProviderCatalogEntry[] | null,
 ): AttentionItem[] {
   const items: AttentionItem[] = [];
   for (const account of accounts) {
@@ -48,13 +50,17 @@ export function buildNeedsAttention(
       continue;
     }
     if (ready && account.enabled) {
-      // Only built-in billed families model a purchase/expiry cadence. Custom
-      // API, Zen Free, and user-defined (dynamic) Providers carry no lifecycle
+      // Only built-in billed families model a purchase/expiry cadence, and the
+      // catalog is the authority on which providers those are. Custom API,
+      // Zen Free, CPA, and user-defined (dynamic) Providers carry no lifecycle
       // dates, so their accounts never raise expiry attention — a synthetic or
-      // blanked date there is not a billing fact.
-      const plan = planForAccount(account);
+      // blanked date there is not a billing fact. A failed (null) catalog
+      // keeps the narrow offline Go/Zen projection; a successful empty catalog
+      // stays authoritative.
+      const plan = planForAccount(account, catalog);
       const expiryDays = plan
         && plan.kind !== "custom"
+        && !plan.dynamic
         && !isZenFreeAccount(account)
         && account.expires_on
         ? daysUntilDate(account.expires_on, now)

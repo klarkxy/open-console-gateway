@@ -45,7 +45,7 @@ Vue SPA              静态资源；只走 HTTP Dashboard V3 + V4
     本地 GET /v1/models
   /dashboard/api/v3       当前 Dashboard 控制面
   /dashboard/api/v4       并行、仅增量的 Dashboard 控制面
-  /dashboard/api          保留 auth + browser WS；已退役 REST -> 410
+  /dashboard/api          保留 auth + browser WS；其余 REST -> 410 墓碑
   /dashboard/             Vue SPA 与静态资源
 ```
 

@@ -2,9 +2,9 @@
 
 # Manual Client Setup
 
-The [legacy Applications subsystem](applications.md) is retired. Use this guide
-to connect a client directly through the ordinary Gateway API. New application
-guides and automatic connectors will belong to a separately designed replacement.
+Use this guide to connect a client directly through the ordinary Gateway API.
+The [Applications page](applications.md) hosts the DSH plugin flow for
+integrating DSH itself.
 
 ## Connect an unlisted client
 
@@ -26,7 +26,7 @@ curl http://127.0.0.1:9042/v1/models \
   -H "Authorization: Bearer <key>"
 ```
 
-This list is a local read of currently routeable code-owned Aliases and eligible Custom IDs. Minimal request bodies for all five interfaces are in [Connect your first client](first-client.md).
+This list is a local read of currently routeable code-owned Aliases and eligible Custom IDs. Minimal request bodies for all four interfaces are in [Connect your first client](first-client.md).
 
 After configuration, send one real request and check **Logs**.
 

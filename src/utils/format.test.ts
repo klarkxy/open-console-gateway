@@ -3,12 +3,14 @@ import test from "node:test";
 import { DEFAULT_LOCALE, setLocale } from "../i18n/index.ts";
 import { formatCost, formatNumber, useClipboard } from "./format.ts";
 
-test("formatNumber uses the active locale grouping", () => {
-  setLocale("en-US");
+test("formatNumber uses the active locale grouping", async () => {
+  await setLocale("en-US");
   assert.equal(formatNumber(1234567.89), "1,234,567.89");
-  setLocale("de-DE");
-  assert.match(formatNumber(1234.5), /1\.234,5|1,234\.5/);
-  setLocale(DEFAULT_LOCALE);
+  await setLocale("de-DE");
+  assert.equal(formatNumber(1234.5), new Intl.NumberFormat("de-DE").format(1234.5));
+  assert.match(formatNumber(1234.5), /1\.234,5/);
+  assert.doesNotMatch(formatNumber(1234.5), /1,234\.5/);
+  await setLocale(DEFAULT_LOCALE);
 });
 
 test("formatCost defaults tiny values to four decimals", () => {

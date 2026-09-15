@@ -2,18 +2,18 @@
 
 # Maintainer Guide
 
-This guide is for people changing code, cutting releases, debugging the gateway, and validating desktop bundles. It documents the V3 architecture and operating contracts as implemented at HEAD.
+This guide is for people changing code, cutting releases, debugging the gateway, and validating desktop bundles. It documents the architecture and operating contracts as implemented at HEAD.
 
 ## Chapters
 
 - [Layout](maintainer/layout.md) — Crate and directory layout.
 - [Development](maintainer/development.md) — Dev loop and checks.
 - [Architecture](maintainer/architecture.md) — Four-layer crates, adapter identity, request flow, and text diagrams.
-- [Dashboard API](maintainer/dashboard-api.md) — V3 contract, CAS tokens, and mutation rules.
+- [Dashboard API](maintainer/dashboard-api.md) — Frozen V3 contract, additive V4 surface, CAS tokens, and mutation rules.
 - [State, Credentials, And Lifecycle](maintainer/state-and-lifecycle.md) — `CoreState`, locks, credentials, and persistence.
-- [HTTP Routes](maintainer/http-routes.md) — Inference routes, V3 paths, the V2 tombstone, and auth/session routes.
+- [HTTP Routes](maintainer/http-routes.md) — Inference routes, V3/V4 paths, the V2 tombstone, and auth/session routes.
 - [Runtime Invariants](maintainer/runtime-invariants.md) — Detailed gateway, alias, Zen Free, plan catalog, access key, proxy, and usage-sync semantics.
-- [Storage And Migrations](maintainer/storage-migration.md) — SQLite schema v37, historical migrations, backup, and the operator runbook.
+- [Storage And Migrations](maintainer/storage-migration.md) — SQLite schema v49, historical migrations, backup, and the operator runbook.
 - [Extending Open Console Gateway](maintainer/extending.md) — Sealed provider extension procedure.
 - [Release Artifacts](maintainer/release-artifacts.md) — Supported platform matrix and package names.
 - [CI Workflows](maintainer/ci.md) — Quality, release, and container workflows.

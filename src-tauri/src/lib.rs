@@ -104,6 +104,7 @@ fn initialize_host() -> Result<state::AppState> {
     }
 
     host::register_desktop_settings(&core_state);
+    ocg_core::dsh_application_host::register(&core_state);
     host::cpa_runtime::register(&core_state);
 
     let browser_processes = Arc::new(Mutex::new(BrowserProcessState::default()));

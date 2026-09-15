@@ -8,6 +8,8 @@ CLI 数据目录默认 `~/.ocg-mgr-cli`，所有平台一致，可用 `--data-di
 
 CLI 只提供 `serve`、`key`、`status`。`key` 管 OpenCode Go 账号凭据，不是面板 Key，也不碰 Custom 目的地或 Zen Free 卡片；按模型协议覆盖等留在面板里操作。CLI 写入会直接 bump 该进程的 settings revision，命令行没有 `expectedRevision`。
 
+原生 `serve` 运行期间，面板的**应用 > DSH**可以把 OCG 插件安装到同一台机器、同一个系统用户的 DSH。官方 Docker 镜像不支持这项本机安装。
+
 ```text
 ocg-manager-cli
 ├── serve         Start the gateway server

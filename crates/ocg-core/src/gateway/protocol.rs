@@ -47,8 +47,6 @@ pub struct RequestPlan {
     pub upstream_base_override: Option<String>,
     /// Client-requested model before prefer mapping, when different.
     pub original_model: Option<String>,
-    /// When free pool is exhausted, retry once on Go with `original_model`.
-    pub allow_go_fallback: bool,
     /// Canonical resolved identity persisted on forward logs.
     pub resolved_alias: Option<String>,
     /// Isolated Custom origin + auth. Presence selects the Custom HTTP path.
@@ -112,7 +110,6 @@ pub struct MaterializeSpec {
     pub channel: UpstreamChannel,
     pub upstream_base_override: Option<String>,
     pub original_model: Option<String>,
-    pub allow_go_fallback: bool,
     /// Skip OpenCode `MODEL_PROTOCOLS` and convert to this account protocol.
     pub forced_upstream: Option<ApiFormat>,
     pub custom_route: Option<CustomRouteSpec>,
@@ -264,7 +261,6 @@ fn identity_spec(parsed: &ParsedClientRequest) -> MaterializeSpec {
         channel: UpstreamChannel::Go,
         upstream_base_override: None,
         original_model: None,
-        allow_go_fallback: false,
         forced_upstream: None,
         custom_route: None,
     }
@@ -293,7 +289,6 @@ pub fn materialize_parsed_request(
     plan.channel = spec.channel;
     plan.upstream_base_override = spec.upstream_base_override.clone();
     plan.original_model = spec.original_model.clone();
-    plan.allow_go_fallback = spec.allow_go_fallback;
     plan.resolved_alias = spec.resolved_alias.clone();
     plan.custom_route = spec.custom_route.clone();
     debug_assert!(
@@ -351,7 +346,6 @@ fn prepare_parsed_request(
         channel: UpstreamChannel::Go,
         upstream_base_override: None,
         original_model: None,
-        allow_go_fallback: false,
         resolved_alias: None,
         custom_route: None,
         service_tier,

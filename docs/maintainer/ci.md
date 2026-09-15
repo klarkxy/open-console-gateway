@@ -10,7 +10,7 @@ not obvious from the YAML.
 Runs on pull requests and `main`, and via `workflow_call` from a production
 tag. Manual release candidates skip it. Three parallel jobs:
 
-- **Web** — `contract:v3:check`, `typecheck`, `test:web`, Vite production
+- **Web** — `contract:v3:check`, `contract:v4:check`, `typecheck`, `test:web`, Vite production
   build, `DESIGN.md` lint, and
   `docker compose -f compose.example.yaml config --quiet`.
   `pnpm run test:tooling` is not in this job.

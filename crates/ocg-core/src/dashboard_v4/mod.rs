@@ -7,6 +7,7 @@
 //! session middleware and the V3 error envelope. Handlers must not issue
 //! outbound network requests.
 
+mod applications;
 mod bindings;
 mod catalog;
 mod connections;
@@ -28,9 +29,10 @@ use crate::state::CoreState;
 
 pub use types::{
     CATALOG_TYPE_NAMES, ConnectionList, ConnectionSummary, CpaCatalog, CpaCatalogUpdate,
-    CredentialRotateRequest, CredentialRotateResult, IdentityList, IdentitySummary,
-    OnboardingAuthorization, OnboardingCommitRequest, OnboardingCommitResult, OnboardingConnection,
-    OnboardingTarget, ProviderTemplate, TemplateList, contract_schema, contract_schema_pretty,
+    CredentialRotateRequest, CredentialRotateResult, DshApplication, DshApplicationInstallRequest,
+    DshApplicationStatus, IdentityList, IdentitySummary, OnboardingAuthorization,
+    OnboardingCommitRequest, OnboardingCommitResult, OnboardingConnection, OnboardingTarget,
+    ProviderTemplate, TemplateList, contract_schema, contract_schema_pretty,
 };
 
 pub fn api_router(state: CoreState) -> Router<CoreState> {
@@ -39,6 +41,10 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
         .route("/templates", get(templates::list_templates))
         .route("/connections", get(connections::list_connections))
         .route("/accounts", get(identities::list_accounts))
+        .route(
+            "/applications/dsh",
+            get(applications::get_dsh).post(applications::install_dsh),
+        )
         .route("/onboarding/commit", post(onboarding::commit))
         .route("/credentials/{id}/rotate", post(credentials::rotate))
         .route("/bindings/{id}", patch(bindings::patch))

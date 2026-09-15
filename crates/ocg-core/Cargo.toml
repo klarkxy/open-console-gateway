@@ -8,6 +8,10 @@ repository.workspace = true
 rust-version.workspace = true
 description = "Core library for Open Console Gateway, account management, cooldown, and fallback"
 
+[features]
+default = []
+dsh-local-host = []
+
 [dependencies]
 aes-gcm = "0.10"
 anyhow = "1"
@@ -33,7 +37,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 hex = "0.4"
 hmac = "0.12"
-sha1 = "0.10"
 sha2 = "0.10"
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = { version = "0.29", default-features = false, features = [

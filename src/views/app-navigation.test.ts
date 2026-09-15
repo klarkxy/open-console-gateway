@@ -15,9 +15,28 @@ import {
 test("navigation metadata keeps the fixed core order and exposes CPA under Extensions", () => {
   assert.deepEqual(
     CORE_APP_NAVIGATION.map(({ key }) => key),
-    ["dashboard", "keys", "accounts", "providers", "aliases", "logs", "settings"],
+    ["dashboard", "keys", "accounts", "providers", "aliases", "applications", "logs", "settings"],
   );
   assert.deepEqual(EXTENSION_APP_NAVIGATION.map(({ key }) => key), ["cpa"]);
+});
+
+test("the applications view key resolves and keeps its child-tab parameter", () => {
+  assert.equal(resolveAppViewKey("applications"), "applications");
+  const url = applyAppViewSearchParams(
+    new URL("http://127.0.0.1:9042/dashboard/?view=applications&app=dsh"),
+    "applications",
+  );
+  assert.equal(url.searchParams.get("view"), "applications");
+  assert.equal(url.searchParams.get("app"), "dsh");
+});
+
+test("leaving applications strips the child-tab parameter", () => {
+  const url = applyAppViewSearchParams(
+    new URL("http://127.0.0.1:9042/dashboard/?view=applications&app=dsh"),
+    "logs",
+  );
+  assert.equal(url.searchParams.get("view"), "logs");
+  assert.equal(url.searchParams.get("app"), null);
 });
 
 test("legacy pricing view keys resolve to providers without inventing a second entry", () => {
@@ -185,7 +204,11 @@ test("leaving Accounts strips a stale account deep-link parameter", () => {
 });
 
 test("the add-account deep link reads on Accounts and is stripped elsewhere", () => {
-  assert.equal(readAccountAddDeepLink("?view=accounts&add=custom-endpoint"), "custom-endpoint");
+  // Legacy bookmarks carry the retired chooser id; it maps to the current one.
+  assert.equal(readAccountAddDeepLink("?view=accounts&add=custom-endpoint"), "custom");
+  assert.equal(readAccountAddDeepLink("?view=accounts&add=custom"), "custom");
+  // Other values pass through unchanged.
+  assert.equal(readAccountAddDeepLink("?view=accounts&add=opencode"), "opencode");
   assert.equal(readAccountAddDeepLink("?view=accounts"), null);
   // Wrong or missing view never qualifies, even with the parameter present.
   assert.equal(readAccountAddDeepLink("?view=providers&add=custom-endpoint"), null);

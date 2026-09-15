@@ -44,6 +44,26 @@ Tauri 与 Vite；变量生效时，设置页以只读方式显示实际端口。
 `pnpm run build` 只做发版验证（`scripts/release.mjs`）。workspace
 `[profile.release]` 使用 thin LTO、`strip` 和 `panic = "abort"`。
 
+## DSH 插件契约测试与真实冒烟
+
+`pnpm run test:dsh:plugin` 就是 `pnpm run test:tooling` 已经运行的那份隔离插件契约测试（`scripts/dsh-plugin-package.test.mjs`）。
+它不会启动 DSH、Gateway，也不会走任何依赖真实凭据的路径。
+
+下面两条是**手工验收冒烟**，需要本机真实的 DSH `0.1.5-rc.2` CLI，和/或本地编译的
+`target/debug/ocg-manager-cli`。它们不属于 `pnpm run test`、`pnpm run test:web`、
+`pnpm run test:tooling` 或 CI。
+
+```bash
+pnpm run smoke:dsh:plugin
+pnpm run smoke:dsh:cli
+```
+
+`smoke:dsh:plugin` 使用已安装的 DSH CLI（Windows：`%APPDATA%/npm/node_modules/@deepseek-ai/dsh/lib/bin.js`），
+配合隔离的 `DSH_HOME` 和本机 loopback 的 models/chat 桩。`smoke:dsh:cli` 对带
+`dsh-local-host` 的原生 `ocg-manager-cli serve` 调用 `GET|POST /dashboard/api/v4/applications/dsh`。
+若 CLI 构建时未启用该能力，加 `--expect-unsupported`；若要覆盖相对路径的 `--data-dir` /
+`DSH_HOME`，加 `--relative-roots`。
+
 Rust 单元测试放在同名子模块：`src/db.rs` 声明 `mod tests;`，测试正文在
 `src/db/tests.rs`。不要写断言源码文本、工作流 YAML 或文档正文的测试。
 

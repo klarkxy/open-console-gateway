@@ -18,18 +18,6 @@ conflicts with the current implementation, code is authoritative.
 | Contributors | [CONTRIBUTORS.md](CONTRIBUTORS.md) | bilingual / 中英同页 | Community credits |
 | Design and coding agents | [../DESIGN.md](../DESIGN.md) · [../AGENTS.md](../AGENTS.md) | English sources | Visual system and project constraints |
 
-## Verification records
-
-These reports preserve the revision, environment, results, and limits of a
-particular run. They supplement the guides; they do not define current support,
-future test exemptions, or a roadmap.
-
-| Record | English | 简体中文 |
-| --- | --- | --- |
-| 2.2.0 candidate, 2026-09-07 | [Review](evidence/release-readiness/2026-09-07/README.md) | [评审](evidence/release-readiness/2026-09-07/README.zh-CN.md) |
-| Zen Free protocols, 2026-09-06 | [Snapshot](maintainer/evidence/protocol-probes/2026-09-06/README.md) | [快照](maintainer/evidence/protocol-probes/2026-09-06/README.zh-CN.md) |
-| Built-in protocols, 2026-08-27 | [Snapshot](maintainer/evidence/protocol-probes/2026-08-27/README.md) | [快照](maintainer/evidence/protocol-probes/2026-08-27/README.zh-CN.md) |
-
 ## Editing documentation
 
 Paired-guide rules are in [maintainer/conventions.md](maintainer/conventions.md).

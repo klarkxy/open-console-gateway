@@ -803,6 +803,106 @@
       ],
       "type": "object"
     },
+    "DshApplication": {
+      "additionalProperties": false,
+      "properties": {
+        "activationRequired": {
+          "type": "boolean"
+        },
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "detected": {
+          "type": "boolean"
+        },
+        "fingerprint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "installSupported": {
+          "type": "boolean"
+        },
+        "installed": {
+          "type": "boolean"
+        },
+        "revision": {
+          "$ref": "#/$defs/ControlRevision"
+        },
+        "status": {
+          "$ref": "#/$defs/DshApplicationStatus"
+        },
+        "targetPaths": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "status",
+        "detected",
+        "installed",
+        "installSupported",
+        "activationRequired",
+        "version",
+        "detail",
+        "targetPaths",
+        "fingerprint",
+        "revision"
+      ],
+      "type": "object"
+    },
+    "DshApplicationInstallRequest": {
+      "additionalProperties": false,
+      "description": "Required process-scoped mutation precondition.\n\nBoth fields travel at the top level of every mutation request. The random\nprocess generation prevents a revision captured before restart from being\naccepted by a fresh process whose in-memory counter reused the same value.",
+      "properties": {
+        "expectedFingerprint": {
+          "type": "string"
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "keyId": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "keyId",
+        "expectedFingerprint"
+      ],
+      "type": "object"
+    },
+    "DshApplicationStatus": {
+      "enum": [
+        "unsupported_runtime",
+        "not_detected",
+        "ready",
+        "installed",
+        "incompatible",
+        "conflict"
+      ],
+      "type": "string"
+    },
     "Eligibility": {
       "additionalProperties": false,
       "properties": {
@@ -1969,6 +2069,15 @@
     },
     {
       "$ref": "#/$defs/AliasPublicationUpdate"
+    },
+    {
+      "$ref": "#/$defs/DshApplicationStatus"
+    },
+    {
+      "$ref": "#/$defs/DshApplication"
+    },
+    {
+      "$ref": "#/$defs/DshApplicationInstallRequest"
     }
   ],
   "title": "DashboardApiV4"

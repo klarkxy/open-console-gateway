@@ -1367,16 +1367,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fs2"
-version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
-dependencies = [
- "libc",
- "winapi",
-]
-
-[[package]]
 name = "futures-channel"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2786,7 +2776,7 @@ dependencies = [
 
 [[package]]
 name = "ocg-browser-worker"
-version = "2.3.0"
+version = "2.4.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2802,7 +2792,7 @@ dependencies = [
 
 [[package]]
 name = "ocg-core"
-version = "2.3.0"
+version = "2.4.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2826,7 +2816,6 @@ dependencies = [
  "schemars 1.2.2",
  "serde",
  "serde_json",
- "sha1",
  "sha2",
  "tar",
  "tokio",
@@ -2841,7 +2830,7 @@ dependencies = [
 
 [[package]]
 name = "ocg-domain"
-version = "2.3.0"
+version = "2.4.0"
 dependencies = [
  "chrono",
  "schemars 1.2.2",
@@ -2852,7 +2841,7 @@ dependencies = [
 
 [[package]]
 name = "ocg-gateway"
-version = "2.3.0"
+version = "2.4.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2863,7 +2852,7 @@ dependencies = [
 
 [[package]]
 name = "ocg-infra"
-version = "2.3.0"
+version = "2.4.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2877,29 +2866,25 @@ dependencies = [
 
 [[package]]
 name = "ocg-manager"
-version = "2.3.0"
+version = "2.4.0"
 dependencies = [
  "anyhow",
- "chrono",
- "fs2",
  "nix",
  "ocg-core",
  "parking_lot",
  "serde",
- "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-shell",
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
- "tokio",
  "uuid",
  "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "ocg-manager-cli"
-version = "2.3.0"
+version = "2.4.0"
 dependencies = [
  "anyhow",
  "chrono",

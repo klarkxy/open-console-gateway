@@ -1,6 +1,6 @@
 //! Read-only shadow planner for inference attempts.
 //!
-//! [`plan_shadow_attempts`] reuses [`super::materialize::materialize_account_routes`]
+//! [`plan_shadow_attempts`] reuses [`super::materialize::materialize_account_routes_with_bindings`]
 //! and [`super::provider_adapter::resolve_route_with_dynamics`]. It never decrypts
 //! credentials, never builds an HTTP client, and never calls Host send. Live
 //! `forward_once` remains the single outbound path.
@@ -31,7 +31,6 @@ use crate::kernel::protocol::ApiFormat;
 use crate::models::{Account, AppConfig};
 use crate::provider::ProviderAdapterKind;
 use crate::provider_contracts::EffectiveContractSet;
-use bytes::Bytes;
 use std::cell::Cell;
 use std::collections::HashMap;
 
@@ -50,7 +49,7 @@ thread_local! {
     static SHADOW_COMPARE_HOOK_ENTRIES: Cell<u64> = const { Cell::new(0) };
 }
 
-/// Same snapshots [`materialize_account_routes`] already consumes.
+/// Same snapshots [`materialize_account_routes_with_bindings`] already consumes.
 pub(crate) struct ShadowPlanInput<'a> {
     pub accounts: &'a [Account],
     pub config: &'a AppConfig,
@@ -58,7 +57,6 @@ pub(crate) struct ShadowPlanInput<'a> {
     pub resolved: &'a ResolvedModel,
     pub client_model: &'a str,
     pub routing_model: &'a str,
-    pub client_body: &'a Bytes,
     pub free_available: bool,
     pub custom_runtimes: &'a HashMap<String, CustomAccountRuntime>,
     pub goat_runtimes: &'a HashMap<String, GoatAccountRuntime>,
@@ -215,7 +213,6 @@ pub(crate) fn plan_shadow_attempts(
         input.resolved,
         input.client_model,
         input.routing_model,
-        input.client_body,
         input.free_available,
         input.custom_runtimes,
         input.goat_runtimes,

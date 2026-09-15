@@ -26,7 +26,7 @@ RUN if [ "$CARGO_REGISTRY" != "sparse+https://index.crates.io/" ]; then \
 COPY . .
 RUN --mount=type=cache,id=ocg-cargo-registry-cli,target=/usr/local/cargo/registry \
     --mount=type=cache,id=ocg-cargo-target-cli,target=/src/target \
-    cargo build --locked --release -p ocg-manager-cli \
+    cargo build --locked --release -p ocg-manager-cli --no-default-features \
     && cp /src/target/release/ocg-manager-cli /ocg-manager-cli
 
 FROM debian:bookworm-slim

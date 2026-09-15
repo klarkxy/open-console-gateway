@@ -198,7 +198,6 @@ async fn execute_protocol_request(
         },
         upstream_base_override: None,
         original_model: None,
-        allow_go_fallback: false,
         resolved_alias: None,
         custom_route: ctx.custom_route.clone(),
         service_tier: None,

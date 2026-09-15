@@ -50,6 +50,29 @@ covers `scripts/*.test.mjs` and is a release/tooling gate, not part of
 (`scripts/release.mjs`). Workspace `[profile.release]` uses thin LTO,
 `strip`, and `panic = "abort"`.
 
+## DSH plugin contract vs real smokes
+
+`pnpm run test:dsh:plugin` is the same isolated plugin contract test that
+`pnpm run test:tooling` already runs (`scripts/dsh-plugin-package.test.mjs`).
+It does not start DSH, the Gateway, or any credential-dependent path.
+
+The following commands are **manual acceptance smokes**. They need a real DSH
+`0.1.5-rc.2` CLI and/or a locally built `target/debug/ocg-manager-cli`. They
+are not part of `pnpm run test`, `pnpm run test:web`, `pnpm run test:tooling`,
+or CI.
+
+```bash
+pnpm run smoke:dsh:plugin
+pnpm run smoke:dsh:cli
+```
+
+`smoke:dsh:plugin` uses the installed DSH CLI (Windows: `%APPDATA%/npm/node_modules/@deepseek-ai/dsh/lib/bin.js`)
+with an isolated `DSH_HOME` and a loopback models/chat stub. `smoke:dsh:cli`
+drives `GET|POST /dashboard/api/v4/applications/dsh` against a native
+`ocg-manager-cli serve` with `dsh-local-host`. Pass `--expect-unsupported` when
+the CLI was built without that feature, or `--relative-roots` to exercise
+relative `--data-dir` / `DSH_HOME` values.
+
 Rust unit tests live in sibling `tests.rs` modules (`src/db.rs` declares
 `mod tests;` and the tests are in `src/db/tests.rs`). Do not add tests that
 assert on source text, workflow YAML, or documentation prose.

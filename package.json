@@ -1,7 +1,7 @@
 {
   "name": "ocg-manager-ui",
   "private": true,
-  "version": "2.3.0",
+  "version": "2.4.0",
   "packageManager": "pnpm@10.29.2",
   "type": "module",
   "scripts": {
@@ -15,6 +15,9 @@
     "test:rust": "cargo test --workspace --locked",
     "test:web": "node --experimental-strip-types --test \"src/**/*.test.ts\"",
     "test:tooling": "node --experimental-strip-types --test \"scripts/*.test.mjs\"",
+    "test:dsh:plugin": "node --experimental-strip-types --test scripts/dsh-plugin-package.test.mjs",
+    "smoke:dsh:plugin": "node scripts/dsh-application-install-smoke.mjs",
+    "smoke:dsh:cli": "node scripts/dsh-headless-cli-smoke.mjs",
     "contract:v3:generate": "node scripts/dashboard-v3-contract.mjs --write",
     "contract:v3:check": "node scripts/dashboard-v3-contract.mjs --check",
     "contract:v4:generate": "node scripts/dashboard-v4-contract.mjs --write",

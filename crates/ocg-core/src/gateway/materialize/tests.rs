@@ -15,6 +15,7 @@ use crate::provider::{
     OPENCODE_ZEN_FREE_PROVIDER_ID, ProviderAdapterKind, QuotaScope, UpstreamProtocolKind,
     ZEN_FREE_ACCOUNT_ID, ZEN_FREE_ACCOUNT_NAME,
 };
+use bytes::Bytes;
 use chrono::Utc;
 use ocg_domain::credential::ModelScope;
 use serde_json::json;
@@ -325,6 +326,39 @@ fn contracts_for(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
+fn materialize_account_routes(
+    accounts: &[Account],
+    config: &AppConfig,
+    parsed: &crate::gateway::protocol::ParsedClientRequest,
+    resolved: &ResolvedModel,
+    client_model: &str,
+    routing_model: &str,
+    _client_body: &bytes::Bytes,
+    free_available: bool,
+    custom_runtimes: &HashMap<String, CustomAccountRuntime>,
+    goat_runtimes: &HashMap<String, GoatAccountRuntime>,
+    cpa_base_url: Option<&str>,
+    contracts: &crate::provider_contracts::EffectiveContractSet,
+    dynamics: &[crate::dynamic::DynamicProviderRuntime],
+) -> Result<MaterializedRouteSet, crate::gateway::protocol::ProtocolError> {
+    materialize_account_routes_with_bindings(
+        accounts,
+        config,
+        parsed,
+        resolved,
+        client_model,
+        routing_model,
+        free_available,
+        custom_runtimes,
+        goat_runtimes,
+        cpa_base_url,
+        contracts,
+        dynamics,
+        &HashMap::new(),
+    )
+}
+
 fn routes_for(
     model: &str,
     accounts: &[Account],
@@ -489,7 +523,6 @@ fn shared_alias_builds_go_and_free_candidates_in_account_order() {
     assert_eq!(set.routes[1].plan.model, "mimo-v2.5-free");
     assert_eq!(set.routes[1].plan.client_model, "mimo-v2.5");
     assert!(set.routes[1].plan.original_model.is_none());
-    assert!(!set.routes[1].plan.allow_go_fallback);
     let free_identity = native_log_identity(&set.routes[1].plan);
     assert_eq!(free_identity.requested_model, "mimo-v2.5");
     assert_eq!(free_identity.resolved_alias.as_deref(), Some("mimo-v2.5"));
@@ -531,7 +564,6 @@ fn pinned_raw_stays_pinned_to_its_provider() {
     assert_eq!(set.routes[0].plan.channel, UpstreamChannel::Go);
     assert_eq!(set.routes[0].plan.model, "deepseek-v4-flash");
     assert_eq!(set.routes[0].plan.client_model, "vendor.gadget-v1");
-    assert!(!set.routes[0].plan.allow_go_fallback);
     assert!(set.routes[0].plan.original_model.is_none());
     let identity = native_log_identity(&set.routes[0].plan);
     assert_eq!(identity.requested_model, "vendor.gadget-v1");
@@ -824,7 +856,6 @@ fn materialize_keeps_client_name_and_mapped_upstream_alias() {
             channel: UpstreamChannel::Go,
             upstream_base_override: None,
             original_model: None,
-            allow_go_fallback: false,
             forced_upstream: None,
             custom_route: None,
         },
@@ -1263,7 +1294,6 @@ fn routes_for_with_bindings(
         &resolved,
         &parsed.requested_model,
         model,
-        &body,
         true,
         &HashMap::new(),
         &HashMap::new(),

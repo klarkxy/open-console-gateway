@@ -3832,3 +3832,100 @@ async fn alias_publication_hides_public_name_from_v1_models_but_keeps_routing() 
     assert_eq!(status, StatusCode::BAD_REQUEST, "{invalid}");
     harness.stop();
 }
+
+#[tokio::test]
+async fn dsh_application_is_explicitly_unsupported_without_a_desktop_host() {
+    let harness = start_loopback("v4-dsh-headless").await;
+    let (status, body) = send_v4(&harness, Method::GET, "/applications/dsh", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["status"], "unsupported_runtime");
+    assert_eq!(body["installSupported"], false);
+    assert_eq!(body["installed"], false);
+    assert!(body["fingerprint"].is_null());
+    assert_secret_free(&body, &[&harness.state.config().gateway_key]);
+    harness.stop();
+}
+
+#[tokio::test]
+async fn dsh_application_install_resolves_the_selected_key_only_inside_the_host() {
+    use ocg_core::dsh_application::{
+        DshApplicationHostRequest, DshApplicationInspection, DshApplicationPhase,
+    };
+    use ocg_core::gateway_keys::PRIMARY_KEY_ID;
+    use std::sync::{Arc, Mutex};
+
+    let harness = start_loopback("v4-dsh-install").await;
+    let selected = harness.state.config().gateway_key;
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let calls_for_host = calls.clone();
+    harness
+        .state
+        .set_dsh_application_host(Arc::new(move |request| match request {
+            DshApplicationHostRequest::Inspect { gateway_v1_url } => {
+                calls_for_host
+                    .lock()
+                    .unwrap()
+                    .push(format!("inspect:{gateway_v1_url}"));
+                Ok(DshApplicationInspection {
+                    phase: DshApplicationPhase::Ready,
+                    detected: true,
+                    installed: false,
+                    install_supported: true,
+                    activation_required: false,
+                    version: Some("0.1.5-rc.2".into()),
+                    detail: Some("ready".into()),
+                    target_paths: vec!["DSH web profile".into()],
+                    fingerprint: Some("inspection-fingerprint".into()),
+                })
+            }
+            DshApplicationHostRequest::Install {
+                expected_fingerprint,
+                gateway_v1_url,
+                secret,
+            } => {
+                assert_eq!(expected_fingerprint, "inspection-fingerprint");
+                calls_for_host.lock().unwrap().push(format!(
+                    "install:{gateway_v1_url}:{}",
+                    secret.expose_to_host()
+                ));
+                Ok(DshApplicationInspection {
+                    phase: DshApplicationPhase::Installed,
+                    detected: true,
+                    installed: true,
+                    install_supported: true,
+                    activation_required: true,
+                    version: Some("0.1.5-rc.2".into()),
+                    detail: Some("installed".into()),
+                    target_paths: vec!["DSH web profile".into()],
+                    fingerprint: Some("installed-fingerprint".into()),
+                })
+            }
+        }));
+
+    let (status, inspected) =
+        send_v4(&harness, Method::GET, "/applications/dsh", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{inspected}");
+    assert_eq!(inspected["status"], "ready");
+    let request = cas(
+        &harness,
+        json!({
+            "keyId": PRIMARY_KEY_ID,
+            "expectedFingerprint": inspected["fingerprint"]
+        }),
+    );
+    let (status, installed) = send_v4(&harness, Method::POST, "/applications/dsh", &request).await;
+    assert_eq!(status, StatusCode::OK, "{installed}");
+    assert_eq!(installed["status"], "installed");
+    assert_eq!(installed["installed"], true);
+    assert_eq!(installed["activationRequired"], true);
+    assert_secret_free(&installed, &[&selected]);
+    assert!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call.ends_with(&selected)),
+        "selected Key did not reach the private host seam"
+    );
+    harness.stop();
+}

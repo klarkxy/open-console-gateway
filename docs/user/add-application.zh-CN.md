@@ -2,8 +2,7 @@
 
 # 手动客户端配置
 
-[旧应用子系统](applications.zh-CN.md)已退役。本指南用于通过普通 Gateway API 直接连接客户端。
-新的应用教程与自动连接器属于后续另行设计的替代方案。
+本指南通过普通 Gateway API 直接连接客户端。[应用页面](applications.zh-CN.md)承载 DSH 插件流程，用于把 DSH 本身接入 Gateway。
 
 ## 接入未收录客户端
 
@@ -25,7 +24,7 @@ curl http://127.0.0.1:9042/v1/models \
   -H "Authorization: Bearer <key>"
 ```
 
-这份列表是本地读取，包含当前可路由且由代码持有的 Alias 与合格 Custom ID。五类接口的最小请求体见[接入第一个客户端](first-client.zh-CN.md)。
+这份列表是本地读取，包含当前可路由且由代码持有的 Alias 与合格 Custom ID。四类接口的最小请求体见[接入第一个客户端](first-client.zh-CN.md)。
 
 配置完成后发送一次真实请求，并在 **日志** 中确认。
 

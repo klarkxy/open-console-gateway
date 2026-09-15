@@ -16,7 +16,7 @@ settings write also rebinds. Never hold a `parking_lot` lock across those
 awaits.
 
 From schema v27 the authoritative table is `access_keys`. Two credential
-tiers share that table (current schema v37) and one auth snapshot:
+tiers share that table (current schema v49) and one auth snapshot:
 
 - Primary key: fixed id `00000000-0000-0000-0000-000000000001`, display
   name `"Primary"`. Always enabled, never deleted. Public `AppConfig` and
@@ -64,7 +64,7 @@ skippable.
 `DEFAULT_OPENCODE_INVITE_URL` (demo). Normalized values must be a
 credential-free HTTPS URL up to 2,048 characters whose host is exactly
 `opencode.ai` or `console.opencode.ai`. The dashboard edits that value on
-the OpenCode Go provider **Other** tab. Creating a managed draft can edit the invite
+the OpenCode Go provider **Settings** tab. Creating a managed draft can edit the invite
 URL and write it back to `opencode_invite_url` when it differs. Signup,
 registration, and payment remain manual in the isolated browser; the user
 copies the key back. Never add CDP autofill or automated payment clicks.
@@ -159,7 +159,7 @@ and profile are removed.
 ## Persistence
 
 `crates/ocg-core/src/db.rs` defines the SQLite schema, migrations, and
-queries. Current schema is **v45**. Version history lives in
+queries. Current schema is **v49**. Version history lives in
 [storage-migration.md](storage-migration.md). `provider_contracts.rs` owns
 provider contract scopes, per-model/per-protocol overrides, effective
 contract derivation, and model-protocol evidence. `models.rs` defines

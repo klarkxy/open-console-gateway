@@ -46,7 +46,7 @@ alias, and conversion behavior belongs in the lower crates.
     local GET /v1/models
   /dashboard/api/v3       current Dashboard control plane
   /dashboard/api/v4       parallel, additive Dashboard control plane
-  /dashboard/api          preserved auth + browser WS; retired REST -> 410
+  /dashboard/api          preserved auth + browser WS; other REST -> 410 tombstone
   /dashboard/             Vue SPA and assets
 ```
 

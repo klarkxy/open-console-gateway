@@ -13,14 +13,12 @@ use crate::custom_http::{
     self, CustomHttpClient, HttpInferenceTransport, InferenceHttpError, custom_auth_scheme,
     json_content_headers, resolve_custom_endpoints,
 };
-use crate::kernel::ids::CUSTOM_PROVIDER_ID;
 use crate::kernel::protocol::ApiFormat;
 use crate::models::{
     AccountCustomConfig, AccountCustomConfigInput, AccountModelCapability,
     AccountModelCapabilityInput, AppConfig, CustomModelDiscoveryResult,
 };
-use crate::provider::ConnectionVerificationStatus;
-use crate::provider::{UpstreamProtocolKind, is_custom_api};
+use crate::provider::{ConnectionVerificationStatus, UpstreamProtocolKind};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
@@ -66,7 +64,7 @@ pub struct CustomAccountRuntime {
 
 impl CustomAccountRuntime {
     pub fn eligible(&self) -> bool {
-        self.enabled && self.setup_ready && self.has_key && is_custom_api(CUSTOM_PROVIDER_ID)
+        self.enabled && self.setup_ready && self.has_key
     }
 
     pub fn capability_matching_public(&self, requested: &str) -> Option<&AccountModelCapability> {

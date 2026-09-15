@@ -1,7 +1,7 @@
 use super::{
-    Cli, Commands, KeyAction, build_state, key_command, ping_keys, resolve_cipher_with,
-    resolve_dashboard_dir, resolve_data_dir, start_serve, status_command, stop_serve,
-    toggle_account,
+    Cli, Commands, KeyAction, build_state, key_command, ping_keys, register_dsh_application_host,
+    resolve_cipher_with, resolve_dashboard_dir, resolve_data_dir, start_serve, status_command,
+    stop_serve, toggle_account,
 };
 use chrono::Utc;
 use clap::{CommandFactory, Parser};
@@ -105,6 +105,21 @@ fn resolve_data_dir_prefers_explicit_path() {
     assert_eq!(resolve_data_dir(Some(explicit.clone())), explicit);
     let fallback = resolve_data_dir(None);
     assert!(fallback.ends_with(".ocg-mgr-cli"));
+}
+
+#[test]
+fn dsh_application_host_matches_the_native_cli_build_capability() {
+    let dir = temp_dir("dsh-host-capability");
+    let state = build_state(dir.clone(), test_cipher()).unwrap();
+    assert!(state.dsh_application_host().is_none());
+
+    register_dsh_application_host(&state);
+
+    assert_eq!(
+        state.dsh_application_host().is_some(),
+        cfg!(feature = "dsh-local-host")
+    );
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 fn assert_cipher_matches_static(

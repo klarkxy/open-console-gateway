@@ -43,7 +43,6 @@ use crate::models::{Account, AppConfig, UpstreamChannel};
 use crate::provider::ProviderAdapterKind;
 use crate::provider_contracts::{ContractScope, EffectiveContractSet};
 use axum::http::StatusCode;
-use bytes::Bytes;
 use ocg_domain::credential::{ModelScope, model_scope_allows};
 use std::collections::HashMap;
 
@@ -250,40 +249,6 @@ struct MappingPlan {
     plan: RequestPlan,
 }
 
-#[allow(dead_code, clippy::too_many_arguments)]
-pub(crate) fn materialize_account_routes(
-    accounts: &[Account],
-    config: &AppConfig,
-    parsed: &ParsedClientRequest,
-    resolved: &ResolvedModel,
-    client_model: &str,
-    routing_model: &str,
-    _client_body: &Bytes,
-    free_available: bool,
-    custom_runtimes: &std::collections::HashMap<String, CustomAccountRuntime>,
-    goat_runtimes: &std::collections::HashMap<String, GoatAccountRuntime>,
-    cpa_base_url: Option<&str>,
-    contracts: &EffectiveContractSet,
-    dynamics: &[crate::dynamic::DynamicProviderRuntime],
-) -> Result<MaterializedRouteSet, ProtocolError> {
-    materialize_account_routes_with_bindings(
-        accounts,
-        config,
-        parsed,
-        resolved,
-        client_model,
-        routing_model,
-        _client_body,
-        free_available,
-        custom_runtimes,
-        goat_runtimes,
-        cpa_base_url,
-        contracts,
-        dynamics,
-        &HashMap::new(),
-    )
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn materialize_account_routes_with_bindings(
     accounts: &[Account],
@@ -292,7 +257,6 @@ pub(crate) fn materialize_account_routes_with_bindings(
     resolved: &ResolvedModel,
     client_model: &str,
     routing_model: &str,
-    _client_body: &Bytes,
     free_available: bool,
     custom_runtimes: &std::collections::HashMap<String, CustomAccountRuntime>,
     goat_runtimes: &std::collections::HashMap<String, GoatAccountRuntime>,
@@ -312,7 +276,6 @@ pub(crate) fn materialize_account_routes_with_bindings(
                 mapping,
                 resolved_alias_from_model(resolved),
                 None,
-                false,
                 cpa_base_url,
                 contracts,
             )?;
@@ -361,7 +324,6 @@ pub(crate) fn materialize_account_routes_with_bindings(
                     mapping,
                     resolved_alias.clone(),
                     None,
-                    false,
                     cpa_base_url,
                     contracts,
                 ) {
@@ -417,7 +379,6 @@ fn materialize_mapping_plan(
     mapping: &ProviderMapping,
     resolved_alias: Option<String>,
     original_model: Option<String>,
-    allow_go_fallback: bool,
     cpa_base_url: Option<&str>,
     contracts: &EffectiveContractSet,
 ) -> Result<RequestPlan, ProtocolError> {
@@ -446,12 +407,6 @@ fn materialize_mapping_plan(
             ApiFormat::Gemini => ApiFormat::ChatCompletions,
             protocol => protocol,
         })
-    } else if adapter_kind == Some(ProviderAdapterKind::CommandCodeGoat) {
-        Some(
-            contracts
-                .select_for_mapping(mapping, parsed.client, &model)
-                .map_err(|error| ProtocolError::new(error.message))?,
-        )
     } else {
         Some(
             contracts
@@ -467,7 +422,6 @@ fn materialize_mapping_plan(
         resolved_alias,
         channel,
         original_model,
-        allow_go_fallback,
         forced_upstream,
         None,
     )?;
@@ -490,7 +444,6 @@ fn materialize_channel_plan(
     resolved_alias: Option<String>,
     channel: UpstreamChannel,
     original_model: Option<String>,
-    allow_go_fallback: bool,
     forced_upstream: Option<ApiFormat>,
     custom_route: Option<CustomRouteSpec>,
 ) -> Result<RequestPlan, ProtocolError> {
@@ -508,7 +461,6 @@ fn materialize_channel_plan(
                 UpstreamChannel::Go => None,
             },
             original_model,
-            allow_go_fallback,
             forced_upstream,
             custom_route,
         },
@@ -573,7 +525,6 @@ fn materialize_custom_account_plan(
         resolved_alias,
         UpstreamChannel::Go,
         None,
-        false,
         Some(upstream),
         Some(CustomRouteSpec {
             endpoint_url: runtime.config.endpoint_url.clone(),
@@ -635,7 +586,6 @@ fn materialize_dynamic_account_plan(
             .or_else(|| Some(selected.public_model.clone())),
         UpstreamChannel::Go,
         None,
-        false,
         Some(upstream),
         Some(CustomRouteSpec {
             endpoint_url: route.endpoint_url,
@@ -703,14 +653,13 @@ fn collect_mapping_plans(
             }
             if mapping_is_command_code_goat(&candidate.mapping) {
                 match goat_runtimes.get(&account.id) {
-                    Some(runtime) if runtime.serves(&candidate.plan.model) => {}
+                    Some(runtime) if runtime.eligible() => {}
                     Some(_) => {
                         rejected.push(format!(
-                            "{}/{} account `{}`: Command Code GOAT catalog does not include model `{}`",
+                            "{}/{} account `{}`: Command Code GOAT account is not eligible for routing",
                             account.provider_id,
                             account.provider_id,
-                            account.name,
-                            candidate.plan.model
+                            account.name
                         ));
                         continue;
                     }
