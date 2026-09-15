@@ -37,6 +37,8 @@
       验证官方 `/zen/go/v1/usage` 的额度刷新。
 - [ ] Windows：SmartScreen 文案、面板、一个账号、一条请求，`auto_start` 与
       `HKCU\...\Run\Open Console Gateway` 对应，卸载后该值消失。
+      对已有副本再跑安装包须保留 `%USERPROFILE%\.ocg-mgr`。交互卸载只有勾选
+      **删除应用数据目录** 才删除该目录。
 - [ ] macOS：**Open Anyway**、面板、一个账号、一条请求。
 - [ ] Linux：在真实 Wayland 或 X11 会话中安装 `.deb` 并运行 AppImage。
 - [ ] 浏览器发现（Windows 上 Edge/Chrome；macOS/Linux 上的平台浏览器）、

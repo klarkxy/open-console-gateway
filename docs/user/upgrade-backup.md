@@ -9,12 +9,12 @@ and verify them against the release's `SHA256SUMS`:
 on macOS, or `sha256sum <file>` on Linux. Backups, restores, and removal are
 the kind of operations that are boring right up until they aren't.
 
-On Windows, the in-app updater preserves the existing installation directory
-when upgrading from OCG Manager to Open Console Gateway. A manual installer
-should use the existing directory to replace the old installation. The upgrade
-keeps the data directory and auto-start setting, migrates existing desktop and
+On Windows, install, in-app update, and running the setup again all reuse the
+existing installation directory, including an OCG Manager copy that has not
+yet been renamed. The installer never uninstalls first. The upgrade keeps the
+data directory and auto-start setting, migrates existing desktop and
 Start-menu shortcuts, and replaces the old installed-app registration with the
-new product name.
+new product name. Uninstall only from Windows **Installed apps**.
 
 ## Database Migration And Access Keys (Schema v49)
 
@@ -169,9 +169,11 @@ dashboard, accounts, and a real gateway request have all been verified.
 
 The direct GUI steps also work when in-app update is unavailable.
 
-- **Windows GUI:** quit the tray app, run the new installer, and choose
-  **Install without uninstalling**. Uninstall from Windows **Installed
-  apps**; the uninstaller asks whether to delete `%USERPROFILE%\.ocg-mgr`.
+- **Windows GUI:** quit the tray app and run the new installer; it replaces
+  the existing copy in place. Uninstall from Windows **Installed apps**. The
+  confirm page deletes `%USERPROFILE%\.ocg-mgr` only when you select **Delete
+  application data**. Reinstalling after an uninstall that left the data
+  directory in place restores the same configuration.
 - **macOS GUI:** replace the app in **Applications** with the new DMG copy.
   Delete the app to uninstall; remove `~/.ocg-mgr` separately only when you
   also intend to delete the data.

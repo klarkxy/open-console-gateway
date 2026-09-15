@@ -4,7 +4,7 @@
 
 从 [GitHub 最新 Release](https://github.com/klarkxy/open-console-gateway/releases/latest) 下载升级包，并用同一 Release 的 `SHA256SUMS` 校验：PowerShell 用 `Get-FileHash <文件> -Algorithm SHA256`，macOS 用 `shasum -a 256 <文件>`，Linux 用 `sha256sum <文件>`。下面把备份、恢复和卸载一起讲完——都是平时很枯燥、关键时刻恨自己没看的操作。
 
-Windows 应用内更新会在 OCG Manager 升级为 Open Console Gateway 时保留原安装目录。手动运行安装器时，请选择原目录以替换旧安装。升级保留数据目录与开机启动设置，迁移已有桌面和开始菜单快捷方式，并将已安装应用记录更新为新名称。
+Windows 上，安装、应用内更新和再次运行安装包都会沿用已有安装目录，包括尚未改名的 OCG Manager 副本。安装器不会先卸载再安装。升级保留数据目录与开机启动设置，迁移已有桌面和开始菜单快捷方式，并将已安装应用记录更新为新名称。只从 Windows **已安装的应用** 卸载。
 
 ## 数据库迁移与接入 Key（schema v49）
 
@@ -84,7 +84,7 @@ docker compose ps
 
 应用内升级不可用时，按下面方式直接覆盖安装。
 
-- **Windows GUI**：退出托盘程序，运行新版安装包，在“升级方式”页选择 **直接安装（无需先卸载）**。在 Windows **已安装的应用** 中卸载；卸载程序会询问是否删除 `%USERPROFILE%\.ocg-mgr`。
+- **Windows GUI**：退出托盘程序并运行新版安装包，安装器会原地替换已有副本。从 Windows **已安装的应用** 卸载。只有在确认页勾选 **删除应用数据目录** 时才会删除 `%USERPROFILE%\.ocg-mgr`。卸载时未删除数据目录的，重装后会沿用原配置。
 - **macOS GUI**：用新版 DMG 中的应用替换 **Applications** 里的旧应用。删除应用即可卸载；只有确定也要删除数据时才另行删除 `~/.ocg-mgr`。
 - **Linux GUI**：用新版 `.deb` 覆盖安装，或替换 AppImage。卸载软件包或删除 AppImage 后，数据仍保留在 `~/.ocg-mgr`，除非手动删除。
 - **CLI**：整体替换解压目录，保持可执行文件、`dist/` 与 `LICENSE` 同级。删除该目录即可卸载；数据仍保留在 `~/.ocg-mgr-cli` 或自定义 `--data-dir`。

@@ -32,7 +32,7 @@
 - **登录后自动启动**：已安装的 Windows x64、macOS 和 Linux x64 桌面版暴露此开关；开发构建、CLI、Docker 面板不显示。Linux AppImage 启动项指向 AppImage 文件，请保留该文件的位置；移动后需重新开关自启动。
 - **Dock 图标**：只有 macOS 桌面版暴露此开关；关闭后应用仍保留菜单栏图标， Windows、Linux、CLI 与 Docker 面板不显示。
 - **连接 / 非流式 / 流式空闲超时**：默认分别为 30、900、300 秒。非流式值是整个请求的总时限；流式空闲值按相邻响应 chunk 之间的等待时间执行。旧安装只有在完整的旧默认组合仍为 `30/120/300` 时才会迁移到 `30/900/300`，任何自定义组合都会原样保留。
-- **检查更新 / 立即升级**：支持升级的已安装桌面版会检查 GitHub 最新 Release，并可下载、校验签名、安装对应平台的包。开发构建、CLI、Docker 仍显示发布页并手动升级。主机必须能访问 GitHub；检查或安装失败不影响 Gateway 转发。
+- **检查更新 / 立即升级**：支持升级的已安装桌面版会检查 GitHub 最新 Release，并可下载、校验签名、原地替换已有副本。数据目录与开机启动设置保留。开发构建、CLI、Docker 仍显示发布页并手动升级。主机必须能访问 GitHub；检查或安装失败不影响 Gateway 转发。
 - **Zen Free**：在账号卡上直接启用或关闭；在 **供应商** 页刷新 Free 模型目录、查看协议证据，并切换 Chat Completions / Responses / Messages。
 
 配置项写入 SQLite，下次启动时重新加载。Settings 资源从不包含 Key 明文。保存使用与其他 Dashboard V3 写入相同的 `expectedRevision` / `processGeneration` token。检查更新是按需动作。

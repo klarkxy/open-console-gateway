@@ -207,6 +207,17 @@ try {
       throw "Published GUI process $previousPid survived the overwrite update"
     }
 
+    if (!(Test-Path -LiteralPath $guiPath)) {
+      throw 'Overwrite update moved the GUI out of the existing installation directory'
+    }
+    $defaultInstallDir = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'Open Console Gateway'))
+    if ($installDir -ne $defaultInstallDir) {
+      $secondCopy = Join-Path $defaultInstallDir 'ocg-manager.exe'
+      if (Test-Path -LiteralPath $secondCopy) {
+        throw 'Overwrite update installed a second copy under the renamed default directory'
+      }
+    }
+
     $updateStatus = Wait-Dashboard -ExpectedVersion $CandidateVersion -Attempts 90
     if ($updateStatus.currentVersion -ne $CandidateVersion) {
       throw "Unexpected updated GUI version: $($updateStatus.currentVersion)"
@@ -289,6 +300,42 @@ Wait-UninstallComplete -ExecutablePath $guiPath -UninstallerPath $uninstaller.Fu
 if (Get-StartupEntryName -RunKey $runKey) {
   throw 'Uninstall left the startup entry behind'
 }
+if (Test-Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Open Console Gateway') {
+  throw 'Uninstall left the installed-app registration behind'
+}
+if (Test-Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\OCG Manager') {
+  throw 'Uninstall left the legacy installed-app registration behind'
+}
+if (Test-Path 'HKCU:\Software\klarkxy\OCG Manager') {
+  throw 'Uninstall left the legacy installation location behind'
+}
 if (!(Test-Path $sentinel)) { throw 'Silent uninstall deleted user data' }
+
+Invoke-Installer -Path $CandidateInstaller -Arguments @('/S', "/D=$installDir") -Label 'candidate reinstall'
+$gui = Get-ChildItem $installDir -Recurse -Filter ocg-manager.exe | Select-Object -First 1
+if (!$gui) { throw 'Reinstalled GUI executable is missing' }
+$guiPath = $gui.FullName
+$process = Start-Process $guiPath -ArgumentList '--startup' -PassThru -WindowStyle Hidden
+try {
+  Wait-Dashboard -ExpectedVersion $CandidateVersion | Out-Null
+  if ((Get-Content $sentinel -Raw).Trim() -ne $sentinelValue) {
+    throw 'Reinstall after silent uninstall lost the data sentinel'
+  }
+} finally {
+  if ($process -and !$process.HasExited) {
+    Stop-Process -Id $process.Id -Force
+    if (!$process.WaitForExit(30000)) { throw "Reinstalled GUI process $($process.Id) did not stop" }
+  }
+  Stop-InstalledGui $guiPath
+}
+
+$uninstaller = Get-ChildItem $installDir -Recurse -Filter uninstall.exe | Select-Object -First 1
+if (!$uninstaller) { throw 'Reinstall uninstaller is missing' }
+Invoke-Installer -Path $uninstaller.FullName -Arguments @('/S') -Label 'candidate reinstall uninstall'
+Wait-UninstallComplete -ExecutablePath $guiPath -UninstallerPath $uninstaller.FullName -RunKey $runKey
+if (Get-StartupEntryName -RunKey $runKey) {
+  throw 'Reinstall uninstall left the startup entry behind'
+}
+if (!(Test-Path $sentinel)) { throw 'Second silent uninstall deleted user data' }
 
 Write-Host "Windows release smoke passed for v$CandidateVersion."

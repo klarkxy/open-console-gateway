@@ -47,6 +47,8 @@ and omissions in the release notes; previous runs do not grant exemptions.
       account.
 - [ ] Windows: SmartScreen text, dashboard, one account, one request,
       `auto_start` ↔ `HKCU\...\Run\Open Console Gateway`, value gone after uninstall.
+      Running the installer over an existing copy keeps `%USERPROFILE%\.ocg-mgr`.
+      Interactive uninstall deletes that directory only with **Delete application data** checked.
 - [ ] macOS: **Open Anyway**, dashboard, one account, one request.
 - [ ] Linux: `.deb` and AppImage under a real Wayland or X11 session.
 - [ ] Browser discovery (Edge/Chrome on Windows; platform browsers on

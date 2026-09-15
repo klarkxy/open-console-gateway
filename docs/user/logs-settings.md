@@ -133,9 +133,10 @@ The **Settings** view holds the gateway's persistent configuration:
   untouched.
 - **Check for updates / Update now** — updater-enabled installed desktop
   builds check the latest GitHub Release and can download, verify, and
-  install its signed platform package. Development builds, the CLI, and
-  Docker keep the release-link/manual-upgrade path. The host must be able to
-  reach GitHub; a failed check or install does not affect gateway forwarding.
+  replace the existing copy in place. The data directory and auto-start
+  setting stay. Development builds, the CLI, and Docker keep the
+  release-link/manual-upgrade path. The host must be able to reach GitHub; a
+  failed check or install does not affect gateway forwarding.
 - **Zen Free** — enable or disable it from its account card. Use
   **Providers** to refresh the Free catalog, inspect protocol evidence, and
   toggle Chat Completions / Responses / Messages.

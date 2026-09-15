@@ -15,8 +15,11 @@ done. The rest is mostly convincing your OS that small developers exist.
    **More info → Run anyway** to continue.
 4. Add an OpenCode-Go account in the **Accounts** view, copy the Key,
    and point your client at `http://127.0.0.1:9042/v1`.
-5. The uninstaller asks whether to delete `%USERPROFILE%\.ocg-mgr`; silent
-   upgrades and uninstalls preserve it.
+5. Running the installer again replaces the existing copy in place and keeps
+   `%USERPROFILE%\.ocg-mgr`. Uninstall from Windows **Installed apps**. The
+   confirm page includes **Delete application data**; leave it unchecked to
+   keep the data directory. Silent uninstalls and in-app updates never delete
+   it.
 
 ## macOS 11+ Intel / Apple Silicon
 
