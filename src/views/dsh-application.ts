@@ -71,7 +71,7 @@ export function dshStatusPresentation(status: DshApplicationStatus): DshStatusPr
       return {
         tone: "warning",
         labelKey: "未检测到 DSH",
-        hintKey: "请先安装 DSH 客户端，然后刷新状态。",
+        hintKey: "先安装 DSH 客户端，再刷新状态。",
       };
     case "ready":
       return {
@@ -83,19 +83,19 @@ export function dshStatusPresentation(status: DshApplicationStatus): DshStatusPr
       return {
         tone: "success",
         labelKey: "已安装",
-        hintKey: "OCG 网关已注册到 DSH。若上方提示需要重启或启动 DSH，请按提示操作。",
+        hintKey: "OCG 网关已注册到 DSH。若上方提示需重启或启动 DSH，按提示操作即可。",
       };
     case "incompatible":
       return {
         tone: "error",
         labelKey: "版本不兼容",
-        hintKey: "检测到的 DSH 与当前 OCG 不兼容，请升级其中一方后刷新。",
+        hintKey: "检测到的 DSH 与当前 OCG 版本不兼容；升级其中一方后刷新。",
       };
     case "conflict":
       return {
         tone: "warning",
         labelKey: "存在冲突",
-        hintKey: "检测到同名或不完整的现有配置。请先处理冲突项，再刷新状态。",
+        hintKey: "检测到同名或不完整的现有配置。先处理冲突项，再刷新状态。",
       };
   }
 }

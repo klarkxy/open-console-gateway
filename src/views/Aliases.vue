@@ -13,7 +13,7 @@
     <n-alert
       v-else-if="loadError && !contracts"
       type="error"
-      :title="t('加载供应商失败: {error}', { error: loadError })"
+      :title="t('加载供应商失败：{error}', { error: loadError })"
     >
       <n-button size="small" secondary :loading="loading" @click="loadAliases()">
         {{ t("重试") }}
@@ -26,7 +26,7 @@
       <n-alert
         v-if="loadError && contracts"
         type="warning"
-        :title="t('加载供应商失败: {error}', { error: loadError })"
+        :title="t('加载供应商失败：{error}', { error: loadError })"
       >
         <n-button size="small" secondary :loading="loading" @click="loadAliases({ retain: true })">
           {{ t("重试") }}
@@ -35,7 +35,7 @@
       <n-alert
         v-if="accountsLoadError"
         type="warning"
-        :title="t('加载 Custom Alias 账号失败: {error}', { error: accountsLoadError })"
+        :title="t('加载 Custom Alias 账号失败：{error}', { error: accountsLoadError })"
       >
         <n-button size="small" secondary :loading="loading" @click="loadAliases({ retain: true })">
           {{ t("重试") }}
@@ -44,7 +44,7 @@
       <n-alert
         v-if="dynamicLoadError"
         type="warning"
-        :title="t('加载供应商失败: {error}', { error: dynamicLoadError })"
+        :title="t('加载供应商失败：{error}', { error: dynamicLoadError })"
       >
         <n-button size="small" secondary :loading="loading" @click="loadAliases({ retain: true })">
           {{ t("重试") }}
@@ -53,7 +53,7 @@
       <n-alert
         v-if="cpaLoadError"
         type="warning"
-        :title="t('加载 CPA 模型目录失败: {error}', { error: cpaLoadError })"
+        :title="t('加载 CPA 模型目录失败：{error}', { error: cpaLoadError })"
       >
         <n-button size="small" secondary :loading="loading" @click="loadAliases({ retain: true })">
           {{ t("重试") }}
@@ -63,7 +63,7 @@
       <n-alert
         v-if="publicationLoadError"
         type="warning"
-        :title="t('加载对外展示失败: {error}', { error: publicationLoadError })"
+        :title="t('加载对外展示失败：{error}', { error: publicationLoadError })"
       >
         <n-button size="small" secondary :loading="loading" @click="loadAliases({ retain: true })">
           {{ t("重试") }}
@@ -72,7 +72,7 @@
       <n-alert
         v-if="publicationSaveError"
         type="warning"
-        :title="t('更新对外展示失败: {error}', { error: publicationSaveError })"
+        :title="t('更新对外展示失败：{error}', { error: publicationSaveError })"
       />
       <n-empty v-if="aliasGroups.length === 0" :description="search.trim() ? t('无匹配模型') : t('暂无 Alias')" />
       <div v-else class="aliases-table-wrap" tabindex="0" role="region" :aria-label="t('模型映射')">
@@ -342,28 +342,28 @@ onActivated(() => {
 }
 .aliases-section {
   min-width: 0;
-  padding: 16px;
+  padding: var(--ocg-space-lg);
   border: 1px solid var(--ocg-border);
-  border-radius: 14px;
+  border-radius: var(--ocg-radius-lg);
   background: var(--ocg-surface);
   box-shadow: var(--ocg-shadow-sm);
 }
 .aliases-section > .n-alert {
-  margin-bottom: 12px;
+  margin-bottom: var(--ocg-space-md);
 }
 .aliases-table-wrap {
   overflow-x: auto;
 }
-.aliases-search { margin-bottom: 16px; }
+.aliases-search { margin-bottom: var(--ocg-space-lg); }
 .aliases-name-row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
 }
 .aliases-unpublished {
   opacity: 0.55;
 }
-.alias-warning { color: var(--ocg-warning); margin: 4px 0 0; }
+.alias-warning { color: var(--ocg-warning); margin: var(--ocg-space-xs) 0 0; }
 .aliases-table {
   width: 100%;
   min-width: 520px;
@@ -372,7 +372,7 @@ onActivated(() => {
 }
 .aliases-table th,
 .aliases-table td {
-  padding: 10px 12px;
+  padding: 10px var(--ocg-space-md);
   border-bottom: 1px solid var(--ocg-border);
   text-align: left;
   vertical-align: middle;

@@ -3,6 +3,7 @@ import test from "node:test";
 import { createPinia, setActivePinia } from "pinia";
 import { toRaw } from "vue";
 import { installWindowDashboard, v3AccountDto } from "../test-helpers/dashboard-v3-fetch.ts";
+import type { Account } from "../api/dashboard.ts";
 import { useAccountsStore } from "./accounts.ts";
 import { useConnectionStore } from "./connection.ts";
 import { useControlPlaneStore } from "./controlPlane.ts";
@@ -146,6 +147,28 @@ test("accounts store: a stale load failure does not overwrite a fresh success", 
   assert.equal(store.error, "");
   assert.deepEqual(store.accounts.map(({ id }) => id), ["b1"]);
   assert.equal(store.loading, false);
+});
+
+test("accounts store: a pending load cannot clobber an in-place mutation", async () => {
+  freshPinia();
+  const calls = installDeferredFetch();
+  const store = useAccountsStore();
+
+  const pendingLoad = store.loadPresented();
+  await waitForCalls(calls, 1);
+
+  store.upsertAccount(v3AccountDto("m1") as unknown as Account);
+  assert.deepEqual(store.accounts.map(({ id }) => id), ["m1"]);
+  assert.equal(store.loading, false, "mutation releases the superseded load flag");
+
+  calls[0]!.resolve(accountsBody(["a1", "a2"], 8));
+  const stale = await pendingLoad;
+  assert.deepEqual(stale.map(({ id }) => id), ["a1", "a2"], "stale caller still gets its own payload");
+  assert.deepEqual(store.accounts.map(({ id }) => id), ["m1"], "stale load must not clobber the mutation");
+
+  store.removeAccount("m1");
+  assert.deepEqual(store.accounts, []);
+  assert.equal(store.loaded, true);
 });
 
 test("connection store: a pending load cannot clobber post-mutation state", async () => {

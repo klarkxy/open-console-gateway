@@ -379,11 +379,19 @@ export function chooserOptionIconKey(option: ChooserOption): string {
   return "database";
 }
 
+export type ChooserTagLabelCode = "provider_preset" | "user_defined" | "custom_endpoint";
+
+export const CHOOSER_TAG_LABEL_KEYS: Record<ChooserTagLabelCode, MessageKey> = {
+  provider_preset: "供应商预设",
+  user_defined: "用户定义",
+  custom_endpoint: "自定义端点",
+};
+
 export interface ChooserDetail {
   kind: "plan" | "family" | "preset" | "platform";
   iconKey: string;
   title: string;
-  tag: { label: MessageKey; type: "warning" | "default" } | null;
+  tag: { label: ChooserTagLabelCode; type: "warning" | "default" } | null;
   links: { docsUrl: string; websiteUrl: string } | null;
 }
 
@@ -403,7 +411,7 @@ export function describeChooserSelection(
       kind: "family",
       iconKey: `family:${option.family.id}`,
       title: option.family.label,
-      tag: { label: "供应商预设", type: "default" },
+      tag: { label: "provider_preset", type: "default" },
       links: { docsUrl: preset.docsUrl, websiteUrl: preset.websiteUrl },
     };
   }
@@ -412,7 +420,7 @@ export function describeChooserSelection(
       kind: "preset",
       iconKey: `family:${familyOf(option.preset).id}`,
       title: option.preset.name,
-      tag: { label: "供应商预设", type: "default" },
+      tag: { label: "provider_preset", type: "default" },
       links: { docsUrl: option.preset.docsUrl, websiteUrl: option.preset.websiteUrl },
     };
   }
@@ -420,8 +428,8 @@ export function describeChooserSelection(
     return { kind: "platform", iconKey: "database", title: option.label, tag: null, links: null };
   }
   let tag: ChooserDetail["tag"] = null;
-  if (option.source === "user-defined") tag = { label: "用户定义", type: "default" };
-  else if (option.plan.kind === "custom") tag = { label: "自定义端点", type: "default" };
+  if (option.source === "user-defined") tag = { label: "user_defined", type: "default" };
+  else if (option.plan.kind === "custom") tag = { label: "custom_endpoint", type: "default" };
   return {
     kind: "plan",
     iconKey: planBrandIconKey(option.plan.id) ?? option.plan.id,

@@ -59,7 +59,7 @@ export function useAccountUsage(
     const limits = quotaLimits.value;
     if (!limits) return [];
     return [
-      { key: "window_5h", label: t("5小时"), limit: limits.window_5h },
+      { key: "window_5h", label: t("5 小时"), limit: limits.window_5h },
       { key: "window_week", label: t("本周"), limit: limits.window_week },
       { key: "window_month", label: t("本月"), limit: limits.window_month },
     ];
@@ -74,7 +74,7 @@ export function useAccountUsage(
       : null;
     if (!limits) return [];
     return [
-      { key: "window_5h", label: t("5小时"), limit: limits.window_5h },
+      { key: "window_5h", label: t("5 小时"), limit: limits.window_5h },
       { key: "window_week", label: t("本周"), limit: limits.window_week },
       { key: "window_month", label: t("本月"), limit: limits.window_month },
     ];
@@ -101,7 +101,7 @@ export function useAccountUsage(
   function limitsFromProviderWindows(windows: ProviderQuotaWindow[]): UsageLimitView[] {
     const byKind = new Map(windows.map((window) => [window.window_kind, window]));
     const definitions: Array<[UsageKey, string, string]> = [
-      ["window_5h", "five_hours", t("5小时")],
+      ["window_5h", "five_hours", t("5 小时")],
       ["window_week", "week", t("本周")],
       ["window_month", "month", t("本月")],
     ];
@@ -280,7 +280,7 @@ export function useAccountUsage(
       edit.resets_dirty = false;
     } catch (error) {
       edit.error = dashboardErrorDetail(error);
-      message.error(t("用量保存失败: {error}", { error: edit.error }));
+      message.error(t("用量保存失败：{error}", { error: edit.error }));
     } finally {
       edit.saving = false;
     }
@@ -328,11 +328,11 @@ export function useAccountUsage(
         const seconds = error.retryAfterSeconds;
         message.warning(
           seconds
-            ? t("请稍后再试（约 {seconds} 秒）", { seconds: String(seconds) })
-            : t("刷新额度失败: {error}", { error: dashboardErrorDetail(error) }),
+            ? t("稍后再试（约 {seconds} 秒）", { seconds: String(seconds) })
+            : t("刷新额度失败：{error}", { error: dashboardErrorDetail(error) }),
         );
       } else {
-        message.error(t("刷新额度失败: {error}", { error: dashboardErrorDetail(error) }));
+        message.error(t("刷新额度失败：{error}", { error: dashboardErrorDetail(error) }));
       }
     } finally {
       usageRefreshLoading.value = { ...usageRefreshLoading.value, [accountId]: false };

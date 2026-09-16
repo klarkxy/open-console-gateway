@@ -56,8 +56,8 @@ defineEmits<{
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 12px;
+  gap: var(--ocg-space-md);
+  margin-bottom: var(--ocg-space-md);
 }
 .model-mappings-hint {
   margin: 0;
@@ -75,7 +75,7 @@ defineEmits<{
 }
 .model-mappings-table th,
 .model-mappings-table td {
-  padding: 10px 12px;
+  padding: 10px var(--ocg-space-md);
   border-bottom: 1px solid var(--ocg-border);
   text-align: left;
   vertical-align: middle;

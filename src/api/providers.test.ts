@@ -251,13 +251,16 @@ test("Custom endpoint protocol probe stays blocked while overrides use the model
     throw new Error(`unsupported request ${url}`);
   });
 
+  // The probe is guarded client-side: it rejects as an Error and never
+  // reaches the network.
   await assert.rejects(
     () => providerApi.runProtocolProbes("custom", {
       model_id: "Org/Model",
       protocols: ["chat_completions"],
     }),
-    /尚未纳入 Dashboard V3 合同/,
+    Error,
   );
+  assert.equal(requests.length, 0, "blocked custom probe must not issue any request");
   await providerApi.updateModelProtocolOverrides(
     "custom_endpoint",
     "custom-1",
@@ -327,7 +330,7 @@ test("Zen Free provider settings reject non-Zen accounts before the dedicated wr
 
   await assert.rejects(
     () => providerApi.updateProviderSettings("go-account-2", { enabled: false }),
-    /only Zen Free has provider settings/,
+    (error: unknown) => error instanceof Error && error.message.includes("Zen Free"),
   );
   assert.deepEqual(requests.map(({ method, url }) => ({ method, url })), [
     { method: "GET", url: "/dashboard/api/v3/accounts/go-account-2" },

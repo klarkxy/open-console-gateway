@@ -12,10 +12,10 @@
     </n-alert>
     <n-form label-placement="top" @submit.prevent="submit">
       <p class="field-hint">
-        {{ t("New API 与 Sub2API 自带协议转换。这里只保存名称与 Key，保存时按该 Key 拉取可用模型。同一模型出现在多把 Key 上会按 Key 顺序叠加路由，各用各的倍率。") }}
+        {{ t("保存时会按该 Key 拉取可用模型。") }}
       </p>
       <p v-if="parentName" class="field-hint">
-        {{ t("站点 {name} 托管 Endpoint；协议路径在请求时按客户端格式选择。", { name: parentName }) }}
+        {{ t("站点 {name} 托管 Endpoint。", { name: parentName }) }}
       </p>
       <n-form-item :label="t('名称')" required>
         <n-input
@@ -133,11 +133,11 @@ function submit(): void {
 
 <style scoped>
 .form-error {
-  margin-bottom: 12px;
+  margin-bottom: var(--ocg-space-md);
 }
 
 .field-hint {
-  margin: 0 0 12px;
+  margin: 0 0 var(--ocg-space-md);
   font-size: var(--ocg-font-xs);
   color: var(--ocg-subtle);
 }

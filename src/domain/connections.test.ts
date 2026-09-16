@@ -3,6 +3,7 @@ import test from "node:test";
 import type { Connection } from "../api/connections.ts";
 import type { ProviderCatalogEntry } from "../api/providers.ts";
 import {
+  CONNECTION_STATUS_LABELS,
   catalogEntryForConnection,
   connectionBrandFamily,
   connectionForLegacyProvider,
@@ -99,7 +100,7 @@ test("connectionStatus uses only authorization, lifecycle, and eligibility", () 
     lifecycle: "draft",
     authorization: "valid",
     eligibility: { state: "ineligible", reason: "missing_credential" },
-  })).label, "草稿");
+  })).label, CONNECTION_STATUS_LABELS.draft);
   assert.equal(isOnboardingDraftConnection(connection({ lifecycle: "draft" })), true);
   assert.equal(isOnboardingDraftConnection(connection({ lifecycle: "configured" })), false);
   assert.equal(connectionStatus(connection({

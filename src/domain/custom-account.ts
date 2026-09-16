@@ -24,7 +24,7 @@ export function isCustomApiAccount(
 export type CustomEndpointUrlIssue = "empty" | "malformed" | "not_http" | "with_credentials";
 
 export const CUSTOM_ENDPOINT_URL_ISSUE_KEYS = {
-  empty: "请填写 API 地址",
+  empty: "填写 API 地址",
   malformed: "Endpoint 格式无效",
   not_http: "Endpoint 必须是 http:// 或 https:// URL",
   with_credentials: "Endpoint 不能包含用户名或密码",

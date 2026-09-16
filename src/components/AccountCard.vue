@@ -119,14 +119,14 @@
                   size="small"
                   class="account-expiry-trigger"
                   :disabled="purchaseDateSaving"
-                  :aria-label="`${accountExpiryLabel(account, now)}；${t('到期于 {date}', { date: account.expires_on })}；${t('修改购买日期')}`"
+                  :aria-label="`${expiryText}；${t('到期于 {date}', { date: account.expires_on })}；${t('修改购买日期')}`"
                 >
                   <n-tag
                     :type="accountExpiryTagType(account, now)"
                     size="small"
                     :bordered="false"
                   >
-                    {{ accountExpiryLabel(account, now) }}
+                    {{ expiryText }}
                   </n-tag>
                 </n-button>
               </template>
@@ -269,7 +269,7 @@
 
         <div v-if="menuOptions.length > 0" class="account-action account-action--menu">
           <n-dropdown
-            :options="menuOptions"
+            :options="renderedMenuOptions"
             trigger="click"
             placement="bottom-end"
             @select="(key: string | number) => emit('menu-select', key)"
@@ -294,8 +294,8 @@
 
     <div v-if="!accountIsReady(account)" class="managed-pending">
       <div>
-        <strong>{{ managedStepLabel(account.setup_step) }}</strong>
-        <p>{{ t("注册进度已保存。继续后仍会使用该账号自己的浏览器 Profile。") }}</p>
+        <strong>{{ t(MANAGED_STEP_LABEL_KEYS[account.setup_step]) }}</strong>
+        <p>{{ t("注册进度已保存，继续使用该账号的独立浏览器 Profile。") }}</p>
       </div>
       <n-button type="primary" secondary @click="emit('open-wizard')">
         {{ t("继续注册") }}
@@ -305,7 +305,7 @@
       <p>{{ draftDescription }}</p>
     </div>
     <div v-else-if="isOllamaCloud && ollamaNeedsBilling" class="provider-unconfigured" role="status">
-      <p>{{ t("请配置 Ollama 计费档位以显示本月额度") }}</p>
+      <p>{{ t("配置 Ollama 计费档位以显示本月额度") }}</p>
     </div>
     <div v-else-if="usageDisplayAvailable" class="official-plan-usage">
       <div v-if="usageLoadError" class="usage-load-error" role="alert">
@@ -331,39 +331,21 @@
           {{ t("{count} 个模型", { count: account.model_capabilities.length }) }}
         </span>
       </div>
-      <div v-if="showsOfficialBalance" class="account-credit-balance">
-        <div v-if="usageLoadError" class="usage-load-error" role="alert">
-          <span>{{ t("用量加载失败") }}</span>
-          <n-button text size="tiny" type="primary" :loading="usageLoading" @click="emit('reload-usage')">
-            {{ t("重试") }}
-          </n-button>
-        </div>
-        <div v-else-if="creditBalances.length === 0" class="account-credit-balance__empty">
-          {{ t("尚未刷新") }}
-        </div>
-        <template v-else>
-          <div v-for="row in creditBalances" :key="row.balance_kind" class="account-credit-balance__row">
-            {{ t("当前余额 {value}", { value: formatQuotaAmount(row.amount, row.unit, locale) }) }}
-          </div>
-        </template>
-      </div>
+      <AccountCreditBalance
+        v-if="showsOfficialBalance"
+        :credit-balances="creditBalances"
+        :usage-load-error="usageLoadError"
+        :usage-loading="usageLoading"
+        @reload-usage="emit('reload-usage')"
+      />
     </div>
-    <div v-else-if="showsOfficialBalance" class="account-credit-balance">
-      <div v-if="usageLoadError" class="usage-load-error" role="alert">
-        <span>{{ t("用量加载失败") }}</span>
-        <n-button text size="tiny" type="primary" :loading="usageLoading" @click="emit('reload-usage')">
-          {{ t("重试") }}
-        </n-button>
-      </div>
-      <div v-else-if="creditBalances.length === 0" class="account-credit-balance__empty">
-        {{ t("尚未刷新") }}
-      </div>
-      <template v-else>
-        <div v-for="row in creditBalances" :key="row.balance_kind" class="account-credit-balance__row">
-          {{ t("当前余额 {value}", { value: formatQuotaAmount(row.amount, row.unit, locale) }) }}
-        </div>
-      </template>
-    </div>
+    <AccountCreditBalance
+      v-else-if="showsOfficialBalance"
+      :credit-balances="creditBalances"
+      :usage-load-error="usageLoadError"
+      :usage-loading="usageLoading"
+      @reload-usage="emit('reload-usage')"
+    />
   </n-card>
 </template>
 
@@ -396,25 +378,35 @@ import type {
 import { isCooling, isUsageLimitReached } from "../domain/accounts-usage.ts";
 import type { UsageKey } from "../domain/accounts-usage.ts";
 import {
-  accountExpiryLabel,
+  MANAGED_STEP_LABEL_KEYS,
+  ROUTING_DRAFT_DESCRIPTION_KEYS,
+  accountExpiry,
   accountExpiryTagType,
   accountIsReady,
-  accountRoutingDraftDescription,
+  accountRoutingDraftState,
   cooldownDetails,
-  managedStepLabel,
 } from "../domain/account-display.ts";
 import {
-  accountCredentialCountLabel,
+  accountCredentialCount,
   accountExpiryDisplay,
   accountShowsDeclaredRelation,
   inferenceLastError,
-  presentedAccountStatusLabel,
+  presentedAccountStatus,
   presentedAccountStatusTagType,
   selectedBindingDisabled,
-  selectedModelRestrictionLabel,
-  selectedQuotaShareLabel,
+  selectedModelRestriction,
+  selectedQuotaShare,
 } from "../domain/account-identity.ts";
 import type { AccountMenuOption } from "../domain/account-display.ts";
+import {
+  accountExpiryText,
+  accountMenuLabelKey,
+  accountStatusText,
+  cooldownDetailsText,
+  credentialCountText,
+  modelRestrictionText,
+  quotaShareText,
+} from "../views/account-status-text.ts";
 import {
   isCpaIntegrationAccount,
   isOllamaCloudAccount,
@@ -424,12 +416,12 @@ import { isCustomApiAccount } from "../domain/custom-account.ts";
 import { localDateString } from "../domain/account-lifecycle.ts";
 import { findPlanDefinition, planLabel } from "../domain/plans.ts";
 import type { AccountUsageEdits, UsageLimitView } from "../domain/useAccountUsage.ts";
-import { locale, t } from "../i18n/index.ts";
-import { formatQuotaAmount } from "../domain/platform-accounts.ts";
+import { t } from "../i18n/index.ts";
 import { accountInferenceEndpointUrl, officialBalanceSupported } from "../domain/upstream-balance.ts";
 import type { Connection } from "../api/connections.ts";
 import AccountUsageEditor from "./AccountUsageEditor.vue";
 import ProviderQuotaSummary from "./ProviderQuotaSummary.vue";
+import AccountCreditBalance from "./AccountCreditBalance.vue";
 
 const props = defineProps<{
   account: Account;
@@ -476,9 +468,12 @@ const isOllamaCloud = computed(() => isOllamaCloudAccount(props.account));
 const ollamaNeedsBilling = computed(() => !props.account.ollama_billing_tier);
 const overlayIdentity = computed(() => props.identity ?? null);
 const showsDeclaredRelation = computed(() => accountShowsDeclaredRelation(overlayIdentity.value));
-const credentialCountLabel = computed(() => accountCredentialCountLabel(overlayIdentity.value));
+const credentialCountLabel = computed(() => {
+  const count = accountCredentialCount(overlayIdentity.value);
+  return count === null ? null : credentialCountText(count);
+});
 const statusLabel = computed(() => (
-  presentedAccountStatusLabel(props.account, overlayIdentity.value, props.now)
+  accountStatusText(presentedAccountStatus(props.account, overlayIdentity.value, props.now))
 ));
 const statusTagType = computed(() => (
   presentedAccountStatusTagType(props.account, overlayIdentity.value, props.now)
@@ -487,22 +482,26 @@ const statusTooltip = computed(() => {
   if (props.account.auth_error) return props.account.auth_error;
   const overlayError = inferenceLastError(overlayIdentity.value, props.account.id);
   if (overlayError) return overlayError;
-  if (isCooling(props.account, props.now)) return cooldownDetails(props.account, props.now, props.limits);
+  if (isCooling(props.account, props.now)) {
+    return cooldownDetailsText(cooldownDetails(props.account, props.now, props.limits));
+  }
   return "";
 });
 const bindingDisabled = computed(() => (
   selectedBindingDisabled(overlayIdentity.value, props.account.id)
 ));
-const modelRestrictionLabel = computed(() => (
-  selectedModelRestrictionLabel(overlayIdentity.value, props.account.id)
-));
-const quotaShareLabel = computed(() => (
-  selectedQuotaShareLabel(
+const modelRestrictionLabel = computed(() => {
+  const restriction = selectedModelRestriction(overlayIdentity.value, props.account.id);
+  return restriction ? modelRestrictionText(restriction) : null;
+});
+const quotaShareLabel = computed(() => {
+  const share = selectedQuotaShare(
     overlayIdentity.value,
     props.account.id,
     (id) => props.accountNames?.[id] ?? null,
-  )
-));
+  );
+  return share ? quotaShareText(share) : null;
+});
 const expiryDisplay = computed(() => (
   accountExpiryDisplay(props.account, overlayIdentity.value, props.catalog)
 ));
@@ -547,9 +546,19 @@ const isDraft = computed(() => (
 ));
 
 const draftDescription = computed(() => {
-  const key = accountRoutingDraftDescription(props.account);
-  return key ? t(key) : "";
+  const state = accountRoutingDraftState(props.account);
+  return state ? t(ROUTING_DRAFT_DESCRIPTION_KEYS[state]) : "";
 });
+
+const expiryText = computed(() => accountExpiryText(accountExpiry(props.account, props.now)));
+
+const renderedMenuOptions = computed(() => props.menuOptions.map((option) => {
+  const labelKey = accountMenuLabelKey(option.key);
+  return {
+    ...option,
+    label: option.label ?? (labelKey ? t(labelKey) : String(option.key)),
+  };
+}));
 
 const usageEditorAvailable = computed(() => {
   if (props.usageLoading || props.usageLoadError) return false;
@@ -581,7 +590,7 @@ watch(() => props.account.purchase_date, (value) => {
 
 <style scoped>
 .account-card {
-  border-radius: 14px;
+  border-radius: var(--ocg-radius-lg);
   box-shadow: var(--ocg-shadow-sm);
   transition: border-color 0.16s ease, box-shadow 0.16s ease, opacity 0.16s ease;
 }
@@ -612,7 +621,7 @@ watch(() => props.account.purchase_date, (value) => {
 
 .manual-usage-block {
   display: grid;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
   margin-top: 10px;
 }
 
@@ -625,7 +634,7 @@ watch(() => props.account.purchase_date, (value) => {
   grid-template-columns: repeat(4, 40px);
   align-items: center;
   justify-content: end;
-  column-gap: 8px;
+  column-gap: var(--ocg-space-sm);
 }
 
 .account-action {
@@ -654,14 +663,14 @@ watch(() => props.account.purchase_date, (value) => {
 .custom-endpoint {
   display: grid;
   justify-items: start;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
 }
 
 .custom-endpoint__meta {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 4px 12px;
+  gap: var(--ocg-space-xs) var(--ocg-space-md);
   min-width: 0;
 }
 
@@ -676,25 +685,10 @@ watch(() => props.account.purchase_date, (value) => {
   font-size: var(--ocg-font-sm);
 }
 
-.account-credit-balance {
-  display: grid;
-  gap: 4px;
-  margin-top: 8px;
-  font-size: var(--ocg-font-sm);
-}
-
-.account-credit-balance__empty {
-  color: var(--ocg-subtle);
-}
-
-.account-credit-balance__row {
-  font-variant-numeric: tabular-nums;
-}
-
 .account-title {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
   min-width: 0;
   width: 100%;
 }
@@ -721,7 +715,7 @@ watch(() => props.account.purchase_date, (value) => {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 4px 6px;
+  gap: var(--ocg-space-xs) 6px;
   min-width: 0;
 }
 
@@ -755,14 +749,14 @@ watch(() => props.account.purchase_date, (value) => {
 .purchase-date-popover__actions {
   display: flex;
   justify-content: flex-end;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
 }
 
 .managed-pending {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: var(--ocg-space-lg);
   padding: 10px 2px 2px;
 }
 
@@ -772,13 +766,13 @@ watch(() => props.account.purchase_date, (value) => {
 }
 
 .managed-pending p {
-  margin: 4px 0 0;
+  margin: var(--ocg-space-xs) 0 0;
   color: var(--ocg-muted);
   font-size: var(--ocg-font-sm);
 }
 
 .usage-sync-meta {
-  margin: 8px 0 0;
+  margin: var(--ocg-space-sm) 0 0;
   color: var(--ocg-text-3);
   font-size: var(--ocg-font-size-12);
   line-height: 1.4;
@@ -788,7 +782,7 @@ watch(() => props.account.purchase_date, (value) => {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
   min-height: 42px;
   color: var(--ocg-error);
   font-size: var(--ocg-font-sm);
@@ -800,7 +794,7 @@ watch(() => props.account.purchase_date, (value) => {
   }
 
   .account-card :deep(.n-card-header__extra) {
-    margin-left: 8px;
+    margin-left: var(--ocg-space-sm);
   }
 }
 
@@ -812,7 +806,7 @@ watch(() => props.account.purchase_date, (value) => {
 
   .account-card :deep(.n-card-header) {
     flex-wrap: wrap;
-    gap: 8px;
+    gap: var(--ocg-space-sm);
   }
 
   .account-card :deep(.n-card-header__main),

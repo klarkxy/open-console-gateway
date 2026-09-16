@@ -55,14 +55,14 @@ export type CredentialEditorIssue =
   | "uncertain_payload_locked";
 
 export const CREDENTIAL_EDITOR_ISSUE_KEYS = {
-  missing_secret: "请填写新 Key",
-  missing_models: "请至少填写一个准确的模型名称",
+  missing_secret: "填写新 Key",
+  missing_models: "至少填写一个准确的模型名称",
   duplicate_model: "模型名称不能重复",
   model_too_long: "模型名称最多 200 个字符",
   model_has_control_character: "模型名称不能包含控制字符",
-  missing_connection: "请选择连接",
-  missing_share_target: "请选择同一身份下要共享额度的 Key",
-  uncertain_payload_locked: "提交结果未知，请用原内容重试或取消。不能改内容后再提交。",
+  missing_connection: "选择连接",
+  missing_share_target: "选择同一身份下要共享额度的 Key",
+  uncertain_payload_locked: "提交结果未知。用原内容重试或取消，勿修改后提交。",
 } as const satisfies Record<CredentialEditorIssue, MessageKey>;
 
 export class CredentialEditorError extends Error {
@@ -88,7 +88,7 @@ export type CredentialWriteSupport = {
   credential: IdentityCredential | null;
   bindingRecord: IdentityBinding | null;
   identityId: string | null;
-  unsupportedReason: string | null;
+  unsupportedReason: MessageKey | null;
 };
 
 function selectedInferenceCredential(
@@ -119,10 +119,10 @@ export function credentialWriteSupport(
     unsupportedReason: null,
   };
   if (isZenFreeAccount(account)) {
-    return { ...hidden, unsupportedReason: "Zen Free 请使用供应商设置" };
+    return { ...hidden, unsupportedReason: "Zen Free 使用供应商设置" };
   }
   if (isCpaIntegrationAccount(account)) {
-    return { ...hidden, unsupportedReason: "CPA 订阅池请使用 CPA 页面" };
+    return { ...hidden, unsupportedReason: "CPA 订阅池使用 CPA 页面" };
   }
   if (account.credential_kind === "none") {
     return { ...hidden, unsupportedReason: "无鉴权账号不支持此操作" };
@@ -166,7 +166,7 @@ export function credentialWriteSupport(
     bindingRecord,
     identityId,
     unsupportedReason: isCustomApiAccount(account)
-      ? "Custom API 请使用账号编辑，不能在此添加 Key"
+      ? "Custom API 需到账号编辑中添加 Key"
       : null,
   };
 }

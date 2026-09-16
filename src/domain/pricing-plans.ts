@@ -35,9 +35,28 @@ export type PlanPricingState =
   | "available-empty"
   | "available-table";
 
+export type PlanPricingMessageCode =
+  | "load_failed"
+  | "unavailable"
+  | "unpriced"
+  | "not_applicable"
+  | "empty"
+  | "models_note"
+  | "estimate_note";
+
+export const PLAN_PRICING_MESSAGE_KEYS: Record<PlanPricingMessageCode, MessageKey> = {
+  load_failed: "加载价格表失败：{error}",
+  unavailable: "暂无该方案的价格数据",
+  unpriced: "该方案未定价",
+  not_applicable: "该方案无需价格表",
+  empty: "暂无该方案的价格数据",
+  models_note: "仅在你主动刷新时访问官方文档，刷新失败则沿用当前快照。",
+  estimate_note: "未知价格不会参与费用估算",
+};
+
 export interface PlanPricingDisplay {
   state: PlanPricingState;
-  messageKey: MessageKey;
+  messageCode: PlanPricingMessageCode;
   error: string | null;
 }
 
@@ -63,24 +82,22 @@ export function resolvePlanPricingDisplay(
   group: PlanPricingGroup,
   error: string | null = null,
 ): PlanPricingDisplay {
-  if (error) return { state: "error", messageKey: "加载额度价格表失败: {error}", error };
+  if (error) return { state: "error", messageCode: "load_failed", error };
   if (group.pricingAvailability === "unavailable") {
-    return { state: "unavailable", messageKey: "暂无该方案的价格数据", error: null };
+    return { state: "unavailable", messageCode: "unavailable", error: null };
   }
   if (group.pricingAvailability === "unpriced") {
-    return { state: "unpriced", messageKey: "该方案未定价", error: null };
+    return { state: "unpriced", messageCode: "unpriced", error: null };
   }
   if (group.pricingAvailability === "not_applicable") {
-    return { state: "not_applicable", messageKey: "该方案无需价格表", error: null };
+    return { state: "not_applicable", messageCode: "not_applicable", error: null };
   }
   if (!contentHasRows(group.content)) {
-    return { state: "available-empty", messageKey: "暂无该方案的价格数据", error: null };
+    return { state: "available-empty", messageCode: "empty", error: null };
   }
   return {
     state: "available-table",
-    messageKey: group.content.kind === "models"
-      ? "只在你主动刷新时访问官方文档；刷新失败会继续使用当前快照。"
-      : "未知价格不会参与费用估算",
+    messageCode: group.content.kind === "models" ? "models_note" : "estimate_note",
     error: null,
   };
 }

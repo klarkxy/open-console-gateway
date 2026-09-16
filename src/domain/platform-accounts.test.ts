@@ -26,6 +26,7 @@ import {
   platformPriceForModel,
   platformPriceRows,
   platformRouteItemId,
+  PLATFORM_UNAVAILABLE_REASON_KEYS,
   platformUnavailableReasonKey,
   quotasByKind,
 } from "./platform-accounts.ts";
@@ -248,9 +249,9 @@ test("group label joins id, platform, and subscription type; empty when none", (
 });
 
 test("known unavailable reasons map to i18n keys, unknown codes stay raw", () => {
-  assert.equal(platformUnavailableReasonKey("user_identity_required"), "需要登录身份才能查看价格");
-  assert.equal(platformUnavailableReasonKey("group_model_unavailable"), "该分组不提供此模型");
-  assert.equal(platformUnavailableReasonKey("reasoning_multiplier"), "按推理强度倍率计费");
+  assert.equal(platformUnavailableReasonKey("user_identity_required"), PLATFORM_UNAVAILABLE_REASON_KEYS.user_identity_required);
+  assert.equal(platformUnavailableReasonKey("group_model_unavailable"), PLATFORM_UNAVAILABLE_REASON_KEYS.group_model_unavailable);
+  assert.equal(platformUnavailableReasonKey("reasoning_multiplier"), PLATFORM_UNAVAILABLE_REASON_KEYS.reasoning_multiplier);
   assert.equal(platformUnavailableReasonKey("some_future_code"), null);
   assert.equal(platformUnavailableReasonKey(null), null);
 });

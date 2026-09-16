@@ -127,32 +127,7 @@
             </div>
             <div class="header-actions">
               <LocaleSwitcher />
-              <n-tooltip trigger="hover" :disabled="themeMenuShown">
-                <template #trigger>
-                  <n-dropdown
-                    trigger="click"
-                    :keyboard="false"
-                    :show="themeMenuShown"
-                    :options="themeMenuOptions"
-                    :menu-props="themeMenuProps"
-                    @select="selectTheme"
-                    @update:show="updateThemeMenuShown"
-                  >
-                    <n-button
-                      circle
-                      quaternary
-                      aria-controls="theme-menu"
-                      aria-haspopup="menu"
-                      :aria-expanded="themeMenuShown"
-                      :aria-label="t('主题：{theme}', { theme: themeLabel })"
-                      @keydown.esc.prevent.stop="closeThemeMenu"
-                    >
-                      <template #icon><n-icon :component="BgColorsOutlined" /></template>
-                    </n-button>
-                  </n-dropdown>
-                </template>
-                {{ t("主题：{theme}", { theme: themeLabel }) }}
-              </n-tooltip>
+              <ThemeSwitcher v-model:theme-name="themeName" :resolved-theme="resolvedTheme" />
               <n-tooltip v-if="!localMode" trigger="hover">
                 <template #trigger>
                   <n-button
@@ -218,7 +193,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, defineAsyncComponent, h, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, defineAsyncComponent, h, onMounted, onUnmounted, ref, watch } from "vue";
 import type { Component } from "vue";
 import {
   NAlert,
@@ -240,12 +215,10 @@ import {
   darkTheme,
   useOsTheme,
 } from "naive-ui";
-import type { DropdownMenuProps, DropdownOption, MenuOption } from "naive-ui";
+import type { DropdownOption, MenuOption } from "naive-ui";
 import {
   ApiOutlined,
   AppstoreOutlined,
-  BgColorsOutlined,
-  CheckOutlined,
   DashboardOutlined,
   CloudServerOutlined,
   FileTextOutlined,
@@ -256,8 +229,8 @@ import {
   TeamOutlined,
 } from "@vicons/antd";
 import LocaleSwitcher from "./components/LocaleSwitcher.vue";
+import ThemeSwitcher from "./components/ThemeSwitcher.vue";
 import { locale, naiveDateLocale, naiveLocale, t } from "./i18n/index.ts";
-import type { MessageKey } from "./i18n/index.ts";
 import {
   DASHBOARD_AUTH_REQUIRED_EVENT,
   DASHBOARD_GONE_EVENT,
@@ -270,7 +243,6 @@ import {
   getThemeTokens,
   readTheme,
   resolveTheme,
-  THEME_OPTIONS,
   toNaiveThemeOverrides,
   writeTheme,
 } from "./theme";
@@ -307,7 +279,6 @@ const collapsed = ref(false);
 const activeKey = ref<ViewKey>(readView());
 const themeStorage = getThemeStorage();
 const themeName = ref<ThemeName>(readTheme(themeStorage));
-const themeMenuShown = ref(false);
 const mobileMenuShown = ref(false);
 const characterImage = new URL("../assets/opencode-mascot.png", import.meta.url).href;
 const authUsername = ref("");
@@ -406,43 +377,6 @@ const mobileMenuOptions = computed<DropdownOption[]>(() => {
 const currentTitle = computed(() => t(
   APP_NAVIGATION.find(({ key }) => key === activeKey.value)?.label ?? "远程浏览器",
 ));
-const themeNames = new Set<ThemeName>(THEME_OPTIONS.map(({ value }) => value));
-const themeLabel = computed(() => {
-  const selected = t((THEME_OPTIONS.find(({ value }) => value === themeName.value)?.label ?? "默认") as MessageKey);
-  if (themeName.value !== "default") return selected;
-  const resolved = t((THEME_OPTIONS.find(({ value }) => value === resolvedTheme.value)?.label ?? "皓白") as MessageKey);
-  return t("默认 · {theme}", { theme: resolved });
-});
-const themeMenuOptions = computed<DropdownOption[]>(() => THEME_OPTIONS.map((option) => ({
-  key: option.value,
-  label: t(option.label as MessageKey),
-  icon: () => h("span", {
-    "aria-hidden": "true",
-    style: {
-      display: "inline-block",
-      width: "16px",
-      height: "16px",
-      borderRadius: "50%",
-      background: option.swatch,
-      boxShadow: "inset 0 0 0 1px rgba(128, 128, 140, 0.45)",
-    },
-  }),
-  extra: themeName.value === option.value
-    ? () => h(NIcon, { component: CheckOutlined, size: 14, "aria-hidden": true })
-    : undefined,
-  props: {
-    id: `theme-menu-option-${option.value}`,
-    role: "menuitemradio",
-    tabindex: -1,
-    "aria-checked": themeName.value === option.value ? "true" : "false",
-    onKeydown: (event: KeyboardEvent) => handleThemeMenuKeydown(event, option.value),
-  },
-})));
-const themeMenuProps: DropdownMenuProps = () => ({
-  id: "theme-menu",
-  role: "menu",
-  "aria-label": t("选择主题"),
-});
 
 const pendingProviderScope = ref<ProviderScopeQuery | null | undefined>(undefined);
 
@@ -490,72 +424,6 @@ function onPopState() {
   activeKey.value = readView();
 }
 
-function selectTheme(key: string | number) {
-  if (typeof key === "string" && themeNames.has(key as ThemeName)) {
-    themeName.value = key as ThemeName;
-    if (themeMenuShown.value) {
-      themeMenuShown.value = false;
-      void nextTick(focusThemeTrigger);
-    }
-  }
-}
-
-async function updateThemeMenuShown(show: boolean) {
-  themeMenuShown.value = show;
-  if (!show) return;
-  await nextTick();
-  focusThemeMenuOption(themeName.value);
-}
-
-function focusThemeMenuOption(theme: ThemeName) {
-  document.querySelector<HTMLElement>(`#theme-menu-option-${theme}`)?.focus();
-}
-
-function focusThemeTrigger() {
-  document.querySelector<HTMLElement>('[aria-controls="theme-menu"]')?.focus();
-}
-
-function closeThemeMenu() {
-  if (!themeMenuShown.value) return;
-  themeMenuShown.value = false;
-  void nextTick(focusThemeTrigger);
-}
-
-function closeOpenThemeMenuOnEscape(event: KeyboardEvent) {
-  if (!themeMenuShown.value || event.key !== "Escape") return;
-  event.preventDefault();
-  closeThemeMenu();
-}
-
-function handleThemeMenuKeydown(event: KeyboardEvent, current: ThemeName) {
-  const index = THEME_OPTIONS.findIndex(({ value }) => value === current);
-  let nextIndex: number | undefined;
-  if (event.key === "ArrowDown" || event.key === "ArrowRight") {
-    nextIndex = (index + 1) % THEME_OPTIONS.length;
-  } else if (event.key === "ArrowUp" || event.key === "ArrowLeft") {
-    nextIndex = (index - 1 + THEME_OPTIONS.length) % THEME_OPTIONS.length;
-  } else if (event.key === "Home") {
-    nextIndex = 0;
-  } else if (event.key === "End") {
-    nextIndex = THEME_OPTIONS.length - 1;
-  } else if (event.key === "Enter" || event.key === " ") {
-    event.preventDefault();
-    event.stopPropagation();
-    selectTheme(current);
-    return;
-  } else if (event.key === "Escape") {
-    event.preventDefault();
-    event.stopPropagation();
-    closeThemeMenu();
-    return;
-  } else {
-    return;
-  }
-  event.preventDefault();
-  event.stopPropagation();
-  focusThemeMenuOption(THEME_OPTIONS[nextIndex].value);
-}
-
 function onAuthRequired(event: Event) {
   if (suppressAuthRequired) return;
   session.handleAuthRequired();
@@ -563,12 +431,12 @@ function onAuthRequired(event: Event) {
   authState.value = "login";
   authPassword.value = "";
   authPasswordConfirm.value = "";
-  authError.value = (event as CustomEvent<string>).detail || t("请重新登录");
+  authError.value = (event as CustomEvent<string>).detail || t("重新登录");
 }
 
 function onDashboardGone(event: Event) {
   const detail = (event as CustomEvent<{ guidance?: string }>).detail;
-  upgradeGuidance.value = detail?.guidance || "页面版本与服务不匹配，请刷新页面后重试；若仍失败请升级到最新版本";
+  upgradeGuidance.value = detail?.guidance || t("页面版本与服务不匹配，刷新页面后重试；仍失败请升级到最新版本");
 }
 
 async function loadAuthStatus() {
@@ -582,7 +450,7 @@ async function loadAuthStatus() {
     suppressAuthRequired = false;
   } catch (e) {
     authState.value = "login";
-    authError.value = t("连接失败: {error}", {
+    authError.value = t("连接失败：{error}", {
       error: userFacingError(e, t("无法连接到本地服务，请确认程序正在运行后重试")),
     });
   }
@@ -621,7 +489,7 @@ async function submitAuth() {
     let error = userFacingError(e, t("无法连接到本地服务，请确认程序正在运行后重试"));
     if (e instanceof DashboardRequestError) {
       if (mode === "login" && e.status === 401) error = t("用户名或密码错误");
-      if (mode === "register" && e.status === 409) error = t("管理员已经创建，请直接登录");
+      if (mode === "register" && e.status === 409) error = t("管理员已创建，直接登录");
     }
     if (mode === "login" && e instanceof DashboardRequestError && e.status === 401) {
       const status = await session.loadStatus().catch(() => null);
@@ -669,7 +537,7 @@ async function logout() {
   } catch (e) {
     suppressAuthRequired = false;
     const error = userFacingError(e, t("无法连接到本地服务，请确认程序正在运行后重试"));
-    logoutError.value = t("退出登录失败: {error}", { error });
+    logoutError.value = t("退出登录失败：{error}", { error });
   } finally {
     loggingOut.value = false;
   }
@@ -686,7 +554,6 @@ onMounted(() => {
   window.addEventListener(DASHBOARD_AUTH_REQUIRED_EVENT, onAuthRequired);
   window.addEventListener(DASHBOARD_GONE_EVENT, onDashboardGone);
   window.addEventListener("popstate", onPopState);
-  document.addEventListener("keydown", closeOpenThemeMenuOnEscape);
   void loadAuthStatus();
 });
 
@@ -694,7 +561,6 @@ onUnmounted(() => {
   window.removeEventListener(DASHBOARD_AUTH_REQUIRED_EVENT, onAuthRequired);
   window.removeEventListener(DASHBOARD_GONE_EVENT, onDashboardGone);
   window.removeEventListener("popstate", onPopState);
-  document.removeEventListener("keydown", closeOpenThemeMenuOnEscape);
 });
 </script>
 
@@ -721,9 +587,9 @@ onUnmounted(() => {
   position: relative;
   z-index: 2;
   width: min(408px, 100%);
-  padding: 32px;
+  padding: var(--ocg-space-2xl);
   border: 1px solid var(--ocg-border);
-  border-radius: 14px;
+  border-radius: var(--ocg-radius-lg);
   background: var(--ocg-surface);
   box-shadow: var(--ocg-shadow-lg);
 }
@@ -754,10 +620,10 @@ onUnmounted(() => {
   color: var(--ocg-muted);
 }
 .auth-form :deep(.n-form-item) {
-  margin-bottom: 12px;
+  margin-bottom: var(--ocg-space-md);
 }
 .auth-error {
-  margin: 0 0 12px;
+  margin: 0 0 var(--ocg-space-md);
   color: var(--ocg-error);
   font-size: var(--ocg-font-sm);
 }
@@ -781,7 +647,7 @@ onUnmounted(() => {
 .brand {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
   height: 58px;
   padding: 0 18px;
   border-bottom: 1px solid var(--ocg-border);
@@ -822,24 +688,24 @@ onUnmounted(() => {
 .header-actions {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--ocg-space-xs);
 }
 .mobile-nav {
   display: none;
   min-width: 0;
   align-items: center;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
 }
 .app-content {
   height: calc(100% - 58px);
   min-width: 0;
   min-height: 0;
-  padding: 24px;
+  padding: var(--ocg-space-xl);
   overflow-y: auto;
   background: var(--ocg-canvas);
 }
 .app-error {
-  margin-bottom: 16px;
+  margin-bottom: var(--ocg-space-lg);
 }
 
 @media (max-width: 1023px) {
@@ -860,19 +726,19 @@ onUnmounted(() => {
     max-width: 100%;
   }
   .app-header {
-    padding: 0 12px;
+    padding: 0 var(--ocg-space-md);
   }
   .app-content {
-    padding: 16px;
+    padding: var(--ocg-space-lg);
   }
 }
 
 @media (max-width: 640px) {
   .auth-page {
-    padding: 16px;
+    padding: var(--ocg-space-lg);
   }
   .auth-panel {
-    padding: 24px 20px;
+    padding: var(--ocg-space-xl) 20px;
   }
   .auth-character {
     right: -190px;
@@ -883,7 +749,7 @@ onUnmounted(() => {
     display: none;
   }
   .app-content {
-    padding: 12px;
+    padding: var(--ocg-space-md);
   }
 }
 </style>

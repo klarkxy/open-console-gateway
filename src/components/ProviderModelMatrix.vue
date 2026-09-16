@@ -70,7 +70,7 @@
               {{ t("删除") }}
             </n-button>
           </template>
-          {{ t("删除已选的 {count} 个模型？从本地目录移除后不再路由。下次刷新官方目录时，它们可能再次出现并默认关闭。", { count: selectedCount }) }}
+          {{ t("删除已选的 {count} 个模型？移除后不再路由，下次刷新官方目录时可能再次出现并默认关闭。", { count: selectedCount }) }}
         </n-popconfirm>
         <n-tooltip trigger="hover">
           <template #trigger>
@@ -113,7 +113,7 @@
             <th class="matrix-cell matrix-cell--protocol-header">
               <n-tooltip trigger="hover">
                 <template #trigger>{{ t("上游协议") }}</template>
-                {{ t("显示表示可通；蓝色为转换默认") }}
+                {{ t("显示即可通；蓝色为转换默认") }}
               </n-tooltip>
             </th>
             <th class="matrix-cell matrix-cell--state-header">{{ t("允许路由") }}</th>
@@ -200,7 +200,7 @@
                     {{ t("测试 {model}", { model: modelId }) }}
                   </n-tooltip>
                 </template>
-                {{ t("将按当前生效的协议发送一次最小真实请求测试连接，可能消耗额度；测试只作观测，不会开启路由。是否继续？") }}
+                {{ t("将按当前生效的协议发送一次最小真实请求以测试连接，可能消耗额度；仅作观测，不会启用路由。是否继续？") }}
               </n-popconfirm>
               <n-popconfirm
                 :positive-text="t('删除')"
@@ -226,7 +226,7 @@
                     {{ t("删除模型") }}
                   </n-tooltip>
                 </template>
-                {{ t("删除此模型？从本地目录移除后不再路由。下次刷新官方目录时，它可能再次出现并默认关闭。") }}
+                {{ t("删除此模型？移除后不再路由，下次刷新官方目录时可能再次出现并默认关闭。") }}
               </n-popconfirm>
             </td>
           </tr>
@@ -518,14 +518,14 @@ function runRowProbe(modelId: string): void {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 12px;
-  margin-bottom: 8px;
+  gap: var(--ocg-space-md);
+  margin-bottom: var(--ocg-space-sm);
 }
 .matrix-toolbar__filters {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 12px;
+  gap: var(--ocg-space-md);
   min-width: 0;
 }
 .matrix-search {
@@ -540,7 +540,7 @@ function runRowProbe(modelId: string): void {
   font-size: var(--ocg-font-xs);
 }
 .matrix-empty {
-  margin: 0 0 8px;
+  margin: 0 0 var(--ocg-space-sm);
   color: var(--ocg-muted);
   font-size: var(--ocg-font-xs);
 }
@@ -549,7 +549,7 @@ function runRowProbe(modelId: string): void {
   flex-wrap: nowrap;
   align-items: center;
   gap: 10px;
-  padding-left: 12px;
+  padding-left: var(--ocg-space-md);
   border-left: 1px solid var(--ocg-divider);
 }
 .matrix-select-count {
@@ -577,7 +577,7 @@ function runRowProbe(modelId: string): void {
   box-shadow: inset 2px 0 0 var(--ocg-primary);
 }
 .matrix-cell {
-  padding: 10px 12px;
+  padding: 10px var(--ocg-space-md);
   border-bottom: 1px solid var(--ocg-divider);
   text-align: left;
   vertical-align: middle;
@@ -598,7 +598,7 @@ function runRowProbe(modelId: string): void {
 .matrix-cell--select,
 .matrix-cell--select-header {
   width: 40px;
-  padding-left: 12px;
+  padding-left: var(--ocg-space-md);
   padding-right: 0;
 }
 .matrix-cell--model {
@@ -637,7 +637,7 @@ function runRowProbe(modelId: string): void {
   height: 26px;
   padding: 0 10px;
   border: 1px solid var(--ocg-border);
-  border-radius: 6px;
+  border-radius: var(--ocg-radius-sm);
   background: var(--ocg-surface);
   color: var(--ocg-muted);
   font: inherit;
@@ -675,6 +675,6 @@ function runRowProbe(modelId: string): void {
   --n-rail-color-active: var(--ocg-primary);
 }
 .matrix-status {
-  margin-bottom: 8px;
+  margin-bottom: var(--ocg-space-sm);
 }
 </style>

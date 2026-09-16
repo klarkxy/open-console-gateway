@@ -5,14 +5,16 @@ import { daysUntilDate, expiryTagType } from "./account-lifecycle.ts";
 import type { ExpiryTagType } from "./account-lifecycle.ts";
 import { isCpaIntegrationAccount, isOllamaCloudAccount, isZenFreeAccount } from "./account-providers.ts";
 import { isCustomApiAccount } from "./custom-account.ts";
-import { t } from "../i18n/index.ts";
 import type { MessageKey } from "../i18n/index.ts";
 
 /**
  * Pure presentational helpers for the account list: status/expiry tags,
- * cooldown summaries, managed-registration step labels, the quota-sync
- * captions, and the per-card overflow menu. Everything takes `now` explicitly
- * so the view's 15s clock stays the single re-render driver.
+ * cooldown summaries, managed-registration steps, the quota-sync caption,
+ * and the per-card overflow menu. Domain functions return semantic codes and
+ * raw data only — never MessageKey or t() output. The view layer maps codes
+ * through the exported `*_KEYS` tables (see src/views/account-status-text.ts).
+ * Everything takes `now` explicitly so the view's 15s clock stays the single
+ * re-render driver.
  */
 
 export type AccountStatusTagType = "success" | "warning" | "error" | "default";
@@ -24,78 +26,114 @@ export type AccountMenuOption = {
   accountName: string;
 };
 
+/** Menu labels by option key; the view renders t(ACCOUNT_MENU_LABEL_KEYS[key]). */
+export const ACCOUNT_MENU_LABEL_KEYS = {
+  "open-cpa": "前往 CPA",
+  "continue-setup": "继续注册",
+  "reset-profile": "重置官网登录状态",
+  "open-console": "打开 OpenCode 官网",
+  "open-site": "打开 Ollama 官网",
+  edit: "编辑账号",
+  reset: "重置冷却",
+  delete: "删除账号",
+} as const satisfies Record<string, MessageKey>;
+
 export function accountIsReady(account: Pick<Account, "setup_step">): boolean {
   return account.setup_step === "ready";
 }
 
-/** Shared label for ready accounts that the backend keeps as unroutable drafts. */
-export function accountRoutingDraftLabel(
+/** Backend-owned unroutable draft state for ready accounts. */
+export type RoutingDraftState = "pending" | "failed" | "unsupported";
+
+export const ROUTING_DRAFT_LABEL_KEYS: Record<RoutingDraftState, MessageKey> = {
+  pending: "待验证",
+  failed: "验证失败",
+  unsupported: "等待支持",
+};
+
+export const ROUTING_DRAFT_DESCRIPTION_KEYS: Record<RoutingDraftState, MessageKey> = {
+  pending: "该方案暂不支持验证，创建后仍为禁用草稿。",
+  failed: "验证失败，请检查 Key 或等待该方案支持验证。",
+  unsupported: "该方案暂不可路由。",
+};
+
+/** The draft state a ready but unroutable account is in; null when routable. */
+export function accountRoutingDraftState(
   account: Pick<Account, "setup_step" | "plan_routable" | "verification_status">,
-): MessageKey | null {
+): RoutingDraftState | null {
   if (!accountIsReady(account) || account.plan_routable) return null;
-  if (account.verification_status === "pending") return "待验证";
-  if (account.verification_status === "failed") return "验证失败";
-  return "等待支持";
+  if (account.verification_status === "pending") return "pending";
+  if (account.verification_status === "failed") return "failed";
+  return "unsupported";
 }
 
-/** Shared explanatory copy for the same backend-owned draft state. */
-export function accountRoutingDraftDescription(
-  account: Pick<Account, "setup_step" | "plan_routable" | "verification_status">,
-): MessageKey | null {
-  if (!accountRoutingDraftLabel(account)) return null;
-  if (account.verification_status === "pending") {
-    return "该方案验证功能暂不可用，创建后保持禁用草稿。";
-  }
-  if (account.verification_status === "failed") {
-    return "验证失败，请检查 Key 或等待该方案支持验证。";
-  }
-  return "该方案暂不可路由。";
-}
+/** Structured cooldown remainder; the view formats it via t() unit keys. */
+export type CooldownRemaining =
+  | { unit: "seconds"; seconds: number }
+  | { unit: "minutes"; minutes: number }
+  | { unit: "hours-minutes"; hours: number; minutes: number }
+  | { unit: "days-hours"; days: number; hours: number };
 
-export function formatCooldownRemainingUntil(until: string | null, now = Date.now()): string {
-  if (!until) return "";
+export function cooldownRemainingUntil(
+  until: string | null,
+  now = Date.now(),
+): CooldownRemaining | null {
+  if (!until) return null;
   const ms = new Date(until).getTime() - now;
-  if (ms <= 0) return t("{seconds}秒", { seconds: 0 });
+  if (ms <= 0) return { unit: "seconds", seconds: 0 };
   const seconds = Math.ceil(ms / 1000);
-  if (seconds < 60) return t("{seconds}秒", { seconds });
+  if (seconds < 60) return { unit: "seconds", seconds };
   const min = Math.floor(ms / 60000);
-  if (min < 60) return t("{minutes}分钟", { minutes: min });
+  if (min < 60) return { unit: "minutes", minutes: min };
   const hr = Math.floor(min / 60);
-  if (hr < 24) return t("{hours}小时{minutes}分钟", { hours: hr, minutes: min % 60 });
+  if (hr < 24) return { unit: "hours-minutes", hours: hr, minutes: min % 60 };
   const day = Math.floor(hr / 24);
-  return t("{days}天{hours}小时", { days: day, hours: hr % 24 });
+  return { unit: "days-hours", days: day, hours: hr % 24 };
 }
 
-export function formatCooldownRemaining(
+export function cooldownRemaining(
   account: Pick<Account, "cooldown_until">,
   now = Date.now(),
-): string {
-  return formatCooldownRemainingUntil(account.cooldown_until, now);
+): CooldownRemaining | null {
+  return cooldownRemainingUntil(account.cooldown_until, now);
 }
 
-export function accountStatusLabel(account: Account, now = Date.now()): string {
+/** The single status an account card presents right now. */
+export type AccountStatus =
+  | { kind: "enabled" }
+  | { kind: "disabled" }
+  | { kind: "registering" }
+  | { kind: "unavailable" }
+  | { kind: "disabled-unavailable" }
+  | { kind: "cooling"; remaining: CooldownRemaining }
+  | { kind: "draft"; state: RoutingDraftState };
+
+const ZERO_REMAINING: CooldownRemaining = { unit: "seconds", seconds: 0 };
+
+export function accountStatus(account: Account, now = Date.now()): AccountStatus {
   if (isZenFreeAccount(account)) {
-    if (!account.enabled) return t("已禁用");
+    if (!account.enabled) return { kind: "disabled" };
     if (isFreeCooling(account, now)) {
-      return t("冷却中·剩 {time}", {
-        time: formatCooldownRemainingUntil(account.cooldown_free_until, now),
-      });
+      return {
+        kind: "cooling",
+        remaining: cooldownRemainingUntil(account.cooldown_free_until, now) ?? ZERO_REMAINING,
+      };
     }
-    return t("已启用");
+    return { kind: "enabled" };
   }
-  if (!accountIsReady(account)) return t("注册中");
-  const draftLabel = accountRoutingDraftLabel(account);
-  if (draftLabel) return t(draftLabel);
+  if (!accountIsReady(account)) return { kind: "registering" };
+  const draftState = accountRoutingDraftState(account);
+  if (draftState) return { kind: "draft", state: draftState };
   if (account.auth_error) {
-    return account.enabled
-      ? t("不可用")
-      : `${t("已禁用")} · ${t("不可用")}`;
+    return account.enabled ? { kind: "unavailable" } : { kind: "disabled-unavailable" };
   }
-  if (!account.enabled) return t("已禁用");
-  if (isCooling(account, now)) return t("冷却中·剩 {time}", { time: formatCooldownRemaining(account, now) });
+  if (!account.enabled) return { kind: "disabled" };
+  if (isCooling(account, now)) {
+    return { kind: "cooling", remaining: cooldownRemaining(account, now) ?? ZERO_REMAINING };
+  }
   // Ready + enabled is a configuration state, not a verified-availability
   // claim: no connection test evidence is implied.
-  return t("已启用");
+  return { kind: "enabled" };
 }
 
 export function accountStatusTagType(account: Account, now = Date.now()): AccountStatusTagType {
@@ -104,8 +142,8 @@ export function accountStatusTagType(account: Account, now = Date.now()): Accoun
     return isFreeCooling(account, now) ? "warning" : "success";
   }
   if (!accountIsReady(account)) return "warning";
-  const draftLabel = accountRoutingDraftLabel(account);
-  if (draftLabel) return draftLabel === "验证失败" ? "error" : "warning";
+  const draftState = accountRoutingDraftState(account);
+  if (draftState) return draftState === "failed" ? "error" : "warning";
   if (account.auth_error) return "error";
   if (!account.enabled) return "error";
   if (isCooling(account, now)) return "warning";
@@ -120,57 +158,76 @@ export function accountExpiryTagType(account: Pick<Account, "expires_on">, now =
   return expiryTagType(accountExpiryDays(account, now));
 }
 
-export function accountExpiryLabel(account: Pick<Account, "expires_on">, now = Date.now()): string {
+/** Expiry state with the raw day count; singular/plural copy stays in the view. */
+export type AccountExpiry =
+  | { kind: "unset" }
+  | { kind: "remaining"; days: number }
+  | { kind: "today" }
+  | { kind: "expired"; days: number };
+
+export function accountExpiry(account: Pick<Account, "expires_on">, now = Date.now()): AccountExpiry {
   const days = accountExpiryDays(account, now);
-  if (!Number.isFinite(days)) return t("未设置");
-  if (days === 1) return t("剩 1 天");
-  if (days > 0) return t("剩 {days} 天", { days });
-  if (days === 0) return t("今天到期");
-  if (days === -1) return t("已到期 1 天");
-  return t("已到期 {days} 天", { days: Math.abs(days) });
+  if (!Number.isFinite(days)) return { kind: "unset" };
+  if (days > 0) return { kind: "remaining", days };
+  if (days === 0) return { kind: "today" };
+  return { kind: "expired", days: Math.abs(days) };
 }
+
+/**
+ * One segment of the cooldown tooltip. Window labels are caller-provided
+ * display text; "generic"/"free" are codes the view maps through t().
+ */
+export type CooldownDetailSegment =
+  | { kind: "generic" }
+  | { kind: "window"; label: string }
+  | { kind: "free" };
 
 export function cooldownDetails(
   account: Account,
   now: number,
   limits: Array<{ key: UsageKey; label: string }>,
-): string {
-  const active = limits
-    .filter((limit) => isWindowCooling(account, limit.key, now))
-    .map((limit) => limit.label);
+): CooldownDetailSegment[] {
+  const segments: CooldownDetailSegment[] = [];
   if (
     account.cooldown_generic_until
     && Date.parse(account.cooldown_generic_until) > now
   ) {
-    active.unshift(t("冷却中"));
+    segments.push({ kind: "generic" });
+  }
+  for (const limit of limits) {
+    if (isWindowCooling(account, limit.key, now)) {
+      segments.push({ kind: "window", label: limit.label });
+    }
   }
   if (isFreeCooling(account, now)) {
-    active.push(t("Free"));
+    segments.push({ kind: "free" });
   }
-  return active.length > 0 ? active.join(" · ") : t("冷却中");
+  if (segments.length === 0) segments.push({ kind: "generic" });
+  return segments;
 }
 
-export function managedStepLabel(step: AccountSetupStep): string {
-  switch (step) {
-    case "google_account": return t("待完成：登录身份");
-    case "opencode_registration": return t("待完成：邀请注册");
-    case "payment": return t("待完成：支付");
-    case "key_verification": return t("待完成：验证 Key");
-    case "ready": return t("注册完成");
-  }
-}
+/** Managed-registration step labels; the step id itself is the semantic code. */
+export const MANAGED_STEP_LABEL_KEYS: Record<AccountSetupStep, MessageKey> = {
+  google_account: "待完成：登录身份",
+  opencode_registration: "待完成：邀请注册",
+  payment: "待完成：支付",
+  key_verification: "待完成：验证 Key",
+  ready: "注册完成",
+};
 
-function formatUsageSyncTime(value: string | null | undefined): string {
-  if (!value) return t("尚未官方同步");
+/** Quota-sync caption state; `time` is locale-formatted data, not copy. */
+export type UsageSyncStatus = { kind: "never" } | { kind: "synced"; time: string };
+
+function formatUsageSyncTime(value: string): string {
   const ts = Date.parse(value);
   if (!Number.isFinite(ts)) return value;
   return new Date(ts).toLocaleString();
 }
 
-export function usageSyncCaption(account: Account): string {
+export function usageSyncStatus(account: Account): UsageSyncStatus {
   return account.usage_sync_last_success_at
-    ? t("上次官方同步: {time}", { time: formatUsageSyncTime(account.usage_sync_last_success_at) })
-    : t("尚未官方同步");
+    ? { kind: "synced", time: formatUsageSyncTime(account.usage_sync_last_success_at) }
+    : { kind: "never" };
 }
 
 export function accountMenuOptions(account: Account, now = Date.now()): AccountMenuOption[] {
@@ -178,7 +235,7 @@ export function accountMenuOptions(account: Account, now = Date.now()): AccountM
   // CPA is a static external-integration singleton. Account ordering and its
   // enabled switch stay here; all other controls live on the CPA page.
   if (isCpaIntegrationAccount(account)) {
-    options.push({ key: "open-cpa", label: t("前往 CPA"), accountId: account.id, accountName: account.name });
+    options.push({ key: "open-cpa", accountId: account.id, accountName: account.name });
     return options;
   }
   // The built-in Zen Free singleton has no Key/profile/console actions.
@@ -187,19 +244,17 @@ export function accountMenuOptions(account: Account, now = Date.now()): AccountM
     // Custom API has no OpenCode console, browser profile, or managed setup;
     // keep only the generic lifecycle actions.
     if (accountIsReady(account)) {
-      options.push({ key: "edit", label: t("编辑账号"), accountId: account.id, accountName: account.name });
+      options.push({ key: "edit", accountId: account.id, accountName: account.name });
     }
     if (accountIsReady(account) && isCooling(account, now)) {
       options.push({
         key: "reset",
-        label: t("重置冷却"),
         accountId: account.id,
         accountName: account.name,
       });
     }
     options.push({
       key: "delete",
-      label: t("删除账号"),
       accountId: account.id,
       accountName: account.name,
     });
@@ -212,19 +267,16 @@ export function accountMenuOptions(account: Account, now = Date.now()): AccountM
   if (isOpencodeGo && !accountIsReady(account)) {
     options.push({
       key: "continue-setup",
-      label: t("继续注册"),
       accountId: account.id,
       accountName: account.name,
     });
     options.push({
       key: "reset-profile",
-      label: t("重置官网登录状态"),
       accountId: account.id,
       accountName: account.name,
     });
     options.push({
       key: "delete",
-      label: t("删除账号"),
       accountId: account.id,
       accountName: account.name,
     });
@@ -234,7 +286,6 @@ export function accountMenuOptions(account: Account, now = Date.now()): AccountM
     if (isOpencodeGo) {
       options.push({
         key: "open-console",
-        label: t("打开 OpenCode 官网"),
         accountId: account.id,
         accountName: account.name,
       });
@@ -242,16 +293,14 @@ export function accountMenuOptions(account: Account, now = Date.now()): AccountM
     if (isOllamaCloudAccount(account)) {
       options.push({
         key: "open-site",
-        label: t("打开 Ollama 官网"),
         accountId: account.id,
         accountName: account.name,
       });
     }
-    options.push({ key: "edit", label: t("编辑账号"), accountId: account.id, accountName: account.name });
+    options.push({ key: "edit", accountId: account.id, accountName: account.name });
     if (isCooling(account, now)) {
       options.push({
         key: "reset",
-        label: t("重置冷却"),
         accountId: account.id,
         accountName: account.name,
       });
@@ -259,18 +308,16 @@ export function accountMenuOptions(account: Account, now = Date.now()): AccountM
     if (isOpencodeGo) {
       options.push({
         key: "reset-profile",
-        label: t("重置官网登录状态"),
         accountId: account.id,
         accountName: account.name,
       });
     }
   } else {
     // Non-OpenCode families have no setup flow; keep the draft editable.
-    options.push({ key: "edit", label: t("编辑账号"), accountId: account.id, accountName: account.name });
+    options.push({ key: "edit", accountId: account.id, accountName: account.name });
   }
   options.push({
     key: "delete",
-    label: t("删除账号"),
     accountId: account.id,
     accountName: account.name,
   });

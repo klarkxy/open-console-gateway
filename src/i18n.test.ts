@@ -37,6 +37,29 @@ const localeCatalogs = {
   "ru-RU": ruRUMessages,
 } as const;
 
+function placeholderNames(template: string): string[] {
+  return [...template.matchAll(/\{(\w+)\}/g)].map((match) => match[1]!);
+}
+
+function applyParams(template: string, params: Record<string, string>): string {
+  return template.replace(/\{(\w+)\}/g, (token, name: string) => params[name] ?? token);
+}
+
+// Assertions must not pin copy: pick a catalog key that has at least one
+// placeholder and a real (non-identity) translation, then derive every
+// expected rendering from the catalogs at runtime.
+function pickInterpolatedKey(): { key: MessageKey; params: Record<string, string> } {
+  const key = Object.keys(enUSMessages).find(
+    (candidate) => (
+      placeholderNames(candidate).length > 0
+      && localeCatalogs["en-US"][candidate as MessageKey] !== candidate
+    ),
+  );
+  assert.ok(key, "catalog contains a key with a placeholder and a non-identity translation");
+  const params = Object.fromEntries(placeholderNames(key).map((name) => [name, `<${name}>`]));
+  return { key: key as MessageKey, params };
+}
+
 test("locale matching uses stored preference, browser languages, and a stable fallback", () => {
   assert.equal(matchLocale("zh-Hant-HK"), "zh-TW");
   assert.equal(matchLocale("pt_PT"), "pt-BR");
@@ -72,10 +95,18 @@ test("all locale catalogs have identical keys and placeholders", () => {
 });
 
 test("translations react to locale changes and preserve interpolation", () => {
+  const { key, params } = pickInterpolatedKey();
+  const enExpected = applyParams(enUSMessages[key], params);
+  const zhExpected = applyParams(key, params);
+
   setLocale("en-US");
-  assert.equal(t("已复制 {label}", { label: "API Base URL" }), "Copied API Base URL");
+  const enRendered = t(key, params);
   setLocale("zh-CN");
-  assert.equal(t("已复制 {label}", { label: "Key" }), "已复制 Key");
+  const zhRendered = t(key, params);
+
+  assert.equal(enRendered, enExpected);
+  assert.equal(zhRendered, zhExpected);
+  assert.notEqual(enRendered, zhRendered, "the rendered message must follow the active locale");
 });
 
 test("a late lazy locale load cannot override a later locale selection", async () => {
@@ -85,7 +116,8 @@ test("a late lazy locale load cannot override a later locale selection", async (
   await new Promise<void>((resolve) => setTimeout(resolve, 0));
 
   assert.equal(locale.value, "en-US");
-  assert.equal(t("已复制 {label}", { label: "Key" }), "Copied Key");
+  const { key, params } = pickInterpolatedKey();
+  assert.equal(t(key, params), applyParams(enUSMessages[key], params));
 });
 
 test("USD costs use the narrow dollar symbol and preserve requested precision", () => {

@@ -82,8 +82,8 @@ useLocalizedModalCloseLabel(
 
 .form-surface-embedded__footer {
   flex: none;
-  margin-top: 12px;
-  padding-top: 12px;
+  margin-top: var(--ocg-space-md);
+  padding-top: var(--ocg-space-md);
   border-top: 1px solid var(--ocg-border);
 }
 </style>

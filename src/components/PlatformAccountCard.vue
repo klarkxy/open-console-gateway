@@ -26,7 +26,7 @@
             </n-button>
           </template>
           {{ orderHandleDisabled
-            ? t("添加 Key 后可拖动此账号参与路由顺序")
+            ? t("添加 Key 后可拖动此账号调整路由顺序")
             : t("拖动调整账号 {name} 的优先级", { name: parent.name }) }}
         </n-tooltip>
         <div class="account-heading">
@@ -78,9 +78,6 @@
     </template>
 
     <div class="platform-parent-body">
-      <p class="platform-hint">
-        {{ t("此站点是一个账号。多个 Key 按你排出的顺序路由；上游已做协议转换，不必再为每个 Key 选择协议。") }}
-      </p>
       <n-alert
         v-if="parent.snapshot && parent.snapshot.errors.length > 0"
         type="warning"
@@ -91,9 +88,9 @@
       <div v-if="parent.snapshot" class="platform-observed">
         {{ t("观测时间：{time}", { time: observedText(parent.snapshot) }) }}
       </div>
-      <div v-else class="platform-observed">{{ t("尚无平台数据，请手动刷新。") }}</div>
+      <div v-else class="platform-observed">{{ t("尚无平台数据，点「刷新」获取。") }}</div>
       <p v-if="!parent.hasUserCredential" class="platform-hint">
-        {{ t("未填写用户凭证时无法读取账号钱包。刷新各 Key 可获取该 Key 的剩余额度。") }}
+        {{ t("未填写用户凭证，无法读取账号钱包。") }}
       </p>
 
       <template v-if="parent.snapshot">
@@ -134,8 +131,8 @@
         </div>
         <p v-if="overlay.uniqueIds.length > 0" class="platform-hint">
           {{ overlay.sharedIds.length > 0
-            ? t("{unique} 个不重复模型，其中 {shared} 个由多把 Key 共同提供。请求按 Key 顺序叠加失败切换，各 Key 使用自己的倍率。", { unique: overlay.uniqueIds.length, shared: overlay.sharedIds.length })
-            : t("{unique} 个不重复模型。各 Key 的模型列表目前没有重叠。", { unique: overlay.uniqueIds.length }) }}
+            ? t("共 {unique} 个模型，{shared} 个由多把 Key 提供。", { unique: overlay.uniqueIds.length, shared: overlay.sharedIds.length })
+            : t("共 {unique} 个模型。", { unique: overlay.uniqueIds.length }) }}
         </p>
         <n-alert
           v-if="pendingLink && pendingLink.parentId === parent.id"
@@ -150,7 +147,7 @@
           </div>
         </n-alert>
         <div v-if="keys.length === 0 && pendingLink?.parentId !== parent.id" class="platform-hint">
-          {{ t("添加 Key 后会按该 Key 拉取可用模型，并按此账号在列表中的位置参与路由。") }}
+          {{ t("尚无关联 Key。") }}
         </div>
         <div v-for="(account, index) in keys" :key="account.id" class="platform-child">
           <div class="platform-child-head">
@@ -219,7 +216,7 @@
           <div v-if="linkOf(account.id)?.snapshot" class="platform-hint">
             {{ t("观测时间：{time}", { time: observedText(linkOf(account.id)!.snapshot!) }) }}
           </div>
-          <div v-else class="platform-hint">{{ t("尚无 Key 快照，请手动刷新。刷新后可看到剩余额度、站点分组和 Key 名称。") }}</div>
+          <div v-else class="platform-hint">{{ t("尚无快照，点「刷新」获取。") }}</div>
           <template v-if="linkOf(account.id)?.snapshot">
             <div class="platform-block">
               <div class="platform-block-title">{{ t(quotaKindKeys.key_limit as MessageKey) }}</div>
@@ -376,7 +373,7 @@ function observedText(snapshot: PlatformSnapshot): string {
 .account-title {
   display: flex;
   align-items: flex-start;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
   min-width: 0;
 }
 
@@ -390,7 +387,7 @@ function observedText(snapshot: PlatformSnapshot): string {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
 }
 
 .account-name {
@@ -408,7 +405,7 @@ function observedText(snapshot: PlatformSnapshot): string {
 
 .platform-parent-body {
   display: grid;
-  gap: 12px;
+  gap: var(--ocg-space-md);
 }
 
 .platform-block {
@@ -441,7 +438,7 @@ function observedText(snapshot: PlatformSnapshot): string {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
 }
 
 .platform-pending-link {
@@ -449,22 +446,22 @@ function observedText(snapshot: PlatformSnapshot): string {
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
 }
 
 .platform-child {
   display: grid;
-  gap: 4px;
-  padding: 8px;
+  gap: var(--ocg-space-xs);
+  padding: var(--ocg-space-sm);
   border: 1px solid var(--ocg-border);
-  border-radius: 10px;
+  border-radius: var(--ocg-radius-md);
 }
 
 .platform-child-head {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
 }
 
 .platform-child-name {

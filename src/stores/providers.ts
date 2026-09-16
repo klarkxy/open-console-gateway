@@ -5,10 +5,12 @@ import { isRevisionConflict } from "../api/dashboard.ts";
 import { providerApi } from "../api/providers.ts";
 import type {
   ContractScopeKind,
+  EffectiveModelContract,
   ModelProtocolOverrideUpdate,
   ProviderCatalogEntry,
   ProviderContractsResponse,
 } from "../api/providers.ts";
+import { applyModelContractToResponse, type ProviderScopeRef } from "../domain/provider-contracts.ts";
 
 /**
  * Provider catalog and contract fetches used by Providers and Aliases.
@@ -110,6 +112,15 @@ export const useProvidersStore = defineStore("providers", () => {
     }
   }
 
+  // A successful probe returns the effective contract of one model; merge it
+  // in place and invalidate pending loads like any other mutation commit.
+  function applyModelContract(scope: ProviderScopeRef, contract: EffectiveModelContract): void {
+    if (!contracts.value) return;
+    contractsGeneration += 1;
+    contracts.value = applyModelContractToResponse(contracts.value, scope, contract);
+    loading.value = false;
+  }
+
   return {
     catalog: computed(() => catalog.value),
     contracts: computed(() => contracts.value),
@@ -122,5 +133,6 @@ export const useProvidersStore = defineStore("providers", () => {
     refreshContractCatalog,
     removeContractCatalogModels,
     putModelProtocolOverrides,
+    applyModelContract,
   };
 });

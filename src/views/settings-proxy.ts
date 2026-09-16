@@ -59,7 +59,7 @@ export function validateProxyList(
   }
   const unknown = [...new Set(cleaned.filter((model) => !supportedIds.includes(model)))];
   if (unknown.length > 0) {
-    throw new Error(`名单包含未知模型：${unknown.join("、")}`);
+    throw new Error("名单包含未知模型");
   }
   return [...new Set(cleaned)];
 }

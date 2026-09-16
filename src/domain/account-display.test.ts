@@ -1,15 +1,21 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { Account } from "../api/dashboard.ts";
+import type { Account, AccountSetupStep } from "../api/dashboard.ts";
 import {
-  accountExpiryLabel,
+  ACCOUNT_MENU_LABEL_KEYS,
+  MANAGED_STEP_LABEL_KEYS,
+  ROUTING_DRAFT_DESCRIPTION_KEYS,
+  ROUTING_DRAFT_LABEL_KEYS,
+  accountExpiry,
   accountMenuOptions,
-  accountRoutingDraftDescription,
-  accountRoutingDraftLabel,
-  accountStatusLabel,
+  accountRoutingDraftState,
+  accountStatus,
   accountStatusTagType,
-  usageSyncCaption,
+  cooldownDetails,
+  cooldownRemainingUntil,
+  usageSyncStatus,
 } from "./account-display.ts";
+import { localDateString } from "./account-lifecycle.ts";
 
 function draftAccount(overrides: Partial<Account> = {}): Account {
   return {
@@ -48,50 +54,147 @@ function draftAccount(overrides: Partial<Account> = {}): Account {
   };
 }
 
-test("missing expiry date is unlabeled rather than zero days overdue", () => {
-  assert.equal(accountExpiryLabel(draftAccount({ expires_on: "" })), "未设置");
+test("missing expiry date is unset rather than zero days overdue", () => {
+  assert.deepEqual(accountExpiry(draftAccount({ expires_on: "" })), { kind: "unset" });
+});
+
+test("expiry state carries raw day counts for remaining, today, and overdue", () => {
+  const now = Date.parse("2026-09-01T12:00:00Z");
+  const offsetLocalDate = (days: number) => {
+    const date = new Date(now);
+    date.setDate(date.getDate() + days);
+    return localDateString(date);
+  };
+  assert.deepEqual(
+    accountExpiry(draftAccount({ expires_on: offsetLocalDate(3) }), now),
+    { kind: "remaining", days: 3 },
+  );
+  assert.deepEqual(
+    accountExpiry(draftAccount({ expires_on: offsetLocalDate(1) }), now),
+    { kind: "remaining", days: 1 },
+  );
+  assert.deepEqual(
+    accountExpiry(draftAccount({ expires_on: offsetLocalDate(0) }), now),
+    { kind: "today" },
+  );
+  assert.deepEqual(
+    accountExpiry(draftAccount({ expires_on: offsetLocalDate(-4) }), now),
+    { kind: "expired", days: 4 },
+  );
 });
 
 test("unroutable account drafts use verification status rather than provider-specific branches", () => {
   const base = { setup_step: "ready" as const, plan_routable: false };
   assert.equal(
-    accountRoutingDraftLabel({ ...base, verification_status: "pending" }),
-    "待验证",
+    accountRoutingDraftState({ ...base, verification_status: "pending" }),
+    "pending",
   );
   assert.equal(
-    accountRoutingDraftDescription({ ...base, verification_status: "pending" }),
-    "该方案验证功能暂不可用，创建后保持禁用草稿。",
+    accountRoutingDraftState({ ...base, verification_status: "failed" }),
+    "failed",
   );
   assert.equal(
-    accountRoutingDraftLabel({ ...base, verification_status: "failed" }),
-    "验证失败",
+    accountRoutingDraftState({ ...base, verification_status: "not_required" }),
+    "unsupported",
   );
   assert.equal(
-    accountRoutingDraftLabel({ ...base, verification_status: "not_required" }),
-    "等待支持",
-  );
-  assert.equal(
-    accountRoutingDraftLabel({ ...base, plan_routable: true, verification_status: "verified" }),
+    accountRoutingDraftState({ ...base, plan_routable: true, verification_status: "verified" }),
     null,
   );
 });
 
+test("routing draft maps cover every state with distinct keys", () => {
+  const states = ["pending", "failed", "unsupported"];
+  assert.deepEqual(Object.keys(ROUTING_DRAFT_LABEL_KEYS).sort(), [...states].sort());
+  assert.deepEqual(Object.keys(ROUTING_DRAFT_DESCRIPTION_KEYS).sort(), [...states].sort());
+  assert.equal(new Set(Object.values(ROUTING_DRAFT_LABEL_KEYS)).size, states.length);
+  assert.equal(new Set(Object.values(ROUTING_DRAFT_DESCRIPTION_KEYS)).size, states.length);
+});
+
 test("draft status replaces disabled instead of rendering a second competing state", () => {
   const pending = draftAccount();
-  assert.equal(accountStatusLabel(pending), "待验证");
+  assert.deepEqual(accountStatus(pending), { kind: "draft", state: "pending" });
   assert.equal(accountStatusTagType(pending), "warning");
 
   const unsupported = draftAccount({ verification_status: "not_required" });
-  assert.equal(accountStatusLabel(unsupported), "等待支持");
+  assert.deepEqual(accountStatus(unsupported), { kind: "draft", state: "unsupported" });
   assert.equal(accountStatusTagType(unsupported), "warning");
 
   const failed = draftAccount({ verification_status: "failed" });
-  assert.equal(accountStatusLabel(failed), "验证失败");
+  assert.deepEqual(accountStatus(failed), { kind: "draft", state: "failed" });
   assert.equal(accountStatusTagType(failed), "error");
 
   const ordinaryDisabled = draftAccount({ plan_routable: true, verification_status: "verified" });
-  assert.equal(accountStatusLabel(ordinaryDisabled), "已禁用");
+  assert.deepEqual(accountStatus(ordinaryDisabled), { kind: "disabled" });
   assert.equal(accountStatusTagType(ordinaryDisabled), "error");
+});
+
+test("cooling status carries the structured remaining time", () => {
+  const now = Date.parse("2026-09-01T00:00:00Z");
+  const cooling = draftAccount({
+    plan_routable: true,
+    verification_status: "verified",
+    enabled: true,
+    cooldown_until: new Date(now + 90_000).toISOString(),
+  });
+  assert.deepEqual(accountStatus(cooling, now), {
+    kind: "cooling",
+    remaining: { unit: "minutes", minutes: 1 },
+  });
+  assert.equal(accountStatusTagType(cooling, now), "warning");
+});
+
+test("cooldown remaining buckets by magnitude", () => {
+  const now = Date.parse("2026-09-01T00:00:00Z");
+  const at = (ms: number) => new Date(now + ms).toISOString();
+  assert.equal(cooldownRemainingUntil(null, now), null);
+  assert.deepEqual(cooldownRemainingUntil(at(-1_000), now), { unit: "seconds", seconds: 0 });
+  assert.deepEqual(cooldownRemainingUntil(at(30_000), now), { unit: "seconds", seconds: 30 });
+  assert.deepEqual(cooldownRemainingUntil(at(90_000), now), { unit: "minutes", minutes: 1 });
+  assert.deepEqual(
+    cooldownRemainingUntil(at(90 * 60_000), now),
+    { unit: "hours-minutes", hours: 1, minutes: 30 },
+  );
+  assert.deepEqual(
+    cooldownRemainingUntil(at(50 * 3_600_000), now),
+    { unit: "days-hours", days: 2, hours: 2 },
+  );
+});
+
+test("cooldown details order generic, windows, free, and fall back to generic", () => {
+  const now = Date.parse("2026-09-01T00:00:00Z");
+  const at = (ms: number) => new Date(now + ms).toISOString();
+  const limits = [
+    { key: "window_5h" as const, label: "L5" },
+    { key: "window_week" as const, label: "LW" },
+  ];
+  const both = draftAccount({
+    cooldown_generic_until: at(60_000),
+    cooldown_5h_until: at(120_000),
+    cooldown_free_until: at(180_000),
+  });
+  assert.deepEqual(cooldownDetails(both, now, limits), [
+    { kind: "generic" },
+    { kind: "window", label: "L5" },
+    { kind: "free" },
+  ]);
+  const windowOnly = draftAccount({ cooldown_week_until: at(120_000) });
+  assert.deepEqual(cooldownDetails(windowOnly, now, limits), [
+    { kind: "window", label: "LW" },
+  ]);
+  assert.deepEqual(cooldownDetails(draftAccount(), now, limits), [{ kind: "generic" }]);
+});
+
+test("managed step label keys cover every setup step with distinct copy", () => {
+  const steps: AccountSetupStep[] = [
+    "google_account",
+    "opencode_registration",
+    "payment",
+    "key_verification",
+    "ready",
+  ];
+  assert.deepEqual(Object.keys(MANAGED_STEP_LABEL_KEYS).sort(), [...steps].sort());
+  assert.equal(new Set(Object.values(MANAGED_STEP_LABEL_KEYS)).size, steps.length);
 });
 
 test("CPA accounts expose only the jump to their external-integration page", () => {
@@ -138,6 +241,52 @@ test("Ollama cards drop OpenCode-only console and profile actions but keep gener
   );
 });
 
+test("every emitted menu option is label-free in the domain and has a label key", () => {
+  const now = Date.now();
+  const scenarios = [
+    draftAccount({
+      id: "00000000-0000-0000-0000-000000000003",
+      provider_id: "cpa",
+      plan_routable: true,
+      verification_status: "verified",
+    }),
+    draftAccount({ id: "custom-1", plan_routable: true }),
+    draftAccount({
+      id: "ollama-1",
+      provider_id: "ollama",
+      enabled: true,
+      plan_routable: true,
+      verification_status: "not_required",
+      cooldown_until: new Date(now + 60_000).toISOString(),
+    }),
+    draftAccount({ id: "go-1", provider_id: "opencode", setup_step: "google_account" }),
+    draftAccount({
+      id: "go-2",
+      provider_id: "opencode",
+      enabled: true,
+      plan_routable: true,
+      verification_status: "verified",
+      cooldown_until: new Date(now + 60_000).toISOString(),
+    }),
+  ];
+  const emittedKeys = new Set(
+    scenarios.flatMap((account) => accountMenuOptions(account, now).map((option) => option.key)),
+  );
+  for (const account of scenarios) {
+    for (const option of accountMenuOptions(account, now)) {
+      assert.equal(option.label, undefined);
+    }
+  }
+  for (const key of emittedKeys) {
+    assert.ok(
+      Object.prototype.hasOwnProperty.call(ACCOUNT_MENU_LABEL_KEYS, String(key)),
+      `missing label key for menu option ${String(key)}`,
+    );
+  }
+  const labelValues = Object.values(ACCOUNT_MENU_LABEL_KEYS);
+  assert.equal(new Set(labelValues).size, labelValues.length);
+});
+
 test("routable Custom accounts follow live enablement rather than legacy verification state", () => {
   const custom = (overrides: Partial<Account> = {}) => draftAccount({
     id: "custom-1",
@@ -149,10 +298,10 @@ test("routable Custom accounts follow live enablement rather than legacy verific
   });
 
   const pending = custom();
-  assert.equal(accountStatusLabel(pending), "已禁用");
+  assert.deepEqual(accountStatus(pending), { kind: "disabled" });
   assert.equal(accountStatusTagType(pending), "error");
-  assert.equal(accountStatusLabel(custom({ verification_status: "failed" })), "已禁用");
-  assert.equal(accountStatusLabel(custom({ verification_status: "verified" })), "已禁用");
+  assert.deepEqual(accountStatus(custom({ verification_status: "failed" })), { kind: "disabled" });
+  assert.deepEqual(accountStatus(custom({ verification_status: "verified" })), { kind: "disabled" });
   assert.deepEqual(accountMenuOptions(custom(), Date.now()).map(({ key }) => key), ["edit", "delete"]);
 });
 
@@ -166,12 +315,12 @@ test("GOAT account states are live without a verification phase", () => {
     ...overrides,
   });
 
-  assert.equal(accountStatusLabel(goat()), "已禁用");
+  assert.deepEqual(accountStatus(goat()), { kind: "disabled" });
   assert.equal(accountStatusTagType(goat()), "error");
   // Ready + enabled is the routing-on configuration state, not an availability claim.
-  assert.equal(accountStatusLabel(goat({ enabled: true })), "已启用");
+  assert.deepEqual(accountStatus(goat({ enabled: true })), { kind: "enabled" });
   assert.equal(accountStatusTagType(goat({ enabled: true })), "success");
-  assert.equal(accountStatusLabel(goat({ plan_routable: false })), "等待支持");
+  assert.deepEqual(accountStatus(goat({ plan_routable: false })), { kind: "draft", state: "unsupported" });
 });
 
 test("upstream auth failure is a distinct unavailable state, not cooldown", () => {
@@ -181,27 +330,32 @@ test("upstream auth failure is a distinct unavailable state, not cooldown", () =
     enabled: true,
     auth_error: "401",
   });
-  assert.equal(accountStatusLabel(broken), "不可用");
+  assert.deepEqual(accountStatus(broken), { kind: "unavailable" });
   assert.equal(accountStatusTagType(broken), "error");
-  assert.equal(
-    accountStatusLabel({ ...broken, enabled: false }),
-    "已禁用 · 不可用",
-  );
+  assert.deepEqual(accountStatus({ ...broken, enabled: false }), { kind: "disabled-unavailable" });
 });
 
-test("usage sync captions show last success or never-synced, never a refresh cooldown", () => {
+test("usage sync status reports last success or never-synced, never a refresh cooldown", () => {
   const neverSynced = draftAccount({
     plan_routable: true,
     verification_status: "verified",
   });
-  assert.equal(usageSyncCaption(neverSynced), "尚未官方同步");
+  assert.deepEqual(usageSyncStatus(neverSynced), { kind: "never" });
 
+  const syncedAt = "2026-08-20T12:00:00Z";
   const cooling = draftAccount({
     plan_routable: true,
     verification_status: "verified",
-    usage_sync_last_success_at: "2026-08-20T12:00:00Z",
+    usage_sync_last_success_at: syncedAt,
     usage_sync_next_allowed_at: "2026-08-21T00:01:00Z",
   });
-  assert.match(usageSyncCaption(cooling), /上次官方同步:/);
-  assert.doesNotMatch(usageSyncCaption(cooling), /刷新额度冷却中/);
+  assert.deepEqual(usageSyncStatus(cooling), {
+    kind: "synced",
+    time: new Date(Date.parse(syncedAt)).toLocaleString(),
+  });
+});
+
+test("unparseable sync timestamps pass through as raw data", () => {
+  const broken = draftAccount({ usage_sync_last_success_at: "not-a-date" });
+  assert.deepEqual(usageSyncStatus(broken), { kind: "synced", time: "not-a-date" });
 });

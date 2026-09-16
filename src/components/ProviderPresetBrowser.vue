@@ -149,9 +149,9 @@ function onSelect(key: string | number): void {
 <style scoped>
 .preset-browser {
   min-width: 0;
-  padding: 16px;
+  padding: var(--ocg-space-lg);
   border: 1px solid var(--ocg-border);
-  border-radius: 14px;
+  border-radius: var(--ocg-radius-lg);
   background: var(--ocg-surface);
   box-shadow: var(--ocg-shadow-sm);
 }
@@ -159,8 +159,8 @@ function onSelect(key: string | number): void {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 12px;
+  gap: var(--ocg-space-md);
+  margin-bottom: var(--ocg-space-md);
 }
 .preset-browser-head h2 {
   margin: 0;
@@ -168,16 +168,16 @@ function onSelect(key: string | number): void {
   font: 700 var(--ocg-font-lg)/1.3 "Bahnschrift", "Segoe UI Variable Display", sans-serif;
 }
 .preset-browser-search {
-  margin-bottom: 12px;
+  margin-bottom: var(--ocg-space-md);
 }
 .preset-browser-list {
   display: grid;
-  gap: 12px;
+  gap: var(--ocg-space-md);
 }
 .preset-browser-manual {
-  padding: 8px 12px;
+  padding: var(--ocg-space-sm) var(--ocg-space-md);
   border: 1px dashed var(--ocg-border);
-  border-radius: 10px;
+  border-radius: var(--ocg-radius-md);
   background: transparent;
   color: var(--ocg-ink);
   font-size: var(--ocg-font-sm);
@@ -192,7 +192,7 @@ function onSelect(key: string | number): void {
   opacity: 0.6;
 }
 .preset-browser-pane__label {
-  margin: 0 0 4px;
+  margin: 0 0 var(--ocg-space-xs);
   color: var(--ocg-subtle);
   font-size: var(--ocg-font-xs);
   font-weight: 600;

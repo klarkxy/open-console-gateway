@@ -13,7 +13,7 @@
           <n-button @click="openTransfer('export')">{{ t("导出账号") }}</n-button>
         </n-space>
         <div
-          v-if="!accountListLoading && !accountListError && accounts.length > 0"
+          v-if="accountsLoaded && accounts.length > 0"
           class="accounts-filter-bar"
         >
           <div class="filter-field">
@@ -53,14 +53,14 @@
         <n-spin size="small" />
       </div>
 
-      <n-alert v-else-if="accountListError" type="error" :title="t('加载账号失败: {error}', { error: accountListError })">
+      <n-alert v-else-if="accountListError && !accountsLoaded" type="error" :title="t('加载账号失败：{error}', { error: accountListError })">
         <n-button size="small" secondary @click="loadAccounts">{{ t("重试") }}</n-button>
       </n-alert>
 
       <n-alert
         v-if="catalogError"
         type="warning"
-        :title="t('加载服务商目录失败: {error}', { error: catalogError })"
+        :title="t('加载供应商目录失败：{error}', { error: catalogError })"
       >
         <n-button size="small" secondary :loading="catalogLoading" @click="loadProviderCatalog">
           {{ t("重试") }}
@@ -79,7 +79,7 @@
       <n-alert
         v-if="identitiesError"
         type="warning"
-        :title="t('加载身份投影失败: {error}', { error: identitiesError })"
+        :title="t('加载身份投影失败：{error}', { error: identitiesError })"
       >
         <n-button
           size="small"
@@ -98,7 +98,7 @@
       />
 
       <n-empty
-        v-if="!accountListLoading && !accountListError && displayedRouteItems.length === 0"
+        v-if="accountsLoaded && displayedRouteItems.length === 0"
         :description="t('暂无账号')"
       >
         <template #extra>
@@ -114,7 +114,7 @@
         </template>
       </n-empty>
 
-      <div v-if="!accountListLoading && !accountListError && displayedRouteItems.length > 0" class="account-list">
+      <div v-if="accountsLoaded && displayedRouteItems.length > 0" class="account-list">
         <template v-for="item in displayedRouteItems" :key="item.id">
           <PlatformAccountCard
             v-if="item.type === 'platform'"
@@ -268,7 +268,7 @@
         </n-form-item>
       </n-form>
       <n-alert type="warning" :show-icon="false">
-        {{ t("请确认邀请链接是你自己的（默认仅演示）。修改后会写入 OpenCode Go 供应商。草稿可随时继续。") }}
+        {{ t("确认邀请链接是你自己的（默认仅演示）。修改会写入 OpenCode Go 供应商，草稿可随时继续。") }}
       </n-alert>
       <template #footer>
         <n-space justify="end">
@@ -434,9 +434,18 @@ const message = useMessage();
 const accountsStore = useAccountsStore();
 const identitiesStore = useIdentitiesStore();
 const providersStore = useProvidersStore();
-const accounts = ref<Account[]>([]);
-const accountListLoading = ref(true);
+// The account list lives in the store; the writable computed lets the
+// order/usage composables keep their Ref<Account[]> contract while every
+// write commits through the store.
+const accounts = computed<Account[]>({
+  get: () => accountsStore.accounts,
+  set: (list) => accountsStore.setAccounts(list),
+});
+const accountsLoaded = computed(() => accountsStore.loaded);
 const accountListError = ref("");
+// The spinner gate covers only the first load; revalidations keep the
+// current list rendered and commit silently when the response lands.
+const accountListLoading = computed(() => !accountsStore.loaded && !accountListError.value);
 const identitiesError = ref("");
 const identitiesLoading = computed(() => identitiesStore.loading);
 const testingAccountId = ref<string | null>(null);
@@ -567,7 +576,7 @@ const managedInvitePreview = computed(() => {
     return {
       status: undefined as "error" | undefined,
       feedback: normalized
-        ? t("将用于打开邀请页；与 OpenCode Go 供应商中的值不同时会写回。")
+        ? t("用于打开邀请页；与 OpenCode Go 供应商中的值不同时写回。")
         : t("必填。仅接受 opencode.ai 官方 HTTPS 链接。"),
       normalized,
     };
@@ -644,10 +653,10 @@ const credentialModalConnection = computed(() => {
   if (!connectionId) return null;
   return providersStore.connections?.find((connection) => connection.id === connectionId) ?? null;
 });
-const credentialModalUnsupported = computed(() => {
+const credentialModalUnsupported = computed((): MessageKey | null => {
   if (!showCredentialModal.value) return null;
   const support = credentialModalSupport.value;
-  if (!support) return t("无法确定当前卡片的凭据");
+  if (!support) return "无法确定当前卡片的凭据";
   if (credentialModalMode.value === "rotate" && !support.rotate) return support.unsupportedReason;
   if (credentialModalMode.value === "binding" && !support.binding) return support.unsupportedReason;
   return null;
@@ -663,10 +672,10 @@ const createModalSupport = computed(() => (
     ? credentialWriteSupport(createModalAccount.value, identityForCard(createModalAccount.value.id))
     : null
 ));
-const createModalUnsupported = computed(() => {
+const createModalUnsupported = computed((): MessageKey | null => {
   if (!showCreateModal.value) return null;
   const support = createModalSupport.value;
-  if (!support?.create) return support?.unsupportedReason || t("无法确定当前卡片的凭据");
+  if (!support?.create) return support?.unsupportedReason ?? "无法确定当前卡片的凭据";
   return null;
 });
 const createModalConnectionId = computed(() => (
@@ -726,8 +735,8 @@ function handleMenuSelect(key: string | number, accountId: string) {
     dialog.warning({
       title: t("重置官网登录状态"),
       content: accountIsReady(account)
-        ? t("确定重置账号 {name} 的独立浏览器 Profile 吗？Google 与 OpenCode 登录状态会被清除，但 Key 不受影响。", { name: account.name })
-        : t("确定重置账号 {name} 的独立浏览器 Profile 吗？登录状态会被清除，注册进度将回到 Google 账号步骤。", { name: account.name }),
+        ? t("重置账号 {name} 的独立浏览器 Profile？Google 与 OpenCode 登录状态会被清除，但 Key 不受影响。", { name: account.name })
+        : t("重置账号 {name} 的独立浏览器 Profile？登录状态会被清除，注册进度回到 Google 账号步骤。", { name: account.name }),
       positiveText: t("重置"),
       negativeText: t("取消"),
       onPositiveClick: () => resetBrowserProfile(accountId),
@@ -737,7 +746,7 @@ function handleMenuSelect(key: string | number, accountId: string) {
     if (!account) return;
     dialog.warning({
       title: t("删除账号"),
-      content: t("确定删除账号 {name} 吗？账号数据以及独立浏览器中的 Cookie 和 Profile 都会被删除。", { name: account.name }),
+      content: t("删除账号 {name}？账号数据、独立浏览器中的 Cookie 和 Profile 都会被删除。", { name: account.name }),
       positiveText: t("删除"),
       negativeText: t("取消"),
       onPositiveClick: () => deleteAccount(accountId),
@@ -848,17 +857,17 @@ async function openCredentialModal(accountId: string, mode: CredentialEditorMode
   if (!account) return;
   const support = credentialWriteSupport(account, identityForCard(accountId));
   if (mode === "rotate" && !support.rotate) {
-    if (support.unsupportedReason) message.warning(support.unsupportedReason);
+    if (support.unsupportedReason) message.warning(t(support.unsupportedReason));
     return;
   }
   if (mode === "binding" && !support.binding) {
-    if (support.unsupportedReason) message.warning(support.unsupportedReason);
+    if (support.unsupportedReason) message.warning(t(support.unsupportedReason));
     return;
   }
   try {
     const expectation = await captureIdentityViewExpectation();
     if (!expectation) {
-      message.error(t("加载身份投影失败: {error}", { error: identitiesError.value || t("保存失败，请重试") }));
+      message.error(t("加载身份投影失败：{error}", { error: identitiesError.value || t("保存失败，请重试") }));
       return;
     }
     credentialModalExpectation.value = expectation;
@@ -866,7 +875,7 @@ async function openCredentialModal(accountId: string, mode: CredentialEditorMode
       await providersStore.loadConnections().catch(() => undefined);
     }
   } catch (error) {
-    message.error(t("加载账号失败: {error}", { error: dashboardErrorDetail(error) }));
+    message.error(t("加载账号失败：{error}", { error: dashboardErrorDetail(error) }));
     return;
   }
   credentialModalAccountId.value = accountId;
@@ -880,13 +889,13 @@ async function openCreateModal(accountId: string): Promise<void> {
   if (!account) return;
   const support = credentialWriteSupport(account, identityForCard(accountId));
   if (!support.create) {
-    if (support.unsupportedReason) message.warning(support.unsupportedReason);
+    if (support.unsupportedReason) message.warning(t(support.unsupportedReason));
     return;
   }
   try {
     const expectation = await captureIdentityViewExpectation();
     if (!expectation) {
-      message.error(t("加载身份投影失败: {error}", { error: identitiesError.value || t("保存失败，请重试") }));
+      message.error(t("加载身份投影失败：{error}", { error: identitiesError.value || t("保存失败，请重试") }));
       return;
     }
     createModalExpectation.value = expectation;
@@ -894,7 +903,7 @@ async function openCreateModal(accountId: string): Promise<void> {
       await providersStore.loadConnections().catch(() => undefined);
     }
   } catch (error) {
-    message.error(t("加载账号失败: {error}", { error: dashboardErrorDetail(error) }));
+    message.error(t("加载账号失败：{error}", { error: dashboardErrorDetail(error) }));
     return;
   }
   createModalAccountId.value = accountId;
@@ -920,8 +929,7 @@ function setCreateModalVisible(show: boolean): void {
 }
 
 async function refreshAccountsAndIdentities(): Promise<void> {
-  const loaded = await accountsStore.loadPresented();
-  accounts.value = loaded;
+  await accountsStore.loadPresented();
   await loadIdentitiesOverlay();
 }
 
@@ -931,9 +939,9 @@ async function recoverCredentialMutationConflict(error: unknown): Promise<boolea
   if (reloaded) {
     credentialModalExpectation.value = identitiesStore.snapshotExpectation;
     createModalExpectation.value = identitiesStore.snapshotExpectation;
-    message.warning(t("凭据设置已被其他操作修改，已重新加载最新状态，请重试"));
+    message.warning(t("凭据设置已被其他操作修改；已重新加载最新状态，请重试。"));
   } else {
-    message.warning(t("凭据设置已被其他操作修改，未能加载最新状态，请稍后重试"));
+    message.warning(t("凭据设置已被其他操作修改；未能加载最新状态，请稍后重试。"));
   }
   return true;
 }
@@ -943,7 +951,7 @@ async function onRotateCredential(payload: { secretInput: string }): Promise<voi
   const support = credentialModalSupport.value;
   const credentialId = support?.credential?.credential.id;
   if (!support?.rotate || !credentialId) {
-    message.warning(support?.unsupportedReason || t("无法确定当前卡片的凭据"));
+    message.warning(t(support?.unsupportedReason ?? "无法确定当前卡片的凭据"));
     return;
   }
   busy.value = true;
@@ -959,12 +967,12 @@ async function onRotateCredential(payload: { secretInput: string }): Promise<voi
     try {
       await refreshAccountsAndIdentities();
     } catch (refreshError) {
-      message.error(t("加载账号失败: {error}", { error: dashboardErrorDetail(refreshError) }));
+      message.error(t("加载账号失败：{error}", { error: dashboardErrorDetail(refreshError) }));
     }
     message.success(t("Key 已轮换"));
   } catch (error) {
     if (await recoverCredentialMutationConflict(error)) return;
-    message.error(t("轮换 Key 失败: {error}", { error: dashboardErrorDetail(error) }));
+    message.error(t("轮换 Key 失败：{error}", { error: dashboardErrorDetail(error) }));
   } finally {
     busy.value = false;
   }
@@ -975,7 +983,7 @@ async function onPatchBinding(payload: BindingPatchInput): Promise<void> {
   const support = credentialModalSupport.value;
   const bindingId = support?.bindingRecord?.id;
   if (!support?.binding || !bindingId) {
-    message.warning(support?.unsupportedReason || t("无法确定当前卡片的凭据"));
+    message.warning(t(support?.unsupportedReason ?? "无法确定当前卡片的凭据"));
     return;
   }
   busy.value = true;
@@ -991,12 +999,12 @@ async function onPatchBinding(payload: BindingPatchInput): Promise<void> {
     try {
       await refreshAccountsAndIdentities();
     } catch (refreshError) {
-      message.error(t("加载账号失败: {error}", { error: dashboardErrorDetail(refreshError) }));
+      message.error(t("加载账号失败：{error}", { error: dashboardErrorDetail(refreshError) }));
     }
     message.success(t("绑定已更新"));
   } catch (error) {
     if (await recoverCredentialMutationConflict(error)) return;
-    message.error(t("更新绑定失败: {error}", { error: dashboardErrorDetail(error) }));
+    message.error(t("更新绑定失败：{error}", { error: dashboardErrorDetail(error) }));
   } finally {
     busy.value = false;
   }
@@ -1007,7 +1015,7 @@ async function onCreateIdentityCredential(payload: IdentityCredentialCreateInput
   const support = createModalSupport.value;
   const identityId = support?.identityId;
   if (!support?.create || !identityId) {
-    message.warning(support?.unsupportedReason || t("无法确定当前卡片的凭据"));
+    message.warning(t(support?.unsupportedReason ?? "无法确定当前卡片的凭据"));
     return;
   }
   busy.value = true;
@@ -1023,16 +1031,16 @@ async function onCreateIdentityCredential(payload: IdentityCredentialCreateInput
     try {
       await refreshAccountsAndIdentities();
     } catch (refreshError) {
-      message.error(t("加载账号失败: {error}", { error: dashboardErrorDetail(refreshError) }));
+      message.error(t("加载账号失败：{error}", { error: dashboardErrorDetail(refreshError) }));
     }
     message.success(t("Key 已添加"));
   } catch (error) {
     createModalRef.value?.noteFailure(error);
     if (await recoverCredentialMutationConflict(error)) return;
     if (isUncertainCreateFailure(error)) {
-      message.warning(t("创建结果未知，Key 可能已添加。请用相同内容重试，不要修改后再提交。"));
+      message.warning(t("创建结果未知，Key 可能已添加。用相同内容重试，勿修改后提交。"));
     } else {
-      message.error(t("添加 Key 失败: {error}", { error: dashboardErrorDetail(error) }));
+      message.error(t("添加 Key 失败：{error}", { error: dashboardErrorDetail(error) }));
     }
   } finally {
     busy.value = false;
@@ -1204,7 +1212,7 @@ async function createManagedAccount(): Promise<void> {
     return;
   }
   if (!inviteUrl) {
-    message.error(t("请填写邀请链接"));
+    message.error(t("填写邀请链接"));
     return;
   }
   managedDraft.value.inviteUrl = inviteUrl;
@@ -1224,7 +1232,7 @@ async function createManagedAccount(): Promise<void> {
     message.success(t("注册草稿已创建"));
   } catch (error) {
     if (await recoverAccountMutationConflict(error)) return;
-    message.error(t("创建注册草稿失败: {error}", { error: dashboardErrorDetail(error) }));
+    message.error(t("创建注册草稿失败：{error}", { error: dashboardErrorDetail(error) }));
   } finally {
     busy.value = false;
   }
@@ -1240,7 +1248,7 @@ async function advanceManagedSetup(accountId: string, setupStep: AccountSetupSte
   } catch (error) {
     if (await recoverAccountMutationConflict(error)) return;
     await recoverManagedSetupConflict(accountId, error);
-    message.error(t("保存注册进度失败: {error}", { error: dashboardErrorDetail(error) }));
+    message.error(t("保存注册进度失败：{error}", { error: dashboardErrorDetail(error) }));
   } finally {
     busy.value = false;
   }
@@ -1263,7 +1271,7 @@ async function verifyManagedKey(accountId: string, key: string): Promise<void> {
   } catch (error) {
     if (await recoverAccountMutationConflict(error)) return;
     await recoverManagedSetupConflict(accountId, error);
-    message.error(t("Key 验证失败: {error}", { error: dashboardErrorDetail(error) }));
+    message.error(t("Key 验证失败：{error}", { error: dashboardErrorDetail(error) }));
   } finally {
     busy.value = false;
   }
@@ -1298,7 +1306,7 @@ async function openAccountBrowser(accountId: string, target: BrowserTarget): Pro
     }
   } catch (error) {
     remoteTab?.close();
-    message.error(t("打开浏览器失败: {error}", { error: dashboardErrorDetail(error) }));
+    message.error(t("打开浏览器失败：{error}", { error: dashboardErrorDetail(error) }));
   } finally {
     openingBrowserTarget.value = null;
   }
@@ -1315,17 +1323,17 @@ async function resetBrowserProfile(accountId: string): Promise<void> {
     message.success(t("官网登录状态已重置"));
   } catch (error) {
     if (await recoverAccountMutationConflict(error)) return;
-    message.error(t("重置官网登录状态失败: {error}", { error: dashboardErrorDetail(error) }));
+    message.error(t("重置官网登录状态失败：{error}", { error: dashboardErrorDetail(error) }));
   }
 }
 
 function replaceAccount(account: Account): void {
-  accounts.value = accounts.value.map((item) => (item.id === account.id ? account : item));
+  accountsStore.upsertAccount(account);
   if (editingAccount.value?.id === account.id) editingAccount.value = account;
 }
 
 function addAccount(account: Account): void {
-  accounts.value = [...accounts.value, account];
+  accountsStore.upsertAccount(account);
 }
 
 async function refreshCatalogIfNewProvider(account: Account): Promise<void> {
@@ -1338,13 +1346,13 @@ async function refreshCatalogIfNewProvider(account: Account): Promise<void> {
     await providersStore.refreshContractCatalog("provider", account.provider_id);
     message.success(t("已刷新模型目录"));
   } catch (error) {
-    message.warning(t("刷新模型目录失败: {error}", { error: dashboardErrorDetail(error) }));
+    message.warning(t("刷新模型目录失败：{error}", { error: dashboardErrorDetail(error) }));
     message.info(`${t("供应商")} → ${t("刷新模型目录")}`);
   }
 }
 
 function removeAccountState(id: string): void {
-  accounts.value = accounts.value.filter((item) => item.id !== id);
+  accountsStore.removeAccount(id);
   delete usageMap.value[id];
   delete providerUsageMap.value[id];
   delete usageEdits.value[id];
@@ -1369,11 +1377,10 @@ function accountHasUsageDisplay(account: Account): boolean {
 
 async function refreshAccountState(id: string): Promise<Account | null> {
   const loaded = await accountsStore.loadPresented();
-  accounts.value = loaded;
   const account = loaded.find((item) => item.id === id);
   if (!account) {
     removeAccountState(id);
-    message.warning(t("未找到该账号，已为你刷新列表"));
+    message.warning(t("未找到该账号，已自动刷新列表"));
     return null;
   }
   if (accountIsReady(account) && accountHasUsageDisplay(account)) {
@@ -1400,12 +1407,10 @@ async function recoverManagedSetupConflict(accountId: string, error: unknown): P
 }
 
 async function loadAccounts() {
-  accountListLoading.value = true;
   accountListError.value = "";
   const overlay = loadIdentitiesOverlay();
   try {
     const loaded = await accountsStore.loadPresented();
-    accounts.value = loaded;
     applyAccountDeepLink();
     await overlay;
     if (!providersStore.connections) {
@@ -1424,9 +1429,7 @@ async function loadAccounts() {
     }
   } catch (e) {
     accountListError.value = dashboardErrorDetail(e);
-    message.error(t("加载账号失败: {error}", { error: accountListError.value }));
-  } finally {
-    accountListLoading.value = false;
+    message.error(t("加载账号失败：{error}", { error: accountListError.value }));
   }
 }
 
@@ -1445,7 +1448,7 @@ async function loadRegistrationOptions(): Promise<void> {
   } else {
     browserCapabilities.value = {
       mode: "unsupported",
-      reason: t("浏览器能力检测失败: {error}", { error: dashboardErrorDetail(browserResult.reason) }),
+      reason: t("浏览器能力检测失败：{error}", { error: dashboardErrorDetail(browserResult.reason) }),
     };
   }
 }
@@ -1506,7 +1509,7 @@ async function onFormSave(payload: AccountInput | AccountFormPayload) {
       showModal.value = false;
     } catch (e) {
       if (await recoverAccountMutationConflict(e)) return;
-      message.error(t("保存失败: {error}", { error: dashboardErrorDetail(e) }));
+      message.error(t("保存失败：{error}", { error: dashboardErrorDetail(e) }));
     } finally {
       busy.value = false;
     }
@@ -1529,7 +1532,7 @@ async function onFormSave(payload: AccountInput | AccountFormPayload) {
       showAddModal.value = false;
     } catch (e) {
       if (await recoverAccountMutationConflict(e)) return;
-      message.error(t("保存失败: {error}", { error: dashboardErrorDetail(e) }));
+      message.error(t("保存失败：{error}", { error: dashboardErrorDetail(e) }));
     } finally {
       busy.value = false;
     }
@@ -1557,7 +1560,7 @@ async function updatePurchaseDate(accountId: string, purchaseDate: string): Prom
     message.success(t("购买日期已更新"));
   } catch (error) {
     if (!(await recoverAccountMutationConflict(error))) {
-      message.error(t("保存失败: {error}", { error: dashboardErrorDetail(error) }));
+      message.error(t("保存失败：{error}", { error: dashboardErrorDetail(error) }));
     }
   } finally {
     purchaseDateSaving.value[accountId] = false;
@@ -1597,7 +1600,7 @@ async function saveCustomAccountEdit(
     showModal.value = false;
   } catch (e) {
     if (await recoverAccountMutationConflict(e)) return;
-    message.error(t("保存失败: {error}", { error: dashboardErrorDetail(e) }));
+    message.error(t("保存失败：{error}", { error: dashboardErrorDetail(e) }));
     try {
       await refreshAccountState(editing.id);
     } catch {
@@ -1621,7 +1624,7 @@ async function toggleAccount(id: string) {
     replaceAccount(updated);
   } catch (e) {
     if (await recoverAccountMutationConflict(e)) return;
-    message.error(t("切换失败: {error}", { error: dashboardErrorDetail(e) }));
+    message.error(t("切换失败：{error}", { error: dashboardErrorDetail(e) }));
   }
 }
 
@@ -1638,7 +1641,6 @@ async function reloadControlPlaneView(): Promise<boolean> {
   for (const id of knownIds) {
     if (!loadedIds.has(id)) removeAccountState(id);
   }
-  accounts.value = loaded;
   await Promise.allSettled([
     loadIdentitiesOverlay(),
     providersStore.loadConnections(),
@@ -1702,7 +1704,7 @@ async function saveZenProviderSettings(
     if (successMessage) message.success(successMessage);
   } catch (error) {
     if (!(await recoverAccountMutationConflict(error))) {
-      message.error(t("保存失败: {error}", { error: dashboardErrorDetail(error) }));
+      message.error(t("保存失败：{error}", { error: dashboardErrorDetail(error) }));
     }
   } finally {
     providerSettingsSaving.value[account.id] = false;
@@ -1717,7 +1719,7 @@ async function deleteAccount(id: string) {
     void providersStore.loadConnections().catch(() => undefined);
   } catch (e) {
     if (await recoverAccountMutationConflict(e)) return;
-    message.error(t("删除失败: {error}", { error: dashboardErrorDetail(e) }));
+    message.error(t("删除失败：{error}", { error: dashboardErrorDetail(e) }));
   }
 }
 
@@ -1725,10 +1727,10 @@ async function resetCooldown(id: string) {
   try {
     const updated = await dashboardApi.resetAccountCooldown(id);
     replaceAccount(updated);
-    message.success(t("已重置冷却"));
+    message.success(t("冷却已重置"));
   } catch (e) {
     if (await recoverAccountMutationConflict(e)) return;
-    message.error(t("重置失败: {error}", { error: dashboardErrorDetail(e) }));
+    message.error(t("重置失败：{error}", { error: dashboardErrorDetail(e) }));
   }
 }
 
@@ -1791,7 +1793,7 @@ onUnmounted(() => {
   flex-wrap: wrap;
   align-items: center;
   justify-content: flex-start;
-  gap: 12px 16px;
+  gap: var(--ocg-space-md) var(--ocg-space-lg);
   min-width: 0;
 }
 
@@ -1801,7 +1803,7 @@ onUnmounted(() => {
 
 .account-list {
   display: grid;
-  gap: 12px;
+  gap: var(--ocg-space-md);
 }
 .account-list-state {
   min-height: 160px;
@@ -1813,7 +1815,7 @@ onUnmounted(() => {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 12px;
+  gap: var(--ocg-space-md);
   flex: 0 1 auto;
   min-width: 0;
 }
@@ -1821,7 +1823,7 @@ onUnmounted(() => {
 .accounts-filter-bar .filter-field {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--ocg-space-xs);
   min-width: 0;
 }
 
@@ -1837,12 +1839,12 @@ onUnmounted(() => {
 
 @media (max-width: 640px) {
   .accounts-toolbar {
-    gap: 12px;
+    gap: var(--ocg-space-md);
   }
 
   .accounts-filter-bar {
     flex-basis: 100%;
-    gap: 8px;
+    gap: var(--ocg-space-sm);
   }
 
   .accounts-actions {

@@ -4,7 +4,7 @@
     <n-alert
       v-if="loadError"
       type="error"
-      :title="t('加载设置失败: {error}', { error: loadError })"
+      :title="t('加载设置失败：{error}', { error: loadError })"
     >
       <n-button size="small" secondary :loading="loading" @click="loadInvite">
         {{ t("重试") }}
@@ -81,7 +81,7 @@ async function loadInvite(): Promise<void> {
     loaded.value = true;
   } catch (error) {
     loadError.value = dashboardErrorDetail(error);
-    message.error(t("加载设置失败: {error}", { error: loadError.value }));
+    message.error(t("加载设置失败：{error}", { error: loadError.value }));
   } finally {
     loading.value = false;
   }
@@ -126,7 +126,7 @@ async function saveInviteUrl(): Promise<void> {
       message.success(t("邀请链接已保存"));
     }
   } catch (error) {
-    message.error(t("保存失败: {error}", { error: dashboardErrorDetail(error) }));
+    message.error(t("保存失败：{error}", { error: dashboardErrorDetail(error) }));
   } finally {
     saving.value = false;
   }
@@ -147,14 +147,14 @@ onActivated(() => {
 <style scoped>
 .invite-section {
   min-width: 0;
-  padding: 16px;
+  padding: var(--ocg-space-lg);
   border: 1px solid var(--ocg-border);
-  border-radius: 14px;
+  border-radius: var(--ocg-radius-lg);
   background: var(--ocg-surface);
   box-shadow: var(--ocg-shadow-sm);
 }
 .invite-section h2 {
-  margin: 0 0 12px;
+  margin: 0 0 var(--ocg-space-md);
   color: var(--ocg-ink);
   font: 700 var(--ocg-font-lg)/1.3 "Bahnschrift", "Segoe UI Variable Display", sans-serif;
 }

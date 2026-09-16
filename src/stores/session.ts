@@ -8,6 +8,7 @@ import {
 import type { AuthStatus } from "../api/generated/dashboard-v3.ts";
 import { useConnectionStore } from "./connection.ts";
 import { useControlPlaneStore } from "./controlPlane.ts";
+import { useAccountsStore } from "./accounts.ts";
 
 export type SessionPhase = "checking" | "login" | "register" | "ready";
 
@@ -95,6 +96,7 @@ export const useSessionStore = defineStore("session", () => {
   /** Local-only teardown: secrets are wiped and the shell returns to login. */
   function dropSession(): void {
     connection.clearSecrets();
+    useAccountsStore().clearAccounts();
     status.value = null;
     phase.value = "login";
   }

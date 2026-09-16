@@ -13,7 +13,7 @@
     <n-alert
       v-else-if="loadError && !contracts && connections.length === 0"
       type="error"
-      :title="t('加载供应商失败: {error}', { error: loadError })"
+      :title="t('加载供应商失败：{error}', { error: loadError })"
     >
       <n-button size="small" secondary :loading="loading" @click="loadAll()">
         {{ t("重试") }}
@@ -77,7 +77,7 @@
         <n-alert
           v-if="loadError && (contracts || connections.length > 0)"
           type="warning"
-          :title="t('加载供应商失败: {error}', { error: loadError })"
+          :title="t('加载供应商失败：{error}', { error: loadError })"
         >
           <n-button size="small" secondary :loading="loading" @click="loadAll({ retain: true })">
             {{ t("重试") }}
@@ -222,7 +222,7 @@
                 <template #trigger>
                   <n-button type="error" secondary :disabled="actionLocked">{{ t("删除供应商") }}</n-button>
                 </template>
-                {{ t("请先删除引用该供应商的账号，再删除供应商。不会级联删除账号。") }}
+                {{ t("先删除引用该供应商的账号，再删除供应商；不会级联删除账号。") }}
               </n-popconfirm>
             </n-space>
           </div>
@@ -285,7 +285,7 @@
             v-if="definitionError"
             type="error"
             class="providers-definition-error"
-            :title="t('加载供应商失败: {error}', { error: definitionError })"
+            :title="t('加载供应商失败：{error}', { error: definitionError })"
           >
             <n-button size="small" secondary :loading="definitionLoading" @click="retryDefinition">
               {{ t("重试") }}
@@ -324,7 +324,7 @@
                 <n-alert
                   v-if="catalogRefreshError"
                   type="error"
-                  :title="t('刷新模型目录失败: {error}', { error: catalogRefreshError })"
+                  :title="t('刷新模型目录失败：{error}', { error: catalogRefreshError })"
                 />
                 <n-alert
                   v-if="probeSummary"
@@ -348,12 +348,12 @@
                 <n-alert
                   v-if="matrixError"
                   type="error"
-                  :title="t('保存协议覆盖失败: {error}', { error: matrixError })"
+                  :title="t('保存协议覆盖失败：{error}', { error: matrixError })"
                 />
                 <n-alert
                   v-if="probeError"
                   type="error"
-                  :title="t('连接测试失败: {error}', { error: probeError })"
+                  :title="t('连接测试失败：{error}', { error: probeError })"
                 />
                 <ProviderModelMatrix
                   :key="activeScope.key"
@@ -372,7 +372,7 @@
 
               <template v-else-if="selectedEntry.origin === 'builtin' && selectedEntry.provider_id === 'custom'">
                 <p class="providers-note">
-                  {{ t("模型与端点按账号配置；每个 Custom API 账号独立管理自己的连接与映射。") }}
+                  {{ t("模型与 Endpoint 按账号配置；每个 Custom API 账号独立管理自己的连接与映射。") }}
                 </p>
                 <n-button secondary size="small" @click="openAccounts">
                   {{ t("打开账号页") }}
@@ -433,7 +433,7 @@
                 <template #trigger>
                   <n-button type="error" secondary :disabled="actionLocked">{{ t("删除供应商") }}</n-button>
                 </template>
-                {{ t("请先删除引用该供应商的账号，再删除供应商。不会级联删除账号。") }}
+                {{ t("先删除引用该供应商的账号，再删除供应商；不会级联删除账号。") }}
               </n-popconfirm>
             </n-space>
           </div>
@@ -510,7 +510,6 @@ import type {
   ProviderDefinitionView,
   ModelProtocolOverrideUpdate,
   ProviderCatalogEntry,
-  ProviderContractsResponse,
   ProtocolProbeResponse,
   ProtocolProbeResult,
 } from "../api/providers.ts";
@@ -532,7 +531,6 @@ import {
   type ProviderDetailTab,
 } from "./app-navigation.ts";
 import {
-  applyModelContractToResponse,
   catalogRefreshSupported,
   effectiveModelTestProtocol,
   flattenProviderScopes,
@@ -576,9 +574,12 @@ import {
 const message = useMessage();
 const accountsStore = useAccountsStore();
 const providersStore = useProvidersStore();
-const contracts = ref<ProviderContractsResponse | null>(null);
-const catalog = ref<ProviderCatalogEntry[] | null>(null);
-const connections = ref<Connection[]>([]);
+const contracts = computed(() => {
+  const value = providersStore.contracts;
+  return value ? normalizeProviderContractsResponse(value) : null;
+});
+const catalog = computed(() => providersStore.catalog);
+const connections = computed(() => providersStore.connections ?? []);
 const showEditModal = ref(false);
 const editingDefinition = ref<ProviderDefinitionView | null>(null);
 const resumeConnectionId = ref<string | null>(null);
@@ -834,7 +835,7 @@ function applyFromQuery(
   }
   const row = rows.find((item) => item.id === wanted) ?? rows[0]!;
   if (fellBackNotice && wanted && row.id !== wanted) {
-    actionLive.value = t("已选择过期范围，已回到第一个供应商");
+    actionLive.value = t("所选范围已失效，切换到第一个供应商");
   }
   selectedConnectionId.value = row.id;
   const candidate = query.tab ?? activeTab.value;
@@ -944,21 +945,13 @@ async function loadAll(options: {
   loading.value = true;
   if (!options.retain) loadError.value = "";
   try {
-    const [contractsResult, catalogResult, connectionsResult] = await Promise.allSettled([
+    const [contractsResult, , connectionsResult] = await Promise.allSettled([
       providersStore.loadContracts(),
       providersStore.loadCatalog(),
       providersStore.loadConnections(),
       accountsStore.loadPresented(),
     ]);
-    if (catalogResult.status === "fulfilled") {
-      catalog.value = catalogResult.value;
-    }
-    if (connectionsResult.status === "fulfilled") {
-      connections.value = connectionsResult.value;
-    }
-    if (contractsResult.status === "fulfilled") {
-      contracts.value = normalizeProviderContractsResponse(contractsResult.value);
-    }
+    // Stores commit their own state; loadAll only surfaces failures below.
     applyFromQuery(true, {
       connectionId: options.preferConnectionId,
       providerId: options.preferProviderId,
@@ -1036,7 +1029,7 @@ async function onDynamicSaved(providerId: string): Promise<void> {
   definitions.value = next;
   const loaded = await loadAll({ retain: true, preferConnectionId, preferProviderId: providerId });
   if (!loaded.ok) {
-    message.warning(t("已保存，但未能刷新列表。请手动刷新，不要再次提交。"));
+    message.warning(t("已保存，但列表刷新失败。手动刷新，不要再次提交。"));
     return;
   }
   const createdConnection = preferConnectionId
@@ -1074,10 +1067,10 @@ async function onAddKeySave(payload: AccountInput | AccountFormPayload): Promise
   } catch (error) {
     if (isRevisionConflict(error) || (error instanceof DashboardRequestError && error.status === 409)) {
       await loadAll({ retain: true });
-      message.warning(t("数据已更新，请检查后重新保存。不会自动重试。"));
+      message.warning(t("数据已更新，检查后再保存；不会自动重试。"));
       return;
     }
-    message.error(t("保存失败: {error}", { error: dashboardErrorDetail(error) }));
+    message.error(t("保存失败：{error}", { error: dashboardErrorDetail(error) }));
   } finally {
     addKeyBusy.value = false;
   }
@@ -1105,10 +1098,10 @@ async function deleteSelected(): Promise<void> {
   } catch (error) {
     if (isRevisionConflict(error) || (error instanceof DashboardRequestError && error.status === 409)) {
       await loadAll({ retain: true });
-      message.warning(t("数据已更新，请检查后重新保存。不会自动重试。"));
+      message.warning(t("数据已更新，检查后再保存；不会自动重试。"));
       return;
     }
-    message.error(t("删除供应商失败: {error}", { error: dashboardErrorDetail(error) }));
+    message.error(t("删除供应商失败：{error}", { error: dashboardErrorDetail(error) }));
   }
 }
 
@@ -1118,22 +1111,21 @@ async function removeCatalogModels(payload: { modelIds: string[] }) {
   catalogRemoving.value = true;
   matrixError.value = "";
   try {
-    const refreshed = await providersStore.removeContractCatalogModels(
+    await providersStore.removeContractCatalogModels(
       scope.scope_kind,
       scope.scope_id,
       payload.modelIds,
     );
-    contracts.value = normalizeProviderContractsResponse(refreshed);
     actionLive.value = t("已从目录删除模型");
     message.success(t("已从目录删除模型"));
   } catch (error) {
     if (error instanceof DashboardRequestError && error.status === 409) {
       await loadAll({ retain: true });
-      actionLive.value = t("供应商设置已在其他位置更新，已重新加载，请重试");
-      message.warning(t("供应商设置已在其他位置更新，已重新加载，请重试"));
+      actionLive.value = t("供应商设置已在其他位置更新并重新加载，重试");
+      message.warning(t("供应商设置已在其他位置更新并重新加载，重试"));
     } else {
       matrixError.value = dashboardErrorDetail(error);
-      message.error(t("删除模型失败: {error}", { error: matrixError.value }));
+      message.error(t("删除模型失败：{error}", { error: matrixError.value }));
     }
   } finally {
     catalogRemoving.value = false;
@@ -1146,14 +1138,13 @@ async function refreshCatalog() {
   catalogRefreshing.value = true;
   catalogRefreshError.value = "";
   try {
-    const refreshed = await providersStore.refreshContractCatalog(scope.scope_kind, scope.scope_id);
-    contracts.value = normalizeProviderContractsResponse(refreshed);
+    await providersStore.refreshContractCatalog(scope.scope_kind, scope.scope_id);
     applyFromQuery();
     actionLive.value = t("已刷新模型目录");
     message.success(t("已刷新模型目录"));
   } catch (error) {
     catalogRefreshError.value = dashboardErrorDetail(error);
-    message.error(t("刷新模型目录失败: {error}", { error: catalogRefreshError.value }));
+    message.error(t("刷新模型目录失败：{error}", { error: catalogRefreshError.value }));
   } finally {
     catalogRefreshing.value = false;
   }
@@ -1214,21 +1205,20 @@ function updateOverrides(payload: OverridePayload) {
 
 async function persistOverrides(payload: OverridePayload, sequence: number) {
   try {
-    const response = await providersStore.putModelProtocolOverrides(
+    await providersStore.putModelProtocolOverrides(
       payload.scopeKind,
       payload.scopeId,
       payload.overrides,
     );
-    contracts.value = normalizeProviderContractsResponse(response);
     actionLive.value = t("协议覆盖已保存");
   } catch (error) {
     if (error instanceof DashboardRequestError && error.status === 409) {
       await loadAll({ retain: true });
-      actionLive.value = t("供应商设置已在其他位置更新，已重新加载，请重试");
-      message.warning(t("供应商设置已在其他位置更新，已重新加载，请重试"));
+      actionLive.value = t("供应商设置已在其他位置更新并重新加载，重试");
+      message.warning(t("供应商设置已在其他位置更新并重新加载，重试"));
     } else {
       matrixError.value = dashboardErrorDetail(error);
-      message.error(t("保存协议覆盖失败: {error}", { error: matrixError.value }));
+      message.error(t("保存协议覆盖失败：{error}", { error: matrixError.value }));
     }
   } finally {
     settleOptimisticOverrides(payload, sequence);
@@ -1243,7 +1233,7 @@ async function runModelProbe(payload: { modelId: string }) {
   const model = scope.models.find((item) => item.model_id === payload.modelId);
   const protocol = effectiveModelTestProtocol(model);
   if (!protocol) {
-    probeError.value = t("该模型没有已开启的协议；请先在矩阵中开启后再测试");
+    probeError.value = t("该模型没有已启用的协议；先在矩阵中启用后再测试");
     message.warning(probeError.value);
     return;
   }
@@ -1255,8 +1245,8 @@ async function runModelProbe(payload: { modelId: string }) {
       protocols: [protocol],
     });
     probeSummary.value = probeSummaryFromResponse(response);
-    if (response.contract && contracts.value) {
-      contracts.value = applyModelContractToResponse(contracts.value, {
+    if (response.contract) {
+      providersStore.applyModelContract({
         scope_kind: scope.scope_kind,
         scope_id: scope.scope_id,
       }, response.contract);
@@ -1264,7 +1254,7 @@ async function runModelProbe(payload: { modelId: string }) {
     const loaded = await loadAll({ retain: true });
     if (!loaded.ok) {
       probeError.value = loaded.error;
-      message.error(t("连接测试失败: {error}", { error: probeError.value }));
+      message.error(t("连接测试失败：{error}", { error: probeError.value }));
       return;
     }
     const failures = response.results.filter((result) => !result.success);
@@ -1277,7 +1267,7 @@ async function runModelProbe(payload: { modelId: string }) {
     message.success(t("连接测试成功"));
   } catch (error) {
     probeError.value = dashboardErrorDetail(error);
-    message.error(t("连接测试失败: {error}", { error: probeError.value }));
+    message.error(t("连接测试失败：{error}", { error: probeError.value }));
   } finally {
     const next = new Set(probingModels.value);
     next.delete(payload.modelId);
@@ -1404,7 +1394,7 @@ onUnmounted(() => {
   overflow: hidden;
 }
 .providers-note {
-  margin: 0 0 12px;
+  margin: 0 0 var(--ocg-space-md);
   color: var(--ocg-muted);
   font-size: var(--ocg-font-sm);
 }
@@ -1418,25 +1408,25 @@ onUnmounted(() => {
   display: grid;
   flex: 1 1 auto;
   grid-template-columns: 208px minmax(0, 1fr);
-  gap: 16px;
+  gap: var(--ocg-space-lg);
   min-width: 0;
   min-height: 0;
 }
 .providers-probe-summary {
-  margin: 12px 0;
+  margin: var(--ocg-space-md) 0;
 }
 .providers-probe-result {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
   align-items: baseline;
-  margin-top: 4px;
+  margin-top: var(--ocg-space-xs);
 }
 .providers-catalog-actions {
   display: flex;
   flex-wrap: wrap;
   justify-content: flex-end;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
 }
 .providers-rail {
   display: flex;
@@ -1444,15 +1434,15 @@ onUnmounted(() => {
   min-width: 0;
   min-height: 0;
   height: 100%;
-  padding: 8px 0;
+  padding: var(--ocg-space-sm) 0;
   overflow: hidden;
   border: 1px solid var(--ocg-border);
-  border-radius: 10px;
+  border-radius: var(--ocg-radius-md);
   background: var(--ocg-surface);
 }
 .providers-rail-search {
   flex: none;
-  padding: 0 8px 8px;
+  padding: 0 var(--ocg-space-sm) var(--ocg-space-sm);
 }
 /* One list scrolls; the Plan / API group labels stick to its top edge instead
    of splitting the rail into two independently scrolling half-height panes. */
@@ -1469,7 +1459,7 @@ onUnmounted(() => {
   top: 0;
   z-index: 1;
   margin: 0;
-  padding: 4px 12px;
+  padding: var(--ocg-space-xs) var(--ocg-space-md);
   color: var(--ocg-subtle);
   font-size: var(--ocg-font-xs);
   font-weight: 600;
@@ -1478,24 +1468,24 @@ onUnmounted(() => {
 }
 .providers-rail-footer {
   flex: none;
-  padding: 8px;
+  padding: var(--ocg-space-sm);
   border-top: 1px solid var(--ocg-border);
 }
 .providers-rail-empty {
   margin: 0;
-  padding: 8px 12px;
+  padding: var(--ocg-space-sm) var(--ocg-space-md);
   color: var(--ocg-muted);
   font-size: var(--ocg-font-xs);
 }
 .providers-mobile-nav {
   display: none;
   min-width: 0;
-  margin-bottom: 12px;
+  margin-bottom: var(--ocg-space-md);
 }
 .providers-main {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  gap: 16px;
+  gap: var(--ocg-space-lg);
   min-width: 0;
   min-height: 0;
   overflow: auto;
@@ -1506,13 +1496,13 @@ onUnmounted(() => {
   max-width: 100%;
 }
 .providers-tabs :deep(.n-tabs-nav) {
-  margin-bottom: 12px;
+  margin-bottom: var(--ocg-space-md);
 }
 .providers-section {
   min-width: 0;
-  padding: 16px;
+  padding: var(--ocg-space-lg);
   border: 1px solid var(--ocg-border);
-  border-radius: 14px;
+  border-radius: var(--ocg-radius-lg);
   background: var(--ocg-surface);
   box-shadow: var(--ocg-shadow-sm);
 }
@@ -1525,9 +1515,9 @@ onUnmounted(() => {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 16px;
-  padding-bottom: 12px;
+  gap: var(--ocg-space-lg);
+  margin-bottom: var(--ocg-space-lg);
+  padding-bottom: var(--ocg-space-md);
   border-bottom: 1px solid var(--ocg-border);
 }
 .providers-catalog-heading {
@@ -1537,13 +1527,13 @@ onUnmounted(() => {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 4px 10px;
+  gap: var(--ocg-space-xs) 10px;
 }
 .providers-catalog-meta {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px 12px;
-  margin-top: 4px;
+  gap: var(--ocg-space-xs) var(--ocg-space-md);
+  margin-top: var(--ocg-space-xs);
   color: var(--ocg-subtle);
   font-size: var(--ocg-font-sm);
 }
@@ -1554,23 +1544,23 @@ onUnmounted(() => {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 12px;
+  gap: var(--ocg-space-lg);
+  margin-bottom: var(--ocg-space-md);
 }
 .providers-models-head .providers-catalog-meta {
   margin-top: 0;
 }
 .providers-definition-error {
-  margin-bottom: 12px;
+  margin-bottom: var(--ocg-space-md);
 }
 .providers-connection-facts {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-  gap: 8px 16px;
-  margin: 0 0 16px;
-  padding: 10px 12px;
+  gap: var(--ocg-space-sm) var(--ocg-space-lg);
+  margin: 0 0 var(--ocg-space-lg);
+  padding: 10px var(--ocg-space-md);
   border: 1px solid var(--ocg-border);
-  border-radius: 10px;
+  border-radius: var(--ocg-radius-md);
   background: var(--ocg-canvas);
 }
 .providers-connection-facts__row {
@@ -1590,7 +1580,7 @@ onUnmounted(() => {
 }
 .providers-connection-targets {
   overflow-x: auto;
-  margin-bottom: 16px;
+  margin-bottom: var(--ocg-space-lg);
 }
 .providers-connection-table {
   width: 100%;
@@ -1599,7 +1589,7 @@ onUnmounted(() => {
 }
 .providers-connection-table th,
 .providers-connection-table td {
-  padding: 8px 12px;
+  padding: var(--ocg-space-sm) var(--ocg-space-md);
   border-bottom: 1px solid var(--ocg-border);
   text-align: left;
 }

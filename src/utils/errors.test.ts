@@ -4,11 +4,22 @@ import { dashboardErrorDetail } from './errors.ts';
 import { setLocale } from '../i18n/index.ts';
 
 test('known recoverable errors use the active locale while unknown diagnostics survive', () => {
+  const migrationError = 'migration password is incorrect or the backup file is damaged';
+  const cpaKeyError = 'CPA Management Key is required';
+  const cpaRuntimeError = 'CPA managed runtime is not installed';
+  const unknownDiagnostic = 'upstream detail: example';
+
   setLocale('zh-CN');
-  assert.equal(dashboardErrorDetail(new Error('migration password is incorrect or the backup file is damaged')), '迁移包密码错误或文件损坏，请检查密码或重新选择备份文件。');
-  assert.equal(dashboardErrorDetail('CPA Management Key is required'), '请填写 CPA Management Key，然后重新测试连接。');
-  assert.equal(dashboardErrorDetail(new Error('upstream detail: example')), 'upstream detail: example');
+  const migrationZh = dashboardErrorDetail(new Error(migrationError));
+  assert.notEqual(migrationZh, migrationError, 'known errors must be localized, not raw backend English');
+  assert.notEqual(dashboardErrorDetail(cpaKeyError), cpaKeyError);
+  // Unknown diagnostics pass through verbatim so backend detail survives.
+  assert.equal(dashboardErrorDetail(new Error(unknownDiagnostic)), unknownDiagnostic);
+
   setLocale('en-US');
-  assert.equal(dashboardErrorDetail('CPA managed runtime is not installed'), 'CPA is not installed. Install it from Overview first.');
+  const migrationEn = dashboardErrorDetail(migrationError);
+  assert.notEqual(migrationEn, migrationError);
+  assert.notEqual(migrationEn, migrationZh, 'localized detail must follow the active locale');
+  assert.notEqual(dashboardErrorDetail(cpaRuntimeError), cpaRuntimeError);
   setLocale('zh-CN');
 });

@@ -25,7 +25,7 @@
             {{ t("刷新运行日志") }}
           </n-tooltip>
         </div>
-        <n-alert v-if="gatewayError" type="error" :title="t('加载运行日志失败: {error}', { error: gatewayError })">
+        <n-alert v-if="gatewayError" type="error" :title="t('加载运行日志失败：{error}', { error: gatewayError })">
           <n-button size="small" secondary @click="loadGatewayLogs">{{ t("重试") }}</n-button>
         </n-alert>
         <p class="log-limit-note">{{ t("仅显示最近 {count} 条运行日志", { count: 200 }) }}</p>
@@ -243,7 +243,7 @@
         <p v-if="keyFilter" class="key-filter-note" role="status">
           {{ t("升级前用量统一计入主 Key") }}
         </p>
-        <n-alert v-if="forwardError" type="error" :title="t('加载请求日志失败: {error}', { error: forwardError })">
+        <n-alert v-if="forwardError" type="error" :title="t('加载请求日志失败：{error}', { error: forwardError })">
           <n-button size="small" secondary @click="loadForwardLogs">{{ t("重试") }}</n-button>
         </n-alert>
         <n-data-table
@@ -284,7 +284,7 @@ import {
   NTooltip,
   useMessage,
 } from "naive-ui";
-import { ArrowDownOutlined, ArrowUpOutlined, CalendarOutlined, CheckOutlined, ClearOutlined, CopyOutlined, ReloadOutlined } from "@vicons/antd";
+import { ArrowDownOutlined, ArrowUpOutlined, CalendarOutlined, ClearOutlined, ReloadOutlined } from "@vicons/antd";
 import { UNATTRIBUTED_KEY_FILTER, dashboardApi } from "../api/dashboard";
 import type {
   Account,
@@ -305,12 +305,14 @@ import {
   forwardLogAlias,
   forwardLogLatencyMs,
   forwardLogPlanLabel,
-  forwardLogProtocol,
-  forwardLogRequestedModel,
-  forwardLogResolvedAlias,
   forwardLogTotalTokens,
-  forwardLogUpstreamModel,
 } from "./forward-log-display.ts";
+import {
+  renderDiagnostic,
+  renderForwardDetail,
+  renderRequestId,
+  type LogsColumnContext,
+} from "./logs-columns.ts";
 import { formatNativeCostEstimate, forwardLogNativeEstimate } from "../domain/native-cost.ts";
 
 type LogTab = "gateway" | "forward";
@@ -555,33 +557,6 @@ async function copyText(target: string, value: string, label: string) {
   }
 }
 
-function shortRequestId(requestId: string): string {
-  return requestId.length <= 18 ? requestId : `${requestId.slice(0, 13)}…${requestId.slice(-4)}`;
-}
-
-function renderRequestId(row: GatewayLog | ForwardLog) {
-  const requestId = row.request_id;
-  if (!requestId) return "—";
-  const target = `request-id-${row.id}`;
-  return h("div", { class: "request-id-cell" }, [
-    h(NButton, {
-      text: true,
-      type: "primary",
-      class: "request-id-link",
-      title: requestId,
-      onClick: () => focusRequestChain(requestId),
-    }, { default: () => h("code", shortRequestId(requestId)) }),
-    h(NButton, {
-      text: true,
-      type: "primary",
-      "aria-label": t("复制请求 ID"),
-      onClick: () => copyText(target, requestId, t("请求 ID")),
-    }, {
-      icon: () => h(NIcon, { component: copiedTarget.value === target ? CheckOutlined : CopyOutlined }),
-    }),
-  ]);
-}
-
 function logRowKey(row: GatewayLog | ForwardLog): number {
   return row.id;
 }
@@ -592,144 +567,12 @@ function focusRequestChain(requestId: string) {
   sortOrder.value = "asc";
 }
 
-function renderAliasDetail(row: ForwardLog) {
-  const items = (
-    [
-      [t("请求模型"), forwardLogRequestedModel(row)],
-      [t("解析别名"), forwardLogResolvedAlias(row)],
-      [t("上游模型"), forwardLogUpstreamModel(row)],
-      [t("协议"), forwardLogProtocol(row)],
-    ] as Array<[string, string | null]>
-  ).filter((pair): pair is [string, string] => pair[1] !== null);
-  if (!items.length) return null;
-  return h("section", [
-    h("h4", t("模型解析")),
-    h("dl", { class: "diagnostic-meta" }, items.flatMap(([label, value]) => [
-      h("dt", label),
-      h("dd", value),
-    ])),
-  ]);
-}
-
-function renderForwardDetail(row: ForwardLog) {
-  const requestId = row.request_id;
-  const requestBlock = requestId
-    ? h("section", [
-      h("h4", t("请求 ID")),
-      h("div", { class: "request-id-cell" }, [
-        h("code", requestId),
-        h(NButton, {
-          text: true,
-          type: "primary",
-          "aria-label": t("复制请求 ID"),
-          onClick: () => copyText(`request-id-${row.id}`, requestId, t("请求 ID")),
-        }, {
-          icon: () => h(NIcon, { component: copiedTarget.value === `request-id-${row.id}` ? CheckOutlined : CopyOutlined }),
-        }),
-        h(NButton, {
-          text: true,
-          type: "primary",
-          onClick: () => focusRequestChain(requestId),
-        }, { default: () => t("筛选此请求") }),
-      ]),
-    ])
-    : null;
-  return h("div", { class: "diagnostic-detail" }, [
-    requestBlock,
-    renderAliasDetail(row),
-    renderProviderCost(row),
-    renderDiagnostic(row),
-  ]);
-}
-
-// Provider attribution and the three cost figures are nullable server-side;
-// null means "unknown" and must never render as a $0 amount.
-function renderProviderCost(row: ForwardLog) {
-  const costValue = (value: number | null | undefined) => (
-    value === null || value === undefined ? t("未知") : formatCost(value, 5)
-  );
-  const accountLabel = (id: string | null | undefined) => {
-    if (!id) return t("未知");
-    return accounts.value.find((account) => account.id === id)?.name ?? id;
-  };
-  const items: Array<[string, string]> = [
-    [t("服务商"), row.provider_id ?? t("未知")],
-    [t("路由账号"), accountLabel(row.route_account_id)],
-    [t("凭证账号"), accountLabel(row.credential_account_id)],
-    [t("原始供应商成本"), costValue(row.raw_cost_usd)],
-    [t("额度扣减"), costValue(row.quota_debit)],
-    [t("有效付费成本"), costValue(row.effective_paid_cost_usd)],
-  ];
-  // Platform-native estimate: original currency, frozen pricing provenance,
-  // and the actual wallet debit stays unknown — never implied by the estimate.
-  const estimate = forwardLogNativeEstimate(row);
-  if (estimate) {
-    items.push(
-      [t("平台估算（原始货币）"), formatNativeCostEstimate(estimate, locale.value)],
-      [t("计价来源（冻结）"), row.pricing_revision_id ?? t("未知")],
-      [t("实际平台扣减"), t("未知")],
-    );
-  }
-  return h("section", [
-    h("h4", t("服务商与费用")),
-    h("dl", { class: "diagnostic-meta" }, items.flatMap(([label, value]) => [
-      h("dt", label),
-      h("dd", value),
-    ])),
-  ]);
-}
-
-function routeLegLabel(route?: string): string {
-  // Empty = a row written before the route column existed: keep the honest
-  // "not recorded" marker instead of hiding the row.
-  if (!route) return "—";
-  if (route === "auto") return t("自动");
-  if (route === "proxy") return t("代理");
-  if (route === "direct") return t("直连");
-  return route;
-}
-
-function renderDiagnostic(row: GatewayLog | ForwardLog) {
-  const diagnostic = row.diagnostic;
-  const items = [
-    [t("错误来源"), row.error_source ?? diagnostic?.error_source],
-    [t("失败阶段"), row.error_stage ?? diagnostic?.error_stage],
-    [t("协议路径"), diagnostic?.upstream_format
-      ? `${diagnostic.client_format} → ${diagnostic.upstream_format}`
-      : diagnostic?.client_format],
-    [t("尝试次数"), diagnostic?.attempt ?? ("attempt" in row ? row.attempt : null)],
-    [t("路由"), "route" in row ? routeLegLabel(row.route) : null],
-    [t("耗时"), row.duration_ms !== null && row.duration_ms !== undefined
-      ? `${row.duration_ms} ms`
-      : diagnostic ? `${diagnostic.duration_ms} ms` : null],
-    [t("上游响应头耗时"), diagnostic?.upstream_wait_ms !== null && diagnostic?.upstream_wait_ms !== undefined
-      ? `${diagnostic.upstream_wait_ms} ms` : null],
-    [t("重试动作"), diagnostic?.retry_action],
-  ].filter((item) => item[1] !== null && item[1] !== undefined && item[1] !== "");
-  const detailBlocks = [
-    diagnostic?.upstream_headers && [t("上游 Trace ID"), diagnostic.upstream_headers],
-    diagnostic?.request_summary && [t("请求结构与指纹"), {
-      fingerprint: diagnostic.request_fingerprint,
-      summary: diagnostic.request_summary,
-    }],
-    diagnostic?.upstream_error && [t("脱敏上游错误"), diagnostic.upstream_error],
-  ].filter(Boolean) as Array<[string, unknown]>;
-  const errorMessage = "error_message" in row ? row.error_message : row.message;
-  return h("div", { class: "diagnostic-detail" }, [
-    h("dl", { class: "diagnostic-meta" }, items.flatMap(([label, value]) => [
-      h("dt", String(label)),
-      h("dd", String(value)),
-    ])),
-    errorMessage ? h("section", [
-      h("h4", t("错误")),
-      h("pre", { class: "error-text" }, errorMessage),
-    ]) : null,
-    ...detailBlocks.map(([label, value]) => h("section", [
-      h("h4", label),
-      h("pre", { class: "diagnostic-json" }, JSON.stringify(value, null, 2)),
-    ])),
-  ]);
-}
+const logsColumnContext: LogsColumnContext = {
+  copiedTarget,
+  copyText,
+  focusRequestChain,
+  accounts,
+};
 
 const gatewayColumns = computed(() => [
   {
@@ -739,7 +582,7 @@ const gatewayColumns = computed(() => [
     renderExpand: renderDiagnostic,
   },
   { title: t("时间"), key: "created_at", width: 150, render: (row: GatewayLog) => formatDate(row.created_at) },
-  { title: t("请求 ID"), key: "request_id", width: 170, render: renderRequestId },
+  { title: t("请求 ID"), key: "request_id", width: 170, render: (row: GatewayLog) => renderRequestId(row, logsColumnContext) },
   { title: t("级别"), key: "level", width: 80 },
   { title: t("分类"), key: "category", width: 100 },
   { title: t("消息"), key: "message", minWidth: 480, ellipsis: { tooltip: true }, render: (row: GatewayLog) => gatewayLogMessage(row.message) },
@@ -749,7 +592,7 @@ const forwardColumns = computed(() => [
     type: "expand" as const,
     width: 44,
     expandable: () => true,
-    renderExpand: renderForwardDetail,
+    renderExpand: (row: ForwardLog) => renderForwardDetail(row, logsColumnContext),
   },
   { title: t("时间"), key: "timestamp", width: 150, render: (row: ForwardLog) => formatDate(row.timestamp) },
   {
@@ -869,7 +712,7 @@ async function loadGatewayLogs() {
   } catch (e) {
     if (request === gatewayRequest) {
       gatewayError.value = e instanceof Error ? e.message : String(e);
-      message.error(t("加载运行日志失败: {error}", { error: gatewayError.value }));
+      message.error(t("加载运行日志失败：{error}", { error: gatewayError.value }));
     }
   } finally {
     if (request === gatewayRequest) gatewayLoading.value = false;
@@ -910,7 +753,7 @@ async function loadForwardLogs() {
       forwardLogs.value = [];
       forwardTotals.value = emptySummary();
       forwardError.value = dashboardErrorDetail(e);
-      message.error(t("加载请求日志失败: {error}", { error: forwardError.value }));
+      message.error(t("加载请求日志失败：{error}", { error: forwardError.value }));
     }
   } finally {
     if (request === forwardRequest) forwardLoading.value = false;
@@ -921,7 +764,7 @@ async function loadAccounts() {
   try {
     accounts.value = await dashboardApi.getAccounts();
   } catch (e) {
-    message.error(t("加载账号筛选失败: {error}", { error: String(e) }));
+    message.error(t("加载账号筛选失败：{error}", { error: String(e) }));
   }
 }
 
@@ -929,7 +772,7 @@ async function loadForwardLogModels() {
   try {
     models.value = await dashboardApi.getForwardLogModels();
   } catch (e) {
-    message.error(t("加载模型筛选失败: {error}", { error: String(e) }));
+    message.error(t("加载模型筛选失败：{error}", { error: String(e) }));
   }
 }
 
@@ -937,7 +780,7 @@ async function loadForwardLogKeys() {
   try {
     clientKeys.value = await dashboardApi.getForwardLogKeys();
   } catch (e) {
-    message.error(t("加载 Key 筛选失败: {error}", { error: String(e) }));
+    message.error(t("加载 Key 筛选失败：{error}", { error: String(e) }));
   }
 }
 
@@ -1030,22 +873,22 @@ onUnmounted(cleanup);
 .logs-card {
   max-width: 1480px;
   margin: 0 auto;
-  padding: 4px 18px 18px;
+  padding: var(--ocg-space-xs) 18px 18px;
   border: 1px solid var(--ocg-border);
-  border-radius: 14px;
+  border-radius: var(--ocg-radius-lg);
   background: var(--ocg-surface);
   box-shadow: var(--ocg-shadow-sm);
 }
 .stats-row {
   display: grid;
   grid-template-columns: repeat(5, 1fr);
-  gap: 12px;
-  margin-bottom: 16px;
+  gap: var(--ocg-space-md);
+  margin-bottom: var(--ocg-space-lg);
 }
 .stat-card {
-  padding: 12px 14px;
+  padding: var(--ocg-space-md) 14px;
   border: 1px solid var(--ocg-border);
-  border-radius: 10px;
+  border-radius: var(--ocg-radius-md);
   background: var(--ocg-surface);
 }
 .stat-label {
@@ -1065,13 +908,13 @@ onUnmounted(cleanup);
   display: flex;
   flex-wrap: wrap;
   align-items: flex-end;
-  gap: 8px;
-  margin-bottom: 12px;
+  gap: var(--ocg-space-sm);
+  margin-bottom: var(--ocg-space-md);
 }
 .filter-field {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--ocg-space-xs);
   flex: 1 1 160px;
   min-width: 0;
 }
@@ -1084,7 +927,7 @@ onUnmounted(cleanup);
 }
 .filter-actions {
   display: flex;
-  gap: 4px;
+  gap: var(--ocg-space-xs);
   flex: 0 0 auto;
   margin-left: auto;
 }
@@ -1107,7 +950,7 @@ onUnmounted(cleanup);
 .time-range-panel {
   display: inline-flex;
   flex-direction: row;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
   max-width: calc(100vw - 48px);
 }
 .preset-list {
@@ -1125,7 +968,7 @@ onUnmounted(cleanup);
 .custom-range-wrapper {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
   width: auto;
   max-width: 0;
   opacity: 0;
@@ -1136,7 +979,7 @@ onUnmounted(cleanup);
 .custom-range-wrapper.is-visible {
   max-width: 600px;
   opacity: 1;
-  padding-left: 8px;
+  padding-left: var(--ocg-space-sm);
   border-left-color: var(--ocg-border);
 }
 .custom-range-title {
@@ -1163,10 +1006,10 @@ onUnmounted(cleanup);
 .filter-actions {
   display: flex;
   justify-content: flex-end;
-  gap: 4px;
+  gap: var(--ocg-space-xs);
 }
 .log-toolbar {
-  margin-bottom: 8px;
+  margin-bottom: var(--ocg-space-sm);
 }
 .request-id-filter {
   width: min(360px, 100%);
@@ -1190,8 +1033,8 @@ onUnmounted(cleanup);
 }
 .diagnostic-detail {
   display: grid;
-  gap: 12px;
-  padding: 8px 0;
+  gap: var(--ocg-space-md);
+  padding: var(--ocg-space-sm) 0;
 }
 .diagnostic-detail h4 {
   margin: 0 0 5px;
@@ -1201,7 +1044,7 @@ onUnmounted(cleanup);
 .diagnostic-meta {
   display: grid;
   grid-template-columns: max-content minmax(120px, 1fr) max-content minmax(120px, 1fr);
-  gap: 5px 12px;
+  gap: 5px var(--ocg-space-md);
   margin: 0;
 }
 .diagnostic-meta dt {
@@ -1215,9 +1058,9 @@ onUnmounted(cleanup);
 .diagnostic-json,
 .error-text {
   margin: 0;
-  padding: 10px 12px;
+  padding: 10px var(--ocg-space-md);
   border: 1px solid var(--ocg-border);
-  border-radius: 6px;
+  border-radius: var(--ocg-radius-sm);
   background: var(--ocg-canvas);
   color: var(--ocg-ink);
   font-family: "Cascadia Mono", Consolas, monospace;
@@ -1231,7 +1074,7 @@ onUnmounted(cleanup);
   overflow: auto;
 }
 
-.advanced-filter-toggle { display: inline-flex; margin-bottom: 12px; }
+.advanced-filter-toggle { display: inline-flex; margin-bottom: var(--ocg-space-md); }
 .filter-bar:not(.show-advanced) .advanced-filter { display: none; }
 
 @media (max-width: 860px) {
@@ -1244,7 +1087,7 @@ onUnmounted(cleanup);
     border-left: none;
     border-top: 1px solid var(--ocg-border);
     padding-left: 0;
-    padding-top: 8px;
+    padding-top: var(--ocg-space-sm);
   }
   .custom-time-picker {
     overflow-x: auto;
@@ -1254,15 +1097,15 @@ onUnmounted(cleanup);
 @media (max-width: 760px) {
   .stats-row {
     grid-template-columns: repeat(3, 1fr);
-    gap: 8px;
+    gap: var(--ocg-space-sm);
   }
 }
 
 @media (max-width: 560px) {
   .stat-card { padding: 10px; }
-  .stats-row { margin-bottom: 12px; }
+  .stats-row { margin-bottom: var(--ocg-space-md); }
   .logs-card {
-    padding: 2px 12px 12px;
+    padding: 2px var(--ocg-space-md) var(--ocg-space-md);
   }
   .stats-row {
     grid-template-columns: repeat(3, minmax(0, 1fr));

@@ -121,7 +121,7 @@ export function useAccountOrder(options: {
       } else {
         accounts.value = previous;
       }
-      const failure = t("保存账号顺序失败: {error}", { error: dashboardErrorDetail(error) });
+      const failure = t("保存账号顺序失败：{error}", { error: dashboardErrorDetail(error) });
       orderAnnouncement.value = failure;
       message.error(failure);
     } finally {

@@ -153,7 +153,7 @@
           </div>
         </div>
         <p v-if="connectionUrls.insecureHttp" class="connection-warning" role="status">
-          {{ t("非本机 HTTP 会明文传输 Key 与请求内容，请仅在可信网络中使用。") }}
+          {{ t("非本机 HTTP 会明文传输 Key 与请求内容，仅在可信网络中使用。") }}
         </p>
       </div>
       <img :src="characterImage" alt="" class="hero-character" aria-hidden="true" />
@@ -256,7 +256,8 @@ import { CHART_PALETTE } from "../theme";
 import { t } from "../i18n/index.ts";
 import { formatNumber, formatTokens, useClipboard } from "../utils/format.ts";
 import { userFacingError } from "../utils/errors.ts";
-import { accountExpiryLabel } from "../domain/account-display.ts";
+import { accountExpiry } from "../domain/account-display.ts";
+import { accountExpiryText } from "./account-status-text.ts";
 import { maskConnectionKey, resolveConnectionUrls } from "./dashboard-connection";
 import { buildNeedsAttention } from "./dashboard-attention.ts";
 import type { AttentionItem, AttentionReason } from "./dashboard-attention.ts";
@@ -280,10 +281,12 @@ const connectionStore = useConnectionStore();
 const providersStore = useProvidersStore();
 const { copiedTarget, copy, cleanup } = useClipboard();
 const characterImage = new URL("../../assets/opencode-mascot.png", import.meta.url).href;
-const accounts = ref<Account[]>([]);
+const accounts = computed(() => accountsStore.accounts);
 const dailyTokens = ref<DailyModelTokens[]>([]);
 const loading = ref(true);
-const accountsLoaded = ref(false);
+const accountsLoaded = computed(() => accountsStore.loaded);
+// summary/tokens latches: once true they stay true, so revalidations
+// (tab return, window refocus) keep the current content rendered.
 const summaryLoaded = ref(false);
 const tokensLoaded = ref(false);
 const dashboardError = ref(false);
@@ -387,7 +390,7 @@ function attentionLabel(item: AttentionItem): string {
     case "expired": {
       const account = attentionAccount(item);
       return account
-        ? accountExpiryLabel(account, lifecycleNow.value)
+        ? accountExpiryText(accountExpiry(account, lifecycleNow.value))
         : t("已到期 {days} 天", { days: 0 });
     }
     case "cooling":
@@ -436,7 +439,7 @@ async function regenerateKey() {
     message.success(t("Key 已刷新"));
   } catch (error) {
     dashboardError.value = true;
-    message.error(t("刷新 Key 失败: {error}", {
+    message.error(t("刷新 Key 失败：{error}", {
       error: userFacingError(error, t("无法连接到本地服务，请确认程序正在运行后重试")),
     }));
   } finally {
@@ -459,11 +462,8 @@ async function loadDashboard() {
   dashboardRequestActive = true;
   loading.value = true;
   dashboardError.value = false;
-  accountsLoaded.value = false;
-  summaryLoaded.value = false;
-  tokensLoaded.value = false;
-  accounts.value = [];
-  dailyTokens.value = [];
+  // Revalidation keeps the current content: successful responses replace
+  // state in place, failures keep the previous snapshot visible.
   const [loadedAccounts, connection, loadedSummary, tokens, catalog] = await Promise.allSettled([
     accountsStore.loadPresented(),
     connectionStore.load(),
@@ -471,10 +471,6 @@ async function loadDashboard() {
     dashboardApi.getDailyTokensByModel(30),
     providersStore.loadCatalog(),
   ]);
-  if (loadedAccounts.status === "fulfilled") {
-    accounts.value = loadedAccounts.value;
-    accountsLoaded.value = true;
-  }
   if (loadedSummary.status === "fulfilled") {
     summary.value = loadedSummary.value;
     summaryLoaded.value = true;
@@ -549,7 +545,7 @@ onUnmounted(() => {
 .dashboard {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: var(--ocg-space-lg);
   max-width: 1480px;
   margin: 0 auto;
 }
@@ -559,7 +555,7 @@ onUnmounted(() => {
   min-height: 262px;
   overflow: hidden;
   border: 1px solid var(--ocg-border);
-  border-radius: 14px;
+  border-radius: var(--ocg-radius-lg);
   background: var(--ocg-surface);
   box-shadow: var(--ocg-shadow-sm);
 }
@@ -589,7 +585,7 @@ onUnmounted(() => {
   position: relative;
   z-index: 2;
   width: min(760px, calc(100% - 300px));
-  padding: 24px;
+  padding: var(--ocg-space-xl);
 }
 .connection-head {
   display: flex;
@@ -633,16 +629,16 @@ onUnmounted(() => {
 }
 .connection-rows {
   display: grid;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
 }
 .connection-row {
   display: grid;
   grid-template-columns: 28px minmax(0, 1fr) auto;
   align-items: center;
   min-height: 44px;
-  padding: 6px 8px 6px 12px;
+  padding: 6px var(--ocg-space-sm) 6px var(--ocg-space-md);
   border: 1px solid var(--ocg-border);
-  border-radius: 10px;
+  border-radius: var(--ocg-radius-md);
   background: color-mix(in srgb, var(--ocg-canvas) 72%, var(--ocg-surface));
   color: var(--ocg-primary);
 }
@@ -654,9 +650,9 @@ onUnmounted(() => {
   align-items: center;
   gap: 6px;
   max-width: 200px;
-  padding: 3px 8px;
+  padding: 3px var(--ocg-space-sm);
   border: 1px solid var(--ocg-border);
-  border-radius: 6px;
+  border-radius: var(--ocg-radius-sm);
   background: var(--ocg-surface);
   color: var(--ocg-ink);
   font-size: var(--ocg-font-sm);
@@ -691,17 +687,17 @@ onUnmounted(() => {
 }
 .key-switcher-menu {
   display: grid;
-  gap: 4px;
+  gap: var(--ocg-space-xs);
   min-width: 260px;
 }
 .key-switcher-option {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  column-gap: 12px;
+  column-gap: var(--ocg-space-md);
   padding: 6px 10px;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--ocg-radius-sm);
   background: none;
   color: var(--ocg-ink);
   cursor: pointer;
@@ -765,7 +761,7 @@ onUnmounted(() => {
 .hero-character {
   position: absolute;
   z-index: 1;
-  top: 4px;
+  top: var(--ocg-space-xs);
   right: 28px;
   height: 380px;
   max-width: 34%;
@@ -779,7 +775,7 @@ onUnmounted(() => {
 
 .card {
   border: 1px solid var(--ocg-border);
-  border-radius: 14px;
+  border-radius: var(--ocg-radius-lg);
   background: var(--ocg-surface);
   box-shadow: var(--ocg-shadow-sm);
 }
@@ -787,8 +783,8 @@ onUnmounted(() => {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
-  padding: 16px 18px 10px;
+  gap: var(--ocg-space-md);
+  padding: var(--ocg-space-lg) 18px 10px;
 }
 .card-title {
   margin: 0;
@@ -801,13 +797,13 @@ onUnmounted(() => {
   font-size: var(--ocg-font-sm);
 }
 .chart-card {
-  padding-bottom: 12px;
+  padding-bottom: var(--ocg-space-md);
 }
 .chart-stats {
   display: flex;
   flex-wrap: wrap;
   justify-content: flex-end;
-  gap: 8px 16px;
+  gap: var(--ocg-space-sm) var(--ocg-space-lg);
   color: var(--ocg-subtle);
   font-size: var(--ocg-font-sm);
 }
@@ -820,7 +816,7 @@ onUnmounted(() => {
   display: flex;
   flex-wrap: wrap;
   gap: 7px 14px;
-  padding: 0 18px 4px;
+  padding: 0 18px var(--ocg-space-xs);
 }
 .legend-item {
   display: inline-flex;
@@ -835,7 +831,7 @@ onUnmounted(() => {
   border-radius: 50%;
 }
 .chart-card :deep(.n-spin-content) {
-  padding: 4px 12px 0;
+  padding: var(--ocg-space-xs) var(--ocg-space-md) 0;
   overflow: hidden;
 }
 
@@ -859,7 +855,7 @@ onUnmounted(() => {
 
 @media (max-width: 640px) {
   .dashboard {
-    gap: 12px;
+    gap: var(--ocg-space-md);
   }
   .connection-hero {
     min-height: 256px;
@@ -900,24 +896,24 @@ onUnmounted(() => {
 }
 
 .attention-card {
-  padding-bottom: 16px;
+  padding-bottom: var(--ocg-space-lg);
 }
 
 .attention-list {
   display: grid;
-  gap: 8px;
-  padding: 4px 18px 0;
+  gap: var(--ocg-space-sm);
+  padding: var(--ocg-space-xs) 18px 0;
 }
 
 .attention-item {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: var(--ocg-space-md);
   width: 100%;
-  padding: 10px 12px;
+  padding: 10px var(--ocg-space-md);
   border: 1px solid var(--ocg-border);
-  border-radius: 10px;
+  border-radius: var(--ocg-radius-md);
   background: color-mix(in srgb, var(--ocg-canvas) 70%, var(--ocg-surface));
   color: var(--ocg-ink);
   font: inherit;
@@ -953,7 +949,7 @@ onUnmounted(() => {
 
 @media (max-width: 640px) {
   .attention-list {
-    padding: 4px 14px 0;
+    padding: var(--ocg-space-xs) 14px 0;
   }
 
   .attention-item {

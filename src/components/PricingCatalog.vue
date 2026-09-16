@@ -12,7 +12,7 @@
     <n-alert
       v-else-if="catalogError"
       type="error"
-      :title="t('加载服务商目录失败: {error}', { error: catalogError })"
+      :title="t('加载供应商目录失败：{error}', { error: catalogError })"
     >
       <n-button size="small" secondary @click="loadProviderCatalog">{{ t("重试") }}</n-button>
     </n-alert>
@@ -42,16 +42,16 @@
                 type="success"
                 size="small"
                 :bordered="false"
-              >{{ t("免费 · 出口 IP 共享") }}</n-tag>
+              >{{ t("免费 · 共享出口 IP") }}</n-tag>
             </h2>
             <n-alert
               v-if="pricingDisplay(group).state === 'error'"
               type="error"
-              :title="t(pricingDisplay(group).messageKey, { error: pricingDisplay(group).error ?? '' })"
+              :title="t(PLAN_PRICING_MESSAGE_KEYS[pricingDisplay(group).messageCode], { error: pricingDisplay(group).error ?? '' })"
             >
               <n-button size="small" secondary @click="retryGroupPricing(group)">{{ t("重试") }}</n-button>
             </n-alert>
-            <p v-else>{{ t(pricingDisplay(group).messageKey) }}</p>
+            <p v-else>{{ t(PLAN_PRICING_MESSAGE_KEYS[pricingDisplay(group).messageCode]) }}</p>
           </div>
           <div v-if="group.pricingAvailability === 'available'" class="pricing-actions">
             <n-button
@@ -73,7 +73,7 @@
         </div>
 
         <template v-if="group.content.kind === 'models'">
-            <n-alert v-if="refreshError" type="warning" :title="t('刷新额度价格表失败: {error}', { error: refreshError })" />
+            <n-alert v-if="refreshError" type="warning" :title="t('刷新价格表失败：{error}', { error: refreshError })" />
 
             <n-spin :show="loading">
               <template v-if="pricingDisplay(group).state === 'available-table'">
@@ -120,7 +120,7 @@
         <n-alert
           v-if="group.content.kind === 'values' && refreshError"
           type="warning"
-          :title="t('刷新额度价格表失败: {error}', { error: refreshError })"
+          :title="t('刷新价格表失败：{error}', { error: refreshError })"
         />
 
         <template v-else-if="group.content.kind === 'opaque' && pricingDisplay(group).state === 'available-table'">
@@ -195,6 +195,7 @@ import { providerSurfaces } from "../domain/plans.ts";
 import {
   buildScopedPlanPricingGroups,
   resolvePlanPricingDisplay,
+  PLAN_PRICING_MESSAGE_KEYS,
 } from "../domain/pricing-plans.ts";
 import type { PlanPricingGroup, ProviderSnapshots } from "../domain/pricing-plans.ts";
 
@@ -486,10 +487,10 @@ async function saveMultiplier(modelId: string) {
     ) {
       const reloadError = await reloadPricingAfterRevisionChange();
       if (reloadError) {
-        message.error(t("保存官方倍率失败: {error}", { error: reloadError }));
+        message.error(t("保存官方倍率失败：{error}", { error: reloadError }));
       }
     } else {
-      message.error(t("保存官方倍率失败: {error}", { error: detail }));
+      message.error(t("保存官方倍率失败：{error}", { error: detail }));
     }
   } finally {
     savingModelId.value = null;
@@ -519,9 +520,9 @@ async function saveProviderMultiplier(
       && detail.includes("provider pricing revision changed")
     ) {
       const reloadError = await reloadPricingAfterRevisionChange();
-      if (reloadError) message.error(t("保存官方倍率失败: {error}", { error: reloadError }));
+      if (reloadError) message.error(t("保存官方倍率失败：{error}", { error: reloadError }));
     } else {
-      message.error(t("保存官方倍率失败: {error}", { error: detail }));
+      message.error(t("保存官方倍率失败：{error}", { error: detail }));
     }
   } finally {
     savingModelId.value = null;
@@ -644,7 +645,7 @@ function multiplierDisplayName(modelId: string): string {
 
 function renderMultiplierChanges(changes: readonly PricingMultiplierChange[]) {
   return h("div", { class: "pricing-refresh-comparison" }, [
-    h("p", t("刷新到的官方倍率与当前设置不同。选择是否覆盖当前倍率后，才会启用新的价格与模型列表。")),
+    h("p", t("刷新到的官方倍率与当前设置不同，选择是否覆盖后才会启用新的价格与模型列表。")),
     h("div", { class: "pricing-refresh-comparison__scroll" }, [
       h("table", [
         h("thead", [h("tr", [
@@ -698,7 +699,7 @@ function showRefreshConfirmation(
 
 function requestPricingRefresh() {
   if (Object.keys(multiplierDrafts.value).length) {
-    message.warning(t("请先保存或放弃倍率修改"));
+    message.warning(t("先保存或放弃倍率修改"));
     return;
   }
   void performPricingRefresh();
@@ -755,7 +756,7 @@ async function performPricingRefresh(
     ) {
       refreshError.value = await reloadPricingAfterRevisionChange() ?? "";
     } else if (!policy && error instanceof DashboardRequestError && error.status === 409) {
-      message.warning(t("已有价格表刷新正在进行"));
+      message.warning(t("价格表刷新已在进行中"));
     } else {
       refreshError.value = detail;
     }
@@ -782,7 +783,7 @@ onMounted(() => void loadProviderCatalog());
 <style scoped>
 .pricing-catalog {
   display: grid;
-  gap: 16px;
+  gap: var(--ocg-space-lg);
 }
 .pricing-plan-tabs {
   min-width: 0;
@@ -793,14 +794,14 @@ onMounted(() => void loadProviderCatalog());
   place-items: center;
 }
 .pricing-card h2 :deep(.n-tag) {
-  margin-left: 8px;
+  margin-left: var(--ocg-space-sm);
   vertical-align: middle;
 }
 .pricing-card {
   grid-column: 1 / -1;
   padding: 22px;
   border: 1px solid var(--ocg-border);
-  border-radius: 14px;
+  border-radius: var(--ocg-radius-lg);
   background: var(--ocg-surface);
   box-shadow: var(--ocg-shadow-sm);
 }
@@ -808,7 +809,7 @@ onMounted(() => void loadProviderCatalog());
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 16px;
+  gap: var(--ocg-space-lg);
   margin-bottom: 18px;
 }
 .pricing-head h2 {
@@ -818,7 +819,7 @@ onMounted(() => void loadProviderCatalog());
 }
 .pricing-head p,
 .pricing-note {
-  margin: 4px 0 0;
+  margin: var(--ocg-space-xs) 0 0;
   color: var(--ocg-subtle);
   font-size: var(--ocg-font-sm);
 }
@@ -826,7 +827,7 @@ onMounted(() => void loadProviderCatalog());
   display: flex;
   flex: 0 0 auto;
   align-items: center;
-  gap: 12px;
+  gap: var(--ocg-space-md);
 }
 .pricing-ledger {
   display: grid;
@@ -835,7 +836,7 @@ onMounted(() => void loadProviderCatalog());
   margin: 0 0 14px;
   overflow: hidden;
   border: 1px solid var(--ocg-border);
-  border-radius: 10px;
+  border-radius: var(--ocg-radius-md);
   background: var(--ocg-border);
 }
 .pricing-ledger--compact {
@@ -843,11 +844,11 @@ onMounted(() => void loadProviderCatalog());
 }
 .pricing-ledger > div {
   min-width: 0;
-  padding: 10px 12px;
+  padding: 10px var(--ocg-space-md);
   background: var(--ocg-canvas);
 }
 .pricing-ledger dt {
-  margin-bottom: 4px;
+  margin-bottom: var(--ocg-space-xs);
   color: var(--ocg-subtle);
   font-size: var(--ocg-font-xs);
 }
@@ -906,7 +907,7 @@ onMounted(() => void loadProviderCatalog());
   max-width: 100%;
 }
 :global(.pricing-refresh-comparison > p) {
-  margin: 0 0 12px;
+  margin: 0 0 var(--ocg-space-md);
   color: var(--ocg-subtle);
 }
 :global(.pricing-refresh-comparison__scroll) {
@@ -921,7 +922,7 @@ onMounted(() => void loadProviderCatalog());
 }
 :global(.pricing-refresh-comparison th),
 :global(.pricing-refresh-comparison td) {
-  padding: 8px 10px;
+  padding: var(--ocg-space-sm) 10px;
   border-bottom: 1px solid var(--ocg-border);
   text-align: left;
 }
@@ -939,7 +940,7 @@ onMounted(() => void loadProviderCatalog());
   display: flex;
   flex-wrap: wrap;
   justify-content: flex-end;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
 }
 @media (prefers-reduced-motion: reduce) {
   :deep(.pricing-tree-chevron) {

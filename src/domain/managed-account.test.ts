@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { enUSMessages } from "../i18n/messages/en-US.ts";
 import {
   DEFAULT_OPENCODE_INVITE_URL,
   MANAGED_SETUP_STEPS,
@@ -7,6 +8,12 @@ import {
   normalizeOpenCodeInviteUrl,
   setupStepIndex,
 } from "./managed-account.ts";
+
+function assertThrowsWithI18nMessage(fn: () => unknown): void {
+  assert.throws(fn, (error: unknown) => (
+    error instanceof Error && Object.hasOwn(enUSMessages, error.message)
+  ));
+}
 
 test("managed wizard steps keep google_account through ready in order and index", () => {
   assert.deepEqual(MANAGED_SETUP_STEPS, [
@@ -36,8 +43,8 @@ test("OpenCode invite URLs are HTTPS, credential-free, bounded, and host allowli
     "https://console.opencode.ai/register?invite=demo",
   );
   assert.throws(() => normalizeOpenCodeInviteUrl("http://opencode.ai/invite"), /HTTPS/);
-  assert.throws(() => normalizeOpenCodeInviteUrl("https://user:pass@opencode.ai/invite"), /用户名或密码/);
-  assert.throws(() => normalizeOpenCodeInviteUrl("https://opencode.ai.example/invite"), /域名/);
+  assertThrowsWithI18nMessage(() => normalizeOpenCodeInviteUrl("https://user:pass@opencode.ai/invite"));
+  assertThrowsWithI18nMessage(() => normalizeOpenCodeInviteUrl("https://opencode.ai.example/invite"));
   assert.throws(() => normalizeOpenCodeInviteUrl(`https://opencode.ai/${"x".repeat(2049)}`), /2048/);
 });
 

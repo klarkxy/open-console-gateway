@@ -16,9 +16,9 @@ export function dashboardErrorDetail(error: unknown): string {
     case "migration password is incorrect or the backup file is damaged":
       return t("迁移包密码错误或文件损坏，请检查密码或重新选择备份文件。");
     case "CPA Management Key is required":
-      return t("请填写 CPA Management Key，然后重新测试连接。");
+      return t("填写 CPA Management Key 后重新测试连接。");
     case "CPA Inference Key is required":
-      return t("请填写 CPA Inference Key，然后重新测试连接。");
+      return t("填写 CPA Inference Key 后重新测试连接。");
     case "CPA managed runtime is not installed":
       return t("CPA 尚未安装，请先在概览中安装。");
     case "no desktop Chromium launcher or remote browser worker is configured":

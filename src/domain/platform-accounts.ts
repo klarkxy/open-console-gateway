@@ -363,7 +363,7 @@ export function platformGroupLabel(
  * i18n key; anything else returns null so the UI shows the raw code.
  */
 export const PLATFORM_UNAVAILABLE_REASON_KEYS: Record<string, string> = {
-  user_identity_required: "需要登录身份才能查看价格",
+  user_identity_required: "登录后才能查看价格",
   group_model_unavailable: "该分组不提供此模型",
   reasoning_multiplier: "按推理强度倍率计费",
 };

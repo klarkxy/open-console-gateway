@@ -1,5 +1,6 @@
 import { dashboardV3, isRevisionConflict, type WithoutExpectation } from "./dashboard-v3.ts";
 import { dashboardV4 } from "./dashboard-v4.ts";
+import { t } from "../i18n/index.ts";
 import { useControlPlaneStore } from "../stores/controlPlane.ts";
 import type {
   AccountCredentialKind,
@@ -727,7 +728,7 @@ export const providerApi = {
     const control = useControlPlaneStore();
     if (!control.hasTokens()) await control.refresh();
     if (providerId === "custom") {
-      throw new Error("Custom API 协议探测尚未纳入 Dashboard V3 合同");
+      throw new Error(t("Custom API 暂不支持协议探测"));
     }
     return presentProbe(await control.runMutation((expectation) =>
       dashboardV3.runProviderProtocolProbes(providerId, {

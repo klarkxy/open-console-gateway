@@ -5,6 +5,7 @@ import {
   providerSurfaces,
   planFamilyLabel,
   planCreateDisabledReason,
+  type PlanCreateDisabledReasonCode,
 } from "./plans.ts";
 
 /**
@@ -19,11 +20,17 @@ export interface PlanOption {
   label: string;
   source: "builtin" | "user-defined";
   disabled: boolean;
-  disabledReason: MessageKey | "";
+  disabledReason: PlanCreateDisabledReasonCode | "";
   /** Honest copy for selectable-but-not-yet-routable families. */
-  creationHint: MessageKey | "";
+  creationHint: PlanOptionCreationHintCode | "";
   managed: boolean;
 }
+
+export type PlanOptionCreationHintCode = "missing_mappings";
+
+export const PLAN_OPTION_CREATION_HINT_KEYS: Record<PlanOptionCreationHintCode, MessageKey> = {
+  missing_mappings: "账号无 Endpoint、协议或模型映射。",
+};
 
 function surfaceOption(
   plan: PlanDefinition,
@@ -38,7 +45,7 @@ function surfaceOption(
     source: dynamic ? "user-defined" : "builtin",
     disabled: Boolean(reason),
     disabledReason: reason ?? "",
-    creationHint: dynamic && !reason ? "账号不拥有 Endpoint、协议或模型映射。" : "",
+    creationHint: dynamic && !reason ? "missing_mappings" : "",
     managed: !reason && plan.managed_registration,
   };
 }

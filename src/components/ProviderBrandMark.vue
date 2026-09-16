@@ -44,7 +44,7 @@ const monogram = computed(() => (props.family.label.trim().charAt(0) || "").toLo
   align-items: center;
   justify-content: center;
   overflow: hidden;
-  border-radius: 6px;
+  border-radius: var(--ocg-radius-sm);
   vertical-align: middle;
 }
 

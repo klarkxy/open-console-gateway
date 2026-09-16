@@ -4,8 +4,10 @@ import { dashboardApi } from "../api/dashboard.ts";
 import type { Account } from "../api/dashboard.ts";
 
 /**
- * Account list cache for pages that need `byId` after a load.
- * Mutations stay on `dashboardApi` in the views.
+ * Single owner of the account list. Views issue API mutations through
+ * `dashboardApi`, then commit the results here via `upsertAccount` /
+ * `removeAccount` / `setAccounts`; a pending load can never clobber state
+ * committed by a newer load or an in-place mutation.
  */
 export const useAccountsStore = defineStore("accounts", () => {
   const accounts = ref<Account[]>([]);
@@ -43,6 +45,37 @@ export const useAccountsStore = defineStore("accounts", () => {
     }
   }
 
+  // Committing mutation results invalidates in-flight loads so a stale
+  // response cannot clobber the newer state; the superseded load's caller
+  // still receives its own payload.
+  function setAccounts(list: Account[]): void {
+    loadGeneration++;
+    loading.value = false;
+    accounts.value = list;
+    loaded.value = true;
+    error.value = "";
+  }
+
+  function upsertAccount(account: Account): void {
+    const exists = accounts.value.some((item) => item.id === account.id);
+    setAccounts(exists
+      ? accounts.value.map((item) => (item.id === account.id ? account : item))
+      : [...accounts.value, account]);
+  }
+
+  function removeAccount(id: string): void {
+    setAccounts(accounts.value.filter((item) => item.id !== id));
+  }
+
+  /** Drop the cached list on 401 / logout so the next session reloads fresh. */
+  function clearAccounts(): void {
+    loadGeneration++;
+    accounts.value = [];
+    loaded.value = false;
+    loading.value = false;
+    error.value = "";
+  }
+
   return {
     accounts: computed(() => accounts.value),
     loaded: computed(() => loaded.value),
@@ -50,5 +83,9 @@ export const useAccountsStore = defineStore("accounts", () => {
     error: computed(() => error.value),
     byId,
     loadPresented,
+    setAccounts,
+    upsertAccount,
+    removeAccount,
+    clearAccounts,
   };
 });

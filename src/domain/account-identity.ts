@@ -8,13 +8,13 @@ import type {
 import { identityJoinKey } from "../api/identities.ts";
 import type { AuthState } from "../api/identities.ts";
 import type { ProviderCatalogEntry } from "../api/providers.ts";
-import { t } from "../i18n/index.ts";
 import {
   accountIsReady,
-  accountRoutingDraftLabel,
-  accountStatusLabel,
+  accountRoutingDraftState,
+  accountStatus,
   accountStatusTagType,
-  formatCooldownRemaining,
+  cooldownRemaining,
+  type AccountStatus,
   type AccountStatusTagType,
 } from "./account-display.ts";
 import { isCooling } from "./accounts-usage.ts";
@@ -25,7 +25,8 @@ import { planForAccount } from "./plans.ts";
 /**
  * Overlay the secret-free V4 identity projection onto a V3 Account card.
  * Join is `legacy.kind+id`. These helpers never invent health, expiry, or
- * a verified-wallet claim, and they never trigger probes.
+ * a verified-wallet claim, and they never trigger probes. They return codes
+ * and raw data only; the view layer localizes (src/views/account-status-text.ts).
  */
 
 /**
@@ -62,9 +63,10 @@ export function accountShowsDeclaredRelation(identity: Identity | null): boolean
   return !!identity && identity.declared_relations.length > 0;
 }
 
-export function accountCredentialCountLabel(identity: Identity | null): string | null {
+/** Extra-credential count badge data; null when a single Key adds no chrome. */
+export function accountCredentialCount(identity: Identity | null): number | null {
   if (!identity || identity.credentials.length <= 1) return null;
-  return t("{count} 个凭据", { count: identity.credentials.length });
+  return identity.credentials.length;
 }
 
 export function inferenceAuthState(
@@ -123,32 +125,40 @@ export function sharedQuotaSiblings(
   ));
 }
 
-export function selectedQuotaShareLabel(
+/** Quota-share badge data: a single named sibling or a count. */
+export type QuotaShare = { kind: "named"; name: string } | { kind: "count"; count: number };
+
+export function selectedQuotaShare(
   identity: Identity | null,
   accountId: string,
   nameForAccountId?: (legacyAccountId: string) => string | null,
-): string | null {
+): QuotaShare | null {
   const siblings = sharedQuotaSiblings(identity, accountId);
   if (siblings.length === 0) return null;
   const names = siblings.map((row) => {
     const named = nameForAccountId?.(row.legacy.id)?.trim();
     return named || row.legacy.id;
   });
-  if (names.length === 1) return t("与 {name} 共享额度", { name: names[0] });
-  return t("与 {count} 个 Key 共享额度", { count: names.length });
+  if (names.length === 1) return { kind: "named", name: names[0] };
+  return { kind: "count", count: names.length };
 }
 
-/** Concise only-scope summary for the selected card; null when unrestricted. */
-export function selectedModelRestrictionLabel(
+/** Only-scope summary data for the selected card; null when unrestricted. */
+export type ModelRestriction =
+  | { kind: "restricted" }
+  | { kind: "single"; model: string }
+  | { kind: "count"; count: number };
+
+export function selectedModelRestriction(
   identity: Identity | null,
   accountId: string,
-): string | null {
+): ModelRestriction | null {
   const binding = selectedInferenceBinding(identity, accountId);
   if (!binding || binding.model_scope.kind !== "only") return null;
   const names = binding.model_scope.models.map((name) => name.trim()).filter(Boolean);
-  if (names.length === 0) return t("已限制模型");
-  if (names.length === 1) return t("仅 {model}", { model: names[0] });
-  return t("仅 {count} 个模型", { count: names.length });
+  if (names.length === 0) return { kind: "restricted" };
+  if (names.length === 1) return { kind: "single", model: names[0] };
+  return { kind: "count", count: names.length };
 }
 
 function inventsLifecycleDates(
@@ -192,25 +202,28 @@ export function accountExpiryDisplay(
   return v3Shows ? "v3" : "hidden";
 }
 
-export function presentedAccountStatusLabel(
+export function presentedAccountStatus(
   account: Account,
   identity: Identity | null,
   now = Date.now(),
-): string {
-  if (isZenFreeAccount(account) || !accountIsReady(account) || accountRoutingDraftLabel(account)) {
-    return accountStatusLabel(account, now);
+): AccountStatus {
+  if (isZenFreeAccount(account) || !accountIsReady(account) || accountRoutingDraftState(account)) {
+    return accountStatus(account, now);
   }
 
   const auth = inferenceAuthState(identity, account.id);
   if (auth === "invalid" || account.auth_error) {
-    return account.enabled ? t("不可用") : `${t("已禁用")} · ${t("不可用")}`;
+    return account.enabled ? { kind: "unavailable" } : { kind: "disabled-unavailable" };
   }
-  if (!account.enabled) return t("已禁用");
+  if (!account.enabled) return { kind: "disabled" };
   if (isCooling(account, now)) {
-    return t("冷却中·剩 {time}", { time: formatCooldownRemaining(account, now) });
+    return {
+      kind: "cooling",
+      remaining: cooldownRemaining(account, now) ?? { unit: "seconds", seconds: 0 },
+    };
   }
   // Unknown auth is not a third card state. The enable switch is the draft/live gate.
-  return t("已启用");
+  return { kind: "enabled" };
 }
 
 export function presentedAccountStatusTagType(
@@ -218,7 +231,7 @@ export function presentedAccountStatusTagType(
   identity: Identity | null,
   now = Date.now(),
 ): AccountStatusTagType {
-  if (isZenFreeAccount(account) || !accountIsReady(account) || accountRoutingDraftLabel(account)) {
+  if (isZenFreeAccount(account) || !accountIsReady(account) || accountRoutingDraftState(account)) {
     return accountStatusTagType(account, now);
   }
   const auth = inferenceAuthState(identity, account.id);

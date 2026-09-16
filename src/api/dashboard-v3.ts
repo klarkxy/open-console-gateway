@@ -240,9 +240,7 @@ export class DashboardThrottledError extends DashboardRequestError {
 
 /** Structured upgrade/refresh guidance surfaced on old-API 410 responses. */
 function goneGuidance(): string {
-  // This is intentionally a stable transport-level fallback, outside the
-  // generated i18n key union. Shell-level UI may localize it further.
-  return "页面版本与服务不匹配，请刷新页面后重试；若仍失败请升级到最新版本";
+  return t("页面版本与服务不匹配，刷新页面后重试；仍失败请升级到最新版本");
 }
 
 export function isRevisionConflict(error: unknown): error is DashboardConflictError {
@@ -283,7 +281,7 @@ export async function requestDashboard<T>(
   });
   if (!response.ok) {
     if (response.status === 401 && notifyAuthRequired) {
-      const message = t("登录已失效，请重新登录");
+      const message = t("登录已失效，重新登录");
       window.dispatchEvent(new CustomEvent(DASHBOARD_AUTH_REQUIRED_EVENT, { detail: message }));
       throw new DashboardAuthError(message);
     }

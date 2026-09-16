@@ -5,6 +5,7 @@ import type { ProviderCatalogEntry, ProviderNeutralPricingSnapshot } from "../ap
 import {
   buildPlanPricingGroups,
   buildScopedPlanPricingGroups,
+  PLAN_PRICING_MESSAGE_KEYS,
   resolvePlanPricingDisplay,
 } from "./pricing-plans.ts";
 
@@ -112,6 +113,8 @@ test("default pricing is catalog ordered, plan-only, and available-only", () => 
   assert.deepEqual(groups.map((group) => group.plan.provider_id), ["future-models", "future-values"]);
   assert.equal(groups[0]?.content.kind, "models");
   assert.equal(groups[1]?.content.kind, "values");
+  assert.equal(resolvePlanPricingDisplay(groups[0]!).messageCode, "models_note");
+  assert.equal(resolvePlanPricingDisplay(groups[1]!).messageCode, "estimate_note");
 });
 
 test("provider detail preserves unpriced state and never invents content", () => {
@@ -124,6 +127,47 @@ test("provider detail preserves unpriced state and never invents content", () =>
   assert.equal(groups[0]?.pricingAvailability, "unpriced");
   assert.equal(groups[0]?.content.kind, "none");
   assert.equal(resolvePlanPricingDisplay(groups[0]!).state, "unpriced");
+  assert.equal(resolvePlanPricingDisplay(groups[0]!).messageCode, "unpriced");
+});
+
+test("error and empty states resolve message codes and every code has a message key", () => {
+  const priced = row("priced");
+  const groups = buildPlanPricingGroups([priced], null, {
+    priced: {
+      provider_id: "priced",
+      availability: "available",
+      snapshot: modelSnapshot,
+      revision: 1,
+      process_generation: 1,
+      pricing_revision: "r",
+      provider_pricing_revision: "models-r1",
+    },
+  });
+  assert.equal(resolvePlanPricingDisplay(groups[0]!, "boom").state, "error");
+  assert.equal(resolvePlanPricingDisplay(groups[0]!, "boom").messageCode, "load_failed");
+
+  const emptyGroups = buildPlanPricingGroups(
+    [row("empty-plan")],
+    null,
+    {
+      "empty-plan": {
+        provider_id: "empty-plan",
+        availability: "available",
+        snapshot: { ...modelSnapshot, models: [] },
+        revision: 1,
+        process_generation: 1,
+        pricing_revision: "r",
+        provider_pricing_revision: "models-r1",
+      },
+    },
+  );
+  assert.equal(resolvePlanPricingDisplay(emptyGroups[0]!).state, "available-empty");
+  assert.equal(resolvePlanPricingDisplay(emptyGroups[0]!).messageCode, "empty");
+
+  assert.deepEqual(
+    Object.keys(PLAN_PRICING_MESSAGE_KEYS).sort(),
+    ["empty", "estimate_note", "load_failed", "models_note", "not_applicable", "unavailable", "unpriced"],
+  );
 });
 
 test("catalog failure keeps only the existing Go snapshot fallback", () => {

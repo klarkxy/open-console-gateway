@@ -8,7 +8,6 @@ import vue from "@vitejs/plugin-vue";
 import { reactive, ssrContextKey, type App, type Component } from "vue";
 import type { DshApplication } from "../api/generated/dashboard-v4.ts";
 import {
-  button,
   createVueHostRenderer,
   deferred,
   installTestWindow,
@@ -159,6 +158,30 @@ function requestError(message: string, status: number): Error {
   return new Ctor(message, status);
 }
 
+// Structural locators keep these tests independent of label wording: the
+// harness forwards naive-ui props into host-node props, so `type`/`class`
+// identify the same buttons an earlier copy-based `button()` lookup found.
+function installActionButton(root: HostNode): HostNode {
+  const actions = walkHostNodes(root).find((node) => node.props.class === "dsh-actions");
+  const found = actions && walkHostNodes(actions).find((node) => node.type === "button");
+  if (!found) throw new Error("install action button should render");
+  return found;
+}
+
+function installConfirmButton(root: HostNode): HostNode {
+  const dialog = walkHostNodes(root).find((node) => node.props.role === "dialog");
+  const found = dialog
+    && walkHostNodes(dialog).find((node) => node.type === "button" && node.props.type === "primary");
+  if (!found) throw new Error("install confirm button should render");
+  return found;
+}
+
+function errorAlertCount(root: HostNode): number {
+  return walkHostNodes(root).filter(
+    (node) => node.props.type === "error" && typeof node.props.title === "string",
+  ).length;
+}
+
 async function mount(options: {
   api: Partial<DshApi> & Pick<DshApi, "getDshApplication">;
   connection?: ConnectionState;
@@ -227,9 +250,9 @@ test("opening install without an enabled Key shows an error and keeps the dialog
     },
   });
   try {
-    await (button(mounted.root, "安装 DSH").props.onClick as () => Promise<void>)();
+    await (installActionButton(mounted.root).props.onClick as () => Promise<void>)();
     await settle();
-    assert.match(text(mounted.root), /没有可用于 DSH 的已启用 Key。/);
+    assert.equal(errorAlertCount(mounted.root), 1);
     assert.equal(
       walkHostNodes(mounted.root).some((node) => node.props.role === "dialog"),
       false,
@@ -260,16 +283,16 @@ test("a 409 install closes the dialog, explains the change, and refreshes status
     },
   });
   try {
-    await (button(mounted.root, "安装 DSH").props.onClick as () => Promise<void>)();
+    await (installActionButton(mounted.root).props.onClick as () => Promise<void>)();
     await settle();
     assert.equal(walkHostNodes(mounted.root).some((node) => node.props.role === "dialog"), true);
-    await (button(mounted.root, "确认安装").props.onClick as () => Promise<void>)();
+    await (installConfirmButton(mounted.root).props.onClick as () => Promise<void>)();
     await settle();
     assert.equal(walkHostNodes(mounted.root).some((node) => node.props.role === "dialog"), false);
-    assert.match(text(mounted.root), /DSH 状态已变化，已刷新当前状态。/);
+    assert.equal(errorAlertCount(mounted.root), 1);
     assert.match(text(mounted.root), /DSH has a same-name package that is not an OCG-managed source/);
     assert.equal(loads, 2);
-    assert.equal(button(mounted.root, "安装 DSH").props.disabled, true);
+    assert.equal(installActionButton(mounted.root).props.disabled, true);
   } finally {
     mounted.app.unmount();
   }
@@ -287,7 +310,7 @@ test("confirm stays disabled without a usable Key and does not install", async (
     },
   });
   try {
-    await (button(mounted.root, "安装 DSH").props.onClick as () => Promise<void>)();
+    await (installActionButton(mounted.root).props.onClick as () => Promise<void>)();
     await settle();
     // openInstall requires a Key to show Confirm; drop every usable Key after.
     mounted.connection.info = {
@@ -295,7 +318,7 @@ test("confirm stays disabled without a usable Key and does not install", async (
       sub_keys: [{ id: "sub-disabled", name: "off", enabled: false, value: "secret" }],
     };
     await settle();
-    const confirm = button(mounted.root, "确认安装");
+    const confirm = installConfirmButton(mounted.root);
     assert.equal(confirm.props.disabled, true);
     await (confirm.props.onClick as () => Promise<void>)();
     await settle();
@@ -318,9 +341,9 @@ test("a repeated click while installing is ignored when a Key is selected", asyn
     },
   });
   try {
-    await (button(mounted.root, "安装 DSH").props.onClick as () => Promise<void>)();
+    await (installActionButton(mounted.root).props.onClick as () => Promise<void>)();
     await settle();
-    const confirm = button(mounted.root, "确认安装");
+    const confirm = installConfirmButton(mounted.root);
     assert.equal(confirm.props.disabled, false);
     const first = (confirm.props.onClick as () => Promise<void>)();
     await settle();
@@ -348,7 +371,7 @@ test("blocked conflict and incompatible states keep the action disabled and show
     },
   });
   try {
-    assert.equal(button(conflict.root, "安装 DSH").props.disabled, true);
+    assert.equal(installActionButton(conflict.root).props.disabled, true);
     assert.match(text(conflict.root), /DSH has only part of the OCG plugin registration/);
     assert.doesNotMatch(text(conflict.root), /Ready to install the OCG provider/);
   } finally {
@@ -365,7 +388,7 @@ test("blocked conflict and incompatible states keep the action disabled and show
     },
   });
   try {
-    assert.equal(button(incompatible.root, "安装 DSH").props.disabled, true);
+    assert.equal(installActionButton(incompatible.root).props.disabled, true);
     assert.match(text(incompatible.root), /DSH 0\.1\.4 is not a supported 0\.1\.5-rc\.1 or 0\.1\.5-rc\.2 build/);
   } finally {
     incompatible.app.unmount();
@@ -375,7 +398,7 @@ test("blocked conflict and incompatible states keep the action disabled and show
     api: { getDshApplication: async () => dshApp() },
   });
   try {
-    assert.equal(button(ready.root, "安装 DSH").props.disabled, false);
+    assert.equal(installActionButton(ready.root).props.disabled, false);
     assert.doesNotMatch(text(ready.root), /Ready to install the OCG provider into the DSH web profile/);
   } finally {
     ready.app.unmount();

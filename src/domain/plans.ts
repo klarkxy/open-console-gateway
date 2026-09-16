@@ -183,15 +183,29 @@ export function planFamilyLabel(
     || plan.provider_id;
 }
 
+/** Semantic reason a catalog surface cannot create an account. */
+export type PlanCreateDisabledReasonCode =
+  | "singleton_managed"
+  | "catalog_unavailable"
+  | "catalog_entry_missing"
+  | "creation_unavailable";
+
+export const PLAN_CREATE_DISABLED_REASON_KEYS: Record<PlanCreateDisabledReasonCode, MessageKey> = {
+  singleton_managed: "单例方案由系统自动管理",
+  catalog_unavailable: "供应商目录加载失败",
+  catalog_entry_missing: "供应商目录未提供该方案",
+  creation_unavailable: "该方案暂不可用",
+};
+
 /** Reason this catalog surface cannot create an account, or null when allowed. */
 export function planCreateDisabledReason(
   plan: ProviderSurface,
   catalog: readonly ProviderCatalogEntry[] | null | undefined,
-): MessageKey | null {
-  if (plan.singleton) return "单例方案由系统自动管理";
-  if (catalog == null) return plan.provider_id === "opencode" ? null : "服务商目录加载失败";
+): PlanCreateDisabledReasonCode | null {
+  if (plan.singleton) return "singleton_managed";
+  if (catalog == null) return plan.provider_id === "opencode" ? null : "catalog_unavailable";
   const entry = findCatalogEntry(catalog, plan.provider_id);
-  if (!entry) return "服务商目录未提供该方案";
-  if (entry.creation_availability !== "available") return "该方案暂不可用";
+  if (!entry) return "catalog_entry_missing";
+  if (entry.creation_availability !== "available") return "creation_unavailable";
   return null;
 }

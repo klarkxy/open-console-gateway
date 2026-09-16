@@ -125,7 +125,7 @@
               :bordered="false"
               :type="detail.tag.type"
             >
-              {{ t(detail.tag.label) }}
+              {{ t(CHOOSER_TAG_LABEL_KEYS[detail.tag.label]) }}
             </n-tag>
             <span v-if="detail.links" class="account-add-detail__links">
               <a :href="detail.links.docsUrl" target="_blank" rel="noopener noreferrer">{{ t("官方文档") }}</a>
@@ -160,7 +160,7 @@
           <n-alert
             v-if="selectedPlanOption.disabled"
             type="warning"
-            :title="selectedPlanOption.disabledReason ? t(selectedPlanOption.disabledReason) : ''"
+            :title="selectedPlanOption.disabledReason ? t(PLAN_CREATE_DISABLED_REASON_KEYS[selectedPlanOption.disabledReason]) : ''"
           />
 
           <template v-else>
@@ -278,10 +278,12 @@ import {
   type ChooserMode,
   type ChooserOption,
   type PresetFamilyOption,
+  CHOOSER_TAG_LABEL_KEYS,
 } from "../domain/account-add-chooser.ts";
 import { PROVIDER_FAMILIES, familyOf, type ProviderFamily } from "../domain/provider-families.ts";
 import { PROVIDER_PRESETS, type ProviderPreset } from "../domain/provider-presets.ts";
 import { isDynamicCatalogEntry } from "../domain/dynamic-provider.ts";
+import { PLAN_CREATE_DISABLED_REASON_KEYS } from "../domain/plans.ts";
 import { providerApi } from "../api/providers.ts";
 import type { Connection } from "../api/connections.ts";
 import type { AccountInput } from "../api/dashboard.ts";
@@ -409,12 +411,12 @@ const navOptions = computed(() => visibleChooserOptions(chooserGroups.value));
 // universe of the active mode — never the hidden desktop search query.
 const selectOptions = computed(() => chooserSelectOptions(
   buildChooserGroups(props.catalog, dynamicPresetIds.value, "", mode.value, props.connections),
-  t("用户定义"),
+  t(CHOOSER_TAG_LABEL_KEYS.user_defined),
 ));
 const railEmptyMessage = computed(() => {
   if (navOptions.value.length > 0) return "";
   if (presetQuery.value.trim()) return t("无匹配选项");
-  return mode.value === "connections" ? t("暂无已有连接") : t("无匹配选项");
+  return mode.value === "connections" ? t("暂无连接") : t("无匹配选项");
 });
 
 const selected = computed(() => (
@@ -617,11 +619,11 @@ function onPresetCommitted(result: {
 }): void {
   lastCommitWasDraft = result.mode === "draft";
   if (result.readbackFailed) {
-    message.warning(t("已保存，但未能刷新列表。请手动刷新，不要再次提交。"));
+    message.warning(t("已保存，但列表刷新失败。手动刷新，不要再次提交。"));
   }
   if (!lastCommitWasDraft) return;
   if (!result.readbackFailed) {
-    message.success(t("草稿已保存，请到供应商页继续设置"));
+    message.success(t("草稿已保存，到供应商页继续设置"));
   }
   const url = applyAppViewSearchParams(new URL(window.location.href), "providers", {
     connection: result.connectionId,
@@ -702,7 +704,7 @@ function variantHost(preset: ProviderPreset): string {
   height: min(620px, calc(100vh - 96px));
   overflow: hidden;
   border: 1px solid var(--ocg-border);
-  border-radius: 14px;
+  border-radius: var(--ocg-radius-lg);
   background: var(--ocg-surface);
 }
 
@@ -722,14 +724,14 @@ function variantHost(preset: ProviderPreset): string {
 
 .account-add-search {
   flex: none;
-  padding: 8px 12px;
+  padding: var(--ocg-space-sm) var(--ocg-space-md);
   background: var(--ocg-canvas);
 }
 
 .account-add-mode {
   flex: none;
   display: flex;
-  padding: 8px 12px 0;
+  padding: var(--ocg-space-sm) var(--ocg-space-md) 0;
   background: var(--ocg-canvas);
 }
 
@@ -753,7 +755,7 @@ function variantHost(preset: ProviderPreset): string {
 .account-add-list {
   flex: 1;
   min-height: 0;
-  padding-bottom: 12px;
+  padding-bottom: var(--ocg-space-md);
   overflow: auto;
 }
 
@@ -766,7 +768,7 @@ function variantHost(preset: ProviderPreset): string {
   top: 0;
   z-index: 1;
   margin: 0;
-  padding: 8px 12px;
+  padding: var(--ocg-space-sm) var(--ocg-space-md);
   color: var(--ocg-subtle);
   font-size: var(--ocg-font-xs);
   font-weight: 600;
@@ -776,7 +778,7 @@ function variantHost(preset: ProviderPreset): string {
 
 .account-add-empty {
   margin: 0;
-  padding: 8px 12px;
+  padding: var(--ocg-space-sm) var(--ocg-space-md);
   color: var(--ocg-muted);
   font-size: var(--ocg-font-xs);
 }
@@ -784,10 +786,10 @@ function variantHost(preset: ProviderPreset): string {
 .account-add-item {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
   width: 100%;
   margin: 0;
-  padding: 8px 12px;
+  padding: var(--ocg-space-sm) var(--ocg-space-md);
   border: 0;
   border-radius: 0;
   color: var(--ocg-ink);
@@ -840,10 +842,10 @@ function variantHost(preset: ProviderPreset): string {
 .account-add-detail {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: var(--ocg-space-md);
   min-width: 0;
   min-height: 0;
-  padding: 16px 20px;
+  padding: var(--ocg-space-lg) 20px;
   overflow: auto;
 }
 
@@ -851,7 +853,7 @@ function variantHost(preset: ProviderPreset): string {
   display: flex;
   flex: none;
   align-items: center;
-  gap: 12px;
+  gap: var(--ocg-space-md);
 }
 
 .account-add-detail__header :deep(.n-icon) {
@@ -862,7 +864,7 @@ function variantHost(preset: ProviderPreset): string {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
   min-width: 0;
 }
 
@@ -876,14 +878,14 @@ function variantHost(preset: ProviderPreset): string {
 
 .account-add-detail__links {
   display: flex;
-  gap: 12px;
+  gap: var(--ocg-space-md);
   font-size: var(--ocg-font-xs);
 }
 
 .account-add-detail__actions {
   display: flex;
   flex: none;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
 }
 
 .account-add-hint {
@@ -895,7 +897,7 @@ function variantHost(preset: ProviderPreset): string {
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
 }
 
 .variant-picker {
@@ -924,8 +926,8 @@ function variantHost(preset: ProviderPreset): string {
 
   .account-add-mobile {
     display: grid;
-    gap: 8px;
-    padding: 12px 12px 0;
+    gap: var(--ocg-space-sm);
+    padding: var(--ocg-space-md) var(--ocg-space-md) 0;
   }
 
   .account-add-detail {

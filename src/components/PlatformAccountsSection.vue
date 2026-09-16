@@ -2,7 +2,7 @@
   <n-alert
     v-if="loadError"
     type="error"
-    :title="t('加载平台账号失败: {error}', { error: loadError })"
+    :title="t('加载平台账号失败：{error}', { error: loadError })"
   >
     <n-button size="small" secondary @click="load">{{ t("重试") }}</n-button>
   </n-alert>
@@ -177,7 +177,7 @@ async function load(): Promise<void> {
   } catch (error) {
     if (generation === loadGeneration) {
       loadError.value = dashboardErrorDetail(error);
-      message.error(t("加载平台账号失败: {error}", { error: loadError.value }));
+      message.error(t("加载平台账号失败：{error}", { error: loadError.value }));
     }
   } finally {
     if (generation === loadGeneration) loading.value = false;
@@ -242,7 +242,7 @@ async function persistPlatform(
       await recoverConflict();
       return "conflict";
     }
-    mutationError(error, "保存失败: {error}");
+    mutationError(error, "保存失败：{error}");
     return "error";
   } finally {
     mutating.value = false;
@@ -280,7 +280,7 @@ async function deletePlatform(parent: PlatformAccount): Promise<void> {
     message.success(t("平台账号已删除"));
   } catch (error) {
     if (isRevisionConflict(error)) await recoverConflict();
-    else mutationError(error, "删除失败: {error}");
+    else mutationError(error, "删除失败：{error}");
   } finally {
     mutating.value = false;
   }
@@ -294,7 +294,7 @@ async function refreshParent(parent: PlatformAccount): Promise<void> {
     message.success(t("已刷新"));
   } catch (error) {
     if (isRevisionConflict(error)) await recoverConflict();
-    else mutationError(error, "刷新失败: {error}");
+    else mutationError(error, "刷新失败：{error}");
   } finally {
     refreshing.value[parent.id] = false;
   }
@@ -309,7 +309,7 @@ async function refreshChild(parent: PlatformAccount, link: PlatformLink): Promis
     message.success(t("已刷新"));
   } catch (error) {
     if (isRevisionConflict(error)) await recoverConflict();
-    else mutationError(error, "刷新失败: {error}");
+    else mutationError(error, "刷新失败：{error}");
   } finally {
     refreshing.value[key] = false;
   }
@@ -408,7 +408,7 @@ async function createAndLinkKey(payload: PlatformKeyFormPayload): Promise<void> 
       api_key: payload.key,
     });
     if (discovery.models.length === 0) {
-      addKeyError.value = t("该 Key 没有返回可用模型，请确认 Key 与站点地址后重试。");
+      addKeyError.value = t("该 Key 未返回可用模型；确认 Key 与站点地址无误后重试。");
       return;
     }
     const created = await dashboardApi.createAccount({
@@ -462,7 +462,7 @@ async function createAndLinkKey(payload: PlatformKeyFormPayload): Promise<void> 
     addKeyParent.value = null;
     dialog.warning({
       title: t("创建结果未知"),
-      content: t("账号可能已创建；直接重复提交可能产生重复 Key。请重新加载账号列表确认后再继续。"),
+      content: t("账号可能已创建；重复提交可能产生重复 Key。重新加载账号列表确认后再继续。"),
       positiveText: t("重新加载"),
       closable: false,
       maskClosable: false,
@@ -492,7 +492,7 @@ async function fetchModels(account: Account): Promise<void> {
       account_id: account.id,
     });
     if (discovery.models.length === 0) {
-      message.warning(t("该 Key 没有返回可用模型，请确认 Key 与站点地址后重试。"));
+      message.warning(t("该 Key 未返回可用模型；确认 Key 与站点地址无误后重试。"));
       return;
     }
     const updated = await dashboardApi.updateAccountModelCapabilities(
@@ -503,7 +503,7 @@ async function fetchModels(account: Account): Promise<void> {
     message.success(overlayImportMessage(updated, discovery.truncated));
   } catch (error) {
     if (isRevisionConflict(error)) await recoverConflict();
-    else mutationError(error, "操作失败: {error}");
+    else mutationError(error, "操作失败：{error}");
   } finally {
     mutating.value = false;
   }
@@ -558,7 +558,7 @@ async function retryPendingLink(): Promise<void> {
     emit("changed");
   } catch (error) {
     if (isRevisionConflict(error)) await recoverConflict();
-    else mutationError(error, "操作失败: {error}");
+    else mutationError(error, "操作失败：{error}");
   } finally {
     mutating.value = false;
   }
@@ -585,7 +585,7 @@ async function onLinkSubmit(
       showLink.value = false;
       await recoverConflict();
     } else {
-      mutationError(error, "操作失败: {error}");
+      mutationError(error, "操作失败：{error}");
     }
   } finally {
     mutating.value = false;
@@ -611,7 +611,7 @@ async function unlink(accountId: string): Promise<void> {
     emit("changed");
   } catch (error) {
     if (isRevisionConflict(error)) await recoverConflict();
-    else mutationError(error, "操作失败: {error}");
+    else mutationError(error, "操作失败：{error}");
   } finally {
     mutating.value = false;
   }

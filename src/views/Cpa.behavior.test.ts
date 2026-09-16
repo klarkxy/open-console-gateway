@@ -14,6 +14,7 @@ import {
   installTestWindow,
   settle,
   text,
+  walkHostNodes,
   type HostNode,
   type TestWindow,
 } from "../test-helpers/vue-host-runtime.ts";
@@ -79,12 +80,13 @@ function cpaHarnessPlugin() {
     enforce: "pre" as const,
     resolveId(source: string, importer?: string) {
       if (source === "naive-ui") return `${prefix}naive`;
-      if (!importer?.replaceAll("\\", "/").includes("/src/views/Cpa.vue")) return null;
+      const importerPath = importer?.replaceAll("\\", "/") ?? "";
+      if (!importerPath.includes("/src/views/Cpa.vue") && !importerPath.includes("/src/components/CpaKeyRow.vue")) return null;
       const module = sources[source];
       return module ? `${prefix}${module}` : null;
     },
     load(id: string) {
-      if (id.includes("/src/views/Cpa.vue?vue&type=style")) return "";
+      if (id.includes("/src/views/Cpa.vue?vue&type=style") || id.includes("/src/components/CpaKeyRow.vue?vue&type=style")) return "";
       return id.startsWith(prefix) ? modules[id.slice(prefix.length)] : null;
     },
   };
@@ -115,6 +117,28 @@ type RecordedMessage = { type: string; args: unknown[] };
 
 function recordedMessages(): RecordedMessage[] {
   return (globalThis as unknown as { __cpaMessages?: RecordedMessage[] }).__cpaMessages ?? [];
+}
+
+// Structural queries below target element kinds (alerts, tags, classed regions)
+// rather than rendered wording, so copy edits cannot break behavior coverage.
+/** n-alert stubs render as divs carrying a string `type` and no `size` prop. */
+function alerts(root: HostNode): HostNode[] {
+  return walkHostNodes(root).filter(
+    (node) => node.type === "div" && typeof node.props.type === "string" && node.props.size === undefined,
+  );
+}
+
+/** n-tag stubs render as divs carrying both `size="small"` and a string `type`. */
+function statusTags(root: HostNode): HostNode[] {
+  return walkHostNodes(root).filter(
+    (node) => node.type === "div" && node.props.size === "small" && typeof node.props.type === "string",
+  );
+}
+
+function byClass(root: HostNode, className: string): HostNode[] {
+  return walkHostNodes(root).filter(
+    (node) => typeof node.props.class === "string" && node.props.class.split(" ").includes(className),
+  );
 }
 
 async function mount(componentApi: CpaApi): Promise<{ app: App; root: HostNode; window: TestWindow }> {
@@ -171,13 +195,18 @@ test("a synchronous lifecycle success immediately refreshes integration, account
     startCpaRuntime: async () => { running = true; return runtime({ running: true }); },
   });
   calls.accounts = calls.integration = calls.keys = 0;
+  const typesBeforeStart = statusTags(mounted.root).map((tag) => tag.props.type);
   const start = button(mounted.root, "启动");
   await (start.props.onClick as () => Promise<void>)();
   await settle();
   assert.equal(calls.integration, 1);
   assert.equal(calls.accounts, 1);
   assert.equal(calls.keys, 1);
-  assert.match(text(mounted.root), /运行中/);
+  const typesAfterStart = statusTags(mounted.root).map((tag) => tag.props.type);
+  assert.ok(
+    !typesBeforeStart.includes("success") && typesAfterStart.includes("success"),
+    "starting the runtime flips the status tag to the running state",
+  );
   mounted.app.unmount();
 });
 
@@ -213,9 +242,15 @@ test("a runtime fetch failure is a visible recoverable error and not confirmed m
       throw new Error("runtime down");
     },
   });
-  assert.match(text(mounted.root), /加载 CPA 运行时失败: runtime down/);
+  assert.ok(
+    alerts(mounted.root).some((node) => node.props.type === "error" && /runtime down/.test(String(node.props.title))),
+    "the runtime fetch failure surfaces an error alert carrying the backend message",
+  );
   assert.equal(button(mounted.root, "托管安装").props.disabled, true);
-  assert.doesNotMatch(text(mounted.root), /当前环境不支持托管 CPA 运行时/);
+  assert.ok(
+    !alerts(mounted.root).some((node) => node.props.type === "warning"),
+    "managed support stays unconfirmed: no unsupported-environment notice renders",
+  );
   mounted.app.unmount();
 });
 
@@ -282,16 +317,22 @@ test("a runtime poll failure stays visible with a local retry", async () => {
   });
   await fireTimers(mounted.window);
   await settle();
-  assert.match(text(mounted.root), /CPA 运行时状态刷新失败: poll failed/);
-  assert.match(text(mounted.root), /下载中/);
+  assert.ok(
+    alerts(mounted.root).some((node) => node.props.type === "error" && /poll failed/.test(String(node.props.title))),
+    "the poll failure surfaces an error alert carrying the backend message",
+  );
+  assert.ok(byClass(mounted.root, "cpa-phase").length >= 1, "the last known phase indicator stays visible during the failure");
   const retries = mounted.root.children.flatMap(function walk(node: HostNode): HostNode[] {
     return [node, ...node.children.flatMap(walk)];
   }).filter((node) => node.type === "button" && text(node).trim() === "重试");
   assert.ok(retries.length >= 1);
   await (retries[retries.length - 1].props.onClick as () => Promise<void>)();
   await settle();
-  assert.doesNotMatch(text(mounted.root), /CPA 运行时状态刷新失败/);
-  assert.doesNotMatch(text(mounted.root), /下载中/);
+  assert.ok(
+    !alerts(mounted.root).some((node) => node.props.type === "error" && /poll failed/.test(String(node.props.title))),
+    "a successful retry clears the poll failure alert",
+  );
+  assert.equal(byClass(mounted.root, "cpa-phase").length, 0, "the stale phase indicator clears once the runtime is idle again");
   mounted.app.unmount();
 });
 
@@ -315,7 +356,10 @@ test("the persisted model catalog lists ids grouped by source", async () => {
   assert.match(text(mounted.root), /claude-sonnet/);
   assert.match(text(mounted.root), /openai/);
   assert.match(text(mounted.root), /anthropic/);
-  assert.match(text(mounted.root), /已选 1 \/ 2/);
+  // The catalog meta line renders exactly once and carries the data-derived selected/total counts.
+  const catalogMeta = byClass(mounted.root, "cpa-catalog-meta");
+  assert.equal(catalogMeta.length, 1);
+  assert.match(text(catalogMeta[0]), /1\s*\/\s*2/);
   assert.match(text(mounted.root), /http:\/\/127\.0\.0\.1:8317/);
   assert.equal(button(mounted.root, "gpt-5").props["aria-pressed"], true);
   assert.equal(button(mounted.root, "claude-sonnet").props["aria-pressed"], false);
@@ -614,7 +658,10 @@ test("disconnecting while a catalog save is pending drops the stale write respon
   // The stale in-flight response neither resynced nor resurrected the selection.
   assert.equal(catalogReads, readsBeforeDisconnect);
   assert.doesNotMatch(text(mounted.root), /model-a/);
-  assert.match(text(mounted.root), /请先在概览中配置并启动 CPA/);
+  assert.ok(
+    alerts(mounted.root).some((node) => node.props.type === "info" && typeof node.props.title === "string"),
+    "the catalog falls back to the not-configured guidance alert after disconnect",
+  );
   mounted.app.unmount();
 });
 
@@ -771,7 +818,10 @@ test("a delayed error resync crossing disconnect applies nothing and toasts noth
   assert.equal(writes.length, 1);
   assert.equal(catalogReads, readsBeforeResolve);
   assert.doesNotMatch(text(mounted.root), /model-a/);
-  assert.match(text(mounted.root), /请先在概览中配置并启动 CPA/);
+  assert.ok(
+    alerts(mounted.root).some((node) => node.props.type === "info" && typeof node.props.title === "string"),
+    "the catalog falls back to the not-configured guidance alert after disconnect",
+  );
   assert.deepEqual(recordedMessages().filter((message) => message.type === "error"), []);
   mounted.app.unmount();
 });

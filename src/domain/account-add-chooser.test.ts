@@ -4,6 +4,7 @@ import type { Connection } from "../api/connections.ts";
 import type { ProviderCatalogEntry } from "../api/providers.ts";
 import {
   buildChooserGroups,
+  CHOOSER_TAG_LABEL_KEYS,
   chooserModeForOptionId,
   chooserOptionIconKey,
   chooserSelectOptions,
@@ -346,7 +347,7 @@ test("default selection uses the first option and falls back to empty", () => {
 
 test("phone select groups mirror the services rail and suffix family variant counts", () => {
   const groups = buildChooserGroups(fullCatalog(), null, "", "services", planConnections());
-  const select = chooserSelectOptions(groups, "用户定义");
+  const select = chooserSelectOptions(groups, "user-defined");
   assert.deepEqual(select.map((group) => group.key), ["plan", "api"]);
   // Family options with > 1 variant get a count suffix; single-variant ones
   // stay clean.
@@ -370,11 +371,11 @@ test("phone select marks user-defined entries in connections mode", () => {
     }),
   ];
   const groups = buildChooserGroups(catalog, null, "", "connections");
-  const select = chooserSelectOptions(groups, "用户定义");
+  const select = chooserSelectOptions(groups, "user-defined");
   const lab = select
     .flatMap((group) => group.children)
     .find((child) => child.value === "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")!;
-  assert.equal(lab.label, "Lab · 用户定义");
+  assert.equal(lab.label, "Lab · user-defined");
 });
 
 test("describeChooserSelection covers plan, family, preset, and platform details", () => {
@@ -395,7 +396,7 @@ test("describeChooserSelection covers plan, family, preset, and platform details
 
   const custom = describeChooserSelection(byId(services, "custom"));
   assert.equal(custom.kind, "plan");
-  assert.deepEqual(custom.tag, { label: "自定义端点", type: "default" });
+  assert.deepEqual(custom.tag, { label: "custom_endpoint", type: "default" });
 
   const kimi = describeChooserSelection(byId(connections, "kimi"));
   assert.equal(kimi.iconKey, "family:moonshot");
@@ -408,7 +409,7 @@ test("describeChooserSelection covers plan, family, preset, and platform details
   assert.equal(familyTencent.kind, "family");
   assert.equal(familyTencent.iconKey, "family:tencent");
   assert.equal(familyTencent.title, "Tencent");
-  assert.deepEqual(familyTencent.tag, { label: "供应商预设", type: "default" });
+  assert.deepEqual(familyTencent.tag, { label: "provider_preset", type: "default" });
   assert.equal(familyTencent.links!.docsUrl.startsWith("https://"), true);
   assert.equal(familyTencent.links!.websiteUrl.startsWith("https://"), true);
   // Passing a non-default variant swaps the links to that preset.
@@ -425,7 +426,7 @@ test("describeChooserSelection covers plan, family, preset, and platform details
   });
 });
 
-test("user-defined plan options carry the 用户定义 tag and family brand icon keys", () => {
+test("user-defined plan options carry the user_defined tag and family brand icon keys", () => {
   const catalog = [
     ...fullCatalog(),
     catalogEntry("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", {
@@ -438,7 +439,7 @@ test("user-defined plan options carry the 用户定义 tag and family brand icon
   const lab = universe.find((option) => option.optionId === "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")!;
   const detail = describeChooserSelection(lab);
   assert.equal(detail.kind, "plan");
-  assert.deepEqual(detail.tag, { label: "用户定义", type: "default" });
+  assert.deepEqual(detail.tag, { label: "user_defined", type: "default" });
   assert.equal(detail.title, "Lab");
 
   const services = chooserUniverse(catalog, null, "services");
@@ -446,4 +447,24 @@ test("user-defined plan options carry the 用户定义 tag and family brand icon
   assert.equal(chooserOptionIconKey(tencentFamily), "family:tencent");
   assert.equal(chooserOptionIconKey(buildPlatformKindOptions()[0]!), "database");
   assert.equal(chooserOptionIconKey(lab), "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+});
+
+test("every chooser tag label code has a message key", () => {
+  const catalog = [
+    ...fullCatalog(),
+    catalogEntry("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", {
+      display_name: "Lab",
+      model_source: "dynamic_provider",
+      routable: true,
+    }),
+  ];
+  const universe = chooserUniverse(catalog, null, "connections");
+  const tags = universe
+    .map((option) => describeChooserSelection(option).tag)
+    .filter((tag) => tag !== null);
+  for (const tag of tags) assert.ok(CHOOSER_TAG_LABEL_KEYS[tag.label]);
+  assert.deepEqual(
+    Object.keys(CHOOSER_TAG_LABEL_KEYS).sort(),
+    ["custom_endpoint", "provider_preset", "user_defined"],
+  );
 });

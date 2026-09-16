@@ -132,7 +132,7 @@
               :placeholder="t('选择计费档位')"
               :aria-label="t('计费档位')"
             />
-            <p class="field-hint">{{ t("新建须选择 Pro / Max / Team 并填写购买日期；未配置的既有账号仍可路由。") }}</p>
+            <p class="field-hint">{{ t("新建账号须选择 Pro / Max / Team 并填写购买日期；未配置的既有账号仍可路由。") }}</p>
           </div>
         </n-form-item>
 
@@ -200,7 +200,7 @@
               <span v-if="discoverySuccess" class="field-hint">{{ discoverySuccess }}</span>
             </div>
             <p v-if="showManualModelHint" class="field-hint">
-              {{ t("非标准完整 Endpoint 无法自动推导 /models；请手动添加模型映射。") }}
+              {{ t("非标准完整 Endpoint 无法自动推导 /models，需手动添加模型映射。") }}
             </p>
             <n-alert v-if="discoveryError" type="error" :show-icon="false">
               {{ discoveryError }}
@@ -533,7 +533,7 @@ const rules = computed<FormRules>(() => {
       {
         required: true,
         type: "number",
-        message: t("请选择购买日期"),
+        message: t("选择购买日期"),
         trigger: ["change", "blur"],
       },
       {
@@ -559,7 +559,7 @@ const rules = computed<FormRules>(() => {
     base.key = {
       required: true,
       whitespace: true,
-      message: t("请填写 API Key"),
+      message: t("填写 API Key"),
       trigger: ["input", "blur"],
     };
   }
@@ -577,7 +577,7 @@ const rules = computed<FormRules>(() => {
       required: true,
       type: "string",
       validator: (_rule: unknown, value: AccountProtocol | null) => !!value,
-      message: t("请选择上游协议"),
+      message: t("选择上游协议"),
       trigger: ["change", "blur"],
     };
     base.modelCapabilities = {
@@ -587,7 +587,7 @@ const rules = computed<FormRules>(() => {
         Array.isArray(value) && value.length > 0 && value.every((cap) => (
           cap.public_model.trim() && cap.upstream_model.trim()
         )),
-      message: t("请至少添加一个完整模型映射"),
+      message: t("至少添加一个完整模型映射"),
       trigger: ["change"],
     };
   }
@@ -865,7 +865,7 @@ async function handleSave() {
 
   const plan = effectivePlan.value;
   if (!plan) {
-    formError.value = t("无法确定账号方案，请关闭后重试");
+    formError.value = t("无法确定账号方案，关闭后重试");
     return;
   }
 
@@ -909,12 +909,12 @@ async function handleSave() {
 .modal-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
+  gap: var(--ocg-space-md);
   align-items: start;
 }
 
 .form-error {
-  margin-bottom: 12px;
+  margin-bottom: var(--ocg-space-md);
 }
 
 .full-width-field,
@@ -931,11 +931,11 @@ async function handleSave() {
 .connection-summary {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-  gap: 8px 16px;
-  margin: 0 0 12px;
-  padding: 10px 12px;
+  gap: var(--ocg-space-sm) var(--ocg-space-lg);
+  margin: 0 0 var(--ocg-space-md);
+  padding: 10px var(--ocg-space-md);
   border: 1px solid var(--ocg-border);
-  border-radius: 10px;
+  border-radius: var(--ocg-radius-md);
   background: var(--ocg-canvas);
 }
 
@@ -966,31 +966,31 @@ async function handleSave() {
 
 .capability-rows {
   display: grid;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
 }
 
 .capability-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
 }
 
 .discovery-import {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
   align-items: center;
 }
 
 .mapping-rows {
   display: grid;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
 }
 
 .mapping-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
   align-items: center;
 }
 
@@ -1003,7 +1003,7 @@ async function handleSave() {
 .protocol-field,
 .billing-field {
   display: grid;
-  gap: 4px;
+  gap: var(--ocg-space-xs);
   width: 100%;
 }
 
@@ -1014,7 +1014,7 @@ async function handleSave() {
 .purchase-date-control {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
   width: 100%;
 }
 
@@ -1022,7 +1022,7 @@ async function handleSave() {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 12px;
+  gap: var(--ocg-space-md);
 }
 
 .modal-footer--embedded {

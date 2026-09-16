@@ -45,13 +45,13 @@ export type AccountCreatePayloadErrorCode =
 
 const ACCOUNT_CREATE_PAYLOAD_ERROR_KEYS = {
   missing_name: "名称不能为空",
-  missing_key: "请填写 API Key",
-  missing_endpoint_url: "请填写 API 地址",
+  missing_key: "填写 API Key",
+  missing_endpoint_url: "填写 API 地址",
   invalid_endpoint_url: "Endpoint 格式无效",
   endpoint_url_not_http: "Endpoint 必须是 http:// 或 https:// URL",
   endpoint_url_with_credentials: "Endpoint 不能包含用户名或密码",
-  missing_upstream_protocol: "请选择上游协议",
-  missing_model_capabilities: "请至少添加一个模型能力",
+  missing_upstream_protocol: "选择上游协议",
+  missing_model_capabilities: "至少添加一个模型能力",
   duplicate_public_model: "对外模型名不能重复",
   public_model_too_long: "对外模型名最多 200 个字符",
   public_model_has_control_character: "对外模型名不能包含控制字符",
