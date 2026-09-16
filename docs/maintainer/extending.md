@@ -52,7 +52,7 @@ Use this for a local service integrated through a code-reviewed adapter. It appe
 the general **Extensions** navigation group below Settings, not in
 Providers, Plans, or the Add Account selector.
 
-- Define a narrow typed Dashboard V3 contract and CAS-protected mutations; do
+- Define a narrow typed Dashboard V4 contract and CAS-protected mutations; do
   not add a raw management proxy or arbitrary upstream path/body forwarding.
 - Make the ownership boundary explicit. OCG may retain only what it needs to
   connect and route; the external service retains its own OAuth tokens, auth

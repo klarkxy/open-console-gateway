@@ -15,13 +15,13 @@ rebind → compensation) is acquired before `gateway_lifecycle` when a
 settings write also rebinds. Never hold a `parking_lot` lock across those
 awaits.
 
-From schema v27 the authoritative table is `access_keys`. Two credential
+The authoritative table for access keys is `access_keys`. Two credential
 tiers share that table (current schema v49) and one auth snapshot:
 
 - Primary key: fixed id `00000000-0000-0000-0000-000000000001`, display
   name `"Primary"`. Always enabled, never deleted. Public `AppConfig` and
-  dashboard APIs still expose `gateway_key`; sanitized config JSON stores
-  `gateway_key` as `""` after v27.
+  dashboard APIs expose `gateway_key`; sanitized config JSON stores
+  `gateway_key` as `""`.
 - Sub keys: non-primary rows, active ceiling 64, soft-delete keeps
   identity/name and clears the value. Lifecycle only through
   `/dashboard/api/v3/keys*`. CLI has no sub-key commands.
@@ -52,9 +52,9 @@ release links. The outbound request is triggered by the user.
 
 ## Account lifecycle and browser runtime
 
-Schema v16 added `account_type` (`key | managed`) and `setup_step`
+`accounts` carries `account_type` (`key | managed`) and `setup_step`
 (`google_account → opencode_registration → payment → key_verification → ready`).
-Existing rows migrate to `key + ready`. A managed draft is persisted
+non-managed rows are `key + ready`. A managed draft is persisted
 immediately with an empty key and `enabled=false`; selector, enable, and
 the request path all require both `ready` and a non-empty key.
 `google_account` is labeled **sign-in identity** in the UI and is
@@ -111,8 +111,8 @@ around the earliest `resetsAt` with bounded jitter while respecting the
 active/inactive cadence. Failure backoff is 5m → 15m → 1h → 6h; never erase
 last success or the previous baseline.
 
-Sync metadata lives in `provider_usage_sync_state`; v27 drops the leftover
-`accounts.usage_sync_*` columns. The public Go docs have not listed this path.
+Sync metadata lives in `provider_usage_sync_state`.
+The public Go docs have not listed this path.
 
 Zen Free is database-owned: it can be enabled, disabled, and reordered,
 but cannot be created or deleted through generic account APIs. Command Code
@@ -174,10 +174,10 @@ hosts must call `Database::open_with_cipher` so ciphertext probes use the
 already resolved cipher. A schema newer than this build supports fails
 closed.
 
-Historical versions still matter on upgrade:
+Historical schema versions matter on upgrade:
 
 - v16: managed setup columns.
-- v21: usage-sync metadata (later moved off `accounts` in v27).
+- v21: usage-sync metadata (now in `provider_usage_sync_state`).
 - v22: immutable provider/offering bindings, provider pricing/usage,
   quota windows, provider-aware forward logs.
 - v23: Plan verification, Alias / upstream log identity, optional native

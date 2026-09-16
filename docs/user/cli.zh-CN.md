@@ -6,7 +6,7 @@ CLI 是同一个 `ocg-core` 进程的无头宿主。下载对应平台压缩包�
 
 CLI 数据目录默认 `~/.ocg-mgr-cli`，所有平台一致，可用 `--data-dir <path>` 覆盖。混淆密钥默认放在 `<data-dir>/.encryption-key`，也可用 `--encryption-key <key>` 参数或 `OCG_MANAGER_ENCRYPTION_KEY` 环境变量覆盖。
 
-CLI 只提供 `serve`、`key`、`status`。`key` 管 OpenCode Go 账号凭据，不是面板 Key，也不碰 Custom 目的地或 Zen Free 卡片；按模型协议覆盖等留在面板里操作。CLI 写入会直接 bump 该进程的 settings revision，命令行没有 `expectedRevision`。
+CLI 只提供 `serve`、`key`、`status`。`key` 管 OpenCode Go 账号凭据；面板 Key、Custom 目的地、按模型协议覆盖等留在面板里操作。CLI 写入会直接 bump 该进程的 settings revision。
 
 原生 `serve` 运行期间，面板的**应用 > DSH**可以把 OCG 插件安装到同一台机器、同一个系统用户的 DSH。官方 Docker 镜像不支持这项本机安装。
 
@@ -30,7 +30,7 @@ ocg-manager-cli
 └── status        Show data dir, gateway port/key, upstream, account totals
 ```
 
-`key add` 写入的是关闭的 OpenCode Go 草稿。确认 Key 可用后（`key ping`，再 `key enable`）再打开。
+`key add` 写入的是就绪且已启用的 OpenCode Go 账号；依赖它之前先用 `key ping` 复核。
 
 无头 Gateway 的最快搭法：
 
@@ -38,7 +38,6 @@ ocg-manager-cli
 ./ocg-manager-cli key add main sk-...
 ./ocg-manager-cli key list
 ./ocg-manager-cli key ping <id>
-./ocg-manager-cli key enable <id>
 ./ocg-manager-cli serve --port 9042
 ```
 

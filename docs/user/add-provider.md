@@ -24,11 +24,11 @@ Choose a [Plan or API preset](provider-presets.md) in **Accounts → Add account
 3. Add at least one public-model → exact-upstream-ID mapping. **Fetch models** and **Test model** stay on this form but need a Key; for keyed auth they remain disabled until you enter one.
 4. Save. Keyed auth may include an optional Key: filling it creates the first account in the same write; leaving it empty saves the definition only (shown as **Missing credential** until you use **Add Key**). A no-auth Provider creates one singleton account without a Key. The write goes through `POST /dashboard/api/v4/onboarding/commit` and does not require a successful probe. If the network drops before a response, the dashboard retries the same commit automatically; saving the unchanged draft again replays the stored result instead of creating a second Provider.
 
-Edit replaces the whole Provider configuration through `PATCH /providers/{id}`. The Provider id is immutable. Changing no-auth to keyed auth requires an explicit replacement Key, written only to that singleton account. An already-keyed Provider rejects any Key on the Provider update; rotate Keys on **Accounts**. Delete is allowed only after every referencing account is removed; there is no cascade.
+Edit replaces the whole Provider configuration through `PATCH /dashboard/api/v3/providers/{id}`. The Provider id is immutable. Changing no-auth to keyed auth requires an explicit replacement Key, written only to that singleton account. An already-keyed Provider rejects any Key on the Provider update; rotate Keys on **Accounts**. Delete is allowed only after every referencing account is removed; there is no cascade.
 
 Provider-owned fields stay on **Providers**. Account **Key**, enablement, order, notes, cooldown, and tests stay on **Accounts**. User-defined Providers are always unpriced: no official usage, quota estimate, or pricing rows. Request logs still attribute provider, account, and model.
 
-Node backups export payload V6 with `providerId` only for every saved user-defined Provider definition; payload V4 and V5 bundles remain importable. The current SQLite schema (v49) stores user-defined Providers in the unified `providers` and `provider_models` tables.
+Node backups export payload V6 with `providerId` only for every saved user-defined Provider definition; imports accept V4 through V6 bundles. The current SQLite schema (v49) stores user-defined Providers in the unified `providers` and `provider_models` tables.
 
 ## Connect a compatible upstream now
 
@@ -87,7 +87,7 @@ A built-in integration is appropriate only when the Provider needs product-owned
 2. Add only verified protocol facts to `crates/ocg-domain/src/protocol.rs`. Request routing uses the saved contract.
 3. Add code-owned client Alias mappings in `crates/ocg-gateway/src/alias.rs`. Preserve exact upstream IDs and reject ambiguous raw IDs; a discovered row must not silently invent a public Alias.
 4. Implement the host route resolver in `ocg-core`. The adapter returns an `AttemptSpec`; database access, Key decryption, proxy selection, and outbound HTTP remain host-owned.
-5. Add the account and **Providers** control-plane/UI workflow, including catalog refresh, enablement, verification, errors, cooldown, pricing, and usage only where the Provider actually supports them. All dashboard writes use CAS: user-defined Provider creation goes through the V4 onboarding commit (`/dashboard/api/v4`); Provider definition edits and the account operations that remain on V3 use `/dashboard/api/v3`; Key rotation, binding edits, and additional identity credentials use V4.
+5. Add the account and **Providers** control-plane/UI workflow, including catalog refresh, enablement, verification, errors, cooldown, pricing, and usage only where the Provider actually supports them. All dashboard writes use CAS: user-defined Provider creation goes through the V4 onboarding commit (`/dashboard/api/v4`); Provider definition edits and the account operations on V3 use `/dashboard/api/v3`; Key rotation, binding edits, and additional identity credentials use V4.
 6. Update the paired user guides and tests. Run the checks in [Development](../maintainer/development.md) for the crates and UI you touched.
 
 Before opening a contribution, write down the upstream origin, auth scheme, catalog source, supported model/protocol pairs, streaming behavior, error semantics, quota/price source, and a non-billable validation plan. Keep the new family fail-closed until its complete routing and control-plane path exists.

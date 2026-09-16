@@ -13,9 +13,9 @@ authenticated. Unknown V4 paths are V4 `404`s, not tombstones. Preserved
 `/dashboard/api` families (exact path, no trailing slash, no extra
 segments): `auth/status`, `auth/register`, `auth/login`, `auth/logout`,
 and `browser/sessions/{token}/ws` (non-empty token). Protected
-V2 REST stays tombstoned; new JSON is V3 or V4.
+V2 REST is tombstoned; new JSON is V3 or V4.
 
-## Inference (unchanged paths)
+## Inference
 
 | Method | Path | Notes |
 | --- | --- | --- |
@@ -42,7 +42,7 @@ Session-protected (non-exhaustive; see `dashboard_v3/mod.rs`):
 `/accounts/{id}/browser-profile`, `/accounts/{id}/setup`,
 `/accounts/{id}/setup/verify-key`, `/accounts/{id}/reset-cooldown`,
 `/accounts/{id}/custom-config`, `/accounts/{id}/model-capabilities`,
-`/accounts/{id}/acknowledgements`, `/accounts/{id}/usage`,
+`/accounts/{id}/usage`,
 `/accounts/{id}/usage/refresh`, `/accounts/{id}/provider-usage`,
 `/accounts/{id}/verify`, `/providers`, `/providers/{provider_id}`,
 `/providers/models/discover`, `/providers/test`, `/providers/model-capabilities`,

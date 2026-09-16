@@ -18,9 +18,9 @@ proposal or pull request, with corresponding code and documentation changes.
 - Streaming cost is exact only when upstream emits usage chunks. Chat streams
   request `stream_options.include_usage`. Without a chunk, Go rows end as
   `success_no_usage`; Zen success without usage stays `success` / `free`.
-- Legacy `profiles/<account_id>` WebView profiles stay on the old engine after
-  upgrade, so users sign in again. The old path is retained for safe
-  reset/delete cleanup.
+- The browser session uses `browser-profiles/<account_id>`; legacy
+  `profiles/<account_id>` profiles are not reused, so affected users sign in
+  again. The legacy path is retained for safe reset/delete cleanup.
 - The Responses endpoint is stateless. `previous_response_id`, `conversation`,
   `store: true`, and `background: true` return `400`. See `protocol.rs` and
   [Limits](../user/limits.md).
@@ -29,18 +29,16 @@ proposal or pull request, with corresponding code and documentation changes.
   [Protocol conversion](../user/protocol-conversion.md).
 - Command Code GOAT has no machine-readable usage endpoint. Its public model
   directory cannot validate a stored Key, so authentication failure is only
-  known from real inference 401/403. Custom API remains a distinct live route
+  known from real inference 401/403. Custom API is a distinct live route
   under the trusted-administrator boundary (`custom.rs` + `custom_http.rs`).
 - Per-model/per-protocol overrides are on V3. Custom account-level
-  per-protocol probing has no V3 counterpart; the historical V2
-  account-owned probe path is 410. Custom verify and model discovery are the
-  live Custom operational paths.
-- The V4 operation digest key (`dashboard_operation_digest_key`) still lives
-  in the same SQLite file as the account Keys (AES-256-GCM `v2:` ciphertext,
-  with legacy XOR readable until open-time repair). Authenticated local Key
-  storage does not move this digest key; it remains beside Keys.
-- The `accounts` row still holds cooldown columns and Key material. The
-  identity model is satellite-based until the write switch in a later phase.
+  per-protocol probing has no V3 endpoint; the account-level probe path
+  returns 410. Custom verify and model discovery are the live Custom
+  operational paths.
+- The V4 operation digest key (`dashboard_operation_digest_key`) lives in the
+  same SQLite file as the account Keys (AES-256-GCM `v2:` ciphertext).
+- The `accounts` row holds cooldown columns and Key material. The V4 identity
+  model is a satellite projection over those rows.
 
 ## Deliberate Non-Goals
 
@@ -49,7 +47,7 @@ proposal or pull request, with corresponding code and documentation changes.
   user-defined Provider definitions remain supported data bound to the sealed
   Configurable HTTP adapter.
 - Remote node sync, an Admin API, or a multi-tenant control plane.
-- Tauri `invoke` as a dashboard data path; WebView commands stay removed.
+- Tauri `invoke` or WebView commands as a dashboard data path.
 - Request-time upstream discovery on `GET /v1/models` or
   `GET /dashboard/api/v3/application-models`.
 - An authoritative GOAT usage API, or treating its public directory as Key

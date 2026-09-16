@@ -56,7 +56,7 @@ supported protocol matrix lives in
   are not implemented. That covers desktop installers only; the container
   images (`ghcr.io/klarkxy/opencode-go-mgr` and its `-browser` sidecar)
   publish `linux/amd64` and `linux/arm64`. Updater-enabled installed desktop
-  builds can install signed releases from Settings; 1.4.1, development
+  builds can install signed releases from Settings; development
   builds, the CLI, and Docker use the direct/manual upgrade path.
 - Command Code GOAT is a live fixed-origin route. Its public `/models` catalog
   is refreshed explicitly on **Providers**; GOAT preset rows default on and
@@ -74,11 +74,10 @@ supported protocol matrix lives in
   logs. Used credit may exceed the Pro `$60` / Max `$300` / Team `$1000`
   limit; the dashboard clamps the bar at 100% and shows overage. Meter fullness
   never writes cooldown, disables the account, or changes routing. New Ollama
-  accounts require an explicit Pro/Max/Team tier and purchase date. Migrated
-  accounts with no billing row stay routeable without a meter. Actual upstream
-  `429` still uses the generic cooldown/fallback path.
-- Zen Free routing uses the card's enable switch and list position. There is
-  no Deny / Explicit / Prefer policy.
+  accounts require an explicit Pro/Max/Team tier and purchase date. Accounts
+  with no billing row stay routeable without a meter. An actual upstream
+  `429` uses the generic cooldown/fallback path.
+- Zen Free routing uses the card's enable switch and list position.
 - Unknown model names return `400` on every supported client format. Clients
   should send published aliases or eligible Custom IDs from authenticated
   `GET /v1/models` that currently have an effective enabled protocol.

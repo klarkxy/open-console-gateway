@@ -21,8 +21,8 @@ identity:
 - `resolved_alias` — the resolved public Alias when one exists
 - `upstream_model` — the exact model ID actually sent to that account's upstream
 
-plus `provider_id`. The existing model filter exact-matches
-any of those identities or the legacy `model` column. Native cost
+plus `provider_id`. The model filter exact-matches
+any of those identities or the `model` column. Native cost
 (`native_cost_value`, `native_cost_unit`, `native_cost_currency`) is optional
 and present only when the provider supplies enough pricing evidence.
 
@@ -51,8 +51,8 @@ changes the quota-debit multiplier.
   request is not replayed automatically and its local cost remains unknown.
 - The **Key** filter narrows rows and the summary totals to one client key.
   Options come from the log table itself, so disabled, deleted, and otherwise
-  unknown keys stay filterable. **Unattributed** selects rows written before
-  multi-key support; a background task attributes them to the primary key as an
+  unknown keys stay filterable. **Unattributed** selects rows with no client-Key
+  attribution; a background task attributes them to the primary key as an
   approximation.
 
 ## Settings
@@ -114,10 +114,10 @@ The **Settings** view holds the gateway's persistent configuration:
   can be listed, but Zen free quota is shared by egress IP, so routing them
   through a proxy changes which quota they draw from. Every forward-log row
   (successes included) records the leg it used — `proxy`, `direct`, or `auto`
-  — in its expanded details; rows from before this feature show "not
-  recorded". List mode requires this version or newer; an older binary cannot
-  start on a config saved with `list` mode — switch back to manual or direct
-  mode first when rolling back.
+  — in its expanded details; rows without a recorded leg show "not recorded".
+  A config saved in list mode cannot be opened by a build from before list
+  mode existed; switch back to manual or direct mode before rolling back to
+  such a build.
 - **Downstream Access Root** — see [Connection Center](dashboard.md#connection-center).
 - **Auto-start on login** — installed Windows x64, macOS, and Linux x64
   desktop builds expose this switch. Development builds, the CLI, and Docker
@@ -128,9 +128,9 @@ The **Settings** view holds the gateway's persistent configuration:
   dashboards hide it.
 - **Connect / non-stream / stream-idle timeouts** — default to 30, 900, and
   300 seconds. The non-stream value is a whole-request deadline; the stream
-  idle value is enforced between response chunks. Existing installations are
-  migrated from 30/120/300 only when that complete old default tuple is still
-  untouched.
+  idle value is enforced between response chunks. A saved tuple that exactly
+  matches the complete former defaults (30/120/300) migrates to the new
+  defaults on startup; customized tuples are preserved.
 - **Check for updates / Update now** — updater-enabled installed desktop
   builds check the latest GitHub Release and can download, verify, and
   replace the existing copy in place. The data directory and auto-start

@@ -20,10 +20,9 @@ docker compose ps
 
 镜像标签会动；先决定是跟车还是钉死。
 
-源码仓库现为 `klarkxy/open-console-gateway`。已发布的 GHCR 镜像继续使用
+源码仓库是 `klarkxy/open-console-gateway`。已发布的 GHCR 镜像包名是
 `ghcr.io/klarkxy/opencode-go-mgr` 和 `ghcr.io/klarkxy/opencode-go-mgr-browser`；
-仓库改名不会同步更改镜像包名。Compose 和容器发布工作流保留这些现有名称，
-使已有安装继续沿用同一升级通道。
+Compose 和容器发布工作流使用这些镜像名。
 
 ## 选择镜像
 
@@ -32,7 +31,7 @@ docker compose ps
 - 生产部署建议在 `.env` 中用 `OCG_IMAGE` 固定完整版本标签，例如
   `ghcr.io/klarkxy/opencode-go-mgr:2.4.1`。
 - 完整版本与 `sha-<commit>` 标签指向单次发布，按策略不应移动；
-  `1.5` 与 `latest` 会继续移动。技术上只有 digest
+  `latest` 会继续移动。技术上只有 digest
   `ghcr.io/klarkxy/opencode-go-mgr@sha256:...` 真正不可变。
 - 想调试当前源码时，设置 `OCG_IMAGE=ocg-manager:local`，再执行
   `docker compose up -d --build`。`NPM_REGISTRY` 与 `CARGO_REGISTRY`

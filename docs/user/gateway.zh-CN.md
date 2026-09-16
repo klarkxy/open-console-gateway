@@ -31,14 +31,14 @@ Gateway 监听 `http://<bind>:<port>`，暴露以下端点：
 
 Gateway API 必须携带 **Key**，支持 `Authorization: Bearer <key>`、`x-api-key: <key>` 或 `x-goog-api-key: <key>` 三种请求头。转发前 Gateway 会移除客户端鉴权头，再注入所选账号的凭据。OpenCode Go 在 Messages 上游使用 `x-api-key`，在 Chat Completions 与 Responses 上游使用 `Authorization: Bearer`。Custom API 由唯一上游协议决定鉴权：Messages 只使用 `x-api-key`，Chat Completions 与 Responses 只使用 Bearer。Gateway 不会转发 dashboard 或客户端凭据。
 
-管理面板鉴权取决于监听地址。当前 SPA 使用 `/dashboard/api/v3/auth/status`、`/dashboard/api/v3/auth/register`、`/dashboard/api/v3/auth/login` 与 `/dashboard/api/v3/auth/logout`。注册、登录、退出需要与其他 V3 写入相同的 `expectedRevision` / `processGeneration` token。对应的 `/dashboard/api/auth/...` 路由只作为已标明的 V2 兼容例外，供缓存的旧页面使用。
+管理面板鉴权取决于监听地址。当前 SPA 使用 `/dashboard/api/v3/auth/status`、`/dashboard/api/v3/auth/register`、`/dashboard/api/v3/auth/login` 与 `/dashboard/api/v3/auth/logout`。注册、登录、退出需要与其他 V3 写入相同的 `expectedRevision` / `processGeneration` token。对应的 `/dashboard/api/auth/...` 路由是已标明的 V2 兼容路由，供缓存的旧页面使用。
 
 - **回环监听（默认）**：Dashboard API 请求的 `Host` 必须为 `localhost` 或回环 IP 字面量；浏览器提供的 `Origin` 必须匹配该主机与端口。跨站请求会被拒绝，注册和登录也不例外。有效本地请求跳过面板登录；但只要带有 `Forwarded`、`x-forwarded-for`、`x-forwarded-proto`、`x-forwarded-host` 或 `x-real-ip` 中任一请求头，仍必须登录。使用公开主机名的反向代理必须连接非回环监听器。客户端还需要 **Key** 才能访问上游端点。桌面端与默认 CLI 都走这个分支。
 - **非回环监听**：管理面板由唯一的 **管理员账号** 管控，密码以 Argon2 哈希存在 SQLite 中，登录后下发 HttpOnly 会话 Cookie。携带标准反向代理转发头但没有 Cookie 的请求仍需要登录。Docker 可以用 `OCG_ADMIN_USERNAME` 与 `OCG_ADMIN_PASSWORD` 引导首个管理员；不提供时由首位注册者创建。
 
 ## 别名
 
-客户端发送 **别名**：本地注册表中的稳定小写 kebab-case 名称。内置 Alias 权威由代码持有：最早 OpenCode Go 静态协议表加上精确密封的 MiniMax CN、Kimi CN 与选定 GOAT 长名称映射。Alias 拼写仍可大小写折叠，例如 `GLM-5.2`。
+客户端发送 **别名**：本地注册表中的稳定小写 kebab-case 名称。内置 Alias 权威由代码持有：OpenCode Go 静态协议表加上精确密封的 MiniMax CN、Kimi CN 与选定 GOAT 长名称映射。Alias 拼写仍可大小写折叠，例如 `GLM-5.2`。
 
 带鉴权的 `GET /v1/models` 先按注册表顺序列出当前可路由的代码授权 Alias，再并入已保存的用户定义 Provider 公开模型，以及不与这些 Alias 冲突、同样有有效启用协议的合格 Custom 能力 ID（`owned_by` 为 `custom`）。**别名**页关闭的对外名称不会出现在该列表中，但仍可按名称调用。该列表使用已保存的本地状态。显式目录刷新更新已保存的供应商映射与合约。列表读取不会写转发日志。已保存的 Zen `-free` 行保留精确 raw pin 并公布去掉后缀后的 Alias；Command 模型可以加入任一代码持有的 Alias；MiniMax/Kimi 模型只激活精确密封的 CN 映射；未来未知的 Command/MiniMax/Kimi 行不能动态创建任意 Alias。合格 Custom ID 来自 enabled + ready 且有 Key 的 Custom 账号（验证为可选）。
 

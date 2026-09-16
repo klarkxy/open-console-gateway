@@ -18,7 +18,7 @@
 
 仍调用无版本号 `/dashboard/api` REST 的缓存页面会收到 HTTP 410，错误码 `dashboardV2Removed`，提示先刷新页面，不够再升级。未登录请求会先返回 401。两类 V2 路径仅作为缓存旧页面的兼容例外保留：`/dashboard/api/auth/status`、`/dashboard/api/auth/register`、`/dashboard/api/auth/login`、`/dashboard/api/auth/logout`，以及 `/dashboard/api/browser/sessions/{token}/ws`。当前面板改用 V3 的鉴权与浏览器 WebSocket 路由。
 
-要探测 OpenCode Go Key，请用 CLI `key ping` 或发一次真实客户端请求。Custom 卡片仍有 **验证连接**；托管注册仍有 Key 验证。
+要探测 OpenCode Go Key，请用 CLI `key ping` 或发一次真实客户端请求。Custom 卡片有 **测试连接**；托管注册会执行 Key 验证。
 
 ## 接入中心
 

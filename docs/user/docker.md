@@ -24,17 +24,16 @@ Image tags move; decide how pinned you want to be.
 ## Choosing An Image
 
 The source repository is `klarkxy/open-console-gateway`. The published GHCR
-packages retain `ghcr.io/klarkxy/opencode-go-mgr` and
-`ghcr.io/klarkxy/opencode-go-mgr-browser`; renaming the repository does not
-rename those packages. Compose and the container publishing workflow keep
-these existing image names so upgrades continue on the same channels.
+packages are `ghcr.io/klarkxy/opencode-go-mgr` and
+`ghcr.io/klarkxy/opencode-go-mgr-browser`; Compose and the container publishing
+workflow use these image names.
 
 - The checkout's `compose.yaml` defaults to `latest`; the Release
   `compose.example.yaml` pins its matching full version.
 - For repeatable production deployments, set `OCG_IMAGE` in `.env` to a full
   release tag such as `ghcr.io/klarkxy/opencode-go-mgr:2.4.1`.
 - Full-version and `sha-<commit>` tags identify one release and are intended
-  not to move; `1.5` and `latest` do. Only a digest such as
+  not to move; `latest` does. Only a digest such as
   `ghcr.io/klarkxy/opencode-go-mgr@sha256:...` is truly immutable.
 - To build the current checkout instead, set `OCG_IMAGE=ocg-manager:local`
   and run `docker compose up -d --build`. `NPM_REGISTRY` and

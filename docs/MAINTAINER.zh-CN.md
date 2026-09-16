@@ -8,7 +8,7 @@
 
 - [仓库结构](maintainer/layout.zh-CN.md) — crate 与目录结构。
 - [开发](maintainer/development.zh-CN.md) — 开发循环与检查。
-- [架构](maintainer/architecture.zh-CN.md) — 四层 crate、适配器身份、请求流转与文字图。
+- [架构](maintainer/architecture.zh-CN.md) — 依赖边界、适配器身份、请求流转与文字图。
 - [Dashboard API](maintainer/dashboard-api.zh-CN.md) — 冻结的 V3 契约、增量 V4 接口、CAS token 与变更规则。
 - [状态、凭据与生命周期](maintainer/state-and-lifecycle.zh-CN.md) — `CoreState`、锁顺序、凭据与持久化。
 - [HTTP 路由](maintainer/http-routes.zh-CN.md) — 推理路由、V3/V4 路径、V2 墓碑与 auth/session 路由。

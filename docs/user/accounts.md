@@ -8,7 +8,7 @@ Provider choices are projected in the exact order returned by the V3 Provider Ca
 
 **Enabled** means the card may enter routing. New ready Key accounts, including Custom API and user-defined Providers, start enabled. Test connection does not change the switch. Already-enabled or disabled accounts stay as stored. Test results stay in the test dialog. User-defined Providers have no modeled subscription period, including those created from Plan presets: their accounts do not show an inferred purchase date, expiry countdown, or expiry alert. Existing stored purchase anchors are preserved for compatibility, but are not presented as confirmed billing facts.
 
-Accounts still edit through the same forms. Ready, routable cards show enabled, disabled, cooling, or unavailable. Card relations come from the identity projection: a declared relation is not a verified wallet, and dynamic or Custom dates stay unknown unless V3 already stored a real purchase date.
+Accounts edit through the same forms used to create them. Ready, routable cards show enabled, disabled, cooling, or unavailable. Card relations come from the identity projection: a declared relation is not a verified wallet, and dynamic or Custom dates stay unknown unless V3 already stored a real purchase date.
 
 A ready Key card can **Rotate Key**, **Add Key**, and **Edit binding** from the overflow menu. Rotate replaces only the Key this console will send on later requests for that card's credential (same credential id; version numbers increase). It is a local replacement: the provider-side credential is not revoked and stays under your control. **Add Key** creates another inference Key on the same identity, defaulting to that card's connection. Quota is independent unless you explicitly share with a selected inference Key on that identity; belonging to the same identity is not enough. After save, cards that actually share a stored quota pool show that relationship (naming the sibling Key when possible). A third Key on the same identity stays independent when it has its own pool or none. Custom API, Zen Free, CPA, no-auth, and observer credentials do not expose Add Key (Custom API still uses its dedicated account editor). If create does not return a definite result, the form keeps the submitted contents and operation: retry the same body, or cancel; do not change the form and submit again (that can create a duplicate Key).
 
@@ -83,8 +83,8 @@ package order. Destination-only Access Keys and Provider scopes are retained.
 
 Browser profiles/cookies, third-party login passwords, referral codes, logs,
 and usage history do not move. V6 carries source cooldown deadlines without
-shortening a later destination deadline; V4/V5 retain their older host-local
-cooldown behavior. Existing destination usage history and browser data stay in
+shortening a later destination deadline; V4/V5 keep cooldown behavior
+host-local. Existing destination usage history and browser data stay in
 place; stale authentication and last-error flags are cleared when package
 account fields replace the stored credential.
 Machine-local listener/root URL, auto-start, and Dock settings also stay with
@@ -181,10 +181,10 @@ set are replaced in one CAS transaction. Disabling the declared protocol makes
 the model unroutable; no fixed-priority fallback or override can enable an
 undeclared protocol. Custom traffic is
 unpriced: logs record `cost_state=unknown` with no quota debit, and Custom has
-no provider usage refresh. `MODEL_PROTOCOLS` remains Go-specific; Custom
+no provider usage refresh. `MODEL_PROTOCOLS` is Go-specific; Custom
 converts the client protocol to the account's single upstream protocol.
 
-Use the existing-connection choices to add another Key without creating a second Provider. New-service choices contain unused built-in templates, Plan/API presets, Custom API and platform types. Search matches vendor, variant, preset name and endpoint host. Selecting a result retains its exact variant when the search clears. Zen Free is a backend-owned singleton, managed only from the account list; OpenCode Go retains its optional managed-registration action where the host supports it.
+Use the existing-connection choices to add another Key without creating a second Provider. New-service choices contain unused built-in templates, Plan/API presets, Custom API and platform types. Search matches vendor, variant, preset name and endpoint host. Selecting a result retains its exact variant when the search clears. Zen Free is a backend-owned singleton, managed only from the account list; OpenCode Go offers its optional managed-registration action where the host supports it.
 
 - A **Key account** stores one officially distributable OpenCode Go API key.
 - A **managed account** immediately creates a disabled, recoverable draft, then
@@ -230,13 +230,11 @@ external Chromium-family browser: Windows prefers Edge and then Chrome; macOS
 checks Chrome, Edge, and Chromium; Linux desktop searches `PATH` for Chrome,
 Chromium, or Edge. It uses only `browser-profiles/<account_id>`, first-run
 suppression, and a new window; it does not enable CDP, automation,
-`--no-sandbox`, or weakened web security. Older `profiles/<account_id>` WebView
-data is deliberately not imported, so the first open after upgrading requires
-another login.
+`--no-sandbox`, or weakened web security.
 
-Every completed account has **Open OpenCode console**
-(`https://opencode.ai/auth`). A legacy account starts with a blank isolated
-profile the first time; sign in once and its cookies remain available.
+Every ready OpenCode Go account offers **Open OpenCode console**
+(`https://opencode.ai/auth`). The profile starts blank the first time; sign in
+once and its cookies remain available.
 Google/GitHub and OpenCode cookies belong to different domains, but both stay in
 the same account profile.
 

@@ -50,8 +50,8 @@ The frozen contract is `schema/dashboard-api-v3.schema.json`, generated from
 `CATALOG_TYPE_NAMES` in `dashboard_v3/types.rs` is the ordered `$defs` catalog;
 appending must keep existing definitions byte-identical.
 
-Pinia stores call `dashboardV3` directly. Pages that still use older field names
-go through `src/api/dashboard.ts` presenters.
+The `src/api/dashboard.ts` presentation client wraps `dashboardV3` and projects
+the fields each page and store needs.
 
 `dashboard.rs` serves the SPA and preserves the V2 auth and browser WebSocket
 handlers. Other `/dashboard/api/...` REST paths are tombstoned in
@@ -84,8 +84,8 @@ Read-only routes are `GET /contract`, `GET /templates`,
 requests.
 
 `GET /templates` is the read-only add catalog: the sealed built-ins (CPA
-excluded) plus the `custom-http` manual template. Presets are not part of it
-yet. Templates have no user instances or secrets.
+excluded) plus the `custom-http` manual template. Presets are not part of the
+template catalog. Templates have no user instances or secrets.
 
 `GET /connections` is a projection of saved instances: built-ins that already
 have an account, every user-defined Provider, and each Custom API account
@@ -110,16 +110,12 @@ legacy identity, never from names or URLs.
 `enabled`, `routingRank`), `quotaWindows[]`, `onboardingTask`,
 `subscription` (null when unknown), `lastError` (redacted; null when it
 cannot be redacted safely), and `legacy`. The platform parent's
-`platform_observer` credential is a projection in this stage (no
+`platform_observer` credential is a projection (no
 `credential_state` row). `authState` is local: `unknown` is never
 `valid`; `valid` requires the existing verification record. The Vue
 Accounts page overlays this projection for display; Key rotation, binding
 edits, and additional identity credentials use V4, while the remaining
-account mutations stay on V3. Some enum values in the V4
-catalog are reserved for the next stage and not yet produced:
-`subject: external_runtime`, `policyMode: observe_only`,
-`relationConfidence: unknown`, `subscription.source: managed_payment`,
-`onboardingTask.state: completed`.
+account mutations stay on V3.
 
 V4 does not treat authorization `unknown` as `valid`. Eligibility is a local
 projection, never upstream health.
@@ -145,7 +141,9 @@ returns `409` `operationPayloadMismatch` and writes nothing; (4) CAS check
 (`409` `revisionConflict`); (5) write.
 
 `new` reuses V3 user-defined Provider validation. Template ids pass through as
-opaque preset ids; Rust still does not load presets. Omitting `authorization`
+opaque preset ids; preset forms stay frontend-owned and Rust consumes only the
+offering projection generated from `resources/provider-presets.json`.
+Omitting `authorization`
 on keyed auth saves the definition only (V4 connections then show
 authorization `missing`); `api_key` requires a non-empty secret on keyed
 auth; `none` is valid only for no-auth templates, which always create the
@@ -153,7 +151,7 @@ singleton account. The Provider row, optional first account row, and the
 operation record commit in one SQLite transaction; the dynamic-provider
 snapshot is installed after commit exactly as V3 does.
 
-`existing` in this stage accepts a new `api_key` only on user-defined
+`existing` accepts a new `api_key` only on user-defined
 (dynamic) Provider connections with keyed auth. Built-in and Custom API
 connection ids return `400` ("add Keys on Accounts"). Account row and
 operation record commit in one transaction, then the revision bump only
@@ -168,7 +166,7 @@ model. The response never contains the secret, ciphers, or the digest.
 the digest is hex HMAC-SHA256 over the semantic payload only — `operationId`,
 `connection`, `authorization` (so the secret is covered), and `targets`.
 `expectedRevision` / `processGeneration` are excluded, so a retry with
-refreshed CAS tokens still replays. Schema v44 stores each commit in
+refreshed CAS tokens still replays. Each commit is stored in
 `dashboard_operations`; the stored `result_json` is secret-free. Rows older
 than 30 days are pruned on insert; after pruning, the same `operationId` is a
 new write.

@@ -8,7 +8,7 @@ This guide is for people changing code, cutting releases, debugging the gateway,
 
 - [Layout](maintainer/layout.md) — Crate and directory layout.
 - [Development](maintainer/development.md) — Dev loop and checks.
-- [Architecture](maintainer/architecture.md) — Four-layer crates, adapter identity, request flow, and text diagrams.
+- [Architecture](maintainer/architecture.md) — Dependency boundaries, adapter identity, request flow, and text diagrams.
 - [Dashboard API](maintainer/dashboard-api.md) — Frozen V3 contract, additive V4 surface, CAS tokens, and mutation rules.
 - [State, Credentials, And Lifecycle](maintainer/state-and-lifecycle.md) — `CoreState`, locks, credentials, and persistence.
 - [HTTP Routes](maintainer/http-routes.md) — Inference routes, V3/V4 paths, the V2 tombstone, and auth/session routes.

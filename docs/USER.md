@@ -16,15 +16,16 @@ This guide is for people running Open Console Gateway as a desktop app, a headle
 - [Architecture Diagrams](user/architecture.md) — Text maps of one node, a client request, Plans, and the dashboard.
 - [Install And First Run](user/install.md) — Windows, macOS, and Linux installers; the SmartScreen ritual included.
 - [Connect Your First Client](user/first-client.md) — Copy the Key and base URL, then prove it with one request.
-- [Upgrade, Backup, Restore, And Uninstall](user/upgrade-backup.md) — Updater channel, manual upgrade, backup, restore, and uninstall.
+- [Upgrade, Backup, Restore, And Uninstall](user/upgrade-backup.md) — In-app and manual upgrade, backup, restore, and uninstall.
 - [The Dashboard](user/dashboard.md) — The eight core views, Extensions group, i18n, and Connection Center.
 - [Applications](user/applications.md) — The DSH plugin installation flow, recovery, and removal.
 - [Accounts](user/accounts.md) — Plans, credentials, ordering, quota behavior, and managed onboarding.
 - [Providers](user/providers.md) — Catalog, provider contracts, per-model protocol overrides, probes, and user-defined Providers.
-- [Logs And Settings](user/logs-settings.md) — Request logs, settings, proxy modes, and theme.
-- [Gateway Behavior](user/gateway.md) — Endpoints, authentication, aliases, Zen Free, and circuit breakers.
+- [Plan And API Presets](user/provider-presets.md) — Browse Plan/API presets from Accounts or Providers; fixed presets supply address, protocol, authentication, and a default model.
+- [Logs And Settings](user/logs-settings.md) — Request logs, settings, and proxy modes.
+- [Gateway Behavior](user/gateway.md) — Endpoints, authentication, and aliases.
 - [Protocol Conversion](user/protocol-conversion.md) — Preferred/supported protocols, passthrough, and conversion limits.
-- [Routing, Cost, And Failover](user/routing.md) — Selection order, sticky/round-robin, cost accounting, and failover.
+- [Routing, Cost, And Failover](user/routing.md) — Selection order, sticky/round-robin, cost accounting, circuit breakers, and failover.
 - [CLI](user/cli.md) — Headless CLI archive, data directory, and `serve` / `key` / `status`.
 - [Docker](user/docker.md) — GHCR image, Compose setup, browser sidecar, and source builds.
 - [External Integrations](user/external-integrations.md) — Local CPA setup, ownership boundaries, routing pool, and disconnect behavior.

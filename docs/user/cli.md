@@ -14,10 +14,9 @@ override it with `--data-dir <path>`. The obfuscation secret lives at
 or `OCG_MANAGER_ENCRYPTION_KEY`.
 
 The CLI only does `serve`, `key`, and `status`. `key` manages OpenCode Go
-account credentials — not dashboard Keys and not Custom or Zen Free cards.
-Keys, Custom destinations, per-model protocol overrides, and catalogs stay on
-the dashboard. CLI writes bump that process's settings revision directly; there is
-no `--expectedRevision` flag.
+account credentials; dashboard Keys, Custom destinations, per-model protocol
+overrides, and catalogs stay on the dashboard. CLI writes bump that process's
+settings revision directly.
 
 While native `serve` is running, **Applications > DSH** can install the OCG
 plugin into a DSH owned by the same OS user on that machine. The official
@@ -43,7 +42,8 @@ ocg-manager-cli
 └── status        Show data dir, gateway port/key, upstream, account totals
 ```
 
-`key add` stores a disabled OpenCode Go draft. Enable it after you have checked the Key (`key ping`, then `key enable`).
+`key add` stores a ready, enabled OpenCode Go account; confirm it with
+`key ping` before you rely on it.
 
 Headless bootstrap:
 
@@ -51,7 +51,6 @@ Headless bootstrap:
 ./ocg-manager-cli key add main sk-...
 ./ocg-manager-cli key list
 ./ocg-manager-cli key ping <id>
-./ocg-manager-cli key enable <id>
 ./ocg-manager-cli serve --port 9042
 ```
 

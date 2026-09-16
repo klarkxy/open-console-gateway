@@ -29,11 +29,11 @@ get billed for a bad guess.
   unknown, and malformed OpenCode 401 responses remain unchanged. Custom API
   `401` rotates to the next eligible card and records `auth_error`. To check an OpenCode Go
   key directly, use CLI `key ping <id>` or send a real client request.
-  Managed-account Key verification and Custom **Verify connection** still
+  Managed-account Key verification and Custom **Test connection**
   record `auth_error` on 401 in those flows.
 - **The dashboard says the page version does not match the service.** A cached
-  older SPA hit the tombstoned `/dashboard/api` REST (not `/dashboard/api/v3`) and
-  received HTTP 410. Refresh the page; if that is not enough, install the
+  older SPA hit the tombstoned `/dashboard/api` REST and received HTTP 410.
+  Refresh the page; if that is not enough, install the
   matching desktop, CLI, or Docker build.
 - **A dashboard save failed with a conflict / 409.** Another tab in the same
   running process wrote first. The SPA refreshes the affected data from the

@@ -17,7 +17,7 @@ model snapshot. The Management Key stays encrypted in OCG storage and, for a
 managed child, reaches CPA only as `MANAGEMENT_PASSWORD`. CPA itself requires
 client `api-keys` in its config, so the protected Inference Key and any
 direct-client keys are necessarily present in CPA's local config under the OCG
-data directory. Creating a client key still returns that secret once from V3;
+data directory. Creating a client key returns that secret once from V3;
 list views stay fingerprinted.
 
 Use one of these local deployments:
@@ -52,8 +52,7 @@ hosts are rejected. Do not reuse an Open Console Gateway Key as either CPA key.
    connect an external CPA, then run the connection test. It reports reachability, supported CPA version,
    Management authentication, and Inference authentication separately.
    OCG requires CPA 7.1.0 or newer; later major versions continue through the
-   same typed response and exact-account validation instead of being rejected
-   solely for their version number.
+   same typed response and exact-account validation.
 3. A fresh managed installation can start successfully with an empty model
    catalog. This confirms CPA and its local authentication are working; it
    does not make any model routeable. Start an OAuth flow from CPA's account
@@ -65,14 +64,14 @@ hosts are rejected. Do not reuse an Open Console Gateway Key as either CPA key.
    selectable cards grouped by the source CPA reported (`owned_by`). A
    highlighted card joins routing; unselected IDs stay in the snapshot but are
    not published. A first refresh, and models newly added by a later refresh,
-   stay off until you select them. Catalogs saved before this selection flag
+   stay off until you select them. Catalogs without a saved selection
    keep routing every ID until you change them. A fresh install can start with
    an empty catalog; refresh after OAuth accounts exist. Then enable the CPA
    subscription pool. Its single **CPA subscription pool** card on Accounts can
    be ordered and enabled/disabled like other route candidates, but cannot
    expose a Key, be deleted, or stand in for individual CPA OAuth accounts. For
-   a managed runtime, extra direct-client keys live on Overview rather than a
-   separate tab; daily use goes through the OCG Access Key.
+   a managed runtime, extra direct-client keys live on Overview; daily use goes
+   through the OCG Access Key.
 
 Disabling the pool removes it from routing without forgetting CPA setup.
 **Disconnect and clear** removes OCG's CPA configuration, the pool card, and
@@ -97,7 +96,7 @@ that port. OCG starts a separate contained CPA login process; CPA exchanges and
 saves credentials without interrupting the gateway. Cancel, expiry (about 15
 minutes), OCG exit, or a managed runtime lifecycle operation stops the helper.
 Cancelling does not delete credentials already saved by CPA. External CPA
-connections retain browser login: this CPA version has no Codex device-login
+connections use browser login: the current CPA version has no Codex device-login
 Management API.
 
 ### Import a local CLI login

@@ -23,7 +23,7 @@ Views are cached while you switch tabs (`KeepAlive`) and refresh their server da
 
 Cached pages that still call the unversioned `/dashboard/api` REST receive HTTP 410 with code `dashboardV2Removed` and a prompt to refresh, then upgrade if needed. Anonymous requests to those paths are rejected with 401 before that 410. Two V2 families remain as compatibility exceptions for cached older pages: the auth endpoints (`/dashboard/api/auth/status`, `/dashboard/api/auth/register`, `/dashboard/api/auth/login`, `/dashboard/api/auth/logout`) and `/dashboard/api/browser/sessions/{token}/ws`. The current dashboard uses the V3 equivalents.
 
-To test an OpenCode Go key, use CLI `key ping` or send a real client request. Custom cards still have **Verify connection**, and managed signup still performs Key verification.
+To test an OpenCode Go key, use CLI `key ping` or send a real client request. Custom cards have **Test connection**, and managed signup performs Key verification.
 
 ## Connection Center
 

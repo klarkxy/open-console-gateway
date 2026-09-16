@@ -1,6 +1,6 @@
 # Routing lab
 
-Black-box runtime check of real gateway routing against synthetic loopback upstreams. It does not touch production source, the official account library, or `.artifacts/protocol-lab/`.
+Black-box runtime check of real gateway routing against synthetic loopback upstreams. It does not touch production source or the official account library.
 
 The orchestrator process hosts three independent loopback listeners with a shared event journal, then starts an isolated CLI gateway with a fresh data directory and dummy credentials.
 

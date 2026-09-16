@@ -4,9 +4,9 @@
 
 Browse Plan/API presets from Accounts → Add account → Add new service, or Providers → Add Provider. Existing connections list only built-in families that still have an account plus saved user-defined Providers; unused built-in templates stay with these creation templates. Presets group by vendor, with a compact selector for regional or plan variants. Search includes vendor and variant names, preset IDs and endpoint hosts. Accounts add shows a read-only connection summary before the Key field. Providers add collects an optional Key on keyed auth. Fixed presets supply the address, protocol, authentication and an editable default model; Azure and Bedrock still require resource/regional addresses and deployment/model information. Saving from Accounts requires a Key and creates the Provider and its first account together; saving from Providers writes the definition and, if a Key is filled, its first account. Custom API and manual configuration retain their full settings.
 
-Presets create ordinary user-defined Providers through the existing atomic Dashboard V3 workflow. The saved Provider participates in account ordering, fallback, model routing and request logs. Its configuration stays editable. It does not add a separate adapter or automatically create an account before saving.
+Presets create ordinary user-defined Providers through the atomic Dashboard V4 onboarding commit. The saved Provider participates in account ordering, fallback, model routing and request logs. Its configuration stays editable. It does not add a separate adapter or automatically create an account before saving.
 
-Models imported while a preset is selected receive a public name such as `openrouter/vendor/model`, while the exact upstream ID remains `vendor/model`. Both fields can be edited. Manual configuration imports retain the original public-name behavior.
+Models imported while a preset is selected receive a public name such as `openrouter/vendor/model`, while the exact upstream ID remains `vendor/model`. Both fields can be edited. Manual configuration imports add no preset prefix.
 
 Switching presets clears the previous channel's Key and model mappings, then fills the selected channel's default model. Operator links contain no referral parameters. Discovery only changes the draft; model tests remain explicit and may be billable. Use models supporting the fixed upstream protocol. Image, audio, video and embedding-only models are outside this chat gateway's preset workflow.
 
@@ -24,7 +24,7 @@ Choose a model and use **Test model**. The test uses its explicit protocol/endpo
 
 Testing never changes routing or preference. **Save Provider** commits the configuration you edited. Custom API accounts test their configured account-owned protocol. Supply a temporary test Key when editing; this action does not read back or replace a saved Key. Linked platform Keys keep their managed endpoint constraints. Model overrides are available for user-defined Providers, not account-owned Custom endpoints.
 
-The selected preset is retained when saving and reopening, including resource-specific addresses such as Azure. It preserves template hints, discovery restrictions and import naming; it does not certify an edited endpoint as official. Older entries without preset provenance use only unambiguous existing configuration evidence, and manually named models are not rewritten. Changing the endpoint, Key, model or protocol clears stale test results.
+The selected preset is retained when saving and reopening, including resource-specific addresses such as Azure. It preserves template hints, discovery restrictions and import naming; it does not certify an edited endpoint as official. Entries without preset provenance use only unambiguous existing configuration evidence, and manually named models are not rewritten. Changing the endpoint, Key, model or protocol clears stale test results.
 
 ## Coverage and sources
 
@@ -91,13 +91,13 @@ The rows below are grouped by vendor family — one row per preset variant, with
 | Compshare Coding Plan | chat_completions | bearer | [API docs](https://compshare.cn/docs/modelverse/codingfaq) | [`deepseek-v4-pro`](https://compshare.cn/docs/modelverse/codingfaq) |
 | AtlasCloud Coding Plan | chat_completions | bearer | [API docs](https://www.atlascloud.ai/docs/coding-plan/api) | [`zai-org/glm-5.1`](https://www.atlascloud.ai/docs/coding-plan/api) |
 
-KAT-Coder's full Chat URL and Bearer auth are derived from its official OpenAI-compatible client configuration (base URL plus the standard `/chat/completions` suffix). Ant Ling uses the current `api.ant-ling.com` official domain rather than CC-Switch's older `api.tbox.cn` entries.
+KAT-Coder's full Chat URL and Bearer auth are derived from its official OpenAI-compatible client configuration (base URL plus the standard `/chat/completions` suffix). Ant Ling uses the current official `api.ant-ling.com` domain.
 
 **Unverified gap:** CC-Switch's Baidu personal Token Plan `/v2/tokenplan/personal` route could not be corroborated in the fetched official docs. It is not offered as a preset. The documented Qianfan general API, legacy Coding Plan and team Token Plan are included separately; do not use a personal Key on the team endpoint.
 
 ## Existing integrations and exclusions
 
-- **OpenCode Go**, **Kimi Code CN** and **MiniMax CN Token Plan** retain their existing built-in routing and usage behavior. Select those existing Providers for the subscription workflow; the new Moonshot and MiniMax API presets cover the distinct API/region use cases.
+- **OpenCode Go**, **Kimi Code CN** and **MiniMax CN Token Plan** retain their existing built-in routing and usage behavior. Select those existing Providers for the subscription workflow; the Moonshot and MiniMax API presets cover the distinct API/region use cases.
 - Azure uses the current v1 API with a resource URL and deployment name. It does not provision resources or refresh Entra ID tokens. Bedrock uses its official OpenAI-compatible API with an API Key; AWS AK/SK signing is not implemented.
 - New API / One API / Sub2API distributors, subscription reverse proxies, referral-only relay listings and providers whose operator/API provenance could not be established are not included. A CC-Switch “aggregator” label alone is insufficient.
 - The included aggregation/inference platforms have their own documented service: OpenRouter, SiliconFlow, NVIDIA, ModelScope, PPIO, Qiniu, Novita, Compshare and AtlasCloud. This is a selected set, not a blanket import of CC-Switch's relay catalog.

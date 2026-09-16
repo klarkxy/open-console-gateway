@@ -8,9 +8,9 @@ MiniMax 官方 Chat 与 Messages 地址分别使用 `/v1`、`/anthropic/v1` 前�
 
 从账号 → 新增账号 → 添加新服务，或供应商 → 添加供应商浏览 Plan/API 预设。已有连接只列出仍有账号的内置供应商和已保存的用户定义供应商；未使用的内置模板与创建模板一起出现在新服务里。预设按厂商分组，地区或套餐变体使用紧凑选择器；搜索包含厂商、变体、预设名称与 ID，以及端点主机。账号页在 Key 字段之前显示只读连接摘要；供应商页在 keyed 鉴权下收集可选 Key。固定预设提供地址、协议、鉴权与可修改的默认模型；Azure、Bedrock 仍需填写资源或地区地址，以及部署或模型信息。在账号页保存必须填写 Key，并同时创建供应商和首个账号；在供应商页保存写入定义，填写 Key 时同时创建首个账号。Custom API 与手动配置仍保留完整设置。
 
-预设通过已有 Dashboard V3 原子创建流程保存为普通用户定义供应商，参与账号排序、故障回退、模型路由和请求日志，保存后仍可编辑。它不会新增独立适配器，也不会在保存前自动创建账号。
+预设通过 Dashboard V4 onboarding commit 原子保存为普通用户定义供应商，参与账号排序、故障回退、模型路由和请求日志，保存后仍可编辑。它不会新增独立适配器，也不会在保存前自动创建账号。
 
-在预设下导入模型时，对外名称会加预设前缀，例如 `openrouter/vendor/model`；准确上游 ID 仍为 `vendor/model`，两个字段都可编辑。手动配置的导入保持原有对外命名行为。
+在预设下导入模型时，对外名称会加预设前缀，例如 `openrouter/vendor/model`；准确上游 ID 仍为 `vendor/model`，两个字段都可编辑。手动配置的导入不添加预设前缀。
 
 切换预设会清除上一渠道的 Key 和模型映射，再填入所选渠道的默认模型。链接指向运营方文档、控制台，不携带 CC-Switch 推广参数。获取模型只修改草稿；模型测试可能收费，仍需现有的明确确认。请选择支持当前上游协议的模型；仅用于图片、音频、视频或向量嵌入的模型不属于此对话网关预设流程。
 
@@ -24,7 +24,7 @@ MiniMax 官方 Chat 与 Messages 地址分别使用 `/v1`、`/anthropic/v1` 前�
 
 测试不会改变路由或优先级，**保存供应商**才提交你编辑的配置。Custom API 账号测试其已配置的账号协议；编辑时填写临时测试 Key，不读回或替换已保存的 Key。关联平台的 Key 继续遵守端点由父账号管理的约束。模型覆盖适用于用户定义供应商，账号所有的 Custom 端点仍保持单协议。
 
-保存后重新编辑会保留所选预设，包括 Azure 等自填资源地址的场景。这用于保留模板提示、目录拉取限制和模型导入命名，不代表修改后的端点已经被认证为官方地址。没有预设来源的旧记录只使用无歧义的既有配置线索，不重写手动模型名称。修改端点、Key、模型或协议会清除过时的测试结果。
+保存后重新编辑会保留所选预设，包括 Azure 等自填资源地址的场景。这用于保留模板提示、目录拉取限制和模型导入命名，不代表修改后的端点已经被认证为官方地址。没有预设来源的记录只使用无歧义的既有配置线索，不重写手动模型名称。修改端点、Key、模型或协议会清除过时的测试结果。
 
 ## 覆盖范围与来源
 
@@ -91,13 +91,13 @@ MiniMax 官方 Chat 与 Messages 地址分别使用 `/v1`、`/anthropic/v1` 前�
 | Compshare Coding Plan | chat_completions | bearer | [API 文档](https://compshare.cn/docs/modelverse/codingfaq) | [`deepseek-v4-pro`](https://compshare.cn/docs/modelverse/codingfaq) |
 | AtlasCloud Coding Plan | chat_completions | bearer | [API 文档](https://www.atlascloud.ai/docs/coding-plan/api) | [`zai-org/glm-5.1`](https://www.atlascloud.ai/docs/coding-plan/api) |
 
-KAT-Coder 的完整 Chat 地址与 Bearer 鉴权，根据官方 OpenAI 兼容客户端配置推导：Base URL 加标准 `/chat/completions` 后缀。百灵采用当前官方 `api.ant-ling.com` 域名，不使用 CC-Switch 中较旧的 `api.tbox.cn` 地址。
+KAT-Coder 的完整 Chat 地址与 Bearer 鉴权，根据官方 OpenAI 兼容客户端配置推导：Base URL 加标准 `/chat/completions` 后缀。百灵采用当前官方 `api.ant-ling.com` 域名。
 
 **待核实项：**未能从已获取的官网文档证实 CC-Switch 的百度个人 Token Plan `/v2/tokenplan/personal` 路径，因此不提供此预设。已分别加入官网有据可查的千帆通用 API、已有 Coding Plan 与团队 Token Plan；个人 Key 不应填入团队端点。
 
 ## 已有集成与排除项
 
-- **OpenCode Go**、**Kimi Code CN** 和 **MiniMax CN Token Plan** 保留已有内置路由与用量行为。订阅场景继续选择这些供应商；新增 Moonshot、MiniMax API 预设覆盖独立 API 或不同地区场景。
+- **OpenCode Go**、**Kimi Code CN** 和 **MiniMax CN Token Plan** 保留已有内置路由与用量行为。订阅场景继续选择这些供应商；Moonshot、MiniMax API 预设覆盖独立 API 或不同地区场景。
 - Azure 使用当前 v1 API，需要填写资源地址和部署名称，不代建资源、不刷新 Entra ID 令牌。Bedrock 使用官方 OpenAI 兼容 API 与 API Key；未实现 AWS AK/SK 签名。
 - 不加入 New API / One API / Sub2API 分发站、订阅反代、仅有推广信息的中转渠道，以及运营主体或 API 来源无法确认的服务。仅有 CC-Switch 的 aggregator 标记不足以入选。
 - 本次选择了有独立服务文档的聚合或推理平台：OpenRouter、SiliconFlow、NVIDIA、ModelScope、PPIO、七牛、Novita、优云智算和 AtlasCloud；没有整批导入 CC-Switch 的中转目录。

@@ -31,7 +31,7 @@ are typed data bound to Configurable HTTP.
 
 `ocg-domain::credential` holds the identity/credential/binding vocabulary and the single legacy mapper.
 
-Compatibility facades remain in `ocg-core`, but new no-I/O catalog, selector,
+Compatibility facades live in `ocg-core`; new no-I/O catalog, selector,
 alias, and conversion behavior belongs in the lower crates.
 
 ## HTTP composition
@@ -86,7 +86,7 @@ and exhaustive adapter kinds. Unknown `provider_id` values fail closed unless
 they match a persisted typed Provider definition, which always selects the
 existing Configurable HTTP adapter.
 
-Custom API remains an account-owned product path even though it uses the same
+Custom API is an account-owned product path that uses the same
 sealed adapter kind. CPA is a separate static external integration.
 
 Provider-owned catalogs and contracts are resolved before account credentials
@@ -98,7 +98,7 @@ exact raw pins.
 The Vue SPA calls V3 through `src/api/dashboard-v3.ts` and V4 through
 `src/api/dashboard-v4.ts` (presenters in `src/api/connections.ts`). A parallel
 additive `/dashboard/api/v4` sits beside frozen V3 and shares the same session;
-it now carries the onboarding commit mutation.
+it carries the onboarding commit mutation.
 CAS-protected mutations carry `expectedRevision` and `processGeneration`;
 pricing writes also carry `expectedPricingRevision`. Operational reads and
 diagnostics that do not mutate state skip CAS.
