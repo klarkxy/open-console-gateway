@@ -60,6 +60,10 @@ pub struct CustomAccountRuntime {
     pub has_key: bool,
     pub config: AccountCustomConfig,
     pub capabilities: Vec<AccountModelCapability>,
+    /// Linked New API / Sub2API Key: the site converts Chat, Messages, and
+    /// Responses, so the contract enables those protocols and the gateway
+    /// passes the matching client format through.
+    pub protocol_passthrough: bool,
 }
 
 impl CustomAccountRuntime {
@@ -71,6 +75,32 @@ impl CustomAccountRuntime {
         self.capabilities
             .iter()
             .find(|capability| custom_model_id_matches(&capability.public_model, requested))
+    }
+
+    /// Public-name / protocol rows used to build the Custom contract.
+    ///
+    /// A passthrough Key advertises Chat, Responses, and Messages for each
+    /// declared model so client formats pass through. Ordinary Custom Keys
+    /// keep the single stored protocol.
+    pub fn declared_protocols(&self) -> Vec<(String, UpstreamProtocolKind)> {
+        if !self.protocol_passthrough {
+            return self
+                .capabilities
+                .iter()
+                .map(|capability| (capability.public_model.clone(), capability.protocol))
+                .collect();
+        }
+        let mut rows = Vec::new();
+        let mut seen = HashSet::new();
+        for capability in &self.capabilities {
+            if !seen.insert(capability.public_model.to_ascii_lowercase()) {
+                continue;
+            }
+            for protocol in UpstreamProtocolKind::ALL {
+                rows.push((capability.public_model.clone(), protocol));
+            }
+        }
+        rows
     }
 }
 

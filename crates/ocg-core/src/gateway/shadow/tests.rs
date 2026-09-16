@@ -132,6 +132,7 @@ fn custom_runtime(account_id: &str, model_id: &str) -> CustomAccountRuntime {
             verified_at: None,
             source: "manual".into(),
         }],
+        protocol_passthrough: false,
     }
 }
 

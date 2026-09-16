@@ -927,6 +927,7 @@ fn proxy_candidates_use_exact_upstream_ids_not_public_aliases() {
             verified_at: None,
             source: "declared".into(),
         }],
+        protocol_passthrough: false,
     };
     let mut inactive_custom = custom_runtime.clone();
     inactive_custom.account_id = "custom-disabled".into();

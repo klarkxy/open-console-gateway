@@ -1150,11 +1150,7 @@ fn merge_custom_scope(
     let descriptor =
         ProviderRegistry::get(CUSTOM_PROVIDER_ID).expect("custom offering is registered");
     let revision = persisted.map(|row| row.revision).unwrap_or(1);
-    let declared: Vec<(String, UpstreamProtocolKind)> = runtime
-        .capabilities
-        .iter()
-        .map(|capability| (capability.public_model.clone(), capability.protocol))
-        .collect();
+    let declared: Vec<(String, UpstreamProtocolKind)> = runtime.declared_protocols();
     let mut catalog_models = Vec::new();
     let mut catalog_seen = HashSet::new();
     for (model_id, _) in &declared {

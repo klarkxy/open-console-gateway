@@ -27,7 +27,10 @@ protocol. Gemini always converts to an enabled upstream protocol. This rule
 applies to every Providers-catalog supplier, including user-defined
 Configurable HTTP mappings (one protocol per mapping). Custom API
 does the same to the account's declared upstream protocol, then honors that
-endpoint's contract and per-model overrides. CPA is unchanged and is not
+endpoint's contract and per-model overrides. A New API or Sub2API linked Key
+is the exception: those sites already convert Chat Completions, Messages, and
+Responses, so OCG stores the site root and passes a matching client format
+through (Gemini still converts to Chat Completions). CPA is unchanged and is not
 part of this conversion-default control. Conversion covers text, system
 instructions, images, tool calls and results, reasoning content, completion
 status, errors, and usage fields. SSE usage, errors, and terminal state are

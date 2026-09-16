@@ -694,7 +694,7 @@ fn put_custom_config_locked(
     {
         let db = state.db.lock();
         if let Some(endpoint) = db
-            .platform_endpoint(id, config.upstream_protocol)
+            .platform_hosted_endpoint(id)
             .map_err(V3ApiError::internal)?
         {
             let old = db.account_custom_config(id).map_err(V3ApiError::internal)?;

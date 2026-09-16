@@ -130,8 +130,8 @@ pub(super) fn merge_platforms_on(
             is_custom_api(&provider),
             "linked account must remain Custom API"
         );
-        let protocol = UpstreamProtocolKind::try_from(protocol.as_str())?;
-        let endpoint = crate::platform::inference_endpoint(&base, protocol)?;
+        let _protocol = UpstreamProtocolKind::try_from(protocol.as_str())?;
+        let endpoint = crate::platform::hosted_endpoint(&base)?;
         conn.execute(
             "UPDATE account_custom_configs SET endpoint_url=?2 WHERE account_id=?1",
             params![id, endpoint],
@@ -145,13 +145,9 @@ pub(super) fn merge_platforms_on(
 }
 
 impl Database {
-    pub(crate) fn platform_endpoint(
-        &self,
-        id: &str,
-        protocol: UpstreamProtocolKind,
-    ) -> Result<Option<String>> {
+    pub(crate) fn platform_hosted_endpoint(&self, id: &str) -> Result<Option<String>> {
         let base: Option<String> = self.conn.query_row("SELECT p.base_url FROM platform_accounts p JOIN platform_links l ON l.platform_account_id=p.id WHERE l.account_id=?1",[id],|r|r.get(0)).optional()?;
-        base.map(|b| crate::platform::inference_endpoint(&b, protocol))
+        base.map(|b| crate::platform::hosted_endpoint(&b))
             .transpose()
     }
     pub fn list_platform_accounts(&self) -> Result<Vec<PlatformAccount>> {
@@ -288,8 +284,7 @@ impl Database {
         let custom = self
             .account_custom_config(account_id)?
             .context("Custom configuration missing")?;
-        let endpoint_url =
-            crate::platform::inference_endpoint(&parent.base_url, custom.upstream_protocol)?;
+        let endpoint_url = crate::platform::hosted_endpoint(&parent.base_url)?;
         let mut group = group.clone();
         group.verified = false;
         group.subscription_type = None;

@@ -204,6 +204,7 @@ fn custom_runtime_identity_is_configurable_http_not_a_base_class() {
             updated_at: chrono::Utc::now(),
         },
         capabilities: Vec::new(),
+        protocol_passthrough: false,
     };
     assert!(runtime.eligible());
     let plan = crate::provider::builtin_provider(CUSTOM_PROVIDER_ID).unwrap();

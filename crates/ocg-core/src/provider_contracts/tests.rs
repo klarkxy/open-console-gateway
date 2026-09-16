@@ -851,6 +851,7 @@ fn custom_discovery_does_not_become_routable_without_declaration() {
             verified_at: None,
             source: "manual".into(),
         }],
+        protocol_passthrough: false,
     };
     let mut persisted = empty_persisted();
     let scope = ContractScope::custom_endpoint("custom-1");
@@ -901,6 +902,7 @@ fn custom_declared_protocol_is_preferred_and_other_clients_fall_back_to_it() {
                 source: "manual".into(),
             })
             .collect(),
+        protocol_passthrough: false,
     };
     let ceiling = safety_ceiling_protocols(probe_for(CUSTOM_PROVIDER_ID), "declared-model");
     assert!(
@@ -959,6 +961,67 @@ fn custom_declared_protocol_is_preferred_and_other_clients_fall_back_to_it() {
     assert!(
         !chat.enabled,
         "force_on cannot enable an undeclared Custom protocol"
+    );
+}
+
+#[test]
+fn platform_passthrough_enables_chat_messages_and_responses() {
+    let runtime = CustomAccountRuntime {
+        account_id: "platform-key".into(),
+        enabled: true,
+        verification_status: ConnectionVerificationStatus::Verified,
+        setup_ready: true,
+        has_key: true,
+        config: AccountCustomConfig {
+            account_id: "platform-key".into(),
+            endpoint_url: "https://api.example.com".into(),
+            upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        },
+        capabilities: vec![AccountModelCapability {
+            account_id: "platform-key".into(),
+            public_model: "claude-sonnet".into(),
+            upstream_model: "claude-sonnet".into(),
+            protocol: UpstreamProtocolKind::ChatCompletions,
+            verified_at: None,
+            source: "discovery".into(),
+        }],
+        protocol_passthrough: true,
+    };
+    let set = build_effective_contracts(
+        &zen_seed(),
+        std::slice::from_ref(&runtime),
+        empty_persisted(),
+    );
+    let custom = set.custom_endpoints.get("platform-key").unwrap();
+    let model = custom.model("claude-sonnet").unwrap();
+    assert!(model.routable);
+    assert_eq!(
+        model.preferred_protocol,
+        UpstreamProtocolKind::ChatCompletions
+    );
+    let scope = ContractScope::custom_endpoint("platform-key");
+    assert_eq!(
+        set.select_upstream(&scope, ApiFormat::ChatCompletions, "claude-sonnet")
+            .unwrap(),
+        ApiFormat::ChatCompletions
+    );
+    assert_eq!(
+        set.select_upstream(&scope, ApiFormat::Messages, "claude-sonnet")
+            .unwrap(),
+        ApiFormat::Messages
+    );
+    assert_eq!(
+        set.select_upstream(&scope, ApiFormat::Responses, "claude-sonnet")
+            .unwrap(),
+        ApiFormat::Responses
+    );
+    assert_eq!(
+        set.select_upstream(&scope, ApiFormat::Gemini, "claude-sonnet")
+            .unwrap(),
+        ApiFormat::ChatCompletions,
+        "Gemini stays a client format and converts to Chat"
     );
 }
 

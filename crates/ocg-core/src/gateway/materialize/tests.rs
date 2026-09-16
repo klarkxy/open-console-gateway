@@ -907,6 +907,7 @@ fn custom_runtime(
             verified_at: None,
             source: "manual".into(),
         }],
+        protocol_passthrough: false,
     }
 }
 
@@ -1160,6 +1161,92 @@ fn custom_single_protocol_converts_other_client_wire_formats() {
         ),
     );
     assert_eq!(gemini, ApiFormat::Messages);
+}
+
+#[test]
+fn platform_passthrough_keeps_matching_client_protocols() {
+    fn route_upstream(client: ApiFormat, body: Bytes) -> crate::gateway::protocol::RequestPlan {
+        let parsed = if client == ApiFormat::Gemini {
+            parse_gemini("local-custom".into(), false, body.clone()).unwrap()
+        } else {
+            parse_client_request(client, body.clone()).unwrap()
+        };
+        let resolved = resolve_with_custom("local-custom", &["local-custom".into()]);
+        let account = custom_account("platform-key");
+        let mut runtime = custom_runtime(
+            "platform-key",
+            "local-custom",
+            UpstreamProtocolKind::ChatCompletions,
+        );
+        runtime.config.endpoint_url = "http://127.0.0.1:9".into();
+        runtime.protocol_passthrough = true;
+        let contracts = contracts_for(std::slice::from_ref(&runtime));
+        let mut runtimes = std::collections::HashMap::new();
+        runtimes.insert(account.id.clone(), runtime);
+        let set = materialize_account_routes(
+            &[account],
+            &AppConfig::default(),
+            &parsed,
+            &resolved,
+            &parsed.requested_model,
+            "local-custom",
+            &body,
+            false,
+            &runtimes,
+            &std::collections::HashMap::new(),
+            None,
+            &contracts,
+            &[],
+        )
+        .expect("platform-linked Keys pass matching client protocols through");
+        assert_eq!(set.routes.len(), 1);
+        set.routes[0].plan.clone()
+    }
+
+    let chat = route_upstream(ApiFormat::ChatCompletions, chat_body("local-custom"));
+    assert_eq!(chat.upstream, ApiFormat::ChatCompletions);
+    assert_eq!(
+        chat.custom_route
+            .as_ref()
+            .map(|route| route.endpoint_url.as_str()),
+        Some("http://127.0.0.1:9")
+    );
+    let messages = route_upstream(
+        ApiFormat::Messages,
+        Bytes::from(
+            serde_json::to_vec(&json!({
+                "model": "local-custom",
+                "max_tokens": 4,
+                "messages": [{"role": "user", "content": "hi"}]
+            }))
+            .unwrap(),
+        ),
+    );
+    assert_eq!(messages.upstream, ApiFormat::Messages);
+    let responses = route_upstream(
+        ApiFormat::Responses,
+        Bytes::from(
+            serde_json::to_vec(&json!({
+                "model": "local-custom",
+                "input": "hi",
+                "store": false,
+                "max_output_tokens": 4
+            }))
+            .unwrap(),
+        ),
+    );
+    assert_eq!(responses.upstream, ApiFormat::Responses);
+    let gemini = route_upstream(
+        ApiFormat::Gemini,
+        Bytes::from(
+            serde_json::to_vec(&json!({
+                "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+                "generationConfig": {"maxOutputTokens": 4}
+            }))
+            .unwrap(),
+        ),
+    );
+    assert_eq!(gemini.upstream, ApiFormat::ChatCompletions);
 }
 
 #[test]

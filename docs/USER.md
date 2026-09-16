@@ -8,7 +8,7 @@ This guide is for people running Open Console Gateway as a desktop app, a headle
 
 - [Add a Provider](user/add-provider.md) — Create a user-defined Provider, connect one compatible upstream through Custom API, or contribute a sealed built-in Provider with its complete HTTP and routing contract.
 - [Manual Client Setup](user/add-application.md) — Connect a client directly through the Gateway API.
-- [New API and Sub2API accounts](user/platform-accounts.md) — Group multiple Custom API Keys, refresh scoped quotas and prices, and preserve global routing order.
+- [New API and Sub2API accounts](user/platform-accounts.md) — One sortable site account with multiple Keys; fetch each Key's models and route in your order.
 
 ## Chapters
 

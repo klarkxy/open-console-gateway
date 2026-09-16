@@ -7922,10 +7922,18 @@ impl Database {
                 config,
             ))
         })?;
+        let linked_ids = {
+            let mut stmt = self.conn.prepare("SELECT account_id FROM platform_links")?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect::<rusqlite::Result<std::collections::HashSet<_>>>()?
+        };
         let mut runtimes = Vec::new();
         for row in rows {
             let (account_id, enabled, verification_status, setup_ready, has_key, mut config) = row?;
-            if let Some(endpoint) = self.platform_endpoint(&account_id, config.upstream_protocol)? {
+            let protocol_passthrough = linked_ids.contains(&account_id);
+            if protocol_passthrough
+                && let Some(endpoint) = self.platform_hosted_endpoint(&account_id)?
+            {
                 config.endpoint_url = endpoint;
             }
             let capabilities = self.list_account_model_capabilities_declared(&account_id)?;
@@ -7937,6 +7945,7 @@ impl Database {
                 has_key,
                 config,
                 capabilities,
+                protocol_passthrough,
             });
         }
         Ok(runtimes)

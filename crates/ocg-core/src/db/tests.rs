@@ -2558,8 +2558,16 @@ fn platform_link_lifecycle_and_refresh_races() {
             .unwrap()
             .unwrap()
             .endpoint_url,
-        "https://new.example/v1/chat/completions"
+        "https://new.example"
     );
+    let linked_runtime = db
+        .list_custom_account_runtimes()
+        .unwrap()
+        .into_iter()
+        .find(|runtime| runtime.account_id == key.id)
+        .expect("linked custom runtime");
+    assert!(linked_runtime.protocol_passthrough);
+    assert_eq!(linked_runtime.config.endpoint_url, "https://new.example");
     assert!(db.delete_platform_account("parent").is_err());
     let old = db.platform_refresh_token("parent", Some(&key.id)).unwrap();
     db.unlink_platform_account(&key.id).unwrap();
@@ -2614,7 +2622,7 @@ fn platform_link_lifecycle_and_refresh_races() {
             .unwrap()
             .unwrap()
             .endpoint_url,
-        "https://new.example/v1/chat/completions"
+        "https://new.example"
     );
     db.link_platform_account(&key.id, "parent", &PlatformGroup::default())
         .unwrap();

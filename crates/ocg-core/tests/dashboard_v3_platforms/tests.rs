@@ -286,7 +286,7 @@ async fn platform_accounts_cas_link_and_v5_secret_free_roundtrip() {
             .unwrap()
             .unwrap()
             .endpoint_url,
-        "https://platform.example/v1/chat/completions"
+        "https://platform.example"
     );
     let (status, _) = send(
         &target,
@@ -592,22 +592,10 @@ async fn same_kind_site_instances_keep_independent_refresh_and_links() {
     link_key(&source, &sub_a_key, &sub_a, "claude").await;
     link_key(&source, &sub_b_key, &sub_b, "openai").await;
     assert_eq!(link_of(&linked, &new_a_key)["platformAccountId"], new_a);
-    assert_eq!(
-        endpoint_of(&source, &new_a_key),
-        format!("{new_a_url}/v1/chat/completions")
-    );
-    assert_eq!(
-        endpoint_of(&source, &new_b_key),
-        format!("{new_b_url}/v1/chat/completions")
-    );
-    assert_eq!(
-        endpoint_of(&source, &sub_a_key),
-        format!("{sub_a_url}/v1/chat/completions")
-    );
-    assert_eq!(
-        endpoint_of(&source, &sub_b_key),
-        format!("{sub_b_url}/v1/chat/completions")
-    );
+    assert_eq!(endpoint_of(&source, &new_a_key), new_a_url.clone());
+    assert_eq!(endpoint_of(&source, &new_b_key), new_b_url.clone());
+    assert_eq!(endpoint_of(&source, &sub_a_key), sub_a_url.clone());
+    assert_eq!(endpoint_of(&source, &sub_b_key), sub_b_url.clone());
 
     let after_a = refresh_parent(&source, &new_a).await;
     assert!(
@@ -699,14 +687,8 @@ async fn same_kind_site_instances_keep_independent_refresh_and_links() {
         snapshot_ids(&parent(&keys, &new_a)["snapshot"], "groups", "id"),
         new_a_groups
     );
-    assert_eq!(
-        endpoint_of(&source, &new_a_key),
-        format!("{new_a_url}/v1/chat/completions")
-    );
-    assert_eq!(
-        endpoint_of(&source, &new_b_key),
-        format!("{new_b_url}/v1/chat/completions")
-    );
+    assert_eq!(endpoint_of(&source, &new_a_key), new_a_url.clone());
+    assert_eq!(endpoint_of(&source, &new_b_key), new_b_url.clone());
 
     let (status, renamed) = send(
         &source,
@@ -778,22 +760,10 @@ async fn same_kind_site_instances_keep_independent_refresh_and_links() {
     assert_eq!(link_of(&loaded, &sub_a_key)["platformAccountId"], sub_a);
     assert_eq!(link_of(&loaded, &sub_b_key)["platformAccountId"], sub_b);
     assert!(link_of(&loaded, &new_b_key)["snapshot"].is_null());
-    assert_eq!(
-        endpoint_of(&target, &new_a_key),
-        format!("{new_a_url}/v1/chat/completions")
-    );
-    assert_eq!(
-        endpoint_of(&target, &new_b_key),
-        format!("{new_b_url}/v1/chat/completions")
-    );
-    assert_eq!(
-        endpoint_of(&target, &sub_a_key),
-        format!("{sub_a_url}/v1/chat/completions")
-    );
-    assert_eq!(
-        endpoint_of(&target, &sub_b_key),
-        format!("{sub_b_url}/v1/chat/completions")
-    );
+    assert_eq!(endpoint_of(&target, &new_a_key), new_a_url.clone());
+    assert_eq!(endpoint_of(&target, &new_b_key), new_b_url.clone());
+    assert_eq!(endpoint_of(&target, &sub_a_key), sub_a_url.clone());
+    assert_eq!(endpoint_of(&target, &sub_b_key), sub_b_url.clone());
 
     let rediscovered = refresh_key(&target, &new_a, &new_a_key).await;
     assert_eq!(
@@ -868,14 +838,8 @@ async fn same_kind_site_instances_keep_independent_refresh_and_links() {
         snapshot_ids(&link_of(&remaining, &sub_a_key)["snapshot"], "models", "id"),
         ["site-sub2-a-model"]
     );
-    assert_eq!(
-        endpoint_of(&source, &new_b_key),
-        format!("{new_b_url}/v1/chat/completions")
-    );
-    assert_eq!(
-        endpoint_of(&source, &new_a_key),
-        format!("{new_a_url}/v1/chat/completions")
-    );
+    assert_eq!(endpoint_of(&source, &new_b_key), new_b_url.clone());
+    assert_eq!(endpoint_of(&source, &new_a_key), new_a_url.clone());
 
     new_a_server.abort();
     new_b_server.abort();
