@@ -1,280 +1,11 @@
 <template>
-  <n-card v-if="sectionVisible" class="platform-section" size="small">
-    <template #header>
-      <span class="platform-section-title">{{ t("平台账号") }}</span>
-      <n-tag v-if="view" size="small" :bordered="false" class="platform-count-tag">
-        {{ view.accounts.length }}
-      </n-tag>
-    </template>
-
-    <div v-if="loading" class="platform-state" role="status" :aria-label="t('加载中…')">
-      <n-spin size="small" />
-    </div>
-    <n-alert
-      v-else-if="loadError"
-      type="error"
-      :title="t('加载平台账号失败: {error}', { error: loadError })"
-    >
-      <n-button size="small" secondary @click="load">{{ t("重试") }}</n-button>
-    </n-alert>
-
-    <n-collapse v-else-if="view" v-model:expanded-names="expanded">
-      <n-collapse-item
-        v-for="parent in view.accounts"
-        :key="parent.id"
-        :name="parent.id"
-      >
-        <template #header>
-          <span class="platform-parent-title">
-            <n-tag size="small" :bordered="false">{{ kindLabel(parent.kind) }}</n-tag>
-            <span class="platform-parent-name">{{ parent.name }}</span>
-            <span class="mono platform-parent-url">{{ parent.baseUrl }}</span>
-            <n-tag v-if="parent.snapshot?.stale" size="small" type="warning" :bordered="false">
-              {{ t("快照已过期") }}
-            </n-tag>
-          </span>
-        </template>
-        <template #header-extra>
-          <n-space size="small" @click.stop>
-            <n-button
-              size="tiny"
-              quaternary
-              :loading="!!refreshing[parent.id]"
-              :disabled="mutating"
-              @click="refreshParent(parent)"
-            >{{ t("刷新") }}</n-button>
-            <n-button size="tiny" quaternary :disabled="mutating" @click="openEdit(parent)">
-              {{ t("编辑") }}
-            </n-button>
-            <n-tooltip v-if="linksFor(parent).length > 0" trigger="hover">
-              <template #trigger>
-                <span>
-                  <n-button size="tiny" quaternary disabled>{{ t("删除") }}</n-button>
-                </span>
-              </template>
-              {{ t("已关联 {count} 个 Key，先取消关联后再删除", { count: linksFor(parent).length }) }}
-            </n-tooltip>
-            <n-button
-              v-else
-              size="tiny"
-              quaternary
-              :disabled="mutating"
-              @click="confirmDelete(parent)"
-            >{{ t("删除") }}</n-button>
-          </n-space>
-        </template>
-
-        <div class="platform-parent-body">
-          <n-alert
-            v-if="parent.snapshot && parent.snapshot.errors.length > 0"
-            type="warning"
-            :show-icon="false"
-            class="platform-block"
-          >
-            {{ t("刷新错误") }}: {{ parent.snapshot.errors.join(", ") }}
-          </n-alert>
-
-          <div v-if="parent.snapshot" class="platform-observed">
-            {{ t("观测时间：{time}", { time: observedText(parent.snapshot) }) }}
-          </div>
-          <div v-else class="platform-observed">
-            {{ t("尚无平台数据，请手动刷新。") }}
-          </div>
-
-          <template v-if="parent.snapshot">
-            <div
-              v-for="kind in PARENT_QUOTA_KINDS"
-              :key="kind"
-              class="platform-block"
-            >
-              <div class="platform-block-title">{{ t(quotaKindKeys[kind] as MessageKey) }}</div>
-              <div v-if="quotasOf(parent.snapshot, kind).length === 0" class="platform-unknown">
-                {{ t("未知") }}
-              </div>
-              <div v-for="(quota, index) in quotasOf(parent.snapshot, kind)" :key="index" class="quota-row">
-                <span class="quota-values">
-                  <template v-if="quota.unlimited">{{ t("不限") }}</template>
-                  <template v-else>
-                    {{ t("已用 {value}", { value: quotaAmount(quota.used, quota.unit) }) }}
-                    · {{ t("剩余 {value}", { value: quotaAmount(quota.remaining, quota.unit) }) }}
-                    · {{ t("限额 {value}", { value: quotaAmount(quota.limit, quota.unit) }) }}
-                  </template>
-                </span>
-                <span class="quota-meta">
-                  <span v-if="quota.scopeId" class="mono">{{ quota.scopeId }}</span>
-                  <span v-if="quota.period">{{ t("周期：{period}", { period: quota.period }) }}</span>
-                  <span v-if="quota.resetsAt">{{ t("重置时间：{time}", { time: timeText(quota.resetsAt) }) }}</span>
-                  <span v-if="quota.expiresAt">{{ t("到期时间：{time}", { time: timeText(quota.expiresAt) }) }}</span>
-                  <span>{{ t("来源：{source}", { source: quota.source }) }}</span>
-                </span>
-              </div>
-            </div>
-
-            <div v-if="parent.snapshot.groups.length > 0" class="platform-block">
-              <div class="platform-block-title">{{ t("分组") }}</div>
-              <n-space size="small" wrap>
-                <n-tag
-                  v-for="(group, index) in parent.snapshot.groups"
-                  :key="index"
-                  size="small"
-                  :bordered="false"
-                >{{ groupLabel(group) || t("无分组") }}</n-tag>
-              </n-space>
-              <div class="platform-hint">{{ t("分组归属不代表该 Key 拥有对应模型的调用权限。") }}</div>
-            </div>
-
-            <PlatformPriceTable :snapshot="parent.snapshot" />
-          </template>
-
-          <div class="platform-block">
-            <div class="platform-children-head">
-              <span class="platform-block-title">
-                {{ t("已关联 Key（{count}）", { count: linksFor(parent).length }) }}
-              </span>
-              <n-space size="small">
-                <n-button
-                  size="tiny"
-                  secondary
-                  :disabled="mutating"
-                  @click="openAddKey(parent)"
-                >{{ t("添加 Key") }}</n-button>
-                <n-button
-                  size="tiny"
-                  secondary
-                  :disabled="mutating"
-                  @click="openLink(parent)"
-                >{{ t("关联已有 Key") }}</n-button>
-              </n-space>
-            </div>
-            <n-alert
-              v-if="pendingLink && pendingLink.parentId === parent.id"
-              type="warning"
-              :show-icon="false"
-              class="platform-block"
-            >
-              <div class="platform-pending-link">
-                <span>{{ t("Key 已创建，关联尚未完成。") }}</span>
-                <n-button
-                  size="tiny"
-                  secondary
-                  :loading="mutating"
-                  :disabled="mutating"
-                  @click="retryPendingLink"
-                >{{ t("重试关联") }}</n-button>
-              </div>
-            </n-alert>
-            <div
-              v-if="linksFor(parent).length === 0 && pendingLink?.parentId !== parent.id"
-              class="platform-hint"
-            >
-              {{ t("可直接添加 Key，或关联本地已有的 Custom API 账号。") }}
-            </div>
-            <div
-              v-for="link in linksFor(parent)"
-              :key="link.accountId"
-              class="platform-child"
-            >
-              <template v-if="accountOf(link.accountId)">
-                <div class="platform-child-head">
-                  <span class="platform-child-name">{{ accountOf(link.accountId)!.name }}</span>
-                  <n-tag v-if="groupLabel(link.group)" size="small" :bordered="false">
-                    {{ groupLabel(link.group) }}
-                  </n-tag>
-                  <n-tag
-                    v-for="autoGroup in link.group.autoGroups"
-                    :key="autoGroup"
-                    size="small"
-                    :bordered="false"
-                    type="info"
-                  >{{ autoGroup }}</n-tag>
-                  <n-space size="small" class="platform-child-actions">
-                    <n-button
-                      size="tiny"
-                      quaternary
-                      :loading="!!refreshing[`${parent.id}:${link.accountId}`]"
-                      :disabled="mutating"
-                      @click="refreshChild(parent, link)"
-                    >{{ t("刷新") }}</n-button>
-                    <n-button
-                      size="tiny"
-                      quaternary
-                      :disabled="mutating"
-                      @click="openImport(accountOf(link.accountId)!, link)"
-                    >{{ t("导入模型") }}</n-button>
-                    <n-button
-                      size="tiny"
-                      quaternary
-                      :disabled="mutating"
-                      @click="confirmUnlink(accountOf(link.accountId)!, link)"
-                    >{{ t("取消关联") }}</n-button>
-                  </n-space>
-                </div>
-                <div class="platform-hint">
-                  {{ t("关联期间 Endpoint 由平台账号托管") }}<template v-if="accountOf(link.accountId)!.custom_config">
-                    ：<span class="mono">{{ accountOf(link.accountId)!.custom_config!.endpoint_url }}</span>
-                  </template>
-                </div>
-                <div v-if="link.snapshot">
-                  <div
-                    v-for="kind in CHILD_QUOTA_KINDS"
-                    :key="kind"
-                  >
-                    <template v-if="kind === 'key_limit' || quotasOf(link.snapshot, kind).length > 0">
-                      <div class="platform-block-title">
-                        {{ t(quotaKindKeys[kind] as MessageKey) }}
-                        <n-tag v-if="kind !== 'key_limit'" size="small" type="info" :bordered="false">
-                          {{ t("经此 Key 观测") }}
-                        </n-tag>
-                      </div>
-                      <div v-if="quotasOf(link.snapshot, kind).length === 0" class="platform-unknown">
-                        {{ t("未知") }}
-                      </div>
-                      <div
-                        v-for="(quota, index) in quotasOf(link.snapshot, kind)"
-                        :key="index"
-                        class="quota-row"
-                      >
-                        <span class="quota-values">
-                          <template v-if="quota.unlimited">{{ t("不限") }}</template>
-                          <template v-else>
-                            {{ t("已用 {value}", { value: quotaAmount(quota.used, quota.unit) }) }}
-                            · {{ t("剩余 {value}", { value: quotaAmount(quota.remaining, quota.unit) }) }}
-                            · {{ t("限额 {value}", { value: quotaAmount(quota.limit, quota.unit) }) }}
-                          </template>
-                        </span>
-                        <span class="quota-meta">
-                          <span v-if="quota.scopeId" class="mono">{{ quota.scopeId }}</span>
-                          <span v-if="quota.period">{{ t("周期：{period}", { period: quota.period }) }}</span>
-                          <span v-if="quota.resetsAt">{{ t("重置时间：{time}", { time: timeText(quota.resetsAt) }) }}</span>
-                          <span v-if="quota.expiresAt">{{ t("到期时间：{time}", { time: timeText(quota.expiresAt) }) }}</span>
-                          <span>{{ t("来源：{source}", { source: quota.source }) }}</span>
-                        </span>
-                      </div>
-                    </template>
-                  </div>
-                  <PlatformPriceTable :snapshot="link.snapshot" />
-                  <div class="platform-observed">
-                    {{ t("观测时间：{time}", { time: observedText(link.snapshot) }) }}
-                    <n-tag v-if="link.snapshot.stale" size="small" type="warning" :bordered="false">
-                      {{ t("快照已过期") }}
-                    </n-tag>
-                  </div>
-                  <n-alert
-                    v-if="link.snapshot.errors.length > 0"
-                    type="warning"
-                    :show-icon="false"
-                  >
-                    {{ t("刷新错误") }}: {{ link.snapshot.errors.join(", ") }}
-                  </n-alert>
-                </div>
-                <div v-else class="platform-hint">{{ t("尚无 Key 快照，请手动刷新。") }}</div>
-              </template>
-            </div>
-          </div>
-        </div>
-      </n-collapse-item>
-    </n-collapse>
-  </n-card>
+  <n-alert
+    v-if="loadError"
+    type="error"
+    :title="t('加载平台账号失败: {error}', { error: loadError })"
+  >
+    <n-button size="small" secondary @click="load">{{ t("重试") }}</n-button>
+  </n-alert>
 
   <PlatformAccountFormModal
     :show="showForm"
@@ -293,25 +24,15 @@
     @submit="onLinkSubmit"
     @add-key="onLinkModalAddKey"
   />
-  <AccountFormModal
-    :show="!!addKeyParent"
-    :account="null"
-    :plan="customApiPlan"
-    :catalog="props.catalog"
+  <PlatformKeyFormModal
+    :show="!!addKeyParent || !!editKeyAccount"
+    :parent-name="keyFormParentName"
+    :title="editKeyAccount ? t('编辑 Key') : t('添加 Key')"
+    :editing="editKeyAccount ? { name: editKeyAccount.name, notes: editKeyAccount.notes } : null"
     :busy="mutating"
-    :platform-parent="addKeyParent ? { name: addKeyParent.name, baseUrl: addKeyParent.baseUrl } : null"
-    :title-override="t('添加 Key')"
     :external-error="addKeyError"
-    @update:show="onAddKeyVisible"
-    @save="onAddKeySave"
-  />
-  <PlatformModelImportModal
-    :show="!!importTarget"
-    :account="importTarget?.account ?? null"
-    :link="importTarget?.link ?? null"
-    :busy="mutating"
-    @update:show="setImportVisible"
-    @submit="onImportSubmit"
+    @update:show="onKeyFormVisible"
+    @save="onKeyFormSave"
   />
 </template>
 
@@ -320,17 +41,10 @@ import { computed, onMounted, ref, watch } from "vue";
 import {
   NAlert,
   NButton,
-  NCard,
-  NCollapse,
-  NCollapseItem,
-  NSpace,
-  NSpin,
-  NTag,
-  NTooltip,
   useDialog,
   useMessage,
 } from "naive-ui";
-import { dashboardApi, DashboardRequestError, type Account, type AccountInput } from "../api/dashboard.ts";
+import { dashboardApi, DashboardRequestError, type Account } from "../api/dashboard.ts";
 import { isRevisionConflict } from "../api/dashboard-v3.ts";
 import {
   platformAccountsApi,
@@ -339,38 +53,24 @@ import {
   type PlatformAccountsView,
   type PlatformKind,
   type PlatformLink,
-  type PlatformQuota,
-  type PlatformQuotaKind,
-  type PlatformSnapshot,
 } from "../api/platform-accounts.ts";
-import type { ProviderCatalogEntry } from "../api/providers.ts";
 import {
-  PLATFORM_KIND_LABELS,
-  PLATFORM_QUOTA_KIND_KEYS,
-  formatPlatformTime,
-  formatQuotaAmount,
-  importCandidateCapabilities,
+  discoveredModelCapabilities,
   linkedAccountIdSet,
-  platformGroupLabel,
-  platformModelCandidates,
-  quotasByKind,
+  platformHostedEndpoint,
+  platformModelOverlay,
 } from "../domain/platform-accounts.ts";
 import { isCustomApiAccount } from "../domain/custom-account.ts";
-import { findPlanDefinition } from "../domain/plans.ts";
-import { locale, t, type MessageKey } from "../i18n/index.ts";
+import { t, type MessageKey } from "../i18n/index.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
-import AccountFormModal, { type AccountFormPayload } from "./AccountFormModal.vue";
 import PlatformAccountFormModal, {
   type PlatformAccountFormPayload,
 } from "./PlatformAccountFormModal.vue";
+import PlatformKeyFormModal, { type PlatformKeyFormPayload } from "./PlatformKeyFormModal.vue";
 import PlatformLinkModal from "./PlatformLinkModal.vue";
-import PlatformModelImportModal from "./PlatformModelImportModal.vue";
-import PlatformPriceTable from "./PlatformPriceTable.vue";
 
 const props = defineProps<{
   accounts: Account[];
-  /** Provider catalog; the embedded Custom Key form resolves its fields from it. */
-  catalog: readonly ProviderCatalogEntry[] | null;
 }>();
 
 const emit = defineEmits<{
@@ -379,13 +79,8 @@ const emit = defineEmits<{
   /** A capabilities import returned the updated account; replace it in place. */
   accountUpdated: [account: Account];
   /** Latest link set plus parent names, for the parent-owned-endpoint lock. */
-  linksChange: [links: PlatformLink[], parents: { id: string; name: string }[]];
+  linksChange: [links: PlatformLink[], parents: PlatformAccount[]];
 }>();
-
-const PARENT_QUOTA_KINDS: readonly PlatformQuotaKind[] = ["wallet", "subscription"];
-// Key-authenticated observations (source sub2api.v1.usage) stay on that Key:
-// manual association cannot prove shared wallet ownership.
-const CHILD_QUOTA_KINDS: readonly PlatformQuotaKind[] = ["wallet", "subscription", "key_limit"];
 
 const dialog = useDialog();
 const message = useMessage();
@@ -393,7 +88,6 @@ const message = useMessage();
 const view = ref<PlatformAccountsView | null>(null);
 const loading = ref(true);
 const loadError = ref("");
-const expanded = ref<string[]>([]);
 const mutating = ref(false);
 const refreshing = ref<Record<string, boolean>>({});
 
@@ -413,25 +107,14 @@ const linkParent = ref<PlatformAccount | null>(null);
 const addKeyParent = ref<PlatformAccount | null>(null);
 const addKeyError = ref("");
 const pendingLink = ref<{ accountId: string; parentId: string } | null>(null);
+const editKeyAccount = ref<Account | null>(null);
 
-const customApiPlan = computed(() => (
-  findPlanDefinition("custom", props.catalog) ?? null
-));
-
-const importTarget = ref<{ account: Account; link: PlatformLink } | null>(null);
-
-const quotaKindKeys = PLATFORM_QUOTA_KIND_KEYS;
-
-// The card hides once a successful load reports zero platform accounts;
-// creation lives in the Add Account chooser (createPlatform), and the form
-// modal below stays mounted outside the card so edits keep working. Loading
-// and error/retry states remain visible.
-const sectionVisible = computed(() => (
-  loading.value
-  || Boolean(loadError.value)
-  || !view.value
-  || view.value.accounts.length > 0
-));
+const keyFormParentName = computed(() => {
+  if (addKeyParent.value) return addKeyParent.value.name;
+  if (!editKeyAccount.value) return "";
+  const link = (view.value?.links ?? []).find((item) => item.accountId === editKeyAccount.value!.id);
+  return (view.value?.accounts ?? []).find((parent) => parent.id === link?.platformAccountId)?.name ?? "";
+});
 
 const linkCandidates = computed(() => {
   const linked = linkedAccountIdSet(view.value?.links ?? []);
@@ -442,7 +125,7 @@ watch(() => view.value?.links, (links) => {
   emit(
     "linksChange",
     links ?? [],
-    (view.value?.accounts ?? []).map((parent) => ({ id: parent.id, name: parent.name })),
+    view.value?.accounts ?? [],
   );
   // A reloaded view that already contains the pending account's link settles
   // the retry state without another write.
@@ -451,36 +134,8 @@ watch(() => view.value?.links, (links) => {
   }
 });
 
-function kindLabel(kind: PlatformKind): string {
-  return PLATFORM_KIND_LABELS[kind];
-}
-
-function groupLabel(group: PlatformLink["group"]): string {
-  return platformGroupLabel(group);
-}
-
 function linksFor(parent: PlatformAccount): PlatformLink[] {
   return (view.value?.links ?? []).filter((link) => link.platformAccountId === parent.id);
-}
-
-function accountOf(accountId: string): Account | undefined {
-  return props.accounts.find((account) => account.id === accountId);
-}
-
-function quotasOf(snapshot: PlatformSnapshot, kind: PlatformQuotaKind): PlatformQuota[] {
-  return quotasByKind(snapshot.quotas)[kind];
-}
-
-function quotaAmount(value: number | null, unit: string): string {
-  return value === null ? t("未知") : formatQuotaAmount(value, unit, locale.value);
-}
-
-function timeText(epochSeconds: number): string {
-  return formatPlatformTime(epochSeconds, locale.value) || t("未知");
-}
-
-function observedText(snapshot: PlatformSnapshot): string {
-  return timeText(snapshot.observedAt);
 }
 
 // Overlapping loads resolve out of order; only the latest operation commits
@@ -569,7 +224,6 @@ async function persistPlatform(
   if (mutating.value) return "error";
   mutating.value = true;
   try {
-    const knownIds = new Set((view.value?.accounts ?? []).map((parent) => parent.id));
     acceptView(editing
       ? await platformAccountsApi.update(editing.id, {
         name: payload.name,
@@ -581,14 +235,6 @@ async function persistPlatform(
         baseUrl: payload.baseUrl,
         ...(payload.userCredential !== undefined ? { userCredential: payload.userCredential } : {}),
       }));
-    if (!editing) {
-      // Expand the freshly created card so the Add Key action is immediately
-      // visible as the obvious next step.
-      const created = (view.value?.accounts ?? []).find((parent) => !knownIds.has(parent.id));
-      if (created && !expanded.value.includes(created.id)) {
-        expanded.value = [...expanded.value, created.id];
-      }
-    }
     message.success(editing ? t("平台账号已更新") : t("平台账号已创建"));
     return "saved";
   } catch (error) {
@@ -676,15 +322,16 @@ function openLink(parent: PlatformAccount): void {
 
 function openAddKey(parent: PlatformAccount): void {
   if (mutating.value) return;
-  if (!props.catalog) {
-    // The Custom Key form resolves its fields from the catalog; without it
-    // the form would fail closed, so block with a clear error instead of
-    // opening a guessed or degraded form.
-    message.error(t("服务商目录加载失败"));
-    return;
-  }
   addKeyError.value = "";
+  editKeyAccount.value = null;
   addKeyParent.value = parent;
+}
+
+function openEditKey(account: Account): void {
+  if (mutating.value) return;
+  addKeyError.value = "";
+  addKeyParent.value = null;
+  editKeyAccount.value = account;
 }
 
 function onLinkModalAddKey(): void {
@@ -693,11 +340,11 @@ function onLinkModalAddKey(): void {
   if (parent) openAddKey(parent);
 }
 
-function onAddKeyVisible(show: boolean): void {
-  // In-flight create/link keeps the modal open and the parent instance fixed.
+function onKeyFormVisible(show: boolean): void {
   if (!show && mutating.value) return;
   if (!show) {
     addKeyParent.value = null;
+    editKeyAccount.value = null;
     addKeyError.value = "";
   }
 }
@@ -711,17 +358,70 @@ function onAddKeyVisible(show: boolean): void {
  * account-list reconciliation before any further attempt: no repeat create
  * can be triggered from the uncertain attempt.
  */
-async function onAddKeySave(payload: AccountInput | AccountFormPayload): Promise<void> {
-  const parent = addKeyParent.value;
-  if (!parent || mutating.value) return;
+async function onKeyFormSave(payload: PlatformKeyFormPayload): Promise<void> {
+  if (editKeyAccount.value) {
+    await saveEditedKey(editKeyAccount.value, payload);
+    return;
+  }
+  await createAndLinkKey(payload);
+}
+
+async function saveEditedKey(account: Account, payload: PlatformKeyFormPayload): Promise<void> {
+  if (mutating.value) return;
   mutating.value = true;
   addKeyError.value = "";
   try {
-    const created = await dashboardApi.createAccount({
-      ...(payload as AccountInput),
-      key: payload.key || "",
+    const updated = await dashboardApi.updateAccount(account.id, {
+      name: payload.name,
+      notes: payload.notes,
+      ...(payload.key ? { key: payload.key } : {}),
     });
-    // Known create success: retain the returned id before ANY link attempt.
+    emit("accountUpdated", updated);
+    editKeyAccount.value = null;
+    message.success(t("已保存"));
+  } catch (error) {
+    if (isRevisionConflict(error)) {
+      await recoverConflict();
+      editKeyAccount.value = null;
+      return;
+    }
+    addKeyError.value = dashboardErrorDetail(error);
+  } finally {
+    mutating.value = false;
+  }
+}
+
+async function createAndLinkKey(payload: PlatformKeyFormPayload): Promise<void> {
+  const parent = addKeyParent.value;
+  if (!parent || mutating.value) return;
+  const hosted = platformHostedEndpoint(parent.baseUrl);
+  if (!hosted) {
+    addKeyError.value = t("平台地址无效");
+    return;
+  }
+  mutating.value = true;
+  addKeyError.value = "";
+  try {
+    const discovery = await dashboardApi.discoverCustomModels({
+      endpoint_url: hosted,
+      upstream_protocol: "chat_completions",
+      api_key: payload.key,
+    });
+    if (discovery.models.length === 0) {
+      addKeyError.value = t("该 Key 没有返回可用模型，请确认 Key 与站点地址后重试。");
+      return;
+    }
+    const created = await dashboardApi.createAccount({
+      name: payload.name,
+      key: payload.key,
+      notes: payload.notes,
+      provider_id: "custom",
+      custom_config: {
+        endpoint_url: hosted,
+        upstream_protocol: "chat_completions",
+      },
+      model_capabilities: discoveredModelCapabilities(discovery.models),
+    });
     pendingLink.value = { accountId: created.id, parentId: parent.id };
     addKeyParent.value = null;
     try {
@@ -731,18 +431,20 @@ async function onAddKeySave(payload: AccountInput | AccountFormPayload): Promise
         platformGroupWrite({ id: null, platform: null }),
       ));
       pendingLink.value = null;
-      message.success(t("Key 已创建并关联"));
+      message.success(overlayImportMessage(created, discovery.truncated));
       emit("changed");
+      try {
+        acceptView(await platformAccountsApi.refresh(parent.id, created.id));
+      } catch {
+        // Observation is optional; the Key is already routable.
+      }
     } catch (linkError) {
       if (isRevisionConflict(linkError)) {
-        // Tokens refresh and the view reloads; the link watch settles the
-        // pending id if the association actually landed. It is never lost.
         await recoverConflict();
         if (pendingLink.value) message.warning(t("Key 已创建，关联尚未完成。"));
         return;
       }
       message.warning(t("Key 已创建，关联尚未完成。"));
-      // Refresh the account list so the created standalone Key is visible.
       emit("changed");
     }
   } catch (createError) {
@@ -754,13 +456,9 @@ async function onAddKeySave(payload: AccountInput | AccountFormPayload): Promise
     if (createError instanceof DashboardRequestError
       && createError.status >= 400
       && createError.status < 500) {
-      // A definite rejection: safe to fix the draft and resubmit.
       addKeyError.value = dashboardErrorDetail(createError);
       return;
     }
-    // Ambiguous outcome: the account may exist. Block any repeat create by
-    // closing the form; reconciliation (account-list reload) is the only
-    // continuation offered.
     addKeyParent.value = null;
     dialog.warning({
       title: t("创建结果未知"),
@@ -774,6 +472,73 @@ async function onAddKeySave(payload: AccountInput | AccountFormPayload): Promise
     });
   } finally {
     mutating.value = false;
+  }
+}
+
+async function fetchModels(account: Account): Promise<void> {
+  if (mutating.value) return;
+  const hosted = account.custom_config?.endpoint_url
+    ? platformHostedEndpoint(account.custom_config.endpoint_url) ?? account.custom_config.endpoint_url
+    : "";
+  if (!hosted) {
+    message.error(t("平台地址无效"));
+    return;
+  }
+  mutating.value = true;
+  try {
+    const discovery = await dashboardApi.discoverCustomModels({
+      endpoint_url: hosted,
+      upstream_protocol: account.custom_config?.upstream_protocol ?? "chat_completions",
+      account_id: account.id,
+    });
+    if (discovery.models.length === 0) {
+      message.warning(t("该 Key 没有返回可用模型，请确认 Key 与站点地址后重试。"));
+      return;
+    }
+    const updated = await dashboardApi.updateAccountModelCapabilities(
+      account.id,
+      discoveredModelCapabilities(discovery.models, account.custom_config?.upstream_protocol ?? "chat_completions"),
+    );
+    emit("accountUpdated", updated);
+    message.success(overlayImportMessage(updated, discovery.truncated));
+  } catch (error) {
+    if (isRevisionConflict(error)) await recoverConflict();
+    else mutationError(error, "操作失败: {error}");
+  } finally {
+    mutating.value = false;
+  }
+}
+
+function overlayImportMessage(account: Account, truncated: boolean): string {
+  const imported = truncated
+    ? t("已导入 {count} 个模型（列表被截断）", { count: account.model_capabilities.length })
+    : t("已导入 {count} 个模型", { count: account.model_capabilities.length });
+  const siblings = siblingKeys(account.id).map((item) => (item.id === account.id ? account : item));
+  const overlay = platformModelOverlay(siblings);
+  const summary = overlay.keys.find((row) => row.accountId === account.id);
+  if (!summary || overlay.keys.length < 2 || summary.shared === 0) {
+    return imported;
+  }
+  return t("{imported}；其中 {shared} 个与其他 Key 相同，按 Key 顺序叠加路由，不合并倍率。", {
+    imported,
+    shared: summary.shared,
+  });
+}
+
+function siblingKeys(accountId: string): Account[] {
+  const parentId = (view.value?.links ?? []).find((link) => link.accountId === accountId)?.platformAccountId;
+  if (!parentId) return [props.accounts.find((account) => account.id === accountId)].filter(Boolean) as Account[];
+  const ids = new Set(
+    (view.value?.links ?? [])
+      .filter((link) => link.platformAccountId === parentId)
+      .map((link) => link.accountId),
+  );
+  return props.accounts.filter((account) => ids.has(account.id));
+}
+
+async function fetchModelsAll(accounts: Account[]): Promise<void> {
+  for (const account of accounts) {
+    await fetchModels(account);
   }
 }
 
@@ -852,173 +617,27 @@ async function unlink(accountId: string): Promise<void> {
   }
 }
 
-function openImport(account: Account, link: PlatformLink): void {
-  importTarget.value = { account, link };
-}
-
-function setImportVisible(show: boolean): void {
-  if (!show) importTarget.value = null;
-}
-
-async function onImportSubmit(modelIds: string[]): Promise<void> {
-  const target = importTarget.value;
-  const protocol = target?.account.custom_config?.upstream_protocol;
-  if (!target || !protocol || mutating.value) return;
-  const selected = platformModelCandidates(target.link.snapshot, target.account.model_capabilities)
-    .filter((candidate) => modelIds.includes(candidate.id) && !candidate.alreadyMapped);
-  if (selected.length === 0) return;
-  mutating.value = true;
-  try {
-    // Explicit confirmation writes through the existing account-capabilities
-    // HTTP route only; refreshing prices never adds models on its own.
-    const updated = await dashboardApi.updateAccountModelCapabilities(target.account.id, [
-      ...target.account.model_capabilities.map((capability) => ({
-        public_model: capability.public_model,
-        upstream_model: capability.upstream_model,
-        protocol: capability.protocol,
-        source: capability.source,
-      })),
-      ...importCandidateCapabilities(selected, protocol),
-    ]);
-    emit("accountUpdated", updated);
-    importTarget.value = null;
-    message.success(t("导入完成：新增 {count} 个模型映射", { count: selected.length }));
-  } catch (error) {
-    if (isRevisionConflict(error)) {
-      importTarget.value = null;
-      await recoverConflict();
-    } else {
-      mutationError(error, "操作失败: {error}");
-    }
-  } finally {
-    mutating.value = false;
-  }
-}
-
 onMounted(load);
 
-defineExpose({ reload: load, openCreate, createPlatform, mutating });
+defineExpose({
+  reload: load,
+  openCreate,
+  createPlatform,
+  mutating,
+  view,
+  pendingLink,
+  refreshing,
+  openAddKey,
+  openEditKey,
+  fetchModels,
+  fetchModelsAll,
+  linksFor,
+  refreshParent,
+  refreshChild,
+  confirmDelete,
+  openEdit,
+  openLink,
+  retryPendingLink,
+  confirmUnlink,
+});
 </script>
-
-<style scoped>
-.platform-section-title {
-  font-size: var(--ocg-font-lg);
-  font-weight: 600;
-}
-
-.platform-count-tag {
-  margin-left: 8px;
-}
-
-.platform-state {
-  min-height: 80px;
-  display: grid;
-  place-items: center;
-}
-
-.platform-parent-title {
-  display: inline-flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-
-.platform-parent-name {
-  font-weight: 600;
-}
-
-.platform-parent-url {
-  font-size: var(--ocg-font-xs);
-  color: var(--ocg-subtle);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 40ch;
-}
-
-.platform-parent-body {
-  display: grid;
-  gap: 12px;
-}
-
-.platform-block {
-  display: grid;
-  gap: 6px;
-}
-
-.platform-block-title {
-  font-size: var(--ocg-font-xs);
-  font-weight: 600;
-  color: var(--ocg-muted);
-}
-
-.platform-observed,
-.platform-hint {
-  font-size: var(--ocg-font-xs);
-  color: var(--ocg-subtle);
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
-.platform-unknown {
-  font-size: var(--ocg-font-sm);
-  color: var(--ocg-subtle);
-}
-
-.quota-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 4px 12px;
-  font-size: var(--ocg-font-sm);
-}
-
-.quota-meta {
-  display: inline-flex;
-  flex-wrap: wrap;
-  gap: 4px 10px;
-  font-size: var(--ocg-font-xs);
-  color: var(--ocg-subtle);
-}
-
-.platform-children-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.platform-pending-link {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.platform-child {
-  display: grid;
-  gap: 6px;
-  padding: 8px;
-  border: 1px solid var(--ocg-border);
-  border-radius: 10px;
-}
-
-.platform-child-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-}
-
-.platform-child-name {
-  font-weight: 600;
-}
-
-.platform-child-actions {
-  margin-left: auto;
-}
-</style>

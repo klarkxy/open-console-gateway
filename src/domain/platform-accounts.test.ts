@@ -1,23 +1,42 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { PlatformLink, PlatformPrice, PlatformSnapshot } from "../api/platform-accounts.ts";
+import type { Account } from "../api/dashboard.ts";
+import type { PlatformAccount, PlatformLink, PlatformPrice, PlatformSnapshot } from "../api/platform-accounts.ts";
 import {
+  buildAccountRouteItems,
+  discoveredModelCapabilities,
+  expandAccountRouteOrder,
+  platformKeyGroupLabel,
+  platformKeyQuotaName,
+  platformModelOverlay,
   formatPlatformRate,
   formatPlatformTime,
   formatQuotaAmount,
+  primaryQuota,
   importCandidateCapabilities,
   linkForAccount,
   linkedAccountIdSet,
+  moveKeyWithinPlatform,
   platformGroupLabel,
+  platformHostedEndpoint,
   platformInferenceEndpoint,
   platformModelCandidates,
   platformManualGroup,
   platformPriceFlags,
   platformPriceForModel,
   platformPriceRows,
+  platformRouteItemId,
   platformUnavailableReasonKey,
   quotasByKind,
 } from "./platform-accounts.ts";
+
+test("platform hosted endpoint is the site root", () => {
+  assert.equal(platformHostedEndpoint("https://newapi.example.com"), "https://newapi.example.com");
+  assert.equal(platformHostedEndpoint("https://newapi.example.com/v1"), "https://newapi.example.com");
+  assert.equal(platformHostedEndpoint("https://newapi.example.com/"), "https://newapi.example.com");
+  assert.equal(platformHostedEndpoint("not a url"), null);
+  assert.equal(platformHostedEndpoint("https://user:pass@example.com"), null);
+});
 
 test("platform inference endpoint mirrors the backend derivation per protocol", () => {
   assert.equal(
@@ -89,6 +108,128 @@ function link(accountId: string, platformAccountId: string): PlatformLink {
   };
 }
 
+function account(id: string): Account {
+  return { id } as Account;
+}
+
+function parent(id: string, name = id): PlatformAccount {
+  return {
+    id,
+    kind: "new_api",
+    name,
+    baseUrl: `https://${id}.example`,
+    hasUserCredential: false,
+    version: 1,
+    snapshot: null,
+  };
+}
+
+test("linked Keys fold into one sortable platform row", () => {
+  const items = buildAccountRouteItems(
+    [account("minimax"), account("k1"), account("k2"), account("kimi")],
+    [parent("site")],
+    [link("k1", "site"), link("k2", "site")],
+  );
+  assert.deepEqual(items.map((item) => item.id), ["minimax", platformRouteItemId("site"), "kimi"]);
+  assert.equal(items[1]?.type, "platform");
+  if (items[1]?.type === "platform") {
+    assert.deepEqual(items[1].keys.map((key) => key.id), ["k1", "k2"]);
+  }
+  assert.deepEqual(expandAccountRouteOrder(items), ["minimax", "k1", "k2", "kimi"]);
+});
+
+test("empty platform instances append after Key-bearing rows", () => {
+  const items = buildAccountRouteItems(
+    [account("go")],
+    [parent("empty")],
+    [],
+  );
+  assert.equal(items[0]?.type, "account");
+  assert.equal(items[1]?.type, "platform");
+  if (items[1]?.type === "platform") assert.deepEqual(items[1].keys, []);
+});
+
+test("moving a Key inside a platform keeps the surrounding order", () => {
+  assert.deepEqual(
+    moveKeyWithinPlatform(["go", "k1", "k2", "kimi"], ["k1", "k2"], "k2", -1),
+    ["go", "k2", "k1", "kimi"],
+  );
+  assert.equal(moveKeyWithinPlatform(["go", "k1", "k2"], ["k1", "k2"], "k1", -1), null);
+});
+
+test("same public models on two Keys overlay without merging rates", () => {
+  const overlay = platformModelOverlay([
+    {
+      id: "stable",
+      model_capabilities: [
+        { public_model: "gpt-5.5", upstream_model: "gpt-5.5", protocol: "chat_completions", source: "discovery", verified_at: null },
+        { public_model: "gpt-6-astra", upstream_model: "gpt-6-astra", protocol: "chat_completions", source: "discovery", verified_at: null },
+      ],
+    } as Account,
+    {
+      id: "pro",
+      model_capabilities: [
+        { public_model: "GPT-5.5", upstream_model: "GPT-5.5", protocol: "chat_completions", source: "discovery", verified_at: null },
+        { public_model: "gpt-5.3-codex-spark", upstream_model: "gpt-5.3-codex-spark", protocol: "chat_completions", source: "discovery", verified_at: null },
+      ],
+    } as Account,
+  ]);
+  assert.equal(overlay.uniqueIds.length, 3);
+  assert.deepEqual(overlay.sharedIds, ["gpt-5.5"]);
+  assert.deepEqual(overlay.keys.find((row) => row.accountId === "stable"), {
+    accountId: "stable",
+    total: 2,
+    shared: 1,
+    exclusive: 1,
+  });
+  assert.deepEqual(overlay.keys.find((row) => row.accountId === "pro"), {
+    accountId: "pro",
+    total: 2,
+    shared: 1,
+    exclusive: 1,
+  });
+});
+
+test("key identity uses observed token name and group", () => {
+  assert.equal(platformKeyQuotaName({
+    observedAt: 1,
+    stale: false,
+    errors: [],
+    quotas: [{
+      kind: "key_limit",
+      scopeId: "cli-pro",
+      unit: "quota",
+      used: 1,
+      remaining: 2,
+      limit: 3,
+      unlimited: false,
+      period: null,
+      resetsAt: null,
+      expiresAt: null,
+      source: "new_api.token_usage",
+    }],
+    models: [],
+    prices: [],
+    groups: [{ id: "Codex-Pro", platform: null, subscriptionType: null, autoGroups: [], verified: true }],
+    billingPreference: null,
+    walletOverflow: null,
+  }), "cli-pro");
+  assert.equal(
+    platformKeyGroupLabel(
+      { group: { id: null, platform: null, subscriptionType: null, autoGroups: [], verified: false } },
+      { observedAt: 1, stale: false, errors: [], quotas: [], models: [], prices: [], groups: [{ id: "Codex稳定", platform: null, subscriptionType: null, autoGroups: [], verified: true }], billingPreference: null, walletOverflow: null },
+    ),
+    "Codex稳定",
+  );
+});
+
+test("discovered models become exact public=upstream mappings", () => {
+  assert.deepEqual(discoveredModelCapabilities(["claude-sonnet", "gpt-4o"]), [
+    { public_model: "claude-sonnet", upstream_model: "claude-sonnet", protocol: "chat_completions", source: "discovery" },
+    { public_model: "gpt-4o", upstream_model: "gpt-4o", protocol: "chat_completions", source: "discovery" },
+  ]);
+});
+
 test("links resolve by account and collect linked ids", () => {
   const links = [link("a1", "p1"), link("a2", "p1"), link("a3", "p2")];
   assert.equal(linkForAccount(links, "a3")?.platformAccountId, "p2");
@@ -126,8 +267,21 @@ test("manual group entry trims and treats empty as unknown", () => {
 });
 
 test("quota amounts carry their unit and never invent totals", () => {
-  assert.equal(formatQuotaAmount(12.3456, "USD", "en-US"), "12.35 USD");
+  assert.equal(formatQuotaAmount(12.3456, "USD", "en-US"), "$12.3456");
+  assert.equal(formatQuotaAmount(3, "usd", "en-US"), "$3.00");
   assert.equal(formatQuotaAmount(100, "", "en-US"), "100");
+  assert.equal(formatQuotaAmount(1.5, "quota", "en-US"), "1.5 quota");
+});
+
+test("primary remaining prefers the overall Key quota over a time window", () => {
+  const quotas = [
+    { kind: "key_limit" as const, remaining: 16, used: 4, limit: 20, unit: "usd", scopeId: "key:5h", unlimited: false, period: "5h", resetsAt: 1, expiresAt: null, source: "key" },
+    { kind: "key_limit" as const, remaining: 27.5, used: 12.5, limit: 40, unit: "usd", scopeId: "key", unlimited: false, period: null, resetsAt: null, expiresAt: null, source: "key" },
+    { kind: "wallet" as const, remaining: 15.5, used: null, limit: null, unit: "usd", scopeId: "wallet", unlimited: false, period: null, resetsAt: null, expiresAt: null, source: "profile" },
+  ];
+  assert.equal(primaryQuota(quotas, "key_limit")?.remaining, 27.5);
+  assert.equal(primaryQuota(quotas, "wallet")?.remaining, 15.5);
+  assert.equal(primaryQuota([], "wallet"), null);
 });
 
 test("o03 wallet subscription and key limits stay separate and are never summed", () => {

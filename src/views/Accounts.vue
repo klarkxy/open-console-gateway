@@ -92,14 +92,13 @@
       <PlatformAccountsSection
         ref="platformSectionRef"
         :accounts="accounts"
-        :catalog="providerCatalog"
         @changed="loadAccounts"
         @account-updated="replaceAccount"
         @links-change="onPlatformLinksChange"
       />
 
       <n-empty
-        v-if="!accountListLoading && !accountListError && displayedAccounts.length === 0"
+        v-if="!accountListLoading && !accountListError && displayedRouteItems.length === 0"
         :description="t('暂无账号')"
       >
         <template #extra>
@@ -115,42 +114,69 @@
         </template>
       </n-empty>
 
-      <div v-if="!accountListLoading && !accountListError && displayedAccounts.length > 0" class="account-list">
-        <AccountCard
-          v-for="account in displayedAccounts"
-          :key="account.id"
-          :account="account"
-          :identity="identityForCard(account.id)"
-          :catalog="providerCatalog"
-          :usage="getUsage(account.id)"
-          :provider-usage="providerUsageMap[account.id] ?? null"
-          :limits="usageLimitsFor(account)"
-          :edits="usageEdits[account.id]"
-          :now="now"
-          :order-handle-disabled="orderSaving || busy || accounts.length < 2"
-          :dragging="draggingAccountId === account.id"
-          :usage-loading="!!usageLoading[account.id]"
-          :usage-load-error="usageLoadErrors[account.id] ?? null"
-          :usage-refresh-loading="!!usageRefreshLoading[account.id]"
-          :purchase-date-saving="busy || !!purchaseDateSaving[account.id]"
-          :quota-limits-failed="!!quotaLimitsError"
-          :menu-options="cardMenuOptions(account)"
-          :account-names="accountNamesById"
-          @order-keydown="handleOrderKeydown($event, account.id)"
-          @order-drag-start="startAccountDrag($event, account.id)"
-          @toggle="toggleAccount(account.id)"
-          @test-connection="openAccountTest(account.id)"
-          @refresh-usage="refreshAccountUsage(account.id)"
-          @update-purchase-date="updatePurchaseDate(account.id, $event)"
-          @reload-usage="loadAccountUsage(account.id)"
-          @open-wizard="openManagedWizard(account.id)"
-          @menu-select="handleMenuSelect($event, account.id)"
-          @usage-editor-open="focusUsageEditor(account.id)"
-          @usage-update-draft="(key, value) => updateUsageDraft(account.id, key, value)"
-          @usage-update-resets-first="(key, value) => updateResetsFirstField(account.id, key, value)"
-          @usage-update-resets-second="(key, value) => updateResetsSecondField(account.id, key, value)"
-          @usage-save="(key) => saveUsage(account.id, key)"
-        />
+      <div v-if="!accountListLoading && !accountListError && displayedRouteItems.length > 0" class="account-list">
+        <template v-for="item in displayedRouteItems" :key="item.id">
+          <PlatformAccountCard
+            v-if="item.type === 'platform'"
+            :parent="item.parent"
+            :keys="item.keys"
+            :links="platformLinks.filter((link) => link.platformAccountId === item.parent.id)"
+            :mutating="platformMutating || busy"
+            :refreshing="platformRefreshing"
+            :pending-link="platformPendingLink"
+            :order-handle-disabled="orderSaving || busy || sortableRouteCount < 2 || item.keys.length === 0"
+            :dragging="draggingAccountId === item.id"
+            @order-keydown="handleOrderKeydown($event, item.id)"
+            @order-drag-start="startAccountDrag($event, item.id)"
+            @refresh-parent="platformSectionRef?.refreshParent(item.parent)"
+            @edit="platformSectionRef?.openEdit(item.parent)"
+            @delete="platformSectionRef?.confirmDelete(item.parent)"
+            @add-key="platformSectionRef?.openAddKey(item.parent)"
+            @link-existing="platformSectionRef?.openLink(item.parent)"
+            @retry-pending-link="platformSectionRef?.retryPendingLink()"
+            @toggle-key="toggleAccount"
+            @move-key="movePlatformKey"
+            @refresh-child="refreshPlatformChild(item.parent, $event)"
+            @fetch-models="fetchPlatformModels"
+            @fetch-all-models="fetchAllPlatformModels(item.keys)"
+            @edit-key="editPlatformKey"
+            @unlink="unlinkPlatformKey"
+          />
+          <AccountCard
+            v-else
+            :account="item.account"
+            :identity="identityForCard(item.account.id)"
+            :catalog="providerCatalog"
+            :usage="getUsage(item.account.id)"
+            :provider-usage="providerUsageMap[item.account.id] ?? null"
+            :limits="usageLimitsFor(item.account)"
+            :edits="usageEdits[item.account.id]"
+            :now="now"
+            :order-handle-disabled="orderSaving || busy || sortableRouteCount < 2"
+            :dragging="draggingAccountId === item.account.id"
+            :usage-loading="!!usageLoading[item.account.id]"
+            :usage-load-error="usageLoadErrors[item.account.id] ?? null"
+            :usage-refresh-loading="!!usageRefreshLoading[item.account.id]"
+            :purchase-date-saving="busy || !!purchaseDateSaving[item.account.id]"
+            :quota-limits-failed="!!quotaLimitsError"
+            :menu-options="cardMenuOptions(item.account)"
+            :account-names="accountNamesById"
+            @order-keydown="handleOrderKeydown($event, item.account.id)"
+            @order-drag-start="startAccountDrag($event, item.account.id)"
+            @toggle="toggleAccount(item.account.id)"
+            @test-connection="openAccountTest(item.account.id)"
+            @refresh-usage="refreshAccountUsage(item.account.id)"
+            @update-purchase-date="updatePurchaseDate(item.account.id, $event)"
+            @reload-usage="loadAccountUsage(item.account.id)"
+            @open-wizard="openManagedWizard(item.account.id)"
+            @menu-select="handleMenuSelect($event, item.account.id)"
+            @usage-editor-open="focusUsageEditor(item.account.id)"
+            @usage-update-draft="(key, value) => updateUsageDraft(item.account.id, key, value)"
+            @usage-update-resets-first="(key, value) => updateResetsFirstField(item.account.id, key, value)"
+            @usage-update-resets-second="(key, value) => updateResetsSecondField(item.account.id, key, value)"
+            @usage-save="(key) => saveUsage(item.account.id, key)"
+          />
+        </template>
       </div>
 
       <span class="sr-only" aria-live="polite" aria-atomic="true">{{ orderAnnouncement }}</span>
@@ -352,8 +378,13 @@ import {
   executeCustomAccountEdit,
   isCustomApiAccount,
 } from "../domain/custom-account.ts";
-import { linkForAccount } from "../domain/platform-accounts.ts";
-import type { PlatformLink } from "../api/platform-accounts.ts";
+import {
+  buildAccountRouteItems,
+  linkForAccount,
+  moveKeyWithinPlatform,
+} from "../domain/platform-accounts.ts";
+import type { PlatformAccount, PlatformLink } from "../api/platform-accounts.ts";
+import PlatformAccountCard from "../components/PlatformAccountCard.vue";
 import { useAccountUsage } from "../domain/useAccountUsage.ts";
 import { useAccountOrder } from "./useAccountOrder.ts";
 import {
@@ -449,7 +480,7 @@ const now = ref(Date.now());
 const planFilter = ref<AccountPlanFilter>("all");
 const platformSectionRef = ref<InstanceType<typeof PlatformAccountsSection> | null>(null);
 const platformLinks = ref<PlatformLink[]>([]);
-const platformParents = ref<{ id: string; name: string }[]>([]);
+const platformParents = ref<PlatformAccount[]>([]);
 const editingPlatformLink = computed(() => (
   editingAccount.value ? linkForAccount(platformLinks.value, editingAccount.value.id) : null
 ));
@@ -491,17 +522,23 @@ const {
   retryQuotaLimits,
 } = useAccountUsage(accounts, now, providerCatalog);
 
+const allRouteItems = computed(() => (
+  buildAccountRouteItems(accounts.value, platformParents.value, platformLinks.value)
+));
+
 const {
   orderSaving,
   draggingAccountId,
   orderAnnouncement,
   startAccountDrag,
   handleOrderKeydown,
+  persistExplicitOrder,
   revertActiveDrag,
 } = useAccountOrder({
   accounts,
   busy,
   reloadAfterRevisionConflict: reloadAfterControlPlaneConflict,
+  routeItems: allRouteItems,
 });
 
 const managedWizardAccount = computed(() => (
@@ -542,9 +579,24 @@ const canCreateManagedDraft = computed(() => (
   && !managedInvitePreview.value.status
 ));
 
-const displayedAccounts = computed(() => (
-  filterAccounts(accounts.value, planFilter.value, statusFilter.value, now.value)
+const displayedRouteItems = computed(() => {
+  const visibleIds = new Set(
+    filterAccounts(accounts.value, planFilter.value, statusFilter.value, now.value).map((account) => account.id),
+  );
+  return allRouteItems.value.filter((item) => {
+    if (item.type === "account") return visibleIds.has(item.account.id);
+    if (item.keys.length === 0) return planFilter.value === "all" && statusFilter.value === "all";
+    if (planFilter.value !== "all" && planFilter.value !== "custom") return false;
+    return item.keys.some((key) => visibleIds.has(key.id));
+  });
+});
+
+const sortableRouteCount = computed(() => (
+  displayedRouteItems.value.filter((item) => item.type === "account" || item.keys.length > 0).length
 ));
+
+const platformRefreshing = computed(() => platformSectionRef.value?.refreshing ?? {});
+const platformPendingLink = computed(() => platformSectionRef.value?.pendingLink ?? null);
 
 const planFilterOptions = computed(() => [
   { value: "all", label: t("全部方案") },
@@ -988,9 +1040,48 @@ async function loadIdentitiesOverlay(): Promise<void> {
   }
 }
 
-function onPlatformLinksChange(links: PlatformLink[], parents: { id: string; name: string }[]): void {
+function onPlatformLinksChange(links: PlatformLink[], parents: PlatformAccount[]): void {
   platformLinks.value = links;
   platformParents.value = parents;
+}
+
+async function movePlatformKey(accountId: string, delta: number): Promise<void> {
+  const item = allRouteItems.value.find((row) => (
+    row.type === "platform" && row.keys.some((key) => key.id === accountId)
+  ));
+  if (!item || item.type !== "platform") return;
+  const next = moveKeyWithinPlatform(
+    accounts.value.map((account) => account.id),
+    item.keys.map((key) => key.id),
+    accountId,
+    delta,
+  );
+  if (next) await persistExplicitOrder(next);
+}
+
+function refreshPlatformChild(parent: PlatformAccount, accountId: string): void {
+  const link = platformLinks.value.find((item) => item.accountId === accountId);
+  if (link) platformSectionRef.value?.refreshChild(parent, link);
+}
+
+function fetchPlatformModels(accountId: string): void {
+  const account = accounts.value.find((item) => item.id === accountId);
+  if (account) platformSectionRef.value?.fetchModels(account);
+}
+
+function fetchAllPlatformModels(keys: Account[]): void {
+  platformSectionRef.value?.fetchModelsAll(keys);
+}
+
+function editPlatformKey(accountId: string): void {
+  const account = accounts.value.find((item) => item.id === accountId);
+  if (account) platformSectionRef.value?.openEditKey(account);
+}
+
+function unlinkPlatformKey(accountId: string): void {
+  const account = accounts.value.find((item) => item.id === accountId);
+  const link = platformLinks.value.find((item) => item.accountId === accountId);
+  if (account && link) platformSectionRef.value?.confirmUnlink(account, link);
 }
 
 function openManagedCreateModal(): void {
