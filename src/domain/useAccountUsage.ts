@@ -26,6 +26,7 @@ import {
 import type { UsageEditState, UsageKey } from "./accounts-usage.ts";
 import { accountIsReady } from "./account-display.ts";
 import { findPlanDefinition } from "./plans.ts";
+import { officialBalanceSupported } from "./upstream-balance.ts";
 import { t } from "../i18n/index.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
 import { mapWithConcurrency } from "../utils/async.ts";
@@ -46,6 +47,7 @@ export function useAccountUsage(
   accounts: Ref<Account[]>,
   now: Ref<number>,
   catalog: Ref<ProviderCatalogEntry[] | null>,
+  options?: { endpointUrlFor?: (account: Account) => string | null },
 ) {
   const message = useMessage();
 
@@ -86,7 +88,14 @@ export function useAccountUsage(
     const surface = findPlanDefinition(account.provider_id, catalog.value);
     const manual = surface?.manual_usage_calibration === true;
     const refresh = surface?.usage_availability === "available";
-    return { providerWindows: refresh || manual, refresh, manual };
+    const creditBalance = officialBalanceSupported(
+      options?.endpointUrlFor?.(account) ?? account.custom_config?.endpoint_url,
+    );
+    return {
+      providerWindows: refresh || manual || creditBalance,
+      refresh: refresh || creditBalance,
+      manual,
+    };
   }
 
   function limitsFromProviderWindows(windows: ProviderQuotaWindow[]): UsageLimitView[] {

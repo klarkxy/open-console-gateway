@@ -65,9 +65,10 @@ Custom API 继续使用账号所有的公开名称 → 上游 ID 映射，发现
 - OpenCode Go 展示 revision、文档更新时间、token 单价、`Usage`（官方文档现在把这一列叫 **Monthly limit**）和额度扣减倍率，点击刷新后才会访问 `https://opencode.ai/docs/go/`。抓取或校验失败时继续使用最后一次成功快照。allowance 不是额度池、不会参与路由，只用于推导扣减倍率（“账号月窗口 / 模型月额度”）。临时覆盖会创建新的持久化 revision，供后续估算使用。
 - Command Code GOAT 展示从 `https://commandcode.ai/docs/plans/goat` 保存的官方费率快照。带分时费率的模型会保留官方每日高峰窗口（UTC 01:00–04:00、06:00–10:00）及独立的输入、输出、缓存读取价格。每个已定价模型的应用倍率都可手动修改并保存；新请求使用保存后的 Provider revision 计算，缺失或歧义行仍为 unpriced。刷新若将覆盖手动倍率会先请求确认。它与 OpenCode Go 分开；账号卡会把 OCG 内已定价请求日志投影到本地 `$14 / $35 / $70` 三个窗口，并允许手工修正。Command Code 没有可机读的用量 API。
 - Zen Free 未定价（额度按出口 IP 共享）。
-- Custom API 为 unpriced：成功转发记 `cost_state=unknown`，不扣额度，也没有官方用量刷新。
+- Custom API 为 unpriced：成功转发记 `cost_state=unknown`，不扣额度。没有官方用量窗口。已知主机的当前余额读取（DeepSeek / Moonshot）只用于展示。
 - Ollama Cloud 刷新公开且无需鉴权的目录 `https://ollama.com/v1/models`，不选择账号。发现的行立即启用 Chat Completions；Responses 与 Messages 不受支持，也没有协议探测入口。目录刷新仅在剥离 `:` 标签后恰好命中一个目录 id 时，才向 Go 拥有的别名追加一个可路由 Ollama 映射。带日期标签的快照 id 来自运行时目录。手动价格刷新读取 `https://ollama.com/pricing`（Model / Input / Cached input / Output），配额倍率固定 `1.0`。新建账号必须选择 Pro/Max/Team 并填写购买日期。账号卡按官方每请求用量与该档估算一个月 USD Credits 窗口；实际已用可以超过软上限，进度条只把显示钳在 100%，不会写冷却或改变路由。无计费行的既有账号仍可路由且无进度条。
 - MiniMax CN 与 Kimi Code CN 在 OCG 内为 unpriced，但账号卡可手工读取官方订阅窗口（`/token_plan/remains` 与 `/usages`）。这些快照只用于展示，不影响推理资格。
+- Custom API 与用户定义 Provider 账号，若保存的 Endpoint 主机恰好是 `api.deepseek.com`、`api.moonshot.cn` 或 `api.moonshot.ai`，可手工读取官方当前余额。其他 Custom 主机不会被探测。
 
 请求时流程：别名 → 账号资格 → 适配器上限 → 已保存合约 → 按模型/按协议 effective 状态 → 透传或转换。协议选择使用已保存的合约。带鉴权的 `GET /v1/models` 与受保护的 `GET /dashboard/api/v3/application-models` 只公布当前可路由且 effective 协议已启用的公开名称。`application-models` 仍是 Go 别名 ∩ 当前价格快照，不含 Custom。
 

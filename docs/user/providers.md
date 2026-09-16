@@ -188,11 +188,16 @@ refreshes those Plans only. Refresh stays manual:
   machine-readable usage API.
 - Zen Free is unpriced (egress-IP-shared free quota).
 - Custom API is unpriced: successful forwards log `cost_state=unknown` with
-  no quota debit and no official usage refresh.
+  no quota debit. There is no official usage window. Known-host current-balance
+  reads (DeepSeek / Moonshot) are display-only.
 - Ollama Cloud refreshes the public keyless directory `https://ollama.com/v1/models` without selecting an account. Discovered ids enable Chat Completions immediately; Responses and Messages are unsupported, and there is no protocol-probe entry. A refreshed catalog may append one routeable Ollama mapping to a Go-owned alias only when stripping the `:` tag leaves exactly one catalog match. Date-tagged snapshot ids come from the runtime catalog. Manual pricing refresh reads `https://ollama.com/pricing` (Model / Input / Cached input / Output) into the provider snapshot with quota multiplier `1.0`. New accounts require Pro/Max/Team plus a purchase date. Account cards estimate one monthly USD-Credits window from official per-request usage against that tier; used credit may exceed the soft limit, the bar clamps at 100%, and the meter never writes cooldown or changes routing. Migrated accounts with no billing row stay routeable without a meter.
 - MiniMax CN and Kimi Code CN are unpriced in OCG, but their account cards can
   manually read the official subscription windows (`/token_plan/remains` and
   `/usages`). These snapshots are display-only and do not gate inference.
+- Custom API and user-defined Provider cards whose stored Endpoint host is
+  exactly `api.deepseek.com`, `api.moonshot.cn`, or `api.moonshot.ai` can
+  manually read that official current balance. Other Custom hosts are not
+  probed.
 
 Request-time flow: Alias → account eligibility → adapter ceiling → saved
 contract → per-model/per-protocol effective state → passthrough or conversion.

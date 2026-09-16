@@ -21,7 +21,7 @@ Free 按出口 IP 共享额度与冷却，Custom API 不做供应商额度核算
 / 冷却状态。本地目录、协议探测、按模型协议覆盖、用户定义供应商的 Endpoint/协议/映射，以及范围内价格都在
 **供应商** 页。用户定义供应商账号只保存 Key（鉴权需要时）、备注、启停和运行时状态。Custom API 是例外：该账号仍拥有 Endpoint、协议和模型映射。无鉴权用户定义供应商只暴露一张单例账号，并拒绝第二张。
 
-额度卡按目录能力而不是 Provider ID 决定行为。`usageAvailability=available` 时加载通用 Provider quota windows 并显示刷新动作；`manualUsageCalibration=true` 时额外加载本地校准对象供编辑，但卡片本身仍渲染 Provider windows。其余目录行不显示额度条；Zen Free 继续使用独立的出口冷却。已知 MiniMax/Kimi 窗口名保持友好显示，未知窗口名安全地人类化，不改存储 wire 值。
+额度卡按目录能力而不是 Provider ID 决定行为。`usageAvailability=available` 时加载通用 Provider quota windows 并显示刷新动作；`manualUsageCalibration=true` 时额外加载本地校准对象供编辑，但卡片本身仍渲染 Provider windows。其余目录行不显示额度条；Zen Free 继续使用独立的出口冷却。已知 MiniMax/Kimi 窗口名保持友好显示，未知窗口名安全地人类化，不改存储 wire 值。Custom API 与用户定义 Provider 账号，若保存的 Endpoint 主机恰好是 `api.deepseek.com`、`api.moonshot.cn` 或 `api.moonshot.ai`，也可以点**刷新额度**读取官方当前余额。该快照只用于展示，不改变路由。其他 Custom 目的地在本产品中没有余额接口。
 
 GOAT 卡片显示的是明确标注的本地估算：
 OCG 内已定价请求日志按公开的 `$14 / $35 / $70` 三个窗口累计。Command Code 没有可机读的用量 API。其他客户端流量与未定价日志不会计入，

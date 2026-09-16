@@ -377,7 +377,7 @@ async fn read_new_api(
         .await
         {
             Ok(fetched) => match new_api_data(&fetched.value, "new_api.user_self") {
-                Ok(data) => parse_new_api_self(data, snapshot, &mut user_group),
+                Ok(data) => parse_new_api_self(data, snapshot, &mut user_group, quota_per_unit),
                 Err(error) => push_error(snapshot, error),
             },
             Err(error) => push_error(snapshot, error),
@@ -413,7 +413,7 @@ async fn read_new_api(
         .await
         {
             Ok(fetched) => match new_api_data(&fetched.value, "new_api.subscription_self") {
-                Ok(data) => parse_new_api_subscriptions(data, snapshot),
+                Ok(data) => parse_new_api_subscriptions(data, snapshot, quota_per_unit),
                 Err(error) => push_error(snapshot, error),
             },
             Err(error) => push_error(snapshot, error),
@@ -465,7 +465,9 @@ async fn read_new_api(
         .await
         {
             Ok(fetched) => match new_api_token_usage_data(&fetched.value, "new_api.token_usage") {
-                Ok(data) => parse_new_api_token_usage(data, &mut allowed_models, snapshot),
+                Ok(data) => {
+                    parse_new_api_token_usage(data, &mut allowed_models, snapshot, quota_per_unit)
+                }
                 Err(error) => push_error(snapshot, error),
             },
             Err(error) => push_error(snapshot, error),
@@ -489,10 +491,31 @@ async fn read_new_api(
     }
 }
 
+/// New API stores wallet/token amounts as integer quota points. The site
+/// `quota_per_unit` (typically 500000) is the observed points-per-dollar rate
+/// from `GET /api/status`. Convert when that rate is known so remaining is a
+/// dollar balance; otherwise keep the native `quota` unit.
+fn scale_new_api_quota(value: Option<f64>, quota_per_unit: Option<f64>) -> Option<f64> {
+    match (value, quota_per_unit) {
+        (Some(raw), Some(unit)) if unit > 0.0 && raw.is_finite() => Some(raw / unit),
+        (Some(raw), _) if raw.is_finite() => Some(raw),
+        _ => None,
+    }
+}
+
+fn new_api_quota_unit(quota_per_unit: Option<f64>) -> &'static str {
+    if quota_per_unit.filter(|unit| *unit > 0.0).is_some() {
+        "usd"
+    } else {
+        "quota"
+    }
+}
+
 fn parse_new_api_self(
     data: &Value,
     snapshot: &mut PlatformSnapshot,
     user_group: &mut Option<String>,
+    quota_per_unit: Option<f64>,
 ) {
     if !data.is_object() {
         push_error(snapshot, component_error("new_api.user_self", CODE_PARSE));
@@ -515,13 +538,13 @@ fn parse_new_api_self(
         }
     }
 
-    let remaining = json_f64(data.get("quota"));
-    let used = json_f64(data.get("used_quota"));
+    let remaining = scale_new_api_quota(json_f64(data.get("quota")), quota_per_unit);
+    let used = scale_new_api_quota(json_f64(data.get("used_quota")), quota_per_unit);
     if remaining.is_some() || used.is_some() {
         snapshot.quotas.push(PlatformQuota {
             kind: PlatformQuotaKind::Wallet,
             scope_id: "wallet".to_string(),
-            unit: "quota".to_string(),
+            unit: new_api_quota_unit(quota_per_unit).to_string(),
             used,
             remaining,
             // Wallet balance + lifetime consumption is not an observed limit.
@@ -589,7 +612,11 @@ fn parse_new_api_auto_groups(data: &Value, snapshot: &mut PlatformSnapshot) {
     });
 }
 
-fn parse_new_api_subscriptions(data: &Value, snapshot: &mut PlatformSnapshot) {
+fn parse_new_api_subscriptions(
+    data: &Value,
+    snapshot: &mut PlatformSnapshot,
+    quota_per_unit: Option<f64>,
+) {
     if !data.is_object() {
         push_error(
             snapshot,
@@ -607,8 +634,8 @@ fn parse_new_api_subscriptions(data: &Value, snapshot: &mut PlatformSnapshot) {
                 .map(|id| id.to_string())
                 .or_else(|| json_str(sub.get("id")).map(str::to_string))
                 .unwrap_or_else(|| "subscription".to_string());
-            let total = json_f64(sub.get("amount_total"));
-            let used = json_f64(sub.get("amount_used"));
+            let total = scale_new_api_quota(json_f64(sub.get("amount_total")), quota_per_unit);
+            let used = scale_new_api_quota(json_f64(sub.get("amount_used")), quota_per_unit);
             let remaining = match (total, used) {
                 (Some(total), Some(used)) => Some(total - used),
                 _ => None,
@@ -617,7 +644,7 @@ fn parse_new_api_subscriptions(data: &Value, snapshot: &mut PlatformSnapshot) {
             snapshot.quotas.push(PlatformQuota {
                 kind: PlatformQuotaKind::Subscription,
                 scope_id: scope,
-                unit: "quota".to_string(),
+                unit: new_api_quota_unit(quota_per_unit).to_string(),
                 used,
                 remaining: if unlimited { None } else { remaining },
                 limit: if unlimited { None } else { total },
@@ -641,15 +668,16 @@ fn parse_new_api_token_usage(
     data: &Value,
     allowed_models: &mut BTreeSet<String>,
     snapshot: &mut PlatformSnapshot,
+    quota_per_unit: Option<f64>,
 ) {
     let unlimited = json_bool(data.get("unlimited_quota")).unwrap_or(false);
-    let used = json_f64(data.get("total_used"));
-    let remaining = json_f64(data.get("total_available"));
-    let granted = json_f64(data.get("total_granted"));
+    let used = scale_new_api_quota(json_f64(data.get("total_used")), quota_per_unit);
+    let remaining = scale_new_api_quota(json_f64(data.get("total_available")), quota_per_unit);
+    let granted = scale_new_api_quota(json_f64(data.get("total_granted")), quota_per_unit);
     snapshot.quotas.push(PlatformQuota {
         kind: PlatformQuotaKind::KeyLimit,
         scope_id: json_str(data.get("name")).unwrap_or("key").to_string(),
-        unit: "quota".to_string(),
+        unit: new_api_quota_unit(quota_per_unit).to_string(),
         used,
         remaining: if unlimited { None } else { remaining },
         limit: if unlimited { None } else { granted },
@@ -659,6 +687,20 @@ fn parse_new_api_token_usage(
         expires_at: json_i64(data.get("expires_at")).filter(|ts| *ts > 0),
         source: "new_api.token_usage".to_string(),
     });
+    if let Some(group) = json_str(data.get("group"))
+        && !snapshot
+            .groups
+            .iter()
+            .any(|item| item.id.as_deref() == Some(group))
+    {
+        snapshot.groups.push(PlatformGroup {
+            subscription_type: None,
+            id: Some(group.to_string()),
+            platform: None,
+            auto_groups: Vec::new(),
+            verified: true,
+        });
+    }
 
     if json_bool(data.get("model_limits_enabled")) == Some(true) {
         if let Some(limits) = data.get("model_limits").and_then(Value::as_object) {

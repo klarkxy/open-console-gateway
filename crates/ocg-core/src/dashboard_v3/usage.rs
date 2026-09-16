@@ -60,31 +60,87 @@ pub(super) async fn get_provider_usage(
     provider_usage_locked(&state, &id).map(Json)
 }
 
+enum ProviderUsageRefreshKind {
+    Go,
+    Plan,
+    Balance { endpoint_url: String },
+}
+
+fn classify_provider_usage_refresh(
+    state: &CoreState,
+    db: &Database,
+    account: &ModelAccount,
+) -> Result<ProviderUsageRefreshKind, V3ApiError> {
+    match ProviderAdapterKind::from_provider_id(&account.provider_id) {
+        Some(ProviderAdapterKind::OpenCodeGo) => Ok(ProviderUsageRefreshKind::Go),
+        Some(ProviderAdapterKind::MiniMaxCn | ProviderAdapterKind::KimiCn) => {
+            Ok(ProviderUsageRefreshKind::Plan)
+        }
+        Some(ProviderAdapterKind::ConfigurableHttp) => {
+            let endpoint = db
+                .account_custom_config(&account.id)
+                .map_err(V3ApiError::internal)?
+                .map(|config| config.endpoint_url);
+            balance_refresh_kind(state, endpoint)
+        }
+        None => {
+            let endpoint =
+                crate::dynamic::find_runtime(&state.dynamic_providers(), &account.provider_id)
+                    .map(|runtime| runtime.endpoint_url.clone());
+            if endpoint.is_none() {
+                return Err(V3ApiError::invalid_request_at(
+                    state,
+                    "unknown provider offering",
+                ));
+            }
+            balance_refresh_kind(state, endpoint)
+        }
+        Some(_) => Err(V3ApiError::invalid_request_at(
+            state,
+            "this Plan does not expose an official manual usage refresh",
+        )),
+    }
+}
+
+fn balance_refresh_kind(
+    state: &CoreState,
+    endpoint_url: Option<String>,
+) -> Result<ProviderUsageRefreshKind, V3ApiError> {
+    let Some(endpoint_url) = endpoint_url.filter(|value| !value.trim().is_empty()) else {
+        return Err(V3ApiError::invalid_request_at(
+            state,
+            "this Plan does not expose an official manual usage refresh",
+        ));
+    };
+    if crate::api_balance::probe_from_endpoint(&endpoint_url).is_none() {
+        return Err(V3ApiError::invalid_request_at(
+            state,
+            "this destination does not expose an official balance endpoint",
+        ));
+    }
+    Ok(ProviderUsageRefreshKind::Balance { endpoint_url })
+}
+
 pub(super) async fn refresh_provider_usage(
     State(state): State<CoreState>,
     Path(id): Path<String>,
     body: Bytes,
 ) -> Result<Json<ProviderUsage>, RefreshApiError> {
     let expectation = parse_mutation_json::<MutationExpectation>(&body)?;
-    let adapter = {
+    let kind = {
         let _settings_update = state.settings_update.lock();
         check_expectation(&state, &expectation)?;
         let db = state.db.lock();
         let account = load_account(&db, &state, &id)?;
-        ProviderAdapterKind::from_provider_id(&account.provider_id)
-            .ok_or_else(|| V3ApiError::invalid_request_at(&state, "unknown provider offering"))?
+        classify_provider_usage_refresh(&state, &db, &account)?
     };
-    match adapter {
-        ProviderAdapterKind::OpenCodeGo => {
+    match kind {
+        ProviderUsageRefreshKind::Go => {
             return refresh_go_provider_usage(&state, &id, &expectation).await;
         }
-        ProviderAdapterKind::MiniMaxCn | ProviderAdapterKind::KimiCn => {}
-        _ => {
-            return Err(V3ApiError::invalid_request_at(
-                &state,
-                "this Plan does not expose an official manual usage refresh",
-            )
-            .into());
+        ProviderUsageRefreshKind::Plan => {}
+        ProviderUsageRefreshKind::Balance { endpoint_url } => {
+            return refresh_official_balance(&state, &id, &expectation, endpoint_url).await;
         }
     }
     let _refresh = state.provider_usage_refresh.try_lock().map_err(|_| {
@@ -158,6 +214,82 @@ pub(super) async fn refresh_provider_usage(
         ),
     );
     provider_usage_locked(&state, &id)
+        .map(Json)
+        .map_err(RefreshApiError::from)
+}
+
+async fn refresh_official_balance(
+    state: &CoreState,
+    id: &str,
+    expectation: &MutationExpectation,
+    endpoint_url: String,
+) -> Result<Json<ProviderUsage>, RefreshApiError> {
+    let _refresh = state
+        .provider_usage_refresh
+        .try_lock()
+        .map_err(|_| V3ApiError::conflict_at(state, "provider usage refresh is already running"))?;
+    let (account_snapshot, config, key) = {
+        let _settings_update = state.settings_update.lock();
+        check_expectation(state, expectation)?;
+        let db = state.db.lock();
+        let account = load_account(&db, state, id)?;
+        if account.key_cipher.trim().is_empty() {
+            return Err(V3ApiError::invalid_request_at(
+                state,
+                "the selected account has no stored Key",
+            )
+            .into());
+        }
+        let key = state
+            .decrypt_key(&account.key_cipher)
+            .map_err(V3ApiError::internal)?;
+        (account, state.config(), key)
+    };
+    let rows = match crate::api_balance::fetch(&config, id, &key, &endpoint_url).await {
+        Ok(rows) => rows,
+        Err(message) => {
+            state.log_runtime_event(
+                "warn",
+                "usage_sync",
+                &format!(
+                    "event=provider_usage_refresh_failed account_id={id} provider={} stage=balance",
+                    account_snapshot.provider_id
+                ),
+            );
+            return Err(V3ApiError::outbound_failed(state, message).into());
+        }
+    };
+    let source = rows.first().map(|row| row.source.clone()).ok_or_else(|| {
+        V3ApiError::outbound_failed(state, "balance endpoint returned no usable amount")
+    })?;
+    let row_count = rows.len();
+    {
+        let _settings_update = state.settings_update.lock();
+        check_expectation(state, expectation)?;
+        let db = state.db.lock();
+        let current = load_account(&db, state, id)?;
+        if current.updated_at != account_snapshot.updated_at
+            || current.key_cipher != account_snapshot.key_cipher
+            || current.provider_id != account_snapshot.provider_id
+        {
+            return Err(V3ApiError::conflict_at(
+                state,
+                "the account changed while provider usage was being refreshed",
+            )
+            .into());
+        }
+        db.replace_credit_balances_by_source(id, &source, &rows)
+            .map_err(V3ApiError::internal)?;
+    }
+    state.log_runtime_event(
+        "info",
+        "usage_sync",
+        &format!(
+            "event=provider_usage_refresh_succeeded account_id={id} provider={} window_count={row_count}",
+            account_snapshot.provider_id
+        ),
+    );
+    provider_usage_locked(state, id)
         .map(Json)
         .map_err(RefreshApiError::from)
 }
@@ -351,7 +483,7 @@ pub(super) fn provider_usage_locked(
             false,
             None,
             Vec::new(),
-            Vec::new(),
+            official_credit_balances(&db, &account.id)?,
             None,
             None,
         ));
@@ -369,7 +501,7 @@ pub(super) fn provider_usage_locked(
             descriptor.usage.experimental,
             None,
             Vec::new(),
-            Vec::new(),
+            official_credit_balances(&db, &account.id)?,
             db.account_usage_sync_state(&account.id)
                 .map_err(V3ApiError::internal)?,
             None,
@@ -461,6 +593,18 @@ fn captured_pricing(state: &CoreState) -> CapturedPricing {
         limits: snapshot.limits.clone(),
         revision: snapshot.revision.clone(),
     }
+}
+
+fn official_credit_balances(
+    db: &Database,
+    account_id: &str,
+) -> Result<Vec<ModelCreditBalance>, V3ApiError> {
+    Ok(db
+        .list_credit_balances(account_id)
+        .map_err(V3ApiError::internal)?
+        .into_iter()
+        .filter(|row| crate::api_balance::is_official_balance_source(&row.source))
+        .collect())
 }
 
 fn load_account(db: &Database, state: &CoreState, id: &str) -> Result<ModelAccount, V3ApiError> {

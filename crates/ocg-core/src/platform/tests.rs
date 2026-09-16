@@ -244,7 +244,7 @@ async fn new_api_key_only_reads_proven_models_and_key_quota() {
     routes.insert(
         "/api/usage/token/".to_string(),
         Route::ok(
-            r#"{"code":true,"message":"ok","data":{"object":"token_usage","name":"cli","total_granted":800000,"total_used":300000,"total_available":500000,"unlimited_quota":false,"model_limits_enabled":false,"expires_at":1776384000}}"#,
+            r#"{"code":true,"message":"ok","data":{"object":"token_usage","name":"cli","group":"Codex稳定","total_granted":800000,"total_used":300000,"total_available":500000,"unlimited_quota":false,"model_limits_enabled":false,"expires_at":1776384000}}"#,
         ),
     );
     routes.insert(
@@ -290,9 +290,19 @@ async fn new_api_key_only_reads_proven_models_and_key_quota() {
         .iter()
         .find(|q| matches!(q.kind, PlatformQuotaKind::KeyLimit))
         .expect("key quota");
-    assert_eq!(key_quota.used, Some(300_000.0));
-    assert_eq!(key_quota.remaining, Some(500_000.0));
-    assert_eq!(key_quota.limit, Some(800_000.0));
+    assert_eq!(key_quota.used, Some(0.6));
+    assert_eq!(key_quota.remaining, Some(1.0));
+    assert_eq!(key_quota.limit, Some(1.6));
+    assert_eq!(key_quota.unit, "usd");
+    assert_eq!(key_quota.scope_id, "cli");
+    assert!(
+        snapshot
+            .groups
+            .iter()
+            .any(|group| group.id.as_deref() == Some("Codex稳定")),
+        "{:?}",
+        snapshot.groups
+    );
 
     let ids: Vec<_> = snapshot.models.iter().map(|m| m.id.as_str()).collect();
     assert_eq!(ids, vec!["gpt-4", "claude-sonnet"]);
@@ -389,7 +399,8 @@ async fn o03_wallet_subscription_and_key_limits_are_not_summed() {
         .iter()
         .find(|q| matches!(q.kind, PlatformQuotaKind::Wallet))
         .expect("wallet");
-    assert_eq!(wallet.remaining, Some(1_500_000.0));
+    assert_eq!(wallet.remaining, Some(3.0));
+    assert_eq!(wallet.unit, "usd");
     assert!(
         wallet.used.is_none(),
         "missing used_quota must not be synthesized as zero"
@@ -401,8 +412,9 @@ async fn o03_wallet_subscription_and_key_limits_are_not_summed() {
         .iter()
         .find(|q| matches!(q.kind, PlatformQuotaKind::Subscription))
         .expect("subscription");
-    assert_eq!(sub.used, Some(250_000.0));
-    assert_eq!(sub.remaining, Some(1_750_000.0));
+    assert_eq!(sub.used, Some(0.5));
+    assert_eq!(sub.remaining, Some(3.5));
+    assert_eq!(sub.unit, "usd");
     assert_eq!(snapshot.billing_preference.as_deref(), Some("subscription"));
     assert_eq!(snapshot.wallet_overflow, Some(false));
 
@@ -411,9 +423,10 @@ async fn o03_wallet_subscription_and_key_limits_are_not_summed() {
         .iter()
         .find(|q| matches!(q.kind, PlatformQuotaKind::KeyLimit))
         .expect("key limit");
-    assert_eq!(key_limit.used, Some(1.0));
-    assert_eq!(key_limit.remaining, Some(2.0));
-    assert_eq!(key_limit.limit, Some(3.0));
+    assert_eq!(key_limit.used, Some(1.0 / 500_000.0));
+    assert_eq!(key_limit.remaining, Some(2.0 / 500_000.0));
+    assert_eq!(key_limit.limit, Some(3.0 / 500_000.0));
+    assert_eq!(key_limit.unit, "usd");
     let invented_total =
         wallet.remaining.unwrap() + sub.remaining.unwrap() + key_limit.remaining.unwrap();
     assert!(
@@ -525,7 +538,8 @@ async fn new_api_auto_group_and_per_request_prices_are_unavailable() {
     assert!(key_quota.unlimited);
     assert!(key_quota.remaining.is_none());
     assert!(key_quota.limit.is_none());
-    assert_eq!(key_quota.used, Some(10.0));
+    assert_eq!(key_quota.used, Some(10.0 / 500_000.0));
+    assert_eq!(key_quota.unit, "usd");
 }
 
 #[tokio::test]

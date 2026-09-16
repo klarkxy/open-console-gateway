@@ -161,6 +161,7 @@
             :quota-limits-failed="!!quotaLimitsError"
             :menu-options="cardMenuOptions(item.account)"
             :account-names="accountNamesById"
+            :connections="providersStore.connections"
             @order-keydown="handleOrderKeydown($event, item.account.id)"
             @order-drag-start="startAccountDrag($event, item.account.id)"
             @toggle="toggleAccount(item.account.id)"
@@ -386,6 +387,7 @@ import {
 import type { PlatformAccount, PlatformLink } from "../api/platform-accounts.ts";
 import PlatformAccountCard from "../components/PlatformAccountCard.vue";
 import { useAccountUsage } from "../domain/useAccountUsage.ts";
+import { accountInferenceEndpointUrl, officialBalanceSupported } from "../domain/upstream-balance.ts";
 import { useAccountOrder } from "./useAccountOrder.ts";
 import {
   filterAccounts,
@@ -520,7 +522,13 @@ const {
   loadQuotaLimits,
   loadAccountUsage,
   retryQuotaLimits,
-} = useAccountUsage(accounts, now, providerCatalog);
+} = useAccountUsage(accounts, now, providerCatalog, {
+  endpointUrlFor: (account) => accountInferenceEndpointUrl(
+    account,
+    identitiesStore.byAccountId.get(account.id) ?? null,
+    providersStore.connections,
+  ),
+});
 
 const allRouteItems = computed(() => (
   buildAccountRouteItems(accounts.value, platformParents.value, platformLinks.value)
@@ -1349,8 +1357,14 @@ function removeAccountState(id: string): void {
 
 function accountHasUsageDisplay(account: Account): boolean {
   const surface = findPlanDefinition(account.provider_id, providerCatalog.value);
-  return surface?.usage_availability === "available"
-    || surface?.manual_usage_calibration === true;
+  if (surface?.usage_availability === "available" || surface?.manual_usage_calibration === true) {
+    return true;
+  }
+  return officialBalanceSupported(accountInferenceEndpointUrl(
+    account,
+    identityForCard(account.id),
+    providersStore.connections,
+  ));
 }
 
 async function refreshAccountState(id: string): Promise<Account | null> {
@@ -1393,6 +1407,10 @@ async function loadAccounts() {
     const loaded = await accountsStore.loadPresented();
     accounts.value = loaded;
     applyAccountDeepLink();
+    await overlay;
+    if (!providersStore.connections) {
+      await providersStore.loadConnections().catch(() => undefined);
+    }
     // Limit concurrent provider/local usage reads for large account lists.
     if (loaded.some(accountHasUsageDisplay)) {
       await mapWithConcurrency(
@@ -1410,7 +1428,6 @@ async function loadAccounts() {
   } finally {
     accountListLoading.value = false;
   }
-  await overlay;
 }
 
 async function loadRegistrationOptions(): Promise<void> {

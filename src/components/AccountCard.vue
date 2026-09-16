@@ -186,7 +186,7 @@
           </n-tooltip>
         </div>
 
-        <div v-if="usageRefreshAvailable && accountIsReady(account)" class="account-action account-action--secondary">
+        <div v-if="canRefreshUsage && accountIsReady(account)" class="account-action account-action--secondary">
           <n-tooltip trigger="hover">
             <template #trigger>
               <n-button
@@ -331,6 +331,38 @@
           {{ t("{count} 个模型", { count: account.model_capabilities.length }) }}
         </span>
       </div>
+      <div v-if="showsOfficialBalance" class="account-credit-balance">
+        <div v-if="usageLoadError" class="usage-load-error" role="alert">
+          <span>{{ t("用量加载失败") }}</span>
+          <n-button text size="tiny" type="primary" :loading="usageLoading" @click="emit('reload-usage')">
+            {{ t("重试") }}
+          </n-button>
+        </div>
+        <div v-else-if="creditBalances.length === 0" class="account-credit-balance__empty">
+          {{ t("尚未刷新") }}
+        </div>
+        <template v-else>
+          <div v-for="row in creditBalances" :key="row.balance_kind" class="account-credit-balance__row">
+            {{ t("当前余额 {value}", { value: formatQuotaAmount(row.amount, row.unit, locale) }) }}
+          </div>
+        </template>
+      </div>
+    </div>
+    <div v-else-if="showsOfficialBalance" class="account-credit-balance">
+      <div v-if="usageLoadError" class="usage-load-error" role="alert">
+        <span>{{ t("用量加载失败") }}</span>
+        <n-button text size="tiny" type="primary" :loading="usageLoading" @click="emit('reload-usage')">
+          {{ t("重试") }}
+        </n-button>
+      </div>
+      <div v-else-if="creditBalances.length === 0" class="account-credit-balance__empty">
+        {{ t("尚未刷新") }}
+      </div>
+      <template v-else>
+        <div v-for="row in creditBalances" :key="row.balance_kind" class="account-credit-balance__row">
+          {{ t("当前余额 {value}", { value: formatQuotaAmount(row.amount, row.unit, locale) }) }}
+        </div>
+      </template>
     </div>
   </n-card>
 </template>
@@ -392,7 +424,10 @@ import { isCustomApiAccount } from "../domain/custom-account.ts";
 import { localDateString } from "../domain/account-lifecycle.ts";
 import { findPlanDefinition, planLabel } from "../domain/plans.ts";
 import type { AccountUsageEdits, UsageLimitView } from "../domain/useAccountUsage.ts";
-import { t } from "../i18n/index.ts";
+import { locale, t } from "../i18n/index.ts";
+import { formatQuotaAmount } from "../domain/platform-accounts.ts";
+import { accountInferenceEndpointUrl, officialBalanceSupported } from "../domain/upstream-balance.ts";
+import type { Connection } from "../api/connections.ts";
 import AccountUsageEditor from "./AccountUsageEditor.vue";
 import ProviderQuotaSummary from "./ProviderQuotaSummary.vue";
 
@@ -414,6 +449,7 @@ const props = defineProps<{
   quotaLimitsFailed: boolean;
   menuOptions: AccountMenuOption[];
   accountNames?: Readonly<Record<string, string>>;
+  connections?: readonly Connection[] | null;
 }>();
 
 const emit = defineEmits<{
@@ -490,6 +526,14 @@ const manualUsageCalibration = computed(() => (
   plan.value?.manual_usage_calibration ?? false
 ));
 const usageRefreshAvailable = computed(() => plan.value?.usage_availability === "available");
+const balanceRefreshAvailable = computed(() => officialBalanceSupported(
+  accountInferenceEndpointUrl(props.account, props.identity, props.connections),
+));
+const canRefreshUsage = computed(() => usageRefreshAvailable.value || balanceRefreshAvailable.value);
+const creditBalances = computed(() => props.providerUsage?.credit_balances ?? []);
+const showsOfficialBalance = computed(() => (
+  balanceRefreshAvailable.value || creditBalances.value.length > 0
+));
 const usageDisplayAvailable = computed(() => (
   usageRefreshAvailable.value || manualUsageCalibration.value
 ));
@@ -630,6 +674,21 @@ watch(() => props.account.purchase_date, (value) => {
 .custom-endpoint__models {
   color: var(--ocg-muted);
   font-size: var(--ocg-font-sm);
+}
+
+.account-credit-balance {
+  display: grid;
+  gap: 4px;
+  margin-top: 8px;
+  font-size: var(--ocg-font-sm);
+}
+
+.account-credit-balance__empty {
+  color: var(--ocg-subtle);
+}
+
+.account-credit-balance__row {
+  font-variant-numeric: tabular-nums;
 }
 
 .account-title {

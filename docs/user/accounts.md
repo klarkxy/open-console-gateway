@@ -32,7 +32,7 @@ enablement, and runtime state. Custom API is the exception: that account still
 owns Endpoint, protocol, and model mappings. No-auth user-defined Providers
 expose one singleton account and reject a second.
 
-Quota cards follow catalog capabilities instead of Provider IDs. `usageAvailability=available` loads Provider quota windows and enables the refresh action. `manualUsageCalibration=true` additionally loads the local calibration object for editing, while the card itself still renders the Provider windows. Other rows show no quota strip; Zen Free keeps its separate egress cooldown. Known MiniMax/Kimi window names remain friendly, and unknown window names are humanized without changing stored wire values.
+Quota cards follow catalog capabilities instead of Provider IDs. `usageAvailability=available` loads Provider quota windows and enables the refresh action. `manualUsageCalibration=true` additionally loads the local calibration object for editing, while the card itself still renders the Provider windows. Other rows show no quota strip; Zen Free keeps its separate egress cooldown. Known MiniMax/Kimi window names remain friendly, and unknown window names are humanized without changing stored wire values. Custom API and user-defined Provider cards whose stored Endpoint host is exactly `api.deepseek.com`, `api.moonshot.cn`, or `api.moonshot.ai` can also **Refresh quota** to read that official current balance. The snapshot is display-only and does not change routing. Other Custom destinations have no balance endpoint in this product.
 
 GOAT cards show a clearly
 labelled local estimate: priced OCG request logs accumulate against the public

@@ -8250,6 +8250,51 @@ impl Database {
         Ok(())
     }
 
+    /// Atomically replace official balance rows for one source on one account.
+    pub fn replace_credit_balances_by_source(
+        &self,
+        account_id: &str,
+        source: &str,
+        balances: &[CreditBalance],
+    ) -> Result<()> {
+        anyhow::ensure!(self.get_account(account_id)?.is_some(), "account not found");
+        anyhow::ensure!(
+            balances
+                .iter()
+                .all(|row| row.account_id == account_id && row.source == source),
+            "credit snapshot contains a mismatched account or source"
+        );
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM credit_balances WHERE account_id = ?1 AND source = ?2",
+            params![account_id, source],
+        )?;
+        for balance in balances {
+            tx.execute(
+                "INSERT INTO credit_balances (
+                    account_id, balance_kind, amount, unit, source, observed_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(account_id, balance_kind) DO UPDATE SET
+                    amount = excluded.amount,
+                    unit = excluded.unit,
+                    source = excluded.source,
+                    observed_at = excluded.observed_at,
+                    updated_at = excluded.updated_at",
+                params![
+                    balance.account_id,
+                    balance.balance_kind,
+                    balance.amount,
+                    balance.unit,
+                    balance.source,
+                    balance.observed_at.map(|value| value.to_rfc3339()),
+                    balance.updated_at.to_rfc3339(),
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn list_credit_balances(&self, account_id: &str) -> Result<Vec<CreditBalance>> {
         let mut stmt = self.conn.prepare(
             "SELECT account_id, balance_kind, amount, unit, source, observed_at, updated_at
