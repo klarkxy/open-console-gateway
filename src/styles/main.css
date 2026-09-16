@@ -7,6 +7,16 @@
   --ocg-font-lg: 16px;
   --ocg-font-xl: 20px;
   --ocg-font-2xl: 24px;
+  /* 间距与圆角刻度：与主题无关的回退默认值，见 DESIGN.md Layout / Shapes */
+  --ocg-space-xs: 4px;
+  --ocg-space-sm: 8px;
+  --ocg-space-md: 12px;
+  --ocg-space-lg: 16px;
+  --ocg-space-xl: 24px;
+  --ocg-space-2xl: 32px;
+  --ocg-radius-sm: 6px;
+  --ocg-radius-md: 10px;
+  --ocg-radius-lg: 14px;
   --ocg-canvas: #f7f7f8;
   --ocg-surface: #ffffff;
   --ocg-surface-raised: #ffffff;
