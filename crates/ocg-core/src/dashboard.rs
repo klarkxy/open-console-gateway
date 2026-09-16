@@ -159,7 +159,7 @@ async fn register_admin(
         |error| match error {
             dashboard_session::RegisterError::Invalid(message) => ApiError::bad_request(message),
             dashboard_session::RegisterError::AlreadyExists => {
-                ApiError::status(StatusCode::CONFLICT, "管理员已经创建，请直接登录")
+                ApiError::status(StatusCode::CONFLICT, "管理员已创建，直接登录")
             }
             dashboard_session::RegisterError::Internal(message) => ApiError::internal(message),
         },
