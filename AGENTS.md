@@ -4,11 +4,12 @@ Open Console Gateway is a local multi-Plan console: Rust workspace, Vue 3 dashbo
 
 ## Boundaries that affect changes
 
-- The dashboard uses HTTP `/dashboard/api/v3` (frozen) and `/dashboard/api/v4` (additive); mutations use CAS. Contract changes belong in the respective `schema/dashboard-api-v{3,4}.schema.json` and generated types. Do not revive retired V2 REST or add Tauri `invoke` commands. V4 contract changes require `pnpm run contract:v4:check`.
+- The dashboard uses HTTP `/dashboard/api/v3` (frozen) and `/dashboard/api/v4` (additive); mutations use CAS. Contract changes belong in the respective `schema/dashboard-api-v{3,4}.schema.json` and generated types. There is no V2 REST surface and no Tauri `invoke` commands; do not add either. V4 contract changes require `pnpm run contract:v4:check`.
 - Provider and Plan share `provider_id`. Adapter implementations stay static/sealed; user-defined Provider data binds Configurable HTTP. Custom API is account-owned; CPA is a separate static external integration.
-- Preserve authentication, Key obfuscation/redaction, URL validation, cooldown state writes, SSE pass-through, data integrity, and supported compatibility. Do not reintroduce remote sync or an Admin API.
+- Preserve authentication, Key obfuscation/redaction, URL validation, cooldown state writes, SSE pass-through, data integrity, and supported compatibility. There is no remote sync and no Admin API; do not add either.
 - Changes to user-visible facts update paired English and `.zh-CN.md` guides. Keep capability tables in `docs/user/`, not the root README.
-- Rust tests belong in sibling `tests.rs` modules. Test behavior, not source text, documentation wording, or workflow spelling.
+- Rust tests belong in sibling `tests.rs` modules. Test behavior, not source text, documentation wording, or workflow spelling. Frontend tests likewise never assert literal UI copy: domain functions return semantic codes, copy mapping lives in exported `*_KEYS` tables (`Record<Code, MessageKey>`), and views compose text with `t()`.
+- Frontend server state has a single owner: the Pinia stores in `src/stores/`. Loads are generation-guarded so stale responses never commit, mutations commit their results into the store in place, revalidations keep current content rendered (loading gates show skeletons only before the first successful load), and `dropSession` wipes cached resources on logout/401. Views keep only UI-local state (modals, drafts, filters, optimistic layers) and must not copy store data into local refs; shared presentation logic stays pure in `src/domain/`.
 
 ## Read for the affected task
 
