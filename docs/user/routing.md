@@ -2,6 +2,10 @@
 
 # Routing, Cost, And Failover
 
+### GOAT transient 429 versus account exhaustion
+
+GOAT only persists an account cooldown when an upstream 429 supplies a valid bounded `Retry-After` (seconds or HTTP date), or a recognized plan window with an absolute reset time. Retry-After takes precedence. A temporary provider/model failure or an unknown response without a usable deadline only excludes the account from this request; the next request retains the global sticky target. Five-hour, weekly, and monthly reset windows are supported. Other Providers keep their existing policies.
+
 ## Account Selection And Failover
 
 Accounts are tried in **list order**, which you can drag into shape and persist

@@ -43,6 +43,8 @@ pub(crate) fn parse_command_code_rate_limit(
         (UsageWindowKind::FiveHours, Duration::hours(5))
     } else if message_lower.contains("weekly usage limit for your plan") {
         (UsageWindowKind::Week, Duration::days(7))
+    } else if message_lower.contains("monthly usage limit for your plan") {
+        (UsageWindowKind::Month, Duration::days(31))
     } else {
         return None;
     };

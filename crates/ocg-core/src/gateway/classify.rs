@@ -74,22 +74,43 @@ pub(crate) fn rate_limit_window_and_cooldown(
     }
 }
 
+/// None means this request may fall back, but there is no account cooldown evidence.
 pub(crate) fn rate_limit_window_and_deadline(
     provider_id: &str,
     policy: RateLimitPolicy,
     text: &str,
+    retry_after: Option<&str>,
     observed_at: DateTime<Utc>,
-) -> (Option<UsageWindowKind>, DateTime<Utc>) {
+) -> Option<(Option<UsageWindowKind>, DateTime<Utc>)> {
     if provider_id == COMMAND_CODE_PROVIDER_ID
         && matches!(policy, RateLimitPolicy::GenericFiveMinute)
-        && let Some(limit) =
-            crate::command_code_rate_limit::parse_command_code_rate_limit(text, observed_at)
     {
-        return (Some(limit.window), limit.resets_at);
+        let limit =
+            crate::command_code_rate_limit::parse_command_code_rate_limit(text, observed_at);
+        // A valid upstream Retry-After wins. Retain a known window when present;
+        // otherwise it is a generic upstream-advertised deadline, not a guess.
+        if let Some(deadline) = retry_after.and_then(|value| parse_retry_after(value, observed_at))
+        {
+            return Some((limit.map(|limit| limit.window), deadline));
+        }
+        return limit.map(|limit| (Some(limit.window), limit.resets_at));
     }
-
     let (window, cooldown) = rate_limit_window_and_cooldown(policy, text);
-    (window, observed_at + cooldown)
+    Some((window, observed_at + cooldown))
+}
+
+fn parse_retry_after(value: &str, observed_at: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    let value = value.trim();
+    let deadline = if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
+        let seconds: i64 = value.parse().ok()?;
+        observed_at.checked_add_signed(Duration::try_seconds(seconds)?)?
+    } else {
+        DateTime::parse_from_rfc2822(value)
+            .ok()?
+            .with_timezone(&Utc)
+    };
+    let remaining = deadline.signed_duration_since(observed_at);
+    (remaining > Duration::zero() && remaining <= Duration::days(31)).then_some(deadline)
 }
 
 pub(crate) fn rate_limit_fallback(window: Option<UsageWindowKind>) -> RateLimitFallback {
@@ -114,8 +135,10 @@ mod tests {
             COMMAND_CODE_PROVIDER_ID,
             RateLimitPolicy::GenericFiveMinute,
             body,
+            None,
             observed_at,
-        );
+        )
+        .unwrap();
         assert_eq!(window, Some(UsageWindowKind::Week));
         assert_eq!(
             deadline,
@@ -128,8 +151,10 @@ mod tests {
             "another-provider",
             RateLimitPolicy::GenericFiveMinute,
             body,
+            None,
             observed_at,
-        );
+        )
+        .unwrap();
         assert_eq!(other_deadline, observed_at + Duration::minutes(5));
     }
 
@@ -243,17 +268,24 @@ mod tests {
     }
 
     #[test]
-    fn goat_429_is_generic_and_ignores_go_limit_windows() {
+    fn goat_429_without_account_evidence_does_not_cool_down() {
         for misleading_body in [
             "5-hour usage limit reached. Resets in 13min.",
             "Weekly usage limit reached. Resets in 4 days.",
             "Monthly usage limit reached. Resets in 13 days.",
             r#"{"type":"GoUsageLimitError","message":"Weekly usage limit reached. Resets in 3 days."}"#,
         ] {
-            let (window, cooldown) =
-                rate_limit_window_and_cooldown(RateLimitPolicy::GenericFiveMinute, misleading_body);
-            assert_eq!(window, None, "{misleading_body}");
-            assert_eq!(cooldown, Duration::minutes(5), "{misleading_body}");
+            assert_eq!(
+                rate_limit_window_and_deadline(
+                    COMMAND_CODE_PROVIDER_ID,
+                    RateLimitPolicy::GenericFiveMinute,
+                    misleading_body,
+                    None,
+                    Utc::now()
+                ),
+                None,
+                "{misleading_body}"
+            );
         }
         let (go_window, go_cooldown) = rate_limit_window_and_cooldown(
             RateLimitPolicy::GoWindow,
@@ -273,6 +305,59 @@ mod tests {
         assert_eq!(
             rate_limit_fallback(window),
             RateLimitFallback::ExhaustFreeChannel
+        );
+    }
+    #[test]
+    fn goat_retry_after_is_bounded_and_precedes_body_deadline() {
+        let now = DateTime::parse_from_rfc3339("2026-09-17T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let body = r#"{"error":{"code":"RATE_LIMITED","type":"rate_limit_error","message":"You've reached your monthly usage limit for your plan. Your limit resets at 2026-10-01T12:00:00Z."}}"#;
+        for header in ["90", "Thu, 17 Sep 2026 12:01:30 GMT"] {
+            assert_eq!(
+                rate_limit_window_and_deadline(
+                    COMMAND_CODE_PROVIDER_ID,
+                    RateLimitPolicy::GenericFiveMinute,
+                    body,
+                    Some(header),
+                    now
+                ),
+                Some((Some(UsageWindowKind::Month), now + Duration::seconds(90)))
+            );
+        }
+        for invalid in [
+            "",
+            "0",
+            "-1",
+            "+90",
+            "forever",
+            "999999999999999999999",
+            "2764800",
+            "Wed, 16 Sep 2026 12:00:00 GMT",
+        ] {
+            assert_eq!(
+                rate_limit_window_and_deadline(
+                    COMMAND_CODE_PROVIDER_ID,
+                    RateLimitPolicy::GenericFiveMinute,
+                    "{}",
+                    Some(invalid),
+                    now
+                ),
+                None,
+                "{invalid}"
+            );
+        }
+        assert_eq!(
+            rate_limit_window_and_deadline(
+                COMMAND_CODE_PROVIDER_ID,
+                RateLimitPolicy::GenericFiveMinute,
+                body,
+                None,
+                now
+            )
+            .unwrap()
+            .0,
+            Some(UsageWindowKind::Month)
         );
     }
 }
