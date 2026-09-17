@@ -14,10 +14,9 @@ jobs:
         shell: bash
         run: |
           mkdir evidence
-          curl --fail --location --max-time 45 --max-filesize 5242880 https://api-docs.deepseek.com/quick_start/pricing/ -o evidence/deepseek-pricing.html
-          curl --fail --location --max-time 45 --max-filesize 5242880 https://api-docs.deepseek.com/api/get-user-balance/ -o evidence/deepseek-balance.html
-          curl --fail --location --max-time 45 --max-filesize 5242880 https://bigmodel.cn/pricing -o evidence/zhipu-pricing.html
-          curl --fail --location --max-time 45 --max-filesize 5242880 https://docs.bigmodel.cn/llms.txt -o evidence/zhipu-docs-index.txt
+          curl --fail --location --max-time 45 --max-filesize 5242880 https://docs.bigmodel.cn/cn/guide/start/pricing.md -o evidence/zhipu-pricing.md
+          curl --fail --location --max-time 45 --max-filesize 5242880 https://docs.bigmodel.cn/cn/guide/models/text/glm-5.3.md -o evidence/glm-5.3.md
+          curl --fail --location --max-time 45 --max-filesize 5242880 https://docs.bigmodel.cn/cn/guide/models/vlm/glm-5.3-flash.md -o evidence/glm-5.3-flash.md
           sha256sum evidence/* > evidence/SHA256SUMS
       - uses: actions/upload-artifact@v7.0.1
         if: always()
