@@ -2,23 +2,55 @@ name: Maintainer issue preparation
 on:
   push:
     branches: [maintainer/issues-58-59-62-63-runner]
-    paths:
-      - .github/workflows/maintainer-issues.yml
-      - .github/maintainer/**
+    paths: [.github/workflows/maintainer-issues.yml]
 permissions:
-  contents: read
+  contents: write
+concurrency:
+  group: maintainer-issue-preparation
+  cancel-in-progress: false
 jobs:
-  source:
+  prepare:
     runs-on: ubuntu-22.04
-    timeout-minutes: 5
+    timeout-minutes: 15
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      BASE: e9f38d1b8baa0dc60f9fdd50e7f063d805ca39ba
+      TARGET: maintainer/issue-63-goat-credits
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
-          ref: e9f38d1b8baa0dc60f9fdd50e7f063d805ca39ba
+          fetch-depth: 0
           persist-credentials: false
-      - run: git archive --format=tar.gz HEAD > /tmp/ocg-source.tar.gz
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
         with:
-          name: ocg-source
-          path: /tmp/ocg-source.tar.gz
-          retention-days: 1
+          shared-key: quality-linux
+          workspaces: . -> target
+          save-if: false
+      - name: Prepare scoped change
+        run: |
+          cp .github/maintainer/issue63.py "$RUNNER_TEMP/fix.py"
+          git switch --detach "$BASE"
+          python "$RUNNER_TEMP/fix.py"
+          cargo fmt --all
+          git diff --check
+      - name: Verify credit rejection and ordinary errors
+        run: |
+          cargo test -p ocg-gateway goat_insufficient_credits --locked
+          cargo test -p ocg-core --test gateway_goat_credits --locked
+      - name: Publish feature branch only
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$BASE"
+          test ! -e .github/workflows/maintainer-issues.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add crates docs
+          git commit -m 'fix(goat): fall back on explicit insufficient-credit errors (#63)'
+          AUTH=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          echo "::add-mask::$AUTH"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $AUTH" push origin "HEAD:refs/heads/$TARGET"
+          echo "Candidate: $(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
