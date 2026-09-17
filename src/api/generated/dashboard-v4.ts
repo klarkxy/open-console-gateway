@@ -50,7 +50,14 @@ export type DashboardApiV4 =
   | AliasPublicationUpdate
   | DshApplicationStatus
   | DshApplication
-  | DshApplicationInstallRequest;
+  | DshApplicationInstallRequest
+  | OfficialApiKind
+  | OfficialPriceRow
+  | OfficialPriceSheet
+  | OfficialBalance
+  | OfficialSpend
+  | OfficialApiStatus
+  | OfficialApiPrices;
 /**
  * Inference operation advertised by one endpoint. Mapped 1:1 from
  * [`UpstreamProtocolKind`].
@@ -172,6 +179,7 @@ export type QuotaSharing =
     };
 export type DshApplicationStatus =
   "unsupported_runtime" | "not_detected" | "ready" | "installed" | "incompatible" | "conflict";
+export type OfficialApiKind = "deepseek" | "zhipu";
 
 /**
  * Live CAS token, process generation, and pricing snapshot id.
@@ -548,4 +556,54 @@ export interface DshApplicationInstallRequest {
   expectedRevision: number;
   keyId: string;
   processGeneration: number;
+}
+export interface OfficialPriceRow {
+  cacheReadPerMillion: number | null;
+  currency: string;
+  inputPerMillion: number;
+  model: string;
+  outputPerMillion: number;
+  /**
+   * `all`, or DeepSeek `peak` / `off_peak` at the frozen attempt time.
+   */
+  period: string;
+}
+export interface OfficialPriceSheet {
+  kind: OfficialApiKind;
+  observedAt: string;
+  revision: string;
+  rows: OfficialPriceRow[];
+  sourceUrl: string;
+  validUntil: string;
+}
+export interface OfficialBalance {
+  currency: string;
+  granted: number;
+  observedAt: string;
+  toppedUp: number;
+  total: number;
+}
+export interface OfficialSpend {
+  amount: number;
+  currency: string;
+  pricedRequests: number;
+}
+export interface OfficialApiStatus {
+  accountId: string;
+  balanceAvailable: boolean;
+  balances: OfficialBalance[];
+  kind: OfficialApiKind;
+  monthSpend: OfficialSpend[];
+  monthStartedAt: string;
+  prices: OfficialPriceSheet;
+  processGeneration: number;
+  providerId: string;
+  revision: number;
+  unpricedRequests: number;
+}
+export interface OfficialApiPrices {
+  prices: OfficialPriceSheet;
+  processGeneration: number;
+  providerId: string;
+  revision: number;
 }

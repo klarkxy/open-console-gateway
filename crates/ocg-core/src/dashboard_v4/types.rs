@@ -72,6 +72,13 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "DshApplicationStatus",
     "DshApplication",
     "DshApplicationInstallRequest",
+    "OfficialApiKind",
+    "OfficialPriceRow",
+    "OfficialPriceSheet",
+    "OfficialBalance",
+    "OfficialSpend",
+    "OfficialApiStatus",
+    "OfficialApiPrices",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -737,6 +744,8 @@ pub fn contract_schema() -> Value {
     include_type::<AliasPublication>(&mut serialize);
     include_type::<DshApplicationStatus>(&mut serialize);
     include_type::<DshApplication>(&mut serialize);
+    include_type::<crate::official_api::OfficialApiStatus>(&mut serialize);
+    include_type::<crate::official_api::OfficialApiPrices>(&mut serialize);
     let mut defs = serialize.take_definitions(true);
 
     let mut deserialize = SchemaSettings::draft2020_12().into_generator();

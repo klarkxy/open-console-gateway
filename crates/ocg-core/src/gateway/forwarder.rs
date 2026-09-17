@@ -324,6 +324,7 @@ enum RequestPricingSnapshot {
     /// Linked Custom Key: exact frozen platform price, or fail-closed unknown.
     /// Never inherits Go / GOAT / Ollama / USD provider rows.
     Platform(PlatformAttemptPrice),
+    OfficialApi(crate::official_api::OfficialAttemptPrice),
     Unpriced,
 }
 
@@ -404,6 +405,35 @@ impl RequestPricingSnapshot {
                 Utc::now(),
             ),
             Self::Platform(price) => price.estimate(),
+            Self::OfficialApi(price) => {
+                let amount = (model == price.model)
+                    .then(|| {
+                        price.amount(
+                            prompt_tokens,
+                            completion_tokens,
+                            cached_tokens,
+                            cache_creation_tokens,
+                        )
+                    })
+                    .flatten();
+                let usd = amount.filter(|_| price.sheet.kind.currency() == "USD");
+                crate::kernel::pricing::PricingEstimate {
+                    raw_cost_usd: usd,
+                    quota_debit: None,
+                    effective_paid_cost_usd: None,
+                    cost: usd,
+                    pricing_revision_id: Some(price.sheet.revision.clone()),
+                    quota_multiplier: None,
+                    local_adjustment_multiplier: None,
+                    cost_state: if usd.is_some() {
+                        "priced"
+                    } else if amount.is_some() {
+                        "unknown"
+                    } else {
+                        "unpriced"
+                    },
+                }
+            }
             Self::Unpriced => crate::kernel::pricing::PricingEstimate {
                 raw_cost_usd: None,
                 quota_debit: None,
@@ -422,6 +452,7 @@ impl RequestPricingSnapshot {
             Self::OpenCode(snapshot) => Some(&snapshot.revision),
             Self::Provider(snapshot) => Some(snapshot.revision()),
             Self::Platform(price) => price.provenance(),
+            Self::OfficialApi(price) => Some(&price.sheet.revision),
             Self::Unpriced => None,
         }
     }
@@ -431,6 +462,7 @@ impl RequestPricingSnapshot {
             Self::OpenCode(_) => Some(crate::provider::OPENCODE_PROVIDER_ID),
             Self::Provider(snapshot) => Some(snapshot.provider_id()),
             Self::Platform(_) => Some(crate::provider::CUSTOM_PROVIDER_ID),
+            Self::OfficialApi(price) => Some(&price.provider_id),
             Self::Unpriced => None,
         }
     }
@@ -643,6 +675,75 @@ fn bind_platform_attempt_price(
     RequestPricingSnapshot::Platform(platform)
 }
 
+fn bind_official_attempt_price(
+    state: &CoreState,
+    account: &Account,
+    plan: &RequestPlan,
+    dynamics: &[crate::dynamic::DynamicProviderRuntime],
+    context: &mut ForwardAttemptContext,
+    original: RequestPricingSnapshot,
+) -> RequestPricingSnapshot {
+    if !matches!(original, RequestPricingSnapshot::Unpriced)
+        || platform_request_has_variable_cost(&plan.body, plan.service_tier.as_deref())
+    {
+        return original;
+    }
+    let Ok(body) = serde_json::from_slice::<Value>(&plan.body) else {
+        return original;
+    };
+    // Hosted tools have charges outside token pricing; ordinary function tools do not.
+    if body
+        .get("tools")
+        .and_then(Value::as_array)
+        .is_some_and(|tools| {
+            tools.iter().any(|tool| {
+                tool.get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|kind| !matches!(kind, "function" | "custom"))
+            })
+        })
+        || body.get("web_search_options").is_some()
+    {
+        return original;
+    }
+    let Some(runtime) = dynamics
+        .iter()
+        .find(|runtime| runtime.id == account.provider_id)
+    else {
+        return original;
+    };
+    let Some(kind) = crate::official_api::kind_for_runtime(runtime) else {
+        return original;
+    };
+    let Some(endpoint) = plan
+        .custom_route
+        .as_ref()
+        .map(|route| route.endpoint_url.as_str())
+    else {
+        return original;
+    };
+    let protocol = match plan.upstream {
+        ApiFormat::ChatCompletions => crate::provider::UpstreamProtocolKind::ChatCompletions,
+        ApiFormat::Responses => crate::provider::UpstreamProtocolKind::Responses,
+        ApiFormat::Messages => crate::provider::UpstreamProtocolKind::Messages,
+        ApiFormat::Gemini => return original,
+    };
+    if !crate::official_api::route_is_official(kind, endpoint, protocol) {
+        return original;
+    }
+    let Ok(sheet) = state.db.lock().official_api_prices(&runtime.id, kind) else {
+        return original;
+    };
+    let price = crate::official_api::OfficialAttemptPrice {
+        provider_id: runtime.id.clone(),
+        sheet,
+        model: plan.model.clone(),
+        at: state.sample_gateway_clock().0,
+    };
+    context.official_price = Some(price.clone());
+    RequestPricingSnapshot::OfficialApi(price)
+}
+
 fn apply_platform_native_attribution(
     attribution: &mut ForwardLogNativeAttribution,
     context: &ForwardAttemptContext,
@@ -729,6 +830,7 @@ struct ForwardAttemptContext {
     client_key_id: Option<String>,
     client_key_name: Option<String>,
     platform_price: Option<PlatformAttemptPrice>,
+    official_price: Option<crate::official_api::OfficialAttemptPrice>,
 }
 
 impl ForwardAttemptContext {
@@ -761,6 +863,7 @@ impl ForwardAttemptContext {
             client_key_id: None,
             client_key_name: None,
             platform_price: None,
+            official_price: None,
         }
     }
 
@@ -947,6 +1050,14 @@ async fn forward_request_impl(
     } else {
         pricing_snapshot
     };
+    let pricing_snapshot = bind_official_attempt_price(
+        state,
+        account,
+        plan,
+        dynamics,
+        &mut attempt_context,
+        pricing_snapshot,
+    );
     attempt_context.set_client_key(client_key_id, state);
     let attempt_spec =
         match provider_adapter::resolve_route_with_dynamics(account, config, plan, dynamics) {
@@ -3122,6 +3233,21 @@ fn persist_log_identity(
     attribution.resolved_alias = context.resolved_alias.clone();
     attribution.upstream_model = Some(context.upstream_model.clone());
     apply_platform_native_attribution(&mut attribution, context, metrics);
+    if let Some(price) = &context.official_price
+        && matches!(metrics.cost_state, "priced" | "unknown")
+        && metrics.pricing_provider_id.as_deref() == Some(price.provider_id.as_str())
+        && metrics.pricing_revision_id.as_deref() == Some(price.sheet.revision.as_str())
+        && let Some(amount) = price.amount(
+            metrics.prompt_tokens,
+            metrics.completion_tokens,
+            metrics.cached_tokens,
+            metrics.cache_creation_tokens,
+        )
+    {
+        attribution.native_cost_value = Some(amount);
+        attribution.native_cost_unit = Some(price.sheet.kind.currency().into());
+        attribution.native_cost_currency = Some(price.sheet.kind.currency().into());
+    }
     db.set_forward_log_native_attribution(id, &attribution)?;
     Ok(())
 }
@@ -3384,6 +3510,7 @@ mod stream_usage_tests {
             client_key_id: None,
             client_key_name: None,
             platform_price: None,
+            official_price: None,
         };
         let mut headers = HeaderMap::new();
         headers.insert("x-request-id", format!("request-{secret}").parse().unwrap());
@@ -3724,6 +3851,7 @@ mod stream_outcome_guard_tests {
             client_key_id: None,
             client_key_name: None,
             platform_price: None,
+            official_price: None,
         }
     }
 

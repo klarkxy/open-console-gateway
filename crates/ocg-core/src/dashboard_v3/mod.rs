@@ -556,7 +556,7 @@ impl V3ApiError {
         }
     }
 
-    fn outbound_failed(state: &CoreState, message: impl Into<String>) -> Self {
+    pub(crate) fn outbound_failed(state: &CoreState, message: impl Into<String>) -> Self {
         Self::outbound_failed_at(
             state.settings_revision(),
             state.process_generation(),
@@ -576,6 +576,18 @@ impl V3ApiError {
                 message: message.into(),
                 current_revision: Some(current_revision),
                 process_generation: Some(process_generation),
+            },
+        }
+    }
+
+    pub(crate) fn throttled_at(state: &CoreState, message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            body: V3Error {
+                code: ERROR_THROTTLED.into(),
+                message: message.into(),
+                current_revision: Some(state.settings_revision()),
+                process_generation: Some(state.process_generation()),
             },
         }
     }

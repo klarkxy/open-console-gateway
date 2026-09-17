@@ -30,7 +30,7 @@ MiniMax 官方 Chat 与 Messages 地址分别使用 `/v1`、`/anthropic/v1` 前�
 
 于 **2026-09-08** 对照 CC-Switch 的 Claude、Codex、Gemini、OpenCode、OpenClaw 与 Hermes [预设源码 `f3b18df`](https://github.com/farion1231/cc-switch/tree/f3b18df12007d0fd79fd8ad8d310880664015197/src/config)。CC-Switch 的分类只用于发现候选，不能直接作为可信判断，例如 Azure、xAI 也可能被标为 third_party。下表的端点与鉴权选择均以运营方文档核对。
 
-每一行是可用的配置模板，不代表已使用真实 Key 完成在线推理，也不代表账号已经获得模型权限。新增供应商仍为未定价：不同步官方额度、余额和价格。Coding/Token Plan Key、不同地区 API Key 必须与所选端点匹配，并遵循上游套餐允许的使用范围。
+每一行是可用的配置模板，不代表已使用真实 Key 完成在线推理，也不代表账号已经获得模型权限。除下文说明的匹配 DeepSeek/智谱官网 API 预设外，新增供应商仍未定价，不同步官方额度、余额和价格。Coding/Token Plan Key、不同地区 API Key 必须与所选端点匹配，并遵循上游套餐允许的使用范围。
 
 下表按厂商族分组，每个预设变体各占一行；多变体厂商（腾讯、智谱、阿里云、Volcengine/BytePlus、百度千帆、StepFun、小米、MiniMax、StreamLake、SiliconFlow、Compshare）的所有变体集中在同一品牌标识下。`src/assets/provider-logos/` 下有 CC0 资源（Anthropic、Google、DeepSeek、Ollama、NVIDIA、OpenRouter、阿里云、字节跳动、百度）的厂商族会在选择器中显示该品牌 SVG，其他厂商使用带首字母的染色 monogram 块。内置 Plan Kimi Code CN、MiniMax CN 与 Ollama Cloud 虽不在选择器内，也同样展示厂商品牌标识。
 
@@ -108,3 +108,17 @@ KAT-Coder 的完整 Chat 地址与 Bearer 鉴权，根据官方 OpenAI 兼容客
 ---
 
 [新增供应商](add-provider.zh-CN.md) · [供应商](providers.zh-CN.md) · [English](provider-presets.md)
+
+## 官网 API 余额与价格参考
+
+DeepSeek API 与智谱 GLM API 预设现在提供独立账务参考面板，但保存的预设、API 类型、鉴权和官网目的地必须仍然匹配。推理继续使用 Configurable HTTP；任意 Custom API、改成中转地址的预设以及 Coding Plan 不会继承这项能力。
+
+在 **账号** 页，DeepSeek 的 **刷新余额** 仅在点击时使用所选 Key 读取官网 `/user/balance`。总余额、赠送余额、充值余额分别展示，保留原币 CNY/USD 和查询时间；总余额已经包含两个分项，不会重复相加。刷新失败保留上次成功结果，不改变启停、认证状态、冷却或路由。换 Key 或修改地址后不会沿用旧余额。智谱明确显示未接入公开余额 API，不生成假余额，也不调用未经证实的控制台接口。
+
+在 **供应商 → 价格** 页，这两种预设展示每百万 Token 的官网参考单价，并提供手工 **刷新价格表**。初始使用附日期的内置参考；参考有效期为 30 天，过期后的新请求保持未定价，直到刷新成功。官网结构不支持时保留旧参考但不延长有效期。打开页面和执行推理都不会自动请求官网价格或余额。
+
+DeepSeek 使用官网 USD 价格，区分缓存命中、未命中以及工作日峰谷时段；CNY 余额不会换算或扣除 USD 估算。智谱使用官网 CNY 价格，写入原币费用，不会冒充美元。账号面板按 UTC 自然月统计 OCG 本地成功请求，按原币分别汇总，并显示费用未知的请求数。这是参考估算，不是实际账单；不包含 OCG 外的调用，也不回算历史请求。每次尝试固定价格版本与时段，流式完成时沿用同一份价格。
+
+仅对有完整单价的准确上游模型计价。未知模型、不支持的分档或存储计费、缺少用量、无效 Token 数、缓存写入、收费托管工具及其他额外计费请求保持未知。把模型路由改到非官网地址后不会继承官网价格。已有匹配预设无需数据迁移；普通用户定义供应商仍未定价。
+
+来源：[DeepSeek 余额](https://api-docs.deepseek.com/api/get-user-balance/)、[DeepSeek 价格](https://api-docs.deepseek.com/quick_start/pricing/)、[智谱价格](https://docs.bigmodel.cn/cn/guide/start/pricing.md)。初始参考核验于 2026-09-17。来源检查和自动测试均未使用真实账号 Key，也未发送收费推理请求。

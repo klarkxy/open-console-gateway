@@ -108,3 +108,17 @@ Initial model IDs are reviewed against operator documentation rather than copied
 ---
 
 [Add a Provider](add-provider.md) · [Providers](providers.md) · [简体中文](provider-presets.zh-CN.md)
+
+## Official API balances and reference prices
+
+DeepSeek API and Zhipu GLM API presets now expose a separate financial reference panel when their saved preset, API offering, authentication, and official destination still match. Inference remains on Configurable HTTP. This is not available for arbitrary Custom API endpoints, edited proxy destinations, or Coding Plan presets.
+
+On **Accounts**, DeepSeek's **Refresh balance** explicitly reads the selected Key's official `/user/balance` endpoint. Total, granted and topped-up balances are shown separately, with their original CNY/USD currency and observation time. The total already contains its components; it is not added to them. Balance refresh never changes enablement, authentication state, cooldown or routing, and errors retain the last successful observation. A replaced Key or edited endpoint cannot inherit an old balance. Zhipu shows that no public balance API is integrated; it does not invent a wallet value or request undocumented console endpoints.
+
+On **Providers → Pricing**, these presets show official reference rates per million tokens and an explicit **Refresh price table** action. A dated, checked-in reference is available initially. Price references expire after 30 days; new requests then remain unpriced until a successful refresh. Unsupported source layouts retain the previous reference without extending its validity. Loading the page and sending inference never fetch a price document or balance.
+
+DeepSeek's reference is in USD and distinguishes cache hits, misses, and weekday peak/off-peak periods. A CNY balance is not converted or subtracted from USD estimates. Zhipu's reference is in CNY and is stored as native-currency cost, never as USD. Account panels aggregate this month's successful locally logged requests by original currency using UTC month boundaries and show the number with unknown cost. This is an estimate, not an invoice; it excludes traffic outside OCG and does not reprice historical requests. The price revision and period are captured per attempt, including streaming finalization.
+
+Only supported exact upstream model rates apply. Unknown models, unsupported tier/storage billing, missing usage, invalid token counts, cache writes, paid hosted tools and other variable-cost requests stay unknown. Editing a model's route to another destination cannot inherit official prices. Existing saved presets gain this capability without a migration; generic providers remain unpriced.
+
+Sources: [DeepSeek balance](https://api-docs.deepseek.com/api/get-user-balance/), [DeepSeek pricing](https://api-docs.deepseek.com/quick_start/pricing/), and [Zhipu pricing](https://docs.bigmodel.cn/cn/guide/start/pricing.md). The initial reference was checked on 2026-09-17. Neither the source checks nor automated tests used a real account Key or a paid inference request.

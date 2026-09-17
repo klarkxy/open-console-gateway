@@ -1414,11 +1414,21 @@ fn dynamic_catalog_entry(runtime: &crate::dynamic::DynamicProviderRuntime) -> Pr
         verification_runtime_availability: "not_applicable".into(),
         routable: true,
         managed_registration: false,
-        pricing_availability: "unpriced".into(),
+        pricing_availability: if crate::official_api::kind_for_runtime(runtime).is_some() {
+            "available"
+        } else {
+            "unpriced"
+        }
+        .into(),
         usage_availability: "unavailable".into(),
         manual_usage_calibration: false,
         quota_unit: "none".into(),
-        model_source: "dynamic_provider".into(),
+        model_source: if crate::official_api::kind_for_runtime(runtime).is_some() {
+            "official_api_preset"
+        } else {
+            "dynamic_provider"
+        }
+        .into(),
         key_prefix: None,
         auth_schemes,
         upstream_protocols: {

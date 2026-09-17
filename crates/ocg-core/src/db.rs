@@ -41,6 +41,7 @@ pub struct Database {
 }
 
 pub(crate) mod identity;
+mod official_api;
 mod platform;
 
 /// Local configuration for the one code-owned CPA external integration.
@@ -6913,6 +6914,10 @@ impl Database {
         );
         tx.execute(
             "DELETE FROM provider_models WHERE provider_id = ?1",
+            [&existing.id],
+        )?;
+        tx.execute(
+            "DELETE FROM provider_pricing_snapshots WHERE provider_id = ?1",
             [&existing.id],
         )?;
         tx.execute("DELETE FROM providers WHERE id = ?1", [&existing.id])?;
