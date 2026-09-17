@@ -16,6 +16,7 @@ jobs:
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_TERM_COLOR: always
       BASE: e9f38d1b8baa0dc60f9fdd50e7f063d805ca39ba
       TARGET: maintainer/issue-63-goat-credits
     steps:
@@ -33,6 +34,12 @@ jobs:
           cp .github/maintainer/issue63.py "$RUNNER_TEMP/fix.py"
           git switch --detach "$BASE"
           python "$RUNNER_TEMP/fix.py"
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('crates/ocg-core/tests/gateway_goat_credits.rs')
+          s = p.read_text().replace('assert_eq!(row.attempt, 1);', 'assert_eq!(row.attempt, Some(1));').replace('row.attempt == 2', 'row.attempt == Some(2)').replace('let diagnostic: serde_json::Value = serde_json::from_str(row.diagnostic_json.as_deref().unwrap()).unwrap();', 'let diagnostic = row.diagnostic.as_ref().unwrap();')
+          p.write_text(s)
+          PY
           cargo fmt --all
           git diff --check
       - name: Verify credit rejection and ordinary errors
