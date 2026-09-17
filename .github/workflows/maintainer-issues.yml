@@ -17,8 +17,9 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
       CARGO_TERM_COLOR: always
-      BASE: e9f38d1b8baa0dc60f9fdd50e7f063d805ca39ba
-      TARGET: maintainer/issue-58-go-catalog-routing
+      MAIN: 10951663eb24cfb655b252dbeb745083e03a4647
+      BASE: adac5d85ef1040d833679741f9bb1bbeac129060
+      TARGET: maintainer/issue-62-ready
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
@@ -29,28 +30,50 @@ jobs:
           shared-key: quality-linux
           workspaces: . -> target
           save-if: false
-      - name: Prepare scoped change
+      - name: Integrate current main without losing separate issue changes
         run: |
-          cp .github/maintainer/issue58.py "$RUNNER_TEMP/fix.py"
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git switch --detach "$BASE"
-          python "$RUNNER_TEMP/fix.py"
+          git merge --no-commit --no-ff "$MAIN" || true
+          python - <<'PY'
+          import os, subprocess
+          from pathlib import Path
+          conflicts = subprocess.check_output(['git','diff','--name-only','--diff-filter=U'],text=True).splitlines()
+          assert set(conflicts) <= {'docs/user/routing.md','docs/user/routing.zh-CN.md'}, conflicts
+          for path, heading in [('docs/user/routing.md','### GOAT transient 429 versus account exhaustion'),('docs/user/routing.zh-CN.md','### GOAT 临时 429 与账号额度耗尽')]:
+              own = subprocess.check_output(['git','show',os.environ['BASE']+':'+path],text=True)
+              section = own[own.index(heading):].split('\n## ',1)[0]
+              current = subprocess.check_output(['git','show',os.environ['MAIN']+':'+path],text=True)
+              current = current.replace('\n## ', '\n'+section+'\n## ', 1)
+              if path.endswith('zh-CN.md'):
+                  current = current.replace('无法识别的 429 默认冷却 5 分钟，同样不改用量基线。','OpenCode Go 无法识别的 429 默认冷却 5 分钟，同样不改用量基线；GOAT 只在具有上游截止时间依据时写冷却，见前文。')
+              else:
+                  current = current.replace('An\n  unrecognized 429 falls back to a five-minute cooldown without changing\n  any usage baseline.', 'An\n  unrecognized OpenCode Go 429 falls back to a five-minute cooldown without changing\n  any usage baseline. GOAT requires upstream deadline evidence as described above.')
+              Path(path).write_text(current)
+          for path, old, new in [
+              ('docs/user/accounts.md','5-hour or weekly plan window uses the response\'s exact `Your limit resets at`\n  timestamp for the matching account cooldown. Ordinary transient or malformed\n  rate limits keep the generic five-minute fallback.', '5-hour, weekly, or monthly plan window uses the response\'s exact `Your limit resets at`\n  timestamp for the matching account cooldown. A valid bounded `Retry-After` takes precedence.\n  Without a usable upstream deadline, transient or malformed rate limits only\n  exclude that account from the current request and do not write account state.'),
+              ('docs/user/accounts.zh-CN.md','普通瞬时限流或畸形响应仍使用通用 5 分钟兜底。','有效且有界的 `Retry-After` 优先，支持 5 小时、周和月窗口。没有有效上游截止时间的临时限流或畸形响应只在本次请求内排除账号，不写账号状态。')]:
+              p=Path(path); s=p.read_text(); assert old in s, path; p.write_text(s.replace(old,new))
+          PY
+          git add docs
+          test -z "$(git diff --name-only --diff-filter=U)"
           cargo fmt --all
           git diff --check
-      - name: Verify routing and zero-send controls
+      - name: Verify combined behavior
         run: |
-          cargo test -p ocg-core --lib diagnostic_plan_does_not_veto --locked
-          cargo test -p ocg-core --test gateway_go_catalog_models --locked
-      - name: Publish feature branch only
+          cargo test -p ocg-core --test gateway_goat_transient --test gateway_goat_credits --test gateway_go_catalog_models --locked
+      - name: Publish candidate only
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$BASE"
           test ! -e .github/workflows/maintainer-issues.yml
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add crates docs
-          git commit -m 'fix(gateway): honor runtime Go contracts before diagnostic planning (#58)'
+          git commit -m 'Merge current main and clarify evidence-only GOAT cooldown documentation'
+          git merge-base --is-ancestor "$MAIN" HEAD
+          git merge-base --is-ancestor "$BASE" HEAD
           AUTH=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
           echo "::add-mask::$AUTH"
           git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $AUTH" push origin "HEAD:refs/heads/$TARGET"
