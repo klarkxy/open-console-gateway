@@ -3,6 +3,8 @@ pub mod alias;
 pub(crate) mod alias_publication;
 pub mod auth;
 pub mod browser;
+pub(crate) mod command_code_rate_limit;
+pub(crate) mod command_code_usage;
 pub(crate) mod control;
 pub mod cpa;
 pub(crate) mod cpa_cli_import;

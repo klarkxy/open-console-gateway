@@ -169,7 +169,7 @@
     </template>
 
     <template #header-extra>
-      <div class="account-actions">
+      <div class="account-actions" :class="{ 'account-actions--calibratable': usageRefreshAvailable && manualUsageCalibration }">
         <div v-if="accountIsReady(account)" class="account-action account-action--enabled">
           <n-tooltip trigger="hover">
             <template #trigger>
@@ -207,7 +207,7 @@
 
         <div
           v-if="manualUsageCalibration && accountIsReady(account) && edits"
-          class="account-action account-action--secondary"
+          class="account-action account-action--secondary account-action--calibration"
         >
           <n-popover
             trigger="click"
@@ -767,4 +767,10 @@ watch(() => props.account.purchase_date, (value) => {
     margin-left: 0;
   }
 }
+.account-actions--calibratable {
+  grid-template-columns: repeat(5, 40px);
+}
+.account-actions--calibratable .account-action--calibration { grid-column: 3; }
+.account-actions--calibratable .account-action--test { grid-column: 4; }
+.account-actions--calibratable .account-action--menu { grid-column: 5; }
 </style>

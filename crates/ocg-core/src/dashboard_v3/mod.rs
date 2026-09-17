@@ -24,6 +24,7 @@ mod account_verify;
 mod accounts;
 mod auth;
 mod browser;
+mod command_code_usage_refresh;
 mod connection;
 mod cpa;
 mod custom_discovery;
@@ -111,6 +112,11 @@ pub use types::{
     contract_schema_pretty,
 };
 pub use updater::{GITHUB_LATEST_RELEASE_API, GITHUB_LATEST_RELEASE_URL};
+
+#[cfg(debug_assertions)]
+pub use crate::command_code_usage::{
+    CommandCodeUsageTargetGuard, install_command_code_usage_target_for_tests,
+};
 
 pub use crate::official_protocols::OfficialProtocolBaseline;
 #[cfg(debug_assertions)]

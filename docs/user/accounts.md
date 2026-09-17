@@ -111,7 +111,8 @@ connection does not. The account is created even if the refresh fails.
 Use only the official provider API **Key** for OpenCode Go, Command Code GOAT,
 MiniMax Token Plan, or Kimi Code. Browser cookies and reverse-proxy credentials
 are not account Keys. GOAT is a separate provider mapping and its Key is sent
-only to the fixed Command Code Provider API, never to OpenCode. Custom API is a
+only to fixed Command Code inference and account-usage endpoints, never to
+OpenCode; the public catalog refresh remains keyless. Custom API is a
 separate trusted-administrator destination and must not send its key to an
 OpenCode endpoint.
 
@@ -249,9 +250,10 @@ from a backup or by signing in again.
 
 Each ready OpenCode Go or GOAT card shows the account name, cooldown state, and
 5-hour / weekly / monthly usage bars. OpenCode Go periodically calibrates the
-local accounting against its official endpoint. GOAT bars remain a local
-projection of priced OCG logs. Zen Free has its own anonymous, egress-IP-shared
-free cooldown rather than a key quota.
+local accounting against its official endpoint. GOAT calibrates only when you
+click **Refresh quota**, then continues from that official baseline with priced
+OCG logs. Zen Free has its own anonymous, egress-IP-shared free cooldown rather
+than a key quota.
 
 - **Usage baselines.** Type a percentage or drag a bar to set its current
   real-world usage baseline. After the value is saved, successful request cost
@@ -274,6 +276,17 @@ free cooldown rather than a key quota.
   `status=rate-limited` never write inference cooldown. Failures keep the
   previous baseline and last-success timestamp. The request uses the same global
   outbound proxy as other dashboard fetches.
+- **Refresh GOAT quota.** The GOAT card calls the fixed first-party
+  `https://api.commandcode.ai/alpha/billing/credits` endpoint with that
+  account's Key only after an explicit click. OCG validates the GOAT 5-hour,
+  weekly, and monthly caps before atomically replacing all three baselines.
+  This path has the same 15-second per-account throttle and global proxy, but
+  no automatic schedule; its result never writes inference cooldown or changes
+  routing. Manual calibration remains available for correction.
+- **GOAT inference cooldown.** A real Command Code `429` that identifies the
+  5-hour or weekly plan window uses the response's exact `Your limit resets at`
+  timestamp for the matching account cooldown. Ordinary transient or malformed
+  rate limits keep the generic five-minute fallback.
 - **Identity and credentials.** The name is the account's required primary
   display label. The login account field is optional; on Key-account creation,
   entering it first copies it into the name until you edit the name yourself.

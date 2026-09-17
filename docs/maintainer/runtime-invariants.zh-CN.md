@@ -124,6 +124,7 @@
 ## 用量同步
 
 - 已完成账号的配额：官方 `https://opencode.ai/zen/go/v1/usage`（`go_usage.rs`）是周期性校准基线；本地 `forward_logs` 在上次成功校准后仍做实时估算。`usage_sync.rs` 协调手动与后台路径：ready+enabled 且最近约 24h 内有本地活动的账号约每小时对账一次，不活跃的约每天一次；disabled/not-ready/空 Key 账号不自动刷新。全局并发 1，带 jitter 与可注入 clock/jitter/fetch seams；无启动惊群。手动 `POST /dashboard/api/v3/accounts/{id}/usage/refresh` 仍可用；服务端限流为每账号 15s（无论成功失败都计入），带并发去重，返回 Retry-After / `next_allowed_at`；失败保留上次基线与上次成功。本地最大 Go 用量 ≥80% 时，加速对账至多每 15 分钟一次。真实推理 429 仍写入现有冷却/选择器，并额外安排约 1–2 分钟后官方对账（非内联）；官方失败或 `status=rate-limited` 从不写入推理冷却。成功后按最早 `resetsAt`（加有界 jitter）重新调度，尊重活跃/不活跃节奏。失败退避：5m → 15m → 1h → 6h。同步元数据位于 `provider_usage_sync_state`。共享实现包括 CAS / 三窗原子校准与全局代理。官方 Go 文档未列出该端点。
+- Command Code GOAT 将同一个 V3 刷新路由分派到独立的 `command_code_usage.rs` / `dashboard_v3/command_code_usage_refresh.rs` 手工路径。它只把选中账号解密后的 Key 通过全局代理发送到固定、禁止重定向的端点，限制响应大小并校验精确 GOAT 上限；网络请求后重新检查 V3 CAS 与账号行身份，再用既有同步元数据提交三个基线。它使用每账号 15 秒手工节流，但没有后台、加速、重置或推理 429 调度。上游失败保留上次基线，且绝不写推理冷却。真实 GOAT 推理 `429` 仍是路由冷却的权威来源：只有严格的 Command Code `RATE_LIMITED` / `rate_limit_error` 正文明确命名 5 小时或周套餐窗口，并携带有界、未来的 RFC3339 `Your limit resets at` 时间时，才写入该窗口的精确冷却；正文畸形、时间已过、距离异常或普通瞬时 429 仍使用通用 5 分钟冷却。
 
 ## 定价、容器与 CI 说明
 

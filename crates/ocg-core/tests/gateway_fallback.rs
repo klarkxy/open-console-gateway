@@ -2,7 +2,7 @@ use axum::Router;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use chrono::{Duration, Utc};
+use chrono::{Duration, SecondsFormat, Utc};
 use ocg_core::crypto::{KeyCipher, StaticKeyCipher};
 use ocg_core::db::{Database, ForwardLogQueryOptions};
 use ocg_core::gateway;
@@ -2380,6 +2380,49 @@ async fn mixed_goat_cooldown_and_sticky_state_are_independent() {
         sync.as_ref()
             .is_none_or(|state| state.next_eligible_at.is_none()),
         "GOAT 429 must not schedule OpenCode Go usage sync: {sync:?}"
+    );
+}
+
+#[tokio::test]
+async fn goat_plan_window_429_persists_the_exact_weekly_deadline() {
+    let expected_reset = Utc::now() + Duration::hours(2);
+    let reset_text = expected_reset.to_rfc3339_opts(SecondsFormat::Millis, true);
+    let body: &'static str = Box::leak(
+        format!(
+            r#"{{"error":{{"code":"RATE_LIMITED","message":"You've reached your weekly usage limit for your plan. Your limit resets at {reset_text}. Please wait for the window to reset or upgrade your plan to continue.","type":"rate_limit_error"}}}}"#
+        )
+        .into_boxed_str(),
+    );
+    let replies = [reply(StatusCode::TOO_MANY_REQUESTS.as_u16(), body)];
+    let entries = [("goat-key", replies.as_slice())];
+    let (h, goat_id) = start_goat(
+        &entries,
+        &[COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM],
+        true,
+        true,
+    )
+    .await;
+
+    let (status, response) = h
+        .protocol(
+            "/v1/chat/completions",
+            COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
+        )
+        .await;
+    assert_ne!(status, StatusCode::OK, "{response}");
+
+    let goat = h.account(&goat_id);
+    assert!(goat.cooldown_generic_until.is_none());
+    assert!(goat.cooldown_5h_until.is_none());
+    assert_eq!(
+        goat.cooldown_week_until
+            .map(|deadline| deadline.timestamp_millis()),
+        Some(expected_reset.timestamp_millis())
+    );
+    assert_eq!(
+        goat.cooldown_until
+            .map(|deadline| deadline.timestamp_millis()),
+        Some(expected_reset.timestamp_millis())
     );
 }
 

@@ -1,8 +1,8 @@
 //! Provider usage capability surface.
 //!
 //! OpenCode Go is the only verified authoritative automatic-sync contract
-//! today. Command Code GOAT publishes a local-state capability and has no
-//! production fetch.
+//! today. Command Code GOAT publishes authoritative manual evidence, but is
+//! intentionally excluded from the automatic coordinator.
 
 use crate::provider::{ProviderRegistry, UsageContractKind};
 use serde::{Deserialize, Serialize};
@@ -72,7 +72,7 @@ mod tests {
         assert!(go.authoritative_for_quota);
 
         let goat = provider_usage_capability(COMMAND_CODE_PROVIDER_ID).unwrap();
-        assert_eq!(goat.evidence, ProviderUsageEvidence::Unavailable);
+        assert_eq!(goat.evidence, ProviderUsageEvidence::Authoritative);
         assert!(!goat.automatic_sync);
         assert!(!goat.authoritative_for_quota);
 
@@ -89,8 +89,8 @@ mod tests {
                     assert!(capability.authoritative_for_quota);
                 }
                 ProviderAdapterKind::CommandCodeGoat => {
-                    let capability = capability.expect("GOAT publishes local-state usage");
-                    assert_eq!(capability.evidence, ProviderUsageEvidence::Unavailable);
+                    let capability = capability.expect("GOAT publishes manual official usage");
+                    assert_eq!(capability.evidence, ProviderUsageEvidence::Authoritative);
                     assert!(!capability.automatic_sync);
                     assert!(!capability.authoritative_for_quota);
                 }
@@ -136,7 +136,7 @@ mod tests {
         assert!(goat_usage.publishes_capability);
         assert!(!goat_usage.automatic_sync);
         let goat = provider_usage_capability(COMMAND_CODE_PROVIDER_ID).unwrap();
-        assert_eq!(goat.evidence, ProviderUsageEvidence::Unavailable);
+        assert_eq!(goat.evidence, ProviderUsageEvidence::Authoritative);
         assert!(!goat.automatic_sync);
 
         let zen_usage = ProviderRegistry::get(OPENCODE_ZEN_FREE_PROVIDER_ID)
