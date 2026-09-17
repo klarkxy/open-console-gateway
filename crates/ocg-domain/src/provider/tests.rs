@@ -129,7 +129,7 @@ fn catalog_hardcodes_providers_and_keeps_unverified_providers_unroutable() {
     assert_eq!(goat.verification_runtime_availability, "not_applicable");
     assert_eq!(goat.creation_availability, CreationAvailability::Available);
     assert_eq!(goat.pricing_availability, "available");
-    assert_eq!(goat.usage_availability, "local_state");
+    assert_eq!(goat.usage_availability, "available");
     assert!(goat.manual_usage_calibration);
     assert_eq!(goat.auth_schemes, &BEARER_AUTH);
     assert_eq!(goat.upstream_protocols, &GOAT_PROTOCOLS);
