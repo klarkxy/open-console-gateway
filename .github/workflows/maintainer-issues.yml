@@ -1,0 +1,24 @@
+name: Maintainer issue preparation
+on:
+  push:
+    branches: [maintainer/issues-58-59-62-63-runner]
+    paths:
+      - .github/workflows/maintainer-issues.yml
+      - .github/maintainer/**
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: e9f38d1b8baa0dc60f9fdd50e7f063d805ca39ba
+          persist-credentials: false
+      - run: git archive --format=tar.gz HEAD > /tmp/ocg-source.tar.gz
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: ocg-source
+          path: /tmp/ocg-source.tar.gz
+          retention-days: 1
