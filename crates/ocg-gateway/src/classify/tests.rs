@@ -304,3 +304,40 @@ fn route_and_decrypt_preflight_are_explicit_classes() {
     assert!(!ProviderErrorClass::RouteUnavailable.same_account_retry_eligible());
     assert!(!ProviderErrorClass::DecryptFailed.same_account_retry_eligible());
 }
+
+#[test]
+fn goat_insufficient_credits_is_not_a_generic_client_error() {
+    let body = r#"{"error":{"code":"BAD_REQUEST","type":"invalid_request_error","message":"You have insufficient credits to make this request. Please purchase more credits to continue using the service."}}"#;
+    assert_eq!(
+        classify_http_response(400, COMMAND_CODE_PROVIDER_ID, false, false, body),
+        ProviderErrorClass::InsufficientCredits
+    );
+    for provider in [OPENCODE_PROVIDER_ID, CUSTOM_PROVIDER_ID, "unknown-provider"] {
+        assert_eq!(
+            classify_http_response(400, provider, false, false, body),
+            ProviderErrorClass::ClientError
+        );
+    }
+    for invalid in [
+        "not json",
+        "{}",
+        r#"{"error":{"message":"insufficient credits"}}"#,
+        r#"{"error":{"code":"BAD_REQUEST","type":"invalid_request_error","message":"maximum context length exceeded"}}"#,
+        r#"{"error":{"code":"BAD_REQUEST","type":"invalid_request_error","message":"The reasoning_content must be passed back"}}"#,
+        r#"{"error":{"code":"BAD_REQUEST","type":"invalid_request_error","message":"unknown model"}}"#,
+    ] {
+        assert_eq!(
+            classify_http_response(400, COMMAND_CODE_PROVIDER_ID, false, false, invalid),
+            ProviderErrorClass::ClientError,
+            "{invalid}"
+        );
+    }
+    assert_eq!(
+        classify_http_response(413, COMMAND_CODE_PROVIDER_ID, false, false, body),
+        ProviderErrorClass::ClientError
+    );
+    assert!(!ProviderErrorClass::InsufficientCredits.same_account_retry_eligible());
+    assert!(!schedule_go_usage_sync(
+        ProviderErrorClass::InsufficientCredits
+    ));
+}

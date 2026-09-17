@@ -146,6 +146,10 @@ cooldown. Successful Free rows keep token counts, use `cost_state=free`, and
 do not enter Go quota totals. Free models are promotional and may use request
 data to improve models — do not submit confidential content.
 
+### GOAT credit rejection without a reset time
+
+An exact GOAT `400` / `BAD_REQUEST` / `invalid_request_error` declaring insufficient credits is an account-level rejection, not a malformed prompt. The current request tries the next eligible account once per account. Without an upstream reset time, OCG does not invent a cooldown, disable the Key, or mark it as an authentication failure. New requests may try that account again; logs retain the upstream 400 and fallback action. Other 400s (context, model, reasoning validation), 413s, and similar messages from other Providers do not gain retry permission.
+
 ---
 
 [User guide index](../USER.md) · [简体中文](routing.zh-CN.md) · [Docs index](../README.md)
