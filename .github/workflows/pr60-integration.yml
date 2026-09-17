@@ -3,9 +3,7 @@ name: Prepare PR 60 maintainer integration
 on:
   push:
     branches: [maintainer/pr-60-integration-runner]
-    paths:
-      - .github/scripts/pr60_polish.py
-      - .github/workflows/pr60-integration.yml
+    paths: [.github/workflows/pr60-integration.yml]
 
 permissions:
   contents: write
@@ -19,23 +17,38 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     env:
-      PR60_INPUT_SHA: e1f6a84bff104f0dd6a44ae583adf3207f834cb2
+      PR60_INPUT_SHA: eb4f1796feb1c20e3903c981c5988f5dfe47a3f5
       PR60_TARGET: maintainer/pr-60-ready
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Apply final resolutions on the candidate
+      - name: Correct the domain catalog regression expectation
         shell: bash
         run: |
           set -euo pipefail
-          cp .github/scripts/pr60_polish.py "$RUNNER_TEMP/pr60_polish.py"
           test "$(git rev-parse origin/maintainer/pr-60-integration)" = "$PR60_INPUT_SHA"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git switch --detach "$PR60_INPUT_SHA"
-          python "$RUNNER_TEMP/pr60_polish.py"
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('crates/ocg-domain/src/provider/tests.rs')
+          text = path.read_text()
+          old = 'assert_eq!(goat.usage_availability, "local_state");'
+          assert text.count(old) == 1
+          path.write_text(text.replace(old, 'assert_eq!(goat.usage_availability, "available");'))
+          PY
+          cargo fmt --all -- --check
+          git diff --check
+          git add crates/ocg-domain/src/provider/tests.rs
+          git commit -m 'test(goat): expect refresh availability in the domain catalog'
+      - name: Verify domain tests before publishing the candidate
+        run: cargo test -p ocg-domain --locked
       - name: Publish follow-up branch only
         env:
           GH_TOKEN: ${{ github.token }}
@@ -44,8 +57,7 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD^1)" = "$PR60_INPUT_SHA"
           test ! -e .github/workflows/pr60-integration.yml
-          test ! -e .github/scripts/pr60_polish.py
           AUTH_HEADER=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
           echo "::add-mask::$AUTH_HEADER"
           git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $AUTH_HEADER" push origin "HEAD:refs/heads/$PR60_TARGET"
-          printf 'Candidate: `%s`\n' "$(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Candidate: `%s`\n\nDomain tests passed.\n' "$(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
