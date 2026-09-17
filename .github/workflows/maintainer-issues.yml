@@ -5,80 +5,52 @@ on:
     paths: [.github/workflows/maintainer-issues.yml]
 permissions:
   contents: write
-concurrency:
-  group: maintainer-issue-preparation
-  cancel-in-progress: false
 jobs:
   prepare:
     runs-on: ubuntu-22.04
-    timeout-minutes: 15
+    timeout-minutes: 5
     env:
-      CARGO_INCREMENTAL: "0"
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_PROFILE_TEST_DEBUG: "0"
-      CARGO_TERM_COLOR: always
-      BASE: fc4ed381ebf4027d867274f8880c1d4052164f77
-      TARGET: maintainer/issue-59-official-api-finances
+      BASE: df8fd9b43079180273ca48a54425e7283415c2dc
+      TARGET: maintainer/issue-59-reviewed
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
-        with:
-          shared-key: quality-linux
-          workspaces: . -> target
-          save-if: false
-      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
-        with:
-          node-version: 22
-          cache: pnpm
-      - name: Assemble reviewed source without preparation files
+      - name: Reconcile existing statements with the documented exception
         run: |
           set -euo pipefail
-          mkdir "$RUNNER_TEMP/issue59"
-          cp .github/maintainer/issue59-*.py "$RUNNER_TEMP/issue59/"
-          git fetch origin main
-          test "$(git rev-parse FETCH_HEAD)" = "$BASE"
           git switch --detach "$BASE"
-          for part in core sources forward tests ui finish; do
-            python "$RUNNER_TEMP/issue59/issue59-$part.py"
-          done
-          cargo fmt --all
+          python - <<'PY'
+          from pathlib import Path
+          replacements = {
+              'docs/user/provider-presets.md': (
+                  'New Providers remain unpriced: official quota, balance and pricing are not synchronized.',
+                  'Except for the matching DeepSeek/Zhipu official API presets described below, new Providers remain unpriced: official quota, balance and pricing are not synchronized.'),
+              'DESIGN.md': (
+                  'User-defined Providers bind Configurable HTTP, stay unpriced, and expose create/edit/delete plus optional discovery/test.',
+                  'User-defined Providers bind Configurable HTTP and expose create/edit/delete plus optional discovery/test. Generic definitions remain unpriced; matching DeepSeek/Zhipu API presets use the separate official financial reference panel described below.'),
+          }
+          for name, (old, new) in replacements.items():
+              p = Path(name)
+              content = p.read_text()
+              assert content.count(old) == 1, (name, content.count(old))
+              p.write_text(content.replace(old, new))
+          PY
           git diff --check
-          test ! -e .github/maintainer/issue59-core.py
+          git diff --stat
           test ! -e .github/workflows/maintainer-issues.yml
-      - name: Generate additive V4 schema and validate frontend
-        run: |
-          set -euo pipefail
-          pnpm install --frozen-lockfile
-          pnpm run contract:v4:generate
-          pnpm run contract:v3:check
-          pnpm run contract:v4:check
-          pnpm run typecheck
-          pnpm run test:web
-          pnpm exec vite build
-          pnpm run design:lint
-      - name: Verify financial behavior and public seed evidence
-        run: |
-          set -euo pipefail
-          cargo test -p ocg-core --lib official_api --locked
-          cargo test -p ocg-core --test dashboard_v4_official_api --locked
-          cargo test -p ocg-core --lib live_official_api --locked -- --ignored
-          cargo fmt --all -- --check
-          git diff --check
-      - name: Publish candidate branch only
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/user/provider-presets.md DESIGN.md
+          git commit -m 'docs(api): qualify the official preset pricing exception'
+      - name: Publish follow-up branch only
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add crates src schema docs DESIGN.md
-          git commit -m 'feat(api): add official preset balances and native reference pricing (#59)'
           test "$(git rev-parse HEAD^1)" = "$BASE"
           AUTH_HEADER=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
           echo "::add-mask::$AUTH_HEADER"
           git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $AUTH_HEADER" push origin "HEAD:refs/heads/$TARGET"
-          printf 'Candidate `%s`, base `%s`. Main unchanged.\n' "$(git rev-parse HEAD)" "$BASE" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Reviewed candidate `%s`; main and PR branch unchanged.\n' "$(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
