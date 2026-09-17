@@ -1,0 +1,57 @@
+name: Prepare PR 60 maintainer integration
+
+on:
+  push:
+    branches: [maintainer/pr-60-integration-runner]
+    paths:
+      - .github/scripts/integrate_pr60.py
+      - .github/workflows/pr60-integration.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pr60-maintainer-preparation
+  cancel-in-progress: true
+
+jobs:
+  prepare:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    env:
+      PR60_MAIN_SHA: eeb0c84373361e36fa78efc5eaedabd3a7d43a17
+      PR60_HEAD_SHA: f89ab03e348f153493452f8c3db6344268847f28
+      PR60_TARGET: maintainer/pr-60-integration
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Prepare reviewed merge tree without touching main or contributor branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp .github/scripts/integrate_pr60.py "$RUNNER_TEMP/integrate_pr60.py"
+          git fetch origin main
+          test "$(git rev-parse FETCH_HEAD)" = "$PR60_MAIN_SHA"
+          git fetch origin refs/pull/60/head
+          test "$(git rev-parse FETCH_HEAD)" = "$PR60_HEAD_SHA"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git switch --detach "$PR60_MAIN_SHA"
+          git merge --no-commit --no-ff -s ours "$PR60_HEAD_SHA"
+          python "$RUNNER_TEMP/integrate_pr60.py"
+      - name: Publish candidate branch only
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^1)" = "$PR60_MAIN_SHA"
+          test "$(git rev-parse HEAD^2)" = "$PR60_HEAD_SHA"
+          test ! -e .github/workflows/pr60-integration.yml
+          test ! -e .github/scripts/integrate_pr60.py
+          AUTH_HEADER=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          echo "::add-mask::$AUTH_HEADER"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $AUTH_HEADER" push origin "HEAD:refs/heads/$PR60_TARGET"
+          printf 'Candidate: `%s`\n\nMain and contributor branches are unchanged.\n' "$(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
