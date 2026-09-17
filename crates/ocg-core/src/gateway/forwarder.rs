@@ -1731,8 +1731,10 @@ async fn forward_request_impl(
                 });
             }
             _ => {
-                // Other 4xx: request-level error. Convert its envelope for the caller,
-                // but don't retry another account for the same invalid request.
+                // A proven GOAT credit rejection is account-scoped and may fall
+                // through for this request only. It supplies no reset deadline:
+                // do not invent a cooldown or mislabel it as an invalid Key.
+                // Other 4xx remain request errors and never replay on another Key.
                 let sanitized = attempt_context.sanitize_upstream_error(&text);
                 let action = forward_action_for_class(class, allow_same_account_retry, None);
                 let failure = attempt_context.failure(FailureSpec {
@@ -1778,7 +1780,8 @@ async fn forward_request_impl(
                 return Ok(ForwardResult {
                     response,
                     action,
-                    error_message: None,
+                    error_message: (class == ProviderErrorClass::InsufficientCredits)
+                        .then_some(message),
                 });
             }
         }
@@ -2948,7 +2951,8 @@ pub(crate) fn forward_action_for_class(
         ProviderErrorClass::RouteUnavailable
         | ProviderErrorClass::DecryptFailed
         | ProviderErrorClass::UnauthorizedRotate
-        | ProviderErrorClass::ForbiddenRotate => ForwardAction::TryNextAccount,
+        | ProviderErrorClass::ForbiddenRotate
+        | ProviderErrorClass::InsufficientCredits => ForwardAction::TryNextAccount,
         ProviderErrorClass::RateLimited { .. } => match rate_limit_fallback(rate_limit_window) {
             RateLimitFallback::ExhaustFreeChannel => ForwardAction::ExhaustFreeChannel,
             RateLimitFallback::TryNextAccount => ForwardAction::TryNextAccount,

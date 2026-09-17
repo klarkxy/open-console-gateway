@@ -286,9 +286,10 @@ than a key quota.
   no automatic schedule; its result never writes inference cooldown or changes
   routing. Manual calibration remains available for correction.
 - **GOAT inference cooldown.** A real Command Code `429` that identifies the
-  5-hour or weekly plan window uses the response's exact `Your limit resets at`
-  timestamp for the matching account cooldown. Ordinary transient or malformed
-  rate limits keep the generic five-minute fallback.
+  5-hour, weekly, or monthly plan window uses the response's exact `Your limit resets at`
+  timestamp for the matching account cooldown. A valid bounded `Retry-After` takes precedence.
+  Without a usable upstream deadline, transient or malformed rate limits only
+  exclude that account from the current request and do not write account state.
 - **Identity and credentials.** The name is the account's required primary
   display label. The login account field is optional; on Key-account creation,
   entering it first copies it into the name until you edit the name yourself.

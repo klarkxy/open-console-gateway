@@ -31,13 +31,17 @@ pub enum ProviderErrorClass {
     DecryptFailed,
     Connect,
     OutcomeUnknown,
-    RateLimited { policy: RateLimitPolicy },
+    RateLimited {
+        policy: RateLimitPolicy,
+    },
     UnauthorizedPassthrough,
     UnauthorizedRotate,
     ForbiddenStop,
     ForbiddenRotate,
     HttpRequestTimeout,
     ClientError,
+    /// Explicit account credit rejection with no advertised recovery time.
+    InsufficientCredits,
     ServerError,
     StreamRetryEligible,
     StreamNoReplay,
@@ -294,9 +298,30 @@ pub fn classify_http_response(
         && response_has_error_type(response_body, "CreditsError")
     {
         ProviderErrorClass::UnauthorizedRotate
+    } else if status == 400
+        && !anonymous
+        && ProviderAdapterKind::from_provider_id(provider_id)
+            == Some(ProviderAdapterKind::CommandCodeGoat)
+        && response_has_insufficient_credits(response_body)
+    {
+        ProviderErrorClass::InsufficientCredits
     } else {
         base
     }
+}
+
+// Only the observed GOAT account-level envelope is evidence. A context-length,
+// model, or reasoning validation error must never trigger another billable send.
+fn response_has_insufficient_credits(body: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return false;
+    };
+    value.pointer("/error/code").and_then(Value::as_str) == Some("BAD_REQUEST")
+        && value.pointer("/error/type").and_then(Value::as_str) == Some("invalid_request_error")
+        && value.pointer("/error/message").and_then(Value::as_str).is_some_and(|message| {
+            message == "You have insufficient credits to make this request."
+                || message == "You have insufficient credits to make this request. Please purchase more credits to continue using the service."
+        })
 }
 
 fn response_has_error_type(response_body: &str, expected: &str) -> bool {

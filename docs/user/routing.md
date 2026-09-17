@@ -2,6 +2,10 @@
 
 # Routing, Cost, And Failover
 
+### Newly discovered OpenCode Go models
+
+Refresh the model catalog on Providers, then explicitly enable newly discovered models and select the supported upstream protocol. Models in the saved Go catalog use their effective model contract even when no checked-in alias/protocol profile exists. Diagnostic planning cannot reject such models merely for being new. This does not enable unknown, disabled or removed models, and does not probe protocols during inference. A local catalog/protocol test is not proof that a live account has access to the model.
+
 ### GOAT transient 429 versus account exhaustion
 
 GOAT only persists an account cooldown when an upstream 429 supplies a valid bounded `Retry-After` (seconds or HTTP date), or a recognized plan window with an absolute reset time. Retry-After takes precedence. A temporary provider/model failure or an unknown response without a usable deadline only excludes the account from this request; the next request retains the global sticky target. Five-hour, weekly, and monthly reset windows are supported. Other Providers keep their existing policies.
@@ -110,8 +114,8 @@ explains what actually stops traffic.
   baseline. During cooldown the matching bar is forced to 100% in the
   dashboard; after cooldown, local priced costs continue from the existing
   baseline until the next manual calibration or official refresh. An
-  unrecognized 429 falls back to a five-minute cooldown without changing
-  any usage baseline.
+  unrecognized OpenCode Go 429 falls back to a five-minute cooldown without changing
+  any usage baseline. GOAT requires upstream deadline evidence as described above.
 - **No account available.** If every enabled account is cooling down, the
   gateway returns `429` with the soonest reset time.
 - **Dashboard display.** While a true circuit breaker is active, the matching
@@ -149,6 +153,10 @@ compatible account cards in saved order; a Free-only model returns the shared
 cooldown. Successful Free rows keep token counts, use `cost_state=free`, and
 do not enter Go quota totals. Free models are promotional and may use request
 data to improve models — do not submit confidential content.
+
+### GOAT credit rejection without a reset time
+
+An exact GOAT `400` / `BAD_REQUEST` / `invalid_request_error` declaring insufficient credits is an account-level rejection, not a malformed prompt. The current request tries the next eligible account once per account. Without an upstream reset time, OCG does not invent a cooldown, disable the Key, or mark it as an authentication failure. New requests may try that account again; logs retain the upstream 400 and fallback action. Other 400s (context, model, reasoning validation), 413s, and similar messages from other Providers do not gain retry permission.
 
 ---
 
