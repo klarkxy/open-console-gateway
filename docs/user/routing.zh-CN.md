@@ -55,6 +55,10 @@ Zen Free 是一张不需要 Key 的账号卡，只有一个启用开关。不需
 
 Free 与 Go 使用**独立冷却窗口**。Zen Free 不发送鉴权头。每次 Free 推理会带上官方 TUI 使用的同一组 OpenCode 客户端身份头（`User-Agent`、`x-opencode-session`、`x-opencode-client`、`x-opencode-request`、`x-opencode-project`），以便会话粘滞和按出口 IP 共享的免费池生效。客户端已提供的 OpenCode 值优先，否则由 Gateway 补齐。促销额度按出口 IP 共享； Free `429` 会冷却整条 Free 通道，不换 Key，并继续尝试账号顺序中后续兼容卡片；只有 Free 映射的模型则返回共享冷却。成功的 Free 请求会记录 token，使用 `cost_state=free`，且不计入 Go 额度。Free 为限时促销，请求数据可能用于改进模型，机密内容请谨慎处理。
 
+### GOAT 未给重置时间的余额不足
+
+GOAT 返回准确的 `400` / `BAD_REQUEST` / `invalid_request_error` 余额不足声明时，当前请求会尝试下一个合格账号，每个账号至多一次。这不是提示词格式错误。上游没有给恢复时间，所以不编造冷却、不禁用 Key，也不标记为鉴权失败；新请求仍可能重试该账号。日志保留真实的 400 和回退动作。上下文过长、模型或 reasoning 参数错误等普通 400、413 及其他供应商的相似文案仍不会获得重试权限。
+
 ---
 
 [用户指南索引](../USER.zh-CN.md) · [English](routing.md) · [文档索引](../README.zh-CN.md)
