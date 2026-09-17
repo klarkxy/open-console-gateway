@@ -1662,3 +1662,47 @@ fn r08_cpa_routing_does_not_assume_local_account_or_unbounded_retry() {
         set.rejected
     );
 }
+
+#[test]
+fn diagnostic_plan_does_not_veto_a_refreshed_go_model_missing_a_static_profile() {
+    for name in [
+        "muse-spark-1.3-contributor",
+        "omen-alpha",
+        "future-go-model",
+    ] {
+        let go = vec![name.to_string()];
+        let resolved = alias::resolve_with_runtime_catalogs(
+            name,
+            RuntimeCatalogs {
+                go: &go,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        for client in [
+            ApiFormat::ChatCompletions,
+            ApiFormat::Responses,
+            ApiFormat::Messages,
+        ] {
+            assert_eq!(diagnostic_forced_upstream(&resolved, client), Some(client));
+        }
+        assert_eq!(
+            diagnostic_forced_upstream(&resolved, ApiFormat::Gemini),
+            Some(ApiFormat::ChatCompletions)
+        );
+        assert!(alias::resolve_with_runtime_catalogs(name, RuntimeCatalogs::default()).is_err());
+    }
+    let go = vec!["grok-4.6".to_string()];
+    let known = alias::resolve_with_runtime_catalogs(
+        "grok-4.6",
+        RuntimeCatalogs {
+            go: &go,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        diagnostic_forced_upstream(&known, ApiFormat::Responses),
+        None
+    );
+}

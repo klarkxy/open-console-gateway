@@ -100,8 +100,10 @@ pub(crate) fn binding_allows_requested_model(
 /// until each actual mapping/account is materialized. Unique GOAT and Ollama
 /// catalog IDs are not in OpenCode `MODEL_PROTOCOLS`. Zen-only resolutions
 /// default to Chat so unknown catalog `-free` rows (and their stripped Alias)
-/// are not rejected against the Go protocol table. Pure builtin resolutions
-/// keep their normal early validation.
+/// are not rejected against the Go protocol table. A Go mapping admitted by a
+/// refreshed catalog may also lack a checked-in profile: defer its protocol to
+/// the effective per-candidate contract instead of vetoing it for diagnostics.
+/// Known builtin profiles keep their normal early validation.
 pub(crate) fn diagnostic_forced_upstream(
     resolved: &ResolvedModel,
     client: ApiFormat,
@@ -134,13 +136,20 @@ pub(crate) fn diagnostic_forced_upstream(
             .iter()
             .any(|mapping| mapping.routeable && mapping_preserves_client_wire(mapping)),
     };
-    preserve_client.then_some(client)
+    preserve_client.then_some(match client {
+        // Gemini is client-only. This diagnostic conversion does not select
+        // the actual upstream, which still comes from the candidate contract.
+        ApiFormat::Gemini => ApiFormat::ChatCompletions,
+        client => client,
+    })
 }
 
 fn mapping_preserves_client_wire(mapping: &ProviderMapping) -> bool {
     mapping_is_configurable_http(mapping)
         || mapping_is_command_code_goat(mapping)
         || mapping_is_ollama_cloud(mapping)
+        || (mapping.is_opencode_go()
+            && crate::kernel::protocol::model_protocol(&mapping.upstream_model).is_none())
 }
 
 fn mapping_adapter_kind(mapping: &ProviderMapping) -> Option<ProviderAdapterKind> {
