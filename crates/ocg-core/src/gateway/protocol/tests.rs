@@ -2265,3 +2265,12 @@ fn command_code_client_formats_convert_to_chat_and_never_emit_responses() {
         Some("/chat/completions")
     );
 }
+
+#[test]
+fn official_api_deepseek_cache_counter_is_preserved() {
+    let body = serde_json::json!({"usage":{"prompt_tokens":1000,"completion_tokens":50,"prompt_cache_hit_tokens":900,"prompt_cache_miss_tokens":100}});
+    let counts = extract_usage(ApiFormat::ChatCompletions, &body, Some("deepseek-flash"));
+    assert_eq!(counts.input_tokens, 1000);
+    assert_eq!(counts.cached_tokens, 900);
+    assert_eq!(counts.output_tokens, 50);
+}

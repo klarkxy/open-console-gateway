@@ -635,6 +635,7 @@ pub fn extract_usage(format: ApiFormat, payload: &Value, model_hint: Option<&str
                 output_tokens: uint(&usage, "completion_tokens"),
                 cached_tokens: usage
                     .pointer("/prompt_tokens_details/cached_tokens")
+                    .or_else(|| usage.get("prompt_cache_hit_tokens"))
                     .and_then(Value::as_u64)
                     .unwrap_or(0),
                 cache_creation_tokens: 0,

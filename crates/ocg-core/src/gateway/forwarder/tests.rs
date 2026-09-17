@@ -280,6 +280,7 @@ fn attempt_context(upstream: &str) -> ForwardAttemptContext {
         client_key_id: None,
         client_key_name: None,
         platform_price: None,
+        official_price: None,
     }
 }
 
@@ -1723,6 +1724,178 @@ async fn r06_persisted_draft_does_not_send_from_captured_configured_snapshot() {
     assert_eq!(hits.load(Ordering::SeqCst), 0, "{:?}", result.error_message);
 
     let _ = stop_tx.send(());
+    drop(state);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn official_api_attempt_pricing_is_native_frozen_and_never_attaches_to_foreign_routes() {
+    use crate::official_api::{OfficialApiKind, pricing};
+    let (dir, state) = test_state("official-api-cost");
+    for (kind, model, amount, currency) in [
+        (OfficialApiKind::Deepseek, "deepseek-flash", 0.0015, "USD"),
+        (OfficialApiKind::Zhipu, "glm-5.3", 0.036, "CNY"),
+    ] {
+        let runtime = crate::official_api::tests::runtime(kind);
+        let mut account = custom_account(&state);
+        account.provider_id = runtime.id.clone();
+        let body = Bytes::from(
+            serde_json::to_vec(
+                &json!({"model":model,"messages":[{"role":"user","content":"hello"}]}),
+            )
+            .unwrap(),
+        );
+        let parsed =
+            crate::gateway::protocol::parse_client_request(ApiFormat::ChatCompletions, body)
+                .unwrap();
+        let mut plan = crate::gateway::protocol::materialize_parsed_request(
+            &parsed,
+            &crate::gateway::protocol::MaterializeSpec {
+                client_model: model.into(),
+                upstream_model: model.into(),
+                resolved_alias: None,
+                channel: UpstreamChannel::Go,
+                upstream_base_override: None,
+                original_model: None,
+                forced_upstream: Some(ApiFormat::ChatCompletions),
+                custom_route: Some(CustomRouteSpec {
+                    endpoint_url: runtime.endpoint_url.clone(),
+                }),
+            },
+        )
+        .unwrap();
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-17T01:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        // Exercise the shared estimator and real log-finalization path at a
+        // deterministic observation time, rather than relying on CI wall time.
+        let frozen = crate::official_api::OfficialAttemptPrice {
+            provider_id: runtime.id.clone(),
+            sheet: pricing::seed(kind),
+            model: model.into(),
+            at: now,
+        };
+        let price = RequestPricingSnapshot::OfficialApi(frozen.clone());
+        let metrics = pricing_metrics(&price, model, 1000, 1000, 0, 0, None);
+        assert_eq!(metrics.quota_debit, None);
+        assert_eq!(metrics.effective_paid_cost_usd, None);
+        if currency == "CNY" {
+            assert_eq!(metrics.raw_cost_usd, None);
+        } else {
+            assert_eq!(metrics.raw_cost_usd, Some(amount));
+        }
+        let mut context = attempt_context(model);
+        context.provider_id = Some(runtime.id.clone());
+        context.official_price = Some(frozen.clone());
+        let id = DbAttemptSink::new(&state.db.lock())
+            .insert(
+                &account,
+                model,
+                "success",
+                Some(200),
+                metrics.clone(),
+                None,
+                &context,
+                None,
+            )
+            .unwrap();
+        let native = state
+            .db
+            .lock()
+            .forward_log_native_attribution(id)
+            .unwrap()
+            .unwrap();
+        assert!((native.native_cost_value.unwrap() - amount).abs() < 1e-12);
+        assert_eq!(native.native_cost_currency.as_deref(), Some(currency));
+        // Finalizing a stream keeps the captured prices, not a later sheet.
+        DbAttemptSink::new(&state.db.lock())
+            .finalize(id, "success", Some(200), metrics, None, None, &context)
+            .unwrap();
+        assert_eq!(
+            state
+                .db
+                .lock()
+                .forward_log_native_attribution(id)
+                .unwrap()
+                .unwrap()
+                .native_cost_value,
+            Some(amount)
+        );
+        let mut positive = attempt_context(model);
+        assert!(matches!(
+            bind_official_attempt_price(
+                &state,
+                &account,
+                &plan,
+                std::slice::from_ref(&runtime),
+                &mut positive,
+                RequestPricingSnapshot::Unpriced
+            ),
+            RequestPricingSnapshot::OfficialApi(_)
+        ));
+        assert!(positive.official_price.is_some());
+        for endpoint in [
+            "https://attacker.test/chat/completions",
+            "http://127.0.0.1:9/chat/completions",
+        ] {
+            plan.custom_route = Some(CustomRouteSpec {
+                endpoint_url: endpoint.into(),
+            });
+            let mut context = attempt_context(model);
+            assert!(matches!(
+                bind_official_attempt_price(
+                    &state,
+                    &account,
+                    &plan,
+                    std::slice::from_ref(&runtime),
+                    &mut context,
+                    RequestPricingSnapshot::Unpriced
+                ),
+                RequestPricingSnapshot::Unpriced
+            ));
+            assert!(context.official_price.is_none());
+        }
+        plan.custom_route = Some(CustomRouteSpec {
+            endpoint_url: runtime.endpoint_url.clone(),
+        });
+        plan.body = Bytes::from_static(br#"{"tools":[{"type":"web_search"}]}"#);
+        let mut context = attempt_context(model);
+        assert!(matches!(
+            bind_official_attempt_price(
+                &state,
+                &account,
+                &plan,
+                std::slice::from_ref(&runtime),
+                &mut context,
+                RequestPricingSnapshot::Unpriced
+            ),
+            RequestPricingSnapshot::Unpriced
+        ));
+        context.official_price = Some(frozen.clone());
+        let missing = metadata_metrics(&price, None, "usage_missing");
+        let id = DbAttemptSink::new(&state.db.lock())
+            .insert(
+                &account,
+                model,
+                "success_no_usage",
+                Some(200),
+                missing,
+                None,
+                &context,
+                None,
+            )
+            .unwrap();
+        assert!(
+            state
+                .db
+                .lock()
+                .forward_log_native_attribution(id)
+                .unwrap()
+                .unwrap()
+                .native_cost_value
+                .is_none()
+        );
+    }
     drop(state);
     let _ = fs::remove_dir_all(dir);
 }

@@ -1232,6 +1232,231 @@
       ],
       "type": "string"
     },
+    "OfficialApiKind": {
+      "enum": [
+        "deepseek",
+        "zhipu"
+      ],
+      "type": "string"
+    },
+    "OfficialApiPrices": {
+      "properties": {
+        "prices": {
+          "$ref": "#/$defs/OfficialPriceSheet"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "providerId": {
+          "type": "string"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "providerId",
+        "prices",
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "OfficialApiStatus": {
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "balanceAvailable": {
+          "type": "boolean"
+        },
+        "balances": {
+          "items": {
+            "$ref": "#/$defs/OfficialBalance"
+          },
+          "type": "array"
+        },
+        "kind": {
+          "$ref": "#/$defs/OfficialApiKind"
+        },
+        "monthSpend": {
+          "items": {
+            "$ref": "#/$defs/OfficialSpend"
+          },
+          "type": "array"
+        },
+        "monthStartedAt": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "prices": {
+          "$ref": "#/$defs/OfficialPriceSheet"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "providerId": {
+          "type": "string"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "unpricedRequests": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "accountId",
+        "providerId",
+        "kind",
+        "balanceAvailable",
+        "balances",
+        "prices",
+        "monthStartedAt",
+        "monthSpend",
+        "unpricedRequests",
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "OfficialBalance": {
+      "properties": {
+        "currency": {
+          "type": "string"
+        },
+        "granted": {
+          "format": "double",
+          "type": "number"
+        },
+        "observedAt": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "toppedUp": {
+          "format": "double",
+          "type": "number"
+        },
+        "total": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "currency",
+        "total",
+        "granted",
+        "toppedUp",
+        "observedAt"
+      ],
+      "type": "object"
+    },
+    "OfficialPriceRow": {
+      "properties": {
+        "cacheReadPerMillion": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "currency": {
+          "type": "string"
+        },
+        "inputPerMillion": {
+          "format": "double",
+          "type": "number"
+        },
+        "model": {
+          "type": "string"
+        },
+        "outputPerMillion": {
+          "format": "double",
+          "type": "number"
+        },
+        "period": {
+          "description": "`all`, or DeepSeek `peak` / `off_peak` at the frozen attempt time.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "model",
+        "currency",
+        "period",
+        "inputPerMillion",
+        "outputPerMillion",
+        "cacheReadPerMillion"
+      ],
+      "type": "object"
+    },
+    "OfficialPriceSheet": {
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/OfficialApiKind"
+        },
+        "observedAt": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        },
+        "rows": {
+          "items": {
+            "$ref": "#/$defs/OfficialPriceRow"
+          },
+          "type": "array"
+        },
+        "sourceUrl": {
+          "type": "string"
+        },
+        "validUntil": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "revision",
+        "sourceUrl",
+        "observedAt",
+        "validUntil",
+        "rows"
+      ],
+      "type": "object"
+    },
+    "OfficialSpend": {
+      "properties": {
+        "amount": {
+          "format": "double",
+          "type": "number"
+        },
+        "currency": {
+          "type": "string"
+        },
+        "pricedRequests": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "currency",
+        "amount",
+        "pricedRequests"
+      ],
+      "type": "object"
+    },
     "OnboardingAuthorization": {
       "oneOf": [
         {
@@ -2078,6 +2303,27 @@
     },
     {
       "$ref": "#/$defs/DshApplicationInstallRequest"
+    },
+    {
+      "$ref": "#/$defs/OfficialApiKind"
+    },
+    {
+      "$ref": "#/$defs/OfficialPriceRow"
+    },
+    {
+      "$ref": "#/$defs/OfficialPriceSheet"
+    },
+    {
+      "$ref": "#/$defs/OfficialBalance"
+    },
+    {
+      "$ref": "#/$defs/OfficialSpend"
+    },
+    {
+      "$ref": "#/$defs/OfficialApiStatus"
+    },
+    {
+      "$ref": "#/$defs/OfficialApiPrices"
     }
   ],
   "title": "DashboardApiV4"

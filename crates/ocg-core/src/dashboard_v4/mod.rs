@@ -5,7 +5,8 @@
 //! CAS-protected onboarding, binding, credential, local CPA catalog,
 //! built-in Provider catalog writes, and alias publication. It reuses V3
 //! session middleware and the V3 error envelope. Handlers must not issue
-//! outbound network requests.
+//! outbound network requests except the explicit official-API balance/price refreshes.
+//! Their GET projections and inference stay local-only.
 
 mod applications;
 mod bindings;
@@ -14,6 +15,7 @@ mod connections;
 mod cpa;
 mod credentials;
 mod identities;
+mod official_api;
 mod onboarding;
 mod publication;
 mod templates;
@@ -41,6 +43,15 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
         .route("/templates", get(templates::list_templates))
         .route("/connections", get(connections::list_connections))
         .route("/accounts", get(identities::list_accounts))
+        .route("/accounts/{id}/official-api", get(official_api::get_status))
+        .route(
+            "/accounts/{id}/official-api/balance",
+            post(official_api::refresh_balance),
+        )
+        .route(
+            "/providers/{id}/official-api/pricing",
+            get(official_api::get_prices).post(official_api::refresh_prices),
+        )
         .route(
             "/applications/dsh",
             get(applications::get_dsh).post(applications::install_dsh),
