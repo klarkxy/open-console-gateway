@@ -2364,8 +2364,8 @@ async fn mixed_goat_cooldown_and_sticky_state_are_independent() {
     );
     let goat = h.account(&goat_id);
     let open = h.account("acct-1");
-    assert!(goat.cooldown_until.is_some());
-    assert!(goat.cooldown_generic_until.is_some());
+    assert!(goat.cooldown_until.is_none());
+    assert!(goat.cooldown_generic_until.is_none());
     assert!(goat.cooldown_5h_until.is_none());
     assert!(goat.cooldown_week_until.is_none());
     assert!(goat.cooldown_month_until.is_none());

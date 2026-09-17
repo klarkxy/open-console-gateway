@@ -1475,20 +1475,26 @@ async fn forward_request_impl(
 
         match class {
             ProviderErrorClass::RateLimited { policy } => {
-                let observed_at = Utc::now();
-                let (window, until) = rate_limit_window_and_deadline(
+                let observed_at = state.sample_gateway_clock().0;
+                let cooldown = rate_limit_window_and_deadline(
                     &account.provider_id,
                     policy,
                     &text,
+                    error_headers
+                        .get(reqwest::header::RETRY_AFTER)
+                        .and_then(|value| value.to_str().ok()),
                     observed_at,
                 );
-                let cooldown = until.signed_duration_since(observed_at);
+                let window = cooldown.and_then(|(window, _)| window);
                 let sanitized = attempt_context.sanitize_upstream_error(&text);
-                let error_message = format!(
-                    "rate limited: {} (resets in {}s)",
-                    sanitized,
-                    cooldown.num_seconds()
-                );
+                let error_message = match cooldown {
+                    Some((_, until)) => format!(
+                        "rate limited: {} (resets in {}s)",
+                        sanitized,
+                        until.signed_duration_since(observed_at).num_seconds()
+                    ),
+                    None => format!("upstream temporarily rate limited: {sanitized}"),
+                };
                 let action = forward_action_for_class(class, allow_same_account_retry, window);
                 let failure = attempt_context.failure(FailureSpec {
                     error_source: "upstream",
@@ -1517,13 +1523,15 @@ async fn forward_request_impl(
                         &attempt_context,
                         Some(failure),
                     )?;
-                    db.set_account_rate_limit_if_key_matches(
-                        &account.id,
-                        &account.key_cipher,
-                        until,
-                        &sanitized,
-                        window,
-                    )?;
+                    if let Some((window, until)) = cooldown {
+                        db.set_account_rate_limit_if_key_matches(
+                            &account.id,
+                            &account.key_cipher,
+                            until,
+                            &sanitized,
+                            window,
+                        )?;
+                    }
                 }
                 // Schedule (never inline) an official usage reconciliation shortly
                 // after a real inference 429. Does not alter cooldown/failover.
