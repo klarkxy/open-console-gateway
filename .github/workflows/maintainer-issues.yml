@@ -18,7 +18,7 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: "0"
       CARGO_TERM_COLOR: always
       BASE: e9f38d1b8baa0dc60f9fdd50e7f063d805ca39ba
-      TARGET: maintainer/issue-63-goat-credits
+      TARGET: maintainer/issue-62-goat-transient
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
@@ -31,21 +31,16 @@ jobs:
           save-if: false
       - name: Prepare scoped change
         run: |
-          cp .github/maintainer/issue63.py "$RUNNER_TEMP/fix.py"
+          cp .github/maintainer/issue62.py "$RUNNER_TEMP/fix.py"
           git switch --detach "$BASE"
           python "$RUNNER_TEMP/fix.py"
-          python - <<'PY'
-          from pathlib import Path
-          p = Path('crates/ocg-core/tests/gateway_goat_credits.rs')
-          s = p.read_text().replace('assert_eq!(row.attempt, 1);', 'assert_eq!(row.attempt, Some(1));').replace('row.attempt == 2', 'row.attempt == Some(2)').replace('let diagnostic: serde_json::Value = serde_json::from_str(row.diagnostic_json.as_deref().unwrap()).unwrap();', 'let diagnostic = row.diagnostic.as_ref().unwrap();')
-          p.write_text(s)
-          PY
           cargo fmt --all
           git diff --check
-      - name: Verify credit rejection and ordinary errors
+      - name: Verify deadlines and sticky request-local fallback
         run: |
-          cargo test -p ocg-gateway goat_insufficient_credits --locked
-          cargo test -p ocg-core --test gateway_goat_credits --locked
+          cargo test -p ocg-core --lib gateway::classify --locked
+          cargo test -p ocg-core --test gateway_goat_transient --locked
+          cargo test -p ocg-core --test gateway_fallback goat --locked
       - name: Publish feature branch only
         env:
           GH_TOKEN: ${{ github.token }}
@@ -56,7 +51,7 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add crates docs
-          git commit -m 'fix(goat): fall back on explicit insufficient-credit errors (#63)'
+          git commit -m 'fix(goat): persist cooldown only from upstream deadline evidence (#62)'
           AUTH=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
           echo "::add-mask::$AUTH"
           git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $AUTH" push origin "HEAD:refs/heads/$TARGET"
