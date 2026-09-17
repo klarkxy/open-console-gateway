@@ -1,0 +1,27 @@
+name: Read official API reference
+on:
+  push:
+    branches: [maintainer/issues-58-59-62-63-runner]
+    paths: [.github/workflows/official-api-evidence.yml]
+permissions:
+  contents: read
+jobs:
+  reference:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - name: Fetch fixed public references without credentials
+        shell: bash
+        run: |
+          mkdir evidence
+          curl --fail --location --max-time 45 --max-filesize 5242880 https://api-docs.deepseek.com/quick_start/pricing/ -o evidence/deepseek-pricing.html
+          curl --fail --location --max-time 45 --max-filesize 5242880 https://api-docs.deepseek.com/api/get-user-balance/ -o evidence/deepseek-balance.html
+          curl --fail --location --max-time 45 --max-filesize 5242880 https://bigmodel.cn/pricing -o evidence/zhipu-pricing.html
+          curl --fail --location --max-time 45 --max-filesize 5242880 https://docs.bigmodel.cn/llms.txt -o evidence/zhipu-docs-index.txt
+          sha256sum evidence/* > evidence/SHA256SUMS
+      - uses: actions/upload-artifact@v7.0.1
+        if: always()
+        with:
+          name: official-api-reference
+          path: evidence
+          retention-days: 1
