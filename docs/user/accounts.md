@@ -34,11 +34,13 @@ expose one singleton account and reject a second.
 
 Quota cards follow catalog capabilities instead of Provider IDs. `usageAvailability=available` loads Provider quota windows and enables the refresh action. `manualUsageCalibration=true` additionally loads the local calibration object for editing, while the card itself still renders the Provider windows. Other rows show no quota strip; Zen Free keeps its separate egress cooldown. Known MiniMax/Kimi window names remain friendly, and unknown window names are humanized without changing stored wire values.
 
-GOAT cards show a clearly
-labelled local estimate: priced OCG request logs accumulate against the public
-`$14 / $35 / $70` windows. Command Code exposes no machine-readable usage API.
-Traffic outside OCG and unpriced rows are not included; manual calibration can
-correct the displayed baseline. Paid Ollama Cloud cards (Pro / Max / Team) show
+GOAT cards offer **Refresh quota** to calibrate the `$14 / $35 / $70`
+windows from Command Code first-party account usage. The endpoint is used
+by the official CLI but is not documented in the public Provider API.
+Between snapshots, priced OCG request logs continue accumulating locally;
+manual baseline correction remains available. The monthly reset still
+uses the configured purchase date, not an upstream monthly-reset timestamp.
+Paid Ollama Cloud cards (Pro / Max / Team) show
 one monthly USD-Credits window from locally priced request logs against
 `$60 / $300 / $1000`. Ollama Cloud exposes no official usage API in this
 product. The meter is a soft estimate — used credit may exceed the limit, the

@@ -23,9 +23,7 @@ Free 按出口 IP 共享额度与冷却，Custom API 不做供应商额度核算
 
 额度卡按目录能力而不是 Provider ID 决定行为。`usageAvailability=available` 时加载通用 Provider quota windows 并显示刷新动作；`manualUsageCalibration=true` 时额外加载本地校准对象供编辑，但卡片本身仍渲染 Provider windows。其余目录行不显示额度条；Zen Free 继续使用独立的出口冷却。已知 MiniMax/Kimi 窗口名保持友好显示，未知窗口名安全地人类化，不改存储 wire 值。
 
-GOAT 卡片显示的是明确标注的本地估算：
-OCG 内已定价请求日志按公开的 `$14 / $35 / $70` 三个窗口累计。Command Code 没有可机读的用量 API。其他客户端流量与未定价日志不会计入，
-可通过手工校准修正显示基线。付费档 Ollama Cloud 卡片（Pro / Max / Team）把 OCG 内已定价请求日志投影到每月 `$60 / $300 / $1000` USD Credits 软额度。Ollama Cloud 在本产品中没有官方用量 API。实际已用可以超过软上限，进度条只把显示钳在 100%，满了也不会写冷却或改变路由。新建账号必须选择 Pro / Max / Team 并填写购买日期。既有无计费行的账号保持未配置且仍可路由，直到编辑档位。
+GOAT 卡片可通过 **刷新额度** 从 Command Code 第一方账号用量校准 `$14 / $35 / $70` 三个窗口。该端点由官方 CLI 使用，但未列入公开 Provider API 文档。两次快照之间继续本地累计 OCG 内已定价请求日志，并保留手工校准。月窗口重置时间仍由已配置的购买日期推导，不是上游返回的月重置时间。付费档 Ollama Cloud 卡片（Pro / Max / Team）把 OCG 内已定价请求日志投影到每月 `$60 / $300 / $1000` USD Credits 软额度。Ollama Cloud 在本产品中没有官方用量 API。实际已用可以超过软上限，进度条只把显示钳在 100%，满了也不会写冷却或改变路由。新建账号必须选择 Pro / Max / Team 并填写购买日期。既有无计费行的账号保持未配置且仍可路由，直到编辑档位。
 
 适配器注册表是静态密封的。内置 Provider 家族如下：
 
