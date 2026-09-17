@@ -562,9 +562,9 @@ pub fn schedule_after_inference_429(state: &impl UsageSyncHost, account_id: &str
             }
         };
         if !supported {
-            // GOAT has no supported quota/usage contract and must not be
-            // coupled to inference cooldown or eligibility. Zen Free uses its
-            // separate egress-IP/global cooldown path.
+            // GOAT has manual official calibration but no automatic-sync
+            // contract, and must not be coupled to inference cooldown or
+            // eligibility. Zen Free uses its separate egress-IP/global path.
             return false;
         }
         if let Err(error) = store.pull_account_usage_sync_next_eligible(account_id, proposal, false)

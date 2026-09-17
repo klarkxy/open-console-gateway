@@ -63,10 +63,12 @@ supported protocol matrix lives in
   additional rows default off. GOAT catalog refresh updates the model
   directory; Key auth is observed from inference 401/403. Its verified price
   snapshot estimates new request costs, with a saved editable multiplier per
-  priced model. The account card projects those priced OCG logs into local
-  `$14 / $35 / $70` windows and allows manual baseline correction. Command
-  Code exposes no machine-readable usage API; traffic outside OCG and unpriced
-  requests are omitted. Custom API is live under the trusted-administrator
+  priced model. The account card can explicitly calibrate local
+  `$14 / $35 / $70` windows from the first-party `/alpha/billing/credits`
+  endpoint used by Command Code's official CLI, then continues accumulating
+  priced OCG logs. The endpoint is not documented in the public Provider API,
+  GOAT is never auto-synced, and manual correction remains available. Custom
+  API is live under the trusted-administrator
   boundary in [Accounts](accounts.md); it is unpriced, has no official usage
   path, and its catalog, protocol, and pricing controls live on **Providers**
   as isolated `CustomEndpoint` scopes.

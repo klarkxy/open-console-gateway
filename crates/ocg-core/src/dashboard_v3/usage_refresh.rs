@@ -72,6 +72,19 @@ pub(super) async fn refresh_account_usage(
         check_expectation(&state, &input.expectation)?;
     }
 
+    let provider_id = {
+        let db = state.db.lock();
+        db.get_account(&id)
+            .map_err(V3ApiError::internal)?
+            .ok_or_else(|| V3ApiError::not_found(&state))?
+            .provider_id
+    };
+    if provider_id == crate::provider::COMMAND_CODE_PROVIDER_ID {
+        return super::command_code_usage_refresh::refresh(&state, &id, &input.expectation)
+            .await
+            .map(Json);
+    }
+
     let authorization = UsageSyncCommitAuthorization::control_revision(
         input.expectation.expected_revision,
         input.expectation.process_generation,
@@ -112,7 +125,7 @@ fn usage_refresh_from_success(
     }
 }
 
-fn usage_window_from_model(
+pub(super) fn usage_window_from_model(
     state: &CoreState,
     usage: ModelUsageWindow,
     pricing_revision: Option<String>,
@@ -177,5 +190,28 @@ pub(super) fn map_refresh_error(
             V3ApiError::outbound_failed(state, upstream.to_string()).into()
         }
         OfficialUsageRefreshError::Internal(message) => V3ApiError::internal(message).into(),
+    }
+}
+
+impl RefreshApiError {
+    pub(super) fn throttled(
+        state: &CoreState,
+        next_allowed_at: DateTime<Utc>,
+        retry_after_secs: u64,
+        operation: &str,
+    ) -> Self {
+        let retry_after_secs = retry_after_secs.max(1);
+        Self::Throttled {
+            body: UsageRefreshThrottleError {
+                code: ERROR_THROTTLED.to_string(),
+                message: format!(
+                    "{operation} is temporarily throttled; retry after {retry_after_secs}s"
+                ),
+                current_revision: Some(state.settings_revision()),
+                process_generation: Some(state.process_generation()),
+                next_allowed_at: next_allowed_at.to_rfc3339(),
+            },
+            retry_after_secs,
+        }
     }
 }

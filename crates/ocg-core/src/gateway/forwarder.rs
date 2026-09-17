@@ -8,7 +8,7 @@ use crate::gateway::attempt::{
 use crate::gateway::classify::{
     PreflightKind, ProviderErrorClass, RateLimitFallback, StreamClassifyInput,
     TransportClassifyInput, classify_http, classify_preflight, classify_stream, classify_transport,
-    rate_limit_fallback, rate_limit_window_and_cooldown, schedule_go_usage_sync,
+    rate_limit_fallback, rate_limit_window_and_deadline, schedule_go_usage_sync,
 };
 use crate::gateway::diagnostics::{
     ErrorDiagnostic, RequestTrace, api_format_name, emit_failure, emit_legacy_tool_compat,
@@ -1475,8 +1475,14 @@ async fn forward_request_impl(
 
         match class {
             ProviderErrorClass::RateLimited { policy } => {
-                let (window, cooldown) = rate_limit_window_and_cooldown(policy, &text);
-                let until = Utc::now() + cooldown;
+                let observed_at = Utc::now();
+                let (window, until) = rate_limit_window_and_deadline(
+                    &account.provider_id,
+                    policy,
+                    &text,
+                    observed_at,
+                );
+                let cooldown = until.signed_duration_since(observed_at);
                 let sanitized = attempt_context.sanitize_upstream_error(&text);
                 let error_message = format!(
                     "rate limited: {} (resets in {}s)",

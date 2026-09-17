@@ -78,6 +78,12 @@ pub(super) async fn refresh_provider_usage(
         ProviderAdapterKind::OpenCodeGo => {
             return refresh_go_provider_usage(&state, &id, &expectation).await;
         }
+        ProviderAdapterKind::CommandCodeGoat => {
+            super::command_code_usage_refresh::refresh(&state, &id, &expectation).await?;
+            return provider_usage_locked(&state, &id)
+                .map(Json)
+                .map_err(RefreshApiError::from);
+        }
         ProviderAdapterKind::MiniMaxCn | ProviderAdapterKind::KimiCn => {}
         _ => {
             return Err(V3ApiError::invalid_request_at(
@@ -415,11 +421,17 @@ pub(super) fn provider_usage_locked(
             window_week: COMMAND_CODE_GOAT_QUOTA_WEEK,
             window_month: COMMAND_CODE_GOAT_QUOTA_MONTH,
         };
-        (
-            db.live_local_quota_windows(&account.id, &limits, "command-code-goat-local")
-                .map_err(V3ApiError::internal)?,
-            None,
-        )
+        let observed_at = db
+            .account_usage_sync_state(&account.id)
+            .map_err(V3ApiError::internal)?
+            .and_then(|sync| sync.last_success_at);
+        let mut windows = db
+            .live_local_quota_windows(&account.id, &limits, "command-code-goat-local")
+            .map_err(V3ApiError::internal)?;
+        for window in &mut windows {
+            window.observed_at = observed_at;
+        }
+        (windows, None)
     } else if descriptor.kind == ProviderAdapterKind::OllamaCloud {
         let windows = match db
             .ollama_cloud_billing_tier(&account.id)

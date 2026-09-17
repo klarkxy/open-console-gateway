@@ -39,8 +39,12 @@ pub const COMMAND_CODE_GOAT_MESSAGES_PATH: &str = "/messages";
 pub const COMMAND_CODE_GOAT_MODELS_PATH: &str = "/models";
 pub const COMMAND_CODE_GOAT_MODELS_SOURCE: &str = "command_code_get_models";
 pub const COMMAND_CODE_GOAT_MODEL_SOURCE: &str = "command_code_verified_models";
-/// Public GOAT plan windows. OCG uses these only to project locally priced
-/// request logs; Command Code does not expose a machine-readable usage API.
+/// Fixed first-party account-usage endpoint used by Command Code's official
+/// CLI `/usage` view. It is not part of the documented Provider API, so OCG
+/// only calls it on an explicit account action and validates the GOAT caps.
+pub const COMMAND_CODE_GOAT_USAGE_URL: &str = "https://api.commandcode.ai/alpha/billing/credits";
+/// Public GOAT plan windows. OCG projects locally priced request logs between
+/// explicit official calibration snapshots.
 pub const COMMAND_CODE_GOAT_QUOTA_5H: f64 = 14.0;
 pub const COMMAND_CODE_GOAT_QUOTA_WEEK: f64 = 35.0;
 pub const COMMAND_CODE_GOAT_QUOTA_MONTH: f64 = 70.0;
@@ -490,7 +494,7 @@ pub const BUILTIN_PROVIDERS: [BuiltinProvider; 8] = [
         routable: true,
         managed_registration: false,
         pricing_availability: "available",
-        usage_availability: "local_state",
+        usage_availability: "available",
         manual_usage_calibration: true,
         quota_unit: "usd",
         model_source: COMMAND_CODE_GOAT_MODEL_SOURCE,
@@ -1299,8 +1303,8 @@ fn command_code_goat_capabilities(plan: BuiltinProvider) -> ProviderCapabilities
         },
         usage: UsageDescriptor {
             catalog_availability: plan.usage_availability,
-            contract: UsageContractKind::LocalState,
-            endpoint: None,
+            contract: UsageContractKind::Authoritative,
+            endpoint: Some(COMMAND_CODE_GOAT_USAGE_URL),
             experimental: false,
             automatic_sync: false,
             authoritative_for_quota: false,
@@ -1316,7 +1320,7 @@ fn command_code_goat_capabilities(plan: BuiltinProvider) -> ProviderCapabilities
             managed_registration: plan.managed_registration,
             fetch_zen_models: false,
             discover_models: false,
-            usage_refresh: false,
+            usage_refresh: true,
             manual_usage_calibration: plan.manual_usage_calibration,
             connection_verify: CardVerifyAction::NotApplicable,
             protocol_and_auth_immutable_after_create: false,

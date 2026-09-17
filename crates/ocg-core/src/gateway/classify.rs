@@ -10,7 +10,8 @@
 
 use crate::gateway::limit::{parse_free_reset_or_default, parse_reset, parse_usage_limit_window};
 use crate::models::{UpstreamChannel, UsageWindowKind};
-use chrono::Duration;
+use crate::provider::COMMAND_CODE_PROVIDER_ID;
+use chrono::{DateTime, Duration, Utc};
 
 pub(crate) use ocg_gateway::classify::{
     PreflightKind, ProviderErrorClass, RateLimitFallback, RateLimitPolicy, StreamClassifyInput,
@@ -73,6 +74,24 @@ pub(crate) fn rate_limit_window_and_cooldown(
     }
 }
 
+pub(crate) fn rate_limit_window_and_deadline(
+    provider_id: &str,
+    policy: RateLimitPolicy,
+    text: &str,
+    observed_at: DateTime<Utc>,
+) -> (Option<UsageWindowKind>, DateTime<Utc>) {
+    if provider_id == COMMAND_CODE_PROVIDER_ID
+        && matches!(policy, RateLimitPolicy::GenericFiveMinute)
+        && let Some(limit) =
+            crate::command_code_rate_limit::parse_command_code_rate_limit(text, observed_at)
+    {
+        return (Some(limit.window), limit.resets_at);
+    }
+
+    let (window, cooldown) = rate_limit_window_and_cooldown(policy, text);
+    (window, observed_at + cooldown)
+}
+
 pub(crate) fn rate_limit_fallback(window: Option<UsageWindowKind>) -> RateLimitFallback {
     if window == Some(UsageWindowKind::Free) {
         RateLimitFallback::ExhaustFreeChannel
@@ -84,6 +103,35 @@ pub(crate) fn rate_limit_fallback(window: Option<UsageWindowKind>) -> RateLimitF
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_code_plan_window_uses_the_exact_provider_deadline() {
+        let observed_at = DateTime::parse_from_rfc3339("2026-09-08T06:27:42.402Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let body = r#"{"error":{"code":"RATE_LIMITED","message":"You've reached your weekly usage limit for your plan. Your limit resets at 2026-09-08T09:56:18.379Z. Please wait for the window to reset or upgrade your plan to continue.","type":"rate_limit_error"}}"#;
+        let (window, deadline) = rate_limit_window_and_deadline(
+            COMMAND_CODE_PROVIDER_ID,
+            RateLimitPolicy::GenericFiveMinute,
+            body,
+            observed_at,
+        );
+        assert_eq!(window, Some(UsageWindowKind::Week));
+        assert_eq!(
+            deadline,
+            DateTime::parse_from_rfc3339("2026-09-08T09:56:18.379Z")
+                .unwrap()
+                .with_timezone(&Utc)
+        );
+
+        let (_, other_deadline) = rate_limit_window_and_deadline(
+            "another-provider",
+            RateLimitPolicy::GenericFiveMinute,
+            body,
+            observed_at,
+        );
+        assert_eq!(other_deadline, observed_at + Duration::minutes(5));
+    }
 
     #[test]
     fn r03_free_429_does_not_rotate_keys() {

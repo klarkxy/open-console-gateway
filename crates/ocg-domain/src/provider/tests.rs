@@ -129,7 +129,7 @@ fn catalog_hardcodes_providers_and_keeps_unverified_providers_unroutable() {
     assert_eq!(goat.verification_runtime_availability, "not_applicable");
     assert_eq!(goat.creation_availability, CreationAvailability::Available);
     assert_eq!(goat.pricing_availability, "available");
-    assert_eq!(goat.usage_availability, "local_state");
+    assert_eq!(goat.usage_availability, "available");
     assert!(goat.manual_usage_calibration);
     assert_eq!(goat.auth_schemes, &BEARER_AUTH);
     assert_eq!(goat.upstream_protocols, &GOAT_PROTOCOLS);
@@ -475,7 +475,11 @@ fn adapter_descriptors_preserve_current_capability_decisions() {
     assert_eq!(goat.inference.auth, InferenceAuthDescriptor::Bearer);
     assert!(!goat.usage.experimental);
     assert!(goat.usage.publishes_capability);
-    assert_eq!(goat.usage.contract, UsageContractKind::LocalState);
+    assert_eq!(goat.usage.contract, UsageContractKind::Authoritative);
+    assert_eq!(goat.usage.catalog_availability, "available");
+    assert_eq!(goat.usage.endpoint, Some(COMMAND_CODE_GOAT_USAGE_URL));
+    assert!(!goat.usage.automatic_sync);
+    assert!(!goat.usage.authoritative_for_quota);
     assert!(goat.usage.manual_calibration);
     assert!(!goat.usage.egress_ip_shared_cooldown_window);
     assert_eq!(
@@ -489,6 +493,7 @@ fn adapter_descriptors_preserve_current_capability_decisions() {
     );
     assert!(goat.card_actions.protocol_probe);
     assert!(goat.card_actions.catalog_refresh);
+    assert!(goat.card_actions.usage_refresh);
     assert_eq!(
         goat.card_actions.connection_verify,
         CardVerifyAction::NotApplicable

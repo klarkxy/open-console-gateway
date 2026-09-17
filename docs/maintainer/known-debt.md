@@ -27,9 +27,12 @@ proposal or pull request, with corresponding code and documentation changes.
 - Gemini is a client compatibility format. Forwarding, `400`, and `501`
   behavior is listed in [Limits](../user/limits.md) and
   [Protocol conversion](../user/protocol-conversion.md).
-- Command Code GOAT has no machine-readable usage endpoint. Its public model
-  directory cannot validate a stored Key, so authentication failure is only
-  known from real inference 401/403. Custom API remains a distinct live route
+- Command Code GOAT account usage comes from the undocumented first-party
+  `/alpha/billing/credits` endpoint used by the official CLI. Its response
+  stability is not guaranteed by the public Provider API, so manual refresh
+  validates exact GOAT caps and fails closed on schema or plan drift. Its
+  public model directory still cannot validate a stored Key, so authentication
+  failure is only known from real inference 401/403. Custom API remains a distinct live route
   under the trusted-administrator boundary (`custom.rs` + `custom_http.rs`).
 - Per-model/per-protocol overrides are on V3. Custom account-level
   per-protocol probing has no V3 counterpart; the historical V2
