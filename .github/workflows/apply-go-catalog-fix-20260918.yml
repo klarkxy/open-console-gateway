@@ -1,0 +1,50 @@
+name: Apply Go catalog source fix (no tests)
+
+on:
+  push:
+    branches:
+      - fix/go-catalog-publication-20260918
+    paths:
+      - scripts/apply-go-catalog-fix-20260918.py
+      - .github/workflows/apply-go-catalog-fix-20260918.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-go-catalog-fix-20260918
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    if: github.ref == 'refs/heads/fix/go-catalog-publication-20260918'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 0
+          ref: fix/go-catalog-publication-20260918
+      - name: Apply guarded source edits
+        run: python3 scripts/apply-go-catalog-fix-20260918.py
+      - name: Format changed Rust source without building or testing
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v rustfmt >/dev/null; then
+            rustfmt --version
+            git diff --name-only -- '*.rs' | while IFS= read -r file; do
+              rustfmt --edition 2024 --config skip_children=true "$file"
+            done
+          else
+            echo 'rustfmt unavailable; source formatting was not run'
+          fi
+          git diff --check
+          git diff --stat
+      - name: Commit source patch to the repair branch only
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add -- crates src docs
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'fix: publish runtime Go models and preserve protocol evidence [skip ci]'
+          git push origin HEAD:refs/heads/fix/go-catalog-publication-20260918
