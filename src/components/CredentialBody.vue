@@ -21,6 +21,13 @@
   <div v-else-if="capabilities.billingTierRequired && ollamaNeedsBilling" class="provider-unconfigured" role="status">
     <p>{{ t("配置 Ollama 计费档位以显示本月额度") }}</p>
   </div>
+  <OfficialApiPanel
+    v-else-if="plan?.model_source === 'official_api_preset'"
+    :provider-id="account.provider_id"
+    :account-id="account.id"
+    :account-version="account.updated_at"
+    :now="now"
+  />
   <div v-else-if="usageDisplayAvailable" class="official-plan-usage">
     <div v-if="usageLoadError" class="usage-load-error" role="alert">
       <span>{{ t("用量加载失败") }}</span>
@@ -72,6 +79,7 @@ import { t } from "../i18n/index.ts";
 import { accountInferenceEndpointUrl, officialBalanceSupported } from "../domain/upstream-balance.ts";
 import AccountCreditBalance from "./AccountCreditBalance.vue";
 import AccountFigure from "./AccountFigure.vue";
+import OfficialApiPanel from "./OfficialApiPanel.vue";
 import ProviderQuotaSummary from "./ProviderQuotaSummary.vue";
 
 export type CredentialFigure = {

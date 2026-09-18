@@ -1123,6 +1123,52 @@ pub fn published_routeable_aliases_with_runtime_catalogs(
     published_routeable_in(&build_runtime_registry(catalogs))
 }
 
+/// Client-visible names: curated aliases plus uniquely resolved exact Go IDs.
+/// Discovering a model does not create a shared cross-provider alias. Hosts
+/// still apply protocol enablement and the operator publication switch.
+pub fn published_routeable_models_with_runtime_catalogs(
+    catalogs: RuntimeCatalogs<'_>,
+) -> Vec<PublishedAlias> {
+    let mut published = published_routeable_aliases_with_runtime_catalogs(catalogs);
+    for id in catalogs.go {
+        if is_free_model(id) || published.iter().any(|item| item.alias == *id) {
+            continue;
+        }
+        if matches!(
+            resolve_with_runtime_catalogs(id, catalogs),
+            Ok(ResolvedModel::PinnedRaw { mapping, .. })
+                if mapping.routeable && mapping.is_opencode_go() && mapping.upstream_model == *id
+        ) {
+            published.push(PublishedAlias {
+                alias: id.clone(),
+                owned_by: OPENCODE_PROVIDER_ID.to_string(),
+            });
+        }
+    }
+    published.sort_by(|left, right| left.alias.cmp(&right.alias));
+    published
+}
+
+/// Public names that resolve to this provider, independent of first-wins ownership.
+pub fn routeable_models_for_with_runtime_catalogs(
+    provider_id: &str,
+    catalogs: RuntimeCatalogs<'_>,
+) -> Vec<String> {
+    published_routeable_models_with_runtime_catalogs(catalogs)
+        .into_iter()
+        .filter(|item| {
+            resolve_with_runtime_catalogs(&item.alias, catalogs).is_ok_and(|resolved| {
+                resolved.routeable_mappings().iter().any(|mapping| {
+                    mapping.provider_id == provider_id
+                        && (provider_id != OPENCODE_PROVIDER_ID
+                            || catalogs.go.contains(&mapping.upstream_model))
+                })
+            })
+        })
+        .map(|item| item.alias)
+        .collect()
+}
+
 fn go_catalog_alias(model_id: &str) -> String {
     model_id
         .trim()

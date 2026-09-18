@@ -4,7 +4,7 @@
 
 use ocg_core::crypto::{KeyCipher, StaticKeyCipher};
 use ocg_core::dashboard_v3::{
-    OfficialProtocolFetchGuard, install_official_protocol_fetch_fallback_chat_for_tests,
+    OfficialProtocolFetchGuard, install_official_protocol_fetch_unavailable_for_tests,
 };
 use ocg_core::db::Database;
 use ocg_core::gateway;
@@ -104,7 +104,7 @@ async fn start_state_on(state: Arc<CoreStateInner>, addr: SocketAddr) -> V3Harne
         .unwrap();
     let host = format!("http://127.0.0.1:{}", handle.port);
     let official_protocol_guard =
-        install_official_protocol_fetch_fallback_chat_for_tests(state.process_generation());
+        install_official_protocol_fetch_unavailable_for_tests(state.process_generation());
     V3Harness {
         state,
         dir,

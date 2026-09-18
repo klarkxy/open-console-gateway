@@ -103,11 +103,12 @@ export function providerAliasRows(
     const providerId = scopeProviderId(scope);
     if (!enabledProviders.has(providerId)) continue;
     for (const model of scope.models) {
-      if (!model.alias) continue;
+      const publicModel = model.alias || (providerId === "opencode" ? model.model_id : "");
+      if (!publicModel) continue;
       rows.push({
         provider_id: providerId,
-        key: `${scope.key}:${model.alias}:${model.model_id}`,
-        public_model: model.alias,
+        key: `${scope.key}:${publicModel}:${model.model_id}`,
+        public_model: publicModel,
         provider_plan: providerPlanLabel(scope),
         custom_account: null,
         upstream_model: model.model_id,

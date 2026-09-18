@@ -15,7 +15,7 @@ use ocg_core::dashboard_v3::install_custom_verify_probe_for_tests;
 use ocg_core::dashboard_v3::{
     AccountMutation, AccountVerificationStatus, ERROR_INVALID_JSON, ERROR_INVALID_REQUEST,
     ERROR_MISSING_EXPECTED_REVISION, ERROR_NOT_FOUND, ERROR_REVISION_CONFLICT, ERROR_UNAUTHORIZED,
-    install_official_protocol_fetch_fallback_chat_for_tests,
+    install_official_protocol_fetch_unavailable_for_tests,
 };
 use ocg_core::gateway::provider_adapter::install_goat_catalog_origin_for_test;
 use ocg_core::models::{AccountUpdate, ProxyMode};
@@ -721,7 +721,7 @@ async fn goat_verify_is_not_applicable_and_never_fetches_the_public_catalog() {
 }
 
 #[tokio::test]
-async fn provider_model_refresh_uses_go_account_and_public_command_catalog() {
+async fn provider_model_refresh_keeps_go_and_command_catalog_requests_keyless() {
     let harness = start_loopback("provider-model-refresh").await;
     force_direct_proxy(&harness);
     let go_origin = start_origin(
@@ -755,10 +755,18 @@ async fn provider_model_refresh_uses_go_account_and_public_command_catalog() {
         go_origin.calls.lock().unwrap()[0].path,
         "/provider/v1/models"
     );
-    assert_eq!(
-        go_origin.calls.lock().unwrap()[0].authorization.as_deref(),
-        Some("Bearer sk-go-verify")
-    );
+    // Public catalog discovery must not disclose account or dashboard secrets.
+    {
+        let calls = go_origin.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        let call = &calls[0];
+        assert_eq!(call.method, "GET");
+        assert_eq!(call.path, "/provider/v1/models");
+        assert!(call.authorization.is_none());
+        assert!(call.x_api_key.is_none());
+        assert!(call.cookie.is_none());
+        assert!(call.body.is_empty());
+    }
 
     let gateway_base = harness.v3_base.strip_suffix("/dashboard/api/v4").unwrap();
     let listed: Value = harness
@@ -864,7 +872,7 @@ async fn provider_model_refresh_uses_go_account_and_public_command_catalog() {
 }
 
 #[tokio::test]
-async fn unified_catalog_refresh_selects_an_eligible_account_and_defaults_new_models_off() {
+async fn unified_catalog_refresh_with_an_enabled_account_is_keyless_and_defaults_new_models_off() {
     let harness = start_loopback("unified-provider-catalog-refresh").await;
     force_direct_proxy(&harness);
     let go_origin = start_origin(
@@ -879,7 +887,7 @@ async fn unified_catalog_refresh_selects_an_eligible_account_and_defaults_new_mo
     let account_id = create_go_account(&harness).await;
     harness.enable_account(&account_id);
     let _docs =
-        install_official_protocol_fetch_fallback_chat_for_tests(harness.state.process_generation());
+        install_official_protocol_fetch_unavailable_for_tests(harness.state.process_generation());
 
     let before = harness.state.settings_revision();
     let (status, contracts) = send_json(
@@ -892,10 +900,18 @@ async fn unified_catalog_refresh_selects_an_eligible_account_and_defaults_new_mo
     assert_eq!(status, StatusCode::OK, "{contracts}");
     assert_eq!(harness.state.settings_revision(), before + 1);
     assert_eq!(go_origin.call_count(), 1);
-    assert_eq!(
-        go_origin.calls.lock().unwrap()[0].authorization.as_deref(),
-        Some("Bearer sk-go-verify")
-    );
+    // Public catalog discovery must not disclose account or dashboard secrets.
+    {
+        let calls = go_origin.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        let call = &calls[0];
+        assert_eq!(call.method, "GET");
+        assert_eq!(call.path, "/provider/v1/models");
+        assert!(call.authorization.is_none());
+        assert!(call.x_api_key.is_none());
+        assert!(call.cookie.is_none());
+        assert!(call.body.is_empty());
+    }
 
     let go = contracts["providers"]
         .as_array()
@@ -932,7 +948,7 @@ async fn unified_catalog_refresh_selects_an_eligible_account_and_defaults_new_mo
 }
 
 #[tokio::test]
-async fn unified_catalog_refresh_uses_a_disabled_ready_key() {
+async fn unified_catalog_refresh_with_a_disabled_account_remains_keyless() {
     let harness = start_loopback("unified-catalog-refresh-disabled-key").await;
     force_direct_proxy(&harness);
     let go_origin = start_origin(
@@ -970,7 +986,7 @@ async fn unified_catalog_refresh_uses_a_disabled_ready_key() {
             .enabled
     );
     let _docs =
-        install_official_protocol_fetch_fallback_chat_for_tests(harness.state.process_generation());
+        install_official_protocol_fetch_unavailable_for_tests(harness.state.process_generation());
 
     let (status, contracts) = send_json(
         &harness,
@@ -981,10 +997,18 @@ async fn unified_catalog_refresh_uses_a_disabled_ready_key() {
     .await;
     assert_eq!(status, StatusCode::OK, "{contracts}");
     assert_eq!(go_origin.call_count(), 1);
-    assert_eq!(
-        go_origin.calls.lock().unwrap()[0].authorization.as_deref(),
-        Some("Bearer sk-go-verify")
-    );
+    // Public catalog discovery must not disclose account or dashboard secrets.
+    {
+        let calls = go_origin.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        let call = &calls[0];
+        assert_eq!(call.method, "GET");
+        assert_eq!(call.path, "/provider/v1/models");
+        assert!(call.authorization.is_none());
+        assert!(call.x_api_key.is_none());
+        assert!(call.cookie.is_none());
+        assert!(call.body.is_empty());
+    }
     let go = contracts["providers"]
         .as_array()
         .unwrap()
@@ -1013,7 +1037,7 @@ async fn command_code_contract_refresh_defaults_new_rows_off_and_legacy_route_st
     .unwrap();
     let _goat_id = create_goat_account(&harness).await;
     let _docs =
-        install_official_protocol_fetch_fallback_chat_for_tests(harness.state.process_generation());
+        install_official_protocol_fetch_unavailable_for_tests(harness.state.process_generation());
 
     let before = harness.state.settings_revision();
     let (status, contracts) = send_json(

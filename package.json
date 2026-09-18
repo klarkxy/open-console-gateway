@@ -1,7 +1,7 @@
 {
   "name": "ocg-manager-ui",
   "private": true,
-  "version": "2.4.1",
+  "version": "2.4.2",
   "packageManager": "pnpm@10.29.2",
   "type": "module",
   "scripts": {
@@ -23,7 +23,7 @@
     "contract:v4:generate": "node scripts/dashboard-v4-contract.mjs --write",
     "contract:v4:check": "node scripts/dashboard-v4-contract.mjs --check",
     "typecheck": "vue-tsc --noEmit",
-    "test": "pnpm run test:web && pnpm run typecheck && pnpm exec vite build && pnpm run test:rust",
+    "test": "pnpm run test:web && pnpm run test:tooling && pnpm run typecheck && pnpm exec vite build && pnpm run test:rust",
     "design:lint": "npx -y @google/design.md@0.3.0 lint DESIGN.md"
   },
   "dependencies": {

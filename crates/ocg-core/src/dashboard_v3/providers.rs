@@ -26,7 +26,6 @@ use std::time::Duration;
 use crate::alias;
 use crate::goat;
 use crate::kernel::ids::is_free_model;
-use crate::kernel::protocol::supported_model_protocol_profiles;
 #[cfg(debug_assertions)]
 use crate::kernel::zen::{ZEN_MODELS_SOURCE_URL, parse_catalog};
 use crate::kernel::zen::{ZenFreeModelCatalog, model_views};
@@ -144,7 +143,7 @@ pub(super) async fn get_model_capabilities(
     State(state): State<CoreState>,
 ) -> Json<Vec<ProviderModelCapability>> {
     let _settings_update = state.settings_update.lock();
-    Json(model_capabilities())
+    Json(model_capabilities(&state.provider_contracts()))
 }
 
 pub(super) async fn get_zen_free_settings(
@@ -244,12 +243,6 @@ pub(super) async fn refresh_zen_free_models(
     Ok(Json(zen_free_models_from_state(&state)))
 }
 
-enum GoCommandCatalogAccount<'a> {
-    Explicit { account_id: &'a str },
-    Eligible,
-    None,
-}
-
 /// Catalog fetch is control-plane, not routing: a ready stored Key is enough
 /// even when the new account is still disabled.
 fn account_can_supply_catalog_refresh_key(account: &ModelAccount) -> bool {
@@ -283,7 +276,6 @@ async fn refresh_go_or_command_catalog(
     state: &CoreState,
     provider_id: &str,
     expectation: &MutationExpectation,
-    account_selection: GoCommandCatalogAccount<'_>,
 ) -> Result<GoCommandCatalogRefresh, V3ApiError> {
     if provider_id != OPENCODE_PROVIDER_ID && provider_id != COMMAND_CODE_PROVIDER_ID {
         return Err(V3ApiError::invalid_request_at(
@@ -296,75 +288,10 @@ async fn refresh_go_or_command_catalog(
         .try_lock()
         .map_err(|_| V3ApiError::conflict_at(state, "provider model refresh is already running"))?;
     let scope = ContractScope::provider(provider_id);
-    let (account, config, key, base_url, source_url, previous_models) = {
+    let (config, base_url, source_url, previous_models) = {
         let _settings_update = state.settings_update.lock();
         check_expectation(state, expectation)?;
         validate_provider_scope(state, &scope)?;
-        let account = match (provider_id, &account_selection) {
-            (id, GoCommandCatalogAccount::Explicit { account_id })
-                if id == OPENCODE_PROVIDER_ID =>
-            {
-                let account_id = account_id.trim();
-                if account_id.is_empty() {
-                    return Err(V3ApiError::invalid_request_at(
-                        state,
-                        "OpenCode Go model refresh requires a selected account",
-                    ));
-                }
-                let account = load_model_account(state, account_id)?;
-                if account.provider_id != OPENCODE_PROVIDER_ID {
-                    return Err(V3ApiError::invalid_request_at(
-                        state,
-                        "the selected account is not an OpenCode Go account",
-                    ));
-                }
-                Some(account)
-            }
-            (id, GoCommandCatalogAccount::Eligible) if id == OPENCODE_PROVIDER_ID => Some(
-                select_catalog_refresh_account(
-                    state
-                        .db
-                        .lock()
-                        .list_accounts()
-                        .map_err(V3ApiError::internal)?,
-                    OPENCODE_PROVIDER_ID,
-                )
-                .ok_or_else(|| {
-                    V3ApiError::invalid_request_at(
-                        state,
-                        "no eligible OpenCode Go account is available for catalog refresh",
-                    )
-                })?,
-            ),
-            (id, GoCommandCatalogAccount::None) if id == COMMAND_CODE_PROVIDER_ID => None,
-            _ => {
-                return Err(V3ApiError::invalid_request_at(
-                    state,
-                    "this provider does not support model refresh",
-                ));
-            }
-        };
-        let key = match (&account, &account_selection) {
-            (Some(account), GoCommandCatalogAccount::Explicit { .. }) => {
-                if account.key_cipher.trim().is_empty() {
-                    return Err(V3ApiError::invalid_request_at(
-                        state,
-                        "the selected account has no stored Key",
-                    ));
-                }
-                Some(
-                    state
-                        .decrypt_key(&account.key_cipher)
-                        .map_err(V3ApiError::internal)?,
-                )
-            }
-            (Some(account), _) => Some(
-                state
-                    .decrypt_key(&account.key_cipher)
-                    .map_err(V3ApiError::internal)?,
-            ),
-            (None, _) => None,
-        };
         let config = state.config();
         let base_url = if provider_id == OPENCODE_PROVIDER_ID {
             crate::gateway::free_models::opencode_go_base_url(&config.upstream_base_url)
@@ -388,16 +315,11 @@ async fn refresh_go_or_command_catalog(
             .scope(&scope)
             .map(|contract| contract.catalog.models.clone())
             .unwrap_or_default();
-        (account, config, key, base_url, source_url, previous_models)
+        (config, base_url, source_url, previous_models)
     };
 
     let models_result = if provider_id == OPENCODE_PROVIDER_ID {
-        goat::probe_opencode_go_models(
-            &config,
-            key.as_deref().expect("OpenCode refresh prepared a Key"),
-            &base_url,
-        )
-        .await
+        goat::refresh_opencode_go_models(&config, &base_url).await
     } else {
         goat::refresh_command_code_models(&config, &base_url).await
     };
@@ -444,15 +366,6 @@ async fn refresh_go_or_command_catalog(
     let now = Utc::now();
     let _settings_update = state.settings_update.lock();
     check_expectation(state, expectation)?;
-    if let Some(account) = account.as_ref() {
-        let current = load_model_account(state, &account.id)?;
-        if current.updated_at != account.updated_at || current.key_cipher != account.key_cipher {
-            return Err(V3ApiError::conflict_at(
-                state,
-                "the selected OpenCode Go account changed while models were refreshing",
-            ));
-        }
-    }
     let source = if provider_id == OPENCODE_PROVIDER_ID {
         provider_contracts::CATALOG_SOURCE_OPENCODE_MODELS
     } else {
@@ -480,7 +393,7 @@ async fn refresh_go_or_command_catalog(
     audit_catalog_success(state, provider_id, models.len(), revision);
     Ok(GoCommandCatalogRefresh {
         provider_id: provider_id.to_string(),
-        account_id: account.map(|account| account.id),
+        account_id: None,
         models,
         refreshed_at: now,
         source_url,
@@ -494,21 +407,8 @@ pub(super) async fn refresh_provider_models(
     body: Bytes,
 ) -> Result<Json<ProviderModels>, V3ApiError> {
     let input = parse_mutation_json::<ProviderModelsRefreshUpdate>(&body)?;
-    let account_selection = if provider_id == OPENCODE_PROVIDER_ID {
-        GoCommandCatalogAccount::Explicit {
-            account_id: input.account_id.as_deref().unwrap_or_default(),
-        }
-    } else if provider_id == COMMAND_CODE_PROVIDER_ID {
-        GoCommandCatalogAccount::None
-    } else {
-        return Err(V3ApiError::invalid_request_at(
-            &state,
-            "this provider does not support model refresh",
-        ));
-    };
-    let refreshed =
-        refresh_go_or_command_catalog(&state, &provider_id, &input.expectation, account_selection)
-            .await?;
+    // The optional legacy accountId is accepted but is not used for public discovery.
+    let refreshed = refresh_go_or_command_catalog(&state, &provider_id, &input.expectation).await?;
     Ok(Json(ProviderModels {
         provider_id: refreshed.provider_id,
         account_id: refreshed.account_id,
@@ -685,12 +585,7 @@ pub(super) async fn refresh_contract_catalog(
         return provider_contracts_response(&state);
     }
     if scope_id == COMMAND_CODE_PROVIDER_ID || scope_id == OPENCODE_PROVIDER_ID {
-        let account_selection = if scope_id == COMMAND_CODE_PROVIDER_ID {
-            GoCommandCatalogAccount::None
-        } else {
-            GoCommandCatalogAccount::Eligible
-        };
-        refresh_go_or_command_catalog(&state, &scope_id, &expectation, account_selection).await?;
+        refresh_go_or_command_catalog(&state, &scope_id, &expectation).await?;
         return provider_contracts_response(&state);
     }
     Err(V3ApiError::not_found_at(&state, "provider scope not found"))
@@ -762,7 +657,7 @@ fn validate_provider_protocol_overrides(
 /// V3 route: rewrite the current catalog to official-docs or snapshot
 /// protocols. The dashboard no longer exposes this; catalog refresh writes
 /// the same evidence. OpenCode Go, Zen Free, and Command Code fetch official
-/// docs (missing models default to Chat). Snapshot providers stay local.
+/// docs; missing models supply no new evidence. Snapshot providers stay local.
 pub(super) async fn reset_provider_model_protocols_to_static(
     State(state): State<CoreState>,
     Path(scope_id): Path<String>,
@@ -1358,11 +1253,26 @@ fn provider_catalog_from_state(state: &CoreState) -> ProviderCatalog {
         .map(|scope| scope.catalog.models.as_slice())
         .unwrap_or_default();
     let ollama_pinned_models = provider_contracts::ollama_cloud_pinned_model_ids(&contracts);
+    let go_models = contracts
+        .providers
+        .get(OPENCODE_PROVIDER_ID)
+        .map(|scope| scope.catalog.models.as_slice())
+        .unwrap_or_default();
+    let public_catalogs = alias::RuntimeCatalogs {
+        go: go_models,
+        zen_free: &zen_catalog.models,
+        command_code: goat_models,
+        minimax: minimax_models,
+        kimi: kimi_models,
+        ollama: ollama_models,
+        ollama_pinned: &ollama_pinned_models,
+        ..alias::RuntimeCatalogs::default()
+    };
     let mut entries: Vec<ProviderCatalogEntry> = BUILTIN_PROVIDERS
         .iter()
         .filter(|plan| !plan.product_surface.is_external_integration())
         .map(|plan| {
-            catalog_entry(
+            let mut entry = catalog_entry(
                 plan,
                 &zen_catalog.models,
                 goat_models,
@@ -1370,7 +1280,14 @@ fn provider_catalog_from_state(state: &CoreState) -> ProviderCatalog {
                 kimi_models,
                 ollama_models,
                 &ollama_pinned_models,
-            )
+            );
+            if plan.provider_id == OPENCODE_PROVIDER_ID {
+                entry.model_aliases = alias::routeable_models_for_with_runtime_catalogs(
+                    plan.provider_id,
+                    public_catalogs,
+                );
+            }
+            entry
         })
         .collect();
     for runtime in state.dynamic_providers().iter() {
@@ -1414,11 +1331,21 @@ fn dynamic_catalog_entry(runtime: &crate::dynamic::DynamicProviderRuntime) -> Pr
         verification_runtime_availability: "not_applicable".into(),
         routable: true,
         managed_registration: false,
-        pricing_availability: "unpriced".into(),
+        pricing_availability: if crate::official_api::kind_for_runtime(runtime).is_some() {
+            "available"
+        } else {
+            "unpriced"
+        }
+        .into(),
         usage_availability: "unavailable".into(),
         manual_usage_calibration: false,
         quota_unit: "none".into(),
-        model_source: "dynamic_provider".into(),
+        model_source: if crate::official_api::kind_for_runtime(runtime).is_some() {
+            "official_api_preset"
+        } else {
+            "dynamic_provider"
+        }
+        .into(),
         key_prefix: None,
         auth_schemes,
         upstream_protocols: {
@@ -1534,28 +1461,24 @@ fn catalog_entry(
     }
 }
 
-fn model_capabilities() -> Vec<ProviderModelCapability> {
-    supported_model_protocol_profiles()
-        .filter_map(|(model_id, preferred, supported)| {
-            Some(ProviderModelCapability {
-                model_id: model_id.to_string(),
-                provider_id: OPENCODE_PROVIDER_ID.to_string(),
-
-                preferred_protocol: upstream_protocol(preferred)?,
-                supported_protocols: supported
-                    .iter()
-                    .copied()
-                    .filter_map(upstream_protocol)
-                    .collect(),
-            })
+fn model_capabilities(contracts: &EffectiveContractSet) -> Vec<ProviderModelCapability> {
+    contracts
+        .providers
+        .get(OPENCODE_PROVIDER_ID)
+        .into_iter()
+        .flat_map(|scope| scope.models.values())
+        .map(|model| ProviderModelCapability {
+            model_id: model.model_id.clone(),
+            provider_id: OPENCODE_PROVIDER_ID.to_string(),
+            preferred_protocol: AccountUpstreamProtocol::from(model.preferred_protocol),
+            supported_protocols: model
+                .protocols
+                .values()
+                .filter(|row| row.available)
+                .map(|row| AccountUpstreamProtocol::from(row.protocol))
+                .collect(),
         })
         .collect()
-}
-
-fn upstream_protocol(
-    format: crate::kernel::protocol::ApiFormat,
-) -> Option<AccountUpstreamProtocol> {
-    provider_contracts::protocol_from_api(format).map(AccountUpstreamProtocol::from)
 }
 
 fn zen_free_settings_from_state(state: &CoreState) -> Result<ZenFreeSettings, V3ApiError> {

@@ -1965,3 +1965,47 @@ fn leftover_row_adapter_comes_from_mapping_catalog_not_account_id() {
     assert_eq!(set.routes[0].routing.adapter, ProviderAdapterKind::Cpa);
     assert_ne!(set.routes[0].routing.account.id, CPA_ACCOUNT_ID);
 }
+
+#[test]
+fn diagnostic_plan_does_not_veto_a_refreshed_go_model_missing_a_static_profile() {
+    for name in [
+        "muse-spark-1.3-contributor",
+        "omen-alpha",
+        "future-go-model",
+    ] {
+        let go = vec![name.to_string()];
+        let resolved = alias::resolve_with_runtime_catalogs(
+            name,
+            RuntimeCatalogs {
+                go: &go,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        for client in [
+            ApiFormat::ChatCompletions,
+            ApiFormat::Responses,
+            ApiFormat::Messages,
+        ] {
+            assert_eq!(diagnostic_forced_upstream(&resolved, client), Some(client));
+        }
+        assert_eq!(
+            diagnostic_forced_upstream(&resolved, ApiFormat::Gemini),
+            Some(ApiFormat::ChatCompletions)
+        );
+        assert!(alias::resolve_with_runtime_catalogs(name, RuntimeCatalogs::default()).is_err());
+    }
+    let go = vec!["grok-4.6".to_string()];
+    let known = alias::resolve_with_runtime_catalogs(
+        "grok-4.6",
+        RuntimeCatalogs {
+            go: &go,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        diagnostic_forced_upstream(&known, ApiFormat::Responses),
+        None
+    );
+}

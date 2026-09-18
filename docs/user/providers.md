@@ -182,9 +182,13 @@ refreshes those Plans only. Refresh stays manual:
   separate input, output, and cache-read rates. Each priced model's applied
   multiplier can be edited and saved. The saved provider revision prices later
   requests; missing or ambiguous rows stay unpriced. A refresh asks before
-  replacing edited multipliers. GOAT account cards use those priced OCG request logs for a local `$14 / $35 / $70`
-  window estimate with manual baseline correction. Command Code exposes no
-  machine-readable usage API.
+  replacing edited multipliers. This remains separate from OpenCode Go. GOAT
+  account cards can explicitly calibrate the `$14 / $35 / $70` windows from
+  Command Code's first-party `/alpha/billing/credits` account endpoint. The
+  official CLI uses this endpoint, although the public Provider API does not
+  document it. Priced OCG logs continue accumulating between snapshots, and
+  manual baseline correction remains available. There is no automatic GOAT
+  usage sync.
 - Zen Free is unpriced (egress-IP-shared free quota).
 - Custom API is unpriced: successful forwards log `cost_state=unknown` with
   no quota debit. There is no official usage window. Known-host current-balance

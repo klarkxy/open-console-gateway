@@ -24,6 +24,7 @@ mod account_verify;
 mod accounts;
 mod auth;
 mod browser;
+mod command_code_usage_refresh;
 mod connection;
 mod cpa;
 mod custom_discovery;
@@ -112,11 +113,16 @@ pub use types::{
 };
 pub use updater::{GITHUB_LATEST_RELEASE_API, GITHUB_LATEST_RELEASE_URL};
 
+#[cfg(debug_assertions)]
+pub use crate::command_code_usage::{
+    CommandCodeUsageTargetGuard, install_command_code_usage_target_for_tests,
+};
+
 pub use crate::official_protocols::OfficialProtocolBaseline;
 #[cfg(debug_assertions)]
 pub use crate::official_protocols::{
-    OfficialProtocolFetchGuard, install_official_protocol_fetch_fallback_chat_for_tests,
-    install_official_protocol_fetch_for_tests,
+    OfficialProtocolFetchGuard, install_official_protocol_fetch_for_tests,
+    install_official_protocol_fetch_unavailable_for_tests,
 };
 #[cfg(debug_assertions)]
 pub use account_verify::{CustomVerifyProbeGuard, install_custom_verify_probe_for_tests};
@@ -547,7 +553,7 @@ impl V3ApiError {
         }
     }
 
-    fn outbound_failed(state: &CoreState, message: impl Into<String>) -> Self {
+    pub(crate) fn outbound_failed(state: &CoreState, message: impl Into<String>) -> Self {
         Self::outbound_failed_at(
             state.settings_revision(),
             state.process_generation(),
@@ -567,6 +573,18 @@ impl V3ApiError {
                 message: message.into(),
                 current_revision: Some(current_revision),
                 process_generation: Some(process_generation),
+            },
+        }
+    }
+
+    pub(crate) fn throttled_at(state: &CoreState, message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            body: V3Error {
+                code: ERROR_THROTTLED.into(),
+                message: message.into(),
+                current_revision: Some(state.settings_revision()),
+                process_generation: Some(state.process_generation()),
             },
         }
     }

@@ -1218,7 +1218,10 @@ fn preferred_protocol(
 ) -> UpstreamProtocolKind {
     match adapter {
         ProviderAdapterKind::OpenCodeGo | ProviderAdapterKind::ZenFree => {
-            UpstreamProtocolKind::ChatCompletions
+            // The V3 preferred field is non-null; this placeholder does not
+            // confer support when an unknown model has no admitted evidence.
+            provider_default_protocol(adapter, model_id)
+                .unwrap_or(UpstreamProtocolKind::ChatCompletions)
         }
         ProviderAdapterKind::CommandCodeGoat => {
             ocg_domain::protocol::command_code_preferred_format(model_id)
@@ -1244,19 +1247,17 @@ fn preferred_protocol(
     }
 }
 
-/// Chat Completions is the documented miss/fallback for Go and Zen until
-/// catalog refresh writes an official-docs protocol. Other sealed adapters
-/// already answer every model id through family rules.
+/// Known per-model defaults only. Directory discovery cannot assert Chat support.
 fn provider_default_protocol(
     adapter: ProviderAdapterKind,
     model_id: &str,
 ) -> Option<UpstreamProtocolKind> {
     match adapter {
-        ProviderAdapterKind::OpenCodeGo if !model_id.trim().is_empty() => {
-            Some(UpstreamProtocolKind::ChatCompletions)
+        ProviderAdapterKind::OpenCodeGo => {
+            crate::official_protocols::known_opencode_default(model_id, false)
         }
-        ProviderAdapterKind::ZenFree if crate::kernel::ids::is_free_model(model_id) => {
-            Some(UpstreamProtocolKind::ChatCompletions)
+        ProviderAdapterKind::ZenFree => {
+            crate::official_protocols::known_opencode_default(model_id, true)
         }
         _ => None,
     }

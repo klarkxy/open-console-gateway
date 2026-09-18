@@ -2,7 +2,7 @@ use axum::Router;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use chrono::{Duration, Utc};
+use chrono::{Duration, SecondsFormat, Utc};
 use ocg_core::crypto::{KeyCipher, StaticKeyCipher};
 use ocg_core::db::{Database, ForwardLogQueryOptions};
 use ocg_core::gateway;
@@ -323,7 +323,7 @@ async fn application_models_does_not_select_accounts_or_hit_upstream() {
 }
 
 #[tokio::test]
-async fn application_models_intersects_priced_go_aliases_in_registry_order() {
+async fn application_models_keeps_unpriced_catalog_models_in_registry_order() {
     let p = PreparedFallback::go(
         &[(
             "key-1",
@@ -353,7 +353,7 @@ async fn application_models_intersects_priced_go_aliases_in_registry_order() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(
         body["models"],
-        serde_json::json!(["glm-5.1", "grok-4.5", "kimi-k3", "minimax-m2.7"])
+        serde_json::to_value(expected_local_application_models(&h.state)).unwrap()
     );
     assert_eq!(
         application_model_ids(&body),
@@ -363,7 +363,7 @@ async fn application_models_intersects_priced_go_aliases_in_registry_order() {
 }
 
 #[tokio::test]
-async fn application_models_empty_intersection_returns_empty_list() {
+async fn application_models_remains_available_with_empty_or_disjoint_pricing() {
     let p = PreparedFallback::go(
         &[(
             "key-1",
@@ -385,7 +385,11 @@ async fn application_models_empty_intersection_returns_empty_list() {
 
     let (status, body) = h.application_models().await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["models"], serde_json::json!([]));
+    assert_eq!(
+        body["models"],
+        serde_json::to_value(expected_local_application_models(&h.state)).unwrap()
+    );
+    assert!(application_model_ids(&body).contains(&"glm-5".to_string()));
     assert_no_application_model_side_effects(&h.state, &h.calls, Some(&before), &routing_before);
 
     let mut disjoint = h.state.pricing_snapshot().as_ref().clone();
@@ -396,7 +400,11 @@ async fn application_models_empty_intersection_returns_empty_list() {
 
     let (status, body) = h.application_models().await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["models"], serde_json::json!([]));
+    assert_eq!(
+        body["models"],
+        serde_json::to_value(expected_local_application_models(&h.state)).unwrap()
+    );
+    assert!(application_model_ids(&body).contains(&"glm-5".to_string()));
     assert!(h.calls.lock().unwrap().is_empty());
 }
 
@@ -1805,7 +1813,7 @@ async fn unregistered_free_suffix_without_protocol_is_rejected_locally() {
 }
 
 #[tokio::test]
-async fn unknown_zen_catalog_free_id_forwards_as_chat_on_raw_pin_and_stripped_alias() {
+async fn unknown_zen_catalog_requires_explicit_chat_for_raw_pin_and_stripped_alias() {
     let p = PreparedFallback::zen_go(&[("", &[ok(), ok()])], &["normal-key"]).await;
     let mut catalog = (*p.state.zen_free_model_catalog()).clone();
     catalog.models.push("brand-new-promo-free".into());
@@ -1818,6 +1826,30 @@ async fn unknown_zen_catalog_free_id_forwards_as_chat_on_raw_pin_and_stripped_al
     p.state.reload_provider_contracts().unwrap();
     p.state.activate_zen_free_model_catalog(catalog).unwrap();
     let h = p.bind().await;
+    let (status, body) = h
+        .protocol("/v1/chat/completions", "brand-new-promo-free")
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        h.calls.lock().unwrap().is_empty(),
+        "unknown protocol must reject before upstream"
+    );
+    h.state
+        .db
+        .lock()
+        .set_model_protocol_overrides(
+            &ocg_core::provider_contracts::ContractScope::provider(
+                ocg_core::provider::OPENCODE_ZEN_FREE_PROVIDER_ID,
+            ),
+            &[(
+                "brand-new-promo-free".to_string(),
+                ocg_core::provider::UpstreamProtocolKind::ChatCompletions,
+                ocg_core::provider_contracts::ProtocolOverrideState::ForceOn,
+            )],
+            Utc::now(),
+        )
+        .unwrap();
+    h.state.reload_provider_contracts().unwrap();
 
     for model in ["brand-new-promo-free", "brand-new-promo"] {
         let (status, body) = h.protocol("/v1/chat/completions", model).await;
@@ -2364,8 +2396,8 @@ async fn mixed_goat_cooldown_and_sticky_state_are_independent() {
     );
     let goat = h.account(&goat_id);
     let open = h.account("acct-1");
-    assert!(goat.cooldown_until.is_some());
-    assert!(goat.cooldown_generic_until.is_some());
+    assert!(goat.cooldown_until.is_none());
+    assert!(goat.cooldown_generic_until.is_none());
     assert!(goat.cooldown_5h_until.is_none());
     assert!(goat.cooldown_week_until.is_none());
     assert!(goat.cooldown_month_until.is_none());
@@ -2380,6 +2412,49 @@ async fn mixed_goat_cooldown_and_sticky_state_are_independent() {
         sync.as_ref()
             .is_none_or(|state| state.next_eligible_at.is_none()),
         "GOAT 429 must not schedule OpenCode Go usage sync: {sync:?}"
+    );
+}
+
+#[tokio::test]
+async fn goat_plan_window_429_persists_the_exact_weekly_deadline() {
+    let expected_reset = Utc::now() + Duration::hours(2);
+    let reset_text = expected_reset.to_rfc3339_opts(SecondsFormat::Millis, true);
+    let body: &'static str = Box::leak(
+        format!(
+            r#"{{"error":{{"code":"RATE_LIMITED","message":"You've reached your weekly usage limit for your plan. Your limit resets at {reset_text}. Please wait for the window to reset or upgrade your plan to continue.","type":"rate_limit_error"}}}}"#
+        )
+        .into_boxed_str(),
+    );
+    let replies = [reply(StatusCode::TOO_MANY_REQUESTS.as_u16(), body)];
+    let entries = [("goat-key", replies.as_slice())];
+    let (h, goat_id) = start_goat(
+        &entries,
+        &[COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM],
+        true,
+        true,
+    )
+    .await;
+
+    let (status, response) = h
+        .protocol(
+            "/v1/chat/completions",
+            COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
+        )
+        .await;
+    assert_ne!(status, StatusCode::OK, "{response}");
+
+    let goat = h.account(&goat_id);
+    assert!(goat.cooldown_generic_until.is_none());
+    assert!(goat.cooldown_5h_until.is_none());
+    assert_eq!(
+        goat.cooldown_week_until
+            .map(|deadline| deadline.timestamp_millis()),
+        Some(expected_reset.timestamp_millis())
+    );
+    assert_eq!(
+        goat.cooldown_until
+            .map(|deadline| deadline.timestamp_millis()),
+        Some(expected_reset.timestamp_millis())
     );
 }
 

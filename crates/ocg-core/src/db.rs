@@ -44,6 +44,7 @@ pub(crate) mod custom_store;
 pub(crate) mod dynamic_store;
 pub(crate) mod identity;
 pub(crate) mod identity_v57;
+mod official_api;
 pub(crate) mod platform;
 
 /// Local configuration for the one code-owned CPA external integration.
@@ -912,47 +913,65 @@ fn apply_official_protocol_baseline_on(
     now: DateTime<Utc>,
     force_off_extras: bool,
 ) -> Result<()> {
-    if !force_off_extras {
-        conn.execute(
-            "DELETE FROM provider_contract_model_protocols
-             WHERE scope_kind = ?1 AND scope_id = ?2 AND source = 'static'",
-            params![scope.kind_str(), scope.id()],
-        )?;
-    }
+    let evidence = load_scope_evidence_on(conn, scope)?;
     let mut preferences = Vec::new();
     for model_id in current_models {
-        let official = baseline.protocol_for(scope.id(), model_id);
-        if let Some(protocol) = official {
-            upsert_model_protocol_row_on(
-                conn,
-                &PersistedModelProtocol {
-                    scope: scope.clone(),
-                    model_id: model_id.clone(),
-                    protocol,
-                    source: ContractEvidenceSource::Static,
-                    verified_at: None,
-                    observed_at: None,
-                    last_probe_result: None,
-                    last_probe_at: None,
-                    last_probe_error: None,
-                },
-            )?;
-            if preference_protocol_allowed(conn, scope, model_id, protocol)? {
-                preferences.push((model_id.clone(), protocol));
-            }
+        let Some(protocol) = baseline.protocol_for(scope.id(), model_id) else {
+            continue;
+        };
+        // Old static declarations may also carry independent probe history.
+        // Demote those declarations, keeping their diagnostics, before pruning.
+        conn.execute(
+            "UPDATE provider_contract_model_protocols SET source = 'probe_observed'
+             WHERE scope_kind = ?1 AND scope_id = ?2 AND model_id = ?3
+               AND source = 'static' AND protocol <> ?4
+               AND (verified_at IS NOT NULL OR observed_at IS NOT NULL
+                    OR last_probe_result IS NOT NULL OR last_probe_at IS NOT NULL
+                    OR last_probe_error IS NOT NULL)",
+            params![scope.kind_str(), scope.id(), model_id, protocol.as_str()],
+        )?;
+        conn.execute(
+            "DELETE FROM provider_contract_model_protocols
+             WHERE scope_kind = ?1 AND scope_id = ?2 AND model_id = ?3
+               AND source = 'static' AND protocol <> ?4",
+            params![scope.kind_str(), scope.id(), model_id, protocol.as_str()],
+        )?;
+        let mut row = evidence
+            .iter()
+            .find(|row| row.model_id == *model_id && row.protocol == protocol)
+            .cloned()
+            .unwrap_or(PersistedModelProtocol {
+                scope: scope.clone(),
+                model_id: model_id.clone(),
+                protocol,
+                source: ContractEvidenceSource::Static,
+                verified_at: None,
+                observed_at: None,
+                last_probe_result: None,
+                last_probe_at: None,
+                last_probe_error: None,
+            });
+        row.source = ContractEvidenceSource::Static;
+        upsert_model_protocol_row_on(conn, &row)?;
+        let has_preference: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM provider_model_protocol_preferences
+             WHERE provider_id = ?1 AND model_id = ?2)",
+            params![scope.id(), model_id.trim().to_ascii_lowercase()],
+            |row| row.get(0),
+        )?;
+        if (force_off_extras || !has_preference)
+            && preference_protocol_allowed(conn, scope, model_id, protocol)?
+        {
+            preferences.push((model_id.clone(), protocol));
         }
         if force_off_extras {
-            for protocol in [
-                UpstreamProtocolKind::ChatCompletions,
-                UpstreamProtocolKind::Responses,
-                UpstreamProtocolKind::Messages,
-            ] {
-                if official != Some(protocol) {
+            for extra in UpstreamProtocolKind::ALL {
+                if extra != protocol {
                     set_model_protocol_override_on(
                         conn,
                         scope,
                         model_id,
-                        protocol,
+                        extra,
                         ProtocolOverrideState::ForceOff,
                         now,
                     )?;
@@ -6075,6 +6094,13 @@ impl Database {
         );
         let tx = self.conn.unchecked_transaction()?;
         ensure_contract_scope_row(&tx, scope, now)?;
+        anyhow::ensure!(
+            !matches!(
+                baseline,
+                crate::official_protocols::OfficialProtocolBaseline::Unavailable
+            ),
+            "cannot reset protocol configuration without an official document"
+        );
         clear_provider_protocol_judgments_on(&tx, scope)?;
         apply_official_protocol_baseline_on(&tx, scope, current_models, baseline, now, true)?;
         bump_scope_revision_on(&tx, scope, now)?;
@@ -6864,6 +6890,10 @@ impl Database {
             "dynamic provider still has {count} referencing account(s)"
         );
         dynamic_store::delete_dynamic_provider_on(&tx, &existing.id)?;
+        tx.execute(
+            "DELETE FROM provider_pricing_snapshots WHERE provider_id = ?1",
+            [&existing.id],
+        )?;
         let snapshot = list_dynamic_providers_on(&tx)?;
         self.refresh_destination_shadow()?;
         tx.commit()?;

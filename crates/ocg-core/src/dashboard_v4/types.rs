@@ -83,6 +83,13 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "PlanDto",
     "CatalogModelDto",
     "DestinationProjectionRefusedError",
+    "OfficialApiKind",
+    "OfficialPriceRow",
+    "OfficialPriceSheet",
+    "OfficialBalance",
+    "OfficialSpend",
+    "OfficialApiStatus",
+    "OfficialApiPrices",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1138,6 +1145,8 @@ pub fn contract_schema() -> Value {
     include_type::<PlanDto>(&mut serialize);
     include_type::<CatalogModelDto>(&mut serialize);
     include_type::<DestinationProjectionRefusedError>(&mut serialize);
+    include_type::<crate::official_api::OfficialApiStatus>(&mut serialize);
+    include_type::<crate::official_api::OfficialApiPrices>(&mut serialize);
     let mut defs = serialize.take_definitions(true);
 
     let mut deserialize = SchemaSettings::draft2020_12().into_generator();

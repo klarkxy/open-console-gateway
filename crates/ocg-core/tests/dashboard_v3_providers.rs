@@ -660,6 +660,28 @@ async fn dashboard_v3_provider_catalog_aliases_follow_saved_builtin_catalogs() {
 #[tokio::test]
 async fn dashboard_v3_model_capabilities_are_go_protocol_rows_including_grok_45() {
     let harness = start_loopback("providers-capabilities").await;
+    // Capabilities are persisted discovery, not an implicit legacy seed catalog.
+    persist_catalog(
+        &harness,
+        OPENCODE_PROVIDER_ID,
+        &["grok-4.5"],
+        CATALOG_SOURCE_OPENCODE_MODELS,
+    );
+    harness
+        .state
+        .db
+        .lock()
+        .apply_official_protocol_baseline(
+            &ContractScope::provider(OPENCODE_PROVIDER_ID),
+            &["grok-4.5".to_string()],
+            &ocg_core::dashboard_v3::OfficialProtocolBaseline::mapped([(
+                "grok-4.5",
+                ocg_core::provider::UpstreamProtocolKind::Responses,
+            )]),
+            chrono::Utc::now(),
+        )
+        .unwrap();
+    harness.state.reload_provider_contracts().unwrap();
     let (status, body) = get_v3(&harness, "/providers/model-capabilities").await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(body.is_array(), "{body}");

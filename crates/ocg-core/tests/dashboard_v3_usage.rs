@@ -532,7 +532,7 @@ async fn dashboard_v3_goat_estimates_priced_logs_and_allows_local_calibration() 
         ))
         .await;
     assert_eq!(status, StatusCode::OK, "{provider}");
-    assert_eq!(provider["availability"], "local_state");
+    assert_eq!(provider["availability"], "available");
     assert_eq!(provider["pricingRevision"], Value::Null);
     let provider = parse_provider_usage(&provider);
     assert_eq!(provider.quota_windows.len(), 3);

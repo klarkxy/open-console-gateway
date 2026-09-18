@@ -8,7 +8,7 @@ use crate::gateway::attempt::{
 use crate::gateway::classify::{
     PreflightKind, ProviderErrorClass, RateLimitFallback, StreamClassifyInput,
     TransportClassifyInput, classify_http, classify_preflight, classify_stream, classify_transport,
-    rate_limit_fallback, rate_limit_window_and_cooldown, schedule_go_usage_sync,
+    rate_limit_fallback, rate_limit_window_and_deadline, schedule_go_usage_sync,
 };
 use crate::gateway::diagnostics::{
     ErrorDiagnostic, RequestTrace, api_format_name, emit_failure, emit_legacy_tool_compat,
@@ -326,6 +326,7 @@ enum RequestPricingSnapshot {
     /// Linked Custom Key: exact frozen platform price, or fail-closed unknown.
     /// Never inherits Go / GOAT / Ollama / USD provider rows.
     Platform(PlatformAttemptPrice),
+    OfficialApi(crate::official_api::OfficialAttemptPrice),
     Unpriced,
 }
 
@@ -408,6 +409,35 @@ impl RequestPricingSnapshot {
                 Utc::now(),
             ),
             Self::Platform(price) => price.estimate(),
+            Self::OfficialApi(price) => {
+                let amount = (model == price.model)
+                    .then(|| {
+                        price.amount(
+                            prompt_tokens,
+                            completion_tokens,
+                            cached_tokens,
+                            cache_creation_tokens,
+                        )
+                    })
+                    .flatten();
+                let usd = amount.filter(|_| price.sheet.kind.currency() == "USD");
+                crate::kernel::pricing::PricingEstimate {
+                    raw_cost_usd: usd,
+                    quota_debit: None,
+                    effective_paid_cost_usd: None,
+                    cost: usd,
+                    pricing_revision_id: Some(price.sheet.revision.clone()),
+                    quota_multiplier: None,
+                    local_adjustment_multiplier: None,
+                    cost_state: if usd.is_some() {
+                        "priced"
+                    } else if amount.is_some() {
+                        "unknown"
+                    } else {
+                        "unpriced"
+                    },
+                }
+            }
             Self::Unpriced => crate::kernel::pricing::PricingEstimate {
                 raw_cost_usd: None,
                 quota_debit: None,
@@ -426,6 +456,7 @@ impl RequestPricingSnapshot {
             Self::OpenCode(snapshot) => Some(&snapshot.revision),
             Self::Provider(snapshot) => Some(snapshot.revision()),
             Self::Platform(price) => price.provenance(),
+            Self::OfficialApi(price) => Some(&price.sheet.revision),
             Self::Unpriced => None,
         }
     }
@@ -435,6 +466,7 @@ impl RequestPricingSnapshot {
             Self::OpenCode(_) => Some(crate::provider::OPENCODE_PROVIDER_ID),
             Self::Provider(snapshot) => Some(snapshot.provider_id()),
             Self::Platform(_) => Some(crate::provider::CUSTOM_PROVIDER_ID),
+            Self::OfficialApi(price) => Some(&price.provider_id),
             Self::Unpriced => None,
         }
     }
@@ -647,6 +679,75 @@ fn bind_platform_attempt_price(
     RequestPricingSnapshot::Platform(platform)
 }
 
+fn bind_official_attempt_price(
+    state: &CoreState,
+    account: &Account,
+    plan: &RequestPlan,
+    dynamics: &[crate::dynamic::DynamicProviderRuntime],
+    context: &mut ForwardAttemptContext,
+    original: RequestPricingSnapshot,
+) -> RequestPricingSnapshot {
+    if !matches!(original, RequestPricingSnapshot::Unpriced)
+        || platform_request_has_variable_cost(&plan.body, plan.service_tier.as_deref())
+    {
+        return original;
+    }
+    let Ok(body) = serde_json::from_slice::<Value>(&plan.body) else {
+        return original;
+    };
+    // Hosted tools have charges outside token pricing; ordinary function tools do not.
+    if body
+        .get("tools")
+        .and_then(Value::as_array)
+        .is_some_and(|tools| {
+            tools.iter().any(|tool| {
+                tool.get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|kind| !matches!(kind, "function" | "custom"))
+            })
+        })
+        || body.get("web_search_options").is_some()
+    {
+        return original;
+    }
+    let Some(runtime) = dynamics
+        .iter()
+        .find(|runtime| runtime.id == account.provider_id)
+    else {
+        return original;
+    };
+    let Some(kind) = crate::official_api::kind_for_runtime(runtime) else {
+        return original;
+    };
+    let Some(endpoint) = plan
+        .custom_route
+        .as_ref()
+        .map(|route| route.endpoint_url.as_str())
+    else {
+        return original;
+    };
+    let protocol = match plan.upstream {
+        ApiFormat::ChatCompletions => crate::provider::UpstreamProtocolKind::ChatCompletions,
+        ApiFormat::Responses => crate::provider::UpstreamProtocolKind::Responses,
+        ApiFormat::Messages => crate::provider::UpstreamProtocolKind::Messages,
+        ApiFormat::Gemini => return original,
+    };
+    if !crate::official_api::route_is_official(kind, endpoint, protocol) {
+        return original;
+    }
+    let Ok(sheet) = state.db.lock().official_api_prices(&runtime.id, kind) else {
+        return original;
+    };
+    let price = crate::official_api::OfficialAttemptPrice {
+        provider_id: runtime.id.clone(),
+        sheet,
+        model: plan.model.clone(),
+        at: state.sample_gateway_clock().0,
+    };
+    context.official_price = Some(price.clone());
+    RequestPricingSnapshot::OfficialApi(price)
+}
+
 fn apply_platform_native_attribution(
     attribution: &mut ForwardLogNativeAttribution,
     context: &ForwardAttemptContext,
@@ -733,6 +834,7 @@ struct ForwardAttemptContext {
     client_key_id: Option<String>,
     client_key_name: Option<String>,
     platform_price: Option<PlatformAttemptPrice>,
+    official_price: Option<crate::official_api::OfficialAttemptPrice>,
 }
 
 impl ForwardAttemptContext {
@@ -765,6 +867,7 @@ impl ForwardAttemptContext {
             client_key_id: None,
             client_key_name: None,
             platform_price: None,
+            official_price: None,
         }
     }
 
@@ -954,6 +1057,14 @@ async fn forward_request_impl(
     } else {
         pricing_snapshot
     };
+    let pricing_snapshot = bind_official_attempt_price(
+        state,
+        account,
+        plan,
+        dynamics,
+        &mut attempt_context,
+        pricing_snapshot,
+    );
     attempt_context.set_client_key(client_key_id, state);
     let attempt_spec = match provider_adapter::resolve_route_with_dynamics(
         account, adapter, config, plan, dynamics,
@@ -1483,14 +1594,26 @@ async fn forward_request_impl(
 
         match class {
             ProviderErrorClass::RateLimited { policy } => {
-                let (window, cooldown) = rate_limit_window_and_cooldown(policy, &text);
-                let until = Utc::now() + cooldown;
-                let sanitized = attempt_context.sanitize_upstream_error(&text);
-                let error_message = format!(
-                    "rate limited: {} (resets in {}s)",
-                    sanitized,
-                    cooldown.num_seconds()
+                let observed_at = state.sample_gateway_clock().0;
+                let cooldown = rate_limit_window_and_deadline(
+                    &account.provider_id,
+                    policy,
+                    &text,
+                    error_headers
+                        .get(reqwest::header::RETRY_AFTER)
+                        .and_then(|value| value.to_str().ok()),
+                    observed_at,
                 );
+                let window = cooldown.and_then(|(window, _)| window);
+                let sanitized = attempt_context.sanitize_upstream_error(&text);
+                let error_message = match cooldown {
+                    Some((_, until)) => format!(
+                        "rate limited: {} (resets in {}s)",
+                        sanitized,
+                        until.signed_duration_since(observed_at).num_seconds()
+                    ),
+                    None => format!("upstream temporarily rate limited: {sanitized}"),
+                };
                 let action = forward_action_for_class(class, allow_same_account_retry, window);
                 let failure = attempt_context.failure(FailureSpec {
                     error_source: "upstream",
@@ -1519,13 +1642,15 @@ async fn forward_request_impl(
                         &attempt_context,
                         Some(failure),
                     )?;
-                    db.set_account_rate_limit_if_key_matches(
-                        &account.id,
-                        &account.key_cipher,
-                        until,
-                        &sanitized,
-                        window,
-                    )?;
+                    if let Some((window, until)) = cooldown {
+                        db.set_account_rate_limit_if_key_matches(
+                            &account.id,
+                            &account.key_cipher,
+                            until,
+                            &sanitized,
+                            window,
+                        )?;
+                    }
                 }
                 // Schedule (never inline) an official usage reconciliation shortly
                 // after a real inference 429. Does not alter cooldown/failover.
@@ -1725,8 +1850,10 @@ async fn forward_request_impl(
                 });
             }
             _ => {
-                // Other 4xx: request-level error. Convert its envelope for the caller,
-                // but don't retry another account for the same invalid request.
+                // A proven GOAT credit rejection is account-scoped and may fall
+                // through for this request only. It supplies no reset deadline:
+                // do not invent a cooldown or mislabel it as an invalid Key.
+                // Other 4xx remain request errors and never replay on another Key.
                 let sanitized = attempt_context.sanitize_upstream_error(&text);
                 let action = forward_action_for_class(class, allow_same_account_retry, None);
                 let failure = attempt_context.failure(FailureSpec {
@@ -1772,7 +1899,8 @@ async fn forward_request_impl(
                 return Ok(ForwardResult {
                     response,
                     action,
-                    error_message: None,
+                    error_message: (class == ProviderErrorClass::InsufficientCredits)
+                        .then_some(message),
                 });
             }
         }
@@ -2942,7 +3070,8 @@ pub(crate) fn forward_action_for_class(
         ProviderErrorClass::RouteUnavailable
         | ProviderErrorClass::DecryptFailed
         | ProviderErrorClass::UnauthorizedRotate
-        | ProviderErrorClass::ForbiddenRotate => ForwardAction::TryNextAccount,
+        | ProviderErrorClass::ForbiddenRotate
+        | ProviderErrorClass::InsufficientCredits => ForwardAction::TryNextAccount,
         ProviderErrorClass::RateLimited { .. } => match rate_limit_fallback(rate_limit_window) {
             RateLimitFallback::ExhaustFreeChannel => ForwardAction::ExhaustFreeChannel,
             RateLimitFallback::TryNextAccount => ForwardAction::TryNextAccount,
@@ -3112,6 +3241,21 @@ fn persist_log_identity(
     attribution.resolved_alias = context.resolved_alias.clone();
     attribution.upstream_model = Some(context.upstream_model.clone());
     apply_platform_native_attribution(&mut attribution, context, metrics);
+    if let Some(price) = &context.official_price
+        && matches!(metrics.cost_state, "priced" | "unknown")
+        && metrics.pricing_provider_id.as_deref() == Some(price.provider_id.as_str())
+        && metrics.pricing_revision_id.as_deref() == Some(price.sheet.revision.as_str())
+        && let Some(amount) = price.amount(
+            metrics.prompt_tokens,
+            metrics.completion_tokens,
+            metrics.cached_tokens,
+            metrics.cache_creation_tokens,
+        )
+    {
+        attribution.native_cost_value = Some(amount);
+        attribution.native_cost_unit = Some(price.sheet.kind.currency().into());
+        attribution.native_cost_currency = Some(price.sheet.kind.currency().into());
+    }
     db.set_forward_log_native_attribution(id, &attribution)?;
     Ok(())
 }
@@ -3374,6 +3518,7 @@ mod stream_usage_tests {
             client_key_id: None,
             client_key_name: None,
             platform_price: None,
+            official_price: None,
         };
         let mut headers = HeaderMap::new();
         headers.insert("x-request-id", format!("request-{secret}").parse().unwrap());
@@ -3714,6 +3859,7 @@ mod stream_outcome_guard_tests {
             client_key_id: None,
             client_key_name: None,
             platform_price: None,
+            official_price: None,
         }
     }
 

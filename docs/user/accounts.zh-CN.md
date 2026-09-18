@@ -23,9 +23,7 @@ Free 按出口 IP 共享额度与冷却，Custom API 不做供应商额度核算
 
 额度卡按目录能力而不是 Provider ID 决定行为。`usageAvailability=available` 时加载通用 Provider quota windows 并显示刷新动作；`manualUsageCalibration=true` 时额外加载本地校准对象供编辑，但卡片本身仍渲染 Provider windows。其余目录行不显示额度条；Zen Free 继续使用独立的出口冷却。已知 MiniMax/Kimi 窗口名保持友好显示，未知窗口名安全地人类化，不改存储 wire 值。Custom API 与用户定义 Provider 账号，若保存的 Endpoint 主机恰好是 `api.deepseek.com`、`api.moonshot.cn` 或 `api.moonshot.ai`，也可以点**刷新额度**读取官方当前余额。该快照只用于展示，不改变路由。其他 Custom 目的地在本产品中没有余额接口。
 
-GOAT 卡片显示的是明确标注的本地估算：
-OCG 内已定价请求日志按公开的 `$14 / $35 / $70` 三个窗口累计。Command Code 没有可机读的用量 API。其他客户端流量与未定价日志不会计入，
-可通过手工校准修正显示基线。付费档 Ollama Cloud 卡片（Pro / Max / Team）把 OCG 内已定价请求日志投影到每月 `$60 / $300 / $1000` USD Credits 软额度。Ollama Cloud 在本产品中没有官方用量 API。实际已用可以超过软上限，进度条只把显示钳在 100%，满了也不会写冷却或改变路由。新建账号必须选择 Pro / Max / Team 并填写购买日期。既有无计费行的账号保持未配置且仍可路由，直到编辑档位。
+GOAT 卡片可通过 **刷新额度** 从 Command Code 第一方账号用量校准 `$14 / $35 / $70` 三个窗口。该端点由官方 CLI 使用，但未列入公开 Provider API 文档。两次快照之间继续本地累计 OCG 内已定价请求日志，并保留手工校准。月窗口重置时间仍由已配置的购买日期推导，不是上游返回的月重置时间。付费档 Ollama Cloud 卡片（Pro / Max / Team）把 OCG 内已定价请求日志投影到每月 `$60 / $300 / $1000` USD Credits 软额度。Ollama Cloud 在本产品中没有官方用量 API。实际已用可以超过软上限，进度条只把显示钳在 100%，满了也不会写冷却或改变路由。新建账号必须选择 Pro / Max / Team 并填写购买日期。既有无计费行的账号保持未配置且仍可路由，直到编辑档位。
 
 适配器注册表是静态密封的。内置 Provider 家族如下：
 
@@ -66,8 +64,8 @@ OCG 内已定价请求日志按公开的 `$14 / $35 / $70` 三个窗口累计。
 GOAT 目录刷新更新模型目录；Key 鉴权从推理 401/403 观察。enabled、ready 且 Key 非空的账号可路由供应商矩阵中已启用的模型。新建且可路由的 Custom API 账号默认启用；编辑 Endpoint、能力、Key 或协议仍保持当前启用状态。禁用草稿仍可保存。为可刷新的内置供应商保存第一张就绪账号时，会自动做一次该供应商的 **刷新模型目录**；往已有连接再加 Key 不会重复刷新。账号创建成功后，目录刷新失败也不回滚。
 
 OpenCode Go、Command Code GOAT、MiniMax Token Plan 与 Kimi Code 只接受各自官方 Provider API **Key**；浏览器 Cookie 与反向代理凭据不是账号
-Key。GOAT 是独立的供应商映射，其 Key 只会发送到固定的 Command Code Provider
-API，绝不发往 OpenCode。Custom API
+Key。GOAT 是独立的供应商映射，其 Key 只会发送到固定的 Command Code 推理和账号用量端点，
+绝不发往 OpenCode；公开目录刷新仍不带 Key。Custom API
 是独立的受信管理员目的地，不能把 Key 发往 OpenCode endpoint。
 
 MiniMax 与 Kimi 的 Key 同样绑定固定来源：MiniMax CN 使用
@@ -127,7 +125,7 @@ Cookie/Profile，确认框会明确提示这一点。之后这些登录状态无
 恢复，只能从备份恢复或重新登录。
 
 每张 ready 的 OpenCode Go 或 GOAT 账号卡都显示账号名、冷却状态，以及 5 小时、本周、本月用量条。
-OpenCode Go 会通过官方端点定期校准本地核算；GOAT 用量条是 OCG 内已定价日志的本地投影。
+OpenCode Go 会通过官方端点定期校准本地核算；GOAT 只在点击 **刷新额度** 时校准，随后在官方基线上继续累计 OCG 内已定价日志。
 Zen Free 使用独立的匿名、按出口 IP 共享的 free 冷却，不使用某个 Key 的额度。
 
 - **用量校准**：每个窗口都可以输入百分比或拖动进度条，将其保存为当前实际用量基线；保存后，OCG
@@ -141,6 +139,11 @@ Zen Free 使用独立的匿名、按出口 IP 共享的 free 冷却，不使用�
   loading。本地估算达到 ≥80% 时最多每 15 分钟加速对账一次。真实推理 `429`
   仍写入现有冷却/选择器状态，并额外在约 1–2 分钟后调度一次官方对账；官方失败或
   `status=rate-limited` 不会写推理冷却。失败保留上次基线与 last-success。请求走与其他面板出站相同的全局代理。
+- **刷新 GOAT 额度**：GOAT 卡片只在用户显式点击后，使用该账号 Key 请求固定第一方端点
+  `https://api.commandcode.ai/alpha/billing/credits`。OCG 会校验 GOAT 的 5 小时、周、月上限，再原子替换三个基线。
+  此路径同样有每账号 15 秒节流并使用全局代理，但没有自动调度；结果不会写推理冷却或改变路由。手工校准仍保留。
+- **GOAT 推理冷却**：真实 Command Code `429` 若明确指出 5 小时或周套餐窗口，则使用响应中的精确
+  `Your limit resets at` 时间写入对应账号冷却。有效且有界的 `Retry-After` 优先，支持 5 小时、周和月窗口。没有有效上游截止时间的临时限流或畸形响应只在本次请求内排除账号，不写账号状态。
 - **标识与凭据**：名称是必填的主要展示标识。登录账号可选；新增 Key
   账号时如果先填写账号，它会自动同步为名称，手动修改名称后不再跟随。可选备注写在 **编辑账号**
   里，可留空，不参与路由、不计入额度。面板保存账号 Key，但不收集或维护第三方登录密码。

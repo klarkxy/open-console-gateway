@@ -8,8 +8,8 @@
 //! identity listing; the remounted V3 account-list shim is `GET
 //! /account-records`. `GET /contract` is the V4-native ControlRevision.
 //! It reuses V3 session middleware and the V3 error envelope.
-//! Handlers do not issue outbound network requests except Key import, which
-//! uses the same stored-credential outbound class as V3 platform refresh.
+//! Handlers do not issue outbound network requests except Key import and
+//! the explicit official-API balance/price refreshes.
 
 mod applications;
 mod bindings;
@@ -19,6 +19,7 @@ mod cpa;
 mod credentials;
 mod destinations;
 mod identities;
+mod official_api;
 mod onboarding;
 mod platform_keys;
 mod publication;
@@ -51,6 +52,15 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
         .route("/accounts", get(identities::list_accounts))
         .route("/destinations", get(destinations::list_destinations))
         .route("/credentials", get(destinations::list_credentials))
+        .route("/accounts/{id}/official-api", get(official_api::get_status))
+        .route(
+            "/accounts/{id}/official-api/balance",
+            post(official_api::refresh_balance),
+        )
+        .route(
+            "/providers/{id}/official-api/pricing",
+            get(official_api::get_prices).post(official_api::refresh_prices),
+        )
         .route(
             "/applications/dsh",
             get(applications::get_dsh).post(applications::install_dsh),

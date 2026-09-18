@@ -42,11 +42,13 @@
   },
   "identifier": "com.klarkxy.ocgmanager",
   "productName": "Open Console Gateway",
-  "version": "2.4.1",
+  "version": "2.4.2",
   "app": {
     "security": {
       "csp": "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'",
-      "capabilities": ["default"]
+      "capabilities": [
+        "default"
+      ]
     },
     "windows": [
       {

@@ -24,7 +24,7 @@ use ocg_core::provider::{
 };
 use ocg_core::state::{CoreStateInner, GatewayHandle};
 use ocg_domain::credential::ModelScope;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::net::TcpListener as StdTcpListener;
 use std::path::{Path, PathBuf};
@@ -909,20 +909,20 @@ pub(crate) fn assert_local_openai_alias_list(state: &Arc<CoreStateInner>, body: 
 }
 
 pub(crate) fn expected_local_application_models(state: &Arc<CoreStateInner>) -> Vec<String> {
-    let priced = state
-        .pricing_snapshot()
-        .models
-        .iter()
-        .map(|model| model.model_id.clone())
-        .collect::<HashSet<_>>();
-    alias::routeable_aliases_for(OPENCODE_PROVIDER_ID)
+    let contracts = state.provider_contracts();
+    let scope = contracts.providers.get(OPENCODE_PROVIDER_ID).unwrap();
+    let catalogs = alias::RuntimeCatalogs {
+        go: &scope.catalog.models,
+        ..alias::RuntimeCatalogs::default()
+    };
+    alias::routeable_models_for_with_runtime_catalogs(OPENCODE_PROVIDER_ID, catalogs)
         .into_iter()
-        .filter(|alias| alias_has_enabled_protocol(state, alias))
-        .filter(|alias| {
-            priced.contains(alias)
-                || alias
-                    .strip_suffix("-highspeed")
-                    .is_some_and(|base| priced.contains(base))
+        .filter(|name| {
+            alias::resolve_with_runtime_catalogs(name, catalogs).is_ok_and(|resolved| {
+                resolved.routeable_mappings().iter().any(|mapping| {
+                    mapping.is_opencode_go() && contracts.mapping_has_enabled_protocol(mapping)
+                })
+            })
         })
         .collect()
 }

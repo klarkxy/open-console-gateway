@@ -397,7 +397,8 @@
             </n-tab-pane>
 
             <n-tab-pane name="pricing" :tab="t('模型价格')">
-              <PricingCatalog :provider-id="selectedEntry.provider_id" />
+              <OfficialApiPanel v-if="selectedEntry.model_source === 'official_api_preset'" :provider-id="selectedEntry.provider_id" />
+              <PricingCatalog v-else :provider-id="selectedEntry.provider_id" />
             </n-tab-pane>
 
             <n-tab-pane name="settings" :tab="t('设置')">
@@ -552,6 +553,7 @@ import ProviderModelMappings from "../components/ProviderModelMappings.vue";
 import ProviderPresetBrowser from "../components/ProviderPresetBrowser.vue";
 import ProviderSettingsPanel from "../components/ProviderSettingsPanel.vue";
 import PricingCatalog from "../components/PricingCatalog.vue";
+import OfficialApiPanel from "../components/OfficialApiPanel.vue";
 import DynamicProviderModal from "../components/DynamicProviderModal.vue";
 import AccountFormModal, { type AccountFormPayload } from "../components/AccountFormModal.vue";
 import ProviderBrandMark from "../components/ProviderBrandMark.vue";

@@ -8,7 +8,7 @@ use ocg_core::dashboard_v3::{
 };
 use ocg_core::db::AccountUsageCalibrationSnapshot;
 use ocg_core::go_usage::{GoUsageError, GoUsageSnapshot, GoUsageWindowStatus};
-use ocg_core::provider::{COMMAND_CODE_PROVIDER_ID, ZEN_FREE_ACCOUNT_ID};
+use ocg_core::provider::ZEN_FREE_ACCOUNT_ID;
 use reqwest::{Method, StatusCode};
 use serde_json::{Map, Value, json};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -198,26 +198,6 @@ async fn create_go(harness: &V3Harness) -> String {
         Method::POST,
         "/accounts",
         &cas(harness, json!({ "name": "Go", "key": ACCOUNT_KEY })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    body["account"]["id"].as_str().unwrap().to_string()
-}
-
-async fn create_goat(harness: &V3Harness) -> String {
-    let (status, body) = send_json(
-        harness,
-        Method::POST,
-        "/accounts",
-        &cas(
-            harness,
-            json!({
-                "name": "GOAT",
-                "key": "goat-key",
-                "providerId": COMMAND_CODE_PROVIDER_ID,
-                "purchaseDate": "2026-01-31"
-            }),
-        ),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -943,7 +923,6 @@ async fn dashboard_v3_official_rate_limit_is_outbound_failed_without_inference_c
 async fn dashboard_v3_refresh_rejects_wrong_provider_and_state() {
     let harness = start_loopback("usage-refresh-ineligible").await;
     install_panic_fetch(&harness);
-    let goat_id = create_goat(&harness).await;
     let (status, body) = send_json(
         &harness,
         Method::POST,
@@ -953,16 +932,6 @@ async fn dashboard_v3_refresh_rejects_wrong_provider_and_state() {
     .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     let managed_id = body["account"]["id"].as_str().unwrap().to_string();
-
-    let (status, body) = send_json(
-        &harness,
-        Method::POST,
-        &refresh_path(&goat_id),
-        &cas(&harness, json!({})),
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-    assert_v3_error(&body, ERROR_INVALID_REQUEST);
 
     let (status, body) = send_json(
         &harness,
