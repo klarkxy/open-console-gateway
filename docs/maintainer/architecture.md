@@ -86,7 +86,7 @@ and exhaustive adapter kinds. Unknown `provider_id` values fail closed unless
 they match a persisted typed Provider definition, which always selects the
 existing Configurable HTTP adapter.
 
-Custom API is an account-owned product path that uses the same
+Custom API is a one-credential `http` destination that uses the same
 sealed adapter kind. CPA is a separate static external integration.
 
 Provider-owned catalogs and contracts are resolved before account credentials
@@ -95,10 +95,10 @@ exact raw pins.
 
 ## Control plane
 
-The Vue SPA calls V3 through `src/api/dashboard-v3.ts` and V4 through
-`src/api/dashboard-v4.ts` (presenters in `src/api/connections.ts`). A parallel
-additive `/dashboard/api/v4` sits beside frozen V3 and shares the same session;
-it carries the onboarding commit mutation.
+The Vue SPA calls remounted operational handlers through
+`src/api/dashboard-v3.ts` (HTTP base `/dashboard/api/v4`) and native V4 routes
+through `src/api/dashboard-v4.ts` (presenters in `src/api/connections.ts`).
+`/dashboard/api/v3` is a 410 tombstone. Live dashboard JSON is V4 only.
 CAS-protected mutations carry `expectedRevision` and `processGeneration`;
 pricing writes also carry `expectedPricingRevision`. Operational reads and
 diagnostics that do not mutate state skip CAS.
@@ -116,7 +116,7 @@ states are shown in
 | Detail | Authoritative chapter |
 | --- | --- |
 | Alias, selector, protocol, retry, cooldown, model-list behavior | [Runtime invariants](runtime-invariants.md) |
-| Dashboard V3 DTOs, CAS, V2 tombstones | [Dashboard API](dashboard-api.md) |
+| Dashboard V4 DTOs, remounted handlers, CAS, V2/V3 tombstones | [Dashboard API](dashboard-api.md) |
 | Locks, account setup, browser workers, process lifecycles | [State and lifecycle](state-and-lifecycle.md) |
 | Tables, migrations, backups, rollback | [Storage and migrations](storage-migration.md) |
 | Complete HTTP route inventory | [HTTP routes](http-routes.md) |

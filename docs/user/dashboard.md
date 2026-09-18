@@ -13,15 +13,15 @@ selector and catalog actions remain visible. Logs keep status, model, and time
 filters in view; **More filters** reveals the rest and shows how many of those
 filters are active. CPA pages guide you back to Overview when setup is needed.
 
-## Dashboard V3 and V4
+## Dashboard API
 
-The current SPA uses frozen **`/dashboard/api/v3`** plus additive **`/dashboard/api/v4`**. The DSH status/install endpoint is V4; its install request carries `expectedRevision` and `processGeneration` for CAS and an inspection fingerprint for external DSH state. If another tab or process changes either side first, the server returns a conflict and the page refreshes instead of replaying the write. These tokens are process-local, so separate OCG processes sharing one data directory are not a coordinated CAS domain. The OpenCode Go pricing snapshot uses its own `pricingRevision`, independent of the settings tokens.
+The current SPA speaks **`/dashboard/api/v4` only**. `/dashboard/api/v3` is a 410 tombstone. Account, settings, auth, logs, and transfer handlers are remounted on V4 beside native destination, credential, and DSH routes. The DSH install request carries `expectedRevision` and `processGeneration` for CAS and an inspection fingerprint for external DSH state. If another tab or process changes either side first, the server returns a conflict and the page refreshes instead of replaying the write. These tokens are process-local, so separate OCG processes sharing one data directory are not a coordinated CAS domain. The OpenCode Go pricing snapshot uses its own `pricingRevision`, independent of the settings tokens.
 
-Plaintext Keys travel only inside the Connection Center payload (`GET /dashboard/api/v3/connection`). The Settings resource never contains Key values. The browser keeps secrets in memory; signing out or a 401 session expiry wipes them immediately.
+Plaintext Keys travel only inside the Connection Center payload (`GET /dashboard/api/v4/connection`). The Settings resource never contains Key values. The browser keeps secrets in memory; signing out or a 401 session expiry wipes them immediately.
 
 Views are cached while you switch tabs (`KeepAlive`) and refresh their server data when you return. The Dashboard view also refreshes when the browser tab comes back to the foreground. Catalogs, pricing, and provider directories are not polled automatically; official usage sync runs on the server. The Settings page may poll signed desktop install progress until the process restarts.
 
-Cached pages that still call the unversioned `/dashboard/api` REST receive HTTP 410 with code `dashboardV2Removed` and a prompt to refresh, then upgrade if needed. Anonymous requests to those paths are rejected with 401 before that 410. Two V2 families remain as compatibility exceptions for cached older pages: the auth endpoints (`/dashboard/api/auth/status`, `/dashboard/api/auth/register`, `/dashboard/api/auth/login`, `/dashboard/api/auth/logout`) and `/dashboard/api/browser/sessions/{token}/ws`. The current dashboard uses the V3 equivalents.
+Cached pages that still call the unversioned `/dashboard/api` REST receive HTTP 410 with code `dashboardV2Removed` and a prompt to refresh, then upgrade if needed. Anonymous requests to those paths are rejected with 401 before that 410. Two V2 families remain as compatibility exceptions for cached older pages: the auth endpoints (`/dashboard/api/auth/status`, `/dashboard/api/auth/register`, `/dashboard/api/auth/login`, `/dashboard/api/auth/logout`) and `/dashboard/api/browser/sessions/{token}/ws`. The current dashboard uses the V4 equivalents.
 
 To test an OpenCode Go key, use CLI `key ping` or send a real client request. Custom cards have **Test connection**, and managed signup performs Key verification.
 

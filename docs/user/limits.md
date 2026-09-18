@@ -81,7 +81,7 @@ supported protocol matrix lives in
 - Unknown model names return `400` on every supported client format. Clients
   should send published aliases or eligible Custom IDs from authenticated
   `GET /v1/models` that currently have an effective enabled protocol.
-  Protected `GET /dashboard/api/v3/application-models` is Go aliases ∩ active
+  Protected `GET /dashboard/api/v4/application-models` is Go aliases ∩ active
   pricing, not that full client list.
 
 ---

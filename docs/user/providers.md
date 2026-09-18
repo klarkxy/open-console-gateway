@@ -201,7 +201,7 @@ refreshes those Plans only. Refresh stays manual:
 Request-time flow: Alias → account eligibility → adapter ceiling → saved
 contract → per-model/per-protocol effective state → passthrough or conversion.
 Protocol selection uses the saved contract. Authenticated `GET /v1/models` and
-protected `GET /dashboard/api/v3/application-models` publish only currently
+protected `GET /dashboard/api/v4/application-models` publish only currently
 routable public names that have an effective enabled protocol. `application-models` stays Go aliases ∩ active pricing and excludes Custom.
 
 ---

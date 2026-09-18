@@ -52,7 +52,7 @@ Configurable HTTP。
 | Endpoint | 公布内容 |
 | --- | --- |
 | 已鉴权 `GET /v1/models` | 当前可路由的代码持有 Alias、已保存 Zen/Command/CN 映射、用户定义 Provider 公开模型，以及符合条件的 Custom 声明 ID |
-| `GET /dashboard/api/v3/application-models` | Go 可路由 Alias 与当前 Go 价格快照的交集；不含 Custom API、用户定义 Provider 与 CN Plan |
+| `GET /dashboard/api/v4/application-models` | Go 可路由 Alias 与当前 Go 价格快照的交集；不含 Custom API、用户定义 Provider 与 CN Plan |
 
 保存目录行在代码分配 Alias 前只保留精确 raw pin。与已公布内置 Alias 冲突的
 Custom ID 不会进入公布列表。

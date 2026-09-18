@@ -19,11 +19,11 @@
 
 **回环监听时** 直接访问跳过登录。带标准反向代理转发头但没 Cookie 的请求仍需登录。**非回环监听** 走单管理员模型：密码以 Argon2 哈希存 SQLite，登录下发 HttpOnly 会话 Cookie。Docker 用 **同时设置的** `OCG_ADMIN_USERNAME` 与 `OCG_ADMIN_PASSWORD` 引导首个管理员；只设一个会启动失败；不提供时由首位注册者创建。
 
-设置页通过 `GET /dashboard/api/v3/settings/check-update` 获取 GitHub Release 元数据。支持升级的已安装桌面运行时可下载、校验签名并安装；开发构建、CLI、Docker 只保留元数据/发布页路径。出站请求只在用户点击时发起。
+设置页通过 `GET /dashboard/api/v4/settings/check-update` 获取 GitHub Release 元数据。支持升级的已安装桌面运行时可下载、校验签名并安装；开发构建、CLI、Docker 只保留元数据/发布页路径。出站请求只在用户点击时发起。
 
 ## 账号生命周期与浏览器运行时
 
-`accounts` 带 `account_type`（`key | managed`）与 `setup_step` （`google_account → opencode_registration → payment → key_verification → ready`）。非托管行为 `key + ready`。托管草稿立即持久化为空 Key、`enabled=false`；选择器、启用接口和路由都必须同时要求 `ready` 与非空 Key。步骤名 `google_account` 在 UI 上展示为「登录身份」，可跳过。
+`credentials` 带 `account_type`（`key | managed`）与 `setup_step` （`google_account → opencode_registration → payment → key_verification → ready`）。非托管行为 `key + ready`。遗留 `accounts` 表在 v52 之后已删除。托管草稿立即持久化为空 Key、`enabled=false`；选择器、启用接口和路由都必须同时要求 `ready` 与非空 Key。步骤名 `google_account` 在 UI 上展示为「登录身份」，可跳过。
 
 `AppConfig::default()` 的 `opencode_invite_url` 带演示默认值（`DEFAULT_OPENCODE_INVITE_URL`）。规范化后只接受最长 2048 字符、无用户名密码的 HTTPS URL，主机严格限定为 `opencode.ai` 或 `console.opencode.ai`。面板在 OpenCode Go 供应商的 **设置** 页签编辑该值。创建托管草稿时可编辑邀请链接；与已保存值不同时写回 SQLite。注册/支付/验证码仍由用户在浏览器中完成，Key 由用户复制回填；Open Console Gateway 不会使用 CDP 自动填表或代点支付。
 
@@ -37,7 +37,7 @@
 
 普通 setup PATCH 只能向前一步，或回到更早的未完成步骤；它不会写入 `ready`。独立的 Key 验证请求在收到 `2xx` 或 `429` 时将账号置为 `ready + enabled`。Key 无效等 `4xx` 与重定向让草稿保持 pending 并返回 `400`；网络、超时与 `5xx` 同样保持 pending，但返回 `502`，用户可重试或回退步骤。
 
-官方 Go usage（`go_usage.rs`，`https://opencode.ai/zen/go/v1/usage`）是校准基线，由 `usage_sync.rs` 协调。手动 `POST /dashboard/api/v3/accounts/{id}/usage/refresh` 与后台对账共用同一条 fetch + key CAS + 三窗口校准路径。
+官方 Go usage（`go_usage.rs`，`https://opencode.ai/zen/go/v1/usage`）是校准基线，由 `usage_sync.rs` 协调。手动 `POST /dashboard/api/v4/accounts/{id}/usage/refresh` 与后台对账共用同一条 fetch + key CAS + 三窗口校准路径。
 
 ready+enabled 且近 24h 有本地活动的账号约每小时对账，无活动约每天；禁用、非 ready、空 Key 排除。启动时避免轰鸣：全局并发 1、节奏控制、有界抖动，并提供可注入 clock/jitter/fetch 缝。
 
@@ -49,7 +49,7 @@ sync 元数据在 `provider_usage_sync_state`。公开 Go docs 尚未列出该�
 
 Zen Free 由数据库持有：可启用、停用、排序，但不能通过通用账号 API 创建或删除。Command Code 账号在 enabled、ready 且 Key 非空时可路由；供应商矩阵控制模型供应，GOAT 预设行默认开启，额外行默认关闭。Custom 声明协议后即可路由；验证为可选。
 
-浏览器：`GET /dashboard/api/v3/browser/capabilities`、 `POST /accounts/{id}/browser`、`DELETE /accounts/{id}/browser-profile` 与 `/browser/sessions/{token}/ws`。浏览目标允许 Google 注册/登录、GitHub 注册/ 登录、配置的邀请 URL 与 OpenCode 控制台（`https://opencode.ai/auth`）。 worker 主机白名单含 `accounts.google.com`、`github.com`、`opencode.ai`、 `console.opencode.ai`、`auth.opencode.ai`。远程会话令牌只在内存中保存，绑定管理员会话并检查 Origin，空闲 30 分钟或总计 4 小时失效。
+浏览器：`GET /dashboard/api/v4/browser/capabilities`、 `POST /accounts/{id}/browser`、`DELETE /accounts/{id}/browser-profile` 与 `/browser/sessions/{token}/ws`。浏览目标允许 Google 注册/登录、GitHub 注册/ 登录、配置的邀请 URL 与 OpenCode 控制台（`https://opencode.ai/auth`）。 worker 主机白名单含 `accounts.google.com`、`github.com`、`opencode.ai`、 `console.opencode.ai`、`auth.opencode.ai`。远程会话令牌只在内存中保存，绑定管理员会话并检查 Origin，空闲 30 分钟或总计 4 小时失效。
 
 桌面原生浏览器 hook 由 `src-tauri/src/host/` 注册进 `CoreState`。Vue 仍通过 HTTP 调用。Windows 依次查 Edge、Chrome；macOS 查 Chrome、Edge、Chromium； Linux 从 `PATH` 查 Chrome/Chromium/Edge。外部浏览器使用 `browser-profiles/<account_id>`、`--no-first-run`、 `--no-default-browser-check` 与新窗口，启动参数中不包含 CDP、automation、`--no-sandbox` 或关闭 Web 安全的选项。
 

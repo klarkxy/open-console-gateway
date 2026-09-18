@@ -70,7 +70,7 @@ Custom API 继续使用账号所有的公开名称 → 上游 ID 映射，发现
 - MiniMax CN 与 Kimi Code CN 在 OCG 内为 unpriced，但账号卡可手工读取官方订阅窗口（`/token_plan/remains` 与 `/usages`）。这些快照只用于展示，不影响推理资格。
 - Custom API 与用户定义 Provider 账号，若保存的 Endpoint 主机恰好是 `api.deepseek.com`、`api.moonshot.cn` 或 `api.moonshot.ai`，可手工读取官方当前余额。其他 Custom 主机不会被探测。
 
-请求时流程：别名 → 账号资格 → 适配器上限 → 已保存合约 → 按模型/按协议 effective 状态 → 透传或转换。协议选择使用已保存的合约。带鉴权的 `GET /v1/models` 与受保护的 `GET /dashboard/api/v3/application-models` 只公布当前可路由且 effective 协议已启用的公开名称。`application-models` 仍是 Go 别名 ∩ 当前价格快照，不含 Custom。
+请求时流程：别名 → 账号资格 → 适配器上限 → 已保存合约 → 按模型/按协议 effective 状态 → 透传或转换。协议选择使用已保存的合约。带鉴权的 `GET /v1/models` 与受保护的 `GET /dashboard/api/v4/application-models` 只公布当前可路由且 effective 协议已启用的公开名称。`application-models` 仍是 Go 别名 ∩ 当前价格快照，不含 Custom。
 
 ---
 

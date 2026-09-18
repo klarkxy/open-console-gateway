@@ -86,7 +86,7 @@ OCG 根据协议派生鉴权。它不会同时发送两类鉴权头，不会在 
 2. 只把已经验证的协议事实加入 `crates/ocg-domain/src/protocol.rs`。请求路由使用已保存的合约。
 3. 在 `crates/ocg-gateway/src/alias.rs` 添加由代码持有的客户端 Alias 映射。保留准确上游 ID，拒绝有歧义的 raw ID；发现的新目录行不能擅自创造公开 Alias。
 4. 在 `ocg-core` 实现宿主路由 resolver。适配器只返回 `AttemptSpec`；数据库访问、Key 解密、代理选择和出站 HTTP 继续由宿主持有。
-5. 补齐账号与 **供应商** 控制面/UI 流程；只在该供应商真实支持时加入目录刷新、启停、验证、错误、冷却、价格和用量。所有面板变更都带 CAS：用户定义供应商的创建走 V4 onboarding commit（`/dashboard/api/v4`）；供应商定义编辑与 V3 上的账号操作走 `/dashboard/api/v3`；Key 轮换、绑定编辑与身份内新增凭据走 V4。
+5. 补齐账号与 **供应商** 控制面/UI 流程；只在该供应商真实支持时加入目录刷新、启停、验证、错误、冷却、价格和用量。所有面板变更都带 CAS，且只走 `/dashboard/api/v4`：用户定义供应商的创建走 onboarding commit；供应商定义编辑、账号操作、Key 轮换、绑定编辑与身份内新增凭据走挂回或原生的 V4 路由。`/dashboard/api/v3` 是 410 墓碑。
 6. 更新成对用户文档与测试。按[开发](../maintainer/development.zh-CN.md)对改动的 crate 与 UI 跑对应检查。
 
 提交贡献前，请写清上游来源、鉴权方式、目录来源、支持的模型/协议组合、流式行为、错误语义、额度/价格来源，以及不产生费用的验证方案。在完整路由与控制面路径真正存在前，让新家族保持 fail closed。

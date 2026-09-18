@@ -45,16 +45,16 @@ bootstrap the first administrator with **both** `OCG_ADMIN_USERNAME` and
 `OCG_ADMIN_PASSWORD`; setting only one fails startup; otherwise the first
 registration wins.
 
-Settings fetches GitHub Release metadata via `GET /dashboard/api/v3/settings/check-update`.
+Settings fetches GitHub Release metadata via `GET /dashboard/api/v4/settings/check-update`.
 Installed desktop runtimes with updater support can download, verify, and install
 signed updates; development builds, CLI, and Docker only receive metadata and
 release links. The outbound request is triggered by the user.
 
 ## Account lifecycle and browser runtime
 
-`accounts` carries `account_type` (`key | managed`) and `setup_step`
+`credentials` carry `account_type` (`key | managed`) and `setup_step`
 (`google_account → opencode_registration → payment → key_verification → ready`).
-non-managed rows are `key + ready`. A managed draft is persisted
+non-managed rows are `key + ready`. The leftover `accounts` table is gone after v52. A managed draft is persisted
 immediately with an empty key and `enabled=false`; selector, enable, and
 the request path all require both `ready` and a non-empty key.
 `google_account` is labeled **sign-in identity** in the UI and is
@@ -92,7 +92,7 @@ retry or rewind.
 
 Official Go usage (`go_usage.rs`, `https://opencode.ai/zen/go/v1/usage`) is
 the calibration baseline; `usage_sync.rs` coordinates it. Manual
-`POST /dashboard/api/v3/accounts/{id}/usage/refresh` and the background
+`POST /dashboard/api/v4/accounts/{id}/usage/refresh` and the background
 reconciler share one fetch + key-CAS + three-window calibration path.
 
 Ready+enabled accounts reconcile about hourly when they had local activity
@@ -120,7 +120,7 @@ accounts are routable when enabled, ready, and keyed; the Provider matrix owns
 their model supply, with GOAT preset rows on and additional rows off by default.
 Custom is catalog-routable after declaration; verification is optional.
 
-Browser: `GET /dashboard/api/v3/browser/capabilities`,
+Browser: `GET /dashboard/api/v4/browser/capabilities`,
 `POST /accounts/{id}/browser`, `DELETE /accounts/{id}/browser-profile`,
 and `/browser/sessions/{token}/ws`. Targets include Google signup/login,
 GitHub signup/login, the configured invite, and the OpenCode console

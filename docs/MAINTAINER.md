@@ -19,7 +19,7 @@ This guide is for people changing code, cutting releases, debugging the gateway,
 - [CI Workflows](maintainer/ci.md) — Quality, release, and container workflows.
 - [Release Procedure](maintainer/releasing.md) — Version bump, tag, build, and publish checklist.
 - [Known Debt And Non-Goals](maintainer/known-debt.md) — Documented gaps and deliberate non-goals.
-- [RFC: Account And Provider Model Redesign](maintainer/account-model-unification.md) — Target Destination / Credential model, what it replaces, and the migration; proposal, not implemented.
+- [RFC: Account And Provider Model Redesign](maintainer/account-model-unification.md) — Landed Destination / Credential model, leftover table drops, V3 tombstone, and the migration that produced HEAD.
 - [Coding Conventions](maintainer/conventions.md) — crate DAG, security boundaries, and documentation ownership.
 
 ## Reading paths

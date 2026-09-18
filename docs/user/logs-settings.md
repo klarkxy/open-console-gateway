@@ -86,7 +86,7 @@ The **Settings** view holds the gateway's persistent configuration:
   account-key tests and Custom verification, official OpenCode Go usage API,
   pricing refreshes, release checks, and signed desktop installer downloads;
   authenticated `GET /v1/models` and protected
-  `GET /dashboard/api/v3/application-models` are local lists and do not use
+  `GET /dashboard/api/v4/application-models` are local lists and do not use
   this outbound path. The browser sidecar is outside its scope. **Test
   connection** uses the unsaved form values against the sealed OpenCode Go
   origin. Any

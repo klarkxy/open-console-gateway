@@ -257,7 +257,7 @@ v32 用 `endpoint_url` 与单值 `upstream_protocol` 替换 `account_custom_conf
 
 ## Schema v35 — Provider 单一身份
 
-v35 去掉 offering 维度。Provider 与 Plan 是同一产品身份，只按 `provider_id` 识别。已知 v34 对映射为 `opencode/go`、`opencode-zen-free/anonymous-free`、`command-code/goat`、`minimax/cn`、`kimi/cn`、`custom/api` 与 `cpa/local`。未知对与复合键冲突在任何写入前 fail closed。重建保留账号、密文字节、日志、定价/目录行、合约、Custom 配置/能力、设置与 access keys。同一 schema 版本还把类型化用户定义供应商存在 `dynamic_providers` 与 `dynamic_provider_models`（两者都在 v42 中改名为 `providers` / `provider_models`）。节点备份导出只含 `providerId` 的 payload V6，并带一份可选/默认空的用户定义供应商定义集合。payload V1–V3，以及除 4、5 或 6 以外的任何版本（包括未来的 V7 包），都会被明确的不支持版本错误拒绝。本二进制导出 payload V6。导入 V4/V5 时仍用确定性 1:1 映射重建身份附属行。
+v35 去掉 offering 维度。Provider 与 Plan 是同一产品身份，只按 `provider_id` 识别。已知 v34 对映射为 `opencode/go`、`opencode-zen-free/anonymous-free`、`command-code/goat`、`minimax/cn`、`kimi/cn`、`custom/api` 与 `cpa/local`。未知对与复合键冲突在任何写入前 fail closed。重建保留账号、密文字节、日志、定价/目录行、合约、Custom 配置/能力、设置与 access keys。同一 schema 版本还把类型化用户定义供应商存在 `dynamic_providers` 与 `dynamic_provider_models`（两者都在 v42 中改名为 `providers` / `provider_models`）。节点备份导出只含 `providerId` 的 payload V6，并带一份可选/默认空的用户定义供应商定义集合。payload V1–V3，以及除 4、5 或 6 以外的任何版本（包括未来的 V7 包），都会被明确的不支持版本错误拒绝。该 schema 当时的转移包导出 payload V6；HEAD 导出 payload V7。导入 V4/V5 时仍用确定性 1:1 映射重建身份附属行。
 
 在非空 v34 库做破坏性 v35 重建之前，进程会写入一份唯一、不覆盖的同目录快照：
 

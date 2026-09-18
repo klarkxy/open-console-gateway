@@ -19,7 +19,7 @@
 - [CI 工作流](maintainer/ci.zh-CN.md) — quality、release 与 container 工作流。
 - [发布流程](maintainer/releasing.zh-CN.md) — 版本 bump、tag、构建与发布检查清单。
 - [已知缺口与明确非目标](maintainer/known-debt.zh-CN.md) — 已记录的缺口与有意不做的事项。
-- [RFC：重新设计账号与供应商模型](maintainer/account-model-unification.zh-CN.md) — 目标 Destination / Credential 模型、它取代什么、以及迁移路径；提案，未实现。
+- [RFC：重新设计账号与供应商模型](maintainer/account-model-unification.zh-CN.md) — 已落地的 Destination / Credential 模型、遗留表删除、V3 墓碑，以及走到 HEAD 的迁移。
 - [编码约定](maintainer/conventions.zh-CN.md) — crate DAG、安全边界与文档归属。
 
 ## 阅读路径

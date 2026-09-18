@@ -76,7 +76,7 @@ SPA 始终是 HTTP 客户端。Desktop capability 注册进 `CoreState`。
 未知 `provider_id` 默认失败；只有匹配已持久化类型化 Provider 定义时才例外，而这些
 定义始终选择既有 Configurable HTTP 适配器。
 
-Custom API 即使使用同一个密封适配器种类，仍是账号级产品路径。CPA 是另一条静态外部
+Custom API 是同一密封适配器种类上的单凭据 `http` 目的地。CPA 是另一条静态外部
 集成。
 
 Provider 目录与合约先于账号凭据解析。保存的发现行只能激活代码持有 Alias 映射，或
@@ -84,8 +84,8 @@ Provider 目录与合约先于账号凭据解析。保存的发现行只能激�
 
 ## 控制面
 
-Vue SPA 通过 `src/api/dashboard-v3.ts` 调用 V3，通过 `src/api/dashboard-v4.ts` 调用 V4（presenter 在 `src/api/connections.ts`）。
-并行的仅增量 `/dashboard/api/v4` 与冻结的 V3 并存，共用同一套会话，并承载 onboarding commit 变更。
+Vue SPA 通过 `src/api/dashboard-v3.ts`（HTTP 基址 `/dashboard/api/v4`）调用挂回的操作处理器，通过 `src/api/dashboard-v4.ts` 调用原生 V4 路由（presenter 在 `src/api/connections.ts`）。
+`/dashboard/api/v3` 是 410 墓碑。活的面板 JSON 只走 V4。
 受 CAS 保护的变更携带 `expectedRevision` 与 `processGeneration`；价格写入另带
 `expectedPricingRevision`。不变更状态的操作读取与诊断跳过 CAS。
 
@@ -101,7 +101,7 @@ Settings 的持久化、重绑与补偿顺序见
 | 细节 | 权威章节 |
 | --- | --- |
 | Alias、selector、协议、重试、冷却、模型列表 | [运行时不变式](runtime-invariants.zh-CN.md) |
-| Dashboard V3 DTO、CAS、V2 墓碑 | [Dashboard API](dashboard-api.zh-CN.md) |
+| Dashboard V4 DTO、挂回的处理器、CAS、V2/V3 墓碑 | [Dashboard API](dashboard-api.zh-CN.md) |
 | 锁、账号 setup、浏览器 worker、进程生命周期 | [状态与生命周期](state-and-lifecycle.zh-CN.md) |
 | 数据表、迁移、备份与回滚 | [存储与迁移](storage-migration.zh-CN.md) |
 | 完整 HTTP 路由 | [HTTP 路由](http-routes.zh-CN.md) |
