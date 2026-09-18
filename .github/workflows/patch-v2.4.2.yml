@@ -29,14 +29,15 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Validate and stage only the six reviewed repair files
+      - name: Validate and stage only the eleven reviewed repair files
         id: stage
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           python3 scripts/repair-main-v2.4.2.py --self-test
-          python3 scripts/repair-main-v2.4.2.py --stage
+          python3 scripts/repair-integration-v2.4.2.py --self-test
+          python3 scripts/repair-integration-v2.4.2.py --stage
           git diff --stat
 
   quality:
