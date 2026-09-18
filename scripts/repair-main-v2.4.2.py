@@ -15,6 +15,7 @@ SOURCE_BLOBS = {
     "src/domain/provider-aliases.test.ts": "390b076842ed5cdd73668e707423e36bc8b81dca",
     "crates/ocg-core/src/provider_contracts/tests.rs": "620165e46522c4e250e652f22669b300ac33dee3",
     "crates/ocg-core/src/state/tests.rs": "7ae6a1b96aa6fd7b87e2aa0afe65c7bdd9f839fe",
+    "crates/ocg-core/tests/dashboard_v3_account_verify.rs": "3e5374a10b6cddd769940392e42bdf7549c7bdb0",
 }
 
 
@@ -206,6 +207,32 @@ test("Go raw model rows preserve disabled protocol state and account filtering",
     updates[path] = edit_test(updates[path], "o01_catalog_discovered_model_stays_off_until_explicitly_enabled", repair_o01)
     path = "crates/ocg-core/src/state/tests.rs"
     updates[path] = edit_test(updates[path], "reload_failure_restriction_rebuilds_proxy_membership", repair_state)
+    path = "crates/ocg-core/tests/dashboard_v3_account_verify.rs"
+    old_auth = '''    assert_eq!(
+        go_origin.calls.lock().unwrap()[0].authorization.as_deref(),
+        Some("Bearer sk-go-verify")
+    );'''
+    public_request = '''    // Public catalog discovery must not disclose account or dashboard secrets.
+    {
+        let calls = go_origin.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        let call = &calls[0];
+        assert_eq!(call.method, "GET");
+        assert_eq!(call.path, "/provider/v1/models");
+        assert!(call.authorization.is_none());
+        assert!(call.x_api_key.is_none());
+        assert!(call.cookie.is_none());
+        assert!(call.body.is_empty());
+    }'''
+    if updates[path].count(old_auth) != 3:
+        raise ValueError("Expected exactly three stale public-catalog credential assertions")
+    updates[path] = updates[path].replace(old_auth, public_request)
+    for old, new in (
+        ("provider_model_refresh_uses_go_account_and_public_command_catalog", "provider_model_refresh_keeps_go_and_command_catalog_requests_keyless"),
+        ("unified_catalog_refresh_selects_an_eligible_account_and_defaults_new_models_off", "unified_catalog_refresh_with_an_enabled_account_is_keyless_and_defaults_new_models_off"),
+        ("unified_catalog_refresh_uses_a_disabled_ready_key", "unified_catalog_refresh_with_a_disabled_account_remains_keyless"),
+    ):
+        updates[path] = once(updates[path], "async fn " + old + "()", "async fn " + new + "()")
     # Fingerprints and all anchors are checked before the first write.
     for path, content in updates.items():
         Path(path).write_bytes(content.encode("utf-8"))

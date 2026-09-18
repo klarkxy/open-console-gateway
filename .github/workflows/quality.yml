@@ -81,7 +81,7 @@ jobs:
           cache-on-failure: true
           save-if: ${{ github.event_name != 'pull_request' }}
 
-      - run: cargo test --workspace --exclude ocg-manager --locked
+      - run: cargo test --workspace --exclude ocg-manager --locked --no-fail-fast
       - run: cargo clippy --workspace --exclude ocg-manager --all-targets --locked -- -D warnings
 
   windows-tauri:

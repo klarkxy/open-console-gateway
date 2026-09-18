@@ -20,6 +20,7 @@ ADDED = {
     "src/domain/provider-aliases.test.ts",
     "crates/ocg-core/src/provider_contracts/tests.rs",
     "crates/ocg-core/src/state/tests.rs",
+    "crates/ocg-core/tests/dashboard_v3_account_verify.rs",
     "scripts/prepare-patch-v2.4.2.py",
     "docs/releases/v2.4.2.md",
     "docs/releases/v2.4.2.zh-CN.md",
