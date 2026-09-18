@@ -37,10 +37,7 @@ pub(super) async fn list_accounts(
     State(state): State<CoreState>,
 ) -> Result<Json<AccountList>, V3ApiError> {
     let _settings_update = state.settings_update.lock();
-    let accounts = state
-        .db
-        .lock()
-        .list_accounts()
+    let accounts = crate::destination_projection::list_accounts_for_v3(&state.db.lock())
         .map_err(V3ApiError::internal)?;
     Ok(Json(account_list_from_state(&state, accounts)?))
 }
@@ -587,10 +584,7 @@ fn reorder_accounts_locked(
             })?;
     }
     let (revision, accounts) = with_committed_revision(state, || {
-        state
-            .db
-            .lock()
-            .list_accounts()
+        crate::destination_projection::list_accounts_for_v3(&state.db.lock())
             .map_err(V3ApiError::internal)
     })?;
     account_list_at(state, accounts, revision)

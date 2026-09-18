@@ -88,7 +88,7 @@ async fn dashboard_cas_is_not_shared_with_cli_or_tauri_shaped_db_writes() {
         .await
         .unwrap();
     let client = loopback_client();
-    let base = format!("http://127.0.0.1:{}/dashboard/api/v3", handle.port);
+    let base = format!("http://127.0.0.1:{}/dashboard/api/v4", handle.port);
     let revision_after_config = state.settings_revision();
     let generation = state.process_generation();
 

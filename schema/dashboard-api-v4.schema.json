@@ -1,5 +1,5 @@
 {
-  "$comment": "Extensible Dashboard V4 contract catalog. Add new $defs for later DTOs; do not rename or reshape existing definitions. Connection and template listings are secret-free. OnboardingCommitRequest.secretInput, CredentialRotateRequest.secretInput, and IdentityCredentialCreateRequest.secretInput are write-only.",
+  "$comment": "Extensible Dashboard V4 contract catalog. Add new $defs for later DTOs; do not rename or reshape existing definitions. Connection, template, destination, and credential listings are secret-free. OnboardingCommitRequest.secretInput, CredentialRotateRequest.secretInput, and IdentityCredentialCreateRequest.secretInput are write-only.",
   "$defs": {
     "AccountAuthScheme": {
       "description": "Custom auth scheme. Wire values match V2 kebab-case.",
@@ -23,6 +23,20 @@
         "chat_completions",
         "responses",
         "messages"
+      ],
+      "type": "string"
+    },
+    "AdapterKindDto": {
+      "description": "Sealed adapter kind. Wire values match the domain serde names.",
+      "enum": [
+        "opencode_go",
+        "zen",
+        "goat",
+        "minimax",
+        "kimi",
+        "ollama",
+        "cpa",
+        "http"
       ],
       "type": "string"
     },
@@ -74,6 +88,15 @@
         "published"
       ],
       "type": "object"
+    },
+    "AuthSchemeDto": {
+      "description": "Destination auth scheme. Wire values match the domain serde names.",
+      "enum": [
+        "none",
+        "bearer",
+        "x_api_key"
+      ],
+      "type": "string"
     },
     "AuthState": {
       "enum": [
@@ -225,6 +248,104 @@
       "required": [
         "revision",
         "binding"
+      ],
+      "type": "object"
+    },
+    "CapabilitiesDto": {
+      "additionalProperties": false,
+      "description": "Destination capability flags. Mirrors the domain `Capabilities` record.",
+      "properties": {
+        "billingTierRequired": {
+          "description": "A billing tier must be selected before the destination is usable.",
+          "type": "boolean"
+        },
+        "discoverableModels": {
+          "description": "The destination can discover models from the upstream.",
+          "type": "boolean"
+        },
+        "externalIntegration": {
+          "description": "The destination is an external integration and holds no local inference secret.",
+          "type": "boolean"
+        },
+        "identityHeaders": {
+          "description": "The adapter attaches identity headers on egress.",
+          "type": "boolean"
+        },
+        "managedSignup": {
+          "description": "Managed signup can start an onboarding task on a credential.",
+          "type": "boolean"
+        },
+        "observer": {
+          "description": "The destination holds a non-inference observer credential (platform parent).",
+          "type": "boolean"
+        },
+        "officialBalanceProbe": {
+          "description": "Hosts Configurable HTTP may probe for an official current-balance API.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "redirectPolicy": {
+          "$ref": "#/$defs/RedirectPolicyDto"
+        },
+        "testable": {
+          "description": "Test connection is offered on every ready credential except external integrations.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "testable",
+        "discoverableModels",
+        "officialBalanceProbe",
+        "observer",
+        "managedSignup",
+        "externalIntegration",
+        "billingTierRequired",
+        "redirectPolicy",
+        "identityHeaders"
+      ],
+      "type": "object"
+    },
+    "CatalogModelDto": {
+      "additionalProperties": false,
+      "description": "One catalog model on a destination.",
+      "properties": {
+        "enabled": {
+          "description": "Whether any protocol is enabled.",
+          "type": "boolean"
+        },
+        "preferred": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProtocolDto"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "protocols": {
+          "items": {
+            "$ref": "#/$defs/ProtocolDto"
+          },
+          "type": "array"
+        },
+        "publicModel": {
+          "description": "Public name exposed to clients.",
+          "type": "string"
+        },
+        "upstreamModel": {
+          "description": "Upstream model id sent on egress.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "publicModel",
+        "upstreamModel",
+        "protocols",
+        "preferred",
+        "enabled"
       ],
       "type": "object"
     },
@@ -597,6 +718,55 @@
       ],
       "type": "object"
     },
+    "CredentialCooldownsDto": {
+      "additionalProperties": false,
+      "description": "Per-window cooldown timestamps on a projected credential.",
+      "properties": {
+        "fiveHourUntil": {
+          "description": "Five-hour window cooldown expiry as RFC 3339, or null.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "freeUntil": {
+          "description": "Free-window cooldown expiry as RFC 3339, or null.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "genericUntil": {
+          "description": "Generic cooldown expiry as RFC 3339, or null.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "monthUntil": {
+          "description": "Monthly window cooldown expiry as RFC 3339, or null.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "weekUntil": {
+          "description": "Weekly window cooldown expiry as RFC 3339, or null.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "genericUntil",
+        "fiveHourUntil",
+        "weekUntil",
+        "monthUntil",
+        "freeUntil"
+      ],
+      "type": "object"
+    },
     "CredentialDto": {
       "additionalProperties": false,
       "properties": {
@@ -649,6 +819,51 @@
         "authState",
         "authStateVersion",
         "expiresAt"
+      ],
+      "type": "object"
+    },
+    "CredentialGrantsDto": {
+      "additionalProperties": false,
+      "description": "Allowed egress grants on a projected credential.",
+      "properties": {
+        "allowedEndpointIds": {
+          "description": "Endpoint ids this secret may be sent to.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "allowedOrigins": {
+          "description": "Origins this secret may be sent to.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "allowedEndpointIds",
+        "allowedOrigins"
+      ],
+      "type": "object"
+    },
+    "CredentialList": {
+      "additionalProperties": false,
+      "description": "RFC credential list. Revision-tagged and secret-free.",
+      "properties": {
+        "credentials": {
+          "items": {
+            "$ref": "#/$defs/DestinationCredentialDto"
+          },
+          "type": "array"
+        },
+        "revision": {
+          "$ref": "#/$defs/ControlRevision"
+        }
+      },
+      "required": [
+        "revision",
+        "credentials"
       ],
       "type": "object"
     },
@@ -800,6 +1015,321 @@
       "required": [
         "platformAccountId",
         "group"
+      ],
+      "type": "object"
+    },
+    "DestinationCredentialDto": {
+      "additionalProperties": false,
+      "description": "RFC credential projection row. Carries `hasSecret` only; never ciphertext or plaintext.",
+      "properties": {
+        "authState": {
+          "$ref": "#/$defs/AuthState"
+        },
+        "cooldowns": {
+          "$ref": "#/$defs/CredentialCooldownsDto"
+        },
+        "destinationId": {
+          "description": "Destination this credential routes through.",
+          "type": "string"
+        },
+        "enabled": {
+          "description": "Routing enable switch (`account.enabled && binding.enabled`).",
+          "type": "boolean"
+        },
+        "grants": {
+          "$ref": "#/$defs/CredentialGrantsDto"
+        },
+        "hasSecret": {
+          "description": "Whether a secret is stored. Always false for keyless Zen and CPA.",
+          "type": "boolean"
+        },
+        "id": {
+          "description": "Stable credential id (deterministic UUIDv5 of the legacy account).",
+          "type": "string"
+        },
+        "lastError": {
+          "description": "Last error string from the legacy account row, or null.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "legacyAccountId": {
+          "description": "The V3 `accounts` row this credential was projected from (migration-era\nbridge to the V3 mutation routes).",
+          "type": "string"
+        },
+        "name": {
+          "description": "Display name.",
+          "type": "string"
+        },
+        "notes": {
+          "description": "Operator notes.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "onboardingTask": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DestinationOnboardingTaskDto"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "purchaseDate": {
+          "description": "Purchase date when the destination has a Plan.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "quotaPoolId": {
+          "description": "Shared quota pool id when the credential joined one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "routingRank": {
+          "description": "Position in the persisted account order.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scope": {
+          "$ref": "#/$defs/ModelScope"
+        }
+      },
+      "required": [
+        "id",
+        "legacyAccountId",
+        "destinationId",
+        "name",
+        "notes",
+        "hasSecret",
+        "enabled",
+        "routingRank",
+        "scope",
+        "grants",
+        "authState",
+        "lastError",
+        "cooldowns",
+        "quotaPoolId",
+        "onboardingTask",
+        "purchaseDate"
+      ],
+      "type": "object"
+    },
+    "DestinationDto": {
+      "additionalProperties": false,
+      "description": "RFC destination projection row. Secret-free; field-for-field from the domain `Destination`.",
+      "properties": {
+        "adapter": {
+          "$ref": "#/$defs/AdapterKindDto"
+        },
+        "authScheme": {
+          "$ref": "#/$defs/AuthSchemeDto"
+        },
+        "baseUrl": {
+          "description": "Upstream origin. Sealed for builtin adapters; user data for `http`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "brandFamily": {
+          "description": "Brand family for grouping, when the adapter or platform kind has one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "capabilities": {
+          "$ref": "#/$defs/CapabilitiesDto"
+        },
+        "catalog": {
+          "items": {
+            "$ref": "#/$defs/CatalogModelDto"
+          },
+          "type": "array"
+        },
+        "enabled": {
+          "description": "Destination enablement.",
+          "type": "boolean"
+        },
+        "id": {
+          "description": "Stable destination id (deterministic UUIDv5 of the legacy row).",
+          "type": "string"
+        },
+        "legacy": {
+          "$ref": "#/$defs/LegacyDestinationRefDto",
+          "description": "V3 row this destination was projected from."
+        },
+        "maxCredentials": {
+          "description": "`1` for singletons and account-owned endpoints; `null` otherwise.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "Display name.",
+          "type": "string"
+        },
+        "observerCredentialId": {
+          "description": "Non-inference observer credential id when `capabilities.observer` is set.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "plan": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PlanDto"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "protocols": {
+          "items": {
+            "$ref": "#/$defs/ProtocolDto"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "legacy",
+        "adapter",
+        "name",
+        "brandFamily",
+        "baseUrl",
+        "protocols",
+        "authScheme",
+        "catalog",
+        "capabilities",
+        "plan",
+        "maxCredentials",
+        "observerCredentialId",
+        "enabled"
+      ],
+      "type": "object"
+    },
+    "DestinationList": {
+      "additionalProperties": false,
+      "description": "RFC destination list. Revision-tagged and secret-free.",
+      "properties": {
+        "destinations": {
+          "items": {
+            "$ref": "#/$defs/DestinationDto"
+          },
+          "type": "array"
+        },
+        "revision": {
+          "$ref": "#/$defs/ControlRevision"
+        }
+      },
+      "required": [
+        "revision",
+        "destinations"
+      ],
+      "type": "object"
+    },
+    "DestinationOnboardingTaskDto": {
+      "additionalProperties": false,
+      "description": "Managed-signup task on a projected credential. Domain shape; no task id.",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/OnboardingTaskKind"
+        },
+        "state": {
+          "$ref": "#/$defs/OnboardingTaskState"
+        },
+        "step": {
+          "description": "Current setup step string.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "state",
+        "step"
+      ],
+      "type": "object"
+    },
+    "DestinationProjectionRefusalDto": {
+      "additionalProperties": false,
+      "description": "One refused row in a `destinationProjectionRefused` 409.",
+      "properties": {
+        "detail": {
+          "description": "Human-readable mapping error.",
+          "type": "string"
+        },
+        "error": {
+          "$ref": "#/$defs/MappingErrorCodeDto"
+        },
+        "row": {
+          "$ref": "#/$defs/RefusedRowDto"
+        }
+      },
+      "required": [
+        "row",
+        "error",
+        "detail"
+      ],
+      "type": "object"
+    },
+    "DestinationProjectionRefusedError": {
+      "additionalProperties": false,
+      "description": "409 envelope when `destination_projection` refuses. Same V3 fields plus `details`.",
+      "properties": {
+        "code": {
+          "description": "Stable error code (`destinationProjectionRefused`).",
+          "type": "string"
+        },
+        "currentRevision": {
+          "description": "Live settings revision.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "details": {
+          "items": {
+            "$ref": "#/$defs/DestinationProjectionRefusalDto"
+          },
+          "type": "array"
+        },
+        "message": {
+          "description": "Human-readable summary.",
+          "type": "string"
+        },
+        "processGeneration": {
+          "description": "Live process generation.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "currentRevision",
+        "processGeneration",
+        "details"
       ],
       "type": "object"
     },
@@ -987,6 +1517,13 @@
       ],
       "type": "object"
     },
+    "ExpiryCadenceDto": {
+      "description": "How a Plan expires, when it has a cadence.",
+      "enum": [
+        "monthly"
+      ],
+      "type": "string"
+    },
     "IdentityConfidence": {
       "enum": [
         "opaque",
@@ -1167,6 +1704,49 @@
       ],
       "type": "string"
     },
+    "LegacyDestinationKindDto": {
+      "description": "Which V3-era row a destination was projected from.",
+      "oneOf": [
+        {
+          "const": "builtin",
+          "description": "Sealed builtin; `id` is the `provider_id`.",
+          "type": "string"
+        },
+        {
+          "const": "dynamic",
+          "description": "User-defined Provider; `id` is the dynamic `provider_id`.",
+          "type": "string"
+        },
+        {
+          "const": "custom_account",
+          "description": "Account-owned Custom API endpoint; `id` is the account id.",
+          "type": "string"
+        },
+        {
+          "const": "platform_parent",
+          "description": "New API / Sub2API site; `id` is the platform parent id.",
+          "type": "string"
+        }
+      ]
+    },
+    "LegacyDestinationRefDto": {
+      "additionalProperties": false,
+      "description": "Migration-era bridge from a projected destination back to the V3 row that\nstill owns its mutations. Removed once destinations become primary.",
+      "properties": {
+        "id": {
+          "description": "Row id in the V3 model named by `kind`.",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/LegacyDestinationKindDto"
+        }
+      },
+      "required": [
+        "kind",
+        "id"
+      ],
+      "type": "object"
+    },
     "LegacyIdentity": {
       "additionalProperties": false,
       "properties": {
@@ -1182,6 +1762,18 @@
         "id"
       ],
       "type": "object"
+    },
+    "MappingErrorCodeDto": {
+      "description": "Mapping-error variant name in camelCase.",
+      "enum": [
+        "unknownProvider",
+        "missingDestination",
+        "customRequiresAccount",
+        "customAccountMissingEndpoint",
+        "dynamicMissingEndpoint",
+        "platformMissingBaseUrl"
+      ],
+      "type": "string"
     },
     "MaterialKind": {
       "enum": [
@@ -1564,6 +2156,161 @@
       ],
       "type": "object"
     },
+    "PlanDto": {
+      "additionalProperties": false,
+      "description": "Commercial offering embedded in a destination. Mirrors the domain `Plan`.",
+      "properties": {
+        "expiryCadence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExpiryCadenceDto"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "manualCalibration": {
+          "description": "Operators may enter local usage numbers by hand.",
+          "type": "boolean"
+        },
+        "pricingSource": {
+          "$ref": "#/$defs/PricingSourceDto"
+        },
+        "usageSource": {
+          "$ref": "#/$defs/UsageSourceDto"
+        },
+        "windows": {
+          "items": {
+            "$ref": "#/$defs/PlanWindowDto"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "usageSource",
+        "windows",
+        "expiryCadence",
+        "pricingSource",
+        "manualCalibration"
+      ],
+      "type": "object"
+    },
+    "PlanWindowDto": {
+      "additionalProperties": false,
+      "description": "One Plan usage window.",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/PlanWindowKindDto"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "type": "object"
+    },
+    "PlanWindowKindDto": {
+      "description": "One Plan usage window kind.",
+      "enum": [
+        "five_hours",
+        "week",
+        "month",
+        "free"
+      ],
+      "type": "string"
+    },
+    "PlatformKeyImportFailure": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "code"
+      ],
+      "type": "object"
+    },
+    "PlatformKeyImportRequest": {
+      "additionalProperties": false,
+      "description": "Import New API inference tokens as local Custom Keys. Secret-free.",
+      "properties": {
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "PlatformKeyImportResult": {
+      "additionalProperties": false,
+      "properties": {
+        "failed": {
+          "items": {
+            "$ref": "#/$defs/PlatformKeyImportFailure"
+          },
+          "type": "array"
+        },
+        "imported": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "$ref": "#/$defs/ControlRevision"
+        },
+        "skippedDisabled": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "skippedExisting": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "imported",
+        "skippedExisting",
+        "skippedDisabled",
+        "failed",
+        "revision"
+      ],
+      "type": "object"
+    },
+    "PricingSourceDto": {
+      "description": "Where a Plan's prices come from.",
+      "enum": [
+        "official",
+        "verified_snapshot",
+        "unpriced"
+      ],
+      "type": "string"
+    },
+    "ProtocolDto": {
+      "description": "Wire protocol for destination catalog and transport rows.",
+      "enum": [
+        "chat_completions",
+        "responses",
+        "messages"
+      ],
+      "type": "string"
+    },
     "ProviderDefinitionAuthKind": {
       "description": "Auth kind owned by a Provider definition. Independent of protocol.\nNullable on the wire because builtin rows leave the field empty.",
       "enum": [
@@ -1779,6 +2526,49 @@
       ],
       "type": "object"
     },
+    "RedirectPolicyDto": {
+      "description": "Redirect policy advertised on a destination.",
+      "enum": [
+        "no_follow",
+        "follow_keyless"
+      ],
+      "type": "string"
+    },
+    "RefusedRowDto": {
+      "additionalProperties": false,
+      "description": "Identity of one legacy row the stage-4a projection refused.",
+      "properties": {
+        "id": {
+          "description": "Persisted row id.",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/RefusedRowKindDto"
+        },
+        "providerId": {
+          "description": "Provider id when the refused row is an account.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "id",
+        "providerId"
+      ],
+      "type": "object"
+    },
+    "RefusedRowKindDto": {
+      "description": "Legacy row kind named in a destination-projection refusal.",
+      "enum": [
+        "account",
+        "dynamic_provider",
+        "platform_parent"
+      ],
+      "type": "string"
+    },
     "RelationConfidence": {
       "enum": [
         "unknown",
@@ -1902,6 +2692,15 @@
         "notes"
       ],
       "type": "object"
+    },
+    "UsageSourceDto": {
+      "description": "Where a Plan reads usage from.",
+      "enum": [
+        "official_api",
+        "local_projection",
+        "none"
+      ],
+      "type": "string"
     },
     "V3Error": {
       "additionalProperties": false,
@@ -2078,6 +2877,39 @@
     },
     {
       "$ref": "#/$defs/DshApplicationInstallRequest"
+    },
+    {
+      "$ref": "#/$defs/PlatformKeyImportRequest"
+    },
+    {
+      "$ref": "#/$defs/PlatformKeyImportResult"
+    },
+    {
+      "$ref": "#/$defs/PlatformKeyImportFailure"
+    },
+    {
+      "$ref": "#/$defs/DestinationList"
+    },
+    {
+      "$ref": "#/$defs/DestinationDto"
+    },
+    {
+      "$ref": "#/$defs/DestinationCredentialDto"
+    },
+    {
+      "$ref": "#/$defs/CredentialList"
+    },
+    {
+      "$ref": "#/$defs/CapabilitiesDto"
+    },
+    {
+      "$ref": "#/$defs/PlanDto"
+    },
+    {
+      "$ref": "#/$defs/CatalogModelDto"
+    },
+    {
+      "$ref": "#/$defs/DestinationProjectionRefusedError"
     }
   ],
   "title": "DashboardApiV4"

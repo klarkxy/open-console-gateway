@@ -253,10 +253,22 @@ fn mutation_routes(id: &str) -> Vec<(Method, String, Value)> {
 }
 
 #[tokio::test]
+async fn dashboard_v3_prefix_is_a_410_tombstone() {
+    let harness = start_loopback("v3-tombstone").await;
+    for path in ["/accounts", "/account-records", "/contract", "/settings"] {
+        let (status, body) = harness
+            .get_json(&format!("{}{path}", harness.v3_tombstone_base))
+            .await;
+        V3Harness::assert_v3_removed(status, &body);
+    }
+    harness.stop();
+}
+
+#[tokio::test]
 async fn dashboard_v3_account_routes_require_the_v3_session() {
     let harness = start_public("accounts-auth").await;
     let (status, body) = harness
-        .get_json(&format!("{}/accounts", harness.v3_base))
+        .get_json(&format!("{}/account-records", harness.v3_base))
         .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_v3_error(&body, ERROR_UNAUTHORIZED);
@@ -316,7 +328,7 @@ async fn dashboard_v3_v2_login_cookie_authorizes_account_reads() {
 
     let listed = harness
         .client
-        .get(format!("{}/accounts", harness.v3_base))
+        .get(format!("{}/account-records", harness.v3_base))
         .header(reqwest::header::COOKIE, &cookie)
         .send()
         .await
@@ -452,7 +464,7 @@ async fn dashboard_v3_list_and_detail_are_secret_free() {
     assert!(created_account.plan_routable);
 
     let (status, listed) = harness
-        .get_json(&format!("{}/accounts", harness.v3_base))
+        .get_json(&format!("{}/account-records", harness.v3_base))
         .await;
     assert_eq!(status, StatusCode::OK, "{listed}");
     assert_secret_free(&listed, &[SECRET, "pw-secret", "ref-secret"]);
@@ -522,7 +534,7 @@ async fn dashboard_v3_list_and_detail_are_secret_free() {
         .unwrap();
 
     let (status, listed) = harness
-        .get_json(&format!("{}/accounts", harness.v3_base))
+        .get_json(&format!("{}/account-records", harness.v3_base))
         .await;
     assert_eq!(status, StatusCode::OK, "{listed}");
     assert_secret_free(&listed, &[SECRET, "pw-secret", "ref-secret"]);
@@ -783,7 +795,7 @@ async fn dashboard_v3_update_toggle_reorder_setup_and_cooldown() {
     assert!(mutation_account(&restored).enabled);
 
     let (status, listed) = harness
-        .get_json(&format!("{}/accounts", harness.v3_base))
+        .get_json(&format!("{}/account-records", harness.v3_base))
         .await;
     assert_eq!(status, StatusCode::OK);
     let mut ids = parse_list(&listed)
@@ -1126,7 +1138,8 @@ async fn dashboard_v3_custom_config_and_capabilities_roll_back_together() {
     conn.busy_timeout(Duration::from_secs(5)).unwrap();
     conn.execute_batch(
         "CREATE TRIGGER fail_custom_config_update
-         BEFORE UPDATE OF endpoint_url ON account_custom_configs
+         BEFORE UPDATE OF base_url ON destinations
+         WHEN NEW.legacy_kind = 'custom_account'
          BEGIN
              SELECT RAISE(ABORT, 'forced atomic Custom update failure');
          END;",
@@ -1151,15 +1164,15 @@ async fn dashboard_v3_custom_config_and_capabilities_roll_back_together() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert_v3_error(&body, ERROR_INVALID_REQUEST);
     assert_eq!(harness.state.settings_revision(), before);
-    let stored: (String, String) = conn
-        .query_row(
-            "SELECT endpoint_url, upstream_protocol FROM account_custom_configs WHERE account_id = ?1",
-            [&custom_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .unwrap();
-    assert_eq!(stored.0, "https://api.example.com/v1/messages");
-    assert_eq!(stored.1, "messages");
+    let stored = harness
+        .state
+        .db
+        .lock()
+        .account_custom_config(&custom_id)
+        .unwrap()
+        .expect("custom dest should remain");
+    assert_eq!(stored.endpoint_url, "https://api.example.com/v1/messages");
+    assert_eq!(stored.upstream_protocol.as_str(), "messages");
     let capabilities = harness
         .state
         .db
@@ -1199,13 +1212,12 @@ async fn dashboard_v3_capabilities_commit_advances_revision_before_post_read_fai
     conn.busy_timeout(Duration::from_secs(5)).unwrap();
     conn.execute_batch(
         "CREATE TRIGGER corrupt_capability_post_read
-         AFTER INSERT ON account_model_capabilities
+         AFTER INSERT ON destination_models
          BEGIN
-             UPDATE account_model_capabilities
-                SET protocol = 'invalid-after-commit'
-              WHERE account_id = NEW.account_id
-                AND model_id = NEW.model_id
-                AND protocol = NEW.protocol;
+             UPDATE destination_models
+                SET protocols_json = '[\"invalid-after-commit\"]'
+              WHERE destination_id = NEW.destination_id
+                AND public_model_key = NEW.public_model_key;
          END;",
     )
     .unwrap();
@@ -1231,13 +1243,17 @@ async fn dashboard_v3_capabilities_commit_advances_revision_before_post_read_fai
     assert_eq!(harness.state.settings_revision(), before + 1);
     let stored: (String, String) = conn
         .query_row(
-            "SELECT model_id, protocol FROM account_model_capabilities WHERE account_id = ?1",
+            "SELECT public_model, protocols_json FROM destination_models
+             WHERE destination_id = (
+                SELECT id FROM destinations
+                 WHERE legacy_kind = 'custom_account' AND legacy_id = ?1
+             )",
             [&custom_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
     assert_eq!(stored.0, "org/committed");
-    assert_eq!(stored.1, "invalid-after-commit");
+    assert_eq!(stored.1, "[\"invalid-after-commit\"]");
 
     drop(conn);
     harness.stop();
@@ -1608,7 +1624,7 @@ async fn retired_v2_account_mutations_do_not_create_or_toggle() {
 
 async fn find_account_for_provider(harness: &V3Harness, provider_id: &str) -> Account {
     let (status, listed) = harness
-        .get_json(&format!("{}/accounts", harness.v3_base))
+        .get_json(&format!("{}/account-records", harness.v3_base))
         .await;
     assert_eq!(status, StatusCode::OK, "{listed}");
     parse_list(&listed)
@@ -1663,7 +1679,7 @@ async fn dynamic_accounts_are_plan_routable_and_stale_uuid_accounts_are_not() {
     {
         let conn = rusqlite::Connection::open(harness.dir.join("data.sqlite")).unwrap();
         conn.execute(
-            "UPDATE accounts SET provider_id = ?1 WHERE id = ?2",
+            "UPDATE credentials SET provider_id = ?1 WHERE legacy_account_id = ?2",
             [stale_uuid, stale_id.as_str()],
         )
         .unwrap();
@@ -1681,5 +1697,124 @@ async fn dynamic_accounts_are_plan_routable_and_stale_uuid_accounts_are_not() {
         .await;
     assert_eq!(status, StatusCode::OK, "{still_dynamic}");
     assert!(parse_account(&still_dynamic).plan_routable);
+    harness.stop();
+}
+
+#[tokio::test]
+async fn v3_account_list_follows_populated_shadow_order() {
+    let harness = start_loopback("v3-accounts-shadow-order").await;
+    for (name, key, host) in [
+        (
+            "Shadow A",
+            "sk-shadow-a",
+            "https://shadow-a.example/v1/chat/completions",
+        ),
+        (
+            "Shadow B",
+            "sk-shadow-b",
+            "https://shadow-b.example/v1/chat/completions",
+        ),
+    ] {
+        let (status, created) = send_json(
+            &harness,
+            Method::POST,
+            "/accounts",
+            &cas(
+                &harness,
+                json!({
+                    "providerId": CUSTOM_PROVIDER_ID,
+                    "name": name,
+                    "key": key,
+                    "customConfig": {
+                        "endpointUrl": host,
+                        "upstreamProtocol": "chat_completions"
+                    },
+                    "modelCapabilities": [{
+                        "publicModel": "shadow-model",
+                        "upstreamModel": "shadow-model",
+                        "protocol": "chat_completions"
+                    }]
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+    }
+
+    let (status, listed) = harness
+        .get_json(&format!("{}/account-records", harness.v3_base))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    let shadow_ids: Vec<String> = parse_list(&listed)
+        .accounts
+        .iter()
+        .map(|account| account.id.clone())
+        .collect();
+
+    {
+        let conn = rusqlite::Connection::open(harness.dir.join("data.sqlite")).unwrap();
+        conn.busy_timeout(Duration::from_secs(5)).unwrap();
+        for (index, id) in shadow_ids.iter().rev().enumerate() {
+            conn.execute(
+                "UPDATE credentials SET routing_rank = ?1 WHERE legacy_account_id = ?2",
+                rusqlite::params![index as i64, id.as_str()],
+            )
+            .unwrap();
+        }
+    }
+
+    let live_ids: Vec<String> = harness
+        .state
+        .db
+        .lock()
+        .list_accounts()
+        .unwrap()
+        .into_iter()
+        .map(|account| account.id)
+        .collect();
+    assert_ne!(live_ids, shadow_ids);
+
+    let (status, listed) = harness
+        .get_json(&format!("{}/account-records", harness.v3_base))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    let shim_ids: Vec<String> = parse_list(&listed)
+        .accounts
+        .iter()
+        .map(|account| account.id.clone())
+        .collect();
+    assert_eq!(shim_ids, shadow_ids);
+
+    {
+        let conn = rusqlite::Connection::open(harness.dir.join("data.sqlite")).unwrap();
+        conn.busy_timeout(Duration::from_secs(5)).unwrap();
+        conn.execute_batch(
+            "DELETE FROM credential_grants;
+             DELETE FROM credentials;
+             DELETE FROM destination_models;
+             DELETE FROM destinations;",
+        )
+        .unwrap();
+    }
+
+    let live_ids: Vec<String> = harness
+        .state
+        .db
+        .lock()
+        .list_accounts()
+        .unwrap()
+        .into_iter()
+        .map(|account| account.id)
+        .collect();
+    let (status, listed) = harness
+        .get_json(&format!("{}/account-records", harness.v3_base))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    let fallback_ids: Vec<String> = parse_list(&listed)
+        .accounts
+        .iter()
+        .map(|account| account.id.clone())
+        .collect();
+    assert_eq!(fallback_ids, live_ids);
     harness.stop();
 }

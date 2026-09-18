@@ -273,7 +273,7 @@ async fn preset_provenance_survives_save_edit_and_can_be_cleared() {
     assert_eq!(status, StatusCode::OK, "{created}");
     assert_eq!(created["provider"]["presetId"], "azure-openai");
     let id = created["provider"]["id"].as_str().unwrap();
-    let (_, accounts) = send_json(&harness, Method::GET, "/accounts", &Value::Null).await;
+    let (_, accounts) = send_json(&harness, Method::GET, "/account-records", &Value::Null).await;
     let account = accounts["accounts"]
         .as_array()
         .unwrap()

@@ -400,7 +400,7 @@ async fn encrypted_account_migration_moves_keys_without_exposing_them() {
         .unwrap();
     assert_eq!(custom_contract.model_capabilities[0].source, "import");
     let (_, listed) = target
-        .get_json(&format!("{}/accounts", target.v3_base))
+        .get_json(&format!("{}/account-records", target.v3_base))
         .await;
     let custom_view = listed["accounts"]
         .as_array()
@@ -776,9 +776,7 @@ async fn node_migration_merges_dynamic_providers_by_stable_id() {
 }
 
 fn v4_base(harness: &V3Harness) -> String {
-    harness
-        .v3_base
-        .replacen("/dashboard/api/v3", "/dashboard/api/v4", 1)
+    harness.v4_base.clone()
 }
 
 async fn send_v4(
@@ -999,9 +997,7 @@ async fn v6_roundtrip_preserves_shared_identity_and_binding_scopes() {
 async fn v6_draft_provider_roundtrip_stays_off_runtime() {
     let _migration_guard = MIGRATION_TEST_LOCK.lock().await;
     let source = start_loopback("draft-transfer-source").await;
-    let v4_base = source
-        .v3_base
-        .replacen("/dashboard/api/v3", "/dashboard/api/v4", 1);
+    let v4_base = source.v4_base.clone();
     let mut body = json!({
         "mode": "draft",
         "operationId": "aaaaaaaa-bbbb-4ccc-8ddd-0000000000aa",

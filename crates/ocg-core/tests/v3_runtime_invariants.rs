@@ -767,7 +767,7 @@ async fn dashboard_json(
     let response = loopback_client()
         .request(
             method,
-            format!("http://127.0.0.1:{port}/dashboard/api/v3{path}"),
+            format!("http://127.0.0.1:{port}/dashboard/api/v4{path}"),
         )
         .json(&body)
         .send()

@@ -45,9 +45,12 @@ fn sample_payload() -> PortablePayload {
         dynamic_providers: Vec::new(),
         identities: Vec::new(),
         quota_pools: Vec::new(),
+        destinations: Vec::new(),
+        credentials: Vec::new(),
         node: Some(sample_node(account_id)),
     };
     attach_default_identity_snapshot(&mut payload);
+    attach_default_destination_snapshot(&mut payload);
     payload
 }
 
@@ -55,6 +58,8 @@ fn sample_legacy_payload(version: u32) -> PortablePayload {
     let mut payload = sample_payload();
     payload.version = version;
     strip_identity_snapshot(&mut payload);
+    payload.destinations.clear();
+    payload.credentials.clear();
     payload
 }
 
@@ -194,6 +199,120 @@ fn attach_default_identity_snapshot(payload: &mut PortablePayload) {
     }
 }
 
+fn attach_default_destination_snapshot(payload: &mut PortablePayload) {
+    use crate::dashboard_v4::types::{
+        AdapterKindDto, AuthSchemeDto, CapabilitiesDto, CredentialCooldownsDto,
+        CredentialGrantsDto, DestinationCredentialDto, DestinationDto, LegacyDestinationKindDto,
+        LegacyDestinationRefDto, RedirectPolicyDto,
+    };
+    use ocg_domain::credential::{AuthState, ModelScope, credential_id_for_legacy_account};
+    use ocg_domain::destination::{
+        destination_id_for_builtin, destination_id_for_custom_account, destination_id_for_dynamic,
+    };
+
+    payload.destinations.clear();
+    payload.credentials.clear();
+    if payload.version < PAYLOAD_VERSION {
+        return;
+    }
+    let mut seen_destinations = HashSet::new();
+    for (rank, account) in payload.accounts.iter().enumerate() {
+        let Some(account_id) = account.id.as_deref() else {
+            continue;
+        };
+        let (destination_id, legacy, adapter) =
+            if account.provider_id == crate::kernel::ids::CUSTOM_PROVIDER_ID {
+                (
+                    destination_id_for_custom_account(account_id),
+                    LegacyDestinationRefDto {
+                        kind: LegacyDestinationKindDto::CustomAccount,
+                        id: account_id.to_string(),
+                    },
+                    AdapterKindDto::Http,
+                )
+            } else if uuid::Uuid::parse_str(&account.provider_id).is_ok()
+                && builtin_provider(&account.provider_id).is_none()
+            {
+                (
+                    destination_id_for_dynamic(&account.provider_id),
+                    LegacyDestinationRefDto {
+                        kind: LegacyDestinationKindDto::Dynamic,
+                        id: account.provider_id.clone(),
+                    },
+                    AdapterKindDto::Http,
+                )
+            } else {
+                (
+                    destination_id_for_builtin(&account.provider_id),
+                    LegacyDestinationRefDto {
+                        kind: LegacyDestinationKindDto::Builtin,
+                        id: account.provider_id.clone(),
+                    },
+                    AdapterKindDto::OpencodeGo,
+                )
+            };
+        if seen_destinations.insert(destination_id.clone()) {
+            payload.destinations.push(DestinationDto {
+                id: destination_id.clone(),
+                legacy,
+                adapter,
+                name: account.name.clone(),
+                brand_family: None,
+                base_url: None,
+                protocols: Vec::new(),
+                auth_scheme: AuthSchemeDto::Bearer,
+                catalog: Vec::new(),
+                capabilities: CapabilitiesDto {
+                    testable: true,
+                    discoverable_models: false,
+                    official_balance_probe: Vec::new(),
+                    observer: false,
+                    managed_signup: false,
+                    external_integration: false,
+                    billing_tier_required: false,
+                    redirect_policy: RedirectPolicyDto::NoFollow,
+                    identity_headers: false,
+                },
+                plan: None,
+                max_credentials: None,
+                observer_credential_id: None,
+                enabled: account.enabled,
+            });
+        }
+        payload.credentials.push(DestinationCredentialDto {
+            id: credential_id_for_legacy_account(account_id).to_string(),
+            legacy_account_id: account_id.to_string(),
+            destination_id,
+            name: account.name.clone(),
+            notes: account.notes.clone(),
+            has_secret: !account.key.is_empty(),
+            enabled: account.enabled,
+            routing_rank: rank as u32,
+            scope: ModelScope::All,
+            grants: CredentialGrantsDto {
+                allowed_endpoint_ids: account.allowed_endpoint_ids.clone().unwrap_or_default(),
+                allowed_origins: account.allowed_origins.clone().unwrap_or_default(),
+            },
+            auth_state: AuthState::Unknown,
+            last_error: None,
+            cooldowns: CredentialCooldownsDto {
+                generic_until: None,
+                five_hour_until: None,
+                week_until: None,
+                month_until: None,
+                free_until: None,
+            },
+            quota_pool_id: None,
+            onboarding_task: None,
+            purchase_date: if account.purchase_date.is_empty() {
+                None
+            } else {
+                Some(account.purchase_date.clone())
+            },
+        });
+    }
+}
+
 fn strip_identity_snapshot(payload: &mut PortablePayload) {
     payload.identities.clear();
     payload.quota_pools.clear();
@@ -303,6 +422,8 @@ fn payload_v1_v2_and_v3_are_rejected_without_a_legacy_offering_parser() {
             dynamic_providers: Vec::new(),
             identities: Vec::new(),
             quota_pools: Vec::new(),
+            destinations: Vec::new(),
+            credentials: Vec::new(),
             node,
         })
         .unwrap_err();
@@ -340,13 +461,13 @@ fn future_payload_version_is_rejected_as_unsupported_not_wrong_password() {
     use std::fs;
     use std::sync::Arc;
 
-    assert_eq!(PAYLOAD_VERSION, 6);
+    assert_eq!(PAYLOAD_VERSION, 7);
     let mut payload = sample_payload();
-    payload.version = 7;
+    payload.version = 8;
     let bundle = encrypt_payload(&payload, "correct horse battery").unwrap();
     let error = decrypt_and_validate(&bundle, "correct horse battery").unwrap_err();
     assert!(
-        matches!(error, TransferError::UnsupportedVersion(7)),
+        matches!(error, TransferError::UnsupportedVersion(8)),
         "{error:?}"
     );
     assert!(!matches!(error, TransferError::InvalidBundle));
@@ -365,7 +486,7 @@ fn future_payload_version_is_rejected_as_unsupported_not_wrong_password() {
     assert_eq!(mapped.status, StatusCode::BAD_REQUEST);
     assert_eq!(mapped.body.code, super::super::ERROR_INVALID_REQUEST);
     assert!(
-        mapped.body.message.contains("payload version 7"),
+        mapped.body.message.contains("payload version 8"),
         "{}",
         mapped.body.message
     );
@@ -540,9 +661,12 @@ fn dynamic_provider_definitions_are_validated_and_dangling_ids_fail() {
         dynamic_providers: vec![sample_dynamic_provider(provider_id, "Lab")],
         identities: Vec::new(),
         quota_pools: Vec::new(),
+        destinations: Vec::new(),
+        credentials: Vec::new(),
         node: Some(sample_node(account_id)),
     };
     attach_default_identity_snapshot(&mut payload);
+    attach_default_destination_snapshot(&mut payload);
     let validated = validate_payload(payload).unwrap();
     assert_eq!(validated.dynamic_providers.len(), 1);
     assert_eq!(validated.dynamic_providers[0].name, "Lab");
@@ -563,6 +687,8 @@ fn dynamic_provider_definitions_are_validated_and_dangling_ids_fail() {
         dynamic_providers: Vec::new(),
         identities: Vec::new(),
         quota_pools: Vec::new(),
+        destinations: Vec::new(),
+        credentials: Vec::new(),
         node: Some(sample_node(account_id)),
     };
     let error = validate_payload(dangling).unwrap_err();
@@ -593,9 +719,12 @@ fn v3_exports_canonical_model_mapping_inside_the_v1_envelope() {
         dynamic_providers: Vec::new(),
         identities: Vec::new(),
         quota_pools: Vec::new(),
+        destinations: Vec::new(),
+        credentials: Vec::new(),
         node: Some(sample_node(account_id)),
     };
     attach_default_identity_snapshot(&mut payload);
+    attach_default_destination_snapshot(&mut payload);
     let json = serde_json::to_value(&payload).unwrap();
     let capability = &json["accounts"][0]["modelCapabilities"][0];
     assert_eq!(capability["publicModel"], "deepseek-v4-flash");
@@ -732,6 +861,7 @@ fn account_count_and_decoded_ciphertext_limits_fail_closed() {
         node.account_order.push(id);
     }
     attach_default_identity_snapshot(&mut payload);
+    attach_default_destination_snapshot(&mut payload);
     assert_eq!(
         validate_payload(payload).unwrap().accounts.len(),
         MAX_ACCOUNTS
@@ -779,7 +909,9 @@ fn v6_without_identity_snapshot_is_rejected() {
     let mut payload = sample_payload();
     strip_identity_snapshot(&mut payload);
     payload.accounts[0].cooldowns = Some(PortableCooldowns::default());
-    payload.version = PAYLOAD_VERSION;
+    payload.version = V6_PAYLOAD_VERSION;
+    payload.destinations.clear();
+    payload.credentials.clear();
     let error = validate_payload(payload).unwrap_err();
     assert!(
         matches!(error, TransferError::Invalid(ref message) if message.contains("identity")),
@@ -791,6 +923,8 @@ fn v6_without_identity_snapshot_is_rejected() {
 fn v5_package_with_identity_semantics_is_not_silently_downgraded() {
     let mut payload = sample_payload();
     payload.version = V5_PAYLOAD_VERSION;
+    payload.destinations.clear();
+    payload.credentials.clear();
     let error = validate_payload(payload).unwrap_err();
     assert!(
         matches!(error, TransferError::Invalid(ref message) if message.contains("identity semantics")),
@@ -895,5 +1029,35 @@ fn v1_encryption_vector_is_stable() {
         format!("{:x}", Sha256::digest(bundle.as_bytes())),
         // Lock the deterministic V5 fixture after retired config fields are omitted.
         "2ccaef5a76f76ee3c2ec9f612f06126ddd2dc076885b90b35edac2429a06d8a3"
+    );
+}
+
+#[test]
+fn v6_package_with_destination_semantics_is_rejected() {
+    let mut payload = sample_payload();
+    payload.version = V6_PAYLOAD_VERSION;
+    let error = validate_payload(payload).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            TransferError::Invalid(ref message) if message.contains("destination semantics")
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn v7_requires_a_destination_snapshot_for_exported_accounts() {
+    let mut payload = sample_payload();
+    payload.destinations.clear();
+    payload.credentials.clear();
+    let error = validate_payload(payload).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            TransferError::Invalid(ref message)
+                if message.contains("missing from the destination credential snapshot")
+        ),
+        "{error:?}"
     );
 }

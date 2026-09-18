@@ -972,7 +972,7 @@ async fn dashboard_v3_zen_settings_cas_bumps_without_account_or_secrets() {
 
     let accounts = harness
         .client
-        .get(format!("{}/accounts", harness.v3_base))
+        .get(format!("{}/account-records", harness.v3_base))
         .send()
         .await
         .unwrap()

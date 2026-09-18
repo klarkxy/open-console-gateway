@@ -646,7 +646,7 @@ async fn unknown_offerings_fail_closed_without_touching_goat_or_upstream() {
     {
         let conn = rusqlite::Connection::open(harness.dir.join("data.sqlite")).unwrap();
         conn.execute(
-            "UPDATE accounts SET provider_id = 'unknown-provider' WHERE id = ?1",
+            "UPDATE credentials SET provider_id = 'unknown-provider' WHERE legacy_account_id = ?1",
             [&unknown_id],
         )
         .unwrap();
@@ -760,7 +760,7 @@ async fn provider_model_refresh_uses_go_account_and_public_command_catalog() {
         Some("Bearer sk-go-verify")
     );
 
-    let gateway_base = harness.v3_base.strip_suffix("/dashboard/api/v3").unwrap();
+    let gateway_base = harness.v3_base.strip_suffix("/dashboard/api/v4").unwrap();
     let listed: Value = harness
         .client
         .get(format!("{gateway_base}/v1/models"))

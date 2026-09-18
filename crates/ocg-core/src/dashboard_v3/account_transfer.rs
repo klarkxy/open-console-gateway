@@ -3,7 +3,8 @@
 //! Plaintext upstream Keys are decrypted and re-encrypted only inside the Host.
 //! The dashboard receives a versioned Argon2id + AES-256-GCM envelope, plus
 //! secret-free previews/results. Browser profiles, cookies, logs, usage, and
-//! V6 also preserves cooldown deadlines; V4/V5 retain their host-local policy.
+//! V7 also carries destinations and credentials directly; V6 preserves
+//! cooldown deadlines; V4/V5 retain their host-local policy.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
@@ -60,9 +61,10 @@ const ENVELOPE_VERSION: u32 = 1;
 const LEGACY_PAYLOAD_VERSION: u32 = 1;
 #[cfg(test)]
 const NODE_PAYLOAD_VERSION: u32 = 2;
-const PAYLOAD_VERSION: u32 = 6;
+const PAYLOAD_VERSION: u32 = 7;
 const MIN_SUPPORTED_PAYLOAD_VERSION: u32 = 4;
 const V5_PAYLOAD_VERSION: u32 = 5;
+const V6_PAYLOAD_VERSION: u32 = 6;
 const AAD: &[u8] = b"ocg-manager-account-backup:v1:argon2id-m65536-t3-p1:aes-256-gcm";
 const ARGON_MEMORY_KIB: u32 = 64 * 1024;
 const ARGON_ITERATIONS: u32 = 3;
@@ -113,6 +115,10 @@ struct PortablePayload {
     identities: Vec<PortableIdentity>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     quota_pools: Vec<PortableQuotaPool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    destinations: Vec<crate::dashboard_v4::types::DestinationDto>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    credentials: Vec<crate::dashboard_v4::types::DestinationCredentialDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     node: Option<PortableNodeState>,
 }
@@ -338,6 +344,8 @@ impl Zeroize for PortablePayload {
         self.dynamic_providers.zeroize();
         self.identities.zeroize();
         self.quota_pools.zeroize();
+        self.destinations.clear();
+        self.credentials.clear();
         self.node.zeroize();
     }
 }
@@ -904,6 +912,7 @@ fn export_payload(state: &CoreState) -> Result<(PortablePayload, u64, u64), Tran
         quota_pools,
         platform_accounts,
         platform_links,
+        projection,
     ) = {
         let db = state.db.lock();
         let accounts = db.list_accounts().map_err(|_| TransferError::Internal)?;
@@ -964,6 +973,8 @@ fn export_payload(state: &CoreState) -> Result<(PortablePayload, u64, u64), Tran
                 }
             })
             .collect::<Vec<_>>();
+        let projection = crate::destination_projection::routing_projection(&db)
+            .map_err(|_| TransferError::Internal)?;
         (
             snapshots,
             sub_keys,
@@ -973,8 +984,15 @@ fn export_payload(state: &CoreState) -> Result<(PortablePayload, u64, u64), Tran
             quota_pools,
             parents,
             links,
+            projection,
         )
     };
+    let projection = projection.ok_or_else(|| {
+        TransferError::Invalid(
+            "destination projection refused; export requires a total destination snapshot"
+                .to_string(),
+        )
+    })?;
     let mut accounts = Zeroizing::new(Vec::new());
     let mut account_order = Vec::new();
     let mut skipped = 0_u64;
@@ -1253,6 +1271,16 @@ fn export_payload(state: &CoreState) -> Result<(PortablePayload, u64, u64), Tran
             dynamic_providers: portable_dynamics,
             identities,
             quota_pools: portable_quota_pools,
+            destinations: projection
+                .destinations
+                .iter()
+                .map(crate::dashboard_v4::types::DestinationDto::from)
+                .collect(),
+            credentials: projection
+                .credentials
+                .iter()
+                .map(crate::dashboard_v4::types::DestinationCredentialDto::from)
+                .collect(),
             node: Some(PortableNodeState {
                 config: state.config(),
                 access_keys,
@@ -1396,9 +1424,17 @@ fn validate_payload(payload: PortablePayload) -> Result<ValidatedMigration, Tran
                 || account.allowed_origins.is_some()
                 || account.cooldowns.is_some()
         });
-    if payload.version < PAYLOAD_VERSION && has_identity_semantics {
+    if payload.version < V6_PAYLOAD_VERSION && has_identity_semantics {
         return Err(TransferError::Invalid(
             "this backup carries identity semantics that cannot be imported as a V4/V5 package"
+                .to_string(),
+        ));
+    }
+    let has_destination_semantics =
+        !payload.destinations.is_empty() || !payload.credentials.is_empty();
+    if payload.version < PAYLOAD_VERSION && has_destination_semantics {
+        return Err(TransferError::Invalid(
+            "this backup carries destination semantics that cannot be imported as a V4/V5/V6 package"
                 .to_string(),
         ));
     }
@@ -1417,7 +1453,7 @@ fn validate_payload(payload: PortablePayload) -> Result<ValidatedMigration, Tran
     let mut logical = HashSet::new();
     let mut account_ids = HashSet::new();
     let mut validated = Vec::with_capacity(payload.accounts.len());
-    let carries_cooldowns = payload.version == PAYLOAD_VERSION;
+    let carries_cooldowns = payload.version >= V6_PAYLOAD_VERSION;
     for (index, account) in payload.accounts.iter_mut().enumerate() {
         let prefix = || format!("account {}", index + 1);
         let id = match account.id.as_deref().map(str::trim) {
@@ -1826,7 +1862,7 @@ fn validate_payload(payload: PortablePayload) -> Result<ValidatedMigration, Tran
         .map(|node| validate_node_state(node, &validated))
         .transpose()?
         .map(Zeroizing::new);
-    let identity_snapshot = if payload.version == PAYLOAD_VERSION {
+    let identity_snapshot = if payload.version >= V6_PAYLOAD_VERSION {
         Some(validate_identity_snapshot(
             &payload.identities,
             &payload.quota_pools,
@@ -1836,6 +1872,13 @@ fn validate_payload(payload: PortablePayload) -> Result<ValidatedMigration, Tran
     } else {
         None
     };
+    if payload.version >= PAYLOAD_VERSION {
+        validate_destination_snapshot(
+            &payload.destinations,
+            &payload.credentials,
+            &payload.accounts,
+        )?;
+    }
     Ok(ValidatedMigration {
         platform_links_authoritative: payload.version >= V5_PAYLOAD_VERSION,
         platform_accounts: payload.platform_accounts.clone(),
@@ -1847,6 +1890,89 @@ fn validate_payload(payload: PortablePayload) -> Result<ValidatedMigration, Tran
         draft_provider_ids,
         identity_snapshot,
     })
+}
+
+fn validate_destination_snapshot(
+    destinations: &[crate::dashboard_v4::types::DestinationDto],
+    credentials: &[crate::dashboard_v4::types::DestinationCredentialDto],
+    accounts: &[PortableAccount],
+) -> Result<(), TransferError> {
+    use crate::dashboard_v4::types::AdapterKindDto;
+    use std::collections::HashSet;
+
+    let mut destination_ids = HashSet::new();
+    for destination in destinations {
+        if destination.id.trim().is_empty() || !destination_ids.insert(destination.id.as_str()) {
+            return Err(TransferError::Invalid(
+                "destination snapshot has a missing or duplicate destination id".to_string(),
+            ));
+        }
+    }
+    let mut credential_ids = HashSet::new();
+    let mut credential_legacy_ids = HashSet::new();
+    for credential in credentials {
+        if credential.id.trim().is_empty() || !credential_ids.insert(credential.id.as_str()) {
+            return Err(TransferError::Invalid(
+                "destination snapshot has a missing or duplicate credential id".to_string(),
+            ));
+        }
+        if !destination_ids.contains(credential.destination_id.as_str()) {
+            return Err(TransferError::Invalid(format!(
+                "credential `{}` names an unknown destination",
+                credential.id
+            )));
+        }
+        if !credential.legacy_account_id.trim().is_empty() {
+            credential_legacy_ids.insert(credential.legacy_account_id.as_str());
+        }
+    }
+    let keyless: HashSet<&str> = destinations
+        .iter()
+        .filter(|destination| {
+            matches!(
+                destination.adapter,
+                AdapterKindDto::Zen | AdapterKindDto::Cpa
+            )
+        })
+        .map(|destination| destination.id.as_str())
+        .collect();
+    for account in accounts {
+        let Some(id) = account
+            .id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        else {
+            continue;
+        };
+        if !credential_legacy_ids.contains(id) {
+            return Err(TransferError::Invalid(format!(
+                "account `{id}` is missing from the destination credential snapshot"
+            )));
+        }
+    }
+    for credential in credentials {
+        if keyless.contains(credential.destination_id.as_str()) {
+            continue;
+        }
+        let id = credential.legacy_account_id.trim();
+        if id.is_empty() {
+            return Err(TransferError::Invalid(format!(
+                "credential `{}` is missing a legacy account id",
+                credential.id
+            )));
+        }
+        if !accounts
+            .iter()
+            .any(|account| account.id.as_deref() == Some(id))
+        {
+            return Err(TransferError::Invalid(format!(
+                "credential `{}` names an account that is not in the package",
+                credential.id
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn validate_identity_snapshot(
@@ -2154,7 +2280,7 @@ fn validate_portable_dynamic_providers(
     let mut seen_ids = HashSet::new();
     let mut validated = Vec::with_capacity(providers.len());
     let mut draft_ids = HashSet::new();
-    let require_draft_flag = payload_version == PAYLOAD_VERSION;
+    let require_draft_flag = payload_version >= V6_PAYLOAD_VERSION;
     for (index, provider) in providers.iter().enumerate() {
         let prefix = || format!("dynamic provider {}", index + 1);
         let id = provider.id.trim();

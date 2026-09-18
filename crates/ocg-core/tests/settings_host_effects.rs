@@ -778,7 +778,7 @@ async fn http_v3_port_change_rebinds_running_listener_or_keeps_old_on_failure() 
     let new_port = free_port();
     let response = client
         .put(format!(
-            "http://127.0.0.1:{old_port}/dashboard/api/v3/settings"
+            "http://127.0.0.1:{old_port}/dashboard/api/v4/settings"
         ))
         .json(&json!({
             "expectedRevision": state.settings_revision(),
@@ -799,7 +799,7 @@ async fn http_v3_port_change_rebinds_running_listener_or_keeps_old_on_failure() 
     let occupied_port = occupied.local_addr().unwrap().port();
     let fail = client
         .put(format!(
-            "http://127.0.0.1:{new_port}/dashboard/api/v3/settings"
+            "http://127.0.0.1:{new_port}/dashboard/api/v4/settings"
         ))
         .json(&json!({
             "expectedRevision": state.settings_revision(),
@@ -930,7 +930,7 @@ async fn failed_http_rebind_releases_sync_gate_and_preserves_later_key_writes() 
     let failed_settings = tokio::spawn(async move {
         settings_client
             .put(format!(
-                "http://127.0.0.1:{serving_port}/dashboard/api/v3/settings"
+                "http://127.0.0.1:{serving_port}/dashboard/api/v4/settings"
             ))
             .json(&json!({
                 "expectedRevision": settings_state.settings_revision(),
@@ -959,7 +959,7 @@ async fn failed_http_rebind_releases_sync_gate_and_preserves_later_key_writes() 
         Duration::from_secs(2),
         client
             .post(format!(
-                "http://127.0.0.1:{serving_port}/dashboard/api/v3/keys/primary/regenerate"
+                "http://127.0.0.1:{serving_port}/dashboard/api/v4/keys/primary/regenerate"
             ))
             .json(&json!({
                 "expectedRevision": state.settings_revision(),
@@ -1112,7 +1112,7 @@ async fn http_concurrent_v3_port_changes_agree_on_configured_and_active_port() {
         a_start.wait().await;
         a_client
             .put(format!(
-                "http://127.0.0.1:{old_port}/dashboard/api/v3/settings"
+                "http://127.0.0.1:{old_port}/dashboard/api/v4/settings"
             ))
             .timeout(Duration::from_secs(5))
             .json(&json!({
@@ -1131,7 +1131,7 @@ async fn http_concurrent_v3_port_changes_agree_on_configured_and_active_port() {
         b_start.wait().await;
         b_client
             .put(format!(
-                "http://127.0.0.1:{old_port}/dashboard/api/v3/settings"
+                "http://127.0.0.1:{old_port}/dashboard/api/v4/settings"
             ))
             .timeout(Duration::from_secs(5))
             .json(&json!({

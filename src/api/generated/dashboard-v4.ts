@@ -50,7 +50,18 @@ export type DashboardApiV4 =
   | AliasPublicationUpdate
   | DshApplicationStatus
   | DshApplication
-  | DshApplicationInstallRequest;
+  | DshApplicationInstallRequest
+  | PlatformKeyImportRequest
+  | PlatformKeyImportResult
+  | PlatformKeyImportFailure
+  | DestinationList
+  | DestinationDto
+  | DestinationCredentialDto
+  | CredentialList
+  | CapabilitiesDto
+  | PlanDto
+  | CatalogModelDto
+  | DestinationProjectionRefusedError;
 /**
  * Inference operation advertised by one endpoint. Mapped 1:1 from
  * [`UpstreamProtocolKind`].
@@ -172,6 +183,56 @@ export type QuotaSharing =
     };
 export type DshApplicationStatus =
   "unsupported_runtime" | "not_detected" | "ready" | "installed" | "incompatible" | "conflict";
+/**
+ * Sealed adapter kind. Wire values match the domain serde names.
+ */
+export type AdapterKindDto = "opencode_go" | "zen" | "goat" | "minimax" | "kimi" | "ollama" | "cpa" | "http";
+/**
+ * Destination auth scheme. Wire values match the domain serde names.
+ */
+export type AuthSchemeDto = "none" | "bearer" | "x_api_key";
+/**
+ * Redirect policy advertised on a destination.
+ */
+export type RedirectPolicyDto = "no_follow" | "follow_keyless";
+/**
+ * Wire protocol for destination catalog and transport rows.
+ */
+export type ProtocolDto = "chat_completions" | "responses" | "messages";
+/**
+ * Which V3-era row a destination was projected from.
+ */
+export type LegacyDestinationKindDto = "builtin" | "dynamic" | "custom_account" | "platform_parent";
+/**
+ * How a Plan expires, when it has a cadence.
+ */
+export type ExpiryCadenceDto = "monthly";
+/**
+ * Where a Plan's prices come from.
+ */
+export type PricingSourceDto = "official" | "verified_snapshot" | "unpriced";
+/**
+ * Where a Plan reads usage from.
+ */
+export type UsageSourceDto = "official_api" | "local_projection" | "none";
+/**
+ * One Plan usage window kind.
+ */
+export type PlanWindowKindDto = "five_hours" | "week" | "month" | "free";
+/**
+ * Mapping-error variant name in camelCase.
+ */
+export type MappingErrorCodeDto =
+  | "unknownProvider"
+  | "missingDestination"
+  | "customRequiresAccount"
+  | "customAccountMissingEndpoint"
+  | "dynamicMissingEndpoint"
+  | "platformMissingBaseUrl";
+/**
+ * Legacy row kind named in a destination-projection refusal.
+ */
+export type RefusedRowKindDto = "account" | "dynamic_provider" | "platform_parent";
 
 /**
  * Live CAS token, process generation, and pricing snapshot id.
@@ -548,4 +609,313 @@ export interface DshApplicationInstallRequest {
   expectedRevision: number;
   keyId: string;
   processGeneration: number;
+}
+/**
+ * Import New API inference tokens as local Custom Keys. Secret-free.
+ */
+export interface PlatformKeyImportRequest {
+  expectedRevision: number;
+  processGeneration: number;
+}
+export interface PlatformKeyImportResult {
+  failed: PlatformKeyImportFailure[];
+  imported: number;
+  revision: ControlRevision;
+  skippedDisabled: number;
+  skippedExisting: number;
+}
+export interface PlatformKeyImportFailure {
+  code: string;
+  name: string;
+}
+/**
+ * RFC destination list. Revision-tagged and secret-free.
+ */
+export interface DestinationList {
+  destinations: DestinationDto[];
+  revision: ControlRevision;
+}
+/**
+ * RFC destination projection row. Secret-free; field-for-field from the domain `Destination`.
+ */
+export interface DestinationDto {
+  adapter: AdapterKindDto;
+  authScheme: AuthSchemeDto;
+  /**
+   * Upstream origin. Sealed for builtin adapters; user data for `http`.
+   */
+  baseUrl: string | null;
+  /**
+   * Brand family for grouping, when the adapter or platform kind has one.
+   */
+  brandFamily: string | null;
+  capabilities: CapabilitiesDto;
+  catalog: CatalogModelDto[];
+  /**
+   * Destination enablement.
+   */
+  enabled: boolean;
+  /**
+   * Stable destination id (deterministic UUIDv5 of the legacy row).
+   */
+  id: string;
+  legacy: LegacyDestinationRefDto;
+  /**
+   * `1` for singletons and account-owned endpoints; `null` otherwise.
+   */
+  maxCredentials: number | null;
+  /**
+   * Display name.
+   */
+  name: string;
+  /**
+   * Non-inference observer credential id when `capabilities.observer` is set.
+   */
+  observerCredentialId: string | null;
+  plan: PlanDto | null;
+  protocols: ProtocolDto[];
+}
+/**
+ * Destination capability flags. Mirrors the domain `Capabilities` record.
+ */
+export interface CapabilitiesDto {
+  /**
+   * A billing tier must be selected before the destination is usable.
+   */
+  billingTierRequired: boolean;
+  /**
+   * The destination can discover models from the upstream.
+   */
+  discoverableModels: boolean;
+  /**
+   * The destination is an external integration and holds no local inference secret.
+   */
+  externalIntegration: boolean;
+  /**
+   * The adapter attaches identity headers on egress.
+   */
+  identityHeaders: boolean;
+  /**
+   * Managed signup can start an onboarding task on a credential.
+   */
+  managedSignup: boolean;
+  /**
+   * The destination holds a non-inference observer credential (platform parent).
+   */
+  observer: boolean;
+  /**
+   * Hosts Configurable HTTP may probe for an official current-balance API.
+   */
+  officialBalanceProbe: string[];
+  redirectPolicy: RedirectPolicyDto;
+  /**
+   * Test connection is offered on every ready credential except external integrations.
+   */
+  testable: boolean;
+}
+/**
+ * One catalog model on a destination.
+ */
+export interface CatalogModelDto {
+  /**
+   * Whether any protocol is enabled.
+   */
+  enabled: boolean;
+  preferred: ProtocolDto | null;
+  protocols: ProtocolDto[];
+  /**
+   * Public name exposed to clients.
+   */
+  publicModel: string;
+  /**
+   * Upstream model id sent on egress.
+   */
+  upstreamModel: string;
+}
+/**
+ * V3 row this destination was projected from.
+ */
+export interface LegacyDestinationRefDto {
+  /**
+   * Row id in the V3 model named by `kind`.
+   */
+  id: string;
+  kind: LegacyDestinationKindDto;
+}
+/**
+ * Commercial offering embedded in a destination. Mirrors the domain `Plan`.
+ */
+export interface PlanDto {
+  expiryCadence: ExpiryCadenceDto | null;
+  /**
+   * Operators may enter local usage numbers by hand.
+   */
+  manualCalibration: boolean;
+  pricingSource: PricingSourceDto;
+  usageSource: UsageSourceDto;
+  windows: PlanWindowDto[];
+}
+/**
+ * One Plan usage window.
+ */
+export interface PlanWindowDto {
+  kind: PlanWindowKindDto;
+}
+/**
+ * RFC credential projection row. Carries `hasSecret` only; never ciphertext or plaintext.
+ */
+export interface DestinationCredentialDto {
+  authState: AuthState;
+  cooldowns: CredentialCooldownsDto;
+  /**
+   * Destination this credential routes through.
+   */
+  destinationId: string;
+  /**
+   * Routing enable switch (`account.enabled && binding.enabled`).
+   */
+  enabled: boolean;
+  grants: CredentialGrantsDto;
+  /**
+   * Whether a secret is stored. Always false for keyless Zen and CPA.
+   */
+  hasSecret: boolean;
+  /**
+   * Stable credential id (deterministic UUIDv5 of the legacy account).
+   */
+  id: string;
+  /**
+   * Last error string from the legacy account row, or null.
+   */
+  lastError: string | null;
+  /**
+   * The V3 `accounts` row this credential was projected from (migration-era
+   * bridge to the V3 mutation routes).
+   */
+  legacyAccountId: string;
+  /**
+   * Display name.
+   */
+  name: string;
+  /**
+   * Operator notes.
+   */
+  notes: string | null;
+  onboardingTask: DestinationOnboardingTaskDto | null;
+  /**
+   * Purchase date when the destination has a Plan.
+   */
+  purchaseDate: string | null;
+  /**
+   * Shared quota pool id when the credential joined one.
+   */
+  quotaPoolId: string | null;
+  /**
+   * Position in the persisted account order.
+   */
+  routingRank: number;
+  scope: ModelScope;
+}
+/**
+ * Per-window cooldown timestamps on a projected credential.
+ */
+export interface CredentialCooldownsDto {
+  /**
+   * Five-hour window cooldown expiry as RFC 3339, or null.
+   */
+  fiveHourUntil: string | null;
+  /**
+   * Free-window cooldown expiry as RFC 3339, or null.
+   */
+  freeUntil: string | null;
+  /**
+   * Generic cooldown expiry as RFC 3339, or null.
+   */
+  genericUntil: string | null;
+  /**
+   * Monthly window cooldown expiry as RFC 3339, or null.
+   */
+  monthUntil: string | null;
+  /**
+   * Weekly window cooldown expiry as RFC 3339, or null.
+   */
+  weekUntil: string | null;
+}
+/**
+ * Allowed egress grants on a projected credential.
+ */
+export interface CredentialGrantsDto {
+  /**
+   * Endpoint ids this secret may be sent to.
+   */
+  allowedEndpointIds: string[];
+  /**
+   * Origins this secret may be sent to.
+   */
+  allowedOrigins: string[];
+}
+/**
+ * Managed-signup task on a projected credential. Domain shape; no task id.
+ */
+export interface DestinationOnboardingTaskDto {
+  kind: OnboardingTaskKind;
+  state: OnboardingTaskState;
+  /**
+   * Current setup step string.
+   */
+  step: string;
+}
+/**
+ * RFC credential list. Revision-tagged and secret-free.
+ */
+export interface CredentialList {
+  credentials: DestinationCredentialDto[];
+  revision: ControlRevision;
+}
+/**
+ * 409 envelope when `destination_projection` refuses. Same V3 fields plus `details`.
+ */
+export interface DestinationProjectionRefusedError {
+  /**
+   * Stable error code (`destinationProjectionRefused`).
+   */
+  code: string;
+  /**
+   * Live settings revision.
+   */
+  currentRevision: number | null;
+  details: DestinationProjectionRefusalDto[];
+  /**
+   * Human-readable summary.
+   */
+  message: string;
+  /**
+   * Live process generation.
+   */
+  processGeneration: number | null;
+}
+/**
+ * One refused row in a `destinationProjectionRefused` 409.
+ */
+export interface DestinationProjectionRefusalDto {
+  /**
+   * Human-readable mapping error.
+   */
+  detail: string;
+  error: MappingErrorCodeDto;
+  row: RefusedRowDto;
+}
+/**
+ * Identity of one legacy row the stage-4a projection refused.
+ */
+export interface RefusedRowDto {
+  /**
+   * Persisted row id.
+   */
+  id: string;
+  kind: RefusedRowKindDto;
+  /**
+   * Provider id when the refused row is an account.
+   */
+  providerId: string | null;
 }

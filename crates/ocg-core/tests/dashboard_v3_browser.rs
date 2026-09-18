@@ -210,7 +210,7 @@ async fn run_remote_browser_child() {
 
     let origin = format!("http://127.0.0.1:{}", harness.handle.port);
     let display_url = format!(
-        "ws://127.0.0.1:{}/dashboard/api/v3/browser/sessions/{token}/ws",
+        "ws://127.0.0.1:{}/dashboard/api/v4/browser/sessions/{token}/ws",
         harness.handle.port
     );
     let mut request = display_url.into_client_request().unwrap();

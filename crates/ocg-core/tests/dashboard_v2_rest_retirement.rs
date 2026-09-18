@@ -4,7 +4,10 @@
 use ocg_core::crypto::{KeyCipher, StaticKeyCipher};
 use ocg_core::db::Database;
 use ocg_core::gateway;
-use ocg_core::host_router::{DASHBOARD_V2_REMOVED_CODE, DASHBOARD_V2_REMOVED_MESSAGE};
+use ocg_core::host_router::{
+    DASHBOARD_V2_REMOVED_CODE, DASHBOARD_V2_REMOVED_MESSAGE, DASHBOARD_V3_REMOVED_CODE,
+    DASHBOARD_V3_REMOVED_MESSAGE,
+};
 use ocg_core::state::CoreStateInner;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
@@ -41,6 +44,15 @@ fn tombstone_body(body: &Value) {
         &json!({
             "code": DASHBOARD_V2_REMOVED_CODE,
             "message": DASHBOARD_V2_REMOVED_MESSAGE })
+    );
+}
+
+fn v3_tombstone_body(body: &Value) {
+    assert_eq!(
+        body,
+        &json!({
+            "code": DASHBOARD_V3_REMOVED_CODE,
+            "message": DASHBOARD_V3_REMOVED_MESSAGE })
     );
 }
 
@@ -268,7 +280,7 @@ async fn browser_websocket_keeps_independent_error_shape() {
 }
 
 #[tokio::test]
-async fn static_inference_and_v3_families_are_not_captured() {
+async fn static_inference_and_v4_families_are_not_captured() {
     let state = temp_state("excluded");
     let handle = gateway::start_gateway_on(state, SocketAddr::from(([127, 0, 0, 1], 0)))
         .await
@@ -277,25 +289,46 @@ async fn static_inference_and_v3_families_are_not_captured() {
     let port = handle.port;
     let root = format!("http://127.0.0.1:{port}");
 
+    for path in [
+        "/dashboard/api/v3",
+        "/dashboard/api/v3/contract",
+        "/dashboard/api/v3/accounts",
+        "/dashboard/api/v3/settings",
+        "/dashboard/api/v3/auth/status",
+        "/dashboard/api/v3/browser/sessions/opaque-token/ws",
+    ] {
+        let (status, body, text) =
+            json_status(&client, reqwest::Method::GET, format!("{root}{path}"), None).await;
+        assert_eq!(
+            status,
+            StatusCode::GONE,
+            "{path} should be the V3 tombstone, got {status} {text}"
+        );
+        v3_tombstone_body(&body);
+        assert_ne!(body["code"], DASHBOARD_V2_REMOVED_CODE);
+    }
+
     let (status, body, text) = json_status(
         &client,
         reqwest::Method::GET,
-        format!("{root}/dashboard/api/v3/contract"),
+        format!("{root}/dashboard/api/v4/contract"),
         None,
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{text}");
     assert!(body.get("revision").is_some(), "{body}");
     assert_ne!(body["code"], DASHBOARD_V2_REMOVED_CODE);
+    assert_ne!(body["code"], DASHBOARD_V3_REMOVED_CODE);
 
-    let v3_accounts = client
-        .get(format!("{root}/dashboard/api/v3/accounts"))
+    let v4_accounts = client
+        .get(format!("{root}/dashboard/api/v4/account-records"))
         .send()
         .await
         .unwrap();
-    assert_eq!(v3_accounts.status(), StatusCode::OK);
-    let v3_accounts: Value = v3_accounts.json().await.unwrap();
-    assert_ne!(v3_accounts["code"], DASHBOARD_V2_REMOVED_CODE);
+    assert_eq!(v4_accounts.status(), StatusCode::OK);
+    let v4_accounts: Value = v4_accounts.json().await.unwrap();
+    assert_ne!(v4_accounts["code"], DASHBOARD_V2_REMOVED_CODE);
+    assert_ne!(v4_accounts["code"], DASHBOARD_V3_REMOVED_CODE);
 
     for path in [
         "/v1/models",
@@ -313,6 +346,10 @@ async fn static_inference_and_v3_families_are_not_captured() {
             !text.contains(DASHBOARD_V2_REMOVED_CODE),
             "{path} leaked the V2 tombstone: {text}"
         );
+        assert!(
+            !text.contains(DASHBOARD_V3_REMOVED_CODE),
+            "{path} leaked the V3 tombstone: {text}"
+        );
     }
 
     for path in ["/dashboard", "/dashboard/", "/dashboard/assets/app.js"] {
@@ -327,25 +364,44 @@ async fn static_inference_and_v3_families_are_not_captured() {
             !text.contains(DASHBOARD_V2_REMOVED_CODE),
             "{path} leaked the V2 tombstone: {text}"
         );
+        assert!(
+            !text.contains(DASHBOARD_V3_REMOVED_CODE),
+            "{path} leaked the V3 tombstone: {text}"
+        );
     }
 
-    let v3_ws = client
-        .get(format!(
-            "{root}/dashboard/api/v3/browser/sessions/opaque-token/ws"
-        ))
-        .send()
-        .await
-        .unwrap();
-    assert_ne!(
-        v3_ws.status(),
-        StatusCode::GONE,
-        "V3 browser WS must stay outside the nested V2 tombstone"
-    );
-    let v3_ws_text = v3_ws.text().await.unwrap_or_default();
-    assert!(
-        !v3_ws_text.contains(DASHBOARD_V2_REMOVED_CODE),
-        "V3 browser WS leaked the V2 tombstone: {v3_ws_text}"
-    );
+    gateway::stop_gateway(handle);
+}
+
+#[tokio::test]
+async fn anonymous_v3_rest_is_401_before_the_tombstone() {
+    let state = temp_state("v3-public-401");
+    let handle = start_session_protected(state).await;
+    let client = loopback_client();
+    let port = handle.port;
+    let root = format!("http://127.0.0.1:{port}");
+
+    for path in [
+        "/dashboard/api/v3",
+        "/dashboard/api/v3/contract",
+        "/dashboard/api/v3/accounts",
+        "/dashboard/api/v3/settings",
+    ] {
+        let (status, json, text) =
+            json_status(&client, reqwest::Method::GET, format!("{root}{path}"), None).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "{path} must 401 before the V3 tombstone, got {status} {text}"
+        );
+        assert!(
+            text.is_empty(),
+            "anonymous V3 401 must stay an empty body, got {text}"
+        );
+        assert_eq!(json, Value::Null);
+        assert_ne!(json["code"], DASHBOARD_V3_REMOVED_CODE);
+        assert_ne!(json["code"], DASHBOARD_V2_REMOVED_CODE);
+    }
 
     gateway::stop_gateway(handle);
 }

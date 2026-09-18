@@ -62,7 +62,8 @@ pub struct PlatformRefresh {
 fn view(state: &CoreState) -> Result<PlatformAccounts, V3ApiError> {
     let db = state.db.lock();
     Ok(PlatformAccounts {
-        accounts: db.list_platform_accounts().map_err(V3ApiError::internal)?,
+        accounts: crate::destination_projection::list_platform_accounts_for_v3(&db)
+            .map_err(V3ApiError::internal)?,
         links: db.list_platform_links().map_err(V3ApiError::internal)?,
         revision: state.settings_revision(),
         process_generation: state.process_generation(),
