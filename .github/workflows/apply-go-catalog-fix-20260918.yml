@@ -1,17 +1,16 @@
-name: Finish Go catalog source fix (no tests)
+name: Finalize Go catalog patch (no tests)
 
 on:
   push:
     branches: [fix/go-catalog-publication-20260918]
-    paths:
-      - .github/workflows/apply-go-catalog-fix-20260918.yml
+    paths: [.github/workflows/apply-go-catalog-fix-20260918.yml]
 permissions:
   contents: write
 concurrency:
   group: apply-go-catalog-fix-20260918
   cancel-in-progress: false
 jobs:
-  apply:
+  finalize:
     if: github.ref == 'refs/heads/fix/go-catalog-publication-20260918'
     runs-on: ubuntu-22.04
     timeout-minutes: 5
@@ -20,94 +19,46 @@ jobs:
         with:
           fetch-depth: 0
           ref: fix/go-catalog-publication-20260918
-      - name: Complete explicit unknown-protocol selection
-        shell: bash
+      - name: Normalize added template indentation
         run: |
           python3 - <<'PY'
           from pathlib import Path
           import subprocess
-          base = 'c9973ef357a772044a91a71898233b7087ada80e'
+          base = 'b2d045a2a714839a3cb7909c28141243724d5e01'
           assert not subprocess.check_output(['git', 'diff', '--name-only', base, 'HEAD', '--', 'crates', 'src', 'docs'], text=True).strip()
           p = Path('src/components/ProviderModelMatrix.vue')
           text = p.read_text()
-          old = '''              <span v-else class="matrix-protocol-label matrix-protocol-label--muted">
-                          {{ t("无可用协议") }}
-                        </span>'''
-          # Match exact source indentation, not a loosely scoped regex.
-          old = '\n'.join(line[10:] if line.startswith('          ') else line for line in old.splitlines())
-          old = '              <span v-else class="matrix-protocol-label matrix-protocol-label--muted">\n                {{ t("无可用协议") }}\n              </span>'
-          assert text.count(old) == 1
-          text = text.replace(old, '''              <div v-else class="matrix-chips">
-                          <n-popconfirm
-                            v-for="choice in rowUnverifiedProtocols(modelId)"
-                            :key="choice"
-                            :disabled="rowEditLocked(modelId)"
-                            @positive-click="enableUnverifiedProtocol(modelId, choice)"
-                          >
-                            <template #trigger>
-                              <n-button text size="tiny" :disabled="rowEditLocked(modelId)">
-                                {{ t("{protocol}（未验证）", { protocol: protocolDisplayName(choice) }) }}
-                              </n-button>
-                            </template>
-                            {{ t("官方协议资料不可用。确认手动启用 {protocol}？此操作只修改配置，不发送测试请求；后续推理可能失败或产生费用。", { protocol: protocolDisplayName(choice) }) }}
-                          </n-popconfirm>
-                          <span v-if="rowUnverifiedProtocols(modelId).length === 0" class="matrix-protocol-label matrix-protocol-label--muted">
-                            {{ t("无可用协议") }}
-                          </span>
-                        </div>''')
-          marker = 'const modelQuery = ref("");'
-          assert text.count(marker) == 1
-          helpers = '''// Unknown support is not silently guessed. Only an explicit confirmed
-          // operator choice can enable one of the backend-admitted protocol slots.
-          function rowUnverifiedProtocols(modelId: string): ProviderProtocol[] {
-            if (props.scope.scope_kind !== "provider") return [];
-            const model = props.scope.models.find((entry) => entry.model_id === modelId);
-            if (!model || modelAvailableProtocols(model).length > 0) return [];
-            return PROVIDER_PROTOCOLS.filter((protocol) => Boolean(model.protocols[protocol]));
-          }
-
-          function enableUnverifiedProtocol(modelId: string, protocol: ProviderProtocol): void {
-            if (rowEditLocked(modelId) || !rowUnverifiedProtocols(modelId).includes(protocol)) return;
-            emit("update:overrides", {
-              scopeKind: props.scope.scope_kind,
-              scopeId: props.scope.scope_id,
-              overrides: [{ model_id: modelId, protocol, state: "force_on", preferred: true }],
-            });
-          }
-
-          '''
-          text = text.replace(marker, helpers + marker)
-          # Align the added template block with its surrounding table cell.
           start = text.index('              <div v-else class="matrix-chips">')
           end = text.index('\n            </td>', start)
           lines = text[start:end].splitlines()
-          lines = [lines[0]] + [line[10:] if line.startswith('          ') else line for line in lines[1:]]
-          text = text[:start] + '\n'.join(lines) + text[end:]
-          p.write_text(text)
-          p = Path('src/i18n/messages/en-US.ts')
-          text = p.read_text()
-          marker = 'export const enUSMessages = {\n'
-          assert text.count(marker) == 1
-          text = text.replace(marker, marker + '''  "{protocol}（未验证）": "{protocol} (unverified)",
-            "官方协议资料不可用。确认手动启用 {protocol}？此操作只修改配置，不发送测试请求；后续推理可能失败或产生费用。": "Official protocol information is unavailable. Manually enable {protocol}? This only changes configuration and sends no test request. Later inference may fail or incur charges.",
-          ''')
-          p.write_text(text)
-          for path, old, new in [
-              ('docs/user/model-catalog-refresh.md', 'an entirely unknown model is not assumed to support Chat Completions.', 'an entirely unknown model is not assumed to support Chat Completions. For a row without available protocols, choose an unverified protocol and confirm manual enablement; this sends no test request.'),
-              ('docs/user/model-catalog-refresh.zh-CN.md', '完全未知模型不会被假定支持 Chat Completions。', '完全未知模型不会被假定支持 Chat Completions。无可用协议的行会展示未验证的协议选项，选择并确认后手动启用；这个动作不会发送测试请求。'),
-          ]:
-              p = Path(path)
-              text = p.read_text()
-              assert text.count(old) == 1
-              p.write_text(text.replace(old, new))
-          print('Added explicit, confirmed protocol selection; no tests or inference requests.')
+          assert lines[-1] == '    </div>'
+          lines = [lines[0]] + ['          ' + line for line in lines[1:]]
+          p.write_text(text[:start] + '\n'.join(lines) + text[end:])
           PY
-      - name: Check source whitespace and commit without tests
+      - name: Format Rust and check the final patch without building or testing
         shell: bash
         run: |
           set -euo pipefail
-          git diff --check
-          git diff --stat
-          git add -- src docs
-          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'fix: allow explicit unverified protocol selection for discovered models [skip ci]'
-          git push origin HEAD:refs/heads/fix/go-catalog-publication-20260918
+          rustfmt --version
+          git diff --name-only 352dabaa8a682a4661ef38b177713c91543e67cc -- '*.rs' | while IFS= read -r file; do
+            rustfmt --edition 2024 --config skip_children=true "$file"
+          done
+          git add -- crates src docs
+          git rm -- scripts/apply-go-catalog-fix-20260918.py .github/workflows/apply-go-catalog-fix-20260918.yml
+          git diff --cached --check
+          git diff --cached --stat 352dabaa8a682a4661ef38b177713c91543e67cc
+      - name: Publish a clean single-commit repair branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          branch=fix/go-catalog-publication-ready-20260918
+          if [ -n "$(git ls-remote --heads origin "refs/heads/$branch")" ]; then
+            echo 'Delivery branch already exists; refusing to replace it'
+            exit 1
+          fi
+          tree=$(git write-tree)
+          message='fix: decouple Go catalog discovery and preserve protocol configuration [skip ci]'
+          commit=$(printf '%s\n\n%s\n' "$message" 'Keyless catalog refresh, exact Go model publication, runtime UI inventory, explicit unknown-protocol selection, and non-destructive document refresh. Tests and compilation were not run; Rust formatting and whitespace validation only.' | git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit-tree "$tree" -p 352dabaa8a682a4661ef38b177713c91543e67cc)
+          git push origin "$commit:refs/heads/$branch"
+          echo "Delivery commit: $commit"
+          echo "Delivery tree: $tree"
