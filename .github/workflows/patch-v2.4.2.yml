@@ -15,13 +15,39 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  quality:
+  repair:
+    name: Stage fingerprint-locked main repairs
     if: github.repository == 'klarkxy/open-console-gateway' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.stage.outputs.sha }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Validate and stage only the five reviewed repairs
+        id: stage
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 scripts/repair-main-v2.4.2.py --self-test
+          python3 scripts/repair-main-v2.4.2.py --stage
+          git diff --stat
+
+  quality:
+    needs: repair
     uses: ./.github/workflows/quality.yml
+    with:
+      checkout_ref: ${{ needs.repair.outputs.sha }}
 
   prepare:
     name: Prepare versions and start native packages
-    needs: quality
+    needs: [repair, quality]
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     permissions:
@@ -30,7 +56,7 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.repair.outputs.sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -40,6 +66,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$GITHUB_REF" = refs/heads/main
+          test "$(git rev-parse HEAD^)" = "$GITHUB_SHA"
           test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$GITHUB_SHA"
           test "$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)" = v2.4.1
           if git show-ref --verify --quiet refs/tags/v2.4.2; then

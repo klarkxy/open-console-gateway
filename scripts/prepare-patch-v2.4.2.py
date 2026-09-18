@@ -13,6 +13,13 @@ OLD = "2.4.1"
 NEW = "2.4.2"
 ADDED = {
     ".github/workflows/patch-v2.4.2.yml",
+    ".github/workflows/quality.yml",
+    "scripts/repair-main-v2.4.2.py",
+    "crates/ocg-core/src/control/observability.rs",
+    "crates/ocg-gateway/src/alias.rs",
+    "src/domain/provider-aliases.test.ts",
+    "crates/ocg-core/src/provider_contracts/tests.rs",
+    "crates/ocg-core/src/state/tests.rs",
     "scripts/prepare-patch-v2.4.2.py",
     "docs/releases/v2.4.2.md",
     "docs/releases/v2.4.2.zh-CN.md",
