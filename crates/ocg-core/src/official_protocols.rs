@@ -1,8 +1,8 @@
 //! Official-docs protocol baselines for OpenCode Go, Zen Free, and Command Code.
 //!
 //! Catalog refresh fetches the documented pages on that explicit user action.
-//! A failed fetch or a model the document does not list defaults to Chat
-//! Completions. Zen Free reuses the Go endpoint table and looks up the
+//! A failed fetch or omitted model supplies no new protocol evidence.
+//! Existing evidence survives. Zen Free reuses the Go endpoint table and looks up the
 //! paid id (strip `-free`).
 
 use anyhow::{Result, anyhow, bail};
@@ -29,8 +29,8 @@ pub enum OfficialProtocolBaseline {
     Mapped(BTreeMap<String, UpstreamProtocolKind>),
     /// Command Code provider docs state the Anthropic/Chat family split.
     FamilyRule,
-    /// Fetch or parse failed; every model defaults to Chat.
-    FallbackChat,
+    /// Fetch or parse failed; preserve saved evidence instead of guessing a protocol.
+    Unavailable,
 }
 
 impl OfficialProtocolBaseline {
@@ -46,35 +46,48 @@ impl OfficialProtocolBaseline {
         )
     }
 
-    /// `None` keeps a known unsupported id (Command Code `stealth/ox-alpha`)
-    /// from gaining a protocol.
+    /// Only protocols explicitly described by this document are evidence.
     pub fn protocol_for(&self, provider_id: &str, model_id: &str) -> Option<UpstreamProtocolKind> {
-        if provider_id == COMMAND_CODE_PROVIDER_ID
-            && model_id.eq_ignore_ascii_case("stealth/ox-alpha")
+        if model_id.trim().is_empty()
+            || (provider_id == COMMAND_CODE_PROVIDER_ID
+                && model_id.eq_ignore_ascii_case("stealth/ox-alpha"))
         {
             return None;
         }
-        if model_id.trim().is_empty() {
-            return Some(UpstreamProtocolKind::ChatCompletions);
-        }
-        Some(match self {
-            Self::Mapped(map) => lookup_mapped(map, model_id)
-                .or_else(|| {
-                    if provider_id == OPENCODE_ZEN_FREE_PROVIDER_ID {
-                        lookup_mapped(map, &strip_zen_free_suffix(model_id))
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or(UpstreamProtocolKind::ChatCompletions),
+        match self {
+            Self::Mapped(map) => lookup_mapped(map, model_id).or_else(|| {
+                (provider_id == OPENCODE_ZEN_FREE_PROVIDER_ID)
+                    .then(|| lookup_mapped(map, &strip_zen_free_suffix(model_id)))
+                    .flatten()
+            }),
             Self::FamilyRule if provider_id == COMMAND_CODE_PROVIDER_ID => {
-                ocg_domain::protocol::command_code_preferred_format(model_id)
-                    .map(api_to_upstream)
-                    .unwrap_or(UpstreamProtocolKind::ChatCompletions)
+                ocg_domain::protocol::command_code_preferred_format(model_id).map(api_to_upstream)
             }
-            Self::FamilyRule | Self::FallbackChat => UpstreamProtocolKind::ChatCompletions,
-        })
+            Self::FamilyRule | Self::Unavailable => None,
+        }
     }
+}
+
+/// A reviewed per-model offline default, never a model-directory whitelist.
+/// Unknown IDs have no default. A known explicitly unsupported row stays unknown.
+pub(crate) fn known_opencode_default(
+    model_id: &str,
+    zen_free: bool,
+) -> Option<UpstreamProtocolKind> {
+    if model_id.trim().is_empty() || (zen_free && !crate::kernel::ids::is_free_model(model_id)) {
+        return None;
+    }
+    let paid_id = if zen_free {
+        strip_zen_free_suffix(model_id)
+    } else {
+        model_id.to_string()
+    };
+    let profile = crate::kernel::protocol::model_protocol(model_id)
+        .or_else(|| crate::kernel::protocol::model_protocol(&paid_id))?;
+    if profile.supported.is_empty() {
+        return None;
+    }
+    Some(api_to_upstream(profile.preferred))
 }
 
 pub fn uses_official_docs_protocol_baseline(provider_id: &str) -> bool {
@@ -98,14 +111,14 @@ pub async fn fetch_official_protocol_baseline(
         OPENCODE_PROVIDER_ID | OPENCODE_ZEN_FREE_PROVIDER_ID => {
             match fetch_go_official_protocols(config).await {
                 Ok(map) => OfficialProtocolBaseline::Mapped(map),
-                Err(_) => OfficialProtocolBaseline::FallbackChat,
+                Err(_) => OfficialProtocolBaseline::Unavailable,
             }
         }
         COMMAND_CODE_PROVIDER_ID => match fetch_command_code_official_protocols(config).await {
             Ok(baseline) => baseline,
-            Err(_) => OfficialProtocolBaseline::FallbackChat,
+            Err(_) => OfficialProtocolBaseline::Unavailable,
         },
-        _ => OfficialProtocolBaseline::FallbackChat,
+        _ => OfficialProtocolBaseline::Unavailable,
     }
 }
 
@@ -146,7 +159,11 @@ pub fn parse_go_official_protocols(html: &str) -> Result<BTreeMap<String, Upstre
         })
         .ok_or_else(|| anyhow!("OpenCode Go endpoint table was not found"))?;
     let id_index = model_id_column_index(endpoint_table).unwrap_or(1);
-    parse_endpoint_protocol_rows(endpoint_table, id_index)
+    let map = parse_endpoint_protocol_rows(endpoint_table, id_index)?;
+    if map.is_empty() {
+        bail!("OpenCode Go endpoint table contains no recognized protocols");
+    }
+    Ok(map)
 }
 
 pub fn parse_command_code_official_protocols(html: &str) -> Result<OfficialProtocolBaseline> {
@@ -330,11 +347,11 @@ mod official_protocol_fetch {
         OfficialProtocolFetchGuard { process_generation }
     }
 
-    pub fn install_official_protocol_fetch_fallback_chat_for_tests(
+    pub fn install_official_protocol_fetch_unavailable_for_tests(
         process_generation: u64,
     ) -> OfficialProtocolFetchGuard {
         install_official_protocol_fetch_for_tests(process_generation, |_| {
-            OfficialProtocolBaseline::FallbackChat
+            OfficialProtocolBaseline::Unavailable
         })
     }
 
@@ -348,8 +365,8 @@ mod official_protocol_fetch {
 
 #[cfg(debug_assertions)]
 pub use official_protocol_fetch::{
-    OfficialProtocolFetchGuard, install_official_protocol_fetch_fallback_chat_for_tests,
-    install_official_protocol_fetch_for_tests,
+    OfficialProtocolFetchGuard, install_official_protocol_fetch_for_tests,
+    install_official_protocol_fetch_unavailable_for_tests,
 };
 
 #[cfg(test)]

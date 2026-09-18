@@ -124,44 +124,38 @@ pub(crate) fn application_models(
 }
 
 pub(crate) fn application_models_from_snapshot(
-    snapshot: &PricingSnapshot,
+    _snapshot: &PricingSnapshot,
     contracts: Option<&EffectiveContractSet>,
 ) -> Vec<String> {
-    let priced = snapshot
-        .models
-        .iter()
-        .map(|model| model.model_id.as_str())
-        .collect::<HashSet<_>>();
-    alias::routeable_aliases_for(crate::provider::OPENCODE_PROVIDER_ID)
-        .into_iter()
-        .filter(|alias| {
-            application_alias_is_priced(alias, &priced)
-                && contracts.is_none_or(|contracts| go_alias_has_enabled_protocol(alias, contracts))
+    let Some(contracts) = contracts else {
+        return Vec::new();
+    };
+    let Some(scope) = contracts
+        .providers
+        .get(crate::provider::OPENCODE_PROVIDER_ID)
+        .filter(|scope| {
+            scope.catalog.source == crate::provider_contracts::CATALOG_SOURCE_OPENCODE_MODELS
         })
-        .collect()
-}
-
-fn go_alias_has_enabled_protocol(alias: &str, contracts: &EffectiveContractSet) -> bool {
-    match crate::alias::resolve(alias) {
-        Ok(crate::alias::ResolvedModel::Alias { mappings, .. }) => mappings.iter().any(|mapping| {
-            mapping.routeable
-                && mapping.provider_id == crate::provider::OPENCODE_PROVIDER_ID
-                && contracts.mapping_has_enabled_protocol(mapping)
-        }),
-        Ok(crate::alias::ResolvedModel::PinnedRaw { mapping, .. }) => {
-            mapping.routeable
-                && mapping.provider_id == crate::provider::OPENCODE_PROVIDER_ID
-                && contracts.mapping_has_enabled_protocol(&mapping)
-        }
-        Err(_) => false,
-    }
-}
-
-fn application_alias_is_priced(alias: &str, priced: &HashSet<&str>) -> bool {
-    priced.contains(alias)
-        || alias
-            .strip_suffix("-highspeed")
-            .is_some_and(|base| priced.contains(base))
+    else {
+        return Vec::new();
+    };
+    let catalogs = alias::RuntimeCatalogs {
+        go: &scope.catalog.models,
+        ..alias::RuntimeCatalogs::default()
+    };
+    alias::routeable_models_for_with_runtime_catalogs(
+        crate::provider::OPENCODE_PROVIDER_ID,
+        catalogs,
+    )
+    .into_iter()
+    .filter(|name| {
+        alias::resolve_with_runtime_catalogs(name, catalogs).is_ok_and(|resolved| {
+            resolved.routeable_mappings().iter().any(|mapping| {
+                mapping.is_opencode_go() && contracts.mapping_has_enabled_protocol(mapping)
+            })
+        })
+    })
+    .collect()
 }
 
 pub(crate) fn dashboard_summary(

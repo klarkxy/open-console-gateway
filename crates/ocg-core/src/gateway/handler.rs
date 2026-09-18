@@ -174,12 +174,11 @@ pub async fn gemini_model_action(
     }
 }
 
-/// GET /v1/models —authenticated local Alias registry list.
+/// GET /v1/models: authenticated, local public model inventory.
 ///
-/// Returns OpenAI list JSON for routeable code-owned aliases, then eligible
-/// Custom capability IDs, de-duplicated and in deterministic order. Refreshed
-/// built-in catalogs can activate sealed names or add an exact raw pin, but
-/// cannot create arbitrary aliases. It never calls upstream.
+/// Includes curated aliases, exact Go catalog pins, and eligible Custom,
+/// CPA and dynamic names. Protocol and publication switches still apply.
+/// Catalog discovery never creates arbitrary shared aliases. No upstream I/O.
 pub async fn models(
     State(state): State<CoreState>,
     headers: HeaderMap,
@@ -235,7 +234,7 @@ fn published_alias_models_response(state: &CoreState) -> axum::response::Respons
         extra: &extra,
     };
     let unpublished = state.unpublished_public_models();
-    let published = crate::alias::published_routeable_aliases_with_runtime_catalogs(catalogs);
+    let published = crate::alias::published_routeable_models_with_runtime_catalogs(catalogs);
     let mut data: Vec<serde_json::Value> = published
         .iter()
         .filter(|item| {
