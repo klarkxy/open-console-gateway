@@ -1654,6 +1654,201 @@ fn v53_migrates_v52_custom_account_and_drops_leftover_tables() {
     fs::remove_dir_all(dir).unwrap();
 }
 
+fn leftover_custom_account(
+    db: &Database,
+    id: &str,
+    key_cipher: &str,
+    public_model: &str,
+    upstream_model: &str,
+) {
+    let mut custom = account(id);
+    custom.provider_id = CUSTOM_PROVIDER_ID.to_string();
+    custom.enabled = false;
+    custom.credential_kind = CredentialKind::ApiKey;
+    custom.quota_scope = QuotaScope::Key;
+    custom.key_cipher = key_cipher.into();
+    db.create_account_with_contract(
+        &custom,
+        Some(&AccountCustomConfigInput {
+            endpoint_url: "https://old.example/v1/chat/completions".into(),
+            upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+        }),
+        &[AccountModelCapabilityInput {
+            public_model: public_model.into(),
+            upstream_model: upstream_model.into(),
+            protocol: UpstreamProtocolKind::ChatCompletions,
+            source: Some("manual".into()),
+        }],
+    )
+    .unwrap();
+}
+
+fn insert_leftover_capability(
+    db: &Database,
+    account_id: &str,
+    public_model: &str,
+    upstream_model: &str,
+) {
+    db.conn
+        .execute(
+            "INSERT INTO account_model_capabilities (
+                account_id, model_id, upstream_model, protocol, source
+             ) VALUES (?1, ?2, ?3, 'chat_completions', 'manual')",
+            rusqlite::params![account_id, public_model, upstream_model],
+        )
+        .unwrap();
+}
+
+#[test]
+fn v53_keeps_both_keys_models_when_two_linked_keys_share_a_platform() {
+    use crate::platform::{PlatformGroup, PlatformKind};
+    use ocg_domain::destination::destination_id_for_platform_account;
+
+    let dir = temp_data_dir("v53-two-linked-keys");
+    let db = Database::open(dir.clone()).unwrap();
+    leftover_custom_account(&db, "key-a", "cipher-a", "model-x", "up-x");
+    leftover_custom_account(&db, "key-b", "cipher-b", "model-y", "up-y");
+    db.create_platform_account(
+        "parent-shared",
+        PlatformKind::NewApi,
+        "Shared Parent",
+        "https://platform.example/v1",
+        Some("mgmt-cipher"),
+    )
+    .unwrap();
+    db.link_platform_account("key-a", "parent-shared", &PlatformGroup::default())
+        .unwrap();
+    db.link_platform_account("key-b", "parent-shared", &PlatformGroup::default())
+        .unwrap();
+    let dest_id = destination_id_for_platform_account("parent-shared");
+    db.conn
+        .execute_batch(
+            "CREATE TABLE account_model_capabilities (
+                account_id TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                upstream_model TEXT NOT NULL,
+                protocol TEXT NOT NULL,
+                verified_at TEXT,
+                source TEXT NOT NULL DEFAULT 'manual',
+                PRIMARY KEY (account_id, model_id, protocol)
+             );",
+        )
+        .unwrap();
+    insert_leftover_capability(&db, "key-a", "model-x", "up-x");
+    insert_leftover_capability(&db, "key-b", "model-y", "up-y");
+    db.conn
+        .execute(
+            "DELETE FROM destination_models WHERE destination_id = ?1",
+            [&dest_id],
+        )
+        .unwrap();
+    db.conn
+        .execute_batch(
+            "DELETE FROM schema_version;
+             INSERT INTO schema_version(version) VALUES (52);",
+        )
+        .unwrap();
+    drop(db);
+
+    let db = Database::open(dir.clone()).unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), CURRENT_SCHEMA_VERSION);
+    let models: Vec<(String, String)> = db
+        .list_account_model_capabilities("key-a")
+        .unwrap()
+        .into_iter()
+        .map(|row| (row.public_model, row.upstream_model))
+        .collect();
+    assert_eq!(
+        models,
+        vec![
+            ("model-x".into(), "up-x".into()),
+            ("model-y".into(), "up-y".into()),
+        ]
+    );
+    drop(db);
+
+    let db = Database::open(dir.clone()).unwrap();
+    let again: Vec<(String, String)> = db
+        .list_account_model_capabilities("key-b")
+        .unwrap()
+        .into_iter()
+        .map(|row| (row.public_model, row.upstream_model))
+        .collect();
+    assert_eq!(
+        again,
+        vec![
+            ("model-x".into(), "up-x".into()),
+            ("model-y".into(), "up-y".into()),
+        ]
+    );
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn v53_refuses_conflicting_upstream_maps_for_the_same_platform_model() {
+    use crate::platform::{PlatformGroup, PlatformKind};
+    use ocg_domain::destination::destination_id_for_platform_account;
+
+    let dir = temp_data_dir("v53-conflict-models");
+    let db = Database::open(dir.clone()).unwrap();
+    leftover_custom_account(&db, "key-a", "cipher-a", "shared", "up-a");
+    leftover_custom_account(&db, "key-b", "cipher-b", "shared", "up-b");
+    db.create_platform_account(
+        "parent-conflict",
+        PlatformKind::NewApi,
+        "Conflict Parent",
+        "https://platform.example/v1",
+        Some("mgmt-cipher"),
+    )
+    .unwrap();
+    db.link_platform_account("key-a", "parent-conflict", &PlatformGroup::default())
+        .unwrap();
+    db.link_platform_account("key-b", "parent-conflict", &PlatformGroup::default())
+        .unwrap();
+    let dest_id = destination_id_for_platform_account("parent-conflict");
+    db.conn
+        .execute_batch(
+            "CREATE TABLE account_model_capabilities (
+                account_id TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                upstream_model TEXT NOT NULL,
+                protocol TEXT NOT NULL,
+                verified_at TEXT,
+                source TEXT NOT NULL DEFAULT 'manual',
+                PRIMARY KEY (account_id, model_id, protocol)
+             );",
+        )
+        .unwrap();
+    insert_leftover_capability(&db, "key-a", "shared", "up-a");
+    insert_leftover_capability(&db, "key-b", "shared", "up-b");
+    db.conn
+        .execute(
+            "DELETE FROM destination_models WHERE destination_id = ?1",
+            [&dest_id],
+        )
+        .unwrap();
+    db.conn
+        .execute_batch(
+            "DELETE FROM schema_version;
+             INSERT INTO schema_version(version) VALUES (52);",
+        )
+        .unwrap();
+    drop(db);
+
+    match Database::open(dir.clone()) {
+        Ok(_) => panic!("v53 should refuse conflicting upstream maps"),
+        Err(err) => assert!(
+            err.to_string().contains("conflicting upstream")
+                || err
+                    .chain()
+                    .any(|cause| cause.to_string().contains("conflicting upstream")),
+            "{err:#}"
+        ),
+    }
+    fs::remove_dir_all(dir).unwrap();
+}
+
 #[test]
 fn v54_migrates_v53_platform_parent_and_linked_key_then_drops_leftover_tables() {
     use crate::platform::{PlatformGroup, PlatformKind, PlatformSnapshot};
@@ -9240,6 +9435,94 @@ fn create_account_with_contract_is_atomic_on_custom_config_failure() {
     );
     assert!(db.get_account("custom-empty-caps").unwrap().is_none());
 
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn create_account_linked_to_platform_is_atomic_on_link_failure() {
+    use crate::platform::{PlatformGroup, PlatformKind};
+
+    let dir = temp_data_dir("atomic-create-link");
+    let db = Database::open(dir.clone()).unwrap();
+    db.create_platform_account(
+        "parent-atomic",
+        PlatformKind::NewApi,
+        "Atomic Parent",
+        "https://platform.example/v1",
+        Some("mgmt-cipher"),
+    )
+    .unwrap();
+    db.conn
+        .execute_batch(
+            "CREATE TRIGGER fail_platform_link
+                 BEFORE UPDATE ON credentials
+                 WHEN NEW.group_json IS NOT NULL AND OLD.group_json IS NULL
+                 BEGIN
+                     SELECT RAISE(ABORT, 'forced link failure');
+                 END;",
+        )
+        .unwrap();
+
+    let mut custom = account("linked-atomic");
+    custom.provider_id = CUSTOM_PROVIDER_ID.to_string();
+    custom.enabled = false;
+    custom.credential_kind = CredentialKind::ApiKey;
+    custom.quota_scope = QuotaScope::Key;
+    custom.key_cipher = "linked-atomic-cipher".into();
+    let error = db
+        .create_account_with_contract_linked_to_platform(
+            &custom,
+            &AccountCustomConfigInput {
+                endpoint_url: "https://platform.example/v1/chat/completions".into(),
+                upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+            },
+            &[AccountModelCapabilityInput {
+                public_model: "org/model".into(),
+                upstream_model: "org/model".into(),
+                protocol: UpstreamProtocolKind::ChatCompletions,
+                source: Some("discovery".into()),
+            }],
+            "parent-atomic",
+            &PlatformGroup::default(),
+        )
+        .expect_err("forced link failure should abort the create");
+    assert!(error.to_string().contains("forced link failure"), "{error}");
+    assert!(db.get_account("linked-atomic").unwrap().is_none());
+    assert!(
+        db.list_platform_links()
+            .unwrap()
+            .into_iter()
+            .all(|link| link.account_id != "linked-atomic")
+    );
+
+    db.conn
+        .execute_batch("DROP TRIGGER fail_platform_link;")
+        .unwrap();
+    db.create_account_with_contract_linked_to_platform(
+        &custom,
+        &AccountCustomConfigInput {
+            endpoint_url: "https://platform.example/v1/chat/completions".into(),
+            upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+        },
+        &[AccountModelCapabilityInput {
+            public_model: "org/model".into(),
+            upstream_model: "org/model".into(),
+            protocol: UpstreamProtocolKind::ChatCompletions,
+            source: Some("discovery".into()),
+        }],
+        "parent-atomic",
+        &PlatformGroup::default(),
+    )
+    .unwrap();
+    assert!(db.get_account("linked-atomic").unwrap().is_some());
+    assert!(
+        db.list_platform_links()
+            .unwrap()
+            .into_iter()
+            .any(|link| link.account_id == "linked-atomic"
+                && link.platform_account_id == "parent-atomic")
+    );
     drop(db);
     fs::remove_dir_all(dir).unwrap();
 }

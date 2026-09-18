@@ -3983,10 +3983,10 @@ async fn dsh_application_install_resolves_the_selected_key_only_inside_the_host(
 async fn new_api_import_keys_creates_local_custom_keys_without_echoing_secrets() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
-    let app = axum::Router::new().fallback(|uri: axum::http::Uri| async move {
+    let app = axum::Router::new().fallback(|method: Method, uri: axum::http::Uri| async move {
         use axum::response::IntoResponse;
         let path = uri.path();
-        let body = if path == "/api/token" || path == "/api/token/" {
+        let body = if (path == "/api/token" || path == "/api/token/") && method == Method::GET {
             json!({
                 "success": true,
                 "data": {
@@ -3997,12 +3997,14 @@ async fn new_api_import_keys_creates_local_custom_keys_without_echoing_secrets()
                     "total": 2
                 }
             })
-        } else if path == "/api/token/7/key" {
+        } else if path == "/api/token/7/key" && method == Method::POST {
             json!({"success": true, "data": {"key": "sk-import-live-secret"}})
-        } else if path == "/api/token/8/key" {
+        } else if path == "/api/token/8/key" && method == Method::POST {
             json!({"success": true, "data": {"key": "sk-disabled-secret"}})
-        } else if path == "/v1/models" {
+        } else if path == "/v1/models" && method == Method::GET {
             json!({"object": "list", "data": [{"id": "imported-model"}]})
+        } else if path == "/api/token/7/key" || path == "/api/token/8/key" {
+            return axum::http::StatusCode::METHOD_NOT_ALLOWED.into_response();
         } else {
             return axum::http::StatusCode::NOT_FOUND.into_response();
         };
@@ -4059,6 +4061,97 @@ async fn new_api_import_keys_creates_local_custom_keys_without_echoing_secrets()
     let (status, listed) = send_v3(&harness, Method::GET, "/platform-accounts", &Value::Null).await;
     assert_eq!(status, StatusCode::OK, "{listed}");
     assert_eq!(listed["links"].as_array().unwrap().len(), 1, "{listed}");
+    harness.stop();
+    server.abort();
+}
+
+#[tokio::test]
+async fn new_api_import_keys_conflicts_when_revision_changes_during_upstream() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let mut started_tx = Some(started_tx);
+        let mut release_rx = Some(release_rx);
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            let mut buf = vec![0_u8; 8192];
+            let n = stream.read(&mut buf).await.unwrap_or(0);
+            let head = String::from_utf8_lossy(&buf[..n]);
+            let line = head.lines().next().unwrap_or_default();
+            let token_list = line.starts_with("GET /api/token");
+            let body = if token_list {
+                if let Some(tx) = started_tx.take() {
+                    let _ = tx.send(());
+                }
+                if let Some(rx) = release_rx.take() {
+                    let _ = rx.await;
+                }
+                r#"{"success":true,"data":{"items":[{"id":7,"name":"Codex","status":1}],"total":1}}"#
+            } else if line.starts_with("POST /api/token/7/key") {
+                r#"{"success":true,"data":{"key":"sk-stale-import"}}"#
+            } else if line.starts_with("GET /v1/models") {
+                r#"{"object":"list","data":[{"id":"imported-model"}]}"#
+            } else {
+                r#"{"success":false}"#
+            };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+        }
+    });
+    let harness = start_loopback("platform-import-cas").await;
+    let (status, parent) = send_v3(
+        &harness,
+        Method::POST,
+        "/platform-accounts",
+        &cas(
+            &harness,
+            json!({
+                "kind": "new_api",
+                "name": "CAS Site",
+                "baseUrl": origin,
+                "userCredential": "9:pat-import-secret"
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{parent}");
+    let id = parent["accounts"][0]["id"].as_str().unwrap().to_string();
+    let (status, imported) = {
+        let import_path = format!("/platform-accounts/{id}/import-keys");
+        let import_body = cas(&harness, json!({}));
+        let import_fut = send_v4(&harness, Method::POST, &import_path, &import_body);
+        tokio::pin!(import_fut);
+        tokio::select! {
+            biased;
+            started = started_rx => started.unwrap(),
+            unexpected = &mut import_fut => {
+                panic!("import finished before the token list was gated: {unexpected:?}");
+            }
+        }
+        let (status, updated) = send_v3(
+            &harness,
+            Method::PUT,
+            &format!("/platform-accounts/{id}"),
+            &cas(&harness, json!({"name": "Renamed Site"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{updated}");
+        let _ = release_tx.send(());
+        import_fut.await
+    };
+    assert_eq!(status, StatusCode::CONFLICT, "{imported}");
+    let (status, listed) = send_v3(&harness, Method::GET, "/platform-accounts", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    assert_eq!(listed["links"].as_array().unwrap().len(), 0, "{listed}");
     harness.stop();
     server.abort();
 }

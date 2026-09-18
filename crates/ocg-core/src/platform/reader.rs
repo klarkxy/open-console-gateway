@@ -161,6 +161,50 @@ pub(crate) async fn get_json_query(
     new_api_user: Option<&str>,
     query: &[(&str, &str)],
 ) -> Result<Fetched, String> {
+    request_json(
+        client,
+        reqwest::Method::GET,
+        base,
+        path,
+        component,
+        auth,
+        new_api_user,
+        query,
+    )
+    .await
+}
+
+pub(crate) async fn post_json(
+    client: &reqwest::Client,
+    base: &reqwest::Url,
+    path: &str,
+    component: &str,
+    auth: Option<&str>,
+    new_api_user: Option<&str>,
+) -> Result<Fetched, String> {
+    request_json(
+        client,
+        reqwest::Method::POST,
+        base,
+        path,
+        component,
+        auth,
+        new_api_user,
+        &[],
+    )
+    .await
+}
+
+async fn request_json(
+    client: &reqwest::Client,
+    method: reqwest::Method,
+    base: &reqwest::Url,
+    path: &str,
+    component: &str,
+    auth: Option<&str>,
+    new_api_user: Option<&str>,
+    query: &[(&str, &str)],
+) -> Result<Fetched, String> {
     let mut url = join_inference_endpoint(base.as_str(), path)
         .map_err(|_| component_error(component, CODE_ENDPOINT))?;
     if !query.is_empty() {
@@ -174,7 +218,7 @@ pub(crate) async fn get_json_query(
     }
 
     let mut builder = client
-        .get(url.clone())
+        .request(method, url.clone())
         .header(reqwest::header::ACCEPT, "application/json")
         .timeout(REQUEST_TIMEOUT);
     if let Some(token) = auth {

@@ -215,6 +215,33 @@ test("destinations store: a 409 refusal populates refusals and keeps the previou
   });
 });
 
+test("destinations store: mismatched snapshot revisions retry until they agree", async () => {
+  setActivePinia(createPinia());
+  useControlPlaneStore();
+  const calls = installDeferredFetch();
+  const store = useDestinationsStore();
+
+  const pending = store.load();
+  await waitForCalls(calls, 2);
+  const firstDest = calls.slice(0, 2).find((call) => call.url.endsWith("/destinations"));
+  const firstCred = calls.slice(0, 2).find((call) => call.url.endsWith("/credentials"));
+  assert.ok(firstDest && firstCred);
+  firstDest.resolve(destListBody("dest-old", "acc-old", 4));
+  firstCred.resolve(credListBody("dest-new", "acc-new", 5));
+
+  await waitForCalls(calls, 4);
+  assert.equal(store.loaded, false);
+  assert.equal(store.destinations.length, 0);
+  resolvePair(calls, 2, "dest-ok", "acc-ok", 5);
+  await pending;
+
+  assert.equal(store.destinations[0]?.id, "dest-ok");
+  assert.equal(store.credentials[0]?.legacy_account_id, "acc-ok");
+  assert.deepEqual(store.expectation, { expectedRevision: 5, processGeneration: 99 });
+  assert.equal(store.loaded, true);
+  assert.equal(store.loading, false);
+});
+
 test("destinations store: clear() empties state and loaded is false", async () => {
   setActivePinia(createPinia());
   useControlPlaneStore();

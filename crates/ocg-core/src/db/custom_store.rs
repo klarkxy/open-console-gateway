@@ -138,7 +138,10 @@ fn backfill_destination_models_from_leftover(
         .collect::<rusqlite::Result<Vec<_>>>()?;
     drop(stmt);
 
-    let mut by_account: HashMap<String, Vec<AccountModelCapabilityInput>> = HashMap::new();
+    // Aggregate by destination so two Keys on one platform parent write one
+    // catalog. HashMap iteration must not decide which Key wins.
+    let mut dest_order: Vec<String> = Vec::new();
+    let mut by_destination: HashMap<String, Vec<AccountModelCapabilityInput>> = HashMap::new();
     for (account_id, public_model, upstream_model, protocol_value, source) in rows {
         let provider = credential_provider_id(conn, &account_id)?;
         if provider.as_deref() != Some(CUSTOM_PROVIDER_ID) {
@@ -149,8 +152,26 @@ fn backfill_destination_models_from_leftover(
                 "v53 refuses leftover capability `{account_id}` / `{public_model}`: unknown protocol `{protocol_value}`"
             )
         })?;
-        by_account
-            .entry(account_id)
+        let dest_id = if linked.contains(&account_id) {
+            let Some(parent_id) = platform_parent_id(conn, &account_id)? else {
+                anyhow::bail!(
+                    "v53 refuses leftover linked capability `{account_id}`: platform_links row missing"
+                );
+            };
+            destination_id_for_platform_account(&parent_id)
+        } else {
+            let dest_id = destination_id_for_custom_account(&account_id);
+            anyhow::ensure!(
+                destination_exists(conn, &dest_id)?,
+                "v53 refuses leftover capability `{account_id}`: Custom destination is missing"
+            );
+            dest_id
+        };
+        if !by_destination.contains_key(&dest_id) {
+            dest_order.push(dest_id.clone());
+        }
+        by_destination
+            .entry(dest_id)
             .or_default()
             .push(AccountModelCapabilityInput {
                 public_model,
@@ -160,28 +181,47 @@ fn backfill_destination_models_from_leftover(
             });
     }
 
-    for (account_id, capabilities) in by_account {
-        if linked.contains(&account_id) {
-            let Some(parent_id) = platform_parent_id(conn, &account_id)? else {
-                anyhow::bail!(
-                    "v53 refuses leftover linked capability `{account_id}`: platform_links row missing"
-                );
-            };
-            replace_destination_models(
-                conn,
-                &destination_id_for_platform_account(&parent_id),
-                &capabilities,
-            )?;
-            continue;
-        }
-        let dest_id = destination_id_for_custom_account(&account_id);
-        anyhow::ensure!(
-            destination_exists(conn, &dest_id)?,
-            "v53 refuses leftover capability `{account_id}`: Custom destination is missing"
-        );
-        replace_destination_models(conn, &dest_id, &capabilities)?;
+    for dest_id in dest_order {
+        let capabilities = by_destination
+            .remove(&dest_id)
+            .expect("destination order tracks aggregated leftovers");
+        let merged = merge_leftover_destination_models(&dest_id, capabilities)?;
+        replace_destination_models(conn, &dest_id, &merged)?;
     }
     Ok(())
+}
+
+/// Union leftover Key catalogs that share a destination. Identical rows
+/// collapse; the same public model with a different upstream mapping is a
+/// hard refusal so upgrade does not pick a winner by walk order.
+fn merge_leftover_destination_models(
+    destination_id: &str,
+    capabilities: Vec<AccountModelCapabilityInput>,
+) -> Result<Vec<AccountModelCapabilityInput>> {
+    let mut merged: Vec<AccountModelCapabilityInput> = Vec::new();
+    for capability in capabilities {
+        if let Some(existing) = merged.iter().find(|row| {
+            row.public_model
+                .eq_ignore_ascii_case(&capability.public_model)
+        }) {
+            anyhow::ensure!(
+                existing
+                    .upstream_model
+                    .eq_ignore_ascii_case(&capability.upstream_model),
+                "v53 refuses leftover capability for `{destination_id}`: `{}` maps to conflicting upstream models",
+                capability.public_model
+            );
+        }
+        if merged.iter().any(|row| {
+            row.public_model
+                .eq_ignore_ascii_case(&capability.public_model)
+                && row.protocol == capability.protocol
+        }) {
+            continue;
+        }
+        merged.push(capability);
+    }
+    Ok(merged)
 }
 
 pub(crate) fn persist_custom_config_on(

@@ -51,6 +51,16 @@ function refusalsFromError(error: DashboardRequestError): DestinationProjectionR
     .filter((row): row is DestinationProjectionRefusal => row !== null);
 }
 
+const SNAPSHOT_CONSISTENCY_ATTEMPTS = 3;
+
+function sameControlExpectation(
+  left: MutationExpectation,
+  right: MutationExpectation,
+): boolean {
+  return left.expectedRevision === right.expectedRevision
+    && left.processGeneration === right.processGeneration;
+}
+
 /**
  * Single owner of the V4 destination / credential projection. Views never
  * group from platform links; a pending load can never clobber a newer
@@ -83,11 +93,26 @@ export const useDestinationsStore = defineStore("destinations", () => {
     const generation = ++loadGeneration;
     loading.value = true;
     try {
-      const [destinationSnapshot, credentialSnapshot] = await Promise.all([
-        destinationsApi.listSnapshot(),
-        credentialsApi.listSnapshot(),
-      ]);
+      let destinationSnapshot: Awaited<ReturnType<typeof destinationsApi.listSnapshot>> | undefined;
+      let credentialSnapshot: Awaited<ReturnType<typeof credentialsApi.listSnapshot>> | undefined;
+      for (let attempt = 0; attempt < SNAPSHOT_CONSISTENCY_ATTEMPTS; attempt++) {
+        const pair = await Promise.all([
+          destinationsApi.listSnapshot(),
+          credentialsApi.listSnapshot(),
+        ]);
+        if (generation !== loadGeneration) return;
+        destinationSnapshot = pair[0];
+        credentialSnapshot = pair[1];
+        if (sameControlExpectation(destinationSnapshot.expectation, credentialSnapshot.expectation)) {
+          break;
+        }
+        destinationSnapshot = undefined;
+        credentialSnapshot = undefined;
+      }
       if (generation !== loadGeneration) return;
+      if (!destinationSnapshot || !credentialSnapshot) {
+        throw new Error("destination credential snapshot mismatch");
+      }
       destinations.value = destinationSnapshot.destinations;
       credentials.value = credentialSnapshot.credentials;
       expectation.value = destinationSnapshot.expectation;

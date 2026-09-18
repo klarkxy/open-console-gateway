@@ -6436,6 +6436,48 @@ impl Database {
         Ok(())
     }
 
+    /// Persist a Custom Key and attach it to a platform parent in one SQLite
+    /// transaction. A link failure rolls back the account so import cannot
+    /// leave an unlinked orphan.
+    pub fn create_account_with_contract_linked_to_platform(
+        &self,
+        account: &Account,
+        custom_config: &AccountCustomConfigInput,
+        capabilities: &[AccountModelCapabilityInput],
+        parent_id: &str,
+        group: &crate::platform::PlatformGroup,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            account.id != ZEN_FREE_ACCOUNT_ID,
+            "Zen Free is database-owned and cannot be created through the generic account API"
+        );
+        ensure_account_provider_binding(self, account)?;
+        let plan = builtin_provider(&account.provider_id)
+            .ok_or_else(|| anyhow::anyhow!("unknown provider offering"))?;
+        anyhow::ensure!(
+            plan_requires_custom_config(plan),
+            "only Custom API accounts can be linked to a platform parent"
+        );
+        anyhow::ensure!(
+            !capabilities.is_empty(),
+            "Custom API accounts require at least one model capability"
+        );
+        let purchase_date = if account.purchase_date.trim().is_empty() {
+            local_today()
+        } else {
+            normalize_purchase_date(&account.purchase_date)?
+        };
+        let verification_status = default_verification_status(plan);
+        let tx = self.conn.unchecked_transaction()?;
+        insert_account_row(&tx, account, &purchase_date, verification_status)?;
+        persist_account_custom_config_on(&tx, &account.id, custom_config)?;
+        persist_account_model_capabilities_on(&tx, &account.id, capabilities)?;
+        platform::apply_platform_link_on(&tx, &account.id, parent_id, group)?;
+        self.refresh_destination_shadow()?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn list_dynamic_providers(&self) -> Result<Vec<DynamicProviderRuntime>> {
         list_dynamic_providers_on(&self.conn)
     }

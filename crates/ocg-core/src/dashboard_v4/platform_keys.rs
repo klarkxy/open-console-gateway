@@ -31,7 +31,7 @@ pub(super) async fn import_keys(
     body: Bytes,
 ) -> Result<Json<PlatformKeyImportResult>, V3ApiError> {
     let input = parse_mutation_json::<PlatformKeyImportRequest>(&body)?;
-    let (base_url, credential) = {
+    let (base_url, credential, captured_version) = {
         let _lock = state.settings_update.lock();
         check_expectation(&state, &input.expectation)?;
         let db = state.db.lock();
@@ -58,7 +58,7 @@ pub(super) async fn import_keys(
                 "user credential required",
             ));
         };
-        (parent.base_url, credential)
+        (parent.base_url, credential, parent.version)
     };
 
     let hosted = hosted_endpoint(&base_url)
@@ -115,17 +115,32 @@ pub(super) async fn import_keys(
 
     {
         let _lock = state.settings_update.lock();
-        if state
-            .db
-            .lock()
-            .platform_account(&id)
-            .map_err(V3ApiError::internal)?
-            .is_none()
+        check_expectation(&state, &input.expectation)?;
         {
-            return Err(V3ApiError::not_found_at(
-                &state,
-                "platform account not found",
-            ));
+            let db = state.db.lock();
+            let parent = db
+                .platform_account(&id)
+                .map_err(V3ApiError::internal)?
+                .ok_or_else(|| V3ApiError::not_found_at(&state, "platform account not found"))?;
+            if parent.kind != PlatformKind::NewApi {
+                return Err(V3ApiError::invalid_request_at(
+                    &state,
+                    "key import is only available for New API",
+                ));
+            }
+            if parent.version != captured_version {
+                return Err(V3ApiError::revision_conflict(&state));
+            }
+            let credential_present = db
+                .platform_credential_cipher(&id)
+                .map_err(V3ApiError::internal)?
+                .is_some_and(|cipher| !cipher.trim().is_empty());
+            if !credential_present {
+                return Err(V3ApiError::invalid_request_at(
+                    &state,
+                    "user credential required",
+                ));
+            }
         }
         let mut existing_keys = local_custom_keys(&state)?;
         for (name, key, capabilities) in pending {
@@ -167,24 +182,18 @@ pub(super) async fn import_keys(
             };
             {
                 let db = state.db.lock();
-                if let Err(error) = db.create_account_with_contract_and_billing(
+                if let Err(error) = db.create_account_with_contract_linked_to_platform(
                     &account,
-                    Some(&custom_config),
+                    &custom_config,
                     &capabilities,
-                    None,
+                    &id,
+                    &PlatformGroup::default(),
                 ) {
                     if error.to_string().contains("duplicate") {
                         skipped_existing += 1;
                     } else {
                         failed.push((account.name, "create".to_string()));
                     }
-                    continue;
-                }
-                if db
-                    .link_platform_account(&account_id, &id, &PlatformGroup::default())
-                    .is_err()
-                {
-                    failed.push((account.name, "link".to_string()));
                     continue;
                 }
             }

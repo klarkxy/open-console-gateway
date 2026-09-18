@@ -139,6 +139,13 @@ test("moving a Key inside a group keeps the surrounding order", () => {
   assert.equal(moveWithinGroup(["go", "k1", "k2"], ["k1", "k2"], "k1", -1), null);
 });
 
+test("moving a Key inside an interleaved group keeps other destinations in place", () => {
+  assert.deepEqual(
+    moveWithinGroup(["a1", "b1", "a2"], ["a1", "a2"], "a2", -1),
+    ["a2", "b1", "a1"],
+  );
+});
+
 test("single-account groups follow max_credentials and platform-parent rules", () => {
   const custom = {
     destination: destination("custom", {

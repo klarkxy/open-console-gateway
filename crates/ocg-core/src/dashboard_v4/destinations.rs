@@ -56,9 +56,9 @@ impl IntoResponse for DestinationsError {
 pub(super) async fn list_destinations(
     State(state): State<CoreState>,
 ) -> Result<Json<DestinationList>, DestinationsError> {
-    let projection = load_projection(&state)?;
+    let (projection, revision) = load_projection(&state)?;
     Ok(Json(DestinationList {
-        revision: ControlRevision::from_state(&state),
+        revision,
         destinations: projection
             .destinations
             .iter()
@@ -70,9 +70,9 @@ pub(super) async fn list_destinations(
 pub(super) async fn list_credentials(
     State(state): State<CoreState>,
 ) -> Result<Json<CredentialList>, DestinationsError> {
-    let projection = load_projection(&state)?;
+    let (projection, revision) = load_projection(&state)?;
     Ok(Json(CredentialList {
-        revision: ControlRevision::from_state(&state),
+        revision,
         credentials: projection
             .credentials
             .iter()
@@ -83,14 +83,20 @@ pub(super) async fn list_credentials(
 
 fn load_projection(
     state: &CoreState,
-) -> Result<crate::destination_projection::DestinationProjection, DestinationsError> {
+) -> Result<
+    (
+        crate::destination_projection::DestinationProjection,
+        ControlRevision,
+    ),
+    DestinationsError,
+> {
     let _settings_update = state.settings_update.lock();
     let result = {
         let db = state.db.lock();
         read_v4_projection(&db).map_err(V3ApiError::internal)?
     };
     match result {
-        Ok(projection) => Ok(projection),
+        Ok(projection) => Ok((projection, ControlRevision::from_state(state))),
         Err(refusals) => Err(DestinationsError::Refused(projection_refused(
             state, &refusals,
         ))),

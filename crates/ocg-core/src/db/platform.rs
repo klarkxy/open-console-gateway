@@ -847,6 +847,63 @@ fn link_version_on(conn: &Connection, account_id: &str, parent_id: &str) -> Resu
     )?)
 }
 
+pub(crate) fn apply_platform_link_on(
+    conn: &Connection,
+    account_id: &str,
+    parent_id: &str,
+    group: &PlatformGroup,
+) -> Result<()> {
+    let account = account_store::get_account_on(conn, account_id)?.context("account not found")?;
+    anyhow::ensure!(
+        is_custom_api(&account.provider_id),
+        "only Custom API Keys can be linked"
+    );
+    let parent = platform_account_on(conn, parent_id)?.context("platform account not found")?;
+    let custom = custom_store::account_custom_config_on(conn, account_id)?
+        .context("Custom configuration missing")?;
+    let endpoint_url = crate::platform::hosted_endpoint(&parent.base_url)?;
+    let mut group = group.clone();
+    group.verified = false;
+    group.subscription_type = None;
+    anyhow::ensure!(
+        group
+            .id
+            .as_ref()
+            .is_none_or(|v| v.len() <= 200 && !v.chars().any(char::is_control))
+            && group
+                .platform
+                .as_ref()
+                .is_none_or(|v| v.len() <= 64 && !v.chars().any(char::is_control))
+            && group.auto_groups.len() <= 50
+            && group
+                .auto_groups
+                .iter()
+                .all(|v| v.len() <= 200 && !v.chars().any(char::is_control)),
+        "invalid group identity"
+    );
+    persist_account_custom_config_on(
+        conn,
+        account_id,
+        &AccountCustomConfigInput {
+            endpoint_url,
+            upstream_protocol: custom.upstream_protocol,
+        },
+    )?;
+    set_link_on(conn, account_id, parent_id, &group, None)?;
+    custom_store::merge_custom_models_onto_platform_parent(conn, account_id, parent_id)?;
+    identity::update_account_identity_declaration(
+        conn,
+        account_id,
+        Some(&ocg_domain::credential::DeclaredPlatformRelation {
+            platform_account_id: parent_id.to_string(),
+            group: identity::platform_group_label(&group),
+            parent_base_url: parent.base_url,
+        }),
+        Utc::now(),
+    )?;
+    Ok(())
+}
+
 fn set_link_on(
     conn: &Connection,
     account_id: &str,
@@ -1466,58 +1523,8 @@ impl Database {
         parent_id: &str,
         group: &PlatformGroup,
     ) -> Result<()> {
-        let account = self.get_account(account_id)?.context("account not found")?;
-        anyhow::ensure!(
-            is_custom_api(&account.provider_id),
-            "only Custom API Keys can be linked"
-        );
-        let parent = self
-            .platform_account(parent_id)?
-            .context("platform account not found")?;
-        let custom = self
-            .account_custom_config(account_id)?
-            .context("Custom configuration missing")?;
-        let endpoint_url = crate::platform::hosted_endpoint(&parent.base_url)?;
-        let mut group = group.clone();
-        group.verified = false;
-        group.subscription_type = None;
-        anyhow::ensure!(
-            group
-                .id
-                .as_ref()
-                .is_none_or(|v| v.len() <= 200 && !v.chars().any(char::is_control))
-                && group
-                    .platform
-                    .as_ref()
-                    .is_none_or(|v| v.len() <= 64 && !v.chars().any(char::is_control))
-                && group.auto_groups.len() <= 50
-                && group
-                    .auto_groups
-                    .iter()
-                    .all(|v| v.len() <= 200 && !v.chars().any(char::is_control)),
-            "invalid group identity"
-        );
         let tx = self.conn.unchecked_transaction()?;
-        persist_account_custom_config_on(
-            &tx,
-            account_id,
-            &AccountCustomConfigInput {
-                endpoint_url,
-                upstream_protocol: custom.upstream_protocol,
-            },
-        )?;
-        set_link_on(&tx, account_id, parent_id, &group, None)?;
-        custom_store::merge_custom_models_onto_platform_parent(&tx, account_id, parent_id)?;
-        identity::update_account_identity_declaration(
-            &tx,
-            account_id,
-            Some(&ocg_domain::credential::DeclaredPlatformRelation {
-                platform_account_id: parent_id.to_string(),
-                group: identity::platform_group_label(&group),
-                parent_base_url: parent.base_url,
-            }),
-            Utc::now(),
-        )?;
+        apply_platform_link_on(&tx, account_id, parent_id, group)?;
         self.refresh_destination_shadow()?;
         tx.commit()?;
         Ok(())

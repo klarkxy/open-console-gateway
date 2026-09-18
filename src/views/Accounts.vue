@@ -1198,10 +1198,14 @@ async function moveWithinDisplayedGroup(accountId: string, delta: number): Promi
 }
 
 async function retryDestinations(): Promise<void> {
+  await refreshDestinationProjection();
+}
+
+async function refreshDestinationProjection(): Promise<void> {
   try {
     await destinationsStore.load();
   } catch {
-    // The alert already reflects refusals / error on the store.
+    // A projection refusal must not hide the account mutation result.
   }
 }
 
@@ -1355,6 +1359,7 @@ async function createManagedAccount(): Promise<void> {
       ...(username ? { username } : {}),
     });
     addAccount(created);
+    await refreshDestinationProjection();
     void providersStore.loadConnections().catch(() => undefined);
     showManagedCreate.value = false;
     managedWizardAccountId.value = created.id;
@@ -1654,6 +1659,7 @@ async function onFormSave(payload: AccountInput | AccountFormPayload) {
     try {
       const created = await dashboardApi.createAccount(input);
       addAccount(created);
+      await refreshDestinationProjection();
       void providersStore.loadConnections().catch(() => undefined);
       message.success(t("账号已添加"));
       await refreshCatalogIfNewProvider(created);
@@ -1852,6 +1858,7 @@ async function deleteAccount(id: string) {
     await dashboardApi.deleteAccount(id);
     message.success(t("账号已删除"));
     removeAccountState(id);
+    await refreshDestinationProjection();
     void providersStore.loadConnections().catch(() => undefined);
   } catch (e) {
     if (await recoverAccountMutationConflict(e)) return;

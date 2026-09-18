@@ -1,12 +1,12 @@
 //! Pull New API inference tokens into local Custom Keys.
 //!
 //! Lists `GET /api/token/` then reads each full secret from
-//! `GET /api/token/{id}/key`. List rows are masked; the plaintext never
+//! `POST /api/token/{id}/key`. List rows are masked; the plaintext never
 //! leaves this module except as an encrypted local Key.
 
 use serde_json::Value;
 
-use super::reader::{get_json_query, new_api_data, split_new_api_user_credential};
+use super::reader::{get_json_query, new_api_data, post_json, split_new_api_user_credential};
 
 const MAX_IMPORT_KEYS: usize = 50;
 const PAGE_SIZE: &str = "50";
@@ -164,14 +164,13 @@ pub(crate) async fn fetch_full_key(
 ) -> Result<String, String> {
     let (new_api_user, bearer) = split_new_api_user_credential(user_credential);
     let path = format!("api/token/{token_id}/key");
-    let fetched = get_json_query(
+    let fetched = post_json(
         client,
         base,
         &path,
         "new_api.token_key",
         Some(bearer),
         new_api_user,
-        &[],
     )
     .await?;
     let data = new_api_data(&fetched.value, "new_api.token_key")?;
@@ -243,5 +242,54 @@ mod tests {
             Some("sk-plain")
         );
         assert_eq!(parse_full_key(&json!({"key": ""})), None);
+    }
+
+    #[tokio::test]
+    async fn fetch_full_key_uses_post_and_ignores_get() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("loopback listener");
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut buf = vec![0_u8; 8192];
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]);
+                let line = head.lines().next().unwrap_or_default();
+                let allowed = line.starts_with("POST /api/token/7/key");
+                let body = if allowed {
+                    r#"{"success":true,"data":{"key":"sk-live"}}"#
+                } else {
+                    r#"{"success":false}"#
+                };
+                let status = if allowed {
+                    "200 OK"
+                } else {
+                    "405 Method Not Allowed"
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            }
+        });
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let origin = reqwest::Url::parse(&format!("http://{addr}")).unwrap();
+        let key = fetch_full_key(&client, &origin, "9:pat-secret", "7")
+            .await
+            .expect("POST /api/token/{{id}}/key must succeed");
+        assert_eq!(key, "sk-live");
+        let get_url = origin.join("api/token/7/key").unwrap();
+        let get_status = client.get(get_url).send().await.unwrap().status();
+        assert_eq!(get_status, reqwest::StatusCode::METHOD_NOT_ALLOWED);
     }
 }

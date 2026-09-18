@@ -89,18 +89,14 @@ export function moveWithinGroup(
   const [moved] = nextKeys.splice(from, 1);
   nextKeys.splice(to, 0, moved);
   const keySet = new Set(groupAccountIds);
-  const result: string[] = [];
-  let inserted = false;
-  for (const id of accountIds) {
-    if (!keySet.has(id)) {
-      result.push(id);
-      continue;
-    }
-    if (!inserted) {
-      result.push(...nextKeys);
-      inserted = true;
-    }
+  const result = [...accountIds];
+  let next = 0;
+  for (let index = 0; index < result.length; index++) {
+    if (!keySet.has(result[index])) continue;
+    result[index] = nextKeys[next];
+    next += 1;
   }
+  if (next !== nextKeys.length) return null;
   return result;
 }
 
