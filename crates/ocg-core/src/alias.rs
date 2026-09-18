@@ -12,6 +12,8 @@ pub use ocg_gateway::alias::{
     AMBIGUOUS_MODEL_ID, AliasEntry, CUSTOM_DYNAMIC_UPSTREAM, ExtraProviderCatalog, ProviderMapping,
     PublishedAlias, ResolveError, ResolvedModel, RuntimeCatalogs,
     canonical_alias_for_provider_model, published_aliases, published_routeable_aliases,
-    published_routeable_aliases_with_runtime_catalogs, resolve, resolve_with_runtime_catalogs,
+    published_routeable_aliases_with_runtime_catalogs,
+    published_routeable_models_with_runtime_catalogs, resolve, resolve_with_runtime_catalogs,
     routeable_aliases_for, routeable_aliases_for_with_runtime_catalogs,
+    routeable_models_for_with_runtime_catalogs,
 };

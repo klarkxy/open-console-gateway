@@ -19,7 +19,7 @@ use crate::provider_contracts::{ContractScope, EffectiveContractSet};
 use crate::redaction::redact_known_secret;
 use crate::routing_runtime::{account_channel, account_is_available_for_at};
 use chrono::{DateTime, SecondsFormat, Utc};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 
 pub(crate) struct GatewayRuntimeStatus {
     pub running: bool,
@@ -123,45 +123,56 @@ pub(crate) fn application_models(
     application_models_from_snapshot(snapshot, contracts)
 }
 
+/// Application names follow the saved Go catalog and enabled protocols.
+/// Missing prices are an accounting state, not an implicit model denylist.
 pub(crate) fn application_models_from_snapshot(
-    snapshot: &PricingSnapshot,
+    _snapshot: &PricingSnapshot,
     contracts: Option<&EffectiveContractSet>,
 ) -> Vec<String> {
-    let priced = snapshot
-        .models
-        .iter()
-        .map(|model| model.model_id.as_str())
-        .collect::<HashSet<_>>();
-    alias::routeable_aliases_for(crate::provider::OPENCODE_PROVIDER_ID)
-        .into_iter()
-        .filter(|alias| {
-            application_alias_is_priced(alias, &priced)
-                && contracts.is_none_or(|contracts| go_alias_has_enabled_protocol(alias, contracts))
+    let Some(contracts) = contracts else {
+        return Vec::new();
+    };
+    let models_for = |provider_id: &str| {
+        contracts
+            .providers
+            .get(provider_id)
+            .map(|scope| scope.catalog.models.as_slice())
+            .unwrap_or_default()
+    };
+    let go_models = contracts
+        .providers
+        .get(crate::provider::OPENCODE_PROVIDER_ID)
+        .filter(|scope| {
+            scope.catalog.source == crate::provider_contracts::CATALOG_SOURCE_OPENCODE_MODELS
         })
-        .collect()
-}
-
-fn go_alias_has_enabled_protocol(alias: &str, contracts: &EffectiveContractSet) -> bool {
-    match crate::alias::resolve(alias) {
-        Ok(crate::alias::ResolvedModel::Alias { mappings, .. }) => mappings.iter().any(|mapping| {
-            mapping.routeable
-                && mapping.provider_id == crate::provider::OPENCODE_PROVIDER_ID
-                && contracts.mapping_has_enabled_protocol(mapping)
-        }),
-        Ok(crate::alias::ResolvedModel::PinnedRaw { mapping, .. }) => {
-            mapping.routeable
-                && mapping.provider_id == crate::provider::OPENCODE_PROVIDER_ID
-                && contracts.mapping_has_enabled_protocol(&mapping)
-        }
-        Err(_) => false,
-    }
-}
-
-fn application_alias_is_priced(alias: &str, priced: &HashSet<&str>) -> bool {
-    priced.contains(alias)
-        || alias
-            .strip_suffix("-highspeed")
-            .is_some_and(|base| priced.contains(base))
+        .map(|scope| scope.catalog.models.as_slice())
+        .unwrap_or_default();
+    let ollama_pinned = crate::provider_contracts::ollama_cloud_pinned_model_ids(contracts);
+    let catalogs = alias::RuntimeCatalogs {
+        go: go_models,
+        zen_free: models_for(crate::provider::OPENCODE_ZEN_FREE_PROVIDER_ID),
+        command_code: models_for(crate::provider::COMMAND_CODE_PROVIDER_ID),
+        minimax: models_for(crate::provider::MINIMAX_PROVIDER_ID),
+        kimi: models_for(crate::provider::KIMI_PROVIDER_ID),
+        ollama: models_for(crate::provider::OLLAMA_PROVIDER_ID),
+        ollama_pinned: &ollama_pinned,
+        ..alias::RuntimeCatalogs::default()
+    };
+    alias::routeable_models_for_with_runtime_catalogs(
+        crate::provider::OPENCODE_PROVIDER_ID,
+        catalogs,
+    )
+    .into_iter()
+    .filter(|name| {
+        alias::resolve_with_runtime_catalogs(name, catalogs).is_ok_and(|resolved| {
+            resolved.routeable_mappings().iter().any(|mapping| {
+                mapping.is_opencode_go()
+                    && go_models.iter().any(|id| *id == mapping.upstream_model)
+                    && contracts.mapping_has_enabled_protocol(mapping)
+            })
+        })
+    })
+    .collect()
 }
 
 pub(crate) fn dashboard_summary(

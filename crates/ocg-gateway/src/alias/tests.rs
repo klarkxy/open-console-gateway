@@ -1738,3 +1738,39 @@ fn ollama_overlay_coexisting_tags_fail_closed_until_pinned() {
         other => panic!("expected pinned shared alias, got {other:?}"),
     }
 }
+
+#[test]
+fn public_go_catalog_names_include_new_pins_without_creating_shared_aliases() {
+    let go = vec!["future-go-model".to_string(), "vendor/model-x".to_string()];
+    let catalogs = RuntimeCatalogs {
+        go: &go,
+        ..RuntimeCatalogs::default()
+    };
+    let published = published_routeable_models_with_runtime_catalogs(catalogs);
+    for id in &go {
+        assert!(
+            published
+                .iter()
+                .any(|item| item.alias == *id && item.owned_by == OPENCODE_PROVIDER_ID)
+        );
+        assert!(
+            matches!(resolve_with_runtime_catalogs(id, catalogs), Ok(ResolvedModel::PinnedRaw { mapping, .. }) if mapping.is_opencode_go())
+        );
+        assert!(
+            !published_routeable_aliases_with_runtime_catalogs(catalogs)
+                .iter()
+                .any(|item| item.alias == *id)
+        );
+    }
+    let custom = vec!["future-go-model".to_string()];
+    let conflicting = RuntimeCatalogs {
+        custom: &custom,
+        ..catalogs
+    };
+    assert!(
+        !published_routeable_models_with_runtime_catalogs(conflicting)
+            .iter()
+            .any(|item| item.alias == "future-go-model")
+    );
+    assert!(resolve_with_runtime_catalogs("not-in-catalog", catalogs).is_err());
+}

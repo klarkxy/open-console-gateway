@@ -9,9 +9,8 @@ use axum::routing::any;
 use ocg_core::dashboard_v3::{
     AccountUpstreamProtocol, ERROR_INTERNAL, ERROR_INVALID_JSON, ERROR_INVALID_REQUEST,
     ERROR_MISSING_EXPECTED_REVISION, ERROR_NOT_FOUND, ERROR_REVISION_CONFLICT, ERROR_UNAUTHORIZED,
-    OfficialProtocolBaseline, ProtocolProbeResponse,
-    install_official_protocol_fetch_fallback_chat_for_tests,
-    install_official_protocol_fetch_for_tests,
+    OfficialProtocolBaseline, ProtocolProbeResponse, install_official_protocol_fetch_for_tests,
+    install_official_protocol_fetch_unavailable_for_tests,
 };
 use ocg_core::gateway::provider_adapter::install_goat_loopback_route_for_test;
 use ocg_core::models::{ProxyListDirection, ProxyMode};
@@ -2207,7 +2206,7 @@ async fn static_reset_advances_global_revision_before_reload_failure() {
         .unwrap();
     harness.state.reload_provider_contracts().unwrap();
     let _docs =
-        install_official_protocol_fetch_fallback_chat_for_tests(harness.state.process_generation());
+        install_official_protocol_fetch_unavailable_for_tests(harness.state.process_generation());
     let before = harness.state.settings_revision();
     let before_contracts = harness.state.provider_contracts();
     let conn = open_sqlite(&harness);

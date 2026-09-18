@@ -15,7 +15,7 @@ use ocg_core::dashboard_v3::install_custom_verify_probe_for_tests;
 use ocg_core::dashboard_v3::{
     AccountMutation, AccountVerificationStatus, ERROR_INVALID_JSON, ERROR_INVALID_REQUEST,
     ERROR_MISSING_EXPECTED_REVISION, ERROR_NOT_FOUND, ERROR_REVISION_CONFLICT, ERROR_UNAUTHORIZED,
-    install_official_protocol_fetch_fallback_chat_for_tests,
+    install_official_protocol_fetch_unavailable_for_tests,
 };
 use ocg_core::gateway::provider_adapter::install_goat_catalog_origin_for_test;
 use ocg_core::models::{AccountUpdate, ProxyMode};
@@ -879,7 +879,7 @@ async fn unified_catalog_refresh_selects_an_eligible_account_and_defaults_new_mo
     let account_id = create_go_account(&harness).await;
     harness.enable_account(&account_id);
     let _docs =
-        install_official_protocol_fetch_fallback_chat_for_tests(harness.state.process_generation());
+        install_official_protocol_fetch_unavailable_for_tests(harness.state.process_generation());
 
     let before = harness.state.settings_revision();
     let (status, contracts) = send_json(
@@ -970,7 +970,7 @@ async fn unified_catalog_refresh_uses_a_disabled_ready_key() {
             .enabled
     );
     let _docs =
-        install_official_protocol_fetch_fallback_chat_for_tests(harness.state.process_generation());
+        install_official_protocol_fetch_unavailable_for_tests(harness.state.process_generation());
 
     let (status, contracts) = send_json(
         &harness,
@@ -1013,7 +1013,7 @@ async fn command_code_contract_refresh_defaults_new_rows_off_and_legacy_route_st
     .unwrap();
     let _goat_id = create_goat_account(&harness).await;
     let _docs =
-        install_official_protocol_fetch_fallback_chat_for_tests(harness.state.process_generation());
+        install_official_protocol_fetch_unavailable_for_tests(harness.state.process_generation());
 
     let before = harness.state.settings_revision();
     let (status, contracts) = send_json(
