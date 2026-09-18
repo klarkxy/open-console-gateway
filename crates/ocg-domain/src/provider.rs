@@ -890,6 +890,10 @@ impl ProviderRegistry {
         Some(ProviderDescriptor::from_plan(kind, plan))
     }
 
+    pub fn get_by_kind(kind: ProviderAdapterKind) -> Option<ProviderDescriptor> {
+        Self::iter().find(|descriptor| descriptor.kind == kind)
+    }
+
     pub fn iter() -> impl Iterator<Item = ProviderDescriptor> {
         BUILTIN_PROVIDERS
             .iter()

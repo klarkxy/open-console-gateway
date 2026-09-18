@@ -78,6 +78,16 @@ pub fn observer_credential_id_for_platform_account(platform_account_id: &str) ->
     )))
 }
 
+/// Deterministic identity id for the CPA management observer.
+pub fn identity_id_for_cpa() -> IdentityId {
+    IdentityId(namespaced_uuid("identity:cpa_observer:cpa"))
+}
+
+/// Deterministic observer credential id for the CPA management key.
+pub fn observer_credential_id_for_cpa() -> CredentialId {
+    CredentialId(namespaced_uuid("credential:cpa_observer:cpa"))
+}
+
 /// Deterministic binding id for one credential on one connection.
 pub fn binding_id_for(credential_id: &CredentialId, connection_id: &ConnectionId) -> BindingId {
     BindingId(namespaced_uuid(&format!(

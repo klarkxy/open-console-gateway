@@ -41,9 +41,15 @@ fn identity_and_credential_ids_are_deterministic_and_distinct() {
     let platform = identity_id_for_platform_account("acct-1");
     let credential = credential_id_for_legacy_account("acct-1");
     let observer = observer_credential_id_for_platform_account("acct-1");
+    let cpa_observer = observer_credential_id_for_cpa();
+    let cpa_identity = identity_id_for_cpa();
+    assert_eq!(cpa_observer, observer_credential_id_for_cpa());
+    assert_eq!(cpa_identity, identity_id_for_cpa());
     assert_ne!(first.as_str(), platform.as_str());
     assert_ne!(first.as_str(), credential.as_str());
     assert_ne!(credential.as_str(), observer.as_str());
+    assert_ne!(observer.as_str(), cpa_observer.as_str());
+    assert_ne!(cpa_identity.as_str(), platform.as_str());
     assert_ne!(
         identity_id_for_legacy_account("a").as_str(),
         identity_id_for_legacy_account("b").as_str()
