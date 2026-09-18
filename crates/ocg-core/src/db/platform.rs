@@ -891,6 +891,7 @@ pub(crate) fn apply_platform_link_on(
     )?;
     set_link_on(conn, account_id, parent_id, &group, None)?;
     custom_store::merge_custom_models_onto_platform_parent(conn, account_id, parent_id)?;
+    custom_store::narrow_credential_scope_from_custom_destination(conn, account_id)?;
     identity::update_account_identity_declaration(
         conn,
         account_id,
@@ -1292,6 +1293,10 @@ pub(super) fn merge_platforms_on(
             Utc::now(),
         )?;
     }
+    let import_links: Vec<(String, String)> = links
+        .iter()
+        .map(|link| (link.account_id.clone(), link.platform_account_id.clone()))
+        .collect();
     for link in links {
         let mut group = link.group.clone();
         group.verified = false;
@@ -1315,6 +1320,7 @@ pub(super) fn merge_platforms_on(
             )?;
         }
     }
+    custom_store::merge_linked_custom_models_for_import(conn, &import_links)?;
     let source = crate::db::account_store::account_row_source(conn)?;
     let mut stmt = conn.prepare(&format!(
         "SELECT c.{id}, d.base_url, a.provider_id

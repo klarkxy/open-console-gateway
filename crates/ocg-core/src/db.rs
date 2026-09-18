@@ -7148,6 +7148,12 @@ impl Database {
         if let Some(snapshot) = &record.identity_snapshot {
             identity::restore_imported_identity_snapshot_on(&tx, snapshot, &imported_account_ids)?;
         }
+        let imported_scope_ids = record
+            .accounts
+            .iter()
+            .map(|account| account.account.id.clone())
+            .collect::<HashSet<_>>();
+        custom_store::narrow_linked_scopes_from_custom_destinations(&tx, &imported_scope_ids)?;
         ensure_dynamic_singleton_accounts_on(&tx)?;
         sqlite_foreign_key_check(&tx)?;
         // The callback reads through this same SQLite connection, so it sees

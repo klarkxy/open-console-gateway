@@ -11,11 +11,12 @@ use crate::models::{AccountCustomConfig, AccountModelCapability, AccountModelCap
 use crate::provider::{UpstreamProtocolKind, validate_custom_model_id};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use ocg_domain::credential::{ModelScope, model_scope_allows};
 use ocg_domain::destination::{
     CatalogModel, LegacyDestinationFacts, destination_from_legacy,
     destination_id_for_custom_account, destination_id_for_platform_account,
 };
-use ocg_domain::ids::CUSTOM_PROVIDER_ID;
+use ocg_domain::ids::{CUSTOM_PROVIDER_ID, normalize_model_name};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::{HashMap, HashSet};
 
@@ -142,6 +143,7 @@ fn backfill_destination_models_from_leftover(
     // catalog. HashMap iteration must not decide which Key wins.
     let mut dest_order: Vec<String> = Vec::new();
     let mut by_destination: HashMap<String, Vec<AccountModelCapabilityInput>> = HashMap::new();
+    let mut leftover_by_account: HashMap<String, Vec<String>> = HashMap::new();
     for (account_id, public_model, upstream_model, protocol_value, source) in rows {
         let provider = credential_provider_id(conn, &account_id)?;
         if provider.as_deref() != Some(CUSTOM_PROVIDER_ID) {
@@ -170,6 +172,13 @@ fn backfill_destination_models_from_leftover(
         if !by_destination.contains_key(&dest_id) {
             dest_order.push(dest_id.clone());
         }
+        let account_models = leftover_by_account.entry(account_id.clone()).or_default();
+        if !account_models
+            .iter()
+            .any(|model| model.eq_ignore_ascii_case(&public_model))
+        {
+            account_models.push(public_model.clone());
+        }
         by_destination
             .entry(dest_id)
             .or_default()
@@ -185,16 +194,16 @@ fn backfill_destination_models_from_leftover(
         let capabilities = by_destination
             .remove(&dest_id)
             .expect("destination order tracks aggregated leftovers");
-        let merged = merge_leftover_destination_models(&dest_id, capabilities)?;
+        let merged = merge_destination_models_refuse_conflict(&dest_id, capabilities)?;
         replace_destination_models(conn, &dest_id, &merged)?;
+    }
+    for (account_id, models) in leftover_by_account {
+        narrow_credential_scope_intersect(conn, &account_id, &models)?;
     }
     Ok(())
 }
 
-/// Union leftover Key catalogs that share a destination. Identical rows
-/// collapse; the same public model with a different upstream mapping is a
-/// hard refusal so upgrade does not pick a winner by walk order.
-fn merge_leftover_destination_models(
+fn merge_destination_models_refuse_conflict(
     destination_id: &str,
     capabilities: Vec<AccountModelCapabilityInput>,
 ) -> Result<Vec<AccountModelCapabilityInput>> {
@@ -208,7 +217,7 @@ fn merge_leftover_destination_models(
                 existing
                     .upstream_model
                     .eq_ignore_ascii_case(&capability.upstream_model),
-                "v53 refuses leftover capability for `{destination_id}`: `{}` maps to conflicting upstream models",
+                "destination `{destination_id}` refuses model `{}`: conflicting upstream mappings",
                 capability.public_model
             );
         }
@@ -222,6 +231,30 @@ fn merge_leftover_destination_models(
         merged.push(capability);
     }
     Ok(merged)
+}
+
+fn union_destination_models_keep_existing(
+    existing: Vec<AccountModelCapabilityInput>,
+    incoming: &[AccountModelCapabilityInput],
+) -> Vec<AccountModelCapabilityInput> {
+    let mut merged = existing;
+    for capability in incoming {
+        if merged.iter().any(|row| {
+            row.public_model
+                .eq_ignore_ascii_case(&capability.public_model)
+                && row.protocol == capability.protocol
+        }) {
+            continue;
+        }
+        if merged.iter().any(|row| {
+            row.public_model
+                .eq_ignore_ascii_case(&capability.public_model)
+        }) {
+            continue;
+        }
+        merged.push(capability.clone());
+    }
+    merged
 }
 
 pub(crate) fn persist_custom_config_on(
@@ -275,7 +308,44 @@ pub(crate) fn persist_custom_capabilities_on(
             "Custom model capabilities require a persisted custom_config.upstream_protocol"
         )
     })?;
-    replace_destination_models(conn, &dest_id, capabilities)?;
+    if platform_parent_id(conn, account_id)?.is_some() {
+        persist_linked_custom_capabilities(conn, account_id, &dest_id, capabilities)?;
+    } else {
+        replace_destination_models(conn, &dest_id, capabilities)?;
+        persist_credential_model_scope_on(
+            conn,
+            account_id,
+            &ModelScope::Only {
+                models: unique_public_models_from_inputs(capabilities),
+            },
+        )?;
+    }
+    Ok(())
+}
+
+fn persist_linked_custom_capabilities(
+    conn: &Connection,
+    account_id: &str,
+    parent_dest_id: &str,
+    capabilities: &[AccountModelCapabilityInput],
+) -> Result<()> {
+    let discovered = unique_public_models_from_inputs(capabilities);
+    let owned_id = destination_id_for_custom_account(account_id);
+    if destination_exists(conn, &owned_id)? {
+        replace_destination_models(conn, &owned_id, capabilities)?;
+    }
+    let next_scope = ModelScope::Only { models: discovered };
+    let mut catalog = union_destination_models_keep_existing(
+        load_destination_model_inputs(conn, parent_dest_id, true)?,
+        capabilities,
+    );
+    if let Some(referenced) =
+        referenced_catalog_models(conn, parent_dest_id, account_id, &next_scope)?
+    {
+        catalog.retain(|row| referenced.contains(&normalize_model_name(&row.public_model)));
+    }
+    replace_destination_models(conn, parent_dest_id, &catalog)?;
+    persist_credential_model_scope_on(conn, account_id, &next_scope)?;
     Ok(())
 }
 
@@ -349,6 +419,8 @@ pub(crate) fn list_capabilities_on(
             });
         }
     }
+    let scope = credential_model_scope_on(conn, account_id)?;
+    capabilities.retain(|capability| model_scope_allows(&scope, &capability.public_model));
     if !declared_order {
         capabilities.sort_by(|left, right| {
             left.public_model
@@ -616,20 +688,91 @@ pub(crate) fn merge_custom_models_onto_platform_parent(
     if custom_models.is_empty() {
         return Ok(());
     }
-    let mut merged = load_destination_model_inputs(conn, &parent_id, true)?;
-    let mut seen: HashSet<String> = merged
-        .iter()
-        .map(|row| row.public_model.to_ascii_lowercase())
-        .collect();
-    for model in custom_models {
-        if seen.insert(model.public_model.to_ascii_lowercase()) {
-            merged.push(model);
-        }
-    }
+    let merged = union_destination_models_keep_existing(
+        load_destination_model_inputs(conn, &parent_id, true)?,
+        &custom_models,
+    );
     if destination_exists(conn, &parent_id)? {
         replace_destination_models(conn, &parent_id, &merged)?;
     }
     Ok(())
+}
+
+/// Copy each linked Key's owned Custom catalog onto its platform parent.
+/// Conflicting public→upstream maps refuse so import does not pick a winner.
+pub(crate) fn merge_linked_custom_models_for_import(
+    conn: &Connection,
+    links: &[(String, String)],
+) -> Result<()> {
+    let mut dest_order: Vec<String> = Vec::new();
+    let mut by_destination: HashMap<String, Vec<AccountModelCapabilityInput>> = HashMap::new();
+    let mut owned_scopes: Vec<(String, Vec<String>)> = Vec::new();
+    for (account_id, parent_id) in links {
+        let custom_id = destination_id_for_custom_account(account_id);
+        let models = load_destination_model_inputs(conn, &custom_id, true)?;
+        if models.is_empty() {
+            continue;
+        }
+        owned_scopes.push((
+            account_id.clone(),
+            unique_public_models_from_inputs(&models),
+        ));
+        let dest_id = destination_id_for_platform_account(parent_id);
+        if !by_destination.contains_key(&dest_id) {
+            dest_order.push(dest_id.clone());
+        }
+        by_destination.entry(dest_id).or_default().extend(models);
+    }
+    for dest_id in dest_order {
+        let incoming = by_destination
+            .remove(&dest_id)
+            .expect("destination order tracks imported catalogs");
+        let mut combined = load_destination_model_inputs(conn, &dest_id, true)?;
+        combined.extend(incoming);
+        let merged = merge_destination_models_refuse_conflict(&dest_id, combined)?;
+        if destination_exists(conn, &dest_id)? {
+            replace_destination_models(conn, &dest_id, &merged)?;
+        }
+    }
+    for (account_id, models) in owned_scopes {
+        narrow_credential_scope_intersect(conn, &account_id, &models)?;
+    }
+    Ok(())
+}
+
+/// Re-narrow imported linked Keys after identity restore may write `All`.
+pub(crate) fn narrow_linked_scopes_from_custom_destinations(
+    conn: &Connection,
+    account_ids: &HashSet<String>,
+) -> Result<()> {
+    for account_id in account_ids {
+        if platform_parent_id(conn, account_id)?.is_none() {
+            continue;
+        }
+        let custom_id = destination_id_for_custom_account(account_id);
+        let models = load_destination_model_inputs(conn, &custom_id, true)?;
+        if models.is_empty() {
+            continue;
+        }
+        narrow_credential_scope_intersect(
+            conn,
+            account_id,
+            &unique_public_models_from_inputs(&models),
+        )?;
+    }
+    Ok(())
+}
+
+pub(crate) fn narrow_credential_scope_from_custom_destination(
+    conn: &Connection,
+    account_id: &str,
+) -> Result<()> {
+    let custom_id = destination_id_for_custom_account(account_id);
+    let models = load_destination_model_inputs(conn, &custom_id, true)?;
+    if models.is_empty() {
+        return Ok(());
+    }
+    narrow_credential_scope_intersect(conn, account_id, &unique_public_models_from_inputs(&models))
 }
 
 fn load_custom_destination_endpoint(
@@ -722,6 +865,187 @@ fn load_destination_model_inputs(
         }
     }
     Ok(inputs)
+}
+
+fn unique_public_models_from_inputs(capabilities: &[AccountModelCapabilityInput]) -> Vec<String> {
+    let mut models = Vec::new();
+    for capability in capabilities {
+        if !models
+            .iter()
+            .any(|model: &String| model.eq_ignore_ascii_case(&capability.public_model))
+        {
+            models.push(capability.public_model.clone());
+        }
+    }
+    models
+}
+
+fn credential_model_scope_on(conn: &Connection, account_id: &str) -> Result<ModelScope> {
+    if table_exists(conn, "credentials")? && table_has_column(conn, "credentials", "scope_json")? {
+        if let Some(raw) = conn
+            .query_row(
+                "SELECT scope_json FROM credentials WHERE legacy_account_id = ?1",
+                [account_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten()
+        {
+            if !raw.trim().is_empty() {
+                return Ok(parse_scope_json(&raw));
+            }
+        }
+    }
+    if table_exists(conn, "credential_bindings")?
+        && table_has_column(conn, "credential_bindings", "model_scope")?
+    {
+        if let Some(raw) = conn
+            .query_row(
+                "SELECT model_scope FROM credential_bindings WHERE account_id = ?1",
+                [account_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten()
+        {
+            if !raw.trim().is_empty() {
+                return Ok(parse_scope_json(&raw));
+            }
+        }
+    }
+    Ok(ModelScope::All)
+}
+
+fn persist_credential_model_scope_on(
+    conn: &Connection,
+    account_id: &str,
+    scope: &ModelScope,
+) -> Result<()> {
+    let json = serde_json::to_string(scope)?;
+    if table_exists(conn, "credentials")? && table_has_column(conn, "credentials", "scope_json")? {
+        conn.execute(
+            "UPDATE credentials SET scope_json = ?2 WHERE legacy_account_id = ?1",
+            params![account_id, json],
+        )?;
+    }
+    if table_exists(conn, "credential_bindings")?
+        && table_has_column(conn, "credential_bindings", "model_scope")?
+    {
+        conn.execute(
+            "UPDATE credential_bindings SET model_scope = ?2 WHERE account_id = ?1",
+            params![account_id, json],
+        )?;
+    }
+    Ok(())
+}
+
+fn narrow_credential_scope_intersect(
+    conn: &Connection,
+    account_id: &str,
+    models: &[String],
+) -> Result<()> {
+    let existing = credential_model_scope_on(conn, account_id)?;
+    persist_credential_model_scope_on(
+        conn,
+        account_id,
+        &intersect_scope_with_models(&existing, models),
+    )
+}
+
+fn intersect_scope_with_models(existing: &ModelScope, models: &[String]) -> ModelScope {
+    let discovered = unique_public_models_from_names(models);
+    match existing {
+        ModelScope::All => ModelScope::Only { models: discovered },
+        ModelScope::Only { models: current } => ModelScope::Only {
+            models: current
+                .iter()
+                .filter(|model| {
+                    discovered.iter().any(|discovered| {
+                        normalize_model_name(model) == normalize_model_name(discovered)
+                    })
+                })
+                .cloned()
+                .collect(),
+        },
+    }
+}
+
+fn unique_public_models_from_names(models: &[String]) -> Vec<String> {
+    let mut unique = Vec::new();
+    for model in models {
+        if !unique
+            .iter()
+            .any(|existing: &String| existing.eq_ignore_ascii_case(model))
+        {
+            unique.push(model.clone());
+        }
+    }
+    unique
+}
+
+fn parse_scope_json(raw: &str) -> ModelScope {
+    serde_json::from_str(raw).unwrap_or(ModelScope::All)
+}
+
+fn referenced_catalog_models(
+    conn: &Connection,
+    destination_id: &str,
+    this_account: &str,
+    this_scope: &ModelScope,
+) -> Result<Option<HashSet<String>>> {
+    let mut referenced = HashSet::new();
+    if !push_scope_models(this_scope, &mut referenced) {
+        return Ok(None);
+    }
+    for sibling in linked_account_ids_for_destination(conn, destination_id)? {
+        if sibling == this_account {
+            continue;
+        }
+        let scope = credential_model_scope_on(conn, &sibling)?;
+        if !push_scope_models(&scope, &mut referenced) {
+            return Ok(None);
+        }
+    }
+    Ok(Some(referenced))
+}
+
+fn push_scope_models(scope: &ModelScope, into: &mut HashSet<String>) -> bool {
+    match scope {
+        ModelScope::All => false,
+        ModelScope::Only { models } => {
+            for model in models {
+                let key = normalize_model_name(model);
+                if !key.is_empty() {
+                    into.insert(key);
+                }
+            }
+            true
+        }
+    }
+}
+
+fn linked_account_ids_for_destination(
+    conn: &Connection,
+    destination_id: &str,
+) -> Result<Vec<String>> {
+    if !table_exists(conn, "credentials")?
+        || !table_has_column(conn, "credentials", "destination_id")?
+    {
+        return Ok(Vec::new());
+    }
+    let purpose_filter = if table_has_column(conn, "credentials", "credential_purpose")? {
+        "AND COALESCE(credential_purpose, 'inference') = 'inference'"
+    } else {
+        ""
+    };
+    let mut stmt = conn.prepare(&format!(
+        "SELECT legacy_account_id FROM credentials
+         WHERE destination_id = ?1
+           {purpose_filter}"
+    ))?;
+    stmt.query_map([destination_id], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
 fn destination_exists(conn: &Connection, destination_id: &str) -> Result<bool> {

@@ -1699,28 +1699,99 @@ fn insert_leftover_capability(
         .unwrap();
 }
 
-#[test]
-fn v53_keeps_both_keys_models_when_two_linked_keys_share_a_platform() {
-    use crate::platform::{PlatformGroup, PlatformKind};
-    use ocg_domain::destination::destination_id_for_platform_account;
+fn capability_pairs(db: &Database, account_id: &str) -> Vec<(String, String)> {
+    db.list_account_model_capabilities(account_id)
+        .unwrap()
+        .into_iter()
+        .map(|row| (row.public_model, row.upstream_model))
+        .collect()
+}
 
-    let dir = temp_data_dir("v53-two-linked-keys");
-    let db = Database::open(dir.clone()).unwrap();
-    leftover_custom_account(&db, "key-a", "cipher-a", "model-x", "up-x");
-    leftover_custom_account(&db, "key-b", "cipher-b", "model-y", "up-y");
+fn parent_catalog_pairs(db: &Database, parent_id: &str) -> Vec<(String, String)> {
+    use ocg_domain::destination::destination_id_for_platform_account;
+    let dest_id = destination_id_for_platform_account(parent_id);
+    let mut stmt = db
+        .conn
+        .prepare(
+            "SELECT public_model, upstream_model FROM destination_models
+             WHERE destination_id = ?1 ORDER BY rowid ASC",
+        )
+        .unwrap();
+    stmt.query_map([dest_id], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+}
+
+fn stored_model_scope(db: &Database, account_id: &str) -> ocg_domain::credential::ModelScope {
+    db.list_identity_model()
+        .unwrap()
+        .accounts
+        .into_iter()
+        .find(|row| row.account.id == account_id)
+        .unwrap()
+        .binding_model_scope
+}
+
+fn assert_key_cannot_serve(db: &Database, account_id: &str, model: &str) {
+    use ocg_domain::credential::model_scope_allows;
+    let runtime = db
+        .list_custom_account_runtimes()
+        .unwrap()
+        .into_iter()
+        .find(|runtime| runtime.account_id == account_id)
+        .expect("custom runtime");
+    assert!(
+        runtime.capability_matching_public(model).is_none(),
+        "{account_id} still declares {model}"
+    );
+    assert!(
+        !model_scope_allows(&stored_model_scope(db, account_id), model),
+        "{account_id} scope still admits {model}"
+    );
+}
+
+fn custom_capability(public_model: &str, upstream_model: &str) -> AccountModelCapabilityInput {
+    AccountModelCapabilityInput {
+        public_model: public_model.into(),
+        upstream_model: upstream_model.into(),
+        protocol: UpstreamProtocolKind::ChatCompletions,
+        source: Some("manual".into()),
+    }
+}
+
+fn seed_linked_platform_keys(db: &Database, parent_id: &str, keys: &[(&str, &str, &str)]) {
+    use crate::platform::{PlatformGroup, PlatformKind};
+    for (account_id, public_model, upstream_model) in keys {
+        leftover_custom_account(
+            db,
+            account_id,
+            &format!("cipher-{account_id}"),
+            public_model,
+            upstream_model,
+        );
+    }
     db.create_platform_account(
-        "parent-shared",
+        parent_id,
         PlatformKind::NewApi,
         "Shared Parent",
         "https://platform.example/v1",
         Some("mgmt-cipher"),
     )
     .unwrap();
-    db.link_platform_account("key-a", "parent-shared", &PlatformGroup::default())
-        .unwrap();
-    db.link_platform_account("key-b", "parent-shared", &PlatformGroup::default())
-        .unwrap();
-    let dest_id = destination_id_for_platform_account("parent-shared");
+    for (account_id, _, _) in keys {
+        db.link_platform_account(account_id, parent_id, &PlatformGroup::default())
+            .unwrap();
+    }
+}
+
+fn rewind_linked_keys_to_v52_leftover_capabilities(
+    db: &Database,
+    parent_id: &str,
+    leftovers: &[(&str, &str, &str)],
+) {
+    use ocg_domain::destination::destination_id_for_platform_account;
+    let dest_id = destination_id_for_platform_account(parent_id);
     db.conn
         .execute_batch(
             "CREATE TABLE account_model_capabilities (
@@ -1734,8 +1805,9 @@ fn v53_keeps_both_keys_models_when_two_linked_keys_share_a_platform() {
              );",
         )
         .unwrap();
-    insert_leftover_capability(&db, "key-a", "model-x", "up-x");
-    insert_leftover_capability(&db, "key-b", "model-y", "up-y");
+    for (account_id, public_model, upstream_model) in leftovers {
+        insert_leftover_capability(db, account_id, public_model, upstream_model);
+    }
     db.conn
         .execute(
             "DELETE FROM destination_models WHERE destination_id = ?1",
@@ -1748,41 +1820,222 @@ fn v53_keeps_both_keys_models_when_two_linked_keys_share_a_platform() {
              INSERT INTO schema_version(version) VALUES (52);",
         )
         .unwrap();
+}
+
+fn force_binding_scope_all(db: &Database, account_id: &str) {
+    db.conn
+        .execute(
+            r#"UPDATE credentials SET scope_json = '{"kind":"all"}' WHERE legacy_account_id = ?1"#,
+            [account_id],
+        )
+        .unwrap();
+}
+
+#[test]
+fn v53_keeps_both_keys_models_when_two_linked_keys_share_a_platform() {
+    use ocg_domain::credential::ModelScope;
+
+    let dir = temp_data_dir("v53-two-linked-keys");
+    let db = Database::open(dir.clone()).unwrap();
+    seed_linked_platform_keys(
+        &db,
+        "parent-shared",
+        &[("key-a", "model-x", "up-x"), ("key-b", "model-y", "up-y")],
+    );
+    force_binding_scope_all(&db, "key-a");
+    force_binding_scope_all(&db, "key-b");
+    rewind_linked_keys_to_v52_leftover_capabilities(
+        &db,
+        "parent-shared",
+        &[("key-a", "model-x", "up-x"), ("key-b", "model-y", "up-y")],
+    );
     drop(db);
 
     let db = Database::open(dir.clone()).unwrap();
     assert_eq!(schema_version_on(&db.conn).unwrap(), CURRENT_SCHEMA_VERSION);
-    let models: Vec<(String, String)> = db
-        .list_account_model_capabilities("key-a")
-        .unwrap()
-        .into_iter()
-        .map(|row| (row.public_model, row.upstream_model))
-        .collect();
     assert_eq!(
-        models,
+        parent_catalog_pairs(&db, "parent-shared"),
         vec![
             ("model-x".into(), "up-x".into()),
             ("model-y".into(), "up-y".into()),
         ]
+    );
+    assert_eq!(
+        capability_pairs(&db, "key-a"),
+        vec![("model-x".into(), "up-x".into())]
+    );
+    assert_eq!(
+        stored_model_scope(&db, "key-a"),
+        ModelScope::Only {
+            models: vec!["model-x".into()]
+        }
+    );
+    assert_key_cannot_serve(&db, "key-a", "model-y");
+    drop(db);
+
+    let db = Database::open(dir.clone()).unwrap();
+    assert_eq!(
+        capability_pairs(&db, "key-b"),
+        vec![("model-y".into(), "up-y".into())]
+    );
+    assert_eq!(
+        stored_model_scope(&db, "key-b"),
+        ModelScope::Only {
+            models: vec!["model-y".into()]
+        }
+    );
+    assert_key_cannot_serve(&db, "key-b", "model-x");
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn v53_intersects_existing_only_scope_instead_of_widening() {
+    use ocg_domain::credential::ModelScope;
+
+    let dir = temp_data_dir("v53-keep-manual-scope");
+    let db = Database::open(dir.clone()).unwrap();
+    seed_linked_platform_keys(
+        &db,
+        "parent-narrow",
+        &[("key-a", "model-a", "up-a"), ("key-b", "model-b", "up-b")],
+    );
+    db.conn
+        .execute(
+            r#"UPDATE credentials SET scope_json = ?2 WHERE legacy_account_id = ?1"#,
+            rusqlite::params![
+                "key-a",
+                serde_json::to_string(&ModelScope::Only {
+                    models: vec!["model-a".into()],
+                })
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+    rewind_linked_keys_to_v52_leftover_capabilities(
+        &db,
+        "parent-narrow",
+        &[
+            ("key-a", "model-a", "up-a"),
+            ("key-a", "model-extra", "up-extra"),
+            ("key-b", "model-b", "up-b"),
+        ],
     );
     drop(db);
 
     let db = Database::open(dir.clone()).unwrap();
-    let again: Vec<(String, String)> = db
-        .list_account_model_capabilities("key-b")
-        .unwrap()
-        .into_iter()
-        .map(|row| (row.public_model, row.upstream_model))
-        .collect();
     assert_eq!(
-        again,
-        vec![
-            ("model-x".into(), "up-x".into()),
-            ("model-y".into(), "up-y".into()),
-        ]
+        stored_model_scope(&db, "key-a"),
+        ModelScope::Only {
+            models: vec!["model-a".into()]
+        }
     );
+    assert_eq!(
+        capability_pairs(&db, "key-a"),
+        vec![("model-a".into(), "up-a".into())]
+    );
+    assert_key_cannot_serve(&db, "key-a", "model-extra");
+    assert_key_cannot_serve(&db, "key-a", "model-b");
     drop(db);
     fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn refresh_one_linked_key_does_not_replace_sibling_catalog() {
+    let dir = temp_data_dir("refresh-one-key");
+    let db = Database::open(dir.clone()).unwrap();
+    seed_linked_platform_keys(
+        &db,
+        "parent-refresh",
+        &[("key-a", "model-a", "up-a"), ("key-b", "model-b", "up-b")],
+    );
+    db.replace_account_model_capabilities("key-a", &[custom_capability("model-a", "up-a")])
+        .unwrap();
+    assert_eq!(
+        parent_catalog_pairs(&db, "parent-refresh"),
+        vec![
+            ("model-a".into(), "up-a".into()),
+            ("model-b".into(), "up-b".into()),
+        ]
+    );
+    assert_eq!(
+        capability_pairs(&db, "key-b"),
+        vec![("model-b".into(), "up-b".into())]
+    );
+    assert_key_cannot_serve(&db, "key-a", "model-b");
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn fetch_all_linked_keys_either_order_keeps_shared_catalog_and_scopes() {
+    use ocg_domain::credential::ModelScope;
+
+    fn apply_fetch_all(db: &Database, first: &str, second: &str) {
+        let first_cap = if first == "key-a" {
+            custom_capability("model-a", "up-a")
+        } else {
+            custom_capability("model-b", "up-b")
+        };
+        let second_cap = if second == "key-a" {
+            custom_capability("model-a", "up-a")
+        } else {
+            custom_capability("model-b", "up-b")
+        };
+        db.replace_account_model_capabilities(first, &[first_cap])
+            .unwrap();
+        db.replace_account_model_capabilities(second, &[second_cap])
+            .unwrap();
+    }
+
+    fn assert_shared(db: &Database) {
+        let mut catalog = parent_catalog_pairs(db, "parent-fetch-all");
+        catalog.sort();
+        assert_eq!(
+            catalog,
+            vec![
+                ("model-a".into(), "up-a".into()),
+                ("model-b".into(), "up-b".into()),
+            ]
+        );
+        assert_eq!(
+            stored_model_scope(db, "key-a"),
+            ModelScope::Only {
+                models: vec!["model-a".into()]
+            }
+        );
+        assert_eq!(
+            stored_model_scope(db, "key-b"),
+            ModelScope::Only {
+                models: vec!["model-b".into()]
+            }
+        );
+        assert_eq!(
+            capability_pairs(db, "key-a"),
+            vec![("model-a".into(), "up-a".into())]
+        );
+        assert_eq!(
+            capability_pairs(db, "key-b"),
+            vec![("model-b".into(), "up-b".into())]
+        );
+    }
+
+    for (label, first, second) in [
+        ("a-then-b", "key-a", "key-b"),
+        ("b-then-a", "key-b", "key-a"),
+    ] {
+        let dir = temp_data_dir(&format!("fetch-all-{label}"));
+        let db = Database::open(dir.clone()).unwrap();
+        seed_linked_platform_keys(
+            &db,
+            "parent-fetch-all",
+            &[("key-a", "model-a", "up-a"), ("key-b", "model-b", "up-b")],
+        );
+        apply_fetch_all(&db, first, second);
+        assert_shared(&db);
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
 }
 
 #[test]
@@ -4190,6 +4443,186 @@ fn platform_key_survives_failed_link_and_retry_links_without_a_second_key() {
     assert_eq!(links[0].platform_account_id, "parent");
     drop(db);
     fs::remove_dir_all(dir).unwrap();
+}
+
+fn custom_platform_import_record(
+    id: &str,
+    public_model: &str,
+    upstream_model: &str,
+) -> AccountImportRecord {
+    let mut custom = account(id);
+    custom.provider_id = CUSTOM_PROVIDER_ID.to_string();
+    custom.credential_kind = CredentialKind::ApiKey;
+    custom.quota_scope = QuotaScope::Key;
+    custom.key_cipher = format!("cipher-{id}");
+    AccountImportRecord {
+        account: custom,
+        custom_config: Some(AccountCustomConfigInput {
+            endpoint_url: "https://old.example/v1/chat/completions".into(),
+            upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+        }),
+        capabilities: vec![custom_capability(public_model, upstream_model)],
+        verification_status: ConnectionVerificationStatus::NotRequired,
+        connection_verified_at: None,
+        ollama_billing_tier: None,
+    }
+}
+
+fn identity_snapshot_forcing_all(
+    db: &Database,
+    account_ids: &[&str],
+) -> crate::db::identity::IdentityImportSnapshot {
+    use crate::db::identity::{IdentityImportSnapshot, ImportedAccountIdentity, ImportedIdentity};
+    use ocg_domain::credential::ModelScope;
+    let model = db.list_identity_model().unwrap();
+    let accounts = model
+        .accounts
+        .iter()
+        .filter(|row| account_ids.contains(&row.account.id.as_str()))
+        .map(|row| ImportedAccountIdentity {
+            account_id: row.account.id.clone(),
+            identity_id: row.identity_id.clone(),
+            credential_id: row.credential_id.clone(),
+            credential_version: row.credential_version,
+            auth_state_version: row.auth_state_version,
+            binding_id: row.binding_id.clone(),
+            binding_enabled: row.binding_enabled,
+            binding_model_scope: ModelScope::All,
+            allowed_endpoint_ids: row.allowed_endpoint_ids.clone(),
+            allowed_origins: row.allowed_origins.clone(),
+        })
+        .collect::<Vec<_>>();
+    let identity_ids = accounts
+        .iter()
+        .map(|row| row.identity_id.clone())
+        .collect::<HashSet<_>>();
+    let identities = model
+        .identities
+        .into_iter()
+        .filter(|identity| identity_ids.contains(&identity.id))
+        .map(|identity| ImportedIdentity {
+            id: identity.id,
+            label: identity.label,
+            identity_confidence: identity.identity_confidence,
+            authority_site: identity.authority_site,
+            authority_subject: identity.authority_subject,
+            enabled: identity.enabled,
+            notes: identity.notes,
+        })
+        .collect();
+    IdentityImportSnapshot {
+        identities,
+        accounts,
+        quota_pools: Vec::new(),
+    }
+}
+
+fn assert_restored_platform_catalog_and_scopes(db: &Database, parent_id: &str) {
+    use crate::custom::eligible_custom_public_models;
+    use ocg_domain::credential::ModelScope;
+    let mut catalog = parent_catalog_pairs(db, parent_id);
+    catalog.sort();
+    assert_eq!(
+        catalog,
+        vec![
+            ("model-a".into(), "up-a".into()),
+            ("model-b".into(), "up-b".into()),
+        ]
+    );
+    assert_eq!(
+        stored_model_scope(db, "key-a"),
+        ModelScope::Only {
+            models: vec!["model-a".into()]
+        }
+    );
+    assert_eq!(
+        stored_model_scope(db, "key-b"),
+        ModelScope::Only {
+            models: vec!["model-b".into()]
+        }
+    );
+    assert_eq!(
+        capability_pairs(db, "key-a"),
+        vec![("model-a".into(), "up-a".into())]
+    );
+    assert_eq!(
+        capability_pairs(db, "key-b"),
+        vec![("model-b".into(), "up-b".into())]
+    );
+    let mut public = eligible_custom_public_models(&db.list_custom_account_runtimes().unwrap());
+    public.sort();
+    assert_eq!(public, vec!["model-a".to_string(), "model-b".to_string()]);
+    assert_key_cannot_serve(db, "key-a", "model-b");
+    assert_key_cannot_serve(db, "key-b", "model-a");
+}
+
+#[test]
+fn import_node_state_moves_linked_models_onto_parent_and_keeps_scopes() {
+    use crate::platform::{PortablePlatformAccount, PortablePlatformLink};
+    use ocg_domain::credential::ModelScope;
+
+    let source_dir = temp_data_dir("import-models-source");
+    let source = Database::open(source_dir.clone()).unwrap();
+    seed_linked_platform_keys(
+        &source,
+        "parent-import",
+        &[("key-a", "model-a", "up-a"), ("key-b", "model-b", "up-b")],
+    );
+    assert_eq!(
+        stored_model_scope(&source, "key-a"),
+        ModelScope::Only {
+            models: vec!["model-a".into()]
+        }
+    );
+    let parents = source
+        .list_platform_accounts()
+        .unwrap()
+        .into_iter()
+        .map(|parent| PortablePlatformAccount {
+            id: parent.id,
+            kind: parent.kind,
+            name: parent.name,
+            base_url: parent.base_url,
+        })
+        .collect::<Vec<_>>();
+    let links = source
+        .list_platform_links()
+        .unwrap()
+        .into_iter()
+        .map(|link| PortablePlatformLink {
+            account_id: link.account_id,
+            platform_account_id: link.platform_account_id,
+            group: {
+                let mut group = link.group;
+                group.verified = false;
+                group.subscription_type = None;
+                group
+            },
+        })
+        .collect::<Vec<_>>();
+    let mut record = node_import_record(
+        &source,
+        vec![
+            custom_platform_import_record("key-a", "model-a", "up-a"),
+            custom_platform_import_record("key-b", "model-b", "up-b"),
+        ],
+        parents,
+        links,
+    );
+    record.identity_snapshot = Some(identity_snapshot_forcing_all(&source, &["key-a", "key-b"]));
+    drop(source);
+    fs::remove_dir_all(source_dir).unwrap();
+
+    let dest_dir = temp_data_dir("import-models-dest");
+    let dest = Database::open(dest_dir.clone()).unwrap();
+    dest.import_node_state(&record, |_| -> Result<()> { Ok(()) })
+        .unwrap();
+    drop(dest);
+
+    let dest = Database::open(dest_dir.clone()).unwrap();
+    assert_restored_platform_catalog_and_scopes(&dest, "parent-import");
+    drop(dest);
+    fs::remove_dir_all(dest_dir).unwrap();
 }
 
 fn node_import_record(
