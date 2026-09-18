@@ -121,8 +121,8 @@ pub use crate::command_code_usage::{
 pub use crate::official_protocols::OfficialProtocolBaseline;
 #[cfg(debug_assertions)]
 pub use crate::official_protocols::{
-    OfficialProtocolFetchGuard, install_official_protocol_fetch_fallback_chat_for_tests,
-    install_official_protocol_fetch_for_tests,
+    OfficialProtocolFetchGuard, install_official_protocol_fetch_for_tests,
+    install_official_protocol_fetch_unavailable_for_tests,
 };
 #[cfg(debug_assertions)]
 pub use account_verify::{CustomVerifyProbeGuard, install_custom_verify_probe_for_tests};

@@ -286,13 +286,13 @@ async fn parse_provider_models_response(
         .map_err(|message| GoatVerifyFailure { message })
 }
 
-pub async fn probe_opencode_go_models(
+/// Read the public Go directory without sending an account credential.
+pub async fn refresh_opencode_go_models(
     config: &AppConfig,
-    api_key: &str,
     base_url: &str,
 ) -> Result<Vec<String>, GoatVerifyFailure> {
     let url = opencode_go_models_url_for_base(base_url);
-    probe_provider_models_at_url(config, api_key, &url, "OpenCode Go").await
+    probe_public_provider_models_at_url(config, &url, "OpenCode Go").await
 }
 
 pub async fn probe_provider_models(
