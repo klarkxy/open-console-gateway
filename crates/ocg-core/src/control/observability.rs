@@ -19,7 +19,7 @@ use crate::provider_contracts::{ContractScope, EffectiveContractSet};
 use crate::redaction::redact_known_secret;
 use crate::routing_runtime::{account_channel, account_is_available_for_at};
 use chrono::{DateTime, SecondsFormat, Utc};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 
 pub(crate) struct GatewayRuntimeStatus {
     pub running: bool,

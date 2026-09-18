@@ -529,7 +529,7 @@ async fn v3_observability_stays_camel_case_after_v2_retirement() {
 }
 
 #[tokio::test]
-async fn dashboard_v3_application_models_follow_current_routeable_intersection() {
+async fn dashboard_v3_application_models_follow_enabled_go_catalog_independently_of_pricing() {
     let harness = start_loopback("obs-app-models").await;
     refreshed_go_catalog::persist_refreshed_go_catalog(&harness.state);
     let _guard =
@@ -544,7 +544,7 @@ async fn dashboard_v3_application_models_follow_current_routeable_intersection()
     let models: ApplicationModels = serde_json::from_value(body).unwrap();
     assert!(models.models.contains(&"minimax-m2.7".into()));
     assert!(!models.models.contains(&"minimax-m2.7-highspeed".into()));
-    assert!(!models.models.contains(&"glm-5".into()));
+    assert!(models.models.contains(&"glm-5".into()));
 
     let mut pricing = harness.state.pricing_snapshot().as_ref().clone();
     pricing.models.retain(|model| model.model_id == "grok-4.5");
@@ -555,7 +555,7 @@ async fn dashboard_v3_application_models_follow_current_routeable_intersection()
         .get_json(&format!("{}/application-models", harness.v3_base))
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["models"], json!(["grok-4.5"]));
+    assert_eq!(body["models"], json!(models.models));
 
     let mut empty = harness.state.pricing_snapshot().as_ref().clone();
     empty.models.clear();
@@ -566,7 +566,7 @@ async fn dashboard_v3_application_models_follow_current_routeable_intersection()
         .get_json(&format!("{}/application-models", harness.v3_base))
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["models"], json!([]));
+    assert_eq!(body["models"], json!(models.models));
 
     harness.stop();
 }

@@ -60,8 +60,10 @@ fn process_host_adapts_key_and_usage_sync_seams() {
 
 #[test]
 fn reload_failure_restriction_rebuilds_proxy_membership() {
-    use crate::provider::OPENCODE_PROVIDER_ID;
-    use crate::provider_contracts::{CATALOG_SOURCE_OPENCODE_MODELS, ContractScope};
+    use crate::provider::{OPENCODE_PROVIDER_ID, UpstreamProtocolKind};
+    use crate::provider_contracts::{
+        CATALOG_SOURCE_OPENCODE_MODELS, ContractScope, ProtocolOverrideState,
+    };
     use chrono::Utc;
 
     let dir = temp_data_dir("restrict-proxy-membership");
@@ -79,6 +81,23 @@ fn reload_failure_restriction_rebuilds_proxy_membership() {
             Some(now),
             CATALOG_SOURCE_OPENCODE_MODELS,
             "https://example.test/models",
+            now,
+        )
+        .unwrap();
+    // This test concerns removing an enabled route, not protocol discovery.
+    // The synthetic model IDs therefore need an explicit operator choice.
+    state
+        .db
+        .lock()
+        .set_model_protocol_overrides(
+            &scope,
+            &["gpt-5.6-luna", "gpt-5.6-sol"].map(|id| {
+                (
+                    id.to_string(),
+                    UpstreamProtocolKind::ChatCompletions,
+                    ProtocolOverrideState::ForceOn,
+                )
+            }),
             now,
         )
         .unwrap();

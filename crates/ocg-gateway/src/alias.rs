@@ -1161,7 +1161,7 @@ pub fn routeable_models_for_with_runtime_catalogs(
                 resolved.routeable_mappings().iter().any(|mapping| {
                     mapping.provider_id == provider_id
                         && (provider_id != OPENCODE_PROVIDER_ID
-                            || catalogs.go.iter().any(|id| *id == mapping.upstream_model))
+                            || catalogs.go.contains(&mapping.upstream_model))
                 })
             })
         })

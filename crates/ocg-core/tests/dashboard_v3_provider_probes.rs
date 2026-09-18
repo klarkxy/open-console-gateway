@@ -602,9 +602,9 @@ async fn opencode_static_protocol_reset_is_cas_protected_and_restores_current_ca
         .find(|model| model["modelId"] == "future-go-model")
         .unwrap();
     assert_eq!(future["protocols"]["chat_completions"]["override"], "auto");
-    assert_eq!(future["protocols"]["chat_completions"]["enabled"], true);
-    assert_eq!(future["protocols"]["responses"]["override"], "force_off");
-    assert_eq!(future["protocols"]["messages"]["override"], "force_off");
+    assert_eq!(future["protocols"]["chat_completions"]["enabled"], false);
+    assert_eq!(future["protocols"]["responses"]["enabled"], false);
+    assert_eq!(future["protocols"]["messages"]["enabled"], false);
     let (status, repeat) = send_json(
         &harness,
         Method::POST,
@@ -625,7 +625,7 @@ async fn opencode_static_protocol_reset_is_cas_protected_and_restores_current_ca
 }
 
 #[tokio::test]
-async fn opencode_static_protocol_reset_defaults_to_chat_when_official_docs_are_unavailable() {
+async fn opencode_static_protocol_reset_does_not_mutate_when_official_docs_are_unavailable() {
     let harness = start_probes("static-protocol-reset-docs-fallback").await;
     let scope = go_scope();
     let models = vec!["grok-4.5".to_string()];
@@ -644,6 +644,11 @@ async fn opencode_static_protocol_reset_defaults_to_chat_when_official_docs_are_
         )
         .unwrap();
     harness.state.reload_provider_contracts().unwrap();
+    let _docs =
+        install_official_protocol_fetch_unavailable_for_tests(harness.state.process_generation());
+    let before = harness.state.settings_revision();
+    let before_contracts = harness.state.provider_contracts();
+    let before_scope = go_scope_revision(&harness);
     let (status, reset) = send_json(
         &harness,
         Method::POST,
@@ -651,28 +656,25 @@ async fn opencode_static_protocol_reset_defaults_to_chat_when_official_docs_are_
         &cas(&harness, json!({})),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "{reset}");
-    let opencode = reset["providers"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|provider| provider["providerId"] == OPENCODE_PROVIDER_ID)
-        .unwrap();
-    let grok = opencode["models"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|model| model["modelId"] == "grok-4.5")
-        .unwrap();
-    assert_eq!(grok["protocols"]["chat_completions"]["override"], "auto");
-    assert_eq!(grok["protocols"]["chat_completions"]["enabled"], true);
-    assert_eq!(grok["protocols"]["responses"]["override"], "force_off");
-    assert_eq!(grok["protocols"]["messages"]["override"], "force_off");
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{reset}");
+    assert_v3_error(&reset, ERROR_INTERNAL);
+    assert!(
+        reset["message"]
+            .as_str()
+            .unwrap()
+            .contains("without an official document")
+    );
+    assert_eq!(harness.state.settings_revision(), before);
+    assert_eq!(go_scope_revision(&harness), before_scope);
+    assert_eq!(
+        before_contracts.as_ref(),
+        harness.state.provider_contracts().as_ref()
+    );
     harness.stop();
 }
 
 #[tokio::test]
-async fn zen_static_protocol_reset_uses_go_docs_and_defaults_unknown_to_chat() {
+async fn zen_static_protocol_reset_uses_go_docs_and_keeps_unknown_protocols_disabled() {
     let harness = start_probes("zen-static-protocol-reset").await;
     let scope = ContractScope::provider(OPENCODE_ZEN_FREE_PROVIDER_ID);
     let models = vec![
@@ -759,7 +761,7 @@ async fn zen_static_protocol_reset_uses_go_docs_and_defaults_unknown_to_chat() {
         .find(|model| model["modelId"] == "future-free")
         .unwrap();
     assert_eq!(future["protocols"]["chat_completions"]["override"], "auto");
-    assert_eq!(future["protocols"]["chat_completions"]["enabled"], true);
+    assert_eq!(future["protocols"]["chat_completions"]["enabled"], false);
     assert!(future["protocols"]["responses"].is_null());
     assert!(future["protocols"]["messages"].is_null());
     harness.stop();
@@ -827,10 +829,7 @@ async fn goat_static_protocol_reset_restores_official_family_without_enabling_ex
         .iter()
         .find(|model| model["modelId"] == "stealth/ox-alpha")
         .unwrap();
-    assert_eq!(
-        stealth["protocols"]["chat_completions"]["override"],
-        "force_off"
-    );
+    assert_eq!(stealth["protocols"]["chat_completions"]["override"], "auto");
     assert_eq!(stealth["protocols"]["chat_completions"]["enabled"], false);
     let future = goat["models"]
         .as_array()
@@ -2205,8 +2204,11 @@ async fn static_reset_advances_global_revision_before_reload_failure() {
         )
         .unwrap();
     harness.state.reload_provider_contracts().unwrap();
+    // Reach the post-commit reload fault, rather than failing before any write.
     let _docs =
-        install_official_protocol_fetch_unavailable_for_tests(harness.state.process_generation());
+        install_official_protocol_fetch_for_tests(harness.state.process_generation(), |_| {
+            OfficialProtocolBaseline::mapped([("grok-4.5", UpstreamProtocolKind::Responses)])
+        });
     let before = harness.state.settings_revision();
     let before_contracts = harness.state.provider_contracts();
     let conn = open_sqlite(&harness);

@@ -223,49 +223,58 @@ fn opencode_ceiling_is_constructable_paths_not_static_model_protocols() {
 }
 
 #[test]
-fn unknown_zen_free_catalog_row_defaults_to_chat_and_honors_force_off() {
+fn unknown_zen_free_catalog_row_requires_explicit_protocol_enablement() {
     let catalog = ZenFreeModelCatalog {
         models: vec!["brand-new-promo-free".into()],
         refreshed_at: None,
         source_url: crate::kernel::zen::ZEN_MODELS_SOURCE_URL.to_string(),
     };
-    let set = build_effective_contracts(&catalog, &[], empty_persisted());
-    let zen = set.providers.get(OPENCODE_ZEN_FREE_PROVIDER_ID).unwrap();
-    let model = zen.model("brand-new-promo-free").unwrap();
-    let chat = model.protocols.get("chat_completions").unwrap();
-    assert_eq!(
-        model.preferred_protocol,
-        UpstreamProtocolKind::ChatCompletions
-    );
-    assert!(chat.available);
-    assert!(chat.enabled);
-    assert_eq!(chat.r#override, ProtocolOverrideState::Auto);
-    assert!(model.routable);
-    assert_eq!(
-        select_upstream_protocol(zen, ApiFormat::ChatCompletions, "brand-new-promo-free").unwrap(),
-        ApiFormat::ChatCompletions
-    );
-
     let mut persisted = empty_persisted();
     let scope = ContractScope::provider(OPENCODE_ZEN_FREE_PROVIDER_ID);
-    persisted.overrides.insert(
-        scope.clone(),
-        vec![PersistedModelProtocolOverride {
-            scope,
-            model_id: "brand-new-promo-free".into(),
-            protocol: UpstreamProtocolKind::ChatCompletions,
-            state: ProtocolOverrideState::ForceOff,
-            updated_at: Utc::now(),
-        }],
-    );
-    let set = build_effective_contracts(&catalog, &[], persisted);
-    let zen = set.providers.get(OPENCODE_ZEN_FREE_PROVIDER_ID).unwrap();
-    let model = zen.model("brand-new-promo-free").unwrap();
-    let chat = model.protocols.get("chat_completions").unwrap();
-    assert!(chat.available);
-    assert!(!chat.enabled);
-    assert_eq!(chat.r#override, ProtocolOverrideState::ForceOff);
-    assert!(!model.routable);
+    // A catalog ID and the non-null preferred-protocol placeholder are not
+    // protocol evidence. Auto must remain off, including after a ForceOn reset.
+    for state in [
+        ProtocolOverrideState::Auto,
+        ProtocolOverrideState::ForceOn,
+        ProtocolOverrideState::ForceOff,
+        ProtocolOverrideState::Auto,
+    ] {
+        persisted.overrides.insert(
+            scope.clone(),
+            vec![PersistedModelProtocolOverride {
+                scope: scope.clone(),
+                model_id: "brand-new-promo-free".into(),
+                protocol: UpstreamProtocolKind::ChatCompletions,
+                state,
+                updated_at: Utc::now(),
+            }],
+        );
+        let set = build_effective_contracts(&catalog, &[], persisted.clone());
+        let zen = set.providers.get(OPENCODE_ZEN_FREE_PROVIDER_ID).unwrap();
+        let model = zen.model("brand-new-promo-free").unwrap();
+        let chat = model.protocols.get("chat_completions").unwrap();
+        let explicitly_enabled = state == ProtocolOverrideState::ForceOn;
+        assert_eq!(
+            model.preferred_protocol,
+            UpstreamProtocolKind::ChatCompletions
+        );
+        assert_eq!(chat.r#override, state);
+        assert_eq!(chat.available, explicitly_enabled);
+        assert_eq!(chat.enabled, explicitly_enabled);
+        assert_eq!(model.routable, explicitly_enabled);
+        let selected =
+            select_upstream_protocol(zen, ApiFormat::ChatCompletions, "brand-new-promo-free");
+        if explicitly_enabled {
+            assert_eq!(selected.unwrap(), ApiFormat::ChatCompletions);
+            assert_eq!(
+                model.enabled_protocols(),
+                vec![UpstreamProtocolKind::ChatCompletions]
+            );
+        } else {
+            assert!(selected.is_err());
+            assert!(model.enabled_protocols().is_empty());
+        }
+    }
 }
 
 fn zen_snapshot(models: &[&str]) -> ZenFreeModelCatalog {
@@ -326,9 +335,10 @@ fn placeholder_empty_zen_scope_still_uses_snapshot_until_a_catalog_is_saved() {
     let set = build_effective_contracts(&snapshot, &[], persisted);
     let zen = set.providers.get(OPENCODE_ZEN_FREE_PROVIDER_ID).unwrap();
     assert_eq!(zen.catalog.models, vec!["review-model-free"]);
-    assert!(zen.model("review-model-free").is_some_and(|model| {
-        model.enabled_protocols() == vec![UpstreamProtocolKind::ChatCompletions]
-    }));
+    assert!(
+        zen.model("review-model-free")
+            .is_some_and(|model| { model.enabled_protocols().is_empty() && !model.routable })
+    );
 }
 
 #[test]
@@ -468,15 +478,32 @@ fn o01_catalog_discovered_model_stays_off_until_explicitly_enabled() {
         model.preferred_protocol,
         UpstreamProtocolKind::ChatCompletions
     );
-    assert!(chat.available);
+    assert!(!chat.available);
     assert!(!chat.enabled);
     assert_eq!(chat.r#override, ProtocolOverrideState::ForceOff);
     assert!(!model.routable);
 
-    // Clearing the refresh-written force_off rows (the matrix "开启" writes
-    // auto) enables the provider default protocol and makes the row routable.
+    // Clearing ForceOff is not evidence for an unknown model's protocol.
     let mut reenabled = persisted;
     reenabled.overrides.clear();
+    let set = build_effective_contracts(&zen_seed(), &[], reenabled.clone());
+    let go = set.providers.get(OPENCODE_PROVIDER_ID).unwrap();
+    let model = go.model("omen-alpha").unwrap();
+    assert!(model.enabled_protocols().is_empty());
+    assert!(!model.routable);
+    assert!(select_upstream_protocol(go, ApiFormat::ChatCompletions, "omen-alpha").is_err());
+
+    // An explicit operator choice admits only that protocol.
+    reenabled.overrides.insert(
+        scope.clone(),
+        vec![PersistedModelProtocolOverride {
+            scope,
+            model_id: "omen-alpha".into(),
+            protocol: UpstreamProtocolKind::ChatCompletions,
+            state: ProtocolOverrideState::ForceOn,
+            updated_at: now,
+        }],
+    );
     let set = build_effective_contracts(&zen_seed(), &[], reenabled);
     let go = set.providers.get(OPENCODE_PROVIDER_ID).unwrap();
     let model = go.model("omen-alpha").unwrap();

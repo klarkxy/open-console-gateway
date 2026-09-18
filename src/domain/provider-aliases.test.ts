@@ -126,6 +126,16 @@ test("Alias rows combine provider contracts with Custom public-to-upstream mappi
       custom_account_id: null,
     },
     {
+      provider_id: "opencode",
+      key: "provider:go:raw-only-model:raw-only-model",
+      public_model: "raw-only-model",
+      provider_plan: "OpenCode Go",
+      custom_account: null,
+      upstream_model: "raw-only-model",
+      routable: true,
+      custom_account_id: null,
+    },
+    {
       provider_id: "custom",
       key: "custom:custom-1:public-model:vendor/model:free",
       public_model: "public-model",
@@ -216,6 +226,7 @@ test("production Alias merge keeps only enabled-account providers and selected C
   );
   assert.deepEqual(rows.map((row) => row.key), [
     "provider:go:gpt-5.6:gpt-5.6-upstream",
+    "provider:go:raw-only-model:raw-only-model",
     "custom:custom-1:public-model:vendor/model:free",
     "dynamic:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa:lab-opus:vendor/opus",
     "cpa:gpt-5.6",
@@ -266,4 +277,17 @@ test("CPA rows stay hidden when the subscription pool is disabled", () => {
     [{ id: "gpt-5.6", enabled: true }],
   );
   assert.deepEqual(rows, []);
+});
+
+
+test("Go raw model rows preserve disabled protocol state and account filtering", () => {
+  const scope = {
+    ...builtinScope,
+    models: [{ ...builtinScope.models[1]!, routable: false }],
+  } as ProviderScopeView;
+  const rows = providerAliasRows([scope], [goAccount]);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]?.public_model, "raw-only-model");
+  assert.equal(rows[0]?.routable, false);
+  assert.deepEqual(providerAliasRows([scope], [{ ...goAccount, enabled: false }]), []);
 });
