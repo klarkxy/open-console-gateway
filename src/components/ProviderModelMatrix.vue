@@ -162,9 +162,24 @@
                   {{ protocolDisplayName(choice) }}
                 </button>
               </div>
-              <span v-else class="matrix-protocol-label matrix-protocol-label--muted">
-                {{ t("无可用协议") }}
-              </span>
+              <div v-else class="matrix-chips">
+      <n-popconfirm
+        v-for="choice in rowUnverifiedProtocols(modelId)"
+        :key="choice"
+        :disabled="rowEditLocked(modelId)"
+        @positive-click="enableUnverifiedProtocol(modelId, choice)"
+      >
+        <template #trigger>
+          <n-button text size="tiny" :disabled="rowEditLocked(modelId)">
+            {{ t("{protocol}（未验证）", { protocol: protocolDisplayName(choice) }) }}
+          </n-button>
+        </template>
+        {{ t("官方协议资料不可用。确认手动启用 {protocol}？此操作只修改配置，不发送测试请求；后续推理可能失败或产生费用。", { protocol: protocolDisplayName(choice) }) }}
+      </n-popconfirm>
+      <span v-if="rowUnverifiedProtocols(modelId).length === 0" class="matrix-protocol-label matrix-protocol-label--muted">
+        {{ t("无可用协议") }}
+      </span>
+    </div>
             </td>
             <td class="matrix-cell matrix-cell--state">
               <n-switch
@@ -291,6 +306,24 @@ const emit = defineEmits<{
   (e: "remove", payload: { modelIds: string[] }): void;
   (e: "error", message: string): void;
 }>();
+
+// Unknown support is not silently guessed. Only an explicit confirmed
+// operator choice can enable one of the backend-admitted protocol slots.
+function rowUnverifiedProtocols(modelId: string): ProviderProtocol[] {
+  if (props.scope.scope_kind !== "provider") return [];
+  const model = props.scope.models.find((entry) => entry.model_id === modelId);
+  if (!model || modelAvailableProtocols(model).length > 0) return [];
+  return PROVIDER_PROTOCOLS.filter((protocol) => Boolean(model.protocols[protocol]));
+}
+
+function enableUnverifiedProtocol(modelId: string, protocol: ProviderProtocol): void {
+  if (rowEditLocked(modelId) || !rowUnverifiedProtocols(modelId).includes(protocol)) return;
+  emit("update:overrides", {
+    scopeKind: props.scope.scope_kind,
+    scopeId: props.scope.scope_id,
+    overrides: [{ model_id: modelId, protocol, state: "force_on", preferred: true }],
+  });
+}
 
 const modelQuery = ref("");
 const enabledOnly = ref(false);
