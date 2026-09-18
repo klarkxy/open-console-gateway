@@ -33,7 +33,7 @@ GUI 或 CLI 启动时会原地执行 SQLite 迁移。打开新版二进制前：
 
 ## Schema v27 与 pre-v3 快照
 
-`CURRENT_SCHEMA_VERSION = 49`（`crates/ocg-core/src/db.rs`）。打开历史库会先规范迁移到 v26，再由 v27 重写把主 Key 与全部 `sub_gateway_keys` 行复制进一张 `access_keys` 表（主 Key 固定 id `00000000-0000-0000-0000-000000000001`），删除 `sub_gateway_keys`，并删除 `accounts` 上遗留的五列 `usage_sync_*`（用量同步元数据在 `provider_usage_sync_state`）。v33 新增 Custom 精确上游模型身份；v34 新增 CPA 单例配置表，但不会导入或导出 CPA 状态。v35 把 Provider/Plan 身份收成只有 `provider_id`：先预检每一个已知的 v34 provider/offering 对，未知对与会丢数据的复合键冲突在写入前失败，再重建受影响的表，使 offering 列不存在。v36 增量创建过 `ollama_cloud_usage_state`（未发布的 Cookie 用量抓取）。v37 删除该表且不动账号 Key 与日志，并创建 `ollama_cloud_billing`。v42 把类型化用户定义 Provider 表与密封 Adapter 种子目录统一：把 `dynamic_providers` / `dynamic_provider_models` 重命名为 `providers` / `provider_models`，新增 `origin`（`builtin` | `preset` | `custom`）、`adapter_kind`、`offering`（`plan` | `api`）与 `endpoint_per_account` 列，把七个密封 builtin 适配器（OpenCode Go、Zen Free、Command Code GOAT、MiniMax CN、Kimi CN、Ollama Cloud、Custom API——但不含静态外部接入 CPA）以 `builtin` 行种入表中，这些行的属性列只是展示镜像，并在 dynamic 读路径上加 `origin` 过滤。v41 的 `provider_model_protocol_preferences` 表上 `provider_id` CHECK 已被去掉（`protocol ∈ ('chat_completions', 'messages')` 的 CHECK 保留到 v43）。账号 `key_cipher` / `password_cipher` 用 Host cipher 就地校验，**不会重新加密**。v44 增量创建 `dashboard_operations`，供 V4 幂等提交使用，不另写迁移前备份（与 v43 相同）。v45 增量创建身份/凭据/绑定附属表与 `accounts.identity_id`，不另写迁移前备份（与 v43/v44 相同）。v46 增量持久化绑定 `allowed_endpoint_ids` / `allowed_origins` JSON，并从安全的已分配连接端点一次性回填；不另写迁移前备份。v47 增量持久化 `providers.onboarding_draft`（`0` 已配置，`1` 草稿）；既有行保持已配置，不会从缺字段推断草稿。路由列表查询排除草稿；控制面列表、入职续写、V4 投影和 V6 导出包含草稿。不另写迁移前备份。v48 删除四列无运行语义的字段（`provider_contract_scopes` 协议开关与 `accounts.free_alias_enabled`）以及空的遗留 `dynamic_providers` / `dynamic_provider_models`；非空遗留会拒绝升级并保持 schema 47。非空 v47 库会写一份唯一的 pre-v48 快照。
+`CURRENT_SCHEMA_VERSION = 57`（`crates/ocg-core/src/db.rs`）。打开历史库会先规范迁移到 v26，再由 v27 重写把主 Key 与全部 `sub_gateway_keys` 行复制进一张 `access_keys` 表（主 Key 固定 id `00000000-0000-0000-0000-000000000001`），删除 `sub_gateway_keys`，并删除 `accounts` 上遗留的五列 `usage_sync_*`（用量同步元数据在 `provider_usage_sync_state`）。v33 新增 Custom 精确上游模型身份；v34 新增 CPA 单例配置表，但不会导入或导出 CPA 状态。v35 把 Provider/Plan 身份收成只有 `provider_id`：先预检每一个已知的 v34 provider/offering 对，未知对与会丢数据的复合键冲突在写入前失败，再重建受影响的表，使 offering 列不存在。v36 增量创建过 `ollama_cloud_usage_state`（未发布的 Cookie 用量抓取）。v37 删除该表且不动账号 Key 与日志，并创建 `ollama_cloud_billing`。v42 把类型化用户定义 Provider 表与密封 Adapter 种子目录统一：把 `dynamic_providers` / `dynamic_provider_models` 重命名为 `providers` / `provider_models`，新增 `origin`（`builtin` | `preset` | `custom`）、`adapter_kind`、`offering`（`plan` | `api`）与 `endpoint_per_account` 列，把七个密封 builtin 适配器（OpenCode Go、Zen Free、Command Code GOAT、MiniMax CN、Kimi CN、Ollama Cloud、Custom API——但不含静态外部接入 CPA）以 `builtin` 行种入表中，这些行的属性列只是展示镜像，并在 dynamic 读路径上加 `origin` 过滤。v41 的 `provider_model_protocol_preferences` 表上 `provider_id` CHECK 已被去掉（`protocol ∈ ('chat_completions', 'messages')` 的 CHECK 保留到 v43）。账号 `key_cipher` / `password_cipher` 用 Host cipher 就地校验，**不会重新加密**。v44 增量创建 `dashboard_operations`，供 V4 幂等提交使用，不另写迁移前备份（与 v43 相同）。v45 增量创建身份/凭据/绑定附属表与 `accounts.identity_id`，不另写迁移前备份（与 v43/v44 相同）。v46 增量持久化绑定 `allowed_endpoint_ids` / `allowed_origins` JSON，并从安全的已分配连接端点一次性回填；不另写迁移前备份。v47 增量持久化 `providers.onboarding_draft`（`0` 已配置，`1` 草稿）；既有行保持已配置，不会从缺字段推断草稿。路由列表查询排除草稿；控制面列表、入职续写、V4 投影和 V6 导出包含草稿。不另写迁移前备份。v48 删除四列无运行语义的字段（`provider_contract_scopes` 协议开关与 `accounts.free_alias_enabled`）以及空的遗留 `dynamic_providers` / `dynamic_provider_models`；非空遗留会拒绝升级并保持 schema 47。非空 v47 库会写一份唯一的 pre-v48 快照。v50 增量创建目的地/凭据影子表（`destinations`、`destination_models`、`credentials`、`credential_grants`），内容来自 `project()`，不另写迁移前备份；它们还不是权威，也不存放 Key 材料。v51 通过 `legacy_account_id` 把 `accounts.key_cipher` / `password_cipher` 复制到 `credentials`，使凭据行成为密钥库；`accounts` 表在剩余读取方迁走之前仍保留。v52 把剩余 Account 字段复制到 `credentials`，在 `accounts` 仍在时重建目的地影子，若任一账号缺少 `credentials.legacy_account_id` 则拒绝删除，然后 `DROP TABLE accounts`。目的地与凭据成为账号行存储。V4 GET 列表仍不含秘密。Key 仍以密文落盘。v53 在遗留 Custom 行能映射时把 endpoint/协议/模型抄到 `destinations` / `destination_models`，无法映射则拒绝，然后 `DROP TABLE account_custom_configs` 与 `DROP TABLE account_model_capabilities`。v54 在遗留平台父账号/关联能映射时把它们抄到 destinations + credentials（观察者凭据持有管理密文），无法映射则拒绝，然后 `DROP TABLE platform_links` 与 `DROP TABLE platform_accounts`。v55 在遗留 `cpa_integration` 能映射时把它抄到 CPA 目的地（`adapter=cpa`）与观察者凭据，无法映射则拒绝，然后 `DROP TABLE cpa_integration`。v56 在遗留 `origin IN ('preset','custom')` 供应商行及其 `provider_models` 能映射时把它们抄到 destinations（`legacy_kind=dynamic`）与 `destination_models`，空的 keyed HTTP URL 或未知 adapter 拒绝迁移，然后 `DROP TABLE provider_models` 与 `DROP TABLE providers`。密封目录仍来自 `BUILTIN_PROVIDERS`；v56 不为 builtin 种子行发明目的地。v57 在遗留身份附属行能映射时把它们抄到 credentials + `credential_grants`，无法映射则拒绝，然后删除 `upstream_identities`、`credential_state`、`credential_bindings`、`legacy_identity_map`、`onboarding_tasks` 与 `subscription_records`。`quota_pools` / `quota_pool_members` 保留。`provider_model_catalogs` 与 `dashboard_operations` 不删。不另写迁移前备份。
 
 ## Schema v45 — 身份 / 凭据 / 绑定附属表
 
@@ -57,7 +57,7 @@ v45 把遗留 Account 拆成身份容器 / 凭据 / 绑定语义，但不搬移 
 
 每一次账号插入（V3 创建、托管创建、用户定义供应商首把 Key、V4 onboarding commit、节点导入）都通过与本迁移共用的唯一映射器，在同一事务写入附属行。平台关联 / 解除关联在同一事务更新被关联身份的置信度与站点。
 
-轮换、绑定编辑与第二份凭据写入是建立在这些附属表上的 V4 CAS 路径。新节点导出使用 portable payload V6（外层 envelope 仍为 v1）。V6 携带显式的身份 / 凭据 / 绑定 / 额度池快照，以便共享身份、第二份凭据、绑定的 `model_scope` / `enabled`、已保存授权以及额度池成员关系在导入到全新数据库后仍可恢复。V4 与 V5 包仍可通过既有的 1:1 确定性附属映射导入（每个账号一个身份、一份凭据、一条 All 范围绑定、该身份的额度池，以及一次性安全授权）。若 V4/V5 包已经带上这些 V6 字段，导入会拒绝，而不会静默丢弃。payload V7 及更新版本会以明确的不支持版本错误拒绝。本切片不改账号页 UI。物理账号表与 v45 附属表不变；冻结的 V3 外层 HTTP 迁移 DTO 也不变。
+轮换、绑定编辑与第二份凭据写入是建立在这些附属表上的 V4 CAS 路径。新节点导出使用 portable payload V7（外层 envelope 仍为 v1）。V7 直接携带目的地与凭据，并保留 V6 的身份 / 凭据 / 绑定 / 额度池快照，以便共享身份、第二份凭据、绑定的 `model_scope` / `enabled`、已保存授权以及额度池成员关系在导入到全新数据库后仍可恢复。V4–V6 包仍可导入；V4/V5 仍走既有的 1:1 确定性附属映射。若 V4/V5 包已经带上 V6 身份字段，或 V6 包已经带上 V7 目的地字段，导入会拒绝而不会静默丢弃。payload V8 及更新版本会以明确的不支持版本错误拒绝。随后 v52 删除了 `accounts`；v53–v57 删除了遗留 Custom、平台、CPA、Provider 与身份附属表。目的地与凭据是当前存储。挂回 V4 的转移 DTO 不变。
 
 ## Schema v46 — 持久化绑定授权
 
@@ -86,6 +86,93 @@ v49 增量创建 `unpublished_public_models`，保存已鉴权 `GET /v1/models` 
 - `updated_at`
 
 未出现的名称默认对外展示。隐藏名称仍可路由。写入路径是 `PATCH /dashboard/api/v4/alias-publication`。节点迁移不携带此表。不另写迁移前备份（只做加法，与 v43–v47 相同）。回滚仍是既有的整目录恢复。
+
+## Schema v50 — 目的地影子表
+
+v50 增量持久化阶段 4a `project()` 的目的地与凭据集合影子。这些表还不是权威：V3/V4 读取与所有变更仍走既有遗留行。控制面写入中 `project()` 会读到的那些，会在同一 SQLite 事务里重建影子；重新打开数据库仍会从活行重建。投影拒绝时清空四张表，不阻止打开数据库。
+
+表：
+
+- `destinations` — `id`、`legacy_kind`（`builtin` | `dynamic` | `custom_account` | `platform_parent`）、`legacy_id`、`adapter`、`name`、`brand_family`、`base_url`、`protocols_json`、`auth_scheme`、`capabilities_json`、`plan_json`、`max_credentials`、`observer_credential_id`、`enabled`
+- `destination_models` — 目录行，主键为 `(destination_id, public_model_key)`；`public_model_key` 是大小写折叠后的对外名
+- `credentials` — 只把 `has_secret` 与 `legacy_account_id` 作为与密钥相邻的事实；没有 `key_cipher`、`password_cipher` 或明文密钥
+- `credential_grants` — `endpoint_id` / `origin` 授权
+
+`credentials.quota_pool_id` 是可空文本 id，复用既有 v45 的 `quota_pools` / `quota_pool_members`。v50 不再造一张池表，也不创建 `observations`。JSON 列存放现有领域类型的 `serde_json`。日期为 RFC3339 文本。布尔为 `0`/`1`。不另写迁移前备份（只做加法，与 v43–v49 相同）。回滚仍是既有的整目录恢复。
+
+## Schema v51 — 凭据密钥库
+
+v51 把 Host cipher 的 Key 与口令材料增量存到 `credentials`：
+
+- `credentials.key_cipher` — `TEXT NOT NULL DEFAULT ''`
+- `credentials.password_cipher` — 可空 `TEXT`
+
+既有行通过 `legacy_account_id` 从 `accounts` 复制密文。打开时重建影子也会同样复制，避免清空密钥。实发优先用非空的凭据密文，没有再回退到 `accounts` 行。V4 GET 列表仍不含秘密。本版本不删除 `accounts` 表。不另写迁移前备份（只做加法）。回滚仍是既有的整目录恢复。
+
+## Schema v52 — 删除 `accounts`
+
+v52 让 `credentials`（join `destinations`）成为账号行存储，并物理删除 `accounts`：
+
+- 在 `credentials` 上补齐重建 Account 仍需要的列（`username`、`referral_code`、`cooldown_until`、`created_at`、`updated_at`、`auth_error`、`account_type`、`setup_step`、`provider_id`、`credential_kind`、`quota_scope`、`identity_id`，以及运行时仍会写入的校验与用量窗口列）。
+- 在 `accounts` 仍在时通过 `legacy_account_id` 从该表回填这些列。
+- 删除前重建一次目的地影子，使每个活账号都有凭据行。
+- 若任一 `accounts.id` 没有对应的 `credentials.legacy_account_id`，迁移拒绝执行（不编造行）。
+- 改写指向 `accounts` 的子表外键，然后 `DROP TABLE accounts`。
+
+v52 之后的 Host 打开不会因为 `project()` 再也读不到 `accounts` 而清空已有的 destinations/credentials。`get_account` / `list_accounts` 从凭据重建 `Account`（`legacy_account_id` 仍是稳定的重挂 id）。运行时写入改打 credentials（provider/name/url 变化时同时写 destinations）。V4 GET 目的地/凭据 DTO 仍不含秘密；Key 密文只留在凭据 SQL 行。全新库迁移结束后不再保留 `accounts` 表。v53 之后 `account_custom_configs` 与 `account_model_capabilities` 也不再保留。v54 之后 `platform_accounts` 与 `platform_links` 也不再保留。v55 之后 `cpa_integration` 也不再保留。v56 之后遗留 `providers` / `provider_models` 也不再保留。身份附属表仍在。不另写迁移前备份。回滚仍是既有的整目录恢复。
+
+## Schema v53 — 删除遗留 Custom 表
+
+v53 让 `destinations` + `destination_models` 成为 Custom HTTP 的 endpoint、协议与模型映射存储，并物理删除两张遗留表：
+
+- 删除前，每一条未链接的遗留 `account_custom_configs` / `account_model_capabilities` 必须能映射到 Custom 目的地（`legacy_kind=custom_account`，`legacy_id=account_id`）及其 `destination_models`。空 URL 或未知协议拒绝迁移；不编造 URL 或协议。
+- 只存在于 `platform_links` 加遗留 custom 配置的已链接平台 Key 仍留在 `platform_*` 表，直到 v54。它们的遗留 custom 行不会映射成 Custom 目的地。
+- 然后 `DROP TABLE account_custom_configs;` 与 `DROP TABLE account_model_capabilities;`。
+
+v53 之后的 Host 打开不会清空已有的 destinations/credentials。`account_custom_config` / `list_account_model_capabilities*` 从 Custom 目的地重建（已链接 Key 则从平台父级目的地目录重建）。写入打 destinations 与 `destination_models`，并在需要时刷新 `credentials.destination_id`。V4 GET 目的地/凭据 DTO 仍不含秘密。全新库迁移结束后不再保留这两张遗留表。v54 之后 `platform_accounts` 与 `platform_links` 也不再保留。v55 之后 `cpa_integration` 也不再保留。v56 之后遗留 `providers` / `provider_models` 也不再保留。身份附属表仍在。不另写迁移前备份。回滚仍是既有的整目录恢复。
+
+## Schema v54 — 删除遗留平台表
+
+v54 让 destinations + credentials 成为平台父账号与关联的存储，然后物理删除遗留表：
+
+- 删除前，每一条遗留 `platform_accounts` 必须映射为目的地（`legacy_kind=platform_parent`，`legacy_id=parent.id`），并带上 `base_url`、`name` 与 `platform_kind`（`new_api` | `sub2api`；同时镜像到 `brand_family`）。空 URL 或未知 kind 拒绝迁移；不编造站点或种类。
+- 管理 `credential_cipher` 落到观察者凭据（`destinations.observer_credential_id`）。有密文时该凭据 `has_secret` 为 true。父账号 `version` / `snapshot` 以目的地附加列 `platform_version` / `platform_snapshot` 保留。
+- 每一条遗留 `platform_links` 必须映射到已关联推理凭据（`legacy_account_id=account_id`），且 `destination_id` 为平台父级目的地。`group_json`、关联 version 与关联 snapshot 以凭据附加列保留。父级目的地或推理凭据缺失则拒绝迁移。
+- 然后 `DROP TABLE platform_links;` 与 `DROP TABLE platform_accounts;`。
+
+v54 之后的 Host 打开不会清空已有的 destinations/credentials。`list_platform_accounts` / `list_platform_links` 以及创建/更新/删除/关联/解除/刷新/导入都从 destinations + credentials 重建并写入。`project()` 从这些行推导平台父账号。V4 GET 目的地/凭据 DTO 仍不含秘密（无管理密文 / `key_cipher`）。全新库迁移结束后不再保留这两张遗留表。v55 之后 `cpa_integration` 也不再保留。v56 之后遗留 `providers` / `provider_models` 也不再保留。身份附属表仍在。不另写迁移前备份。回滚仍是既有的整目录恢复。
+
+## Schema v55 — 删除遗留 CPA 表
+
+v55 让 destinations + credentials 成为 CPA 单例接入的存储，然后物理删除遗留表：
+
+- 删除前，遗留 `cpa_integration` 行必须映射到 CPA 目的地（`adapter=cpa` / 遗留 builtin `cpa`），有 `base_url` 时写到目的地，`management_key_cipher` 写到观察者凭据（`destinations.observer_credential_id`）。保留的推理凭据不承载管理密文。空管理密文或缺失列拒绝迁移；没有遗留行时不发明 CPA 目的地。
+- 然后 `DROP TABLE cpa_integration;`。
+- CPA 模型快照仍在 `provider_model_catalogs`。回环 / compose `base_url` 覆盖仍遵循既有运行时不变量。
+
+v55 之后的 Host 打开不会清空已有的 destinations/credentials。`cpa_integration()` / `upsert_cpa_integration` / `delete_cpa_integration` 从 CPA 目的地 + 观察者凭据重建并写入。`project()` 不再读 `cpa_integration`。V4 GET 目的地/凭据 DTO 仍不含秘密（无管理密文 / `key_cipher`）。全新库迁移结束后不再保留该遗留表，也不会发明 CPA 目的地。v56 之后遗留 `providers` / `provider_models` 也不再保留。身份附属表与 `provider_model_catalogs` 仍在。不另写迁移前备份。回滚仍是既有的整目录恢复。
+
+## Schema v56 — 删除遗留动态 Provider 表
+
+v56 让 destinations + `destination_models` 成为用户定义 / 预设 HTTP Provider 的存储，然后物理删除遗留动态 Provider 表：
+
+- 删除前，每一条遗留 `origin IN ('preset','custom')` 供应商必须映射为目的地（`legacy_kind=dynamic`，`legacy_id=provider.id`），并带上名称、`base_url`、协议、认证、origin、offering、preset、时间戳与 `onboarding_draft`。这些 id 上的每一条遗留 `provider_models` 映射到 `destination_models`（含 `upstream_override`）。keyed HTTP 空 URL、未知 adapter 或无法映射的遗留 `provider_models` 拒绝迁移；不编造 URL 或 adapter。
+- 不复制 builtin 种子行。密封目录仍来自编译期 `BUILTIN_PROVIDERS` / adapter 注册表。v56 不为 builtin 种子发明目的地，也不发明运行时 adapter 行。
+- 然后 `DROP TABLE provider_models;` 与 `DROP TABLE providers;`。
+
+v56 之后的 Host 打开不会清空已有的 destinations/credentials。`list_control_plane_dynamic_providers` / get / upsert / delete / 入职提交 / 转移合并都从 destinations + `destination_models` 重建并写入。V4 connections/templates 的 builtin 来自密封目录，用户定义行来自 destinations。`project()` 不再需要遗留 Provider 表。V4 GET 目的地/凭据 DTO 仍不含秘密。全新库迁移结束后不再保留遗留 `providers` / `provider_models`，也不会发明用户定义目的地。v57 之后那六张身份遗留表也不再保留。`quota_pools`、`provider_model_catalogs` 与 `dashboard_operations` 仍在。不另写迁移前备份。回滚仍是既有的整目录恢复。
+
+## Schema v57 — 删除遗留身份附属表
+
+v57 让 credentials + `credential_grants` 成为身份、绑定、入职与订阅事实的存储，然后物理删除遗留附属表：
+
+- 增量凭据列承接遗留身份/绑定/状态事实（`identity_confidence`、`authority_site`、`authority_subject`、`identity_enabled`、`identity_label`、`identity_notes`、`credential_version`、`auth_state_version`、`rotated_at`、`binding_id`、`binding_enabled`、`subscription_source`、`subscription_expires_on`）。遗留授权在缺失时抄到 `credential_grants`。遗留入职抄到 `credentials.onboarding_json`。遗留订阅抄到凭据的购买/到期字段。
+- 删除前，每一条被凭据或平台目的地引用的遗留 `upstream_identities` 必须能映射。每一条遗留 `credential_state` / `credential_bindings` / `onboarding_tasks` / `subscription_records` 必须映射到凭据（`legacy_account_id` / `identity_id`）。孤立绑定，或没有可重建凭据/目的地的身份，会拒绝迁移。没有遗留行的全新库不会发明身份。
+- 保留 UUID 仍在代码里。`legacy_identity_map` 只是迁移桥。
+- 然后 `DROP TABLE` `upstream_identities`、`credential_state`、`credential_bindings`、`legacy_identity_map`、`onboarding_tasks` 与 `subscription_records`。已经是 v57 的库再次打开也会 `DROP TABLE IF EXISTS` 这些遗留表。
+- `quota_pools` / `quota_pool_members` 保留（`quota_pool_members.account_id` 是重挂后的 `credentials.legacy_account_id`）。`credential_grants`、`provider_model_catalogs` 与 `dashboard_operations` 保留。
+
+v57 之后的 Host 打开不会清空已有的 destinations/credentials。`list_identity_model` / 创建凭据 / 轮换 / 更新授权 / 入职 / 转移 V6+V7 身份导入 / 平台身份标签更新都不依赖遗留身份表。V4 `GET /accounts` 仍是重建后的身份列表，且不含秘密（无 `key_cipher` / 管理密文）。全新库迁移结束后不再保留这六张遗留表，仍有 `quota_pools`，仍有 Zen，也不会发明额外身份。这六张身份遗留表已不在，阶段 8 的身份遗留删除到此完成。不另写迁移前备份。回滚仍是既有的整目录恢复。
 
 ## Schema v48 — 无运行语义的列与空遗留表
 

@@ -4,7 +4,18 @@
 
 ## Dashboard V3
 
-Dashboard JSON is `/dashboard/api/v3`. DTOs are camelCase, mutation bodies deny unknown fields, and nullable response fields serialize as `T | null`.
+The `/dashboard/api/v3` HTTP mount is **removed**. The dashboard speaks V4
+only. Anonymous `/dashboard/api/v3` and `/dashboard/api/v3/*` return
+empty-body **401** (auth runs before the tombstone). Authenticated requests
+(including loopback local mode) return **410**
+`{ "code": "dashboardV3Removed", "message": "Dashboard API V3 has been removed; refresh the page and retry." }`.
+
+Operational V3 handlers are remounted under `/dashboard/api/v4` with the same
+relative paths, except the account-list shim is `GET /account-records` so it
+does not collide with V4 `GET /accounts` (identities). `GET /contract` is the
+existing V4 ControlRevision. **The remounted handlers are a compatibility
+shim** over the destination and credential tables. New clients should use V4
+`GET /destinations` and `GET /credentials`. Remounted listings reconstruct from destinations and credentials. Key ciphertext stays on credential SQL rows and never appears on V4 GET destination/credential DTOs. DTOs are camelCase, mutation bodies deny unknown fields, and nullable response fields serialize as `T | null`.
 
 Control-plane identity:
 
@@ -23,7 +34,7 @@ Mutations require top-level `expectedRevision` and `processGeneration`
 `POST /accounts/{id}/usage/refresh`). A missing `expectedRevision` returns
 `400` `missingExpectedRevision`; a mismatch returns `409` `revisionConflict`
 with `currentRevision` and `processGeneration` in the error envelope. The Vue
-`controlPlane` store records both tokens from every V3 payload. On 409 the
+`controlPlane` store records both tokens from every remounted V3 payload. On 409 the
 client refreshes the control tokens and affected resource without replaying
 the mutation; the user can review current state and submit again. Tokens are process-local
 and do not coordinate separate processes sharing a data directory.
@@ -59,8 +70,9 @@ handlers. Other `/dashboard/api/...` REST paths are tombstoned in
 
 ## Dashboard V4
 
-Dashboard V4 JSON is `/dashboard/api/v4`. It is a parallel, additive control
-plane beside frozen V3. V3 `$defs` and routes do not gain new fields.
+Dashboard V4 JSON is `/dashboard/api/v4`. This is the only live dashboard
+JSON prefix: additive V4 routes plus remounted V3 operational handlers.
+V3 `$defs` do not gain new fields.
 
 V4 reuses V3 session middleware. Its listings return the same `ControlRevision`
 (`expectedRevision` / `processGeneration`) that V3 uses for CAS. V4 mutations are `POST /onboarding/commit`,
@@ -79,7 +91,9 @@ The checked-in additive V4 contract is `schema/dashboard-api-v4.schema.json`, ge
 appending must keep existing definitions byte-identical.
 
 Read-only routes are `GET /contract`, `GET /templates`,
-`GET /connections`, `GET /accounts`, `GET /applications/dsh`,
+`GET /connections`, `GET /accounts` (identities), `GET /account-records`
+(remounted V3 account-list shim), `GET /destinations`, `GET /credentials`,
+`GET /applications/dsh`,
 `GET /cpa/models`, and `GET /alias-publication`. Those reads perform no outbound
 requests.
 
@@ -116,6 +130,13 @@ cannot be redacted safely), and `legacy`. The platform parent's
 Accounts page overlays this projection for display; Key rotation, binding
 edits, and additional identity credentials use V4, while the remaining
 account mutations stay on V3.
+
+`GET /destinations` and `GET /credentials` are the RFC stage-4b projection of
+`destination_projection`: read-only, secret-free, and revision-tagged. A
+refused mapping returns `409` `destinationProjectionRefused` with a `details`
+array naming each refused row. Mapping totality is still live `project()`.
+A populated v50 shadow is the served snapshot; an empty shadow or load error
+falls back to live. Mapping refusals stay `409` from live `project()`.
 
 V4 does not treat authorization `unknown` as `valid`. Eligibility is a local
 projection, never upstream health.
@@ -239,9 +260,9 @@ Protected Dashboard V2 REST answers with a fixed tombstone.
   tombstone).
 - Authenticated V2 REST (including loopback local mode): **410** with
   `{ "code": "dashboardV2Removed", "message": "Dashboard API V2 has been removed; refresh the page and retry." }`.
-- Unknown `/dashboard/api/...` paths that are not V3, not V4, and not a
-  preserved family are also 410 once authenticated. Unknown V4 paths are V4
-  `404`s, not tombstones.
+- Unknown `/dashboard/api/...` paths that are not the V3 tombstone prefix,
+  not V4, and not a preserved family are also 410 once authenticated.
+  Unknown V4 paths are V4 `404`s, not tombstones.
 
 Preserved `/dashboard/api` families (exact path, no trailing slash, no
 extra segments):
@@ -249,10 +270,11 @@ extra segments):
 - `auth/status`, `auth/register`, `auth/login`, `auth/logout`
 - `browser/sessions/{token}/ws` (non-empty token)
 
-V3 auth and browser WebSocket live under `/dashboard/api/v3/...`; the Vue
-shell uses them, and current product views also call the additive V4 routes
-under `/dashboard/api/v4/...`. Inference routes, dashboard HTML, and
-`/dashboard/assets/...` are outside the tombstone.
+The `/dashboard/api/v3` prefix is a separate 410 family
+(`dashboardV3Removed`). The Vue shell and product views call
+`/dashboard/api/v4` only (`requestV3` and `requestV4` share that base;
+`dashboardV3.listAccounts` uses `GET /account-records`). Inference routes,
+dashboard HTML, and `/dashboard/assets/...` are outside the tombstone.
 
 ---
 

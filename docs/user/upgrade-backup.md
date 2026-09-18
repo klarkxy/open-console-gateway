@@ -14,9 +14,9 @@ existing installation directory. The installer never uninstalls first. The
 upgrade keeps the data directory and auto-start setting and migrates existing
 desktop and Start-menu shortcuts. Uninstall only from Windows **Installed apps**.
 
-## Database Migration And Access Keys (Schema v49)
+## Database Migration And Access Keys (Schema v57)
 
-The database schema is **v49**; historical databases migrate in place on
+The database schema is **v57**; historical databases migrate in place on
 startup. The primary access key keeps the fixed id
 `00000000-0000-0000-0000-000000000001`, so clients keep authenticating with
 the same value across upgrades. The `access_keys` table holds the primary key
@@ -27,7 +27,7 @@ Before a destructive schema rewrite (v27, v35, v42, v48), the migrator writes
 a unique, never-overwritten sibling snapshot — `data.sqlite.pre-v3.<timestamp>.bak`,
 `data.sqlite.pre-v35.<timestamp>.bak`, `data.sqlite.pre-v42.<timestamp>.bak`,
 or `data.sqlite.pre-v48.<timestamp>.bak` — plus a SHA-256 sidecar. A fresh
-empty data directory creates schema v49 directly and skips the snapshot. That
+empty data directory creates schema v57 directly and skips the snapshot. That
 snapshot is a rollback point, not a substitute for a complete backup: verify
 the sidecar before restoring it, and restore it only onto a binary that can
 open that schema version or to retry an upgrade that never committed. Never
@@ -39,11 +39,12 @@ dropped.
 
 ### Portable Node Backup Payloads
 
-Node backups export payload V6 with `providerId` plus the identity snapshot,
-including saved user-defined Provider definitions. V4/V5 backups remain
-importable with their older host-local cooldown behavior. Payload V1–V3
-backups are rejected with an explicit unsupported-version error; that is not
-a wrong password or a damaged file.
+Node backups export payload V7 with destinations, credentials, `providerId`,
+and the identity snapshot, including saved user-defined Provider definitions.
+V4–V6 backups remain importable (V4/V5 keep their older host-local cooldown
+behavior). Payload V1–V3 backups, and V8 or newer, are rejected with an
+explicit unsupported-version error; that is not a wrong password or a damaged
+file.
 
 ## Backup
 

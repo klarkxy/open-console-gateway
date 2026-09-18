@@ -30,11 +30,11 @@ Protect the data directory: there is no remote recovery if it is lost.
   file from the loopback dashboard; no separate administrator step-up is
   required. Account and Access Keys are encrypted with Argon2id plus
   AES-256-GCM. The migration password is not stored and cannot be recovered.
-  Treat the file and password as separate secrets. V6 preserves identity
-  grouping, credential and binding IDs, model restrictions, quota-pool
-  relationships, and cooldown deadlines. Import never shortens a later
-  destination cooldown. V4/V5 imports remain supported with their older
-  host-local cooldown behavior. Browser profiles, login passwords, logs,
+  Treat the file and password as separate secrets. V7 preserves destinations,
+  credentials, identity grouping, credential and binding IDs, model
+  restrictions, quota-pool relationships, and cooldown deadlines. Import never
+  shortens a later destination cooldown. V4–V6 imports remain supported (V4/V5
+  keep their older host-local cooldown behavior). Browser profiles, login passwords, logs,
   usage, and machine-local host settings are not included. For a rollback,
   restore a complete data-directory backup, including its encryption key.
 - **Plain HTTP warning.** A non-loopback `http://` root URL exposes the Key

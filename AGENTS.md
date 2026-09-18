@@ -4,8 +4,8 @@ Open Console Gateway is a local multi-Plan console: Rust workspace, Vue 3 dashbo
 
 ## Boundaries that affect changes
 
-- The dashboard uses HTTP `/dashboard/api/v3` (frozen) and `/dashboard/api/v4` (additive); mutations use CAS. Contract changes belong in the respective `schema/dashboard-api-v{3,4}.schema.json` and generated types. There is no V2 REST surface and no Tauri `invoke` commands; do not add either.
-- Provider and Plan share `provider_id`. Adapter implementations stay static/sealed; user-defined Provider data binds Configurable HTTP. Custom API is account-owned; CPA is a separate static external integration.
+- The dashboard uses HTTP `/dashboard/api/v4`; mutations use CAS. `/dashboard/api/v3` is a 410 tombstone. Contract changes belong in `schema/dashboard-api-v4.schema.json` and generated types. There is no V2 or V3 REST surface and no Tauri `invoke` commands; do not add either.
+- Provider and Plan share `provider_id` on catalog rows. Adapter implementations stay static/sealed; user-defined Provider data binds Configurable HTTP. Custom API is a one-credential `http` destination; CPA is a separate static external integration.
 - Preserve authentication, Key obfuscation/redaction, URL validation, cooldown state writes, SSE pass-through, data integrity, and supported compatibility. There is no remote sync and no Admin API; do not add either.
 - Changes to user-visible facts update paired English and `.zh-CN.md` guides. Keep capability tables in `docs/user/`, not the root README.
 - Rust tests belong in sibling `tests.rs` modules. Test behavior, not source text, documentation wording, or workflow spelling. Frontend tests likewise never assert literal UI copy: domain functions return semantic codes, copy mapping lives in exported `*_KEYS` tables (`Record<Code, MessageKey>`), and views compose text with `t()`.
@@ -22,6 +22,6 @@ Open Console Gateway is a local multi-Plan console: Rust workspace, Vue 3 dashbo
 - Known limits: [known debt](docs/maintainer/known-debt.md).
 - User docs: [docs/USER.md](docs/USER.md). Maintainer index: [docs/MAINTAINER.md](docs/MAINTAINER.md).
 
-Use checks that can expose a failure in the changed behavior. Documentation-only work needs paired English and `.zh-CN.md` content review, not a Rust or frontend build. Contract changes require the matching `pnpm run contract:v3:check` / `contract:v4:check`; Vue changes require `pnpm run build:web`.
+Use checks that can expose a failure in the changed behavior. Documentation-only work needs paired English and `.zh-CN.md` content review, not a Rust or frontend build. Contract changes require `pnpm run contract:v4:check`; Vue changes require `pnpm run build:web`.
 
 Quit the release tray app before local Tauri development. Report source checks, builds, and real desktop use as distinct evidence.

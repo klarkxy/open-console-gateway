@@ -10,25 +10,25 @@ Use this guide when you want Open Console Gateway to route to another upstream s
 | Connect one OpenAI- or Anthropic-compatible endpoint on a single account | Add a **Custom API** account | No |
 | Ship a named built-in Provider (the product's Provider/Plan identity) to every Open Console Gateway user | Add a sealed built-in Provider | Yes, reviewed code and tests |
 
-The **Adapter Registry** stays static and sealed. User-defined Providers are typed persisted definitions; every one binds the code-owned Configurable HTTP adapter. OCG never loads user scripts, plugins, or binaries. Unknown `provider_id` values fail closed unless they match a saved definition. Custom API remains a distinct account-owned path: it keeps Endpoint, protocol, and model mappings on the account card.
+The **Adapter Registry** stays static and sealed. User-defined Providers are typed persisted definitions; every one binds the code-owned Configurable HTTP adapter. OCG never loads user scripts, plugins, or binaries. Unknown `provider_id` values fail closed unless they match a saved definition. Custom API is one-credential Configurable HTTP: endpoint, protocol, and model mappings live on that destination and are edited on Accounts.
 
 ## Create from a preset
 
-Choose a [Plan or API preset](provider-presets.md) in **Accounts → Add account** to create the Provider and its first Key together (a Key is required), or in **Providers → Add Provider** to save the connection with an optional Key. Fixed-address presets already set protocol, authentication, endpoint and a default chat model. Optional settings expose names and models. Azure and Bedrock also need their customer-specific address and model/deployment information. Switching presets clears the previous Key and mappings, then supplies the new preset's default model. On **Providers**, the Key is optional; on **Accounts**, a preset still requires a Key. Save from either entry commits through `POST /dashboard/api/v4/onboarding/commit`.
+**Providers → Add Provider** and **Accounts → Add account** open the same Accounts chooser. Choose a [Plan or API preset](provider-presets.md) there to create the Provider and its first Key together. Fixed-address presets already set protocol, authentication, endpoint and a default chat model. Optional settings expose names and models. Azure and Bedrock also need their customer-specific address and model/deployment information. Switching presets clears the previous Key and mappings, then supplies the new preset's default model. Completing a preset requires a Key; **Save draft** may omit it. Save from either button commits through `POST /dashboard/api/v4/onboarding/commit`.
 
 ## Create a user-defined Provider manually
 
-1. Open **Providers**, choose **Add Provider** in the rail footer, then pick
-   **Manual setup** in the preset browser.
+1. Open **Providers** or **Accounts**, choose **Add Provider** / **Add account**,
+   then pick **Manual setup** in the shared chooser.
 2. Enter a name, one API Endpoint, one upstream protocol (Chat Completions, Responses, or Messages), and one auth kind (Bearer, `x-api-key`, or none).
 3. Add at least one public-model → exact-upstream-ID mapping. **Fetch models** and **Test model** stay on this form but need a Key; for keyed auth they remain disabled until you enter one.
 4. Save. Keyed auth may include an optional Key: filling it creates the first account in the same write; leaving it empty saves the definition only (shown as **Missing credential** until you use **Add Key**). A no-auth Provider creates one singleton account without a Key. The write goes through `POST /dashboard/api/v4/onboarding/commit` and does not require a successful probe. If the network drops before a response, the dashboard retries the same commit automatically; saving the unchanged draft again replays the stored result instead of creating a second Provider.
 
-Edit replaces the whole Provider configuration through `PATCH /dashboard/api/v3/providers/{id}`. The Provider id is immutable. Changing no-auth to keyed auth requires an explicit replacement Key, written only to that singleton account. An already-keyed Provider rejects any Key on the Provider update; rotate Keys on **Accounts**. Delete is allowed only after every referencing account is removed; there is no cascade.
+Edit replaces the whole Provider configuration through `PATCH /dashboard/api/v4/providers/{id}`. The Provider id is immutable. Changing no-auth to keyed auth requires an explicit replacement Key, written only to that singleton account. An already-keyed Provider rejects any Key on the Provider update; rotate Keys on **Accounts**. Delete is allowed only after every referencing account is removed; there is no cascade.
 
 Provider-owned fields stay on **Providers**. Account **Key**, enablement, order, notes, cooldown, and tests stay on **Accounts**. User-defined Providers are always unpriced: no official usage, quota estimate, or pricing rows. Request logs still attribute provider, account, and model.
 
-Node backups export payload V6 with `providerId` only for every saved user-defined Provider definition; imports accept V4 through V6 bundles. The current SQLite schema (v49) stores user-defined Providers in the unified `providers` and `provider_models` tables.
+Node backups export payload V7 with destinations, credentials, and `providerId` for every saved user-defined Provider definition; imports accept V4 through V7 bundles. The current SQLite schema (v57) stores user-defined / preset HTTP Providers on destinations (`legacy_kind=dynamic`) and `destination_models`. Sealed builtins stay compiled-in.
 
 ## Connect a compatible upstream now
 

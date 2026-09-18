@@ -16,7 +16,7 @@ settings write also rebinds. Never hold a `parking_lot` lock across those
 awaits.
 
 The authoritative table for access keys is `access_keys`. Two credential
-tiers share that table (current schema v49) and one auth snapshot:
+tiers share that table (current schema v57) and one auth snapshot:
 
 - Primary key: fixed id `00000000-0000-0000-0000-000000000001`, display
   name `"Primary"`. Always enabled, never deleted. Public `AppConfig` and
@@ -24,7 +24,7 @@ tiers share that table (current schema v49) and one auth snapshot:
   `gateway_key` as `""`.
 - Sub keys: non-primary rows, active ceiling 64, soft-delete keeps
   identity/name and clears the value. Lifecycle only through
-  `/dashboard/api/v3/keys*`. CLI has no sub-key commands.
+  `/dashboard/api/v4/keys*`. CLI has no sub-key commands.
 
 Primary/sub values are mutually exclusive
 (`gateway_keys::ensure_primary_value_allowed`) on dashboard, settings, and
@@ -159,7 +159,7 @@ and profile are removed.
 ## Persistence
 
 `crates/ocg-core/src/db.rs` defines the SQLite schema, migrations, and
-queries. Current schema is **v49**. Version history lives in
+queries. Current schema is **v57**. Version history lives in
 [storage-migration.md](storage-migration.md). `provider_contracts.rs` owns
 provider contract scopes, per-model/per-protocol overrides, effective
 contract derivation, and model-protocol evidence. `models.rs` defines

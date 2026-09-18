@@ -2,7 +2,7 @@
 
 # Accounts
 
-**Add account** first distinguishes an existing connection from a new service. Existing connections use the same projection as **Providers**: built-in Providers that still have at least one account, and every saved user-defined Provider (with or without a Key). Deleting the last account of a built-in family removes it from existing connections and returns it to the new-service templates. Choose an existing connection to add another Key using its saved address, protocol and models. Choose a new service to browse unused built-in templates, Plan/API presets, Custom API, or a platform site; saving a preset creates a Provider and its first account together. Saving a preset from **Add account** uses the same onboarding commit as **Providers**. Connection summaries remain visible before entering a Key. Regional variants use a compact picker. Keys are stored by the account service; you can add one here or from a Provider's detail with **Add Key**.
+**Add account** first distinguishes an existing connection from a new service. Existing connections use the same projection as **Providers**: built-in Providers that still have at least one account, and every saved user-defined Provider (with or without a Key). Deleting the last account of a built-in family removes it from existing connections and returns it to the new-service templates. Choose an existing connection to add another Key using its saved address, protocol and models. Choose a new service to browse unused built-in templates, Plan/API presets, Custom API, or a platform site; saving a preset creates a Provider and its first account together. **Providers → Add Provider** opens this same chooser. Saving a preset from **Add account** uses the same onboarding commit as **Providers**. Connection summaries remain visible before entering a Key. Regional variants use a compact picker. Keys are stored by the account service; you can add one here or from a Provider's detail with **Add Key**.
 
 Provider choices are projected in the exact order returned by the V3 Provider Catalog, and `provider_id` is the chooser, filter, dialog, and cache key. A successful empty catalog stays empty. If the catalog cannot be loaded, only the OpenCode Go creation form remains available; an existing Zen Free singleton can still be displayed, while every other built-in, Custom, and user-defined entry fails closed. Names, Plan/API grouping, creation status, and form fields come from each catalog row. After the first ready account for a sealed Provider is saved, the dashboard consults that Provider's existing contract capability before refreshing its model catalog; another Key does not refresh again. A capability or refresh failure never rolls back the saved account and can be retried from **Providers → Refresh model catalog**.
 
@@ -67,7 +67,7 @@ transfer it separately from the file; Open Console Gateway cannot recover it. Th
 operation remains available only from the node's loopback dashboard; forwarded
 scheme headers do not grant access to a remote dashboard.
 
-The current V6 payload moves usable ordinary accounts and their stable IDs,
+The current V7 payload moves destinations, credentials, usable ordinary accounts and their stable IDs,
 ready account Keys, Custom Endpoint/public-model → upstream-ID mappings and verification state,
 user-defined Providers (`providerId` only),
 the primary and active sub Access Keys, portable routing/proxy settings, Zen
@@ -82,7 +82,7 @@ accounts keep their current order and position; source-only accounts append in
 package order. Destination-only Access Keys and Provider scopes are retained.
 
 Browser profiles/cookies, third-party login passwords, referral codes, logs,
-and usage history do not move. V6 carries source cooldown deadlines without
+and usage history do not move. V7 carries source cooldown deadlines without
 shortening a later destination deadline; V4/V5 keep cooldown behavior
 host-local. Existing destination usage history and browser data stay in
 place; stale authentication and last-error flags are cleared when package
@@ -90,11 +90,11 @@ account fields replace the stored credential.
 Machine-local listener/root URL, auto-start, and Dock settings also stay with
 the destination. Ready managed accounts keep their Key, but their browser login
 does not move; unfinished managed drafts are skipped. Import accepts payload
-V4, V5, and V6. V4/V5 packages rebuild one identity, credential, All-scope
-binding, and identity quota pool per account. Payload V1–V3 and future V7
+V4, V5, V6, and V7. V4/V5 packages rebuild one identity, credential, All-scope
+binding, and identity quota pool per account. Payload V1–V3 and V8 or newer
 backups are rejected with an explicit unsupported-version error. A V4/V5 file
-that already contains V6 identity fields is rejected rather than silently
-dropping them. The outer encrypted envelope remains version 1 and
+that already contains V6 identity fields, or a V6 file that already contains
+V7 destination fields, is rejected rather than silently dropping them. The outer encrypted envelope remains version 1 and
 is distinct from the portable payload version.
 
 Every persistent mutation path rejects `enabled=true` for a catalogued
@@ -288,11 +288,15 @@ free cooldown rather than a key quota.
   remaining, due today, or days expired. This is informational only and never
   disables an account or prevents the gateway from selecting it. Zen Free and
   Custom API have no purchase-cycle expiry and show no expiry tag or alert.
-- **Priority order.** Use the drag handle on an account card to persist its
-  priority with a mouse, touchscreen, or pen. When the handle has keyboard focus,
-  the Up and Down arrow keys move the account as well. Dashboard, the Logs
-  account filter, CLI listings, and the gateway selector all consume this same
-  SQLite-backed order.
+- **Priority order.** Accounts are listed as Keys grouped by destination — a
+  Provider, a Custom API endpoint, or a platform site — in one global routing
+  order. A destination with one Key renders as a single card; one with several
+  Keys shows the destination header and one row per Key. Use the card's drag
+  handle to move the whole group with a mouse, touchscreen, or pen; when the
+  handle has keyboard focus, the Up and Down arrow keys move it as well. Keys
+  inside a group reorder with **Move up** / **Move down** in the row menu and
+  never leave their group. Dashboard, the Logs account filter, CLI listings,
+  and the gateway selector all consume this same SQLite-backed order.
 - **Cooldown reset.** You can reset a cooldown manually from this view. The bar
   snaps back to its local estimate as soon as the cooldown is cleared.
 
