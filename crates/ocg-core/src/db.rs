@@ -1,5 +1,4 @@
 use crate::crypto::{KeyCipher, is_legacy_local_ciphertext};
-use crate::custom::validate_custom_endpoint_url;
 use crate::dynamic::DynamicProviderRuntime;
 use crate::kernel::ids::{PRIMARY_KEY_ID, PRIMARY_KEY_NAME};
 use crate::kernel::pricing::{
@@ -15,7 +14,6 @@ use crate::provider_contracts::{
 };
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Local, NaiveDate, TimeZone, Utc};
-use ocg_domain::dynamic::{DynamicAuthKind, DynamicModelMapping};
 use ocg_infra::sqlite_logs::{
     ForwardLogIdentityPatch, ForwardLogInsertRow, ForwardLogUpdateRow, GatewayLogInsertRow,
 };
@@ -37,11 +35,16 @@ use std::{
 };
 
 pub struct Database {
-    conn: Connection,
+    pub(crate) conn: Connection,
 }
 
+pub(crate) mod account_store;
+pub(crate) mod cpa;
+pub(crate) mod custom_store;
+pub(crate) mod dynamic_store;
 pub(crate) mod identity;
-mod platform;
+pub(crate) mod identity_v57;
+pub(crate) mod platform;
 
 /// Local configuration for the one code-owned CPA external integration.
 /// Both credential values stay encrypted outside the short-lived V3 write path.
@@ -280,7 +283,7 @@ pub const PRE_V42_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v42.";
 /// database drops inert columns and empty leftover dynamic provider tables.
 pub const PRE_V48_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v48.";
 /// Highest schema this binary can open or migrate. Newer databases fail closed.
-pub const CURRENT_SCHEMA_VERSION: i32 = 49;
+pub const CURRENT_SCHEMA_VERSION: i32 = 57;
 /// Canonical source schema for the v48 inert-column / empty-table cleanup.
 pub const V47_SCHEMA_VERSION: i32 = 47;
 /// Canonical source schema for the v35 provider-identity rewrite.
@@ -520,7 +523,7 @@ fn ensure_column(
     Ok(())
 }
 
-fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
+pub(crate) fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
     Ok(conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
         [table],
@@ -528,7 +531,7 @@ fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
     )? != 0)
 }
 
-fn table_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+pub(crate) fn table_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
     if !table_exists(conn, table)? {
         return Ok(false);
     }
@@ -538,6 +541,10 @@ fn table_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool
         .collect::<rusqlite::Result<Vec<_>>>()?
         .iter()
         .any(|existing| existing == column))
+}
+
+pub(crate) fn credentials_store_secrets(conn: &Connection) -> bool {
+    table_has_column(conn, "credentials", "key_cipher").unwrap_or(false)
 }
 
 fn backfill_v26_zen_provider_scope(tx: &Transaction<'_>) -> Result<()> {
@@ -1242,54 +1249,98 @@ fn probe_account_cipher(
 }
 
 fn preflight_ciphertext_probes(conn: &Connection, cipher: Option<&dyn KeyCipher>) -> Result<()> {
-    if !table_exists(conn, "accounts")? {
-        return Ok(());
-    }
-    if table_has_column(conn, "accounts", "key_cipher")? {
-        let mut stmt = conn.prepare("SELECT id, key_cipher FROM accounts")?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        for (id, value) in rows {
-            probe_account_cipher(cipher, &id, "key_cipher", &value)?;
+    if table_exists(conn, "accounts")? {
+        if table_has_column(conn, "accounts", "key_cipher")? {
+            let mut stmt = conn.prepare("SELECT id, key_cipher FROM accounts")?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            for (id, value) in rows {
+                probe_account_cipher(cipher, &id, "key_cipher", &value)?;
+            }
+        }
+        if table_has_column(conn, "accounts", "password_cipher")? {
+            let mut stmt = conn.prepare(
+                "SELECT id, password_cipher FROM accounts WHERE password_cipher IS NOT NULL AND password_cipher <> ''",
+            )?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            for (id, value) in rows {
+                probe_account_cipher(cipher, &id, "password_cipher", &value)?;
+            }
         }
     }
-    if table_has_column(conn, "accounts", "password_cipher")? {
-        let mut stmt = conn.prepare(
-            "SELECT id, password_cipher FROM accounts WHERE password_cipher IS NOT NULL AND password_cipher <> ''",
-        )?;
+    if table_exists(conn, "credentials")? && table_has_column(conn, "credentials", "key_cipher")? {
+        let purpose_filter = if table_has_column(conn, "credentials", "credential_purpose")? {
+            "WHERE COALESCE(credential_purpose, 'inference') = 'inference'"
+        } else {
+            ""
+        };
+        let mut stmt = conn.prepare(&format!(
+            "SELECT legacy_account_id, key_cipher, password_cipher FROM credentials
+             {purpose_filter}"
+        ))?;
         let rows = stmt
             .query_map([], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        for (id, value) in rows {
-            probe_account_cipher(cipher, &id, "password_cipher", &value)?;
+        for (id, key, password) in rows {
+            probe_account_cipher(cipher, &id, "key_cipher", &key)?;
+            if let Some(value) = password.as_deref() {
+                probe_account_cipher(cipher, &id, "password_cipher", value)?;
+            }
         }
     }
     Ok(())
 }
 
 fn repair_legacy_account_ciphertext(conn: &Connection, cipher: &dyn KeyCipher) -> Result<()> {
-    if !table_exists(conn, "accounts")? {
+    let (select_sql, both_sql, key_sql, password_sql) = if table_exists(conn, "credentials")?
+        && table_has_column(conn, "credentials", "key_cipher")?
+    {
+        (
+            if table_has_column(conn, "credentials", "credential_purpose")? {
+                "SELECT legacy_account_id, key_cipher, password_cipher FROM credentials
+                 WHERE COALESCE(credential_purpose, 'inference') = 'inference'"
+            } else {
+                "SELECT legacy_account_id, key_cipher, password_cipher FROM credentials"
+            },
+            "UPDATE credentials SET key_cipher = ?1, password_cipher = ?2 WHERE legacy_account_id = ?3",
+            "UPDATE credentials SET key_cipher = ?1 WHERE legacy_account_id = ?2",
+            "UPDATE credentials SET password_cipher = ?1 WHERE legacy_account_id = ?2",
+        )
+    } else if table_exists(conn, "accounts")? {
+        let has_key = table_has_column(conn, "accounts", "key_cipher")?;
+        let has_password = table_has_column(conn, "accounts", "password_cipher")?;
+        if !has_key && !has_password {
+            return Ok(());
+        }
+        (
+            match (has_key, has_password) {
+                (true, true) => "SELECT id, key_cipher, password_cipher FROM accounts",
+                (true, false) => "SELECT id, key_cipher, NULL FROM accounts",
+                (false, true) => "SELECT id, '', password_cipher FROM accounts",
+                (false, false) => return Ok(()),
+            },
+            "UPDATE accounts SET key_cipher = ?1, password_cipher = ?2 WHERE id = ?3",
+            "UPDATE accounts SET key_cipher = ?1 WHERE id = ?2",
+            "UPDATE accounts SET password_cipher = ?1 WHERE id = ?2",
+        )
+    } else {
         return Ok(());
-    }
-    let has_key = table_has_column(conn, "accounts", "key_cipher")?;
-    let has_password = table_has_column(conn, "accounts", "password_cipher")?;
-    if !has_key && !has_password {
-        return Ok(());
-    }
-
-    let select_sql = match (has_key, has_password) {
-        (true, true) => "SELECT id, key_cipher, password_cipher FROM accounts",
-        (true, false) => "SELECT id, key_cipher, NULL FROM accounts",
-        (false, true) => "SELECT id, '', password_cipher FROM accounts",
-        (false, false) => return Ok(()),
     };
 
     let rows = {
@@ -1359,22 +1410,13 @@ fn repair_legacy_account_ciphertext(conn: &Connection, cipher: &dyn KeyCipher) -
     for (id, new_key, new_password) in updates {
         match (new_key, new_password) {
             (Some(key), Some(password)) => {
-                tx.execute(
-                    "UPDATE accounts SET key_cipher = ?1, password_cipher = ?2 WHERE id = ?3",
-                    params![key, password, id],
-                )?;
+                tx.execute(both_sql, params![key, password, id])?;
             }
             (Some(key), None) => {
-                tx.execute(
-                    "UPDATE accounts SET key_cipher = ?1 WHERE id = ?2",
-                    params![key, id],
-                )?;
+                tx.execute(key_sql, params![key, id])?;
             }
             (None, Some(password)) => {
-                tx.execute(
-                    "UPDATE accounts SET password_cipher = ?1 WHERE id = ?2",
-                    params![password, id],
-                )?;
+                tx.execute(password_sql, params![password, id])?;
             }
             (None, None) => {}
         }
@@ -2067,6 +2109,13 @@ fn migrate_to_v32(conn: &Connection) -> Result<()> {
     // v32 table shape is already present. The actual v32 migration is atomic,
     // so recognizing the complete final shape is safe and keeps reopen
     // idempotent without trying to read removed v31 columns.
+    // After v52 the accounts parent is gone; after v53 the leftover Custom
+    // tables are gone. Rewind tests that only need later schema steps must
+    // not resurrect those children with a FK to a missing parent.
+    if !table_exists(conn, "account_custom_configs")? {
+        conn.execute_batch("INSERT OR REPLACE INTO schema_version (version) VALUES (32);")?;
+        return Ok(());
+    }
     if table_has_column(conn, "account_custom_configs", "endpoint_url")?
         && table_has_column(conn, "account_custom_configs", "upstream_protocol")?
     {
@@ -2189,6 +2238,10 @@ fn migrate_to_v33(conn: &Connection) -> Result<()> {
         version == 32,
         "v33 requires a canonical schema v32 source, found {version}"
     );
+    if !table_exists(conn, "account_model_capabilities")? {
+        conn.execute_batch("INSERT OR REPLACE INTO schema_version (version) VALUES (33);")?;
+        return Ok(());
+    }
     let tx = conn.unchecked_transaction()?;
     if !table_has_column(&tx, "account_model_capabilities", "upstream_model")? {
         tx.execute_batch(
@@ -2210,8 +2263,8 @@ fn migrate_to_v33(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// v34: one local CPA configuration row. The inference credential, enablement,
-/// and ordering remain on the reserved singleton account; the model snapshot
+/// v34: one local CPA configuration row. Dropped in v55 after the singleton
+/// maps onto the CPA destination + observer credential. The model snapshot
 /// remains in `provider_model_catalogs`.
 fn migrate_to_v34(conn: &Connection) -> Result<()> {
     let version = schema_version_on(conn)?;
@@ -2482,311 +2535,37 @@ fn dynamic_tx_fault(point: &'static str) -> Result<()> {
 }
 
 fn list_dynamic_providers_on(conn: &Connection) -> Result<Vec<DynamicProviderRuntime>> {
-    list_dynamic_providers_filtered_on(conn, false)
+    dynamic_store::list_dynamic_providers_on(conn)
 }
 
 fn list_control_plane_dynamic_providers_on(
     conn: &Connection,
 ) -> Result<Vec<DynamicProviderRuntime>> {
-    list_dynamic_providers_filtered_on(conn, true)
-}
-
-fn list_dynamic_providers_filtered_on(
-    conn: &Connection,
-    include_drafts: bool,
-) -> Result<Vec<DynamicProviderRuntime>> {
-    let sql = if include_drafts {
-        "SELECT id, name, endpoint_url, upstream_protocol, auth_kind, created_at, updated_at, preset_id, origin, offering
-         FROM providers
-         WHERE origin IN ('preset', 'custom')
-         ORDER BY created_at ASC, id ASC"
-    } else {
-        "SELECT id, name, endpoint_url, upstream_protocol, auth_kind, created_at, updated_at, preset_id, origin, offering
-         FROM providers
-         WHERE origin IN ('preset', 'custom')
-           AND COALESCE(onboarding_draft, 0) = 0
-         ORDER BY created_at ASC, id ASC"
-    };
-    let mut stmt = conn.prepare(sql)?;
-    let rows = stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, String>(3)?,
-            row.get::<_, String>(4)?,
-            row.get::<_, String>(5)?,
-            row.get::<_, String>(6)?,
-            row.get::<_, Option<String>>(7)?,
-            row.get::<_, String>(8)?,
-            row.get::<_, String>(9)?,
-        ))
-    })?;
-    let mut providers = Vec::new();
-    for row in rows {
-        let (
-            id,
-            name,
-            endpoint_url,
-            protocol,
-            auth_kind,
-            created_at,
-            updated_at,
-            preset_id,
-            origin,
-            offering,
-        ) = row?;
-        providers.push(load_dynamic_provider_runtime(
-            conn,
-            DynamicProviderRow {
-                preset_id,
-                id,
-                name,
-                endpoint_url,
-                protocol,
-                auth_kind,
-                created_at,
-                updated_at,
-                origin,
-                offering,
-            },
-        )?);
-    }
-    Ok(providers)
+    dynamic_store::list_control_plane_dynamic_providers_on(conn)
 }
 
 fn get_dynamic_provider_on(
     conn: &Connection,
     provider_id: &str,
 ) -> Result<Option<DynamicProviderRuntime>> {
-    let row = conn
-        .query_row(
-            "SELECT id, name, endpoint_url, upstream_protocol, auth_kind, created_at, updated_at, preset_id, origin, offering
-             FROM providers
-             WHERE lower(id) = lower(?1) AND origin IN ('preset', 'custom')",
-            [provider_id],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, Option<String>>(7)?,
-                    row.get::<_, String>(8)?,
-                    row.get::<_, String>(9)?,
-                ))
-            },
-        )
-        .optional()?;
-    let Some((
-        id,
-        name,
-        endpoint_url,
-        protocol,
-        auth_kind,
-        created_at,
-        updated_at,
-        preset_id,
-        origin,
-        offering,
-    )) = row
-    else {
-        return Ok(None);
-    };
-    Ok(Some(load_dynamic_provider_runtime(
-        conn,
-        DynamicProviderRow {
-            preset_id,
-            id,
-            name,
-            endpoint_url,
-            protocol,
-            auth_kind,
-            created_at,
-            updated_at,
-            origin,
-            offering,
-        },
-    )?))
+    dynamic_store::get_dynamic_provider_on(conn, provider_id)
 }
 
 fn onboarding_draft_provider_ids_on(conn: &Connection) -> Result<HashSet<String>> {
-    let mut stmt = conn.prepare(
-        "SELECT id FROM providers
-         WHERE origin IN ('preset', 'custom')
-           AND COALESCE(onboarding_draft, 0) != 0",
-    )?;
-    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-    let mut ids = HashSet::new();
-    for id in rows {
-        ids.insert(id?);
-    }
-    Ok(ids)
+    dynamic_store::onboarding_draft_provider_ids_on(conn)
 }
 
 fn provider_is_onboarding_draft_on(conn: &Connection, provider_id: &str) -> Result<Option<bool>> {
-    conn.query_row(
-        "SELECT COALESCE(onboarding_draft, 0) FROM providers
-         WHERE lower(id) = lower(?1) AND origin IN ('preset', 'custom')",
-        [provider_id],
-        |row| row.get::<_, i32>(0),
-    )
-    .optional()
-    .map(|value| value.map(|flag| flag != 0))
-    .map_err(Into::into)
+    dynamic_store::provider_is_onboarding_draft_on(conn, provider_id)
 }
 
-/// Read a single row from the unified `providers` table without filtering on
-/// `origin`. Used by the public read path to surface builtin seeds alongside
-/// dynamic rows. Returns `None` when the id is unknown.
+/// Read a sealed builtin catalog row or a destination-backed dynamic
+/// definition. Used by the public GET to surface the unified view.
 fn get_provider_definition_on(
     conn: &Connection,
     provider_id: &str,
 ) -> Result<Option<DynamicProviderRuntime>> {
-    let row = conn
-        .query_row(
-            "SELECT id, name, endpoint_url, upstream_protocol, auth_kind, created_at, updated_at, preset_id, origin, offering
-             FROM providers
-             WHERE lower(id) = lower(?1)",
-            [provider_id],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, Option<String>>(7)?,
-                    row.get::<_, String>(8)?,
-                    row.get::<_, String>(9)?,
-                ))
-            },
-        )
-        .optional()?;
-    let Some((
-        id,
-        name,
-        endpoint_url_opt,
-        protocol_opt,
-        auth_kind_opt,
-        created_at,
-        updated_at,
-        preset_id,
-        origin,
-        offering,
-    )) = row
-    else {
-        return Ok(None);
-    };
-    // Builtin rows leave endpoint_url/upstream_protocol/auth_kind as NULL;
-    // synthesize safe placeholders the loader can parse so the runtime shape
-    // stays uniform. The handler then maps to `Option<...>` on the wire.
-    let endpoint_url = endpoint_url_opt.unwrap_or_default();
-    let protocol = protocol_opt.unwrap_or_else(|| "chat_completions".to_string());
-    let auth_kind = auth_kind_opt.unwrap_or_else(|| "bearer".to_string());
-    Ok(Some(load_dynamic_provider_runtime(
-        conn,
-        DynamicProviderRow {
-            preset_id,
-            id,
-            name,
-            endpoint_url,
-            protocol,
-            auth_kind,
-            created_at,
-            updated_at,
-            origin,
-            offering,
-        },
-    )?))
-}
-
-struct DynamicProviderRow {
-    preset_id: Option<String>,
-    id: String,
-    name: String,
-    endpoint_url: String,
-    protocol: String,
-    auth_kind: String,
-    created_at: String,
-    updated_at: String,
-    origin: String,
-    offering: String,
-}
-
-fn load_dynamic_provider_runtime(
-    conn: &Connection,
-    provider: DynamicProviderRow,
-) -> Result<DynamicProviderRuntime> {
-    let upstream_protocol =
-        ocg_domain::catalog::UpstreamProtocolKind::try_from(provider.protocol.as_str())
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    let auth_kind = DynamicAuthKind::try_from(provider.auth_kind.as_str())
-        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    let mut stmt = conn.prepare(
-        "SELECT public_model, upstream_model, upstream_override
-         FROM provider_models
-         WHERE provider_id = ?1
-         ORDER BY public_model_key ASC",
-    )?;
-    let rows = stmt.query_map([&provider.id], |row| {
-        Ok(DynamicModelMapping {
-            public_model: row.get(0)?,
-            upstream_model: row.get(1)?,
-            upstream_override: row
-                .get::<_, Option<String>>(2)?
-                .map(|value| {
-                    serde_json::from_str(&value).map_err(|error| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            2,
-                            rusqlite::types::Type::Text,
-                            Box::new(error),
-                        )
-                    })
-                })
-                .transpose()?,
-        })
-    })?;
-    let mut mappings = Vec::new();
-    for row in rows {
-        mappings.push(row?);
-    }
-    let created_at = DateTime::parse_from_rfc3339(&provider.created_at)
-        .map(|value| value.with_timezone(&Utc))
-        .map_err(|error| {
-            anyhow::anyhow!(
-                "dynamic provider {} has invalid created_at: {error}",
-                provider.id
-            )
-        })?;
-    let updated_at = DateTime::parse_from_rfc3339(&provider.updated_at)
-        .map(|value| value.with_timezone(&Utc))
-        .map_err(|error| {
-            anyhow::anyhow!(
-                "dynamic provider {} has invalid updated_at: {error}",
-                provider.id
-            )
-        })?;
-    let origin = ocg_domain::provider::ProviderOrigin::try_from(provider.origin.as_str())
-        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    Ok(DynamicProviderRuntime {
-        preset_id: provider.preset_id,
-        id: provider.id,
-        name: provider.name,
-        endpoint_url: provider.endpoint_url,
-        upstream_protocol,
-        auth_kind,
-        mappings,
-        created_at,
-        updated_at,
-        origin,
-        offering: provider.offering,
-    })
+    dynamic_store::get_provider_definition_on(conn, provider_id)
 }
 
 fn find_dashboard_operation_on(
@@ -2842,38 +2621,11 @@ fn insert_dynamic_provider_on(
     runtime: &DynamicProviderRuntime,
     onboarding_draft: bool,
 ) -> Result<()> {
-    let origin = runtime.origin.as_str();
-    let offering = runtime.offering.as_str();
-    conn.execute(
-        "INSERT INTO providers
-         (id, origin, adapter_kind, name, endpoint_url, upstream_protocol,
-          auth_kind, preset_id, offering, display_family, endpoint_per_account,
-          created_at, updated_at, onboarding_draft)
-         VALUES (?1, ?2, 'configurable_http', ?3, ?4, ?5, ?6, ?7, ?8, NULL, 0, ?9, ?10, ?11)",
-        params![
-            runtime.id,
-            origin,
-            runtime.name,
-            runtime.endpoint_url,
-            runtime.upstream_protocol.as_str(),
-            runtime.auth_kind.as_str(),
-            runtime.preset_id,
-            offering,
-            runtime.created_at.to_rfc3339(),
-            runtime.updated_at.to_rfc3339(),
-            onboarding_draft as i32,
-        ],
-    )?;
-    insert_dynamic_provider_models_on(conn, &runtime.id, &runtime.mappings)
+    dynamic_store::insert_dynamic_provider_on(conn, runtime, onboarding_draft)
 }
 
 fn count_accounts_for_provider_on(conn: &Connection, provider_id: &str) -> Result<i64> {
-    conn.query_row(
-        "SELECT COUNT(*) FROM accounts WHERE lower(provider_id) = lower(?1)",
-        [provider_id],
-        |row| row.get(0),
-    )
-    .map_err(Into::into)
+    account_store::count_accounts_for_provider_on(conn, provider_id)
 }
 
 fn upsert_imported_dynamic_provider_on(
@@ -2882,49 +2634,12 @@ fn upsert_imported_dynamic_provider_on(
     imported_account_ids: &HashSet<String>,
     onboarding_draft: bool,
 ) -> Result<()> {
-    anyhow::ensure!(
-        builtin_provider(&runtime.id).is_none(),
-        "dynamic provider id collides with a built-in provider"
-    );
-    if let Some(existing) = get_dynamic_provider_on(conn, &runtime.id)? {
-        if existing.auth_kind.requires_key() != runtime.auth_kind.requires_key() {
-            let mut statement =
-                conn.prepare("SELECT id FROM accounts WHERE lower(provider_id) = lower(?1)")?;
-            let existing_ids =
-                statement.query_map([&existing.id], |row| row.get::<_, String>(0))?;
-            for account_id in existing_ids {
-                let account_id = account_id?;
-                anyhow::ensure!(
-                    imported_account_ids.contains(&account_id.to_ascii_lowercase()),
-                    "cannot change dynamic provider auth while destination-only accounts still reference it"
-                );
-            }
-        }
-        conn.execute(
-            "UPDATE providers
-             SET name = ?1, endpoint_url = ?2, upstream_protocol = ?3, auth_kind = ?4,
-                 updated_at = ?5, preset_id = ?7, offering = ?8, onboarding_draft = ?9
-             WHERE id = ?6",
-            params![
-                runtime.name,
-                runtime.endpoint_url,
-                runtime.upstream_protocol.as_str(),
-                runtime.auth_kind.as_str(),
-                runtime.updated_at.to_rfc3339(),
-                existing.id,
-                runtime.preset_id,
-                runtime.offering.as_str(),
-                onboarding_draft as i32,
-            ],
-        )?;
-        conn.execute(
-            "DELETE FROM provider_models WHERE provider_id = ?1",
-            [&existing.id],
-        )?;
-        insert_dynamic_provider_models_on(conn, &existing.id, &runtime.mappings)
-    } else {
-        insert_dynamic_provider_on(conn, runtime, onboarding_draft)
-    }
+    dynamic_store::upsert_imported_dynamic_provider_on(
+        conn,
+        runtime,
+        imported_account_ids,
+        onboarding_draft,
+    )
 }
 
 fn ensure_dynamic_singleton_accounts_on(conn: &Connection) -> Result<()> {
@@ -2938,32 +2653,6 @@ fn ensure_dynamic_singleton_accounts_on(conn: &Connection) -> Result<()> {
             "no-auth provider `{}` requires a singleton account",
             runtime.id
         );
-    }
-    Ok(())
-}
-
-fn insert_dynamic_provider_models_on(
-    conn: &Connection,
-    provider_id: &str,
-    mappings: &[DynamicModelMapping],
-) -> Result<()> {
-    let mut stmt = conn.prepare(
-        "INSERT INTO provider_models
-         (provider_id, public_model, public_model_key, upstream_model, upstream_override)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-    )?;
-    for mapping in mappings {
-        stmt.execute(params![
-            provider_id,
-            mapping.public_model,
-            mapping.public_model.to_ascii_lowercase(),
-            mapping.upstream_model,
-            mapping
-                .upstream_override
-                .as_ref()
-                .map(serde_json::to_string)
-                .transpose()?,
-        ])?;
     }
     Ok(())
 }
@@ -3167,16 +2856,14 @@ fn migrate_to_v47(conn: &Connection) -> Result<()> {
         return Ok(());
     }
     anyhow::ensure!(version == 46, "v47 requires schema v46");
-    anyhow::ensure!(
-        table_exists(&tx, "providers")?,
-        "v47 requires the unified providers table"
-    );
-    ensure_column(
-        &tx,
-        "providers",
-        "onboarding_draft",
-        "INTEGER NOT NULL DEFAULT 0",
-    )?;
+    if table_exists(&tx, "providers")? {
+        ensure_column(
+            &tx,
+            "providers",
+            "onboarding_draft",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+    }
     tx.execute_batch("INSERT OR REPLACE INTO schema_version(version) VALUES (47);")?;
     tx.commit()?;
     Ok(())
@@ -3280,6 +2967,265 @@ fn migrate_to_v49(conn: &Connection) -> Result<()> {
     )?;
     tx.execute_batch("INSERT OR REPLACE INTO schema_version(version) VALUES (49);")?;
     tx.commit()?;
+    Ok(())
+}
+
+/// v50: destination/credential shadow of `project()`. Additive; no Key
+/// material; no second quota-pool tables; no `observations`.
+fn migrate_to_v50(conn: &Connection) -> Result<()> {
+    if schema_version_on(conn)? >= 50 {
+        return Ok(());
+    }
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let version = schema_version_on(&tx)?;
+    if version >= 50 {
+        return Ok(());
+    }
+    anyhow::ensure!(version == 49, "v50 requires schema v49");
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS destinations (
+            id TEXT PRIMARY KEY,
+            legacy_kind TEXT NOT NULL CHECK(legacy_kind IN ('builtin','dynamic','custom_account','platform_parent')),
+            legacy_id TEXT NOT NULL,
+            adapter TEXT NOT NULL,
+            name TEXT NOT NULL,
+            brand_family TEXT,
+            base_url TEXT,
+            protocols_json TEXT NOT NULL,
+            auth_scheme TEXT NOT NULL,
+            capabilities_json TEXT NOT NULL,
+            plan_json TEXT,
+            max_credentials INTEGER,
+            observer_credential_id TEXT,
+            enabled INTEGER NOT NULL,
+            UNIQUE(legacy_kind, legacy_id)
+        );
+        CREATE TABLE IF NOT EXISTS destination_models (
+            destination_id TEXT NOT NULL,
+            public_model TEXT NOT NULL,
+            public_model_key TEXT NOT NULL,
+            upstream_model TEXT NOT NULL,
+            protocols_json TEXT NOT NULL,
+            preferred TEXT,
+            enabled INTEGER NOT NULL,
+            PRIMARY KEY (destination_id, public_model_key)
+        );
+        CREATE TABLE IF NOT EXISTS credentials (
+            id TEXT PRIMARY KEY,
+            legacy_account_id TEXT NOT NULL UNIQUE,
+            destination_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            notes TEXT,
+            has_secret INTEGER NOT NULL,
+            enabled INTEGER NOT NULL,
+            routing_rank INTEGER NOT NULL,
+            scope_json TEXT NOT NULL,
+            auth_state TEXT NOT NULL,
+            last_error TEXT,
+            cooldown_generic_until TEXT,
+            cooldown_5h_until TEXT,
+            cooldown_week_until TEXT,
+            cooldown_month_until TEXT,
+            cooldown_free_until TEXT,
+            quota_pool_id TEXT,
+            onboarding_json TEXT,
+            purchase_date TEXT,
+            username TEXT,
+            referral_code TEXT,
+            cooldown_until TEXT,
+            created_at TEXT,
+            updated_at TEXT,
+            auth_error TEXT,
+            account_type TEXT,
+            setup_step TEXT,
+            provider_id TEXT,
+            credential_kind TEXT,
+            quota_scope TEXT,
+            identity_id TEXT,
+            verification_status TEXT,
+            connection_verified_at TEXT,
+            verification_error TEXT,
+            usage_5h_window_started_at TEXT,
+            usage_5h_window_cost_offset REAL NOT NULL DEFAULT 0,
+            usage_week_window_started_at TEXT,
+            usage_week_window_cost_offset REAL NOT NULL DEFAULT 0,
+            usage_month_window_cost_offset REAL NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS credential_grants (
+            credential_id TEXT NOT NULL,
+            kind TEXT NOT NULL CHECK(kind IN ('endpoint_id','origin')),
+            value TEXT NOT NULL,
+            PRIMARY KEY (credential_id, kind, value)
+        );",
+    )?;
+    tx.execute_batch("INSERT OR REPLACE INTO schema_version(version) VALUES (50);")?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// v51: credentials become the secret store. Copy Key/password ciphertext
+/// from `accounts` via `legacy_account_id`. Additive; no pre-migration backup.
+/// The `accounts` table remains until remaining readers move off it.
+fn migrate_to_v51(conn: &Connection) -> Result<()> {
+    if schema_version_on(conn)? >= 51 {
+        return Ok(());
+    }
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let version = schema_version_on(&tx)?;
+    if version >= 51 {
+        return Ok(());
+    }
+    anyhow::ensure!(version == 50, "v51 requires schema v50");
+    if !table_has_column(&tx, "credentials", "key_cipher")? {
+        tx.execute_batch("ALTER TABLE credentials ADD COLUMN key_cipher TEXT NOT NULL DEFAULT ''")?;
+    }
+    if !table_has_column(&tx, "credentials", "password_cipher")? {
+        tx.execute_batch("ALTER TABLE credentials ADD COLUMN password_cipher TEXT")?;
+    }
+    if table_exists(&tx, "accounts")? {
+        tx.execute_batch(
+            "UPDATE credentials
+             SET key_cipher = COALESCE(
+                    (SELECT key_cipher FROM accounts WHERE accounts.id = credentials.legacy_account_id),
+                    key_cipher
+                 ),
+                 password_cipher = COALESCE(
+                    (SELECT password_cipher FROM accounts WHERE accounts.id = credentials.legacy_account_id),
+                    password_cipher
+                 )
+             WHERE EXISTS (
+                SELECT 1 FROM accounts WHERE accounts.id = credentials.legacy_account_id
+             );",
+        )?;
+    }
+    tx.execute_batch("INSERT OR REPLACE INTO schema_version(version) VALUES (51);")?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// v52: credentials become the account-row store. Copy remaining Account
+/// fields from `accounts`, rebuild the destination shadow while that table
+/// still exists, refuse the drop if any account lacks a credential row, then
+/// `DROP TABLE accounts`. Child-table FKs that pointed at `accounts` are
+/// rewritten in place. Does not drop providers (those drop in v56), platform
+/// leftovers (those drop in v54), CPA (that drops in v55), or identity
+/// satellites.
+fn migrate_to_v52(db: &Database) -> Result<()> {
+    if schema_version_on(&db.conn)? >= 52 {
+        if !account_store::accounts_table_exists(&db.conn)? {
+            with_foreign_keys_off(&db.conn, || {
+                account_store::drop_accounts_foreign_keys(&db.conn)?;
+                Ok(())
+            })?;
+        }
+        return Ok(());
+    }
+    account_store::ensure_v52_credential_columns(&db.conn)?;
+    if account_store::accounts_table_exists(&db.conn)? {
+        let _ = crate::destination_projection::replace_persisted_on(db)?;
+        account_store::backfill_credential_account_columns(&db.conn)?;
+        account_store::assert_credential_totality(&db.conn)?;
+        with_foreign_keys_off(&db.conn, || {
+            account_store::drop_accounts_foreign_keys(&db.conn)?;
+            account_store::drop_accounts_table(&db.conn)?;
+            Ok(())
+        })?;
+    } else {
+        with_foreign_keys_off(&db.conn, || {
+            account_store::drop_accounts_foreign_keys(&db.conn)?;
+            Ok(())
+        })?;
+    }
+    db.conn
+        .execute_batch("INSERT OR REPLACE INTO schema_version(version) VALUES (52);")?;
+    Ok(())
+}
+
+/// v53: destinations + destination_models become the Custom HTTP store.
+/// Backfill Custom destinations from leftover custom tables when those rows
+/// can map, refuse if an unlinked leftover config/capability cannot map,
+/// then `DROP TABLE account_custom_configs` and
+/// `DROP TABLE account_model_capabilities`. Linked platform Keys stay on
+/// leftover `platform_*` tables until v54. Does not drop providers (those
+/// drop in v56), CPA (that drops in v55), or identity satellites.
+fn migrate_to_v53(conn: &Connection) -> Result<()> {
+    if schema_version_on(conn)? >= 53 {
+        return Ok(());
+    }
+    anyhow::ensure!(schema_version_on(conn)? == 52, "v53 requires schema v52");
+    custom_store::migrate_v53_backfill_and_drop(conn)?;
+    conn.execute_batch("INSERT OR REPLACE INTO schema_version(version) VALUES (53);")?;
+    Ok(())
+}
+
+/// v54: destinations + credentials become the platform parent/link store.
+/// Backfill leftover parents/links when those rows can map, refuse if a
+/// leftover parent/link cannot map, then `DROP TABLE platform_links` and
+/// `DROP TABLE platform_accounts`. Does not drop providers (those drop in
+/// v56), CPA (that drops in v55), or identity satellites.
+fn migrate_to_v54(conn: &Connection) -> Result<()> {
+    if schema_version_on(conn)? >= 54 {
+        platform::ensure_v54_columns(conn)?;
+        return Ok(());
+    }
+    anyhow::ensure!(schema_version_on(conn)? == 53, "v54 requires schema v53");
+    platform::migrate_v54_backfill_and_drop(conn)?;
+    conn.execute_batch("INSERT OR REPLACE INTO schema_version(version) VALUES (54);")?;
+    Ok(())
+}
+
+/// v55: destinations + credentials become the CPA integration store.
+/// Backfill leftover `cpa_integration` when that row can map, refuse if it
+/// cannot, then `DROP TABLE cpa_integration`. Does not invent a CPA
+/// destination when leftover is absent. Does not drop providers (those drop
+/// in v56), identity satellites, or `provider_model_catalogs`.
+fn migrate_to_v55(conn: &Connection) -> Result<()> {
+    if schema_version_on(conn)? >= 55 {
+        conn.execute_batch("DROP TABLE IF EXISTS cpa_integration;")?;
+        return Ok(());
+    }
+    anyhow::ensure!(schema_version_on(conn)? == 54, "v55 requires schema v54");
+    cpa::migrate_v55_backfill_and_drop(conn)?;
+    conn.execute_batch("INSERT OR REPLACE INTO schema_version(version) VALUES (55);")?;
+    Ok(())
+}
+
+/// v56: destinations + destination_models become the user-defined Provider
+/// store. Backfill leftover `origin IN ('preset','custom')` rows when they
+/// can map, refuse empty keyed HTTP URLs or unknown adapters, then
+/// `DROP TABLE provider_models` and `DROP TABLE providers`. Builtin seed
+/// rows stay sealed catalog. Does not drop identity satellites,
+/// `quota_pools`, `provider_model_catalogs`, or `dashboard_operations`.
+fn migrate_to_v56(conn: &Connection) -> Result<()> {
+    if schema_version_on(conn)? >= 56 {
+        conn.execute_batch(
+            "DROP TABLE IF EXISTS provider_models;
+             DROP TABLE IF EXISTS providers;",
+        )?;
+        dynamic_store::ensure_v56_columns(conn)?;
+        return Ok(());
+    }
+    anyhow::ensure!(schema_version_on(conn)? == 55, "v56 requires schema v55");
+    dynamic_store::migrate_v56_backfill_and_drop(conn)?;
+    conn.execute_batch("INSERT OR REPLACE INTO schema_version(version) VALUES (56);")?;
+    Ok(())
+}
+
+/// v57: credentials + `credential_grants` become the identity / binding /
+/// onboarding / subscription store. Copy leftover satellites when they can
+/// map, refuse unmappable leftovers, then drop `upstream_identities`,
+/// `credential_state`, `credential_bindings`, `legacy_identity_map`,
+/// `onboarding_tasks`, and `subscription_records`. Keeps `quota_pools` /
+/// `quota_pool_members`. Does not invent identities on leftover-absent DBs.
+fn migrate_to_v57(conn: &Connection) -> Result<()> {
+    if schema_version_on(conn)? >= 57 {
+        identity_v57::drop_leftover_identity_tables(conn)?;
+        identity_v57::ensure_v57_columns(conn)?;
+        return Ok(());
+    }
+    anyhow::ensure!(schema_version_on(conn)? == 56, "v57 requires schema v56");
+    identity_v57::migrate_v57_backfill_and_drop(conn)?;
+    conn.execute_batch("INSERT OR REPLACE INTO schema_version(version) VALUES (57);")?;
     Ok(())
 }
 
@@ -3804,11 +3750,7 @@ fn insert_account_row(
     verification_status: ConnectionVerificationStatus,
 ) -> Result<()> {
     insert_account_columns(conn, account, purchase_date, verification_status)?;
-    let sort_order: i64 = conn.query_row(
-        "SELECT sort_order FROM accounts WHERE id = ?1",
-        [&account.id],
-        |row| row.get(0),
-    )?;
+    let sort_order: i64 = account_store::select_account_sort_order(conn, &account.id)?;
     identity::persist_account_identity_model(
         conn,
         account,
@@ -3827,45 +3769,7 @@ pub(crate) fn insert_account_columns(
     purchase_date: &str,
     verification_status: ConnectionVerificationStatus,
 ) -> Result<()> {
-    conn.execute(
-        "INSERT INTO accounts (id, name, username, password_cipher, key_cipher, enabled, referral_code, recharge_date, sort_order, cooldown_until, cooldown_generic_until, cooldown_5h_until, cooldown_week_until, cooldown_month_until, cooldown_free_until, last_error, auth_error, account_type, setup_step, notes, created_at, updated_at, provider_id, credential_kind, quota_scope, verification_status, connection_verified_at, verification_error)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM accounts), ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, NULL, NULL)",
-        params![
-            account.id,
-            account.name,
-            account.username,
-            account.password_cipher,
-            account.key_cipher,
-            account.enabled as i32,
-            account.referral_code,
-            purchase_date,
-            account.cooldown_until.map(|t| t.to_rfc3339()),
-            account.cooldown_generic_until.map(|t| t.to_rfc3339()),
-            account.cooldown_5h_until.map(|t| t.to_rfc3339()),
-            account.cooldown_week_until.map(|t| t.to_rfc3339()),
-            account.cooldown_month_until.map(|t| t.to_rfc3339()),
-            account.cooldown_free_until.map(|t| t.to_rfc3339()),
-            account.last_error,
-            account.auth_error,
-            account.account_type.as_str(),
-            account.setup_step.as_str(),
-            account.notes,
-            account.created_at.to_rfc3339(),
-            account.updated_at.to_rfc3339(),
-            account.provider_id,
-            account.credential_kind.as_str(),
-            account.quota_scope.as_str(),
-            verification_status.as_str(),
-        ],
-    )?;
-    conn.execute(
-        "INSERT INTO provider_usage_sync_state (
-            account_id, last_success_at, last_attempt_at, next_eligible_at,
-            failure_streak, last_expedited_at
-         ) VALUES (?1, NULL, NULL, NULL, 0, NULL)",
-        [&account.id],
-    )?;
-    Ok(())
+    account_store::insert_account_columns(conn, account, purchase_date, verification_status)
 }
 
 fn insert_import_account_on(conn: &Connection, record: &AccountImportRecord) -> Result<()> {
@@ -3949,9 +3853,9 @@ fn validate_import_account_on(conn: &Connection, record: &AccountImportRecord) -
 
 fn restore_import_verification_on(conn: &Connection, record: &AccountImportRecord) -> Result<()> {
     conn.execute(
-        "UPDATE accounts SET verification_status = ?2,
+        "UPDATE credentials SET verification_status = ?2,
              connection_verified_at = ?3, verification_error = NULL
-         WHERE id = ?1",
+         WHERE legacy_account_id = ?1",
         params![
             record.account.id,
             record.verification_status.as_str(),
@@ -3966,7 +3870,7 @@ fn restore_import_verification_on(conn: &Connection, record: &AccountImportRecor
 fn merge_import_account_on(conn: &Connection, record: &AccountImportRecord) -> Result<()> {
     if conn
         .query_row(
-            "SELECT 1 FROM accounts WHERE id = ?1",
+            "SELECT 1 FROM credentials WHERE legacy_account_id = ?1",
             [&record.account.id],
             |_| Ok(()),
         )
@@ -3983,14 +3887,14 @@ fn merge_import_account_on(conn: &Connection, record: &AccountImportRecord) -> R
         normalize_purchase_date(&account.purchase_date)?
     };
     conn.execute(
-        "UPDATE accounts SET
+        "UPDATE credentials SET
              name = ?2, username = ?3, key_cipher = ?4, enabled = ?5,
-             recharge_date = ?6, account_type = ?7, setup_step = ?8, notes = ?9,
+             purchase_date = ?6, account_type = ?7, setup_step = ?8, notes = ?9,
              provider_id = ?10, credential_kind = ?11,
              quota_scope = ?12, verification_status = ?13,
              connection_verified_at = ?14, verification_error = NULL,
              auth_error = NULL, last_error = NULL, updated_at = ?15
-         WHERE id = ?1",
+         WHERE legacy_account_id = ?1",
         params![
             account.id,
             account.name,
@@ -4011,14 +3915,7 @@ fn merge_import_account_on(conn: &Connection, record: &AccountImportRecord) -> R
             Utc::now().to_rfc3339(),
         ],
     )?;
-    conn.execute(
-        "DELETE FROM account_model_capabilities WHERE account_id = ?1",
-        [&account.id],
-    )?;
-    conn.execute(
-        "DELETE FROM account_custom_configs WHERE account_id = ?1",
-        [&account.id],
-    )?;
+    custom_store::delete_custom_destination_facts(conn, &account.id)?;
     conn.execute(
         "DELETE FROM provider_contract_model_protocol_overrides
          WHERE scope_kind = ?1 AND scope_id = ?2",
@@ -4068,43 +3965,7 @@ fn persist_account_custom_config_on(
     account_id: &str,
     input: &AccountCustomConfigInput,
 ) -> Result<()> {
-    let endpoint_url = validate_custom_endpoint_url(&input.endpoint_url)?;
-    let now = Utc::now().to_rfc3339();
-    let existing = conn
-        .query_row(
-            "SELECT endpoint_url, upstream_protocol FROM account_custom_configs WHERE account_id = ?1",
-            [account_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        )
-        .optional()?;
-    let endpoint_changed = existing.as_ref().is_some_and(|(url, protocol)| {
-        url != &endpoint_url || protocol != input.upstream_protocol.as_str()
-    });
-    if existing.is_some() {
-        conn.execute(
-            "UPDATE account_custom_configs
-             SET endpoint_url = ?2, upstream_protocol = ?3, updated_at = ?4
-             WHERE account_id = ?1",
-            params![
-                account_id,
-                endpoint_url,
-                input.upstream_protocol.as_str(),
-                now,
-            ],
-        )?;
-    } else {
-        conn.execute(
-            "INSERT INTO account_custom_configs (
-                account_id, endpoint_url, upstream_protocol, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?4)",
-            params![
-                account_id,
-                endpoint_url,
-                input.upstream_protocol.as_str(),
-                now,
-            ],
-        )?;
-    }
+    let endpoint_changed = custom_store::persist_custom_config_on(conn, account_id, input)?;
     identity::fill_uninitialized_binding_grants_on(conn, Some(account_id))?;
     mark_required_verification_stale_on(conn, account_id)?;
     if endpoint_changed {
@@ -4122,26 +3983,29 @@ fn persist_account_custom_config_on(
 /// enablement gate. Go (`not_required`) rows are left untouched.
 fn mark_required_verification_stale_on(conn: &Connection, account_id: &str) -> Result<()> {
     conn.execute(
-        "UPDATE accounts
+        "UPDATE credentials
          SET verification_status = 'pending',
              connection_verified_at = NULL,
              verification_error = NULL,
              updated_at = ?2
-         WHERE id = ?1 AND verification_status <> 'not_required'",
+         WHERE legacy_account_id = ?1 AND verification_status <> 'not_required'",
         params![account_id, Utc::now().to_rfc3339()],
     )?;
     Ok(())
 }
 
 fn refresh_goat_provider_catalog_on(conn: &Connection) -> Result<()> {
+    if !table_exists(conn, "account_model_capabilities")? {
+        return Ok(());
+    }
     let mut stmt = conn.prepare(
         "SELECT c.model_id
          FROM account_model_capabilities c
-         INNER JOIN accounts a ON a.id = c.account_id
+         INNER JOIN credentials a ON a.legacy_account_id = c.account_id
          WHERE a.provider_id = ?1
            AND c.source = ?2
            AND a.verification_status = 'verified'
-         ORDER BY a.sort_order ASC, a.created_at ASC, a.id ASC, c.rowid ASC",
+         ORDER BY a.routing_rank ASC, a.created_at ASC, a.legacy_account_id ASC, c.rowid ASC",
     )?;
     let rows = stmt.query_map(
         params![COMMAND_CODE_PROVIDER_ID, COMMAND_CODE_GOAT_MODELS_SOURCE],
@@ -4191,36 +4055,67 @@ fn persist_goat_catalog_on(
     models: &[String],
     verified_at: Option<DateTime<Utc>>,
 ) -> Result<()> {
-    conn.execute(
-        "DELETE FROM account_model_capabilities
-         WHERE account_id = ?1 AND source = ?2",
-        params![account_id, COMMAND_CODE_GOAT_MODELS_SOURCE],
-    )?;
-    let verified = verified_at.map(|value| value.to_rfc3339());
-    let mut seen = HashSet::new();
-    for model in models {
-        let model_id = validate_custom_model_id(model)?;
-        let key = model_id.to_ascii_lowercase();
-        if !seen.insert(key) {
-            continue;
-        }
-        let protocol = match ocg_domain::protocol::command_code_preferred_format(&model_id) {
-            Some(ocg_domain::protocol::ApiFormat::Messages) => UpstreamProtocolKind::Messages,
-            _ => UpstreamProtocolKind::ChatCompletions,
-        };
+    if table_exists(conn, "account_model_capabilities")? {
         conn.execute(
-            "INSERT INTO account_model_capabilities
-             (account_id, model_id, upstream_model, protocol, verified_at, source)
-             VALUES (?1, ?2, ?2, ?3, ?4, ?5)",
-            params![
-                account_id,
-                model_id,
-                protocol.as_str(),
-                verified,
-                COMMAND_CODE_GOAT_MODELS_SOURCE,
-            ],
+            "DELETE FROM account_model_capabilities
+             WHERE account_id = ?1 AND source = ?2",
+            params![account_id, COMMAND_CODE_GOAT_MODELS_SOURCE],
         )?;
+        let verified = verified_at.map(|value| value.to_rfc3339());
+        let mut seen = HashSet::new();
+        for model in models {
+            let model_id = validate_custom_model_id(model)?;
+            let key = model_id.to_ascii_lowercase();
+            if !seen.insert(key) {
+                continue;
+            }
+            let protocol = match ocg_domain::protocol::command_code_preferred_format(&model_id) {
+                Some(ocg_domain::protocol::ApiFormat::Messages) => UpstreamProtocolKind::Messages,
+                _ => UpstreamProtocolKind::ChatCompletions,
+            };
+            conn.execute(
+                "INSERT INTO account_model_capabilities
+                 (account_id, model_id, upstream_model, protocol, verified_at, source)
+                 VALUES (?1, ?2, ?2, ?3, ?4, ?5)",
+                params![
+                    account_id,
+                    model_id,
+                    protocol.as_str(),
+                    verified,
+                    COMMAND_CODE_GOAT_MODELS_SOURCE,
+                ],
+            )?;
+        }
     }
+    let now = verified_at.unwrap_or_else(Utc::now);
+    let catalog: Vec<String> = models
+        .iter()
+        .filter_map(|model| validate_custom_model_id(model).ok())
+        .collect();
+    conn.execute(
+        "INSERT INTO provider_model_catalogs
+         (provider_id, models_json, refreshed_at, source_url)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(provider_id) DO UPDATE SET
+             models_json = excluded.models_json,
+             refreshed_at = excluded.refreshed_at,
+             source_url = excluded.source_url",
+        params![
+            COMMAND_CODE_PROVIDER_ID,
+            serde_json::to_string(&catalog)?,
+            now.to_rfc3339(),
+            COMMAND_CODE_GOAT_BASE_URL,
+        ],
+    )?;
+    upsert_contract_catalog_on(
+        conn,
+        &ContractScope::provider(COMMAND_CODE_PROVIDER_ID),
+        &catalog,
+        Some(now),
+        CATALOG_SOURCE_COMMAND_CODE_MODELS,
+        COMMAND_CODE_GOAT_BASE_URL,
+        now,
+    )?;
     Ok(())
 }
 
@@ -4229,60 +4124,7 @@ fn persist_account_model_capabilities_on(
     account_id: &str,
     capabilities: &[AccountModelCapabilityInput],
 ) -> Result<()> {
-    if !capabilities.is_empty() {
-        let expected_json: String = conn
-            .query_row(
-                "SELECT upstream_protocol FROM account_custom_configs WHERE account_id = ?1",
-                [account_id],
-                |row| row.get(0),
-            )
-            .optional()?
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Custom model capabilities require a persisted custom_config.upstream_protocol"
-                )
-            })?;
-        let expected_protocol = UpstreamProtocolKind::try_from(expected_json.as_str())
-            .map_err(|error| anyhow::anyhow!(error))?;
-        crate::custom::validate_custom_capability_expansion(expected_protocol, capabilities)
-            .map_err(|message| anyhow::anyhow!(message))?;
-    }
-    conn.execute(
-        "DELETE FROM account_model_capabilities WHERE account_id = ?1",
-        [account_id],
-    )?;
-    let mut seen = HashSet::new();
-    for capability in capabilities {
-        let public_model = validate_custom_model_id(&capability.public_model)?;
-        let upstream_model = validate_custom_model_id(&capability.upstream_model)?;
-        let source = capability
-            .source
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or("manual");
-        let key = (
-            public_model.to_ascii_lowercase(),
-            capability.protocol.as_str().to_string(),
-        );
-        anyhow::ensure!(
-            seen.insert(key),
-            "duplicate model capability `{public_model}` / {}",
-            capability.protocol.as_str()
-        );
-        conn.execute(
-            "INSERT INTO account_model_capabilities (
-                account_id, model_id, upstream_model, protocol, verified_at, source
-             ) VALUES (?1, ?2, ?3, ?4, NULL, ?5)",
-            params![
-                account_id,
-                public_model,
-                upstream_model,
-                capability.protocol.as_str(),
-                source
-            ],
-        )?;
-    }
+    custom_store::persist_custom_capabilities_on(conn, account_id, capabilities)?;
     mark_required_verification_stale_on(conn, account_id)?;
     Ok(())
 }
@@ -4422,17 +4264,28 @@ fn migrate_legacy_usage_baselines(
 /// catalog plan with `routable=false` are forced off. Providers come from
 /// [`BUILTIN_PROVIDERS`]; Go, Zen, and unknown provider rows are skipped.
 fn disable_unroutable_catalog_accounts(tx: &Transaction<'_>) -> Result<()> {
-    if !(table_has_column(tx, "accounts", "provider_id")?
-        && table_has_column(tx, "accounts", "enabled")?)
-    {
+    let accounts = table_has_column(tx, "accounts", "provider_id")?
+        && table_has_column(tx, "accounts", "enabled")?;
+    let credentials = table_has_column(tx, "credentials", "provider_id")?
+        && table_has_column(tx, "credentials", "enabled")?;
+    if !accounts && !credentials {
         return Ok(());
     }
     for plan in BUILTIN_PROVIDERS.iter().filter(|plan| !plan.routable) {
-        tx.execute(
-            "UPDATE accounts SET enabled = 0
-             WHERE provider_id = ?1 AND enabled <> 0",
-            params![plan.provider_id],
-        )?;
+        if accounts {
+            tx.execute(
+                "UPDATE accounts SET enabled = 0
+                 WHERE provider_id = ?1 AND enabled <> 0",
+                params![plan.provider_id],
+            )?;
+        }
+        if credentials {
+            tx.execute(
+                "UPDATE credentials SET enabled = 0
+                 WHERE provider_id = ?1 AND enabled <> 0",
+                params![plan.provider_id],
+            )?;
+        }
     }
     Ok(())
 }
@@ -4543,7 +4396,20 @@ impl Database {
         migrate_to_v47(&db.conn)?;
         migrate_to_v48(&db.conn, &db_path, is_fresh)?;
         migrate_to_v49(&db.conn)?;
+        migrate_to_v50(&db.conn)?;
+        migrate_to_v51(&db.conn)?;
         identity::ensure_identity_model_consistent(&db.conn)?;
+        migrate_to_v52(&db)?;
+        migrate_to_v53(&db.conn)?;
+        migrate_to_v54(&db.conn)?;
+        migrate_to_v55(&db.conn)?;
+        migrate_to_v56(&db.conn)?;
+        identity::ensure_identity_model_consistent(&db.conn)?;
+        migrate_to_v57(&db.conn)?;
+        identity::ensure_identity_model_consistent(&db.conn)?;
+        if !crate::destination_projection::should_skip_persist_on_open(&db)? {
+            let _ = crate::destination_projection::replace_persisted(&db)?;
+        }
         if let Some(cipher) = cipher {
             repair_legacy_account_ciphertext(&db.conn, cipher)?;
         }
@@ -5699,32 +5565,35 @@ impl Database {
         // Unreleased #43 drafts numbered client-key columns as v18 and the
         // sub-key table as v19, so those databases already report version
         // >= 18 and skip the notes gate above. ensure_column is idempotent
-        // on released v1.6.3 libraries and on fresh installs.
-        ensure_column(&tx, "accounts", "notes", "TEXT")?;
-        // Idempotent backstop for v21 columns when an unreleased draft already
-        // reported a higher schema_version number without these fields. v27
-        // drops these leftovers in favor of `provider_usage_sync_state`; never
-        // resurrect them on a v27+ database.
-        if version < V27_SCHEMA_VERSION {
-            ensure_column(&tx, "accounts", "usage_sync_last_success_at", "TEXT")?;
-            ensure_column(&tx, "accounts", "usage_sync_last_attempt_at", "TEXT")?;
-            ensure_column(&tx, "accounts", "usage_sync_next_eligible_at", "TEXT")?;
+        // on released v1.6.3 libraries and on fresh installs. After v52 the
+        // accounts table is gone; skip these backstops.
+        if table_exists(&tx, "accounts")? {
+            ensure_column(&tx, "accounts", "notes", "TEXT")?;
+            // Idempotent backstop for v21 columns when an unreleased draft already
+            // reported a higher schema_version number without these fields. v27
+            // drops these leftovers in favor of `provider_usage_sync_state`; never
+            // resurrect them on a v27+ database.
+            if version < V27_SCHEMA_VERSION {
+                ensure_column(&tx, "accounts", "usage_sync_last_success_at", "TEXT")?;
+                ensure_column(&tx, "accounts", "usage_sync_last_attempt_at", "TEXT")?;
+                ensure_column(&tx, "accounts", "usage_sync_next_eligible_at", "TEXT")?;
+                ensure_column(
+                    &tx,
+                    "accounts",
+                    "usage_sync_failure_streak",
+                    "INTEGER NOT NULL DEFAULT 0",
+                )?;
+                ensure_column(&tx, "accounts", "usage_sync_last_expedited_at", "TEXT")?;
+            }
             ensure_column(
                 &tx,
                 "accounts",
-                "usage_sync_failure_streak",
-                "INTEGER NOT NULL DEFAULT 0",
+                "verification_status",
+                "TEXT NOT NULL DEFAULT 'not_required'",
             )?;
-            ensure_column(&tx, "accounts", "usage_sync_last_expedited_at", "TEXT")?;
+            ensure_column(&tx, "accounts", "connection_verified_at", "TEXT")?;
+            ensure_column(&tx, "accounts", "verification_error", "TEXT")?;
         }
-        ensure_column(
-            &tx,
-            "accounts",
-            "verification_status",
-            "TEXT NOT NULL DEFAULT 'not_required'",
-        )?;
-        ensure_column(&tx, "accounts", "connection_verified_at", "TEXT")?;
-        ensure_column(&tx, "accounts", "verification_error", "TEXT")?;
         for (column, definition) in [
             ("requested_model", "TEXT"),
             ("resolved_alias", "TEXT"),
@@ -5735,26 +5604,31 @@ impl Database {
         ] {
             ensure_column(&tx, "forward_logs", column, definition)?;
         }
-        tx.execute_batch(
-            "CREATE TABLE IF NOT EXISTS account_custom_configs (
-                account_id TEXT PRIMARY KEY,
-                base_url TEXT NOT NULL,
-                upstream_protocols TEXT NOT NULL,
-                auth_scheme TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
-            );
-            CREATE TABLE IF NOT EXISTS account_model_capabilities (
-                account_id TEXT NOT NULL,
-                model_id TEXT NOT NULL,
-                protocol TEXT NOT NULL,
-                verified_at TEXT,
-                source TEXT NOT NULL DEFAULT 'manual',
-                PRIMARY KEY (account_id, model_id, protocol),
-                FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
-            );",
-        )?;
+        // Historical leftover Custom tables referenced `accounts`. After v52
+        // that parent is gone, so do not recreate the children on rewind.
+        // v32/v33 treat a missing leftover table as already-migrated.
+        if version < 53 && table_exists(&tx, "accounts")? {
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS account_custom_configs (
+                    account_id TEXT PRIMARY KEY,
+                    base_url TEXT NOT NULL,
+                    upstream_protocols TEXT NOT NULL,
+                    auth_scheme TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS account_model_capabilities (
+                    account_id TEXT NOT NULL,
+                    model_id TEXT NOT NULL,
+                    protocol TEXT NOT NULL,
+                    verified_at TEXT,
+                    source TEXT NOT NULL DEFAULT 'manual',
+                    PRIMARY KEY (account_id, model_id, protocol),
+                    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+                );",
+            )?;
+        }
         tx.execute_batch(PROVIDER_CONTRACT_V26_DDL)?;
         // Fail-closed leftovers for every catalogued-but-unroutable offering,
         // including already-v23 verified rows. Sparse pre-v22 fixtures may still
@@ -5769,6 +5643,18 @@ impl Database {
         {
             tx.execute(
                 "UPDATE accounts
+                 SET verification_status = 'not_required',
+                     connection_verified_at = NULL,
+                     verification_error = NULL
+                 WHERE provider_id = ?1",
+                params![COMMAND_CODE_PROVIDER_ID],
+            )?;
+        }
+        if table_has_column(&tx, "credentials", "provider_id")?
+            && table_has_column(&tx, "credentials", "verification_status")?
+        {
+            tx.execute(
+                "UPDATE credentials
                  SET verification_status = 'not_required',
                      connection_verified_at = NULL,
                      verification_error = NULL
@@ -5798,14 +5684,28 @@ impl Database {
         // v17 originally stored the IP-shared free cooldown only on the account
         // that observed it. Backfill an active legacy value into a durable global
         // setting on every open, without adding another schema migration.
-        let legacy_free_cooldown: Option<String> = tx.query_row(
-            "SELECT MAX(cooldown_free_until)
-             FROM accounts
-             WHERE cooldown_free_until IS NOT NULL
-               AND cooldown_free_until > ?1",
-            params![Utc::now().to_rfc3339()],
-            |row| row.get(0),
-        )?;
+        let now_rfc = Utc::now().to_rfc3339();
+        let legacy_free_cooldown: Option<String> = if table_exists(&tx, "accounts")? {
+            tx.query_row(
+                "SELECT MAX(cooldown_free_until)
+                 FROM accounts
+                 WHERE cooldown_free_until IS NOT NULL
+                   AND cooldown_free_until > ?1",
+                params![now_rfc],
+                |row| row.get(0),
+            )?
+        } else if table_exists(&tx, "credentials")? {
+            tx.query_row(
+                "SELECT MAX(cooldown_free_until)
+                 FROM credentials
+                 WHERE cooldown_free_until IS NOT NULL
+                   AND cooldown_free_until > ?1",
+                params![now_rfc],
+                |row| row.get(0),
+            )?
+        } else {
+            None
+        };
         if let Some(until) = legacy_free_cooldown {
             Self::upsert_free_channel_cooldown(&tx, &until)?;
         }
@@ -5935,6 +5835,7 @@ impl Database {
             &catalog.models,
             now,
         )?;
+        self.refresh_destination_shadow()?;
         tx.commit()?;
         Ok(())
     }
@@ -6035,6 +5936,7 @@ impl Database {
         upsert_contract_catalog_on(&tx, scope, models, refreshed_at, source, source_url, now)?;
         let row = load_scope_on(&tx, scope)?
             .ok_or_else(|| anyhow::anyhow!("contract scope was not persisted"))?;
+        self.refresh_destination_shadow()?;
         tx.commit()?;
         Ok(row)
     }
@@ -6087,6 +5989,7 @@ impl Database {
         }
         let row = load_scope_on(&tx, scope)?
             .ok_or_else(|| anyhow::anyhow!("contract scope was not persisted"))?;
+        self.refresh_destination_shadow()?;
         tx.commit()?;
         Ok(row)
     }
@@ -6113,6 +6016,7 @@ impl Database {
         mark_new_catalog_models_default_off_on(&tx, scope, previous_models, models, refreshed_at)?;
         let row = load_scope_on(&tx, scope)?
             .ok_or_else(|| anyhow::anyhow!("contract scope was not persisted"))?;
+        self.refresh_destination_shadow()?;
         tx.commit()?;
         Ok(row)
     }
@@ -6149,6 +6053,7 @@ impl Database {
         bump_scope_revision_on(&tx, scope, now)?;
         let scope = load_scope_on(&tx, scope)?
             .ok_or_else(|| anyhow::anyhow!("contract scope was not persisted"))?;
+        self.refresh_destination_shadow()?;
         tx.commit()?;
         Ok(scope)
     }
@@ -6175,6 +6080,7 @@ impl Database {
         bump_scope_revision_on(&tx, scope, now)?;
         let row = load_scope_on(&tx, scope)?
             .ok_or_else(|| anyhow::anyhow!("contract scope was not persisted"))?;
+        self.refresh_destination_shadow()?;
         tx.commit()?;
         Ok(row)
     }
@@ -6198,6 +6104,7 @@ impl Database {
         bump_scope_revision_on(&tx, scope, now)?;
         let row = load_scope_on(&tx, scope)?
             .ok_or_else(|| anyhow::anyhow!("contract scope was not persisted"))?;
+        self.refresh_destination_shadow()?;
         tx.commit()?;
         Ok(row)
     }
@@ -6253,6 +6160,7 @@ impl Database {
         bump_scope_revision_on(&tx, scope, now)?;
         let row = load_scope_on(&tx, scope)?
             .ok_or_else(|| anyhow::anyhow!("contract scope was not persisted"))?;
+        self.refresh_destination_shadow()?;
         tx.commit()?;
         Ok(row)
     }
@@ -6285,6 +6193,7 @@ impl Database {
         bump_scope_revision_on(&tx, scope, now)?;
         let scope = load_scope_on(&tx, scope)?
             .ok_or_else(|| anyhow::anyhow!("contract scope was not persisted"))?;
+        self.refresh_destination_shadow()?;
         tx.commit()?;
         Ok(scope)
     }
@@ -6345,6 +6254,7 @@ impl Database {
         bump_scope_revision_on(&tx, &first.scope, now)?;
         let scope = load_scope_on(&tx, &first.scope)?
             .ok_or_else(|| anyhow::anyhow!("contract scope was not persisted"))?;
+        self.refresh_destination_shadow()?;
         tx.commit()?;
         Ok(scope)
     }
@@ -6419,6 +6329,13 @@ impl Database {
             .map_err(Into::into)
     }
 
+    /// Rebuild the v50 destination/credential shadow from live rows without
+    /// opening a nested transaction. A mapping refusal empties the tables and
+    /// does not fail the caller; SQL errors do so the outer writer rolls back.
+    pub(crate) fn refresh_destination_shadow(&self) -> Result<()> {
+        crate::destination_projection::refresh_destination_shadow(self)
+    }
+
     // Accounts
     pub fn create_account(&self, account: &Account) -> Result<()> {
         anyhow::ensure!(
@@ -6436,6 +6353,7 @@ impl Database {
             .unwrap_or(ConnectionVerificationStatus::NotRequired);
         let tx = self.conn.unchecked_transaction()?;
         insert_account_row(&tx, account, &purchase_date, verification_status)?;
+        self.refresh_destination_shadow()?;
         tx.commit()?;
         Ok(())
     }
@@ -6513,6 +6431,7 @@ impl Database {
         if account.provider_id == OLLAMA_PROVIDER_ID || ollama_billing.is_some() {
             set_ollama_cloud_billing_tier_on(&tx, &account.id, ollama_billing)?;
         }
+        self.refresh_destination_shadow()?;
         tx.commit()?;
         Ok(())
     }
@@ -6540,19 +6459,38 @@ impl Database {
         account_id: &str,
         credential_id: &str,
     ) -> Result<()> {
-        let updated = self.conn.execute(
-            "UPDATE credential_state SET credential_id = ?2 WHERE account_id = ?1",
-            params![account_id, credential_id],
+        if table_exists(&self.conn, "credential_state")? {
+            let updated = self.conn.execute(
+                "UPDATE credential_state SET credential_id = ?2 WHERE account_id = ?1",
+                params![account_id, credential_id],
+            )?;
+            anyhow::ensure!(
+                updated == 1,
+                "account {account_id} is missing credential_state"
+            );
+            if table_exists(&self.conn, "legacy_identity_map")? {
+                self.conn.execute(
+                    "UPDATE legacy_identity_map SET new_id = ?2
+                     WHERE legacy_id = ?1 AND new_kind = 'credential'",
+                    params![account_id, credential_id],
+                )?;
+            }
+            return Ok(());
+        }
+        let current_id: String = self.conn.query_row(
+            "SELECT id FROM credentials WHERE legacy_account_id = ?1",
+            [account_id],
+            |row| row.get(0),
         )?;
-        anyhow::ensure!(
-            updated == 1,
-            "account {account_id} is missing credential_state"
-        );
         self.conn.execute(
-            "UPDATE legacy_identity_map SET new_id = ?2
-             WHERE legacy_id = ?1 AND new_kind = 'credential'",
+            "UPDATE credential_grants SET credential_id = ?2 WHERE credential_id = ?1",
+            params![current_id, credential_id],
+        )?;
+        let updated = self.conn.execute(
+            "UPDATE credentials SET id = ?2 WHERE legacy_account_id = ?1",
             params![account_id, credential_id],
         )?;
+        anyhow::ensure!(updated == 1, "account {account_id} is missing a credential");
         Ok(())
     }
 
@@ -6563,9 +6501,8 @@ impl Database {
         get_dynamic_provider_on(&self.conn, provider_id)
     }
 
-    /// Read any `providers` row (builtin preset/custom) by id. Used by the
-    /// public GET to surface the unified view; the handler still rejects
-    /// PATCH/DELETE on builtin rows.
+    /// Read a sealed builtin catalog row or a destination-backed dynamic
+    /// definition. The handler still rejects PATCH/DELETE on builtin rows.
     pub fn get_provider_definition(
         &self,
         provider_id: &str,
@@ -6598,6 +6535,7 @@ impl Database {
         )?;
         dynamic_tx_fault("after_account_insert")?;
         let snapshot = list_dynamic_providers_on(&tx)?;
+        self.refresh_destination_shadow()?;
         tx.commit()?;
         Ok(snapshot)
     }
@@ -6611,6 +6549,7 @@ impl Database {
         let tx = self.conn.unchecked_transaction()?;
         insert_dynamic_provider_on(&tx, runtime, false)?;
         let snapshot = list_dynamic_providers_on(&tx)?;
+        self.refresh_destination_shadow()?;
         tx.commit()?;
         Ok(snapshot)
     }
@@ -6650,6 +6589,7 @@ impl Database {
         }
         insert_dashboard_operation_on(&tx, operation)?;
         let snapshot = list_dynamic_providers_on(&tx)?;
+        self.refresh_destination_shadow()?;
         tx.commit()?;
         Ok(snapshot)
     }
@@ -6678,6 +6618,7 @@ impl Database {
         insert_account_row(&tx, account, &purchase_date, verification_status)?;
         dynamic_tx_fault("after_account_insert")?;
         insert_dashboard_operation_on(&tx, operation)?;
+        self.refresh_destination_shadow()?;
         tx.commit()?;
         Ok(())
     }
@@ -6700,28 +6641,13 @@ impl Database {
         let tx = self.conn.unchecked_transaction()?;
         let existing = get_dynamic_provider_on(&tx, &runtime.id)?
             .ok_or_else(|| anyhow::anyhow!("unknown provider `{}`", runtime.id))?;
-        tx.execute(
-            "UPDATE providers
-             SET name = ?1, endpoint_url = ?2, upstream_protocol = ?3, auth_kind = ?4,
-                 updated_at = ?5, preset_id = ?7, offering = ?8, onboarding_draft = ?9
-             WHERE id = ?6",
-            params![
-                runtime.name,
-                runtime.endpoint_url,
-                runtime.upstream_protocol.as_str(),
-                runtime.auth_kind.as_str(),
-                runtime.updated_at.to_rfc3339(),
-                existing.id,
-                runtime.preset_id,
-                runtime.offering.as_str(),
-                onboarding_draft as i32,
-            ],
+        let mut stored = runtime.clone();
+        stored.id = existing.id.clone();
+        dynamic_store::replace_dynamic_provider_definition_on(
+            &tx,
+            &stored,
+            Some(onboarding_draft),
         )?;
-        tx.execute(
-            "DELETE FROM provider_models WHERE provider_id = ?1",
-            [&existing.id],
-        )?;
-        insert_dynamic_provider_models_on(&tx, &existing.id, &runtime.mappings)?;
         dynamic_tx_fault("after_mapping_replace")?;
         if let Some(account) = create_account {
             let purchase_date = if account.purchase_date.trim().is_empty() {
@@ -6745,19 +6671,19 @@ impl Database {
             match (name, notes) {
                 (Some(name), Some(notes)) => {
                     tx.execute(
-                        "UPDATE accounts SET name = ?2, notes = ?3, updated_at = ?4 WHERE id = ?1",
+                        "UPDATE credentials SET name = ?2, notes = ?3, updated_at = ?4 WHERE legacy_account_id = ?1",
                         params![account_id, name, notes, now],
                     )?;
                 }
                 (Some(name), None) => {
                     tx.execute(
-                        "UPDATE accounts SET name = ?2, updated_at = ?3 WHERE id = ?1",
+                        "UPDATE credentials SET name = ?2, updated_at = ?3 WHERE legacy_account_id = ?1",
                         params![account_id, name, now],
                     )?;
                 }
                 (None, Some(notes)) => {
                     tx.execute(
-                        "UPDATE accounts SET notes = ?2, updated_at = ?3 WHERE id = ?1",
+                        "UPDATE credentials SET notes = ?2, updated_at = ?3 WHERE legacy_account_id = ?1",
                         params![account_id, notes, now],
                     )?;
                 }
@@ -6769,9 +6695,9 @@ impl Database {
         }
         if let Some((account_id, credential_kind, quota_scope)) = sync_auth {
             tx.execute(
-                "UPDATE accounts SET credential_kind = ?2, quota_scope = ?3,
+                "UPDATE credentials SET credential_kind = ?2, quota_scope = ?3,
                      setup_step = 'ready', updated_at = ?4
-                 WHERE id = ?1",
+                 WHERE legacy_account_id = ?1",
                 params![
                     account_id,
                     credential_kind,
@@ -6782,6 +6708,7 @@ impl Database {
         }
         insert_dashboard_operation_on(&tx, operation)?;
         let snapshot = list_dynamic_providers_on(&tx)?;
+        self.refresh_destination_shadow()?;
         tx.commit()?;
         Ok(snapshot)
     }
@@ -6796,31 +6723,13 @@ impl Database {
         let tx = self.conn.unchecked_transaction()?;
         let existing = get_dynamic_provider_on(&tx, &runtime.id)?
             .ok_or_else(|| anyhow::anyhow!("unknown provider `{}`", runtime.id))?;
-        tx.execute(
-            "UPDATE providers
-             SET name = ?1, endpoint_url = ?2, upstream_protocol = ?3, auth_kind = ?4,
-                 updated_at = ?5, preset_id = ?7, offering = ?8
-             WHERE id = ?6",
-            params![
-                runtime.name,
-                runtime.endpoint_url,
-                runtime.upstream_protocol.as_str(),
-                runtime.auth_kind.as_str(),
-                runtime.updated_at.to_rfc3339(),
-                existing.id,
-                runtime.preset_id,
-                runtime.offering.as_str(),
-            ],
-        )?;
-        tx.execute(
-            "DELETE FROM provider_models WHERE provider_id = ?1",
-            [&existing.id],
-        )?;
-        insert_dynamic_provider_models_on(&tx, &existing.id, &runtime.mappings)?;
+        let mut stored = runtime.clone();
+        stored.id = existing.id.clone();
+        dynamic_store::replace_dynamic_provider_definition_on(&tx, &stored, None)?;
         dynamic_tx_fault("after_mapping_replace")?;
         if clear_runtime_state {
             tx.execute(
-                "UPDATE accounts SET
+                "UPDATE credentials SET
                     auth_error = NULL,
                     last_error = NULL,
                     cooldown_until = NULL,
@@ -6836,7 +6745,7 @@ impl Database {
             let mut account_ids = Vec::new();
             {
                 let mut stmt =
-                    tx.prepare("SELECT id FROM accounts WHERE lower(provider_id) = lower(?1)")?;
+                    tx.prepare("SELECT legacy_account_id FROM credentials WHERE lower(provider_id) = lower(?1)")?;
                 let rows = stmt.query_map([&existing.id], |row| row.get::<_, String>(0))?;
                 for id in rows {
                     account_ids.push(id?);
@@ -6852,7 +6761,7 @@ impl Database {
         }
         if clear_keys {
             tx.execute(
-                "UPDATE accounts SET key_cipher = '', credential_kind = ?1, quota_scope = ?2, updated_at = ?3
+                "UPDATE credentials SET key_cipher = '', credential_kind = ?1, quota_scope = ?2, updated_at = ?3
                  WHERE lower(provider_id) = lower(?4)",
                 params![
                     runtime.auth_kind.credential_kind().as_str(),
@@ -6868,7 +6777,7 @@ impl Database {
                 "replacement Key can only be written to the singleton account"
             );
             tx.execute(
-                "UPDATE accounts SET key_cipher = ?1, credential_kind = ?2, quota_scope = ?3, updated_at = ?4
+                "UPDATE credentials SET key_cipher = ?1, credential_kind = ?2, quota_scope = ?3, updated_at = ?4
                  WHERE lower(provider_id) = lower(?5)",
                 params![
                     key_cipher,
@@ -6880,7 +6789,7 @@ impl Database {
             )?;
         } else {
             tx.execute(
-                "UPDATE accounts SET credential_kind = ?1, quota_scope = ?2, updated_at = ?3
+                "UPDATE credentials SET credential_kind = ?1, quota_scope = ?2, updated_at = ?3
                  WHERE lower(provider_id) = lower(?4)",
                 params![
                     runtime.auth_kind.credential_kind().as_str(),
@@ -6891,6 +6800,7 @@ impl Database {
             )?;
         }
         let snapshot = list_dynamic_providers_on(&tx)?;
+        self.refresh_destination_shadow()?;
         tx.commit()?;
         Ok(snapshot)
     }
@@ -6903,7 +6813,7 @@ impl Database {
         let existing = get_dynamic_provider_on(&tx, provider_id)?
             .ok_or_else(|| anyhow::anyhow!("unknown provider `{provider_id}`"))?;
         let count: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM accounts WHERE lower(provider_id) = lower(?1)",
+            "SELECT COUNT(*) FROM credentials WHERE lower(provider_id) = lower(?1)",
             [&existing.id],
             |row| row.get(0),
         )?;
@@ -6911,12 +6821,9 @@ impl Database {
             count == 0,
             "dynamic provider still has {count} referencing account(s)"
         );
-        tx.execute(
-            "DELETE FROM provider_models WHERE provider_id = ?1",
-            [&existing.id],
-        )?;
-        tx.execute("DELETE FROM providers WHERE id = ?1", [&existing.id])?;
+        dynamic_store::delete_dynamic_provider_on(&tx, &existing.id)?;
         let snapshot = list_dynamic_providers_on(&tx)?;
+        self.refresh_destination_shadow()?;
         tx.commit()?;
         Ok(snapshot)
     }
@@ -6929,6 +6836,7 @@ impl Database {
         for record in records {
             insert_import_account_on(&tx, record)?;
         }
+        self.refresh_destination_shadow()?;
         tx.commit()?;
         Ok(())
     }
@@ -6945,7 +6853,9 @@ impl Database {
         let mut ordered_ids = Vec::new();
         {
             let mut stmt = tx.prepare(
-                "SELECT id FROM accounts ORDER BY sort_order ASC, created_at ASC, id ASC",
+                "SELECT legacy_account_id FROM credentials
+                 WHERE COALESCE(credential_purpose, 'inference') = 'inference'
+                 ORDER BY routing_rank ASC, created_at ASC, legacy_account_id ASC",
             )?;
             let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
             for id in rows {
@@ -6971,12 +6881,12 @@ impl Database {
             )?;
         }
         if record.platform_links_authoritative {
-            for account in &record.accounts {
-                tx.execute(
-                    "DELETE FROM platform_links WHERE account_id=?1",
-                    [&account.account.id],
-                )?;
-            }
+            let imported_ids: Vec<String> = record
+                .accounts
+                .iter()
+                .map(|account| account.account.id.clone())
+                .collect();
+            platform::unlink_imported_accounts(&tx, &imported_ids)?;
         }
         for account in &record.accounts {
             merge_import_account_on(&tx, account)?;
@@ -7005,9 +6915,9 @@ impl Database {
                     .max(month)
                     .max(free);
                 tx.execute(
-                    "UPDATE accounts SET cooldown_until=?2, cooldown_generic_until=?3,
+                    "UPDATE credentials SET cooldown_until=?2, cooldown_generic_until=?3,
                          cooldown_5h_until=?4, cooldown_week_until=?5,
-                         cooldown_month_until=?6, cooldown_free_until=?7 WHERE id=?1",
+                         cooldown_month_until=?6, cooldown_free_until=?7 WHERE legacy_account_id=?1",
                     params![
                         source.id,
                         until.map(|v| v.to_rfc3339()),
@@ -7071,8 +6981,8 @@ impl Database {
         );
 
         let zen_changed = tx.execute(
-            "UPDATE accounts SET enabled = ?2, updated_at = ?3
-             WHERE id = ?1 AND provider_id = ?4 ",
+            "UPDATE credentials SET enabled = ?2, updated_at = ?3
+             WHERE legacy_account_id = ?1 AND provider_id = ?4 ",
             params![
                 ZEN_FREE_ACCOUNT_ID,
                 record.zen_free_enabled as i32,
@@ -7089,7 +6999,10 @@ impl Database {
             }
         }
         let current_ids = {
-            let mut stmt = tx.prepare("SELECT id FROM accounts")?;
+            let mut stmt = tx.prepare(
+                "SELECT legacy_account_id FROM credentials
+                 WHERE COALESCE(credential_purpose, 'inference') = 'inference'",
+            )?;
             stmt.query_map([], |row| row.get::<_, String>(0))?
                 .collect::<rusqlite::Result<HashSet<_>>>()?
         };
@@ -7101,7 +7014,7 @@ impl Database {
         );
         for (sort_order, id) in ordered_ids.iter().enumerate() {
             tx.execute(
-                "UPDATE accounts SET sort_order = ?1 WHERE id = ?2",
+                "UPDATE credentials SET routing_rank = ?1 WHERE legacy_account_id = ?2",
                 params![sort_order as i64, id],
             )?;
         }
@@ -7200,6 +7113,7 @@ impl Database {
         // step must finish before commit; the caller installs the returned
         // snapshots only after this transaction succeeds.
         let runtime = prepare_runtime(self)?;
+        self.refresh_destination_shadow()?;
         tx.commit()?;
         Ok(runtime)
     }
@@ -7289,14 +7203,14 @@ impl Database {
 
         let tx = self.conn.unchecked_transaction()?;
         tx.execute(
-            "UPDATE accounts SET name = ?1, username = ?2, password_cipher = ?3, key_cipher = ?4,
-             enabled = CASE WHEN ?10 AND ?14 THEN 0 ELSE ?5 END, referral_code = ?6, recharge_date = ?7, notes = ?8,
+            "UPDATE credentials SET name = ?1, username = ?2, password_cipher = ?3, key_cipher = ?4,
+             enabled = CASE WHEN ?10 AND ?14 THEN 0 ELSE ?5 END, referral_code = ?6, purchase_date = ?7, notes = ?8,
              usage_month_window_cost_offset = CASE WHEN ?9 THEN 0 ELSE usage_month_window_cost_offset END,
              auth_error = CASE WHEN ?10 THEN NULL ELSE auth_error END,
              verification_status = CASE WHEN ?10 AND ?13 THEN 'pending' ELSE verification_status END,
              connection_verified_at = CASE WHEN ?10 AND ?13 THEN NULL ELSE connection_verified_at END,
              verification_error = CASE WHEN ?10 AND ?13 THEN NULL ELSE verification_error END,
-             updated_at = ?11 WHERE id = ?12",
+             updated_at = ?11 WHERE legacy_account_id = ?12",
             params![
                 name,
                 username,
@@ -7315,22 +7229,22 @@ impl Database {
             ],
         )?;
         if key_replaced && requires_verification && is_command_code_goat(&existing.provider_id) {
-            tx.execute(
-                "DELETE FROM account_model_capabilities
-                 WHERE account_id = ?1 AND source = ?2",
-                params![id, COMMAND_CODE_GOAT_MODELS_SOURCE],
-            )?;
+            if table_exists(&tx, "account_model_capabilities")? {
+                tx.execute(
+                    "DELETE FROM account_model_capabilities
+                     WHERE account_id = ?1 AND source = ?2",
+                    params![id, COMMAND_CODE_GOAT_MODELS_SOURCE],
+                )?;
+            }
             refresh_goat_provider_catalog_on(&tx)?;
         }
         if let Some(tier) = ollama_billing {
             set_ollama_cloud_billing_tier_on(&tx, id, tier)?;
         }
         if key_replaced {
-            tx.execute(
-                "UPDATE platform_links SET snapshot=NULL,version=version+1 WHERE account_id=?1",
-                [id],
-            )?;
+            platform::clear_link_snapshot_for_account(&tx, id)?;
         }
+        self.refresh_destination_shadow()?;
         tx.commit()?;
         Ok(())
     }
@@ -7353,21 +7267,7 @@ impl Database {
     }
 
     pub fn cpa_integration(&self) -> Result<Option<CpaIntegrationRecord>> {
-        self.conn
-            .query_row(
-                "SELECT account_id, base_url, management_key_cipher
-                   FROM cpa_integration WHERE id = 'cpa'",
-                [],
-                |row| {
-                    Ok(CpaIntegrationRecord {
-                        account_id: row.get(0)?,
-                        base_url: row.get(1)?,
-                        management_key_cipher: row.get(2)?,
-                    })
-                },
-            )
-            .optional()
-            .map_err(Into::into)
+        cpa::integration_on(&self.conn)
     }
 
     /// Atomically creates or updates the one CPA route account and its local
@@ -7399,7 +7299,7 @@ impl Database {
         let tx = self.conn.unchecked_transaction()?;
         let exists = tx
             .query_row(
-                "SELECT 1 FROM accounts WHERE id = ?1",
+                "SELECT 1 FROM credentials WHERE legacy_account_id = ?1",
                 [CPA_ACCOUNT_ID],
                 |_| Ok(()),
             )
@@ -7407,7 +7307,7 @@ impl Database {
             .is_some();
         if exists {
             tx.execute(
-                "UPDATE accounts
+                "UPDATE credentials
                     SET name = ?2,
                         auth_error = CASE WHEN key_cipher <> ?3 THEN NULL ELSE auth_error END,
                         key_cipher = ?3, enabled = ?4,
@@ -7416,7 +7316,7 @@ impl Database {
                         credential_kind = ?9, quota_scope = ?10,
                         verification_status = 'not_required',
                         connection_verified_at = NULL, verification_error = NULL
-                  WHERE id = ?1",
+                  WHERE legacy_account_id = ?1",
                 params![
                     account.id,
                     account.name,
@@ -7439,22 +7339,8 @@ impl Database {
                 default_verification_status(plan),
             )?;
         }
-        tx.execute(
-            "INSERT INTO cpa_integration
-                 (id, account_id, base_url, management_key_cipher, updated_at)
-             VALUES ('cpa', ?1, ?2, ?3, ?4)
-             ON CONFLICT(id) DO UPDATE SET
-                 account_id = excluded.account_id,
-                 base_url = excluded.base_url,
-                 management_key_cipher = excluded.management_key_cipher,
-                 updated_at = excluded.updated_at",
-            params![
-                CPA_ACCOUNT_ID,
-                base_url,
-                management_key_cipher,
-                Utc::now().to_rfc3339(),
-            ],
-        )?;
+        cpa::upsert_destination_and_observer_on(&tx, base_url, management_key_cipher)?;
+        self.refresh_destination_shadow()?;
         tx.commit()?;
         Ok(())
     }
@@ -7462,7 +7348,7 @@ impl Database {
     /// Removes only OCG-owned CPA state. CPA auth files remain owned by CPA.
     pub fn delete_cpa_integration(&self) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
-        tx.execute("DELETE FROM cpa_integration WHERE id = 'cpa'", [])?;
+        cpa::delete_destination_and_observer_on(&tx)?;
         tx.execute(
             "DELETE FROM provider_model_catalogs WHERE provider_id = ?1",
             params![CPA_PROVIDER_ID],
@@ -7484,8 +7370,12 @@ impl Database {
         )?;
         let identity_id = identity::account_identity_id(&tx, CPA_ACCOUNT_ID)?;
         identity::delete_account_identity_satellites(&tx, CPA_ACCOUNT_ID)?;
-        tx.execute("DELETE FROM accounts WHERE id = ?1", [CPA_ACCOUNT_ID])?;
+        tx.execute(
+            "DELETE FROM credentials WHERE legacy_account_id = ?1",
+            [CPA_ACCOUNT_ID],
+        )?;
         identity::delete_orphan_identity_for_account(&tx, CPA_ACCOUNT_ID, identity_id.as_deref())?;
+        self.refresh_destination_shadow()?;
         tx.commit()?;
         Ok(())
     }
@@ -7571,6 +7461,14 @@ impl Database {
         Ok(value.filter(|key| !key.trim().is_empty()))
     }
 
+    /// Test-only seam: recreate leftover identity satellites from credentials
+    /// and mark schema v56 so the next open exercises v57 copy+drop.
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    pub fn test_rewind_identity_satellites_to_v56(&self) -> Result<()> {
+        identity_v57::rewind_identity_satellites_to_v56(&self.conn)
+    }
+
     /// Test-only seam: drop the live unique index so out-of-model collision
     /// drills can still exercise snapshot/API gates. Compiled only for unit
     /// tests and debug builds; release production source does not expose it.
@@ -7585,9 +7483,10 @@ impl Database {
     /// The Zen Free singleton has one canonical user setting: enabled.
     pub fn set_zen_free_enabled(&self, enabled: bool) -> Result<()> {
         ensure_enabled_provider_is_routable(OPENCODE_ZEN_FREE_PROVIDER_ID, enabled)?;
-        let changed = self.conn.execute(
-            "UPDATE accounts SET enabled = ?2, updated_at = ?3
-             WHERE id = ?1 AND provider_id = ?4",
+        let tx = self.conn.unchecked_transaction()?;
+        let changed = tx.execute(
+            "UPDATE credentials SET enabled = ?2, updated_at = ?3
+             WHERE legacy_account_id = ?1 AND provider_id = ?4",
             params![
                 ZEN_FREE_ACCOUNT_ID,
                 enabled as i32,
@@ -7596,6 +7495,8 @@ impl Database {
             ],
         )?;
         anyhow::ensure!(changed == 1, "Zen Free singleton is missing");
+        self.refresh_destination_shadow()?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -7604,22 +7505,15 @@ impl Database {
             id != ZEN_FREE_ACCOUNT_ID,
             "Zen Free is a built-in singleton and cannot be deleted"
         );
-        let tx = self.conn.transaction()?;
+        let tx = self.conn.unchecked_transaction()?;
         tx.execute("DELETE FROM quota_windows WHERE account_id = ?1", [id])?;
-        tx.execute("DELETE FROM platform_links WHERE account_id = ?1", [id])?;
+        platform::unlink_imported_accounts(&tx, &[id.to_string()])?;
         tx.execute("DELETE FROM credit_balances WHERE account_id = ?1", [id])?;
         tx.execute(
             "DELETE FROM provider_usage_sync_state WHERE account_id = ?1",
             [id],
         )?;
-        tx.execute(
-            "DELETE FROM account_custom_configs WHERE account_id = ?1",
-            [id],
-        )?;
-        tx.execute(
-            "DELETE FROM account_model_capabilities WHERE account_id = ?1",
-            [id],
-        )?;
+        custom_store::delete_custom_destination_facts(&tx, id)?;
         tx.execute(
             "DELETE FROM provider_contract_model_protocols
              WHERE scope_kind = ?1 AND scope_id = ?2",
@@ -7637,8 +7531,13 @@ impl Database {
         )?;
         let identity_id = identity::account_identity_id(&tx, id)?;
         identity::delete_account_identity_satellites(&tx, id)?;
-        tx.execute("DELETE FROM accounts WHERE id = ?1", [id])?;
+        tx.execute(
+            "DELETE FROM ollama_cloud_billing WHERE account_id = ?1",
+            [id],
+        )?;
+        tx.execute("DELETE FROM credentials WHERE legacy_account_id = ?1", [id])?;
         identity::delete_orphan_identity_for_account(&tx, id, identity_id.as_deref())?;
+        self.refresh_destination_shadow()?;
         tx.commit()?;
         Ok(())
     }
@@ -7661,8 +7560,8 @@ impl Database {
     ) -> Result<Option<AccountVerificationState>> {
         self.conn
             .query_row(
-                "SELECT id, verification_status, connection_verified_at, verification_error
-                 FROM accounts WHERE id = ?1",
+                "SELECT legacy_account_id, verification_status, connection_verified_at, verification_error
+                 FROM credentials WHERE legacy_account_id = ?1",
                 [account_id],
                 account_verification_from_row,
             )
@@ -7688,13 +7587,14 @@ impl Database {
         verified_at: Option<DateTime<Utc>>,
         error: Option<&str>,
     ) -> Result<bool> {
-        let changed = self.conn.execute(
-            "UPDATE accounts
+        let tx = self.conn.unchecked_transaction()?;
+        let changed = tx.execute(
+            "UPDATE credentials
              SET verification_status = ?2,
                  connection_verified_at = ?3,
                  verification_error = ?4,
                  updated_at = ?5
-             WHERE id = ?1",
+             WHERE legacy_account_id = ?1",
             params![
                 account_id,
                 status.as_str(),
@@ -7703,6 +7603,10 @@ impl Database {
                 Utc::now().to_rfc3339(),
             ],
         )?;
+        if changed == 1 {
+            self.refresh_destination_shadow()?;
+        }
+        tx.commit()?;
         Ok(changed == 1)
     }
 
@@ -7749,12 +7653,12 @@ impl Database {
             return Ok(false);
         }
         let changed = tx.execute(
-            "UPDATE accounts
+            "UPDATE credentials
              SET verification_status = ?2,
                  connection_verified_at = ?3,
                  verification_error = ?4,
                  updated_at = ?5
-             WHERE id = ?1
+             WHERE legacy_account_id = ?1
                AND verification_status IN ('pending', 'failed')
                AND updated_at = ?6
                AND key_cipher = ?7",
@@ -7771,6 +7675,7 @@ impl Database {
         if changed != 1 {
             return Ok(false);
         }
+        self.refresh_destination_shadow()?;
         tx.commit()?;
         Ok(true)
     }
@@ -7782,7 +7687,7 @@ impl Database {
         self.conn
             .query_row(
                 "SELECT updated_at, key_cipher, verification_status
-                 FROM accounts WHERE id = ?1",
+                 FROM credentials WHERE legacy_account_id = ?1",
                 [account_id],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
@@ -7791,15 +7696,7 @@ impl Database {
     }
 
     pub fn account_custom_config(&self, account_id: &str) -> Result<Option<AccountCustomConfig>> {
-        self.conn
-            .query_row(
-                "SELECT account_id, endpoint_url, upstream_protocol, created_at, updated_at
-                 FROM account_custom_configs WHERE account_id = ?1",
-                [account_id],
-                account_custom_config_from_row,
-            )
-            .optional()
-            .map_err(Into::into)
+        custom_store::account_custom_config_on(&self.conn, account_id)
     }
 
     pub fn upsert_account_custom_config(
@@ -7823,6 +7720,7 @@ impl Database {
         anyhow::ensure!(self.get_account(account_id)?.is_some(), "account not found");
         let tx = self.conn.unchecked_transaction()?;
         persist_account_custom_config_on(&tx, account_id, input)?;
+        self.refresh_destination_shadow()?;
         tx.commit()?;
         Ok(())
     }
@@ -7841,6 +7739,7 @@ impl Database {
         persist_account_custom_config_on(&tx, account_id, input)?;
         persist_account_model_capabilities_on(&tx, account_id, capabilities)?;
         clear_custom_protocol_state_except_on(&tx, account_id, input.upstream_protocol)?;
+        self.refresh_destination_shadow()?;
         tx.commit()?;
         Ok(())
     }
@@ -7849,40 +7748,32 @@ impl Database {
         &self,
         account_id: &str,
     ) -> Result<Vec<AccountModelCapability>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT account_id, model_id, upstream_model, protocol, verified_at, source
-             FROM account_model_capabilities
-             WHERE account_id = ?1
-             ORDER BY model_id ASC, protocol ASC",
-        )?;
-        let rows = stmt.query_map([account_id], account_model_capability_from_row)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        custom_store::list_capabilities_on(&self.conn, account_id, false, false)
     }
 
     pub fn list_account_model_capabilities_declared(
         &self,
         account_id: &str,
     ) -> Result<Vec<AccountModelCapability>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT account_id, model_id, upstream_model, protocol, verified_at, source
-             FROM account_model_capabilities
-             WHERE account_id = ?1
-             ORDER BY rowid ASC",
-        )?;
-        let rows = stmt.query_map([account_id], account_model_capability_from_row)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        custom_store::list_capabilities_on(&self.conn, account_id, true, false)
+    }
+
+    /// Projection catalog rows. Unknown leftover protocols are omitted rather
+    /// than failing the mapping; dashboard post-reads still use the strict list.
+    pub(crate) fn list_account_model_capabilities_for_projection(
+        &self,
+        account_id: &str,
+    ) -> Result<Vec<AccountModelCapability>> {
+        custom_store::list_capabilities_on(&self.conn, account_id, true, true)
     }
 
     /// Custom accounts in saved account order, with config and declared capabilities.
     pub fn list_custom_account_runtimes(&self) -> Result<Vec<crate::custom::CustomAccountRuntime>> {
         let mut stmt = self.conn.prepare(
-            "SELECT a.id, a.enabled, a.verification_status, a.setup_step, a.key_cipher,
-                    c.account_id, c.endpoint_url, c.upstream_protocol,
-                    c.created_at, c.updated_at
-             FROM accounts a
-             INNER JOIN account_custom_configs c ON c.account_id = a.id
-             WHERE a.provider_id = ?1
-             ORDER BY a.sort_order ASC, a.created_at ASC, a.id ASC",
+            "SELECT legacy_account_id, enabled, verification_status, setup_step, key_cipher
+             FROM credentials
+             WHERE provider_id = ?1
+             ORDER BY routing_rank ASC, created_at ASC, legacy_account_id ASC",
         )?;
         let rows = stmt.query_map(params![CUSTOM_PROVIDER_ID], |row| {
             let account_id: String = row.get(0)?;
@@ -7901,41 +7792,22 @@ impl Database {
                 )
             })?;
             let key_cipher: String = row.get(4)?;
-            let config = AccountCustomConfig {
-                account_id: row.get(5)?,
-                endpoint_url: row.get(6)?,
-                upstream_protocol: {
-                    let value = row.get::<_, String>(7)?;
-                    UpstreamProtocolKind::try_from(value.as_str()).map_err(|error| {
-                        rusqlite::Error::FromSqlConversionFailure(7, Type::Text, Box::new(error))
-                    })?
-                },
-                created_at: parse_datetime(row.get::<_, String>(8)?),
-                updated_at: parse_datetime(row.get::<_, String>(9)?),
-            };
             Ok((
                 account_id,
                 enabled,
                 verification_status,
                 setup_step.is_ready(),
                 !key_cipher.is_empty(),
-                config,
             ))
         })?;
-        let linked_ids = {
-            let mut stmt = self.conn.prepare("SELECT account_id FROM platform_links")?;
-            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-            rows.collect::<rusqlite::Result<std::collections::HashSet<_>>>()?
-        };
         let mut runtimes = Vec::new();
         for row in rows {
-            let (account_id, enabled, verification_status, setup_ready, has_key, mut config) = row?;
-            let protocol_passthrough = linked_ids.contains(&account_id);
-            if protocol_passthrough
-                && let Some(endpoint) = self.platform_hosted_endpoint(&account_id)?
-            {
-                config.endpoint_url = endpoint;
-            }
+            let (account_id, enabled, verification_status, setup_ready, has_key) = row?;
+            let Some(config) = self.account_custom_config(&account_id)? else {
+                continue;
+            };
+            let protocol_passthrough =
+                custom_store::platform_parent_id(&self.conn, &account_id)?.is_some();
             let capabilities = self.list_account_model_capabilities_declared(&account_id)?;
             runtimes.push(crate::custom::CustomAccountRuntime {
                 account_id,
@@ -7953,10 +7825,10 @@ impl Database {
 
     pub fn list_goat_account_runtimes(&self) -> Result<Vec<crate::goat::GoatAccountRuntime>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, enabled, verification_status, setup_step, key_cipher
-             FROM accounts
+            "SELECT legacy_account_id, enabled, verification_status, setup_step, key_cipher
+             FROM credentials
              WHERE provider_id = ?1
-             ORDER BY sort_order ASC, created_at ASC, id ASC",
+             ORDER BY routing_rank ASC, created_at ASC, legacy_account_id ASC",
         )?;
         let rows = stmt.query_map(params![COMMAND_CODE_PROVIDER_ID], |row| {
             let account_id: String = row.get(0)?;
@@ -8016,6 +7888,10 @@ impl Database {
         anyhow::ensure!(self.get_account(account_id)?.is_some(), "account not found");
         let tx = self.conn.unchecked_transaction()?;
         persist_account_model_capabilities_on(&tx, account_id, capabilities)?;
+        // After v53 destination_models is the store. Re-projecting through
+        // skip-unknown catalog join would DELETE + rewrite those rows and
+        // hide a committed unreadable protocols_json from the post-commit
+        // DTO read (revision already advanced).
         tx.commit()?;
         Ok(())
     }
@@ -8457,20 +8333,32 @@ impl Database {
         Ok(exists != 0)
     }
 
+    /// v51 secret store. Empty or missing credential rows fall back to the
+    /// `accounts` row until that table is dropped.
+    pub(crate) fn credential_key_cipher_for_legacy_account(
+        &self,
+        legacy_account_id: &str,
+    ) -> Result<Option<String>> {
+        if !table_has_column(&self.conn, "credentials", "key_cipher")? {
+            return Ok(None);
+        }
+        let cipher = self
+            .conn
+            .query_row(
+                "SELECT key_cipher FROM credentials WHERE legacy_account_id = ?1",
+                [legacy_account_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        Ok(cipher.filter(|value| !value.is_empty()))
+    }
+
     pub fn get_account(&self, id: &str) -> Result<Option<Account>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, name, username, password_cipher, key_cipher, enabled, referral_code, recharge_date, cooldown_until, cooldown_generic_until, cooldown_5h_until, cooldown_week_until, cooldown_month_until, cooldown_free_until, last_error, created_at, updated_at, auth_error, account_type, setup_step, notes, provider_id, credential_kind, quota_scope FROM accounts WHERE id = ?1"
-        )?;
-        let account = stmt.query_row([id], account_from_row).optional()?;
-        Ok(account)
+        account_store::get_account_on(&self.conn, id)
     }
 
     pub fn list_accounts(&self) -> Result<Vec<Account>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, name, username, password_cipher, key_cipher, enabled, referral_code, recharge_date, cooldown_until, cooldown_generic_until, cooldown_5h_until, cooldown_week_until, cooldown_month_until, cooldown_free_until, last_error, created_at, updated_at, auth_error, account_type, setup_step, notes, provider_id, credential_kind, quota_scope FROM accounts ORDER BY sort_order ASC, created_at ASC, id ASC"
-        )?;
-        let rows = stmt.query_map([], account_from_row)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.into())
+        account_store::list_accounts_on(&self.conn)
     }
 
     /// Advance a managed-account onboarding step with an optimistic current-step
@@ -8485,14 +8373,15 @@ impl Database {
         let confirmed_purchase_date = (from == AccountSetupStep::Payment
             && to == AccountSetupStep::KeyVerification)
             .then(local_today);
-        let changed = self.conn.execute(
-            "UPDATE accounts
+        let tx = self.conn.unchecked_transaction()?;
+        let changed = tx.execute(
+            "UPDATE credentials
              SET setup_step = ?1, enabled = 0,
-                 recharge_date = CASE WHEN ?5 IS NULL THEN recharge_date ELSE ?5 END,
+                 purchase_date = CASE WHEN ?5 IS NULL THEN purchase_date ELSE ?5 END,
                  usage_month_window_cost_offset = CASE WHEN ?5 IS NULL
                      THEN usage_month_window_cost_offset ELSE 0 END,
                  updated_at = ?2
-             WHERE id = ?3 AND account_type = 'managed' AND setup_step = ?4",
+             WHERE legacy_account_id = ?3 AND account_type = 'managed' AND setup_step = ?4",
             params![
                 to.as_str(),
                 Utc::now().to_rfc3339(),
@@ -8501,18 +8390,27 @@ impl Database {
                 confirmed_purchase_date,
             ],
         )?;
+        if changed == 1 {
+            self.refresh_destination_shadow()?;
+        }
+        tx.commit()?;
         Ok(changed == 1)
     }
 
     /// Persist a candidate key while keeping the account isolated from routing.
     pub fn save_managed_key_for_verification(&self, id: &str, key_cipher: &str) -> Result<bool> {
-        let changed = self.conn.execute(
-            "UPDATE accounts
+        let tx = self.conn.unchecked_transaction()?;
+        let changed = tx.execute(
+            "UPDATE credentials
              SET key_cipher = ?1, enabled = 0, auth_error = NULL, last_error = NULL,
                  updated_at = ?2
-             WHERE id = ?3 AND account_type = 'managed' AND setup_step = 'key_verification'",
+             WHERE legacy_account_id = ?3 AND account_type = 'managed' AND setup_step = 'key_verification'",
             params![key_cipher, Utc::now().to_rfc3339(), id],
         )?;
+        if changed == 1 {
+            self.refresh_destination_shadow()?;
+        }
+        tx.commit()?;
         Ok(changed == 1)
     }
 
@@ -8534,10 +8432,10 @@ impl Database {
         let now_rfc = now.to_rfc3339();
         let tx = self.conn.unchecked_transaction()?;
         let changed = tx.execute(
-            "UPDATE accounts
+            "UPDATE credentials
              SET key_cipher = ?1, enabled = 0, auth_error = NULL, last_error = NULL,
                  updated_at = ?2
-             WHERE id = ?3 AND key_cipher = ?4 AND updated_at = ?5
+             WHERE legacy_account_id = ?3 AND key_cipher = ?4 AND updated_at = ?5
                AND provider_id = ?6
                AND account_type = ?7 AND setup_step = ?8",
             params![
@@ -8570,7 +8468,7 @@ impl Database {
                     };
                     let completed = tx.execute(
                         &format!(
-                            "UPDATE accounts
+                            "UPDATE credentials
                              SET {column} = ?2, last_error = ?3,
                                  setup_step = 'ready', enabled = 1, auth_error = NULL,
                                  verification_status = CASE
@@ -8580,7 +8478,7 @@ impl Database {
                                      WHEN verification_status = 'not_required'
                                      THEN NULL ELSE ?4 END,
                                  verification_error = NULL, updated_at = ?4
-                             WHERE id = ?1 AND key_cipher = ?5"
+                             WHERE legacy_account_id = ?1 AND key_cipher = ?5"
                         ),
                         params![
                             id,
@@ -8593,7 +8491,7 @@ impl Database {
                     anyhow::ensure!(completed == 1, "managed verification row disappeared");
                     let cooldown_until = Self::compute_cooldown_until(&tx, id, &now_rfc)?;
                     tx.execute(
-                        "UPDATE accounts SET cooldown_until = ?2 WHERE id = ?1",
+                        "UPDATE credentials SET cooldown_until = ?2 WHERE legacy_account_id = ?1",
                         params![id, cooldown_until],
                     )?;
                     if rate_limit.window == Some(UsageWindowKind::Free) {
@@ -8601,7 +8499,7 @@ impl Database {
                     }
                 } else {
                     let completed = tx.execute(
-                        "UPDATE accounts
+                        "UPDATE credentials
                          SET setup_step = 'ready', enabled = 1, auth_error = NULL,
                              cooldown_until = NULL, cooldown_generic_until = NULL,
                              cooldown_5h_until = NULL, cooldown_week_until = NULL,
@@ -8614,7 +8512,7 @@ impl Database {
                                  WHEN verification_status = 'not_required'
                                  THEN NULL ELSE ?2 END,
                              verification_error = NULL, updated_at = ?2
-                         WHERE id = ?1 AND key_cipher = ?3",
+                         WHERE legacy_account_id = ?1 AND key_cipher = ?3",
                         params![id, now_rfc, candidate_key_cipher],
                     )?;
                     anyhow::ensure!(completed == 1, "managed verification row disappeared");
@@ -8638,8 +8536,8 @@ impl Database {
             }
             ManagedKeyVerificationWrite::AuthFailed { auth_error } => {
                 let updated = tx.execute(
-                    "UPDATE accounts SET auth_error = ?2, updated_at = ?3
-                     WHERE id = ?1 AND key_cipher = ?4",
+                    "UPDATE credentials SET auth_error = ?2, updated_at = ?3
+                     WHERE legacy_account_id = ?1 AND key_cipher = ?4",
                     params![id, auth_error, now_rfc, candidate_key_cipher],
                 )?;
                 anyhow::ensure!(updated == 1, "managed verification row disappeared");
@@ -8647,6 +8545,7 @@ impl Database {
             ManagedKeyVerificationWrite::Pending => {}
         }
 
+        self.refresh_destination_shadow()?;
         tx.commit()?;
         Ok(ManagedKeyVerificationCommit::Applied)
     }
@@ -8662,29 +8561,39 @@ impl Database {
             return Ok(false);
         };
         ensure_enabled_provider_is_routable(&account.provider_id, true)?;
-        let changed = self.conn.execute(
-            "UPDATE accounts
+        let tx = self.conn.unchecked_transaction()?;
+        let changed = tx.execute(
+            "UPDATE credentials
              SET setup_step = 'ready', enabled = 1, auth_error = NULL, updated_at = ?1
-             WHERE id = ?2 AND account_type = 'managed'
+             WHERE legacy_account_id = ?2 AND account_type = 'managed'
                AND setup_step = 'key_verification' AND key_cipher = ?3",
             params![Utc::now().to_rfc3339(), id, expected_key_cipher],
         )?;
+        if changed == 1 {
+            self.refresh_destination_shadow()?;
+        }
+        tx.commit()?;
         Ok(changed == 1)
     }
 
     /// Reset only an unfinished managed onboarding. Ready accounts keep their key
     /// when their browser profile is reset.
     pub fn reset_pending_managed_setup(&self, id: &str) -> Result<bool> {
-        let changed = self.conn.execute(
-            "UPDATE accounts
+        let tx = self.conn.unchecked_transaction()?;
+        let changed = tx.execute(
+            "UPDATE credentials
              SET setup_step = 'google_account', key_cipher = '', enabled = 0,
                  auth_error = NULL, last_error = NULL, cooldown_until = NULL,
                  cooldown_generic_until = NULL, cooldown_5h_until = NULL,
                  cooldown_week_until = NULL, cooldown_month_until = NULL, cooldown_free_until = NULL,
                  updated_at = ?1
-             WHERE id = ?2 AND account_type = 'managed' AND setup_step <> 'ready'",
+             WHERE legacy_account_id = ?2 AND account_type = 'managed' AND setup_step <> 'ready'",
             params![Utc::now().to_rfc3339(), id],
         )?;
+        if changed == 1 {
+            self.refresh_destination_shadow()?;
+        }
+        tx.commit()?;
         Ok(changed == 1)
     }
 
@@ -8702,7 +8611,10 @@ impl Database {
         }
 
         let current_ids = {
-            let mut stmt = tx.prepare("SELECT id FROM accounts")?;
+            let mut stmt = tx.prepare(
+                "SELECT legacy_account_id FROM credentials
+                 WHERE COALESCE(credential_purpose, 'inference') = 'inference'",
+            )?;
             let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
@@ -8716,10 +8628,13 @@ impl Database {
 
         for (sort_order, id) in account_ids.iter().enumerate() {
             tx.execute(
-                "UPDATE accounts SET sort_order = ?1 WHERE id = ?2",
+                "UPDATE credentials SET routing_rank = ?1 WHERE legacy_account_id = ?2",
                 params![sort_order as i64, id],
             )?;
         }
+        self.refresh_destination_shadow().map_err(|error| {
+            ReorderAccountsError::Database(rusqlite::Error::ToSqlConversionFailure(error.into()))
+        })?;
         tx.commit()?;
         Ok(())
     }
@@ -9451,7 +9366,7 @@ impl Database {
         let tx = self.conn.unchecked_transaction()?;
         if until.is_none() && err.is_none() {
             tx.execute(
-                "UPDATE accounts
+                "UPDATE credentials
                  SET cooldown_until = NULL,
                      cooldown_generic_until = NULL,
                      cooldown_5h_until = NULL,
@@ -9460,23 +9375,24 @@ impl Database {
                      cooldown_free_until = NULL,
                      last_error = NULL,
                      updated_at = ?2
-                 WHERE id = ?1",
+                 WHERE legacy_account_id = ?1",
                 params![id, now],
             )?;
         } else {
             tx.execute(
-                "UPDATE accounts
+                "UPDATE credentials
                  SET cooldown_generic_until = ?2, last_error = ?3, updated_at = ?4
-                 WHERE id = ?1",
+                 WHERE legacy_account_id = ?1",
                 params![id, until.map(|t| t.to_rfc3339()), err, now],
             )?;
             let new_cooldown = Self::compute_cooldown_until(&tx, id, &now)?;
             tx.execute(
-                "UPDATE accounts SET cooldown_until = ?2 WHERE id = ?1",
+                "UPDATE credentials SET cooldown_until = ?2 WHERE legacy_account_id = ?1",
                 params![id, new_cooldown],
             )?;
         }
         identity::fanout_shared_pool_cooldown(&tx, id, !(until.is_none() && err.is_none()))?;
+        self.refresh_destination_shadow()?;
         tx.commit()?;
         Ok(())
     }
@@ -9489,10 +9405,13 @@ impl Database {
     /// separate from cooldowns because authentication failures do not carry a
     /// reset deadline and must not be reported as rate limits.
     pub fn set_account_auth_error(&self, id: &str, error: Option<&str>) -> Result<()> {
-        self.conn.execute(
-            "UPDATE accounts SET auth_error = ?2, updated_at = ?3 WHERE id = ?1",
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE credentials SET auth_error = ?2, updated_at = ?3 WHERE legacy_account_id = ?1",
             params![id, error, Utc::now().to_rfc3339()],
         )?;
+        self.refresh_destination_shadow()?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -9505,12 +9424,17 @@ impl Database {
         expected_key_cipher: &str,
         error: Option<&str>,
     ) -> Result<bool> {
-        let updated = self.conn.execute(
-            "UPDATE accounts
+        let tx = self.conn.unchecked_transaction()?;
+        let updated = tx.execute(
+            "UPDATE credentials
              SET auth_error = ?3, updated_at = ?4
-             WHERE id = ?1 AND key_cipher = ?2",
+             WHERE legacy_account_id = ?1 AND key_cipher = ?2",
             params![id, expected_key_cipher, error, Utc::now().to_rfc3339()],
         )?;
+        if updated > 0 {
+            self.refresh_destination_shadow()?;
+        }
+        tx.commit()?;
         Ok(updated > 0)
     }
 
@@ -9563,8 +9487,8 @@ impl Database {
         };
         let updated = tx.execute(
             &format!(
-                "UPDATE accounts SET {column} = ?2, last_error = ?3, updated_at = ?4
-                 WHERE id = ?1 AND (?5 IS NULL OR key_cipher = ?5)"
+                "UPDATE credentials SET {column} = ?2, last_error = ?3, updated_at = ?4
+                 WHERE legacy_account_id = ?1 AND (?5 IS NULL OR key_cipher = ?5)"
             ),
             params![id, until.to_rfc3339(), err, now_rfc, expected_key_cipher],
         )?;
@@ -9576,7 +9500,7 @@ impl Database {
             // Legacy callers use cooldown_until as the time when this account is usable.
             let new_cooldown = Self::compute_cooldown_until(&tx, id, &now_rfc)?;
             tx.execute(
-                "UPDATE accounts SET cooldown_until = ?2 WHERE id = ?1",
+                "UPDATE credentials SET cooldown_until = ?2 WHERE legacy_account_id = ?1",
                 params![id, new_cooldown],
             )?;
         }
@@ -9591,6 +9515,7 @@ impl Database {
 
         if updated > 0 {
             identity::fanout_shared_pool_cooldown(&tx, id, true)?;
+            self.refresh_destination_shadow()?;
         }
 
         // ponytail: 不再在 429 时设置 baseline。固定窗口的"重置"由 forward_logs 自然驱动；
@@ -9617,18 +9542,23 @@ impl Database {
         id: &str,
         now_rfc: &str,
     ) -> Result<Option<String>> {
+        let source = account_store::account_row_source(tx)?;
         let max: Option<String> = tx.query_row(
-            "SELECT MAX(until) FROM (
-                SELECT cooldown_generic_until AS until FROM accounts WHERE id = ?1
+            &format!(
+                "SELECT MAX(until) FROM (
+                SELECT cooldown_generic_until AS until FROM {table} WHERE {id_col} = ?1
                 UNION ALL
-                SELECT cooldown_5h_until FROM accounts WHERE id = ?1
+                SELECT cooldown_5h_until FROM {table} WHERE {id_col} = ?1
                 UNION ALL
-                SELECT cooldown_week_until FROM accounts WHERE id = ?1
+                SELECT cooldown_week_until FROM {table} WHERE {id_col} = ?1
                 UNION ALL
-                SELECT cooldown_month_until FROM accounts WHERE id = ?1
+                SELECT cooldown_month_until FROM {table} WHERE {id_col} = ?1
                 UNION ALL
-                SELECT cooldown_free_until FROM accounts WHERE id = ?1
+                SELECT cooldown_free_until FROM {table} WHERE {id_col} = ?1
             ) WHERE until IS NOT NULL AND until > ?2",
+                table = source.table,
+                id_col = source.id_col
+            ),
             params![id, now_rfc],
             |row| row.get(0),
         )?;
@@ -9643,7 +9573,7 @@ impl Database {
             .conn
             .query_row(
                 "SELECT MIN(cooldown_until)
-                 FROM accounts
+                 FROM credentials
                  WHERE enabled = 1
                    AND setup_step = 'ready'
                    AND key_cipher <> ''
@@ -9749,8 +9679,8 @@ impl Database {
         let tx = self.conn.unchecked_transaction()?;
         let matches: i64 = tx.query_row(
             "SELECT EXISTS(
-                SELECT 1 FROM accounts
-                WHERE id = ?1
+                SELECT 1 FROM credentials
+                WHERE legacy_account_id = ?1
                   AND key_cipher = ?2
                   AND key_cipher <> ''
                   AND setup_step = 'ready'
@@ -9855,7 +9785,7 @@ impl Database {
     ) -> Result<Vec<QuotaWindow>> {
         let now = Utc::now();
         let (offset, purchase_date): (f64, String) = self.conn.query_row(
-            "SELECT usage_month_window_cost_offset, recharge_date FROM accounts WHERE id = ?1",
+            "SELECT usage_month_window_cost_offset, purchase_date FROM credentials WHERE legacy_account_id = ?1",
             [account_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
@@ -9881,7 +9811,7 @@ impl Database {
         let Some((offset, purchase_date)) = self
             .conn
             .query_row(
-                "SELECT usage_month_window_cost_offset, recharge_date FROM accounts WHERE id = ?1",
+                "SELECT usage_month_window_cost_offset, purchase_date FROM credentials WHERE legacy_account_id = ?1",
                 [account_id],
                 |row| Ok((row.get::<_, f64>(0)?, row.get::<_, String>(1)?)),
             )
@@ -9902,7 +9832,7 @@ impl Database {
         let purchase_date: String = match self
             .conn
             .query_row(
-                "SELECT recharge_date FROM accounts WHERE id = ?1",
+                "SELECT purchase_date FROM credentials WHERE legacy_account_id = ?1",
                 [account_id],
                 |row| row.get(0),
             )
@@ -9914,10 +9844,10 @@ impl Database {
         let actual_cost = sum_ollama_month_cost_on(&self.conn, account_id, &purchase_date)?;
         let offset = limit * percent / 100.0 - actual_cost;
         let changed = self.conn.execute(
-            "UPDATE accounts
+            "UPDATE credentials
              SET usage_month_window_cost_offset = ?2,
                  updated_at = ?3
-             WHERE id = ?1",
+             WHERE legacy_account_id = ?1",
             params![account_id, offset, now.to_rfc3339()],
         )?;
         Ok(changed > 0)
@@ -9937,8 +9867,8 @@ impl Database {
             .query_row(
                 "SELECT usage_5h_window_started_at, usage_5h_window_cost_offset,
                         usage_week_window_started_at, usage_week_window_cost_offset,
-                        usage_month_window_cost_offset, recharge_date
-                 FROM accounts WHERE id = ?1",
+                        usage_month_window_cost_offset, purchase_date
+                 FROM credentials WHERE legacy_account_id = ?1",
                 [account_id],
                 |row| {
                     Ok((
@@ -10107,24 +10037,41 @@ fn account_usage_with_limits_on(
     limits: &PricingLimits,
     now: DateTime<Utc>,
 ) -> Result<UsageWindow> {
-    let row = conn.query_row(
+    let row_sql = if table_exists(conn, "accounts")? {
         "SELECT usage_5h_window_started_at, usage_5h_window_cost_offset,
                 usage_week_window_started_at, usage_week_window_cost_offset,
                 usage_month_window_cost_offset,
                 recharge_date
-         FROM accounts WHERE id = ?1",
-        [account_id],
-        |row| {
-            Ok((
-                row.get::<_, Option<String>>(0)?,
-                row.get::<_, f64>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, f64>(3)?,
-                row.get::<_, f64>(4)?,
-                row.get::<_, String>(5)?,
-            ))
-        },
-    );
+         FROM accounts WHERE id = ?1"
+    } else if table_exists(conn, "credentials")?
+        && table_has_column(conn, "credentials", "purchase_date")?
+    {
+        "SELECT usage_5h_window_started_at, usage_5h_window_cost_offset,
+                usage_week_window_started_at, usage_week_window_cost_offset,
+                usage_month_window_cost_offset,
+                purchase_date
+         FROM credentials WHERE legacy_account_id = ?1"
+    } else {
+        return Ok(UsageWindow {
+            account_id: account_id.to_string(),
+            window_5h: 0.0,
+            window_week: 0.0,
+            window_month: 0.0,
+            resets_in_5h: None,
+            resets_in_week: None,
+            resets_in_month: None,
+        });
+    };
+    let row = conn.query_row(row_sql, [account_id], |row| {
+        Ok((
+            row.get::<_, Option<String>>(0)?,
+            row.get::<_, Option<f64>>(1)?.unwrap_or(0.0),
+            row.get::<_, Option<String>>(2)?,
+            row.get::<_, Option<f64>>(3)?.unwrap_or(0.0),
+            row.get::<_, Option<f64>>(4)?.unwrap_or(0.0),
+            row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+        ))
+    });
     let (started_5h_str, offset_5h, started_week_str, offset_week, offset_month, purchase_date) =
         match row.optional()? {
             Some(value) => value,
@@ -10221,11 +10168,12 @@ fn compute_fixed_window(
             match first {
                 None => return Ok((0.0, None)), // 真的没用过
                 Some(s) => {
+                    let source = account_store::account_row_source(conn)?;
                     conn.execute(
                         &format!(
-                            "UPDATE accounts SET {} = ?2, {} = 0
-                             WHERE id = ?1",
-                            spec.started_col, spec.offset_col
+                            "UPDATE {} SET {} = ?2, {} = 0
+                             WHERE {} = ?1",
+                            source.table, spec.started_col, spec.offset_col, source.id_col
                         ),
                         params![account_id, &s],
                     )?;
@@ -10273,11 +10221,12 @@ fn compute_fixed_window(
         match next {
             None => {
                 // 过期后无新请求：清空窗口，等待下次请求触发新窗口。
+                let source = account_store::account_row_source(conn)?;
                 conn.execute(
                     &format!(
-                        "UPDATE accounts SET {} = NULL, {} = 0
-                         WHERE id = ?1",
-                        spec.started_col, spec.offset_col
+                        "UPDATE {} SET {} = NULL, {} = 0
+                         WHERE {} = ?1",
+                        source.table, spec.started_col, spec.offset_col, source.id_col
                     ),
                     [account_id],
                 )?;
@@ -10286,11 +10235,12 @@ fn compute_fixed_window(
             Some(s) => {
                 started_at = parse_rfc3339(&s)?;
                 effective_offset = 0.0;
+                let source = account_store::account_row_source(conn)?;
                 conn.execute(
                     &format!(
-                        "UPDATE accounts SET {} = ?2, {} = 0
-                         WHERE id = ?1",
-                        spec.started_col, spec.offset_col
+                        "UPDATE {} SET {} = ?2, {} = 0
+                         WHERE {} = ?1",
+                        source.table, spec.started_col, spec.offset_col, source.id_col
                     ),
                     params![account_id, &s],
                 )?;
@@ -10448,7 +10398,7 @@ fn calibrate_account_usage_on(
         None => {
             let purchase_date: String = conn
                 .query_row(
-                    "SELECT recharge_date FROM accounts WHERE id = ?1",
+                    "SELECT purchase_date FROM credentials WHERE legacy_account_id = ?1",
                     [account_id],
                     |row| row.get(0),
                 )
@@ -10476,21 +10426,21 @@ fn calibrate_account_usage_on(
     let changed = if started_col.is_empty() {
         // 月窗口：只更新 cost_offset（started_at 由 purchase_date 派生，不存储）
         conn.execute(
-            "UPDATE accounts
+            "UPDATE credentials
              SET usage_month_window_cost_offset = ?2,
                  updated_at = ?3
-             WHERE id = ?1",
+             WHERE legacy_account_id = ?1",
             params![account_id, offset, now.to_rfc3339()],
         )?
     } else {
         let started = started_at.unwrap();
         conn.execute(
             &format!(
-                "UPDATE accounts
+                "UPDATE credentials
                  SET {started_col} = ?2,
                      {offset_col} = ?3,
                      updated_at = ?4
-                 WHERE id = ?1"
+                 WHERE legacy_account_id = ?1"
             ),
             params![account_id, started.to_rfc3339(), offset, now.to_rfc3339()],
         )?
@@ -10713,7 +10663,7 @@ fn custom_verification_contract_still_matches_on(
     let Some((updated_at, key_cipher, status)): Option<(String, String, String)> = conn
         .query_row(
             "SELECT updated_at, key_cipher, verification_status
-             FROM accounts WHERE id = ?1",
+             FROM credentials WHERE legacy_account_id = ?1",
             [&contract.account_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
@@ -10727,40 +10677,15 @@ fn custom_verification_contract_still_matches_on(
     {
         return Ok(false);
     }
-    let Some((endpoint_url, protocol)): Option<(String, String)> = conn
-        .query_row(
-            "SELECT endpoint_url, upstream_protocol
-             FROM account_custom_configs WHERE account_id = ?1",
-            [&contract.account_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()?
+    let Some((endpoint_url, protocol)) =
+        custom_store::custom_endpoint_protocol_on(conn, &contract.account_id)?
     else {
         return Ok(false);
     };
-    if endpoint_url != contract.endpoint_url || protocol != contract.upstream_protocol.as_str() {
+    if endpoint_url != contract.endpoint_url || protocol != contract.upstream_protocol {
         return Ok(false);
     }
-    let mut stmt = conn.prepare(
-        "SELECT model_id, upstream_model, protocol
-         FROM account_model_capabilities
-         WHERE account_id = ?1
-         ORDER BY rowid ASC",
-    )?;
-    let rows = stmt.query_map([&contract.account_id], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-        ))
-    })?;
-    let mut current = Vec::new();
-    for row in rows {
-        let (public_model, upstream_model, protocol) = row?;
-        let protocol = UpstreamProtocolKind::try_from(protocol.as_str())
-            .map_err(|error| anyhow::anyhow!(error))?;
-        current.push((public_model, upstream_model, protocol));
-    }
+    let current = custom_store::capability_triples_on(conn, &contract.account_id)?;
     Ok(current == contract.capabilities)
 }
 
@@ -10807,41 +10732,11 @@ fn set_ollama_cloud_billing_tier_on(
     }
     if current != tier {
         conn.execute(
-            "UPDATE accounts SET usage_month_window_cost_offset = 0 WHERE id = ?1",
+            "UPDATE credentials SET usage_month_window_cost_offset = 0 WHERE legacy_account_id = ?1",
             [account_id],
         )?;
     }
     Ok(())
-}
-
-fn account_custom_config_from_row(row: &Row<'_>) -> rusqlite::Result<AccountCustomConfig> {
-    let protocol_value = row.get::<_, String>(2)?;
-    let upstream_protocol =
-        UpstreamProtocolKind::try_from(protocol_value.as_str()).map_err(|error| {
-            rusqlite::Error::FromSqlConversionFailure(2, Type::Text, Box::new(error))
-        })?;
-    Ok(AccountCustomConfig {
-        account_id: row.get(0)?,
-        endpoint_url: row.get(1)?,
-        upstream_protocol,
-        created_at: parse_datetime(row.get::<_, String>(3)?),
-        updated_at: parse_datetime(row.get::<_, String>(4)?),
-    })
-}
-
-fn account_model_capability_from_row(row: &Row<'_>) -> rusqlite::Result<AccountModelCapability> {
-    let protocol_value = row.get::<_, String>(3)?;
-    let protocol = UpstreamProtocolKind::try_from(protocol_value.as_str()).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(3, Type::Text, Box::new(error))
-    })?;
-    Ok(AccountModelCapability {
-        account_id: row.get(0)?,
-        public_model: row.get(1)?,
-        upstream_model: row.get(2)?,
-        protocol,
-        verified_at: row.get::<_, Option<String>>(4)?.map(parse_datetime),
-        source: row.get(5)?,
-    })
 }
 
 fn forward_log_native_from_row(row: &Row<'_>) -> rusqlite::Result<ForwardLogNativeAttribution> {
@@ -10859,7 +10754,9 @@ fn account_from_row(row: &Row<'_>) -> rusqlite::Result<Account> {
     // SELECT order: id,name,username,password,key,enabled,referral,recharge,
     // cooldown_until,generic,5h,week,month,free,last_error,created,updated,auth,type,setup,notes,
     // provider,offering,credential,quota_scope
-    let created_at = row.get::<_, String>(15)?;
+    let created_at = row
+        .get::<_, Option<String>>(15)?
+        .unwrap_or_else(|| Utc::now().to_rfc3339());
     let purchase_date = match row.get::<_, Option<String>>(7)? {
         Some(value) if normalize_purchase_date(&value).is_ok() => value,
         _ => migration_fallback_purchase_date(&created_at).map_err(|error| {
@@ -10873,7 +10770,9 @@ fn account_from_row(row: &Row<'_>) -> rusqlite::Result<Account> {
     let expires_on = purchase_expires_on(&purchase_date).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(7, Type::Text, Box::new(error))
     })?;
-    let account_type_value = row.get::<_, String>(18)?;
+    let account_type_value = row
+        .get::<_, Option<String>>(18)?
+        .unwrap_or_else(|| "key".to_string());
     let account_type = AccountType::try_from(account_type_value.as_str()).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(
             18,
@@ -10881,7 +10780,9 @@ fn account_from_row(row: &Row<'_>) -> rusqlite::Result<Account> {
             Box::new(std::io::Error::other(error)),
         )
     })?;
-    let setup_step_value = row.get::<_, String>(19)?;
+    let setup_step_value = row
+        .get::<_, Option<String>>(19)?
+        .unwrap_or_else(|| "ready".to_string());
     let setup_step = AccountSetupStep::try_from(setup_step_value.as_str()).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(
             19,
@@ -10889,7 +10790,9 @@ fn account_from_row(row: &Row<'_>) -> rusqlite::Result<Account> {
             Box::new(std::io::Error::other(error)),
         )
     })?;
-    let credential_value = row.get::<_, String>(22)?;
+    let credential_value = row
+        .get::<_, Option<String>>(22)?
+        .unwrap_or_else(|| "api_key".to_string());
     let credential_kind = CredentialKind::try_from(credential_value.as_str()).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(
             22,
@@ -10897,7 +10800,9 @@ fn account_from_row(row: &Row<'_>) -> rusqlite::Result<Account> {
             Box::new(std::io::Error::other(error)),
         )
     })?;
-    let quota_scope_value = row.get::<_, String>(23)?;
+    let quota_scope_value = row
+        .get::<_, Option<String>>(23)?
+        .unwrap_or_else(|| "key".to_string());
     let quota_scope = QuotaScope::try_from(quota_scope_value.as_str()).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(
             23,
@@ -10907,15 +10812,15 @@ fn account_from_row(row: &Row<'_>) -> rusqlite::Result<Account> {
     })?;
     Ok(Account {
         id: row.get(0)?,
-        provider_id: row.get(21)?,
+        provider_id: row.get::<_, Option<String>>(21)?.unwrap_or_default(),
 
         credential_kind,
         quota_scope,
-        name: row.get(1)?,
+        name: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
         username: row.get(2)?,
         password_cipher: row.get(3)?,
-        key_cipher: row.get(4)?,
-        enabled: row.get::<_, i32>(5)? != 0,
+        key_cipher: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+        enabled: row.get::<_, Option<i32>>(5)?.unwrap_or(0) != 0,
         account_type,
         setup_step,
         referral_code: row.get(6)?,
@@ -10931,7 +10836,10 @@ fn account_from_row(row: &Row<'_>) -> rusqlite::Result<Account> {
         auth_error: row.get(17)?,
         notes: row.get(20)?,
         created_at: parse_datetime(created_at),
-        updated_at: parse_datetime(row.get::<_, String>(16)?),
+        updated_at: parse_datetime(
+            row.get::<_, Option<String>>(16)?
+                .unwrap_or_else(|| Utc::now().to_rfc3339()),
+        ),
     })
 }
 

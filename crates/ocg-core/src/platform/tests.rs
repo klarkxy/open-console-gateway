@@ -81,6 +81,7 @@ fn now() -> i64 {
 struct Captured {
     path: String,
     authorization: Option<String>,
+    new_api_user: Option<String>,
 }
 
 struct Route {
@@ -93,6 +94,14 @@ impl Route {
     fn ok(body: impl Into<String>) -> Self {
         Self {
             status: 200,
+            body: body.into(),
+            location: None,
+        }
+    }
+
+    fn status(status: u16, body: impl Into<String>) -> Self {
+        Self {
+            status,
             body: body.into(),
             location: None,
         }
@@ -118,9 +127,11 @@ async fn spawn_mock(
             let head = String::from_utf8_lossy(&buf[..n]);
             let path = request_path(&head);
             let authorization = header_value(&head, "authorization");
+            let new_api_user = header_value(&head, "new-api-user");
             hits.lock().unwrap().push(Captured {
                 path: path.clone(),
                 authorization,
+                new_api_user,
             });
             let route = routes.get(&path);
             let (status, reason, location, body) = match route {
@@ -1118,5 +1129,211 @@ async fn incompatible_envelope_is_parse_error_not_empty_success() {
             .iter()
             .all(|q| !matches!(q.kind, PlatformQuotaKind::Wallet)),
         "incompatible self envelope must not become a wallet observation"
+    );
+}
+
+fn new_api_user_routes() -> HashMap<String, Route> {
+    let mut routes = HashMap::new();
+    routes.insert(
+        "/api/status".to_string(),
+        Route::ok(r#"{"success":true,"data":{"quota_per_unit":500000}}"#),
+    );
+    routes.insert(
+        "/api/user/self".to_string(),
+        Route::ok(r#"{"success":true,"data":{"group":"default","quota":1000}}"#),
+    );
+    routes.insert(
+        "/api/user/self/groups".to_string(),
+        Route::ok(r#"{"success":true,"data":{"default":{"ratio":1}}}"#),
+    );
+    routes.insert(
+        "/api/subscription/self".to_string(),
+        Route::ok(r#"{"success":true,"data":{"subscriptions":[]}}"#),
+    );
+    routes.insert(
+        "/api/token/auto-groups".to_string(),
+        Route::ok(r#"{"success":true,"data":{"groups":[]}}"#),
+    );
+    routes.insert(
+        "/api/pricing".to_string(),
+        Route::ok(r#"{"success":true,"data":[],"group_ratio":{}}"#),
+    );
+    routes
+}
+
+#[tokio::test]
+async fn new_api_auto_groups_envelope_mismatch_is_omitted_not_stale() {
+    let mut routes = new_api_user_routes();
+    routes.insert(
+        "/api/token/auto-groups".to_string(),
+        Route::ok(r#"{"success":false,"message":"auto groups unavailable"}"#),
+    );
+    let (base, client, _) = spawn_mock(routes).await;
+    let group = group_with(None, &[]);
+    let snapshot = read(
+        &client,
+        &PlatformReadRequest {
+            kind: PlatformKind::NewApi,
+            base_url: &base,
+            user_credential: Some(USER),
+            key: None,
+            group: &group,
+            now: now(),
+        },
+    )
+    .await;
+    assert!(
+        snapshot
+            .quotas
+            .iter()
+            .any(|q| matches!(q.kind, PlatformQuotaKind::Wallet))
+    );
+    assert!(
+        snapshot
+            .errors
+            .iter()
+            .all(|e| !e.starts_with("new_api.token_auto_groups")),
+        "{:?}",
+        snapshot.errors
+    );
+    assert!(!snapshot.stale);
+}
+
+#[tokio::test]
+async fn new_api_prefixed_credential_sends_user_id_header() {
+    let (base, client, captured) = spawn_mock(new_api_user_routes()).await;
+    let group = group_with(None, &[]);
+    let credential = format!("18:{USER}");
+    let snapshot = read(
+        &client,
+        &PlatformReadRequest {
+            kind: PlatformKind::NewApi,
+            base_url: &base,
+            user_credential: Some(&credential),
+            key: None,
+            group: &group,
+            now: now(),
+        },
+    )
+    .await;
+    assert!(
+        snapshot
+            .quotas
+            .iter()
+            .any(|q| matches!(q.kind, PlatformQuotaKind::Wallet)),
+        "{:?}",
+        snapshot.errors
+    );
+    let hits = captured.lock().unwrap();
+    let user_hits: Vec<_> = hits
+        .iter()
+        .filter(|hit| {
+            hit.path.starts_with("/api/user")
+                || hit.path == "/api/subscription/self"
+                || hit.path == "/api/token/auto-groups"
+                || hit.path == "/api/pricing"
+        })
+        .collect();
+    assert!(!user_hits.is_empty());
+    assert!(user_hits.iter().all(|hit| {
+        hit.authorization.as_deref() == Some(&format!("Bearer {USER}"))
+            && hit.new_api_user.as_deref() == Some("18")
+    }));
+    assert!(hits.iter().any(|hit| {
+        hit.path == "/api/status" && hit.authorization.is_none() && hit.new_api_user.is_none()
+    }));
+    let blob = serde_json::to_string(&snapshot).unwrap();
+    assert!(!blob.contains(USER));
+    assert!(!blob.contains(&credential));
+}
+
+#[tokio::test]
+async fn new_api_plain_credential_omits_user_id_header() {
+    let (base, client, captured) = spawn_mock(new_api_user_routes()).await;
+    let group = group_with(None, &[]);
+    let _ = read(
+        &client,
+        &PlatformReadRequest {
+            kind: PlatformKind::NewApi,
+            base_url: &base,
+            user_credential: Some(USER),
+            key: None,
+            group: &group,
+            now: now(),
+        },
+    )
+    .await;
+    let hits = captured.lock().unwrap();
+    assert!(hits.iter().all(|hit| hit.new_api_user.is_none()));
+}
+
+#[tokio::test]
+async fn new_api_missing_user_id_header_is_fixed_code() {
+    let mut routes = new_api_user_routes();
+    routes.insert(
+        "/api/user/self".to_string(),
+        Route::status(
+            401,
+            r#"{"success":false,"message":"Unauthorized, New-Api-User header not provided"}"#,
+        ),
+    );
+    let (base, client, _) = spawn_mock(routes).await;
+    let group = group_with(None, &[]);
+    let snapshot = read(
+        &client,
+        &PlatformReadRequest {
+            kind: PlatformKind::NewApi,
+            base_url: &base,
+            user_credential: Some(USER),
+            key: None,
+            group: &group,
+            now: now(),
+        },
+    )
+    .await;
+    assert!(
+        snapshot
+            .errors
+            .iter()
+            .any(|e| e == "new_api.user_self.user_id_required"),
+        "{:?}",
+        snapshot.errors
+    );
+    let blob = serde_json::to_string(&snapshot).unwrap();
+    assert!(!blob.contains(USER));
+    assert!(!blob.contains("New-Api-User"));
+}
+
+#[tokio::test]
+async fn new_api_user_id_mismatch_is_fixed_code() {
+    let mut routes = new_api_user_routes();
+    routes.insert(
+        "/api/user/self".to_string(),
+        Route::status(
+            401,
+            r#"{"success":false,"message":"Unauthorized, New-Api-User does not match logged in user"}"#,
+        ),
+    );
+    let (base, client, _) = spawn_mock(routes).await;
+    let group = group_with(None, &[]);
+    let snapshot = read(
+        &client,
+        &PlatformReadRequest {
+            kind: PlatformKind::NewApi,
+            base_url: &base,
+            user_credential: Some("1:not-the-owner"),
+            key: None,
+            group: &group,
+            now: now(),
+        },
+    )
+    .await;
+    assert!(
+        snapshot
+            .errors
+            .iter()
+            .any(|e| e == "new_api.user_self.user_id_mismatch"),
+        "{:?}",
+        snapshot.errors
     );
 }

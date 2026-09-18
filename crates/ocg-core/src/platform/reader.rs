@@ -42,6 +42,8 @@ const CODE_REDIRECT: &str = "redirect_rejected";
 const CODE_NETWORK: &str = "network";
 const CODE_TIMEOUT: &str = "timeout";
 const CODE_UNAUTHORIZED: &str = "unauthorized";
+const CODE_USER_ID_REQUIRED: &str = "user_id_required";
+const CODE_USER_ID_MISMATCH: &str = "user_id_mismatch";
 const CODE_FORBIDDEN: &str = "forbidden";
 const CODE_HTTP_STATUS: &str = "http_status";
 const CODE_PARSE: &str = "parse";
@@ -135,8 +137,8 @@ fn same_origin(left: &reqwest::Url, right: &reqwest::Url) -> bool {
         && left.port_or_known_default() == right.port_or_known_default()
 }
 
-struct Fetched {
-    value: Value,
+pub(crate) struct Fetched {
+    pub value: Value,
 }
 
 async fn get_json(
@@ -145,9 +147,28 @@ async fn get_json(
     path: &str,
     component: &str,
     auth: Option<&str>,
+    new_api_user: Option<&str>,
 ) -> Result<Fetched, String> {
-    let url = join_inference_endpoint(base.as_str(), path)
+    get_json_query(client, base, path, component, auth, new_api_user, &[]).await
+}
+
+pub(crate) async fn get_json_query(
+    client: &reqwest::Client,
+    base: &reqwest::Url,
+    path: &str,
+    component: &str,
+    auth: Option<&str>,
+    new_api_user: Option<&str>,
+    query: &[(&str, &str)],
+) -> Result<Fetched, String> {
+    let mut url = join_inference_endpoint(base.as_str(), path)
         .map_err(|_| component_error(component, CODE_ENDPOINT))?;
+    if !query.is_empty() {
+        let mut pairs = url.query_pairs_mut();
+        for (key, value) in query {
+            pairs.append_pair(key, value);
+        }
+    }
     if !same_origin(base, &url) {
         return Err(component_error(component, CODE_ENDPOINT));
     }
@@ -161,6 +182,11 @@ async fn get_json(
             .map_err(|_| component_error(component, CODE_PARSE))?;
         builder = builder.header(reqwest::header::AUTHORIZATION, value);
     }
+    if let Some(user_id) = new_api_user {
+        let value =
+            HeaderValue::from_str(user_id).map_err(|_| component_error(component, CODE_PARSE))?;
+        builder = builder.header("New-Api-User", value);
+    }
 
     let response = builder.send().await.map_err(|error| {
         if error.is_timeout() {
@@ -173,12 +199,7 @@ async fn get_json(
     if response.status().is_redirection() || !same_origin(&url, response.url()) {
         return Err(component_error(component, CODE_REDIRECT));
     }
-    match response.status() {
-        StatusCode::OK | StatusCode::CREATED => {}
-        StatusCode::UNAUTHORIZED => return Err(component_error(component, CODE_UNAUTHORIZED)),
-        StatusCode::FORBIDDEN => return Err(component_error(component, CODE_FORBIDDEN)),
-        _ => return Err(component_error(component, CODE_HTTP_STATUS)),
-    }
+    let status = response.status();
 
     let mut body = Vec::new();
     let mut stream = response.bytes_stream();
@@ -196,16 +217,66 @@ async fn get_json(
         body.extend_from_slice(&chunk);
     }
 
+    match status {
+        StatusCode::OK | StatusCode::CREATED => {}
+        StatusCode::UNAUTHORIZED => {
+            return Err(classify_unauthorized(component, &body));
+        }
+        StatusCode::FORBIDDEN => return Err(component_error(component, CODE_FORBIDDEN)),
+        _ => return Err(component_error(component, CODE_HTTP_STATUS)),
+    }
+
     let value: Value =
         serde_json::from_slice(&body).map_err(|_| component_error(component, CODE_PARSE))?;
     Ok(Fetched { value })
+}
+
+fn strip_bearer_prefix(value: &str) -> &str {
+    value
+        .strip_prefix("Bearer ")
+        .or_else(|| value.strip_prefix("bearer "))
+        .unwrap_or(value)
+        .trim()
+}
+
+/// New API v0.4.6+ PAT calls need `New-Api-User: <numeric id>` alongside Bearer.
+/// Store that as `userId:token`. Newer builds ignore the extra header.
+pub(crate) fn split_new_api_user_credential(raw: &str) -> (Option<&str>, &str) {
+    let raw = strip_bearer_prefix(raw.trim());
+    if let Some((id, token)) = raw.split_once(':') {
+        let id = id.trim();
+        let token = strip_bearer_prefix(token.trim());
+        if !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()) && !token.is_empty() {
+            return (Some(id), token);
+        }
+    }
+    (None, raw)
+}
+
+fn classify_unauthorized(component: &str, body: &[u8]) -> String {
+    let parsed = serde_json::from_slice::<Value>(body).ok();
+    let message = parsed
+        .as_ref()
+        .and_then(|value| json_str(value.get("message")))
+        .unwrap_or("");
+    let lower = message.to_ascii_lowercase();
+    let code = if message.contains("New-Api-User") || lower.contains("new-api-user") {
+        if lower.contains("match") || message.contains("不匹配") || message.contains("不符") {
+            CODE_USER_ID_MISMATCH
+        } else {
+            CODE_USER_ID_REQUIRED
+        }
+    } else {
+        CODE_UNAUTHORIZED
+    };
+    component_error(component, code)
 }
 
 fn payload(value: &Value) -> &Value {
     value.get("data").unwrap_or(value)
 }
 
-fn new_api_data<'a>(value: &'a Value, component: &str) -> Result<&'a Value, String> {
+pub(crate) fn new_api_data<'a>(value: &'a Value, component: &str) -> Result<&'a Value, String> {
     match value.get("success") {
         Some(Value::Bool(true)) => value
             .get("data")
@@ -354,8 +425,16 @@ async fn read_new_api(
     key: Option<&str>,
     snapshot: &mut PlatformSnapshot,
 ) {
+    let (new_api_user, bearer) = match user {
+        Some(raw) => {
+            let (id, token) = split_new_api_user_credential(raw);
+            (id, Some(token))
+        }
+        None => (None, None),
+    };
+
     let mut quota_per_unit: Option<f64> = None;
-    match get_json(client, base, "api/status", "new_api.status", None).await {
+    match get_json(client, base, "api/status", "new_api.status", None, None).await {
         Ok(fetched) => match new_api_data(&fetched.value, "new_api.status") {
             Ok(data) => {
                 quota_per_unit = json_f64(data.get("quota_per_unit")).filter(|value| *value > 0.0);
@@ -366,13 +445,14 @@ async fn read_new_api(
     }
 
     let mut user_group: Option<String> = None;
-    if let Some(user) = user {
+    if let Some(user) = bearer {
         match get_json(
             client,
             base,
             "api/user/self",
             "new_api.user_self",
             Some(user),
+            new_api_user,
         )
         .await
         {
@@ -389,6 +469,7 @@ async fn read_new_api(
             "api/user/self/groups",
             "new_api.user_groups",
             Some(user),
+            new_api_user,
         )
         .await
         {
@@ -409,6 +490,7 @@ async fn read_new_api(
             "api/subscription/self",
             "new_api.subscription_self",
             Some(user),
+            new_api_user,
         )
         .await
         {
@@ -419,26 +501,26 @@ async fn read_new_api(
             Err(error) => push_error(snapshot, error),
         }
 
-        match get_json(
+        // Optional catalog: older sites omit or change this envelope, so a
+        // fetch or envelope error is not recorded.
+        if let Ok(fetched) = get_json(
             client,
             base,
             "api/token/auto-groups",
             "new_api.token_auto_groups",
             Some(user),
+            new_api_user,
         )
         .await
+            && let Ok(data) = new_api_data(&fetched.value, "new_api.token_auto_groups")
         {
-            Ok(fetched) => match new_api_data(&fetched.value, "new_api.token_auto_groups") {
-                Ok(data) => parse_new_api_auto_groups(data, snapshot),
-                Err(error) => push_error(snapshot, error),
-            },
-            Err(error) => push_error(snapshot, error),
+            parse_new_api_auto_groups(data, snapshot);
         }
     }
 
     let mut allowed_models: BTreeSet<String> = BTreeSet::new();
     if let Some(key) = key {
-        match get_json(client, base, "v1/models", "new_api.models", Some(key)).await {
+        match get_json(client, base, "v1/models", "new_api.models", Some(key), None).await {
             Ok(fetched) => {
                 if let Err(error) = collect_models(
                     &fetched.value,
@@ -461,6 +543,7 @@ async fn read_new_api(
             "api/usage/token/",
             "new_api.token_usage",
             Some(key),
+            None,
         )
         .await
         {
@@ -474,8 +557,16 @@ async fn read_new_api(
         }
     }
 
-    let pricing_auth = user;
-    match get_json(client, base, "api/pricing", "new_api.pricing", pricing_auth).await {
+    match get_json(
+        client,
+        base,
+        "api/pricing",
+        "new_api.pricing",
+        bearer,
+        new_api_user,
+    )
+    .await
+    {
         Ok(fetched) => match new_api_data(&fetched.value, "new_api.pricing") {
             Ok(_) => parse_new_api_pricing(
                 &fetched.value,
@@ -933,6 +1024,7 @@ async fn read_sub2(
             "api/v1/user/profile",
             "sub2api.profile",
             Some(user),
+            None,
         )
         .await
         {
@@ -949,6 +1041,7 @@ async fn read_sub2(
             "api/v1/subscriptions/summary",
             "sub2api.subscriptions",
             Some(user),
+            None,
         )
         .await
         {
@@ -965,6 +1058,7 @@ async fn read_sub2(
             "api/v1/groups/available",
             "sub2api.groups",
             Some(user),
+            None,
         )
         .await
         {
@@ -977,7 +1071,7 @@ async fn read_sub2(
     }
 
     if let Some(key) = key {
-        match get_json(client, base, "v1/models", "sub2api.models", Some(key)).await {
+        match get_json(client, base, "v1/models", "sub2api.models", Some(key), None).await {
             Ok(fetched) => {
                 if let Err(error) = collect_models(
                     &fetched.value,
@@ -994,7 +1088,7 @@ async fn read_sub2(
             Err(error) => push_error(snapshot, error),
         }
 
-        match get_json(client, base, "v1/usage", "sub2api.usage", Some(key)).await {
+        match get_json(client, base, "v1/usage", "sub2api.usage", Some(key), None).await {
             Ok(fetched) => {
                 if let Err(error) = parse_sub2_usage(&fetched.value, snapshot) {
                     push_error(snapshot, error);
@@ -1009,6 +1103,7 @@ async fn read_sub2(
             "v1/sub2api/billing",
             "sub2api.billing",
             Some(key),
+            None,
         )
         .await
         {
@@ -1030,6 +1125,7 @@ async fn read_sub2(
         "api/v1/model-plaza",
         "sub2api.plaza",
         plaza_auth,
+        None,
     )
     .await
     {

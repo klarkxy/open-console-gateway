@@ -17,6 +17,7 @@ pub mod dashboard_v3;
 pub mod dashboard_v4;
 pub mod db;
 pub mod desktop;
+pub mod destination_projection;
 pub mod dsh_application;
 #[cfg(feature = "dsh-local-host")]
 pub mod dsh_application_host;

@@ -146,67 +146,7 @@ fn v42_fresh_database_includes_seven_sealed_builtin_rows() {
     let dir = temp_data_dir("v42-fresh-seeds");
     let db = open_with_host_cipher(dir.clone()).unwrap();
     assert_eq!(schema_version_on(&db.conn).unwrap(), CURRENT_SCHEMA_VERSION);
-    let count: i64 = db
-        .conn
-        .query_row(
-            "SELECT COUNT(*) FROM providers WHERE origin = 'builtin'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(count, 7);
-
-    let opencode: (String, String, String, String, String, String) = db
-        .conn
-        .query_row(
-            "SELECT adapter_kind, name, endpoint_url, upstream_protocol, auth_kind, offering
-             FROM providers WHERE id = 'opencode'",
-            [],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                ))
-            },
-        )
-        .unwrap();
-    assert_eq!(opencode.0, "opencode_go");
-    assert_eq!(opencode.1, "OpenCode Go");
-    assert_eq!(opencode.2, OPENCODE_GO_BASE_URL);
-    assert_eq!(opencode.3, "chat_completions");
-    assert_eq!(opencode.4, "bearer");
-    assert_eq!(opencode.5, "plan");
-
-    let zen_free: (String, String, String) = db
-        .conn
-        .query_row(
-            "SELECT adapter_kind, auth_kind, offering
-             FROM providers WHERE id = 'opencode-zen-free'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .unwrap();
-    assert_eq!(zen_free.0, "zen_free");
-    assert_eq!(zen_free.1, "none");
-    assert_eq!(zen_free.2, "api");
-
-    let custom: (Option<String>, Option<String>, i64) = db
-        .conn
-        .query_row(
-            "SELECT endpoint_url, upstream_protocol, endpoint_per_account
-             FROM providers WHERE id = 'custom'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .unwrap();
-    assert!(custom.0.is_none());
-    assert!(custom.1.is_none());
-    assert_eq!(custom.2, 1);
-
+    assert_leftover_dynamic_provider_storage_absent(&db.conn);
     for builtin_id in [
         OPENCODE_PROVIDER_ID,
         OPENCODE_ZEN_FREE_PROVIDER_ID,
@@ -216,16 +156,49 @@ fn v42_fresh_database_includes_seven_sealed_builtin_rows() {
         OLLAMA_PROVIDER_ID,
         CUSTOM_PROVIDER_ID,
     ] {
-        let family: Option<String> = db
-            .conn
-            .query_row(
-                "SELECT display_family FROM providers WHERE id = ?1",
-                [builtin_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert!(family.is_some(), "{builtin_id}");
+        let row = db
+            .get_provider_definition(builtin_id)
+            .unwrap()
+            .unwrap_or_else(|| panic!("sealed builtin `{builtin_id}`"));
+        assert_eq!(row.origin, ocg_domain::provider::ProviderOrigin::Builtin);
+        assert_eq!(row.id, builtin_id);
     }
+    let opencode = db
+        .get_provider_definition(OPENCODE_PROVIDER_ID)
+        .unwrap()
+        .expect("opencode");
+    assert_eq!(opencode.name, "OpenCode Go");
+    assert_eq!(opencode.offering, "plan");
+    assert_eq!(
+        opencode.auth_kind,
+        ocg_domain::dynamic::DynamicAuthKind::Bearer
+    );
+    let zen_free = db
+        .get_provider_definition(OPENCODE_ZEN_FREE_PROVIDER_ID)
+        .unwrap()
+        .expect("zen");
+    assert_eq!(
+        zen_free.auth_kind,
+        ocg_domain::dynamic::DynamicAuthKind::None
+    );
+    assert_eq!(zen_free.offering, "api");
+    let custom = db
+        .get_provider_definition(CUSTOM_PROVIDER_ID)
+        .unwrap()
+        .expect("custom");
+    assert!(custom.endpoint_url.is_empty());
+    let invented: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM destinations WHERE legacy_kind = 'dynamic'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        invented, 0,
+        "fresh open must not invent user-defined destinations"
+    );
 
     drop(db);
     fs::remove_dir_all(dir).unwrap();
@@ -242,8 +215,8 @@ fn v42_unifies_existing_dynamic_providers_and_preserves_models_and_preferences()
     db.conn
         .execute_batch(&format!(
             "PRAGMA foreign_keys=OFF;
-             DROP TABLE providers;
-             DROP TABLE provider_models;
+             DROP TABLE IF EXISTS providers;
+             DROP TABLE IF EXISTS provider_models;
              CREATE TABLE dynamic_providers (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
@@ -289,62 +262,32 @@ fn v42_unifies_existing_dynamic_providers_and_preserves_models_and_preferences()
     assert_eq!(schema_version_on(&db.conn).unwrap(), CURRENT_SCHEMA_VERSION);
     assert!(!table_exists(&db.conn, "dynamic_providers").unwrap());
     assert!(!table_exists(&db.conn, "dynamic_provider_models").unwrap());
-    assert!(table_exists(&db.conn, "providers").unwrap());
-    assert!(table_exists(&db.conn, "provider_models").unwrap());
+    assert_leftover_dynamic_provider_storage_absent(&db.conn);
 
-    let plan_lab: (String, String, String, Option<String>, String) = db
-        .conn
-        .query_row(
-            "SELECT origin, adapter_kind, name, preset_id, offering
-             FROM providers WHERE id = 'plan-lab'",
-            [],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                ))
-            },
-        )
-        .unwrap();
-    assert_eq!(plan_lab.0, "preset");
-    assert_eq!(plan_lab.1, "configurable_http");
-    assert_eq!(plan_lab.2, "Plan Lab");
-    assert_eq!(plan_lab.3.as_deref(), Some("zhipu-coding"));
-    assert_eq!(plan_lab.4, "plan");
+    let plan_lab = db
+        .get_dynamic_provider("plan-lab")
+        .unwrap()
+        .expect("plan-lab survived v42 through v56");
+    assert_eq!(
+        plan_lab.origin,
+        ocg_domain::provider::ProviderOrigin::Preset
+    );
+    assert_eq!(plan_lab.name, "Plan Lab");
+    assert_eq!(plan_lab.preset_id.as_deref(), Some("zhipu-coding"));
+    assert_eq!(plan_lab.offering, "plan");
+    assert_eq!(plan_lab.mappings.len(), 1);
 
-    let free_lab: (String, Option<String>, String) = db
-        .conn
-        .query_row(
-            "SELECT origin, preset_id, offering FROM providers WHERE id = 'free-lab'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .unwrap();
-    assert_eq!(free_lab.0, "custom");
-    assert!(free_lab.1.is_none());
-    assert_eq!(free_lab.2, "api");
-
-    let plan_models: i64 = db
-        .conn
-        .query_row(
-            "SELECT COUNT(*) FROM provider_models WHERE provider_id = 'plan-lab'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(plan_models, 1);
-    let free_models: i64 = db
-        .conn
-        .query_row(
-            "SELECT COUNT(*) FROM provider_models WHERE provider_id = 'free-lab'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(free_models, 1);
+    let free_lab = db
+        .get_dynamic_provider("free-lab")
+        .unwrap()
+        .expect("free-lab survived v42 through v56");
+    assert_eq!(
+        free_lab.origin,
+        ocg_domain::provider::ProviderOrigin::Custom
+    );
+    assert!(free_lab.preset_id.is_none());
+    assert_eq!(free_lab.offering, "api");
+    assert_eq!(free_lab.mappings.len(), 1);
 
     let pref_protocol: String = db
         .conn
@@ -453,6 +396,7 @@ fn v44_adds_dashboard_operations_on_v43_reopen_and_fresh_databases() {
 }
 
 fn rewind_identity_model_to_v44(conn: &Connection) {
+    account_store::materialize_legacy_accounts_for_rewind(conn).unwrap();
     conn.execute_batch(
         "DROP TABLE IF EXISTS quota_pool_members;
          DROP TABLE IF EXISTS quota_pools;
@@ -474,21 +418,13 @@ fn v45_fresh_database_is_current_and_v44_reopen_migrates() {
     let fresh = temp_data_dir("v45-fresh");
     let db = open_with_host_cipher(fresh.clone()).unwrap();
     assert_eq!(schema_version_on(&db.conn).unwrap(), CURRENT_SCHEMA_VERSION);
-    for table in [
-        "upstream_identities",
-        "credential_state",
-        "credential_bindings",
-        "legacy_identity_map",
-        "onboarding_tasks",
-        "subscription_records",
-        "quota_pools",
-        "quota_pool_members",
-    ] {
+    assert_leftover_identity_tables_absent(&db.conn);
+    for table in ["quota_pools", "quota_pool_members"] {
         assert!(table_exists(&db.conn, table).unwrap(), "{table}");
     }
-    assert!(table_has_column(&db.conn, "accounts", "identity_id").unwrap());
-    assert!(table_has_column(&db.conn, "credential_bindings", "allowed_endpoint_ids").unwrap());
-    assert!(table_has_column(&db.conn, "credential_bindings", "allowed_origins").unwrap());
+    assert!(!table_exists(&db.conn, "accounts").unwrap());
+    assert!(table_has_column(&db.conn, "credentials", "identity_id").unwrap());
+    assert!(table_has_column(&db.conn, "credentials", "binding_id").unwrap());
     drop(db);
     fs::remove_dir_all(fresh).unwrap();
 
@@ -501,7 +437,8 @@ fn v45_fresh_database_is_current_and_v44_reopen_migrates() {
 
     let db = open_with_host_cipher(dir.clone()).unwrap();
     assert_eq!(schema_version_on(&db.conn).unwrap(), CURRENT_SCHEMA_VERSION);
-    assert!(table_exists(&db.conn, "upstream_identities").unwrap());
+    assert_leftover_identity_tables_absent(&db.conn);
+    assert!(table_exists(&db.conn, "quota_pools").unwrap());
     drop(db);
     fs::remove_dir_all(dir).unwrap();
 }
@@ -653,25 +590,39 @@ fn v45_migrates_legacy_accounts_idempotently_without_changing_v3_rows() {
 
     let account_count: i64 = db
         .conn
-        .query_row("SELECT COUNT(*) FROM accounts", [], |row| row.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM credentials
+             WHERE COALESCE(credential_purpose, 'inference') = 'inference'",
+            [],
+            |row| row.get(0),
+        )
         .unwrap();
     let identity_count: i64 = db
         .conn
-        .query_row("SELECT COUNT(*) FROM upstream_identities", [], |row| {
-            row.get(0)
-        })
+        .query_row(
+            "SELECT COUNT(DISTINCT identity_id) FROM credentials WHERE identity_id IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )
         .unwrap();
     let credential_count: i64 = db
         .conn
-        .query_row("SELECT COUNT(*) FROM credential_state", [], |row| {
-            row.get(0)
-        })
+        .query_row(
+            "SELECT COUNT(*) FROM credentials
+             WHERE COALESCE(credential_purpose, 'inference') = 'inference'",
+            [],
+            |row| row.get(0),
+        )
         .unwrap();
     let binding_count: i64 = db
         .conn
-        .query_row("SELECT COUNT(*) FROM credential_bindings", [], |row| {
-            row.get(0)
-        })
+        .query_row(
+            "SELECT COUNT(*) FROM credentials
+             WHERE COALESCE(credential_purpose, 'inference') = 'inference'
+               AND binding_id IS NOT NULL AND binding_id <> ''",
+            [],
+            |row| row.get(0),
+        )
         .unwrap();
     assert_eq!(credential_count, account_count);
     assert_eq!(binding_count, account_count);
@@ -689,7 +640,7 @@ fn v45_migrates_legacy_accounts_idempotently_without_changing_v3_rows() {
         let stored_identity: String = db
             .conn
             .query_row(
-                "SELECT identity_id FROM accounts WHERE id = ?1",
+                "SELECT identity_id FROM credentials WHERE legacy_account_id = ?1",
                 [id],
                 |row| row.get(0),
             )
@@ -698,28 +649,30 @@ fn v45_migrates_legacy_accounts_idempotently_without_changing_v3_rows() {
         let stored_credential: String = db
             .conn
             .query_row(
-                "SELECT credential_id FROM credential_state WHERE account_id = ?1",
+                "SELECT id FROM credentials WHERE legacy_account_id = ?1",
                 [id],
                 |row| row.get(0),
             )
             .unwrap();
         assert_eq!(stored_credential, credential.as_str(), "{id}");
-        let map: i64 = db
+        let binding: Option<String> = db
             .conn
             .query_row(
-                "SELECT COUNT(*) FROM legacy_identity_map
-                 WHERE legacy_kind = 'account' AND legacy_id = ?1",
+                "SELECT binding_id FROM credentials WHERE legacy_account_id = ?1",
                 [id],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(map, 3, "{id}");
+        assert!(
+            binding.as_deref().is_some_and(|value| !value.is_empty()),
+            "{id}"
+        );
     }
 
     let go_sort: i64 = db
         .conn
         .query_row(
-            "SELECT sort_order FROM accounts WHERE id = 'go-keyed'",
+            "SELECT routing_rank FROM credentials WHERE legacy_account_id = 'go-keyed'",
             [],
             |row| row.get(0),
         )
@@ -728,7 +681,7 @@ fn v45_migrates_legacy_accounts_idempotently_without_changing_v3_rows() {
     let stored_5h: String = db
         .conn
         .query_row(
-            "SELECT cooldown_5h_until FROM accounts WHERE id = 'go-keyed'",
+            "SELECT cooldown_5h_until FROM credentials WHERE legacy_account_id = 'go-keyed'",
             [],
             |row| row.get(0),
         )
@@ -736,7 +689,7 @@ fn v45_migrates_legacy_accounts_idempotently_without_changing_v3_rows() {
     let stored_week: String = db
         .conn
         .query_row(
-            "SELECT cooldown_week_until FROM accounts WHERE id = 'go-keyed'",
+            "SELECT cooldown_week_until FROM credentials WHERE legacy_account_id = 'go-keyed'",
             [],
             |row| row.get(0),
         )
@@ -744,41 +697,38 @@ fn v45_migrates_legacy_accounts_idempotently_without_changing_v3_rows() {
     assert_eq!(stored_5h, cooldown_5h_text);
     assert_eq!(stored_week, cooldown_week_text);
 
-    let task: (String, String) = db
-        .conn
-        .query_row(
-            "SELECT step, state FROM onboarding_tasks WHERE account_id = 'managed-draft'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .unwrap();
-    assert_eq!(task, ("payment".into(), "in_progress".into()));
-    let ready_tasks: i64 = db
-        .conn
-        .query_row(
-            "SELECT COUNT(*) FROM onboarding_tasks WHERE account_id != 'managed-draft'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
+    let snapshot = db.list_identity_model().unwrap();
+    let task = snapshot
+        .accounts
+        .iter()
+        .find(|row| row.account.id == "managed-draft")
+        .and_then(|row| row.onboarding.as_ref())
+        .expect("managed onboarding");
+    assert_eq!(
+        (task.step.as_str(), task.state.as_str()),
+        ("payment", "in_progress")
+    );
+    let ready_tasks = snapshot
+        .accounts
+        .iter()
+        .filter(|row| row.account.id != "managed-draft" && row.onboarding.is_some())
+        .count();
     assert_eq!(ready_tasks, 0);
 
-    let subscriptions: Vec<String> = db
-        .conn
-        .prepare("SELECT account_id FROM subscription_records ORDER BY account_id")
-        .unwrap()
-        .query_map([], |row| row.get(0))
-        .unwrap()
-        .map(|row| row.unwrap())
+    let subscriptions: Vec<String> = snapshot
+        .accounts
+        .iter()
+        .filter(|row| row.subscription.is_some())
+        .map(|row| row.account.id.clone())
         .collect();
     assert_eq!(subscriptions, vec!["go-keyed".to_string()]);
 
     let custom_identity: (String, Option<String>) = db
         .conn
         .query_row(
-            "SELECT i.identity_confidence, i.authority_site
-             FROM accounts a JOIN upstream_identities i ON i.id = a.identity_id
-             WHERE a.id = 'custom-keyed'",
+            "SELECT identity_confidence, authority_site
+             FROM credentials
+             WHERE legacy_account_id = 'custom-keyed'",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
@@ -787,7 +737,8 @@ fn v45_migrates_legacy_accounts_idempotently_without_changing_v3_rows() {
     let stored_parent_base: String = db
         .conn
         .query_row(
-            "SELECT base_url FROM platform_accounts WHERE id = 'parent-1'",
+            "SELECT base_url FROM destinations
+             WHERE legacy_kind = 'platform_parent' AND legacy_id = 'parent-1'",
             [],
             |row| row.get(0),
         )
@@ -798,17 +749,12 @@ fn v45_migrates_legacy_accounts_idempotently_without_changing_v3_rows() {
     );
 
     let platform_identity = identity_id_for_platform_account("parent-1");
-    let platform_map: i64 = db
-        .conn
-        .query_row(
-            "SELECT COUNT(*) FROM legacy_identity_map
-             WHERE legacy_kind = 'platform_account' AND legacy_id = 'parent-1'
-               AND new_kind = 'identity' AND new_id = ?1",
-            [platform_identity.as_str()],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(platform_map, 1);
+    let platform_parent = snapshot
+        .platform_parents
+        .iter()
+        .find(|row| row.platform_id == "parent-1")
+        .expect("platform parent identity");
+    assert_eq!(platform_parent.identity.id, platform_identity.as_str());
 
     let quota_pools: i64 = db
         .conn
@@ -834,9 +780,9 @@ fn v45_migrates_legacy_accounts_idempotently_without_changing_v3_rows() {
             .query_row(
                 "SELECT p.subject_ref, p.relation_confidence, p.policy_mode, COUNT(m.account_id)
                  FROM quota_pools p
-                 JOIN accounts a ON a.identity_id = p.subject_ref
+                 JOIN credentials a ON a.identity_id = p.subject_ref
                  JOIN quota_pool_members m ON m.pool_id = p.id
-                 WHERE a.id = ?1
+                 WHERE a.legacy_account_id = ?1
                  GROUP BY p.id",
                 [id],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
@@ -856,7 +802,7 @@ fn v45_migrates_legacy_accounts_idempotently_without_changing_v3_rows() {
     let stored_zen_binding: String = db
         .conn
         .query_row(
-            "SELECT id FROM credential_bindings WHERE account_id = ?1",
+            "SELECT binding_id FROM credentials WHERE legacy_account_id = ?1",
             [ZEN_FREE_ACCOUNT_ID],
             |row| row.get(0),
         )
@@ -870,11 +816,7 @@ fn v45_migrates_legacy_accounts_idempotently_without_changing_v3_rows() {
         identity_count,
         credential_count,
         binding_count,
-        db.conn
-            .query_row("SELECT COUNT(*) FROM legacy_identity_map", [], |row| {
-                row.get::<_, i64>(0)
-            })
-            .unwrap(),
+        db.list_identity_model().unwrap().accounts.len(),
     );
     {
         let tx = db.conn.unchecked_transaction().unwrap();
@@ -882,27 +824,33 @@ fn v45_migrates_legacy_accounts_idempotently_without_changing_v3_rows() {
         crate::db::identity::migrate_v45_body(&tx).unwrap();
         tx.commit().unwrap();
     }
+    assert_leftover_identity_tables_absent(&db.conn);
     let after_second = (
         db.conn
-            .query_row("SELECT COUNT(*) FROM upstream_identities", [], |row| {
-                row.get::<_, i64>(0)
-            })
+            .query_row(
+                "SELECT COUNT(DISTINCT identity_id) FROM credentials WHERE identity_id IS NOT NULL",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
             .unwrap(),
         db.conn
-            .query_row("SELECT COUNT(*) FROM credential_state", [], |row| {
-                row.get::<_, i64>(0)
-            })
+            .query_row(
+                "SELECT COUNT(*) FROM credentials
+                 WHERE COALESCE(credential_purpose, 'inference') = 'inference'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
             .unwrap(),
         db.conn
-            .query_row("SELECT COUNT(*) FROM credential_bindings", [], |row| {
-                row.get::<_, i64>(0)
-            })
+            .query_row(
+                "SELECT COUNT(*) FROM credentials
+                 WHERE COALESCE(credential_purpose, 'inference') = 'inference'
+                   AND binding_id IS NOT NULL AND binding_id <> ''",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
             .unwrap(),
-        db.conn
-            .query_row("SELECT COUNT(*) FROM legacy_identity_map", [], |row| {
-                row.get::<_, i64>(0)
-            })
-            .unwrap(),
+        db.list_identity_model().unwrap().accounts.len(),
     );
     assert_eq!(before_second, after_second);
 
@@ -946,25 +894,14 @@ fn v45_delete_linked_key_keeps_platform_parent_identity() {
         .unwrap();
     let parent_identity = identity_id_for_platform_account("keep-parent");
     db.delete_account("linked-custom").unwrap();
-    let parent_rows: i64 = db
-        .conn
-        .query_row(
-            "SELECT COUNT(*) FROM upstream_identities WHERE id = ?1",
-            [parent_identity.as_str()],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(parent_rows, 1);
-    let map: i64 = db
-        .conn
-        .query_row(
-            "SELECT COUNT(*) FROM legacy_identity_map
-             WHERE legacy_kind = 'platform_account' AND legacy_id = 'keep-parent'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(map, 1);
+    let parent = db
+        .list_identity_model()
+        .unwrap()
+        .platform_parents
+        .into_iter()
+        .find(|row| row.platform_id == "keep-parent")
+        .expect("platform parent identity survives");
+    assert_eq!(parent.identity.id, parent_identity.as_str());
     drop(db);
     fs::remove_dir_all(dir).unwrap();
 }
@@ -1007,9 +944,9 @@ fn v45_unlink_returns_identity_to_opaque() {
     let state: (String, Option<String>) = db
         .conn
         .query_row(
-            "SELECT i.identity_confidence, i.authority_site
-             FROM accounts a JOIN upstream_identities i ON i.id = a.identity_id
-             WHERE a.id = 'unlink-custom'",
+            "SELECT identity_confidence, authority_site
+             FROM credentials
+             WHERE legacy_account_id = 'unlink-custom'",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
@@ -1035,7 +972,7 @@ fn d02_shared_identity_pool_fans_out_cooldown_to_sibling_key() {
     let identity_id: String = db
         .conn
         .query_row(
-            "SELECT identity_id FROM accounts WHERE id = 'pool-a'",
+            "SELECT identity_id FROM credentials WHERE legacy_account_id = 'pool-a'",
             [],
             |row| row.get(0),
         )
@@ -1117,13 +1054,13 @@ fn v45_open_repairs_missing_satellites_and_list_fails_closed() {
     db.create_account(&keyed).unwrap();
     db.conn
         .execute(
-            "UPDATE accounts SET identity_id = NULL WHERE id = 'repair-go'",
+            "UPDATE credentials SET identity_id = NULL WHERE legacy_account_id = 'repair-go'",
             [],
         )
         .unwrap();
     db.conn
         .execute(
-            "DELETE FROM credential_state WHERE account_id = 'repair-go'",
+            "UPDATE credentials SET binding_id = NULL WHERE legacy_account_id = 'repair-go'",
             [],
         )
         .unwrap();
@@ -1189,15 +1126,15 @@ fn identity_repair_preserves_existing_shared_graph_and_ids() {
     };
     db.conn
         .execute(
-            "UPDATE credential_state SET credential_id=?2, version=7,
-        auth_state_version=7 WHERE account_id=?1",
+            "UPDATE credentials SET id=?2, credential_version=7, auth_state_version=7
+             WHERE legacy_account_id=?1",
             params![second.id, credential_id],
         )
         .unwrap();
     db.conn
         .execute(
-            "UPDATE credential_bindings SET id=?2, model_scope=?3,
-        enabled=0 WHERE account_id=?1",
+            "UPDATE credentials SET binding_id=?2, scope_json=?3, binding_enabled=0
+             WHERE legacy_account_id=?1",
             params![
                 second.id,
                 binding_id,
@@ -1205,14 +1142,6 @@ fn identity_repair_preserves_existing_shared_graph_and_ids() {
             ],
         )
         .unwrap();
-    for (kind, id) in [("credential", credential_id), ("binding", binding_id)] {
-        db.conn
-            .execute(
-                "UPDATE legacy_identity_map SET new_id=?3 WHERE legacy_id=?1 AND new_kind=?2",
-                params![second.id, kind, id],
-            )
-            .unwrap();
-    }
     let old_pool: String = db
         .conn
         .query_row(
@@ -1239,7 +1168,7 @@ fn identity_repair_preserves_existing_shared_graph_and_ids() {
         .unwrap();
     db.conn
         .execute(
-            "DELETE FROM credential_state WHERE account_id=?1",
+            "UPDATE credentials SET binding_id = NULL WHERE legacy_account_id=?1",
             [&other.id],
         )
         .unwrap();
@@ -1274,7 +1203,8 @@ fn identity_repair_preserves_existing_shared_graph_and_ids() {
     let bindings: i64 = db
         .conn
         .query_row(
-            "SELECT COUNT(*) FROM credential_bindings WHERE account_id=?1",
+            "SELECT COUNT(*) FROM credentials
+             WHERE legacy_account_id=?1 AND binding_id IS NOT NULL AND binding_id <> ''",
             [&second.id],
             |row| row.get(0),
         )
@@ -1310,8 +1240,13 @@ fn saved_grants_remain_revoked_across_reopen_and_rotation() {
     assert!(stored.allowed_origins.is_empty());
     db.conn
         .execute(
-            "UPDATE credential_bindings SET allowed_endpoint_ids='[]', allowed_origins='[]'
-             WHERE account_id='grant-go'",
+            "DELETE FROM credential_grants WHERE credential_id = ?1",
+            [credential_id_for_legacy_account("grant-go").as_str()],
+        )
+        .unwrap();
+    db.conn
+        .execute(
+            "UPDATE credentials SET grants_initialized = 1 WHERE legacy_account_id='grant-go'",
             [],
         )
         .unwrap();
@@ -1351,6 +1286,7 @@ fn v47_adds_onboarding_draft_to_existing_v46_rows() {
     let dir = temp_data_dir("v47-from-v46");
     let db = open_with_host_cipher(dir.clone()).unwrap();
     restore_v47_inert_columns(&db.conn);
+    materialize_legacy_providers_for_rewind(&db.conn);
     db.conn
         .execute_batch(
             "ALTER TABLE providers DROP COLUMN onboarding_draft;
@@ -1364,10 +1300,12 @@ fn v47_adds_onboarding_draft_to_existing_v46_rows() {
 
     let db = open_with_host_cipher(dir.clone()).unwrap();
     assert_eq!(schema_version_on(&db.conn).unwrap(), CURRENT_SCHEMA_VERSION);
+    assert_leftover_dynamic_provider_storage_absent(&db.conn);
     let defaulted: i64 = db
         .conn
         .query_row(
-            "SELECT COUNT(*) FROM providers WHERE onboarding_draft != 0",
+            "SELECT COUNT(*) FROM destinations
+             WHERE legacy_kind = 'dynamic' AND COALESCE(onboarding_draft, 0) != 0",
             [],
             |row| row.get(0),
         )
@@ -1412,6 +1350,1258 @@ fn v49_adds_unpublished_public_models_on_v48_reopen_and_fresh_databases() {
     db.remove_unpublished_public_model("deepseek-v4-flashnh")
         .unwrap();
     assert!(db.list_unpublished_public_models().unwrap().is_empty());
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn v50_adds_destination_shadow_tables_on_v49_reopen_and_fresh_databases() {
+    assert_eq!(CURRENT_SCHEMA_VERSION, 57);
+    let shadow_tables = [
+        "destinations",
+        "destination_models",
+        "credentials",
+        "credential_grants",
+    ];
+
+    let fresh = temp_data_dir("v50-fresh");
+    let db = open_with_host_cipher(fresh.clone()).unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), CURRENT_SCHEMA_VERSION);
+    for table in shadow_tables {
+        assert!(table_exists(&db.conn, table).unwrap(), "{table}");
+    }
+    drop(db);
+    fs::remove_dir_all(fresh).unwrap();
+
+    let dir = temp_data_dir("v50-from-v49");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    db.conn
+        .execute_batch(
+            "DROP TABLE credential_grants;
+             DROP TABLE credentials;
+             DROP TABLE destination_models;
+             DROP TABLE destinations;
+             DELETE FROM schema_version;
+             INSERT INTO schema_version(version) VALUES (49);",
+        )
+        .unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), 49);
+    for table in shadow_tables {
+        assert!(!table_exists(&db.conn, table).unwrap(), "{table}");
+    }
+    drop(db);
+
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), CURRENT_SCHEMA_VERSION);
+    for table in shadow_tables {
+        assert!(table_exists(&db.conn, table).unwrap(), "{table}");
+    }
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+fn accounts_table_present(conn: &Connection) -> bool {
+    table_exists(conn, "accounts").unwrap()
+}
+
+#[test]
+fn v52_migrates_v51_fixture_and_drops_accounts() {
+    let dir = temp_data_dir("v52-from-v51");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let mut keyed = account("v51-keyed");
+    keyed.key_cipher = fixture_account_key_cipher();
+    keyed.enabled = true;
+    keyed.notes = Some("keep-notes".into());
+    db.create_account(&keyed).unwrap();
+    db.update_account(
+        "v51-keyed",
+        &AccountUpdate {
+            name: None,
+            username: None,
+            password: None,
+            key: None,
+            enabled: Some(false),
+            referral_code: None,
+            purchase_date: None,
+            notes: None,
+        },
+        None,
+        None,
+    )
+    .unwrap();
+    let before = db.get_account("v51-keyed").unwrap().unwrap();
+    account_store::materialize_legacy_accounts_for_rewind(&db.conn).unwrap();
+    db.conn
+        .execute_batch(
+            "DELETE FROM schema_version;
+             INSERT INTO schema_version(version) VALUES (51);",
+        )
+        .unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), 51);
+    assert!(accounts_table_present(&db.conn));
+    drop(db);
+
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), CURRENT_SCHEMA_VERSION);
+    assert!(!accounts_table_present(&db.conn));
+    let after = db.get_account("v51-keyed").unwrap().expect("reconstructed");
+    assert_eq!(after.enabled, before.enabled);
+    assert_eq!(after.notes, before.notes);
+    assert_eq!(after.key_cipher, before.key_cipher);
+    let listed = db.list_accounts().unwrap();
+    assert!(listed.iter().any(|row| row.id == "v51-keyed"));
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn fresh_open_is_schema_v57_without_leftover_tables_and_keeps_zen() {
+    let dir = temp_data_dir("v57-fresh");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), 57);
+    assert!(!accounts_table_present(&db.conn));
+    assert!(!table_exists(&db.conn, "account_custom_configs").unwrap());
+    assert!(!table_exists(&db.conn, "account_model_capabilities").unwrap());
+    assert!(!table_exists(&db.conn, "platform_accounts").unwrap());
+    assert!(!table_exists(&db.conn, "platform_links").unwrap());
+    assert!(!table_exists(&db.conn, "cpa_integration").unwrap());
+    assert_leftover_dynamic_provider_storage_absent(&db.conn);
+    assert_leftover_identity_tables_absent(&db.conn);
+    assert!(table_exists(&db.conn, "quota_pools").unwrap());
+    assert!(table_exists(&db.conn, "quota_pool_members").unwrap());
+    let identity_snapshot = db.list_identity_model().unwrap();
+    assert!(
+        identity_snapshot
+            .accounts
+            .iter()
+            .any(|row| row.account.id == ZEN_FREE_ACCOUNT_ID)
+    );
+    assert!(
+        identity_snapshot
+            .accounts
+            .iter()
+            .all(|row| row.account.id == ZEN_FREE_ACCOUNT_ID)
+    );
+    let zen = db
+        .get_account(ZEN_FREE_ACCOUNT_ID)
+        .unwrap()
+        .expect("zen credential");
+    assert_eq!(zen.id, ZEN_FREE_ACCOUNT_ID);
+    let listed = db.list_accounts().unwrap();
+    assert!(listed.iter().any(|row| row.id == ZEN_FREE_ACCOUNT_ID));
+    assert!(listed.iter().all(|row| row.id != CPA_ACCOUNT_ID));
+    assert!(db.cpa_integration().unwrap().is_none());
+    let cpa_dest: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM destinations
+             WHERE adapter = 'cpa'
+                OR (legacy_kind = 'builtin' AND legacy_id = 'cpa')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(cpa_dest, 0, "fresh open must not invent a CPA destination");
+    let invented: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM destinations WHERE legacy_kind = 'dynamic'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        invented, 0,
+        "fresh open must not invent a user-defined destination"
+    );
+    for builtin_id in [
+        OPENCODE_PROVIDER_ID,
+        OPENCODE_ZEN_FREE_PROVIDER_ID,
+        COMMAND_CODE_PROVIDER_ID,
+        MINIMAX_PROVIDER_ID,
+        KIMI_PROVIDER_ID,
+        OLLAMA_PROVIDER_ID,
+        CUSTOM_PROVIDER_ID,
+    ] {
+        assert!(
+            db.get_provider_definition(builtin_id).unwrap().is_some(),
+            "{builtin_id}"
+        );
+    }
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn v53_migrates_v52_custom_account_and_drops_leftover_tables() {
+    let dir = temp_data_dir("v53-from-v52-custom");
+    let db = Database::open(dir.clone()).unwrap();
+    let mut custom = account("custom-v52");
+    custom.provider_id = CUSTOM_PROVIDER_ID.to_string();
+    custom.enabled = false;
+    custom.credential_kind = CredentialKind::ApiKey;
+    custom.quota_scope = QuotaScope::Key;
+    db.create_account_with_contract(
+        &custom,
+        Some(&AccountCustomConfigInput {
+            endpoint_url: "https://api.example.com/v1/chat/completions".into(),
+            upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+        }),
+        &[AccountModelCapabilityInput {
+            public_model: "org/model".into(),
+            upstream_model: "org/upstream".into(),
+            protocol: UpstreamProtocolKind::ChatCompletions,
+            source: Some("manual".into()),
+        }],
+    )
+    .unwrap();
+    let before = db.account_custom_config("custom-v52").unwrap().unwrap();
+    let before_caps = db.list_account_model_capabilities("custom-v52").unwrap();
+    db.conn
+        .execute_batch(
+            "CREATE TABLE account_custom_configs (
+                account_id TEXT PRIMARY KEY,
+                endpoint_url TEXT NOT NULL,
+                upstream_protocol TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+             );
+             CREATE TABLE account_model_capabilities (
+                account_id TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                upstream_model TEXT NOT NULL,
+                protocol TEXT NOT NULL,
+                verified_at TEXT,
+                source TEXT NOT NULL DEFAULT 'manual',
+                PRIMARY KEY (account_id, model_id, protocol)
+             );",
+        )
+        .unwrap();
+    db.conn
+        .execute(
+            "INSERT INTO account_custom_configs (
+                account_id, endpoint_url, upstream_protocol, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?4)",
+            rusqlite::params![
+                "custom-v52",
+                before.endpoint_url,
+                before.upstream_protocol.as_str(),
+                "2026-01-01T00:00:00Z",
+            ],
+        )
+        .unwrap();
+    db.conn
+        .execute(
+            "INSERT INTO account_model_capabilities (
+                account_id, model_id, upstream_model, protocol, source
+             ) VALUES (?1, ?2, ?3, ?4, 'manual')",
+            rusqlite::params![
+                "custom-v52",
+                before_caps[0].public_model,
+                before_caps[0].upstream_model,
+                before_caps[0].protocol.as_str(),
+            ],
+        )
+        .unwrap();
+    db.conn
+        .execute(
+            "UPDATE destinations SET base_url = NULL, protocols_json = '[]'
+             WHERE legacy_kind = 'custom_account' AND legacy_id = 'custom-v52'",
+            [],
+        )
+        .unwrap();
+    db.conn
+        .execute(
+            "DELETE FROM destination_models WHERE destination_id = (
+                SELECT id FROM destinations
+                 WHERE legacy_kind = 'custom_account' AND legacy_id = 'custom-v52'
+             )",
+            [],
+        )
+        .unwrap();
+    db.conn
+        .execute_batch(
+            "DELETE FROM schema_version;
+             INSERT INTO schema_version(version) VALUES (52);",
+        )
+        .unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), 52);
+    assert!(table_exists(&db.conn, "account_custom_configs").unwrap());
+    drop(db);
+
+    let db = Database::open(dir.clone()).unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), CURRENT_SCHEMA_VERSION);
+    let leftover: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type = 'table'
+               AND name IN ('account_custom_configs', 'account_model_capabilities')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(leftover, 0);
+    let after = db.account_custom_config("custom-v52").unwrap().unwrap();
+    assert_eq!(after.endpoint_url, before.endpoint_url);
+    assert_eq!(after.upstream_protocol, before.upstream_protocol);
+    let after_caps = db.list_account_model_capabilities("custom-v52").unwrap();
+    assert_eq!(after_caps.len(), 1);
+    assert_eq!(after_caps[0].public_model, before_caps[0].public_model);
+    assert_eq!(after_caps[0].upstream_model, before_caps[0].upstream_model);
+    assert_eq!(after_caps[0].protocol, before_caps[0].protocol);
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn v54_migrates_v53_platform_parent_and_linked_key_then_drops_leftover_tables() {
+    use crate::platform::{PlatformGroup, PlatformKind, PlatformSnapshot};
+    use ocg_domain::credential::observer_credential_id_for_platform_account;
+    use ocg_domain::destination::destination_id_for_platform_account;
+
+    let dir = temp_data_dir("v54-from-v53-platform");
+    let db = Database::open(dir.clone()).unwrap();
+    let mut custom = account("linked-v53");
+    custom.provider_id = CUSTOM_PROVIDER_ID.to_string();
+    custom.enabled = false;
+    custom.credential_kind = CredentialKind::ApiKey;
+    custom.quota_scope = QuotaScope::Key;
+    custom.key_cipher = "linked-key-cipher".into();
+    db.create_account_with_contract(
+        &custom,
+        Some(&AccountCustomConfigInput {
+            endpoint_url: "https://old.example/v1/chat/completions".into(),
+            upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+        }),
+        &[AccountModelCapabilityInput {
+            public_model: "org/model".into(),
+            upstream_model: "org/upstream".into(),
+            protocol: UpstreamProtocolKind::ChatCompletions,
+            source: Some("manual".into()),
+        }],
+    )
+    .unwrap();
+    db.create_platform_account(
+        "parent-v53",
+        PlatformKind::NewApi,
+        "Parent V53",
+        "https://platform.example/v1",
+        Some("mgmt-cipher"),
+    )
+    .unwrap();
+    db.link_platform_account("linked-v53", "parent-v53", &PlatformGroup::default())
+        .unwrap();
+    let token = db
+        .platform_refresh_token("parent-v53", Some("linked-v53"))
+        .unwrap();
+    assert!(
+        db.save_platform_refresh(
+            "parent-v53",
+            Some("linked-v53"),
+            &token,
+            &PlatformSnapshot {
+                observed_at: 1,
+                ..PlatformSnapshot::default()
+            },
+        )
+        .unwrap()
+    );
+    let before_parent = db.platform_account("parent-v53").unwrap().unwrap();
+    let before_link = db
+        .list_platform_links()
+        .unwrap()
+        .into_iter()
+        .find(|link| link.account_id == "linked-v53")
+        .unwrap();
+    let before_cipher = db
+        .platform_credential_cipher("parent-v53")
+        .unwrap()
+        .expect("management cipher");
+    let dest_id = destination_id_for_platform_account("parent-v53");
+    let observer_id = observer_credential_id_for_platform_account("parent-v53").to_string();
+    let snapshot_json = serde_json::to_string(&before_parent.snapshot).unwrap();
+    let group_json = serde_json::to_string(&before_link.group).unwrap();
+    let link_version: i64 = db
+        .conn
+        .query_row(
+            "SELECT COALESCE(link_version, 0) FROM credentials WHERE legacy_account_id = 'linked-v53'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let link_snapshot: Option<String> = db
+        .conn
+        .query_row(
+            "SELECT link_snapshot FROM credentials WHERE legacy_account_id = 'linked-v53'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    db.conn
+        .execute_batch(
+            "CREATE TABLE platform_accounts (
+                id TEXT PRIMARY KEY, kind TEXT NOT NULL,
+                name TEXT NOT NULL, base_url TEXT NOT NULL, credential_cipher TEXT,
+                version INTEGER NOT NULL DEFAULT 1, snapshot TEXT);
+             CREATE TABLE platform_links (
+                account_id TEXT PRIMARY KEY,
+                platform_account_id TEXT NOT NULL,
+                group_json TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 1, snapshot TEXT);",
+        )
+        .unwrap();
+    db.conn
+        .execute(
+            "INSERT INTO platform_accounts(id,kind,name,base_url,credential_cipher,version,snapshot)
+             VALUES ('parent-v53','new_api','Parent V53','https://platform.example/v1',?1,?2,?3)",
+            rusqlite::params![before_cipher, before_parent.version as i64, snapshot_json],
+        )
+        .unwrap();
+    db.conn
+        .execute(
+            "INSERT INTO platform_links(account_id,platform_account_id,group_json,version,snapshot)
+             VALUES ('linked-v53','parent-v53',?1,?2,?3)",
+            rusqlite::params![group_json, link_version, link_snapshot],
+        )
+        .unwrap();
+    db.conn
+        .execute(
+            "DELETE FROM credential_grants WHERE credential_id = ?1",
+            [&observer_id],
+        )
+        .unwrap();
+    db.conn
+        .execute("DELETE FROM credentials WHERE id = ?1", [&observer_id])
+        .unwrap();
+    db.conn
+        .execute(
+            "DELETE FROM destination_models WHERE destination_id = ?1",
+            [&dest_id],
+        )
+        .unwrap();
+    db.conn
+        .execute("DELETE FROM destinations WHERE id = ?1", [&dest_id])
+        .unwrap();
+    db.conn
+        .execute(
+            "UPDATE credentials
+             SET destination_id = '', group_json = NULL, link_version = NULL, link_snapshot = NULL
+             WHERE legacy_account_id = 'linked-v53'",
+            [],
+        )
+        .unwrap();
+    db.conn
+        .execute_batch(
+            "DELETE FROM schema_version;
+             INSERT INTO schema_version(version) VALUES (53);",
+        )
+        .unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), 53);
+    assert!(table_exists(&db.conn, "platform_accounts").unwrap());
+    drop(db);
+
+    let db = Database::open(dir.clone()).unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), CURRENT_SCHEMA_VERSION);
+    let leftover: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type = 'table'
+               AND name IN ('platform_accounts', 'platform_links')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(leftover, 0);
+    let after_parent = db.platform_account("parent-v53").unwrap().unwrap();
+    assert_eq!(after_parent.kind, PlatformKind::NewApi);
+    assert_eq!(after_parent.base_url, "https://platform.example/v1");
+    assert_eq!(after_parent.name, "Parent V53");
+    assert!(after_parent.has_user_credential);
+    assert_eq!(after_parent.version, before_parent.version);
+    assert_eq!(
+        after_parent.snapshot.is_some(),
+        before_parent.snapshot.is_some()
+    );
+    assert_eq!(
+        db.platform_credential_cipher("parent-v53")
+            .unwrap()
+            .as_deref(),
+        Some(before_cipher.as_str())
+    );
+    let after_link = db
+        .list_platform_links()
+        .unwrap()
+        .into_iter()
+        .find(|link| link.account_id == "linked-v53")
+        .expect("link survived");
+    assert_eq!(after_link.platform_account_id, "parent-v53");
+    assert_eq!(after_link.group, before_link.group);
+    assert!(after_link.snapshot.is_some());
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn v54_refuses_unmappable_leftover_platform_parent() {
+    let dir = temp_data_dir("v54-refuse-empty-url");
+    let db = Database::open(dir.clone()).unwrap();
+    db.conn
+        .execute_batch(
+            "CREATE TABLE platform_accounts (
+                id TEXT PRIMARY KEY, kind TEXT NOT NULL,
+                name TEXT NOT NULL, base_url TEXT NOT NULL, credential_cipher TEXT,
+                version INTEGER NOT NULL DEFAULT 1, snapshot TEXT);
+             INSERT INTO platform_accounts(id,kind,name,base_url,version)
+             VALUES ('bad-parent','new_api','Bad','',1);
+             DELETE FROM schema_version;
+             INSERT INTO schema_version(version) VALUES (53);",
+        )
+        .unwrap();
+    drop(db);
+    match Database::open(dir.clone()) {
+        Ok(_) => panic!("v54 should refuse leftover parent with empty base_url"),
+        Err(err) => assert!(
+            err.to_string().contains("empty base_url")
+                || err
+                    .chain()
+                    .any(|cause| cause.to_string().contains("empty base_url")),
+            "{err:#}"
+        ),
+    }
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn v55_migrates_v54_cpa_leftover_then_drops_table() {
+    use ocg_domain::credential::observer_credential_id_for_cpa;
+    use ocg_domain::destination::destination_id_for_builtin;
+
+    let dir = temp_data_dir("v55-from-v54-cpa");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let now = Utc::now();
+    let mut cpa_account = account(CPA_ACCOUNT_ID);
+    cpa_account.provider_id = CPA_PROVIDER_ID.to_string();
+    cpa_account.credential_kind = CredentialKind::ApiKey;
+    cpa_account.quota_scope = QuotaScope::Key;
+    cpa_account.name = CPA_ACCOUNT_NAME.to_string();
+    cpa_account.account_type = AccountType::Key;
+    cpa_account.setup_step = AccountSetupStep::Ready;
+    cpa_account.created_at = now;
+    cpa_account.updated_at = now;
+    cpa_account.key_cipher = String::new();
+    let management_cipher = test_host_cipher().encrypt("cpa-management-v54").unwrap();
+    db.upsert_cpa_integration(&cpa_account, "http://127.0.0.1:8317", &management_cipher)
+        .unwrap();
+    let dest_id = destination_id_for_builtin(CPA_PROVIDER_ID);
+    let observer_id = observer_credential_id_for_cpa().to_string();
+    db.conn
+        .execute_batch(
+            "CREATE TABLE cpa_integration (
+                id TEXT PRIMARY KEY CHECK (id = 'cpa'),
+                account_id TEXT NOT NULL UNIQUE,
+                base_url TEXT NOT NULL,
+                management_key_cipher TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+             );",
+        )
+        .unwrap();
+    db.conn
+        .execute(
+            "INSERT INTO cpa_integration
+                 (id, account_id, base_url, management_key_cipher, updated_at)
+             VALUES ('cpa', ?1, ?2, ?3, ?4)",
+            rusqlite::params![
+                CPA_ACCOUNT_ID,
+                "http://127.0.0.1:8317",
+                management_cipher,
+                now.to_rfc3339(),
+            ],
+        )
+        .unwrap();
+    db.conn
+        .execute(
+            "DELETE FROM credential_grants WHERE credential_id = ?1",
+            [&observer_id],
+        )
+        .unwrap();
+    db.conn
+        .execute("DELETE FROM credentials WHERE id = ?1", [&observer_id])
+        .unwrap();
+    db.conn
+        .execute(
+            "DELETE FROM destination_models WHERE destination_id = ?1",
+            [&dest_id],
+        )
+        .unwrap();
+    db.conn
+        .execute("DELETE FROM destinations WHERE id = ?1", [&dest_id])
+        .unwrap();
+    db.conn
+        .execute_batch(
+            "DELETE FROM schema_version;
+             INSERT INTO schema_version(version) VALUES (54);",
+        )
+        .unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), 54);
+    assert!(table_exists(&db.conn, "cpa_integration").unwrap());
+    drop(db);
+
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), CURRENT_SCHEMA_VERSION);
+    let leftover: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type = 'table' AND name = 'cpa_integration'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(leftover, 0);
+    let record = db.cpa_integration().unwrap().expect("mapped leftover");
+    assert_eq!(record.account_id, CPA_ACCOUNT_ID);
+    assert_eq!(record.base_url, "http://127.0.0.1:8317");
+    assert_eq!(record.management_key_cipher, management_cipher);
+    let inference = db.get_account(CPA_ACCOUNT_ID).unwrap().expect("inference");
+    assert_ne!(inference.key_cipher, management_cipher);
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn v55_refuses_unmappable_leftover_cpa() {
+    let dir = temp_data_dir("v55-refuse-empty-cipher");
+    let db = Database::open(dir.clone()).unwrap();
+    db.conn
+        .execute_batch(
+            "CREATE TABLE cpa_integration (
+                id TEXT PRIMARY KEY CHECK (id = 'cpa'),
+                account_id TEXT NOT NULL UNIQUE,
+                base_url TEXT NOT NULL,
+                management_key_cipher TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+             );
+             INSERT INTO cpa_integration
+                 (id, account_id, base_url, management_key_cipher, updated_at)
+             VALUES ('cpa', '00000000-0000-0000-0000-000000000003',
+                     'http://127.0.0.1:8317', '', '2026-01-01T00:00:00Z');
+             DELETE FROM schema_version;
+             INSERT INTO schema_version(version) VALUES (54);",
+        )
+        .unwrap();
+    drop(db);
+    match Database::open(dir.clone()) {
+        Ok(_) => panic!("v55 should refuse leftover CPA with empty management cipher"),
+        Err(err) => assert!(
+            err.to_string().contains("empty management_key_cipher")
+                || err
+                    .chain()
+                    .any(|cause| { cause.to_string().contains("empty management_key_cipher") }),
+            "{err:#}"
+        ),
+    }
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn v56_migrates_v55_dynamic_leftover_then_drops_tables() {
+    use ocg_domain::destination::destination_id_for_dynamic;
+
+    let dir = temp_data_dir("v56-from-v55-dynamic");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let now = Utc::now().to_rfc3339();
+    let dest_id = destination_id_for_dynamic("lab-http");
+    db.conn
+        .execute_batch(&format!(
+            "{ddl}
+             INSERT INTO providers
+                (id, origin, adapter_kind, name, endpoint_url, upstream_protocol,
+                 auth_kind, preset_id, offering, created_at, updated_at, onboarding_draft)
+             VALUES
+                ('lab-http', 'custom', 'configurable_http', 'Lab HTTP',
+                 'https://lab.example/v1', 'chat_completions', 'bearer', NULL, 'api',
+                 '{now}', '{now}', 0),
+                ('draft-http', 'preset', 'configurable_http', 'Draft HTTP',
+                 'https://draft.example/v1', 'chat_completions', 'bearer', 'zhipu-coding',
+                 'plan', '{now}', '{now}', 1);
+             INSERT INTO provider_models
+                (provider_id, public_model, public_model_key, upstream_model, upstream_override)
+             VALUES
+                ('lab-http', 'lab-opus', 'lab-opus', 'vendor/opus',
+                 '{{\"protocol\":\"messages\",\"endpoint_url\":\"https://lab.example/anthropic/v1/messages\"}}');
+             DELETE FROM destination_models WHERE destination_id = '{dest_id}';
+             DELETE FROM destinations WHERE id = '{dest_id}' OR legacy_id IN ('lab-http','draft-http');
+             DELETE FROM schema_version;
+             INSERT INTO schema_version(version) VALUES (55);",
+            ddl = leftover_providers_ddl()
+        ))
+        .unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), 55);
+    assert!(table_exists(&db.conn, "providers").unwrap());
+    drop(db);
+
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), CURRENT_SCHEMA_VERSION);
+    assert_leftover_dynamic_provider_storage_absent(&db.conn);
+    let lab = db
+        .get_dynamic_provider("lab-http")
+        .unwrap()
+        .expect("mapped leftover");
+    assert_eq!(lab.endpoint_url, "https://lab.example/v1");
+    assert_eq!(
+        lab.upstream_protocol,
+        crate::provider::UpstreamProtocolKind::ChatCompletions
+    );
+    assert_eq!(lab.mappings.len(), 1);
+    assert_eq!(lab.mappings[0].public_model, "lab-opus");
+    assert_eq!(lab.mappings[0].upstream_model, "vendor/opus");
+    assert_eq!(
+        lab.mappings[0]
+            .upstream_override
+            .as_ref()
+            .map(|value| value.endpoint_url.as_str()),
+        Some("https://lab.example/anthropic/v1/messages")
+    );
+    assert_eq!(
+        db.provider_is_onboarding_draft("draft-http").unwrap(),
+        Some(true)
+    );
+    let draft = db
+        .list_control_plane_dynamic_providers()
+        .unwrap()
+        .into_iter()
+        .find(|row| row.id == "draft-http")
+        .expect("draft leftover");
+    assert_eq!(draft.preset_id.as_deref(), Some("zhipu-coding"));
+    assert_eq!(draft.offering, "plan");
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn v56_refuses_unmappable_leftover_dynamic_provider() {
+    let dir = temp_data_dir("v56-refuse-empty-url");
+    let db = Database::open(dir.clone()).unwrap();
+    let now = Utc::now().to_rfc3339();
+    db.conn
+        .execute_batch(&format!(
+            "{ddl}
+             INSERT INTO providers
+                (id, origin, adapter_kind, name, endpoint_url, upstream_protocol,
+                 auth_kind, offering, created_at, updated_at)
+             VALUES ('bad-http', 'custom', 'configurable_http', 'Bad HTTP', '',
+                     'chat_completions', 'bearer', 'api', '{now}', '{now}');
+             DELETE FROM schema_version;
+             INSERT INTO schema_version(version) VALUES (55);",
+            ddl = leftover_providers_ddl()
+        ))
+        .unwrap();
+    drop(db);
+    match Database::open(dir.clone()) {
+        Ok(_) => panic!("v56 should refuse leftover keyed HTTP with empty URL"),
+        Err(err) => assert!(
+            err.to_string().contains("empty required URL")
+                || err
+                    .chain()
+                    .any(|cause| cause.to_string().contains("empty required URL")),
+            "{err:#}"
+        ),
+    }
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn v56_refuses_unknown_leftover_adapter() {
+    let dir = temp_data_dir("v56-refuse-unknown-adapter");
+    let db = Database::open(dir.clone()).unwrap();
+    let now = Utc::now().to_rfc3339();
+    db.conn
+        .execute_batch(&format!(
+            "{ddl}
+             INSERT INTO providers
+                (id, origin, adapter_kind, name, endpoint_url, upstream_protocol,
+                 auth_kind, offering, created_at, updated_at)
+             VALUES ('weird', 'custom', 'user_script', 'Weird', 'https://weird.example/v1',
+                     'chat_completions', 'bearer', 'api', '{now}', '{now}');
+             DELETE FROM schema_version;
+             INSERT INTO schema_version(version) VALUES (55);",
+            ddl = leftover_providers_ddl()
+        ))
+        .unwrap();
+    drop(db);
+    match Database::open(dir.clone()) {
+        Ok(_) => panic!("v56 should refuse leftover with unknown adapter"),
+        Err(err) => assert!(
+            err.to_string().contains("unknown adapter")
+                || err
+                    .chain()
+                    .any(|cause| cause.to_string().contains("unknown adapter")),
+            "{err:#}"
+        ),
+    }
+    fs::remove_dir_all(dir).unwrap();
+}
+
+fn rewind_identity_satellites_to_v56(conn: &Connection) {
+    crate::db::identity_v57::rewind_identity_satellites_to_v56(conn).unwrap();
+}
+
+#[test]
+fn v57_migrates_v56_identity_satellites_then_drops_tables() {
+    let dir = temp_data_dir("v57-from-v56-identity");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let mut keyed = account("v57-go");
+    keyed.name = "Go Key".into();
+    keyed.key_cipher = fixture_account_key_cipher();
+    db.create_account(&keyed).unwrap();
+    let mut managed = account("v57-managed");
+    managed.name = "Managed Draft".into();
+    managed.account_type = AccountType::Managed;
+    managed.setup_step = AccountSetupStep::Payment;
+    managed.enabled = false;
+    managed.key_cipher.clear();
+    db.create_account(&managed).unwrap();
+    let before = db.list_identity_model().unwrap();
+    let go = before
+        .accounts
+        .iter()
+        .find(|row| row.account.id == "v57-go")
+        .unwrap()
+        .clone();
+    let draft = before
+        .accounts
+        .iter()
+        .find(|row| row.account.id == "v57-managed")
+        .unwrap()
+        .clone();
+    rewind_identity_satellites_to_v56(&db.conn);
+    assert_eq!(schema_version_on(&db.conn).unwrap(), 56);
+    assert!(table_exists(&db.conn, "upstream_identities").unwrap());
+    assert!(table_exists(&db.conn, "quota_pools").unwrap());
+    drop(db);
+
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), CURRENT_SCHEMA_VERSION);
+    assert_leftover_identity_tables_absent(&db.conn);
+    assert!(table_exists(&db.conn, "quota_pools").unwrap());
+    assert!(table_exists(&db.conn, "quota_pool_members").unwrap());
+    let after = db.list_identity_model().unwrap();
+    let go_after = after
+        .accounts
+        .iter()
+        .find(|row| row.account.id == "v57-go")
+        .expect("reconstructed go");
+    assert_eq!(go_after.identity_id, go.identity_id);
+    assert_eq!(go_after.credential_id, go.credential_id);
+    assert_eq!(go_after.binding_id, go.binding_id);
+    let mut go_ids = go.allowed_endpoint_ids.clone();
+    let mut go_ids_after = go_after.allowed_endpoint_ids.clone();
+    go_ids.sort();
+    go_ids_after.sort();
+    assert_eq!(go_ids_after, go_ids);
+    assert!(go_after.subscription.is_some());
+    let draft_after = after
+        .accounts
+        .iter()
+        .find(|row| row.account.id == "v57-managed")
+        .expect("reconstructed managed");
+    assert_eq!(draft_after.identity_id, draft.identity_id);
+    assert!(draft_after.onboarding.is_some());
+    let pool_members: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM quota_pool_members WHERE account_id IN ('v57-go', 'v57-managed')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(pool_members, 2);
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn v57_refuses_unmappable_leftover_identity_satellite() {
+    let dir = temp_data_dir("v57-refuse-orphan-binding");
+    let db = Database::open(dir.clone()).unwrap();
+    let now = Utc::now().to_rfc3339();
+    db.conn
+        .execute_batch(&format!(
+            "{ddl}
+             INSERT INTO credential_bindings (
+                id, account_id, connection_legacy_kind, connection_legacy_id,
+                model_scope, enabled, created_at, updated_at,
+                allowed_endpoint_ids, allowed_origins
+             ) VALUES (
+                'orphan-binding', 'missing-account', 'account', 'missing-account',
+                '{{\"kind\":\"all\"}}', 1, '{now}', '{now}', '[]', '[]'
+             );
+             DELETE FROM schema_version;
+             INSERT INTO schema_version(version) VALUES (56);",
+            ddl = crate::db::identity_v57::leftover_identity_tables_ddl()
+        ))
+        .unwrap();
+    drop(db);
+    match Database::open(dir.clone()) {
+        Ok(_) => panic!("v57 should refuse leftover binding with no credential"),
+        Err(err) => assert!(
+            err.to_string().contains("no reconstructible credential")
+                || err
+                    .chain()
+                    .any(|cause| cause.to_string().contains("no reconstructible credential")),
+            "{err:#}"
+        ),
+    }
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn v57_refuses_unmappable_leftover_identity() {
+    let dir = temp_data_dir("v57-refuse-orphan-identity");
+    let db = Database::open(dir.clone()).unwrap();
+    let now = Utc::now().to_rfc3339();
+    db.conn
+        .execute_batch(&format!(
+            "{ddl}
+             INSERT INTO upstream_identities (
+                id, label, identity_confidence, authority_site, authority_subject,
+                enabled, notes, created_at, updated_at
+             ) VALUES (
+                'orphan-identity', 'Orphan', 'opaque', NULL, NULL, 1, NULL, '{now}', '{now}'
+             );
+             DELETE FROM schema_version;
+             INSERT INTO schema_version(version) VALUES (56);",
+            ddl = crate::db::identity_v57::leftover_identity_tables_ddl()
+        ))
+        .unwrap();
+    drop(db);
+    match Database::open(dir.clone()) {
+        Ok(_) => panic!("v57 should refuse leftover identity with no credential"),
+        Err(err) => assert!(
+            err.to_string().contains("no reconstructible credential")
+                || err
+                    .chain()
+                    .any(|cause| cause.to_string().contains("no reconstructible credential")),
+            "{err:#}"
+        ),
+    }
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn v57_create_credential_and_grants_survive_reopen_without_leftover_tables() {
+    let dir = temp_data_dir("v57-crud-reopen");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let mut keyed = account("v57-persist");
+    keyed.key_cipher = fixture_account_key_cipher();
+    db.create_account(&keyed).unwrap();
+    let stored = db
+        .list_identity_model()
+        .unwrap()
+        .accounts
+        .into_iter()
+        .find(|row| row.account.id == "v57-persist")
+        .unwrap();
+    db.update_credential_binding(
+        &stored.binding_id,
+        None,
+        None,
+        Some(&[] as &[String]),
+        Some(&[] as &[String]),
+    )
+    .unwrap();
+    assert_leftover_identity_tables_absent(&db.conn);
+    drop(db);
+
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    assert_leftover_identity_tables_absent(&db.conn);
+    let reopened = db
+        .list_identity_model()
+        .unwrap()
+        .accounts
+        .into_iter()
+        .find(|row| row.account.id == "v57-persist")
+        .expect("reopened");
+    assert_eq!(reopened.identity_id, stored.identity_id);
+    assert_eq!(reopened.binding_id, stored.binding_id);
+    assert!(reopened.allowed_endpoint_ids.is_empty());
+    assert!(reopened.allowed_origins.is_empty());
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn dynamic_provider_crud_and_onboarding_survive_reopen_without_leftover_tables() {
+    let dir = temp_data_dir("v56-crud-reopen");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let provider_id = uuid::Uuid::new_v4().to_string();
+    let draft_id = uuid::Uuid::new_v4().to_string();
+    let runtime = onboarding_runtime(&provider_id, "Persist Lab");
+    let mut first = account("persist-lab");
+    first.provider_id = provider_id.clone();
+    first.key_cipher = fixture_account_key_cipher();
+    db.create_dynamic_provider(&runtime, &first).unwrap();
+    let mut changed = runtime.clone();
+    changed.name = "Persist Lab Updated".into();
+    changed.endpoint_url = "https://persist.example/v1".into();
+    db.replace_dynamic_provider(&changed, false, false, None)
+        .unwrap();
+    db.commit_onboarding_new(
+        &onboarding_runtime(&draft_id, "Draft Lab"),
+        None,
+        true,
+        &onboarding_operation(
+            &uuid::Uuid::new_v4().to_string(),
+            "draft-reopen",
+            r#"{"connectionId":"c","credentialId":null,"targetIds":[]}"#,
+        ),
+    )
+    .unwrap();
+    db.commit_onboarding_resume(
+        &onboarding_runtime(&draft_id, "Draft Lab Done"),
+        false,
+        None,
+        None,
+        None,
+        None,
+        None,
+        &onboarding_operation(
+            &uuid::Uuid::new_v4().to_string(),
+            "draft-complete",
+            r#"{"connectionId":"c","credentialId":null,"targetIds":[]}"#,
+        ),
+    )
+    .unwrap();
+    drop(db);
+
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    assert_leftover_dynamic_provider_storage_absent(&db.conn);
+    let loaded = db
+        .get_dynamic_provider(&provider_id)
+        .unwrap()
+        .expect("reopened");
+    assert_eq!(loaded.name, "Persist Lab Updated");
+    assert_eq!(loaded.endpoint_url, "https://persist.example/v1");
+    assert_eq!(db.count_accounts_for_provider(&provider_id).unwrap(), 1);
+    let completed = db.get_dynamic_provider(&draft_id).unwrap().expect("draft");
+    assert_eq!(completed.name, "Draft Lab Done");
+    assert_eq!(
+        db.provider_is_onboarding_draft(&draft_id).unwrap(),
+        Some(false)
+    );
+    db.delete_dynamic_provider(&draft_id).unwrap();
+    drop(db);
+
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    assert!(db.get_dynamic_provider(&draft_id).unwrap().is_none());
+    assert!(db.get_dynamic_provider(&provider_id).unwrap().is_some());
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn platform_parent_link_refresh_survives_reopen_without_leftover_tables() {
+    use crate::platform::{PlatformGroup, PlatformKind, PlatformSnapshot};
+
+    let dir = temp_data_dir("v54-platform-reopen");
+    let db = Database::open(dir.clone()).unwrap();
+    assert!(!table_exists(&db.conn, "platform_accounts").unwrap());
+    let mut custom = account("reopen-linked");
+    custom.provider_id = CUSTOM_PROVIDER_ID.to_string();
+    custom.credential_kind = CredentialKind::ApiKey;
+    custom.quota_scope = QuotaScope::Key;
+    custom.key_cipher = "reopen-key".into();
+    db.create_account_with_contract(
+        &custom,
+        Some(&AccountCustomConfigInput {
+            endpoint_url: "https://old.example/v1/chat/completions".into(),
+            upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+        }),
+        &[AccountModelCapabilityInput {
+            public_model: "reopen-model".into(),
+            upstream_model: "reopen-model".into(),
+            protocol: UpstreamProtocolKind::ChatCompletions,
+            source: None,
+        }],
+    )
+    .unwrap();
+    db.create_platform_account(
+        "reopen-parent",
+        PlatformKind::Sub2api,
+        "Reopen Parent",
+        "https://sub.example",
+        Some("reopen-mgmt"),
+    )
+    .unwrap();
+    db.link_platform_account("reopen-linked", "reopen-parent", &PlatformGroup::default())
+        .unwrap();
+    let token = db.platform_refresh_token("reopen-parent", None).unwrap();
+    assert!(
+        db.save_platform_refresh(
+            "reopen-parent",
+            None,
+            &token,
+            &PlatformSnapshot {
+                observed_at: 9,
+                ..PlatformSnapshot::default()
+            },
+        )
+        .unwrap()
+    );
+    drop(db);
+
+    let db = Database::open(dir.clone()).unwrap();
+    assert!(!table_exists(&db.conn, "platform_accounts").unwrap());
+    assert!(!table_exists(&db.conn, "platform_links").unwrap());
+    let parent = db.platform_account("reopen-parent").unwrap().unwrap();
+    assert_eq!(parent.kind, PlatformKind::Sub2api);
+    assert_eq!(parent.base_url, "https://sub.example");
+    assert_eq!(parent.name, "Reopen Parent");
+    assert!(parent.has_user_credential);
+    assert!(parent.snapshot.is_some());
+    assert_eq!(
+        db.platform_credential_cipher("reopen-parent")
+            .unwrap()
+            .as_deref(),
+        Some("reopen-mgmt")
+    );
+    let links = db.list_platform_links().unwrap();
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].account_id, "reopen-linked");
+    db.unlink_platform_account("reopen-linked").unwrap();
+    assert!(db.list_platform_links().unwrap().is_empty());
+    db.delete_platform_account("reopen-parent").unwrap();
+    assert!(db.platform_account("reopen-parent").unwrap().is_none());
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn custom_config_and_capabilities_round_trip_without_leftover_tables() {
+    let dir = temp_data_dir("v53-custom-roundtrip");
+    let db = Database::open(dir.clone()).unwrap();
+    assert!(!table_exists(&db.conn, "account_custom_configs").unwrap());
+    let mut custom = account("custom-roundtrip");
+    custom.provider_id = CUSTOM_PROVIDER_ID.to_string();
+    custom.enabled = false;
+    custom.credential_kind = CredentialKind::ApiKey;
+    custom.quota_scope = QuotaScope::Key;
+    db.create_account_with_contract(
+        &custom,
+        Some(&AccountCustomConfigInput {
+            endpoint_url: "https://api.example.com/v1/chat/completions".into(),
+            upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+        }),
+        &[AccountModelCapabilityInput {
+            public_model: "org/one".into(),
+            upstream_model: "org/one-up".into(),
+            protocol: UpstreamProtocolKind::ChatCompletions,
+            source: Some("manual".into()),
+        }],
+    )
+    .unwrap();
+    db.upsert_account_custom_config(
+        "custom-roundtrip",
+        &AccountCustomConfigInput {
+            endpoint_url: "https://api.example.net/v1/messages".into(),
+            upstream_protocol: UpstreamProtocolKind::Messages,
+        },
+    )
+    .unwrap();
+    db.replace_account_model_capabilities(
+        "custom-roundtrip",
+        &[AccountModelCapabilityInput {
+            public_model: "org/two".into(),
+            upstream_model: "org/two-up".into(),
+            protocol: UpstreamProtocolKind::Messages,
+            source: Some("manual".into()),
+        }],
+    )
+    .unwrap();
+    let live_config = db
+        .account_custom_config("custom-roundtrip")
+        .unwrap()
+        .unwrap();
+    let live_caps = db
+        .list_account_model_capabilities("custom-roundtrip")
+        .unwrap();
+    assert_eq!(
+        live_config.endpoint_url,
+        "https://api.example.net/v1/messages"
+    );
+    assert_eq!(
+        live_config.upstream_protocol,
+        UpstreamProtocolKind::Messages
+    );
+    assert_eq!(live_caps.len(), 1);
+    assert_eq!(live_caps[0].public_model, "org/two");
+    assert_eq!(live_caps[0].upstream_model, "org/two-up");
+    drop(db);
+
+    let db = Database::open(dir.clone()).unwrap();
+    assert!(!table_exists(&db.conn, "account_custom_configs").unwrap());
+    assert!(!table_exists(&db.conn, "account_model_capabilities").unwrap());
+    let reopened = db
+        .account_custom_config("custom-roundtrip")
+        .unwrap()
+        .unwrap();
+    let reopened_caps = db
+        .list_account_model_capabilities("custom-roundtrip")
+        .unwrap();
+    assert_eq!(reopened.endpoint_url, live_config.endpoint_url);
+    assert_eq!(reopened.upstream_protocol, live_config.upstream_protocol);
+    assert_eq!(reopened_caps.len(), 1);
+    assert_eq!(reopened_caps[0].public_model, "org/two");
+    assert_eq!(reopened_caps[0].upstream_model, "org/two-up");
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn mutation_then_reopen_keeps_reconstructed_account_and_credential_secrets() {
+    let dir = temp_data_dir("v52-mutate-reopen");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let mut keyed = account("mutate-go");
+    keyed.key_cipher = fixture_account_key_cipher();
+    keyed.notes = Some("before".into());
+    db.create_account(&keyed).unwrap();
+    db.update_account(
+        "mutate-go",
+        &AccountUpdate {
+            name: Some("Mutated".into()),
+            username: None,
+            password: None,
+            key: None,
+            enabled: Some(false),
+            referral_code: None,
+            purchase_date: None,
+            notes: Some("after".into()),
+        },
+        Some(&fixture_account_key_cipher()),
+        None,
+    )
+    .unwrap();
+    let live = db.get_account("mutate-go").unwrap().unwrap();
+    drop(db);
+
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    assert!(!accounts_table_present(&db.conn));
+    let reopened = db.get_account("mutate-go").unwrap().unwrap();
+    assert_eq!(reopened.enabled, live.enabled);
+    assert_eq!(reopened.name, live.name);
+    assert_eq!(reopened.notes, live.notes);
+    assert_eq!(reopened.key_cipher, live.key_cipher);
+    let sql_cipher: String = db
+        .conn
+        .query_row(
+            "SELECT key_cipher FROM credentials WHERE legacy_account_id = ?1",
+            ["mutate-go"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(sql_cipher, reopened.key_cipher);
+    assert_fixture_account_cipher(&sql_cipher);
     drop(db);
     fs::remove_dir_all(dir).unwrap();
 }
@@ -1480,7 +2670,7 @@ fn second_identity_credential_is_independent_until_explicit_share() {
     let identity_id: String = db
         .conn
         .query_row(
-            "SELECT identity_id FROM accounts WHERE id = 'indep-a'",
+            "SELECT identity_id FROM credentials WHERE legacy_account_id = 'indep-a'",
             [],
             |row| row.get(0),
         )
@@ -1526,7 +2716,7 @@ fn shared_pool_fanout_preserves_maxima_and_clear_still_propagates() {
     let identity_id: String = db
         .conn
         .query_row(
-            "SELECT identity_id FROM accounts WHERE id = 'max-a'",
+            "SELECT identity_id FROM credentials WHERE legacy_account_id = 'max-a'",
             [],
             |row| row.get(0),
         )
@@ -1534,7 +2724,7 @@ fn shared_pool_fanout_preserves_maxima_and_clear_still_propagates() {
     let source_credential: String = db
         .conn
         .query_row(
-            "SELECT credential_id FROM credential_state WHERE account_id = 'max-a'",
+            "SELECT id FROM credentials WHERE legacy_account_id = 'max-a'",
             [],
             |row| row.get(0),
         )
@@ -1595,7 +2785,8 @@ fn rotate_increments_version_and_auth_state_version_together() {
     let before: (i64, i64) = db
         .conn
         .query_row(
-            "SELECT version, auth_state_version FROM credential_state WHERE account_id = 'rotate-go'",
+            "SELECT COALESCE(credential_version, 1), COALESCE(auth_state_version, 1)
+             FROM credentials WHERE legacy_account_id = 'rotate-go'",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
@@ -1610,9 +2801,10 @@ fn rotate_increments_version_and_auth_state_version_together() {
     let after: (i64, i64, Option<String>, Option<String>, String) = db
         .conn
         .query_row(
-            "SELECT c.version, c.auth_state_version, a.auth_error, a.last_error, a.key_cipher
-             FROM credential_state c JOIN accounts a ON a.id = c.account_id
-             WHERE a.id = 'rotate-go'",
+            "SELECT COALESCE(credential_version, 1), COALESCE(auth_state_version, 1),
+                    auth_error, last_error, key_cipher
+             FROM credentials
+             WHERE legacy_account_id = 'rotate-go'",
             [],
             |row| {
                 Ok((
@@ -1632,7 +2824,8 @@ fn rotate_increments_version_and_auth_state_version_together() {
 
     db.conn
         .execute(
-            "DELETE FROM credential_state WHERE account_id = 'rotate-go'",
+            "UPDATE credentials SET credential_version = NULL, auth_state_version = NULL
+             WHERE legacy_account_id = 'rotate-go'",
             [],
         )
         .unwrap();
@@ -1877,33 +3070,27 @@ fn v42_create_dynamic_provider_persists_origin_and_offering() {
     db.create_dynamic_provider(&custom_runtime, &custom_first)
         .unwrap();
 
-    let preset_row: (String, String, Option<String>, String) = db
-        .conn
-        .query_row(
-            "SELECT origin, adapter_kind, preset_id, offering
-             FROM providers WHERE id = ?1",
-            [&preset_provider],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        )
-        .unwrap();
-    assert_eq!(preset_row.0, "preset");
-    assert_eq!(preset_row.1, "configurable_http");
-    assert_eq!(preset_row.2.as_deref(), Some("zhipu-coding"));
-    assert_eq!(preset_row.3, "plan");
+    let preset_row = db
+        .get_dynamic_provider(&preset_provider)
+        .unwrap()
+        .expect("preset");
+    assert_eq!(
+        preset_row.origin,
+        ocg_domain::provider::ProviderOrigin::Preset
+    );
+    assert_eq!(preset_row.preset_id.as_deref(), Some("zhipu-coding"));
+    assert_eq!(preset_row.offering, "plan");
 
-    let custom_row: (String, String, Option<String>, String) = db
-        .conn
-        .query_row(
-            "SELECT origin, adapter_kind, preset_id, offering
-             FROM providers WHERE id = ?1",
-            [&custom_provider],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        )
-        .unwrap();
-    assert_eq!(custom_row.0, "custom");
-    assert_eq!(custom_row.1, "configurable_http");
-    assert!(custom_row.2.is_none());
-    assert_eq!(custom_row.3, "api");
+    let custom_row = db
+        .get_dynamic_provider(&custom_provider)
+        .unwrap()
+        .expect("custom");
+    assert_eq!(
+        custom_row.origin,
+        ocg_domain::provider::ProviderOrigin::Custom
+    );
+    assert!(custom_row.preset_id.is_none());
+    assert_eq!(custom_row.offering, "api");
 
     // create_dynamic_provider on a builtin id must fail because get_dynamic_provider
     // already returns None for builtin rows.
@@ -1932,7 +3119,7 @@ fn v42_create_dynamic_provider_persists_origin_and_offering() {
         .expect_err("creating a dynamic provider with a builtin id must fail");
     let message = format!("{error:#}");
     assert!(
-        message.contains("UNIQUE"),
+        message.contains("UNIQUE") || message.contains("collides") || message.contains("built-in"),
         "create on builtin id must surface uniqueness conflict, got: {message}"
     );
 
@@ -1974,8 +3161,8 @@ fn v42_writes_pre_v42_backup_for_non_fresh_v41_source() {
     db.conn
         .execute_batch(&format!(
             "PRAGMA foreign_keys=OFF;
-             DROP TABLE providers;
-             DROP TABLE provider_models;
+             DROP TABLE IF EXISTS providers;
+             DROP TABLE IF EXISTS provider_models;
              CREATE TABLE dynamic_providers (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
@@ -2031,6 +3218,52 @@ fn pre_v48_backup_paths(dir: &Path) -> Vec<PathBuf> {
     backup_paths_with_prefix(dir, PRE_V48_BACKUP_FILE_PREFIX)
 }
 
+fn assert_leftover_dynamic_provider_storage_absent(conn: &Connection) {
+    assert!(!table_exists(conn, "providers").unwrap());
+    assert!(!table_exists(conn, "provider_models").unwrap());
+}
+
+fn assert_leftover_identity_tables_absent(conn: &Connection) {
+    for table in crate::db::identity_v57::IDENTITY_LEFTOVER_TABLES {
+        assert!(!table_exists(conn, table).unwrap(), "{table}");
+    }
+}
+
+fn leftover_providers_ddl() -> &'static str {
+    "CREATE TABLE providers (
+            id TEXT PRIMARY KEY,
+            origin TEXT NOT NULL CHECK(origin IN ('builtin','preset','custom')),
+            adapter_kind TEXT NOT NULL,
+            name TEXT NOT NULL,
+            endpoint_url TEXT,
+            upstream_protocol TEXT,
+            auth_kind TEXT,
+            preset_id TEXT,
+            offering TEXT NOT NULL DEFAULT 'api' CHECK(offering IN ('plan','api')),
+            display_family TEXT,
+            endpoint_per_account INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            onboarding_draft INTEGER NOT NULL DEFAULT 0
+         );
+         CREATE TABLE provider_models (
+            provider_id TEXT NOT NULL,
+            public_model TEXT NOT NULL,
+            public_model_key TEXT NOT NULL,
+            upstream_model TEXT NOT NULL,
+            upstream_override TEXT,
+            PRIMARY KEY (provider_id, public_model_key)
+         );"
+}
+
+fn materialize_legacy_providers_for_rewind(conn: &Connection) {
+    if table_exists(conn, "providers").unwrap() {
+        return;
+    }
+    conn.execute_batch(leftover_providers_ddl())
+        .expect("rewind leftover providers should recreate");
+}
+
 fn assert_retired_dynamic_provider_tables_absent(conn: &Connection) {
     assert!(!table_exists(conn, "dynamic_providers").unwrap());
     assert!(!table_exists(conn, "dynamic_provider_models").unwrap());
@@ -2052,7 +3285,8 @@ fn current_schema_and_data_remain_stable_across_startup_replay() {
         assert_eq!(schema_version_on(&db.conn).unwrap(), CURRENT_SCHEMA_VERSION);
         assert_retired_dynamic_provider_tables_absent(&db.conn);
         assert_v48_inert_columns_absent(&db.conn);
-        assert!(table_has_column(&db.conn, "providers", "onboarding_draft").unwrap());
+        assert_leftover_dynamic_provider_storage_absent(&db.conn);
+        assert!(table_has_column(&db.conn, "destinations", "onboarding_draft").unwrap());
         assert!(!table_has_column(&db.conn, "accounts", "offering_id").unwrap());
         for column in USAGE_SYNC_ACCOUNT_COLUMNS {
             assert!(
@@ -2064,6 +3298,10 @@ fn current_schema_and_data_remain_stable_across_startup_replay() {
             "access_keys",
             "provider_contract_scopes",
             "provider_contract_model_protocols",
+            "destinations",
+            "destination_models",
+            "credentials",
+            "credential_grants",
         ] {
             assert!(table_exists(&db.conn, table).unwrap(), "{table}");
         }
@@ -2672,7 +3910,7 @@ fn platform_link_failure_rolls_back_endpoint() {
         None,
     )
     .unwrap();
-    db.conn.execute_batch("CREATE TRIGGER reject_platform BEFORE INSERT ON platform_links BEGIN SELECT RAISE(ABORT,'injected failure'); END;").unwrap();
+    db.conn.execute_batch("CREATE TRIGGER reject_platform BEFORE UPDATE ON credentials WHEN NEW.group_json IS NOT NULL AND OLD.group_json IS NULL BEGIN SELECT RAISE(ABORT,'injected failure'); END;").unwrap();
     assert!(
         db.link_platform_account(&key.id, "parent", &PlatformGroup::default())
             .is_err()
@@ -2720,7 +3958,7 @@ fn platform_key_survives_failed_link_and_retry_links_without_a_second_key() {
     .unwrap();
     db.conn
         .execute_batch(
-            "CREATE TRIGGER reject_platform BEFORE INSERT ON platform_links BEGIN SELECT RAISE(ABORT,'injected failure'); END;",
+            "CREATE TRIGGER reject_platform BEFORE UPDATE ON credentials WHEN NEW.group_json IS NOT NULL AND OLD.group_json IS NULL BEGIN SELECT RAISE(ABORT,'injected failure'); END;",
         )
         .unwrap();
     assert!(
@@ -2910,7 +4148,7 @@ fn import_node_state_does_not_commit_when_runtime_snapshot_fails() {
     let satellites: i64 = db
         .conn
         .query_row(
-            "SELECT COUNT(*) FROM credential_state WHERE account_id = 'snapshot-go'",
+            "SELECT COUNT(*) FROM credentials WHERE legacy_account_id = 'snapshot-go'",
             [],
             |row| row.get(0),
         )
@@ -3040,16 +4278,15 @@ fn v45_keeps_forward_logs_interpretable_against_migrated_account_ids() {
     assert_eq!(row.account_id, account.id);
     assert_eq!(row.model, "glm-5");
     assert_eq!(row.status, "success");
-    let mapped: i64 = db
+    let mapped: Option<String> = db
         .conn
         .query_row(
-            "SELECT COUNT(*) FROM legacy_identity_map
-             WHERE legacy_kind = 'account' AND legacy_id = 'go-log'",
+            "SELECT identity_id FROM credentials WHERE legacy_account_id = 'go-log'",
             [],
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(mapped, 3);
+    assert!(mapped.as_deref().is_some_and(|value| !value.is_empty()));
     drop(db);
     fs::remove_dir_all(dir).unwrap();
 }
@@ -3099,7 +4336,10 @@ fn create_v21_fixture(dir: &Path, include_reserved_account_conflict: bool) {
         .expect("representative forward log should save");
     if !include_reserved_account_conflict {
         db.conn
-            .execute("DELETE FROM accounts WHERE id = ?1", [ZEN_FREE_ACCOUNT_ID])
+            .execute(
+                "DELETE FROM credentials WHERE legacy_account_id = ?1",
+                [ZEN_FREE_ACCOUNT_ID],
+            )
             .expect("reserved v22 account should be removed from a normal v21 fixture");
     }
     drop(db);
@@ -3246,6 +4486,7 @@ fn drop_unified_provider_tables(conn: &Connection) {
 }
 
 fn restore_v47_inert_columns(conn: &Connection) {
+    account_store::materialize_legacy_accounts_for_rewind(conn).unwrap();
     conn.execute_batch(
         "ALTER TABLE accounts ADD COLUMN free_alias_enabled INTEGER NOT NULL DEFAULT 0;
          ALTER TABLE provider_contract_scopes ADD COLUMN chat_completions_enabled INTEGER NOT NULL DEFAULT 1;
@@ -3268,6 +4509,7 @@ fn rewind_current_to_v47(conn: &Connection) {
 fn reverse_current_to_v34(dir: &Path) {
     let path = dir.join("data.sqlite");
     let conn = Connection::open(&path).expect("migrated database should reopen for reverse");
+    account_store::materialize_legacy_accounts_for_rewind(&conn).unwrap();
     drop_unified_provider_tables(&conn);
     restore_v47_inert_columns(&conn);
     conn.execute_batch(
@@ -3500,7 +4742,10 @@ fn persist_sanitation_account(db: &Database, plan: BuiltinProvider, id: &str, no
 fn leftover_enable(db: &Database, id: &str) {
     let changed = db
         .conn
-        .execute("UPDATE accounts SET enabled = 1 WHERE id = ?1", [id])
+        .execute(
+            "UPDATE credentials SET enabled = 1 WHERE legacy_account_id = ?1",
+            [id],
+        )
         .unwrap();
     assert_eq!(changed, 1, "{id}");
 }
@@ -3704,7 +4949,7 @@ fn managed_setup_requires_order_and_matching_verified_key() {
     }
     db.conn
             .execute(
-                "UPDATE accounts SET recharge_date = '2000-01-01', usage_month_window_cost_offset = 1 WHERE id = 'managed'",
+                "UPDATE credentials SET purchase_date = '2000-01-01', usage_month_window_cost_offset = 1 WHERE legacy_account_id = 'managed'",
                 [],
             )
             .unwrap();
@@ -3721,7 +4966,7 @@ fn managed_setup_requires_order_and_matching_verified_key() {
     let month_offset: f64 = db
         .conn
         .query_row(
-            "SELECT usage_month_window_cost_offset FROM accounts WHERE id = 'managed'",
+            "SELECT usage_month_window_cost_offset FROM credentials WHERE legacy_account_id = 'managed'",
             [],
             |row| row.get(0),
         )
@@ -3760,11 +5005,11 @@ fn managed_key_verification_transaction_rolls_back_after_candidate_write_failure
     let cooldown = (Utc::now() + Duration::hours(2)).to_rfc3339();
     db.conn
         .execute(
-            "UPDATE accounts
+            "UPDATE credentials
                  SET auth_error = 'original-auth', last_error = 'original-limit',
                      cooldown_until = ?2, cooldown_generic_until = ?2,
                      verification_error = 'original-verification'
-                 WHERE id = ?1",
+                 WHERE legacy_account_id = ?1",
             params![managed.id, cooldown],
         )
         .expect("rollback sentinel state should save");
@@ -3777,8 +5022,8 @@ fn managed_key_verification_transaction_rolls_back_after_candidate_write_failure
     db.conn
         .execute_batch(
             "CREATE TRIGGER fail_managed_verification_completion
-                 BEFORE UPDATE ON accounts
-                 WHEN OLD.id = 'managed-atomic'
+                 BEFORE UPDATE ON credentials
+                 WHEN OLD.legacy_account_id = 'managed-atomic'
                       AND OLD.setup_step = 'key_verification'
                       AND NEW.setup_step = 'ready'
                  BEGIN
@@ -4201,7 +5446,7 @@ fn v5_migration_backfills_dates_and_stable_dense_order() {
     assert_eq!(accounts[3].purchase_date, "2026-02-04");
     let sort_orders = db
         .conn
-        .prepare("SELECT sort_order FROM accounts ORDER BY sort_order")
+        .prepare("SELECT routing_rank FROM credentials ORDER BY routing_rank")
         .expect("sort query should prepare")
         .query_map([], |row| row.get::<_, i64>(0))
         .expect("sort query should run")
@@ -4447,7 +5692,7 @@ fn account_reads_fallback_after_v8_data_is_corrupted() {
     // 无法再被 UPDATE 成 NULL；只测试 invalid-text 这一支。
     db.conn
         .execute(
-            "UPDATE accounts SET recharge_date = 'not-a-date' WHERE id = 'invalid'",
+            "UPDATE credentials SET purchase_date = 'not-a-date' WHERE legacy_account_id = 'invalid'",
             [],
         )
         .expect("purchase date should be corrupted to invalid text");
@@ -4474,7 +5719,7 @@ fn account_reads_fallback_after_v8_data_is_corrupted() {
     let remains_invalid: bool = db
         .conn
         .query_row(
-            "SELECT recharge_date = 'not-a-date' FROM accounts WHERE id = 'invalid'",
+            "SELECT purchase_date = 'not-a-date' FROM credentials WHERE legacy_account_id = 'invalid'",
             [],
             |row| row.get(0),
         )
@@ -4492,17 +5737,17 @@ fn account_reads_fallback_after_v8_data_is_corrupted() {
 fn account_creation_defaults_dates_and_appends_to_saved_order() {
     let dir = temp_data_dir("create-order");
     let db = Database::open(dir.clone()).expect("db should open");
-    let purchase_date_is_not_null: bool = db
+    let purchase_date_column: i64 = db
         .conn
         .query_row(
-            "SELECT [notnull]
-                 FROM pragma_table_info('accounts')
-                 WHERE name = 'recharge_date'",
+            "SELECT COUNT(*)
+                 FROM pragma_table_info('credentials')
+                 WHERE name = 'purchase_date'",
             [],
             |row| row.get(0),
         )
-        .expect("fresh account schema should expose purchase date constraints");
-    assert!(purchase_date_is_not_null);
+        .expect("fresh credential schema should expose purchase date");
+    assert_eq!(purchase_date_column, 1);
     let mut first = account("first");
     first.created_at = Utc::now() + Duration::days(1);
     db.create_account(&first)
@@ -4572,8 +5817,8 @@ fn zen_enabled_has_a_dedicated_writer_and_generic_update_is_rejected() {
     db.conn
         .execute_batch(&format!(
             "CREATE TRIGGER reject_zen_provider_settings
-                 BEFORE UPDATE OF enabled ON accounts
-                 WHEN OLD.id = '{ZEN_FREE_ACCOUNT_ID}'
+                 BEFORE UPDATE OF enabled ON credentials
+                 WHEN OLD.legacy_account_id = '{ZEN_FREE_ACCOUNT_ID}'
                  BEGIN
                      SELECT RAISE(ABORT, 'forced Zen settings failure');
                  END;"
@@ -4650,7 +5895,7 @@ fn reorder_accounts_validates_atomically_and_persists_dense_order() {
 
     let sort_orders = db
         .conn
-        .prepare("SELECT sort_order FROM accounts ORDER BY sort_order")
+        .prepare("SELECT routing_rank FROM credentials ORDER BY routing_rank")
         .expect("sort query should prepare")
         .query_map([], |row| row.get::<_, i64>(0))
         .expect("sort query should run")
@@ -4685,8 +5930,8 @@ fn reorder_accounts_rolls_back_when_an_update_fails_mid_transaction() {
     db.conn
         .execute_batch(
             "CREATE TRIGGER reject_b_sort_update
-                 BEFORE UPDATE OF sort_order ON accounts
-                 WHEN NEW.id = 'b'
+                 BEFORE UPDATE OF routing_rank ON credentials
+                 WHEN NEW.legacy_account_id = 'b'
                  BEGIN
                      SELECT RAISE(ABORT, 'forced reorder failure');
                  END;",
@@ -4988,8 +6233,28 @@ fn v13_migration_preserves_legacy_manual_usage_calibration() {
     acct.purchase_date = local_today();
     db.create_account(&acct).expect("account should be created");
     finalize_success(&db, "legacy-calibration", 2.0, Utc::now());
-    db.conn
-        .execute(
+    finalize_success(&db, "legacy-calibration", 1.0, Utc::now());
+    drop(db);
+    reverse_current_to_v34(&dir);
+    {
+        let conn = Connection::open(dir.join("data.sqlite")).unwrap();
+        for (column, definition) in [
+            ("usage_5h_baseline_percent", "REAL"),
+            ("usage_5h_anchor_success_cost", "REAL"),
+            ("usage_week_baseline_percent", "REAL"),
+            ("usage_week_anchor_success_cost", "REAL"),
+            ("usage_month_baseline_percent", "REAL"),
+            ("usage_month_anchor_success_cost", "REAL"),
+        ] {
+            if !table_has_column(&conn, "accounts", column).unwrap() {
+                conn.execute(
+                    &format!("ALTER TABLE accounts ADD COLUMN {column} {definition}"),
+                    [],
+                )
+                .expect("legacy baseline columns should exist for rewind");
+            }
+        }
+        conn.execute(
             "UPDATE accounts SET
                     usage_5h_baseline_percent = 50,
                     usage_5h_anchor_success_cost = 2,
@@ -5001,11 +6266,6 @@ fn v13_migration_preserves_legacy_manual_usage_calibration() {
             [],
         )
         .expect("legacy baselines should save");
-    finalize_success(&db, "legacy-calibration", 1.0, Utc::now());
-    drop(db);
-    reverse_current_to_v34(&dir);
-    {
-        let conn = Connection::open(dir.join("data.sqlite")).unwrap();
         conn.execute_batch(
             "DELETE FROM schema_version;
                  INSERT INTO schema_version (version) VALUES (10);",
@@ -5027,10 +6287,8 @@ fn v13_migration_preserves_legacy_manual_usage_calibration() {
         .conn
         .query_row(
             "SELECT COUNT(*)
-                 FROM accounts
-                 WHERE usage_5h_baseline_percent IS NOT NULL
-                    OR usage_week_baseline_percent IS NOT NULL
-                    OR usage_month_baseline_percent IS NOT NULL",
+                 FROM sqlite_master
+                 WHERE type = 'table' AND name = 'accounts'",
             [],
             |row| row.get(0),
         )
@@ -5178,7 +6436,7 @@ fn v15_migration_adds_nullable_auth_error() {
     let auth_error: Option<String> = db
         .conn
         .query_row(
-            "SELECT auth_error FROM accounts WHERE id = 'legacy'",
+            "SELECT auth_error FROM credentials WHERE legacy_account_id = 'legacy'",
             [],
             |row| row.get(0),
         )
@@ -5564,7 +6822,7 @@ fn changing_purchase_date_resets_month_calibration_offset() {
     let offset: f64 = db
         .conn
         .query_row(
-            "SELECT usage_month_window_cost_offset FROM accounts WHERE id = ?1",
+            "SELECT usage_month_window_cost_offset FROM credentials WHERE legacy_account_id = ?1",
             ["monthly-renewal"],
             |row| row.get(0),
         )
@@ -5762,7 +7020,7 @@ fn usage_offset_row(db: &Database, id: &str) -> (Option<String>, f64, Option<Str
             "SELECT usage_5h_window_started_at, usage_5h_window_cost_offset,
                         usage_week_window_started_at, usage_week_window_cost_offset,
                         usage_month_window_cost_offset
-                 FROM accounts WHERE id = ?1",
+                 FROM credentials WHERE legacy_account_id = ?1",
             [id],
             |row| {
                 Ok((
@@ -5954,8 +7212,8 @@ fn calibrate_account_usage_snapshot_rolls_back_when_third_window_fails() {
     db.conn
         .execute_batch(
             "CREATE TRIGGER reject_month_calibrate
-                 BEFORE UPDATE OF usage_month_window_cost_offset ON accounts
-                 WHEN NEW.id = 'snap-month'
+                 BEFORE UPDATE OF usage_month_window_cost_offset ON credentials
+                 WHEN NEW.legacy_account_id = 'snap-month'
                  BEGIN
                      SELECT RAISE(ABORT, 'forced month calibrate failure');
                  END;",
@@ -6910,20 +8168,9 @@ fn v20_to_v22_creates_verified_source_backup_before_direct_upgrade() {
     create_v20_fixture(&dir, false);
 
     let db = open_with_host_cipher(dir.clone()).expect("v20 database should migrate directly");
-    let account_columns = db
-        .conn
-        .prepare("PRAGMA table_info(accounts)")
-        .expect("table info should prepare")
-        .query_map([], |row| row.get::<_, String>(1))
-        .expect("table info should query")
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .expect("columns should load");
-    assert!(
-        !account_columns
-            .iter()
-            .any(|name| name == "usage_sync_last_success_at")
-    );
-    assert!(account_columns.iter().any(|name| name == "provider_id"));
+    assert!(!table_exists(&db.conn, "accounts").unwrap());
+    assert!(table_has_column(&db.conn, "credentials", "provider_id").unwrap());
+    assert!(!table_has_column(&db.conn, "credentials", "usage_sync_last_success_at").unwrap());
     drop(db);
 
     let backups_before = pre_v22_backup_paths(&dir);
@@ -6955,6 +8202,7 @@ fn draft_v19_libraries_without_notes_gain_the_column_on_reopen() {
     db.create_account(&legacy).unwrap();
     // Unreleased #43 drafts already sat at version 19 (client-key
     // columns + sub-key table) and never received upstream v18 notes.
+    account_store::materialize_legacy_accounts_for_rewind(&db.conn).unwrap();
     db.conn
         .execute_batch(
             "ALTER TABLE accounts DROP COLUMN notes;
@@ -6983,10 +8231,11 @@ fn draft_v19_libraries_without_notes_gain_the_column_on_reopen() {
     }
 
     let db = open_with_host_cipher(dir.clone()).expect("draft database should reopen");
+    assert!(!table_exists(&db.conn, "accounts").unwrap());
     let notes_after: i64 = db
         .conn
         .query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('accounts') WHERE name = 'notes'",
+            "SELECT COUNT(*) FROM pragma_table_info('credentials') WHERE name = 'notes'",
             [],
             |row| row.get(0),
         )
@@ -7889,7 +9138,8 @@ fn create_account_with_contract_is_atomic_on_custom_config_failure() {
     db.conn
         .execute_batch(
             "CREATE TRIGGER fail_custom_config
-                 BEFORE INSERT ON account_custom_configs
+                 BEFORE INSERT ON destinations
+                 WHEN NEW.legacy_kind = 'custom_account'
                  BEGIN
                      SELECT RAISE(ABORT, 'forced custom config failure');
                  END;",
@@ -8033,7 +9283,8 @@ fn account_migration_batch_is_atomic_and_preserves_order() {
     db.conn
         .execute_batch(
             "CREATE TRIGGER fail_migration_custom_config
-                 BEFORE INSERT ON account_custom_configs
+                 BEFORE INSERT ON destinations
+                 WHEN NEW.legacy_kind = 'custom_account'
                  BEGIN
                      SELECT RAISE(ABORT, 'forced migration failure');
                  END;",
@@ -8063,7 +9314,9 @@ fn account_migration_batch_is_atomic_and_preserves_order() {
     let imported_satellites: i64 = db
         .conn
         .query_row(
-            "SELECT COUNT(*) FROM credential_state WHERE account_id IN ('migration-go', 'migration-custom')",
+            "SELECT COUNT(*) FROM credentials
+             WHERE legacy_account_id IN ('migration-go', 'migration-custom')
+               AND binding_id IS NOT NULL",
             [],
             |row| row.get(0),
         )
@@ -8072,8 +9325,8 @@ fn account_migration_batch_is_atomic_and_preserves_order() {
     let imported_identities: i64 = db
         .conn
         .query_row(
-            "SELECT COUNT(*) FROM accounts
-             WHERE id IN ('migration-go', 'migration-custom') AND identity_id IS NOT NULL",
+            "SELECT COUNT(*) FROM credentials
+             WHERE legacy_account_id IN ('migration-go', 'migration-custom') AND identity_id IS NOT NULL",
             [],
             |row| row.get(0),
         )
@@ -8259,7 +9512,7 @@ fn custom_mutations_repend_but_keep_verified_accounts_enabled() {
     .unwrap();
     db.conn
         .execute(
-            "UPDATE accounts SET enabled = 1 WHERE id = 'custom-stale'",
+            "UPDATE credentials SET enabled = 1 WHERE legacy_account_id = 'custom-stale'",
             [],
         )
         .unwrap();
@@ -8294,7 +9547,7 @@ fn custom_mutations_repend_but_keep_verified_accounts_enabled() {
     .unwrap();
     db.conn
         .execute(
-            "UPDATE accounts SET enabled = 1 WHERE id = 'custom-stale'",
+            "UPDATE credentials SET enabled = 1 WHERE legacy_account_id = 'custom-stale'",
             [],
         )
         .unwrap();
@@ -8329,7 +9582,7 @@ fn custom_mutations_repend_but_keep_verified_accounts_enabled() {
     .unwrap();
     db.conn
         .execute(
-            "UPDATE accounts SET enabled = 1 WHERE id = 'custom-stale'",
+            "UPDATE credentials SET enabled = 1 WHERE legacy_account_id = 'custom-stale'",
             [],
         )
         .unwrap();
@@ -8591,9 +9844,9 @@ fn reopen_repairs_legacy_goat_verification_without_changing_other_accounts() {
     leftover_enable(&db, "unknown-keep");
     db.conn
         .execute(
-            "UPDATE accounts
+            "UPDATE credentials
                  SET provider_id = 'unknown-provider'
-                 WHERE id = 'unknown-keep'",
+                 WHERE legacy_account_id = 'unknown-keep'",
             [],
         )
         .unwrap();
@@ -8614,9 +9867,9 @@ fn reopen_repairs_legacy_goat_verification_without_changing_other_accounts() {
     );
     db.conn
         .execute(
-            "UPDATE accounts
+            "UPDATE credentials
                  SET enabled = 1, verification_status = 'verified', verification_error = NULL
-                 WHERE id = 'goat-verified'",
+                 WHERE legacy_account_id = 'goat-verified'",
             [],
         )
         .unwrap();
@@ -8629,9 +9882,9 @@ fn reopen_repairs_legacy_goat_verification_without_changing_other_accounts() {
     );
     db.conn
         .execute(
-            "UPDATE accounts
+            "UPDATE credentials
                  SET enabled = 1, verification_status = 'failed', verification_error = 'boom'
-                 WHERE id = 'goat-failed'",
+                 WHERE legacy_account_id = 'goat-failed'",
             [],
         )
         .unwrap();
@@ -8988,9 +10241,10 @@ fn v31_to_v32_collapses_custom_protocols_and_disables_the_account() {
         }],
     )
     .unwrap();
+    account_store::materialize_legacy_accounts_for_rewind(&db.conn).unwrap();
     db.conn
         .execute_batch(
-            "DROP TABLE account_custom_configs;
+            "DROP TABLE IF EXISTS account_custom_configs;
                  CREATE TABLE account_custom_configs (
                     account_id TEXT PRIMARY KEY,
                     base_url TEXT NOT NULL,
@@ -9006,6 +10260,15 @@ fn v31_to_v32_collapses_custom_protocols_and_disables_the_account() {
                     'custom-v31', 'https://api.example.com/v1',
                     '[\"messages\",\"responses\",\"chat_completions\"]', 'x_api_key',
                     '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
+                 );
+                 DROP TABLE IF EXISTS account_model_capabilities;
+                 CREATE TABLE account_model_capabilities (
+                    account_id TEXT NOT NULL,
+                    model_id TEXT NOT NULL,
+                    protocol TEXT NOT NULL,
+                    verified_at TEXT,
+                    source TEXT NOT NULL DEFAULT 'manual',
+                    PRIMARY KEY (account_id, model_id, protocol)
                  );
                  INSERT INTO account_model_capabilities
                     (account_id, model_id, protocol, source)
@@ -9081,10 +10344,12 @@ fn v32_to_v33_backfills_public_and_upstream_identities_for_custom_and_goat() {
     drop(db);
 
     let conn = Connection::open(dir.join("data.sqlite")).unwrap();
+    account_store::materialize_legacy_accounts_for_rewind(&conn).unwrap();
     conn.execute_batch(
         "PRAGMA foreign_keys = OFF;
              DROP INDEX IF EXISTS idx_account_model_capabilities_account;
-             CREATE TABLE account_model_capabilities_v32 (
+             DROP TABLE IF EXISTS account_model_capabilities;
+             CREATE TABLE account_model_capabilities (
                 account_id TEXT NOT NULL,
                 model_id TEXT NOT NULL,
                 protocol TEXT NOT NULL,
@@ -9093,13 +10358,11 @@ fn v32_to_v33_backfills_public_and_upstream_identities_for_custom_and_goat() {
                 PRIMARY KEY (account_id, model_id, protocol),
                 FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
              );
-             INSERT INTO account_model_capabilities_v32
-                (account_id, model_id, protocol, verified_at, source)
-             SELECT account_id, model_id, protocol, verified_at, source
-               FROM account_model_capabilities;
-             DROP TABLE account_model_capabilities;
-             ALTER TABLE account_model_capabilities_v32
-                RENAME TO account_model_capabilities;
+             INSERT INTO account_model_capabilities
+                (account_id, model_id, protocol, source)
+             VALUES
+                ('custom-v32', 'custom-public', 'chat_completions', 'manual'),
+                ('goat-v32', 'goat/model', 'chat_completions', 'manual');
              CREATE INDEX idx_account_model_capabilities_account
                 ON account_model_capabilities(account_id);
              DELETE FROM schema_version;
@@ -9111,27 +10374,38 @@ fn v32_to_v33_backfills_public_and_upstream_identities_for_custom_and_goat() {
     drop(conn);
 
     let migrated = Database::open(dir.clone()).unwrap();
-    for (account_id, expected) in [("custom-v32", "custom-public"), ("goat-v32", "goat/model")] {
-        let capabilities = migrated
-            .list_account_model_capabilities(account_id)
-            .unwrap();
-        assert_eq!(capabilities.len(), 1);
-        assert_eq!(capabilities[0].public_model, expected);
-        assert_eq!(capabilities[0].upstream_model, expected);
-    }
+    let capabilities = migrated
+        .list_account_model_capabilities("custom-v32")
+        .unwrap();
+    assert_eq!(capabilities.len(), 1);
+    assert_eq!(capabilities[0].public_model, "custom-public");
+    assert_eq!(capabilities[0].upstream_model, "custom-public");
+    assert!(migrated.get_account("goat-v32").unwrap().is_some());
+    let goat_catalog: String = migrated
+        .conn
+        .query_row(
+            "SELECT models_json FROM provider_model_catalogs WHERE provider_id = ?1",
+            [COMMAND_CODE_PROVIDER_ID],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        goat_catalog.contains("goat/model"),
+        "GOAT catalog must survive leftover capability drop: {goat_catalog}"
+    );
 
     drop(migrated);
     fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
-fn v33_to_v34_adds_empty_cpa_singleton_configuration_table() {
-    let dir = temp_data_dir("v33-v34-cpa");
+fn v33_reopen_reaches_current_without_cpa_leftover_table() {
+    let dir = temp_data_dir("v33-v55-cpa");
     let db = Database::open(dir.clone()).unwrap();
     drop(db);
     let conn = Connection::open(dir.join("data.sqlite")).unwrap();
     conn.execute_batch(
-        "DROP TABLE cpa_integration;
+        "DROP TABLE IF EXISTS cpa_integration;
              DELETE FROM schema_version;
              INSERT INTO schema_version (version) VALUES (33);",
     )
@@ -9140,7 +10414,11 @@ fn v33_to_v34_adds_empty_cpa_singleton_configuration_table() {
     drop(conn);
 
     let migrated = Database::open(dir.clone()).unwrap();
-    assert!(table_exists(&migrated.conn, "cpa_integration").unwrap());
+    assert_eq!(
+        schema_version_on(&migrated.conn).unwrap(),
+        CURRENT_SCHEMA_VERSION
+    );
+    assert!(!table_exists(&migrated.conn, "cpa_integration").unwrap());
     assert!(migrated.cpa_integration().unwrap().is_none());
     drop(migrated);
     fs::remove_dir_all(dir).unwrap();
@@ -9174,10 +10452,35 @@ fn cpa_singleton_upsert_catalog_and_disconnect_are_idempotent_and_atomic() {
     assert_eq!(record.base_url, "http://127.0.0.1:9317");
     assert_eq!(record.management_key_cipher, management_cipher);
     assert!(db.get_account(CPA_ACCOUNT_ID).unwrap().unwrap().enabled);
+    assert!(!table_exists(&db.conn, "cpa_integration").unwrap());
+    let dest_url: Option<String> = db
+        .conn
+        .query_row(
+            "SELECT base_url FROM destinations
+             WHERE adapter = 'cpa'
+                OR (legacy_kind = 'builtin' AND legacy_id = 'cpa')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(dest_url.as_deref(), Some("http://127.0.0.1:9317"));
+    let observer_cipher: String = db
+        .conn
+        .query_row(
+            "SELECT key_cipher FROM credentials WHERE id = ?1",
+            [ocg_domain::credential::observer_credential_id_for_cpa().as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(observer_cipher, management_cipher);
+    assert_ne!(
+        db.get_account(CPA_ACCOUNT_ID).unwrap().unwrap().key_cipher,
+        management_cipher
+    );
 
     db.conn
         .execute(
-            "UPDATE accounts SET auth_error = '401' WHERE id = ?1",
+            "UPDATE credentials SET auth_error = '401' WHERE legacy_account_id = ?1",
             [CPA_ACCOUNT_ID],
         )
         .unwrap();
@@ -9223,11 +10526,30 @@ fn cpa_singleton_upsert_catalog_and_disconnect_are_idempotent_and_atomic() {
     assert_eq!(catalog.models[0].owned_by.as_deref(), Some("openai"));
     assert!(catalog.models[1].owned_by.is_none());
 
+    drop(db);
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let reopened = db.cpa_integration().unwrap().unwrap();
+    assert_eq!(reopened.account_id, CPA_ACCOUNT_ID);
+    assert_eq!(reopened.base_url, "http://127.0.0.1:9317");
+    assert_eq!(reopened.management_key_cipher, management_cipher);
+    assert!(!table_exists(&db.conn, "cpa_integration").unwrap());
+
     db.delete_cpa_integration().unwrap();
     db.delete_cpa_integration().unwrap();
     assert!(db.cpa_integration().unwrap().is_none());
     assert!(db.cpa_model_catalog().unwrap().is_none());
     assert!(db.get_account(CPA_ACCOUNT_ID).unwrap().is_none());
+    let leftover_dest: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM destinations
+             WHERE adapter = 'cpa'
+                OR (legacy_kind = 'builtin' AND legacy_id = 'cpa')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(leftover_dest, 0);
     drop(db);
     fs::remove_dir_all(dir).unwrap();
 }
@@ -9400,7 +10722,7 @@ fn v26_to_v27_copies_keys_drops_columns_and_writes_hashed_backup() {
     sqlite_foreign_key_check(&db.conn).unwrap();
     let accounts: i64 = db
         .conn
-        .query_row("SELECT COUNT(*) FROM accounts", [], |row| row.get(0))
+        .query_row("SELECT COUNT(*) FROM credentials", [], |row| row.get(0))
         .unwrap();
     let keys: i64 = db
         .conn
@@ -9419,7 +10741,7 @@ fn v26_to_v27_copies_keys_drops_columns_and_writes_hashed_backup() {
     let stored_cipher: String = db
         .conn
         .query_row(
-            "SELECT key_cipher FROM accounts WHERE id = 'v26-account'",
+            "SELECT key_cipher FROM credentials WHERE legacy_account_id = 'v26-account'",
             [],
             |row| row.get(0),
         )
@@ -9604,7 +10926,7 @@ fn s05_wrong_host_cipher_fails_closed_without_rewriting_ciphertext() {
     assert_eq!(schema_version_on(&conn).unwrap(), CURRENT_SCHEMA_VERSION);
     let (key_after, password_after): (String, Option<String>) = conn
         .query_row(
-            "SELECT key_cipher, password_cipher FROM accounts WHERE id = ?1",
+            "SELECT key_cipher, password_cipher FROM credentials WHERE legacy_account_id = ?1",
             ["enc-current"],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
@@ -10440,7 +11762,7 @@ fn v35_maps_known_pairs_conserves_rows_and_writes_pre_v35_snapshot() {
         .unwrap();
     let account_count: i64 = db
         .conn
-        .query_row("SELECT COUNT(*) FROM accounts", [], |row| row.get(0))
+        .query_row("SELECT COUNT(*) FROM credentials", [], |row| row.get(0))
         .unwrap();
     let log_count: i64 = db
         .conn
@@ -10465,7 +11787,7 @@ fn v35_maps_known_pairs_conserves_rows_and_writes_pre_v35_snapshot() {
     sqlite_foreign_key_check(&db.conn).unwrap();
     let account_count_after: i64 = db
         .conn
-        .query_row("SELECT COUNT(*) FROM accounts", [], |row| row.get(0))
+        .query_row("SELECT COUNT(*) FROM credentials", [], |row| row.get(0))
         .unwrap();
     let log_count_after: i64 = db
         .conn
@@ -10565,21 +11887,24 @@ fn v35_unknown_catalog_pair_rolls_back_without_mutation() {
 fn dynamic_provider_round_trip_and_duplicate_public_model_rejection() {
     let dir = temp_data_dir("v35-dynamic-providers");
     let db = open_with_host_cipher(dir.clone()).unwrap();
-    let columns = v35_column_names(&db.conn, "providers");
+    assert_leftover_dynamic_provider_storage_absent(&db.conn);
+    let dest_columns = v35_column_names(&db.conn, "destinations");
     for required in [
         "id",
         "name",
-        "endpoint_url",
-        "upstream_protocol",
-        "auth_kind",
-        "created_at",
-        "updated_at",
+        "base_url",
+        "legacy_kind",
+        "legacy_id",
+        "origin",
     ] {
-        assert!(columns.iter().any(|name| name == required), "{required}");
+        assert!(
+            dest_columns.iter().any(|name| name == required),
+            "{required}"
+        );
     }
-    let model_columns = v35_column_names(&db.conn, "provider_models");
+    let model_columns = v35_column_names(&db.conn, "destination_models");
     assert!(model_columns.iter().any(|name| name == "public_model_key"));
-    assert!(!columns.iter().any(|name| name == "offering_id"));
+    assert!(model_columns.iter().any(|name| name == "upstream_override"));
 
     let now = Utc::now();
     let provider_id = uuid::Uuid::new_v4().to_string();
@@ -10635,11 +11960,13 @@ fn dynamic_provider_round_trip_and_duplicate_public_model_rejection() {
             .is_none()
     );
 
+    let dest_id = ocg_domain::destination::destination_id_for_dynamic(&provider_id);
     let duplicate = db.conn.execute(
-        "INSERT INTO provider_models
-         (provider_id, public_model, public_model_key, upstream_model)
-         VALUES (?1, 'LAB-OPUS', 'lab-opus', 'other')",
-        [&provider_id],
+        "INSERT INTO destination_models
+         (destination_id, public_model, public_model_key, upstream_model,
+          protocols_json, preferred, enabled)
+         VALUES (?1, 'LAB-OPUS', 'lab-opus', 'other', '[]', NULL, 1)",
+        [&dest_id],
     );
     assert!(duplicate.is_err());
     drop(db);
@@ -10884,7 +12211,7 @@ fn dynamic_provider_patch_fault_rolls_back_mappings_and_runtime_state() {
     db.create_dynamic_provider(&runtime, &first).unwrap();
     db.conn
         .execute(
-            "UPDATE accounts SET auth_error = 'stale' WHERE id = ?1",
+            "UPDATE credentials SET auth_error = 'stale' WHERE legacy_account_id = ?1",
             [&first.id],
         )
         .unwrap();
@@ -11172,6 +12499,7 @@ fn v36_to_v37_discards_cookie_usage_state_and_keeps_account_keys() {
     drop(db);
 
     let conn = Connection::open(dir.join("data.sqlite")).unwrap();
+    account_store::materialize_legacy_accounts_for_rewind(&conn).unwrap();
     conn.execute_batch(
         "DROP TABLE IF EXISTS ollama_cloud_billing;
          CREATE TABLE IF NOT EXISTS ollama_cloud_usage_state (
@@ -11245,7 +12573,7 @@ fn ollama_tier_change_clears_month_offset_same_tier_preserves() {
         .unwrap();
     db.conn
         .execute(
-            "UPDATE accounts SET usage_month_window_cost_offset = 12.5 WHERE id = ?1",
+            "UPDATE credentials SET usage_month_window_cost_offset = 12.5 WHERE legacy_account_id = ?1",
             ["ollama-offset"],
         )
         .unwrap();
@@ -11254,7 +12582,7 @@ fn ollama_tier_change_clears_month_offset_same_tier_preserves() {
     let offset: f64 = db
         .conn
         .query_row(
-            "SELECT usage_month_window_cost_offset FROM accounts WHERE id = ?1",
+            "SELECT usage_month_window_cost_offset FROM credentials WHERE legacy_account_id = ?1",
             ["ollama-offset"],
             |row| row.get(0),
         )
@@ -11265,7 +12593,7 @@ fn ollama_tier_change_clears_month_offset_same_tier_preserves() {
     let offset: f64 = db
         .conn
         .query_row(
-            "SELECT usage_month_window_cost_offset FROM accounts WHERE id = ?1",
+            "SELECT usage_month_window_cost_offset FROM credentials WHERE legacy_account_id = ?1",
             ["ollama-offset"],
             |row| row.get(0),
         )

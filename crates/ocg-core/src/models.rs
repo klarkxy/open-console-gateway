@@ -614,26 +614,30 @@ impl ForwardMetrics {
         self.local_adjustment_multiplier = None;
         self.pricing_provider_id = None;
 
-        if provider_id == crate::kernel::ids::OPENCODE_ZEN_FREE_PROVIDER_ID
-            && (successful || has_cost_outcome)
-        {
-            self.raw_cost_usd = Some(0.0);
-            self.quota_debit = Some(0.0);
-            self.effective_paid_cost_usd = Some(0.0);
-            self.cost_state = "free";
-        } else if crate::provider::is_custom_api(provider_id) {
-            self.raw_cost_usd = None;
-            self.quota_debit = None;
-            self.effective_paid_cost_usd = None;
-            if successful || has_cost_outcome {
-                self.cost_state = "unknown";
+        match crate::dynamic::adapter_kind_for(provider_id, &[]) {
+            Some(crate::provider::ProviderAdapterKind::ZenFree)
+                if successful || has_cost_outcome =>
+            {
+                self.raw_cost_usd = Some(0.0);
+                self.quota_debit = Some(0.0);
+                self.effective_paid_cost_usd = Some(0.0);
+                self.cost_state = "free";
             }
-        } else {
-            self.raw_cost_usd = None;
-            self.quota_debit = None;
-            self.effective_paid_cost_usd = None;
-            if has_cost_outcome {
-                self.cost_state = "unpriced";
+            Some(crate::provider::ProviderAdapterKind::ConfigurableHttp) => {
+                self.raw_cost_usd = None;
+                self.quota_debit = None;
+                self.effective_paid_cost_usd = None;
+                if successful || has_cost_outcome {
+                    self.cost_state = "unknown";
+                }
+            }
+            _ => {
+                self.raw_cost_usd = None;
+                self.quota_debit = None;
+                self.effective_paid_cost_usd = None;
+                if has_cost_outcome {
+                    self.cost_state = "unpriced";
+                }
             }
         }
     }
