@@ -26,7 +26,31 @@ jobs:
           fetch-depth: 0
           ref: fix/go-catalog-publication-20260918
       - name: Apply guarded source edits
-        run: python3 scripts/apply-go-catalog-fix-20260918.py
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('scripts/apply-go-catalog-fix-20260918.py')
+          script = p.read_text()
+          old = "line.startswith('- ') and 'MODEL_PROTOCOLS' in line]"
+          assert script.count(old) == 1
+          script = script.replace(old, "line.startswith('- Go 已发布别名') and 'MODEL_PROTOCOLS' in line]")
+          exec(compile(script, str(p), 'exec'))
+          p = Path('crates/ocg-gateway/src/alias.rs')
+          text = p.read_text()
+          old = 'resolved.routeable_mappings().iter().any(|mapping| mapping.provider_id == provider_id)'
+          assert text.count(old) == 1
+          text = text.replace(old, '''resolved.routeable_mappings().iter().any(|mapping| {
+              mapping.provider_id == provider_id
+                  && (provider_id != OPENCODE_PROVIDER_ID
+                      || catalogs.go.iter().any(|id| *id == mapping.upstream_model))
+          })''')
+          p.write_text(text)
+          p = Path('crates/ocg-core/src/dashboard_v3/providers.rs')
+          text = p.read_text().replace('docs (missing models default to Chat). Snapshot providers stay local.',
+                                      'docs; missing models supply no new evidence. Snapshot providers stay local.')
+          p.write_text(text)
+          PY
       - name: Format changed Rust source without building or testing
         shell: bash
         run: |
