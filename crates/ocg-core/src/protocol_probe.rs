@@ -208,16 +208,10 @@ async fn execute_protocol_request(
         response_tool_choice: serde_json::json!("auto"),
         response_tools: Vec::new(),
     };
-    if crate::provider::is_custom_api(&account.provider_id) && plan.custom_route.is_none() {
-        return Err((
-            None,
-            "Custom API accounts require a persisted API URL and upstream protocol".to_string(),
-        ));
-    }
     let route = if account_test {
-        resolve_account_test_route_with_dynamics(account, ctx.config, &plan, dynamics)
+        resolve_account_test_route_with_dynamics(account, ctx.adapter, ctx.config, &plan, dynamics)
     } else {
-        resolve_probe_route(account, ctx.config, &plan)
+        resolve_probe_route(account, ctx.adapter, ctx.config, &plan)
     }
     .map_err(|error| (None, error))?;
     let selection = {
@@ -268,7 +262,7 @@ async fn execute_protocol_request(
     crate::gateway::forwarder::apply_provider_identity_headers(
         &mut extra,
         &reqwest::header::HeaderMap::new(),
-        &account.provider_id,
+        ctx.adapter,
         format,
         ctx.model_id,
         &body,

@@ -9,6 +9,7 @@ use crate::kernel::catalog::CredentialKind;
 use crate::models::{Account, RoutingMode, UpstreamChannel};
 use crate::provider::ProviderAdapterKind;
 use chrono::{DateTime, Utc};
+use ocg_domain::destination::Destination;
 use ocg_gateway::selector::{BaseAvailability, Candidate as GatewayCandidate, SelectionPolicy};
 use parking_lot::Mutex;
 use std::time::Instant;
@@ -26,6 +27,7 @@ pub struct RoutingCandidate {
     pub account: Account,
     pub channel: UpstreamChannel,
     pub resolved_model: String,
+    pub adapter: ProviderAdapterKind,
 }
 
 impl RoutingRuntime {
@@ -100,6 +102,7 @@ impl RoutingRuntime {
             .iter()
             .cloned()
             .map(|account| RoutingCandidate {
+                adapter: adapter_for_account(&account, None),
                 account,
                 channel,
                 resolved_model: resolved_model.to_string(),
@@ -234,39 +237,55 @@ pub(crate) fn account_is_available_for_at(
         && !account.is_cooling_for(channel, now)
 }
 
-/// Runtime channel owned by one valid sealed provider/offering binding.
-///
-/// Keeping this mapping beside selector eligibility prevents observability and
-/// other read paths from growing their own, incomplete provider lists.
-pub(crate) fn account_channel(account: &Account) -> Option<UpstreamChannel> {
-    match ProviderAdapterKind::from_provider_id(&account.provider_id) {
-        Some(kind) => {
-            if account.validate_provider_binding().is_err() {
-                return None;
-            }
-            match kind {
-                ProviderAdapterKind::OpenCodeGo
-                | ProviderAdapterKind::CommandCodeGoat
-                | ProviderAdapterKind::MiniMaxCn
-                | ProviderAdapterKind::KimiCn
-                | ProviderAdapterKind::OllamaCloud
-                | ProviderAdapterKind::Cpa
-                | ProviderAdapterKind::ConfigurableHttp => Some(UpstreamChannel::Go),
-                ProviderAdapterKind::ZenFree => Some(UpstreamChannel::Free),
-            }
-        }
-        None => Some(UpstreamChannel::Go),
+/// Runtime channel owned by one adapter. Zen is Free; every other adapter is Go.
+pub(crate) fn channel_for_adapter(kind: ProviderAdapterKind) -> UpstreamChannel {
+    match kind {
+        ProviderAdapterKind::ZenFree => UpstreamChannel::Free,
+        ProviderAdapterKind::OpenCodeGo
+        | ProviderAdapterKind::CommandCodeGoat
+        | ProviderAdapterKind::MiniMaxCn
+        | ProviderAdapterKind::KimiCn
+        | ProviderAdapterKind::OllamaCloud
+        | ProviderAdapterKind::Cpa
+        | ProviderAdapterKind::ConfigurableHttp => UpstreamChannel::Go,
     }
 }
 
+/// Adapter for a routing row: destination projection when present, otherwise
+/// the catalog kind for `account.provider_id` (a catalog key, not a reserved
+/// account-id gate).
+pub(crate) fn adapter_for_account(
+    account: &Account,
+    destination: Option<&Destination>,
+) -> ProviderAdapterKind {
+    destination
+        .map(|destination| ProviderAdapterKind::from(destination.adapter))
+        .or_else(|| crate::dynamic::adapter_kind_for(&account.provider_id, &[]))
+        .unwrap_or(ProviderAdapterKind::ConfigurableHttp)
+}
+
+/// Runtime channel owned by one adapter. Dashboard probes without a
+/// destination still resolve the catalog kind; reserved account ids are not
+/// consulted.
+pub(crate) fn account_channel(account: &Account) -> Option<UpstreamChannel> {
+    account_channel_for(account, None)
+}
+
+pub(crate) fn account_channel_for(
+    account: &Account,
+    destination: Option<&Destination>,
+) -> Option<UpstreamChannel> {
+    Some(channel_for_adapter(adapter_for_account(
+        account,
+        destination,
+    )))
+}
+
 pub(crate) fn free_channel_is_exhausted_at(accounts: &[Account], now: DateTime<Utc>) -> bool {
-    accounts
-        .iter()
-        .filter(|account| {
-            account.id == crate::kernel::ids::ZEN_FREE_ACCOUNT_ID
-                && account.provider_id == crate::kernel::ids::OPENCODE_ZEN_FREE_PROVIDER_ID
-        })
-        .any(|account| account.cooldown_free_until.is_some_and(|until| until > now))
+    accounts.iter().any(|account| {
+        adapter_for_account(account, None) == ProviderAdapterKind::ZenFree
+            && account.cooldown_free_until.is_some_and(|until| until > now)
+    })
 }
 
 fn account_matches_channel(account: &Account, channel: UpstreamChannel) -> bool {
@@ -286,7 +305,15 @@ fn gateway_candidate<'a>(
     free_channel_available: bool,
     wall: DateTime<Utc>,
 ) -> GatewayCandidate<'a> {
-    let available = account_is_available_for_at(&candidate.account, candidate.channel, &[], wall)
+    let available = candidate.account.enabled
+        && candidate.account.setup_step.is_ready()
+        && channel_for_adapter(candidate.adapter) == candidate.channel
+        && match candidate.account.credential_kind {
+            CredentialKind::ApiKey => !candidate.account.key_cipher.is_empty(),
+            CredentialKind::None => true,
+        }
+        && candidate.account.auth_error.is_none()
+        && !candidate.account.is_cooling_for(candidate.channel, wall)
         && (candidate.channel != UpstreamChannel::Free || free_channel_available);
     GatewayCandidate::new(
         candidate.account.id.as_str(),

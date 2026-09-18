@@ -68,7 +68,9 @@ use crate::models::{
     ProxyMode, UpstreamChannel,
 };
 use crate::platform::{PlatformGroup, PlatformKind, PlatformPrice, PlatformSnapshot};
-use crate::provider::{CUSTOM_PROVIDER_ID, OPENCODE_PROVIDER_ID, UpstreamProtocolKind};
+use crate::provider::{
+    CUSTOM_PROVIDER_ID, OPENCODE_PROVIDER_ID, ProviderAdapterKind, UpstreamProtocolKind,
+};
 use crate::state::CoreStateInner;
 use bytes::Bytes;
 use chrono::Utc;
@@ -223,13 +225,10 @@ fn platform_attempt_rejects_old_key_or_endpoint_and_keeps_billed_row() {
         pinned_group(),
         snapshot(vec![billable_price(), official], false),
     );
+    // Linking rewrites the Key's endpoint to the parent-owned site root, so
+    // the attempt identity check compares against that root.
     assert!(matches!(
-        platform_price_for_attempt(
-            &state,
-            &account,
-            UPSTREAM,
-            Some("https://api.example.com/v1/chat/completions")
-        ),
+        platform_price_for_attempt(&state, &account, UPSTREAM, Some("https://api.example.com")),
         Some(PlatformAttemptPrice::Frozen(_))
     ));
     assert!(matches!(
@@ -293,7 +292,12 @@ fn bind_for(
         state,
         account,
         &mut context,
-        RequestPricingSnapshot::for_account(state, account, state.pricing_snapshot()),
+        RequestPricingSnapshot::for_account(
+            state,
+            account,
+            crate::routing_runtime::adapter_for_account(account, None),
+            state.pricing_snapshot(),
+        ),
         None,
     );
     (pricing, context)
@@ -911,6 +915,7 @@ async fn p09_forward_attempt_emits_carried_legacy_tool_compat() {
         RouteLabel::Direct,
         &state,
         &account,
+        ProviderAdapterKind::ConfigurableHttp,
         &config,
         &plan,
         &trace,
@@ -1111,6 +1116,7 @@ async fn forward_once(
         RouteLabel::Direct,
         state,
         account,
+        crate::routing_runtime::adapter_for_account(account, None),
         &config,
         plan,
         &RequestTrace::new(),

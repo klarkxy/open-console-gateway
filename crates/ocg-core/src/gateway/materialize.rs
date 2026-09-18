@@ -29,6 +29,7 @@
 
 use crate::alias::{ProviderMapping, ResolveError, ResolvedModel};
 use crate::custom::CustomAccountRuntime;
+use crate::destination_projection::DestinationProjection;
 use crate::gateway::free_models::resolve_upstream_base;
 use crate::gateway::protocol::{
     CustomRouteSpec, MaterializeSpec, ParsedClientRequest, ProtocolError, RequestPlan,
@@ -44,7 +45,8 @@ use crate::provider::ProviderAdapterKind;
 use crate::provider_contracts::{ContractScope, EffectiveContractSet};
 use axum::http::StatusCode;
 use ocg_domain::credential::{ModelScope, model_scope_allows};
-use std::collections::HashMap;
+use ocg_domain::destination::{Destination, LegacyDestinationRef};
+use std::collections::{HashMap, HashSet};
 
 pub use crate::gateway::protocol::{
     parse_client_request as parse_client, parse_gemini_request as parse_gemini,
@@ -143,7 +145,7 @@ fn mapping_preserves_client_wire(mapping: &ProviderMapping) -> bool {
         || mapping_is_ollama_cloud(mapping)
 }
 
-fn mapping_adapter_kind(mapping: &ProviderMapping) -> Option<ProviderAdapterKind> {
+pub(crate) fn mapping_adapter_kind(mapping: &ProviderMapping) -> Option<ProviderAdapterKind> {
     crate::dynamic::adapter_kind_for(&mapping.provider_id, &[]).or_else(|| {
         uuid::Uuid::parse_str(&mapping.provider_id)
             .ok()
@@ -151,11 +153,19 @@ fn mapping_adapter_kind(mapping: &ProviderMapping) -> Option<ProviderAdapterKind
     })
 }
 
+/// Custom/platform catalog row: Configurable HTTP whose `provider_id` is the
+/// sealed custom catalog key, not a dynamic UUID.
+pub(crate) fn mapping_is_custom_http_catalog(mapping: &ProviderMapping) -> bool {
+    mapping_adapter_kind(mapping) == Some(ProviderAdapterKind::ConfigurableHttp)
+        && crate::dynamic::adapter_kind_for(&mapping.provider_id, &[])
+            == Some(ProviderAdapterKind::ConfigurableHttp)
+}
+
 fn mapping_is_configurable_http(mapping: &ProviderMapping) -> bool {
     mapping_adapter_kind(mapping) == Some(ProviderAdapterKind::ConfigurableHttp)
 }
 
-fn mapping_is_zen_free(mapping: &ProviderMapping) -> bool {
+pub(crate) fn mapping_is_zen_free(mapping: &ProviderMapping) -> bool {
     mapping_adapter_kind(mapping) == Some(ProviderAdapterKind::ZenFree)
 }
 
@@ -264,6 +274,7 @@ pub(crate) fn materialize_account_routes_with_bindings(
     contracts: &EffectiveContractSet,
     dynamics: &[crate::dynamic::DynamicProviderRuntime],
     bindings: &InferenceBindingIndex,
+    projection: Option<&DestinationProjection>,
 ) -> Result<MaterializedRouteSet, ProtocolError> {
     match resolved {
         ResolvedModel::PinnedRaw { mapping, .. } => {
@@ -297,6 +308,7 @@ pub(crate) fn materialize_account_routes_with_bindings(
                 contracts,
                 dynamics,
                 bindings,
+                projection,
             )
         }
         ResolvedModel::Alias {
@@ -365,6 +377,7 @@ pub(crate) fn materialize_account_routes_with_bindings(
                 contracts,
                 dynamics,
                 bindings,
+                projection,
             )
         }
     }
@@ -597,6 +610,87 @@ fn mapping_is_command_code_goat(mapping: &ProviderMapping) -> bool {
     mapping_adapter_kind(mapping) == Some(ProviderAdapterKind::CommandCodeGoat)
 }
 
+struct RoutingAccount<'a> {
+    account: &'a Account,
+    destination: Option<&'a Destination>,
+    credential_enabled: Option<bool>,
+}
+
+fn routing_accounts<'a>(
+    accounts: &'a [Account],
+    projection: Option<&'a DestinationProjection>,
+) -> Vec<RoutingAccount<'a>> {
+    let Some(projection) = projection else {
+        return accounts
+            .iter()
+            .map(|account| RoutingAccount {
+                account,
+                destination: None,
+                credential_enabled: None,
+            })
+            .collect();
+    };
+    let by_id: HashMap<&str, &Account> = accounts
+        .iter()
+        .map(|account| (account.id.as_str(), account))
+        .collect();
+    let dest_by_id: HashMap<&str, &Destination> = projection
+        .destinations
+        .iter()
+        .map(|destination| (destination.id.as_str(), destination))
+        .collect();
+    let mut seen = HashSet::new();
+    let mut rows = Vec::new();
+    for credential in &projection.credentials {
+        let Some(account) = by_id.get(credential.legacy_account_id.as_str()).copied() else {
+            continue;
+        };
+        seen.insert(account.id.as_str());
+        rows.push(RoutingAccount {
+            account,
+            destination: dest_by_id.get(credential.destination_id.as_str()).copied(),
+            credential_enabled: Some(credential.enabled),
+        });
+    }
+    for account in accounts {
+        if seen.contains(account.id.as_str()) {
+            continue;
+        }
+        rows.push(RoutingAccount {
+            account,
+            destination: None,
+            credential_enabled: None,
+        });
+    }
+    rows
+}
+
+pub(crate) fn destination_matches_mapping(
+    destination: &Destination,
+    mapping: &ProviderMapping,
+) -> bool {
+    match &destination.legacy {
+        LegacyDestinationRef::Builtin(id) | LegacyDestinationRef::Dynamic(id) => {
+            id == &mapping.provider_id
+        }
+        LegacyDestinationRef::CustomAccount(_) | LegacyDestinationRef::PlatformParent(_) => {
+            destination.adapter == ocg_domain::destination::AdapterKind::Http
+                && mapping_is_custom_http_catalog(mapping)
+        }
+    }
+}
+
+fn account_matches_mapping(
+    account: &Account,
+    destination: Option<&Destination>,
+    mapping: &ProviderMapping,
+) -> bool {
+    match destination {
+        Some(destination) => destination_matches_mapping(destination, mapping),
+        None => account.provider_id == mapping.provider_id,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn collect_mapping_plans(
     accounts: &[Account],
@@ -613,9 +707,18 @@ fn collect_mapping_plans(
     contracts: &EffectiveContractSet,
     dynamics: &[crate::dynamic::DynamicProviderRuntime],
     bindings: &InferenceBindingIndex,
+    projection: Option<&DestinationProjection>,
 ) -> Result<MaterializedRouteSet, ProtocolError> {
     let mut routes = Vec::new();
-    for account in accounts {
+    for row in routing_accounts(accounts, projection) {
+        let account = row.account;
+        if row.credential_enabled == Some(false) {
+            rejected.push(format!(
+                "{}/{} account `{}`: credential is disabled",
+                account.provider_id, account.provider_id, account.name
+            ));
+            continue;
+        }
         let binding = bindings
             .get(&account.id)
             .cloned()
@@ -628,7 +731,7 @@ fn collect_mapping_plans(
             continue;
         }
         for candidate in &plans {
-            if account.provider_id != candidate.mapping.provider_id {
+            if !account_matches_mapping(account, row.destination, &candidate.mapping) {
                 continue;
             }
             // Scope is per candidate. OR-ing every same-provider plan would let
@@ -672,9 +775,15 @@ fn collect_mapping_plans(
                     }
                 }
             }
-            let plan = if mapping_is_configurable_http(&candidate.mapping)
-                && crate::provider::is_custom_api(&account.provider_id)
-            {
+            let custom_owned = match row.destination {
+                Some(destination) => matches!(
+                    destination.legacy,
+                    LegacyDestinationRef::CustomAccount(_)
+                        | LegacyDestinationRef::PlatformParent(_)
+                ),
+                None => crate::dynamic::find_runtime(dynamics, &account.provider_id).is_none(),
+            };
+            let plan = if mapping_is_configurable_http(&candidate.mapping) && custom_owned {
                 match materialize_custom_account_plan(
                     account,
                     custom_runtimes.get(&account.id),
@@ -719,12 +828,18 @@ fn collect_mapping_plans(
             } else {
                 candidate.plan.clone()
             };
+            let adapter = row
+                .destination
+                .map(|destination| ProviderAdapterKind::from(destination.adapter))
+                .or_else(|| mapping_adapter_kind(&candidate.mapping))
+                .unwrap_or(ProviderAdapterKind::ConfigurableHttp);
             match provider_adapter::supports_production_plan(
-                account, config, &plan, contracts, dynamics,
+                account, adapter, config, &plan, contracts, dynamics,
             ) {
                 Ok(()) => {
                     routes.push(MaterializedCandidate {
                         routing: RoutingCandidate {
+                            adapter,
                             account: account.clone(),
                             channel: plan.channel,
                             resolved_model: plan.model.clone(),

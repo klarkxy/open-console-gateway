@@ -14,7 +14,7 @@ use crate::gateway::forwarder::{
     ForwardAction, LiveSendSelection, forward_request, rate_limited_response,
 };
 use crate::gateway::materialize::{
-    InferenceBindingGate, InferenceBindingIndex, diagnostic_forced_upstream,
+    InferenceBindingGate, InferenceBindingIndex, diagnostic_forced_upstream, mapping_is_zen_free,
     materialize_account_routes_with_bindings, resolved_alias_from_model,
 };
 use crate::gateway::protocol::{MaterializeSpec, RequestPlan, materialize_parsed_request};
@@ -134,7 +134,7 @@ impl GatewayExecutor {
                 let zen_only = mappings
                     .iter()
                     .filter(|mapping| mapping.routeable)
-                    .all(|mapping| mapping.is_zen_free());
+                    .all(mapping_is_zen_free);
                 (
                     (*alias).to_string(),
                     if zen_only {
@@ -150,7 +150,7 @@ impl GatewayExecutor {
                 } else {
                     mapping.upstream_model.to_string()
                 },
-                if mapping.is_zen_free() {
+                if mapping_is_zen_free(mapping) {
                     UpstreamChannel::Free
                 } else {
                     UpstreamChannel::Go
@@ -187,9 +187,9 @@ impl GatewayExecutor {
 
         loop {
             let (decision_wall, decision_mono) = state.sample_gateway_clock();
-            let (accounts, free_cooldown, stored_bindings) = {
+            let (accounts, free_cooldown, stored_bindings, routing) = {
                 let db = state.db.lock();
-                let accounts = match db.list_accounts() {
+                let accounts = match crate::destination_projection::list_accounts_for_v3(&db) {
                     Ok(accounts) => accounts,
                     Err(error) => {
                         let message = format!("failed to select account: {error}");
@@ -237,7 +237,10 @@ impl GatewayExecutor {
                         );
                     }
                 };
-                (accounts, free_cooldown, stored_bindings)
+                let routing = crate::destination_projection::routing_projection(&db)
+                    .ok()
+                    .flatten();
+                (accounts, free_cooldown, stored_bindings, routing)
             };
             let bindings = stored_bindings
                 .iter()
@@ -252,7 +255,16 @@ impl GatewayExecutor {
                 })
                 .collect::<InferenceBindingIndex>();
             let free_available = free_cooldown.is_none()
-                && !crate::routing_runtime::free_channel_is_exhausted_at(&accounts, decision_wall);
+                && !match routing.as_ref() {
+                    Some(projection) => crate::destination_projection::free_channel_exhausted(
+                        projection,
+                        decision_wall,
+                    ),
+                    None => crate::routing_runtime::free_channel_is_exhausted_at(
+                        &accounts,
+                        decision_wall,
+                    ),
+                };
             let custom_runtimes = match state.db.lock().list_custom_account_runtimes() {
                 Ok(runtimes) => crate::custom::custom_runtimes_by_account(&runtimes),
                 Err(error) => {
@@ -291,6 +303,7 @@ impl GatewayExecutor {
                 &snapshots.contracts,
                 &snapshots.dynamics,
                 &bindings,
+                routing.as_ref(),
             ) {
                 Ok(route_set) => route_set,
                 Err(error) => {
@@ -319,6 +332,7 @@ impl GatewayExecutor {
                     contracts: &snapshots.contracts,
                     dynamics: &snapshots.dynamics,
                     bindings: &bindings,
+                    projection: routing.as_ref(),
                 },
                 &route_set,
             );
@@ -454,6 +468,7 @@ impl GatewayExecutor {
                     return protocol_error_response(client_format, status, &message, None);
                 }
             };
+            let adapter = route.routing.adapter;
             let account = route.routing.account;
             let active_plan = route.plan;
             let selection = LiveSendSelection::from_binding(
@@ -472,7 +487,7 @@ impl GatewayExecutor {
                 // Re-resolve the leg on every attempt: free fallback or sticky
                 // rewrites can swap `active_plan.model` mid-request.
                 let (client, selected_route) = snapshots.routes.client_for(&active_plan.model);
-                let route = if account.provider_id == crate::provider::CPA_PROVIDER_ID {
+                let route = if adapter == crate::provider::ProviderAdapterKind::Cpa {
                     RouteLabel::Direct
                 } else {
                     selected_route
@@ -482,6 +497,7 @@ impl GatewayExecutor {
                     route,
                     &state,
                     &account,
+                    adapter,
                     &snapshots.config,
                     &active_plan,
                     &trace,

@@ -687,7 +687,7 @@ pub(crate) fn force_enable_unroutable_account_for_loopback_test(data_dir: &Path,
         .expect("loopback test sqlite should set busy timeout");
     let changed = conn
         .execute(
-            "UPDATE accounts SET enabled = 1 WHERE id = ?1",
+            "UPDATE credentials SET enabled = 1 WHERE legacy_account_id = ?1",
             [account_id],
         )
         .expect("loopback test enable poke should execute");
@@ -932,7 +932,7 @@ pub(crate) async fn get_application_models(
 ) -> (axum::http::StatusCode, serde_json::Value) {
     let response = loopback_client()
         .get(format!(
-            "http://127.0.0.1:{port}/dashboard/api/v3/application-models"
+            "http://127.0.0.1:{port}/dashboard/api/v4/application-models"
         ))
         .send()
         .await
@@ -1078,7 +1078,7 @@ pub(crate) async fn dashboard_protocol_probe(
 ) -> (axum::http::StatusCode, serde_json::Value) {
     let response = loopback_client()
         .post(format!(
-            "http://127.0.0.1:{port}/dashboard/api/v3/providers/{OPENCODE_PROVIDER_ID}/protocol-probes"
+            "http://127.0.0.1:{port}/dashboard/api/v4/providers/{OPENCODE_PROVIDER_ID}/protocol-probes"
         ))
         .json(&serde_json::json!({
             "expectedRevision": state.settings_revision(),

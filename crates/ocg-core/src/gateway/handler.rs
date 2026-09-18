@@ -5,12 +5,15 @@ use crate::gateway::diagnostics::{
 };
 use crate::gateway::executor::GatewayExecutor;
 use crate::gateway::forwarder::UpstreamPayloadTooLargeResponse;
-use crate::gateway::materialize::protocol_error_from_resolve;
+use crate::gateway::materialize::{
+    mapping_adapter_kind, mapping_is_custom_http_catalog, protocol_error_from_resolve,
+};
 use crate::gateway::protocol::{ProtocolError, parse_client_request, parse_gemini_request};
 use crate::gateway::response::{
     local_protocol_failure, protocol_error_from, protocol_error_response,
 };
 use crate::kernel::protocol::ApiFormat;
+use crate::provider::ProviderAdapterKind;
 use crate::state::CoreState;
 use axum::body::{Body, Bytes};
 use axum::extract::{Extension, Path, State};
@@ -255,7 +258,9 @@ fn published_alias_models_response(state: &CoreState) -> axum::response::Respons
         let routeable_custom_alias = matches!(
             crate::alias::resolve_with_runtime_catalogs(id, catalogs),
             Ok(crate::alias::ResolvedModel::Alias { mappings, .. })
-                if mappings.iter().any(|mapping| mapping.is_custom_api() && mapping.routeable)
+                if mappings.iter().any(|mapping| {
+                    mapping.routeable && mapping_is_custom_http_catalog(mapping)
+                })
         );
         if !routeable_custom_alias {
             continue;
@@ -281,7 +286,8 @@ fn published_alias_models_response(state: &CoreState) -> axum::response::Respons
         let exact_cpa_raw = matches!(
             crate::alias::resolve_with_runtime_catalogs(id, catalogs),
             Ok(crate::alias::ResolvedModel::PinnedRaw { mapping, .. })
-                if mapping.provider_id == crate::provider::CPA_PROVIDER_ID && mapping.routeable
+                if mapping.routeable
+                    && mapping_adapter_kind(&mapping) == Some(ProviderAdapterKind::Cpa)
         );
         if exact_cpa_raw
             && crate::alias_publication::is_downstream_visible(id, &unpublished)
@@ -357,13 +363,13 @@ fn model_has_enabled_protocol(
     match crate::alias::resolve_with_runtime_catalogs(model, catalogs) {
         Ok(alias::ResolvedModel::Alias { mappings, .. }) => mappings.iter().any(|mapping| {
             mapping.routeable
-                && (mapping.provider_id == crate::provider::CPA_PROVIDER_ID
+                && (mapping_adapter_kind(mapping) == Some(ProviderAdapterKind::Cpa)
                     || crate::dynamic::find_runtime(dynamics, &mapping.provider_id).is_some()
                     || contracts.mapping_has_enabled_protocol(mapping))
         }),
         Ok(alias::ResolvedModel::PinnedRaw { mapping, .. }) => {
             mapping.routeable
-                && (mapping.provider_id == crate::provider::CPA_PROVIDER_ID
+                && (mapping_adapter_kind(&mapping) == Some(ProviderAdapterKind::Cpa)
                     || crate::dynamic::find_runtime(dynamics, &mapping.provider_id).is_some()
                     || contracts.mapping_has_enabled_protocol(&mapping))
         }
@@ -408,21 +414,24 @@ fn eligible_custom_public_models(
 
 /// A disabled, cooling, auth-failed, or disconnected CPA must not inject raw
 /// identities before the ordinary selector can fall back to existing routes.
+/// Availability is the integration credential + Cpa adapter, not the reserved
+/// account UUID.
 fn active_cpa_model_ids(state: &CoreState) -> std::sync::Arc<Vec<String>> {
     let active = {
         let db = state.db.lock();
-        db.cpa_integration().ok().flatten().is_some_and(|_| {
-            db.get_account(crate::provider::CPA_ACCOUNT_ID)
-                .ok()
-                .flatten()
-                .is_some_and(|account| {
-                    crate::routing_runtime::account_is_available_for(
+        db.cpa_integration()
+            .ok()
+            .flatten()
+            .and_then(|record| db.get_account(&record.account_id).ok().flatten())
+            .is_some_and(|account| {
+                let adapter = crate::routing_runtime::adapter_for_account(&account, None);
+                adapter == ProviderAdapterKind::Cpa
+                    && crate::routing_runtime::account_is_available_for(
                         &account,
                         crate::models::UpstreamChannel::Go,
                         &[],
                     )
-                })
-        })
+            })
     };
     if active {
         state.cpa_model_catalog()

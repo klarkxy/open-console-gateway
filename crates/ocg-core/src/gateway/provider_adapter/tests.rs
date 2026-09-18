@@ -5,23 +5,29 @@ use crate::gateway::wire::WireNormalization;
 use crate::models::{Account, AccountSetupStep, AccountType, AppConfig};
 use crate::provider::{
     COMMAND_CODE_GOAT_BASE_URL, COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
-    COMMAND_CODE_PROVIDER_ID, CUSTOM_PROVIDER_ID, KIMI_CN_BASE_URL, KIMI_CN_CHAT_COMPLETIONS_PATH,
-    KIMI_CN_MESSAGES_PATH, KIMI_PROVIDER_ID, MINIMAX_CN_ANTHROPIC_BASE_URL, MINIMAX_CN_BASE_URL,
-    MINIMAX_CN_CHAT_COMPLETIONS_PATH, MINIMAX_CN_MESSAGES_PATH, MINIMAX_PROVIDER_ID,
-    OLLAMA_CLOUD_BASE_URL, OLLAMA_CLOUD_CHAT_COMPLETIONS_PATH, OLLAMA_PROVIDER_ID,
-    OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID, ZEN_FREE_ACCOUNT_NAME,
+    COMMAND_CODE_PROVIDER_ID, CUSTOM_PROVIDER_ID, CredentialKind, KIMI_CN_BASE_URL,
+    KIMI_CN_CHAT_COMPLETIONS_PATH, KIMI_CN_MESSAGES_PATH, KIMI_PROVIDER_ID,
+    MINIMAX_CN_ANTHROPIC_BASE_URL, MINIMAX_CN_BASE_URL, MINIMAX_CN_CHAT_COMPLETIONS_PATH,
+    MINIMAX_CN_MESSAGES_PATH, MINIMAX_PROVIDER_ID, OLLAMA_CLOUD_BASE_URL,
+    OLLAMA_CLOUD_CHAT_COMPLETIONS_PATH, OLLAMA_PROVIDER_ID, OPENCODE_PROVIDER_ID,
+    OPENCODE_ZEN_FREE_PROVIDER_ID, ProviderAdapterKind, QuotaScope, ZEN_FREE_ACCOUNT_ID,
+    ZEN_FREE_ACCOUNT_NAME,
 };
 use bytes::Bytes;
 use chrono::Utc;
 use serde_json::json;
 use std::sync::Arc;
 
+fn kind(account: &Account) -> ProviderAdapterKind {
+    crate::routing_runtime::adapter_for_account(account, None)
+}
+
 fn resolve_route(
     account: &Account,
     config: &AppConfig,
     plan: &RequestPlan,
 ) -> Result<AttemptSpec, String> {
-    resolve_route_with_dynamics(account, config, plan, &[])
+    resolve_route_with_dynamics(account, kind(account), config, plan, &[])
 }
 
 fn account(
@@ -436,11 +442,12 @@ fn probe_route_allows_ceiling_without_static_support_production_requires_contrac
         ApiFormat::ChatCompletions,
         None,
     );
-    let probe = resolve_probe_route(&go, &config, &chat_grok).unwrap();
+    let probe = resolve_probe_route(&go, kind(&go), &config, &chat_grok).unwrap();
     assert_eq!(probe.path, "/v1/chat/completions");
     assert_eq!(probe.upstream, ApiFormat::ChatCompletions);
     let fetched_model_probe = resolve_probe_route(
         &go,
+        kind(&go),
         &config,
         &chat_plan(
             "future-go-model",
@@ -487,12 +494,14 @@ fn probe_route_allows_ceiling_without_static_support_production_requires_contrac
         persisted.clone(),
     );
     assert!(
-        supports_production_plan(&go, &config, &chat_grok, &static_contracts, &[]).is_err(),
+        supports_production_plan(&go, kind(&go), &config, &chat_grok, &static_contracts, &[])
+            .is_err(),
         "official-docs grok-4.5 Chat must stay unverified until a probe succeeds"
     );
     assert!(
         supports_production_plan(
             &go,
+            kind(&go),
             &config,
             &chat_plan("grok-4.5", UpstreamChannel::Go, ApiFormat::Responses, None),
             &static_contracts,
@@ -519,16 +528,17 @@ fn probe_route_allows_ceiling_without_static_support_production_requires_contrac
         &[],
         persisted,
     );
-    assert!(supports_production_plan(&go, &config, &chat_grok, &probed, &[]).is_ok());
+    assert!(supports_production_plan(&go, kind(&go), &config, &chat_grok, &probed, &[]).is_ok());
 
     let goat = account(
-        "goat-1",
+        "goat-probe-official",
         COMMAND_CODE_PROVIDER_ID,
         CredentialKind::ApiKey,
         QuotaScope::Key,
     );
     let goat_probe = resolve_probe_route(
         &goat,
+        kind(&goat),
         &config,
         &chat_plan(
             COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
@@ -574,10 +584,15 @@ fn fixed_provider_plans_expose_documented_chat_and_messages_routes() {
             (ApiFormat::Messages, messages_base, messages_path),
         ] {
             let plan = chat_plan(model_id, UpstreamChannel::Go, protocol, None);
-            let account_route =
-                resolve_account_test_route_with_dynamics(&account, &config, &plan, &[])
-                    .expect("account-level tests use the documented production route");
-            let provider_route = resolve_probe_route(&account, &config, &plan)
+            let account_route = resolve_account_test_route_with_dynamics(
+                &account,
+                kind(&account),
+                &config,
+                &plan,
+                &[],
+            )
+            .expect("account-level tests use the documented production route");
+            let provider_route = resolve_probe_route(&account, kind(&account), &config, &plan)
                 .expect("provider probes reuse the documented production route");
             for route in [account_route, provider_route] {
                 assert_eq!(route.base_url, base_url);
@@ -590,6 +605,7 @@ fn fixed_provider_plans_expose_documented_chat_and_messages_routes() {
         assert!(
             resolve_probe_route(
                 &account,
+                kind(&account),
                 &config,
                 &chat_plan(model_id, UpstreamChannel::Go, ApiFormat::Responses, None,),
             )
@@ -631,6 +647,7 @@ fn minimax_kimi_ollama_do_not_inherit_opencode_responses_for_shared_model_names(
     for account in [&minimax, &kimi, &ollama] {
         let err = resolve_account_test_route_with_dynamics(
             account,
+            kind(account),
             &config,
             &chat_plan(shared, UpstreamChannel::Go, ApiFormat::Responses, None),
             &[],
@@ -643,6 +660,7 @@ fn minimax_kimi_ollama_do_not_inherit_opencode_responses_for_shared_model_names(
         );
         let probe_err = resolve_probe_route(
             account,
+            kind(account),
             &config,
             &chat_plan(shared, UpstreamChannel::Go, ApiFormat::Responses, None),
         )
@@ -657,6 +675,7 @@ fn minimax_kimi_ollama_do_not_inherit_opencode_responses_for_shared_model_names(
 
     let ollama_chat = resolve_account_test_route_with_dynamics(
         &ollama,
+        kind(&ollama),
         &config,
         &chat_plan(
             "deepseek-v4-flash",
@@ -682,6 +701,7 @@ fn p06_ollama_cloud_attempt_normalizes_wire() {
     );
     let spec = resolve_account_test_route_with_dynamics(
         &ollama,
+        kind(&ollama),
         &config,
         &chat_plan(
             "deepseek-v4-flash",
@@ -758,6 +778,7 @@ fn s01_dynamic_override_resolves_configured_route_without_granting_the_key() {
     );
     let foreign = resolve_route_with_dynamics(
         &account,
+        kind(&account),
         &config,
         &chat_plan(
             "vendor/lab",
@@ -781,6 +802,7 @@ fn s01_dynamic_override_resolves_configured_route_without_granting_the_key() {
     );
     let allowed = resolve_route_with_dynamics(
         &account,
+        kind(&account),
         &config,
         &chat_plan(
             "vendor/lab",
@@ -812,6 +834,7 @@ fn s01_keyless_dynamic_override_may_use_another_origin() {
     account.key_cipher.clear();
     let route = resolve_route_with_dynamics(
         &account,
+        kind(&account),
         &config,
         &chat_plan(
             "vendor/lab",
@@ -824,4 +847,41 @@ fn s01_keyless_dynamic_override_may_use_another_origin() {
     .unwrap();
     assert_eq!(route.base_url, "https://evil.example");
     assert_eq!(route.auth, UpstreamAuth::None);
+}
+
+#[test]
+fn resolve_dispatches_on_caller_adapter_not_account_provider_id() {
+    let config = AppConfig::default();
+    let go = account(
+        "go-looking",
+        OPENCODE_PROVIDER_ID,
+        CredentialKind::ApiKey,
+        QuotaScope::Key,
+    );
+    let go_responses = chat_plan("grok-4.5", UpstreamChannel::Go, ApiFormat::Responses, None);
+    assert!(
+        resolve_route_with_dynamics(
+            &go,
+            ProviderAdapterKind::OpenCodeGo,
+            &config,
+            &go_responses,
+            &[],
+        )
+        .is_ok(),
+        "OpenCode Go still serves grok-4.5 Responses when the caller adapter matches"
+    );
+    let minimax_err = resolve_route_with_dynamics(
+        &go,
+        ProviderAdapterKind::MiniMaxCn,
+        &config,
+        &go_responses,
+        &[],
+    )
+    .unwrap_err();
+    assert!(
+        minimax_err.contains("no official upstream path")
+            || minimax_err.contains("no verified support")
+            || minimax_err.contains("does not support"),
+        "a MiniMax adapter must not inherit OpenCode Responses from provider_id: {minimax_err}"
+    );
 }

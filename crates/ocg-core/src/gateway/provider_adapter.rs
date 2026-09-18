@@ -1,8 +1,10 @@
 //! Provider offering adapters: endpoint, auth, and capability checks.
 //!
 //! Authentication belongs to the provider/offering, not the wire protocol.
-//! [`resolve_route_with_dynamics`] dispatches exhaustively on
-//! [`crate::provider::ProviderAdapterKind`] onto sealed route helpers. Alias resolution
+//! [`resolve_route_with_dynamics`] dispatches exhaustively on the caller's
+//! [`crate::provider::ProviderAdapterKind`] onto sealed route helpers.
+//! Configurable HTTP splits on whether a dynamic provider runtime exists for
+//! the catalog id, not on `is_custom_api`. Alias resolution
 //! stays ahead of this seam: Alias and PinnedRaw candidates both materialize a
 //! [`RequestPlan`] then call here. Adapters must not probe a billable inference
 //! path to discover protocol support.
@@ -31,11 +33,11 @@ use crate::kernel::ids::{OLLAMA_CLOUD_BASE_URL, OLLAMA_CLOUD_CHAT_COMPLETIONS_PA
 use crate::models::{Account, AppConfig, UpstreamChannel};
 use crate::provider::{
     COMMAND_CODE_GOAT_BASE_URL, COMMAND_CODE_GOAT_CHAT_COMPLETIONS_PATH, COMMAND_CODE_GOAT_HOST,
-    COMMAND_CODE_GOAT_MESSAGES_PATH, COMMAND_CODE_GOAT_MODELS_PATH, CPA_ACCOUNT_ID, CredentialKind,
+    COMMAND_CODE_GOAT_MESSAGES_PATH, COMMAND_CODE_GOAT_MODELS_PATH, CredentialKind,
     InferenceAuthDescriptor, KIMI_CN_BASE_URL, KIMI_CN_CHAT_COMPLETIONS_PATH,
     KIMI_CN_MESSAGES_PATH, MINIMAX_CN_ANTHROPIC_BASE_URL, MINIMAX_CN_BASE_URL,
     MINIMAX_CN_CHAT_COMPLETIONS_PATH, MINIMAX_CN_MESSAGES_PATH, ProviderAdapterKind,
-    ProviderRegistry, QuotaScope, UpstreamAuthScheme, ZEN_FREE_ACCOUNT_ID,
+    ProviderRegistry, QuotaScope, UpstreamAuthScheme,
 };
 use crate::provider_contracts::EffectiveContractSet;
 use std::collections::HashMap;
@@ -226,6 +228,7 @@ enum RoutePolicy<'a> {
 
 pub(crate) fn supports_production_plan(
     account: &Account,
+    adapter: ProviderAdapterKind,
     config: &AppConfig,
     plan: &RequestPlan,
     contracts: &EffectiveContractSet,
@@ -233,6 +236,7 @@ pub(crate) fn supports_production_plan(
 ) -> Result<(), String> {
     resolve_route_with_policy(
         account,
+        adapter,
         config,
         plan,
         RoutePolicy::Production {
@@ -245,12 +249,14 @@ pub(crate) fn supports_production_plan(
 
 pub(crate) fn resolve_route_with_dynamics(
     account: &Account,
+    adapter: ProviderAdapterKind,
     config: &AppConfig,
     plan: &RequestPlan,
     dynamics: &[crate::dynamic::DynamicProviderRuntime],
 ) -> Result<AttemptSpec, String> {
     resolve_route_with_policy(
         account,
+        adapter,
         config,
         plan,
         RoutePolicy::Production { contracts: None },
@@ -260,54 +266,56 @@ pub(crate) fn resolve_route_with_dynamics(
 
 pub(crate) fn resolve_probe_route(
     account: &Account,
+    adapter: ProviderAdapterKind,
     config: &AppConfig,
     plan: &RequestPlan,
 ) -> Result<AttemptSpec, String> {
-    resolve_route_with_policy(account, config, plan, RoutePolicy::Probe, &[])
+    resolve_route_with_policy(account, adapter, config, plan, RoutePolicy::Probe, &[])
 }
 
 pub(crate) fn resolve_account_test_route_with_dynamics(
     account: &Account,
+    adapter: ProviderAdapterKind,
     config: &AppConfig,
     plan: &RequestPlan,
     dynamics: &[crate::dynamic::DynamicProviderRuntime],
 ) -> Result<AttemptSpec, String> {
-    resolve_route_with_policy(account, config, plan, RoutePolicy::AccountTest, dynamics)
+    resolve_route_with_policy(
+        account,
+        adapter,
+        config,
+        plan,
+        RoutePolicy::AccountTest,
+        dynamics,
+    )
 }
 
 fn resolve_route_with_policy(
     account: &Account,
+    adapter: ProviderAdapterKind,
     config: &AppConfig,
     plan: &RequestPlan,
     policy: RoutePolicy<'_>,
     dynamics: &[crate::dynamic::DynamicProviderRuntime],
 ) -> Result<AttemptSpec, String> {
-    match crate::dynamic::adapter_kind_for(&account.provider_id, dynamics) {
-        Some(ProviderAdapterKind::OpenCodeGo) => {
-            resolve_open_code_go(account, config, plan, policy)
-        }
-        Some(ProviderAdapterKind::ZenFree) => resolve_zen_free(account, config, plan, policy),
-        Some(ProviderAdapterKind::CommandCodeGoat) => {
+    match adapter {
+        ProviderAdapterKind::OpenCodeGo => resolve_open_code_go(account, config, plan, policy),
+        ProviderAdapterKind::ZenFree => resolve_zen_free(account, config, plan, policy),
+        ProviderAdapterKind::CommandCodeGoat => {
             resolve_command_code_goat(account, config, plan, policy)
         }
-        Some(ProviderAdapterKind::MiniMaxCn) => resolve_minimax_cn(account, config, plan, policy),
-        Some(ProviderAdapterKind::KimiCn) => resolve_kimi_cn(account, config, plan, policy),
-        Some(ProviderAdapterKind::OllamaCloud) => {
-            resolve_ollama_cloud(account, config, plan, policy)
-        }
-        Some(ProviderAdapterKind::ConfigurableHttp)
-            if crate::provider::is_custom_api(&account.provider_id) =>
+        ProviderAdapterKind::MiniMaxCn => resolve_minimax_cn(account, config, plan, policy),
+        ProviderAdapterKind::KimiCn => resolve_kimi_cn(account, config, plan, policy),
+        ProviderAdapterKind::OllamaCloud => resolve_ollama_cloud(account, config, plan, policy),
+        ProviderAdapterKind::ConfigurableHttp
+            if crate::dynamic::find_runtime(dynamics, &account.provider_id).is_some() =>
         {
-            resolve_configurable_http(account, config, plan, policy)
-        }
-        Some(ProviderAdapterKind::ConfigurableHttp) => {
             resolve_dynamic_http(account, plan, policy, dynamics)
         }
-        Some(ProviderAdapterKind::Cpa) => resolve_cpa(account, config, plan, policy),
-        None => Err(format!(
-            "unsupported provider offering `{}/{}`",
-            account.provider_id, account.provider_id
-        )),
+        ProviderAdapterKind::ConfigurableHttp => {
+            resolve_configurable_http(account, config, plan, policy)
+        }
+        ProviderAdapterKind::Cpa => resolve_cpa(account, config, plan, policy),
     }
 }
 
@@ -317,7 +325,7 @@ fn resolve_open_code_go(
     plan: &RequestPlan,
     policy: RoutePolicy<'_>,
 ) -> Result<AttemptSpec, String> {
-    let descriptor = registered_descriptor(ProviderAdapterKind::OpenCodeGo, account)?;
+    let descriptor = sealed_descriptor(ProviderAdapterKind::OpenCodeGo)?;
     require_binding(
         account,
         descriptor.inference.credential_kind,
@@ -345,15 +353,12 @@ fn resolve_zen_free(
     plan: &RequestPlan,
     policy: RoutePolicy<'_>,
 ) -> Result<AttemptSpec, String> {
-    let descriptor = registered_descriptor(ProviderAdapterKind::ZenFree, account)?;
+    let descriptor = sealed_descriptor(ProviderAdapterKind::ZenFree)?;
     require_binding(
         account,
         descriptor.inference.credential_kind,
         descriptor.inference.quota_scope,
     )?;
-    if account.id != ZEN_FREE_ACCOUNT_ID {
-        return Err("Zen Free route must use the reserved singleton account".to_string());
-    }
     if plan.channel != UpstreamChannel::Free {
         return Err(format!(
             "Zen Free does not support routed model `{}` on this channel",
@@ -383,7 +388,7 @@ fn resolve_command_code_goat(
     plan: &RequestPlan,
     policy: RoutePolicy<'_>,
 ) -> Result<AttemptSpec, String> {
-    let descriptor = registered_descriptor(ProviderAdapterKind::CommandCodeGoat, account)?;
+    let descriptor = sealed_descriptor(ProviderAdapterKind::CommandCodeGoat)?;
     require_binding(
         account,
         descriptor.inference.credential_kind,
@@ -433,7 +438,7 @@ fn resolve_fixed_provider_plan(
     base_url: &str,
     path: &str,
 ) -> Result<AttemptSpec, String> {
-    let descriptor = registered_descriptor(adapter, account)?;
+    let descriptor = sealed_descriptor(adapter)?;
     require_binding(
         account,
         descriptor.inference.credential_kind,
@@ -665,15 +670,12 @@ fn resolve_cpa(
     if matches!(policy, RoutePolicy::Probe | RoutePolicy::AccountTest) {
         return Err("CPA protocol probes and account tests are not available".to_string());
     }
-    let descriptor = registered_descriptor(ProviderAdapterKind::Cpa, account)?;
+    let descriptor = sealed_descriptor(ProviderAdapterKind::Cpa)?;
     require_binding(
         account,
         descriptor.inference.credential_kind,
         descriptor.inference.quota_scope,
     )?;
-    if account.id != CPA_ACCOUNT_ID {
-        return Err("CPA route must use the reserved singleton account".to_string());
-    }
     if plan.channel != UpstreamChannel::Go {
         return Err("CPA does not serve the Zen free channel".to_string());
     }
@@ -696,6 +698,12 @@ fn resolve_cpa(
         proxy_routing: ProxyRoutingModel::LocalExternalIntegration,
         wire_normalization: WireNormalization::None,
     })
+}
+
+fn sealed_descriptor(
+    kind: ProviderAdapterKind,
+) -> Result<crate::provider::ProviderDescriptor, String> {
+    ProviderRegistry::get_by_kind(kind).ok_or_else(|| format!("unsupported adapter `{kind:?}`"))
 }
 
 fn registered_descriptor(

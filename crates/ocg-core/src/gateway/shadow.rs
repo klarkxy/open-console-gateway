@@ -64,6 +64,7 @@ pub(crate) struct ShadowPlanInput<'a> {
     pub contracts: &'a EffectiveContractSet,
     pub dynamics: &'a [DynamicProviderRuntime],
     pub bindings: &'a InferenceBindingIndex,
+    pub projection: Option<&'a crate::destination_projection::DestinationProjection>,
 }
 
 /// Comparable, secret-free view of one planned attempt.
@@ -220,6 +221,7 @@ pub(crate) fn plan_shadow_attempts(
         input.contracts,
         input.dynamics,
         input.bindings,
+        input.projection,
     )?;
     Ok(shadow_plan_from_materialized(
         &set,
@@ -258,15 +260,16 @@ fn attempts_from_materialized(
     for route in routes {
         match provider_adapter::resolve_route_with_dynamics(
             &route.routing.account,
+            route.routing.adapter,
             config,
             &route.plan,
             dynamics,
         ) {
             Ok(spec) => attempts.push(shadow_attempt_from_live(
                 &route.routing.account,
+                route.routing.adapter,
                 &route.plan,
                 &spec,
-                dynamics,
             )),
             Err(error) => rejects.push(format!(
                 "{}/{} account `{}`: {error}",
@@ -281,12 +284,10 @@ fn attempts_from_materialized(
 
 pub(crate) fn shadow_attempt_from_live(
     account: &Account,
+    adapter_kind: ProviderAdapterKind,
     plan: &RequestPlan,
     spec: &AttemptSpec,
-    dynamics: &[DynamicProviderRuntime],
 ) -> ShadowAttempt {
-    let adapter_kind = crate::dynamic::adapter_kind_for(&account.provider_id, dynamics)
-        .unwrap_or(ProviderAdapterKind::ConfigurableHttp);
     ShadowAttempt {
         public_name: plan
             .resolved_alias

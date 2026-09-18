@@ -231,6 +231,7 @@ fn plan_input<'a>(
         contracts,
         dynamics,
         bindings: empty_bindings(),
+        projection: None,
     }
 }
 
@@ -264,6 +265,7 @@ fn materialize_account_routes(
         contracts,
         dynamics,
         &HashMap::new(),
+        None,
     )
 }
 
@@ -533,6 +535,7 @@ fn shadow_matches_live_rejects_when_inference_binding_is_disabled() {
         &contracts,
         &[],
         &bindings,
+        None,
     )
     .unwrap();
     let input = ShadowPlanInput {
@@ -549,6 +552,7 @@ fn shadow_matches_live_rejects_when_inference_binding_is_disabled() {
         contracts: &contracts,
         dynamics: &[],
         bindings: &bindings,
+        projection: None,
     };
     let shadow = plan_shadow_attempts(&input).unwrap();
     let live = shadow_plan_from_materialized(&set, &config, &[]);
@@ -590,10 +594,20 @@ fn mismatch_is_reported_and_does_not_alter_the_live_spec() {
         &[],
     )
     .unwrap();
-    let live_spec =
-        provider_adapter::resolve_route_with_dynamics(&account, &config, &set.routes[0].plan, &[])
-            .unwrap();
-    let live = shadow_attempt_from_live(&account, &set.routes[0].plan, &live_spec, &[]);
+    let live_spec = provider_adapter::resolve_route_with_dynamics(
+        &account,
+        crate::routing_runtime::adapter_for_account(&account, None),
+        &config,
+        &set.routes[0].plan,
+        &[],
+    )
+    .unwrap();
+    let live = shadow_attempt_from_live(
+        &account,
+        crate::routing_runtime::adapter_for_account(&account, None),
+        &set.routes[0].plan,
+        &live_spec,
+    );
     let mut shadow = live.clone();
     shadow.upstream_model = "not-the-live-model".into();
     shadow.endpoint = Some("https://example.invalid/v1/chat/completions".into());

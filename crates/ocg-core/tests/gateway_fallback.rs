@@ -2389,7 +2389,7 @@ async fn v3_post(
     body: serde_json::Value,
 ) -> (StatusCode, serde_json::Value) {
     let response = loopback_client()
-        .post(format!("http://127.0.0.1:{port}/dashboard/api/v3{path}"))
+        .post(format!("http://127.0.0.1:{port}/dashboard/api/v4{path}"))
         .json(&body)
         .send()
         .await
@@ -2978,7 +2978,7 @@ async fn dashboard_port_change_rebinds_and_persists_across_restart() {
     let client = loopback_client();
     let response = client
         .put(format!(
-            "http://127.0.0.1:{current_port}/dashboard/api/v3/settings"
+            "http://127.0.0.1:{current_port}/dashboard/api/v4/settings"
         ))
         .json(&settings_payload)
         .send()
@@ -3000,7 +3000,7 @@ async fn dashboard_port_change_rebinds_and_persists_across_restart() {
 
     let status_response = client
         .get(format!(
-            "http://127.0.0.1:{requested_port}/dashboard/api/v3/gateway/status"
+            "http://127.0.0.1:{requested_port}/dashboard/api/v4/gateway/status"
         ))
         .send()
         .await
@@ -3019,7 +3019,7 @@ async fn dashboard_port_change_rebinds_and_persists_across_restart() {
     });
     let fail = client
         .put(format!(
-            "http://127.0.0.1:{requested_port}/dashboard/api/v3/settings"
+            "http://127.0.0.1:{requested_port}/dashboard/api/v4/settings"
         ))
         .json(&fail_payload)
         .send()

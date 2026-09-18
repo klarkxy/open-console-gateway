@@ -2,6 +2,11 @@ use super::*;
 use crate::crypto::{KeyCipher, StaticKeyCipher};
 use crate::kernel::catalog::QuotaScope;
 use crate::kernel::ids::ZEN_FREE_ACCOUNT_ID;
+use crate::provider::ProviderAdapterKind;
+use ocg_domain::destination::{
+    AdapterKind, AuthScheme, Destination, LegacyDestinationRef, destination_id_for_builtin,
+    sealed_capabilities,
+};
 use ocg_gateway::selector::{CONVERSATION_TTL, MAX_CONVERSATIONS, SelectionError};
 use std::sync::Arc;
 use std::time::Duration;
@@ -76,10 +81,40 @@ fn routing_candidate(
     channel: UpstreamChannel,
     resolved_model: &str,
 ) -> RoutingCandidate {
+    let adapter = adapter_for_account(&account, None);
+    routing_candidate_with_adapter(account, channel, resolved_model, adapter)
+}
+
+fn routing_candidate_with_adapter(
+    account: Account,
+    channel: UpstreamChannel,
+    resolved_model: &str,
+    adapter: ProviderAdapterKind,
+) -> RoutingCandidate {
     RoutingCandidate {
+        adapter,
         account,
         channel,
         resolved_model: resolved_model.to_string(),
+    }
+}
+
+fn destination(adapter: AdapterKind, provider_id: &str) -> Destination {
+    Destination {
+        id: destination_id_for_builtin(provider_id),
+        legacy: LegacyDestinationRef::Builtin(provider_id.to_string()),
+        adapter,
+        name: "dest".into(),
+        brand_family: None,
+        base_url: None,
+        protocols: Vec::new(),
+        auth_scheme: AuthScheme::None,
+        catalog: Vec::new(),
+        capabilities: sealed_capabilities(adapter),
+        plan: None,
+        max_credentials: None,
+        observer_credential_id: None,
+        enabled: true,
     }
 }
 
@@ -1154,5 +1189,101 @@ fn conversation_sticky_requires_account_channel_and_resolved_model() {
             UpstreamChannel::Go,
             "test-model".to_string()
         ))
+    );
+}
+
+#[test]
+fn reserved_zen_account_id_is_not_the_free_gate() {
+    let wall = frozen_wall();
+    let mut reserved_go = account(ZEN_FREE_ACCOUNT_ID, true);
+    reserved_go.cooldown_free_until = Some(wall + chrono::Duration::hours(1));
+    assert!(
+        !free_channel_is_exhausted_at(&[reserved_go], wall),
+        "the reserved Zen account id on a Go catalog row must not exhaust Free"
+    );
+
+    let mut zen = account("not-the-reserved-zen-id", true);
+    zen.provider_id = OPENCODE_ZEN_FREE_PROVIDER_ID.into();
+    zen.credential_kind = CredentialKind::None;
+    zen.quota_scope = QuotaScope::EgressIp;
+    zen.key_cipher.clear();
+    zen.cooldown_free_until = Some(wall + chrono::Duration::hours(1));
+    assert!(
+        free_channel_is_exhausted_at(&[zen], wall),
+        "a Zen adapter catalog row exhausts Free without the reserved account id"
+    );
+}
+
+#[test]
+fn adapter_for_account_prefers_destination_adapter() {
+    let mut go = account("go-looking", true);
+    go.provider_id = crate::provider::default_provider_id();
+    assert_eq!(
+        adapter_for_account(&go, None),
+        ProviderAdapterKind::OpenCodeGo
+    );
+    assert_eq!(
+        adapter_for_account(
+            &go,
+            Some(&destination(
+                AdapterKind::Zen,
+                OPENCODE_ZEN_FREE_PROVIDER_ID
+            ))
+        ),
+        ProviderAdapterKind::ZenFree
+    );
+    assert_eq!(
+        account_channel_for(
+            &go,
+            Some(&destination(
+                AdapterKind::Zen,
+                OPENCODE_ZEN_FREE_PROVIDER_ID
+            ))
+        ),
+        Some(UpstreamChannel::Free)
+    );
+}
+
+#[test]
+fn selector_uses_candidate_adapter_not_account_provider_id() {
+    let runtime = RoutingRuntime::new();
+    let wall = frozen_wall();
+    let mono = Instant::now();
+    let mut item = account("go-row", true);
+    item.provider_id = crate::provider::default_provider_id();
+    let candidates = vec![routing_candidate_with_adapter(
+        item,
+        UpstreamChannel::Free,
+        "m-free",
+        ProviderAdapterKind::ZenFree,
+    )];
+    assert_eq!(
+        pick_index(
+            &runtime,
+            &candidates,
+            RoutingMode::StrictPriority,
+            false,
+            None,
+            &[],
+            true,
+            wall,
+            mono,
+        ),
+        Some(0),
+        "selector eligibility is candidate.adapter, not account.provider_id"
+    );
+    assert_eq!(
+        pick_index(
+            &runtime,
+            &candidates,
+            RoutingMode::StrictPriority,
+            false,
+            None,
+            &[],
+            false,
+            wall,
+            mono,
+        ),
+        None
     );
 }

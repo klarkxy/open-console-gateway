@@ -16,7 +16,6 @@ use crate::gateway::attempt::{AttemptSpec, CredentialHandle, ProxyRoutingModel};
 use crate::gateway::materialize::binding_allows_requested_model;
 use crate::gateway::protocol::RequestPlan;
 use crate::models::Account;
-use crate::provider::{CPA_PROVIDER_ID, is_custom_api};
 use crate::provider_contracts::protocol_to_api;
 use crate::state::CoreState;
 use ocg_domain::catalog::UpstreamProtocolKind;
@@ -132,7 +131,7 @@ pub(crate) fn authorize_live_send_secret(
                 return Err(LiveSendAuthError::unauthorized(UNAUTHORIZED_ATTEMPT));
             }
             let db = state.db.lock();
-            verify_live_send(&db, selection, account, plan, spec, account_gate)?;
+            verify_live_send(&db, selection, plan, spec, account_gate)?;
             state
                 .decrypt_key(&selection.key_cipher)
                 .map(Some)
@@ -158,15 +157,25 @@ pub(crate) fn confirm_live_send_secret(
                 return Err(LiveSendAuthError::unauthorized(UNAUTHORIZED_ATTEMPT));
             }
             let db = state.db.lock();
-            verify_live_send(&db, selection, account, plan, spec, account_gate)
+            verify_live_send(&db, selection, plan, spec, account_gate)
         }
+    }
+}
+
+fn live_key_cipher(
+    db: &crate::db::Database,
+    account: &Account,
+) -> Result<String, LiveSendAuthError> {
+    match db.credential_key_cipher_for_legacy_account(&account.id) {
+        Ok(Some(cipher)) => Ok(cipher),
+        Ok(None) => Ok(account.key_cipher.clone()),
+        Err(error) => Err(LiveSendAuthError::unauthorized(error.to_string())),
     }
 }
 
 fn verify_live_send(
     db: &crate::db::Database,
     selection: &LiveSendSelection,
-    account: &Account,
     plan: &RequestPlan,
     spec: &AttemptSpec,
     account_gate: LiveSendAccountGate,
@@ -174,12 +183,12 @@ fn verify_live_send(
     let target_url = spec
         .request_url()
         .map_err(LiveSendAuthError::unauthorized)?;
-    if spec.is_local_external_integration() || account.provider_id == CPA_PROVIDER_ID {
+    if spec.is_local_external_integration() {
         if let Some(live_account) = db
             .get_account(&selection.account_id)
             .map_err(|error| LiveSendAuthError::unauthorized(error.to_string()))?
             && ((account_gate == LiveSendAccountGate::RequireEnabled && !live_account.enabled)
-                || live_account.key_cipher != selection.key_cipher)
+                || live_key_cipher(db, &live_account)? != selection.key_cipher)
         {
             return Err(LiveSendAuthError::unauthorized(UNAUTHORIZED_ATTEMPT));
         }
@@ -203,7 +212,7 @@ fn verify_live_send(
     if binding.binding_id != selection.binding_id
         || selection.binding_id.is_empty()
         || binding.credential_version != selection.credential_version
-        || live_account.key_cipher != selection.key_cipher
+        || live_key_cipher(db, &live_account)? != selection.key_cipher
         || !binding.enabled
         || !binding_allows_requested_model(
             &binding.model_scope,
@@ -263,11 +272,10 @@ fn live_isolated_route(
     plan: &RequestPlan,
     spec: &AttemptSpec,
 ) -> Result<LiveIsolatedRoute, LiveSendAuthError> {
-    if is_custom_api(&account.provider_id) {
-        let config = db
-            .account_custom_config(&account.id)
-            .map_err(|error| LiveSendAuthError::unauthorized(error.to_string()))?
-            .ok_or_else(|| LiveSendAuthError::unauthorized(MISSING_GRANT))?;
+    if let Some(config) = db
+        .account_custom_config(&account.id)
+        .map_err(|error| LiveSendAuthError::unauthorized(error.to_string()))?
+    {
         if spec.upstream != protocol_to_api(config.upstream_protocol) {
             return Err(LiveSendAuthError::unauthorized(ROUTE_CHANGED));
         }

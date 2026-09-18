@@ -17,7 +17,13 @@ use crate::provider::{
 };
 use bytes::Bytes;
 use chrono::Utc;
-use ocg_domain::credential::ModelScope;
+use ocg_domain::credential::{AuthState, ModelScope};
+use ocg_domain::destination::Credential as DestinationCredential;
+use ocg_domain::destination::{
+    AdapterKind, AuthScheme, Cooldowns, Destination, Grants, LegacyDestinationRef,
+    destination_id_for_builtin, destination_id_for_custom_account,
+    destination_id_for_platform_account, sealed_capabilities,
+};
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -356,6 +362,7 @@ fn materialize_account_routes(
         contracts,
         dynamics,
         &HashMap::new(),
+        None,
     )
 }
 
@@ -1388,6 +1395,7 @@ fn routes_for_with_bindings(
         &static_contracts(),
         &[],
         bindings,
+        None,
     )
     .unwrap()
 }
@@ -1714,14 +1722,47 @@ fn r08_cpa_routing_does_not_assume_local_account_or_unbounded_retry() {
         "CPA without a configured base must fail closed"
     );
 
-    let local = account(
-        "local-oauth-1",
+    let cpa = account(
+        "cpa-adapter-1",
         CPA_PROVIDER_ID,
         CredentialKind::ApiKey,
         QuotaScope::Key,
     );
     let set = materialize_account_routes(
-        &[local],
+        &[cpa],
+        &AppConfig::default(),
+        &parsed,
+        &resolved,
+        "vendor/cpa-new-model",
+        "vendor/cpa-new-model",
+        &body,
+        true,
+        &HashMap::new(),
+        &HashMap::new(),
+        Some(crate::cpa::DEFAULT_CPA_BASE_URL),
+        &static_contracts(),
+        &[],
+    )
+    .unwrap();
+    assert_eq!(
+        set.routes.len(),
+        1,
+        "CPA routes by adapter, not the reserved account id: {:?}",
+        set.rejected
+    );
+    assert_eq!(
+        set.routes[0].routing.adapter,
+        crate::provider::ProviderAdapterKind::Cpa
+    );
+
+    let go = account(
+        "local-oauth-1",
+        OPENCODE_PROVIDER_ID,
+        CredentialKind::ApiKey,
+        QuotaScope::Key,
+    );
+    let set = materialize_account_routes(
+        &[go],
         &AppConfig::default(),
         &parsed,
         &resolved,
@@ -1738,14 +1779,189 @@ fn r08_cpa_routing_does_not_assume_local_account_or_unbounded_retry() {
     .unwrap();
     assert!(
         set.routes.is_empty(),
-        "CPA must not invent a local OAuth/account candidate: {:?}",
-        set.rejected
-    );
-    assert!(
-        set.rejected
+        "a non-CPA adapter must not become a CPA candidate: {:?}",
+        set.routes
             .iter()
-            .any(|reason| reason.contains("reserved") || reason.contains("CPA")),
-        "{:?}",
-        set.rejected
+            .map(|route| route.routing.account.id.as_str())
+            .collect::<Vec<_>>()
     );
+}
+
+fn mapping(provider_id: &str, model: &str) -> crate::alias::ProviderMapping {
+    crate::alias::ProviderMapping {
+        provider_id: provider_id.to_string(),
+        upstream_model: model.into(),
+        routeable: true,
+    }
+}
+
+fn test_destination(adapter: AdapterKind, legacy: LegacyDestinationRef) -> Destination {
+    let id = match &legacy {
+        LegacyDestinationRef::Builtin(id) | LegacyDestinationRef::Dynamic(id) => {
+            destination_id_for_builtin(id)
+        }
+        LegacyDestinationRef::CustomAccount(id) => destination_id_for_custom_account(id),
+        LegacyDestinationRef::PlatformParent(id) => destination_id_for_platform_account(id),
+    };
+    Destination {
+        id,
+        legacy,
+        adapter,
+        name: "dest".into(),
+        brand_family: None,
+        base_url: None,
+        protocols: Vec::new(),
+        auth_scheme: AuthScheme::Bearer,
+        catalog: Vec::new(),
+        capabilities: sealed_capabilities(adapter),
+        plan: None,
+        max_credentials: None,
+        observer_credential_id: None,
+        enabled: true,
+    }
+}
+
+fn test_credential(account_id: &str, destination_id: &str) -> DestinationCredential {
+    DestinationCredential {
+        id: format!("cred-{account_id}"),
+        legacy_account_id: account_id.into(),
+        destination_id: destination_id.into(),
+        name: account_id.into(),
+        notes: None,
+        has_secret: true,
+        enabled: true,
+        routing_rank: 0,
+        scope: ModelScope::All,
+        grants: Grants {
+            allowed_endpoint_ids: Vec::new(),
+            allowed_origins: Vec::new(),
+        },
+        auth_state: AuthState::Unknown,
+        last_error: None,
+        cooldowns: Cooldowns {
+            generic_until: None,
+            five_hour_until: None,
+            week_until: None,
+            month_until: None,
+            free_until: None,
+        },
+        quota_pool_id: None,
+        onboarding_task: None,
+        purchase_date: None,
+    }
+}
+
+#[test]
+fn destination_match_uses_adapter_and_legacy_not_custom_predicate() {
+    let custom = test_destination(
+        AdapterKind::Http,
+        LegacyDestinationRef::CustomAccount("api-1".into()),
+    );
+    let platform = test_destination(
+        AdapterKind::Http,
+        LegacyDestinationRef::PlatformParent("plat-1".into()),
+    );
+    let go = test_destination(
+        AdapterKind::OpencodeGo,
+        LegacyDestinationRef::Builtin(OPENCODE_PROVIDER_ID.into()),
+    );
+    let custom_mapping = mapping(CUSTOM_PROVIDER_ID, "local-custom");
+    let go_mapping = mapping(OPENCODE_PROVIDER_ID, "glm-5.2");
+    let dynamic_mapping = mapping("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "dyn-model");
+
+    assert!(destination_matches_mapping(&custom, &custom_mapping));
+    assert!(destination_matches_mapping(&platform, &custom_mapping));
+    assert!(!destination_matches_mapping(&custom, &go_mapping));
+    assert!(!destination_matches_mapping(&platform, &go_mapping));
+    assert!(!destination_matches_mapping(&custom, &dynamic_mapping));
+    assert!(destination_matches_mapping(&go, &go_mapping));
+    assert!(!destination_matches_mapping(&go, &custom_mapping));
+    assert!(mapping_is_custom_http_catalog(&custom_mapping));
+    assert!(!mapping_is_custom_http_catalog(&dynamic_mapping));
+    assert!(!mapping_is_custom_http_catalog(&go_mapping));
+}
+
+#[test]
+fn projection_supplies_adapter_and_matches_custom_without_reserved_account_id() {
+    let account = custom_account("owned-http");
+    let destination = test_destination(
+        AdapterKind::Http,
+        LegacyDestinationRef::CustomAccount(account.id.clone()),
+    );
+    let projection = crate::destination_projection::DestinationProjection {
+        destinations: vec![destination.clone()],
+        credentials: vec![test_credential(&account.id, &destination.id)],
+    };
+    let runtime = custom_runtime(
+        &account.id,
+        "local-custom",
+        UpstreamProtocolKind::ChatCompletions,
+    );
+    let mut runtimes = HashMap::new();
+    let contracts = contracts_for(std::slice::from_ref(&runtime));
+    runtimes.insert(account.id.clone(), runtime);
+    let body = chat_body("local-custom");
+    let parsed = parse_client_request(ApiFormat::ChatCompletions, body.clone()).unwrap();
+    let resolved = resolve_with_custom("local-custom", &["local-custom".into()]);
+    let set = materialize_account_routes_with_bindings(
+        &[account],
+        &AppConfig::default(),
+        &parsed,
+        &resolved,
+        "local-custom",
+        "local-custom",
+        true,
+        &runtimes,
+        &HashMap::new(),
+        None,
+        &contracts,
+        &[],
+        &HashMap::new(),
+        Some(&projection),
+    )
+    .unwrap();
+    assert_eq!(set.routes.len(), 1, "{:?}", set.rejected);
+    assert_eq!(
+        set.routes[0].routing.adapter,
+        ProviderAdapterKind::ConfigurableHttp
+    );
+}
+
+#[test]
+fn leftover_row_adapter_comes_from_mapping_catalog_not_account_id() {
+    let cpa = account(
+        "cpa-leftover",
+        CPA_PROVIDER_ID,
+        CredentialKind::ApiKey,
+        QuotaScope::Key,
+    );
+    let resolved = alias::resolve_with_runtime_catalogs(
+        "vendor/cpa-new-model",
+        alias::RuntimeCatalogs {
+            cpa: &["vendor/cpa-new-model".to_string()],
+            ..alias::RuntimeCatalogs::default()
+        },
+    )
+    .unwrap();
+    let body = chat_body("vendor/cpa-new-model");
+    let parsed = parse_client_request(ApiFormat::ChatCompletions, body.clone()).unwrap();
+    let set = materialize_account_routes(
+        &[cpa],
+        &AppConfig::default(),
+        &parsed,
+        &resolved,
+        "vendor/cpa-new-model",
+        "vendor/cpa-new-model",
+        &body,
+        true,
+        &HashMap::new(),
+        &HashMap::new(),
+        Some(crate::cpa::DEFAULT_CPA_BASE_URL),
+        &static_contracts(),
+        &[],
+    )
+    .unwrap();
+    assert_eq!(set.routes.len(), 1, "{:?}", set.rejected);
+    assert_eq!(set.routes[0].routing.adapter, ProviderAdapterKind::Cpa);
+    assert_ne!(set.routes[0].routing.account.id, CPA_ACCOUNT_ID);
 }

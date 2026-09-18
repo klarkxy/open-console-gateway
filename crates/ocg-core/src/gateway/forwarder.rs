@@ -33,6 +33,7 @@ use crate::platform::{PlatformAccount, PlatformLink};
 use crate::pricing::{
     ProviderPricingEvidence, ProviderScopedPricingSnapshot, latest_provider_pricing_snapshot,
 };
+use crate::provider::ProviderAdapterKind;
 use crate::state::CoreState;
 use anyhow::Result;
 use axum::body::Body;
@@ -41,6 +42,7 @@ use axum::response::{IntoResponse, Response};
 use bytes::BytesMut;
 use chrono::Utc;
 use futures_util::StreamExt;
+use ocg_domain::destination::{AdapterKind, sealed_capabilities};
 use parking_lot::Mutex;
 use reqwest::Client;
 use serde_json::Value;
@@ -351,14 +353,16 @@ impl From<Arc<PricingSnapshot>> for RequestPricingSnapshot {
 }
 
 impl RequestPricingSnapshot {
-    fn for_account(state: &CoreState, account: &Account, go: Arc<PricingSnapshot>) -> Self {
-        if account.provider_id == crate::provider::OPENCODE_PROVIDER_ID {
-            return Self::OpenCode(go);
-        }
-        if !crate::provider::is_command_code_goat(&account.provider_id)
-            && account.provider_id != crate::provider::OLLAMA_PROVIDER_ID
-        {
-            return Self::Unpriced;
+    fn for_account(
+        state: &CoreState,
+        account: &Account,
+        adapter: ProviderAdapterKind,
+        go: Arc<PricingSnapshot>,
+    ) -> Self {
+        match adapter {
+            ProviderAdapterKind::OpenCodeGo => return Self::OpenCode(go),
+            ProviderAdapterKind::CommandCodeGoat | ProviderAdapterKind::OllamaCloud => {}
+            _ => return Self::Unpriced,
         }
         let loaded = latest_provider_pricing_snapshot(&state.db.lock(), &account.provider_id);
         match loaded {
@@ -875,6 +879,7 @@ pub(crate) async fn forward_request(
     route: RouteLabel,
     state: &CoreState,
     account: &Account,
+    adapter: ProviderAdapterKind,
     config: &AppConfig,
     plan: &RequestPlan,
     trace: &RequestTrace,
@@ -892,6 +897,7 @@ pub(crate) async fn forward_request(
         route,
         state,
         account,
+        adapter,
         config,
         plan,
         trace,
@@ -913,6 +919,7 @@ async fn forward_request_impl(
     route: RouteLabel,
     state: &CoreState,
     account: &Account,
+    adapter: ProviderAdapterKind,
     config: &AppConfig,
     plan: &RequestPlan,
     trace: &RequestTrace,
@@ -931,7 +938,7 @@ async fn forward_request_impl(
         state,
         account,
         &mut attempt_context,
-        RequestPricingSnapshot::for_account(state, account, pricing_snapshot),
+        RequestPricingSnapshot::for_account(state, account, adapter, pricing_snapshot),
         plan.custom_route
             .as_ref()
             .map(|route| route.endpoint_url.as_str()),
@@ -948,44 +955,45 @@ async fn forward_request_impl(
         pricing_snapshot
     };
     attempt_context.set_client_key(client_key_id, state);
-    let attempt_spec =
-        match provider_adapter::resolve_route_with_dynamics(account, config, plan, dynamics) {
-            Ok(spec) => spec,
-            Err(error) => {
-                let class = classify_preflight(PreflightKind::Route);
-                let message = format!("provider route is unavailable: {error}");
-                let failure = attempt_context.failure(FailureSpec {
-                    error_source: "gateway",
-                    error_stage: "provider_route",
-                    downstream_status: Some(StatusCode::BAD_GATEWAY.as_u16()),
-                    upstream_status: None,
-                    upstream_wait_ms: None,
-                    retry_action: Some(retry_action_name(forward_action_for_class(
-                        class,
-                        allow_same_account_retry,
-                        None,
-                    ))),
-                    upstream_headers: None,
-                    upstream_error: None,
-                    request_body: Some(client_body),
-                });
-                DbAttemptSink::new(&state.db.lock()).insert(
-                    account,
-                    &plan.model,
-                    "error",
+    let attempt_spec = match provider_adapter::resolve_route_with_dynamics(
+        account, adapter, config, plan, dynamics,
+    ) {
+        Ok(spec) => spec,
+        Err(error) => {
+            let class = classify_preflight(PreflightKind::Route);
+            let message = format!("provider route is unavailable: {error}");
+            let failure = attempt_context.failure(FailureSpec {
+                error_source: "gateway",
+                error_stage: "provider_route",
+                downstream_status: Some(StatusCode::BAD_GATEWAY.as_u16()),
+                upstream_status: None,
+                upstream_wait_ms: None,
+                retry_action: Some(retry_action_name(forward_action_for_class(
+                    class,
+                    allow_same_account_retry,
                     None,
-                    metadata_metrics(
-                        &pricing_snapshot,
-                        plan.service_tier.as_deref(),
-                        "not_applicable",
-                    ),
-                    Some(&message),
-                    &attempt_context,
-                    Some(failure),
-                )?;
-                return Ok(account_preflight_failure(plan, message));
-            }
-        };
+                ))),
+                upstream_headers: None,
+                upstream_error: None,
+                request_body: Some(client_body),
+            });
+            DbAttemptSink::new(&state.db.lock()).insert(
+                account,
+                &plan.model,
+                "error",
+                None,
+                metadata_metrics(
+                    &pricing_snapshot,
+                    plan.service_tier.as_deref(),
+                    "not_applicable",
+                ),
+                Some(&message),
+                &attempt_context,
+                Some(failure),
+            )?;
+            return Ok(account_preflight_failure(plan, message));
+        }
+    };
     attempt_context.set_provider_route(account, &attempt_spec);
     // Attempt-level wire normalization: request-plan bytes are shared by every
     // candidate of a mixed chain, so the rewrite happens here after the
@@ -1086,7 +1094,7 @@ async fn forward_request_impl(
     apply_provider_identity_headers(
         &mut upstream_headers,
         &headers,
-        &account.provider_id,
+        adapter,
         plan.client,
         plan.log_requested_model(),
         client_body,
@@ -3734,7 +3742,12 @@ mod stream_outcome_guard_tests {
         let (dir, state) = test_state("goat-pricing");
         let mut goat = account(&state);
         goat.provider_id = crate::provider::COMMAND_CODE_PROVIDER_ID.into();
-        let missing = RequestPricingSnapshot::for_account(&state, &goat, state.pricing_snapshot());
+        let missing = RequestPricingSnapshot::for_account(
+            &state,
+            &goat,
+            ProviderAdapterKind::CommandCodeGoat,
+            state.pricing_snapshot(),
+        );
         let mut missing_metrics = pricing_metrics(
             &missing,
             "deepseek-v4-flash",
@@ -3779,7 +3792,12 @@ mod stream_outcome_guard_tests {
         .unwrap();
         crate::pricing::store_provider_pricing_snapshot(&state.db.lock(), &snapshot).unwrap();
 
-        let pricing = RequestPricingSnapshot::for_account(&state, &goat, state.pricing_snapshot());
+        let pricing = RequestPricingSnapshot::for_account(
+            &state,
+            &goat,
+            ProviderAdapterKind::CommandCodeGoat,
+            state.pricing_snapshot(),
+        );
         let mut metrics = pricing_metrics(
             &pricing,
             "deepseek/deepseek-v4-flash",
@@ -3961,30 +3979,31 @@ mod stream_outcome_guard_tests {
 const OPENCODE_ZEN_FREE_CLIENT: &str = "cli";
 const OPENCODE_ZEN_FREE_USER_AGENT: &str = "opencode";
 
-fn carries_opencode_session_header(provider_id: &str) -> bool {
-    provider_id == crate::provider::OPENCODE_PROVIDER_ID
-        || provider_id == crate::provider::OPENCODE_ZEN_FREE_PROVIDER_ID
+fn identity_headers_enabled(adapter: ProviderAdapterKind) -> bool {
+    sealed_capabilities(AdapterKind::from(adapter)).identity_headers
 }
 
 /// Shared by inference and operational probes so a working account is not
 /// rejected merely because its test omitted provider-required identity.
+/// Session / anonymous headers follow destination `identity_headers` and
+/// adapter kind, not a reserved provider UUID.
 pub(crate) fn apply_provider_identity_headers(
     upstream: &mut reqwest::header::HeaderMap,
     client_headers: &HeaderMap,
-    provider_id: &str,
+    adapter: ProviderAdapterKind,
     client: ApiFormat,
     model: &str,
     body: &[u8],
     request_id: &str,
 ) {
-    if carries_opencode_session_header(provider_id) {
-        let session =
-            resolve_opencode_session_header(client_headers, client, model, body, request_id);
-        upstream.insert("x-opencode-session", session.clone());
-        copy_explicit_opencode_identity_headers(upstream, client_headers);
-        if provider_id == crate::provider::OPENCODE_ZEN_FREE_PROVIDER_ID {
-            apply_zen_free_identity_headers(upstream, &session, request_id);
-        }
+    if !identity_headers_enabled(adapter) {
+        return;
+    }
+    let session = resolve_opencode_session_header(client_headers, client, model, body, request_id);
+    upstream.insert("x-opencode-session", session.clone());
+    copy_explicit_opencode_identity_headers(upstream, client_headers);
+    if adapter == ProviderAdapterKind::ZenFree {
+        apply_zen_free_identity_headers(upstream, &session, request_id);
     }
 }
 
@@ -4147,16 +4166,54 @@ mod forward_once_tests {
     }
 
     #[test]
-    fn opencode_session_header_is_go_and_zen_free_only() {
-        assert!(carries_opencode_session_header(
-            crate::provider::OPENCODE_PROVIDER_ID
+    fn identity_headers_follow_adapter_capability() {
+        assert!(identity_headers_enabled(ProviderAdapterKind::OpenCodeGo));
+        assert!(identity_headers_enabled(ProviderAdapterKind::ZenFree));
+        assert!(!identity_headers_enabled(
+            ProviderAdapterKind::CommandCodeGoat
         ));
-        assert!(carries_opencode_session_header(
-            crate::provider::OPENCODE_ZEN_FREE_PROVIDER_ID
+        assert!(!identity_headers_enabled(
+            ProviderAdapterKind::ConfigurableHttp
         ));
-        assert!(!carries_opencode_session_header(
-            crate::provider::COMMAND_CODE_PROVIDER_ID
-        ));
+
+        let empty = HeaderMap::new();
+        let mut zen = reqwest::header::HeaderMap::new();
+        apply_provider_identity_headers(
+            &mut zen,
+            &empty,
+            ProviderAdapterKind::ZenFree,
+            ApiFormat::ChatCompletions,
+            "m-free",
+            b"{}",
+            "req_1",
+        );
+        assert!(zen.get("x-opencode-session").is_some());
+        assert_eq!(zen.get("x-opencode-client").unwrap(), "cli");
+
+        let mut go = reqwest::header::HeaderMap::new();
+        apply_provider_identity_headers(
+            &mut go,
+            &empty,
+            ProviderAdapterKind::OpenCodeGo,
+            ApiFormat::ChatCompletions,
+            "glm-5.2",
+            b"{}",
+            "req_1",
+        );
+        assert!(go.get("x-opencode-session").is_some());
+        assert!(go.get("x-opencode-client").is_none());
+
+        let mut goat = reqwest::header::HeaderMap::new();
+        apply_provider_identity_headers(
+            &mut goat,
+            &empty,
+            ProviderAdapterKind::CommandCodeGoat,
+            ApiFormat::ChatCompletions,
+            "goat",
+            b"{}",
+            "req_1",
+        );
+        assert!(goat.get("x-opencode-session").is_none());
     }
 }
 
