@@ -1890,6 +1890,61 @@ fn v53_keeps_both_keys_models_when_two_linked_keys_share_a_platform() {
 }
 
 #[test]
+fn v53_empty_leftover_key_stays_ineligible_for_sibling_models() {
+    use ocg_domain::credential::ModelScope;
+
+    let dir = temp_data_dir("v53-empty-leftover-key");
+    let db = Database::open(dir.clone()).unwrap();
+    seed_linked_platform_keys(
+        &db,
+        "parent-empty",
+        &[("key-a", "model-a", "up-a"), ("key-b", "model-b", "up-b")],
+    );
+    force_binding_scope_all(&db, "key-a");
+    force_binding_scope_all(&db, "key-b");
+    rewind_linked_keys_to_v52_leftover_capabilities(
+        &db,
+        "parent-empty",
+        &[("key-b", "model-b", "up-b")],
+    );
+    drop(db);
+
+    let db = Database::open(dir.clone()).unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), CURRENT_SCHEMA_VERSION);
+    assert_eq!(
+        parent_catalog_pairs(&db, "parent-empty"),
+        vec![("model-b".into(), "up-b".into())]
+    );
+    assert_eq!(
+        stored_model_scope(&db, "key-a"),
+        ModelScope::Only { models: vec![] }
+    );
+    assert!(capability_pairs(&db, "key-a").is_empty());
+    assert_key_cannot_serve(&db, "key-a", "model-b");
+    assert_eq!(
+        stored_model_scope(&db, "key-b"),
+        ModelScope::Only {
+            models: vec!["model-b".into()]
+        }
+    );
+    assert_eq!(
+        capability_pairs(&db, "key-b"),
+        vec![("model-b".into(), "up-b".into())]
+    );
+    drop(db);
+
+    let db = Database::open(dir.clone()).unwrap();
+    assert_eq!(
+        stored_model_scope(&db, "key-a"),
+        ModelScope::Only { models: vec![] }
+    );
+    assert!(capability_pairs(&db, "key-a").is_empty());
+    assert_key_cannot_serve(&db, "key-a", "model-b");
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn v53_intersects_existing_only_scope_instead_of_widening() {
     use ocg_domain::credential::ModelScope;
 
@@ -4617,6 +4672,13 @@ fn import_node_state_moves_linked_models_onto_parent_and_keeps_scopes() {
     let dest = Database::open(dest_dir.clone()).unwrap();
     dest.import_node_state(&record, |_| -> Result<()> { Ok(()) })
         .unwrap();
+    drop(dest);
+
+    let dest = Database::open(dest_dir.clone()).unwrap();
+    assert_restored_platform_catalog_and_scopes(&dest, "parent-import");
+    dest.import_node_state(&record, |_| -> Result<()> { Ok(()) })
+        .unwrap();
+    assert_restored_platform_catalog_and_scopes(&dest, "parent-import");
     drop(dest);
 
     let dest = Database::open(dest_dir.clone()).unwrap();

@@ -139,11 +139,18 @@ fn backfill_destination_models_from_leftover(
         .collect::<rusqlite::Result<Vec<_>>>()?;
     drop(stmt);
 
+    // Start from Custom credentials, not leftover rows: a Key with an empty
+    // leftover list must still intersect (`All ∩ []` / `Only[x] ∩ []` → `Only[]`).
+    // A missing or unreadable leftover table never reaches this loop.
+    let mut leftover_by_account: HashMap<String, Vec<String>> = HashMap::new();
+    for account_id in custom_inference_account_ids(conn)? {
+        leftover_by_account.entry(account_id).or_default();
+    }
+
     // Aggregate by destination so two Keys on one platform parent write one
     // catalog. HashMap iteration must not decide which Key wins.
     let mut dest_order: Vec<String> = Vec::new();
     let mut by_destination: HashMap<String, Vec<AccountModelCapabilityInput>> = HashMap::new();
-    let mut leftover_by_account: HashMap<String, Vec<String>> = HashMap::new();
     for (account_id, public_model, upstream_model, protocol_value, source) in rows {
         let provider = credential_provider_id(conn, &account_id)?;
         if provider.as_deref() != Some(CUSTOM_PROVIDER_ID) {
@@ -740,24 +747,18 @@ pub(crate) fn merge_linked_custom_models_for_import(
     Ok(())
 }
 
-/// Re-narrow imported linked Keys after identity restore may write `All`.
-pub(crate) fn narrow_linked_scopes_from_custom_destinations(
+/// Re-narrow imported Custom scopes after identity restore may write `All`.
+/// Uses the package capability list, including empty lists — an independent
+/// Custom destination may be gone after a later merge onto the platform parent.
+pub(crate) fn narrow_imported_custom_scopes(
     conn: &Connection,
-    account_ids: &HashSet<String>,
+    imported: &[(&str, &[AccountModelCapabilityInput])],
 ) -> Result<()> {
-    for account_id in account_ids {
-        if platform_parent_id(conn, account_id)?.is_none() {
-            continue;
-        }
-        let custom_id = destination_id_for_custom_account(account_id);
-        let models = load_destination_model_inputs(conn, &custom_id, true)?;
-        if models.is_empty() {
-            continue;
-        }
+    for (account_id, capabilities) in imported {
         narrow_credential_scope_intersect(
             conn,
             account_id,
-            &unique_public_models_from_inputs(&models),
+            &unique_public_models_from_inputs(capabilities),
         )?;
     }
     Ok(())
@@ -1054,6 +1055,38 @@ fn destination_exists(conn: &Connection, destination_id: &str) -> Result<bool> {
         [destination_id],
         |row| row.get::<_, i64>(0),
     )? != 0)
+}
+
+fn custom_inference_account_ids(conn: &Connection) -> Result<Vec<String>> {
+    if table_exists(conn, "credentials")? && table_has_column(conn, "credentials", "provider_id")? {
+        let purpose_filter = if table_has_column(conn, "credentials", "credential_purpose")? {
+            "AND COALESCE(credential_purpose, 'inference') = 'inference'"
+        } else {
+            ""
+        };
+        let mut stmt = conn.prepare(&format!(
+            "SELECT legacy_account_id FROM credentials
+             WHERE provider_id = ?1
+               {purpose_filter}
+             ORDER BY COALESCE(routing_rank, 0) ASC, COALESCE(created_at, '') ASC, legacy_account_id ASC"
+        ))?;
+        return stmt
+            .query_map([CUSTOM_PROVIDER_ID], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into);
+    }
+    if table_exists(conn, "accounts")? && table_has_column(conn, "accounts", "provider_id")? {
+        let mut stmt = conn.prepare(
+            "SELECT id FROM accounts
+             WHERE provider_id = ?1
+             ORDER BY id ASC",
+        )?;
+        return stmt
+            .query_map([CUSTOM_PROVIDER_ID], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into);
+    }
+    Ok(Vec::new())
 }
 
 fn linked_account_ids(conn: &Connection) -> Result<HashSet<String>> {

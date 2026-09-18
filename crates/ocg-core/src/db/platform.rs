@@ -15,7 +15,7 @@ use ocg_domain::credential::{
 };
 use ocg_domain::destination::{
     LegacyDestinationFacts, PlatformKind as DomainPlatformKind, destination_from_legacy,
-    destination_id_for_platform_account,
+    destination_id_for_custom_account, destination_id_for_platform_account,
 };
 use rusqlite::OptionalExtension;
 
@@ -1379,13 +1379,28 @@ pub(crate) fn clear_link_snapshot_for_account(conn: &Connection, account_id: &st
 
 pub(crate) fn unlink_imported_accounts(conn: &Connection, account_ids: &[String]) -> Result<()> {
     for account_id in account_ids {
-        conn.execute(
-            "UPDATE credentials
-             SET group_json = NULL, link_version = NULL, link_snapshot = NULL
-             WHERE legacy_account_id = ?1
-               AND COALESCE(credential_purpose, 'inference') = 'inference'",
-            [account_id],
-        )?;
+        let linked = custom_store::platform_parent_id(conn, account_id)?.is_some();
+        if linked {
+            // `group_json` alone does not unlink: readers treat a platform
+            // parent `destination_id` as linked even when group evidence is gone.
+            let custom_dest = destination_id_for_custom_account(account_id);
+            conn.execute(
+                "UPDATE credentials
+                 SET group_json = NULL, link_version = NULL, link_snapshot = NULL,
+                     destination_id = ?2
+                 WHERE legacy_account_id = ?1
+                   AND COALESCE(credential_purpose, 'inference') = 'inference'",
+                params![account_id, custom_dest],
+            )?;
+        } else {
+            conn.execute(
+                "UPDATE credentials
+                 SET group_json = NULL, link_version = NULL, link_snapshot = NULL
+                 WHERE legacy_account_id = ?1
+                   AND COALESCE(credential_purpose, 'inference') = 'inference'",
+                [account_id],
+            )?;
+        }
     }
     Ok(())
 }

@@ -126,7 +126,8 @@ v52 之后的 Host 打开不会因为 `project()` 再也读不到 `accounts` 而
 v53 让 `destinations` + `destination_models` 成为 Custom HTTP 的 endpoint、协议与模型映射存储，并物理删除两张遗留表：
 
 - 删除前，每一条未链接的遗留 `account_custom_configs` / `account_model_capabilities` 必须能映射到 Custom 目的地（`legacy_kind=custom_account`，`legacy_id=account_id`）及其 `destination_models`。空 URL 或未知协议拒绝迁移；不编造 URL 或协议。
-- 只存在于 `platform_links` 加遗留 custom 配置的已链接平台 Key 仍留在 `platform_*` 表，直到 v54。它们的遗留 custom 行不会映射成 Custom 目的地。
+- 只存在于 `platform_links` 加遗留 custom 配置的已链接平台 Key 仍留在 `platform_*` 表，直到 v54。它们的遗留 custom 行不会映射成 Custom 目的地；遗留模型行会合入平台父级目录。
+- 可读的遗留能力会与每一把 Custom 凭据的已存范围取交集，包括没有任何遗留行的 Key（`All ∩ []` 与 `Only[x] ∩ []` 都变成 `Only[]`）。列无法映射的遗留表在仍有行时拒绝迁移，且不会被当成空能力集合。
 - 然后 `DROP TABLE account_custom_configs;` 与 `DROP TABLE account_model_capabilities;`。
 
 v53 之后的 Host 打开不会清空已有的 destinations/credentials。`account_custom_config` / `list_account_model_capabilities*` 从 Custom 目的地重建（已链接 Key 则从平台父级目的地目录重建）。写入打 destinations 与 `destination_models`，并在需要时刷新 `credentials.destination_id`。V4 GET 目的地/凭据 DTO 仍不含秘密。全新库迁移结束后不再保留这两张遗留表。v54 之后 `platform_accounts` 与 `platform_links` 也不再保留。v55 之后 `cpa_integration` 也不再保留。v56 之后遗留 `providers` / `provider_models` 也不再保留。身份附属表仍在。不另写迁移前备份。回滚仍是既有的整目录恢复。
