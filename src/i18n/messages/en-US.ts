@@ -1,6 +1,8 @@
 import { managedAccountEnUSMessages } from "./managed-account.ts";
 
 export const enUSMessages = {
+  "{protocol}（未验证）": "{protocol} (unverified)",
+  "官方协议资料不可用。确认手动启用 {protocol}？此操作只修改配置，不发送测试请求；后续推理可能失败或产生费用。": "Official protocol information is unavailable. Manually enable {protocol}? This only changes configuration and sends no test request. Later inference may fail or incur charges.",
   "官网 API 账务参考": "Official API financial reference",
   "官网余额与本月估算": "Official balance and monthly estimate",
   "官网价格参考": "Official pricing reference",
