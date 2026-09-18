@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { Account } from "../api/dashboard.ts";
-import type { PlatformAccount, PlatformLink, PlatformPrice, PlatformSnapshot } from "../api/platform-accounts.ts";
+import type { PlatformLink, PlatformPrice, PlatformSnapshot } from "../api/platform-accounts.ts";
 import {
-  buildAccountRouteItems,
+  canImportPlatformKeys,
+  composeNewApiUserCredential,
   discoveredModelCapabilities,
-  expandAccountRouteOrder,
   platformKeyGroupLabel,
   platformKeyQuotaName,
   platformModelOverlay,
@@ -16,7 +16,7 @@ import {
   importCandidateCapabilities,
   linkForAccount,
   linkedAccountIdSet,
-  moveKeyWithinPlatform,
+  newApiCredentialIssue,
   platformGroupLabel,
   platformHostedEndpoint,
   platformInferenceEndpoint,
@@ -25,11 +25,28 @@ import {
   platformPriceFlags,
   platformPriceForModel,
   platformPriceRows,
-  platformRouteItemId,
   PLATFORM_UNAVAILABLE_REASON_KEYS,
   platformUnavailableReasonKey,
   quotasByKind,
 } from "./platform-accounts.ts";
+
+test("New API key import is only offered with a user credential", () => {
+  assert.equal(canImportPlatformKeys({ kind: "new_api", hasUserCredential: true }), true);
+  assert.equal(canImportPlatformKeys({ kind: "new_api", hasUserCredential: false }), false);
+  assert.equal(canImportPlatformKeys({ kind: "sub2api", hasUserCredential: true }), false);
+});
+
+test("New API credential is user id and token together, or omitted", () => {
+  assert.equal(newApiCredentialIssue("", ""), null);
+  assert.equal(newApiCredentialIssue("  ", "  "), null);
+  assert.equal(newApiCredentialIssue("18", ""), "user_id_without_token");
+  assert.equal(newApiCredentialIssue("", "pat"), "token_without_user_id");
+  assert.equal(newApiCredentialIssue("ab", "pat"), "user_id_not_digits");
+  assert.equal(newApiCredentialIssue("18", "pat"), null);
+  assert.equal(composeNewApiUserCredential("", ""), undefined);
+  assert.equal(composeNewApiUserCredential("18", ""), undefined);
+  assert.equal(composeNewApiUserCredential("18", " pat "), "18:pat");
+});
 
 test("platform hosted endpoint is the site root", () => {
   assert.equal(platformHostedEndpoint("https://newapi.example.com"), "https://newapi.example.com");
@@ -108,55 +125,6 @@ function link(accountId: string, platformAccountId: string): PlatformLink {
     snapshot: null,
   };
 }
-
-function account(id: string): Account {
-  return { id } as Account;
-}
-
-function parent(id: string, name = id): PlatformAccount {
-  return {
-    id,
-    kind: "new_api",
-    name,
-    baseUrl: `https://${id}.example`,
-    hasUserCredential: false,
-    version: 1,
-    snapshot: null,
-  };
-}
-
-test("linked Keys fold into one sortable platform row", () => {
-  const items = buildAccountRouteItems(
-    [account("minimax"), account("k1"), account("k2"), account("kimi")],
-    [parent("site")],
-    [link("k1", "site"), link("k2", "site")],
-  );
-  assert.deepEqual(items.map((item) => item.id), ["minimax", platformRouteItemId("site"), "kimi"]);
-  assert.equal(items[1]?.type, "platform");
-  if (items[1]?.type === "platform") {
-    assert.deepEqual(items[1].keys.map((key) => key.id), ["k1", "k2"]);
-  }
-  assert.deepEqual(expandAccountRouteOrder(items), ["minimax", "k1", "k2", "kimi"]);
-});
-
-test("empty platform instances append after Key-bearing rows", () => {
-  const items = buildAccountRouteItems(
-    [account("go")],
-    [parent("empty")],
-    [],
-  );
-  assert.equal(items[0]?.type, "account");
-  assert.equal(items[1]?.type, "platform");
-  if (items[1]?.type === "platform") assert.deepEqual(items[1].keys, []);
-});
-
-test("moving a Key inside a platform keeps the surrounding order", () => {
-  assert.deepEqual(
-    moveKeyWithinPlatform(["go", "k1", "k2", "kimi"], ["k1", "k2"], "k2", -1),
-    ["go", "k2", "k1", "kimi"],
-  );
-  assert.equal(moveKeyWithinPlatform(["go", "k1", "k2"], ["k1", "k2"], "k1", -1), null);
-});
 
 test("same public models on two Keys overlay without merging rates", () => {
   const overlay = platformModelOverlay([

@@ -13,6 +13,8 @@ import {
   accountStatusTagType,
   cooldownDetails,
   cooldownRemainingUntil,
+  destinationTypeLabel,
+  groupMoveMenuOptions,
   usageSyncStatus,
 } from "./account-display.ts";
 import { localDateString } from "./account-lifecycle.ts";
@@ -355,7 +357,67 @@ test("usage sync status reports last success or never-synced, never a refresh co
   });
 });
 
+test("groupMoveMenuOptions disables the end moves and registers label keys", () => {
+  const account = { id: "key-1", name: "Key" };
+  const first = groupMoveMenuOptions(account, 0, 3);
+  assert.deepEqual(first.map((option) => option.key), ["move-up", "move-down"]);
+  assert.equal(first[0]?.disabled, true);
+  assert.equal(first[1]?.disabled, false);
+  const last = groupMoveMenuOptions(account, 2, 3);
+  assert.equal(last[0]?.disabled, false);
+  assert.equal(last[1]?.disabled, true);
+  const only = groupMoveMenuOptions(account, 0, 1);
+  assert.equal(only[0]?.disabled, true);
+  assert.equal(only[1]?.disabled, true);
+  for (const key of ["move-up", "move-down", "fetch-models", "edit-key", "unlink"] as const) {
+    assert.ok(Object.prototype.hasOwnProperty.call(ACCOUNT_MENU_LABEL_KEYS, key));
+  }
+});
+
 test("unparseable sync timestamps pass through as raw data", () => {
   const broken = draftAccount({ usage_sync_last_success_at: "not-a-date" });
   assert.deepEqual(usageSyncStatus(broken), { kind: "synced", time: "not-a-date" });
+});
+
+test("destination type label follows destination capabilities", () => {
+  const caps = {
+    billing_tier_required: false,
+    discoverable_models: false,
+    external_integration: false,
+    identity_headers: false,
+    managed_signup: false,
+    observer: false,
+    official_balance_probe: [],
+    redirect_policy: "no_follow" as const,
+    testable: true,
+  };
+  assert.equal(destinationTypeLabel({
+    adapter: "cpa",
+    auth_scheme: "none",
+    brand_family: null,
+    capabilities: { ...caps, external_integration: true, testable: false },
+    max_credentials: 1,
+    name: "CPA",
+    plan: null,
+  }).kind, "cpa");
+  assert.equal(destinationTypeLabel({
+    adapter: "zen",
+    auth_scheme: "none",
+    brand_family: "OpenCode",
+    capabilities: caps,
+    max_credentials: 1,
+    name: "Zen Free",
+    plan: null,
+  }).kind, "keyless");
+  const named = destinationTypeLabel({
+    adapter: "http",
+    auth_scheme: "bearer",
+    brand_family: null,
+    capabilities: caps,
+    max_credentials: 1,
+    name: "lab.example",
+    plan: null,
+  });
+  assert.equal(named.kind, "plan");
+  if (named.kind === "plan") assert.equal(named.label, "lab.example");
 });

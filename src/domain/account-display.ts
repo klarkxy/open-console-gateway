@@ -1,10 +1,12 @@
 import type { Account, AccountSetupStep } from "../api/dashboard";
+import type { Destination } from "../api/destinations.ts";
+import type { ProviderCatalogEntry } from "../api/providers.ts";
 import { isCooling, isFreeCooling, isWindowCooling } from "./accounts-usage.ts";
 import type { UsageKey } from "./accounts-usage.ts";
 import { daysUntilDate, expiryTagType } from "./account-lifecycle.ts";
 import type { ExpiryTagType } from "./account-lifecycle.ts";
-import { isCpaIntegrationAccount, isOllamaCloudAccount, isZenFreeAccount } from "./account-providers.ts";
-import { isCustomApiAccount } from "./custom-account.ts";
+import { accountCapabilities, destinationCapabilities } from "./account-capabilities.ts";
+import { planLabel } from "./plans.ts";
 import type { MessageKey } from "../i18n/index.ts";
 
 /**
@@ -24,6 +26,7 @@ export type AccountMenuOption = {
   label?: string;
   accountId: string;
   accountName: string;
+  disabled?: boolean;
 };
 
 /** Menu labels by option key; the view renders t(ACCOUNT_MENU_LABEL_KEYS[key]). */
@@ -36,7 +39,73 @@ export const ACCOUNT_MENU_LABEL_KEYS = {
   edit: "编辑账号",
   reset: "重置冷却",
   delete: "删除账号",
+  "move-up": "上移",
+  "move-down": "下移",
+  "fetch-models": "获取模型",
+  "edit-key": "编辑",
+  unlink: "取消关联",
 } as const satisfies Record<string, MessageKey>;
+
+/** Neutral type-tag code, or the catalog plan label when the card is a billed family. */
+export type AccountTypeLabel =
+  | { kind: "cpa" }
+  | { kind: "keyless" }
+  | { kind: "plan"; label: string };
+
+export const ACCOUNT_TYPE_LABEL_KEYS = {
+  cpa: "CPA 订阅池",
+  keyless: "免费通道",
+} as const satisfies Record<"cpa" | "keyless", MessageKey>;
+
+export function accountTypeLabel(
+  account: Pick<Account, "id" | "provider_id" | "account_type">,
+  catalog: readonly ProviderCatalogEntry[] | null | undefined,
+): AccountTypeLabel {
+  const caps = accountCapabilities(account, catalog);
+  if (caps.externalIntegration) return { kind: "cpa" };
+  if (caps.keylessSingleton) return { kind: "keyless" };
+  return { kind: "plan", label: planLabel(account, catalog) };
+}
+
+export function destinationTypeLabel(
+  destination: Pick<
+    Destination,
+    | "adapter"
+    | "auth_scheme"
+    | "brand_family"
+    | "capabilities"
+    | "max_credentials"
+    | "name"
+    | "plan"
+  >,
+): AccountTypeLabel {
+  const caps = destinationCapabilities(destination);
+  if (caps.externalIntegration) return { kind: "cpa" };
+  if (caps.keylessSingleton) return { kind: "keyless" };
+  return { kind: "plan", label: destination.brand_family ?? destination.name };
+}
+
+/** Reorder actions for a credential inside a multi-account destination. */
+export function groupMoveMenuOptions(
+  account: Pick<Account, "id" | "name">,
+  index: number,
+  count: number,
+): AccountMenuOption[] {
+  return [
+    {
+      key: "move-up",
+      accountId: account.id,
+      accountName: account.name,
+      disabled: index <= 0,
+    },
+    {
+      key: "move-down",
+      accountId: account.id,
+      accountName: account.name,
+      disabled: count <= 0 || index >= count - 1,
+    },
+  ];
+}
 
 export function accountIsReady(account: Pick<Account, "setup_step">): boolean {
   return account.setup_step === "ready";
@@ -110,8 +179,12 @@ export type AccountStatus =
 
 const ZERO_REMAINING: CooldownRemaining = { unit: "seconds", seconds: 0 };
 
-export function accountStatus(account: Account, now = Date.now()): AccountStatus {
-  if (isZenFreeAccount(account)) {
+export function accountStatus(
+  account: Account,
+  now = Date.now(),
+  catalog: readonly ProviderCatalogEntry[] | null | undefined = null,
+): AccountStatus {
+  if (accountCapabilities(account, catalog).freeCooldownOnly) {
     if (!account.enabled) return { kind: "disabled" };
     if (isFreeCooling(account, now)) {
       return {
@@ -136,8 +209,12 @@ export function accountStatus(account: Account, now = Date.now()): AccountStatus
   return { kind: "enabled" };
 }
 
-export function accountStatusTagType(account: Account, now = Date.now()): AccountStatusTagType {
-  if (isZenFreeAccount(account)) {
+export function accountStatusTagType(
+  account: Account,
+  now = Date.now(),
+  catalog: readonly ProviderCatalogEntry[] | null | undefined = null,
+): AccountStatusTagType {
+  if (accountCapabilities(account, catalog).freeCooldownOnly) {
     if (!account.enabled) return "error";
     return isFreeCooling(account, now) ? "warning" : "success";
   }
@@ -230,17 +307,22 @@ export function usageSyncStatus(account: Account): UsageSyncStatus {
     : { kind: "never" };
 }
 
-export function accountMenuOptions(account: Account, now = Date.now()): AccountMenuOption[] {
+export function accountMenuOptions(
+  account: Account,
+  now = Date.now(),
+  catalog: readonly ProviderCatalogEntry[] | null | undefined = null,
+): AccountMenuOption[] {
   const options: AccountMenuOption[] = [];
+  const caps = accountCapabilities(account, catalog);
   // CPA is a static external-integration singleton. Account ordering and its
   // enabled switch stay here; all other controls live on the CPA page.
-  if (isCpaIntegrationAccount(account)) {
+  if (caps.externalIntegration) {
     options.push({ key: "open-cpa", accountId: account.id, accountName: account.name });
     return options;
   }
   // The built-in Zen Free singleton has no Key/profile/console actions.
-  if (isZenFreeAccount(account)) return options;
-  if (isCustomApiAccount(account)) {
+  if (caps.keylessSingleton) return options;
+  if (caps.endpointOnAccount) {
     // Custom API has no OpenCode console, browser profile, or managed setup;
     // keep only the generic lifecycle actions.
     if (accountIsReady(account)) {
@@ -260,21 +342,22 @@ export function accountMenuOptions(account: Account, now = Date.now()): AccountM
     });
     return options;
   }
-  // The console link, managed setup, and browser-profile actions are
-  // OpenCode-only semantics; other sealed families stop at the generic
-  // lifecycle actions.
-  const isOpencodeGo = account.provider_id === "opencode";
-  if (isOpencodeGo && !accountIsReady(account)) {
-    options.push({
-      key: "continue-setup",
-      accountId: account.id,
-      accountName: account.name,
-    });
-    options.push({
-      key: "reset-profile",
-      accountId: account.id,
-      accountName: account.name,
-    });
+  const opencodeActions = caps.consoleLink === "opencode" || caps.browserProfile || caps.managedSignup;
+  if (opencodeActions && !accountIsReady(account)) {
+    if (caps.managedSignup) {
+      options.push({
+        key: "continue-setup",
+        accountId: account.id,
+        accountName: account.name,
+      });
+    }
+    if (caps.browserProfile) {
+      options.push({
+        key: "reset-profile",
+        accountId: account.id,
+        accountName: account.name,
+      });
+    }
     options.push({
       key: "delete",
       accountId: account.id,
@@ -283,14 +366,14 @@ export function accountMenuOptions(account: Account, now = Date.now()): AccountM
     return options;
   }
   if (accountIsReady(account)) {
-    if (isOpencodeGo) {
+    if (caps.consoleLink === "opencode") {
       options.push({
         key: "open-console",
         accountId: account.id,
         accountName: account.name,
       });
     }
-    if (isOllamaCloudAccount(account)) {
+    if (caps.consoleLink === "ollama") {
       options.push({
         key: "open-site",
         accountId: account.id,
@@ -305,7 +388,7 @@ export function accountMenuOptions(account: Account, now = Date.now()): AccountM
         accountName: account.name,
       });
     }
-    if (isOpencodeGo) {
+    if (caps.browserProfile) {
       options.push({
         key: "reset-profile",
         accountId: account.id,

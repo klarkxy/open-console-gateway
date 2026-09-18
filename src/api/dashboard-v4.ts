@@ -12,6 +12,8 @@ import type {
   BindingPatchRequest,
   BindingPatchResult,
   ConnectionList,
+  CredentialList,
+  DestinationList,
   AliasPublication,
   AliasPublicationUpdate,
   CatalogModelsRemoveRequest,
@@ -34,6 +36,8 @@ export const dashboardV4 = {
   getTemplates: () => requestV4<TemplateList>("/templates"),
   getConnections: () => requestV4<ConnectionList>("/connections"),
   getAccounts: () => requestV4<IdentityList>("/accounts"),
+  getDestinations: () => requestV4<DestinationList>("/destinations"),
+  getCredentials: () => requestV4<CredentialList>("/credentials"),
   commitOnboarding: (
     input: WithoutExpectation<OnboardingCommitRequest>,
     expectation: MutationExpectation,

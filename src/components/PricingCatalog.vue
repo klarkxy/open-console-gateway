@@ -191,6 +191,7 @@ import {
   formatPricingRate,
 } from "../domain/pricing-view.ts";
 import type { PricingTableRow } from "../domain/pricing-view.ts";
+import { isLegacyGoFallbackPlan, usesLegacyGoPricingSnapshot } from "../domain/account-capabilities.ts";
 import { providerSurfaces } from "../domain/plans.ts";
 import {
   buildScopedPlanPricingGroups,
@@ -244,12 +245,12 @@ const providerRefreshRevision = computed<string | undefined>(() => {
   const group = activeGroup.value;
   if (!group) return undefined;
   return providerSnapshots.value[group.plan.provider_id]?.provider_pricing_revision
-    ?? (group.plan.provider_id === "opencode" ? snapshot.value?.revision : undefined);
+    ?? (usesLegacyGoPricingSnapshot(group.plan) ? snapshot.value?.revision : undefined);
 });
 
 function pricingError(group: PlanPricingGroup): string | null {
   return providerSnapshotErrors.value[group.plan.provider_id]
-    ?? (catalog.value == null && group.plan.provider_id === "opencode" && !snapshot.value
+    ?? (isLegacyGoFallbackPlan(group.plan, catalog.value) && !snapshot.value
       ? loadError.value || null
       : null);
 }
@@ -263,7 +264,7 @@ function pricingSourceUrl(group: PlanPricingGroup): string {
 }
 
 function retryGroupPricing(group: PlanPricingGroup) {
-  if (catalog.value == null && group.plan.provider_id === "opencode") {
+  if (isLegacyGoFallbackPlan(group.plan, catalog.value)) {
     void loadPricing();
   } else if (catalog.value) {
     void loadProviderSnapshots(catalog.value);
@@ -733,7 +734,7 @@ async function performPricingRefresh(
       );
     } else if (result.refresh_status === "success") {
       if (catalog.value) await loadProviderSnapshots(catalog.value);
-      else if (group.plan.provider_id === "opencode") await loadPricing();
+      else if (isLegacyGoFallbackPlan(group.plan, catalog.value)) await loadPricing();
       message.success(policy === "keep_current"
         ? t("价格表已更新，已保留当前倍率")
         : policy === "use_official"
@@ -741,7 +742,7 @@ async function performPricingRefresh(
           : t("价格表已更新"));
     } else if (result.refresh_status === "unchanged") {
       if (catalog.value) await loadProviderSnapshots(catalog.value);
-      else if (group.plan.provider_id === "opencode") await loadPricing();
+      else if (isLegacyGoFallbackPlan(group.plan, catalog.value)) await loadPricing();
       message.info(t("价格表没有变化"));
     } else {
       refreshError.value = result.error || t("价格表刷新失败，详见页面提示");

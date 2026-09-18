@@ -266,7 +266,7 @@ import {
   PROVIDER_PROTOCOLS,
   type ProviderScopeView,
 } from "../domain/provider-contracts.ts";
-import { CPA_PROVIDER_ID } from "../domain/account-providers.ts";
+import { CPA_PROVIDER_ID } from "../domain/destination-providers.ts";
 import { t } from "../i18n/index.ts";
 
 const props = defineProps<{

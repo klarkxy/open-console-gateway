@@ -6,13 +6,19 @@
         {{ t("重试") }}
       </n-button>
     </div>
-    <div v-else-if="creditBalances.length === 0" class="account-credit-balance__empty">
-      {{ t("尚未刷新") }}
-    </div>
+    <AccountFigure
+      v-else-if="creditBalances.length === 0"
+      :label="t('余额')"
+      value="—"
+      :caption="t('尚未刷新')"
+    />
     <template v-else>
-      <div v-for="row in creditBalances" :key="row.balance_kind" class="account-credit-balance__row">
-        {{ t("当前余额 {value}", { value: formatQuotaAmount(row.amount, row.unit, locale) }) }}
-      </div>
+      <AccountFigure
+        v-for="row in creditBalances"
+        :key="row.balance_kind"
+        :label="t('余额')"
+        :value="formatQuotaAmount(row.amount, row.unit, locale)"
+      />
     </template>
   </div>
 </template>
@@ -22,6 +28,7 @@ import { NButton } from "naive-ui";
 import type { ProviderCreditBalance } from "../api/providers.ts";
 import { locale, t } from "../i18n/index.ts";
 import { formatQuotaAmount } from "../domain/platform-accounts.ts";
+import AccountFigure from "./AccountFigure.vue";
 
 defineProps<{
   creditBalances: readonly ProviderCreditBalance[];
@@ -37,25 +44,14 @@ const emit = defineEmits<{
 <style scoped>
 .account-credit-balance {
   display: grid;
+  justify-items: start;
   gap: var(--ocg-space-xs);
-  margin-top: var(--ocg-space-sm);
-  font-size: var(--ocg-font-sm);
-}
-
-.account-credit-balance__empty {
-  color: var(--ocg-subtle);
-}
-
-.account-credit-balance__row {
-  font-variant-numeric: tabular-nums;
 }
 
 .usage-load-error {
   display: flex;
   align-items: center;
-  justify-content: center;
   gap: var(--ocg-space-sm);
-  min-height: 42px;
   color: var(--ocg-error);
   font-size: var(--ocg-font-sm);
 }

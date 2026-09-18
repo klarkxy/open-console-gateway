@@ -35,7 +35,7 @@
           <section v-for="pane in railPanes" :key="pane.id" class="providers-rail-pane">
             <h3 class="providers-rail-pane__label">{{ pane.label }}</h3>
             <n-menu
-              :value="selectedConnectionId"
+              :value="selectedRailKey"
               :options="pane.options"
               :aria-label="`${t('选择供应商范围')} · ${pane.label}`"
               @update:value="selectConnection"
@@ -64,7 +64,7 @@
       <div class="providers-main">
         <div class="providers-mobile-nav">
           <n-select
-            :value="addStage ? ADD_SELECT_VALUE : selectedConnectionId"
+            :value="addStage ? ADD_SELECT_VALUE : selectedRailKey"
             :options="mobileSelectOptions"
             filterable
             :aria-label="t('选择供应商范围')"
@@ -442,6 +442,38 @@
           </n-alert>
         </section>
 
+        <section
+          v-else-if="selectedDestination && !selectedConnection"
+          class="providers-section"
+          aria-labelledby="provider-detail-title"
+        >
+          <div class="providers-catalog-head">
+            <div class="providers-catalog-heading providers-detail-heading">
+              <ProviderBrandMark :family="selectedConnectionFamily" :size="22" />
+              <h2 id="provider-detail-title">{{ selectedDestination.name }}</h2>
+              <div class="providers-catalog-meta">
+                <n-tag size="small" :bordered="false">{{ selectedDestinationTypeLabel }}</n-tag>
+                <n-tag v-if="selectedDestination.brand_family" size="small" :bordered="false">
+                  {{ selectedDestination.brand_family }}
+                </n-tag>
+              </div>
+            </div>
+          </div>
+          <dl class="providers-connection-facts" :aria-label="t('连接信息')">
+            <div class="providers-connection-facts__row">
+              <dt>{{ t("API 地址") }}</dt>
+              <dd><code>{{ selectedDestination.base_url || t("未设置") }}</code></dd>
+            </div>
+            <div class="providers-connection-facts__row">
+              <dt>{{ t("凭据数量") }}</dt>
+              <dd>{{ selectedDestinationCredentialCount }}</dd>
+            </div>
+          </dl>
+          <n-button type="primary" size="small" @click="openAccounts">
+            {{ t("打开账号页") }}
+          </n-button>
+        </section>
+
         <section v-else class="providers-section" :aria-label="t('暂无已接入的供应商')">
           <n-empty :description="t('暂无已接入的供应商')">
             <template #extra>
@@ -502,9 +534,11 @@ import {
 } from "naive-ui";
 import type { MenuOption, SelectOption } from "naive-ui";
 import type { Connection } from "../api/connections.ts";
+import type { Destination } from "../api/destinations.ts";
 import { DashboardRequestError, dashboardApi, type AccountInput } from "../api/dashboard";
 import { isRevisionConflict, providerApi } from "../api/providers.ts";
 import { useAccountsStore } from "../stores/accounts.ts";
+import { useDestinationsStore } from "../stores/destinations.ts";
 import { useProvidersStore } from "../stores/providers.ts";
 import type {
   ProviderDefinitionView,
@@ -525,6 +559,8 @@ import { t, type MessageKey } from "../i18n/index.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
 import { formatDateTime } from "../utils/format.ts";
 import {
+  accountAddDeepLinkFromProviderAdd,
+  accountAddQueryValue,
   applyAppViewSearchParams,
   readProviderPageQuery,
   resolveAppViewKey,
@@ -549,10 +585,18 @@ import {
   isOnboardingDraftConnection,
   selectedConnectionIdFromQuery,
 } from "../domain/connections.ts";
+import { destinationBrandFamily } from "../domain/account-brand.ts";
+import { destinationTypeLabel } from "../domain/account-display.ts";
+import { accountTypeLabelText } from "./account-status-text.ts";
+import {
+  connectionForDestination,
+  filterDestinations,
+  groupDestinationsByOffering,
+  railKeyForDestination,
+} from "../domain/destination-providers.ts";
 
 import {
   catalogEntryFamily,
-  providerAddStageFromQuery,
   providerAddStageToQuery,
   type ProviderAddStage,
 } from "../domain/provider-catalog.ts";
@@ -573,6 +617,7 @@ import {
 
 const message = useMessage();
 const accountsStore = useAccountsStore();
+const destinationsStore = useDestinationsStore();
 const providersStore = useProvidersStore();
 const contracts = computed(() => {
   const value = providersStore.contracts;
@@ -594,6 +639,9 @@ const railQuery = ref("");
 const loading = ref(false);
 const loadError = ref("");
 const selectedConnectionId = ref<string | null>(null);
+const selectedDestinationId = ref<string | null>(null);
+const destinations = computed(() => destinationsStore.destinations);
+const selectedRailKey = computed(() => selectedConnectionId.value ?? selectedDestinationId.value);
 const lastCommittedConnectionId = ref<string | null>(null);
 const activeTab = ref<ProviderDetailTab>("models");
 const definitions = ref<Map<string, ProviderDefinitionView>>(new Map());
@@ -628,6 +676,26 @@ const scopes = computed(() => (
 const selectedConnection = computed(() => (
   connections.value.find((item) => item.id === selectedConnectionId.value) ?? null
 ));
+const selectedDestination = computed(() => {
+  if (selectedDestinationId.value) {
+    return destinations.value.find((row) => row.id === selectedDestinationId.value) ?? null;
+  }
+  const connection = selectedConnection.value;
+  if (!connection) return null;
+  return destinations.value.find((row) => (
+    connectionForDestination(connections.value, row)?.id === connection.id
+  )) ?? null;
+});
+const selectedDestinationTypeLabel = computed(() => (
+  selectedDestination.value
+    ? accountTypeLabelText(destinationTypeLabel(selectedDestination.value))
+    : ""
+));
+const selectedDestinationCredentialCount = computed(() => (
+  selectedDestination.value
+    ? destinationsStore.credentials.filter((row) => row.destination_id === selectedDestination.value?.id).length
+    : 0
+));
 const selectedEntry = computed(() => {
   const connection = selectedConnection.value;
   if (!connection) return null;
@@ -641,11 +709,15 @@ const selectedStatus = computed(() => (
     ? connectionStatus(selectedConnection.value)
     : { kind: "ok" as const, label: null }
 ));
-const selectedConnectionFamily = computed(() => (
-  selectedConnection.value
-    ? connectionBrandFamily(selectedConnection.value, allCatalogEntries.value)
-    : catalogEntryFamily({ provider_id: "", display_family: "", display_name: "" })
-));
+const selectedConnectionFamily = computed(() => {
+  if (selectedConnection.value) {
+    return connectionBrandFamily(selectedConnection.value, allCatalogEntries.value);
+  }
+  if (selectedDestination.value) {
+    return destinationBrandFamily(selectedDestination.value, null, allCatalogEntries.value);
+  }
+  return catalogEntryFamily({ provider_id: "", display_family: "", display_name: "" });
+});
 const customAccountEndpoint = computed(() => (
   selectedConnection.value?.endpoints.find((endpoint) => endpoint.url)?.url ?? ""
 ));
@@ -727,6 +799,32 @@ function railStatusExtra(connection: Connection) {
 }
 
 const railPanes = computed<Array<{ id: "plan" | "api"; label: "Plan" | "API"; options: MenuOption[] }>>(() => {
+  const panes: Array<{ id: "plan" | "api"; label: "Plan" | "API"; options: MenuOption[] }> = [];
+  if (destinations.value.length > 0) {
+    const filtered = filterDestinations(destinations.value, railQuery.value);
+    const groups = groupDestinationsByOffering(filtered);
+    const toOptions = (list: readonly Destination[]): MenuOption[] => (
+      list.map((item) => {
+        const joined = connectionForDestination(connections.value, item);
+        return {
+          key: railKeyForDestination(item, connections.value),
+          label: item.name,
+          icon: () => h(ProviderBrandMark, {
+            family: joined
+              ? connectionBrandFamily(joined, allCatalogEntries.value)
+              : destinationBrandFamily(item, null, allCatalogEntries.value),
+            size: RAIL_BRAND_SIZE,
+          }),
+          extra: joined ? railStatusExtra(joined) : undefined,
+        };
+      })
+    );
+    const planOptions = toOptions(groups.plan);
+    const apiOptions = toOptions(groups.api);
+    if (planOptions.length) panes.push({ id: "plan", label: "Plan", options: planOptions });
+    if (apiOptions.length) panes.push({ id: "api", label: "API", options: apiOptions });
+    return panes;
+  }
   const filtered = filterConnections(connections.value, railQuery.value);
   const groups = groupConnectionsByOffering(filtered);
   const toOptions = (list: readonly Connection[]): MenuOption[] => (
@@ -740,7 +838,6 @@ const railPanes = computed<Array<{ id: "plan" | "api"; label: "Plan" | "API"; op
       extra: railStatusExtra(item),
     }))
   );
-  const panes: Array<{ id: "plan" | "api"; label: "Plan" | "API"; options: MenuOption[] }> = [];
   const planOptions = toOptions(groups.plan);
   const apiOptions = toOptions(groups.api);
   if (planOptions.length) panes.push({ id: "plan", label: "Plan", options: planOptions });
@@ -754,6 +851,23 @@ const railFilteredOut = computed(() => (
 const mobileSelectOptions = computed<SelectOption[]>(() => {
   // The mobile selector has its own built-in filter; the rail search query
   // must not shrink these options when the rail itself is hidden.
+  if (destinations.value.length > 0) {
+    const groups = groupDestinationsByOffering(destinations.value);
+    const labelFor = (item: Destination, offering: "Plan" | "API"): string => (
+      `${item.name} · ${offering}`
+    );
+    return [
+      ...groups.plan.map((item) => ({
+        value: railKeyForDestination(item, connections.value),
+        label: labelFor(item, "Plan"),
+      })),
+      ...groups.api.map((item) => ({
+        value: railKeyForDestination(item, connections.value),
+        label: labelFor(item, "API"),
+      })),
+      { value: ADD_SELECT_VALUE, label: t("添加供应商") },
+    ];
+  }
   const groups = groupConnectionsByOffering(connections.value);
   const labelFor = (item: Connection, offering: "Plan" | "API"): string => {
     const status = connectionStatus(item);
@@ -809,6 +923,9 @@ function writeUrl() {
   const stage = addStage.value;
   const url = applyAppViewSearchParams(new URL(window.location.href), "providers", {
     ...(selectedConnectionId.value ? { connection: selectedConnectionId.value } : {}),
+    ...(!selectedConnectionId.value && selectedDestinationId.value
+      ? { destination: selectedDestinationId.value }
+      : {}),
     ...(stage
       ? providerAddStageToQuery(stage)
       : activeTab.value !== "models" ? { tab: activeTab.value } : {}),
@@ -821,15 +938,50 @@ function applyFromQuery(
   prefer?: { connectionId?: string; providerId?: string },
 ) {
   const query = readProviderPageQuery(window.location.search);
-  addStage.value = providerAddStageFromQuery(query.add, query.preset);
+  if (query.add) {
+    addStage.value = null;
+    const url = applyAppViewSearchParams(new URL(window.location.href), "accounts");
+    url.searchParams.set(
+      "add",
+      accountAddQueryValue(accountAddDeepLinkFromProviderAdd(query.preset)),
+    );
+    window.history.replaceState(null, "", url);
+    window.dispatchEvent(new PopStateEvent("popstate"));
+    return;
+  }
+  addStage.value = null;
+  const destWanted = query.connection || prefer?.connectionId
+    ? null
+    : (query.destination ?? selectedDestinationId.value);
+  if (destWanted) {
+    const dest = destinations.value.find((row) => row.id === destWanted);
+    if (dest) {
+      selectedDestinationId.value = dest.id;
+      selectedConnectionId.value = connectionForDestination(connections.value, dest)?.id ?? null;
+      const candidate = query.tab ?? activeTab.value;
+      activeTab.value = candidate;
+      writeUrl();
+      return;
+    }
+  }
   const wanted = selectedConnectionIdFromQuery({
     connection: prefer?.connectionId ?? query.connection,
     provider: prefer?.providerId ?? query.provider,
   }, connections.value)
     ?? selectedConnectionId.value;
   const rows = connections.value;
-  if (rows.length === 0) {
+  if (rows.length === 0 && destinations.value.length === 0) {
     selectedConnectionId.value = null;
+    selectedDestinationId.value = null;
+    writeUrl();
+    return;
+  }
+  if (rows.length === 0 && destinations.value.length > 0) {
+    const dest = destinations.value[0]!;
+    selectedDestinationId.value = dest.id;
+    selectedConnectionId.value = connectionForDestination(connections.value, dest)?.id ?? null;
+    const candidate = query.tab ?? activeTab.value;
+    activeTab.value = candidate;
     writeUrl();
     return;
   }
@@ -838,6 +990,9 @@ function applyFromQuery(
     actionLive.value = t("所选范围已失效，切换到第一个供应商");
   }
   selectedConnectionId.value = row.id;
+  selectedDestinationId.value = destinations.value.find((dest) => (
+    connectionForDestination(connections.value, dest)?.id === row.id
+  ))?.id ?? null;
   const candidate = query.tab ?? activeTab.value;
   activeTab.value = candidate;
   writeUrl();
@@ -847,10 +1002,23 @@ function selectConnection(key: string | number) {
   // An embedded form with in-flight save/test/discovery must not be swapped
   // out; its stale-generation guards only cover responses, not dismissal.
   if (inlineFormBusy.value || addKeyBusy.value) return;
-  const connectionId = String(key);
-  if (!connections.value.some((item) => item.id === connectionId)) return;
+  const railKey = String(key);
+  const dest = destinations.value.find((row) => (
+    railKeyForDestination(row, connections.value) === railKey
+  ));
+  if (dest) {
+    addStage.value = null;
+    selectedDestinationId.value = dest.id;
+    selectedConnectionId.value = connectionForDestination(connections.value, dest)?.id ?? null;
+    writeUrl();
+    return;
+  }
+  if (!connections.value.some((item) => item.id === railKey)) return;
   addStage.value = null;
-  selectedConnectionId.value = connectionId;
+  selectedConnectionId.value = railKey;
+  selectedDestinationId.value = destinations.value.find((row) => (
+    connectionForDestination(connections.value, row)?.id === railKey
+  ))?.id ?? null;
   writeUrl();
 }
 
@@ -863,12 +1031,19 @@ function onMobileSelect(key: string | number) {
   selectConnection(value);
 }
 
+function openAccountAdd(link = accountAddDeepLinkFromProviderAdd(null)): void {
+  const url = applyAppViewSearchParams(new URL(window.location.href), "accounts");
+  url.searchParams.set("add", accountAddQueryValue(link));
+  window.history.pushState(null, "", url);
+  window.dispatchEvent(new PopStateEvent("popstate"));
+}
+
 function openAddFlow() {
   if (inlineFormBusy.value || addKeyBusy.value) return;
   showEditModal.value = false;
   editingDefinition.value = null;
-  addStage.value = { stage: "browse" };
-  writeUrl();
+  addStage.value = null;
+  openAccountAdd();
 }
 
 function onPresetBrowserSelect(presetId: string | null) {
@@ -950,6 +1125,7 @@ async function loadAll(options: {
       providersStore.loadCatalog(),
       providersStore.loadConnections(),
       accountsStore.loadPresented(),
+      destinationsStore.load(),
     ]);
     // Stores commit their own state; loadAll only surfaces failures below.
     applyFromQuery(true, {
@@ -1365,7 +1541,7 @@ watch(selectedEntry, (entry, previous) => {
   if (entry && entry.origin !== "builtin") void ensureDefinition(entry.provider_id);
 });
 
-watch([selectedConnectionId, activeTab, addStage], () => {
+watch([selectedConnectionId, selectedDestinationId, activeTab, addStage], () => {
   writeUrl();
 });
 

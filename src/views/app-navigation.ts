@@ -69,6 +69,7 @@ export type ProviderDetailTab = (typeof PROVIDER_DETAIL_TABS)[number];
 export interface ProviderScopeQuery {
   connection?: string;
   provider?: string;
+  destination?: string;
   tab?: ProviderDetailTab;
   add?: boolean;
   preset?: string;
@@ -78,6 +79,7 @@ export interface ProviderScopeQuery {
 export interface ProviderPageQuery {
   connection: string | null;
   provider: string | null;
+  destination: string | null;
   tab: ProviderDetailTab | null;
   add: boolean;
   preset: string | null;
@@ -127,6 +129,7 @@ export function readProviderPageQuery(search: string): ProviderPageQuery {
   return {
     connection,
     provider,
+    destination: params.get("destination"),
     tab: normalizeProviderDetailTab(params.get("tab")),
     add,
     preset,
@@ -142,18 +145,36 @@ export function readAccountDeepLink(search: string): string | null {
 const LEGACY_CUSTOM_ENDPOINT_OPTION_ID = "custom-endpoint";
 
 /**
- * One-shot "open Add Account with this chooser option" deep link (Accounts
- * view only). Only an explicit Accounts view qualifies — a missing or
- * different view returns null. The legacy `custom-endpoint` value maps to the
- * current Custom API chooser id so old bookmarks keep working; every other
- * value passes through unchanged. Consumers must delete the parameter on use
- * so a reload or a close/reopen cycle never reopens the modal.
+ * One-shot Add chooser deep link (Accounts view only). `optionId` is a
+ * chooser option, or `null` to open the chooser on its default selection.
+ * `add=1` / empty `add` is the Providers-page entry into the same flow.
+ * The legacy `custom-endpoint` value maps to Custom API. Consumers must
+ * delete the parameter on use so a reload never replays it.
  */
-export function readAccountAddDeepLink(search: string): string | null {
+export interface AccountAddDeepLink {
+  optionId: string | null;
+}
+
+export function readAccountAddDeepLink(search: string): AccountAddDeepLink | null {
   const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
   if (resolveAppViewKey(params.get("view")) !== "accounts") return null;
+  if (!params.has("add")) return null;
   const add = params.get("add");
-  return add === LEGACY_CUSTOM_ENDPOINT_OPTION_ID ? "custom" : add;
+  if (!add || add === "1") return { optionId: null };
+  return {
+    optionId: add === LEGACY_CUSTOM_ENDPOINT_OPTION_ID ? "custom" : add,
+  };
+}
+
+/** Map a Providers `add` / `preset` query onto the shared Accounts chooser. */
+export function accountAddDeepLinkFromProviderAdd(
+  preset: string | null,
+): AccountAddDeepLink {
+  return preset ? { optionId: `preset:${preset}` } : { optionId: null };
+}
+
+export function accountAddQueryValue(link: AccountAddDeepLink): string {
+  return link.optionId ?? "1";
 }
 
 export function applyAppViewSearchParams(
@@ -174,6 +195,7 @@ export function applyAppViewSearchParams(
   if (view !== "providers") {
     url.searchParams.delete("connection");
     url.searchParams.delete("provider");
+    url.searchParams.delete("destination");
     url.searchParams.delete("preset");
     url.searchParams.delete("tab");
     return url;
@@ -182,6 +204,7 @@ export function applyAppViewSearchParams(
   if (scope === null) {
     url.searchParams.delete("connection");
     url.searchParams.delete("provider");
+    url.searchParams.delete("destination");
     url.searchParams.delete("tab");
     url.searchParams.delete("add");
     url.searchParams.delete("preset");
@@ -190,10 +213,13 @@ export function applyAppViewSearchParams(
   if (scope.connection) {
     url.searchParams.set("connection", scope.connection);
     url.searchParams.delete("provider");
+    url.searchParams.delete("destination");
   } else {
     url.searchParams.delete("connection");
     if (scope.provider) url.searchParams.set("provider", scope.provider);
     else url.searchParams.delete("provider");
+    if (scope.destination) url.searchParams.set("destination", scope.destination);
+    else url.searchParams.delete("destination");
   }
   if (scope.tab) url.searchParams.set("tab", scope.tab);
   else url.searchParams.delete("tab");

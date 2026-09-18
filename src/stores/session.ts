@@ -9,6 +9,9 @@ import type { AuthStatus } from "../api/generated/dashboard-v3.ts";
 import { useConnectionStore } from "./connection.ts";
 import { useControlPlaneStore } from "./controlPlane.ts";
 import { useAccountsStore } from "./accounts.ts";
+import { useDestinationsStore } from "./destinations.ts";
+import { useIdentitiesStore } from "./identities.ts";
+import { usePlatformAccountsStore } from "./platformAccounts.ts";
 
 export type SessionPhase = "checking" | "login" | "register" | "ready";
 
@@ -97,6 +100,9 @@ export const useSessionStore = defineStore("session", () => {
   function dropSession(): void {
     connection.clearSecrets();
     useAccountsStore().clearAccounts();
+    usePlatformAccountsStore().clear();
+    useIdentitiesStore().clear();
+    useDestinationsStore().clear();
     status.value = null;
     phase.value = "login";
   }

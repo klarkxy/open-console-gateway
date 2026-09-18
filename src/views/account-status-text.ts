@@ -2,11 +2,13 @@ import { t } from "../i18n/index.ts";
 import type { MessageKey } from "../i18n/index.ts";
 import {
   ACCOUNT_MENU_LABEL_KEYS,
+  ACCOUNT_TYPE_LABEL_KEYS,
   ROUTING_DRAFT_LABEL_KEYS,
 } from "../domain/account-display.ts";
 import type {
   AccountExpiry,
   AccountStatus,
+  AccountTypeLabel,
   CooldownDetailSegment,
   CooldownRemaining,
   UsageSyncStatus,
@@ -89,6 +91,10 @@ export function usageSyncCaptionText(status: UsageSyncStatus): string {
 /** Menu label key for a domain-owned option key; null for foreign options. */
 export function accountMenuLabelKey(key: string | number): MessageKey | null {
   return (ACCOUNT_MENU_LABEL_KEYS as Record<string, MessageKey>)[String(key)] ?? null;
+}
+
+export function accountTypeLabelText(label: AccountTypeLabel): string {
+  return label.kind === "plan" ? label.label : t(ACCOUNT_TYPE_LABEL_KEYS[label.kind]);
 }
 
 export function credentialCountText(count: number): string {

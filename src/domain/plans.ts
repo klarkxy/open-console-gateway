@@ -4,6 +4,7 @@ import type {
   ProviderCatalogFormField,
 } from "../api/providers.ts";
 import type { MessageKey } from "../i18n/index.ts";
+import { isLegacyGoFallbackPlan } from "./account-capabilities.ts";
 
 export type PlanKind = "quota" | "free" | "api-key" | "custom";
 
@@ -203,7 +204,7 @@ export function planCreateDisabledReason(
   catalog: readonly ProviderCatalogEntry[] | null | undefined,
 ): PlanCreateDisabledReasonCode | null {
   if (plan.singleton) return "singleton_managed";
-  if (catalog == null) return plan.provider_id === "opencode" ? null : "catalog_unavailable";
+  if (catalog == null) return isLegacyGoFallbackPlan(plan, catalog) ? null : "catalog_unavailable";
   const entry = findCatalogEntry(catalog, plan.provider_id);
   if (!entry) return "catalog_entry_missing";
   if (entry.creation_availability !== "available") return "creation_unavailable";

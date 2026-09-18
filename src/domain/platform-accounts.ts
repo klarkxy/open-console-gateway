@@ -22,6 +22,69 @@ export const PLATFORM_KIND_LABELS: Record<PlatformKind, string> = {
 };
 
 /**
+ * New API management credential as typed in the form. Stored as the existing
+ * opaque `userCredential` string (`userId:token`) so V3 stays unchanged.
+ */
+export type NewApiCredentialIssue =
+  | "user_id_not_digits"
+  | "user_id_without_token"
+  | "token_without_user_id";
+
+export const NEW_API_CREDENTIAL_ISSUE_KEYS = {
+  user_id_not_digits: "用户 ID 须为数字",
+  user_id_without_token: "填写用户 ID 时请同时填写系统访问令牌",
+  token_without_user_id: "填写令牌时请同时填写用户 ID",
+} as const satisfies Record<NewApiCredentialIssue, string>;
+
+export function newApiCredentialIssue(
+  userId: string,
+  token: string,
+): NewApiCredentialIssue | null {
+  const id = userId.trim();
+  const secret = token.trim();
+  if (!id && !secret) return null;
+  if (id && !/^\d+$/u.test(id)) return "user_id_not_digits";
+  if (id && !secret) return "user_id_without_token";
+  if (!id && secret) return "token_without_user_id";
+  return null;
+}
+
+export function canImportPlatformKeys(
+  parent: Pick<PlatformAccount, "kind" | "hasUserCredential">,
+): boolean {
+  return parent.kind === "new_api" && parent.hasUserCredential;
+}
+
+export type PlatformKeyImportFailureCode =
+  | "full_key_unavailable"
+  | "no_models"
+  | "discover"
+  | "create"
+  | "link"
+  | "existing";
+
+export const PLATFORM_KEY_IMPORT_FAILURE_KEYS = {
+  full_key_unavailable: "站点不允许读取完整 Key",
+  no_models: "未返回可用模型",
+  discover: "拉取模型失败",
+  create: "创建失败",
+  link: "关联失败",
+  existing: "本地已有相同 Key",
+} as const satisfies Record<PlatformKeyImportFailureCode, string>;
+
+/** `undefined` means omit/preserve; never returns an empty string. */
+export function composeNewApiUserCredential(
+  userId: string,
+  token: string,
+): string | undefined {
+  if (newApiCredentialIssue(userId, token) !== null) return undefined;
+  const id = userId.trim();
+  const secret = token.trim();
+  if (!id || !secret) return undefined;
+  return `${id}:${secret}`;
+}
+
+/**
  * Add-Account chooser entries for platform kinds. These are typed separately
  * from plan options on purpose: platform accounts are not plans, and no
  * backend PlanDefinition exists for them. Option ids carry a prefix so they
@@ -73,118 +136,6 @@ export function platformInferenceEndpoint(
       ? "messages"
       : "chat/completions";
   return `${root}/v1/${suffix}`;
-}
-
-export const PLATFORM_ROUTE_ITEM_PREFIX = "platform:";
-
-export function platformRouteItemId(parentId: string): string {
-  return `${PLATFORM_ROUTE_ITEM_PREFIX}${parentId}`;
-}
-
-export function isPlatformRouteItemId(id: string): boolean {
-  return id.startsWith(PLATFORM_ROUTE_ITEM_PREFIX);
-}
-
-export interface AccountRouteItemAccount {
-  type: "account";
-  id: string;
-  account: Account;
-}
-
-export interface AccountRouteItemPlatform {
-  type: "platform";
-  id: string;
-  parent: PlatformAccount;
-  keys: Account[];
-}
-
-export type AccountRouteItem = AccountRouteItemAccount | AccountRouteItemPlatform;
-
-/**
- * One sortable row per unlinked account, and one row per platform instance.
- * Linked Keys are folded into their parent so the site stays one routing unit.
- * Empty platform instances append after every Key-bearing row.
- */
-export function buildAccountRouteItems(
-  accounts: readonly Account[],
-  parents: readonly PlatformAccount[],
-  links: readonly PlatformLink[],
-): AccountRouteItem[] {
-  const parentById = new Map(parents.map((parent) => [parent.id, parent]));
-  const keysByParent = new Map<string, Account[]>();
-  for (const account of accounts) {
-    const link = linkForAccount(links, account.id);
-    if (!link || !parentById.has(link.platformAccountId)) continue;
-    const keys = keysByParent.get(link.platformAccountId) ?? [];
-    keys.push(account);
-    keysByParent.set(link.platformAccountId, keys);
-  }
-  const items: AccountRouteItem[] = [];
-  const emitted = new Set<string>();
-  for (const account of accounts) {
-    const link = linkForAccount(links, account.id);
-    const parent = link ? parentById.get(link.platformAccountId) : undefined;
-    if (!parent) {
-      items.push({ type: "account", id: account.id, account });
-      continue;
-    }
-    if (emitted.has(parent.id)) continue;
-    emitted.add(parent.id);
-    items.push({
-      type: "platform",
-      id: platformRouteItemId(parent.id),
-      parent,
-      keys: keysByParent.get(parent.id) ?? [],
-    });
-  }
-  for (const parent of parents) {
-    if (emitted.has(parent.id)) continue;
-    items.push({
-      type: "platform",
-      id: platformRouteItemId(parent.id),
-      parent,
-      keys: [],
-    });
-  }
-  return items;
-}
-
-export function expandAccountRouteOrder(items: readonly AccountRouteItem[]): string[] {
-  const ids: string[] = [];
-  for (const item of items) {
-    if (item.type === "account") ids.push(item.account.id);
-    else ids.push(...item.keys.map((key) => key.id));
-  }
-  return ids;
-}
-
-/** Reorder Keys inside one platform block; other accounts keep their places. */
-export function moveKeyWithinPlatform(
-  accountIds: readonly string[],
-  keyIds: readonly string[],
-  keyId: string,
-  delta: number,
-): string[] | null {
-  const from = keyIds.indexOf(keyId);
-  const to = from + delta;
-  if (from < 0 || to < 0 || to >= keyIds.length) return null;
-  const nextKeys = [...keyIds];
-  const [moved] = nextKeys.splice(from, 1);
-  nextKeys.splice(to, 0, moved);
-  const keySet = new Set(keyIds);
-  const result: string[] = [];
-  let inserted = false;
-  for (const id of accountIds) {
-    if (!keySet.has(id)) {
-      result.push(id);
-      continue;
-    }
-    if (!inserted) {
-      result.push(...nextKeys);
-      inserted = true;
-    }
-  }
-  return result;
 }
 
 export function discoveredModelCapabilities(

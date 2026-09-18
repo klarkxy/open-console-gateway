@@ -1,4 +1,5 @@
 import type { ProviderCatalogEntry, ProviderCatalogFormField } from "../api/providers.ts";
+import { isLegacyGoFallbackPlan } from "./account-capabilities.ts";
 import type { PlanDefinition } from "./plans.ts";
 
 const LEGACY_GO_FIELDS: readonly ProviderCatalogFormField[] = [
@@ -25,7 +26,7 @@ export function resolveAccountFormFields(
     return fields.filter((field) => field.id !== "purchase_date");
   }
   if (catalogEntry) return fields;
-  if (plan.legacy && plan.provider_id === "opencode") {
+  if (isLegacyGoFallbackPlan(plan, null)) {
     return LEGACY_GO_FIELDS.map((field) => ({ ...field }));
   }
   return [];

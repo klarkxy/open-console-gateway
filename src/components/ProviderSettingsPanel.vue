@@ -51,7 +51,7 @@
         </n-button>
       </template>
 
-      <OpenCodeInviteUrlField v-if="entry.provider_id === 'opencode' && entry.origin === 'builtin'" />
+      <OpenCodeInviteUrlField v-if="entry.managed_registration && entry.origin === 'builtin'" />
 
       <div v-if="entry.origin !== 'builtin' && (entry.editable || entry.deletable)" class="provider-settings-actions">
         <n-button v-if="entry.editable" secondary :disabled="actionLocked" @click="$emit('edit')">

@@ -1,7 +1,8 @@
 import type { Account } from "../api/dashboard.ts";
+import type { ProviderCatalogEntry } from "../api/providers.ts";
 import type { PlanDefinition } from "../domain/plans.ts";
 import { isCooling, isFreeCooling } from "../domain/accounts-usage.ts";
-import { isZenFreeAccount } from "../domain/account-providers.ts";
+import { accountCapabilities } from "../domain/account-capabilities.ts";
 
 /**
  * Plan/status filters for the Accounts workbench. Both filters are pure and
@@ -20,8 +21,12 @@ export type AccountPlanFilter = "all" | string;
 export type AccountStatusFilter = "all" | AccountStatusKey;
 
 /** The single status bucket an account belongs to right now. */
-export function accountStatusKey(account: Account, now: number = Date.now()): AccountStatusKey {
-  if (isZenFreeAccount(account)) {
+export function accountStatusKey(
+  account: Account,
+  now: number = Date.now(),
+  catalog: readonly ProviderCatalogEntry[] | null | undefined = null,
+): AccountStatusKey {
+  if (accountCapabilities(account, catalog).freeCooldownOnly) {
     if (!account.enabled) return "disabled";
     return isFreeCooling(account, now) ? "cooling" : "available";
   }
@@ -41,10 +46,11 @@ export function filterAccounts(
   planFilter: AccountPlanFilter,
   statusFilter: AccountStatusFilter,
   now: number = Date.now(),
+  catalog: readonly ProviderCatalogEntry[] | null | undefined = null,
 ): Account[] {
   return accounts.filter((account) => {
     if (planFilter !== "all" && accountPlanKey(account) !== planFilter) return false;
-    if (statusFilter !== "all" && accountStatusKey(account, now) !== statusFilter) return false;
+    if (statusFilter !== "all" && accountStatusKey(account, now, catalog) !== statusFilter) return false;
     return true;
   });
 }

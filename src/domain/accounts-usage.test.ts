@@ -389,7 +389,7 @@ test("usage API patches the selected window and percent, and refreshes with POST
   await dashboardApi.updateAccountUsage("acc 1", "window_week", 42, 15);
   await dashboardApi.refreshAccountUsage("acc 1");
 
-  assert.equal(requests[0]?.url, "/dashboard/api/v3/accounts/acc%201/usage");
+  assert.equal(requests[0]?.url, "/dashboard/api/v4/accounts/acc%201/usage");
   assert.equal(requests[0]?.method, "PATCH");
   assert.deepEqual(requests[0]?.body, {
     window: "window_week",
@@ -398,7 +398,7 @@ test("usage API patches the selected window and percent, and refreshes with POST
     expectedRevision: 7,
     processGeneration: 99,
   });
-  assert.equal(requests[1]?.url, "/dashboard/api/v3/accounts/acc%201/usage/refresh");
+  assert.equal(requests[1]?.url, "/dashboard/api/v4/accounts/acc%201/usage/refresh");
   assert.equal(requests[1]?.method, "POST");
   assert.deepEqual(requests[1]?.body, {
     expectedRevision: 7,

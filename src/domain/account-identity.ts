@@ -18,8 +18,7 @@ import {
   type AccountStatusTagType,
 } from "./account-display.ts";
 import { isCooling } from "./accounts-usage.ts";
-import { isCustomApiAccount } from "./custom-account.ts";
-import { isZenFreeAccount } from "./account-providers.ts";
+import { accountCapabilities } from "./account-capabilities.ts";
 import { planForAccount } from "./plans.ts";
 
 /**
@@ -162,10 +161,10 @@ export function selectedModelRestriction(
 }
 
 function inventsLifecycleDates(
-  account: Pick<Account, "provider_id">,
+  account: Pick<Account, "id" | "provider_id" | "account_type">,
   catalog: readonly ProviderCatalogEntry[] | null,
 ): boolean {
-  if (isCustomApiAccount(account)) return true;
+  if (accountCapabilities(account, catalog).endpointOnAccount) return true;
   return planForAccount(account, catalog)?.dynamic === true;
 }
 
@@ -174,11 +173,9 @@ export function v3AccountShowsExpiry(
   account: Account,
   catalog: readonly ProviderCatalogEntry[] | null,
 ): boolean {
-  const plan = planForAccount(account, catalog);
   return accountIsReady(account)
-    && !!plan
-    && plan.kind !== "custom"
-    && !isZenFreeAccount(account)
+    && accountCapabilities(account, catalog).hasExpiry
+    && !!planForAccount(account, catalog)
     && !!account.purchase_date
     && !!account.expires_on;
 }
@@ -206,9 +203,14 @@ export function presentedAccountStatus(
   account: Account,
   identity: Identity | null,
   now = Date.now(),
+  catalog: readonly ProviderCatalogEntry[] | null = null,
 ): AccountStatus {
-  if (isZenFreeAccount(account) || !accountIsReady(account) || accountRoutingDraftState(account)) {
-    return accountStatus(account, now);
+  if (
+    accountCapabilities(account, catalog).freeCooldownOnly
+    || !accountIsReady(account)
+    || accountRoutingDraftState(account)
+  ) {
+    return accountStatus(account, now, catalog);
   }
 
   const auth = inferenceAuthState(identity, account.id);
@@ -230,9 +232,14 @@ export function presentedAccountStatusTagType(
   account: Account,
   identity: Identity | null,
   now = Date.now(),
+  catalog: readonly ProviderCatalogEntry[] | null = null,
 ): AccountStatusTagType {
-  if (isZenFreeAccount(account) || !accountIsReady(account) || accountRoutingDraftState(account)) {
-    return accountStatusTagType(account, now);
+  if (
+    accountCapabilities(account, catalog).freeCooldownOnly
+    || !accountIsReady(account)
+    || accountRoutingDraftState(account)
+  ) {
+    return accountStatusTagType(account, now, catalog);
   }
   const auth = inferenceAuthState(identity, account.id);
   if (auth === "invalid" || account.auth_error) return "error";

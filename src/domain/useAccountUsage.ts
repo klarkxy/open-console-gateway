@@ -24,6 +24,7 @@ import {
   windowResetsAt,
 } from "./accounts-usage.ts";
 import type { UsageEditState, UsageKey } from "./accounts-usage.ts";
+import { isLegacyGoFallbackPlan } from "./account-capabilities.ts";
 import { accountIsReady } from "./account-display.ts";
 import { findPlanDefinition } from "./plans.ts";
 import { officialBalanceSupported } from "./upstream-balance.ts";
@@ -69,7 +70,7 @@ export function useAccountUsage(
     const providerLimits = providerUsageLimits.value[account.id];
     if (providerLimits?.length) return providerLimits;
     const surface = findPlanDefinition(account.provider_id, catalog.value);
-    const limits = surface?.legacy && account.provider_id === "opencode"
+    const limits = surface && isLegacyGoFallbackPlan(surface, catalog.value)
       ? quotaLimits.value
       : null;
     if (!limits) return [];

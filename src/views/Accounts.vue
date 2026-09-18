@@ -89,16 +89,32 @@
         >{{ t("重试") }}</n-button>
       </n-alert>
 
+      <n-alert
+        v-if="destinationsStore.refusals.length > 0"
+        type="error"
+        :title="t('目的地投影失败：{count} 行无法映射', { count: destinationsStore.refusals.length })"
+      >
+        <div
+          v-for="(row, index) in destinationsStore.refusals"
+          :key="`${row.kind}:${row.id}:${index}`"
+          class="mono"
+        >
+          {{ row.kind }} · {{ row.id }} · {{ row.detail }}
+        </div>
+        <n-button size="small" secondary :loading="destinationsStore.loading" @click="retryDestinations">
+          {{ t("重试") }}
+        </n-button>
+      </n-alert>
+
       <PlatformAccountsSection
         ref="platformSectionRef"
         :accounts="accounts"
         @changed="loadAccounts"
         @account-updated="replaceAccount"
-        @links-change="onPlatformLinksChange"
       />
 
       <n-empty
-        v-if="accountsLoaded && displayedRouteItems.length === 0"
+        v-if="accountsLoaded && destinationsStore.loaded && displayedGroups.length === 0"
         :description="t('暂无账号')"
       >
         <template #extra>
@@ -114,69 +130,57 @@
         </template>
       </n-empty>
 
-      <div v-if="accountsLoaded && displayedRouteItems.length > 0" class="account-list">
-        <template v-for="item in displayedRouteItems" :key="item.id">
-          <PlatformAccountCard
-            v-if="item.type === 'platform'"
-            :parent="item.parent"
-            :keys="item.keys"
-            :links="platformLinks.filter((link) => link.platformAccountId === item.parent.id)"
+      <div v-if="accountsLoaded && displayedGroupViews.length > 0" class="account-list">
+        <template v-for="view in displayedGroupViews" :key="view.group.id">
+          <DestinationCard
+            :group="view.displayGroup"
+            :parent="view.parent"
+            :catalog="providerCatalog"
+            :links="view.parent ? platformStore.linksFor(view.parent.id) : []"
             :mutating="platformMutating || busy"
+            :importing="view.parent ? Boolean(platformStore.importing[view.parent.id]) : false"
             :refreshing="platformRefreshing"
             :pending-link="platformPendingLink"
-            :order-handle-disabled="orderSaving || busy || sortableRouteCount < 2 || item.keys.length === 0"
-            :dragging="draggingAccountId === item.id"
-            @order-keydown="handleOrderKeydown($event, item.id)"
-            @order-drag-start="startAccountDrag($event, item.id)"
-            @refresh-parent="platformSectionRef?.refreshParent(item.parent)"
-            @edit="platformSectionRef?.openEdit(item.parent)"
-            @delete="platformSectionRef?.confirmDelete(item.parent)"
-            @add-key="platformSectionRef?.openAddKey(item.parent)"
-            @link-existing="platformSectionRef?.openLink(item.parent)"
-            @retry-pending-link="platformSectionRef?.retryPendingLink()"
-            @toggle-key="toggleAccount"
-            @move-key="movePlatformKey"
-            @refresh-child="refreshPlatformChild(item.parent, $event)"
-            @fetch-models="fetchPlatformModels"
-            @fetch-all-models="fetchAllPlatformModels(item.keys)"
-            @edit-key="editPlatformKey"
-            @unlink="unlinkPlatformKey"
-          />
-          <AccountCard
-            v-else
-            :account="item.account"
-            :identity="identityForCard(item.account.id)"
-            :catalog="providerCatalog"
-            :usage="getUsage(item.account.id)"
-            :provider-usage="providerUsageMap[item.account.id] ?? null"
-            :limits="usageLimitsFor(item.account)"
-            :edits="usageEdits[item.account.id]"
             :now="now"
-            :order-handle-disabled="orderSaving || busy || sortableRouteCount < 2"
-            :dragging="draggingAccountId === item.account.id"
-            :usage-loading="!!usageLoading[item.account.id]"
-            :usage-load-error="usageLoadErrors[item.account.id] ?? null"
-            :usage-refresh-loading="!!usageRefreshLoading[item.account.id]"
-            :purchase-date-saving="busy || !!purchaseDateSaving[item.account.id]"
-            :quota-limits-failed="!!quotaLimitsError"
-            :menu-options="cardMenuOptions(item.account)"
-            :account-names="accountNamesById"
-            :connections="providersStore.connections"
-            @order-keydown="handleOrderKeydown($event, item.account.id)"
-            @order-drag-start="startAccountDrag($event, item.account.id)"
-            @toggle="toggleAccount(item.account.id)"
-            @test-connection="openAccountTest(item.account.id)"
-            @refresh-usage="refreshAccountUsage(item.account.id)"
-            @update-purchase-date="updatePurchaseDate(item.account.id, $event)"
-            @reload-usage="loadAccountUsage(item.account.id)"
-            @open-wizard="openManagedWizard(item.account.id)"
-            @menu-select="handleMenuSelect($event, item.account.id)"
-            @usage-editor-open="focusUsageEditor(item.account.id)"
-            @usage-update-draft="(key, value) => updateUsageDraft(item.account.id, key, value)"
-            @usage-update-resets-first="(key, value) => updateResetsFirstField(item.account.id, key, value)"
-            @usage-update-resets-second="(key, value) => updateResetsSecondField(item.account.id, key, value)"
-            @usage-save="(key) => saveUsage(item.account.id, key)"
-          />
+            :order-handle-disabled="orderSaving || busy || sortableRouteCount < 2 || view.group.accounts.length === 0"
+            :order-handle-hint="view.parent ? t('添加 Key 后可拖动此账号调整路由顺序') : ''"
+            :dragging="draggingAccountId === view.group.id"
+            @order-keydown="handleOrderKeydown($event, view.group.id)"
+            @order-drag-start="startAccountDrag($event, view.group.id)"
+            @refresh-parent="view.parent && platformSectionRef?.refreshParent(view.parent)"
+            @edit="view.parent && platformSectionRef?.openEdit(view.parent)"
+            @delete="view.parent && platformSectionRef?.confirmDelete(view.parent)"
+            @add-key="view.parent && platformSectionRef?.openAddKey(view.parent)"
+            @import-keys="view.parent && platformSectionRef?.importKeys(view.parent)"
+            @link-existing="view.parent && platformSectionRef?.openLink(view.parent)"
+            @retry-pending-link="platformSectionRef?.retryPendingLink()"
+            @fetch-all-models="fetchAllPlatformModels(view.group.accounts)"
+          >
+            <template #row="{ account, index, extraTags, figure, duplicateName }">
+              <CredentialRow
+                v-bind="credentialRowBindings(account)"
+                :extra-tags="extraTags"
+                :figure="figure"
+                :duplicate-name="duplicateName"
+                :menu-options="rowMenuOptions(view.group, account, index)"
+                :show-refresh="view.parent ? true : undefined"
+                :refreshing="view.parent ? !!platformRefreshing[`${view.parent.id}:${account.id}`] : undefined"
+                :usage-loading="!!usageLoading[account.id] || (!!view.parent && (platformMutating || busy))"
+                @toggle="toggleAccount(account.id)"
+                @test-connection="openAccountTest(account.id)"
+                @refresh-usage="view.parent ? refreshPlatformChild(view.parent, account.id) : refreshAccountUsage(account.id)"
+                @update-purchase-date="updatePurchaseDate(account.id, $event)"
+                @reload-usage="loadAccountUsage(account.id)"
+                @open-wizard="openManagedWizard(account.id)"
+                @menu-select="handleMenuSelect($event, account.id)"
+                @usage-editor-open="focusUsageEditor(account.id)"
+                @usage-update-draft="(key, value) => updateUsageDraft(account.id, key, value)"
+                @usage-update-resets-first="(key, value) => updateResetsFirstField(account.id, key, value)"
+                @usage-update-resets-second="(key, value) => updateResetsSecondField(account.id, key, value)"
+                @usage-save="(key) => saveUsage(account.id, key)"
+              />
+            </template>
+          </DestinationCard>
         </template>
       </div>
 
@@ -350,7 +354,9 @@ import { PlusOutlined } from "@vicons/antd";
 import { DashboardRequestError, dashboardApi, isRevisionConflict } from "../api/dashboard";
 import { providerApi } from "../api/providers.ts";
 import { useAccountsStore } from "../stores/accounts.ts";
+import { useDestinationsStore } from "../stores/destinations.ts";
 import { useIdentitiesStore } from "../stores/identities.ts";
+import { usePlatformAccountsStore } from "../stores/platformAccounts.ts";
 import { useProvidersStore } from "../stores/providers.ts";
 import type { MutationExpectation } from "../api/generated/dashboard-v3.ts";
 import type { ProviderCatalogEntry } from "../api/providers.ts";
@@ -363,7 +369,12 @@ import type {
   BrowserTarget,
 } from "../api/dashboard";
 import { isCooling } from "../domain/accounts-usage.ts";
-import { accountIsReady, accountMenuOptions } from "../domain/account-display.ts";
+import {
+  accountIsReady,
+  accountMenuOptions,
+  groupMoveMenuOptions,
+  type AccountMenuOption,
+} from "../domain/account-display.ts";
 import {
   accountCredentialMenuOptions,
   connectionAllowsIdentityCredentialCreate,
@@ -374,18 +385,18 @@ import {
 } from "../domain/account-credential.ts";
 import { identitiesApi } from "../api/identities.ts";
 import type { BindingPatchInput, IdentityCredentialCreateInput } from "../api/identities.ts";
-import { DEFAULT_PROVIDER_ID, isZenFreeAccount } from "../domain/account-providers.ts";
+import { accountCapabilities, isManagedOnboardingAccount } from "../domain/account-capabilities.ts";
+import { DEFAULT_PROVIDER_ID } from "../domain/destination-providers.ts";
+import { executeCustomAccountEdit } from "../domain/custom-account.ts";
 import {
-  executeCustomAccountEdit,
-  isCustomApiAccount,
-} from "../domain/custom-account.ts";
-import {
-  buildAccountRouteItems,
-  linkForAccount,
-  moveKeyWithinPlatform,
-} from "../domain/platform-accounts.ts";
-import type { PlatformAccount, PlatformLink } from "../api/platform-accounts.ts";
-import PlatformAccountCard from "../components/PlatformAccountCard.vue";
+  alignDestinationGroupsToAccountOrder,
+  buildDestinationGroups,
+  isSingleAccountGroup,
+  moveWithinGroup,
+  type DestinationGroup,
+} from "../domain/destination-groups.ts";
+import { linkForAccount } from "../domain/platform-accounts.ts";
+import type { PlatformAccount } from "../api/platform-accounts.ts";
 import { useAccountUsage } from "../domain/useAccountUsage.ts";
 import { accountInferenceEndpointUrl, officialBalanceSupported } from "../domain/upstream-balance.ts";
 import { useAccountOrder } from "./useAccountOrder.ts";
@@ -419,7 +430,8 @@ import {
   normalizeOpenCodeInviteUrl,
 } from "../domain/managed-account.ts";
 import AccountAddModal from "../components/AccountAddModal.vue";
-import AccountCard from "../components/AccountCard.vue";
+import CredentialRow from "../components/CredentialRow.vue";
+import DestinationCard from "../components/DestinationCard.vue";
 import AccountConnectionTestModal from "../components/AccountConnectionTestModal.vue";
 import AccountFormModal, { type AccountFormPayload } from "../components/AccountFormModal.vue";
 import ManagedAccountWizard from "../components/ManagedAccountWizard.vue";
@@ -432,7 +444,9 @@ import type { PlatformAccountFormPayload } from "../components/PlatformAccountFo
 const dialog = useDialog();
 const message = useMessage();
 const accountsStore = useAccountsStore();
+const destinationsStore = useDestinationsStore();
 const identitiesStore = useIdentitiesStore();
+const platformStore = usePlatformAccountsStore();
 const providersStore = useProvidersStore();
 // The account list lives in the store; the writable computed lets the
 // order/usage composables keep their Ref<Account[]> contract while every
@@ -445,7 +459,13 @@ const accountsLoaded = computed(() => accountsStore.loaded);
 const accountListError = ref("");
 // The spinner gate covers only the first load; revalidations keep the
 // current list rendered and commit silently when the response lands.
-const accountListLoading = computed(() => !accountsStore.loaded && !accountListError.value);
+const accountListLoading = computed(() => {
+  if (accountListError.value) return false;
+  if (!accountsStore.loaded) return true;
+  return !destinationsStore.loaded
+    && destinationsStore.refusals.length === 0
+    && !destinationsStore.error;
+});
 const identitiesError = ref("");
 const identitiesLoading = computed(() => identitiesStore.loading);
 const testingAccountId = ref<string | null>(null);
@@ -490,15 +510,13 @@ const busy = ref(false);
 const now = ref(Date.now());
 const planFilter = ref<AccountPlanFilter>("all");
 const platformSectionRef = ref<InstanceType<typeof PlatformAccountsSection> | null>(null);
-const platformLinks = ref<PlatformLink[]>([]);
-const platformParents = ref<PlatformAccount[]>([]);
 const editingPlatformLink = computed(() => (
-  editingAccount.value ? linkForAccount(platformLinks.value, editingAccount.value.id) : null
+  editingAccount.value ? linkForAccount(platformStore.links, editingAccount.value.id) : null
 ));
 const editingEndpointLockHint = computed(() => {
   const link = editingPlatformLink.value;
   if (!link) return "";
-  const parentName = platformParents.value.find((parent) => parent.id === link.platformAccountId)?.name;
+  const parentName = platformStore.parents.find((parent) => parent.id === link.platformAccountId)?.name;
   return parentName
     ? t("已关联平台账号 {name}，Endpoint 由平台托管", { name: parentName })
     : t("已关联平台账号，Endpoint 由平台托管");
@@ -509,7 +527,7 @@ const statusFilter = ref<AccountStatusFilter>("all");
 const providerCatalog = ref<ProviderCatalogEntry[] | null>(null);
 const catalogLoading = ref(false);
 const catalogError = ref("");
-const platformMutating = computed(() => Boolean(platformSectionRef.value?.mutating));
+const platformMutating = computed(() => platformStore.mutating);
 
 const {
   quotaLimitsLoading,
@@ -539,8 +557,13 @@ const {
   ),
 });
 
-const allRouteItems = computed(() => (
-  buildAccountRouteItems(accounts.value, platformParents.value, platformLinks.value)
+const allGroups = computed(() => alignDestinationGroupsToAccountOrder(
+  buildDestinationGroups(
+    destinationsStore.destinations,
+    destinationsStore.credentials,
+    accountsStore.byId,
+  ),
+  accounts.value.map((account) => account.id),
 ));
 
 const {
@@ -555,7 +578,7 @@ const {
   accounts,
   busy,
   reloadAfterRevisionConflict: reloadAfterControlPlaneConflict,
-  routeItems: allRouteItems,
+  groups: allGroups,
 });
 
 const managedWizardAccount = computed(() => (
@@ -596,24 +619,60 @@ const canCreateManagedDraft = computed(() => (
   && !managedInvitePreview.value.status
 ));
 
-const displayedRouteItems = computed(() => {
-  const visibleIds = new Set(
-    filterAccounts(accounts.value, planFilter.value, statusFilter.value, now.value).map((account) => account.id),
-  );
-  return allRouteItems.value.filter((item) => {
-    if (item.type === "account") return visibleIds.has(item.account.id);
-    if (item.keys.length === 0) return planFilter.value === "all" && statusFilter.value === "all";
-    if (planFilter.value !== "all" && planFilter.value !== "custom") return false;
-    return item.keys.some((key) => visibleIds.has(key.id));
+const visibleAccountIds = computed(() => new Set(
+  filterAccounts(
+    accounts.value,
+    planFilter.value,
+    statusFilter.value,
+    now.value,
+    providerCatalog.value,
+  ).map((account) => account.id),
+));
+
+const displayedGroups = computed(() => {
+  const visibleIds = visibleAccountIds.value;
+  return allGroups.value.filter((group) => {
+    if (group.destination.legacy.kind === "platform_parent") {
+      if (group.accounts.length === 0) return planFilter.value === "all" && statusFilter.value === "all";
+      if (planFilter.value !== "all" && planFilter.value !== "custom") return false;
+      return group.accounts.some((key) => visibleIds.has(key.id));
+    }
+    if (isSingleAccountGroup(group)) return visibleIds.has(group.accounts[0]?.id ?? "");
+    return group.accounts.some((account) => visibleIds.has(account.id));
   });
 });
 
+interface DisplayedGroupView {
+  group: DestinationGroup;
+  displayGroup: DestinationGroup;
+  parent: PlatformAccount | null;
+}
+
+const displayedGroupViews = computed((): DisplayedGroupView[] => {
+  const views: DisplayedGroupView[] = [];
+  const visibleIds = visibleAccountIds.value;
+  for (const group of displayedGroups.value) {
+    const cards = group.accounts.filter((account) => visibleIds.has(account.id));
+    const displayGroup = cards.length === group.accounts.length
+      ? group
+      : { ...group, accounts: cards };
+    if (group.destination.legacy.kind === "platform_parent") {
+      const parent = platformStore.parents.find((row) => row.id === group.destination.legacy.id) ?? null;
+      if (!parent) continue;
+      views.push({ group, displayGroup, parent });
+      continue;
+    }
+    views.push({ group, displayGroup, parent: null });
+  }
+  return views;
+});
+
 const sortableRouteCount = computed(() => (
-  displayedRouteItems.value.filter((item) => item.type === "account" || item.keys.length > 0).length
+  displayedGroups.value.filter((group) => group.accounts.length >= 1).length
 ));
 
-const platformRefreshing = computed(() => platformSectionRef.value?.refreshing ?? {});
-const platformPendingLink = computed(() => platformSectionRef.value?.pendingLink ?? null);
+const platformRefreshing = computed(() => platformStore.refreshing);
+const platformPendingLink = computed(() => platformStore.pendingLink);
 
 const planFilterOptions = computed(() => [
   { value: "all", label: t("全部方案") },
@@ -644,7 +703,11 @@ const credentialModalAccount = computed(() => (
 ));
 const credentialModalSupport = computed(() => (
   credentialModalAccount.value
-    ? credentialWriteSupport(credentialModalAccount.value, identityForCard(credentialModalAccount.value.id))
+    ? credentialWriteSupport(
+      credentialModalAccount.value,
+      identityForCard(credentialModalAccount.value.id),
+      providerCatalog.value,
+    )
     : null
 ));
 const credentialModalBinding = computed(() => credentialModalSupport.value?.bindingRecord ?? null);
@@ -669,7 +732,11 @@ const createModalAccount = computed(() => (
 ));
 const createModalSupport = computed(() => (
   createModalAccount.value
-    ? credentialWriteSupport(createModalAccount.value, identityForCard(createModalAccount.value.id))
+    ? credentialWriteSupport(
+      createModalAccount.value,
+      identityForCard(createModalAccount.value.id),
+      providerCatalog.value,
+    )
     : null
 ));
 const createModalUnsupported = computed((): MessageKey | null => {
@@ -695,12 +762,56 @@ const createModalShareTargets = computed(() => {
 });
 
 function cardMenuOptions(account: Account) {
-  const base = accountMenuOptions(account, now.value);
-  const extra = accountCredentialMenuOptions(account, identityForCard(account.id));
+  const base = accountMenuOptions(account, now.value, providerCatalog.value);
+  const extra = accountCredentialMenuOptions(
+    account,
+    identityForCard(account.id),
+    providerCatalog.value,
+  );
   if (extra.length === 0) return base;
   const editAt = base.findIndex((option) => option.key === "edit");
   if (editAt < 0) return [...base, ...extra];
   return [...base.slice(0, editAt + 1), ...extra, ...base.slice(editAt + 1)];
+}
+
+function credentialRowBindings(account: Account) {
+  return {
+    account,
+    identity: identityForCard(account.id),
+    catalog: providerCatalog.value,
+    usage: getUsage(account.id),
+    providerUsage: providerUsageMap.value[account.id] ?? null,
+    limits: usageLimitsFor(account),
+    edits: usageEdits.value[account.id],
+    now: now.value,
+    usageLoading: !!usageLoading.value[account.id],
+    usageLoadError: usageLoadErrors.value[account.id] ?? null,
+    usageRefreshLoading: !!usageRefreshLoading.value[account.id],
+    purchaseDateSaving: busy.value || !!purchaseDateSaving.value[account.id],
+    quotaLimitsFailed: !!quotaLimitsError.value,
+    accountNames: accountNamesById.value,
+    connections: providersStore.connections,
+  };
+}
+
+function rowMenuOptions(
+  group: DestinationGroup,
+  account: Account,
+  index: number,
+): AccountMenuOption[] {
+  const at = group.accounts.findIndex((row) => row.id === account.id);
+  const resolved = at >= 0 ? at : index;
+  const moves = groupMoveMenuOptions(account, resolved, group.accounts.length);
+  if (group.destination.legacy.kind === "platform_parent") {
+    const blocked = platformMutating.value || busy.value;
+    return [
+      { key: "fetch-models", accountId: account.id, accountName: account.name, disabled: blocked },
+      ...moves.map((option) => ({ ...option, disabled: blocked || Boolean(option.disabled) })),
+      { key: "edit-key", accountId: account.id, accountName: account.name, disabled: blocked },
+      { key: "unlink", accountId: account.id, accountName: account.name, disabled: blocked },
+    ];
+  }
+  return [...cardMenuOptions(account), ...moves];
 }
 
 function handleMenuSelect(key: string | number, accountId: string) {
@@ -751,6 +862,14 @@ function handleMenuSelect(key: string | number, accountId: string) {
       negativeText: t("取消"),
       onPositiveClick: () => deleteAccount(accountId),
     });
+  } else if (key === "move-up" || key === "move-down") {
+    void moveWithinDisplayedGroup(accountId, key === "move-up" ? -1 : 1);
+  } else if (key === "fetch-models") {
+    fetchPlatformModels(accountId);
+  } else if (key === "edit-key") {
+    editPlatformKey(accountId);
+  } else if (key === "unlink") {
+    unlinkPlatformKey(accountId);
   }
 }
 
@@ -777,13 +896,13 @@ function openAddModal(): void {
  * modal opens so a reload or close never replays it.
  */
 function applyAccountAddDeepLink(): void {
-  const optionId = readAccountAddDeepLink(window.location.search);
-  if (!optionId) return;
+  const link = readAccountAddDeepLink(window.location.search);
+  if (!link) return;
   const url = new URL(window.location.href);
   url.searchParams.delete("add");
   window.history.replaceState(null, "", url);
   editingAccount.value = null;
-  addInitialOptionId.value = optionId;
+  addInitialOptionId.value = link.optionId;
   showAddModal.value = true;
   void providersStore.loadConnections().catch(() => undefined);
 }
@@ -855,7 +974,11 @@ async function openCredentialModal(accountId: string, mode: CredentialEditorMode
   if (busy.value) return;
   const account = accounts.value.find((item) => item.id === accountId);
   if (!account) return;
-  const support = credentialWriteSupport(account, identityForCard(accountId));
+  const support = credentialWriteSupport(
+    account,
+    identityForCard(accountId),
+    providerCatalog.value,
+  );
   if (mode === "rotate" && !support.rotate) {
     if (support.unsupportedReason) message.warning(t(support.unsupportedReason));
     return;
@@ -887,7 +1010,11 @@ async function openCreateModal(accountId: string): Promise<void> {
   if (busy.value) return;
   const account = accounts.value.find((item) => item.id === accountId);
   if (!account) return;
-  const support = credentialWriteSupport(account, identityForCard(accountId));
+  const support = credentialWriteSupport(
+    account,
+    identityForCard(accountId),
+    providerCatalog.value,
+  );
   if (!support.create) {
     if (support.unsupportedReason) message.warning(t(support.unsupportedReason));
     return;
@@ -1056,27 +1183,30 @@ async function loadIdentitiesOverlay(): Promise<void> {
   }
 }
 
-function onPlatformLinksChange(links: PlatformLink[], parents: PlatformAccount[]): void {
-  platformLinks.value = links;
-  platformParents.value = parents;
-}
-
-async function movePlatformKey(accountId: string, delta: number): Promise<void> {
-  const item = allRouteItems.value.find((row) => (
-    row.type === "platform" && row.keys.some((key) => key.id === accountId)
+async function moveWithinDisplayedGroup(accountId: string, delta: number): Promise<void> {
+  const group = allGroups.value.find((row) => (
+    row.accounts.some((account) => account.id === accountId)
   ));
-  if (!item || item.type !== "platform") return;
-  const next = moveKeyWithinPlatform(
+  if (!group) return;
+  const next = moveWithinGroup(
     accounts.value.map((account) => account.id),
-    item.keys.map((key) => key.id),
+    group.accounts.map((account) => account.id),
     accountId,
     delta,
   );
   if (next) await persistExplicitOrder(next);
 }
 
+async function retryDestinations(): Promise<void> {
+  try {
+    await destinationsStore.load();
+  } catch {
+    // The alert already reflects refusals / error on the store.
+  }
+}
+
 function refreshPlatformChild(parent: PlatformAccount, accountId: string): void {
-  const link = platformLinks.value.find((item) => item.accountId === accountId);
+  const link = platformStore.linkForAccount(accountId);
   if (link) platformSectionRef.value?.refreshChild(parent, link);
 }
 
@@ -1096,7 +1226,7 @@ function editPlatformKey(accountId: string): void {
 
 function unlinkPlatformKey(accountId: string): void {
   const account = accounts.value.find((item) => item.id === accountId);
-  const link = platformLinks.value.find((item) => item.accountId === accountId);
+  const link = platformStore.linkForAccount(accountId);
   if (account && link) platformSectionRef.value?.confirmUnlink(account, link);
 }
 
@@ -1136,7 +1266,7 @@ function setManagedCreateVisible(show: boolean): void {
 
 function openManagedWizard(accountId: string): void {
   const account = accounts.value.find(({ id }) => id === accountId);
-  if (!account || account.account_type !== "managed" || accountIsReady(account)) return;
+  if (!account || !isManagedOnboardingAccount(account) || accountIsReady(account)) return;
   managedWizardAccountId.value = accountId;
   showManagedWizard.value = true;
 }
@@ -1412,6 +1542,11 @@ async function loadAccounts() {
   try {
     const loaded = await accountsStore.loadPresented();
     applyAccountDeepLink();
+    try {
+      await destinationsStore.load();
+    } catch {
+      // A projection refusal must not hide the V3 account list.
+    }
     await overlay;
     if (!providersStore.connections) {
       await providersStore.loadConnections().catch(() => undefined);
@@ -1482,7 +1617,7 @@ async function initializeAccounts() {
 async function onFormSave(payload: AccountInput | AccountFormPayload) {
   const editing = editingAccount.value;
   if (editing) {
-    if (isCustomApiAccount(editing)) {
+    if (accountCapabilities(editing, providerCatalog.value).endpointOnAccount) {
       // The edit form always emits the AccountFormPayload shape.
       await saveCustomAccountEdit(editing, payload as AccountFormPayload);
       return;
@@ -1544,8 +1679,8 @@ async function updatePurchaseDate(accountId: string, purchaseDate: string): Prom
   if (
     !account
     || !accountIsReady(account)
-    || isCustomApiAccount(account)
-    || isZenFreeAccount(account)
+    || accountCapabilities(account, providerCatalog.value).endpointOnAccount
+    || accountCapabilities(account, providerCatalog.value).keylessSingleton
     || busy.value
     || purchaseDateSaving.value[accountId]
   ) return;
@@ -1615,7 +1750,7 @@ async function toggleAccount(id: string) {
   const account = accounts.value.find((item) => item.id === id);
   // The Zen Free singleton only accepts the dedicated provider-settings write;
   // never fall back to the generic account PATCH/toggle for it.
-  if (account && isZenFreeAccount(account)) {
+  if (account && accountCapabilities(account, providerCatalog.value).toggleWrite === "provider_settings") {
     await saveZenProviderSettings(account, !account.enabled);
     return;
   }
@@ -1644,6 +1779,7 @@ async function reloadControlPlaneView(): Promise<boolean> {
   await Promise.allSettled([
     loadIdentitiesOverlay(),
     providersStore.loadConnections(),
+    destinationsStore.load(),
   ]);
   if (editingAccount.value) {
     const stillListed = reconcileEditingAccount(loaded, editingAccount.value.id);
@@ -1766,7 +1902,8 @@ onActivated(() => {
   applyCachedAccountDeepLink();
   if (activatedOnce) {
     void initializeAccounts();
-    platformSectionRef.value?.reload();
+    void platformStore.load().catch(() => undefined);
+    void destinationsStore.load().catch(() => undefined);
   } else activatedOnce = true;
 });
 onDeactivated(stopClock);

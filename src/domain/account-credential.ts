@@ -1,4 +1,5 @@
 import type { Account } from "../api/dashboard.ts";
+import type { ProviderCatalogEntry } from "../api/providers.ts";
 import type { Connection, ConnectionEndpoint } from "../api/connections.ts";
 import type {
   BindingPatchInput,
@@ -9,10 +10,9 @@ import type {
   QuotaSharing,
 } from "../api/identities.ts";
 import { DashboardAuthError, DashboardRequestError } from "../api/dashboard-v3.ts";
-import { isCpaIntegrationAccount, isZenFreeAccount } from "./account-providers.ts";
+import { accountCapabilities } from "./account-capabilities.ts";
 import { accountIsReady } from "./account-display.ts";
 import { credentialForAccount, inferenceCredentials } from "./account-identity.ts";
-import { isCustomApiAccount } from "./custom-account.ts";
 import { protocolDisplayName } from "./provider-contracts.ts";
 import type { AccountMenuOption } from "./account-display.ts";
 import { t, type MessageKey } from "../i18n/index.ts";
@@ -106,8 +106,9 @@ function selectedInferenceCredential(
  * rows rather than inventing ids. Matches backend `resolve_connection_target`.
  */
 export function credentialWriteSupport(
-  account: Pick<Account, "id" | "provider_id" | "credential_kind" | "setup_step">,
+  account: Pick<Account, "id" | "provider_id" | "account_type" | "credential_kind" | "setup_step">,
   identity: Identity | null,
+  catalog: readonly ProviderCatalogEntry[] | null | undefined = null,
 ): CredentialWriteSupport {
   const hidden: CredentialWriteSupport = {
     rotate: false,
@@ -118,10 +119,11 @@ export function credentialWriteSupport(
     identityId: identity?.identity.id ?? null,
     unsupportedReason: null,
   };
-  if (isZenFreeAccount(account)) {
+  const caps = accountCapabilities(account, catalog);
+  if (caps.keylessSingleton) {
     return { ...hidden, unsupportedReason: "Zen Free 使用供应商设置" };
   }
-  if (isCpaIntegrationAccount(account)) {
+  if (caps.externalIntegration) {
     return { ...hidden, unsupportedReason: "CPA 订阅池使用 CPA 页面" };
   }
   if (account.credential_kind === "none") {
@@ -155,7 +157,7 @@ export function credentialWriteSupport(
   const identityId = identity?.identity.id ?? null;
   const rotate = true;
   const binding = bindingRecord !== null;
-  const create = !isCustomApiAccount(account)
+  const create = !caps.endpointOnAccount
     && !!identityId
     && !!bindingRecord?.connection_id;
   return {
@@ -165,17 +167,18 @@ export function credentialWriteSupport(
     credential,
     bindingRecord,
     identityId,
-    unsupportedReason: isCustomApiAccount(account)
+    unsupportedReason: caps.endpointOnAccount
       ? "Custom API 需到账号编辑中添加 Key"
       : null,
   };
 }
 
 export function accountCredentialMenuOptions(
-  account: Pick<Account, "id" | "name" | "provider_id" | "credential_kind" | "setup_step">,
+  account: Pick<Account, "id" | "name" | "provider_id" | "account_type" | "credential_kind" | "setup_step">,
   identity: Identity | null,
+  catalog: readonly ProviderCatalogEntry[] | null | undefined = null,
 ): AccountMenuOption[] {
-  const support = credentialWriteSupport(account, identity);
+  const support = credentialWriteSupport(account, identity, catalog);
   const options: AccountMenuOption[] = [];
   if (support.rotate) {
     options.push({

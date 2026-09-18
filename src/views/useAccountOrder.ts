@@ -4,10 +4,7 @@ import { useMessage } from "naive-ui";
 import { DashboardRequestError, dashboardApi } from "../api/dashboard";
 import type { Account } from "../api/dashboard";
 import { moveItem } from "../domain/account-lifecycle.ts";
-import {
-  expandAccountRouteOrder,
-  type AccountRouteItem,
-} from "../domain/platform-accounts.ts";
+import { expandGroupOrder, type DestinationGroup } from "../domain/destination-groups.ts";
 import { t } from "../i18n/index.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
 
@@ -17,24 +14,33 @@ type AccountDragState = {
   moved: boolean;
   pointerId: number;
   previous: Account[];
-  items: AccountRouteItem[];
+  items: DestinationGroup[];
 };
 
 function sameAccountOrder(left: readonly Account[], right: readonly Account[]): boolean {
   return left.length === right.length && left.every((account, index) => account.id === right[index]?.id);
 }
 
-function accountsFromItems(
-  items: readonly AccountRouteItem[],
+function accountsFromGroups(
+  groups: readonly DestinationGroup[],
   previous: readonly Account[],
 ): Account[] {
-  const expanded = expandAccountRouteOrder(items);
+  const expanded = expandGroupOrder(groups);
   const byId = new Map(previous.map((account) => [account.id, account]));
   const next = expanded
     .map((id) => byId.get(id))
     .filter((account): account is Account => Boolean(account));
   const seen = new Set(next.map((account) => account.id));
   return [...next, ...previous.filter((account) => !seen.has(account.id))];
+}
+
+function resolveGroupId(
+  targetId: string | undefined,
+  groups: readonly DestinationGroup[],
+): string | undefined {
+  if (!targetId) return undefined;
+  if (groups.some((group) => group.id === targetId)) return targetId;
+  return groups.find((group) => group.accounts.some((account) => account.id === targetId))?.id;
 }
 
 /**
@@ -46,13 +52,13 @@ export function useAccountOrder(options: {
   accounts: Ref<Account[]>;
   busy: Ref<boolean>;
   reloadAfterRevisionConflict: () => Promise<void>;
-  routeItems?: Ref<AccountRouteItem[]>;
+  groups: Ref<DestinationGroup[]>;
 }) {
   const {
     accounts,
     busy,
     reloadAfterRevisionConflict,
-    routeItems,
+    groups,
   } = options;
   const message = useMessage();
 
@@ -61,20 +67,16 @@ export function useAccountOrder(options: {
   const orderAnnouncement = ref("");
   let accountDrag: AccountDragState | null = null;
 
-  function currentItems(): AccountRouteItem[] {
-    return routeItems?.value ?? accounts.value.map((account) => ({
-      type: "account" as const,
-      id: account.id,
-      account,
-    }));
+  function currentGroups(): DestinationGroup[] {
+    return groups.value;
   }
 
-  function applyItems(items: readonly AccountRouteItem[], previous: readonly Account[]): void {
-    accounts.value = accountsFromItems(items, previous);
+  function applyGroups(nextGroups: readonly DestinationGroup[], previous: readonly Account[]): void {
+    accounts.value = accountsFromGroups(nextGroups, previous);
   }
 
   function sortableLength(): number {
-    return currentItems().filter((item) => item.type === "account" || item.keys.length > 0).length;
+    return currentGroups().filter((group) => group.accounts.length >= 1).length;
   }
 
   function clearAccountDrag(state: AccountDragState): void {
@@ -94,10 +96,10 @@ export function useAccountOrder(options: {
     try {
       const saved = await dashboardApi.reorderAccounts(accounts.value.map(({ id }) => id));
       accounts.value = saved;
-      const items = currentItems();
+      const items = currentGroups();
       const moved = items.find((item) => item.id === movedItemId);
       const position = items.findIndex((item) => item.id === movedItemId) + 1;
-      const name = moved?.type === "platform" ? moved.parent.name : moved?.account.name;
+      const name = moved?.destination.name || moved?.accounts[0]?.name;
       if (name && position > 0) {
         orderAnnouncement.value = t("账号 {name} 已移至第 {position} 位", {
           name,
@@ -147,7 +149,7 @@ export function useAccountOrder(options: {
       moved: false,
       pointerId: event.pointerId,
       previous: [...accounts.value],
-      items: currentItems(),
+      items: currentGroups(),
     };
     draggingAccountId.value = accountId;
     window.addEventListener("pointermove", previewAccountDrag, { passive: false });
@@ -162,17 +164,17 @@ export function useAccountOrder(options: {
     const target = document
       .elementFromPoint(event.clientX, event.clientY)
       ?.closest<HTMLElement>(".account-card[data-account-id]");
-    const targetId = target?.dataset.accountId;
+    const targetId = resolveGroupId(target?.dataset.accountId, state.items);
     if (!targetId || targetId === state.accountId) return;
     const fromIndex = state.items.findIndex((item) => item.id === state.accountId);
     const toIndex = state.items.findIndex((item) => item.id === targetId);
     if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) return;
     const targetItem = state.items[toIndex];
-    if (targetItem?.type === "platform" && targetItem.keys.length === 0) return;
+    if ((targetItem?.accounts.length ?? 0) === 0) return;
     const sourceItem = state.items[fromIndex];
-    if (sourceItem?.type === "platform" && sourceItem.keys.length === 0) return;
+    if ((sourceItem?.accounts.length ?? 0) === 0) return;
     state.items = moveItem(state.items, fromIndex, toIndex);
-    applyItems(state.items, state.previous);
+    applyGroups(state.items, state.previous);
     state.moved = true;
   }
 
@@ -197,16 +199,16 @@ export function useAccountOrder(options: {
     if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
     event.preventDefault();
     if (orderSaving.value || busy.value || sortableLength() < 2) return;
-    const items = currentItems();
+    const items = currentGroups();
     const fromIndex = items.findIndex((item) => item.id === accountId);
     const toIndex = fromIndex + (event.key === "ArrowUp" ? -1 : 1);
     if (fromIndex < 0 || toIndex < 0 || toIndex >= items.length) return;
     const source = items[fromIndex];
     const target = items[toIndex];
-    if (source?.type === "platform" && source.keys.length === 0) return;
-    if (target?.type === "platform" && target.keys.length === 0) return;
+    if ((source?.accounts.length ?? 0) === 0) return;
+    if ((target?.accounts.length ?? 0) === 0) return;
     const previous = [...accounts.value];
-    applyItems(moveItem(items, fromIndex, toIndex), previous);
+    applyGroups(moveItem(items, fromIndex, toIndex), previous);
     await persistAccountOrder(previous, accountId);
   }
 

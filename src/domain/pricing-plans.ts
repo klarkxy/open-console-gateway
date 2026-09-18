@@ -6,6 +6,7 @@ import type {
   ProviderPricingResponse,
   StoredProviderPricingSnapshot,
 } from "../api/providers.ts";
+import { isLegacyGoFallbackPlan } from "./account-capabilities.ts";
 import {
   type ProviderSurface,
   planFamilyLabel,
@@ -111,7 +112,7 @@ function groupForSurface(
   const response = providerSnapshots[surface.provider_id];
   const availability = response?.availability ?? surface.pricing_availability;
   const snapshot = response?.snapshot
-    ?? (catalog == null && surface.provider_id === "opencode" ? legacyGoSnapshot ?? undefined : undefined);
+    ?? (isLegacyGoFallbackPlan(surface, catalog) ? legacyGoSnapshot ?? undefined : undefined);
   return {
     plan: surface,
     label: planFamilyLabel(surface, catalog),

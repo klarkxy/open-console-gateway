@@ -2,7 +2,7 @@ import type { Account } from "../api/dashboard.ts";
 import type { ProviderCatalogEntry } from "../api/providers.ts";
 import { isCooling, isFreeCooling } from "../domain/accounts-usage.ts";
 import { daysUntilDate } from "../domain/account-lifecycle.ts";
-import { isZenFreeAccount } from "../domain/account-providers.ts";
+import { accountCapabilities } from "../domain/account-capabilities.ts";
 import { planForAccount } from "../domain/plans.ts";
 
 /**
@@ -31,8 +31,12 @@ const REASON_PRIORITY: Record<AttentionReason, number> = {
   "setup-incomplete": 3,
 };
 
-function accountCooling(account: Account, now: number): boolean {
-  return isZenFreeAccount(account)
+function accountCooling(
+  account: Account,
+  now: number,
+  catalog?: readonly ProviderCatalogEntry[] | null,
+): boolean {
+  return accountCapabilities(account, catalog).freeCooldownOnly
     ? isFreeCooling(account, now)
     : isCooling(account, now);
 }
@@ -58,10 +62,10 @@ export function buildNeedsAttention(
       // keeps the narrow offline Go/Zen projection; a successful empty catalog
       // stays authoritative.
       const plan = planForAccount(account, catalog);
+      const caps = accountCapabilities(account, catalog);
       const expiryDays = plan
-        && plan.kind !== "custom"
+        && caps.hasExpiry
         && !plan.dynamic
-        && !isZenFreeAccount(account)
         && account.expires_on
         ? daysUntilDate(account.expires_on, now)
         : Number.POSITIVE_INFINITY;
@@ -69,7 +73,7 @@ export function buildNeedsAttention(
         items.push({ accountId: account.id, accountName: account.name, reason: "expired" });
         continue;
       }
-      if (accountCooling(account, now)) {
+      if (accountCooling(account, now, catalog)) {
         items.push({ accountId: account.id, accountName: account.name, reason: "cooling" });
         continue;
       }

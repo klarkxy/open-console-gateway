@@ -160,7 +160,7 @@ test("Go protocol probe sends only provider, model, and protocol intent", async 
 
   assert.equal(result.model_id, "gpt-5.6-luna");
   assert.deepEqual(requests[0], {
-    url: "/dashboard/api/v3/providers/opencode/protocol-probes",
+    url: "/dashboard/api/v4/providers/opencode/protocol-probes",
     method: "POST",
     body: {
       modelId: "gpt-5.6-luna",
@@ -189,7 +189,7 @@ test("unified catalog refresh sends only the selected contract scope and CAS tok
   await providerApi.refreshContractCatalog("provider", "opencode");
 
   assert.deepEqual(requests, [{
-    url: "/dashboard/api/v3/provider-contracts/provider/opencode/catalog/refresh",
+    url: "/dashboard/api/v4/provider-contracts/provider/opencode/catalog/refresh",
     method: "POST",
     body: { expectedRevision: 12, processGeneration: 42 },
   }]);
@@ -226,7 +226,7 @@ test("catalog remove posts V4 model ids then reloads contracts", async () => {
       body: { modelIds: ["drop-me"], expectedRevision: 12, processGeneration: 42 },
     },
     {
-      url: "/dashboard/api/v3/provider-contracts",
+      url: "/dashboard/api/v4/provider-contracts",
       method: "GET",
       body: null,
     },
@@ -269,7 +269,7 @@ test("Custom endpoint protocol probe stays blocked while overrides use the model
   assert.deepEqual(requests.map(({ method, url }) => ({ method, url })), [
     {
       method: "PUT",
-      url: "/dashboard/api/v3/provider-contracts/custom-endpoint/custom-1/model-protocol-overrides",
+      url: "/dashboard/api/v4/provider-contracts/custom-endpoint/custom-1/model-protocol-overrides",
     },
   ]);
   assert.deepEqual(requests[0]?.body, {
@@ -333,7 +333,7 @@ test("Zen Free provider settings reject non-Zen accounts before the dedicated wr
     (error: unknown) => error instanceof Error && error.message.includes("Zen Free"),
   );
   assert.deepEqual(requests.map(({ method, url }) => ({ method, url })), [
-    { method: "GET", url: "/dashboard/api/v3/accounts/go-account-2" },
+    { method: "GET", url: "/dashboard/api/v4/accounts/go-account-2" },
   ]);
 });
 
@@ -363,7 +363,7 @@ test("Zen Free enable switch writes the catalog provider through PATCH /provider
   assert.equal(result.account.enabled, false);
   assert.equal(result.revision, 13);
   assert.deepEqual(requests[1], {
-    url: "/dashboard/api/v3/providers/zen-free",
+    url: "/dashboard/api/v4/providers/zen-free",
     method: "PATCH",
     body: {
       enabled: false,

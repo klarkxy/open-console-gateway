@@ -1,5 +1,5 @@
 import { useControlPlaneStore } from "../stores/controlPlane.ts";
-import { requestV3, type WithoutExpectation } from "./dashboard-v3.ts";
+import { requestV3, requestV4, type WithoutExpectation } from "./dashboard-v3.ts";
 import type {
   MutationAck,
   MutationExpectation,
@@ -33,7 +33,7 @@ export type {
 } from "./generated/dashboard-v3.ts";
 
 /**
- * New API / Sub2API platform-account client for `/dashboard/api/v3`.
+ * New API / Sub2API platform-account client for `/dashboard/api/v4`.
  *
  * Responses are validated field-by-field by the adapters below before they are
  * handed to the UI: a malformed payload degrades to explicit defaults instead
@@ -262,4 +262,40 @@ export const platformAccountsApi = {
         ...expectation,
       } satisfies WithoutExpectation<PlatformRefresh> & MutationExpectation),
     }))),
+
+  importKeys: (id: string): Promise<PlatformKeyImportResult> =>
+    withCas(async (expectation) => adaptImportResult(await requestV4<unknown>(
+      `/platform-accounts/${encode(id)}/import-keys`,
+      {
+        method: "POST",
+        body: JSON.stringify({ ...expectation }),
+      },
+    ))),
 };
+
+export interface PlatformKeyImportFailure {
+  name: string;
+  code: string;
+}
+
+export interface PlatformKeyImportResult {
+  imported: number;
+  skippedExisting: number;
+  skippedDisabled: number;
+  failed: PlatformKeyImportFailure[];
+}
+
+function adaptImportResult(value: unknown): PlatformKeyImportResult {
+  const dto = record(value);
+  return {
+    imported: num(dto.imported),
+    skippedExisting: num(dto.skippedExisting),
+    skippedDisabled: num(dto.skippedDisabled),
+    failed: Array.isArray(dto.failed)
+      ? dto.failed.map((item) => {
+        const row = record(item);
+        return { name: str(row.name), code: str(row.code, "create") };
+      })
+      : [],
+  };
+}

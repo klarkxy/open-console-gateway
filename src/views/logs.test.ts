@@ -206,7 +206,7 @@ test("account API sends purchase dates and the complete reorder payload", async 
   assert.equal(reordered[0]?.id, "account-2");
   assert.deepEqual(requests, [
     {
-      url: "/dashboard/api/v3/accounts",
+      url: "/dashboard/api/v4/accounts",
       method: "POST",
       body: {
         name: "Second",
@@ -217,7 +217,7 @@ test("account API sends purchase dates and the complete reorder payload", async 
       },
     },
     {
-      url: "/dashboard/api/v3/accounts/order",
+      url: "/dashboard/api/v4/accounts/order",
       method: "PUT",
       body: { accountIds: ["account-2", "account-1"], expectedRevision: 1, processGeneration: 99 },
     },
@@ -253,12 +253,12 @@ test("managed account API uses ordered setup, browser targets, and profile reset
     path: new URL(url, "http://localhost").pathname,
     method,
   })), [
-    { path: "/dashboard/api/v3/accounts/managed", method: "POST" },
-    { path: "/dashboard/api/v3/accounts/managed-1/setup", method: "PATCH" },
-    { path: "/dashboard/api/v3/accounts/managed-1/setup/verify-key", method: "POST" },
-    { path: "/dashboard/api/v3/browser/capabilities", method: "GET" },
-    { path: "/dashboard/api/v3/accounts/managed-1/browser", method: "POST" },
-    { path: "/dashboard/api/v3/accounts/managed-1/browser-profile", method: "DELETE" },
+    { path: "/dashboard/api/v4/accounts/managed", method: "POST" },
+    { path: "/dashboard/api/v4/accounts/managed-1/setup", method: "PATCH" },
+    { path: "/dashboard/api/v4/accounts/managed-1/setup/verify-key", method: "POST" },
+    { path: "/dashboard/api/v4/browser/capabilities", method: "GET" },
+    { path: "/dashboard/api/v4/accounts/managed-1/browser", method: "POST" },
+    { path: "/dashboard/api/v4/accounts/managed-1/browser-profile", method: "DELETE" },
   ]);
   assert.deepEqual(requests[4]?.body, {
     target: "invite",

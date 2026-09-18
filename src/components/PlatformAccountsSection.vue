@@ -1,17 +1,17 @@
 <template>
   <n-alert
-    v-if="loadError"
+    v-if="platformStore.error"
     type="error"
-    :title="t('加载平台账号失败：{error}', { error: loadError })"
+    :title="t('加载平台账号失败：{error}', { error: platformStore.error })"
   >
-    <n-button size="small" secondary @click="load">{{ t("重试") }}</n-button>
+    <n-button size="small" secondary @click="reload">{{ t("重试") }}</n-button>
   </n-alert>
 
   <PlatformAccountFormModal
     :show="showForm"
     :editing="editingPlatform"
     :preset-kind="presetKind"
-    :busy="mutating"
+    :busy="platformStore.mutating"
     @update:show="showForm = $event"
     @save="onFormSave"
   />
@@ -19,7 +19,7 @@
     :show="showLink"
     :parent="linkParent"
     :candidates="linkCandidates"
-    :busy="mutating"
+    :busy="platformStore.mutating"
     @update:show="showLink = $event"
     @submit="onLinkSubmit"
     @add-key="onLinkModalAddKey"
@@ -29,7 +29,7 @@
     :parent-name="keyFormParentName"
     :title="editKeyAccount ? t('编辑 Key') : t('添加 Key')"
     :editing="editKeyAccount ? { name: editKeyAccount.name, notes: editKeyAccount.notes } : null"
-    :busy="mutating"
+    :busy="platformStore.mutating"
     :external-error="addKeyError"
     @update:show="onKeyFormVisible"
     @save="onKeyFormSave"
@@ -47,21 +47,22 @@ import {
 import { dashboardApi, DashboardRequestError, type Account } from "../api/dashboard.ts";
 import { isRevisionConflict } from "../api/dashboard-v3.ts";
 import {
-  platformAccountsApi,
-  platformGroupWrite,
   type PlatformAccount,
-  type PlatformAccountsView,
   type PlatformKind,
   type PlatformLink,
 } from "../api/platform-accounts.ts";
 import {
+  PLATFORM_KEY_IMPORT_FAILURE_KEYS,
+  canImportPlatformKeys,
   discoveredModelCapabilities,
   linkedAccountIdSet,
   platformHostedEndpoint,
   platformModelOverlay,
+  type PlatformKeyImportFailureCode,
 } from "../domain/platform-accounts.ts";
-import { isCustomApiAccount } from "../domain/custom-account.ts";
+import { accountCapabilities } from "../domain/account-capabilities.ts";
 import { t, type MessageKey } from "../i18n/index.ts";
+import { usePlatformAccountsStore, type PlatformPersistOutcome } from "../stores/platformAccounts.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
 import PlatformAccountFormModal, {
   type PlatformAccountFormPayload,
@@ -78,18 +79,11 @@ const emit = defineEmits<{
   changed: [];
   /** A capabilities import returned the updated account; replace it in place. */
   accountUpdated: [account: Account];
-  /** Latest link set plus parent names, for the parent-owned-endpoint lock. */
-  linksChange: [links: PlatformLink[], parents: PlatformAccount[]];
 }>();
 
 const dialog = useDialog();
 const message = useMessage();
-
-const view = ref<PlatformAccountsView | null>(null);
-const loading = ref(true);
-const loadError = ref("");
-const mutating = ref(false);
-const refreshing = ref<Record<string, boolean>>({});
+const platformStore = usePlatformAccountsStore();
 
 const showForm = ref(false);
 const editingPlatform = ref<PlatformAccount | null>(null);
@@ -106,93 +100,39 @@ const linkParent = ref<PlatformAccount | null>(null);
  */
 const addKeyParent = ref<PlatformAccount | null>(null);
 const addKeyError = ref("");
-const pendingLink = ref<{ accountId: string; parentId: string } | null>(null);
 const editKeyAccount = ref<Account | null>(null);
 
 const keyFormParentName = computed(() => {
   if (addKeyParent.value) return addKeyParent.value.name;
   if (!editKeyAccount.value) return "";
-  const link = (view.value?.links ?? []).find((item) => item.accountId === editKeyAccount.value!.id);
-  return (view.value?.accounts ?? []).find((parent) => parent.id === link?.platformAccountId)?.name ?? "";
+  const link = platformStore.links.find((item) => item.accountId === editKeyAccount.value!.id);
+  return platformStore.parents.find((parent) => parent.id === link?.platformAccountId)?.name ?? "";
 });
 
 const linkCandidates = computed(() => {
-  const linked = linkedAccountIdSet(view.value?.links ?? []);
-  return props.accounts.filter((account) => isCustomApiAccount(account) && !linked.has(account.id));
+  const linked = linkedAccountIdSet(platformStore.links);
+  return props.accounts.filter((account) => (
+    accountCapabilities(account, null).endpointOnAccount && !linked.has(account.id)
+  ));
 });
 
-watch(() => view.value?.links, (links) => {
-  emit(
-    "linksChange",
-    links ?? [],
-    view.value?.accounts ?? [],
-  );
-  // A reloaded view that already contains the pending account's link settles
-  // the retry state without another write.
-  if (pendingLink.value && (links ?? []).some((link) => link.accountId === pendingLink.value!.accountId)) {
-    pendingLink.value = null;
+watch(() => platformStore.error, (error) => {
+  if (error) {
+    message.error(t("加载平台账号失败：{error}", { error }));
   }
 });
 
-function linksFor(parent: PlatformAccount): PlatformLink[] {
-  return (view.value?.links ?? []).filter((link) => link.platformAccountId === parent.id);
-}
-
-// Overlapping loads resolve out of order; only the latest operation commits
-// loading/error presentation. Mirrors the load guard in stores/accounts.ts.
-let loadGeneration = 0;
-
-/**
- * Acceptance boundary for every incoming snapshot: within the same backend
- * process generation a delayed older response must not roll the view back;
- * a different generation is an opaque identity with no comparable ordering,
- * so it is adopted as-is. Mirrors the revision sink in stores/controlPlane.ts.
- *
- * An accepted snapshot is a complete fresh list, so it also supersedes any
- * pending load: drop the obsolete loading/error presentation and invalidate
- * older load completions. A rejected stale snapshot carries no fresh state
- * and leaves an in-flight newer load untouched.
- */
-function acceptView(next: PlatformAccountsView): void {
-  const current = view.value;
-  if (
-    current !== null
-    && next.processGeneration === current.processGeneration
-    && next.revision < current.revision
-  ) {
-    return;
-  }
-  view.value = next;
-  loadGeneration += 1;
-  loading.value = false;
-  loadError.value = "";
-}
-
-async function load(): Promise<void> {
-  const generation = ++loadGeneration;
-  loading.value = true;
-  loadError.value = "";
-  try {
-    acceptView(await platformAccountsApi.list());
-  } catch (error) {
-    if (generation === loadGeneration) {
-      loadError.value = dashboardErrorDetail(error);
-      message.error(t("加载平台账号失败：{error}", { error: loadError.value }));
-    }
-  } finally {
-    if (generation === loadGeneration) loading.value = false;
-  }
-}
-
-/** Revision-conflict recovery: tokens already refreshed by the CAS layer; reload and ask to retry. */
-async function recoverConflict(): Promise<void> {
-  try {
-    acceptView(await platformAccountsApi.list());
-  } catch {
-    // The next explicit action retries; keep the conflict warning meaningful.
-  }
+function notifyConflict(): void {
   message.warning(t("账号设置已被其他操作修改，已重新加载最新状态，请重试"));
   emit("changed");
+}
+
+async function reload(): Promise<void> {
+  try {
+    await platformStore.load();
+  } catch {
+    // Alert + error watch keep the same load-failure presentation.
+  }
 }
 
 function mutationError(error: unknown, fallbackKey: MessageKey): void {
@@ -210,8 +150,6 @@ function openEdit(parent: PlatformAccount): void {
   showForm.value = true;
 }
 
-type PlatformPersistOutcome = "saved" | "conflict" | "error";
-
 /**
  * Single owner of the platform create/update write: the edit modal and the
  * Add Account chooser's embedded create form both funnel through here so
@@ -221,31 +159,17 @@ async function persistPlatform(
   payload: PlatformAccountFormPayload,
   editing: PlatformAccount | null,
 ): Promise<PlatformPersistOutcome> {
-  if (mutating.value) return "error";
-  mutating.value = true;
   try {
-    acceptView(editing
-      ? await platformAccountsApi.update(editing.id, {
-        name: payload.name,
-        ...(payload.userCredential !== undefined ? { userCredential: payload.userCredential } : {}),
-      })
-      : await platformAccountsApi.create({
-        kind: payload.kind,
-        name: payload.name,
-        baseUrl: payload.baseUrl,
-        ...(payload.userCredential !== undefined ? { userCredential: payload.userCredential } : {}),
-      }));
-    message.success(editing ? t("平台账号已更新") : t("平台账号已创建"));
-    return "saved";
-  } catch (error) {
-    if (isRevisionConflict(error)) {
-      await recoverConflict();
-      return "conflict";
+    const outcome = await platformStore.createOrUpdate(payload, editing);
+    if (outcome === "saved") {
+      message.success(editing ? t("平台账号已更新") : t("平台账号已创建"));
+    } else if (outcome === "conflict") {
+      notifyConflict();
     }
+    return outcome;
+  } catch (error) {
     mutationError(error, "保存失败：{error}");
     return "error";
-  } finally {
-    mutating.value = false;
   }
 }
 
@@ -272,46 +196,77 @@ function confirmDelete(parent: PlatformAccount): void {
 }
 
 async function deletePlatform(parent: PlatformAccount): Promise<void> {
-  if (mutating.value) return;
-  mutating.value = true;
   try {
-    await platformAccountsApi.remove(parent.id);
-    await load();
-    message.success(t("平台账号已删除"));
+    const outcome = await platformStore.remove(parent.id);
+    if (outcome === "conflict") notifyConflict();
+    else if (outcome === "ok") message.success(t("平台账号已删除"));
   } catch (error) {
-    if (isRevisionConflict(error)) await recoverConflict();
-    else mutationError(error, "删除失败：{error}");
-  } finally {
-    mutating.value = false;
+    mutationError(error, "删除失败：{error}");
+  }
+}
+
+async function importKeys(parent: PlatformAccount): Promise<void> {
+  if (!canImportPlatformKeys(parent) || platformStore.mutating || platformStore.importing[parent.id]) return;
+  dialog.info({
+    title: t("从站点导入 Key"),
+    content: t("将从站点拉取令牌并在本地创建 Key。已存在的 Key 会跳过。"),
+    positiveText: t("导入"),
+    negativeText: t("取消"),
+    onPositiveClick: () => runImportKeys(parent),
+  });
+}
+
+async function runImportKeys(parent: PlatformAccount): Promise<void> {
+  try {
+    const result = await platformStore.importKeys(parent.id);
+    if (result === "error") return;
+    if (result === "conflict") {
+      notifyConflict();
+      return;
+    }
+    emit("changed");
+    if (result.imported === 0 && result.failed.length === 0) {
+      message.info(t("没有可导入的 Key"));
+      return;
+    }
+    const parts = [t("已导入 {imported} 把 Key", { imported: result.imported })];
+    if (result.skippedExisting > 0) {
+      parts.push(t("已跳过 {count} 把已存在的 Key", { count: result.skippedExisting }));
+    }
+    if (result.skippedDisabled > 0) {
+      parts.push(t("{count} 把已停用", { count: result.skippedDisabled }));
+    }
+    if (result.failed.length > 0) {
+      const sample = result.failed.slice(0, 3).map((item) => {
+        const mapped = PLATFORM_KEY_IMPORT_FAILURE_KEYS[item.code as PlatformKeyImportFailureCode];
+        return `${item.name}: ${mapped ? t(mapped) : item.code}`;
+      }).join("；");
+      parts.push(t("{count} 把导入失败", { count: result.failed.length }) + `（${sample}）`);
+    }
+    if (result.failed.length > 0 && result.imported === 0) message.warning(parts.join(" · "));
+    else message.success(parts.join(" · "));
+  } catch (error) {
+    mutationError(error, "导入 Key 失败：{error}");
   }
 }
 
 async function refreshParent(parent: PlatformAccount): Promise<void> {
-  if (refreshing.value[parent.id]) return;
-  refreshing.value[parent.id] = true;
   try {
-    acceptView(await platformAccountsApi.refresh(parent.id));
-    message.success(t("已刷新"));
+    const outcome = await platformStore.refreshParent(parent.id);
+    if (outcome === "conflict") notifyConflict();
+    else if (outcome === "ok") message.success(t("已刷新"));
   } catch (error) {
-    if (isRevisionConflict(error)) await recoverConflict();
-    else mutationError(error, "刷新失败：{error}");
-  } finally {
-    refreshing.value[parent.id] = false;
+    mutationError(error, "刷新失败：{error}");
   }
 }
 
 async function refreshChild(parent: PlatformAccount, link: PlatformLink): Promise<void> {
-  const key = `${parent.id}:${link.accountId}`;
-  if (refreshing.value[key]) return;
-  refreshing.value[key] = true;
   try {
-    acceptView(await platformAccountsApi.refresh(parent.id, link.accountId));
-    message.success(t("已刷新"));
+    const outcome = await platformStore.refreshChild(parent.id, link.accountId);
+    if (outcome === "conflict") notifyConflict();
+    else if (outcome === "ok") message.success(t("已刷新"));
   } catch (error) {
-    if (isRevisionConflict(error)) await recoverConflict();
-    else mutationError(error, "刷新失败：{error}");
-  } finally {
-    refreshing.value[key] = false;
+    mutationError(error, "刷新失败：{error}");
   }
 }
 
@@ -321,14 +276,14 @@ function openLink(parent: PlatformAccount): void {
 }
 
 function openAddKey(parent: PlatformAccount): void {
-  if (mutating.value) return;
+  if (platformStore.mutating) return;
   addKeyError.value = "";
   editKeyAccount.value = null;
   addKeyParent.value = parent;
 }
 
 function openEditKey(account: Account): void {
-  if (mutating.value) return;
+  if (platformStore.mutating) return;
   addKeyError.value = "";
   addKeyParent.value = null;
   editKeyAccount.value = account;
@@ -341,7 +296,7 @@ function onLinkModalAddKey(): void {
 }
 
 function onKeyFormVisible(show: boolean): void {
-  if (!show && mutating.value) return;
+  if (!show && platformStore.mutating) return;
   if (!show) {
     addKeyParent.value = null;
     editKeyAccount.value = null;
@@ -367,8 +322,7 @@ async function onKeyFormSave(payload: PlatformKeyFormPayload): Promise<void> {
 }
 
 async function saveEditedKey(account: Account, payload: PlatformKeyFormPayload): Promise<void> {
-  if (mutating.value) return;
-  mutating.value = true;
+  if (!platformStore.beginMutation()) return;
   addKeyError.value = "";
   try {
     const updated = await dashboardApi.updateAccount(account.id, {
@@ -381,25 +335,26 @@ async function saveEditedKey(account: Account, payload: PlatformKeyFormPayload):
     message.success(t("已保存"));
   } catch (error) {
     if (isRevisionConflict(error)) {
-      await recoverConflict();
+      await platformStore.recoverConflict();
+      notifyConflict();
       editKeyAccount.value = null;
       return;
     }
     addKeyError.value = dashboardErrorDetail(error);
   } finally {
-    mutating.value = false;
+    platformStore.endMutation();
   }
 }
 
 async function createAndLinkKey(payload: PlatformKeyFormPayload): Promise<void> {
   const parent = addKeyParent.value;
-  if (!parent || mutating.value) return;
+  if (!parent || platformStore.mutating) return;
   const hosted = platformHostedEndpoint(parent.baseUrl);
   if (!hosted) {
     addKeyError.value = t("平台地址无效");
     return;
   }
-  mutating.value = true;
+  if (!platformStore.beginMutation()) return;
   addKeyError.value = "";
   try {
     const discovery = await dashboardApi.discoverCustomModels({
@@ -422,34 +377,35 @@ async function createAndLinkKey(payload: PlatformKeyFormPayload): Promise<void> 
       },
       model_capabilities: discoveredModelCapabilities(discovery.models),
     });
-    pendingLink.value = { accountId: created.id, parentId: parent.id };
+    platformStore.setPendingLink({ accountId: created.id, parentId: parent.id });
     addKeyParent.value = null;
     try {
-      acceptView(await platformAccountsApi.link(
+      const outcome = await platformStore.link(
         created.id,
         parent.id,
-        platformGroupWrite({ id: null, platform: null }),
-      ));
-      pendingLink.value = null;
+        { id: null, platform: null },
+      );
+      if (outcome === "conflict") {
+        notifyConflict();
+        if (platformStore.pendingLink) message.warning(t("Key 已创建，关联尚未完成。"));
+        return;
+      }
+      platformStore.clearPendingLink();
       message.success(overlayImportMessage(created, discovery.truncated));
       emit("changed");
       try {
-        acceptView(await platformAccountsApi.refresh(parent.id, created.id));
+        await platformStore.commitRefresh(parent.id, created.id);
       } catch {
         // Observation is optional; the Key is already routable.
       }
-    } catch (linkError) {
-      if (isRevisionConflict(linkError)) {
-        await recoverConflict();
-        if (pendingLink.value) message.warning(t("Key 已创建，关联尚未完成。"));
-        return;
-      }
+    } catch {
       message.warning(t("Key 已创建，关联尚未完成。"));
       emit("changed");
     }
   } catch (createError) {
     if (isRevisionConflict(createError)) {
-      await recoverConflict();
+      await platformStore.recoverConflict();
+      notifyConflict();
       addKeyParent.value = null;
       return;
     }
@@ -471,12 +427,12 @@ async function createAndLinkKey(payload: PlatformKeyFormPayload): Promise<void> 
       },
     });
   } finally {
-    mutating.value = false;
+    platformStore.endMutation();
   }
 }
 
 async function fetchModels(account: Account): Promise<void> {
-  if (mutating.value) return;
+  if (platformStore.mutating) return;
   const hosted = account.custom_config?.endpoint_url
     ? platformHostedEndpoint(account.custom_config.endpoint_url) ?? account.custom_config.endpoint_url
     : "";
@@ -484,7 +440,7 @@ async function fetchModels(account: Account): Promise<void> {
     message.error(t("平台地址无效"));
     return;
   }
-  mutating.value = true;
+  if (!platformStore.beginMutation()) return;
   try {
     const discovery = await dashboardApi.discoverCustomModels({
       endpoint_url: hosted,
@@ -502,10 +458,14 @@ async function fetchModels(account: Account): Promise<void> {
     emit("accountUpdated", updated);
     message.success(overlayImportMessage(updated, discovery.truncated));
   } catch (error) {
-    if (isRevisionConflict(error)) await recoverConflict();
-    else mutationError(error, "操作失败：{error}");
+    if (isRevisionConflict(error)) {
+      await platformStore.recoverConflict();
+      notifyConflict();
+    } else {
+      mutationError(error, "操作失败：{error}");
+    }
   } finally {
-    mutating.value = false;
+    platformStore.endMutation();
   }
 }
 
@@ -526,10 +486,10 @@ function overlayImportMessage(account: Account, truncated: boolean): string {
 }
 
 function siblingKeys(accountId: string): Account[] {
-  const parentId = (view.value?.links ?? []).find((link) => link.accountId === accountId)?.platformAccountId;
+  const parentId = platformStore.links.find((link) => link.accountId === accountId)?.platformAccountId;
   if (!parentId) return [props.accounts.find((account) => account.id === accountId)].filter(Boolean) as Account[];
   const ids = new Set(
-    (view.value?.links ?? [])
+    platformStore.links
       .filter((link) => link.platformAccountId === parentId)
       .map((link) => link.accountId),
   );
@@ -544,23 +504,15 @@ async function fetchModelsAll(accounts: Account[]): Promise<void> {
 
 /** Retry ONLY the association of an already-created Key; never re-creates. */
 async function retryPendingLink(): Promise<void> {
-  const pending = pendingLink.value;
-  if (!pending || mutating.value) return;
-  mutating.value = true;
   try {
-    acceptView(await platformAccountsApi.link(
-      pending.accountId,
-      pending.parentId,
-      platformGroupWrite({ id: null, platform: null }),
-    ));
-    pendingLink.value = null;
-    message.success(t("已关联"));
-    emit("changed");
+    const outcome = await platformStore.retryPendingLink();
+    if (outcome === "conflict") notifyConflict();
+    else if (outcome === "ok") {
+      message.success(t("已关联"));
+      emit("changed");
+    }
   } catch (error) {
-    if (isRevisionConflict(error)) await recoverConflict();
-    else mutationError(error, "操作失败：{error}");
-  } finally {
-    mutating.value = false;
+    mutationError(error, "操作失败：{error}");
   }
 }
 
@@ -568,27 +520,26 @@ async function onLinkSubmit(
   selection: { accountId: string; group: { id: string | null; platform: string | null } },
 ): Promise<void> {
   const parent = linkParent.value;
-  if (!parent || mutating.value) return;
-  mutating.value = true;
+  if (!parent || !platformStore.beginMutation()) return;
   try {
-    acceptView(await platformAccountsApi.link(
+    const outcome = await platformStore.link(
       selection.accountId,
       parent.id,
-      platformGroupWrite(selection.group),
-    ));
-    showLink.value = false;
-    message.success(t("已关联"));
-    // Linking rewrites the Key's endpoint to the parent-owned inference URL.
-    emit("changed");
-  } catch (error) {
-    if (isRevisionConflict(error)) {
+      selection.group,
+    );
+    if (outcome === "conflict") {
       showLink.value = false;
-      await recoverConflict();
+      notifyConflict();
     } else {
-      mutationError(error, "操作失败：{error}");
+      showLink.value = false;
+      message.success(t("已关联"));
+      // Linking rewrites the Key's endpoint to the parent-owned inference URL.
+      emit("changed");
     }
+  } catch (error) {
+    mutationError(error, "操作失败：{error}");
   } finally {
-    mutating.value = false;
+    platformStore.endMutation();
   }
 }
 
@@ -603,35 +554,29 @@ function confirmUnlink(account: Account, link: PlatformLink): void {
 }
 
 async function unlink(accountId: string): Promise<void> {
-  if (mutating.value) return;
-  mutating.value = true;
   try {
-    acceptView(await platformAccountsApi.unlink(accountId));
-    message.success(t("已取消关联"));
-    emit("changed");
+    const outcome = await platformStore.unlink(accountId);
+    if (outcome === "conflict") notifyConflict();
+    else if (outcome === "ok") {
+      message.success(t("已取消关联"));
+      emit("changed");
+    }
   } catch (error) {
-    if (isRevisionConflict(error)) await recoverConflict();
-    else mutationError(error, "操作失败：{error}");
-  } finally {
-    mutating.value = false;
+    mutationError(error, "操作失败：{error}");
   }
 }
 
-onMounted(load);
+onMounted(reload);
 
 defineExpose({
-  reload: load,
+  reload,
   openCreate,
   createPlatform,
-  mutating,
-  view,
-  pendingLink,
-  refreshing,
   openAddKey,
+  importKeys,
   openEditKey,
   fetchModels,
   fetchModelsAll,
-  linksFor,
   refreshParent,
   refreshChild,
   confirmDelete,
