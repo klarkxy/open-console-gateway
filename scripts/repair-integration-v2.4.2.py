@@ -56,6 +56,10 @@ def unavailable_reset(body):
 
 def unknown_reset(body):
     body = once(body, 'assert_eq!(future["protocols"]["chat_completions"]["enabled"], true);', 'assert_eq!(future["protocols"]["chat_completions"]["enabled"], false);')
+    for protocol in ("responses", "messages"):
+        old = f'assert_eq!(future["protocols"]["{protocol}"]["override"], "force_off");'
+        if old in body:
+            body = once(body, old, f'assert_eq!(future["protocols"]["{protocol}"]["enabled"], false);')
     return body
 
 
@@ -74,7 +78,7 @@ def capabilities(body):
     harness.state.db.lock().apply_official_protocol_baseline(
         &ContractScope::provider(OPENCODE_PROVIDER_ID),
         &["grok-4.5".to_string()],
-        &ocg_core::official_protocols::OfficialProtocolBaseline::mapped([
+        &ocg_core::dashboard_v3::OfficialProtocolBaseline::mapped([
             ("grok-4.5", ocg_core::provider::UpstreamProtocolKind::Responses),
         ]),
         chrono::Utc::now(),
@@ -156,6 +160,7 @@ def repair_extra():
         raise ValueError("Expected one application model fixture helper")
     match = matches[0]
     texts[path] = texts[path][:match.start()] + EXPECTED_MODELS + texts[path][match.end():]
+    texts[path] = once(texts[path], "use std::collections::{HashMap, HashSet, VecDeque};", "use std::collections::{HashMap, VecDeque};")
     for path, text in texts.items():
         Path(path).write_text(text, encoding="utf-8")
 
