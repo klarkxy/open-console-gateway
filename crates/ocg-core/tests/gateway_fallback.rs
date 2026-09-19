@@ -2563,8 +2563,8 @@ async fn dynamic_429_uses_generic_cooldown_skips_go_windows_and_falls_through() 
     );
     let first = h.account(&first_id);
     let second = h.account(&second_id);
-    assert!(first.cooldown_until.is_some());
-    assert!(first.cooldown_generic_until.is_some());
+    assert!(first.cooldown_until.is_none());
+    assert!(first.cooldown_generic_until.is_none());
     assert!(first.cooldown_5h_until.is_none());
     assert!(first.cooldown_week_until.is_none());
     assert!(first.cooldown_month_until.is_none());

@@ -670,6 +670,7 @@ fn reset_cooldown_locked(
         let db = state.db.lock();
         db.clear_account_cooldown(id)
             .map_err(V3ApiError::internal)?;
+        state.recovery.reset_account(id);
     }
     mutation_after_commit(state, id, false)
 }

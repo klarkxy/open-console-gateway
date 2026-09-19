@@ -33,6 +33,8 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use ocg_gateway::selector::SelectionError;
 use std::sync::Arc;
+use std::time::Duration;
+const MAX_REQUEST_ATTEMPTS: u32 = 32;
 
 /// Process-state values frozen at request entry. Each fallback iteration still
 /// re-reads accounts, eligible Custom runtimes, and Zen Free cooldown.
@@ -122,6 +124,10 @@ impl GatewayExecutor {
         // and a concurrent settings switch only affects requests starting later.
         let snapshots = RequestSnapshots::capture(&state, config, contracts, resolved, dynamics);
         let mut loop_state = LoopState::new();
+        // Applies through headers / stream pre-output only. Once a stream is
+        // handed off, its existing idle timeout and no-replay rules take over.
+        let request_deadline = tokio::time::Instant::now()
+            + Duration::from_secs(snapshots.config.non_stream_timeout_secs.max(1));
         let conversation_key = if snapshots.config.conversation_sticky {
             resolve_conversation_key(client_format, &routing_model, &headers, &client_body)
         } else {
@@ -468,6 +474,30 @@ impl GatewayExecutor {
 
             let mut retried_same_account = false;
             loop {
+                if loop_state.attempt >= MAX_REQUEST_ATTEMPTS
+                    || tokio::time::Instant::now() >= request_deadline
+                {
+                    let message =
+                        "Gateway request retry budget exhausted; no further upstream attempt sent";
+                    record_plan_failure(
+                        &state,
+                        &trace,
+                        &client_body,
+                        loop_state.attempt.max(1),
+                        client_format,
+                        &active_plan,
+                        "gateway",
+                        "request_budget",
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        message,
+                    );
+                    return protocol_error_response(
+                        client_format,
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        message,
+                        None,
+                    );
+                }
                 loop_state.attempt = loop_state.attempt.saturating_add(1);
                 // Re-resolve the leg on every attempt: free fallback or sticky
                 // rewrites can swap `active_plan.model` mid-request.
@@ -477,25 +507,54 @@ impl GatewayExecutor {
                 } else {
                     selected_route
                 };
-                match forward_request(
-                    client,
-                    route,
-                    &state,
-                    &account,
-                    &snapshots.config,
-                    &active_plan,
-                    &trace,
-                    &client_body,
-                    loop_state.attempt,
-                    !retried_same_account,
-                    headers.clone(),
-                    snapshots.pricing.clone(),
-                    client_key_id.as_deref(),
-                    &snapshots.dynamics,
-                    &selection,
+                let forwarded = tokio::time::timeout_at(
+                    request_deadline,
+                    forward_request(
+                        client,
+                        route,
+                        &state,
+                        &account,
+                        &snapshots.config,
+                        &active_plan,
+                        &trace,
+                        &client_body,
+                        loop_state.attempt,
+                        !retried_same_account,
+                        headers.clone(),
+                        snapshots.pricing.clone(),
+                        client_key_id.as_deref(),
+                        &snapshots.dynamics,
+                        &selection,
+                    ),
                 )
-                .await
-                {
+                .await;
+                let forwarded = match forwarded {
+                    Ok(result) => result,
+                    Err(_) => {
+                        // Cancellation after send may have reached the upstream.
+                        // Never replay it automatically on a different Key.
+                        let message = "Gateway request deadline exceeded; upstream outcome may be unknown and the request was not replayed";
+                        record_plan_failure(
+                            &state,
+                            &trace,
+                            &client_body,
+                            loop_state.attempt,
+                            client_format,
+                            &active_plan,
+                            "transport",
+                            "request_budget",
+                            StatusCode::GATEWAY_TIMEOUT,
+                            message,
+                        );
+                        return protocol_error_response(
+                            client_format,
+                            StatusCode::GATEWAY_TIMEOUT,
+                            message,
+                            None,
+                        );
+                    }
+                };
+                match forwarded {
                     Ok(result) => match result.action {
                         ForwardAction::Return => return result.response,
                         ForwardAction::RetrySameAccount if !retried_same_account => {

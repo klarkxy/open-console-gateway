@@ -8,13 +8,14 @@ use crate::gateway::attempt::{
 use crate::gateway::classify::{
     PreflightKind, ProviderErrorClass, RateLimitFallback, StreamClassifyInput,
     TransportClassifyInput, classify_http, classify_preflight, classify_stream, classify_transport,
-    rate_limit_fallback, rate_limit_window_and_deadline, schedule_go_usage_sync,
+    rate_limit_fallback, schedule_go_usage_sync,
 };
 use crate::gateway::diagnostics::{
     ErrorDiagnostic, RequestTrace, api_format_name, emit_failure, emit_legacy_tool_compat,
     redact_known_secret, redact_known_secret_values, safe_upstream_headers,
     sanitize_upstream_error_value_with_known_secret, serialize_diagnostic,
 };
+use crate::gateway::failure::decode::decode as decode_failure;
 use crate::gateway::materialize::native_log_identity;
 use crate::gateway::protocol::{
     RequestPlan, UsageCounts, error_body, extract_usage, format_error, has_complete_usage,
@@ -22,6 +23,7 @@ use crate::gateway::protocol::{
 };
 use crate::gateway::protocol_stream::StreamConverter;
 use crate::gateway::provider_adapter;
+use crate::gateway::recovery::{RecoveryPermit, ResourceSet};
 use crate::gateway::routing::resolve_conversation_key;
 use crate::http_client::RouteLabel;
 use crate::kernel::pricing::PricingSnapshot;
@@ -823,6 +825,7 @@ struct ForwardAttemptContext {
     /// the request's route-set snapshot; recorded on the forward log row.
     route: RouteLabel,
     known_secret: Option<String>,
+    restriction_details: Option<Value>,
     route_account_id: Option<String>,
     provider_id: Option<String>,
 
@@ -856,6 +859,7 @@ impl ForwardAttemptContext {
             stream: plan.stream,
             route,
             known_secret: None,
+            restriction_details: None,
             route_account_id: None,
             provider_id: None,
 
@@ -931,7 +935,13 @@ impl ForwardAttemptContext {
             ));
         }
         let duration_ms = diagnostic.duration_ms.min(i64::MAX as u64) as i64;
-        let diagnostic_json = serialize_diagnostic(diagnostic);
+        let mut diagnostic_json = serialize_diagnostic(diagnostic);
+        if let Some(details) = &self.restriction_details
+            && let Ok(Value::Object(mut value)) = serde_json::from_str::<Value>(&diagnostic_json)
+        {
+            value.insert("restriction".into(), details.clone());
+            diagnostic_json = Value::Object(value).to_string();
+        }
         emit_failure(&diagnostic_json);
         FailureRecord {
             error_source: spec.error_source.to_string(),
@@ -1347,6 +1357,73 @@ async fn forward_request_impl(
         return Ok(account_preflight_failure(plan, message));
     }
 
+    // Admission is operational state, not account quota or selector state.
+    // Its key uses the authorized exact endpoint/model, route and current
+    // credential/pool generation. No raw identity digest is logged.
+    let free_contract = matches!(
+        classify_http(
+            429,
+            &account.provider_id,
+            plan.channel,
+            attempt_spec.auth == UpstreamAuth::None
+        ),
+        ProviderErrorClass::RateLimited {
+            profile: ocg_gateway::classify::ErrorProfile::ZenFree
+        }
+    );
+    let restriction_endpoint = format!("{url}|{route:?}|{:?}", plan.upstream);
+    let resources = ResourceSet::capture(
+        &state.db.lock(),
+        account,
+        &restriction_endpoint,
+        &plan.model,
+        free_contract,
+    )?;
+    let (wall, mono) = state.sample_gateway_clock();
+    let mut recovery_permit = match state.recovery.acquire(resources, wall, mono) {
+        Ok(permit) => permit,
+        Err(wait) => {
+            let message =
+                "compatible upstream resource is waiting for recovery; no upstream request sent";
+            attempt_context.restriction_details = Some(serde_json::json!({"wait": wait}));
+            let failure = attempt_context.failure(FailureSpec {
+                error_source: "gateway",
+                error_stage: "resource_wait",
+                downstream_status: Some(StatusCode::SERVICE_UNAVAILABLE.as_u16()),
+                upstream_status: None,
+                upstream_wait_ms: None,
+                retry_action: Some("try_next_account"),
+                upstream_headers: None,
+                upstream_error: None,
+                request_body: Some(client_body),
+            });
+            DbAttemptSink::new(&state.db.lock()).insert(
+                account,
+                &plan.model,
+                "error",
+                None,
+                metadata_metrics(
+                    &pricing_snapshot,
+                    plan.service_tier.as_deref(),
+                    "not_applicable",
+                ),
+                Some(message),
+                &attempt_context,
+                Some(failure),
+            )?;
+            return Ok(ForwardResult {
+                response: protocol_status_error_response(
+                    plan.client,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    message,
+                    None,
+                ),
+                action: ForwardAction::TryNextAccount,
+                error_message: Some(message.into()),
+            });
+        }
+    };
+
     if let Some(compat) = &plan.legacy_tool_compat {
         emit_legacy_tool_compat(
             &trace.request_id,
@@ -1584,77 +1661,116 @@ async fn forward_request_impl(
             &text,
         );
 
-        match class {
-            ProviderErrorClass::RateLimited { policy } => {
-                let observed_at = state.sample_gateway_clock().0;
-                let cooldown = rate_limit_window_and_deadline(
-                    &account.provider_id,
-                    policy,
-                    &text,
-                    error_headers
-                        .get(reqwest::header::RETRY_AFTER)
-                        .and_then(|value| value.to_str().ok()),
-                    observed_at,
-                );
-                let window = cooldown.and_then(|(window, _)| window);
-                let sanitized = attempt_context.sanitize_upstream_error(&text);
-                let error_message = match cooldown {
-                    Some((_, until)) => format!(
-                        "rate limited: {} (resets in {}s)",
-                        sanitized,
-                        until.signed_duration_since(observed_at).num_seconds()
-                    ),
-                    None => format!("upstream temporarily rate limited: {sanitized}"),
-                };
-                let action = forward_action_for_class(class, allow_same_account_retry, window);
-                let failure = attempt_context.failure(FailureSpec {
-                    error_source: "upstream",
-                    error_stage: "upstream_http",
-                    downstream_status: Some(StatusCode::BAD_GATEWAY.as_u16()),
-                    upstream_status: Some(status.as_u16()),
-                    upstream_wait_ms: Some(upstream_wait_ms),
-                    retry_action: Some(retry_action_name(action)),
-                    upstream_headers: Some(&error_headers),
-                    upstream_error: Some(&text),
-                    request_body: Some(client_body),
-                });
-                {
-                    let db = state.db.lock();
-                    DbAttemptSink::new(&db).insert(
+        let (observed_at, observed_mono) = state.sample_gateway_clock();
+        if let Some(facts) = decode_failure(
+            class,
+            &text,
+            error_headers
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            observed_at,
+        ) {
+            let decision = facts.decide();
+            let sanitized = attempt_context.sanitize_upstream_error(&text);
+            let action = if decision.exhaust_free {
+                ForwardAction::ExhaustFreeChannel
+            } else {
+                ForwardAction::TryNextAccount
+            };
+            let error_message = format!(
+                "upstream rejected this resource ({:?}): {sanitized}",
+                facts.cause
+            );
+            let downstream = if status == StatusCode::TOO_MANY_REQUESTS {
+                StatusCode::BAD_GATEWAY
+            } else {
+                status
+            };
+            // Re-read the selection and entire explicit quota generation under
+            // the same DB lock as persistence. Old replies cannot affect a new
+            // Key, binding, endpoint, membership or operator reset.
+            let recorded = {
+                let db = state.db.lock();
+                let current = matches!(attempt_spec.credential, CredentialHandle::None)
+                    || live_send::verify_live_send(
+                        &db,
+                        selection,
                         account,
-                        &model,
-                        "client_error",
-                        Some(429),
-                        metadata_metrics(
-                            &pricing_snapshot,
-                            plan.service_tier.as_deref(),
-                            "not_applicable",
-                        ),
-                        Some(&sanitized),
-                        &attempt_context,
-                        Some(failure),
-                    )?;
-                    if let Some((window, until)) = cooldown {
+                        plan,
+                        &attempt_spec,
+                        LiveSendAccountGate::RequireEnabled,
+                    )
+                    .is_ok();
+                let same_generation = current
+                    && recovery_permit.permits_observation(&facts)
+                    && recovery_permit.same_generation(&ResourceSet::capture(
+                        &db,
+                        account,
+                        &restriction_endpoint,
+                        &plan.model,
+                        free_contract,
+                    )?);
+                if same_generation {
+                    recovery_permit.observe_failure(&facts, decision, observed_mono);
+                    if let Some((window, until)) = decision.persist_reset {
                         db.set_account_rate_limit_if_key_matches(
                             &account.id,
                             &account.key_cipher,
                             until,
                             &sanitized,
-                            window,
+                            Some(window),
                         )?;
                     }
                 }
-                // Schedule (never inline) an official usage reconciliation shortly
-                // after a real inference 429. Does not alter cooldown/failover.
-                if schedule_go_usage_sync(class) {
-                    crate::usage_sync::schedule_after_inference_429(state, &account.id);
-                }
-                return Ok(ForwardResult {
-                    response: error_response(plan.client, &error_message, None),
-                    action,
-                    error_message: Some(error_message),
-                });
+                same_generation
+            };
+            attempt_context.restriction_details = Some(serde_json::json!({
+                "facts": facts, "recorded_for_current_generation": recorded,
+                "local_reprobe": decision.wait_for_recovery,
+            }));
+            let failure = attempt_context.failure(FailureSpec {
+                error_source: "upstream",
+                error_stage: "upstream_http",
+                downstream_status: Some(downstream.as_u16()),
+                upstream_status: Some(status.as_u16()),
+                upstream_wait_ms: Some(upstream_wait_ms),
+                retry_action: Some(retry_action_name(action)),
+                upstream_headers: Some(&error_headers),
+                upstream_error: Some(&text),
+                request_body: Some(client_body),
+            });
+            DbAttemptSink::new(&state.db.lock()).insert(
+                account,
+                &model,
+                "client_error",
+                Some(status.as_u16() as i32),
+                metadata_metrics(
+                    &pricing_snapshot,
+                    plan.service_tier.as_deref(),
+                    "not_applicable",
+                ),
+                Some(&sanitized),
+                &attempt_context,
+                Some(failure),
+            )?;
+            // Existing official reconciliation is a capability, not a decoder
+            // side effect. Do not schedule it from stale credential evidence.
+            if recorded && schedule_go_usage_sync(class) {
+                crate::usage_sync::schedule_after_inference_429(state, &account.id);
             }
+            return Ok(ForwardResult {
+                response: protocol_status_error_response(
+                    plan.client,
+                    downstream,
+                    &error_message,
+                    None,
+                ),
+                action,
+                error_message: Some(error_message),
+            });
+        }
+
+        match class {
             ProviderErrorClass::HttpRequestTimeout => {
                 let detail = format!(
                     "upstream returned 408: {}",
@@ -1842,10 +1958,8 @@ async fn forward_request_impl(
                 });
             }
             _ => {
-                // A proven GOAT credit rejection is account-scoped and may fall
-                // through for this request only. It supplies no reset deadline:
-                // do not invent a cooldown or mislabel it as an invalid Key.
-                // Other 4xx remain request errors and never replay on another Key.
+                // Unrecognized 4xx remain request errors. Provider decoders may
+                // refine only verified rejection envelopes above.
                 let sanitized = attempt_context.sanitize_upstream_error(&text);
                 let action = forward_action_for_class(class, allow_same_account_retry, None);
                 let failure = attempt_context.failure(FailureSpec {
@@ -2277,7 +2391,7 @@ async fn forward_request_impl(
             let service_tier_f = plan.service_tier.clone();
             let pricing_f = pricing_snapshot.clone();
             let attempt_f = attempt_context.clone();
-            let stream_guard = StreamOutcomeGuard::new(
+            let mut stream_guard = StreamOutcomeGuard::new(
                 state.clone(),
                 initial_id,
                 st.clone(),
@@ -2288,6 +2402,7 @@ async fn forward_request_impl(
                 status.as_u16(),
                 upstream_wait_ms,
             );
+            stream_guard.recovery = Some(recovery_permit);
             // `unfold` is a clean "run once, then end" stream. The DB write is the
             // unfold's state transition, the body emits a single empty chunk, and
             // the stream then terminates — no need for once() + flatten gymnastics.
@@ -2442,6 +2557,11 @@ async fn forward_request_impl(
                                 "forwarder",
                                 &format!("failed to finalize streaming row {initial_id}: {e}"),
                             );
+                        }
+                        if !st_f.lock().error
+                            && let Some(permit) = guard.recovery.as_mut()
+                        {
+                            permit.confirm_success();
                         }
                         guard.disarm();
                         Some((
@@ -2641,6 +2761,20 @@ async fn forward_request_impl(
             )?;
         }
 
+        let protocol = match plan.upstream {
+            ApiFormat::ChatCompletions => {
+                Some(ocg_domain::catalog::UpstreamProtocolKind::ChatCompletions)
+            }
+            ApiFormat::Responses => Some(ocg_domain::catalog::UpstreamProtocolKind::Responses),
+            ApiFormat::Messages => Some(ocg_domain::catalog::UpstreamProtocolKind::Messages),
+            ApiFormat::Gemini => None,
+        };
+        if protocol.is_some_and(|protocol| {
+            crate::custom::prove_verified_protocol_response(status, text.as_bytes(), protocol)
+                .is_ok()
+        }) {
+            recovery_permit.confirm_success();
+        }
         Ok(ForwardResult {
             response: (status, axum::Json(response_json)).into_response(),
             action: ForwardAction::Return,
@@ -2660,6 +2794,7 @@ struct StreamOutcomeGuard {
     upstream_status: u16,
     upstream_wait_ms: u64,
     armed: bool,
+    recovery: Option<RecoveryPermit>,
 }
 
 impl StreamOutcomeGuard {
@@ -2686,6 +2821,7 @@ impl StreamOutcomeGuard {
             upstream_status,
             upstream_wait_ms,
             armed: true,
+            recovery: None,
         }
     }
 

@@ -1,6 +1,5 @@
 //! Temporary upstream failures must not mutate account availability or stickiness.
 use axum::http::StatusCode;
-use chrono::{Duration, Utc};
 use ocg_core::gateway::provider_adapter::install_goat_loopback_route_for_test;
 use ocg_core::models::RoutingMode;
 use ocg_core::provider::{COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS as MODEL, ZEN_FREE_ACCOUNT_ID};
@@ -62,7 +61,7 @@ async fn goat_transient_falls_back_only_for_this_request_and_next_request_return
 }
 
 #[tokio::test]
-async fn goat_retry_after_header_reaches_persisted_deadline() {
+async fn goat_retry_after_is_endpoint_wait_not_an_account_reset() {
     let raw = format!("HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nRetry-After: 90\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", TRANSIENT.len(), TRANSIENT).into_bytes();
     let (base, calls, stop) = start_raw_disconnect_upstream(raw).await;
     let (state, dir) = build_state(base.clone(), &["unused"]);
@@ -70,11 +69,28 @@ async fn goat_retry_after_header_reaches_persisted_deadline() {
     let _route = install_goat_loopback_route_for_test(goat.clone(), base).unwrap();
     let h =
         FallbackHarness::from_parts(state, dir, Default::default(), Some(stop), Some(calls)).await;
-    let before = Utc::now();
+    let before = h.account(&goat);
     let (status, _) = h.protocol("/v1/chat/completions", MODEL).await;
     assert_ne!(status, StatusCode::OK);
-    let until = h.account(&goat).cooldown_generic_until.unwrap();
-    assert!(until >= before + Duration::seconds(90));
-    assert!(until <= Utc::now() + Duration::seconds(90));
-    assert!(h.account(&goat).cooldown_week_until.is_none());
+    let after = h.account(&goat);
+    assert_eq!(after.cooldown_generic_until, before.cooldown_generic_until);
+    assert_eq!(after.cooldown_week_until, before.cooldown_week_until);
+    assert_eq!(after.updated_at, before.updated_at);
+    let count = h
+        .delayed_calls
+        .as_ref()
+        .unwrap()
+        .load(std::sync::atomic::Ordering::SeqCst);
+    let (status, _) = h.protocol("/v1/chat/completions", MODEL).await;
+    assert_ne!(status, StatusCode::OK);
+    assert_eq!(
+        h.delayed_calls
+            .as_ref()
+            .unwrap()
+            .load(std::sync::atomic::Ordering::SeqCst),
+        count
+    );
+    assert!(h.logs().iter().any(
+        |row| row.error_stage.as_deref() == Some("resource_wait") && row.http_status.is_none()
+    ));
 }
