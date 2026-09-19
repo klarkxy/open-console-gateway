@@ -1,0 +1,36 @@
+name: Restriction offline checks
+on:
+  push:
+    branches: [maintainer/unified-restrictions]
+    paths: [.github/workflows/restriction-offline-checks.yml]
+permissions:
+  contents: read
+jobs:
+  public-toolchain:
+    if: github.repository == 'klarkxy/open-console-gateway' && github.ref == 'refs/heads/maintainer/unified-restrictions'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - name: Fetch locked public crates only
+        run: |
+          if grep -q '^source = "git+' Cargo.lock; then exit 1; fi
+          cargo fetch --locked
+      - name: Package compiler and public dependencies without credentials
+        run: |
+          set -eu
+          mkdir -p /tmp/offline-rust/toolchain /tmp/offline-rust/cargo/registry
+          sysroot="$(rustc --print sysroot)"
+          cp -a "$sysroot/bin" "$sysroot/lib" /tmp/offline-rust/toolchain/
+          for dir in src cache index; do
+            cp -a "$HOME/.cargo/registry/$dir" /tmp/offline-rust/cargo/registry/
+          done
+          tar -C /tmp/offline-rust -czf /tmp/offline-rust.tar.gz toolchain cargo
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: restriction-offline-rust
+          path: /tmp/offline-rust.tar.gz
+          compression-level: 0
+          retention-days: 1
