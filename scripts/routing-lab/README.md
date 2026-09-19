@@ -2,6 +2,8 @@
 
 Black-box runtime check of real gateway routing against synthetic loopback upstreams. It does not touch production source or the official account library.
 
+This directory is a **compatibility entry**. The simulator, Dashboard V4 client, and scenario runner live in [`tools/gateway-lab/`](../../tools/gateway-lab/README.md). `node scripts/routing-lab/run.mjs` still writes `.artifacts/routing-lab/` and keeps the previous CLI flags.
+
 The orchestrator process hosts three independent loopback listeners with a shared event journal, then starts an isolated CLI gateway with a fresh data directory and dummy credentials.
 
 ## Replay
@@ -12,7 +14,7 @@ Pass a gateway executable. Parent should supply a freshly built CLI when the cur
 node scripts/routing-lab/run.mjs --cli ".\target\debug\ocg-manager-cli.exe"
 ```
 
-`--shadow` sets `OCG_SHADOW_COMPARE=1` on the freshly spawned gateway only. The default launch still strips that variable. Cleanup always stops the PID this script started and verifies listener plus gateway ports are closed.
+`--shadow` sets `OCG_SHADOW_COMPARE=1` on the freshly spawned gateway only. The default launch still strips that variable. Cleanup always stops the PID this script started and verifies listener plus gateway ports are closed. SIGINT/SIGTERM run that same owned cleanup; this lab never broad-kills unrelated processes.
 
 ## What it checks
 
