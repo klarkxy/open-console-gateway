@@ -1,0 +1,23 @@
+name: Restriction workbench
+on:
+  push:
+    branches: [maintainer/unified-restrictions]
+    paths: [.github/workflows/restriction-workbench.yml]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    if: github.repository == 'klarkxy/open-console-gateway' && github.ref == 'refs/heads/maintainer/unified-restrictions'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - name: Export reviewed baseline without credentials
+        run: git archive --format=tar.gz -o /tmp/restriction-baseline.tar.gz HEAD
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: restriction-baseline
+          path: /tmp/restriction-baseline.tar.gz
+          retention-days: 1
