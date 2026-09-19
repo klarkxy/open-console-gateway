@@ -1,4 +1,6 @@
 use super::*;
+use ocg_domain::credential::ModelScope;
+use std::collections::{HashMap, HashSet};
 
 fn sample_account(name: impl Into<String>) -> PortableAccount {
     PortableAccount {
@@ -32,14 +34,14 @@ fn sample_account(name: impl Into<String>) -> PortableAccount {
     }
 }
 
-fn sample_payload() -> PortablePayload {
+fn sample_account_graph() -> PortablePayload {
     let account_id = "00000000-0000-4000-8000-000000000041";
     let mut account = sample_account("Primary");
     account.id = Some(account_id.to_string());
     let mut payload = PortablePayload {
         platform_accounts: Vec::new(),
         platform_links: Vec::new(),
-        version: PAYLOAD_VERSION,
+        version: V6_PAYLOAD_VERSION,
         exported_at: "2026-08-29T00:00:00Z".to_string(),
         accounts: vec![account],
         dynamic_providers: Vec::new(),
@@ -50,14 +52,31 @@ fn sample_payload() -> PortablePayload {
         node: Some(sample_node(account_id)),
     };
     attach_default_identity_snapshot(&mut payload);
+    payload
+}
+
+fn sample_v6_payload() -> PortablePayload {
+    sample_account_graph()
+}
+
+fn sample_payload() -> PortablePayload {
+    let mut payload = sample_account_graph();
+    payload.version = PAYLOAD_VERSION;
     attach_default_destination_snapshot(&mut payload);
+    payload.accounts.clear();
+    payload.identities.clear();
+    payload.dynamic_providers.clear();
+    payload.platform_accounts.clear();
+    payload.platform_links.clear();
     payload
 }
 
 fn sample_legacy_payload(version: u32) -> PortablePayload {
-    let mut payload = sample_payload();
+    let mut payload = sample_account_graph();
     payload.version = version;
-    strip_identity_snapshot(&mut payload);
+    if version < V6_PAYLOAD_VERSION {
+        strip_identity_snapshot(&mut payload);
+    }
     payload.destinations.clear();
     payload.credentials.clear();
     payload
@@ -200,116 +219,189 @@ fn attach_default_identity_snapshot(payload: &mut PortablePayload) {
 }
 
 fn attach_default_destination_snapshot(payload: &mut PortablePayload) {
-    use crate::dashboard_v4::types::{
-        AdapterKindDto, AuthSchemeDto, CapabilitiesDto, CredentialCooldownsDto,
-        CredentialGrantsDto, DestinationCredentialDto, DestinationDto, LegacyDestinationKindDto,
-        LegacyDestinationRefDto, RedirectPolicyDto,
-    };
-    use ocg_domain::credential::{AuthState, ModelScope, credential_id_for_legacy_account};
+    use super::portable::{PURPOSE_INFERENCE, PortableCredential, PortableDestination};
+    use ocg_domain::credential::{ModelScope, credential_id_for_legacy_account};
     use ocg_domain::destination::{
-        destination_id_for_builtin, destination_id_for_custom_account, destination_id_for_dynamic,
+        LegacyCredentialFacts, LegacyDestinationFacts, LegacyIdentityFacts, LegacyPlatformLink,
+        credential_from_legacy, destination_from_legacy,
     };
+    use ocg_domain::dynamic::{DynamicAuthKind, DynamicModelMapping, DynamicProviderDefinition};
 
     payload.destinations.clear();
     payload.credentials.clear();
     if payload.version < PAYLOAD_VERSION {
         return;
     }
+    let dynamics: HashMap<_, _> = payload
+        .dynamic_providers
+        .iter()
+        .map(|provider| (provider.id.clone(), provider))
+        .collect();
+    let link_by_account: HashMap<_, _> = payload
+        .platform_links
+        .iter()
+        .map(|link| (link.account_id.clone(), link.clone()))
+        .collect();
+    let mut domain_destinations = Vec::new();
     let mut seen_destinations = HashSet::new();
+    for account in &payload.accounts {
+        let Some(account_id) = account.id.as_deref() else {
+            continue;
+        };
+        let facts = if account.provider_id == crate::kernel::ids::CUSTOM_PROVIDER_ID {
+            let Some(config) = account.custom_config.as_ref() else {
+                continue;
+            };
+            let Ok(protocol) = UpstreamProtocolKind::try_from(config.upstream_protocol.as_str())
+            else {
+                continue;
+            };
+            LegacyDestinationFacts::CustomAccount {
+                account_id: account_id.to_string(),
+                name: account.name.clone(),
+                endpoint_url: config.endpoint_url.clone(),
+                protocol,
+                model_capabilities: account
+                    .model_capabilities
+                    .iter()
+                    .filter_map(|capability| match capability {
+                        PortableModelCapability::Canonical(row) => {
+                            Some((row.public_model.clone(), row.upstream_model.clone()))
+                        }
+                        PortableModelCapability::Legacy(_) => None,
+                    })
+                    .collect(),
+            }
+        } else if let Some(provider) = dynamics.get(&account.provider_id) {
+            let Ok(protocol) = UpstreamProtocolKind::try_from(provider.upstream_protocol.as_str())
+            else {
+                continue;
+            };
+            let Ok(auth_kind) = DynamicAuthKind::try_from(provider.auth_kind.as_str()) else {
+                continue;
+            };
+            LegacyDestinationFacts::Dynamic {
+                definition: DynamicProviderDefinition {
+                    preset_id: provider.preset_id.clone(),
+                    id: provider.id.clone(),
+                    name: provider.name.clone(),
+                    endpoint_url: provider.endpoint_url.clone(),
+                    upstream_protocol: protocol,
+                    auth_kind,
+                    mappings: provider
+                        .models
+                        .iter()
+                        .map(|model| DynamicModelMapping {
+                            public_model: model.public_model.clone(),
+                            upstream_model: model.upstream_model.clone(),
+                            upstream_override: None,
+                        })
+                        .collect(),
+                },
+            }
+        } else {
+            LegacyDestinationFacts::Builtin {
+                provider_id: account.provider_id.clone(),
+            }
+        };
+        let Ok(mapped) = destination_from_legacy(&facts) else {
+            continue;
+        };
+        if !seen_destinations.insert(mapped.id.clone()) {
+            continue;
+        }
+        let mut portable = PortableDestination::from(&mapped);
+        if let Some(provider) = dynamics.get(&account.provider_id) {
+            portable.onboarding_draft = provider.onboarding_draft;
+            portable.preset_id = provider.preset_id.clone();
+            portable.origin = Some(
+                ocg_domain::provider::provider_origin_from_preset(provider.preset_id.as_deref())
+                    .as_str()
+                    .to_string(),
+            );
+            portable.offering = Some(
+                ocg_domain::provider::preset_offering(provider.preset_id.as_deref().unwrap_or(""))
+                    .to_string(),
+            );
+        }
+        domain_destinations.push(mapped);
+        payload.destinations.push(portable);
+    }
     for (rank, account) in payload.accounts.iter().enumerate() {
         let Some(account_id) = account.id.as_deref() else {
             continue;
         };
-        let (destination_id, legacy, adapter) =
-            if account.provider_id == crate::kernel::ids::CUSTOM_PROVIDER_ID {
-                (
-                    destination_id_for_custom_account(account_id),
-                    LegacyDestinationRefDto {
-                        kind: LegacyDestinationKindDto::CustomAccount,
-                        id: account_id.to_string(),
-                    },
-                    AdapterKindDto::Http,
-                )
-            } else if uuid::Uuid::parse_str(&account.provider_id).is_ok()
-                && builtin_provider(&account.provider_id).is_none()
-            {
-                (
-                    destination_id_for_dynamic(&account.provider_id),
-                    LegacyDestinationRefDto {
-                        kind: LegacyDestinationKindDto::Dynamic,
-                        id: account.provider_id.clone(),
-                    },
-                    AdapterKindDto::Http,
-                )
-            } else {
-                (
-                    destination_id_for_builtin(&account.provider_id),
-                    LegacyDestinationRefDto {
-                        kind: LegacyDestinationKindDto::Builtin,
-                        id: account.provider_id.clone(),
-                    },
-                    AdapterKindDto::OpencodeGo,
-                )
-            };
-        if seen_destinations.insert(destination_id.clone()) {
-            payload.destinations.push(DestinationDto {
-                id: destination_id.clone(),
-                legacy,
-                adapter,
-                name: account.name.clone(),
-                brand_family: None,
-                base_url: None,
-                protocols: Vec::new(),
-                auth_scheme: AuthSchemeDto::Bearer,
-                catalog: Vec::new(),
-                capabilities: CapabilitiesDto {
-                    testable: true,
-                    discoverable_models: false,
-                    official_balance_probe: Vec::new(),
-                    observer: false,
-                    managed_signup: false,
-                    external_integration: false,
-                    billing_tier_required: false,
-                    redirect_policy: RedirectPolicyDto::NoFollow,
-                    identity_headers: false,
-                },
-                plan: None,
-                max_credentials: None,
-                observer_credential_id: None,
-                enabled: account.enabled,
-            });
-        }
-        payload.credentials.push(DestinationCredentialDto {
-            id: credential_id_for_legacy_account(account_id).to_string(),
-            legacy_account_id: account_id.to_string(),
-            destination_id,
+        let facts = LegacyCredentialFacts {
+            id: account_id.to_string(),
+            provider_id: account.provider_id.clone(),
             name: account.name.clone(),
             notes: account.notes.clone(),
-            has_secret: !account.key.is_empty(),
+            has_key: !account.key.is_empty(),
             enabled: account.enabled,
-            routing_rank: rank as u32,
-            scope: ModelScope::All,
-            grants: CredentialGrantsDto {
+            order_index: rank as u32,
+            setup_step: match account.setup_step.as_str() {
+                "ready" => ModelSetupStep::Ready,
+                "payment" => ModelSetupStep::Payment,
+                other => ModelSetupStep::try_from(other).unwrap_or(ModelSetupStep::Ready),
+            },
+            account_type: match account.account_type.as_str() {
+                "managed" => ModelAccountType::Managed,
+                _ => ModelAccountType::Key,
+            },
+            auth_error: None,
+            last_error: None,
+            purchase_date: (!account.purchase_date.is_empty())
+                .then(|| account.purchase_date.clone()),
+            cooldown_generic_until: account.cooldowns.as_ref().and_then(|row| row.generic),
+            cooldown_5h_until: account.cooldowns.as_ref().and_then(|row| row.five_hours),
+            cooldown_week_until: account.cooldowns.as_ref().and_then(|row| row.week),
+            cooldown_month_until: account.cooldowns.as_ref().and_then(|row| row.month),
+            cooldown_free_until: account.cooldowns.as_ref().and_then(|row| row.free),
+            verified: account.verification_status.as_deref() == Some("verified"),
+            platform_link: link_by_account
+                .get(account_id)
+                .map(|link| LegacyPlatformLink {
+                    parent_id: link.platform_account_id.clone(),
+                }),
+            identity: account.identity_id.as_ref().map(|_| LegacyIdentityFacts {
+                quota_pool_id: None,
+                model_scope: account
+                    .binding_model_scope
+                    .clone()
+                    .unwrap_or(ModelScope::All),
                 allowed_endpoint_ids: account.allowed_endpoint_ids.clone().unwrap_or_default(),
                 allowed_origins: account.allowed_origins.clone().unwrap_or_default(),
-            },
-            auth_state: AuthState::Unknown,
-            last_error: None,
-            cooldowns: CredentialCooldownsDto {
-                generic_until: None,
-                five_hour_until: None,
-                week_until: None,
-                month_until: None,
-                free_until: None,
-            },
-            quota_pool_id: None,
-            onboarding_task: None,
-            purchase_date: if account.purchase_date.is_empty() {
-                None
-            } else {
-                Some(account.purchase_date.clone())
-            },
-        });
+                binding_enabled: account.binding_enabled.unwrap_or(true),
+            }),
+        };
+        let Ok(mapped) = credential_from_legacy(&facts, &domain_destinations) else {
+            continue;
+        };
+        let mut portable = PortableCredential::from(&mapped);
+        portable.id = credential_id_for_legacy_account(account_id).to_string();
+        portable.key = account.key.clone();
+        portable.username = account.username.clone();
+        portable.purpose = Some(PURPOSE_INFERENCE.to_string());
+        portable.provider_id = Some(account.provider_id.clone());
+        portable.account_type = Some(account.account_type.clone());
+        portable.setup_step = Some(account.setup_step.clone());
+        portable.verification_status = account.verification_status.clone();
+        portable.identity_id = account.identity_id.clone();
+        portable.identity_label = Some(account.name.clone());
+        portable.identity_confidence = Some("opaque".to_string());
+        portable.identity_enabled = Some(true);
+        portable.credential_version = account.credential_version;
+        portable.auth_state_version = account.auth_state_version;
+        portable.binding_id = account.binding_id.clone();
+        portable.binding_enabled = account.binding_enabled;
+        portable.scope = account
+            .binding_model_scope
+            .clone()
+            .unwrap_or(ModelScope::All);
+        if let Some(link) = link_by_account.get(account_id) {
+            portable.link_group = Some(link.group.clone());
+        }
+        payload.credentials.push(portable);
     }
 }
 
@@ -439,9 +531,9 @@ fn unsupported_payload_version_is_not_a_password_or_damage_error() {
     let v4 = sample_legacy_payload(4);
     let bundle = encrypt_payload(&v4, "correct horse battery").unwrap();
     let imported = decrypt_and_validate(&bundle, "correct horse battery").unwrap();
-    assert!(imported.platform_accounts.is_empty());
-    assert!(imported.platform_links.is_empty());
-    assert!(imported.identity_snapshot.is_none());
+    assert!(imported.unified.platform_accounts.is_empty());
+    assert!(imported.unified.platform_links.is_empty());
+    assert!(imported.unified.identity_snapshot.is_none());
     let mut payload = sample_payload();
     payload.version = 3;
     let bundle = encrypt_payload(&payload, "correct horse battery").unwrap();
@@ -538,7 +630,7 @@ fn preview_rejects_same_platform_id_with_a_different_site() {
         )
         .unwrap();
 
-    let mut payload = sample_payload();
+    let mut payload = sample_v6_payload();
     payload.platform_accounts = vec![PortablePlatformAccount {
         id: parent_id.to_string(),
         kind: PlatformKind::NewApi,
@@ -667,30 +759,27 @@ fn dynamic_provider_definitions_are_validated_and_dangling_ids_fail() {
     };
     attach_default_identity_snapshot(&mut payload);
     attach_default_destination_snapshot(&mut payload);
-    let validated = validate_payload(payload).unwrap();
-    assert_eq!(validated.dynamic_providers.len(), 1);
-    assert_eq!(validated.dynamic_providers[0].name, "Lab");
-    assert_eq!(
-        validated.accounts[0].credential_kind,
-        crate::provider::CredentialKind::ApiKey
-    );
-
-    let mut dangling_account = sample_account("Lab");
-    dangling_account.id = Some(account_id.to_string());
-    dangling_account.provider_id = provider_id.to_string();
-    let dangling = PortablePayload {
+    let mut dangling = PortablePayload {
         platform_accounts: Vec::new(),
         platform_links: Vec::new(),
         version: PAYLOAD_VERSION,
         exported_at: "2026-08-29T00:00:00Z".to_string(),
-        accounts: vec![dangling_account],
+        accounts: Vec::new(),
         dynamic_providers: Vec::new(),
         identities: Vec::new(),
         quota_pools: Vec::new(),
-        destinations: Vec::new(),
-        credentials: Vec::new(),
+        destinations: payload.destinations.clone(),
+        credentials: payload.credentials.clone(),
         node: Some(sample_node(account_id)),
     };
+    dangling.credentials[0].provider_id = Some("not-a-registered-plan".to_string());
+    let validated = validate_payload(payload).unwrap();
+    assert_eq!(validated.unified.dynamic_providers.len(), 1);
+    assert_eq!(validated.unified.dynamic_providers[0].name, "Lab");
+    assert_eq!(
+        validated.accounts[0].credential_kind,
+        crate::provider::CredentialKind::ApiKey
+    );
     let error = validate_payload(dangling).unwrap_err();
     assert!(
         matches!(error, TransferError::Invalid(ref message) if message.contains("unknown provider")),
@@ -725,8 +814,10 @@ fn v3_exports_canonical_model_mapping_inside_the_v1_envelope() {
     };
     attach_default_identity_snapshot(&mut payload);
     attach_default_destination_snapshot(&mut payload);
+    payload.accounts.clear();
+    payload.identities.clear();
     let json = serde_json::to_value(&payload).unwrap();
-    let capability = &json["accounts"][0]["modelCapabilities"][0];
+    let capability = &json["destinations"][0]["catalog"][0];
     assert_eq!(capability["publicModel"], "deepseek-v4-flash");
     assert_eq!(capability["upstreamModel"], "deepseek-v4-flash:0731");
     assert!(capability.get("modelId").is_none());
@@ -782,7 +873,7 @@ fn wrong_password_and_tampering_share_invalid_bundle_result() {
 
 #[test]
 fn duplicate_rows_inside_bundle_fail_closed() {
-    let mut payload = sample_payload();
+    let mut payload = sample_v6_payload();
     payload.accounts.push(PortableAccount {
         id: None,
         provider_id: "opencode".to_string(),
@@ -829,7 +920,7 @@ fn managed_lifecycle_is_normalized_without_browser_identity() {
         ModelAccountType::Managed,
         ModelSetupStep::Ready
     ));
-    let mut draft = sample_payload();
+    let mut draft = sample_v6_payload();
     draft.accounts[0].account_type = "managed".to_string();
     draft.accounts[0].setup_step = "payment".to_string();
     draft.accounts[0].enabled = true;
@@ -838,7 +929,7 @@ fn managed_lifecycle_is_normalized_without_browser_identity() {
     assert!(!draft.accounts[0].enabled);
     assert!(draft.accounts[0].key.is_empty());
 
-    let mut ready = sample_payload();
+    let mut ready = sample_v6_payload();
     ready.accounts[0].account_type = "managed".to_string();
     let ready = validate_payload(ready).unwrap();
     assert_eq!(ready.accounts[0].setup_step, ModelSetupStep::Ready);
@@ -848,7 +939,7 @@ fn managed_lifecycle_is_normalized_without_browser_identity() {
 
 #[test]
 fn account_count_and_decoded_ciphertext_limits_fail_closed() {
-    let mut payload = sample_payload();
+    let mut payload = sample_v6_payload();
     let node = payload
         .node
         .as_mut()
@@ -867,7 +958,7 @@ fn account_count_and_decoded_ciphertext_limits_fail_closed() {
         MAX_ACCOUNTS
     );
 
-    let mut oversized = sample_payload();
+    let mut oversized = sample_v6_payload();
     for index in 1..=MAX_ACCOUNTS {
         oversized
             .accounts
@@ -899,17 +990,16 @@ fn v4_and_v5_payloads_without_identity_snapshot_remain_importable() {
     for version in [4, V5_PAYLOAD_VERSION] {
         let payload = sample_legacy_payload(version);
         let validated = validate_payload(payload).unwrap();
-        assert!(validated.identity_snapshot.is_none());
-        assert_eq!(validated.platform_links_authoritative, version >= 5);
+        assert!(validated.unified.identity_snapshot.is_none());
+        assert_eq!(validated.unified.platform_links_authoritative, version >= 5);
     }
 }
 
 #[test]
 fn v6_without_identity_snapshot_is_rejected() {
-    let mut payload = sample_payload();
+    let mut payload = sample_v6_payload();
     strip_identity_snapshot(&mut payload);
     payload.accounts[0].cooldowns = Some(PortableCooldowns::default());
-    payload.version = V6_PAYLOAD_VERSION;
     payload.destinations.clear();
     payload.credentials.clear();
     let error = validate_payload(payload).unwrap_err();
@@ -921,7 +1011,7 @@ fn v6_without_identity_snapshot_is_rejected() {
 
 #[test]
 fn v5_package_with_identity_semantics_is_not_silently_downgraded() {
-    let mut payload = sample_payload();
+    let mut payload = sample_v6_payload();
     payload.version = V5_PAYLOAD_VERSION;
     payload.destinations.clear();
     payload.credentials.clear();
@@ -934,7 +1024,7 @@ fn v5_package_with_identity_semantics_is_not_silently_downgraded() {
 
 #[test]
 fn v6_dangling_identity_and_verified_relation_are_rejected() {
-    let mut dangling = sample_payload();
+    let mut dangling = sample_v6_payload();
     dangling.identities[0].id = "00000000-0000-4000-8000-000000000099".to_string();
     let error = validate_payload(dangling).unwrap_err();
     assert!(
@@ -942,7 +1032,7 @@ fn v6_dangling_identity_and_verified_relation_are_rejected() {
         "{error:?}"
     );
 
-    let mut verified = sample_payload();
+    let mut verified = sample_v6_payload();
     verified.identities[0].identity_confidence = "verified".to_string();
     let error = validate_payload(verified).unwrap_err();
     assert!(
@@ -950,7 +1040,7 @@ fn v6_dangling_identity_and_verified_relation_are_rejected() {
         "{error:?}"
     );
 
-    let mut missing_member = sample_payload();
+    let mut missing_member = sample_v6_payload();
     missing_member.quota_pools[0].member_account_ids =
         vec!["00000000-0000-4000-8000-000000000098".to_string()];
     let error = validate_payload(missing_member).unwrap_err();
@@ -964,7 +1054,7 @@ fn v6_dangling_identity_and_verified_relation_are_rejected() {
 fn v6_rejects_versions_that_sqlite_cannot_preserve() {
     for value in [0, i64::MAX as u64 + 1, u64::MAX] {
         for auth_version in [false, true] {
-            let mut payload = sample_payload();
+            let mut payload = sample_v6_payload();
             if auth_version {
                 payload.accounts[0].auth_state_version = Some(value);
             } else {
@@ -1028,7 +1118,7 @@ fn v1_encryption_vector_is_stable() {
     assert_eq!(
         format!("{:x}", Sha256::digest(bundle.as_bytes())),
         // Lock the deterministic V5 fixture after retired config fields are omitted.
-        "2ccaef5a76f76ee3c2ec9f612f06126ddd2dc076885b90b35edac2429a06d8a3"
+        "158b5e3145c76bd6accc7644f3715a79b9935c5b07c1dcfcf60720e99aa007b0"
     );
 }
 
@@ -1048,7 +1138,8 @@ fn v6_package_with_destination_semantics_is_rejected() {
 
 #[test]
 fn v7_requires_a_destination_snapshot_for_exported_accounts() {
-    let mut payload = sample_payload();
+    let mut payload = sample_account_graph();
+    payload.version = PAYLOAD_VERSION;
     payload.destinations.clear();
     payload.credentials.clear();
     let error = validate_payload(payload).unwrap_err();
@@ -1056,8 +1147,392 @@ fn v7_requires_a_destination_snapshot_for_exported_accounts() {
         matches!(
             error,
             TransferError::Invalid(ref message)
-                if message.contains("missing from the destination credential snapshot")
+                if message.contains("destination/credential snapshot")
         ),
         "{error:?}"
     );
+}
+
+#[test]
+fn v7_leftover_account_fields_that_disagree_with_dest_cred_are_rejected() {
+    let mut payload = sample_payload();
+    let account_id = payload.credentials[0].legacy_account_id.clone();
+    let mut leftover = sample_account("Primary");
+    leftover.id = Some(account_id);
+    leftover.enabled = !payload.credentials[0].enabled;
+    leftover.binding_model_scope = Some(ModelScope::Only {
+        models: vec!["glm-5.1".to_string()],
+    });
+    payload.accounts = vec![leftover];
+    let error = validate_payload(payload).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            TransferError::Invalid(ref message) if message.contains("conflicts with destination/credential")
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn v4_v5_and_v6_samples_still_import_through_the_old_decoder() {
+    for version in [4, V5_PAYLOAD_VERSION] {
+        let payload = sample_legacy_payload(version);
+        let validated = validate_payload(payload).unwrap();
+        assert_eq!(validated.accounts.len(), 1);
+        assert_eq!(validated.accounts[0].key.as_str(), "sk-ocg-test-secret");
+        assert!(!validated.unified.destinations.is_empty());
+        assert_eq!(validated.unified.credentials.len(), 1);
+        assert_eq!(validated.unified.credentials[0].key, "sk-ocg-test-secret");
+    }
+    let validated = validate_payload(sample_v6_payload()).unwrap();
+    assert_eq!(validated.accounts.len(), 1);
+    assert!(validated.unified.identity_snapshot.is_some());
+    assert_eq!(validated.unified.credentials[0].key, "sk-ocg-test-secret");
+}
+
+#[test]
+fn v7_export_json_omits_old_account_graph_fields() {
+    use crate::crypto::{KeyCipher, StaticKeyCipher};
+    use crate::db::Database;
+    use crate::state::CoreStateInner;
+    use std::fs;
+    use std::sync::Arc;
+
+    let dir = std::env::temp_dir().join(format!(
+        "ocg-transfer-v7-export-json-{}",
+        uuid::Uuid::new_v4()
+    ));
+    fs::create_dir_all(&dir).unwrap();
+    let cipher: Arc<dyn KeyCipher + Send + Sync> =
+        Arc::new(StaticKeyCipher::new("v3-transfer-v7-export-json"));
+    let state = Arc::new(
+        CoreStateInner::new(Database::open(dir.clone()).unwrap(), dir.clone(), cipher).unwrap(),
+    );
+    let (payload, _, _) = export_payload(&state).unwrap();
+    let json = serde_json::to_value(&payload).unwrap();
+    let object = json.as_object().expect("export payload is an object");
+    for key in [
+        "accounts",
+        "platformAccounts",
+        "platformLinks",
+        "dynamicProviders",
+        "identities",
+    ] {
+        assert!(
+            !object.contains_key(key),
+            "new export still serialized {key}"
+        );
+    }
+    assert!(object.contains_key("node"));
+    drop(state);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+fn transfer_state(label: &str) -> (std::path::PathBuf, crate::state::CoreState) {
+    use crate::crypto::{KeyCipher, StaticKeyCipher};
+    use crate::db::Database;
+    use crate::state::CoreStateInner;
+    use std::sync::Arc;
+
+    let dir = std::env::temp_dir().join(format!("ocg-transfer-{label}-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let cipher: Arc<dyn KeyCipher + Send + Sync> =
+        Arc::new(StaticKeyCipher::new("v3-transfer-observer"));
+    let state = Arc::new(
+        CoreStateInner::new(Database::open(dir.clone()).unwrap(), dir.clone(), cipher).unwrap(),
+    );
+    (dir, state)
+}
+
+fn empty_node_import() -> crate::db::NodeImportRecord {
+    let config = crate::models::AppConfig {
+        gateway_key: "ocg-transfer-primary-key".into(),
+        ..crate::models::AppConfig::default()
+    };
+    crate::db::NodeImportRecord {
+        platform_links_authoritative: true,
+        platform_accounts: Vec::new(),
+        platform_links: Vec::new(),
+        platform_catalogs: HashMap::new(),
+        accounts: Vec::new(),
+        account_order: vec![crate::provider::ZEN_FREE_ACCOUNT_ID.to_string()],
+        config_json: serde_json::to_string(&config).unwrap(),
+        sub_keys: Vec::new(),
+        zen_free_enabled: false,
+        zen_catalog: crate::kernel::zen::ZenFreeModelCatalog::default(),
+        provider_contracts: crate::provider_contracts::PersistedContracts::default(),
+        dynamic_providers: Vec::new(),
+        identity_snapshot: None,
+        draft_provider_ids: HashSet::new(),
+        platform_observer_ciphers: HashMap::new(),
+        platform_snapshots: HashMap::new(),
+        platform_versions: HashMap::new(),
+        cpa_base_url: None,
+        cpa_management_key_cipher: None,
+    }
+}
+
+fn cpa_account() -> crate::models::Account {
+    let now = chrono::Utc::now();
+    crate::models::Account {
+        id: crate::provider::CPA_ACCOUNT_ID.to_string(),
+        provider_id: crate::provider::CPA_PROVIDER_ID.to_string(),
+        credential_kind: crate::provider::CredentialKind::ApiKey,
+        quota_scope: crate::provider::QuotaScope::Key,
+        name: crate::provider::CPA_ACCOUNT_NAME.to_string(),
+        username: None,
+        password_cipher: None,
+        key_cipher: String::new(),
+        enabled: false,
+        account_type: crate::models::AccountType::Key,
+        setup_step: crate::models::AccountSetupStep::Ready,
+        referral_code: None,
+        purchase_date: String::new(),
+        expires_on: String::new(),
+        cooldown_until: None,
+        cooldown_generic_until: None,
+        cooldown_5h_until: None,
+        cooldown_week_until: None,
+        cooldown_month_until: None,
+        cooldown_free_until: None,
+        last_error: None,
+        auth_error: None,
+        notes: None,
+        created_at: now,
+        updated_at: now,
+    }
+}
+
+#[test]
+fn v7_export_restores_platform_and_cpa_observer_management_keys_on_a_new_node() {
+    use super::portable::{PURPOSE_CPA_OBSERVER, PURPOSE_PLATFORM_OBSERVER};
+
+    let (source_dir, source) = transfer_state("v7-observer-export");
+    let parent_id = "00000000-0000-4000-8000-0000000000aa";
+    let pat = "123:platform-pat-secret";
+    let pat_cipher = source.encrypt_key(pat).unwrap();
+    source
+        .db
+        .lock()
+        .create_platform_account(
+            parent_id,
+            crate::platform::PlatformKind::NewApi,
+            "Site",
+            "https://newapi.example",
+            Some(&pat_cipher),
+        )
+        .unwrap();
+    let cpa_mgmt = "cpa-management-secret";
+    let cpa_cipher = source.encrypt_key(cpa_mgmt).unwrap();
+    source
+        .db
+        .lock()
+        .upsert_cpa_integration(&cpa_account(), "http://127.0.0.1:8317", &cpa_cipher)
+        .unwrap();
+
+    let (payload, _, _) = export_payload(&source).unwrap();
+    let observers: Vec<_> = payload
+        .credentials
+        .iter()
+        .filter(|credential| is_observer_purpose(credential_purpose(credential)))
+        .collect();
+    let platform_observer = observers
+        .iter()
+        .find(|credential| credential_purpose(credential) == PURPOSE_PLATFORM_OBSERVER)
+        .expect("platform observer must be exported");
+    assert_eq!(platform_observer.management_key.as_deref(), Some(pat));
+    assert!(platform_observer.key.is_empty());
+    let encoded = serde_json::to_value(*platform_observer).unwrap();
+    assert!(encoded.get("key").is_none() || encoded["key"] == "");
+    assert_eq!(encoded["managementKey"], pat);
+    let cpa_observer = observers
+        .iter()
+        .find(|credential| credential_purpose(credential) == PURPOSE_CPA_OBSERVER)
+        .expect("CPA observer must be exported");
+    assert_eq!(cpa_observer.management_key.as_deref(), Some(cpa_mgmt));
+    assert!(cpa_observer.key.is_empty());
+    let encoded = serde_json::to_value(*cpa_observer).unwrap();
+    assert!(encoded.get("key").is_none() || encoded["key"] == "");
+    assert_eq!(encoded["managementKey"], cpa_mgmt);
+
+    let validated = validate_payload(payload).unwrap();
+    let plains = super::new_model::observer_plaintext_by_parent(&validated.unified);
+    assert_eq!(plains.get(parent_id).map(String::as_str), Some(pat));
+    assert_eq!(
+        validated.unified.cpa_management_key.as_deref(),
+        Some(cpa_mgmt)
+    );
+
+    let (dest_dir, dest) = transfer_state("v7-observer-restore");
+    let mut record = empty_node_import();
+    record.platform_accounts = validated.unified.platform_accounts.clone();
+    record.platform_snapshots = validated.unified.platform_snapshots.clone();
+    record.platform_versions = validated.unified.platform_versions.clone();
+    record.platform_observer_ciphers = plains
+        .into_iter()
+        .map(|(id, plain)| (id, dest.encrypt_key(&plain).unwrap()))
+        .collect();
+    record.cpa_base_url = validated.unified.cpa_base_url.clone();
+    record.cpa_management_key_cipher = validated
+        .unified
+        .cpa_management_key
+        .as_deref()
+        .map(|plain| dest.encrypt_key(plain).unwrap());
+    dest.db
+        .lock()
+        .import_node_state(&record, |_| -> anyhow::Result<()> { Ok(()) })
+        .unwrap();
+    assert!(
+        dest.db
+            .lock()
+            .platform_account(parent_id)
+            .unwrap()
+            .unwrap()
+            .has_user_credential
+    );
+    let restored_plat = dest
+        .db
+        .lock()
+        .platform_credential_cipher(parent_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(dest.decrypt_key(&restored_plat).unwrap(), pat);
+    let restored_cpa = dest.db.lock().cpa_integration().unwrap().unwrap();
+    assert_eq!(
+        dest.decrypt_key(&restored_cpa.management_key_cipher)
+            .unwrap(),
+        cpa_mgmt
+    );
+
+    drop(source);
+    drop(dest);
+    std::fs::remove_dir_all(source_dir).unwrap();
+    std::fs::remove_dir_all(dest_dir).unwrap();
+}
+
+#[test]
+fn v7_merge_without_cpa_observer_key_keeps_existing_management_key() {
+    use super::portable::PURPOSE_CPA_OBSERVER;
+
+    let (source_dir, source) = transfer_state("v7-cpa-merge-source");
+    let source_cipher = source.encrypt_key("source-cpa-secret").unwrap();
+    source
+        .db
+        .lock()
+        .upsert_cpa_integration(&cpa_account(), "http://127.0.0.1:8317", &source_cipher)
+        .unwrap();
+    let (mut payload, _, _) = export_payload(&source).unwrap();
+    payload
+        .credentials
+        .retain(|credential| credential_purpose(credential) != PURPOSE_CPA_OBSERVER);
+    let validated = validate_payload(payload).unwrap();
+    assert!(
+        validated
+            .unified
+            .cpa_management_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_none()
+    );
+    assert!(validated.unified.cpa_base_url.is_some());
+
+    let (dest_dir, dest) = transfer_state("v7-cpa-merge-keep");
+    let keep = "keep-existing-cpa-secret";
+    let keep_cipher = dest.encrypt_key(keep).unwrap();
+    dest.db
+        .lock()
+        .upsert_cpa_integration(&cpa_account(), "http://127.0.0.1:8317", &keep_cipher)
+        .unwrap();
+    let mut record = empty_node_import();
+    record.account_order = dest
+        .db
+        .lock()
+        .list_accounts()
+        .unwrap()
+        .into_iter()
+        .map(|account| account.id)
+        .collect();
+    record.cpa_base_url = validated.unified.cpa_base_url.clone();
+    record.cpa_management_key_cipher = validated
+        .unified
+        .cpa_management_key
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .map(|plain| dest.encrypt_key(plain).unwrap());
+    dest.db
+        .lock()
+        .import_node_state(&record, |_| -> anyhow::Result<()> { Ok(()) })
+        .unwrap();
+    let after = dest.db.lock().cpa_integration().unwrap().unwrap();
+    assert_eq!(after.base_url, "http://127.0.0.1:8317");
+    assert_eq!(
+        dest.decrypt_key(&after.management_key_cipher).unwrap(),
+        keep
+    );
+
+    drop(source);
+    drop(dest);
+    std::fs::remove_dir_all(source_dir).unwrap();
+    std::fs::remove_dir_all(dest_dir).unwrap();
+}
+
+#[test]
+fn v7_empty_only_model_scope_roundtrips_and_rejects_blank_model_ids() {
+    let mut payload = sample_payload();
+    payload.credentials[0].scope = ModelScope::Only { models: Vec::new() };
+    let validated = validate_payload(payload).unwrap();
+    assert_eq!(
+        validated.unified.credentials[0].scope,
+        ModelScope::Only { models: Vec::new() }
+    );
+    assert_eq!(
+        validated
+            .unified
+            .identity_snapshot
+            .as_ref()
+            .unwrap()
+            .accounts[0]
+            .binding_model_scope,
+        ModelScope::Only { models: Vec::new() }
+    );
+    assert!(!matches!(
+        validated.unified.credentials[0].scope,
+        ModelScope::All
+    ));
+
+    let mut payload = sample_payload();
+    payload.credentials[0].scope = ModelScope::Only { models: Vec::new() };
+    let bundle = encrypt_payload(&payload, "correct horse battery").unwrap();
+    let migration = decrypt_and_validate(&bundle, "correct horse battery").unwrap();
+    assert_eq!(
+        migration.unified.credentials[0].scope,
+        ModelScope::Only { models: Vec::new() }
+    );
+    assert_eq!(
+        migration.accounts[0]
+            .identity
+            .as_ref()
+            .unwrap()
+            .binding_model_scope,
+        ModelScope::Only { models: Vec::new() }
+    );
+
+    for models in [
+        vec![String::new()],
+        vec![" ".to_string()],
+        vec!["glm-5".to_string(), String::new()],
+    ] {
+        let mut payload = sample_payload();
+        payload.credentials[0].scope = ModelScope::Only { models };
+        let error = validate_payload(payload).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                TransferError::Invalid(ref message) if message.contains("model scope")
+            ),
+            "{error:?}"
+        );
+    }
 }

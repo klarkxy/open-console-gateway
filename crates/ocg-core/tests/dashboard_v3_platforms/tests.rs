@@ -213,7 +213,7 @@ async fn export_import(source: &V3Harness, target: &V3Harness, password: &str) {
 }
 
 #[tokio::test]
-async fn platform_accounts_cas_link_and_v5_secret_free_roundtrip() {
+async fn platform_accounts_cas_link_and_v7_secret_restoring_roundtrip() {
     let source = start_loopback("platform-v5-source").await;
     let target = start_loopback("platform-v5-target").await;
     let (status,parent)=send(&source,Method::POST,"/platform-accounts",cas(&source,json!({"kind":"new_api","name":"New API","baseUrl":"https://platform.example","userCredential":"management-secret-test"}))).await;
@@ -252,13 +252,23 @@ async fn platform_accounts_cas_link_and_v5_secret_free_roundtrip() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+    let expected_model_contract = model_contract_of(&source, key_id);
+    assert!(ocg_domain::credential::model_scope_allows(
+        &expected_model_contract.0,
+        "model-a"
+    ));
+    assert_eq!(
+        expected_model_contract.1,
+        vec![("model-a".into(), "model-a".into())]
+    );
     export_import(&source, &target, "platform-bundle-password").await;
     let (_, loaded) = send(&target, Method::GET, "/platform-accounts", json!({})).await;
     assert_eq!(loaded["accounts"][0]["id"], id);
-    assert_eq!(loaded["accounts"][0]["hasUserCredential"], false);
+    assert_eq!(loaded["accounts"][0]["hasUserCredential"], true);
     assert!(loaded["accounts"][0]["snapshot"].is_null());
     assert_eq!(loaded["links"][0]["accountId"], key_id);
     assert_eq!(loaded["links"][0]["group"]["verified"], false);
+    assert_eq!(model_contract_of(&target, key_id), expected_model_contract);
     let (status, _) = send(
         &source,
         Method::DELETE,
@@ -452,6 +462,28 @@ fn endpoint_of(h: &V3Harness, account_id: &str) -> String {
         .unwrap()
         .unwrap()
         .endpoint_url
+}
+
+fn model_contract_of(
+    h: &V3Harness,
+    account_id: &str,
+) -> (ocg_domain::credential::ModelScope, Vec<(String, String)>) {
+    let db = h.state.db.lock();
+    let scope = db
+        .list_identity_model()
+        .unwrap()
+        .accounts
+        .into_iter()
+        .find(|row| row.account.id == account_id)
+        .expect("identity row")
+        .binding_model_scope;
+    let capabilities = db
+        .list_account_model_capabilities(account_id)
+        .unwrap()
+        .into_iter()
+        .map(|row| (row.public_model, row.upstream_model))
+        .collect();
+    (scope, capabilities)
 }
 
 async fn create_parent(
@@ -737,23 +769,46 @@ async fn same_kind_site_instances_keep_independent_refresh_and_links() {
     export_import(&source, &target, "platform-bundle-password").await;
     let (_, loaded) = send(&target, Method::GET, "/platform-accounts", json!({})).await;
     assert_eq!(account_ids(&loaded).len(), 4, "{loaded}");
-    for (id, kind, name, url) in [
+    for (id, kind, name, url, has_user_credential, has_snapshot) in [
         (
             new_a.as_str(),
             "new_api",
             "New API East",
             new_a_url.as_str(),
+            false,
+            false,
         ),
-        (new_b.as_str(), "new_api", "New API", new_b_url.as_str()),
-        (sub_a.as_str(), "sub2api", "Sub2API", sub_a_url.as_str()),
-        (sub_b.as_str(), "sub2api", "Sub2API", sub_b_url.as_str()),
+        (
+            new_b.as_str(),
+            "new_api",
+            "New API",
+            new_b_url.as_str(),
+            true,
+            true,
+        ),
+        (
+            sub_a.as_str(),
+            "sub2api",
+            "Sub2API",
+            sub_a_url.as_str(),
+            true,
+            true,
+        ),
+        (
+            sub_b.as_str(),
+            "sub2api",
+            "Sub2API",
+            sub_b_url.as_str(),
+            true,
+            true,
+        ),
     ] {
         let row = parent(&loaded, id);
         assert_eq!(row["kind"], kind, "{row}");
         assert_eq!(row["name"], name, "{row}");
         assert_eq!(row["baseUrl"], url, "{row}");
-        assert_eq!(row["hasUserCredential"], false, "{row}");
-        assert!(row["snapshot"].is_null(), "{row}");
+        assert_eq!(row["hasUserCredential"], has_user_credential, "{row}");
+        assert_eq!(row["snapshot"].is_object(), has_snapshot, "{row}");
     }
     assert_eq!(link_of(&loaded, &new_a_key)["platformAccountId"], new_a);
     assert_eq!(link_of(&loaded, &new_b_key)["platformAccountId"], new_b);

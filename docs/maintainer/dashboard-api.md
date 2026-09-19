@@ -133,10 +133,21 @@ account mutations stay on V3.
 
 `GET /destinations` and `GET /credentials` are the RFC stage-4b projection of
 `destination_projection`: read-only, secret-free, and revision-tagged. A
-refused mapping returns `409` `destinationProjectionRefused` with a `details`
-array naming each refused row. Mapping totality is still live `project()`.
-A populated v50 shadow is the served snapshot; an empty shadow or load error
-falls back to live. Mapping refusals stay `409` from live `project()`.
+populated destinations/credentials store is served even when live
+`project()` would refuse. An empty store or leftover-table upgrade window
+falls back to `project()`; only that empty-store fallback can return
+`409` `destinationProjectionRefused` with a `details` array naming each
+refused row.
+
+Node transfer (`POST /accounts/transfer/export|preview|import`) is remounted
+on V4. Latest export is payload V7: `destinations` and `credentials`
+(plaintext secrets, platform and CPA observer management credentials, and
+identity / grant / cooldown extras stay inside the encrypted envelope), plus
+`quotaPools` and `node`. Merging a package that has no CPA observer key
+preserves the destination's existing management key. It does not emit
+`accounts`, `platformAccounts`, `platformLinks`, `dynamicProviders`, or
+`identities`. Those portable types are transfer-only and are not V4 listing
+DTOs. V4–V6 packages remain importable through the old-graph decoder.
 
 V4 does not treat authorization `unknown` as `valid`. Eligibility is a local
 projection, never upstream health.

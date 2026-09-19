@@ -41,6 +41,7 @@ pub struct Database {
 pub(crate) mod account_store;
 pub(crate) mod cpa;
 pub(crate) mod custom_store;
+pub(crate) mod destination_store;
 pub(crate) mod dynamic_store;
 pub(crate) mod identity;
 pub(crate) mod identity_v57;
@@ -235,6 +236,9 @@ pub struct NodeImportRecord {
     pub platform_links_authoritative: bool,
     pub platform_accounts: Vec<crate::platform::PortablePlatformAccount>,
     pub platform_links: Vec<crate::platform::PortablePlatformLink>,
+    /// V7 platform destination catalogs keyed by portable platform parent id.
+    /// Empty catalogs are authoritative and clear an imported parent's models.
+    pub platform_catalogs: HashMap<String, Vec<ocg_domain::destination::CatalogModel>>,
     pub accounts: Vec<AccountImportRecord>,
     pub account_order: Vec<String>,
     pub config_json: String,
@@ -248,6 +252,14 @@ pub struct NodeImportRecord {
     pub(crate) identity_snapshot: Option<identity::IdentityImportSnapshot>,
     /// Provider ids that stay persisted drafts. Routing snapshots exclude them.
     pub draft_provider_ids: HashSet<String>,
+    /// Platform observer ciphertext keyed by platform parent id.
+    pub platform_observer_ciphers: HashMap<String, String>,
+    /// Destination-id keyed platform snapshot JSON from a V7 package.
+    pub platform_snapshots: HashMap<String, String>,
+    /// Destination-id keyed platform versions from a V7 package.
+    pub platform_versions: HashMap<String, i64>,
+    pub cpa_base_url: Option<String>,
+    pub cpa_management_key_cipher: Option<String>,
 }
 
 /// Settings key holding the forward-log client-key backfill watermark
@@ -3779,6 +3791,7 @@ fn insert_account_row(
         None,
         Utc::now(),
     )?;
+    account_store::sync_inference_credential_projection_on(conn, &account.id)?;
     Ok(())
 }
 
@@ -3791,8 +3804,12 @@ pub(crate) fn insert_account_columns(
     account_store::insert_account_columns(conn, account, purchase_date, verification_status)
 }
 
-fn insert_import_account_on(conn: &Connection, record: &AccountImportRecord) -> Result<()> {
-    validate_import_account_on(conn, record)?;
+fn insert_import_account_on(
+    conn: &Connection,
+    record: &AccountImportRecord,
+    platform_contract_authoritative: bool,
+) -> Result<()> {
+    validate_import_account_on(conn, record, platform_contract_authoritative)?;
     let account = &record.account;
     let purchase_date = if account.purchase_date.trim().is_empty() {
         local_today()
@@ -3811,7 +3828,11 @@ fn insert_import_account_on(conn: &Connection, record: &AccountImportRecord) -> 
     Ok(())
 }
 
-fn validate_import_account_on(conn: &Connection, record: &AccountImportRecord) -> Result<()> {
+fn validate_import_account_on(
+    conn: &Connection,
+    record: &AccountImportRecord,
+    platform_contract_authoritative: bool,
+) -> Result<()> {
     let account = &record.account;
     anyhow::ensure!(
         account.id != ZEN_FREE_ACCOUNT_ID,
@@ -3831,14 +3852,22 @@ fn validate_import_account_on(conn: &Connection, record: &AccountImportRecord) -
             "an enabled imported account must retain an enabling verification state"
         );
         if plan_requires_custom_config(plan) {
-            anyhow::ensure!(
-                record.custom_config.is_some(),
-                "Custom API accounts require a complete endpoint"
-            );
-            anyhow::ensure!(
-                !record.capabilities.is_empty(),
-                "Custom API accounts require at least one model capability"
-            );
+            // A platform-linked Custom Key belongs to the platform destination,
+            // so V7 deliberately carries no standalone Custom Endpoint facts.
+            // Every other Custom account must retain the complete contract.
+            let linked_without_custom_contract = platform_contract_authoritative
+                && record.custom_config.is_none()
+                && record.capabilities.is_empty();
+            if !linked_without_custom_contract {
+                anyhow::ensure!(
+                    record.custom_config.is_some(),
+                    "Custom API accounts require a complete endpoint"
+                );
+                anyhow::ensure!(
+                    !record.capabilities.is_empty(),
+                    "Custom API accounts require at least one model capability"
+                );
+            }
         } else {
             anyhow::ensure!(
                 record.custom_config.is_none(),
@@ -3886,7 +3915,11 @@ fn restore_import_verification_on(conn: &Connection, record: &AccountImportRecor
     Ok(())
 }
 
-fn merge_import_account_on(conn: &Connection, record: &AccountImportRecord) -> Result<()> {
+fn merge_import_account_on(
+    conn: &Connection,
+    record: &AccountImportRecord,
+    platform_contract_authoritative: bool,
+) -> Result<()> {
     if conn
         .query_row(
             "SELECT 1 FROM credentials WHERE legacy_account_id = ?1",
@@ -3896,9 +3929,9 @@ fn merge_import_account_on(conn: &Connection, record: &AccountImportRecord) -> R
         .optional()?
         .is_none()
     {
-        return insert_import_account_on(conn, record);
+        return insert_import_account_on(conn, record, platform_contract_authoritative);
     }
-    validate_import_account_on(conn, record)?;
+    validate_import_account_on(conn, record, platform_contract_authoritative)?;
     let account = &record.account;
     let purchase_date = if account.purchase_date.trim().is_empty() {
         local_today()
@@ -4429,6 +4462,7 @@ impl Database {
         if !crate::destination_projection::should_skip_persist_on_open(&db)? {
             let _ = crate::destination_projection::replace_persisted(&db)?;
         }
+        crate::db::destination_store::ensure_zen_destination(&db.conn)?;
         if let Some(cipher) = cipher {
             repair_legacy_account_ciphertext(&db.conn, cipher)?;
         }
@@ -6355,9 +6389,8 @@ impl Database {
             .map_err(Into::into)
     }
 
-    /// Rebuild the v50 destination/credential shadow from live rows without
-    /// opening a nested transaction. A mapping refusal empties the tables and
-    /// does not fail the caller; SQL errors do so the outer writer rolls back.
+    /// Align builtin destination catalogs with persisted contracts.
+    /// Does not rebuild destination or credential rows from `project()`.
     pub(crate) fn refresh_destination_shadow(&self) -> Result<()> {
         crate::destination_projection::refresh_destination_shadow(self)
     }
@@ -6603,7 +6636,6 @@ impl Database {
         )?;
         dynamic_tx_fault("after_account_insert")?;
         let snapshot = list_dynamic_providers_on(&tx)?;
-        self.refresh_destination_shadow()?;
         tx.commit()?;
         Ok(snapshot)
     }
@@ -6617,7 +6649,6 @@ impl Database {
         let tx = self.conn.unchecked_transaction()?;
         insert_dynamic_provider_on(&tx, runtime, false)?;
         let snapshot = list_dynamic_providers_on(&tx)?;
-        self.refresh_destination_shadow()?;
         tx.commit()?;
         Ok(snapshot)
     }
@@ -6657,7 +6688,6 @@ impl Database {
         }
         insert_dashboard_operation_on(&tx, operation)?;
         let snapshot = list_dynamic_providers_on(&tx)?;
-        self.refresh_destination_shadow()?;
         tx.commit()?;
         Ok(snapshot)
     }
@@ -6686,7 +6716,6 @@ impl Database {
         insert_account_row(&tx, account, &purchase_date, verification_status)?;
         dynamic_tx_fault("after_account_insert")?;
         insert_dashboard_operation_on(&tx, operation)?;
-        self.refresh_destination_shadow()?;
         tx.commit()?;
         Ok(())
     }
@@ -6776,7 +6805,6 @@ impl Database {
         }
         insert_dashboard_operation_on(&tx, operation)?;
         let snapshot = list_dynamic_providers_on(&tx)?;
-        self.refresh_destination_shadow()?;
         tx.commit()?;
         Ok(snapshot)
     }
@@ -6867,8 +6895,18 @@ impl Database {
                 ],
             )?;
         }
+        let account_ids = {
+            let mut stmt = tx.prepare(
+                "SELECT legacy_account_id FROM credentials
+                 WHERE lower(provider_id) = lower(?1)",
+            )?;
+            let rows = stmt.query_map([&existing.id], |row| row.get::<_, String>(0))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for account_id in account_ids {
+            account_store::sync_inference_credential_projection_on(&tx, &account_id)?;
+        }
         let snapshot = list_dynamic_providers_on(&tx)?;
-        self.refresh_destination_shadow()?;
         tx.commit()?;
         Ok(snapshot)
     }
@@ -6895,7 +6933,6 @@ impl Database {
             [&existing.id],
         )?;
         let snapshot = list_dynamic_providers_on(&tx)?;
-        self.refresh_destination_shadow()?;
         tx.commit()?;
         Ok(snapshot)
     }
@@ -6906,7 +6943,7 @@ impl Database {
     pub fn import_accounts_with_contracts(&self, records: &[AccountImportRecord]) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         for record in records {
-            insert_import_account_on(&tx, record)?;
+            insert_import_account_on(&tx, record, false)?;
         }
         self.refresh_destination_shadow()?;
         tx.commit()?;
@@ -6939,6 +6976,28 @@ impl Database {
             .iter()
             .map(|record| record.account.id.to_ascii_lowercase())
             .collect::<HashSet<_>>();
+        let imported_platform_ids = record
+            .platform_accounts
+            .iter()
+            .map(|parent| parent.id.to_ascii_lowercase())
+            .collect::<HashSet<_>>();
+        anyhow::ensure!(
+            record
+                .platform_catalogs
+                .keys()
+                .all(|id| imported_platform_ids.contains(&id.to_ascii_lowercase())),
+            "platform catalog references a parent outside the imported node snapshot"
+        );
+        let platform_catalog_linked_account_ids = record
+            .platform_links
+            .iter()
+            .filter(|link| {
+                record
+                    .platform_catalogs
+                    .contains_key(&link.platform_account_id)
+            })
+            .map(|link| link.account_id.to_ascii_lowercase())
+            .collect::<HashSet<_>>();
         for runtime in &record.dynamic_providers {
             let onboarding_draft = record.draft_provider_ids.contains(&runtime.id)
                 || record
@@ -6961,7 +7020,12 @@ impl Database {
             platform::unlink_imported_accounts(&tx, &imported_ids)?;
         }
         for account in &record.accounts {
-            merge_import_account_on(&tx, account)?;
+            merge_import_account_on(
+                &tx,
+                account,
+                platform_catalog_linked_account_ids
+                    .contains(&account.account.id.to_ascii_lowercase()),
+            )?;
             if record.identity_snapshot.is_some() {
                 // V6 carries cooldowns. Merging a package must not shorten a
                 // deadline already observed on the destination host.
@@ -7008,6 +7072,47 @@ impl Database {
             &record.platform_links,
             &imported_account_ids,
         )?;
+        for (parent_id, catalog) in &record.platform_catalogs {
+            let destination_id =
+                ocg_domain::destination::destination_id_for_platform_account(parent_id);
+            destination_store::merge_destination_catalog_refuse_conflict(
+                &tx,
+                &destination_id,
+                catalog,
+            )?;
+        }
+        let extra_ids = record
+            .platform_snapshots
+            .keys()
+            .chain(record.platform_versions.keys())
+            .cloned()
+            .collect::<HashSet<_>>();
+        let extras = extra_ids
+            .into_iter()
+            .map(|id| platform::DestinationPlatformExtras {
+                id: id.clone(),
+                platform_kind: None,
+                platform_version: record.platform_versions.get(&id).copied(),
+                platform_snapshot: record.platform_snapshots.get(&id).cloned(),
+            })
+            .collect::<Vec<_>>();
+        platform::restore_destination_platform_extras(&tx, &extras)?;
+        for (parent_id, cipher) in &record.platform_observer_ciphers {
+            let observer_id =
+                ocg_domain::credential::observer_credential_id_for_platform_account(parent_id)
+                    .to_string();
+            tx.execute(
+                "UPDATE credentials SET key_cipher = ?2, has_secret = ?3 WHERE id = ?1",
+                params![observer_id, cipher, i64::from(!cipher.is_empty())],
+            )?;
+        }
+        if let Some(base_url) = record.cpa_base_url.as_deref() {
+            cpa::upsert_destination_and_observer_on(
+                &tx,
+                base_url,
+                record.cpa_management_key_cipher.as_deref().unwrap_or(""),
+            )?;
+        }
 
         let (sanitized, primary) = sanitize_config_json_primary_key(&record.config_json)?;
         let primary =
@@ -7181,7 +7286,11 @@ impl Database {
         let imported_custom_scopes: Vec<(&str, &[AccountModelCapabilityInput])> = record
             .accounts
             .iter()
-            .filter(|account| is_custom_api(&account.account.provider_id))
+            .filter(|account| {
+                is_custom_api(&account.account.provider_id)
+                    && !platform_catalog_linked_account_ids
+                        .contains(&account.account.id.to_ascii_lowercase())
+            })
             .map(|account| (account.account.id.as_str(), account.capabilities.as_slice()))
             .collect();
         custom_store::narrow_imported_custom_scopes(&tx, &imported_custom_scopes)?;
@@ -7323,7 +7432,7 @@ impl Database {
         if key_replaced {
             platform::clear_link_snapshot_for_account(&tx, id)?;
         }
-        self.refresh_destination_shadow()?;
+        account_store::sync_inference_credential_projection_on(&tx, id)?;
         tx.commit()?;
         Ok(())
     }
@@ -7419,7 +7528,7 @@ impl Database {
             )?;
         }
         cpa::upsert_destination_and_observer_on(&tx, base_url, management_key_cipher)?;
-        self.refresh_destination_shadow()?;
+        account_store::sync_inference_credential_projection_on(&tx, CPA_ACCOUNT_ID)?;
         tx.commit()?;
         Ok(())
     }
@@ -7449,12 +7558,12 @@ impl Database {
         )?;
         let identity_id = identity::account_identity_id(&tx, CPA_ACCOUNT_ID)?;
         identity::delete_account_identity_satellites(&tx, CPA_ACCOUNT_ID)?;
+        account_store::delete_credential_grants_for_legacy_account_on(&tx, CPA_ACCOUNT_ID)?;
         tx.execute(
             "DELETE FROM credentials WHERE legacy_account_id = ?1",
             [CPA_ACCOUNT_ID],
         )?;
         identity::delete_orphan_identity_for_account(&tx, CPA_ACCOUNT_ID, identity_id.as_deref())?;
-        self.refresh_destination_shadow()?;
         tx.commit()?;
         Ok(())
     }
@@ -7574,7 +7683,6 @@ impl Database {
             ],
         )?;
         anyhow::ensure!(changed == 1, "Zen Free singleton is missing");
-        self.refresh_destination_shadow()?;
         tx.commit()?;
         Ok(())
     }
@@ -7614,9 +7722,19 @@ impl Database {
             "DELETE FROM ollama_cloud_billing WHERE account_id = ?1",
             [id],
         )?;
+        let destination_id: Option<String> = tx
+            .query_row(
+                "SELECT destination_id FROM credentials WHERE legacy_account_id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        account_store::delete_credential_grants_for_legacy_account_on(&tx, id)?;
         tx.execute("DELETE FROM credentials WHERE legacy_account_id = ?1", [id])?;
         identity::delete_orphan_identity_for_account(&tx, id, identity_id.as_deref())?;
-        self.refresh_destination_shadow()?;
+        if let Some(destination_id) = destination_id {
+            destination_store::delete_unused_builtin_destination(&tx, &destination_id)?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -7683,7 +7801,7 @@ impl Database {
             ],
         )?;
         if changed == 1 {
-            self.refresh_destination_shadow()?;
+            account_store::sync_inference_credential_projection_on(&tx, account_id)?;
         }
         tx.commit()?;
         Ok(changed == 1)
@@ -7754,7 +7872,7 @@ impl Database {
         if changed != 1 {
             return Ok(false);
         }
-        self.refresh_destination_shadow()?;
+        account_store::sync_inference_credential_projection_on(&tx, &contract.account_id)?;
         tx.commit()?;
         Ok(true)
     }
@@ -7799,7 +7917,6 @@ impl Database {
         anyhow::ensure!(self.get_account(account_id)?.is_some(), "account not found");
         let tx = self.conn.unchecked_transaction()?;
         persist_account_custom_config_on(&tx, account_id, input)?;
-        self.refresh_destination_shadow()?;
         tx.commit()?;
         Ok(())
     }
@@ -7818,7 +7935,6 @@ impl Database {
         persist_account_custom_config_on(&tx, account_id, input)?;
         persist_account_model_capabilities_on(&tx, account_id, capabilities)?;
         clear_custom_protocol_state_except_on(&tx, account_id, input.upstream_protocol)?;
-        self.refresh_destination_shadow()?;
         tx.commit()?;
         Ok(())
     }
@@ -8470,7 +8586,7 @@ impl Database {
             ],
         )?;
         if changed == 1 {
-            self.refresh_destination_shadow()?;
+            account_store::sync_inference_credential_projection_on(&tx, id)?;
         }
         tx.commit()?;
         Ok(changed == 1)
@@ -8487,7 +8603,7 @@ impl Database {
             params![key_cipher, Utc::now().to_rfc3339(), id],
         )?;
         if changed == 1 {
-            self.refresh_destination_shadow()?;
+            account_store::sync_inference_credential_projection_on(&tx, id)?;
         }
         tx.commit()?;
         Ok(changed == 1)
@@ -8624,7 +8740,7 @@ impl Database {
             ManagedKeyVerificationWrite::Pending => {}
         }
 
-        self.refresh_destination_shadow()?;
+        account_store::sync_inference_credential_projection_on(&tx, id)?;
         tx.commit()?;
         Ok(ManagedKeyVerificationCommit::Applied)
     }
@@ -8649,7 +8765,7 @@ impl Database {
             params![Utc::now().to_rfc3339(), id, expected_key_cipher],
         )?;
         if changed == 1 {
-            self.refresh_destination_shadow()?;
+            account_store::sync_inference_credential_projection_on(&tx, id)?;
         }
         tx.commit()?;
         Ok(changed == 1)
@@ -8670,7 +8786,7 @@ impl Database {
             params![Utc::now().to_rfc3339(), id],
         )?;
         if changed == 1 {
-            self.refresh_destination_shadow()?;
+            account_store::sync_inference_credential_projection_on(&tx, id)?;
         }
         tx.commit()?;
         Ok(changed == 1)
@@ -8711,9 +8827,6 @@ impl Database {
                 params![sort_order as i64, id],
             )?;
         }
-        self.refresh_destination_shadow().map_err(|error| {
-            ReorderAccountsError::Database(rusqlite::Error::ToSqlConversionFailure(error.into()))
-        })?;
         tx.commit()?;
         Ok(())
     }
@@ -9471,7 +9584,6 @@ impl Database {
             )?;
         }
         identity::fanout_shared_pool_cooldown(&tx, id, !(until.is_none() && err.is_none()))?;
-        self.refresh_destination_shadow()?;
         tx.commit()?;
         Ok(())
     }
@@ -9489,7 +9601,7 @@ impl Database {
             "UPDATE credentials SET auth_error = ?2, updated_at = ?3 WHERE legacy_account_id = ?1",
             params![id, error, Utc::now().to_rfc3339()],
         )?;
-        self.refresh_destination_shadow()?;
+        account_store::sync_inference_credential_projection_on(&tx, id)?;
         tx.commit()?;
         Ok(())
     }
@@ -9511,7 +9623,7 @@ impl Database {
             params![id, expected_key_cipher, error, Utc::now().to_rfc3339()],
         )?;
         if updated > 0 {
-            self.refresh_destination_shadow()?;
+            account_store::sync_inference_credential_projection_on(&tx, id)?;
         }
         tx.commit()?;
         Ok(updated > 0)
@@ -9594,7 +9706,6 @@ impl Database {
 
         if updated > 0 {
             identity::fanout_shared_pool_cooldown(&tx, id, true)?;
-            self.refresh_destination_shadow()?;
         }
 
         // ponytail: 不再在 429 时设置 baseline。固定窗口的"重置"由 forward_logs 自然驱动；

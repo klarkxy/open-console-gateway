@@ -336,8 +336,6 @@ fn upsert_observer_on(
     let observer = observer_id();
     let identity_id = identity_id_for_cpa().to_string();
     let scope_json = serde_json::to_string(&ocg_domain::credential::ModelScope::All)?;
-    let cipher = management_key_cipher.to_string();
-    let has_secret = !cipher.is_empty();
     let existing: Option<String> = conn
         .query_row(
             "SELECT key_cipher FROM credentials WHERE id = ?1",
@@ -345,6 +343,12 @@ fn upsert_observer_on(
             |row| row.get(0),
         )
         .optional()?;
+    let cipher = if management_key_cipher.is_empty() {
+        existing.clone().unwrap_or_default()
+    } else {
+        management_key_cipher.to_string()
+    };
+    let has_secret = !cipher.is_empty();
     if existing.is_some() {
         conn.execute(
             "UPDATE credentials

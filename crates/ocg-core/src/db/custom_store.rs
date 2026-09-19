@@ -464,6 +464,10 @@ pub(crate) fn delete_custom_destination_facts(conn: &Connection, account_id: &st
     if platform_parent_id(conn, account_id)?.is_some() {
         return Ok(());
     }
+    delete_custom_destination_row(conn, account_id)
+}
+
+pub(crate) fn delete_custom_destination_row(conn: &Connection, account_id: &str) -> Result<()> {
     let dest_id = destination_id_for_custom_account(account_id);
     conn.execute(
         "DELETE FROM destination_models WHERE destination_id = ?1",

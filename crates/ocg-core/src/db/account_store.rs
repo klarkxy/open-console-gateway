@@ -5,12 +5,17 @@
 //! uses `credentials` (joined to `destinations` only for destination identity).
 
 use super::*;
-use ocg_domain::credential::credential_id_for_legacy_account;
-use ocg_domain::destination::{
-    destination_id_for_builtin, destination_id_for_custom_account, destination_id_for_dynamic,
-    destination_id_for_platform_account,
+use ocg_domain::credential::{
+    OnboardingTaskKind, OnboardingTaskState, credential_id_for_legacy_account, derive_auth_state,
 };
-use ocg_domain::ids::CUSTOM_PROVIDER_ID;
+use ocg_domain::destination::{
+    OnboardingTaskRef, destination_id_for_builtin, destination_id_for_custom_account,
+    destination_id_for_dynamic, destination_id_for_platform_account,
+};
+use ocg_domain::ids::{
+    CPA_ACCOUNT_ID, CPA_PROVIDER_ID, CUSTOM_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID,
+    ZEN_FREE_ACCOUNT_ID,
+};
 
 pub(crate) const ACCOUNT_SELECT_FROM_ACCOUNTS: &str = "SELECT id, name, username, password_cipher, key_cipher, enabled, referral_code, recharge_date, cooldown_until, cooldown_generic_until, cooldown_5h_until, cooldown_week_until, cooldown_month_until, cooldown_free_until, last_error, created_at, updated_at, auth_error, account_type, setup_step, notes, provider_id, credential_kind, quota_scope FROM accounts";
 
@@ -60,25 +65,32 @@ pub(crate) struct AccountRowSource {
     pub table: &'static str,
     pub id_col: &'static str,
     pub sort_col: &'static str,
-    #[allow(dead_code)]
-    pub purchase_col: &'static str,
 }
 
+/// Leftover-aware selector for migration and rewind fixtures.
+/// Post-v52 runtime databases have no `accounts` table; the credentials
+/// branch is the live store. Do not add new runtime writers here.
 pub(crate) fn account_row_source(conn: &Connection) -> Result<AccountRowSource> {
-    if table_exists(conn, "accounts")? {
+    if leftover_accounts_table(conn)? {
         Ok(AccountRowSource {
             table: "accounts",
             id_col: "id",
             sort_col: "sort_order",
-            purchase_col: "recharge_date",
         })
     } else {
-        Ok(AccountRowSource {
-            table: "credentials",
-            id_col: "legacy_account_id",
-            sort_col: "routing_rank",
-            purchase_col: "purchase_date",
-        })
+        Ok(runtime_credential_source())
+    }
+}
+
+fn leftover_accounts_table(conn: &Connection) -> Result<bool> {
+    table_exists(conn, "accounts")
+}
+
+fn runtime_credential_source() -> AccountRowSource {
+    AccountRowSource {
+        table: "credentials",
+        id_col: "legacy_account_id",
+        sort_col: "routing_rank",
     }
 }
 
@@ -111,6 +123,120 @@ pub(crate) fn get_account_on(conn: &Connection, id: &str) -> Result<Option<Accou
     Ok(account)
 }
 
+/// Keep inference-credential projection columns aligned with the live account
+/// row. Observer credentials are not written. Ciphertext is left untouched.
+pub(crate) fn sync_inference_credential_projection_on(
+    conn: &Connection,
+    account_id: &str,
+) -> Result<()> {
+    if !table_exists(conn, "credentials")? {
+        return Ok(());
+    }
+    let Some(account) = get_account_on(conn, account_id)? else {
+        return Ok(());
+    };
+    let verification: Option<String> = conn
+        .query_row(
+            &format!(
+                "SELECT verification_status FROM credentials
+                 WHERE legacy_account_id = ?1{}",
+                inference_predicate(conn, "credentials")?
+            ),
+            [account_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+    let verified = verification.as_deref() == Some(ConnectionVerificationStatus::Verified.as_str());
+    let has_secret = inference_has_secret(&account);
+    let auth_state = derive_auth_state(account.auth_error.is_some(), verified);
+    let onboarding_json = inference_onboarding_json(&account)?;
+    let quota_pool_id = inference_quota_pool_id(conn, account_id)?;
+    conn.execute(
+        &format!(
+            "UPDATE credentials
+             SET has_secret = ?2,
+                 auth_state = ?3,
+                 last_error = ?4,
+                 onboarding_json = ?5,
+                 quota_pool_id = ?6
+             WHERE legacy_account_id = ?1{}",
+            inference_predicate(conn, "credentials")?
+        ),
+        params![
+            account_id,
+            i64::from(has_secret),
+            auth_state.as_str(),
+            account.last_error,
+            onboarding_json,
+            quota_pool_id,
+        ],
+    )?;
+    Ok(())
+}
+
+fn inference_has_secret(account: &Account) -> bool {
+    if account.id == ZEN_FREE_ACCOUNT_ID
+        || account.provider_id == OPENCODE_ZEN_FREE_PROVIDER_ID
+        || account.id == CPA_ACCOUNT_ID
+        || account.provider_id == CPA_PROVIDER_ID
+    {
+        return false;
+    }
+    !account.key_cipher.is_empty()
+        || account
+            .password_cipher
+            .as_deref()
+            .is_some_and(|value| !value.is_empty())
+}
+
+fn inference_onboarding_json(account: &Account) -> Result<Option<String>> {
+    if account.account_type != AccountType::Managed || account.setup_step.is_ready() {
+        return Ok(None);
+    }
+    Ok(Some(serde_json::to_string(&OnboardingTaskRef {
+        kind: OnboardingTaskKind::ManagedRegistration,
+        state: OnboardingTaskState::InProgress,
+        step: account.setup_step.as_str().to_string(),
+    })?))
+}
+
+fn inference_quota_pool_id(conn: &Connection, account_id: &str) -> Result<Option<String>> {
+    if !table_exists(conn, "quota_pool_members")? || !table_exists(conn, "quota_pools")? {
+        return Ok(None);
+    }
+    conn.query_row(
+        "SELECT p.id
+         FROM quota_pool_members m
+         JOIN quota_pools p ON p.id = m.pool_id
+         WHERE m.account_id = ?1
+         ORDER BY (SELECT COUNT(*) FROM quota_pool_members m2 WHERE m2.pool_id = p.id) DESC,
+                  CASE p.relation_confidence WHEN 'declared' THEN 1 ELSE 0 END DESC
+         LIMIT 1",
+        [account_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+pub(crate) fn delete_credential_grants_for_legacy_account_on(
+    conn: &Connection,
+    account_id: &str,
+) -> Result<()> {
+    if !table_exists(conn, "credential_grants")? || !table_exists(conn, "credentials")? {
+        return Ok(());
+    }
+    conn.execute(
+        "DELETE FROM credential_grants
+         WHERE credential_id IN (
+            SELECT id FROM credentials WHERE legacy_account_id = ?1
+         )",
+        [account_id],
+    )?;
+    Ok(())
+}
+
 pub(crate) fn list_accounts_on(conn: &Connection) -> Result<Vec<Account>> {
     let source = account_row_source(conn)?;
     let sql = format!(
@@ -134,11 +260,6 @@ fn account_select_sql(table: &str) -> &'static str {
     } else {
         ACCOUNT_SELECT_FROM_CREDENTIALS
     }
-}
-
-#[allow(dead_code)]
-pub(crate) fn account_exists_on(conn: &Connection, id: &str) -> Result<bool> {
-    Ok(get_account_on(conn, id)?.is_some())
 }
 
 pub(crate) fn select_account_identity_id(
@@ -294,21 +415,6 @@ pub(crate) fn list_account_ids_for_identity(
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
-#[allow(dead_code)]
-pub(crate) fn list_account_ids_on(conn: &Connection) -> Result<Vec<String>> {
-    let source = account_row_source(conn)?;
-    let mut stmt = conn.prepare(&format!(
-        "SELECT {} FROM {} WHERE 1=1{} ORDER BY {} ASC, created_at ASC, {} ASC",
-        source.id_col,
-        source.table,
-        inference_predicate(conn, source.table)?,
-        source.sort_col,
-        source.id_col
-    ))?;
-    let rows = stmt.query_map([], |row| row.get(0))?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
-}
-
 pub(crate) fn count_accounts_for_provider_on(conn: &Connection, provider_id: &str) -> Result<i64> {
     let source = account_row_source(conn)?;
     Ok(conn.query_row(
@@ -319,31 +425,6 @@ pub(crate) fn count_accounts_for_provider_on(conn: &Connection, provider_id: &st
         ),
         [provider_id],
         |row| row.get(0),
-    )?)
-}
-
-#[allow(dead_code)]
-pub(crate) fn list_account_ids_for_provider(
-    conn: &Connection,
-    provider_id: &str,
-) -> Result<Vec<String>> {
-    let source = account_row_source(conn)?;
-    let mut stmt = conn.prepare(&format!(
-        "SELECT {} FROM {} WHERE lower(provider_id) = lower(?1){}",
-        source.id_col,
-        source.table,
-        inference_predicate(conn, source.table)?
-    ))?;
-    let rows = stmt.query_map([provider_id], |row| row.get(0))?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
-}
-
-#[allow(dead_code)]
-pub(crate) fn delete_account_row(conn: &Connection, id: &str) -> Result<usize> {
-    let source = account_row_source(conn)?;
-    Ok(conn.execute(
-        &format!("DELETE FROM {} WHERE {} = ?1", source.table, source.id_col),
-        [id],
     )?)
 }
 
@@ -361,14 +442,20 @@ pub(crate) fn destination_id_for_account(conn: &Connection, account: &Account) -
 }
 
 /// Runtime insert: write the credential row (and usage-sync stub). After v52
-/// this is the account-row store. `refresh_destination_shadow` rebuilds
-/// destinations from `project()`.
+/// this is the account-row store. Sealed builtin destinations are ensured
+/// here so writers no longer rebuild the four tables from `project()`.
 pub(crate) fn insert_account_columns(
     conn: &Connection,
     account: &Account,
     purchase_date: &str,
     verification_status: ConnectionVerificationStatus,
 ) -> Result<()> {
+    if builtin_provider(&account.provider_id).is_some()
+        && account.provider_id != CUSTOM_PROVIDER_ID
+        && account.provider_id != CPA_PROVIDER_ID
+    {
+        crate::db::destination_store::ensure_builtin_destination(conn, &account.provider_id)?;
+    }
     let destination_id = destination_id_for_account(conn, account)?;
     let credential_id = credential_id_for_legacy_account(&account.id).to_string();
     let routing_rank: i64 = conn.query_row(
@@ -945,7 +1032,7 @@ pub(crate) fn restore_credential_extras(
 
 /// Recreate a late-schema `accounts` table from credentials so historical
 /// rewind fixtures can still ALTER/UPDATE that table after v52.
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn materialize_legacy_accounts_for_rewind(conn: &Connection) -> Result<()> {
     if table_exists(conn, "accounts")? {
         return Ok(());

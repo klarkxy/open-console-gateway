@@ -39,6 +39,7 @@ pub(super) async fn test_account_model(
             config: &prepared.config,
             account: &prepared.account,
             adapter: prepared.adapter,
+            public_model: &prepared.public_model,
             model_id: &prepared.upstream_model,
             protocol: prepared.protocol,
             custom_endpoint_url: prepared.custom_endpoint_url.as_deref(),

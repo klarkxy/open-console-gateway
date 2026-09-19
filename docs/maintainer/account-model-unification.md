@@ -2,19 +2,20 @@
 
 # RFC: Redesigning The Account And Provider Model
 
-Status: **landed**. Stages 1–8 are in HEAD and verified against live data.
-Stage 5 planner/resolve/send dispatch on destination adapter and sealed
-capabilities; catalog join by `provider_id` remains. Stage 6 cut over
-Accounts to one destination card shell, Providers to a destination rail,
-and one Add chooser. Stage 7 made transfer default to payload V7. Stage 8
-tombstoned `/dashboard/api/v3`, remounted handlers under V4, and dropped
-`accounts` (v52), leftover Custom tables (v53), leftover platform
-tables (v54), leftover `cpa_integration` (v55), leftover
-`providers` / `provider_models` (v56), and leftover identity satellites
-(v57: `upstream_identities`, `credential_state`, `credential_bindings`,
-`legacy_identity_map`, `onboarding_tasks`, `subscription_records`).
-`quota_pools` / `quota_pool_members` remain. This page is the target
-model and the migration path that produced it. [Runtime
+Status: **physical storage and destination/credential projection have
+switched; Account overlay and some runtime consumers remain**. Stages 1–8
+dropped leftover tables through schema v57 and remounted handlers under
+`/dashboard/api/v4`. HEAD now writes destinations / credentials / catalogs
+incrementally: `project()` and `replace_all_on` stay on leftover-table
+migration and V4–V6 backup conversion, not on account create, cooldown, or
+catalog mutation. Payload V7 export/import is destination- and
+credential-authoritative (secrets travel inside the existing encrypted
+envelope), including platform and CPA observer management credentials.
+Merging a package that omits a CPA observer key keeps the destination's
+existing management key. Accounts cards group credentials without requiring a
+parallel Account list. Remaining: no public `POST/PATCH /destinations`
+routes; remounted `/accounts*` handlers are I/O adapters; `legacy_account_id`
+and the V3 Account overlay still bridge some runtime consumers. [Runtime
 invariants](runtime-invariants.md) and [dashboard API](dashboard-api.md)
 describe HEAD.
 
@@ -263,14 +264,17 @@ Strangler pattern; each stage ships alone.
        legacy tables. No Key material is copied. Existing v45 `quota_pools`
        / `quota_pool_members` are reused via `quota_pool_id`;
        `observations` waits for a later slice.
-     - **4d-2 Dual-write.** Mutations refresh the shadow in the same
-       transaction.
+     - **4d-2 Dual-write.** Historical: mutations refreshed the shadow
+       from a full `project()`. **Superseded on HEAD** by incremental
+       destination / credential / catalog writes.
      - **4d-3 V3 shim.** V3/V4 reads switch to the new tables after
        shadow-compare stays clean. Split:
-       - **4d-3a** V4 GET still authorizes from live `project()` and only
-         returns a matching shadow.
-       - **4d-3b** V4 GET serves a populated v50 shadow. Live `project()`
-         still gates mapping totality and fills in when the shadow is empty.
+       - **4d-3a** Historical: V4 GET authorized from live `project()`
+         and only returned a matching shadow. **Superseded on HEAD.**
+       - **4d-3b** Historical first cut: V4 GET served a populated
+         shadow but still let live `project()` refuse the request.
+         **Superseded on HEAD** — a populated store is served even when
+         `project()` refuses.
        - **4d-3c** V3 listings become a shim over the same tables.
 5. **Routing planner reads credentials and capabilities only.** Delete the
    Rust identity predicates; reserved UUIDs survive only in the migration.
@@ -390,30 +394,24 @@ four-Key New API site and a two-Key site):
 
 ### Mutation rules settled in stage 4d-2
 
-- Writers that change what `project()` reads rebuild the v50 shadow in the
-  same SQLite transaction as a full `project()` snapshot, not per-row UPSERTs.
-- A mapping refusal empties the shadow tables and does **not** roll back the
-  legacy write (same as persist-on-open). A SQL error while rebuilding the
-  shadow fails the mutation so the outer transaction rolls back.
-- V4 `GET /destinations` and `GET /credentials` still use live `project()`.
-  Persist-on-open remains the crash/reopen safety net.
+Historical dual-write: writers rebuilt the v50 shadow from a full
+`project()` snapshot. **Superseded on HEAD.** Runtime writers persist
+destinations, credentials, and `destination_models` incrementally.
+`refresh_destination_shadow` only syncs builtin catalogs from persisted
+contracts. `replace_all_on` remains for leftover-table backfill.
 
 ### Read rules settled in stage 4d-3a
 
-V4 `GET /destinations` and `GET /credentials` still authorize from live
-`project()`. After a total live snapshot the handler reads the v50 shadow and
-returns that stored value when it equals live. Divergence, an empty shadow, or
-a load error still serves live and does not 409. Mapping refusals stay
-`409 destinationProjectionRefused` from live `project()`.
+Historical: V4 GET authorized from live `project()` and returned the
+shadow only when it equaled live. **Superseded on HEAD** by the 4d-3b
+store-first rule below.
 
 ### Read rules settled in stage 4d-3b
 
-V4 `GET /destinations` and `GET /credentials` serve a populated v50 shadow as
-the read model. Live `project()` still gates mapping totality: a refusal is
-`409 destinationProjectionRefused` even when the shadow still has rows. An
-empty shadow or load error falls back to live so a refusal-emptied store still
-409s from `project()` rather than serving an empty listing. A populated but
-stale shadow is served until the next dual-write or persist-on-open rebuild.
+**Superseded on HEAD.** V4 `GET /destinations` and `GET /credentials` serve a
+populated destinations/credentials store via `load_all`. A live `project()`
+refusal does not hide those rows. An empty store or leftover-table upgrade
+window still falls back to `project()`.
 
 ### Read rules settled in stage 4d-3c
 
@@ -442,8 +440,8 @@ projection is present (builtin/dynamic id, or Custom/platform → adapter
 `http` plus the Configurable HTTP catalog key) and still falls back to
 `account.provider_id` for tests without a projection. `RoutingCandidate.adapter`
 comes from `destination.adapter` when present, else the mapping catalog
-kind — not `account.provider_id`. Key material still comes from the
-`accounts` row. Sealed adapters resolve their descriptor by
+kind — not `account.provider_id`. Key material comes from the
+credential row. Sealed adapters resolve their descriptor by
 `ProviderAdapterKind` (`get_by_kind`), not by the account's reserved UUID.
 Selector channel eligibility uses `channel_for_adapter`. Zen/CPA no longer
 require the reserved account id on the resolve path. CPA live send uses
@@ -500,11 +498,17 @@ reserved account UUIDs. `/dashboard/api/v3` is a 410 tombstone.
 ### Deprecation rules started in stage 7
 
 New node backups export payload V7. The encrypted envelope stays v1. V7
-carries `destinations` and `credentials` (secret-free; Keys stay on the
-portable account rows used by the V3 shim). V4–V6 remain importable. A V6
-package that already contains destination fields is rejected. V8 and newer
-are an unsupported-version error. Dashboard V3 is documented as a deprecated
-shim; V4 destinations/credentials are the read model for new clients.
+carries `destinations` and `credentials` (including plaintext secrets,
+platform and CPA observer management credentials, and identity / grant /
+cooldown extras inside that envelope), plus `quotaPools` and `node`. A merge
+import that omits a CPA observer key keeps the destination's existing
+management key. Latest export does not emit `accounts`, platform rows, dynamic
+provider definitions, or a separate identities array. V4–V6 remain
+importable through an old-graph decoder that maps into the same new-model
+import object. A V7 package that still carries leftover old fields must
+match dest/cred or is rejected. V8 and newer are an unsupported-version
+error. Remounted `/accounts*` handlers are I/O adapters; V4
+destinations/credentials are the read model.
 
 ### UI rules started in stage 6
 

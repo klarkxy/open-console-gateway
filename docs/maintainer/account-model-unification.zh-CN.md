@@ -2,7 +2,7 @@
 
 # RFC：重新设计账号与供应商模型
 
-状态：**已落地**。阶段 1–8 已在 HEAD 与真实数据上核对。阶段 5 规划器/解析/实发按目的地 adapter 与密封能力分发，目录仍可按 `provider_id` 连接。阶段 6 已切到一种目的地卡片外壳、Providers 目的地列表和同一套 Add 选择器。阶段 7 将转移包默认 payload V7。阶段 8 已把 `/dashboard/api/v3` 做成墓碑、把操作路由重挂到 V4，删除了 `accounts`（v52）、遗留 Custom 表（v53）、遗留平台表（v54）、遗留 `cpa_integration`（v55）、遗留 `providers` / `provider_models`（v56），以及遗留身份附属表（v57：`upstream_identities`、`credential_state`、`credential_bindings`、`legacy_identity_map`、`onboarding_tasks`、`subscription_records`）。`quota_pools` / `quota_pool_members` 保留。本页是目标模型与走到它的迁移路径。[运行时不变量](runtime-invariants.zh-CN.md)与[Dashboard API](dashboard-api.zh-CN.md)描述 HEAD。
+状态：**物理存储与 destination/credential 投影已切换；Account overlay 与部分运行时消费方仍是后续债。** 阶段 1–8 删到 schema v57，并把操作路由重挂到 `/dashboard/api/v4`。HEAD 已按实体增量写 destinations / credentials / catalogs：`project()` 与 `replace_all_on` 只留在遗留表升级和 V4–V6 备份转换，不再挂在账号创建、冷却或目录变更上。Payload V7 导出/导入以 Destination、Credential 为权威（密钥只存在已加密信封内），并携带平台与 CPA observer 管理凭据。合并导入时，若包中没有 CPA observer key，会保留目标已有 management key。账号页按 Credential 分组，不再要求另一份 Account 列表才能出卡片。仍未做：公开的 `POST/PATCH /destinations`；重挂的 `/accounts*` 仍是输入输出适配器；`legacy_account_id` 与 V3 Account overlay 仍桥接部分运行时消费方。[运行时不变量](runtime-invariants.zh-CN.md)与[Dashboard API](dashboard-api.zh-CN.md)描述 HEAD。
 
 ## 1. 问题在哪
 
@@ -134,11 +134,10 @@ Custom API 账号成为 `adapter = http`、`max_credentials = 1` 的目的地，
      - **4c-2** `DestinationCard` + `CredentialRow`；删除 `PlatformAccountCard`。恰有一把 Key 的目的地折叠成今天的 `AccountCard`；平台父即使只有一把 Key 也保持组卡。拖柄移动整组；行菜单的上移/下移不跨组。
    - **4d 新表 + 双写 + V3 垫片。** 不可回头点；只在 4a–4c 对真实数据跑通之后进行。拆分为：
      - **4d-1 影子表 + 回填。** schema v50 创建 `destinations`、`destination_models`、`credentials`、`credential_grants`。打开数据库时若 4a 投影全量成功则用其重建这些表。V3/V4 读与全部变更仍走旧表。不复制 Key 材料。v45 已有的 `quota_pools` / `quota_pool_members` 通过 `quota_pool_id` 复用；`observations` 留待后续切片。
-     - **4d-2 双写。** 变更在同一事务里刷新影子表。
+     - **4d-2 双写。** 当时的做法：变更用完整 `project()` 刷新影子。**HEAD 已取代**为按行写 destination / credential / catalog。
      - **4d-3 V3 垫片。** shadow 对比保持干净后，V3/V4 读切到新表。拆分为：
-       - **4d-3a** V4 GET 仍以活的 `project()` 为准，且只返回匹配的影子。
-       - **4d-3b** V4 GET 下发已填充的 v50 影子。活的 `project()` 仍负责映射
-         完整性，并在影子为空时兜底。
+       - **4d-3a** 当时：V4 GET 以活的 `project()` 为准，且只返回匹配的影子。**HEAD 已取代。**
+       - **4d-3b** 当时的第一刀：V4 GET 下发已填充影子，但仍可能被活的 `project()` 拒绝挡住。**HEAD 已取代**——只要新表有行就下发，不被 `project()` 拒绝挡住。
        - **4d-3c** V3 列表成为同一套表上的垫片。
 5. **路由规划器只读凭据与能力。** 删除 Rust 身份谓词；保留 UUID 只在迁移中出现。
 6. **UI 切换**到 V4 完整表面：账号 = 按目的地分组的凭据，供应商 = 目的地，一条新增流程。
@@ -203,27 +202,21 @@ Custom API 账号成为 `adapter = http`、`max_credentials = 1` 的目的地，
 
 ### 阶段 4d-2 已定下的变更规则
 
-- 会改变 `project()` 读集的写入，在同一 SQLite 事务里用完整的 `project()`
-  快照重建 v50 影子，而不是按行 UPSERT。
-- 映射拒绝会清空影子表，**不**回滚遗留写入（与打开时持久化相同）。重建影子时的
-  SQL 错误会使变更失败，从而让外层事务回滚。
-- V4 `GET /destinations` 与 `GET /credentials` 仍使用活的 `project()`。打开时
-  持久化仍是崩溃/重开的安全网。
+当时的双写：写入用完整 `project()` 快照重建 v50 影子。**HEAD 已取代。**
+运行时按行持久化 destinations、credentials 与 `destination_models`。
+`refresh_destination_shadow` 只把内建目录与已持久化的 contract 对齐。
+`replace_all_on` 只留给遗留表回填。
 
 ### 阶段 4d-3a 已定下的读取规则
 
-V4 `GET /destinations` 与 `GET /credentials` 仍以活的 `project()` 为准。活快照
-完整时，处理会读 v50 影子，并在与活投影相等时返回该已存值。偏离、空影子或
-加载失败仍下发活投影，且不因此 409。映射拒绝仍由活的 `project()` 返回
-`409 destinationProjectionRefused`。
+当时：V4 GET 以活的 `project()` 为准，影子仅在与活投影相等时下发。
+**HEAD 已取代**为下面 4d-3b 的“已填充表优先”规则。
 
 ### 阶段 4d-3b 已定下的读取规则
 
-V4 `GET /destinations` 与 `GET /credentials` 以已填充的 v50 影子为读模型。活的
-`project()` 仍负责映射完整性：即使影子里还有行，映射拒绝也返回
-`409 destinationProjectionRefused`。空影子或加载失败回落到活投影，因此被拒绝
-清空后的库仍由 `project()` 给出 409，而不是下发空列表。已填充但过期的影子会
-一直被下发，直到下一次双写或打开时重建。
+**HEAD 已取代。** V4 `GET /destinations` 与 `GET /credentials` 通过
+`load_all` 下发已填充的 destinations/credentials。活的 `project()` 拒绝
+不得挡住这些行。空库或遗留表升级窗口仍回落到 `project()`。
 
 ### 阶段 4d-3c 已定下的读取规则
 
@@ -246,7 +239,7 @@ Free 视为耗尽。规划器的 Free 门不再看保留的 Zen 账号/供应商
 Custom/平台 → adapter `http` 加上 Configurable HTTP 目录键）；没有投影的测试
 仍回落 `account.provider_id`。`RoutingCandidate.adapter` 有投影时来自
 `destination.adapter`，否则来自映射的目录种类——不来自 `account.provider_id`。
-Key 材料仍来自 `accounts` 行。密封 adapter 用 `ProviderAdapterKind`
+Key 材料来自凭据行。密封 adapter 用 `ProviderAdapterKind`
 （`get_by_kind`）取描述符，不再用账号上的保留 UUID。选择器通道资格用
 `channel_for_adapter`。Zen/CPA 解析路径不再要求保留账号 id。CPA 实发用
 `AttemptSpec::is_local_external_integration`（CPA adapter 的代理模型），不用
@@ -291,10 +284,13 @@ V4 GET 列表仍不含秘密。Key
 
 ### 阶段 7 已开始的弃用规则
 
-新节点备份导出 payload V7。加密 envelope 仍为 v1。V7 直接携带
-`destinations` 与 `credentials`（不含秘密；Key 仍在 V3 垫片使用的可迁移账号行上）。
-V4–V6 仍可导入。已经带上目的地字段的 V6 包会被拒绝。V8 及更新是不支持版本错误。
-Dashboard V3 在文档中标为已弃用垫片；新客户端的读模型是 V4 目的地/凭据。
+新节点备份导出 payload V7。加密 envelope 仍为 v1。V7 携带 `destinations` 与
+`credentials`（明文密钥、平台与 CPA observer 管理凭据，以及 identity / grant /
+cooldown 等 extras 只存在该信封内），以及 `quotaPools` 与 `node`。合并导入时，若包中没有
+CPA observer key，会保留目标已有 management key。最新导出不再生成 `accounts`、平台行、动态供应商定义
+或单独的 identities 数组。V4–V6 仍可通过旧图解码器转入同一套新模型导入对象。
+若 V7 包仍带旧字段，必须与 dest/cred 一致，否则拒绝。V8 及更新是不支持版本错误。
+重挂的 `/accounts*` 是输入输出适配器；新客户端的读模型是 V4 目的地/凭据。
 
 ### 阶段 6 已开始的界面规则
 

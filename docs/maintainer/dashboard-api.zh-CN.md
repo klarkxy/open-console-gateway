@@ -44,7 +44,9 @@ V4 复用 V3 会话中间件。其列表返回与 V3 CAS 相同的 `ControlRevis
 
 `GET /accounts` 返回 `IdentityList { revision, identities[] }`。每条 `IdentitySummary` 携带 `identity`（`id`、`label`、`authorityRef` `{ issuerOrSite, tenantOrSubject }`、`identityConfidence`、`enabled`、`notes`）、`credentials[]`、身份级 `declaredRelations[]`（`platformAccountId`、`group`）以及 `legacy`（`kind` `account` | `platform_account`，`id`）。载荷形状是嵌套的：`credentials[].credential`（`id`、`purpose` `inference` | `platform_observer`、`materialKind` `api_key` | `external_reference`、`secretRef`——不透明句柄，绝不是材料本身、`hasMaterial`、`version`、`enabled`、`authState` `unknown` | `valid` | `invalid`、`authStateVersion`、未知时 `expiresAt` 为 null），同级字段为 `subject`（`account_credential` | `anonymous`）、`bindings[]`（`id`、`connectionId`、`allowedEndpointIds`、`allowedOrigins`、`modelScope`、`enabled`、`routingRank`）、`quotaWindows[]`、`onboardingTask`、`subscription`（未知时为 null）、`lastError`（已脱敏；无法安全脱敏时为 null）与 `legacy`。平台父账号的 `platform_observer` 凭据是投影，没有 `credential_state` 行。`authState` 是本地状态：`unknown` 绝不是 `valid`；`valid` 需要既有验证记录。Vue 账号页只把该投影叠加到展示上；Key 轮换、绑定编辑与身份内新增凭据走 V4 原生路由，其余账号变更走挂回 V4 的原 V3 路径。
 
-`GET /destinations` 与 `GET /credentials` 是 `destination_projection` 的 RFC 第 4b 阶段投影：只读、不含密钥、带 revision。映射拒绝时返回 `409` `destinationProjectionRefused`，`details` 数组点名每一条被拒绝的行。映射完整性仍由活的 `project()` 判定。已填充的 v50 影子是下发快照；空影子或加载失败回落到活投影。映射拒绝仍由活的 `project()` 返回 `409`。
+`GET /destinations` 与 `GET /credentials` 是 `destination_projection` 的 RFC 第 4b 阶段投影：只读、不含密钥、带 revision。只要 destinations/credentials 已有行就下发，即使活的 `project()` 会拒绝。空库或遗留表升级窗口才回落到 `project()`；只有这条空库回落会返回 `409` `destinationProjectionRefused`，`details` 数组点名每一条被拒绝的行。
+
+节点转移（`POST /accounts/transfer/export|preview|import`）挂在 V4。最新导出是 payload V7：`destinations` 与 `credentials`（明文密钥、平台与 CPA observer 管理凭据，以及 identity / grant / cooldown extras 只存在已加密信封内），外加 `quotaPools` 与 `node`。合并导入时，若包中没有 CPA observer key，会保留目标已有 management key。不再生成 `accounts`、`platformAccounts`、`platformLinks`、`dynamicProviders` 或 `identities`。这些 Portable 类型只用于转移，不进 V4 列表 DTO。V4–V6 包仍走旧图解码器导入。
 
 V4 不把授权 `unknown` 当作 `valid`。资格是本地投影，不是上游健康。
 

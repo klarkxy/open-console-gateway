@@ -17,7 +17,9 @@ use crate::provider::{
 use crate::provider_contracts::ContractScope;
 use crate::state::CoreStateInner;
 use ocg_domain::account::AccountSetupStep as DomainSetupStep;
-use ocg_domain::credential::{ModelScope, OnboardingTaskKind, credential_id_for_legacy_account};
+use ocg_domain::credential::{
+    AuthState, ModelScope, OnboardingTaskKind, credential_id_for_legacy_account,
+};
 use ocg_domain::destination::{
     AdapterKind, destination_id_for_builtin, destination_id_for_custom_account,
     destination_id_for_dynamic, destination_id_for_platform_account,
@@ -153,6 +155,16 @@ fn create_custom(
         capabilities,
     )
     .expect("custom account should save");
+}
+
+fn assert_persisted_credential_identity(db: &Database, account_id: &str, destination_id: &str) {
+    let stored = load_persisted(db).expect("persisted store should load");
+    assert_eq!(
+        cred(&stored, account_id).destination_id,
+        destination_id,
+        "persisted credential destination_id"
+    );
+    dest(&stored, destination_id);
 }
 
 fn dynamic_runtime(
@@ -558,6 +570,117 @@ fn managed_draft_carries_onboarding_task_ready_does_not() {
 }
 
 #[test]
+fn managed_complete_persists_secret_ready_onboarding_and_auth_state() {
+    let (dir, db) = open_db("managed-persist");
+    let mut draft = account("managed-ready-key", OPENCODE_PROVIDER_ID);
+    draft.account_type = AccountType::Managed;
+    draft.setup_step = AccountSetupStep::GoogleAccount;
+    draft.key_cipher.clear();
+    draft.enabled = false;
+    db.create_account(&draft).unwrap();
+    for (from, to) in [
+        (
+            AccountSetupStep::GoogleAccount,
+            AccountSetupStep::OpencodeRegistration,
+        ),
+        (
+            AccountSetupStep::OpencodeRegistration,
+            AccountSetupStep::Payment,
+        ),
+        (AccountSetupStep::Payment, AccountSetupStep::KeyVerification),
+    ] {
+        assert!(
+            db.advance_managed_setup("managed-ready-key", from, to)
+                .unwrap()
+        );
+    }
+    assert!(
+        db.save_managed_key_for_verification("managed-ready-key", "candidate-cipher")
+            .unwrap()
+    );
+    let after_save = load_persisted(&db).expect("persisted store should load after key save");
+    let saved = cred(&after_save, "managed-ready-key");
+    assert!(saved.has_secret);
+    assert_eq!(
+        saved
+            .onboarding_task
+            .as_ref()
+            .map(|task| task.step.as_str()),
+        Some(DomainSetupStep::KeyVerification.as_str())
+    );
+    assert!(
+        db.complete_managed_setup_if_key_matches("managed-ready-key", "candidate-cipher")
+            .unwrap()
+    );
+    let stored = load_persisted(&db).expect("persisted store should load after complete");
+    let credential = cred(&stored, "managed-ready-key");
+    assert!(credential.has_secret);
+    assert!(
+        credential.onboarding_task.is_none(),
+        "ready managed accounts must not keep an onboarding task"
+    );
+    assert_eq!(credential.auth_state, AuthState::Unknown);
+    db.set_account_auth_error("managed-ready-key", Some("401 unauthorized"))
+        .unwrap();
+    let invalid = load_persisted(&db).expect("persisted store should load after auth error");
+    assert_eq!(
+        cred(&invalid, "managed-ready-key").auth_state,
+        AuthState::Invalid
+    );
+
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn shared_quota_membership_updates_persisted_quota_pool_id() {
+    let (dir, db) = open_db("quota-persist");
+    create_keyed_builtin(&db, "go-primary", OPENCODE_PROVIDER_ID);
+    let snapshot = db.list_identity_model().unwrap();
+    let primary = snapshot
+        .accounts
+        .iter()
+        .find(|record| record.account.id == "go-primary")
+        .expect("primary identity row");
+    let identity_id = primary.identity_id.clone();
+    let primary_credential_id = primary.credential_id.clone();
+
+    let independent = account("go-independent", OPENCODE_PROVIDER_ID);
+    db.create_account_for_identity(
+        &identity_id,
+        &independent,
+        &local_today(),
+        ConnectionVerificationStatus::NotRequired,
+        QuotaSharingJoin::Independent,
+        None,
+    )
+    .unwrap();
+    let shared = account("go-shared", OPENCODE_PROVIDER_ID);
+    db.create_account_for_identity(
+        &identity_id,
+        &shared,
+        &local_today(),
+        ConnectionVerificationStatus::NotRequired,
+        QuotaSharingJoin::Shared {
+            source_credential_id: primary_credential_id,
+        },
+        None,
+    )
+    .unwrap();
+
+    let stored = load_persisted(&db).expect("persisted store should load after quota join");
+    let primary_cred = cred(&stored, "go-primary");
+    let independent_cred = cred(&stored, "go-independent");
+    let shared_cred = cred(&stored, "go-shared");
+    assert!(primary_cred.quota_pool_id.is_some());
+    assert_eq!(shared_cred.quota_pool_id, primary_cred.quota_pool_id);
+    assert_ne!(independent_cred.quota_pool_id, primary_cred.quota_pool_id);
+
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn identity_second_credential_shares_pool_only_when_joined_and_binding_is_projected() {
     let (dir, db) = open_db("identity");
     create_keyed_builtin(&db, "go-primary", OPENCODE_PROVIDER_ID);
@@ -862,10 +985,11 @@ fn create_custom_account_refreshes_shadow_without_reopen() {
             UpstreamProtocolKind::ChatCompletions,
         )],
     );
-    assert_persisted_matches_live(&db);
-    let stored = load_persisted(&db).expect("shadow should contain the new custom row");
-    dest(&stored, &destination_id_for_custom_account("custom-new"));
-    cred(&stored, "custom-new");
+    assert_persisted_credential_identity(
+        &db,
+        "custom-new",
+        &destination_id_for_custom_account("custom-new"),
+    );
 
     drop(db);
     fs::remove_dir_all(dir).unwrap();
@@ -876,6 +1000,7 @@ fn reorder_accounts_refreshes_shadow_routing_rank_without_reopen() {
     let (dir, db) = open_db("4d2-reorder");
     create_keyed_builtin(&db, "rank-a", OPENCODE_PROVIDER_ID);
     create_keyed_builtin(&db, "rank-b", MINIMAX_PROVIDER_ID);
+    create_keyed_builtin(&db, "rank-c", KIMI_PROVIDER_ID);
     let mut ids: Vec<String> = db
         .list_accounts()
         .unwrap()
@@ -884,8 +1009,20 @@ fn reorder_accounts_refreshes_shadow_routing_rank_without_reopen() {
         .collect();
     ids.reverse();
     db.reorder_accounts(&ids).unwrap();
-    assert_persisted_matches_live(&db);
-    let stored = load_persisted(&db).expect("reordered shadow should load");
+    let stored = load_persisted(&db).expect("reordered store should load");
+    dest(&stored, &destination_id_for_builtin(OPENCODE_PROVIDER_ID));
+    dest(&stored, &destination_id_for_builtin(MINIMAX_PROVIDER_ID));
+    dest(&stored, &destination_id_for_builtin(KIMI_PROVIDER_ID));
+    let stored_ids: Vec<&str> = stored
+        .credentials
+        .iter()
+        .map(|credential| credential.legacy_account_id.as_str())
+        .collect();
+    assert_eq!(
+        stored_ids,
+        ids.iter().map(String::as_str).collect::<Vec<_>>(),
+        "persisted credentials must follow the saved account order"
+    );
     for (index, account) in db.list_accounts().unwrap().iter().enumerate() {
         assert_eq!(
             cred(&stored, &account.id).routing_rank,
@@ -893,6 +1030,10 @@ fn reorder_accounts_refreshes_shadow_routing_rank_without_reopen() {
             "persisted routing_rank must follow the live account order"
         );
     }
+    assert_eq!(
+        account_ids(&list_accounts_for_v3(&db).expect("v3 list should follow persisted order")),
+        ids
+    );
 
     drop(db);
     fs::remove_dir_all(dir).unwrap();
@@ -922,16 +1063,27 @@ fn platform_link_and_unlink_refresh_shadow_without_reopen() {
     );
     db.link_platform_account("linked-4d2", "plat-4d2", &PlatformGroup::default())
         .unwrap();
-    assert_persisted_matches_live(&db);
-    let linked = load_persisted(&db).expect("linked shadow should load");
-    assert_eq!(
-        cred(&linked, "linked-4d2").destination_id,
-        destination_id_for_platform_account("plat-4d2")
+    assert_persisted_credential_identity(
+        &db,
+        "linked-4d2",
+        &destination_id_for_platform_account("plat-4d2"),
+    );
+    let linked = load_persisted(&db).expect("linked store should load");
+    assert!(
+        linked
+            .destinations
+            .iter()
+            .all(|destination| destination.id != destination_id_for_custom_account("linked-4d2")),
+        "linked custom destination must be removed"
     );
 
     db.unlink_platform_account("linked-4d2").unwrap();
-    assert_persisted_matches_live(&db);
-    let unlinked = load_persisted(&db).expect("unlinked shadow should load");
+    assert_persisted_credential_identity(
+        &db,
+        "linked-4d2",
+        &destination_id_for_custom_account("linked-4d2"),
+    );
+    let unlinked = load_persisted(&db).expect("unlinked store should load");
     assert_eq!(
         cred(&unlinked, "linked-4d2").destination_id,
         destination_id_for_custom_account("linked-4d2")
@@ -974,8 +1126,9 @@ fn read_shadow_if_matches_returns_none_when_stale_or_empty() {
             UpstreamProtocolKind::ChatCompletions,
         )],
     );
-    let live = unwrap_projection(&db);
-    assert!(read_shadow_if_matches(&db, &live).is_some());
+    let stored = load_persisted(&db).expect("custom destination must persist");
+    dest(&stored, &destination_id_for_custom_account("custom-shadow"));
+    cred(&stored, "custom-shadow");
 
     db.conn
         .execute(
@@ -1021,15 +1174,15 @@ fn v4_read_serves_populated_shadow_then_live_on_empty() {
             UpstreamProtocolKind::ChatCompletions,
         )],
     );
-    let live = unwrap_projection(&db);
-    let stored = load_persisted(&db).expect("open persist should leave a readable shadow");
+    let stored = load_persisted(&db).expect("open persist should leave a readable store");
+    dest(&stored, &destination_id_for_custom_account("custom-shadow"));
+    cred(&stored, "custom-shadow");
     assert_eq!(
         read_v4_projection(&db)
             .expect("v4 read should succeed")
-            .expect("matching shadow should be total"),
+            .expect("populated store should be total"),
         stored
     );
-    assert_eq!(stored, live);
 
     db.conn
         .execute(
@@ -1071,7 +1224,7 @@ fn v4_read_serves_populated_shadow_then_live_on_empty() {
 }
 
 #[test]
-fn v4_read_still_refuses_when_live_mapping_fails() {
+fn v4_read_refuses_a_corrupt_persisted_custom_destination() {
     let (dir, db) = open_db("4d3b-refuse");
     create_custom(
         &db,
@@ -1084,14 +1237,13 @@ fn v4_read_still_refuses_when_live_mapping_fails() {
             UpstreamProtocolKind::ChatCompletions,
         )],
     );
+    let stored = load_persisted(&db).expect("shadow should stay populated");
     assert!(
         read_v4_projection(&db)
             .expect("v4 read should succeed")
             .is_ok()
     );
-    assert!(shadow_is_populated(
-        &load_persisted(&db).expect("shadow should stay populated")
-    ));
+    assert!(shadow_is_populated(&stored));
 
     db.conn
         .execute(
@@ -1100,14 +1252,21 @@ fn v4_read_still_refuses_when_live_mapping_fails() {
             ["custom-shadow"],
         )
         .unwrap();
-    let result = read_v4_projection(&db).expect("refusals are mapping errors, not IO");
-    assert!(
-        result.is_err(),
-        "live refusal must win even if the shadow still has rows"
+    let refusals = read_v4_projection(&db)
+        .expect("persisted validation should complete")
+        .expect_err("a corrupt persisted endpoint must fail closed");
+    assert_eq!(
+        refusals,
+        vec![ProjectionRefusal {
+            row: RefusedRow::Account {
+                id: "custom-shadow".to_string(),
+                provider_id: CUSTOM_PROVIDER_ID.to_string(),
+            },
+            error: MappingError::CustomAccountMissingEndpoint {
+                account_id: "custom-shadow".to_string(),
+            },
+        }]
     );
-    assert!(shadow_is_populated(
-        &load_persisted(&db).expect("missed-hook shadow should still load")
-    ));
 
     drop(db);
     fs::remove_dir_all(dir).unwrap();
@@ -1307,6 +1466,62 @@ fn catalog_refresh_survives_unreadable_protocol_evidence() {
         .unwrap()
         .unwrap();
     assert_eq!(stored.catalog_models, vec!["keep-me".to_string()]);
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn create_account_ensures_builtin_destination_and_keeps_key_after_cooldown() {
+    let (dir, db) = open_db("runtime-ensure-builtin");
+    let dest_id = destination_id_for_builtin(OPENCODE_PROVIDER_ID);
+    let before_dests: i64 = db
+        .conn
+        .query_row("SELECT COUNT(*) FROM destinations", [], |row| row.get(0))
+        .unwrap();
+    create_keyed_builtin(&db, "go-runtime", OPENCODE_PROVIDER_ID);
+    let after_create: i64 = db
+        .conn
+        .query_row("SELECT COUNT(*) FROM destinations", [], |row| row.get(0))
+        .unwrap();
+    assert!(after_create >= before_dests);
+    let exists: i64 = db
+        .conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM destinations WHERE id = ?1)",
+            [&dest_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(exists, 1);
+    let key: String = db
+        .conn
+        .query_row(
+            "SELECT key_cipher FROM credentials WHERE legacy_account_id = ?1",
+            ["go-runtime"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(key, "cipher");
+    db.set_account_cooldown(
+        "go-runtime",
+        Some(chrono::Utc::now() + chrono::Duration::minutes(5)),
+        Some("429"),
+    )
+    .unwrap();
+    let key_after: String = db
+        .conn
+        .query_row(
+            "SELECT key_cipher FROM credentials WHERE legacy_account_id = ?1",
+            ["go-runtime"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(key_after, "cipher");
+    let dests_after_cooldown: i64 = db
+        .conn
+        .query_row("SELECT COUNT(*) FROM destinations", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(dests_after_cooldown, after_create);
     drop(db);
     fs::remove_dir_all(dir).unwrap();
 }

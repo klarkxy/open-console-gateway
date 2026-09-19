@@ -892,6 +892,7 @@ pub(crate) fn apply_platform_link_on(
     set_link_on(conn, account_id, parent_id, &group, None)?;
     custom_store::merge_custom_models_onto_platform_parent(conn, account_id, parent_id)?;
     custom_store::narrow_credential_scope_from_custom_destination(conn, account_id)?;
+    custom_store::delete_custom_destination_row(conn, account_id)?;
     identity::update_account_identity_declaration(
         conn,
         account_id,
@@ -1454,7 +1455,6 @@ impl Database {
             false,
         )?;
         identity::persist_platform_identity(&tx, id, name.trim(), &base_url, Utc::now())?;
-        self.refresh_destination_shadow()?;
         tx.commit()?;
         Ok(())
     }
@@ -1503,7 +1503,6 @@ impl Database {
             )?;
             clear_link_snapshots_for_parent(&tx, id)?;
         }
-        self.refresh_destination_shadow()?;
         tx.commit()?;
         Ok(())
     }
@@ -1529,7 +1528,6 @@ impl Database {
             "platform account not found"
         );
         identity::delete_platform_identity(&tx, id)?;
-        self.refresh_destination_shadow()?;
         tx.commit()?;
         Ok(())
     }
@@ -1546,7 +1544,6 @@ impl Database {
     ) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         apply_platform_link_on(&tx, account_id, parent_id, group)?;
-        self.refresh_destination_shadow()?;
         tx.commit()?;
         Ok(())
     }
@@ -1559,7 +1556,6 @@ impl Database {
         if let Some(parent_id) = parent_id {
             custom_store::persist_custom_destination_after_unlink(&tx, account_id, &parent_id)?;
         }
-        self.refresh_destination_shadow()?;
         tx.commit()?;
         Ok(())
     }

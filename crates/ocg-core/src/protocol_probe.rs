@@ -137,7 +137,7 @@ pub(crate) async fn execute_protocol_probe(
     account: &Account,
     protocol: UpstreamProtocolKind,
 ) -> Result<u16, (Option<u16>, String)> {
-    execute_protocol_request(ctx, account, protocol, false, &[]).await
+    execute_protocol_request(ctx, account, protocol, false, ctx.model_id, &[]).await
 }
 
 /// Send the same minimal protocol request used by provider probes, but lock
@@ -148,6 +148,7 @@ pub(crate) struct AccountModelTestInput<'a> {
     pub config: &'a AppConfig,
     pub account: &'a Account,
     pub adapter: ProviderAdapterKind,
+    pub public_model: &'a str,
     pub model_id: &'a str,
     pub protocol: UpstreamProtocolKind,
     pub custom_endpoint_url: Option<&'a str>,
@@ -171,7 +172,15 @@ pub(crate) async fn execute_account_model_test(
         custom_route,
         now: chrono::Utc::now(),
     };
-    execute_protocol_request(&ctx, input.account, input.protocol, true, input.dynamics).await
+    execute_protocol_request(
+        &ctx,
+        input.account,
+        input.protocol,
+        true,
+        input.public_model,
+        input.dynamics,
+    )
+    .await
 }
 
 async fn execute_protocol_request(
@@ -179,6 +188,7 @@ async fn execute_protocol_request(
     account: &Account,
     protocol: UpstreamProtocolKind,
     account_test: bool,
+    public_model: &str,
     dynamics: &[crate::dynamic::DynamicProviderRuntime],
 ) -> Result<u16, (Option<u16>, String)> {
     let format = protocol_to_api(protocol);
@@ -223,8 +233,8 @@ async fn execute_protocol_request(
         LiveSendSelection::from_binding(
             account,
             binding.as_ref(),
-            ctx.model_id,
-            ctx.model_id,
+            public_model,
+            public_model,
             ctx.model_id,
         )
     };

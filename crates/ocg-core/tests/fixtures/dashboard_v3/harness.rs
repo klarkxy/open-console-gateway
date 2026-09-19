@@ -185,4 +185,10 @@ impl V3Harness {
         gateway::stop_gateway(self.handle);
         let _ = fs::remove_dir_all(self.dir);
     }
+
+    pub(crate) fn close_keep_dir(self) -> PathBuf {
+        let dir = self.dir.clone();
+        gateway::stop_gateway(self.handle);
+        dir
+    }
 }

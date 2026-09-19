@@ -14,7 +14,7 @@ use std::time::Duration;
 #[path = "fixtures/dashboard_v3/harness.rs"]
 mod harness;
 
-use harness::{V3Harness, start_loopback, start_public};
+use harness::{V3Harness, start_loopback, start_on_existing_dir, start_public};
 
 const BUNDLE_PASSWORD: &str = "migration-password-123";
 const PUBLIC_ADMIN_PASSWORD: &str = "public-admin-password-123";
@@ -398,7 +398,7 @@ async fn encrypted_account_migration_moves_keys_without_exposing_them() {
         .lock()
         .load_account_contract(&custom.id)
         .unwrap();
-    assert_eq!(custom_contract.model_capabilities[0].source, "import");
+    assert_eq!(custom_contract.model_capabilities[0].source, "manual");
     let (_, listed) = target
         .get_json(&format!("{}/account-records", target.v3_base))
         .await;
@@ -1085,4 +1085,136 @@ async fn v6_draft_provider_roundtrip_stays_off_runtime() {
 
     source.stop();
     target.stop();
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct TransferTruth {
+    accounts: Vec<(String, String, String, bool, String)>,
+    destinations: Vec<(String, String, Option<String>, Vec<(String, String)>)>,
+    routing: Vec<(String, String, u32, bool, String)>,
+}
+
+fn capture_transfer_truth(harness: &V3Harness) -> TransferTruth {
+    let db = harness.state.db.lock();
+    let mut accounts = db
+        .list_accounts()
+        .unwrap()
+        .into_iter()
+        .filter(|account| {
+            account.provider_id != OPENCODE_ZEN_FREE_PROVIDER_ID
+                && account.id != ocg_core::provider::CPA_ACCOUNT_ID
+        })
+        .map(|account| {
+            let key = if account.key_cipher.is_empty() {
+                String::new()
+            } else {
+                harness.state.decrypt_key(&account.key_cipher).unwrap()
+            };
+            (
+                account.id,
+                account.provider_id,
+                account.name,
+                account.enabled,
+                key,
+            )
+        })
+        .collect::<Vec<_>>();
+    accounts.sort();
+    let stored = ocg_core::destination_projection::load_persisted(&db).unwrap();
+    drop(db);
+    let mut routing = stored
+        .credentials
+        .iter()
+        .filter(|credential| {
+            credential.legacy_account_id != ocg_core::provider::CPA_ACCOUNT_ID
+                && credential.legacy_account_id != ZEN_FREE_ACCOUNT_ID
+        })
+        .map(|credential| {
+            (
+                credential.legacy_account_id.clone(),
+                credential.destination_id.clone(),
+                credential.routing_rank,
+                credential.enabled,
+                serde_json::to_string(&credential.scope).unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    routing.sort();
+    let routed_dests = routing
+        .iter()
+        .map(|row| row.1.clone())
+        .collect::<std::collections::HashSet<_>>();
+    let mut destinations = stored
+        .destinations
+        .iter()
+        .filter(|destination| routed_dests.contains(&destination.id))
+        .map(|destination| {
+            let catalog = destination
+                .catalog
+                .iter()
+                .map(|model| (model.public_model.clone(), model.upstream_model.clone()))
+                .collect::<Vec<_>>();
+            (
+                destination.id.clone(),
+                destination.name.clone(),
+                destination.base_url.clone(),
+                catalog,
+            )
+        })
+        .collect::<Vec<_>>();
+    destinations.sort();
+    TransferTruth {
+        accounts,
+        destinations,
+        routing,
+    }
+}
+
+#[tokio::test]
+async fn v7_export_import_reopen_preserves_fields_keys_catalog_and_routing() {
+    let _migration_guard = MIGRATION_TEST_LOCK.lock().await;
+    let source = start_loopback("v7-reopen-source").await;
+    create_source_accounts(&source).await;
+    let before = capture_transfer_truth(&source);
+    assert_eq!(before.accounts.len(), 3);
+    assert!(!before.accounts.iter().any(|row| row.4.is_empty()));
+    assert!(before.destinations.iter().any(|destination| {
+        destination
+            .3
+            .iter()
+            .any(|model| model.0 == "org/migrated-model")
+    }));
+
+    let (status, _, exported) = send_json(
+        &source,
+        Method::POST,
+        "/accounts/transfer/export",
+        &json!({ "bundlePassword": BUNDLE_PASSWORD }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{exported}");
+    let bundle = exported["bundle"].as_str().unwrap().to_string();
+
+    let target = start_loopback("v7-reopen-target").await;
+    let (status, _, imported) = send_json(
+        &target,
+        Method::POST,
+        "/accounts/transfer/import",
+        &cas(
+            &target,
+            json!({ "password": BUNDLE_PASSWORD, "bundle": bundle }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{imported}");
+    let after_import = capture_transfer_truth(&target);
+    assert_eq!(before, after_import);
+
+    let dir = target.close_keep_dir();
+    let reopened = start_on_existing_dir(dir).await;
+    let after_reopen = capture_transfer_truth(&reopened);
+    assert_eq!(before, after_reopen);
+
+    source.stop();
+    reopened.stop();
 }

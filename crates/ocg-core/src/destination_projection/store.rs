@@ -300,7 +300,7 @@ fn load_credentials(
                 onboarding_json, purchase_date
          FROM credentials
          {purpose_filter}
-         ORDER BY rowid"
+         ORDER BY routing_rank ASC, created_at ASC, legacy_account_id ASC, id ASC"
     ))?;
     let rows = stmt.query_map([], |row| {
         Ok((

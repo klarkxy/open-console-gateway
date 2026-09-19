@@ -3,7 +3,7 @@ use super::{V27MigrationFault, v27_test_hooks};
 use crate::crypto::{
     KeyCipher, LOCAL_CIPHER_V2_PREFIX, StaticKeyCipher, is_legacy_local_ciphertext,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::sync::Arc;
 
@@ -4687,6 +4687,140 @@ fn import_node_state_moves_linked_models_onto_parent_and_keeps_scopes() {
     fs::remove_dir_all(dest_dir).unwrap();
 }
 
+#[test]
+fn import_v7_platform_catalog_merges_target_models_and_preserves_exact_scopes() {
+    use crate::platform::{PortablePlatformAccount, PortablePlatformLink};
+    use ocg_domain::credential::ModelScope;
+    use ocg_domain::destination::CatalogModel;
+
+    let source_dir = temp_data_dir("import-v7-platform-source");
+    let source = Database::open(source_dir.clone()).unwrap();
+    seed_linked_platform_keys(
+        &source,
+        "parent-import",
+        &[("key-a", "model-a", "up-a"), ("key-b", "model-b", "up-b")],
+    );
+    let parents = source
+        .list_platform_accounts()
+        .unwrap()
+        .into_iter()
+        .map(|parent| PortablePlatformAccount {
+            id: parent.id,
+            kind: parent.kind,
+            name: parent.name,
+            base_url: parent.base_url,
+        })
+        .collect::<Vec<_>>();
+    let links = source
+        .list_platform_links()
+        .unwrap()
+        .into_iter()
+        .map(|link| PortablePlatformLink {
+            account_id: link.account_id,
+            platform_account_id: link.platform_account_id,
+            group: link.group,
+        })
+        .collect::<Vec<_>>();
+    let mut accounts = vec![
+        custom_platform_import_record("key-a", "model-a", "up-a"),
+        custom_platform_import_record("key-b", "model-b", "up-b"),
+    ];
+    for account in &mut accounts {
+        account.custom_config = None;
+        account.capabilities.clear();
+    }
+    let mut record = node_import_record(&source, accounts, parents, links);
+    let mut identity = identity_snapshot_forcing_all(&source, &["key-a", "key-b"]);
+    for row in &mut identity.accounts {
+        row.binding_model_scope = if row.account_id == "key-a" {
+            ModelScope::Only {
+                models: vec!["model-a".into()],
+            }
+        } else {
+            ModelScope::Only { models: Vec::new() }
+        };
+    }
+    record.identity_snapshot = Some(identity);
+    record.platform_catalogs.insert(
+        "parent-import".into(),
+        [("model-a", "up-a"), ("model-b", "up-b")]
+            .into_iter()
+            .map(|(public_model, upstream_model)| CatalogModel {
+                public_model: public_model.into(),
+                upstream_model: upstream_model.into(),
+                protocols: vec![UpstreamProtocolKind::ChatCompletions],
+                preferred: Some(UpstreamProtocolKind::ChatCompletions),
+                enabled: true,
+            })
+            .collect(),
+    );
+    drop(source);
+    fs::remove_dir_all(source_dir).unwrap();
+
+    let dest_dir = temp_data_dir("import-v7-platform-dest");
+    let dest = Database::open(dest_dir.clone()).unwrap();
+    seed_linked_platform_keys(
+        &dest,
+        "parent-import",
+        &[("key-target", "model-target", "up-target")],
+    );
+    dest.import_node_state(&record, |_| -> Result<()> { Ok(()) })
+        .unwrap();
+
+    let mut catalog = parent_catalog_pairs(&dest, "parent-import");
+    catalog.sort();
+    assert_eq!(
+        catalog,
+        vec![
+            ("model-a".into(), "up-a".into()),
+            ("model-b".into(), "up-b".into()),
+            ("model-target".into(), "up-target".into()),
+        ]
+    );
+    assert_eq!(
+        stored_model_scope(&dest, "key-a"),
+        ModelScope::Only {
+            models: vec!["model-a".into()]
+        }
+    );
+    assert_eq!(
+        stored_model_scope(&dest, "key-b"),
+        ModelScope::Only { models: Vec::new() }
+    );
+    assert_eq!(
+        stored_model_scope(&dest, "key-target"),
+        ModelScope::Only {
+            models: vec!["model-target".into()]
+        }
+    );
+    assert_eq!(
+        capability_pairs(&dest, "key-a"),
+        vec![("model-a".into(), "up-a".into())]
+    );
+    assert!(capability_pairs(&dest, "key-b").is_empty());
+    assert_eq!(
+        capability_pairs(&dest, "key-target"),
+        vec![("model-target".into(), "up-target".into())]
+    );
+
+    let mut conflicting = record.clone();
+    conflicting
+        .platform_catalogs
+        .get_mut("parent-import")
+        .unwrap()[0]
+        .upstream_model = "different-upstream".into();
+    let error = dest
+        .import_node_state(&conflicting, |_| -> Result<()> { Ok(()) })
+        .expect_err("a conflicting public-to-upstream map must roll back");
+    assert!(error.to_string().contains("conflicting upstream mappings"));
+    let mut after_conflict = parent_catalog_pairs(&dest, "parent-import");
+    after_conflict.sort();
+    assert_eq!(after_conflict, catalog);
+
+    drop(dest);
+    fs::remove_dir_all(dest_dir).unwrap();
+}
+
 fn node_import_record(
     db: &Database,
     accounts: Vec<AccountImportRecord>,
@@ -4712,6 +4846,7 @@ fn node_import_record(
         platform_links_authoritative: true,
         platform_accounts,
         platform_links,
+        platform_catalogs: HashMap::new(),
         accounts,
         account_order,
         config_json: serde_json::to_string(&config).unwrap(),
@@ -4722,6 +4857,11 @@ fn node_import_record(
         dynamic_providers: Vec::new(),
         identity_snapshot: None,
         draft_provider_ids: HashSet::new(),
+        platform_observer_ciphers: HashMap::new(),
+        platform_snapshots: HashMap::new(),
+        platform_versions: HashMap::new(),
+        cpa_base_url: None,
+        cpa_management_key_cipher: None,
     }
 }
 
@@ -5678,6 +5818,38 @@ fn managed_setup_requires_order_and_matching_verified_key() {
     assert_eq!(ready.setup_step, AccountSetupStep::Ready);
     assert!(ready.enabled);
 
+    drop(db);
+    fs::remove_dir_all(dir).expect("test data dir should be removed");
+}
+
+#[test]
+fn delete_account_removes_credential_grants() {
+    use ocg_domain::credential::credential_id_for_legacy_account;
+
+    let dir = temp_data_dir("delete-grants");
+    let mut db = Database::open(dir.clone()).expect("db should open");
+    db.create_account(&account("gone"))
+        .expect("account should save");
+    let credential_id = credential_id_for_legacy_account("gone").to_string();
+    let before: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM credential_grants WHERE credential_id = ?1",
+            [&credential_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(before > 0, "create should persist credential grants");
+    db.delete_account("gone").expect("account should delete");
+    let after: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM credential_grants WHERE credential_id = ?1",
+            [&credential_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(after, 0);
     drop(db);
     fs::remove_dir_all(dir).expect("test data dir should be removed");
 }
@@ -12747,6 +12919,98 @@ fn dynamic_provider_round_trip_and_duplicate_public_model_rejection() {
         [&dest_id],
     );
     assert!(duplicate.is_err());
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn replace_dynamic_provider_keeps_persisted_credential_projection_in_sync() {
+    let dir = temp_data_dir("dynamic-provider-projection-sync");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let now = Utc::now();
+    let provider_id = uuid::Uuid::new_v4().to_string();
+    let runtime = crate::dynamic::DynamicProviderRuntime {
+        preset_id: None,
+        id: provider_id.clone(),
+        name: "Projection sync".into(),
+        endpoint_url: "http://127.0.0.1:9".into(),
+        upstream_protocol: crate::provider::UpstreamProtocolKind::ChatCompletions,
+        auth_kind: ocg_domain::dynamic::DynamicAuthKind::Bearer,
+        mappings: vec![ocg_domain::dynamic::DynamicModelMapping {
+            public_model: "lab-model".into(),
+            upstream_model: "vendor/model".into(),
+            upstream_override: None,
+        }],
+        created_at: now,
+        updated_at: now,
+        origin: ocg_domain::provider::ProviderOrigin::Custom,
+        offering: "api".to_string(),
+    };
+    let mut account = account("dynamic-projection-account");
+    account.provider_id = provider_id.clone();
+    account.key_cipher = fixture_account_key_cipher();
+    db.create_dynamic_provider(&runtime, &account).unwrap();
+
+    db.conn
+        .execute(
+            "UPDATE credentials
+             SET auth_error = 'stale auth failure', auth_state = 'invalid'
+             WHERE legacy_account_id = ?1",
+            [&account.id],
+        )
+        .unwrap();
+    let mut edited = runtime.clone();
+    edited.endpoint_url = "http://127.0.0.1:10".into();
+    db.replace_dynamic_provider(&edited, true, false, None)
+        .unwrap();
+    let auth_state: String = db
+        .conn
+        .query_row(
+            "SELECT auth_state FROM credentials WHERE legacy_account_id = ?1",
+            [&account.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_ne!(
+        auth_state, "invalid",
+        "cleared auth_error must update the projection"
+    );
+
+    let mut none = edited.clone();
+    none.auth_kind = ocg_domain::dynamic::DynamicAuthKind::None;
+    db.replace_dynamic_provider(&none, true, true, None)
+        .unwrap();
+    let has_secret: i64 = db
+        .conn
+        .query_row(
+            "SELECT has_secret FROM credentials WHERE legacy_account_id = ?1",
+            [&account.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        has_secret, 0,
+        "bearer to none must clear projected secret state"
+    );
+
+    let mut bearer = none;
+    bearer.auth_kind = ocg_domain::dynamic::DynamicAuthKind::Bearer;
+    let replacement = test_host_cipher().encrypt("sk-replacement").unwrap();
+    db.replace_dynamic_provider(&bearer, true, false, Some(&replacement))
+        .unwrap();
+    let has_secret: i64 = db
+        .conn
+        .query_row(
+            "SELECT has_secret FROM credentials WHERE legacy_account_id = ?1",
+            [&account.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        has_secret, 1,
+        "none to bearer must set projected secret state"
+    );
+
     drop(db);
     fs::remove_dir_all(dir).unwrap();
 }

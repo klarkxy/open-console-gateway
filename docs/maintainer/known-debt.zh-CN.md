@@ -14,9 +14,9 @@
 - Responses 端点是无状态。`previous_response_id`、`conversation`、 `store: true`、`background: true` 返回 `400`。详见 `protocol.rs` 和[限制](../user/limits.zh-CN.md)。
 - Gemini 是客户端兼容格式。转发、`400` 与 `501` 行为见[限制](../user/limits.zh-CN.md)和[协议转换](../user/protocol-conversion.zh-CN.md)。
 - Command Code GOAT 账号用量来自官方 CLI 使用、但公开 Provider API 未文档化的第一方 `/alpha/billing/credits` 端点。其响应稳定性没有公开契约保证，因此手工刷新会校验精确 GOAT 上限，并在 schema 或套餐漂移时 fail closed。公开模型目录仍不能验证已保存 Key，因此鉴权失败只能从真实推理 401/403 得知。Custom API 仍是独立的已上线路由，遵循受信管理员边界（`custom.rs` + `custom_http.rs`）。
-- 按模型/按协议覆盖在 V3。Custom 账号级按协议探测没有 V3 端点；账号侧探测路径返回 410。Custom 验证与模型发现是现行路径。
-- V4 操作摘要密钥（`dashboard_operation_digest_key`）与账号 Key 存放在同一个 SQLite 文件中（账号 Key 为 AES-256-GCM `v2:` 密文）。
-- `accounts` 行持有冷却列与 Key 材料；V4 身份模型是建立在这些行之上的附属投影。
+- 按模型/按协议覆盖仍走挂在 `/dashboard/api/v4` 下的旧 Account 处理器。Custom 账号级按协议探测没有独立端点；该探测路径返回 410。Custom 验证与模型发现是现行路径。
+- V4 操作摘要密钥（`dashboard_operation_digest_key`）与凭据 Key 存放在同一个 SQLite 文件中（AES-256-GCM `v2:` 密文）。
+- 没有公开的 Destination 写入路由。账号、平台、Custom 变更仍是 `/accounts*` 适配器，底层写 destinations / credentials。`legacy_account_id` 仍是这些路由的桥接 id。物理存储与 destination/credential 投影已切换；V3 Account overlay 与部分运行时消费方仍走这座桥。
 
 ## 明确非目标
 
@@ -25,7 +25,7 @@
   密封 Configurable HTTP 适配器的数据。
 - 远端节点同步、Admin API 或多租户控制面。
 - 把 Tauri `invoke` 或 WebView command 用作面板数据路径。
-- 在 `GET /v1/models` 或 `GET /dashboard/api/v3/application-models` 上做请求时上游发现。
+- 在 `GET /v1/models` 上做请求时上游发现。`/dashboard/api/v3` 已是 410 墓碑。
 - GOAT 官方权威用量 API，或把其公开目录当作 Key 验证。
 - `/embeddings`、Gemini `embedContent`（501），或把 Gemini `countTokens` 做成真实上游计数（501 供 Gemini CLI 回退本地估算）。
 - Gemini 作为上游协议。

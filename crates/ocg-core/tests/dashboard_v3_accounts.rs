@@ -1783,7 +1783,11 @@ async fn v3_account_list_follows_populated_shadow_order() {
         .iter()
         .map(|account| account.id.clone())
         .collect();
-    assert_eq!(shim_ids, shadow_ids);
+    assert_eq!(
+        shim_ids,
+        shadow_ids.iter().rev().cloned().collect::<Vec<_>>(),
+        "the account-records shim must follow persisted credential routing_rank"
+    );
 
     {
         let conn = rusqlite::Connection::open(harness.dir.join("data.sqlite")).unwrap();

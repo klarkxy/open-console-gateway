@@ -1,32 +1,16 @@
-//! RFC destination/credential projection over live persisted rows.
+//! Destination/credential projection for leftover-table migration and V4–V6
+//! backup conversion.
 //!
-//! Stage 4a: [`project`] builds [`LegacyDestinationFacts`] /
-//! [`LegacyCredentialFacts`] from accounts, dynamic providers, platform
-//! parents/links, CPA, and V4 identity bindings, runs the domain mapper, then
-//! joins persisted catalog snapshots. That path never writes, never issues
-//! HTTP, and never returns Key material.
+//! Runtime reads serve persisted `destinations` / `credentials` via
+//! [`read_v4_projection`] and [`load_persisted`]. Runtime writers persist
+//! those tables incrementally; they must not rebuild them from [`project`].
 //!
-//! Stage 4d-1: [`replace_persisted`] rebuilds the schema-v50 shadow tables
-//! from a total [`project`]. A mapping refusal empties those tables. The
-//! shadow stores no Key material and is not the mutation authority.
-//!
-//! Stage 4d-2: writers that change what [`project`] reads call
-//! [`refresh_destination_shadow`] in the same SQLite transaction. That helper
-//! rebuilds via [`replace_persisted_on`] (no nested transaction).
-//!
-//! Stage 4d-3a: V4 GET still authorized from live [`project`] and only
-//! returned a matching shadow.
-//!
-//! Stage 4d-3b: V4 GET still gates mapping totality with live [`project`].
-//! A populated v50 shadow is the served snapshot via [`read_v4_projection`].
-//! An empty shadow or load error falls back to live so a refusal-emptied
-//! store still 409s from [`project`] rather than serving an empty listing.
-//!
-//! Stage 4d-3c: V3 listings take identity and order from the populated
-//! shadow via [`list_accounts_for_v3`] / [`list_platform_accounts_for_v3`].
-//! Key material still comes from the legacy rows. Rows the shadow does not
-//! name are appended in live order so the frozen V3 contract never drops an
-//! account. An empty shadow falls back to live list order.
+//! [`project`] still maps reconstructed account/platform/dynamic/identity
+//! facts when leftover tables exist or a V4–V6 package needs converting.
+//! [`replace_persisted`] / [`replace_persisted_on`] remain the one-shot
+//! backfill used while `accounts` (or other leftover tables) can still
+//! reconstruct the store. [`refresh_destination_shadow`] now only syncs
+//! builtin `destination_models` from persisted contracts.
 
 use std::collections::{HashMap, HashSet};
 
@@ -212,9 +196,7 @@ pub(crate) fn should_skip_persist_on_open(db: &Database) -> anyhow::Result<bool>
     Ok(accounts_missing || populated)
 }
 
-/// Rebuild the v50 shadow on an already-open connection. Does not begin a
-/// transaction: writers call this (via [`refresh_destination_shadow`]) before
-/// `commit` so the shadow and legacy rows share one rollback.
+/// One-shot leftover-table backfill. Runtime writers must not call this.
 pub fn replace_persisted_on(db: &Database) -> anyhow::Result<Result<(), Vec<ProjectionRefusal>>> {
     match project(db)? {
         Err(refusals) => {
@@ -233,16 +215,12 @@ pub fn replace_persisted_on(db: &Database) -> anyhow::Result<Result<(), Vec<Proj
     }
 }
 
-/// Refresh the v50 shadow from live rows without opening a transaction.
+/// Keep builtin `destination_models` aligned with persisted contracts.
 ///
-/// `Ok(Ok(()))` from [`replace_persisted_on`] leaves a total snapshot.
-/// `Ok(Err(refusals))` does **not** fail the caller. After v52 it also does
-/// not empty credentials (those rows *are* the account store). A SQL error
-/// fails so an outer writer rolls back.
+/// Runtime writers must not rebuild destinations/credentials from
+/// [`project`]. Leftover-table backfill still uses [`replace_persisted_on`].
 pub fn refresh_destination_shadow(db: &Database) -> anyhow::Result<()> {
-    match replace_persisted_on(db)? {
-        Ok(()) | Err(_) => Ok(()),
-    }
+    crate::db::destination_store::sync_builtin_catalogs(db)
 }
 
 /// Reconstruct destinations and credentials from the v50 shadow tables.
@@ -275,21 +253,60 @@ pub fn shadow_is_populated(stored: &DestinationProjection) -> bool {
     !stored.destinations.is_empty() || !stored.credentials.is_empty()
 }
 
-/// V4 destination/credential read: populated shadow, else live [`project`].
+/// V4 destination/credential read: persisted tables, else live [`project`].
 ///
-/// [`project`] still gates mapping totality. A refusal is `Err(refusals)`
-/// even when a populated shadow exists. An empty shadow or load error
-/// returns the live snapshot.
+/// A populated store is served even when [`project`] would refuse. Empty
+/// stores and leftover-table upgrade windows still fall back to [`project`].
 pub fn read_v4_projection(
     db: &Database,
 ) -> anyhow::Result<Result<DestinationProjection, Vec<ProjectionRefusal>>> {
-    match project(db)? {
-        Err(refusals) => Ok(Err(refusals)),
-        Ok(live) => match load_persisted(db) {
-            Ok(stored) if shadow_is_populated(&stored) => Ok(Ok(stored)),
-            _ => Ok(Ok(live)),
-        },
+    match load_persisted(db) {
+        Ok(stored) if shadow_is_populated(&stored) => {
+            let refusals = persisted_destination_refusals(&stored);
+            if refusals.is_empty() {
+                Ok(Ok(stored))
+            } else {
+                Ok(Err(refusals))
+            }
+        }
+        _ => project(db),
     }
+}
+
+/// Validate structural invariants that the legacy mapper used to enforce.
+/// Persisted rows are authoritative after v57, but corrupted endpoint-bearing
+/// destinations must still fail closed instead of reaching the dashboard or
+/// routing runtime as apparently usable records.
+fn persisted_destination_refusals(stored: &DestinationProjection) -> Vec<ProjectionRefusal> {
+    stored
+        .destinations
+        .iter()
+        .filter_map(|destination| {
+            let missing_base = destination
+                .base_url
+                .as_deref()
+                .is_none_or(|value| value.trim().is_empty());
+            if !missing_base {
+                return None;
+            }
+            match &destination.legacy {
+                LegacyDestinationRef::CustomAccount(id) => Some(ProjectionRefusal {
+                    row: RefusedRow::Account {
+                        id: id.clone(),
+                        provider_id: CUSTOM_PROVIDER_ID.to_string(),
+                    },
+                    error: MappingError::CustomAccountMissingEndpoint {
+                        account_id: id.clone(),
+                    },
+                }),
+                LegacyDestinationRef::PlatformParent(id) => Some(ProjectionRefusal {
+                    row: RefusedRow::PlatformParent { id: id.clone() },
+                    error: MappingError::PlatformMissingBaseUrl { id: id.clone() },
+                }),
+                _ => None,
+            }
+        })
+        .collect()
 }
 
 /// V3 `GET /accounts` rows: shadow credential order, then live leftovers.

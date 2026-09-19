@@ -1066,6 +1066,11 @@ fn ensure_identity_quota_pool(
         "INSERT OR IGNORE INTO quota_pool_members (pool_id, account_id) VALUES (?1, ?2)",
         params![pool_id.as_str(), account_id],
     )?;
+    conn.execute(
+        "UPDATE credentials SET quota_pool_id = COALESCE(quota_pool_id, ?2)
+         WHERE legacy_account_id = ?1",
+        params![account_id, pool_id.as_str()],
+    )?;
     let members: i64 = conn.query_row(
         "SELECT COUNT(*) FROM quota_pool_members WHERE pool_id = ?1",
         [pool_id.as_str()],
@@ -1929,7 +1934,6 @@ fn rotate_account_credential_on(
 ) -> Result<RotatedCredential> {
     let tx = Transaction::new_unchecked(&db.conn, TransactionBehavior::Immediate)?;
     let rotated = rotate_account_credential_in(&tx, account_id, key_cipher)?;
-    db.refresh_destination_shadow()?;
     tx.commit()?;
     Ok(rotated)
 }
@@ -1975,6 +1979,7 @@ pub(crate) fn rotate_account_credential_in(
         ],
     )?;
     anyhow::ensure!(account_updated == 1, "account {account_id} was not updated");
+    account_store::sync_inference_credential_projection_on(conn, account_id)?;
     if leftover_identity_tables_present(conn)? {
         conn.execute(
             "INSERT OR IGNORE INTO credential_state (
@@ -2304,7 +2309,6 @@ fn update_credential_binding_on(
         )
         .optional()?
         .unwrap_or(1);
-    db.refresh_destination_shadow()?;
     tx.commit()?;
     Ok(StoredInferenceBinding {
         account_id,
@@ -2369,7 +2373,6 @@ fn update_credential_binding_on_credentials(
         )
         .optional()?
         .unwrap_or(1);
-    db.refresh_destination_shadow()?;
     tx.commit()?;
     Ok(StoredInferenceBinding {
         account_id,
@@ -2432,6 +2435,22 @@ fn create_account_for_identity_on(
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )?
         };
+    account_store::sync_inference_credential_projection_on(&tx, &account.id)?;
+    if let QuotaSharingJoin::Shared {
+        source_credential_id,
+    } = &quota_sharing
+    {
+        let source_account_id: Option<String> = tx
+            .query_row(
+                "SELECT legacy_account_id FROM credentials WHERE id = ?1",
+                [source_credential_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(source_account_id) = source_account_id {
+            account_store::sync_inference_credential_projection_on(&tx, &source_account_id)?;
+        }
+    }
     if let Some((operation_id, digest)) = operation {
         let result_json = serde_json::json!({
             "identityId": identity_id,
@@ -2453,7 +2472,6 @@ fn create_account_for_identity_on(
             },
         )?;
     }
-    db.refresh_destination_shadow()?;
     tx.commit()?;
     Ok(CreatedIdentityCredential {
         account_id: account.id.clone(),
@@ -2551,6 +2569,8 @@ fn join_explicit_quota_share(
         )?;
     }
     merge_pool_cooldown_maxima(conn, &pool_id)?;
+    account_store::sync_inference_credential_projection_on(conn, &source_account_id)?;
+    account_store::sync_inference_credential_projection_on(conn, new_account_id)?;
     Ok(())
 }
 

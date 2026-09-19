@@ -102,7 +102,7 @@ async fn proxy_list_matches_the_materialized_upstream_id_in_both_directions() {
     )
     .await;
     let (settings_status, settings) =
-        dashboard_json(h.port, reqwest::Method::GET, "v3", "/settings", None).await;
+        dashboard_json(h.port, reqwest::Method::GET, "v4", "/settings", None).await;
     assert_eq!(settings_status, StatusCode::OK, "{settings}");
     assert!(
         settings["proxySupportedModels"]
