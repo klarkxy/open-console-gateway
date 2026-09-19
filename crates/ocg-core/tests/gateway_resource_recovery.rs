@@ -279,6 +279,9 @@ async fn all_waiting_returns_without_resending_and_recovers_on_demand() {
     .await;
     let clock = clocked(&mut p);
     let (_ids, _routes) = goats(&p, &["a"]);
+    // The ordinary account is only a template for the GOAT fixture; it must
+    // not remain a hidden, healthy fallback in an all-resources-waiting test.
+    p.state.db.lock().delete_account("acct-1").unwrap();
     let h = p.bind().await;
     let (status, _) = h.protocol("/v1/chat/completions", MODEL).await;
     assert_ne!(status, StatusCode::OK);

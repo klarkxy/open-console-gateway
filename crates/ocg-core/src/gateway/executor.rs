@@ -11,7 +11,7 @@ use crate::gateway::diagnostics::{
     ErrorDiagnostic, RequestTrace, emit_failure, log_request_failure, serialize_diagnostic,
 };
 use crate::gateway::forwarder::{
-    ForwardAction, LiveSendSelection, forward_request, rate_limited_response,
+    ForwardAction, LiveSendSelection, forward_request_with_deadline, rate_limited_response,
 };
 use crate::gateway::materialize::{
     InferenceBindingGate, InferenceBindingIndex, diagnostic_forced_upstream,
@@ -35,6 +35,17 @@ use ocg_gateway::selector::SelectionError;
 use std::sync::Arc;
 use std::time::Duration;
 const MAX_REQUEST_ATTEMPTS: u32 = 32;
+
+fn request_budget_duration(config: &AppConfig, stream: bool) -> Duration {
+    Duration::from_secs(
+        if stream {
+            config.stream_idle_timeout_secs
+        } else {
+            config.non_stream_timeout_secs
+        }
+        .max(1),
+    )
+}
 
 /// Process-state values frozen at request entry. Each fallback iteration still
 /// re-reads accounts, eligible Custom runtimes, and Zen Free cooldown.
@@ -124,10 +135,6 @@ impl GatewayExecutor {
         // and a concurrent settings switch only affects requests starting later.
         let snapshots = RequestSnapshots::capture(&state, config, contracts, resolved, dynamics);
         let mut loop_state = LoopState::new();
-        // Applies through headers / stream pre-output only. Once a stream is
-        // handed off, its existing idle timeout and no-replay rules take over.
-        let request_deadline = tokio::time::Instant::now()
-            + Duration::from_secs(snapshots.config.non_stream_timeout_secs.max(1));
         let conversation_key = if snapshots.config.conversation_sticky {
             resolve_conversation_key(client_format, &routing_model, &headers, &client_body)
         } else {
@@ -191,6 +198,10 @@ impl GatewayExecutor {
             }
         };
 
+        // A stream has its own pre-output budget; non-stream settings must not
+        // truncate it. After handoff, only the existing stream idle timer applies.
+        let request_deadline = tokio::time::Instant::now()
+            + request_budget_duration(&snapshots.config, requested_plan.stream);
         loop {
             let (decision_wall, decision_mono) = state.sample_gateway_clock();
             let (accounts, free_cooldown, stored_bindings) = {
@@ -507,52 +518,27 @@ impl GatewayExecutor {
                 } else {
                     selected_route
                 };
-                let forwarded = tokio::time::timeout_at(
-                    request_deadline,
-                    forward_request(
-                        client,
-                        route,
-                        &state,
-                        &account,
-                        &snapshots.config,
-                        &active_plan,
-                        &trace,
-                        &client_body,
-                        loop_state.attempt,
-                        !retried_same_account,
-                        headers.clone(),
-                        snapshots.pricing.clone(),
-                        client_key_id.as_deref(),
-                        &snapshots.dynamics,
-                        &selection,
-                    ),
+                // The attempt owns timeout finalization so a known HTTP status
+                // and the selected account cannot be lost to outer cancellation.
+                let forwarded = forward_request_with_deadline(
+                    client,
+                    route,
+                    &state,
+                    &account,
+                    &snapshots.config,
+                    &active_plan,
+                    &trace,
+                    &client_body,
+                    loop_state.attempt,
+                    !retried_same_account,
+                    headers.clone(),
+                    snapshots.pricing.clone(),
+                    client_key_id.as_deref(),
+                    &snapshots.dynamics,
+                    &selection,
+                    Some(request_deadline),
                 )
                 .await;
-                let forwarded = match forwarded {
-                    Ok(result) => result,
-                    Err(_) => {
-                        // Cancellation after send may have reached the upstream.
-                        // Never replay it automatically on a different Key.
-                        let message = "Gateway request deadline exceeded; upstream outcome may be unknown and the request was not replayed";
-                        record_plan_failure(
-                            &state,
-                            &trace,
-                            &client_body,
-                            loop_state.attempt,
-                            client_format,
-                            &active_plan,
-                            "transport",
-                            "request_budget",
-                            StatusCode::GATEWAY_TIMEOUT,
-                            message,
-                        );
-                        return super::forwarder::outcome_unknown_response(
-                            client_format,
-                            StatusCode::GATEWAY_TIMEOUT,
-                            message,
-                        );
-                    }
-                };
                 match forwarded {
                     Ok(result) => match result.action {
                         ForwardAction::Return => return result.response,
@@ -659,6 +645,16 @@ fn routing_selector_invariant(failure: SelectorInvariant) -> (StatusCode, String
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn request_budgets_keep_stream_and_non_stream_settings_independent() {
+        let config = crate::models::AppConfig {
+            non_stream_timeout_secs: 1,
+            stream_idle_timeout_secs: 5,
+            ..Default::default()
+        };
+        assert_eq!(super::request_budget_duration(&config, false).as_secs(), 1);
+        assert_eq!(super::request_budget_duration(&config, true).as_secs(), 5);
+    }
     #[test]
     fn selector_invariant_maps_to_internal_error() {
         for (label, failure, expected) in [

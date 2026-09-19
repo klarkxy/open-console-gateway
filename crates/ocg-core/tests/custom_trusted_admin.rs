@@ -1479,7 +1479,7 @@ async fn oversized_verification_body_fails_cleanly() {
 }
 
 #[tokio::test]
-async fn custom_429_is_generic_and_does_not_parse_go_windows() {
+async fn unknown_custom_429_does_not_invent_cooldown_or_parse_go_windows() {
     let harness = BlackBoxHarness::start_with_upstream(Some({
         let mut replies = HashMap::new();
         replies.insert(
@@ -1492,6 +1492,10 @@ async fn custom_429_is_generic_and_does_not_parse_go_windows() {
                 FakeReply {
                     status: 429,
                     body: "5-hour usage limit reached. Resets in 13min.",
+                },
+                FakeReply {
+                    status: 200,
+                    body: SUCCESS_CHAT_BODY,
                 },
             ]),
         );
@@ -1512,18 +1516,25 @@ async fn custom_429_is_generic_and_does_not_parse_go_windows() {
     assert_ne!(status, StatusCode::OK, "{body}");
     let after = harness.account_by_id(&id).await;
     assert!(
-        after["cooldownGenericUntil"].as_str().is_some(),
-        "Custom 429 must persist a generic cooldown: {after}"
+        after["cooldownGenericUntil"].is_null() && after["cooldownUntil"].is_null(),
+        "an unknown Custom 429 must not invent account cooldown: {after}"
     );
     assert!(
         after["cooldown5hUntil"].is_null(),
         "Custom 429 must not parse Go 5-hour windows: {after}"
     );
     let (again_status, again_body) = harness.chat(CUSTOM_MODEL).await;
-    assert_ne!(
+    assert_eq!(
         again_status,
         StatusCode::OK,
-        "selector must skip the cooling Custom account: {again_body}"
+        "the next request must still be allowed to use this account: {again_body}"
     );
+    assert_eq!(
+        harness.fake_calls().len(),
+        3,
+        "one verification and two inference calls"
+    );
+    assert!(after["authError"].is_null());
+    assert!(after["lastError"].is_null());
     harness.shutdown();
 }

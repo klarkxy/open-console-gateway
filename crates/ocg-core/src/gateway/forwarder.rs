@@ -982,6 +982,8 @@ impl FailureRecord {
     }
 }
 
+// Isolated attempt tests do not own a logical-request budget.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn forward_request(
     client: &Client,
@@ -1000,7 +1002,7 @@ pub(crate) async fn forward_request(
     dynamics: &[crate::dynamic::DynamicProviderRuntime],
     selection: &LiveSendSelection,
 ) -> Result<ForwardResult> {
-    forward_request_impl(
+    forward_request_with_deadline(
         client,
         route,
         state,
@@ -1016,12 +1018,13 @@ pub(crate) async fn forward_request(
         client_key_id,
         dynamics,
         selection,
+        None,
     )
     .await
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn forward_request_impl(
+pub(crate) async fn forward_request_with_deadline(
     client: &Client,
     route: RouteLabel,
     state: &CoreState,
@@ -1037,6 +1040,7 @@ async fn forward_request_impl(
     client_key_id: Option<&str>,
     dynamics: &[crate::dynamic::DynamicProviderRuntime],
     selection: &LiveSendSelection,
+    request_deadline: Option<tokio::time::Instant>,
 ) -> Result<ForwardResult> {
     let mut attempt_context =
         ForwardAttemptContext::new(trace, client_body.len(), attempt, plan, route);
@@ -1434,15 +1438,59 @@ async fn forward_request_impl(
         );
     }
 
+    let mut timeouts = AttemptTimeouts::from_secs(
+        config.non_stream_timeout_secs,
+        config.stream_idle_timeout_secs,
+    );
+    if let Some(deadline) = request_deadline {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            let message = "Gateway request deadline exceeded before send; no upstream request sent";
+            let failure = attempt_context.failure(FailureSpec {
+                error_source: "gateway",
+                error_stage: "request_budget",
+                downstream_status: Some(StatusCode::SERVICE_UNAVAILABLE.as_u16()),
+                upstream_status: None,
+                upstream_wait_ms: None,
+                retry_action: Some("return"),
+                upstream_headers: None,
+                upstream_error: None,
+                request_body: Some(client_body),
+            });
+            DbAttemptSink::new(&state.db.lock()).insert(
+                account,
+                &model,
+                "error",
+                None,
+                metadata_metrics(
+                    &pricing_snapshot,
+                    plan.service_tier.as_deref(),
+                    "not_applicable",
+                ),
+                Some(message),
+                &attempt_context,
+                Some(failure),
+            )?;
+            return Ok(ForwardResult {
+                response: protocol_status_error_response(
+                    plan.client,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    message,
+                    None,
+                ),
+                action: ForwardAction::Return,
+                error_message: Some(message.into()),
+            });
+        }
+        timeouts.non_stream = timeouts.non_stream.min(remaining);
+        timeouts.stream_header = timeouts.stream_header.min(remaining);
+    }
     let sent = forward_once(
         &attempt_spec,
         client,
         route,
         config,
-        AttemptTimeouts::from_secs(
-            config.non_stream_timeout_secs,
-            config.stream_idle_timeout_secs,
-        ),
+        timeouts,
         &url,
         send_headers,
         attempt_body,
@@ -1455,7 +1503,7 @@ async fn forward_request_impl(
         Err(AttemptTransportError::HeaderTimeout { timeout }) => {
             let class = classify_transport(TransportClassifyInput::HeaderTimeout);
             let detail = format!(
-                "upstream did not return response headers within {}s",
+                "upstream response header timeout after {}s",
                 timeout.as_secs()
             );
             let error_message = outcome_unknown_message(&detail);
@@ -1582,6 +1630,13 @@ async fn forward_request_impl(
     let body_timeout = plan
         .stream
         .then(|| StdDuration::from_secs(config.stream_idle_timeout_secs));
+    let body_timeout = match request_deadline {
+        Some(deadline) => {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            Some(body_timeout.map_or(remaining, |timeout| timeout.min(remaining)))
+        }
+        None => body_timeout,
+    };
 
     if status.is_server_error() {
         // A response status is authoritative even if its error body stalls. Keep
@@ -2065,7 +2120,13 @@ async fn forward_request_impl(
         // downstream SSE events. The upstream outcome and quota charge can still
         // be ambiguous, so the retry remains bounded to the same account.
         let (initial_chunks, upstream_finished) = loop {
-            let preflight = tokio::time::timeout(stream_idle_timeout, upstream_stream.next()).await;
+            // Heartbeats or partial frames must not restart the logical request
+            // budget while no usable downstream output has been produced.
+            let read_timeout = request_deadline.map_or(stream_idle_timeout, |deadline| {
+                stream_idle_timeout
+                    .min(deadline.saturating_duration_since(tokio::time::Instant::now()))
+            });
+            let preflight = tokio::time::timeout(read_timeout, upstream_stream.next()).await;
             match preflight {
                 Ok(Some(Ok(chunk))) => {
                     process_chunk_for_usage(&mut st.lock(), upstream_format, &chunk, Some(&model));
@@ -2167,8 +2228,14 @@ async fn forward_request_impl(
                     }
                 }
                 Err(_) => {
-                    let detail =
-                        format!("upstream stream idle timeout after {stream_idle_timeout_secs}s");
+                    let budget_expired = request_deadline
+                        .is_some_and(|deadline| tokio::time::Instant::now() >= deadline);
+                    let detail = if budget_expired {
+                        "Gateway request deadline exceeded before stream output (timeout)"
+                            .to_string()
+                    } else {
+                        format!("upstream stream idle timeout after {stream_idle_timeout_secs}s")
+                    };
                     match handle_pre_output_stream_failure(
                         state,
                         &st,
@@ -2181,10 +2248,14 @@ async fn forward_request_impl(
                         upstream_wait_ms,
                         StatusCode::GATEWAY_TIMEOUT,
                         "transport",
-                        "stream",
+                        if budget_expired {
+                            "request_budget"
+                        } else {
+                            "stream"
+                        },
                         &detail,
                         StreamClassifyInput::IdleTimeoutBeforeOutput,
-                        allow_same_account_retry,
+                        allow_same_account_retry && !budget_expired,
                     ) {
                         PreOutputFailure::Retry(result) => return Ok(result),
                         PreOutputFailure::Return(chunks) => break (chunks, true),
