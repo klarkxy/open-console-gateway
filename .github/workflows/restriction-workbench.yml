@@ -5,19 +5,47 @@ on:
     paths: [.github/workflows/restriction-workbench.yml]
 permissions:
   contents: read
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
 jobs:
-  snapshot:
+  apply:
     if: github.repository == 'klarkxy/open-console-gateway' && github.ref == 'refs/heads/maintainer/unified-restrictions'
+    permissions:
+      contents: write
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.apply.outputs.sha }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ github.sha }}
+      - id: apply
+        run: python3 .workbench/apply-restriction.py
+      - name: Export credential-free source for review
+        run: git archive --format=tar.gz -o /tmp/restriction-source.tar.gz HEAD
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: restriction-source
+          path: /tmp/restriction-source.tar.gz
+          retention-days: 1
+  quality:
+    needs: apply
+    uses: ./.github/workflows/quality.yml
+    with:
+      checkout_ref: ${{ needs.apply.outputs.sha }}
+  tooling:
+    needs: apply
     runs-on: ubuntu-22.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
+          ref: ${{ needs.apply.outputs.sha }}
           persist-credentials: false
-      - name: Export reviewed baseline without credentials
-        run: git archive --format=tar.gz -o /tmp/restriction-baseline.tar.gz HEAD
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
         with:
-          name: restriction-baseline
-          path: /tmp/restriction-baseline.tar.gz
-          retention-days: 1
+          node-version: 22
+      - run: node --test scripts/tests/*.test.mjs
