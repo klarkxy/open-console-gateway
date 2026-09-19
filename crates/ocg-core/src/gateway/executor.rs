@@ -546,11 +546,10 @@ impl GatewayExecutor {
                             StatusCode::GATEWAY_TIMEOUT,
                             message,
                         );
-                        return protocol_error_response(
+                        return super::forwarder::outcome_unknown_response(
                             client_format,
                             StatusCode::GATEWAY_TIMEOUT,
                             message,
-                            None,
                         );
                     }
                 };
@@ -623,6 +622,16 @@ fn record_plan_failure(
     diagnostic.model = Some(plan.model.clone());
     diagnostic.stream = Some(plan.stream);
     diagnostic.downstream_status = Some(status.as_u16());
+    if error_stage == "request_budget" {
+        diagnostic.retry_action = Some(
+            if error_source == "transport" {
+                "no_replay_outcome_unknown"
+            } else {
+                "return"
+            }
+            .to_string(),
+        );
+    }
     let encoded = serialize_diagnostic(diagnostic.clone());
     log_request_failure(&state.db.lock(), trace, &diagnostic, &encoded, message);
     emit_failure(&encoded);

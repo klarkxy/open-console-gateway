@@ -36,6 +36,7 @@ pub(crate) enum RetryHint {
 pub(crate) struct FailureFacts {
     pub cause: Cause,
     pub scope: Scope,
+    #[serde(serialize_with = "serialize_window")]
     pub window: Option<UsageWindowKind>,
     pub upstream_reset_at: Option<DateTime<Utc>>,
     pub retry_not_before: Option<RetryHint>,
@@ -69,6 +70,20 @@ impl FailureFacts {
             exhaust_free: self.scope == Scope::SharedFreeEgress,
         }
     }
+}
+
+fn serialize_window<S: serde::Serializer>(
+    window: &Option<UsageWindowKind>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    window
+        .map(|window| match window {
+            UsageWindowKind::FiveHours => "five_hours",
+            UsageWindowKind::Week => "week",
+            UsageWindowKind::Month => "month",
+            UsageWindowKind::Free => "free",
+        })
+        .serialize(serializer)
 }
 
 #[cfg(test)]

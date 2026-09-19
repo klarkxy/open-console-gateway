@@ -181,3 +181,24 @@ fn malformed_huge_reset_text_cannot_panic_or_persist() {
         assert!(f.decide().persist_reset.is_none());
     }
 }
+
+#[test]
+fn diagnostic_serialization_preserves_window_and_evidence() {
+    let value =
+        serde_json::to_value(rate(ErrorProfile::CommandCodeGoat, GOAT, Some("90"))).unwrap();
+    assert_eq!(value["window"], "week");
+    assert_eq!(value["rule_id"], "goat.plan_window");
+    assert_eq!(value["rule_version"], 1);
+    assert!(value.get("body").is_none());
+}
+#[test]
+fn echoed_limit_text_outside_message_is_not_account_evidence() {
+    let f = rate(
+        ErrorProfile::OpenCodeGo,
+        r#"{"error":{},"echo":"Weekly usage limit reached. Resets in 1 day."}"#,
+        None,
+    );
+    assert_eq!(f.scope, Scope::Unspecified);
+    assert!(f.decide().persist_reset.is_none());
+    assert!(!f.decide().wait_for_recovery);
+}

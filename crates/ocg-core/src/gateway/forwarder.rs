@@ -859,7 +859,6 @@ impl ForwardAttemptContext {
             stream: plan.stream,
             route,
             known_secret: None,
-            restriction_details: None,
             route_account_id: None,
             provider_id: None,
 
@@ -868,6 +867,7 @@ impl ForwardAttemptContext {
             client_key_name: None,
             platform_price: None,
             official_price: None,
+            restriction_details: None,
         }
     }
 
@@ -1314,49 +1314,6 @@ async fn forward_request_impl(
         upstream_headers
     };
 
-    if let Err(error) = resolver.confirm_live() {
-        let class = if error.is_decrypt() {
-            classify_preflight(PreflightKind::Decrypt)
-        } else {
-            classify_preflight(PreflightKind::Route)
-        };
-        let message = if error.is_decrypt() {
-            format!("failed to decrypt account credentials: {error}")
-        } else {
-            error.to_string()
-        };
-        let failure = attempt_context.failure(FailureSpec {
-            error_source: "gateway",
-            error_stage: "credential",
-            downstream_status: Some(StatusCode::BAD_GATEWAY.as_u16()),
-            upstream_status: None,
-            upstream_wait_ms: None,
-            retry_action: Some(retry_action_name(forward_action_for_class(
-                class,
-                allow_same_account_retry,
-                None,
-            ))),
-            upstream_headers: None,
-            upstream_error: None,
-            request_body: Some(client_body),
-        });
-        DbAttemptSink::new(&state.db.lock()).insert(
-            account,
-            &plan.model,
-            "error",
-            None,
-            metadata_metrics(
-                &pricing_snapshot,
-                plan.service_tier.as_deref(),
-                "not_applicable",
-            ),
-            Some(&message),
-            &attempt_context,
-            Some(failure),
-        )?;
-        return Ok(account_preflight_failure(plan, message));
-    }
-
     // Admission is operational state, not account quota or selector state.
     // Its key uses the authorized exact endpoint/model, route and current
     // credential/pool generation. No raw identity digest is logged.
@@ -1371,7 +1328,8 @@ async fn forward_request_impl(
             profile: ocg_gateway::classify::ErrorProfile::ZenFree
         }
     );
-    let restriction_endpoint = format!("{url}|{route:?}|{:?}", plan.upstream);
+    let proxy_identity = (route == RouteLabel::Proxy).then_some(config.proxy_url.as_str());
+    let restriction_endpoint = format!("{url}|{route:?}|{:?}|{proxy_identity:?}", plan.upstream);
     let resources = ResourceSet::capture(
         &state.db.lock(),
         account,
@@ -1423,6 +1381,49 @@ async fn forward_request_impl(
             });
         }
     };
+
+    if let Err(error) = resolver.confirm_live() {
+        let class = if error.is_decrypt() {
+            classify_preflight(PreflightKind::Decrypt)
+        } else {
+            classify_preflight(PreflightKind::Route)
+        };
+        let message = if error.is_decrypt() {
+            format!("failed to decrypt account credentials: {error}")
+        } else {
+            error.to_string()
+        };
+        let failure = attempt_context.failure(FailureSpec {
+            error_source: "gateway",
+            error_stage: "credential",
+            downstream_status: Some(StatusCode::BAD_GATEWAY.as_u16()),
+            upstream_status: None,
+            upstream_wait_ms: None,
+            retry_action: Some(retry_action_name(forward_action_for_class(
+                class,
+                allow_same_account_retry,
+                None,
+            ))),
+            upstream_headers: None,
+            upstream_error: None,
+            request_body: Some(client_body),
+        });
+        DbAttemptSink::new(&state.db.lock()).insert(
+            account,
+            &plan.model,
+            "error",
+            None,
+            metadata_metrics(
+                &pricing_snapshot,
+                plan.service_tier.as_deref(),
+                "not_applicable",
+            ),
+            Some(&message),
+            &attempt_context,
+            Some(failure),
+        )?;
+        return Ok(account_preflight_failure(plan, message));
+    }
 
     if let Some(compat) = &plan.legacy_tool_compat {
         emit_legacy_tool_compat(
@@ -3255,7 +3256,11 @@ fn outcome_unknown_retry_message(detail: &str) -> String {
     )
 }
 
-fn outcome_unknown_response(format: ApiFormat, status: StatusCode, detail: &str) -> Response {
+pub(crate) fn outcome_unknown_response(
+    format: ApiFormat,
+    status: StatusCode,
+    detail: &str,
+) -> Response {
     let message = outcome_unknown_message(detail);
     outcome_unknown_response_with_message(format, status, &message)
 }
@@ -3647,6 +3652,7 @@ mod stream_usage_tests {
             client_key_name: None,
             platform_price: None,
             official_price: None,
+            restriction_details: None,
         };
         let mut headers = HeaderMap::new();
         headers.insert("x-request-id", format!("request-{secret}").parse().unwrap());
@@ -3988,6 +3994,7 @@ mod stream_outcome_guard_tests {
             client_key_name: None,
             platform_price: None,
             official_price: None,
+            restriction_details: None,
         }
     }
 

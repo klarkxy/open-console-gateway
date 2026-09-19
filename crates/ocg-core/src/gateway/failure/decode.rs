@@ -55,7 +55,7 @@ pub(crate) fn decode(
                 .as_ref()
                 .and_then(|v| v.pointer("/error/message").or_else(|| v.get("message")))
                 .and_then(Value::as_str)
-                .unwrap_or(body);
+                .unwrap_or(if json.is_some() { "" } else { body });
             let kind = json
                 .as_ref()
                 .and_then(|v| v.pointer("/error/type").or_else(|| v.get("type")))
