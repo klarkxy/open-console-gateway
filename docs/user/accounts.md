@@ -273,7 +273,7 @@ than a key quota.
   throttle (Retry-After / next-allowed). The card shows the last successful
   official sync time. Local estimates that reach
   ≥80% may trigger one expedited sync per 15 minutes. A real inference `429`
-  still writes the existing cooldown/selector state and additionally schedules
+  follows the common scoped restriction policy and additionally schedules
   an official reconciliation about 1–2 minutes later; official failures or
   `status=rate-limited` never write inference cooldown. Failures keep the
   previous baseline and last-success timestamp. The request uses the same global
@@ -285,11 +285,8 @@ than a key quota.
   This path has the same 15-second per-account throttle and global proxy, but
   no automatic schedule; its result never writes inference cooldown or changes
   routing. Manual calibration remains available for correction.
-- **GOAT inference cooldown.** A real Command Code `429` that identifies the
-  5-hour, weekly, or monthly plan window uses the response's exact `Your limit resets at`
-  timestamp for the matching account cooldown. A valid bounded `Retry-After` takes precedence.
-  Without a usable upstream deadline, transient or malformed rate limits only
-  exclude that account from the current request and do not write account state.
+- **GOAT inference restrictions.** A recognized 5-hour, weekly, or monthly plan reset writes the exact matching cooldown. `Retry-After` is enforced independently, never substituted for a quota reset. Unknown/transient 429s without a retry constraint are request-local. Exact insufficient-credit 400s enter model-specific waiting for the declared quota pool and foreground single-flight reprobes; this does not disable the Key or create an authentication error. See [routing and recovery](routing.md).
+
 - **Identity and credentials.** The name is the account's required primary
   display label. The login account field is optional; on Key-account creation,
   entering it first copies it into the name until you edit the name yourself.
@@ -311,8 +308,7 @@ than a key quota.
   the Up and Down arrow keys move the account as well. Dashboard, the Logs
   account filter, CLI listings, and the gateway selector all consume this same
   SQLite-backed order.
-- **Cooldown reset.** You can reset a cooldown manually from this view. The bar
-  snaps back to its local estimate as soon as the cooldown is cleared.
+- **Cooldown reset.** The existing visible cooldown action restores the bar to its local estimate. Its CAS backend operation also clears associated process-local waiting and fences late replies. Account reset does not reset anonymous Free restrictions. This change adds no new waiting badge or button for resources that have only local waiting; inspect `resource_wait` request diagnostics instead. Restart clears local waiting, not persisted quota deadlines, and no historical generic cooldown rows are migrated.
 
 ---
 
