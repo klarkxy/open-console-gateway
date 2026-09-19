@@ -281,6 +281,7 @@ fn attempt_context(upstream: &str) -> ForwardAttemptContext {
         client_key_name: None,
         platform_price: None,
         official_price: None,
+        restriction_details: None,
     }
 }
 

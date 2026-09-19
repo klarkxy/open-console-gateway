@@ -330,7 +330,7 @@ async fn disabled_account_and_model_scope_never_call_upstream() {
 }
 
 #[tokio::test]
-async fn shared_quota_skips_sibling_credential_on_429() {
+async fn unknown_custom_429_does_not_invent_shared_pool_exhaustion() {
     let journal = SharedJournal::new();
     let labs = [
         start_journaled_lab(&journal, "lab-a", DUMMY_A, &[limited()]).await,
@@ -428,20 +428,21 @@ async fn shared_quota_skips_sibling_credential_on_429() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(
         journal.listeners(),
-        ["lab-a", "lab-c"],
-        "shared-quota sibling must not be contacted: {:?}",
+        ["lab-a", "lab-b"],
+        "unknown Custom 429 must not claim shared quota exhaustion: {:?}",
         journal.snapshot()
     );
-    assert_eq!(journal.keys(), [DUMMY_A, DUMMY_C]);
+    assert_eq!(journal.keys(), [DUMMY_A, DUMMY_B]);
     let logs = sorted_logs(&h.state);
     assert!(
-        logs.iter().all(|log| log.account_id != sibling_id),
-        "sibling credential must not appear in forward logs: {logs:?}"
+        logs.iter()
+            .any(|log| log.account_id == sibling_id && log.http_status == Some(200)),
+        "eligible sibling should serve after an unknown request-local rejection: {logs:?}"
     );
     evidence(
-        "shared-quota-skips-sibling",
-        &["lab-a", "lab-c"],
-        &[DUMMY_A, DUMMY_C],
+        "unknown-429-keeps-shared-pool-eligible",
+        &["lab-a", "lab-b"],
+        &[DUMMY_A, DUMMY_B],
         &journal,
         &logs,
         status.as_u16(),

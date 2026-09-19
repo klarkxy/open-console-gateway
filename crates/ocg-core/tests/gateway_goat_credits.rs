@@ -43,7 +43,19 @@ async fn goat_credit_400_retries_another_key_and_keeps_unknown_recovery_explicit
         let (status, body) = h.protocol("/v1/chat/completions", MODEL).await;
         assert_eq!(status, StatusCode::OK, "{body}");
     }
-    assert_eq!(h.call_keys(), ["a", "b", "a", "b"]);
+    assert_eq!(h.call_keys(), ["a", "b", "b"]);
+    let waits: Vec<_> = h
+        .logs()
+        .into_iter()
+        .filter(|row| row.error_stage.as_deref() == Some("resource_wait"))
+        .collect();
+    assert_eq!(waits.len(), 1);
+    assert_eq!(waits[0].http_status, None);
+    assert!(waits[0].cost.is_none());
+    assert_eq!(
+        waits[0].diagnostic.as_ref().unwrap()["restriction"]["wait"]["reason"],
+        "resource_waiting_for_recovery"
+    );
     let after = h.account(&a);
     assert_eq!(after.cooldown_until, before.cooldown_until);
     assert_eq!(after.auth_error, before.auth_error);
@@ -53,7 +65,7 @@ async fn goat_credit_400_retries_another_key_and_keeps_unknown_recovery_explicit
         .iter()
         .filter(|row| row.http_status == Some(400))
         .collect();
-    assert_eq!(failed.len(), 2);
+    assert_eq!(failed.len(), 1);
     for row in failed {
         assert_eq!(row.attempt, Some(1));
         let diagnostic = row.diagnostic.as_ref().unwrap();

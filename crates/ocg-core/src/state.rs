@@ -100,6 +100,8 @@ pub struct CoreStateInner {
     provider_contracts: RwLock<Arc<crate::provider_contracts::EffectiveContractSet>>,
     dynamic_providers: RwLock<Arc<Vec<crate::dynamic::DynamicProviderRuntime>>>,
     pub routing: RoutingRuntime,
+    /// Ephemeral resource admission. Never held while acquiring the database lock.
+    pub(crate) recovery: Arc<crate::gateway::recovery::RecoveryRuntime>,
     pub browser: crate::browser::BrowserRuntime,
     /// Official Go usage sync gates (concurrency, dedupe, clock/jitter seams).
     /// The background loop is started from gateway startup, not construction.
@@ -418,6 +420,7 @@ impl CoreStateInner {
             provider_contracts: RwLock::new(Arc::new(provider_contracts)),
             dynamic_providers: RwLock::new(Arc::new(dynamic_providers)),
             routing: RoutingRuntime::new(),
+            recovery: Arc::new(crate::gateway::recovery::RecoveryRuntime::default()),
             browser: crate::browser::BrowserRuntime::new(),
             usage_sync: crate::usage_sync::UsageSyncRuntime::new(),
             gateway_clock,

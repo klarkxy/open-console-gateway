@@ -11,7 +11,7 @@ use crate::gateway::diagnostics::{
     ErrorDiagnostic, RequestTrace, emit_failure, log_request_failure, serialize_diagnostic,
 };
 use crate::gateway::forwarder::{
-    ForwardAction, LiveSendSelection, forward_request, rate_limited_response,
+    ForwardAction, LiveSendSelection, forward_request_with_deadline, rate_limited_response,
 };
 use crate::gateway::materialize::{
     InferenceBindingGate, InferenceBindingIndex, diagnostic_forced_upstream,
@@ -33,6 +33,19 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use ocg_gateway::selector::SelectionError;
 use std::sync::Arc;
+use std::time::Duration;
+const MAX_REQUEST_ATTEMPTS: u32 = 32;
+
+fn request_budget_duration(config: &AppConfig, stream: bool) -> Duration {
+    Duration::from_secs(
+        if stream {
+            config.stream_idle_timeout_secs
+        } else {
+            config.non_stream_timeout_secs
+        }
+        .max(1),
+    )
+}
 
 /// Process-state values frozen at request entry. Each fallback iteration still
 /// re-reads accounts, eligible Custom runtimes, and Zen Free cooldown.
@@ -185,6 +198,10 @@ impl GatewayExecutor {
             }
         };
 
+        // A stream has its own pre-output budget; non-stream settings must not
+        // truncate it. After handoff, only the existing stream idle timer applies.
+        let request_deadline = tokio::time::Instant::now()
+            + request_budget_duration(&snapshots.config, requested_plan.stream);
         loop {
             let (decision_wall, decision_mono) = state.sample_gateway_clock();
             let (accounts, free_cooldown, stored_bindings) = {
@@ -468,6 +485,30 @@ impl GatewayExecutor {
 
             let mut retried_same_account = false;
             loop {
+                if loop_state.attempt >= MAX_REQUEST_ATTEMPTS
+                    || tokio::time::Instant::now() >= request_deadline
+                {
+                    let message =
+                        "Gateway request retry budget exhausted; no further upstream attempt sent";
+                    record_plan_failure(
+                        &state,
+                        &trace,
+                        &client_body,
+                        loop_state.attempt.max(1),
+                        client_format,
+                        &active_plan,
+                        "gateway",
+                        "request_budget",
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        message,
+                    );
+                    return protocol_error_response(
+                        client_format,
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        message,
+                        None,
+                    );
+                }
                 loop_state.attempt = loop_state.attempt.saturating_add(1);
                 // Re-resolve the leg on every attempt: free fallback or sticky
                 // rewrites can swap `active_plan.model` mid-request.
@@ -477,7 +518,9 @@ impl GatewayExecutor {
                 } else {
                     selected_route
                 };
-                match forward_request(
+                // The attempt owns timeout finalization so a known HTTP status
+                // and the selected account cannot be lost to outer cancellation.
+                let forwarded = forward_request_with_deadline(
                     client,
                     route,
                     &state,
@@ -493,9 +536,10 @@ impl GatewayExecutor {
                     client_key_id.as_deref(),
                     &snapshots.dynamics,
                     &selection,
+                    Some(request_deadline),
                 )
-                .await
-                {
+                .await;
+                match forwarded {
                     Ok(result) => match result.action {
                         ForwardAction::Return => return result.response,
                         ForwardAction::RetrySameAccount if !retried_same_account => {
@@ -564,6 +608,16 @@ fn record_plan_failure(
     diagnostic.model = Some(plan.model.clone());
     diagnostic.stream = Some(plan.stream);
     diagnostic.downstream_status = Some(status.as_u16());
+    if error_stage == "request_budget" {
+        diagnostic.retry_action = Some(
+            if error_source == "transport" {
+                "no_replay_outcome_unknown"
+            } else {
+                "return"
+            }
+            .to_string(),
+        );
+    }
     let encoded = serialize_diagnostic(diagnostic.clone());
     log_request_failure(&state.db.lock(), trace, &diagnostic, &encoded, message);
     emit_failure(&encoded);
@@ -591,6 +645,16 @@ fn routing_selector_invariant(failure: SelectorInvariant) -> (StatusCode, String
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn request_budgets_keep_stream_and_non_stream_settings_independent() {
+        let config = crate::models::AppConfig {
+            non_stream_timeout_secs: 1,
+            stream_idle_timeout_secs: 5,
+            ..Default::default()
+        };
+        assert_eq!(super::request_budget_duration(&config, false).as_secs(), 1);
+        assert_eq!(super::request_budget_duration(&config, true).as_secs(), 5);
+    }
     #[test]
     fn selector_invariant_maps_to_internal_error() {
         for (label, failure, expected) in [

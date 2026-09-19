@@ -163,7 +163,7 @@ pub(crate) fn confirm_live_send_secret(
     }
 }
 
-fn verify_live_send(
+pub(super) fn verify_live_send(
     db: &crate::db::Database,
     selection: &LiveSendSelection,
     account: &Account,
