@@ -1,8 +1,9 @@
 <template>
   <div class="credential-row">
     <div class="credential-row__head">
-      <span class="credential-row__name">{{ account.name }}</span>
+      <span class="credential-row__name">{{ credential.name }}</span>
       <CredentialTags
+        v-if="account"
         :account="account"
         :identity="identity"
         :catalog="catalog"
@@ -14,8 +15,19 @@
         :duplicate-name="duplicateName"
         @update-purchase-date="emit('update-purchase-date', $event)"
       />
+      <template v-else>
+        <n-tag
+          v-for="(tag, index) in extraTags"
+          :key="`${tag}:${index}`"
+          size="small"
+          :bordered="false"
+        >
+          {{ tag }}
+        </n-tag>
+      </template>
       <div class="credential-row__actions">
         <CredentialActions
+          v-if="account"
           compact
           :account="account"
           :identity="identity"
@@ -44,6 +56,7 @@
       </div>
     </div>
     <CredentialBody
+      v-if="account"
       :account="account"
       :identity="identity"
       :catalog="catalog"
@@ -60,7 +73,9 @@
 </template>
 
 <script setup lang="ts">
+import { NTag } from "naive-ui";
 import type { Account, UsageWindow } from "../api/dashboard";
+import type { Destination, DestinationCredential } from "../api/destinations.ts";
 import type { Identity } from "../api/identities.ts";
 import type {
   ProviderCatalogEntry,
@@ -76,7 +91,9 @@ import CredentialTags from "./CredentialTags.vue";
 
 withDefaults(
   defineProps<{
-    account: Account;
+    credential: DestinationCredential;
+    destination: Destination;
+    account?: Account | null;
     identity?: Identity | null;
     catalog: readonly ProviderCatalogEntry[] | null;
     usage: UsageWindow;
@@ -99,6 +116,7 @@ withDefaults(
     refreshing?: boolean;
   }>(),
   {
+    account: null,
     identity: null,
     quotaLimitsFailed: false,
     accountNames: undefined,

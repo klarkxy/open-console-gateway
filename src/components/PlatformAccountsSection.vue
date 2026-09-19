@@ -77,6 +77,8 @@ const props = defineProps<{
 const emit = defineEmits<{
   /** Server mutated account state (link/unlink rewrote the endpoint); reload the ordered list. */
   changed: [];
+  /** Platform write committed, but the destination cards still show the prior snapshot. */
+  destinationRefreshFailed: [error: string];
   /** A capabilities import returned the updated account; replace it in place. */
   accountUpdated: [account: Account];
 }>();
@@ -163,6 +165,10 @@ async function persistPlatform(
     const outcome = await platformStore.createOrUpdate(payload, editing);
     if (outcome === "saved") {
       message.success(editing ? t("平台账号已更新") : t("平台账号已创建"));
+      emit("changed");
+    } else if (outcome === "saved_refresh_failed") {
+      message.warning(t("已保存，但列表刷新失败。手动刷新，不要再次提交。"));
+      emit("destinationRefreshFailed", platformStore.destinationRefreshError);
     } else if (outcome === "conflict") {
       notifyConflict();
     }
@@ -182,7 +188,8 @@ async function onFormSave(payload: PlatformAccountFormPayload): Promise<void> {
 
 /** Add Account chooser entry point; true only when the create persisted. */
 async function createPlatform(payload: PlatformAccountFormPayload): Promise<boolean> {
-  return (await persistPlatform(payload, null)) === "saved";
+  const outcome = await persistPlatform(payload, null);
+  return outcome === "saved" || outcome === "saved_refresh_failed";
 }
 
 function confirmDelete(parent: PlatformAccount): void {

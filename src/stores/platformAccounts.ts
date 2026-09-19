@@ -11,9 +11,10 @@ import {
   type PlatformLink,
 } from "../api/platform-accounts.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
+import { useDestinationsStore } from "./destinations.ts";
 
 export type PlatformPendingLink = { accountId: string; parentId: string };
-export type PlatformPersistOutcome = "saved" | "conflict" | "error";
+export type PlatformPersistOutcome = "saved" | "saved_refresh_failed" | "conflict" | "error";
 export type PlatformWriteOutcome = "ok" | "conflict" | "error";
 
 export interface PlatformAccountWritePayload {
@@ -38,6 +39,7 @@ export const usePlatformAccountsStore = defineStore("platformAccounts", () => {
   const importing = ref<Record<string, boolean>>({});
   const refreshing = ref<Record<string, boolean>>({});
   const pendingLink = ref<PlatformPendingLink | null>(null);
+  const destinationRefreshError = ref("");
 
   // Overlapping loads resolve out of order; only the latest operation commits
   // loading/error presentation. Mirrors the load guard in stores/accounts.ts.
@@ -134,6 +136,14 @@ export const usePlatformAccountsStore = defineStore("platformAccounts", () => {
           baseUrl: payload.baseUrl,
           ...(payload.userCredential !== undefined ? { userCredential: payload.userCredential } : {}),
         }));
+      try {
+        await useDestinationsStore().refreshAfterMutation();
+        destinationRefreshError.value = "";
+      } catch (error) {
+        // The platform write already committed; cards keep the previous dest snapshot.
+        destinationRefreshError.value = dashboardErrorDetail(error);
+        return "saved_refresh_failed";
+      }
       return "saved";
     } catch (e) {
       if (isRevisionConflict(e)) return recoverConflict();
@@ -261,6 +271,7 @@ export const usePlatformAccountsStore = defineStore("platformAccounts", () => {
 
   function clearPendingLink(): void {
     pendingLink.value = null;
+    destinationRefreshError.value = "";
   }
 
   function linksFor(parentId: string): PlatformLink[] {
@@ -295,6 +306,7 @@ export const usePlatformAccountsStore = defineStore("platformAccounts", () => {
     importing: computed(() => importing.value),
     refreshing: computed(() => refreshing.value),
     pendingLink: computed(() => pendingLink.value),
+    destinationRefreshError: computed(() => destinationRefreshError.value),
     load,
     acceptView,
     recoverConflict,

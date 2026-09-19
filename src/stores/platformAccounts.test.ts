@@ -3,6 +3,7 @@ import test from "node:test";
 import { createPinia, setActivePinia } from "pinia";
 import { installWindowDashboard } from "../test-helpers/dashboard-v3-fetch.ts";
 import { useControlPlaneStore } from "./controlPlane.ts";
+import { useDestinationsStore } from "./destinations.ts";
 import { usePlatformAccountsStore } from "./platformAccounts.ts";
 import type { PlatformAccountsView, PlatformLink } from "../api/platform-accounts.ts";
 
@@ -152,4 +153,34 @@ test("platform accounts store: an accepted view containing the pending account's
   store.acceptView(platformView("parent-1", 3, 1, [platformLink("acc-1", "parent-1")]));
   assert.equal(store.pendingLink, null);
   assert.equal(store.linkForAccount("acc-1")?.platformAccountId, "parent-1");
+});
+
+test("platform accounts store: a committed create reports a destination refresh failure without losing either snapshot", async () => {
+  setActivePinia(createPinia());
+  useControlPlaneStore().sync({ revision: 7, processGeneration: 99, pricingRevision: null });
+  const calls = installDeferredFetch();
+  const destinations = useDestinationsStore();
+  destinations.commitSnapshot([], [], { expectedRevision: 7, processGeneration: 99 });
+  const store = usePlatformAccountsStore();
+
+  const pending = store.createOrUpdate({
+    kind: "new_api",
+    name: "New site",
+    baseUrl: "https://new.example.test",
+  }, null);
+  await waitForCalls(calls, 1);
+  calls[0]!.resolve(listBody("parent-new", 8, 99));
+  await waitForCalls(calls, 3);
+  calls[1]!.reject(new Error("destination refresh failed"));
+  calls[2]!.resolve({
+    credentials: [],
+    revision: { revision: 8, processGeneration: 99 },
+  });
+
+  assert.equal(await pending, "saved_refresh_failed");
+  assert.equal(store.parents[0]?.id, "parent-new", "the committed platform view is retained");
+  assert.equal(store.destinationRefreshError, "destination refresh failed");
+  assert.equal(destinations.loaded, true, "the prior destination snapshot stays rendered");
+  assert.deepEqual(destinations.destinations, []);
+  assert.deepEqual(destinations.credentials, []);
 });

@@ -12,6 +12,7 @@ const account = {
 
 const contracts = {
   revision: 1,
+  process_generation: 1,
   providers: [{
     scope_kind: "provider",
     scope_id: "provider-1",
@@ -98,7 +99,12 @@ const expectedDynamicModels = [
 ] as const;
 
 test("dynamic catalog aliases fill the test list only when no exact contract scope exists", () => {
-  const emptyContracts = { revision: 1, providers: [], custom_endpoints: [] } satisfies ProviderContractsResponse;
+  const emptyContracts = {
+    revision: 1,
+    process_generation: 1,
+    providers: [],
+    custom_endpoints: [],
+  } satisfies ProviderContractsResponse;
   const catalog = [dynamicCatalog()];
   assert.deepEqual(accountTestModels(dynamicAccount, emptyContracts, catalog), expectedDynamicModels);
   assert.deepEqual(

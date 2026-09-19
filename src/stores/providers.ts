@@ -30,6 +30,54 @@ export const useProvidersStore = defineStore("providers", () => {
   let catalogGeneration = 0;
   let contractsGeneration = 0;
   let connectionsGeneration = 0;
+  let sessionGeneration = 0;
+
+  interface ContractsMutationToken {
+    session: number;
+    invalidatedLoad: number;
+  }
+
+  function beginContractsMutation(): ContractsMutationToken {
+    return {
+      session: sessionGeneration,
+      invalidatedLoad: ++contractsGeneration,
+    };
+  }
+
+  function mutationSessionIsCurrent(token: ContractsMutationToken): boolean {
+    return token.session === sessionGeneration;
+  }
+
+  function commitContractsMutation(
+    token: ContractsMutationToken,
+    result: ProviderContractsResponse,
+  ): void {
+    if (!mutationSessionIsCurrent(token)) return;
+    // Settings revisions restart from a fresh random epoch with the backend.
+    // Reject regression only when both snapshots came from that same process.
+    if (
+      contracts.value
+      && result.process_generation === contracts.value.process_generation
+      && result.revision < contracts.value.revision
+    ) return;
+    // A load may have started after this mutation. Its snapshot can predate
+    // the committed mutation, so invalidate it before installing the receipt.
+    contractsGeneration += 1;
+    contracts.value = result;
+    loading.value = false;
+    error.value = "";
+  }
+
+  function failContractsMutation(token: ContractsMutationToken): void {
+    if (!mutationSessionIsCurrent(token)) return;
+    // Release only the load invalidated by this mutation. A newer load still
+    // owns the loading flag and will clear it in its own finally block.
+    if (contractsGeneration === token.invalidatedLoad) loading.value = false;
+  }
+
+  function shouldRecoverContractsConflict(token: ContractsMutationToken): boolean {
+    return mutationSessionIsCurrent(token) && contractsGeneration === token.invalidatedLoad;
+  }
 
   async function loadCatalog(): Promise<ProviderCatalogEntry[]> {
     const generation = ++catalogGeneration;
@@ -70,12 +118,15 @@ export const useProvidersStore = defineStore("providers", () => {
     scopeKind: ContractScopeKind,
     scopeId: string,
   ): Promise<ProviderContractsResponse> {
-    const result = await providerApi.refreshContractCatalog(scopeKind, scopeId);
-    contractsGeneration += 1;
-    contracts.value = result;
-    // Release the flag of any superseded in-flight `loadContracts`.
-    loading.value = false;
-    return result;
+    const token = beginContractsMutation();
+    try {
+      const result = await providerApi.refreshContractCatalog(scopeKind, scopeId);
+      commitContractsMutation(token, result);
+      return result;
+    } catch (cause) {
+      failContractsMutation(token);
+      throw cause;
+    }
   }
 
   async function removeContractCatalogModels(
@@ -83,14 +134,16 @@ export const useProvidersStore = defineStore("providers", () => {
     scopeId: string,
     modelIds: string[],
   ): Promise<ProviderContractsResponse> {
+    const token = beginContractsMutation();
     try {
       const result = await providerApi.removeContractCatalogModels(scopeKind, scopeId, modelIds);
-      contractsGeneration += 1;
-      contracts.value = result;
-      loading.value = false;
+      commitContractsMutation(token, result);
       return result;
     } catch (cause) {
-      if (isRevisionConflict(cause)) await loadContracts();
+      failContractsMutation(token);
+      if (isRevisionConflict(cause) && shouldRecoverContractsConflict(token)) {
+        await loadContracts();
+      }
       throw cause;
     }
   }
@@ -100,14 +153,16 @@ export const useProvidersStore = defineStore("providers", () => {
     scopeId: string,
     overrides: ModelProtocolOverrideUpdate[],
   ): Promise<ProviderContractsResponse> {
+    const token = beginContractsMutation();
     try {
       const result = await providerApi.updateModelProtocolOverrides(scopeKind, scopeId, overrides);
-      contractsGeneration += 1;
-      contracts.value = result;
-      loading.value = false;
+      commitContractsMutation(token, result);
       return result;
     } catch (cause) {
-      if (isRevisionConflict(cause)) await loadContracts();
+      failContractsMutation(token);
+      if (isRevisionConflict(cause) && shouldRecoverContractsConflict(token)) {
+        await loadContracts();
+      }
       throw cause;
     }
   }
@@ -119,6 +174,19 @@ export const useProvidersStore = defineStore("providers", () => {
     contractsGeneration += 1;
     contracts.value = applyModelContractToResponse(contracts.value, scope, contract);
     loading.value = false;
+  }
+
+  /** Drop cached catalog/contracts/connections on 401 / logout. */
+  function clear(): void {
+    sessionGeneration += 1;
+    catalogGeneration += 1;
+    contractsGeneration += 1;
+    connectionsGeneration += 1;
+    catalog.value = null;
+    contracts.value = null;
+    connections.value = null;
+    loading.value = false;
+    error.value = "";
   }
 
   return {
@@ -134,5 +202,6 @@ export const useProvidersStore = defineStore("providers", () => {
     removeContractCatalogModels,
     putModelProtocolOverrides,
     applyModelContract,
+    clear,
   };
 });

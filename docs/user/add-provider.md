@@ -28,7 +28,7 @@ Edit replaces the whole Provider configuration through `PATCH /dashboard/api/v4/
 
 Provider-owned fields stay on **Providers**. Account **Key**, enablement, order, notes, cooldown, and tests stay on **Accounts**. User-defined Providers are always unpriced: no official usage, quota estimate, or pricing rows. Request logs still attribute provider, account, and model.
 
-Node backups export payload V7 with destinations, credentials, and `providerId` for every saved user-defined Provider definition; imports accept V4 through V7 bundles. The current SQLite schema (v57) stores user-defined / preset HTTP Providers on destinations (`legacy_kind=dynamic`) and `destination_models`. Sealed builtins stay compiled-in.
+Node backups export payload V7 with destinations and credentials; user-defined Providers travel as destination extras. Imports accept V4 through V7 bundles. The current SQLite schema (v57) stores user-defined / preset HTTP Providers on destinations (`legacy_kind=dynamic`) and `destination_models`. Sealed builtins stay compiled-in.
 
 ## Connect a compatible upstream now
 

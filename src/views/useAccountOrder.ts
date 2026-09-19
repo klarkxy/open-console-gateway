@@ -40,7 +40,9 @@ function resolveGroupId(
 ): string | undefined {
   if (!targetId) return undefined;
   if (groups.some((group) => group.id === targetId)) return targetId;
-  return groups.find((group) => group.accounts.some((account) => account.id === targetId))?.id;
+  return groups.find((group) => group.credentials.some((credential) => (
+    credential.id === targetId || credential.legacy_account_id === targetId
+  )))?.id;
 }
 
 /**
@@ -76,7 +78,7 @@ export function useAccountOrder(options: {
   }
 
   function sortableLength(): number {
-    return currentGroups().filter((group) => group.accounts.length >= 1).length;
+    return currentGroups().filter((group) => group.credentials.length >= 1).length;
   }
 
   function clearAccountDrag(state: AccountDragState): void {
@@ -99,7 +101,7 @@ export function useAccountOrder(options: {
       const items = currentGroups();
       const moved = items.find((item) => item.id === movedItemId);
       const position = items.findIndex((item) => item.id === movedItemId) + 1;
-      const name = moved?.destination.name || moved?.accounts[0]?.name;
+      const name = moved?.destination.name || moved?.credentials[0]?.name;
       if (name && position > 0) {
         orderAnnouncement.value = t("账号 {name} 已移至第 {position} 位", {
           name,
@@ -170,9 +172,9 @@ export function useAccountOrder(options: {
     const toIndex = state.items.findIndex((item) => item.id === targetId);
     if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) return;
     const targetItem = state.items[toIndex];
-    if ((targetItem?.accounts.length ?? 0) === 0) return;
+    if ((targetItem?.credentials.length ?? 0) === 0) return;
     const sourceItem = state.items[fromIndex];
-    if ((sourceItem?.accounts.length ?? 0) === 0) return;
+    if ((sourceItem?.credentials.length ?? 0) === 0) return;
     state.items = moveItem(state.items, fromIndex, toIndex);
     applyGroups(state.items, state.previous);
     state.moved = true;
@@ -205,8 +207,8 @@ export function useAccountOrder(options: {
     if (fromIndex < 0 || toIndex < 0 || toIndex >= items.length) return;
     const source = items[fromIndex];
     const target = items[toIndex];
-    if ((source?.accounts.length ?? 0) === 0) return;
-    if ((target?.accounts.length ?? 0) === 0) return;
+    if ((source?.credentials.length ?? 0) === 0) return;
+    if ((target?.credentials.length ?? 0) === 0) return;
     const previous = [...accounts.value];
     applyGroups(moveItem(items, fromIndex, toIndex), previous);
     await persistAccountOrder(previous, accountId);

@@ -172,6 +172,7 @@ function customEndpoint(overrides: Partial<CustomEndpointContract> = {}): Custom
 function contracts(overrides: Partial<ProviderContractsResponse> = {}): ProviderContractsResponse {
   return {
     revision: 11,
+    process_generation: 1,
     providers: [providerGroup()],
     custom_endpoints: [customEndpoint()],
     ...overrides,

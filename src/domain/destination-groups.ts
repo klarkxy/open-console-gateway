@@ -3,22 +3,34 @@ import type { Destination, DestinationCredential } from "../api/destinations.ts"
 
 export interface DestinationGroup {
   destination: Destination;
-  /** V3 accounts for this destination's credentials, in routing_rank order. */
-  accounts: Account[];
+  /** Destination credentials in routing_rank order. Membership is credential-only. */
+  credentials: DestinationCredential[];
   /** Stable list key; equals the destination id. */
   id: string;
 }
 
+/** Drag / V3 reorder key. Prefer the legacy account id when the overlay exists. */
+export function groupRowOrderId(credential: DestinationCredential): string {
+  return credential.legacy_account_id || credential.id;
+}
+
+export function overlayAccountForCredential(
+  credential: DestinationCredential,
+  accountsById: ReadonlyMap<string, Account>,
+): Account | undefined {
+  return accountsById.get(credential.legacy_account_id);
+}
+
 /**
- * Group V3 accounts by their destination projection. Membership comes from
- * credentials; missing V3 rows are skipped so the account store stays the
- * source of truth for cards. Populated groups sort by the minimum
- * `routing_rank`; empty destinations append in list order.
+ * Group credentials by destination. Membership comes from the destination
+ * projection; a missing V3 Account overlay does not drop the row. Usage and
+ * platform overlays attach later by credential or destination id.
+ * Populated groups sort by the minimum `routing_rank`; empty destinations
+ * append in list order.
  */
 export function buildDestinationGroups(
   destinations: readonly Destination[],
   credentials: readonly DestinationCredential[],
-  accountsById: ReadonlyMap<string, Account>,
 ): DestinationGroup[] {
   const credentialsByDestination = new Map<string, DestinationCredential[]>();
   for (const credential of credentials) {
@@ -35,18 +47,17 @@ export function buildDestinationGroups(
       .sort((left, right) => (
         left.routing_rank - right.routing_rank || left.id.localeCompare(right.id)
       ));
-    const accounts: Account[] = [];
     const seen = new Set<string>();
+    const unique: DestinationCredential[] = [];
     let minRank = Number.POSITIVE_INFINITY;
     for (const credential of rows) {
-      const account = accountsById.get(credential.legacy_account_id);
-      if (!account || seen.has(account.id)) continue;
-      seen.add(account.id);
-      accounts.push(account);
+      if (seen.has(credential.id)) continue;
+      seen.add(credential.id);
+      unique.push(credential);
       if (credential.routing_rank < minRank) minRank = credential.routing_rank;
     }
-    const group: DestinationGroup = { destination, accounts, id: destination.id };
-    if (accounts.length === 0) empty.push(group);
+    const group: DestinationGroup = { destination, credentials: unique, id: destination.id };
+    if (unique.length === 0) empty.push(group);
     else populated.push({ group, minRank, index });
   });
 
@@ -55,12 +66,13 @@ export function buildDestinationGroups(
 }
 
 export function expandGroupOrder(groups: readonly DestinationGroup[]): string[] {
-  return groups.flatMap((group) => group.accounts.map((account) => account.id));
+  return groups.flatMap((group) => group.credentials.map(groupRowOrderId));
 }
 
 /**
  * Keep destination groups that still have at least one visible credential row.
- * Input groups are not mutated; each kept group gets a new `accounts` array.
+ * Input groups are not mutated; each kept group gets a new `credentials` array.
+ * `visibleIds` may contain credential ids or legacy account ids.
  */
 export function filterGroupRows(
   groups: readonly DestinationGroup[],
@@ -68,14 +80,29 @@ export function filterGroupRows(
 ): DestinationGroup[] {
   const result: DestinationGroup[] = [];
   for (const group of groups) {
-    const accounts = group.accounts.filter((account) => visibleIds.has(account.id));
-    if (accounts.length === 0) continue;
-    result.push({ ...group, accounts });
+    const credentials = group.credentials.filter((credential) => (
+      visibleIds.has(credential.id) || visibleIds.has(credential.legacy_account_id)
+    ));
+    if (credentials.length === 0) continue;
+    result.push({ ...group, credentials });
   }
   return result;
 }
 
-/** Reorder accounts inside one destination group; other accounts keep their places. */
+/**
+ * A credential is listed unless its V3 overlay exists and was filtered out.
+ * Missing overlays never hide the row.
+ */
+export function includeCredentialRow(
+  credential: DestinationCredential,
+  visibleAccountIds: ReadonlySet<string>,
+  knownAccountIds: ReadonlySet<string>,
+): boolean {
+  if (!knownAccountIds.has(credential.legacy_account_id)) return true;
+  return visibleAccountIds.has(credential.legacy_account_id);
+}
+
+/** Reorder credentials inside one destination group; other rows keep their places. */
 export function moveWithinGroup(
   accountIds: readonly string[],
   groupAccountIds: readonly string[],
@@ -102,40 +129,51 @@ export function moveWithinGroup(
 
 /**
  * One credential destination (singleton / account-owned) or any non-platform
- * destination that currently has exactly one account. Platform parents stay
+ * destination that currently has exactly one credential. Platform parents stay
  * grouped even when they have a single Key.
  */
 export function isSingleAccountGroup(group: DestinationGroup): boolean {
-  if (group.accounts.length !== 1) return false;
+  if (group.credentials.length !== 1) return false;
   return group.destination.max_credentials === 1
     || group.destination.legacy.kind !== "platform_parent";
 }
 
+function rowAlignRank(
+  credential: DestinationCredential,
+  index: ReadonlyMap<string, number>,
+): number {
+  return index.get(credential.legacy_account_id)
+    ?? index.get(credential.id)
+    ?? Number.POSITIVE_INFINITY;
+}
+
 /**
- * Reorder groups and their accounts to the live V3 list so drag previews
+ * Reorder groups and their credentials to the live V3 list so drag previews
  * follow `accounts` immediately while credential ranks catch up on reload.
+ * Alignment keys are `legacy_account_id` or `credential.id`.
  */
 export function alignDestinationGroupsToAccountOrder(
   groups: readonly DestinationGroup[],
   accountIds: readonly string[],
 ): DestinationGroup[] {
   const index = new Map(accountIds.map((id, position) => [id, position]));
-  const rank = (id: string) => index.get(id) ?? Number.POSITIVE_INFINITY;
   const populated: DestinationGroup[] = [];
   const empty: DestinationGroup[] = [];
   for (const group of groups) {
-    if (group.accounts.length === 0) {
+    if (group.credentials.length === 0) {
       empty.push(group);
       continue;
     }
     populated.push({
       ...group,
-      accounts: [...group.accounts].sort((left, right) => rank(left.id) - rank(right.id)),
+      credentials: [...group.credentials].sort((left, right) => (
+        rowAlignRank(left, index) - rowAlignRank(right, index)
+      )),
     });
   }
   populated.sort((left, right) => {
-    const leftRank = Math.min(...left.accounts.map((account) => rank(account.id)));
-    const rightRank = Math.min(...right.accounts.map((account) => rank(account.id)));
+    const leftRank = Math.min(...left.credentials.map((credential) => rowAlignRank(credential, index)));
+    const rightRank = Math.min(...right.credentials.map((credential) => rowAlignRank(credential, index)));
     return leftRank - rightRank;
   });
   return [...populated, ...empty];

@@ -89,6 +89,30 @@ export const useDestinationsStore = defineStore("destinations", () => {
     return map;
   });
 
+  function applySnapshot(
+    nextDestinations: Destination[],
+    nextCredentials: DestinationCredential[],
+    nextExpectation: MutationExpectation,
+  ): void {
+    destinations.value = nextDestinations;
+    credentials.value = nextCredentials;
+    expectation.value = nextExpectation;
+    refusals.value = [];
+    loaded.value = true;
+    error.value = "";
+  }
+
+  /** Commit a fresh pair and invalidate in-flight loads, like an in-place mutation. */
+  function commitSnapshot(
+    nextDestinations: Destination[],
+    nextCredentials: DestinationCredential[],
+    nextExpectation: MutationExpectation,
+  ): void {
+    loadGeneration += 1;
+    loading.value = false;
+    applySnapshot(nextDestinations, nextCredentials, nextExpectation);
+  }
+
   async function load(): Promise<void> {
     const generation = ++loadGeneration;
     loading.value = true;
@@ -113,23 +137,29 @@ export const useDestinationsStore = defineStore("destinations", () => {
       if (!destinationSnapshot || !credentialSnapshot) {
         throw new Error("destination credential snapshot mismatch");
       }
-      destinations.value = destinationSnapshot.destinations;
-      credentials.value = credentialSnapshot.credentials;
-      expectation.value = destinationSnapshot.expectation;
-      refusals.value = [];
-      loaded.value = true;
-      error.value = "";
+      applySnapshot(
+        destinationSnapshot.destinations,
+        credentialSnapshot.credentials,
+        destinationSnapshot.expectation,
+      );
     } catch (e) {
       if (generation === loadGeneration) {
-        error.value = e instanceof Error ? e.message : String(e);
         if (isDestinationProjectionRefused(e)) {
+          error.value = e instanceof Error ? e.message : String(e);
           refusals.value = refusalsFromError(e);
+        } else if (!loaded.value) {
+          error.value = e instanceof Error ? e.message : String(e);
         }
       }
       throw e;
     } finally {
       if (generation === loadGeneration) loading.value = false;
     }
+  }
+
+  /** Generation-guarded reload after a mutation. Keeps the last snapshot on failure. */
+  async function refreshAfterMutation(): Promise<void> {
+    await load();
   }
 
   /** Drop the cached projection on 401 / logout so the next session reloads fresh. */
@@ -155,6 +185,8 @@ export const useDestinationsStore = defineStore("destinations", () => {
     byId: destinationsById,
     credentialsByLegacyAccountId,
     load,
+    refreshAfterMutation,
+    commitSnapshot,
     clear,
   };
 });

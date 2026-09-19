@@ -27,7 +27,7 @@
 
 供应商所有字段留在 **供应商** 页。账号 **Key**、启停、顺序、备注、冷却和测试留在 **账号** 页。用户定义供应商始终未定价：没有官方用量、额度估算或价格行。请求日志仍会归因供应商、账号和模型。
 
-节点备份以 payload V7 导出，携带目的地、凭据，以及每一份已保存用户定义供应商定义的 `providerId`；导入接受 V4 至 V7 负载。当前 SQLite schema（v57）将用户定义 / 预设 HTTP Provider 存在 destinations（`legacy_kind=dynamic`）与 `destination_models` 上。密封 builtin 仍编译在代码里。
+节点备份以 payload V7 导出，携带目的地与凭据；用户定义供应商作为目的地 extras。导入接受 V4 至 V7 负载。当前 SQLite schema（v57）将用户定义 / 预设 HTTP Provider 存在 destinations（`legacy_kind=dynamic`）与 `destination_models` 上。密封 builtin 仍编译在代码里。
 
 ## 立即接入兼容上游
 

@@ -95,20 +95,20 @@
         </div>
       </n-alert>
       <div
-        v-if="parent && group.accounts.length === 0 && pendingLink?.parentId !== parent.id"
+        v-if="parent && group.credentials.length === 0 && pendingLink?.parentId !== parent.id"
         class="destination-hint"
       >
         {{ t("尚无关联 Key。") }}
       </div>
-      <div v-if="group.accounts.length > 0" class="destination-rows">
-        <template v-for="(account, index) in group.accounts" :key="account.id">
+      <div v-if="group.credentials.length > 0" class="destination-rows">
+        <template v-for="(credential, index) in group.credentials" :key="credential.id">
           <slot
             name="row"
-            :account="account"
+            :credential="credential"
             :index="index"
-            :extra-tags="extraTagsFor(account)"
-            :figure="figureFor(account)"
-            :duplicate-name="duplicateNames.has(account.name.trim())"
+            :extra-tags="extraTagsFor(credential)"
+            :figure="figureFor(credential)"
+            :duplicate-name="duplicateNames.has(credential.name.trim())"
           />
         </template>
       </div>
@@ -127,6 +127,7 @@ import {
 } from "naive-ui";
 import { MoreOutlined, PlusOutlined, ReloadOutlined } from "@vicons/antd";
 import type { Account } from "../api/dashboard.ts";
+import type { DestinationCredential } from "../api/destinations.ts";
 import type { ProviderCatalogEntry } from "../api/providers.ts";
 import type {
   PlatformAccount,
@@ -135,7 +136,10 @@ import type {
 } from "../api/platform-accounts.ts";
 import { destinationBrandFamily, platformBrandFamily } from "../domain/account-brand.ts";
 import { destinationTypeLabel } from "../domain/account-display.ts";
-import type { DestinationGroup } from "../domain/destination-groups.ts";
+import {
+  overlayAccountForCredential,
+  type DestinationGroup,
+} from "../domain/destination-groups.ts";
 import {
   PLATFORM_KIND_LABELS,
   formatQuotaAmount,
@@ -154,6 +158,7 @@ import PlatformPriceTable from "./PlatformPriceTable.vue";
 const props = defineProps<{
   group: DestinationGroup;
   parent: PlatformAccount | null;
+  accountsById: ReadonlyMap<string, Account>;
   catalog: readonly ProviderCatalogEntry[] | null;
   links: PlatformLink[];
   mutating: boolean;
@@ -179,7 +184,12 @@ const emit = defineEmits<{
   "fetch-all-models": [];
 }>();
 
-const firstAccount = computed(() => props.group.accounts[0] ?? null);
+const overlayAccounts = computed(() => (
+  props.group.credentials
+    .map((credential) => overlayAccountForCredential(credential, props.accountsById))
+    .filter((account): account is Account => Boolean(account))
+));
+const firstAccount = computed(() => overlayAccounts.value[0] ?? null);
 const family = computed(() => {
   if (props.parent) return platformBrandFamily(props.parent.kind);
   return destinationBrandFamily(
@@ -195,11 +205,11 @@ const typeLabel = computed(() => {
 const refreshingParent = computed(() => (
   props.parent ? Boolean(props.refreshing[props.parent.id]) : false
 ));
-const overlay = computed(() => platformModelOverlay(props.group.accounts));
+const overlay = computed(() => platformModelOverlay(overlayAccounts.value));
 const duplicateNames = computed(() => {
   const counts = new Map<string, number>();
-  for (const account of props.group.accounts) {
-    const name = account.name.trim();
+  for (const credential of props.group.credentials) {
+    const name = credential.name.trim();
     if (!name) continue;
     counts.set(name, (counts.get(name) ?? 0) + 1);
   }
@@ -209,7 +219,7 @@ const duplicateNames = computed(() => {
 const parentMenuOptions = computed(() => {
   if (!props.parent) return [];
   return [
-    { label: t("获取全部模型"), key: "fetch-all-models", disabled: props.mutating || props.group.accounts.length === 0 },
+    { label: t("获取全部模型"), key: "fetch-all-models", disabled: props.mutating || props.group.credentials.length === 0 },
     ...(props.parent.kind === "new_api"
       ? [{
           label: props.parent.hasUserCredential ? t("从站点导入 Key") : t("填写用户 ID 和系统访问令牌后可导入"),
@@ -220,11 +230,11 @@ const parentMenuOptions = computed(() => {
     { label: t("关联已有 Key"), key: "link-existing", disabled: props.mutating },
     { label: t("编辑"), key: "edit", disabled: props.mutating },
     {
-      label: props.group.accounts.length > 0
-        ? t("已关联 {count} 个 Key，先取消关联后再删除", { count: props.group.accounts.length })
+      label: props.group.credentials.length > 0
+        ? t("已关联 {count} 个 Key，先取消关联后再删除", { count: props.group.credentials.length })
         : t("删除"),
       key: "delete",
-      disabled: props.mutating || props.group.accounts.length > 0,
+      disabled: props.mutating || props.group.credentials.length > 0,
     },
   ];
 });
@@ -237,26 +247,36 @@ function handleParentMenuSelect(key: string | number) {
   else if (key === "delete") emit("delete");
 }
 
-function keySummary(accountId: string) {
+function overlayId(credential: DestinationCredential): string {
+  return credential.legacy_account_id || credential.id;
+}
+
+function keySummary(credential: DestinationCredential) {
+  const accountId = overlayId(credential);
   return overlay.value.keys.find((row) => row.accountId === accountId);
 }
 
-function keyGroup(accountId: string): string {
-  const link = linkOf(accountId);
+function keyGroup(credential: DestinationCredential): string {
+  const link = linkOf(credential);
   return platformKeyGroupLabel(link, link?.snapshot);
 }
 
-function keyTokenName(accountId: string): string {
-  return platformKeyQuotaName(linkOf(accountId)?.snapshot) ?? "";
+function keyTokenName(credential: DestinationCredential): string {
+  return platformKeyQuotaName(linkOf(credential)?.snapshot) ?? "";
 }
 
-function showsTokenName(account: Account): boolean {
-  const tokenName = keyTokenName(account.id);
-  return tokenName !== "" && tokenName !== account.name.trim();
+function showsTokenName(credential: DestinationCredential): boolean {
+  const tokenName = keyTokenName(credential);
+  const overlayAccount = overlayAccountForCredential(credential, props.accountsById);
+  const name = overlayAccount?.name.trim() || credential.name.trim();
+  return tokenName !== "" && tokenName !== name;
 }
 
-function linkOf(accountId: string): PlatformLink | undefined {
-  return props.links.find((link) => link.accountId === accountId);
+function linkOf(credential: DestinationCredential): PlatformLink | undefined {
+  const accountId = overlayId(credential);
+  return props.links.find((link) => (
+    link.accountId === accountId || link.accountId === credential.id
+  ));
 }
 
 function remainingText(kind: PlatformQuotaKind): string {
@@ -276,21 +296,22 @@ const parentUsedText = computed(() => {
   return t("已用 {value}", { value: formatQuotaAmount(quota.used, quota.unit, locale.value) });
 });
 
-function extraTagsFor(account: Account): string[] {
+function extraTagsFor(credential: DestinationCredential): string[] {
   if (!props.parent) return [];
   const tags: string[] = [];
-  const group = keyGroup(account.id);
+  const group = keyGroup(credential);
   if (group) tags.push(group);
-  if (showsTokenName(account)) tags.push(keyTokenName(account.id));
+  if (showsTokenName(credential)) tags.push(keyTokenName(credential));
+  const overlayAccount = overlayAccountForCredential(credential, props.accountsById);
   tags.push(t("{count} 个模型", {
-    count: keySummary(account.id)?.total ?? account.model_capabilities.length,
+    count: keySummary(credential)?.total ?? overlayAccount?.model_capabilities.length ?? 0,
   }));
   return tags;
 }
 
-function figureFor(account: Account): CredentialFigure | null {
+function figureFor(credential: DestinationCredential): CredentialFigure | null {
   if (!props.parent) return null;
-  const quota = primaryQuota(linkOf(account.id)?.snapshot?.quotas ?? [], "key_limit");
+  const quota = primaryQuota(linkOf(credential)?.snapshot?.quotas ?? [], "key_limit");
   if (!quota || quota.unlimited || quota.remaining === null) return null;
   return { value: formatQuotaAmount(quota.remaining, quota.unit, locale.value) };
 }

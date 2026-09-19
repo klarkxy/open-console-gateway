@@ -90,6 +90,26 @@
       </n-alert>
 
       <n-alert
+        v-if="destinationLoadFailed"
+        type="error"
+        :title="t(DESTINATION_LOAD_KEYS.load_failed, { error: destinationsStore.error })"
+      >
+        <n-button size="small" secondary :loading="destinationsStore.loading" @click="retryDestinations">
+          {{ t("重试") }}
+        </n-button>
+      </n-alert>
+
+      <n-alert
+        v-if="destRefreshError"
+        type="error"
+        :title="t(DESTINATION_PROJECTION_REFRESH_KEYS[destRefreshError], { error: destRefreshErrorDetail })"
+      >
+        <n-button size="small" secondary :loading="destinationsStore.loading" @click="retryDestinations">
+          {{ t("重试") }}
+        </n-button>
+      </n-alert>
+
+      <n-alert
         v-if="destinationsStore.refusals.length > 0"
         type="error"
         :title="t('目的地投影失败：{count} 行无法映射', { count: destinationsStore.refusals.length })"
@@ -110,6 +130,7 @@
         ref="platformSectionRef"
         :accounts="accounts"
         @changed="loadAccounts"
+        @destination-refresh-failed="handlePlatformDestinationRefreshFailure"
         @account-updated="replaceAccount"
       />
 
@@ -135,6 +156,7 @@
           <DestinationCard
             :group="view.displayGroup"
             :parent="view.parent"
+            :accounts-by-id="accountsStore.byId"
             :catalog="providerCatalog"
             :links="view.parent ? platformStore.linksFor(view.parent.id) : []"
             :mutating="platformMutating || busy"
@@ -142,7 +164,7 @@
             :refreshing="platformRefreshing"
             :pending-link="platformPendingLink"
             :now="now"
-            :order-handle-disabled="orderSaving || busy || sortableRouteCount < 2 || view.group.accounts.length === 0"
+            :order-handle-disabled="orderSaving || busy || sortableRouteCount < 2 || view.group.credentials.length === 0"
             :order-handle-hint="view.parent ? t('添加 Key 后可拖动此账号调整路由顺序') : ''"
             :dragging="draggingAccountId === view.group.id"
             @order-keydown="handleOrderKeydown($event, view.group.id)"
@@ -154,30 +176,30 @@
             @import-keys="view.parent && platformSectionRef?.importKeys(view.parent)"
             @link-existing="view.parent && platformSectionRef?.openLink(view.parent)"
             @retry-pending-link="platformSectionRef?.retryPendingLink()"
-            @fetch-all-models="fetchAllPlatformModels(view.group.accounts)"
+            @fetch-all-models="fetchAllPlatformModels(overlayAccountsFor(view.group))"
           >
-            <template #row="{ account, index, extraTags, figure, duplicateName }">
+            <template #row="{ credential, index, extraTags, figure, duplicateName }">
               <CredentialRow
-                v-bind="credentialRowBindings(account)"
+                v-bind="credentialRowBindings(credential, view.displayGroup.destination)"
                 :extra-tags="extraTags"
                 :figure="figure"
                 :duplicate-name="duplicateName"
-                :menu-options="rowMenuOptions(view.group, account, index)"
+                :menu-options="rowMenuOptions(view.group, credential, index)"
                 :show-refresh="view.parent ? true : undefined"
-                :refreshing="view.parent ? !!platformRefreshing[`${view.parent.id}:${account.id}`] : undefined"
-                :usage-loading="!!usageLoading[account.id] || (!!view.parent && (platformMutating || busy))"
-                @toggle="toggleAccount(account.id)"
-                @test-connection="openAccountTest(account.id)"
-                @refresh-usage="view.parent ? refreshPlatformChild(view.parent, account.id) : refreshAccountUsage(account.id)"
-                @update-purchase-date="updatePurchaseDate(account.id, $event)"
-                @reload-usage="loadAccountUsage(account.id)"
-                @open-wizard="openManagedWizard(account.id)"
-                @menu-select="handleMenuSelect($event, account.id)"
-                @usage-editor-open="focusUsageEditor(account.id)"
-                @usage-update-draft="(key, value) => updateUsageDraft(account.id, key, value)"
-                @usage-update-resets-first="(key, value) => updateResetsFirstField(account.id, key, value)"
-                @usage-update-resets-second="(key, value) => updateResetsSecondField(account.id, key, value)"
-                @usage-save="(key) => saveUsage(account.id, key)"
+                :refreshing="view.parent ? !!platformRefreshing[`${view.parent.id}:${credential.legacy_account_id}`] : undefined"
+                :usage-loading="!!usageLoading[credential.legacy_account_id] || (!!view.parent && (platformMutating || busy))"
+                @toggle="toggleAccount(credential.legacy_account_id)"
+                @test-connection="openAccountTest(credential.legacy_account_id)"
+                @refresh-usage="view.parent ? refreshPlatformChild(view.parent, credential.legacy_account_id) : refreshAccountUsage(credential.legacy_account_id)"
+                @update-purchase-date="updatePurchaseDate(credential.legacy_account_id, $event)"
+                @reload-usage="loadAccountUsage(credential.legacy_account_id)"
+                @open-wizard="openManagedWizard(credential.legacy_account_id)"
+                @menu-select="handleMenuSelect($event, credential.legacy_account_id)"
+                @usage-editor-open="focusUsageEditor(credential.legacy_account_id)"
+                @usage-update-draft="(key, value) => updateUsageDraft(credential.legacy_account_id, key, value)"
+                @usage-update-resets-first="(key, value) => updateResetsFirstField(credential.legacy_account_id, key, value)"
+                @usage-update-resets-second="(key, value) => updateResetsSecondField(credential.legacy_account_id, key, value)"
+                @usage-save="(key) => saveUsage(credential.legacy_account_id, key)"
               />
             </template>
           </DestinationCard>
@@ -388,13 +410,23 @@ import type { BindingPatchInput, IdentityCredentialCreateInput } from "../api/id
 import { accountCapabilities, isManagedOnboardingAccount } from "../domain/account-capabilities.ts";
 import { DEFAULT_PROVIDER_ID } from "../domain/destination-providers.ts";
 import { executeCustomAccountEdit } from "../domain/custom-account.ts";
+import type { Destination, DestinationCredential } from "../api/destinations.ts";
 import {
   alignDestinationGroupsToAccountOrder,
   buildDestinationGroups,
+  includeCredentialRow,
   isSingleAccountGroup,
   moveWithinGroup,
+  overlayAccountForCredential,
   type DestinationGroup,
 } from "../domain/destination-groups.ts";
+import {
+  DESTINATION_LOAD_KEYS,
+  DESTINATION_PROJECTION_REFRESH_KEYS,
+  destinationFirstLoadFailed,
+  refreshDestinationProjection as loadDestinationProjection,
+  type DestinationProjectionRefreshCode,
+} from "../domain/destination-projection-refresh.ts";
 import { linkForAccount } from "../domain/platform-accounts.ts";
 import type { PlatformAccount } from "../api/platform-accounts.ts";
 import { useAccountUsage } from "../domain/useAccountUsage.ts";
@@ -466,6 +498,13 @@ const accountListLoading = computed(() => {
     && destinationsStore.refusals.length === 0
     && !destinationsStore.error;
 });
+const destRefreshError = ref<DestinationProjectionRefreshCode | null>(null);
+const destRefreshErrorDetail = ref("");
+const destinationLoadFailed = computed(() => destinationFirstLoadFailed(
+  destinationsStore.loaded,
+  destinationsStore.error,
+  destinationsStore.refusals.length,
+));
 const identitiesError = ref("");
 const identitiesLoading = computed(() => identitiesStore.loading);
 const testingAccountId = ref<string | null>(null);
@@ -561,10 +600,10 @@ const allGroups = computed(() => alignDestinationGroupsToAccountOrder(
   buildDestinationGroups(
     destinationsStore.destinations,
     destinationsStore.credentials,
-    accountsStore.byId,
   ),
   accounts.value.map((account) => account.id),
 ));
+const knownAccountIds = computed(() => new Set(accountsStore.byId.keys()));
 
 const {
   orderSaving,
@@ -631,14 +670,22 @@ const visibleAccountIds = computed(() => new Set(
 
 const displayedGroups = computed(() => {
   const visibleIds = visibleAccountIds.value;
+  const knownIds = knownAccountIds.value;
   return allGroups.value.filter((group) => {
     if (group.destination.legacy.kind === "platform_parent") {
-      if (group.accounts.length === 0) return planFilter.value === "all" && statusFilter.value === "all";
+      if (group.credentials.length === 0) return planFilter.value === "all" && statusFilter.value === "all";
       if (planFilter.value !== "all" && planFilter.value !== "custom") return false;
-      return group.accounts.some((key) => visibleIds.has(key.id));
+      return group.credentials.some((credential) => (
+        includeCredentialRow(credential, visibleIds, knownIds)
+      ));
     }
-    if (isSingleAccountGroup(group)) return visibleIds.has(group.accounts[0]?.id ?? "");
-    return group.accounts.some((account) => visibleIds.has(account.id));
+    if (isSingleAccountGroup(group)) {
+      const credential = group.credentials[0];
+      return credential ? includeCredentialRow(credential, visibleIds, knownIds) : false;
+    }
+    return group.credentials.some((credential) => (
+      includeCredentialRow(credential, visibleIds, knownIds)
+    ));
   });
 });
 
@@ -652,10 +699,12 @@ const displayedGroupViews = computed((): DisplayedGroupView[] => {
   const views: DisplayedGroupView[] = [];
   const visibleIds = visibleAccountIds.value;
   for (const group of displayedGroups.value) {
-    const cards = group.accounts.filter((account) => visibleIds.has(account.id));
-    const displayGroup = cards.length === group.accounts.length
+    const cards = group.credentials.filter((credential) => (
+      includeCredentialRow(credential, visibleIds, knownAccountIds.value)
+    ));
+    const displayGroup = cards.length === group.credentials.length
       ? group
-      : { ...group, accounts: cards };
+      : { ...group, credentials: cards };
     if (group.destination.legacy.kind === "platform_parent") {
       const parent = platformStore.parents.find((row) => row.id === group.destination.legacy.id) ?? null;
       if (!parent) continue;
@@ -668,7 +717,7 @@ const displayedGroupViews = computed((): DisplayedGroupView[] => {
 });
 
 const sortableRouteCount = computed(() => (
-  displayedGroups.value.filter((group) => group.accounts.length >= 1).length
+  displayedGroups.value.filter((group) => group.credentials.length >= 1).length
 ));
 
 const platformRefreshing = computed(() => platformStore.refreshing);
@@ -774,20 +823,30 @@ function cardMenuOptions(account: Account) {
   return [...base.slice(0, editAt + 1), ...extra, ...base.slice(editAt + 1)];
 }
 
-function credentialRowBindings(account: Account) {
+function overlayAccountsFor(group: DestinationGroup): Account[] {
+  return group.credentials
+    .map((credential) => overlayAccountForCredential(credential, accountsStore.byId))
+    .filter((account): account is Account => Boolean(account));
+}
+
+function credentialRowBindings(credential: DestinationCredential, destination: Destination) {
+  const account = overlayAccountForCredential(credential, accountsStore.byId) ?? null;
+  const overlayId = account?.id ?? credential.legacy_account_id;
   return {
+    credential,
+    destination,
     account,
-    identity: identityForCard(account.id),
+    identity: identityForCard(overlayId),
     catalog: providerCatalog.value,
-    usage: getUsage(account.id),
-    providerUsage: providerUsageMap.value[account.id] ?? null,
-    limits: usageLimitsFor(account),
-    edits: usageEdits.value[account.id],
+    usage: getUsage(overlayId),
+    providerUsage: providerUsageMap.value[overlayId] ?? null,
+    limits: account ? usageLimitsFor(account) : [],
+    edits: usageEdits.value[overlayId],
     now: now.value,
-    usageLoading: !!usageLoading.value[account.id],
-    usageLoadError: usageLoadErrors.value[account.id] ?? null,
-    usageRefreshLoading: !!usageRefreshLoading.value[account.id],
-    purchaseDateSaving: busy.value || !!purchaseDateSaving.value[account.id],
+    usageLoading: !!usageLoading.value[overlayId],
+    usageLoadError: usageLoadErrors.value[overlayId] ?? null,
+    usageRefreshLoading: !!usageRefreshLoading.value[overlayId],
+    purchaseDateSaving: busy.value || !!purchaseDateSaving.value[overlayId],
     quotaLimitsFailed: !!quotaLimitsError.value,
     accountNames: accountNamesById.value,
     connections: providersStore.connections,
@@ -796,22 +855,27 @@ function credentialRowBindings(account: Account) {
 
 function rowMenuOptions(
   group: DestinationGroup,
-  account: Account,
+  credential: DestinationCredential,
   index: number,
 ): AccountMenuOption[] {
-  const at = group.accounts.findIndex((row) => row.id === account.id);
+  const at = group.credentials.findIndex((row) => row.id === credential.id);
   const resolved = at >= 0 ? at : index;
-  const moves = groupMoveMenuOptions(account, resolved, group.accounts.length);
+  const overlay = overlayAccountForCredential(credential, accountsStore.byId);
+  const menuTarget = overlay ?? {
+    id: credential.legacy_account_id,
+    name: credential.name,
+  };
+  const moves = groupMoveMenuOptions(menuTarget, resolved, group.credentials.length);
   if (group.destination.legacy.kind === "platform_parent") {
     const blocked = platformMutating.value || busy.value;
     return [
-      { key: "fetch-models", accountId: account.id, accountName: account.name, disabled: blocked },
+      { key: "fetch-models", accountId: menuTarget.id, accountName: menuTarget.name, disabled: blocked },
       ...moves.map((option) => ({ ...option, disabled: blocked || Boolean(option.disabled) })),
-      { key: "edit-key", accountId: account.id, accountName: account.name, disabled: blocked },
-      { key: "unlink", accountId: account.id, accountName: account.name, disabled: blocked },
+      { key: "edit-key", accountId: menuTarget.id, accountName: menuTarget.name, disabled: blocked },
+      { key: "unlink", accountId: menuTarget.id, accountName: menuTarget.name, disabled: blocked },
     ];
   }
-  return [...cardMenuOptions(account), ...moves];
+  return overlay ? [...cardMenuOptions(overlay), ...moves] : moves;
 }
 
 function handleMenuSelect(key: string | number, accountId: string) {
@@ -1185,12 +1249,14 @@ async function loadIdentitiesOverlay(): Promise<void> {
 
 async function moveWithinDisplayedGroup(accountId: string, delta: number): Promise<void> {
   const group = allGroups.value.find((row) => (
-    row.accounts.some((account) => account.id === accountId)
+    row.credentials.some((credential) => (
+      credential.legacy_account_id === accountId || credential.id === accountId
+    ))
   ));
   if (!group) return;
   const next = moveWithinGroup(
     accounts.value.map((account) => account.id),
-    group.accounts.map((account) => account.id),
+    group.credentials.map((credential) => credential.legacy_account_id),
     accountId,
     delta,
   );
@@ -1198,15 +1264,44 @@ async function moveWithinDisplayedGroup(accountId: string, delta: number): Promi
 }
 
 async function retryDestinations(): Promise<void> {
-  await refreshDestinationProjection();
-}
-
-async function refreshDestinationProjection(): Promise<void> {
   try {
     await destinationsStore.load();
-  } catch {
-    // A projection refusal must not hide the account mutation result.
+    destRefreshError.value = null;
+    destRefreshErrorDetail.value = "";
+  } catch (error) {
+    if (destRefreshError.value) {
+      destRefreshErrorDetail.value = dashboardErrorDetail(error);
+      message.error(t(DESTINATION_PROJECTION_REFRESH_KEYS[destRefreshError.value], {
+        error: destRefreshErrorDetail.value,
+      }));
+    }
   }
+}
+
+async function refreshDestinationProjection(
+  failureCode: DestinationProjectionRefreshCode = "refresh_failed",
+): Promise<boolean> {
+  const result = await loadDestinationProjection(() => destinationsStore.refreshAfterMutation());
+  if (result.ok) {
+    destRefreshError.value = null;
+    destRefreshErrorDetail.value = "";
+    return true;
+  }
+  destRefreshError.value = failureCode;
+  destRefreshErrorDetail.value = dashboardErrorDetail(result.error);
+  return false;
+}
+
+function notifyDestinationRefreshFailure(): void {
+  if (!destRefreshError.value) return;
+  message.error(t(DESTINATION_PROJECTION_REFRESH_KEYS[destRefreshError.value], {
+    error: destRefreshErrorDetail.value,
+  }));
+}
+
+function handlePlatformDestinationRefreshFailure(error: string): void {
+  destRefreshError.value = "refresh_failed";
+  destRefreshErrorDetail.value = error;
 }
 
 function refreshPlatformChild(parent: PlatformAccount, accountId: string): void {
@@ -1359,12 +1454,13 @@ async function createManagedAccount(): Promise<void> {
       ...(username ? { username } : {}),
     });
     addAccount(created);
-    await refreshDestinationProjection();
+    message.success(t("注册草稿已创建"));
+    const destRefreshed = await refreshDestinationProjection("created_refresh_failed");
+    if (!destRefreshed) notifyDestinationRefreshFailure();
     void providersStore.loadConnections().catch(() => undefined);
     showManagedCreate.value = false;
     managedWizardAccountId.value = created.id;
     showManagedWizard.value = true;
-    message.success(t("注册草稿已创建"));
   } catch (error) {
     if (await recoverAccountMutationConflict(error)) return;
     message.error(t("创建注册草稿失败：{error}", { error: dashboardErrorDetail(error) }));
@@ -1641,6 +1737,8 @@ async function onFormSave(payload: AccountInput | AccountFormPayload) {
     try {
       const saved = await dashboardApi.updateAccount(editing.id, update);
       replaceAccount(saved);
+      const destRefreshed = await refreshDestinationProjection();
+      if (!destRefreshed) notifyDestinationRefreshFailure();
       // purchase_date defines the monthly usage window and changing it clears
       // the persisted calibration offset, so the local usage snapshot must be
       // refreshed before the edited account is shown again.
@@ -1659,9 +1757,10 @@ async function onFormSave(payload: AccountInput | AccountFormPayload) {
     try {
       const created = await dashboardApi.createAccount(input);
       addAccount(created);
-      await refreshDestinationProjection();
-      void providersStore.loadConnections().catch(() => undefined);
       message.success(t("账号已添加"));
+      const destRefreshed = await refreshDestinationProjection("created_refresh_failed");
+      if (!destRefreshed) notifyDestinationRefreshFailure();
+      void providersStore.loadConnections().catch(() => undefined);
       await refreshCatalogIfNewProvider(created);
       // Go uses official usage; GOAT and Ollama project locally priced OCG request logs.
       if (accountHasUsageDisplay(created) && accountIsReady(created)) {
@@ -1736,6 +1835,8 @@ async function saveCustomAccountEdit(
         replaceAccount(await dashboardApi.updateAccountCustomConfig(editing.id, config));
       },
     });
+    const destRefreshed = await refreshDestinationProjection();
+    if (!destRefreshed) notifyDestinationRefreshFailure();
 
     message.success(t("账号已更新"));
     showModal.value = false;
@@ -1858,7 +1959,8 @@ async function deleteAccount(id: string) {
     await dashboardApi.deleteAccount(id);
     message.success(t("账号已删除"));
     removeAccountState(id);
-    await refreshDestinationProjection();
+    const destRefreshed = await refreshDestinationProjection("deleted_refresh_failed");
+    if (!destRefreshed) notifyDestinationRefreshFailure();
     void providersStore.loadConnections().catch(() => undefined);
   } catch (e) {
     if (await recoverAccountMutationConflict(e)) return;

@@ -69,12 +69,13 @@ transfer it separately from the file; Open Console Gateway cannot recover it. Th
 operation remains available only from the node's loopback dashboard; forwarded
 scheme headers do not grant access to a remote dashboard.
 
-The current V7 payload moves destinations, credentials, usable ordinary accounts and their stable IDs,
-ready account Keys, Custom Endpoint/public-model → upstream-ID mappings and verification state,
-user-defined Providers (`providerId` only),
+The current V7 payload moves destinations and credentials as the authority
+(ready Keys, platform and CPA observer management credentials, and identity /
+grant / cooldown extras stay inside the encrypted envelope), Custom Endpoint/public-model → upstream-ID mappings and verification
+state encoded on those entities, user-defined Providers as destination extras,
 the primary and active sub Access Keys, portable routing/proxy settings, Zen
 Free enablement/catalog, Provider catalogs, evidence, and protocol
-overrides, and an explicit identity / credential / binding / quota-pool snapshot.
+overrides, plus quota-pool membership.
 Shared identities, a second credential on the same identity, binding model
 restrictions and enabled flags, and quota-pool membership and declared/unknown
 evidence are restored as stored. Matching stable IDs are merged with package-owned portable fields;
@@ -82,6 +83,8 @@ same-Plan or same-name rows with different IDs coexist and independent same-URL
 accounts are not merged. Existing destination
 accounts keep their current order and position; source-only accounts append in
 package order. Destination-only Access Keys and Provider scopes are retained.
+A merge that omits a CPA observer key keeps the destination's existing
+management key.
 
 Browser profiles/cookies, third-party login passwords, referral codes, logs,
 and usage history do not move. V7 carries source cooldown deadlines without

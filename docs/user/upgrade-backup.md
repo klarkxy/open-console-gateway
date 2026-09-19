@@ -39,8 +39,9 @@ dropped.
 
 ### Portable Node Backup Payloads
 
-Node backups export payload V7 with destinations, credentials, `providerId`,
-and the identity snapshot, including saved user-defined Provider definitions.
+Node backups export payload V7 with destinations and credentials as the
+authority (secrets and identity extras stay inside the encrypted envelope).
+User-defined Providers travel as destination extras.
 V4–V6 backups remain importable (V4/V5 keep their older host-local cooldown
 behavior). Payload V1–V3 backups, and V8 or newer, are rejected with an
 explicit unsupported-version error; that is not a wrong password or a damaged

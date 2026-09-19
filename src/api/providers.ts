@@ -295,6 +295,8 @@ export interface CustomEndpointContract {
 export interface ProviderContractsResponse {
   /** Shared settings revision for PUT `expected_revision`. Distinct from each scope `revision`. */
   revision: number;
+  /** Backend process identity; revisions are comparable only within one generation. */
+  process_generation: number;
   providers: ProviderContractGroup[];
   custom_endpoints: CustomEndpointContract[];
 }
@@ -504,6 +506,7 @@ function presentAccountChoice(value: V3ProviderContracts["providers"][number]["a
 function presentContracts(value: V3ProviderContracts): ProviderContractsResponse {
   return {
     revision: value.revision,
+    process_generation: value.processGeneration,
     providers: value.providers.map((scope) => ({
       scope_kind: scope.scopeKind,
       scope_id: scope.scopeId,

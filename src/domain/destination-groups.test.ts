@@ -1,19 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { Account } from "../api/dashboard.ts";
 import type { Destination, DestinationCredential } from "../api/destinations.ts";
 import {
   alignDestinationGroupsToAccountOrder,
   buildDestinationGroups,
   expandGroupOrder,
   filterGroupRows,
+  includeCredentialRow,
   isSingleAccountGroup,
   moveWithinGroup,
 } from "./destination-groups.ts";
-
-function account(id: string): Account {
-  return { id } as Account;
-}
 
 function destination(
   id: string,
@@ -79,7 +75,7 @@ function credential(
   };
 }
 
-test("destination groups order by minimum routing_rank and keep accounts in rank order", () => {
+test("destination groups order by minimum routing_rank and keep credentials in rank order", () => {
   const groups = buildDestinationGroups(
     [
       destination("site"),
@@ -92,15 +88,9 @@ test("destination groups order by minimum routing_rank and keep accounts in rank
       credential("site", "k1", 1),
       credential("kimi", "kimi", 3),
     ],
-    new Map([
-      ["minimax", account("minimax")],
-      ["k1", account("k1")],
-      ["k2", account("k2")],
-      ["kimi", account("kimi")],
-    ]),
   );
   assert.deepEqual(groups.map((group) => group.id), ["minimax", "site", "kimi"]);
-  assert.deepEqual(groups[1]?.accounts.map((row) => row.id), ["k1", "k2"]);
+  assert.deepEqual(groups[1]?.credentials.map((row) => row.legacy_account_id), ["k1", "k2"]);
   assert.deepEqual(expandGroupOrder(groups), ["minimax", "k1", "k2", "kimi"]);
 });
 
@@ -108,15 +98,14 @@ test("empty destination groups append after every populated group in list order"
   const groups = buildDestinationGroups(
     [destination("empty-b"), destination("go"), destination("empty-a")],
     [credential("go", "go", 4)],
-    new Map([["go", account("go")]]),
   );
   assert.deepEqual(groups.map((group) => group.id), ["go", "empty-b", "empty-a"]);
-  assert.deepEqual(groups[0]?.accounts.map((row) => row.id), ["go"]);
-  assert.deepEqual(groups[1]?.accounts, []);
-  assert.deepEqual(groups[2]?.accounts, []);
+  assert.deepEqual(groups[0]?.credentials.map((row) => row.legacy_account_id), ["go"]);
+  assert.deepEqual(groups[1]?.credentials, []);
+  assert.deepEqual(groups[2]?.credentials, []);
 });
 
-test("credentials whose V3 account is missing are skipped", () => {
+test("credentials still appear when the V3 account overlay is missing", () => {
   const groups = buildDestinationGroups(
     [destination("site"), destination("go")],
     [
@@ -124,11 +113,25 @@ test("credentials whose V3 account is missing are skipped", () => {
       credential("site", "k1", 2),
       credential("go", "ghost", 1),
     ],
-    new Map([["k1", account("k1")]]),
   );
   assert.deepEqual(groups.map((group) => group.id), ["site", "go"]);
-  assert.deepEqual(groups[0]?.accounts.map((row) => row.id), ["k1"]);
-  assert.deepEqual(groups[1]?.accounts, []);
+  assert.deepEqual(
+    groups[0]?.credentials.map((row) => row.legacy_account_id),
+    ["missing", "k1"],
+  );
+  assert.deepEqual(groups[1]?.credentials.map((row) => row.legacy_account_id), ["ghost"]);
+  assert.equal(
+    includeCredentialRow(credential("site", "missing", 0), new Set(["k1"]), new Set(["k1"])),
+    true,
+  );
+  assert.equal(
+    includeCredentialRow(credential("site", "k1", 2), new Set(["k1"]), new Set(["k1"])),
+    true,
+  );
+  assert.equal(
+    includeCredentialRow(credential("site", "k2", 3), new Set(["k1"]), new Set(["k1", "k2"])),
+    false,
+  );
 });
 
 test("moving a Key inside a group keeps the surrounding order", () => {
@@ -152,12 +155,12 @@ test("single-account groups follow max_credentials and platform-parent rules", (
       legacy: { kind: "custom_account", id: "acct" },
       max_credentials: 1,
     }),
-    accounts: [account("acct")],
+    credentials: [credential("custom", "acct", 0)],
     id: "custom",
   };
   const builtinOne = {
     destination: destination("go"),
-    accounts: [account("go")],
+    credentials: [credential("go", "go", 0)],
     id: "go",
   };
   const platformOne = {
@@ -165,7 +168,7 @@ test("single-account groups follow max_credentials and platform-parent rules", (
       legacy: { kind: "platform_parent", id: "site" },
       max_credentials: null,
     }),
-    accounts: [account("k1")],
+    credentials: [credential("site", "k1", 0)],
     id: "site",
   };
   const platformSingleton = {
@@ -173,28 +176,46 @@ test("single-account groups follow max_credentials and platform-parent rules", (
       legacy: { kind: "platform_parent", id: "solo-site" },
       max_credentials: 1,
     }),
-    accounts: [account("k1")],
+    credentials: [credential("solo-site", "k1", 0)],
     id: "solo-site",
   };
   assert.equal(isSingleAccountGroup(custom), true);
   assert.equal(isSingleAccountGroup(builtinOne), true);
   assert.equal(isSingleAccountGroup(platformOne), false);
   assert.equal(isSingleAccountGroup(platformSingleton), true);
-  assert.equal(isSingleAccountGroup({ ...builtinOne, accounts: [account("a"), account("b")] }), false);
+  assert.equal(isSingleAccountGroup({
+    ...builtinOne,
+    credentials: [credential("go", "a", 0), credential("go", "b", 1)],
+  }), false);
 });
 
 test("filterGroupRows keeps groups with a visible row and does not mutate input", () => {
   const groups = [
-    { destination: destination("a"), accounts: [account("a1"), account("a2")], id: "a" },
-    { destination: destination("b"), accounts: [account("b1")], id: "b" },
-    { destination: destination("c"), accounts: [account("c1")], id: "c" },
+    {
+      destination: destination("a"),
+      credentials: [credential("a", "a1", 0), credential("a", "a2", 1)],
+      id: "a",
+    },
+    {
+      destination: destination("b"),
+      credentials: [credential("b", "b1", 0)],
+      id: "b",
+    },
+    {
+      destination: destination("c"),
+      credentials: [credential("c", "c1", 0)],
+      id: "c",
+    },
   ];
-  const snapshot = groups.map((group) => group.accounts.map((row) => row.id));
+  const snapshot = groups.map((group) => group.credentials.map((row) => row.legacy_account_id));
   const filtered = filterGroupRows(groups, new Set(["a2", "c1"]));
   assert.deepEqual(filtered.map((group) => group.id), ["a", "c"]);
-  assert.deepEqual(filtered[0]?.accounts.map((row) => row.id), ["a2"]);
-  assert.deepEqual(filtered[1]?.accounts.map((row) => row.id), ["c1"]);
-  assert.deepEqual(groups.map((group) => group.accounts.map((row) => row.id)), snapshot);
+  assert.deepEqual(filtered[0]?.credentials.map((row) => row.legacy_account_id), ["a2"]);
+  assert.deepEqual(filtered[1]?.credentials.map((row) => row.legacy_account_id), ["c1"]);
+  assert.deepEqual(
+    groups.map((group) => group.credentials.map((row) => row.legacy_account_id)),
+    snapshot,
+  );
   assert.notEqual(filtered[0], groups[0]);
   assert.equal(filterGroupRows(groups, new Set()).length, 0);
 });
@@ -203,9 +224,18 @@ test("aligning groups follows the live V3 account order", () => {
   const groups = buildDestinationGroups(
     [destination("late"), destination("early")],
     [credential("late", "late", 0), credential("early", "early", 1)],
-    new Map([["late", account("late")], ["early", account("early")]]),
   );
   assert.deepEqual(groups.map((group) => group.id), ["late", "early"]);
   const aligned = alignDestinationGroupsToAccountOrder(groups, ["early", "late"]);
   assert.deepEqual(aligned.map((group) => group.id), ["early", "late"]);
+});
+
+test("aligning groups can use credential ids when legacy ids are absent from the order", () => {
+  const orphan = credential("solo", "ghost", 0);
+  const groups = buildDestinationGroups(
+    [destination("solo")],
+    [orphan],
+  );
+  const aligned = alignDestinationGroupsToAccountOrder(groups, [orphan.id]);
+  assert.deepEqual(aligned[0]?.credentials.map((row) => row.id), [orphan.id]);
 });

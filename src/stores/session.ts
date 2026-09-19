@@ -12,6 +12,7 @@ import { useAccountsStore } from "./accounts.ts";
 import { useDestinationsStore } from "./destinations.ts";
 import { useIdentitiesStore } from "./identities.ts";
 import { usePlatformAccountsStore } from "./platformAccounts.ts";
+import { useProvidersStore } from "./providers.ts";
 
 export type SessionPhase = "checking" | "login" | "register" | "ready";
 
@@ -103,6 +104,7 @@ export const useSessionStore = defineStore("session", () => {
     usePlatformAccountsStore().clear();
     useIdentitiesStore().clear();
     useDestinationsStore().clear();
+    useProvidersStore().clear();
     status.value = null;
     phase.value = "login";
   }
