@@ -2,12 +2,17 @@
  * Dashboard V4 destination / credential projection presenter.
  *
  * `GET /dashboard/api/v4/destinations` and `GET /dashboard/api/v4/credentials`
- * are secret-free. The wire uses camelCase; the view model is snake_case,
+ * are secret-free. `PATCH`/`DELETE /dashboard/api/v4/destinations/{id}` edit
+ * and remove configurable HTTP destinations under CAS, and
+ * `GET /dashboard/api/v4/routing/explain` is the read-only routing prediction.
+ * The wire uses camelCase; the view model is snake_case,
  * matching `connections.ts`.
  */
 
 import { dashboardV4 } from "./dashboard-v4.ts";
+import type { WithoutExpectation } from "./dashboard-v3.ts";
 import type { MutationExpectation } from "./generated/dashboard-v3.ts";
+import { useControlPlaneStore } from "../stores/controlPlane.ts";
 import type {
   AdapterKindDto,
   AuthSchemeDto,
@@ -19,11 +24,22 @@ import type {
   DestinationDto,
   DestinationList,
   DestinationOnboardingTaskDto,
+  DestinationPatchRequest,
   LegacyDestinationRefDto,
   ModelScope,
   PlanDto,
   ProtocolDto,
   RedirectPolicyDto,
+  RoutingChannel,
+  RoutingClientProtocol,
+  RoutingConversationBinding,
+  RoutingEligibleCandidate,
+  RoutingExclusion,
+  RoutingExclusionCode,
+  RoutingExplanation,
+  RoutingMode,
+  RoutingResolvedKind,
+  RuntimeOnlyUncertainty,
 } from "./generated/dashboard-v4.ts";
 
 export type {
@@ -33,6 +49,12 @@ export type {
   ModelScope,
   ProtocolDto,
   RedirectPolicyDto,
+  RoutingChannel,
+  RoutingClientProtocol,
+  RoutingExclusionCode,
+  RoutingMode,
+  RoutingResolvedKind,
+  RuntimeOnlyUncertainty,
 };
 
 export interface DestinationCapabilities {
@@ -65,6 +87,8 @@ export interface DestinationCatalogModel {
   protocols: ProtocolDto[];
   public_model: string;
   upstream_model: string;
+  /** Persisted per-model route override; null inherits the connection default. */
+  upstream_override: { protocol: ProtocolDto; endpoint_url: string } | null;
 }
 
 /** Migration-era bridge back to the V3 row that still owns mutations. */
@@ -139,6 +163,63 @@ export interface CredentialListSnapshot {
   expectation: MutationExpectation;
 }
 
+/** Presented body of a destination PATCH; the CAS pair is supplied per attempt. */
+export type DestinationPatchInput = WithoutExpectation<DestinationPatchRequest>;
+
+export interface DestinationPatchView {
+  destination: Destination;
+  credentials: DestinationCredential[];
+  expectation: MutationExpectation;
+}
+
+export interface RoutingResolvedMappingView {
+  provider_id: string;
+  routeable: boolean;
+  upstream_model: string;
+}
+
+export interface RoutingResolvedModelView {
+  alias: string | null;
+  kind: RoutingResolvedKind;
+  mappings: RoutingResolvedMappingView[];
+}
+
+export interface RoutingEligibleCandidateView {
+  account_id: string;
+  account_name: string;
+  adapter_kind: string;
+  channel: RoutingChannel;
+  destination_id: string | null;
+  destination_name: string | null;
+  provider_id: string;
+  resolved_model: string;
+  routing_rank: number;
+  upstream_protocol: RoutingClientProtocol;
+}
+
+export interface RoutingExclusionView {
+  account_id: string | null;
+  code: RoutingExclusionCode;
+  detail: string;
+  provider_id: string | null;
+  upstream_model: string | null;
+}
+
+export interface RoutingExplanationView {
+  client_protocol: RoutingClientProtocol;
+  conversation_binding: RoutingConversationBinding;
+  conversation_sticky: boolean;
+  eligible: RoutingEligibleCandidateView[];
+  exclusions: RoutingExclusionView[];
+  expected_base_policy_first_pick: RoutingEligibleCandidateView | null;
+  observed_at: string;
+  requested_model: string;
+  resolved: RoutingResolvedModelView;
+  expectation: MutationExpectation;
+  routing_mode: RoutingMode;
+  runtime_only_uncertainty: RuntimeOnlyUncertainty[];
+}
+
 function presentCapabilities(value: CapabilitiesDto): DestinationCapabilities {
   return {
     billing_tier_required: value.billingTierRequired,
@@ -171,6 +252,9 @@ function presentCatalogModel(value: CatalogModelDto): DestinationCatalogModel {
     protocols: [...value.protocols],
     public_model: value.publicModel,
     upstream_model: value.upstreamModel,
+    upstream_override: value.upstreamOverride
+      ? { protocol: value.upstreamOverride.protocol, endpoint_url: value.upstreamOverride.endpointUrl }
+      : null,
   };
 }
 
@@ -253,6 +337,70 @@ export function presentCredentialListSnapshot(value: CredentialList): Credential
   };
 }
 
+function presentEligibleCandidate(value: RoutingEligibleCandidate): RoutingEligibleCandidateView {
+  return {
+    account_id: value.accountId,
+    account_name: value.accountName,
+    adapter_kind: value.adapterKind,
+    channel: value.channel,
+    destination_id: value.destinationId,
+    destination_name: value.destinationName,
+    provider_id: value.providerId,
+    resolved_model: value.resolvedModel,
+    routing_rank: value.routingRank,
+    upstream_protocol: value.upstreamProtocol,
+  };
+}
+
+function presentRoutingExclusion(value: RoutingExclusion): RoutingExclusionView {
+  return {
+    account_id: value.accountId,
+    code: value.code,
+    detail: value.detail,
+    provider_id: value.providerId,
+    upstream_model: value.upstreamModel,
+  };
+}
+
+export function presentRoutingExplanation(value: RoutingExplanation): RoutingExplanationView {
+  return {
+    client_protocol: value.clientProtocol,
+    conversation_binding: value.conversationBinding,
+    conversation_sticky: value.conversationSticky,
+    eligible: value.eligible.map(presentEligibleCandidate),
+    exclusions: value.exclusions.map(presentRoutingExclusion),
+    expected_base_policy_first_pick: value.expectedBasePolicyFirstPick
+      ? presentEligibleCandidate(value.expectedBasePolicyFirstPick)
+      : null,
+    observed_at: value.observedAt,
+    requested_model: value.requestedModel,
+    resolved: {
+      alias: value.resolved.alias,
+      kind: value.resolved.kind,
+      mappings: value.resolved.mappings.map((mapping) => ({
+        provider_id: mapping.providerId,
+        routeable: mapping.routeable,
+        upstream_model: mapping.upstreamModel,
+      })),
+    },
+    expectation: {
+      expectedRevision: value.revision.revision,
+      processGeneration: value.revision.processGeneration,
+    },
+    routing_mode: value.routingMode,
+    runtime_only_uncertainty: [...value.runtimeOnlyUncertainty],
+  };
+}
+
+async function withCas<T>(
+  run: (expectation: MutationExpectation) => Promise<T>,
+  captured?: MutationExpectation,
+): Promise<T> {
+  const control = useControlPlaneStore();
+  if (!captured && !control.hasTokens()) await control.refresh();
+  return control.runMutation(run, captured);
+}
+
 async function fetchDestinationSnapshot(): Promise<DestinationListSnapshot> {
   const value = await dashboardV4.getDestinations();
   return presentDestinationListSnapshot(value);
@@ -269,6 +417,48 @@ export const destinationsApi = {
     return snapshot.destinations;
   },
   listSnapshot: fetchDestinationSnapshot,
+  /**
+   * Full-replacement PATCH of one configurable HTTP destination. Pass the
+   * expectation the editor captured with its snapshot; omit it to use the
+   * control-plane pair. On 409 `runMutation` refreshes tokens and never
+   * replays — the caller reloads the projection and asks the user to re-apply.
+   */
+  patch: async (
+    id: string,
+    input: DestinationPatchInput,
+    expectation?: MutationExpectation,
+  ): Promise<DestinationPatchView> => {
+    const value = await withCas(
+      (tokens) => dashboardV4.patchDestination(id, input, tokens),
+      expectation,
+    );
+    return {
+      destination: presentDestination(value.destination),
+      credentials: value.credentials.map(presentDestinationCredential),
+      expectation: {
+        expectedRevision: value.revision.revision,
+        processGeneration: value.revision.processGeneration,
+      },
+    };
+  },
+  /** Only empty destinations delete; the server 400s while Keys reference it. */
+  delete: async (id: string, expectation?: MutationExpectation): Promise<MutationExpectation> => {
+    const value = await withCas((tokens) => dashboardV4.deleteDestination(id, tokens), expectation);
+    return {
+      expectedRevision: value.revision.revision,
+      processGeneration: value.revision.processGeneration,
+    };
+  },
+};
+
+export const routingApi = {
+  explain: async (
+    model: string,
+    clientProtocol: RoutingClientProtocol,
+  ): Promise<RoutingExplanationView> => {
+    const value = await dashboardV4.explainRouting(model, clientProtocol);
+    return presentRoutingExplanation(value);
+  },
 };
 
 export const credentialsApi = {

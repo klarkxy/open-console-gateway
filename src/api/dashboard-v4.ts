@@ -22,6 +22,9 @@ import type {
   CpaCatalogUpdate,
   CredentialRotateRequest,
   CredentialRotateResult,
+  DestinationDeleteResult,
+  DestinationPatchRequest,
+  DestinationPatchResult,
   DshApplication,
   DshApplicationInstallRequest,
   IdentityCredentialCreateRequest,
@@ -29,6 +32,8 @@ import type {
   IdentityList,
   OnboardingCommitRequest,
   OnboardingCommitResult,
+  RoutingClientProtocol,
+  RoutingExplanation,
   TemplateList,
 } from "./generated/dashboard-v4.ts";
 
@@ -38,6 +43,29 @@ export const dashboardV4 = {
   getAccounts: () => requestV4<IdentityList>("/accounts"),
   getDestinations: () => requestV4<DestinationList>("/destinations"),
   getCredentials: () => requestV4<CredentialList>("/credentials"),
+  patchDestination: (
+    id: string,
+    input: WithoutExpectation<DestinationPatchRequest>,
+    expectation: MutationExpectation,
+  ) => requestV4<DestinationPatchResult>(
+    `/destinations/${encodeURIComponent(id)}`,
+    {
+      method: "PATCH",
+      body: withExpectation(input, expectation),
+    },
+  ),
+  deleteDestination: (id: string, expectation: MutationExpectation) =>
+    requestV4<DestinationDeleteResult>(
+      `/destinations/${encodeURIComponent(id)}`,
+      {
+        method: "DELETE",
+        body: withExpectation({}, expectation),
+      },
+    ),
+  explainRouting: (model: string, clientProtocol: RoutingClientProtocol) =>
+    requestV4<RoutingExplanation>(
+      `/routing/explain?model=${encodeURIComponent(model)}&clientProtocol=${encodeURIComponent(clientProtocol)}`,
+    ),
   commitOnboarding: (
     input: WithoutExpectation<OnboardingCommitRequest>,
     expectation: MutationExpectation,

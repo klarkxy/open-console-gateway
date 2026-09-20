@@ -1,16 +1,21 @@
 import { computed, ref } from "vue";
 import { defineStore } from "pinia";
 import { DashboardRequestError } from "../api/dashboard-v3.ts";
+import { isRevisionConflict } from "../api/dashboard.ts";
 import {
   credentialsApi,
   destinationsApi,
+  routingApi,
   type Destination,
   type DestinationCredential,
+  type DestinationPatchInput,
+  type RoutingExplanationView,
 } from "../api/destinations.ts";
 import type { MutationExpectation } from "../api/generated/dashboard-v3.ts";
 import type {
   MappingErrorCodeDto,
   RefusedRowKindDto,
+  RoutingClientProtocol,
 } from "../api/generated/dashboard-v4.ts";
 
 export interface DestinationProjectionRefusal {
@@ -75,7 +80,47 @@ export const useDestinationsStore = defineStore("destinations", () => {
   const error = ref("");
   const refusals = ref<DestinationProjectionRefusal[]>([]);
 
+  // On-demand routing explanations, keyed by `explainKey(model, protocol)`.
+  const explanations = ref<Record<string, RoutingExplanationView>>({});
+  const explainLoading = ref<Record<string, boolean>>({});
+  const explainErrors = ref<Record<string, string>>({});
+
   let loadGeneration = 0;
+  // Bumped by `clear` so an explanation resolving after logout never commits.
+  let sessionGeneration = 0;
+  const explainRequests = new Map<string, number>();
+
+  interface DestinationMutationToken {
+    session: number;
+  }
+
+  /** Invalidate any load that started before this write. */
+  function beginDestinationMutation(): DestinationMutationToken {
+    loadGeneration += 1;
+    loading.value = false;
+    return { session: sessionGeneration };
+  }
+
+  function mutationSessionIsCurrent(token: DestinationMutationToken): boolean {
+    return token.session === sessionGeneration;
+  }
+
+  function mutationExpectationIsCurrent(next: MutationExpectation): boolean {
+    return !expectation.value
+      || next.processGeneration !== expectation.value.processGeneration
+      || next.expectedRevision >= expectation.value.expectedRevision;
+  }
+
+  /** A write receipt wins over loads that started while that write was pending. */
+  function beginMutationCommit(
+    token: DestinationMutationToken,
+    next: MutationExpectation,
+  ): boolean {
+    if (!mutationSessionIsCurrent(token) || !mutationExpectationIsCurrent(next)) return false;
+    loadGeneration += 1;
+    loading.value = false;
+    return true;
+  }
 
   const destinationsById = computed(() => {
     const map = new Map<string, Destination>();
@@ -162,9 +207,106 @@ export const useDestinationsStore = defineStore("destinations", () => {
     await load();
   }
 
+  /**
+   * PATCH one destination and commit the returned row in place. A CAS
+   * conflict reloads the projection before rethrowing so the editor can show
+   * the conflict against fresh state; the mutation is never replayed.
+   */
+  async function patchDestination(
+    id: string,
+    input: DestinationPatchInput,
+    capturedExpectation?: MutationExpectation,
+  ): Promise<Destination> {
+    const token = beginDestinationMutation();
+    try {
+      const result = await destinationsApi.patch(
+        id,
+        input,
+        capturedExpectation ?? expectation.value ?? undefined,
+      );
+      if (beginMutationCommit(token, result.expectation)) {
+        destinations.value = destinations.value.map((destination) => (
+          destination.id === id ? result.destination : destination
+        ));
+        credentials.value = result.credentials;
+        expectation.value = result.expectation;
+      }
+      return result.destination;
+    } catch (cause) {
+      if (isRevisionConflict(cause) && mutationSessionIsCurrent(token)) {
+        await refreshAfterMutation();
+      }
+      throw cause;
+    }
+  }
+
+  /** Delete an empty destination and drop it (and any stale rows) locally. */
+  async function deleteDestination(id: string): Promise<void> {
+    const token = beginDestinationMutation();
+    try {
+      const nextExpectation = await destinationsApi.delete(id, expectation.value ?? undefined);
+      if (beginMutationCommit(token, nextExpectation)) {
+        destinations.value = destinations.value.filter((destination) => destination.id !== id);
+        credentials.value = credentials.value.filter((credential) => credential.destination_id !== id);
+        expectation.value = nextExpectation;
+      }
+    } catch (cause) {
+      if (isRevisionConflict(cause) && mutationSessionIsCurrent(token)) {
+        await refreshAfterMutation();
+      }
+      throw cause;
+    }
+  }
+
+  /** Per-model explain cache key: one pending request per (model, protocol). */
+  function explainKey(model: string, clientProtocol: RoutingClientProtocol): string {
+    return `${clientProtocol} ${model.trim().toLocaleLowerCase()}`;
+  }
+
+  /**
+   * On-demand `GET /routing/explain`. Repeating a key re-fetches; only the
+   * latest request per key commits, and nothing commits after `clear`.
+   */
+  async function explainRouting(
+    model: string,
+    clientProtocol: RoutingClientProtocol,
+  ): Promise<RoutingExplanationView> {
+    const key = explainKey(model, clientProtocol);
+    const requestId = (explainRequests.get(key) ?? 0) + 1;
+    explainRequests.set(key, requestId);
+    const session = sessionGeneration;
+    const owns = () => session === sessionGeneration && explainRequests.get(key) === requestId;
+    explainLoading.value = { ...explainLoading.value, [key]: true };
+    try {
+      const result = await routingApi.explain(model, clientProtocol);
+      if (!owns()) return result;
+      explanations.value = { ...explanations.value, [key]: result };
+      const nextErrors = { ...explainErrors.value };
+      delete nextErrors[key];
+      explainErrors.value = nextErrors;
+      return result;
+    } catch (e) {
+      if (owns()) {
+        explainErrors.value = {
+          ...explainErrors.value,
+          [key]: e instanceof Error ? e.message : String(e),
+        };
+      }
+      throw e;
+    } finally {
+      if (owns()) {
+        const nextLoading = { ...explainLoading.value };
+        delete nextLoading[key];
+        explainLoading.value = nextLoading;
+      }
+    }
+  }
+
   /** Drop the cached projection on 401 / logout so the next session reloads fresh. */
   function clear(): void {
     loadGeneration++;
+    sessionGeneration++;
+    explainRequests.clear();
     destinations.value = [];
     credentials.value = [];
     expectation.value = null;
@@ -172,6 +314,9 @@ export const useDestinationsStore = defineStore("destinations", () => {
     loading.value = false;
     error.value = "";
     refusals.value = [];
+    explanations.value = {};
+    explainLoading.value = {};
+    explainErrors.value = {};
   }
 
   return {
@@ -182,11 +327,18 @@ export const useDestinationsStore = defineStore("destinations", () => {
     loading: computed(() => loading.value),
     error: computed(() => error.value),
     refusals: computed(() => refusals.value),
+    explanations: computed(() => explanations.value),
+    explainLoading: computed(() => explainLoading.value),
+    explainErrors: computed(() => explainErrors.value),
     byId: destinationsById,
     credentialsByLegacyAccountId,
     load,
     refreshAfterMutation,
     commitSnapshot,
+    patchDestination,
+    deleteDestination,
+    explainKey,
+    explainRouting,
     clear,
   };
 });

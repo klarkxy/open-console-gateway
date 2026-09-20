@@ -75,6 +75,7 @@ function destinationDto(
     id,
     legacy: { kind: extra.legacyKind ?? "custom_account", id: legacyId },
     maxCredentials: extra.legacyKind === "platform_parent" ? null : 1,
+    modelResolution: "public_only",
     name: extra.name ?? id,
     observerCredentialId: null,
     plan: null,

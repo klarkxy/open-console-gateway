@@ -136,8 +136,18 @@
           </div>
         </n-form-item>
 
+        <div
+          v-if="isCustomConnectionEdit"
+          class="custom-connection-edit full-width-field"
+        >
+          <p class="field-hint">{{ t("连接的地址、协议与模型映射在 Providers 中管理。") }}</p>
+          <n-button text type="primary" @click="$emit('editConnection')">
+            {{ t("在 Providers 中编辑此连接") }}
+          </n-button>
+        </div>
+
         <n-form-item
-          v-if="isCustomPlan"
+          v-if="showCustomSections"
           path="endpointUrl"
           :label="t('API 地址')"
           class="full-width-field"
@@ -160,7 +170,7 @@
         </n-form-item>
 
         <n-form-item
-          v-if="isCustomPlan"
+          v-if="showCustomSections"
           path="upstreamProtocol"
           :label="t('上游协议')"
         >
@@ -178,7 +188,7 @@
         </n-form-item>
 
         <n-form-item
-          v-if="isCustomPlan"
+          v-if="showCustomSections"
           path="modelCapabilities"
           :label="t('模型映射')"
           class="full-width-field"
@@ -340,16 +350,6 @@ export type AccountFormPayload = {
   provider_id?: string;
   purchase_date?: string;
   notes: string;
-  /** Custom API edit only; persisted via the dedicated custom-config route. */
-  endpoint_url?: string;
-  /** Custom API edit only; persisted via the dedicated custom-config route. */
-  upstream_protocol?: AccountProtocol;
-  /** Custom API edit only; atomically persisted with the dedicated custom-config route. */
-  model_capabilities?: Array<{
-    public_model: string;
-    upstream_model: string;
-    protocol: AccountProtocol;
-  }>;
   ollama_billing_tier?: "pro" | "max" | "team";
 };
 
@@ -418,6 +418,7 @@ const emit = defineEmits<{
   (e: "update:show", value: boolean): void;
   (e: "save", payload: AccountInput | AccountFormPayload): void;
   (e: "resetCooldown"): void;
+  (e: "editConnection"): void;
 }>();
 
 const formRef = ref<FormInst | null>(null);
@@ -452,6 +453,10 @@ const effectivePlan = computed<PlanDefinition | null>(() => {
 });
 
 const isCustomPlan = computed(() => effectivePlan.value?.kind === "custom");
+// Legacy Custom edit: address/protocol/mappings editing lives in Providers;
+// create (and the platform Add Key flow) keeps the full Custom sections.
+const isCustomConnectionEdit = computed(() => isEdit.value && isCustomPlan.value);
+const showCustomSections = computed(() => isCustomPlan.value && !isCustomConnectionEdit.value);
 const isOllamaPlan = computed(() => effectivePlan.value?.provider_id === "ollama");
 const ollamaBillingOptions = [
   { value: "pro", label: "Pro · $60" },
@@ -564,7 +569,7 @@ const rules = computed<FormRules>(() => {
     };
   }
 
-  if (isCustomPlan.value) {
+  if (showCustomSections.value) {
     base.endpointUrl = {
       required: true,
       validator: (_rule: unknown, value: string) => {
@@ -847,15 +852,6 @@ async function handleSave() {
     if (form.value.key.trim()) {
       payload.key = form.value.key.trim();
     }
-    if (isCustomPlan.value) {
-      payload.endpoint_url = form.value.endpointUrl.trim();
-      payload.upstream_protocol = form.value.upstreamProtocol ?? undefined;
-      payload.model_capabilities = form.value.modelCapabilities.map((capability) => ({
-        public_model: capability.public_model,
-        upstream_model: capability.upstream_model,
-        protocol: form.value.upstreamProtocol ?? "chat_completions",
-      }));
-    }
     if (hasField("ollama_billing_tier") && form.value.ollamaBillingTier) {
       payload.ollama_billing_tier = form.value.ollamaBillingTier;
     }
@@ -926,6 +922,17 @@ async function handleSave() {
   margin: 6px 0 0;
   color: var(--ocg-muted);
   font-size: var(--ocg-font-xs);
+}
+
+.custom-connection-edit {
+  display: grid;
+  gap: var(--ocg-space-xs);
+  justify-items: start;
+  margin-bottom: var(--ocg-space-md);
+}
+
+.custom-connection-edit .field-hint {
+  margin: 0;
 }
 
 .connection-summary {

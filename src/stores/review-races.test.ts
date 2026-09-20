@@ -108,6 +108,26 @@ function contractsBody(revision: number, processGeneration = 99): object {
   return { revision, processGeneration, providers: [], customEndpoints: [] };
 }
 
+function definitionBody(name: string, revision: number): object {
+  return {
+    id: "dynamic-one",
+    name,
+    origin: "custom",
+    offering: "api",
+    editable: true,
+    deletable: true,
+    endpointUrl: "https://dynamic.example/v1",
+    upstreamProtocol: "chat_completions",
+    authKind: "bearer",
+    models: [],
+    presetId: null,
+    createdAt: "2026-09-20T00:00:00Z",
+    updatedAt: "2026-09-20T00:00:00Z",
+    revision,
+    processGeneration: 99,
+  };
+}
+
 test("accounts store: an older load resolving last does not clobber newer state", async () => {
   freshPinia();
   const calls = installDeferredFetch();
@@ -359,6 +379,33 @@ test("providers store: clear() invalidates in-flight catalog, contracts, and con
   assert.equal(store.connections, null);
   assert.equal(store.loading, false);
   assert.equal(store.error, "");
+});
+
+test("providers store owns definition invalidation, refresh, and session guards", async () => {
+  freshPinia();
+  const calls = installDeferredFetch();
+  const store = useProvidersStore();
+
+  const first = store.loadDefinition("dynamic-one");
+  await waitForCalls(calls, 1);
+  calls[0]!.resolve(definitionBody("Before", 4));
+  await first;
+  assert.equal(store.definitions.get("dynamic-one")?.name, "Before");
+
+  store.invalidateDefinition("dynamic-one");
+  assert.equal(store.definitions.has("dynamic-one"), false);
+  const refreshed = store.loadDefinition("dynamic-one", true);
+  await waitForCalls(calls, 2);
+  calls[1]!.resolve(definitionBody("After", 5));
+  await refreshed;
+  assert.equal(store.definitions.get("dynamic-one")?.name, "After");
+
+  const stale = store.loadDefinition("dynamic-one", true);
+  await waitForCalls(calls, 3);
+  store.clear();
+  calls[2]!.resolve(definitionBody("Stale", 6));
+  await stale;
+  assert.equal(store.definitions.size, 0);
 });
 
 test("providers store: a contract refresh resolving after clear returns to its caller without restoring cache", async () => {

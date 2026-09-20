@@ -2,7 +2,7 @@ import { computed, ref } from "vue";
 import { defineStore } from "pinia";
 import { connectionsApi, type Connection } from "../api/connections.ts";
 import { isRevisionConflict } from "../api/dashboard.ts";
-import { providerApi } from "../api/providers.ts";
+import { providerApi, type ProviderDefinitionView } from "../api/providers.ts";
 import type {
   ContractScopeKind,
   EffectiveModelContract,
@@ -20,6 +20,7 @@ export const useProvidersStore = defineStore("providers", () => {
   const catalog = ref<ProviderCatalogEntry[] | null>(null);
   const contracts = ref<ProviderContractsResponse | null>(null);
   const connections = ref<Connection[] | null>(null);
+  const definitions = ref<Map<string, ProviderDefinitionView>>(new Map());
   const loading = ref(false);
   const error = ref("");
 
@@ -30,6 +31,7 @@ export const useProvidersStore = defineStore("providers", () => {
   let catalogGeneration = 0;
   let contractsGeneration = 0;
   let connectionsGeneration = 0;
+  let definitionsGeneration = 0;
   let sessionGeneration = 0;
 
   interface ContractsMutationToken {
@@ -129,6 +131,30 @@ export const useProvidersStore = defineStore("providers", () => {
     }
   }
 
+  async function loadDefinition(
+    providerId: string,
+    force = false,
+  ): Promise<ProviderDefinitionView> {
+    const cached = definitions.value.get(providerId);
+    if (cached && !force) return cached;
+    const generation = ++definitionsGeneration;
+    const session = sessionGeneration;
+    const result = await providerApi.getProviderDefinition(providerId);
+    if (generation !== definitionsGeneration || session !== sessionGeneration) return result;
+    const next = new Map(definitions.value);
+    next.set(providerId, result);
+    definitions.value = next;
+    return result;
+  }
+
+  function invalidateDefinition(providerId: string): void {
+    definitionsGeneration += 1;
+    if (!definitions.value.has(providerId)) return;
+    const next = new Map(definitions.value);
+    next.delete(providerId);
+    definitions.value = next;
+  }
+
   async function removeContractCatalogModels(
     scopeKind: ContractScopeKind,
     scopeId: string,
@@ -182,9 +208,11 @@ export const useProvidersStore = defineStore("providers", () => {
     catalogGeneration += 1;
     contractsGeneration += 1;
     connectionsGeneration += 1;
+    definitionsGeneration += 1;
     catalog.value = null;
     contracts.value = null;
     connections.value = null;
+    definitions.value = new Map();
     loading.value = false;
     error.value = "";
   }
@@ -193,10 +221,13 @@ export const useProvidersStore = defineStore("providers", () => {
     catalog: computed(() => catalog.value),
     contracts: computed(() => contracts.value),
     connections: computed(() => connections.value),
+    definitions: computed(() => definitions.value),
     loading: computed(() => loading.value),
     error: computed(() => error.value),
     loadCatalog,
     loadConnections,
+    loadDefinition,
+    invalidateDefinition,
     loadContracts,
     refreshContractCatalog,
     removeContractCatalogModels,

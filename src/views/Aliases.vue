@@ -109,10 +109,30 @@
                   <code>{{ group.public_model }}</code>
                 </div>
                 <p v-if="groupHasOverlap(group.rows)" class="alias-warning">{{ t('名称与其他上游 ID 重叠，请检查调用名称。') }}</p>
+                <n-button
+                  size="tiny"
+                  quaternary
+                  type="primary"
+                  :aria-expanded="isExplainOpen(group.public_model)"
+                  @click="toggleExplain(group.public_model)"
+                >
+                  {{ t(isExplainOpen(group.public_model) ? "收起路由解释" : "查看路由解释") }}
+                </n-button>
               </td>
-              <td>{{ row.provider_plan }}</td>
+              <td>
+                {{ row.provider_plan }}
+                <n-tag v-if="!row.routable" size="tiny" :bordered="false" class="alias-model-disabled">
+                  {{ t("模型未启用") }}
+                </n-tag>
+              </td>
               <td><code>{{ row.upstream_model }}</code></td>
             </tr>
+            <AliasRoutingExplain
+              v-if="isExplainOpen(group.public_model)"
+              :model="group.public_model"
+              :protocol="explainProtocol(group.public_model)"
+              @update:protocol="setExplainProtocol(group.public_model, $event)"
+            />
           </tbody>
         </table>
       </div>
@@ -122,8 +142,9 @@
 
 <script setup lang="ts">
 import { computed, onActivated, onMounted, ref } from "vue";
-import { NAlert, NButton, NEmpty, NInput, NSpin, NSwitch, NTooltip } from "naive-ui";
+import { NAlert, NButton, NEmpty, NInput, NSpin, NSwitch, NTag, NTooltip } from "naive-ui";
 import type { Account } from "../api/dashboard.ts";
+import type { RoutingClientProtocol } from "../api/destinations.ts";
 import type {
   ProviderDefinitionView,
   ProviderCatalogEntry,
@@ -132,6 +153,7 @@ import type {
 import { dashboardV4 } from "../api/dashboard-v4.ts";
 import type { CpaCatalogEntry } from "../api/generated/dashboard-v4.ts";
 import { providerApi } from "../api/providers.ts";
+import AliasRoutingExplain from "../components/AliasRoutingExplain.vue";
 import { isDynamicCatalogEntry } from "../domain/dynamic-provider.ts";
 import { flattenProviderScopes, normalizeProviderContractsResponse } from "../domain/provider-contracts.ts";
 import { isRevisionConflict } from "../api/dashboard.ts";
@@ -145,12 +167,14 @@ import {
 import { t } from "../i18n/index.ts";
 import { useAccountsStore } from "../stores/accounts.ts";
 import { useControlPlaneStore } from "../stores/controlPlane.ts";
+import { useDestinationsStore } from "../stores/destinations.ts";
 import { useProvidersStore } from "../stores/providers.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
 
 const accountsStore = useAccountsStore();
 const controlPlane = useControlPlaneStore();
 const providersStore = useProvidersStore();
+const destinationsStore = useDestinationsStore();
 const contracts = ref<ProviderContractsResponse | null>(null);
 const catalog = ref<ProviderCatalogEntry[] | null>(null);
 const accounts = ref<Account[]>([]);
@@ -167,6 +191,9 @@ const publicationReady = ref(false);
 const publicationLoadError = ref("");
 const publicationSaveError = ref("");
 const saving = ref<Record<string, boolean>>({});
+// UI-local expansion state per public model; explanations stay in the store.
+const explainOpen = ref<Record<string, boolean>>({});
+const explainProtocols = ref<Record<string, RoutingClientProtocol>>({});
 let activatedOnce = false;
 
 const initialLoading = computed(() => loading.value && !contracts.value);
@@ -201,6 +228,30 @@ const aliasGroups = computed(() => {
 
 function groupHasOverlap(rows: readonly ProviderAliasRow[]): boolean {
   return rows.some((row) => aliasNameOverlaps(row, aliasRows.value));
+}
+
+function isExplainOpen(publicModel: string): boolean {
+  return Boolean(explainOpen.value[publicModelPublicationKey(publicModel)]);
+}
+
+function explainProtocol(publicModel: string): RoutingClientProtocol {
+  return explainProtocols.value[publicModelPublicationKey(publicModel)] ?? "chat_completions";
+}
+
+function ensureExplanation(publicModel: string): void {
+  void destinationsStore.explainRouting(publicModel, explainProtocol(publicModel)).catch(() => {});
+}
+
+function toggleExplain(publicModel: string): void {
+  const key = publicModelPublicationKey(publicModel);
+  const open = !explainOpen.value[key];
+  explainOpen.value = { ...explainOpen.value, [key]: open };
+  if (open) ensureExplanation(publicModel);
+}
+
+function setExplainProtocol(publicModel: string, protocol: RoutingClientProtocol): void {
+  explainProtocols.value = { ...explainProtocols.value, [publicModelPublicationKey(publicModel)]: protocol };
+  if (isExplainOpen(publicModel)) ensureExplanation(publicModel);
 }
 
 async function setPublished(publicModel: string, published: boolean): Promise<void> {
@@ -364,6 +415,11 @@ onActivated(() => {
   opacity: 0.55;
 }
 .alias-warning { color: var(--ocg-warning); margin: var(--ocg-space-xs) 0 0; }
+.alias-model-disabled {
+  margin-left: var(--ocg-space-xs);
+  color: var(--ocg-muted);
+  background-color: var(--ocg-primary-soft);
+}
 .aliases-table {
   width: 100%;
   min-width: 520px;

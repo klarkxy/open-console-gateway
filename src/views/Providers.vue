@@ -176,9 +176,32 @@
               </tbody>
             </table>
           </div>
-          <n-button type="primary" size="small" @click="openAccountEditor(selectedConnection.legacy.id)">
-            {{ t("在账号页编辑") }}
-          </n-button>
+          <n-space>
+            <n-button
+              v-if="selectedEditableDestination"
+              type="primary"
+              size="small"
+              :disabled="actionLocked"
+              @click="openDestinationEditor"
+            >
+              {{ t("编辑连接") }}
+            </n-button>
+            <n-button
+              v-else
+              type="primary"
+              size="small"
+              @click="openAccountEditor(selectedConnection.legacy.id)"
+            >
+              {{ t("在账号页编辑") }}
+            </n-button>
+            <DestinationDeleteButton
+              v-if="selectedEditableDestination"
+              :destination="selectedEditableDestination"
+              size="small"
+              :disabled="actionLocked"
+              @deleted="onDestinationDeleted"
+            />
+          </n-space>
         </section>
 
         <section v-else-if="selectedEntry" class="providers-section" aria-labelledby="provider-detail-title">
@@ -206,6 +229,14 @@
                 {{ t("继续设置") }}
               </n-button>
               <n-button
+                v-else-if="selectedEditableDestination"
+                secondary
+                :disabled="actionLocked"
+                @click="openDestinationEditor"
+              >
+                {{ t("编辑连接") }}
+              </n-button>
+              <n-button
                 v-else-if="selectedEntry.editable"
                 secondary
                 :disabled="actionLocked || definitionLoading || !selectedDefinition"
@@ -213,8 +244,14 @@
               >
                 {{ t("编辑供应商") }}
               </n-button>
+              <DestinationDeleteButton
+                v-if="selectedEditableDestination"
+                :destination="selectedEditableDestination"
+                :disabled="actionLocked"
+                @deleted="onDestinationDeleted"
+              />
               <n-popconfirm
-                v-if="selectedEntry.deletable"
+                v-else-if="selectedEntry.deletable"
                 :positive-text="t('删除')"
                 :negative-text="t('取消')"
                 @positive-click="deleteSelected"
@@ -408,7 +445,7 @@
                 :definition-loading="selectedEntry.origin !== 'builtin' && definitionLoading"
                 :action-locked="actionLocked"
                 @edit="openDefinitionEditor"
-                @delete="deleteSelected"
+                @delete="onSettingsDelete"
                 @open-accounts="openAccounts"
               />
             </n-tab-pane>
@@ -459,6 +496,17 @@
                 </n-tag>
               </div>
             </div>
+            <n-space v-if="selectedEditableDestination">
+              <n-button secondary size="small" :disabled="actionLocked" @click="openDestinationEditor">
+                {{ t("编辑连接") }}
+              </n-button>
+              <DestinationDeleteButton
+                :destination="selectedEditableDestination"
+                size="small"
+                :disabled="actionLocked"
+                @deleted="onDestinationDeleted"
+              />
+            </n-space>
           </div>
           <dl class="providers-connection-facts" :aria-label="t('连接信息')">
             <div class="providers-connection-facts__row">
@@ -502,6 +550,14 @@
       @saved="onDynamicSaved"
       @committed="onDynamicCommitted"
       @conflict="onDynamicConflict"
+    />
+    <DestinationEditModal
+      :show="showDestinationEditModal"
+      :destination="editingDestination"
+      :credentials="destinationsStore.credentials"
+      :endpoints="selectedConnection?.endpoints ?? []"
+      @update:show="onDestinationEditShow"
+      @saved="onDestinationSaved"
     />
     <AccountFormModal
       :show="showAddKeyModal"
@@ -555,11 +611,14 @@ import ProviderSettingsPanel from "../components/ProviderSettingsPanel.vue";
 import PricingCatalog from "../components/PricingCatalog.vue";
 import OfficialApiPanel from "../components/OfficialApiPanel.vue";
 import DynamicProviderModal from "../components/DynamicProviderModal.vue";
+import DestinationEditModal from "../components/DestinationEditModal.vue";
+import DestinationDeleteButton from "../components/DestinationDeleteButton.vue";
 import AccountFormModal, { type AccountFormPayload } from "../components/AccountFormModal.vue";
 import ProviderBrandMark from "../components/ProviderBrandMark.vue";
 import { t, type MessageKey } from "../i18n/index.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
 import { formatDateTime } from "../utils/format.ts";
+import { isDestinationDeletable, isDestinationEditable } from "../domain/destination-edit.ts";
 import {
   accountAddDeepLinkFromProviderAdd,
   accountAddQueryValue,
@@ -631,6 +690,12 @@ const showEditModal = ref(false);
 const editingDefinition = ref<ProviderDefinitionView | null>(null);
 const resumeConnectionId = ref<string | null>(null);
 const resumeHasSavedKey = ref(false);
+/** Destination editor state: only the target id and visibility live here. */
+const showDestinationEditModal = ref(false);
+const destinationEditId = ref<string | null>(null);
+const editingDestination = computed(() => (
+  destinationEditId.value ? destinationsStore.byId.get(destinationEditId.value) ?? null : null
+));
 const showAddKeyModal = ref(false);
 const addKeyBusy = ref(false);
 /** In-flight save/test/discovery inside the embedded create form. */
@@ -646,7 +711,6 @@ const destinations = computed(() => destinationsStore.destinations);
 const selectedRailKey = computed(() => selectedConnectionId.value ?? selectedDestinationId.value);
 const lastCommittedConnectionId = ref<string | null>(null);
 const activeTab = ref<ProviderDetailTab>("models");
-const definitions = ref<Map<string, ProviderDefinitionView>>(new Map());
 const definitionLoading = ref(false);
 const definitionError = ref("");
 const catalogRefreshing = ref(false);
@@ -662,7 +726,6 @@ const actionLive = ref("");
 let activatedOnce = false;
 let overrideSequence = 0;
 let overrideQueue: Promise<void> = Promise.resolve();
-let definitionGeneration = 0;
 const latestOverrideSequence = new Map<string, number>();
 
 const RAIL_BRAND_SIZE = 18;
@@ -697,6 +760,12 @@ const selectedDestinationCredentialCount = computed(() => (
   selectedDestination.value
     ? destinationsStore.credentials.filter((row) => row.destination_id === selectedDestination.value?.id).length
     : 0
+));
+/** Configurable HTTP rows (dynamic providers, legacy Custom API) edit via the V4 PATCH. */
+const selectedEditableDestination = computed(() => (
+  selectedDestination.value && isDestinationEditable(selectedDestination.value)
+    ? selectedDestination.value
+    : null
 ));
 const selectedEntry = computed(() => {
   const connection = selectedConnection.value;
@@ -748,7 +817,7 @@ const canAddKey = computed(() => {
 const selectedDefinition = computed(() => {
   const providerId = selectedEntry.value?.provider_id
     ?? (selectedConnection.value?.legacy.kind === "dynamic_provider" ? selectedConnection.value.legacy.id : null);
-  return providerId ? definitions.value.get(providerId) ?? null : null;
+  return providerId ? providersStore.definitions.get(providerId) ?? null : null;
 });
 const activeScope = computed(() => {
   const entry = selectedEntry.value;
@@ -1081,28 +1150,29 @@ function resetScopeActions() {
 }
 
 async function loadDefinition(providerId: string): Promise<ProviderDefinitionView | null> {
-  const generation = ++definitionGeneration;
   definitionLoading.value = true;
   definitionError.value = "";
   try {
-    const definition = await providerApi.getProviderDefinition(providerId);
-    if (generation !== definitionGeneration) return null;
-    const next = new Map(definitions.value);
-    next.set(providerId, definition);
-    definitions.value = next;
-    return definition;
+    return await providersStore.loadDefinition(providerId, true);
   } catch (error) {
-    if (generation !== definitionGeneration) return null;
     definitionError.value = dashboardErrorDetail(error);
     return null;
   } finally {
-    if (generation === definitionGeneration) definitionLoading.value = false;
+    definitionLoading.value = false;
   }
 }
 
 async function ensureDefinition(providerId: string) {
-  if (definitions.value.has(providerId)) return;
-  await loadDefinition(providerId);
+  if (providersStore.definitions.has(providerId)) return;
+  definitionLoading.value = true;
+  definitionError.value = "";
+  try {
+    await providersStore.loadDefinition(providerId);
+  } catch (error) {
+    definitionError.value = dashboardErrorDetail(error);
+  } finally {
+    definitionLoading.value = false;
+  }
 }
 
 function retryDefinition() {
@@ -1162,12 +1232,77 @@ function openDefinitionEditor(): void {
 async function openEdit(): Promise<void> {
   const entry = selectedEntry.value;
   if (!entry?.editable || isDraftConnection.value) return;
+  if (selectedEditableDestination.value) {
+    openDestinationEditor();
+    return;
+  }
   const definition = await loadDefinition(entry.provider_id);
   if (!definition) return;
   resumeConnectionId.value = null;
   resumeHasSavedKey.value = false;
   editingDefinition.value = definition;
   showEditModal.value = true;
+}
+
+function openDestinationEditor(): void {
+  const destination = selectedEditableDestination.value;
+  if (!destination || actionLocked.value) return;
+  destinationEditId.value = destination.id;
+  showDestinationEditModal.value = true;
+}
+
+function onDestinationEditShow(visible: boolean): void {
+  showDestinationEditModal.value = visible;
+  if (!visible) destinationEditId.value = null;
+}
+
+function onDestinationSaved(): void {
+  actionLive.value = t("连接已保存");
+  const providerId = selectedDestination.value?.legacy.kind === "dynamic"
+    ? selectedDestination.value.legacy.id
+    : null;
+  if (providerId) providersStore.invalidateDefinition(providerId);
+  // Destination edits change connection facts, provider catalog mappings, and
+  // effective contracts. Revalidate all three projections together.
+  void Promise.all([
+    providersStore.loadConnections(),
+    providersStore.loadCatalog(),
+    providersStore.loadContracts(),
+    ...(providerId ? [providersStore.loadDefinition(providerId, true)] : []),
+  ]).catch(() => {});
+}
+
+/** The store already dropped the row; fall back so the panel never points at it. */
+function onDestinationDeleted(id: string): void {
+  void providersStore.loadConnections().catch(() => {});
+  if (selectedDestinationId.value !== id) return;
+  selectedDestinationId.value = null;
+  selectedConnectionId.value = null;
+  applyFromQuery();
+}
+
+async function deleteDestinationById(id: string): Promise<void> {
+  try {
+    await destinationsStore.deleteDestination(id);
+    message.success(t("连接已删除"));
+    onDestinationDeleted(id);
+  } catch (error) {
+    message.error(t("删除失败：{error}", { error: dashboardErrorDetail(error) }));
+  }
+}
+
+/** ProviderSettingsPanel confirmed already; route V4-editable rows to the new DELETE. */
+function onSettingsDelete(): void {
+  const destination = selectedEditableDestination.value;
+  if (!destination) {
+    void deleteSelected();
+    return;
+  }
+  if (!isDestinationDeletable(destination, destinationsStore.credentials)) {
+    message.warning(t("仍有 Key 使用此连接，无法删除"));
+    return;
+  }
+  void deleteDestinationById(destination.id);
 }
 
 async function openContinueSetup(): Promise<void> {
@@ -1202,9 +1337,7 @@ async function onDynamicSaved(providerId: string): Promise<void> {
   addStage.value = null;
   resumeConnectionId.value = null;
   resumeHasSavedKey.value = false;
-  const next = new Map(definitions.value);
-  next.delete(providerId);
-  definitions.value = next;
+  providersStore.invalidateDefinition(providerId);
   const loaded = await loadAll({ retain: true, preferConnectionId, preferProviderId: providerId });
   if (!loaded.ok) {
     message.warning(t("已保存，但列表刷新失败。手动刷新，不要再次提交。"));
@@ -1266,9 +1399,7 @@ async function deleteSelected(): Promise<void> {
   try {
     await providerApi.deleteProviderDefinition(providerId);
     message.success(t("供应商已删除"));
-    const next = new Map(definitions.value);
-    next.delete(providerId);
-    definitions.value = next;
+    providersStore.invalidateDefinition(providerId);
     selectedConnectionId.value = connections.value.find((item) => (
       !(item.legacy.kind === "dynamic_provider" && item.legacy.id === providerId)
     ))?.id ?? null;

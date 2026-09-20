@@ -151,6 +151,24 @@
         </template>
       </n-empty>
 
+      <p
+        v-if="routingModeLine && accountsLoaded && displayedGroupViews.length > 0"
+        class="routing-mode-line"
+      >
+        <span>{{ t("当前路由模式") }}：{{ routingModeLine.mode }}</span>
+        <span>{{ t("对话粘性") }}：{{ routingModeLine.stickyOn ? t("已开启") : t("已关闭") }}</span>
+        <n-button
+          text
+          tag="a"
+          size="tiny"
+          type="primary"
+          class="routing-mode-line__action"
+          @click="openSettingsView"
+        >
+          {{ t("在设置中更改") }}
+        </n-button>
+      </p>
+
       <div v-if="accountsLoaded && displayedGroupViews.length > 0" class="account-list">
         <template v-for="view in displayedGroupViews" :key="view.group.id">
           <DestinationCard
@@ -238,6 +256,7 @@
       :endpoint-lock-hint="editingEndpointLockHint"
       @update:show="setAccountFormVisible"
       @save="onFormSave"
+      @edit-connection="onEditConnection"
       @reset-cooldown="resetCooldown(editingAccount!.id)"
     />
 
@@ -380,6 +399,7 @@ import { useDestinationsStore } from "../stores/destinations.ts";
 import { useIdentitiesStore } from "../stores/identities.ts";
 import { usePlatformAccountsStore } from "../stores/platformAccounts.ts";
 import { useProvidersStore } from "../stores/providers.ts";
+import { useSettingsStore } from "../stores/settings.ts";
 import type { MutationExpectation } from "../api/generated/dashboard-v3.ts";
 import type { ProviderCatalogEntry } from "../api/providers.ts";
 import type {
@@ -409,7 +429,8 @@ import { identitiesApi } from "../api/identities.ts";
 import type { BindingPatchInput, IdentityCredentialCreateInput } from "../api/identities.ts";
 import { accountCapabilities, isManagedOnboardingAccount } from "../domain/account-capabilities.ts";
 import { DEFAULT_PROVIDER_ID } from "../domain/destination-providers.ts";
-import { executeCustomAccountEdit } from "../domain/custom-account.ts";
+import { legacyCustomAccountDestinationId } from "../domain/custom-account.ts";
+import { ROUTING_MODE_KEYS } from "../domain/routing-explain.ts";
 import type { Destination, DestinationCredential } from "../api/destinations.ts";
 import {
   alignDestinationGroupsToAccountOrder,
@@ -480,6 +501,7 @@ const destinationsStore = useDestinationsStore();
 const identitiesStore = useIdentitiesStore();
 const platformStore = usePlatformAccountsStore();
 const providersStore = useProvidersStore();
+const settingsStore = useSettingsStore();
 // The account list lives in the store; the writable computed lets the
 // order/usage composables keep their Ref<Account[]> contract while every
 // write commits through the store.
@@ -720,6 +742,17 @@ const sortableRouteCount = computed(() => (
   displayedGroups.value.filter((group) => group.credentials.length >= 1).length
 ));
 
+// Ordering follows the routing mode, so the compact line above the ordered
+// list names the live mode and sticky state; a failed settings load hides it.
+const routingModeLine = computed(() => {
+  const settings = settingsStore.settings;
+  if (!settings) return null;
+  return {
+    mode: t(ROUTING_MODE_KEYS[settings.routing_mode]),
+    stickyOn: settings.conversation_sticky,
+  };
+});
+
 const platformRefreshing = computed(() => platformStore.refreshing);
 const platformPendingLink = computed(() => platformStore.pendingLink);
 
@@ -941,6 +974,37 @@ function openCpa(): void {
   const url = new URL(window.location.href);
   url.searchParams.set("view", "cpa");
   url.searchParams.delete("account_id");
+  window.history.pushState(null, "", url);
+  window.dispatchEvent(new PopStateEvent("popstate"));
+}
+
+function openSettingsView(): void {
+  const url = applyAppViewSearchParams(new URL(window.location.href), "settings");
+  window.history.pushState(null, "", url);
+  window.dispatchEvent(new PopStateEvent("popstate"));
+}
+
+// The edit form for a legacy Custom account defers address/protocol/mapping
+// edits to the owning Providers connection; Accounts keeps name/notes/Key.
+function onEditConnection(): void {
+  const account = editingAccount.value;
+  showModal.value = false;
+  if (!account) return;
+  void openCustomConnectionInProviders(account);
+}
+
+async function openCustomConnectionInProviders(account: Account): Promise<void> {
+  if (!destinationsStore.loaded) {
+    await destinationsStore.load().catch(() => undefined);
+  }
+  const destinationId = legacyCustomAccountDestinationId(
+    account.id,
+    destinationsStore.credentialsByLegacyAccountId,
+    destinationsStore.destinations,
+  );
+  const url = applyAppViewSearchParams(new URL(window.location.href), "providers", {
+    ...(destinationId ? { destination: destinationId } : {}),
+  });
   window.history.pushState(null, "", url);
   window.dispatchEvent(new PopStateEvent("popstate"));
 }
@@ -1706,11 +1770,15 @@ async function loadProviderCatalog(): Promise<void> {
 
 async function initializeAccounts() {
   const registrationOptions = loadRegistrationOptions();
+  const routingSettings = settingsStore.settings
+    ? Promise.resolve()
+    : settingsStore.loadPresented().catch(() => undefined);
   await loadProviderCatalog();
   await loadQuotaLimits();
   await loadAccounts();
   await Promise.allSettled([
     registrationOptions,
+    routingSettings,
     providersStore.loadConnections(),
   ]);
 }
@@ -1718,11 +1786,6 @@ async function initializeAccounts() {
 async function onFormSave(payload: AccountInput | AccountFormPayload) {
   const editing = editingAccount.value;
   if (editing) {
-    if (accountCapabilities(editing, providerCatalog.value).endpointOnAccount) {
-      // The edit form always emits the AccountFormPayload shape.
-      await saveCustomAccountEdit(editing, payload as AccountFormPayload);
-      return;
-    }
     const update: AccountUpdate = {
       name: payload.name,
       username: payload.username ?? "",
@@ -1814,43 +1877,6 @@ function openAccountTest(id: string) {
 
 function setAccountTestVisible(show: boolean) {
   if (!show) testingAccountId.value = null;
-}
-
-/**
- * Custom edits validate the whole form before any mutation, then write only
- * the sections that changed. This preserves a verified connection for a
- * metadata-only edit and avoids unnecessary verification invalidation.
- */
-async function saveCustomAccountEdit(
-  editing: Account,
-  payload: AccountFormPayload,
-): Promise<void> {
-  busy.value = true;
-  try {
-    await executeCustomAccountEdit(editing, payload, {
-      account: async (update) => {
-        replaceAccount(await dashboardApi.updateAccount(editing.id, update));
-      },
-      customConfig: async (config) => {
-        replaceAccount(await dashboardApi.updateAccountCustomConfig(editing.id, config));
-      },
-    });
-    const destRefreshed = await refreshDestinationProjection();
-    if (!destRefreshed) notifyDestinationRefreshFailure();
-
-    message.success(t("账号已更新"));
-    showModal.value = false;
-  } catch (e) {
-    if (await recoverAccountMutationConflict(e)) return;
-    message.error(t("保存失败：{error}", { error: dashboardErrorDetail(e) }));
-    try {
-      await refreshAccountState(editing.id);
-    } catch {
-      // Keep the original save error; the next explicit refresh reconciles.
-    }
-  } finally {
-    busy.value = false;
-  }
 }
 
 async function toggleAccount(id: string) {
@@ -2045,6 +2071,16 @@ onUnmounted(() => {
 
 .accounts-actions {
   flex: 0 0 auto;
+}
+
+.routing-mode-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ocg-space-xs) var(--ocg-space-md);
+  margin: 0;
+  color: var(--ocg-muted);
+  font-size: var(--ocg-font-xs);
 }
 
 .account-list {
