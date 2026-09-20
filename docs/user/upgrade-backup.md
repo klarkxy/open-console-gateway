@@ -23,11 +23,11 @@ the same value across upgrades. The `access_keys` table holds the primary key
 plus up to 64 non-deleted sub keys; deleting a sub key clears its plaintext
 but keeps the name for log attribution.
 
-Before a destructive schema rewrite (v27, v35, v42, v48), the migrator writes
+Before a destructive schema rewrite (v27, v35, v42, v48, v58), the migrator writes
 a unique, never-overwritten sibling snapshot — `data.sqlite.pre-v3.<timestamp>.bak`,
 `data.sqlite.pre-v35.<timestamp>.bak`, `data.sqlite.pre-v42.<timestamp>.bak`,
-or `data.sqlite.pre-v48.<timestamp>.bak` — plus a SHA-256 sidecar. A fresh
-empty data directory creates schema v57 directly and skips the snapshot. That
+`data.sqlite.pre-v48.<timestamp>.bak`, or `data.sqlite.pre-v58.<timestamp>.bak` — plus a SHA-256 sidecar. A fresh
+empty data directory creates schema v58 directly and skips the snapshot. That
 snapshot is a rollback point, not a substitute for a complete backup: verify
 the sidecar before restoring it, and restore it only onto a binary that can
 open that schema version or to retry an upgrade that never committed. Never
@@ -39,11 +39,11 @@ dropped.
 
 ### Portable Node Backup Payloads
 
-Node backups export payload V7 with destinations and credentials as the
-authority (secrets and identity extras stay inside the encrypted envelope).
-User-defined Providers travel as destination extras.
-V4–V6 backups remain importable (V4/V5 keep their older host-local cooldown
-behavior). Payload V1–V3 backups, and V8 or newer, are rejected with an
+Node backups export payload V8 with destinations and credentials as the
+authority, including model-resolution policy and per-model route overrides
+(secrets and identity extras stay inside the encrypted envelope).
+V4–V8 backups remain importable; V7 receives deterministic resolution defaults.
+Payload V1–V3 backups, and V9 or newer, are rejected with an
 explicit unsupported-version error; that is not a wrong password or a damaged
 file.
 

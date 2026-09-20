@@ -91,13 +91,16 @@ independently of discovery and test; a real test may consume upstream quota.
 
 V4-native session-protected routes (see `dashboard_v4/mod.rs`): `GET /contract`,
 `GET /templates`, `GET /connections`, `GET /accounts` (identities),
-`GET /destinations`, `GET /credentials`,
+`GET /destinations`, `PATCH|DELETE /destinations/{id}`, `GET /credentials`,
+`GET /routing/explain`,
 `GET|POST /applications/dsh`,
 `POST /onboarding/commit`, `POST /credentials/{id}/rotate`,
 `PATCH /bindings/{id}`, `POST /identities/{id}/credentials`,
 `GET|PUT /cpa/models`,
 `POST /provider-contracts/{scope_kind}/{scope_id}/catalog/remove`,
 `GET|PATCH /alias-publication`.
+
+Destination mutations are CAS-protected and limited to configurable HTTP rows; sealed and platform-managed rows are immutable. Routing explain is read-only and performs no upstream I/O or Key decryption.
 
 ## Static dashboard
 

@@ -5,7 +5,7 @@ Open Console Gateway is a local multi-Plan console: Rust workspace, Vue 3 dashbo
 ## Boundaries that affect changes
 
 - The dashboard uses HTTP `/dashboard/api/v4`; mutations use CAS. `/dashboard/api/v3` is a 410 tombstone. Contract changes belong in `schema/dashboard-api-v4.schema.json` and generated types. There is no V2 or V3 REST surface and no Tauri `invoke` commands; do not add either.
-- Provider and Plan share `provider_id` on catalog rows. Adapter implementations stay static/sealed; user-defined Provider data binds Configurable HTTP. Custom API is a one-credential `http` destination; CPA is a separate static external integration.
+- Provider and Plan share `provider_id` on catalog rows. Adapter implementations stay static/sealed; user-defined Provider data binds Configurable HTTP. Legacy Custom API rows are distinct configurable `http` destinations that may hold multiple credentials while preserving public-name-only resolution; CPA is a separate static external integration.
 - Preserve authentication, Key obfuscation/redaction, URL validation, cooldown state writes, SSE pass-through, data integrity, and supported compatibility. There is no remote sync and no Admin API; do not add either.
 - Changes to user-visible facts update paired English and `.zh-CN.md` guides. Keep capability tables in `docs/user/`, not the root README.
 - Rust tests belong in sibling `tests.rs` modules. Test behavior, not source text, documentation wording, or workflow spelling. Frontend tests likewise never assert literal UI copy: domain functions return semantic codes, copy mapping lives in exported `*_KEYS` tables (`Record<Code, MessageKey>`), and views compose text with `t()`.

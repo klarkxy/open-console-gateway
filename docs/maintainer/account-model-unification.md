@@ -2,20 +2,7 @@
 
 # RFC: Redesigning The Account And Provider Model
 
-Status: **physical storage and destination/credential projection have
-switched; Account overlay and some runtime consumers remain**. Stages 1–8
-dropped leftover tables through schema v57 and remounted handlers under
-`/dashboard/api/v4`. HEAD now writes destinations / credentials / catalogs
-incrementally: `project()` and `replace_all_on` stay on leftover-table
-migration and V4–V6 backup conversion, not on account create, cooldown, or
-catalog mutation. Payload V7 export/import is destination- and
-credential-authoritative (secrets travel inside the existing encrypted
-envelope), including platform and CPA observer management credentials.
-Merging a package that omits a CPA observer key keeps the destination's
-existing management key. Accounts cards group credentials without requiring a
-parallel Account list. Remaining: no public `POST/PATCH /destinations`
-routes; remounted `/accounts*` handlers are I/O adapters; `legacy_account_id`
-and the V3 Account overlay still bridge some runtime consumers. [Runtime
+Status: **destinations/credentials are authoritative; schema v58 completes connection-owned, multi-Key Custom HTTP.** V4 now exposes destination PATCH/DELETE and read-only routing explanation. Payload V8 is destination/credential-authoritative and carries model-resolution policy and route overrides; V4–V8 import. `legacy_account_id` and remounted account inputs remain compatibility bridges. [Runtime
 invariants](runtime-invariants.md) and [dashboard API](dashboard-api.md)
 describe HEAD.
 
@@ -109,9 +96,8 @@ Custom API config, and platform parent.
 | `observer_credential_id` | optional non-inference credential used to read site data (platform management token) |
 | `enabled`, `revision` | lifecycle and CAS |
 
-A Custom API account becomes a destination with `adapter = http`,
-`max_credentials = 1`, and its one credential created in the same write. A
-user-defined Provider is the same with `max_credentials = null`. A platform
+A Custom API account migrates to a distinct destination with `adapter = http`,
+`max_credentials = null`, stable IDs, and `public_only` resolution; multiple credentials may reference it. A user-defined Provider likewise has `max_credentials = null` but uses `public_and_upstream`. A platform
 site is the same plus `observer_credential_id` and the `observer` capability.
 Zen Free is `adapter = zen`, `auth_scheme = none`, `max_credentials = 1`. CPA
 is `adapter = cpa` with `capabilities.external_integration`; it holds no local
@@ -186,8 +172,7 @@ explicit cooldown writes on the credential.
   one row; there is no separate "account card" versus "platform card".
 - **Providers** lists **destinations**. Detail = catalog, plan / pricing,
   transport settings, observer credential. Custom API destinations appear
-  here like any other `http` destination; because `max_credentials = 1` their
-  transport fields are also editable from the credential card.
+  and edit here like any other configurable `http` destination; Accounts edits credentials only.
 - **Add** is one flow: choose a destination (existing, or new from sealed
   kinds / presets / manual `http`), then add a credential. Managed signup is a
   credential onboarding task started from the same flow when the destination
@@ -216,7 +201,7 @@ explicit cooldown writes on the credential.
   tables into them; the old tables are dropped after the shim release. The
   migration is total: every current row maps to exactly one destination and
   one credential, or the migration refuses to run.
-- **Transfer bundle** payload V7 carries the new entities directly.
+- **Transfer bundle** payload V8 carries the new entities, resolution policy, and route overrides directly.
 
 ## 6. Migration
 
@@ -280,7 +265,7 @@ Strangler pattern; each stage ships alone.
    Rust identity predicates; reserved UUIDs survive only in the migration.
 6. **UI cutover** to V4-complete: Accounts = credentials grouped by
    destination, Providers = destinations, one Add flow.
-7. **Deprecation release**: V3 shim marked deprecated, transfer V7 default.
+7. **Deprecation release**: V3 shim marked deprecated, transfer V8 default.
 8. **Removal release**: drop V3, old tables, `account-providers.ts`,
    `platform-accounts.ts` route-item helpers.
 
@@ -497,7 +482,7 @@ reserved account UUIDs. `/dashboard/api/v3` is a 410 tombstone.
 
 ### Deprecation rules started in stage 7
 
-New node backups export payload V7. The encrypted envelope stays v1. V7
+New node backups export payload V8. The encrypted envelope stays v1. V8
 carries `destinations` and `credentials` (including plaintext secrets,
 platform and CPA observer management credentials, and identity / grant /
 cooldown extras inside that envelope), plus `quotaPools` and `node`. A merge
@@ -506,7 +491,7 @@ management key. Latest export does not emit `accounts`, platform rows, dynamic
 provider definitions, or a separate identities array. V4–V6 remain
 importable through an old-graph decoder that maps into the same new-model
 import object. A V7 package that still carries leftover old fields must
-match dest/cred or is rejected. V8 and newer are an unsupported-version
+match dest/cred or is rejected. V9 and newer are an unsupported-version
 error. Remounted `/accounts*` handlers are I/O adapters; V4
 destinations/credentials are the read model.
 

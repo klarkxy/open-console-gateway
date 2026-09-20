@@ -12,6 +12,8 @@ GOAT only persists an account cooldown when an upstream 429 supplies a valid bou
 
 ## Account Selection And Failover
 
+On **Aliases**, expand a model to request a read-only routing explanation. It shows the resolved mapping, eligible service connections and Keys, upstream protocol, global order, structured exclusion reasons, and the base policy's expected first pick. This preview sends no upstream request, decrypts no Key, writes no cooldown or log, and does not advance sticky or round-robin state. It does not simulate a conversation binding, retry-time exclusions, state changes after the snapshot, or an upstream result, so it is an explanation of the observed base policy rather than a delivery guarantee.
+
 Accounts are tried in **list order**, which you can drag into shape and persist
 from the Accounts view. The selector skips:
 

@@ -22,7 +22,7 @@ Fetch models only updates the draft candidate list. Empty and truncated results 
 
 Choose a model and use **Test model**. The test uses its explicit protocol/endpoint override, or the supplier defaults when it inherits. A success requires a response matching the selected protocol, not just HTTP 200. It does not prove streaming, tools or other advanced features for that supplier.
 
-Testing never changes routing or preference. **Save Provider** commits the configuration you edited. Custom API accounts test their configured account-owned protocol. Supply a temporary test Key when editing; this action does not read back or replace a saved Key. Linked platform Keys keep their managed endpoint constraints. Model overrides are available for user-defined Providers, not account-owned Custom endpoints.
+Testing never changes routing or preference. **Save Provider** commits the configuration you edited. Configurable HTTP tests use the selected connection route; they do not read back or replace a saved Key. Linked platform Keys keep their managed endpoint constraints. Model protocol/endpoint overrides are connection-owned and available to both ordinary dynamic and migrated Custom HTTP connections.
 
 The selected preset is retained when saving and reopening, including resource-specific addresses such as Azure. It preserves template hints, discovery restrictions and import naming; it does not certify an edited endpoint as official. Entries without preset provenance use only unambiguous existing configuration evidence, and manually named models are not rewritten. Changing the endpoint, Key, model or protocol clears stale test results.
 

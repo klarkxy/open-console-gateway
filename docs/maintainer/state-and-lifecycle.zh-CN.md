@@ -8,7 +8,7 @@
 
 锁顺序：(1) `settings_update`，(2) `db`，(3) `config`，(4) `http_client`， (5) `gateway`，(6) `pricing`，(7) `zen_free_models`，(8) `provider_contracts`，(9) `routing`，(10) `credential_snapshot`。反向获取会造成死锁；持有 `routing` 锁时不应执行 DB 或网络 I/O。异步闸口：设置写同时重绑时， `settings_host_effects`（持久化 → 监听器重绑 → 补偿）先于 `gateway_lifecycle`。这些 await 期间应释放 `parking_lot` 锁。
 
-访问 Key 的权威表是 `access_keys`。两层凭证共用该表（当前 schema v57）和一份鉴权快照：
+访问 Key 的权威表是 `access_keys`。两层凭证共用该表（当前 schema v58）和一份鉴权快照：
 
 - 主 Key：固定 id `00000000-0000-0000-0000-000000000001`，显示名 `"Primary"`。始终启用，没有删除入口。公开 `AppConfig` 与面板 API 暴露 `gateway_key`；经消毒的 config JSON 把 `gateway_key` 存为 `""`。
 - 子 Key：非主行，活跃上限 64，软删保留身份/名称并清除明文。只经 `/dashboard/api/v4/keys*` 生命周期 API 变更。CLI 没有子 Key 命令。
@@ -63,7 +63,7 @@ Profile 删除先停浏览器，校验账号 ID 防目录穿越，再把新旧 P
 
 ## 持久化
 
-`crates/ocg-core/src/db.rs` 定义 SQLite schema、迁移与查询。当前 schema 是 **v57**。版本沿革见 [storage-migration.zh-CN.md](storage-migration.zh-CN.md)。`provider_contracts.rs` 负责供应商合约范围、按模型/按协议覆盖、effective 合约推导与模型协议证据。`models.rs` 定义共享 serde 类型和 `AppConfig`。本机 Key 存放在 `ocg-infra::crypto`（门面 `ocg_core::crypto`）：AES-256-GCM `v2:` 密文，不是 KMS。旧 XOR 仍可解密；正确的 `open_with_cipher` 会在同一事务里把剩余账号 `key_cipher` / `password_cipher` 改写成 v2。Windows 桌面使用 `MachineBoundCipher`；CLI/Docker 使用来自 `OCG_MANAGER_ENCRYPTION_KEY` 或 `<data-dir>/.encryption-key` 的 `StaticKeyCipher`。生产宿主必须调用 `Database::open_with_cipher`，让密文探测使用已经解析的 cipher。比本构建支持的更新 schema 会 fail closed。
+`crates/ocg-core/src/db.rs` 定义 SQLite schema、迁移与查询。当前 schema 是 **v58**。版本沿革见 [storage-migration.zh-CN.md](storage-migration.zh-CN.md)。`provider_contracts.rs` 负责供应商合约范围、按模型/按协议覆盖、effective 合约推导与模型协议证据。`models.rs` 定义共享 serde 类型和 `AppConfig`。本机 Key 存放在 `ocg-infra::crypto`（门面 `ocg_core::crypto`）：AES-256-GCM `v2:` 密文，不是 KMS。旧 XOR 仍可解密；正确的 `open_with_cipher` 会在同一事务里把剩余账号 `key_cipher` / `password_cipher` 改写成 v2。Windows 桌面使用 `MachineBoundCipher`；CLI/Docker 使用来自 `OCG_MANAGER_ENCRYPTION_KEY` 或 `<data-dir>/.encryption-key` 的 `StaticKeyCipher`。生产宿主必须调用 `Database::open_with_cipher`，让密文探测使用已经解析的 cipher。比本构建支持的更新 schema 会 fail closed。
 
 升级路径上的历史版本：
 

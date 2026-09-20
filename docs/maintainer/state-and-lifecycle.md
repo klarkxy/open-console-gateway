@@ -16,7 +16,7 @@ settings write also rebinds. Never hold a `parking_lot` lock across those
 awaits.
 
 The authoritative table for access keys is `access_keys`. Two credential
-tiers share that table (current schema v57) and one auth snapshot:
+tiers share that table (current schema v58) and one auth snapshot:
 
 - Primary key: fixed id `00000000-0000-0000-0000-000000000001`, display
   name `"Primary"`. Always enabled, never deleted. Public `AppConfig` and

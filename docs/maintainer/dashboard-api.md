@@ -102,8 +102,8 @@ excluded) plus the `custom-http` manual template. Presets are not part of the
 template catalog. Templates have no user instances or secrets.
 
 `GET /connections` is a projection of saved instances: built-ins that already
-have an account, every user-defined Provider, and each Custom API account
-individually; CPA is never a connection. Each connection carries lifecycle, authorization state, local
+have an account and every configurable HTTP connection, including each
+persisted Custom API destination grouped with all of its Keys; CPA is never a connection. Each connection carries lifecycle, authorization state, local
 eligibility with a reason, endpoints, model targets, and a legacy identity
 reference. Connection ids are deterministic UUIDv5 values derived from that
 legacy identity, never from names or URLs.
@@ -131,8 +131,11 @@ Accounts page overlays this projection for display; Key rotation, binding
 edits, and additional identity credentials use V4, while the remaining
 account mutations stay on V3.
 
-`GET /destinations` and `GET /credentials` are the RFC stage-4b projection of
-`destination_projection`: read-only, secret-free, and revision-tagged. A
+`GET /destinations` and `GET /credentials` are secret-free, revision-tagged projections.
+CAS-protected `PATCH /destinations/{id}` fully replaces editable HTTP name, endpoint, auth,
+protocol, mappings, and route overrides. It never accepts Key material and unions safe grants
+only for explicit `authorizeCredentialIds`. `DELETE /destinations/{id}` requires zero referencing
+credentials. Sealed and platform-managed destinations reject both mutations. A
 populated destinations/credentials store is served even when live
 `project()` would refuse. An empty store or leftover-table upgrade window
 falls back to `project()`; only that empty-store fallback can return
@@ -140,14 +143,16 @@ falls back to `project()`; only that empty-store fallback can return
 refused row.
 
 Node transfer (`POST /accounts/transfer/export|preview|import`) is remounted
-on V4. Latest export is payload V7: `destinations` and `credentials`
+on V4. Latest export is payload V8: `destinations` and `credentials`
 (plaintext secrets, platform and CPA observer management credentials, and
 identity / grant / cooldown extras stay inside the encrypted envelope), plus
 `quotaPools` and `node`. Merging a package that has no CPA observer key
 preserves the destination's existing management key. It does not emit
 `accounts`, `platformAccounts`, `platformLinks`, `dynamicProviders`, or
 `identities`. Those portable types are transfer-only and are not V4 listing
-DTOs. V4–V6 packages remain importable through the old-graph decoder.
+DTOs. V4–V8 packages remain importable; V7 receives deterministic model-resolution defaults and V8 requires the field.
+
+`GET /routing/explain?model=...&clientProtocol=...` is read-only and authenticated. It reuses live alias resolution, route materialization, availability gates, and a clone-based base-policy preview. It never sends, decrypts a Key, probes DNS, writes logs/cooldowns, or advances sticky/round-robin state. The response includes eligible Keys, typed exclusions, effective upstream protocol/global rank, and explicit runtime-only uncertainties.
 
 V4 does not treat authorization `unknown` as `valid`. Eligibility is a local
 projection, never upstream health.
@@ -162,7 +167,7 @@ plus `name`, `endpointUrl`, `upstreamProtocol`, `authKind`) or
 (`secretInput`, optional `accountLabel` / `notes`) or `kind: none`.
 `targets` map a public model to an exact upstream model, with an optional
 per-target upstream override. `new` requires a non-empty `targets` list;
-`existing` requires it empty (model edits stay on V3 `PATCH /providers/{id}`).
+`existing` requires it empty (connection edits use V4 `PATCH /destinations/{id}`).
 
 Evaluation order: (1) parse; (2) `operationId` must be a UUID; (3) take the
 `settings_update` lock, then idempotency lookup before CAS — if that `operationId` was already committed with the same
@@ -183,9 +188,8 @@ singleton account. The Provider row, optional first account row, and the
 operation record commit in one SQLite transaction; the dynamic-provider
 snapshot is installed after commit exactly as V3 does.
 
-`existing` accepts a new `api_key` only on user-defined
-(dynamic) Provider connections with keyed auth. Built-in and Custom API
-connection ids return `400` ("add Keys on Accounts"). Account row and
+`existing` accepts a new `api_key` on keyed dynamic Providers and legacy Custom HTTP connections. Built-in, platform-managed, and no-auth
+connection ids return `400`. Account row and
 operation record commit in one transaction, then the revision bump only
 (`reload_contracts=false`), the same as V3 plain account create.
 

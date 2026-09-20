@@ -2,7 +2,7 @@
 
 # Providers
 
-The rail lists the V4 connection projection: built-in Providers with at least one account, every user-defined Provider (with or without a Key, including persisted onboarding drafts), and each Custom API account as its own row, grouped by Plan/API. Unused built-in templates stay off the rail and remain in the **Add Provider** catalog only. Row and detail-header status comes from server-side projection fields only: **Draft** (lifecycle `draft`), **Missing credential** (authorization `missing` on a configured connection), **Disabled** (lifecycle `disabled` or all credentials disabled), **Invalid credential** (authorization `invalid`), **No enabled model** (eligibility reason `no_enabled_target`), **Cooling down** (eligibility `cooling`). These are local eligibility projections, never upstream health; `unknown` authorization shows no badge and is not verified. A draft stays on the rail with **Continue setup** and is not routed; it does not open **Add Key** merely because a credential is missing. **Continue setup** reloads that Provider's current definition and pairs save with that view's revision; a none-auth draft is not treated as having a saved Key. A configured keyed Provider with no Key stays on the rail as **Missing credential**: it is saved, has no Key, and does not participate in routing; it is not tested automatically. **Add Key** on a configured detail opens the same credential editor used on **Accounts**, prefilled for that Provider. A Custom API account row is a read-only summary (endpoint, protocol, mapped models); **Edit on Accounts** opens that account's editor on **Accounts**. Custom API configuration is account-owned. The page selects by `connection=<id>`; older `provider=<id>` bookmarks still resolve to the matching built-in or user-defined connection. **Add Provider** in the rail footer opens the same **Accounts → Add account** chooser (`add=1`, or `preset:<id>` for a preset bookmark), keeping available templates off the configured-Providers rail. That form can **Save draft** once name and URL are valid (Key and models may be omitted) or **Complete setup** (models required, and a Key for keyed auth). Fetch models and Test model stay explicit. Saving or completing a user-defined Provider from **Providers → Add Provider** or **Accounts → Add account** → preset commits once through onboarding. A draft saved from Accounts continues on Providers. Reopening a draft uses the same connection ID, keeps a blank Key field to retain saved material, and rotates only when a new Key is provided. Completing with a saved Key shows the current destination Origin/URL and an unchecked authorize-current-address control; opening or editing never grants. If the network drops before a response, the form reports an unknown outcome, locks the fields, and retries the same payload and operation on explicit Retry. A conflicting revision reloads tokens for review and keeps the input without replaying. Configured Providers use ordinary edit, never turning a live Provider into a draft. Saved connections retain their preset brand where provenance is known, without certifying an edited address as official. The model catalog has its own model search and enabled-state filter; searching the Provider list does not search models. Mapping tables keep both public and upstream names accessible on narrow screens.
+The rail lists the V4 connection projection: built-in Providers with at least one account and every configurable HTTP connection (with or without a Key, including persisted onboarding drafts), grouped by Plan/API. Existing Custom API records remain separate connections; equal names or URLs are never merged. Unused built-in templates stay off the rail and remain in the **Add Provider** catalog only. Row and detail-header status comes from server-side projection fields only: **Draft** (lifecycle `draft`), **Missing credential** (authorization `missing` on a configured connection), **Disabled** (lifecycle `disabled` or all credentials disabled), **Invalid credential** (authorization `invalid`), **No enabled model** (eligibility reason `no_enabled_target`), **Cooling down** (eligibility `cooling`). These are local eligibility projections, never upstream health; `unknown` authorization shows no badge and is not verified. A draft stays on the rail with **Continue setup** and is not routed; it does not open **Add Key** merely because a credential is missing. **Continue setup** reloads that Provider's current definition and pairs save with that view's revision; a none-auth draft is not treated as having a saved Key. A configured keyed connection with no Key stays on the rail as **Missing credential**: it is saved, has no Key, and does not participate in routing; it is not tested automatically. **Add Key** opens the same credential editor used on **Accounts**, prefilled for that connection. Endpoint, authentication, protocol, and model mappings are connection-owned and edited on **Providers** for every configurable HTTP connection; Accounts owns each Key, its scope, enablement, quota relation, and order. The page selects by `connection=<id>`; older `provider=<id>` bookmarks still resolve to the matching built-in or user-defined connection. **Add Provider** in the rail footer opens the same **Accounts → Add account** chooser (`add=1`, or `preset:<id>` for a preset bookmark), keeping available templates off the configured-Providers rail. That form can **Save draft** once name and URL are valid (Key and models may be omitted) or **Complete setup** (models required, and a Key for keyed auth). Fetch models and Test model stay explicit. Saving or completing a user-defined Provider from **Providers → Add Provider** or **Accounts → Add account** → preset commits once through onboarding. A draft saved from Accounts continues on Providers. Reopening a draft uses the same connection ID, keeps a blank Key field to retain saved material, and rotates only when a new Key is provided. Completing with a saved Key shows the current destination Origin/URL and an unchecked authorize-current-address control; opening or editing never grants. Editing an address or model override lists affected Keys and adds grants only for Keys the operator explicitly selects. If the network drops before a response, the form reports an unknown outcome, locks the fields, and retries the same payload and operation on explicit Retry. A conflicting revision reloads tokens for review and keeps the input without replaying. Configured Providers use ordinary edit, never turning a live Provider into a draft. Saved connections retain their preset brand where provenance is known, without certifying an edited address as official. The model catalog has its own model search and enabled-state filter; searching the Provider list does not search models. Mapping tables keep both public and upstream names accessible on narrow screens.
 
 Enabling a model force-enables every available protocol; it does not merely restore `auto`. Available upstreams always use the same chips: a visible chip can connect, and blue is the conversion default. Clicking a chip sets that default. The preference is remembered independently of enablement and travels in node migration packages. Model and connection tests never enable a model or change its protocol choice.
 
@@ -14,7 +14,7 @@ Each user-defined Provider supplies the default endpoint, protocol and authentic
 
 Routing passes the client protocol through when that protocol is enabled. Otherwise the gateway converts to the model's preferred protocol, then to the first remaining enabled protocol in adapter fallback order. CPA preserves its supported Chat, Responses and Messages client formats; Gemini clients are converted to Chat.
 
-Official presets initialize new Providers from documented defaults. Manual configuration starts with unverified Chat. There is no automatic protocol scan, and template updates never rewrite saved choices. New API and Sub2API are site types with independent instances; their linked Custom accounts retain account-owned configuration.
+Official presets initialize new Providers from documented defaults. Manual configuration starts with unverified Chat. There is no automatic protocol scan, and template updates never rewrite saved choices. New API and Sub2API remain independently managed site types; their site and management-credential boundary is unchanged.
 
 **Test model** sends a minimal request using the selected model's effective configuration. It does not guess alternate URLs, enable protocols or change preference. Draft tests need an explicit temporary Key; account tests use that account's saved Key. Model discovery is separate and does not certify inference support.
 
@@ -36,8 +36,8 @@ account-owned path. Scopes are split like this:
   the scope ID is the Provider's own ID.
 - User-defined Providers persist as typed definitions and bind Configurable
   HTTP. Their Endpoint, protocol, auth kind, and mappings are edited here.
-- `CustomEndpoint(account_id)` scopes keep Custom mappings account-owned.
-  Edit those mappings on **Accounts**.
+- Legacy `CustomEndpoint(account_id)` scopes remain as compatibility evidence,
+  while their endpoint and mappings are edited on the owning connection.
 
 Provider-preset and user-defined Providers open the same detail shell with up to three tabs. **Models**
 is the default: provider-preset scopes show the model catalog (source line, refresh,
@@ -50,10 +50,9 @@ user-defined rows offer edit/delete, and the **OpenCode Go** scope keeps the
 managed-signup **invite URL** here. It is a user-owned `opencode.ai` /
 `console.opencode.ai` HTTPS link (not a sealed origin). Fresh installs may
 ship a demo default; replace it with your own link before a real signup.
-Creating a managed draft can also edit and write this value back. A Custom
-API account row is a read-only summary (endpoint, protocol, mapped models);
-**Edit on Accounts** opens the account editor on **Accounts**. User-defined
-Providers are unpriced.
+Creating a managed draft can also edit and write this value back. Configurable
+HTTP connection settings are edited here; **Accounts** edits only the attached
+credentials and their routing bindings. User-defined Providers are unpriced.
 
 **Aliases** is a separate core page because its table spans every
 currently enabled account instead of the selected Provider. It lists only
@@ -121,10 +120,9 @@ Messages; Responses stays unsupported. Existing overrides and probe results for
 surviving models are preserved. A failed or empty refresh keeps the previous
 snapshot.
 
-Custom API continues to use account-owned public-name → upstream-ID mappings;
-discovery never silently replaces them. The account form **Fetch models** action
-is an unsaved-form helper that returns upstream IDs only. Selecting one imports
-an exact `public name = upstream ID` row. Command Code uses its public official
+Migrated Custom API connections retain public-name → upstream-ID mappings and
+`public_only` lookup; discovery never silently replaces them. Ordinary new
+configurable HTTP connections may also accept a unique exact upstream ID. Command Code uses its public official
 `/models` directory: the GOAT preset starts enabled, while additional models
 discovered later start disabled until you enable their supported protocol in
 the list.

@@ -28,7 +28,7 @@ Each upstream attempt freezes its own price evidence. A fallback Key uses its ow
 
 A linked Key's endpoint belongs to its parent. Unlinking keeps the Key, its materialized endpoint, and model configuration. Delete or unlink all children before deleting a parent; parent deletion never deletes Keys.
 
-Node exports use payload V7. They include destinations and credentials as the authority — parent definitions, associations, management secrets, and platform extras travel inside the encrypted envelope with the inference Keys. A merge that omits the CPA or platform observer key keeps the destination's existing management key. Draft connections stay off routing after import until they are completed. Imports accept V4 through V7 bundles. Imported groups are unverified until fresh evidence is obtained. Import rejects a matching parent ID with a different platform or site URL as one atomic failure.
+Node exports use payload V8. Destinations and credentials remain authoritative — parent definitions, associations, management secrets, and platform extras travel inside the encrypted envelope with inference Keys. A merge that omits the CPA or platform observer key keeps the destination's existing management key. Draft connections stay off routing after import until completed. Imports accept V4 through V8. Imported groups remain unverified until fresh evidence; a matching parent ID with a different platform or site URL rejects atomically.
 
 Back up the complete data directory before upgrading. Rollback restores that full backup; do not open a migrated database with an older binary. See [storage and migrations](../maintainer/storage-migration.md).
 

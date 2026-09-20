@@ -10,7 +10,7 @@
 | 给一张账号接入 OpenAI 或 Anthropic 兼容端点 | 新增 **Custom API** 账号 | 否 |
 | 让所有 Open Console Gateway 用户获得一个具名内置 Provider（产品中的 Provider/Plan 身份） | 新增密封的内置供应商 | 是，需要经过审查的代码与测试 |
 
-**适配器注册表**保持静态密封。用户定义供应商是类型化的持久定义；每一条都绑定代码持有的 Configurable HTTP 适配器。OCG 从不加载用户脚本、插件或二进制。未知 `provider_id` 除非匹配已保存的定义，否则 fail closed。Custom API 是一凭据 Configurable HTTP：地址、协议和模型映射在该目的地上，并在账号页编辑。
+**适配器注册表**保持静态密封。用户定义供应商是类型化的持久定义；每一条都绑定代码持有的 Configurable HTTP 适配器。OCG 从不加载用户脚本、插件或二进制。未知 `provider_id` 除非匹配已保存的定义，否则 fail closed。迁移后的 Custom API 是普通可配置 HTTP 连接：地址、鉴权、协议和模型映射在供应商页编辑，可挂多把 Key。
 
 ## 从预设创建
 
@@ -27,7 +27,7 @@
 
 供应商所有字段留在 **供应商** 页。账号 **Key**、启停、顺序、备注、冷却和测试留在 **账号** 页。用户定义供应商始终未定价：没有官方用量、额度估算或价格行。请求日志仍会归因供应商、账号和模型。
 
-节点备份以 payload V7 导出，携带目的地与凭据；用户定义供应商作为目的地 extras。导入接受 V4 至 V7 负载。当前 SQLite schema（v57）将用户定义 / 预设 HTTP Provider 存在 destinations（`legacy_kind=dynamic`）与 `destination_models` 上。密封 builtin 仍编译在代码里。
+节点备份以 payload V8 导出，携带目的地、凭据、模型解析策略与按模型路由覆盖。导入接受 V4 至 V8。当前 SQLite schema（v58）把可配置 HTTP 连接存在 destinations 与 `destination_models` 上；遗留 Custom 连接保持独立并可挂多把 Key。密封 builtin 仍编译在代码里。
 
 ## 立即接入兼容上游
 

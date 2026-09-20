@@ -7,10 +7,10 @@ Use this guide when you want Open Console Gateway to route to another upstream s
 | Goal | Path | Repository change |
 | --- | --- | --- |
 | Add a named Provider this node can reuse across accounts | **Providers** → **Add Provider** (user-defined) | No |
-| Connect one OpenAI- or Anthropic-compatible endpoint on a single account | Add a **Custom API** account | No |
+| Connect one OpenAI- or Anthropic-compatible service and attach one or more Keys | Add a **Custom API** / manual HTTP connection | No |
 | Ship a named built-in Provider (the product's Provider/Plan identity) to every Open Console Gateway user | Add a sealed built-in Provider | Yes, reviewed code and tests |
 
-The **Adapter Registry** stays static and sealed. User-defined Providers are typed persisted definitions; every one binds the code-owned Configurable HTTP adapter. OCG never loads user scripts, plugins, or binaries. Unknown `provider_id` values fail closed unless they match a saved definition. Custom API is one-credential Configurable HTTP: endpoint, protocol, and model mappings live on that destination and are edited on Accounts.
+The **Adapter Registry** stays static and sealed. User-defined Providers are typed persisted definitions; every one binds the code-owned Configurable HTTP adapter. OCG never loads user scripts, plugins, or binaries. Unknown `provider_id` values fail closed unless they match a saved definition. Migrated Custom API rows are normal configurable HTTP connections: endpoint, auth, protocol, and model mappings are edited on Providers, while Accounts manages one or more Keys.
 
 ## Create from a preset
 
@@ -28,7 +28,7 @@ Edit replaces the whole Provider configuration through `PATCH /dashboard/api/v4/
 
 Provider-owned fields stay on **Providers**. Account **Key**, enablement, order, notes, cooldown, and tests stay on **Accounts**. User-defined Providers are always unpriced: no official usage, quota estimate, or pricing rows. Request logs still attribute provider, account, and model.
 
-Node backups export payload V7 with destinations and credentials; user-defined Providers travel as destination extras. Imports accept V4 through V7 bundles. The current SQLite schema (v57) stores user-defined / preset HTTP Providers on destinations (`legacy_kind=dynamic`) and `destination_models`. Sealed builtins stay compiled-in.
+Node backups export payload V8 with destinations and credentials, model-resolution policy, and per-model route overrides. Imports accept V4 through V8 bundles. The current SQLite schema (v58) stores configurable HTTP Providers on destinations and `destination_models`; legacy Custom connections remain distinct and may hold multiple Keys. Sealed builtins stay compiled-in.
 
 ## Connect a compatible upstream now
 

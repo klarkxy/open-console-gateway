@@ -86,8 +86,9 @@ and exhaustive adapter kinds. Unknown `provider_id` values fail closed unless
 they match a persisted typed Provider definition, which always selects the
 existing Configurable HTTP adapter.
 
-Custom API is a one-credential `http` destination that uses the same
-sealed adapter kind. CPA is a separate static external integration.
+Legacy Custom API rows are distinct configurable `http` destinations using
+the same sealed adapter kind. A connection may hold multiple credentials while
+preserving public-name-only resolution. CPA is a separate static external integration.
 
 Provider-owned catalogs and contracts are resolved before account credentials
 are used. Saved discovery rows may activate code-owned Alias mappings or remain

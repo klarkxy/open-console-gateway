@@ -40,25 +40,27 @@ V4 复用 V3 会话中间件。其列表返回与 V3 CAS 相同的 `ControlRevis
 
 `GET /templates` 是只读的添加目录：密封内置项（不含 CPA）加上 `custom-http` 手动模板。预设不属于该模板目录。模板没有用户实例或密钥。
 
-`GET /connections` 是已保存实例的投影：已有账号的内置项、每一个用户定义供应商，以及每个 Custom API 账号各自一条；CPA 永远不是 connection。每条 connection 携带生命周期、授权状态、带原因的本地资格、endpoints、模型目标，以及一份遗留身份引用。connection id 是由该遗留身份派生的确定性 UUIDv5，从不由名称或 URL 派生。
+`GET /connections` 是已保存实例的投影：已有账号的内置项，以及每一条可配置 HTTP 连接；每个持久化 Custom API 目的地只出现一次，并汇总引用它的全部 Key。CPA 永远不是 connection。每条 connection 携带生命周期、授权状态、带原因的本地资格、endpoints、模型目标，以及一份遗留身份引用。connection id 由该遗留身份派生，不由名称或 URL 派生。
 
 `GET /accounts` 返回 `IdentityList { revision, identities[] }`。每条 `IdentitySummary` 携带 `identity`（`id`、`label`、`authorityRef` `{ issuerOrSite, tenantOrSubject }`、`identityConfidence`、`enabled`、`notes`）、`credentials[]`、身份级 `declaredRelations[]`（`platformAccountId`、`group`）以及 `legacy`（`kind` `account` | `platform_account`，`id`）。载荷形状是嵌套的：`credentials[].credential`（`id`、`purpose` `inference` | `platform_observer`、`materialKind` `api_key` | `external_reference`、`secretRef`——不透明句柄，绝不是材料本身、`hasMaterial`、`version`、`enabled`、`authState` `unknown` | `valid` | `invalid`、`authStateVersion`、未知时 `expiresAt` 为 null），同级字段为 `subject`（`account_credential` | `anonymous`）、`bindings[]`（`id`、`connectionId`、`allowedEndpointIds`、`allowedOrigins`、`modelScope`、`enabled`、`routingRank`）、`quotaWindows[]`、`onboardingTask`、`subscription`（未知时为 null）、`lastError`（已脱敏；无法安全脱敏时为 null）与 `legacy`。平台父账号的 `platform_observer` 凭据是投影，没有 `credential_state` 行。`authState` 是本地状态：`unknown` 绝不是 `valid`；`valid` 需要既有验证记录。Vue 账号页只把该投影叠加到展示上；Key 轮换、绑定编辑与身份内新增凭据走 V4 原生路由，其余账号变更走挂回 V4 的原 V3 路径。
 
-`GET /destinations` 与 `GET /credentials` 是 `destination_projection` 的 RFC 第 4b 阶段投影：只读、不含密钥、带 revision。只要 destinations/credentials 已有行就下发，即使活的 `project()` 会拒绝。空库或遗留表升级窗口才回落到 `project()`；只有这条空库回落会返回 `409` `destinationProjectionRefused`，`details` 数组点名每一条被拒绝的行。
+`GET /destinations` 与 `GET /credentials` 是不含密钥、带 revision 的投影。带 CAS 的 `PATCH /destinations/{id}` 完整替换可编辑 HTTP 目的地的名称、地址、鉴权、协议、映射与按模型路由覆盖；它不接收 Key，只给 `authorizeCredentialIds` 明确列出的凭据并入安全授权。`DELETE /destinations/{id}` 要求没有凭据引用。密封与平台管理目的地拒绝两种变更。空库或遗留表升级窗口回落到 `project()`；拒绝时返回结构化 `409`。
 
-节点转移（`POST /accounts/transfer/export|preview|import`）挂在 V4。最新导出是 payload V7：`destinations` 与 `credentials`（明文密钥、平台与 CPA observer 管理凭据，以及 identity / grant / cooldown extras 只存在已加密信封内），外加 `quotaPools` 与 `node`。合并导入时，若包中没有 CPA observer key，会保留目标已有 management key。不再生成 `accounts`、`platformAccounts`、`platformLinks`、`dynamicProviders` 或 `identities`。这些 Portable 类型只用于转移，不进 V4 列表 DTO。V4–V6 包仍走旧图解码器导入。
+节点转移（`POST /accounts/transfer/export|preview|import`）挂在 V4。最新导出是 payload V8，以 `destinations` 与 `credentials` 为权威，并携带按模型路由覆盖、模型解析策略、`quotaPools` 与 `node`。V4–V8 可导入：V7 确定性补解析策略，V8 必须显式携带。
+
+`GET /routing/explain?model=...&clientProtocol=...` 是受保护的只读解释。它复用真实别名解析、路由物化、资格门和基础策略克隆预览，不发送、不解密 Key、不探测 DNS、不写日志/冷却，也不推进粘性或轮询。响应给出合格 Key、类型化排除原因、有效上游协议/全局顺序及明确的运行时不确定项。
 
 V4 不把授权 `unknown` 当作 `valid`。资格是本地投影，不是上游健康。
 
 `POST /onboarding/commit` 请求体：`expectedRevision`、`processGeneration`（与 V3 相同的 CAS 令牌）、`operationId`（客户端生成的 UUID）、`connection`、可选 `authorization`，以及 `targets`。
 
-`connection` 为 `kind: new`（`templateId` 是 `custom-http` 或预设 id，外加 `name`、`endpointUrl`、`upstreamProtocol`、`authKind`）或 `kind: existing`（`connectionId`）。`authorization` 为 `kind: api_key`（`secretInput`，可选 `accountLabel` / `notes`）或 `kind: none`。`targets` 把公开模型映射到精确上游模型，可带每条目的上游覆盖。`new` 要求 `targets` 非空；`existing` 必须为空（模型编辑仍走 V3 `PATCH /providers/{id}`）。
+`connection` 为 `kind: new`（`templateId` 是 `custom-http` 或预设 id，外加 `name`、`endpointUrl`、`upstreamProtocol`、`authKind`）或 `kind: existing`（`connectionId`）。`authorization` 为 `kind: api_key`（`secretInput`，可选 `accountLabel` / `notes`）或 `kind: none`。`targets` 把公开模型映射到精确上游模型，可带每条目的上游覆盖。`new` 要求 `targets` 非空；`existing` 必须为空（连接编辑走 V4 `PATCH /destinations/{id}`）。
 
 求值顺序：(1) 解析；(2) `operationId` 必须是 UUID；(3) 先取 `settings_update` 锁，再在 CAS 之前做幂等查找——若该 `operationId` 已用同一载荷摘要提交过，则直接返回已存的无密钥结果，并带 `replayed: true` 与当前 revision 令牌，不再检查 CAS（首次写入已经推进 revision）；同一 `operationId` 配不同载荷返回 `409` `operationPayloadMismatch`，不写入；(4) CAS 检查（`409` `revisionConflict`）；(5) 写入。
 
 `new` 复用 V3 用户定义供应商校验。模板 id 作为不透明预设 id 透传；预设表单归前端所有，Rust 只消费由 `resources/provider-presets.json` 生成的 offering 投影。keyed 鉴权下省略 `authorization` 只保存定义（随后 V4 connection 的授权为 `missing`）；`api_key` 在 keyed 鉴权下要求非空密钥；`none` 仅对无鉴权模板有效，且总会创建单例账号。供应商行、可选的首个账号行与操作记录在同一 SQLite 事务中提交；提交后按 V3 同样方式安装动态供应商快照。
 
-`existing` 只接受用户定义（dynamic）且为 keyed 鉴权的 connection 新增 `api_key`。内置与 Custom API 的 connection id 返回 `400`（“add Keys on Accounts”）。账号行与操作记录在同一事务中提交，随后只推进 revision（`reload_contracts=false`），与 V3 普通账号创建一致。
+`existing` 接受 keyed dynamic Provider 与遗留 Custom HTTP connection 新增 `api_key`。内置、平台管理与无鉴权 connection 返回 `400`。账号行与操作记录在同一事务中提交，随后推进 revision。
 
 结果为 `{ revision, connectionId, credentialId | null, targetIds, replayed }`。`connectionId` 是动态供应商的确定性 UUIDv5；`credentialId` 是账号 id；`targetIds` 是每个公开模型的 UUIDv5。响应从不包含密钥、密文或摘要。
 

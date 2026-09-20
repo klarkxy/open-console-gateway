@@ -10,7 +10,7 @@ Provider choices are projected in the exact order returned by the V4 destination
 
 Accounts edit through the same forms used to create them. Ready, routable cards show enabled, disabled, cooling, or unavailable. Card relations come from the identity projection: a declared relation is not a verified wallet, and dynamic or Custom dates stay unknown unless a stored purchase date already exists.
 
-A ready Key card can **Rotate Key**, **Add Key**, and **Edit binding** from the overflow menu. Rotate replaces only the Key this console will send on later requests for that card's credential (same credential id; version numbers increase). It is a local replacement: the provider-side credential is not revoked and stays under your control. **Add Key** creates another inference Key on the same identity, defaulting to that card's connection. Quota is independent unless you explicitly share with a selected inference Key on that identity; belonging to the same identity is not enough. After save, cards that actually share a stored quota pool show that relationship (naming the sibling Key when possible). A third Key on the same identity stays independent when it has its own pool or none. Custom API, Zen Free, CPA, no-auth, and observer credentials do not expose Add Key (Custom API still uses its dedicated account editor). If create does not return a definite result, the form keeps the submitted contents and operation: retry the same body, or cancel; do not change the form and submit again (that can create a duplicate Key).
+A ready Key card can **Rotate Key**, **Add Key**, and **Edit binding** from the overflow menu. Rotate replaces only the Key this console will send on later requests for that card's credential (same credential id; version numbers increase). It is a local replacement: the provider-side credential is not revoked and stays under your control. **Add Key** creates another inference Key on that connection. Quota is independent unless you explicitly share with a selected inference Key on the same identity; using one connection or identity is not enough. After save, cards that actually share a stored quota pool show that relationship (naming the sibling Key when possible). A third Key stays independent when it has its own pool or none. Configurable HTTP connections, including migrated Custom API records, support multiple Keys. Zen Free, CPA, no-auth, and observer credentials remain singletons or externally owned and do not expose Add Key. If create does not return a definite result, the form keeps the submitted contents and operation: retry the same body, or cancel; do not change the form and submit again (that can create a duplicate Key).
 
 Edit binding changes that credential's enabled state, model scope (all models, or only the exact names you list), and — when you change it — destination consent: which configured endpoint this Key may be sent to (protocol and URL). Saved destination grants are facts; if a provider URL later changes, the saved Origin is shown and that endpoint stays unchecked until you explicitly allow the new destination. Changing only scope or enabled leaves destinations unchanged. Clearing both destination lists revokes access. Sealed official endpoints with no URL stay locked destinations and do not invent Origin strings. A disabled binding is shown on that card and does not flip the account enable switch. Zen Free, CPA, no-auth, and observer credentials do not expose rotate or binding. An identity can hold more than one Key; each card uses the credential whose legacy account id matches that card.
 
@@ -25,12 +25,11 @@ pool.
 
 **Accounts** owns identity, the account **Key**, verification, enabled state,
 card order, managed registration, and available usage / cooldown state.
-Catalogs, protocol probes, per-model protocol overrides, user-defined Provider
-Endpoint/protocol/mappings, and scoped pricing live on **Providers**.
-A user-defined Provider account only stores Key (when auth requires it), notes,
-enablement, and runtime state. Custom API is the exception: that account still
-owns Endpoint, protocol, and model mappings. No-auth user-defined Providers
-expose one singleton account and reject a second.
+Catalogs, protocol probes, per-model protocol overrides, configurable HTTP
+Endpoint/auth/protocol/mappings, and scoped pricing live on **Providers**.
+An account stores one Key (when auth requires it), notes, enablement, model
+scope, grants, quota relation, and runtime state. No-auth connections expose
+one singleton credential and reject a second.
 
 Quota cards follow catalog capabilities instead of Provider IDs. `usageAvailability=available` loads Provider quota windows and enables the refresh action. `manualUsageCalibration=true` additionally loads the local calibration object for editing, while the card itself still renders the Provider windows. Other rows show no quota strip; Zen Free keeps its separate egress cooldown. Known MiniMax/Kimi window names remain friendly, and unknown window names are humanized without changing stored wire values. Custom API and user-defined Provider cards whose stored Endpoint host is exactly `api.deepseek.com`, `api.moonshot.cn`, or `api.moonshot.ai` can also **Refresh quota** to read that official current balance. The snapshot is display-only and does not change routing. Other Custom destinations have no balance endpoint in this product.
 
@@ -58,7 +57,7 @@ The Adapter Registry is sealed. Built-in Provider families are:
 | MiniMax CN Token Plan | `minimax` | Yes | Dedicated `sk-cp` Key; fixed official Chat and Messages routes, authenticated model directory, and manual official Token Plan usage refresh |
 | Kimi Code CN | `kimi` | Yes | Dedicated Kimi Code Key; fixed official Chat and Messages routes, authenticated model directory, and manual official weekly/rate-window usage refresh |
 | Ollama Cloud | `ollama` | Yes | Fixed-origin Chat Completions only (`https://ollama.com`, Bearer); public keyless catalog refresh; account billing tier (Pro $60 / Max $300 / Team $1000 USD Credits per billing month) plus purchase date; local monthly soft-credit estimate from official per-request usage and the manual `https://ollama.com/pricing` table; unconfigured existing accounts stay routeable with no meter |
-| Custom API | `custom` | Yes | Trusted-administrator destination; one API URL, one account-wide upstream protocol, and public-name → upstream-ID mappings per account; common base URLs are completed automatically; new accounts start enabled; eligible public names appear on `/v1/models`; unpriced/unknown cost, no quota debit |
+| Custom API | `custom` | Yes | Compatibility identity for migrated configurable HTTP connections; one connection owns its API URL, auth, protocol, and public-name → upstream-ID mappings, while multiple Key cards may attach; existing records remain separate and retain public-name-only resolution; unpriced/unknown cost, no quota debit |
 
 ## Move a node configuration
 
@@ -69,7 +68,7 @@ transfer it separately from the file; Open Console Gateway cannot recover it. Th
 operation remains available only from the node's loopback dashboard; forwarded
 scheme headers do not grant access to a remote dashboard.
 
-The current V7 payload moves destinations and credentials as the authority
+The current V8 payload moves destinations and credentials as the authority
 (ready Keys, platform and CPA observer management credentials, and identity /
 grant / cooldown extras stay inside the encrypted envelope), Custom Endpoint/public-model → upstream-ID mappings and verification
 state encoded on those entities, user-defined Providers as destination extras,
@@ -78,7 +77,9 @@ Free enablement/catalog, Provider catalogs, evidence, and protocol
 overrides, plus quota-pool membership.
 Shared identities, a second credential on the same identity, binding model
 restrictions and enabled flags, and quota-pool membership and declared/unknown
-evidence are restored as stored. Matching stable IDs are merged with package-owned portable fields;
+evidence are restored as stored. V7 Custom destinations are normalized to the
+connection-owned multi-Key representation without changing their stable IDs or
+public-name-only lookup behavior. Matching stable IDs are merged with package-owned portable fields;
 same-Plan or same-name rows with different IDs coexist and independent same-URL
 accounts are not merged. Existing destination
 accounts keep their current order and position; source-only accounts append in
@@ -87,7 +88,7 @@ A merge that omits a CPA observer key keeps the destination's existing
 management key.
 
 Browser profiles/cookies, third-party login passwords, referral codes, logs,
-and usage history do not move. V7 carries source cooldown deadlines without
+and usage history do not move. V8 carries source cooldown deadlines without
 shortening a later destination deadline; V4/V5 keep cooldown behavior
 host-local. Existing destination usage history and browser data stay in
 place; stale authentication and last-error flags are cleared when package
@@ -95,8 +96,8 @@ account fields replace the stored credential.
 Machine-local listener/root URL, auto-start, and Dock settings also stay with
 the destination. Ready managed accounts keep their Key, but their browser login
 does not move; unfinished managed drafts are skipped. Import accepts payload
-V4, V5, V6, and V7. V4/V5 packages rebuild one identity, credential, All-scope
-binding, and identity quota pool per account. Payload V1–V3 and V8 or newer
+V4, V5, V6, V7, and V8. V4/V5 packages rebuild one identity, credential, All-scope
+binding, and identity quota pool per account. Payload V1–V3 and V9 or newer
 backups are rejected with an explicit unsupported-version error. A V4/V5 file
 that already contains V6 identity fields, or a V6 file that already contains
 V7 destination fields, is rejected rather than silently dropping them. The outer encrypted envelope remains version 1 and

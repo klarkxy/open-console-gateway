@@ -2,7 +2,7 @@
 
 # RFC：重新设计账号与供应商模型
 
-状态：**物理存储与 destination/credential 投影已切换；Account overlay 与部分运行时消费方仍是后续债。** 阶段 1–8 删到 schema v57，并把操作路由重挂到 `/dashboard/api/v4`。HEAD 已按实体增量写 destinations / credentials / catalogs：`project()` 与 `replace_all_on` 只留在遗留表升级和 V4–V6 备份转换，不再挂在账号创建、冷却或目录变更上。Payload V7 导出/导入以 Destination、Credential 为权威（密钥只存在已加密信封内），并携带平台与 CPA observer 管理凭据。合并导入时，若包中没有 CPA observer key，会保留目标已有 management key。账号页按 Credential 分组，不再要求另一份 Account 列表才能出卡片。仍未做：公开的 `POST/PATCH /destinations`；重挂的 `/accounts*` 仍是输入输出适配器；`legacy_account_id` 与 V3 Account overlay 仍桥接部分运行时消费方。[运行时不变量](runtime-invariants.zh-CN.md)与[Dashboard API](dashboard-api.zh-CN.md)描述 HEAD。
+状态：**目的地/凭据已是权威存储，schema v58 完成 Custom HTTP 连接所有与多 Key；V4 已提供目的地 PATCH/DELETE 和只读路由解释。** Payload V8 以 Destination、Credential 为权威并携带模型解析策略与按模型覆盖；V4–V8 可导入。`legacy_account_id` 与重挂的旧账号输入仍作为兼容桥。[运行时不变量](runtime-invariants.zh-CN.md)与[Dashboard API](dashboard-api.zh-CN.md)描述 HEAD。
 
 ## 1. 问题在哪
 
@@ -61,7 +61,7 @@
 | `observer_credential_id` | 可选的非推理凭据，用于读取站点数据（平台管理令牌） |
 | `enabled`、`revision` | 生命周期与 CAS |
 
-Custom API 账号成为 `adapter = http`、`max_credentials = 1` 的目的地，其唯一凭据在同一次写入中创建。用户定义供应商相同但 `max_credentials = null`。平台站点在此基础上加 `observer_credential_id` 与 `observer` 能力。Zen Free 是 `adapter = zen`、`auth_scheme = none`、`max_credentials = 1`。CPA 是 `adapter = cpa` 加 `capabilities.external_integration`，本机不持有推理凭据。
+Custom API 账号迁移为 `adapter = http`、`max_credentials = null` 的独立目的地，可由多份凭据引用；既有目的地 ID 与 `public_only` 解析保持不变。平台站点另有 `observer_credential_id` 与 `observer` 能力。Zen Free 是 `adapter = zen`、`auth_scheme = none`、`max_credentials = 1`。CPA 是 `adapter = cpa` 加 `capabilities.external_integration`，本机不持有推理凭据。
 
 ### 3.2 Credential（凭据）
 
@@ -107,7 +107,7 @@ Custom API 账号成为 `adapter = http`、`max_credentials = 1` 的目的地，
 ## 4. 目标 UI
 
 - **账号**页列出**按目的地分组的凭据**，按全局路由顺序。每组使用同一张卡壳（本分支已交付的那张）：目的地头部（品牌、名称、类型、副标题、能力动作）加每个凭据一行（名称、状态标签、元信息、开关、工具、菜单）。单凭据目的地渲染同一张卡但只有一行；不再有"账号卡"与"平台卡"之分。
-- **供应商**页列出**目的地**。详情 = 目录、套餐 / 价格、传输设置、观测凭据。Custom API 目的地像任何 `http` 目的地一样出现在这里；由于 `max_credentials = 1`，其传输字段也可从凭据卡编辑。
+- **供应商**页列出**目的地**。详情 = 目录、套餐 / 价格、传输设置、观测凭据。Custom API 目的地像任何 `http` 目的地一样在这里编辑；账号页只管理凭据。
 - **新增**是一条流程：选择目的地（已有，或从 sealed 类型 / 预设 / 手工 `http` 新建），再添加凭据。目的地具备 `managed_signup` 时，托管注册作为凭据的 onboarding task 从同一流程发起。
 - **别名**页职责不变：跨已启用凭据，每个对外名一行。
 - Custom API 在"新增"中保留一等入口，即"手工 `http` 目的地 + 一个凭据"。它是任何上游的兜底，永不隐藏。
@@ -117,7 +117,7 @@ Custom API 账号成为 `adapter = http`、`max_credentials = 1` 的目的地，
 - **Dashboard API V4 成为完整表面**：`destinations`、`credentials`、`quota-pools`、`observations`、`onboarding`，加上既有的 `contract`、`templates`、`applications`。所有变更走 CAS；创建按 operation id 幂等。
 - **V3 降为读写垫片**，在新表之上维持一个版本（`accounts` ↔ 凭据 + 单凭据目的地投影），然后移除。`schema/dashboard-api-v3.schema.json` 不再是冻结的权威；生成的 V4 类型才是。
 - **存储**：新表 `destinations`、`destination_models`、`credentials`、`credential_grants`、`quota_pools`、`quota_pool_members`、`observations`。一次迁移读取 `accounts`、`providers`、`provider_models`、`account_model_capabilities`、`platform_accounts`、`platform_links`、`credential_bindings`、`cpa_integration` 与 V4 identity 表写入新表；垫片版本之后删除旧表。迁移是全量的：每一现有行必须恰好映射为一个目的地与一个凭据，否则迁移拒绝运行。
-- **转移包** payload V7 直接携带新实体。
+- **转移包** payload V8 直接携带新实体、模型解析策略与路由覆盖。
 
 ## 6. 迁移
 
@@ -141,7 +141,7 @@ Custom API 账号成为 `adapter = http`、`max_credentials = 1` 的目的地，
        - **4d-3c** V3 列表成为同一套表上的垫片。
 5. **路由规划器只读凭据与能力。** 删除 Rust 身份谓词；保留 UUID 只在迁移中出现。
 6. **UI 切换**到 V4 完整表面：账号 = 按目的地分组的凭据，供应商 = 目的地，一条新增流程。
-7. **弃用版本**：V3 垫片标记弃用，转移包默认 V7。
+7. **弃用版本**：V3 垫片标记弃用，转移包默认 V8。
 8. **移除版本**：删除 V3、旧表、`account-providers.ts`、`platform-accounts.ts` 中的 route-item 辅助函数。
 
 阶段 1–3 不需要 schema 或契约变化。阶段 4 是最大的一步，也是不可回头的点；之前应先写一份迁移测试计划，覆盖每一种现有形态（每个 sealed adapter、根地址与完整路径两种 Custom、有 / 无 Key 的用户定义供应商、关联 / 未关联 / 待关联 Key 的平台、每一步的托管草稿、Zen、CPA）。
@@ -284,12 +284,12 @@ V4 GET 列表仍不含秘密。Key
 
 ### 阶段 7 已开始的弃用规则
 
-新节点备份导出 payload V7。加密 envelope 仍为 v1。V7 携带 `destinations` 与
+新节点备份导出 payload V8。加密 envelope 仍为 v1。V8 携带 `destinations` 与
 `credentials`（明文密钥、平台与 CPA observer 管理凭据，以及 identity / grant /
 cooldown 等 extras 只存在该信封内），以及 `quotaPools` 与 `node`。合并导入时，若包中没有
 CPA observer key，会保留目标已有 management key。最新导出不再生成 `accounts`、平台行、动态供应商定义
 或单独的 identities 数组。V4–V6 仍可通过旧图解码器转入同一套新模型导入对象。
-若 V7 包仍带旧字段，必须与 dest/cred 一致，否则拒绝。V8 及更新是不支持版本错误。
+若 V7 包仍带旧字段，必须与 dest/cred 一致，否则拒绝。V9 及更新是不支持版本错误。
 重挂的 `/accounts*` 是输入输出适配器；新客户端的读模型是 V4 目的地/凭据。
 
 ### 阶段 6 已开始的界面规则

@@ -61,7 +61,7 @@
 
 Go/Zen 协议探测是 `POST /providers/{provider_id}/protocol-probes`。Custom 在该路径被拒绝（`protocol probes for Custom API are account-owned`）。Custom 连接验证是 `POST /accounts/{id}/verify`；模型发现是 `POST /custom/models/discover`。V2 `POST /accounts/{id}/protocol-probes` 为 410。用户定义供应商使用 `POST /providers`、`GET|PATCH|DELETE /providers/{provider_id}`、`POST /providers/models/discover` 与 `POST /providers/test`。保存不依赖发现与测试；真实测试可能消耗上游额度。
 
-V4 原生会话保护路由（见 `dashboard_v4/mod.rs`）：`GET /contract`、`GET /templates`、`GET /connections`、`GET /accounts`（身份）、`GET /destinations`、`GET /credentials`、`GET|POST /applications/dsh`、`POST /onboarding/commit`、`POST /credentials/{id}/rotate`、`PATCH /bindings/{id}`、`POST /identities/{id}/credentials`、`GET|PUT /cpa/models`、`POST /provider-contracts/{scope_kind}/{scope_id}/catalog/remove`、`GET|PATCH /alias-publication`。
+V4 原生会话保护路由（见 `dashboard_v4/mod.rs`）：`GET /contract`、`GET /templates`、`GET /connections`、`GET /accounts`（身份）、`GET /destinations`、`PATCH|DELETE /destinations/{id}`、`GET /credentials`、`GET /routing/explain`、`GET|POST /applications/dsh`、`POST /onboarding/commit`、`POST /credentials/{id}/rotate`、`PATCH /bindings/{id}`、`POST /identities/{id}/credentials`、`GET|PUT /cpa/models`、`POST /provider-contracts/{scope_kind}/{scope_id}/catalog/remove`、`GET|PATCH /alias-publication`。目的地变更带 CAS，只允许可配置 HTTP 行；密封与平台管理行不可改。路由解释只读，不发出站请求也不解密 Key。
 
 ## 静态面板
 
