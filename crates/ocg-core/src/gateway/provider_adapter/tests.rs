@@ -305,6 +305,7 @@ fn adapter_kind_dispatch_preserves_route_auth_and_model_decisions() {
             ApiFormat::Messages,
             Some(CustomRouteSpec {
                 endpoint_url: "http://127.0.0.1:9/v1/messages".into(),
+                auth_kind: ocg_domain::dynamic::DynamicAuthKind::XApiKey,
             }),
         ),
     )
@@ -325,6 +326,21 @@ fn adapter_kind_dispatch_preserves_route_auth_and_model_decisions() {
             id: "custom-1".into()
         }
     );
+    let x_api_chat = resolve_route(
+        &custom,
+        &config,
+        &chat_plan(
+            "local-model",
+            UpstreamChannel::Go,
+            ApiFormat::ChatCompletions,
+            Some(CustomRouteSpec {
+                endpoint_url: "http://127.0.0.1:9/v1/chat/completions".into(),
+                auth_kind: ocg_domain::dynamic::DynamicAuthKind::XApiKey,
+            }),
+        ),
+    )
+    .unwrap();
+    assert_eq!(x_api_chat.auth, UpstreamAuth::XApiKey);
 
     for endpoint_url in ["http://127.0.0.1:9", "http://127.0.0.1:9/v1"] {
         let resolved = resolve_route(
@@ -336,6 +352,7 @@ fn adapter_kind_dispatch_preserves_route_auth_and_model_decisions() {
                 ApiFormat::ChatCompletions,
                 Some(CustomRouteSpec {
                     endpoint_url: endpoint_url.into(),
+                    auth_kind: ocg_domain::dynamic::DynamicAuthKind::Bearer,
                 }),
             ),
         )

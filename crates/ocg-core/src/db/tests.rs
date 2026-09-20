@@ -958,6 +958,221 @@ fn v45_unlink_returns_identity_to_opaque() {
 }
 
 #[test]
+fn shared_custom_link_and_unlink_preserve_sibling_connection() {
+    use crate::platform::{PlatformGroup, PlatformKind};
+
+    let dir = temp_data_dir("shared-custom-link-unlink");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let mut owner = account("shared-owner");
+    owner.provider_id = CUSTOM_PROVIDER_ID.into();
+    owner.key_cipher = fixture_account_key_cipher();
+    db.create_account_with_contract(
+        &owner,
+        Some(&AccountCustomConfigInput {
+            endpoint_url: "https://shared-source.example/v1/chat/completions".into(),
+            upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+        }),
+        &[AccountModelCapabilityInput {
+            public_model: "shared-model".into(),
+            upstream_model: "vendor/shared-model".into(),
+            protocol: UpstreamProtocolKind::ChatCompletions,
+            source: None,
+        }],
+    )
+    .unwrap();
+    db.replace_credential_id("shared-owner", "00000000-0000-4000-8000-00000000c0de")
+        .unwrap();
+    let source_destination = ocg_domain::destination::destination_id_for_custom_account(&owner.id);
+    let mut sibling = account("shared-sibling");
+    sibling.provider_id = CUSTOM_PROVIDER_ID.into();
+    sibling.key_cipher = fixture_account_key_cipher();
+    db.commit_onboarding_existing_account(
+        &sibling,
+        Some(&source_destination),
+        &NewDashboardOperation {
+            operation_id: uuid::Uuid::new_v4().to_string(),
+            kind: "onboarding_commit".into(),
+            payload_digest: "2".repeat(64),
+            result_json: "{}".into(),
+        },
+    )
+    .unwrap();
+    db.create_platform_account(
+        "shared-parent",
+        PlatformKind::NewApi,
+        "Shared Parent",
+        "https://shared-source.example/v1",
+        Some("obfuscated-test-credential"),
+    )
+    .unwrap();
+
+    db.link_platform_account("shared-owner", "shared-parent", &PlatformGroup::default())
+        .unwrap();
+    let sibling_after_link = db.account_custom_config("shared-sibling").unwrap().unwrap();
+    assert_eq!(
+        sibling_after_link.endpoint_url,
+        "https://shared-source.example/v1/chat/completions"
+    );
+    let sibling_destination: String = db
+        .conn
+        .query_row(
+            "SELECT destination_id FROM credentials WHERE legacy_account_id = 'shared-sibling'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(sibling_destination, source_destination);
+
+    db.unlink_platform_account("shared-owner").unwrap();
+    let owner_destination: String = db
+        .conn
+        .query_row(
+            "SELECT destination_id FROM credentials WHERE legacy_account_id = 'shared-owner'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_ne!(owner_destination, source_destination);
+    let owner_legacy_id: String = db
+        .conn
+        .query_row(
+            "SELECT legacy_id FROM destinations WHERE id = ?1",
+            [&owner_destination],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let owner_connection = ocg_domain::connection::connection_id_for_legacy(
+        ocg_domain::connection::LegacyConnectionKind::CustomAccount,
+        &owner_legacy_id,
+    );
+    let expected_endpoint = ocg_domain::connection::endpoint_id_for(
+        &owner_connection,
+        ocg_domain::connection::EndpointOperation::ChatCreate,
+    );
+    let owner_binding = db
+        .list_inference_bindings()
+        .unwrap()
+        .into_iter()
+        .find(|binding| binding.account_id == "shared-owner")
+        .unwrap();
+    assert_eq!(
+        owner_binding.allowed_endpoint_ids,
+        vec![expected_endpoint.to_string()]
+    );
+    let sibling_destination: String = db
+        .conn
+        .query_row(
+            "SELECT destination_id FROM credentials WHERE legacy_account_id = 'shared-sibling'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(sibling_destination, source_destination);
+    assert_eq!(
+        db.account_custom_config("shared-sibling")
+            .unwrap()
+            .unwrap()
+            .endpoint_url,
+        "https://shared-source.example/v1/chat/completions"
+    );
+    assert_eq!(
+        db.account_custom_config("shared-owner")
+            .unwrap()
+            .unwrap()
+            .endpoint_url,
+        "https://shared-source.example"
+    );
+
+    let binding_id = owner_binding.binding_id;
+    db.update_credential_binding(&binding_id, None, None, Some(&[]), Some(&[]))
+        .unwrap();
+    db.link_platform_account("shared-owner", "shared-parent", &PlatformGroup::default())
+        .unwrap();
+    db.unlink_platform_account("shared-owner").unwrap();
+    let revoked = db
+        .list_inference_bindings()
+        .unwrap()
+        .into_iter()
+        .find(|binding| binding.account_id == "shared-owner")
+        .unwrap();
+    assert!(revoked.allowed_endpoint_ids.is_empty());
+    assert!(revoked.allowed_origins.is_empty());
+
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn substantive_custom_destination_edit_invalidates_verification_and_auth_projection() {
+    let dir = temp_data_dir("custom-edit-invalidates-verification");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let mut custom = account("custom-verified");
+    custom.provider_id = CUSTOM_PROVIDER_ID.into();
+    custom.key_cipher = fixture_account_key_cipher();
+    db.create_account_with_contract(
+        &custom,
+        Some(&AccountCustomConfigInput {
+            endpoint_url: "https://before.example/v1/chat/completions".into(),
+            upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+        }),
+        &[AccountModelCapabilityInput {
+            public_model: "verified-model".into(),
+            upstream_model: "vendor/verified-model".into(),
+            protocol: UpstreamProtocolKind::ChatCompletions,
+            source: None,
+        }],
+    )
+    .unwrap();
+    db.conn
+        .execute(
+            "UPDATE credentials SET verification_status = 'verified',
+                 connection_verified_at = '2026-09-20T00:00:00Z',
+                 cooldown_generic_until = '2026-09-21T00:00:00Z'
+             WHERE legacy_account_id = 'custom-verified'",
+            [],
+        )
+        .unwrap();
+    account_store::sync_inference_credential_projection_on(&db.conn, "custom-verified").unwrap();
+    let destination_id =
+        ocg_domain::destination::destination_id_for_custom_account("custom-verified");
+    db.replace_custom_destination(
+        &destination_id,
+        &ocg_domain::dynamic::DynamicProviderDefinition {
+            preset_id: None,
+            id: "custom-verified".into(),
+            name: "After".into(),
+            endpoint_url: "https://after.example/v1/chat/completions".into(),
+            upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+            auth_kind: ocg_domain::dynamic::DynamicAuthKind::Bearer,
+            mappings: vec![ocg_domain::dynamic::DynamicModelMapping {
+                public_model: "verified-model".into(),
+                upstream_model: "vendor/verified-model".into(),
+                upstream_override: None,
+            }],
+        },
+        &[],
+    )
+    .unwrap();
+    let state: (String, Option<String>, String, Option<String>) = db
+        .conn
+        .query_row(
+            "SELECT verification_status, connection_verified_at, auth_state,
+                    cooldown_generic_until
+             FROM credentials WHERE legacy_account_id = 'custom-verified'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(state.0, "pending");
+    assert!(state.1.is_none());
+    assert_eq!(state.2, "unknown");
+    assert!(state.3.is_none());
+
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn d02_shared_identity_pool_fans_out_cooldown_to_sibling_key() {
     use crate::models::{UpstreamChannel, local_today};
     use crate::provider::ConnectionVerificationStatus;
@@ -1356,7 +1571,7 @@ fn v49_adds_unpublished_public_models_on_v48_reopen_and_fresh_databases() {
 
 #[test]
 fn v50_adds_destination_shadow_tables_on_v49_reopen_and_fresh_databases() {
-    assert_eq!(CURRENT_SCHEMA_VERSION, 57);
+    assert_eq!(CURRENT_SCHEMA_VERSION, 58);
     let shadow_tables = [
         "destinations",
         "destination_models",
@@ -1455,10 +1670,11 @@ fn v52_migrates_v51_fixture_and_drops_accounts() {
 }
 
 #[test]
-fn fresh_open_is_schema_v57_without_leftover_tables_and_keeps_zen() {
-    let dir = temp_data_dir("v57-fresh");
+fn fresh_open_is_schema_v58_without_leftover_tables_and_keeps_zen() {
+    let dir = temp_data_dir("v58-fresh");
     let db = open_with_host_cipher(dir.clone()).unwrap();
-    assert_eq!(schema_version_on(&db.conn).unwrap(), 57);
+    assert_eq!(schema_version_on(&db.conn).unwrap(), 58);
+    assert!(table_has_column(&db.conn, "destinations", "model_resolution").unwrap());
     assert!(!accounts_table_present(&db.conn));
     assert!(!table_exists(&db.conn, "account_custom_configs").unwrap());
     assert!(!table_exists(&db.conn, "account_model_capabilities").unwrap());
@@ -3721,6 +3937,105 @@ fn pre_v48_backup_paths(dir: &Path) -> Vec<PathBuf> {
     backup_paths_with_prefix(dir, PRE_V48_BACKUP_FILE_PREFIX)
 }
 
+fn pre_v58_backup_paths(dir: &Path) -> Vec<PathBuf> {
+    backup_paths_with_prefix(dir, PRE_V58_BACKUP_FILE_PREFIX)
+}
+
+#[test]
+fn v58_preserves_custom_identity_and_writes_verified_backup() {
+    let dir = temp_data_dir("v58-custom-connection");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let mut custom = account("custom-v58");
+    custom.provider_id = CUSTOM_PROVIDER_ID.into();
+    custom.name = "Legacy Custom".into();
+    custom.key_cipher = fixture_account_key_cipher();
+    db.create_account_with_contract(
+        &custom,
+        Some(&AccountCustomConfigInput {
+            endpoint_url: "https://custom.example/v1/chat/completions".into(),
+            upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+        }),
+        &[AccountModelCapabilityInput {
+            public_model: "public-name".into(),
+            upstream_model: "vendor/raw-id".into(),
+            protocol: UpstreamProtocolKind::ChatCompletions,
+            source: None,
+        }],
+    )
+    .unwrap();
+    let before: (String, String, String) = db
+        .conn
+        .query_row(
+            "SELECT d.id, c.id, c.destination_id
+             FROM destinations d
+             JOIN credentials c ON c.destination_id = d.id
+             WHERE c.legacy_account_id = 'custom-v58'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    db.conn
+        .execute_batch(
+            "ALTER TABLE destinations DROP COLUMN model_resolution;
+             UPDATE destinations SET max_credentials = 1 WHERE legacy_kind = 'custom_account';
+             DELETE FROM schema_version;
+             INSERT INTO schema_version(version) VALUES (57);",
+        )
+        .unwrap();
+    drop(db);
+
+    assert!(pre_v58_backup_paths(&dir).is_empty());
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), 58);
+    let after: (String, String, String, Option<i64>, String) = db
+        .conn
+        .query_row(
+            "SELECT d.id, c.id, c.destination_id, d.max_credentials, d.model_resolution
+             FROM destinations d
+             JOIN credentials c ON c.destination_id = d.id
+             WHERE c.legacy_account_id = 'custom-v58'",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(after.0, before.0);
+    assert_eq!(after.1, before.1);
+    assert_eq!(after.2, before.2);
+    assert_eq!(after.3, None);
+    assert_eq!(after.4, "public_only");
+    let model: (String, String) = db
+        .conn
+        .query_row(
+            "SELECT public_model, upstream_model FROM destination_models WHERE destination_id = ?1",
+            [&after.0],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(model, ("public-name".into(), "vendor/raw-id".into()));
+    drop(db);
+
+    let backups = pre_v58_backup_paths(&dir);
+    assert_eq!(backups.len(), 1);
+    let backup =
+        Connection::open_with_flags(&backups[0], OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    assert_eq!(schema_version_on(&backup).unwrap(), 57);
+    drop(backup);
+    let hash_path = backups[0].with_file_name(format!(
+        "{}.sha256",
+        backups[0].file_name().unwrap().to_str().unwrap()
+    ));
+    assert!(hash_path.exists());
+    fs::remove_dir_all(dir).unwrap();
+}
+
 fn assert_leftover_dynamic_provider_storage_absent(conn: &Connection) {
     assert!(!table_exists(conn, "providers").unwrap());
     assert!(!table_exists(conn, "provider_models").unwrap());
@@ -3790,6 +4105,7 @@ fn current_schema_and_data_remain_stable_across_startup_replay() {
         assert_v48_inert_columns_absent(&db.conn);
         assert_leftover_dynamic_provider_storage_absent(&db.conn);
         assert!(table_has_column(&db.conn, "destinations", "onboarding_draft").unwrap());
+        assert!(table_has_column(&db.conn, "destinations", "model_resolution").unwrap());
         assert!(!table_has_column(&db.conn, "accounts", "offering_id").unwrap());
         for column in USAGE_SYNC_ACCOUNT_COLUMNS {
             assert!(
@@ -3833,6 +4149,7 @@ fn current_schema_and_data_remain_stable_across_startup_replay() {
             ("v35", pre_v35_backup_paths(&dir)),
             ("v42", pre_v42_backup_paths(&dir)),
             ("v48", pre_v48_backup_paths(&dir)),
+            ("v58", pre_v58_backup_paths(&dir)),
         ] {
             assert!(
                 backups.is_empty(),
@@ -4751,6 +5068,7 @@ fn import_v7_platform_catalog_merges_target_models_and_preserves_exact_scopes() 
                 protocols: vec![UpstreamProtocolKind::ChatCompletions],
                 preferred: Some(UpstreamProtocolKind::ChatCompletions),
                 enabled: true,
+                upstream_override: None,
             })
             .collect(),
     );
@@ -4855,6 +5173,8 @@ fn node_import_record(
         zen_catalog: crate::kernel::zen::ZenFreeModelCatalog::default(),
         provider_contracts: crate::provider_contracts::PersistedContracts::default(),
         dynamic_providers: Vec::new(),
+        custom_destinations: Vec::new(),
+        custom_credential_destinations: HashMap::new(),
         identity_snapshot: None,
         draft_provider_ids: HashSet::new(),
         platform_observer_ciphers: HashMap::new(),
@@ -4874,6 +5194,67 @@ fn go_import_record(id: &str) -> AccountImportRecord {
         connection_verified_at: None,
         ollama_billing_tier: None,
     }
+}
+
+#[test]
+fn import_v8_custom_stable_id_collision_rolls_back_whole_node() {
+    let dir = temp_data_dir("import-custom-id-collision");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let now = Utc::now();
+    db.create_dynamic_provider_definition(&DynamicProviderRuntime {
+        preset_id: None,
+        id: "collision-dynamic".into(),
+        name: "Collision".into(),
+        endpoint_url: "https://dynamic.example/v1".into(),
+        upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+        auth_kind: DynamicAuthKind::Bearer,
+        mappings: Vec::new(),
+        created_at: now,
+        updated_at: now,
+        origin: ProviderOrigin::Custom,
+        offering: "api".into(),
+    })
+    .unwrap();
+    let custom_legacy_id = "00000000-0000-4000-8000-00000000c011";
+    let custom_id = ocg_domain::destination::destination_id_for_custom_account(custom_legacy_id);
+    let dynamic_id = ocg_domain::destination::destination_id_for_dynamic("collision-dynamic");
+    db.conn
+        .execute(
+            "UPDATE destinations SET id = ?2 WHERE id = ?1",
+            params![dynamic_id, custom_id],
+        )
+        .unwrap();
+    let before_primary = db.primary_access_key_value().unwrap();
+    let mut record = node_import_record(&db, Vec::new(), Vec::new(), Vec::new());
+    record.custom_destinations.push(ImportedCustomDestination {
+        id: custom_id.clone(),
+        legacy_id: custom_legacy_id.into(),
+        name: "Imported Custom".into(),
+        endpoint_url: "https://custom.example/v1/chat/completions".into(),
+        protocol: UpstreamProtocolKind::ChatCompletions,
+        auth_scheme: AuthScheme::Bearer,
+        models: vec![ocg_domain::dynamic::DynamicModelMapping {
+            public_model: "custom-model".into(),
+            upstream_model: "vendor/custom-model".into(),
+            upstream_override: None,
+        }],
+        enabled: true,
+    });
+    let error = db.import_node_state(&record, |_| Ok(())).unwrap_err();
+    assert!(error.to_string().contains("collides"), "{error:#}");
+    assert_eq!(db.primary_access_key_value().unwrap(), before_primary);
+    let row: (String, String) = db
+        .conn
+        .query_row(
+            "SELECT legacy_kind, legacy_id FROM destinations WHERE id = ?1",
+            [&custom_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(row, ("dynamic".into(), "collision-dynamic".into()));
+
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]

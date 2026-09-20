@@ -266,9 +266,46 @@ pub(crate) fn connection_legacy_for_account(
     }
 }
 
-pub(crate) fn connection_id_for_account(provider_id: &str, account_id: &str) -> ConnectionId {
-    let (kind, legacy_id) = connection_legacy_for_account(provider_id, account_id);
-    connection_id_for_legacy(kind, &legacy_id)
+fn connection_legacy_for_persisted_account(
+    conn: &Connection,
+    account: &Account,
+) -> Result<(LegacyConnectionKind, String)> {
+    let stored: Option<(String, String)> = conn
+        .query_row(
+            "SELECT d.legacy_kind, d.legacy_id
+             FROM credentials c
+             JOIN destinations d ON d.id = c.destination_id
+             WHERE c.legacy_account_id = ?1",
+            [&account.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    match stored {
+        Some((kind, id)) if kind == "builtin" => Ok((LegacyConnectionKind::BuiltinProvider, id)),
+        Some((kind, id)) if kind == "dynamic" => Ok((LegacyConnectionKind::DynamicProvider, id)),
+        Some((kind, id)) if kind == "custom_account" => {
+            Ok((LegacyConnectionKind::CustomAccount, id))
+        }
+        // Platform bindings keep their established account-derived identity;
+        // the parent relation is represented separately.
+        Some((kind, _)) if kind == "platform_parent" => Ok(connection_legacy_for_account(
+            &account.provider_id,
+            &account.id,
+        )),
+        Some((kind, _)) => anyhow::bail!("unknown destination legacy kind `{kind}`"),
+        None => Ok(connection_legacy_for_account(
+            &account.provider_id,
+            &account.id,
+        )),
+    }
+}
+
+fn connection_id_for_persisted_account(
+    conn: &Connection,
+    account: &Account,
+) -> Result<ConnectionId> {
+    let (kind, id) = connection_legacy_for_persisted_account(conn, account)?;
+    Ok(connection_id_for_legacy(kind, &id))
 }
 
 pub(crate) fn has_legacy_subscription(provider_id: &str, setup_step: AccountSetupStep) -> bool {
@@ -359,7 +396,7 @@ pub(crate) fn persist_account_identity_model_on(
             identity_override,
         );
     }
-    let connection_id = connection_id_for_account(&account.provider_id, &account.id);
+    let connection_id = connection_id_for_persisted_account(conn, account)?;
     let facts = LegacyAccountFacts {
         account_id: account.id.clone(),
         name: account.name.clone(),
@@ -372,7 +409,7 @@ pub(crate) fn persist_account_identity_model_on(
         declared_relation: declared.cloned(),
     };
     let (identity, credential, binding) = legacy_account_objects(facts, &connection_id, &[]);
-    let (legacy_kind, legacy_id) = connection_legacy_for_account(&account.provider_id, &account.id);
+    let (legacy_kind, legacy_id) = connection_legacy_for_persisted_account(conn, account)?;
     let now_rfc = now.to_rfc3339();
     let saved_identity = account_store::select_account_identity_id(conn, &account.id)?;
     let identity_id = match identity_override.or(saved_identity.as_deref()) {
@@ -544,7 +581,7 @@ fn persist_account_identity_on_credentials(
     identity_override: Option<&str>,
 ) -> Result<()> {
     super::identity_v57::ensure_v57_columns(conn)?;
-    let connection_id = connection_id_for_account(&account.provider_id, &account.id);
+    let connection_id = connection_id_for_persisted_account(conn, account)?;
     let facts = LegacyAccountFacts {
         account_id: account.id.clone(),
         name: account.name.clone(),
@@ -770,6 +807,32 @@ fn configured_endpoints_for_provider(
     account_id: &str,
 ) -> Result<Vec<AssignedEndpoint>> {
     if provider_id == CUSTOM_PROVIDER_ID {
+        if let Some(destination) =
+            custom_store::custom_destination_for_account_on(conn, account_id)?
+        {
+            let connection_id = connection_id_for_legacy(
+                LegacyConnectionKind::CustomAccount,
+                &destination.legacy_id,
+            );
+            let mut routes = vec![RouteSpec {
+                operation: EndpointOperation::from(destination.protocol),
+                url: Some(destination.endpoint_url.clone()),
+            }];
+            let mut seen =
+                std::collections::HashSet::from([(destination.protocol, destination.endpoint_url)]);
+            for mapping in destination.models {
+                let Some(route) = mapping.upstream_override else {
+                    continue;
+                };
+                if seen.insert((route.protocol, route.endpoint_url.clone())) {
+                    routes.push(RouteSpec {
+                        operation: EndpointOperation::from(route.protocol),
+                        url: Some(route.endpoint_url),
+                    });
+                }
+            }
+            return Ok(assigned_endpoints_for_routes(&connection_id, &routes));
+        }
         let connection_id =
             connection_id_for_legacy(LegacyConnectionKind::CustomAccount, account_id);
         let Some((url, kind)) = custom_store::custom_endpoint_protocol_on(conn, account_id)? else {
@@ -2457,7 +2520,7 @@ fn create_account_for_identity_on(
             "credentialId": credential_id,
             "bindingId": binding_id,
             "accountId": account.id,
-            "connectionId": connection_id_for_account(&account.provider_id, &account.id).to_string(),
+            "connectionId": connection_id_for_persisted_account(&tx, account)?.to_string(),
             "version": version,
             "authStateVersion": auth_state_version,
         })

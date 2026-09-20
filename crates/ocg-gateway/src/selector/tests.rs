@@ -938,6 +938,152 @@ fn reset_clears_runtime_state() {
 }
 
 #[test]
+fn preview_at_does_not_advance_round_robin_or_rewrite_sticky_global() {
+    let mut state = SelectorState::new();
+    let now = origin();
+    let candidates = [cand("a", true), cand("b", true)];
+    assert_eq!(
+        id_at(
+            &candidates,
+            pick(
+                &mut state,
+                &candidates,
+                SelectionPolicy::RoundRobin,
+                false,
+                None,
+                &[],
+                now,
+            )
+            .unwrap()
+        ),
+        "a"
+    );
+    assert_eq!(state.round_robin_after.as_deref(), Some("a"));
+
+    let preview = state
+        .preview_at(
+            &candidates,
+            SelectionPolicy::RoundRobin,
+            false,
+            None,
+            &[],
+            now,
+        )
+        .expect("candidates must not contain duplicate account ids")
+        .expect("preview should pick the next round-robin card");
+    assert_eq!(id_at(&candidates, preview.candidate_index()), "b");
+    assert_eq!(state.round_robin_after.as_deref(), Some("a"));
+
+    assert_eq!(
+        id_at(
+            &candidates,
+            pick(
+                &mut state,
+                &candidates,
+                SelectionPolicy::RoundRobin,
+                false,
+                None,
+                &[],
+                now,
+            )
+            .unwrap()
+        ),
+        "b"
+    );
+    assert_eq!(state.round_robin_after.as_deref(), Some("b"));
+
+    let mut sticky = SelectorState::new();
+    pick(
+        &mut sticky,
+        &candidates,
+        SelectionPolicy::StickyGlobal,
+        false,
+        None,
+        &[],
+        now,
+    );
+    assert_eq!(sticky.global_account_id.as_deref(), Some("a"));
+    let disabled = [cand("a", false), cand("b", true)];
+    let preview = sticky
+        .preview_at(
+            &disabled,
+            SelectionPolicy::StickyGlobal,
+            false,
+            None,
+            &[],
+            now,
+        )
+        .expect("candidates must not contain duplicate account ids")
+        .expect("preview should fall through when sticky is unavailable");
+    assert_eq!(id_at(&disabled, preview.candidate_index()), "b");
+    assert_eq!(sticky.global_account_id.as_deref(), Some("a"));
+    assert_eq!(
+        id_at(
+            &candidates,
+            pick(
+                &mut sticky,
+                &candidates,
+                SelectionPolicy::StickyGlobal,
+                false,
+                None,
+                &[],
+                now,
+            )
+            .unwrap()
+        ),
+        "a"
+    );
+}
+
+#[test]
+fn preview_at_does_not_insert_or_refresh_conversation_bindings() {
+    let mut state = SelectorState::new();
+    let now = origin();
+    let candidates = [cand("a", true), cand("b", true)];
+    pick(
+        &mut state,
+        &candidates,
+        SelectionPolicy::StrictPriority,
+        true,
+        Some("live"),
+        &[],
+        now,
+    );
+    assert_eq!(state.binding_at("live", now).unwrap().account_id(), "a");
+
+    let later = now + Duration::from_secs(60);
+    let preview = state
+        .preview_at(
+            &candidates,
+            SelectionPolicy::RoundRobin,
+            true,
+            Some("live"),
+            &[],
+            later,
+        )
+        .expect("candidates must not contain duplicate account ids")
+        .expect("preview should hit the conversation binding");
+    assert_eq!(id_at(&candidates, preview.candidate_index()), "a");
+    let inserted = state
+        .preview_at(
+            &candidates,
+            SelectionPolicy::RoundRobin,
+            true,
+            Some("preview-only"),
+            &[],
+            later,
+        )
+        .expect("candidates must not contain duplicate account ids")
+        .expect("preview should select a card");
+    assert_eq!(id_at(&candidates, inserted.candidate_index()), "a");
+    assert!(state.binding_at("preview-only", later).is_none());
+    assert!(
+        state.binding_at("live", now + CONVERSATION_TTL).is_none(),
+        "preview must not refresh live conversation last_seen"
+    );
+}
+
+#[test]
 fn disabling_conversation_sticky_ignores_existing_bindings() {
     let mut state = SelectorState::new();
     let now = origin();

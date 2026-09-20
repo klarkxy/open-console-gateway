@@ -20,7 +20,7 @@ use chrono::Utc;
 use ocg_domain::credential::{AuthState, ModelScope};
 use ocg_domain::destination::Credential as DestinationCredential;
 use ocg_domain::destination::{
-    AdapterKind, AuthScheme, Cooldowns, Destination, Grants, LegacyDestinationRef,
+    AdapterKind, AuthScheme, Cooldowns, Destination, Grants, LegacyDestinationRef, ModelResolution,
     destination_id_for_builtin, destination_id_for_custom_account,
     destination_id_for_platform_account, sealed_capabilities,
 };
@@ -894,6 +894,12 @@ fn custom_runtime(
         verification_status: ConnectionVerificationStatus::Verified,
         setup_ready: true,
         has_key: true,
+        auth_kind: match protocol {
+            UpstreamProtocolKind::Messages => ocg_domain::dynamic::DynamicAuthKind::XApiKey,
+            UpstreamProtocolKind::ChatCompletions | UpstreamProtocolKind::Responses => {
+                ocg_domain::dynamic::DynamicAuthKind::Bearer
+            }
+        },
         config: AccountCustomConfig {
             account_id: account_id.into(),
             endpoint_url: match protocol {
@@ -914,6 +920,7 @@ fn custom_runtime(
             verified_at: None,
             source: "manual".into(),
         }],
+        route_overrides: Vec::new(),
         protocol_passthrough: false,
     }
 }
@@ -1090,6 +1097,56 @@ fn custom_native_messages_structured_format_does_not_guess_chat() {
     assert_eq!(set.routes[0].plan.upstream, ApiFormat::Messages);
     let upstream: serde_json::Value = serde_json::from_slice(&set.routes[0].plan.body).unwrap();
     assert_eq!(upstream["output_config"]["format"]["type"], "json_schema");
+}
+
+#[test]
+fn custom_model_override_owns_protocol_endpoint_and_auth_independently() {
+    let body = chat_body("local-custom");
+    let parsed = parse_client_request(ApiFormat::ChatCompletions, body.clone()).unwrap();
+    let resolved = resolve_with_custom("local-custom", &["local-custom".into()]);
+    let account = custom_account("custom-override");
+    let mut runtime = custom_runtime(
+        "custom-override",
+        "local-custom",
+        UpstreamProtocolKind::ChatCompletions,
+    );
+    runtime.auth_kind = ocg_domain::dynamic::DynamicAuthKind::XApiKey;
+    runtime.capabilities[0].protocol = UpstreamProtocolKind::Messages;
+    runtime.route_overrides.push((
+        "local-custom".into(),
+        ocg_domain::dynamic::DynamicModelUpstreamOverride {
+            protocol: UpstreamProtocolKind::Messages,
+            endpoint_url: "http://127.0.0.1:9/alternate/messages".into(),
+        },
+    ));
+    let contracts = contracts_for(std::slice::from_ref(&runtime));
+    let mut runtimes = std::collections::HashMap::new();
+    runtimes.insert(account.id.clone(), runtime);
+    let set = materialize_account_routes(
+        &[account],
+        &AppConfig::default(),
+        &parsed,
+        &resolved,
+        &parsed.requested_model,
+        "local-custom",
+        &body,
+        false,
+        &runtimes,
+        &std::collections::HashMap::new(),
+        None,
+        &contracts,
+        &[],
+    )
+    .unwrap();
+    let plan = &set.routes[0].plan;
+    assert_eq!(plan.upstream, ApiFormat::Messages);
+    assert_eq!(
+        plan.custom_route,
+        Some(CustomRouteSpec {
+            endpoint_url: "http://127.0.0.1:9/alternate/messages".into(),
+            auth_kind: ocg_domain::dynamic::DynamicAuthKind::XApiKey,
+        })
+    );
 }
 
 #[test]
@@ -1436,6 +1493,13 @@ fn d01_model_scope_keeps_x_off_key_b_without_disabling_other_models() {
         "{:?}",
         request_x.rejected
     );
+    assert!(
+        request_x.rejections.iter().any(|rejection| rejection.code
+            == RouteRejectionCode::ModelScopeDenied
+            && rejection.account_id.as_deref() == Some("key-b")),
+        "{:?}",
+        request_x.rejections
+    );
 
     let request_other = routes_for_with_bindings("glm-5.1", &accounts, &bindings);
     let other_ids: Vec<_> = request_other
@@ -1470,6 +1534,13 @@ fn d01_disabled_binding_is_skipped_and_default_all_preserves_routes() {
             .any(|reason| reason.contains("key-b") && reason.contains("disabled")),
         "{:?}",
         set.rejected
+    );
+    assert!(
+        set.rejections.iter().any(|rejection| rejection.code
+            == RouteRejectionCode::BindingDisabled
+            && rejection.account_id.as_deref() == Some("key-b")),
+        "{:?}",
+        set.rejections
     );
 
     let unrestricted = routes_for("glm-5.2", &accounts, &AppConfig::default(), true);
@@ -1803,6 +1874,13 @@ fn test_destination(adapter: AdapterKind, legacy: LegacyDestinationRef) -> Desti
         LegacyDestinationRef::CustomAccount(id) => destination_id_for_custom_account(id),
         LegacyDestinationRef::PlatformParent(id) => destination_id_for_platform_account(id),
     };
+    let model_resolution = match &legacy {
+        LegacyDestinationRef::Builtin(_) => ModelResolution::AdapterDefined,
+        LegacyDestinationRef::Dynamic(_) => ModelResolution::PublicAndUpstream,
+        LegacyDestinationRef::CustomAccount(_) | LegacyDestinationRef::PlatformParent(_) => {
+            ModelResolution::PublicOnly
+        }
+    };
     Destination {
         id,
         legacy,
@@ -1812,6 +1890,7 @@ fn test_destination(adapter: AdapterKind, legacy: LegacyDestinationRef) -> Desti
         base_url: None,
         protocols: Vec::new(),
         auth_scheme: AuthScheme::Bearer,
+        model_resolution,
         catalog: Vec::new(),
         capabilities: sealed_capabilities(adapter),
         plan: None,
@@ -2007,5 +2086,206 @@ fn diagnostic_plan_does_not_veto_a_refreshed_go_model_missing_a_static_profile()
     assert_eq!(
         diagnostic_forced_upstream(&known, ApiFormat::Responses),
         None
+    );
+}
+
+fn rejection_codes(set: &MaterializedRouteSet) -> Vec<RouteRejectionCode> {
+    set.rejections
+        .iter()
+        .map(|rejection| rejection.code)
+        .collect()
+}
+
+#[test]
+fn typed_rejections_cover_current_materialize_branches() {
+    let config = AppConfig::default();
+    let body = chat_body("glm-5.2");
+    let parsed = parse_client_request(ApiFormat::ChatCompletions, body.clone()).unwrap();
+
+    let mut disabled_cred =
+        test_credential("go-off", &destination_id_for_builtin(OPENCODE_PROVIDER_ID));
+    disabled_cred.enabled = false;
+    let go_dest = test_destination(
+        AdapterKind::OpencodeGo,
+        LegacyDestinationRef::Builtin(OPENCODE_PROVIDER_ID.into()),
+    );
+    let projection = crate::destination_projection::DestinationProjection {
+        destinations: vec![go_dest.clone()],
+        credentials: vec![disabled_cred],
+    };
+    let credential_set = materialize_account_routes_with_bindings(
+        &[go_account("go-off")],
+        &config,
+        &parsed,
+        &resolve_model("glm-5.2"),
+        "glm-5.2",
+        "glm-5.2",
+        true,
+        &HashMap::new(),
+        &HashMap::new(),
+        None,
+        &static_contracts(),
+        &[],
+        &HashMap::new(),
+        Some(&projection),
+    )
+    .unwrap();
+    assert!(rejection_codes(&credential_set).contains(&RouteRejectionCode::CredentialDisabled));
+
+    let custom = custom_account("custom-missing");
+    let custom_set = materialize_account_routes(
+        &[custom],
+        &config,
+        &parsed,
+        &resolve_with_custom("local-custom", &["local-custom".into()]),
+        "local-custom",
+        "local-custom",
+        &body,
+        true,
+        &HashMap::new(),
+        &HashMap::new(),
+        None,
+        &static_contracts(),
+        &[],
+    )
+    .unwrap();
+    assert!(
+        rejection_codes(&custom_set).contains(&RouteRejectionCode::CandidateMaterializationFailed),
+        "{:?}",
+        custom_set.rejections
+    );
+
+    let goat = goat_account("goat-1");
+    let goat_unverified = materialize_account_routes(
+        &[goat.clone()],
+        &config,
+        &parsed,
+        &ResolvedModel::PinnedRaw {
+            requested: COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM.into(),
+            mapping: crate::alias::ProviderMapping {
+                provider_id: COMMAND_CODE_PROVIDER_ID.to_string(),
+                upstream_model: COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM.into(),
+                routeable: true,
+            },
+        },
+        COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
+        COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
+        &body,
+        true,
+        &HashMap::new(),
+        &HashMap::new(),
+        None,
+        &goat_contracts(&[COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM]),
+        &[],
+    )
+    .unwrap();
+    assert!(
+        rejection_codes(&goat_unverified).contains(&RouteRejectionCode::GoatUnverified),
+        "{:?}",
+        goat_unverified.rejections
+    );
+
+    let mut ineligible = goat_runtime("goat-1", &[COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM]);
+    ineligible.enabled = false;
+    let mut ineligible_runtimes = HashMap::new();
+    ineligible_runtimes.insert(goat.id.clone(), ineligible);
+    let goat_ineligible = materialize_account_routes(
+        &[goat.clone()],
+        &config,
+        &parsed,
+        &ResolvedModel::PinnedRaw {
+            requested: COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM.into(),
+            mapping: crate::alias::ProviderMapping {
+                provider_id: COMMAND_CODE_PROVIDER_ID.to_string(),
+                upstream_model: COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM.into(),
+                routeable: true,
+            },
+        },
+        COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
+        COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
+        &body,
+        true,
+        &HashMap::new(),
+        &ineligible_runtimes,
+        None,
+        &goat_contracts(&[COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM]),
+        &[],
+    )
+    .unwrap();
+    assert!(
+        rejection_codes(&goat_ineligible).contains(&RouteRejectionCode::GoatNotEligible),
+        "{:?}",
+        goat_ineligible.rejections
+    );
+
+    let mut mismatched_zen = zen_account();
+    mismatched_zen.credential_kind = CredentialKind::ApiKey;
+    mismatched_zen.quota_scope = QuotaScope::Key;
+    let zen_unsupported = materialize_account_routes(
+        &[mismatched_zen],
+        &config,
+        &parsed,
+        &resolve_model("mimo-v2.5-free"),
+        "mimo-v2.5-free",
+        "mimo-v2.5-free",
+        &body,
+        true,
+        &HashMap::new(),
+        &HashMap::new(),
+        None,
+        &static_contracts(),
+        &[],
+    )
+    .unwrap();
+    assert!(
+        rejection_codes(&zen_unsupported).contains(&RouteRejectionCode::ProductionRouteUnsupported),
+        "{:?}",
+        zen_unsupported.rejections
+    );
+
+    let mixed = ResolvedModel::Alias {
+        requested: "glm-5.2".into(),
+        alias: "glm-5.2".into(),
+        mappings: vec![
+            crate::alias::ProviderMapping {
+                provider_id: CPA_PROVIDER_ID.to_string(),
+                upstream_model: "vendor/cpa-new-model".into(),
+                routeable: true,
+            },
+            crate::alias::ProviderMapping {
+                provider_id: OPENCODE_PROVIDER_ID.to_string(),
+                upstream_model: "glm-5.2".into(),
+                routeable: true,
+            },
+        ],
+    };
+    let mixed_set = materialize_account_routes(
+        &[go_account("go-1")],
+        &config,
+        &parsed,
+        &mixed,
+        "glm-5.2",
+        "glm-5.2",
+        &body,
+        true,
+        &HashMap::new(),
+        &HashMap::new(),
+        None,
+        &static_contracts(),
+        &[],
+    )
+    .unwrap();
+    assert!(
+        rejection_codes(&mixed_set).contains(&RouteRejectionCode::MappingProtocolIncompatible),
+        "{:?}",
+        mixed_set.rejections
+    );
+    assert_eq!(
+        RouteRejectionCode::CredentialDisabled.as_str(),
+        "credential_disabled"
+    );
+    assert_eq!(
+        RouteRejectionCode::MappingProtocolIncompatible.as_str(),
+        "mapping_protocol_incompatible"
     );
 }

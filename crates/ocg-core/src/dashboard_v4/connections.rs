@@ -7,7 +7,6 @@ use axum::extract::State;
 use chrono::Utc;
 use std::collections::{HashMap, HashSet};
 
-use crate::custom_http::custom_auth_scheme;
 use crate::dashboard_v3::{AccountUpstreamProtocol, ControlRevision, V3ApiError};
 use crate::dynamic::DynamicProviderRuntime;
 use crate::models::Account;
@@ -24,6 +23,7 @@ use ocg_domain::connection::{
     cooling_all_usable, derive_authorization, derive_eligibility, endpoint_id_for, target_id_for,
 };
 use ocg_domain::credential::{RouteSpec, assigned_endpoints_for_routes};
+use ocg_domain::destination::{Destination, LegacyDestinationRef};
 use ocg_domain::dynamic::DynamicAuthKind;
 use ocg_domain::ids::CUSTOM_PROVIDER_ID;
 use ocg_domain::provider::provider_origin_from_preset;
@@ -42,7 +42,7 @@ pub(super) async fn list_connections(
     let _settings_update = state.settings_update.lock();
     let now = Utc::now();
     let contracts = state.provider_contracts();
-    let (accounts, custom_runtimes, dynamic_providers, draft_ids) = {
+    let (accounts, custom_runtimes, dynamic_providers, draft_ids, projection) = {
         let db = state.db.lock();
         let accounts = db.list_accounts().map_err(V3ApiError::internal)?;
         let custom_runtimes = db
@@ -54,6 +54,9 @@ pub(super) async fn list_connections(
         let draft_ids = db
             .onboarding_draft_provider_ids()
             .map_err(V3ApiError::internal)?;
+        let projection = crate::destination_projection::read_v4_projection(&db)
+            .map_err(V3ApiError::internal)?
+            .map_err(|_| V3ApiError::conflict_at(&state, "destination projection refused"))?;
         let mut verification = HashMap::new();
         for account in &accounts {
             if let Some(row) = db
@@ -77,6 +80,7 @@ pub(super) async fn list_connections(
             custom_runtimes,
             dynamic_providers,
             draft_ids,
+            projection,
         )
     };
 
@@ -128,7 +132,41 @@ pub(super) async fn list_connections(
         .iter()
         .map(|row| (row.0.id.as_str(), row))
         .collect();
+    let destination_by_account = projection
+        .credentials
+        .iter()
+        .map(|credential| {
+            (
+                credential.legacy_account_id.as_str(),
+                credential.destination_id.as_str(),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let mut projected_custom_accounts = HashSet::new();
+    for destination in projection
+        .destinations
+        .iter()
+        .filter(|destination| matches!(destination.legacy, LegacyDestinationRef::CustomAccount(_)))
+    {
+        let group = accounts
+            .iter()
+            .filter(|(account, _)| {
+                account.provider_id == CUSTOM_PROVIDER_ID
+                    && destination_by_account.get(account.id.as_str()).copied()
+                        == Some(destination.id.as_str())
+            })
+            .map(|row| (&row.0, row.1))
+            .collect::<Vec<_>>();
+        projected_custom_accounts.extend(group.iter().map(|(account, _)| account.id.as_str()));
+        connections.push(project_custom_destination(destination, &group, now));
+    }
+    // Platform-linked Custom Keys retain their pre-unification projection;
+    // their service definition is owned by the platform parent, not editable
+    // through the Custom destination route.
     for runtime in custom_runtimes {
+        if projected_custom_accounts.contains(runtime.account_id.as_str()) {
+            continue;
+        }
         let Some((account, status)) = accounts_by_id.get(runtime.account_id.as_str()) else {
             continue;
         };
@@ -139,6 +177,116 @@ pub(super) async fn list_connections(
         revision: ControlRevision::from_state(&state),
         connections,
     }))
+}
+
+fn project_custom_destination(
+    destination: &Destination,
+    accounts: &[(&Account, ConnectionVerificationStatus)],
+    now: chrono::DateTime<Utc>,
+) -> ConnectionSummary {
+    let LegacyDestinationRef::CustomAccount(legacy_id) = &destination.legacy else {
+        unreachable!("filtered to legacy Custom destinations")
+    };
+    let connection_id = connection_id_for_legacy(LegacyConnectionKind::CustomAccount, legacy_id);
+    let protocol = destination
+        .protocols
+        .first()
+        .copied()
+        .unwrap_or(ocg_domain::catalog::UpstreamProtocolKind::ChatCompletions);
+    let auth_scheme = match destination.auth_scheme {
+        ocg_domain::destination::AuthScheme::Bearer => EndpointAuthScheme::Bearer,
+        ocg_domain::destination::AuthScheme::XApiKey => EndpointAuthScheme::XApiKey,
+        ocg_domain::destination::AuthScheme::None => EndpointAuthScheme::None,
+    };
+    let mut routes = vec![RouteSpec {
+        operation: EndpointOperation::from(protocol),
+        url: destination.base_url.clone(),
+    }];
+    let mut seen_routes = HashSet::from([(protocol, destination.base_url.clone())]);
+    for model in &destination.catalog {
+        let Some(route) = &model.upstream_override else {
+            continue;
+        };
+        if seen_routes.insert((route.protocol, Some(route.endpoint_url.clone()))) {
+            routes.push(RouteSpec {
+                operation: EndpointOperation::from(route.protocol),
+                url: Some(route.endpoint_url.clone()),
+            });
+        }
+    }
+    let endpoints = assigned_endpoints_for_routes(&connection_id, &routes)
+        .into_iter()
+        .zip(routes)
+        .map(|(assigned, route)| {
+            endpoint_dto(
+                &connection_id,
+                assigned.id,
+                route.operation,
+                ocg_domain::catalog::UpstreamProtocolKind::from(route.operation),
+                assigned.url,
+                auth_scheme,
+                false,
+            )
+        })
+        .collect::<Vec<_>>();
+    let targets = destination
+        .catalog
+        .iter()
+        .map(|model| {
+            let route_protocol = model
+                .upstream_override
+                .as_ref()
+                .map(|route| route.protocol)
+                .unwrap_or(protocol);
+            let route_url = model
+                .upstream_override
+                .as_ref()
+                .map(|route| route.endpoint_url.as_str())
+                .or(destination.base_url.as_deref());
+            let endpoint_id = endpoints
+                .iter()
+                .find(|endpoint| {
+                    endpoint.operation == EndpointOperation::from(route_protocol)
+                        && endpoint.url.as_deref() == route_url
+                })
+                .map(|endpoint| endpoint.id.clone())
+                .unwrap_or_else(|| {
+                    endpoint_id_for(&connection_id, EndpointOperation::from(route_protocol))
+                        .to_string()
+                });
+            ConnectionTarget {
+                id: target_id_for(&connection_id, &model.public_model).to_string(),
+                connection_id: connection_id.to_string(),
+                public_name: model.public_model.clone(),
+                upstream_model_id: model.upstream_model.clone(),
+                endpoint_ids: vec![endpoint_id],
+                enabled: model.enabled,
+            }
+        })
+        .collect();
+    let facts = credential_facts(accounts, now);
+    finish_summary(SummaryDraft {
+        connection_id,
+        name: destination.name.clone(),
+        origin: ConnectionOrigin::CustomAccount,
+        template_ref: Some(TemplateRef {
+            id: CUSTOM_PROVIDER_ID.to_string(),
+            version: TEMPLATE_VERSION,
+        }),
+        adapter_kind: ProviderAdapterKind::ConfigurableHttp.as_str().to_string(),
+        credential_kind: CredentialKind::ApiKey,
+        facts: &facts,
+        accounts,
+        endpoints,
+        targets,
+        legacy: LegacyIdentity {
+            kind: LegacyConnectionKind::CustomAccount,
+            id: legacy_id.clone(),
+        },
+        display_family: Some("Custom".to_string()),
+        offering: OfferingKind::Api,
+        onboarding_draft: false,
+    })
 }
 
 fn project_builtin(
@@ -257,7 +405,11 @@ fn project_custom(
         operation,
         runtime.config.upstream_protocol,
         Some(runtime.config.endpoint_url.clone()),
-        EndpointAuthScheme::from(custom_auth_scheme(runtime.config.upstream_protocol)),
+        match runtime.auth_kind {
+            DynamicAuthKind::Bearer => EndpointAuthScheme::Bearer,
+            DynamicAuthKind::XApiKey => EndpointAuthScheme::XApiKey,
+            DynamicAuthKind::None => EndpointAuthScheme::None,
+        },
         false,
     )];
     let targets: Vec<ConnectionTarget> = runtime

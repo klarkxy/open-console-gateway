@@ -643,7 +643,8 @@ fn upsert_platform_parent_on(
             "UPDATE destinations
              SET name = ?2, base_url = ?3, brand_family = ?4, platform_kind = ?5,
                  protocols_json = ?6, auth_scheme = ?7, adapter = ?8,
-                 capabilities_json = ?9, max_credentials = ?10, enabled = ?11,
+                 model_resolution = 'public_only', capabilities_json = ?9,
+                 max_credentials = ?10, enabled = ?11,
                  observer_credential_id = ?12, platform_version = ?13,
                  platform_snapshot = CASE WHEN ?14 THEN ?15 ELSE platform_snapshot END
              WHERE id = ?1",
@@ -669,10 +670,10 @@ fn upsert_platform_parent_on(
         conn.execute(
             "INSERT INTO destinations (
                 id, legacy_kind, legacy_id, adapter, name, brand_family, base_url,
-                protocols_json, auth_scheme, capabilities_json, plan_json,
+                protocols_json, auth_scheme, model_resolution, capabilities_json, plan_json,
                 max_credentials, observer_credential_id, enabled,
                 platform_kind, platform_version, platform_snapshot
-             ) VALUES (?1, 'platform_parent', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, ?10, ?11, ?12, ?13, ?14, ?15)",
+             ) VALUES (?1, 'platform_parent', ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'public_only', ?9, NULL, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 dest_id,
                 id,
@@ -859,9 +860,8 @@ pub(crate) fn apply_platform_link_on(
         "only Custom API Keys can be linked"
     );
     let parent = platform_account_on(conn, parent_id)?.context("platform account not found")?;
-    let custom = custom_store::account_custom_config_on(conn, account_id)?
+    let _custom = custom_store::account_custom_config_on(conn, account_id)?
         .context("Custom configuration missing")?;
-    let endpoint_url = crate::platform::hosted_endpoint(&parent.base_url)?;
     let mut group = group.clone();
     group.verified = false;
     group.subscription_type = None;
@@ -881,18 +881,12 @@ pub(crate) fn apply_platform_link_on(
                 .all(|v| v.len() <= 200 && !v.chars().any(char::is_control)),
         "invalid group identity"
     );
-    persist_account_custom_config_on(
-        conn,
-        account_id,
-        &AccountCustomConfigInput {
-            endpoint_url,
-            upstream_protocol: custom.upstream_protocol,
-        },
-    )?;
-    set_link_on(conn, account_id, parent_id, &group, None)?;
+    // Read and narrow from the source Custom destination before moving this
+    // one credential. A shared connection is destination-owned: linking one
+    // Key must never rewrite or delete the siblings' transport.
     custom_store::merge_custom_models_onto_platform_parent(conn, account_id, parent_id)?;
     custom_store::narrow_credential_scope_from_custom_destination(conn, account_id)?;
-    custom_store::delete_custom_destination_row(conn, account_id)?;
+    set_link_on(conn, account_id, parent_id, &group, None)?;
     identity::update_account_identity_declaration(
         conn,
         account_id,

@@ -186,6 +186,37 @@ impl RoutingRuntime {
             .map(|selection| selection.candidate_index()))
     }
 
+    /// Clone-based selection preview. Sticky-global and round-robin on the
+    /// live slot stay unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn preview_candidate_index_at(
+        &self,
+        candidates: &[RoutingCandidate],
+        mode: RoutingMode,
+        conversation_sticky: bool,
+        conversation_key: Option<&str>,
+        exclude_ids: &[&str],
+        free_channel_available: bool,
+        wall: DateTime<Utc>,
+        mono: Instant,
+    ) -> Result<Option<usize>, ocg_gateway::selector::SelectionError> {
+        let gateway_candidates = candidates
+            .iter()
+            .map(|candidate| gateway_candidate(candidate, free_channel_available, wall))
+            .collect::<Vec<_>>();
+        let mut preview = self.inner.lock().clone();
+        Ok(preview
+            .select_at(
+                &gateway_candidates,
+                selection_policy(mode),
+                conversation_sticky,
+                conversation_key,
+                exclude_ids,
+                mono,
+            )?
+            .map(|selection| selection.candidate_index()))
+    }
+
     /// Read sticky binding for a conversation if still fresh.
     pub fn sticky_binding(
         &self,
@@ -300,26 +331,78 @@ fn selection_policy(mode: RoutingMode) -> SelectionPolicy {
     }
 }
 
+/// Why a materialized candidate is or is not base-available.
+///
+/// Order matches the historical `gateway_candidate` conjunction so selection
+/// and explanation share one assessment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CandidateAvailability {
+    Available,
+    AccountDisabled,
+    SetupNotReady,
+    ChannelMismatch,
+    CredentialMissing,
+    AuthError,
+    CoolingDown,
+    FreeChannelUnavailable,
+}
+
+impl CandidateAvailability {
+    pub(crate) fn is_available(self) -> bool {
+        matches!(self, Self::Available)
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Available => "available",
+            Self::AccountDisabled => "account_disabled",
+            Self::SetupNotReady => "setup_not_ready",
+            Self::ChannelMismatch => "channel_mismatch",
+            Self::CredentialMissing => "credential_missing",
+            Self::AuthError => "auth_error",
+            Self::CoolingDown => "cooling_down",
+            Self::FreeChannelUnavailable => "free_channel_unavailable",
+        }
+    }
+}
+
+pub(crate) fn assess_candidate_availability(
+    candidate: &RoutingCandidate,
+    free_channel_available: bool,
+    wall: DateTime<Utc>,
+) -> CandidateAvailability {
+    if !candidate.account.enabled {
+        CandidateAvailability::AccountDisabled
+    } else if !candidate.account.setup_step.is_ready() {
+        CandidateAvailability::SetupNotReady
+    } else if channel_for_adapter(candidate.adapter) != candidate.channel {
+        CandidateAvailability::ChannelMismatch
+    } else if matches!(candidate.account.credential_kind, CredentialKind::ApiKey)
+        && candidate.account.key_cipher.is_empty()
+    {
+        CandidateAvailability::CredentialMissing
+    } else if candidate.account.auth_error.is_some() {
+        CandidateAvailability::AuthError
+    } else if candidate.account.is_cooling_for(candidate.channel, wall) {
+        CandidateAvailability::CoolingDown
+    } else if candidate.channel == UpstreamChannel::Free && !free_channel_available {
+        CandidateAvailability::FreeChannelUnavailable
+    } else {
+        CandidateAvailability::Available
+    }
+}
+
 fn gateway_candidate<'a>(
     candidate: &'a RoutingCandidate,
     free_channel_available: bool,
     wall: DateTime<Utc>,
 ) -> GatewayCandidate<'a> {
-    let available = candidate.account.enabled
-        && candidate.account.setup_step.is_ready()
-        && channel_for_adapter(candidate.adapter) == candidate.channel
-        && match candidate.account.credential_kind {
-            CredentialKind::ApiKey => !candidate.account.key_cipher.is_empty(),
-            CredentialKind::None => true,
-        }
-        && candidate.account.auth_error.is_none()
-        && !candidate.account.is_cooling_for(candidate.channel, wall)
-        && (candidate.channel != UpstreamChannel::Free || free_channel_available);
+    let available = assess_candidate_availability(candidate, free_channel_available, wall);
     GatewayCandidate::new(
         candidate.account.id.as_str(),
         candidate.channel,
         candidate.resolved_model.as_str(),
-        if available {
+        if available.is_available() {
             BaseAvailability::Available
         } else {
             BaseAvailability::Unavailable

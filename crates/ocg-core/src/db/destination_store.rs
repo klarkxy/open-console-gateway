@@ -54,8 +54,8 @@ pub(crate) fn replace_destination_catalog(
         conn.execute(
             "INSERT INTO destination_models (
                 destination_id, public_model, public_model_key, upstream_model,
-                protocols_json, preferred, enabled
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                protocols_json, preferred, enabled, upstream_override
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 destination_id,
                 model.public_model,
@@ -66,6 +66,11 @@ pub(crate) fn replace_destination_catalog(
                     .preferred
                     .map(|protocol| protocol.as_str().to_string()),
                 i64::from(model.enabled),
+                model
+                    .upstream_override
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()?,
             ],
         )?;
     }
@@ -103,6 +108,15 @@ pub(crate) fn merge_destination_catalog_refuse_conflict(
                 existing.preferred = model.preferred;
             }
             existing.enabled |= model.enabled;
+            if existing.upstream_override.is_none() {
+                existing.upstream_override = model.upstream_override.clone();
+            } else if model.upstream_override.is_some() {
+                anyhow::ensure!(
+                    existing.upstream_override == model.upstream_override,
+                    "destination `{destination_id}` refuses model `{}`: conflicting upstream route overrides",
+                    model.public_model
+                );
+            }
         } else {
             merged.push(model.clone());
         }
@@ -112,7 +126,7 @@ pub(crate) fn merge_destination_catalog_refuse_conflict(
 
 fn load_destination_catalog(conn: &Connection, destination_id: &str) -> Result<Vec<CatalogModel>> {
     let mut stmt = conn.prepare(
-        "SELECT public_model, upstream_model, protocols_json, preferred, enabled
+        "SELECT public_model, upstream_model, protocols_json, preferred, enabled, upstream_override
          FROM destination_models WHERE destination_id = ?1 ORDER BY rowid ASC",
     )?;
     let rows = stmt.query_map([destination_id], |row| {
@@ -122,11 +136,13 @@ fn load_destination_catalog(conn: &Connection, destination_id: &str) -> Result<V
             row.get::<_, String>(2)?,
             row.get::<_, Option<String>>(3)?,
             row.get::<_, i64>(4)?,
+            row.get::<_, Option<String>>(5)?,
         ))
     })?;
     let mut catalog = Vec::new();
     for row in rows {
-        let (public_model, upstream_model, protocols_json, preferred, enabled) = row?;
+        let (public_model, upstream_model, protocols_json, preferred, enabled, upstream_override) =
+            row?;
         catalog.push(CatalogModel {
             public_model,
             upstream_model,
@@ -136,6 +152,10 @@ fn load_destination_catalog(conn: &Connection, destination_id: &str) -> Result<V
                 .map(ocg_domain::catalog::UpstreamProtocolKind::try_from)
                 .transpose()?,
             enabled: enabled != 0,
+            upstream_override: upstream_override
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()?,
         });
     }
     Ok(catalog)
@@ -212,9 +232,9 @@ fn insert_destination_row(conn: &Connection, destination: &Destination) -> Resul
     conn.execute(
         "INSERT INTO destinations (
             id, legacy_kind, legacy_id, adapter, name, brand_family, base_url,
-            protocols_json, auth_scheme, capabilities_json, plan_json,
+            protocols_json, auth_scheme, model_resolution, capabilities_json, plan_json,
             max_credentials, observer_credential_id, enabled
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         params![
             destination.id,
             legacy_kind,
@@ -225,6 +245,7 @@ fn insert_destination_row(conn: &Connection, destination: &Destination) -> Resul
             destination.base_url,
             serde_json::to_string(&destination.protocols)?,
             destination.auth_scheme.as_str(),
+            destination.model_resolution.as_str(),
             serde_json::to_string(&destination.capabilities)?,
             destination
                 .plan
@@ -256,6 +277,7 @@ fn catalog_from_persisted_scope(scope: &EffectiveScopeContract) -> Vec<CatalogMo
             protocols: model.enabled_protocols(),
             preferred: Some(model.preferred_protocol),
             enabled: model.has_enabled_protocol(),
+            upstream_override: None,
         });
     }
     catalog

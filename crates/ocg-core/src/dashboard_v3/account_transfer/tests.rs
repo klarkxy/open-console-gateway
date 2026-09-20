@@ -229,7 +229,7 @@ fn attach_default_destination_snapshot(payload: &mut PortablePayload) {
 
     payload.destinations.clear();
     payload.credentials.clear();
-    if payload.version < PAYLOAD_VERSION {
+    if payload.version < V7_PAYLOAD_VERSION {
         return;
     }
     let dynamics: HashMap<_, _> = payload
@@ -553,13 +553,13 @@ fn future_payload_version_is_rejected_as_unsupported_not_wrong_password() {
     use std::fs;
     use std::sync::Arc;
 
-    assert_eq!(PAYLOAD_VERSION, 7);
+    assert_eq!(PAYLOAD_VERSION, 8);
     let mut payload = sample_payload();
-    payload.version = 8;
+    payload.version = PAYLOAD_VERSION + 1;
     let bundle = encrypt_payload(&payload, "correct horse battery").unwrap();
     let error = decrypt_and_validate(&bundle, "correct horse battery").unwrap_err();
     assert!(
-        matches!(error, TransferError::UnsupportedVersion(8)),
+        matches!(error, TransferError::UnsupportedVersion(9)),
         "{error:?}"
     );
     assert!(!matches!(error, TransferError::InvalidBundle));
@@ -578,7 +578,7 @@ fn future_payload_version_is_rejected_as_unsupported_not_wrong_password() {
     assert_eq!(mapped.status, StatusCode::BAD_REQUEST);
     assert_eq!(mapped.body.code, super::super::ERROR_INVALID_REQUEST);
     assert!(
-        mapped.body.message.contains("payload version 8"),
+        mapped.body.message.contains("payload version 9"),
         "{}",
         mapped.body.message
     );
@@ -595,6 +595,41 @@ fn future_payload_version_is_rejected_as_unsupported_not_wrong_password() {
     assert!(!lower.contains("damaged"), "{}", mapped.body.message);
     drop(state);
     fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn v7_destinations_gain_resolution_defaults_but_v8_requires_the_field() {
+    use ocg_domain::destination::ModelResolution;
+
+    let mut v7 = sample_payload();
+    v7.version = V7_PAYLOAD_VERSION;
+    for destination in &mut v7.destinations {
+        destination.model_resolution = None;
+    }
+    let validated = validate_payload(v7).unwrap();
+    assert!(validated.unified.destinations.iter().all(|destination| {
+        destination.model_resolution
+            == Some(match destination.legacy.kind {
+                crate::dashboard_v4::types::LegacyDestinationKindDto::Dynamic => {
+                    ModelResolution::PublicAndUpstream
+                }
+                crate::dashboard_v4::types::LegacyDestinationKindDto::CustomAccount
+                | crate::dashboard_v4::types::LegacyDestinationKindDto::PlatformParent => {
+                    ModelResolution::PublicOnly
+                }
+                crate::dashboard_v4::types::LegacyDestinationKindDto::Builtin => {
+                    ModelResolution::AdapterDefined
+                }
+            })
+    }));
+
+    let mut v8 = sample_payload();
+    v8.destinations[0].model_resolution = None;
+    let error = validate_payload(v8).unwrap_err();
+    assert!(
+        matches!(error, TransferError::Invalid(ref message) if message.contains("modelResolution")),
+        "{error:?}"
+    );
 }
 
 #[test]
@@ -1263,6 +1298,8 @@ fn empty_node_import() -> crate::db::NodeImportRecord {
         zen_catalog: crate::kernel::zen::ZenFreeModelCatalog::default(),
         provider_contracts: crate::provider_contracts::PersistedContracts::default(),
         dynamic_providers: Vec::new(),
+        custom_destinations: Vec::new(),
+        custom_credential_destinations: HashMap::new(),
         identity_snapshot: None,
         draft_provider_ids: HashSet::new(),
         platform_observer_ciphers: HashMap::new(),

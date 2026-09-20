@@ -58,6 +58,75 @@ pub(crate) struct MaterializedCandidate {
     pub plan: RequestPlan,
 }
 
+/// Stable internal rejection identity. Wire/explain codes are `as_str()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RouteRejectionCode {
+    MappingProtocolIncompatible,
+    CredentialDisabled,
+    BindingDisabled,
+    ModelScopeDenied,
+    GoatNotEligible,
+    GoatUnverified,
+    CandidateMaterializationFailed,
+    ProductionRouteUnsupported,
+}
+
+impl RouteRejectionCode {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::MappingProtocolIncompatible => "mapping_protocol_incompatible",
+            Self::CredentialDisabled => "credential_disabled",
+            Self::BindingDisabled => "binding_disabled",
+            Self::ModelScopeDenied => "model_scope_denied",
+            Self::GoatNotEligible => "goat_not_eligible",
+            Self::GoatUnverified => "goat_unverified",
+            Self::CandidateMaterializationFailed => "candidate_materialization_failed",
+            Self::ProductionRouteUnsupported => "production_route_unsupported",
+        }
+    }
+}
+
+/// Typed materialize rejection with the historical human detail string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RouteRejection {
+    pub code: RouteRejectionCode,
+    pub detail: String,
+    pub account_id: Option<String>,
+    pub provider_id: Option<String>,
+    pub upstream_model: Option<String>,
+}
+
+fn mapping_rejection(
+    code: RouteRejectionCode,
+    mapping: &ProviderMapping,
+    detail: String,
+) -> RouteRejection {
+    RouteRejection {
+        code,
+        detail,
+        account_id: None,
+        provider_id: Some(mapping.provider_id.clone()),
+        upstream_model: Some(mapping.upstream_model.clone()),
+    }
+}
+
+fn account_rejection(
+    code: RouteRejectionCode,
+    account: &Account,
+    suffix: impl std::fmt::Display,
+) -> RouteRejection {
+    RouteRejection {
+        code,
+        detail: format!(
+            "{}/{} account `{}`: {suffix}",
+            account.provider_id, account.provider_id, account.name
+        ),
+        account_id: Some(account.id.clone()),
+        provider_id: Some(account.provider_id.clone()),
+        upstream_model: None,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct MaterializedRouteSet {
     pub routes: Vec<MaterializedCandidate>,
@@ -67,6 +136,8 @@ pub(crate) struct MaterializedRouteSet {
     /// Empty when every considered account produced a route. Live send ignores
     /// this list; the read-only shadow planner surfaces it for compare.
     pub rejected: Vec<String>,
+    /// Typed form of [`Self::rejected`]. Same order and human detail.
+    pub rejections: Vec<RouteRejection>,
 }
 
 #[derive(Debug, Clone)]
@@ -330,7 +401,7 @@ pub(crate) fn materialize_account_routes_with_bindings(
                 .collect();
             let zen_only = !routeable.is_empty() && routeable.iter().all(mapping_is_zen_free);
             let mut plans = Vec::new();
-            let mut rejected = Vec::new();
+            let mut rejections = Vec::new();
             let mut first_materialization_error = None;
             let resolved_alias = Some(alias.to_string());
             for mapping in &routeable {
@@ -353,9 +424,13 @@ pub(crate) fn materialize_account_routes_with_bindings(
                         plan,
                     }),
                     Err(error) => {
-                        rejected.push(format!(
-                            "{}/{} mapping `{}`: {error}",
-                            mapping.provider_id, mapping.provider_id, mapping.upstream_model
+                        rejections.push(mapping_rejection(
+                            RouteRejectionCode::MappingProtocolIncompatible,
+                            mapping,
+                            format!(
+                                "{}/{} mapping `{}`: {error}",
+                                mapping.provider_id, mapping.provider_id, mapping.upstream_model
+                            ),
                         ));
                         first_materialization_error.get_or_insert(error);
                     }
@@ -380,7 +455,7 @@ pub(crate) fn materialize_account_routes_with_bindings(
                 Some(alias.to_string()),
                 plans,
                 zen_only,
-                rejected,
+                rejections,
                 custom_runtimes,
                 goat_runtimes,
                 contracts,
@@ -539,6 +614,10 @@ fn materialize_custom_account_plan(
         &capability.public_model,
     )
     .map_err(|error| ProtocolError::new(error.message))?;
+    let endpoint_url = runtime
+        .route_override_matching_public(&capability.public_model)
+        .map(|route| route.endpoint_url.clone())
+        .unwrap_or_else(|| runtime.config.endpoint_url.clone());
     materialize_channel_plan(
         config,
         parsed,
@@ -549,7 +628,8 @@ fn materialize_custom_account_plan(
         None,
         Some(upstream),
         Some(CustomRouteSpec {
-            endpoint_url: runtime.config.endpoint_url.clone(),
+            endpoint_url,
+            auth_kind: runtime.auth_kind,
         }),
     )
 }
@@ -611,6 +691,7 @@ fn materialize_dynamic_account_plan(
         Some(upstream),
         Some(CustomRouteSpec {
             endpoint_url: route.endpoint_url,
+            auth_kind: runtime.auth_kind,
         }),
     )
 }
@@ -710,7 +791,7 @@ fn collect_mapping_plans(
     resolved_alias: Option<String>,
     plans: Vec<MappingPlan>,
     free_only: bool,
-    mut rejected: Vec<String>,
+    mut rejections: Vec<RouteRejection>,
     custom_runtimes: &std::collections::HashMap<String, CustomAccountRuntime>,
     goat_runtimes: &std::collections::HashMap<String, GoatAccountRuntime>,
     contracts: &EffectiveContractSet,
@@ -722,9 +803,10 @@ fn collect_mapping_plans(
     for row in routing_accounts(accounts, projection) {
         let account = row.account;
         if row.credential_enabled == Some(false) {
-            rejected.push(format!(
-                "{}/{} account `{}`: credential is disabled",
-                account.provider_id, account.provider_id, account.name
+            rejections.push(account_rejection(
+                RouteRejectionCode::CredentialDisabled,
+                account,
+                "credential is disabled",
             ));
             continue;
         }
@@ -733,9 +815,10 @@ fn collect_mapping_plans(
             .cloned()
             .unwrap_or_else(default_inference_binding);
         if !binding.enabled {
-            rejected.push(format!(
-                "{}/{} account `{}`: inference binding is disabled",
-                account.provider_id, account.provider_id, account.name
+            rejections.push(account_rejection(
+                RouteRejectionCode::BindingDisabled,
+                account,
+                "inference binding is disabled",
             ));
             continue;
         }
@@ -751,9 +834,10 @@ fn collect_mapping_plans(
                 routing_model,
                 std::iter::once(candidate.plan.model.as_str()),
             ) {
-                rejected.push(format!(
-                    "{}/{} account `{}`: model `{routing_model}` is outside binding model scope",
-                    account.provider_id, account.provider_id, account.name
+                rejections.push(account_rejection(
+                    RouteRejectionCode::ModelScopeDenied,
+                    account,
+                    format!("model `{routing_model}` is outside binding model scope"),
                 ));
                 continue;
             }
@@ -767,18 +851,18 @@ fn collect_mapping_plans(
                 match goat_runtimes.get(&account.id) {
                     Some(runtime) if runtime.eligible() => {}
                     Some(_) => {
-                        rejected.push(format!(
-                            "{}/{} account `{}`: Command Code GOAT account is not eligible for routing",
-                            account.provider_id,
-                            account.provider_id,
-                            account.name
+                        rejections.push(account_rejection(
+                            RouteRejectionCode::GoatNotEligible,
+                            account,
+                            "Command Code GOAT account is not eligible for routing",
                         ));
                         continue;
                     }
                     None => {
-                        rejected.push(format!(
-                            "{}/{} account `{}`: Command Code GOAT production inference endpoint, auth, protocol, and model catalog are not verified; route is disabled",
-                            account.provider_id, account.provider_id, account.name
+                        rejections.push(account_rejection(
+                            RouteRejectionCode::GoatUnverified,
+                            account,
+                            "Command Code GOAT production inference endpoint, auth, protocol, and model catalog are not verified; route is disabled",
                         ));
                         continue;
                     }
@@ -805,9 +889,10 @@ fn collect_mapping_plans(
                 ) {
                     Ok(plan) => plan,
                     Err(error) => {
-                        rejected.push(format!(
-                            "{}/{} account `{}`: {error}",
-                            account.provider_id, account.provider_id, account.name
+                        rejections.push(account_rejection(
+                            RouteRejectionCode::CandidateMaterializationFailed,
+                            account,
+                            error,
                         ));
                         continue;
                     }
@@ -827,9 +912,10 @@ fn collect_mapping_plans(
                 ) {
                     Ok(plan) => plan,
                     Err(error) => {
-                        rejected.push(format!(
-                            "{}/{} account `{}`: {error}",
-                            account.provider_id, account.provider_id, account.name
+                        rejections.push(account_rejection(
+                            RouteRejectionCode::CandidateMaterializationFailed,
+                            account,
+                            error,
                         ));
                         continue;
                     }
@@ -857,13 +943,18 @@ fn collect_mapping_plans(
                     });
                     break;
                 }
-                Err(error) => rejected.push(format!(
-                    "{}/{} account `{}`: {error}",
-                    account.provider_id, account.provider_id, account.name
+                Err(error) => rejections.push(account_rejection(
+                    RouteRejectionCode::ProductionRouteUnsupported,
+                    account,
+                    error,
                 )),
             }
         }
     }
+    let rejected: Vec<String> = rejections
+        .iter()
+        .map(|rejection| rejection.detail.clone())
+        .collect();
     let incompatibility = (routes.is_empty() && !rejected.is_empty()).then(|| {
         format!(
             "no compatible provider account for model `{client_model}` and {:?}: {}",
@@ -876,6 +967,7 @@ fn collect_mapping_plans(
         free_only,
         incompatibility,
         rejected,
+        rejections,
     })
 }
 

@@ -119,6 +119,7 @@ pub struct MaterializeSpec {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CustomRouteSpec {
     pub endpoint_url: String,
+    pub auth_kind: ocg_domain::dynamic::DynamicAuthKind,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProtocolError {

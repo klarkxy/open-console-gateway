@@ -1,12 +1,12 @@
-//! Custom API runtime helpers: capability matching, verification probe, and
-//! per-account route identity.
+//! Custom API runtime helpers: connection-owned route configuration projected
+//! per credential for capability matching and verification.
 //!
 //! Account model capabilities are the client-facing IDs and the exact upstream
-//! IDs, each bound to the account's one upstream protocol. Verification sends
+//! IDs, each bound to its effective destination route. Verification sends
 //! one protocol-correct non-stream request against the first declared model.
 //! Discovery never mutates the declared list.
 //! The adapter identity is Configurable HTTP, not a base class other providers
-//! inherit from. Custom keeps a configurable API URL and explicit enablement;
+//! inherit from. Custom keeps destination-owned HTTP configuration and per-Key enablement;
 //! connection verification is an optional tool, not an enablement gate.
 
 use crate::custom_http::{
@@ -58,8 +58,10 @@ pub struct CustomAccountRuntime {
     pub verification_status: ConnectionVerificationStatus,
     pub setup_ready: bool,
     pub has_key: bool,
+    pub auth_kind: ocg_domain::dynamic::DynamicAuthKind,
     pub config: AccountCustomConfig,
     pub capabilities: Vec<AccountModelCapability>,
+    pub route_overrides: Vec<(String, ocg_domain::dynamic::DynamicModelUpstreamOverride)>,
     /// Linked New API / Sub2API Key: the site converts Chat, Messages, and
     /// Responses, so the contract enables those protocols and the gateway
     /// passes the matching client format through.
@@ -75,6 +77,16 @@ impl CustomAccountRuntime {
         self.capabilities
             .iter()
             .find(|capability| custom_model_id_matches(&capability.public_model, requested))
+    }
+
+    pub fn route_override_matching_public(
+        &self,
+        requested: &str,
+    ) -> Option<&ocg_domain::dynamic::DynamicModelUpstreamOverride> {
+        self.route_overrides
+            .iter()
+            .find(|(public_model, _)| custom_model_id_matches(public_model, requested))
+            .map(|(_, route)| route)
     }
 
     /// Public-name / protocol rows used to build the Custom contract.

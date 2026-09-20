@@ -112,19 +112,21 @@ fn prepare_account_model_test(
         .ok_or_else(|| V3ApiError::invalid_request_at(state, "unknown provider offering"))?;
 
     let (protocol, custom_endpoint_url, upstream_model) = if plan_requires_custom_config(plan) {
-        let contract = state
+        let runtime = state
             .db
             .lock()
-            .load_account_contract(&account.id)
-            .map_err(V3ApiError::internal)?;
-        let config = contract.custom_config.ok_or_else(|| {
-            V3ApiError::invalid_request_at(
-                state,
-                "Custom API accounts require a persisted endpoint URL and upstream protocol",
-            )
-        })?;
-        let capability = contract
-            .model_capabilities
+            .list_custom_account_runtimes()
+            .map_err(V3ApiError::internal)?
+            .into_iter()
+            .find(|runtime| runtime.account_id == account.id)
+            .ok_or_else(|| {
+                V3ApiError::invalid_request_at(
+                    state,
+                    "Custom API accounts require a persisted endpoint URL and upstream protocol",
+                )
+            })?;
+        let capability = runtime
+            .capabilities
             .iter()
             .find(|capability| {
                 crate::custom::custom_model_id_matches(&capability.public_model, model_id)
@@ -132,15 +134,13 @@ fn prepare_account_model_test(
             .ok_or_else(|| {
                 V3ApiError::invalid_request_at(state, "model is not declared for this account")
             })?;
-        if capability.protocol != config.upstream_protocol {
-            return Err(V3ApiError::invalid_request_at(
-                state,
-                "Custom API model capability protocol does not match this account",
-            ));
-        }
+        let endpoint_url = runtime
+            .route_override_matching_public(&capability.public_model)
+            .map(|route| route.endpoint_url.clone())
+            .unwrap_or_else(|| runtime.config.endpoint_url.clone());
         (
             capability.protocol,
-            Some(config.endpoint_url),
+            Some(endpoint_url),
             capability.upstream_model.clone(),
         )
     } else {

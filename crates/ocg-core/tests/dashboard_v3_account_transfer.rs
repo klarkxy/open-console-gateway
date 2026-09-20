@@ -58,6 +58,24 @@ async fn send_json(
     (status, headers, body)
 }
 
+async fn send_v4_json(
+    harness: &V3Harness,
+    method: Method,
+    path: &str,
+    body: &Value,
+) -> (StatusCode, Value) {
+    let response = harness
+        .client
+        .request(method, format!("{}{path}", harness.v4_base))
+        .json(body)
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = response.json().await.unwrap_or(Value::Null);
+    (status, body)
+}
+
 fn assert_no_store(headers: &reqwest::header::HeaderMap) {
     assert_eq!(
         headers
@@ -1217,4 +1235,201 @@ async fn v7_export_import_reopen_preserves_fields_keys_catalog_and_routing() {
 
     source.stop();
     reopened.stop();
+}
+
+#[tokio::test]
+async fn v8_roundtrip_preserves_shared_and_empty_custom_connections() {
+    let _migration_guard = MIGRATION_TEST_LOCK.lock().await;
+    let source = start_loopback("v8-shared-custom-source").await;
+    let create_custom = |name: &str, key: &str, endpoint: &str, model: &str| {
+        cas(
+            &source,
+            json!({
+                "name": name,
+                "key": key,
+                "providerId": CUSTOM_PROVIDER_ID,
+                "customConfig": {
+                    "endpointUrl": endpoint,
+                    "upstreamProtocol": "chat_completions"
+                },
+                "modelCapabilities": [{
+                    "publicModel": model,
+                    "upstreamModel": format!("vendor/{model}"),
+                    "protocol": "chat_completions"
+                }]
+            }),
+        )
+    };
+    let (status, _, first) = send_json(
+        &source,
+        Method::POST,
+        "/accounts",
+        &create_custom(
+            "Shared source",
+            "sk-shared-first",
+            "https://shared.example/v1/chat/completions",
+            "shared-model",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    let (status, connections) =
+        send_v4_json(&source, Method::GET, "/connections", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{connections}");
+    let shared_connection = connections["connections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["legacy"]["kind"] == "custom_account")
+        .unwrap();
+    let connection_id = shared_connection["id"].as_str().unwrap().to_string();
+    let second = cas(
+        &source,
+        json!({
+            "operationId": "aaaaaaaa-bbbb-4ccc-8ddd-00000000f801",
+            "connection": { "kind": "existing", "connectionId": connection_id },
+            "authorization": {
+                "kind": "api_key",
+                "secretInput": "sk-shared-second",
+                "accountLabel": "Shared second"
+            },
+            "targets": []
+        }),
+    );
+    let (status, second) = send_v4_json(&source, Method::POST, "/onboarding/commit", &second).await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+
+    let (status, destinations) =
+        send_v4_json(&source, Method::GET, "/destinations", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{destinations}");
+    let shared_destination = destinations["destinations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["legacy"]["kind"] == "custom_account")
+        .unwrap();
+    let shared_destination_id = shared_destination["id"].as_str().unwrap().to_string();
+    let (status, credentials) =
+        send_v4_json(&source, Method::GET, "/credentials", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{credentials}");
+    let authorize_ids = credentials["credentials"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["destinationId"] == shared_destination_id)
+        .map(|row| row["id"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(authorize_ids.len(), 2);
+    let patch = cas(
+        &source,
+        json!({
+            "name": "Shared imported name",
+            "endpointUrl": "https://shared.example/v1/chat/completions",
+            "upstreamProtocol": "chat_completions",
+            "authScheme": "x_api_key",
+            "models": [{
+                "publicModel": "shared-model",
+                "upstreamModel": "vendor/shared-model",
+                "upstreamOverride": {
+                    "protocol": "messages",
+                    "endpointUrl": "https://override.example/v1/messages"
+                }
+            }],
+            "authorizeCredentialIds": authorize_ids
+        }),
+    );
+    let (status, patched) = send_v4_json(
+        &source,
+        Method::PATCH,
+        &format!("/destinations/{shared_destination_id}"),
+        &patch,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{patched}");
+
+    let (status, _, empty_created) = send_json(
+        &source,
+        Method::POST,
+        "/accounts",
+        &create_custom(
+            "Empty imported name",
+            "sk-empty",
+            "https://empty.example/v1/chat/completions",
+            "empty-model",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{empty_created}");
+    let empty_account_id = empty_created["account"]["id"].as_str().unwrap().to_string();
+    source
+        .state
+        .db
+        .lock()
+        .delete_account(&empty_account_id)
+        .unwrap();
+
+    let (status, _, exported) = send_json(
+        &source,
+        Method::POST,
+        "/accounts/transfer/export",
+        &json!({ "bundlePassword": BUNDLE_PASSWORD }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{exported}");
+    let target = start_loopback("v8-shared-custom-target").await;
+    let (status, _, imported) = send_json(
+        &target,
+        Method::POST,
+        "/accounts/transfer/import",
+        &cas(
+            &target,
+            json!({
+                "password": BUNDLE_PASSWORD,
+                "bundle": exported["bundle"]
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{imported}");
+
+    let stored = ocg_core::destination_projection::load_persisted(&target.state.db.lock()).unwrap();
+    let shared = stored
+        .destinations
+        .iter()
+        .find(|destination| destination.id == shared_destination_id)
+        .unwrap();
+    assert_eq!(shared.name, "Shared imported name");
+    assert_eq!(shared.auth_scheme.as_str(), "x_api_key");
+    assert_eq!(
+        shared.catalog[0]
+            .upstream_override
+            .as_ref()
+            .unwrap()
+            .endpoint_url,
+        "https://override.example/v1/messages"
+    );
+    assert_eq!(
+        stored
+            .credentials
+            .iter()
+            .filter(|credential| credential.destination_id == shared_destination_id)
+            .count(),
+        2
+    );
+    let empty = stored
+        .destinations
+        .iter()
+        .find(|destination| destination.name == "Empty imported name")
+        .unwrap();
+    assert_eq!(
+        stored
+            .credentials
+            .iter()
+            .filter(|credential| credential.destination_id == empty.id)
+            .count(),
+        0
+    );
+
+    source.stop();
+    target.stop();
 }

@@ -327,7 +327,7 @@ async fn populated_state_projects_go_custom_and_platform_without_secrets() {
     let platform_destination = find_destination(&destinations, &platform_destination_id);
     assert_eq!(go_destination["adapter"], "opencode_go");
     assert_eq!(custom_destination["adapter"], "http");
-    assert_eq!(custom_destination["maxCredentials"], 1);
+    assert!(custom_destination["maxCredentials"].is_null());
     assert_eq!(platform_destination["adapter"], "http");
     assert_eq!(platform_destination["capabilities"]["observer"], true);
 

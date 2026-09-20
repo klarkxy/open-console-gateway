@@ -12,6 +12,7 @@ use ocg_domain::connection::{
 use ocg_domain::credential::{
     RouteSpec, assigned_endpoints_for_routes, credential_id_for_legacy_account, safe_default_grants,
 };
+use ocg_domain::destination::{AuthScheme, LegacyDestinationRef};
 use ocg_domain::dynamic::DynamicAuthKind;
 use ocg_domain::ids::CUSTOM_PROVIDER_ID;
 use sha2::Sha256;
@@ -44,7 +45,8 @@ use super::types::{
 const DIGEST_KEY_SETTING: &str = "dashboard_operation_digest_key";
 const OPERATION_KIND: &str = "onboarding_commit";
 const CUSTOM_HTTP_TEMPLATE: &str = "custom-http";
-const BUILTIN_OR_CUSTOM_MESSAGE: &str = "builtin and Custom API connections add Keys on Accounts";
+const NON_DYNAMIC_DRAFT_MESSAGE: &str =
+    "only configurable HTTP draft connections can resume explicit onboarding";
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -277,8 +279,8 @@ fn commit_existing_second_key(
             "existing connections cannot change model targets on onboarding commit",
         ));
     }
-    let runtime = resolve_existing_dynamic(state, connection_id)?;
-    if !runtime.auth_kind.requires_key() {
+    let connection = resolve_existing_key_connection(state, connection_id)?;
+    if !connection.auth_kind.requires_key() {
         return Err(V3ApiError::invalid_request_at(
             state,
             "no-auth provider already has a singleton account",
@@ -309,17 +311,17 @@ fn commit_existing_second_key(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or(runtime.name.as_str())
+        .unwrap_or(connection.name.as_str())
         .to_string();
     let notes = match api_key.notes.as_deref() {
         Some(value) => normalize_account_notes(value)
             .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?,
         None => None,
     };
-    let key_cipher = first_account_key(state, runtime.auth_kind, Some(secret))?;
+    let key_cipher = first_account_key(state, connection.auth_kind, Some(secret))?;
     let account = dynamic_provider_account(
-        runtime.auth_kind,
-        &runtime.id,
+        connection.auth_kind,
+        &connection.provider_id,
         account_name,
         key_cipher,
         notes,
@@ -334,11 +336,64 @@ fn commit_existing_second_key(
     let operation = ledger_row(operation_id, digest, &stored)?;
     {
         let db = state.db.lock();
-        db.commit_onboarding_existing_account(&account, &operation)
-            .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?;
+        db.commit_onboarding_existing_account(
+            &account,
+            connection.destination_id.as_deref(),
+            &operation,
+        )
+        .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?;
     }
     state.bump_settings_revision();
     Ok(committed_result(state, stored))
+}
+
+struct ExistingKeyConnection {
+    provider_id: String,
+    name: String,
+    auth_kind: DynamicAuthKind,
+    destination_id: Option<String>,
+}
+
+fn resolve_existing_key_connection(
+    state: &CoreState,
+    connection_id: &str,
+) -> Result<ExistingKeyConnection, V3ApiError> {
+    if let Ok(runtime) = resolve_existing_dynamic(state, connection_id) {
+        return Ok(ExistingKeyConnection {
+            provider_id: runtime.id,
+            name: runtime.name,
+            auth_kind: runtime.auth_kind,
+            destination_id: None,
+        });
+    }
+    let projection = {
+        let db = state.db.lock();
+        crate::destination_projection::read_v4_projection(&db)
+            .map_err(V3ApiError::internal)?
+            .map_err(|_| V3ApiError::conflict_at(state, "destination projection refused"))?
+    };
+    for destination in projection.destinations {
+        let LegacyDestinationRef::CustomAccount(legacy_id) = &destination.legacy else {
+            continue;
+        };
+        if connection_id_for_legacy(LegacyConnectionKind::CustomAccount, legacy_id).as_str()
+            != connection_id
+        {
+            continue;
+        }
+        let auth_kind = match destination.auth_scheme {
+            AuthScheme::Bearer => DynamicAuthKind::Bearer,
+            AuthScheme::XApiKey => DynamicAuthKind::XApiKey,
+            AuthScheme::None => DynamicAuthKind::None,
+        };
+        return Ok(ExistingKeyConnection {
+            provider_id: CUSTOM_PROVIDER_ID.to_string(),
+            name: destination.name,
+            auth_kind,
+            destination_id: Some(destination.id),
+        });
+    }
+    Err(V3ApiError::not_found_at(state, "connection not found"))
 }
 
 /// Draft resume is one CAS write over configuration, auth, targets, and mode.
@@ -917,7 +972,7 @@ fn resolve_existing_dynamic(
         {
             return Err(V3ApiError::invalid_request_at(
                 state,
-                BUILTIN_OR_CUSTOM_MESSAGE,
+                NON_DYNAMIC_DRAFT_MESSAGE,
             ));
         }
     }
@@ -933,7 +988,7 @@ fn resolve_existing_dynamic(
         {
             return Err(V3ApiError::invalid_request_at(
                 state,
-                BUILTIN_OR_CUSTOM_MESSAGE,
+                NON_DYNAMIC_DRAFT_MESSAGE,
             ));
         }
     }

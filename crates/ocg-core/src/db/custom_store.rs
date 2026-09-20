@@ -13,12 +13,36 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use ocg_domain::credential::{ModelScope, model_scope_allows};
 use ocg_domain::destination::{
-    CatalogModel, LegacyDestinationFacts, destination_from_legacy,
+    AuthScheme, CatalogModel, LegacyDestinationFacts, destination_from_legacy,
     destination_id_for_custom_account, destination_id_for_platform_account,
 };
+use ocg_domain::dynamic::DynamicModelMapping;
 use ocg_domain::ids::{CUSTOM_PROVIDER_ID, normalize_model_name};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::{HashMap, HashSet};
+
+#[derive(Debug, Clone)]
+pub(crate) struct CustomDestinationRecord {
+    pub legacy_id: String,
+    pub endpoint_url: String,
+    pub protocol: UpstreamProtocolKind,
+    pub auth_scheme: AuthScheme,
+    pub models: Vec<DynamicModelMapping>,
+}
+
+/// Resolve the connection-owned Custom destination for one standalone Key.
+/// Linked platform Keys deliberately return `None`: their route identity is
+/// still account-scoped and owned by the platform destination.
+pub(crate) fn custom_destination_for_account_on(
+    conn: &Connection,
+    account_id: &str,
+) -> Result<Option<CustomDestinationRecord>> {
+    let Some((destination_id, _, _)) = standalone_custom_destination_for_account(conn, account_id)?
+    else {
+        return Ok(None);
+    };
+    custom_destination_for_update_on(conn, &destination_id)
+}
 
 /// Copy leftover Custom facts onto destinations, then drop the two leftover
 /// tables. Linked platform Keys are not mapped to Custom destinations.
@@ -88,7 +112,17 @@ fn backfill_custom_destinations_from_leftover(
             "v53 refuses leftover custom config `{account_id}`: empty endpoint_url"
         );
         let name = credential_name(conn, &account_id)?.unwrap_or_else(|| account_id.clone());
-        upsert_custom_destination(conn, &account_id, &name, endpoint, protocol, &[])?;
+        let destination_id = destination_id_for_custom_account(&account_id);
+        upsert_custom_destination(
+            conn,
+            &account_id,
+            &destination_id,
+            &account_id,
+            &name,
+            endpoint,
+            protocol,
+            &[],
+        )?;
     }
     Ok(())
 }
@@ -274,16 +308,27 @@ pub(crate) fn persist_custom_config_on(
         merge_custom_models_onto_platform_parent(conn, account_id, &parent_id)?;
         return Ok(false);
     }
+    let existing_row = standalone_custom_destination_for_account(conn, account_id)?;
     let existing = load_custom_destination_endpoint(conn, account_id)?;
     let endpoint_changed = existing.as_ref().is_some_and(|(url, protocol)| {
         url != &endpoint_url || *protocol != input.upstream_protocol
     });
-    let name = credential_name(conn, account_id)?.unwrap_or_else(|| account_id.to_string());
-    let existing_models =
-        load_destination_model_inputs(conn, &destination_id_for_custom_account(account_id), true)?;
+    let (destination_id, legacy_owner_id, name) = match existing_row {
+        Some((destination_id, legacy_owner_id, destination_name)) => {
+            (destination_id, legacy_owner_id, destination_name)
+        }
+        None => (
+            destination_id_for_custom_account(account_id),
+            account_id.to_string(),
+            credential_name(conn, account_id)?.unwrap_or_else(|| account_id.to_string()),
+        ),
+    };
+    let existing_models = load_destination_model_inputs(conn, &destination_id, true)?;
     upsert_custom_destination(
         conn,
         account_id,
+        &destination_id,
+        &legacy_owner_id,
         &name,
         &endpoint_url,
         input.upstream_protocol,
@@ -438,6 +483,64 @@ pub(crate) fn list_capabilities_on(
     Ok(capabilities)
 }
 
+pub(crate) fn custom_auth_kind_on(
+    conn: &Connection,
+    account_id: &str,
+) -> Result<Option<ocg_domain::dynamic::DynamicAuthKind>> {
+    let value = conn
+        .query_row(
+            "SELECT d.auth_scheme
+             FROM credentials c
+             JOIN destinations d ON d.id = c.destination_id
+             WHERE c.legacy_account_id = ?1",
+            [account_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    value
+        .map(|value| match value.as_str() {
+            "bearer" => Ok(ocg_domain::dynamic::DynamicAuthKind::Bearer),
+            "x_api_key" | "x-api-key" => Ok(ocg_domain::dynamic::DynamicAuthKind::XApiKey),
+            "none" => Ok(ocg_domain::dynamic::DynamicAuthKind::None),
+            other => anyhow::bail!("unknown destinations.auth_scheme `{other}`"),
+        })
+        .transpose()
+}
+
+pub(crate) fn custom_route_overrides_on(
+    conn: &Connection,
+    account_id: &str,
+) -> Result<Vec<(String, ocg_domain::dynamic::DynamicModelUpstreamOverride)>> {
+    let Some(destination_id) = destination_id_for_account_custom_facts(conn, account_id)? else {
+        return Ok(Vec::new());
+    };
+    let scope = credential_model_scope_on(conn, account_id)?;
+    let mut stmt = conn.prepare(
+        "SELECT public_model, upstream_override
+         FROM destination_models
+         WHERE destination_id = ?1 AND upstream_override IS NOT NULL
+         ORDER BY rowid ASC",
+    )?;
+    let rows = stmt
+        .query_map([destination_id], |row| {
+            let public_model = row.get::<_, String>(0)?;
+            let raw = row.get::<_, String>(1)?;
+            let route = serde_json::from_str(&raw).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    1,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?;
+            Ok((public_model, route))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows
+        .into_iter()
+        .filter(|(public_model, _)| model_scope_allows(&scope, public_model))
+        .collect())
+}
+
 pub(crate) fn capability_triples_on(
     conn: &Connection,
     account_id: &str,
@@ -464,16 +567,9 @@ pub(crate) fn delete_custom_destination_facts(conn: &Connection, account_id: &st
     if platform_parent_id(conn, account_id)?.is_some() {
         return Ok(());
     }
-    delete_custom_destination_row(conn, account_id)
-}
-
-pub(crate) fn delete_custom_destination_row(conn: &Connection, account_id: &str) -> Result<()> {
-    let dest_id = destination_id_for_custom_account(account_id);
-    conn.execute(
-        "DELETE FROM destination_models WHERE destination_id = ?1",
-        [&dest_id],
-    )?;
-    conn.execute("DELETE FROM destinations WHERE id = ?1", [&dest_id])?;
+    // Destination configuration is connection-owned after v58. Deleting or
+    // replacing the last Key deliberately leaves the connection available so
+    // another credential can be attached later.
     Ok(())
 }
 
@@ -497,8 +593,81 @@ pub(crate) fn persist_custom_destination_after_unlink(
                 .flatten()
         })
         .unwrap_or(UpstreamProtocolKind::ChatCompletions);
+    // Preserve explicit revocation. A new connection identity may inherit
+    // authorization only when this Key had both the old endpoint id and the
+    // exact new origin authorized before unlink.
+    let credential_id: String = conn.query_row(
+        "SELECT id FROM credentials
+         WHERE legacy_account_id = ?1
+           AND COALESCE(credential_purpose, 'inference') = 'inference'",
+        [account_id],
+        |row| row.get(0),
+    )?;
+    let old_connection_id =
+        connection_id_for_legacy(LegacyConnectionKind::CustomAccount, account_id);
+    let old_endpoint_id = endpoint_id_for(&old_connection_id, EndpointOperation::from(protocol));
+    let new_origin = normalize_origin(&endpoint);
+    let mut had_old_endpoint = false;
+    let mut had_new_origin = false;
+    {
+        let mut stmt =
+            conn.prepare("SELECT kind, value FROM credential_grants WHERE credential_id = ?1")?;
+        for row in stmt.query_map([&credential_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })? {
+            let (kind, value) = row?;
+            if kind == "endpoint_id" && value == old_endpoint_id.as_str() {
+                had_old_endpoint = true;
+            } else if kind == "origin"
+                && new_origin
+                    .as_ref()
+                    .is_some_and(|expected| normalize_origin(&value).as_ref() == Some(expected))
+            {
+                had_new_origin = true;
+            }
+        }
+    }
     let name = credential_name(conn, account_id)?.unwrap_or_else(|| account_id.to_string());
-    upsert_custom_destination(conn, account_id, &name, &endpoint, protocol, &models)?;
+    // A v58 Custom connection can outlive and be shared by the account whose
+    // id originally named it. Unlinking that owner must not overwrite the
+    // retained source connection used by siblings (or its zero-Key config).
+    // Allocate a fresh connection identity on collision and persist it on the
+    // credential through `upsert_custom_destination` below.
+    let mut legacy_owner_id = account_id.to_string();
+    let mut destination_id = destination_id_for_custom_account(&legacy_owner_id);
+    while destination_exists(conn, &destination_id)? {
+        legacy_owner_id = uuid::Uuid::new_v4().to_string();
+        destination_id = destination_id_for_custom_account(&legacy_owner_id);
+    }
+    upsert_custom_destination(
+        conn,
+        account_id,
+        &destination_id,
+        &legacy_owner_id,
+        &name,
+        &endpoint,
+        protocol,
+        &models,
+    )?;
+    // The unlinked Key now belongs to a fresh Custom connection identity.
+    // Platform endpoint ids (and any ids from a retained shared source) are
+    // not valid for it, so replace the binding grants with this connection's
+    // default route before the transaction commits.
+    let connection_id =
+        connection_id_for_legacy(LegacyConnectionKind::CustomAccount, &legacy_owner_id);
+    let (ids, origins) = if had_old_endpoint && had_new_origin {
+        let assigned = assigned_endpoints_for_routes(
+            &connection_id,
+            &[RouteSpec {
+                operation: EndpointOperation::from(protocol),
+                url: Some(endpoint),
+            }],
+        );
+        safe_default_grants(&assigned)
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    identity::replace_binding_grants_for_account_on(conn, account_id, &ids, &origins)?;
     Ok(())
 }
 
@@ -545,17 +714,15 @@ fn destination_id_for_account_custom_facts(
     if let Some(parent_id) = platform_parent_id(conn, account_id)? {
         return Ok(Some(destination_id_for_platform_account(&parent_id)));
     }
-    let dest_id = destination_id_for_custom_account(account_id);
-    if destination_exists(conn, &dest_id)? {
-        Ok(Some(dest_id))
-    } else {
-        Ok(None)
-    }
+    Ok(standalone_custom_destination_for_account(conn, account_id)?
+        .map(|(destination_id, _, _)| destination_id))
 }
 
 fn upsert_custom_destination(
     conn: &Connection,
     account_id: &str,
+    destination_id: &str,
+    legacy_owner_id: &str,
     name: &str,
     endpoint_url: &str,
     protocol: UpstreamProtocolKind,
@@ -566,19 +733,24 @@ fn upsert_custom_destination(
         .map(|row| (row.public_model.clone(), row.upstream_model.clone()))
         .collect();
     let destination = destination_from_legacy(&LegacyDestinationFacts::CustomAccount {
-        account_id: account_id.to_string(),
+        account_id: legacy_owner_id.to_string(),
         name: name.to_string(),
         endpoint_url: endpoint_url.to_string(),
         protocol,
         model_capabilities: pairs,
     })
     .map_err(|error| anyhow::anyhow!("{error}"))?;
-    let dest_id = destination.id.clone();
+    anyhow::ensure!(
+        destination.id == destination_id,
+        "custom destination identity changed while updating account `{account_id}`"
+    );
+    let dest_id = destination_id.to_string();
     if destination_exists(conn, &dest_id)? {
         conn.execute(
             "UPDATE destinations
              SET name = ?2, base_url = ?3, protocols_json = ?4, auth_scheme = ?5,
-                 adapter = ?6, capabilities_json = ?7, max_credentials = ?8, enabled = ?9
+                 adapter = ?6, capabilities_json = ?7,
+                 model_resolution = 'public_only', max_credentials = NULL, enabled = ?8
              WHERE id = ?1",
             params![
                 dest_id,
@@ -588,7 +760,6 @@ fn upsert_custom_destination(
                 destination.auth_scheme.as_str(),
                 destination.adapter.as_str(),
                 serde_json::to_string(&destination.capabilities)?,
-                destination.max_credentials.map(i64::from),
                 i64::from(destination.enabled),
             ],
         )?;
@@ -596,19 +767,18 @@ fn upsert_custom_destination(
         conn.execute(
             "INSERT INTO destinations (
                 id, legacy_kind, legacy_id, adapter, name, brand_family, base_url,
-                protocols_json, auth_scheme, capabilities_json, plan_json,
+                protocols_json, auth_scheme, model_resolution, capabilities_json, plan_json,
                 max_credentials, observer_credential_id, enabled
-             ) VALUES (?1, 'custom_account', ?2, ?3, ?4, NULL, ?5, ?6, ?7, ?8, NULL, ?9, NULL, ?10)",
+             ) VALUES (?1, 'custom_account', ?2, ?3, ?4, NULL, ?5, ?6, ?7, 'public_only', ?8, NULL, NULL, NULL, ?9)",
             params![
                 dest_id,
-                account_id,
+                legacy_owner_id,
                 destination.adapter.as_str(),
                 destination.name,
                 destination.base_url,
                 serde_json::to_string(&destination.protocols)?,
                 destination.auth_scheme.as_str(),
                 serde_json::to_string(&destination.capabilities)?,
-                destination.max_credentials.map(i64::from),
                 i64::from(destination.enabled),
             ],
         )?;
@@ -657,6 +827,7 @@ fn replace_destination_models(
             protocols: vec![capability.protocol],
             preferred: Some(capability.protocol),
             enabled: true,
+            upstream_override: None,
         });
     }
     conn.execute(
@@ -667,8 +838,8 @@ fn replace_destination_models(
         conn.execute(
             "INSERT INTO destination_models (
                 destination_id, public_model, public_model_key, upstream_model,
-                protocols_json, preferred, enabled
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                protocols_json, preferred, enabled, upstream_override
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 destination_id,
                 model.public_model,
@@ -679,6 +850,11 @@ fn replace_destination_models(
                     .preferred
                     .map(|protocol| protocol.as_str().to_string()),
                 i64::from(model.enabled),
+                model
+                    .upstream_override
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()?,
             ],
         )?;
     }
@@ -690,11 +866,11 @@ pub(crate) fn merge_custom_models_onto_platform_parent(
     account_id: &str,
     parent_id: &str,
 ) -> Result<()> {
-    let custom_id = destination_id_for_custom_account(account_id);
-    let parent_id = destination_id_for_platform_account(parent_id);
-    if !destination_exists(conn, &custom_id)? {
+    let Some((custom_id, _, _)) = standalone_custom_destination_for_account(conn, account_id)?
+    else {
         return Ok(());
-    }
+    };
+    let parent_id = destination_id_for_platform_account(parent_id);
     let custom_models = load_destination_model_inputs(conn, &custom_id, true)?;
     if custom_models.is_empty() {
         return Ok(());
@@ -772,7 +948,10 @@ pub(crate) fn narrow_credential_scope_from_custom_destination(
     conn: &Connection,
     account_id: &str,
 ) -> Result<()> {
-    let custom_id = destination_id_for_custom_account(account_id);
+    let Some((custom_id, _, _)) = standalone_custom_destination_for_account(conn, account_id)?
+    else {
+        return Ok(());
+    };
     let models = load_destination_model_inputs(conn, &custom_id, true)?;
     if models.is_empty() {
         return Ok(());
@@ -784,17 +963,18 @@ fn load_custom_destination_endpoint(
     conn: &Connection,
     account_id: &str,
 ) -> Result<Option<(String, UpstreamProtocolKind)>> {
-    let dest_id = destination_id_for_custom_account(account_id);
+    let Some((dest_id, _, _)) = standalone_custom_destination_for_account(conn, account_id)? else {
+        return Ok(None);
+    };
     let row: Option<(Option<String>, String)> = conn
         .query_row(
             "SELECT base_url, protocols_json FROM destinations
-             WHERE legacy_kind = 'custom_account' AND legacy_id = ?1",
-            [account_id],
+             WHERE id = ?1 AND legacy_kind = 'custom_account'",
+            [&dest_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
     let Some((base_url, protocols_json)) = row else {
-        let _ = dest_id;
         return Ok(None);
     };
     let protocols: Vec<UpstreamProtocolKind> = serde_json::from_str(&protocols_json)
@@ -804,6 +984,337 @@ fn load_custom_destination_endpoint(
         .next()
         .unwrap_or(UpstreamProtocolKind::ChatCompletions);
     Ok(Some((base_url.unwrap_or_default(), protocol)))
+}
+
+/// Resolve the connection-owned Custom destination for one credential.
+/// The destination's legacy id remains the first pre-v58 account id, while
+/// later credentials point at the same destination through `destination_id`.
+fn standalone_custom_destination_for_account(
+    conn: &Connection,
+    account_id: &str,
+) -> Result<Option<(String, String, String)>> {
+    conn.query_row(
+        "SELECT d.id, d.legacy_id, d.name
+         FROM credentials c
+         JOIN destinations d ON d.id = c.destination_id
+         WHERE c.legacy_account_id = ?1
+           AND d.legacy_kind = 'custom_account'",
+        [account_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+pub(crate) fn custom_connection_credential_count_on(
+    conn: &Connection,
+    account_id: &str,
+) -> Result<i64> {
+    let Some((destination_id, _, _)) = standalone_custom_destination_for_account(conn, account_id)?
+    else {
+        return Ok(0);
+    };
+    conn.query_row(
+        "SELECT COUNT(*) FROM credentials
+         WHERE destination_id = ?1
+           AND COALESCE(credential_purpose, 'inference') = 'inference'",
+        [destination_id],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
+}
+
+pub(crate) fn custom_destination_for_update_on(
+    conn: &Connection,
+    destination_id: &str,
+) -> Result<Option<CustomDestinationRecord>> {
+    let row: Option<(String, String, String, String)> = conn
+        .query_row(
+            "SELECT legacy_id, COALESCE(base_url, ''), protocols_json, auth_scheme
+             FROM destinations
+             WHERE id = ?1 AND legacy_kind = 'custom_account' AND adapter = 'http'",
+            [destination_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()?;
+    let Some((legacy_id, endpoint_url, protocols_json, auth_scheme)) = row else {
+        return Ok(None);
+    };
+    let protocols: Vec<UpstreamProtocolKind> = serde_json::from_str(&protocols_json)?;
+    let protocol = protocols
+        .first()
+        .copied()
+        .unwrap_or(UpstreamProtocolKind::ChatCompletions);
+    let auth_scheme = match auth_scheme.as_str() {
+        "bearer" => AuthScheme::Bearer,
+        "x_api_key" | "x-api-key" => AuthScheme::XApiKey,
+        "none" => AuthScheme::None,
+        other => anyhow::bail!("unknown destinations.auth_scheme `{other}`"),
+    };
+    let mut stmt = conn.prepare(
+        "SELECT public_model, upstream_model, upstream_override
+         FROM destination_models
+         WHERE destination_id = ?1
+         ORDER BY rowid ASC",
+    )?;
+    let models = stmt
+        .query_map([destination_id], |row| {
+            Ok(DynamicModelMapping {
+                public_model: row.get(0)?,
+                upstream_model: row.get(1)?,
+                upstream_override: row
+                    .get::<_, Option<String>>(2)?
+                    .map(|raw| {
+                        serde_json::from_str(&raw).map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                2,
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })
+                    })
+                    .transpose()?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(Some(CustomDestinationRecord {
+        legacy_id,
+        endpoint_url,
+        protocol,
+        auth_scheme,
+        models,
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn upsert_imported_custom_destination_on(
+    conn: &Connection,
+    destination_id: &str,
+    legacy_id: &str,
+    name: &str,
+    endpoint_url: &str,
+    protocol: UpstreamProtocolKind,
+    auth_scheme: AuthScheme,
+    models: &[DynamicModelMapping],
+    enabled: bool,
+) -> Result<()> {
+    anyhow::ensure!(
+        destination_id_for_custom_account(legacy_id) == destination_id,
+        "Custom destination `{destination_id}` has an incompatible stable identity"
+    );
+    anyhow::ensure!(
+        !matches!(auth_scheme, AuthScheme::None),
+        "legacy Custom HTTP connections require keyed authentication"
+    );
+    let endpoint_url = validate_custom_endpoint_url(endpoint_url)?;
+    let definition = ocg_domain::dynamic::DynamicProviderDefinition {
+        preset_id: None,
+        id: legacy_id.to_string(),
+        name: name.to_string(),
+        endpoint_url: endpoint_url.clone(),
+        upstream_protocol: protocol,
+        auth_kind: match auth_scheme {
+            AuthScheme::Bearer => ocg_domain::dynamic::DynamicAuthKind::Bearer,
+            AuthScheme::XApiKey => ocg_domain::dynamic::DynamicAuthKind::XApiKey,
+            AuthScheme::None => unreachable!("None was rejected above"),
+        },
+        mappings: models.to_vec(),
+    };
+    let definition = crate::dynamic::validate_definition(definition)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let name = definition.name.as_str();
+    let endpoint_url = definition.endpoint_url;
+    let protocol = definition.upstream_protocol;
+    let models = definition.mappings;
+    let pairs = models
+        .iter()
+        .map(|model| (model.public_model.clone(), model.upstream_model.clone()))
+        .collect::<Vec<_>>();
+    let mapped = destination_from_legacy(&LegacyDestinationFacts::CustomAccount {
+        account_id: legacy_id.to_string(),
+        name: name.to_string(),
+        endpoint_url: endpoint_url.clone(),
+        protocol,
+        model_capabilities: pairs,
+    })
+    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let collision = conn
+        .query_row(
+            "SELECT legacy_kind, legacy_id, adapter FROM destinations WHERE id = ?1",
+            [destination_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    if let Some((kind, existing_legacy_id, adapter)) = collision {
+        anyhow::ensure!(
+            kind == "custom_account" && existing_legacy_id == legacy_id && adapter == "http",
+            "Custom destination stable id collides with an incompatible destination"
+        );
+        conn.execute(
+            "UPDATE destinations SET
+                 name = ?2, base_url = ?3, protocols_json = ?4,
+                 auth_scheme = ?5, model_resolution = 'public_only',
+                 capabilities_json = ?6, max_credentials = NULL, enabled = ?7
+             WHERE id = ?1",
+            params![
+                destination_id,
+                name,
+                endpoint_url,
+                serde_json::to_string(&[protocol])?,
+                auth_scheme.as_str(),
+                serde_json::to_string(&mapped.capabilities)?,
+                i64::from(enabled),
+            ],
+        )?;
+    } else {
+        let conflicting_id: Option<String> = conn
+            .query_row(
+                "SELECT id FROM destinations
+                 WHERE legacy_kind = 'custom_account' AND legacy_id = ?1",
+                [legacy_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        anyhow::ensure!(
+            conflicting_id.is_none(),
+            "Custom destination legacy identity collides with another stable id"
+        );
+        conn.execute(
+            "INSERT INTO destinations (
+                 id, legacy_kind, legacy_id, adapter, name, brand_family,
+                 base_url, protocols_json, auth_scheme, model_resolution,
+                 capabilities_json, plan_json, max_credentials,
+                 observer_credential_id, enabled
+             ) VALUES (?1, 'custom_account', ?2, 'http', ?3, NULL, ?4, ?5,
+                       ?6, 'public_only', ?7, NULL, NULL, NULL, ?8)",
+            params![
+                destination_id,
+                legacy_id,
+                name,
+                endpoint_url,
+                serde_json::to_string(&[protocol])?,
+                auth_scheme.as_str(),
+                serde_json::to_string(&mapped.capabilities)?,
+                i64::from(enabled),
+            ],
+        )?;
+    }
+    replace_custom_destination_definition_on(
+        conn,
+        destination_id,
+        name,
+        &endpoint_url,
+        protocol,
+        auth_scheme,
+        &models,
+        Utc::now(),
+    )?;
+    Ok(())
+}
+
+pub(crate) fn replace_custom_destination_definition_on(
+    conn: &Connection,
+    destination_id: &str,
+    name: &str,
+    endpoint_url: &str,
+    protocol: UpstreamProtocolKind,
+    auth_scheme: AuthScheme,
+    models: &[DynamicModelMapping],
+    updated_at: DateTime<Utc>,
+) -> Result<Vec<(String, String)>> {
+    let _existing = custom_destination_for_update_on(conn, destination_id)?
+        .ok_or_else(|| anyhow::anyhow!("custom destination not found"))?;
+    let endpoint_url = validate_custom_endpoint_url(endpoint_url)?;
+    let protocols_json = serde_json::to_string(&[protocol])?;
+    conn.execute(
+        "UPDATE destinations
+         SET name = ?2, base_url = ?3, protocols_json = ?4, auth_scheme = ?5,
+             model_resolution = 'public_only', max_credentials = NULL, updated_at = ?6
+         WHERE id = ?1 AND legacy_kind = 'custom_account' AND adapter = 'http'",
+        params![
+            destination_id,
+            name,
+            endpoint_url,
+            protocols_json,
+            auth_scheme.as_str(),
+            updated_at.to_rfc3339(),
+        ],
+    )?;
+    conn.execute(
+        "DELETE FROM destination_models WHERE destination_id = ?1",
+        [destination_id],
+    )?;
+    let mut insert = conn.prepare(
+        "INSERT INTO destination_models (
+            destination_id, public_model, public_model_key, upstream_model,
+            protocols_json, preferred, enabled, upstream_override
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7)",
+    )?;
+    for model in models {
+        let effective_protocol = model
+            .upstream_override
+            .as_ref()
+            .map(|route| route.protocol)
+            .unwrap_or(protocol);
+        insert.execute(params![
+            destination_id,
+            model.public_model,
+            model.public_model.to_ascii_lowercase(),
+            model.upstream_model,
+            serde_json::to_string(&[effective_protocol])?,
+            effective_protocol.as_str(),
+            model
+                .upstream_override
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?,
+        ])?;
+    }
+    drop(insert);
+    let mut stmt = conn.prepare(
+        "SELECT legacy_account_id, id FROM credentials
+         WHERE destination_id = ?1
+           AND COALESCE(credential_purpose, 'inference') = 'inference'
+         ORDER BY routing_rank ASC, created_at ASC, legacy_account_id ASC",
+    )?;
+    let credentials = stmt
+        .query_map([destination_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(credentials)
+}
+
+pub(crate) fn delete_empty_custom_destination_on(
+    conn: &Connection,
+    destination_id: &str,
+) -> Result<()> {
+    let exists: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM destinations
+         WHERE id = ?1 AND legacy_kind = 'custom_account' AND adapter = 'http'",
+        [destination_id],
+        |row| row.get(0),
+    )?;
+    anyhow::ensure!(exists == 1, "custom destination not found");
+    let credentials: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM credentials WHERE destination_id = ?1",
+        [destination_id],
+        |row| row.get(0),
+    )?;
+    anyhow::ensure!(
+        credentials == 0,
+        "custom destination still has {credentials} credential(s)"
+    );
+    conn.execute(
+        "DELETE FROM destination_models WHERE destination_id = ?1",
+        [destination_id],
+    )?;
+    conn.execute("DELETE FROM destinations WHERE id = ?1", [destination_id])?;
+    Ok(())
 }
 
 fn load_destination_first_protocol(

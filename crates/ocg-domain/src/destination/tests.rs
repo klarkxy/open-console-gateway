@@ -428,7 +428,7 @@ fn maps_custom_root_url_account() {
     );
     assert_eq!(destination.protocols, vec![Protocol::ChatCompletions]);
     assert_eq!(destination.auth_scheme, AuthScheme::Bearer);
-    assert_eq!(destination.max_credentials, Some(1));
+    assert_eq!(destination.max_credentials, None);
     assert!(destination.plan.is_none());
     assert!(destination.capabilities.discoverable_models);
     assert_eq!(
@@ -439,6 +439,7 @@ fn maps_custom_root_url_account() {
             protocols: vec![Protocol::ChatCompletions],
             preferred: Some(Protocol::ChatCompletions),
             enabled: true,
+            upstream_override: None,
         }]
     );
 
@@ -469,7 +470,7 @@ fn maps_custom_complete_path_account() {
     );
     assert_eq!(destination.protocols, vec![Protocol::Messages]);
     assert_eq!(destination.auth_scheme, AuthScheme::XApiKey);
-    assert_eq!(destination.max_credentials, Some(1));
+    assert_eq!(destination.max_credentials, None);
     assert_eq!(destination.catalog[0].preferred, Some(Protocol::Messages));
 
     assert_eq!(

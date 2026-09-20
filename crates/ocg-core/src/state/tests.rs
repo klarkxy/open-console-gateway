@@ -931,6 +931,7 @@ fn proxy_candidates_use_exact_upstream_ids_not_public_aliases() {
         verification_status: crate::provider::ConnectionVerificationStatus::Verified,
         setup_ready: true,
         has_key: true,
+        auth_kind: ocg_domain::dynamic::DynamicAuthKind::XApiKey,
         config: crate::models::AccountCustomConfig {
             account_id: "custom-1".into(),
             endpoint_url: "https://api.example.com/v1/messages".into(),
@@ -946,6 +947,7 @@ fn proxy_candidates_use_exact_upstream_ids_not_public_aliases() {
             verified_at: None,
             source: "declared".into(),
         }],
+        route_overrides: Vec::new(),
         protocol_passthrough: false,
     };
     let mut inactive_custom = custom_runtime.clone();

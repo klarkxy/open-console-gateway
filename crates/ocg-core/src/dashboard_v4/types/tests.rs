@@ -95,6 +95,58 @@ fn schema_catalog_names_v4_types_and_shared_error() {
             "{field} must stay required so responses emit T|null"
         );
     }
+    assert!(defs.contains_key("RoutingExplanation"));
+}
+
+#[test]
+fn routing_explanation_emits_camel_case_and_null_optionals() {
+    let explanation = RoutingExplanation {
+        requested_model: "glm-5.2".into(),
+        client_protocol: RoutingClientProtocol::ChatCompletions,
+        resolved: RoutingResolvedModel {
+            kind: RoutingResolvedKind::PinnedRaw,
+            alias: None,
+            mappings: vec![RoutingResolvedMapping {
+                provider_id: "opencode".into(),
+                upstream_model: "glm-5.2".into(),
+                routeable: true,
+            }],
+        },
+        revision: ControlRevision {
+            revision: 1,
+            process_generation: 2,
+            pricing_revision: "p".into(),
+        },
+        observed_at: "2024-01-02T03:04:05Z".into(),
+        routing_mode: RoutingMode::StrictPriority,
+        conversation_sticky: true,
+        conversation_binding: RoutingConversationBinding::NotEvaluated,
+        eligible: Vec::new(),
+        exclusions: vec![RoutingExclusion {
+            code: RoutingExclusionCode::AccountDisabled,
+            detail: "account `a` is disabled".into(),
+            account_id: Some("a".into()),
+            provider_id: Some("opencode".into()),
+            upstream_model: None,
+        }],
+        expected_base_policy_first_pick: None,
+        runtime_only_uncertainty: vec![RuntimeOnlyUncertainty::UpstreamResultUnknown],
+    };
+    let value = serde_json::to_value(&explanation).unwrap();
+    assert_eq!(value["requestedModel"], "glm-5.2");
+    assert_eq!(value["clientProtocol"], "chat_completions");
+    assert_eq!(value["resolved"]["kind"], "pinned_raw");
+    assert_eq!(value["resolved"]["alias"], Value::Null);
+    assert_eq!(value["routingMode"], "strict-priority");
+    assert_eq!(value["conversationBinding"], "not_evaluated");
+    assert_eq!(value["expectedBasePolicyFirstPick"], Value::Null);
+    assert_eq!(value["exclusions"][0]["accountId"], "a");
+    assert_eq!(value["exclusions"][0]["upstreamModel"], Value::Null);
+    assert_eq!(value["exclusions"][0]["code"], "account_disabled");
+    assert_eq!(
+        value["runtimeOnlyUncertainty"],
+        json!(["upstream_result_unknown"])
+    );
 }
 
 #[test]

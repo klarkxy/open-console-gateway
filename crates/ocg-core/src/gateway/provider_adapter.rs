@@ -21,7 +21,7 @@
 //! loopback origin only and still uses `/provider/v1/...`.
 //! Configurable HTTP is the Custom API identity, not a base class.
 
-use crate::custom_http::{custom_auth_scheme, join_inference_endpoint, resolve_custom_endpoints};
+use crate::custom_http::{join_inference_endpoint, resolve_custom_endpoints};
 use crate::gateway::attempt::{AttemptSpec, CredentialHandle, ProxyRoutingModel};
 use crate::gateway::free_models::resolve_upstream_base;
 use crate::gateway::protocol::{
@@ -578,9 +578,10 @@ fn resolve_configurable_http(
         base_url: base.as_str().trim_end_matches('/').to_string(),
         path: endpoint_path,
         upstream: plan.upstream,
-        auth: match custom_auth_scheme(protocol) {
-            UpstreamAuthScheme::Bearer => UpstreamAuth::Bearer,
-            UpstreamAuthScheme::XApiKey => UpstreamAuth::XApiKey,
+        auth: match custom.auth_kind {
+            ocg_domain::dynamic::DynamicAuthKind::Bearer => UpstreamAuth::Bearer,
+            ocg_domain::dynamic::DynamicAuthKind::XApiKey => UpstreamAuth::XApiKey,
+            ocg_domain::dynamic::DynamicAuthKind::None => UpstreamAuth::None,
         },
         follow_redirects: descriptor.inference.follow_redirects,
         credential: credential_handle(account, descriptor),

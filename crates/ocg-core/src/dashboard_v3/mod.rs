@@ -470,6 +470,7 @@ where
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct V3ApiError {
     status: StatusCode,
     body: V3Error,

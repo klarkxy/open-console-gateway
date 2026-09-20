@@ -3,7 +3,7 @@
 //! Plaintext upstream Keys are decrypted and re-encrypted only inside the Host.
 //! The dashboard receives a versioned Argon2id + AES-256-GCM envelope, plus
 //! secret-free previews/results. Browser profiles, cookies, logs, usage, and
-//! local Host settings stay off the package. V7 destinations and credentials
+//! local Host settings stay off the package. V7/V8 destinations and credentials
 //! are the authoritative transfer model and carry plaintext secrets inside the
 //! already-encrypted envelope. V6 preserves cooldown deadlines; V4/V5 retain
 //! their host-local policy.
@@ -61,7 +61,7 @@ mod new_model;
 mod portable;
 
 use new_model::{
-    ValidatedMigration, export_new_model, finish_v7_migration, map_old_graph_to_unified,
+    ValidatedMigration, export_new_model, finish_new_model_migration, map_old_graph_to_unified,
     observer_plaintext_by_parent,
 };
 use portable::{PortableCredential, PortableDestination, credential_purpose, is_observer_purpose};
@@ -72,10 +72,11 @@ const ENVELOPE_VERSION: u32 = 1;
 const LEGACY_PAYLOAD_VERSION: u32 = 1;
 #[cfg(test)]
 const NODE_PAYLOAD_VERSION: u32 = 2;
-const PAYLOAD_VERSION: u32 = 7;
+const PAYLOAD_VERSION: u32 = 8;
 const MIN_SUPPORTED_PAYLOAD_VERSION: u32 = 4;
 const V5_PAYLOAD_VERSION: u32 = 5;
 const V6_PAYLOAD_VERSION: u32 = 6;
+const V7_PAYLOAD_VERSION: u32 = 7;
 const AAD: &[u8] = b"ocg-manager-account-backup:v1:argon2id-m65536-t3-p1:aes-256-gcm";
 const ARGON_MEMORY_KIB: u32 = 64 * 1024;
 const ARGON_ITERATIONS: u32 = 3;
@@ -873,6 +874,8 @@ async fn import_accounts_inner(
         provider_contracts: persisted_contracts_from_portable(&node.provider_contracts, now)
             .map_err(|error| V3ApiError::invalid_request_at(&state, error))?,
         dynamic_providers: validated.unified.dynamic_providers,
+        custom_destinations: validated.unified.custom_destinations,
+        custom_credential_destinations: validated.unified.custom_credential_destinations,
         identity_snapshot,
         draft_provider_ids: validated.unified.draft_provider_ids,
         platform_observer_ciphers,
@@ -1209,7 +1212,7 @@ fn validate_payload(payload: PortablePayload) -> Result<ValidatedMigration, Tran
     }
     let has_destination_semantics =
         !payload.destinations.is_empty() || !payload.credentials.is_empty();
-    if payload.version < PAYLOAD_VERSION && has_destination_semantics {
+    if payload.version < V7_PAYLOAD_VERSION && has_destination_semantics {
         return Err(TransferError::Invalid(
             "this backup carries destination semantics that cannot be imported as a V4/V5/V6 package"
                 .to_string(),
@@ -1221,8 +1224,8 @@ fn validate_payload(payload: PortablePayload) -> Result<ValidatedMigration, Tran
         return Err(TransferError::InvalidBundle);
     }
     let exported_at = payload.exported_at.clone();
-    if payload.version >= PAYLOAD_VERSION {
-        return finish_v7_migration(&mut payload, exported_at);
+    if payload.version >= V7_PAYLOAD_VERSION {
+        return finish_new_model_migration(&mut payload, exported_at);
     }
     if payload.accounts.len() > MAX_ACCOUNTS || payload.node.is_none() {
         return Err(TransferError::InvalidBundle);

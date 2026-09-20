@@ -14,6 +14,14 @@ use crate::provider_contracts::{
 };
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Local, NaiveDate, TimeZone, Utc};
+use ocg_domain::connection::{
+    EndpointOperation, LegacyConnectionKind, connection_id_for_legacy, endpoint_id_for,
+};
+use ocg_domain::credential::{
+    RouteSpec, assigned_endpoints_for_routes, normalize_origin, safe_default_grants,
+};
+use ocg_domain::destination::AuthScheme;
+use ocg_domain::dynamic::{DynamicAuthKind, DynamicProviderDefinition};
 use ocg_infra::sqlite_logs::{
     ForwardLogIdentityPatch, ForwardLogInsertRow, ForwardLogUpdateRow, GatewayLogInsertRow,
 };
@@ -227,6 +235,21 @@ pub struct AccountImportRecord {
     pub ollama_billing_tier: Option<OllamaBillingTier>,
 }
 
+/// One validated V8 Custom HTTP connection definition. Credentials attach by
+/// `NodeImportRecord::custom_credential_destinations`; keeping the connection
+/// separate preserves shared and zero-Key destinations during import.
+#[derive(Debug, Clone)]
+pub struct ImportedCustomDestination {
+    pub id: String,
+    pub legacy_id: String,
+    pub name: String,
+    pub endpoint_url: String,
+    pub protocol: UpstreamProtocolKind,
+    pub auth_scheme: AuthScheme,
+    pub models: Vec<ocg_domain::dynamic::DynamicModelMapping>,
+    pub enabled: bool,
+}
+
 /// One fully validated, portable node-state snapshot. Stable IDs merge into an
 /// existing destination; destination-only state is retained according to the
 /// node migration rules. All database-owned state is committed in one
@@ -236,7 +259,7 @@ pub struct NodeImportRecord {
     pub platform_links_authoritative: bool,
     pub platform_accounts: Vec<crate::platform::PortablePlatformAccount>,
     pub platform_links: Vec<crate::platform::PortablePlatformLink>,
-    /// V7 platform destination catalogs keyed by portable platform parent id.
+    /// V7/V8 platform destination catalogs keyed by portable platform parent id.
     /// Empty catalogs are authoritative and clear an imported parent's models.
     pub platform_catalogs: HashMap<String, Vec<ocg_domain::destination::CatalogModel>>,
     pub accounts: Vec<AccountImportRecord>,
@@ -247,6 +270,10 @@ pub struct NodeImportRecord {
     pub zen_catalog: crate::kernel::zen::ZenFreeModelCatalog,
     pub provider_contracts: PersistedContracts,
     pub dynamic_providers: Vec<DynamicProviderRuntime>,
+    /// V8 Custom connection definitions, including connections with no Keys.
+    pub custom_destinations: Vec<ImportedCustomDestination>,
+    /// Imported inference account id -> V8 Custom destination id.
+    pub custom_credential_destinations: HashMap<String, String>,
     /// V6 portable identity/credential/binding/quota-pool snapshot. `None`
     /// keeps the v45 1:1 satellite mapper used for V4/V5 packages.
     pub(crate) identity_snapshot: Option<identity::IdentityImportSnapshot>,
@@ -254,9 +281,9 @@ pub struct NodeImportRecord {
     pub draft_provider_ids: HashSet<String>,
     /// Platform observer ciphertext keyed by platform parent id.
     pub platform_observer_ciphers: HashMap<String, String>,
-    /// Destination-id keyed platform snapshot JSON from a V7 package.
+    /// Destination-id keyed platform snapshot JSON from a V7/V8 package.
     pub platform_snapshots: HashMap<String, String>,
-    /// Destination-id keyed platform versions from a V7 package.
+    /// Destination-id keyed platform versions from a V7/V8 package.
     pub platform_versions: HashMap<String, i64>,
     pub cpa_base_url: Option<String>,
     pub cpa_management_key_cipher: Option<String>,
@@ -295,8 +322,13 @@ pub const PRE_V42_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v42.";
 /// Unique never-overwritten SQLite snapshot taken before a non-empty v47
 /// database drops inert columns and empty leftover dynamic provider tables.
 pub const PRE_V48_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v48.";
+/// Unique never-overwritten SQLite snapshot taken before a non-empty v57
+/// database enables connection-owned Custom HTTP configuration and multi-Key
+/// destinations.
+pub const PRE_V58_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v58.";
 /// Highest schema this binary can open or migrate. Newer databases fail closed.
-pub const CURRENT_SCHEMA_VERSION: i32 = 57;
+pub const CURRENT_SCHEMA_VERSION: i32 = 58;
+pub const V57_SCHEMA_VERSION: i32 = 57;
 /// Canonical source schema for the v48 inert-column / empty-table cleanup.
 pub const V47_SCHEMA_VERSION: i32 = 47;
 /// Canonical source schema for the v35 provider-identity rewrite.
@@ -2446,6 +2478,15 @@ fn create_pre_v48_backup(conn: &Connection, db_path: &Path) -> Result<PathBuf> {
     )
 }
 
+fn create_pre_v58_backup(conn: &Connection, db_path: &Path) -> Result<PathBuf> {
+    create_pre_version_backup(
+        conn,
+        db_path,
+        PRE_V58_BACKUP_FILE_PREFIX,
+        V57_SCHEMA_VERSION,
+    )
+}
+
 fn create_pre_version_backup(
     conn: &Connection,
     db_path: &Path,
@@ -3260,6 +3301,74 @@ fn migrate_to_v57(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// v58: Custom HTTP configuration becomes connection-owned. Existing Custom
+/// destination and credential IDs stay in place; the old account id remains
+/// only as the destination's legacy compatibility anchor. Multiple inference
+/// credentials may now reference that destination. Model-name resolution is
+/// persisted explicitly so legacy public-name-only behavior survives while
+/// normal user-defined HTTP connections keep unique upstream-id lookup.
+fn migrate_to_v58(
+    conn: &Connection,
+    db_path: &Path,
+    is_fresh: bool,
+    backup_created: bool,
+) -> Result<()> {
+    let source_version = schema_version_on(conn)?;
+    if source_version >= 58 {
+        anyhow::ensure!(
+            table_has_column(conn, "destinations", "model_resolution")?,
+            "schema v58 is missing destinations.model_resolution"
+        );
+        return Ok(());
+    }
+    anyhow::ensure!(
+        source_version == V57_SCHEMA_VERSION,
+        "v58 requires schema v57"
+    );
+    if !is_fresh && !backup_created {
+        create_pre_v58_backup(conn, db_path)?;
+    }
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let locked_version = schema_version_on(&tx)?;
+    if locked_version >= 58 {
+        return Ok(());
+    }
+    anyhow::ensure!(
+        locked_version == V57_SCHEMA_VERSION,
+        "v58 writer lock observed schema {locked_version}, expected {V57_SCHEMA_VERSION}"
+    );
+    ensure_v58_destination_column(&tx)?;
+    tx.execute_batch(
+        "UPDATE destinations
+         SET model_resolution = CASE legacy_kind
+             WHEN 'dynamic' THEN 'public_and_upstream'
+             WHEN 'custom_account' THEN 'public_only'
+             WHEN 'platform_parent' THEN 'public_only'
+             ELSE 'adapter_defined'
+         END;
+         UPDATE destinations
+         SET max_credentials = NULL
+         WHERE legacy_kind = 'custom_account';
+         INSERT OR REPLACE INTO schema_version(version) VALUES (58);",
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Transitional compatibility for v52+ projection writers compiled with the
+/// v58 Destination shape. The schema version remains unchanged; v58 performs
+/// the authoritative backfill and version bump after the verified backup.
+fn ensure_v58_destination_column(conn: &Connection) -> Result<()> {
+    if table_exists(conn, "destinations")?
+        && !table_has_column(conn, "destinations", "model_resolution")?
+    {
+        conn.execute_batch(
+            "ALTER TABLE destinations ADD COLUMN model_resolution TEXT NOT NULL DEFAULT 'adapter_defined';",
+        )?;
+    }
+    Ok(())
+}
+
 fn migrate_v42_body(tx: &Transaction<'_>) -> Result<()> {
     let now = Utc::now().to_rfc3339();
     let v41_dynamic_providers_exists = table_exists(tx, "dynamic_providers")?;
@@ -3795,6 +3904,34 @@ fn insert_account_row(
     Ok(())
 }
 
+fn insert_account_row_for_destination(
+    conn: &Connection,
+    account: &Account,
+    destination_id: &str,
+    purchase_date: &str,
+    verification_status: ConnectionVerificationStatus,
+) -> Result<()> {
+    account_store::insert_account_columns_for_destination(
+        conn,
+        account,
+        purchase_date,
+        verification_status,
+        destination_id,
+    )?;
+    let sort_order: i64 = account_store::select_account_sort_order(conn, &account.id)?;
+    identity::persist_account_identity_model(
+        conn,
+        account,
+        purchase_date,
+        verification_status,
+        sort_order,
+        None,
+        Utc::now(),
+    )?;
+    account_store::sync_inference_credential_projection_on(conn, &account.id)?;
+    Ok(())
+}
+
 pub(crate) fn insert_account_columns(
     conn: &Connection,
     account: &Account,
@@ -3853,7 +3990,7 @@ fn validate_import_account_on(
         );
         if plan_requires_custom_config(plan) {
             // A platform-linked Custom Key belongs to the platform destination,
-            // so V7 deliberately carries no standalone Custom Endpoint facts.
+            // so V7/V8 deliberately carry no standalone Custom Endpoint facts.
             // Every other Custom account must retain the complete contract.
             let linked_without_custom_contract = platform_contract_authoritative
                 && record.custom_config.is_none()
@@ -3919,6 +4056,7 @@ fn merge_import_account_on(
     conn: &Connection,
     record: &AccountImportRecord,
     platform_contract_authoritative: bool,
+    destination_override: Option<&str>,
 ) -> Result<()> {
     if conn
         .query_row(
@@ -3929,6 +4067,25 @@ fn merge_import_account_on(
         .optional()?
         .is_none()
     {
+        if let Some(destination_id) = destination_override {
+            validate_import_account_on(conn, record, true)?;
+            let account = &record.account;
+            let purchase_date = if account.purchase_date.trim().is_empty() {
+                local_today()
+            } else {
+                normalize_purchase_date(&account.purchase_date)?
+            };
+            insert_account_row_for_destination(
+                conn,
+                account,
+                destination_id,
+                &purchase_date,
+                record.verification_status,
+            )?;
+            restore_import_verification_on(conn, record)?;
+            persist_ollama_billing_on(conn, record)?;
+            return Ok(());
+        }
         return insert_import_account_on(conn, record, platform_contract_authoritative);
     }
     validate_import_account_on(conn, record, platform_contract_authoritative)?;
@@ -3967,26 +4124,33 @@ fn merge_import_account_on(
             Utc::now().to_rfc3339(),
         ],
     )?;
-    custom_store::delete_custom_destination_facts(conn, &account.id)?;
-    conn.execute(
-        "DELETE FROM provider_contract_model_protocol_overrides
-         WHERE scope_kind = ?1 AND scope_id = ?2",
-        params![SCOPE_KIND_CUSTOM_ENDPOINT, account.id],
-    )?;
-    conn.execute(
-        "DELETE FROM provider_contract_model_protocols
-         WHERE scope_kind = ?1 AND scope_id = ?2",
-        params![SCOPE_KIND_CUSTOM_ENDPOINT, account.id],
-    )?;
-    conn.execute(
-        "DELETE FROM provider_contract_scopes WHERE scope_kind = ?1 AND scope_id = ?2",
-        params![SCOPE_KIND_CUSTOM_ENDPOINT, account.id],
-    )?;
-    if let Some(config) = &record.custom_config {
-        persist_account_custom_config_on(conn, &account.id, config)?;
-    }
-    if !record.capabilities.is_empty() {
-        persist_account_model_capabilities_on(conn, &account.id, &record.capabilities)?;
+    if let Some(destination_id) = destination_override {
+        conn.execute(
+            "UPDATE credentials SET destination_id = ?2 WHERE legacy_account_id = ?1",
+            params![account.id, destination_id],
+        )?;
+    } else {
+        custom_store::delete_custom_destination_facts(conn, &account.id)?;
+        conn.execute(
+            "DELETE FROM provider_contract_model_protocol_overrides
+             WHERE scope_kind = ?1 AND scope_id = ?2",
+            params![SCOPE_KIND_CUSTOM_ENDPOINT, account.id],
+        )?;
+        conn.execute(
+            "DELETE FROM provider_contract_model_protocols
+             WHERE scope_kind = ?1 AND scope_id = ?2",
+            params![SCOPE_KIND_CUSTOM_ENDPOINT, account.id],
+        )?;
+        conn.execute(
+            "DELETE FROM provider_contract_scopes WHERE scope_kind = ?1 AND scope_id = ?2",
+            params![SCOPE_KIND_CUSTOM_ENDPOINT, account.id],
+        )?;
+        if let Some(config) = &record.custom_config {
+            persist_account_custom_config_on(conn, &account.id, config)?;
+        }
+        if !record.capabilities.is_empty() {
+            persist_account_model_capabilities_on(conn, &account.id, &record.capabilities)?;
+        }
     }
     // Child-table writers correctly invalidate verification during ordinary
     // edits. A validated node snapshot is different: it carries the source
@@ -4422,6 +4586,12 @@ impl Database {
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         let db = Self { conn };
         db.migrate()?;
+        // A canonical v57 source receives its verified snapshot before even
+        // idempotent older migration helpers can touch leftover tables.
+        let pre_v58_backup_created = existing_version == V57_SCHEMA_VERSION && !is_fresh;
+        if pre_v58_backup_created {
+            create_pre_v58_backup(&db.conn, &db_path)?;
+        }
         migrate_to_v27(&db.conn, &db_path, cipher, is_fresh)?;
         migrate_to_v28(&db.conn)?;
         migrate_to_v29(&db.conn)?;
@@ -4451,6 +4621,7 @@ impl Database {
         migrate_to_v50(&db.conn)?;
         migrate_to_v51(&db.conn)?;
         identity::ensure_identity_model_consistent(&db.conn)?;
+        ensure_v58_destination_column(&db.conn)?;
         migrate_to_v52(&db)?;
         migrate_to_v53(&db.conn)?;
         migrate_to_v54(&db.conn)?;
@@ -4459,6 +4630,7 @@ impl Database {
         identity::ensure_identity_model_consistent(&db.conn)?;
         migrate_to_v57(&db.conn)?;
         identity::ensure_identity_model_consistent(&db.conn)?;
+        migrate_to_v58(&db.conn, &db_path, is_fresh, pre_v58_backup_created)?;
         if !crate::destination_projection::should_skip_persist_on_open(&db)? {
             let _ = crate::destination_projection::replace_persisted(&db)?;
         }
@@ -6697,6 +6869,7 @@ impl Database {
     pub fn commit_onboarding_existing_account(
         &self,
         account: &Account,
+        destination_id: Option<&str>,
         operation: &NewDashboardOperation,
     ) -> Result<()> {
         anyhow::ensure!(
@@ -6713,7 +6886,16 @@ impl Database {
             .map(default_verification_status)
             .unwrap_or(ConnectionVerificationStatus::NotRequired);
         let tx = self.conn.unchecked_transaction()?;
-        insert_account_row(&tx, account, &purchase_date, verification_status)?;
+        match destination_id {
+            Some(destination_id) => insert_account_row_for_destination(
+                &tx,
+                account,
+                destination_id,
+                &purchase_date,
+                verification_status,
+            )?,
+            None => insert_account_row(&tx, account, &purchase_date, verification_status)?,
+        }
         dynamic_tx_fault("after_account_insert")?;
         insert_dashboard_operation_on(&tx, operation)?;
         tx.commit()?;
@@ -6816,6 +6998,23 @@ impl Database {
         clear_keys: bool,
         replacement_key_cipher: Option<&str>,
     ) -> Result<Vec<DynamicProviderRuntime>> {
+        self.replace_dynamic_provider_authorized(
+            runtime,
+            clear_runtime_state,
+            clear_keys,
+            replacement_key_cipher,
+            &[],
+        )
+    }
+
+    pub fn replace_dynamic_provider_authorized(
+        &self,
+        runtime: &DynamicProviderRuntime,
+        clear_runtime_state: bool,
+        clear_keys: bool,
+        replacement_key_cipher: Option<&str>,
+        authorize_credential_ids: &[String],
+    ) -> Result<Vec<DynamicProviderRuntime>> {
         let tx = self.conn.unchecked_transaction()?;
         let existing = get_dynamic_provider_on(&tx, &runtime.id)?
             .ok_or_else(|| anyhow::anyhow!("unknown provider `{}`", runtime.id))?;
@@ -6895,15 +7094,101 @@ impl Database {
                 ],
             )?;
         }
-        let account_ids = {
+        let credential_rows = {
             let mut stmt = tx.prepare(
-                "SELECT legacy_account_id FROM credentials
+                "SELECT legacy_account_id, id FROM credentials
                  WHERE lower(provider_id) = lower(?1)",
             )?;
-            let rows = stmt.query_map([&existing.id], |row| row.get::<_, String>(0))?;
-            rows.collect::<rusqlite::Result<Vec<_>>>()?
+            let rows = stmt.query_map([&existing.id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            rows.collect::<rusqlite::Result<Vec<(String, String)>>>()?
         };
-        for account_id in account_ids {
+        let by_credential: HashMap<&str, &str> = credential_rows
+            .iter()
+            .map(|(account_id, credential_id)| (credential_id.as_str(), account_id.as_str()))
+            .collect();
+        let mut selected = HashSet::new();
+        for credential_id in authorize_credential_ids {
+            anyhow::ensure!(
+                selected.insert(credential_id.as_str()),
+                "authorizeCredentialIds contains duplicates"
+            );
+            anyhow::ensure!(
+                by_credential.contains_key(credential_id.as_str()),
+                "credential `{credential_id}` does not belong to provider `{}`",
+                existing.id
+            );
+        }
+        if !selected.is_empty() {
+            let connection_id =
+                connection_id_for_legacy(LegacyConnectionKind::DynamicProvider, &existing.id);
+            let mut routes = vec![RouteSpec {
+                operation: EndpointOperation::from(runtime.upstream_protocol),
+                url: Some(runtime.endpoint_url.clone()),
+            }];
+            let mut seen_routes =
+                HashSet::from([(runtime.upstream_protocol, runtime.endpoint_url.clone())]);
+            for mapping in &runtime.mappings {
+                let Some(route) = &mapping.upstream_override else {
+                    continue;
+                };
+                if seen_routes.insert((route.protocol, route.endpoint_url.clone())) {
+                    routes.push(RouteSpec {
+                        operation: EndpointOperation::from(route.protocol),
+                        url: Some(route.endpoint_url.clone()),
+                    });
+                }
+            }
+            let assigned = assigned_endpoints_for_routes(&connection_id, &routes);
+            // `authorizeCredentialIds` is explicit user consent for every
+            // route in this replacement, including foreign-origin overrides.
+            let safe_ids = assigned
+                .iter()
+                .map(|endpoint| endpoint.id.clone())
+                .collect::<Vec<_>>();
+            let mut safe_origins = Vec::new();
+            for origin in assigned
+                .iter()
+                .filter_map(|endpoint| endpoint.url.as_deref().and_then(normalize_origin))
+            {
+                if !safe_origins.contains(&origin) {
+                    safe_origins.push(origin);
+                }
+            }
+            for credential_id in selected {
+                let account_id = by_credential[credential_id];
+                let mut ids = Vec::new();
+                let mut origins = Vec::new();
+                let mut stmt = tx.prepare(
+                    "SELECT kind, value FROM credential_grants
+                     WHERE credential_id = ?1 ORDER BY kind, value",
+                )?;
+                let grants = stmt
+                    .query_map([credential_id], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                drop(stmt);
+                for (kind, value) in grants {
+                    if kind == "endpoint_id" {
+                        ids.push(value);
+                    } else if kind == "origin" {
+                        origins.push(value);
+                    }
+                }
+                for value in &safe_ids {
+                    if !ids.contains(value) {
+                        ids.push(value.clone());
+                    }
+                }
+                for value in &safe_origins {
+                    if !origins.contains(value) {
+                        origins.push(value.clone());
+                    }
+                }
+                identity::replace_binding_grants_for_account_on(&tx, account_id, &ids, &origins)?;
+            }
+        }
+        for (account_id, _) in credential_rows {
             account_store::sync_inference_credential_projection_on(&tx, &account_id)?;
         }
         let snapshot = list_dynamic_providers_on(&tx)?;
@@ -6998,6 +7283,34 @@ impl Database {
             })
             .map(|link| link.account_id.to_ascii_lowercase())
             .collect::<HashSet<_>>();
+        let imported_custom_ids = record
+            .custom_destinations
+            .iter()
+            .map(|destination| destination.id.as_str())
+            .collect::<HashSet<_>>();
+        anyhow::ensure!(
+            record
+                .custom_credential_destinations
+                .iter()
+                .all(|(account_id, destination_id)| {
+                    imported_account_ids.contains(&account_id.to_ascii_lowercase())
+                        && imported_custom_ids.contains(destination_id.as_str())
+                }),
+            "Custom credential association references an account or destination outside the imported node snapshot"
+        );
+        for destination in &record.custom_destinations {
+            custom_store::upsert_imported_custom_destination_on(
+                &tx,
+                &destination.id,
+                &destination.legacy_id,
+                &destination.name,
+                &destination.endpoint_url,
+                destination.protocol,
+                destination.auth_scheme,
+                &destination.models,
+                destination.enabled,
+            )?;
+        }
         for runtime in &record.dynamic_providers {
             let onboarding_draft = record.draft_provider_ids.contains(&runtime.id)
                 || record
@@ -7020,11 +7333,16 @@ impl Database {
             platform::unlink_imported_accounts(&tx, &imported_ids)?;
         }
         for account in &record.accounts {
+            let custom_destination_id = record
+                .custom_credential_destinations
+                .get(&account.account.id);
             merge_import_account_on(
                 &tx,
                 account,
                 platform_catalog_linked_account_ids
-                    .contains(&account.account.id.to_ascii_lowercase()),
+                    .contains(&account.account.id.to_ascii_lowercase())
+                    || custom_destination_id.is_some(),
+                custom_destination_id.map(String::as_str),
             )?;
             if record.identity_snapshot.is_some() {
                 // V6 carries cooldowns. Merging a package must not shorten a
@@ -7896,6 +8214,193 @@ impl Database {
         custom_store::account_custom_config_on(&self.conn, account_id)
     }
 
+    pub(crate) fn custom_destination_for_account(
+        &self,
+        account_id: &str,
+    ) -> Result<Option<custom_store::CustomDestinationRecord>> {
+        custom_store::custom_destination_for_account_on(&self.conn, account_id)
+    }
+
+    pub(crate) fn custom_auth_kind(
+        &self,
+        account_id: &str,
+    ) -> Result<Option<ocg_domain::dynamic::DynamicAuthKind>> {
+        custom_store::custom_auth_kind_on(&self.conn, account_id)
+    }
+
+    pub fn custom_connection_credential_count(&self, account_id: &str) -> Result<i64> {
+        custom_store::custom_connection_credential_count_on(&self.conn, account_id)
+    }
+
+    /// Replace connection-owned configuration for a legacy Custom HTTP
+    /// destination. Existing Keys keep their scopes and grants. Only the
+    /// explicitly selected credential ids receive grants for the new routes.
+    pub fn replace_custom_destination(
+        &self,
+        destination_id: &str,
+        definition: &DynamicProviderDefinition,
+        authorize_credential_ids: &[String],
+    ) -> Result<()> {
+        anyhow::ensure!(
+            !matches!(definition.auth_kind, DynamicAuthKind::None),
+            "legacy Custom HTTP connections require keyed authentication"
+        );
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let existing = custom_store::custom_destination_for_update_on(&tx, destination_id)?
+            .ok_or_else(|| anyhow::anyhow!("custom destination not found"))?;
+        let auth_scheme = match definition.auth_kind {
+            DynamicAuthKind::Bearer => AuthScheme::Bearer,
+            DynamicAuthKind::XApiKey => AuthScheme::XApiKey,
+            DynamicAuthKind::None => AuthScheme::None,
+        };
+        let substantive = existing.endpoint_url != definition.endpoint_url
+            || existing.protocol != definition.upstream_protocol
+            || existing.auth_scheme != auth_scheme
+            || existing.models != definition.mappings;
+        let now = Utc::now();
+        let credentials = custom_store::replace_custom_destination_definition_on(
+            &tx,
+            destination_id,
+            &definition.name,
+            &definition.endpoint_url,
+            definition.upstream_protocol,
+            auth_scheme,
+            &definition.mappings,
+            now,
+        )?;
+        let by_credential: HashMap<&str, &str> = credentials
+            .iter()
+            .map(|(account_id, credential_id)| (credential_id.as_str(), account_id.as_str()))
+            .collect();
+        let mut selected = HashSet::new();
+        for credential_id in authorize_credential_ids {
+            anyhow::ensure!(
+                selected.insert(credential_id.as_str()),
+                "authorizeCredentialIds contains duplicates"
+            );
+            anyhow::ensure!(
+                by_credential.contains_key(credential_id.as_str()),
+                "credential `{credential_id}` does not belong to destination `{destination_id}`"
+            );
+        }
+        if substantive {
+            tx.execute(
+                "UPDATE credentials SET
+                    auth_error = NULL,
+                    last_error = NULL,
+                    verification_status = CASE
+                        WHEN verification_status = 'not_required' THEN verification_status
+                        ELSE 'pending'
+                    END,
+                    connection_verified_at = NULL,
+                    verification_error = NULL,
+                    cooldown_until = NULL,
+                    cooldown_generic_until = NULL,
+                    cooldown_5h_until = NULL,
+                    cooldown_week_until = NULL,
+                    cooldown_month_until = NULL,
+                    cooldown_free_until = NULL,
+                    updated_at = ?2
+                 WHERE destination_id = ?1",
+                params![destination_id, now.to_rfc3339()],
+            )?;
+            for (account_id, _) in &credentials {
+                invalidate_probe_evidence_on(
+                    &tx,
+                    &ContractScope::custom_endpoint(account_id),
+                    now,
+                )?;
+                account_store::sync_inference_credential_projection_on(&tx, account_id)?;
+            }
+        }
+        if !selected.is_empty() {
+            let connection_id =
+                connection_id_for_legacy(LegacyConnectionKind::CustomAccount, &existing.legacy_id);
+            let mut routes = vec![RouteSpec {
+                operation: EndpointOperation::from(definition.upstream_protocol),
+                url: Some(definition.endpoint_url.clone()),
+            }];
+            let mut seen_routes = HashSet::from([(
+                definition.upstream_protocol,
+                definition.endpoint_url.clone(),
+            )]);
+            for mapping in &definition.mappings {
+                let Some(route) = &mapping.upstream_override else {
+                    continue;
+                };
+                if seen_routes.insert((route.protocol, route.endpoint_url.clone())) {
+                    routes.push(RouteSpec {
+                        operation: EndpointOperation::from(route.protocol),
+                        url: Some(route.endpoint_url.clone()),
+                    });
+                }
+            }
+            let assigned = assigned_endpoints_for_routes(&connection_id, &routes);
+            // Explicit PATCH consent covers every configured route, unlike
+            // onboarding's same-origin-only safe defaults.
+            let safe_ids = assigned
+                .iter()
+                .map(|endpoint| endpoint.id.clone())
+                .collect::<Vec<_>>();
+            let mut safe_origins = Vec::new();
+            for origin in assigned
+                .iter()
+                .filter_map(|endpoint| endpoint.url.as_deref().and_then(normalize_origin))
+            {
+                if !safe_origins.contains(&origin) {
+                    safe_origins.push(origin);
+                }
+            }
+            for credential_id in selected {
+                let account_id = by_credential[credential_id];
+                let mut current_ids = Vec::new();
+                let mut current_origins = Vec::new();
+                let mut stmt = tx.prepare(
+                    "SELECT kind, value FROM credential_grants
+                     WHERE credential_id = ?1 ORDER BY kind, value",
+                )?;
+                let rows = stmt
+                    .query_map([credential_id], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                drop(stmt);
+                for (kind, value) in rows {
+                    if kind == "endpoint_id" {
+                        current_ids.push(value);
+                    } else if kind == "origin" {
+                        current_origins.push(value);
+                    }
+                }
+                for value in &safe_ids {
+                    if !current_ids.contains(value) {
+                        current_ids.push(value.clone());
+                    }
+                }
+                for value in &safe_origins {
+                    if !current_origins.contains(value) {
+                        current_origins.push(value.clone());
+                    }
+                }
+                identity::replace_binding_grants_for_account_on(
+                    &tx,
+                    account_id,
+                    &current_ids,
+                    &current_origins,
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn delete_empty_custom_destination(&self, destination_id: &str) -> Result<()> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        custom_store::delete_empty_custom_destination_on(&tx, destination_id)?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn upsert_account_custom_config(
         &self,
         account_id: &str,
@@ -8001,6 +8506,9 @@ impl Database {
             let Some(config) = self.account_custom_config(&account_id)? else {
                 continue;
             };
+            let auth_kind = custom_store::custom_auth_kind_on(&self.conn, &account_id)?
+                .ok_or_else(|| anyhow::anyhow!("Custom account destination is missing"))?;
+            let route_overrides = custom_store::custom_route_overrides_on(&self.conn, &account_id)?;
             let protocol_passthrough =
                 custom_store::platform_parent_id(&self.conn, &account_id)?.is_some();
             let capabilities = self.list_account_model_capabilities_declared(&account_id)?;
@@ -8010,8 +8518,10 @@ impl Database {
                 verification_status,
                 setup_ready,
                 has_key,
+                auth_kind,
                 config,
                 capabilities,
+                route_overrides,
                 protocol_passthrough,
             });
         }

@@ -21,8 +21,9 @@ use ocg_domain::credential::{
     AuthState, ModelScope, OnboardingTaskKind, credential_id_for_legacy_account,
 };
 use ocg_domain::destination::{
-    AdapterKind, destination_id_for_builtin, destination_id_for_custom_account,
-    destination_id_for_dynamic, destination_id_for_platform_account,
+    AdapterKind, LegacyDestinationRef, destination_id_for_builtin,
+    destination_id_for_custom_account, destination_id_for_dynamic,
+    destination_id_for_platform_account,
 };
 use ocg_domain::dynamic::{DynamicAuthKind, DynamicModelMapping};
 use ocg_domain::ids::{CPA_ACCOUNT_ID, OPENCODE_ZEN_FREE_PROVIDER_ID, ZEN_FREE_ACCOUNT_ID};
@@ -372,7 +373,7 @@ fn custom_root_and_complete_path_are_single_credential_http_destinations() {
     for account_id in ["custom-root", "custom-path"] {
         let destination = dest(&projection, &destination_id_for_custom_account(account_id));
         assert_eq!(destination.adapter, AdapterKind::Http);
-        assert_eq!(destination.max_credentials, Some(1));
+        assert_eq!(destination.max_credentials, None);
         let credential = cred(&projection, account_id);
         assert_eq!(credential.destination_id, destination.id);
         let stored = db
@@ -511,7 +512,7 @@ fn platform_parent_unions_linked_keys_and_leaves_unlinked_custom() {
     assert_eq!(cred(&projection, "linked-a").destination_id, parent.id);
     assert_eq!(cred(&projection, "linked-b").destination_id, parent.id);
     let unlinked = dest(&projection, &destination_id_for_custom_account("unlinked"));
-    assert_eq!(unlinked.max_credentials, Some(1));
+    assert_eq!(unlinked.max_credentials, None);
     assert_eq!(cred(&projection, "unlinked").destination_id, unlinked.id);
     assert!(
         projection
@@ -899,7 +900,7 @@ fn v51_credentials_store_secrets_without_exposing_them_on_projection() {
 #[test]
 fn v53_leftover_custom_tables_are_gone_and_projection_stays_secret_free() {
     let (dir, db) = open_db("v53-no-leftover-custom");
-    assert_eq!(crate::db::CURRENT_SCHEMA_VERSION, 57);
+    assert_eq!(crate::db::CURRENT_SCHEMA_VERSION, 58);
     let leftover: i64 = db
         .conn
         .query_row(
@@ -1069,24 +1070,32 @@ fn platform_link_and_unlink_refresh_shadow_without_reopen() {
         &destination_id_for_platform_account("plat-4d2"),
     );
     let linked = load_persisted(&db).expect("linked store should load");
+    let retained_id = destination_id_for_custom_account("linked-4d2");
     assert!(
         linked
             .destinations
             .iter()
-            .all(|destination| destination.id != destination_id_for_custom_account("linked-4d2")),
-        "linked custom destination must be removed"
+            .any(|destination| destination.id == retained_id),
+        "the now-empty Custom connection remains reusable"
+    );
+    assert!(
+        linked
+            .credentials
+            .iter()
+            .all(|credential| credential.destination_id != retained_id),
+        "the linked Key moved to the platform destination"
     );
 
     db.unlink_platform_account("linked-4d2").unwrap();
-    assert_persisted_credential_identity(
-        &db,
-        "linked-4d2",
-        &destination_id_for_custom_account("linked-4d2"),
-    );
     let unlinked = load_persisted(&db).expect("unlinked store should load");
-    assert_eq!(
-        cred(&unlinked, "linked-4d2").destination_id,
-        destination_id_for_custom_account("linked-4d2")
+    let unlinked_destination = cred(&unlinked, "linked-4d2").destination_id.clone();
+    assert_ne!(unlinked_destination, retained_id);
+    assert!(
+        unlinked.destinations.iter().any(|destination| {
+            destination.id == unlinked_destination
+                && matches!(destination.legacy, LegacyDestinationRef::CustomAccount(_))
+        }),
+        "unlink creates a fresh standalone Custom connection without overwriting the retained one"
     );
 
     drop(db);

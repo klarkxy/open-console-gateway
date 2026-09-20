@@ -1,8 +1,8 @@
 //! Typed dynamic Provider definitions. These are data, not adapter plugins.
 //!
 //! Every dynamic Provider binds the sealed Configurable HTTP adapter. Custom
-//! API remains a distinct account-owned route (`custom`) and is not a dynamic
-//! Provider.
+//! API retains the distinct compatibility identity (`custom`) and is not a
+//! dynamic Provider, while its persisted HTTP configuration is destination-owned.
 
 use crate::catalog::{
     CatalogParseError, CredentialKind, QuotaScope, UpstreamAuthScheme, UpstreamProtocolKind,
@@ -117,7 +117,7 @@ impl DynamicProviderDefinition {
     }
 }
 
-/// True when `provider_id` is the account-owned Custom API identity.
+/// True when `provider_id` is the legacy Custom API compatibility identity.
 pub fn is_custom_api_id(provider_id: &str) -> bool {
     provider_id == CUSTOM_PROVIDER_ID
 }

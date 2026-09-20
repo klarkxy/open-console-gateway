@@ -11,7 +11,7 @@ use serde_json::{Map, Value, json};
 
 use crate::dashboard_v3::{
     AccountAuthScheme, AccountCredentialKind, AccountUpstreamProtocol, ControlRevision,
-    MutationExpectation, ProviderDefinitionAuthKind, V3Error,
+    MutationExpectation, ProviderDefinitionAuthKind, RoutingMode, V3Error,
 };
 use ocg_domain::connection::{
     AuthorizationState, ConnectionLifecycle as DomainConnectionLifecycle, ConnectionOrigin,
@@ -77,6 +77,12 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "PlatformKeyImportFailure",
     "DestinationList",
     "DestinationDto",
+    "ModelResolutionDto",
+    "DestinationModelPatch",
+    "DestinationUpstreamOverridePatch",
+    "DestinationPatchRequest",
+    "DestinationPatchResult",
+    "DestinationDeleteResult",
     "DestinationCredentialDto",
     "CredentialList",
     "CapabilitiesDto",
@@ -90,6 +96,18 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "OfficialSpend",
     "OfficialApiStatus",
     "OfficialApiPrices",
+    "RoutingMode",
+    "RoutingClientProtocol",
+    "RoutingResolvedKind",
+    "RoutingResolvedMapping",
+    "RoutingResolvedModel",
+    "RoutingChannel",
+    "RoutingEligibleCandidate",
+    "RoutingExclusionCode",
+    "RoutingExclusion",
+    "RoutingConversationBinding",
+    "RuntimeOnlyUncertainty",
+    "RoutingExplanation",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -765,6 +783,16 @@ pub enum AuthSchemeDto {
     XApiKey,
 }
 
+/// Which client model names may resolve to a destination mapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum ModelResolutionDto {
+    AdapterDefined,
+    PublicOnly,
+    PublicAndUpstream,
+}
+
 /// Wire protocol for destination catalog and transport rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -881,6 +909,7 @@ pub struct CatalogModelDto {
     pub preferred: Option<ProtocolDto>,
     /// Whether any protocol is enabled.
     pub enabled: bool,
+    pub upstream_override: Option<DestinationUpstreamOverridePatch>,
 }
 
 /// Which V3-era row a destination was projected from.
@@ -927,15 +956,77 @@ pub struct DestinationDto {
     pub base_url: Option<String>,
     pub protocols: Vec<ProtocolDto>,
     pub auth_scheme: AuthSchemeDto,
+    /// Model-name resolution owned by this destination.
+    pub model_resolution: ModelResolutionDto,
     pub catalog: Vec<CatalogModelDto>,
     pub capabilities: CapabilitiesDto,
     pub plan: Option<PlanDto>,
-    /// `1` for singletons and account-owned endpoints; `null` otherwise.
+    /// `1` for true singletons; `null` for multi-credential destinations.
     pub max_credentials: Option<u32>,
     /// Non-inference observer credential id when `capabilities.observer` is set.
     pub observer_credential_id: Option<String>,
     /// Destination enablement.
     pub enabled: bool,
+}
+
+/// Optional per-model route override for a configurable HTTP destination.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DestinationUpstreamOverridePatch {
+    pub protocol: ProtocolDto,
+    pub endpoint_url: String,
+}
+
+/// Complete public-to-upstream mapping written by a destination PATCH.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DestinationModelPatch {
+    pub public_model: String,
+    pub upstream_model: String,
+    #[serde(default)]
+    pub upstream_override: Option<DestinationUpstreamOverridePatch>,
+}
+
+/// Full replacement of editable configuration on one HTTP destination.
+/// Keys remain account-owned and are never accepted by this route.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DestinationPatchRequest {
+    #[serde(flatten)]
+    #[schemars(flatten)]
+    pub expectation: MutationExpectation,
+    pub name: String,
+    pub endpoint_url: String,
+    pub upstream_protocol: ProtocolDto,
+    pub auth_scheme: AuthSchemeDto,
+    pub models: Vec<DestinationModelPatch>,
+    /// Explicit consent to add safe grants for the destination's current
+    /// endpoints to these existing credentials.
+    #[serde(default)]
+    pub authorize_credential_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DestinationPatchResult {
+    pub revision: ControlRevision,
+    pub destination: DestinationDto,
+    /// Complete secret-free credential projection after the mutation. A
+    /// destination edit can reset verification, auth/cooldowns, and grants on
+    /// more than one Key, so returning only the destination row is stale by
+    /// construction.
+    pub credentials: Vec<DestinationCredentialDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DestinationDeleteResult {
+    pub revision: ControlRevision,
 }
 
 /// RFC destination list. Revision-tagged and secret-free.
@@ -1092,6 +1183,142 @@ pub struct DestinationProjectionRefusedError {
     pub details: Vec<DestinationProjectionRefusalDto>,
 }
 
+/// Client protocol accepted by `GET /routing/explain`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum RoutingClientProtocol {
+    ChatCompletions,
+    Responses,
+    Messages,
+    Gemini,
+}
+
+/// How the requested name resolved against the live alias registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum RoutingResolvedKind {
+    Alias,
+    PinnedRaw,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RoutingResolvedMapping {
+    pub provider_id: String,
+    pub upstream_model: String,
+    pub routeable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RoutingResolvedModel {
+    pub kind: RoutingResolvedKind,
+    pub alias: Option<String>,
+    pub mappings: Vec<RoutingResolvedMapping>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum RoutingChannel {
+    Go,
+    Free,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RoutingEligibleCandidate {
+    pub account_id: String,
+    pub account_name: String,
+    pub provider_id: String,
+    pub destination_id: Option<String>,
+    pub destination_name: Option<String>,
+    pub adapter_kind: String,
+    pub channel: RoutingChannel,
+    pub resolved_model: String,
+    pub upstream_protocol: RoutingClientProtocol,
+    pub routing_rank: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum RoutingExclusionCode {
+    MappingProtocolIncompatible,
+    CredentialDisabled,
+    BindingDisabled,
+    ModelScopeDenied,
+    GoatNotEligible,
+    GoatUnverified,
+    CandidateMaterializationFailed,
+    ProductionRouteUnsupported,
+    AccountDisabled,
+    SetupNotReady,
+    ChannelMismatch,
+    CredentialMissing,
+    AuthError,
+    CoolingDown,
+    FreeChannelUnavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RoutingExclusion {
+    pub code: RoutingExclusionCode,
+    pub detail: String,
+    pub account_id: Option<String>,
+    pub provider_id: Option<String>,
+    pub upstream_model: Option<String>,
+}
+
+/// Conversation stickiness is reported, not applied: this endpoint has no
+/// conversation input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum RoutingConversationBinding {
+    NotEvaluated,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum RuntimeOnlyUncertainty {
+    StateChangedAfterSnapshot,
+    ConversationBindingNotEvaluated,
+    RetryExclusionsNotApplied,
+    CredentialRecheckPending,
+    UpstreamResultUnknown,
+}
+
+/// Read-only routing prediction for `GET /routing/explain`.
+///
+/// This is not a send guarantee. `runtimeOnlyUncertainty` names the live
+/// steps this snapshot does not execute.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RoutingExplanation {
+    pub requested_model: String,
+    pub client_protocol: RoutingClientProtocol,
+    pub resolved: RoutingResolvedModel,
+    pub revision: ControlRevision,
+    pub observed_at: String,
+    pub routing_mode: RoutingMode,
+    pub conversation_sticky: bool,
+    pub conversation_binding: RoutingConversationBinding,
+    pub eligible: Vec<RoutingEligibleCandidate>,
+    pub exclusions: Vec<RoutingExclusion>,
+    pub expected_base_policy_first_pick: Option<RoutingEligibleCandidate>,
+    pub runtime_only_uncertainty: Vec<RuntimeOnlyUncertainty>,
+}
+
 /// Deterministic JSON Schema catalog for the V4 contract.
 ///
 /// Generator settings match V3: draft 2020-12, serialize-mode for response
@@ -1139,6 +1366,9 @@ pub fn contract_schema() -> Value {
     include_type::<PlatformKeyImportFailure>(&mut serialize);
     include_type::<DestinationList>(&mut serialize);
     include_type::<DestinationDto>(&mut serialize);
+    include_type::<ModelResolutionDto>(&mut serialize);
+    include_type::<DestinationPatchResult>(&mut serialize);
+    include_type::<DestinationDeleteResult>(&mut serialize);
     include_type::<DestinationCredentialDto>(&mut serialize);
     include_type::<CredentialList>(&mut serialize);
     include_type::<CapabilitiesDto>(&mut serialize);
@@ -1147,6 +1377,18 @@ pub fn contract_schema() -> Value {
     include_type::<DestinationProjectionRefusedError>(&mut serialize);
     include_type::<crate::official_api::OfficialApiStatus>(&mut serialize);
     include_type::<crate::official_api::OfficialApiPrices>(&mut serialize);
+    include_type::<RoutingMode>(&mut serialize);
+    include_type::<RoutingClientProtocol>(&mut serialize);
+    include_type::<RoutingResolvedKind>(&mut serialize);
+    include_type::<RoutingResolvedMapping>(&mut serialize);
+    include_type::<RoutingResolvedModel>(&mut serialize);
+    include_type::<RoutingChannel>(&mut serialize);
+    include_type::<RoutingEligibleCandidate>(&mut serialize);
+    include_type::<RoutingExclusionCode>(&mut serialize);
+    include_type::<RoutingExclusion>(&mut serialize);
+    include_type::<RoutingConversationBinding>(&mut serialize);
+    include_type::<RuntimeOnlyUncertainty>(&mut serialize);
+    include_type::<RoutingExplanation>(&mut serialize);
     let mut defs = serialize.take_definitions(true);
 
     let mut deserialize = SchemaSettings::draft2020_12().into_generator();
@@ -1164,6 +1406,9 @@ pub fn contract_schema() -> Value {
     include_type::<AliasPublicationUpdate>(&mut deserialize);
     include_type::<DshApplicationInstallRequest>(&mut deserialize);
     include_type::<PlatformKeyImportRequest>(&mut deserialize);
+    include_type::<DestinationModelPatch>(&mut deserialize);
+    include_type::<DestinationUpstreamOverridePatch>(&mut deserialize);
+    include_type::<DestinationPatchRequest>(&mut deserialize);
     for (name, schema) in deserialize.take_definitions(true) {
         defs.entry(name).or_insert(schema);
     }

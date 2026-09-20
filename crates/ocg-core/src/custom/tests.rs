@@ -196,6 +196,7 @@ fn custom_runtime_identity_is_configurable_http_not_a_base_class() {
         verification_status: ConnectionVerificationStatus::Verified,
         setup_ready: true,
         has_key: true,
+        auth_kind: ocg_domain::dynamic::DynamicAuthKind::Bearer,
         config: AccountCustomConfig {
             account_id: "acc".into(),
             endpoint_url: "http://127.0.0.1:9/v1/chat/completions".into(),
@@ -204,6 +205,7 @@ fn custom_runtime_identity_is_configurable_http_not_a_base_class() {
             updated_at: chrono::Utc::now(),
         },
         capabilities: Vec::new(),
+        route_overrides: Vec::new(),
         protocol_passthrough: false,
     };
     assert!(runtime.eligible());

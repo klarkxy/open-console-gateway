@@ -198,18 +198,10 @@ pub async fn models(
 }
 
 fn published_alias_models_response(state: &CoreState) -> axum::response::Response {
-    let zen_catalog = state.zen_free_model_catalog();
     let contracts = state.provider_contracts();
-    let go_ids = provider_catalog_model_ids(&contracts, crate::provider::OPENCODE_PROVIDER_ID);
-    let goat_ids =
-        provider_catalog_model_ids(&contracts, crate::provider::COMMAND_CODE_PROVIDER_ID);
-    let minimax_ids = provider_catalog_model_ids(&contracts, crate::provider::MINIMAX_PROVIDER_ID);
-    let kimi_ids = provider_catalog_model_ids(&contracts, crate::provider::KIMI_PROVIDER_ID);
-    let cpa_ids = active_cpa_model_ids(state);
-    let ollama_ids = provider_catalog_model_ids(&contracts, crate::provider::OLLAMA_PROVIDER_ID);
-    let ollama_pinned_ids = crate::provider_contracts::ollama_cloud_pinned_model_ids(&contracts);
-    let custom_ids = match eligible_custom_public_models(state, &contracts) {
-        Ok(ids) => ids,
+    let dynamics = state.dynamic_providers();
+    let snapshot = match runtime_catalog_snapshot(state, &contracts, &dynamics) {
+        Ok(snapshot) => snapshot,
         Err(error) => {
             return protocol_error_response(
                 ApiFormat::ChatCompletions,
@@ -219,23 +211,9 @@ fn published_alias_models_response(state: &CoreState) -> axum::response::Respons
             );
         }
     };
-    let dynamics = state.dynamic_providers();
-    let extra: Vec<_> = dynamics
-        .iter()
-        .map(crate::dynamic::DynamicProviderRuntime::alias_catalog)
-        .collect();
-    let catalogs = crate::alias::RuntimeCatalogs {
-        go: &go_ids,
-        zen_free: &zen_catalog.models,
-        custom: &custom_ids,
-        command_code: &goat_ids,
-        minimax: &minimax_ids,
-        kimi: &kimi_ids,
-        cpa: &cpa_ids,
-        ollama: &ollama_ids,
-        ollama_pinned: &ollama_pinned_ids,
-        extra: &extra,
-    };
+    let catalogs = snapshot.catalogs();
+    let custom_ids = &snapshot.custom;
+    let cpa_ids = &snapshot.cpa;
     let unpublished = state.unpublished_public_models();
     let published = crate::alias::published_routeable_models_with_runtime_catalogs(catalogs);
     let mut data: Vec<serde_json::Value> = published
@@ -253,7 +231,7 @@ fn published_alias_models_response(state: &CoreState) -> axum::response::Respons
             })
         })
         .collect();
-    for id in &custom_ids {
+    for id in custom_ids {
         let routeable_custom_alias = matches!(
             crate::alias::resolve_with_runtime_catalogs(id, catalogs),
             Ok(crate::alias::ResolvedModel::Alias { mappings, .. })
@@ -302,7 +280,7 @@ fn published_alias_models_response(state: &CoreState) -> axum::response::Respons
             }));
         }
     }
-    for catalog in &extra {
+    for catalog in &snapshot.extra {
         for (public_model, _upstream_model) in &catalog.mappings {
             if published_model_ids_contain(&data, public_model) {
                 continue;
@@ -439,6 +417,64 @@ fn active_cpa_model_ids(state: &CoreState) -> std::sync::Arc<Vec<String>> {
     }
 }
 
+/// Owned runtime catalog inputs used by live send and the read-only explain
+/// path. Callers borrow [`Self::catalogs`] for alias resolution.
+pub(crate) struct RuntimeCatalogSnapshot {
+    pub go: Vec<String>,
+    pub zen_free: Vec<String>,
+    pub custom: Vec<String>,
+    pub command_code: Vec<String>,
+    pub minimax: Vec<String>,
+    pub kimi: Vec<String>,
+    pub cpa: Vec<String>,
+    pub ollama: Vec<String>,
+    pub ollama_pinned: Vec<String>,
+    pub extra: Vec<crate::alias::ExtraProviderCatalog>,
+}
+
+impl RuntimeCatalogSnapshot {
+    pub(crate) fn catalogs(&self) -> crate::alias::RuntimeCatalogs<'_> {
+        crate::alias::RuntimeCatalogs {
+            go: &self.go,
+            zen_free: &self.zen_free,
+            custom: &self.custom,
+            command_code: &self.command_code,
+            minimax: &self.minimax,
+            kimi: &self.kimi,
+            cpa: &self.cpa,
+            ollama: &self.ollama,
+            ollama_pinned: &self.ollama_pinned,
+            extra: &self.extra,
+        }
+    }
+}
+
+pub(crate) fn runtime_catalog_snapshot(
+    state: &CoreState,
+    contracts: &crate::provider_contracts::EffectiveContractSet,
+    dynamics: &[crate::dynamic::DynamicProviderRuntime],
+) -> anyhow::Result<RuntimeCatalogSnapshot> {
+    let zen_catalog = state.zen_free_model_catalog();
+    Ok(RuntimeCatalogSnapshot {
+        go: provider_catalog_model_ids(contracts, crate::provider::OPENCODE_PROVIDER_ID),
+        zen_free: zen_catalog.models.clone(),
+        custom: eligible_custom_public_models(state, contracts)?,
+        command_code: provider_catalog_model_ids(
+            contracts,
+            crate::provider::COMMAND_CODE_PROVIDER_ID,
+        ),
+        minimax: provider_catalog_model_ids(contracts, crate::provider::MINIMAX_PROVIDER_ID),
+        kimi: provider_catalog_model_ids(contracts, crate::provider::KIMI_PROVIDER_ID),
+        cpa: active_cpa_model_ids(state).as_ref().clone(),
+        ollama: provider_catalog_model_ids(contracts, crate::provider::OLLAMA_PROVIDER_ID),
+        ollama_pinned: crate::provider_contracts::ollama_cloud_pinned_model_ids(contracts),
+        extra: dynamics
+            .iter()
+            .map(crate::dynamic::DynamicProviderRuntime::alias_catalog)
+            .collect(),
+    })
+}
+
 async fn proxy_handler(
     state: CoreState,
     trace: RequestTrace,
@@ -485,10 +521,9 @@ async fn proxy_handler_inner(
     let client_model = parsed.requested_model.clone();
     let routing_model = parsed.requested_model.clone();
     let contracts = state.provider_contracts();
-    let go_model_ids =
-        provider_catalog_model_ids(&contracts, crate::provider::OPENCODE_PROVIDER_ID);
-    let custom_model_ids = match eligible_custom_public_models(&state, &contracts) {
-        Ok(ids) => ids,
+    let dynamics = state.dynamic_providers();
+    let snapshot = match runtime_catalog_snapshot(&state, &contracts, &dynamics) {
+        Ok(snapshot) => snapshot,
         Err(error) => {
             return protocol_error_response(
                 client_format,
@@ -498,33 +533,7 @@ async fn proxy_handler_inner(
             );
         }
     };
-    let goat_model_ids =
-        provider_catalog_model_ids(&contracts, crate::provider::COMMAND_CODE_PROVIDER_ID);
-    let minimax_model_ids =
-        provider_catalog_model_ids(&contracts, crate::provider::MINIMAX_PROVIDER_ID);
-    let kimi_model_ids = provider_catalog_model_ids(&contracts, crate::provider::KIMI_PROVIDER_ID);
-    let cpa_model_ids = active_cpa_model_ids(&state);
-    let ollama_model_ids =
-        provider_catalog_model_ids(&contracts, crate::provider::OLLAMA_PROVIDER_ID);
-    let ollama_pinned_ids = crate::provider_contracts::ollama_cloud_pinned_model_ids(&contracts);
-    let zen_catalog = state.zen_free_model_catalog();
-    let dynamics = state.dynamic_providers();
-    let extra: Vec<_> = dynamics
-        .iter()
-        .map(crate::dynamic::DynamicProviderRuntime::alias_catalog)
-        .collect();
-    let catalogs = crate::alias::RuntimeCatalogs {
-        go: &go_model_ids,
-        zen_free: &zen_catalog.models,
-        custom: &custom_model_ids,
-        command_code: &goat_model_ids,
-        minimax: &minimax_model_ids,
-        kimi: &kimi_model_ids,
-        cpa: &cpa_model_ids,
-        ollama: &ollama_model_ids,
-        ollama_pinned: &ollama_pinned_ids,
-        extra: &extra,
-    };
+    let catalogs = snapshot.catalogs();
     let resolved = match crate::alias::resolve_with_runtime_catalogs(&routing_model, catalogs) {
         Ok(resolved) => resolved,
         Err(error) => {
@@ -591,10 +600,9 @@ async fn gemini_proxy_handler(
     let client_model = parsed.requested_model.clone();
     let routing_model = parsed.requested_model.clone();
     let contracts = state.provider_contracts();
-    let go_model_ids =
-        provider_catalog_model_ids(&contracts, crate::provider::OPENCODE_PROVIDER_ID);
-    let custom_model_ids = match eligible_custom_public_models(&state, &contracts) {
-        Ok(ids) => ids,
+    let dynamics = state.dynamic_providers();
+    let snapshot = match runtime_catalog_snapshot(&state, &contracts, &dynamics) {
+        Ok(snapshot) => snapshot,
         Err(error) => {
             return protocol_error_response(
                 ApiFormat::Gemini,
@@ -604,33 +612,7 @@ async fn gemini_proxy_handler(
             );
         }
     };
-    let goat_model_ids =
-        provider_catalog_model_ids(&contracts, crate::provider::COMMAND_CODE_PROVIDER_ID);
-    let minimax_model_ids =
-        provider_catalog_model_ids(&contracts, crate::provider::MINIMAX_PROVIDER_ID);
-    let kimi_model_ids = provider_catalog_model_ids(&contracts, crate::provider::KIMI_PROVIDER_ID);
-    let cpa_model_ids = active_cpa_model_ids(&state);
-    let ollama_model_ids =
-        provider_catalog_model_ids(&contracts, crate::provider::OLLAMA_PROVIDER_ID);
-    let ollama_pinned_ids = crate::provider_contracts::ollama_cloud_pinned_model_ids(&contracts);
-    let zen_catalog = state.zen_free_model_catalog();
-    let dynamics = state.dynamic_providers();
-    let extra: Vec<_> = dynamics
-        .iter()
-        .map(crate::dynamic::DynamicProviderRuntime::alias_catalog)
-        .collect();
-    let catalogs = crate::alias::RuntimeCatalogs {
-        go: &go_model_ids,
-        zen_free: &zen_catalog.models,
-        custom: &custom_model_ids,
-        command_code: &goat_model_ids,
-        minimax: &minimax_model_ids,
-        kimi: &kimi_model_ids,
-        cpa: &cpa_model_ids,
-        ollama: &ollama_model_ids,
-        ollama_pinned: &ollama_pinned_ids,
-        extra: &extra,
-    };
+    let catalogs = snapshot.catalogs();
     let resolved = match crate::alias::resolve_with_runtime_catalogs(&routing_model, catalogs) {
         Ok(resolved) => resolved,
         Err(error) => {

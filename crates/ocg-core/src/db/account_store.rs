@@ -450,13 +450,52 @@ pub(crate) fn insert_account_columns(
     purchase_date: &str,
     verification_status: ConnectionVerificationStatus,
 ) -> Result<()> {
+    insert_account_columns_at(conn, account, purchase_date, verification_status, None)
+}
+
+/// Insert a credential for an already persisted destination. This is the
+/// connection-owned path used when a second Key is attached to a legacy
+/// Custom HTTP connection; normal callers keep deriving the destination from
+/// the provider/account pair.
+pub(crate) fn insert_account_columns_for_destination(
+    conn: &Connection,
+    account: &Account,
+    purchase_date: &str,
+    verification_status: ConnectionVerificationStatus,
+    destination_id: &str,
+) -> Result<()> {
+    insert_account_columns_at(
+        conn,
+        account,
+        purchase_date,
+        verification_status,
+        Some(destination_id),
+    )
+}
+
+fn insert_account_columns_at(
+    conn: &Connection,
+    account: &Account,
+    purchase_date: &str,
+    verification_status: ConnectionVerificationStatus,
+    destination_override: Option<&str>,
+) -> Result<()> {
     if builtin_provider(&account.provider_id).is_some()
         && account.provider_id != CUSTOM_PROVIDER_ID
         && account.provider_id != CPA_PROVIDER_ID
     {
         crate::db::destination_store::ensure_builtin_destination(conn, &account.provider_id)?;
     }
-    let destination_id = destination_id_for_account(conn, account)?;
+    let destination_id = match destination_override {
+        Some(destination_id) => {
+            anyhow::ensure!(
+                super::destination_store::destination_exists(conn, destination_id)?,
+                "destination `{destination_id}` not found"
+            );
+            destination_id.to_string()
+        }
+        None => destination_id_for_account(conn, account)?,
+    };
     let credential_id = credential_id_for_legacy_account(&account.id).to_string();
     let routing_rank: i64 = conn.query_row(
         "SELECT COALESCE(MAX(routing_rank), -1) + 1 FROM credentials",

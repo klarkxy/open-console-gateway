@@ -895,6 +895,7 @@ async fn p09_forward_attempt_emits_carried_legacy_tool_compat() {
             forced_upstream: Some(ApiFormat::ChatCompletions),
             custom_route: Some(CustomRouteSpec {
                 endpoint_url: endpoint_url.clone(),
+                auth_kind: ocg_domain::dynamic::DynamicAuthKind::Bearer,
             }),
         },
     )
@@ -1050,6 +1051,7 @@ fn chat_plan(model: &str, custom_endpoint: Option<&str>) -> RequestPlan {
         resolved_alias: Some(model.into()),
         custom_route: custom_endpoint.map(|endpoint_url| CustomRouteSpec {
             endpoint_url: endpoint_url.to_string(),
+            auth_kind: ocg_domain::dynamic::DynamicAuthKind::Bearer,
         }),
         service_tier: None,
         custom_tools: Vec::new(),
@@ -1159,6 +1161,84 @@ async fn r06_granted_same_origin_custom_sends_once() {
     let result = forward_once(&state, &account, &plan, &selection, &[]).await;
     assert_eq!(hits.load(Ordering::SeqCst), 1, "{:?}", result.error_message);
     let _ = stop_tx.send(());
+    drop(state);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn r06_shared_custom_second_key_uses_owner_grant_and_model_override() {
+    let (default_addr, default_hits, default_stop) = spawn_hit_counter().await;
+    let (override_addr, override_hits, override_stop) = spawn_hit_counter().await;
+    let default_url = format!("http://{default_addr}/v1/chat/completions");
+    let override_url = format!("http://{override_addr}/v1/chat/completions");
+    let (dir, state) = test_state("r06-shared-custom-override");
+    let mut config = state.config();
+    config.proxy_mode = ProxyMode::Direct;
+    state.set_config(config).unwrap();
+
+    let mut owner = custom_account(&state);
+    owner.id = uuid::Uuid::new_v4().to_string();
+    owner.name = "Owner".into();
+    persist_custom_at(&state, &owner, &default_url);
+    let destination_id = ocg_domain::destination::destination_id_for_custom_account(&owner.id);
+    let mut second = custom_account(&state);
+    second.id = uuid::Uuid::new_v4().to_string();
+    second.name = "Second".into();
+    second.key_cipher = state.encrypt_key("sk-shared-second").unwrap();
+    state
+        .db
+        .lock()
+        .commit_onboarding_existing_account(
+            &second,
+            Some(&destination_id),
+            &crate::db::NewDashboardOperation {
+                operation_id: uuid::Uuid::new_v4().to_string(),
+                kind: "onboarding_commit".into(),
+                payload_digest: "1".repeat(64),
+                result_json: "{}".into(),
+            },
+        )
+        .unwrap();
+    let definition = ocg_domain::dynamic::DynamicProviderDefinition {
+        preset_id: None,
+        id: owner.id.clone(),
+        name: "Shared".into(),
+        endpoint_url: default_url.clone(),
+        upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+        auth_kind: ocg_domain::dynamic::DynamicAuthKind::Bearer,
+        mappings: vec![ocg_domain::dynamic::DynamicModelMapping {
+            public_model: "shared-model".into(),
+            upstream_model: "vendor/shared-model".into(),
+            upstream_override: Some(ocg_domain::dynamic::DynamicModelUpstreamOverride {
+                protocol: UpstreamProtocolKind::ChatCompletions,
+                endpoint_url: override_url.clone(),
+            }),
+        }],
+    };
+    state
+        .db
+        .lock()
+        .replace_custom_destination(
+            &destination_id,
+            &definition,
+            &[ocg_domain::credential::credential_id_for_legacy_account(&second.id).to_string()],
+        )
+        .unwrap();
+
+    let mut plan = chat_plan("vendor/shared-model", Some(&override_url));
+    plan.resolved_alias = Some("shared-model".into());
+    let selection = live_send_selection(&state, &second, &plan);
+    let result = forward_once(&state, &second, &plan, &selection, &[]).await;
+    assert_eq!(
+        override_hits.load(Ordering::SeqCst),
+        1,
+        "{:?}",
+        result.error_message
+    );
+    assert_eq!(default_hits.load(Ordering::SeqCst), 0);
+
+    let _ = default_stop.send(());
+    let _ = override_stop.send(());
     drop(state);
     let _ = fs::remove_dir_all(dir);
 }
@@ -1766,6 +1846,7 @@ fn official_api_attempt_pricing_is_native_frozen_and_never_attaches_to_foreign_r
                 forced_upstream: Some(ApiFormat::ChatCompletions),
                 custom_route: Some(CustomRouteSpec {
                     endpoint_url: runtime.endpoint_url.clone(),
+                    auth_kind: ocg_domain::dynamic::DynamicAuthKind::Bearer,
                 }),
             },
         )
@@ -1846,6 +1927,7 @@ fn official_api_attempt_pricing_is_native_frozen_and_never_attaches_to_foreign_r
         ] {
             plan.custom_route = Some(CustomRouteSpec {
                 endpoint_url: endpoint.into(),
+                auth_kind: ocg_domain::dynamic::DynamicAuthKind::Bearer,
             });
             let mut context = attempt_context(model);
             assert!(matches!(
@@ -1863,6 +1945,7 @@ fn official_api_attempt_pricing_is_native_frozen_and_never_attaches_to_foreign_r
         }
         plan.custom_route = Some(CustomRouteSpec {
             endpoint_url: runtime.endpoint_url.clone(),
+            auth_kind: ocg_domain::dynamic::DynamicAuthKind::Bearer,
         });
         plan.body = Bytes::from_static(br#"{"tools":[{"type":"web_search"}]}"#);
         let mut context = attempt_context(model);

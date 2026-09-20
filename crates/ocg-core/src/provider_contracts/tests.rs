@@ -863,6 +863,7 @@ fn custom_discovery_does_not_become_routable_without_declaration() {
         verification_status: ConnectionVerificationStatus::Verified,
         setup_ready: true,
         has_key: true,
+        auth_kind: ocg_domain::dynamic::DynamicAuthKind::Bearer,
         config: AccountCustomConfig {
             account_id: "custom-1".into(),
             endpoint_url: "https://api.example.com/v1/chat/completions".into(),
@@ -878,6 +879,7 @@ fn custom_discovery_does_not_become_routable_without_declaration() {
             verified_at: None,
             source: "manual".into(),
         }],
+        route_overrides: Vec::new(),
         protocol_passthrough: false,
     };
     let mut persisted = empty_persisted();
@@ -911,6 +913,7 @@ fn custom_declared_protocol_is_preferred_and_other_clients_fall_back_to_it() {
         verification_status: ConnectionVerificationStatus::Verified,
         setup_ready: true,
         has_key: true,
+        auth_kind: ocg_domain::dynamic::DynamicAuthKind::XApiKey,
         config: AccountCustomConfig {
             account_id: "custom-single".into(),
             endpoint_url: "https://api.example.com/v1/messages".into(),
@@ -929,6 +932,7 @@ fn custom_declared_protocol_is_preferred_and_other_clients_fall_back_to_it() {
                 source: "manual".into(),
             })
             .collect(),
+        route_overrides: Vec::new(),
         protocol_passthrough: false,
     };
     let ceiling = safety_ceiling_protocols(probe_for(CUSTOM_PROVIDER_ID), "declared-model");
@@ -999,6 +1003,7 @@ fn platform_passthrough_enables_chat_messages_and_responses() {
         verification_status: ConnectionVerificationStatus::Verified,
         setup_ready: true,
         has_key: true,
+        auth_kind: ocg_domain::dynamic::DynamicAuthKind::Bearer,
         config: AccountCustomConfig {
             account_id: "platform-key".into(),
             endpoint_url: "https://api.example.com".into(),
@@ -1014,6 +1019,7 @@ fn platform_passthrough_enables_chat_messages_and_responses() {
             verified_at: None,
             source: "discovery".into(),
         }],
+        route_overrides: Vec::new(),
         protocol_passthrough: true,
     };
     let set = build_effective_contracts(

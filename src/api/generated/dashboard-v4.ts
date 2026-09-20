@@ -56,6 +56,12 @@ export type DashboardApiV4 =
   | PlatformKeyImportFailure
   | DestinationList
   | DestinationDto
+  | ModelResolutionDto
+  | DestinationModelPatch
+  | DestinationUpstreamOverridePatch
+  | DestinationPatchRequest
+  | DestinationPatchResult
+  | DestinationDeleteResult
   | DestinationCredentialDto
   | CredentialList
   | CapabilitiesDto
@@ -68,7 +74,19 @@ export type DashboardApiV4 =
   | OfficialBalance
   | OfficialSpend
   | OfficialApiStatus
-  | OfficialApiPrices;
+  | OfficialApiPrices
+  | RoutingMode
+  | RoutingClientProtocol
+  | RoutingResolvedKind
+  | RoutingResolvedMapping
+  | RoutingResolvedModel
+  | RoutingChannel
+  | RoutingEligibleCandidate
+  | RoutingExclusionCode
+  | RoutingExclusion
+  | RoutingConversationBinding
+  | RuntimeOnlyUncertainty
+  | RoutingExplanation;
 /**
  * Inference operation advertised by one endpoint. Mapped 1:1 from
  * [`UpstreamProtocolKind`].
@@ -227,6 +245,10 @@ export type UsageSourceDto = "official_api" | "local_projection" | "none";
  */
 export type PlanWindowKindDto = "five_hours" | "week" | "month" | "free";
 /**
+ * Which client model names may resolve to a destination mapping.
+ */
+export type ModelResolutionDto = "adapter_defined" | "public_only" | "public_and_upstream";
+/**
  * Mapping-error variant name in camelCase.
  */
 export type MappingErrorCodeDto =
@@ -241,6 +263,46 @@ export type MappingErrorCodeDto =
  */
 export type RefusedRowKindDto = "account" | "dynamic_provider" | "platform_parent";
 export type OfficialApiKind = "deepseek" | "zhipu";
+/**
+ * Account selection mode. Wire values stay kebab-case, matching V2.
+ */
+export type RoutingMode = "strict-priority" | "sticky-global" | "round-robin";
+/**
+ * Client protocol accepted by `GET /routing/explain`.
+ */
+export type RoutingClientProtocol = "chat_completions" | "responses" | "messages" | "gemini";
+/**
+ * How the requested name resolved against the live alias registry.
+ */
+export type RoutingResolvedKind = "alias" | "pinned_raw";
+export type RoutingChannel = "go" | "free";
+export type RoutingExclusionCode =
+  | "mapping_protocol_incompatible"
+  | "credential_disabled"
+  | "binding_disabled"
+  | "model_scope_denied"
+  | "goat_not_eligible"
+  | "goat_unverified"
+  | "candidate_materialization_failed"
+  | "production_route_unsupported"
+  | "account_disabled"
+  | "setup_not_ready"
+  | "channel_mismatch"
+  | "credential_missing"
+  | "auth_error"
+  | "cooling_down"
+  | "free_channel_unavailable";
+/**
+ * Conversation stickiness is reported, not applied: this endpoint has no
+ * conversation input.
+ */
+export type RoutingConversationBinding = "not_evaluated";
+export type RuntimeOnlyUncertainty =
+  | "state_changed_after_snapshot"
+  | "conversation_binding_not_evaluated"
+  | "retry_exclusions_not_applied"
+  | "credential_recheck_pending"
+  | "upstream_result_unknown";
 
 /**
  * Live CAS token, process generation, and pricing snapshot id.
@@ -669,9 +731,13 @@ export interface DestinationDto {
   id: string;
   legacy: LegacyDestinationRefDto;
   /**
-   * `1` for singletons and account-owned endpoints; `null` otherwise.
+   * `1` for true singletons; `null` for multi-credential destinations.
    */
   maxCredentials: number | null;
+  /**
+   * Model-name resolution owned by this destination.
+   */
+  modelResolution: "adapter_defined" | "public_only" | "public_and_upstream";
   /**
    * Display name.
    */
@@ -739,6 +805,14 @@ export interface CatalogModelDto {
    * Upstream model id sent on egress.
    */
   upstreamModel: string;
+  upstreamOverride: DestinationUpstreamOverridePatch | null;
+}
+/**
+ * Optional per-model route override for a configurable HTTP destination.
+ */
+export interface DestinationUpstreamOverridePatch {
+  endpointUrl: string;
+  protocol: ProtocolDto;
 }
 /**
  * V3 row this destination was projected from.
@@ -768,6 +842,43 @@ export interface PlanDto {
  */
 export interface PlanWindowDto {
   kind: PlanWindowKindDto;
+}
+/**
+ * Complete public-to-upstream mapping written by a destination PATCH.
+ */
+export interface DestinationModelPatch {
+  publicModel: string;
+  upstreamModel: string;
+  upstreamOverride?: DestinationUpstreamOverridePatch | null;
+}
+/**
+ * Full replacement of editable configuration on one HTTP destination.
+ * Keys remain account-owned and are never accepted by this route.
+ */
+export interface DestinationPatchRequest {
+  authScheme: AuthSchemeDto;
+  /**
+   * Explicit consent to add safe grants for the destination's current
+   * endpoints to these existing credentials.
+   */
+  authorizeCredentialIds?: string[];
+  endpointUrl: string;
+  expectedRevision: number;
+  models: DestinationModelPatch[];
+  name: string;
+  processGeneration: number;
+  upstreamProtocol: ProtocolDto;
+}
+export interface DestinationPatchResult {
+  /**
+   * Complete secret-free credential projection after the mutation. A
+   * destination edit can reset verification, auth/cooldowns, and grants on
+   * more than one Key, so returning only the destination row is stale by
+   * construction.
+   */
+  credentials: DestinationCredentialDto[];
+  destination: DestinationDto;
+  revision: ControlRevision;
 }
 /**
  * RFC credential projection row. Carries `hasSecret` only; never ciphertext or plaintext.
@@ -873,6 +984,9 @@ export interface DestinationOnboardingTaskDto {
    */
   step: string;
 }
+export interface DestinationDeleteResult {
+  revision: ControlRevision;
+}
 /**
  * RFC credential list. Revision-tagged and secret-free.
  */
@@ -976,4 +1090,53 @@ export interface OfficialApiPrices {
   processGeneration: number;
   providerId: string;
   revision: number;
+}
+export interface RoutingResolvedMapping {
+  providerId: string;
+  routeable: boolean;
+  upstreamModel: string;
+}
+export interface RoutingResolvedModel {
+  alias: string | null;
+  kind: RoutingResolvedKind;
+  mappings: RoutingResolvedMapping[];
+}
+export interface RoutingEligibleCandidate {
+  accountId: string;
+  accountName: string;
+  adapterKind: string;
+  channel: RoutingChannel;
+  destinationId: string | null;
+  destinationName: string | null;
+  providerId: string;
+  resolvedModel: string;
+  routingRank: number;
+  upstreamProtocol: RoutingClientProtocol;
+}
+export interface RoutingExclusion {
+  accountId: string | null;
+  code: RoutingExclusionCode;
+  detail: string;
+  providerId: string | null;
+  upstreamModel: string | null;
+}
+/**
+ * Read-only routing prediction for `GET /routing/explain`.
+ *
+ * This is not a send guarantee. `runtimeOnlyUncertainty` names the live
+ * steps this snapshot does not execute.
+ */
+export interface RoutingExplanation {
+  clientProtocol: RoutingClientProtocol;
+  conversationBinding: RoutingConversationBinding;
+  conversationSticky: boolean;
+  eligible: RoutingEligibleCandidate[];
+  exclusions: RoutingExclusion[];
+  expectedBasePolicyFirstPick: RoutingEligibleCandidate | null;
+  observedAt: string;
+  requestedModel: string;
+  resolved: RoutingResolvedModel;
+  revision: ControlRevision;
+  routingMode: RoutingMode;
+  runtimeOnlyUncertainty: RuntimeOnlyUncertainty[];
 }

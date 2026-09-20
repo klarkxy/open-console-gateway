@@ -12,7 +12,7 @@ use crate::credential::{
     credential_id_for_legacy_account, derive_auth_state,
     observer_credential_id_for_platform_account,
 };
-use crate::dynamic::{DynamicAuthKind, DynamicProviderDefinition};
+use crate::dynamic::{DynamicAuthKind, DynamicModelUpstreamOverride, DynamicProviderDefinition};
 use crate::ids::{
     CPA_ACCOUNT_ID, CPA_PROVIDER_ID, CUSTOM_PROVIDER_ID, OLLAMA_CLOUD_BASE_URL,
     OPENCODE_ZEN_FREE_PROVIDER_ID, ZEN_FREE_ACCOUNT_ID,
@@ -222,6 +222,31 @@ pub struct CatalogModel {
     pub protocols: Vec<Protocol>,
     pub preferred: Option<Protocol>,
     pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_override: Option<DynamicModelUpstreamOverride>,
+}
+
+/// Which client model names may resolve to a destination mapping.
+///
+/// Legacy Custom API rows accepted only their declared public names. Normal
+/// user-defined HTTP connections also accept a unique exact upstream model
+/// id. Built-in adapters retain their sealed, adapter-defined alias rules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelResolution {
+    AdapterDefined,
+    PublicOnly,
+    PublicAndUpstream,
+}
+
+impl ModelResolution {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AdapterDefined => "adapter_defined",
+            Self::PublicOnly => "public_only",
+            Self::PublicAndUpstream => "public_and_upstream",
+        }
+    }
 }
 
 /// Which V3-era row a destination was projected from. Migration-era bridge
@@ -251,6 +276,7 @@ pub struct Destination {
     pub base_url: Option<String>,
     pub protocols: Vec<Protocol>,
     pub auth_scheme: AuthScheme,
+    pub model_resolution: ModelResolution,
     pub catalog: Vec<CatalogModel>,
     pub capabilities: Capabilities,
     pub plan: Option<Plan>,
@@ -605,6 +631,7 @@ fn catalog_from_pairs(pairs: &[(String, String)], protocol: Protocol) -> Vec<Cat
             protocols: vec![protocol],
             preferred: Some(protocol),
             enabled: true,
+            upstream_override: None,
         })
         .collect()
 }
@@ -629,6 +656,7 @@ fn builtin_destination(provider_id: &str) -> Result<Destination, MappingError> {
         base_url: sealed_base_url(adapter),
         protocols: provider.upstream_protocols.to_vec(),
         auth_scheme: auth_scheme_from_builtin(provider.auth_schemes),
+        model_resolution: ModelResolution::AdapterDefined,
         // Builtin catalogs are persisted snapshots (`provider_model_catalogs`);
         // the projection layer joins them onto the destination after mapping.
         catalog: Vec::new(),
@@ -660,9 +688,22 @@ pub fn destination_from_legacy(
                 .map(|mapping| CatalogModel {
                     public_model: mapping.public_model.clone(),
                     upstream_model: mapping.upstream_model.clone(),
-                    protocols: vec![protocol],
-                    preferred: Some(protocol),
+                    protocols: vec![
+                        mapping
+                            .upstream_override
+                            .as_ref()
+                            .map(|route| route.protocol)
+                            .unwrap_or(protocol),
+                    ],
+                    preferred: Some(
+                        mapping
+                            .upstream_override
+                            .as_ref()
+                            .map(|route| route.protocol)
+                            .unwrap_or(protocol),
+                    ),
                     enabled: true,
+                    upstream_override: mapping.upstream_override.clone(),
                 })
                 .collect();
             Ok(Destination {
@@ -674,6 +715,7 @@ pub fn destination_from_legacy(
                 base_url: Some(endpoint.to_string()),
                 protocols: vec![protocol],
                 auth_scheme: AuthScheme::from(definition.auth_kind),
+                model_resolution: ModelResolution::PublicAndUpstream,
                 catalog,
                 capabilities: sealed_capabilities(AdapterKind::Http),
                 plan: None,
@@ -703,10 +745,11 @@ pub fn destination_from_legacy(
                 base_url: Some(endpoint.to_string()),
                 protocols: vec![*protocol],
                 auth_scheme: auth_scheme_for_http_protocol(*protocol),
+                model_resolution: ModelResolution::PublicOnly,
                 catalog: catalog_from_pairs(model_capabilities, *protocol),
                 capabilities: sealed_capabilities(AdapterKind::Http),
                 plan: None,
-                max_credentials: Some(1),
+                max_credentials: None,
                 observer_credential_id: None,
                 enabled: true,
             })
@@ -735,6 +778,7 @@ pub fn destination_from_legacy(
                 base_url: Some(endpoint.to_string()),
                 protocols: Protocol::ALL.to_vec(),
                 auth_scheme: AuthScheme::Bearer,
+                model_resolution: ModelResolution::PublicOnly,
                 // Platform catalogs live in refresh snapshots; the projection
                 // layer joins them after mapping.
                 catalog: Vec::new(),

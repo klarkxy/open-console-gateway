@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use ocg_domain::credential::{AuthState, ModelScope};
 use ocg_domain::destination::{
     AdapterKind, AuthScheme, Capabilities, CatalogModel, Cooldowns, Credential, Destination,
-    Grants, LegacyDestinationRef, OnboardingTaskRef, Plan, Protocol,
+    Grants, LegacyDestinationRef, ModelResolution, OnboardingTaskRef, Plan, Protocol,
 };
 use rusqlite::{Connection, params};
 
@@ -76,9 +76,9 @@ fn insert_destination(conn: &Connection, destination: &Destination) -> anyhow::R
     conn.execute(
         "INSERT INTO destinations (
             id, legacy_kind, legacy_id, adapter, name, brand_family, base_url,
-            protocols_json, auth_scheme, capabilities_json, plan_json,
+            protocols_json, auth_scheme, model_resolution, capabilities_json, plan_json,
             max_credentials, observer_credential_id, enabled
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         params![
             destination.id,
             legacy_kind,
@@ -89,6 +89,7 @@ fn insert_destination(conn: &Connection, destination: &Destination) -> anyhow::R
             destination.base_url,
             serde_json::to_string(&destination.protocols)?,
             destination.auth_scheme.as_str(),
+            destination.model_resolution.as_str(),
             serde_json::to_string(&destination.capabilities)?,
             destination
                 .plan
@@ -212,7 +213,7 @@ fn load_destinations(
 ) -> anyhow::Result<Vec<Destination>> {
     let mut stmt = conn.prepare(
         "SELECT id, legacy_kind, legacy_id, adapter, name, brand_family, base_url,
-                protocols_json, auth_scheme, capabilities_json, plan_json,
+                protocols_json, auth_scheme, model_resolution, capabilities_json, plan_json,
                 max_credentials, observer_credential_id, enabled
          FROM destinations
          ORDER BY rowid",
@@ -229,10 +230,11 @@ fn load_destinations(
             row.get::<_, String>(7)?,
             row.get::<_, String>(8)?,
             row.get::<_, String>(9)?,
-            row.get::<_, Option<String>>(10)?,
-            row.get::<_, Option<i64>>(11)?,
-            row.get::<_, Option<String>>(12)?,
-            row.get::<_, i64>(13)?,
+            row.get::<_, String>(10)?,
+            row.get::<_, Option<String>>(11)?,
+            row.get::<_, Option<i64>>(12)?,
+            row.get::<_, Option<String>>(13)?,
+            row.get::<_, i64>(14)?,
         ))
     })?;
     let mut destinations = Vec::new();
@@ -247,6 +249,7 @@ fn load_destinations(
             base_url,
             protocols_json,
             auth_scheme,
+            model_resolution,
             capabilities_json,
             plan_json,
             max_credentials,
@@ -264,6 +267,7 @@ fn load_destinations(
             protocols: serde_json::from_str(&protocols_json)
                 .with_context(|| "invalid destinations.protocols_json")?,
             auth_scheme: auth_scheme_from_str(&auth_scheme)?,
+            model_resolution: model_resolution_from_str(&model_resolution)?,
             catalog,
             capabilities: serde_json::from_str::<Capabilities>(&capabilities_json)
                 .with_context(|| "invalid destinations.capabilities_json")?,
@@ -280,6 +284,15 @@ fn load_destinations(
         });
     }
     Ok(destinations)
+}
+
+fn model_resolution_from_str(value: &str) -> anyhow::Result<ModelResolution> {
+    match value {
+        "adapter_defined" => Ok(ModelResolution::AdapterDefined),
+        "public_only" => Ok(ModelResolution::PublicOnly),
+        "public_and_upstream" => Ok(ModelResolution::PublicAndUpstream),
+        other => anyhow::bail!("unknown destinations.model_resolution `{other}`"),
+    }
 }
 
 fn load_credentials(
@@ -389,7 +402,7 @@ fn load_credentials(
 fn load_catalogs(conn: &Connection) -> anyhow::Result<HashMap<String, Vec<CatalogModel>>> {
     let mut stmt = conn.prepare(
         "SELECT destination_id, public_model, upstream_model, protocols_json,
-                preferred, enabled
+                preferred, enabled, upstream_override
          FROM destination_models
          ORDER BY rowid",
     )?;
@@ -401,12 +414,20 @@ fn load_catalogs(conn: &Connection) -> anyhow::Result<HashMap<String, Vec<Catalo
             row.get::<_, String>(3)?,
             row.get::<_, Option<String>>(4)?,
             row.get::<_, i64>(5)?,
+            row.get::<_, Option<String>>(6)?,
         ))
     })?;
     let mut catalogs = HashMap::new();
     for row in rows {
-        let (destination_id, public_model, upstream_model, protocols_json, preferred, enabled) =
-            row?;
+        let (
+            destination_id,
+            public_model,
+            upstream_model,
+            protocols_json,
+            preferred,
+            enabled,
+            upstream_override,
+        ) = row?;
         catalogs
             .entry(destination_id)
             .or_insert_with(Vec::new)
@@ -417,6 +438,11 @@ fn load_catalogs(conn: &Connection) -> anyhow::Result<HashMap<String, Vec<Catalo
                     .with_context(|| "invalid destination_models.protocols_json")?,
                 preferred: preferred.as_deref().map(protocol_from_str).transpose()?,
                 enabled: enabled != 0,
+                upstream_override: upstream_override
+                    .as_deref()
+                    .map(serde_json::from_str)
+                    .transpose()
+                    .with_context(|| "invalid destination_models.upstream_override")?,
             });
     }
     Ok(catalogs)

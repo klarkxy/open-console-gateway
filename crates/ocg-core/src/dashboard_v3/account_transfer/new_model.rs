@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use ocg_domain::credential::{AuthState, ModelScope};
 use ocg_domain::destination::{
     AdapterKind, LegacyCredentialFacts, LegacyDestinationFacts, LegacyIdentityFacts,
-    LegacyPlatformLink, credential_from_legacy, destination_from_legacy,
+    LegacyPlatformLink, ModelResolution, credential_from_legacy, destination_from_legacy,
     destination_id_for_dynamic, destination_id_for_platform_account,
 };
 use ocg_domain::dynamic::{DynamicAuthKind, DynamicModelMapping, DynamicModelUpstreamOverride};
@@ -19,12 +19,13 @@ use super::{
     MAX_ACCOUNTS, MAX_CAPABILITIES, MAX_ENDPOINT_CHARS, MAX_KEY_CHARS, MAX_NAME_CHARS,
     MAX_NOTES_CHARS, MAX_USERNAME_CHARS, PAYLOAD_VERSION, PortableCooldowns, PortableNodeState,
     PortablePayload, PortableProviderDefinition, TransferError, V5_PAYLOAD_VERSION,
-    ValidatedAccount, validate_node_state, validate_portable_dynamic_providers,
+    V7_PAYLOAD_VERSION, ValidatedAccount, validate_node_state, validate_portable_dynamic_providers,
 };
 use crate::dashboard_v4::types::{
     AdapterKindDto, AuthSchemeDto, CredentialCooldownsDto, CredentialGrantsDto,
     LegacyDestinationKindDto,
 };
+use crate::db::ImportedCustomDestination;
 use crate::db::identity::{
     IdentityImportSnapshot, ImportedAccountIdentity, ImportedIdentity, ImportedQuotaPool,
 };
@@ -47,6 +48,8 @@ pub(super) struct UnifiedNewModelImport {
     pub credentials: Vec<PortableCredential>,
     pub identity_snapshot: Option<IdentityImportSnapshot>,
     pub dynamic_providers: Vec<DynamicProviderRuntime>,
+    pub custom_destinations: Vec<ImportedCustomDestination>,
+    pub custom_credential_destinations: HashMap<String, String>,
     pub draft_provider_ids: HashSet<String>,
     pub platform_accounts: Vec<PortablePlatformAccount>,
     pub platform_links: Vec<PortablePlatformLink>,
@@ -319,7 +322,7 @@ pub(super) fn export_new_model(
     Ok((destinations, credentials, skipped))
 }
 
-pub(super) fn validate_v7_payload(
+pub(super) fn validate_new_model_payload(
     payload: &mut PortablePayload,
 ) -> Result<(Vec<ValidatedAccount>, UnifiedNewModelImport), TransferError> {
     if payload.node.is_none() {
@@ -330,13 +333,45 @@ pub(super) fn validate_v7_payload(
         && !payload.accounts.is_empty()
     {
         return Err(TransferError::Invalid(
-            "this V7 backup is missing its destination/credential snapshot".to_string(),
+            "this V7/V8 backup is missing its destination/credential snapshot".to_string(),
         ));
     }
     if payload.credentials.len() > MAX_ACCOUNTS {
         return Err(TransferError::InvalidBundle);
     }
     compare_legacy_fields_to_new_model(payload)?;
+    for destination in &mut payload.destinations {
+        if destination.model_resolution.is_none() {
+            if payload.version >= PAYLOAD_VERSION {
+                return Err(TransferError::Invalid(format!(
+                    "destination `{}` is missing modelResolution",
+                    destination.id
+                )));
+            }
+            destination.model_resolution = Some(match destination.legacy.kind {
+                LegacyDestinationKindDto::Dynamic => ModelResolution::PublicAndUpstream,
+                LegacyDestinationKindDto::CustomAccount
+                | LegacyDestinationKindDto::PlatformParent => ModelResolution::PublicOnly,
+                LegacyDestinationKindDto::Builtin => ModelResolution::AdapterDefined,
+            });
+        }
+        let expected_resolution = match destination.legacy.kind {
+            LegacyDestinationKindDto::Dynamic => ModelResolution::PublicAndUpstream,
+            LegacyDestinationKindDto::CustomAccount | LegacyDestinationKindDto::PlatformParent => {
+                ModelResolution::PublicOnly
+            }
+            LegacyDestinationKindDto::Builtin => ModelResolution::AdapterDefined,
+        };
+        if destination.model_resolution != Some(expected_resolution) {
+            return Err(TransferError::Invalid(format!(
+                "destination `{}` has an incompatible modelResolution",
+                destination.id
+            )));
+        }
+        if destination.legacy.kind == LegacyDestinationKindDto::CustomAccount {
+            destination.max_credentials = None;
+        }
+    }
     let mut destination_ids = HashSet::new();
     for destination in &payload.destinations {
         if destination.id.trim().is_empty() || !destination_ids.insert(destination.id.clone()) {
@@ -469,6 +504,8 @@ pub(super) fn validate_v7_payload(
     }
     let (dynamic_providers, draft_provider_ids) =
         dynamics_from_destinations(&payload.destinations)?;
+    let (custom_destinations, custom_credential_destinations) =
+        customs_from_destinations(&payload.destinations, &payload.credentials)?;
     let (
         platform_accounts,
         platform_links,
@@ -492,6 +529,8 @@ pub(super) fn validate_v7_payload(
             credentials: payload.credentials.clone(),
             identity_snapshot,
             dynamic_providers,
+            custom_destinations,
+            custom_credential_destinations,
             draft_provider_ids,
             platform_accounts,
             platform_links,
@@ -692,11 +731,15 @@ pub(super) fn map_old_graph_to_unified(
         }
         credentials.push(portable);
     }
+    let (custom_destinations, custom_credential_destinations) =
+        customs_from_destinations(&destinations, &credentials)?;
     Ok(UnifiedNewModelImport {
         destinations,
         credentials,
         identity_snapshot,
         dynamic_providers,
+        custom_destinations,
+        custom_credential_destinations,
         draft_provider_ids,
         platform_accounts: payload.platform_accounts.clone(),
         platform_links: payload.platform_links.clone(),
@@ -996,6 +1039,142 @@ fn validate_inference_credential(
         }
     }
     Ok(())
+}
+
+fn customs_from_destinations(
+    destinations: &[PortableDestination],
+    credentials: &[PortableCredential],
+) -> Result<(Vec<ImportedCustomDestination>, HashMap<String, String>), TransferError> {
+    let custom_by_id = destinations
+        .iter()
+        .filter(|destination| destination.legacy.kind == LegacyDestinationKindDto::CustomAccount)
+        .map(|destination| (destination.id.as_str(), destination))
+        .collect::<HashMap<_, _>>();
+    let mut imported = Vec::with_capacity(custom_by_id.len());
+    for destination in custom_by_id.values() {
+        if destination.adapter != AdapterKindDto::Http {
+            return Err(TransferError::Invalid(format!(
+                "Custom destination `{}` must use the HTTP adapter",
+                destination.id
+            )));
+        }
+        let expected_id =
+            ocg_domain::destination::destination_id_for_custom_account(&destination.legacy.id);
+        if destination.id != expected_id {
+            return Err(TransferError::Invalid(format!(
+                "Custom destination `{}` has an incompatible stable identity",
+                destination.id
+            )));
+        }
+        if destination.protocols.len() != 1 {
+            return Err(TransferError::Invalid(format!(
+                "Custom destination `{}` must declare exactly one default protocol",
+                destination.id
+            )));
+        }
+        let protocol = super::portable::protocol_from_dto(destination.protocols[0]);
+        let auth_scheme = super::portable::auth_scheme_from_dto(destination.auth_scheme);
+        if matches!(auth_scheme, ocg_domain::destination::AuthScheme::None) {
+            return Err(TransferError::Invalid(format!(
+                "Custom destination `{}` requires keyed authentication",
+                destination.id
+            )));
+        }
+        let endpoint_url = destination
+            .base_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                TransferError::Invalid(format!(
+                    "destination `{}` is missing its Custom Endpoint",
+                    destination.id
+                ))
+            })?;
+        let endpoint_url =
+            crate::custom::validate_custom_endpoint_url(endpoint_url).map_err(|_| {
+                TransferError::Invalid(format!(
+                    "destination `{}` has an invalid Custom Endpoint",
+                    destination.id
+                ))
+            })?;
+        let models = destination
+            .catalog
+            .iter()
+            .map(|model| {
+                Ok(DynamicModelMapping {
+                    public_model: model.public_model.clone(),
+                    upstream_model: model.upstream_model.clone(),
+                    upstream_override: model
+                        .upstream_override
+                        .as_ref()
+                        .map(|value| {
+                            Ok::<_, TransferError>(DynamicModelUpstreamOverride {
+                                protocol: UpstreamProtocolKind::try_from(value.protocol.as_str())
+                                    .map_err(|_| {
+                                        TransferError::Invalid(format!(
+                                            "Custom destination `{}` has an invalid model protocol override",
+                                            destination.id
+                                        ))
+                                    })?,
+                                endpoint_url: value.endpoint_url.clone(),
+                            })
+                        })
+                        .transpose()?,
+                })
+            })
+            .collect::<Result<Vec<_>, TransferError>>()?;
+        let definition = ocg_domain::dynamic::DynamicProviderDefinition {
+            preset_id: None,
+            id: destination.legacy.id.clone(),
+            name: destination.name.clone(),
+            endpoint_url: endpoint_url.clone(),
+            upstream_protocol: protocol,
+            auth_kind: match auth_scheme {
+                ocg_domain::destination::AuthScheme::Bearer => DynamicAuthKind::Bearer,
+                ocg_domain::destination::AuthScheme::XApiKey => DynamicAuthKind::XApiKey,
+                ocg_domain::destination::AuthScheme::None => unreachable!(),
+            },
+            mappings: models.clone(),
+        };
+        let definition = crate::dynamic::validate_definition(definition).map_err(|error| {
+            TransferError::Invalid(format!(
+                "Custom destination `{}` is invalid: {error}",
+                destination.id
+            ))
+        })?;
+        imported.push(ImportedCustomDestination {
+            id: destination.id.clone(),
+            legacy_id: destination.legacy.id.clone(),
+            name: definition.name,
+            endpoint_url: definition.endpoint_url,
+            protocol: definition.upstream_protocol,
+            auth_scheme,
+            models: definition.mappings,
+            enabled: destination.enabled,
+        });
+    }
+    let mut associations = HashMap::new();
+    for credential in credentials {
+        if is_observer_purpose(credential_purpose(credential))
+            || !custom_by_id.contains_key(credential.destination_id.as_str())
+        {
+            continue;
+        }
+        if associations
+            .insert(
+                credential.legacy_account_id.clone(),
+                credential.destination_id.clone(),
+            )
+            .is_some()
+        {
+            return Err(TransferError::Invalid(format!(
+                "credential `{}` has duplicate Custom destination ownership",
+                credential.id
+            )));
+        }
+    }
+    Ok((imported, associations))
 }
 
 fn dynamics_from_destinations(
@@ -1750,12 +1929,16 @@ pub(super) fn observer_plaintext_by_parent(
     out
 }
 
-pub(super) fn finish_v7_migration(
+pub(super) fn finish_new_model_migration(
     payload: &mut PortablePayload,
     exported_at: String,
 ) -> Result<ValidatedMigration, TransferError> {
-    let (accounts, unified) = validate_v7_payload(payload)?;
-    let node = validate_node_state(payload.node.take().expect("V7 node was checked"), &accounts)?;
+    debug_assert!(payload.version >= V7_PAYLOAD_VERSION);
+    let (accounts, unified) = validate_new_model_payload(payload)?;
+    let node = validate_node_state(
+        payload.node.take().expect("V7/V8 node was checked"),
+        &accounts,
+    )?;
     Ok(ValidatedMigration {
         exported_at,
         accounts,

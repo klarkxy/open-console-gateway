@@ -4,8 +4,8 @@ use crate::kernel::catalog::QuotaScope;
 use crate::kernel::ids::ZEN_FREE_ACCOUNT_ID;
 use crate::provider::ProviderAdapterKind;
 use ocg_domain::destination::{
-    AdapterKind, AuthScheme, Destination, LegacyDestinationRef, destination_id_for_builtin,
-    sealed_capabilities,
+    AdapterKind, AuthScheme, Destination, LegacyDestinationRef, ModelResolution,
+    destination_id_for_builtin, sealed_capabilities,
 };
 use ocg_gateway::selector::{CONVERSATION_TTL, MAX_CONVERSATIONS, SelectionError};
 use std::sync::Arc;
@@ -109,6 +109,7 @@ fn destination(adapter: AdapterKind, provider_id: &str) -> Destination {
         base_url: None,
         protocols: Vec::new(),
         auth_scheme: AuthScheme::None,
+        model_resolution: ModelResolution::AdapterDefined,
         catalog: Vec::new(),
         capabilities: sealed_capabilities(adapter),
         plan: None,
@@ -1285,5 +1286,200 @@ fn selector_uses_candidate_adapter_not_account_provider_id() {
             mono,
         ),
         None
+    );
+}
+
+fn preview_index(
+    runtime: &RoutingRuntime,
+    candidates: &[RoutingCandidate],
+    mode: RoutingMode,
+    conversation_sticky: bool,
+    conversation_key: Option<&str>,
+    exclude_ids: &[&str],
+    free_channel_available: bool,
+    wall: DateTime<Utc>,
+    mono: Instant,
+) -> Option<usize> {
+    runtime
+        .preview_candidate_index_at(
+            candidates,
+            mode,
+            conversation_sticky,
+            conversation_key,
+            exclude_ids,
+            free_channel_available,
+            wall,
+            mono,
+        )
+        .expect("candidates must not contain duplicate account ids")
+}
+
+#[test]
+fn preview_candidate_index_does_not_advance_round_robin_or_sticky_global() {
+    let runtime = RoutingRuntime::new();
+    let wall = frozen_wall();
+    let mono = Instant::now();
+    let candidates = vec![
+        go_candidate(account("a", true)),
+        go_candidate(account("b", true)),
+    ];
+    assert_eq!(
+        pick_index(
+            &runtime,
+            &candidates,
+            RoutingMode::RoundRobin,
+            false,
+            None,
+            &[],
+            true,
+            wall,
+            mono,
+        ),
+        Some(0)
+    );
+    assert_eq!(
+        preview_index(
+            &runtime,
+            &candidates,
+            RoutingMode::RoundRobin,
+            false,
+            None,
+            &[],
+            true,
+            wall,
+            mono,
+        ),
+        Some(1)
+    );
+    assert_eq!(
+        pick_index(
+            &runtime,
+            &candidates,
+            RoutingMode::RoundRobin,
+            false,
+            None,
+            &[],
+            true,
+            wall,
+            mono,
+        ),
+        Some(1),
+        "preview must leave the live round-robin cursor unmoved"
+    );
+
+    let sticky = RoutingRuntime::new();
+    assert_eq!(
+        pick_index(
+            &sticky,
+            &candidates,
+            RoutingMode::StickyGlobal,
+            false,
+            None,
+            &[],
+            true,
+            wall,
+            mono,
+        ),
+        Some(0)
+    );
+    let disabled = vec![
+        go_candidate(account("a", false)),
+        go_candidate(account("b", true)),
+    ];
+    assert_eq!(
+        preview_index(
+            &sticky,
+            &disabled,
+            RoutingMode::StickyGlobal,
+            false,
+            None,
+            &[],
+            true,
+            wall,
+            mono,
+        ),
+        Some(1)
+    );
+    assert_eq!(
+        pick_index(
+            &sticky,
+            &candidates,
+            RoutingMode::StickyGlobal,
+            false,
+            None,
+            &[],
+            true,
+            wall,
+            mono,
+        ),
+        Some(0),
+        "preview must not rewrite live sticky-global"
+    );
+}
+
+#[test]
+fn assess_candidate_availability_covers_current_gate_order() {
+    let wall = frozen_wall();
+    let available = go_candidate(account("ready", true));
+    assert_eq!(
+        assess_candidate_availability(&available, true, wall),
+        CandidateAvailability::Available
+    );
+
+    let disabled = go_candidate(account("off", false));
+    assert_eq!(
+        assess_candidate_availability(&disabled, true, wall),
+        CandidateAvailability::AccountDisabled
+    );
+
+    let mut setup = account("setup", true);
+    setup.setup_step = crate::models::AccountSetupStep::KeyVerification;
+    assert_eq!(
+        assess_candidate_availability(&go_candidate(setup), true, wall),
+        CandidateAvailability::SetupNotReady
+    );
+
+    let mismatched = routing_candidate(account("go", true), UpstreamChannel::Free, "m");
+    assert_eq!(
+        assess_candidate_availability(&mismatched, true, wall),
+        CandidateAvailability::ChannelMismatch
+    );
+
+    let mut missing = account("missing", true);
+    missing.key_cipher.clear();
+    assert_eq!(
+        assess_candidate_availability(&go_candidate(missing), true, wall),
+        CandidateAvailability::CredentialMissing
+    );
+
+    let mut auth = account("auth", true);
+    auth.auth_error = Some("invalid key".into());
+    assert_eq!(
+        assess_candidate_availability(&go_candidate(auth), true, wall),
+        CandidateAvailability::AuthError
+    );
+
+    let cooling = go_candidate(cooling_at("cool", wall + chrono::Duration::hours(1)));
+    assert_eq!(
+        assess_candidate_availability(&cooling, true, wall),
+        CandidateAvailability::CoolingDown
+    );
+
+    let free = routing_candidate(zen_account(true), UpstreamChannel::Free, "m-free");
+    assert_eq!(
+        assess_candidate_availability(&free, false, wall),
+        CandidateAvailability::FreeChannelUnavailable
+    );
+    assert_eq!(
+        assess_candidate_availability(&free, true, wall),
+        CandidateAvailability::Available
+    );
+    assert_eq!(
+        CandidateAvailability::AccountDisabled.as_str(),
+        "account_disabled"
+    );
+    assert_eq!(
+        CandidateAvailability::FreeChannelUnavailable.as_str(),
+        "free_channel_unavailable"
     );
 }

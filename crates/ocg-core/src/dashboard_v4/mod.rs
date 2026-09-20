@@ -23,6 +23,7 @@ mod official_api;
 mod onboarding;
 mod platform_keys;
 mod publication;
+mod routing;
 mod templates;
 pub(crate) mod types;
 
@@ -41,7 +42,7 @@ pub use types::{
     DshApplicationStatus, IdentityList, IdentitySummary, OnboardingAuthorization,
     OnboardingCommitRequest, OnboardingCommitResult, OnboardingConnection, OnboardingTarget,
     PlatformKeyImportFailure, PlatformKeyImportRequest, PlatformKeyImportResult, ProviderTemplate,
-    TemplateList, contract_schema, contract_schema_pretty,
+    RoutingExplanation, TemplateList, contract_schema, contract_schema_pretty,
 };
 
 pub fn api_router(state: CoreState) -> Router<CoreState> {
@@ -51,6 +52,10 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
         .route("/connections", get(connections::list_connections))
         .route("/accounts", get(identities::list_accounts))
         .route("/destinations", get(destinations::list_destinations))
+        .route(
+            "/destinations/{id}",
+            patch(destinations::patch_destination).delete(destinations::delete_destination),
+        )
         .route("/credentials", get(destinations::list_credentials))
         .route("/accounts/{id}/official-api", get(official_api::get_status))
         .route(
@@ -85,6 +90,7 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
             "/alias-publication",
             get(publication::get_publication).patch(publication::patch_publication),
         )
+        .route("/routing/explain", get(routing::explain))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_v3_session,

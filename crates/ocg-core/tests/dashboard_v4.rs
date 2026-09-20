@@ -869,7 +869,7 @@ async fn commit_existing_dynamic_connection_adds_second_key() {
 }
 
 #[tokio::test]
-async fn commit_existing_builtin_or_custom_connection_is_rejected() {
+async fn commit_existing_builtin_is_not_exposed_and_custom_adds_second_key() {
     let harness = start_loopback("v4-commit-reject-legacy").await;
     let builtin_id =
         connection_id_for_legacy(LegacyConnectionKind::BuiltinProvider, OPENCODE_PROVIDER_ID);
@@ -886,15 +886,8 @@ async fn commit_existing_builtin_or_custom_connection_is_rejected() {
         }),
     );
     let (status, error) = send_v4(&harness, Method::POST, "/onboarding/commit", &builtin).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
-    assert_eq!(error["code"], "invalidRequest");
-    assert!(
-        error["message"]
-            .as_str()
-            .unwrap()
-            .contains("builtin and Custom API connections add Keys on Accounts"),
-        "{error}"
-    );
+    assert_eq!(status, StatusCode::NOT_FOUND, "{error}");
+    assert_eq!(error["code"], "notFound");
 
     let (status, created) = send_v3(
         &harness,
@@ -926,22 +919,32 @@ async fn commit_existing_builtin_or_custom_connection_is_rejected() {
         .iter()
         .find(|connection| connection["legacy"]["kind"] == "custom_account")
         .expect("custom connection");
+    let custom_connection_id = custom["id"].as_str().unwrap().to_string();
+    assert_eq!(custom["credentialCount"], 1);
     let custom_commit = commit_cas(
         &harness,
         &operation_id(10),
         json!({
             "connection": {
                 "kind": "existing",
-                "connectionId": custom["id"]
+                "connectionId": custom_connection_id
             },
             "authorization": api_key_auth("sk-custom-second", None),
             "targets": []
         }),
     );
-    let (status, error) =
+    let (status, added) =
         send_v4(&harness, Method::POST, "/onboarding/commit", &custom_commit).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
-    assert_eq!(error["code"], "invalidRequest");
+    assert_eq!(status, StatusCode::OK, "{added}");
+    assert_eq!(added["connectionId"], custom_connection_id);
+    assert_ne!(added["credentialId"], created["account"]["id"]);
+    let (status, connections) = send_v4(&harness, Method::GET, "/connections", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{connections}");
+    let custom = connections_of(&connections)
+        .iter()
+        .find(|connection| connection["id"] == custom_connection_id)
+        .expect("custom connection after second Key");
+    assert_eq!(custom["credentialCount"], 2);
     harness.stop();
 }
 

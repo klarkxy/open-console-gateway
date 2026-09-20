@@ -658,6 +658,7 @@ fn catalog_from_persisted_scope(scope: &EffectiveScopeContract) -> Vec<CatalogMo
             protocols: model.enabled_protocols(),
             preferred: Some(model.preferred_protocol),
             enabled: model.has_enabled_protocol(),
+            upstream_override: None,
         });
     }
     catalog
@@ -684,6 +685,7 @@ fn platform_catalog_union(capabilities: &[AccountModelCapability]) -> Vec<Catalo
             protocols: vec![protocol],
             preferred: Some(protocol),
             enabled: true,
+            upstream_override: None,
         });
     }
     catalog

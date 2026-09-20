@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use ocg_domain::credential::{AuthState, ModelScope};
 use ocg_domain::destination::{
     AdapterKind, AuthScheme, Capabilities, CatalogModel, Credential, Destination,
-    LegacyDestinationRef, Plan, Protocol,
+    LegacyDestinationRef, ModelResolution, Plan, Protocol,
 };
 use ocg_domain::dynamic::DynamicModelUpstreamOverride;
 use serde::{Deserialize, Serialize};
@@ -55,6 +55,8 @@ pub(super) struct PortableDestination {
     pub base_url: Option<String>,
     pub protocols: Vec<ProtocolDto>,
     pub auth_scheme: AuthSchemeDto,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_resolution: Option<ModelResolution>,
     pub catalog: Vec<PortableCatalogModel>,
     pub capabilities: CapabilitiesDto,
     pub plan: Option<PlanDto>,
@@ -199,7 +201,12 @@ impl From<&CatalogModel> for PortableCatalogModel {
             protocols: dto.protocols,
             preferred: dto.preferred,
             enabled: dto.enabled,
-            upstream_override: None,
+            upstream_override: value.upstream_override.as_ref().map(|route| {
+                PortableCatalogOverride {
+                    protocol: route.protocol.as_str().to_string(),
+                    endpoint_url: route.endpoint_url.clone(),
+                }
+            }),
         }
     }
 }
@@ -220,6 +227,7 @@ impl From<&Destination> for PortableDestination {
                 .map(ProtocolDto::from)
                 .collect(),
             auth_scheme: destination.auth_scheme.into(),
+            model_resolution: Some(destination.model_resolution),
             catalog: destination
                 .catalog
                 .iter()
@@ -404,14 +412,31 @@ pub(super) fn catalog_from_portable(models: &[PortableCatalogModel]) -> Vec<Cata
                 .collect(),
             preferred: model.preferred.map(protocol_from_dto),
             enabled: model.enabled,
+            upstream_override: model.upstream_override.as_ref().map(|route| {
+                DynamicModelUpstreamOverride {
+                    protocol: ocg_domain::catalog::UpstreamProtocolKind::try_from(
+                        route.protocol.as_str(),
+                    )
+                    .expect("portable catalog override protocol was validated"),
+                    endpoint_url: route.endpoint_url.clone(),
+                }
+            }),
         })
         .collect()
 }
 
 pub(super) fn destination_from_portable(destination: &PortableDestination) -> Destination {
+    let legacy = legacy_ref_from_dto(&destination.legacy);
+    let model_resolution = destination.model_resolution.unwrap_or(match &legacy {
+        LegacyDestinationRef::Dynamic(_) => ModelResolution::PublicAndUpstream,
+        LegacyDestinationRef::CustomAccount(_) | LegacyDestinationRef::PlatformParent(_) => {
+            ModelResolution::PublicOnly
+        }
+        LegacyDestinationRef::Builtin(_) => ModelResolution::AdapterDefined,
+    });
     Destination {
         id: destination.id.clone(),
-        legacy: legacy_ref_from_dto(&destination.legacy),
+        legacy,
         adapter: adapter_from_dto(destination.adapter),
         name: destination.name.clone(),
         brand_family: destination.brand_family.clone(),
@@ -423,6 +448,7 @@ pub(super) fn destination_from_portable(destination: &PortableDestination) -> De
             .map(protocol_from_dto)
             .collect(),
         auth_scheme: auth_scheme_from_dto(destination.auth_scheme),
+        model_resolution,
         catalog: catalog_from_portable(&destination.catalog),
         capabilities: capabilities_from_dto(&destination.capabilities),
         plan: destination.plan.as_ref().map(plan_from_dto),

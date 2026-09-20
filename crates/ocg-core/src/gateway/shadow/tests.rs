@@ -117,6 +117,7 @@ fn custom_runtime(account_id: &str, model_id: &str) -> CustomAccountRuntime {
         verification_status: ConnectionVerificationStatus::Verified,
         setup_ready: true,
         has_key: true,
+        auth_kind: ocg_domain::dynamic::DynamicAuthKind::Bearer,
         config: AccountCustomConfig {
             account_id: account_id.into(),
             endpoint_url: "http://127.0.0.1:9/v1/chat/completions".into(),
@@ -132,6 +133,7 @@ fn custom_runtime(account_id: &str, model_id: &str) -> CustomAccountRuntime {
             verified_at: None,
             source: "manual".into(),
         }],
+        route_overrides: Vec::new(),
         protocol_passthrough: false,
     }
 }
