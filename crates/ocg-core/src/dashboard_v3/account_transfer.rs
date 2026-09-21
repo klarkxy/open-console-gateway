@@ -3,10 +3,11 @@
 //! Plaintext upstream Keys are decrypted and re-encrypted only inside the Host.
 //! The dashboard receives a versioned Argon2id + AES-256-GCM envelope, plus
 //! secret-free previews/results. Browser profiles, cookies, logs, usage, and
-//! local Host settings stay off the package. V7/V8 destinations and credentials
+//! local Host settings stay off the package. V7+ destinations and credentials
 //! are the authoritative transfer model and carry plaintext secrets inside the
-//! already-encrypted envelope. V6 preserves cooldown deadlines; V4/V5 retain
-//! their host-local policy.
+//! already-encrypted envelope. V9 carries `routingCards`. V8 requires
+//! `modelResolution`; V7 fills deterministic defaults. V6 preserves cooldown
+//! deadlines; V4/V5 retain their host-local policy.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
@@ -38,6 +39,7 @@ use crate::models::{
 use ocg_domain::credential::ModelScope;
 use ocg_domain::dynamic::{DynamicAuthKind, DynamicModelMapping, DynamicProviderDefinition};
 
+use crate::dashboard_v4::types::RoutingCard;
 use crate::dynamic::DynamicProviderRuntime;
 use crate::provider::{
     ConnectionVerificationStatus, CreationAvailability, CredentialKind, QuotaScope,
@@ -72,11 +74,14 @@ const ENVELOPE_VERSION: u32 = 1;
 const LEGACY_PAYLOAD_VERSION: u32 = 1;
 #[cfg(test)]
 const NODE_PAYLOAD_VERSION: u32 = 2;
-const PAYLOAD_VERSION: u32 = 8;
+const PAYLOAD_VERSION: u32 = 10;
 const MIN_SUPPORTED_PAYLOAD_VERSION: u32 = 4;
 const V5_PAYLOAD_VERSION: u32 = 5;
 const V6_PAYLOAD_VERSION: u32 = 6;
 const V7_PAYLOAD_VERSION: u32 = 7;
+const V8_PAYLOAD_VERSION: u32 = 8;
+const V9_PAYLOAD_VERSION: u32 = 9;
+const MAX_ROUTING_CARDS: usize = 1000;
 const AAD: &[u8] = b"ocg-manager-account-backup:v1:argon2id-m65536-t3-p1:aes-256-gcm";
 const ARGON_MEMORY_KIB: u32 = 64 * 1024;
 const ARGON_ITERATIONS: u32 = 3;
@@ -132,6 +137,8 @@ struct PortablePayload {
     destinations: Vec<PortableDestination>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     credentials: Vec<PortableCredential>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    routing_cards: Option<Vec<RoutingCard>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     node: Option<PortableNodeState>,
 }
@@ -359,6 +366,9 @@ impl Zeroize for PortablePayload {
         self.quota_pools.zeroize();
         self.destinations.zeroize();
         self.credentials.zeroize();
+        if let Some(cards) = self.routing_cards.as_mut() {
+            cards.clear();
+        }
         self.node.zeroize();
     }
 }
@@ -848,7 +858,29 @@ async fn import_accounts_inner(
         .map(|plaintext| state.encrypt_key(plaintext))
         .transpose()
         .map_err(|_| V3ApiError::internal("failed to protect an imported CPA secret"))?;
+    let db = state.db.lock();
+    let preimport_cards = if validated.unified.routing_cards.is_some() {
+        Some(
+            crate::db::routing_cards::load_on(&db.conn)
+                .map_err(|_| V3ApiError::internal("failed to read destination routing cards"))?,
+        )
+    } else {
+        None
+    };
+    let credit_meters: Vec<_> = validated
+        .unified
+        .credentials
+        .iter()
+        .filter_map(|credential| {
+            let meter = credential.credit_meter.as_ref()?;
+            let account_id = account_id_map.get(&credential.legacy_account_id)?;
+            imported_account_ids
+                .contains(account_id)
+                .then(|| (account_id.clone(), meter.clone()))
+        })
+        .collect();
     let node_record = NodeImportRecord {
+        destination_controls: validated.unified.destination_controls,
         platform_links_authoritative: validated.unified.platform_links_authoritative,
         platform_accounts: validated.unified.platform_accounts,
         platform_links: validated.unified.platform_links,
@@ -884,10 +916,19 @@ async fn import_accounts_inner(
         cpa_base_url: validated.unified.cpa_base_url,
         cpa_management_key_cipher,
     };
-    let runtime = state
-        .db
-        .lock()
-        .import_node_state(&node_record, |db| state.prepare_imported_node_runtime(db))
+    let runtime = db
+        .import_node_state_with_cipher(&node_record, Some(state.cipher.as_ref()), |db| {
+            for (account_id, meter) in &credit_meters {
+                crate::db::billing::import_on(&db.conn, account_id, meter, now)?;
+            }
+            if let (Some(preimport), Some(cards)) = (
+                preimport_cards.as_ref(),
+                validated.unified.routing_cards.as_ref(),
+            ) {
+                restore_imported_routing_cards_on(&db.conn, preimport, cards)?;
+            }
+            state.prepare_imported_node_runtime(db)
+        })
         .map_err(|error| V3ApiError::conflict_at(&state, error.to_string()))?;
     state.install_imported_node_runtime(runtime);
     let revision = state.settings_revision();
@@ -901,10 +942,190 @@ async fn import_accounts_inner(
     }))
 }
 
+fn routing_cards_for_export(
+    cards: Vec<RoutingCard>,
+    destinations: &[PortableDestination],
+    credentials: &[PortableCredential],
+) -> Vec<RoutingCard> {
+    let dest_ids: HashSet<&str> = destinations
+        .iter()
+        .map(|destination| destination.id.as_str())
+        .collect();
+    let cred_ids: HashSet<&str> = credentials
+        .iter()
+        .filter(|credential| !is_observer_purpose(credential_purpose(credential)))
+        .map(|credential| credential.id.as_str())
+        .collect();
+    cards
+        .into_iter()
+        .filter_map(|mut card| {
+            if !dest_ids.contains(card.destination_id.as_str()) {
+                return None;
+            }
+            let was_empty = card.credential_ids.is_empty();
+            card.credential_ids
+                .retain(|credential_id| cred_ids.contains(credential_id.as_str()));
+            if was_empty || !card.credential_ids.is_empty() {
+                Some(card)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Build the membership layout restored after node import.
+///
+/// Pre-import cards are preserved — including empty and adjacent same-destination
+/// cards — for destinations that still exist. Source grouping applies only to
+/// credential IDs that were not already on the target. Same card id on the same
+/// destination absorbs new members; the same id on a different destination is
+/// rejected so the import transaction rolls back. Remaining live credentials
+/// omitted from the portable snapshot (Zen/CPA) keep their generated singleton
+/// cards from the post-import layout.
+fn proposed_imported_routing_cards(
+    preimport: Vec<RoutingCard>,
+    imported: &[RoutingCard],
+    post_import: &[RoutingCard],
+) -> anyhow::Result<Vec<RoutingCard>> {
+    let live_destinations: HashSet<String> = post_import
+        .iter()
+        .map(|card| card.destination_id.clone())
+        .collect();
+    let mut credential_destination = HashMap::<String, String>::new();
+    for card in post_import {
+        for id in &card.credential_ids {
+            credential_destination.insert(id.clone(), card.destination_id.clone());
+        }
+    }
+    let preexisting: HashSet<String> = preimport
+        .iter()
+        .flat_map(|card| card.credential_ids.iter().cloned())
+        .filter(|id| credential_destination.contains_key(id))
+        .collect();
+
+    let mut proposed = Vec::new();
+    let mut proposed_ids = HashSet::new();
+    for mut card in preimport {
+        if !live_destinations.contains(&card.destination_id) {
+            continue;
+        }
+        card.credential_ids
+            .retain(|id| credential_destination.get(id) == Some(&card.destination_id));
+        proposed_ids.insert(card.id.clone());
+        proposed.push(card);
+    }
+
+    for source in imported {
+        if !live_destinations.contains(&source.destination_id) {
+            continue;
+        }
+        if proposed
+            .iter()
+            .any(|card| card.id == source.id && card.destination_id != source.destination_id)
+        {
+            anyhow::bail!(
+                "imported routing card `{}` collides with a different destination",
+                source.id
+            );
+        }
+        let was_empty = source.credential_ids.is_empty();
+        let new_members: Vec<String> = source
+            .credential_ids
+            .iter()
+            .filter(|id| {
+                !preexisting.contains(*id)
+                    && credential_destination.get(*id) == Some(&source.destination_id)
+            })
+            .cloned()
+            .collect();
+        if new_members.is_empty() && !was_empty {
+            continue;
+        }
+        if was_empty && proposed_ids.contains(&source.id) {
+            continue;
+        }
+        if let Some(existing) = proposed.iter_mut().find(|card| card.id == source.id) {
+            if existing.destination_id != source.destination_id {
+                anyhow::bail!(
+                    "imported routing card `{}` collides with a different destination",
+                    source.id
+                );
+            }
+            for id in new_members {
+                if !existing.credential_ids.contains(&id) {
+                    existing.credential_ids.push(id);
+                }
+            }
+            continue;
+        }
+        proposed_ids.insert(source.id.clone());
+        proposed.push(RoutingCard {
+            id: source.id.clone(),
+            destination_id: source.destination_id.clone(),
+            credential_ids: new_members,
+        });
+    }
+
+    let covered: HashSet<String> = proposed
+        .iter()
+        .flat_map(|card| card.credential_ids.iter().cloned())
+        .collect();
+    for current in post_import {
+        let leftover: Vec<String> = current
+            .credential_ids
+            .iter()
+            .filter(|id| !covered.contains(*id))
+            .cloned()
+            .collect();
+        if leftover.is_empty() {
+            continue;
+        }
+        if let Some(existing) = proposed.iter_mut().find(|card| card.id == current.id) {
+            if existing.destination_id != current.destination_id {
+                anyhow::bail!(
+                    "imported routing card `{}` collides with a different destination",
+                    current.id
+                );
+            }
+            for id in leftover {
+                if !existing.credential_ids.contains(&id) {
+                    existing.credential_ids.push(id);
+                }
+            }
+            continue;
+        }
+        proposed.push(RoutingCard {
+            id: current.id.clone(),
+            destination_id: current.destination_id.clone(),
+            credential_ids: leftover,
+        });
+    }
+    Ok(proposed)
+}
+
+fn restore_imported_routing_cards_on(
+    conn: &rusqlite::Connection,
+    preimport: &[RoutingCard],
+    imported: &[RoutingCard],
+) -> anyhow::Result<()> {
+    let post_import = crate::db::routing_cards::load_on(conn)?;
+    let proposed = proposed_imported_routing_cards(preimport.to_vec(), imported, &post_import)?;
+    crate::db::routing_cards::restore_on(conn, &proposed)
+}
+
 fn export_payload(state: &CoreState) -> Result<(PortablePayload, u64, u64), TransferError> {
     let _settings_update = state.settings_update.lock();
     let revision = state.settings_revision();
     let (destinations, credentials, skipped) = export_new_model(state)?;
+    let routing_cards = routing_cards_for_export(
+        {
+            let db = state.db.lock();
+            crate::db::routing_cards::load_on(&db.conn).map_err(|_| TransferError::Internal)?
+        },
+        &destinations,
+        &credentials,
+    );
     if credentials
         .iter()
         .filter(|credential| !is_observer_purpose(credential_purpose(credential)))
@@ -1060,6 +1281,7 @@ fn export_payload(state: &CoreState) -> Result<(PortablePayload, u64, u64), Tran
             quota_pools: portable_quota_pools,
             destinations,
             credentials,
+            routing_cards: Some(routing_cards),
             node: Some(PortableNodeState {
                 config: state.config(),
                 access_keys,
@@ -1216,6 +1438,22 @@ fn validate_payload(payload: PortablePayload) -> Result<ValidatedMigration, Tran
         return Err(TransferError::Invalid(
             "this backup carries destination semantics that cannot be imported as a V4/V5/V6 package"
                 .to_string(),
+        ));
+    }
+    if payload.version < V9_PAYLOAD_VERSION && payload.routing_cards.is_some() {
+        return Err(TransferError::Invalid(
+            "this backup carries routing card semantics that cannot be imported as a V4/V5/V6/V7/V8 package"
+                .to_string(),
+        ));
+    }
+    if payload.version < 10
+        && payload
+            .credentials
+            .iter()
+            .any(|credential| credential.credit_meter.is_some())
+    {
+        return Err(TransferError::Invalid(
+            "personal credit meters require a V10 backup".to_string(),
         ));
     }
     if payload.exported_at.chars().count() > 64

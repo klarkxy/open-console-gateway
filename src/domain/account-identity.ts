@@ -58,10 +58,6 @@ function inferenceCredentialForAccount(
   return row;
 }
 
-export function accountShowsDeclaredRelation(identity: Identity | null): boolean {
-  return !!identity && identity.declared_relations.length > 0;
-}
-
 /** Extra-credential count badge data; null when a single Key adds no chrome. */
 export function accountCredentialCount(identity: Identity | null): number | null {
   if (!identity || identity.credentials.length <= 1) return null;

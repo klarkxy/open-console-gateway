@@ -676,7 +676,8 @@ fn upsert_dynamic_destination_on(
             "UPDATE destinations
              SET name = ?2, base_url = ?3, protocols_json = ?4, auth_scheme = ?5,
                  adapter = ?6, capabilities_json = ?7,
-                 model_resolution = 'public_and_upstream', enabled = 1,
+                 model_resolution = 'public_and_upstream',
+                 max_credentials = CASE WHEN ?5 = 'none' THEN 1 ELSE NULL END,
                  preset_id = ?8, origin = ?9, offering = ?10,
                  created_at = COALESCE(created_at, ?11), updated_at = ?12,
                  onboarding_draft = ?13
@@ -704,7 +705,7 @@ fn upsert_dynamic_destination_on(
                 protocols_json, auth_scheme, model_resolution, capabilities_json, plan_json,
                 max_credentials, observer_credential_id, enabled,
                 onboarding_draft, preset_id, origin, offering, created_at, updated_at
-             ) VALUES (?1, 'dynamic', ?2, ?3, ?4, NULL, ?5, ?6, ?7, 'public_and_upstream', ?8, NULL, NULL, NULL, 1,
+             ) VALUES (?1, 'dynamic', ?2, ?3, ?4, NULL, ?5, ?6, ?7, 'public_and_upstream', ?8, NULL, CASE WHEN ?7 = 'none' THEN 1 ELSE NULL END, NULL, 1,
                        ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 dest_id,
@@ -733,37 +734,10 @@ fn replace_destination_models(
     dest_id: &str,
     runtime: &DynamicProviderRuntime,
 ) -> Result<()> {
-    conn.execute(
-        "DELETE FROM destination_models WHERE destination_id = ?1",
-        [dest_id],
-    )?;
-    let mut stmt = conn.prepare(
-        "INSERT INTO destination_models (
-            destination_id, public_model, public_model_key, upstream_model,
-            protocols_json, preferred, enabled, upstream_override
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7)",
-    )?;
-    for mapping in &runtime.mappings {
-        let effective_protocol = mapping
-            .upstream_override
-            .as_ref()
-            .map(|route| route.protocol)
-            .unwrap_or(runtime.upstream_protocol);
-        stmt.execute(params![
-            dest_id,
-            mapping.public_model,
-            mapping.public_model.to_ascii_lowercase(),
-            mapping.upstream_model,
-            serde_json::to_string(&[effective_protocol])?,
-            effective_protocol.as_str(),
-            mapping
-                .upstream_override
-                .as_ref()
-                .map(serde_json::to_string)
-                .transpose()?,
-        ])?;
-    }
-    Ok(())
+    let previous = super::destination_store::load_destination_catalog(conn, dest_id)?;
+    let catalog =
+        super::destination_commands::catalog_from_definition(&previous, &runtime.definition());
+    super::destination_store::replace_destination_catalog(conn, dest_id, &catalog)
 }
 
 fn backfill_dynamic_from_leftover(conn: &Connection) -> Result<()> {

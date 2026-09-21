@@ -160,7 +160,7 @@ test("platform accounts store: a committed create reports a destination refresh 
   useControlPlaneStore().sync({ revision: 7, processGeneration: 99, pricingRevision: null });
   const calls = installDeferredFetch();
   const destinations = useDestinationsStore();
-  destinations.commitSnapshot([], [], { expectedRevision: 7, processGeneration: 99 });
+  destinations.commitSnapshot({ destinations: [], credentials: [], cards: [], expectation: { expectedRevision: 7, processGeneration: 99 } });
   const store = usePlatformAccountsStore();
 
   const pending = store.createOrUpdate({
@@ -170,12 +170,8 @@ test("platform accounts store: a committed create reports a destination refresh 
   }, null);
   await waitForCalls(calls, 1);
   calls[0]!.resolve(listBody("parent-new", 8, 99));
-  await waitForCalls(calls, 3);
+  await waitForCalls(calls, 2);
   calls[1]!.reject(new Error("destination refresh failed"));
-  calls[2]!.resolve({
-    credentials: [],
-    revision: { revision: 8, processGeneration: 99 },
-  });
 
   assert.equal(await pending, "saved_refresh_failed");
   assert.equal(store.parents[0]?.id, "parent-new", "the committed platform view is retained");

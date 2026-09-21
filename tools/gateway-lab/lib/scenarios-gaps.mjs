@@ -299,36 +299,49 @@ export async function runAmbiguityAndAlias(runtime, collector) {
 export async function beginCooldownRecovery(runtime) {
   const { lab, api } = runtime;
   const routeSlots = routeSlotsOf(runtime.started);
-  lab.script("alpha", [{ kind: "http", status: 429, body: { error: { message: "Resets in 5 minutes", type: "rate_limit_error" } } }]);
+  await api.setRoutingMode("strict-priority", false);
+  await api.reorder(routeSlots.map((slot) => slot.accountId));
+  await api.resetCooldowns(routeSlots.map((slot) => slot.accountId));
+  const startedAt = Date.now();
+  lab.script("alpha", [{ kind: "http", status: 429, headers: { "Retry-After": "3" }, body: { error: { message: "temporary", type: "rate_limit_error" } } }]);
+  const firstMark = lab.snapshot().length;
   const first = await api.chatRoute();
+  assert.equal(first.status, 200);
+  assert.ok(lab.snapshot().slice(firstMark).some((hit) => hit.listener === "alpha" && hit.scriptStatus === 429), "alpha did not deliver the retry response");
+  const mark = lab.snapshot().length;
+  const second = await api.chatRoute();
+  assert.equal(second.status, 200);
+  assert.ok(!lab.snapshot().slice(mark).some((hit) => hit.listener === "alpha"), "Retry-After was not enforced before expiry");
   const rows = await api.credentials();
   const alpha = rows.find((row) => row.legacyAccountId === routeSlots[0].accountId);
-  const deadline = alpha?.cooldowns?.genericUntil || alpha?.cooldownGenericUntil || alpha?.cooldowns?.generic_until;
-  return { startedAt: Date.now(), deadline, firstStatus: first.status, routeSlots };
+  assert.ok(alpha, "alpha credential is missing");
+  assert.equal(alpha.quotaRecovery ?? null, null, "temporary 429 invented quota exhaustion");
+  const accountCooldown = alpha.cooldowns?.genericUntil ?? alpha.cooldownGenericUntil ?? alpha.cooldowns?.generic_until;
+  assert.equal(accountCooldown ?? null, null, "temporary 429 invented account cooldown");
+  return { startedAt, deadline: new Date(Date.now() + 3000).toISOString(), firstStatus: first.status, routeSlots };
 }
 
 export async function finishCooldownRecovery(runtime, collector, token) {
   const { lab, api } = runtime;
   try {
-    const second = await api.chatRoute();
-    assert.equal(second.status, 200);
-    const until = token.deadline ? Date.parse(token.deadline) : token.startedAt + 5 * 60 * 1000;
+    const until = Date.parse(token.deadline);
     const waitMs = Math.max(0, until - Date.now() + 1000);
-    if (waitMs > 0 && waitMs < 6 * 60 * 1000) await new Promise((resolve) => setTimeout(resolve, waitMs));
+    assert.ok(waitMs <= 5000, "unexpected retry wait");
+    if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
     lab.script("alpha", []);
     const afterMark = lab.snapshot().length;
     const after = await api.chatRoute();
     const recovered = lab.snapshot().slice(afterMark);
     assert.equal(after.status, 200);
     assert.ok(recovered.some((hit) => hit.listener === "alpha"), `selection did not resume to alpha: ${JSON.stringify(recovered.map(summarizeHit))}`);
-    gw(collector, "cooldown recovery after expiry", {
+    gw(collector, "endpoint Retry-After recovery after expiry", {
       scenarioId: "gw.fail.cooldown-recovery",
       deadline: token.deadline,
       waitedMs: Date.now() - token.startedAt,
       lastListener: recovered.at(-1)?.listener,
     });
   } catch (error) {
-    collector.fail("cooldown recovery after expiry", error, { scenarioId: "gw.fail.cooldown-recovery" });
+    collector.fail("endpoint Retry-After recovery after expiry", error, { scenarioId: "gw.fail.cooldown-recovery" });
   }
 }
 
@@ -758,9 +771,14 @@ export async function runAuthIsolation(runtime, collector) {
     const mark = lab.snapshot().length;
     const blocked = await request(gatewayBase, "/v1/chat/completions", "POST", input("chat", chat.publicModel, false), inferenceHeaders("chat", gatewayKey));
     const other = await request(gatewayBase, "/v1/responses", "POST", input("responses", responses.publicModel, false), inferenceHeaders("responses", gatewayKey));
-    assert.equal(blocked.status, 429, await blocked.text());
+    // An unclassified upstream 429 excludes this candidate for the request;
+    // exhausting its route returns 503 without inventing a quota reset.
+    assert.equal(blocked.status, 503, await blocked.text());
     assert.equal(other.status, 200, await other.text());
     const hits = lab.snapshot().slice(mark);
+    assert.equal(hits.length, 2, "each isolated endpoint must receive exactly one request");
+    assert.equal(hits.filter((hit) => hit.slot === "chat").length, 1);
+    assert.equal(hits.filter((hit) => hit.slot === "responses").length, 1);
     const chatHit = hits.find((hit) => hit.slot === "chat");
     const responsesHit = hits.find((hit) => hit.slot === "responses");
     assert.ok(chatHit, "chat request did not reach the chat upstream");

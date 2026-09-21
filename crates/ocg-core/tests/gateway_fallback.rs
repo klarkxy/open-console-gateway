@@ -2,7 +2,7 @@ use axum::Router;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use chrono::{Duration, SecondsFormat, Utc};
+use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use ocg_core::crypto::{KeyCipher, StaticKeyCipher};
 use ocg_core::db::{Database, ForwardLogQueryOptions};
 use ocg_core::gateway;
@@ -1544,6 +1544,18 @@ async fn falls_back_past_five_limited_accounts_to_sixth_success() {
         .map(|(key, replies)| (*key, replies.as_slice()))
         .collect::<Vec<_>>();
     let h = FallbackHarness::go(&entries, &keys).await;
+    let before = v4_list_credentials(h.port).await;
+    let before_pools: HashMap<String, serde_json::Value> = before
+        .iter()
+        .map(|row| {
+            (
+                row["id"].as_str().expect("credential id").to_string(),
+                row.get("quotaPoolId")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+            )
+        })
+        .collect();
 
     let (status, _) = h.chat().await;
     assert_eq!(status, 200);
@@ -1559,19 +1571,58 @@ async fn falls_back_past_five_limited_accounts_to_sixth_success() {
             .all(|c| c.accept_encoding.as_deref() == Some("identity"))
     );
 
-    let db = h.state.db.lock();
-    let accounts = db.list_accounts().unwrap();
-    assert_eq!(
-        accounts
-            .iter()
-            .filter(|a| a.cooldown_until.is_some())
-            .count(),
-        5
-    );
-    let logs = db.list_forward_logs(20).unwrap();
+    let logs = h.state.db.lock().list_forward_logs(20).unwrap();
     assert!(
         logs.iter()
             .any(|l| l.account_name == "acct-6" && l.status == "success")
+    );
+
+    let credentials = v4_list_credentials(h.port).await;
+    for credential in &credentials {
+        assert_ordinary_cooldowns_none(credential);
+        let id = credential["id"].as_str().expect("credential id");
+        let pool = credential
+            .get("quotaPoolId")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        assert_eq!(
+            pool, before_pools[id],
+            "quotaRecovery must not change existing pool membership on {id}: {credential}"
+        );
+    }
+    let mut waiting_ids = Vec::new();
+    for idx in 1..=6 {
+        let account_id = format!("acct-{idx}");
+        let credential = v4_credential(&credentials, &account_id);
+        if idx == 6 {
+            let recovery = credential.get("quotaRecovery");
+            assert!(
+                recovery.is_none() || recovery.is_some_and(serde_json::Value::is_null),
+                "sixth key must remain healthy: {credential}"
+            );
+            continue;
+        }
+        let recovery = waiting_quota_recovery(credential);
+        assert_eq!(recovery["reason"], "quota_exhausted", "{recovery}");
+        assert_eq!(recovery["window"], "week", "{recovery}");
+        assert_eq!(recovery["failureCount"], 1, "{recovery}");
+        assert_eq!(
+            rfc3339_millis(&recovery["nextRetryAt"]),
+            rfc3339_millis(&recovery["resetsAt"]),
+            "{recovery}"
+        );
+        waiting_ids.push(
+            credential["id"]
+                .as_str()
+                .expect("credential id")
+                .to_string(),
+        );
+    }
+    let unique: HashSet<_> = waiting_ids.iter().cloned().collect();
+    assert_eq!(
+        unique.len(),
+        5,
+        "each exhausted Key keeps its own waiting quotaRecovery: {waiting_ids:?}"
     );
 }
 
@@ -1922,16 +1973,39 @@ async fn all_limited_accounts_return_429_with_soonest_reset() {
     let (status, body) = h.chat().await;
     assert_eq!(status, 429);
     assert!(body.contains("resets_at"));
+    assert_eq!(h.call_keys(), ["key-1", "key-2"]);
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let soonest_reset = rfc3339_millis(&error["error"]["resets_at"]);
+
+    let credentials = v4_list_credentials(h.port).await;
+    let mut waiting_retries = Vec::new();
+    for account_id in ["acct-1", "acct-2"] {
+        let credential = v4_credential(&credentials, account_id);
+        assert_ordinary_cooldowns_none(credential);
+        let recovery = waiting_quota_recovery(credential);
+        assert_eq!(recovery["reason"], "quota_exhausted", "{recovery}");
+        assert_eq!(recovery["window"], "week", "{recovery}");
+        assert_eq!(
+            rfc3339_millis(&recovery["nextRetryAt"]),
+            rfc3339_millis(&recovery["resetsAt"]),
+            "{recovery}"
+        );
+        waiting_retries.push(rfc3339_millis(&recovery["nextRetryAt"]));
+    }
     assert_eq!(
-        h.state
-            .db
-            .lock()
-            .list_accounts()
-            .unwrap()
-            .iter()
-            .filter(|a| a.cooldown_until.is_some())
-            .count(),
-        2
+        soonest_reset,
+        *waiting_retries.iter().min().expect("waiting deadlines"),
+        "429 must advertise the earliest persisted nextRetryAt"
+    );
+
+    let upstream_hits = h.call_count();
+    let (status, retry_body) = h.chat().await;
+    assert_eq!(status, 429);
+    assert!(retry_body.contains("resets_at"));
+    assert_eq!(
+        h.call_count(),
+        upstream_hits,
+        "waiting quotaRecovery must not send another upstream request"
     );
 }
 
@@ -2443,19 +2517,79 @@ async fn goat_plan_window_429_persists_the_exact_weekly_deadline() {
         .await;
     assert_ne!(status, StatusCode::OK, "{response}");
 
-    let goat = h.account(&goat_id);
-    assert!(goat.cooldown_generic_until.is_none());
-    assert!(goat.cooldown_5h_until.is_none());
+    let credentials = v4_list_credentials(h.port).await;
+    let goat = v4_credential(&credentials, &goat_id);
+    assert_ordinary_cooldowns_none(goat);
+    let recovery = waiting_quota_recovery(goat);
+    assert_eq!(recovery["reason"], "quota_exhausted", "{recovery}");
+    assert_eq!(recovery["window"], "week", "{recovery}");
     assert_eq!(
-        goat.cooldown_week_until
-            .map(|deadline| deadline.timestamp_millis()),
-        Some(expected_reset.timestamp_millis())
+        rfc3339_millis(&recovery["resetsAt"]),
+        expected_reset.timestamp_millis(),
+        "{recovery}"
     );
     assert_eq!(
-        goat.cooldown_until
-            .map(|deadline| deadline.timestamp_millis()),
-        Some(expected_reset.timestamp_millis())
+        rfc3339_millis(&recovery["nextRetryAt"]),
+        expected_reset.timestamp_millis(),
+        "{recovery}"
     );
+}
+
+async fn v4_list_credentials(port: u16) -> Vec<serde_json::Value> {
+    let (status, body) = v4_get(port, "/credentials").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    body["credentials"]
+        .as_array()
+        .cloned()
+        .unwrap_or_else(|| panic!("credentials list: {body}"))
+}
+
+fn v4_credential<'a>(
+    credentials: &'a [serde_json::Value],
+    legacy_account_id: &str,
+) -> &'a serde_json::Value {
+    credentials
+        .iter()
+        .find(|row| row["legacyAccountId"] == legacy_account_id)
+        .unwrap_or_else(|| panic!("missing credential {legacy_account_id}"))
+}
+
+fn assert_ordinary_cooldowns_none(credential: &serde_json::Value) {
+    let cooldowns = &credential["cooldowns"];
+    for field in [
+        "genericUntil",
+        "fiveHourUntil",
+        "weekUntil",
+        "monthUntil",
+        "freeUntil",
+    ] {
+        assert!(
+            cooldowns[field].is_null(),
+            "{field} must stay empty on {}: {cooldowns}",
+            credential["legacyAccountId"]
+        );
+    }
+}
+
+fn waiting_quota_recovery(credential: &serde_json::Value) -> &serde_json::Value {
+    let recovery = &credential["quotaRecovery"];
+    assert!(
+        recovery.is_object(),
+        "expected waiting quotaRecovery on {}: {credential}",
+        credential["legacyAccountId"]
+    );
+    assert_eq!(recovery["status"], "waiting", "{recovery}");
+    recovery
+}
+
+fn rfc3339_millis(value: &serde_json::Value) -> i64 {
+    DateTime::parse_from_rfc3339(
+        value
+            .as_str()
+            .unwrap_or_else(|| panic!("rfc3339 timestamp: {value}")),
+    )
+    .unwrap_or_else(|err| panic!("parse {value}: {err}"))
+    .timestamp_millis()
 }
 
 async fn v3_post(
@@ -2563,8 +2697,8 @@ async fn dynamic_429_uses_generic_cooldown_skips_go_windows_and_falls_through() 
     );
     let first = h.account(&first_id);
     let second = h.account(&second_id);
-    assert!(first.cooldown_until.is_some());
-    assert!(first.cooldown_generic_until.is_some());
+    assert!(first.cooldown_until.is_none());
+    assert!(first.cooldown_generic_until.is_none());
     assert!(first.cooldown_5h_until.is_none());
     assert!(first.cooldown_week_until.is_none());
     assert!(first.cooldown_month_until.is_none());

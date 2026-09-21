@@ -900,7 +900,13 @@ fn v51_credentials_store_secrets_without_exposing_them_on_projection() {
 #[test]
 fn v53_leftover_custom_tables_are_gone_and_projection_stays_secret_free() {
     let (dir, db) = open_db("v53-no-leftover-custom");
-    assert_eq!(crate::db::CURRENT_SCHEMA_VERSION, 58);
+    let schema_version: i32 = db
+        .conn
+        .query_row("SELECT MAX(version) FROM schema_version", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(schema_version, crate::db::CURRENT_SCHEMA_VERSION);
     let leftover: i64 = db
         .conn
         .query_row(
@@ -1170,7 +1176,7 @@ fn read_shadow_if_matches_returns_none_when_stale_or_empty() {
 }
 
 #[test]
-fn v4_read_serves_populated_shadow_then_live_on_empty() {
+fn v4_read_serves_persisted_configuration_including_empty() {
     let (dir, db) = open_db("4d3b-v4");
     create_custom(
         &db,
@@ -1218,16 +1224,115 @@ fn v4_read_serves_populated_shadow_then_live_on_empty() {
              DELETE FROM destinations;",
         )
         .unwrap();
-    let after_empty = unwrap_projection(&db);
     let empty = load_persisted(&db).expect("emptied shadow should still load");
     assert!(!shadow_is_populated(&empty));
     assert_eq!(
         read_v4_projection(&db)
             .expect("v4 read should succeed")
-            .expect("empty shadow falls back to live"),
-        after_empty
+            .expect("empty configuration is valid"),
+        empty
     );
+    assert!(load_runtime(&db).unwrap().destinations.is_empty());
 
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn runtime_configuration_load_error_never_reconstructs_legacy_facts() {
+    let (dir, db) = open_db("runtime-authority");
+    db.conn
+        .execute_batch("DROP TABLE credential_grants;")
+        .unwrap();
+    assert!(read_v4_projection(&db).is_err());
+    assert!(load_runtime(&db).is_err());
+    assert!(routing_projection(&db).is_err());
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn custom_protocol_control_roundtrip_uses_destination_authority() {
+    use crate::provider_contracts::ProtocolOverrideState;
+    let (dir, db) = open_db("custom-effective-controls");
+    create_custom(
+        &db,
+        "effective-key",
+        "https://example.com/v1",
+        UpstreamProtocolKind::ChatCompletions,
+        &[custom_capabilities(
+            "public",
+            "upstream",
+            UpstreamProtocolKind::ChatCompletions,
+        )],
+    );
+    let scope = ContractScope::custom_endpoint("effective-key");
+    let changes = |state| {
+        vec![(
+            "public".to_string(),
+            UpstreamProtocolKind::ChatCompletions,
+            state,
+        )]
+    };
+    db.set_model_protocol_overrides(
+        &scope,
+        &changes(ProtocolOverrideState::ForceOff),
+        Utc::now(),
+    )
+    .unwrap();
+    let id = destination_id_for_custom_account("effective-key");
+    assert!(!dest(&load_runtime(&db).unwrap(), &id).catalog[0].enabled);
+    db.create_account(&account("unrelated-key", OPENCODE_PROVIDER_ID))
+        .unwrap();
+    assert!(!dest(&load_runtime(&db).unwrap(), &id).catalog[0].enabled);
+    db.set_model_protocol_overrides(&scope, &changes(ProtocolOverrideState::ForceOn), Utc::now())
+        .unwrap();
+    let restored = load_runtime(&db).unwrap();
+    let model = &dest(&restored, &id).catalog[0];
+    assert!(model.enabled);
+    assert_eq!(model.protocols, vec![UpstreamProtocolKind::ChatCompletions]);
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn v59_upgrade_preserves_connection_grants_and_disabled_models() {
+    let (dir, db) = open_db("v59-grant-identity");
+    create_custom(
+        &db,
+        "upgrade-key",
+        "https://example.com/v1",
+        UpstreamProtocolKind::ChatCompletions,
+        &[custom_capabilities(
+            "public",
+            "upstream",
+            UpstreamProtocolKind::ChatCompletions,
+        )],
+    );
+    let id = destination_id_for_custom_account("upgrade-key");
+    db.conn
+        .execute(
+            "UPDATE destination_models SET enabled = 0 WHERE destination_id = ?1",
+            [&id],
+        )
+        .unwrap();
+    let previous = load_runtime(&db).unwrap();
+    let connection: String = db.conn.query_row("SELECT authorization_connection_id FROM credentials WHERE legacy_account_id = 'upgrade-key'", [], |row| row.get(0)).unwrap();
+    db.conn.execute_batch("ALTER TABLE credentials DROP COLUMN authorization_connection_id; DELETE FROM schema_version; INSERT INTO schema_version VALUES(58);").unwrap();
+    drop(db);
+    let db = Database::open(dir.clone()).unwrap();
+    let after = load_runtime(&db).unwrap();
+    assert_eq!(
+        cred(&after, "upgrade-key").grants,
+        cred(&previous, "upgrade-key").grants
+    );
+    assert!(!dest(&after, &id).catalog[0].enabled);
+    let restored: String = db.conn.query_row("SELECT authorization_connection_id FROM credentials WHERE legacy_account_id = 'upgrade-key'", [], |row| row.get(0)).unwrap();
+    assert_eq!(restored, connection);
+    assert_eq!(
+        db.schema_version().unwrap(),
+        crate::db::CURRENT_SCHEMA_VERSION
+    );
     drop(db);
     fs::remove_dir_all(dir).unwrap();
 }

@@ -485,13 +485,18 @@ pub(super) async fn refresh_contract_catalog(
         check_expectation(&state, &expectation)?;
         {
             let db = state.db.lock();
-            db.set_contract_catalog(
+            let previous = db
+                .load_persisted_scope(&scope)
+                .map_err(V3ApiError::internal)?
+                .map(|row| row.catalog_models)
+                .unwrap_or_default();
+            db.refresh_contract_catalog_with_default_off(
                 &scope,
+                &previous,
                 &models,
-                Some(now),
+                now,
                 provider_contracts::CATALOG_SOURCE_OLLAMA_CLOUD_MODELS,
                 &source_url,
-                now,
             )
             .map_err(V3ApiError::internal)?;
             state
@@ -573,8 +578,20 @@ pub(super) async fn refresh_contract_catalog(
         }
         {
             let db = state.db.lock();
-            db.set_contract_catalog(&scope, &models, Some(now), source, &source_url, now)
-                .map_err(V3ApiError::internal)?;
+            let previous = db
+                .load_persisted_scope(&scope)
+                .map_err(V3ApiError::internal)?
+                .map(|row| row.catalog_models)
+                .unwrap_or_default();
+            db.refresh_contract_catalog_with_default_off(
+                &scope,
+                &previous,
+                &models,
+                now,
+                source,
+                &source_url,
+            )
+            .map_err(V3ApiError::internal)?;
             state
                 .reload_provider_contracts_locked(&db)
                 .map_err(V3ApiError::internal)?;

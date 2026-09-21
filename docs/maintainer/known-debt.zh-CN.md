@@ -13,10 +13,11 @@
 - 浏览器会话使用 `browser-profiles/<account_id>`；旧 `profiles/<account_id>` Profile 不会被原生浏览器复用，受影响的用户需要重新登录。旧路径仅保留用于重置/删除时的安全清理。
 - Responses 端点是无状态。`previous_response_id`、`conversation`、 `store: true`、`background: true` 返回 `400`。详见 `protocol.rs` 和[限制](../user/limits.zh-CN.md)。
 - Gemini 是客户端兼容格式。转发、`400` 与 `501` 行为见[限制](../user/limits.zh-CN.md)和[协议转换](../user/protocol-conversion.zh-CN.md)。
-- Command Code GOAT 账号用量来自官方 CLI 使用、但公开 Provider API 未文档化的第一方 `/alpha/billing/credits` 端点。其响应稳定性没有公开契约保证，因此手工刷新会校验精确 GOAT 上限，并在 schema 或套餐漂移时 fail closed。公开模型目录仍不能验证已保存 Key，因此鉴权失败只能从真实推理 401/403 得知。Custom API 仍是独立的已上线路由，遵循受信管理员边界（`custom.rs` + `custom_http.rs`）。
+- Command Code GOAT 账号用量来自官方 CLI 使用、但公开 Provider API 未文档化的第一方 `/alpha/billing/credits` 端点。其响应稳定性没有公开契约保证，因此手工刷新会校验精确 GOAT 上限，并在 schema 或套餐漂移时 fail closed。公开模型目录仍不能验证已保存 Key，因此鉴权失败只能从真实推理 401/403 得知。Custom API 使用共享 HTTP 适配器，并保留受信管理员的 URL 边界。
 - 按模型/按协议覆盖仍走挂在 `/dashboard/api/v4` 下的旧 Account 处理器。Custom 账号级按协议探测没有独立端点；该探测路径返回 410。Custom 验证与模型发现是现行路径。
 - V4 操作摘要密钥（`dashboard_operation_digest_key`）与凭据 Key 存放在同一个 SQLite 文件中（AES-256-GCM `v2:` 密文）。
-- 没有公开的 Destination 写入路由。账号、平台、Custom 变更仍是 `/accounts*` 适配器，底层写 destinations / credentials。`legacy_account_id` 仍是这些路由的桥接 id。物理存储与 destination/credential 投影已切换；V3 Account overlay 与部分运行时消费方仍走这座桥。
+- V4 目的地 PATCH/DELETE 使用共享 HTTP 配置事务。管理操作的 Account DTO 和旧 ID 留作管理、旧备份导入的兼容边界；正常请求规划直接读取目的地与执行凭据。
+
 
 ## 明确非目标
 

@@ -14,6 +14,19 @@ import type {
   UsageSyncStatus,
 } from "../domain/account-display.ts";
 import type { ModelRestriction, QuotaShare } from "../domain/account-identity.ts";
+import {
+  PLATFORM_CREDENTIAL_TAG_KEYS,
+  type PlatformCredentialTag,
+} from "../domain/platform-accounts.ts";
+import {
+  CARD_QUOTA_AVAILABILITY_KEYS,
+  QUOTA_RECOVERY_REASON_KEYS,
+  QUOTA_RECOVERY_STATUS_KEYS,
+  QUOTA_RECOVERY_WINDOW_KEYS,
+  type CardQuotaAvailability,
+  type QuotaRecoveryPresentation,
+} from "../domain/quota-recovery.ts";
+import { CPA_CARD_STATUS_KEYS, type CpaCardStatus } from "../domain/cpa-runtime.ts";
 
 /**
  * Display composition for the account domain codes: every t() mapping for
@@ -115,5 +128,37 @@ export function modelRestrictionText(restriction: ModelRestriction): string {
       return t("仅 {model}", { model: restriction.model });
     case "count":
       return t("仅 {count} 个模型", { count: restriction.count });
+  }
+}
+
+export function quotaRecoveryText(state: QuotaRecoveryPresentation): string {
+  const balance = state.reason === "insufficient_balance"
+    ? t(QUOTA_RECOVERY_REASON_KEYS.insufficient_balance)
+    : null;
+  if (state.kind === "ready" || state.kind === "probing") {
+    return [t(QUOTA_RECOVERY_STATUS_KEYS[state.kind]), balance].filter(Boolean).join(" · ");
+  }
+  const cause = balance ?? t(QUOTA_RECOVERY_STATUS_KEYS.waiting);
+  const window = state.window === "unknown" ? null : t(QUOTA_RECOVERY_WINDOW_KEYS[state.window]);
+  const time = formatCooldownRemainingText(state.wait);
+  return [cause, window, time].filter(Boolean).join(" · ");
+}
+
+export function cardQuotaAvailabilityText(kind: Exclude<CardQuotaAvailability, "available">): string {
+  return t(CARD_QUOTA_AVAILABILITY_KEYS[kind]);
+}
+
+export function cpaCardStatusText(status: CpaCardStatus): string {
+  return t(CPA_CARD_STATUS_KEYS[status]);
+}
+
+export function platformCredentialTagText(tag: PlatformCredentialTag): string {
+  switch (tag.kind) {
+    case "group":
+      return t(PLATFORM_CREDENTIAL_TAG_KEYS.group, { name: tag.name });
+    case "token":
+      return t(PLATFORM_CREDENTIAL_TAG_KEYS.token, { name: tag.name });
+    case "models":
+      return t(PLATFORM_CREDENTIAL_TAG_KEYS.models, { count: tag.count });
   }
 }

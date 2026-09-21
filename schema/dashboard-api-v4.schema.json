@@ -136,6 +136,110 @@
       ],
       "type": "string"
     },
+    "BillingModel": {
+      "enum": [
+        "quota",
+        "cash",
+        "credits"
+      ],
+      "type": "string"
+    },
+    "BillingSource": {
+      "enum": [
+        "official",
+        "local_estimate",
+        "unavailable"
+      ],
+      "type": "string"
+    },
+    "BillingStatus": {
+      "additionalProperties": false,
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "cash": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OfficialApiStatus"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "configurableCredits": {
+          "type": "boolean"
+        },
+        "credits": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CreditMeterView"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "manualCalibration": {
+          "type": "boolean"
+        },
+        "model": {
+          "$ref": "#/$defs/BillingModel"
+        },
+        "officialRefresh": {
+          "type": "boolean"
+        },
+        "presets": {
+          "items": {
+            "$ref": "#/$defs/CreditPreset"
+          },
+          "type": "array"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "source": {
+          "$ref": "#/$defs/BillingSource"
+        },
+        "unit": {
+          "type": "string"
+        },
+        "usage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderUsage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "accountId",
+        "model",
+        "source",
+        "unit",
+        "configurableCredits",
+        "manualCalibration",
+        "officialRefresh",
+        "usage",
+        "cash",
+        "credits",
+        "presets",
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
     "BindingDto": {
       "additionalProperties": false,
       "properties": {
@@ -1013,6 +1117,401 @@
       ],
       "type": "object"
     },
+    "CreditBalance": {
+      "additionalProperties": false,
+      "description": "One credit balance row as projected for provider usage. Distinct from the\nstored provider credit row.",
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "amount": {
+          "format": "double",
+          "type": "number"
+        },
+        "balanceKind": {
+          "type": "string"
+        },
+        "observedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "type": "string"
+        },
+        "unit": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "accountId",
+        "balanceKind",
+        "amount",
+        "unit",
+        "source",
+        "observedAt",
+        "updatedAt"
+      ],
+      "type": "object"
+    },
+    "CreditBalanceCorrection": {
+      "additionalProperties": false,
+      "properties": {
+        "bucketId": {
+          "type": "string"
+        },
+        "remaining": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "bucketId",
+        "remaining"
+      ],
+      "type": "object"
+    },
+    "CreditBucket": {
+      "additionalProperties": false,
+      "properties": {
+        "expiresAt": {
+          "format": "date-time",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "granted": {
+          "format": "double",
+          "type": "number"
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/CreditBucketKind"
+        },
+        "label": {
+          "type": "string"
+        },
+        "remaining": {
+          "format": "double",
+          "type": "number"
+        },
+        "startsAt": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "label",
+        "granted",
+        "remaining",
+        "startsAt",
+        "expiresAt"
+      ],
+      "type": "object"
+    },
+    "CreditBucketKind": {
+      "enum": [
+        "monthly",
+        "top_up",
+        "manual"
+      ],
+      "type": "string"
+    },
+    "CreditCalibrationRequest": {
+      "additionalProperties": false,
+      "description": "Required process-scoped mutation precondition.\n\nBoth fields travel at the top level of every mutation request. The random\nprocess generation prevents a revision captured before restart from being\naccepted by a fresh process whose in-memory counter reused the same value.",
+      "properties": {
+        "balances": {
+          "items": {
+            "$ref": "#/$defs/CreditBalanceCorrection"
+          },
+          "type": "array"
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "balances",
+        "expectedRevision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "CreditConfiguration": {
+      "additionalProperties": false,
+      "properties": {
+        "creditsPerCurrency": {
+          "format": "double",
+          "type": "number"
+        },
+        "currency": {
+          "type": "string"
+        },
+        "monthly": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MonthlyCredits"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "rates": {
+          "items": {
+            "$ref": "#/$defs/CreditRate"
+          },
+          "type": "array"
+        },
+        "sourceUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "currency",
+        "creditsPerCurrency",
+        "rates",
+        "monthly",
+        "sourceUrl"
+      ],
+      "type": "object"
+    },
+    "CreditConfigureRequest": {
+      "additionalProperties": false,
+      "description": "Required process-scoped mutation precondition.\n\nBoth fields travel at the top level of every mutation request. The random\nprocess generation prevents a revision captured before restart from being\naccepted by a fresh process whose in-memory counter reused the same value.",
+      "properties": {
+        "configuration": {
+          "$ref": "#/$defs/CreditConfiguration"
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "initialBuckets": {
+          "description": "Required for initial setup; omitted for a rate/settings edit so balances survive.",
+          "items": {
+            "$ref": "#/$defs/CreditBucket"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "configuration",
+        "expectedRevision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "CreditGrantRequest": {
+      "additionalProperties": false,
+      "description": "Required process-scoped mutation precondition.\n\nBoth fields travel at the top level of every mutation request. The random\nprocess generation prevents a revision captured before restart from being\naccepted by a fresh process whose in-memory counter reused the same value.",
+      "properties": {
+        "amount": {
+          "format": "double",
+          "type": "number"
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "expiresAt": {
+          "format": "date-time",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "label": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "label",
+        "amount",
+        "expectedRevision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "CreditMeterView": {
+      "additionalProperties": false,
+      "properties": {
+        "activeGranted": {
+          "format": "double",
+          "type": "number"
+        },
+        "buckets": {
+          "items": {
+            "$ref": "#/$defs/CreditBucket"
+          },
+          "type": "array"
+        },
+        "configuration": {
+          "$ref": "#/$defs/CreditConfiguration"
+        },
+        "credentialId": {
+          "type": "string"
+        },
+        "estimatedAt": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "lastCalibrationAt": {
+          "format": "date-time",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "meterId": {
+          "type": "string"
+        },
+        "nextResetAt": {
+          "description": "Next actual renewal; configuration.next_reset_at remains the calendar anchor.",
+          "format": "date-time",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "overdrawn": {
+          "format": "double",
+          "type": "number"
+        },
+        "pendingRequests": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "remaining": {
+          "format": "double",
+          "type": "number"
+        },
+        "spentSinceCalibration": {
+          "format": "double",
+          "type": "number"
+        },
+        "unpricedRequests": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "credentialId",
+        "meterId",
+        "configuration",
+        "buckets",
+        "remaining",
+        "activeGranted",
+        "spentSinceCalibration",
+        "overdrawn",
+        "unpricedRequests",
+        "pendingRequests",
+        "lastCalibrationAt",
+        "estimatedAt",
+        "nextResetAt"
+      ],
+      "type": "object"
+    },
+    "CreditPreset": {
+      "additionalProperties": false,
+      "properties": {
+        "configuration": {
+          "$ref": "#/$defs/CreditConfiguration"
+        },
+        "id": {
+          "type": "string"
+        },
+        "initialGrant": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "id",
+        "configuration",
+        "initialGrant"
+      ],
+      "type": "object"
+    },
+    "CreditRate": {
+      "additionalProperties": false,
+      "properties": {
+        "cacheReadPerMillion": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "cacheWritePerMillion": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "inputPerMillion": {
+          "format": "double",
+          "type": "number"
+        },
+        "model": {
+          "type": "string"
+        },
+        "outputPerMillion": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "model",
+        "inputPerMillion",
+        "outputPerMillion",
+        "cacheReadPerMillion",
+        "cacheWritePerMillion"
+      ],
+      "type": "object"
+    },
     "DeclaredRelationDto": {
       "additionalProperties": false,
       "properties": {
@@ -1103,6 +1602,17 @@
             "string",
             "null"
           ]
+        },
+        "quotaRecovery": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/QuotaRecoveryDto"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Confirmed per-Key exhaustion/recovery. Omitted or null means no confirmed exhaustion."
         },
         "routingRank": {
           "description": "Position in the persisted account order.",
@@ -1275,6 +1785,13 @@
       "additionalProperties": false,
       "description": "Complete public-to-upstream mapping written by a destination PATCH.",
       "properties": {
+        "enabled": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "publicModel": {
           "type": "string"
         },
@@ -1335,6 +1852,13 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "enabled": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
         },
         "endpointUrl": {
           "type": "string"
@@ -1975,6 +2499,39 @@
         }
       ]
     },
+    "MonthlyCredits": {
+      "additionalProperties": false,
+      "properties": {
+        "amount": {
+          "format": "double",
+          "type": "number"
+        },
+        "nextResetAt": {
+          "description": "First renewal boundary and immutable calendar anchor, including its UTC time.",
+          "format": "date-time",
+          "type": "string"
+        },
+        "renewalEndsAt": {
+          "format": "date-time",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "timezoneOffsetMinutes": {
+          "description": "Calendar boundaries use this fixed UTC offset, e.g. 480 for China.",
+          "format": "int32",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "amount",
+        "nextResetAt",
+        "timezoneOffsetMinutes",
+        "renewalEndsAt"
+      ],
+      "type": "object"
+    },
     "OfferingKind": {
       "enum": [
         "plan",
@@ -2033,6 +2590,12 @@
         "kind": {
           "$ref": "#/$defs/OfficialApiKind"
         },
+        "lifetimeSpend": {
+          "items": {
+            "$ref": "#/$defs/OfficialSpend"
+          },
+          "type": "array"
+        },
         "monthSpend": {
           "items": {
             "$ref": "#/$defs/OfficialSpend"
@@ -2074,6 +2637,7 @@
         "prices",
         "monthStartedAt",
         "monthSpend",
+        "lifetimeSpend",
         "unpricedRequests",
         "revision",
         "processGeneration"
@@ -2783,6 +3347,82 @@
       ],
       "type": "object"
     },
+    "ProviderUsage": {
+      "additionalProperties": false,
+      "description": "GET `/accounts/{id}/provider-usage` body. Distinct from stored quota rows.\n\n`pricingRevision` is present when live Go quota windows use one captured\npricing snapshot.",
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "availability": {
+          "$ref": "#/$defs/UsageAvailability"
+        },
+        "creditBalances": {
+          "items": {
+            "$ref": "#/$defs/CreditBalance"
+          },
+          "type": "array"
+        },
+        "experimental": {
+          "type": "boolean"
+        },
+        "freeCooldownUntil": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pricingRevision": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "providerId": {
+          "type": "string"
+        },
+        "quotaWindows": {
+          "items": {
+            "$ref": "#/$defs/QuotaWindow"
+          },
+          "type": "array"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "syncState": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UsageSyncState"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "accountId",
+        "providerId",
+        "availability",
+        "experimental",
+        "freeCooldownUntil",
+        "quotaWindows",
+        "creditBalances",
+        "syncState",
+        "revision",
+        "processGeneration",
+        "pricingRevision"
+      ],
+      "type": "object"
+    },
     "QuotaMetricDto": {
       "additionalProperties": false,
       "properties": {
@@ -2824,6 +3464,92 @@
       ],
       "type": "string"
     },
+    "QuotaRecoveryDto": {
+      "additionalProperties": false,
+      "description": "Optional per-Key quota recovery overlay. Status is presentation-only.",
+      "properties": {
+        "failureCount": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "nextRetryAt": {
+          "type": "string"
+        },
+        "observedAt": {
+          "type": "string"
+        },
+        "reason": {
+          "$ref": "#/$defs/QuotaRecoveryReason"
+        },
+        "resetsAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/QuotaRecoveryStatus"
+        },
+        "window": {
+          "$ref": "#/$defs/QuotaRecoveryWindow"
+        }
+      },
+      "required": [
+        "status",
+        "reason",
+        "window",
+        "observedAt",
+        "resetsAt",
+        "nextRetryAt",
+        "failureCount"
+      ],
+      "type": "object"
+    },
+    "QuotaRecoveryReason": {
+      "description": "Why the credential was confirmed exhausted.",
+      "enum": [
+        "quota_exhausted",
+        "insufficient_balance"
+      ],
+      "type": "string"
+    },
+    "QuotaRecoveryStatus": {
+      "description": "Presentation status for a confirmed quota-recovery episode.",
+      "enum": [
+        "waiting",
+        "ready",
+        "probing"
+      ],
+      "type": "string"
+    },
+    "QuotaRecoveryWindow": {
+      "description": "Window named by confirmed exhaustion evidence.",
+      "enum": [
+        "five_hours",
+        "week",
+        "month",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "QuotaRetryResult": {
+      "additionalProperties": false,
+      "description": "POST `/credentials/{id}/quota-retry` result.",
+      "properties": {
+        "credential": {
+          "$ref": "#/$defs/DestinationCredentialDto"
+        },
+        "revision": {
+          "$ref": "#/$defs/ControlRevision"
+        }
+      },
+      "required": [
+        "revision",
+        "credential"
+      ],
+      "type": "object"
+    },
     "QuotaSharing": {
       "oneOf": [
         {
@@ -2862,6 +3588,74 @@
         "egress"
       ],
       "type": "string"
+    },
+    "QuotaWindow": {
+      "additionalProperties": false,
+      "description": "One live or synthetic quota window. Distinct from `models::QuotaWindow`.",
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "calibrationOffset": {
+          "format": "double",
+          "type": "number"
+        },
+        "limitValue": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "observedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resetsAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "type": "string"
+        },
+        "startedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "unit": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "type": "string"
+        },
+        "used": {
+          "format": "double",
+          "type": "number"
+        },
+        "windowKind": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "accountId",
+        "windowKind",
+        "used",
+        "limitValue",
+        "startedAt",
+        "resetsAt",
+        "calibrationOffset",
+        "unit",
+        "source",
+        "observedAt",
+        "updatedAt"
+      ],
+      "type": "object"
     },
     "QuotaWindowDto": {
       "additionalProperties": false,
@@ -2958,6 +3752,91 @@
         "declared"
       ],
       "type": "string"
+    },
+    "RoutingCard": {
+      "additionalProperties": false,
+      "properties": {
+        "credentialIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "destinationId": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "destinationId",
+        "credentialIds"
+      ],
+      "type": "object"
+    },
+    "RoutingCardList": {
+      "additionalProperties": false,
+      "description": "One consistent, secret-free snapshot of cards and the resources they show.",
+      "properties": {
+        "cards": {
+          "items": {
+            "$ref": "#/$defs/RoutingCard"
+          },
+          "type": "array"
+        },
+        "credentials": {
+          "items": {
+            "$ref": "#/$defs/DestinationCredentialDto"
+          },
+          "type": "array"
+        },
+        "destinations": {
+          "items": {
+            "$ref": "#/$defs/DestinationDto"
+          },
+          "type": "array"
+        },
+        "revision": {
+          "$ref": "#/$defs/ControlRevision"
+        }
+      },
+      "required": [
+        "revision",
+        "cards",
+        "destinations",
+        "credentials"
+      ],
+      "type": "object"
+    },
+    "RoutingCardUpdate": {
+      "additionalProperties": false,
+      "description": "The flattened card and row sequence is the complete routing priority order.",
+      "properties": {
+        "cards": {
+          "items": {
+            "$ref": "#/$defs/RoutingCard"
+          },
+          "type": "array"
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "cards"
+      ],
+      "type": "object"
     },
     "RoutingChannel": {
       "enum": [
@@ -3092,7 +3971,10 @@
         "credential_missing",
         "auth_error",
         "cooling_down",
-        "free_channel_unavailable"
+        "free_channel_unavailable",
+        "quota_waiting",
+        "quota_due",
+        "quota_probing"
       ],
       "type": "string"
     },
@@ -3359,6 +4241,15 @@
       ],
       "type": "object"
     },
+    "UsageAvailability": {
+      "description": "Registry usage availability. Wire values stay snake_case.",
+      "enum": [
+        "available",
+        "unavailable",
+        "local_state"
+      ],
+      "type": "string"
+    },
     "UsageSourceDto": {
       "description": "Where a Plan reads usage from.",
       "enum": [
@@ -3367,6 +4258,52 @@
         "none"
       ],
       "type": "string"
+    },
+    "UsageSyncState": {
+      "additionalProperties": false,
+      "description": "Official-usage sync metadata as projected for provider usage. Distinct from\nthe stored `provider_usage_sync_state` row.",
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "failureStreak": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "lastAttemptAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lastExpeditedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lastSuccessAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nextEligibleAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "accountId",
+        "lastSuccessAt",
+        "lastAttemptAt",
+        "nextEligibleAt",
+        "failureStreak",
+        "lastExpeditedAt"
+      ],
+      "type": "object"
     },
     "V3Error": {
       "additionalProperties": false,
@@ -3581,7 +4518,31 @@
       "$ref": "#/$defs/DestinationCredentialDto"
     },
     {
+      "$ref": "#/$defs/QuotaRecoveryDto"
+    },
+    {
+      "$ref": "#/$defs/QuotaRecoveryStatus"
+    },
+    {
+      "$ref": "#/$defs/QuotaRecoveryReason"
+    },
+    {
+      "$ref": "#/$defs/QuotaRecoveryWindow"
+    },
+    {
+      "$ref": "#/$defs/QuotaRetryResult"
+    },
+    {
       "$ref": "#/$defs/CredentialList"
+    },
+    {
+      "$ref": "#/$defs/RoutingCard"
+    },
+    {
+      "$ref": "#/$defs/RoutingCardList"
+    },
+    {
+      "$ref": "#/$defs/RoutingCardUpdate"
     },
     {
       "$ref": "#/$defs/CapabilitiesDto"
@@ -3615,6 +4576,48 @@
     },
     {
       "$ref": "#/$defs/OfficialApiPrices"
+    },
+    {
+      "$ref": "#/$defs/BillingModel"
+    },
+    {
+      "$ref": "#/$defs/BillingSource"
+    },
+    {
+      "$ref": "#/$defs/BillingStatus"
+    },
+    {
+      "$ref": "#/$defs/CreditRate"
+    },
+    {
+      "$ref": "#/$defs/MonthlyCredits"
+    },
+    {
+      "$ref": "#/$defs/CreditConfiguration"
+    },
+    {
+      "$ref": "#/$defs/CreditBucketKind"
+    },
+    {
+      "$ref": "#/$defs/CreditBucket"
+    },
+    {
+      "$ref": "#/$defs/CreditPreset"
+    },
+    {
+      "$ref": "#/$defs/CreditMeterView"
+    },
+    {
+      "$ref": "#/$defs/CreditConfigureRequest"
+    },
+    {
+      "$ref": "#/$defs/CreditBalanceCorrection"
+    },
+    {
+      "$ref": "#/$defs/CreditCalibrationRequest"
+    },
+    {
+      "$ref": "#/$defs/CreditGrantRequest"
     },
     {
       "$ref": "#/$defs/RoutingMode"

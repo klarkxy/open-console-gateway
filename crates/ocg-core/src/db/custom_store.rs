@@ -278,6 +278,10 @@ fn union_destination_models_keep_existing(
     existing: Vec<AccountModelCapabilityInput>,
     incoming: &[AccountModelCapabilityInput],
 ) -> Vec<AccountModelCapabilityInput> {
+    let existing_names: HashSet<_> = existing
+        .iter()
+        .map(|row| row.public_model.to_ascii_lowercase())
+        .collect();
     let mut merged = existing;
     for capability in incoming {
         if merged.iter().any(|row| {
@@ -287,10 +291,7 @@ fn union_destination_models_keep_existing(
         }) {
             continue;
         }
-        if merged.iter().any(|row| {
-            row.public_model
-                .eq_ignore_ascii_case(&capability.public_model)
-        }) {
+        if existing_names.contains(&capability.public_model.to_ascii_lowercase()) {
             continue;
         }
         merged.push(capability.clone());
@@ -363,7 +364,31 @@ pub(crate) fn persist_custom_capabilities_on(
     if platform_parent_id(conn, account_id)?.is_some() {
         persist_linked_custom_capabilities(conn, account_id, &dest_id, capabilities)?;
     } else {
-        replace_destination_models(conn, &dest_id, capabilities)?;
+        // A credential edits its scope; sibling credentials still own their
+        // references to the shared destination catalog.
+        let count = custom_connection_credential_count_on(conn, account_id)?;
+        if count > 1 {
+            let mut merged = load_destination_model_inputs(conn, &dest_id, true)?;
+            for incoming in capabilities {
+                if let Some(existing) = merged.iter().find(|model| {
+                    model
+                        .public_model
+                        .eq_ignore_ascii_case(&incoming.public_model)
+                }) {
+                    anyhow::ensure!(
+                        existing.upstream_model == incoming.upstream_model
+                            && existing.protocol == incoming.protocol,
+                        "shared destination model `{}` has conflicting configuration",
+                        incoming.public_model
+                    );
+                } else {
+                    merged.push(incoming.clone());
+                }
+            }
+            replace_destination_models(conn, &dest_id, &merged)?;
+        } else {
+            replace_destination_models(conn, &dest_id, capabilities)?;
+        }
         persist_credential_model_scope_on(
             conn,
             account_id,
@@ -373,6 +398,34 @@ pub(crate) fn persist_custom_capabilities_on(
         )?;
     }
     Ok(())
+}
+
+// Platform onboarding declares the site's protocol set for each new model.
+// replace_destination_models retains controls already saved on surviving rows.
+fn platform_capabilities(
+    conn: &Connection,
+    destination_id: &str,
+    capabilities: &[AccountModelCapabilityInput],
+) -> Result<Vec<AccountModelCapabilityInput>> {
+    let raw: String = conn.query_row(
+        "SELECT protocols_json FROM destinations WHERE id = ?1",
+        [destination_id],
+        |row| row.get(0),
+    )?;
+    let protocols: Vec<UpstreamProtocolKind> = serde_json::from_str(&raw)?;
+    let mut seen = HashSet::new();
+    let mut declared = Vec::new();
+    for model in capabilities {
+        for protocol in &protocols {
+            if seen.insert((model.public_model.to_ascii_lowercase(), *protocol)) {
+                declared.push(AccountModelCapabilityInput {
+                    protocol: *protocol,
+                    ..model.clone()
+                });
+            }
+        }
+    }
+    Ok(declared)
 }
 
 fn persist_linked_custom_capabilities(
@@ -387,16 +440,17 @@ fn persist_linked_custom_capabilities(
         replace_destination_models(conn, &owned_id, capabilities)?;
     }
     let next_scope = ModelScope::Only { models: discovered };
+    let declared = platform_capabilities(conn, parent_dest_id, capabilities)?;
     let mut catalog = union_destination_models_keep_existing(
         load_destination_model_inputs(conn, parent_dest_id, true)?,
-        capabilities,
+        &declared,
     );
     if let Some(referenced) =
         referenced_catalog_models(conn, parent_dest_id, account_id, &next_scope)?
     {
         catalog.retain(|row| referenced.contains(&normalize_model_name(&row.public_model)));
     }
-    replace_destination_models(conn, parent_dest_id, &catalog)?;
+    replace_destination_models_with_controls(conn, parent_dest_id, &catalog, true)?;
     persist_credential_model_scope_on(conn, account_id, &next_scope)?;
     Ok(())
 }
@@ -431,10 +485,13 @@ pub(crate) fn list_capabilities_on(
         return Ok(Vec::new());
     };
     let mut stmt = conn.prepare(
-        "SELECT public_model, upstream_model, protocols_json
-         FROM destination_models
-         WHERE destination_id = ?1
-         ORDER BY rowid ASC",
+        "SELECT m.public_model, m.upstream_model,
+             CASE WHEN m.protocols_json != '[]' THEN m.protocols_json
+                  WHEN m.preferred IS NOT NULL THEN json_array(m.preferred)
+                  ELSE d.protocols_json END, m.upstream_override
+         FROM destination_models m JOIN destinations d ON d.id = m.destination_id
+         WHERE m.destination_id = ?1
+         ORDER BY m.rowid ASC",
     )?;
     let rows = stmt
         .query_map([&dest_id], |row| {
@@ -442,13 +499,14 @@ pub(crate) fn list_capabilities_on(
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     drop(stmt);
     let mut capabilities = Vec::new();
-    for (public_model, upstream_model, protocols_json) in rows {
-        let protocols: Vec<UpstreamProtocolKind> = match serde_json::from_str(&protocols_json) {
+    for (public_model, upstream_model, protocols_json, upstream_override) in rows {
+        let mut protocols: Vec<UpstreamProtocolKind> = match serde_json::from_str(&protocols_json) {
             Ok(value) => value,
             Err(error) if skip_unknown_protocols => {
                 let _ = error;
@@ -460,6 +518,11 @@ pub(crate) fn list_capabilities_on(
                 ));
             }
         };
+        if let Some(raw) = upstream_override {
+            let route: ocg_domain::dynamic::DynamicModelUpstreamOverride =
+                serde_json::from_str(&raw)?;
+            protocols = vec![route.protocol];
+        }
         for protocol in protocols {
             capabilities.push(AccountModelCapability {
                 account_id: account_id.to_string(),
@@ -718,6 +781,7 @@ fn destination_id_for_account_custom_facts(
         .map(|(destination_id, _, _)| destination_id))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn upsert_custom_destination(
     conn: &Connection,
     account_id: &str,
@@ -750,7 +814,7 @@ fn upsert_custom_destination(
             "UPDATE destinations
              SET name = ?2, base_url = ?3, protocols_json = ?4, auth_scheme = ?5,
                  adapter = ?6, capabilities_json = ?7,
-                 model_resolution = 'public_only', max_credentials = NULL, enabled = ?8
+                 model_resolution = 'public_only', max_credentials = NULL
              WHERE id = ?1",
             params![
                 dest_id,
@@ -760,7 +824,6 @@ fn upsert_custom_destination(
                 destination.auth_scheme.as_str(),
                 destination.adapter.as_str(),
                 serde_json::to_string(&destination.capabilities)?,
-                i64::from(destination.enabled),
             ],
         )?;
     } else {
@@ -798,6 +861,16 @@ fn replace_destination_models(
     destination_id: &str,
     capabilities: &[AccountModelCapabilityInput],
 ) -> Result<()> {
+    replace_destination_models_with_controls(conn, destination_id, capabilities, false)
+}
+
+fn replace_destination_models_with_controls(
+    conn: &Connection,
+    destination_id: &str,
+    capabilities: &[AccountModelCapabilityInput],
+    preserve_controls: bool,
+) -> Result<()> {
+    let previous = super::destination_store::load_destination_catalog(conn, destination_id)?;
     let mut seen = HashSet::new();
     let mut models: Vec<CatalogModel> = Vec::new();
     for capability in capabilities {
@@ -816,6 +889,10 @@ fn replace_destination_models(
             .iter_mut()
             .find(|model| model.public_model.eq_ignore_ascii_case(&public_model))
         {
+            anyhow::ensure!(
+                existing.upstream_model == upstream_model,
+                "model `{public_model}` has conflicting upstream identities"
+            );
             if !existing.protocols.contains(&capability.protocol) {
                 existing.protocols.push(capability.protocol);
             }
@@ -834,7 +911,24 @@ fn replace_destination_models(
         "DELETE FROM destination_models WHERE destination_id = ?1",
         [destination_id],
     )?;
-    for model in models {
+    for mut model in models {
+        if let Some(saved) = previous
+            .iter()
+            .find(|saved| saved.public_model.eq_ignore_ascii_case(&model.public_model))
+        {
+            model.enabled = saved.enabled;
+            if saved.upstream_model == model.upstream_model {
+                model.upstream_override = saved.upstream_override.clone();
+                if preserve_controls
+                    || saved
+                        .preferred
+                        .is_some_and(|preferred| model.protocols.contains(&preferred))
+                {
+                    model.preferred = saved.preferred;
+                    model.protocols = saved.protocols.clone();
+                }
+            }
+        }
         conn.execute(
             "INSERT INTO destination_models (
                 destination_id, public_model, public_model_key, upstream_model,
@@ -875,12 +969,13 @@ pub(crate) fn merge_custom_models_onto_platform_parent(
     if custom_models.is_empty() {
         return Ok(());
     }
+    let custom_models = platform_capabilities(conn, &parent_id, &custom_models)?;
     let merged = union_destination_models_keep_existing(
         load_destination_model_inputs(conn, &parent_id, true)?,
         &custom_models,
     );
     if destination_exists(conn, &parent_id)? {
-        replace_destination_models(conn, &parent_id, &merged)?;
+        replace_destination_models_with_controls(conn, &parent_id, &merged, true)?;
     }
     Ok(())
 }
@@ -1102,10 +1197,6 @@ pub(crate) fn upsert_imported_custom_destination_on(
         destination_id_for_custom_account(legacy_id) == destination_id,
         "Custom destination `{destination_id}` has an incompatible stable identity"
     );
-    anyhow::ensure!(
-        !matches!(auth_scheme, AuthScheme::None),
-        "legacy Custom HTTP connections require keyed authentication"
-    );
     let endpoint_url = validate_custom_endpoint_url(endpoint_url)?;
     let definition = ocg_domain::dynamic::DynamicProviderDefinition {
         preset_id: None,
@@ -1116,7 +1207,7 @@ pub(crate) fn upsert_imported_custom_destination_on(
         auth_kind: match auth_scheme {
             AuthScheme::Bearer => ocg_domain::dynamic::DynamicAuthKind::Bearer,
             AuthScheme::XApiKey => ocg_domain::dynamic::DynamicAuthKind::XApiKey,
-            AuthScheme::None => unreachable!("None was rejected above"),
+            AuthScheme::None => ocg_domain::dynamic::DynamicAuthKind::None,
         },
         mappings: models.to_vec(),
     };
@@ -1160,7 +1251,7 @@ pub(crate) fn upsert_imported_custom_destination_on(
             "UPDATE destinations SET
                  name = ?2, base_url = ?3, protocols_json = ?4,
                  auth_scheme = ?5, model_resolution = 'public_only',
-                 capabilities_json = ?6, max_credentials = NULL, enabled = ?7
+                 capabilities_json = ?6, max_credentials = CASE WHEN ?5 = 'none' THEN 1 ELSE NULL END, enabled = ?7
              WHERE id = ?1",
             params![
                 destination_id,
@@ -1192,7 +1283,7 @@ pub(crate) fn upsert_imported_custom_destination_on(
                  capabilities_json, plan_json, max_credentials,
                  observer_credential_id, enabled
              ) VALUES (?1, 'custom_account', ?2, 'http', ?3, NULL, ?4, ?5,
-                       ?6, 'public_only', ?7, NULL, NULL, NULL, ?8)",
+                       ?6, 'public_only', ?7, NULL, CASE WHEN ?6 = 'none' THEN 1 ELSE NULL END, NULL, ?8)",
             params![
                 destination_id,
                 legacy_id,
@@ -1218,6 +1309,7 @@ pub(crate) fn upsert_imported_custom_destination_on(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn replace_custom_destination_definition_on(
     conn: &Connection,
     destination_id: &str,
@@ -1235,7 +1327,7 @@ pub(crate) fn replace_custom_destination_definition_on(
     conn.execute(
         "UPDATE destinations
          SET name = ?2, base_url = ?3, protocols_json = ?4, auth_scheme = ?5,
-             model_resolution = 'public_only', max_credentials = NULL, updated_at = ?6
+             model_resolution = 'public_only', max_credentials = CASE WHEN ?5 = 'none' THEN 1 ELSE NULL END, updated_at = ?6
          WHERE id = ?1 AND legacy_kind = 'custom_account' AND adapter = 'http'",
         params![
             destination_id,
@@ -1345,7 +1437,8 @@ fn load_destination_model_inputs(
         return Ok(Vec::new());
     }
     let mut stmt = conn.prepare(
-        "SELECT public_model, upstream_model, protocols_json
+        "SELECT public_model, upstream_model,
+                CASE WHEN protocols_json = '[]' THEN (SELECT protocols_json FROM destinations WHERE id = ?1) ELSE protocols_json END
          FROM destination_models
          WHERE destination_id = ?1
          ORDER BY rowid ASC",
@@ -1397,8 +1490,9 @@ fn unique_public_models_from_inputs(capabilities: &[AccountModelCapabilityInput]
 }
 
 fn credential_model_scope_on(conn: &Connection, account_id: &str) -> Result<ModelScope> {
-    if table_exists(conn, "credentials")? && table_has_column(conn, "credentials", "scope_json")? {
-        if let Some(raw) = conn
+    if table_exists(conn, "credentials")?
+        && table_has_column(conn, "credentials", "scope_json")?
+        && let Some(raw) = conn
             .query_row(
                 "SELECT scope_json FROM credentials WHERE legacy_account_id = ?1",
                 [account_id],
@@ -1406,16 +1500,13 @@ fn credential_model_scope_on(conn: &Connection, account_id: &str) -> Result<Mode
             )
             .optional()?
             .flatten()
-        {
-            if !raw.trim().is_empty() {
-                return Ok(parse_scope_json(&raw));
-            }
-        }
+        && !raw.trim().is_empty()
+    {
+        return Ok(parse_scope_json(&raw));
     }
     if table_exists(conn, "credential_bindings")?
         && table_has_column(conn, "credential_bindings", "model_scope")?
-    {
-        if let Some(raw) = conn
+        && let Some(raw) = conn
             .query_row(
                 "SELECT model_scope FROM credential_bindings WHERE account_id = ?1",
                 [account_id],
@@ -1423,11 +1514,9 @@ fn credential_model_scope_on(conn: &Connection, account_id: &str) -> Result<Mode
             )
             .optional()?
             .flatten()
-        {
-            if !raw.trim().is_empty() {
-                return Ok(parse_scope_json(&raw));
-            }
-        }
+        && !raw.trim().is_empty()
+    {
+        return Ok(parse_scope_json(&raw));
     }
     Ok(ModelScope::All)
 }
@@ -1676,8 +1765,8 @@ pub(crate) fn platform_parent_id(conn: &Connection, account_id: &str) -> Result<
 }
 
 fn credential_provider_id(conn: &Connection, account_id: &str) -> Result<Option<String>> {
-    if table_exists(conn, "credentials")? {
-        if let Some(value) = conn
+    if table_exists(conn, "credentials")?
+        && let Some(value) = conn
             .query_row(
                 "SELECT provider_id FROM credentials WHERE legacy_account_id = ?1",
                 [account_id],
@@ -1685,9 +1774,8 @@ fn credential_provider_id(conn: &Connection, account_id: &str) -> Result<Option<
             )
             .optional()?
             .flatten()
-        {
-            return Ok(Some(value));
-        }
+    {
+        return Ok(Some(value));
     }
     if table_exists(conn, "accounts")? {
         return Ok(conn

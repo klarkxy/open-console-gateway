@@ -11,8 +11,10 @@ import { useControlPlaneStore } from "./controlPlane.ts";
 import { useAccountsStore } from "./accounts.ts";
 import { useDestinationsStore } from "./destinations.ts";
 import { useIdentitiesStore } from "./identities.ts";
+import { useCpaStore } from "./cpa.ts";
 import { usePlatformAccountsStore } from "./platformAccounts.ts";
 import { useProvidersStore } from "./providers.ts";
+import { useBillingStore } from "./billing.ts";
 
 export type SessionPhase = "checking" | "login" | "register" | "ready";
 
@@ -105,6 +107,8 @@ export const useSessionStore = defineStore("session", () => {
     useIdentitiesStore().clear();
     useDestinationsStore().clear();
     useProvidersStore().clear();
+    useCpaStore().clear();
+    useBillingStore().clear();
     status.value = null;
     phase.value = "login";
   }

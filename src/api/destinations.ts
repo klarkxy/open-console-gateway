@@ -27,9 +27,13 @@ import type {
   DestinationPatchRequest,
   LegacyDestinationRefDto,
   ModelScope,
+  QuotaRecoveryDto,
   PlanDto,
   ProtocolDto,
   RedirectPolicyDto,
+  RoutingCard,
+  RoutingCardList,
+  RoutingCardUpdate,
   RoutingChannel,
   RoutingClientProtocol,
   RoutingConversationBinding,
@@ -133,6 +137,20 @@ export interface DestinationOnboardingTask {
   step: string;
 }
 
+export type QuotaRecoveryStatus = QuotaRecoveryDto["status"];
+export type QuotaRecoveryReason = QuotaRecoveryDto["reason"];
+export type QuotaRecoveryWindow = QuotaRecoveryDto["window"];
+
+export interface QuotaRecovery {
+  status: QuotaRecoveryStatus;
+  reason: QuotaRecoveryReason;
+  window: QuotaRecoveryWindow;
+  observed_at: string;
+  resets_at: string | null;
+  next_retry_at: string;
+  failure_count: number;
+}
+
 export interface DestinationCredential {
   auth_state: AuthState;
   cooldowns: DestinationCredentialCooldowns;
@@ -149,6 +167,11 @@ export interface DestinationCredential {
   onboarding_task: DestinationOnboardingTask | null;
   purchase_date: string | null;
   quota_pool_id: string | null;
+  /**
+   * Confirmed exhaustion/recovery for this Key only. Absent or null means no
+   * confirmed exhaustion, not verified upstream health. Pools do not fan out.
+   */
+  quota_recovery?: QuotaRecovery | null;
   routing_rank: number;
   scope: ModelScope;
 }
@@ -162,6 +185,24 @@ export interface CredentialListSnapshot {
   credentials: DestinationCredential[];
   expectation: MutationExpectation;
 }
+
+/** One routing card: a stable presentation group over credentials of one destination. */
+export interface RoutingCardView {
+  id: string;
+  destination_id: string;
+  credential_ids: string[];
+}
+
+/** Atomic snapshot of cards plus the resources they show; the sole routing layout source. */
+export interface RoutingCardListSnapshot {
+  cards: RoutingCardView[];
+  destinations: Destination[];
+  credentials: DestinationCredential[];
+  expectation: MutationExpectation;
+}
+
+/** Submitted full layout; the CAS pair is attached per attempt. */
+export type RoutingCardLayoutInput = WithoutExpectation<RoutingCardUpdate>;
 
 /** Presented body of a destination PATCH; the CAS pair is supplied per attempt. */
 export type DestinationPatchInput = WithoutExpectation<DestinationPatchRequest>;
@@ -277,6 +318,39 @@ export function presentDestination(value: DestinationDto): Destination {
   };
 }
 
+const QUOTA_RECOVERY_STATUSES = new Set<QuotaRecoveryStatus>(["waiting", "ready", "probing"]);
+const QUOTA_RECOVERY_REASONS = new Set<QuotaRecoveryReason>([
+  "quota_exhausted",
+  "insufficient_balance",
+]);
+const QUOTA_RECOVERY_WINDOWS = new Set<QuotaRecoveryWindow>([
+  "five_hours",
+  "week",
+  "month",
+  "unknown",
+]);
+
+export function presentQuotaRecovery(
+  value: QuotaRecoveryDto | null | undefined,
+): QuotaRecovery | null {
+  if (!value) return null;
+  if (!QUOTA_RECOVERY_STATUSES.has(value.status)) return null;
+  if (!QUOTA_RECOVERY_REASONS.has(value.reason)) return null;
+  if (!QUOTA_RECOVERY_WINDOWS.has(value.window)) return null;
+  if (typeof value.observedAt !== "string" || typeof value.nextRetryAt !== "string") return null;
+  if (value.resetsAt !== null && typeof value.resetsAt !== "string") return null;
+  if (typeof value.failureCount !== "number") return null;
+  return {
+    status: value.status,
+    reason: value.reason,
+    window: value.window,
+    observed_at: value.observedAt,
+    resets_at: value.resetsAt,
+    next_retry_at: value.nextRetryAt,
+    failure_count: value.failureCount,
+  };
+}
+
 export function presentDestinationCredential(
   value: DestinationCredentialDto,
 ): DestinationCredential {
@@ -310,6 +384,7 @@ export function presentDestinationCredential(
       : null,
     purchase_date: value.purchaseDate,
     quota_pool_id: value.quotaPoolId,
+    quota_recovery: presentQuotaRecovery(value.quotaRecovery),
     routing_rank: value.routingRank,
     scope: value.scope,
   };
@@ -329,6 +404,26 @@ export function presentDestinationListSnapshot(
 
 export function presentCredentialListSnapshot(value: CredentialList): CredentialListSnapshot {
   return {
+    credentials: value.credentials.map(presentDestinationCredential),
+    expectation: {
+      expectedRevision: value.revision.revision,
+      processGeneration: value.revision.processGeneration,
+    },
+  };
+}
+
+function presentRoutingCard(value: RoutingCard): RoutingCardView {
+  return {
+    id: value.id,
+    destination_id: value.destinationId,
+    credential_ids: [...value.credentialIds],
+  };
+}
+
+export function presentRoutingCardListSnapshot(value: RoutingCardList): RoutingCardListSnapshot {
+  return {
+    cards: value.cards.map(presentRoutingCard),
+    destinations: value.destinations.map(presentDestination),
     credentials: value.credentials.map(presentDestinationCredential),
     expectation: {
       expectedRevision: value.revision.revision,
@@ -461,10 +556,61 @@ export const routingApi = {
   },
 };
 
+export interface CredentialQuotaRetryView {
+  credential: DestinationCredential;
+  expectation: MutationExpectation;
+}
+
 export const credentialsApi = {
   list: async (): Promise<DestinationCredential[]> => {
     const snapshot = await fetchCredentialSnapshot();
     return snapshot.credentials;
   },
   listSnapshot: fetchCredentialSnapshot,
+  /**
+   * Marks one exhausted Key ready for the next normal selection. Flattened
+   * CAS body only; does not test, enable, or clear backoff. Idempotent while
+   * already ready or probing.
+   */
+  retryQuota: async (
+    id: string,
+    expectation?: MutationExpectation,
+  ): Promise<CredentialQuotaRetryView> => {
+    const value = await withCas(
+      (tokens) => dashboardV4.retryCredentialQuota(id, tokens),
+      expectation,
+    );
+    return {
+      credential: presentDestinationCredential(value.credential),
+      expectation: {
+        expectedRevision: value.revision.revision,
+        processGeneration: value.revision.processGeneration,
+      },
+    };
+  },
+};
+
+async function fetchRoutingCardSnapshot(): Promise<RoutingCardListSnapshot> {
+  const value = await dashboardV4.getRoutingCards();
+  return presentRoutingCardListSnapshot(value);
+}
+
+export const routingCardsApi = {
+  /** One atomic snapshot of cards and the resources they show. */
+  listSnapshot: fetchRoutingCardSnapshot,
+  /**
+   * Full-replacement layout write under CAS. `cards` is the complete visible
+   * layout (grouping plus flattened rank). Returns the committed snapshot,
+   * which the caller commits in place; a 409 conflict is never replayed.
+   */
+  replace: async (
+    input: RoutingCardLayoutInput,
+    expectation?: MutationExpectation,
+  ): Promise<RoutingCardListSnapshot> => {
+    const value = await withCas(
+      (tokens) => dashboardV4.putRoutingCards(input, tokens),
+      expectation,
+    );
+    return presentRoutingCardListSnapshot(value);
+  },
 };

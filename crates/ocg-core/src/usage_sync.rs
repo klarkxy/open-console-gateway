@@ -562,7 +562,7 @@ pub fn schedule_after_inference_429(state: &impl UsageSyncHost, account_id: &str
             }
         };
         if !supported {
-            // GOAT has manual official calibration but no automatic-sync
+            // GOAT has explicit official refresh but no automatic-sync
             // contract, and must not be coupled to inference cooldown or
             // eligibility. Zen Free uses its separate egress-IP/global path.
             return false;

@@ -99,9 +99,10 @@ export function readBody(req, limit = BODY_LIMIT) {
   });
 }
 
-export function writeJson(res, status, body) {
+export function writeJson(res, status, body, headers = {}) {
   const payload = JSON.stringify(body);
   res.writeHead(status, {
+    ...headers,
     "content-type": "application/json",
     "content-length": Buffer.byteLength(payload),
   });

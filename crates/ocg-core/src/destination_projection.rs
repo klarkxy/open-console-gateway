@@ -220,7 +220,11 @@ pub fn replace_persisted_on(db: &Database) -> anyhow::Result<Result<(), Vec<Proj
 /// Runtime writers must not rebuild destinations/credentials from
 /// [`project`]. Leftover-table backfill still uses [`replace_persisted_on`].
 pub fn refresh_destination_shadow(db: &Database) -> anyhow::Result<()> {
-    crate::db::destination_store::sync_builtin_catalogs(db)
+    if db.schema_version()? >= 59 {
+        crate::db::destination_store::seed_missing_builtin_catalogs(db)
+    } else {
+        crate::db::destination_store::sync_builtin_catalogs(db)
+    }
 }
 
 /// Reconstruct destinations and credentials from the v50 shadow tables.
@@ -253,24 +257,65 @@ pub fn shadow_is_populated(stored: &DestinationProjection) -> bool {
     !stored.destinations.is_empty() || !stored.credentials.is_empty()
 }
 
-/// V4 destination/credential read: persisted tables, else live [`project`].
-///
-/// A populated store is served even when [`project`] would refuse. Empty
-/// stores and leftover-table upgrade windows still fall back to [`project`].
+/// V4 reads the authoritative store, including a legitimately empty store.
+/// Legacy reconstruction belongs exclusively to upgrade and import boundaries.
 pub fn read_v4_projection(
     db: &Database,
 ) -> anyhow::Result<Result<DestinationProjection, Vec<ProjectionRefusal>>> {
-    match load_persisted(db) {
-        Ok(stored) if shadow_is_populated(&stored) => {
-            let refusals = persisted_destination_refusals(&stored);
-            if refusals.is_empty() {
-                Ok(Ok(stored))
-            } else {
-                Ok(Err(refusals))
-            }
-        }
-        _ => project(db),
+    let stored = load_persisted(db)?;
+    validate_persisted_references(&stored)?;
+    let refusals = persisted_destination_refusals(&stored);
+    if refusals.is_empty() {
+        Ok(Ok(stored))
+    } else {
+        Ok(Err(refusals))
     }
+}
+
+/// The validated configuration used by routing and configuration consumers.
+/// An I/O error or invalid relationship is never an invitation to reconstruct
+/// a different configuration from compatibility records.
+pub fn load_runtime(db: &Database) -> anyhow::Result<DestinationProjection> {
+    read_v4_projection(db)?
+        .map_err(|refusals| anyhow::anyhow!("invalid destination configuration: {refusals:?}"))
+}
+
+fn validate_persisted_references(stored: &DestinationProjection) -> anyhow::Result<()> {
+    let destinations: HashMap<_, _> = stored
+        .destinations
+        .iter()
+        .map(|destination| (destination.id.as_str(), destination))
+        .collect();
+    for credential in &stored.credentials {
+        anyhow::ensure!(
+            destinations.contains_key(credential.destination_id.as_str()),
+            "credential `{}` references missing destination `{}`",
+            credential.id,
+            credential.destination_id
+        );
+    }
+    for destination in &stored.destinations {
+        if let Some(limit) = destination.max_credentials {
+            let count = stored
+                .credentials
+                .iter()
+                .filter(|credential| credential.destination_id == destination.id)
+                .count();
+            anyhow::ensure!(
+                count <= limit as usize,
+                "destination `{}` exceeds its credential limit",
+                destination.id
+            );
+        }
+        for model in &destination.catalog {
+            anyhow::ensure!(
+                !model.public_model.trim().is_empty() && !model.upstream_model.trim().is_empty(),
+                "destination `{}` contains an empty model identity",
+                destination.id
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Validate structural invariants that the legacy mapper used to enforce.
@@ -349,18 +394,10 @@ pub fn list_platform_accounts_for_v3(db: &Database) -> anyhow::Result<Vec<Platfo
     })
 }
 
-/// Routing snapshot: populated shadow, else a total live [`project`].
-///
-/// A mapping refusal yields `None` so the planner can fall back without
-/// inventing destinations. Reserved UUIDs are not consulted here.
+/// Compatibility signature for callers migrating to [`load_runtime`].
+/// Success always contains the persisted configuration, even when it is empty.
 pub fn routing_projection(db: &Database) -> anyhow::Result<Option<DestinationProjection>> {
-    match load_persisted(db) {
-        Ok(stored) if shadow_is_populated(&stored) => Ok(Some(stored)),
-        _ => match project(db)? {
-            Ok(live) => Ok(Some(live)),
-            Err(_) => Ok(None),
-        },
-    }
+    load_runtime(db).map(Some)
 }
 
 /// True when a Zen destination credential is still inside `free_until`.

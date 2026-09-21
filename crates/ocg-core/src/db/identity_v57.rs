@@ -444,35 +444,35 @@ pub(crate) fn stored_onboarding_from_json(
     raw: Option<&str>,
     setup_step: &str,
 ) -> Option<super::identity::StoredOnboarding> {
-    if let Some(raw) = raw.filter(|value| !value.is_empty()) {
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) {
-            let kind = value
-                .get("kind")
-                .and_then(|item| item.as_str())
-                .unwrap_or("managed_registration")
-                .to_string();
-            let state = value
-                .get("state")
-                .and_then(|item| item.as_str())
-                .unwrap_or("in_progress")
-                .to_string();
-            let step = value
-                .get("step")
-                .and_then(|item| item.as_str())
-                .unwrap_or(setup_step)
-                .to_string();
-            let id = value
-                .get("id")
-                .and_then(|item| item.as_str())
-                .map(ToOwned::to_owned)
-                .unwrap_or_else(|| onboarding_task_id_for_legacy_account(account_id).to_string());
-            return Some(super::identity::StoredOnboarding {
-                id,
-                kind,
-                step,
-                state,
-            });
-        }
+    if let Some(raw) = raw.filter(|value| !value.is_empty())
+        && let Ok(value) = serde_json::from_str::<serde_json::Value>(raw)
+    {
+        let kind = value
+            .get("kind")
+            .and_then(|item| item.as_str())
+            .unwrap_or("managed_registration")
+            .to_string();
+        let state = value
+            .get("state")
+            .and_then(|item| item.as_str())
+            .unwrap_or("in_progress")
+            .to_string();
+        let step = value
+            .get("step")
+            .and_then(|item| item.as_str())
+            .unwrap_or(setup_step)
+            .to_string();
+        let id = value
+            .get("id")
+            .and_then(|item| item.as_str())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| onboarding_task_id_for_legacy_account(account_id).to_string());
+        return Some(super::identity::StoredOnboarding {
+            id,
+            kind,
+            step,
+            state,
+        });
     }
     None
 }
@@ -539,6 +539,7 @@ pub(crate) fn leftover_identity_tables_ddl() -> &'static str {
 pub(crate) fn rewind_identity_satellites_to_v56(conn: &Connection) -> Result<()> {
     let now = Utc::now().to_rfc3339();
     conn.execute_batch(leftover_identity_tables_ddl())?;
+    #[allow(clippy::type_complexity)]
     let rows: Vec<(
         String,
         String,
@@ -689,34 +690,34 @@ pub(crate) fn rewind_identity_satellites_to_v56(conn: &Connection) -> Result<()>
                 ],
             )?;
         }
-        if let Some(raw) = onboarding_json.filter(|value| !value.is_empty()) {
-            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
-                conn.execute(
-                    "INSERT OR REPLACE INTO onboarding_tasks (
+        if let Some(raw) = onboarding_json.filter(|value| !value.is_empty())
+            && let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw)
+        {
+            conn.execute(
+                "INSERT OR REPLACE INTO onboarding_tasks (
                         id, account_id, kind, step, state, created_at, updated_at
                      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
-                    params![
-                        value
-                            .get("id")
-                            .and_then(|item| item.as_str())
-                            .unwrap_or("onboarding"),
-                        account_id,
-                        value
-                            .get("kind")
-                            .and_then(|item| item.as_str())
-                            .unwrap_or("managed_registration"),
-                        value
-                            .get("step")
-                            .and_then(|item| item.as_str())
-                            .unwrap_or(setup_step.as_deref().unwrap_or("ready")),
-                        value
-                            .get("state")
-                            .and_then(|item| item.as_str())
-                            .unwrap_or("in_progress"),
-                        now,
-                    ],
-                )?;
-            }
+                params![
+                    value
+                        .get("id")
+                        .and_then(|item| item.as_str())
+                        .unwrap_or("onboarding"),
+                    account_id,
+                    value
+                        .get("kind")
+                        .and_then(|item| item.as_str())
+                        .unwrap_or("managed_registration"),
+                    value
+                        .get("step")
+                        .and_then(|item| item.as_str())
+                        .unwrap_or(setup_step.as_deref().unwrap_or("ready")),
+                    value
+                        .get("state")
+                        .and_then(|item| item.as_str())
+                        .unwrap_or("in_progress"),
+                    now,
+                ],
+            )?;
         }
         if let Some(source) = subscription_source.filter(|value| !value.is_empty()) {
             conn.execute(

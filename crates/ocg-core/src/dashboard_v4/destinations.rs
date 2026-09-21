@@ -1,10 +1,6 @@
-//! Read-only V4 destination and credential listings.
-//!
-//! Served from the stage-4a [`crate::destination_projection`] mapper. Handlers
-//! take the settings lock, read SQLite only, and never issue outbound HTTP or
-//! write. Mapping totality is still live [`project`]; a populated v50 shadow
-//! is the served snapshot, and an empty shadow falls back to live. Projection
-//! refusals are a structured 409.
+//! V4 destination/credential reads and transactional HTTP configuration writes.
+//! All reads use persisted configuration; writes preflight the runtime before
+//! committing and publish under the same settings lock. Refusals are explicit.
 
 use axum::Json;
 use axum::body::Bytes;
@@ -24,7 +20,11 @@ use crate::dashboard_v3::{
     ControlRevision, MutationExpectation, V3ApiError, check_expectation, parse_mutation_json,
 };
 use crate::destination_projection::{ProjectionRefusal, RefusedRow, read_v4_projection};
-use crate::dynamic::{DynamicProviderRuntime, validate_definition};
+use crate::dynamic::validate_definition;
+use crate::quota_recovery::{
+    PersistedQuotaReason, PersistedQuotaRecovery, PersistedQuotaWindow, QuotaEpisode,
+    QuotaPresentationStatus, QuotaRecoveryView,
+};
 use crate::state::CoreState;
 
 use super::types::{
@@ -34,13 +34,15 @@ use super::types::{
     DestinationOnboardingTaskDto, DestinationPatchRequest, DestinationPatchResult,
     DestinationProjectionRefusalDto, DestinationProjectionRefusedError, ExpiryCadenceDto,
     LegacyDestinationKindDto, LegacyDestinationRefDto, MappingErrorCodeDto, ModelResolutionDto,
-    PlanDto, PlanWindowDto, PlanWindowKindDto, PricingSourceDto, ProtocolDto, RedirectPolicyDto,
+    PlanDto, PlanWindowDto, PlanWindowKindDto, PricingSourceDto, ProtocolDto, QuotaRecoveryDto,
+    QuotaRecoveryReason, QuotaRecoveryStatus, QuotaRecoveryWindow, RedirectPolicyDto,
     RefusedRowDto, RefusedRowKindDto, UsageSourceDto,
 };
 
 /// Stable 409 code when the stage-4a projection cannot map every live row.
 pub const ERROR_DESTINATION_PROJECTION_REFUSED: &str = "destinationProjectionRefused";
 
+#[derive(Debug)]
 pub(super) enum DestinationsError {
     Api(V3ApiError),
     Refused(DestinationProjectionRefusedError),
@@ -64,7 +66,7 @@ impl IntoResponse for DestinationsError {
 pub(super) async fn list_destinations(
     State(state): State<CoreState>,
 ) -> Result<Json<DestinationList>, DestinationsError> {
-    let (projection, revision) = load_projection(&state)?;
+    let (projection, _, _, revision) = load_projection(&state)?;
     Ok(Json(DestinationList {
         revision,
         destinations: projection
@@ -78,14 +80,10 @@ pub(super) async fn list_destinations(
 pub(super) async fn list_credentials(
     State(state): State<CoreState>,
 ) -> Result<Json<CredentialList>, DestinationsError> {
-    let (projection, revision) = load_projection(&state)?;
+    let (projection, recoveries, probes, revision) = load_projection(&state)?;
     Ok(Json(CredentialList {
         revision,
-        credentials: projection
-            .credentials
-            .iter()
-            .map(CredentialDto::from)
-            .collect(),
+        credentials: overlay_credential_dtos(&state, &projection.credentials, &recoveries, &probes),
     }))
 }
 
@@ -115,96 +113,42 @@ fn patch_destination_locked(
     let _settings_update = state.settings_update.lock();
     check_expectation(state, &input.expectation)?;
     let destination = load_destination(state, destination_id)?;
-    let legacy = destination.legacy.clone();
     let definition = destination_definition(&destination, &input)
         .map_err(|message| V3ApiError::invalid_request_at(state, message))?;
-
-    match &legacy {
-        LegacyDestinationRef::Dynamic(provider_id) => {
-            let existing = state
-                .db
-                .lock()
-                .get_dynamic_provider(provider_id)
-                .map_err(V3ApiError::internal)?
-                .ok_or_else(|| V3ApiError::not_found_at(state, "destination not found"))?;
-            let account_count = state
-                .db
-                .lock()
-                .count_accounts_for_provider(provider_id)
-                .map_err(V3ApiError::internal)?;
-            if definition.auth_kind.is_singleton() && account_count > 1 {
-                return Err(V3ApiError::invalid_request_at(
-                    state,
-                    "no-auth destinations require at most one credential",
-                )
-                .into());
+    state.commit_configuration_update(|db| {
+        crate::db::destination_commands::replace_http_destination_on(
+            db, destination_id, &definition, &input.authorize_credential_ids,
+        )?;
+        if let Some(enabled) = input.enabled {
+            db.conn.execute("UPDATE destinations SET enabled = ?2 WHERE id = ?1", rusqlite::params![destination_id, enabled])?;
+        }
+        for model in &input.models {
+            if let Some(enabled) = model.enabled {
+                let protocol: ocg_domain::catalog::UpstreamProtocolKind = model.upstream_override.as_ref()
+                    .map(|route| route.protocol).unwrap_or(input.upstream_protocol).into();
+                db.conn.execute("UPDATE destination_models SET enabled = ?3 WHERE destination_id = ?1 AND public_model_key = ?2",
+                    rusqlite::params![destination_id, model.public_model.trim().to_ascii_lowercase(), enabled])?;
+                if enabled {
+                    db.conn.execute("UPDATE destination_models SET protocols_json = ?3, preferred = ?4 WHERE destination_id = ?1 AND public_model_key = ?2 AND protocols_json = '[]'",
+                        rusqlite::params![destination_id, model.public_model.trim().to_ascii_lowercase(), serde_json::to_string(&[protocol])?, protocol.as_str()])?;
+                }
             }
-            let now = chrono::Utc::now();
-            let runtime = DynamicProviderRuntime {
-                preset_id: existing.preset_id,
-                id: existing.id,
-                name: definition.name,
-                endpoint_url: definition.endpoint_url,
-                upstream_protocol: definition.upstream_protocol,
-                auth_kind: definition.auth_kind,
-                mappings: definition.mappings,
-                created_at: existing.created_at,
-                updated_at: now,
-                origin: existing.origin,
-                offering: existing.offering,
-            };
-            let substantive = existing.endpoint_url != runtime.endpoint_url
-                || existing.upstream_protocol != runtime.upstream_protocol
-                || existing.auth_kind != runtime.auth_kind
-                || existing.mappings != runtime.mappings;
-            let changing_to_none =
-                !existing.auth_kind.is_singleton() && runtime.auth_kind.is_singleton();
-            let snapshot = state
-                .db
-                .lock()
-                .replace_dynamic_provider_authorized(
-                    &runtime,
-                    substantive,
-                    changing_to_none,
-                    None,
-                    &input.authorize_credential_ids,
-                )
-                .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?;
-            state
-                .install_dynamic_providers_snapshot(snapshot)
-                .map_err(V3ApiError::internal)?;
         }
-        LegacyDestinationRef::CustomAccount(_) => {
-            state
-                .db
-                .lock()
-                .replace_custom_destination(
-                    destination_id,
-                    &definition,
-                    &input.authorize_credential_ids,
-                )
-                .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?;
-            state.bump_settings_revision();
-            state
-                .reload_provider_contracts()
-                .map_err(V3ApiError::internal)?;
-        }
-        LegacyDestinationRef::Builtin(_) | LegacyDestinationRef::PlatformParent(_) => {
-            return Err(V3ApiError::invalid_request_at(
-                state,
-                "sealed and platform-managed destinations are immutable",
-            )
-            .into());
-        }
-    }
+        Ok(())
+    }).map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?;
 
     // `patch_destination_locked` already owns `settings_update`; do not call
     // `load_projection`, which would try to acquire the non-reentrant lock.
-    let projection = {
+    let (projection, recoveries, probes) = {
         let db = state.db.lock();
-        read_v4_projection(&db).map_err(V3ApiError::internal)?
-    }
-    .map_err(|refusals| DestinationsError::Refused(projection_refused(state, &refusals)))?;
+        let projection = read_v4_projection(&db).map_err(V3ApiError::internal)?;
+        let recoveries = crate::db::quota_recovery::load_all_identified_on(&db.conn)
+            .map_err(V3ApiError::internal)?;
+        let probes = state.quota_probes.lock().clone();
+        (projection, recoveries, probes)
+    };
+    let projection = projection
+        .map_err(|refusals| DestinationsError::Refused(projection_refused(state, &refusals)))?;
     let updated = projection
         .destinations
         .iter()
@@ -213,11 +157,7 @@ fn patch_destination_locked(
     Ok(DestinationPatchResult {
         revision: ControlRevision::from_state(state),
         destination: DestinationDto::from(updated),
-        credentials: projection
-            .credentials
-            .iter()
-            .map(CredentialDto::from)
-            .collect(),
+        credentials: overlay_credential_dtos(state, &projection.credentials, &recoveries, &probes),
     })
 }
 
@@ -228,37 +168,11 @@ fn delete_destination_locked(
 ) -> Result<DestinationDeleteResult, DestinationsError> {
     let _settings_update = state.settings_update.lock();
     check_expectation(state, &expectation)?;
-    let destination = load_destination(state, destination_id)?;
-    match destination.legacy {
-        LegacyDestinationRef::Dynamic(provider_id) => {
-            let snapshot = state
-                .db
-                .lock()
-                .delete_dynamic_provider(&provider_id)
-                .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?;
-            state
-                .install_dynamic_providers_snapshot(snapshot)
-                .map_err(V3ApiError::internal)?;
-        }
-        LegacyDestinationRef::CustomAccount(_) => {
-            state
-                .db
-                .lock()
-                .delete_empty_custom_destination(destination_id)
-                .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?;
-            state.bump_settings_revision();
-            state
-                .reload_provider_contracts()
-                .map_err(V3ApiError::internal)?;
-        }
-        LegacyDestinationRef::Builtin(_) | LegacyDestinationRef::PlatformParent(_) => {
-            return Err(V3ApiError::invalid_request_at(
-                state,
-                "sealed and platform-managed destinations cannot be deleted",
-            )
-            .into());
-        }
-    }
+    state
+        .commit_configuration_update(|db| {
+            crate::db::destination_commands::delete_http_destination_on(db, destination_id)
+        })
+        .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?;
     Ok(DestinationDeleteResult {
         revision: ControlRevision::from_state(state),
     })
@@ -292,12 +206,10 @@ fn destination_definition(
         AuthSchemeDto::XApiKey => DynamicAuthKind::XApiKey,
         AuthSchemeDto::None => DynamicAuthKind::None,
     };
-    let id = match &destination.legacy {
-        LegacyDestinationRef::Dynamic(id) | LegacyDestinationRef::CustomAccount(id) => id.clone(),
-        LegacyDestinationRef::Builtin(_) | LegacyDestinationRef::PlatformParent(_) => {
-            return Err("sealed and platform-managed destinations are immutable".to_string());
-        }
-    };
+    if destination.capabilities.observer {
+        return Err("platform-managed destinations are immutable".to_string());
+    }
+    let id = destination.id.clone();
     let definition = DynamicProviderDefinition {
         preset_id: None,
         id,
@@ -323,30 +235,99 @@ fn model_patch(model: DestinationModelPatch) -> DynamicModelMapping {
     }
 }
 
+#[allow(clippy::type_complexity)]
 fn load_projection(
     state: &CoreState,
 ) -> Result<
     (
         crate::destination_projection::DestinationProjection,
+        std::collections::HashMap<String, crate::db::quota_recovery::QuotaRecoveryRow>,
+        std::collections::HashMap<String, QuotaEpisode>,
         ControlRevision,
     ),
     DestinationsError,
 > {
     let _settings_update = state.settings_update.lock();
-    let result = {
-        let db = state.db.lock();
-        read_v4_projection(&db).map_err(V3ApiError::internal)?
-    };
-    match result {
-        Ok(projection) => Ok((projection, ControlRevision::from_state(state))),
+    let db = state.db.lock();
+    let projection = read_v4_projection(&db).map_err(V3ApiError::internal)?;
+    let recoveries = crate::db::quota_recovery::load_all_identified_on(&db.conn)
+        .map_err(V3ApiError::internal)?;
+    let probes = state.quota_probes.lock().clone();
+    let revision = ControlRevision::from_state(state);
+    match projection {
+        Ok(projection) => Ok((projection, recoveries, probes, revision)),
         Err(refusals) => Err(DestinationsError::Refused(projection_refused(
             state, &refusals,
         ))),
     }
 }
 
+pub(super) fn overlay_credential_dtos(
+    state: &CoreState,
+    credentials: &[Credential],
+    recoveries: &std::collections::HashMap<String, crate::db::quota_recovery::QuotaRecoveryRow>,
+    probes: &std::collections::HashMap<String, QuotaEpisode>,
+) -> Vec<CredentialDto> {
+    let now = state.sample_gateway_clock().0;
+    credentials
+        .iter()
+        .map(|credential| {
+            let mut dto = CredentialDto::from(credential);
+            dto.quota_recovery = recoveries.get(&credential.id).map(|row| {
+                let probing = probes.get(&credential.id).is_some_and(|episode| {
+                    crate::routing_snapshot::quota_episode_matches(
+                        episode,
+                        &credential.id,
+                        row.credential_version,
+                        &row.key_cipher,
+                        row.recovery.epoch,
+                    )
+                });
+                quota_recovery_dto(row.recovery.present(now, probing))
+            });
+            dto
+        })
+        .collect()
+}
+
+pub(super) fn overlay_one_credential_dto(
+    state: &CoreState,
+    credential: &Credential,
+    recovery: Option<&PersistedQuotaRecovery>,
+    probing: bool,
+) -> CredentialDto {
+    let now = state.sample_gateway_clock().0;
+    let mut dto = CredentialDto::from(credential);
+    dto.quota_recovery = recovery.map(|row| quota_recovery_dto(row.present(now, probing)));
+    dto
+}
+
+fn quota_recovery_dto(view: QuotaRecoveryView) -> QuotaRecoveryDto {
+    QuotaRecoveryDto {
+        status: match view.status {
+            QuotaPresentationStatus::Waiting => QuotaRecoveryStatus::Waiting,
+            QuotaPresentationStatus::Ready => QuotaRecoveryStatus::Ready,
+            QuotaPresentationStatus::Probing => QuotaRecoveryStatus::Probing,
+        },
+        reason: match view.reason {
+            PersistedQuotaReason::QuotaExhausted => QuotaRecoveryReason::QuotaExhausted,
+            PersistedQuotaReason::InsufficientBalance => QuotaRecoveryReason::InsufficientBalance,
+        },
+        window: match view.window {
+            PersistedQuotaWindow::FiveHours => QuotaRecoveryWindow::FiveHours,
+            PersistedQuotaWindow::Week => QuotaRecoveryWindow::Week,
+            PersistedQuotaWindow::Month => QuotaRecoveryWindow::Month,
+            PersistedQuotaWindow::Unknown => QuotaRecoveryWindow::Unknown,
+        },
+        observed_at: view.observed_at.to_rfc3339(),
+        resets_at: view.resets_at.map(|at| at.to_rfc3339()),
+        next_retry_at: view.next_retry_at.to_rfc3339(),
+        failure_count: view.failure_count,
+    }
+}
+
 /// Structured 409 reused by both destination and credential reads.
-fn projection_refused(
+pub(super) fn projection_refused(
     state: &CoreState,
     refusals: &[ProjectionRefusal],
 ) -> DestinationProjectionRefusedError {
@@ -434,6 +415,7 @@ impl From<&Credential> for CredentialDto {
                 .as_ref()
                 .map(DestinationOnboardingTaskDto::from),
             purchase_date: credential.purchase_date.clone(),
+            quota_recovery: None,
         }
     }
 }

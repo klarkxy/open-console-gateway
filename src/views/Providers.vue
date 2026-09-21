@@ -132,6 +132,7 @@
               <ProviderBrandMark :family="selectedConnectionFamily" :size="22" />
               <h2 id="provider-detail-title">{{ selectedConnection.name }}</h2>
               <div class="providers-catalog-meta">
+                <n-tag v-if="selectedDestination && !selectedDestination.enabled" size="small" :bordered="false">{{ t("已停用") }}</n-tag>
                 <n-tag size="small" :bordered="false">{{ t("Custom API 账号") }}</n-tag>
                 <n-tag
                   v-if="selectedStatus.label"
@@ -170,7 +171,10 @@
               </thead>
               <tbody>
                 <tr v-for="target in selectedConnection.targets" :key="target.id">
-                  <td><code>{{ target.public_name }}</code></td>
+                  <td>
+                    <code>{{ target.public_name }}</code>
+                    <n-tag v-if="disabledModelNames.has(target.public_name.toLowerCase())" size="small" :bordered="false">{{ t("已停用") }}</n-tag>
+                  </td>
                   <td><code>{{ target.upstream_model_id }}</code></td>
                 </tr>
               </tbody>
@@ -210,6 +214,7 @@
               <ProviderBrandMark :family="selectedConnectionFamily" :size="22" />
               <h2 id="provider-detail-title">{{ selectedEntry.display_name }}</h2>
               <div class="providers-catalog-meta">
+                <n-tag v-if="selectedDestination && !selectedDestination.enabled" size="small" :bordered="false">{{ t("已停用") }}</n-tag>
                 <n-tag size="small" :bordered="false">{{ originLabel(selectedEntry.origin) }}</n-tag>
                 <n-tag
                   v-if="selectedStatus.label"
@@ -334,6 +339,7 @@
               <template v-if="activeScope">
                 <div class="providers-models-head">
                   <div class="providers-catalog-meta">
+                <n-tag v-if="selectedDestination && !selectedDestination.enabled" size="small" :bordered="false">{{ t("已停用") }}</n-tag>
                     <span>{{ catalogSourceLabel(activeScope.catalog.source) }}</span>
                     <a
                       v-if="safeSourceUrl"
@@ -427,6 +433,7 @@
                 <ProviderModelMappings
                   v-else-if="selectedDefinition"
                   :models="selectedDefinition.models"
+                  :disabled-models="disabledModelNames"
                   :editable="selectedEntry.editable"
                   @edit="openDefinitionEditor"
                 />
@@ -490,6 +497,7 @@
               <ProviderBrandMark :family="selectedConnectionFamily" :size="22" />
               <h2 id="provider-detail-title">{{ selectedDestination.name }}</h2>
               <div class="providers-catalog-meta">
+                <n-tag v-if="selectedDestination && !selectedDestination.enabled" size="small" :bordered="false">{{ t("已停用") }}</n-tag>
                 <n-tag size="small" :bordered="false">{{ selectedDestinationTypeLabel }}</n-tag>
                 <n-tag v-if="selectedDestination.brand_family" size="small" :bordered="false">
                   {{ selectedDestination.brand_family }}
@@ -653,6 +661,7 @@ import {
   connectionForDestination,
   filterDestinations,
   groupDestinationsByOffering,
+  isProvidersRailDestination,
   railKeyForDestination,
 } from "../domain/destination-providers.ts";
 
@@ -708,6 +717,9 @@ const loadError = ref("");
 const selectedConnectionId = ref<string | null>(null);
 const selectedDestinationId = ref<string | null>(null);
 const destinations = computed(() => destinationsStore.destinations);
+const railDestinations = computed(() => (
+  destinations.value.filter(isProvidersRailDestination)
+));
 const selectedRailKey = computed(() => selectedConnectionId.value ?? selectedDestinationId.value);
 const lastCommittedConnectionId = ref<string | null>(null);
 const activeTab = ref<ProviderDetailTab>("models");
@@ -742,15 +754,23 @@ const selectedConnection = computed(() => (
   connections.value.find((item) => item.id === selectedConnectionId.value) ?? null
 ));
 const selectedDestination = computed(() => {
-  if (selectedDestinationId.value) {
-    return destinations.value.find((row) => row.id === selectedDestinationId.value) ?? null;
-  }
-  const connection = selectedConnection.value;
-  if (!connection) return null;
-  return destinations.value.find((row) => (
-    connectionForDestination(connections.value, row)?.id === connection.id
-  )) ?? null;
+  const match = selectedDestinationId.value
+    ? destinations.value.find((row) => row.id === selectedDestinationId.value) ?? null
+    : (() => {
+      const connection = selectedConnection.value;
+      if (!connection) return null;
+      return destinations.value.find((row) => (
+        connectionForDestination(connections.value, row)?.id === connection.id
+      )) ?? null;
+    })();
+  if (match && !isProvidersRailDestination(match)) return null;
+  return match;
 });
+const disabledModelNames = computed(() => new Set(
+  (selectedDestination.value?.catalog ?? [])
+    .filter((model) => !model.enabled || model.protocols.length === 0)
+    .map((model) => model.public_model.toLowerCase()),
+));
 const selectedDestinationTypeLabel = computed(() => (
   selectedDestination.value
     ? accountTypeLabelText(destinationTypeLabel(selectedDestination.value))
@@ -872,7 +892,7 @@ function railStatusExtra(connection: Connection) {
 const railPanes = computed<Array<{ id: "plan" | "api"; label: "Plan" | "API"; options: MenuOption[] }>>(() => {
   const panes: Array<{ id: "plan" | "api"; label: "Plan" | "API"; options: MenuOption[] }> = [];
   if (destinations.value.length > 0) {
-    const filtered = filterDestinations(destinations.value, railQuery.value);
+    const filtered = filterDestinations(railDestinations.value, railQuery.value);
     const groups = groupDestinationsByOffering(filtered);
     const toOptions = (list: readonly Destination[]): MenuOption[] => (
       list.map((item) => {
@@ -923,7 +943,7 @@ const mobileSelectOptions = computed<SelectOption[]>(() => {
   // The mobile selector has its own built-in filter; the rail search query
   // must not shrink these options when the rail itself is hidden.
   if (destinations.value.length > 0) {
-    const groups = groupDestinationsByOffering(destinations.value);
+    const groups = groupDestinationsByOffering(railDestinations.value);
     const labelFor = (item: Destination, offering: "Plan" | "API"): string => (
       `${item.name} · ${offering}`
     );

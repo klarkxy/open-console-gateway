@@ -6,7 +6,6 @@ import type { ProviderCatalogEntry } from "../api/providers.ts";
 import {
   accountCredentialCount,
   accountExpiryDisplay,
-  accountShowsDeclaredRelation,
   credentialForAccount,
   inferenceAuthState,
   inferenceCredentials,
@@ -254,14 +253,6 @@ test("platform observer credentials are not inference Keys", () => {
   assert.equal(inferenceAuthState(observerOnly, "acc-1"), null);
   assert.deepEqual(presentedAccountStatus(account(), observerOnly), { kind: "enabled" });
   assert.equal(accountCredentialCount(observerOnly), null);
-});
-
-test("d04 declared relations are a declared tag, never a verified-wallet claim", () => {
-  assert.equal(accountShowsDeclaredRelation(identity()), false);
-  assert.equal(accountShowsDeclaredRelation(identity({
-    declared_relations: [{ group: "team-a", platform_account_id: "plat-1" }],
-  })), true);
-  assert.equal(accountShowsDeclaredRelation(null), false);
 });
 
 test("multiple credentials yield a count; a single credential adds no chrome", () => {

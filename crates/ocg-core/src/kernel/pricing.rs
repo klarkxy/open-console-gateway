@@ -308,9 +308,13 @@ impl ProviderCostEstimate {
         ensure_optional_positive_finite("quota multiplier", quota_multiplier)?;
         ensure_optional_non_negative_finite("paid plan price", paid_plan_price)?;
         ensure_optional_positive_finite("plan limit", plan_limit)?;
-        let quota_debit = quota_multiplier.map(|multiplier| raw_cost * multiplier);
+        let quota_debit = quota_multiplier
+            .and_then(|multiplier| ocg_domain::billing::convert_charge(raw_cost, multiplier));
         let paid_cost = match (quota_debit, paid_plan_price, plan_limit) {
-            (Some(debit), Some(price), Some(limit)) => Some(debit * price / limit),
+            (Some(_), Some(0.0), Some(_)) => Some(0.0),
+            (Some(debit), Some(price), Some(limit)) => {
+                ocg_domain::billing::convert_charge(debit, price / limit)
+            }
             _ => None,
         };
         Ok(Self {

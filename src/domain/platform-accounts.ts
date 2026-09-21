@@ -9,17 +9,44 @@ import type {
   PlatformSnapshot,
 } from "../api/platform-accounts.ts";
 import type { Account, AccountModelCapabilityInput, AccountProtocol } from "../api/dashboard.ts";
+import type { MessageKey } from "../i18n/index.ts";
 
 /**
  * Presentation logic for New API / Sub2API platform accounts. Pure helpers
- * only; i18n keys stay plain Chinese strings so this module never imports the
- * i18n runtime (same convention as custom-account.ts).
+ * only; i18n keys stay plain Chinese strings. Type-only `MessageKey` is
+ * allowed; this module never imports the i18n runtime.
  */
 
 export const PLATFORM_KIND_LABELS: Record<PlatformKind, string> = {
   new_api: "New API",
   sub2api: "Sub2API",
 };
+
+/**
+ * Snapshot error codes written by the platform reader. These are refresh-time
+ * notices, never a resident card banner.
+ */
+export const PLATFORM_SNAPSHOT_ERROR_KEYS = {
+  "auth.missing": "未保存管理凭证",
+  "base_url.invalid": "平台地址无效",
+  unauthorized: "管理凭证无效",
+  user_id_required: "缺少用户 ID",
+  user_id_mismatch: "用户 ID 不匹配",
+  forbidden: "平台拒绝访问",
+  network: "无法连接平台",
+  timeout: "平台请求超时",
+  redirect_rejected: "平台地址发生重定向",
+  http_status: "平台返回异常状态",
+  parse: "平台响应无法解析",
+  oversize: "平台响应过大",
+  endpoint_override: "平台改写了请求地址",
+  secret_reflected: "平台响应含有凭证",
+} as const satisfies Record<string, MessageKey>;
+
+export function platformSnapshotErrorKey(code: string): MessageKey {
+  return PLATFORM_SNAPSHOT_ERROR_KEYS[code as keyof typeof PLATFORM_SNAPSHOT_ERROR_KEYS]
+    ?? "刷新未完成";
+}
 
 /**
  * New API management credential as typed in the form. Stored as the existing
@@ -184,6 +211,79 @@ function capabilityPublicIds(
   return ids;
 }
 
+/** Distinct public names; protocol rows for the same name count once. */
+export function uniquePublicModelCount(
+  account: Pick<Account, "model_capabilities"> | null | undefined,
+): number {
+  return account ? capabilityPublicIds(account).length : 0;
+}
+
+export interface PlatformKeyModelRow {
+  public_model: string;
+  upstream_model: string;
+  protocols: Account["model_capabilities"][number]["protocol"][];
+}
+
+/** Collapse protocol rows that share a public name; first upstream wins. */
+export function platformKeyModelRows(
+  account: Pick<Account, "model_capabilities"> | null | undefined,
+): PlatformKeyModelRow[] {
+  if (!account) return [];
+  const rows: PlatformKeyModelRow[] = [];
+  const index = new Map<string, PlatformKeyModelRow>();
+  for (const capability of account.model_capabilities) {
+    const publicModel = capability.public_model.trim();
+    if (!publicModel) continue;
+    const folded = publicModel.toLocaleLowerCase();
+    const existing = index.get(folded);
+    if (existing) {
+      if (!existing.protocols.includes(capability.protocol)) {
+        existing.protocols.push(capability.protocol);
+      }
+      continue;
+    }
+    const row: PlatformKeyModelRow = {
+      public_model: publicModel,
+      upstream_model: capability.upstream_model.trim() || publicModel,
+      protocols: [capability.protocol],
+    };
+    index.set(folded, row);
+    rows.push(row);
+  }
+  return rows;
+}
+
+export type PlatformCredentialTag =
+  | { kind: "group"; name: string }
+  | { kind: "token"; name: string }
+  | { kind: "models"; count: number };
+
+export const PLATFORM_CREDENTIAL_TAG_KEYS = {
+  group: "分组 {name}",
+  token: "令牌 {name}",
+  models: "{count} 个模型",
+} as const satisfies Record<PlatformCredentialTag["kind"], MessageKey>;
+
+/**
+ * Platform Key-row chips: site group, snapshot token name when it differs
+ * from the local name, and unique public model count.
+ */
+export function platformCredentialTags(input: {
+  group: string;
+  tokenName: string;
+  accountName: string;
+  modelCount: number;
+}): PlatformCredentialTag[] {
+  const tags: PlatformCredentialTag[] = [];
+  const group = input.group.trim();
+  if (group) tags.push({ kind: "group", name: group });
+  const token = input.tokenName.trim();
+  const name = input.accountName.trim();
+  if (token && token !== name) tags.push({ kind: "token", name: token });
+  tags.push({ kind: "models", count: input.modelCount });
+  return tags;
+}
+
 /**
  * Same public model on two Keys of one site is overlay, not a conflict:
  * `/v1/models` lists the name once, and routing tries those Keys in order.
@@ -285,10 +385,47 @@ export function primaryQuota(
   kind: PlatformQuotaKind,
 ): PlatformQuota | null {
   const rows = quotasByKind(quotas)[kind];
-  if (kind === "key_limit") {
+  if (kind === "key_limit" || kind === "wallet") {
     return rows.find((row) => !row.period) ?? rows[0] ?? null;
   }
   return rows[0] ?? null;
+}
+
+/** Site-reported consume total for the current UTC month, when the optional catalog exists. */
+export function walletMonthQuota(
+  quotas: readonly PlatformQuota[],
+): PlatformQuota | null {
+  return quotas.find((quota) => quota.kind === "wallet" && quota.period === "month") ?? null;
+}
+
+/** Parent-card wallet figures: remaining, UTC-month used, lifetime used. */
+export interface PlatformWalletMeter {
+  unit: string;
+  remaining: number | null;
+  remainingUnlimited: boolean;
+  historyUsed: number | null;
+  monthUsed: number | null;
+  observedAt: number | null;
+}
+
+export function platformWalletMeter(
+  snapshot: PlatformSnapshot | null | undefined,
+): PlatformWalletMeter | null {
+  if (!snapshot) return null;
+  const wallet = primaryQuota(snapshot.quotas, "wallet");
+  const month = walletMonthQuota(snapshot.quotas);
+  if (!wallet && !month) return null;
+  const finite = (value: number | null | undefined): number | null => (
+    value != null && Number.isFinite(value) ? value : null
+  );
+  return {
+    unit: wallet?.unit || month?.unit || "",
+    remaining: wallet?.unlimited ? null : finite(wallet?.remaining),
+    remainingUnlimited: Boolean(wallet?.unlimited),
+    historyUsed: wallet?.unlimited ? null : finite(wallet?.used),
+    monthUsed: finite(month?.used),
+    observedAt: snapshot.observedAt > 0 ? snapshot.observedAt : null,
+  };
 }
 
 export function linkForAccount(

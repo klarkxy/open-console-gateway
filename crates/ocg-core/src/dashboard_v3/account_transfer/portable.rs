@@ -148,6 +148,8 @@ pub(super) struct PortableCredential {
     pub ollama_billing_tier: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link_group: Option<PlatformGroup>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credit_meter: Option<crate::billing_types::PortableCreditMeter>,
 }
 
 impl Zeroize for PortableDestination {
@@ -296,6 +298,7 @@ impl From<&Credential> for PortableCredential {
             quota_scope: None,
             ollama_billing_tier: None,
             link_group: None,
+            credit_meter: None,
         }
     }
 }

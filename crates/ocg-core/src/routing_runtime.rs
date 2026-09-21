@@ -23,8 +23,8 @@ pub struct RoutingRuntime {
 }
 
 #[derive(Debug, Clone)]
-pub struct RoutingCandidate {
-    pub account: Account,
+pub struct RoutingCandidate<A = Account> {
+    pub account: A,
     pub channel: UpstreamChannel,
     pub resolved_model: String,
     pub adapter: ProviderAdapterKind,
@@ -158,9 +158,9 @@ impl RoutingRuntime {
     /// disabled-Zen-row exhaustion combined by the caller). Duplicate account
     /// ids error before any state mutation.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn try_select_candidate_index_at(
+    pub(crate) fn try_select_candidate_index_at<A: CandidateFacts>(
         &self,
-        candidates: &[RoutingCandidate],
+        candidates: &[RoutingCandidate<A>],
         mode: RoutingMode,
         conversation_sticky: bool,
         conversation_key: Option<&str>,
@@ -189,9 +189,9 @@ impl RoutingRuntime {
     /// Clone-based selection preview. Sticky-global and round-robin on the
     /// live slot stay unchanged.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn preview_candidate_index_at(
+    pub(crate) fn preview_candidate_index_at<A: CandidateFacts>(
         &self,
-        candidates: &[RoutingCandidate],
+        candidates: &[RoutingCandidate<A>],
         mode: RoutingMode,
         conversation_sticky: bool,
         conversation_key: Option<&str>,
@@ -242,6 +242,7 @@ impl RoutingRuntime {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn account_is_available_for(
     account: &Account,
     channel: UpstreamChannel,
@@ -345,6 +346,8 @@ pub(crate) enum CandidateAvailability {
     AuthError,
     CoolingDown,
     FreeChannelUnavailable,
+    QuotaWaiting,
+    QuotaProbing,
 }
 
 impl CandidateAvailability {
@@ -362,44 +365,112 @@ impl CandidateAvailability {
             Self::AuthError => "auth_error",
             Self::CoolingDown => "cooling_down",
             Self::FreeChannelUnavailable => "free_channel_unavailable",
+            Self::QuotaWaiting => "quota_waiting",
+            Self::QuotaProbing => "quota_probing",
         }
     }
 }
 
-pub(crate) fn assess_candidate_availability(
-    candidate: &RoutingCandidate,
+pub(crate) fn assess_candidate_availability<A: CandidateFacts>(
+    candidate: &RoutingCandidate<A>,
     free_channel_available: bool,
     wall: DateTime<Utc>,
 ) -> CandidateAvailability {
-    if !candidate.account.enabled {
-        CandidateAvailability::AccountDisabled
-    } else if !candidate.account.setup_step.is_ready() {
-        CandidateAvailability::SetupNotReady
-    } else if channel_for_adapter(candidate.adapter) != candidate.channel {
-        CandidateAvailability::ChannelMismatch
-    } else if matches!(candidate.account.credential_kind, CredentialKind::ApiKey)
-        && candidate.account.key_cipher.is_empty()
-    {
-        CandidateAvailability::CredentialMissing
-    } else if candidate.account.auth_error.is_some() {
-        CandidateAvailability::AuthError
-    } else if candidate.account.is_cooling_for(candidate.channel, wall) {
-        CandidateAvailability::CoolingDown
-    } else if candidate.channel == UpstreamChannel::Free && !free_channel_available {
-        CandidateAvailability::FreeChannelUnavailable
-    } else {
-        CandidateAvailability::Available
+    candidate.account.availability(
+        candidate.adapter,
+        candidate.channel,
+        free_channel_available,
+        wall,
+    )
+}
+
+pub(crate) trait CandidateFacts {
+    fn routing_id(&self) -> &str;
+    fn availability(
+        &self,
+        adapter: ProviderAdapterKind,
+        channel: UpstreamChannel,
+        free: bool,
+        wall: DateTime<Utc>,
+    ) -> CandidateAvailability;
+}
+
+impl CandidateFacts for Account {
+    fn routing_id(&self) -> &str {
+        &self.id
+    }
+    fn availability(
+        &self,
+        adapter: ProviderAdapterKind,
+        channel: UpstreamChannel,
+        free: bool,
+        wall: DateTime<Utc>,
+    ) -> CandidateAvailability {
+        if !self.enabled {
+            CandidateAvailability::AccountDisabled
+        } else if !self.setup_step.is_ready() {
+            CandidateAvailability::SetupNotReady
+        } else if channel_for_adapter(adapter) != channel {
+            CandidateAvailability::ChannelMismatch
+        } else if self.credential_kind == CredentialKind::ApiKey && self.key_cipher.is_empty() {
+            CandidateAvailability::CredentialMissing
+        } else if self.auth_error.is_some() {
+            CandidateAvailability::AuthError
+        } else if self.is_cooling_for(channel, wall) {
+            CandidateAvailability::CoolingDown
+        } else if channel == UpstreamChannel::Free && !free {
+            CandidateAvailability::FreeChannelUnavailable
+        } else {
+            CandidateAvailability::Available
+        }
     }
 }
 
-fn gateway_candidate<'a>(
-    candidate: &'a RoutingCandidate,
+impl CandidateFacts for crate::routing_snapshot::ExecutionCredential {
+    fn routing_id(&self) -> &str {
+        &self.id
+    }
+    fn availability(
+        &self,
+        adapter: ProviderAdapterKind,
+        channel: UpstreamChannel,
+        free: bool,
+        wall: DateTime<Utc>,
+    ) -> CandidateAvailability {
+        if !self.enabled {
+            CandidateAvailability::AccountDisabled
+        } else if !self.ready {
+            CandidateAvailability::SetupNotReady
+        } else if channel_for_adapter(adapter) != channel {
+            CandidateAvailability::ChannelMismatch
+        } else if self.auth_error.is_some() {
+            CandidateAvailability::AuthError
+        } else if self.is_cooling_for(channel, wall) {
+            CandidateAvailability::CoolingDown
+        } else if self.quota_probe {
+            CandidateAvailability::QuotaProbing
+        } else if self
+            .quota_recovery
+            .as_ref()
+            .is_some_and(|recovery| !recovery.due_at(wall))
+        {
+            CandidateAvailability::QuotaWaiting
+        } else if channel == UpstreamChannel::Free && !free {
+            CandidateAvailability::FreeChannelUnavailable
+        } else {
+            CandidateAvailability::Available
+        }
+    }
+}
+
+fn gateway_candidate<'a, A: CandidateFacts>(
+    candidate: &'a RoutingCandidate<A>,
     free_channel_available: bool,
     wall: DateTime<Utc>,
 ) -> GatewayCandidate<'a> {
     let available = assess_candidate_availability(candidate, free_channel_available, wall);
     GatewayCandidate::new(
-        candidate.account.id.as_str(),
+        candidate.account.routing_id(),
         candidate.channel,
         candidate.resolved_model.as_str(),
         if available.is_available() {

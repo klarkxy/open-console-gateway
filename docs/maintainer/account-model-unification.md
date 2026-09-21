@@ -2,9 +2,13 @@
 
 # RFC: Redesigning The Account And Provider Model
 
-Status: **destinations/credentials are authoritative; schema v58 completes connection-owned, multi-Key Custom HTTP.** V4 now exposes destination PATCH/DELETE and read-only routing explanation. Payload V8 is destination/credential-authoritative and carries model-resolution policy and route overrides; V4–V8 import. `legacy_account_id` and remounted account inputs remain compatibility bridges. [Runtime
-invariants](runtime-invariants.md) and [dashboard API](dashboard-api.md)
-describe HEAD.
+Status: **schema v59 makes destinations, credentials and model mappings the normal routing authority.** V4 provides transactional HTTP destination edits and read-only routing explanation. Payload V10 preserves HTTP destination/model controls, model-resolution policy and route overrides; V4–V10 imports remain supported. See [runtime invariants](runtime-invariants.md) and [dashboard API](dashboard-api.md).
+
+## Runtime cutover (v59)
+
+Normal requests use persisted destinations, model mappings and a private execution credential view. The planner no longer reconstructs Account, branches on legacy creation origin, or falls back after a failed authoritative read. Frozen attempts and live authorization share the same model gate with route explanation. HTTP destination edits and deletes share one transaction with runtime preflight; imported formats and operational Account DTOs remain boundary adapters. Global credential ordering is exposed separately from supplier grouping.
+
+The remaining RFC sections describe the historical migration rationale; their counts and staged proposals are not current runtime status.
 
 ## 1. What is wrong
 
@@ -201,7 +205,7 @@ explicit cooldown writes on the credential.
   tables into them; the old tables are dropped after the shim release. The
   migration is total: every current row maps to exactly one destination and
   one credential, or the migration refuses to run.
-- **Transfer bundle** payload V8 carries the new entities, resolution policy, and route overrides directly.
+- **Transfer bundle** payload V10 carries the new entities, resolution policy, and route overrides directly.
 
 ## 6. Migration
 
@@ -482,7 +486,7 @@ reserved account UUIDs. `/dashboard/api/v3` is a 410 tombstone.
 
 ### Deprecation rules started in stage 7
 
-New node backups export payload V8. The encrypted envelope stays v1. V8
+New node backups export payload V10. The encrypted envelope stays v1. V9
 carries `destinations` and `credentials` (including plaintext secrets,
 platform and CPA observer management credentials, and identity / grant /
 cooldown extras inside that envelope), plus `quotaPools` and `node`. A merge
@@ -491,13 +495,13 @@ management key. Latest export does not emit `accounts`, platform rows, dynamic
 provider definitions, or a separate identities array. V4–V6 remain
 importable through an old-graph decoder that maps into the same new-model
 import object. A V7 package that still carries leftover old fields must
-match dest/cred or is rejected. V9 and newer are an unsupported-version
+match dest/cred or is rejected. V11 and newer are an unsupported-version
 error. Remounted `/accounts*` handlers are I/O adapters; V4
 destinations/credentials are the read model.
 
 ### UI rules started in stage 6
 
-Accounts lists every destination group through one `DestinationCard` shell.
+Accounts lists each persisted routing card through one `DestinationCard` shell. Multiple cards may reference one destination; their identities and membership are separate from supplier configuration.
 Each credential is a `CredentialRow`. Header brand and type come from
 destination `brand_family` / capabilities when the group is not a platform
 parent. `AccountCard` is no longer mounted on this page. Providers lists

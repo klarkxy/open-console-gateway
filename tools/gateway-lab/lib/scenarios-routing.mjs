@@ -309,7 +309,7 @@ export async function runRoutingControlScenarios(runtime, collector) {
   }
 
   {
-    const label = "shared quota sibling skip";
+    const label = "temporary 429 does not quarantine shared quota siblings";
     let siblingAccountId = null;
     try {
       const beforeIdentities = await api.identities();
@@ -353,12 +353,12 @@ export async function runRoutingControlScenarios(runtime, collector) {
       const mark = lab.snapshot().length;
       const response = await api.chatRoute();
       assert.equal(response.status, 200, response.text.slice(0, 500));
-      checkOutput("chat", false, response.text, "LAB_OK_charlie");
+      checkOutput("chat", false, response.text, "LAB_OK_bravo");
       const hits = lab.snapshot().slice(mark);
-      assert.ok(!hits.some((hit) => hit.listener === "bravo"), "shared quota sibling was not skipped");
+      assert.ok(hits.some((hit) => hit.listener === "bravo"), "temporary 429 blocked an independent endpoint through quota membership");
       api.expectHits(label, mark, [
         { listener: "alpha", slot: "alpha" },
-        { listener: "charlie", slot: "charlie", valid: true },
+        { listener: "bravo", slot: "bravo", valid: true },
       ]);
       collector.pass(label, {
         status: response.status,

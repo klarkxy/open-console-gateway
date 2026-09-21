@@ -21,6 +21,7 @@ base64 = "0.22"
 bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
 futures-util = "0.3"
+fs2 = "0.4"
 getrandom = "0.3"
 ocg-domain = { path = "../ocg-domain", features = ["schemars"] }
 ocg-gateway = { path = "../ocg-gateway" }

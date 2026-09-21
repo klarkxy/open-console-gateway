@@ -89,12 +89,14 @@ fn configurable_destination_patch_round_trips_override_and_delete_requires_no_ke
         &state,
         &destination_id,
         DestinationPatchRequest {
+            enabled: None,
             expectation: expectation(&state),
             name: "After".into(),
             endpoint_url: "https://after.example/v1".into(),
             upstream_protocol: ProtocolDto::Responses,
             auth_scheme: AuthSchemeDto::XApiKey,
             models: vec![DestinationModelPatch {
+                enabled: None,
                 public_model: "public-after".into(),
                 upstream_model: "upstream-after".into(),
                 upstream_override: Some(super::super::types::DestinationUpstreamOverridePatch {

@@ -20,6 +20,7 @@ import {
   routingEligibleOrdered,
   routingExplanationState,
 } from "./routing-explain.ts";
+import { QUOTA_RECOVERY_STATUS_KEYS } from "./quota-recovery.ts";
 
 test("copy tables cover every wire code", () => {
   const modes: RoutingMode[] = ["strict-priority", "sticky-global", "round-robin"];
@@ -46,8 +47,14 @@ test("copy tables cover every wire code", () => {
     "auth_error",
     "cooling_down",
     "free_channel_unavailable",
+    "quota_waiting",
+    "quota_due",
+    "quota_probing",
   ];
   for (const code of exclusions) assert.ok(ROUTING_EXCLUSION_KEYS[code]);
+  assert.equal(ROUTING_EXCLUSION_KEYS.quota_waiting, QUOTA_RECOVERY_STATUS_KEYS.waiting);
+  assert.equal(ROUTING_EXCLUSION_KEYS.quota_due, QUOTA_RECOVERY_STATUS_KEYS.ready);
+  assert.equal(ROUTING_EXCLUSION_KEYS.quota_probing, QUOTA_RECOVERY_STATUS_KEYS.probing);
   const uncertainties: RuntimeOnlyUncertainty[] = [
     "state_changed_after_snapshot",
     "conversation_binding_not_evaluated",

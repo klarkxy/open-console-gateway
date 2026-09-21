@@ -1900,6 +1900,77 @@ fn test_destination(adapter: AdapterKind, legacy: LegacyDestinationRef) -> Desti
     }
 }
 
+#[test]
+fn http_targets_keep_public_separators_and_exact_upstream_identity() {
+    use ocg_domain::destination::CatalogModel;
+    let mut destination = test_destination(
+        AdapterKind::Http,
+        LegacyDestinationRef::Dynamic("lab".into()),
+    );
+    destination.catalog = [
+        ("lab_model", "vendor/lab_model"),
+        ("lab model", "vendor/lab model"),
+        ("lab/model", "vendor/lab/model"),
+        ("lab-model", "vendor/lab-model"),
+    ]
+    .into_iter()
+    .map(|(public, upstream)| CatalogModel {
+        public_model: public.into(),
+        upstream_model: upstream.into(),
+        protocols: vec![UpstreamProtocolKind::ChatCompletions],
+        preferred: Some(UpstreamProtocolKind::ChatCompletions),
+        enabled: true,
+        upstream_override: None,
+    })
+    .collect();
+    for resolution in [
+        ModelResolution::PublicOnly,
+        ModelResolution::PublicAndUpstream,
+    ] {
+        destination.model_resolution = resolution;
+        for (selected_index, selected) in destination.catalog.iter().enumerate() {
+            let provider = if resolution == ModelResolution::PublicOnly {
+                CUSTOM_PROVIDER_ID
+            } else {
+                &destination.id
+            };
+            let resolved = ResolvedModel::PinnedRaw {
+                requested: selected.public_model.clone(),
+                mapping: mapping(provider, &selected.upstream_model),
+            };
+            for requested in [
+                selected.public_model.clone(),
+                selected.public_model.to_uppercase(),
+            ] {
+                for (index, candidate) in destination.catalog.iter().enumerate() {
+                    assert_eq!(
+                        resolved_contains_model(&resolved, &destination, candidate, &requested),
+                        index == selected_index,
+                        "{resolution:?}: {requested} matched {}",
+                        candidate.public_model
+                    );
+                }
+            }
+            if resolution == ModelResolution::PublicAndUpstream {
+                for (index, candidate) in destination.catalog.iter().enumerate() {
+                    assert_eq!(
+                        resolved_contains_model(
+                            &resolved,
+                            &destination,
+                            candidate,
+                            &selected.upstream_model
+                        ),
+                        index == selected_index,
+                        "canonical upstream {} matched {}",
+                        selected.upstream_model,
+                        candidate.upstream_model
+                    );
+                }
+            }
+        }
+    }
+}
+
 fn test_credential(account_id: &str, destination_id: &str) -> DestinationCredential {
     DestinationCredential {
         id: format!("cred-{account_id}"),
@@ -2157,7 +2228,7 @@ fn typed_rejections_cover_current_materialize_branches() {
 
     let goat = goat_account("goat-1");
     let goat_unverified = materialize_account_routes(
-        &[goat.clone()],
+        std::slice::from_ref(&goat),
         &config,
         &parsed,
         &ResolvedModel::PinnedRaw {
@@ -2190,7 +2261,7 @@ fn typed_rejections_cover_current_materialize_branches() {
     let mut ineligible_runtimes = HashMap::new();
     ineligible_runtimes.insert(goat.id.clone(), ineligible);
     let goat_ineligible = materialize_account_routes(
-        &[goat.clone()],
+        std::slice::from_ref(&goat),
         &config,
         &parsed,
         &ResolvedModel::PinnedRaw {

@@ -13,7 +13,7 @@ This guide is for people changing code, cutting releases, debugging the gateway,
 - [State, Credentials, And Lifecycle](maintainer/state-and-lifecycle.md) — `CoreState`, locks, credentials, and persistence.
 - [HTTP Routes](maintainer/http-routes.md) — Inference routes, V3/V4 paths, the V2 tombstone, and auth/session routes.
 - [Runtime Invariants](maintainer/runtime-invariants.md) — Detailed gateway, alias, Zen Free, plan catalog, access key, proxy, and usage-sync semantics.
-- [Storage And Migrations](maintainer/storage-migration.md) — SQLite schema v58, historical migrations, backup, and the operator runbook.
+- [Storage And Migrations](maintainer/storage-migration.md) — SQLite schema v59, historical migrations, backup, and the operator runbook.
 - [Extending Open Console Gateway](maintainer/extending.md) — Sealed provider extension procedure.
 - [Release Artifacts](maintainer/release-artifacts.md) — Supported platform matrix and package names.
 - [CI Workflows](maintainer/ci.md) — Quality, release, and container workflows.

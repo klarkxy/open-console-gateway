@@ -494,6 +494,7 @@ fn adapter_descriptors_preserve_current_capability_decisions() {
     assert!(goat.card_actions.protocol_probe);
     assert!(goat.card_actions.catalog_refresh);
     assert!(goat.card_actions.usage_refresh);
+    assert!(goat.card_actions.manual_usage_calibration);
     assert_eq!(
         goat.card_actions.connection_verify,
         CardVerifyAction::NotApplicable

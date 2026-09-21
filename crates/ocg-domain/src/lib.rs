@@ -2,6 +2,7 @@
 //! normalization for Open Console Gateway.
 
 pub mod account;
+pub mod billing;
 pub mod catalog;
 pub mod connection;
 pub mod credential;

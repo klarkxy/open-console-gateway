@@ -17,6 +17,7 @@ use crate::gateway::materialize::binding_allows_requested_model;
 use crate::gateway::protocol::RequestPlan;
 use crate::models::Account;
 use crate::provider_contracts::protocol_to_api;
+use crate::quota_recovery::{QuotaAcquire, QuotaEpisode};
 use crate::state::CoreState;
 use ocg_domain::catalog::UpstreamProtocolKind;
 use ocg_domain::connection::{
@@ -50,6 +51,9 @@ const ROUTE_CHANGED: &str =
 
 #[derive(Debug, Clone)]
 pub(crate) struct LiveSendSelection {
+    pub target: Option<crate::gateway::materialize::FrozenTarget>,
+    pub credential_id: Option<String>,
+    pub attempt_spec: Option<AttemptSpec>,
     pub account_id: String,
     pub binding_id: String,
     pub credential_version: u64,
@@ -68,6 +72,9 @@ impl LiveSendSelection {
         plan_model: &str,
     ) -> Self {
         Self {
+            target: None,
+            credential_id: None,
+            attempt_spec: None,
             account_id: account.id.clone(),
             binding_id: binding
                 .map(|row| row.binding_id.clone())
@@ -79,6 +86,236 @@ impl LiveSendSelection {
             plan_model: plan_model.to_string(),
         }
     }
+}
+
+impl LiveSendSelection {
+    pub(crate) fn from_execution(
+        route: &crate::gateway::materialize::ExecutionRoute,
+        client_model: &str,
+        routing_model: &str,
+    ) -> Self {
+        let c = &route.routing.account;
+        Self {
+            target: Some(route.target.clone()),
+            credential_id: Some(c.credential_id.clone()),
+            attempt_spec: Some(route.spec.clone()),
+            account_id: c.id.clone(),
+            binding_id: c.binding_id.clone(),
+            credential_version: c.credential_version,
+            key_cipher: c.key_cipher.clone(),
+            client_model: client_model.into(),
+            routing_model: routing_model.into(),
+            plan_model: route.plan.model.clone(),
+        }
+    }
+}
+
+/// Pure authorization, shared by explain and actual dispatch. No decrypt,
+/// selector mutation, database access, or route re-resolution.
+pub(crate) fn verify_execution_authorization(
+    snapshot: &crate::routing_snapshot::RoutingSnapshot,
+    selection: &LiveSendSelection,
+    spec: &AttemptSpec,
+    wall: chrono::DateTime<chrono::Utc>,
+    free_available: bool,
+) -> Result<(), LiveSendAuthError> {
+    use ocg_domain::destination::{AdapterKind, AuthScheme};
+    let deny = || LiveSendAuthError::unauthorized(UNAUTHORIZED_ATTEMPT);
+    let target = selection.target.as_ref().ok_or_else(deny)?;
+    if selection.attempt_spec.as_ref() != Some(spec) {
+        return Err(LiveSendAuthError::unauthorized(ROUTE_CHANGED));
+    }
+    let destination = snapshot
+        .projection
+        .destinations
+        .iter()
+        .find(|d| d.id == target.destination.id)
+        .ok_or_else(deny)?;
+    let c = snapshot
+        .credentials
+        .iter()
+        .find(|c| c.id == selection.account_id)
+        .ok_or_else(deny)?;
+    let channel = crate::routing_runtime::channel_for_adapter(destination.adapter.into());
+    if selection.credential_id.as_deref() != Some(c.credential_id.as_str())
+        || c.destination_id != target.destination.id
+        || !c.enabled
+        || !c.ready
+        || !c.binding_enabled
+        || c.auth_error.is_some()
+        || c.is_cooling_for(channel, wall)
+        || c.quota_probe
+        || c.quota_recovery
+            .as_ref()
+            .is_some_and(|recovery| !recovery.due_at(wall))
+        || (channel == crate::models::UpstreamChannel::Free && !free_available)
+        || c.binding_id.is_empty()
+        || c.binding_id != selection.binding_id
+        || c.credential_version != selection.credential_version
+        || c.key_cipher != selection.key_cipher
+        || !binding_allows_requested_model(
+            &c.scope,
+            &selection.client_model,
+            &selection.routing_model,
+            [&selection.plan_model, &target.model.public_model],
+        )
+    {
+        return Err(deny());
+    }
+    let frozen = &target.destination;
+    if !destination.enabled
+        || destination.adapter != frozen.adapter
+        || destination.base_url != frozen.base_url
+        || destination.auth_scheme != frozen.auth_scheme
+        || destination.protocols != frozen.protocols
+        || destination.model_resolution != frozen.model_resolution
+        || !destination
+            .catalog
+            .iter()
+            .any(|m| m == &target.model && m.enabled)
+        || crate::gateway::materialize::endpoint_id_for_target(
+            c,
+            destination,
+            &target.model,
+            spec.upstream,
+        )
+        .map_err(LiveSendAuthError::unauthorized)?
+            != target.endpoint_id
+    {
+        return Err(LiveSendAuthError::unauthorized(ROUTE_CHANGED));
+    }
+    if destination.auth_scheme != AuthScheme::None {
+        if c.key_cipher.is_empty() {
+            return Err(deny());
+        }
+        if !matches!(&spec.credential, CredentialHandle::Account { id } if id == &c.id) {
+            return Err(deny());
+        }
+        // CPA is a local external integration and owns its key's scope. It is
+        // still subject to identity, rotation, enablement and route checks above.
+        if destination.adapter != AdapterKind::Cpa
+            && !c.grants.allowed_endpoint_ids.contains(&target.endpoint_id)
+        {
+            return Err(LiveSendAuthError::unauthorized(ENDPOINT_NOT_GRANTED));
+        }
+        let url = spec
+            .request_url()
+            .map_err(LiveSendAuthError::unauthorized)?;
+        if destination.adapter == AdapterKind::Http {
+            ensure_secret_origin_granted(&url, &c.grants.allowed_origins)?;
+        } else {
+            ensure_sealed_secret_origin(&url, &spec.base_url)?;
+        }
+    } else if !matches!(spec.credential, CredentialHandle::None) {
+        return Err(deny());
+    }
+    Ok(())
+}
+
+pub(crate) fn authorize_execution_send(
+    state: &CoreState,
+    selection: &LiveSendSelection,
+    spec: &AttemptSpec,
+    decrypt: bool,
+) -> Result<Option<String>, LiveSendAuthError> {
+    let db = state.db.lock();
+    let snapshot = load_snapshot_with_probes(state, &db)?;
+    let wall = state.sample_gateway_clock().0;
+    let free_available = db
+        .free_channel_cooldown_until_at(wall)
+        .map_err(|e| LiveSendAuthError::unauthorized(e.to_string()))?
+        .is_none()
+        && !crate::destination_projection::free_channel_exhausted(&snapshot.projection, wall);
+    verify_execution_authorization(&snapshot, selection, spec, wall, free_available)?;
+    if decrypt && matches!(spec.credential, CredentialHandle::Account { .. }) {
+        state
+            .decrypt_key(&selection.key_cipher)
+            .map(Some)
+            .map_err(LiveSendAuthError::Decrypt)
+    } else {
+        Ok(None)
+    }
+}
+
+/// Re-check authorization immediately before send and acquire a one-shot
+/// quota trial when this Key is due.
+pub(crate) fn confirm_execution_send(
+    state: &CoreState,
+    selection: &LiveSendSelection,
+    spec: &AttemptSpec,
+) -> Result<Option<QuotaEpisode>, LiveSendAuthError> {
+    let _settings_update = state.settings_update.lock();
+    let db = state.db.lock();
+    let mut snapshot = load_snapshot_with_probes(state, &db)?;
+    let wall = state.sample_gateway_clock().0;
+    let free_available = db
+        .free_channel_cooldown_until_at(wall)
+        .map_err(|e| LiveSendAuthError::unauthorized(e.to_string()))?
+        .is_none()
+        && !crate::destination_projection::free_channel_exhausted(&snapshot.projection, wall);
+    verify_execution_authorization(&snapshot, selection, spec, wall, free_available)?;
+    let Some(credential) = snapshot
+        .credentials
+        .iter_mut()
+        .find(|credential| credential.id == selection.account_id)
+    else {
+        return Err(LiveSendAuthError::unauthorized(UNAUTHORIZED_ATTEMPT));
+    };
+    match acquire_quota_trial_locked(state, &db, credential, wall)? {
+        QuotaAcquire::NotInRecovery => Ok(None),
+        QuotaAcquire::Trial(episode) => Ok(Some(episode)),
+        QuotaAcquire::SkipWaiting | QuotaAcquire::SkipProbing => {
+            Err(LiveSendAuthError::unauthorized(UNAUTHORIZED_ATTEMPT))
+        }
+    }
+}
+
+fn load_snapshot_with_probes(
+    state: &CoreState,
+    db: &crate::db::Database,
+) -> Result<crate::routing_snapshot::RoutingSnapshot, LiveSendAuthError> {
+    let mut snapshot = crate::routing_snapshot::RoutingSnapshot::load(db)
+        .map_err(|e| LiveSendAuthError::unauthorized(e.to_string()))?;
+    let probes = state.quota_probes.lock();
+    snapshot.apply_quota_probes(&probes);
+    Ok(snapshot)
+}
+
+fn acquire_quota_trial_locked(
+    state: &CoreState,
+    db: &crate::db::Database,
+    credential: &crate::routing_snapshot::ExecutionCredential,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<QuotaAcquire, LiveSendAuthError> {
+    let Some(recovery) = credential.quota_recovery.as_ref() else {
+        return Ok(QuotaAcquire::NotInRecovery);
+    };
+    let mut probes = state.quota_probes.lock();
+    if probes
+        .get(&credential.credential_id)
+        .is_some_and(|episode| credential.matches_quota_episode(episode))
+    {
+        return Ok(QuotaAcquire::SkipProbing);
+    }
+    if !recovery.due_at(now) {
+        return Ok(QuotaAcquire::SkipWaiting);
+    }
+    let episode = QuotaEpisode {
+        credential_id: credential.credential_id.clone(),
+        account_id: credential.id.clone(),
+        credential_version: credential.credential_version,
+        epoch: recovery.epoch,
+        key_cipher: credential.key_cipher.clone(),
+    };
+    let crash_safe = recovery.with_crash_safe_retry(now);
+    let saved = crate::db::quota_recovery::save_on(&db.conn, &episode, &crash_safe)
+        .map_err(|error| LiveSendAuthError::unauthorized(error.to_string()))?;
+    if !saved {
+        return Ok(QuotaAcquire::NotInRecovery);
+    }
+    probes.insert(credential.credential_id.clone(), episode.clone());
+    state.bump_settings_revision();
+    Ok(QuotaAcquire::Trial(episode))
 }
 
 #[derive(Debug)]
@@ -173,7 +410,7 @@ fn live_key_cipher(
     }
 }
 
-fn verify_live_send(
+pub(super) fn verify_live_send(
     db: &crate::db::Database,
     selection: &LiveSendSelection,
     plan: &RequestPlan,
@@ -544,3 +781,54 @@ fn resolve_inference_url(
 fn inference_urls_match(spec_url: &str, current: &reqwest::Url) -> bool {
     reqwest::Url::parse(spec_url.trim()).is_ok_and(|parsed| parsed == *current)
 }
+
+/// Late observations may update only the exact identity that performed I/O.
+/// The caller retains the DB lock through the subsequent state write.
+pub(crate) fn selection_identity_is_current(
+    db: &crate::db::Database,
+    selected: &LiveSendSelection,
+) -> anyhow::Result<bool> {
+    use rusqlite::OptionalExtension;
+    let live = db.conn.query_row(
+        "SELECT id, binding_id, credential_version, key_cipher FROM credentials WHERE legacy_account_id = ?1 AND COALESCE(credential_purpose, 'inference') = 'inference'",
+        [&selected.account_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?, row.get::<_, String>(3)?))).optional()?;
+    Ok(live.is_some_and(|(id, binding, version, cipher)| {
+        selected.credential_id.as_deref() == Some(id.as_str())
+            && binding == selected.binding_id
+            && version > 0
+            && version as u64 == selected.credential_version
+            && cipher == selected.key_cipher
+    }))
+}
+
+/// Revalidate the route that produced an observation, without treating its own
+/// quota trial or a concurrent cooldown as an authorization change.
+/// The caller holds the DB lock through its state write.
+pub(crate) fn selection_allows_observation(
+    db: &crate::db::Database,
+    selected: &LiveSendSelection,
+) -> anyhow::Result<bool> {
+    let Some(spec) = selected.attempt_spec.as_ref() else {
+        return Ok(false);
+    };
+    let mut snapshot = crate::routing_snapshot::RoutingSnapshot::load(db)?;
+    if let Some(credential) = snapshot
+        .credentials
+        .iter_mut()
+        .find(|credential| credential.id == selected.account_id)
+    {
+        credential.quota_recovery = None;
+        credential.quota_probe = false;
+        credential.cooldowns = ocg_domain::destination::Cooldowns {
+            generic_until: None,
+            five_hour_until: None,
+            week_until: None,
+            month_until: None,
+            free_until: None,
+        };
+    }
+    Ok(verify_execution_authorization(&snapshot, selected, spec, chrono::Utc::now(), true).is_ok())
+}
+
+#[cfg(test)]
+mod tests;

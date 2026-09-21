@@ -25,6 +25,28 @@ test("non-loopback lab host is rejected", async () => {
   assert.throws(() => createLab({ host: "0.0.0.0" }), /loopback/);
 });
 
+test("scripted HTTP failures deliver Retry-After to the client", async () => {
+  const lab = createLab();
+  const started = await lab.start();
+  try {
+    const chat = started.slots.find((slot) => slot.slot === "chat");
+    lab.script(chat.listener, [{
+      kind: "http", status: 429, headers: { "Retry-After": "3" },
+      body: { error: { message: "temporary" } },
+    }]);
+    const response = await fetch(chat.url, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${chat.secret}` },
+      body: JSON.stringify(input("chat", chat.model, false)),
+    });
+    assert.equal(response.status, 429);
+    assert.equal(response.headers.get("retry-after"), "3");
+    assert.deepEqual(await response.json(), { error: { message: "temporary" } });
+  } finally {
+    await lab.close();
+  }
+});
+
 test("scoped http_429 matches endpoint+key+model+scenario and does not hit siblings", async () => {
   const lab = createLab();
   const started = await lab.start();

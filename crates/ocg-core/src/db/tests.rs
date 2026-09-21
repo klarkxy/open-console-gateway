@@ -3,11 +3,299 @@ use super::{V27MigrationFault, v27_test_hooks};
 use crate::crypto::{
     KeyCipher, LOCAL_CIPHER_V2_PREFIX, StaticKeyCipher, is_legacy_local_ciphertext,
 };
+use ocg_domain::dynamic::DynamicAuthKind;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::sync::Arc;
 
 const TEST_HOST_SECRET: &str = "ocg-db-v27-test-host";
+
+fn billing_open_fixture(dir: &Path) -> (Database, i64, crate::billing::CreditAttempt) {
+    use crate::billing_types::{CreditBucket, CreditBucketKind, CreditConfiguration, CreditRate};
+    let db = open_with_host_cipher(dir.to_path_buf()).unwrap();
+    let mut draft = account("billing-open");
+    draft.provider_id = CUSTOM_PROVIDER_ID.into();
+    draft.key_cipher = fixture_account_key_cipher();
+    let endpoint = "https://billing-open.example/v1/chat/completions";
+    db.create_account_with_contract(
+        &draft,
+        Some(&AccountCustomConfigInput {
+            endpoint_url: endpoint.into(),
+            upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+        }),
+        &[AccountModelCapabilityInput {
+            public_model: "model".into(),
+            upstream_model: "model".into(),
+            protocol: UpstreamProtocolKind::ChatCompletions,
+            source: None,
+        }],
+    )
+    .unwrap();
+    let now = Utc::now();
+    billing::configure_on(
+        &db.conn,
+        &draft.id,
+        CreditConfiguration {
+            name: "Personal".into(),
+            currency: "CNY".into(),
+            credits_per_currency: 1.0,
+            rates: vec![CreditRate {
+                model: "model".into(),
+                input_per_million: 10.0,
+                output_per_million: 20.0,
+                cache_read_per_million: None,
+                cache_write_per_million: None,
+            }],
+            monthly: None,
+            source_url: None,
+        },
+        Some(vec![CreditBucket {
+            id: "initial".into(),
+            kind: CreditBucketKind::Manual,
+            label: "Current".into(),
+            granted: 100.0,
+            remaining: 75.0,
+            starts_at: now,
+            expires_at: None,
+        }]),
+        now,
+    )
+    .unwrap();
+    let attempt = billing::capture_on(&db.conn, &draft.id, endpoint, "model", now)
+        .unwrap()
+        .unwrap();
+    let log_id = db
+        .log_forward(&forward_log(&draft.id, "streaming", 0.0))
+        .unwrap();
+    billing::attach_attempt_on(&db.conn, log_id, &attempt).unwrap();
+    (db, log_id, attempt)
+}
+
+fn assert_billing_open_state(db: &Database, remaining: f64, pending: u64, unpriced: u64) {
+    let view = billing::read_view_on(&db.conn, "billing-open", Utc::now())
+        .unwrap()
+        .unwrap();
+    assert_eq!(view.remaining, remaining);
+    assert_eq!(view.pending_requests, pending);
+    assert_eq!(view.unpriced_requests, unpriced);
+}
+
+fn finish_billing_open_attempt(
+    db: &Database,
+    log_id: i64,
+    attempt: &crate::billing::CreditAttempt,
+) {
+    for _ in 0..2 {
+        let tx = db.conn.unchecked_transaction().unwrap();
+        billing::settle_on(
+            &tx,
+            log_id,
+            attempt,
+            ocg_domain::billing::BillingTokens::new(1_000_000, 0, 0, 0),
+            "success",
+            Utc::now(),
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        assert_billing_open_state(db, 65.0, 0, 0);
+    }
+}
+
+#[test]
+fn billing_open_live_receipt_survives_concurrent_open_and_settles_once() {
+    let dir = temp_data_dir("billing-live-open");
+    let (db, log_id, attempt) = billing_open_fixture(&dir);
+    let second = open_with_host_cipher(dir.clone()).unwrap();
+    assert_billing_open_state(&second, 75.0, 1, 0);
+    finish_billing_open_attempt(&db, log_id, &attempt);
+    assert_billing_open_state(&second, 65.0, 0, 0);
+    drop(db);
+    drop(second);
+    let reopened = open_with_host_cipher(dir.clone()).unwrap();
+    assert_billing_open_state(&reopened, 65.0, 0, 0);
+    drop(reopened);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn billing_open_recovers_uncertainty_only_after_last_handle_closes() {
+    let dir = temp_data_dir("billing-cold-open");
+    let (db, _, _) = billing_open_fixture(&dir);
+    let second = open_with_host_cipher(dir.clone()).unwrap();
+    drop(db);
+    let third = open_with_host_cipher(dir.clone()).unwrap();
+    assert_billing_open_state(&third, 75.0, 1, 0);
+    drop(second);
+    drop(third);
+    for _ in 0..2 {
+        let reopened = open_with_host_cipher(dir.clone()).unwrap();
+        assert_billing_open_state(&reopened, 75.0, 0, 1);
+    }
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn billing_open_failed_recovery_rolls_back_and_releases_lifetime_lock() {
+    let dir = temp_data_dir("billing-failed-open");
+    let (db, _, _) = billing_open_fixture(&dir);
+    db.conn.execute_batch("CREATE TRIGGER block_receipt BEFORE UPDATE OF credit_receipt_json ON forward_logs BEGIN SELECT RAISE(ABORT,'fixture recovery failure'); END;").unwrap();
+    drop(db);
+    assert!(open_with_host_cipher(dir.clone()).is_err());
+    let guard = open_guard::DatabaseOpenGuard::acquire(&dir).unwrap();
+    assert!(
+        guard.can_recover_pending(),
+        "failed open must release its lock"
+    );
+    let conn = Connection::open(dir.join("data.sqlite")).unwrap();
+    let state = billing::load_on(&conn, "billing-open").unwrap().unwrap();
+    assert_eq!(state.unpriced_requests, 0, "failed recovery must roll back");
+    assert_eq!(
+        billing::pending_count_on(&conn, &state.credential_id, &state.meter_id).unwrap(),
+        1
+    );
+    conn.execute_batch("DROP TRIGGER block_receipt;").unwrap();
+    drop(conn);
+    drop(guard);
+    let recovered = open_with_host_cipher(dir.clone()).unwrap();
+    assert_billing_open_state(&recovered, 75.0, 0, 1);
+    drop(recovered);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn billing_open_waiter_recovers_when_cold_initializer_fails() {
+    use std::sync::{Mutex, mpsc};
+    use std::time::Duration as StdDuration;
+
+    struct BlockedFailingCipher {
+        entered: mpsc::Sender<()>,
+        fail: Mutex<mpsc::Receiver<()>>,
+    }
+
+    impl KeyCipher for BlockedFailingCipher {
+        fn encrypt(&self, _plaintext: &str) -> Result<String> {
+            anyhow::bail!("fixture does not encrypt")
+        }
+
+        fn decrypt(&self, _ciphertext: &str) -> Result<String> {
+            self.entered.send(()).unwrap();
+            self.fail
+                .lock()
+                .unwrap()
+                .recv_timeout(StdDuration::from_secs(5))
+                .unwrap();
+            anyhow::bail!("fixture cold initializer failure")
+        }
+    }
+
+    let dir = temp_data_dir("billing-failed-initializer-waiter");
+    let (db, _, _) = billing_open_fixture(&dir);
+    drop(db);
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (fail_tx, fail_rx) = mpsc::channel();
+    let cipher = Arc::new(BlockedFailingCipher {
+        entered: entered_tx,
+        fail: Mutex::new(fail_rx),
+    });
+    let first_dir = dir.clone();
+    let first = std::thread::spawn(move || Database::open_with_cipher(first_dir, cipher).is_err());
+    entered_rx.recv_timeout(StdDuration::from_secs(5)).unwrap();
+    let (started_tx, started_rx) = mpsc::channel();
+    let (opened_tx, opened_rx) = mpsc::channel();
+    let second_dir = dir.clone();
+    let second = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        opened_tx.send(open_with_host_cipher(second_dir)).unwrap();
+    });
+    started_rx.recv().unwrap();
+    assert!(matches!(
+        opened_rx.recv_timeout(StdDuration::from_millis(100)),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    ));
+    fail_tx.send(()).unwrap();
+    assert!(first.join().unwrap());
+    let recovered = opened_rx
+        .recv_timeout(StdDuration::from_secs(5))
+        .unwrap()
+        .unwrap();
+    second.join().unwrap();
+    assert_billing_open_state(&recovered, 75.0, 0, 1);
+    drop(recovered);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn billing_open_early_failure_releases_lifetime_lock() {
+    let dir = temp_data_dir("billing-early-failed-open");
+    fs::create_dir(dir.join("data.sqlite")).unwrap();
+    assert!(Database::open(dir.clone()).is_err());
+    let guard = open_guard::DatabaseOpenGuard::acquire(&dir).unwrap();
+    assert!(guard.can_recover_pending());
+    drop(guard);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+// Run by the parent test in another process, including on Windows. The child
+// remains open while the parent finalizes the original pending receipt.
+#[test]
+fn billing_open_subprocess() {
+    let Some(dir) = std::env::var_os("OCG_TEST_BILLING_OPEN_DIR") else {
+        return;
+    };
+    let dir = PathBuf::from(dir);
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    assert_billing_open_state(&db, 75.0, 1, 0);
+    fs::write(dir.join("child-opened"), b"ready").unwrap();
+    let mut signal = [0];
+    std::io::stdin().read_exact(&mut signal).unwrap();
+    assert_billing_open_state(&db, 65.0, 0, 0);
+}
+
+#[test]
+fn billing_open_cross_process_receipt_survives_and_settles_once() {
+    use std::process::{Command, Stdio};
+    use std::time::{Duration as StdDuration, Instant};
+    let dir = temp_data_dir("billing-process-open");
+    let (db, log_id, attempt) = billing_open_fixture(&dir);
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "db::tests::billing_open_subprocess",
+            "--nocapture",
+        ])
+        .env("OCG_TEST_BILLING_OPEN_DIR", &dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + StdDuration::from_secs(30);
+    while !dir.join("child-opened").exists() {
+        if child.try_wait().unwrap().is_some() || Instant::now() >= deadline {
+            let _ = child.kill();
+            let output = child.wait_with_output().unwrap();
+            panic!("concurrent child open failed: {output:?}");
+        }
+        std::thread::sleep(StdDuration::from_millis(10));
+    }
+    finish_billing_open_attempt(&db, log_id, &attempt);
+    child.stdin.take().unwrap().write_all(&[1]).unwrap();
+    while child.try_wait().unwrap().is_none() {
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let output = child.wait_with_output().unwrap();
+            panic!("child settlement check timed out: {output:?}");
+        }
+        std::thread::sleep(StdDuration::from_millis(10));
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    drop(db);
+    let reopened = open_with_host_cipher(dir.clone()).unwrap();
+    assert_billing_open_state(&reopened, 65.0, 0, 0);
+    drop(reopened);
+    fs::remove_dir_all(dir).unwrap();
+}
 
 #[test]
 fn v41_concurrent_migration_rechecks_version_under_the_writer_lock() {
@@ -1166,7 +1454,7 @@ fn substantive_custom_destination_edit_invalidates_verification_and_auth_project
     assert_eq!(state.0, "pending");
     assert!(state.1.is_none());
     assert_eq!(state.2, "unknown");
-    assert!(state.3.is_none());
+    assert_eq!(state.3.as_deref(), Some("2026-09-21T00:00:00Z"));
 
     drop(db);
     fs::remove_dir_all(dir).unwrap();
@@ -1571,7 +1859,6 @@ fn v49_adds_unpublished_public_models_on_v48_reopen_and_fresh_databases() {
 
 #[test]
 fn v50_adds_destination_shadow_tables_on_v49_reopen_and_fresh_databases() {
-    assert_eq!(CURRENT_SCHEMA_VERSION, 58);
     let shadow_tables = [
         "destinations",
         "destination_models",
@@ -1673,7 +1960,10 @@ fn v52_migrates_v51_fixture_and_drops_accounts() {
 fn fresh_open_is_schema_v58_without_leftover_tables_and_keeps_zen() {
     let dir = temp_data_dir("v58-fresh");
     let db = open_with_host_cipher(dir.clone()).unwrap();
-    assert_eq!(schema_version_on(&db.conn).unwrap(), 58);
+    assert_eq!(
+        schema_version_on(&db.conn).unwrap(),
+        crate::db::CURRENT_SCHEMA_VERSION
+    );
     assert!(table_has_column(&db.conn, "destinations", "model_resolution").unwrap());
     assert!(!accounts_table_present(&db.conn));
     assert!(!table_exists(&db.conn, "account_custom_configs").unwrap());
@@ -1916,11 +2206,16 @@ fn insert_leftover_capability(
 }
 
 fn capability_pairs(db: &Database, account_id: &str) -> Vec<(String, String)> {
-    db.list_account_model_capabilities(account_id)
+    // These scope tests compare model identities; v59 materializes the
+    // platform passthrough protocols as several rows for each same identity.
+    let mut pairs: Vec<_> = db
+        .list_account_model_capabilities(account_id)
         .unwrap()
         .into_iter()
         .map(|row| (row.public_model, row.upstream_model))
-        .collect()
+        .collect();
+    pairs.dedup();
+    pairs
 }
 
 fn parent_catalog_pairs(db: &Database, parent_id: &str) -> Vec<(String, String)> {
@@ -3986,7 +4281,10 @@ fn v58_preserves_custom_identity_and_writes_verified_backup() {
 
     assert!(pre_v58_backup_paths(&dir).is_empty());
     let db = open_with_host_cipher(dir.clone()).unwrap();
-    assert_eq!(schema_version_on(&db.conn).unwrap(), 58);
+    assert_eq!(
+        schema_version_on(&db.conn).unwrap(),
+        crate::db::CURRENT_SCHEMA_VERSION
+    );
     let after: (String, String, String, Option<i64>, String) = db
         .conn
         .query_row(
@@ -5165,6 +5463,7 @@ fn node_import_record(
         platform_accounts,
         platform_links,
         platform_catalogs: HashMap::new(),
+        destination_controls: Vec::new(),
         accounts,
         account_order,
         config_json: serde_json::to_string(&config).unwrap(),
@@ -13703,7 +14002,7 @@ fn replace_dynamic_provider_refuses_to_fan_out_a_replacement_key() {
     assert!(
         error
             .to_string()
-            .contains("replacement Key can only be written to the singleton account"),
+            .contains("replacement Key requires exactly one credential"),
         "{error}"
     );
     let first_loaded = db.get_account(&first.id).unwrap().unwrap();
@@ -14088,6 +14387,231 @@ fn ollama_month_window_is_half_open_and_exposes_overage() {
     let (used, reset) = db.ollama_month_usage("ollama-month").unwrap();
     assert_eq!(used, 80.0);
     assert_eq!(reset, Some(end));
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn imported_http_controls_survive_fresh_merge_and_failed_preflight() {
+    use ocg_domain::destination::{CatalogModel, ModelResolution};
+    let dir = temp_data_dir("http-control-import");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let legacy_id = "00000000-0000-4000-8000-00000000c099";
+    let id = ocg_domain::destination::destination_id_for_custom_account(legacy_id);
+    let model = CatalogModel {
+        public_model: "public-model".into(),
+        upstream_model: "upstream-model".into(),
+        protocols: Vec::new(),
+        preferred: None,
+        enabled: false,
+        upstream_override: None,
+    };
+    let mut record = node_import_record(&db, Vec::new(), Vec::new(), Vec::new());
+    record.custom_destinations.push(ImportedCustomDestination {
+        id: id.clone(),
+        legacy_id: legacy_id.into(),
+        name: "No Key".into(),
+        endpoint_url: "https://custom.example/v1/chat/completions".into(),
+        protocol: UpstreamProtocolKind::ChatCompletions,
+        auth_scheme: AuthScheme::None,
+        models: vec![ocg_domain::dynamic::DynamicModelMapping {
+            public_model: model.public_model.clone(),
+            upstream_model: model.upstream_model.clone(),
+            upstream_override: None,
+        }],
+        enabled: false,
+    });
+    db.import_node_state(&record, |_| Ok(())).unwrap();
+    let mut destination = crate::destination_projection::load_persisted(&db)
+        .unwrap()
+        .destinations
+        .into_iter()
+        .find(|d| d.id == id)
+        .unwrap();
+    destination.enabled = false;
+    destination.catalog = vec![model.clone()];
+    destination.model_resolution = ModelResolution::PublicOnly;
+    record.destination_controls = vec![destination];
+    db.conn
+        .execute("DELETE FROM destinations WHERE id = ?1", [&id])
+        .unwrap();
+    db.import_node_state(&record, |db| {
+        let d = crate::destination_projection::load_persisted(db)?
+            .destinations
+            .into_iter()
+            .find(|d| d.id == id)
+            .unwrap();
+        assert!(!d.enabled);
+        assert_eq!(d.auth_scheme, AuthScheme::None);
+        assert_eq!(d.catalog, vec![model.clone()]);
+        Ok(())
+    })
+    .unwrap();
+    let mut target_only = model.clone();
+    target_only.public_model = "target-only".into();
+    target_only.upstream_model = "target-upstream".into();
+    target_only.enabled = true;
+    target_only.protocols = vec![UpstreamProtocolKind::ChatCompletions];
+    let mut target_model = model.clone();
+    target_model.enabled = true;
+    target_model.protocols = vec![UpstreamProtocolKind::ChatCompletions];
+    target_model.preferred = Some(UpstreamProtocolKind::ChatCompletions);
+    destination_store::replace_destination_catalog(
+        &db.conn,
+        &id,
+        &[target_model, target_only.clone()],
+    )
+    .unwrap();
+    db.conn
+        .execute("UPDATE destinations SET enabled = 1 WHERE id = ?1", [&id])
+        .unwrap();
+    let before = destination_store::load_destination_catalog(&db.conn, &id).unwrap();
+    assert!(
+        db.import_node_state(&record, |_| -> Result<()> {
+            anyhow::bail!("preflight refused")
+        })
+        .is_err()
+    );
+    assert_eq!(
+        destination_store::load_destination_catalog(&db.conn, &id).unwrap(),
+        before
+    );
+    db.import_node_state(&record, |_| Ok(())).unwrap();
+    assert_eq!(
+        destination_store::load_destination_catalog(&db.conn, &id).unwrap(),
+        vec![model, target_only]
+    );
+    assert_eq!(
+        db.conn
+            .query_row(
+                "SELECT enabled FROM destinations WHERE id = ?1",
+                [&id],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0
+    );
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn imported_builtin_controls_replace_target_choices_for_old_and_new_payloads() {
+    let dir = temp_data_dir("builtin-control-import");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let scope = ContractScope::provider(OPENCODE_PROVIDER_ID);
+    let now = Utc::now();
+    db.set_contract_catalog(
+        &scope,
+        &["gpt-5.6-luna".into()],
+        Some(now),
+        "test",
+        "https://example.test/models",
+        now,
+    )
+    .unwrap();
+    let destination_id = ocg_domain::destination::destination_id_for_builtin(OPENCODE_PROVIDER_ID);
+    let changes = [
+        UpstreamProtocolKind::ChatCompletions,
+        UpstreamProtocolKind::Responses,
+        UpstreamProtocolKind::Messages,
+    ]
+    .map(|p| ("gpt-5.6-luna".into(), p, ProtocolOverrideState::ForceOff));
+    db.set_model_protocol_overrides(&scope, &changes, now)
+        .unwrap();
+    let source = crate::destination_projection::load_persisted(&db)
+        .unwrap()
+        .destinations
+        .into_iter()
+        .find(|d| d.id == destination_id)
+        .unwrap();
+    assert!(!source.catalog[0].enabled);
+    let mut record = node_import_record(&db, Vec::new(), Vec::new(), Vec::new());
+    record.provider_contracts = db.load_persisted_contracts().unwrap();
+    for canonical in [false, true] {
+        db.set_model_protocol_overrides(
+            &scope,
+            &[(
+                "gpt-5.6-luna".into(),
+                UpstreamProtocolKind::ChatCompletions,
+                ProtocolOverrideState::ForceOn,
+            )],
+            now,
+        )
+        .unwrap();
+        assert!(
+            destination_store::load_destination_catalog(&db.conn, &destination_id).unwrap()[0]
+                .enabled
+        );
+        record.destination_controls = if canonical {
+            vec![source.clone()]
+        } else {
+            vec![]
+        };
+        db.import_node_state(&record, |db| {
+            let catalog = destination_store::load_destination_catalog(&db.conn, &destination_id)?;
+            assert!(!catalog[0].enabled);
+            assert!(catalog[0].protocols.is_empty());
+            Ok(())
+        })
+        .unwrap();
+    }
+    let fresh_dir = temp_data_dir("builtin-control-import-fresh");
+    let fresh = open_with_host_cipher(fresh_dir.clone()).unwrap();
+    fresh.import_node_state(&record, |_| Ok(())).unwrap();
+    assert_eq!(
+        destination_store::load_destination_catalog(&fresh.conn, &destination_id).unwrap(),
+        source.catalog
+    );
+    let empty_dir = temp_data_dir("builtin-control-import-empty");
+    let empty = open_with_host_cipher(empty_dir.clone()).unwrap();
+    record.provider_contracts = PersistedContracts::default();
+    record.destination_controls[0].catalog.clear();
+    empty.import_node_state(&record, |_| Ok(())).unwrap();
+    assert!(destination_store::destination_exists(&empty.conn, &destination_id).unwrap());
+    assert!(
+        destination_store::load_destination_catalog(&empty.conn, &destination_id)
+            .unwrap()
+            .is_empty()
+    );
+    drop(fresh);
+    drop(empty);
+    fs::remove_dir_all(fresh_dir).unwrap();
+    fs::remove_dir_all(empty_dir).unwrap();
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn platform_discovery_preserves_empty_protocol_controls_and_initializes_new_models() {
+    let dir = temp_data_dir("platform-protocol-controls");
+    let db = Database::open(dir.clone()).unwrap();
+    seed_linked_platform_keys(&db, "parent-controls", &[("key-a", "model-a", "up-a")]);
+    let id = ocg_domain::destination::destination_id_for_platform_account("parent-controls");
+    let before = destination_store::load_destination_catalog(&db.conn, &id).unwrap();
+    assert_eq!(before[0].protocols.len(), 3);
+    db.conn.execute("UPDATE destination_models SET enabled = 0, protocols_json = '[]', preferred = NULL WHERE destination_id = ?1 AND public_model = 'model-a'", [&id]).unwrap();
+    db.replace_account_model_capabilities(
+        "key-a",
+        &[
+            custom_capability("model-a", "up-a"),
+            custom_capability("model-b", "up-b"),
+        ],
+    )
+    .unwrap();
+    let catalog = destination_store::load_destination_catalog(&db.conn, &id).unwrap();
+    let saved = catalog
+        .iter()
+        .find(|m| m.public_model == "model-a")
+        .unwrap();
+    assert!(!saved.enabled);
+    assert!(saved.protocols.is_empty());
+    assert!(saved.preferred.is_none());
+    let new = catalog
+        .iter()
+        .find(|m| m.public_model == "model-b")
+        .unwrap();
+    assert_eq!(new.protocols.len(), 3);
     drop(db);
     fs::remove_dir_all(dir).unwrap();
 }

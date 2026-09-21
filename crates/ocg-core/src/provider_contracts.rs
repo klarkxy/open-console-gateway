@@ -521,6 +521,73 @@ pub struct EffectiveContractSet {
 }
 
 impl EffectiveContractSet {
+    /// Compatibility/dashboard evidence view. Routing decisions belong to the
+    /// saved destination catalog; evidence and override labels remain visible.
+    pub(crate) fn apply_destination_configuration(
+        &mut self,
+        projection: &crate::destination_projection::DestinationProjection,
+    ) {
+        let destinations: HashMap<_, _> = projection
+            .destinations
+            .iter()
+            .map(|destination| (destination.id.as_str(), destination))
+            .collect();
+        let by_account: HashMap<_, _> = projection
+            .credentials
+            .iter()
+            .filter_map(|credential| {
+                destinations
+                    .get(credential.destination_id.as_str())
+                    .map(|destination| (credential.legacy_account_id.as_str(), *destination))
+            })
+            .collect();
+        for scope in self
+            .providers
+            .values_mut()
+            .chain(self.custom_endpoints.values_mut())
+        {
+            let destination = match &scope.scope {
+                ContractScope::Provider(id) => destinations
+                    .get(ocg_domain::destination::destination_id_for_builtin(id).as_str())
+                    .copied(),
+                ContractScope::CustomEndpoint(id) => by_account.get(id.as_str()).copied(),
+            };
+            let Some(destination) = destination else {
+                continue;
+            };
+            scope.catalog.models = destination
+                .catalog
+                .iter()
+                .map(|model| model.public_model.clone())
+                .collect();
+            for model in scope.models.values_mut() {
+                let saved = destination
+                    .catalog
+                    .iter()
+                    .find(|saved| saved.public_model.eq_ignore_ascii_case(&model.model_id));
+                for evidence in model.protocols.values_mut() {
+                    evidence.enabled = destination.enabled
+                        && saved.is_some_and(|saved| {
+                            saved.enabled && saved.protocols.contains(&evidence.protocol)
+                        });
+                    if saved.is_some_and(|saved| saved.protocols.contains(&evidence.protocol)) {
+                        evidence.available = true;
+                    }
+                }
+                if let Some(preferred) = saved.and_then(|saved| saved.preferred) {
+                    model.preferred_protocol = preferred;
+                }
+                model.routable = model.has_enabled_protocol() && scope.production_inference;
+                if !model.routable && model.disabled_reasons.is_empty() {
+                    model.disabled_reasons.push("model_disabled".to_string());
+                } else if model.routable {
+                    model.disabled_reasons.clear();
+                }
+            }
+            scope.catalog_routable = scope.models.values().any(|model| model.routable);
+        }
+    }
+
     pub fn scope(&self, scope: &ContractScope) -> Option<&EffectiveScopeContract> {
         match scope {
             ContractScope::Provider(id) => self.providers.get(id),

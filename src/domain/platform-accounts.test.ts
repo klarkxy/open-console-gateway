@@ -6,17 +6,24 @@ import {
   canImportPlatformKeys,
   composeNewApiUserCredential,
   discoveredModelCapabilities,
+  PLATFORM_CREDENTIAL_TAG_KEYS,
+  platformCredentialTags,
   platformKeyGroupLabel,
+  uniquePublicModelCount,
+  platformKeyModelRows,
   platformKeyQuotaName,
   platformModelOverlay,
   formatPlatformRate,
   formatPlatformTime,
   formatQuotaAmount,
   primaryQuota,
+  platformWalletMeter,
+  walletMonthQuota,
   importCandidateCapabilities,
   linkForAccount,
   linkedAccountIdSet,
   newApiCredentialIssue,
+  platformSnapshotErrorKey,
   platformGroupLabel,
   platformHostedEndpoint,
   platformInferenceEndpoint,
@@ -34,6 +41,12 @@ test("New API key import is only offered with a user credential", () => {
   assert.equal(canImportPlatformKeys({ kind: "new_api", hasUserCredential: true }), true);
   assert.equal(canImportPlatformKeys({ kind: "new_api", hasUserCredential: false }), false);
   assert.equal(canImportPlatformKeys({ kind: "sub2api", hasUserCredential: true }), false);
+});
+
+test("snapshot error codes map to copy keys and unknown codes stay generic", () => {
+  assert.equal(platformSnapshotErrorKey("auth.missing"), "未保存管理凭证");
+  assert.equal(platformSnapshotErrorKey("unauthorized"), "管理凭证无效");
+  assert.equal(platformSnapshotErrorKey("not-a-real-code"), "刷新未完成");
 });
 
 test("New API credential is user id and token together, or omitted", () => {
@@ -159,6 +172,60 @@ test("same public models on two Keys overlay without merging rates", () => {
   });
 });
 
+test("unique public model count collapses protocol rows for the same name", () => {
+  assert.equal(uniquePublicModelCount(null), 0);
+  assert.equal(uniquePublicModelCount({
+    model_capabilities: [
+      { public_model: "gpt-5.5", upstream_model: "gpt-5.5", protocol: "chat_completions", source: "discovery", verified_at: null },
+      { public_model: "gpt-5.5", upstream_model: "gpt-5.5", protocol: "messages", source: "discovery", verified_at: null },
+      { public_model: "gpt-5.5", upstream_model: "gpt-5.5", protocol: "responses", source: "discovery", verified_at: null },
+      { public_model: "GPT-5.5", upstream_model: "GPT-5.5", protocol: "chat_completions", source: "discovery", verified_at: null },
+      { public_model: "codex", upstream_model: "codex", protocol: "chat_completions", source: "discovery", verified_at: null },
+    ],
+  } as Account), 2);
+});
+
+test("platform Key model rows collapse protocols and keep the first upstream id", () => {
+  assert.deepEqual(platformKeyModelRows(null), []);
+  assert.deepEqual(platformKeyModelRows({
+    model_capabilities: [
+      { public_model: "gpt-5.5", upstream_model: "openai/gpt-5.5", protocol: "chat_completions", source: "discovery", verified_at: null },
+      { public_model: "gpt-5.5", upstream_model: "ignored", protocol: "messages", source: "discovery", verified_at: null },
+      { public_model: "codex", upstream_model: "codex", protocol: "responses", source: "discovery", verified_at: null },
+      { public_model: "  ", upstream_model: "blank", protocol: "chat_completions", source: "discovery", verified_at: null },
+    ],
+  } as Account), [
+    { public_model: "gpt-5.5", upstream_model: "openai/gpt-5.5", protocols: ["chat_completions", "messages"] },
+    { public_model: "codex", upstream_model: "codex", protocols: ["responses"] },
+  ]);
+});
+
+test("platform credential tags label group and token, never a bare snapshot id", () => {
+  assert.deepEqual(platformCredentialTags({
+    group: "codex-pro",
+    tokenName: "cli-pro",
+    accountName: "codex-pro-0.25",
+    modelCount: 9,
+  }), [
+    { kind: "group", name: "codex-pro" },
+    { kind: "token", name: "cli-pro" },
+    { kind: "models", count: 9 },
+  ]);
+  assert.deepEqual(platformCredentialTags({
+    group: "  ",
+    tokenName: "gpt-0.05",
+    accountName: "gpt-0.05",
+    modelCount: 7,
+  }), [{ kind: "models", count: 7 }]);
+  assert.deepEqual(platformCredentialTags({
+    group: "",
+    tokenName: "",
+    accountName: "orphan",
+    modelCount: 0,
+  }), [{ kind: "models", count: 0 }]);
+  assert.deepEqual(Object.keys(PLATFORM_CREDENTIAL_TAG_KEYS).sort(), ["group", "models", "token"]);
+});
+
 test("key identity uses observed token name and group", () => {
   assert.equal(platformKeyQuotaName({
     observedAt: 1,
@@ -251,6 +318,31 @@ test("primary remaining prefers the overall Key quota over a time window", () =>
   assert.equal(primaryQuota(quotas, "key_limit")?.remaining, 27.5);
   assert.equal(primaryQuota(quotas, "wallet")?.remaining, 15.5);
   assert.equal(primaryQuota([], "wallet"), null);
+});
+
+test("wallet month used stays off the remaining figure", () => {
+  const quotas = [
+    { kind: "wallet" as const, remaining: null, used: 4, limit: null, unit: "usd", scopeId: "wallet:month", unlimited: false, period: "month", resetsAt: null, expiresAt: null, source: "new_api.log_self_stat" },
+    { kind: "wallet" as const, remaining: 27.79, used: 82.21, limit: null, unit: "usd", scopeId: "wallet", unlimited: false, period: null, resetsAt: null, expiresAt: null, source: "new_api.user_self" },
+  ];
+  assert.equal(primaryQuota(quotas, "wallet")?.remaining, 27.79);
+  assert.equal(walletMonthQuota(quotas)?.used, 4);
+  const meter = platformWalletMeter({
+    observedAt: 1_753_000_000,
+    stale: false,
+    errors: [],
+    quotas,
+    models: [],
+    prices: [],
+    groups: [],
+    billingPreference: null,
+    walletOverflow: null,
+  });
+  assert.equal(meter?.remaining, 27.79);
+  assert.equal(meter?.historyUsed, 82.21);
+  assert.equal(meter?.monthUsed, 4);
+  assert.equal(meter?.remainingUnlimited, false);
+  assert.equal(platformWalletMeter(null), null);
 });
 
 test("o03 wallet subscription and key limits stay separate and are never summed", () => {

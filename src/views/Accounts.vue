@@ -173,6 +173,7 @@
         <template v-for="view in displayedGroupViews" :key="view.group.id">
           <DestinationCard
             :group="view.displayGroup"
+            :membership="view.group.credentials"
             :parent="view.parent"
             :accounts-by-id="accountsStore.byId"
             :catalog="providerCatalog"
@@ -182,27 +183,40 @@
             :refreshing="platformRefreshing"
             :pending-link="platformPendingLink"
             :now="now"
-            :order-handle-disabled="orderSaving || busy || sortableRouteCount < 2 || view.group.credentials.length === 0"
-            :order-handle-hint="view.parent ? t('添加 Key 后可拖动此账号调整路由顺序') : ''"
-            :dragging="draggingAccountId === view.group.id"
-            @order-keydown="handleOrderKeydown($event, view.group.id)"
-            @order-drag-start="startAccountDrag($event, view.group.id)"
+            :order-handle-disabled="!arrangementEnabled"
+            :dragging="draggingCardId === view.group.id"
+            :order-handle-hint="arrangementDisabledHint"
+            :can-remove-empty-card="view.group.credentials.length === 0 && removableEmptyCardIds.has(view.group.id)"
+            :arranging-disabled="!arrangementEnabled"
+            :cpa-status="cpaStatusFor(view.displayGroup)"
+            @order-keydown="handleCardKeydown($event, view.group.id)"
+            @order-drag-start="startCardDrag($event, view.group.id)"
+            @add-card="addCardAfter(view.group.id)"
+            @remove-empty-card="removeEmptyCardById(view.group.id)"
             @refresh-parent="view.parent && platformSectionRef?.refreshParent(view.parent)"
             @edit="view.parent && platformSectionRef?.openEdit(view.parent)"
             @delete="view.parent && platformSectionRef?.confirmDelete(view.parent)"
-            @add-key="view.parent && platformSectionRef?.openAddKey(view.parent)"
+            @add-key="addKeyForCard(view.group, view.parent)"
             @import-keys="view.parent && platformSectionRef?.importKeys(view.parent)"
             @link-existing="view.parent && platformSectionRef?.openLink(view.parent)"
             @retry-pending-link="platformSectionRef?.retryPendingLink()"
             @fetch-all-models="fetchAllPlatformModels(overlayAccountsFor(view.group))"
           >
-            <template #row="{ credential, index, extraTags, figure, duplicateName }">
+            <template #row="{ credential, index, extraTags, figure, duplicateName, hideModelCount, modelCount }">
               <CredentialRow
                 v-bind="credentialRowBindings(credential, view.displayGroup.destination)"
                 :extra-tags="extraTags"
                 :figure="figure"
                 :duplicate-name="duplicateName"
+                :hide-model-count="hideModelCount"
+                :model-count="modelCount"
                 :menu-options="rowMenuOptions(view.group, credential, index)"
+                :order-disabled="!arrangementEnabled || view.group.credentials.length < 2"
+                :dragging="draggingCredentialId === credential.id"
+                :quota-retrying="!!quotaRetrying[credential.id]"
+                :cpa-status="cpaStatusFor(view.displayGroup)"
+                @order-drag-start="startCredentialDrag($event, view.group.id, credential.id)"
+                @order-keydown="handleRowKeydown($event, credential.legacy_account_id)"
                 :show-refresh="view.parent ? true : undefined"
                 :refreshing="view.parent ? !!platformRefreshing[`${view.parent.id}:${credential.legacy_account_id}`] : undefined"
                 :usage-loading="!!usageLoading[credential.legacy_account_id] || (!!view.parent && (platformMutating || busy))"
@@ -218,6 +232,8 @@
                 @usage-update-resets-first="(key, value) => updateResetsFirstField(credential.legacy_account_id, key, value)"
                 @usage-update-resets-second="(key, value) => updateResetsSecondField(credential.legacy_account_id, key, value)"
                 @usage-save="(key) => saveUsage(credential.legacy_account_id, key)"
+                @retry-quota="retryQuotaRecovery(credential.id)"
+                @open-models="openPlatformKeyModels(credential.legacy_account_id)"
               />
             </template>
           </DestinationCard>
@@ -371,6 +387,56 @@
       @update:show="setCreateModalVisible"
       @create="onCreateIdentityCredential"
     />
+
+    <PlatformKeyModelsModal
+      :show="platformKeyModelsAccount !== null"
+      :account="platformKeyModelsAccount"
+      :busy="platformMutating"
+      @update:show="setPlatformKeyModelsVisible"
+      @fetch="refreshPlatformKeyModels"
+    />
+
+    <n-modal
+      :show="moveToCardState !== null"
+      preset="card"
+      :title="t('移动账号到卡片')"
+      style="width: 440px; max-width: calc(100vw - 32px)"
+      :close-on-esc="!orderSaving"
+      @update:show="setMoveToCardVisible"
+    >
+      <n-space vertical :size="12">
+        <p v-if="moveToCardState" class="move-to-card-subject">
+          {{ moveToCardSubject }}
+        </p>
+        <n-radio-group
+          v-if="moveToCardState"
+          v-model:value="moveToCardTarget"
+          class="move-to-card-options"
+        >
+          <n-radio
+            v-for="option in moveToCardOptions"
+            :key="option.value"
+            :value="option.value"
+            :disabled="orderSaving"
+          >
+            {{ option.label }}
+          </n-radio>
+        </n-radio-group>
+      </n-space>
+      <template #footer>
+        <n-space justify="end">
+          <n-button :disabled="orderSaving" @click="setMoveToCardVisible(false)">
+            {{ t("取消") }}
+          </n-button>
+          <n-button
+            type="primary"
+            :loading="orderSaving"
+            :disabled="!moveToCardTarget || !arrangementEnabled"
+            @click="confirmMoveToCard"
+          >{{ t("移动") }}</n-button>
+        </n-space>
+      </template>
+    </n-modal>
   </div>
 </template>
 
@@ -385,6 +451,8 @@ import {
   NIcon,
   NInput,
   NModal,
+  NRadio,
+  NRadioGroup,
   NSelect,
   NSpin,
   NSpace,
@@ -396,7 +464,9 @@ import { DashboardRequestError, dashboardApi, isRevisionConflict } from "../api/
 import { providerApi } from "../api/providers.ts";
 import { useAccountsStore } from "../stores/accounts.ts";
 import { useDestinationsStore } from "../stores/destinations.ts";
+import { useSessionStore } from "../stores/session.ts";
 import { useIdentitiesStore } from "../stores/identities.ts";
+import { useCpaStore } from "../stores/cpa.ts";
 import { usePlatformAccountsStore } from "../stores/platformAccounts.ts";
 import { useProvidersStore } from "../stores/providers.ts";
 import { useSettingsStore } from "../stores/settings.ts";
@@ -428,19 +498,24 @@ import {
 import { identitiesApi } from "../api/identities.ts";
 import type { BindingPatchInput, IdentityCredentialCreateInput } from "../api/identities.ts";
 import { accountCapabilities, isManagedOnboardingAccount } from "../domain/account-capabilities.ts";
-import { DEFAULT_PROVIDER_ID } from "../domain/destination-providers.ts";
+import { DEFAULT_PROVIDER_ID, connectionForDestination } from "../domain/destination-providers.ts";
 import { legacyCustomAccountDestinationId } from "../domain/custom-account.ts";
 import { ROUTING_MODE_KEYS } from "../domain/routing-explain.ts";
 import type { Destination, DestinationCredential } from "../api/destinations.ts";
 import {
-  alignDestinationGroupsToAccountOrder,
-  buildDestinationGroups,
   includeCredentialRow,
   isSingleAccountGroup,
-  moveWithinGroup,
   overlayAccountForCredential,
   type DestinationGroup,
 } from "../domain/destination-groups.ts";
+import {
+  addEmptyCardAfter,
+  buildRoutingCardGroups,
+  moveCredentialToCard,
+  moveCredentialWithinCard,
+  newRoutingCardId,
+  removeEmptyCard,
+} from "../domain/routing-cards.ts";
 import {
   DESTINATION_LOAD_KEYS,
   DESTINATION_PROJECTION_REFRESH_KEYS,
@@ -448,11 +523,17 @@ import {
   refreshDestinationProjection as loadDestinationProjection,
   type DestinationProjectionRefreshCode,
 } from "../domain/destination-projection-refresh.ts";
+import { quotaRetryRequestNeeded } from "../domain/quota-recovery.ts";
+import type { CpaCardStatus } from "../domain/cpa-runtime.ts";
+import {
+  browserAccountsProjectionRefreshHost,
+  createAccountsProjectionRefresh,
+} from "../domain/accounts-projection-refresh.ts";
 import { linkForAccount } from "../domain/platform-accounts.ts";
 import type { PlatformAccount } from "../api/platform-accounts.ts";
 import { useAccountUsage } from "../domain/useAccountUsage.ts";
 import { accountInferenceEndpointUrl, officialBalanceSupported } from "../domain/upstream-balance.ts";
-import { useAccountOrder } from "./useAccountOrder.ts";
+import { useRoutingCardLayout } from "./useRoutingCardLayout.ts";
 import {
   filterAccounts,
   plansInUse,
@@ -467,8 +548,21 @@ import {
 import { accountCreateRequestInput } from "../domain/account-create-payload.ts";
 import {
   isFirstReadyProviderAccount,
+  providerContractAllowsCatalogRefresh,
   shouldRefreshCatalogForNewProviderAccount,
 } from "../domain/provider-catalog-refresh.ts";
+import {
+  mergeDiscoveredAccountCapabilities,
+  mergeDiscoveredCatalogModels,
+  usageCompanionCatalog,
+  usageCompanionCatalogLockKey,
+} from "../domain/usage-refresh-catalog.ts";
+import {
+  DESTINATION_EDIT_ISSUE_KEYS,
+  destinationEditDraft,
+  isDestinationEditable,
+} from "../domain/destination-edit.ts";
+import { planDestinationSave } from "../domain/destination-edit-save.ts";
 import { t, type MessageKey } from "../i18n/index.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
 import { applyAppViewSearchParams, readAccountAddDeepLink, readAccountDeepLink } from "./app-navigation.ts";
@@ -492,18 +586,21 @@ import AccountTransferModal from "../components/AccountTransferModal.vue";
 import AccountCredentialModal from "../components/AccountCredentialModal.vue";
 import IdentityCredentialCreateModal from "../components/IdentityCredentialCreateModal.vue";
 import PlatformAccountsSection from "../components/PlatformAccountsSection.vue";
+import PlatformKeyModelsModal from "../components/PlatformKeyModelsModal.vue";
 import type { PlatformAccountFormPayload } from "../components/PlatformAccountFormModal.vue";
 
 const dialog = useDialog();
 const message = useMessage();
 const accountsStore = useAccountsStore();
 const destinationsStore = useDestinationsStore();
+const sessionStore = useSessionStore();
 const identitiesStore = useIdentitiesStore();
 const platformStore = usePlatformAccountsStore();
 const providersStore = useProvidersStore();
 const settingsStore = useSettingsStore();
+const cpaStore = useCpaStore();
 // The account list lives in the store; the writable computed lets the
-// order/usage composables keep their Ref<Account[]> contract while every
+// usage composable and confirmed order receipts keep their Ref<Account[]> contract while every
 // write commits through the store.
 const accounts = computed<Account[]>({
   get: () => accountsStore.accounts,
@@ -538,6 +635,9 @@ const credentialModalMode = ref<CredentialEditorMode>("rotate");
 const credentialModalAccountId = ref<string | null>(null);
 const credentialModalExpectation = ref<MutationExpectation | null>(null);
 const showCreateModal = ref(false);
+const createModalCardId = ref<string | null>(null);
+let accountViewSession = 0;
+watch(() => destinationsStore.loaded, loaded => { if (!loaded) accountViewSession += 1; }, { flush: "sync" });
 const createModalAccountId = ref<string | null>(null);
 const createModalExpectation = ref<MutationExpectation | null>(null);
 const createModalRef = ref<InstanceType<typeof IdentityCredentialCreateModal> | null>(null);
@@ -594,7 +694,6 @@ const {
   quotaLimitsLoading,
   quotaLimitsError,
   usageLimitsFor,
-  usageMap,
   providerUsageMap,
   usageEdits,
   usageLoading,
@@ -609,38 +708,142 @@ const {
   refreshAccountUsage,
   loadQuotaLimits,
   loadAccountUsage,
+  revalidateAccountUsage,
   retryQuotaLimits,
+  forgetAccount,
 } = useAccountUsage(accounts, now, providerCatalog, {
   endpointUrlFor: (account) => accountInferenceEndpointUrl(
     account,
     identitiesStore.byAccountId.get(account.id) ?? null,
     providersStore.connections,
   ),
+  afterUsageRefresh: (accountId, isCurrent) => refreshCompanionCatalog(accountId, isCurrent),
 });
 
-const allGroups = computed(() => alignDestinationGroupsToAccountOrder(
-  buildDestinationGroups(
-    destinationsStore.destinations,
-    destinationsStore.credentials,
-  ),
-  accounts.value.map((account) => account.id),
-));
+// The saved routing-card snapshot is the only ordering source; the visible
+// card order then row order is the persisted routing priority. The view keeps
+// only a UI-local draft layout while an arrangement is being composed.
+const layoutDraft = ref<{ id: string; destinationId: string; credentialIds: string[] }[] | null>(null);
 const knownAccountIds = computed(() => new Set(accountsStore.byId.keys()));
 
+/** Draft layout (while arranging) or the committed snapshot. */
+const activeCardLayout = computed(() => (
+  layoutDraft.value ?? destinationsStore.cards.map((card) => ({
+    id: card.id,
+    destinationId: card.destination_id,
+    credentialIds: [...card.credential_ids],
+  }))
+));
+
+const allGroups = computed(() => buildRoutingCardGroups(
+  activeCardLayout.value.map((card) => ({
+    id: card.id,
+    destination_id: card.destinationId,
+    credential_ids: card.credentialIds,
+  })),
+  destinationsStore.destinations,
+  destinationsStore.credentials,
+));
+
+const committedCardLayout = computed(() => destinationsStore.cards.map((card) => ({
+  id: card.id,
+  destinationId: card.destination_id,
+  credentialIds: [...card.credential_ids],
+})));
+
+const arrangementBlocked = computed(() => busy.value || platformMutating.value
+  || planFilter.value !== "all" || statusFilter.value !== "all" || !destinationsStore.loaded);
+async function saveCardLayout(layout: { id: string; destinationId: string; credentialIds: string[] }[], revision: MutationExpectation): Promise<void> {
+  await destinationsStore.replaceRoutingCardLayout(layout, revision);
+}
 const {
-  orderSaving,
-  draggingAccountId,
-  orderAnnouncement,
-  startAccountDrag,
-  handleOrderKeydown,
-  persistExplicitOrder,
-  revertActiveDrag,
-} = useAccountOrder({
-  accounts,
-  busy,
-  reloadAfterRevisionConflict: reloadAfterControlPlaneConflict,
-  groups: allGroups,
+  orderSaving, orderAnnouncement, draggingCardId, draggingCredentialId,
+  startCardDrag, startCredentialDrag, handleCardKeydown, applyLayoutChange,
+  cancelArrangement, revertActiveArrangement,
+} = useRoutingCardLayout({
+  committedLayout: committedCardLayout,
+  revision: computed(() => destinationsStore.expectation),
+  draft: layoutDraft,
+  busy: arrangementBlocked,
+  message,
+  save: saveCardLayout,
+  refreshConflict: () => Promise.all([accountsStore.loadPresented(), identitiesStore.loadPresented(), providersStore.loadConnections()]),
 });
+const arrangementEnabled = computed(() => !arrangementBlocked.value && !orderSaving.value);
+const arrangementDisabledHint = computed(() => planFilter.value !== "all" || statusFilter.value !== "all"
+  ? t("清除筛选后可调整顺序") : "");
+const removableEmptyCardIds = computed(() => new Set(destinationsStore.cards
+  .filter(card => card.credential_ids.length === 0 && destinationsStore.cards.some(other => other.id !== card.id && other.destination_id === card.destination_id))
+  .map(card => card.id)));
+function draftCards(cards: typeof destinationsStore.cards) {
+  return cards.map(card => ({ id: card.id, destinationId: card.destination_id, credentialIds: [...card.credential_ids] }));
+}
+async function addCardAfter(cardId: string) {
+  if (!arrangementEnabled.value) return;
+  const card = destinationsStore.cards.find(card => card.id === cardId);
+  if (card) await applyLayoutChange(draftCards(addEmptyCardAfter(destinationsStore.cards, card.destination_id, cardId)));
+}
+async function removeEmptyCardById(cardId: string) {
+  if (!arrangementEnabled.value) return;
+  const next = removeEmptyCard(destinationsStore.cards, cardId);
+  if (next) await applyLayoutChange(draftCards(next));
+}
+const moveToCardState = ref<string | null>(null);
+const moveToCardTarget = ref<string | null>(null);
+const movingCredential = computed(() => destinationsStore.credentials.find(row => row.id === moveToCardState.value));
+const moveToCardSubject = computed(() => movingCredential.value?.name ?? "");
+const moveToCardOptions = computed(() => {
+  const credential = movingCredential.value;
+  if (!credential) return [];
+  const options = destinationsStore.cards.flatMap((card, index) => {
+    if (card.destination_id !== credential.destination_id || card.credential_ids.includes(credential.id)) return [];
+    const names = card.credential_ids.map(id => destinationsStore.credentials.find(row => row.id === id)?.name ?? "").filter(Boolean).join("、");
+    return [{ value: card.id, label: t("第 {position} 张 · {names}", { position: index + 1, names: names || t("空卡片") }) }];
+  });
+  return [...options, { value: "new", label: t("新卡片") }];
+});
+function setMoveToCardVisible(show: boolean) {
+  if (!show && !orderSaving.value) { moveToCardState.value = null; moveToCardTarget.value = null; }
+}
+function openMoveToCard(accountId: string) {
+  if (!arrangementEnabled.value) return;
+  const credential = destinationsStore.credentialsByLegacyAccountId.get(accountId);
+  if (!credential) return;
+  moveToCardState.value = credential.id;
+  moveToCardTarget.value = moveToCardOptions.value[0]?.value ?? "new";
+}
+async function confirmMoveToCard() {
+  const credential = movingCredential.value;
+  if (!arrangementEnabled.value || !credential || !moveToCardTarget.value) return;
+  let cards = destinationsStore.cards;
+  let target = moveToCardTarget.value;
+  if (target === "new") {
+    const sourceIndex = cards.findIndex(card => card.credential_ids.includes(credential.id));
+    if (sourceIndex < 0) return;
+    target = newRoutingCardId();
+    cards = [...cards];
+    cards.splice(sourceIndex + 1, 0, { id: target, destination_id: credential.destination_id, credential_ids: [] });
+  }
+  const next = moveCredentialToCard(cards, credential.id, target);
+  if (next && await applyLayoutChange(draftCards(next))) setMoveToCardVisible(false);
+}
+function handleRowKeydown(event: KeyboardEvent, accountId: string) {
+  if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+  event.preventDefault();
+  void moveWithinDisplayedGroup(accountId, event.key === "ArrowUp" ? -1 : 1);
+}
+async function addKeyForCard(group: DestinationGroup, parent: PlatformAccount | null) {
+  if (parent) { platformSectionRef.value?.openAddKey(parent); return; }
+  const source = destinationsStore.credentials.find(row => row.destination_id === group.destination.id);
+  const account = source ? overlayAccountForCredential(source, accountsStore.byId) : null;
+  if (account) { await openCreateModal(account.id); createModalCardId.value = group.id; return; }
+  await providersStore.loadConnections().catch(() => undefined);
+  const connection = connectionForDestination(providersStore.connections ?? [], group.destination);
+  if (!connection) return;
+  editingAccount.value = null;
+  addInitialOptionId.value = `connection:${connection.id}`;
+  showAddModal.value = true;
+}
 
 const managedWizardAccount = computed(() => (
   accounts.value.find(({ id }) => id === managedWizardAccountId.value) ?? null
@@ -694,6 +897,7 @@ const displayedGroups = computed(() => {
   const visibleIds = visibleAccountIds.value;
   const knownIds = knownAccountIds.value;
   return allGroups.value.filter((group) => {
+    if (group.credentials.length === 0) return planFilter.value === "all" && statusFilter.value === "all";
     if (group.destination.legacy.kind === "platform_parent") {
       if (group.credentials.length === 0) return planFilter.value === "all" && statusFilter.value === "all";
       if (planFilter.value !== "all" && planFilter.value !== "custom") return false;
@@ -737,10 +941,6 @@ const displayedGroupViews = computed((): DisplayedGroupView[] => {
   }
   return views;
 });
-
-const sortableRouteCount = computed(() => (
-  displayedGroups.value.filter((group) => group.credentials.length >= 1).length
-));
 
 // Ordering follows the routing mode, so the compact line above the ordered
 // list names the live mode and sticky state; a failed settings load hides it.
@@ -862,6 +1062,15 @@ function overlayAccountsFor(group: DestinationGroup): Account[] {
     .filter((account): account is Account => Boolean(account));
 }
 
+function cpaStatusFor(group: DestinationGroup): CpaCardStatus | null {
+  return group.destination.adapter === "cpa" ? cpaStore.cardStatus : null;
+}
+
+function refreshCpaSnapshot(): void {
+  if (!destinationsStore.destinations.some((destination) => destination.adapter === "cpa")) return;
+  void cpaStore.load().catch(() => undefined);
+}
+
 function credentialRowBindings(credential: DestinationCredential, destination: Destination) {
   const account = overlayAccountForCredential(credential, accountsStore.byId) ?? null;
   const overlayId = account?.id ?? credential.legacy_account_id;
@@ -898,7 +1107,8 @@ function rowMenuOptions(
     id: credential.legacy_account_id,
     name: credential.name,
   };
-  const moves = groupMoveMenuOptions(menuTarget, resolved, group.credentials.length);
+  const moves = groupMoveMenuOptions(menuTarget, resolved, group.credentials.length, { canMoveToCard: true })
+    .map(option => ({ ...option, disabled: !arrangementEnabled.value || Boolean(option.disabled) }));
   if (group.destination.legacy.kind === "platform_parent") {
     const blocked = platformMutating.value || busy.value;
     return [
@@ -959,6 +1169,8 @@ function handleMenuSelect(key: string | number, accountId: string) {
       negativeText: t("取消"),
       onPositiveClick: () => deleteAccount(accountId),
     });
+  } else if (key === "move-to-card") {
+    openMoveToCard(accountId);
   } else if (key === "move-up" || key === "move-down") {
     void moveWithinDisplayedGroup(accountId, key === "move-up" ? -1 : 1);
   } else if (key === "fetch-models") {
@@ -1093,8 +1305,8 @@ function identityForCard(accountId: string) {
 }
 
 async function captureIdentityViewExpectation(): Promise<MutationExpectation | null> {
-  if (identitiesStore.snapshotExpectation) return identitiesStore.snapshotExpectation;
-  await loadIdentitiesOverlay();
+  await identitiesStore.loadPresented();
+  identitiesError.value = "";
   return identitiesStore.snapshotExpectation;
 }
 
@@ -1162,6 +1374,7 @@ async function openCreateModal(accountId: string): Promise<void> {
     return;
   }
   createModalAccountId.value = accountId;
+  createModalCardId.value = destinationsStore.cards.find(card => card.credential_ids.some(id => destinationsStore.credentialsByLegacyAccountId.get(accountId)?.id === id))?.id ?? null;
   showCreateModal.value = true;
 }
 
@@ -1180,12 +1393,12 @@ function setCreateModalVisible(show: boolean): void {
   if (!show) {
     createModalAccountId.value = null;
     createModalExpectation.value = null;
+    createModalCardId.value = null;
   }
 }
 
 async function refreshAccountsAndIdentities(): Promise<void> {
-  await accountsStore.loadPresented();
-  await loadIdentitiesOverlay();
+  await Promise.all([accountsStore.loadPresented(), loadIdentitiesOverlay(), destinationsStore.load()]);
 }
 
 async function recoverCredentialMutationConflict(error: unknown): Promise<boolean> {
@@ -1273,18 +1486,29 @@ async function onCreateIdentityCredential(payload: IdentityCredentialCreateInput
     message.warning(t(support?.unsupportedReason ?? "无法确定当前卡片的凭据"));
     return;
   }
+  const capturedSession = accountViewSession;
   busy.value = true;
   try {
-    await identitiesApi.createIdentityCredential(
+    const targetCardId = createModalCardId.value;
+    const created = await identitiesApi.createIdentityCredential(
       identityId,
       payload,
       createModalExpectation.value ?? undefined,
     );
+    if (capturedSession !== accountViewSession) return;
     showCreateModal.value = false;
     createModalAccountId.value = null;
     createModalExpectation.value = null;
+    createModalCardId.value = null;
     try {
       await refreshAccountsAndIdentities();
+      if (capturedSession !== accountViewSession) return;
+      if (targetCardId) {
+        const target = destinationsStore.cards.find(card => card.id === targetCardId);
+        const next = target && !target.credential_ids.includes(created.credential_id)
+          ? moveCredentialToCard(destinationsStore.cards, created.credential_id, targetCardId) : null;
+        if (next) await destinationsStore.replaceRoutingCardLayout(draftCards(next));
+      }
     } catch (refreshError) {
       message.error(t("加载账号失败：{error}", { error: dashboardErrorDetail(refreshError) }));
     }
@@ -1312,19 +1536,13 @@ async function loadIdentitiesOverlay(): Promise<void> {
 }
 
 async function moveWithinDisplayedGroup(accountId: string, delta: number): Promise<void> {
-  const group = allGroups.value.find((row) => (
-    row.credentials.some((credential) => (
-      credential.legacy_account_id === accountId || credential.id === accountId
-    ))
-  ));
-  if (!group) return;
-  const next = moveWithinGroup(
-    accounts.value.map((account) => account.id),
-    group.credentials.map((credential) => credential.legacy_account_id),
-    accountId,
-    delta,
-  );
-  if (next) await persistExplicitOrder(next);
+  if (!arrangementEnabled.value) return;
+  const credential = destinationsStore.credentialsByLegacyAccountId.get(accountId);
+  if (!credential) return;
+  const card = destinationsStore.cards.find(card => card.credential_ids.includes(credential.id));
+  if (!card) return;
+  const next = moveCredentialWithinCard(destinationsStore.cards, card.id, credential.id, delta);
+  if (next) await applyLayoutChange(draftCards(next));
 }
 
 async function retryDestinations(): Promise<void> {
@@ -1380,6 +1598,26 @@ function fetchPlatformModels(accountId: string): void {
 
 function fetchAllPlatformModels(keys: Account[]): void {
   platformSectionRef.value?.fetchModelsAll(keys);
+}
+
+const platformKeyModelsAccountId = ref<string | null>(null);
+const platformKeyModelsAccount = computed(() => (
+  platformKeyModelsAccountId.value
+    ? accounts.value.find((account) => account.id === platformKeyModelsAccountId.value) ?? null
+    : null
+));
+
+function openPlatformKeyModels(accountId: string): void {
+  platformKeyModelsAccountId.value = accountId;
+}
+
+function setPlatformKeyModelsVisible(show: boolean): void {
+  if (!show) platformKeyModelsAccountId.value = null;
+}
+
+function refreshPlatformKeyModels(): void {
+  const account = platformKeyModelsAccount.value;
+  if (account) platformSectionRef.value?.fetchModels(account);
 }
 
 function editPlatformKey(accountId: string): void {
@@ -1612,8 +1850,7 @@ async function resetBrowserProfile(accountId: string): Promise<void> {
     const updated = await dashboardApi.resetAccountBrowserProfile(accountId);
     replaceAccount(updated);
     if (!accountIsReady(updated)) {
-      delete usageMap.value[accountId];
-      delete usageEdits.value[accountId];
+      forgetAccount(accountId);
     }
     message.success(t("官网登录状态已重置"));
   } catch (error) {
@@ -1646,13 +1883,111 @@ async function refreshCatalogIfNewProvider(account: Account): Promise<void> {
   }
 }
 
+const companionCatalogInflight = new Set<string>();
+
+function destinationForAccountId(accountId: string): Destination | null {
+  const credential = destinationsStore.credentialsByLegacyAccountId.get(accountId);
+  if (!credential) return null;
+  return destinationsStore.destinations.find((row) => row.id === credential.destination_id) ?? null;
+}
+
+async function refreshCompanionCatalog(accountId: string, isCurrent: () => boolean): Promise<void> {
+  if (!isCurrent()) return;
+  const account = accounts.value.find((item) => item.id === accountId);
+  if (!account) return;
+  const destination = destinationForAccountId(accountId);
+  const companion = usageCompanionCatalog({
+    providerId: account.provider_id,
+    catalog: providerCatalog.value,
+    destination,
+  });
+  const lockKey = usageCompanionCatalogLockKey(companion, accountId, destination?.id ?? null);
+  if (!lockKey || companionCatalogInflight.has(lockKey)) return;
+  companionCatalogInflight.add(lockKey);
+  try {
+    if (companion.kind === "provider_catalog") {
+      const contracts = providersStore.contracts ?? await providersStore.loadContracts();
+      if (!isCurrent()) return;
+      if (!providerContractAllowsCatalogRefresh(contracts, companion.providerId)) return;
+      await providersStore.refreshContractCatalog("provider", companion.providerId);
+      if (!isCurrent()) return;
+      await refreshDestinationProjection();
+      if (!isCurrent()) return;
+      message.success(t("已刷新模型目录"));
+      return;
+    }
+    const endpointUrl = account.custom_config?.endpoint_url?.trim() || destination?.base_url?.trim() || "";
+    const protocol = account.custom_config?.upstream_protocol
+      ?? destination?.protocols[0]
+      ?? "chat_completions";
+    if (!endpointUrl) return;
+    const discovery = await dashboardApi.discoverCustomModels({
+      endpoint_url: endpointUrl,
+      upstream_protocol: protocol,
+      account_id: account.id,
+    });
+    if (!isCurrent()) return;
+    if (discovery.models.length === 0) {
+      message.warning(t("该 Key 未返回可用模型；确认 Key 与站点地址无误后重试。"));
+      return;
+    }
+    if (companion.kind === "http_destination") {
+      if (!destination || !isDestinationEditable(destination)) return;
+      const merged = mergeDiscoveredCatalogModels(
+        destination.catalog,
+        discovery.models,
+        protocol,
+      );
+      const draft = destinationEditDraft({ ...destination, catalog: merged.catalog });
+      const plan = planDestinationSave(destination, destinationsStore.credentials, draft);
+      if (plan.status === "invalid") {
+        message.warning(t(DESTINATION_EDIT_ISSUE_KEYS[plan.issue]));
+        return;
+      }
+      if (plan.status !== "patch") return;
+      await destinationsStore.patchDestination(destination.id, plan.input);
+      if (!isCurrent()) return;
+      if (merged.added === 0) {
+        message.success(t("已刷新模型目录"));
+        return;
+      }
+      message.success(
+        discovery.truncated
+          ? t("已导入 {count} 个模型（列表被截断）", { count: merged.added })
+          : t("已导入 {count} 个模型", { count: merged.added }),
+      );
+      return;
+    }
+    const merged = mergeDiscoveredAccountCapabilities(
+      account.model_capabilities,
+      discovery.models,
+      protocol,
+    );
+    if (merged.added === 0) {
+      message.success(t("已刷新模型目录"));
+      return;
+    }
+    const updated = await dashboardApi.updateAccountModelCapabilities(account.id, merged.capabilities);
+    if (!isCurrent()) return;
+    replaceAccount(updated);
+    await refreshDestinationProjection();
+    if (!isCurrent()) return;
+    message.success(
+      discovery.truncated
+        ? t("已导入 {count} 个模型（列表被截断）", { count: merged.added })
+        : t("已导入 {count} 个模型", { count: merged.added }),
+    );
+  } catch (error) {
+    if (!isCurrent()) return;
+    message.warning(t("刷新模型目录失败：{error}", { error: dashboardErrorDetail(error) }));
+  } finally {
+    companionCatalogInflight.delete(lockKey);
+  }
+}
+
 function removeAccountState(id: string): void {
   accountsStore.removeAccount(id);
-  delete usageMap.value[id];
-  delete providerUsageMap.value[id];
-  delete usageEdits.value[id];
-  delete usageLoading.value[id];
-  delete usageLoadErrors.value[id];
+  forgetAccount(id);
   if (testingAccountId.value === id) testingAccountId.value = null;
   delete providerSettingsSaving.value[id];
   delete purchaseDateSaving.value[id];
@@ -1660,14 +1995,19 @@ function removeAccountState(id: string): void {
 
 function accountHasUsageDisplay(account: Account): boolean {
   const surface = findPlanDefinition(account.provider_id, providerCatalog.value);
+  if (surface?.model_source === "official_api_preset") return true;
   if (surface?.usage_availability === "available" || surface?.manual_usage_calibration === true) {
     return true;
   }
-  return officialBalanceSupported(accountInferenceEndpointUrl(
+  if (officialBalanceSupported(accountInferenceEndpointUrl(
     account,
     identityForCard(account.id),
     providersStore.connections,
-  ));
+  ))) {
+    return true;
+  }
+  if (platformStore.linkForAccount(account.id)) return false;
+  return surface?.kind === "custom" || surface?.dynamic === true;
 }
 
 async function refreshAccountState(id: string): Promise<Account | null> {
@@ -1681,9 +2021,7 @@ async function refreshAccountState(id: string): Promise<Account | null> {
   if (accountIsReady(account) && accountHasUsageDisplay(account)) {
     await loadAccountUsage(id);
   } else {
-    delete usageMap.value[id];
-    delete providerUsageMap.value[id];
-    delete usageEdits.value[id];
+    forgetAccount(id);
   }
   return account;
 }
@@ -1712,6 +2050,7 @@ async function loadAccounts() {
     } catch {
       // A projection refusal must not hide the V3 account list.
     }
+    refreshCpaSnapshot();
     await overlay;
     if (!providersStore.connections) {
       await providersStore.loadConnections().catch(() => undefined);
@@ -1890,6 +2229,8 @@ async function toggleAccount(id: string) {
   try {
     const updated = await dashboardApi.toggleAccount(id);
     replaceAccount(updated);
+    const destRefreshed = await refreshDestinationProjection();
+    if (!destRefreshed) notifyDestinationRefreshFailure();
   } catch (e) {
     if (await recoverAccountMutationConflict(e)) return;
     message.error(t("切换失败：{error}", { error: dashboardErrorDetail(e) }));
@@ -1934,6 +2275,7 @@ async function reloadControlPlaneView(): Promise<boolean> {
     showCreateModal.value = false;
     createModalAccountId.value = null;
     createModalExpectation.value = null;
+    createModalCardId.value = null;
   }
   return true;
 }
@@ -1970,6 +2312,8 @@ async function saveZenProviderSettings(
       enabled,
     });
     replaceAccount(result.account);
+    const destRefreshed = await refreshDestinationProjection();
+    if (!destRefreshed) notifyDestinationRefreshFailure();
     if (successMessage) message.success(successMessage);
   } catch (error) {
     if (!(await recoverAccountMutationConflict(error))) {
@@ -1991,6 +2335,24 @@ async function deleteAccount(id: string) {
   } catch (e) {
     if (await recoverAccountMutationConflict(e)) return;
     message.error(t("删除失败：{error}", { error: dashboardErrorDetail(e) }));
+  }
+}
+
+const quotaRetrying = ref<Record<string, boolean>>({});
+
+async function retryQuotaRecovery(credentialId: string) {
+  const credential = destinationsStore.credentials.find((row) => row.id === credentialId);
+  if (!quotaRetryRequestNeeded(credential?.quota_recovery) || quotaRetrying.value[credentialId]) return;
+  quotaRetrying.value = { ...quotaRetrying.value, [credentialId]: true };
+  try {
+    await destinationsStore.retryQuotaRecovery(credentialId);
+  } catch (e) {
+    if (await recoverAccountMutationConflict(e)) return;
+    message.error(t("重新尝试失败：{error}", { error: dashboardErrorDetail(e) }));
+  } finally {
+    const next = { ...quotaRetrying.value };
+    delete next[credentialId];
+    quotaRetrying.value = next;
   }
 }
 
@@ -2023,15 +2385,37 @@ function stopClock() {
   }
 }
 
+const projectionRefresh = createAccountsProjectionRefresh({
+  host: browserAccountsProjectionRefreshHost(),
+  isAuthenticated: () => sessionStore.authenticated,
+  refresh: async () => {
+    if (!destinationsStore.loaded) return;
+    await Promise.all([
+      destinationsStore.load().catch(() => undefined),
+      mapWithConcurrency(
+        accounts.value.filter(account => accountIsReady(account) && accountHasUsageDisplay(account)),
+        4,
+        account => revalidateAccountUsage(account.id),
+      ),
+    ]);
+  },
+});
+
+watch(() => sessionStore.authenticated, (ok) => {
+  if (!ok) projectionRefresh.onSessionDropped();
+});
+
 onMounted(() => {
   applyAccountAddDeepLink();
   void initializeAccounts();
 });
 // This view is kept alive by App.vue; coarse states (cooling tags, editor
 // enablement) recompute on a 15s clock. Returning to the view refreshes
-// server-side cooldown changes.
+// server-side cooldown changes. Local V4 destination/card revalidation is
+// a separate 15s timer gated on visibility and auth.
 onActivated(() => {
   startClock();
+  projectionRefresh.activate();
   now.value = Date.now();
   applyAccountAddDeepLink();
   applyCachedAccountDeepLink();
@@ -2039,16 +2423,24 @@ onActivated(() => {
     void initializeAccounts();
     void platformStore.load().catch(() => undefined);
     void destinationsStore.load().catch(() => undefined);
+    refreshCpaSnapshot();
   } else activatedOnce = true;
 });
-onDeactivated(stopClock);
+onDeactivated(() => {
+  stopClock();
+  projectionRefresh.deactivate();
+  cancelArrangement();
+});
 onUnmounted(() => {
   stopClock();
-  revertActiveDrag();
+  projectionRefresh.deactivate();
+  revertActiveArrangement();
 });
 </script>
 
 <style scoped>
+.move-to-card-options { display: grid; gap: var(--ocg-space-md); }
+.move-to-card-subject { margin: 0; }
 .accounts-view {
   position: relative;
   max-width: 1280px;

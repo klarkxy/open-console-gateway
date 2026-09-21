@@ -212,6 +212,7 @@ fn every_adapter_kind_has_sealed_capabilities() {
                     "api.deepseek.com".to_string(),
                     "api.moonshot.cn".to_string(),
                     "api.moonshot.ai".to_string(),
+                    "api.stepfun.com".to_string(),
                 ]
             );
         } else {

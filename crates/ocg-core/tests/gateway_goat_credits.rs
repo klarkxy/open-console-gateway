@@ -43,17 +43,37 @@ async fn goat_credit_400_retries_another_key_and_keeps_unknown_recovery_explicit
         let (status, body) = h.protocol("/v1/chat/completions", MODEL).await;
         assert_eq!(status, StatusCode::OK, "{body}");
     }
-    assert_eq!(h.call_keys(), ["a", "b", "a", "b"]);
+    assert_eq!(h.call_keys(), ["a", "b", "b"]);
+    let waits: Vec<_> = h
+        .logs()
+        .into_iter()
+        .filter(|row| row.error_stage.as_deref() == Some("resource_wait"))
+        .collect();
+    assert!(
+        waits.is_empty(),
+        "persistent quota admission skips this Key before dispatch"
+    );
+    let credential = identity_refs_for(&h.state, &a).credential_id;
+    let (status, view) = v4_get(h.port, "/credentials").await;
+    assert_eq!(status, StatusCode::OK);
+    let row = view["credentials"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == credential)
+        .unwrap();
+    assert_eq!(row["quotaRecovery"]["reason"], "insufficient_balance");
+    assert_eq!(row["quotaRecovery"]["status"], "waiting");
     let after = h.account(&a);
     assert_eq!(after.cooldown_until, before.cooldown_until);
     assert_eq!(after.auth_error, before.auth_error);
-    assert_eq!(after.updated_at, before.updated_at);
+
     let logs = h.logs();
     let failed: Vec<_> = logs
         .iter()
         .filter(|row| row.http_status == Some(400))
         .collect();
-    assert_eq!(failed.len(), 2);
+    assert_eq!(failed.len(), 1);
     for row in failed {
         assert_eq!(row.attempt, Some(1));
         let diagnostic = row.diagnostic.as_ref().unwrap();
@@ -64,7 +84,7 @@ async fn goat_credit_400_retries_another_key_and_keeps_unknown_recovery_explicit
         logs.iter()
             .filter(|row| row.http_status == Some(200) && row.attempt == Some(2))
             .count(),
-        2
+        1
     );
 }
 

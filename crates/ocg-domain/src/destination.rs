@@ -30,8 +30,12 @@ use uuid::Uuid;
 pub type Protocol = crate::catalog::UpstreamProtocolKind;
 
 /// Hosts that Configurable HTTP may probe for an official current-balance API.
-pub const OFFICIAL_BALANCE_PROBE_HOSTS: &[&str] =
-    &["api.deepseek.com", "api.moonshot.cn", "api.moonshot.ai"];
+pub const OFFICIAL_BALANCE_PROBE_HOSTS: &[&str] = &[
+    "api.deepseek.com",
+    "api.moonshot.cn",
+    "api.moonshot.ai",
+    "api.stepfun.com",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

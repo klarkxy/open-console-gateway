@@ -59,19 +59,36 @@ supported protocol matrix lives in
   builds can install signed releases from Settings; development
   builds, the CLI, and Docker use the direct/manual upgrade path.
 - Command Code GOAT is a live fixed-origin route. Its public `/models` catalog
-  is refreshed explicitly on **Providers**; GOAT preset rows default on and
+  is refreshed explicitly on **Providers**, and also when **Refresh quota**
+  runs on **Accounts**; GOAT preset rows default on and
   additional rows default off. GOAT catalog refresh updates the model
   directory; Key auth is observed from inference 401/403. Its verified price
   snapshot estimates new request costs, with a saved editable multiplier per
-  priced model. The account card can explicitly calibrate local
+  priced model. The account card can explicitly **Refresh quota** to read local
   `$14 / $35 / $70` windows from the first-party `/alpha/billing/credits`
   endpoint used by Command Code's official CLI, then continues accumulating
-  priced OCG logs. The endpoint is not documented in the public Provider API,
-  GOAT is never auto-synced, and manual correction remains available. Custom
+  priced OCG logs. The endpoint is not documented in the public Provider API.
+  GOAT is never auto-synced. After an official refresh, the timed windows can
+  be calibrated by hand. Custom
   API is live under the trusted-administrator
-  boundary in [Accounts](accounts.md); it is unpriced, has no official usage
+  boundary in [Accounts](accounts.md); per-account credit setup enables local estimates. Otherwise it remains unpriced, with no generic official usage
   path, and its catalog, protocol, and pricing controls live on **Providers**
   as isolated `CustomEndpoint` scopes.
+- Account billing has three models — timed quota windows, cash (official API
+  wallet), and credits — with an independent source: official, local estimate,
+  or unavailable. Plans without an official usage API use a local estimate plus
+  manual calibration. Credit cost is actual normalized tokens × the selected
+  per-million rates × the credits-per-currency factor; it is not the
+  subscription list price. Only traffic that passed through Open Console Gateway
+  is estimated. Usage outside OCG has to be entered by calibration. Unknown
+  pricing is unknown, not free. Incomplete observations stay incomplete; they
+  are not filled with zero. Wait until pending charges complete before
+  calibrating; calibration is refused while any request is still pending.
+  Monthly grants, top-ups, and expiry are separate buckets;
+  remaining excludes expired top-ups and does not invent one shared reset.
+  Estimates never disable a Key or change routing by themselves. Official API
+  cash balance is unchanged: remaining is the official wallet, and month /
+  lifetime spend stay local estimates.
 - Ollama Cloud monthly USD-credits usage is a soft estimate from locally priced
   logs. Used credit may exceed the Pro `$60` / Max `$300` / Team `$1000`
   limit; the dashboard clamps the bar at 100% and shows overage. Meter fullness

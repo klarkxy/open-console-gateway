@@ -1108,6 +1108,7 @@ async fn v6_draft_provider_roundtrip_stays_off_runtime() {
 #[derive(Debug, PartialEq, Eq)]
 struct TransferTruth {
     accounts: Vec<(String, String, String, bool, String)>,
+    #[allow(clippy::type_complexity)]
     destinations: Vec<(String, String, Option<String>, Vec<(String, String)>)>,
     routing: Vec<(String, String, u32, bool, String)>,
 }

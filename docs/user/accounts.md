@@ -6,38 +6,34 @@
 
 Provider choices are projected in the exact order returned by the V4 destination and catalog projection, and `provider_id` is the chooser, filter, dialog, and cache key. A successful empty catalog stays empty. If the catalog cannot be loaded, only the OpenCode Go creation form remains available; an existing Zen Free singleton can still be displayed, while every other built-in, Custom, and user-defined entry fails closed. Names, Plan/API grouping, creation status, and form fields come from each catalog row. After the first ready account for a sealed Provider is saved, the dashboard consults that Provider's existing contract capability before refreshing its model catalog; another Key does not refresh again. A capability or refresh failure never rolls back the saved account and can be retried from **Providers → Refresh model catalog**.
 
-**Enabled** means the card may enter routing. New ready Key accounts, including Custom API and user-defined Providers, start enabled. Test connection does not change the switch. Already-enabled or disabled accounts stay as stored. Test results stay in the test dialog. User-defined Providers have no modeled subscription period, including those created from Plan presets: their accounts do not show an inferred purchase date, expiry countdown, or expiry alert. Existing stored purchase anchors are preserved for compatibility, but are not presented as confirmed billing facts.
+**Enabled** means the account may enter routing. New ready Key accounts, including Custom API and user-defined Providers, start enabled. Test connection does not change the switch. Already-enabled or disabled accounts stay as stored. Test results stay in the test dialog. User-defined Providers have no modeled subscription period, including those created from Plan presets: their accounts do not show an inferred purchase date, expiry countdown, or expiry alert. Existing stored purchase anchors are preserved for compatibility, but are not presented as confirmed billing facts.
 
-Accounts edit through the same forms used to create them. Ready, routable cards show enabled, disabled, cooling, or unavailable. Card relations come from the identity projection: a declared relation is not a verified wallet, and dynamic or Custom dates stay unknown unless a stored purchase date already exists.
+Accounts edit through the same forms used to create them. Ready, routable cards show enabled, disabled, cooling, quota exhausted, or unavailable. Dynamic or Custom dates stay unknown unless a stored purchase date already exists.
 
-A ready Key card can **Rotate Key**, **Add Key**, and **Edit binding** from the overflow menu. Rotate replaces only the Key this console will send on later requests for that card's credential (same credential id; version numbers increase). It is a local replacement: the provider-side credential is not revoked and stays under your control. **Add Key** creates another inference Key on that connection. Quota is independent unless you explicitly share with a selected inference Key on the same identity; using one connection or identity is not enough. After save, cards that actually share a stored quota pool show that relationship (naming the sibling Key when possible). A third Key stays independent when it has its own pool or none. Configurable HTTP connections, including migrated Custom API records, support multiple Keys. Zen Free, CPA, no-auth, and observer credentials remain singletons or externally owned and do not expose Add Key. If create does not return a definite result, the form keeps the submitted contents and operation: retry the same body, or cancel; do not change the form and submit again (that can create a duplicate Key).
+Confirmed quota exhaustion dims that Key and skips routing. Enabled stays as stored. Disabling a Key dims that row immediately. The card itself is gray only when every Key on it is dimmed (disabled, invalid, cooling, quota-exhausted, or otherwise not routeable). When every Key on the card is quota-exhausted, the card is labeled quota exhausted. A mix of disabled, invalid, and quota-exhausted Keys shows no available Key. An empty card shows no Key. Each presentation card is judged on its own rows.
 
-Edit binding changes that credential's enabled state, model scope (all models, or only the exact names you list), and — when you change it — destination consent: which configured endpoint this Key may be sent to (protocol and URL). Saved destination grants are facts; if a provider URL later changes, the saved Origin is shown and that endpoint stays unchecked until you explicitly allow the new destination. Changing only scope or enabled leaves destinations unchanged. Clearing both destination lists revokes access. Sealed official endpoints with no URL stay locked destinations and do not invent Origin strings. A disabled binding is shown on that card and does not flip the account enable switch. Zen Free, CPA, no-auth, and observer credentials do not expose rotate or binding. An identity can hold more than one Key; each card uses the credential whose legacy account id matches that card.
+A ready Key row can **Rotate Key**, **Add Key**, and **Edit binding** from the overflow menu. Rotate replaces only the Key this console will send on later requests for that card's credential (same credential id; version numbers increase). It is a local replacement: the provider-side credential is not revoked and stays under your control. Rotating or otherwise replacing a Key clears local quota recovery so an old Key cannot restore the new one. **Add Key** creates another inference Key on that connection. Quota is independent unless you explicitly share with a selected inference Key on the same identity; using one connection or identity is not enough. After save, cards that actually share a stored quota pool show that relationship (naming the sibling Key when possible). A third Key stays independent when it has its own pool or none. Configurable HTTP connections, including migrated Custom API records, support multiple Keys. Zen Free, CPA, no-auth, and observer credentials remain singletons or externally owned and do not expose Add Key. The CPA pool card also shows whether an OCG-managed runtime is running, stopped, not installed, or in an install/start phase; an external CPA connection is labeled as such and does not report a process OCG does not own. A running or external pool stays a normal available card; a stopped, missing, or failed managed runtime grays the card without flipping Enabled. If create does not return a definite result, the form keeps the submitted contents and operation: retry the same body, or cancel; do not change the form and submit again (that can create a duplicate Key).
 
-Accounts is the tenant list. A Provider and a Plan are the same product
-identity (`provider_id` only), and every card belongs to one Provider with one
-credential when that Provider requires it. Quota authority is Provider-specific:
-OpenCode Go counts usage by account **Key**, Zen Free shares free cooldown by
-egress IP, and Custom API keeps no provider-side quota. All cards share one
-manually persisted global order; capability filtering runs first, then strict priority, global
-sticky, and round-robin all read from that order. There is no per-model quota
-pool.
+Edit binding changes that credential's enabled state, model scope (all models, or only the exact names you list), and — when you change it — destination consent: which configured endpoint this Key may be sent to (protocol and URL). Saved destination grants are facts; if a provider URL later changes, the saved Origin is shown and that endpoint stays unchecked until you explicitly allow the new destination. Changing only scope or enabled leaves destinations unchanged. Clearing both destination lists revokes access. Sealed official endpoints with no URL stay locked destinations and do not invent Origin strings. A disabled binding is shown on that card and does not flip the account enable switch. Zen Free, CPA, no-auth, and observer credentials do not expose rotate or binding. An identity can hold more than one Key; each account row uses the credential whose legacy account id matches that row.
+
+Accounts are arranged in supplier cards. A card can contain several accounts / Keys, and one supplier can have several cards sharing its address, protocols and models. Moving an account preserves its credential, grants, usage, quota pool, cooldown, and local quota-recovery state. Provider and Plan remain one product identity (`provider_id` only). OpenCode Go counts usage by account **Key**, Zen Free shares free cooldown by egress IP, and Custom API keeps no provider-side quota. Card order, then row order inside each card, defines the persisted routing priority used by strict priority, global sticky and round-robin after eligibility filtering. There is no per-model quota pool. Ordinary cooldown still fans out through a **declared quota pool**; confirmed quota exhaustion stays on that Key.
 
 **Accounts** owns identity, the account **Key**, verification, enabled state,
-card order, managed registration, and available usage / cooldown state.
+card order, managed registration, and available usage / cooldown / quota-recovery state.
 Catalogs, protocol probes, per-model protocol overrides, configurable HTTP
 Endpoint/auth/protocol/mappings, and scoped pricing live on **Providers**.
 An account stores one Key (when auth requires it), notes, enablement, model
 scope, grants, quota relation, and runtime state. No-auth connections expose
 one singleton credential and reject a second.
 
-Quota cards follow catalog capabilities instead of Provider IDs. `usageAvailability=available` loads Provider quota windows and enables the refresh action. `manualUsageCalibration=true` additionally loads the local calibration object for editing, while the card itself still renders the Provider windows. Other rows show no quota strip; Zen Free keeps its separate egress cooldown. Known MiniMax/Kimi window names remain friendly, and unknown window names are humanized without changing stored wire values. Custom API and user-defined Provider cards whose stored Endpoint host is exactly `api.deepseek.com`, `api.moonshot.cn`, or `api.moonshot.ai` can also **Refresh quota** to read that official current balance. The snapshot is display-only and does not change routing. Other Custom destinations have no balance endpoint in this product.
+Quota cards follow catalog capabilities instead of Provider IDs. `usageAvailability=available` loads Provider quota windows and enables the refresh action. `manualUsageCalibration=true` additionally loads the local calibration object for editing, while the card itself still renders the Provider windows. Other rows show no quota strip; Zen Free keeps its separate egress cooldown. Known MiniMax/Kimi window names remain friendly, and unknown window names are humanized without changing stored wire values. Custom API and user-defined Provider cards whose stored Endpoint host is exactly `api.deepseek.com`, `api.moonshot.cn`, or `api.moonshot.ai` can also **Refresh quota** to read that official current balance. Pay-as-you-go API cards (DeepSeek / Zhipu presets and New API / Sub2API sites) show **Balance**, **This month**, and **Lifetime** as figures, never a quota bar. Known-host official balances keep a remaining figure. **Refresh quota** also refreshes that destination’s model list (the official Provider catalog for built-in Plans; `/v1/models` discovery for Custom / known-host balance cards and platform Keys), so you do not need to open **Providers** only to refresh the catalog. Newly discovered built-in catalog rows stay off until enabled on Providers. Usage snapshots stay display-only: a bar at 100%, unknown, or failed never marks a Key exhausted and never changes routing. Other Custom destinations have no balance endpoint in this product.
 
-GOAT cards offer **Refresh quota** to calibrate the `$14 / $35 / $70`
+GOAT cards offer **Refresh quota** to read the `$14 / $35 / $70`
 windows from Command Code first-party account usage. The endpoint is used
 by the official CLI but is not documented in the public Provider API.
-Between snapshots, priced OCG request logs continue accumulating locally;
-manual baseline correction remains available. The monthly reset still
+Between snapshots, priced OCG request logs continue accumulating locally.
+The official snapshot is the baseline, so the card has no manual calibration editor.
+The monthly reset still
 uses the configured purchase date, not an upstream monthly-reset timestamp.
 Paid Ollama Cloud cards (Pro / Max / Team) show
 one monthly USD-Credits window from locally priced request logs against
@@ -51,15 +47,38 @@ The Adapter Registry is sealed. Built-in Provider families are:
 
 | Family | Provider ID | Live routing | Notes |
 | --- | --- | --- | --- |
-| OpenCode Go | `opencode` | Yes | One officially distributable API key per card; managed signup remains Beta |
+| OpenCode Go | `opencode` | Yes | One officially distributable API Key per account; managed signup remains Beta |
 | Zen Free | `opencode-zen-free` | Yes | One credentialless, anonymous singleton; sortable and enableable, not deletable; quota shared by egress IP |
 | Command Code GOAT | `command-code` | Yes | Public Provider catalog; GOAT preset models default on, additional models default off in the Providers matrix; no account-level GOAT/All or Max mode |
 | MiniMax CN Token Plan | `minimax` | Yes | Dedicated `sk-cp` Key; fixed official Chat and Messages routes, authenticated model directory, and manual official Token Plan usage refresh |
 | Kimi Code CN | `kimi` | Yes | Dedicated Kimi Code Key; fixed official Chat and Messages routes, authenticated model directory, and manual official weekly/rate-window usage refresh |
 | Ollama Cloud | `ollama` | Yes | Fixed-origin Chat Completions only (`https://ollama.com`, Bearer); public keyless catalog refresh; account billing tier (Pro $60 / Max $300 / Team $1000 USD Credits per billing month) plus purchase date; local monthly soft-credit estimate from official per-request usage and the manual `https://ollama.com/pricing` table; unconfigured existing accounts stay routeable with no meter |
-| Custom API | `custom` | Yes | Compatibility identity for migrated configurable HTTP connections; one connection owns its API URL, auth, protocol, and public-name → upstream-ID mappings, while multiple Key cards may attach; existing records remain separate and retain public-name-only resolution; unpriced/unknown cost, no quota debit |
+| Custom API | `custom` | Yes | Compatibility identity for migrated configurable HTTP connections; one connection owns its API URL, auth, protocol, and public-name → upstream-ID mappings, while multiple Key accounts may attach; existing records remain separate and retain public-name-only resolution; unknown cost unless personal rates are configured; no provider quota debit |
+
+Configurable HTTP connections and individual models have separate **Enabled** switches in **Providers → Edit connection**. Renaming a connection or editing mappings preserves existing disabled models. Deleting the final Key preserves the connection and its model settings.
+
+## Personal credit estimates
+
+Custom API and saved configurable HTTP accounts can track a personal credit
+balance. Open the account's billing panel, configure rates by exact upstream model ID and the current
+balance, then add monthly issuance or expiring top-ups as needed. Each Key has
+its own estimate even when several Keys share a supplier. New API / Sub2API site
+Keys and sealed built-in Plans keep their existing billing views; they do not
+offer this personal-credit editor.
+
+Completed requests deduct credits using the rate captured when that attempt
+started. Missing usage or prices remain unknown. Calibration waits for in-flight
+requests; changing rates preserves the current balance. An estimated zero
+balance never disables routing. Step Plan uses local estimation and manual
+calibration; it does not read a private console usage API.
+
+Payload V10 backups carry credit settings and remaining balances. Existing
+target meters survive a merge. Pending requests appear as uncertainty in the
+exported estimate. See [Upgrade and backup](upgrade-backup.md).
 
 ## Move a node configuration
+
+Supplier and model enablement, enabled protocols and preferred protocols are restored from matching source records. Target-only models remain; conflicting upstream mappings or route overrides reject the entire import. No-auth HTTP destinations can also be exported and restored.
 
 Use **Export** on the Accounts toolbar to create a password-encrypted
 `.ocgbackup` file, then use **Import** on the destination node to preview and
@@ -68,7 +87,7 @@ transfer it separately from the file; Open Console Gateway cannot recover it. Th
 operation remains available only from the node's loopback dashboard; forwarded
 scheme headers do not grant access to a remote dashboard.
 
-The current V8 payload moves destinations and credentials as the authority
+The current V10 payload moves destinations and credentials as the authority
 (ready Keys, platform and CPA observer management credentials, and identity /
 grant / cooldown extras stay inside the encrypted envelope), Custom Endpoint/public-model → upstream-ID mappings and verification
 state encoded on those entities, user-defined Providers as destination extras,
@@ -88,7 +107,9 @@ A merge that omits a CPA observer key keeps the destination's existing
 management key.
 
 Browser profiles/cookies, third-party login passwords, referral codes, logs,
-and usage history do not move. V8 carries source cooldown deadlines without
+and usage history do not move. Local quota-recovery state is not exported.
+An import that leaves the target Key unchanged keeps that local recovery;
+replacing the Key clears it. V9 carries source cooldown deadlines without
 shortening a later destination deadline; V4/V5 keep cooldown behavior
 host-local. Existing destination usage history and browser data stay in
 place; stale authentication and last-error flags are cleared when package
@@ -96,8 +117,8 @@ account fields replace the stored credential.
 Machine-local listener/root URL, auto-start, and Dock settings also stay with
 the destination. Ready managed accounts keep their Key, but their browser login
 does not move; unfinished managed drafts are skipped. Import accepts payload
-V4, V5, V6, V7, and V8. V4/V5 packages rebuild one identity, credential, All-scope
-binding, and identity quota pool per account. Payload V1–V3 and V9 or newer
+V4, V5, V6, V7, V8, V9, and V10. V4/V5 packages rebuild one identity, credential, All-scope
+binding, and identity quota pool per account. Payload V1–V3 and V11 or newer
 backups are rejected with an explicit unsupported-version error. A V4/V5 file
 that already contains V6 identity fields, or a V6 file that already contains
 V7 destination fields, is rejected rather than silently dropping them. The outer encrypted envelope remains version 1 and
@@ -130,7 +151,8 @@ first successful usage refresh, the account card still shows a neutral **Not
 yet refreshed** quota bar; official windows replace it after refresh.
 
 Command Code's official `GET /models` is public and refreshes one
-Provider-level catalog. The Providers matrix is the model-supply control: GOAT
+Provider-level catalog. **Refresh quota** on the account card also runs that
+catalog refresh. The Providers matrix remains the model-supply control: GOAT
 preset rows default on, newly discovered rows default off.
 
 Custom API is a live trusted-administrator destination. **Accounts** is the
@@ -169,8 +191,9 @@ Every ready account card has the same **Test connection** action. It opens an
 account-scoped, searchable model table with single-model and sequential
 **Test all** controls. Each test sends one minimal real request through that
 exact account and its current effective protocol. Tests stay on that account:
-they do not switch accounts, run gateway fallback, change enablement or
-cooldown, or write Provider protocol evidence. Results live only in the open
+they do not switch accounts, run gateway fallback, change enablement,
+cooldown or quota recovery, or write Provider protocol evidence. They are
+not the quota-recovery trial. Results live only in the open
 dialog; closing it stops dispatching queued tests. A request already sent may finish, and testing
 may consume provider quota. Provider-page tests remain the separate,
 low-frequency control for validating newly added Provider model/protocol
@@ -186,9 +209,9 @@ Endpoint, Key, mappings, or protocol leaves the account enabled. Endpoint and
 upstream protocol can be edited after create; the config and complete mapping
 set are replaced in one CAS transaction. Disabling the declared protocol makes
 the model unroutable; no fixed-priority fallback or override can enable an
-undeclared protocol. Custom traffic is
-unpriced: logs record `cost_state=unknown` with no quota debit, and Custom has
-no provider usage refresh. `MODEL_PROTOCOLS` is Go-specific; Custom
+undeclared protocol. Custom traffic has unknown cost unless personal credit rates are configured
+for the exact upstream model. Personal estimates do not debit provider quota,
+and Custom has no provider usage refresh. `MODEL_PROTOCOLS` is Go-specific; Custom
 converts the client protocol to the account's single upstream protocol.
 
 Use the existing-connection choices to add another Key without creating a second Provider. New-service choices contain unused built-in templates, Plan/API presets, Custom API and platform types. Search matches vendor, variant, preset name and endpoint host. Selecting a result retains its exact variant when the search clears. Zen Free is a backend-owned singleton, managed only from the account list; OpenCode Go offers its optional managed-registration action where the host supports it.
@@ -263,8 +286,8 @@ than a key quota.
   real-world usage baseline. After the value is saved, successful request cost
   recorded by Open Console Gateway continues to accumulate above that baseline. Reaching
   100% is still only a warning; it does not stop the gateway from selecting the
-  account. Manual calibration is shown only when the Plan declares it; GOAT
-  uses it to correct for traffic that OCG cannot observe.
+  account. Manual calibration is shown only when the Plan declares it. Ollama
+  Cloud uses it because it has no official usage API.
 - **Refresh quota (ready Key and managed accounts).** Official OpenCode usage
   (`/zen/go/v1/usage`) is only a periodic calibration baseline; local forward-log
   costs stay the live estimator. Active ready accounts reconcile about hourly,
@@ -275,9 +298,10 @@ than a key quota.
   throttle (Retry-After / next-allowed). The card shows the last successful
   official sync time. Local estimates that reach
   ≥80% may trigger one expedited sync per 15 minutes. A real inference `429`
-  still writes the existing cooldown/selector state and additionally schedules
-  an official reconciliation about 1–2 minutes later; official failures or
-  `status=rate-limited` never write inference cooldown. Failures keep the
+  still writes ordinary cooldown or, when recognized, per-Key quota recovery,
+  and additionally schedules an official reconciliation about 1–2 minutes later;
+  official failures or `status=rate-limited` never write inference cooldown or
+  quota recovery. Failures keep the
   previous baseline and last-success timestamp. The request uses the same global
   outbound proxy as other dashboard fetches.
 - **Refresh GOAT quota.** The GOAT card calls the fixed first-party
@@ -286,12 +310,13 @@ than a key quota.
   weekly, and monthly caps before atomically replacing all three baselines.
   This path has the same 15-second per-account throttle and global proxy, but
   no automatic schedule; its result never writes inference cooldown or changes
-  routing. Manual calibration remains available for correction.
-- **GOAT inference cooldown.** A real Command Code `429` that identifies the
-  5-hour, weekly, or monthly plan window uses the response's exact `Your limit resets at`
-  timestamp for the matching account cooldown. A valid bounded `Retry-After` takes precedence.
-  Without a usable upstream deadline, transient or malformed rate limits only
-  exclude that account from the current request and do not write account state.
+  routing. There is no separate manual calibration editor.
+- **GOAT inference restrictions.** For unrecognized temporary Command Code
+  `429`s, a usable `Retry-After` creates a process-local resource wait, without
+  writing account cooldown or quota exhaustion. A response without a recognized plan error and without a
+  usable deadline only excludes that account from the current request.
+  Strict plan-window errors persist as per-Key quota exhaustion even with no
+  deadline; known insufficient credits persist the same way. See [Routing](routing.md).
 - **Identity and credentials.** The name is the account's required primary
   display label. The login account field is optional; on Key-account creation,
   entering it first copies it into the name until you edit the name yourself.
@@ -308,17 +333,20 @@ than a key quota.
   remaining, due today, or days expired. This is informational only and never
   disables an account or prevents the gateway from selecting it. Zen Free and
   Custom API have no purchase-cycle expiry and show no expiry tag or alert.
-- **Priority order.** Accounts are listed as Keys grouped by destination — a
-  Provider, a Custom API endpoint, or a platform site — in one global routing
-  order. A destination with one Key renders as a single card; one with several
-  Keys shows the destination header and one row per Key. Use the card's drag
-  handle to move the whole group with a mouse, touchscreen, or pen; when the
-  handle has keyboard focus, the Up and Down arrow keys move it as well. Keys
-  inside a group reorder with **Move up** / **Move down** in the row menu and
-  never leave their group. Dashboard, the Logs account filter, CLI listings,
-  and the gateway selector all consume this same SQLite-backed order.
-- **Cooldown reset.** You can reset a cooldown manually from this view. The bar
+- **Priority order.** Reorder cards and the accounts inside them directly. Move a whole card, reorder its rows, or move a Key to another card of the same supplier. To arrange `A1 → B1 → A2`, create another A card and move A2 into it. Pointer and keyboard controls save the same order. Sorting is disabled while filters are active so hidden accounts keep their positions. Empty cards and adjacent cards of the same supplier remain separate.
+- **Cooldown reset.** You can reset an ordinary cooldown manually from this view. The bar
   snaps back to its local estimate as soon as the cooldown is cleared.
+- **Retry quota.** Manual retry only makes that exhausted Key eligible for the
+  next normally selected request. It does not send an upstream call, clear the
+  exhausted status, change Enabled, or reset the wait step.
+- **Quota recovery.** A known reset waits until that time. An unknown window
+  waits 15 minutes, then 1 hour, then 6 hours; that step advances only after
+  another proven quota error. When due, the next request that would normally
+  select that Key is the single trial — no extra probe is sent, and other
+  traffic is not held waiting. A completed success (JSON or SSE, even without
+  usage) restores the Key. Timeout, cancel, or 5xx keep exhaustion and allow
+  another try after at least 15 minutes without increasing the unknown-window
+  step.
 
 ---
 

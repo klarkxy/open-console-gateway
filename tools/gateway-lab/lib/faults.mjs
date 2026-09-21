@@ -41,6 +41,7 @@ export function normalizeScript(item) {
     return {
       kind: "http",
       status: Number.isFinite(status) ? status : 500,
+      headers: item.headers ?? {},
       body: item.body ?? { error: { message: item.message || "scripted_http", type: "api_error" } },
     };
   }

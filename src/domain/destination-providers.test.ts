@@ -8,6 +8,7 @@ import {
   destinationOffering,
   filterDestinations,
   groupDestinationsByOffering,
+  isProvidersRailDestination,
   railKeyForDestination,
 } from "./destination-providers.ts";
 import { findPlanDefinition, OPENCODE_GO_PLAN } from "./plans.ts";
@@ -123,6 +124,8 @@ test("rail key prefers the joined connection id", () => {
   const rows = [connection({ id: "c-go", legacy: { kind: "builtin_provider", id: "opencode" } })];
   assert.equal(railKeyForDestination(dest, rows), "c-go");
   assert.equal(railKeyForDestination(platform, rows), "dest-site");
+  assert.equal(isProvidersRailDestination(dest), true);
+  assert.equal(isProvidersRailDestination(platform), false);
 });
 
 test("ollama surface exists only when the catalog supplies it", () => {

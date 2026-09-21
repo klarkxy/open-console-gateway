@@ -2,6 +2,16 @@
 
 # Dashboard API
 
+## Billing and local credit estimates (V4)
+
+`GET /dashboard/api/v4/accounts/{id}/billing` presents timed quota, cash, or credits together with its observation source and available actions. Here `id` identifies one account (one Key); several accounts in a supplier container remain independent. The read makes no upstream request. Existing official balance and quota refresh endpoints retain their provider-specific observation adapters.
+
+`PUT .../billing/credits` configures a personal credit estimate. Initial setup supplies current buckets; later rate/settings edits preserve balances. `POST .../billing/credits/calibrate` corrects current bucket balances, `POST .../billing/credits/grants` adds a grant or top-up, and `DELETE .../billing/credits` disables this estimate. Mutations require `expectedRevision` and `processGeneration` and return the updated `BillingStatus`. Requests that start after calibration settle against that new baseline; pending and unpriced requests remain visible. Estimated exhaustion never changes routing eligibility.
+
+Step Plan uses this local estimation/calibration contract until an official usage API is available. The former private console-token endpoints and `StepFunUsageStatus` contract are retired. StepFun ordinary API balance remains separate from the `/step_plan` channel.
+
+Personal credits are configurable only for `http` destinations of legacy kind `custom_account` or `dynamic`. Platform-linked Keys, observer credentials and sealed built-in Plans retain their existing billing contracts. Credit calibration rejects pending requests; it does not move their baseline while they are in flight.
+
 ## Dashboard V3
 
 The `/dashboard/api/v3` HTTP mount is **removed**. The dashboard speaks V4
@@ -76,7 +86,8 @@ V3 `$defs` do not gain new fields.
 
 V4 reuses V3 session middleware. Its listings return the same `ControlRevision`
 (`expectedRevision` / `processGeneration`) that V3 uses for CAS. V4 mutations are `POST /onboarding/commit`,
-`POST /credentials/{id}/rotate`, `PATCH /bindings/{id}`,
+`POST /credentials/{id}/rotate`, `POST /credentials/{id}/quota-retry`,
+`PATCH /bindings/{id}`,
 `POST /identities/{id}/credentials`, `POST /applications/dsh` (which also
 binds the GET inspection fingerprint), `PUT /cpa/models`,
 `POST /provider-contracts/{scope_kind}/{scope_id}/catalog/remove`, and
@@ -127,11 +138,12 @@ cannot be redacted safely), and `legacy`. The platform parent's
 `platform_observer` credential is a projection (no
 `credential_state` row). `authState` is local: `unknown` is never
 `valid`; `valid` requires the existing verification record. The Vue
-Accounts page overlays this projection for display; Key rotation, binding
+Accounts page overlays this projection for display; Key rotation, quota retry,
+binding
 edits, and additional identity credentials use V4, while the remaining
 account mutations stay on V3.
 
-`GET /destinations` and `GET /credentials` are secret-free, revision-tagged projections.
+`GET /destinations` and `GET /credentials` are secret-free, revision-tagged, local-only projections. `DestinationCredentialDto` may include optional nullable `quotaRecovery` (camelCase). Absence means no confirmed exhaustion, not verified upstream health. `status` on that object is presentation only (`waiting` | `ready` | `probing`). `IdentitySummary` credentials do not carry this field.
 CAS-protected `PATCH /destinations/{id}` fully replaces editable HTTP name, endpoint, auth,
 protocol, mappings, and route overrides. It never accepts Key material and unions safe grants
 only for explicit `authorizeCredentialIds`. `DELETE /destinations/{id}` requires zero referencing
@@ -143,16 +155,18 @@ falls back to `project()`; only that empty-store fallback can return
 refused row.
 
 Node transfer (`POST /accounts/transfer/export|preview|import`) is remounted
-on V4. Latest export is payload V8: `destinations` and `credentials`
+on V4. Latest export is payload V10: `destinations` and `credentials`
 (plaintext secrets, platform and CPA observer management credentials, and
 identity / grant / cooldown extras stay inside the encrypted envelope), plus
 `quotaPools` and `node`. Merging a package that has no CPA observer key
 preserves the destination's existing management key. It does not emit
 `accounts`, `platformAccounts`, `platformLinks`, `dynamicProviders`, or
 `identities`. Those portable types are transfer-only and are not V4 listing
-DTOs. V4–V8 packages remain importable; V7 receives deterministic model-resolution defaults and V8 requires the field.
+DTOs. V4–V10 packages remain importable; V7 receives deterministic model-resolution defaults and V8 and later require the field. Local quota recovery is not a portable field: it is omitted from export, retained on an unchanged target Key, and cleared when the Key is replaced.
 
-`GET /routing/explain?model=...&clientProtocol=...` is read-only and authenticated. It reuses live alias resolution, route materialization, availability gates, and a clone-based base-policy preview. It never sends, decrypts a Key, probes DNS, writes logs/cooldowns, or advances sticky/round-robin state. The response includes eligible Keys, typed exclusions, effective upstream protocol/global rank, and explicit runtime-only uncertainties.
+`GET /routing/cards` returns one revision-tagged snapshot of `cards`, `destinations` and `credentials`. `PUT /routing/cards` accepts CAS tokens and the complete ordered card list. A card has `id`, `destinationId` and ordered `credentialIds`; every inference credential, including disabled rows, must appear exactly once under its existing destination. Observer credentials are excluded. Layout and flattened routing ranks commit together, and the response returns the complete committed snapshot. Multiple cards share one destination; creating or removing an empty extra card does not create or delete a supplier.
+
+`GET /routing/explain?model=...&clientProtocol=...` is read-only and authenticated. It reuses live alias resolution, route materialization, availability gates, and a clone-based base-policy preview. It never sends, decrypts a Key, probes DNS, writes logs/cooldowns/quota recovery, or advances sticky, round-robin or quota-trial state. The response includes eligible Keys, typed exclusions, effective upstream protocol/global rank, and explicit runtime-only uncertainties.
 
 V4 does not treat authorization `unknown` as `valid`. Eligibility is a local
 projection, never upstream health.
@@ -212,11 +226,26 @@ credential. CAS tokens are required; there is no `operationId`. The
 credential id, binding, and quota relationship stay the same. `version`
 and `authStateVersion` increment together; `authState` becomes `unknown`;
 the underlying account's `auth_error` / `last_error` and verification
-result are cleared so the old version cannot pollute the new one. The
+result are cleared so the old version cannot pollute the new one.
+Rotating replaces the Key and clears local quota recovery. The
 body is `{ secretInput }` plus CAS tokens. The result is secret-free.
 Platform observer, anonymous, no-auth, and CPA credentials return `400`.
 Unknown ids return `404`. A stale CAS token returns `409` and writes
 nothing.
+
+`QuotaRecoveryDto` is `{ status: "waiting" | "ready" | "probing", reason:
+"quota_exhausted" | "insufficient_balance", window: "five_hours" | "week" |
+"month" | "unknown", observedAt: string (RFC3339), resetsAt: string | null,
+nextRetryAt: string (RFC3339), failureCount: number }`.
+
+`POST /credentials/{id}/quota-retry` uses the existing flattened
+`MutationExpectation` body (`expectedRevision`, `processGeneration`) with no
+`operationId`. The result is `{ revision: ControlRevision, credential:
+DestinationCredentialDto }` and is secret-free. It permits one next normal
+selection: no outbound request, no enablement change, and no backoff clear.
+It is idempotent while status is already `ready` or `probing` and may return
+the current updated row. Unknown ids return `404`. A stale CAS token returns
+`409` and writes nothing.
 
 `PATCH /bindings/{id}` edits one inference binding. CAS tokens are
 required; there is no `operationId`. The body is `{ modelScope?, enabled? }`
@@ -245,8 +274,8 @@ The dashboard consumes `GET /connections` for the Providers rail,
 `GET /accounts` as a display overlay on the Accounts page. The client generates a new `operationId` when
 the draft changes, keeps that id across retries of an unchanged draft, and
 regenerates it after success. Editing and deleting accounts and the
-remaining Accounts-page operations stay on V3; Key rotation, binding edits,
-and adding a Key to an existing identity use V4.
+remaining Accounts-page operations stay on V3; Key rotation, quota retry,
+binding edits, and adding a Key to an existing identity use V4.
 
 ## Settings mutation workflow
 

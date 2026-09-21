@@ -102,6 +102,23 @@ fn reload_failure_restriction_rebuilds_proxy_membership() {
         )
         .unwrap();
     state.reload_provider_contracts().unwrap();
+    let projection = crate::destination_projection::load_runtime(&state.db.lock()).unwrap();
+    let go = projection
+        .destinations
+        .iter()
+        .find(|destination| destination.adapter == ocg_domain::destination::AdapterKind::OpencodeGo)
+        .expect("a saved public Go directory must exist without a stored Key");
+    assert!(
+        go.catalog
+            .iter()
+            .any(|model| model.upstream_model == "gpt-5.6-sol" && model.enabled)
+    );
+    assert!(
+        projection
+            .credentials
+            .iter()
+            .all(|credential| credential.destination_id != go.id)
+    );
     let mut config = state.config();
     config.proxy_mode = ProxyMode::List;
     config.proxy_url = "http://127.0.0.1:9".into();
@@ -381,6 +398,17 @@ fn route_set_snapshot_swaps_atomically_and_stays_self_consistent() {
         )
         .unwrap();
     state.reload_provider_contracts().unwrap();
+    let projection = crate::destination_projection::load_runtime(&state.db.lock()).unwrap();
+    let go = projection
+        .destinations
+        .iter()
+        .find(|destination| destination.adapter == ocg_domain::destination::AdapterKind::OpencodeGo)
+        .expect("public catalog refresh must persist its destination before route publication");
+    assert!(
+        go.catalog
+            .iter()
+            .any(|model| model.upstream_model == "gpt-5.6-luna" && model.enabled)
+    );
 
     let mut list_config = state.config();
     list_config.gateway_key = "gw".into();
@@ -901,6 +929,22 @@ fn zen_activation_installs_the_just_persisted_catalog_with_new_models_off() {
         let scope = crate::provider_contracts::ContractScope::provider(
             crate::provider::OPENCODE_ZEN_FREE_PROVIDER_ID,
         );
+        let projection = crate::destination_projection::load_runtime(&state.db.lock()).unwrap();
+        let saved = projection
+            .destinations
+            .iter()
+            .find(|destination| destination.adapter == ocg_domain::destination::AdapterKind::Zen)
+            .unwrap();
+        assert_eq!(
+            saved
+                .catalog
+                .iter()
+                .map(|row| row.upstream_model.as_str())
+                .collect::<Vec<_>>(),
+            [model]
+        );
+        assert!(saved.catalog.iter().all(|row| !row.enabled));
+        assert_eq!(state.zen_free_model_catalog().models, [model]);
         let contract = state.provider_contracts().scope(&scope).cloned().unwrap();
         assert_eq!(contract.catalog.models, [model]);
         assert!(
@@ -989,4 +1033,51 @@ fn proxy_candidates_use_exact_upstream_ids_not_public_aliases() {
     assert!(!ids.contains(&"vendor/disabled"), "{ids:?}");
     assert!(!ids.contains(&"lab-opus"), "{ids:?}");
     assert!(!ids.contains(&"lab-chat"), "{ids:?}");
+}
+
+#[test]
+fn zen_activation_preflight_failure_rolls_back_catalog_and_preserves_all_active_pointers() {
+    let dir = temp_data_dir("zen-activation-rollback");
+    let db = Database::open(dir.clone()).unwrap();
+    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("state-test"));
+    let state = CoreStateInner::new(db, dir.clone(), cipher).unwrap();
+    let previous_config = state.config();
+    let previous_catalog = state.zen_free_model_catalog();
+    let previous_contracts = state.provider_contracts();
+    let previous_routes = state.forward_route_set();
+    let previous_saved = crate::destination_projection::load_runtime(&state.db.lock()).unwrap();
+    let previous_directory = state.db.lock().zen_free_model_catalog().unwrap();
+    // Inject an invalid transport generation so the failure happens after the
+    // setter has written its uncommitted catalog and default-off controls.
+    {
+        let mut config = state.config.lock();
+        config.proxy_mode = ProxyMode::Manual;
+        config.proxy_url = "http://[invalid".into();
+    }
+    let result = state.activate_zen_free_model_catalog(crate::kernel::zen::ZenFreeModelCatalog {
+        models: vec!["rollback-free".into()],
+        refreshed_at: Some(chrono::Utc::now()),
+        source_url: crate::kernel::zen::ZEN_MODELS_SOURCE_URL.into(),
+    });
+    assert!(result.is_err());
+    assert_eq!(
+        crate::destination_projection::load_runtime(&state.db.lock()).unwrap(),
+        previous_saved
+    );
+    assert_eq!(
+        state.db.lock().zen_free_model_catalog().unwrap(),
+        previous_directory
+    );
+    assert!(Arc::ptr_eq(
+        &previous_catalog,
+        &state.zen_free_model_catalog()
+    ));
+    assert!(Arc::ptr_eq(
+        &previous_contracts,
+        &state.provider_contracts()
+    ));
+    assert!(Arc::ptr_eq(&previous_routes, &state.forward_route_set()));
+    *state.config.lock() = previous_config;
+    drop(state);
+    fs::remove_dir_all(dir).unwrap();
 }

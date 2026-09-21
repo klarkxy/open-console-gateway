@@ -49,6 +49,16 @@ export function groupDestinationsByOffering(
   };
 }
 
+/**
+ * New API / Sub2API sites live on Accounts. Their parent destination is not a
+ * Provider catalog row and must not appear in the Providers rail.
+ */
+export function isProvidersRailDestination(
+  destination: Pick<Destination, "legacy">,
+): boolean {
+  return destination.legacy.kind !== "platform_parent";
+}
+
 export function filterDestinations(
   destinations: readonly Destination[],
   query: string,

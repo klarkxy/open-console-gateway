@@ -2,6 +2,12 @@ import type { Account } from "../api/dashboard.ts";
 import type { Connection } from "../api/connections.ts";
 import type { Identity } from "../api/identities.ts";
 
+const STEP_FUN_API_HOST = "api.stepfun.com";
+
+function isStepFunPlanPath(pathname: string): boolean {
+  return pathname === "/step_plan" || pathname.startsWith("/step_plan/");
+}
+
 /**
  * Official hosts that publish a Key-authenticated current-balance endpoint.
  * Exact hostname match only; never suffix matching.
@@ -16,7 +22,15 @@ export function officialBalanceSupported(endpointUrl: string | null | undefined)
   const trimmed = endpointUrl?.trim();
   if (!trimmed) return false;
   try {
-    const host = new URL(trimmed).hostname.toLowerCase();
+    const parsed = new URL(trimmed);
+    const host = parsed.hostname.toLowerCase();
+    if (host === STEP_FUN_API_HOST) {
+      if (parsed.protocol !== "https:") return false;
+      if (parsed.username !== "" || parsed.password !== "") return false;
+      if (parsed.search !== "" || parsed.hash !== "") return false;
+      if (parsed.port !== "" && parsed.port !== "443") return false;
+      return !isStepFunPlanPath(parsed.pathname);
+    }
     return OFFICIAL_BALANCE_HOSTS.has(host);
   } catch {
     return false;

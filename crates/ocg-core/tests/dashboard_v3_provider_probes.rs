@@ -2204,7 +2204,6 @@ async fn static_reset_advances_global_revision_before_reload_failure() {
         )
         .unwrap();
     harness.state.reload_provider_contracts().unwrap();
-    // Reach the post-commit reload fault, rather than failing before any write.
     let _docs =
         install_official_protocol_fetch_for_tests(harness.state.process_generation(), |_| {
             OfficialProtocolBaseline::mapped([("grok-4.5", UpstreamProtocolKind::Responses)])
@@ -2212,12 +2211,23 @@ async fn static_reset_advances_global_revision_before_reload_failure() {
     let before = harness.state.settings_revision();
     let before_contracts = harness.state.provider_contracts();
     let conn = open_sqlite(&harness);
-    conn.execute(
-        "INSERT OR REPLACE INTO provider_contract_model_protocols
-         (scope_kind, scope_id, model_id, protocol, source)
-         VALUES ('provider', ?1, 'kimi-for-coding', 'chat_completions', 'invalid-before-reload')",
-        [KIMI_PROVIDER_ID],
-    )
+    // Protocol controls now read all evidence inside the reset transaction.
+    // Corrupt only after that read, while its final destination catalog writes
+    // are running, so the durable commit precedes the reload failure.
+    conn.execute_batch(&format!(
+        "CREATE TRIGGER corrupt_static_reset_evidence_before_reload
+         AFTER INSERT ON destination_models
+         WHEN NEW.destination_id = (
+             SELECT id FROM destinations
+              WHERE legacy_kind = 'builtin' AND legacy_id = '{OPENCODE_PROVIDER_ID}'
+         )
+         BEGIN
+             INSERT OR REPLACE INTO provider_contract_model_protocols
+             (scope_kind, scope_id, model_id, protocol, source)
+             VALUES ('provider', '{KIMI_PROVIDER_ID}', 'kimi-for-coding',
+                     'chat_completions', 'invalid-before-reload');
+         END;"
+    ))
     .unwrap();
 
     let (status, body) = send_json(
@@ -2251,6 +2261,91 @@ async fn static_reset_advances_global_revision_before_reload_failure() {
     assert!(
         go_override_count > 0,
         "the reset transaction must be durable"
+    );
+    assert_eq!(
+        before_contracts.as_ref(),
+        harness.state.provider_contracts().as_ref()
+    );
+    drop(conn);
+    harness.stop();
+}
+
+#[tokio::test]
+async fn static_reset_rolls_back_without_revision_bump_when_evidence_is_invalid() {
+    let harness = start_probes("static-reset-invalid-evidence").await;
+    let now = chrono::Utc::now();
+    harness
+        .state
+        .db
+        .lock()
+        .set_contract_catalog(
+            &ContractScope::provider(KIMI_PROVIDER_ID),
+            &["kimi-for-coding".to_string()],
+            Some(now),
+            "provider_get_models",
+            "https://example.test/models",
+            now,
+        )
+        .unwrap();
+    harness.state.reload_provider_contracts().unwrap();
+    // Supply valid official docs so the fault occurs while applying controls.
+    let _docs =
+        install_official_protocol_fetch_for_tests(harness.state.process_generation(), |_| {
+            OfficialProtocolBaseline::mapped([("grok-4.5", UpstreamProtocolKind::Responses)])
+        });
+    let before = harness.state.settings_revision();
+    let before_contracts = harness.state.provider_contracts();
+    let before_scope = go_scope_revision(&harness);
+    assert!(before_scope.is_some());
+    let conn = open_sqlite(&harness);
+    let before_override_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM provider_contract_model_protocol_overrides
+         WHERE scope_kind = 'provider' AND scope_id = ?1",
+            [OPENCODE_PROVIDER_ID],
+            |row| row.get(0),
+        )
+        .unwrap();
+    conn.execute(
+        "INSERT OR REPLACE INTO provider_contract_model_protocols
+         (scope_kind, scope_id, model_id, protocol, source)
+         VALUES ('provider', ?1, 'kimi-for-coding', 'chat_completions', 'invalid-before-reload')",
+        [KIMI_PROVIDER_ID],
+    )
+    .unwrap();
+
+    let (status, body) = send_json(
+        &harness,
+        Method::POST,
+        &static_reset_path(),
+        &cas(&harness, json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert_v3_error(&body, ERROR_INTERNAL);
+    assert_eq!(harness.state.settings_revision(), before);
+    assert_eq!(go_scope_revision(&harness), before_scope);
+    let stored_source: String = conn
+        .query_row(
+            "SELECT source FROM provider_contract_model_protocols
+             WHERE scope_kind = 'provider' AND scope_id = ?1
+             LIMIT 1",
+            [KIMI_PROVIDER_ID],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored_source, "invalid-before-reload");
+    let go_override_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM provider_contract_model_protocol_overrides
+             WHERE scope_kind = 'provider' AND scope_id = ?1",
+            [OPENCODE_PROVIDER_ID],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        go_override_count, before_override_count,
+        "the failed reset must roll back its protocol-control writes"
     );
     assert_eq!(
         before_contracts.as_ref(),

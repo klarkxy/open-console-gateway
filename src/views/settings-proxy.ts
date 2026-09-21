@@ -1,5 +1,9 @@
 import type { ProxyMode } from "../api/dashboard";
 
+export function proxyModelKey(model: string): string {
+  return model.trim().toLowerCase();
+}
+
 export function normalizeProxyUrl(mode: ProxyMode, value: string): string {
   const trimmed = value.trim();
   const urlRequired = mode === "manual" || mode === "list";
@@ -57,9 +61,16 @@ export function validateProxyList(
   if (cleaned.length === 0) {
     throw new Error("名单模式至少勾选一个模型");
   }
-  const unknown = [...new Set(cleaned.filter((model) => !supportedIds.includes(model)))];
+  const supported = new Set(supportedIds.map(proxyModelKey));
+  const unknown = cleaned.filter((model) => !supported.has(proxyModelKey(model)));
   if (unknown.length > 0) {
     throw new Error("名单包含未知模型");
   }
-  return [...new Set(cleaned)];
+  const seen = new Set<string>();
+  return cleaned.filter((model) => {
+    const key = proxyModelKey(model);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }

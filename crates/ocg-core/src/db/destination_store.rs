@@ -124,7 +124,10 @@ pub(crate) fn merge_destination_catalog_refuse_conflict(
     replace_destination_catalog(conn, destination_id, &merged)
 }
 
-fn load_destination_catalog(conn: &Connection, destination_id: &str) -> Result<Vec<CatalogModel>> {
+pub(crate) fn load_destination_catalog(
+    conn: &Connection,
+    destination_id: &str,
+) -> Result<Vec<CatalogModel>> {
     let mut stmt = conn.prepare(
         "SELECT public_model, upstream_model, protocols_json, preferred, enabled, upstream_override
          FROM destination_models WHERE destination_id = ?1 ORDER BY rowid ASC",
@@ -161,65 +164,233 @@ fn load_destination_catalog(conn: &Connection, destination_id: &str) -> Result<V
     Ok(catalog)
 }
 
-/// Join persisted contract catalogs onto builtin destinations that already exist.
-/// Does not invent destination rows.
+/// Seed newly available catalog rows. Existing routing choices belong to the
+/// destination and are never rewritten by unrelated account writes or refresh.
 pub(crate) fn sync_builtin_catalogs(db: &Database) -> Result<()> {
-    let Ok(zen) = db
-        .zen_free_model_catalog()
-        .map(|row| row.unwrap_or_default())
-    else {
-        return Ok(());
-    };
-    let Ok(persisted) = db.load_persisted_contracts() else {
-        return Ok(());
-    };
+    let zen = db.zen_free_model_catalog()?.unwrap_or_default();
+    let persisted = db.load_persisted_contracts()?;
     let contracts = build_effective_contracts(&zen, &[], persisted);
     for scope in contracts.providers.values() {
         let dest_id = destination_id_for_builtin(&scope.provider_id);
         if !destination_exists(&db.conn, &dest_id)? {
             continue;
         }
-        replace_destination_catalog(&db.conn, &dest_id, &catalog_from_persisted_scope(scope))?;
+        let mut catalog = load_destination_catalog(&db.conn, &dest_id)?;
+        for model in catalog_from_persisted_scope(scope) {
+            if !catalog.iter().any(|existing| {
+                existing
+                    .public_model
+                    .eq_ignore_ascii_case(&model.public_model)
+            }) {
+                catalog.push(model);
+            }
+        }
+        replace_destination_catalog(&db.conn, &dest_id, &catalog)?;
     }
     Ok(())
 }
 
-/// Drop a builtin destination after its last inference credential is gone.
-/// Zen and non-builtin destinations are left for their own writers.
-pub(crate) fn delete_unused_builtin_destination(
-    conn: &Connection,
-    destination_id: &str,
+/// Explicit catalog replacement preserves controls for surviving models while
+/// removing upstream models that are no longer in the refreshed directory.
+pub(crate) fn refresh_builtin_catalog(
+    db: &Database,
+    scope: &crate::provider_contracts::ContractScope,
 ) -> Result<()> {
-    let Some((legacy_kind, legacy_id)) = destination_legacy(conn, destination_id)? else {
+    let crate::provider_contracts::ContractScope::Provider(id) = scope else {
         return Ok(());
     };
-    if legacy_kind != "builtin" || legacy_id == OPENCODE_ZEN_FREE_PROVIDER_ID {
+    if crate::provider::builtin_provider(id).is_none() {
         return Ok(());
     }
-    let remaining: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM credentials WHERE destination_id = ?1",
-        [destination_id],
+    let dest_id = ensure_builtin_destination(&db.conn, id)?;
+    let zen = db.zen_free_model_catalog()?.unwrap_or_default();
+    let contracts = build_effective_contracts(&zen, &[], db.load_persisted_contracts()?);
+    let Some(scope) = contracts.scope(scope) else {
+        return Ok(());
+    };
+    let previous = load_destination_catalog(&db.conn, &dest_id)?;
+    let catalog = catalog_from_persisted_scope(scope)
+        .into_iter()
+        .map(|next| {
+            previous
+                .iter()
+                .find(|model| model.public_model.eq_ignore_ascii_case(&next.public_model))
+                .cloned()
+                .unwrap_or(next)
+        })
+        .collect::<Vec<_>>();
+    replace_destination_catalog(&db.conn, &dest_id, &catalog)
+}
+
+pub(crate) fn seed_missing_builtin_catalogs(db: &Database) -> Result<()> {
+    let missing: bool = db.conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM destinations d
+         JOIN provider_contract_scopes s ON s.scope_kind = 'provider' AND s.scope_id = d.legacy_id
+         WHERE d.legacy_kind = 'builtin' AND s.catalog_models_json != '[]'
+           AND NOT EXISTS(SELECT 1 FROM destination_models m WHERE m.destination_id = d.id))",
+        [],
         |row| row.get(0),
     )?;
-    if remaining > 0 {
-        return Ok(());
+    if missing {
+        sync_builtin_catalogs(db)?;
     }
-    conn.execute(
-        "DELETE FROM destination_models WHERE destination_id = ?1",
-        [destination_id],
-    )?;
-    conn.execute("DELETE FROM destinations WHERE id = ?1", [destination_id])?;
     Ok(())
 }
 
-fn destination_legacy(conn: &Connection, destination_id: &str) -> Result<Option<(String, String)>> {
-    conn.query_row(
-        "SELECT legacy_kind, legacy_id FROM destinations WHERE id = ?1",
-        [destination_id],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )
-    .optional()
-    .map_err(Into::into)
+/// Explicit protocol-control writes update their destination model rows in the
+/// caller's transaction. Evidence remains available for future Auto decisions,
+/// but is no longer a second request-time authority.
+pub(crate) fn apply_scope_controls(
+    db: &Database,
+    scope: &crate::provider_contracts::ContractScope,
+    model_ids: Option<&[String]>,
+) -> Result<()> {
+    use crate::provider_contracts::ContractScope;
+    let dest_id = match scope {
+        ContractScope::Provider(id) => destination_id_for_builtin(id),
+        ContractScope::CustomEndpoint(id) => {
+            let id: Option<String> = db
+                .conn
+                .query_row(
+                    "SELECT destination_id FROM credentials WHERE legacy_account_id = ?1",
+                    [id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let Some(id) = id else {
+                return Ok(());
+            };
+            id
+        }
+    };
+    if !destination_exists(&db.conn, &dest_id)? {
+        return Ok(());
+    }
+    let zen = db.zen_free_model_catalog()?.unwrap_or_default();
+    let custom = db.list_custom_account_runtimes()?;
+    let contracts = build_effective_contracts(&zen, &custom, db.load_persisted_contracts()?);
+    let Some(contract) = contracts.scope(scope) else {
+        return Ok(());
+    };
+    let mut catalog = load_destination_catalog(&db.conn, &dest_id)?;
+    for model in &mut catalog {
+        if model_ids.is_some_and(|ids| {
+            !ids.iter()
+                .any(|id| id.eq_ignore_ascii_case(&model.public_model))
+        }) {
+            continue;
+        }
+        if let Some(effective) = contract.model(&model.public_model) {
+            model.protocols = effective.enabled_protocols();
+            model.preferred = Some(effective.preferred_protocol);
+            model.enabled = effective.has_enabled_protocol();
+        }
+    }
+    replace_destination_catalog(&db.conn, &dest_id, &catalog)
+}
+
+pub(crate) fn remove_scope_models(
+    db: &Database,
+    scope: &crate::provider_contracts::ContractScope,
+    ids: &[String],
+) -> Result<()> {
+    let dest_id = match scope {
+        crate::provider_contracts::ContractScope::Provider(id) => destination_id_for_builtin(id),
+        crate::provider_contracts::ContractScope::CustomEndpoint(id) => {
+            let id: Option<String> = db
+                .conn
+                .query_row(
+                    "SELECT destination_id FROM credentials WHERE legacy_account_id = ?1",
+                    [id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let Some(id) = id else {
+                return Ok(());
+            };
+            id
+        }
+    };
+    for id in ids {
+        db.conn.execute(
+            "DELETE FROM destination_models WHERE destination_id = ?1 AND public_model_key = ?2",
+            params![dest_id, id.to_ascii_lowercase()],
+        )?;
+    }
+    Ok(())
+}
+
+/// One-time conversion of per-account protocol judgments. Disagreement cannot
+/// be silently unioned because it could authorize a sibling Key's protocol.
+pub(crate) fn migrate_custom_protocol_controls(db: &Database) -> Result<()> {
+    let projection = crate::destination_projection::load_persisted(db)?;
+    let zen = db.zen_free_model_catalog()?.unwrap_or_default();
+    let runtimes = db.list_custom_account_runtimes()?;
+    let contracts = build_effective_contracts(&zen, &runtimes, db.load_persisted_contracts()?);
+    for destination in projection
+        .destinations
+        .iter()
+        .filter(|destination| destination.adapter == ocg_domain::destination::AdapterKind::Http)
+    {
+        let mut catalog = destination.catalog.clone();
+        for model in &mut catalog {
+            let mut selected: Option<(Vec<UpstreamProtocolKind>, UpstreamProtocolKind)> = None;
+            for credential in projection
+                .credentials
+                .iter()
+                .filter(|credential| credential.destination_id == destination.id)
+            {
+                let Some(effective) = contracts
+                    .custom_endpoints
+                    .get(&credential.legacy_account_id)
+                    .and_then(|scope| scope.model(&model.public_model))
+                else {
+                    continue;
+                };
+                let decision = (effective.enabled_protocols(), effective.preferred_protocol);
+                if let Some(previous) = &selected {
+                    anyhow::ensure!(
+                        previous == &decision,
+                        "destination `{}` model `{}` has conflicting credential protocol settings; resolve them before upgrading",
+                        destination.id,
+                        model.public_model
+                    );
+                } else {
+                    selected = Some(decision);
+                }
+            }
+            if let Some((protocols, preferred)) = selected {
+                model.enabled &= !protocols.is_empty();
+                model.protocols = protocols;
+                model.preferred = Some(preferred);
+            }
+        }
+        replace_destination_catalog(&db.conn, &destination.id, &catalog)?;
+    }
+    if destination_exists(&db.conn, &super::cpa::destination_id())?
+        && let Some(catalog) = db.cpa_model_catalog()?
+    {
+        replace_destination_catalog(
+            &db.conn,
+            &super::cpa::destination_id(),
+            &cpa_catalog(&catalog.models),
+        )?;
+    }
+    Ok(())
+}
+
+pub(crate) fn cpa_catalog(models: &[super::CpaCatalogModel]) -> Vec<CatalogModel> {
+    models
+        .iter()
+        .map(|model| CatalogModel {
+            public_model: model.id.clone(),
+            upstream_model: model.id.clone(),
+            enabled: model.enabled,
+            protocols: UpstreamProtocolKind::ALL.to_vec(),
+            preferred: Some(UpstreamProtocolKind::ChatCompletions),
+            upstream_override: None,
+        })
+        .collect()
 }
 
 fn insert_destination_row(conn: &Connection, destination: &Destination) -> Result<()> {

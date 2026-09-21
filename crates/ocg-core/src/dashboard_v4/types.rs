@@ -9,6 +9,12 @@ use schemars::generate::{SchemaGenerator, SchemaSettings};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
+pub use crate::billing_types::{
+    BillingStatus, CreditBalanceCorrection, CreditCalibrationRequest, CreditConfigureRequest,
+    CreditGrantRequest,
+};
+pub use crate::db::routing_cards::RoutingCard;
+
 use crate::dashboard_v3::{
     AccountAuthScheme, AccountCredentialKind, AccountUpstreamProtocol, ControlRevision,
     MutationExpectation, ProviderDefinitionAuthKind, RoutingMode, V3Error,
@@ -84,7 +90,15 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "DestinationPatchResult",
     "DestinationDeleteResult",
     "DestinationCredentialDto",
+    "QuotaRecoveryDto",
+    "QuotaRecoveryStatus",
+    "QuotaRecoveryReason",
+    "QuotaRecoveryWindow",
+    "QuotaRetryResult",
     "CredentialList",
+    "RoutingCard",
+    "RoutingCardList",
+    "RoutingCardUpdate",
     "CapabilitiesDto",
     "PlanDto",
     "CatalogModelDto",
@@ -96,6 +110,20 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "OfficialSpend",
     "OfficialApiStatus",
     "OfficialApiPrices",
+    "BillingModel",
+    "BillingSource",
+    "BillingStatus",
+    "CreditRate",
+    "MonthlyCredits",
+    "CreditConfiguration",
+    "CreditBucketKind",
+    "CreditBucket",
+    "CreditPreset",
+    "CreditMeterView",
+    "CreditConfigureRequest",
+    "CreditBalanceCorrection",
+    "CreditCalibrationRequest",
+    "CreditGrantRequest",
     "RoutingMode",
     "RoutingClientProtocol",
     "RoutingResolvedKind",
@@ -987,6 +1015,8 @@ pub struct DestinationModelPatch {
     pub upstream_model: String,
     #[serde(default)]
     pub upstream_override: Option<DestinationUpstreamOverridePatch>,
+    #[serde(default)]
+    pub enabled: Option<bool>,
 }
 
 /// Full replacement of editable configuration on one HTTP destination.
@@ -1007,6 +1037,8 @@ pub struct DestinationPatchRequest {
     /// endpoints to these existing credentials.
     #[serde(default)]
     pub authorize_credential_ids: Vec<String>,
+    #[serde(default)]
+    pub enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1110,6 +1142,62 @@ pub struct DestinationCredentialDto {
     pub onboarding_task: Option<DestinationOnboardingTaskDto>,
     /// Purchase date when the destination has a Plan.
     pub purchase_date: Option<String>,
+    /// Confirmed per-Key exhaustion/recovery. Omitted or null means no confirmed exhaustion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_recovery: Option<QuotaRecoveryDto>,
+}
+
+/// Presentation status for a confirmed quota-recovery episode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum QuotaRecoveryStatus {
+    Waiting,
+    Ready,
+    Probing,
+}
+
+/// Why the credential was confirmed exhausted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum QuotaRecoveryReason {
+    QuotaExhausted,
+    InsufficientBalance,
+}
+
+/// Window named by confirmed exhaustion evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum QuotaRecoveryWindow {
+    FiveHours,
+    Week,
+    Month,
+    Unknown,
+}
+
+/// Optional per-Key quota recovery overlay. Status is presentation-only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QuotaRecoveryDto {
+    pub status: QuotaRecoveryStatus,
+    pub reason: QuotaRecoveryReason,
+    pub window: QuotaRecoveryWindow,
+    pub observed_at: String,
+    pub resets_at: Option<String>,
+    pub next_retry_at: String,
+    pub failure_count: u32,
+}
+
+/// POST `/credentials/{id}/quota-retry` result.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QuotaRetryResult {
+    pub revision: ControlRevision,
+    pub credential: DestinationCredentialDto,
 }
 
 /// RFC credential list. Revision-tagged and secret-free.
@@ -1119,6 +1207,27 @@ pub struct DestinationCredentialDto {
 pub struct CredentialList {
     pub revision: ControlRevision,
     pub credentials: Vec<DestinationCredentialDto>,
+}
+
+/// One consistent, secret-free snapshot of cards and the resources they show.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RoutingCardList {
+    pub revision: ControlRevision,
+    pub cards: Vec<RoutingCard>,
+    pub destinations: Vec<DestinationDto>,
+    pub credentials: Vec<DestinationCredentialDto>,
+}
+
+/// The flattened card and row sequence is the complete routing priority order.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase")]
+pub struct RoutingCardUpdate {
+    #[serde(flatten)]
+    pub expectation: MutationExpectation,
+    pub cards: Vec<RoutingCard>,
 }
 
 /// Legacy row kind named in a destination-projection refusal.
@@ -1264,6 +1373,9 @@ pub enum RoutingExclusionCode {
     AuthError,
     CoolingDown,
     FreeChannelUnavailable,
+    QuotaWaiting,
+    QuotaDue,
+    QuotaProbing,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1370,13 +1482,22 @@ pub fn contract_schema() -> Value {
     include_type::<DestinationPatchResult>(&mut serialize);
     include_type::<DestinationDeleteResult>(&mut serialize);
     include_type::<DestinationCredentialDto>(&mut serialize);
+    include_type::<QuotaRecoveryDto>(&mut serialize);
+    include_type::<QuotaRecoveryStatus>(&mut serialize);
+    include_type::<QuotaRecoveryReason>(&mut serialize);
+    include_type::<QuotaRecoveryWindow>(&mut serialize);
+    include_type::<QuotaRetryResult>(&mut serialize);
     include_type::<CredentialList>(&mut serialize);
+    include_type::<RoutingCard>(&mut serialize);
+    include_type::<RoutingCardList>(&mut serialize);
     include_type::<CapabilitiesDto>(&mut serialize);
     include_type::<PlanDto>(&mut serialize);
     include_type::<CatalogModelDto>(&mut serialize);
     include_type::<DestinationProjectionRefusedError>(&mut serialize);
     include_type::<crate::official_api::OfficialApiStatus>(&mut serialize);
     include_type::<crate::official_api::OfficialApiPrices>(&mut serialize);
+    include_type::<BillingStatus>(&mut serialize);
+    include_type::<CreditBalanceCorrection>(&mut serialize);
     include_type::<RoutingMode>(&mut serialize);
     include_type::<RoutingClientProtocol>(&mut serialize);
     include_type::<RoutingResolvedKind>(&mut serialize);
@@ -1409,6 +1530,10 @@ pub fn contract_schema() -> Value {
     include_type::<DestinationModelPatch>(&mut deserialize);
     include_type::<DestinationUpstreamOverridePatch>(&mut deserialize);
     include_type::<DestinationPatchRequest>(&mut deserialize);
+    include_type::<RoutingCardUpdate>(&mut deserialize);
+    include_type::<CreditConfigureRequest>(&mut deserialize);
+    include_type::<CreditCalibrationRequest>(&mut deserialize);
+    include_type::<CreditGrantRequest>(&mut deserialize);
     for (name, schema) in deserialize.take_definitions(true) {
         defs.entry(name).or_insert(schema);
     }

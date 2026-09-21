@@ -271,6 +271,7 @@ fn parse_platform_snapshot(value: Option<String>) -> Result<Option<PlatformSnaps
     Ok(Some(serde_json::from_str(trimmed)?))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn parent_from_destination_row(
     legacy_id: String,
     name: String,
@@ -356,6 +357,7 @@ fn leftover_platform_account_on(conn: &Connection, id: &str) -> Result<Option<Pl
     if !table_exists(conn, "platform_accounts")? {
         return Ok(None);
     }
+    #[allow(clippy::type_complexity)]
     let row: Option<(String, String, String, String, bool, i64, Option<String>)> = conn
         .query_row(
             "SELECT id, kind, name, base_url, credential_cipher IS NOT NULL, version, snapshot
@@ -478,6 +480,7 @@ fn platform_account_on(conn: &Connection, id: &str) -> Result<Option<PlatformAcc
     if table_exists(conn, "destinations")?
         && table_has_column(conn, "destinations", "platform_kind")?
     {
+        #[allow(clippy::type_complexity)]
         let row: Option<(
             String,
             String,
@@ -603,6 +606,7 @@ fn observer_key_cipher_on(conn: &Connection, parent_id: &str) -> Result<Option<S
     Ok(value.filter(|cipher| !cipher.is_empty()))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn upsert_platform_parent_on(
     conn: &Connection,
     id: &str,
@@ -939,8 +943,8 @@ pub(crate) fn platform_parent_base_url(
     conn: &Connection,
     parent_id: &str,
 ) -> Result<Option<String>> {
-    if table_exists(conn, "destinations")? {
-        if let Some(base_url) = conn
+    if table_exists(conn, "destinations")?
+        && let Some(base_url) = conn
             .query_row(
                 "SELECT base_url FROM destinations
                  WHERE legacy_kind = 'platform_parent' AND legacy_id = ?1",
@@ -949,9 +953,8 @@ pub(crate) fn platform_parent_base_url(
             )
             .optional()?
             .flatten()
-        {
-            return Ok(Some(base_url));
-        }
+    {
+        return Ok(Some(base_url));
     }
     if table_exists(conn, "platform_accounts")? {
         return Ok(conn
@@ -1449,6 +1452,7 @@ impl Database {
             false,
         )?;
         identity::persist_platform_identity(&tx, id, name.trim(), &base_url, Utc::now())?;
+        super::routing_cards::reconcile_on(&tx)?;
         tx.commit()?;
         Ok(())
     }
@@ -1484,10 +1488,7 @@ impl Database {
             id,
             &dest_id,
             name.trim(),
-            match credential {
-                Some(value) => value,
-                None => None,
-            },
+            credential.unwrap_or_default(),
             credential.is_some(),
         )?;
         if credential.is_some() {
@@ -1522,6 +1523,7 @@ impl Database {
             "platform account not found"
         );
         identity::delete_platform_identity(&tx, id)?;
+        super::routing_cards::reconcile_on(&tx)?;
         tx.commit()?;
         Ok(())
     }
@@ -1538,6 +1540,7 @@ impl Database {
     ) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         apply_platform_link_on(&tx, account_id, parent_id, group)?;
+        super::routing_cards::reconcile_on(&tx)?;
         tx.commit()?;
         Ok(())
     }
@@ -1550,6 +1553,7 @@ impl Database {
         if let Some(parent_id) = parent_id {
             custom_store::persist_custom_destination_after_unlink(&tx, account_id, &parent_id)?;
         }
+        super::routing_cards::reconcile_on(&tx)?;
         tx.commit()?;
         Ok(())
     }

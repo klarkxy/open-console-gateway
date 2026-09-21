@@ -39,7 +39,7 @@ mod proxy_test;
 mod settings;
 mod types;
 mod updater;
-mod usage;
+pub(crate) mod usage;
 mod usage_refresh;
 
 use axum::extract::{DefaultBodyLimit, FromRequestParts, Query, Request, State};

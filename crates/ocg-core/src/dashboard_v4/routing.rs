@@ -15,8 +15,7 @@ use std::collections::HashMap;
 use crate::dashboard_v3::{ControlRevision, RoutingMode as RoutingModeDto, V3ApiError};
 use crate::gateway::handler::runtime_catalog_snapshot;
 use crate::gateway::materialize::{
-    InferenceBindingGate, InferenceBindingIndex, RouteRejection, RouteRejectionCode,
-    materialize_account_routes_with_bindings, protocol_error_from_resolve,
+    RouteRejection, RouteRejectionCode, materialize_execution_routes, protocol_error_from_resolve,
     resolved_alias_from_model,
 };
 use crate::gateway::protocol::{ParsedClientRequest, parse_client_request, parse_gemini_request};
@@ -133,6 +132,8 @@ fn availability_code(reason: CandidateAvailability) -> Option<RoutingExclusionCo
         CandidateAvailability::FreeChannelUnavailable => {
             Some(RoutingExclusionCode::FreeChannelUnavailable)
         }
+        CandidateAvailability::QuotaWaiting => Some(RoutingExclusionCode::QuotaWaiting),
+        CandidateAvailability::QuotaProbing => Some(RoutingExclusionCode::QuotaProbing),
     }
 }
 
@@ -147,7 +148,7 @@ fn from_rejection(rejection: &RouteRejection) -> RoutingExclusion {
 }
 
 fn availability_exclusion(
-    candidate: &RoutingCandidate,
+    candidate: &RoutingCandidate<crate::routing_snapshot::ExecutionCredential>,
     reason: CandidateAvailability,
 ) -> RoutingExclusion {
     RoutingExclusion {
@@ -173,7 +174,7 @@ fn protocol_dto(protocol: ApiFormat) -> RoutingClientProtocol {
 }
 
 fn eligible_candidate(
-    candidate: &RoutingCandidate,
+    candidate: &RoutingCandidate<crate::routing_snapshot::ExecutionCredential>,
     upstream_protocol: ApiFormat,
     routing_rank: u32,
     destination: Option<&(String, String)>,
@@ -250,20 +251,6 @@ fn minimal_parsed_request(
     }
 }
 
-fn cpa_base_url(state: &CoreState) -> Option<String> {
-    match crate::cpa::env_base_url() {
-        Ok(Some(base_url)) => Some(base_url),
-        Ok(None) => state
-            .db
-            .lock()
-            .cpa_integration()
-            .ok()
-            .flatten()
-            .map(|record| record.base_url),
-        Err(_) => None,
-    }
-}
-
 fn explain_model(
     state: &CoreState,
     model: &str,
@@ -272,56 +259,20 @@ fn explain_model(
     let _settings_update = state.settings_update.lock();
     let (wall, mono) = state.sample_gateway_clock();
     let config = state.config();
-    let contracts = state.provider_contracts();
-    let dynamics = state.dynamic_providers();
-    let snapshot =
-        runtime_catalog_snapshot(state, &contracts, &dynamics).map_err(V3ApiError::internal)?;
-    let catalogs = snapshot.catalogs();
-    let resolved =
-        crate::alias::resolve_with_runtime_catalogs(model, catalogs).map_err(|error| {
-            V3ApiError::invalid_request_at(state, protocol_error_from_resolve(error).message)
-        })?;
+    let snapshot = runtime_catalog_snapshot(state).map_err(V3ApiError::internal)?;
+    let resolved = snapshot.resolve(model).map_err(|error| {
+        V3ApiError::invalid_request_at(state, protocol_error_from_resolve(error).message)
+    })?;
     let parsed = minimal_parsed_request(protocol, model)
         .map_err(|error| V3ApiError::invalid_request_at(state, error.message))?;
 
-    let (
-        accounts,
-        free_cooldown,
-        stored_bindings,
-        routing,
-        custom_runtimes,
-        goat_runtimes,
-        projection,
-    ) = {
-        let db = state.db.lock();
-        let accounts = crate::destination_projection::list_accounts_for_v3(&db)
-            .map_err(V3ApiError::internal)?;
-        let free_cooldown = db
-            .free_channel_cooldown_until_at(wall)
-            .map_err(V3ApiError::internal)?;
-        let stored_bindings = db.list_inference_bindings().map_err(V3ApiError::internal)?;
-        let routing = crate::destination_projection::routing_projection(&db)
-            .ok()
-            .flatten();
-        let custom_runtimes = db
-            .list_custom_account_runtimes()
-            .map_err(V3ApiError::internal)?;
-        let goat_runtimes = db
-            .list_goat_account_runtimes()
-            .map_err(V3ApiError::internal)?;
-        let projection = crate::destination_projection::read_v4_projection(&db)
-            .map_err(V3ApiError::internal)?
-            .map_err(|_| V3ApiError::conflict_at(state, "destination projection refused"))?;
-        (
-            accounts,
-            free_cooldown,
-            stored_bindings,
-            routing,
-            custom_runtimes,
-            goat_runtimes,
-            projection,
-        )
-    };
+    let projection = &snapshot.routing.projection;
+    let accounts = &snapshot.routing.credentials;
+    let free_cooldown = state
+        .db
+        .lock()
+        .free_channel_cooldown_until_at(wall)
+        .map_err(V3ApiError::internal)?;
     let destination_names = projection
         .destinations
         .iter()
@@ -346,50 +297,52 @@ fn explain_model(
         .enumerate()
         .map(|(index, account)| (account.id.as_str(), index as u32))
         .collect::<HashMap<_, _>>();
-    let bindings = stored_bindings
-        .iter()
-        .map(|row| {
-            (
-                row.account_id.clone(),
-                InferenceBindingGate {
-                    enabled: row.enabled,
-                    model_scope: row.model_scope.clone(),
-                },
-            )
-        })
-        .collect::<InferenceBindingIndex>();
     let free_available = free_cooldown.is_none()
-        && !match routing.as_ref() {
-            Some(projection) => {
-                crate::destination_projection::free_channel_exhausted(projection, wall)
-            }
-            None => crate::routing_runtime::free_channel_is_exhausted_at(&accounts, wall),
-        };
-    let custom_by_account = crate::custom::custom_runtimes_by_account(&custom_runtimes);
-    let goat_by_account = crate::goat::goat_runtimes_by_account(&goat_runtimes);
-    let cpa_base = cpa_base_url(state);
-    let route_set = materialize_account_routes_with_bindings(
-        &accounts,
+        && !crate::destination_projection::free_channel_exhausted(projection, wall);
+    let cpa_base = crate::cpa::env_base_url().map_err(V3ApiError::internal)?;
+    let mut route_set = materialize_execution_routes(
+        &snapshot.routing,
         &config,
         &parsed,
         &resolved,
         model,
         model,
-        free_available,
-        &custom_by_account,
-        &goat_by_account,
         cpa_base.as_deref(),
-        &contracts,
-        &dynamics,
-        &bindings,
-        routing.as_ref(),
     )
     .map_err(|error| V3ApiError::invalid_request_at(state, error.message))?;
+    let mut authorization_exclusions = std::collections::HashSet::new();
+    for route in &mut route_set.routes {
+        if !assess_candidate_availability(&route.routing, free_available, wall).is_available() {
+            continue;
+        }
+        let selection =
+            crate::gateway::forwarder::LiveSendSelection::from_execution(route, model, model);
+        if let Err(error) = crate::gateway::forwarder::verify_execution_authorization(
+            &snapshot.routing,
+            &selection,
+            &route.spec,
+            wall,
+            free_available,
+        ) {
+            authorization_exclusions.insert(route.routing.account.id.clone());
+            route.routing.account.enabled = false;
+            route_set.rejections.push(RouteRejection {
+                code: RouteRejectionCode::ProductionRouteUnsupported,
+                detail: error.to_string(),
+                account_id: Some(route.routing.account.id.clone()),
+                provider_id: Some(route.routing.account.provider_id.clone()),
+                upstream_model: Some(route.plan.model.clone()),
+            });
+        }
+    }
 
     let mut exclusions: Vec<RoutingExclusion> =
         route_set.rejections.iter().map(from_rejection).collect();
     let mut eligible = Vec::new();
     for route in &route_set.routes {
+        if authorization_exclusions.contains(&route.routing.account.id) {
+            continue;
+        }
         let reason = assess_candidate_availability(&route.routing, free_available, wall);
         if reason.is_available() {
             eligible.push(eligible_candidate(
@@ -401,6 +354,25 @@ fn explain_model(
                     .unwrap_or(u32::MAX),
                 destination_by_account.get(route.routing.account.id.as_str()),
             ));
+            if route
+                .routing
+                .account
+                .quota_recovery
+                .as_ref()
+                .is_some_and(|recovery| recovery.due_at(wall))
+                && !route.routing.account.quota_probe
+            {
+                exclusions.push(RoutingExclusion {
+                    code: RoutingExclusionCode::QuotaDue,
+                    detail: format!(
+                        "account `{}`: quota recovery is due for one trial",
+                        route.routing.account.id
+                    ),
+                    account_id: Some(route.routing.account.id.clone()),
+                    provider_id: Some(route.routing.account.provider_id.clone()),
+                    upstream_model: Some(route.routing.resolved_model.clone()),
+                });
+            }
         } else {
             exclusions.push(availability_exclusion(&route.routing, reason));
         }
@@ -423,8 +395,7 @@ fn explain_model(
             wall,
             mono,
         )
-        .ok()
-        .flatten()
+        .map_err(V3ApiError::internal)?
         .and_then(|index| route_set.routes.get(index))
         .map(|route| {
             eligible_candidate(
@@ -444,12 +415,15 @@ fn explain_model(
         } => RoutingResolvedModel {
             kind: RoutingResolvedKind::Alias,
             alias: Some((*alias).to_string()),
-            mappings: mappings.iter().map(mapping_dto).collect(),
+            mappings: mappings
+                .iter()
+                .map(|mapping| mapping_dto(mapping, &snapshot))
+                .collect(),
         },
         crate::alias::ResolvedModel::PinnedRaw { mapping, .. } => RoutingResolvedModel {
             kind: RoutingResolvedKind::PinnedRaw,
             alias: resolved_alias_from_model(&resolved),
-            mappings: vec![mapping_dto(mapping)],
+            mappings: vec![mapping_dto(mapping, &snapshot)],
         },
     };
 
@@ -469,9 +443,12 @@ fn explain_model(
     })
 }
 
-fn mapping_dto(mapping: &crate::alias::ProviderMapping) -> RoutingResolvedMapping {
+fn mapping_dto(
+    mapping: &crate::alias::ProviderMapping,
+    snapshot: &crate::gateway::handler::RuntimeCatalogSnapshot,
+) -> RoutingResolvedMapping {
     RoutingResolvedMapping {
-        provider_id: mapping.provider_id.clone(),
+        provider_id: snapshot.output_provider_id(&mapping.provider_id),
         upstream_model: mapping.upstream_model.clone(),
         routeable: mapping.routeable,
     }

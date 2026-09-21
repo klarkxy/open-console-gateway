@@ -1367,6 +1367,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs2"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
+dependencies = [
+ "libc",
+ "winapi",
+]
+
+[[package]]
 name = "futures-channel"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2776,7 +2786,7 @@ dependencies = [
 
 [[package]]
 name = "ocg-browser-worker"
-version = "2.4.2"
+version = "2.5.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2792,7 +2802,7 @@ dependencies = [
 
 [[package]]
 name = "ocg-core"
-version = "2.4.2"
+version = "2.5.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2802,6 +2812,7 @@ dependencies = [
  "bytes",
  "chrono",
  "flate2",
+ "fs2",
  "futures-util",
  "getrandom 0.3.4",
  "hex",
@@ -2830,7 +2841,7 @@ dependencies = [
 
 [[package]]
 name = "ocg-domain"
-version = "2.4.2"
+version = "2.5.0"
 dependencies = [
  "chrono",
  "schemars 1.2.2",
@@ -2841,7 +2852,7 @@ dependencies = [
 
 [[package]]
 name = "ocg-gateway"
-version = "2.4.2"
+version = "2.5.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2852,7 +2863,7 @@ dependencies = [
 
 [[package]]
 name = "ocg-infra"
-version = "2.4.2"
+version = "2.5.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2866,7 +2877,7 @@ dependencies = [
 
 [[package]]
 name = "ocg-manager"
-version = "2.4.2"
+version = "2.5.0"
 dependencies = [
  "anyhow",
  "nix",
@@ -2885,7 +2896,7 @@ dependencies = [
 
 [[package]]
 name = "ocg-manager-cli"
-version = "2.4.2"
+version = "2.5.0"
 dependencies = [
  "anyhow",
  "chrono",

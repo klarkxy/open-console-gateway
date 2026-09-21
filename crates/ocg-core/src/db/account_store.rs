@@ -172,6 +172,7 @@ pub(crate) fn sync_inference_credential_projection_on(
             quota_pool_id,
         ],
     )?;
+    super::identity::backfill_authorization_connections_on(conn)?;
     Ok(())
 }
 

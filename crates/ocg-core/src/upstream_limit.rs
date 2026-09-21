@@ -57,16 +57,18 @@ pub fn parse_reset(text: &str) -> Option<Duration> {
         let Some(n) = n else { continue };
         let unit = unit.trim_matches(|c: char| !c.is_ascii_alphabetic());
         let duration = match unit.to_ascii_lowercase().as_str() {
-            u if u.starts_with("min") => Duration::minutes(n),
-            u if u.starts_with("hr") || u.starts_with("hour") || u == "h" => Duration::hours(n),
-            u if u.starts_with("day") => Duration::days(n),
+            u if u.starts_with("min") => Duration::try_minutes(n)?,
+            u if u.starts_with("hr") || u.starts_with("hour") || u == "h" => {
+                Duration::try_hours(n)?
+            }
+            u if u.starts_with("day") => Duration::try_days(n)?,
             "" => {
                 pending = Some(n);
                 continue;
             }
             _ => continue,
         };
-        total += duration;
+        total = total.checked_add(&duration)?;
         found = true;
     }
 

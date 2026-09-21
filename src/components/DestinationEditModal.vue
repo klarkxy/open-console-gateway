@@ -12,6 +12,9 @@
     <div v-if="destination && draft" class="destination-edit-body">
       <template v-if="!grantStep">
         <n-form label-placement="top" class="destination-edit-form">
+          <n-form-item :label="t('启用')">
+            <n-switch v-model:value="draft.enabled" :disabled="saving" :aria-label="t('启用')" />
+          </n-form-item>
           <n-form-item :label="t('名称')">
             <n-input
               v-model:value="draft.name"
@@ -47,6 +50,7 @@
             <div class="mapping-rows">
               <div v-for="(row, index) in draft.models" :key="index" class="mapping-row">
                 <div class="mapping-row-main">
+                  <n-switch v-model:value="row.enabled" :disabled="saving" :aria-label="`${t('模型')} ${row.public_model} ${t('启用')}`" />
                   <n-input
                     v-model:value="row.public_model"
                     :disabled="saving"
@@ -156,6 +160,7 @@ import {
   NCheckbox,
   NForm,
   NFormItem,
+  NSwitch,
   NInput,
   NModal,
   NSelect,
@@ -255,7 +260,7 @@ watch(
 
 function addModel(): void {
   if (!draft.value || saving.value) return;
-  draft.value.models.push({ public_model: "", upstream_model: "", upstream_override: null });
+  draft.value.models.push({ enabled: true, public_model: "", upstream_model: "", upstream_override: null });
 }
 
 function removeModel(index: number): void {

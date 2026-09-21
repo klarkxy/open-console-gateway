@@ -69,7 +69,11 @@ hosts are rejected. Do not reuse an Open Console Gateway Key as either CPA key.
    an empty catalog; refresh after OAuth accounts exist. Then enable the CPA
    subscription pool. Its single **CPA subscription pool** card on Accounts can
    be ordered and enabled/disabled like other route candidates, but cannot
-   expose a Key, be deleted, or stand in for individual CPA OAuth accounts. For
+   expose a Key, be deleted, or stand in for individual CPA OAuth accounts.
+   The card shows the managed runtime as running, stopped, not installed, or in
+   an install/start phase; an external connection is labeled as such. A running
+   or external pool is not grayed; a stopped, missing, or failed managed runtime
+   is. For
    a managed runtime, extra direct-client keys live on Overview; daily use goes
    through the OCG Access Key.
 

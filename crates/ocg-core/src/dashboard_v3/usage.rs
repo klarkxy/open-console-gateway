@@ -241,6 +241,13 @@ async fn refresh_official_balance(
         check_expectation(state, expectation)?;
         let db = state.db.lock();
         let account = load_account(&db, state, id)?;
+        if configured_balance_endpoint(&db, &account)?.as_deref() != Some(endpoint_url.as_str()) {
+            return Err(V3ApiError::conflict_at(
+                state,
+                "the destination changed before balance refresh",
+            )
+            .into());
+        }
         if account.key_cipher.trim().is_empty() {
             return Err(V3ApiError::invalid_request_at(
                 state,
@@ -279,6 +286,7 @@ async fn refresh_official_balance(
         if current.updated_at != account_snapshot.updated_at
             || current.key_cipher != account_snapshot.key_cipher
             || current.provider_id != account_snapshot.provider_id
+            || configured_balance_endpoint(&db, &current)?.as_deref() != Some(endpoint_url.as_str())
         {
             return Err(V3ApiError::conflict_at(
                 state,
@@ -475,7 +483,7 @@ fn patch_account_usage_locked(
     })
 }
 
-pub(super) fn provider_usage_locked(
+pub(crate) fn provider_usage_locked(
     state: &CoreState,
     id: &str,
 ) -> Result<ProviderUsage, V3ApiError> {
@@ -491,7 +499,7 @@ pub(super) fn provider_usage_locked(
             false,
             None,
             Vec::new(),
-            official_credit_balances(&db, &account.id)?,
+            official_credit_balances(&db, &account)?,
             None,
             None,
         ));
@@ -509,7 +517,7 @@ pub(super) fn provider_usage_locked(
             descriptor.usage.experimental,
             None,
             Vec::new(),
-            official_credit_balances(&db, &account.id)?,
+            official_credit_balances(&db, &account)?,
             db.account_usage_sync_state(&account.id)
                 .map_err(V3ApiError::internal)?,
             None,
@@ -611,14 +619,40 @@ fn captured_pricing(state: &CoreState) -> CapturedPricing {
 
 fn official_credit_balances(
     db: &Database,
-    account_id: &str,
+    account: &ModelAccount,
 ) -> Result<Vec<ModelCreditBalance>, V3ApiError> {
+    let endpoint = configured_balance_endpoint(db, account)?;
+    let stepfun_api = endpoint.as_deref().is_some_and(|endpoint| {
+        crate::api_balance::probe_from_endpoint(endpoint).is_some()
+            && reqwest::Url::parse(endpoint)
+                .ok()
+                .is_some_and(|url| url.host_str() == Some("api.stepfun.com"))
+    });
     Ok(db
-        .list_credit_balances(account_id)
+        .list_credit_balances(&account.id)
         .map_err(V3ApiError::internal)?
         .into_iter()
         .filter(|row| crate::api_balance::is_official_balance_source(&row.source))
+        .filter(|row| row.source != "stepfun-api-official" || stepfun_api)
         .collect())
+}
+
+fn configured_balance_endpoint(
+    db: &Database,
+    account: &ModelAccount,
+) -> Result<Option<String>, V3ApiError> {
+    if account.provider_id == crate::provider::CUSTOM_PROVIDER_ID {
+        return db
+            .account_custom_config(&account.id)
+            .map(|config| config.map(|config| config.endpoint_url))
+            .map_err(V3ApiError::internal);
+    }
+    Ok(db
+        .list_dynamic_providers()
+        .map_err(V3ApiError::internal)?
+        .into_iter()
+        .find(|provider| provider.id == account.provider_id)
+        .map(|provider| provider.endpoint_url))
 }
 
 fn load_account(db: &Database, state: &CoreState, id: &str) -> Result<ModelAccount, V3ApiError> {

@@ -4,6 +4,39 @@
 
 Operator contract for upgrades, backups, and rollback. Schema details are in [Persistence](state-and-lifecycle.md#persistence).
 
+## Schema v62 — personal credit estimates
+
+v62 adds nullable `credentials.credit_meter_json` and `forward_logs.credit_receipt_json`. Each credential owns its configuration, credit buckets, calibration baseline, and estimated consumption. A settlement receipt and its debit commit in the same transaction; repeated stream finalization cannot debit twice, and log removal cannot replenish the stored balance. Supplier containers and existing quota-sharing metadata do not own these personal meters.
+
+The earlier v61 console-session column is retained as historical schema but cleared when upgrading to v62; no runtime code reads or renews those tokens. Configuration rewrites preserve a credit meter only for the same credential, destination, and endpoint. Key rotation on that account does not reset its balance. Inference grants, cooldowns, and quota recovery are unchanged. These additive changes are transactional and create no separate pre-v62 backup. Rollback requires restoring the whole pre-upgrade data directory; older binaries refuse schema v62.
+
+An exclusive `.database-open-gate.lock` serializes initialization. Each open
+database holds a shared lock on `.database-open.lock`. Pending credit
+receipts are recovered only by an opener that can first acquire the exclusive
+lock, after all previous database handles have closed. A concurrent CLI status
+read therefore leaves active receipts untouched. If another handle survives a
+gateway crash, recovery waits for a later cold open. Do not remove or replace
+either lock file while the directory is in use; upgrades must stop older binaries
+that do not participate in this lock.
+
+## Schema v60 — per-Key quota recovery
+
+v60 additively stores confirmed per-Key quota exhaustion on `credentials.quota_recovery_json` (nullable TEXT JSON). `migrate_to_v60` requires schema v59, calls `quota_recovery::ensure_column`, then writes `schema_version` 60. An already-v60 open still runs `ensure_column`. There is no credentials-table rewrite and no pre-v60 SQLite snapshot. Ordinary cooldown columns, credential IDs, routing order, and Key ciphertext stay as stored.
+
+The JSON holds epoch, reason, window map (optional reset instants), observed time, next retry, and failure count. The probing lease is process-local and is not persisted; a restart reloads wait and backoff from the column. Recovery is independent of quota pools and ordinary cooldown. Local destination-projection rewrites snapshot and restore the column in place. Node transfer does not export it. Metadata edits that do not replace the Key leave it in place; rotate, Key replacement, and managed-key writes set it NULL.
+
+Older binaries refuse a v60 database (`existing_version > CURRENT_SCHEMA_VERSION`) and do not apply the recovery gate. Roll back by restoring the whole pre-upgrade data directory; that is not a behavior-preserving downgrade of the migrated file.
+
+## Schema v59 — runtime authorization and model authority
+
+Schema v59 persists `credentials.authorization_connection_id`, preserving the existing endpoint-grant namespace without changing grant values, Key ciphertext, credential IDs or global order. Platform Keys retain their historical per-Key authorization identity; shared HTTP Keys retain their connection identity. Normal routing reads this field directly.
+
+Existing Custom protocol judgments are converted into the destination catalog in one transaction. Conflicting judgments for a shared model reject the upgrade instead of combining permissions. CPA's selected catalog is also materialized into `destination_models`. A nonempty v58 database receives a verified `data.sqlite.pre-v59.<timestamp>.bak` and `.sha256` sidecar before mutation. Restore the matching pre-upgrade directory to roll back; no down-migration is provided.
+
+## Routing cards (schema v59, no new tables)
+
+`settings.routing_cards_v1` stores versioned card IDs, destination references and credential membership. Card identity is separate from the shared destination configuration. `credentials.routing_rank` remains the runtime order: one CAS layout write validates the complete inference-credential set and commits its flattened ranks and card metadata in one transaction. Reads never reorder credentials; legacy rank-only writes reconcile card boundaries against the saved ranks. Adjacent and empty cards remain distinct. Payload V9 adds validated `routingCards`; V4–V8 imports derive cards from their credential order.
+
 ## Data directories and cipher identity
 
 Every database open uses the Host-resolved cipher (`Database::open_with_cipher` on CLI, desktop, and Docker). Stored account ciphertext is probed before migration and decryption errors fail closed. New writes use authenticated AES-256-GCM (`v2:`). Unprefixed legacy XOR still decrypts so backups restore; a successful Host-cipher open rewrites those rows to v2. A successful UTF-8 decode of XOR is not treated as v2 success. Retain the original cipher; rewriting ciphertext does not repair a mismatch.
@@ -33,7 +66,7 @@ Downgrades are not supported: never point an older binary at a migrated database
 
 ## Schema v27 and the pre-v3 snapshot
 
-`CURRENT_SCHEMA_VERSION = 58` (`crates/ocg-core/src/db.rs`). Historical migrations v1–v57 remain described below. v58 adds `destinations.model_resolution`, backfills `adapter_defined` / `public_only` / `public_and_upstream`, changes legacy Custom destinations to unbounded credential capacity, preserves every destination and credential ID, and writes a verified pre-v58 SQLite backup for a non-fresh canonical v57 source before mutation.
+`CURRENT_SCHEMA_VERSION = 62` (`crates/ocg-core/src/db.rs`). Historical migrations v1–v57 remain described below. v58 adds `destinations.model_resolution`, backfills `adapter_defined` / `public_only` / `public_and_upstream`, changes legacy Custom destinations to unbounded credential capacity, preserves every destination and credential ID, and writes a verified pre-v58 SQLite backup for a non-fresh canonical v57 source before mutation. v60 additively stores `credentials.quota_recovery_json` (see above).
 
 ## Schema v45 — identity / credential / binding satellites
 
@@ -57,7 +90,7 @@ Migration rules: each existing account becomes exactly one identity (label = acc
 
 Every account insert (V3 create, managed create, user-defined Provider first Key, V4 onboarding commit, node import, V4 identity credential create) writes the satellite rows in the same transaction via the single mapper shared with this migration. Platform link / unlink updates the linked identity's confidence and site in the same transaction.
 
-Rotate, binding edits, second-credential writes, and configurable-destination PATCH/DELETE are V4 CAS paths. New exports use portable payload V8 (envelope v1). V8 carries destinations and credentials as authority, including per-model route overrides and `modelResolution`; V7 imports receive deterministic defaults, while V8 requires the field. V4–V8 remain importable and V9+ is rejected. Legacy Custom rows keep stable IDs and `public_only` resolution while becoming connection-owned and multi-Key. Destination/credential merge remains transactional.
+Rotate, binding edits, second-credential writes, and configurable-destination PATCH/DELETE are V4 CAS paths. New exports use portable payload V10 (envelope v1). V9 carries destinations and credentials as authority, including per-model route overrides and `modelResolution`; V7 imports receive deterministic defaults, while V8 and later require the field. V4–V10 remain importable and V11+ is rejected. Legacy Custom rows keep stable IDs and `public_only` resolution while becoming connection-owned and multi-Key. Destination/credential merge remains transactional.
 
 ## Schema v46 — persisted binding grants
 
@@ -262,7 +295,7 @@ v32 replaces `account_custom_configs.base_url`, JSON `upstream_protocols`, and `
 
 ## Schema v35 — Provider single identity
 
-v35 removes the offering dimension. Provider and Plan are one product identity keyed by `provider_id`. Known v34 pairs map as `opencode/go`, `opencode-zen-free/anonymous-free`, `command-code/goat`, `minimax/cn`, `kimi/cn`, `custom/api`, and `cpa/local`. Unknown pairs and composite-key collisions fail closed before any write. The rebuild preserves accounts, ciphertext bytes, logs, pricing/catalog rows, contracts, Custom configs/capabilities, settings, and access keys. The same schema version also stores typed user-defined Providers in `dynamic_providers` and `dynamic_provider_models` (both renamed to `providers` / `provider_models` in v42). Node backups export payload V6 with `providerId` only, plus an optional/defaulted user-defined Provider definition collection. Payload V1–V3, and any version other than 4, 5, or 6 (including a future V7 package), are rejected with an explicit unsupported-version error. That schema's transfer contract exported payload V6; HEAD exports payload V8. V4/V5 imports still rebuild identity satellites with the deterministic 1:1 mapper.
+v35 removes the offering dimension. Provider and Plan are one product identity keyed by `provider_id`. Known v34 pairs map as `opencode/go`, `opencode-zen-free/anonymous-free`, `command-code/goat`, `minimax/cn`, `kimi/cn`, `custom/api`, and `cpa/local`. Unknown pairs and composite-key collisions fail closed before any write. The rebuild preserves accounts, ciphertext bytes, logs, pricing/catalog rows, contracts, Custom configs/capabilities, settings, and access keys. The same schema version also stores typed user-defined Providers in `dynamic_providers` and `dynamic_provider_models` (both renamed to `providers` / `provider_models` in v42). Node backups export payload V6 with `providerId` only, plus an optional/defaulted user-defined Provider definition collection. Payload V1–V3, and any version other than 4, 5, or 6 (including a future V7 package), are rejected with an explicit unsupported-version error. That schema's transfer contract exported payload V6; HEAD exports payload V10. V4/V5 imports still rebuild identity satellites with the deterministic 1:1 mapper.
 
 Before any destructive v35 rebuild on a non-empty v34 database, the process writes a unique never-overwritten sibling snapshot:
 

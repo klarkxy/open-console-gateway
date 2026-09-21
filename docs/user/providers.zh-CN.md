@@ -32,7 +32,7 @@
 - 用户定义供应商作为类型化定义持久化，并绑定 Configurable HTTP。它们的 Endpoint、协议、鉴权方式和映射在本页编辑。
 - 遗留 `CustomEndpoint(account_id)` 范围继续保留每把 Key 的探测证据；连接配置统一在**供应商**页编辑。
 
-供应商预设与可配置连接共用详情壳。**模型** 展示目录或公开名称 → 上游 ID 映射；**价格** 不会在没有快照时编造价格；**设置** 展示并编辑 HTTP 连接信息，密封供应商保持只读。迁移后的 Custom API 连接也在此编辑和删除。**OpenCode Go** 的托管注册 **邀请链接** 仍在设置页签，它不是密封源。用户定义供应商未定价。
+供应商预设与可配置连接共用详情壳。**模型** 展示目录或公开名称 → 上游 ID 映射；**价格** 不会在没有快照时编造价格；**设置** 展示并编辑 HTTP 连接信息，密封供应商保持只读。迁移后的 Custom API 连接也在此编辑和删除。**OpenCode Go** 的托管注册 **邀请链接** 仍在设置页签，它不是密封源。用户定义供应商默认未定价，可由匹配的官网预设或按账号配置的积分费率提供估算。
 
 **别名** 是独立的核心页面，因为它的表覆盖当前已启用账号，而不是某一个选中的供应商。表里只出现至少有一个启用账号的供应商，并把 CPA 单独列成一个供应商。公开名称和精确上游身份来自这些供应商的合约、用户定义映射、Custom 能力，以及已选中的 CPA 目录。公开名称与其他上游 ID 重叠时会显示检查提示。可以按公开名称、上游 ID 或供应商搜索。对外模型名左侧的开关控制是否对下游列出该名称：默认开启，会出现在已鉴权的 `GET /v1/models` 中；关闭后该列表不再包含它。关闭的名称仍留在本页，知道名称的客户端仍可调用。供应商目录上的启用开关仍然决定是否参与路由。
 
@@ -52,7 +52,7 @@ MiniMax 与 Kimi 需要一个符合条件的账号 Key。MiniMax 刷新 `https:/
 
 迁移后的 Custom API 连接保留公开名称 → 上游 ID 映射，发现结果不会静默替换。既有连接只按公开名称解析；普通新建可配置 HTTP 连接也允许唯一的精确上游 ID。Command Code 使用官方公开的 `/models` 目录：GOAT 预设默认开启，后续发现的额外模型默认关闭，只有在列表中开启其受支持协议后才会供应。
 
-本地目录会进入解析，请求时不会再访问上游。内置 Alias 权威是静态且由代码持有：最早 OpenCode Go 表提供 Go 名称，密封 MiniMax CN、Kimi CN 与选定 GOAT 长名称映射表提供供应商 Alias，但不会据此新增 Go 路由。Command 会先去掉 Provider 命名空间并复用已有代码持有的 Alias；只有短名已获授权时才去掉已知套餐后缀。例如 `nvidia/nemotron-3-ultra-550b-a55b` 使用 Alias `nemotron-3-ultra`。保存的 CN 行只激活其精确密封映射。无法匹配的 Command/MiniMax/Kimi 模型保留为精确 raw ID，不会作为新 Alias 公布；CN 映射仍保留上游 ID 的准确拼写。Zen Free 按官方 `-free` 后缀公布去掉后缀后的 Alias，原始 `-free` ID 始终可作为精确 raw pin 使用，见 [Zen Free 模型](routing.zh-CN.md#zen-free-模型)。
+本地目录会进入解析，请求时不会再访问上游。内置 Alias 权威是静态且由代码持有：最早 OpenCode Go 表提供 Go 名称，密封 MiniMax CN、Kimi CN 与选定 GOAT 长名称映射表提供供应商 Alias，但不会据此新增 Go 路由。Command 会先去掉 Provider 命名空间并复用已有代码持有的 Alias；只有短名已获授权时才去掉已知套餐后缀。例如 `nvidia/nemotron-3-ultra-550b-a55b` 使用 Alias `nemotron-3-ultra`。保存的 CN 行只激活其精确密封映射。含 `/` 的 Command id 会公布唯一的最后一节小写 kebab Alias（例如 `google/gemini-3.5-flash` → `gemini-3.5-flash`）。不含 `/` 且无法匹配的 Command 行，以及无法匹配的 MiniMax/Kimi 模型，保留为精确 raw ID，不会作为新 Alias 公布；CN 映射仍保留上游 ID 的准确拼写。Zen Free 按官方 `-free` 后缀公布去掉后缀后的 Alias，原始 `-free` ID 始终可作为精确 raw pin 使用，见 [Zen Free 模型](routing.zh-CN.md#zen-free-模型)。
 
 当某个供应商的全部模型都关闭时，该供应商不再产生路由。带鉴权的下游 `GET /v1/models` 只公布可路由的公开名称；raw-only 身份和 raw 名称冲突都会排除。歧义 raw 身份以 `ambiguous_model_id` 失败，绝不请求上游。
 
@@ -63,9 +63,9 @@ MiniMax 与 Kimi 需要一个符合条件的账号 Key。MiniMax 刷新 `https:/
 **刷新价格表** 只抓取并校验当前所选 Provider 自己的官方来源。OpenCode 与 Command Code 的 revision 和最后成功快照彼此独立；一个失败不会动另一个。以后某个 Provider 若包含多个有价格的 Plan，一次操作也只刷新该 Provider 内的 Plan。刷新仍只能手动发起：
 
 - OpenCode Go 展示 revision、文档更新时间、token 单价、`Usage`（官方文档中这一列名为 **Monthly limit**）和额度扣减倍率，点击刷新后才会访问 `https://opencode.ai/docs/go/`。抓取或校验失败时继续使用最后一次成功快照。allowance 不是额度池、不会参与路由，只用于推导扣减倍率（“账号月窗口 / 模型月额度”）。临时覆盖会创建新的持久化 revision，供后续估算使用。
-- Command Code GOAT 展示从 `https://commandcode.ai/docs/plans/goat` 保存的官方费率快照。带分时费率的模型会保留官方每日高峰窗口（UTC 01:00–04:00、06:00–10:00）及独立的输入、输出、缓存读取价格。每个已定价模型的应用倍率都可手动修改并保存；新请求使用保存后的 Provider revision 计算，缺失或歧义行仍为 unpriced。刷新若将覆盖手动倍率会先请求确认。它与 OpenCode Go 分开；账号卡可显式从 Command Code 第一方 `/alpha/billing/credits` 账号端点校准 `$14 / $35 / $70` 三个窗口。官方 CLI 使用该端点，但公开 Provider API 文档未列出。两次快照之间继续累计 OCG 内已定价日志，并保留手工修正；GOAT 不做自动用量同步。
+- Command Code GOAT 展示从 `https://commandcode.ai/docs/plans/goat` 保存的官方费率快照。带分时费率的模型会保留官方每日高峰窗口（UTC 01:00–04:00、06:00–10:00）及独立的输入、输出、缓存读取价格。每个已定价模型的应用倍率都可手动修改并保存；新请求使用保存后的 Provider revision 计算，缺失或歧义行仍为 unpriced。刷新若将覆盖手动倍率会先请求确认。它与 OpenCode Go 分开；账号卡可显式 **刷新额度**，从 Command Code 第一方 `/alpha/billing/credits` 账号端点读取 `$14 / $35 / $70` 三个窗口，并同时刷新 GOAT 模型目录。官方 CLI 使用该端点，但公开 Provider API 文档未列出。两次快照之间继续累计 OCG 内已定价日志。官方快照就是基线，之后可以用手工校准三个窗口；GOAT 不做自动用量同步。
 - Zen Free 未定价（额度按出口 IP 共享）。
-- Custom API 为 unpriced：成功转发记 `cost_state=unknown`，不扣额度。没有官方用量窗口。已知主机的当前余额读取（DeepSeek / Moonshot）只用于展示。
+- Custom API 的美元费用保持未知：成功转发记 `cost_state=unknown`，不扣计时额度。已配置积分计量的账号会单独记录原生积分费用。没有通用官方用量窗口；已知主机的当前余额读取（DeepSeek / Moonshot / StepFun API）只用于展示。
 - Ollama Cloud 刷新公开且无需鉴权的目录 `https://ollama.com/v1/models`，不选择账号。发现的行立即启用 Chat Completions；Responses 与 Messages 不受支持，也没有协议探测入口。目录刷新仅在剥离 `:` 标签后恰好命中一个目录 id 时，才向 Go 拥有的别名追加一个可路由 Ollama 映射。带日期标签的快照 id 来自运行时目录。手动价格刷新读取 `https://ollama.com/pricing`（Model / Input / Cached input / Output），配额倍率固定 `1.0`。新建账号必须选择 Pro/Max/Team 并填写购买日期。账号卡按官方每请求用量与该档估算一个月 USD Credits 窗口；实际已用可以超过软上限，进度条只把显示钳在 100%，不会写冷却或改变路由。无计费行的既有账号仍可路由且无进度条。
 - MiniMax CN 与 Kimi Code CN 在 OCG 内为 unpriced，但账号卡可手工读取官方订阅窗口（`/token_plan/remains` 与 `/usages`）。这些快照只用于展示，不影响推理资格。
 - Custom API 与用户定义 Provider 账号，若保存的 Endpoint 主机恰好是 `api.deepseek.com`、`api.moonshot.cn` 或 `api.moonshot.ai`，可手工读取官方当前余额。其他 Custom 主机不会被探测。

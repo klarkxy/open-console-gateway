@@ -553,6 +553,7 @@ import { dashboardErrorDetail } from "../utils/errors.ts";
 import { useClipboard } from "../utils/format.ts";
 import {
   CPA_OAUTH_PROVIDERS,
+  CPA_RUNTIME_PHASE_KEYS,
   cpaAccountKey,
   cpaCliImportAlreadyPresent,
   cpaOAuthProviderForCliAccount,
@@ -732,14 +733,7 @@ const modelCatalogDetail = computed(() => {
 });
 
 function runtimePhaseLabel(phase: CpaRuntimePhase): string {
-  switch (phase) {
-    case "checking": return t("检查中");
-    case "downloading": return t("下载中");
-    case "installing": return t("安装中");
-    case "starting": return t("启动中");
-    case "failed": return t("失败");
-    default: return t("空闲");
-  }
+  return t(CPA_RUNTIME_PHASE_KEYS[phase]);
 }
 
 function selectMode(next: Exclude<CpaRuntimeModePreference, null>): void {

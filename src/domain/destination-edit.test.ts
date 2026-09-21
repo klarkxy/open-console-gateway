@@ -129,8 +129,8 @@ test("every issue code has a copy mapping", () => {
 test("only user-defined http destinations are editable", () => {
   assert.equal(isDestinationEditable(destination()), true);
   assert.equal(isDestinationEditable(destination({ legacy: { kind: "dynamic", id: "dyn-1" } })), true);
-  assert.equal(isDestinationEditable(destination({ legacy: { kind: "builtin", id: "deepseek" } })), false);
-  assert.equal(isDestinationEditable(destination({ legacy: { kind: "platform_parent", id: "p-1" } })), false);
+  assert.equal(isDestinationEditable(destination({ adapter: "zen" })), false);
+  assert.equal(isDestinationEditable(destination({ capabilities: { ...destination().capabilities, observer: true } })), false);
   assert.equal(isDestinationEditable(destination({ adapter: "zen" })), false);
 });
 
@@ -141,7 +141,7 @@ test("delete requires an editable destination with no referencing Keys", () => {
     isDestinationDeletable(destination(), [credential({ destination_id: "dest-2", id: "cred-2" })]),
     true,
   );
-  assert.equal(isDestinationDeletable(destination({ legacy: { kind: "builtin", id: "deepseek" } }), []), false);
+  assert.equal(isDestinationDeletable(destination({ adapter: "zen" }), []), false);
 });
 
 test("draft round-trips the persisted destination including per-model overrides", () => {
@@ -161,6 +161,7 @@ test("draft round-trips the persisted destination including per-model overrides"
   assert.equal(result.auth_scheme, "bearer");
   assert.equal(result.upstream_protocol, "chat_completions");
   assert.deepEqual(result.models, [{
+    enabled: true,
     public_model: "lab-fast",
     upstream_model: "vendor/fast",
     upstream_override: { protocol: "responses", endpoint_url: "https://fast.lab.example/v1" },
@@ -208,7 +209,7 @@ test("buildDestinationPatch validates before producing the full replacement", ()
   );
   assert.equal(
     issueOf(() => buildDestinationPatch(destination({
-      legacy: { kind: "builtin", id: "deepseek" },
+      adapter: "zen",
     }), draft())),
     "immutable_destination",
   );

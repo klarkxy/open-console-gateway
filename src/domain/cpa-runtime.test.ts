@@ -1,9 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  CPA_CARD_STATUS_KEYS,
   CPA_LOG_TAIL_LINES,
   CPA_OAUTH_PROVIDERS,
+  CPA_RUNTIME_PHASE_KEYS,
   cpaAccountKey,
+  cpaCardProcessDown,
+  cpaCardStatus,
+  cpaCardStatusTagType,
   cpaCliImportAlreadyPresent,
   cpaCliImportFilenameToken,
   cpaOAuthProviderForCliAccount,
@@ -283,6 +288,67 @@ test("CLI import filename tokens match CPA account names", () => {
   assert.ok(!cpaCliImportAlreadyPresent("codex", [{ name: "codex-work.json" }]));
   assert.equal(cpaOAuthProviderForCliAccount({ name: "ocg-cli-claude-f0e1d2.json" }), "anthropic");
   assert.equal(cpaOAuthProviderForCliAccount({ name: "chatgpt-oauth.json" }), null);
+});
+
+test("CPA card status prefers lifecycle phase then managed running/stopped", () => {
+  const owned = integration({ configured: true, runtimeOwned: true, runtimeRunning: true, installedVersion: "1.0.0" });
+  assert.equal(cpaCardStatus(owned, runtime({ running: true, installed: true, owned: true })), "running");
+  assert.equal(cpaCardStatus(owned, runtime({ running: false, installed: true, owned: true })), "stopped");
+  assert.equal(
+    cpaCardStatus(owned, runtime({ running: false, installed: false, owned: true })),
+    "not_installed",
+  );
+  assert.equal(
+    cpaCardStatus(owned, runtime({ phase: "starting", running: false, installed: true, owned: true })),
+    "starting",
+  );
+  assert.equal(
+    cpaCardStatus(owned, runtime({ phase: "failed", running: false, installed: true, owned: true })),
+    "failed",
+  );
+  assert.equal(cpaCardStatus(owned, null), "running");
+  assert.equal(
+    cpaCardStatus(integration({ configured: true, runtimeOwned: true, runtimeRunning: false, installedVersion: "1.0.0" }), null),
+    "stopped",
+  );
+  assert.equal(
+    cpaCardStatus(integration({ configured: true, runtimeOwned: false, runtimeRunning: false }), runtime({ owned: false, running: false })),
+    "external",
+  );
+  assert.equal(cpaCardStatus(integration({ configured: false, runtimeOwned: false }), null), null);
+  assert.equal(cpaCardStatus(null, runtime()), null);
+});
+
+test("CPA card status keys cover every code and tag type stays semantic", () => {
+  const statuses = [
+    "checking",
+    "downloading",
+    "installing",
+    "starting",
+    "failed",
+    "running",
+    "stopped",
+    "not_installed",
+    "external",
+  ] as const;
+  assert.deepEqual(Object.keys(CPA_CARD_STATUS_KEYS).sort(), [...statuses].sort());
+  assert.deepEqual(
+    Object.keys(CPA_RUNTIME_PHASE_KEYS).sort(),
+    ["checking", "downloading", "failed", "idle", "installing", "starting"].sort(),
+  );
+  assert.equal(cpaCardStatusTagType("running"), "success");
+  assert.equal(cpaCardStatusTagType("failed"), "error");
+  assert.equal(cpaCardStatusTagType("starting"), "warning");
+  assert.equal(cpaCardStatusTagType("not_installed"), "warning");
+  assert.equal(cpaCardStatusTagType("stopped"), "default");
+  assert.equal(cpaCardStatusTagType("external"), "default");
+  assert.equal(cpaCardProcessDown("running"), false);
+  assert.equal(cpaCardProcessDown("external"), false);
+  assert.equal(cpaCardProcessDown(null), false);
+  assert.equal(cpaCardProcessDown("stopped"), true);
+  assert.equal(cpaCardProcessDown("not_installed"), true);
+  assert.equal(cpaCardProcessDown("failed"), true);
+  assert.equal(cpaCardProcessDown("starting"), true);
 });
 
 test("OAuth polling stops on terminal statuses and refreshes accounts only on success", () => {

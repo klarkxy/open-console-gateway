@@ -27,7 +27,7 @@
 
 供应商所有字段留在 **供应商** 页。账号 **Key**、启停、顺序、备注、冷却和测试留在 **账号** 页。用户定义供应商始终未定价：没有官方用量、额度估算或价格行。请求日志仍会归因供应商、账号和模型。
 
-节点备份以 payload V8 导出，携带目的地、凭据、模型解析策略与按模型路由覆盖。导入接受 V4 至 V8。当前 SQLite schema（v58）把可配置 HTTP 连接存在 destinations 与 `destination_models` 上；遗留 Custom 连接保持独立并可挂多把 Key。密封 builtin 仍编译在代码里。
+节点备份以 payload V9 导出，携带目的地、凭据、模型解析策略与按模型路由覆盖。导入接受 V4 至 V9。当前 SQLite schema（v60）把可配置 HTTP 连接存在 destinations 与 `destination_models` 上；遗留 Custom 连接保持独立并可挂多把 Key。密封 builtin 仍编译在代码里。
 
 ## 立即接入兼容上游
 

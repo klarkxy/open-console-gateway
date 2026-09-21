@@ -1289,6 +1289,7 @@ fn selector_uses_candidate_adapter_not_account_provider_id() {
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn preview_index(
     runtime: &RoutingRuntime,
     candidates: &[RoutingCandidate],

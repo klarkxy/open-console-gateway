@@ -6,9 +6,12 @@ import {
   credentialsApi,
   destinationsApi,
   routingApi,
+  routingCardsApi,
   type Destination,
   type DestinationCredential,
   type DestinationPatchInput,
+  type RoutingCardListSnapshot,
+  type RoutingCardView,
   type RoutingExplanationView,
 } from "../api/destinations.ts";
 import type { MutationExpectation } from "../api/generated/dashboard-v3.ts";
@@ -56,16 +59,6 @@ function refusalsFromError(error: DashboardRequestError): DestinationProjectionR
     .filter((row): row is DestinationProjectionRefusal => row !== null);
 }
 
-const SNAPSHOT_CONSISTENCY_ATTEMPTS = 3;
-
-function sameControlExpectation(
-  left: MutationExpectation,
-  right: MutationExpectation,
-): boolean {
-  return left.expectedRevision === right.expectedRevision
-    && left.processGeneration === right.processGeneration;
-}
-
 /**
  * Single owner of the V4 destination / credential projection. Views never
  * group from platform links; a pending load can never clobber a newer
@@ -74,6 +67,7 @@ function sameControlExpectation(
 export const useDestinationsStore = defineStore("destinations", () => {
   const destinations = ref<Destination[]>([]);
   const credentials = ref<DestinationCredential[]>([]);
+  const cards = ref<RoutingCardView[]>([]);
   const expectation = ref<MutationExpectation | null>(null);
   const loaded = ref(false);
   const loading = ref(false);
@@ -92,23 +86,37 @@ export const useDestinationsStore = defineStore("destinations", () => {
 
   interface DestinationMutationToken {
     session: number;
+    processGeneration: number | null;
   }
 
   /** Invalidate any load that started before this write. */
   function beginDestinationMutation(): DestinationMutationToken {
     loadGeneration += 1;
     loading.value = false;
-    return { session: sessionGeneration };
+    return {
+      session: sessionGeneration,
+      processGeneration: expectation.value?.processGeneration ?? null,
+    };
   }
 
   function mutationSessionIsCurrent(token: DestinationMutationToken): boolean {
     return token.session === sessionGeneration;
   }
 
-  function mutationExpectationIsCurrent(next: MutationExpectation): boolean {
-    return !expectation.value
-      || next.processGeneration !== expectation.value.processGeneration
-      || next.expectedRevision >= expectation.value.expectedRevision;
+  /**
+   * Same-process receipts are revision-monotonic. Process identity is opaque:
+   * a snapshot from a different process than this write started under (a
+   * restart) invalidates the in-flight receipt. Do not order generations.
+   */
+  function mutationExpectationIsCurrent(
+    token: DestinationMutationToken,
+    next: MutationExpectation,
+  ): boolean {
+    const current = expectation.value;
+    if (!current) return true;
+    if (token.processGeneration !== current.processGeneration) return false;
+    if (next.processGeneration !== current.processGeneration) return false;
+    return next.expectedRevision >= current.expectedRevision;
   }
 
   /** A write receipt wins over loads that started while that write was pending. */
@@ -116,7 +124,9 @@ export const useDestinationsStore = defineStore("destinations", () => {
     token: DestinationMutationToken,
     next: MutationExpectation,
   ): boolean {
-    if (!mutationSessionIsCurrent(token) || !mutationExpectationIsCurrent(next)) return false;
+    if (!mutationSessionIsCurrent(token) || !mutationExpectationIsCurrent(token, next)) {
+      return false;
+    }
     loadGeneration += 1;
     loading.value = false;
     return true;
@@ -137,56 +147,32 @@ export const useDestinationsStore = defineStore("destinations", () => {
   function applySnapshot(
     nextDestinations: Destination[],
     nextCredentials: DestinationCredential[],
+    nextCards: RoutingCardView[],
     nextExpectation: MutationExpectation,
   ): void {
     destinations.value = nextDestinations;
     credentials.value = nextCredentials;
+    cards.value = nextCards;
     expectation.value = nextExpectation;
     refusals.value = [];
     loaded.value = true;
     error.value = "";
   }
 
-  /** Commit a fresh pair and invalidate in-flight loads, like an in-place mutation. */
-  function commitSnapshot(
-    nextDestinations: Destination[],
-    nextCredentials: DestinationCredential[],
-    nextExpectation: MutationExpectation,
-  ): void {
+  /** Commit a fresh snapshot and invalidate in-flight loads, like an in-place mutation. */
+  function commitSnapshot(snapshot: RoutingCardListSnapshot): void {
     loadGeneration += 1;
     loading.value = false;
-    applySnapshot(nextDestinations, nextCredentials, nextExpectation);
+    applySnapshot(snapshot.destinations, snapshot.credentials, snapshot.cards, snapshot.expectation);
   }
 
   async function load(): Promise<void> {
     const generation = ++loadGeneration;
     loading.value = true;
     try {
-      let destinationSnapshot: Awaited<ReturnType<typeof destinationsApi.listSnapshot>> | undefined;
-      let credentialSnapshot: Awaited<ReturnType<typeof credentialsApi.listSnapshot>> | undefined;
-      for (let attempt = 0; attempt < SNAPSHOT_CONSISTENCY_ATTEMPTS; attempt++) {
-        const pair = await Promise.all([
-          destinationsApi.listSnapshot(),
-          credentialsApi.listSnapshot(),
-        ]);
-        if (generation !== loadGeneration) return;
-        destinationSnapshot = pair[0];
-        credentialSnapshot = pair[1];
-        if (sameControlExpectation(destinationSnapshot.expectation, credentialSnapshot.expectation)) {
-          break;
-        }
-        destinationSnapshot = undefined;
-        credentialSnapshot = undefined;
-      }
+      const snapshot = await routingCardsApi.listSnapshot();
       if (generation !== loadGeneration) return;
-      if (!destinationSnapshot || !credentialSnapshot) {
-        throw new Error("destination credential snapshot mismatch");
-      }
-      applySnapshot(
-        destinationSnapshot.destinations,
-        credentialSnapshot.credentials,
-        destinationSnapshot.expectation,
-      );
+      applySnapshot(snapshot.destinations, snapshot.credentials, snapshot.cards, snapshot.expectation);
     } catch (e) {
       if (generation === loadGeneration) {
         if (isDestinationProjectionRefused(e)) {
@@ -240,6 +226,36 @@ export const useDestinationsStore = defineStore("destinations", () => {
     }
   }
 
+  /**
+   * POST quota-retry for one Key and merge the returned credential in place.
+   * Does not rewrite siblings, pools, enablement, or cards. A CAS conflict
+   * reloads the projection before rethrowing and is never replayed.
+   */
+  async function retryQuotaRecovery(
+    id: string,
+    capturedExpectation?: MutationExpectation,
+  ): Promise<DestinationCredential> {
+    const token = beginDestinationMutation();
+    try {
+      const result = await credentialsApi.retryQuota(
+        id,
+        capturedExpectation ?? expectation.value ?? undefined,
+      );
+      if (beginMutationCommit(token, result.expectation)) {
+        credentials.value = credentials.value.map((credential) => (
+          credential.id === id ? result.credential : credential
+        ));
+        expectation.value = result.expectation;
+      }
+      return result.credential;
+    } catch (cause) {
+      if (isRevisionConflict(cause) && mutationSessionIsCurrent(token)) {
+        await refreshAfterMutation();
+      }
+      throw cause;
+    }
+  }
+
   /** Delete an empty destination and drop it (and any stale rows) locally. */
   async function deleteDestination(id: string): Promise<void> {
     const token = beginDestinationMutation();
@@ -248,7 +264,35 @@ export const useDestinationsStore = defineStore("destinations", () => {
       if (beginMutationCommit(token, nextExpectation)) {
         destinations.value = destinations.value.filter((destination) => destination.id !== id);
         credentials.value = credentials.value.filter((credential) => credential.destination_id !== id);
+        cards.value = cards.value.filter((card) => card.destination_id !== id);
         expectation.value = nextExpectation;
+      }
+    } catch (cause) {
+      if (isRevisionConflict(cause) && mutationSessionIsCurrent(token)) {
+        await refreshAfterMutation();
+      }
+      throw cause;
+    }
+  }
+
+  /**
+   * Submit a full routing card layout (grouping + flattened rank) under CAS.
+   * The committed snapshot is written back in place so the visible order and
+   * ranks stay consistent. A 409 conflict reloads the projection and is never
+   * replayed; any other failure leaves the last committed layout on screen.
+   */
+  async function replaceRoutingCardLayout(
+    input: { id: string; destinationId: string; credentialIds: string[] }[],
+    capturedExpectation?: MutationExpectation,
+  ): Promise<void> {
+    const token = beginDestinationMutation();
+    try {
+      const snapshot = await routingCardsApi.replace(
+        { cards: input },
+        capturedExpectation ?? expectation.value ?? undefined,
+      );
+      if (beginMutationCommit(token, snapshot.expectation)) {
+        commitSnapshot(snapshot);
       }
     } catch (cause) {
       if (isRevisionConflict(cause) && mutationSessionIsCurrent(token)) {
@@ -309,6 +353,7 @@ export const useDestinationsStore = defineStore("destinations", () => {
     explainRequests.clear();
     destinations.value = [];
     credentials.value = [];
+    cards.value = [];
     expectation.value = null;
     loaded.value = false;
     loading.value = false;
@@ -322,6 +367,7 @@ export const useDestinationsStore = defineStore("destinations", () => {
   return {
     destinations: computed(() => destinations.value),
     credentials: computed(() => credentials.value),
+    cards: computed(() => cards.value),
     expectation: computed(() => expectation.value),
     loaded: computed(() => loaded.value),
     loading: computed(() => loading.value),
@@ -336,7 +382,9 @@ export const useDestinationsStore = defineStore("destinations", () => {
     refreshAfterMutation,
     commitSnapshot,
     patchDestination,
+    retryQuotaRecovery,
     deleteDestination,
+    replaceRoutingCardLayout,
     explainKey,
     explainRouting,
     clear,

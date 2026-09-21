@@ -21,11 +21,11 @@
   <div v-else-if="capabilities.billingTierRequired && ollamaNeedsBilling" class="provider-unconfigured" role="status">
     <p>{{ t("配置 Ollama 计费档位以显示本月额度") }}</p>
   </div>
-  <OfficialApiPanel
-    v-else-if="plan?.model_source === 'official_api_preset'"
-    :provider-id="account.provider_id"
-    :account-id="account.id"
-    :account-version="account.updated_at"
+  <BillingPanel
+    v-else-if="showsBilling"
+    :account="account"
+    :identity="identity"
+    :connections="connections"
     :now="now"
   />
   <div v-else-if="usageDisplayAvailable" class="official-plan-usage">
@@ -43,7 +43,7 @@
     </div>
     <ProviderQuotaSummary v-else :usage="providerUsage" :now="now" />
   </div>
-  <div v-else-if="capabilities.endpointOnAccount || showsOfficialBalance" class="account-meta-row">
+  <div v-else-if="showsModelCount || showsOfficialBalance" class="account-meta-row">
     <AccountCreditBalance
       v-if="showsOfficialBalance"
       :credit-balances="creditBalances"
@@ -51,8 +51,8 @@
       :usage-loading="usageLoading"
       @reload-usage="emit('reload-usage')"
     />
-    <span v-if="capabilities.endpointOnAccount" class="account-meta-row__models">
-      {{ t("{count} 个模型", { count: account.model_capabilities.length }) }}
+    <span v-if="showsModelCount" class="account-meta-row__models">
+      {{ t("{count} 个模型", { count: uniquePublicModelCount(account) }) }}
     </span>
   </div>
 </template>
@@ -76,10 +76,11 @@ import {
 import { accountCapabilities } from "../domain/account-capabilities.ts";
 import { findPlanDefinition } from "../domain/plans.ts";
 import { t } from "../i18n/index.ts";
+import { uniquePublicModelCount } from "../domain/platform-accounts.ts";
 import { accountInferenceEndpointUrl, officialBalanceSupported } from "../domain/upstream-balance.ts";
 import AccountCreditBalance from "./AccountCreditBalance.vue";
 import AccountFigure from "./AccountFigure.vue";
-import OfficialApiPanel from "./OfficialApiPanel.vue";
+import BillingPanel from "./BillingPanel.vue";
 import ProviderQuotaSummary from "./ProviderQuotaSummary.vue";
 
 export type CredentialFigure = {
@@ -99,11 +100,13 @@ const props = withDefaults(
     usageLoadError: string | null;
     connections?: readonly Connection[] | null;
     figure?: CredentialFigure | null;
+    hideModelCount?: boolean;
   }>(),
   {
     identity: null,
     connections: null,
     figure: null,
+    hideModelCount: false,
   },
 );
 
@@ -113,15 +116,19 @@ const emit = defineEmits<{
 }>();
 
 const capabilities = computed(() => accountCapabilities(props.account, props.catalog));
+const showsModelCount = computed(() => (
+  capabilities.value.endpointOnAccount && !props.hideModelCount
+));
 const ollamaNeedsBilling = computed(() => !props.account.ollama_billing_tier);
 const plan = computed(() => findPlanDefinition(props.account.provider_id, props.catalog));
 const manualUsageCalibration = computed(() => (
   plan.value?.manual_usage_calibration ?? false
 ));
 const usageRefreshAvailable = computed(() => plan.value?.usage_availability === "available");
-const balanceRefreshAvailable = computed(() => officialBalanceSupported(
-  accountInferenceEndpointUrl(props.account, props.identity, props.connections),
+const inferenceEndpointUrl = computed(() => (
+  accountInferenceEndpointUrl(props.account, props.identity, props.connections)
 ));
+const balanceRefreshAvailable = computed(() => officialBalanceSupported(inferenceEndpointUrl.value));
 const creditBalances = computed(() => props.providerUsage?.credit_balances ?? []);
 const showsOfficialBalance = computed(() => (
   balanceRefreshAvailable.value || creditBalances.value.length > 0
@@ -129,6 +136,12 @@ const showsOfficialBalance = computed(() => (
 const usageDisplayAvailable = computed(() => (
   usageRefreshAvailable.value || manualUsageCalibration.value
 ));
+const showsBilling = computed(() => {
+  if (props.hideModelCount) return false;
+  if (plan.value?.model_source === "official_api_preset") return true;
+  if (usageDisplayAvailable.value || balanceRefreshAvailable.value) return true;
+  return plan.value?.kind === "custom" || plan.value?.dynamic === true;
+});
 const isDraft = computed(() => (
   accountIsReady(props.account)
   && !props.account.plan_routable

@@ -220,7 +220,7 @@ async fn entry_pricing_snapshot_survives_midflight_activation() {
 }
 
 #[tokio::test]
-async fn entry_contracts_snapshot_survives_midflight_protocol_disable() {
+async fn entry_route_snapshot_stops_after_live_protocol_revocation() {
     let (state, dir) = go_state_with_keys(&["key-1", "key-2"]);
     let state_for_cb = state.clone();
     let (base_url, calls, stop) = start_scripted_upstream(
@@ -249,10 +249,33 @@ async fn entry_contracts_snapshot_survives_midflight_protocol_disable() {
     let (status, body) = chat(port, GO_MODEL).await;
     assert_eq!(
         status,
-        StatusCode::OK,
-        "entry contract snapshot must still allow Chat: {body}"
+        StatusCode::SERVICE_UNAVAILABLE,
+        "the frozen route must not bypass a live protocol revocation: {body}"
     );
-    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "no fallback or remapped send is authorized"
+    );
+    let logs = state.db.lock().list_forward_logs(10).unwrap();
+    let sent = logs
+        .iter()
+        .filter(|row| row.error_source.as_deref() == Some("upstream"))
+        .collect::<Vec<_>>();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].account_id, "acct-1");
+    assert_eq!(sent[0].http_status, Some(403));
+    // Local selection failures also carry the downstream HTTP status; they
+    // are not another upstream receipt.
+    let rejected = logs
+        .iter()
+        .find(|row| {
+            row.error_source.as_deref() == Some("gateway")
+                && row.error_stage.as_deref() == Some("account_selection")
+        })
+        .expect("revocation must produce a local selection failure");
+    assert_eq!(rejected.http_status, Some(503));
+    assert!(rejected.diagnostic.as_ref().unwrap()["upstream_status"].is_null());
 
     let (status, body) = chat(port, GO_MODEL).await;
     assert_ne!(
@@ -262,7 +285,7 @@ async fn entry_contracts_snapshot_survives_midflight_protocol_disable() {
     );
     assert_eq!(
         calls.load(Ordering::SeqCst),
-        2,
+        1,
         "the follow-up request must fail locally without another upstream call"
     );
 
@@ -311,6 +334,17 @@ async fn entry_alias_snapshot_survives_midflight_zen_catalog_replace() {
         "in-flight zen-only resolve must not become unknown_model: {body}"
     );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let free_cooldown = state
+        .db
+        .lock()
+        .get_account(ZEN_FREE_ACCOUNT_ID)
+        .unwrap()
+        .unwrap()
+        .cooldown_free_until;
+    assert!(
+        free_cooldown.is_some_and(|until| until > Utc::now() + ChronoDuration::days(2)),
+        "the confirmed shared egress reset must persist despite catalog replacement"
+    );
 
     let (status, body) = chat(port, ZEN_ONLY_MODEL).await;
     assert_eq!(
@@ -622,26 +656,14 @@ async fn custom_401_rotates_persists_auth_error_and_skips_a_runtime_disabled_mid
 async fn outer_fallback_resamples_injected_wall_for_cooldown() {
     let until = Utc::now() + ChronoDuration::hours(1);
     let wall = Arc::new(std::sync::Mutex::new(until - ChronoDuration::seconds(1)));
-    let wall_calls = Arc::new(AtomicUsize::new(0));
-    let mono_calls = Arc::new(AtomicUsize::new(0));
     let t0 = Instant::now();
     let (state, dir) = go_state_with_keys_and_clock(
         &["key-1", "key-2"],
         {
             let wall = wall.clone();
-            let wall_calls = wall_calls.clone();
-            move || {
-                wall_calls.fetch_add(1, Ordering::SeqCst);
-                *wall.lock().unwrap()
-            }
+            move || *wall.lock().unwrap()
         },
-        {
-            let mono_calls = mono_calls.clone();
-            move || {
-                mono_calls.fetch_add(1, Ordering::SeqCst);
-                t0
-            }
-        },
+        move || t0,
     );
     state
         .db
@@ -680,17 +702,9 @@ async fn outer_fallback_resamples_injected_wall_for_cooldown() {
         "the next outer iteration must resample wall and select the recovered card: {body}"
     );
     assert_eq!(calls.load(Ordering::SeqCst), 2);
-    assert_eq!(
-        wall_calls.load(Ordering::SeqCst),
-        2,
-        "each outer fallback iteration must sample wall once"
-    );
-    assert_eq!(
-        mono_calls.load(Ordering::SeqCst),
-        2,
-        "each outer fallback iteration must sample mono once"
-    );
-
+    // Recovery admission/observation also samples the clock. Assert the
+    // externally visible selection at the changed wall instant, not an internal
+    // call count that cannot distinguish selection from recovery reads.
     let mut logs = state.db.lock().list_forward_logs(10).unwrap();
     logs.sort_by_key(|log| log.attempt);
     assert_eq!(logs.len(), 2, "{logs:?}");
@@ -703,57 +717,40 @@ async fn outer_fallback_resamples_injected_wall_for_cooldown() {
 }
 
 #[tokio::test]
-async fn same_account_retry_does_not_resample_or_reselect() {
-    let wall_calls = Arc::new(AtomicUsize::new(0));
-    let mono_calls = Arc::new(AtomicUsize::new(0));
+async fn same_account_retry_does_not_reselect_or_advance_round_robin() {
     let frozen = Utc::now();
     let t0 = Instant::now();
-    let (state, dir) = go_state_with_keys_and_clock(
-        &["key-1", "key-2"],
-        {
-            let wall_calls = wall_calls.clone();
-            move || {
-                wall_calls.fetch_add(1, Ordering::SeqCst);
-                frozen
-            }
-        },
-        {
-            let mono_calls = mono_calls.clone();
-            move || {
-                mono_calls.fetch_add(1, Ordering::SeqCst);
-                t0
-            }
-        },
-    );
-
+    let (state, dir) =
+        go_state_with_keys_and_clock(&["key-1", "key-2"], move || frozen, move || t0);
     let mut config = state.config();
     config.upstream_base_url = closed_upstream_url();
     config.connect_timeout_secs = 1;
     config.routing_mode = RoutingMode::RoundRobin;
     state.set_config(config).unwrap();
-
     let (port, gateway_handle) = start_gateway(state.clone()).await;
-    let (status, _body) = chat(port, GO_MODEL).await;
-    assert_eq!(status, StatusCode::BAD_GATEWAY);
-
-    let mut logs = state.db.lock().list_forward_logs(10).unwrap();
-    logs.sort_by_key(|log| log.attempt);
-    assert_eq!(logs.len(), 2, "{logs:?}");
-    assert!(
-        logs.iter().all(|log| log.account_id == "acct-1"),
-        "same-account retry must not re-enter selection: {logs:?}"
-    );
-    assert_eq!(
-        wall_calls.load(Ordering::SeqCst),
-        1,
-        "same-account retry must not resample wall"
-    );
-    assert_eq!(
-        mono_calls.load(Ordering::SeqCst),
-        1,
-        "same-account retry must not resample mono"
-    );
-
+    for (expected_account, total) in [("acct-1", 2), ("acct-2", 4)] {
+        let (status, _) = chat(port, GO_MODEL).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        let logs = state.db.lock().list_forward_logs(10).unwrap();
+        assert_eq!(logs.len(), total, "{logs:?}");
+        let mut current: Vec<_> = logs
+            .iter()
+            .filter(|log| log.account_id == expected_account)
+            .collect();
+        current.sort_by_key(|log| log.attempt);
+        assert_eq!(
+            current.len(),
+            2,
+            "safe retry must stay on the selected account: {logs:?}"
+        );
+        assert_eq!(current[0].attempt, Some(1));
+        assert_eq!(current[1].attempt, Some(2));
+        assert_eq!(current[0].request_id, current[1].request_id);
+        assert_eq!(current[0].error_stage.as_deref(), Some("connect"));
+        assert_eq!(current[1].error_stage.as_deref(), Some("connect"));
+    }
+    // The second logical request choosing acct-2 proves the first retry did
+    // not advance round-robin selection, regardless of recovery clock reads.
     gateway::stop_gateway(gateway_handle);
     let _ = std::fs::remove_dir_all(dir);
 }

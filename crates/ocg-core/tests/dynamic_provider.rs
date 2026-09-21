@@ -815,13 +815,24 @@ async fn raw_ambiguity_makes_zero_outbound_requests() {
 
 #[tokio::test]
 async fn raw_shaped_public_models_are_listed_under_public_name_only() {
+    let model_pairs = [
+        ("org/same", "org/same"),
+        ("org/public", "vendor/real"),
+        ("lab_model", "vendor/lab_model"),
+        ("lab model", "vendor/lab model"),
+        ("lab/model", "vendor/lab/model"),
+        ("lab-model", "vendor/lab-model"),
+    ];
     let mut replies = HashMap::new();
     replies.insert(
         "sk-lab".to_string(),
-        VecDeque::from([FakeReply {
-            status: 200,
-            body: CHAT_OK,
-        }]),
+        VecDeque::from(vec![
+            FakeReply {
+                status: 200,
+                body: CHAT_OK,
+            };
+            10
+        ]),
     );
     let (upstream, calls, _stop) = start_fake_upstream(replies).await;
     let harness = start_loopback("dyn-raw-public").await;
@@ -840,12 +851,8 @@ async fn raw_shaped_public_models_are_listed_under_public_name_only() {
                 "upstreamProtocol": "chat_completions",
                 "authKind": "bearer",
                 "key": "sk-lab",
-                "models": [
-                    {"publicModel": "org/same", "upstreamModel": "org/same"},
-                    {"publicModel": "org/public", "upstreamModel": "vendor/real"},
-                    {"publicModel": "lab_model", "upstreamModel": "vendor/lab"},
-                    {"publicModel": "lab model", "upstreamModel": "vendor/space"}
-                ]
+                "models": model_pairs.iter().map(|(public, upstream)|
+                    json!({"publicModel": public, "upstreamModel": upstream})).collect::<Vec<_>>()
             }),
         ),
     )
@@ -855,39 +862,47 @@ async fn raw_shaped_public_models_are_listed_under_public_name_only() {
     enable_accounts_for_provider(&harness, &provider_id);
 
     let ids = listed_gateway_model_ids(&harness).await;
-    for public in ["org/same", "org/public", "lab_model", "lab model"] {
+    for (public, _) in model_pairs {
         assert_eq!(
             ids.iter().filter(|id| **id == public).count(),
             1,
             "{public} missing or duplicated in {ids:?}"
         );
     }
-    for leaked in ["vendor/real", "vendor/lab", "vendor/space"] {
+    for (_, leaked) in model_pairs.iter().skip(1) {
         assert!(
-            !ids.iter().any(|id| id == leaked),
+            !ids.iter().any(|id| id.as_str() == *leaked),
             "differing upstream leaked into /v1/models: {leaked} in {ids:?}"
         );
     }
 
-    let (status, body) = chat_completion(&harness, "org/public").await;
-    assert_eq!(status, StatusCode::OK, "{body}");
+    let requests: Vec<_> = model_pairs
+        .iter()
+        .copied()
+        .chain(
+            model_pairs
+                .iter()
+                .skip(2)
+                .map(|(_, upstream)| (*upstream, *upstream)),
+        )
+        .collect();
+    for (requested, _) in &requests {
+        let (status, body) = chat_completion(&harness, requested).await;
+        assert_eq!(status, StatusCode::OK, "{requested}: {body}");
+    }
     {
         let outbound = calls.lock().expect("fake call log");
-        assert_eq!(outbound.len(), 1, "{outbound:?}");
-        assert!(
-            outbound[0].body.contains("\"model\":\"vendor/real\""),
-            "public!=upstream must forward the exact upstream id: {}",
-            outbound[0].body
-        );
-        assert!(
-            !outbound[0].body.contains("\"model\":\"org/public\""),
-            "public name must not replace the upstream id: {}",
-            outbound[0].body
-        );
+        assert_eq!(outbound.len(), requests.len(), "{outbound:?}");
+        for (call, (requested, upstream)) in outbound.iter().zip(&requests) {
+            let body: Value = serde_json::from_str(&call.body).unwrap();
+            assert_eq!(
+                body["model"].as_str(),
+                Some(*upstream),
+                "request {requested}: {}",
+                call.body
+            );
+        }
     }
-
-    let (status, same_body) = chat_completion(&harness, "org/same").await;
-    assert_eq!(status, StatusCode::OK, "{same_body}");
     harness.stop();
 }
 
@@ -1041,7 +1056,7 @@ async fn discover_and_test_do_not_persist_keys_or_providers() {
 }
 
 #[tokio::test]
-async fn patch_clears_runtime_state_and_usage_is_unpriced() {
+async fn patch_preserves_cooldown_resets_verification_and_usage_is_unpriced() {
     let harness = start_loopback("dyn-patch").await;
     let (status, created) = send_json(
         &harness,
@@ -1071,14 +1086,18 @@ async fn patch_clears_runtime_state_and_usage_is_unpriced() {
         .find(|account| account.provider_id == provider_id)
         .unwrap()
         .id;
+    let cooldown = Utc::now() + chrono::Duration::hours(1);
     {
         let db = harness.state.db.lock();
         db.set_account_auth_error(&account_id, Some("stale"))
             .unwrap();
-        db.set_account_cooldown(
+        db.set_account_cooldown(&account_id, Some(cooldown), Some("boom"))
+            .unwrap();
+        db.set_account_verification(
             &account_id,
-            Some(Utc::now() + chrono::Duration::hours(1)),
-            Some("boom"),
+            ocg_core::provider::ConnectionVerificationStatus::Verified,
+            Some(Utc::now()),
+            None,
         )
         .unwrap();
     }
@@ -1108,7 +1127,7 @@ async fn patch_clears_runtime_state_and_usage_is_unpriced() {
         .unwrap();
     assert_eq!(account.auth_error.as_deref(), Some("stale"));
     assert_eq!(account.last_error.as_deref(), Some("boom"));
-    assert!(account.cooldown_until.is_some());
+    assert_eq!(account.cooldown_until, Some(cooldown));
 
     let (status, patched) = send_json(
         &harness,
@@ -1136,8 +1155,21 @@ async fn patch_clears_runtime_state_and_usage_is_unpriced() {
         .unwrap();
     assert!(account.auth_error.is_none());
     assert!(account.last_error.is_none());
-    assert!(account.cooldown_until.is_none());
+    assert_eq!(account.cooldown_until, Some(cooldown));
+    assert_eq!(account.cooldown_generic_until, Some(cooldown));
     assert!(!account.key_cipher.is_empty());
+    let verification = harness
+        .state
+        .db
+        .lock()
+        .account_verification_state(&account_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        verification.status,
+        ocg_core::provider::ConnectionVerificationStatus::Pending
+    );
+    assert!(verification.connection_verified_at.is_none());
 
     let (status, usage) = harness
         .get_json(&format!(

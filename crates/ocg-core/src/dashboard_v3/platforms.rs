@@ -259,7 +259,8 @@ pub(super) async fn refresh(
     if !snapshot.errors.is_empty() {
         snapshot.stale = true;
     }
-    // Do not copy user-credential balances into every child. Key-authenticated
+    // Do not copy user-credential balances into every child. New API Key
+    // refresh also skips those user-scoped fetches. Key-authenticated
     // observations remain on that Key; a manual parent link is not ownership proof.
     if input.account_id.is_some() {
         snapshot.quotas.retain(|q| {

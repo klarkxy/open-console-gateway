@@ -308,6 +308,53 @@ fn connection_id_for_persisted_account(
     Ok(connection_id_for_legacy(kind, &id))
 }
 
+/// Upgrade/import boundary only. Capture the established authorization
+/// namespace without regenerating endpoint grants or granting new origins.
+pub(crate) fn backfill_authorization_connections_on(conn: &Connection) -> Result<()> {
+    // Older upgrades still have partial credential projection columns.
+    // v59 performs this backfill after the pre-v59 migrations have completed.
+    if schema_version_on(conn)? < 58 {
+        return Ok(());
+    }
+
+    if !table_has_column(conn, "credentials", "authorization_connection_id")? {
+        return Ok(());
+    }
+    let rows = {
+        let mut stmt = conn.prepare(
+            "SELECT c.id, c.legacy_account_id, c.provider_id, d.legacy_kind, d.legacy_id
+             FROM credentials c JOIN destinations d ON d.id = c.destination_id
+             WHERE COALESCE(c.credential_purpose, 'inference') = 'inference'
+               AND (c.authorization_connection_id IS NULL OR c.authorization_connection_id = '')",
+        )?;
+        stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (credential_id, account_id, provider_id, kind, legacy_id) in rows {
+        let (kind, id) = match kind.as_str() {
+            "builtin" => (LegacyConnectionKind::BuiltinProvider, legacy_id),
+            "dynamic" => (LegacyConnectionKind::DynamicProvider, legacy_id),
+            "custom_account" => (LegacyConnectionKind::CustomAccount, legacy_id),
+            "platform_parent" => connection_legacy_for_account(&provider_id, &account_id),
+            other => anyhow::bail!("unknown destination legacy kind `{other}`"),
+        };
+        let connection_id = connection_id_for_legacy(kind, &id);
+        conn.execute(
+            "UPDATE credentials SET authorization_connection_id = ?2 WHERE id = ?1",
+            params![credential_id, connection_id.as_str()],
+        )?;
+    }
+    Ok(())
+}
+
 pub(crate) fn has_legacy_subscription(provider_id: &str, setup_step: AccountSetupStep) -> bool {
     provider_id != CUSTOM_PROVIDER_ID
         && provider_id != OPENCODE_ZEN_FREE_PROVIDER_ID
@@ -683,6 +730,7 @@ fn persist_account_identity_on_credentials(
     }
     persist_onboarding_and_subscription_on_credentials(conn, account, purchase_date, now)?;
     ensure_identity_quota_pool(conn, &identity_id, &account.id, &now.to_rfc3339())?;
+    backfill_authorization_connections_on(conn)?;
     Ok(())
 }
 
@@ -838,13 +886,23 @@ fn configured_endpoints_for_provider(
         let Some((url, kind)) = custom_store::custom_endpoint_protocol_on(conn, account_id)? else {
             return Ok(Vec::new());
         };
-        return Ok(assigned_endpoints_for_routes(
-            &connection_id,
-            &[RouteSpec {
-                operation: EndpointOperation::from(kind),
-                url: Some(url),
-            }],
-        ));
+        let protocols = if schema_version_on(conn)? >= 59 {
+            let raw: String = conn.query_row(
+                "SELECT d.protocols_json FROM credentials c JOIN destinations d ON d.id = c.destination_id WHERE c.legacy_account_id = ?1",
+                [account_id], |row| row.get(0),
+            )?;
+            serde_json::from_str::<Vec<ocg_domain::catalog::UpstreamProtocolKind>>(&raw)?
+        } else {
+            vec![kind]
+        };
+        let routes = protocols
+            .into_iter()
+            .map(|protocol| RouteSpec {
+                operation: EndpointOperation::from(protocol),
+                url: Some(url.clone()),
+            })
+            .collect::<Vec<_>>();
+        return Ok(assigned_endpoints_for_routes(&connection_id, &routes));
     }
     if let Some(plan) = builtin_provider(provider_id) {
         let connection_id =
@@ -2021,6 +2079,7 @@ pub(crate) fn rotate_account_credential_in(
         ConnectionVerificationStatus::NotRequired
     };
     let source = account_store::account_row_source(conn)?;
+    crate::db::quota_recovery::clear_for_account_on(conn, account_id)?;
     let account_updated = conn.execute(
         &format!(
             "UPDATE {} SET
@@ -2535,6 +2594,7 @@ fn create_account_for_identity_on(
             },
         )?;
     }
+    super::routing_cards::reconcile_on(&tx)?;
     tx.commit()?;
     Ok(CreatedIdentityCredential {
         account_id: account.id.clone(),

@@ -4,12 +4,21 @@ import type { Destination, DestinationCredential } from "../api/destinations.ts"
 import {
   alignDestinationGroupsToAccountOrder,
   buildDestinationGroups,
+  buildCredentialOrder,
   expandGroupOrder,
   filterGroupRows,
   includeCredentialRow,
   isSingleAccountGroup,
   moveWithinGroup,
 } from "./destination-groups.ts";
+
+test("global credential order preserves interleaved suppliers independently of grouping", () => {
+  const rows = [credential("a", "a2", 2), credential("b", "b1", 1), credential("a", "a1", 0)];
+  const ordered = buildCredentialOrder([destination("a"), destination("b")], rows);
+  assert.deepEqual(ordered.map((group) => group.credentials[0].legacy_account_id), ["a1", "b1", "a2"]);
+  assert.deepEqual(ordered.map((group) => group.id), [rows[2].id, rows[1].id, rows[0].id]);
+  assert.deepEqual(expandGroupOrder(buildDestinationGroups([destination("a"), destination("b")], rows)), ["a1", "a2", "b1"]);
+});
 
 function destination(
   id: string,
@@ -238,4 +247,15 @@ test("aligning groups can use credential ids when legacy ids are absent from the
   );
   const aligned = alignDestinationGroupsToAccountOrder(groups, [orphan.id]);
   assert.deepEqual(aligned[0]?.credentials.map((row) => row.id), [orphan.id]);
+});
+
+
+test("observer credentials never enter account groups or global routing order", () => {
+  const observer = credential("platform", "observer", -1);
+  const destinations = [destination("platform", { observer_credential_id: observer.id }), destination("other")];
+  const rows = [observer, credential("platform", "a1", 0), credential("other", "b1", 1), credential("platform", "a2", 2)];
+  const order = buildCredentialOrder(destinations, rows);
+  assert.deepEqual(expandGroupOrder(order), ["a1", "b1", "a2"]);
+  assert.deepEqual(expandGroupOrder(buildDestinationGroups(destinations, rows)), ["a1", "a2", "b1"]);
+  assert.deepEqual(moveWithinGroup(["a1", "b1", "a2"], expandGroupOrder(order), "a2", -1), ["a1", "a2", "b1"]);
 });

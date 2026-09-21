@@ -1,79 +1,82 @@
-//! Outer Gateway request orchestration.
-//!
-//! [`GatewayExecutor`] owns the request-entry snapshot, candidate selection,
-//! same-account retry, and account fallback loop. The handler retains
-//! trace/auth, client parse/format validation, and Alias resolution.
-//! Single-attempt forwarding stays in [`super::forwarder`].
-//! This slice does not consolidate decision policy.
+//! Captures a logical request's identities, catalog, transport and prices,
+//! then executes bounded selection, retry and fallback. The handler owns
+//! client authentication and parsing; single-attempt I/O lives in forwarder.
 
 use crate::alias;
 use crate::gateway::diagnostics::{
     ErrorDiagnostic, RequestTrace, emit_failure, log_request_failure, serialize_diagnostic,
 };
 use crate::gateway::forwarder::{
-    ForwardAction, LiveSendSelection, forward_request, rate_limited_response,
+    ForwardAction, LiveSendSelection, forward_request_with_deadline, rate_limited_response,
 };
 use crate::gateway::materialize::{
-    InferenceBindingGate, InferenceBindingIndex, diagnostic_forced_upstream, mapping_is_zen_free,
-    materialize_account_routes_with_bindings, resolved_alias_from_model,
+    diagnostic_forced_upstream, mapping_is_zen_free, materialize_execution_routes,
+    resolved_alias_from_model,
 };
-use crate::gateway::protocol::{MaterializeSpec, RequestPlan, materialize_parsed_request};
+use crate::gateway::protocol::{
+    MaterializeSpec, ProtocolError, RequestPlan, materialize_parsed_request,
+};
 use crate::gateway::response::{local_protocol_failure, protocol_error_response};
 use crate::gateway::routing::resolve_conversation_key;
-use crate::gateway::shadow::{ShadowPlanInput, maybe_compare_live_routes};
 
 use crate::http_client::{ForwardRouteSet, RouteLabel};
 use crate::kernel::pricing::PricingSnapshot;
 use crate::kernel::protocol::ApiFormat;
 use crate::models::{AppConfig, UpstreamChannel};
-use crate::provider_contracts::EffectiveContractSet;
 use crate::state::CoreState;
 use axum::body::Bytes;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use ocg_gateway::selector::SelectionError;
 use std::sync::Arc;
+use std::time::Duration;
+const MAX_REQUEST_ATTEMPTS: u32 = 32;
 
-/// Process-state values frozen at request entry. Each fallback iteration still
-/// re-reads accounts, eligible Custom runtimes, and Zen Free cooldown.
+fn request_budget_duration(config: &AppConfig, stream: bool) -> Duration {
+    Duration::from_secs(
+        if stream {
+            config.stream_idle_timeout_secs
+        } else {
+            config.non_stream_timeout_secs
+        }
+        .max(1),
+    )
+}
+
+/// Process-state values frozen at request entry. Live credential availability
+/// and authorization are reread before every dispatch.
 pub(crate) struct RequestSnapshots {
     config: AppConfig,
     pricing: Arc<PricingSnapshot>,
     routes: Arc<ForwardRouteSet>,
-    contracts: Arc<EffectiveContractSet>,
     resolved: alias::ResolvedModel,
     cpa_base_url: Option<String>,
-    dynamics: Arc<Vec<crate::dynamic::DynamicProviderRuntime>>,
+    routing: crate::routing_snapshot::RoutingSnapshot,
 }
 
 impl RequestSnapshots {
     fn capture(
         state: &CoreState,
         config: AppConfig,
-        contracts: Arc<EffectiveContractSet>,
         resolved: alias::ResolvedModel,
-        dynamics: Arc<Vec<crate::dynamic::DynamicProviderRuntime>>,
-    ) -> Self {
-        let cpa_base_url = match crate::cpa::env_base_url() {
-            Ok(Some(base_url)) => Some(base_url),
-            Ok(None) => state
-                .db
-                .lock()
-                .cpa_integration()
-                .ok()
-                .flatten()
-                .map(|record| record.base_url),
-            Err(_) => None,
-        };
-        Self {
+        routing: crate::routing_snapshot::RoutingSnapshot,
+    ) -> anyhow::Result<Self> {
+        let cpa_base_url = crate::cpa::env_base_url()?.or_else(|| {
+            routing
+                .projection
+                .destinations
+                .iter()
+                .find(|d| d.adapter == ocg_domain::destination::AdapterKind::Cpa)
+                .and_then(|d| d.base_url.clone())
+        });
+        Ok(Self {
             config,
             pricing: state.pricing_snapshot(),
             routes: state.forward_route_set(),
-            contracts,
             resolved,
             cpa_base_url,
-            dynamics,
-        }
+            routing,
+        })
     }
 }
 
@@ -94,8 +97,7 @@ impl LoopState {
     }
 }
 
-/// Concrete orchestration facade for one already-parsed, already-resolved
-/// Gateway request.
+/// Orchestrates one parsed client request.
 pub(crate) struct GatewayExecutor;
 
 impl GatewayExecutor {
@@ -107,205 +109,104 @@ impl GatewayExecutor {
         headers: HeaderMap,
         client_format: ApiFormat,
         parsed: crate::gateway::protocol::ParsedClientRequest,
-        resolved: alias::ResolvedModel,
         client_model: String,
         routing_model: String,
-        config: AppConfig,
         client_key_id: Option<String>,
-        contracts: Arc<EffectiveContractSet>,
-        dynamics: Arc<Vec<crate::dynamic::DynamicProviderRuntime>>,
     ) -> Response {
-        // One logical client request, including safe retries and account fallback,
-        // must use one immutable pricing revision from start to finish.
-        // Routing snapshot captured once at entry: every attempt (including after
-        // free fallback rewrites the model) resolves its leg from this snapshot,
-        // and a concurrent settings switch only affects requests starting later.
-        let snapshots = RequestSnapshots::capture(&state, config, contracts, resolved, dynamics);
-        let mut loop_state = LoopState::new();
-        let conversation_key = if snapshots.config.conversation_sticky {
-            resolve_conversation_key(client_format, &routing_model, &headers, &client_body)
-        } else {
-            None
-        };
-        let (diagnostic_model, diagnostic_channel) = match &snapshots.resolved {
-            alias::ResolvedModel::Alias {
-                alias, mappings, ..
-            } => {
-                let zen_only = mappings
-                    .iter()
-                    .filter(|mapping| mapping.routeable)
-                    .all(mapping_is_zen_free);
-                (
-                    (*alias).to_string(),
-                    if zen_only {
+        let (snapshots, requested_plan, route_set, prices) = {
+            // Publish settings, catalog, credentials, route and pricing identities
+            // as one preparation phase. No guard crosses upstream I/O.
+            let _settings_update = state.settings_update.lock();
+            let routing = match crate::routing_snapshot::RoutingSnapshot::load(&state.db.lock()) {
+                Ok(routing) => routing,
+                Err(error) => {
+                    return protocol_error_response(
+                        client_format,
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!("failed to capture routing state: {error}"),
+                        None,
+                    );
+                }
+            };
+            let catalog = crate::gateway::handler::RuntimeCatalogSnapshot::from_routing(
+                routing,
+                state.sample_gateway_clock().0,
+            );
+            let resolved = match catalog.resolve(&routing_model) {
+                Ok(resolved) => resolved,
+                Err(error) => {
+                    return local_protocol_failure(
+                        &state,
+                        &trace,
+                        client_format,
+                        crate::gateway::materialize::protocol_error_from_resolve(error),
+                        Some(client_body.len()),
+                        Some(&client_body),
+                    );
+                }
+            };
+            let snapshots = match RequestSnapshots::capture(
+                &state,
+                state.config(),
+                resolved,
+                catalog.routing,
+            ) {
+                Ok(snapshots) => snapshots,
+                Err(error) => {
+                    return protocol_error_response(
+                        client_format,
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!("failed to capture route configuration: {error}"),
+                        None,
+                    );
+                }
+            };
+            let (diagnostic_model, diagnostic_channel) = match &snapshots.resolved {
+                alias::ResolvedModel::Alias {
+                    alias, mappings, ..
+                } => {
+                    let zen_only = mappings
+                        .iter()
+                        .filter(|mapping| mapping.routeable)
+                        .all(mapping_is_zen_free);
+                    (
+                        (*alias).to_string(),
+                        if zen_only {
+                            UpstreamChannel::Free
+                        } else {
+                            UpstreamChannel::Go
+                        },
+                    )
+                }
+                alias::ResolvedModel::PinnedRaw { mapping, .. } => (
+                    if mapping.upstream_model.is_empty() {
+                        routing_model.clone()
+                    } else {
+                        mapping.upstream_model.to_string()
+                    },
+                    if mapping_is_zen_free(mapping) {
                         UpstreamChannel::Free
                     } else {
                         UpstreamChannel::Go
                     },
-                )
-            }
-            alias::ResolvedModel::PinnedRaw { mapping, .. } => (
-                if mapping.upstream_model.is_empty() {
-                    routing_model.clone()
-                } else {
-                    mapping.upstream_model.to_string()
-                },
-                if mapping_is_zen_free(mapping) {
-                    UpstreamChannel::Free
-                } else {
-                    UpstreamChannel::Go
-                },
-            ),
-        };
-        let diagnostic_forced_upstream =
-            diagnostic_forced_upstream(&snapshots.resolved, parsed.client);
-        let requested_plan = match materialize_parsed_request(
-            &parsed,
-            &MaterializeSpec {
-                client_model: client_model.clone(),
-                upstream_model: diagnostic_model,
-                resolved_alias: resolved_alias_from_model(&snapshots.resolved),
-                channel: diagnostic_channel,
-                upstream_base_override: None,
-                original_model: None,
-                forced_upstream: diagnostic_forced_upstream,
-                custom_route: None,
-            },
-        ) {
-            Ok(plan) => plan,
-            Err(error) => {
-                return local_protocol_failure(
-                    &state,
-                    &trace,
-                    client_format,
-                    error,
-                    Some(client_body.len()),
-                    Some(&client_body),
-                );
-            }
-        };
-
-        loop {
-            let (decision_wall, decision_mono) = state.sample_gateway_clock();
-            let (accounts, free_cooldown, stored_bindings, routing) = {
-                let db = state.db.lock();
-                let accounts = match crate::destination_projection::list_accounts_for_v3(&db) {
-                    Ok(accounts) => accounts,
-                    Err(error) => {
-                        let message = format!("failed to select account: {error}");
-                        record_plan_failure(
-                            &state,
-                            &trace,
-                            &client_body,
-                            loop_state.attempt.max(1),
-                            client_format,
-                            &requested_plan,
-                            "gateway",
-                            "account_selection",
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            &message,
-                        );
-                        return protocol_error_response(
-                            client_format,
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            &message,
-                            None,
-                        );
-                    }
-                };
-                let free_cooldown = match db.free_channel_cooldown_until_at(decision_wall) {
-                    Ok(cooldown) => cooldown,
-                    Err(error) => {
-                        let message = format!("failed to read free-channel cooldown: {error}");
-                        return protocol_error_response(
-                            client_format,
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            &message,
-                            None,
-                        );
-                    }
-                };
-                let stored_bindings = match db.list_inference_bindings() {
-                    Ok(rows) => rows,
-                    Err(error) => {
-                        let message = format!("failed to load inference bindings: {error}");
-                        return protocol_error_response(
-                            client_format,
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            &message,
-                            None,
-                        );
-                    }
-                };
-                let routing = crate::destination_projection::routing_projection(&db)
-                    .ok()
-                    .flatten();
-                (accounts, free_cooldown, stored_bindings, routing)
+                ),
             };
-            let bindings = stored_bindings
-                .iter()
-                .map(|row| {
-                    (
-                        row.account_id.clone(),
-                        InferenceBindingGate {
-                            enabled: row.enabled,
-                            model_scope: row.model_scope.clone(),
-                        },
-                    )
-                })
-                .collect::<InferenceBindingIndex>();
-            let free_available = free_cooldown.is_none()
-                && !match routing.as_ref() {
-                    Some(projection) => crate::destination_projection::free_channel_exhausted(
-                        projection,
-                        decision_wall,
-                    ),
-                    None => crate::routing_runtime::free_channel_is_exhausted_at(
-                        &accounts,
-                        decision_wall,
-                    ),
-                };
-            let custom_runtimes = match state.db.lock().list_custom_account_runtimes() {
-                Ok(runtimes) => crate::custom::custom_runtimes_by_account(&runtimes),
-                Err(error) => {
-                    let message = format!("failed to load Custom accounts: {error}");
-                    return protocol_error_response(
-                        client_format,
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        &message,
-                        None,
-                    );
-                }
-            };
-            let goat_runtimes = match state.db.lock().list_goat_account_runtimes() {
-                Ok(runtimes) => crate::goat::goat_runtimes_by_account(&runtimes),
-                Err(error) => {
-                    let message = format!("failed to load Command Code GOAT accounts: {error}");
-                    return protocol_error_response(
-                        client_format,
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        &message,
-                        None,
-                    );
-                }
-            };
-            let route_set = match materialize_account_routes_with_bindings(
-                &accounts,
-                &snapshots.config,
+            let diagnostic_forced_upstream =
+                diagnostic_forced_upstream(&snapshots.resolved, parsed.client);
+            let requested_plan = match materialize_parsed_request(
                 &parsed,
-                &snapshots.resolved,
-                &client_model,
-                &routing_model,
-                free_available,
-                &custom_runtimes,
-                &goat_runtimes,
-                snapshots.cpa_base_url.as_deref(),
-                &snapshots.contracts,
-                &snapshots.dynamics,
-                &bindings,
-                routing.as_ref(),
+                &MaterializeSpec {
+                    client_model: client_model.clone(),
+                    upstream_model: diagnostic_model,
+                    resolved_alias: resolved_alias_from_model(&snapshots.resolved),
+                    channel: diagnostic_channel,
+                    upstream_base_override: None,
+                    original_model: None,
+                    forced_upstream: diagnostic_forced_upstream,
+                    custom_route: None,
+                },
             ) {
-                Ok(route_set) => route_set,
+                Ok(plan) => plan,
                 Err(error) => {
                     return local_protocol_failure(
                         &state,
@@ -317,34 +218,143 @@ impl GatewayExecutor {
                     );
                 }
             };
-            maybe_compare_live_routes(
-                &ShadowPlanInput {
-                    accounts: &accounts,
-                    config: &snapshots.config,
-                    parsed: &parsed,
-                    resolved: &snapshots.resolved,
-                    client_model: &client_model,
-                    routing_model: &routing_model,
-                    free_available,
-                    custom_runtimes: &custom_runtimes,
-                    goat_runtimes: &goat_runtimes,
-                    cpa_base_url: snapshots.cpa_base_url.as_deref(),
-                    contracts: &snapshots.contracts,
-                    dynamics: &snapshots.dynamics,
-                    bindings: &bindings,
-                    projection: routing.as_ref(),
-                },
+
+            let route_set = match materialize_execution_routes(
+                &snapshots.routing,
+                &snapshots.config,
+                &parsed,
+                &snapshots.resolved,
+                &client_model,
+                &routing_model,
+                snapshots.cpa_base_url.as_deref(),
+            ) {
+                Ok(routes) => routes,
+                Err(error) => {
+                    return local_protocol_failure(
+                        &state,
+                        &trace,
+                        client_format,
+                        error,
+                        Some(client_body.len()),
+                        Some(&client_body),
+                    );
+                }
+            };
+            crate::gateway::shadow::maybe_compare_execution_routes(
+                &snapshots.routing,
+                &snapshots.config,
+                &parsed,
+                &snapshots.resolved,
+                &client_model,
+                &routing_model,
+                snapshots.cpa_base_url.as_deref(),
                 &route_set,
             );
+            if route_set.routes.is_empty()
+                && !route_set.rejections.is_empty()
+                && route_set.rejections.iter().all(|rejection| {
+                    rejection.code
+                        == crate::gateway::materialize::RouteRejectionCode::MappingProtocolIncompatible
+                })
+            {
+                return local_protocol_failure(
+                    &state,
+                    &trace,
+                    client_format,
+                    ProtocolError::new(crate::provider_contracts::NO_ENABLED_UPSTREAM_PROTOCOL),
+                    Some(client_body.len()),
+                    Some(&client_body),
+                );
+            }
+            let prices = route_set
+                .routes
+                .iter()
+                .map(|route| {
+                    crate::gateway::forwarder::capture_execution_pricing(
+                        &state,
+                        &route.routing.account,
+                        route.routing.adapter,
+                        &route.plan,
+                        &trace,
+                        snapshots.pricing.clone(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            (snapshots, requested_plan, route_set, prices)
+        };
+        let mut loop_state = LoopState::new();
+        let conversation_key = if snapshots.config.conversation_sticky {
+            resolve_conversation_key(client_format, &routing_model, &headers, &client_body)
+        } else {
+            None
+        };
+        let request_deadline = tokio::time::Instant::now()
+            + request_budget_duration(&snapshots.config, requested_plan.stream);
+        loop {
+            let (decision_wall, decision_mono) = state.sample_gateway_clock();
+            let live = {
+                let db = state.db.lock();
+                crate::routing_snapshot::RoutingSnapshot::load(&db).and_then(|routing| {
+                    db.free_channel_cooldown_until_at(decision_wall)
+                        .map(|cooldown| (routing, cooldown))
+                })
+            };
+            let (mut live, free_cooldown) = match live {
+                Ok(live) => live,
+                Err(error) => {
+                    return protocol_error_response(
+                        client_format,
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!("failed to load routing state: {error}"),
+                        None,
+                    );
+                }
+            };
+            let free_available = free_cooldown.is_none()
+                && !crate::destination_projection::free_channel_exhausted(
+                    &live.projection,
+                    decision_wall,
+                );
             let excluded = loop_state
                 .failed_ids
                 .iter()
                 .map(String::as_str)
                 .collect::<Vec<_>>();
+            {
+                let probes = state.quota_probes.lock();
+                live.apply_quota_probes(&probes);
+            }
+            let mut live_authorization_error = None;
             let routing_candidates = route_set
                 .routes
                 .iter()
-                .map(|route| route.routing.clone())
+                .map(|route| {
+                    let mut candidate = route.routing.clone();
+                    if let Some(current) = live
+                        .credentials
+                        .iter()
+                        .find(|c| c.id == candidate.account.id)
+                    {
+                        candidate.account = current.clone();
+                    } else {
+                        candidate.account.enabled = false;
+                    }
+                    let selection =
+                        LiveSendSelection::from_execution(route, &client_model, &routing_model);
+                    if let Err(error) = crate::gateway::forwarder::verify_execution_authorization(
+                        &live,
+                        &selection,
+                        &route.spec,
+                        decision_wall,
+                        free_available,
+                    ) {
+                        candidate.account.enabled = false;
+                        if !excluded.contains(&candidate.account.id.as_str()) {
+                            live_authorization_error.get_or_insert_with(|| error.to_string());
+                        }
+                    }
+                    candidate
+                })
                 .collect::<Vec<_>>();
             let selected_index = match state.routing.try_select_candidate_index_at(
                 &routing_candidates,
@@ -375,16 +385,36 @@ impl GatewayExecutor {
                         );
                         return rate_limited_response(client_format, until);
                     }
-                    let soonest = route_set
-                        .routes
-                        .iter()
-                        .filter_map(|route| {
-                            route
-                                .routing
-                                .account
-                                .cooldown_ends_at_for(route.routing.channel, decision_wall)
-                        })
-                        .min();
+                    let soonest_cooldown = route_set.routes.iter().filter_map(|route| {
+                        live.credentials
+                            .iter()
+                            .find(|credential| credential.id == route.routing.account.id)
+                            .and_then(|credential| {
+                                credential
+                                    .cooldown_ends_at_for(route.routing.channel, decision_wall)
+                            })
+                    });
+                    let soonest_waiting = route_set.routes.iter().filter_map(|route| {
+                        live.credentials
+                            .iter()
+                            .find(|credential| credential.id == route.routing.account.id)
+                            .and_then(|credential| {
+                                if credential.quota_probe {
+                                    return None;
+                                }
+                                credential.quota_recovery.as_ref().and_then(|recovery| {
+                                    (recovery.next_retry_at > decision_wall)
+                                        .then_some(recovery.next_retry_at)
+                                })
+                            })
+                    });
+                    let soonest = soonest_cooldown.chain(soonest_waiting).min();
+                    let probe_only = soonest.is_none()
+                        && route_set.routes.iter().any(|route| {
+                            live.credentials.iter().any(|credential| {
+                                credential.id == route.routing.account.id && credential.quota_probe
+                            })
+                        });
                     return match soonest {
                         Some(until) => {
                             record_plan_failure(
@@ -401,12 +431,35 @@ impl GatewayExecutor {
                             );
                             rate_limited_response(client_format, until)
                         }
+                        None if probe_only => {
+                            let msg = "quota recovery trial is already in flight";
+                            record_plan_failure(
+                                &state,
+                                &trace,
+                                &client_body,
+                                loop_state.attempt.max(1),
+                                client_format,
+                                &requested_plan,
+                                "gateway",
+                                "account_selection",
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                msg,
+                            );
+                            protocol_error_response(
+                                client_format,
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                msg,
+                                None,
+                            )
+                        }
                         None => {
-                            let msg = loop_state.last_error.clone().unwrap_or_else(|| {
-                                route_set.incompatibility.unwrap_or_else(|| {
-                                    "no compatible provider accounts are available".to_string()
-                                })
-                            });
+                            let msg = live_authorization_error
+                                .or_else(|| loop_state.last_error.clone())
+                                .unwrap_or_else(|| {
+                                    route_set.incompatibility.unwrap_or_else(|| {
+                                        "no compatible provider accounts are available".to_string()
+                                    })
+                                });
                             record_plan_failure(
                                 &state,
                                 &trace,
@@ -446,7 +499,7 @@ impl GatewayExecutor {
                     return protocol_error_response(client_format, status, &message, None);
                 }
             };
-            let route = match route_set.routes.into_iter().nth(selected_index) {
+            let route = match route_set.routes.get(selected_index).cloned() {
                 Some(route) => route,
                 None => {
                     let (status, message) =
@@ -468,21 +521,39 @@ impl GatewayExecutor {
                     return protocol_error_response(client_format, status, &message, None);
                 }
             };
+            let selection =
+                LiveSendSelection::from_execution(&route, &client_model, &routing_model);
             let adapter = route.routing.adapter;
             let account = route.routing.account;
             let active_plan = route.plan;
-            let selection = LiveSendSelection::from_binding(
-                &account,
-                stored_bindings
-                    .iter()
-                    .find(|row| row.account_id == account.id),
-                &client_model,
-                &routing_model,
-                &active_plan.model,
-            );
+            let frozen_spec = route.spec;
 
             let mut retried_same_account = false;
             loop {
+                if loop_state.attempt >= MAX_REQUEST_ATTEMPTS
+                    || tokio::time::Instant::now() >= request_deadline
+                {
+                    let message =
+                        "Gateway request retry budget exhausted; no further upstream attempt sent";
+                    record_plan_failure(
+                        &state,
+                        &trace,
+                        &client_body,
+                        loop_state.attempt.max(1),
+                        client_format,
+                        &active_plan,
+                        "gateway",
+                        "request_budget",
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        message,
+                    );
+                    return protocol_error_response(
+                        client_format,
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        message,
+                        None,
+                    );
+                }
                 loop_state.attempt = loop_state.attempt.saturating_add(1);
                 // Re-resolve the leg on every attempt: free fallback or sticky
                 // rewrites can swap `active_plan.model` mid-request.
@@ -492,7 +563,9 @@ impl GatewayExecutor {
                 } else {
                     selected_route
                 };
-                match forward_request(
+                // The attempt owns timeout finalization so a known HTTP status
+                // and the selected account cannot be lost to outer cancellation.
+                let forwarded = forward_request_with_deadline(
                     client,
                     route,
                     &state,
@@ -505,13 +578,14 @@ impl GatewayExecutor {
                     loop_state.attempt,
                     !retried_same_account,
                     headers.clone(),
-                    snapshots.pricing.clone(),
+                    prices[selected_index].clone(),
                     client_key_id.as_deref(),
-                    &snapshots.dynamics,
+                    &frozen_spec,
                     &selection,
+                    Some(request_deadline),
                 )
-                .await
-                {
+                .await;
+                match forwarded {
                     Ok(result) => match result.action {
                         ForwardAction::Return => return result.response,
                         ForwardAction::RetrySameAccount if !retried_same_account => {
@@ -580,6 +654,16 @@ fn record_plan_failure(
     diagnostic.model = Some(plan.model.clone());
     diagnostic.stream = Some(plan.stream);
     diagnostic.downstream_status = Some(status.as_u16());
+    if error_stage == "request_budget" {
+        diagnostic.retry_action = Some(
+            if error_source == "transport" {
+                "no_replay_outcome_unknown"
+            } else {
+                "return"
+            }
+            .to_string(),
+        );
+    }
     let encoded = serialize_diagnostic(diagnostic.clone());
     log_request_failure(&state.db.lock(), trace, &diagnostic, &encoded, message);
     emit_failure(&encoded);
@@ -606,33 +690,4 @@ fn routing_selector_invariant(failure: SelectorInvariant) -> (StatusCode, String
 }
 
 #[cfg(test)]
-mod tests {
-    #[test]
-    fn selector_invariant_maps_to_internal_error() {
-        for (label, failure, expected) in [
-            (
-                "duplicate",
-                super::SelectorInvariant::Duplicate(
-                    ocg_gateway::selector::SelectionError::DuplicateAccountId {
-                        first: 0,
-                        duplicate: 2,
-                    },
-                ),
-                "routing selector invariant: duplicate account id at candidate index 2 (first seen at 0)",
-            ),
-            (
-                "index-out-of-range",
-                super::SelectorInvariant::CandidateIndexOutOfRange { selected_index: 9 },
-                "routing selector invariant: candidate index 9 is out of range",
-            ),
-        ] {
-            let (status, message) = super::routing_selector_invariant(failure);
-            assert_eq!(
-                status,
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                "{label}"
-            );
-            assert_eq!(message, expected, "{label}");
-        }
-    }
-}
+mod tests;

@@ -32,10 +32,16 @@ import type {
   IdentityList,
   OnboardingCommitRequest,
   OnboardingCommitResult,
+  QuotaRecoveryDto,
+  QuotaRetryResult,
+  RoutingCardList,
+  RoutingCardUpdate,
   RoutingClientProtocol,
   RoutingExplanation,
   TemplateList,
 } from "./generated/dashboard-v4.ts";
+
+export type { QuotaRecoveryDto, QuotaRetryResult };
 
 export const dashboardV4 = {
   getTemplates: () => requestV4<TemplateList>("/templates"),
@@ -43,6 +49,14 @@ export const dashboardV4 = {
   getAccounts: () => requestV4<IdentityList>("/accounts"),
   getDestinations: () => requestV4<DestinationList>("/destinations"),
   getCredentials: () => requestV4<CredentialList>("/credentials"),
+  getRoutingCards: () => requestV4<RoutingCardList>("/routing/cards"),
+  putRoutingCards: (
+    input: WithoutExpectation<RoutingCardUpdate>,
+    expectation: MutationExpectation,
+  ) => requestV4<RoutingCardList>("/routing/cards", {
+    method: "PUT",
+    body: withExpectation(input, expectation),
+  }),
   patchDestination: (
     id: string,
     input: WithoutExpectation<DestinationPatchRequest>,
@@ -82,6 +96,16 @@ export const dashboardV4 = {
     {
       method: "POST",
       body: withExpectation(input, expectation),
+    },
+  ),
+  retryCredentialQuota: (
+    id: string,
+    expectation: MutationExpectation,
+  ) => requestV4<QuotaRetryResult>(
+    `/credentials/${encodeURIComponent(id)}/quota-retry`,
+    {
+      method: "POST",
+      body: withExpectation({}, expectation),
     },
   ),
   patchBinding: (

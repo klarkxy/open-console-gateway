@@ -32,20 +32,15 @@ proposal or pull request, with corresponding code and documentation changes.
   stability is not guaranteed by the public Provider API, so manual refresh
   validates exact GOAT caps and fails closed on schema or plan drift. Its
   public model directory still cannot validate a stored Key, so authentication
-  failure is only known from real inference 401/403. Custom API remains a distinct live route
-  under the trusted-administrator boundary (`custom.rs` + `custom_http.rs`).
+  failure is only known from real inference 401/403. Custom API uses the shared HTTP adapter under the trusted-administrator URL boundary.
 - Per-model/per-protocol overrides still use remounted Account-path handlers
   under `/dashboard/api/v4`. Custom account-level per-protocol probing has no
   dedicated endpoint; that probe path returns 410. Custom verify and model
   discovery are the live Custom operational paths.
 - The V4 operation digest key (`dashboard_operation_digest_key`) lives in the
   same SQLite file as the credential Keys (AES-256-GCM `v2:` ciphertext).
-- Destination write HTTP routes are not public. Account, platform, and Custom
-  mutations stay remounted `/accounts*` adapters over destinations and
-  credentials. `legacy_account_id` remains the bridge id for those routes.
-  Physical storage and destination/credential projection have switched; the
-  V3 Account overlay and some runtime consumers still read through that
-  bridge.
+- V4 destination PATCH/DELETE use a shared transactional HTTP configuration service. Operational Account DTOs and legacy IDs remain compatibility boundaries for management and old imports; normal request planning reads destinations and execution credentials directly.
+
 
 ## Deliberate Non-Goals
 

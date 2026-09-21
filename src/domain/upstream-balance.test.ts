@@ -19,6 +19,23 @@ test("official balance hosts are exact names only", () => {
   assert.equal(officialBalanceSupported(null), false);
 });
 
+test("StepFun CN ordinary endpoints support balance and Step Plan paths do not", () => {
+  assert.equal(officialBalanceSupported("https://api.stepfun.com/v1/chat/completions"), true);
+  assert.equal(officialBalanceSupported("https://api.stepfun.com/chat/completions"), true);
+  assert.equal(officialBalanceSupported("https://API.stepfun.com:443/v1"), true);
+  assert.equal(officialBalanceSupported("http://api.stepfun.com/v1"), false);
+  assert.equal(officialBalanceSupported("https://api.stepfun.com:444/v1"), false);
+  assert.equal(officialBalanceSupported("https://user:token@api.stepfun.com/v1"), false);
+  assert.equal(officialBalanceSupported("https://api.stepfun.com/v1?x=1"), false);
+  assert.equal(officialBalanceSupported("https://api.stepfun.com/v1#frag"), false);
+  assert.equal(officialBalanceSupported("https://api.stepfun.com/step_plan"), false);
+  assert.equal(officialBalanceSupported("https://api.stepfun.com/step_plan/v1/chat/completions"), false);
+  assert.equal(officialBalanceSupported("https://api.stepfun.com/step_plan?x=1"), false);
+  assert.equal(officialBalanceSupported("https://api.stepfun.ai/v1/chat/completions"), false);
+  assert.equal(officialBalanceSupported("https://evil.api.stepfun.com/v1/chat/completions"), false);
+  assert.equal(officialBalanceSupported("https://api.stepfun.com.evil.example/v1/chat/completions"), false);
+});
+
 test("account inference URL prefers the Custom Endpoint then the connection", () => {
   const custom: Pick<Account, "custom_config"> = {
     custom_config: {

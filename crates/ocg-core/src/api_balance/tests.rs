@@ -23,21 +23,48 @@ fn only_exact_official_hosts_are_balance_capable() {
     assert!(probe_from_endpoint("https://api.deepseek.com/v1/chat/completions").is_some());
     assert!(probe_from_endpoint("https://api.moonshot.cn/v1/chat/completions").is_some());
     assert!(probe_from_endpoint("https://api.moonshot.ai/v1/chat/completions").is_some());
+    assert!(probe_from_endpoint("https://api.stepfun.com/v1/chat/completions").is_some());
+    assert!(probe_from_endpoint("https://api.stepfun.com/v1/accounts").is_some());
+    assert!(probe_from_endpoint("https://api.stepfun.com:443/v1/chat/completions").is_some());
     assert!(probe_from_endpoint("https://evil.api.deepseek.com/chat/completions").is_none());
     assert!(
         probe_from_endpoint("https://api.deepseek.com.evil.example/chat/completions").is_none()
     );
     assert!(probe_from_endpoint("https://api.openai.com/v1/chat/completions").is_none());
+    assert!(probe_from_endpoint("https://api.stepfun.ai/v1/chat/completions").is_none());
+    assert!(probe_from_endpoint("https://evil.api.stepfun.com/v1/chat/completions").is_none());
+    assert!(
+        probe_from_endpoint("https://api.stepfun.com.evil.example/v1/chat/completions").is_none()
+    );
+    assert!(probe_from_endpoint("http://api.stepfun.com/v1/chat/completions").is_none());
+    assert!(probe_from_endpoint("https://api.stepfun.com:444/v1/chat/completions").is_none());
     assert!(probe_from_endpoint("https://127.0.0.1/chat/completions").is_none());
     assert!(probe_from_endpoint("not a url").is_none());
+}
+
+#[test]
+fn step_plan_paths_are_excluded_only_on_stepfun_host() {
+    assert!(probe_from_endpoint("https://api.stepfun.com/step_plan").is_none());
+    assert!(probe_from_endpoint("https://api.stepfun.com/step_plan/").is_none());
+    assert!(probe_from_endpoint("https://api.stepfun.com/step_plan/v1/chat/completions").is_none());
+    assert!(probe_from_endpoint("https://api.stepfun.com/step_plan/v1/accounts").is_none());
+    assert!(probe_from_endpoint("https://api.stepfun.com/step_planning").is_some());
+    assert!(
+        probe_from_endpoint("https://api.deepseek.com/step_plan/v1/chat/completions").is_some()
+    );
+    assert!(probe_from_endpoint("https://api.moonshot.cn/step_plan/v1/chat/completions").is_some());
+    assert!(probe_from_endpoint("https://api.deepseek.com/chat/completions").is_some());
+    assert!(probe_from_endpoint("https://api.moonshot.cn/v1/chat/completions").is_some());
 }
 
 #[test]
 fn official_balance_sources_are_the_known_pair() {
     assert!(is_official_balance_source(DEEPSEEK_BALANCE_SOURCE));
     assert!(is_official_balance_source(MOONSHOT_BALANCE_SOURCE));
+    assert!(is_official_balance_source(STEPFUN_BALANCE_SOURCE));
     assert!(!is_official_balance_source("test-fixture"));
     assert!(!is_official_balance_source("minimax-cn-official"));
+    assert!(!is_official_balance_source("stepfun-plan-official"));
 }
 
 #[test]
@@ -90,6 +117,91 @@ fn moonshot_available_balance_is_the_current_amount() {
     assert_eq!(rows[0].amount, 49.58894);
     assert_eq!(rows[0].unit, "usd");
     assert_eq!(rows[0].balance_kind, "available");
+}
+
+#[test]
+fn stepfun_balance_is_the_current_amount_without_summing_cash_or_voucher() {
+    let now = Utc::now();
+    let rows = parse_stepfun(
+        "acc",
+        STEPFUN_BALANCE_SOURCE,
+        "cny",
+        &json!({
+            "object": "account",
+            "type": "prepaid",
+            "balance": 12.5,
+            "total_cash_balance": 10.0,
+            "total_voucher_balance": 26.0
+        }),
+        now,
+    )
+    .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].amount, 12.5);
+    assert_eq!(rows[0].unit, "cny");
+    assert_eq!(rows[0].balance_kind, "balance");
+    assert_eq!(rows[0].source, STEPFUN_BALANCE_SOURCE);
+}
+
+#[test]
+fn stepfun_zero_and_negative_balance_are_valid() {
+    let now = Utc::now();
+    let zero = parse_stepfun(
+        "acc",
+        STEPFUN_BALANCE_SOURCE,
+        "cny",
+        &json!({"balance": 0.0}),
+        now,
+    )
+    .unwrap();
+    assert_eq!(zero[0].amount, 0.0);
+    let negative = parse_stepfun(
+        "acc",
+        STEPFUN_BALANCE_SOURCE,
+        "cny",
+        &json!({"balance": "-1.25"}),
+        now,
+    )
+    .unwrap();
+    assert_eq!(negative[0].amount, -1.25);
+}
+
+#[test]
+fn stepfun_missing_or_malformed_balance_fails() {
+    let now = Utc::now();
+    assert!(
+        parse_stepfun(
+            "acc",
+            STEPFUN_BALANCE_SOURCE,
+            "cny",
+            &json!({
+                "total_cash_balance": 4.0,
+                "total_voucher_balance": 6.0
+            }),
+            now,
+        )
+        .is_err()
+    );
+    assert!(
+        parse_stepfun(
+            "acc",
+            STEPFUN_BALANCE_SOURCE,
+            "cny",
+            &json!({"balance": "not-a-number"}),
+            now,
+        )
+        .is_err()
+    );
+    assert!(
+        parse_stepfun(
+            "acc",
+            STEPFUN_BALANCE_SOURCE,
+            "cny",
+            &json!({"balance": null}),
+            now,
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -168,5 +280,34 @@ async fn fetch_probe_sends_bearer_get_and_parses_deepseek() {
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].method, "GET");
     assert_eq!(hits[0].path, "/user/balance");
+    assert_eq!(hits[0].authorization.as_deref(), Some("Bearer sk-test"));
+}
+
+#[tokio::test]
+async fn fetch_probe_sends_bearer_get_and_parses_stepfun() {
+    let body = r#"{"object":"account","type":"prepaid","balance":0.00,"total_cash_balance":1.00,"total_voucher_balance":26.00}"#;
+    let (origin, calls) = start_origin(StatusCode::OK, body).await;
+    let url = reqwest::Url::parse(&format!("{origin}/v1/accounts")).unwrap();
+    let rows = fetch_probe(
+        &config(),
+        "acc",
+        "sk-test",
+        BalanceProbe {
+            url,
+            source: STEPFUN_BALANCE_SOURCE,
+            kind: BalanceKind::StepFun,
+            unit_hint: "cny",
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].amount, 0.0);
+    assert_eq!(rows[0].balance_kind, "balance");
+    assert_eq!(rows[0].unit, "cny");
+    let hits = calls.lock().unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].method, "GET");
+    assert_eq!(hits[0].path, "/v1/accounts");
     assert_eq!(hits[0].authorization.as_deref(), Some("Bearer sk-test"));
 }

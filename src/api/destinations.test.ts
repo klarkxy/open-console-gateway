@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { QuotaRecoveryDto } from "./dashboard-v4.ts";
 import {
   credentialsApi,
   destinationsApi,
   presentDestination,
   presentDestinationCredential,
   presentDestinationListSnapshot,
+  presentQuotaRecovery,
 } from "./destinations.ts";
 import type {
   DestinationCredentialDto,
@@ -52,7 +54,9 @@ function destination(overrides: Partial<DestinationDto> = {}): DestinationDto {
   };
 }
 
-function credential(overrides: Partial<DestinationCredentialDto> = {}): DestinationCredentialDto {
+function credential(
+  overrides: Partial<DestinationCredentialDto> = {},
+): Omit<DestinationCredentialDto, "quotaRecovery"> & { quotaRecovery?: QuotaRecoveryDto | null } {
   return {
     authState: "unknown",
     cooldowns: {
@@ -160,4 +164,66 @@ test("presentDestinationListSnapshot pairs the GET revision with presented rows"
   });
   assert.equal(snapshot.destinations[0]?.adapter, "zen");
   assert.deepEqual(snapshot.expectation, { expectedRevision: 4, processGeneration: 11 });
+});
+
+function quotaRecoveryDto(overrides: Partial<QuotaRecoveryDto> = {}): QuotaRecoveryDto {
+  return {
+    status: "waiting",
+    reason: "quota_exhausted",
+    window: "week",
+    observedAt: "2026-09-20T11:00:00Z",
+    resetsAt: "2026-09-27T00:00:00Z",
+    nextRetryAt: "2026-09-20T12:30:00Z",
+    failureCount: 1,
+    ...overrides,
+  };
+}
+
+test("presentDestinationCredential maps optional quotaRecovery without treating absence as health", () => {
+  const absent = presentDestinationCredential(credential());
+  assert.equal(absent.quota_recovery, null);
+
+  const presented = presentDestinationCredential({
+    ...credential(),
+    quotaRecovery: quotaRecoveryDto({ status: "ready", window: "unknown", resetsAt: null }),
+  });
+  assert.deepEqual(presented.quota_recovery, {
+    status: "ready",
+    reason: "quota_exhausted",
+    window: "unknown",
+    observed_at: "2026-09-20T11:00:00Z",
+    resets_at: null,
+    next_retry_at: "2026-09-20T12:30:00Z",
+    failure_count: 1,
+  });
+});
+
+test("presentQuotaRecovery rejects malformed recovery objects", () => {
+  assert.equal(presentQuotaRecovery(null), null);
+  assert.equal(presentQuotaRecovery(quotaRecoveryDto({ status: "paused" as QuotaRecoveryDto["status"] })), null);
+  assert.equal(presentQuotaRecovery(quotaRecoveryDto({ failureCount: "2" as unknown as number })), null);
+});
+
+test("credentialsApi.retryQuota posts flattened CAS and presents the returned Key", async () => {
+  setupControlPlane(4, 11, "p1");
+  const requests = installFetchMock(({ url, method }) => {
+    if (url.endsWith("/credentials/cred-1/quota-retry") && method === "POST") {
+      return {
+        revision: { revision: 9, processGeneration: 11, pricingRevision: "p2" },
+        credential: {
+          ...credential(),
+          quotaRecovery: quotaRecoveryDto({ status: "ready" }),
+        },
+      };
+    }
+    throw new Error(`unexpected request ${method} ${url}`);
+  });
+
+  const result = await credentialsApi.retryQuota("cred-1");
+  assert.equal(requests.length, 1);
+  assert.match(requests[0]!.url, /\/dashboard\/api\/v4\/credentials\/cred-1\/quota-retry$/);
+  assert.deepEqual(requests[0]!.body, { expectedRevision: 4, processGeneration: 11 });
+  assert.equal(result.credential.quota_recovery?.status, "ready");
+  assert.deepEqual(result.expectation, { expectedRevision: 9, processGeneration: 11 });
+  assert.equal(useControlPlaneStore().revision, 9);
 });

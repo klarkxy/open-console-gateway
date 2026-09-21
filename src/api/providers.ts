@@ -583,7 +583,7 @@ function presentProviderPricingSnapshot(value: V3ProviderPricingSnapshot): Provi
   };
 }
 
-function presentProviderUsage(value: V3ProviderUsage): ProviderUsageResponse {
+export function presentProviderUsage(value: V3ProviderUsage): ProviderUsageResponse {
   return {
     account_id: value.accountId,
     provider_id: value.providerId,

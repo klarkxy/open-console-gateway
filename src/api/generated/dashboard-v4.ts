@@ -63,7 +63,15 @@ export type DashboardApiV4 =
   | DestinationPatchResult
   | DestinationDeleteResult
   | DestinationCredentialDto
+  | QuotaRecoveryDto
+  | QuotaRecoveryStatus
+  | QuotaRecoveryReason
+  | QuotaRecoveryWindow
+  | QuotaRetryResult
   | CredentialList
+  | RoutingCard
+  | RoutingCardList
+  | RoutingCardUpdate
   | CapabilitiesDto
   | PlanDto
   | CatalogModelDto
@@ -75,6 +83,20 @@ export type DashboardApiV4 =
   | OfficialSpend
   | OfficialApiStatus
   | OfficialApiPrices
+  | BillingModel
+  | BillingSource
+  | BillingStatus
+  | CreditRate
+  | MonthlyCredits
+  | CreditConfiguration
+  | CreditBucketKind
+  | CreditBucket
+  | CreditPreset
+  | CreditMeterView
+  | CreditConfigureRequest
+  | CreditBalanceCorrection
+  | CreditCalibrationRequest
+  | CreditGrantRequest
   | RoutingMode
   | RoutingClientProtocol
   | RoutingResolvedKind
@@ -249,6 +271,18 @@ export type PlanWindowKindDto = "five_hours" | "week" | "month" | "free";
  */
 export type ModelResolutionDto = "adapter_defined" | "public_only" | "public_and_upstream";
 /**
+ * Why the credential was confirmed exhausted.
+ */
+export type QuotaRecoveryReason = "quota_exhausted" | "insufficient_balance";
+/**
+ * Presentation status for a confirmed quota-recovery episode.
+ */
+export type QuotaRecoveryStatus = "waiting" | "ready" | "probing";
+/**
+ * Window named by confirmed exhaustion evidence.
+ */
+export type QuotaRecoveryWindow = "five_hours" | "week" | "month" | "unknown";
+/**
  * Mapping-error variant name in camelCase.
  */
 export type MappingErrorCodeDto =
@@ -263,6 +297,13 @@ export type MappingErrorCodeDto =
  */
 export type RefusedRowKindDto = "account" | "dynamic_provider" | "platform_parent";
 export type OfficialApiKind = "deepseek" | "zhipu";
+export type BillingModel = "quota" | "cash" | "credits";
+export type BillingSource = "official" | "local_estimate" | "unavailable";
+export type CreditBucketKind = "monthly" | "top_up" | "manual";
+/**
+ * Registry usage availability. Wire values stay snake_case.
+ */
+export type UsageAvailability = "available" | "unavailable" | "local_state";
 /**
  * Account selection mode. Wire values stay kebab-case, matching V2.
  */
@@ -291,7 +332,10 @@ export type RoutingExclusionCode =
   | "credential_missing"
   | "auth_error"
   | "cooling_down"
-  | "free_channel_unavailable";
+  | "free_channel_unavailable"
+  | "quota_waiting"
+  | "quota_due"
+  | "quota_probing";
 /**
  * Conversation stickiness is reported, not applied: this endpoint has no
  * conversation input.
@@ -847,6 +891,7 @@ export interface PlanWindowDto {
  * Complete public-to-upstream mapping written by a destination PATCH.
  */
 export interface DestinationModelPatch {
+  enabled?: boolean | null;
   publicModel: string;
   upstreamModel: string;
   upstreamOverride?: DestinationUpstreamOverridePatch | null;
@@ -862,6 +907,7 @@ export interface DestinationPatchRequest {
    * endpoints to these existing credentials.
    */
   authorizeCredentialIds?: string[];
+  enabled?: boolean | null;
   endpointUrl: string;
   expectedRevision: number;
   models: DestinationModelPatch[];
@@ -930,6 +976,10 @@ export interface DestinationCredentialDto {
    */
   quotaPoolId: string | null;
   /**
+   * Confirmed per-Key exhaustion/recovery. Omitted or null means no confirmed exhaustion.
+   */
+  quotaRecovery?: QuotaRecoveryDto | null;
+  /**
    * Position in the persisted account order.
    */
   routingRank: number;
@@ -984,7 +1034,26 @@ export interface DestinationOnboardingTaskDto {
    */
   step: string;
 }
+/**
+ * Optional per-Key quota recovery overlay. Status is presentation-only.
+ */
+export interface QuotaRecoveryDto {
+  failureCount: number;
+  nextRetryAt: string;
+  observedAt: string;
+  reason: QuotaRecoveryReason;
+  resetsAt: string | null;
+  status: QuotaRecoveryStatus;
+  window: QuotaRecoveryWindow;
+}
 export interface DestinationDeleteResult {
+  revision: ControlRevision;
+}
+/**
+ * POST `/credentials/{id}/quota-retry` result.
+ */
+export interface QuotaRetryResult {
+  credential: DestinationCredentialDto;
   revision: ControlRevision;
 }
 /**
@@ -993,6 +1062,28 @@ export interface DestinationDeleteResult {
 export interface CredentialList {
   credentials: DestinationCredentialDto[];
   revision: ControlRevision;
+}
+export interface RoutingCard {
+  credentialIds: string[];
+  destinationId: string;
+  id: string;
+}
+/**
+ * One consistent, secret-free snapshot of cards and the resources they show.
+ */
+export interface RoutingCardList {
+  cards: RoutingCard[];
+  credentials: DestinationCredentialDto[];
+  destinations: DestinationDto[];
+  revision: ControlRevision;
+}
+/**
+ * The flattened card and row sequence is the complete routing priority order.
+ */
+export interface RoutingCardUpdate {
+  cards: RoutingCard[];
+  expectedRevision: number;
+  processGeneration: number;
 }
 /**
  * 409 envelope when `destination_projection` refuses. Same V3 fields plus `details`.
@@ -1077,6 +1168,7 @@ export interface OfficialApiStatus {
   balanceAvailable: boolean;
   balances: OfficialBalance[];
   kind: OfficialApiKind;
+  lifetimeSpend: OfficialSpend[];
   monthSpend: OfficialSpend[];
   monthStartedAt: string;
   prices: OfficialPriceSheet;
@@ -1090,6 +1182,186 @@ export interface OfficialApiPrices {
   processGeneration: number;
   providerId: string;
   revision: number;
+}
+export interface BillingStatus {
+  accountId: string;
+  cash: OfficialApiStatus | null;
+  configurableCredits: boolean;
+  credits: CreditMeterView | null;
+  manualCalibration: boolean;
+  model: BillingModel;
+  officialRefresh: boolean;
+  presets: CreditPreset[];
+  processGeneration: number;
+  revision: number;
+  source: BillingSource;
+  unit: string;
+  usage: ProviderUsage | null;
+}
+export interface CreditMeterView {
+  activeGranted: number;
+  buckets: CreditBucket[];
+  configuration: CreditConfiguration;
+  credentialId: string;
+  estimatedAt: string;
+  lastCalibrationAt: string | null;
+  meterId: string;
+  /**
+   * Next actual renewal; configuration.next_reset_at remains the calendar anchor.
+   */
+  nextResetAt: string | null;
+  overdrawn: number;
+  pendingRequests: number;
+  remaining: number;
+  spentSinceCalibration: number;
+  unpricedRequests: number;
+}
+export interface CreditBucket {
+  expiresAt: string | null;
+  granted: number;
+  id: string;
+  kind: CreditBucketKind;
+  label: string;
+  remaining: number;
+  startsAt: string;
+}
+export interface CreditConfiguration {
+  creditsPerCurrency: number;
+  currency: string;
+  monthly: MonthlyCredits | null;
+  name: string;
+  rates: CreditRate[];
+  sourceUrl: string | null;
+}
+export interface MonthlyCredits {
+  amount: number;
+  /**
+   * First renewal boundary and immutable calendar anchor, including its UTC time.
+   */
+  nextResetAt: string;
+  renewalEndsAt: string | null;
+  /**
+   * Calendar boundaries use this fixed UTC offset, e.g. 480 for China.
+   */
+  timezoneOffsetMinutes: number;
+}
+export interface CreditRate {
+  cacheReadPerMillion: number | null;
+  cacheWritePerMillion: number | null;
+  inputPerMillion: number;
+  model: string;
+  outputPerMillion: number;
+}
+export interface CreditPreset {
+  configuration: CreditConfiguration;
+  id: string;
+  initialGrant: number;
+}
+/**
+ * GET `/accounts/{id}/provider-usage` body. Distinct from stored quota rows.
+ *
+ * `pricingRevision` is present when live Go quota windows use one captured
+ * pricing snapshot.
+ */
+export interface ProviderUsage {
+  accountId: string;
+  availability: UsageAvailability;
+  creditBalances: CreditBalance[];
+  experimental: boolean;
+  freeCooldownUntil: string | null;
+  pricingRevision: string | null;
+  processGeneration: number;
+  providerId: string;
+  quotaWindows: QuotaWindow[];
+  revision: number;
+  syncState: UsageSyncState | null;
+}
+/**
+ * One credit balance row as projected for provider usage. Distinct from the
+ * stored provider credit row.
+ */
+export interface CreditBalance {
+  accountId: string;
+  amount: number;
+  balanceKind: string;
+  observedAt: string | null;
+  source: string;
+  unit: string;
+  updatedAt: string;
+}
+/**
+ * One live or synthetic quota window. Distinct from `models::QuotaWindow`.
+ */
+export interface QuotaWindow {
+  accountId: string;
+  calibrationOffset: number;
+  limitValue: number | null;
+  observedAt: string | null;
+  resetsAt: string | null;
+  source: string;
+  startedAt: string | null;
+  unit: string;
+  updatedAt: string;
+  used: number;
+  windowKind: string;
+}
+/**
+ * Official-usage sync metadata as projected for provider usage. Distinct from
+ * the stored `provider_usage_sync_state` row.
+ */
+export interface UsageSyncState {
+  accountId: string;
+  failureStreak: number;
+  lastAttemptAt: string | null;
+  lastExpeditedAt: string | null;
+  lastSuccessAt: string | null;
+  nextEligibleAt: string | null;
+}
+/**
+ * Required process-scoped mutation precondition.
+ *
+ * Both fields travel at the top level of every mutation request. The random
+ * process generation prevents a revision captured before restart from being
+ * accepted by a fresh process whose in-memory counter reused the same value.
+ */
+export interface CreditConfigureRequest {
+  configuration: CreditConfiguration;
+  expectedRevision: number;
+  /**
+   * Required for initial setup; omitted for a rate/settings edit so balances survive.
+   */
+  initialBuckets?: CreditBucket[] | null;
+  processGeneration: number;
+}
+export interface CreditBalanceCorrection {
+  bucketId: string;
+  remaining: number;
+}
+/**
+ * Required process-scoped mutation precondition.
+ *
+ * Both fields travel at the top level of every mutation request. The random
+ * process generation prevents a revision captured before restart from being
+ * accepted by a fresh process whose in-memory counter reused the same value.
+ */
+export interface CreditCalibrationRequest {
+  balances: CreditBalanceCorrection[];
+  expectedRevision: number;
+  processGeneration: number;
+}
+/**
+ * Required process-scoped mutation precondition.
+ *
+ * Both fields travel at the top level of every mutation request. The random
+ * process generation prevents a revision captured before restart from being
+ * accepted by a fresh process whose in-memory counter reused the same value.
+ */
+export interface CreditGrantRequest {
+  amount: number;
+  expectedRevision: number;
+  expiresAt?: string | null;
+  label: string;
+  processGeneration: number;
 }
 export interface RoutingResolvedMapping {
   providerId: string;

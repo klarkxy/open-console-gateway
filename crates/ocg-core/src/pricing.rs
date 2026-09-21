@@ -13,6 +13,7 @@ use crate::kernel::ids::{
     COMMAND_CODE_PROVIDER_ID, OLLAMA_CLOUD_PRICING_URL, OLLAMA_PROVIDER_ID, OPENCODE_PROVIDER_ID,
     OPENCODE_ZEN_FREE_PROVIDER_ID, is_free_model,
 };
+use ocg_domain::billing::{BillingTokens, TokenRates, convert_charge, token_charge};
 
 pub use crate::kernel::ids::normalize_model_name;
 use crate::kernel::pricing::ProviderPricingValueWire;
@@ -195,11 +196,7 @@ impl ProviderScopedPricingSnapshot {
         cache_creation: i64,
         at: DateTime<Utc>,
     ) -> PricingEstimate {
-        let prompt = prompt.max(0) as f64;
-        let completion = completion.max(0) as f64;
-        let cached = (cached.max(0) as f64).min(prompt);
-        let cache_creation = (cache_creation.max(0) as f64).min(prompt - cached);
-        let uncached = prompt - cached - cache_creation;
+        let tokens = BillingTokens::clamped(prompt, completion, cached, cache_creation);
         let preferred_time_window = if is_provider_peak_utc(&self.provider_id, at) {
             PricingTimeWindow::Peak
         } else {
@@ -208,7 +205,7 @@ impl ProviderScopedPricingSnapshot {
         let Some(value) = select_provider_pricing_value(
             &self.values,
             model,
-            prompt as i64,
+            tokens.input,
             preferred_time_window,
             &self.provider_id,
         ) else {
@@ -230,11 +227,12 @@ impl ProviderScopedPricingSnapshot {
         // input rate, matching how cache writes already fall back.
         let cache_read = value.cache_read_per_million().unwrap_or(input);
         let cache_write = value.cache_write_per_million().unwrap_or(input);
-        let raw_cost = (uncached * input
-            + completion * output
-            + cached * cache_read
-            + cache_creation * cache_write)
-            / 1_000_000.0;
+        let Some(raw_cost) = token_charge(
+            tokens,
+            TokenRates::per_million(input, output, Some(cache_read), Some(cache_write)),
+        ) else {
+            return PricingEstimate::unpriced(&self.revision);
+        };
         let estimate = ProviderCostEstimate::from_raw_with_multiplier(
             raw_cost,
             value.quota_multiplier(),
@@ -1023,11 +1021,7 @@ impl PricingSnapshot {
         service_tier: Option<&str>,
         at: DateTime<Utc>,
     ) -> PricingEstimate {
-        let prompt = prompt.max(0) as f64;
-        let completion = completion.max(0) as f64;
-        let cached = (cached.max(0) as f64).min(prompt);
-        let cache_creation = (cache_creation.max(0) as f64).min(prompt - cached);
-        let uncached = prompt - cached - cache_creation;
+        let tokens = BillingTokens::clamped(prompt, completion, cached, cache_creation);
         let normalized = normalize_model_name(model);
         if is_free_model(&normalized) {
             return PricingEstimate::free(&self.revision);
@@ -1043,10 +1037,10 @@ impl PricingSnapshot {
             .filter(|entry| {
                 entry
                     .min_input_tokens
-                    .is_none_or(|minimum| prompt as i64 >= minimum)
+                    .is_none_or(|minimum| tokens.input >= minimum)
                     && entry
                         .max_input_tokens
-                        .is_none_or(|maximum| prompt as i64 <= maximum)
+                        .is_none_or(|maximum| tokens.input <= maximum)
             })
             .collect::<Vec<_>>();
         let selected = select_priced_model(&candidates, at);
@@ -1057,11 +1051,17 @@ impl PricingSnapshot {
         // A '-' in the official Cached Write column means there is no separate
         // cache-write price. Cache creation is still new input, so it uses input.
         let cache_write = price.cache_write.unwrap_or(price.input);
-        let base = (uncached * price.input
-            + completion * price.output
-            + cached * price.cache_read
-            + cache_creation * cache_write)
-            / 1_000_000.0;
+        let Some(base) = token_charge(
+            tokens,
+            TokenRates::per_million(
+                price.input,
+                price.output,
+                Some(price.cache_read),
+                Some(cache_write),
+            ),
+        ) else {
+            return PricingEstimate::unpriced(&self.revision);
+        };
 
         let mut adjusted_input = price.input;
         let mut adjusted_output = price.output;
@@ -1073,7 +1073,7 @@ impl PricingSnapshot {
         }
         if price.model_id == "minimax-m3" {
             let mut multiplier = 1.0;
-            if prompt > 512_000.0 {
+            if tokens.input > 512_000 {
                 multiplier *= 2.0;
             }
             if service_tier.is_some_and(|tier| tier.eq_ignore_ascii_case("priority")) {
@@ -1084,14 +1084,22 @@ impl PricingSnapshot {
             adjusted_cache_read *= multiplier;
             adjusted_cache_write *= multiplier;
         }
-        let adjusted = (uncached * adjusted_input
-            + completion * adjusted_output
-            + cached * adjusted_cache_read
-            + cache_creation * adjusted_cache_write)
-            / 1_000_000.0;
+        let Some(adjusted) = token_charge(
+            tokens,
+            TokenRates::per_million(
+                adjusted_input,
+                adjusted_output,
+                Some(adjusted_cache_read),
+                Some(adjusted_cache_write),
+            ),
+        ) else {
+            return PricingEstimate::unpriced(&self.revision);
+        };
         let local_adjustment_multiplier = if base > 0.0 { adjusted / base } else { 1.0 };
 
-        let quota_debit = adjusted * price.quota_multiplier;
+        let Some(quota_debit) = convert_charge(adjusted, price.quota_multiplier) else {
+            return PricingEstimate::unpriced(&self.revision);
+        };
         PricingEstimate {
             raw_cost_usd: Some(adjusted),
             quota_debit: Some(quota_debit),

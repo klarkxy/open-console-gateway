@@ -276,7 +276,7 @@ export function createLab({ host = HOST, profile, live = null, runId = "in-proce
       return true;
     }
     if (scripted.kind === "http") {
-      writeJson(res, scripted.status, scripted.body);
+      writeJson(res, scripted.status, scripted.body, scripted.headers);
       return true;
     }
     if (scripted.kind === "malformed_json") {

@@ -21,6 +21,11 @@ export function overlayAccountForCredential(
   return accountsById.get(credential.legacy_account_id);
 }
 
+function inferenceCredentials(destinations: readonly Destination[], credentials: readonly DestinationCredential[]): DestinationCredential[] {
+  const observers = new Set(destinations.flatMap((destination) => destination.observer_credential_id ? [destination.observer_credential_id] : []));
+  return credentials.filter((credential) => !observers.has(credential.id));
+}
+
 /**
  * Group credentials by destination. Membership comes from the destination
  * projection; a missing V3 Account overlay does not drop the row. Usage and
@@ -33,7 +38,7 @@ export function buildDestinationGroups(
   credentials: readonly DestinationCredential[],
 ): DestinationGroup[] {
   const credentialsByDestination = new Map<string, DestinationCredential[]>();
-  for (const credential of credentials) {
+  for (const credential of inferenceCredentials(destinations, credentials)) {
     const rows = credentialsByDestination.get(credential.destination_id) ?? [];
     rows.push(credential);
     credentialsByDestination.set(credential.destination_id, rows);
@@ -67,6 +72,20 @@ export function buildDestinationGroups(
 
 export function expandGroupOrder(groups: readonly DestinationGroup[]): string[] {
   return groups.flatMap((group) => group.credentials.map(groupRowOrderId));
+}
+
+/** One row per credential in global routing order; supplier grouping is presentation only. */
+export function buildCredentialOrder(
+  destinations: readonly Destination[],
+  credentials: readonly DestinationCredential[],
+): DestinationGroup[] {
+  const byId = new Map(destinations.map((destination) => [destination.id, destination]));
+  return inferenceCredentials(destinations, credentials)
+    .sort((left, right) => left.routing_rank - right.routing_rank || left.id.localeCompare(right.id))
+    .flatMap((credential) => {
+      const destination = byId.get(credential.destination_id);
+      return destination ? [{ id: credential.id, destination, credentials: [credential] }] : [];
+    });
 }
 
 /**

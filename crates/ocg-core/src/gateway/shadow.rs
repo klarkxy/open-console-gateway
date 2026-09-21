@@ -1,37 +1,36 @@
-//! Read-only shadow planner for inference attempts.
-//!
-//! [`plan_shadow_attempts`] reuses [`super::materialize::materialize_account_routes_with_bindings`]
-//! and [`super::provider_adapter::resolve_route_with_dynamics`]. It never decrypts
-//! credentials, never builds an HTTP client, and never calls Host send. Live
-//! `forward_once` remains the single outbound path.
-//!
-//! Compare is opt-in and default-off. Production enables it with environment
-//! `OCG_SHADOW_COMPARE=1` (only the exact trimmed value `1` enables; unset,
-//! empty, `0`, and any other value leave it off). Tests may force the flag
-//! per-thread without mutating process environment. When enabled, the live
-//! path may log [`ShadowMismatch`] values after materialize/resolve and
-//! before send; it must not change the live [`AttemptSpec`] or send count.
-//!
-//! This is consistency instrumentation on the live materialize/resolve path.
-//! Shadow rematerializes the same planner the live request already used; it
-//! does not claim independent algorithm parity.
+//! Default-off consistency instrumentation over the same frozen production
+//! materializer. It never decrypts, mutates selection, or sends a second request.
+//! Enable with OCG_SHADOW_COMPARE=1; old Account fixtures are test-only.
 
 use crate::alias::ResolvedModel;
+#[cfg(test)]
 use crate::custom::CustomAccountRuntime;
+#[cfg(test)]
 use crate::dynamic::DynamicProviderRuntime;
-use crate::gateway::attempt::{AttemptSpec, CredentialHandle};
+#[cfg(test)]
+use crate::gateway::attempt::AttemptSpec;
+use crate::gateway::attempt::CredentialHandle;
+#[cfg(test)]
 use crate::gateway::materialize::{
     InferenceBindingIndex, MaterializedCandidate, MaterializedRouteSet,
     materialize_account_routes_with_bindings,
 };
-use crate::gateway::protocol::{ParsedClientRequest, ProtocolError, RequestPlan};
+use crate::gateway::protocol::ParsedClientRequest;
+#[cfg(test)]
+use crate::gateway::protocol::{ProtocolError, RequestPlan};
+#[cfg(test)]
 use crate::gateway::provider_adapter;
+#[cfg(test)]
 use crate::goat::GoatAccountRuntime;
 use crate::kernel::protocol::ApiFormat;
-use crate::models::{Account, AppConfig};
+#[cfg(test)]
+use crate::models::Account;
+use crate::models::AppConfig;
 use crate::provider::ProviderAdapterKind;
+#[cfg(test)]
 use crate::provider_contracts::EffectiveContractSet;
 use std::cell::Cell;
+#[cfg(test)]
 use std::collections::HashMap;
 
 /// Environment flag that opts into live-path shadow compare. Default off.
@@ -50,6 +49,7 @@ thread_local! {
 }
 
 /// Same snapshots [`materialize_account_routes_with_bindings`] already consumes.
+#[cfg(test)]
 pub(crate) struct ShadowPlanInput<'a> {
     pub accounts: &'a [Account],
     pub config: &'a AppConfig,
@@ -204,6 +204,7 @@ pub(crate) fn reset_shadow_compare_hook_entries() {
 }
 
 /// Plan the AttemptSpecs the live path would send, without Host send or decrypt.
+#[cfg(test)]
 pub(crate) fn plan_shadow_attempts(
     input: &ShadowPlanInput<'_>,
 ) -> Result<ShadowPlan, ProtocolError> {
@@ -230,6 +231,7 @@ pub(crate) fn plan_shadow_attempts(
     ))
 }
 
+#[cfg(test)]
 fn shadow_plan_from_materialized(
     set: &MaterializedRouteSet,
     config: &AppConfig,
@@ -242,6 +244,7 @@ fn shadow_plan_from_materialized(
 }
 
 #[cfg(test)]
+#[cfg(test)]
 pub(crate) fn live_shadow_attempts(
     routes: &[MaterializedCandidate],
     config: &AppConfig,
@@ -250,6 +253,7 @@ pub(crate) fn live_shadow_attempts(
     attempts_from_materialized(routes, config, dynamics).0
 }
 
+#[cfg(test)]
 fn attempts_from_materialized(
     routes: &[MaterializedCandidate],
     config: &AppConfig,
@@ -282,6 +286,7 @@ fn attempts_from_materialized(
     (attempts, rejects)
 }
 
+#[cfg(test)]
 pub(crate) fn shadow_attempt_from_live(
     account: &Account,
     adapter_kind: ProviderAdapterKind,
@@ -457,29 +462,53 @@ fn record_mismatches(mismatches: &[ShadowMismatch]) {
     }
 }
 
-/// Live-path hook. Default off. When on, compare and log only — never send.
-pub(crate) fn maybe_compare_live_routes(input: &ShadowPlanInput<'_>, live: &MaterializedRouteSet) {
+/// Default-off consistency instrumentation; rematerialization never sends.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn maybe_compare_execution_routes(
+    snapshot: &crate::routing_snapshot::RoutingSnapshot,
+    config: &AppConfig,
+    parsed: &ParsedClientRequest,
+    resolved: &ResolvedModel,
+    client_model: &str,
+    routing_model: &str,
+    cpa_base_url: Option<&str>,
+    live: &crate::gateway::materialize::ExecutionRouteSet,
+) {
     if !shadow_compare_enabled() {
         return;
     }
     #[cfg(test)]
     SHADOW_COMPARE_HOOK_ENTRIES.with(|count| count.set(count.get() + 1));
-    let live_plan = shadow_plan_from_materialized(live, input.config, input.dynamics);
-    match plan_shadow_attempts(input) {
-        Ok(shadow) => {
-            let mismatches = shadow_plan_diff(&live_plan, &shadow);
-            record_mismatches(&mismatches);
-        }
-        Err(error) => {
-            eprintln!(
-                "OCG_SHADOW_MISMATCH {}",
-                serde_json::json!({
-                    "account_id": serde_json::Value::Null,
-                    "field": "plan",
-                    "detail": error.message,
-                })
-            );
-        }
+    let summarize = |set: &crate::gateway::materialize::ExecutionRouteSet| ShadowPlan {
+        attempts: set
+            .routes
+            .iter()
+            .map(|route| ShadowAttempt {
+                public_name: route.plan.client_model.clone(),
+                upstream_model: route.plan.model.clone(),
+                adapter_kind: route.routing.adapter,
+                endpoint: route.spec.request_url().ok(),
+                protocol: route.plan.upstream,
+                credential_handle: route.spec.credential.clone(),
+                account_id: route.routing.account.id.clone(),
+            })
+            .collect(),
+        rejects: set.rejections.iter().map(|r| r.detail.clone()).collect(),
+    };
+    match crate::gateway::materialize::materialize_execution_routes(
+        snapshot,
+        config,
+        parsed,
+        resolved,
+        client_model,
+        routing_model,
+        cpa_base_url,
+    ) {
+        Ok(shadow) => record_mismatches(&shadow_plan_diff(&summarize(live), &summarize(&shadow))),
+        Err(error) => eprintln!(
+            "OCG_SHADOW_MISMATCH {}",
+            serde_json::json!({"field":"plan", "detail":error.message})
+        ),
     }
 }
 

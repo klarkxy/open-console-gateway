@@ -351,6 +351,7 @@ async function runLocalSuite(runtime, collector) {
   await runDirectValidatorNegatives(runtime, collector);
   await runRoutingControlScenarios(runtime, collector);
   const cooldown = await beginCooldownRecovery(runtime);
+  await finishCooldownRecovery(runtime, collector, cooldown);
   await runToolHistoryScenarios(runtime, collector);
   await runLocalFaultsAndExtras(runtime, collector);
   await runAmbiguityAndAlias(runtime, collector);
@@ -364,7 +365,6 @@ async function runLocalSuite(runtime, collector) {
   await runImportExport(runtime, collector);
   await runRestartPersistence(runtime, collector);
   await runRustPriceAndFree(collector);
-  await finishCooldownRecovery(runtime, collector, cooldown);
   await expectRemoteZero(lab, collector);
   applyCoverageChecklist(collector);
 }

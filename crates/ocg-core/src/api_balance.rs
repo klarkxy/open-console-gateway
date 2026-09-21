@@ -19,10 +19,12 @@ use std::time::Duration;
 
 pub const DEEPSEEK_BALANCE_SOURCE: &str = "deepseek-official";
 pub const MOONSHOT_BALANCE_SOURCE: &str = "moonshot-official";
+pub const STEPFUN_BALANCE_SOURCE: &str = "stepfun-api-official";
 
 const MAX_BODY_BYTES: usize = 256 * 1024;
 const PATH_DEEPSEEK: &str = "user/balance";
 const PATH_MOONSHOT: &str = "v1/users/me/balance";
+const PATH_STEPFUN: &str = "v1/accounts";
 
 #[cfg(test)]
 #[path = "api_balance/tests.rs"]
@@ -32,6 +34,7 @@ mod tests;
 enum BalanceKind {
     DeepSeek,
     Moonshot,
+    StepFun,
 }
 
 #[derive(Debug, Clone)]
@@ -43,7 +46,9 @@ struct BalanceProbe {
 }
 
 pub fn is_official_balance_source(source: &str) -> bool {
-    source == DEEPSEEK_BALANCE_SOURCE || source == MOONSHOT_BALANCE_SOURCE
+    source == DEEPSEEK_BALANCE_SOURCE
+        || source == MOONSHOT_BALANCE_SOURCE
+        || source == STEPFUN_BALANCE_SOURCE
 }
 
 /// Exact official hosts only. Suffix matching is never used.
@@ -67,14 +72,44 @@ fn probe_kind(host: &str) -> Option<(BalanceKind, &'static str, &'static str, &'
             MOONSHOT_BALANCE_SOURCE,
             "usd",
         )),
+        "api.stepfun.com" => Some((
+            BalanceKind::StepFun,
+            PATH_STEPFUN,
+            STEPFUN_BALANCE_SOURCE,
+            "cny",
+        )),
         _ => None,
     }
 }
 
-fn origin_of(endpoint_url: &str) -> Result<reqwest::Url, String> {
+/// Step Plan paths must be rejected on the original StepFun URL. Origin
+/// stripping would otherwise classify `/step_plan/...` as API balance.
+fn is_step_plan_path(path: &str) -> bool {
+    path == "/step_plan" || path.starts_with("/step_plan/")
+}
+
+fn is_stepfun_api_balance_url(parsed: &reqwest::Url, host: &str) -> bool {
+    host == "api.stepfun.com"
+        && parsed.scheme() == "https"
+        && parsed.port_or_known_default() == Some(443)
+        && !is_step_plan_path(parsed.path())
+}
+
+fn parsed_endpoint(endpoint_url: &str) -> Result<reqwest::Url, String> {
     let parsed = reqwest::Url::parse(endpoint_url.trim())
         .map_err(|_| "balance endpoint URL is not a valid URL".to_string())?;
     inspect_custom_url(&parsed).map_err(|error| error.to_string())?;
+    if let Some(host) = host_domain(&parsed)
+        && host == "api.stepfun.com"
+        && !is_stepfun_api_balance_url(&parsed, &host)
+    {
+        return Err("this destination does not expose an official balance endpoint".to_string());
+    }
+    Ok(parsed)
+}
+
+fn origin_of(endpoint_url: &str) -> Result<reqwest::Url, String> {
+    let parsed = parsed_endpoint(endpoint_url)?;
     let mut origin = parsed;
     origin.set_path("");
     origin.set_query(None);
@@ -165,6 +200,9 @@ async fn fetch_probe(
         BalanceKind::DeepSeek => parse_deepseek(account_id, probe.source, &value, now),
         BalanceKind::Moonshot => {
             parse_moonshot(account_id, probe.source, probe.unit_hint, &value, now)
+        }
+        BalanceKind::StepFun => {
+            parse_stepfun(account_id, probe.source, probe.unit_hint, &value, now)
         }
     }
 }
@@ -265,6 +303,25 @@ fn parse_moonshot(
     Ok(vec![credit_row(
         account_id,
         "available".to_string(),
+        amount,
+        unit_hint,
+        source,
+        now,
+    )])
+}
+
+fn parse_stepfun(
+    account_id: &str,
+    source: &str,
+    unit_hint: &str,
+    value: &Value,
+    now: chrono::DateTime<Utc>,
+) -> Result<Vec<CreditBalance>, String> {
+    let amount = json_f64(value.get("balance"))
+        .ok_or_else(|| "StepFun balance response did not include a finite balance".to_string())?;
+    Ok(vec![credit_row(
+        account_id,
+        "balance".to_string(),
         amount,
         unit_hint,
         source,

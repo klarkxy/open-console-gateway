@@ -58,7 +58,14 @@ async fn mock_platform(
         }
         _ => return axum::http::StatusCode::NOT_FOUND.into_response(),
     };
-    axum::Json(body).into_response()
+    let mut response = axum::Json(body).into_response();
+    if uri.path() == "/api/pricing" && auth == "Bearer user-metadata-key" {
+        response.headers_mut().insert(
+            "auth-version",
+            axum::http::HeaderValue::from_static("864b7076dbcd0a3c01b5520316720ebf"),
+        );
+    }
+    response
 }
 
 #[tokio::test]
@@ -116,6 +123,15 @@ async fn platform_refresh_fallback_stream_and_stale_price_end_to_end() {
             .find(|l| l["accountId"] == key_id)
             .unwrap();
         assert_eq!(link["snapshot"]["stale"], false, "{link}");
+        assert!(
+            link["snapshot"]["prices"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|price| price["model"] == "platform-e2e-model"
+                    && price["unavailableReason"].is_null()),
+            "{link}"
+        );
         keys.push(key_id);
     }
     let response=h.client.post(format!("http://127.0.0.1:{}/v1/chat/completions",h.handle.port)).bearer_auth(h.state.config().gateway_key).json(&json!({"model":"platform-e2e-model","stream":true,"messages":[{"role":"user","content":"hello"}]})).send().await.unwrap();
@@ -338,6 +354,7 @@ struct IsolatedSite {
 async fn isolated_site(
     axum::extract::State(state): axum::extract::State<IsolatedSite>,
     uri: axum::http::Uri,
+    headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
     state.hits.lock().unwrap().push(uri.path().to_string());
@@ -390,7 +407,17 @@ async fn isolated_site(
         (_, "/v1/models") => json!({"object":"list","data":[{"id":model,"object":"model"}]}),
         _ => return axum::http::StatusCode::NOT_FOUND.into_response(),
     };
-    axum::Json(body).into_response()
+    let mut response = axum::Json(body).into_response();
+    if state.kind == "new_api"
+        && uri.path() == "/api/pricing"
+        && headers.contains_key("authorization")
+    {
+        response.headers_mut().insert(
+            "auth-version",
+            axum::http::HeaderValue::from_static("864b7076dbcd0a3c01b5520316720ebf"),
+        );
+    }
+    response
 }
 
 async fn spawn_isolated_site(
@@ -477,12 +504,14 @@ fn model_contract_of(
         .find(|row| row.account.id == account_id)
         .expect("identity row")
         .binding_model_scope;
-    let capabilities = db
+    let mut capabilities: Vec<_> = db
         .list_account_model_capabilities(account_id)
         .unwrap()
         .into_iter()
         .map(|row| (row.public_model, row.upstream_model))
         .collect();
+    // Model identity is independent of its three explicit platform protocols.
+    capabilities.dedup();
     (scope, capabilities)
 }
 

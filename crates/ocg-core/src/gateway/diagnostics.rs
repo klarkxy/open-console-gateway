@@ -283,7 +283,11 @@ pub(crate) fn log_request_failure(
         credential_account_id: None,
         client_key_id: trace.client_key_id.clone(),
         client_key_name: trace.client_key_name.clone(),
-        status: if diagnostic.error_source == "client" {
+        status: if diagnostic.error_source == "transport"
+            && diagnostic.error_stage == "request_budget"
+        {
+            "outcome_unknown"
+        } else if diagnostic.error_source == "client" {
             "client_error"
         } else {
             "error"
@@ -303,7 +307,14 @@ pub(crate) fn log_request_failure(
         quota_multiplier: None,
         local_adjustment_multiplier: None,
         service_tier: None,
-        cost_state: "not_applicable".to_string(),
+        cost_state: if diagnostic.error_source == "transport"
+            && diagnostic.error_stage == "request_budget"
+        {
+            "outcome_unknown"
+        } else {
+            "not_applicable"
+        }
+        .to_string(),
         error_message: Some(redact_text(message)),
         request_id: Some(diagnostic.request_id.clone()),
         attempt: Some(i64::from(diagnostic.attempt)),

@@ -1136,10 +1136,7 @@ async fn v57_get_accounts_after_migrate_lists_reconstructed_identity_secret_free
     assert_secret_free(&body, &[secret]);
     let identity = find_identity_legacy(&body, "account", "v57-go");
     assert_eq!(identity["credentials"].as_array().unwrap().len(), 1);
-    assert_eq!(
-        identity["identity"]["id"].as_str().unwrap().is_empty(),
-        false
-    );
+    assert!(!identity["identity"]["id"].as_str().unwrap().is_empty());
     harness.stop();
 }
 

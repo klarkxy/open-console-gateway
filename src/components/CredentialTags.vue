@@ -74,16 +74,13 @@
   <n-tag v-if="isManagedOnboardingAccount(account)" size="small" :bordered="false">
     {{ t("托管注册") }}
   </n-tag>
-  <n-tag v-if="showsDeclaredRelation" size="small" :bordered="false">
-    {{ t("声明关系") }}
-  </n-tag>
   <n-tag v-if="credentialCountLabel" size="small" :bordered="false">
     {{ credentialCountLabel }}
   </n-tag>
   <n-tag v-if="bindingDisabled" size="small" :bordered="false">
     {{ t("绑定已禁用") }}
   </n-tag>
-  <n-tag v-if="modelRestrictionLabel" size="small" :bordered="false">
+  <n-tag v-if="modelRestrictionLabel && !hideModelRestriction" size="small" :bordered="false">
     {{ modelRestrictionLabel }}
   </n-tag>
   <n-tag v-if="quotaShareLabel" size="small" :bordered="false">
@@ -123,7 +120,6 @@ import {
 import {
   accountCredentialCount,
   accountExpiryDisplay,
-  accountShowsDeclaredRelation,
   inferenceLastError,
   presentedAccountStatus,
   presentedAccountStatusTagType,
@@ -155,12 +151,14 @@ const props = withDefaults(
     accountNames?: Readonly<Record<string, string>>;
     extraTags?: string[];
     duplicateName?: boolean;
+    hideModelRestriction?: boolean;
   }>(),
   {
     identity: null,
     accountNames: undefined,
     extraTags: () => [],
     duplicateName: false,
+    hideModelRestriction: false,
   },
 );
 
@@ -169,7 +167,6 @@ const emit = defineEmits<{
 }>();
 
 const overlayIdentity = computed(() => props.identity ?? null);
-const showsDeclaredRelation = computed(() => accountShowsDeclaredRelation(overlayIdentity.value));
 const credentialCountLabel = computed(() => {
   const count = accountCredentialCount(overlayIdentity.value);
   return count === null ? null : credentialCountText(count);

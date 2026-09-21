@@ -1,4 +1,4 @@
-//! Schema v50 shadow of [`super::project`]. No Key material.
+//! Authoritative destination and credential configuration reads. No Key material.
 
 use std::collections::HashMap;
 
@@ -29,6 +29,8 @@ pub(super) fn replace_all_on(
     projection: &DestinationProjection,
 ) -> anyhow::Result<()> {
     let extras = crate::db::account_store::snapshot_credential_extras(conn)?;
+    let quota_recoveries = crate::db::quota_recovery::snapshot_on(conn)?;
+    let credit_meters = crate::db::credit_lifecycle::snapshot_on(conn)?;
     let dest_extras = crate::db::platform::snapshot_destination_platform_extras(conn)?;
     let cpa_extras = crate::db::cpa::snapshot_destination_extras(conn)?;
     let dynamic_extras = crate::db::dynamic_store::snapshot_destination_extras(conn)?;
@@ -47,6 +49,9 @@ pub(super) fn replace_all_on(
     crate::db::dynamic_store::restore_destination_extras(conn, &dynamic_extras)?;
     crate::db::dynamic_store::restore_model_overrides(conn, &model_overrides)?;
     crate::db::platform::restore_observer_credentials(conn, &observers)?;
+    crate::db::identity::backfill_authorization_connections_on(conn)?;
+    crate::db::quota_recovery::restore_on(conn, &quota_recoveries)?;
+    crate::db::credit_lifecycle::restore_on(conn, &credit_meters)?;
     Ok(())
 }
 
@@ -283,6 +288,10 @@ fn load_destinations(
             enabled: enabled != 0,
         });
     }
+    anyhow::ensure!(
+        catalogs.is_empty(),
+        "model catalog references a missing destination"
+    );
     Ok(destinations)
 }
 

@@ -7,6 +7,7 @@
       'account-card--cooling': tone === 'cooling',
       'account-card--pending': tone === 'pending',
       'account-card--draft': tone === 'draft',
+      'account-card--unavailable': tone === 'unavailable',
       'account-card--dragging': dragging,
     }"
   >
@@ -71,7 +72,7 @@ import ProviderBrandMark from "./ProviderBrandMark.vue";
  * carries consumption (quota bars, balance, pending setup, linked Keys).
  */
 
-export type AccountCardTone = "cooling" | "pending" | "draft" | null;
+export type AccountCardTone = "cooling" | "pending" | "draft" | "unavailable" | null;
 
 const BRAND_SIZE = 20;
 
@@ -106,6 +107,11 @@ const emit = defineEmits<{
 
 .account-card--cooling {
   border-color: color-mix(in srgb, var(--ocg-error) 45%, transparent);
+}
+
+.account-card--unavailable {
+  background: color-mix(in srgb, var(--ocg-muted) 12%, var(--ocg-surface));
+  border-color: var(--ocg-border);
 }
 
 .account-card--pending,

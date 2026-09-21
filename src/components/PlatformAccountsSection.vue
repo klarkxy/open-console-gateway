@@ -58,6 +58,8 @@ import {
   linkedAccountIdSet,
   platformHostedEndpoint,
   platformModelOverlay,
+  platformSnapshotErrorKey,
+  uniquePublicModelCount,
   type PlatformKeyImportFailureCode,
 } from "../domain/platform-accounts.ts";
 import { accountCapabilities } from "../domain/account-capabilities.ts";
@@ -257,11 +259,30 @@ async function runImportKeys(parent: PlatformAccount): Promise<void> {
   }
 }
 
+function notifyRefreshOutcome(parentId: string): void {
+  const latest = platformStore.parents.find((item) => item.id === parentId);
+  const errors = latest?.snapshot?.errors ?? [];
+  if (errors.length === 0) {
+    message.success(t("已刷新"));
+    return;
+  }
+  const text = [...new Set(errors.map((code) => t(platformSnapshotErrorKey(code))))].join("；");
+  message.warning(text);
+}
+
 async function refreshParent(parent: PlatformAccount): Promise<void> {
   try {
     const outcome = await platformStore.refreshParent(parent.id);
     if (outcome === "conflict") notifyConflict();
-    else if (outcome === "ok") message.success(t("已刷新"));
+    else if (outcome === "ok") {
+      notifyRefreshOutcome(parent.id);
+      const ids = new Set(
+        platformStore.links
+          .filter((link) => link.platformAccountId === parent.id)
+          .map((link) => link.accountId),
+      );
+      await fetchModelsAll(props.accounts.filter((account) => ids.has(account.id)));
+    }
   } catch (error) {
     mutationError(error, "刷新失败：{error}");
   }
@@ -271,7 +292,11 @@ async function refreshChild(parent: PlatformAccount, link: PlatformLink): Promis
   try {
     const outcome = await platformStore.refreshChild(parent.id, link.accountId);
     if (outcome === "conflict") notifyConflict();
-    else if (outcome === "ok") message.success(t("已刷新"));
+    else if (outcome === "ok") {
+      notifyRefreshOutcome(parent.id);
+      const account = props.accounts.find((item) => item.id === link.accountId);
+      if (account) await fetchModels(account);
+    }
   } catch (error) {
     mutationError(error, "刷新失败：{error}");
   }
@@ -477,9 +502,10 @@ async function fetchModels(account: Account): Promise<void> {
 }
 
 function overlayImportMessage(account: Account, truncated: boolean): string {
+  const count = uniquePublicModelCount(account);
   const imported = truncated
-    ? t("已导入 {count} 个模型（列表被截断）", { count: account.model_capabilities.length })
-    : t("已导入 {count} 个模型", { count: account.model_capabilities.length });
+    ? t("已导入 {count} 个模型（列表被截断）", { count })
+    : t("已导入 {count} 个模型", { count });
   const siblings = siblingKeys(account.id).map((item) => (item.id === account.id ? account : item));
   const overlay = platformModelOverlay(siblings);
   const summary = overlay.keys.find((row) => row.accountId === account.id);

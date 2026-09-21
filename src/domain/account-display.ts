@@ -41,6 +41,7 @@ export const ACCOUNT_MENU_LABEL_KEYS = {
   delete: "删除账号",
   "move-up": "上移",
   "move-down": "下移",
+  "move-to-card": "移到卡片",
   "fetch-models": "获取模型",
   "edit-key": "编辑",
   unlink: "取消关联",
@@ -85,13 +86,18 @@ export function destinationTypeLabel(
   return { kind: "plan", label: destination.brand_family ?? destination.name };
 }
 
-/** Reorder actions for a credential inside a multi-account destination. */
+/**
+ * Reorder actions for a credential row inside one routing card: move within
+ * the card, plus a move-to-card action that opens the card picker when the
+ * same supplier has (or can have) another card.
+ */
 export function groupMoveMenuOptions(
   account: Pick<Account, "id" | "name">,
   index: number,
   count: number,
+  options: { canMoveToCard?: boolean } = {},
 ): AccountMenuOption[] {
-  return [
+  const moves: AccountMenuOption[] = [
     {
       key: "move-up",
       accountId: account.id,
@@ -105,6 +111,15 @@ export function groupMoveMenuOptions(
       disabled: count <= 0 || index >= count - 1,
     },
   ];
+  if (options.canMoveToCard) {
+    moves.push({
+      key: "move-to-card",
+      accountId: account.id,
+      accountName: account.name,
+      disabled: false,
+    });
+  }
+  return moves;
 }
 
 export function accountIsReady(account: Pick<Account, "setup_step">): boolean {

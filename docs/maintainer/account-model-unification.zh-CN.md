@@ -2,7 +2,13 @@
 
 # RFC：重新设计账号与供应商模型
 
-状态：**目的地/凭据已是权威存储，schema v58 完成 Custom HTTP 连接所有与多 Key；V4 已提供目的地 PATCH/DELETE 和只读路由解释。** Payload V8 以 Destination、Credential 为权威并携带模型解析策略与按模型覆盖；V4–V8 可导入。`legacy_account_id` 与重挂的旧账号输入仍作为兼容桥。[运行时不变量](runtime-invariants.zh-CN.md)与[Dashboard API](dashboard-api.zh-CN.md)描述 HEAD。
+状态：**schema v59 以目的地、凭据和模型映射作为正常路由的权威。** V4 提供 HTTP 目的地编辑事务和只读路由解释。Payload V10 保留 HTTP 目的地与模型控制、模型解析策略和按模型覆盖；仍支持 V4–V10 导入。详见[运行时不变量](runtime-invariants.zh-CN.md)和[Dashboard API](dashboard-api.zh-CN.md)。
+
+## 运行时切换（v59）
+
+正常请求使用持久化目的地、模型映射与私有执行凭据视图。规划器不再重建 Account，不按历史创建来源分流，也不在权威配置读取失败后回退。固定的请求尝试与实时授权检查和路由解释共用模型约束。HTTP 目的地修改、删除统一在带运行时预检查的事务内完成；旧导入格式和管理操作的 Account DTO 留在兼容边界。全局凭据排序与供应商分组分开呈现。
+
+下文 RFC 保留历史迁移背景，旧计数与阶段建议不代表当前运行时状态。
 
 ## 1. 问题在哪
 
@@ -117,7 +123,7 @@ Custom API 账号迁移为 `adapter = http`、`max_credentials = null` 的独立
 - **Dashboard API V4 成为完整表面**：`destinations`、`credentials`、`quota-pools`、`observations`、`onboarding`，加上既有的 `contract`、`templates`、`applications`。所有变更走 CAS；创建按 operation id 幂等。
 - **V3 降为读写垫片**，在新表之上维持一个版本（`accounts` ↔ 凭据 + 单凭据目的地投影），然后移除。`schema/dashboard-api-v3.schema.json` 不再是冻结的权威；生成的 V4 类型才是。
 - **存储**：新表 `destinations`、`destination_models`、`credentials`、`credential_grants`、`quota_pools`、`quota_pool_members`、`observations`。一次迁移读取 `accounts`、`providers`、`provider_models`、`account_model_capabilities`、`platform_accounts`、`platform_links`、`credential_bindings`、`cpa_integration` 与 V4 identity 表写入新表；垫片版本之后删除旧表。迁移是全量的：每一现有行必须恰好映射为一个目的地与一个凭据，否则迁移拒绝运行。
-- **转移包** payload V8 直接携带新实体、模型解析策略与路由覆盖。
+- **转移包** payload V10 直接携带新实体、模型解析策略与路由覆盖。
 
 ## 6. 迁移
 
@@ -284,17 +290,17 @@ V4 GET 列表仍不含秘密。Key
 
 ### 阶段 7 已开始的弃用规则
 
-新节点备份导出 payload V8。加密 envelope 仍为 v1。V8 携带 `destinations` 与
+新节点备份导出 payload V10。加密 envelope 仍为 v1。V9 携带 `destinations` 与
 `credentials`（明文密钥、平台与 CPA observer 管理凭据，以及 identity / grant /
 cooldown 等 extras 只存在该信封内），以及 `quotaPools` 与 `node`。合并导入时，若包中没有
 CPA observer key，会保留目标已有 management key。最新导出不再生成 `accounts`、平台行、动态供应商定义
 或单独的 identities 数组。V4–V6 仍可通过旧图解码器转入同一套新模型导入对象。
-若 V7 包仍带旧字段，必须与 dest/cred 一致，否则拒绝。V9 及更新是不支持版本错误。
+若 V7 包仍带旧字段，必须与 dest/cred 一致，否则拒绝。V11 及更新是不支持版本错误。
 重挂的 `/accounts*` 是输入输出适配器；新客户端的读模型是 V4 目的地/凭据。
 
 ### 阶段 6 已开始的界面规则
 
-Accounts 上每个目的地分组都走同一套 `DestinationCard` 外壳，凭据行仍是
+Accounts 上每张已保存的路由卡都走同一套 `DestinationCard` 外壳。多张卡可引用同一目的地，卡片身份和成员独立于供应商配置；凭据行仍是
 `CredentialRow`。没有平台父级时，页头品牌和类型来自目的地的 `brand_family` /
 capabilities。`AccountCard` 不再挂在这个页面上。Providers 左侧列出目的地
 （仍 join 到负责变更的 V4 connection；平台目的地没有 connection，用

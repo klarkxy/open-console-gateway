@@ -17,7 +17,10 @@
         </thead>
         <tbody>
           <tr v-for="model in models" :key="model.public_model">
-            <td><code>{{ model.public_model }}</code></td>
+            <td>
+              <code>{{ model.public_model }}</code>
+              <n-tag v-if="disabledModels.has(model.public_model.toLowerCase())" class="model-state" size="small" :bordered="false">{{ t("已停用") }}</n-tag>
+            </td>
             <td><code>{{ model.upstream_model }}</code></td>
             <td>
               <template v-if="model.upstream_override">
@@ -33,7 +36,7 @@
 </template>
 
 <script setup lang="ts">
-import { NButton } from "naive-ui";
+import { NButton, NTag } from "naive-ui";
 import type { ProviderDefinitionModelView } from "../api/providers.ts";
 import { t } from "../i18n/index.ts";
 import { protocolDisplayName } from "../domain/provider-contracts.ts";
@@ -41,6 +44,7 @@ import { protocolDisplayName } from "../domain/provider-contracts.ts";
 defineProps<{
   models: ProviderDefinitionModelView[];
   editable: boolean;
+  disabledModels: ReadonlySet<string>;
 }>();
 
 defineEmits<{
@@ -87,6 +91,9 @@ defineEmits<{
 }
 .model-mappings-table td code {
   overflow-wrap: anywhere;
+}
+.model-state {
+  margin-inline-start: var(--ocg-space-sm);
 }
 .model-mappings-inherit {
   color: var(--ocg-muted);

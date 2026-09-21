@@ -1,25 +1,6 @@
-//! Provider offering adapters: endpoint, auth, and capability checks.
-//!
-//! Authentication belongs to the provider/offering, not the wire protocol.
-//! [`resolve_route_with_dynamics`] dispatches exhaustively on the caller's
-//! [`crate::provider::ProviderAdapterKind`] onto sealed route helpers.
-//! Configurable HTTP splits on whether a dynamic provider runtime exists for
-//! the catalog id, not on `is_custom_api`. Alias resolution
-//! stays ahead of this seam: Alias and PinnedRaw candidates both materialize a
-//! [`RequestPlan`] then call here. Adapters must not probe a billable inference
-//! path to discover protocol support.
-//!
-//! Route resolution returns a data-only [`crate::gateway::attempt::AttemptSpec`]:
-//! endpoint, path, upstream protocol, auth scheme, redirect policy, an opaque
-//! credential handle, and the proxy-routing model. Adapters take an account,
-//! config, and request plan. They do not decrypt keys, open databases, or
-//! build HTTP clients; the Host resolver and single-attempt executor do that.
-//!
-//! Production Command Code GOAT uses the official Provider API origin after
-//! explicit verification. [`command_code_goat_transport_spec`] proves
-//! host/path/auth construction. The GOAT loopback helper substitutes a
-//! loopback origin only and still uses `/provider/v1/...`.
-//! Configurable HTTP is the Custom API identity, not a base class.
+//! Sealed provider transport construction. Production receives an execution
+//! credential, a destination and an already-selected protocol/model. Account
+//! interfaces below are operational probe and compatibility boundaries.
 
 use crate::custom_http::{join_inference_endpoint, resolve_custom_endpoints};
 use crate::gateway::attempt::{AttemptSpec, CredentialHandle, ProxyRoutingModel};
@@ -42,6 +23,117 @@ use crate::provider::{
 use crate::provider_contracts::EffectiveContractSet;
 use std::collections::HashMap;
 use std::sync::{LazyLock, RwLock};
+
+/// Construct transport from explicit destination facts after catalog protocol
+/// selection. This is the production seam; Account adapters below serve probes.
+pub(crate) fn resolve_execution_route(
+    credential: &crate::routing_snapshot::ExecutionCredential,
+    destination: &ocg_domain::destination::Destination,
+    config: &AppConfig,
+    plan: &RequestPlan,
+) -> Result<AttemptSpec, String> {
+    use ocg_domain::destination::{AdapterKind, AuthScheme};
+    let kind = ProviderAdapterKind::from(destination.adapter);
+    let mut spec = AttemptSpec {
+        base_url: String::new(),
+        path: opencode_upstream_path(plan.upstream)?,
+        upstream: plan.upstream,
+        auth: match destination.auth_scheme {
+            AuthScheme::Bearer => UpstreamAuth::Bearer,
+            AuthScheme::XApiKey => UpstreamAuth::XApiKey,
+            AuthScheme::None => UpstreamAuth::None,
+        },
+        follow_redirects: false,
+        credential: if destination.auth_scheme == AuthScheme::None {
+            CredentialHandle::None
+        } else {
+            CredentialHandle::Account {
+                id: credential.id.clone(),
+            }
+        },
+        proxy_routing: ProxyRoutingModel::ProcessWideNoRedirect,
+        wire_normalization: WireNormalization::None,
+    };
+    match destination.adapter {
+        AdapterKind::Http => {
+            let route = plan.custom_route.as_ref().ok_or("missing HTTP route")?;
+            let endpoint =
+                resolve_custom_endpoints(&route.endpoint_url, protocol_kind_for(plan.upstream)?)
+                    .map_err(|error| error.to_string())?
+                    .inference;
+            spec.path = endpoint.path().to_string();
+            let mut base = endpoint;
+            base.set_path("");
+            base.set_query(None);
+            base.set_fragment(None);
+            spec.base_url = base.as_str().trim_end_matches('/').to_string();
+            spec.proxy_routing = ProxyRoutingModel::IsolatedTrustedAdmin;
+        }
+        AdapterKind::OpencodeGo | AdapterKind::Zen => {
+            spec.base_url = resolve_upstream_base(plan.channel, &config.upstream_base_url)?;
+            let descriptor = sealed_descriptor(kind)?;
+            spec.auth = descriptor_auth(descriptor.inference.auth)?;
+            spec.follow_redirects = descriptor.inference.follow_redirects;
+            spec.proxy_routing = ProxyRoutingModel::RequestEntrySnapshot;
+        }
+        AdapterKind::Goat => {
+            if !command_code_supports_upstream(&plan.model, plan.upstream) {
+                return Err("Command Code model/protocol is unsupported".into());
+            }
+            spec.base_url = GOAT_LOOPBACK_ROUTES
+                .read()
+                .map_err(|_| "GOAT route lock poisoned")?
+                .get(&credential.id)
+                .map(|route| command_code_goat_loopback_base(&route.origin))
+                .unwrap_or_else(|| COMMAND_CODE_GOAT_BASE_URL.into());
+            spec.path = command_code_upstream_path(plan.upstream)
+                .ok_or("unsupported GOAT protocol")?
+                .into();
+        }
+        AdapterKind::Minimax => {
+            let (base, path) = match plan.upstream {
+                ApiFormat::ChatCompletions => {
+                    (MINIMAX_CN_BASE_URL, MINIMAX_CN_CHAT_COMPLETIONS_PATH)
+                }
+                ApiFormat::Messages => (MINIMAX_CN_ANTHROPIC_BASE_URL, MINIMAX_CN_MESSAGES_PATH),
+                _ => return Err("unsupported MiniMax protocol".into()),
+            };
+            spec.base_url = base.into();
+            spec.path = path.into();
+        }
+        AdapterKind::Kimi => {
+            spec.base_url = KIMI_CN_BASE_URL.into();
+            spec.path = match plan.upstream {
+                ApiFormat::ChatCompletions => KIMI_CN_CHAT_COMPLETIONS_PATH,
+                ApiFormat::Messages => KIMI_CN_MESSAGES_PATH,
+                _ => return Err("unsupported Kimi protocol".into()),
+            }
+            .into();
+        }
+        AdapterKind::Ollama => {
+            if plan.upstream != ApiFormat::ChatCompletions {
+                return Err("unsupported Ollama protocol".into());
+            }
+            spec.base_url = OLLAMA_LOOPBACK_ROUTES
+                .read()
+                .map_err(|_| "Ollama route lock poisoned")?
+                .get(&credential.id)
+                .cloned()
+                .unwrap_or_else(|| OLLAMA_CLOUD_BASE_URL.into());
+            spec.path = OLLAMA_CLOUD_CHAT_COMPLETIONS_PATH.into();
+            spec.wire_normalization = WireNormalization::OllamaCloud;
+        }
+        AdapterKind::Cpa => {
+            spec.base_url = plan
+                .upstream_base_override
+                .clone()
+                .ok_or("CPA is not configured")?;
+            crate::cpa::normalize_base_url(&spec.base_url, true).map_err(|e| e.to_string())?;
+            spec.proxy_routing = ProxyRoutingModel::LocalExternalIntegration;
+        }
+    }
+    Ok(spec)
+}
 
 pub(crate) use crate::gateway::attempt::UpstreamAuth;
 
@@ -214,6 +306,7 @@ enum RoutePolicy<'a> {
     /// contract (static/preset/probe-confirmed + switches) is required.
     /// The forwarder keeps the historical three-argument signature and
     /// still refuses protocols outside the adapter safety ceiling.
+    #[allow(dead_code)] // Account contract policy remains in compatibility tests.
     Production {
         contracts: Option<&'a EffectiveContractSet>,
     },
@@ -226,6 +319,7 @@ enum RoutePolicy<'a> {
     AccountTest,
 }
 
+#[cfg(test)]
 pub(crate) fn supports_production_plan(
     account: &Account,
     adapter: ProviderAdapterKind,
@@ -247,6 +341,7 @@ pub(crate) fn supports_production_plan(
     .map(|_| ())
 }
 
+#[cfg(test)]
 pub(crate) fn resolve_route_with_dynamics(
     account: &Account,
     adapter: ProviderAdapterKind,

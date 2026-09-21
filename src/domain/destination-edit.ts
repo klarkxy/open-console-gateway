@@ -17,6 +17,7 @@ import { customEndpointUrlIssue } from "./custom-account.ts";
  */
 
 export interface DestinationModelDraft {
+  enabled?: boolean;
   public_model: string;
   upstream_model: string;
   /** Null inherits the connection endpoint/protocol. */
@@ -24,6 +25,7 @@ export interface DestinationModelDraft {
 }
 
 export interface DestinationEditDraft {
+  enabled?: boolean;
   name: string;
   endpoint_url: string;
   auth_scheme: AuthSchemeDto;
@@ -77,15 +79,15 @@ export class DestinationEditError extends Error {
 
 /** Only user-defined HTTP rows accept the destination PATCH. */
 export function isDestinationEditable(
-  destination: Pick<Destination, "adapter" | "legacy">,
+  destination: Pick<Destination, "adapter" | "capabilities">,
 ): boolean {
   return destination.adapter === "http"
-    && (destination.legacy.kind === "dynamic" || destination.legacy.kind === "custom_account");
+    && !destination.capabilities.observer;
 }
 
 /** The server refuses a delete while any Key still routes through the destination. */
 export function isDestinationDeletable(
-  destination: Pick<Destination, "adapter" | "legacy" | "id">,
+  destination: Pick<Destination, "adapter" | "capabilities" | "id">,
   credentials: readonly Pick<DestinationCredential, "destination_id">[],
 ): boolean {
   return isDestinationEditable(destination)
@@ -94,11 +96,13 @@ export function isDestinationDeletable(
 
 export function destinationEditDraft(destination: Destination): DestinationEditDraft {
   return {
+    enabled: destination.enabled,
     name: destination.name,
     endpoint_url: destination.base_url ?? "",
     auth_scheme: destination.auth_scheme,
     upstream_protocol: destination.protocols[0] ?? "",
     models: destination.catalog.map((model) => ({
+      enabled: model.enabled,
       public_model: model.public_model,
       upstream_model: model.upstream_model,
       upstream_override: model.upstream_override
@@ -166,6 +170,7 @@ export function buildDestinationPatch(
     seen.add(key);
     return {
       publicModel,
+      ...(model.enabled === undefined ? {} : { enabled: model.enabled }),
       upstreamModel,
       upstreamOverride: model.upstream_override
         ? {
@@ -177,6 +182,7 @@ export function buildDestinationPatch(
   });
   if (models.length === 0) throw new DestinationEditError("missing_mappings");
   return {
+    ...(draft.enabled === undefined ? {} : { enabled: draft.enabled }),
     authScheme: draft.auth_scheme,
     endpointUrl,
     models,

@@ -17,13 +17,14 @@ use super::portable::{
 };
 use super::{
     MAX_ACCOUNTS, MAX_CAPABILITIES, MAX_ENDPOINT_CHARS, MAX_KEY_CHARS, MAX_NAME_CHARS,
-    MAX_NOTES_CHARS, MAX_USERNAME_CHARS, PAYLOAD_VERSION, PortableCooldowns, PortableNodeState,
-    PortablePayload, PortableProviderDefinition, TransferError, V5_PAYLOAD_VERSION,
-    V7_PAYLOAD_VERSION, ValidatedAccount, validate_node_state, validate_portable_dynamic_providers,
+    MAX_NOTES_CHARS, MAX_ROUTING_CARDS, MAX_USERNAME_CHARS, PAYLOAD_VERSION, PortableCooldowns,
+    PortableNodeState, PortablePayload, PortableProviderDefinition, TransferError,
+    V5_PAYLOAD_VERSION, V7_PAYLOAD_VERSION, V8_PAYLOAD_VERSION, V9_PAYLOAD_VERSION,
+    ValidatedAccount, validate_node_state, validate_portable_dynamic_providers,
 };
 use crate::dashboard_v4::types::{
     AdapterKindDto, AuthSchemeDto, CredentialCooldownsDto, CredentialGrantsDto,
-    LegacyDestinationKindDto,
+    LegacyDestinationKindDto, RoutingCard,
 };
 use crate::db::ImportedCustomDestination;
 use crate::db::identity::{
@@ -44,8 +45,10 @@ use crate::state::CoreState;
 
 #[derive(Debug)]
 pub(super) struct UnifiedNewModelImport {
+    pub destination_controls: Vec<ocg_domain::destination::Destination>,
     pub destinations: Vec<PortableDestination>,
     pub credentials: Vec<PortableCredential>,
+    pub routing_cards: Option<Vec<RoutingCard>>,
     pub identity_snapshot: Option<IdentityImportSnapshot>,
     pub dynamic_providers: Vec<DynamicProviderRuntime>,
     pub custom_destinations: Vec<ImportedCustomDestination>,
@@ -295,6 +298,12 @@ pub(super) fn export_new_model(
         if let Some(tier) = ollama_tiers.get(&credential.legacy_account_id) {
             portable.ollama_billing_tier = Some(tier.clone());
         }
+        portable.credit_meter = crate::db::billing::export_on(
+            &state.db.lock().conn,
+            &credential.legacy_account_id,
+            Utc::now(),
+        )
+        .map_err(|_| TransferError::Internal)?;
         credentials.push(portable);
     }
     let mut exported_ids: HashSet<String> = credentials
@@ -322,6 +331,114 @@ pub(super) fn export_new_model(
     Ok((destinations, credentials, skipped))
 }
 
+fn validate_routing_cards(
+    payload: &PortablePayload,
+    destination_ids: &HashSet<String>,
+) -> Result<Option<Vec<RoutingCard>>, TransferError> {
+    match payload.routing_cards.as_ref() {
+        None if payload.version >= V9_PAYLOAD_VERSION => Err(TransferError::Invalid(
+            "this V9 backup is missing routingCards".to_string(),
+        )),
+        None => Ok(None),
+        Some(_) if payload.version < V9_PAYLOAD_VERSION => Err(TransferError::Invalid(
+            "this backup carries routing card semantics that cannot be imported as a V4/V5/V6/V7/V8 package"
+                .to_string(),
+        )),
+        Some(cards) => {
+            if cards.len() > MAX_ROUTING_CARDS {
+                return Err(TransferError::InvalidBundle);
+            }
+            let inference: HashMap<_, _> = payload
+                .credentials
+                .iter()
+                .filter(|credential| !is_observer_purpose(credential_purpose(credential)))
+                .map(|credential| (credential.id.as_str(), credential))
+                .collect();
+            let mut card_ids = HashSet::new();
+            let mut seen_credentials = HashSet::new();
+            for (index, card) in cards.iter().enumerate() {
+                let prefix = || format!("routing card {}", index + 1);
+                if card.id.trim().is_empty()
+                    || card.id.len() > 128
+                    || !card_ids.insert(card.id.as_str())
+                {
+                    return Err(TransferError::Invalid(format!(
+                        "{} has an invalid or duplicate id",
+                        prefix()
+                    )));
+                }
+                if card.destination_id.is_empty()
+                    || !destination_ids.contains(&card.destination_id)
+                {
+                    return Err(TransferError::Invalid(format!(
+                        "{} names an unknown destination",
+                        prefix()
+                    )));
+                }
+                for credential_id in &card.credential_ids {
+                    let Some(credential) = inference.get(credential_id.as_str()) else {
+                        return Err(TransferError::Invalid(format!(
+                            "{} names an unknown credential",
+                            prefix()
+                        )));
+                    };
+                    if credential.destination_id != card.destination_id {
+                        return Err(TransferError::Invalid(format!(
+                            "{} credential does not belong to its destination",
+                            prefix()
+                        )));
+                    }
+                    if !seen_credentials.insert(credential_id.as_str()) {
+                        return Err(TransferError::Invalid(
+                            "a credential appears in more than one routing card".to_string(),
+                        ));
+                    }
+                }
+            }
+            if seen_credentials.len() != inference.len() {
+                return Err(TransferError::Invalid(
+                    "routingCards must cover every inference credential exactly once".to_string(),
+                ));
+            }
+            let flattened: Vec<&str> = cards
+                .iter()
+                .flat_map(|card| card.credential_ids.iter().map(String::as_str))
+                .collect();
+            let mut ranked: Vec<&PortableCredential> = payload
+                .credentials
+                .iter()
+                .filter(|credential| !is_observer_purpose(credential_purpose(credential)))
+                .collect();
+            ranked.sort_by_key(|credential| credential.routing_rank);
+            let ranked_ids: Vec<&str> = ranked
+                .iter()
+                .map(|credential| credential.id.as_str())
+                .collect();
+            if flattened != ranked_ids {
+                return Err(TransferError::Invalid(
+                    "routingCards order contradicts credential routing_rank".to_string(),
+                ));
+            }
+            if let Some(node) = payload.node.as_ref() {
+                let card_accounts: Vec<&str> = flattened.iter()
+                    .map(|id| inference[id].legacy_account_id.as_str())
+                    .collect();
+                let account_ids: HashSet<&str> = card_accounts.iter().copied().collect();
+                let node_accounts: Vec<&str> = node.account_order.iter()
+                    .map(String::as_str)
+                    .filter(|id| account_ids.contains(id))
+                    .collect();
+                if card_accounts != node_accounts {
+                    return Err(TransferError::Invalid(
+                        "routingCards order contradicts node account_order".to_string(),
+                    ));
+                }
+            }
+            Ok(Some(cards.clone()))
+        }
+    }
+}
+
 pub(super) fn validate_new_model_payload(
     payload: &mut PortablePayload,
 ) -> Result<(Vec<ValidatedAccount>, UnifiedNewModelImport), TransferError> {
@@ -333,7 +450,7 @@ pub(super) fn validate_new_model_payload(
         && !payload.accounts.is_empty()
     {
         return Err(TransferError::Invalid(
-            "this V7/V8 backup is missing its destination/credential snapshot".to_string(),
+            "this V7+ backup is missing its destination/credential snapshot".to_string(),
         ));
     }
     if payload.credentials.len() > MAX_ACCOUNTS {
@@ -342,7 +459,7 @@ pub(super) fn validate_new_model_payload(
     compare_legacy_fields_to_new_model(payload)?;
     for destination in &mut payload.destinations {
         if destination.model_resolution.is_none() {
-            if payload.version >= PAYLOAD_VERSION {
+            if payload.version >= V8_PAYLOAD_VERSION {
                 return Err(TransferError::Invalid(format!(
                     "destination `{}` is missing modelResolution",
                     destination.id
@@ -471,6 +588,28 @@ pub(super) fn validate_new_model_payload(
             )));
         }
         let purpose = credential_purpose(credential);
+        if let Some(meter) = credential.credit_meter.as_ref() {
+            let destination = payload
+                .destinations
+                .iter()
+                .find(|destination| destination.id == credential.destination_id)
+                .ok_or(TransferError::InvalidBundle)?;
+            if is_observer_purpose(purpose)
+                || destination.adapter != AdapterKindDto::Http
+                || !matches!(
+                    destination.legacy.kind,
+                    LegacyDestinationKindDto::Dynamic | LegacyDestinationKindDto::CustomAccount
+                )
+            {
+                return Err(TransferError::Invalid(format!(
+                    "{} cannot carry a personal credit meter",
+                    prefix()
+                )));
+            }
+            validate_portable_credit_meter(meter, credential, destination).map_err(|error| {
+                TransferError::Invalid(format!("{} has an invalid credit meter: {error}", prefix()))
+            })?;
+        }
         if is_observer_purpose(purpose) {
             if credential.has_secret
                 && credential
@@ -522,11 +661,18 @@ pub(super) fn validate_new_model_payload(
         &payload.credentials,
         &dynamic_providers,
     )?;
+    let routing_cards = validate_routing_cards(payload, &destination_ids)?;
     Ok((
         accounts,
         UnifiedNewModelImport {
+            destination_controls: payload
+                .destinations
+                .iter()
+                .map(super::portable::destination_from_portable)
+                .collect(),
             destinations: payload.destinations.clone(),
             credentials: payload.credentials.clone(),
+            routing_cards,
             identity_snapshot,
             dynamic_providers,
             custom_destinations,
@@ -542,6 +688,44 @@ pub(super) fn validate_new_model_payload(
             cpa_management_key,
         },
     ))
+}
+
+fn validate_portable_credit_meter(
+    meter: &crate::billing_types::PortableCreditMeter,
+    credential: &PortableCredential,
+    destination: &PortableDestination,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        meter.created_at <= meter.exported_at,
+        "creation is after export"
+    );
+    anyhow::ensure!(
+        meter
+            .last_calibration_at
+            .is_none_or(|at| at <= meter.exported_at),
+        "calibration is after export"
+    );
+    anyhow::ensure!(
+        meter
+            .monthly_cursor
+            .is_none_or(|at| at <= meter.exported_at),
+        "monthly cursor is after export"
+    );
+    let mut state = crate::billing::CreditMeterState::new(
+        "portable-validation".into(),
+        credential.id.clone(),
+        destination.id.clone(),
+        destination.base_url.clone().unwrap_or_default(),
+        meter.configuration.clone(),
+        meter.buckets.clone(),
+        meter.created_at,
+    )?;
+    state.spent_since_calibration = meter.spent_since_calibration;
+    state.overdrawn = meter.overdrawn;
+    state.unpriced_requests = meter.unpriced_requests;
+    state.last_calibration_at = meter.last_calibration_at;
+    state.monthly_cursor = meter.monthly_cursor;
+    state.validate()
 }
 
 pub(super) fn map_old_graph_to_unified(
@@ -736,6 +920,7 @@ pub(super) fn map_old_graph_to_unified(
     Ok(UnifiedNewModelImport {
         destinations,
         credentials,
+        routing_cards: None,
         identity_snapshot,
         dynamic_providers,
         custom_destinations,
@@ -744,6 +929,7 @@ pub(super) fn map_old_graph_to_unified(
         platform_accounts: payload.platform_accounts.clone(),
         platform_links: payload.platform_links.clone(),
         platform_catalogs: HashMap::new(),
+        destination_controls: Vec::new(),
         platform_links_authoritative: payload.version >= V5_PAYLOAD_VERSION,
         platform_snapshots: HashMap::new(),
         platform_versions: HashMap::new(),
@@ -1074,12 +1260,6 @@ fn customs_from_destinations(
         }
         let protocol = super::portable::protocol_from_dto(destination.protocols[0]);
         let auth_scheme = super::portable::auth_scheme_from_dto(destination.auth_scheme);
-        if matches!(auth_scheme, ocg_domain::destination::AuthScheme::None) {
-            return Err(TransferError::Invalid(format!(
-                "Custom destination `{}` requires keyed authentication",
-                destination.id
-            )));
-        }
         let endpoint_url = destination
             .base_url
             .as_deref()
@@ -1133,7 +1313,7 @@ fn customs_from_destinations(
             auth_kind: match auth_scheme {
                 ocg_domain::destination::AuthScheme::Bearer => DynamicAuthKind::Bearer,
                 ocg_domain::destination::AuthScheme::XApiKey => DynamicAuthKind::XApiKey,
-                ocg_domain::destination::AuthScheme::None => unreachable!(),
+                ocg_domain::destination::AuthScheme::None => DynamicAuthKind::None,
             },
             mappings: models.clone(),
         };
@@ -1266,6 +1446,7 @@ fn dynamics_from_destinations(
     validate_portable_dynamic_providers(&providers, PAYLOAD_VERSION)
 }
 
+#[allow(clippy::type_complexity)]
 fn platforms_from_destinations(
     destinations: &[PortableDestination],
     credentials: &[PortableCredential],
@@ -1602,9 +1783,7 @@ fn validated_accounts_from_credentials(
                     .and_then(|task| ModelSetupStep::try_from(task.step.as_str()).ok())
             })
             .unwrap_or(ModelSetupStep::Ready);
-        let requires_key = dynamic
-            .map(|runtime| runtime.auth_kind.requires_key())
-            .unwrap_or(true);
+        let requires_key = destination.auth_scheme != AuthSchemeDto::None;
         if account_type == ModelAccountType::Key && requires_key && credential.key.trim().is_empty()
         {
             return Err(TransferError::Invalid(format!(
@@ -1725,8 +1904,13 @@ fn validated_accounts_from_credentials(
             custom_config,
             capabilities,
             ollama_billing_tier,
-            credential_kind: dynamic
-                .map(|runtime| runtime.auth_kind.credential_kind())
+            credential_kind: (destination.adapter == AdapterKindDto::Http)
+                .then_some(if requires_key {
+                    CredentialKind::ApiKey
+                } else {
+                    CredentialKind::None
+                })
+                .or_else(|| dynamic.map(|runtime| runtime.auth_kind.credential_kind()))
                 .or_else(|| plan.map(|plan| plan.credential_kind))
                 .or_else(|| {
                     credential
@@ -1898,6 +2082,7 @@ fn portable_observer_credential(
         quota_scope: None,
         ollama_billing_tier: None,
         link_group: None,
+        credit_meter: None,
     }
 }
 
@@ -1936,7 +2121,7 @@ pub(super) fn finish_new_model_migration(
     debug_assert!(payload.version >= V7_PAYLOAD_VERSION);
     let (accounts, unified) = validate_new_model_payload(payload)?;
     let node = validate_node_state(
-        payload.node.take().expect("V7/V8 node was checked"),
+        payload.node.take().expect("V7+ node was checked"),
         &accounts,
     )?;
     Ok(ValidatedMigration {

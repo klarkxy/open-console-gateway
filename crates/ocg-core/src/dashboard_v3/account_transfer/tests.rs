@@ -2,6 +2,103 @@ use super::*;
 use ocg_domain::credential::ModelScope;
 use std::collections::{HashMap, HashSet};
 
+#[test]
+fn credit_v10_transfer_restores_new_accounts_but_never_refills_existing_accounts() {
+    use crate::billing_types::{
+        CreditBalanceCorrection, CreditBucket, CreditBucketKind, CreditConfiguration, CreditRate,
+    };
+    let account = "00000000-0000-4000-8000-0000000000a1";
+    let (source_dir, source) = seed_ab_accounts("credit-transfer-source");
+    let now = chrono::Utc::now();
+    crate::db::billing::configure_on(
+        &source.db.lock().conn,
+        account,
+        CreditConfiguration {
+            name: "credits".into(),
+            currency: "CNY".into(),
+            credits_per_currency: 1.0,
+            rates: vec![CreditRate {
+                model: "model".into(),
+                input_per_million: 1.0,
+                output_per_million: 2.0,
+                cache_read_per_million: None,
+                cache_write_per_million: None,
+            }],
+            monthly: None,
+            source_url: None,
+        },
+        Some(vec![CreditBucket {
+            id: "current".into(),
+            kind: CreditBucketKind::Manual,
+            label: "remaining".into(),
+            granted: 100.0,
+            remaining: 35.0,
+            starts_at: now,
+            expires_at: None,
+        }]),
+        now,
+    )
+    .unwrap();
+    let original = crate::db::billing::load_on(&source.db.lock().conn, account)
+        .unwrap()
+        .unwrap();
+    let (mut payload, _, _) = export_payload(&source).unwrap();
+    assert_eq!(payload.version, 10);
+    assert!(
+        payload
+            .credentials
+            .iter()
+            .any(|credential| credential.credit_meter.is_some())
+    );
+    let bundle = encrypt_payload(&payload, "correct horse battery").unwrap();
+    let (target_dir, target) = transfer_state("credit-transfer-target");
+    local_import(&target, "correct horse battery", &bundle).unwrap();
+    let imported = crate::db::billing::load_on(&target.db.lock().conn, account)
+        .unwrap()
+        .unwrap();
+    assert_ne!(original.meter_id, imported.meter_id);
+    assert_eq!(imported.project(now, 0).remaining, 35.0);
+    crate::db::billing::calibrate_on(
+        &target.db.lock().conn,
+        account,
+        &[CreditBalanceCorrection {
+            bucket_id: "current".into(),
+            remaining: 3.0,
+        }],
+        now,
+    )
+    .unwrap();
+    local_import(&target, "correct horse battery", &bundle).unwrap();
+    assert_eq!(
+        crate::db::billing::load_on(&target.db.lock().conn, account)
+            .unwrap()
+            .unwrap()
+            .project(now, 0)
+            .remaining,
+        3.0
+    );
+    payload.version = 9;
+    let invalid_old = encrypt_payload(&payload, "correct horse battery").unwrap();
+    assert!(decrypt_and_validate(&invalid_old, "correct horse battery").is_err());
+    for credential in &mut payload.credentials {
+        credential.credit_meter = None;
+    }
+    let valid_old = encrypt_payload(&payload, "correct horse battery").unwrap();
+    local_import(&target, "correct horse battery", &valid_old).unwrap();
+    assert_eq!(
+        crate::db::billing::load_on(&target.db.lock().conn, account)
+            .unwrap()
+            .unwrap()
+            .project(now, 0)
+            .remaining,
+        3.0
+    );
+    drop(source);
+    drop(target);
+    std::fs::remove_dir_all(source_dir).unwrap();
+    std::fs::remove_dir_all(target_dir).unwrap();
+}
+
 fn sample_account(name: impl Into<String>) -> PortableAccount {
     PortableAccount {
         id: None,
@@ -49,6 +146,7 @@ fn sample_account_graph() -> PortablePayload {
         quota_pools: Vec::new(),
         destinations: Vec::new(),
         credentials: Vec::new(),
+        routing_cards: None,
         node: Some(sample_node(account_id)),
     };
     attach_default_identity_snapshot(&mut payload);
@@ -229,6 +327,7 @@ fn attach_default_destination_snapshot(payload: &mut PortablePayload) {
 
     payload.destinations.clear();
     payload.credentials.clear();
+    payload.routing_cards = None;
     if payload.version < V7_PAYLOAD_VERSION {
         return;
     }
@@ -403,6 +502,37 @@ fn attach_default_destination_snapshot(payload: &mut PortablePayload) {
         }
         payload.credentials.push(portable);
     }
+    attach_default_routing_cards(payload);
+}
+
+fn attach_default_routing_cards(payload: &mut PortablePayload) {
+    use super::portable::{credential_purpose, is_observer_purpose};
+
+    payload.routing_cards = None;
+    if payload.version < V9_PAYLOAD_VERSION {
+        return;
+    }
+    let mut inference: Vec<&PortableCredential> = payload
+        .credentials
+        .iter()
+        .filter(|credential| !is_observer_purpose(credential_purpose(credential)))
+        .collect();
+    inference.sort_by_key(|credential| credential.routing_rank);
+    let mut cards: Vec<crate::dashboard_v4::types::RoutingCard> = Vec::new();
+    for credential in inference {
+        if let Some(last) = cards.last_mut()
+            && last.destination_id == credential.destination_id
+        {
+            last.credential_ids.push(credential.id.clone());
+            continue;
+        }
+        cards.push(crate::dashboard_v4::types::RoutingCard {
+            id: format!("card:{}:{}", credential.destination_id, cards.len()),
+            credential_ids: vec![credential.id.clone()],
+            destination_id: credential.destination_id.clone(),
+        });
+    }
+    payload.routing_cards = Some(cards);
 }
 
 fn strip_identity_snapshot(payload: &mut PortablePayload) {
@@ -516,6 +646,7 @@ fn payload_v1_v2_and_v3_are_rejected_without_a_legacy_offering_parser() {
             quota_pools: Vec::new(),
             destinations: Vec::new(),
             credentials: Vec::new(),
+            routing_cards: None,
             node,
         })
         .unwrap_err();
@@ -553,13 +684,13 @@ fn future_payload_version_is_rejected_as_unsupported_not_wrong_password() {
     use std::fs;
     use std::sync::Arc;
 
-    assert_eq!(PAYLOAD_VERSION, 8);
+    assert_eq!(PAYLOAD_VERSION, 10);
     let mut payload = sample_payload();
     payload.version = PAYLOAD_VERSION + 1;
     let bundle = encrypt_payload(&payload, "correct horse battery").unwrap();
     let error = decrypt_and_validate(&bundle, "correct horse battery").unwrap_err();
     assert!(
-        matches!(error, TransferError::UnsupportedVersion(9)),
+        matches!(error, TransferError::UnsupportedVersion(11)),
         "{error:?}"
     );
     assert!(!matches!(error, TransferError::InvalidBundle));
@@ -578,7 +709,7 @@ fn future_payload_version_is_rejected_as_unsupported_not_wrong_password() {
     assert_eq!(mapped.status, StatusCode::BAD_REQUEST);
     assert_eq!(mapped.body.code, super::super::ERROR_INVALID_REQUEST);
     assert!(
-        mapped.body.message.contains("payload version 9"),
+        mapped.body.message.contains("payload version 11"),
         "{}",
         mapped.body.message
     );
@@ -603,6 +734,7 @@ fn v7_destinations_gain_resolution_defaults_but_v8_requires_the_field() {
 
     let mut v7 = sample_payload();
     v7.version = V7_PAYLOAD_VERSION;
+    v7.routing_cards = None;
     for destination in &mut v7.destinations {
         destination.model_resolution = None;
     }
@@ -624,8 +756,18 @@ fn v7_destinations_gain_resolution_defaults_but_v8_requires_the_field() {
     }));
 
     let mut v8 = sample_payload();
+    v8.version = V8_PAYLOAD_VERSION;
+    v8.routing_cards = None;
     v8.destinations[0].model_resolution = None;
     let error = validate_payload(v8).unwrap_err();
+    assert!(
+        matches!(error, TransferError::Invalid(ref message) if message.contains("modelResolution")),
+        "{error:?}"
+    );
+
+    let mut v9 = sample_payload();
+    v9.destinations[0].model_resolution = None;
+    let error = validate_payload(v9).unwrap_err();
     assert!(
         matches!(error, TransferError::Invalid(ref message) if message.contains("modelResolution")),
         "{error:?}"
@@ -790,6 +932,7 @@ fn dynamic_provider_definitions_are_validated_and_dangling_ids_fail() {
         quota_pools: Vec::new(),
         destinations: Vec::new(),
         credentials: Vec::new(),
+        routing_cards: None,
         node: Some(sample_node(account_id)),
     };
     attach_default_identity_snapshot(&mut payload);
@@ -805,6 +948,7 @@ fn dynamic_provider_definitions_are_validated_and_dangling_ids_fail() {
         quota_pools: Vec::new(),
         destinations: payload.destinations.clone(),
         credentials: payload.credentials.clone(),
+        routing_cards: payload.routing_cards.clone(),
         node: Some(sample_node(account_id)),
     };
     dangling.credentials[0].provider_id = Some("not-a-registered-plan".to_string());
@@ -845,6 +989,7 @@ fn v3_exports_canonical_model_mapping_inside_the_v1_envelope() {
         quota_pools: Vec::new(),
         destinations: Vec::new(),
         credentials: Vec::new(),
+        routing_cards: None,
         node: Some(sample_node(account_id)),
     };
     attach_default_identity_snapshot(&mut payload);
@@ -1260,6 +1405,7 @@ fn v7_export_json_omits_old_account_graph_fields() {
         );
     }
     assert!(object.contains_key("node"));
+    assert!(object.contains_key("routingCards"));
     drop(state);
     fs::remove_dir_all(dir).unwrap();
 }
@@ -1290,6 +1436,7 @@ fn empty_node_import() -> crate::db::NodeImportRecord {
         platform_accounts: Vec::new(),
         platform_links: Vec::new(),
         platform_catalogs: HashMap::new(),
+        destination_controls: Vec::new(),
         accounts: Vec::new(),
         account_order: vec![crate::provider::ZEN_FREE_ACCOUNT_ID.to_string()],
         config_json: serde_json::to_string(&config).unwrap(),
@@ -1572,4 +1719,806 @@ fn v7_empty_only_model_scope_roundtrips_and_rejects_blank_model_ids() {
             "{error:?}"
         );
     }
+}
+
+#[test]
+fn v8_http_controls_and_no_key_credentials_survive_encrypted_validation() {
+    for is_custom in [false, true] {
+        let account_id = "00000000-0000-4000-8000-0000000000cc";
+        let provider_id = "00000000-0000-4000-8000-0000000000dd";
+        let mut account = if is_custom {
+            sample_custom_account()
+        } else {
+            sample_account("HTTP")
+        };
+        account.id = Some(account_id.into());
+        if is_custom {
+            account.model_capabilities = vec![PortableModelCapability::Canonical(
+                PortableModelCapabilityCanonical {
+                    public_model: "public-model".into(),
+                    upstream_model: "upstream-model".into(),
+                    protocol: "chat_completions".into(),
+                },
+            )];
+        }
+        if !is_custom {
+            account.provider_id = provider_id.into();
+        }
+        let mut payload = PortablePayload {
+            version: PAYLOAD_VERSION,
+            exported_at: "2026-08-29T00:00:00Z".into(),
+            accounts: vec![account],
+            dynamic_providers: if is_custom {
+                vec![]
+            } else {
+                vec![sample_dynamic_provider(provider_id, "HTTP")]
+            },
+            identities: vec![],
+            quota_pools: vec![],
+            destinations: vec![],
+            credentials: vec![],
+            routing_cards: None,
+            platform_accounts: vec![],
+            platform_links: vec![],
+            node: Some(sample_node(account_id)),
+        };
+        attach_default_identity_snapshot(&mut payload);
+        attach_default_destination_snapshot(&mut payload);
+        payload.accounts.clear();
+        payload.identities.clear();
+        payload.dynamic_providers.clear();
+        payload.destinations[0].auth_scheme = crate::dashboard_v4::types::AuthSchemeDto::None;
+        payload.destinations[0].enabled = false;
+        payload.destinations[0].catalog[0].enabled = false;
+        payload.destinations[0].catalog[0].protocols.clear();
+        payload.destinations[0].catalog[0].preferred = None;
+        payload.credentials[0].key.clear();
+        payload.credentials[0].has_secret = false;
+        payload.credentials[0].scope = ModelScope::Only { models: vec![] };
+        let bundle = encrypt_payload(&payload, "correct horse battery").unwrap();
+        let validated = decrypt_and_validate(&bundle, "correct horse battery").unwrap();
+        assert!(validated.accounts[0].key.is_empty());
+        let controls = &validated.unified.destination_controls[0];
+        assert!(!controls.enabled);
+        assert!(!controls.catalog[0].enabled);
+        assert!(controls.catalog[0].protocols.is_empty());
+        assert!(controls.catalog[0].preferred.is_none());
+        assert_eq!(
+            validated.unified.credentials[0].scope,
+            ModelScope::Only { models: vec![] }
+        );
+        assert_eq!(
+            validated.accounts[0].credential_kind,
+            crate::provider::CredentialKind::None
+        );
+        let (dir, state) = transfer_state(if is_custom {
+            "custom-noauth-full"
+        } else {
+            "dynamic-noauth-full"
+        });
+        let imported = &validated.accounts[0];
+        let mut account = cpa_account();
+        account.id = account_id.into();
+        account.provider_id = imported.provider_id.clone();
+        account.name = imported.name.clone();
+        account.credential_kind = imported.credential_kind;
+        account.quota_scope = imported.quota_scope;
+        account.enabled = imported.enabled;
+        let mut record = empty_node_import();
+        record.account_order.push(account_id.into());
+        record.accounts.push(crate::db::AccountImportRecord {
+            account,
+            custom_config: imported.custom_config.clone(),
+            capabilities: imported.capabilities.clone(),
+            verification_status: imported.verification_status,
+            connection_verified_at: imported.connection_verified_at,
+            ollama_billing_tier: None,
+        });
+        record.dynamic_providers = validated.unified.dynamic_providers.clone();
+        record.custom_destinations = validated.unified.custom_destinations.clone();
+        record.custom_credential_destinations =
+            validated.unified.custom_credential_destinations.clone();
+        record.destination_controls = validated.unified.destination_controls.clone();
+        record.identity_snapshot = validated.unified.identity_snapshot.clone();
+        for _ in 0..2 {
+            state
+                .db
+                .lock()
+                .import_node_state(&record, |db| state.prepare_imported_node_runtime(db))
+                .unwrap();
+            let db = state.db.lock();
+            let account = db.get_account(account_id).unwrap().unwrap();
+            assert_eq!(
+                account.credential_kind,
+                crate::provider::CredentialKind::None
+            );
+            assert!(account.key_cipher.is_empty());
+            let projection = crate::destination_projection::load_persisted(&db).unwrap();
+            let credential = projection
+                .credentials
+                .iter()
+                .find(|c| c.legacy_account_id == account_id)
+                .unwrap();
+            assert_eq!(credential.scope, ModelScope::Only { models: vec![] });
+            let destination = projection
+                .destinations
+                .iter()
+                .find(|d| d.id == credential.destination_id)
+                .unwrap();
+            assert_eq!(destination.max_credentials, Some(1));
+            assert!(!destination.enabled);
+            assert!(!destination.catalog[0].enabled);
+            assert!(destination.catalog[0].protocols.is_empty());
+        }
+        drop(state);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[test]
+fn v8_package_with_routing_cards_is_rejected() {
+    let mut payload = sample_payload();
+    payload.version = V8_PAYLOAD_VERSION;
+    let error = validate_payload(payload).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            TransferError::Invalid(ref message) if message.contains("routing card semantics")
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn v8_without_routing_cards_still_imports_and_v9_requires_the_field() {
+    let mut v8 = sample_payload();
+    v8.version = V8_PAYLOAD_VERSION;
+    v8.routing_cards = None;
+    validate_payload(v8).unwrap();
+
+    let mut v9 = sample_payload();
+    v9.routing_cards = None;
+    let error = validate_payload(v9).unwrap_err();
+    assert!(
+        matches!(error, TransferError::Invalid(ref message) if message.contains("routingCards")),
+        "{error:?}"
+    );
+}
+
+fn routing_card(
+    id: &str,
+    destination: &str,
+    credentials: &[&str],
+) -> crate::dashboard_v4::types::RoutingCard {
+    crate::dashboard_v4::types::RoutingCard {
+        id: id.into(),
+        destination_id: destination.into(),
+        credential_ids: credentials.iter().map(|id| (*id).to_string()).collect(),
+    }
+}
+
+fn load_cards(state: &crate::state::CoreState) -> Vec<crate::dashboard_v4::types::RoutingCard> {
+    let db = state.db.lock();
+    crate::db::routing_cards::load_on(&db.conn).unwrap()
+}
+
+fn rank_ids(state: &crate::state::CoreState) -> Vec<String> {
+    load_cards(state)
+        .into_iter()
+        .flat_map(|card| card.credential_ids)
+        .collect()
+}
+
+fn save_cards(state: &crate::state::CoreState, cards: &[crate::dashboard_v4::types::RoutingCard]) {
+    let db = state.db.lock();
+    crate::db::routing_cards::save_on(&db.conn, cards).unwrap();
+}
+
+fn credential_for(state: &crate::state::CoreState, account: &str) -> (String, String) {
+    let db = state.db.lock();
+    let projection = crate::destination_projection::load_persisted(&db).unwrap();
+    let row = projection
+        .credentials
+        .iter()
+        .find(|row| row.legacy_account_id == account)
+        .unwrap();
+    (row.id.clone(), row.destination_id.clone())
+}
+
+fn seed_ab_accounts(label: &str) -> (std::path::PathBuf, crate::state::CoreState) {
+    use crate::crypto::{KeyCipher, StaticKeyCipher};
+    use crate::db::Database;
+    use crate::dynamic::DynamicProviderRuntime;
+    use crate::models::{Account, AccountSetupStep, AccountType};
+    use crate::provider::{CredentialKind, ProviderOrigin, QuotaScope, UpstreamProtocolKind};
+    use crate::state::CoreStateInner;
+    use chrono::Utc;
+    use ocg_domain::dynamic::{DynamicAuthKind, DynamicModelMapping};
+    use std::sync::Arc;
+
+    let dir = std::env::temp_dir().join(format!("ocg-transfer-{label}-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let cipher: Arc<dyn KeyCipher + Send + Sync> =
+        Arc::new(StaticKeyCipher::new("v9-routing-cards"));
+    let db = Database::open(dir.clone()).unwrap();
+    let now = Utc::now();
+    for (id, url) in [
+        (
+            "00000000-0000-4000-8000-0000000000aa",
+            "https://a.invalid/v1",
+        ),
+        (
+            "00000000-0000-4000-8000-0000000000bb",
+            "https://b.invalid/v1",
+        ),
+    ] {
+        db.create_dynamic_provider_definition(&DynamicProviderRuntime {
+            preset_id: None,
+            id: id.into(),
+            name: id.into(),
+            endpoint_url: url.into(),
+            upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+            auth_kind: DynamicAuthKind::Bearer,
+            mappings: vec![DynamicModelMapping {
+                public_model: "card-test".into(),
+                upstream_model: format!("{id}-upstream"),
+                upstream_override: None,
+            }],
+            created_at: now,
+            updated_at: now,
+            origin: ProviderOrigin::Custom,
+            offering: "api".into(),
+        })
+        .unwrap();
+    }
+    for (id, provider) in [
+        (
+            "00000000-0000-4000-8000-0000000000a1",
+            "00000000-0000-4000-8000-0000000000aa",
+        ),
+        (
+            "00000000-0000-4000-8000-0000000000a2",
+            "00000000-0000-4000-8000-0000000000aa",
+        ),
+        (
+            "00000000-0000-4000-8000-0000000000b1",
+            "00000000-0000-4000-8000-0000000000bb",
+        ),
+    ] {
+        db.create_account(&Account {
+            id: id.into(),
+            provider_id: provider.into(),
+            credential_kind: CredentialKind::ApiKey,
+            quota_scope: QuotaScope::Key,
+            name: id.into(),
+            username: None,
+            password_cipher: None,
+            key_cipher: cipher.encrypt(&format!("dummy-{id}")).unwrap(),
+            enabled: true,
+            account_type: AccountType::Key,
+            setup_step: AccountSetupStep::Ready,
+            referral_code: None,
+            purchase_date: String::new(),
+            expires_on: String::new(),
+            cooldown_until: None,
+            cooldown_generic_until: None,
+            cooldown_5h_until: None,
+            cooldown_week_until: None,
+            cooldown_month_until: None,
+            cooldown_free_until: None,
+            last_error: None,
+            auth_error: None,
+            notes: None,
+            created_at: now,
+            updated_at: now,
+        })
+        .unwrap();
+    }
+    let state = Arc::new(CoreStateInner::new(db, dir.clone(), cipher).unwrap());
+    (dir, state)
+}
+
+fn layout_covering_snapshot(
+    state: &crate::state::CoreState,
+    desired: Vec<crate::dashboard_v4::types::RoutingCard>,
+) -> Vec<crate::dashboard_v4::types::RoutingCard> {
+    let owned: HashSet<_> = desired
+        .iter()
+        .flat_map(|card| card.credential_ids.iter().cloned())
+        .collect();
+    let mut cards = desired;
+    cards.extend(
+        load_cards(state)
+            .into_iter()
+            .filter(|card| !card.credential_ids.iter().any(|id| owned.contains(id))),
+    );
+    cards
+}
+
+fn import_validated_node(
+    target: &crate::state::CoreState,
+    validated: &ValidatedMigration,
+) -> anyhow::Result<()> {
+    let mut record = empty_node_import();
+    record.account_order = validated.node.account_order.clone();
+    record.destination_controls = validated.unified.destination_controls.clone();
+    record.dynamic_providers = validated.unified.dynamic_providers.clone();
+    record.custom_destinations = validated.unified.custom_destinations.clone();
+    record.custom_credential_destinations =
+        validated.unified.custom_credential_destinations.clone();
+    record.identity_snapshot = validated.unified.identity_snapshot.clone();
+    record.draft_provider_ids = validated.unified.draft_provider_ids.clone();
+    record.zen_free_enabled = validated.node.zen_free.enabled;
+    for account in &validated.accounts {
+        let id = account.id.clone().unwrap();
+        let key_cipher = if account.key.is_empty() {
+            String::new()
+        } else {
+            target.encrypt_key(account.key.as_str())?
+        };
+        record.accounts.push(crate::db::AccountImportRecord {
+            account: crate::models::Account {
+                id,
+                provider_id: account.provider_id.clone(),
+                credential_kind: account.credential_kind,
+                quota_scope: account.quota_scope,
+                name: account.name.clone(),
+                username: account.username.clone(),
+                password_cipher: None,
+                key_cipher,
+                enabled: account.enabled,
+                account_type: account.account_type,
+                setup_step: account.setup_step,
+                referral_code: None,
+                purchase_date: account.purchase_date.clone(),
+                expires_on: account.expires_on.clone(),
+                cooldown_until: account.cooldowns.until,
+                cooldown_generic_until: account.cooldowns.generic,
+                cooldown_5h_until: account.cooldowns.five_hours,
+                cooldown_week_until: account.cooldowns.week,
+                cooldown_month_until: account.cooldowns.month,
+                cooldown_free_until: account.cooldowns.free,
+                last_error: None,
+                auth_error: None,
+                notes: account.notes.clone(),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            },
+            custom_config: account.custom_config.clone(),
+            capabilities: account.capabilities.clone(),
+            verification_status: account.verification_status,
+            connection_verified_at: account.connection_verified_at,
+            ollama_billing_tier: account.ollama_billing_tier,
+        });
+    }
+    let imported = validated.unified.routing_cards.clone();
+    let db = target.db.lock();
+    let preimport = crate::db::routing_cards::load_on(&db.conn)?;
+    db.import_node_state(&record, |db| {
+        if let Some(cards) = imported.as_ref() {
+            restore_imported_routing_cards_on(&db.conn, &preimport, cards)?;
+        }
+        Ok(())
+    })?;
+    Ok(())
+}
+
+fn local_import(
+    state: &crate::state::CoreState,
+    password: &str,
+    bundle: &str,
+) -> Result<AccountImportResult, super::super::V3ApiError> {
+    static IMPORT_TEST_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _serial = IMPORT_TEST_GATE.lock().unwrap();
+    use axum::body::Bytes;
+    use axum::http::HeaderMap;
+
+    state.set_dashboard_local_mode(true);
+    let mut headers = HeaderMap::new();
+    headers.insert("host", "localhost".parse().unwrap());
+    let body = serde_json::to_vec(&serde_json::json!({
+        "expectedRevision": state.settings_revision(),
+        "processGeneration": state.process_generation(),
+        "password": password,
+        "bundle": bundle,
+    }))
+    .unwrap();
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(import_accounts_inner(
+            state.clone(),
+            headers,
+            Bytes::from(body),
+        ))
+        .map(|axum::Json(result)| result)
+}
+
+#[test]
+fn imported_routing_cards_do_not_replace_preexisting_membership() {
+    let preimport = vec![
+        routing_card("current", "dest-a", &["a1", "a2"]),
+        routing_card("empty", "dest-a", &[]),
+    ];
+    let imported = vec![routing_card("imported", "dest-a", &["a2", "a1"])];
+    let merged = proposed_imported_routing_cards(preimport.clone(), &imported, &preimport).unwrap();
+    assert_eq!(merged, preimport);
+}
+
+#[test]
+fn v9_routing_cards_must_cover_inference_credentials_and_known_destinations() {
+    let mut unknown_dest = sample_payload();
+    unknown_dest.routing_cards.as_mut().unwrap()[0].destination_id = "missing-dest".into();
+    let error = validate_payload(unknown_dest).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            TransferError::Invalid(ref message) if message.contains("unknown destination")
+        ),
+        "{error:?}"
+    );
+
+    let mut incomplete = sample_payload();
+    incomplete.routing_cards.as_mut().unwrap()[0]
+        .credential_ids
+        .clear();
+    let error = validate_payload(incomplete).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            TransferError::Invalid(ref message)
+                if message.contains("every inference credential exactly once")
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn v9_routing_cards_contradictory_rank_order_is_rejected() {
+    let provider_id = "00000000-0000-4000-8000-0000000000aa";
+    let first_id = "00000000-0000-4000-8000-0000000000a1";
+    let second_id = "00000000-0000-4000-8000-0000000000a2";
+    let mut first = sample_account("A1");
+    first.id = Some(first_id.into());
+    first.provider_id = provider_id.into();
+    let mut second = sample_account("A2");
+    second.id = Some(second_id.into());
+    second.provider_id = provider_id.into();
+    let mut payload = PortablePayload {
+        platform_accounts: Vec::new(),
+        platform_links: Vec::new(),
+        version: PAYLOAD_VERSION,
+        exported_at: "2026-08-29T00:00:00Z".into(),
+        accounts: vec![first, second],
+        dynamic_providers: vec![sample_dynamic_provider(provider_id, "Lab")],
+        identities: Vec::new(),
+        quota_pools: Vec::new(),
+        destinations: Vec::new(),
+        credentials: Vec::new(),
+        routing_cards: None,
+        node: Some({
+            let mut node = sample_node(first_id);
+            node.account_order.push(second_id.into());
+            node
+        }),
+    };
+    attach_default_identity_snapshot(&mut payload);
+    attach_default_destination_snapshot(&mut payload);
+    payload.accounts.clear();
+    payload.identities.clear();
+    payload.dynamic_providers.clear();
+    payload.routing_cards.as_mut().unwrap()[0]
+        .credential_ids
+        .reverse();
+    let error = validate_payload(payload).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            TransferError::Invalid(ref message) if message.contains("routing_rank")
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn imported_routing_cards_keep_target_only_credentials_and_empty_cards() {
+    let preimport = vec![
+        routing_card("target", "dest-t", &["target-only"]),
+        routing_card("empty", "dest-t", &[]),
+        routing_card("shared", "dest-s", &["shared"]),
+    ];
+    let imported = vec![routing_card(
+        "imported",
+        "dest-s",
+        &["shared", "new-on-source"],
+    )];
+    let post = vec![
+        routing_card("target", "dest-t", &["target-only"]),
+        routing_card("empty", "dest-t", &[]),
+        routing_card("shared", "dest-s", &["shared"]),
+        routing_card("auto", "dest-s", &["new-on-source"]),
+    ];
+    let merged = proposed_imported_routing_cards(preimport, &imported, &post).unwrap();
+    assert_eq!(
+        merged.iter().find(|card| card.id == "target").unwrap(),
+        &routing_card("target", "dest-t", &["target-only"])
+    );
+    assert!(
+        merged
+            .iter()
+            .any(|card| card.id == "empty" && card.credential_ids.is_empty())
+    );
+    assert_eq!(
+        merged.iter().find(|card| card.id == "shared").unwrap(),
+        &routing_card("shared", "dest-s", &["shared"])
+    );
+    assert_eq!(
+        merged.iter().find(|card| card.id == "imported").unwrap(),
+        &routing_card("imported", "dest-s", &["new-on-source"])
+    );
+}
+
+#[test]
+fn imported_routing_card_id_collision_across_destinations_is_rejected() {
+    let preimport = vec![routing_card("same", "dest-a", &["a1"])];
+    let imported = vec![routing_card("same", "dest-b", &["b-new"])];
+    let post = vec![
+        routing_card("same", "dest-a", &["a1"]),
+        routing_card("auto", "dest-b", &["b-new"]),
+    ];
+    let error = proposed_imported_routing_cards(preimport, &imported, &post).unwrap_err();
+    assert!(error.to_string().contains("collides"), "{error}");
+}
+
+#[test]
+fn v9_merge_keeps_preexisting_ranks_and_unrelated_empty_card() {
+    let (source_dir, source) = transfer_state("v9-merge-source");
+    let (target_dir, target) = seed_ab_accounts("v9-merge-target");
+    let (a1, dest_a) = credential_for(&target, "00000000-0000-4000-8000-0000000000a1");
+    let (a2, _) = credential_for(&target, "00000000-0000-4000-8000-0000000000a2");
+    let (b1, dest_b) = credential_for(&target, "00000000-0000-4000-8000-0000000000b1");
+    let empty_id = uuid::Uuid::new_v4().to_string();
+    let desired = vec![
+        routing_card("card-a1", &dest_a, &[a1.as_str()]),
+        routing_card("card-b1", &dest_b, &[b1.as_str()]),
+        routing_card("card-a2", &dest_a, &[a2.as_str()]),
+        routing_card(&empty_id, &dest_a, &[]),
+    ];
+    save_cards(&target, &layout_covering_snapshot(&target, desired));
+    let ranks_before = rank_ids(&target);
+    assert_eq!(
+        ranks_before
+            .iter()
+            .filter(|id| **id == a1 || **id == b1 || **id == a2)
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![a1.clone(), b1.clone(), a2.clone()]
+    );
+
+    let (payload, _, _) = export_payload(&source).unwrap();
+    let bundle = encrypt_payload(&payload, "correct horse battery").unwrap();
+    let validated = decrypt_and_validate(&bundle, "correct horse battery").unwrap();
+    import_validated_node(&target, &validated).unwrap();
+    let restored = load_cards(&target);
+    assert_eq!(
+        rank_ids(&target)
+            .into_iter()
+            .filter(|id| *id == a1 || *id == b1 || *id == a2)
+            .collect::<Vec<_>>(),
+        vec![a1, b1, a2]
+    );
+    assert!(
+        restored
+            .iter()
+            .any(|card| card.id == empty_id && card.credential_ids.is_empty())
+    );
+    drop(source);
+    drop(target);
+    std::fs::remove_dir_all(source_dir).unwrap();
+    std::fs::remove_dir_all(target_dir).unwrap();
+}
+
+#[test]
+fn v9_fresh_import_keeps_source_adjacent_cards_and_empty_after_reopen() {
+    let (source_dir, source) = seed_ab_accounts("v9-adjacent-source");
+    let (a1, dest_a) = credential_for(&source, "00000000-0000-4000-8000-0000000000a1");
+    let (a2, _) = credential_for(&source, "00000000-0000-4000-8000-0000000000a2");
+    let (b1, dest_b) = credential_for(&source, "00000000-0000-4000-8000-0000000000b1");
+    let empty_id = "source-empty-a".to_string();
+    let desired = vec![
+        routing_card("source-a1", &dest_a, &[a1.as_str()]),
+        routing_card(&empty_id, &dest_a, &[]),
+        routing_card("source-a2", &dest_a, &[a2.as_str()]),
+        routing_card("source-b1", &dest_b, &[b1.as_str()]),
+    ];
+    save_cards(&source, &layout_covering_snapshot(&source, desired));
+    let (payload, _, _) = export_payload(&source).unwrap();
+    let exported = payload.routing_cards.clone().unwrap();
+    assert!(
+        exported
+            .iter()
+            .any(|card| card.id == empty_id && card.credential_ids.is_empty())
+    );
+    let bundle = encrypt_payload(&payload, "correct horse battery").unwrap();
+    let validated = decrypt_and_validate(&bundle, "correct horse battery").unwrap();
+
+    let (target_dir, target) = transfer_state("v9-adjacent-target");
+    import_validated_node(&target, &validated).unwrap();
+    let restored = load_cards(&target);
+    let a_cards: Vec<_> = restored
+        .iter()
+        .filter(|card| card.destination_id == dest_a)
+        .map(|card| (card.id.as_str(), card.credential_ids.clone()))
+        .collect();
+    assert!(
+        a_cards.windows(3).any(|window| {
+            window[0] == ("source-a1", vec![a1.clone()])
+                && window[1] == (empty_id.as_str(), Vec::new())
+                && window[2] == ("source-a2", vec![a2.clone()])
+        }),
+        "{a_cards:?}"
+    );
+    assert!(
+        restored
+            .iter()
+            .any(|card| { card.id == "source-b1" && card.credential_ids == [b1.clone()] })
+    );
+
+    drop(target);
+    let reopened = crate::db::Database::open(target_dir.clone()).unwrap();
+    let again = crate::db::routing_cards::load_on(&reopened.conn).unwrap();
+    assert_eq!(again, restored);
+    drop(reopened);
+    drop(source);
+    std::fs::remove_dir_all(source_dir).unwrap();
+    std::fs::remove_dir_all(target_dir).unwrap();
+}
+
+#[test]
+fn v9_repeat_import_does_not_add_extra_cards() {
+    let (source_dir, source) = seed_ab_accounts("v9-repeat-source");
+    let (payload, _, _) = export_payload(&source).unwrap();
+    let bundle = encrypt_payload(&payload, "correct horse battery").unwrap();
+    let validated = decrypt_and_validate(&bundle, "correct horse battery").unwrap();
+    let (target_dir, target) = transfer_state("v9-repeat-target");
+    import_validated_node(&target, &validated).unwrap();
+    let first = load_cards(&target);
+    import_validated_node(&target, &validated).unwrap();
+    assert_eq!(load_cards(&target), first);
+    drop(source);
+    drop(target);
+    std::fs::remove_dir_all(source_dir).unwrap();
+    std::fs::remove_dir_all(target_dir).unwrap();
+}
+
+#[test]
+fn v9_export_import_restores_interleaved_routing_cards_on_fresh_target() {
+    let (source_dir, source) = seed_ab_accounts("v9-cards-source");
+    let (a1, dest_a) = credential_for(&source, "00000000-0000-4000-8000-0000000000a1");
+    let (a2, _) = credential_for(&source, "00000000-0000-4000-8000-0000000000a2");
+    let (b1, dest_b) = credential_for(&source, "00000000-0000-4000-8000-0000000000b1");
+    let desired = vec![
+        routing_card("src-a1", &dest_a, &[a1.as_str()]),
+        routing_card("src-b1", &dest_b, &[b1.as_str()]),
+        routing_card("src-a2", &dest_a, &[a2.as_str()]),
+    ];
+    save_cards(&source, &layout_covering_snapshot(&source, desired));
+    let (payload, _, _) = export_payload(&source).unwrap();
+    assert_eq!(payload.version, 10);
+    let exported = payload.routing_cards.clone().unwrap();
+    assert_eq!(
+        exported
+            .iter()
+            .flat_map(|card| card.credential_ids.iter().cloned())
+            .filter(|id| *id == a1 || *id == b1 || *id == a2)
+            .collect::<Vec<_>>(),
+        vec![a1.clone(), b1.clone(), a2.clone()]
+    );
+    let bundle = encrypt_payload(&payload, "correct horse battery").unwrap();
+    let validated = decrypt_and_validate(&bundle, "correct horse battery").unwrap();
+    assert_eq!(validated.unified.routing_cards.as_ref().unwrap(), &exported);
+
+    let (target_dir, target) = transfer_state("v9-cards-target");
+    import_validated_node(&target, &validated).unwrap();
+    let restored = load_cards(&target);
+    assert!(
+        restored
+            .iter()
+            .any(|card| { card.id == "src-a1" && card.credential_ids == [a1.clone()] })
+    );
+    assert!(
+        restored
+            .iter()
+            .any(|card| { card.id == "src-b1" && card.credential_ids == [b1.clone()] })
+    );
+    assert!(
+        restored
+            .iter()
+            .any(|card| { card.id == "src-a2" && card.credential_ids == [a2.clone()] })
+    );
+    drop(source);
+    drop(target);
+    std::fs::remove_dir_all(source_dir).unwrap();
+    std::fs::remove_dir_all(target_dir).unwrap();
+}
+
+#[test]
+fn v9_import_endpoint_rolls_back_when_routing_card_ids_collide() {
+    let (source_dir, source) = seed_ab_accounts("v9-collide-source");
+    let (a1, dest_a) = credential_for(&source, "00000000-0000-4000-8000-0000000000a1");
+    let (a2, _) = credential_for(&source, "00000000-0000-4000-8000-0000000000a2");
+    let (b1, dest_b) = credential_for(&source, "00000000-0000-4000-8000-0000000000b1");
+    let collision = "collision-card-id";
+    let desired = vec![
+        routing_card(collision, &dest_a, &[a1.as_str()]),
+        routing_card("src-b1", &dest_b, &[b1.as_str()]),
+        routing_card("src-a2", &dest_a, &[a2.as_str()]),
+    ];
+    save_cards(&source, &layout_covering_snapshot(&source, desired));
+    let (payload, _, _) = export_payload(&source).unwrap();
+    let bundle = encrypt_payload(&payload, "correct horse battery").unwrap();
+
+    let (target_dir, target) = transfer_state("v9-collide-target");
+    let before = target
+        .db
+        .lock()
+        .list_accounts()
+        .unwrap()
+        .into_iter()
+        .map(|account| account.id)
+        .collect::<Vec<_>>();
+    let mut target_cards = load_cards(&target);
+    target_cards[0].id = collision.into();
+    save_cards(&target, &target_cards);
+    let error = local_import(&target, "correct horse battery", &bundle).unwrap_err();
+    assert!(
+        error.body.message.contains("collides"),
+        "{}",
+        error.body.message
+    );
+    let after = target
+        .db
+        .lock()
+        .list_accounts()
+        .unwrap()
+        .into_iter()
+        .map(|account| account.id)
+        .collect::<Vec<_>>();
+    assert_eq!(after, before);
+    assert!(
+        after
+            .iter()
+            .all(|id| id != "00000000-0000-4000-8000-0000000000a1")
+    );
+    drop(source);
+    drop(target);
+    std::fs::remove_dir_all(source_dir).unwrap();
+    std::fs::remove_dir_all(target_dir).unwrap();
+}
+
+#[test]
+fn v9_routing_cards_contradictory_node_order_is_rejected() {
+    let (source_dir, source) = seed_ab_accounts("v9-node-order");
+    let (mut payload, _, _) = export_payload(&source).unwrap();
+    payload.node.as_mut().unwrap().account_order.reverse();
+    let error = validate_payload(payload).unwrap_err();
+    assert!(
+        matches!(error, TransferError::Invalid(ref message) if message.contains("account_order")),
+        "{error:?}"
+    );
+    drop(source);
+    std::fs::remove_dir_all(source_dir).unwrap();
+}
+
+#[test]
+fn imported_empty_routing_card_collision_is_rejected() {
+    let preimport = vec![routing_card("same", "dest-a", &[])];
+    let imported = vec![routing_card("same", "dest-b", &[])];
+    let post = vec![
+        routing_card("same", "dest-a", &[]),
+        routing_card("auto", "dest-b", &[]),
+    ];
+    let error = proposed_imported_routing_cards(preimport, &imported, &post).unwrap_err();
+    assert!(error.to_string().contains("collides"), "{error}");
 }

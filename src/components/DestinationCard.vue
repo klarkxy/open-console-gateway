@@ -5,14 +5,21 @@
     :family="family"
     :type-label="typeLabel"
     :subtitle="group.destination.base_url ?? ''"
+    :tone="cardTone"
     :order-handle-disabled="orderHandleDisabled"
     :order-handle-hint="orderHandleHint"
     :dragging="dragging"
     @order-keydown="emit('order-keydown', $event)"
     @order-drag-start="emit('order-drag-start', $event)"
   >
-    <template v-if="parent" #actions>
-      <div class="account-action account-action--secondary">
+    <template v-if="cpaStatusLabel || cardAvailabilityLabel" #tags>
+      <n-tag v-if="cpaStatusLabel" size="small" role="status" :type="cpaStatusType">
+        {{ cpaStatusLabel }}
+      </n-tag>
+      <n-tag v-if="cardAvailabilityLabel" size="small" role="status">{{ cardAvailabilityLabel }}</n-tag>
+    </template>
+    <template #actions>
+      <div v-if="parent || group.destination.max_credentials !== 1" class="account-action account-action--secondary">
         <n-tooltip trigger="hover">
           <template #trigger>
             <n-button
@@ -29,7 +36,7 @@
           {{ t("添加 Key") }}
         </n-tooltip>
       </div>
-      <div class="account-action account-action--tertiary">
+      <div v-if="parent" class="account-action account-action--tertiary">
         <n-tooltip trigger="hover">
           <template #trigger>
             <n-button
@@ -67,19 +74,11 @@
     </template>
 
     <div class="destination-card-body">
-      <AccountFigure
-        v-if="parentBalanceText"
-        :label="t('余额')"
-        :value="parentBalanceText"
-        :caption="parentUsedText"
+      <ApiPriceMeter
+        v-if="walletMeterCells.length > 0"
+        :cells="walletMeterCells"
+        :caption="walletMeterCaption"
       />
-      <n-alert
-        v-if="parent?.snapshot && parent.snapshot.errors.length > 0"
-        type="warning"
-        :show-icon="false"
-      >
-        {{ t("刷新错误") }}: {{ parent.snapshot.errors.join(", ") }}
-      </n-alert>
       <PlatformPriceTable v-if="parent?.snapshot" :snapshot="parent.snapshot" />
 
       <n-alert
@@ -95,10 +94,10 @@
         </div>
       </n-alert>
       <div
-        v-if="parent && group.credentials.length === 0 && pendingLink?.parentId !== parent.id"
+        v-if="cardAvailability === 'no_keys' && (!parent || pendingLink?.parentId !== parent.id)"
         class="destination-hint"
       >
-        {{ t("尚无关联 Key。") }}
+        {{ t(CARD_QUOTA_AVAILABILITY_KEYS.no_keys) }}
       </div>
       <div v-if="group.credentials.length > 0" class="destination-rows">
         <template v-for="(credential, index) in group.credentials" :key="credential.id">
@@ -109,6 +108,8 @@
             :extra-tags="extraTagsFor(credential)"
             :figure="figureFor(credential)"
             :duplicate-name="duplicateNames.has(credential.name.trim())"
+            :hide-model-count="Boolean(parent)"
+            :model-count="modelCountFor(credential)"
           />
         </template>
       </div>
@@ -123,6 +124,7 @@ import {
   NButton,
   NDropdown,
   NIcon,
+  NTag,
   NTooltip,
 } from "naive-ui";
 import { MoreOutlined, PlusOutlined, ReloadOutlined } from "@vicons/antd";
@@ -132,31 +134,52 @@ import type { ProviderCatalogEntry } from "../api/providers.ts";
 import type {
   PlatformAccount,
   PlatformLink,
-  PlatformQuotaKind,
 } from "../api/platform-accounts.ts";
 import { destinationBrandFamily, platformBrandFamily } from "../domain/account-brand.ts";
 import { destinationTypeLabel } from "../domain/account-display.ts";
 import {
+  isSingleAccountGroup,
   overlayAccountForCredential,
   type DestinationGroup,
 } from "../domain/destination-groups.ts";
+import { cpaCardProcessDown, cpaCardStatusTagType, type CpaCardStatus } from "../domain/cpa-runtime.ts";
+import {
+  CARD_QUOTA_AVAILABILITY_KEYS,
+  cardQuotaAvailability,
+  withAccountEnablement,
+} from "../domain/quota-recovery.ts";
 import {
   PLATFORM_KIND_LABELS,
   formatQuotaAmount,
+  platformCredentialTags,
   platformKeyGroupLabel,
   platformKeyQuotaName,
   platformModelOverlay,
+  platformWalletMeter,
   primaryQuota,
+  uniquePublicModelCount,
 } from "../domain/platform-accounts.ts";
+import {
+  PAY_GO_METER_EMPTY,
+  PAY_GO_METER_LABEL_KEYS,
+  formatPayGoObservedAt,
+} from "../domain/pay-go-meter.ts";
 import { locale, t } from "../i18n/index.ts";
-import { accountTypeLabelText } from "../views/account-status-text.ts";
-import AccountCardFrame from "./AccountCardFrame.vue";
-import AccountFigure from "./AccountFigure.vue";
+import {
+  accountTypeLabelText,
+  cardQuotaAvailabilityText,
+  cpaCardStatusText,
+  platformCredentialTagText,
+} from "../views/account-status-text.ts";
+import AccountCardFrame, { type AccountCardTone } from "./AccountCardFrame.vue";
+import ApiPriceMeter, { type ApiPriceMeterCell } from "./ApiPriceMeter.vue";
 import type { CredentialFigure } from "./CredentialBody.vue";
 import PlatformPriceTable from "./PlatformPriceTable.vue";
 
 const props = defineProps<{
   group: DestinationGroup;
+  /** Saved Keys on this card, unfiltered. */
+  membership: readonly DestinationCredential[];
   parent: PlatformAccount | null;
   accountsById: ReadonlyMap<string, Account>;
   catalog: readonly ProviderCatalogEntry[] | null;
@@ -169,6 +192,9 @@ const props = defineProps<{
   orderHandleHint?: string;
   dragging: boolean;
   now: number;
+  arrangingDisabled?: boolean;
+  canRemoveEmptyCard?: boolean;
+  cpaStatus?: CpaCardStatus | null;
 }>();
 
 const emit = defineEmits<{
@@ -178,6 +204,8 @@ const emit = defineEmits<{
   edit: [];
   delete: [];
   "add-key": [];
+  "add-card": [];
+  "remove-empty-card": [];
   "import-keys": [];
   "link-existing": [];
   "retry-pending-link": [];
@@ -202,6 +230,35 @@ const typeLabel = computed(() => {
   if (props.parent) return PLATFORM_KIND_LABELS[props.parent.kind];
   return accountTypeLabelText(destinationTypeLabel(props.group.destination));
 });
+const membershipGroup = computed((): DestinationGroup => ({
+  ...props.group,
+  credentials: [...props.membership],
+}));
+const availabilityMembership = computed(() => (
+  props.membership.map((credential) => withAccountEnablement(
+    credential,
+    overlayAccountForCredential(credential, props.accountsById)?.enabled,
+  ))
+));
+const cardAvailability = computed(() => (
+  cardQuotaAvailability(availabilityMembership.value, props.group.destination, props.now)
+));
+const cardTone = computed<AccountCardTone>(() => {
+  if (cpaCardProcessDown(props.cpaStatus)) return "unavailable";
+  return cardAvailability.value === "available" ? null : "unavailable";
+});
+const cardAvailabilityLabel = computed(() => {
+  const kind = cardAvailability.value;
+  if (kind === "available" || kind === "no_keys") return "";
+  if (isSingleAccountGroup(membershipGroup.value)) return "";
+  return cardQuotaAvailabilityText(kind);
+});
+const cpaStatusLabel = computed(() => (
+  props.cpaStatus ? cpaCardStatusText(props.cpaStatus) : ""
+));
+const cpaStatusType = computed(() => (
+  props.cpaStatus ? cpaCardStatusTagType(props.cpaStatus) : "default"
+));
 const refreshingParent = computed(() => (
   props.parent ? Boolean(props.refreshing[props.parent.id]) : false
 ));
@@ -217,8 +274,13 @@ const duplicateNames = computed(() => {
 });
 
 const parentMenuOptions = computed(() => {
-  if (!props.parent) return [];
+  const arrangement = [
+    { label: t("再建一张卡片"), key: "add-card", disabled: props.arrangingDisabled },
+    ...(props.canRemoveEmptyCard ? [{ label: t("删除空卡片"), key: "remove-empty-card", disabled: props.arrangingDisabled }] : []),
+  ];
+  if (!props.parent) return arrangement;
   return [
+    ...arrangement,
     { label: t("获取全部模型"), key: "fetch-all-models", disabled: props.mutating || props.group.credentials.length === 0 },
     ...(props.parent.kind === "new_api"
       ? [{
@@ -230,16 +292,23 @@ const parentMenuOptions = computed(() => {
     { label: t("关联已有 Key"), key: "link-existing", disabled: props.mutating },
     { label: t("编辑"), key: "edit", disabled: props.mutating },
     {
-      label: props.group.credentials.length > 0
-        ? t("已关联 {count} 个 Key，先取消关联后再删除", { count: props.group.credentials.length })
+      label: props.links.length > 0
+        ? t("已关联 {count} 个 Key，先取消关联后再删除", { count: props.links.length })
         : t("删除"),
       key: "delete",
-      disabled: props.mutating || props.group.credentials.length > 0,
+      disabled: props.mutating || props.links.length > 0,
     },
   ];
 });
 
 function handleParentMenuSelect(key: string | number) {
+  if (key === "add-card" || key === "remove-empty-card") {
+    if (!props.arrangingDisabled) {
+      if (key === "add-card") emit("add-card");
+      else emit("remove-empty-card");
+    }
+    return;
+  }
   if (key === "fetch-all-models") emit("fetch-all-models");
   else if (key === "import-keys") emit("import-keys");
   else if (key === "link-existing") emit("link-existing");
@@ -265,13 +334,6 @@ function keyTokenName(credential: DestinationCredential): string {
   return platformKeyQuotaName(linkOf(credential)?.snapshot) ?? "";
 }
 
-function showsTokenName(credential: DestinationCredential): boolean {
-  const tokenName = keyTokenName(credential);
-  const overlayAccount = overlayAccountForCredential(credential, props.accountsById);
-  const name = overlayAccount?.name.trim() || credential.name.trim();
-  return tokenName !== "" && tokenName !== name;
-}
-
 function linkOf(credential: DestinationCredential): PlatformLink | undefined {
   const accountId = overlayId(credential);
   return props.links.find((link) => (
@@ -279,34 +341,51 @@ function linkOf(credential: DestinationCredential): PlatformLink | undefined {
   ));
 }
 
-function remainingText(kind: PlatformQuotaKind): string {
-  if (!props.parent) return "";
-  const quota = primaryQuota(props.parent.snapshot?.quotas ?? [], kind);
-  if (!quota) return "";
-  if (quota.unlimited) return t("不限");
-  if (quota.remaining === null) return "";
-  return formatQuotaAmount(quota.remaining, quota.unit, locale.value);
-}
-
-const parentBalanceText = computed(() => remainingText("wallet"));
-const parentUsedText = computed(() => {
-  if (!props.parent) return "";
-  const quota = primaryQuota(props.parent.snapshot?.quotas ?? [], "wallet");
-  if (!quota || quota.unlimited || quota.used === null) return "";
-  return t("已用 {value}", { value: formatQuotaAmount(quota.used, quota.unit, locale.value) });
+const walletMeter = computed(() => platformWalletMeter(props.parent?.snapshot));
+const walletMeterCaption = computed(() => {
+  const observedAt = walletMeter.value?.observedAt;
+  return observedAt ? formatPayGoObservedAt(observedAt, locale.value) : "";
+});
+const walletMeterCells = computed<ApiPriceMeterCell[]>(() => {
+  const meter = walletMeter.value;
+  if (!meter) return [];
+  const money = (value: number) => formatQuotaAmount(value, meter.unit, locale.value);
+  return [
+    {
+      key: "remaining",
+      label: t(PAY_GO_METER_LABEL_KEYS.remaining),
+      value: meter.remainingUnlimited
+        ? t("不限")
+        : meter.remaining == null ? PAY_GO_METER_EMPTY : money(meter.remaining),
+    },
+    {
+      key: "month",
+      label: t(PAY_GO_METER_LABEL_KEYS.month),
+      value: meter.monthUsed == null ? PAY_GO_METER_EMPTY : money(meter.monthUsed),
+    },
+    {
+      key: "history",
+      label: t(PAY_GO_METER_LABEL_KEYS.history),
+      value: meter.historyUsed == null ? PAY_GO_METER_EMPTY : money(meter.historyUsed),
+    },
+  ];
 });
 
 function extraTagsFor(credential: DestinationCredential): string[] {
   if (!props.parent) return [];
-  const tags: string[] = [];
-  const group = keyGroup(credential);
-  if (group) tags.push(group);
-  if (showsTokenName(credential)) tags.push(keyTokenName(credential));
   const overlayAccount = overlayAccountForCredential(credential, props.accountsById);
-  tags.push(t("{count} 个模型", {
-    count: keySummary(credential)?.total ?? overlayAccount?.model_capabilities.length ?? 0,
-  }));
-  return tags;
+  return platformCredentialTags({
+    group: keyGroup(credential),
+    tokenName: keyTokenName(credential),
+    accountName: overlayAccount?.name.trim() || credential.name.trim(),
+    modelCount: modelCountFor(credential) ?? 0,
+  }).filter((tag) => tag.kind !== "models").map(platformCredentialTagText);
+}
+
+function modelCountFor(credential: DestinationCredential): number | null {
+  if (!props.parent) return null;
+  const overlayAccount = overlayAccountForCredential(credential, props.accountsById);
+  return keySummary(credential)?.total ?? uniquePublicModelCount(overlayAccount);
 }
 
 function figureFor(credential: DestinationCredential): CredentialFigure | null {

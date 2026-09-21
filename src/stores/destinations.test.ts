@@ -140,33 +140,15 @@ function credListBody(
   };
 }
 
-function resolvePair(
-  calls: DeferredCall[],
-  start: number,
-  destId: string,
-  accountId: string,
-  revision: number,
-): void {
-  const slice = calls.slice(start, start + 2);
-  const dest = slice.find((call) => call.url.endsWith("/destinations"));
-  const cred = slice.find((call) => call.url.endsWith("/credentials"));
-  assert.ok(dest && cred, "expected destination and credential fetches");
-  dest.resolve(destListBody(destId, accountId, revision));
-  cred.resolve(credListBody(destId, accountId, revision));
+function resolvePair(calls: DeferredCall[], start: number, destId: string, accountId: string, revision: number): void {
+  resolvePairWith(calls, start, destListBody(destId, accountId, revision), credListBody(destId, accountId, revision));
 }
-
-function resolvePairWith(
-  calls: DeferredCall[],
-  start: number,
-  destBody: object,
-  credBody: object,
-): void {
-  const slice = calls.slice(start, start + 2);
-  const dest = slice.find((call) => call.url.endsWith("/destinations"));
-  const cred = slice.find((call) => call.url.endsWith("/credentials"));
-  assert.ok(dest && cred, "expected destination and credential fetches");
-  dest.resolve(destBody);
-  cred.resolve(credBody);
+function resolvePairWith(calls: DeferredCall[], start: number, destBody: object, credBody: object): void {
+  const dest = destBody as { destinations: DestinationDto[]; revision: object };
+  const cred = credBody as { credentials: DestinationCredentialDto[] };
+  assert.ok(calls[start].url.endsWith("/routing/cards"));
+  calls[start].resolve({ ...dest, ...cred, cards: dest.destinations.map(row => ({ id: `card-${row.id}`, destinationId: row.id,
+    credentialIds: cred.credentials.filter(c => c.destinationId === row.id && c.id !== row.observerCredentialId).map(c => c.id) })) });
 }
 
 test("destinations store: a stale slower load does not clobber a newer one", async () => {
@@ -177,9 +159,9 @@ test("destinations store: a stale slower load does not clobber a newer one", asy
 
   const first = store.load();
   const second = store.load();
-  await waitForCalls(calls, 4);
+  await waitForCalls(calls, 2);
 
-  resolvePair(calls, 2, "dest-b", "acc-b", 8);
+  resolvePair(calls, 1, "dest-b", "acc-b", 8);
   await second;
   assert.equal(store.destinations[0]?.id, "dest-b");
   assert.equal(store.credentialsByLegacyAccountId.get("acc-b")?.destination_id, "dest-b");
@@ -201,17 +183,15 @@ test("destinations store: a 409 refusal populates refusals and keeps the previou
   const store = useDestinationsStore();
 
   const first = store.load();
-  await waitForCalls(calls, 2);
+  await waitForCalls(calls, 1);
   resolvePair(calls, 0, "dest-ok", "acc-ok", 4);
   await first;
   assert.equal(store.destinations[0]?.id, "dest-ok");
   assert.equal(store.credentials.length, 1);
 
   const second = store.load();
-  await waitForCalls(calls, 4);
-  const dest = calls.slice(2).find((call) => call.url.endsWith("/destinations"));
-  const cred = calls.slice(2).find((call) => call.url.endsWith("/credentials"));
-  assert.ok(dest && cred);
+  await waitForCalls(calls, 2);
+  const dest = calls[1];
   dest.resolve({
     code: "destinationProjectionRefused",
     message: "projection refused",
@@ -223,7 +203,6 @@ test("destinations store: a 409 refusal populates refusals and keeps the previou
       detail: "missing custom_config",
     }],
   }, 409);
-  cred.resolve(credListBody("dest-ok", "acc-ok", 5));
 
   await assert.rejects(second, (error: unknown) => {
     assert.ok(error instanceof DashboardRequestError);
@@ -246,33 +225,6 @@ test("destinations store: a 409 refusal populates refusals and keeps the previou
   });
 });
 
-test("destinations store: mismatched snapshot revisions retry until they agree", async () => {
-  setActivePinia(createPinia());
-  useControlPlaneStore();
-  const calls = installDeferredFetch();
-  const store = useDestinationsStore();
-
-  const pending = store.load();
-  await waitForCalls(calls, 2);
-  const firstDest = calls.slice(0, 2).find((call) => call.url.endsWith("/destinations"));
-  const firstCred = calls.slice(0, 2).find((call) => call.url.endsWith("/credentials"));
-  assert.ok(firstDest && firstCred);
-  firstDest.resolve(destListBody("dest-old", "acc-old", 4));
-  firstCred.resolve(credListBody("dest-new", "acc-new", 5));
-
-  await waitForCalls(calls, 4);
-  assert.equal(store.loaded, false);
-  assert.equal(store.destinations.length, 0);
-  resolvePair(calls, 2, "dest-ok", "acc-ok", 5);
-  await pending;
-
-  assert.equal(store.destinations[0]?.id, "dest-ok");
-  assert.equal(store.credentials[0]?.legacy_account_id, "acc-ok");
-  assert.deepEqual(store.expectation, { expectedRevision: 5, processGeneration: 99 });
-  assert.equal(store.loaded, true);
-  assert.equal(store.loading, false);
-});
-
 test("destinations store: clear() empties state and loaded is false", async () => {
   setActivePinia(createPinia());
   useControlPlaneStore();
@@ -280,7 +232,7 @@ test("destinations store: clear() empties state and loaded is false", async () =
   const store = useDestinationsStore();
 
   const pending = store.load();
-  await waitForCalls(calls, 2);
+  await waitForCalls(calls, 1);
   resolvePair(calls, 0, "dest-ok", "acc-ok", 3);
   await pending;
   assert.equal(store.loaded, true);
@@ -305,9 +257,8 @@ test("destinations store: first ordinary load failure records error and loaded s
   const store = useDestinationsStore();
 
   const pending = store.load();
-  await waitForCalls(calls, 2);
+  await waitForCalls(calls, 1);
   calls[0]!.reject(new Error("network down"));
-  calls[1]!.reject(new Error("network down"));
   await assert.rejects(pending, /network down/);
 
   assert.equal(store.loaded, false);
@@ -324,16 +275,15 @@ test("destinations store: revalidation ordinary failure keeps the successful sna
   const store = useDestinationsStore();
 
   const first = store.load();
-  await waitForCalls(calls, 2);
+  await waitForCalls(calls, 1);
   resolvePair(calls, 0, "dest-ok", "acc-ok", 4);
   await first;
   assert.equal(store.loaded, true);
   assert.equal(store.destinations[0]?.name, "dest-ok");
 
   const second = store.load();
-  await waitForCalls(calls, 4);
-  calls[2]!.reject(new Error("revalidation failed"));
-  calls[3]!.reject(new Error("revalidation failed"));
+  await waitForCalls(calls, 2);
+  calls[1]!.reject(new Error("revalidation failed"));
   await assert.rejects(second, /revalidation failed/);
 
   assert.equal(store.loaded, true);
@@ -349,7 +299,7 @@ test("destinations store: refreshAfterMutation updates credential name after a r
   const store = useDestinationsStore();
 
   const first = store.load();
-  await waitForCalls(calls, 2);
+  await waitForCalls(calls, 1);
   resolvePairWith(
     calls,
     0,
@@ -360,10 +310,10 @@ test("destinations store: refreshAfterMutation updates credential name after a r
   assert.equal(store.credentials[0]?.name, "Old Name");
 
   const refreshed = store.refreshAfterMutation();
-  await waitForCalls(calls, 4);
+  await waitForCalls(calls, 2);
   resolvePairWith(
     calls,
-    2,
+    1,
     destListBody("dest-go", "acc-go", 5, { name: "Renamed" }),
     credListBody("dest-go", "acc-go", 5, "Renamed"),
   );
@@ -379,7 +329,7 @@ test("destinations store: refreshAfterMutation updates custom endpoint and name"
   const store = useDestinationsStore();
 
   const first = store.load();
-  await waitForCalls(calls, 2);
+  await waitForCalls(calls, 1);
   resolvePairWith(
     calls,
     0,
@@ -393,10 +343,10 @@ test("destinations store: refreshAfterMutation updates custom endpoint and name"
   assert.equal(store.destinations[0]?.base_url, "https://old.example/v1");
 
   const refreshed = store.refreshAfterMutation();
-  await waitForCalls(calls, 4);
+  await waitForCalls(calls, 2);
   resolvePairWith(
     calls,
-    2,
+    1,
     destListBody("dest-custom", "acc-custom", 5, {
       name: "Custom Lab",
       baseUrl: "https://new.example/v1",
@@ -416,7 +366,7 @@ test("destinations store: refreshAfterMutation adds a newly created platform des
   const store = useDestinationsStore();
 
   const first = store.load();
-  await waitForCalls(calls, 2);
+  await waitForCalls(calls, 1);
   resolvePairWith(
     calls,
     0,
@@ -433,10 +383,10 @@ test("destinations store: refreshAfterMutation adds a newly created platform des
   assert.equal(store.destinations.length, 0);
 
   const refreshed = store.refreshAfterMutation();
-  await waitForCalls(calls, 4);
+  await waitForCalls(calls, 2);
   resolvePairWith(
     calls,
-    2,
+    1,
     destListBody("dest-plat", "plat-1", 5, {
       name: "Site",
       baseUrl: "https://newapi.example",
@@ -453,4 +403,13 @@ test("destinations store: refreshAfterMutation adds a newly created platform des
   assert.equal(store.destinations[0]?.legacy.kind, "platform_parent");
   assert.equal(store.destinations[0]?.name, "Site");
   assert.equal(store.byId.has("dest-plat"), true);
+});
+
+
+test("destination cards and pending loads are cleared on logout", async () => {
+  setActivePinia(createPinia()); useControlPlaneStore();
+  const calls = installDeferredFetch(); const store = useDestinationsStore();
+  const pending = store.load(); await waitForCalls(calls, 1); store.clear();
+  resolvePair(calls, 0, "old-dest", "old-account", 2); await pending;
+  assert.equal(store.loaded, false); assert.deepEqual(store.cards, []); assert.deepEqual(store.destinations, []);
 });

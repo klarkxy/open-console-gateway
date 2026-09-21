@@ -441,7 +441,7 @@ async fn cpa_v4_get_stays_secret_free() {
 #[tokio::test]
 async fn destinations_and_credentials_require_a_session() {
     let harness = start_public("v4-dest-session").await;
-    for path in ["/destinations", "/credentials"] {
+    for path in ["/destinations", "/credentials", "/routing/cards"] {
         let response = harness
             .client
             .get(format!("{}{path}", v4_base(&harness)))
@@ -494,7 +494,7 @@ async fn refused_projection_returns_structured_409() {
     .unwrap();
     drop(conn);
 
-    for path in ["/destinations", "/credentials"] {
+    for path in ["/destinations", "/credentials", "/routing/cards"] {
         let (status, body, _) = send_v4(&harness, Method::GET, path, &Value::Null).await;
         assert_eq!(status, StatusCode::CONFLICT, "{path} {body}");
         assert_eq!(
@@ -611,7 +611,7 @@ async fn v4_list_after_custom_create_matches_persisted_shadow() {
 }
 
 #[tokio::test]
-async fn populated_shadow_is_v4_read_model_until_emptied() {
+async fn persisted_v4_read_model_remains_authoritative_when_empty() {
     let harness = start_loopback("v4-dest-shadow-stale").await;
     let (status, custom) = send_v3(
         &harness,
@@ -680,7 +680,7 @@ async fn populated_shadow_is_v4_read_model_until_emptied() {
         )
         .unwrap();
     }
-    let (live, stored) = live_and_persisted(&harness);
+    let (_live, stored) = live_and_persisted(&harness);
     assert!(stored.destinations.is_empty());
     assert!(stored.credentials.is_empty());
     let (status, destinations, _) =
@@ -689,6 +689,6 @@ async fn populated_shadow_is_v4_read_model_until_emptied() {
     let (status, credentials, _) =
         send_v4(&harness, Method::GET, "/credentials", &Value::Null).await;
     assert_eq!(status, StatusCode::OK, "{credentials}");
-    assert_v4_lists_match_projection(&destinations, &credentials, &live);
+    assert_v4_lists_match_projection(&destinations, &credentials, &stored);
     harness.stop();
 }

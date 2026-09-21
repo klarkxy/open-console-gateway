@@ -8,6 +8,7 @@ import type {
   RuntimeOnlyUncertainty,
 } from "../api/destinations.ts";
 import type { MessageKey } from "../i18n/index.ts";
+import { QUOTA_RECOVERY_STATUS_KEYS } from "./quota-recovery.ts";
 
 /**
  * Presentation mapping for the read-only `GET /routing/explain` prediction.
@@ -53,6 +54,9 @@ export const ROUTING_EXCLUSION_KEYS = {
   auth_error: "鉴权失败",
   cooling_down: "冷却中",
   free_channel_unavailable: "Free 通道不可用",
+  quota_waiting: QUOTA_RECOVERY_STATUS_KEYS.waiting,
+  quota_due: QUOTA_RECOVERY_STATUS_KEYS.ready,
+  quota_probing: QUOTA_RECOVERY_STATUS_KEYS.probing,
 } as const satisfies Record<RoutingExclusionCode, MessageKey>;
 
 export const ROUTING_UNCERTAINTY_KEYS = {

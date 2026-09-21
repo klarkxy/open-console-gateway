@@ -52,7 +52,7 @@ managed-signup **invite URL** here. It is a user-owned `opencode.ai` /
 ship a demo default; replace it with your own link before a real signup.
 Creating a managed draft can also edit and write this value back. Configurable
 HTTP connection settings are edited here; **Accounts** edits only the attached
-credentials and their routing bindings. User-defined Providers are unpriced.
+credentials and their routing bindings. User-defined Providers stay unpriced until an official preset or a per-account credit configuration supplies the rates.
 
 **Aliases** is a separate core page because its table spans every
 currently enabled account instead of the selected Provider. It lists only
@@ -135,8 +135,10 @@ removes the Provider namespace and reuses an existing code-owned Alias; known
 plan suffixes are removed only when the shorter name is already authorized.
 For example, `nvidia/nemotron-3-ultra-550b-a55b` uses Alias
 `nemotron-3-ultra`. Saved CN rows activate only their exact sealed map.
-Unmatched Command/MiniMax/Kimi rows remain exact raw model IDs and are not advertised as
-new Aliases; CN mappings keep the upstream ID's exact spelling. A Zen Free row
+Command ids that contain `/` publish a unique last-segment lowercase kebab Alias
+(for example `google/gemini-3.5-flash` → `gemini-3.5-flash`). Slash-free unmatched
+Command rows and unmatched MiniMax/Kimi rows remain exact raw model IDs and are
+not advertised as new Aliases; CN mappings keep the upstream ID's exact spelling. A Zen Free row
 publishes its suffix-stripped Alias from the official `-free` suffix;
 the original `-free` ID remains an exact raw pin,
 as described under
@@ -181,16 +183,16 @@ refreshes those Plans only. Refresh stays manual:
   multiplier can be edited and saved. The saved provider revision prices later
   requests; missing or ambiguous rows stay unpriced. A refresh asks before
   replacing edited multipliers. This remains separate from OpenCode Go. GOAT
-  account cards can explicitly calibrate the `$14 / $35 / $70` windows from
-  Command Code's first-party `/alpha/billing/credits` account endpoint. The
-  official CLI uses this endpoint, although the public Provider API does not
-  document it. Priced OCG logs continue accumulating between snapshots, and
-  manual baseline correction remains available. There is no automatic GOAT
-  usage sync.
+  account cards can explicitly **Refresh quota** to read the `$14 / $35 / $70`
+  windows from Command Code's first-party `/alpha/billing/credits` account
+  endpoint; that action also refreshes the GOAT model catalog. The official CLI uses this endpoint, although the public Provider
+  API does not document it. Priced OCG logs continue accumulating between
+  snapshots. The official snapshot is the baseline, and the timed windows can
+  be calibrated by hand afterwards. There is no automatic GOAT usage sync.
 - Zen Free is unpriced (egress-IP-shared free quota).
-- Custom API is unpriced: successful forwards log `cost_state=unknown` with
-  no quota debit. There is no official usage window. Known-host current-balance
-  reads (DeepSeek / Moonshot) are display-only.
+- Custom API keeps USD cost unknown: successful forwards log `cost_state=unknown` with
+  no quota debit. Configured credit meters record native credits separately. There is no generic official usage window. Known-host current-balance
+  reads (DeepSeek / Moonshot / StepFun API) are display-only.
 - Ollama Cloud refreshes the public keyless directory `https://ollama.com/v1/models` without selecting an account. Discovered ids enable Chat Completions immediately; Responses and Messages are unsupported, and there is no protocol-probe entry. A refreshed catalog may append one routeable Ollama mapping to a Go-owned alias only when stripping the `:` tag leaves exactly one catalog match. Date-tagged snapshot ids come from the runtime catalog. Manual pricing refresh reads `https://ollama.com/pricing` (Model / Input / Cached input / Output) into the provider snapshot with quota multiplier `1.0`. New accounts require Pro/Max/Team plus a purchase date. Account cards estimate one monthly USD-Credits window from official per-request usage against that tier; used credit may exceed the soft limit, the bar clamps at 100%, and the meter never writes cooldown or changes routing. Existing accounts with no billing row stay routeable without a meter.
 - MiniMax CN and Kimi Code CN are unpriced in OCG, but their account cards can
   manually read the official subscription windows (`/token_plan/remains` and

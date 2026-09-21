@@ -60,7 +60,7 @@
                   :class="{ 'proxy-model-free': isZenFreeModel(model.id) }"
                 >
                   <n-checkbox
-                    :checked="config.proxy_list_models.includes(model.id)"
+                    :checked="config.proxy_list_models.some((id) => proxyModelKey(id) === proxyModelKey(model.id))"
                     :disabled="!loaded || saving || testingProxy"
                     @update:checked="(checked: boolean) => toggleProxyListModel(model.id, checked)"
                   >
@@ -469,7 +469,7 @@ import {
 } from "./dashboard-connection";
 import { DEFAULT_OPENCODE_INVITE_URL } from "../domain/managed-account.ts";
 import { mergeUnsavedSettings } from "./settings-merge";
-import { normalizeProxyUrl, validateProxyList } from "./settings-proxy";
+import { normalizeProxyUrl, proxyModelKey, validateProxyList } from "./settings-proxy";
 import {
   clearUpdateTarget,
   decideInstallRequestFailure,
@@ -599,7 +599,7 @@ const proxySupportedIds = computed(() =>
 /** Stored ids the current registry no longer knows; inert and dropped on save. */
 const proxyUnknownModels = computed(() => (
   config.value.proxy_mode === "list"
-    ? config.value.proxy_list_models.filter((id) => !proxySupportedIds.value.includes(id))
+    ? config.value.proxy_list_models.filter((id) => !proxySupportedIds.value.some((known) => proxyModelKey(known) === proxyModelKey(id)))
     : []
 ));
 
@@ -607,7 +607,7 @@ const proxyUnknownModels = computed(() => (
  * ids may end in `-free` without being on the free channel, so the hint must
  * follow the registry flag, not the suffix. */
 function isZenFreeModel(id: string): boolean {
-  return config.value.proxy_supported_models.some((model) => model.id === id && model.zen_free);
+  return config.value.proxy_supported_models.some((model) => proxyModelKey(model.id) === proxyModelKey(id) && model.zen_free);
 }
 
 function protocolLabel(protocol: string): string {
@@ -618,13 +618,9 @@ function protocolLabel(protocol: string): string {
 }
 
 function toggleProxyListModel(id: string, checked: boolean) {
-  const models = new Set(config.value.proxy_list_models);
-  if (checked) {
-    models.add(id);
-  } else {
-    models.delete(id);
-  }
-  config.value.proxy_list_models = [...models];
+  const models = config.value.proxy_list_models.filter((model) => proxyModelKey(model) !== proxyModelKey(id));
+  if (checked) models.push(id);
+  config.value.proxy_list_models = models;
 }
 
 const proxyUrlPreview = computed<{ status?: "error"; feedback: string }>(() => {
@@ -840,7 +836,7 @@ function normalizeProxyListInput(): boolean {
   const supported = proxySupportedIds.value;
   const knownOnly = config.value.proxy_list_models
     .map((id) => id.trim())
-    .filter((id) => supported.includes(id));
+    .filter((id) => supported.some((known) => proxyModelKey(known) === proxyModelKey(id)));
   try {
     config.value.proxy_list_models = validateProxyList(config.value.proxy_mode, knownOnly, supported);
     return true;

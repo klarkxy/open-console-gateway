@@ -12,6 +12,7 @@
 //! the explicit official-API balance/price refreshes.
 
 mod applications;
+mod billing;
 mod bindings;
 mod catalog;
 mod connections;
@@ -24,6 +25,7 @@ mod onboarding;
 mod platform_keys;
 mod publication;
 mod routing;
+mod routing_cards;
 mod templates;
 pub(crate) mod types;
 
@@ -42,7 +44,8 @@ pub use types::{
     DshApplicationStatus, IdentityList, IdentitySummary, OnboardingAuthorization,
     OnboardingCommitRequest, OnboardingCommitResult, OnboardingConnection, OnboardingTarget,
     PlatformKeyImportFailure, PlatformKeyImportRequest, PlatformKeyImportResult, ProviderTemplate,
-    RoutingExplanation, TemplateList, contract_schema, contract_schema_pretty,
+    RoutingCard, RoutingCardList, RoutingCardUpdate, RoutingExplanation, TemplateList,
+    contract_schema, contract_schema_pretty,
 };
 
 pub fn api_router(state: CoreState) -> Router<CoreState> {
@@ -58,6 +61,19 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
         )
         .route("/credentials", get(destinations::list_credentials))
         .route("/accounts/{id}/official-api", get(official_api::get_status))
+        .route("/accounts/{id}/billing", get(billing::get_status))
+        .route(
+            "/accounts/{id}/billing/credits",
+            axum::routing::put(billing::configure).delete(billing::disable),
+        )
+        .route(
+            "/accounts/{id}/billing/credits/calibrate",
+            post(billing::calibrate),
+        )
+        .route(
+            "/accounts/{id}/billing/credits/grants",
+            post(billing::grant),
+        )
         .route(
             "/accounts/{id}/official-api/balance",
             post(official_api::refresh_balance),
@@ -76,6 +92,10 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
             post(platform_keys::import_keys),
         )
         .route("/credentials/{id}/rotate", post(credentials::rotate))
+        .route(
+            "/credentials/{id}/quota-retry",
+            post(credentials::quota_retry),
+        )
         .route("/bindings/{id}", patch(bindings::patch))
         .route(
             "/identities/{id}/credentials",
@@ -91,6 +111,10 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
             get(publication::get_publication).patch(publication::patch_publication),
         )
         .route("/routing/explain", get(routing::explain))
+        .route(
+            "/routing/cards",
+            get(routing_cards::list).put(routing_cards::replace),
+        )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_v3_session,

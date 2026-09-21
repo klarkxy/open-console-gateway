@@ -5,8 +5,8 @@
 //!   (`router/api-router.go`, `router/relay-router.go`, `controller/user.go`,
 //!   `controller/group.go`, `controller/subscription.go`, `controller/token.go`,
 //!   `controller/pricing.go`, `controller/model.go`, `controller/misc.go`,
-//!   `middleware/auth.go`, `model/pricing.go`, `model/token.go`,
-//!   `model/subscription.go`)
+//!   `controller/log.go`, `middleware/auth.go`, `model/pricing.go`,
+//!   `model/token.go`, `model/subscription.go`)
 //! - Sub2API `772a0382f079676983c06f24b0d41e09139a8462`
 //!   (`backend/internal/server/router.go`, `.../routes/user.go`,
 //!   `.../routes/gateway.go`, `.../routes/model_plaza.go`,
@@ -25,6 +25,7 @@ use super::{
     PlatformReadRequest, PlatformSnapshot,
 };
 use crate::custom_http::join_inference_endpoint;
+use chrono::{DateTime, Datelike, TimeZone, Utc};
 use futures_util::StreamExt;
 use reqwest::StatusCode;
 use reqwest::header::HeaderValue;
@@ -35,6 +36,8 @@ use std::time::Duration;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_BODY_BYTES: usize = 256 * 1024;
 const SNAPSHOT_TTL_SECS: i64 = 24 * 60 * 60;
+// New API 71c1fd7 sets this only after establishing dashboard user context.
+const NEW_API_AUTH_VERSION: &str = "864b7076dbcd0a3c01b5520316720ebf";
 
 const ERR_BASE_URL_INVALID: &str = "base_url.invalid";
 const ERR_AUTH_MISSING: &str = "auth.missing";
@@ -139,6 +142,7 @@ fn same_origin(left: &reqwest::Url, right: &reqwest::Url) -> bool {
 
 pub(crate) struct Fetched {
     pub value: Value,
+    new_api_user_authenticated: bool,
 }
 
 async fn get_json(
@@ -195,6 +199,7 @@ pub(crate) async fn post_json(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn request_json(
     client: &reqwest::Client,
     method: reqwest::Method,
@@ -244,6 +249,11 @@ async fn request_json(
         return Err(component_error(component, CODE_REDIRECT));
     }
     let status = response.status();
+    let new_api_user_authenticated = auth.is_some()
+        && response
+            .headers()
+            .get("Auth-Version")
+            .is_some_and(|value| value == NEW_API_AUTH_VERSION);
 
     let mut body = Vec::new();
     let mut stream = response.bytes_stream();
@@ -272,7 +282,10 @@ async fn request_json(
 
     let value: Value =
         serde_json::from_slice(&body).map_err(|_| component_error(component, CODE_PARSE))?;
-    Ok(Fetched { value })
+    Ok(Fetched {
+        value,
+        new_api_user_authenticated,
+    })
 }
 
 fn strip_bearer_prefix(value: &str) -> &str {
@@ -489,7 +502,11 @@ async fn read_new_api(
     }
 
     let mut user_group: Option<String> = None;
-    if let Some(user) = bearer {
+    // A Key refresh must not read the site wallet. User-scoped endpoints stay
+    // on the parent refresh (no inference Key).
+    if let Some(user) = bearer
+        && key.is_none()
+    {
         match get_json(
             client,
             base,
@@ -560,6 +577,31 @@ async fn read_new_api(
         {
             parse_new_api_auto_groups(data, snapshot);
         }
+
+        // Optional: current UTC-month consume total. Missing or forked sites
+        // must not stale the wallet snapshot.
+        if let Some(start) = utc_month_start_secs(request.now) {
+            let start_s = start.to_string();
+            let end_s = request.now.to_string();
+            if let Ok(fetched) = get_json_query(
+                client,
+                base,
+                "api/log/self/stat",
+                "new_api.log_self_stat",
+                Some(user),
+                new_api_user,
+                &[
+                    ("type", "2"),
+                    ("start_timestamp", &start_s),
+                    ("end_timestamp", &end_s),
+                ],
+            )
+            .await
+                && let Ok(data) = new_api_data(&fetched.value, "new_api.log_self_stat")
+            {
+                parse_new_api_month_stat(data, snapshot, quota_per_unit);
+            }
+        }
     }
 
     let mut allowed_models: BTreeSet<String> = BTreeSet::new();
@@ -616,6 +658,7 @@ async fn read_new_api(
                 &fetched.value,
                 request,
                 user_group.as_deref(),
+                fetched.new_api_user_authenticated,
                 quota_per_unit,
                 &allowed_models,
                 snapshot,
@@ -644,6 +687,36 @@ fn new_api_quota_unit(quota_per_unit: Option<f64>) -> &'static str {
     } else {
         "quota"
     }
+}
+
+fn utc_month_start_secs(now: i64) -> Option<i64> {
+    let dt = DateTime::from_timestamp(now, 0)?;
+    Utc.with_ymd_and_hms(dt.year(), dt.month(), 1, 0, 0, 0)
+        .single()
+        .map(|start| start.timestamp())
+}
+
+fn parse_new_api_month_stat(
+    data: &Value,
+    snapshot: &mut PlatformSnapshot,
+    quota_per_unit: Option<f64>,
+) {
+    let Some(used) = scale_new_api_quota(json_f64(data.get("quota")), quota_per_unit) else {
+        return;
+    };
+    snapshot.quotas.push(PlatformQuota {
+        kind: PlatformQuotaKind::Wallet,
+        scope_id: "wallet:month".to_string(),
+        unit: new_api_quota_unit(quota_per_unit).to_string(),
+        used: Some(used),
+        remaining: None,
+        limit: None,
+        unlimited: false,
+        period: Some("month".to_string()),
+        resets_at: None,
+        expires_at: None,
+        source: "new_api.log_self_stat".to_string(),
+    });
 }
 
 fn parse_new_api_self(
@@ -897,6 +970,7 @@ fn parse_new_api_pricing(
     value: &Value,
     request: &PlatformReadRequest<'_>,
     user_group: Option<&str>,
+    user_authenticated: bool,
     quota_per_unit: Option<f64>,
     allowed_models: &BTreeSet<String>,
     snapshot: &mut PlatformSnapshot,
@@ -1031,8 +1105,10 @@ fn parse_new_api_pricing(
         if let Some(create_ratio) = json_f64(row.get("create_cache_ratio")) {
             price.cache_write = Some(input * create_ratio);
         }
-        // Anonymous pricing cannot resolve the user's group-to-group override.
-        if user_group.is_none() {
+        // Authenticated pricing already applies user group-to-group overrides.
+        // A supplied bearer can fall through TryUserAuth as anonymous, and Key
+        // refresh intentionally does not fetch user/self just to learn a group.
+        if !user_authenticated {
             price.unavailable_reason = Some("user_identity_required".into());
         } else if !row
             .get("enable_groups")

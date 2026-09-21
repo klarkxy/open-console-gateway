@@ -16,7 +16,7 @@ settings write also rebinds. Never hold a `parking_lot` lock across those
 awaits.
 
 The authoritative table for access keys is `access_keys`. Two credential
-tiers share that table (current schema v58) and one auth snapshot:
+tiers share that table (current schema v62) and one auth snapshot:
 
 - Primary key: fixed id `00000000-0000-0000-0000-000000000001`, display
   name `"Primary"`. Always enabled, never deleted. Public `AppConfig` and
@@ -159,8 +159,11 @@ and profile are removed.
 ## Persistence
 
 `crates/ocg-core/src/db.rs` defines the SQLite schema, migrations, and
-queries. Current schema is **v57**. Version history lives in
-[storage-migration.md](storage-migration.md). `provider_contracts.rs` owns
+queries. Current schema is **v62**. Version history lives in
+[storage-migration.md](storage-migration.md). v60 additively stores the
+local per-Key recovery runtime column `credentials.quota_recovery_json`;
+portable export excludes it. Restart retains wait and backoff, not the
+probe lease. `provider_contracts.rs` owns
 provider contract scopes, per-model/per-protocol overrides, effective
 contract derivation, and model-protocol evidence. `models.rs` defines
 shared serde types and `AppConfig`. Local Key storage is

@@ -22,7 +22,7 @@
           circle
           quaternary
           size="small"
-          :aria-label="t('刷新额度')"
+          :aria-label="t('刷新')"
           :loading="refreshLoading"
           :disabled="usageLoading || !!usageLoadError"
           @click="emit('refresh-usage')"
@@ -30,7 +30,7 @@
           <template #icon><n-icon :component="ReloadOutlined" /></template>
         </n-button>
       </template>
-      {{ t("刷新额度") }}
+      {{ t("刷新") }}
     </n-tooltip>
   </div>
 
@@ -149,7 +149,9 @@ import { accountMenuLabelKey } from "../views/account-status-text.ts";
 import { accountCapabilities } from "../domain/account-capabilities.ts";
 import { findPlanDefinition } from "../domain/plans.ts";
 import type { AccountUsageEdits, UsageLimitView } from "../domain/useAccountUsage.ts";
+import { billingManualCalibration } from "../domain/billing.ts";
 import { t } from "../i18n/index.ts";
+import { useBillingStore } from "../stores/billing.ts";
 import { accountInferenceEndpointUrl, officialBalanceSupported } from "../domain/upstream-balance.ts";
 import type { Connection } from "../api/connections.ts";
 import AccountUsageEditor from "./AccountUsageEditor.vue";
@@ -193,19 +195,28 @@ const emit = defineEmits<{
   "usage-save": [key: UsageKey];
 }>();
 
+const billing = useBillingStore();
 const capabilities = computed(() => accountCapabilities(props.account, props.catalog));
 const plan = computed(() => findPlanDefinition(props.account.provider_id, props.catalog));
-const manualUsageCalibration = computed(() => (
-  plan.value?.manual_usage_calibration ?? false
+const billingStatus = computed(() => billing.byId[props.account.id]?.status ?? null);
+const manualUsageCalibration = computed(() => {
+  if (billingStatus.value) return billingManualCalibration(billingStatus.value);
+  return plan.value?.manual_usage_calibration ?? false;
+});
+const usageRefreshAvailable = computed(() => (
+  billingStatus.value ? billingStatus.value.officialRefresh : plan.value?.usage_availability === "available"
 ));
-const usageRefreshAvailable = computed(() => plan.value?.usage_availability === "available");
 const balanceRefreshAvailable = computed(() => officialBalanceSupported(
   accountInferenceEndpointUrl(props.account, props.identity, props.connections),
 ));
-const canRefreshUsage = computed(() => usageRefreshAvailable.value || balanceRefreshAvailable.value);
+const canRefreshUsage = computed(() => usageRefreshAvailable.value || (
+  billingStatus.value ? false : balanceRefreshAvailable.value
+));
 const refreshVisible = computed(() => {
   if (props.showRefresh === true) return true;
   if (props.showRefresh === false) return false;
+  if (billingStatus.value?.cash) return false;
+  if (!billingStatus.value && plan.value?.model_source === "official_api_preset") return false;
   return canRefreshUsage.value && accountIsReady(props.account);
 });
 const refreshLoading = computed(() => props.refreshing ?? props.usageRefreshLoading);
