@@ -1,6 +1,4 @@
-import { h, type Ref } from "vue";
-import { NButton, NIcon } from "naive-ui";
-import { CheckOutlined, CopyOutlined } from "@vicons/antd";
+import { h, type Component, type Ref } from "vue";
 import type { Account, ForwardLog, GatewayLog } from "../api/dashboard.ts";
 import { locale, t } from "../i18n/index.ts";
 import { formatCost } from "../utils/format.ts";
@@ -18,6 +16,12 @@ import {
  * state through LogsColumnContext.
  */
 export interface LogsColumnContext {
+  components: {
+    NButton: Component;
+    NIcon: Component;
+    CheckOutlined: Component;
+    CopyOutlined: Component;
+  };
   copiedTarget: Ref<string | null>;
   copyText: (target: string, value: string, label: string) => void;
   focusRequestChain: (requestId: string) => void;
@@ -29,6 +33,7 @@ export function shortRequestId(requestId: string): string {
 }
 
 export function renderRequestId(row: GatewayLog | ForwardLog, ctx: LogsColumnContext) {
+  const { NButton, NIcon, CheckOutlined, CopyOutlined } = ctx.components;
   const requestId = row.request_id;
   if (!requestId) return "—";
   const target = `request-id-${row.id}`;
@@ -71,6 +76,7 @@ function renderAliasDetail(row: ForwardLog) {
 }
 
 export function renderForwardDetail(row: ForwardLog, ctx: LogsColumnContext) {
+  const { NButton, NIcon, CheckOutlined, CopyOutlined } = ctx.components;
   const requestId = row.request_id;
   const requestBlock = requestId
     ? h("section", [

@@ -80,6 +80,12 @@ function makeContext(accounts: Account[] = []) {
     focused: [] as string[],
   };
   const ctx: LogsColumnContext = {
+    components: {
+      NButton: { name: "TestButton" },
+      NIcon: { name: "TestIcon" },
+      CheckOutlined: { name: "TestCheck" },
+      CopyOutlined: { name: "TestCopy" },
+    },
     copiedTarget: ref(null),
     copyText: (target, value, label) => { calls.copied.push({ target, value, label }); },
     focusRequestChain: (requestId) => { calls.focused.push(requestId); },
@@ -151,6 +157,8 @@ test("renderRequestId focuses the chain from the link and copies from the icon b
   assert.equal(vnode.type, "div");
   assert.equal(vnode.props?.class, "request-id-cell");
   const [linkButton, copyButton] = childrenOf(vnode);
+  assert.equal(linkButton.type, ctx.components.NButton);
+  assert.equal(copyButton.type, ctx.components.NButton);
 
   const code = slotVNode(linkButton, "default");
   assert.equal(code.type, "code");
@@ -165,6 +173,7 @@ test("renderRequestId focuses the chain from the link and copies from the icon b
   assert.equal(typeof calls.copied[0]?.label, "string");
 
   const iconBefore = slotVNode(copyButton, "icon");
+  assert.equal(iconBefore.type, ctx.components.NIcon);
   ctx.copiedTarget.value = "request-id-42";
   const rerendered = renderRequestId(gatewayRow({ id: 42, request_id: requestId }), ctx) as VNode;
   const iconAfter = slotVNode(childrenOf(rerendered)[1] as VNode, "icon");

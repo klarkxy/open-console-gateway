@@ -7,10 +7,13 @@ use chrono::Utc;
 use clap::{CommandFactory, Parser};
 use ocg_core::browser::browser_profile_paths;
 use ocg_core::crypto::{KeyCipher, StaticKeyCipher};
-use ocg_core::models::{Account, AccountSetupStep, AccountType, AccountUpdate};
+use ocg_core::models::{
+    Account, AccountCustomConfigInput, AccountModelCapabilityInput, AccountSetupStep, AccountType,
+    AccountUpdate,
+};
 use ocg_core::provider::{
     BUILTIN_PROVIDERS, CUSTOM_PROVIDER_ID, ConnectionVerificationStatus, CredentialKind,
-    OPENCODE_PROVIDER_ID, ZEN_FREE_ACCOUNT_ID,
+    OPENCODE_PROVIDER_ID, UpstreamProtocolKind, ZEN_FREE_ACCOUNT_ID,
 };
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
 use std::path::PathBuf;
@@ -696,6 +699,28 @@ fn custom_draft(state: &ocg_core::state::CoreStateInner, id: &str) -> Account {
     }
 }
 
+fn create_pending_custom_fixture(state: &ocg_core::state::CoreStateInner, id: &str) {
+    // Pending verification is valid; a Custom credential without its HTTP
+    // destination and declared catalog is not a valid reopenable fixture.
+    state
+        .db
+        .lock()
+        .create_account_with_contract(
+            &custom_draft(state, id),
+            Some(&AccountCustomConfigInput {
+                endpoint_url: "https://custom-cli.example/v1/chat/completions".into(),
+                upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+            }),
+            &[AccountModelCapabilityInput {
+                public_model: "cli-custom-model".into(),
+                upstream_model: "vendor/cli-custom-model".into(),
+                protocol: UpstreamProtocolKind::ChatCompletions,
+                source: None,
+            }],
+        )
+        .unwrap();
+}
+
 #[tokio::test]
 async fn cli_key_mutations_share_control_plane_revision_in_process() {
     let dir = temp_dir("cli-cas-split");
@@ -822,11 +847,7 @@ async fn cli_enable_allows_pending_custom_without_verification() {
     let dir = temp_dir("cli-custom-enable");
     let cipher = test_cipher();
     let state = build_state(dir.clone(), cipher.clone()).unwrap();
-    state
-        .db
-        .lock()
-        .create_account(&custom_draft(&state, "cli-custom"))
-        .unwrap();
+    create_pending_custom_fixture(&state, "cli-custom");
     let before = state
         .db
         .lock()
@@ -876,11 +897,7 @@ fn cli_update_shaped_writes_skip_revision_unlike_dashboard() {
     let dir = temp_dir("cli-update-shape");
     let cipher = test_cipher();
     let state = build_state(dir.clone(), cipher).unwrap();
-    state
-        .db
-        .lock()
-        .create_account(&custom_draft(&state, "rename-me"))
-        .unwrap();
+    create_pending_custom_fixture(&state, "rename-me");
     let revision = state.settings_revision();
     state
         .db

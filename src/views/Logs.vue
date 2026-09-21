@@ -284,7 +284,7 @@ import {
   NTooltip,
   useMessage,
 } from "naive-ui";
-import { ArrowDownOutlined, ArrowUpOutlined, CalendarOutlined, ClearOutlined, ReloadOutlined } from "@vicons/antd";
+import { ArrowDownOutlined, ArrowUpOutlined, CalendarOutlined, CheckOutlined, ClearOutlined, CopyOutlined, ReloadOutlined } from "@vicons/antd";
 import { UNATTRIBUTED_KEY_FILTER, dashboardApi } from "../api/dashboard";
 import type {
   Account,
@@ -568,6 +568,7 @@ function focusRequestChain(requestId: string) {
 }
 
 const logsColumnContext: LogsColumnContext = {
+  components: { NButton, NIcon, CheckOutlined, CopyOutlined },
   copiedTarget,
   copyText,
   focusRequestChain,
