@@ -5,16 +5,21 @@ use crate::gateway::wire::WireNormalization;
 use crate::models::{Account, AccountSetupStep, AccountType, AppConfig};
 use crate::provider::{
     COMMAND_CODE_GOAT_BASE_URL, COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
-    COMMAND_CODE_PROVIDER_ID, CUSTOM_PROVIDER_ID, CredentialKind, KIMI_CN_BASE_URL,
-    KIMI_CN_CHAT_COMPLETIONS_PATH, KIMI_CN_MESSAGES_PATH, KIMI_PROVIDER_ID,
-    MINIMAX_CN_ANTHROPIC_BASE_URL, MINIMAX_CN_BASE_URL, MINIMAX_CN_CHAT_COMPLETIONS_PATH,
-    MINIMAX_CN_MESSAGES_PATH, MINIMAX_CN_RESPONSES_PATH, MINIMAX_PROVIDER_ID,
-    OLLAMA_CLOUD_BASE_URL, OLLAMA_CLOUD_CHAT_COMPLETIONS_PATH, OLLAMA_PROVIDER_ID,
-    OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID, ProviderAdapterKind, QuotaScope,
-    ZEN_FREE_ACCOUNT_ID, ZEN_FREE_ACCOUNT_NAME,
+    COMMAND_CODE_PROVIDER_ID, CPA_PROVIDER_ID, CUSTOM_PROVIDER_ID, CredentialKind,
+    InferenceAuthDescriptor, KIMI_CN_BASE_URL, KIMI_CN_CHAT_COMPLETIONS_PATH,
+    KIMI_CN_MESSAGES_PATH, KIMI_PROVIDER_ID, MINIMAX_CN_ANTHROPIC_BASE_URL, MINIMAX_CN_BASE_URL,
+    MINIMAX_CN_CHAT_COMPLETIONS_PATH, MINIMAX_CN_MESSAGES_PATH, MINIMAX_CN_RESPONSES_PATH,
+    MINIMAX_PROVIDER_ID, OLLAMA_CLOUD_BASE_URL, OLLAMA_CLOUD_CHAT_COMPLETIONS_PATH,
+    OLLAMA_PROVIDER_ID, OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID, ProviderAdapterKind,
+    QuotaScope, ZEN_FREE_ACCOUNT_ID, ZEN_FREE_ACCOUNT_NAME,
 };
+use crate::routing_snapshot::ExecutionCredential;
 use bytes::Bytes;
 use chrono::Utc;
+use ocg_domain::destination::{
+    AdapterKind, AuthScheme, Destination, LegacyDestinationRef, ModelResolution,
+    destination_id_for_builtin, destination_id_for_custom_account, sealed_capabilities,
+};
 use serde_json::json;
 use std::sync::Arc;
 
@@ -957,5 +962,487 @@ fn resolve_dispatches_on_caller_adapter_not_account_provider_id() {
             || kimi_err.contains("no verified support")
             || kimi_err.contains("does not support"),
         "a Kimi adapter must not inherit OpenCode Responses from provider_id: {kimi_err}"
+    );
+}
+
+fn execution_destination(account: &Account) -> Destination {
+    let adapter = AdapterKind::from(kind(account));
+    let (legacy, model_resolution, auth_scheme) = match adapter {
+        AdapterKind::Http => (
+            LegacyDestinationRef::CustomAccount(account.id.clone()),
+            ModelResolution::PublicOnly,
+            AuthScheme::Bearer,
+        ),
+        AdapterKind::Zen => (
+            LegacyDestinationRef::Builtin(account.provider_id.clone()),
+            ModelResolution::AdapterDefined,
+            AuthScheme::None,
+        ),
+        _ => (
+            LegacyDestinationRef::Builtin(account.provider_id.clone()),
+            ModelResolution::AdapterDefined,
+            AuthScheme::Bearer,
+        ),
+    };
+    let id = match &legacy {
+        LegacyDestinationRef::Builtin(provider_id) => destination_id_for_builtin(provider_id),
+        LegacyDestinationRef::CustomAccount(account_id) => {
+            destination_id_for_custom_account(account_id)
+        }
+        LegacyDestinationRef::Dynamic(provider_id) => {
+            ocg_domain::destination::destination_id_for_dynamic(provider_id)
+        }
+        LegacyDestinationRef::PlatformParent(parent_id) => {
+            ocg_domain::destination::destination_id_for_platform_account(parent_id)
+        }
+    };
+    Destination {
+        id,
+        legacy,
+        adapter,
+        name: account.name.clone(),
+        brand_family: None,
+        base_url: None,
+        protocols: Vec::new(),
+        protocol_routes: Vec::new(),
+        auth_scheme,
+        model_resolution,
+        catalog: Vec::new(),
+        capabilities: sealed_capabilities(adapter),
+        plan: None,
+        max_credentials: None,
+        observer_credential_id: None,
+        enabled: true,
+    }
+}
+
+fn production_route(
+    account: &Account,
+    destination: &Destination,
+    config: &AppConfig,
+    plan: &RequestPlan,
+) -> Result<AttemptSpec, String> {
+    resolve_execution_route(
+        &ExecutionCredential::from(account),
+        destination,
+        config,
+        plan,
+    )
+}
+
+fn assert_production_probe_transport_eq(
+    account: &Account,
+    destination: &Destination,
+    config: &AppConfig,
+    plan: &RequestPlan,
+) {
+    let production = production_route(account, destination, config, plan)
+        .unwrap_or_else(|error| panic!("production transport: {error}"));
+    let probe = resolve_probe_route(account, kind(account), config, plan)
+        .unwrap_or_else(|error| panic!("probe transport: {error}"));
+    assert_eq!(production, probe);
+}
+
+fn assert_production_and_probe_denied(
+    account: &Account,
+    destination: &Destination,
+    config: &AppConfig,
+    plan: &RequestPlan,
+) {
+    let production = production_route(account, destination, config, plan);
+    let probe = resolve_probe_route(account, kind(account), config, plan);
+    assert!(
+        production.is_err(),
+        "production should deny {:?}",
+        plan.upstream
+    );
+    assert!(probe.is_err(), "probe should deny {:?}", plan.upstream);
+    assert_eq!(
+        production.unwrap_err(),
+        probe.unwrap_err(),
+        "denied transport errors should match for {:?}",
+        plan.upstream
+    );
+}
+
+#[test]
+fn production_and_probe_share_transport_for_supported_protocols() {
+    let config = AppConfig::default();
+    let go = account(
+        "go-parity",
+        OPENCODE_PROVIDER_ID,
+        CredentialKind::ApiKey,
+        QuotaScope::Key,
+    );
+    let go_dest = execution_destination(&go);
+    for protocol in [
+        ApiFormat::ChatCompletions,
+        ApiFormat::Responses,
+        ApiFormat::Messages,
+    ] {
+        assert_production_probe_transport_eq(
+            &go,
+            &go_dest,
+            &config,
+            &chat_plan("glm-5.2", UpstreamChannel::Go, protocol, None),
+        );
+    }
+
+    let mut zen = account(
+        ZEN_FREE_ACCOUNT_ID,
+        OPENCODE_ZEN_FREE_PROVIDER_ID,
+        CredentialKind::None,
+        QuotaScope::EgressIp,
+    );
+    zen.name = ZEN_FREE_ACCOUNT_NAME.into();
+    let zen_dest = execution_destination(&zen);
+    assert_production_probe_transport_eq(
+        &zen,
+        &zen_dest,
+        &config,
+        &chat_plan(
+            "mimo-v2.5-free",
+            UpstreamChannel::Free,
+            ApiFormat::ChatCompletions,
+            None,
+        ),
+    );
+
+    let goat = account(
+        "goat-parity",
+        COMMAND_CODE_PROVIDER_ID,
+        CredentialKind::ApiKey,
+        QuotaScope::Key,
+    );
+    let goat_dest = execution_destination(&goat);
+    for protocol in [
+        ApiFormat::ChatCompletions,
+        ApiFormat::Responses,
+        ApiFormat::Messages,
+    ] {
+        assert_production_probe_transport_eq(
+            &goat,
+            &goat_dest,
+            &config,
+            &chat_plan(
+                COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
+                UpstreamChannel::Go,
+                protocol,
+                None,
+            ),
+        );
+    }
+    let _guard =
+        install_goat_loopback_route_for_test(goat.id.clone(), "http://127.0.0.1:9").unwrap();
+    assert_production_probe_transport_eq(
+        &goat,
+        &goat_dest,
+        &config,
+        &chat_plan(
+            COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
+            UpstreamChannel::Go,
+            ApiFormat::ChatCompletions,
+            None,
+        ),
+    );
+
+    let minimax = account(
+        "minimax-parity",
+        MINIMAX_PROVIDER_ID,
+        CredentialKind::ApiKey,
+        QuotaScope::Key,
+    );
+    let minimax_dest = execution_destination(&minimax);
+    for protocol in [
+        ApiFormat::ChatCompletions,
+        ApiFormat::Messages,
+        ApiFormat::Responses,
+    ] {
+        assert_production_probe_transport_eq(
+            &minimax,
+            &minimax_dest,
+            &config,
+            &chat_plan("MiniMax-M3", UpstreamChannel::Go, protocol, None),
+        );
+    }
+
+    let kimi = account(
+        "kimi-parity",
+        KIMI_PROVIDER_ID,
+        CredentialKind::ApiKey,
+        QuotaScope::Key,
+    );
+    let kimi_dest = execution_destination(&kimi);
+    for protocol in [ApiFormat::ChatCompletions, ApiFormat::Messages] {
+        assert_production_probe_transport_eq(
+            &kimi,
+            &kimi_dest,
+            &config,
+            &chat_plan("kimi-for-coding", UpstreamChannel::Go, protocol, None),
+        );
+    }
+
+    let ollama = account(
+        "ollama-parity",
+        OLLAMA_PROVIDER_ID,
+        CredentialKind::ApiKey,
+        QuotaScope::Key,
+    );
+    let ollama_dest = execution_destination(&ollama);
+    assert_production_probe_transport_eq(
+        &ollama,
+        &ollama_dest,
+        &config,
+        &chat_plan(
+            "deepseek-v4-flash",
+            UpstreamChannel::Go,
+            ApiFormat::ChatCompletions,
+            None,
+        ),
+    );
+    let _ollama_guard =
+        install_ollama_cloud_loopback_route_for_test(ollama.id.clone(), "http://127.0.0.1:9")
+            .unwrap();
+    assert_production_probe_transport_eq(
+        &ollama,
+        &ollama_dest,
+        &config,
+        &chat_plan(
+            "deepseek-v4-flash",
+            UpstreamChannel::Go,
+            ApiFormat::ChatCompletions,
+            None,
+        ),
+    );
+
+    let custom = account(
+        "custom-parity",
+        CUSTOM_PROVIDER_ID,
+        CredentialKind::ApiKey,
+        QuotaScope::Key,
+    );
+    let custom_dest = execution_destination(&custom);
+    assert_eq!(custom_dest.model_resolution, ModelResolution::PublicOnly);
+    for (protocol, url, auth) in [
+        (
+            ApiFormat::ChatCompletions,
+            "http://127.0.0.1:9/v1/chat/completions",
+            ocg_domain::dynamic::DynamicAuthKind::Bearer,
+        ),
+        (
+            ApiFormat::Messages,
+            "http://127.0.0.1:9/v1/messages",
+            ocg_domain::dynamic::DynamicAuthKind::XApiKey,
+        ),
+        (
+            ApiFormat::Responses,
+            "http://127.0.0.1:9/v1/responses",
+            ocg_domain::dynamic::DynamicAuthKind::Bearer,
+        ),
+        (
+            ApiFormat::ChatCompletions,
+            "http://127.0.0.1:9",
+            ocg_domain::dynamic::DynamicAuthKind::None,
+        ),
+    ] {
+        assert_production_probe_transport_eq(
+            &custom,
+            &custom_dest,
+            &config,
+            &chat_plan(
+                "local-model",
+                UpstreamChannel::Go,
+                protocol,
+                Some(CustomRouteSpec {
+                    endpoint_url: url.into(),
+                    auth_kind: auth,
+                }),
+            ),
+        );
+    }
+}
+
+#[test]
+fn production_and_probe_deny_unsupported_transport_protocols() {
+    let config = AppConfig::default();
+    let go = account(
+        "go-denied",
+        OPENCODE_PROVIDER_ID,
+        CredentialKind::ApiKey,
+        QuotaScope::Key,
+    );
+    let go_dest = execution_destination(&go);
+    assert_production_and_probe_denied(
+        &go,
+        &go_dest,
+        &config,
+        &chat_plan("glm-5.2", UpstreamChannel::Go, ApiFormat::Gemini, None),
+    );
+
+    let goat = account(
+        "goat-denied",
+        COMMAND_CODE_PROVIDER_ID,
+        CredentialKind::ApiKey,
+        QuotaScope::Key,
+    );
+    assert_production_and_probe_denied(
+        &goat,
+        &execution_destination(&goat),
+        &config,
+        &chat_plan(
+            COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
+            UpstreamChannel::Go,
+            ApiFormat::Gemini,
+            None,
+        ),
+    );
+
+    let minimax = account(
+        "minimax-denied",
+        MINIMAX_PROVIDER_ID,
+        CredentialKind::ApiKey,
+        QuotaScope::Key,
+    );
+    assert_production_and_probe_denied(
+        &minimax,
+        &execution_destination(&minimax),
+        &config,
+        &chat_plan("MiniMax-M3", UpstreamChannel::Go, ApiFormat::Gemini, None),
+    );
+
+    let kimi = account(
+        "kimi-denied",
+        KIMI_PROVIDER_ID,
+        CredentialKind::ApiKey,
+        QuotaScope::Key,
+    );
+    let kimi_dest = execution_destination(&kimi);
+    for protocol in [ApiFormat::Responses, ApiFormat::Gemini] {
+        assert_production_and_probe_denied(
+            &kimi,
+            &kimi_dest,
+            &config,
+            &chat_plan("kimi-for-coding", UpstreamChannel::Go, protocol, None),
+        );
+    }
+
+    let ollama = account(
+        "ollama-denied",
+        OLLAMA_PROVIDER_ID,
+        CredentialKind::ApiKey,
+        QuotaScope::Key,
+    );
+    let ollama_dest = execution_destination(&ollama);
+    for protocol in [ApiFormat::Messages, ApiFormat::Responses, ApiFormat::Gemini] {
+        assert_production_and_probe_denied(
+            &ollama,
+            &ollama_dest,
+            &config,
+            &chat_plan("deepseek-v4-flash", UpstreamChannel::Go, protocol, None),
+        );
+    }
+
+    let custom = account(
+        "custom-denied",
+        CUSTOM_PROVIDER_ID,
+        CredentialKind::ApiKey,
+        QuotaScope::Key,
+    );
+    let custom_dest = execution_destination(&custom);
+    assert_production_and_probe_denied(
+        &custom,
+        &custom_dest,
+        &config,
+        &chat_plan(
+            "local-model",
+            UpstreamChannel::Go,
+            ApiFormat::Gemini,
+            Some(CustomRouteSpec {
+                endpoint_url: "http://127.0.0.1:9/v1/chat/completions".into(),
+                auth_kind: ocg_domain::dynamic::DynamicAuthKind::Bearer,
+            }),
+        ),
+    );
+
+    let missing = chat_plan(
+        "local-model",
+        UpstreamChannel::Go,
+        ApiFormat::ChatCompletions,
+        None,
+    );
+    let production_missing =
+        production_route(&custom, &custom_dest, &config, &missing).unwrap_err();
+    let probe_missing = resolve_probe_route(&custom, kind(&custom), &config, &missing).unwrap_err();
+    assert!(production_missing.contains("missing HTTP route"));
+    assert!(probe_missing.contains("missing a persisted endpoint URL"));
+
+    let cpa = account(
+        "cpa-denied",
+        CPA_PROVIDER_ID,
+        CredentialKind::ApiKey,
+        QuotaScope::Key,
+    );
+    let mut cpa_plan = chat_plan(
+        "gpt-4",
+        UpstreamChannel::Go,
+        ApiFormat::ChatCompletions,
+        None,
+    );
+    cpa_plan.upstream_base_override = Some(crate::cpa::DEFAULT_CPA_BASE_URL.into());
+    let cpa_dest = execution_destination(&cpa);
+    let cpa_production = production_route(&cpa, &cpa_dest, &config, &cpa_plan)
+        .expect("production CPA constructs transport without probing");
+    assert_eq!(
+        cpa_production.proxy_routing,
+        ProxyRoutingModel::LocalExternalIntegration
+    );
+    assert!(
+        resolve_probe_route(&cpa, kind(&cpa), &config, &cpa_plan)
+            .unwrap_err()
+            .contains("not available")
+    );
+
+    let runtime = dynamic_runtime(
+        "https://lab.example/v1",
+        Some("https://evil.example/v1"),
+        ocg_domain::dynamic::DynamicAuthKind::Bearer,
+    );
+    let dynamic = account(
+        "dyn-denied",
+        &runtime.id,
+        CredentialKind::ApiKey,
+        QuotaScope::Key,
+    );
+    let mapped = resolve_route_with_dynamics(
+        &dynamic,
+        kind(&dynamic),
+        &config,
+        &chat_plan(
+            "vendor/lab",
+            UpstreamChannel::Go,
+            ApiFormat::ChatCompletions,
+            None,
+        ),
+        std::slice::from_ref(&runtime),
+    )
+    .expect("dynamic mapping selection stays outside shared transport construction");
+    assert_eq!(mapped.base_url, "https://evil.example");
+    let dynamic_probe = resolve_probe_route(
+        &dynamic,
+        kind(&dynamic),
+        &config,
+        &chat_plan(
+            "vendor/lab",
+            UpstreamChannel::Go,
+            ApiFormat::ChatCompletions,
+            None,
+        ),
+    )
+    .unwrap_err();
+    assert!(
+        dynamic_probe.contains("unsupported provider offering")
+            || dynamic_probe.contains("POST /providers/test")
+            || dynamic_probe.contains("not in the request snapshot"),
+        "dynamic probe must not construct a production override route: {dynamic_probe}"
     );
 }
