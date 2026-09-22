@@ -89,6 +89,25 @@ export function buildCredentialOrder(
 }
 
 /**
+ * A zero-row Custom card whose original account now lives on another
+ * destination. Adding a New API Key creates that Custom destination, then
+ * moves the Key onto the platform parent; the shell is not another account.
+ * An intentional empty routing card stays when this destination still holds
+ * the Key. A Custom destination with no moved Key stays so a Key can be added.
+ */
+export function isVacatedCustomShell(
+  group: Pick<DestinationGroup, "credentials" | "destination">,
+  credentials: readonly Pick<DestinationCredential, "destination_id" | "legacy_account_id">[],
+): boolean {
+  if (group.credentials.length > 0) return false;
+  if (group.destination.legacy.kind !== "custom_account") return false;
+  const ownerId = group.destination.legacy.id;
+  return credentials.some((credential) => (
+    credential.legacy_account_id === ownerId && credential.destination_id !== group.destination.id
+  ));
+}
+
+/**
  * Keep destination groups that still have at least one visible credential row.
  * Input groups are not mutated; each kept group gets a new `credentials` array.
  * `visibleIds` may contain credential ids or legacy account ids.

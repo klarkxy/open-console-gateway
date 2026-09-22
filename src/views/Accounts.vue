@@ -491,6 +491,7 @@ import type { Destination, DestinationCredential } from "../api/destinations.ts"
 import {
   includeCredentialRow,
   isSingleAccountGroup,
+  isVacatedCustomShell,
   overlayAccountForCredential,
   type DestinationGroup,
 } from "../domain/destination-groups.ts";
@@ -904,7 +905,10 @@ const displayedGroups = computed(() => {
   const visibleIds = visibleAccountIds.value;
   const knownIds = knownAccountIds.value;
   return allGroups.value.filter((group) => {
-    if (group.credentials.length === 0) return planFilter.value === "all" && statusFilter.value === "all";
+    if (group.credentials.length === 0) {
+      if (isVacatedCustomShell(group, destinationsStore.credentials)) return false;
+      return planFilter.value === "all" && statusFilter.value === "all";
+    }
     if (group.destination.legacy.kind === "platform_parent") {
       if (group.credentials.length === 0) return planFilter.value === "all" && statusFilter.value === "all";
       if (planFilter.value !== "all" && planFilter.value !== "custom") return false;

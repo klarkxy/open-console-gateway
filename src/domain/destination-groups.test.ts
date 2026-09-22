@@ -9,6 +9,7 @@ import {
   filterGroupRows,
   includeCredentialRow,
   isSingleAccountGroup,
+  isVacatedCustomShell,
   moveWithinGroup,
 } from "./destination-groups.ts";
 
@@ -197,6 +198,35 @@ test("single-account groups follow max_credentials and platform-parent rules", (
     ...builtinOne,
     credentials: [credential("go", "a", 0), credential("go", "b", 1)],
   }), false);
+});
+
+test("a Custom card is hidden only after its Key has moved to another destination", () => {
+  const shell = {
+    destination: destination("claude-dest", {
+      legacy: { kind: "custom_account", id: "claude" },
+    }),
+    credentials: [],
+    id: "claude-card",
+  };
+  const moved = credential("platform", "claude", 5);
+  assert.equal(isVacatedCustomShell(shell, [moved]), true);
+  assert.equal(isVacatedCustomShell(shell, [credential("claude-dest", "claude", 5)]), false);
+  assert.equal(isVacatedCustomShell({
+    ...shell,
+    credentials: [credential("claude-dest", "claude", 5)],
+  }, [moved]), false);
+  const extraEmpty = {
+    destination: destination("platform", { legacy: { kind: "platform_parent", id: "zoowyoo" } }),
+    credentials: [],
+    id: "extra",
+  };
+  assert.equal(isVacatedCustomShell(extraEmpty, [moved]), false);
+  const awaitingKey = {
+    destination: destination("bare", { legacy: { kind: "custom_account", id: "bare" } }),
+    credentials: [],
+    id: "bare-card",
+  };
+  assert.equal(isVacatedCustomShell(awaitingKey, [moved]), false);
 });
 
 test("filterGroupRows keeps groups with a visible row and does not mutate input", () => {
