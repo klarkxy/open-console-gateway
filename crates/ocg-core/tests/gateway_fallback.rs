@@ -2,7 +2,7 @@ use axum::Router;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use chrono::{DateTime, Duration, SecondsFormat, Utc};
+use chrono::{Duration, Utc};
 use ocg_core::crypto::{KeyCipher, StaticKeyCipher};
 use ocg_core::db::{Database, ForwardLogQueryOptions};
 use ocg_core::gateway;
@@ -1517,7 +1517,7 @@ async fn upstream_payload_too_large_is_not_mislabeled_as_client_body_limit() {
 }
 
 #[tokio::test]
-async fn falls_back_past_five_limited_accounts_to_sixth_success() {
+async fn falls_back_past_five_temporarily_limited_accounts_to_sixth_success_without_quota_fanout() {
     let keys = ["key-1", "key-2", "key-3", "key-4", "key-5", "key-6"];
     let queued = keys
         .iter()
@@ -1584,40 +1584,25 @@ async fn falls_back_past_five_limited_accounts_to_sixth_success() {
             "quotaRecovery must not change existing pool membership on {id}: {credential}"
         );
     }
-    let mut waiting_ids = Vec::new();
     for idx in 1..=6 {
         let account_id = format!("acct-{idx}");
         let credential = v4_credential(&credentials, &account_id);
         if idx == 6 {
-            let recovery = credential.get("quotaRecovery");
-            assert!(
-                recovery.is_none() || recovery.is_some_and(serde_json::Value::is_null),
-                "sixth key must remain healthy: {credential}"
-            );
+            assert_no_quota_recovery(credential);
             continue;
         }
-        let recovery = waiting_quota_recovery(credential);
-        assert_eq!(recovery["reason"], "quota_exhausted", "{recovery}");
-        assert_eq!(recovery["window"], "week", "{recovery}");
-        assert_eq!(recovery["failureCount"], 1, "{recovery}");
-        assert_eq!(
-            rfc3339_millis(&recovery["nextRetryAt"]),
-            rfc3339_millis(&recovery["resetsAt"]),
-            "{recovery}"
-        );
-        waiting_ids.push(
-            credential["id"]
-                .as_str()
-                .expect("credential id")
-                .to_string(),
-        );
+        assert_no_quota_recovery(credential);
     }
-    let unique: HashSet<_> = waiting_ids.iter().cloned().collect();
+
+    let first_request_hits = h.call_count();
+    let (status, body) = h.chat().await;
+    assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(
-        unique.len(),
-        5,
-        "each exhausted Key keeps its own waiting quotaRecovery: {waiting_ids:?}"
+        h.call_count(),
+        first_request_hits + 1,
+        "the temporary per-Key waits must skip only the five failed Keys"
     );
+    assert_eq!(h.call_keys().last().map(String::as_str), Some("key-6"));
 }
 
 #[tokio::test]
@@ -1659,6 +1644,8 @@ async fn inference_403_fails_over_without_persisting_an_auth_breaker() {
         h.account("acct-1").auth_error.is_none(),
         "inference 403 must not permanently break an account"
     );
+    let credentials = v4_list_credentials(h.port).await;
+    assert_no_quota_recovery(v4_credential(&credentials, "acct-1"));
 }
 
 #[tokio::test]
@@ -1957,7 +1944,7 @@ async fn registered_zen_model_401_is_returned_without_credential_fallback_or_bre
 }
 
 #[tokio::test]
-async fn all_limited_accounts_return_429_with_soonest_reset() {
+async fn all_429_accounts_return_429_with_a_temporary_per_key_wait() {
     let h = FallbackHarness::go(
         &[("key-1", &[limited()]), ("key-2", &[limited()])],
         &["key-1", "key-2"],
@@ -1968,29 +1955,12 @@ async fn all_limited_accounts_return_429_with_soonest_reset() {
     assert_eq!(status, 429);
     assert!(body.contains("resets_at"));
     assert_eq!(h.call_keys(), ["key-1", "key-2"]);
-    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
-    let soonest_reset = rfc3339_millis(&error["error"]["resets_at"]);
-
     let credentials = v4_list_credentials(h.port).await;
-    let mut waiting_retries = Vec::new();
     for account_id in ["acct-1", "acct-2"] {
         let credential = v4_credential(&credentials, account_id);
         assert_ordinary_cooldowns_none(credential);
-        let recovery = waiting_quota_recovery(credential);
-        assert_eq!(recovery["reason"], "quota_exhausted", "{recovery}");
-        assert_eq!(recovery["window"], "week", "{recovery}");
-        assert_eq!(
-            rfc3339_millis(&recovery["nextRetryAt"]),
-            rfc3339_millis(&recovery["resetsAt"]),
-            "{recovery}"
-        );
-        waiting_retries.push(rfc3339_millis(&recovery["nextRetryAt"]));
+        assert_no_quota_recovery(credential);
     }
-    assert_eq!(
-        soonest_reset,
-        *waiting_retries.iter().min().expect("waiting deadlines"),
-        "429 must advertise the earliest persisted nextRetryAt"
-    );
 
     let upstream_hits = h.call_count();
     let (status, retry_body) = h.chat().await;
@@ -1999,7 +1969,45 @@ async fn all_limited_accounts_return_429_with_soonest_reset() {
     assert_eq!(
         h.call_count(),
         upstream_hits,
-        "waiting quotaRecovery must not send another upstream request"
+        "temporary per-Key recovery waits must not send another upstream request"
+    );
+}
+
+#[tokio::test]
+async fn go_429_persists_quota_recovery_only_after_injected_authoritative_rate_limited_usage() {
+    let p = PreparedFallback::go(&[("key-1", &[limited()])], &["key-1"]).await;
+    p.state
+        .usage_sync
+        .set_reactive_refresh_enabled_for_test(true);
+    p.state.usage_sync.set_fetch_for_test(|_, _| {
+        Box::pin(async {
+            Ok(ocg_core::go_usage::GoUsageSnapshot {
+                rolling_status: ocg_core::go_usage::GoUsageWindowStatus::Ok,
+                weekly_status: ocg_core::go_usage::GoUsageWindowStatus::RateLimited,
+                monthly_status: ocg_core::go_usage::GoUsageWindowStatus::Ok,
+                rolling_percent: 12.5,
+                weekly_percent: 100.0,
+                monthly_percent: 25.0,
+                rolling_resets_in_minutes: 30,
+                weekly_resets_in_minutes: 120,
+                monthly_resets_in_minutes: 720,
+                earliest_resets_in_minutes: 30,
+            })
+        })
+    });
+    let h = p.bind().await;
+
+    let (status, body) = h.chat().await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    assert_eq!(h.call_keys(), ["key-1"]);
+
+    let recovery = wait_for_quota_recovery(&h, "acct-1").await;
+    assert_eq!(recovery["status"], "waiting", "{recovery}");
+    assert_eq!(recovery["reason"], "quota_exhausted", "{recovery}");
+    assert_eq!(recovery["window"], "week", "{recovery}");
+    assert!(
+        recovery["resetsAt"].is_string() && recovery["nextRetryAt"].is_string(),
+        "authoritative rate-limited usage must retain its weekly deadline: {recovery}"
     );
 }
 
@@ -2021,11 +2029,17 @@ async fn zen_free_429_is_anonymous_and_cools_the_singleton_egress_route() {
     {
         let db = h.state.db.lock();
         let source = db.get_account(ZEN_FREE_ACCOUNT_ID).unwrap().unwrap();
-        assert!(source.cooldown_free_until.is_some());
+        assert!(
+            source.cooldown_free_until.is_none(),
+            "a Free 429 must not persist a named free window from error prose"
+        );
         assert!(source.cooldown_5h_until.is_none());
         assert!(source.cooldown_week_until.is_none());
         assert!(source.cooldown_month_until.is_none());
-        assert!(db.free_channel_cooldown_until().unwrap().is_some());
+        assert!(
+            db.free_channel_cooldown_until().unwrap().is_none(),
+            "temporary Free waits stay process-local, not durable settings"
+        );
         assert!(
             db.get_account("acct-1")
                 .unwrap()
@@ -2502,16 +2516,11 @@ async fn mixed_goat_cooldown_and_sticky_state_are_independent() {
 }
 
 #[tokio::test]
-async fn goat_plan_window_429_persists_the_exact_weekly_deadline() {
-    let expected_reset = Utc::now() + Duration::hours(2);
-    let reset_text = expected_reset.to_rfc3339_opts(SecondsFormat::Millis, true);
-    let body: &'static str = Box::leak(
-        format!(
-            r#"{{"error":{{"code":"RATE_LIMITED","message":"You've reached your weekly usage limit for your plan. Your limit resets at {reset_text}. Please wait for the window to reset or upgrade your plan to continue.","type":"rate_limit_error"}}}}"#
-        )
-        .into_boxed_str(),
-    );
-    let replies = [reply(StatusCode::TOO_MANY_REQUESTS.as_u16(), body)];
+async fn goat_400_insufficient_credits_error_body_never_persists_quota_recovery() {
+    let replies = [reply(
+        StatusCode::BAD_REQUEST.as_u16(),
+        r#"{"error":{"code":"INSUFFICIENT_CREDITS","message":"Insufficient credits for this request"}}"#,
+    )];
     let entries = [("goat-key", replies.as_slice())];
     let (h, goat_id) = start_goat(
         &entries,
@@ -2532,19 +2541,7 @@ async fn goat_plan_window_429_persists_the_exact_weekly_deadline() {
     let credentials = v4_list_credentials(h.port).await;
     let goat = v4_credential(&credentials, &goat_id);
     assert_ordinary_cooldowns_none(goat);
-    let recovery = waiting_quota_recovery(goat);
-    assert_eq!(recovery["reason"], "quota_exhausted", "{recovery}");
-    assert_eq!(recovery["window"], "week", "{recovery}");
-    assert_eq!(
-        rfc3339_millis(&recovery["resetsAt"]),
-        expected_reset.timestamp_millis(),
-        "{recovery}"
-    );
-    assert_eq!(
-        rfc3339_millis(&recovery["nextRetryAt"]),
-        expected_reset.timestamp_millis(),
-        "{recovery}"
-    );
+    assert_no_quota_recovery(goat);
 }
 
 async fn v4_list_credentials(port: u16) -> Vec<serde_json::Value> {
@@ -2583,25 +2580,32 @@ fn assert_ordinary_cooldowns_none(credential: &serde_json::Value) {
     }
 }
 
-fn waiting_quota_recovery(credential: &serde_json::Value) -> &serde_json::Value {
-    let recovery = &credential["quotaRecovery"];
+fn assert_no_quota_recovery(credential: &serde_json::Value) {
+    let recovery = credential.get("quotaRecovery");
     assert!(
-        recovery.is_object(),
-        "expected waiting quotaRecovery on {}: {credential}",
+        recovery.is_none() || recovery.is_some_and(serde_json::Value::is_null),
+        "inference failure must not create quotaRecovery on {}: {credential}",
         credential["legacyAccountId"]
     );
-    assert_eq!(recovery["status"], "waiting", "{recovery}");
-    recovery
 }
 
-fn rfc3339_millis(value: &serde_json::Value) -> i64 {
-    DateTime::parse_from_rfc3339(
-        value
-            .as_str()
-            .unwrap_or_else(|| panic!("rfc3339 timestamp: {value}")),
-    )
-    .unwrap_or_else(|err| panic!("parse {value}: {err}"))
-    .timestamp_millis()
+async fn wait_for_quota_recovery(h: &FallbackHarness, account_id: &str) -> serde_json::Value {
+    let deadline = tokio::time::Instant::now() + StdDuration::from_secs(2);
+    loop {
+        let credentials = v4_list_credentials(h.port).await;
+        let recovery = v4_credential(&credentials, account_id)
+            .get("quotaRecovery")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        if recovery.is_object() {
+            return recovery;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for injected authoritative usage to create quotaRecovery for {account_id}"
+        );
+        tokio::time::sleep(StdDuration::from_millis(10)).await;
+    }
 }
 
 async fn v3_post(

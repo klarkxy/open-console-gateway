@@ -41,7 +41,7 @@ fn unknown_and_transient_never_invent_account_cooldown() {
 }
 
 #[test]
-fn dialects_translate_to_the_same_policy_without_cross_provider_guessing() {
+fn error_prose_does_not_establish_quota_for_any_provider() {
     let goat = rate(ErrorProfile::CommandCodeGoat, GOAT, None);
     let go = rate(
         ErrorProfile::OpenCodeGo,
@@ -49,13 +49,10 @@ fn dialects_translate_to_the_same_policy_without_cross_provider_guessing() {
         None,
     );
     assert_eq!(goat.decide(), go.decide());
-    assert_eq!(
-        goat.decide().persist_reset,
-        Some((UsageWindowKind::Week, now() + Duration::days(1)))
-    );
+    assert_eq!(goat.decide().persist_reset, None);
     for body in [GOAT, "Weekly usage limit reached. Resets in 1 day."] {
         let generic = rate(ErrorProfile::GenericHttp, body, None);
-        assert_eq!(generic.cause, Cause::Unknown);
+        assert_eq!(generic.cause, Cause::Transient);
         assert!(!generic.decide().wait_for_recovery);
         assert_eq!(generic.decide().persist_reset, None);
     }
@@ -66,10 +63,7 @@ fn retry_after_and_quota_reset_are_independent_constraints() {
     for delay in ["10", "172800"] {
         let f = rate(ErrorProfile::CommandCodeGoat, GOAT, Some(delay));
         let d = f.decide();
-        assert_eq!(
-            d.persist_reset,
-            Some((UsageWindowKind::Week, now() + Duration::days(1)))
-        );
+        assert_eq!(d.persist_reset, None);
         assert_eq!(
             d.retry_not_before,
             Some(RetryHint::Until(
@@ -86,12 +80,10 @@ fn retry_after_and_quota_reset_are_independent_constraints() {
 
 #[test]
 fn known_exhaustion_without_reset_is_pending_not_a_fake_deadline() {
-    let credit = decode(ProviderErrorClass::InsufficientCredits, "", None, now()).unwrap();
-    assert!(credit.decide().wait_for_recovery);
-    assert!(credit.decide().persist_reset.is_none());
+    assert!(decode(ProviderErrorClass::InsufficientCredits, "", None, now()).is_none());
     let go = rate(ErrorProfile::OpenCodeGo, "Weekly usage limit reached", None);
-    assert!(go.decide().wait_for_recovery);
-    assert_eq!(go.window, Some(UsageWindowKind::Week));
+    assert!(!go.decide().wait_for_recovery);
+    assert_eq!(go.window, None);
     assert!(go.upstream_reset_at.is_none());
     let free = rate(ErrorProfile::ZenFree, "5-hour usage limit reached", None);
     assert_eq!(free.scope, Scope::SharedFreeEgress);
@@ -186,9 +178,9 @@ fn malformed_huge_reset_text_cannot_panic_or_persist() {
 fn diagnostic_serialization_preserves_window_and_evidence() {
     let value =
         serde_json::to_value(rate(ErrorProfile::CommandCodeGoat, GOAT, Some("90"))).unwrap();
-    assert_eq!(value["window"], "week");
-    assert_eq!(value["rule_id"], "goat.plan_window");
-    assert_eq!(value["rule_version"], 1);
+    assert!(value["window"].is_null());
+    assert_eq!(value["rule_id"], "http.429.temporary");
+    assert_eq!(value["rule_version"], 2);
     assert!(value.get("body").is_none());
 }
 #[test]
@@ -201,4 +193,23 @@ fn echoed_limit_text_outside_message_is_not_account_evidence() {
     assert_eq!(f.scope, Scope::Unspecified);
     assert!(f.decide().persist_reset.is_none());
     assert!(!f.decide().wait_for_recovery);
+}
+
+#[test]
+fn temporary_backoff_uses_valid_retry_after_or_thirty_seconds() {
+    use super::decode::temporary_429_deadline;
+    for value in [None, Some("bad"), Some("0")] {
+        assert_eq!(
+            temporary_429_deadline(value, now()),
+            RetryHint::Until(now() + Duration::seconds(30))
+        );
+    }
+    assert_eq!(
+        temporary_429_deadline(Some("120"), now()),
+        RetryHint::Until(now() + Duration::seconds(120))
+    );
+    assert_eq!(
+        temporary_429_deadline(Some("99999999999999999999999999"), now()),
+        RetryHint::Unbounded
+    );
 }

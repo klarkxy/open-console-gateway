@@ -153,6 +153,50 @@ pub(crate) fn record_evidence_on(
     save_on(conn, &episode, &next)
 }
 
+/// Called under the usage coordinator's captured identity check and DB lock.
+/// A complete official snapshot replaces previous quota evidence, including
+/// healthy windows; the separate short 429 backoff is deliberately untouched.
+pub(crate) fn reconcile_official_go_usage(
+    conn: &Connection,
+    account_id: &str,
+    snapshot: &crate::go_usage::GoUsageSnapshot,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    let evidence = crate::usage_sync::official_go_quota_evidence(snapshot, now);
+    let Some((credential_id, version, key_cipher, previous)) =
+        load_for_legacy_on(conn, account_id)?
+    else {
+        return Ok(());
+    };
+    let mut next = None;
+    for item in evidence {
+        next = Some(PersistedQuotaRecovery::from_evidence(
+            next.as_ref(),
+            &item,
+            now,
+            None,
+        ));
+    }
+    let Some(mut next) = next else {
+        return clear_for_account_on(conn, account_id);
+    };
+    next.epoch = previous
+        .as_ref()
+        .map_or(1, |row| row.epoch.saturating_add(1));
+    save_on(
+        conn,
+        &QuotaEpisode {
+            credential_id,
+            account_id: account_id.into(),
+            credential_version: version,
+            epoch: next.epoch,
+            key_cipher,
+        },
+        &next,
+    )?;
+    Ok(())
+}
+
 pub(crate) fn release_nonquota_trial_on(
     conn: &Connection,
     episode: &QuotaEpisode,

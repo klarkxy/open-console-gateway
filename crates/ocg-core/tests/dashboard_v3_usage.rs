@@ -384,6 +384,7 @@ async fn provider_usage_refresh_reuses_official_go_coordinator_and_returns_provi
                 monthly_percent: 10.0,
                 rolling_resets_in_minutes: 180,
                 weekly_resets_in_minutes: 1_440,
+                monthly_resets_in_minutes: 43200,
                 earliest_resets_in_minutes: 180,
             })
         })

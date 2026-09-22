@@ -10,10 +10,12 @@ function summary(overrides: Partial<ConnectionSummary> = {}): ConnectionSummary 
     adapterKind: "configurable_http",
     authorization: "missing",
     credentialCount: 0,
+    credentialCreate: { allowed: true, materialKinds: ["api_key"], reason: null },
     displayFamily: "Lab",
     eligibility: { reason: "missing_credential", state: "ineligible" },
     enabledCredentialCount: 0,
     endpoints: [{
+      officialBalance: false,
       authScheme: "bearer",
       connectionId: "conn-1",
       id: "ep-1",

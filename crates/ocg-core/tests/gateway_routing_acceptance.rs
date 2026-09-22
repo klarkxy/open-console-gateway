@@ -250,6 +250,10 @@ async fn fallthrough_429_then_403_then_success_across_three_upstreams() {
     assert_eq!(logs[0].http_status, Some(429));
     assert_eq!(logs[1].account_id, ids[1]);
     assert_eq!(logs[1].http_status, Some(403));
+    assert!(
+        h.account(&ids[1]).auth_error.is_none(),
+        "a 403 is request-local and must not disable the Key"
+    );
     assert_eq!(logs[2].account_id, ids[2]);
     assert!(logs[2].status.starts_with("success"), "{logs:?}");
     let request_ids = logs
@@ -434,6 +438,21 @@ async fn unknown_custom_429_does_not_invent_shared_pool_exhaustion() {
     );
     assert_eq!(journal.keys(), [DUMMY_A, DUMMY_B]);
     let logs = sorted_logs(&h.state);
+    assert!(h.account(&first_id).cooldown_until.is_none());
+    assert!(h.account(&first_id).auth_error.is_none());
+    let credential_id = identity_refs_for(&h.state, &first_id).credential_id;
+    let (status, credentials) = v4_get(h.port, "/credentials").await;
+    assert_eq!(status, StatusCode::OK, "{credentials}");
+    let credential = credentials["credentials"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == credential_id)
+        .unwrap();
+    assert!(
+        credential.get("quotaRecovery").is_none(),
+        "an unknown 429 must not create durable quota state: {credential}"
+    );
     assert!(
         logs.iter()
             .any(|log| log.account_id == sibling_id && log.http_status == Some(200)),

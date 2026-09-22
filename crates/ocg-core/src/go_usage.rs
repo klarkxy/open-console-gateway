@@ -35,8 +35,8 @@ pub enum GoUsageWindowStatus {
 
 /// Pure data snapshot used to calibrate local Go usage windows.
 ///
-/// `monthly` `resetsAt` is validated when fetching but is not converted into
-/// local remaining minutes — month reset still follows `purchase_date`.
+/// Official reset minutes are retained for quota evidence. Local monthly
+/// calibration still follows `purchase_date`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GoUsageSnapshot {
     pub rolling_status: GoUsageWindowStatus,
@@ -47,6 +47,7 @@ pub struct GoUsageSnapshot {
     pub monthly_percent: f64,
     pub rolling_resets_in_minutes: i64,
     pub weekly_resets_in_minutes: i64,
+    pub monthly_resets_in_minutes: i64,
     /// Earliest of the three official `resetsAt` values, in whole minutes from
     /// the parse clock. Used to schedule a post-reset reconciliation.
     pub earliest_resets_in_minutes: i64,
@@ -180,6 +181,7 @@ fn parse_go_usage_body(bytes: &[u8], now: DateTime<Utc>) -> Result<GoUsageSnapsh
         monthly_percent: monthly.percent,
         rolling_resets_in_minutes,
         weekly_resets_in_minutes,
+        monthly_resets_in_minutes,
         earliest_resets_in_minutes,
     })
 }

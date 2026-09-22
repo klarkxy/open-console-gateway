@@ -193,6 +193,12 @@ fn operator_reset_fences_late_reply_and_free_scope_cannot_be_reset_from_account(
     runtime.reset_account("free");
     assert!(runtime.acquire(free, wall, mono).is_err());
     assert!(runtime.acquire(resource(1), wall, mono).is_ok());
+    assert!(
+        runtime
+            .free_egress_retry_until(wall, mono)
+            .is_some_and(|until| until > wall),
+        "shared Free waits must expose a soonest deadline for all-waiting 429"
+    );
 }
 
 #[test]

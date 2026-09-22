@@ -28,10 +28,11 @@ use ocg_domain::dynamic::DynamicAuthKind;
 use ocg_domain::ids::CUSTOM_PROVIDER_ID;
 use ocg_domain::provider::provider_origin_from_preset;
 
+use super::identities::{CredentialCreateFacts, credential_create_capability};
 use super::templates::{is_cpa_id, offering_kind};
 use super::types::{
     ConnectionEndpoint, ConnectionLifecycle, ConnectionList, ConnectionSummary, ConnectionTarget,
-    Eligibility, LegacyIdentity, OfferingKind, TemplateRef,
+    CredentialCreateCapabilityDto, Eligibility, LegacyIdentity, OfferingKind, TemplateRef,
 };
 
 const TEMPLATE_VERSION: u32 = 1;
@@ -39,6 +40,10 @@ const TEMPLATE_VERSION: u32 = 1;
 pub(super) async fn list_connections(
     State(state): State<CoreState>,
 ) -> Result<Json<ConnectionList>, V3ApiError> {
+    list_connections_locked(&state).map(Json)
+}
+
+fn list_connections_locked(state: &CoreState) -> Result<ConnectionList, V3ApiError> {
     let _settings_update = state.settings_update.lock();
     let now = Utc::now();
     let contracts = state.provider_contracts();
@@ -113,6 +118,14 @@ pub(super) async fn list_connections(
         connections.push(project_builtin(&plan, &group, &contracts, now));
     }
 
+    let destination_by_dynamic: HashMap<&str, &Destination> = projection
+        .destinations
+        .iter()
+        .filter_map(|destination| match &destination.legacy {
+            LegacyDestinationRef::Dynamic(id) => Some((id.as_str(), destination)),
+            _ => None,
+        })
+        .collect();
     for runtime in dynamic_providers.iter() {
         let empty = Vec::new();
         let indexes = by_provider.get(&runtime.id).unwrap_or(&empty);
@@ -121,10 +134,9 @@ pub(super) async fn list_connections(
             .map(|index| (&accounts[*index].0, accounts[*index].1))
             .collect();
         let mut summary = project_dynamic(runtime, &group, now, draft_ids.contains(&runtime.id));
-        if let Some(destination) = projection.destinations.iter().find(|destination| {
-            matches!(&destination.legacy, LegacyDestinationRef::Dynamic(id) if id == &runtime.id)
-        }) {
-            let connection_id = connection_id_for_legacy(LegacyConnectionKind::DynamicProvider, &runtime.id);
+        if let Some(destination) = destination_by_dynamic.get(runtime.id.as_str()) {
+            let connection_id =
+                connection_id_for_legacy(LegacyConnectionKind::DynamicProvider, &runtime.id);
             let (endpoints, targets) = http_connection_members(destination, &connection_id);
             summary.endpoints = endpoints;
             summary.targets = targets;
@@ -146,21 +158,33 @@ pub(super) async fn list_connections(
             )
         })
         .collect::<HashMap<_, _>>();
+    let mut custom_indexes_by_destination: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (index, (account, _)) in accounts.iter().enumerate() {
+        if account.provider_id != CUSTOM_PROVIDER_ID {
+            continue;
+        }
+        let Some(destination_id) = destination_by_account.get(account.id.as_str()).copied() else {
+            continue;
+        };
+        custom_indexes_by_destination
+            .entry(destination_id)
+            .or_default()
+            .push(index);
+    }
     let mut projected_custom_accounts = HashSet::new();
     for destination in projection
         .destinations
         .iter()
         .filter(|destination| matches!(destination.legacy, LegacyDestinationRef::CustomAccount(_)))
     {
-        let group = accounts
+        let empty = Vec::new();
+        let indexes = custom_indexes_by_destination
+            .get(destination.id.as_str())
+            .unwrap_or(&empty);
+        let group: Vec<_> = indexes
             .iter()
-            .filter(|(account, _)| {
-                account.provider_id == CUSTOM_PROVIDER_ID
-                    && destination_by_account.get(account.id.as_str()).copied()
-                        == Some(destination.id.as_str())
-            })
-            .map(|row| (&row.0, row.1))
-            .collect::<Vec<_>>();
+            .map(|index| (&accounts[*index].0, accounts[*index].1))
+            .collect();
         projected_custom_accounts.extend(group.iter().map(|(account, _)| account.id.as_str()));
         connections.push(project_custom_destination(destination, &group, now));
     }
@@ -177,10 +201,10 @@ pub(super) async fn list_connections(
         connections.push(project_custom(account, *status, &runtime, now));
     }
 
-    Ok(Json(ConnectionList {
-        revision: ControlRevision::from_state(&state),
+    Ok(ConnectionList {
+        revision: ControlRevision::from_state(state),
         connections,
-    }))
+    })
 }
 
 fn http_connection_members(
@@ -279,6 +303,7 @@ fn project_custom_destination(
         display_family: Some("Custom".to_string()),
         offering: OfferingKind::Api,
         onboarding_draft: false,
+        credential_create: credential_create_capability(&CredentialCreateFacts::CustomAccount),
     })
 }
 
@@ -337,6 +362,7 @@ fn project_builtin(
         display_family: Some(plan.display_family.to_string()),
         offering: offering_kind(builtin_offering(plan.provider_id)),
         onboarding_draft: false,
+        credential_create: credential_create_capability(&CredentialCreateFacts::Builtin(plan)),
     })
 }
 
@@ -380,6 +406,10 @@ fn project_dynamic(
         display_family: None,
         offering: offering_kind(offering),
         onboarding_draft,
+        credential_create: credential_create_capability(&CredentialCreateFacts::Dynamic {
+            runtime,
+            onboarding_draft,
+        }),
     })
 }
 
@@ -442,6 +472,7 @@ fn project_custom(
         display_family: Some("Custom".to_string()),
         offering: OfferingKind::Api,
         onboarding_draft: false,
+        credential_create: credential_create_capability(&CredentialCreateFacts::CustomAccount),
     })
 }
 
@@ -587,6 +618,7 @@ struct SummaryDraft<'a> {
     display_family: Option<String>,
     offering: OfferingKind,
     onboarding_draft: bool,
+    credential_create: CredentialCreateCapabilityDto,
 }
 
 fn finish_summary(draft: SummaryDraft<'_>) -> ConnectionSummary {
@@ -605,6 +637,7 @@ fn finish_summary(draft: SummaryDraft<'_>) -> ConnectionSummary {
         display_family,
         offering,
         onboarding_draft,
+        credential_create,
     } = draft;
     let domain_lifecycle =
         if !accounts.is_empty() && accounts.iter().all(|(account, _)| !account.enabled) {
@@ -651,6 +684,7 @@ fn finish_summary(draft: SummaryDraft<'_>) -> ConnectionSummary {
         None
     };
     ConnectionSummary {
+        credential_create,
         id: connection_id.to_string(),
         name,
         origin,
@@ -684,6 +718,9 @@ fn endpoint_dto(
     locked: bool,
 ) -> ConnectionEndpoint {
     ConnectionEndpoint {
+        official_balance: url
+            .as_deref()
+            .is_some_and(crate::official_service::has_official_balance),
         id: id.as_ref().to_string(),
         connection_id: connection_id.to_string(),
         operation,
@@ -693,3 +730,6 @@ fn endpoint_dto(
         locked,
     }
 }
+
+#[cfg(test)]
+mod tests;

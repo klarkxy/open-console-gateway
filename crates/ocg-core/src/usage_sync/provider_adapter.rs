@@ -55,6 +55,21 @@ pub fn supports_authoritative_auto_sync(provider_id: &str) -> bool {
         .is_some_and(|capability| capability.automatic_sync && capability.authoritative_for_quota)
 }
 
+/// Official counters that a 429 may refresh without delaying fallback.
+/// GOAT/CN stay `authoritative_for_quota=false`: calibration only.
+pub fn supports_reactive_usage_refresh(provider_id: &str) -> bool {
+    use crate::provider::ProviderAdapterKind;
+    matches!(
+        ProviderAdapterKind::from_provider_id(provider_id),
+        Some(
+            ProviderAdapterKind::OpenCodeGo
+                | ProviderAdapterKind::CommandCodeGoat
+                | ProviderAdapterKind::MiniMaxCn
+                | ProviderAdapterKind::KimiCn
+        )
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

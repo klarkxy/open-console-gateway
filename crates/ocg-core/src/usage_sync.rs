@@ -5,6 +5,7 @@
 //! Manual and background paths share one secure fetch + key CAS implementation.
 
 pub mod provider_adapter;
+mod reactive;
 
 use crate::go_usage::{GoUsageError, GoUsageSnapshot};
 use crate::kernel::pricing::PricingLimits;
@@ -13,6 +14,8 @@ use crate::usage_sync::provider_adapter::supports_authoritative_auto_sync;
 use chrono::{DateTime, Duration, Utc};
 use futures_util::future::FutureExt;
 use parking_lot::Mutex as ParkingMutex;
+pub(crate) use reactive::official_go_quota_evidence;
+pub use reactive::spawn_reactive_usage_refresh;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::future::Future;
@@ -34,10 +37,6 @@ pub const ACTIVITY_LOOKBACK: Duration = Duration::hours(24);
 pub const EXPEDITE_THRESHOLD_PERCENT: f64 = 80.0;
 /// Minimum gap between expedited reconciliations for one account.
 pub const EXPEDITE_GUARD: Duration = Duration::minutes(15);
-/// Lower bound for delayed official sync after a real inference 429.
-pub const INFERENCE_429_DELAY_MIN: Duration = Duration::minutes(1);
-/// Upper bound for delayed official sync after a real inference 429.
-pub const INFERENCE_429_DELAY_MAX: Duration = Duration::minutes(2);
 /// Bounded jitter after an official window reset before reconciling.
 pub const RESET_JITTER_MAX: Duration = Duration::minutes(3);
 /// Startup deferral spread so a restart does not stampede official fetches.
@@ -176,8 +175,77 @@ pub(crate) struct OfficialUsageRefreshObservation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UsageSyncCommitAuthorizationRejected;
 
+/// Captured credential/binding generation for a usage request. The internal
+/// routing row is never serialized or logged.
+#[derive(Clone)]
+pub struct UsageRefreshIdentity {
+    credential: crate::routing_snapshot::ExecutionCredential,
+    updated_at: String,
+}
+impl UsageRefreshIdentity {
+    pub(crate) fn capture(
+        db: &crate::db::Database,
+        account_id: &str,
+    ) -> anyhow::Result<Option<Self>> {
+        let Some(credential) = crate::routing_snapshot::RoutingSnapshot::load(db)?
+            .credentials
+            .into_iter()
+            .find(|row| row.id == account_id)
+        else {
+            return Ok(None);
+        };
+        let updated_at = db.conn.query_row(
+            "SELECT updated_at FROM credentials WHERE id = ?1",
+            [&credential.credential_id],
+            |row| row.get(0),
+        )?;
+        Ok(Some(Self {
+            credential,
+            updated_at,
+        }))
+    }
+    pub(crate) fn is_current(&self, db: &crate::db::Database) -> anyhow::Result<bool> {
+        let Some(live) = Self::capture(db, &self.credential.id)? else {
+            return Ok(false);
+        };
+        let a = &self.credential;
+        let b = &live.credential;
+        Ok(self.updated_at == live.updated_at
+            && a.credential_id == b.credential_id
+            && a.credential_version == b.credential_version
+            && a.key_cipher == b.key_cipher
+            && a.provider_id == b.provider_id
+            && a.destination_id == b.destination_id
+            && a.binding_id == b.binding_id
+            && a.binding_enabled == b.binding_enabled
+            && a.authorization_connection_id == b.authorization_connection_id
+            && a.scope == b.scope
+            && a.grants == b.grants
+            && a.ready == b.ready
+            && serde_json::to_string(&a.quota_recovery)?
+                == serde_json::to_string(&b.quota_recovery)?)
+    }
+}
+
 /// Persistence operations held under one database lock by [`UsageSyncHost`].
 pub trait UsageSyncStore {
+    fn capture_usage_identity(
+        &self,
+        _account_id: &str,
+    ) -> anyhow::Result<Option<UsageRefreshIdentity>> {
+        Ok(None)
+    }
+    fn usage_identity_is_current(&self, _identity: &UsageRefreshIdentity) -> anyhow::Result<bool> {
+        Ok(false)
+    }
+    fn reconcile_authoritative_usage(
+        &self,
+        _account_id: &str,
+        _snapshot: &GoUsageSnapshot,
+        _now: DateTime<Utc>,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
     fn list_accounts(&self) -> anyhow::Result<Vec<Account>>;
     fn get_account(&self, account_id: &str) -> anyhow::Result<Option<Account>>;
     fn account_usage_sync_state(
@@ -265,6 +333,8 @@ struct InflightEntry {
 
 /// Process-wide gates for concurrency-1, in-flight dedupe, and wakeups.
 pub struct UsageSyncRuntime {
+    #[cfg(debug_assertions)]
+    reactive_enabled_for_test: AtomicBool,
     global: AsyncMutex<()>,
     inflight: AsyncMutex<HashMap<String, InflightEntry>>,
     inflight_generation: AtomicU64,
@@ -291,6 +361,8 @@ impl Default for UsageSyncRuntime {
 impl UsageSyncRuntime {
     pub fn new() -> Self {
         Self {
+            #[cfg(debug_assertions)]
+            reactive_enabled_for_test: AtomicBool::new(true),
             global: AsyncMutex::new(()),
             inflight: AsyncMutex::new(HashMap::new()),
             inflight_generation: AtomicU64::new(1),
@@ -300,6 +372,24 @@ impl UsageSyncRuntime {
             jitter: ParkingMutex::new(None),
             fetch: ParkingMutex::new(None),
             before_inflight_cleanup: ParkingMutex::new(None),
+        }
+    }
+
+    /// Keep inference-only loopback tests from calling optional official APIs.
+    #[cfg(debug_assertions)]
+    pub fn set_reactive_refresh_enabled_for_test(&self, enabled: bool) {
+        self.reactive_enabled_for_test
+            .store(enabled, Ordering::Relaxed);
+    }
+
+    pub(crate) fn reactive_refresh_enabled(&self) -> bool {
+        #[cfg(debug_assertions)]
+        {
+            return self.reactive_enabled_for_test.load(Ordering::Relaxed);
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            true
         }
     }
 
@@ -326,6 +416,9 @@ impl UsageSyncRuntime {
     }
 
     pub fn clear_test_seams(&self) {
+        #[cfg(debug_assertions)]
+        self.reactive_enabled_for_test
+            .store(true, Ordering::Relaxed);
         *self.clock.lock() = None;
         *self.jitter.lock() = None;
         *self.fetch.lock() = None;
@@ -366,13 +459,6 @@ fn random_jitter01() -> f64 {
 fn scale_duration(base: Duration, jitter01: f64) -> Duration {
     let millis = base.num_milliseconds().max(0) as f64;
     Duration::milliseconds((millis * jitter01.clamp(0.0, 1.0)).round() as i64)
-}
-
-fn duration_between(min: Duration, max: Duration, jitter01: f64) -> Duration {
-    if max <= min {
-        return min;
-    }
-    min + scale_duration(max - min, jitter01)
 }
 
 /// Failure backoff ladder: 5m → 15m → 1h → 6h (capped).
@@ -456,10 +542,6 @@ pub fn compute_next_after_failure(
     now + base + jitter
 }
 
-pub fn compute_inference_429_delay(now: DateTime<Utc>, jitter01: f64) -> DateTime<Utc> {
-    now + duration_between(INFERENCE_429_DELAY_MIN, INFERENCE_429_DELAY_MAX, jitter01)
-}
-
 pub fn compute_startup_deferral(
     now: DateTime<Utc>,
     account_id: &str,
@@ -532,55 +614,6 @@ pub fn active_cadence_pull_proposal(
     let active_due = last_success + ACTIVE_CADENCE;
     let proposal = if active_due <= now { now } else { active_due };
     (proposal < current_next).then_some(proposal)
-}
-
-/// Schedule a delayed official reconciliation after a real inference 429.
-/// Never performs the network call inline and never touches cooldown state.
-///
-/// Intentionally allowed to pull earlier than a failure-backoff floor: the
-/// 1–2 minute post-429 event is an explicit override of cadence/backoff
-/// scheduling, tested separately from threshold/cadence pulls.
-pub fn schedule_after_inference_429(state: &impl UsageSyncHost, account_id: &str) {
-    let now = state.usage_runtime().now();
-    let jitter = state.usage_runtime().jitter01();
-    let proposal = compute_inference_429_delay(now, jitter);
-    let scheduled = state.with_sync_store(|store| {
-        let supported = match store.get_account(account_id) {
-            Ok(Some(account)) => {
-                supports_authoritative_auto_sync(&account.provider_id)
-            }
-            Ok(None) => false,
-            Err(error) => {
-                let _ = store.log_gateway(
-                    "warn",
-                    "usage_sync",
-                    &format!(
-                        "failed to resolve provider before post-429 usage sync for {account_id}: {error}"
-                    ),
-                );
-                return false;
-            }
-        };
-        if !supported {
-            // GOAT has explicit official refresh but no automatic-sync
-            // contract, and must not be coupled to inference cooldown or
-            // eligibility. Zen Free uses its separate egress-IP/global path.
-            return false;
-        }
-        if let Err(error) = store.pull_account_usage_sync_next_eligible(account_id, proposal, false)
-        {
-            let _ = store.log_gateway(
-                "warn",
-                "usage_sync",
-                &format!("failed to schedule post-429 usage sync for {account_id}: {error}"),
-            );
-            return false;
-        }
-        true
-    });
-    if scheduled {
-        state.usage_runtime().wake();
-    }
 }
 
 /// Process-level workers owned by a [`UsageSyncHost`].
@@ -827,7 +860,10 @@ pub(crate) async fn refresh_official_usage_with_authorization<H: UsageSyncHost>(
     trigger: UsageSyncTrigger,
     authorization: UsageSyncCommitAuthorization,
 ) -> OfficialUsageRefreshObservation {
-    if trigger == UsageSyncTrigger::Manual {
+    if matches!(
+        trigger,
+        UsageSyncTrigger::Manual | UsageSyncTrigger::Inference429
+    ) {
         let now = state.usage_runtime().now();
         let sync = match state.with_sync_store(|store| store.account_usage_sync_state(account_id)) {
             Ok(sync) => sync,
@@ -979,9 +1015,15 @@ async fn execute_official_usage_refresh(
     let config = state.config();
 
     // Policy exclusions: do not begin an attempt / do not write backoff.
-    let account = {
-        match state.with_sync_store(|store| store.get_account(account_id)) {
-            Ok(Some(account)) => account,
+    let (account, identity) = {
+        match state.with_sync_store(|store| -> anyhow::Result<_> {
+            let Some(account) = store.get_account(account_id)? else {
+                return Ok(None);
+            };
+            let identity = store.capture_usage_identity(account_id)?;
+            Ok(Some((account, identity)))
+        }) {
+            Ok(Some(captured)) => captured,
             Ok(None) => return Err(OfficialUsageRefreshError::NotFound),
             Err(error) => {
                 // DB read failed after scheduler selected the account: treat as
@@ -1010,7 +1052,13 @@ async fn execute_official_usage_refresh(
     let plaintext = match state.decrypt_account_key(&key_cipher) {
         Ok(key) => key,
         Err(error) => {
-            record_attempt_failure(state, account_id, now, authorization)?;
+            record_current_attempt_failure(
+                state,
+                account_id,
+                now,
+                authorization,
+                identity.as_ref(),
+            )?;
             return Err(OfficialUsageRefreshError::Internal(error.to_string()));
         }
     };
@@ -1029,18 +1077,31 @@ async fn execute_official_usage_refresh(
     let snapshot = match snapshot {
         Ok(snapshot) => snapshot,
         Err(error) => {
-            record_attempt_failure(state, account_id, now, authorization)?;
+            record_current_attempt_failure(
+                state,
+                account_id,
+                now,
+                authorization,
+                identity.as_ref(),
+            )?;
             return Err(OfficialUsageRefreshError::Upstream(error));
         }
     };
 
+    let quota_observed_at = state.usage_runtime().now();
     let active = {
         match state.with_sync_store(|store| {
             store.account_has_local_activity_since(account_id, now - ACTIVITY_LOOKBACK)
         }) {
             Ok(active) => active,
             Err(error) => {
-                record_attempt_failure(state, account_id, now, authorization)?;
+                record_current_attempt_failure(
+                    state,
+                    account_id,
+                    now,
+                    authorization,
+                    identity.as_ref(),
+                )?;
                 return Err(OfficialUsageRefreshError::Internal(error.to_string()));
             }
         }
@@ -1050,9 +1111,14 @@ async fn execute_official_usage_refresh(
         compute_next_after_success(now, active, snapshot.earliest_resets_in_minutes, jitter);
     let next_allowed = now + MANUAL_THROTTLE;
     let usage = {
-        let committed = state
+        let committed: anyhow::Result<Option<UsageWindow>> = state
             .with_authorized_sync_store(authorization, |store| {
-                store.commit_official_usage_sync_success(
+                if let Some(identity) = &identity {
+                    if !store.usage_identity_is_current(identity)? {
+                        return Ok(None);
+                    }
+                }
+                let usage = store.commit_official_usage_sync_success(
                     account_id,
                     &key_cipher,
                     &snapshot,
@@ -1062,19 +1128,39 @@ async fn execute_official_usage_refresh(
                         next_eligible_at: next_eligible,
                         mark_expedited: trigger == UsageSyncTrigger::Expedited,
                     },
-                )
+                )?;
+                if usage.is_some() {
+                    store.reconcile_authoritative_usage(
+                        account_id,
+                        &snapshot,
+                        quota_observed_at,
+                    )?;
+                }
+                Ok(usage)
             })
             .map_err(|_| commit_authorization_conflict())?;
         match committed {
             Ok(Some(usage)) => usage,
             Ok(None) => {
-                record_attempt_failure(state, account_id, now, authorization)?;
+                record_current_attempt_failure(
+                    state,
+                    account_id,
+                    now,
+                    authorization,
+                    identity.as_ref(),
+                )?;
                 return Err(OfficialUsageRefreshError::Conflict(
                     "account key or setup changed while refreshing official Go usage",
                 ));
             }
             Err(error) => {
-                record_attempt_failure(state, account_id, now, authorization)?;
+                record_current_attempt_failure(
+                    state,
+                    account_id,
+                    now,
+                    authorization,
+                    identity.as_ref(),
+                )?;
                 return Err(OfficialUsageRefreshError::Internal(error.to_string()));
             }
         }
@@ -1088,6 +1174,16 @@ async fn execute_official_usage_refresh(
     })
 }
 
+fn record_current_attempt_failure(
+    state: &impl UsageSyncHost,
+    account_id: &str,
+    now: DateTime<Utc>,
+    authorization: &UsageSyncCommitAuthorization,
+    identity: Option<&UsageRefreshIdentity>,
+) -> Result<(), OfficialUsageRefreshError> {
+    record_attempt_failure_guarded(state, account_id, now, authorization, identity)
+}
+
 /// Record a safe retry/backoff outcome for any begun attempt that did not
 /// succeed. Never logs keys, ciphertext, or upstream bodies. If persistence
 /// itself fails, emit only a sanitized scheduler diagnostic.
@@ -1097,9 +1193,24 @@ fn record_attempt_failure(
     now: DateTime<Utc>,
     authorization: &UsageSyncCommitAuthorization,
 ) -> Result<(), OfficialUsageRefreshError> {
+    record_attempt_failure_guarded(state, account_id, now, authorization, None)
+}
+
+fn record_attempt_failure_guarded(
+    state: &impl UsageSyncHost,
+    account_id: &str,
+    now: DateTime<Utc>,
+    authorization: &UsageSyncCommitAuthorization,
+    identity: Option<&UsageRefreshIdentity>,
+) -> Result<(), OfficialUsageRefreshError> {
     let jitter = state.usage_runtime().jitter01();
     state
         .with_authorized_sync_store(authorization, |store| {
+            if let Some(identity) = identity {
+                if !store.usage_identity_is_current(identity).unwrap_or(false) {
+                    return;
+                }
+            }
             let current = store.account_usage_sync_state(account_id).ok().flatten();
             let streak = current.as_ref().map(|s| s.failure_streak).unwrap_or(0) + 1;
             let next = compute_next_after_failure(now, streak as u32, jitter);

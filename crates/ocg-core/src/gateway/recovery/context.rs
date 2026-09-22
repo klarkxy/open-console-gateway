@@ -26,6 +26,15 @@ impl ResourceSet {
         free_contract: bool,
     ) -> Result<Self> {
         let snapshot = RoutingSnapshot::load(db)?;
+        Self::from_snapshot(&snapshot, account, endpoint, model, free_contract)
+    }
+    pub(crate) fn from_snapshot(
+        snapshot: &RoutingSnapshot,
+        account: &ExecutionCredential,
+        endpoint: &str,
+        model: &str,
+        free_contract: bool,
+    ) -> Result<Self> {
         let selected = snapshot
             .projection
             .credentials

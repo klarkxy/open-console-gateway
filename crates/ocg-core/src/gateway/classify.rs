@@ -5,7 +5,6 @@ use crate::models::{UpstreamChannel, UsageWindowKind};
 pub(crate) use ocg_gateway::classify::{
     PreflightKind, ProviderErrorClass, RateLimitFallback, StreamClassifyInput,
     TransportClassifyInput, classify_preflight, classify_stream, classify_transport,
-    schedule_go_usage_sync,
 };
 
 /// Host compatibility wrapper: converts [`UpstreamChannel::Free`] to the

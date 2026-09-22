@@ -2,7 +2,7 @@ use super::*;
 use crate::alias::{self, ResolvedModel, RuntimeCatalogs};
 use crate::crypto::{KeyCipher, StaticKeyCipher};
 use crate::custom::CustomAccountRuntime;
-use crate::gateway::protocol::{ApiFormat, parse_client_request};
+use crate::gateway::protocol::{ApiFormat, is_known_model, parse_client_request};
 use crate::gateway::provider_adapter::install_goat_loopback_route_for_test;
 use crate::goat::GoatAccountRuntime;
 use crate::models::{
@@ -11,17 +11,19 @@ use crate::models::{
 use crate::provider::{
     COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS, COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
     COMMAND_CODE_PROVIDER_ID, CPA_ACCOUNT_ID, CPA_PROVIDER_ID, CUSTOM_PROVIDER_ID,
-    ConnectionVerificationStatus, CredentialKind, OPENCODE_PROVIDER_ID,
-    OPENCODE_ZEN_FREE_PROVIDER_ID, ProviderAdapterKind, QuotaScope, UpstreamProtocolKind,
-    ZEN_FREE_ACCOUNT_ID, ZEN_FREE_ACCOUNT_NAME,
+    ConnectionVerificationStatus, CredentialKind, KIMI_PROVIDER_ID, MINIMAX_PROVIDER_ID,
+    OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID, ProviderAdapterKind, QuotaScope,
+    UpstreamProtocolKind, ZEN_FREE_ACCOUNT_ID, ZEN_FREE_ACCOUNT_NAME,
 };
+use crate::routing_snapshot::{ExecutionCredential, RoutingSnapshot};
 use bytes::Bytes;
 use chrono::Utc;
+use ocg_domain::connection::{LegacyConnectionKind, connection_id_for_legacy};
 use ocg_domain::credential::{AuthState, ModelScope};
 use ocg_domain::destination::Credential as DestinationCredential;
 use ocg_domain::destination::{
-    AdapterKind, AuthScheme, Cooldowns, Destination, Grants, LegacyDestinationRef, ModelResolution,
-    destination_id_for_builtin, destination_id_for_custom_account,
+    AdapterKind, AuthScheme, CatalogModel, Cooldowns, Destination, Grants, LegacyDestinationRef,
+    ModelResolution, destination_id_for_builtin, destination_id_for_custom_account,
     destination_id_for_platform_account, sealed_capabilities,
 };
 use serde_json::json;
@@ -962,52 +964,6 @@ fn materialize_dispatches_builtin_and_custom_through_adapter_kinds() {
             routeable: false
         }
     ));
-}
-
-#[test]
-fn custom_candidate_diagnostic_passthrough_keeps_client_protocol() {
-    let resolved = resolve_with_custom("local-custom", &["local-custom".into()]);
-    assert_eq!(
-        diagnostic_forced_upstream(&resolved, ApiFormat::Responses),
-        Some(ApiFormat::Responses)
-    );
-    assert_eq!(
-        diagnostic_forced_upstream(&resolved, ApiFormat::Messages),
-        Some(ApiFormat::Messages)
-    );
-    let mixed = resolve_with_custom("hy3", &["hy3".into()]);
-    assert_eq!(
-        diagnostic_forced_upstream(&mixed, ApiFormat::Responses),
-        Some(ApiFormat::Responses)
-    );
-    let builtin = alias::resolve("hy3").unwrap();
-    assert_eq!(
-        diagnostic_forced_upstream(&builtin, ApiFormat::Responses),
-        None
-    );
-    let goat = resolve_with_catalogs("claude-sonnet-4-6", &[], &[], &["claude-sonnet-4-6".into()]);
-    assert_eq!(
-        diagnostic_forced_upstream(&goat, ApiFormat::Responses),
-        Some(ApiFormat::Responses)
-    );
-    assert_eq!(
-        diagnostic_forced_upstream(&goat, ApiFormat::Messages),
-        Some(ApiFormat::Messages)
-    );
-    let zen = resolve_with_catalogs(
-        "brand-new-promo",
-        &["brand-new-promo-free".into()],
-        &[],
-        &[],
-    );
-    assert_eq!(
-        diagnostic_forced_upstream(&zen, ApiFormat::ChatCompletions),
-        Some(ApiFormat::ChatCompletions)
-    );
-    assert_eq!(
-        diagnostic_forced_upstream(&zen, ApiFormat::Messages),
-        Some(ApiFormat::ChatCompletions)
-    );
 }
 
 #[test]
@@ -2117,47 +2073,164 @@ fn leftover_row_adapter_comes_from_mapping_catalog_not_account_id() {
     assert_ne!(set.routes[0].routing.account.id, CPA_ACCOUNT_ID);
 }
 
-#[test]
-fn diagnostic_plan_does_not_veto_a_refreshed_go_model_missing_a_static_profile() {
-    for name in [
-        "muse-spark-1.3-contributor",
-        "omen-alpha",
-        "future-go-model",
-    ] {
-        let go = vec![name.to_string()];
-        let resolved = alias::resolve_with_runtime_catalogs(
-            name,
+fn cn_catalog_snapshot(
+    adapter: AdapterKind,
+    provider_id: &str,
+    account_id: &str,
+    model: &str,
+    protocols: &[UpstreamProtocolKind],
+    preferred: UpstreamProtocolKind,
+) -> (RoutingSnapshot, ResolvedModel) {
+    let mut destination =
+        test_destination(adapter, LegacyDestinationRef::Builtin(provider_id.into()));
+    destination.catalog = vec![CatalogModel {
+        public_model: model.into(),
+        upstream_model: model.into(),
+        protocols: protocols.to_vec(),
+        preferred: Some(preferred),
+        enabled: true,
+        upstream_override: None,
+    }];
+    let account = account(
+        account_id,
+        provider_id,
+        CredentialKind::ApiKey,
+        QuotaScope::Key,
+    );
+    let mut credential = ExecutionCredential::from(&account);
+    credential.destination_id = destination.id.clone();
+    credential.authorization_connection_id =
+        connection_id_for_legacy(LegacyConnectionKind::BuiltinProvider, provider_id).to_string();
+    let model_id = destination.catalog[0].public_model.clone();
+    let resolved = match adapter {
+        AdapterKind::Minimax => alias::resolve_with_runtime_catalogs(
+            model,
             RuntimeCatalogs {
-                go: &go,
-                ..Default::default()
+                minimax: std::slice::from_ref(&model_id),
+                ..RuntimeCatalogs::default()
             },
-        )
-        .unwrap();
-        for client in [
-            ApiFormat::ChatCompletions,
-            ApiFormat::Responses,
-            ApiFormat::Messages,
-        ] {
-            assert_eq!(diagnostic_forced_upstream(&resolved, client), Some(client));
-        }
-        assert_eq!(
-            diagnostic_forced_upstream(&resolved, ApiFormat::Gemini),
-            Some(ApiFormat::ChatCompletions)
-        );
-        assert!(alias::resolve_with_runtime_catalogs(name, RuntimeCatalogs::default()).is_err());
+        ),
+        AdapterKind::Kimi => alias::resolve_with_runtime_catalogs(
+            model,
+            RuntimeCatalogs {
+                kimi: std::slice::from_ref(&model_id),
+                ..RuntimeCatalogs::default()
+            },
+        ),
+        _ => panic!("cn catalog fixture is MiniMax/Kimi only"),
     }
-    let go = vec!["grok-4.6".to_string()];
-    let known = alias::resolve_with_runtime_catalogs(
-        "grok-4.6",
-        RuntimeCatalogs {
-            go: &go,
-            ..Default::default()
-        },
-    )
     .unwrap();
+    (
+        RoutingSnapshot {
+            projection: crate::destination_projection::DestinationProjection {
+                destinations: vec![destination],
+                credentials: Vec::new(),
+            },
+            credentials: vec![credential],
+            ollama_pinned: Vec::new(),
+        },
+        resolved,
+    )
+}
+
+fn materialize_cn_catalog(
+    snapshot: &RoutingSnapshot,
+    resolved: &ResolvedModel,
+    client: ApiFormat,
+    model: &str,
+    body: Bytes,
+) -> ExecutionRouteSet {
+    let parsed = parse_client_request(client, body).unwrap();
+    materialize_execution_routes(
+        snapshot,
+        &AppConfig::default(),
+        &parsed,
+        resolved,
+        model,
+        model,
+        None,
+    )
+    .unwrap()
+}
+
+#[test]
+fn catalog_cn_model_absent_static_table_same_protocol_avoids_virtual_conversion() {
+    assert!(!is_known_model("MiniMax-New"));
+    assert!(!is_known_model("kimi-for-coding"));
+
+    let (minimax, resolved) = cn_catalog_snapshot(
+        AdapterKind::Minimax,
+        MINIMAX_PROVIDER_ID,
+        "minimax-fresh",
+        "MiniMax-New",
+        &[
+            UpstreamProtocolKind::ChatCompletions,
+            UpstreamProtocolKind::Messages,
+            UpstreamProtocolKind::Responses,
+        ],
+        UpstreamProtocolKind::Messages,
+    );
+    let chat = materialize_cn_catalog(
+        &minimax,
+        &resolved,
+        ApiFormat::ChatCompletions,
+        "MiniMax-New",
+        chat_body("MiniMax-New"),
+    );
+    assert_eq!(chat.routes.len(), 1, "{:?}", chat.rejections);
+    assert_eq!(chat.routes[0].plan.client, ApiFormat::ChatCompletions);
+    assert_eq!(chat.routes[0].plan.upstream, ApiFormat::ChatCompletions);
+
+    let responses_body = Bytes::from(
+        serde_json::to_vec(&json!({
+            "model": "MiniMax-New",
+            "input": "hi",
+            "store": false,
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "answer",
+                    "schema": {"type": "object"}
+                }
+            }
+        }))
+        .unwrap(),
+    );
+    let responses = materialize_cn_catalog(
+        &minimax,
+        &resolved,
+        ApiFormat::Responses,
+        "MiniMax-New",
+        responses_body,
+    );
+    assert_eq!(responses.routes.len(), 1, "{:?}", responses.rejections);
+    assert_eq!(responses.routes[0].plan.upstream, ApiFormat::Responses);
+    let upstream: serde_json::Value =
+        serde_json::from_slice(&responses.routes[0].plan.body).unwrap();
+    assert_eq!(upstream["text"]["format"]["type"], "json_schema");
+
+    let (kimi, kimi_resolved) = cn_catalog_snapshot(
+        AdapterKind::Kimi,
+        KIMI_PROVIDER_ID,
+        "kimi-fresh",
+        "kimi-for-coding",
+        &[
+            UpstreamProtocolKind::ChatCompletions,
+            UpstreamProtocolKind::Messages,
+        ],
+        UpstreamProtocolKind::ChatCompletions,
+    );
+    let kimi_chat = materialize_cn_catalog(
+        &kimi,
+        &kimi_resolved,
+        ApiFormat::ChatCompletions,
+        "kimi-for-coding",
+        chat_body("kimi-for-coding"),
+    );
+    assert_eq!(kimi_chat.routes.len(), 1, "{:?}", kimi_chat.rejections);
     assert_eq!(
-        diagnostic_forced_upstream(&known, ApiFormat::Responses),
-        None
+        kimi_chat.routes[0].plan.upstream,
+        ApiFormat::ChatCompletions
     );
 }
 
@@ -2359,5 +2432,52 @@ fn typed_rejections_cover_current_materialize_branches() {
     assert_eq!(
         RouteRejectionCode::MappingProtocolIncompatible.as_str(),
         "mapping_protocol_incompatible"
+    );
+}
+
+#[test]
+fn only_actual_candidate_conversion_failures_are_client_errors() {
+    let (mut snapshot, resolved) = cn_catalog_snapshot(
+        AdapterKind::Minimax,
+        MINIMAX_PROVIDER_ID,
+        "minimax-json",
+        "MiniMax-New",
+        &[UpstreamProtocolKind::Messages],
+        UpstreamProtocolKind::Messages,
+    );
+    let body = Bytes::from(serde_json::to_vec(&json!({
+        "model": "MiniMax-New", "messages": [{"role":"user", "content":"hi"}],
+        "response_format": {"type":"json_schema", "json_schema":{"name":"answer", "schema":{"type":"object"}}}
+    })).unwrap());
+    let parsed = parse_client_request(ApiFormat::ChatCompletions, body).unwrap();
+    let config = AppConfig::default();
+    let result = materialize_execution_routes(
+        &snapshot,
+        &config,
+        &parsed,
+        &resolved,
+        "MiniMax-New",
+        "MiniMax-New",
+        None,
+    );
+    let error = result
+        .err()
+        .expect("unsupported conversion must remain a client error");
+    assert_eq!(error.status, axum::http::StatusCode::BAD_REQUEST);
+    snapshot.credentials[0].key_cipher.clear();
+    let unavailable = materialize_execution_routes(
+        &snapshot,
+        &config,
+        &parsed,
+        &resolved,
+        "MiniMax-New",
+        "MiniMax-New",
+        None,
+    )
+    .unwrap();
+    assert!(unavailable.routes.is_empty());
+    assert_eq!(
+        unavailable.rejections[0].code,
+        RouteRejectionCode::CandidateMaterializationFailed
     );
 }

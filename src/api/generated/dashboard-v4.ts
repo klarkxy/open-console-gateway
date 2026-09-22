@@ -16,6 +16,8 @@ export type DashboardApiV4 =
   | Eligibility
   | TemplateRef
   | ConnectionSummary
+  | CredentialCreateCapabilityDto
+  | CredentialCreateUnavailableReasonDto
   | ConnectionList
   | OnboardingCommitRequest
   | OnboardingCommitMode
@@ -166,6 +168,18 @@ export type EligibilityState = "eligible" | "ineligible" | "cooling";
  * Local authorization projection. Unknown is not a verified success.
  */
 export type AuthorizationState = "not_required" | "missing" | "unknown" | "valid" | "invalid";
+export type MaterialKind = "api_key" | "external_reference";
+/**
+ * Why this connection cannot accept another credential through identity creation.
+ */
+export type CredentialCreateUnavailableReasonDto =
+  | "external_integration"
+  | "singleton"
+  | "no_authentication"
+  | "dedicated_account_flow"
+  | "builtin_definition"
+  | "unavailable"
+  | "draft";
 /**
  * V4 connection lifecycle, including persisted onboarding drafts.
  *
@@ -227,7 +241,6 @@ export type ModelScope =
       models: string[];
     };
 export type AuthState = "unknown" | "valid" | "invalid";
-export type MaterialKind = "api_key" | "external_reference";
 export type CredentialPurpose = "inference" | "platform_observer";
 export type IdentityLegacyKind = "account" | "platform_account";
 export type OnboardingTaskKind = "managed_registration";
@@ -414,6 +427,10 @@ export interface ConnectionEndpoint {
   connectionId: string;
   id: string;
   locked: boolean;
+  /**
+   * Official balance support for this exact configured URL, including its path.
+   */
+  officialBalance: boolean;
   operation: EndpointOperation;
   url: string | null;
   wireProtocol: AccountUpstreamProtocol;
@@ -442,6 +459,7 @@ export interface ConnectionSummary {
   adapterKind: string;
   authorization: AuthorizationState;
   credentialCount: number;
+  credentialCreate: CredentialCreateCapabilityDto;
   /**
    * Personal credit setup for Key forms. None means unsupported; an empty
    * list permits custom configuration without a provider preset.
@@ -460,6 +478,14 @@ export interface ConnectionSummary {
   targetCount: number;
   targets: ConnectionTarget[];
   templateRef: TemplateRef | null;
+}
+/**
+ * Server-owned operation capability; writes recheck it against current state.
+ */
+export interface CredentialCreateCapabilityDto {
+  allowed: boolean;
+  materialKinds: MaterialKind[];
+  reason: CredentialCreateUnavailableReasonDto | null;
 }
 export interface CreditPreset {
   configuration: CreditConfiguration;

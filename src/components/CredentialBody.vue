@@ -131,7 +131,7 @@ const usageRefreshAvailable = computed(() => plan.value?.usage_availability === 
 const inferenceEndpointUrl = computed(() => (
   accountInferenceEndpointUrl(props.account, props.identity, props.connections)
 ));
-const balanceRefreshAvailable = computed(() => officialBalanceSupported(inferenceEndpointUrl.value));
+const balanceRefreshAvailable = computed(() => officialBalanceSupported(inferenceEndpointUrl.value, props.connections));
 const creditBalances = computed(() => props.providerUsage?.credit_balances ?? []);
 const showsOfficialBalance = computed(() => (
   balanceRefreshAvailable.value || creditBalances.value.length > 0

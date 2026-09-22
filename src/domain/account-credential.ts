@@ -103,14 +103,15 @@ function selectedInferenceCredential(
 
 /**
  * V4 rotate/binding are hidden for Zen, CPA, no-auth, and observer credentials.
- * Add Key also hides Custom API (dedicated account path) and missing overlay
- * rows rather than inventing ids. Matches backend `resolve_connection_target`.
+ * Add Key consumes the selected connection's current server capability.
+ * Missing connection projections remain unavailable until loaded.
  */
 export function credentialWriteSupport(
   account: Pick<Account, "id" | "provider_id" | "account_type" | "credential_kind" | "setup_step">,
   identity: Identity | null,
   catalog: readonly ProviderCatalogEntry[] | null | undefined = null,
   destination?: AccountCapabilitySource | null,
+  connections: readonly Connection[] = [],
 ): CredentialWriteSupport {
   const hidden: CredentialWriteSupport = {
     rotate: false,
@@ -159,9 +160,8 @@ export function credentialWriteSupport(
   const identityId = identity?.identity.id ?? null;
   const rotate = true;
   const binding = bindingRecord !== null;
-  const create = !caps.endpointOnAccount
-    && !!identityId
-    && !!bindingRecord?.connection_id;
+  const connection = connections.find((row) => row.id === bindingRecord?.connection_id);
+  const create = !!identityId && !!connection && connectionAllowsIdentityCredentialCreate(connection);
   return {
     rotate,
     binding,
@@ -169,7 +169,7 @@ export function credentialWriteSupport(
     credential,
     bindingRecord,
     identityId,
-    unsupportedReason: caps.endpointOnAccount
+    unsupportedReason: connection?.credential_create?.reason === "dedicated_account_flow"
       ? "Custom API 需到账号编辑中添加 Key"
       : null,
   };
@@ -180,8 +180,9 @@ export function accountCredentialMenuOptions(
   identity: Identity | null,
   catalog: readonly ProviderCatalogEntry[] | null | undefined = null,
   destination?: AccountCapabilitySource | null,
+  connections: readonly Connection[] = [],
 ): AccountMenuOption[] {
-  const support = credentialWriteSupport(account, identity, catalog, destination);
+  const support = credentialWriteSupport(account, identity, catalog, destination, connections);
   const options: AccountMenuOption[] = [];
   if (support.rotate) {
     options.push({
@@ -224,27 +225,14 @@ export function shareableInferenceCredentials(
 }
 
 /**
- * Backend `resolve_connection_target`: Custom API dedicated rows, CPA, Zen,
- * no-auth, and singleton/unavailable builtins cannot receive a Key here.
+ * The server shares this projection with the credential mutation guard.
+ * Do not infer creation rights from origin, owner, or provider names.
  */
 export function connectionAllowsIdentityCredentialCreate(
-  connection: Pick<Connection, "legacy" | "origin">,
+  connection: Pick<Connection, "credential_create">,
 ): boolean {
-  if (connection.legacy.kind === "custom_account" || connection.origin === "custom_account") {
-    return false;
-  }
-  const providerId = connection.legacy.id;
-  if (
-    providerId === "cpa"
-    || providerId === "opencode-zen-free"
-    || providerId === "custom"
-  ) {
-    return false;
-  }
-  if (connection.legacy.kind === "dynamic_provider" && connection.origin === "builtin") {
-    return false;
-  }
-  return true;
+  const capability = connection.credential_create;
+  return capability?.allowed === true && capability.materialKinds.includes("api_key");
 }
 
 export function emptyRotateDraft(): CredentialRotateDraft {

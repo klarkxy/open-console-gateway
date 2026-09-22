@@ -18,6 +18,7 @@ pub(crate) enum Cause {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Scope {
+    #[allow(dead_code)] // Recovery compatibility fixtures; inference creates no pool quota facts.
     QuotaPool,
     SharedFreeEgress,
     Unspecified,
@@ -64,7 +65,8 @@ impl FailureFacts {
             persist_reset,
             wait_for_recovery: known_scope
                 && (self.cause == Cause::CreditsExhausted
-                    || (self.cause == Cause::QuotaExhausted && persist_reset.is_none())),
+                    || (self.cause == Cause::QuotaExhausted && persist_reset.is_none())
+                    || (self.scope == Scope::SharedFreeEgress && self.cause == Cause::Transient)),
             // This never replaces a separate plan reset. Both must be satisfied.
             retry_not_before: self.retry_not_before,
             exhaust_free: self.scope == Scope::SharedFreeEgress,

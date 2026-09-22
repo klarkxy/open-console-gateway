@@ -1611,6 +1611,34 @@ impl crate::account_control::AccountControlHost for CoreStateInner {
 }
 
 impl crate::usage_sync::UsageSyncStore for Database {
+    fn capture_usage_identity(
+        &self,
+        account_id: &str,
+    ) -> anyhow::Result<Option<crate::usage_sync::UsageRefreshIdentity>> {
+        let identity = crate::usage_sync::UsageRefreshIdentity::capture(self, account_id)?;
+        anyhow::ensure!(
+            identity.is_some(),
+            "inference credential is unavailable for usage refresh"
+        );
+        Ok(identity)
+    }
+    fn usage_identity_is_current(
+        &self,
+        identity: &crate::usage_sync::UsageRefreshIdentity,
+    ) -> anyhow::Result<bool> {
+        identity.is_current(self)
+    }
+    fn reconcile_authoritative_usage(
+        &self,
+        account_id: &str,
+        snapshot: &crate::go_usage::GoUsageSnapshot,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> anyhow::Result<()> {
+        crate::db::quota_recovery::reconcile_official_go_usage(
+            &self.conn, account_id, snapshot, now,
+        )
+    }
+
     fn list_accounts(&self) -> anyhow::Result<Vec<crate::models::Account>> {
         Database::list_accounts(self)
     }

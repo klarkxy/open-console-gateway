@@ -299,7 +299,7 @@ fn convert_response_json_round_trips_signed_thinking_and_namespace_tools() {
 }
 
 #[test]
-fn convert_response_json_sanitizes_minimax_bogus_cache() {
+fn convert_response_json_preserves_reported_minimax_cache() {
     let messages_to_chat = convert_resp(
         ApiFormat::Messages,
         ApiFormat::ChatCompletions,
@@ -317,7 +317,7 @@ fn convert_response_json_sanitizes_minimax_bogus_cache() {
     assert_eq!(messages_to_chat["usage"]["prompt_tokens"], 40500);
     assert_eq!(
         messages_to_chat["usage"]["prompt_tokens_details"]["cached_tokens"],
-        0
+        40500
     );
 
     let passthrough = convert_resp(
@@ -340,7 +340,7 @@ fn convert_response_json_sanitizes_minimax_bogus_cache() {
     assert_eq!(passthrough["usage"]["prompt_tokens"], 40669);
     assert_eq!(
         passthrough["usage"]["prompt_tokens_details"]["cached_tokens"],
-        0
+        40669
     );
     assert_eq!(passthrough["model"], "minimax-m3");
 }

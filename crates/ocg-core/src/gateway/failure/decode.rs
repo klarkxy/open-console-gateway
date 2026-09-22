@@ -1,14 +1,20 @@
 //! Small static error dialects. No database, selector, retries or state writes.
+//!
+//! Quota exhaustion is not inferred from upstream error prose. A 429 carries
+//! Retry-After and a short temporary backoff; official usage is the Go quota
+//! authority. Zen Free keeps its declared shared-egress scope without a window
+//! parsed from the body.
 use super::{Cause, FailureFacts, RetryHint, Scope};
 use crate::models::UsageWindowKind;
-use crate::upstream_limit::{parse_reset, parse_usage_limit_window};
 use chrono::{DateTime, Datelike, Duration, NaiveDateTime, Utc};
 use ocg_gateway::classify::{ErrorProfile, ProviderErrorClass};
-use serde_json::Value;
+
+/// Default Key-scoped wait when an upstream 429 has no usable Retry-After.
+pub(crate) const TEMPORARY_429_SECS: i64 = 30;
 
 pub(crate) fn decode(
     class: ProviderErrorClass,
-    body: &str,
+    _body: &str,
     retry_after: Option<&str>,
     observed_at: DateTime<Utc>,
 ) -> Option<FailureFacts> {
@@ -19,92 +25,52 @@ pub(crate) fn decode(
         upstream_reset_at: None,
         retry_not_before: retry_after.and_then(|value| parse_retry_after(value, observed_at)),
         rule_id: "http.429.unknown",
-        rule_version: 1,
+        rule_version: 2,
     };
     match class {
-        ProviderErrorClass::InsufficientCredits => {
-            facts.cause = Cause::CreditsExhausted;
-            facts.scope = Scope::QuotaPool;
-            facts.rule_id = "structured.insufficient_credits";
-        }
         ProviderErrorClass::RateLimited {
-            profile: ErrorProfile::CommandCodeGoat,
+            profile:
+                ErrorProfile::OpenCodeGo | ErrorProfile::GenericHttp | ErrorProfile::CommandCodeGoat,
         } => {
-            if let Some(limit) = crate::command_code_rate_limit::parse_command_code_rate_limit(body, observed_at) {
-                facts.cause = Cause::QuotaExhausted;
-                facts.scope = Scope::QuotaPool;
-                facts.window = Some(limit.window);
-                facts.upstream_reset_at = Some(limit.resets_at);
-                facts.rule_id = "goat.plan_window";
-            } else if serde_json::from_str::<Value>(body).ok().is_some_and(|value| {
-                value.pointer("/error/message").and_then(Value::as_str)
-                    == Some("Upstream model provider is temporarily unavailable. Please try again in a moment.")
-                    && value.pointer("/error/code").is_none()
-            }) {
-                facts.cause = Cause::Transient;
-                facts.rule_id = "goat.upstream_transient";
-            }
-        }
-        ProviderErrorClass::RateLimited {
-            profile: ErrorProfile::OpenCodeGo,
-        } => {
-            // This dialect is used only for the sealed Go service, never for a
-            // merely OpenAI-compatible endpoint. Prefer its message field.
-            let json = serde_json::from_str::<Value>(body).ok();
-            let message = json
-                .as_ref()
-                .and_then(|v| v.pointer("/error/message").or_else(|| v.get("message")))
-                .and_then(Value::as_str)
-                .unwrap_or(if json.is_some() { "" } else { body });
-            let kind = json
-                .as_ref()
-                .and_then(|v| v.pointer("/error/type").or_else(|| v.get("type")))
-                .and_then(Value::as_str);
-            let allowed = kind.is_none_or(|kind| {
-                matches!(kind, "error" | "GoUsageLimitError" | "FreeUsageLimitError")
-            });
-            if allowed && let Some(window) = parse_usage_limit_window(message) {
-                facts.cause = Cause::QuotaExhausted;
-                facts.scope = if window == UsageWindowKind::Free {
-                    Scope::SharedFreeEgress
-                } else {
-                    Scope::QuotaPool
-                };
-                facts.window = Some(window);
-                facts.upstream_reset_at = future_reset(message, observed_at);
-                facts.rule_id = "go.usage_window";
-            }
+            facts.cause = Cause::Transient;
+            facts.rule_id = "http.429.temporary";
         }
         ProviderErrorClass::RateLimited {
             profile: ErrorProfile::ZenFree,
         } => {
             // Anonymous Free is an existing, declared shared-egress contract.
-            // Never let misleading paid-plan words move this onto a Key.
-            facts.cause = Cause::QuotaExhausted;
+            // Never let misleading paid-plan words move this onto a Key, and
+            // never copy a reset instant from error prose.
+            facts.cause = Cause::Transient;
             facts.scope = Scope::SharedFreeEgress;
             facts.window = Some(UsageWindowKind::Free);
-            facts.upstream_reset_at = future_reset(body, observed_at);
+            facts.retry_not_before = Some(temporary_429_deadline(retry_after, observed_at));
             facts.rule_id = "zen.free_egress";
         }
-        ProviderErrorClass::RateLimited {
-            profile: ErrorProfile::GenericHttp,
-        } => {}
         _ => return None,
     }
     Some(facts)
 }
 
-fn future_reset(text: &str, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
-    let parsed = parse_reset(text).or_else(|| {
-        let index = text.to_ascii_lowercase().find("retrying in")?;
-        parse_reset(&format!(
-            "Resets in {}",
-            &text[index + "retrying in".len()..]
-        ))
-    })?;
-    (parsed > Duration::zero())
-        .then(|| now.checked_add_signed(parsed))
-        .flatten()
+/// Short Key-scoped 429 wait: honor a valid future Retry-After, otherwise 30s.
+/// Zero/past Retry-After is not extra wait, so the default applies. Unbounded
+/// stays unbounded. Callers must still max() against an existing longer wait.
+pub(crate) fn temporary_429_deadline(retry_after: Option<&str>, now: DateTime<Utc>) -> RetryHint {
+    match retry_after.and_then(|value| parse_retry_after(value, now)) {
+        Some(RetryHint::Unbounded) => RetryHint::Unbounded,
+        Some(RetryHint::Until(at)) if at > now => RetryHint::Until(at),
+        _ => RetryHint::Until(now + Duration::seconds(TEMPORARY_429_SECS)),
+    }
+}
+
+/// Wall-clock form of [`temporary_429_deadline`] for persisted cooldown rows
+/// that cannot represent Unbounded. The maximum timestamp preserves the wait
+/// without inventing a named quota window.
+pub(crate) fn temporary_429_until(retry_after: Option<&str>, now: DateTime<Utc>) -> DateTime<Utc> {
+    match temporary_429_deadline(retry_after, now) {
+        RetryHint::Until(at) => at,
+        RetryHint::Unbounded => DateTime::<Utc>::MAX_UTC,
+    }
 }
 
 /// RFC 9110 Retry-After: delay-seconds and all three HTTP-date forms.

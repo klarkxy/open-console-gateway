@@ -165,6 +165,15 @@ pub(crate) fn build_state_with_routing(
     config.routing_mode = routing_mode;
     config.conversation_sticky = conversation_sticky;
     state.set_config(config).unwrap();
+    // Inference-only gateway tests must never contact an official usage API.
+    // Individual authoritative-Go cases explicitly re-enable the reactive path
+    // and replace this failure seam with their expected snapshot.
+    state
+        .usage_sync
+        .set_reactive_refresh_enabled_for_test(false);
+    state.usage_sync.set_fetch_for_test(|_, _| {
+        Box::pin(async { Err(ocg_core::go_usage::GoUsageError::Network) })
+    });
 
     let now = chrono::Utc::now();
     for (idx, key) in keys.iter().enumerate() {

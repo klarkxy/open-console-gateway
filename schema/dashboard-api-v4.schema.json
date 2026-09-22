@@ -588,6 +588,10 @@
         "locked": {
           "type": "boolean"
         },
+        "officialBalance": {
+          "description": "Official balance support for this exact configured URL, including its path.",
+          "type": "boolean"
+        },
         "operation": {
           "$ref": "#/$defs/EndpointOperation"
         },
@@ -602,6 +606,7 @@
         }
       },
       "required": [
+        "officialBalance",
         "id",
         "connectionId",
         "operation",
@@ -663,6 +668,9 @@
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
+        },
+        "credentialCreate": {
+          "$ref": "#/$defs/CredentialCreateCapabilityDto"
         },
         "creditPresets": {
           "description": "Personal credit setup for Key forms. None means unsupported; an empty\nlist permits custom configuration without a provider preset.",
@@ -735,6 +743,7 @@
         }
       },
       "required": [
+        "credentialCreate",
         "id",
         "name",
         "origin",
@@ -946,6 +955,50 @@
         "freeUntil"
       ],
       "type": "object"
+    },
+    "CredentialCreateCapabilityDto": {
+      "additionalProperties": false,
+      "description": "Server-owned operation capability; writes recheck it against current state.",
+      "properties": {
+        "allowed": {
+          "type": "boolean"
+        },
+        "materialKinds": {
+          "items": {
+            "$ref": "#/$defs/MaterialKind"
+          },
+          "type": "array"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CredentialCreateUnavailableReasonDto"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "allowed",
+        "materialKinds",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "CredentialCreateUnavailableReasonDto": {
+      "description": "Why this connection cannot accept another credential through identity creation.",
+      "enum": [
+        "external_integration",
+        "singleton",
+        "no_authentication",
+        "dedicated_account_flow",
+        "builtin_definition",
+        "unavailable",
+        "draft"
+      ],
+      "type": "string"
     },
     "CredentialDto": {
       "additionalProperties": false,
@@ -4676,6 +4729,12 @@
     },
     {
       "$ref": "#/$defs/ConnectionSummary"
+    },
+    {
+      "$ref": "#/$defs/CredentialCreateCapabilityDto"
+    },
+    {
+      "$ref": "#/$defs/CredentialCreateUnavailableReasonDto"
     },
     {
       "$ref": "#/$defs/ConnectionList"

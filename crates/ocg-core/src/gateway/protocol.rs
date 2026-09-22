@@ -20,8 +20,7 @@ pub use ocg_domain::protocol::{
 
 pub(crate) use ocg_gateway::protocol::{
     LegacyToolCompat, NamespaceToolMapping, decode_anthropic_thinking_block, decode_chat_reasoning,
-    encode_anthropic_thinking_block, encode_chat_reasoning, sanitize_minimax_anthropic_usage,
-    sanitize_minimax_chat_usage,
+    encode_anthropic_thinking_block, encode_chat_reasoning,
 };
 
 #[cfg(test)]
@@ -96,6 +95,27 @@ pub struct ParsedClientRequest {
     pub requested_model: String,
     pub stream: bool,
     parsed: Value,
+}
+
+/// Client request facts captured at entry for budgets and pre-candidate logs.
+///
+/// This context does not select, convert, or validate an upstream protocol.
+/// Candidate materialization remains the sole upstream conversion authority.
+#[derive(Debug, Clone)]
+pub(crate) struct RequestFacts {
+    pub client: ApiFormat,
+    pub client_model: String,
+    pub stream: bool,
+}
+
+impl RequestFacts {
+    pub(crate) fn from_parsed(parsed: &ParsedClientRequest) -> Self {
+        Self {
+            client: parsed.client,
+            client_model: parsed.requested_model.clone(),
+            stream: parsed.stream,
+        }
+    }
 }
 
 /// Per-candidate identity used to turn a parsed client request into a
@@ -224,6 +244,15 @@ pub fn parse_gemini_request(
     })
 }
 
+/// Request features that apply regardless of which candidate is later
+/// selected. Conversion-only checks stay in [`materialize_parsed_request`].
+pub(crate) fn validate_client_request_features(
+    parsed: &ParsedClientRequest,
+) -> Result<(), ProtocolError> {
+    ocg_gateway::protocol::validate_client_request_features(parsed.client, &parsed.parsed)
+        .map_err(protocol_conversion_error)
+}
+
 /// Test-only identity planner. Production inference must parse once, resolve
 /// the name through [`crate::alias::resolve`], then call
 /// [`materialize_parsed_request`]. This helper never bypasses alias
@@ -266,7 +295,9 @@ fn identity_spec(parsed: &ParsedClientRequest) -> MaterializeSpec {
 /// Convert a request that was already parsed once for a specific candidate.
 ///
 /// Protocol selection uses the OpenCode `MODEL_PROTOCOLS` table for the
-/// upstream model. Callers must never trial a billable inference path.
+/// upstream model unless the caller supplies `forced_upstream` from that
+/// candidate's contract. Request-level diagnostics must not call this to
+/// guess an upstream. Callers must never trial a billable inference path.
 pub fn materialize_parsed_request(
     parsed: &ParsedClientRequest,
     spec: &MaterializeSpec,
@@ -581,12 +612,7 @@ fn gemini_status_for_kind(kind: &str) -> &'static str {
     }
 }
 
-/// Work around MiniMax's Anthropic-compatible endpoint returning the entire prompt as
-/// `cache_read_input_tokens` with `input_tokens: 0` on the first turn. When that happens,
-/// move the tokens back to `input_tokens` so the gateway doesn't report a 100% cache hit.
-///
-/// `model` is the model name reported by the upstream response; `model_hint` is the model
-/// from the original request plan. OpenCode Go sometimes returns a generic or internal model
+/// Report upstream usage without model-name-based corrections.
 fn usage_payload(format: ApiFormat, payload: &Value) -> Option<&Value> {
     match format {
         ApiFormat::ChatCompletions => payload.get("usage"),
@@ -617,36 +643,25 @@ pub fn has_complete_usage(format: ApiFormat, payload: &Value) -> bool {
     }
 }
 
-pub fn extract_usage(format: ApiFormat, payload: &Value, model_hint: Option<&str>) -> UsageCounts {
+pub fn extract_usage(format: ApiFormat, payload: &Value, _model_hint: Option<&str>) -> UsageCounts {
     let usage = usage_payload(format, payload);
     let Some(usage) = usage else {
         return UsageCounts::default();
     };
     match format {
-        ApiFormat::ChatCompletions => {
-            let mut usage = usage.clone();
-            let model = payload.get("model").and_then(Value::as_str);
-            sanitize_minimax_chat_usage(model, model_hint, &mut usage);
-            UsageCounts {
-                input_tokens: uint(&usage, "prompt_tokens"),
-                output_tokens: uint(&usage, "completion_tokens"),
-                cached_tokens: usage
-                    .pointer("/prompt_tokens_details/cached_tokens")
-                    .or_else(|| usage.get("prompt_cache_hit_tokens"))
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0),
-                cache_creation_tokens: 0,
-            }
-        }
+        ApiFormat::ChatCompletions => UsageCounts {
+            input_tokens: uint(&usage, "prompt_tokens"),
+            output_tokens: uint(&usage, "completion_tokens"),
+            cached_tokens: usage
+                .pointer("/prompt_tokens_details/cached_tokens")
+                .or_else(|| usage.get("prompt_cache_hit_tokens"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+            cache_creation_tokens: 0,
+        },
         ApiFormat::Messages => {
-            let mut usage = usage.clone();
-            let model = payload
-                .get("model")
-                .or_else(|| payload.pointer("/message/model"))
-                .and_then(Value::as_str);
-            sanitize_minimax_anthropic_usage(model, model_hint, &mut usage);
-            let cached = uint(&usage, "cache_read_input_tokens");
-            let created = uint(&usage, "cache_creation_input_tokens");
+            let cached = uint(usage, "cache_read_input_tokens");
+            let created = uint(usage, "cache_creation_input_tokens");
             UsageCounts {
                 input_tokens: uint(&usage, "input_tokens")
                     .saturating_add(cached)

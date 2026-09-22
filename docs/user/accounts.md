@@ -24,13 +24,13 @@ Provider choices come from the V4 destination and catalog projection; the choose
 
 Accounts edit through the same forms used to create them. Ready, routable cards show enabled, disabled, cooling, quota exhausted, or unavailable. Dynamic, Custom and CPA accounts do not display an inferred subscription period, even when compatibility data contains a purchase date.
 
-Confirmed quota exhaustion dims that Key and skips routing. Enabled stays as stored. Disabling a Key dims that row immediately. The card itself is gray only when every Key on it is dimmed (disabled, invalid, cooling, quota-exhausted, or otherwise not routeable). When every Key on the card is quota-exhausted, the card is labeled quota exhausted. A mix of disabled, invalid, and quota-exhausted Keys shows no available Key. An empty card shows no Key. Each presentation card is judged on its own rows.
+Confirmed quota exhaustion dims that Key and skips routing. Enabled stays as stored. Disabling a Key dims that row immediately. The card itself is gray only when every Key on it is dimmed (disabled, invalid, cooling, quota-exhausted, or otherwise not routeable). When every Key on the card is quota-exhausted, the card is labeled quota exhausted. A mix of disabled, invalid, and quota-exhausted Keys shows no available Key. An empty card shows no Key. Each presentation card is judged on its own rows. New exhaustion is established only by authoritative official Go usage; historical episodes remain until recovery or Key replacement.
 
-A ready Key row can **Rotate Key**, **Add Key**, and **Edit binding** from the overflow menu. Rotate replaces only the Key this console will send on later requests for that card's credential (same credential id; version numbers increase). It is a local replacement: the provider-side credential is not revoked and stays under your control. Rotating or otherwise replacing a Key clears local quota recovery so an old Key cannot restore the new one. **Add Key** creates another inference Key on that connection. Quota is independent unless you explicitly share with a selected inference Key on the same identity; using one connection or identity is not enough. After save, cards that actually share a stored quota pool show that relationship (naming the sibling Key when possible). A third Key stays independent when it has its own pool or none. Configurable HTTP connections, including migrated Custom API records, support multiple Keys. Zen Free, CPA, no-auth, and observer credentials remain singletons or externally owned and do not expose Add Key. The CPA pool card also shows whether an OCG-managed runtime is running, stopped, not installed, or in an install/start phase; an external CPA connection is labeled as such and does not report a process OCG does not own. A running or external pool stays a normal available card; a stopped, missing, or failed managed runtime grays the card without flipping Enabled. If create does not return a definite result, the form keeps the submitted contents and operation: retry the same body, or cancel; do not change the form and submit again (that can create a duplicate Key).
+A ready Key row can **Rotate Key**, **Add Key**, and **Edit binding** from the overflow menu. Rotate replaces only the Key this console will send on later requests for that card's credential (same credential id; version numbers increase). It is a local replacement: the provider-side credential is not revoked and stays under your control. Rotating or otherwise replacing a Key clears local state tied to the old Key version. **Add Key** creates another inference Key on that connection only when the server allows credential creation for that connection and accepts the submitted material kind; the shared backend guard returns its reason when it refuses. Quota is independent unless you explicitly share with a selected inference Key on the same identity; using one connection or identity is not enough. After save, cards that actually share a stored quota pool show that relationship (naming the sibling Key when possible). A third Key stays independent when it has its own pool or none. Configurable HTTP connections, including migrated Custom API records, support multiple Keys. Zen Free, CPA, no-auth, and observer credentials remain singletons or externally owned and do not expose Add Key. The CPA pool card also shows whether an OCG-managed runtime is running, stopped, not installed, or in an install/start phase; an external CPA connection is labeled as such and does not report a process OCG does not own. A running or external pool stays a normal available card; a stopped, missing, or failed managed runtime grays the card without flipping Enabled. If create does not return a definite result, the form keeps the submitted contents and operation: retry the same body, or cancel; do not change the form and submit again (that can create a duplicate Key).
 
-Edit binding changes that credential's enabled state, model scope (all models, or only the exact names you list), and — when you change it — destination consent: which configured endpoint this Key may be sent to (protocol and URL). Saved destination grants are facts; if a provider URL later changes, the saved Origin is shown and that endpoint stays unchecked until you explicitly allow the new destination. Changing only scope or enabled leaves destinations unchanged. Clearing both destination lists revokes access. Sealed official endpoints with no URL stay locked destinations and do not invent Origin strings. A disabled binding is shown on that card and does not flip the account enable switch. Zen Free, CPA, no-auth, and observer credentials do not expose rotate or binding. An identity can hold more than one Key; each account row uses the credential whose legacy account id matches that row.
+Edit binding changes that credential's enabled state, model scope (all models, or only the exact names you list), and — when you change it — destination consent: which configured endpoint this Key may be sent to (protocol and URL). The current endpoint is resolved from this exact credential's saved grants; a sibling Key never lends an Origin. If a provider URL later changes, the saved Origin is shown and that endpoint stays unchecked until you explicitly allow the new destination. Changing only scope or enabled leaves destinations unchanged. Clearing both destination lists revokes access. Sealed official endpoints with no URL stay locked destinations and do not invent Origin strings. A disabled binding is shown on that card and does not flip the account enable switch. Zen Free, CPA, no-auth, and observer credentials do not expose rotate or binding. An identity can hold more than one Key; each account row uses the credential whose legacy account id matches that row.
 
-Accounts are arranged in supplier cards. A card can contain several accounts / Keys, and one supplier can have several cards sharing its address, protocols and models. Moving an account preserves its credential, grants, usage, quota pool, cooldown, and local quota-recovery state. Provider and Plan remain one product identity (`provider_id` only). OpenCode Go counts usage by account **Key**, Zen Free shares free cooldown by egress IP, and Custom API keeps no provider-side quota. Card order, then row order inside each card, defines the persisted routing priority used by strict priority, global sticky and round-robin after eligibility filtering. There is no per-model quota pool. Ordinary cooldown still fans out through a **declared quota pool**; confirmed quota exhaustion stays on that Key.
+Accounts are arranged in supplier cards. A card can contain several accounts / Keys, and one supplier can have several cards sharing its address, protocols and models. Moving an account preserves its credential, grants, usage, quota pool, cooldown, and local state. Provider and Plan remain one product identity (`provider_id` only). OpenCode Go counts usage by account **Key**, Zen Free shares free cooldown by egress IP, and Custom API keeps no provider-side quota. Card order, then row order inside each card, defines the persisted routing priority used by strict priority, global sticky and round-robin after eligibility filtering. There is no per-model quota pool. Ordinary cooldown can fan out through a **declared quota pool**; a `429` cooldown remains on its receiving Key.
 
 **Accounts** owns identity, the account **Key**, verification, enabled state,
 card order, managed registration, and available usage / cooldown / quota-recovery state.
@@ -296,22 +296,16 @@ than a key quota.
   100% is still only a warning; it does not stop the gateway from selecting the
   account. Manual calibration is shown only when the Plan declares it. Ollama
   Cloud uses it because it has no official usage API.
-- **Refresh quota (ready Key and managed accounts).** Official OpenCode usage
-  (`/zen/go/v1/usage`) is only a periodic calibration baseline; local forward-log
-  costs stay the live estimator. Active ready accounts reconcile about hourly,
-  inactive ones about daily; disabled, unfinished, or empty-key accounts are
-  never auto-refreshed. Opening this page or starting the gateway does not force
-  a fetch: new schedules are spread across the first 0–15 minutes. **Refresh
-  quota** runs the same path on demand with a 15-second per-account server
-  throttle (Retry-After / next-allowed). The card shows the last successful
-  official sync time. Local estimates that reach
-  ≥80% may trigger one expedited sync per 15 minutes. A real inference `429`
-  still writes ordinary cooldown or, when recognized, per-Key quota recovery,
-  and additionally schedules an official reconciliation about 1–2 minutes later;
-  official failures or `status=rate-limited` never write inference cooldown or
-  quota recovery. Failures keep the
-  previous baseline and last-success timestamp. The request uses the same global
-  outbound proxy as other dashboard fetches.
+- **Refresh quota (ready Key and managed accounts).** The existing OpenCode Go
+  scheduler continues to calibrate local estimates from `/zen/go/v1/usage` on
+  its established cadence; no new global polling loop is added. **Refresh
+  quota** uses the same throttled, concurrently coalesced path on demand. A real
+  `429` starts the temporary Key cooldown immediately and can queue that same
+  asynchronous refresh without making the client request wait. Fetched Go usage
+  may establish or clear Go quota state. A failed, rate-limited, or unsupported
+  refresh keeps the previous observation or unknown and never writes inference
+  cooldown or `auth_error`. The request uses the same global outbound proxy as
+  other dashboard fetches.
 - **Refresh GOAT quota.** The GOAT card calls the fixed first-party
   `https://api.commandcode.ai/alpha/billing/credits` endpoint with that
   account's Key only after an explicit click. OCG validates the GOAT 5-hour,
@@ -319,12 +313,10 @@ than a key quota.
   This path has the same 15-second per-account throttle and global proxy, but
   no automatic schedule; its result never writes inference cooldown or changes
   routing. There is no separate manual calibration editor.
-- **GOAT inference restrictions.** For unrecognized temporary Command Code
-  `429`s, a usable `Retry-After` creates a process-local resource wait, without
-  writing account cooldown or quota exhaustion. A response without a recognized plan error and without a
-  usable deadline only excludes that account from the current request.
-  Strict plan-window errors persist as per-Key quota exhaustion even with no
-  deadline; known insufficient credits persist the same way. See [Routing](routing.md).
+- **GOAT inference restrictions.** Each `429` starts the same 30-second
+  temporary Key cooldown, extended but never shortened by valid `Retry-After`.
+  GOAT error text, caps, and displayed usage do not create or clear permanent
+  quota state. See [Routing](routing.md).
 - **Identity and credentials.** The name is the account's required primary
   display label. The login account field is optional; on Key-account creation,
   entering it first copies it into the name until you edit the name yourself.
@@ -344,17 +336,11 @@ than a key quota.
 - **Priority order.** Reorder cards and the accounts inside them directly. Move a whole card, reorder its rows, or move a Key to another card of the same supplier. To arrange `A1 → B1 → A2`, create another A card and move A2 into it. Pointer and keyboard controls save the same order. Sorting is disabled while filters are active so hidden accounts keep their positions. Empty cards and adjacent cards of the same supplier remain separate.
 - **Cooldown reset.** You can reset an ordinary cooldown manually from this view. The bar
   snaps back to its local estimate as soon as the cooldown is cleared.
-- **Retry quota.** Manual retry only makes that exhausted Key eligible for the
-  next normally selected request. It does not send an upstream call, clear the
-  exhausted status, change Enabled, or reset the wait step.
-- **Quota recovery.** A known reset waits until that time. An unknown window
-  waits 15 minutes, then 1 hour, then 6 hours; that step advances only after
-  another proven quota error. When due, the next request that would normally
-  select that Key is the single trial — no extra probe is sent, and other
-  traffic is not held waiting. A completed success (JSON or SSE, even without
-  usage) restores the Key. Timeout, cancel, or 5xx keep exhaustion and allow
-  another try after at least 15 minutes without increasing the unknown-window
-  step.
+- **429 cooldown.** A `429` cools its exact Key for 30 seconds unless a valid
+  `Retry-After` produces a later deadline. It does not spread to a quota-pool
+  sibling, and no background probe is sent when it becomes eligible. Retained
+  historical quota state is not bulk-purged; fetched authoritative Go usage is
+  the path that can reconcile Go state.
 
 ---
 

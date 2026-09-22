@@ -719,6 +719,10 @@ const {
     identitiesStore.byAccountId.get(account.id) ?? null,
     providersStore.connections,
   ),
+  officialBalanceFor: (account) => officialBalanceSupported(
+    accountInferenceEndpointUrl(account, identityForCard(account.id), providersStore.connections),
+    providersStore.connections,
+  ),
   afterUsageRefresh: (accountId, isCurrent) => refreshCompanionCatalog(accountId, isCurrent),
 });
 
@@ -982,6 +986,7 @@ const credentialModalSupport = computed(() => (
       identityForCard(credentialModalAccount.value.id),
       providerCatalog.value,
       destinationForAccountId(credentialModalAccount.value.id),
+      providersStore.connections ?? [],
     )
     : null
 ));
@@ -1012,6 +1017,7 @@ const createModalSupport = computed(() => (
       identityForCard(createModalAccount.value.id),
       providerCatalog.value,
       destinationForAccountId(createModalAccount.value.id),
+      providersStore.connections ?? [],
     )
     : null
 ));
@@ -1043,7 +1049,8 @@ function cardMenuOptions(account: Account) {
     account,
     identityForCard(account.id),
     providerCatalog.value,
-      destinationForAccountId(account.id),
+    destinationForAccountId(account.id),
+    providersStore.connections ?? [],
   );
   if (extra.length === 0) return base;
   const editAt = base.findIndex((option) => option.key === "edit");
@@ -1307,7 +1314,8 @@ async function openCredentialModal(accountId: string, mode: CredentialEditorMode
     account,
     identityForCard(accountId),
     providerCatalog.value,
-      destinationForAccountId(account.id),
+    destinationForAccountId(account.id),
+    providersStore.connections ?? [],
   );
   if (mode === "rotate" && !support.rotate) {
     if (support.unsupportedReason) message.warning(t(support.unsupportedReason));
@@ -1344,7 +1352,8 @@ async function openCreateModal(accountId: string): Promise<void> {
     account,
     identityForCard(accountId),
     providerCatalog.value,
-      destinationForAccountId(account.id),
+    destinationForAccountId(account.id),
+    providersStore.connections ?? [],
   );
   if (!support.create) {
     if (support.unsupportedReason) message.warning(t(support.unsupportedReason));
@@ -2008,7 +2017,7 @@ function accountHasUsageDisplay(account: Account): boolean {
     account,
     identityForCard(account.id),
     providersStore.connections,
-  ))) {
+  ), providersStore.connections)) {
     return true;
   }
   if (platformStore.linkForAccount(account.id)) return false;

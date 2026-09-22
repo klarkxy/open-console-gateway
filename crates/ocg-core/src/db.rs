@@ -9175,11 +9175,11 @@ impl Database {
     ) -> Result<()> {
         // Never clear last_success_at on failure.
         self.conn.execute(
-            "UPDATE provider_usage_sync_state
-             SET last_attempt_at = ?1,
-                 next_eligible_at = ?2,
-                 failure_streak = ?3
-             WHERE account_id = ?4",
+            "INSERT INTO provider_usage_sync_state(account_id, last_attempt_at, next_eligible_at, failure_streak)
+             VALUES (?4, ?1, ?2, ?3) ON CONFLICT(account_id) DO UPDATE
+             SET last_attempt_at = excluded.last_attempt_at,
+                 next_eligible_at = excluded.next_eligible_at,
+                 failure_streak = excluded.failure_streak",
             params![
                 now.to_rfc3339(),
                 next_eligible_at.to_rfc3339(),
@@ -9198,9 +9198,9 @@ impl Database {
         now: DateTime<Utc>,
     ) -> Result<()> {
         self.conn.execute(
-            "UPDATE provider_usage_sync_state
-             SET last_attempt_at = ?1
-             WHERE account_id = ?2",
+            "INSERT INTO provider_usage_sync_state(account_id, last_attempt_at)
+             VALUES (?2, ?1) ON CONFLICT(account_id) DO UPDATE
+             SET last_attempt_at = excluded.last_attempt_at",
             params![now.to_rfc3339(), account_id],
         )?;
         Ok(())

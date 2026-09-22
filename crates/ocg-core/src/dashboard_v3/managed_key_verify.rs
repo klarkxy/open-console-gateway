@@ -10,7 +10,7 @@ use axum::Json;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 #[cfg(debug_assertions)]
 use parking_lot::Mutex;
@@ -21,6 +21,7 @@ use crate::db::{
     ManagedKeyVerificationCas, ManagedKeyVerificationCommit, ManagedKeyVerificationRateLimit,
     ManagedKeyVerificationWrite,
 };
+use crate::gateway::failure::decode::temporary_429_until;
 use crate::http_client;
 use crate::kernel::protocol::{ApiFormat, supported_model_protocol_profiles};
 use crate::models::{
@@ -32,7 +33,6 @@ use crate::redaction::{
     redact_known_secret, redact_text, sanitize_upstream_error_value_with_known_secret,
 };
 use crate::state::CoreState;
-use crate::upstream_limit::{parse_reset, parse_usage_limit_window};
 
 use super::types::{
     Account, AccountCustomConfig, AccountManagedKeyVerify, AccountModelCapability, AccountMutation,
@@ -173,6 +173,7 @@ pub(super) async fn verify_managed_account_key(
 struct PreparedVerify {
     account_name: String,
     account_cas: ManagedKeyVerificationCas,
+    existing_generic_cooldown_until: Option<DateTime<Utc>>,
     key: String,
     key_cipher: String,
     config: AppConfig,
@@ -182,10 +183,21 @@ struct PreparedVerify {
 
 enum VerifyOutcome {
     Success,
-    RateLimited { body: String },
-    AuthFailed { status: StatusCode, body: String },
-    ClientFailed { status: StatusCode, body: String },
-    UpstreamFailed { message: String },
+    RateLimited {
+        body: String,
+        retry_after: Option<String>,
+    },
+    AuthFailed {
+        status: StatusCode,
+        body: String,
+    },
+    ClientFailed {
+        status: StatusCode,
+        body: String,
+    },
+    UpstreamFailed {
+        message: String,
+    },
 }
 
 fn prepare_managed_key_verify(
@@ -208,6 +220,7 @@ fn prepare_managed_key_verify(
     Ok(PreparedVerify {
         account_name: account.name.clone(),
         account_cas: ManagedKeyVerificationCas::from_account(&account),
+        existing_generic_cooldown_until: account.cooldown_generic_until,
         key,
         key_cipher,
         config,
@@ -357,6 +370,11 @@ async fn execute_managed_key_verify(prepared: &PreparedVerify) -> VerifyOutcome 
     };
 
     let status = response.status();
+    let retry_after = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
     let body = match read_managed_key_verification_response(response).await {
         Ok(body) => body,
         Err(error) => {
@@ -375,7 +393,7 @@ async fn execute_managed_key_verify(prepared: &PreparedVerify) -> VerifyOutcome 
             ),
         }
     } else if status == StatusCode::TOO_MANY_REQUESTS {
-        VerifyOutcome::RateLimited { body }
+        VerifyOutcome::RateLimited { body, retry_after }
     } else if status.is_success() {
         VerifyOutcome::Success
     } else {
@@ -454,97 +472,128 @@ fn commit_managed_key_verify(
     prepared: &PreparedVerify,
     outcome: VerifyOutcome,
 ) -> Result<Json<AccountMutation>, V3ApiError> {
-    let _settings_update = state.settings_update.lock();
-    check_expectation(state, expectation)?;
-    let account = load_waiting_managed_account(state, id)?;
-    ensure_plan_can_enable(state, &account)?;
-
     enum ResponseKind {
         Verified,
         InvalidRequest(String),
         OutboundFailed(String),
     }
 
-    let (write, response_kind) = match outcome {
-        VerifyOutcome::Success => (
-            ManagedKeyVerificationWrite::Verified {
-                rate_limit: None,
-                account_name: prepared.account_name.clone(),
-            },
-            ResponseKind::Verified,
-        ),
-        VerifyOutcome::RateLimited { body } => {
-            let cooldown = parse_reset(&body).unwrap_or_else(|| chrono::Duration::minutes(5));
-            let sanitized =
-                sanitize_upstream_error_value_with_known_secret(&body, &prepared.key).to_string();
-            (
+    let (result, refresh_usage) = {
+        let _settings_update = state.settings_update.lock();
+        check_expectation(state, expectation)?;
+        let account = load_waiting_managed_account(state, id)?;
+        ensure_plan_can_enable(state, &account)?;
+
+        let (write, response_kind, rate_limited) = match outcome {
+            VerifyOutcome::Success => (
                 ManagedKeyVerificationWrite::Verified {
-                    rate_limit: Some(ManagedKeyVerificationRateLimit {
-                        until: Utc::now() + cooldown,
-                        error: sanitized,
-                        window: parse_usage_limit_window(&body),
-                    }),
+                    rate_limit: None,
                     account_name: prepared.account_name.clone(),
                 },
                 ResponseKind::Verified,
-            )
-        }
-        VerifyOutcome::AuthFailed { status, body } => {
-            let sanitized =
-                sanitize_upstream_error_value_with_known_secret(&body, &prepared.key).to_string();
-            let auth_error = format!(
-                "upstream auth error {}: {}",
-                status.as_u16(),
-                short_body(&sanitized)
-            );
-            (
-                ManagedKeyVerificationWrite::AuthFailed {
-                    auth_error: auth_error.clone(),
-                },
-                ResponseKind::InvalidRequest(format!("Key verification failed: {auth_error}")),
-            )
-        }
-        VerifyOutcome::ClientFailed { status, body } => {
-            let sanitized =
-                sanitize_upstream_error_value_with_known_secret(&body, &prepared.key).to_string();
-            (
-                ManagedKeyVerificationWrite::Pending,
-                ResponseKind::InvalidRequest(format!(
-                    "Key verification failed: upstream returned {}: {}",
-                    status,
+                false,
+            ),
+            VerifyOutcome::RateLimited { body, retry_after } => {
+                let sanitized =
+                    sanitize_upstream_error_value_with_known_secret(&body, &prepared.key)
+                        .to_string();
+                let retry_until = temporary_429_until(retry_after.as_deref(), Utc::now());
+                // A 429 without a declared window must only update the generic
+                // slot. Keep a longer generic wait captured with the account;
+                // named quota-window slots remain untouched by the DB commit.
+                let until = prepared
+                    .existing_generic_cooldown_until
+                    .filter(|existing| existing > &retry_until)
+                    .unwrap_or(retry_until);
+                (
+                    ManagedKeyVerificationWrite::Verified {
+                        rate_limit: Some(ManagedKeyVerificationRateLimit {
+                            until,
+                            error: sanitized,
+                            window: None,
+                        }),
+                        account_name: prepared.account_name.clone(),
+                    },
+                    ResponseKind::Verified,
+                    true,
+                )
+            }
+            VerifyOutcome::AuthFailed { status, body } => {
+                let sanitized =
+                    sanitize_upstream_error_value_with_known_secret(&body, &prepared.key)
+                        .to_string();
+                let auth_error = format!(
+                    "upstream auth error {}: {}",
+                    status.as_u16(),
                     short_body(&sanitized)
-                )),
+                );
+                (
+                    ManagedKeyVerificationWrite::AuthFailed {
+                        auth_error: auth_error.clone(),
+                    },
+                    ResponseKind::InvalidRequest(format!("Key verification failed: {auth_error}")),
+                    false,
+                )
+            }
+            VerifyOutcome::ClientFailed { status, body } => {
+                let sanitized =
+                    sanitize_upstream_error_value_with_known_secret(&body, &prepared.key)
+                        .to_string();
+                (
+                    ManagedKeyVerificationWrite::Pending,
+                    ResponseKind::InvalidRequest(format!(
+                        "Key verification failed: upstream returned {}: {}",
+                        status,
+                        short_body(&sanitized)
+                    )),
+                    false,
+                )
+            }
+            VerifyOutcome::UpstreamFailed { message } => (
+                ManagedKeyVerificationWrite::Pending,
+                ResponseKind::OutboundFailed(message),
+                false,
+            ),
+        };
+
+        let committed = state
+            .db
+            .lock()
+            .commit_managed_key_verification(
+                id,
+                &prepared.account_cas,
+                &prepared.key_cipher,
+                &write,
             )
+            .map_err(|error| map_complete_error(state, error))?;
+        if committed == ManagedKeyVerificationCommit::Conflict {
+            return Err(key_changed_conflict(state));
         }
-        VerifyOutcome::UpstreamFailed { message } => (
-            ManagedKeyVerificationWrite::Pending,
-            ResponseKind::OutboundFailed(message),
-        ),
+
+        if matches!(&response_kind, ResponseKind::Verified) {
+            state.routing.reset();
+        }
+        let revision = state.bump_settings_revision();
+        match response_kind {
+            ResponseKind::Verified => {
+                let account = load_model_account(state, id)?;
+                (
+                    Ok(Json(account_mutation_at(state, account, revision)?)),
+                    rate_limited,
+                )
+            }
+            ResponseKind::InvalidRequest(message) => {
+                (Err(V3ApiError::invalid_request_at(state, message)), false)
+            }
+            ResponseKind::OutboundFailed(message) => {
+                (Err(V3ApiError::outbound_failed(state, message)), false)
+            }
+        }
     };
-
-    let committed = state
-        .db
-        .lock()
-        .commit_managed_key_verification(id, &prepared.account_cas, &prepared.key_cipher, &write)
-        .map_err(|error| map_complete_error(state, error))?;
-    if committed == ManagedKeyVerificationCommit::Conflict {
-        return Err(key_changed_conflict(state));
+    if refresh_usage {
+        crate::usage_sync::spawn_reactive_usage_refresh(state, id);
     }
-
-    if matches!(&response_kind, ResponseKind::Verified) {
-        state.routing.reset();
-    }
-    let revision = state.bump_settings_revision();
-    match response_kind {
-        ResponseKind::Verified => {
-            let account = load_model_account(state, id)?;
-            Ok(Json(account_mutation_at(state, account, revision)?))
-        }
-        ResponseKind::InvalidRequest(message) => {
-            Err(V3ApiError::invalid_request_at(state, message))
-        }
-        ResponseKind::OutboundFailed(message) => Err(V3ApiError::outbound_failed(state, message)),
-    }
+    result
 }
 
 fn key_changed_conflict(state: &CoreState) -> V3ApiError {

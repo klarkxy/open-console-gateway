@@ -232,6 +232,7 @@ const usageRefreshAvailable = computed(() => (
 ));
 const balanceRefreshAvailable = computed(() => officialBalanceSupported(
   accountInferenceEndpointUrl(props.account, props.identity, props.connections),
+  props.connections,
 ));
 const canRefreshUsage = computed(() => usageRefreshAvailable.value || (
   billingStatus.value ? false : balanceRefreshAvailable.value

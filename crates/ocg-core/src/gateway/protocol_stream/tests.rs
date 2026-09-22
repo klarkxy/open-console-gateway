@@ -798,7 +798,7 @@ fn chat_passthrough_keeps_unchanged_minimax_frames_byte_identical() {
 }
 
 #[test]
-fn chat_passthrough_changes_only_minimax_usage_data() {
+fn chat_passthrough_preserves_reported_minimax_usage_data() {
     let mut minimax_plan = plan(ApiFormat::ChatCompletions, ApiFormat::ChatCompletions);
     minimax_plan.model = "minimax-m3".into();
     let mut converter = StreamConverter::new(&minimax_plan);
@@ -809,12 +809,12 @@ fn chat_passthrough_changes_only_minimax_usage_data() {
     let output = String::from_utf8(output).unwrap();
     assert!(output.starts_with(": keepalive\r\nid: 9\r\nretry: 1500\r\nevent: chunk\r\n"));
     assert!(output.ends_with("\r\n\r\n"));
-    assert!(output.contains("\"cached_tokens\":0"), "{output}");
-    assert!(!output.contains("\"cached_tokens\":10"), "{output}");
+    assert!(output.contains("\"prompt_tokens\":10"), "{output}");
+    assert!(output.contains("\"cached_tokens\":10"), "{output}");
 }
 
 #[test]
-fn messages_passthrough_sanitizes_minimax_and_preserves_sse_fields() {
+fn messages_passthrough_preserves_minimax_usage_and_sse_fields() {
     let mut minimax_plan = plan(ApiFormat::Messages, ApiFormat::Messages);
     minimax_plan.model = "minimax-m3".into();
     let mut converter = StreamConverter::new(&minimax_plan);
@@ -827,8 +827,11 @@ fn messages_passthrough_sanitizes_minimax_and_preserves_sse_fields() {
         output.starts_with(": keepalive\r\nid: msg-9\r\nretry: 1500\r\nevent: message_start\r\n")
     );
     assert!(output.ends_with("\r\n\r\n"));
-    assert!(output.contains("\"input_tokens\":40500"), "{output}");
-    assert!(output.contains("\"cache_read_input_tokens\":0"), "{output}");
+    assert!(output.contains("\"input_tokens\":0"), "{output}");
+    assert!(
+        output.contains("\"cache_read_input_tokens\":40500"),
+        "{output}"
+    );
 }
 
 #[test]
@@ -1161,10 +1164,9 @@ fn chat_converter_captures_trailing_include_usage_chunk() {
 }
 
 #[test]
-fn streaming_messages_to_chat_sanitizes_minimax_bogus_all_cache() {
+fn streaming_messages_to_chat_preserves_reported_minimax_all_cache() {
     // OpenCode Go may omit the model field in message_start or report the id in
-    // mixed case ("MiniMax-M3"); the converter must fall back to the request
-    // plan's model to sanitize the bogus all-cache usage in every shape.
+    // mixed case ("MiniMax-M3"); usage stays provider-reported in every shape.
     for model in ["minimax-m3", "MiniMax-M3"] {
         for start_model in [Some(model), None] {
             let message = match start_model {
@@ -1199,7 +1201,7 @@ fn streaming_messages_to_chat_sanitizes_minimax_bogus_all_cache() {
                 "model={model} start_model={start_model:?}"
             );
             assert!(
-                output.contains("\"cached_tokens\":0"),
+                output.contains("\"cached_tokens\":40500"),
                 "model={model} start_model={start_model:?}"
             );
         }

@@ -235,14 +235,14 @@ test("write actions stay on the matching card credential and hide Zen, CPA, no-a
       credential(),
     ],
   });
-  const card = credentialWriteSupport(account(), shared);
+  const card = credentialWriteSupport(account(), shared, null, null, [connection()]);
   assert.equal(card.rotate, true);
   assert.equal(card.binding, true);
   assert.equal(card.create, true);
   assert.equal(card.credential?.credential.id, "cred-1");
   assert.equal(card.bindingRecord?.id, "bind-1");
   assert.deepEqual(
-    accountCredentialMenuOptions(account(), shared).map((option) => option.key),
+    accountCredentialMenuOptions(account(), shared, null, null, [connection()]).map((option) => option.key),
     ["rotate-key", "add-key", "edit-binding"],
   );
 
@@ -287,6 +287,7 @@ function endpoint(overrides: Partial<ConnectionEndpoint> = {}): ConnectionEndpoi
 
 function connection(overrides: Partial<Connection> = {}): Connection {
   return {
+    credential_create: { allowed: true, materialKinds: ["api_key"], reason: null },
     id: "conn-1",
     name: "Go",
     origin: "builtin",
@@ -366,12 +367,15 @@ test("Add Key stays hidden for observers, Zen, CPA, no-auth, and Custom API", ()
   assert.equal(connectionAllowsIdentityCredentialCreate(connection({
     legacy: { kind: "custom_account", id: "acc-9" },
     origin: "custom_account",
+    credential_create: { allowed: false, materialKinds: [], reason: "dedicated_account_flow" },
   })), false);
   assert.equal(connectionAllowsIdentityCredentialCreate(connection({
     legacy: { kind: "builtin_provider", id: "cpa" },
+    credential_create: { allowed: false, materialKinds: [], reason: "external_integration" },
   })), false);
   assert.equal(connectionAllowsIdentityCredentialCreate(connection({
     legacy: { kind: "builtin_provider", id: "opencode-zen-free" },
+    credential_create: { allowed: false, materialKinds: [], reason: "no_authentication" },
   })), false);
   assert.equal(connectionAllowsIdentityCredentialCreate(connection({
     origin: "custom",
@@ -380,6 +384,7 @@ test("Add Key stays hidden for observers, Zen, CPA, no-auth, and Custom API", ()
   assert.equal(connectionAllowsIdentityCredentialCreate(connection({
     origin: "builtin",
     legacy: { kind: "dynamic_provider", id: "lab" },
+    credential_create: { allowed: false, materialKinds: [], reason: "builtin_definition" },
   })), false);
 });
 
@@ -560,10 +565,10 @@ test("credential editing uses the loaded resource owner and integration controls
     auth_scheme: "bearer", max_credentials: 1, plan: null,
     capabilities: { testable: true, managed_signup: false, external_integration: false, billing_tier_required: false },
   };
-  assert.equal(credentialWriteSupport(account({ provider_id: "custom" }), identity(), null, destination).create, true);
+  assert.equal(credentialWriteSupport(account({ provider_id: "custom" }), identity(), null, destination, [connection()]).create, true);
   assert.equal(credentialWriteSupport(account(), identity(), null, {
     ...destination, account_controls: { ...destination.account_controls, configurationOwner: "account" },
-  }).create, false);
+  }, [connection()]).create, true);
   assert.equal(credentialWriteSupport(account(), identity(), null, {
     ...destination, capabilities: { ...destination.capabilities, external_integration: true },
   }).rotate, false);
@@ -577,4 +582,13 @@ test("generic keyless singleton uses no-auth restrictions without inheriting Zen
   };
   const row = account({ provider_id: "generic", credential_kind: "none" });
   assert.deepEqual(credentialWriteSupport(row, identity(), null, destination), credentialWriteSupport(row, identity(), null));
+});
+
+test("creation authority comes from the selected connection projection", () => {
+  for (const capability of [undefined, { allowed: false, materialKinds: [], reason: "no_authentication" as const }, { allowed: true, materialKinds: ["external_reference" as const], reason: null }]) {
+    const row = connection({ credential_create: capability });
+    assert.equal(connectionAllowsIdentityCredentialCreate(row), false);
+    assert.equal(credentialWriteSupport(account(), identity(), null, null, [row]).create, false);
+  }
+  assert.equal(credentialWriteSupport(account(), identity(), null, null, [connection({ id: "other" })]).create, false);
 });

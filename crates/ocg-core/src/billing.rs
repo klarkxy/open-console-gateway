@@ -21,9 +21,6 @@ const MAX_ID_LEN: usize = 128;
 const MAX_LABEL_LEN: usize = 128;
 const MAX_URL_LEN: usize = 2048;
 const CHINA_OFFSET_MINUTES: i32 = 480;
-const STEPFUN_HOST: &str = "api.stepfun.com";
-const STEPFUN_PRICING_URL: &str = "https://platform.stepfun.com/docs/zh/guides/pricing/details";
-const STEPFUN_CREDITS_PER_CNY: f64 = 1_000_000.0;
 
 /// Persisted local estimate for one credential. One Key is one account.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -76,25 +73,14 @@ pub(crate) fn billing_model_for_adapter(kind: AdapterKind) -> BillingModel {
 /// Exact HTTPS `:443` `api.stepfun.com/step_plan` (and `/step_plan/…`) only.
 /// Ordinary `/v1` API paths, `/step_planet`, and `/step_planning` are false.
 pub(crate) fn is_stepfun_plan_endpoint(endpoint: &str) -> bool {
-    let Ok(parsed) = reqwest::Url::parse(endpoint.trim()) else {
-        return false;
-    };
-    parsed.scheme() == "https"
-        && parsed.port_or_known_default() == Some(443)
-        && parsed
-            .host_str()
-            .map(|host| host.eq_ignore_ascii_case(STEPFUN_HOST))
-            == Some(true)
-        && parsed.username().is_empty()
-        && parsed.password().is_none()
-        && parsed.query().is_none()
-        && parsed.fragment().is_none()
-        && is_step_plan_path(parsed.path())
+    crate::official_service::identify(endpoint)
+        == Some(crate::official_service::OfficialService::StepFunPlan)
 }
 
 pub(crate) fn billing_model_for_destination(kind: AdapterKind, endpoint: &str) -> BillingModel {
-    if kind == AdapterKind::Http && is_stepfun_plan_endpoint(endpoint) {
-        BillingModel::Credits
+    if kind == AdapterKind::Http {
+        crate::official_service::identify(endpoint)
+            .map_or(BillingModel::Cash, |service| service.billing_model())
     } else {
         billing_model_for_adapter(kind)
     }
@@ -109,32 +95,28 @@ pub(crate) fn stepfun_credit_presets(at: DateTime<Utc>) -> Vec<CreditPreset> {
         Ok(reset) => reset,
         Err(_) => at,
     };
-    let rates = stepfun_rates();
-    [
-        ("mini", "Mini", 400_000_000.0),
-        ("plus", "Plus", 1_600_000_000.0),
-        ("pro", "Pro", 8_000_000_000.0),
-        ("max", "Max", 40_000_000_000.0),
-    ]
-    .into_iter()
-    .map(|(id, name, amount)| CreditPreset {
-        id: id.to_string(),
-        configuration: CreditConfiguration {
-            name: name.to_string(),
-            currency: "CNY".to_string(),
-            credits_per_currency: STEPFUN_CREDITS_PER_CNY,
-            rates: rates.clone(),
-            monthly: Some(MonthlyCredits {
-                amount,
-                next_reset_at: next_reset,
-                timezone_offset_minutes: CHINA_OFFSET_MINUTES,
-                renewal_ends_at: None,
-            }),
-            source_url: Some(STEPFUN_PRICING_URL.to_string()),
-        },
-        initial_grant: amount,
-    })
-    .collect()
+    let preset = &*STEPFUN_PRESETS;
+    preset
+        .tiers
+        .iter()
+        .map(|tier| CreditPreset {
+            id: tier.id.clone(),
+            configuration: CreditConfiguration {
+                name: tier.name.clone(),
+                currency: preset.currency.clone(),
+                credits_per_currency: preset.credits_per_currency,
+                rates: preset.rates.clone(),
+                monthly: Some(MonthlyCredits {
+                    amount: tier.amount,
+                    next_reset_at: next_reset,
+                    timezone_offset_minutes: CHINA_OFFSET_MINUTES,
+                    renewal_ends_at: None,
+                }),
+                source_url: Some(preset.source_url.clone()),
+            },
+            initial_grant: tier.amount,
+        })
+        .collect()
 }
 
 impl CreditMeterState {
@@ -570,28 +552,29 @@ fn monthly_policy_changed(
     }
 }
 
-fn is_step_plan_path(path: &str) -> bool {
-    path == "/step_plan" || path.starts_with("/step_plan/")
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreditPresetResource {
+    currency: String,
+    credits_per_currency: f64,
+    source_url: String,
+    tiers: Vec<CreditPresetTier>,
+    rates: Vec<CreditRate>,
+}
+#[derive(Deserialize)]
+struct CreditPresetTier {
+    id: String,
+    name: String,
+    amount: f64,
 }
 
-fn stepfun_rates() -> Vec<CreditRate> {
-    vec![
-        stepfun_rate("step-5-preview", 7.0, 0.35, 20.0),
-        stepfun_rate("step-3.7-flash", 1.35, 0.27, 8.1),
-        stepfun_rate("step-3.5-flash", 0.7, 0.14, 2.1),
-        stepfun_rate("step-3.5-flash-2603", 0.7, 0.14, 2.1),
-    ]
-}
-
-fn stepfun_rate(model: &str, input: f64, cache_read: f64, output: f64) -> CreditRate {
-    CreditRate {
-        model: model.to_string(),
-        input_per_million: input,
-        output_per_million: output,
-        cache_read_per_million: Some(cache_read),
-        cache_write_per_million: Some(input),
-    }
-}
+static STEPFUN_PRESETS: std::sync::LazyLock<CreditPresetResource> =
+    std::sync::LazyLock::new(|| {
+        serde_json::from_str(include_str!(
+            "../../../resources/stepfun-credit-presets.json"
+        ))
+        .expect("bundled StepFun credit preset resource must be valid")
+    });
 
 fn bucket_active(bucket: &CreditBucket, now: DateTime<Utc>) -> bool {
     bucket.starts_at <= now && bucket.expires_at.is_none_or(|expires| now < expires)

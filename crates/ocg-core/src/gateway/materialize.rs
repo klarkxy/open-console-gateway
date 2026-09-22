@@ -163,63 +163,6 @@ pub(crate) fn binding_allows_requested_model(
             .any(|model| model_scope_allows(scope, model.as_ref()))
 }
 
-/// Diagnostics are not a candidate protocol decision. If a resolution can use
-/// Custom, Command Code GOAT, or Ollama Cloud, preserve the client wire format
-/// until each actual mapping/account is materialized. Unique GOAT and Ollama
-/// catalog IDs are not in OpenCode `MODEL_PROTOCOLS`. Zen-only resolutions
-/// default to Chat so unknown catalog `-free` rows (and their stripped Alias)
-/// are not rejected against the Go protocol table. A Go mapping admitted by a
-/// refreshed catalog may also lack a checked-in profile: defer its protocol to
-/// the effective per-candidate contract instead of vetoing it for diagnostics.
-/// Known builtin profiles keep their normal early validation.
-pub(crate) fn diagnostic_forced_upstream(
-    resolved: &ResolvedModel,
-    client: ApiFormat,
-) -> Option<ApiFormat> {
-    if let ResolvedModel::PinnedRaw { mapping, .. } = resolved
-        && mapping_adapter_kind(mapping) == Some(ProviderAdapterKind::Cpa)
-    {
-        return Some(
-            crate::kernel::protocol::model_protocol(&mapping.upstream_model)
-                .map(|profile| profile.preferred)
-                .unwrap_or(ApiFormat::ChatCompletions),
-        );
-    }
-    let zen_only = match resolved {
-        ResolvedModel::PinnedRaw { mapping, .. } => mapping_is_zen_free(mapping),
-        ResolvedModel::Alias { mappings, .. } => {
-            let routeable: Vec<_> = mappings
-                .iter()
-                .filter(|mapping| mapping.routeable)
-                .collect();
-            !routeable.is_empty() && routeable.iter().all(|mapping| mapping_is_zen_free(mapping))
-        }
-    };
-    if zen_only {
-        return Some(ApiFormat::ChatCompletions);
-    }
-    let preserve_client = match resolved {
-        ResolvedModel::PinnedRaw { mapping, .. } => mapping_preserves_client_wire(mapping),
-        ResolvedModel::Alias { mappings, .. } => mappings
-            .iter()
-            .any(|mapping| mapping.routeable && mapping_preserves_client_wire(mapping)),
-    };
-    preserve_client.then_some(match client {
-        // Gemini is client-only. This diagnostic conversion does not select
-        // the actual upstream, which still comes from the candidate contract.
-        ApiFormat::Gemini => ApiFormat::ChatCompletions,
-        client => client,
-    })
-}
-
-fn mapping_preserves_client_wire(mapping: &ProviderMapping) -> bool {
-    mapping_is_configurable_http(mapping)
-        || mapping_is_command_code_goat(mapping)
-        || mapping_is_ollama_cloud(mapping)
-        || (mapping.is_opencode_go()
-            && crate::kernel::protocol::model_protocol(&mapping.upstream_model).is_none())
-}
-
 pub(crate) fn mapping_adapter_kind(mapping: &ProviderMapping) -> Option<ProviderAdapterKind> {
     crate::dynamic::adapter_kind_for(&mapping.provider_id, &[]).or_else(|| {
         uuid::Uuid::parse_str(&mapping.provider_id)
@@ -236,16 +179,14 @@ pub(crate) fn mapping_is_custom_http_catalog(mapping: &ProviderMapping) -> bool 
             == Some(ProviderAdapterKind::ConfigurableHttp)
 }
 
+#[cfg(test)]
 fn mapping_is_configurable_http(mapping: &ProviderMapping) -> bool {
     mapping_adapter_kind(mapping) == Some(ProviderAdapterKind::ConfigurableHttp)
 }
 
+#[cfg(test)]
 pub(crate) fn mapping_is_zen_free(mapping: &ProviderMapping) -> bool {
     mapping_adapter_kind(mapping) == Some(ProviderAdapterKind::ZenFree)
-}
-
-fn mapping_is_ollama_cloud(mapping: &ProviderMapping) -> bool {
-    mapping_adapter_kind(mapping) == Some(ProviderAdapterKind::OllamaCloud)
 }
 
 pub(crate) fn protocol_error_from_resolve(error: ResolveError) -> ProtocolError {
@@ -698,6 +639,7 @@ fn materialize_dynamic_account_plan(
     )
 }
 
+#[cfg(test)]
 fn mapping_is_command_code_goat(mapping: &ProviderMapping) -> bool {
     mapping_adapter_kind(mapping) == Some(ProviderAdapterKind::CommandCodeGoat)
 }
@@ -1096,6 +1038,8 @@ pub(crate) fn materialize_execution_routes(
     use ocg_domain::destination::{AdapterKind, AuthScheme};
     let mut routes = Vec::new();
     let mut rejections = Vec::new();
+    let mut conversion_error = None;
+    let mut conversion_failures = 0;
     for credential in &snapshot.credentials {
         let Some(destination) = snapshot
             .projection
@@ -1243,6 +1187,8 @@ pub(crate) fn materialize_execution_routes(
             let plan = match plan {
                 Ok(plan) => plan,
                 Err(error) => {
+                    conversion_failures += 1;
+                    conversion_error.get_or_insert_with(|| error.clone());
                     rejections.push(reject(
                         RouteRejectionCode::CandidateMaterializationFailed,
                         error.message,
@@ -1283,6 +1229,22 @@ pub(crate) fn materialize_execution_routes(
                 },
             });
             break;
+        }
+    }
+    // Only real candidate conversions can reject client features. Unavailable
+    // credentials still produce availability errors, and any viable route wins.
+    if routes.is_empty()
+        && conversion_failures
+            + rejections
+                .iter()
+                .filter(|rejection| {
+                    rejection.code == RouteRejectionCode::MappingProtocolIncompatible
+                })
+                .count()
+            == rejections.len()
+    {
+        if let Some(error) = conversion_error {
+            return Err(error);
         }
     }
     let free_only = !routes.is_empty()

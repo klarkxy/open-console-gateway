@@ -7,7 +7,7 @@ use chrono::Utc;
 use hmac::{Hmac, Mac};
 use serde::Serialize;
 use sha2::Sha256;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::dashboard_v3::dynamic_providers::first_account_key;
 use crate::dashboard_v3::{ControlRevision, V3ApiError, check_expectation, parse_mutation_json};
@@ -20,14 +20,16 @@ use crate::models::{
     Account, AccountSetupStep, AccountType, NEW_READY_KEY_ACCOUNT_ENABLED, local_today,
 };
 use crate::provider::{
-    CPA_PROVIDER_ID, ConnectionVerificationStatus, CreationAvailability, builtin_provider,
-    validate_plan_key,
+    BUILTIN_PROVIDERS, BuiltinProvider, CPA_PROVIDER_ID, ConnectionVerificationStatus,
+    CreationAvailability, builtin_provider, default_verification_status, validate_plan_key,
 };
 use crate::redaction::redact_known_secret;
+use crate::routing_snapshot::RoutingSnapshot;
 use crate::state::CoreState;
 use ocg_domain::catalog::CredentialKind;
 use ocg_domain::connection::{
-    EndpointOperation, LegacyConnectionKind, connection_id_for_legacy, endpoint_id_for,
+    ConnectionId, EndpointOperation, LegacyConnectionKind, connection_id_for_legacy,
+    endpoint_id_for,
 };
 use ocg_domain::credential::{
     AssignedEndpoint, CredentialPurpose, LegacyAccountFacts, MaterialKind, OnboardingTaskKind,
@@ -41,7 +43,8 @@ use ocg_domain::ids::CUSTOM_PROVIDER_ID;
 use ocg_domain::provider::ProviderOrigin;
 
 use super::types::{
-    AuthorityRefDto, BindingDto, CredentialDto, CredentialSummary, DeclaredRelationDto,
+    AuthorityRefDto, BindingDto, CredentialCreateCapabilityDto,
+    CredentialCreateUnavailableReasonDto, CredentialDto, CredentialSummary, DeclaredRelationDto,
     IdentityCredentialCreateRequest, IdentityCredentialCreateResult, IdentityLegacy,
     IdentityLegacyKind, IdentityList, IdentitySummary, OnboardingTaskDto, QuotaSharing,
     QuotaWindowDto, SubscriptionDto, UpstreamAccountDto,
@@ -55,7 +58,7 @@ pub(super) async fn list_accounts(
 ) -> Result<Json<IdentityList>, V3ApiError> {
     let _settings_update = state.settings_update.lock();
     let now = Utc::now();
-    let (snapshot, custom_runtimes, dynamic_providers) = {
+    let (snapshot, custom_runtimes, dynamic_providers, routing) = {
         let db = state.db.lock();
         let snapshot = db.list_identity_model().map_err(V3ApiError::internal)?;
         let custom_runtimes = db
@@ -64,11 +67,18 @@ pub(super) async fn list_accounts(
         let dynamic_providers = db
             .list_control_plane_dynamic_providers()
             .map_err(V3ApiError::internal)?;
-        (snapshot, custom_runtimes, dynamic_providers)
+        let routing = CurrentHttpRoutingFacts::load(&db)?;
+        (snapshot, custom_runtimes, dynamic_providers, routing)
     };
 
-    let identities =
-        project_identities(&state, snapshot, &dynamic_providers, &custom_runtimes, now)?;
+    let identities = project_identities(
+        &state,
+        snapshot,
+        &dynamic_providers,
+        &custom_runtimes,
+        &routing,
+        now,
+    )?;
     Ok(Json(IdentityList {
         revision: ControlRevision::from_state(&state),
         identities,
@@ -123,9 +133,16 @@ fn create_credential_locked(
         ));
     }
 
-    let snapshot = {
+    let (snapshot, dynamic_providers, draft_ids) = {
         let db = state.db.lock();
-        db.list_identity_model().map_err(V3ApiError::internal)?
+        let snapshot = db.list_identity_model().map_err(V3ApiError::internal)?;
+        let dynamic_providers = db
+            .list_control_plane_dynamic_providers()
+            .map_err(V3ApiError::internal)?;
+        let draft_ids = db
+            .onboarding_draft_provider_ids()
+            .map_err(V3ApiError::internal)?;
+        (snapshot, dynamic_providers, draft_ids)
     };
     if snapshot
         .platform_parents
@@ -143,7 +160,13 @@ fn create_credential_locked(
         .find(|record| record.identity_id == identity_id)
         .ok_or_else(|| V3ApiError::not_found_at(state, "identity not found"))?;
 
-    let target = resolve_connection_target(state, &snapshot, &input.connection_id)?;
+    let target = resolve_connection_target(
+        state,
+        &snapshot,
+        &dynamic_providers,
+        &draft_ids,
+        &input.connection_id,
+    )?;
     let quota_sharing = resolve_quota_sharing(state, &snapshot, identity_id, &input.quota_sharing)?;
     let key_cipher = encrypt_connection_secret(state, &target, secret)?;
     let now = Utc::now();
@@ -226,83 +249,139 @@ struct ConnectionTarget {
     auth_kind: Option<DynamicAuthKind>,
 }
 
+/// Existing connection facts used by both identity writes and connection listing.
+pub(super) enum CredentialCreateFacts<'a> {
+    Builtin(&'a BuiltinProvider),
+    Dynamic {
+        runtime: &'a DynamicProviderRuntime,
+        onboarding_draft: bool,
+    },
+    CustomAccount,
+}
+
+pub(super) fn credential_create_capability(
+    facts: &CredentialCreateFacts<'_>,
+) -> CredentialCreateCapabilityDto {
+    match credential_create_unavailable_reason(facts) {
+        None => CredentialCreateCapabilityDto {
+            allowed: true,
+            material_kinds: vec![MaterialKind::ApiKey],
+            reason: None,
+        },
+        Some(reason) => CredentialCreateCapabilityDto {
+            allowed: false,
+            material_kinds: Vec::new(),
+            reason: Some(reason),
+        },
+    }
+}
+
+fn credential_create_unavailable_reason(
+    facts: &CredentialCreateFacts<'_>,
+) -> Option<CredentialCreateUnavailableReasonDto> {
+    match facts {
+        CredentialCreateFacts::Builtin(plan) => {
+            if plan.product_surface.is_external_integration()
+                || plan.provider_id == CPA_PROVIDER_ID
+                || super::templates::is_cpa_id(plan.provider_id)
+            {
+                return Some(CredentialCreateUnavailableReasonDto::ExternalIntegration);
+            }
+            if plan.singleton_account_id.is_some() {
+                return Some(CredentialCreateUnavailableReasonDto::Singleton);
+            }
+            if plan.creation_availability == CreationAvailability::Unavailable {
+                return Some(CredentialCreateUnavailableReasonDto::Unavailable);
+            }
+            if plan.credential_kind == CredentialKind::None {
+                return Some(CredentialCreateUnavailableReasonDto::NoAuthentication);
+            }
+            if plan.provider_id == CUSTOM_PROVIDER_ID {
+                return Some(CredentialCreateUnavailableReasonDto::DedicatedAccountFlow);
+            }
+            None
+        }
+        CredentialCreateFacts::Dynamic {
+            runtime,
+            onboarding_draft,
+        } => {
+            if runtime.auth_kind.is_singleton() || !runtime.auth_kind.requires_key() {
+                return Some(CredentialCreateUnavailableReasonDto::NoAuthentication);
+            }
+            if runtime.origin == ProviderOrigin::Builtin {
+                return Some(CredentialCreateUnavailableReasonDto::BuiltinDefinition);
+            }
+            if *onboarding_draft {
+                return Some(CredentialCreateUnavailableReasonDto::Draft);
+            }
+            None
+        }
+        CredentialCreateFacts::CustomAccount => {
+            Some(CredentialCreateUnavailableReasonDto::DedicatedAccountFlow)
+        }
+    }
+}
+
+fn lookup_credential_create_facts<'a>(
+    snapshot: &'a IdentityModelSnapshot,
+    dynamic_providers: &'a [DynamicProviderRuntime],
+    draft_ids: &HashSet<String>,
+    connection_id: &str,
+) -> Option<CredentialCreateFacts<'a>> {
+    for plan in &BUILTIN_PROVIDERS {
+        let id = connection_id_for_legacy(LegacyConnectionKind::BuiltinProvider, plan.provider_id);
+        if id.as_str() == connection_id {
+            return Some(CredentialCreateFacts::Builtin(plan));
+        }
+    }
+    if let Some(runtime) = dynamic_providers.iter().find(|runtime| {
+        connection_id_for_legacy(LegacyConnectionKind::DynamicProvider, &runtime.id).as_str()
+            == connection_id
+    }) {
+        return Some(CredentialCreateFacts::Dynamic {
+            runtime,
+            onboarding_draft: draft_ids.contains(&runtime.id),
+        });
+    }
+    if snapshot.accounts.iter().any(|record| {
+        record.account.provider_id == CUSTOM_PROVIDER_ID
+            && connection_id_for_legacy(LegacyConnectionKind::CustomAccount, &record.account.id)
+                .as_str()
+                == connection_id
+    }) {
+        return Some(CredentialCreateFacts::CustomAccount);
+    }
+    None
+}
+
 fn resolve_connection_target(
     state: &CoreState,
     snapshot: &IdentityModelSnapshot,
+    dynamic_providers: &[DynamicProviderRuntime],
+    draft_ids: &HashSet<String>,
     connection_id: &str,
 ) -> Result<ConnectionTarget, V3ApiError> {
-    use crate::provider::{BUILTIN_PROVIDERS, default_verification_status};
-
-    for plan in BUILTIN_PROVIDERS {
-        let id = connection_id_for_legacy(LegacyConnectionKind::BuiltinProvider, plan.provider_id);
-        if id.as_str() != connection_id {
-            continue;
-        }
-        if plan.product_surface.is_external_integration()
-            || plan.provider_id == CPA_PROVIDER_ID
-            || super::templates::is_cpa_id(plan.provider_id)
-        {
-            return Err(V3ApiError::invalid_request_at(
-                state,
-                "CPA Subscription Pool settings must use the external-integration endpoint",
-            ));
-        }
-        if plan.creation_availability == CreationAvailability::Unavailable
-            || plan.singleton_account_id.is_some()
-        {
-            return Err(V3ApiError::invalid_request_at(
-                state,
-                plan.creation_unavailable_reason
-                    .unwrap_or("this Plan cannot receive another Key through this endpoint")
-                    .to_string(),
-            ));
-        }
-        if plan.credential_kind == CredentialKind::None {
-            return Err(V3ApiError::invalid_request_at(
-                state,
-                "anonymous and no-auth credentials cannot be created",
-            ));
-        }
-        if plan.provider_id == CUSTOM_PROVIDER_ID {
-            return Err(V3ApiError::invalid_request_at(
-                state,
-                "Custom API connections require the dedicated account endpoint",
-            ));
-        }
-        return Ok(ConnectionTarget {
+    let facts =
+        lookup_credential_create_facts(snapshot, dynamic_providers, draft_ids, connection_id)
+            .ok_or_else(|| V3ApiError::not_found_at(state, "connection not found"))?;
+    let capability = credential_create_capability(&facts);
+    if !capability.allowed {
+        let reason = capability
+            .reason
+            .unwrap_or(CredentialCreateUnavailableReasonDto::Unavailable);
+        return Err(credential_create_unavailable_error(state, &facts, reason));
+    }
+    match facts {
+        CredentialCreateFacts::Builtin(plan) => Ok(ConnectionTarget {
             connection_id: connection_id.to_string(),
             provider_id: plan.provider_id.to_string(),
             credential_kind: plan.credential_kind,
             quota_scope: plan.quota_scope,
             enabled: NEW_READY_KEY_ACCOUNT_ENABLED,
-            verification_status: default_verification_status(plan),
+            verification_status: default_verification_status(*plan),
             auth_kind: None,
-        });
-    }
-
-    let dynamic_providers = {
-        let db = state.db.lock();
-        db.list_control_plane_dynamic_providers()
-            .map_err(V3ApiError::internal)?
-    };
-    if let Some(runtime) = dynamic_providers.iter().find(|runtime| {
-        connection_id_for_legacy(LegacyConnectionKind::DynamicProvider, &runtime.id).as_str()
-            == connection_id
-    }) {
-        let runtime = runtime.clone();
-        if runtime.auth_kind.is_singleton() || !runtime.auth_kind.requires_key() {
-            return Err(V3ApiError::invalid_request_at(
-                state,
-                "anonymous and no-auth credentials cannot be created",
-            ));
-        }
-        if runtime.origin == ProviderOrigin::Builtin {
-            return Err(V3ApiError::invalid_request_at(
-                state,
-                "builtin provider definitions cannot receive Keys here",
-            ));
-        }
-        return Ok(ConnectionTarget {
+        }),
+        CredentialCreateFacts::Dynamic { runtime, .. } => Ok(ConnectionTarget {
             connection_id: connection_id.to_string(),
             provider_id: runtime.id.clone(),
             credential_kind: runtime.auth_kind.credential_kind(),
@@ -310,22 +389,45 @@ fn resolve_connection_target(
             enabled: NEW_READY_KEY_ACCOUNT_ENABLED,
             verification_status: ConnectionVerificationStatus::NotRequired,
             auth_kind: Some(runtime.auth_kind),
-        });
+        }),
+        CredentialCreateFacts::CustomAccount => Err(V3ApiError::internal(
+            "custom connections cannot resolve a credential-create target",
+        )),
     }
+}
 
-    if snapshot.accounts.iter().any(|record| {
-        record.account.provider_id == CUSTOM_PROVIDER_ID
-            && connection_id_for_legacy(LegacyConnectionKind::CustomAccount, &record.account.id)
-                .as_str()
-                == connection_id
-    }) {
-        return Err(V3ApiError::invalid_request_at(
-            state,
-            "Custom API connections require the dedicated account endpoint",
-        ));
-    }
-
-    Err(V3ApiError::not_found_at(state, "connection not found"))
+fn credential_create_unavailable_error(
+    state: &CoreState,
+    facts: &CredentialCreateFacts<'_>,
+    reason: CredentialCreateUnavailableReasonDto,
+) -> V3ApiError {
+    let message = match (reason, facts) {
+        (CredentialCreateUnavailableReasonDto::ExternalIntegration, _) => {
+            "CPA Subscription Pool settings must use the external-integration endpoint".to_string()
+        }
+        (
+            CredentialCreateUnavailableReasonDto::Singleton
+            | CredentialCreateUnavailableReasonDto::Unavailable,
+            CredentialCreateFacts::Builtin(plan),
+        ) => plan
+            .creation_unavailable_reason
+            .unwrap_or("this Plan cannot receive another Key through this endpoint")
+            .to_string(),
+        (CredentialCreateUnavailableReasonDto::NoAuthentication, _) => {
+            "anonymous and no-auth credentials cannot be created".to_string()
+        }
+        (CredentialCreateUnavailableReasonDto::DedicatedAccountFlow, _) => {
+            "Custom API connections require the dedicated account endpoint".to_string()
+        }
+        (CredentialCreateUnavailableReasonDto::BuiltinDefinition, _) => {
+            "builtin provider definitions cannot receive Keys here".to_string()
+        }
+        (CredentialCreateUnavailableReasonDto::Draft, _) => {
+            "draft connections cannot receive Keys here".to_string()
+        }
+        _ => "this Plan cannot receive another Key through this endpoint".to_string(),
+    };
+    V3ApiError::invalid_request_at(state, message)
 }
 
 fn encrypt_connection_secret(
@@ -348,6 +450,7 @@ fn project_identities(
     snapshot: IdentityModelSnapshot,
     dynamic_providers: &[DynamicProviderRuntime],
     custom_runtimes: &[crate::custom::CustomAccountRuntime],
+    routing: &CurrentHttpRoutingFacts,
     now: chrono::DateTime<Utc>,
 ) -> Result<Vec<IdentitySummary>, V3ApiError> {
     let custom_by_id: HashMap<&str, &crate::custom::CustomAccountRuntime> = custom_runtimes
@@ -360,26 +463,30 @@ fn project_identities(
         .collect();
 
     let mut identities = Vec::new();
-    let mut seen = std::collections::HashSet::new();
+    let mut groups: Vec<Vec<&IdentityAccountRecord>> = Vec::new();
+    let mut group_index: HashMap<&str, usize> = HashMap::new();
+    let mut seen = HashSet::new();
     for record in &snapshot.accounts {
-        if !seen.insert(record.identity_id.clone()) {
+        if let Some(&index) = group_index.get(record.identity_id.as_str()) {
+            groups[index].push(record);
             continue;
         }
-        let records: Vec<_> = snapshot
-            .accounts
-            .iter()
-            .filter(|candidate| candidate.identity_id == record.identity_id)
-            .collect();
+        group_index.insert(record.identity_id.as_str(), groups.len());
+        seen.insert(record.identity_id.as_str());
+        groups.push(vec![record]);
+    }
+    for records in groups {
         identities.push(project_account_identity(
             state,
             &records,
             &dynamic_by_id,
             &custom_by_id,
+            routing,
             now,
         )?);
     }
     for parent in &snapshot.platform_parents {
-        if !seen.insert(parent.identity.id.clone()) {
+        if !seen.insert(parent.identity.id.as_str()) {
             continue;
         }
         identities.push(project_platform_identity(parent));
@@ -392,6 +499,7 @@ fn project_account_identity(
     records: &[&IdentityAccountRecord],
     dynamic_by_id: &HashMap<&str, &DynamicProviderRuntime>,
     custom_by_id: &HashMap<&str, &crate::custom::CustomAccountRuntime>,
+    routing: &CurrentHttpRoutingFacts,
     now: chrono::DateTime<Utc>,
 ) -> Result<IdentitySummary, V3ApiError> {
     let primary = records
@@ -400,13 +508,14 @@ fn project_account_identity(
         .ok_or_else(|| V3ApiError::internal("identity has no credentials"))?;
     let mut credentials = Vec::new();
     let mut declared_relations = Vec::new();
-    let mut seen_relations = std::collections::HashSet::new();
+    let mut seen_relations = HashSet::new();
     for record in records {
         credentials.push(project_credential(
             state,
             record,
             dynamic_by_id,
             custom_by_id,
+            routing,
             now,
         )?);
         if let Some(relation) = &record.declared_relation {
@@ -421,7 +530,7 @@ fn project_account_identity(
     }
     let account = &primary.account;
     let (connection_id, endpoints) =
-        assigned_endpoints_current(state, account, dynamic_by_id, custom_by_id)?;
+        routing.assigned_endpoints(account, dynamic_by_id, custom_by_id);
     let facts = LegacyAccountFacts {
         account_id: account.id.clone(),
         name: account.name.clone(),
@@ -460,11 +569,12 @@ fn project_credential(
     record: &IdentityAccountRecord,
     dynamic_by_id: &HashMap<&str, &DynamicProviderRuntime>,
     custom_by_id: &HashMap<&str, &crate::custom::CustomAccountRuntime>,
+    routing: &CurrentHttpRoutingFacts,
     now: chrono::DateTime<Utc>,
 ) -> Result<CredentialSummary, V3ApiError> {
     let account = &record.account;
     let (connection_id, endpoints) =
-        assigned_endpoints_current(state, account, dynamic_by_id, custom_by_id)?;
+        routing.assigned_endpoints(account, dynamic_by_id, custom_by_id);
     let facts = LegacyAccountFacts {
         account_id: account.id.clone(),
         name: account.name.clone(),
@@ -663,33 +773,98 @@ pub(super) fn project_binding_dto(
     }
 }
 
+#[derive(Clone)]
+struct HttpAssignedRoutes {
+    connection_id: ConnectionId,
+    endpoints: Vec<AssignedEndpoint>,
+}
+
+/// HTTP routing facts captured once per identity projection request.
+pub(super) struct CurrentHttpRoutingFacts {
+    by_account: HashMap<String, HttpAssignedRoutes>,
+    #[allow(dead_code)]
+    by_credential: HashMap<String, HttpAssignedRoutes>,
+    #[allow(dead_code)]
+    by_destination: HashMap<String, HttpAssignedRoutes>,
+}
+
+impl CurrentHttpRoutingFacts {
+    pub(super) fn load(db: &crate::db::Database) -> Result<Self, V3ApiError> {
+        Self::from_snapshot(&RoutingSnapshot::load(db).map_err(V3ApiError::internal)?)
+    }
+
+    pub(super) fn from_snapshot(snapshot: &RoutingSnapshot) -> Result<Self, V3ApiError> {
+        let http_destinations: HashMap<&str, &ocg_domain::destination::Destination> = snapshot
+            .projection
+            .destinations
+            .iter()
+            .filter(|destination| destination.adapter == ocg_domain::destination::AdapterKind::Http)
+            .map(|destination| (destination.id.as_str(), destination))
+            .collect();
+        let mut by_account = HashMap::new();
+        let mut by_credential = HashMap::new();
+        let mut by_destination = HashMap::new();
+        let mut dest_cache: HashMap<(String, String), HttpAssignedRoutes> = HashMap::new();
+        for credential in &snapshot.credentials {
+            let Some(destination) = http_destinations.get(credential.destination_id.as_str())
+            else {
+                continue;
+            };
+            let cache_key = (
+                credential.destination_id.clone(),
+                credential.authorization_connection_id.clone(),
+            );
+            let assignment = if let Some(existing) = dest_cache.get(&cache_key).cloned() {
+                existing
+            } else {
+                let connection_id: ConnectionId = serde_json::from_value(
+                    serde_json::Value::String(credential.authorization_connection_id.clone()),
+                )
+                .map_err(V3ApiError::internal)?;
+                let assignment = HttpAssignedRoutes {
+                    endpoints: assigned_endpoints_for_routes(
+                        &connection_id,
+                        &ocg_domain::destination::http_configured_routes(destination),
+                    ),
+                    connection_id,
+                };
+                dest_cache.insert(cache_key, assignment.clone());
+                assignment
+            };
+            by_account.insert(credential.id.clone(), assignment.clone());
+            by_credential.insert(credential.credential_id.clone(), assignment.clone());
+            by_destination
+                .entry(credential.destination_id.clone())
+                .or_insert_with(|| assignment.clone());
+        }
+        Ok(Self {
+            by_account,
+            by_credential,
+            by_destination,
+        })
+    }
+
+    fn assigned_endpoints(
+        &self,
+        account: &Account,
+        dynamic_by_id: &HashMap<&str, &DynamicProviderRuntime>,
+        custom_by_id: &HashMap<&str, &crate::custom::CustomAccountRuntime>,
+    ) -> (ConnectionId, Vec<AssignedEndpoint>) {
+        if let Some(found) = self.by_account.get(&account.id) {
+            return (found.connection_id.clone(), found.endpoints.clone());
+        }
+        assigned_endpoints(account, dynamic_by_id, custom_by_id)
+    }
+}
+
 pub(super) fn assigned_endpoints_current(
     state: &CoreState,
     account: &Account,
     dynamic_by_id: &HashMap<&str, &DynamicProviderRuntime>,
     custom_by_id: &HashMap<&str, &crate::custom::CustomAccountRuntime>,
-) -> Result<(ocg_domain::connection::ConnectionId, Vec<AssignedEndpoint>), V3ApiError> {
-    let snapshot = crate::routing_snapshot::RoutingSnapshot::load(&state.db.lock())
-        .map_err(V3ApiError::internal)?;
-    if let Some(credential) = snapshot.credentials.iter().find(|row| row.id == account.id)
-        && let Some(destination) = snapshot.projection.destinations.iter().find(|row| {
-            row.id == credential.destination_id
-                && row.adapter == ocg_domain::destination::AdapterKind::Http
-        })
-    {
-        let connection_id: ocg_domain::connection::ConnectionId = serde_json::from_value(
-            serde_json::Value::String(credential.authorization_connection_id.clone()),
-        )
-        .map_err(V3ApiError::internal)?;
-        return Ok((
-            connection_id.clone(),
-            assigned_endpoints_for_routes(
-                &connection_id,
-                &ocg_domain::destination::http_configured_routes(destination),
-            ),
-        ));
-    }
-    Ok(assigned_endpoints(account, dynamic_by_id, custom_by_id))
+) -> Result<(ConnectionId, Vec<AssignedEndpoint>), V3ApiError> {
+    let facts = CurrentHttpRoutingFacts::load(&state.db.lock())?;
+    Ok(facts.assigned_endpoints(account, dynamic_by_id, custom_by_id))
 }
 
 pub(super) fn assigned_endpoints(
@@ -939,3 +1114,6 @@ pub(super) fn validate_binding_grants(
     }
     Ok((ids, origins))
 }
+
+#[cfg(test)]
+mod tests;

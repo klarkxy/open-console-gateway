@@ -1,4 +1,4 @@
-//! Account-credit 400s must fall through without inventing account state.
+//! Account-credit 400s are request-local and must not invent account state.
 use axum::http::StatusCode;
 use ocg_core::gateway::provider_adapter::install_goat_loopback_route_for_test;
 use ocg_core::models::RoutingMode;
@@ -10,7 +10,7 @@ use fixture::*;
 const CREDIT_ERROR: &str = r#"{"error":{"code":"BAD_REQUEST","message":"You have insufficient credits to make this request. Please purchase more credits to continue using the service.","type":"invalid_request_error"}}"#;
 
 #[tokio::test]
-async fn goat_credit_400_retries_another_key_and_keeps_unknown_recovery_explicit() {
+async fn goat_credit_400_retries_another_key_without_publishing_quota_recovery() {
     let p = PreparedFallback::routing(
         &[
             ("a", &[reply(400, CREDIT_ERROR), reply(400, CREDIT_ERROR)]),
@@ -43,15 +43,10 @@ async fn goat_credit_400_retries_another_key_and_keeps_unknown_recovery_explicit
         let (status, body) = h.protocol("/v1/chat/completions", MODEL).await;
         assert_eq!(status, StatusCode::OK, "{body}");
     }
-    assert_eq!(h.call_keys(), ["a", "b", "b"]);
-    let waits: Vec<_> = h
-        .logs()
-        .into_iter()
-        .filter(|row| row.error_stage.as_deref() == Some("resource_wait"))
-        .collect();
-    assert!(
-        waits.is_empty(),
-        "persistent quota admission skips this Key before dispatch"
+    assert_eq!(
+        h.call_keys(),
+        ["a", "b", "a", "b"],
+        "a request-local credit 400 must not make StickyGlobal abandon the higher card"
     );
     let credential = identity_refs_for(&h.state, &a).credential_id;
     let (status, view) = v4_get(h.port, "/credentials").await;
@@ -62,8 +57,10 @@ async fn goat_credit_400_retries_another_key_and_keeps_unknown_recovery_explicit
         .iter()
         .find(|row| row["id"] == credential)
         .unwrap();
-    assert_eq!(row["quotaRecovery"]["reason"], "insufficient_balance");
-    assert_eq!(row["quotaRecovery"]["status"], "waiting");
+    assert!(
+        row.get("quotaRecovery").is_none(),
+        "an upstream 400 body must not publish a durable quota episode: {row}"
+    );
     let after = h.account(&a);
     assert_eq!(after.cooldown_until, before.cooldown_until);
     assert_eq!(after.auth_error, before.auth_error);
@@ -73,7 +70,7 @@ async fn goat_credit_400_retries_another_key_and_keeps_unknown_recovery_explicit
         .iter()
         .filter(|row| row.http_status == Some(400))
         .collect();
-    assert_eq!(failed.len(), 1);
+    assert_eq!(failed.len(), 2);
     for row in failed {
         assert_eq!(row.attempt, Some(1));
         let diagnostic = row.diagnostic.as_ref().unwrap();
@@ -84,7 +81,7 @@ async fn goat_credit_400_retries_another_key_and_keeps_unknown_recovery_explicit
         logs.iter()
             .filter(|row| row.http_status == Some(200) && row.attempt == Some(2))
             .count(),
-        1
+        2
     );
 }
 

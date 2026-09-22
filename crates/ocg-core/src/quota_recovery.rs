@@ -9,9 +9,7 @@ use ocg_gateway::quota::{QuotaEvidence, QuotaReason, QuotaWindowKind};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub(crate) use ocg_gateway::quota::{
-    MiniMaxEnvelope, minimax_envelope, recognize_quota, recognize_quota_in_sse,
-};
+pub(crate) use ocg_gateway::quota::{MiniMaxEnvelope, minimax_envelope};
 
 const FIRST_UNKNOWN: Duration = Duration::minutes(15);
 const SECOND_UNKNOWN: Duration = Duration::hours(1);
@@ -366,22 +364,6 @@ pub(crate) enum QuotaAcquire {
     Trial(QuotaEpisode),
     SkipWaiting,
     SkipProbing,
-}
-
-pub(crate) fn host_quota_evidence(
-    status: u16,
-    provider_id: &str,
-    body: &str,
-) -> Option<QuotaEvidence> {
-    recognize_quota(status, provider_id, body)
-}
-
-pub(crate) fn host_quota_evidence_sse(
-    status: u16,
-    provider_id: &str,
-    chunk: &str,
-) -> Option<QuotaEvidence> {
-    recognize_quota_in_sse(status, provider_id, chunk)
 }
 
 #[cfg(test)]

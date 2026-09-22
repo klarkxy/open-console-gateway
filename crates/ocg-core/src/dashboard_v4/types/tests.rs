@@ -47,6 +47,11 @@ fn wire_fields_are_camel_case() {
 #[test]
 fn connection_summary_emits_null_optional_fields() {
     let summary = ConnectionSummary {
+        credential_create: CredentialCreateCapabilityDto {
+            allowed: true,
+            material_kinds: vec![ocg_domain::credential::MaterialKind::ApiKey],
+            reason: None,
+        },
         id: "id".into(),
         name: "Lab".into(),
         origin: ConnectionOrigin::Custom,

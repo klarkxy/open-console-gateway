@@ -380,19 +380,6 @@ fn expedite_guard_is_fifteen_minutes() {
 }
 
 #[test]
-fn inference_429_delay_stays_within_one_to_two_minutes() {
-    let now = fixed("2026-08-18T12:00:00Z");
-    assert_eq!(
-        compute_inference_429_delay(now, 0.0),
-        now + INFERENCE_429_DELAY_MIN
-    );
-    assert_eq!(
-        compute_inference_429_delay(now, 1.0),
-        now + INFERENCE_429_DELAY_MAX
-    );
-}
-
-#[test]
 fn auto_sync_excludes_disabled_non_ready_empty_key() {
     let provider = crate::provider::OPENCODE_PROVIDER_ID;
     assert!(!provider_account_is_auto_sync_candidate(
@@ -478,6 +465,7 @@ fn sample_snapshot() -> GoUsageSnapshot {
         monthly_percent: 10.0,
         rolling_resets_in_minutes: 180,
         weekly_resets_in_minutes: 1_440,
+        monthly_resets_in_minutes: 43200,
         earliest_resets_in_minutes: 180,
     }
 }
@@ -845,6 +833,12 @@ async fn key_cas_leaves_windows_unchanged_when_account_changes() {
         .account_usage_with_limits("acc-3", &limits)
         .unwrap();
 
+    let sync_before = state
+        .db
+        .lock()
+        .account_usage_sync_state("acc-3")
+        .unwrap()
+        .unwrap();
     let now = fixed("2026-08-18T12:00:00Z");
     state.usage_sync.set_clock_for_test(move || now);
     state.usage_sync.set_jitter_for_test(|| 0.0);
@@ -893,13 +887,9 @@ async fn key_cas_leaves_windows_unchanged_when_account_changes() {
         .account_usage_sync_state("acc-3")
         .unwrap()
         .unwrap();
-    assert_eq!(sync.failure_streak, 1);
-    assert_eq!(sync.next_eligible_at, Some(now + failure_backoff(1)));
-    assert_eq!(sync.last_attempt_at, Some(now));
-    // Manual 15s throttle still exposed after CAS conflict.
     assert_eq!(
-        manual_next_allowed_at(sync.last_attempt_at, now),
-        Some(now + MANUAL_THROTTLE)
+        sync, sync_before,
+        "old-key results must not throttle the replacement"
     );
 
     state.usage_sync.clear_test_seams();
@@ -929,40 +919,6 @@ async fn official_rate_limited_status_does_not_write_cooldown() {
     assert!(stored.cooldown_month_until.is_none());
     assert!(stored.cooldown_generic_until.is_none());
     assert!(stored.cooldown_free_until.is_none());
-
-    drop(state);
-    std::fs::remove_dir_all(dir).unwrap();
-}
-
-#[tokio::test]
-async fn schedule_after_inference_429_only_pulls_next_eligible() {
-    let (dir, state) = test_state("infer-429");
-    let account = ready_account(&state, "acc-5", "sk-acc-5");
-    state.db.lock().create_account(&account).unwrap();
-    let now = fixed("2026-08-18T12:00:00Z");
-    state.usage_sync.set_clock_for_test(move || now);
-    state.usage_sync.set_jitter_for_test(|| 0.0);
-    // Far-future cadence baseline.
-    state
-        .db
-        .lock()
-        .record_account_usage_sync_success(
-            "acc-5",
-            now - Duration::hours(1),
-            now + Duration::hours(20),
-            false,
-        )
-        .unwrap();
-    schedule_after_inference_429(&state, "acc-5");
-    let sync = state
-        .db
-        .lock()
-        .account_usage_sync_state("acc-5")
-        .unwrap()
-        .unwrap();
-    assert_eq!(sync.next_eligible_at, Some(now + INFERENCE_429_DELAY_MIN));
-    let stored = state.db.lock().get_account("acc-5").unwrap().unwrap();
-    assert!(stored.cooldown_until.is_none());
 
     drop(state);
     std::fs::remove_dir_all(dir).unwrap();
@@ -1541,43 +1497,6 @@ fn inactive_to_active_pulls_hourly_without_overriding_failure_backoff() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-#[test]
-fn inference_429_intentionally_overrides_failure_backoff_floor() {
-    let (dir, state) = test_state("429-override");
-    let account = ready_account(&state, "rl", "sk-rl");
-    state.db.lock().create_account(&account).unwrap();
-    let now = fixed("2026-08-18T12:00:00Z");
-    state.usage_sync.set_clock_for_test(move || now);
-    state.usage_sync.set_jitter_for_test(|| 0.0);
-    state
-        .db
-        .lock()
-        .record_account_usage_sync_failure(
-            "rl",
-            now - Duration::minutes(1),
-            2,
-            now + failure_backoff(2),
-        )
-        .unwrap();
-    schedule_after_inference_429(&state, "rl");
-    let sync = state
-        .db
-        .lock()
-        .account_usage_sync_state("rl")
-        .unwrap()
-        .unwrap();
-    assert_eq!(sync.failure_streak, 2);
-    assert_eq!(
-        sync.next_eligible_at,
-        Some(now + INFERENCE_429_DELAY_MIN),
-        "real inference 429 may intentionally pull earlier than failure backoff"
-    );
-
-    state.usage_sync.clear_test_seams();
-    drop(state);
-    let _ = std::fs::remove_dir_all(dir);
-}
-
 #[tokio::test]
 async fn goat_key_windows_are_independent_and_usage_failure_is_fail_soft() {
     let (dir, state) = test_state("goat-independent");
@@ -1669,7 +1588,6 @@ async fn goat_key_windows_are_independent_and_usage_failure_is_fail_soft() {
     assert_eq!(sync.last_attempt_at, None);
     assert_eq!(sync.next_eligible_at, None);
 
-    schedule_after_inference_429(&state, "goat-a");
     assert_eq!(
         state
             .db
@@ -1962,26 +1880,6 @@ impl UsageSyncHost for FakeUsageHost {
     }
 }
 
-#[test]
-fn usage_sync_host_seam_schedules_inference_429_without_process_host() {
-    let host = FakeUsageHost::new();
-    host.insert_ready_go("acc-5", "sk-acc-5");
-    let now = fixed("2026-08-18T12:00:00Z");
-    host.usage_runtime().set_clock_for_test(move || now);
-    host.usage_runtime().set_jitter_for_test(|| 0.0);
-    host.inner
-        .sync
-        .lock()
-        .get_mut("acc-5")
-        .unwrap()
-        .next_eligible_at = Some(now + Duration::hours(20));
-
-    schedule_after_inference_429(&host, "acc-5");
-    let sync = host.inner.sync.lock().get("acc-5").cloned().unwrap();
-    assert_eq!(sync.next_eligible_at, Some(now + INFERENCE_429_DELAY_MIN));
-    assert_eq!(sync.failure_streak, 0);
-}
-
 #[tokio::test]
 async fn usage_sync_host_loop_exits_when_the_host_is_dropped() {
     let host = FakeUsageHost::new();
@@ -1999,4 +1897,143 @@ async fn usage_sync_host_loop_exits_when_the_host_is_dropped() {
         FakeUsageHost::upgrade(&weak).is_none(),
         "dropping the last host handle must end the scheduler lifetime"
     );
+}
+
+#[tokio::test]
+async fn authoritative_usage_replaces_exhaustion_but_preserves_temporary_cooldown() {
+    let (dir, state) = test_state("official-quota-evidence");
+    let mut account = ready_account(&state, "official-quota", "test-key");
+    let now = Utc::now();
+    account.cooldown_generic_until = Some(now + Duration::seconds(120));
+    account.cooldown_until = account.cooldown_generic_until;
+    state.db.lock().create_account(&account).unwrap();
+    state
+        .usage_sync
+        .set_fetch_for_test(|_, _| Box::pin(async { Ok(sample_snapshot()) }));
+    refresh_official_usage(&state, &account.id, UsageSyncTrigger::Scheduled)
+        .await
+        .unwrap();
+    let before = crate::db::quota_recovery::load_for_legacy_on(&state.db.lock().conn, &account.id)
+        .unwrap()
+        .unwrap()
+        .3
+        .unwrap();
+    assert_eq!(before.windows.len(), 1);
+    state
+        .usage_sync
+        .set_fetch_for_test(|_, _| Box::pin(async { Err(GoUsageError::Timeout) }));
+    assert!(
+        refresh_official_usage(&state, &account.id, UsageSyncTrigger::Scheduled)
+            .await
+            .is_err()
+    );
+    let after_failure =
+        crate::db::quota_recovery::load_for_legacy_on(&state.db.lock().conn, &account.id)
+            .unwrap()
+            .unwrap()
+            .3
+            .unwrap();
+    assert_eq!(
+        serde_json::to_value(&before).unwrap(),
+        serde_json::to_value(&after_failure).unwrap()
+    );
+    state.usage_sync.set_fetch_for_test(|_, _| {
+        Box::pin(async {
+            let mut snapshot = sample_snapshot();
+            snapshot.rolling_status = crate::go_usage::GoUsageWindowStatus::Ok;
+            Ok(snapshot)
+        })
+    });
+    refresh_official_usage(&state, &account.id, UsageSyncTrigger::Scheduled)
+        .await
+        .unwrap();
+    assert!(
+        crate::db::quota_recovery::load_for_legacy_on(&state.db.lock().conn, &account.id)
+            .unwrap()
+            .unwrap()
+            .3
+            .is_none()
+    );
+    assert_eq!(
+        state
+            .db
+            .lock()
+            .get_account(&account.id)
+            .unwrap()
+            .unwrap()
+            .cooldown_generic_until,
+        account.cooldown_generic_until
+    );
+    state.usage_sync.clear_test_seams();
+    drop(state);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn changed_credential_version_with_same_cipher_rejects_usage_write() {
+    let (dir, state) = test_state("official-version-guard");
+    let account = ready_account(&state, "version-guard", "same-key");
+    state.db.lock().create_account(&account).unwrap();
+    let before = state
+        .db
+        .lock()
+        .account_usage_sync_state(&account.id)
+        .unwrap();
+    let mutate = state.clone();
+    state.usage_sync.set_fetch_for_test(move |_, _| {
+        let mutate = mutate.clone();
+        Box::pin(async move {
+            mutate.db.lock().conn.execute("UPDATE credentials SET credential_version = credential_version + 1 WHERE legacy_account_id = 'version-guard'", []).unwrap();
+            Ok(sample_snapshot())
+        })
+    });
+    assert!(matches!(
+        refresh_official_usage(&state, &account.id, UsageSyncTrigger::Inference429).await,
+        Err(OfficialUsageRefreshError::Conflict(_))
+    ));
+    assert!(
+        crate::db::quota_recovery::load_for_legacy_on(&state.db.lock().conn, &account.id)
+            .unwrap()
+            .unwrap()
+            .3
+            .is_none()
+    );
+    assert_eq!(
+        state
+            .db
+            .lock()
+            .account_usage_sync_state(&account.id)
+            .unwrap(),
+        before
+    );
+    state.usage_sync.clear_test_seams();
+    drop(state);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn first_reactive_attempt_creates_throttle_metadata_without_a_success() {
+    let (dir, state) = test_state("reactive-attempt-row");
+    let account = ready_account(&state, "first-reactive", "test-key");
+    state.db.lock().create_account(&account).unwrap();
+    let now = Utc::now();
+    {
+        let db = state.db.lock();
+        db.conn
+            .execute(
+                "DELETE FROM provider_usage_sync_state WHERE account_id = ?1",
+                [&account.id],
+            )
+            .unwrap();
+        db.touch_account_usage_sync_attempt(&account.id, now)
+            .unwrap();
+        let row = db.account_usage_sync_state(&account.id).unwrap().unwrap();
+        assert_eq!(
+            manual_next_allowed_at(row.last_attempt_at, now),
+            Some(now + MANUAL_THROTTLE)
+        );
+        assert!(row.last_success_at.is_none());
+    }
+    drop(state);
+    std::fs::remove_dir_all(dir).unwrap();
 }

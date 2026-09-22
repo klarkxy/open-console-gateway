@@ -119,7 +119,7 @@ platform link.
 | `secret` | encrypted; `null` for `auth_scheme = none` and for external integrations |
 | `enabled`, `routing_rank` | the routing gate and global order (one order across all destinations) |
 | `scope` | model scope: all, or an explicit public-name list |
-| `grants` | allowed endpoint ids / origins the secret may be sent to |
+| `grants` | allowed endpoint ids / origins the secret may be sent to; the current account endpoint is resolved from this exact credential's saved grants, never from a sibling Key |
 | `auth_state`, `auth_state_version`, `last_error` | local verification state |
 | `cooldowns` | generic and per-window `until` timestamps (moved from `accounts`) |
 | `quota_pool_id` | shared pool membership |
@@ -131,10 +131,19 @@ Keyless destinations still get exactly one credential row with
 `secret = null`, so enablement and order are uniform: the routing planner
 iterates credentials, never destinations, and no singleton check exists.
 
+Credential creation is a server-side decision. `credentialCreate` must permit
+the operation for the destination, the submitted material kind must be in its
+allowed `materialKinds`, and a rejection returns the shared reason code. The
+same backend guard serves Add Key and every other creation entry point; a
+client-side picker cannot bypass it.
+
 ### 3.3 Quota pool
 
 Unchanged from V4 in shape: `id`, `policy_mode`, `relation_confidence`,
-members. A 429 or window exhaustion on one member fans out to the pool.
+members. Ordinary cooldowns may fan out only through this explicit membership.
+Each 429 starts a temporary wait for the receiving Key (or Zen Free's anonymous
+egress scope), so it never creates a pool-wide quota episode from a status,
+code, or error body.
 
 ### 3.4 Plan (embedded in destination)
 
@@ -323,7 +332,9 @@ follows (the code carries no remaining `TODO(rfc)` markers):
 - GOAT, MiniMax, and Kimi plans have `expiry_cadence = Monthly` — their cards
   already show a monthly purchase countdown. MiniMax and Kimi windows are
   `FiveHours` + `Week`, which is how the dashboard presents their official
-  usage today.
+  usage today. GOAT and CN window snapshots are display-only; fetched
+  OpenCode Go usage is the authoritative source that may establish or clear
+  Go quota state.
 - CPA `base_url` is `None` (runtime loopback of the managed child).
 - Builtin and platform `catalog` are empty at mapping time; the projection
   layer (stage 4a) joins persisted catalog snapshots after mapping.
@@ -436,7 +447,7 @@ Selector channel eligibility uses `channel_for_adapter`. Zen/CPA no longer
 require the reserved account id on the resolve path. CPA live send uses
 `AttemptSpec::is_local_external_integration` (the CPA adapter's proxy
 model), not `provider_id`. Diagnostic channel selection uses
-`mapping_is_zen_free` (adapter kind), not `ProviderMapping::is_zen_free`.
+the adapter kind directly, not a mapping helper or a reserved provider id.
 Custom vs dynamic HTTP uses `destination.legacy` when a projection row is
 present; leftover rows and `resolve_route_with_dynamics` split Configurable
 HTTP on whether a dynamic provider runtime exists, not `is_custom_api`.

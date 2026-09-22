@@ -80,7 +80,7 @@ Custom API 账号迁移为 `adapter = http`、`max_credentials = null` 的独立
 | `secret` | 加密；`auth_scheme = none` 与外部集成为 `null` |
 | `enabled`、`routing_rank` | 路由门与全局顺序（所有目的地共用一个顺序） |
 | `scope` | 模型范围：全部，或显式对外名列表 |
-| `grants` | 允许发送 secret 的 endpoint id / origin |
+| `grants` | 允许发送 secret 的 endpoint id / origin；当前账号 endpoint 只从这条精确凭据已保存的 grants 解析，绝不借用同级 Key |
 | `auth_state`、`auth_state_version`、`last_error` | 本地验证状态 |
 | `cooldowns` | 通用与按窗口的 `until` 时间戳（自 `accounts` 迁出） |
 | `quota_pool_id` | 共享池成员 |
@@ -90,9 +90,11 @@ Custom API 账号迁移为 `adapter = http`、`max_credentials = null` 的独立
 
 无密钥目的地仍恰有一行 `secret = null` 的凭据，因此启用与顺序是统一的：路由规划器遍历凭据而非目的地，不存在单例检查。
 
+凭据创建由服务端决定。目的地必须允许 `credentialCreate`，提交的材料类型必须属于其允许的 `materialKinds`，拒绝时返回共用 reason code。同一个后端守卫服务于添加 Key 及所有其他创建入口；客户端选择器不能绕过它。
+
 ### 3.3 Quota pool（额度池）
 
-形状与 V4 相同：`id`、`policy_mode`、`relation_confidence`、成员。某成员上的 429 或窗口耗尽扇出到整个池。
+形状与 V4 相同：`id`、`policy_mode`、`relation_confidence`、成员。普通冷却只可经由这一显式成员关系扇出。每个 429 都为收到它的 Key（或 Zen Free 的匿名出口范围）启动临时等待，绝不由状态、代码或错误正文创建全池额度回合。
 
 ### 3.4 Plan（嵌入目的地）
 
@@ -174,7 +176,7 @@ Custom API 账号迁移为 `adapter = http`、`max_credentials = null` 的独立
 - 鉴权头类型不是能力。它由目的地的 `auth_scheme` 推导，`Http` 还按线协议推导（Messages → `x-api-key`）；该字段已删除。
 - `toggleable_credentials` 已删除：每个凭据都有启用开关，包括无密钥的，因此该标志没有信息量。
 - `testable` 对除外部集成（CPA）外的所有 adapter 为真，与"每张就绪卡片都提供测试连接"的运行时不变量一致。
-- GOAT、MiniMax、Kimi 的套餐 `expiry_cadence = Monthly`——它们的卡片本来就显示按月的购买倒计时。MiniMax 与 Kimi 的窗口为 `FiveHours` + `Week`，即今天面板呈现其官方用量的方式。
+- GOAT、MiniMax、Kimi 的套餐 `expiry_cadence = Monthly`——它们的卡片本来就显示按月的购买倒计时。MiniMax 与 Kimi 的窗口为 `FiveHours` + `Week`，即今天面板呈现其官方用量的方式。GOAT 与 CN 窗口快照只用于展示；获取到的 OpenCode Go 用量才是可以建立或清除 Go 额度状态的权威来源。
 - CPA 的 `base_url` 为 `None`（托管子进程的运行时回环地址）。
 - 内置与平台的 `catalog` 在映射时为空；投影层（阶段 4a）在映射后 join 持久化的目录快照。
 
@@ -249,8 +251,7 @@ Key 材料来自凭据行。密封 adapter 用 `ProviderAdapterKind`
 （`get_by_kind`）取描述符，不再用账号上的保留 UUID。选择器通道资格用
 `channel_for_adapter`。Zen/CPA 解析路径不再要求保留账号 id。CPA 实发用
 `AttemptSpec::is_local_external_integration`（CPA adapter 的代理模型），不用
-`provider_id`。诊断通道用 `mapping_is_zen_free`（adapter 种类），不用
-`ProviderMapping::is_zen_free`。有投影行时，Custom 与动态 HTTP 看
+`provider_id`。诊断通道直接遵循 adapter 种类，不再借助映射辅助函数或保留 provider id。有投影行时，Custom 与动态 HTTP 看
 `destination.legacy`；剩余行和 `resolve_route_with_dynamics` 按是否存在动态
 供应商运行时拆分 Configurable HTTP，不再看 `is_custom_api`。隔离实发的授权
 先认已存的 `account_custom_config`，否则走动态运行时。`/v1/models` 列表按映射

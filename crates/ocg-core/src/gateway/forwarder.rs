@@ -10,14 +10,14 @@ use crate::gateway::attempt_pricing::apply_native_cost_attribution;
 use crate::gateway::classify::{
     PreflightKind, ProviderErrorClass, RateLimitFallback, StreamClassifyInput,
     TransportClassifyInput, classify_http, classify_preflight, classify_stream, classify_transport,
-    rate_limit_fallback, schedule_go_usage_sync,
+    rate_limit_fallback,
 };
 use crate::gateway::diagnostics::{
     ErrorDiagnostic, RequestTrace, api_format_name, emit_failure, emit_legacy_tool_compat,
     redact_known_secret, redact_known_secret_values, safe_upstream_headers,
     sanitize_upstream_error_value_with_known_secret, serialize_diagnostic,
 };
-use crate::gateway::failure::decode::decode as decode_failure;
+use crate::gateway::failure::decode::{decode as decode_failure, temporary_429_deadline};
 use crate::gateway::materialize::native_log_identity;
 use crate::gateway::protocol::{
     RequestPlan, UsageCounts, error_body, extract_usage, format_error, has_complete_usage,
@@ -32,6 +32,7 @@ use crate::models::{AppConfig, ForwardLog, ForwardMetrics, UsageWindowKind};
 use crate::provider::ProviderAdapterKind;
 use crate::routing_snapshot::ExecutionCredential;
 use crate::state::CoreState;
+use crate::usage_sync::spawn_reactive_usage_refresh;
 use anyhow::Result;
 use axum::body::Body;
 use axum::http::{HeaderMap, StatusCode};
@@ -1215,66 +1216,12 @@ pub(crate) async fn forward_request_with_deadline(
             attempt_spec.auth == UpstreamAuth::None,
             &text,
         );
-        let mut quota_evidence =
-            crate::quota_recovery::host_quota_evidence(status.as_u16(), policy_provider_id, &text);
-        if let Some(evidence) = quota_evidence.as_mut() {
-            let now = state.sample_gateway_clock().0;
-            enrich_confirmed_quota_reset(evidence, policy_provider_id, &text, now);
-            record_quota_for_account(
-                state,
-                account,
-                evidence,
-                quota_trial.lock().as_mut(),
-                &quota_observation,
-                now,
-            );
-        }
-
+        let retry_after = error_headers
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok());
         let (observed_at, observed_mono) = state.sample_gateway_clock();
-        if let Some(facts) = decode_failure(
-            class,
-            &text,
-            error_headers
-                .get(reqwest::header::RETRY_AFTER)
-                .and_then(|v| v.to_str().ok()),
-            observed_at,
-        )
-        .filter(|facts| {
-            quota_evidence.is_none() || facts.cause != crate::gateway::failure::Cause::Unknown
-        })
-        .or_else(|| {
-            quota_evidence.as_ref().map(|evidence| {
-                use crate::gateway::failure::{Cause, FailureFacts, Scope};
-                use ocg_gateway::quota::{QuotaReason, QuotaWindowKind};
-                FailureFacts {
-                    cause: match evidence.reason {
-                        QuotaReason::QuotaExhausted => Cause::QuotaExhausted,
-                        QuotaReason::InsufficientBalance => Cause::CreditsExhausted,
-                    },
-                    scope: Scope::QuotaPool,
-                    window: match evidence.window {
-                        QuotaWindowKind::FiveHours => Some(UsageWindowKind::FiveHours),
-                        QuotaWindowKind::Week => Some(UsageWindowKind::Week),
-                        QuotaWindowKind::Month => Some(UsageWindowKind::Month),
-                        QuotaWindowKind::Unknown => None,
-                    },
-                    upstream_reset_at: None,
-                    retry_not_before: error_headers
-                        .get(reqwest::header::RETRY_AFTER)
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(|v| {
-                            crate::gateway::failure::decode::parse_retry_after(v, observed_at)
-                        }),
-                    rule_id: "credential.confirmed_quota",
-                    rule_version: 1,
-                }
-            })
-        }) {
-            let mut decision = facts.decide();
-            if quota_evidence.is_some() && !free_contract {
-                decision.persist_reset = None;
-                decision.wait_for_recovery = false;
-            }
+        if let Some(facts) = decode_failure(class, &text, retry_after, observed_at) {
+            let decision = facts.decide();
             let sanitized = attempt_context.sanitize_upstream_error(&text);
             let action = if decision.exhaust_free {
                 ForwardAction::ExhaustFreeChannel
@@ -1290,41 +1237,29 @@ pub(crate) async fn forward_request_with_deadline(
             } else {
                 status
             };
-            // Re-read the selection and entire explicit quota generation under
-            // the same DB lock as persistence. Old replies cannot affect a new
-            // Key, binding, endpoint, membership or operator reset.
+            let rate_limited = matches!(class, ProviderErrorClass::RateLimited { .. });
+            // Re-read live Key/binding/endpoint identity after I/O. Stale
+            // replies never write backoff, and output has not started so
+            // fallback remains allowed.
             let recorded = {
                 let db = state.db.lock();
-                let same_generation = if quota_evidence.is_some() && !free_contract {
-                    // This Key owns persistent evidence and Retry-After. A
-                    // sibling's quota-pool reset must not fence its observation.
-                    quota_observation.is_current(&db)?
-                } else {
-                    live_send::selection_identity_is_current(&db, selection)?
-                        && recovery_permit.permits_observation(&facts)
-                        && recovery_permit.same_generation(&ResourceSet::capture(
-                            &db,
-                            account,
-                            &restriction_endpoint,
-                            &plan.model,
-                            free_contract,
-                        )?)
-                };
+                let same_generation = live_send::selection_identity_is_current(&db, selection)?
+                    && recovery_permit.permits_observation(&facts)
+                    && recovery_permit.same_generation(&ResourceSet::capture(
+                        &db,
+                        account,
+                        &restriction_endpoint,
+                        &plan.model,
+                        free_contract,
+                    )?);
                 if same_generation {
-                    if quota_evidence.is_some() && !free_contract {
-                        recovery_permit
-                            .observe_credential_retry(facts.retry_not_before, observed_mono);
+                    if rate_limited && !free_contract {
+                        recovery_permit.observe_credential_retry(
+                            Some(temporary_429_deadline(retry_after, observed_at)),
+                            observed_mono,
+                        );
                     } else {
                         recovery_permit.observe_failure(&facts, decision, observed_mono);
-                    }
-                    if let Some((window, until)) = decision.persist_reset {
-                        db.set_account_rate_limit_if_key_matches(
-                            &account.id,
-                            &account.key_cipher,
-                            until,
-                            &sanitized,
-                            Some(window),
-                        )?;
                     }
                 }
                 same_generation
@@ -1358,10 +1293,8 @@ pub(crate) async fn forward_request_with_deadline(
                 &attempt_context,
                 Some(failure),
             )?;
-            // Existing official reconciliation is a capability, not a decoder
-            // side effect. Do not schedule it from stale credential evidence.
-            if recorded && schedule_go_usage_sync(class) {
-                crate::usage_sync::schedule_after_inference_429(state, &account.id);
+            if recorded && rate_limited && !free_contract {
+                spawn_reactive_usage_refresh(state, &account.id);
             }
             return Ok(ForwardResult {
                 response: protocol_status_error_response(
@@ -1501,7 +1434,7 @@ pub(crate) async fn forward_request_with_deadline(
                         &attempt_context,
                         Some(failure),
                     )?;
-                    if quota_evidence.is_none() && quota_observation.is_current(&db)? {
+                    if quota_observation.is_current(&db)? {
                         db.set_account_auth_error_if_key_matches(
                             &account.id,
                             &account.key_cipher,
@@ -1524,7 +1457,7 @@ pub(crate) async fn forward_request_with_deadline(
                     )
                 } else {
                     format!(
-                        "upstream auth error 403: {}",
+                        "upstream returned 403: {}",
                         attempt_context.sanitize_upstream_error(&text)
                     )
                 };
@@ -1568,11 +1501,7 @@ pub(crate) async fn forward_request_with_deadline(
                 // Unrecognized 4xx remain request errors. Provider decoders may
                 // refine only verified rejection envelopes above.
                 let sanitized = attempt_context.sanitize_upstream_error(&text);
-                let action = if quota_evidence.is_some() {
-                    ForwardAction::TryNextAccount
-                } else {
-                    forward_action_for_class(class, allow_same_account_retry, None)
-                };
+                let action = forward_action_for_class(class, allow_same_account_retry, None);
                 let failure = attempt_context.failure(FailureSpec {
                     error_source: "upstream",
                     error_stage: "upstream_http",
@@ -1658,10 +1587,7 @@ pub(crate) async fn forward_request_with_deadline(
 
         let stream_idle_timeout = StdDuration::from_secs(config.stream_idle_timeout_secs);
         let mut upstream_stream = Box::pin(upstream_resp.bytes_stream());
-        let st = Arc::new(Mutex::new(StreamState {
-            quota_scan: Some((status.as_u16(), policy_provider_id.to_string())),
-            ..StreamState::default()
-        }));
+        let st = Arc::new(Mutex::new(StreamState::default()));
         let converter = Arc::new(Mutex::new(
             StreamConverter::new_with_known_secret_and_normalization(
                 plan,
@@ -1688,19 +1614,6 @@ pub(crate) async fn forward_request_with_deadline(
             match preflight {
                 Ok(Some(Ok(chunk))) => {
                     process_chunk_for_usage(&mut st.lock(), upstream_format, &chunk, Some(&model));
-                    let quota = st.lock().quota_evidence.take();
-                    if let Some(evidence) = quota.as_ref() {
-                        let now = state.sample_gateway_clock().0;
-                        record_quota_for_account(
-                            state,
-                            account,
-                            evidence,
-                            quota_trial.lock().as_mut(),
-                            &quota_observation,
-                            now,
-                        );
-                    }
-                    let fallback_detail = String::from_utf8_lossy(&chunk).into_owned();
                     let (converted, terminal) = {
                         let mut converter = converter.lock();
                         let converted = converter.process_chunk(chunk);
@@ -1709,36 +1622,6 @@ pub(crate) async fn forward_request_with_deadline(
                     };
                     match converted {
                         Ok(chunks) => {
-                            if quota.is_some() {
-                                if chunks.is_empty() {
-                                    let detail =
-                                        st.lock().error_message.clone().unwrap_or(fallback_detail);
-                                    let sanitized =
-                                        attempt_context.sanitize_upstream_error(&detail);
-                                    {
-                                        let db = state.db.lock();
-                                        let _ = DbAttemptSink::new(&db).finalize(
-                                            initial_id,
-                                            "client_error",
-                                            Some(status.as_u16() as i32),
-                                            metadata_metrics(
-                                                &pricing_snapshot,
-                                                plan.service_tier.as_deref(),
-                                                "not_applicable",
-                                            ),
-                                            Some(&sanitized),
-                                            None,
-                                            &attempt_context,
-                                        );
-                                    }
-                                    return Ok(ForwardResult {
-                                        response: error_response(plan.client, &sanitized, None),
-                                        action: ForwardAction::TryNextAccount,
-                                        error_message: Some(sanitized),
-                                    });
-                                }
-                                break (chunks, terminal);
-                            }
                             if !chunks.is_empty() || terminal {
                                 break (chunks, terminal);
                             }
@@ -1886,9 +1769,6 @@ pub(crate) async fn forward_request_with_deadline(
         let pricing_map = pricing_snapshot.clone();
         let service_tier_map = plan.service_tier.clone();
         let attempt_map = attempt_context.clone();
-        let account_map = account.clone();
-        let quota_trial_map = quota_trial.clone();
-        let quota_observation_map = quota_observation.clone();
 
         let mapped = stream
             .flat_map(move |result| {
@@ -1907,17 +1787,6 @@ pub(crate) async fn forward_request_with_deadline(
                                 &chunk,
                                 Some(&model_for_stream),
                             );
-                            if let Some(evidence) = st_map.lock().quota_evidence.take() {
-                                let now = state_h.sample_gateway_clock().0;
-                                record_quota_for_account(
-                                    &state_h,
-                                    &account_map,
-                                    &evidence,
-                                    quota_trial_map.lock().as_mut(),
-                                    &quota_observation_map,
-                                    now,
-                                );
-                            }
                             let converted = converter_map.lock().process_chunk(chunk);
                             match converted {
                                 Ok(chunks) => (chunks, false),
@@ -2371,56 +2240,6 @@ pub(crate) async fn forward_request_with_deadline(
         };
 
         let body_for_quota = serde_json::to_string(&upstream_json).unwrap_or_else(|_| text.clone());
-        if let Some(evidence) = crate::quota_recovery::host_quota_evidence(
-            status.as_u16(),
-            policy_provider_id,
-            &body_for_quota,
-        ) {
-            let now = state.sample_gateway_clock().0;
-            record_quota_for_account(
-                state,
-                account,
-                &evidence,
-                quota_trial.lock().as_mut(),
-                &quota_observation,
-                now,
-            );
-            let sanitized = attempt_context.sanitize_upstream_error(&body_for_quota);
-            let action = ForwardAction::TryNextAccount;
-            let failure = attempt_context.failure(FailureSpec {
-                error_source: "upstream",
-                error_stage: "upstream_http",
-                downstream_status: Some(status.as_u16()),
-                upstream_status: Some(status.as_u16()),
-                upstream_wait_ms: Some(upstream_wait_ms),
-                retry_action: Some(retry_action_name(action)),
-                upstream_headers: None,
-                upstream_error: Some(&body_for_quota),
-                request_body: Some(client_body),
-            });
-            {
-                let db = state.db.lock();
-                DbAttemptSink::new(&db).insert(
-                    account,
-                    &model,
-                    "client_error",
-                    Some(status.as_u16() as i32),
-                    metadata_metrics(
-                        &pricing_snapshot,
-                        plan.service_tier.as_deref(),
-                        "not_applicable",
-                    ),
-                    Some(&sanitized),
-                    &attempt_context,
-                    Some(failure),
-                )?;
-            }
-            return Ok(ForwardResult {
-                response: error_response(plan.client, &sanitized, Some(&upstream_json)),
-                action,
-                error_message: Some(sanitized),
-            });
-        }
         if crate::provider::ProviderAdapterKind::from_provider_id(policy_provider_id)
             == Some(crate::provider::ProviderAdapterKind::MiniMaxCn)
             && let Some(envelope) = crate::quota_recovery::minimax_envelope(&body_for_quota)
@@ -2625,6 +2444,7 @@ impl QuotaTrialGuard {
         self.settled = true;
     }
 
+    #[allow(dead_code)]
     fn fail_quota(
         &mut self,
         account: &ExecutionCredential,
@@ -2738,45 +2558,6 @@ fn persist_quota_write(
         }
         persisted
     })
-}
-
-fn record_quota_for_account(
-    state: &CoreState,
-    account: &ExecutionCredential,
-    evidence: &ocg_gateway::quota::QuotaEvidence,
-    trial: Option<&mut QuotaTrialGuard>,
-    observation: &QuotaObservation,
-    now: chrono::DateTime<Utc>,
-) {
-    if let Some(trial) = trial {
-        trial.fail_quota(account, evidence, now);
-        return;
-    }
-    persist_quota_write(
-        state,
-        None,
-        |db| {
-            if !observation.is_current(db)? {
-                return Ok(false);
-            }
-            crate::db::quota_recovery::record_evidence_on(&db.conn, account, evidence, None, now)
-        },
-        "quota recovery evidence",
-    );
-}
-
-fn enrich_confirmed_quota_reset(
-    evidence: &mut ocg_gateway::quota::QuotaEvidence,
-    provider_id: &str,
-    body: &str,
-    observed_at: chrono::DateTime<Utc>,
-) {
-    if provider_id == crate::provider::COMMAND_CODE_PROVIDER_ID
-        && let Some(limit) =
-            crate::command_code_rate_limit::parse_command_code_rate_limit(body, observed_at)
-    {
-        evidence.resets_at_rfc3339 = Some(limit.resets_at.to_rfc3339());
-    }
 }
 
 struct CreditRequestGuard {
@@ -3585,8 +3366,6 @@ struct StreamState {
     outcome_unknown: bool,
     error_message: Option<String>,
     diagnostic_recorded: bool,
-    quota_scan: Option<(u16, String)>,
-    quota_evidence: Option<ocg_gateway::quota::QuotaEvidence>,
 }
 
 // Match the stream converter's pending-frame cap. The old 64 KiB limit dropped
@@ -3645,14 +3424,6 @@ fn process_chunk_for_usage(
         };
         let take = event_boundary_len(bytes, idx);
         let event = st.buf.split_to(idx + take);
-        if st.quota_evidence.is_none()
-            && let Some((status, provider_id)) = st.quota_scan.as_ref()
-            && let Ok(event_text) = std::str::from_utf8(&event)
-            && let Some(evidence) =
-                crate::quota_recovery::host_quota_evidence_sse(*status, provider_id, event_text)
-        {
-            st.quota_evidence = Some(evidence);
-        }
         if let Some(payload) = extract_data_payload(&event) {
             let payload = payload.trim();
             if payload == "[DONE]" {
@@ -3886,10 +3657,7 @@ mod stream_usage_tests {
     }
 
     #[test]
-    fn messages_stream_sanitizes_minimax_bogus_cache_from_request_hint() {
-        // Upstream may omit the model field in message_start or rewrite it to an
-        // internal id, and the plan's hint may arrive in mixed case ("MiniMax-M3");
-        // the request hint must still sanitize the bogus all-cache usage in every shape.
+    fn messages_stream_keeps_raw_minimax_cache_read_tokens() {
         for (hint, start_model) in [
             ("minimax-m3", None),
             ("minimax-m3", Some("ocg-generic")),
@@ -3909,7 +3677,7 @@ mod stream_usage_tests {
             let (input, output, cached, _) = token_counts(st.usage);
             assert_eq!(
                 (input, output, cached),
-                (40500, 5, 0),
+                (40500, 5, 40500),
                 "hint={hint} start_model={start_model:?}"
             );
         }

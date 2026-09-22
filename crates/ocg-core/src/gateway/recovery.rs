@@ -225,6 +225,50 @@ impl RecoveryRuntime {
         })
     }
 
+    /// Read the current credential generation's temporary wait without claiming
+    /// a probe or extending it. The executor uses this after exhausting fallbacks.
+    pub(crate) fn credential_retry_until(
+        &self,
+        resources: &ResourceSet,
+        now: DateTime<Utc>,
+    ) -> Option<DateTime<Utc>> {
+        self.inner
+            .lock()
+            .slots
+            .get(&resources.key(ResourceKind::CredentialRetry))
+            .and_then(|slot| match slot.upstream_not_before {
+                Some(RetryHint::Until(until)) if until > now => Some(until),
+                Some(RetryHint::Unbounded) => Some(DateTime::<Utc>::MAX_UTC),
+                _ => None,
+            })
+    }
+
+    /// Process-wide anonymous Free egress wait (Zen Free shared IP scope).
+    /// Combines a wall-clock Retry-After / temporary 429 deadline with any
+    /// remaining local reprobe so "all waiting" can return 429, not 503.
+    pub(crate) fn free_egress_retry_until(
+        &self,
+        now: DateTime<Utc>,
+        mono: Instant,
+    ) -> Option<DateTime<Utc>> {
+        let key = ResourceKey {
+            kind: ResourceKind::FreeEgress,
+            generation: [0; 32],
+        };
+        let inner = self.inner.lock();
+        let slot = inner.slots.get(&key)?;
+        let upstream = match slot.upstream_not_before {
+            Some(RetryHint::Until(until)) if until > now => Some(until),
+            Some(RetryHint::Unbounded) => Some(DateTime::<Utc>::MAX_UTC),
+            _ => None,
+        };
+        let probe = slot.next_probe.filter(|at| *at > mono).and_then(|at| {
+            let secs = i64::try_from(at.saturating_duration_since(mono).as_secs()).ok()?;
+            now.checked_add_signed(chrono::Duration::seconds(secs.saturating_add(1)))
+        });
+        [upstream, probe].into_iter().flatten().max()
+    }
+
     /// Explicit operator reset. A fence prevents old in-flight replies from
     /// recreating the state the operator just cleared. Shared members reset the
     /// same resource. No automatic reset accompanies ordinary success elsewhere.

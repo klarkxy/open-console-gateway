@@ -33,7 +33,6 @@ import {
   usageWindowFromProviderUsage,
 } from "./billing.ts";
 import { findPlanDefinition } from "./plans.ts";
-import { officialBalanceSupported } from "./upstream-balance.ts";
 import { t } from "../i18n/index.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
 import { mapWithConcurrency } from "../utils/async.ts";
@@ -54,6 +53,7 @@ export function useAccountUsage(
   options?: {
     message?: Pick<ReturnType<typeof useMessage>, "success" | "warning" | "error">;
     endpointUrlFor?: (account: Account) => string | null;
+    officialBalanceFor?: (account: Account) => boolean;
     /** Runs after an attempted quota refresh (success or failure), while the button still spins. */
     afterUsageRefresh?: (accountId: string, isCurrent: () => boolean) => Promise<void>;
   },
@@ -161,9 +161,7 @@ export function useAccountUsage(
     const surface = findPlanDefinition(account.provider_id, catalog.value);
     const manual = surface?.manual_usage_calibration === true;
     const refresh = surface?.usage_availability === "available";
-    const creditBalance = officialBalanceSupported(
-      options?.endpointUrlFor?.(account) ?? account.custom_config?.endpoint_url,
-    );
+    const creditBalance = options?.officialBalanceFor?.(account) === true;
     return {
       providerWindows: refresh || manual || creditBalance,
       refresh: refresh || creditBalance,

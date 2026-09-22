@@ -188,7 +188,7 @@ fn config(monthly: Option<MonthlyCredits>, rates: Vec<CreditRate>) -> CreditConf
         credits_per_currency: 1_000_000.0,
         rates,
         monthly,
-        source_url: Some(STEPFUN_PRICING_URL.to_string()),
+        source_url: Some(STEPFUN_PRESETS.source_url.clone()),
     }
 }
 
@@ -735,7 +735,7 @@ fn stepfun_presets_use_published_cny_rates_and_next_china_month() {
     assert_eq!(presets[0].configuration.credits_per_currency, 1_000_000.0);
     assert_eq!(
         presets[0].configuration.source_url.as_deref(),
-        Some(STEPFUN_PRICING_URL)
+        Some(STEPFUN_PRESETS.source_url.as_str())
     );
 
     let by_model = |model: &str| {

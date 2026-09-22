@@ -18,7 +18,6 @@ use ocg_core::provider::{
 };
 use ocg_core::provider_contracts::{ContractScope, ProtocolOverrideState};
 use ocg_core::state::CoreStateInner;
-use ocg_core::usage_sync::INFERENCE_429_DELAY_MIN;
 use ocg_core::zen_models::{ZEN_MODELS_SOURCE_URL, ZenFreeModelCatalog};
 use serde_json::json;
 use std::collections::{HashMap, VecDeque};
@@ -91,7 +90,25 @@ fn inflate_active_pricing(state: &Arc<ocg_core::state::CoreStateInner>, model_id
 }
 
 fn go_state_with_keys(keys: &[&str]) -> (Arc<ocg_core::state::CoreStateInner>, std::path::PathBuf) {
-    build_go_state("http://127.0.0.1:1".into(), keys)
+    local_go_state("http://127.0.0.1:1".into(), keys)
+}
+
+fn local_go_state(
+    base_url: String,
+    keys: &[&str],
+) -> (Arc<ocg_core::state::CoreStateInner>, std::path::PathBuf) {
+    let (state, dir) = build_go_state(base_url, keys);
+    install_local_usage_sync_seams(&state);
+    (state, dir)
+}
+
+fn install_local_usage_sync_seams(state: &Arc<CoreStateInner>) {
+    state
+        .usage_sync
+        .set_reactive_refresh_enabled_for_test(false);
+    state.usage_sync.set_fetch_for_test(|_cfg, _key| {
+        Box::pin(async { Err(ocg_core::go_usage::GoUsageError::Network) })
+    });
 }
 
 fn go_state_with_keys_and_clock(
@@ -146,6 +163,7 @@ fn go_state_with_keys_and_clock(
     }
     persist_refreshed_go_catalog(&state);
     persist_enabled_zen_catalog(&state);
+    install_local_usage_sync_seams(&state);
     (state, dir)
 }
 
@@ -334,16 +352,24 @@ async fn entry_alias_snapshot_survives_midflight_zen_catalog_replace() {
         "in-flight zen-only resolve must not become unknown_model: {body}"
     );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    let free_cooldown = state
+    let free_account = state
         .db
         .lock()
         .get_account(ZEN_FREE_ACCOUNT_ID)
         .unwrap()
-        .unwrap()
-        .cooldown_free_until;
+        .unwrap();
     assert!(
-        free_cooldown.is_some_and(|until| until > Utc::now() + ChronoDuration::days(2)),
-        "the confirmed shared egress reset must persist despite catalog replacement"
+        free_account.cooldown_free_until.is_none(),
+        "a Free 429 must not copy a multi-day reset from error prose: {free_account:?}"
+    );
+    assert!(
+        state
+            .db
+            .lock()
+            .free_channel_cooldown_until()
+            .unwrap()
+            .is_none(),
+        "temporary Free waits stay process-local, not durable settings"
     );
 
     let (status, body) = chat(port, ZEN_ONLY_MODEL).await;
@@ -487,7 +513,7 @@ async fn go_success_without_usage_is_success_no_usage_for_non_stream_and_stream(
         ]),
     )]);
     let (base_url, _calls, stop) = start_fake_upstream(replies).await;
-    let (state, dir) = build_go_state(base_url, &["key-1"]);
+    let (state, dir) = local_go_state(base_url, &["key-1"]);
     let (port, gateway_handle) = start_gateway(state.clone()).await;
 
     let (status, body) = chat(port, GO_MODEL).await;
@@ -514,7 +540,7 @@ async fn go_success_without_usage_is_success_no_usage_for_non_stream_and_stream(
 }
 
 #[tokio::test]
-async fn go_inference_429_schedules_deferred_usage_sync_without_an_inline_fetch() {
+async fn go_inference_429_returns_before_one_reactive_usage_fetch_completes() {
     let replies = HashMap::from([(
         "key-1".to_string(),
         VecDeque::from([FakeReply {
@@ -523,17 +549,31 @@ async fn go_inference_429_schedules_deferred_usage_sync_without_an_inline_fetch(
         }]),
     )]);
     let (base_url, _calls, stop) = start_fake_upstream(replies).await;
-    let (state, dir) = build_go_state(base_url, &["key-1"]);
+    let (state, dir) = local_go_state(base_url, &["key-1"]);
     let now = chrono::DateTime::parse_from_rfc3339("2026-08-18T12:00:00Z")
         .unwrap()
         .with_timezone(&Utc);
     state.usage_sync.set_clock_for_test(move || now);
-    state.usage_sync.set_jitter_for_test(|| 0.0);
     let fetches = Arc::new(AtomicUsize::new(0));
     let fetches_cb = fetches.clone();
+    let fetch_started = Arc::new(tokio::sync::Notify::new());
+    let fetch_started_cb = fetch_started.clone();
+    let release_fetch = Arc::new(tokio::sync::Notify::new());
+    let release_fetch_cb = release_fetch.clone();
+    let fetch_finished = Arc::new(tokio::sync::Notify::new());
+    let fetch_finished_cb = fetch_finished.clone();
+    state.usage_sync.set_reactive_refresh_enabled_for_test(true);
     state.usage_sync.set_fetch_for_test(move |_cfg, _key| {
         fetches_cb.fetch_add(1, Ordering::SeqCst);
-        Box::pin(async { Err(ocg_core::go_usage::GoUsageError::Network) })
+        let fetch_started = fetch_started_cb.clone();
+        let release_fetch = release_fetch_cb.clone();
+        let fetch_finished = fetch_finished_cb.clone();
+        Box::pin(async move {
+            fetch_started.notify_one();
+            release_fetch.notified().await;
+            fetch_finished.notify_one();
+            Err(ocg_core::go_usage::GoUsageError::Network)
+        })
     });
     state
         .db
@@ -547,21 +587,29 @@ async fn go_inference_429_schedules_deferred_usage_sync_without_an_inline_fetch(
         .unwrap();
 
     let (port, gateway_handle) = start_gateway(state.clone()).await;
-    let (status, body) = chat(port, GO_MODEL).await;
+    let (status, body) = tokio::time::timeout(Duration::from_secs(1), chat(port, GO_MODEL))
+        .await
+        .expect("the inference response must not wait for official usage");
     assert_eq!(
         status,
         StatusCode::TOO_MANY_REQUESTS,
         "a lone Go 429 still rotates then returns the soonest reset: {body}"
     );
-    assert_eq!(fetches.load(Ordering::SeqCst), 0);
-
-    let sync = state
-        .db
-        .lock()
-        .account_usage_sync_state("acct-1")
-        .unwrap()
-        .unwrap();
-    assert_eq!(sync.next_eligible_at, Some(now + INFERENCE_429_DELAY_MIN));
+    tokio::time::timeout(Duration::from_secs(1), fetch_started.notified())
+        .await
+        .expect("the reactive Go refresh must start immediately");
+    assert_eq!(fetches.load(Ordering::SeqCst), 1);
+    ocg_core::usage_sync::spawn_reactive_usage_refresh(&state, "acct-1");
+    tokio::task::yield_now().await;
+    assert_eq!(
+        fetches.load(Ordering::SeqCst),
+        1,
+        "the same Key must throttle a second reactive refresh"
+    );
+    release_fetch.notify_one();
+    tokio::time::timeout(Duration::from_secs(1), fetch_finished.notified())
+        .await
+        .expect("the held reactive fetch must complete after release");
 
     state.usage_sync.clear_test_seams();
     gateway::stop_gateway(gateway_handle);
@@ -884,7 +932,7 @@ async fn strict_priority_keeps_first_available_card_across_requests() {
         Arc::new(|_| {}),
     )
     .await;
-    let (state, dir) = build_go_state(base_url, &["key-1", "key-2"]);
+    let (state, dir) = local_go_state(base_url, &["key-1", "key-2"]);
     let mut config = state.config();
     config.routing_mode = RoutingMode::StrictPriority;
     state.set_config(config).unwrap();
@@ -925,7 +973,7 @@ async fn round_robin_cycles_exact_card_order() {
         Arc::new(|_| {}),
     )
     .await;
-    let (state, dir) = build_go_state(base_url, &["key-1", "key-2"]);
+    let (state, dir) = local_go_state(base_url, &["key-1", "key-2"]);
     let mut config = state.config();
     config.routing_mode = RoutingMode::RoundRobin;
     state.set_config(config).unwrap();
@@ -972,7 +1020,7 @@ async fn sticky_global_transient_exclude_does_not_rewrite_next_request() {
         Arc::new(|_| {}),
     )
     .await;
-    let (state, dir) = build_go_state(base_url, &["key-1", "key-2"]);
+    let (state, dir) = local_go_state(base_url, &["key-1", "key-2"]);
     let mut config = state.config();
     config.routing_mode = RoutingMode::StickyGlobal;
     state.set_config(config).unwrap();
@@ -1009,7 +1057,7 @@ async fn free_gates_close_only_free_candidates_on_shared_alias() {
         Arc::new(|_| {}),
     )
     .await;
-    let (state, dir) = build_go_state(base_url.clone(), &["key-1"]);
+    let (state, dir) = local_go_state(base_url.clone(), &["key-1"]);
     state
         .db
         .lock()
@@ -1057,7 +1105,7 @@ async fn disabled_goat_is_skipped_and_unavailable_raw_has_no_route() {
         Arc::new(|_| {}),
     )
     .await;
-    let (state, dir) = build_go_state(base_url, &["key-1"]);
+    let (state, dir) = local_go_state(base_url, &["key-1"]);
     insert_disabled_offering(
         &state,
         "acct-1",

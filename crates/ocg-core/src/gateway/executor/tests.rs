@@ -28,7 +28,7 @@ fn selector_invariant_maps_to_internal_error() {
 }
 
 #[tokio::test]
-async fn exhausted_candidate_reports_persistent_quota_retry_after() {
+async fn rate_limited_candidate_reports_temporary_retry_after_without_durable_quota() {
     use crate::crypto::{KeyCipher, StaticKeyCipher};
     use crate::models::{
         Account, AccountCustomConfigInput, AccountModelCapabilityInput, ProxyMode,
@@ -124,8 +124,15 @@ async fn exhausted_candidate_reports_persistent_quota_retry_after() {
         .unwrap()
         .parse()
         .unwrap();
-    assert!((850..=900).contains(&retry_after), "{retry_after}");
+    assert!((295..=300).contains(&retry_after), "{retry_after}");
     assert_eq!(hits.load(Ordering::SeqCst), 1);
+    assert!(
+        crate::db::quota_recovery::load_for_legacy_on(&state.db.lock().conn, &account.id)
+            .unwrap()
+            .and_then(|(_, _, _, recovery)| recovery)
+            .is_none(),
+        "a misleading 429 body must not create a durable quota episode"
+    );
     assert!(
         state
             .db
@@ -365,4 +372,132 @@ fn request_budgets_keep_stream_and_non_stream_settings_independent() {
     };
     assert_eq!(super::request_budget_duration(&config, false).as_secs(), 1);
     assert_eq!(super::request_budget_duration(&config, true).as_secs(), 5);
+}
+
+fn minimax_catalog_state(model: &str) -> (std::path::PathBuf, crate::state::CoreState) {
+    use crate::crypto::{KeyCipher, StaticKeyCipher};
+    use crate::models::{Account, ProxyMode};
+    use crate::provider::MINIMAX_PROVIDER_ID;
+    use crate::state::CoreStateInner;
+    use std::sync::Arc;
+    let dir = std::env::temp_dir().join(format!("ocg-exec-minimax-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = crate::db::Database::open(dir.clone()).unwrap();
+    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("minimax-exec"));
+    let state = Arc::new(CoreStateInner::new(db, dir.clone(), cipher).unwrap());
+    let mut config = state.config();
+    config.gateway_key = "gateway-quota-test".into();
+    config.proxy_mode = ProxyMode::Direct;
+    state.set_config(config).unwrap();
+    let now = chrono::Utc::now();
+    let account: Account = serde_json::from_value(serde_json::json!({
+        "id": "minimax-fresh",
+        "provider_id": MINIMAX_PROVIDER_ID,
+        "name": "MiniMax",
+        "key_cipher": state.encrypt_key("test-key").unwrap(),
+        "enabled": false,
+        "purchase_date": "",
+        "created_at": now,
+        "updated_at": now
+    }))
+    .unwrap();
+    state.db.lock().create_account(&account).unwrap();
+    let now = chrono::Utc::now();
+    state
+        .db
+        .lock()
+        .set_contract_catalog(
+            &crate::provider_contracts::ContractScope::provider(MINIMAX_PROVIDER_ID),
+            &[model.to_string()],
+            Some(now),
+            crate::provider_contracts::CATALOG_SOURCE_MINIMAX_CN_MODELS,
+            crate::provider::MINIMAX_CN_BASE_URL,
+            now,
+        )
+        .unwrap();
+    state.reload_provider_contracts().unwrap();
+    (dir, state)
+}
+
+#[tokio::test]
+async fn catalog_minimax_model_absent_static_table_is_not_request_vetoed() {
+    use axum::{extract::State, http::HeaderMap};
+    let (dir, state) = minimax_catalog_state("MiniMax-New");
+    let chat = chat(state.clone(), "MiniMax-New").await;
+    let chat_status = chat.status();
+    let chat_body = axum::body::to_bytes(chat.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let chat_text = String::from_utf8_lossy(&chat_body);
+    assert_ne!(
+        chat_status,
+        axum::http::StatusCode::BAD_REQUEST,
+        "fresh catalog MiniMax must not be vetoed against the static table: {chat_text}"
+    );
+    assert!(
+        !chat_text.contains("unknown model"),
+        "fresh catalog MiniMax must not be vetoed against the static table: {chat_text}"
+    );
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "authorization",
+        "Bearer gateway-quota-test".parse().unwrap(),
+    );
+    let responses = crate::gateway::handler::responses(
+        State(state.clone()),
+        axum::extract::Extension(crate::gateway::diagnostics::RequestTrace::new()),
+        headers,
+        axum::body::Bytes::from_static(br#"{"model":"MiniMax-New","input":"hi"}"#),
+    )
+    .await;
+    assert_eq!(responses.status(), axum::http::StatusCode::BAD_REQUEST);
+    let responses_body = axum::body::to_bytes(responses.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let responses_text = String::from_utf8_lossy(&responses_body);
+    assert!(responses_text.contains("store=false"), "{responses_text}");
+    drop(state);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn retry_after_uses_the_longest_blocker_for_each_key() {
+    let (dir, state) = custom_http_state("combined-waits", &["wait-key"], "http://127.0.0.1:1/v1");
+    let now = chrono::Utc::now();
+    let live = crate::routing_snapshot::RoutingSnapshot::load(&state.db.lock()).unwrap();
+    let credential = &live.credentials[0];
+    let resources = crate::gateway::recovery::ResourceSet::from_snapshot(
+        &live,
+        credential,
+        "",
+        "quota-model",
+        false,
+    )
+    .unwrap();
+    let mut permit = state
+        .recovery
+        .acquire(resources, now, std::time::Instant::now())
+        .unwrap();
+    permit.observe_credential_retry(
+        Some(crate::gateway::failure::RetryHint::Until(
+            now + chrono::Duration::seconds(30),
+        )),
+        std::time::Instant::now(),
+    );
+    drop(permit);
+    persist_recovery(&state, "wait-key", now + chrono::Duration::hours(1));
+    let response = chat(state.clone(), "quota-model").await;
+    assert_eq!(response.status(), axum::http::StatusCode::TOO_MANY_REQUESTS);
+    let retry: u64 = response
+        .headers()
+        .get("retry-after")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!((3595..=3600).contains(&retry), "{retry}");
+    drop(state);
+    std::fs::remove_dir_all(dir).unwrap();
 }

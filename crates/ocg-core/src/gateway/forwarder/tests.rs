@@ -2583,11 +2583,8 @@ fn prepare_custom_forward(
 }
 
 #[test]
-fn split_sse_frames_assemble_quota_without_treating_content_as_evidence() {
-    let mut state = StreamState {
-        quota_scan: Some((200, CUSTOM_PROVIDER_ID.into())),
-        ..StreamState::default()
-    };
+fn split_sse_frames_mark_only_complete_protocol_errors() {
+    let mut state = StreamState::default();
     let content = b"data: {\"choices\":[{\"delta\":{\"content\":\"insufficient_quota\"}}]}\n\n";
     process_chunk_for_usage(
         &mut state,
@@ -2596,8 +2593,8 @@ fn split_sse_frames_assemble_quota_without_treating_content_as_evidence() {
         None,
     );
     assert!(
-        state.quota_evidence.is_none(),
-        "assistant content quoting quota text is not exhaustion"
+        !state.error,
+        "assistant content quoting quota text is not an error"
     );
 
     let full = b"data: {\"error\":{\"code\":\"insufficient_quota\"}}\n\n";
@@ -2608,10 +2605,7 @@ fn split_sse_frames_assemble_quota_without_treating_content_as_evidence() {
         &Bytes::copy_from_slice(&full[..split]),
         None,
     );
-    assert!(
-        state.quota_evidence.is_none(),
-        "incomplete frame is not quota"
-    );
+    assert!(!state.error, "incomplete frame is not an error");
     process_chunk_for_usage(
         &mut state,
         ApiFormat::ChatCompletions,
@@ -2619,8 +2613,8 @@ fn split_sse_frames_assemble_quota_without_treating_content_as_evidence() {
         None,
     );
     assert!(
-        state.quota_evidence.is_some(),
-        "complete assembled event must be recognized"
+        state.error,
+        "complete assembled error event must be recognized"
     );
 }
 
@@ -2851,7 +2845,7 @@ fn concurrent_settings_reader_never_sees_probe_flip_at_same_revision() {
 }
 
 #[tokio::test]
-async fn confirmed_quota_429_skips_ordinary_cooldown_and_pool_fanout() {
+async fn quota_shaped_429_body_sets_only_a_per_key_runtime_wait() {
     let (addr, hits, stop_tx) = spawn_json_upstream(
         axum::http::StatusCode::TOO_MANY_REQUESTS,
         quota_json(),
@@ -2873,8 +2867,25 @@ async fn confirmed_quota_429_skips_ordinary_cooldown_and_pool_fanout() {
     let result = forward_once(&state, &account, &plan, &selection, &[]).await;
     assert_eq!(hits.load(Ordering::SeqCst), 1, "{:?}", result.error_message);
     assert_eq!(result.action, ForwardAction::TryNextAccount);
-    assert!(recovery_for(&state, &account.id).is_some());
+    assert!(recovery_for(&state, &account.id).is_none());
     assert!(recovery_for(&state, &sibling.id).is_none());
+
+    let sibling_selection = live_send_selection(&state, &sibling, &plan);
+    let sibling_result = forward_once(&state, &sibling, &plan, &sibling_selection, &[]).await;
+    assert_eq!(sibling_result.action, ForwardAction::TryNextAccount);
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        2,
+        "a declared quota-pool sibling must not inherit the first Key's temporary wait"
+    );
+
+    let blocked = forward_once(&state, &account, &plan, &selection, &[]).await;
+    assert_eq!(blocked.action, ForwardAction::TryNextAccount);
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        2,
+        "the originating Key must wait before another upstream request"
+    );
 
     let primary = state.db.lock().get_account(&account.id).unwrap().unwrap();
     let other = state.db.lock().get_account(&sibling.id).unwrap().unwrap();
@@ -2890,41 +2901,31 @@ async fn confirmed_quota_429_skips_ordinary_cooldown_and_pool_fanout() {
 }
 
 #[tokio::test]
-async fn unrecognized_429_with_retry_after_waits_on_endpoint_without_quota_or_cooldown() {
+async fn retry_after_429_keeps_temporary_wait_without_durable_quota() {
     let (addr, hits, stop_tx) = spawn_json_upstream(
         axum::http::StatusCode::TOO_MANY_REQUESTS,
         r#"{"error":{"message":"slow down"}}"#,
         "application/json",
-        Some("30"),
+        Some("120"),
     )
     .await;
     let endpoint = format!("http://{addr}/v1/chat/completions");
     let (dir, state, account, plan, selection) =
         prepare_custom_forward("quota-unrecognized-429", &endpoint);
 
-    let mut sibling = custom_account(&state);
-    sibling.id = "custom-unrec-sibling".into();
-    sibling.key_cipher = state.encrypt_key("sk-unrec-sibling").unwrap();
-    persist_granted_custom(&state, &sibling, &endpoint);
-    share_quota_pool(&state, &account.id, &sibling.id);
-
     let result = forward_once(&state, &account, &plan, &selection, &[]).await;
     assert_eq!(hits.load(Ordering::SeqCst), 1, "{:?}", result.error_message);
     assert!(recovery_for(&state, &account.id).is_none());
     let primary = state.db.lock().get_account(&account.id).unwrap().unwrap();
-    let other = state.db.lock().get_account(&sibling.id).unwrap().unwrap();
     assert!(primary.cooldown_generic_until.is_none());
-    assert!(other.cooldown_generic_until.is_none());
 
-    let sibling_selection = live_send_selection(&state, &sibling, &plan);
-    let blocked = forward_once(&state, &sibling, &plan, &sibling_selection, &[]).await;
+    let blocked = forward_once(&state, &account, &plan, &selection, &[]).await;
     assert_eq!(blocked.action, ForwardAction::TryNextAccount);
     assert_eq!(
         hits.load(Ordering::SeqCst),
         1,
-        "the exact endpoint/model remains waiting"
+        "the same Key must remain waiting until Retry-After"
     );
-    assert!(recovery_for(&state, &sibling.id).is_none());
     assert!(
         state
             .db
@@ -2941,7 +2942,7 @@ async fn unrecognized_429_with_retry_after_waits_on_endpoint_without_quota_or_co
 }
 
 #[tokio::test]
-async fn explicit_quota_403_does_not_mark_auth_invalid() {
+async fn quota_shaped_403_does_not_persist_quota_or_auth_error() {
     let (addr, hits, stop_tx) = spawn_json_upstream(
         axum::http::StatusCode::FORBIDDEN,
         quota_json(),
@@ -2954,7 +2955,7 @@ async fn explicit_quota_403_does_not_mark_auth_invalid() {
         prepare_custom_forward("quota-403-auth", &endpoint);
     let result = forward_once(&state, &account, &plan, &selection, &[]).await;
     assert_eq!(hits.load(Ordering::SeqCst), 1, "{:?}", result.error_message);
-    assert!(recovery_for(&state, &account.id).is_some());
+    assert!(recovery_for(&state, &account.id).is_none());
     let row = state.db.lock().get_account(&account.id).unwrap().unwrap();
     assert!(row.auth_error.is_none());
     assert!(row.cooldown_generic_until.is_none());
@@ -2965,7 +2966,37 @@ async fn explicit_quota_403_does_not_mark_auth_invalid() {
 }
 
 #[tokio::test]
-async fn delayed_split_sse_quota_after_output_persists_without_replay() {
+async fn minimax_200_status_envelope_is_an_error_without_durable_quota() {
+    let (addr, hits, stop_tx) = spawn_json_upstream(
+        axum::http::StatusCode::OK,
+        r#"{"base_resp":{"status_code":1008,"status_msg":"insufficient balance"}}"#,
+        "application/json",
+        None,
+    )
+    .await;
+    let endpoint = format!("http://{addr}/v1/chat/completions");
+    let (dir, state, account, plan, selection) =
+        prepare_custom_forward("minimax-status-envelope", &endpoint);
+    let mut minimax_account = account.clone();
+    minimax_account.provider_id = crate::provider::MINIMAX_PROVIDER_ID.into();
+
+    let result = forward_once(&state, &minimax_account, &plan, &selection, &[]).await;
+    assert_eq!(hits.load(Ordering::SeqCst), 1, "{:?}", result.error_message);
+    assert_eq!(result.action, ForwardAction::TryNextAccount);
+    assert!(!result.response.status().is_success());
+    assert!(recovery_for(&state, &account.id).is_none());
+    assert_eq!(
+        state.db.lock().list_forward_logs(10).unwrap()[0].status,
+        "client_error"
+    );
+
+    let _ = stop_tx.send(());
+    drop(state);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn delayed_split_sse_error_after_output_has_no_replay_or_durable_quota() {
     const CONTENT: &[u8] = b"data: {\"id\":\"x\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n";
     const QUOTA_A: &[u8] = b"data: {\"error\":{\"code\":\"insuff";
     const QUOTA_B: &[u8] = b"icient_quota\"}}\n\n";
@@ -2988,8 +3019,8 @@ async fn delayed_split_sse_quota_after_output_persists_without_replay() {
     let text = String::from_utf8_lossy(&body);
     assert!(text.contains("hi"), "{text}");
     assert!(
-        recovery_for(&state, &account.id).is_some(),
-        "late SSE quota must persist even after [DONE]"
+        recovery_for(&state, &account.id).is_none(),
+        "a post-output SSE error cannot create durable quota state"
     );
 
     let _ = stop_tx.send(());

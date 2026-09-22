@@ -6,10 +6,10 @@
 //! probes arbitrary paths.
 
 use crate::custom_http::{
-    CustomUrlHost, HttpInferenceTransport, build_custom_http_client, inspect_custom_url,
-    join_inference_endpoint,
+    HttpInferenceTransport, build_custom_http_client, inspect_custom_url, join_inference_endpoint,
 };
 use crate::models::{AppConfig, CreditBalance};
+use crate::official_service::{self, BalanceKind};
 use crate::provider::UpstreamAuthScheme;
 use chrono::Utc;
 use reqwest::StatusCode;
@@ -22,20 +22,9 @@ pub const MOONSHOT_BALANCE_SOURCE: &str = "moonshot-official";
 pub const STEPFUN_BALANCE_SOURCE: &str = "stepfun-api-official";
 
 const MAX_BODY_BYTES: usize = 256 * 1024;
-const PATH_DEEPSEEK: &str = "user/balance";
-const PATH_MOONSHOT: &str = "v1/users/me/balance";
-const PATH_STEPFUN: &str = "v1/accounts";
-
 #[cfg(test)]
 #[path = "api_balance/tests.rs"]
 mod tests;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BalanceKind {
-    DeepSeek,
-    Moonshot,
-    StepFun,
-}
 
 #[derive(Debug, Clone)]
 struct BalanceProbe {
@@ -51,100 +40,27 @@ pub fn is_official_balance_source(source: &str) -> bool {
         || source == STEPFUN_BALANCE_SOURCE
 }
 
-/// Exact official hosts only. Suffix matching is never used.
-fn probe_kind(host: &str) -> Option<(BalanceKind, &'static str, &'static str, &'static str)> {
-    match host {
-        "api.deepseek.com" => Some((
-            BalanceKind::DeepSeek,
-            PATH_DEEPSEEK,
-            DEEPSEEK_BALANCE_SOURCE,
-            "cny",
-        )),
-        "api.moonshot.cn" => Some((
-            BalanceKind::Moonshot,
-            PATH_MOONSHOT,
-            MOONSHOT_BALANCE_SOURCE,
-            "cny",
-        )),
-        "api.moonshot.ai" => Some((
-            BalanceKind::Moonshot,
-            PATH_MOONSHOT,
-            MOONSHOT_BALANCE_SOURCE,
-            "usd",
-        )),
-        "api.stepfun.com" => Some((
-            BalanceKind::StepFun,
-            PATH_STEPFUN,
-            STEPFUN_BALANCE_SOURCE,
-            "cny",
-        )),
-        _ => None,
-    }
-}
-
-/// Step Plan paths must be rejected on the original StepFun URL. Origin
-/// stripping would otherwise classify `/step_plan/...` as API balance.
-fn is_step_plan_path(path: &str) -> bool {
-    path == "/step_plan" || path.starts_with("/step_plan/")
-}
-
-fn is_stepfun_api_balance_url(parsed: &reqwest::Url, host: &str) -> bool {
-    host == "api.stepfun.com"
-        && parsed.scheme() == "https"
-        && parsed.port_or_known_default() == Some(443)
-        && !is_step_plan_path(parsed.path())
-}
-
-fn parsed_endpoint(endpoint_url: &str) -> Result<reqwest::Url, String> {
-    let parsed = reqwest::Url::parse(endpoint_url.trim())
-        .map_err(|_| "balance endpoint URL is not a valid URL".to_string())?;
-    inspect_custom_url(&parsed).map_err(|error| error.to_string())?;
-    if let Some(host) = host_domain(&parsed)
-        && host == "api.stepfun.com"
-        && !is_stepfun_api_balance_url(&parsed, &host)
-    {
-        return Err("this destination does not expose an official balance endpoint".to_string());
-    }
-    Ok(parsed)
-}
-
-fn origin_of(endpoint_url: &str) -> Result<reqwest::Url, String> {
-    let parsed = parsed_endpoint(endpoint_url)?;
-    let mut origin = parsed;
-    origin.set_path("");
-    origin.set_query(None);
-    origin.set_fragment(None);
-    Ok(origin)
-}
-
-fn host_domain(url: &reqwest::Url) -> Option<String> {
-    match inspect_custom_url(url).ok()?.host {
-        CustomUrlHost::Domain(name) => Some(name.to_ascii_lowercase()),
-        CustomUrlHost::Ip(_) => None,
-    }
-}
-
 pub fn probe_from_endpoint(endpoint_url: &str) -> Option<()> {
-    let origin = origin_of(endpoint_url).ok()?;
-    let host = host_domain(&origin)?;
-    probe_kind(&host).map(|_| ())
+    official_service::has_official_balance(endpoint_url).then_some(())
 }
 
 fn probe_for(endpoint_url: &str) -> Result<BalanceProbe, String> {
-    let origin = origin_of(endpoint_url)?;
-    let host = host_domain(&origin).ok_or_else(|| {
-        "this destination does not expose an official balance endpoint".to_string()
-    })?;
-    let Some((kind, path, source, unit_hint)) = probe_kind(&host) else {
-        return Err("this destination does not expose an official balance endpoint".to_string());
-    };
-    let url = join_inference_endpoint(origin.as_str(), path).map_err(|error| error.to_string())?;
+    let reader = official_service::identify(endpoint_url)
+        .and_then(|service| service.balance_reader())
+        .ok_or_else(|| {
+            "this destination does not expose an official balance endpoint".to_string()
+        })?;
+    let mut origin = reqwest::Url::parse(endpoint_url.trim()).map_err(|error| error.to_string())?;
+    inspect_custom_url(&origin).map_err(|error| error.to_string())?;
+    origin.set_path("");
+    let url =
+        join_inference_endpoint(origin.as_str(), reader.path).map_err(|error| error.to_string())?;
     inspect_custom_url(&url).map_err(|error| error.to_string())?;
     Ok(BalanceProbe {
         url,
-        source,
-        kind,
-        unit_hint,
+        source: reader.source,
+        kind: reader.kind,
+        unit_hint: reader.unit,
     })
 }
 

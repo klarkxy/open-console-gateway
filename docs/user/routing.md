@@ -2,7 +2,7 @@
 
 # Routing, Cost, And Failover
 
-A request resolves model identity from the saved destination catalog, then selects credentials in their global order. Supplier, credential and model enablement, protocol selection, model scope and explicit endpoint grants all constrain sending. Invalid configuration fails explicitly; there is no fallback to reconstructed legacy accounts. Each logical request freezes model mappings and transport configuration, while every send rechecks current authorization, Key version, cooldown and confirmed quota recovery. Changes invalidate an old candidate rather than silently redirecting it.
+A request resolves model identity from the saved destination catalog, then selects credentials in their global order. Supplier, credential and model enablement, protocol selection, model scope and explicit endpoint grants all constrain sending. Invalid configuration fails explicitly; there is no fallback to reconstructed legacy accounts. Each logical request freezes model mappings and transport configuration, while every send rechecks current authorization, Key version, cooldown and any persisted quota-recovery state. Changes invalidate an old candidate rather than silently redirecting it.
 
 On **Accounts**, card order followed by Key order inside each card is the saved routing priority. Drag a card to move its Keys together, or move a Key within its card or to another card of the same supplier. Create another card for that supplier to arrange `A1 → B1 → A2`; both A cards use the same saved supplier configuration. Adjacent cards remain separate. Priority, round-robin and sticky routing retain their existing policies.
 
@@ -10,33 +10,39 @@ On **Accounts**, card order followed by Key order inside each card is the saved 
 
 Refresh the model catalog on Providers. Newly discovered models are enabled automatically when a supported upstream protocol is known; models without protocol evidence remain unavailable until that evidence exists. Models in the saved Go catalog use their effective model contract even when no checked-in alias/protocol profile exists. Diagnostic planning cannot reject such models merely for being new. This does not re-enable models you explicitly disabled or removed, and does not probe protocols during inference. A local catalog/protocol test is not proof that a live account has access to the model.
 
-### Recognized quota versus temporary 429
+### 429 cooldowns and official observation
 
-Confirmed per-Key quota exhaustion dims that Key and skips routing. Usage at 100%, unknown, or failed never infers it. This exhaustion state does not copy to other members of a declared quota pool. Existing cooldowns remain valid; Zen Free uses its separate shared-channel recovery.
+Every upstream `429` starts a temporary cooldown for the exact Key that
+received it: 30 seconds when there is no usable constraint. A valid
+`Retry-After` delay or HTTP date can extend that wait and never shortens an
+already longer wait. The cooldown is not a displayed quota-reset time and does
+not spread through a declared quota pool. Zen Free retains its existing anonymous egress-IP recovery scope instead of a Key scope.
 
-These errors are recognized quota:
+The gateway never infers persistent quota or balance exhaustion from an HTTP
+status, an error body, or text in that body. A `403` is request-local and does
+not persist `auth_error`. MiniMax still validates its structured error envelope,
+including an error envelope delivered with HTTP 200, but its codes and message
+do not create persistent quota or balance state.
 
-- Kimi: an explicit `403` naming the 5-hour, weekly, or monthly window.
-- OpenCode Go: an explicit 5-hour, weekly, or monthly window only. Structured `CreditsError` 401 may still mean an inactive subscription and keeps the existing `auth_error` path.
-- GOAT: strict plan-window errors even when no reset deadline is given, plus known insufficient-credits errors.
-- MiniMax: `1008` and `2056`.
-- Configurable HTTP: structured `insufficient_quota` or `insufficient_balance`.
-
-An unrecognized temporary `429` does not prove quota exhaustion. Without a usable retry constraint it excludes the account only from that request and keeps an otherwise healthy sticky target. No five-minute account cooldown is invented. `Retry-After` constrains the relevant endpoint/model; when accompanying confirmed per-Key exhaustion, it constrains that Key independently of its quota reset. It never becomes a displayed quota-reset time or spreads that Key's exhaustion to siblings.
-
-A known reset waits until that time. An unknown window waits 15 minutes, then 1 hour, then 6 hours (capped); that step advances only after another proven quota error. When due, the next request that would normally select that Key is the single trial. The gateway does not send a synthetic probe, run a scheduler, or hold other traffic waiting for validation. Manual retry only makes the Key eligible. Only a completed successful JSON or SSE response restores it, including success with no usage. Timeout, cancel, or 5xx keep exhaustion, release the trial, and allow another try after at least 15 minutes without increasing the unknown-window step. A success from an old Key or an old exhaustion episode cannot clear the current state.
+After a `429`, the gateway can queue an asynchronous, coalesced and throttled
+official-usage refresh for an adapter that supports it; the client request does
+not wait for that work. Fetched authoritative OpenCode Go usage can establish or
+clear Go quota state. GOAT and CN usage snapshots remain display-only unless an
+adapter explicitly declares a different authority. A failed or unsupported
+refresh retains the last observation, or remains unknown. Existing persisted
+quota episodes are retained rather than bulk-purged; new error responses do not
+create them.
 
 ## Account Selection And Failover
 
-On **Aliases**, expand a model to request a read-only routing explanation. It shows the resolved mapping, eligible service connections and Keys, upstream protocol, global order, structured exclusion reasons, and the base policy's expected first pick. This preview sends no upstream request, decrypts no Key, writes no cooldown, quota recovery or log, and does not advance sticky, round-robin or quota-trial state. It does not simulate a conversation binding, retry-time exclusions, state changes after the snapshot, or an upstream result, so it is an explanation of the observed base policy rather than a delivery guarantee.
+On **Aliases**, expand a model to request a read-only routing explanation. It shows the resolved mapping, eligible service connections and Keys, upstream protocol, global order, structured exclusion reasons, and the base policy's expected first pick. This preview sends no upstream request, decrypts no Key, writes no cooldown, quota state or log, and does not advance sticky or round-robin state. It does not simulate a conversation binding, retry-time exclusions, state changes after the snapshot, or an upstream result, so it is an explanation of the observed base policy rather than a delivery guarantee.
 
 Accounts are tried in **list order**, which you can drag into shape and persist
 from the Accounts view. The selector skips:
 
 - Disabled accounts.
 - Accounts that are cooling down.
-- Keys in confirmed quota exhaustion, except the single due trial when that
-  Key is the ordinary next pick.
+- Keys with an active temporary `429` wait or a quota-recovery deadline that has not elapsed.
 - Accounts that have already failed during the current request (e.g. with a
   `429`).
 - Accounts whose saved provider contract has no effective enabled upstream
@@ -46,15 +52,15 @@ from the Accounts view. The selector skips:
   same connection keeps its own allow-list.
 
 Keys that share a **declared quota pool** can share stored ordinary cooldowns.
-Confirmed quota exhaustion stays on that Key and does not fan out. Matching
-names do not create a shared pool. Switching Keys on the same identity does
-not invent a fresh pool.
+The temporary cooldown created by a `429` remains on the receiving Key.
+Matching names do not create a shared pool. Switching Keys on the same identity
+does not invent a fresh pool.
 
-A recognized quota error persists per-Key recovery and the gateway tries the
-next Key. Other failures follow their observed scope and retry constraints,
-without treating arbitrary error text as quota evidence. A generic `403` fails over without
-writing a quota cooldown; Kimi's explicit plan-window `403` is quota recovery, not
-that generic path. Zen Free `401` is returned as-is. OpenCode Go structured
+A `429` cools the receiving Key temporarily and the gateway tries the next
+eligible Key. Other failures follow their observed scope and retry constraints,
+without treating arbitrary error text as quota evidence. A `403` fails over
+for this request without writing a cooldown or `auth_error`, including Kimi
+responses. Zen Free `401` is returned as-is. OpenCode Go structured
 `CreditsError` 401 rotates to the next eligible card and persists `auth_error`
 (it may still be an inactive subscription, not quota recovery);
 re-saving the same Key clears that breaker after renewal. Its `ModelError`,
@@ -79,9 +85,9 @@ once on the same account within the original deadline. After output starts,
 there is no replay or cross-account splicing. All attempts share a 32-attempt
 budget and one pre-output deadline. Unresolved outcomes are reported as
 `upstream_outcome_unknown` because the upstream may already have charged.
-If every account is cooling or quota-exhausted, the gateway returns `429`
-with the next known eligibility time. Purely process-local resource waits
-without a known quota reset return `503`.
+If every account is cooling or has persisted quota-recovery state, the gateway returns
+`429` with the next known eligibility time. Purely process-local resource waits
+without a known eligibility time return `503`.
 
 ## Cost Accounting
 
@@ -116,10 +122,9 @@ Edge cases in the log:
   refresh (manual **Refresh quota** or adaptive sync) on a ready Key or managed
   account overwrites the baseline with official OpenCode usage percentages.
   Successful priced costs recorded afterward accumulate until the next manual
-  calibration or official refresh. A real inference `429` only writes an
-  scope-specific recovery or, when recognized as quota, per-Key recovery; it
-  does not rewrite the usage baseline, but a temporary 429 does schedule a
-  later official reconciliation.
+  calibration or official refresh. A real inference `429` does not rewrite the
+  usage baseline, but can queue a later asynchronous official refresh when that
+  adapter supports it.
 - An `outcome_unknown` row means the upstream may have completed and charged
   the request while the gateway lost the response; its local cost stays unknown. The only stream retry exception is the bounded pre-output case described above.
 
@@ -131,18 +136,13 @@ explains what actually stops traffic.
 A full local quota bar or zero estimated credit balance never disables an
 account. Calibration changes the display baseline, not routing eligibility.
 
-Confirmed per-Key exhaustion follows the persistent wait and single-trial
-rules above. Existing ordinary cooldowns remain effective until their stored
-deadline or an explicit reset. Their matching usage bars stay at 100% while
-active. Resetting ordinary cooldown does not clear per-Key quota recovery.
+An upstream `429` uses the temporary cooldown above. Existing ordinary
+cooldowns remain effective until their stored deadline or an explicit reset.
+Resetting an ordinary cooldown does not rewrite persisted quota-recovery state.
 
-Other observed endpoint restrictions and anonymous Free exhaustion use
-process-local waiting. When recovery is unknown, a real client request may
-probe after about 30 seconds with small jitter; failed probes back off to at
-most 300 seconds. No background or synthetic inference is sent. A complete,
-protocol-valid response can clear only its own probe lease. Invalid 200 JSON,
-partial streams and cancellation do not establish recovery. Restart clears
-these local waits while persisted per-Key quota state remains.
+No background or synthetic inference is sent to clear a temporary cooldown.
+Restart clears process-local waits while retained persisted quota episodes
+remain available for authoritative Go usage to reconcile.
 
 ## Zen Free models
 
@@ -167,13 +167,24 @@ channel with the same OpenCode client headers the TUI uses (`User-Agent`,
 `x-opencode-session`, `x-opencode-client`, `x-opencode-request`,
 `x-opencode-project`) so session stickiness and the shared egress-IP free
 pool apply. Client-supplied OpenCode values win; otherwise the gateway fills
-them in. Its promo quota is shared per egress IP, so a Free `429` restricts the anonymous Free channel rather than rotating Keys. A known reset is persisted; unknown recovery uses the same local single-flight waiting policy. Routing continues to later compatible cards in saved order. A Free-only request with no known reset returns local unavailability rather than a fictitious quota deadline. Successful Free rows keep token counts, use `cost_state=free`, and
+them in. Its promo quota is shared per egress IP, so a Free `429` temporarily
+restricts the anonymous Free channel rather than rotating Keys. Routing
+continues to later compatible cards in saved order. A Free-only request with no
+known eligibility time returns local unavailability rather than a fictitious
+quota deadline. Successful Free rows keep token counts, use `cost_state=free`, and
 do not enter Go quota totals. Free models are promotional and may use request
 data to improve models — do not submit confidential content.
 
-### GOAT credit rejection without a reset time
+### GOAT credit errors
 
-An exact GOAT `400` / `BAD_REQUEST` / `invalid_request_error` declaring insufficient credits is an account-level quota rejection, not a malformed prompt. The current request tries the next eligible account once per account. That Key persists as exhausted (`insufficient_balance`) even when the upstream gives no reset time; Enabled does not change and it is not marked as an authentication failure. Recovery follows the per-Key wait and single trial above. Other 400s (context, model, reasoning validation), 413s, and similar unrecognized messages from other Providers do not gain this path.
+A GOAT response that reports insufficient credits is an upstream error for the
+current request; its body does not create persistent quota or balance state.
+Other 400s (context, model, reasoning validation), 413s, and similar errors
+remain request-local as well. Only a `429` starts the temporary cooldown and
+optional asynchronous official refresh described above.
+
+MiniMax reports cache counters unchanged through JSON, SSE, and request
+accounting. The gateway does not rewrite those counters from a model prefix.
 
 ---
 

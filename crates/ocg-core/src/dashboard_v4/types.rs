@@ -43,6 +43,8 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "Eligibility",
     "TemplateRef",
     "ConnectionSummary",
+    "CredentialCreateCapabilityDto",
+    "CredentialCreateUnavailableReasonDto",
     "ConnectionList",
     "OnboardingCommitRequest",
     "OnboardingCommitMode",
@@ -243,6 +245,8 @@ pub struct TemplateList {
 #[serde(rename_all = "camelCase")]
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ConnectionEndpoint {
+    /// Official balance support for this exact configured URL, including its path.
+    pub official_balance: bool,
     pub id: String,
     pub connection_id: String,
     pub operation: EndpointOperation,
@@ -309,10 +313,34 @@ impl From<DomainConnectionLifecycle> for ConnectionLifecycle {
     }
 }
 
+/// Why this connection cannot accept another credential through identity creation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialCreateUnavailableReasonDto {
+    ExternalIntegration,
+    Singleton,
+    NoAuthentication,
+    DedicatedAccountFlow,
+    BuiltinDefinition,
+    Unavailable,
+    Draft,
+}
+
+/// Server-owned operation capability; writes recheck it against current state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CredentialCreateCapabilityDto {
+    pub allowed: bool,
+    pub material_kinds: Vec<MaterialKind>,
+    pub reason: Option<CredentialCreateUnavailableReasonDto>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ConnectionSummary {
+    pub credential_create: CredentialCreateCapabilityDto,
     pub id: String,
     pub name: String,
     pub origin: ConnectionOrigin,
