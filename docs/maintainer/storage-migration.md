@@ -4,6 +4,14 @@
 
 Operator contract for upgrades, backups, and rollback. Schema details are in [Persistence](state-and-lifecycle.md#persistence).
 
+## Schema v63 — explicit HTTP protocol routes
+
+v63 additively adds nullable `destinations.protocol_routes_json`. `NULL` and an empty list retain legacy behavior: the destination's existing base URL and authentication apply to its legacy protocol set. A nonempty list stores one to three unique protocol routes, each with its complete endpoint and authentication; the first route remains consistent with the legacy base fields. Malformed, duplicate, or unknown route values reject the write or transfer rather than being repaired at read time.
+
+No read path performs DDL. The migration preserves disabled rows and their evidence/overrides. A later official refresh can enable only an unknown Auto row when it supplies protocol evidence; confirmed disabled or explicit `force_off` state remains off. This migration does not create a `pre-v63` backup. Before upgrading a production data directory, make a complete, consistent backup yourself. Older binaries cannot open schema 63; rollback means restoring that full pre-upgrade data directory with the same cipher identity.
+
+Portable export now uses payload V11 and carries explicit routes with destinations, catalog state, and grants. V4–V10 payloads that omit routes remain importable as legacy destinations. A payload older than V11 that contains nonempty routes is rejected to avoid data loss; V1–V3 and V12 or later are unsupported.
+
 ## Schema v62 — personal credit estimates
 
 v62 adds nullable `credentials.credit_meter_json` and `forward_logs.credit_receipt_json`. Each credential owns its configuration, credit buckets, calibration baseline, and estimated consumption. A settlement receipt and its debit commit in the same transaction; repeated stream finalization cannot debit twice, and log removal cannot replenish the stored balance. Supplier containers and existing quota-sharing metadata do not own these personal meters.
@@ -90,7 +98,7 @@ Migration rules: each existing account becomes exactly one identity (label = acc
 
 Every account insert (V3 create, managed create, user-defined Provider first Key, V4 onboarding commit, node import, V4 identity credential create) writes the satellite rows in the same transaction via the single mapper shared with this migration. Platform link / unlink updates the linked identity's confidence and site in the same transaction.
 
-Rotate, binding edits, second-credential writes, and configurable-destination PATCH/DELETE are V4 CAS paths. New exports use portable payload V10 (envelope v1). V9 carries destinations and credentials as authority, including per-model route overrides and `modelResolution`; V7 imports receive deterministic defaults, while V8 and later require the field. V4–V10 remain importable and V11+ is rejected. Legacy Custom rows keep stable IDs and `public_only` resolution while becoming connection-owned and multi-Key. Destination/credential merge remains transactional.
+Rotate, binding edits, second-credential writes, and configurable-destination PATCH/DELETE are V4 CAS paths. New exports use portable payload V11 (envelope v1). It carries explicit protocol routes along with destinations, credentials, per-model route overrides, and `modelResolution`. V4–V10 remain importable when they omit routes; a pre-V11 payload carrying routes is rejected. V12+ is rejected. Legacy Custom rows keep stable IDs and `public_only` resolution while becoming connection-owned and multi-Key. Destination/credential merge remains transactional.
 
 ## Schema v46 — persisted binding grants
 
@@ -295,7 +303,7 @@ v32 replaces `account_custom_configs.base_url`, JSON `upstream_protocols`, and `
 
 ## Schema v35 — Provider single identity
 
-v35 removes the offering dimension. Provider and Plan are one product identity keyed by `provider_id`. Known v34 pairs map as `opencode/go`, `opencode-zen-free/anonymous-free`, `command-code/goat`, `minimax/cn`, `kimi/cn`, `custom/api`, and `cpa/local`. Unknown pairs and composite-key collisions fail closed before any write. The rebuild preserves accounts, ciphertext bytes, logs, pricing/catalog rows, contracts, Custom configs/capabilities, settings, and access keys. The same schema version also stores typed user-defined Providers in `dynamic_providers` and `dynamic_provider_models` (both renamed to `providers` / `provider_models` in v42). Node backups export payload V6 with `providerId` only, plus an optional/defaulted user-defined Provider definition collection. Payload V1–V3, and any version other than 4, 5, or 6 (including a future V7 package), are rejected with an explicit unsupported-version error. That schema's transfer contract exported payload V6; HEAD exports payload V10. V4/V5 imports still rebuild identity satellites with the deterministic 1:1 mapper.
+v35 removes the offering dimension. Provider and Plan are one product identity keyed by `provider_id`. Known v34 pairs map as `opencode/go`, `opencode-zen-free/anonymous-free`, `command-code/goat`, `minimax/cn`, `kimi/cn`, `custom/api`, and `cpa/local`. Unknown pairs and composite-key collisions fail closed before any write. The rebuild preserves accounts, ciphertext bytes, logs, pricing/catalog rows, contracts, Custom configs/capabilities, settings, and access keys. The same schema version also stores typed user-defined Providers in `dynamic_providers` and `dynamic_provider_models` (both renamed to `providers` / `provider_models` in v42). Node backups export payload V6 with `providerId` only, plus an optional/defaulted user-defined Provider definition collection. Payload V1–V3, and any version other than 4, 5, or 6 (including a future V7 package), are rejected with an explicit unsupported-version error. That schema's transfer contract exported payload V6; Current builds export payload V11. V4/V5 imports still rebuild identity satellites with the deterministic 1:1 mapper.
 
 Before any destructive v35 rebuild on a non-empty v34 database, the process writes a unique never-overwritten sibling snapshot:
 

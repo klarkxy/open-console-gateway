@@ -49,8 +49,8 @@ The Adapter Registry is sealed. Built-in Provider families are:
 | --- | --- | --- | --- |
 | OpenCode Go | `opencode` | Yes | One officially distributable API Key per account; managed signup remains Beta |
 | Zen Free | `opencode-zen-free` | Yes | One credentialless, anonymous singleton; sortable and enableable, not deletable; quota shared by egress IP |
-| Command Code GOAT | `command-code` | Yes | Public Provider catalog; GOAT preset models default on, additional models default off in the Providers matrix; no account-level GOAT/All or Max mode |
-| MiniMax CN Token Plan | `minimax` | Yes | Dedicated `sk-cp` Key; fixed official Chat and Messages routes, authenticated model directory, and manual official Token Plan usage refresh |
+| Command Code GOAT | `command-code` | Yes | Public Provider catalog; discovered models with documented supported endpoints default on. Existing models stay off only when confirmed supported but disabled, or when you explicitly turned them off; models with no protocol evidence wait for official documentation. No account-level GOAT/All or Max mode. |
+| MiniMax CN Token Plan | `minimax` | Yes | Dedicated `sk-cp` Key; fixed official Chat, Responses, and Messages routes, authenticated model directory, and manual official Token Plan usage refresh |
 | Kimi Code CN | `kimi` | Yes | Dedicated Kimi Code Key; fixed official Chat and Messages routes, authenticated model directory, and manual official weekly/rate-window usage refresh |
 | Ollama Cloud | `ollama` | Yes | Fixed-origin Chat Completions only (`https://ollama.com`, Bearer); public keyless catalog refresh; account billing tier (Pro $60 / Max $300 / Team $1000 USD Credits per billing month) plus purchase date; local monthly soft-credit estimate from official per-request usage and the manual `https://ollama.com/pricing` table; unconfigured existing accounts stay routeable with no meter |
 | Custom API | `custom` | Yes | Compatibility identity for migrated configurable HTTP connections; one connection owns its API URL, auth, protocol, and public-name → upstream-ID mappings, while multiple Key accounts may attach; existing records remain separate and retain public-name-only resolution; unknown cost unless personal rates are configured; no provider quota debit |
@@ -60,11 +60,18 @@ Configurable HTTP connections and individual models have separate **Enabled** sw
 ## Personal credit estimates
 
 Custom API and saved configurable HTTP accounts can track a personal credit
-balance. Open the account's billing panel, configure rates by exact upstream model ID and the current
-balance, then add monthly issuance or expiring top-ups as needed. Each Key has
+balance. Initialize it in **Add Key** or the Key's **Edit** form. Step Plan offers
+its tiers, current remaining balance and next reset; other HTTP accounts can opt
+into **Estimate credits locally** and enter rates by exact upstream model ID.
+The card shows the saved balance, with later corrections under **Calibrate usage**
+in the Key's action row. Monthly issuance and expiring top-ups remain separate. Each Key has
 its own estimate even when several Keys share a supplier. New API / Sub2API site
 Keys and sealed built-in Plans keep their existing billing views; they do not
 offer this personal-credit editor.
+
+Editing a Key preserves an existing credit ledger. If the Key saves but credit
+setup fails, retry in the same form to finish setup without creating another
+Key. You can also close the form and finish setup from that Key's **Edit** action.
 
 Completed requests deduct credits using the rate captured when that attempt
 started. Missing usage or prices remain unknown. Calibration waits for in-flight
@@ -72,7 +79,7 @@ requests; changing rates preserves the current balance. An estimated zero
 balance never disables routing. Step Plan uses local estimation and manual
 calibration; it does not read a private console usage API.
 
-Payload V10 backups carry credit settings and remaining balances. Existing
+Payload V11 backups carry credit settings and remaining balances. Existing
 target meters survive a merge. Pending requests appear as uncertainty in the
 exported estimate. See [Upgrade and backup](upgrade-backup.md).
 
@@ -87,13 +94,13 @@ transfer it separately from the file; Open Console Gateway cannot recover it. Th
 operation remains available only from the node's loopback dashboard; forwarded
 scheme headers do not grant access to a remote dashboard.
 
-The current V10 payload moves destinations and credentials as the authority
+The current V11 payload moves destinations and credentials as the authority
 (ready Keys, platform and CPA observer management credentials, and identity /
 grant / cooldown extras stay inside the encrypted envelope), Custom Endpoint/public-model → upstream-ID mappings and verification
 state encoded on those entities, user-defined Providers as destination extras,
 the primary and active sub Access Keys, portable routing/proxy settings, Zen
-Free enablement/catalog, Provider catalogs, evidence, and protocol
-overrides, plus quota-pool membership.
+Free enablement/catalog, Provider catalogs, evidence, protocol overrides, and
+explicit HTTP protocol routes, plus quota-pool membership.
 Shared identities, a second credential on the same identity, binding model
 restrictions and enabled flags, and quota-pool membership and declared/unknown
 evidence are restored as stored. V7 Custom destinations are normalized to the
@@ -117,8 +124,8 @@ account fields replace the stored credential.
 Machine-local listener/root URL, auto-start, and Dock settings also stay with
 the destination. Ready managed accounts keep their Key, but their browser login
 does not move; unfinished managed drafts are skipped. Import accepts payload
-V4, V5, V6, V7, V8, V9, and V10. V4/V5 packages rebuild one identity, credential, All-scope
-binding, and identity quota pool per account. Payload V1–V3 and V11 or newer
+V4, V5, V6, V7, V8, V9, V10, and V11. V4–V10 packages without protocol routes remain compatible; a pre-V11 package carrying nonempty explicit routes is rejected rather than losing those routes. V4/V5 packages rebuild one identity, credential, All-scope
+binding, and identity quota pool per account. Payload V1–V3 and V12 or newer
 backups are rejected with an explicit unsupported-version error. A V4/V5 file
 that already contains V6 identity fields, or a V6 file that already contains
 V7 destination fields, is rejected rather than silently dropping them. The outer encrypted envelope remains version 1 and
@@ -143,8 +150,8 @@ OpenCode; the public catalog refresh remains keyless. Custom API is a
 separate trusted-administrator destination and must not send its key to an
 OpenCode endpoint.
 
-MiniMax and Kimi keys are also origin-bound: MiniMax CN uses
-`https://api.minimaxi.com/v1`; Kimi Code CN uses
+MiniMax and Kimi keys are also origin-bound: sealed MiniMax CN inference and catalog routes use
+`https://api.minimax.cn/v1` plus the documented `/anthropic` route; its older usage endpoint is unchanged. Kimi Code CN uses
 `https://api.kimi.com/coding/v1`. Model and usage refreshes are explicit
 dashboard actions. Usage display never changes routing eligibility. Before the
 first successful usage refresh, the account card still shows a neutral **Not
@@ -153,25 +160,12 @@ yet refreshed** quota bar; official windows replace it after refresh.
 Command Code's official `GET /models` is public and refreshes one
 Provider-level catalog. **Refresh quota** on the account card also runs that
 catalog refresh. The Providers matrix remains the model-supply control: GOAT
-preset rows default on, newly discovered rows default off.
+preset rows and newly discovered models with documented supported endpoints
+default on. Existing models stay off only when confirmed supported but disabled,
+or when you explicitly turned them off; models with no protocol evidence wait
+for official documentation.
 
-Custom API is a live trusted-administrator destination. **Accounts** is the
-only editor for its mappings: each row pairs a public model name (what the
-client requests) with the exact upstream model ID (what OCG sends). The card
-stores one API URL, one upstream protocol (Chat Completions, Responses, or
-Messages), and at least one mapping. That protocol is uniform across every
-mapping on the account and is the effective preferred
-protocol: matching client traffic passes through, while other supported client
-formats convert to it. See [Protocol conversion](protocol-conversion.md).
-Entering an origin root is recommended:
-OCG appends `/v1` and the selected protocol path. A base already ending in
-`/v1` is used without duplicating that segment. Existing complete standard
-Endpoints remain exact. **Fetch models** derives `/v1/models` from a root or
-versioned base, or the sibling `/models` from a complete standard Endpoint.
-Non-standard complete paths remain exact for inference and retain manual model
-entry instead of guessing a directory URL. Discovery returns upstream IDs only.
-Choosing one imports a row with the public name and upstream ID exactly equal.
-Fetching does not save, verify, or enable the account.
+Custom API is a live trusted-administrator destination. **Providers** edits its mappings: each row pairs a public model name (what the client requests) with the exact upstream model ID (what OCG sends). A connection stores either its legacy route or one to three explicit Chat Completions, Responses, and/or Messages routes, each with its endpoint and authentication. Each mapping inherits the route for its protocol unless it has a single explicit upstream override. **Accounts** edits only attached Keys and bindings. Existing complete endpoints remain exact. **Fetch models** uses the saved directory route; non-standard routes remain exact for inference and retain manual model entry instead of guessing a directory URL. Discovery returns upstream IDs only. Choosing one imports a row with the public name and upstream ID exactly equal. Fetching does not save, verify, enable, or grant a Key.
 
 A trusted administrator may configure a public, LAN, or loopback HTTP or HTTPS
 origin. Metadata, link-local, and opaque IPv4-trick hosts (for example

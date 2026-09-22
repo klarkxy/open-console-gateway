@@ -2,9 +2,9 @@
 
 # Plan 与 API 预设
 
-默认协议和地址复核于 **2026-09-09**：xAI 使用 Responses，MiniMax 国内/国际使用 Messages 与 Bearer 鉴权，依据运营方当前推荐与 REST 文档。OpenAI/Azure/Bedrock 保留 Responses，Anthropic 保留 Messages，其他预设保留文档中的 Chat 兼容默认值。Gemini 原生 Google API 不属于这三种上游格式，因此预设使用官方列明的 OpenAI 兼容接口。“文档支持”不等于“官方唯一推荐”。模板只初始化新草稿，不改写已经保存的选择。
+创建预设或显式重新套用预设时，系统会保存文档所列的整组路由。它不会从运行时主机名推导替换路径，也不会改写已保存的连接。OpenAI/Azure/Bedrock 保留 Responses，Anthropic 保留 Messages，其他预设保留官方记录的支持格式。Gemini 原生 Google API 不属于这三种上游格式，因此预设使用官方列明的 OpenAI 兼容接口。
 
-MiniMax 官方 Chat 与 Messages 地址分别使用 `/v1`、`/anthropic/v1` 前缀。覆盖模型协议时明确填写对应地址，面板不猜测其他路径。[当前 MiniMax Messages 鉴权](https://platform.minimax.io/docs/api-reference/text-chat-anthropic)为 Bearer，不能仅因协议格式兼容 Anthropic 就推断为 x-api-key。选择规则见[协议默认值](providers.zh-CN.md#协议默认值与连接测试)。
+MiniMax 国内/API 与国际预设会保存独立的 Chat Completions、Responses 和 Messages 路由。Chat 和 Responses 使用 Bearer；Messages 使用 `x-api-key`。完整端点会被保存，面板不会猜测其他路径。MiMo API 与 MiMo Token Plan（国内）同样保存 Bearer 鉴权的 Chat `/v1/chat/completions`、Responses `/v1/responses` 和 Messages `/anthropic/v1/messages` 三条路由。选择规则见[协议默认值](providers.zh-CN.md#协议默认值与连接测试)。
 
 从 **账号 → 新增账号** 或 **供应商 → 添加供应商** 浏览 Plan/API 预设。两个按钮打开同一套账号页选择器。已有连接只列出仍有账号的内置供应商和已保存的用户定义供应商；未使用的内置模板与创建模板一起出现在新服务里。预设按厂商分组，地区或套餐变体使用紧凑选择器；搜索包含厂商、变体、预设名称与 ID，以及端点主机。选择器在 Key 字段之前显示只读连接摘要。固定预设提供地址、协议、鉴权与可修改的默认模型；Azure、Bedrock 仍需填写资源或地区地址，以及部署或模型信息。完成预设必须填写 Key，并同时创建供应商和首个账号；**保存草稿** 可以省略 Key。Custom API 与手动配置仍保留完整设置。
 
@@ -48,8 +48,8 @@ MiniMax 官方 Chat 与 Messages 地址分别使用 `/v1`、`/anthropic/v1` 前�
 | Zhipu GLM Coding Plan | chat_completions | bearer | [API 文档](https://docs.bigmodel.cn/cn/guide/develop/cursor) | [`glm-5.3`](https://docs.bigmodel.cn/cn/guide/develop/cursor) |
 | Z.AI GLM API | chat_completions | bearer | [API 文档](https://docs.z.ai/api-reference/introduction) | [`glm-5.3`](https://docs.z.ai/api-reference/introduction) |
 | Z.AI GLM Coding Plan | chat_completions | bearer | [API 文档](https://docs.z.ai/devpack/tool/others) | [`glm-5.3`](https://docs.z.ai/devpack/tool/others) |
-| MiniMax API (CN) | messages | bearer | [API 文档](https://platform.minimaxi.com/docs/api-reference/text-anthropic-api) | [`MiniMax-M2.5`](https://platform.minimaxi.com/docs/api-reference/text-anthropic-api) |
-| MiniMax API / Token Plan (Global) | messages | bearer | [API 文档](https://platform.minimax.io/docs/api-reference/text-anthropic-api) | [`MiniMax-M3`](https://platform.minimax.io/docs/api-reference/text-chat-anthropic) |
+| MiniMax API（国内） | Chat Completions + Responses + Messages | Bearer（Chat/Responses）；`x-api-key`（Messages） | [API 文档](https://platform.minimax.cn/docs/api-reference/responses-create) | [`MiniMax-M2.5`](https://platform.minimax.cn/docs/api-reference/responses-create) |
+| MiniMax API / Token Plan（国际） | Chat Completions + Responses + Messages | Bearer（Chat/Responses）；`x-api-key`（Messages） | [API 文档](https://platform.minimax.io/docs/api-reference/responses-create) | [`MiniMax-M3`](https://platform.minimax.io/docs/api-reference/responses-create) |
 | LongCat API | chat_completions | bearer | [API 文档](https://longcat.chat/platform/docs/api/chat.html) | [`LongCat-2.0`](https://longcat.chat/platform/docs/api/chat) |
 | Tencent Hunyuan / TokenHub API | chat_completions | bearer | [API 文档](https://cloud.tencent.com/document/product/1823/130078) | [`hy3`](https://cloud.tencent.com/document/product/1823/132252) |
 | Tencent Token Plan (CN) | chat_completions | bearer | [API 文档](https://cloud.tencent.com/document/product/1823/130119) | [`tc-code-latest`](https://cloud.tencent.com/document/product/1823/130119) |
@@ -74,8 +74,8 @@ MiniMax 官方 Chat 与 Messages 地址分别使用 `/v1`、`/anthropic/v1` 前�
 | StepFun Step Plan (CN) | chat_completions | bearer | [API 文档](https://platform.stepfun.com/docs/zh/step-plan/integrations/reasoning-api) | [`step-router-v1`](https://platform.stepfun.com/docs/zh/step-plan/integrations/reasoning-api) |
 | StepFun API (Global) | chat_completions | bearer | [API 文档](https://platform.stepfun.ai/docs/en/api-reference/chat/chat-completion-create) | [`step-3.5-flash`](https://platform.stepfun.ai/docs/en/api-reference/chat/chat-completion-create) |
 | StepFun Step Plan (Global) | chat_completions | bearer | [API 文档](https://platform.stepfun.ai/docs/en/step-plan/integrations/reasoning-api) | [`step-3.5-flash`](https://platform.stepfun.ai/docs/en/step-plan/integrations/reasoning-api) |
-| Xiaomi MiMo API | chat_completions | bearer | [API 文档](https://mimo.mi.com/docs/zh-CN/quick-start/faq/api-integration) | [`mimo-v2.5`](https://mimo.mi.com/docs/zh-CN/quick-start/faq/api-integration) |
-| Xiaomi MiMo Token Plan (CN) | chat_completions | bearer | [API 文档](https://mimo.mi.com/docs/zh-CN/tokenplan/integration/tools-overview) | [`mimo-v2.5`](https://mimo.mi.com/docs/zh-CN/tokenplan/integration/tools-overview) |
+| 小米 MiMo API | Chat Completions + Responses + Messages | bearer | [API 文档](https://mimo.mi.com/docs/en-US/tokenplan/integration/codex-configuration) | [`mimo-v2.6-flash`](https://mimo.mi.com/docs/en-US/tokenplan/integration/codex-configuration) |
+| 小米 MiMo Token Plan（国内） | Chat Completions + Responses + Messages | bearer | [API 文档](https://mimo.mi.com/docs/en-US/tokenplan/integration/claudecode) | [`mimo-v2.6-flash`](https://mimo.mi.com/docs/en-US/tokenplan/integration/codex-configuration) |
 | BaiLing / Ant Ling API | chat_completions | bearer | [API 文档](https://developer.ant-ling.com/zh-CN/docs/api-reference/openai/) | [`Ling-3.0-flash`](https://developer.ant-ling.com/zh-CN/docs/api-reference/openai/) |
 | KAT-Coder / StreamLake API | chat_completions | bearer | [API 文档](https://www.streamlake.ai/document/DOC/mg6k6nlp8j6qxicx4c9) | [`kat-coder-pro-v2.5`](https://www.streamlake.ai/document/DOC/mg6k6nlp8j6qxicx4c9) |
 | KAT-Coder / StreamLake Coding Plan | chat_completions | bearer | [API 文档](https://www.streamlake.ai/document/DOC/mg6k6nlp8j6qxicx4c9) | [`kat-coder-pro-v2.5`](https://www.streamlake.ai/document/DOC/mg6k6nlp8j6qxicx4c9) |
@@ -127,7 +127,7 @@ DeepSeek 使用官网 USD 价格，区分缓存命中、未命中以及工作日
 
 StepFun API (CN) 在 `api.stepfun.com` 的普通路径（不含 `/step_plan`）可以用所选 Key 刷新当前余额，入口与 DeepSeek、Moonshot 相同，都是账号页的现金计量。官网钱包余额不变。
 
-Step Plan (CN) 在 Open Console Gateway 里没有官网用量 API。账号卡使用 **本地估算**，并手工校准。选择 Mini / Plus / Pro / Max（400M / 1600M / 8000M / 40000M 点数，1M 点数 = 1 元人民币）。费率来自服务端预设。首次配置需要填写当前剩余和重置时间（默认下个自然月 00:00 中国时间，UTC+8），这样第一条观测是完整的。不需要控制台 Cookie 或登录。
+Step Plan (CN) 在 Open Console Gateway 里没有官网用量 API。账号卡使用 **本地估算**，并手工校准。在 **添加 Key** 或该 Key 的 **编辑** 表单中，选择 Mini / Plus / Pro / Max（400M / 1600M / 8000M / 40000M 点数，1M 点数 = 1 元人民币），填写当前剩余和重置时间（默认下个自然月 00:00 中国时间，UTC+8）。费率来自服务端预设。后续余额修正使用 Key 操作区的 **校准用量**。不需要控制台 Cookie 或登录。
 
 费用按实际归一化 Token × 这些费率 × 1M/元换算，不是订阅标价。只有 OCG 流量进入估算；OCG 之外的用量用校准纠正。待结算完成后再校准。月度发放、400M / 1600M 充值（可选 30 天过期）和其他过期是分开的桶。剩余不含已过期充值。每条过期单独列出，卡片不会编造一个共用重置时间。未知定价保持未知，不是免费。该估算不阻断路由。
 

@@ -4,6 +4,14 @@
 
 本页是升级、备份与回滚的运维约定。schema 细节见 [持久化](state-and-lifecycle.zh-CN.md#持久化)。
 
+## Schema v63 — 显式 HTTP 协议路由
+
+v63 增量增加可空 `destinations.protocol_routes_json`。`NULL` 与空列表保持遗留行为：目的地既有基址和鉴权适用于其遗留协议集。非空列表保存一到三条互不重复的协议路由，每条都带完整端点与鉴权；第一条与遗留基址字段保持一致。格式错误、重复或未知路由值会拒绝写入或转移，不会在读路径中被修复。
+
+读路径不执行 DDL。迁移保留关闭行及其证据/覆盖。后续官方刷新只有在补充协议证据时才能启用未知 Auto 行；已确认关闭或显式 `force_off` 状态仍保持关闭。本迁移不创建 `pre-v63` 备份。升级生产数据目录前，请自行制作完整且一致的备份。旧二进制不能打开 schema 63；回退必须以相同 cipher identity 恢复完整的升级前数据目录。
+
+便携导出现在使用 payload V11，并随目的地、目录状态和授权一起携带显式路由。未带路由的 V4–V10 payload 仍按遗留目的地导入。早于 V11 但含非空路由的 payload 会被拒绝以避免丢失数据；V1–V3 及 V12 或更高版本不受支持。
+
 ## Schema v62 — 个人积分估算
 
 v62 增加可空的 `credentials.credit_meter_json` 和 `forward_logs.credit_receipt_json`。每个账号独立保存配置、各笔积分、校准基准和估算消耗。结算记录与扣减在同一事务中提交，流式响应重复完成不会重复扣减，移除日志也不会补回已保存的余额。供应商容器和已有额度共享元数据不拥有这些个人计量状态。
@@ -83,7 +91,7 @@ v45 把遗留 Account 拆成身份容器 / 凭据 / 绑定语义，但不搬移 
 
 每一次账号插入（V3 创建、托管创建、用户定义供应商首把 Key、V4 onboarding commit、节点导入）都通过与本迁移共用的唯一映射器，在同一事务写入附属行。平台关联 / 解除关联在同一事务更新被关联身份的置信度与站点。
 
-轮换、绑定编辑、第二份凭据写入，以及可配置目的地 PATCH/DELETE 都是 V4 CAS 路径。新导出使用 portable payload V10（envelope v1）。V9 以目的地与凭据为权威，并携带按模型路由覆盖与 `modelResolution`；V7 导入确定性补默认值，V8 及以上必须显式携带。V4–V10 均可导入，V11+ 拒绝。遗留 Custom 行保持稳定 ID 与 `public_only` 解析，同时改为连接所有、多 Key。目的地/凭据归并保持单事务。
+轮换、绑定编辑、第二份凭据写入，以及可配置目的地 PATCH/DELETE 都是 V4 CAS 路径。新导出使用 portable payload V11（envelope v1），随目的地、凭据、按模型路由覆盖与 `modelResolution` 一起携带显式协议路由。未带路由的 V4–V10 均可导入；早于 V11 却带路由的 payload 会拒绝。V12+ 拒绝。遗留 Custom 行保持稳定 ID 与 `public_only` 解析，同时改为连接所有、多 Key。目的地/凭据归并保持单事务。
 
 ## Schema v46 — 持久化绑定授权
 
@@ -288,7 +296,7 @@ v32 用 `endpoint_url` 与单值 `upstream_protocol` 替换 `account_custom_conf
 
 ## Schema v35 — Provider 单一身份
 
-v35 去掉 offering 维度。Provider 与 Plan 是同一产品身份，只按 `provider_id` 识别。已知 v34 对映射为 `opencode/go`、`opencode-zen-free/anonymous-free`、`command-code/goat`、`minimax/cn`、`kimi/cn`、`custom/api` 与 `cpa/local`。未知对与复合键冲突在任何写入前 fail closed。重建保留账号、密文字节、日志、定价/目录行、合约、Custom 配置/能力、设置与 access keys。同一 schema 版本还把类型化用户定义供应商存在 `dynamic_providers` 与 `dynamic_provider_models`（两者都在 v42 中改名为 `providers` / `provider_models`）。节点备份导出只含 `providerId` 的 payload V6，并带一份可选/默认空的用户定义供应商定义集合。payload V1–V3，以及除 4、5 或 6 以外的任何版本（包括未来的 V7 包），都会被明确的不支持版本错误拒绝。该 schema 当时的转移包导出 payload V6；HEAD 导出 payload V10。导入 V4/V5 时仍用确定性 1:1 映射重建身份附属行。
+v35 去掉 offering 维度。Provider 与 Plan 是同一产品身份，只按 `provider_id` 识别。已知 v34 对映射为 `opencode/go`、`opencode-zen-free/anonymous-free`、`command-code/goat`、`minimax/cn`、`kimi/cn`、`custom/api` 与 `cpa/local`。未知对与复合键冲突在任何写入前 fail closed。重建保留账号、密文字节、日志、定价/目录行、合约、Custom 配置/能力、设置与 access keys。同一 schema 版本还把类型化用户定义供应商存在 `dynamic_providers` 与 `dynamic_provider_models`（两者都在 v42 中改名为 `providers` / `provider_models`）。节点备份导出只含 `providerId` 的 payload V6，并带一份可选/默认空的用户定义供应商定义集合。payload V1–V3，以及除 4、5 或 6 以外的任何版本（包括未来的 V7 包），都会被明确的不支持版本错误拒绝。该 schema 当时的转移包导出 payload V6；当前版本导出 payload V11。导入 V4/V5 时仍用确定性 1:1 映射重建身份附属行。
 
 在非空 v34 库做破坏性 v35 重建之前，进程会写入一份唯一、不覆盖的同目录快照：
 
