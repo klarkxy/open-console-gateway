@@ -36,30 +36,19 @@
         :usage="presented"
         :now="now"
       />
-      <n-button
-        v-if="creditConfigureAvailable"
-        size="tiny"
-        quaternary
-        :disabled="mutating"
-        @click="creditSetupOpen = true"
-      >
-        {{ t("积分计费") }}
-      </n-button>
       <CreditMeterPanel
-        v-if="kind === 'credits_meter' || kind === 'credits_setup' || creditSetupOpen"
+        v-if="kind === 'credits_meter'"
         :account-id="account.id"
         :binding="binding"
         :status="status!"
         :now="now"
-        :setup-requested="creditSetupOpen"
-        @setup-closed="creditSetupOpen = false"
       />
     </template>
   </section>
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, watch } from "vue";
 import { NButton } from "naive-ui";
 import type { Account } from "../api/dashboard";
 import type { Identity } from "../api/identities.ts";
@@ -70,7 +59,6 @@ import {
   billingPanelMode,
   billingPanelOverlayError,
   billingSurfaceKind,
-  cashCreditConfigureAvailable,
   presentedUsageOf,
 } from "../domain/billing.ts";
 import { accountInferenceEndpointUrl } from "../domain/upstream-balance.ts";
@@ -95,7 +83,6 @@ const props = withDefaults(
 );
 
 const store = useBillingStore();
-const creditSetupOpen = ref(false);
 const endpointUrl = computed(() => (
   accountInferenceEndpointUrl(props.account, props.identity, props.connections)
 ));
@@ -124,9 +111,6 @@ const overlayKey = computed(() => {
 const kind = computed(() => status.value ? billingSurfaceKind(status.value) : "empty");
 const presented = computed(() => presentedUsageOf(status.value));
 const creditBalances = computed(() => presented.value?.credit_balances ?? []);
-const creditConfigureAvailable = computed(() => (
-  status.value ? cashCreditConfigureAvailable(status.value) : false
-));
 
 function reload(): void {
   void store.load(props.account.id, binding.value);
@@ -143,12 +127,10 @@ async function onRefreshCash(): Promise<void> {
 watch(
   () => [props.account.id, props.account.updated_at, endpointUrl.value] as const,
   () => {
-    creditSetupOpen.value = false;
     reload();
   },
   { immediate: true },
 );
-watch(() => store.sessionEpoch, () => { creditSetupOpen.value = false; });
 </script>
 
 <style scoped>

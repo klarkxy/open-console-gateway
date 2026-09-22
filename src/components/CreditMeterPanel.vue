@@ -1,52 +1,6 @@
 <template>
   <section class="credit-meter" :aria-label="t('点数')">
-    <div v-if="setupOpen" class="credit-meter__setup">
-      <n-select
-        v-if="status.presets.length > 0"
-        :value="presetId"
-        :options="presetOptions"
-        :placeholder="t('档位')"
-        :aria-label="t('档位')"
-        :disabled="mutating"
-        @update:value="onPreset"
-      />
-      <p v-if="draftIssue" class="credit-meter__hint" role="alert">{{ t(draftIssue) }}</p>
-      <n-form label-placement="top" @submit.prevent="submitSetup">
-        <n-form-item :label="t('当前剩余')" required>
-          <div class="credit-meter__amount">
-            <n-input-number
-              v-model:value="remainingDraft"
-              :show-button="false"
-              :min="0"
-              :precision="4"
-              :disabled="mutating"
-              :aria-label="t('当前剩余')"
-            />
-            <span v-if="unitLabel" class="mono">{{ unitLabel }}</span>
-          </div>
-        </n-form-item>
-        <n-form-item :label="t('重置日期')" required>
-          <input
-            v-model="resetDraft"
-            type="datetime-local"
-            class="credit-meter__datetime mono"
-            :disabled="mutating"
-            :aria-label="t('重置日期')"
-          >
-        </n-form-item>
-      </n-form>
-      <n-button
-        type="primary"
-        size="small"
-        :loading="mutating"
-        :disabled="!canSubmitSetup"
-        @click="submitSetup"
-      >
-        {{ t("保存") }}
-      </n-button>
-    </div>
-
-    <template v-else-if="meter">
+    <template v-if="meter">
       <div class="credit-meter__head">
         <p class="credit-meter__source">
           <a
@@ -57,21 +11,6 @@
           >{{ t("官方来源") }}</a>
         </p>
         <div class="credit-meter__actions">
-          <n-tooltip trigger="hover">
-            <template #trigger>
-              <n-button
-                circle
-                quaternary
-                size="small"
-                :aria-label="calibrationReason"
-                :disabled="mutating || activeBuckets.length === 0 || Boolean(calibrationBlock)"
-                @click="openCalibrate"
-              >
-                <template #icon><n-icon :component="EditOutlined" /></template>
-              </n-button>
-            </template>
-            {{ calibrationReason }}
-          </n-tooltip>
           <n-tooltip trigger="hover">
             <template #trigger>
               <n-button
@@ -129,48 +68,7 @@
       </ul>
     </template>
 
-    <div v-else class="credit-meter__setup">
-      <n-button size="small" secondary :disabled="mutating" @click="openGenericSetup">
-        {{ t("配置额度") }}
-      </n-button>
-    </div>
   </section>
-
-  <FormSurface
-    :show="calibrateOpen"
-    :title="t('校准用量')"
-    modal-style="width: 440px; max-width: calc(100vw - 32px)"
-    :close-on-esc="!mutating"
-    @update:show="setCalibrate"
-  >
-    <n-form label-placement="top" @submit.prevent="submitCalibrate">
-      <n-form-item
-        v-for="row in calibDrafts"
-        :key="row.bucketId"
-        :label="row.label"
-      >
-        <div class="credit-meter__amount">
-          <n-input-number
-            :value="row.remainingScaled"
-            :show-button="false"
-            :min="0"
-            :precision="4"
-            :disabled="mutating"
-            :aria-label="row.label"
-            @update:value="(value) => row.remainingScaled = value"
-          />
-          <span v-if="unitLabel" class="mono">{{ unitLabel }}</span>
-        </div>
-      </n-form-item>
-      <p v-if="draftIssue" class="credit-meter__hint" role="alert">{{ t(draftIssue) }}</p>
-    </n-form>
-    <template #footer>
-      <n-space justify="end">
-        <n-button :disabled="mutating" @click="setCalibrate(false)">{{ t("取消") }}</n-button>
-        <n-button type="primary" :loading="mutating" :disabled="Boolean(calibrationBlock)" @click="submitCalibrate">{{ t("保存") }}</n-button>
-      </n-space>
-    </template>
-  </FormSurface>
 
   <FormSurface
     :show="topupOpen"
@@ -236,93 +134,8 @@
     @update:show="setSettings"
   >
     <n-form label-placement="top" @submit.prevent="submitSettings">
-      <n-form-item v-if="!meter" :label="t('名称')" required>
-        <n-input v-model:value="genericName" :disabled="mutating" :aria-label="t('名称')" />
-      </n-form-item>
-      <n-form-item v-if="!meter" :label="t('币种')">
-        <n-input v-model:value="genericCurrency" :disabled="mutating" :aria-label="t('币种')" />
-      </n-form-item>
-      <n-form-item v-if="!meter" :label="t('点数每货币')">
-        <n-input-number
-          v-model:value="genericFactor"
-          :show-button="false"
-          :min="0"
-          :disabled="mutating"
-          :aria-label="t('点数每货币')"
-        />
-      </n-form-item>
       <p v-if="draftIssue" class="credit-meter__hint" role="alert">{{ t(draftIssue) }}</p>
-      <p class="credit-meter__hint">{{ t("每百万 Token，按原币估算；未知模型、复杂分档或额外收费请求保持未知。") }}</p>
-      <n-form-item
-        v-for="(rate, index) in rateDrafts"
-        :key="index"
-        :label="t('费率')"
-      >
-        <div class="credit-meter__rate">
-          <label class="credit-meter__rate-field credit-meter__model">
-          <span>{{ t("上游模型") }}</span>
-          <n-input
-            v-model:value="rate.model"
-            :disabled="mutating"
-            :placeholder="t('上游模型')"
-            :aria-label="t('上游模型')"
-            :input-props="{ 'aria-label': t('上游模型') }"
-          />
-          </label>
-          <n-button class="credit-meter__remove" size="tiny" quaternary :disabled="mutating" :aria-label="t('删除')" @click="removeRate(index)">
-            {{ t("删除") }}
-          </n-button>
-          <label class="credit-meter__rate-field">
-          <span>{{ t("输入") }}</span>
-          <n-input-number
-            v-model:value="rate.inputPerMillion"
-            :show-button="false"
-            :min="0"
-            :disabled="mutating"
-            :aria-label="t('输入')"
-            :input-props="{ 'aria-label': t('输入') }"
-          />
-          </label>
-          <label class="credit-meter__rate-field">
-          <span>{{ t("输出") }}</span>
-          <n-input-number
-            v-model:value="rate.outputPerMillion"
-            :show-button="false"
-            :min="0"
-            :disabled="mutating"
-            :aria-label="t('输出')"
-            :input-props="{ 'aria-label': t('输出') }"
-          />
-          </label>
-          <label class="credit-meter__rate-field">
-          <span>{{ t("缓存读") }}</span>
-          <n-input-number
-            v-model:value="rate.cacheReadPerMillion"
-            :show-button="false"
-            :min="0"
-            :disabled="mutating"
-            :placeholder="t('未知')"
-            :aria-label="t('缓存读')"
-            :input-props="{ 'aria-label': t('缓存读') }"
-          />
-          </label>
-          <label class="credit-meter__rate-field">
-          <span>{{ t("缓存写") }}</span>
-          <n-input-number
-            v-model:value="rate.cacheWritePerMillion"
-            :show-button="false"
-            :min="0"
-            :disabled="mutating"
-            :placeholder="t('未知')"
-            :aria-label="t('缓存写')"
-            :input-props="{ 'aria-label': t('缓存写') }"
-          />
-          </label>
-        </div>
-      </n-form-item>
-      <n-button size="tiny" quaternary :disabled="mutating" @click="addRate">
-        {{ t("添加") }}
-      </n-button>
+      <CreditRateFields :model-value="rateDrafts" :disabled="mutating" @update:model-value="rates => rateDrafts.splice(0, rateDrafts.length, ...rates)" />
       <n-checkbox v-model:checked="monthlyEnabled" :disabled="mutating">
         {{ t("月度额度") }}
       </n-checkbox>
@@ -348,19 +161,6 @@
           :aria-label="t('重置日期')"
         >
       </n-form-item>
-      <n-form-item v-if="!meter" :label="t('当前剩余')" required>
-        <div class="credit-meter__amount">
-          <n-input-number
-            v-model:value="remainingDraft"
-            :show-button="false"
-            :min="0"
-            :precision="4"
-            :disabled="mutating"
-            :aria-label="t('当前剩余')"
-          />
-          <span v-if="unitLabel" class="mono">{{ unitLabel }}</span>
-        </div>
-      </n-form-item>
     </n-form>
     <template #footer>
       <n-space justify="space-between">
@@ -385,23 +185,17 @@ import {
   NForm,
   NFormItem,
   NIcon,
-  NInput,
   NInputNumber,
-  NSelect,
   NSpace,
   NTooltip,
 } from "naive-ui";
-import { EditOutlined, PlusOutlined, ReloadOutlined, SettingOutlined } from "@vicons/antd";
+import { PlusOutlined, ReloadOutlined, SettingOutlined } from "@vicons/antd";
 import type { BillingStatus, CreditRate } from "../api/billing.ts";
 import {
   BILLING_SOURCE_KEYS,
   CHINA_OFFSET_MINUTES,
   TOPUP_QUICK_AMOUNTS,
   buildCreditSettingsConfiguration,
-  buildInitialCreditConfigure,
-  calibrationBalances,
-  configurationFromPreset,
-  creditCalibrationBlock,
   creditDisplayFactor,
   creditsToScaled,
   formatOffsetDateTime,
@@ -410,14 +204,12 @@ import {
   CREDIT_DATE_ISSUE_KEY,
   CREDIT_SETUP_ISSUE_KEYS,
   fromDatetimeLocalValue,
-  initialMonthlyBucket,
   meterNextResetAt,
   meterOffsetMinutes,
   nextCalendarMonthStart,
   offsetMinutesOrDefault,
   parseCreditAmount,
   partitionCreditBuckets,
-  presetById,
   toDatetimeLocalValue,
   topupExpiryIso,
 } from "../domain/billing.ts";
@@ -427,30 +219,23 @@ import { useBillingStore } from "../stores/billing.ts";
 import type { ApiPriceMeterCell } from "./ApiPriceMeter.vue";
 import ApiPriceMeter from "./ApiPriceMeter.vue";
 import FormSurface from "./FormSurface.vue";
+import CreditRateFields from "./CreditRateFields.vue";
 
-const props = withDefaults(defineProps<{
+const props = defineProps<{
   accountId: string;
   binding: string;
   status: BillingStatus;
   now: number;
-  setupRequested?: boolean;
-}>(), {
-  setupRequested: false,
-});
-const emit = defineEmits<{ "setup-closed": [] }>();
+}>();
 
 const store = useBillingStore();
 const unitFactor = computed(() => creditDisplayFactor(props.status.presets.length));
 const unitLabel = computed(() => props.status.presets.length > 0 ? "M" : "");
-const presetId = ref<string | null>(null);
-const remainingDraft = ref<number | null>(null);
 const monthlyEnabled = ref(false);
 const monthlyAmountDraft = ref<number | null>(null);
 const resetDraft = ref("");
-const calibrateOpen = ref(false);
 const topupOpen = ref(false);
 const settingsOpen = ref(false);
-const genericOpen = ref(false);
 const topupAmount = ref<number | null>(null);
 const topupExpiry = ref("");
 const topupThirtyDays = ref(false);
@@ -458,7 +243,6 @@ const genericName = ref("");
 const genericCurrency = ref("CNY");
 const genericFactor = ref<number | null>(1);
 const rateDrafts = reactive<CreditRate[]>([]);
-const calibDrafts = reactive<Array<{ bucketId: string; label: string; remainingScaled: number | null }>>([]);
 const draftIssue = ref<MessageKey | null>(null);
 
 const slot = computed(() => store.byId[props.accountId]);
@@ -466,32 +250,8 @@ const mutating = computed(() => slot.value?.mutating ?? false);
 const loading = computed(() => slot.value?.loading ?? false);
 const meter = computed(() => props.status.credits);
 const offsetMinutes = computed(() => meterOffsetMinutes(meter.value));
-const setupOpen = computed(() => (
-  !meter.value
-  && props.status.presets.length > 0
-  && (props.status.configurableCredits || props.setupRequested)
-));
 const partitioned = computed(() => partitionCreditBuckets(meter.value?.buckets ?? [], props.now));
-const activeBuckets = computed(() => partitioned.value.active);
 const expiredBuckets = computed(() => partitioned.value.expired);
-const calibrationBlock = computed(() => creditCalibrationBlock(meter.value));
-const calibrationReason = computed(() => {
-  const view = meter.value;
-  if (calibrationBlock.value === "pending" && view) {
-    return t("{count} 条待结算", { count: view.pendingRequests });
-  }
-  return t("校准用量");
-});
-const presetOptions = computed(() => props.status.presets.map((preset) => ({
-  label: preset.configuration.name,
-  value: preset.id,
-})));
-const canSubmitSetup = computed(() => (
-  !("issue" in parseCreditAmount(remainingDraft.value, unitFactor.value))
-  && Boolean(fromDatetimeLocalValue(resetDraft.value, CHINA_OFFSET_MINUTES))
-  && (props.status.presets.length === 0 || Boolean(presetId.value))
-));
-
 const cells = computed<ApiPriceMeterCell[]>(() => {
   const view = meter.value;
   if (!view) return [];
@@ -549,10 +309,6 @@ function defaultResetLocal(): string {
 }
 
 function clearDrafts(): void {
-  presetId.value = props.status.presets[0]?.id ?? null;
-  remainingDraft.value = props.status.presets[0]
-    ? creditsToScaled(props.status.presets[0].initialGrant, unitFactor.value)
-    : null;
   monthlyEnabled.value = props.status.presets.length > 0;
   monthlyAmountDraft.value = props.status.presets[0]
     ? creditsToScaled(props.status.presets[0].configuration.monthly?.amount ?? props.status.presets[0].initialGrant, unitFactor.value)
@@ -566,103 +322,8 @@ function clearDrafts(): void {
   genericCurrency.value = "CNY";
   genericFactor.value = 1;
   rateDrafts.splice(0, rateDrafts.length);
-  calibDrafts.splice(0, calibDrafts.length);
-  calibrateOpen.value = false;
   topupOpen.value = false;
   settingsOpen.value = false;
-  genericOpen.value = false;
-}
-
-function onPreset(id: string | number | null): void {
-  if (id == null) return;
-  const selected = String(id);
-  presetId.value = selected;
-  const preset = presetById(props.status.presets, selected);
-  if (!preset) return;
-  remainingDraft.value = creditsToScaled(preset.initialGrant, unitFactor.value);
-  monthlyEnabled.value = true;
-  monthlyAmountDraft.value = creditsToScaled(
-    preset.configuration.monthly?.amount ?? preset.initialGrant,
-    unitFactor.value,
-  );
-  const next = preset.configuration.monthly?.nextResetAt
-    ?? nextCalendarMonthStart(props.now, CHINA_OFFSET_MINUTES).toISOString();
-  resetDraft.value = toDatetimeLocalValue(
-    next,
-    offsetMinutesOrDefault(preset.configuration.monthly?.timezoneOffsetMinutes),
-  );
-}
-
-async function submitSetup(): Promise<void> {
-  if (mutating.value) return;
-  const parsed = parseCreditAmount(remainingDraft.value, unitFactor.value);
-  const resetAt = fromDatetimeLocalValue(resetDraft.value, CHINA_OFFSET_MINUTES);
-  if ("issue" in parsed) {
-    draftIssue.value = CREDIT_AMOUNT_ISSUE_KEYS[parsed.issue];
-    return;
-  }
-  if (!resetAt) {
-    draftIssue.value = CREDIT_DATE_ISSUE_KEY;
-    return;
-  }
-  draftIssue.value = null;
-  const remaining = parsed.amount;
-  const preset = presetId.value ? presetById(props.status.presets, presetId.value) : undefined;
-  const configuration = preset
-    ? configurationFromPreset(preset, resetAt)
-    : {
-      name: genericName.value.trim() || "credits",
-      currency: genericCurrency.value.trim() || "CNY",
-      creditsPerCurrency: genericFactor.value && genericFactor.value > 0 ? genericFactor.value : 1,
-      rates: rateDrafts.filter((rate) => rate.model.trim()),
-      monthly: {
-        amount: remaining,
-        nextResetAt: resetAt,
-        timezoneOffsetMinutes: CHINA_OFFSET_MINUTES,
-        renewalEndsAt: null,
-      },
-      sourceUrl: null,
-    };
-  try {
-    await store.configureCredits(props.accountId, props.binding, {
-      configuration,
-      initialBuckets: [initialMonthlyBucket(configuration, remaining, new Date(props.now).toISOString())],
-    });
-  } catch {
-    // Store keeps the last snapshot.
-  }
-}
-
-function openCalibrate(): void {
-  if (creditCalibrationBlock(meter.value)) return;
-  calibDrafts.splice(0, calibDrafts.length, ...activeBuckets.value.map((bucket) => ({
-    bucketId: bucket.id,
-    label: bucket.label,
-    remainingScaled: creditsToScaled(bucket.remaining, unitFactor.value),
-  })));
-  calibrateOpen.value = true;
-}
-
-function setCalibrate(open: boolean): void {
-  calibrateOpen.value = open;
-  if (!open) calibDrafts.splice(0, calibDrafts.length);
-}
-
-async function submitCalibrate(): Promise<void> {
-  if (mutating.value) return;
-  if (creditCalibrationBlock(meter.value)) return;
-  const balances = calibrationBalances(calibDrafts, unitFactor.value);
-  if (!balances) {
-    draftIssue.value = CREDIT_AMOUNT_ISSUE_KEYS.invalid;
-    return;
-  }
-  draftIssue.value = null;
-  try {
-    await store.calibrateCredits(props.accountId, props.binding, balances);
-    setCalibrate(false);
-  } catch {
-    // Keep the dialog for another attempt.
-  }
 }
 
 function fillTopup(amount: number): void {
@@ -718,45 +379,11 @@ async function submitTopup(): Promise<void> {
   }
 }
 
-function addRate(): void {
-  rateDrafts.push({
-    model: "",
-    inputPerMillion: 0,
-    outputPerMillion: 0,
-    cacheReadPerMillion: null,
-    cacheWritePerMillion: null,
-  });
-}
-
-function removeRate(index: number): void {
-  rateDrafts.splice(index, 1);
-}
-
 function reload(): void {
   void store.load(props.accountId, props.binding);
 }
 
-function openGenericSetup(): void {
-  genericOpen.value = true;
-  settingsOpen.value = true;
-  genericName.value = "";
-  genericCurrency.value = "CNY";
-  genericFactor.value = 1;
-  remainingDraft.value = null;
-  monthlyEnabled.value = false;
-  monthlyAmountDraft.value = null;
-  resetDraft.value = defaultResetLocal();
-  rateDrafts.splice(0, rateDrafts.length, {
-    model: "",
-    inputPerMillion: 0,
-    outputPerMillion: 0,
-    cacheReadPerMillion: null,
-    cacheWritePerMillion: null,
-  });
-}
-
 function openSettings(): void {
-  genericOpen.value = false;
   const view = meter.value;
   if (view) {
     genericName.value = view.configuration.name;
@@ -779,10 +406,6 @@ function openSettings(): void {
 
 function setSettings(open: boolean): void {
   settingsOpen.value = open;
-  if (!open) {
-    genericOpen.value = false;
-    if (props.setupRequested) emit("setup-closed");
-  }
 }
 
 function parsedMonthlyGrant(): { amount: number | null } | { issue: "missing" | "invalid" } {
@@ -820,32 +443,7 @@ async function submitSettings(): Promise<void> {
     return;
   }
   try {
-    if (!view) {
-      const remaining = parseCreditAmount(remainingDraft.value, unitFactor.value);
-      if ("issue" in remaining) {
-        draftIssue.value = CREDIT_AMOUNT_ISSUE_KEYS[remaining.issue];
-        return;
-      }
-      const built = buildInitialCreditConfigure({
-        name: genericName.value.trim() || "credits",
-        currency: genericCurrency.value.trim() || "CNY",
-        creditsPerCurrency: genericFactor.value && genericFactor.value > 0 ? genericFactor.value : 1,
-        rates,
-        remaining: remaining.amount,
-        monthlyEnabled: monthlyEnabled.value,
-        monthlyAmount: grant.amount,
-        nextResetAt: resetAt,
-        timezoneOffsetMinutes: CHINA_OFFSET_MINUTES,
-        sourceUrl: null,
-        startsAt: new Date(props.now).toISOString(),
-      });
-      if ("issue" in built) {
-        draftIssue.value = CREDIT_SETUP_ISSUE_KEYS[built.issue];
-        return;
-      }
-      draftIssue.value = null;
-      await store.configureCredits(props.accountId, props.binding, built);
-    } else {
+    if (view) {
       const configuration = buildCreditSettingsConfiguration(view.configuration, {
         name: genericName.value.trim() || view.configuration.name,
         currency: genericCurrency.value.trim() || view.configuration.currency,
@@ -887,11 +485,6 @@ watch(
   { immediate: true },
 );
 
-watch(() => props.setupRequested, (requested) => {
-    if (!requested || meter.value) return;
-    if (props.status.presets.length === 0) openGenericSetup();
-}, { immediate: true });
-
 watch(monthlyEnabled, (enabled) => {
   if (enabled && !resetDraft.value) resetDraft.value = defaultResetLocal();
 });
@@ -900,100 +493,10 @@ onBeforeUnmount(() => { clearDrafts(); });
 </script>
 
 <style scoped>
-.credit-meter {
-  display: grid;
-  gap: var(--ocg-space-sm);
-  min-width: 0;
-}
-
-.credit-meter__head,
-.credit-meter__actions,
-.credit-meter__quick {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--ocg-space-xs);
-}
-
-.credit-meter__head {
-  justify-content: space-between;
-}
-
-.credit-meter__source,
-.credit-meter__hint,
-.credit-meter p {
-  margin: 0;
-  color: var(--ocg-muted);
-  font-size: var(--ocg-font-xs);
-}
-
-.credit-meter__source {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--ocg-space-sm);
-}
-
-.credit-meter__source a {
-  color: inherit;
-  text-decoration: underline;
-}
-
-.credit-meter__datetime {
-  width: 100%;
-  min-height: 34px;
-  padding: 0 var(--ocg-space-sm);
-  border: 1px solid var(--ocg-border);
-  border-radius: var(--ocg-radius-sm);
-  background: var(--ocg-surface);
-  color: var(--ocg-ink);
-}
-
-.credit-meter__expired {
-  margin: 0;
-  padding-left: var(--ocg-space-lg);
-  color: var(--ocg-muted);
-  font-size: var(--ocg-font-xs);
-}
-
-.credit-meter__rate {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: var(--ocg-space-xs);
-  align-items: center;
-}
-
-.credit-meter__rate-field {
-  display: grid;
-  gap: var(--ocg-space-xs);
-  min-width: 0;
-  font-size: var(--ocg-font-xs);
-}
-
-.credit-meter__model { grid-column: 1 / 4; }
-.credit-meter__remove { grid-column: 4; align-self: end; }
-
-.credit-meter__amount {
-  display: flex;
-  align-items: center;
-  gap: var(--ocg-space-sm);
-  min-width: 0;
-}
-
-.credit-meter__amount :deep(.n-input-number) {
-  flex: 1 1 auto;
-  min-width: 0;
-}
-
-.credit-meter__setup {
-  display: grid;
-  gap: var(--ocg-space-sm);
-}
-
-@media (max-width: 640px) {
-  .credit-meter__rate {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-  .credit-meter__model { grid-column: 1; }
-  .credit-meter__remove { grid-column: 2; }
-}
+.credit-meter { display: grid; gap: var(--ocg-space-sm); min-width: 0; }
+.credit-meter__head, .credit-meter__actions, .credit-meter__amount { display: flex; align-items: center; gap: var(--ocg-space-sm); }
+.credit-meter__head { justify-content: space-between; }
+.credit-meter__source, .credit-meter__hint, .credit-meter__expired { margin: 0; color: var(--ocg-muted); font-size: var(--ocg-font-xs); }
+.credit-meter__datetime { width: 100%; padding: var(--ocg-space-sm); color: var(--ocg-ink); background: var(--ocg-surface); border: 1px solid var(--ocg-border); border-radius: var(--ocg-radius-sm); }
+.credit-meter__quick { margin-bottom: var(--ocg-space-md); }
 </style>

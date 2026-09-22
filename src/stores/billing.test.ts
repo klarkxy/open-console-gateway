@@ -612,3 +612,45 @@ test("a rejected credit calibration keeps the last good remaining and does not r
   assert.equal(store.byId["acc-1"]?.status?.credits?.pendingRequests, 2);
   assert.equal(calls.filter((call) => call.url.includes("/calibrate")).length, 1);
 });
+
+
+test("initialization retries read back a committed ledger without replaying initial balances", async () => {
+  setActivePinia(createPinia());
+  useControlPlaneStore().sync({ revision: 3, processGeneration: 99, pricingRevision: null });
+  const store = useBillingStore();
+  const calls = installDeferredFetch();
+  const input = { configuration: credits().configuration, initialBuckets: [] };
+  const first = store.initializeCredits("acc-1", "v1", input);
+  await waitForCalls(calls, 1);
+  calls[0]!.resolve(billingStatus());
+  await waitForCalls(calls, 2);
+  assert.equal(calls[1]!.method, "PUT");
+  assert.deepEqual(calls[1]!.body?.initialBuckets, []);
+  calls[1]!.reject(new TypeError("response lost"));
+  await assert.rejects(first);
+  const retry = store.initializeCredits("acc-1", "v1", input);
+  await waitForCalls(calls, 3);
+  calls[2]!.resolve(billingStatus({ credits: credits({ remaining: 123 }), revision: 4 }));
+  await retry;
+  assert.equal(calls.length, 3);
+  assert.equal(store.byId["acc-1"]?.status?.credits?.remaining, 123);
+});
+
+test("initialization cannot start its write after logout or rebinding during its read", async () => {
+  for (const transition of ["logout", "binding"] as const) {
+    setActivePinia(createPinia());
+    useControlPlaneStore().sync({ revision: 3, processGeneration: 99, pricingRevision: null });
+    const store = useBillingStore();
+    const calls = installDeferredFetch();
+    const pending = store.initializeCredits("acc-1", "v1", { configuration: credits().configuration, initialBuckets: [] });
+    await waitForCalls(calls, 1);
+    let reload: Promise<void> | undefined;
+    if (transition === "logout") store.clear();
+    else { reload = store.load("acc-1", "v2"); await waitForCalls(calls, 2); }
+    calls[0]!.resolve(billingStatus());
+    await assert.rejects(pending);
+    assert.ok(calls.every(call => call.method === "GET"));
+    if (reload) { calls[1]!.resolve(billingStatus({ credits: credits({ remaining: 456 }) })); await reload; }
+    assert.equal(store.byId["acc-1"]?.status?.credits?.remaining, transition === "logout" ? undefined : 456);
+  }
+});

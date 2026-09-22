@@ -11,7 +11,6 @@ import {
   billingPanelOverlayError,
   billingSurfaceKind,
   calibrationBalances,
-  cashCreditConfigureAvailable,
   cashRefreshKind,
   creditCalibrationBlock,
   CHINA_OFFSET_MINUTES,
@@ -286,15 +285,6 @@ test("billing surfaces follow the server model rather than a provider URL", () =
   assert.equal(cashRefreshKind(status({ model: "cash", cash: null })), "provider_usage");
   assert.equal(billingSurfaceKind(status({ model: "cash", cash: officialCash() })), "cash");
   assert.equal(cashRefreshKind(status({ model: "cash", cash: officialCash() })), "official_balance");
-  assert.equal(cashCreditConfigureAvailable(status({
-    model: "cash",
-    configurableCredits: true,
-    credits: null,
-  })), true);
-  assert.equal(cashCreditConfigureAvailable(status({
-    model: "cash",
-    configurableCredits: false,
-  })), false);
   assert.equal(billingSurfaceKind(status({ model: "quota" })), "quota");
   assert.equal(billingSurfaceKind(status({ credits: meter() })), "credits_meter");
   assert.equal(billingSurfaceKind(status({

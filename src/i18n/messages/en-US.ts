@@ -1330,7 +1330,9 @@ export const enUSMessages = {
   "添加": "Add",
   "点数每货币": "Credits per currency",
   "月度额度": "Monthly grant",
-  "积分计费": "Credit billing",
+  "本地积分估算": "Estimate credits locally",
+  "添加费率": "Add rate",
+  "Key 已保存，请重试额度初始化。": "Key saved. Retry credit setup.",
   "填写金额": "Enter an amount",
   "金额无效": "Amount is invalid",
   "日期无效": "Date is invalid"

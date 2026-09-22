@@ -252,6 +252,7 @@
       :managed-reason="managedRegistrationReason"
       :invite-missing="!opencodeInviteUrl"
       :create-busy="busy"
+      :setup-pending="!!pendingNewCredits"
       :platform-busy="platformMutating"
       :initial-option-id="addInitialOptionId"
       @register-managed="openManagedCreateModal"
@@ -263,6 +264,7 @@
     />
 
     <AccountFormModal
+      ref="accountFormRef"
       :show="showModal"
       :account="editingAccount"
       :is-cooling="editingAccount ? isCooling(editingAccount, now) : false"
@@ -441,7 +443,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from "vue";
 import {
   NAlert,
   NButton,
@@ -585,6 +587,9 @@ import ManagedAccountWizard from "../components/ManagedAccountWizard.vue";
 import AccountTransferModal from "../components/AccountTransferModal.vue";
 import AccountCredentialModal from "../components/AccountCredentialModal.vue";
 import IdentityCredentialCreateModal from "../components/IdentityCredentialCreateModal.vue";
+import { useBillingStore } from "../stores/billing.ts";
+import { billingBinding } from "../domain/billing.ts";
+import type { CreditSetupInput } from "../domain/credit-setup.ts";
 import PlatformAccountsSection from "../components/PlatformAccountsSection.vue";
 import PlatformKeyModelsModal from "../components/PlatformKeyModelsModal.vue";
 import type { PlatformAccountFormPayload } from "../components/PlatformAccountFormModal.vue";
@@ -641,6 +646,19 @@ watch(() => destinationsStore.loaded, loaded => { if (!loaded) accountViewSessio
 const createModalAccountId = ref<string | null>(null);
 const createModalExpectation = ref<MutationExpectation | null>(null);
 const createModalRef = ref<InstanceType<typeof IdentityCredentialCreateModal> | null>(null);
+const accountFormRef = ref<InstanceType<typeof AccountFormModal> | null>(null);
+const billingStore = useBillingStore();
+let pendingCreditCreate: { created: Awaited<ReturnType<typeof identitiesApi.createIdentityCredential>>; credits: CreditSetupInput } | null = null;
+let pendingCreditEdit: { account: Account; credits: CreditSetupInput } | null = null;
+const pendingNewCredits = ref<{ account: Account; credits: CreditSetupInput } | null>(null);
+watch(showCreateModal, show => { if (!show) pendingCreditCreate = null; });
+watch(showModal, show => { if (!show) pendingCreditEdit = null; });
+watch(() => billingStore.sessionEpoch, () => { pendingCreditCreate = null; pendingCreditEdit = null; pendingNewCredits.value = null; });
+
+async function initializeAccountCredits(account: Account, credits: CreditSetupInput): Promise<void> {
+  const binding = billingBinding(account.updated_at, accountInferenceEndpointUrl(account, identityForCard(account.id), providersStore.connections));
+  await billingStore.initializeCredits(account.id, binding, credits);
+}
 const showAddModal = ref(false);
 /** One-shot chooser preselection from the `add` deep link; cleared on close. */
 const addInitialOptionId = ref<string | null>(null);
@@ -1478,7 +1496,7 @@ async function onPatchBinding(payload: BindingPatchInput): Promise<void> {
   }
 }
 
-async function onCreateIdentityCredential(payload: IdentityCredentialCreateInput): Promise<void> {
+async function onCreateIdentityCredential(payload: IdentityCredentialCreateInput, credits: CreditSetupInput | null): Promise<void> {
   if (busy.value) return;
   const support = createModalSupport.value;
   const identityId = support?.identityId;
@@ -1490,12 +1508,22 @@ async function onCreateIdentityCredential(payload: IdentityCredentialCreateInput
   busy.value = true;
   try {
     const targetCardId = createModalCardId.value;
-    const created = await identitiesApi.createIdentityCredential(
+    const created = pendingCreditCreate?.created ?? await identitiesApi.createIdentityCredential(
       identityId,
       payload,
       createModalExpectation.value ?? undefined,
     );
     if (capturedSession !== accountViewSession) return;
+    if (credits || pendingCreditCreate) {
+      pendingCreditCreate ??= { created, credits: credits! };
+      createModalRef.value?.noteSaved();
+      await refreshAccountsAndIdentities();
+      if (capturedSession !== accountViewSession) return;
+      const account = accountsStore.byId.get(created.account_id);
+      if (!account) throw new Error(t("未找到指定账号，已清除链接参数"));
+      await initializeAccountCredits(account, pendingCreditCreate!.credits);
+      if (capturedSession !== accountViewSession) return;
+    }
     showCreateModal.value = false;
     createModalAccountId.value = null;
     createModalExpectation.value = null;
@@ -1514,6 +1542,12 @@ async function onCreateIdentityCredential(payload: IdentityCredentialCreateInput
     }
     message.success(t("Key 已添加"));
   } catch (error) {
+    if (capturedSession !== accountViewSession) return;
+    if (pendingCreditCreate) {
+      createModalRef.value?.noteSaved();
+      message.error(t("保存失败：{error}", { error: dashboardErrorDetail(error) }));
+      return;
+    }
     createModalRef.value?.noteFailure(error);
     if (await recoverCredentialMutationConflict(error)) return;
     if (isUncertainCreateFailure(error)) {
@@ -1727,7 +1761,7 @@ watch(showModal, (show) => {
 });
 
 watch(showAddModal, (show) => {
-  if (!show) addInitialOptionId.value = null;
+  if (!show) { addInitialOptionId.value = null; pendingNewCredits.value = null; }
 });
 
 async function createManagedAccount(): Promise<void> {
@@ -2123,6 +2157,8 @@ async function initializeAccounts() {
 }
 
 async function onFormSave(payload: AccountInput | AccountFormPayload) {
+  if (busy.value) return;
+  const capturedSession = accountViewSession;
   const editing = editingAccount.value;
   if (editing) {
     const update: AccountUpdate = {
@@ -2137,8 +2173,18 @@ async function onFormSave(payload: AccountInput | AccountFormPayload) {
     }
     busy.value = true;
     try {
-      const saved = await dashboardApi.updateAccount(editing.id, update);
+      const saved = pendingCreditEdit?.account ?? await dashboardApi.updateAccount(editing.id, update);
+      if (capturedSession !== accountViewSession) return;
       replaceAccount(saved);
+      const credits = (payload as AccountFormPayload).credits;
+      if (credits || pendingCreditEdit) {
+        pendingCreditEdit ??= { account: saved, credits: credits! };
+        accountFormRef.value?.noteSaved();
+        await nextTick();
+        if (capturedSession !== accountViewSession) return;
+        await initializeAccountCredits(saved, pendingCreditEdit!.credits);
+        if (capturedSession !== accountViewSession) return;
+      }
       const destRefreshed = await refreshDestinationProjection();
       if (!destRefreshed) notifyDestinationRefreshFailure();
       // purchase_date defines the monthly usage window and changing it clears
@@ -2148,17 +2194,32 @@ async function onFormSave(payload: AccountInput | AccountFormPayload) {
       message.success(t("账号已更新"));
       showModal.value = false;
     } catch (e) {
+      if (capturedSession !== accountViewSession) return;
+      if (pendingCreditEdit) {
+        accountFormRef.value?.noteSaved();
+        message.error(t("保存失败：{error}", { error: dashboardErrorDetail(e) }));
+        return;
+      }
       if (await recoverAccountMutationConflict(e)) return;
       message.error(t("保存失败：{error}", { error: dashboardErrorDetail(e) }));
     } finally {
       busy.value = false;
     }
   } else {
-    const input = accountCreateRequestInput(payload as AccountInput);
+    const { credits, ...accountPayload } = payload as AccountFormPayload;
+    const input = accountCreateRequestInput(accountPayload as AccountInput);
     busy.value = true;
     try {
-      const created = await dashboardApi.createAccount(input);
+      const created = pendingNewCredits.value?.account ?? await dashboardApi.createAccount(input);
+      if (capturedSession !== accountViewSession) return;
       addAccount(created);
+      if (credits || pendingNewCredits.value) {
+        pendingNewCredits.value ??= { account: created, credits: credits! };
+        await nextTick();
+        if (capturedSession !== accountViewSession) return;
+        await initializeAccountCredits(created, pendingNewCredits.value.credits);
+        if (capturedSession !== accountViewSession) return;
+      }
       message.success(t("账号已添加"));
       const destRefreshed = await refreshDestinationProjection("created_refresh_failed");
       if (!destRefreshed) notifyDestinationRefreshFailure();
@@ -2173,6 +2234,11 @@ async function onFormSave(payload: AccountInput | AccountFormPayload) {
       // only a successful create closes it, so a failed save keeps the draft.
       showAddModal.value = false;
     } catch (e) {
+      if (capturedSession !== accountViewSession) return;
+      if (pendingNewCredits.value) {
+        message.error(t("Key 已保存，请重试额度初始化。"));
+        return;
+      }
       if (await recoverAccountMutationConflict(e)) return;
       message.error(t("保存失败：{error}", { error: dashboardErrorDetail(e) }));
     } finally {

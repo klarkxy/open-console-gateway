@@ -10,6 +10,7 @@
     <n-form
       ref="formRef"
       :model="form"
+      :disabled="busy || savedForSetup"
       :rules="rules"
       label-placement="top"
     >
@@ -282,6 +283,8 @@
           />
         </n-form-item>
       </div>
+      <AccountCreditSetup v-if="show && account && !endpointLocked && (isDynamicPlan || isCustomConnectionEdit)" :account="account" :disabled="busy || savedForSetup" @change="creditSetup = $event" />
+      <CreditSetupFields v-else-if="show && !account && createCreditPresets" :key="effectivePlan?.provider_id" :presets="createCreditPresets" :disabled="busy || setupPending" @change="creditSetup = $event" />
     </n-form>
     </div>
     <template #footer>
@@ -297,7 +300,7 @@
         </n-button>
         <n-space>
           <n-button v-if="!embedded" @click="$emit('update:show', false)">{{ t("取消") }}</n-button>
-          <n-button type="primary" :loading="busy" @click="handleSave">{{ t("保存") }}</n-button>
+          <n-button type="primary" :loading="busy" :disabled="!creditSetup.valid && !savedForSetup" @click="handleSave">{{ savedForSetup ? t("重试") : t("保存") }}</n-button>
         </n-space>
       </div>
     </template>
@@ -342,8 +345,13 @@ import {
 } from "../domain/custom-account.ts";
 import { protocolDisplayName } from "../domain/provider-contracts.ts";
 import FormSurface from "./FormSurface.vue";
+import AccountCreditSetup from "./AccountCreditSetup.vue";
+import CreditSetupFields from "./CreditSetupFields.vue";
+import { useProvidersStore } from "../stores/providers.ts";
+import type { CreditSetupInput } from "../domain/credit-setup.ts";
 
 export type AccountFormPayload = {
+  credits?: CreditSetupInput | null;
   name: string;
   username: string;
   key?: string;
@@ -400,6 +408,7 @@ const props = withDefaults(defineProps<{
   externalError?: string;
   /** Inline rendering inside the Add Account chooser instead of a modal. */
   embedded?: boolean;
+  setupPending?: boolean;
 }>(), {
   account: null,
   isCooling: false,
@@ -412,6 +421,7 @@ const props = withDefaults(defineProps<{
   titleOverride: "",
   externalError: "",
   embedded: false,
+  setupPending: false,
 });
 
 const emit = defineEmits<{
@@ -426,6 +436,16 @@ const formElement = ref<HTMLElement | null>(null);
 const form = ref<FormModel>(blankForm());
 const nameWasEdited = ref(false);
 const formError = ref("");
+const providers = useProvidersStore();
+const createCreditPresets = computed(() => !props.account && !props.platformParent
+  ? providers.connections?.find(row => row.legacy.kind === "dynamic_provider" && row.legacy.id === effectivePlan.value?.provider_id)?.credit_presets ?? null : null);
+const creditSetup = ref<{ input: CreditSetupInput | null; valid: boolean }>({ input: null, valid: true });
+const locallySaved = ref(false);
+const savedForSetup = computed(() => locallySaved.value || props.setupPending);
+function noteSaved(): void { locallySaved.value = true; formError.value = t("Key 已保存，请重试额度初始化。"); }
+defineExpose({ noteSaved });
+watch(() => [props.show, props.account?.id, props.plan?.provider_id], () => { locallySaved.value = false; creditSetup.value = { input: null, valid: true }; });
+watch(() => props.setupPending, pending => { if (pending) formError.value = t("Key 已保存，请重试额度初始化。"); });
 const discoveringModels = ref(false);
 const discoveryError = ref("");
 const discoverySuccess = ref("");
@@ -827,7 +847,7 @@ async function discoverModels() {
 
 async function handleSave() {
   // The parent's mutation owns `busy`; never submit twice for one intent.
-  if (props.busy) return;
+  if (props.busy || (!creditSetup.value.valid && !savedForSetup.value)) return;
   try {
     await formRef.value?.validate();
   } catch {
@@ -840,6 +860,7 @@ async function handleSave() {
 
   if (isEdit.value) {
     const payload: AccountFormPayload = {
+      credits: creditSetup.value.input,
       name: form.value.name.trim(),
       username: form.value.username.trim(),
       notes: form.value.notes,
@@ -889,6 +910,7 @@ async function handleSave() {
 
   try {
     const payload = buildCreateAccountPayload(plan, values);
+    if (createCreditPresets.value) (payload as AccountFormPayload).credits = creditSetup.value.input;
     if (hasField("ollama_billing_tier") && form.value.ollamaBillingTier) {
       payload.ollama_billing_tier = form.value.ollamaBillingTier;
     }

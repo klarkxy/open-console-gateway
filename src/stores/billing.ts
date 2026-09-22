@@ -323,6 +323,26 @@ export const useBillingStore = defineStore("billing", () => {
     }
   }
 
+  async function initializeCredits(accountId: string, binding: string, input: {
+    configuration: CreditConfiguration; initialBuckets: CreditBucket[];
+  }): Promise<BillingStatus> {
+    const token = begin(accountId, binding, { loading: false, mutating: true, clearError: true });
+    try {
+      const current = await billingApi.status(accountId);
+      if (!owns(token)) throw new Error("billing is not current");
+      applyStatus(accountId, current);
+      // A previous save may have succeeded despite a lost response. Never
+      // replay initial balances or replace an already configured ledger.
+      if (current.credits) return current;
+      return await sendMutation(token, accountId, expected => billingApi.configureCredits(accountId, input, expected));
+    } catch (error) {
+      if (owns(token)) write(accountId, { error: clientErrorFrom(error) });
+      throw error;
+    } finally {
+      if (owns(token)) write(accountId, { mutating: false, loading: false });
+    }
+  }
+
   async function calibrateCredits(
     accountId: string,
     binding: string,
@@ -506,6 +526,7 @@ export const useBillingStore = defineStore("billing", () => {
     refreshUsage,
     refreshCash,
     configureCredits,
+    initializeCredits,
     calibrateCredits,
     grantCredits,
     disableCredits,

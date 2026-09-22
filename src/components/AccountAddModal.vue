@@ -170,6 +170,7 @@
               :show="true"
               :account="null"
               :busy="createBusy"
+              :setup-pending="setupPending"
               :plan="selectedPlanOption.plan"
               :catalog="catalog ?? null"
               @save="(payload) => emit('saveAccount', payload)"
@@ -303,6 +304,7 @@ const props = defineProps<{
   catalogLoading: boolean;
   /** V4 connection projection; unused built-ins stay out of Existing connections. */
   connections?: readonly Connection[] | null;
+  setupPending?: boolean;
   managedAvailable: boolean;
   managedReason: string;
   inviteMissing: boolean;
@@ -498,7 +500,7 @@ const currentVariantHost = computed(() => {
  * success can never land in a different form or duplicate a write.
  */
 const interactionLocked = computed(() => (
-  props.createBusy || props.platformBusy || embeddedFormBusy.value
+  props.createBusy || props.platformBusy || embeddedFormBusy.value || props.setupPending
 ));
 
 function setMode(next: ChooserMode): void {
@@ -647,7 +649,7 @@ function onOuterUpdateShow(value: boolean): void {
     return;
   }
   // Failed saves keep the draft; in-flight work keeps the modal open.
-  if (interactionLocked.value) return;
+  if (props.createBusy || props.platformBusy || embeddedFormBusy.value) return;
   emit("update:show", false);
 }
 

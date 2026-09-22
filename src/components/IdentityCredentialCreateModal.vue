@@ -76,6 +76,13 @@
           :aria-label="t('选择要共享额度的 Key')"
         />
       </n-form-item>
+      <CreditSetupFields
+        v-if="creditPresets"
+        :key="`${show}:${draft.connectionId}`"
+        :presets="creditPresets"
+        :disabled="fieldsLocked"
+        @change="creditSetup = $event"
+      />
     </n-form>
 
     <template #footer>
@@ -89,7 +96,7 @@
           :disabled="busy || !!unsupportedReason || !canSubmit"
           @click="submit"
         >
-          {{ lastFailure === "uncertain" ? t("重试") : t("添加 Key") }}
+          {{ saved || lastFailure === "uncertain" ? t("重试") : t("添加 Key") }}
         </n-button>
       </n-space>
     </template>
@@ -125,6 +132,8 @@ import {
 } from "../domain/account-credential.ts";
 import { t, type MessageKey } from "../i18n/index.ts";
 import FormSurface from "./FormSurface.vue";
+import CreditSetupFields from "./CreditSetupFields.vue";
+import type { CreditSetupInput } from "../domain/credit-setup.ts";
 
 const props = defineProps<{
   show: boolean;
@@ -137,7 +146,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   "update:show": [show: boolean];
-  create: [payload: IdentityCredentialCreateInput];
+  create: [payload: IdentityCredentialCreateInput, credits: CreditSetupInput | null];
 }>();
 
 const draft = ref<CredentialCreateDraft>(emptyCreateDraft());
@@ -146,6 +155,10 @@ const secretInputRef = ref<InputInst | null>(null);
 const operationId = ref<string | null>(null);
 const lastSignature = ref<string | null>(null);
 const lastFailure = ref<CredentialCreateFailureKind>("none");
+const saved = ref(false);
+const creditSetup = ref<{ input: CreditSetupInput | null; valid: boolean }>({ input: null, valid: true });
+const creditPresets = computed(() => supportedConnections.value.find(row => row.id === draft.value.connectionId)?.credit_presets ?? null);
+watch(() => draft.value.connectionId, () => { creditSetup.value = { input: null, valid: !creditPresets.value?.length }; }, { flush: "sync" });
 
 const supportedConnections = computed(() => (
   props.connections.filter(connectionAllowsIdentityCredentialCreate)
@@ -174,9 +187,10 @@ const shareOptions = computed(() => (
 ));
 
 const draftLocked = computed(() => lastFailure.value === "uncertain");
-const fieldsLocked = computed(() => props.busy || draftLocked.value);
+const fieldsLocked = computed(() => props.busy || draftLocked.value || saved.value);
 
 const canSubmit = computed(() => {
+  if (creditPresets.value && !creditSetup.value.valid) return false;
   if (!draft.value.secret.trim() || !draft.value.connectionId.trim()) return false;
   if (draft.value.sharingKind === "shared") return draft.value.shareCredentialId.trim().length > 0;
   return true;
@@ -188,6 +202,8 @@ function hydrate(): void {
   operationId.value = null;
   lastSignature.value = null;
   lastFailure.value = "none";
+  saved.value = false;
+  creditSetup.value = { input: null, valid: !creditPresets.value?.length };
 }
 
 function setVisible(show: boolean): void {
@@ -202,7 +218,7 @@ function setSharingKind(value: string | number): void {
 }
 
 function submit(): void {
-  if (props.busy || props.unsupportedReason) return;
+  if (props.busy || props.unsupportedReason || !canSubmit.value) return;
   formError.value = "";
   try {
     const payload = buildCreatePayload(
@@ -218,7 +234,7 @@ function submit(): void {
     });
     operationId.value = nextId;
     lastSignature.value = signature;
-    emit("create", { ...payload, operationId: nextId });
+    emit("create", { ...payload, operationId: nextId }, creditPresets.value ? creditSetup.value.input : null);
   } catch (error) {
     formError.value = t(credentialEditorIssueKey(error));
   }
@@ -231,7 +247,11 @@ function noteFailure(error: unknown): void {
   }
 }
 
-defineExpose({ noteFailure });
+function noteSaved(): void {
+  saved.value = true;
+  formError.value = t("Key 已保存，请重试额度初始化。");
+}
+defineExpose({ noteFailure, noteSaved });
 
 watch(() => props.show, (show) => {
   if (!show) {

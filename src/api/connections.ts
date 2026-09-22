@@ -87,6 +87,7 @@ export interface Connection {
   legacy: LegacyIdentity;
   display_family: string | null;
   offering: OfferingKind;
+  credit_presets?: import("./billing.ts").CreditPreset[] | null;
 }
 
 export interface OnboardingCommitView {
@@ -155,6 +156,7 @@ export function presentConnection(value: ConnectionSummary): Connection {
     legacy: presentLegacy(value.legacy),
     display_family: value.displayFamily,
     offering: value.offering,
+    credit_presets: value.creditPresets ?? null,
   };
 }
 

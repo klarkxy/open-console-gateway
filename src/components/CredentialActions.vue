@@ -35,7 +35,7 @@
   </div>
 
   <div
-    v-if="manualUsageCalibration && accountIsReady(account) && edits"
+    v-if="(hasCreditMeter || (manualUsageCalibration && edits)) && accountIsReady(account)"
     :class="actionClass('secondary')"
   >
     <n-popover
@@ -43,8 +43,9 @@
       placement="bottom-end"
       :show-arrow="false"
       :width="320"
+      :show="calibrationOpen"
       style="max-width: calc(100vw - 64px)"
-      @update:show="(show: boolean) => show && emit('usage-editor-open')"
+      @update:show="setCalibrationOpen"
     >
       <template #trigger>
         <n-tooltip trigger="hover">
@@ -54,7 +55,7 @@
               quaternary
               size="small"
               :aria-label="t('校准用量')"
-              :disabled="!usageEditorAvailable"
+              :disabled="hasCreditMeter ? creditCalibrationDisabled : !usageEditorAvailable"
             >
               <template #icon><n-icon :component="EditOutlined" /></template>
             </n-button>
@@ -63,7 +64,16 @@
         </n-tooltip>
       </template>
 
+      <CreditCalibrationEditor
+        v-if="hasCreditMeter && calibrationOpen"
+        :account-id="account.id"
+        :binding="billing.byId[account.id]!.boundVersion"
+        :status="billingStatus!"
+        :now="now"
+        @saved="calibrationOpen = false"
+      />
       <AccountUsageEditor
+        v-else-if="!hasCreditMeter"
         :account="account"
         :usage="usage"
         :limits="limits"
@@ -121,7 +131,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref, watch } from "vue";
 import {
   NButton,
   NDropdown,
@@ -149,12 +159,13 @@ import { accountMenuLabelKey } from "../views/account-status-text.ts";
 import { accountCapabilities } from "../domain/account-capabilities.ts";
 import { findPlanDefinition } from "../domain/plans.ts";
 import type { AccountUsageEdits, UsageLimitView } from "../domain/useAccountUsage.ts";
-import { billingManualCalibration } from "../domain/billing.ts";
+import { billingManualCalibration, creditCalibrationBlock, partitionCreditBuckets } from "../domain/billing.ts";
 import { t } from "../i18n/index.ts";
 import { useBillingStore } from "../stores/billing.ts";
 import { accountInferenceEndpointUrl, officialBalanceSupported } from "../domain/upstream-balance.ts";
 import type { Connection } from "../api/connections.ts";
 import AccountUsageEditor from "./AccountUsageEditor.vue";
+import CreditCalibrationEditor from "./CreditCalibrationEditor.vue";
 
 const props = withDefaults(
   defineProps<{
@@ -199,6 +210,16 @@ const billing = useBillingStore();
 const capabilities = computed(() => accountCapabilities(props.account, props.catalog));
 const plan = computed(() => findPlanDefinition(props.account.provider_id, props.catalog));
 const billingStatus = computed(() => billing.byId[props.account.id]?.status ?? null);
+const calibrationOpen = ref(false);
+const hasCreditMeter = computed(() => Boolean(billingStatus.value?.credits));
+const creditCalibrationDisabled = computed(() => Boolean(billing.byId[props.account.id]?.mutating)
+  || Boolean(creditCalibrationBlock(billingStatus.value?.credits))
+  || partitionCreditBuckets(billingStatus.value?.credits?.buckets ?? [], props.now).active.length === 0);
+function setCalibrationOpen(show: boolean): void {
+  calibrationOpen.value = show;
+  if (show && !hasCreditMeter.value) emit("usage-editor-open");
+}
+watch(() => [props.account.id, props.account.updated_at, billing.sessionEpoch], () => { calibrationOpen.value = false; });
 const manualUsageCalibration = computed(() => {
   if (billingStatus.value) return billingManualCalibration(billingStatus.value);
   return plan.value?.manual_usage_calibration ?? false;

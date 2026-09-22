@@ -283,3 +283,9 @@ test("connectionsApi.commitOnboarding publishes nested V4 CAS tokens", async () 
   assert.equal(control.processGeneration, 11);
   assert.equal(control.pricingRevision, "p3");
 });
+
+
+test("connection setup distinguishes unsupported from configurable without presets", () => {
+  assert.equal(presentConnection(summary()).credit_presets, null);
+  assert.deepEqual(presentConnection(summary({ creditPresets: [] })).credit_presets, []);
+});

@@ -257,10 +257,6 @@ export function cashRefreshKind(status: BillingStatus): CashRefreshKind {
   return status.cash ? "official_balance" : "provider_usage";
 }
 
-export function cashCreditConfigureAvailable(status: BillingStatus): boolean {
-  return status.model === "cash" && status.configurableCredits && !status.credits;
-}
-
 export function billingManualCalibration(status: BillingStatus): boolean {
   if (!status.manualCalibration) return false;
   if (status.credits) return false;
