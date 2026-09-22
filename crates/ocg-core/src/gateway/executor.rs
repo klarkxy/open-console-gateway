@@ -270,12 +270,11 @@ impl GatewayExecutor {
                 .routes
                 .iter()
                 .map(|route| {
-                    crate::gateway::forwarder::capture_execution_pricing(
+                    crate::gateway::attempt_pricing::capture_execution_pricing(
                         &state,
                         &route.routing.account,
                         route.routing.adapter,
                         &route.plan,
-                        &trace,
                         snapshots.pricing.clone(),
                     )
                 })

@@ -1,4 +1,5 @@
 pub mod attempt;
+pub(crate) mod attempt_pricing;
 pub mod classify;
 pub mod diagnostics;
 pub mod executor;

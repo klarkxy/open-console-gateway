@@ -1,4 +1,8 @@
 use super::*;
+use crate::gateway::attempt_pricing::{
+    bind_official_execution_price, bind_platform_attempt_price, capture_execution_pricing,
+};
+use crate::kernel::pricing::PricingSnapshot;
 
 fn install_test_credits(state: &CoreState, account: &Account) {
     use crate::billing_types::{CreditBucket, CreditBucketKind, CreditConfiguration, CreditRate};
@@ -284,18 +288,6 @@ fn mixed_sse_line_endings_keep_the_first_error_terminal() {
     assert!(state.buf.is_empty());
 }
 
-#[test]
-fn platform_media_and_service_tiers_do_not_use_plain_text_rates() {
-    assert!(!platform_request_has_variable_cost(
-        br#"{"messages":[{"role":"user","content":"hello"}]}"#,
-        None
-    ));
-    assert!(platform_request_has_variable_cost(br#"{"messages":[{"content":[{"type":"image_url","image_url":{"url":"https://example.test/a.png"}}]}]}"#,None));
-    assert!(platform_request_has_variable_cost(
-        br#"{"input":"hello"}"#,
-        Some("priority")
-    ));
-}
 use crate::crypto::{KeyCipher, StaticKeyCipher};
 use crate::db::Database;
 use crate::gateway::diagnostics::RequestTrace;
@@ -453,56 +445,6 @@ fn pinned_group() -> PlatformGroup {
     }
 }
 
-#[test]
-fn platform_attempt_rejects_old_key_or_endpoint_and_keeps_billed_row() {
-    let (dir, state) = test_state("platform-identity");
-    let account = custom_account(&state);
-    persist_custom(&state, &account);
-    let mut official = billable_price();
-    official.official_reference = true;
-    link_with_snapshot(
-        &state,
-        pinned_group(),
-        snapshot(vec![billable_price(), official], false),
-    );
-    // Linking rewrites the Key's endpoint to the parent-owned site root, so
-    // the attempt identity check compares against that root.
-    assert!(matches!(
-        platform_price_for_attempt(
-            &state,
-            &(&account).into(),
-            UPSTREAM,
-            Some("https://api.example.com")
-        ),
-        Some(PlatformAttemptPrice::Frozen(_))
-    ));
-    assert!(matches!(
-        platform_price_for_attempt(
-            &state,
-            &(&account).into(),
-            UPSTREAM,
-            Some("https://old.example/v1/chat/completions")
-        ),
-        Some(PlatformAttemptPrice::Unknown { .. })
-    ));
-    state
-        .db
-        .lock()
-        .update_account(
-            &account.id,
-            &crate::models::AccountUpdate::default(),
-            Some("new-key-cipher"),
-            None,
-        )
-        .unwrap();
-    assert!(matches!(
-        platform_price_for_attempt(&state, &(&account).into(), UPSTREAM, None),
-        Some(PlatformAttemptPrice::Unknown { .. })
-    ));
-    drop(state);
-    let _ = fs::remove_dir_all(dir);
-}
-
 fn attempt_context(upstream: &str) -> ForwardAttemptContext {
     ForwardAttemptContext {
         trace: RequestTrace::new(),
@@ -541,7 +483,7 @@ fn bind_for(
     let pricing = bind_platform_attempt_price(
         state,
         &(account).into(),
-        &mut context,
+        upstream,
         RequestPricingSnapshot::for_account(
             state,
             &(account).into(),
@@ -550,6 +492,7 @@ fn bind_for(
         ),
         None,
     );
+    context.attach_pricing(&pricing);
     (pricing, context)
 }
 
@@ -2211,17 +2154,15 @@ fn official_api_attempt_pricing_is_native_frozen_and_never_attaches_to_foreign_r
             Some(amount)
         );
         let mut positive = attempt_context(model);
-        assert!(matches!(
-            bind_official_attempt_price(
-                &state,
-                &(&account).into(),
-                &plan,
-                std::slice::from_ref(&runtime),
-                &mut positive,
-                RequestPricingSnapshot::Unpriced
-            ),
-            RequestPricingSnapshot::OfficialApi(_)
-        ));
+        let bound = bind_official_attempt_price(
+            &state,
+            &(&account).into(),
+            &plan,
+            std::slice::from_ref(&runtime),
+            RequestPricingSnapshot::Unpriced,
+        );
+        assert!(matches!(bound, RequestPricingSnapshot::OfficialApi(_)));
+        positive.attach_pricing(&bound);
         assert!(positive.official_price.is_some());
         for endpoint in [
             "https://attacker.test/chat/completions",
@@ -2231,14 +2172,13 @@ fn official_api_attempt_pricing_is_native_frozen_and_never_attaches_to_foreign_r
                 endpoint_url: endpoint.into(),
                 auth_kind: ocg_domain::dynamic::DynamicAuthKind::Bearer,
             });
-            let mut context = attempt_context(model);
+            let context = attempt_context(model);
             assert!(matches!(
                 bind_official_attempt_price(
                     &state,
                     &(&account).into(),
                     &plan,
                     std::slice::from_ref(&runtime),
-                    &mut context,
                     RequestPricingSnapshot::Unpriced
                 ),
                 RequestPricingSnapshot::Unpriced
@@ -2257,7 +2197,6 @@ fn official_api_attempt_pricing_is_native_frozen_and_never_attaches_to_foreign_r
                 &(&account).into(),
                 &plan,
                 std::slice::from_ref(&runtime),
-                &mut context,
                 RequestPricingSnapshot::Unpriced
             ),
             RequestPricingSnapshot::Unpriced
@@ -2324,7 +2263,7 @@ async fn forward_request(
         plan,
     )
     .unwrap();
-    let pricing = capture_execution_pricing(state, &execution, adapter, plan, trace, pricing);
+    let pricing = capture_execution_pricing(state, &execution, adapter, plan, pricing);
     super::forward_request(
         client,
         route,
@@ -2351,7 +2290,6 @@ fn bind_official_attempt_price(
     account: &ExecutionCredential,
     plan: &RequestPlan,
     dynamics: &[crate::dynamic::DynamicProviderRuntime],
-    context: &mut ForwardAttemptContext,
     original: RequestPricingSnapshot,
 ) -> RequestPricingSnapshot {
     let mut account = account.clone();
@@ -2359,7 +2297,7 @@ fn bind_official_attempt_price(
         .iter()
         .find(|d| d.id == account.provider_id)
         .and_then(crate::official_api::kind_for_runtime);
-    super::bind_official_execution_price(state, &account, plan, context, original)
+    bind_official_execution_price(state, &account, plan, original)
 }
 
 fn frozen_test_plan(
