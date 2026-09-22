@@ -9,7 +9,11 @@
  * matching `connections.ts`.
  */
 
-import { dashboardV4 } from "./dashboard-v4.ts";
+import {
+  dashboardV4,
+  type DestinationCatalogUpdate,
+  type HttpProtocolRouteDto,
+} from "./dashboard-v4.ts";
 import type { WithoutExpectation } from "./dashboard-v3.ts";
 import type { MutationExpectation } from "./generated/dashboard-v3.ts";
 import { useControlPlaneStore } from "../stores/controlPlane.ts";
@@ -116,6 +120,14 @@ export interface Destination {
   observer_credential_id: string | null;
   plan: DestinationPlan | null;
   protocols: ProtocolDto[];
+  protocol_routes?: DestinationProtocolRoute[];
+}
+
+/** One configured HTTP protocol route on the destination view model. */
+export interface DestinationProtocolRoute {
+  protocol: ProtocolDto;
+  endpoint_url: string;
+  auth_scheme: AuthSchemeDto;
 }
 
 export interface DestinationCredentialGrants {
@@ -205,7 +217,23 @@ export interface RoutingCardListSnapshot {
 export type RoutingCardLayoutInput = WithoutExpectation<RoutingCardUpdate>;
 
 /** Presented body of a destination PATCH; the CAS pair is supplied per attempt. */
-export type DestinationPatchInput = WithoutExpectation<DestinationPatchRequest>;
+export type DestinationPatchInput = Omit<WithoutExpectation<DestinationPatchRequest>, "models"> & {
+  protocolRoutes?: HttpProtocolRouteDto[];
+  models: Array<DestinationPatchRequest["models"][number] & {
+    protocols?: ProtocolDto[];
+    preferred?: ProtocolDto;
+  }>;
+};
+
+export type DestinationCatalogUpdateInput = DestinationCatalogUpdate;
+
+export interface DestinationModelTestView {
+  public_model: string;
+  protocol: ProtocolDto;
+  ok: boolean;
+  error: string | null;
+  expectation: MutationExpectation;
+}
 
 export interface DestinationPatchView {
   destination: Destination;
@@ -299,6 +327,16 @@ function presentCatalogModel(value: CatalogModelDto): DestinationCatalogModel {
   };
 }
 
+function presentProtocolRoutes(value: DestinationDto): DestinationProtocolRoute[] {
+  const routes = (value as DestinationDto & { protocolRoutes?: HttpProtocolRouteDto[] }).protocolRoutes;
+  if (!Array.isArray(routes)) return [];
+  return routes.map((route) => ({
+    protocol: route.protocol,
+    endpoint_url: route.endpointUrl,
+    auth_scheme: route.authScheme,
+  }));
+}
+
 export function presentDestination(value: DestinationDto): Destination {
   return {
     adapter: value.adapter,
@@ -315,6 +353,7 @@ export function presentDestination(value: DestinationDto): Destination {
     observer_credential_id: value.observerCredentialId,
     plan: presentPlan(value.plan),
     protocols: [...value.protocols],
+    protocol_routes: presentProtocolRoutes(value),
   };
 }
 
@@ -507,6 +546,57 @@ async function fetchCredentialSnapshot(): Promise<CredentialListSnapshot> {
 }
 
 export const destinationsApi = {
+  refreshCatalog: async (id: string, expectation?: MutationExpectation) => {
+    const value = await withCas((tokens) => dashboardV4.refreshDestinationCatalog(id, tokens), expectation);
+    return {
+      destination: presentDestination(value.destination),
+      addedCount: value.addedCount,
+      truncated: value.truncated,
+      expectation: {
+        expectedRevision: value.revision.revision,
+        processGeneration: value.revision.processGeneration,
+      },
+    };
+  },
+  updateCatalog: async (
+    id: string,
+    input: DestinationCatalogUpdateInput,
+    expectation?: MutationExpectation,
+  ): Promise<DestinationPatchView> => {
+    const value = await withCas(
+      (tokens) => dashboardV4.updateDestinationCatalog(id, input, tokens),
+      expectation,
+    );
+    return {
+      destination: presentDestination(value.destination),
+      credentials: value.credentials.map(presentDestinationCredential),
+      expectation: {
+        expectedRevision: value.revision.revision,
+        processGeneration: value.revision.processGeneration,
+      },
+    };
+  },
+  testModel: async (
+    id: string,
+    publicModel: string,
+    protocol: ProtocolDto,
+    expectation?: MutationExpectation,
+  ): Promise<DestinationModelTestView> => {
+    const value = await withCas(
+      (tokens) => dashboardV4.testDestinationModel(id, publicModel, protocol, tokens),
+      expectation,
+    );
+    return {
+      public_model: value.publicModel,
+      protocol: value.protocol,
+      ok: value.ok,
+      error: value.error ?? null,
+      expectation: {
+        expectedRevision: value.revision.revision,
+        processGeneration: value.revision.processGeneration,
+      },
+    };
+  },
   list: async (): Promise<Destination[]> => {
     const snapshot = await fetchDestinationSnapshot();
     return snapshot.destinations;

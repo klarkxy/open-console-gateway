@@ -171,7 +171,7 @@ test("legacy Custom API discovers into the account model list", () => {
   );
 });
 
-test("catalog merge keeps existing enablement and defaults new rows off", () => {
+test("catalog merge keeps existing enablement and defaults new rows on", () => {
   const merged = mergeDiscoveredCatalogModels(
     [{
       enabled: true,
@@ -187,7 +187,7 @@ test("catalog merge keeps existing enablement and defaults new rows off", () => 
   assert.equal(merged.added, 1);
   assert.equal(merged.catalog[0]?.enabled, true);
   assert.equal(merged.catalog[1]?.public_model, "step-5-preview");
-  assert.equal(merged.catalog[1]?.enabled, false);
+  assert.equal(merged.catalog[1]?.enabled, true);
 });
 
 test("account capability merge keeps curated rows and appends discoveries", () => {

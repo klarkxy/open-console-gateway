@@ -8,6 +8,8 @@ import type {
 import type { ConnectionEndpoint } from "../api/connections.ts";
 import type { MessageKey } from "../i18n/index.ts";
 import { customEndpointUrlIssue } from "./custom-account.ts";
+import { MAX_HTTP_PROTOCOL_ROUTES } from "./destination-catalog.ts";
+import type { ProviderPreset } from "./provider-presets.ts";
 
 /**
  * Edit planning for configurable HTTP destinations (dynamic providers and
@@ -22,6 +24,14 @@ export interface DestinationModelDraft {
   upstream_model: string;
   /** Null inherits the connection endpoint/protocol. */
   upstream_override: { protocol: ProtocolDto; endpoint_url: string } | null;
+  protocols?: ProtocolDto[];
+  preferred?: ProtocolDto | null;
+}
+
+export interface DestinationProtocolRouteDraft {
+  protocol: ProtocolDto | "";
+  endpoint_url: string;
+  auth_scheme: AuthSchemeDto;
 }
 
 export interface DestinationEditDraft {
@@ -30,6 +40,7 @@ export interface DestinationEditDraft {
   endpoint_url: string;
   auth_scheme: AuthSchemeDto;
   upstream_protocol: ProtocolDto | "";
+  protocol_routes: DestinationProtocolRouteDraft[];
   models: DestinationModelDraft[];
 }
 
@@ -48,7 +59,13 @@ export type DestinationEditIssue =
   | "missing_override_endpoint"
   | "invalid_override_endpoint"
   | "override_endpoint_not_http"
-  | "override_endpoint_with_credentials";
+  | "override_endpoint_with_credentials"
+  | "missing_route_endpoint"
+  | "invalid_route_endpoint"
+  | "route_endpoint_not_http"
+  | "route_endpoint_with_credentials"
+  | "duplicate_protocol_route"
+  | "too_many_protocol_routes";
 
 export const DESTINATION_EDIT_ISSUE_KEYS = {
   immutable_destination: "此连接由系统托管，不能在此编辑",
@@ -66,6 +83,12 @@ export const DESTINATION_EDIT_ISSUE_KEYS = {
   invalid_override_endpoint: "覆盖的上游地址格式无效",
   override_endpoint_not_http: "覆盖的上游地址必须是 http:// 或 https:// URL",
   override_endpoint_with_credentials: "覆盖的上游地址不能包含用户名或密码",
+  missing_route_endpoint: "填写协议地址",
+  invalid_route_endpoint: "协议地址格式无效",
+  route_endpoint_not_http: "协议地址必须是 http:// 或 https:// URL",
+  route_endpoint_with_credentials: "协议地址不能包含用户名或密码",
+  duplicate_protocol_route: "每个上游协议只能配置一条地址",
+  too_many_protocol_routes: "最多三条协议地址",
 } as const satisfies Record<DestinationEditIssue, MessageKey>;
 
 export class DestinationEditError extends Error {
@@ -85,6 +108,12 @@ export function isDestinationEditable(
     && !destination.capabilities.observer;
 }
 
+export function isDestinationCatalogRefreshable(
+  destination: Pick<Destination, "adapter" | "capabilities">,
+): boolean {
+  return isDestinationEditable(destination) && destination.capabilities.discoverable_models;
+}
+
 /** The server refuses a delete while any Key still routes through the destination. */
 export function isDestinationDeletable(
   destination: Pick<Destination, "adapter" | "capabilities" | "id">,
@@ -94,17 +123,58 @@ export function isDestinationDeletable(
     && !credentials.some((credential) => credential.destination_id === destination.id);
 }
 
+export function destinationHasExplicitRoutes(
+  destination: Pick<Destination, "protocol_routes">,
+): boolean {
+  return (destination.protocol_routes?.length ?? 0) > 0;
+}
+
+export function destinationDraftRoutes(
+  destination: Destination,
+): DestinationProtocolRouteDraft[] {
+  if (destinationHasExplicitRoutes(destination)) {
+    return destination.protocol_routes!.map((route) => ({
+      protocol: route.protocol,
+      endpoint_url: route.endpoint_url,
+      auth_scheme: route.auth_scheme,
+    }));
+  }
+  return [{
+    protocol: destination.protocols[0] ?? "",
+    endpoint_url: destination.base_url ?? "",
+    auth_scheme: destination.auth_scheme,
+  }];
+}
+
+/** Keep the first route identical to the legacy default directory fields. */
+export function syncDraftDefaultRoute(draft: DestinationEditDraft): void {
+  const first = draft.protocol_routes[0] ?? {
+    protocol: draft.upstream_protocol,
+    endpoint_url: draft.endpoint_url,
+    auth_scheme: draft.auth_scheme,
+  };
+  first.protocol = draft.upstream_protocol;
+  first.endpoint_url = draft.endpoint_url;
+  first.auth_scheme = draft.auth_scheme;
+  draft.protocol_routes[0] = first;
+}
+
 export function destinationEditDraft(destination: Destination): DestinationEditDraft {
+  const protocolRoutes = destinationDraftRoutes(destination);
+  const first = protocolRoutes[0];
   return {
     enabled: destination.enabled,
     name: destination.name,
-    endpoint_url: destination.base_url ?? "",
-    auth_scheme: destination.auth_scheme,
-    upstream_protocol: destination.protocols[0] ?? "",
+    endpoint_url: first?.endpoint_url ?? destination.base_url ?? "",
+    auth_scheme: first?.auth_scheme ?? destination.auth_scheme,
+    upstream_protocol: first?.protocol || destination.protocols[0] || "",
+    protocol_routes: protocolRoutes,
     models: destination.catalog.map((model) => ({
       enabled: model.enabled,
       public_model: model.public_model,
       upstream_model: model.upstream_model,
+      protocols: [...model.protocols],
+      preferred: model.preferred,
       upstream_override: model.upstream_override
         ? { protocol: model.upstream_override.protocol, endpoint_url: model.upstream_override.endpoint_url }
         : null,
@@ -140,6 +210,42 @@ function overrideIssue(
   return null;
 }
 
+function routeEndpointIssue(value: string): DestinationEditIssue | null {
+  const issue = customEndpointUrlIssue(value);
+  if (issue === "empty") return "missing_route_endpoint";
+  if (issue === "malformed") return "invalid_route_endpoint";
+  if (issue === "not_http") return "route_endpoint_not_http";
+  if (issue === "with_credentials") return "route_endpoint_with_credentials";
+  return null;
+}
+
+function parsedProtocolRoutes(
+  draft: DestinationEditDraft,
+): { protocol: ProtocolDto; endpoint_url: string; auth_scheme: AuthSchemeDto }[] {
+  syncDraftDefaultRoute(draft);
+  if (draft.protocol_routes.length > MAX_HTTP_PROTOCOL_ROUTES) {
+    throw new DestinationEditError("too_many_protocol_routes");
+  }
+  const seen = new Set<ProtocolDto>();
+  return draft.protocol_routes.map((route, index) => {
+    if (route.protocol !== "chat_completions"
+      && route.protocol !== "responses"
+      && route.protocol !== "messages") {
+      throw new DestinationEditError("missing_protocol");
+    }
+    if (seen.has(route.protocol)) throw new DestinationEditError("duplicate_protocol_route");
+    seen.add(route.protocol);
+    const endpointUrl = route.endpoint_url.trim();
+    const problem = index === 0 ? endpointIssue(endpointUrl) : routeEndpointIssue(endpointUrl);
+    if (problem) throw new DestinationEditError(problem);
+    return {
+      protocol: route.protocol,
+      endpoint_url: endpointUrl,
+      auth_scheme: route.auth_scheme,
+    };
+  });
+}
+
 /** Validate the draft and build the full-replacement PATCH body (sans CAS pair). */
 export function buildDestinationPatch(
   destination: Destination,
@@ -148,14 +254,9 @@ export function buildDestinationPatch(
   if (!isDestinationEditable(destination)) throw new DestinationEditError("immutable_destination");
   const name = draft.name.trim();
   if (!name) throw new DestinationEditError("missing_name");
-  const endpointUrl = draft.endpoint_url.trim();
-  const endpointProblem = endpointIssue(endpointUrl);
-  if (endpointProblem) throw new DestinationEditError(endpointProblem);
-  if (draft.upstream_protocol !== "chat_completions"
-    && draft.upstream_protocol !== "responses"
-    && draft.upstream_protocol !== "messages") {
-    throw new DestinationEditError("missing_protocol");
-  }
+  const protocolRoutes = parsedProtocolRoutes(draft);
+  const first = protocolRoutes[0];
+  if (!first) throw new DestinationEditError("missing_protocol");
   const seen = new Set<string>();
   const models = draft.models.map((model) => {
     const publicModel = model.public_model.trim();
@@ -168,9 +269,29 @@ export function buildDestinationPatch(
     const key = publicModel.toLocaleLowerCase();
     if (seen.has(key)) throw new DestinationEditError("duplicate_public_model");
     seen.add(key);
+    const previous = destination.catalog.find((entry) => entry.public_model.toLocaleLowerCase() === key);
+    const available = model.upstream_override
+      ? [model.upstream_override.protocol]
+      : protocolRoutes.map((route) => route.protocol);
+    const previouslyAvailable = previous?.upstream_override
+      ? [previous.upstream_override.protocol]
+      : destinationDraftRoutes(destination).map((route) => route.protocol);
+    let protocols = model.protocols?.filter((protocol) => available.includes(protocol));
+    if (protocols) {
+      for (const protocol of available) {
+        if (!previouslyAvailable.includes(protocol) && !protocols.includes(protocol)) protocols.push(protocol);
+      }
+      if (model.enabled && !previous?.enabled && protocols.length === 0) protocols = [...available];
+    }
+    const enabled = model.enabled === undefined ? undefined : model.enabled && (protocols?.length ?? available.length) > 0;
+    const preferredChoices = enabled ? (protocols ?? available) : available;
+    const preferred = model.preferred && preferredChoices.includes(model.preferred)
+      ? model.preferred : preferredChoices[0];
     return {
       publicModel,
-      ...(model.enabled === undefined ? {} : { enabled: model.enabled }),
+      ...(enabled === undefined ? {} : { enabled }),
+      ...(protocols ? { protocols } : {}),
+      ...(model.preferred || model.protocols ? { preferred } : {}),
       upstreamModel,
       upstreamOverride: model.upstream_override
         ? {
@@ -181,13 +302,24 @@ export function buildDestinationPatch(
     };
   });
   if (models.length === 0) throw new DestinationEditError("missing_mappings");
+  const extraRoutes = protocolRoutes.length > 1;
+  const sendRoutes = extraRoutes || destinationHasExplicitRoutes(destination);
   return {
     ...(draft.enabled === undefined ? {} : { enabled: draft.enabled }),
-    authScheme: draft.auth_scheme,
-    endpointUrl,
+    authScheme: first.auth_scheme,
+    endpointUrl: first.endpoint_url,
     models,
     name,
-    upstreamProtocol: draft.upstream_protocol,
+    upstreamProtocol: first.protocol,
+    ...(sendRoutes
+      ? {
+        protocolRoutes: protocolRoutes.map((route) => ({
+          protocol: route.protocol,
+          endpointUrl: route.endpoint_url,
+          authScheme: route.auth_scheme,
+        })),
+      }
+      : {}),
   };
 }
 
@@ -203,11 +335,14 @@ function originOf(value: string | null): string | null {
 /** Every upstream origin the PATCH would route Key material towards. */
 export function destinationPatchOrigins(input: DestinationPatchInput): string[] {
   const origins = new Set<string>();
-  const base = originOf(input.endpointUrl);
-  if (base) origins.add(base);
+  const add = (value: string | null | undefined) => {
+    const origin = originOf(value ?? null);
+    if (origin) origins.add(origin);
+  };
+  add(input.endpointUrl);
+  for (const route of input.protocolRoutes ?? []) add(route.endpointUrl);
   for (const model of input.models) {
-    const override = originOf(model.upstreamOverride?.endpointUrl ?? null);
-    if (override) origins.add(override);
+    add(model.upstreamOverride?.endpointUrl ?? null);
   }
   return [...origins];
 }
@@ -243,7 +378,11 @@ export function destinationPatchRoutes(input: DestinationPatchInput): Destinatio
     seen.add(key);
     routes.push(route);
   };
-  add(input.upstreamProtocol, input.endpointUrl);
+  if (input.protocolRoutes && input.protocolRoutes.length > 0) {
+    for (const route of input.protocolRoutes) add(route.protocol, route.endpointUrl);
+  } else {
+    add(input.upstreamProtocol, input.endpointUrl);
+  }
   for (const model of input.models) {
     if (model.upstreamOverride) {
       add(model.upstreamOverride.protocol, model.upstreamOverride.endpointUrl);
@@ -254,12 +393,19 @@ export function destinationPatchRoutes(input: DestinationPatchInput): Destinatio
 
 function destinationCurrentRoutes(destination: Destination): DestinationRoute[] {
   const protocol = destination.protocols[0];
-  if (!protocol || !destination.base_url) return [];
+  const firstUrl = destination.protocol_routes?.[0]?.endpoint_url ?? destination.base_url;
+  if (!protocol && (destination.protocol_routes?.length ?? 0) === 0) return [];
+  if (!firstUrl && (destination.protocol_routes?.length ?? 0) === 0) return [];
   return destinationPatchRoutes({
     authScheme: destination.auth_scheme,
-    endpointUrl: destination.base_url,
+    endpointUrl: destination.base_url ?? firstUrl ?? "",
     name: destination.name,
-    upstreamProtocol: protocol,
+    upstreamProtocol: protocol ?? destination.protocol_routes?.[0]?.protocol ?? "chat_completions",
+    protocolRoutes: destination.protocol_routes?.map((route) => ({
+      protocol: route.protocol,
+      endpointUrl: route.endpoint_url,
+      authScheme: route.auth_scheme,
+    })),
     models: destination.catalog.map((model) => ({
       publicModel: model.public_model,
       upstreamModel: model.upstream_model,
@@ -341,4 +487,55 @@ export function withAuthorizedCredentials(
   return authorizeCredentialIds.length === 0
     ? input
     : { ...input, authorizeCredentialIds: [...authorizeCredentialIds] };
+}
+
+function isProtocol(value: string): value is ProtocolDto {
+  return value === "chat_completions" || value === "responses" || value === "messages";
+}
+
+export function unusedDraftProtocol(draft: DestinationEditDraft): ProtocolDto | null {
+  const used = new Set(draft.protocol_routes.map((route) => route.protocol));
+  return (["chat_completions", "responses", "messages"] as const).find((protocol) => !used.has(protocol)) ?? null;
+}
+
+export function addDraftProtocolRoute(draft: DestinationEditDraft): boolean {
+  if (draft.protocol_routes.length >= MAX_HTTP_PROTOCOL_ROUTES) return false;
+  const protocol = unusedDraftProtocol(draft);
+  if (!protocol) return false;
+  const first = draft.protocol_routes[0];
+  draft.protocol_routes.push({
+    protocol,
+    endpoint_url: "",
+    auth_scheme: first?.auth_scheme ?? draft.auth_scheme,
+  });
+  return true;
+}
+
+export function removeDraftProtocolRoute(draft: DestinationEditDraft, index: number): boolean {
+  if (index <= 0 || index >= draft.protocol_routes.length) return false;
+  draft.protocol_routes.splice(index, 1);
+  return true;
+}
+
+/**
+ * Fill draft routes from an official preset's declared protocolRoutes.
+ * Does not persist; Save still has to authorize grants.
+ */
+export function applyPresetProtocolRoutesToDraft(
+  draft: DestinationEditDraft,
+  preset: Pick<ProviderPreset, "protocolRoutes">,
+): boolean {
+  const routes = preset.protocolRoutes;
+  if (!routes || routes.length === 0) return false;
+  draft.protocol_routes = routes.slice(0, MAX_HTTP_PROTOCOL_ROUTES).map((route) => ({
+    protocol: route.protocol,
+    endpoint_url: route.endpointUrl,
+    auth_scheme: route.authScheme,
+  }));
+  const first = draft.protocol_routes[0];
+  if (!first || !isProtocol(first.protocol)) return false;
+  draft.endpoint_url = first.endpoint_url;
+  draft.upstream_protocol = first.protocol;
+  draft.auth_scheme = first.auth_scheme;
+  return true;
 }

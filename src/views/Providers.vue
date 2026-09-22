@@ -32,19 +32,16 @@
           />
         </div>
         <div class="providers-rail-list">
-          <section v-for="pane in railPanes" :key="pane.id" class="providers-rail-pane">
-            <h3 class="providers-rail-pane__label">{{ pane.label }}</h3>
-            <n-menu
-              :value="selectedRailKey"
-              :options="pane.options"
-              :aria-label="`${t('选择供应商范围')} · ${pane.label}`"
-              @update:value="selectConnection"
-            />
-          </section>
+          <n-menu
+            :value="selectedRailKey"
+            :options="railOptions"
+            :aria-label="t('选择供应商范围')"
+            @update:value="selectConnection"
+          />
           <p v-if="railFilteredOut" class="providers-rail-empty">
             {{ t("无匹配供应商") }}
           </p>
-          <p v-else-if="railPanes.length === 0" class="providers-rail-empty">
+          <p v-else-if="railOptions.length === 0" class="providers-rail-empty">
             {{ t("暂无已接入的供应商") }}
           </p>
         </div>
@@ -161,25 +158,81 @@
               <dd>{{ selectedConnection.target_count }}</dd>
             </div>
           </dl>
-          <div class="providers-connection-targets">
-            <table class="providers-connection-table">
-              <thead>
-                <tr>
-                  <th>{{ t("对外模型名") }}</th>
-                  <th>{{ t("上游模型 ID") }}</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="target in selectedConnection.targets" :key="target.id">
-                  <td>
-                    <code>{{ target.public_name }}</code>
-                    <n-tag v-if="disabledModelNames.has(target.public_name.toLowerCase())" size="small" :bordered="false">{{ t("已停用") }}</n-tag>
-                  </td>
-                  <td><code>{{ target.upstream_model_id }}</code></td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
+          <template v-if="activeScope">
+            <div class="providers-models-head">
+              <div class="providers-catalog-meta">
+                <span>{{ catalogSourceLabel(activeScope.catalog.source) }}</span>
+                <a
+                  v-if="safeSourceUrl"
+                  :href="safeSourceUrl"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >{{ t("官方来源") }}</a>
+              </div>
+              <div class="providers-catalog-actions">
+                <n-button
+                  v-if="catalogRefreshVisible"
+                  type="primary"
+                  size="small"
+                  :loading="catalogRefreshing"
+                  :disabled="actionLocked"
+                  @click="refreshCatalog"
+                >
+                  {{ catalogRefreshing ? t("正在刷新模型目录…") : t("刷新模型目录") }}
+                </n-button>
+                <n-button
+                  v-if="selectedEditableDestination"
+                  secondary
+                  size="small"
+                  :disabled="actionLocked"
+                  @click="openDestinationEditor"
+                >
+                  {{ t("编辑映射") }}
+                </n-button>
+              </div>
+            </div>
+            <n-alert
+              v-if="catalogRefreshError"
+              type="error"
+              :title="t('刷新模型目录失败：{error}', { error: catalogRefreshError })"
+            />
+            <n-alert
+              v-if="probeSummary"
+              :type="probeSummary.hasFailures ? 'warning' : 'success'"
+              :title="probeSummary.hasFailures ? t('连接测试失败') : t('连接测试成功')"
+              class="providers-probe-summary"
+            >
+              <div v-for="result in probeSummary.results" :key="result.protocol" class="providers-probe-result">
+                <strong>{{ protocolDisplayName(result.protocol) }}</strong>
+                <span>{{ probeResultStatus(result) }}</span>
+                <span v-if="probeResultHttpStatus(result.error)">HTTP {{ probeResultHttpStatus(result.error) }}</span>
+                <span v-if="probeResultMessage(result.error)">{{ probeResultMessage(result.error) }}</span>
+              </div>
+            </n-alert>
+            <n-alert
+              v-if="matrixError"
+              type="error"
+              :title="t('保存协议覆盖失败：{error}', { error: matrixError })"
+            />
+            <n-alert
+              v-if="probeError"
+              type="error"
+              :title="t('连接测试失败：{error}', { error: probeError })"
+            />
+            <ProviderModelMatrix
+              :key="activeScope.key"
+              :scope="activeScope"
+              :optimistic-overrides="optimisticOverrides"
+              :pending-override-keys="pendingOverrideKeys"
+              :probing-models="probingModels"
+              :action-locked="matrixActionLocked"
+              :removing="catalogRemoving"
+              @update:overrides="updateOverrides"
+              @probe="runModelProbe"
+              @remove="removeCatalogModels"
+              @error="matrixError = $event"
+            />
+          </template>
           <n-space>
             <n-button
               v-if="selectedEditableDestination"
@@ -362,6 +415,15 @@
                     >
                       {{ catalogRefreshing ? t("正在刷新模型目录…") : t("刷新模型目录") }}
                     </n-button>
+                    <n-button
+                      v-if="selectedEditableDestination && !isDraftConnection"
+                      secondary
+                      size="small"
+                      :disabled="actionLocked"
+                      @click="openDestinationEditor"
+                    >
+                      {{ t("编辑映射") }}
+                    </n-button>
                   </div>
                 </div>
                 <n-alert
@@ -426,18 +488,9 @@
                 <n-spin size="small" />
               </div>
 
-              <template v-else>
-                <div v-if="definitionLoading && !selectedDefinition" class="providers-state" role="status">
-                  <n-spin size="small" />
-                </div>
-                <ProviderModelMappings
-                  v-else-if="selectedDefinition"
-                  :models="selectedDefinition.models"
-                  :disabled-models="disabledModelNames"
-                  :editable="selectedEntry.editable"
-                  @edit="openDefinitionEditor"
-                />
-              </template>
+              <div v-else-if="definitionLoading && !selectedDefinition && !selectedDestination" class="providers-state" role="status">
+                <n-spin size="small" />
+              </div>
             </n-tab-pane>
 
             <n-tab-pane name="pricing" :tab="t('模型价格')">
@@ -564,6 +617,7 @@
       :destination="editingDestination"
       :credentials="destinationsStore.credentials"
       :endpoints="selectedConnection?.endpoints ?? []"
+      :preset-id="selectedDefinition?.preset_id ?? null"
       @update:show="onDestinationEditShow"
       @saved="onDestinationSaved"
     />
@@ -576,18 +630,69 @@
       @update:show="onAddKeyShow"
       @save="onAddKeySave"
     />
+    <n-modal
+      :show="protocolGrantDialog !== null"
+      :mask-closable="!protocolGrantSaving"
+      :close-on-esc="!protocolGrantSaving"
+      @update:show="onProtocolGrantDialogShow"
+    >
+      <n-card
+        style="width: min(440px, calc(100vw - 32px))"
+        :title="t('需要 Key 授权')"
+        :closable="!protocolGrantSaving"
+        role="dialog"
+        @close="dismissProtocolGrantDialog"
+      >
+        <p class="providers-note">
+          {{ t('启用该协议需要为所选 Key 授权对应 Endpoint。未选择的 Key 仍不能使用该协议。') }}
+        </p>
+        <n-checkbox-group v-model:value="protocolGrantSelectedIds" :disabled="protocolGrantSaving">
+          <n-space vertical>
+            <n-checkbox
+              v-for="candidate in protocolGrantDialog?.candidates ?? []"
+              :key="candidate.id"
+              :value="candidate.id"
+            >
+              {{ candidate.name }} · {{ candidate.missingProtocols.map(protocolDisplayName).join(', ') }}
+            </n-checkbox>
+          </n-space>
+        </n-checkbox-group>
+        <template #footer>
+          <n-space justify="end">
+            <n-button :disabled="protocolGrantSaving" @click="dismissProtocolGrantDialog">
+              {{ t("取消") }}
+            </n-button>
+            <n-button :loading="protocolGrantSaving" @click="saveProtocolGrantDialog(false)">
+              {{ t("仅保存协议") }}
+            </n-button>
+            <n-button
+              type="primary"
+              :loading="protocolGrantSaving"
+              :disabled="protocolGrantSelectedIds.length === 0"
+              @click="saveProtocolGrantDialog(true)"
+            >
+              {{ t("保存并授权") }}
+            </n-button>
+          </n-space>
+        </template>
+      </n-card>
+    </n-modal>
     <span class="sr-only" aria-live="polite" aria-atomic="true">{{ actionLive }}</span>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, h, onActivated, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, h, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from "vue";
 import {
   NAlert,
   NButton,
+  NCard,
+  NCheckbox,
+  NCheckboxGroup,
   NEmpty,
   NInput,
   NMenu,
+  NModal,
   NPopconfirm,
   NSelect,
   NSpace,
@@ -599,12 +704,12 @@ import {
 } from "naive-ui";
 import type { MenuOption, SelectOption } from "naive-ui";
 import type { Connection } from "../api/connections.ts";
-import type { Destination } from "../api/destinations.ts";
 import { DashboardRequestError, dashboardApi, type AccountInput } from "../api/dashboard";
 import { isRevisionConflict, providerApi } from "../api/providers.ts";
 import { useAccountsStore } from "../stores/accounts.ts";
 import { useDestinationsStore } from "../stores/destinations.ts";
 import { useProvidersStore } from "../stores/providers.ts";
+import { useControlPlaneStore } from "../stores/controlPlane.ts";
 import type {
   ProviderDefinitionView,
   ModelProtocolOverrideUpdate,
@@ -612,8 +717,8 @@ import type {
   ProtocolProbeResponse,
   ProtocolProbeResult,
 } from "../api/providers.ts";
+import type { MutationExpectation } from "../api/generated/dashboard-v3.ts";
 import ProviderModelMatrix from "../components/ProviderModelMatrix.vue";
-import ProviderModelMappings from "../components/ProviderModelMappings.vue";
 import ProviderPresetBrowser from "../components/ProviderPresetBrowser.vue";
 import ProviderSettingsPanel from "../components/ProviderSettingsPanel.vue";
 import PricingCatalog from "../components/PricingCatalog.vue";
@@ -626,7 +731,12 @@ import ProviderBrandMark from "../components/ProviderBrandMark.vue";
 import { t, type MessageKey } from "../i18n/index.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
 import { formatDateTime } from "../utils/format.ts";
-import { isDestinationDeletable, isDestinationEditable } from "../domain/destination-edit.ts";
+import { isDestinationCatalogRefreshable, isDestinationDeletable, isDestinationEditable } from "../domain/destination-edit.ts";
+import {
+  catalogUpdatesFromOverrides,
+  destinationProbeIdentity,
+  projectDestinationCatalog,
+} from "../domain/destination-catalog.ts";
 import {
   accountAddDeepLinkFromProviderAdd,
   accountAddQueryValue,
@@ -650,7 +760,6 @@ import {
   connectionForLegacyProvider,
   connectionStatus,
   filterConnections,
-  groupConnectionsByOffering,
   isOnboardingDraftConnection,
   selectedConnectionIdFromQuery,
 } from "../domain/connections.ts";
@@ -660,7 +769,6 @@ import { accountTypeLabelText } from "./account-status-text.ts";
 import {
   connectionForDestination,
   filterDestinations,
-  groupDestinationsByOffering,
   isProvidersRailDestination,
   railKeyForDestination,
 } from "../domain/destination-providers.ts";
@@ -684,11 +792,18 @@ import {
   CATALOG_SOURCE_OFFICIAL_ZEN,
   CATALOG_SOURCE_STATIC,
 } from "../domain/provider-contracts.ts";
+import {
+  providerProtocolGrantCandidates,
+  providerProtocolGrantCaptureIsCurrent,
+  type ProviderProtocolGrantCandidate,
+  type ProviderProtocolGrantCapture,
+} from "../domain/provider-protocol-grants.ts";
 
 const message = useMessage();
 const accountsStore = useAccountsStore();
 const destinationsStore = useDestinationsStore();
 const providersStore = useProvidersStore();
+const controlPlane = useControlPlaneStore();
 const contracts = computed(() => {
   const value = providersStore.contracts;
   return value ? normalizeProviderContractsResponse(value) : null;
@@ -730,13 +845,30 @@ const catalogRemoving = ref(false);
 const catalogRefreshError = ref("");
 const matrixError = ref("");
 const probeError = ref("");
-const probeSummary = ref<{ results: ProtocolProbeResult[]; hasFailures: boolean } | null>(null);
+const probeReceipt = ref<{
+  scopeKey: string;
+  modelId: string;
+  protocol: string;
+  processGeneration: number | null;
+  revision: number | null;
+  identity: string | null;
+  results: ProtocolProbeResult[];
+  hasFailures: boolean;
+} | null>(null);
 const probingModels = ref<Set<string>>(new Set());
 const optimisticOverrides = ref<Map<string, boolean>>(new Map());
 const pendingOverrideKeys = ref<Set<string>>(new Set());
+const protocolGrantDialog = ref<{
+  capture: ProviderProtocolGrantCapture;
+  candidates: ProviderProtocolGrantCandidate[];
+  payload: OverridePayload;
+} | null>(null);
+const protocolGrantSelectedIds = ref<string[]>([]);
+const protocolGrantSaving = ref(false);
 const actionLive = ref("");
 let activatedOnce = false;
 let overrideSequence = 0;
+let probeSequence = 0;
 let overrideQueue: Promise<void> = Promise.resolve();
 const latestOverrideSequence = new Map<string, number>();
 
@@ -766,11 +898,6 @@ const selectedDestination = computed(() => {
   if (match && !isProvidersRailDestination(match)) return null;
   return match;
 });
-const disabledModelNames = computed(() => new Set(
-  (selectedDestination.value?.catalog ?? [])
-    .filter((model) => !model.enabled || model.protocols.length === 0)
-    .map((model) => model.public_model.toLowerCase()),
-));
 const selectedDestinationTypeLabel = computed(() => (
   selectedDestination.value
     ? accountTypeLabelText(destinationTypeLabel(selectedDestination.value))
@@ -839,11 +966,27 @@ const selectedDefinition = computed(() => {
     ?? (selectedConnection.value?.legacy.kind === "dynamic_provider" ? selectedConnection.value.legacy.id : null);
   return providerId ? providersStore.definitions.get(providerId) ?? null : null;
 });
-const activeScope = computed(() => {
+const httpScope = computed(() => {
+  const dest = selectedDestination.value;
+  if (!dest || !isDestinationEditable(dest)) return null;
+  const presetId = selectedDefinition.value?.preset_id;
+  const preset = presetId ? PROVIDER_PRESETS.find((entry) => entry.id === presetId) ?? null : null;
+  return projectDestinationCatalog(dest, {
+    source: preset ? "preset" : "static",
+    source_url: preset?.docsUrl ?? "",
+    revision: destinationsStore.expectation?.expectedRevision ?? 0,
+  });
+});
+const builtinScope = computed(() => {
   const entry = selectedEntry.value;
   if (!entry || entry.origin !== "builtin" || entry.provider_id === "custom") return null;
   return scopes.value.find((scope) => scope.provider_id === entry.provider_id) ?? null;
 });
+const activeScope = computed(() => builtinScope.value ?? httpScope.value);
+const httpCatalogRefreshVisible = computed(() => (
+  Boolean(selectedDestination.value && isDestinationCatalogRefreshable(selectedDestination.value))
+  && !isDraftConnection.value
+));
 const addPreset = computed(() => {
   const stage = addStage.value;
   if (!stage || stage.stage !== "form" || !stage.presetId) return null;
@@ -854,18 +997,21 @@ const addFormKey = computed(() => {
   return stage?.stage === "form" ? `add-form:${stage.presetId ?? "manual"}` : "add-form:none";
 });
 const initialLoading = computed(() => (
-  loading.value && !contracts.value && !catalog.value && connections.value.length === 0 && !loadError.value
+  loading.value && !selectedEntry.value && !addStage.value && !loadError.value
 ));
 const actionLocked = computed(() => (
   catalogRefreshing.value
   || catalogRemoving.value
   || probingModels.value.size > 0
   || pendingOverrideKeys.value.size > 0
+  || protocolGrantDialog.value !== null
+  || protocolGrantSaving.value
 ));
 const matrixActionLocked = computed(() => (
   catalogRefreshing.value
   || catalogRemoving.value
   || probingModels.value.size > 0
+  || protocolGrantDialog.value !== null
 ));
 
 function originLabel(origin: ProviderCatalogEntry["origin"]): string {
@@ -889,98 +1035,67 @@ function railStatusExtra(connection: Connection) {
   }, t(label as MessageKey));
 }
 
-const railPanes = computed<Array<{ id: "plan" | "api"; label: "Plan" | "API"; options: MenuOption[] }>>(() => {
-  const panes: Array<{ id: "plan" | "api"; label: "Plan" | "API"; options: MenuOption[] }> = [];
+const railOptions = computed<MenuOption[]>(() => {
   if (destinations.value.length > 0) {
     const filtered = filterDestinations(railDestinations.value, railQuery.value);
-    const groups = groupDestinationsByOffering(filtered);
-    const toOptions = (list: readonly Destination[]): MenuOption[] => (
-      list.map((item) => {
-        const joined = connectionForDestination(connections.value, item);
-        return {
-          key: railKeyForDestination(item, connections.value),
-          label: item.name,
-          icon: () => h(ProviderBrandMark, {
-            family: joined
-              ? connectionBrandFamily(joined, allCatalogEntries.value)
-              : destinationBrandFamily(item, null, allCatalogEntries.value),
-            size: RAIL_BRAND_SIZE,
-          }),
-          extra: joined ? railStatusExtra(joined) : undefined,
-        };
-      })
-    );
-    const planOptions = toOptions(groups.plan);
-    const apiOptions = toOptions(groups.api);
-    if (planOptions.length) panes.push({ id: "plan", label: "Plan", options: planOptions });
-    if (apiOptions.length) panes.push({ id: "api", label: "API", options: apiOptions });
-    return panes;
+    return filtered.map((item) => {
+      const joined = connectionForDestination(connections.value, item);
+      return {
+        key: railKeyForDestination(item, connections.value),
+        label: item.name,
+        icon: () => h(ProviderBrandMark, {
+          family: joined
+            ? connectionBrandFamily(joined, allCatalogEntries.value)
+            : destinationBrandFamily(item, null, allCatalogEntries.value),
+          size: RAIL_BRAND_SIZE,
+        }),
+        extra: joined ? railStatusExtra(joined) : undefined,
+      };
+    });
   }
-  const filtered = filterConnections(connections.value, railQuery.value);
-  const groups = groupConnectionsByOffering(filtered);
-  const toOptions = (list: readonly Connection[]): MenuOption[] => (
-    list.map((item) => ({
-      key: item.id,
-      label: item.name,
-      icon: () => h(ProviderBrandMark, {
-        family: connectionBrandFamily(item, allCatalogEntries.value),
-        size: RAIL_BRAND_SIZE,
-      }),
-      extra: railStatusExtra(item),
-    }))
-  );
-  const planOptions = toOptions(groups.plan);
-  const apiOptions = toOptions(groups.api);
-  if (planOptions.length) panes.push({ id: "plan", label: "Plan", options: planOptions });
-  if (apiOptions.length) panes.push({ id: "api", label: "API", options: apiOptions });
-  return panes;
+  return filterConnections(connections.value, railQuery.value).map((item) => ({
+    key: item.id,
+    label: item.name,
+    icon: () => h(ProviderBrandMark, {
+      family: connectionBrandFamily(item, allCatalogEntries.value),
+      size: RAIL_BRAND_SIZE,
+    }),
+    extra: railStatusExtra(item),
+  }));
 });
 const railFilteredOut = computed(() => (
-  Boolean(railQuery.value.trim())
-  && railPanes.value.every((pane) => pane.options.length === 0)
+  Boolean(railQuery.value.trim()) && railOptions.value.length === 0
 ));
 const mobileSelectOptions = computed<SelectOption[]>(() => {
   // The mobile selector has its own built-in filter; the rail search query
   // must not shrink these options when the rail itself is hidden.
   if (destinations.value.length > 0) {
-    const groups = groupDestinationsByOffering(railDestinations.value);
-    const labelFor = (item: Destination, offering: "Plan" | "API"): string => (
-      `${item.name} · ${offering}`
-    );
     return [
-      ...groups.plan.map((item) => ({
+      ...railDestinations.value.map((item) => ({
         value: railKeyForDestination(item, connections.value),
-        label: labelFor(item, "Plan"),
-      })),
-      ...groups.api.map((item) => ({
-        value: railKeyForDestination(item, connections.value),
-        label: labelFor(item, "API"),
+        label: item.name,
       })),
       { value: ADD_SELECT_VALUE, label: t("添加供应商") },
     ];
   }
-  const groups = groupConnectionsByOffering(connections.value);
-  const labelFor = (item: Connection, offering: "Plan" | "API"): string => {
+  const labelFor = (item: Connection): string => {
     const status = connectionStatus(item);
     return status.label
-      ? `${item.name} · ${offering} · ${t(status.label as MessageKey)}`
-      : `${item.name} · ${offering}`;
+      ? `${item.name} · ${t(status.label as MessageKey)}`
+      : item.name;
   };
   return [
-    ...groups.plan.map((item) => ({
+    ...connections.value.map((item) => ({
       value: item.id,
-      label: labelFor(item, "Plan"),
-    })),
-    ...groups.api.map((item) => ({
-      value: item.id,
-      label: labelFor(item, "API"),
+      label: labelFor(item),
     })),
     { value: ADD_SELECT_VALUE, label: t("添加供应商") },
   ];
 });
 const catalogRefreshVisible = computed(() => {
   const scope = activeScope.value;
-  return Boolean(scope && catalogRefreshSupported(scope));
+  if (!scope || isDraftConnection.value) return false;
+  return catalogRefreshSupported(scope);
 });
 const safeSourceUrl = computed(() => {
   const url = activeScope.value?.catalog.source_url ?? "";
@@ -994,6 +1109,7 @@ function catalogSourceLabel(source: string): string {
   if (source === CATALOG_SOURCE_DECLARED) return t("账号声明");
   if (source === CATALOG_SOURCE_OPENCODE_MODELS) return `OpenCode · ${t("官方来源")}`;
   if (source === CATALOG_SOURCE_COMMAND_CODE_MODELS) return `Command Code · ${t("官方来源")}`;
+  if (source === "preset") return t("供应商预设");
   return source;
 }
 
@@ -1163,10 +1279,16 @@ function openAccountEditor(accountId: string) {
 }
 
 function resetScopeActions() {
+  probeSequence++;
+  probingModels.value = new Set();
+  if (!protocolGrantSaving.value) {
+    protocolGrantDialog.value = null;
+    protocolGrantSelectedIds.value = [];
+  }
   catalogRefreshError.value = "";
   matrixError.value = "";
   probeError.value = "";
-  probeSummary.value = null;
+  probeReceipt.value = null;
 }
 
 async function loadDefinition(providerId: string): Promise<ProviderDefinitionView | null> {
@@ -1440,11 +1562,18 @@ async function removeCatalogModels(payload: { modelIds: string[] }) {
   catalogRemoving.value = true;
   matrixError.value = "";
   try {
-    await providersStore.removeContractCatalogModels(
-      scope.scope_kind,
-      scope.scope_id,
-      payload.modelIds,
-    );
+    if (scope.scope_kind === "custom_endpoint") {
+      await destinationsStore.updateCatalog(scope.scope_id, {
+        updates: [],
+        removeModels: payload.modelIds,
+      });
+    } else {
+      await providersStore.removeContractCatalogModels(
+        scope.scope_kind,
+        scope.scope_id,
+        payload.modelIds,
+      );
+    }
     actionLive.value = t("已从目录删除模型");
     message.success(t("已从目录删除模型"));
   } catch (error) {
@@ -1462,7 +1591,11 @@ async function removeCatalogModels(payload: { modelIds: string[] }) {
 }
 
 async function refreshCatalog() {
-  const scope = activeScope.value;
+  if (httpScope.value) {
+    await refreshHttpCatalog();
+    return;
+  }
+  const scope = builtinScope.value;
   if (!scope || !catalogRefreshVisible.value || catalogRefreshing.value) return;
   catalogRefreshing.value = true;
   catalogRefreshError.value = "";
@@ -1472,6 +1605,32 @@ async function refreshCatalog() {
     actionLive.value = t("已刷新模型目录");
     message.success(t("已刷新模型目录"));
   } catch (error) {
+    catalogRefreshError.value = dashboardErrorDetail(error);
+    message.error(t("刷新模型目录失败：{error}", { error: catalogRefreshError.value }));
+  } finally {
+    catalogRefreshing.value = false;
+  }
+}
+
+async function refreshHttpCatalog() {
+  const destination = selectedDestination.value;
+  if (!destination || !httpCatalogRefreshVisible.value || catalogRefreshing.value) return;
+  const id = destination.id;
+  catalogRefreshing.value = true;
+  catalogRefreshError.value = "";
+  try {
+    const result = await destinationsStore.refreshCatalog(id);
+    // A cleared session must not start new loads or resurrect provider caches.
+    if (!destinationsStore.byId.has(id)) return;
+    if (destination.legacy.kind === "dynamic") providersStore.invalidateDefinition(destination.legacy.id);
+    // The model table already renders the mutation receipt from the destination store.
+    void Promise.all([providersStore.loadConnections(), providersStore.loadCatalog()]).catch(() => {});
+    if (selectedDestination.value?.id !== id) return;
+    actionLive.value = t("已刷新模型目录，新增 {count} 个模型（默认启用）。", { count: result.addedCount });
+    if (result.truncated) message.warning(t("模型目录仅返回部分结果，已有模型已保留。"));
+    else message.success(actionLive.value);
+  } catch (error) {
+    if (selectedDestination.value?.id !== id) return;
     catalogRefreshError.value = dashboardErrorDetail(error);
     message.error(t("刷新模型目录失败：{error}", { error: catalogRefreshError.value }));
   } finally {
@@ -1525,20 +1684,165 @@ function settleOptimisticOverrides(payload: OverridePayload, sequence: number) {
   pendingOverrideKeys.value = nextPending;
 }
 
+function sameExpectation(
+  left: MutationExpectation,
+  right: MutationExpectation,
+): boolean {
+  return left.expectedRevision === right.expectedRevision
+    && left.processGeneration === right.processGeneration;
+}
+
+function currentProviderProtocolGrantCapture(): ProviderProtocolGrantCapture | null {
+  const scope = activeScope.value;
+  const destination = selectedDestination.value;
+  const connection = selectedConnection.value;
+  const destinationExpectation = destinationsStore.expectation;
+  if (!scope || scope.scope_kind !== "provider" || !destination || !connection || !destinationExpectation) {
+    return null;
+  }
+  let controlExpectation: MutationExpectation;
+  try {
+    controlExpectation = controlPlane.expectation();
+  } catch {
+    return null;
+  }
+  // The Key list and endpoint list must describe the same CAS snapshot as the
+  // provider mutation. Otherwise a dialog could grant a Key the user did not
+  // inspect.
+  if (!sameExpectation(destinationExpectation, controlExpectation)) return null;
+  return {
+    scopeKey: scope.key,
+    destinationId: destination.id,
+    connectionId: connection.id,
+    expectation: controlExpectation,
+  };
+}
+
+function cloneOverridePayload(payload: OverridePayload): OverridePayload {
+  return {
+    scopeKind: payload.scopeKind,
+    scopeId: payload.scopeId,
+    overrides: payload.overrides.map((item) => ({ ...item })),
+  };
+}
+
+function openProviderProtocolGrantDialog(payload: OverridePayload): boolean {
+  if (payload.scopeKind !== "provider") return false;
+  const scope = activeScope.value;
+  const destination = selectedDestination.value;
+  const connection = selectedConnection.value;
+  if (
+    !scope
+    || scope.key !== `${payload.scopeKind}:${payload.scopeId}`
+    || !destination
+    || destination.legacy.kind !== "builtin"
+    || destination.legacy.id !== payload.scopeId
+    || !connection
+  ) {
+    return false;
+  }
+  const candidates = providerProtocolGrantCandidates(
+    destination,
+    destinationsStore.credentials,
+    connection.endpoints,
+    payload.overrides,
+  );
+  if (candidates.length === 0) return false;
+  const capture = currentProviderProtocolGrantCapture();
+  if (!capture) {
+    matrixError.value = t("供应商设置已在其他位置更新并重新加载，重试");
+    message.warning(matrixError.value);
+    void loadAll({ retain: true });
+    return true;
+  }
+  protocolGrantSelectedIds.value = [];
+  protocolGrantDialog.value = {
+    capture,
+    candidates,
+    payload: cloneOverridePayload(payload),
+  };
+  return true;
+}
+
+function dismissProtocolGrantDialog(): void {
+  if (protocolGrantSaving.value) return;
+  protocolGrantDialog.value = null;
+  protocolGrantSelectedIds.value = [];
+}
+
+function onProtocolGrantDialogShow(visible: boolean): void {
+  if (!visible) dismissProtocolGrantDialog();
+}
+
+async function saveProtocolGrantDialog(authorizeSelected: boolean): Promise<void> {
+  const dialog = protocolGrantDialog.value;
+  if (!dialog || protocolGrantSaving.value) return;
+  const current = currentProviderProtocolGrantCapture();
+  if (!current || !providerProtocolGrantCaptureIsCurrent(dialog.capture, current)) {
+    dismissProtocolGrantDialog();
+    matrixError.value = t("供应商设置已在其他位置更新并重新加载，重试");
+    message.warning(matrixError.value);
+    void loadAll({ retain: true });
+    return;
+  }
+  const allowedIds = new Set(dialog.candidates.map((candidate) => candidate.id));
+  const authorizeCredentialIds = authorizeSelected
+    ? protocolGrantSelectedIds.value.filter((id) => allowedIds.has(id))
+    : [];
+  protocolGrantSaving.value = true;
+  const sequence = ++overrideSequence;
+  showOptimisticOverrides(dialog.payload, sequence);
+  matrixError.value = "";
+  try {
+    await (overrideQueue = overrideQueue.then(() => persistOverrides(
+      dialog.payload,
+      sequence,
+      authorizeCredentialIds,
+      dialog.capture.expectation,
+    )));
+    protocolGrantDialog.value = null;
+    protocolGrantSelectedIds.value = [];
+  } finally {
+    protocolGrantSaving.value = false;
+  }
+}
+
 function updateOverrides(payload: OverridePayload) {
+  if (openProviderProtocolGrantDialog(payload)) return;
   const sequence = ++overrideSequence;
   showOptimisticOverrides(payload, sequence);
   matrixError.value = "";
   overrideQueue = overrideQueue.then(() => persistOverrides(payload, sequence));
 }
 
-async function persistOverrides(payload: OverridePayload, sequence: number) {
+async function persistOverrides(
+  payload: OverridePayload,
+  sequence: number,
+  authorizeCredentialIds: string[] = [],
+  capturedExpectation?: MutationExpectation,
+) {
   try {
-    await providersStore.putModelProtocolOverrides(
-      payload.scopeKind,
-      payload.scopeId,
-      payload.overrides,
-    );
+    if (payload.scopeKind === "custom_endpoint") {
+      const dest = destinationsStore.byId.get(payload.scopeId);
+      if (!dest || !isDestinationEditable(dest)) return;
+      const input = catalogUpdatesFromOverrides(dest, payload.overrides);
+      if (input.updates.length === 0) return;
+      await destinationsStore.updateCatalog(dest.id, input);
+    } else {
+      await providersStore.putModelProtocolOverrides(
+        payload.scopeKind,
+        payload.scopeId,
+        payload.overrides,
+        authorizeCredentialIds.length > 0 ? authorizeCredentialIds : undefined,
+        capturedExpectation,
+      );
+      // The provider receipt commits the matrix. Reload the destination
+      // projection only after an explicit Key authorization so the Key cards
+      // reflect grants without clearing their current content first.
+      if (authorizeCredentialIds.length > 0) {
+        await destinationsStore.load().catch(() => {});
+      }
+    }
     actionLive.value = t("协议覆盖已保存");
   } catch (error) {
     if (error instanceof DashboardRequestError && error.status === 409) {
@@ -1554,11 +1858,16 @@ async function persistOverrides(payload: OverridePayload, sequence: number) {
   }
 }
 
+function httpProbeIdentity(destinationId: string, modelId: string, protocol: string): string | null {
+  const destination = destinationsStore.byId.get(destinationId);
+  if (!destination || controlPlane.processGeneration === null || controlPlane.revision === null) return null;
+  return JSON.stringify([controlPlane.processGeneration, controlPlane.revision,
+    destinationProbeIdentity(destination, destinationsStore.credentials, protocol, modelId)]);
+}
+
 async function runModelProbe(payload: { modelId: string }) {
   const scope = activeScope.value;
   if (!scope || actionLocked.value || probingModels.value.has(payload.modelId)) return;
-  // Configured-route test only: the effective preferred protocol, or the first
-  // enabled fallback when the preferred one is disabled. Never a blind scan.
   const model = scope.models.find((item) => item.model_id === payload.modelId);
   const protocol = effectiveModelTestProtocol(model);
   if (!protocol) {
@@ -1566,14 +1875,54 @@ async function runModelProbe(payload: { modelId: string }) {
     message.warning(probeError.value);
     return;
   }
+  const sequence = ++probeSequence;
+  const processGeneration = controlPlane.processGeneration;
+  const identity = scope.scope_kind === "custom_endpoint" ? httpProbeIdentity(scope.scope_id, payload.modelId, protocol) : null;
+  const ownsProbe = () => sequence === probeSequence && activeScope.value?.key === scope.key
+    && controlPlane.processGeneration === processGeneration
+    && (scope.scope_kind !== "custom_endpoint" || (identity !== null && identity === httpProbeIdentity(scope.scope_id, payload.modelId, protocol)));
   probingModels.value = new Set(probingModels.value).add(payload.modelId);
   probeError.value = "";
+  probeReceipt.value = null;
   try {
+    if (scope.scope_kind === "custom_endpoint") {
+      const result = await destinationsStore.testModel(scope.scope_id, payload.modelId, protocol);
+      if (!ownsProbe()) return;
+      const error = result.ok ? null : (result.error || t("连接测试失败"));
+      probeReceipt.value = {
+        scopeKey: scope.key,
+        modelId: payload.modelId,
+        protocol,
+        processGeneration,
+        revision: controlPlane.revision,
+        identity,
+        results: [{ protocol, success: result.ok, skipped: false, error }],
+        hasFailures: !result.ok,
+      };
+      if (!result.ok) {
+        probeError.value = error ?? t("连接测试失败");
+        actionLive.value = t("连接测试失败");
+        message.warning(actionLive.value);
+        return;
+      }
+      actionLive.value = t("连接测试成功");
+      message.success(t("连接测试成功"));
+      return;
+    }
     const response = await providerApi.runProtocolProbes(scope.provider_id, {
       model_id: payload.modelId,
       protocols: [protocol],
     });
-    probeSummary.value = probeSummaryFromResponse(response);
+    if (!ownsProbe()) return;
+    probeReceipt.value = {
+      ...probeSummaryFromResponse(response),
+      scopeKey: scope.key,
+      modelId: payload.modelId,
+      protocol,
+      processGeneration,
+      revision: controlPlane.revision,
+      identity: null,
+    };
     if (response.contract) {
       providersStore.applyModelContract({
         scope_kind: scope.scope_kind,
@@ -1581,6 +1930,7 @@ async function runModelProbe(payload: { modelId: string }) {
       }, response.contract);
     }
     const loaded = await loadAll({ retain: true });
+    if (!ownsProbe()) return;
     if (!loaded.ok) {
       probeError.value = loaded.error;
       message.error(t("连接测试失败：{error}", { error: probeError.value }));
@@ -1595,14 +1945,43 @@ async function runModelProbe(payload: { modelId: string }) {
     actionLive.value = t("连接测试成功");
     message.success(t("连接测试成功"));
   } catch (error) {
+    if (!ownsProbe()) return;
     probeError.value = dashboardErrorDetail(error);
+    probeReceipt.value = {
+      scopeKey: scope.key,
+      modelId: payload.modelId,
+      protocol,
+      processGeneration,
+      revision: controlPlane.revision,
+      identity,
+      results: [{ protocol, success: false, skipped: false, error: probeError.value }],
+      hasFailures: true,
+    };
     message.error(t("连接测试失败：{error}", { error: probeError.value }));
   } finally {
+    if (sequence !== probeSequence) return;
     const next = new Set(probingModels.value);
     next.delete(payload.modelId);
     probingModels.value = next;
   }
 }
+
+const probeSummary = computed(() => {
+  const receipt = probeReceipt.value;
+  const scope = activeScope.value;
+  if (!receipt || !scope || receipt.scopeKey !== scope.key) return null;
+  if (receipt.processGeneration !== controlPlane.processGeneration || receipt.revision !== controlPlane.revision) return null;
+  if (
+    scope.scope_kind === "custom_endpoint"
+    && (receipt.processGeneration !== controlPlane.processGeneration
+      || receipt.identity !== httpProbeIdentity(scope.scope_id, receipt.modelId, receipt.protocol))
+  ) {
+    return null;
+  }
+  const model = scope.models.find((item) => item.model_id === receipt.modelId);
+  if (effectiveModelTestProtocol(model) !== receipt.protocol) return null;
+  return receipt;
+});
 
 function probeSummaryFromResponse(response: ProtocolProbeResponse) {
   return {
@@ -1675,6 +2054,7 @@ function onPopState() {
 }
 
 watch(selectedConnectionId, () => {
+  catalogRefreshError.value = "";
   // The embedded form unmounts on selection change; its busy flags die with
   // it, so the navigation lock must not outlive the form.
   inlineFormBusy.value = false;
@@ -1694,6 +2074,11 @@ watch(selectedEntry, (entry, previous) => {
   if (entry && entry.origin !== "builtin") void ensureDefinition(entry.provider_id);
 });
 
+watch(selectedDestinationId, (id, previous) => {
+  if (id === previous) return;
+  resetScopeActions();
+});
+
 watch([selectedConnectionId, selectedDestinationId, activeTab, addStage], () => {
   writeUrl();
 });
@@ -1706,7 +2091,9 @@ onActivated(() => {
   if (activatedOnce) void loadAll({ retain: true });
   else activatedOnce = true;
 });
+onDeactivated(resetScopeActions);
 onUnmounted(() => {
+  resetScopeActions();
   window.removeEventListener("popstate", onPopState);
 });
 </script>
@@ -1773,27 +2160,10 @@ onUnmounted(() => {
   flex: none;
   padding: 0 var(--ocg-space-sm) var(--ocg-space-sm);
 }
-/* One list scrolls; the Plan / API group labels stick to its top edge instead
-   of splitting the rail into two independently scrolling half-height panes. */
 .providers-rail-list {
   flex: 1;
   min-height: 0;
   overflow: auto;
-}
-.providers-rail-pane + .providers-rail-pane {
-  border-top: 1px solid var(--ocg-border);
-}
-.providers-rail-pane__label {
-  position: sticky;
-  top: 0;
-  z-index: 1;
-  margin: 0;
-  padding: var(--ocg-space-xs) var(--ocg-space-md);
-  color: var(--ocg-subtle);
-  font-size: var(--ocg-font-xs);
-  font-weight: 600;
-  line-height: 1.3;
-  background: var(--ocg-surface);
 }
 .providers-rail-footer {
   flex: none;

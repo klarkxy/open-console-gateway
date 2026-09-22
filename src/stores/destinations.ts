@@ -8,6 +8,7 @@ import {
   routingApi,
   routingCardsApi,
   type Destination,
+  type DestinationCatalogUpdateInput,
   type DestinationCredential,
   type DestinationPatchInput,
   type RoutingCardListSnapshot,
@@ -17,6 +18,7 @@ import {
 import type { MutationExpectation } from "../api/generated/dashboard-v3.ts";
 import type {
   MappingErrorCodeDto,
+  ProtocolDto,
   RefusedRowKindDto,
   RoutingClientProtocol,
 } from "../api/generated/dashboard-v4.ts";
@@ -191,6 +193,88 @@ export const useDestinationsStore = defineStore("destinations", () => {
   /** Generation-guarded reload after a mutation. Keeps the last snapshot on failure. */
   async function refreshAfterMutation(): Promise<void> {
     await load();
+  }
+
+  async function refreshCatalog(id: string) {
+    const token = beginDestinationMutation();
+    try {
+      const result = await destinationsApi.refreshCatalog(id, expectation.value ?? undefined);
+      if (beginMutationCommit(token, result.expectation)) {
+        destinations.value = destinations.value.map((destination) => (
+          destination.id === id ? result.destination : destination
+        ));
+        expectation.value = result.expectation;
+      }
+      return result;
+    } catch (cause) {
+      if (isRevisionConflict(cause) && mutationSessionIsCurrent(token)) {
+        await refreshAfterMutation();
+      }
+      throw cause;
+    }
+  }
+
+  /**
+   * PUT catalog enablement / protocol / preferred / removals. Commits the
+   * destination and credential receipt in place. Probe is a separate route.
+   */
+  async function updateCatalog(
+    id: string,
+    input: DestinationCatalogUpdateInput,
+    capturedExpectation?: MutationExpectation,
+  ): Promise<Destination> {
+    const token = beginDestinationMutation();
+    try {
+      const result = await destinationsApi.updateCatalog(
+        id,
+        input,
+        capturedExpectation ?? expectation.value ?? undefined,
+      );
+      if (beginMutationCommit(token, result.expectation)) {
+        destinations.value = destinations.value.map((destination) => (
+          destination.id === id ? result.destination : destination
+        ));
+        credentials.value = result.credentials;
+        expectation.value = result.expectation;
+      }
+      return result.destination;
+    } catch (cause) {
+      if (isRevisionConflict(cause) && mutationSessionIsCurrent(token)) {
+        await refreshAfterMutation();
+      }
+      throw cause;
+    }
+  }
+
+  /**
+   * POST a bounded model/protocol probe. Updates the CAS pair from the
+   * receipt and never rewrites catalog enablement. HTTP 200 with ok=false is
+   * a completed observation, not a thrown transport failure.
+   */
+  async function testModel(
+    id: string,
+    publicModel: string,
+    protocol: ProtocolDto,
+    capturedExpectation?: MutationExpectation,
+  ) {
+    const token = beginDestinationMutation();
+    try {
+      const result = await destinationsApi.testModel(
+        id,
+        publicModel,
+        protocol,
+        capturedExpectation ?? expectation.value ?? undefined,
+      );
+      if (beginMutationCommit(token, result.expectation)) {
+        expectation.value = result.expectation;
+      }
+      return result;
+    } catch (cause) {
+      if (isRevisionConflict(cause) && mutationSessionIsCurrent(token)) {
+        await refreshAfterMutation();
+      }
+      throw cause;
+    }
   }
 
   /**
@@ -382,6 +466,9 @@ export const useDestinationsStore = defineStore("destinations", () => {
     refreshAfterMutation,
     commitSnapshot,
     patchDestination,
+    refreshCatalog,
+    updateCatalog,
+    testModel,
     retryQuotaRecovery,
     deleteDestination,
     replaceRoutingCardLayout,

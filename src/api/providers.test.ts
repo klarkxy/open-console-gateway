@@ -195,6 +195,41 @@ test("unified catalog refresh sends only the selected contract scope and CAS tok
   }]);
 });
 
+test("provider protocol override sends only selected Key grants with its captured CAS pair", async () => {
+  setupControlPlane(12, 42, "p1");
+  const requests = installFetchMock(({ url, method }) => {
+    if (url.endsWith("/provider-contracts/provider/opencode/model-protocol-overrides") && method === "PUT") {
+      return {
+        revision: 9,
+        processGeneration: 42,
+        pricingRevision: "p1",
+        providers: [],
+        customEndpoints: [],
+      };
+    }
+    throw new Error(`unexpected request ${method} ${url}`);
+  });
+
+  await providerApi.updateModelProtocolOverrides(
+    "provider",
+    "opencode",
+    [{ model_id: "mimo-v2.6-flash", protocol: "responses", state: "force_on" }],
+    ["key-selected"],
+    { expectedRevision: 8, processGeneration: 42 },
+  );
+
+  assert.deepEqual(requests, [{
+    url: "/dashboard/api/v4/provider-contracts/provider/opencode/model-protocol-overrides",
+    method: "PUT",
+    body: {
+      overrides: [{ modelId: "mimo-v2.6-flash", protocol: "responses", state: "force_on" }],
+      authorizeCredentialIds: ["key-selected"],
+      expectedRevision: 8,
+      processGeneration: 42,
+    },
+  }]);
+});
+
 test("catalog remove posts V4 model ids then reloads contracts", async () => {
   setupControlPlane(12, 42, "p1");
   const requests = installFetchMock(({ url, method }) => {

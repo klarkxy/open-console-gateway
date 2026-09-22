@@ -1,4 +1,8 @@
-import { dashboardV3, isRevisionConflict, type WithoutExpectation } from "./dashboard-v3.ts";
+import {
+  dashboardV3,
+  isRevisionConflict,
+  type WithoutExpectation,
+} from "./dashboard-v3.ts";
 import { dashboardV4 } from "./dashboard-v4.ts";
 import { t } from "../i18n/index.ts";
 import { useControlPlaneStore } from "../stores/controlPlane.ts";
@@ -706,6 +710,8 @@ export const providerApi = {
     scopeKind: ContractScopeKind,
     scopeId: string,
     overrides: ModelProtocolOverrideUpdate[],
+    authorizeCredentialIds?: string[],
+    capturedExpectation?: MutationExpectation,
   ): Promise<ProviderContractsResponse> => {
     const control = useControlPlaneStore();
     if (!control.hasTokens()) await control.refresh();
@@ -719,9 +725,13 @@ export const providerApi = {
             protocol: item.protocol,
             state: item.state,
             ...(item.preferred !== undefined ? { preferred: item.preferred } : {}),
-          })) } satisfies WithoutExpectation<ModelProtocolOverridesUpdate>,
+          })),
+          ...(authorizeCredentialIds && authorizeCredentialIds.length > 0
+            ? { authorizeCredentialIds: [...authorizeCredentialIds] }
+            : {}),
+          } satisfies WithoutExpectation<ModelProtocolOverridesUpdate>,
           expectation,
-        )));
+        ), capturedExpectation));
     } catch (cause) {
       if (isRevisionConflict(cause)) await dashboardV3.getProviderContracts();
       throw cause;

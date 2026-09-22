@@ -91,6 +91,7 @@ function destinationDto(id: string, name = id): DestinationDto {
     observerCredentialId: null,
     plan: null,
     protocols: ["chat_completions"],
+    protocolRoutes: [],
   };
 }
 
@@ -168,6 +169,141 @@ async function loadedStore(calls: DeferredCall[]): Promise<ReturnType<typeof use
   await load;
   return store;
 }
+
+test("catalog refresh commits models immediately and invalidates loads that started during refresh", async () => {
+  setActivePinia(createPinia());
+  useControlPlaneStore();
+  const calls = installDeferredFetch();
+  const store = await loadedStore(calls);
+  const pending = store.refreshCatalog("dest-1");
+  await waitForCalls(calls, 2);
+  assert.equal(calls[1]!.method, "POST");
+  assert.ok(calls[1]!.url.endsWith("/destinations/dest-1/catalog/refresh"));
+  assert.deepEqual(calls[1]!.body, { expectedRevision: 4, processGeneration: 99 });
+  const lateLoad = store.load();
+  await waitForCalls(calls, 3);
+  const updated = destinationDto("dest-1");
+  updated.catalog.push({ ...updated.catalog[0]!, publicModel: "new-model", upstreamModel: "new-model", enabled: false });
+  calls[1]!.resolve({ destination: updated, revision: revisionBody(5), addedCount: 1, truncated: false });
+  const result = await pending;
+  assert.equal(result.addedCount, 1);
+  assert.equal(store.destinations[0]!.catalog.length, 2);
+  assert.equal(store.destinations[0]!.catalog[1]!.enabled, false);
+  assert.equal(store.credentials.length, 1);
+  resolvePair(calls, 2, "dest-1", 4);
+  await lateLoad;
+  assert.equal(store.destinations[0]!.catalog.length, 2);
+  assert.equal(store.expectation!.expectedRevision, 5);
+});
+
+test("catalog refresh resolving after logout cannot resurrect destination data", async () => {
+  setActivePinia(createPinia());
+  useControlPlaneStore();
+  const calls = installDeferredFetch();
+  const store = await loadedStore(calls);
+  const pending = store.refreshCatalog("dest-1");
+  await waitForCalls(calls, 2);
+  store.clear();
+  calls[1]!.resolve({ destination: destinationDto("dest-1"), revision: revisionBody(5), addedCount: 0, truncated: true });
+  await pending;
+  assert.deepEqual(store.destinations, []);
+  assert.equal(store.expectation, null);
+});
+
+test("failed catalog refresh retains the existing catalog", async () => {
+  setActivePinia(createPinia());
+  useControlPlaneStore();
+  const calls = installDeferredFetch();
+  const store = await loadedStore(calls);
+  const pending = store.refreshCatalog("dest-1");
+  await waitForCalls(calls, 2);
+  calls[1]!.resolve({ code: "outboundFailed", message: "unavailable" }, 502);
+  await assert.rejects(pending);
+  assert.equal(store.destinations[0]!.catalog.length, 1);
+  assert.equal(store.expectation!.expectedRevision, 4);
+});
+
+test("catalog update commits the destination receipt and does not keep a later stale load", async () => {
+  setActivePinia(createPinia());
+  useControlPlaneStore();
+  const calls = installDeferredFetch();
+  const store = await loadedStore(calls);
+  const pending = store.updateCatalog("dest-1", {
+    updates: [{ publicModel: "lab-opus", enabled: false, protocols: [] }],
+  });
+  await waitForCalls(calls, 2);
+  assert.equal(calls[1]!.method, "PUT");
+  assert.ok(calls[1]!.url.endsWith("/destinations/dest-1/catalog"));
+  const updated = destinationDto("dest-1");
+  updated.catalog[0]!.enabled = false;
+  updated.catalog[0]!.protocols = [];
+  calls[1]!.resolve({
+    destination: updated,
+    credentials: [credentialDto("cred-dest-1", "dest-1")],
+    revision: revisionBody(6),
+  });
+  await pending;
+  assert.equal(store.destinations[0]!.catalog[0]!.enabled, false);
+  assert.deepEqual(store.destinations[0]!.catalog[0]!.protocols, []);
+  assert.equal(store.expectation!.expectedRevision, 6);
+});
+
+test("model test 200 ok=false keeps catalog switches and still publishes the CAS pair", async () => {
+  setActivePinia(createPinia());
+  useControlPlaneStore();
+  const calls = installDeferredFetch();
+  const store = await loadedStore(calls);
+  const pending = store.testModel("dest-1", "lab-opus", "chat_completions");
+  await waitForCalls(calls, 2);
+  assert.equal(calls[1]!.method, "POST");
+  assert.ok(calls[1]!.url.endsWith("/destinations/dest-1/model-tests"));
+  assert.equal((calls[1]!.body as { publicModel?: string }).publicModel, "lab-opus");
+  calls[1]!.resolve({
+    revision: revisionBody(5),
+    publicModel: "lab-opus",
+    protocol: "chat_completions",
+    ok: false,
+    error: "upstream 401",
+  });
+  const result = await pending;
+  assert.equal(result.ok, false);
+  assert.equal(result.error, "upstream 401");
+  assert.equal(store.destinations[0]!.catalog[0]!.enabled, true);
+  assert.equal(store.expectation!.expectedRevision, 5);
+});
+
+test("model test transport failure retains catalog and CAS", async () => {
+  setActivePinia(createPinia());
+  useControlPlaneStore();
+  const calls = installDeferredFetch();
+  const store = await loadedStore(calls);
+  const pending = store.testModel("dest-1", "lab-opus", "chat_completions");
+  await waitForCalls(calls, 2);
+  calls[1]!.resolve({ code: "outboundFailed", message: "unavailable" }, 502);
+  await assert.rejects(pending);
+  assert.equal(store.destinations[0]!.catalog[0]!.enabled, true);
+  assert.equal(store.expectation!.expectedRevision, 4);
+});
+
+test("model test after logout cannot resurrect destination data", async () => {
+  setActivePinia(createPinia());
+  useControlPlaneStore();
+  const calls = installDeferredFetch();
+  const store = await loadedStore(calls);
+  const pending = store.testModel("dest-1", "lab-opus", "chat_completions");
+  await waitForCalls(calls, 2);
+  store.clear();
+  calls[1]!.resolve({
+    revision: revisionBody(5),
+    publicModel: "lab-opus",
+    protocol: "chat_completions",
+    ok: true,
+    error: null,
+  });
+  await pending;
+  assert.deepEqual(store.destinations, []);
+  assert.equal(store.expectation, null);
+});
 
 test("patch commits the returned destination in place with the new CAS pair", async () => {
   setActivePinia(createPinia());

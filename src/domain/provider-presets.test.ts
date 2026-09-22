@@ -312,6 +312,43 @@ test("an unseeded preset keeps the empty mapping row so model editing stays requ
   );
 });
 
+test("protocolRoutes validate as 1–3 unique official routes and parse auth schemes", () => {
+  const withRoutes = {
+    ...samplePreset(),
+    protocolRoutes: [
+      { protocol: "chat_completions", endpointUrl: "https://a.example/v1", authScheme: "bearer" },
+      { protocol: "messages", endpointUrl: "https://a.example/anthropic", authScheme: "x-api-key" },
+    ],
+  };
+  assert.deepEqual(providerPresetShapeIssues(withRoutes), []);
+  assert.ok(providerPresetShapeIssues({ ...samplePreset(), protocolRoutes: [] }).length > 0);
+  assert.ok(providerPresetShapeIssues({
+    ...samplePreset(),
+    protocolRoutes: [
+      { protocol: "chat_completions", endpointUrl: "https://a.example/v1", authScheme: "bearer" },
+      { protocol: "chat_completions", endpointUrl: "https://b.example/v1", authScheme: "bearer" },
+    ],
+  }).length > 0);
+  const parsed = parseProviderPresets([
+    {
+      ...samplePreset({ id: "multi-route" }),
+      protocolRoutes: [
+        { protocol: "responses", endpointUrl: "https://api.preset.example/v1", authScheme: "bearer" },
+        { protocol: "messages", endpointUrl: "https://api.preset.example/anthropic", authScheme: "x-api-key" },
+      ],
+    },
+    {
+      ...samplePreset({ id: "bad-routes" }),
+      protocolRoutes: [{ protocol: "chat_completions", endpointUrl: "not-a-url", authScheme: "bearer" }],
+    },
+  ]);
+  assert.deepEqual(parsed.map((preset) => preset.id), ["multi-route"]);
+  assert.deepEqual(parsed[0]?.protocolRoutes, [
+    { protocol: "responses", endpointUrl: "https://api.preset.example/v1", authScheme: "bearer" },
+    { protocol: "messages", endpointUrl: "https://api.preset.example/anthropic", authScheme: "x_api_key" },
+  ]);
+});
+
 test("model discovery opt-out defaults to enabled and respects an explicit false", () => {
   assert.equal(providerPresetModelDiscoveryEnabled(samplePreset()), true);
   assert.equal(providerPresetModelDiscoveryEnabled(samplePreset({ modelDiscovery: true })), true);

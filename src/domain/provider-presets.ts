@@ -7,6 +7,7 @@ import {
   type ProviderDefinitionMapping,
   type DynamicUpstreamProtocol,
 } from "./dynamic-provider.ts";
+import type { AuthSchemeDto } from "../api/generated/dashboard-v4.ts";
 
 export type ProviderPresetCategory = "official" | "aggregator";
 export type ProviderPresetOffering = "plan" | "api";
@@ -49,6 +50,17 @@ export interface ProviderPreset {
   endpointPlaceholder?: string;
   /** False means no model-discovery interface is configured for this preset. */
   modelDiscovery?: boolean;
+  /**
+   * Official protocol endpoints declared on the preset. Absent means the
+   * editor keeps the single default route. Never inferred from display names.
+   */
+  protocolRoutes?: ProviderPresetProtocolRoute[];
+}
+
+export interface ProviderPresetProtocolRoute {
+  protocol: DynamicUpstreamProtocol;
+  endpointUrl: string;
+  authScheme: AuthSchemeDto;
 }
 
 const PRESET_CATEGORIES: readonly ProviderPresetCategory[] = ["official", "aggregator"];
@@ -59,6 +71,12 @@ const PRESET_PROTOCOLS: readonly DynamicUpstreamProtocol[] = [
   "messages",
 ];
 const PRESET_AUTH_KINDS: readonly ProviderPresetAuthKind[] = ["bearer", "x-api-key"];
+const PRESET_ROUTE_AUTH: Record<string, AuthSchemeDto> = {
+  bearer: "bearer",
+  "x-api-key": "x_api_key",
+  x_api_key: "x_api_key",
+  none: "none",
+};
 
 function isHttpUrl(value: unknown): value is string {
   if (typeof value !== "string" || !value) return false;
@@ -137,7 +155,52 @@ export function providerPresetShapeIssues(raw: unknown, index = 0): string[] {
       issues.push(`${where}: defaultModels must be a non-empty array of trimmed unique non-empty IDs`);
     }
   }
+  if (row.protocolRoutes !== undefined) {
+    issues.push(...providerPresetProtocolRouteIssues(row.protocolRoutes, where));
+  }
   return issues;
+}
+
+function providerPresetProtocolRouteIssues(raw: unknown, where: string): string[] {
+  if (!Array.isArray(raw) || raw.length === 0 || raw.length > 3) {
+    return [`${where}: protocolRoutes must be 1–3 routes when present`];
+  }
+  const issues: string[] = [];
+  const seen = new Set<string>();
+  for (const [index, entry] of raw.entries()) {
+    const routeWhere = `${where} protocolRoutes[${index}]`;
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      issues.push(`${routeWhere}: not an object`);
+      continue;
+    }
+    const route = entry as Record<string, unknown>;
+    if (!PRESET_PROTOCOLS.includes(route.protocol as DynamicUpstreamProtocol)) {
+      issues.push(`${routeWhere}: protocol must be chat_completions, responses, or messages`);
+    } else if (seen.has(route.protocol as string)) {
+      issues.push(`${routeWhere}: protocol is duplicated`);
+    } else {
+      seen.add(route.protocol as string);
+    }
+    if (typeof route.endpointUrl !== "string" || !isHttpUrl(route.endpointUrl)) {
+      issues.push(`${routeWhere}: endpointUrl is not an http(s) URL`);
+    }
+    if (PRESET_ROUTE_AUTH[String(route.authScheme)] === undefined) {
+      issues.push(`${routeWhere}: authScheme must be bearer, x-api-key, or none`);
+    }
+  }
+  return issues;
+}
+
+function presentPresetProtocolRoutes(raw: unknown): ProviderPresetProtocolRoute[] | undefined {
+  if (!Array.isArray(raw) || providerPresetProtocolRouteIssues(raw, "row").length > 0) return undefined;
+  return raw.map((entry) => {
+    const route = entry as Record<string, unknown>;
+    return {
+      protocol: route.protocol as DynamicUpstreamProtocol,
+      endpointUrl: route.endpointUrl as string,
+      authScheme: PRESET_ROUTE_AUTH[String(route.authScheme)]!,
+    };
+  });
 }
 
 /** Keeps only contract-valid rows so a bad entry cannot break the dashboard. */
@@ -147,7 +210,11 @@ export function parseProviderPresets(raw: unknown): ProviderPreset[] {
   const presets: ProviderPreset[] = [];
   for (const [index, row] of raw.entries()) {
     if (providerPresetShapeIssues(row, index).length > 0) continue;
-    const preset = row as ProviderPreset;
+    const record = row as Record<string, unknown>;
+    const preset = {
+      ...(row as ProviderPreset),
+      protocolRoutes: presentPresetProtocolRoutes(record.protocolRoutes),
+    };
     if (seen.has(preset.id)) continue;
     seen.add(preset.id);
     presets.push(preset);

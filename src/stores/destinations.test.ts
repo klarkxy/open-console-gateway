@@ -80,6 +80,7 @@ function destinationDto(
     observerCredentialId: null,
     plan: null,
     protocols: ["chat_completions"],
+    protocolRoutes: [],
   };
 }
 

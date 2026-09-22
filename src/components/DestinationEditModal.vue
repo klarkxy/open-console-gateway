@@ -28,6 +28,7 @@
               :disabled="saving"
               :placeholder="t('推荐填写不带 /v1 的 API 根地址；OCG 会自动补全 /v1 和协议路径。已带 /v1 时不会重复添加。')"
               :input-props="{ 'aria-label': t('API 地址') }"
+              @update:value="onDefaultRouteFieldChange"
             />
           </n-form-item>
           <n-form-item :label="t('鉴权方式')">
@@ -36,6 +37,7 @@
               :options="authOptions"
               :disabled="saving"
               :aria-label="t('鉴权方式')"
+              @update:value="onDefaultRouteFieldChange"
             />
           </n-form-item>
           <n-form-item :label="t('上游协议')">
@@ -44,7 +46,76 @@
               :options="protocolOptions"
               :disabled="saving"
               :aria-label="t('上游协议')"
+              @update:value="onDefaultRouteFieldChange"
             />
+          </n-form-item>
+          <n-form-item v-if="presetWithRoutes" class="full-width-field">
+            <div class="protocol-preset-actions">
+              <n-button
+                attr-type="button"
+                size="small"
+                secondary
+                :disabled="saving"
+                @click="applyPresetRoutes"
+              >
+                {{ t("采用预设协议") }}
+              </n-button>
+              <a
+                :href="presetWithRoutes.docsUrl"
+                target="_blank"
+                rel="noopener noreferrer"
+              >{{ t("官方文档") }}</a>
+            </div>
+          </n-form-item>
+          <n-form-item
+            v-if="extraProtocolRoutes.length > 0 || canAddProtocolRoute"
+            :label="t('额外协议')"
+            class="full-width-field"
+          >
+            <div class="protocol-route-rows">
+              <div
+                v-for="row in extraProtocolRoutes"
+                :key="row.index"
+                class="protocol-route-row"
+              >
+                <n-select
+                  v-model:value="draft.protocol_routes[row.index].protocol"
+                  :options="protocolOptionsFor(row.index)"
+                  :disabled="saving"
+                  :aria-label="t('上游协议')"
+                />
+                <n-select
+                  v-model:value="draft.protocol_routes[row.index].auth_scheme"
+                  :options="authOptions"
+                  :disabled="saving"
+                  :aria-label="t('鉴权方式')"
+                />
+                <n-input
+                  v-model:value="draft.protocol_routes[row.index].endpoint_url"
+                  :disabled="saving"
+                  :placeholder="t('协议地址')"
+                  :input-props="{ 'aria-label': t('协议地址') }"
+                />
+                <n-button
+                  attr-type="button"
+                  quaternary
+                  :disabled="saving"
+                  @click="removeProtocolRoute(row.index)"
+                >
+                  {{ t("删除") }}
+                </n-button>
+              </div>
+              <n-button
+                v-if="canAddProtocolRoute"
+                attr-type="button"
+                size="small"
+                secondary
+                :disabled="saving"
+                @click="addProtocolRoute"
+              >
+                {{ t("添加协议") }}
+              </n-button>
+            </div>
           </n-form-item>
           <n-form-item :label="t('模型映射')" class="full-width-field">
             <div class="mapping-rows">
@@ -179,7 +250,12 @@ import { dashboardErrorDetail } from "../utils/errors.ts";
 import { useLocalizedModalCloseLabel } from "../utils/modal-close-label.ts";
 import {
   DESTINATION_EDIT_ISSUE_KEYS,
+  addDraftProtocolRoute,
+  applyPresetProtocolRoutesToDraft,
   destinationEditDraft,
+  removeDraftProtocolRoute,
+  syncDraftDefaultRoute,
+  unusedDraftProtocol,
   withAuthorizedCredentials,
   type DestinationEditDraft,
   type DestinationGrantCandidate,
@@ -187,8 +263,10 @@ import {
 } from "../domain/destination-edit.ts";
 import { planDestinationSave } from "../domain/destination-edit-save.ts";
 import { PROVIDER_PROTOCOLS, protocolDisplayName } from "../domain/provider-contracts.ts";
+import { PROVIDER_PRESETS } from "../domain/provider-presets.ts";
 import type { MutationExpectation } from "../api/generated/dashboard-v3.ts";
 import type { ConnectionEndpoint } from "../api/connections.ts";
+import type { ProtocolDto } from "../api/destinations.ts";
 
 const props = defineProps<{
   show: boolean;
@@ -197,6 +275,8 @@ const props = defineProps<{
   /** Credential projection used to compute grant consent candidates. */
   credentials: readonly DestinationCredential[];
   endpoints: readonly ConnectionEndpoint[];
+  /** Persisted preset id from the parent definition; never inferred from names. */
+  presetId?: string | null;
 }>();
 
 const emit = defineEmits<{
@@ -235,6 +315,55 @@ const routeModeOptions = computed(() => [
   { value: "override", label: t("覆盖上游地址") },
 ]);
 
+const presetWithRoutes = computed(() => {
+  const presetId = props.presetId?.trim();
+  if (!presetId) return null;
+  const preset = PROVIDER_PRESETS.find((entry) => entry.id === presetId) ?? null;
+  return preset?.protocolRoutes && preset.protocolRoutes.length > 0 ? preset : null;
+});
+
+const extraProtocolRoutes = computed(() => (
+  (draft.value?.protocol_routes ?? []).slice(1).map((route, offset) => ({
+    index: offset + 1,
+    route,
+  }))
+));
+
+const canAddProtocolRoute = computed(() => (
+  Boolean(draft.value && unusedDraftProtocol(draft.value))
+));
+
+function onDefaultRouteFieldChange(): void {
+  if (!draft.value || saving.value) return;
+  syncDraftDefaultRoute(draft.value);
+}
+
+function addProtocolRoute(): void {
+  if (!draft.value || saving.value) return;
+  addDraftProtocolRoute(draft.value);
+}
+
+function removeProtocolRoute(index: number): void {
+  if (!draft.value || saving.value) return;
+  removeDraftProtocolRoute(draft.value, index);
+}
+
+function applyPresetRoutes(): void {
+  if (!draft.value || saving.value || !presetWithRoutes.value) return;
+  applyPresetProtocolRoutesToDraft(draft.value, presetWithRoutes.value);
+}
+
+function protocolOptionsFor(index: number) {
+  const current = draft.value?.protocol_routes[index]?.protocol ?? "";
+  const used = new Set(
+    (draft.value?.protocol_routes ?? [])
+      .map((route, routeIndex) => (routeIndex === index ? "" : route.protocol)),
+  );
+  return protocolOptions.value.filter((option) => (
+    option.value === current || !used.has(option.value as ProtocolDto)
+  ));
+}
+
 function resetDraft(destination: Destination): void {
   draft.value = destinationEditDraft(destination);
   capturedExpectation.value = destinationsStore.expectation
@@ -260,7 +389,17 @@ watch(
 
 function addModel(): void {
   if (!draft.value || saving.value) return;
-  draft.value.models.push({ enabled: true, public_model: "", upstream_model: "", upstream_override: null });
+  const protocol = PROVIDER_PROTOCOLS.includes(draft.value.upstream_protocol as ProtocolDto)
+    ? draft.value.upstream_protocol as ProtocolDto
+    : undefined;
+  draft.value.models.push({
+    enabled: true,
+    public_model: "",
+    upstream_model: "",
+    protocols: protocol ? [protocol] : [],
+    preferred: protocol ?? null,
+    upstream_override: null,
+  });
 }
 
 function removeModel(index: number): void {
@@ -383,13 +522,30 @@ function onOuterUpdateShow(value: boolean): void {
 }
 .mapping-row-main {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr) auto;
   gap: var(--ocg-space-sm);
   align-items: center;
 }
 .mapping-row-route {
   display: grid;
   grid-template-columns: minmax(140px, auto) minmax(140px, auto) minmax(0, 1fr);
+  gap: var(--ocg-space-sm);
+  align-items: center;
+}
+.protocol-preset-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ocg-space-sm);
+}
+.protocol-route-rows {
+  display: grid;
+  gap: var(--ocg-space-sm);
+  width: 100%;
+}
+.protocol-route-row {
+  display: grid;
+  grid-template-columns: minmax(140px, auto) minmax(140px, auto) minmax(0, 1fr) auto;
   gap: var(--ocg-space-sm);
   align-items: center;
 }
@@ -432,6 +588,9 @@ function onOuterUpdateShow(value: boolean): void {
     grid-template-columns: minmax(0, 1fr);
   }
   .mapping-row-route {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .protocol-route-row {
     grid-template-columns: minmax(0, 1fr);
   }
 }

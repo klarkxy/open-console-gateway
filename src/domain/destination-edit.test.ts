@@ -4,6 +4,8 @@ import type { Destination, DestinationCredential } from "../api/destinations.ts"
 import {
   DESTINATION_EDIT_ISSUE_KEYS,
   DestinationEditError,
+  addDraftProtocolRoute,
+  applyPresetProtocolRoutesToDraft,
   buildDestinationPatch,
   destinationEditDraft,
   destinationGrantCandidates,
@@ -11,10 +13,30 @@ import {
   destinationRouteChanged,
   isDestinationDeletable,
   isDestinationEditable,
+  isDestinationCatalogRefreshable,
   withAuthorizedCredentials,
   type DestinationEditDraft,
   type DestinationEditIssue,
 } from "./destination-edit.ts";
+
+test("HTTP catalog refresh follows capabilities for presets and custom destinations", () => {
+  for (const kind of ["dynamic", "custom_account"] as const) {
+    const row = destination({ legacy: { kind, id: "arbitrary-provider" } });
+    assert.equal(isDestinationCatalogRefreshable(row), true);
+    assert.equal(isDestinationCatalogRefreshable({ ...row, adapter: "opencode_go" }), false);
+    assert.equal(isDestinationCatalogRefreshable({ ...row, capabilities: { ...row.capabilities, observer: true } }), false);
+    assert.equal(isDestinationCatalogRefreshable({ ...row, capabilities: { ...row.capabilities, discoverable_models: false } }), false);
+  }
+});
+
+test("editing discovered models preserves default-off until explicitly enabled", () => {
+  const row = destination();
+  row.catalog[0]!.enabled = false;
+  const draft = destinationEditDraft(row);
+  assert.equal(buildDestinationPatch(row, draft).models[0]?.enabled, false);
+  draft.models[0]!.enabled = true;
+  assert.equal(buildDestinationPatch(row, draft).models[0]?.enabled, true);
+});
 
 function destination(overrides: Partial<Destination> = {}): Destination {
   return {
@@ -90,6 +112,11 @@ function draft(overrides: Partial<DestinationEditDraft> = {}): DestinationEditDr
     endpoint_url: "https://api.lab.example/v1",
     auth_scheme: "bearer",
     upstream_protocol: "chat_completions",
+    protocol_routes: [{
+      protocol: "chat_completions",
+      endpoint_url: "https://api.lab.example/v1",
+      auth_scheme: "bearer",
+    }],
     models: [{ public_model: "lab-opus", upstream_model: "vendor/opus", upstream_override: null }],
     ...overrides,
   };
@@ -122,6 +149,12 @@ test("every issue code has a copy mapping", () => {
     "invalid_override_endpoint",
     "override_endpoint_not_http",
     "override_endpoint_with_credentials",
+    "missing_route_endpoint",
+    "invalid_route_endpoint",
+    "route_endpoint_not_http",
+    "route_endpoint_with_credentials",
+    "duplicate_protocol_route",
+    "too_many_protocol_routes",
   ];
   for (const code of codes) assert.ok(DESTINATION_EDIT_ISSUE_KEYS[code]);
 });
@@ -160,10 +193,17 @@ test("draft round-trips the persisted destination including per-model overrides"
   assert.equal(result.endpoint_url, "https://api.lab.example/v1");
   assert.equal(result.auth_scheme, "bearer");
   assert.equal(result.upstream_protocol, "chat_completions");
+  assert.deepEqual(result.protocol_routes, [{
+    protocol: "chat_completions",
+    endpoint_url: "https://api.lab.example/v1",
+    auth_scheme: "bearer",
+  }]);
   assert.deepEqual(result.models, [{
     enabled: true,
     public_model: "lab-fast",
     upstream_model: "vendor/fast",
+    protocols: ["responses"],
+    preferred: "responses",
     upstream_override: { protocol: "responses", endpoint_url: "https://fast.lab.example/v1" },
   }]);
 });
@@ -239,6 +279,76 @@ test("buildDestinationPatch emits wire-shaped models with overrides", () => {
     },
   ]);
   assert.equal("authorizeCredentialIds" in input, false);
+});
+
+test("legacy single-route saves omit protocolRoutes; explicit routes round-trip", () => {
+  const legacy = buildDestinationPatch(destination(), draft());
+  assert.equal("protocolRoutes" in legacy, false);
+  const explicit = destination({
+    protocol_routes: [
+      { protocol: "chat_completions", endpoint_url: "https://api.lab.example/v1", auth_scheme: "bearer" },
+      { protocol: "messages", endpoint_url: "https://api.lab.example/anthropic", auth_scheme: "x_api_key" },
+    ],
+  });
+  const result = buildDestinationPatch(explicit, destinationEditDraft(explicit));
+  assert.deepEqual(result.protocolRoutes, [
+    { protocol: "chat_completions", endpointUrl: "https://api.lab.example/v1", authScheme: "bearer" },
+    { protocol: "messages", endpointUrl: "https://api.lab.example/anthropic", authScheme: "x_api_key" },
+  ]);
+  assert.equal(result.models[0]?.enabled, true);
+  assert.deepEqual(result.models[0]?.protocols, ["chat_completions"]);
+  assert.equal(result.models[0]?.preferred, "chat_completions");
+  assert.equal(result.models[0]?.upstreamOverride, null);
+});
+
+test("adding a second protocol route is a grant-affecting route change", () => {
+  const value = destination();
+  const next = draft();
+  assert.equal(addDraftProtocolRoute(next), true);
+  next.protocol_routes[1]!.endpoint_url = "https://api.lab.example/responses";
+  next.protocol_routes[1]!.protocol = "responses";
+  const input = buildDestinationPatch(value, next);
+  assert.equal(destinationRouteChanged(value, input), true);
+  assert.equal(input.protocolRoutes?.length, 2);
+});
+
+test("duplicate protocols and more than three routes are rejected", () => {
+  assert.equal(
+    issueOf(() => buildDestinationPatch(destination(), draft({
+      protocol_routes: [
+        { protocol: "chat_completions", endpoint_url: "https://api.lab.example/v1", auth_scheme: "bearer" },
+        { protocol: "chat_completions", endpoint_url: "https://other.example/v1", auth_scheme: "bearer" },
+      ],
+    }))),
+    "duplicate_protocol_route",
+  );
+  assert.equal(
+    issueOf(() => buildDestinationPatch(destination(), draft({
+      protocol_routes: [
+        { protocol: "chat_completions", endpoint_url: "https://a.example/v1", auth_scheme: "bearer" },
+        { protocol: "responses", endpoint_url: "https://b.example/v1", auth_scheme: "bearer" },
+        { protocol: "messages", endpoint_url: "https://c.example/v1", auth_scheme: "x_api_key" },
+        { protocol: "chat_completions", endpoint_url: "https://d.example/v1", auth_scheme: "bearer" },
+      ],
+    }))),
+    "too_many_protocol_routes",
+  );
+});
+
+test("preset protocol routes fill the draft only when applied", () => {
+  const next = draft({ endpoint_url: "https://user.example/v1" });
+  assert.equal(applyPresetProtocolRoutesToDraft(next, {}), false);
+  assert.equal(next.endpoint_url, "https://user.example/v1");
+  assert.equal(applyPresetProtocolRoutesToDraft(next, {
+    protocolRoutes: [
+      { protocol: "responses", endpointUrl: "https://api.preset.example/v1", authScheme: "bearer" },
+      { protocol: "messages", endpointUrl: "https://api.preset.example/anthropic", authScheme: "x_api_key" },
+    ],
+  }), true);
+  assert.equal(next.endpoint_url, "https://api.preset.example/v1");
+  assert.equal(next.upstream_protocol, "responses");
+  assert.equal(next.auth_scheme, "bearer");
+  assert.equal(next.protocol_routes.length, 2);
 });
 
 test("route change detection covers origin, protocol, and override edits", () => {
@@ -330,4 +440,30 @@ test("grant consent attaches only the explicit selection", () => {
     withAuthorizedCredentials(input, ["cred-1", "cred-2"]).authorizeCredentialIds,
     ["cred-1", "cred-2"],
   );
+});
+
+
+test("route changes reconcile model protocols while metadata edits preserve manual selection", () => {
+  const row = destination();
+  const draft = destinationEditDraft(row);
+  draft.upstream_protocol = "messages";
+  draft.endpoint_url = "https://api.lab.example/anthropic/v1/messages";
+  const changed = buildDestinationPatch(row, draft).models[0]!;
+  assert.deepEqual(changed.protocols, ["messages"]);
+  assert.equal(changed.preferred, "messages");
+  const override = destinationEditDraft(row);
+  override.models[0]!.upstream_override = { protocol: "messages", endpoint_url: "https://alternate.example/messages" };
+  assert.deepEqual(buildDestinationPatch(row, override).models[0]!.protocols, ["messages"]);
+  const off = destination({ catalog: [{ ...row.catalog[0]!, enabled: false, protocols: [] }] });
+  const enable = destinationEditDraft(off);
+  enable.models[0]!.enabled = true;
+  assert.deepEqual(buildDestinationPatch(off, enable).models[0]!.protocols, ["chat_completions"]);
+  const multi = destination({ protocols: ["chat_completions", "messages"], protocol_routes: [
+    { protocol: "chat_completions", endpoint_url: row.base_url!, auth_scheme: "bearer" },
+    { protocol: "messages", endpoint_url: "https://api.lab.example/anthropic/v1/messages", auth_scheme: "x_api_key" },
+  ], catalog: [{ ...row.catalog[0]!, protocols: ["messages"], preferred: "messages" }] });
+  const rename = destinationEditDraft(multi);
+  rename.name = "Renamed";
+  assert.deepEqual(buildDestinationPatch(multi, rename).models[0]!.protocols, ["messages"]);
+  assert.equal(buildDestinationPatch(multi, rename).models[0]!.preferred, "messages");
 });

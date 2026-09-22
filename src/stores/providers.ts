@@ -10,6 +10,7 @@ import type {
   ProviderCatalogEntry,
   ProviderContractsResponse,
 } from "../api/providers.ts";
+import type { MutationExpectation } from "../api/generated/dashboard-v3.ts";
 import { applyModelContractToResponse, type ProviderScopeRef } from "../domain/provider-contracts.ts";
 
 /**
@@ -178,10 +179,18 @@ export const useProvidersStore = defineStore("providers", () => {
     scopeKind: ContractScopeKind,
     scopeId: string,
     overrides: ModelProtocolOverrideUpdate[],
+    authorizeCredentialIds?: string[],
+    capturedExpectation?: MutationExpectation,
   ): Promise<ProviderContractsResponse> {
     const token = beginContractsMutation();
     try {
-      const result = await providerApi.updateModelProtocolOverrides(scopeKind, scopeId, overrides);
+      const result = await providerApi.updateModelProtocolOverrides(
+        scopeKind,
+        scopeId,
+        overrides,
+        authorizeCredentialIds,
+        capturedExpectation,
+      );
       commitContractsMutation(token, result);
       return result;
     } catch (cause) {

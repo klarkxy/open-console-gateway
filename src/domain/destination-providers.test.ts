@@ -5,9 +5,7 @@ import type { Destination } from "../api/destinations.ts";
 import {
   OLLAMA_PROVIDER_ID,
   connectionForDestination,
-  destinationOffering,
   filterDestinations,
-  groupDestinationsByOffering,
   isProvidersRailDestination,
   railKeyForDestination,
 } from "./destination-providers.ts";
@@ -100,20 +98,12 @@ test("connection join follows destination legacy kind, not destination id", () =
   );
 });
 
-test("destination offering follows an embedded plan, not adapter identity", () => {
-  assert.equal(destinationOffering(destination("go", { plan: monthly })), "plan");
-  assert.equal(destinationOffering(destination("http")), "api");
-});
-
-test("destination groups and filters keep input order", () => {
+test("destination filtering matches connection identity", () => {
   const rows = [
     destination("go", { name: "OpenCode Go", plan: monthly, brand_family: "OpenCode" }),
     destination("lab", { name: "lab.example", base_url: "https://lab.example/v1" }),
     destination("kimi", { name: "Kimi", plan: monthly }),
   ];
-  const groups = groupDestinationsByOffering(rows);
-  assert.deepEqual(groups.plan.map((row) => row.id), ["go", "kimi"]);
-  assert.deepEqual(groups.api.map((row) => row.id), ["lab"]);
   assert.deepEqual(filterDestinations(rows, "LAB.EXAMPLE").map((row) => row.id), ["lab"]);
   assert.deepEqual(filterDestinations(rows, "opencode").map((row) => row.id), ["go"]);
 });

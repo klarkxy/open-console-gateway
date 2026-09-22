@@ -70,7 +70,7 @@
               {{ t("删除") }}
             </n-button>
           </template>
-          {{ t("删除已选的 {count} 个模型？移除后不再路由，下次刷新官方目录时可能再次出现并默认关闭。", { count: selectedCount }) }}
+          {{ removeConfirmText(selectedCount) }}
         </n-popconfirm>
         <n-tooltip trigger="hover">
           <template #trigger>
@@ -135,9 +135,9 @@
             <td class="matrix-cell matrix-cell--model">
               <code>{{ modelAlias(modelId) || modelId }}</code>
               <code
-                v-if="modelAlias(modelId) && modelAlias(modelId) !== modelId"
+                v-if="modelSecondary(modelId)"
                 class="matrix-model-id"
-              >{{ modelId }}</code>
+              >{{ modelSecondary(modelId) }}</code>
             </td>
             <td class="matrix-cell matrix-cell--protocol">
               <div
@@ -241,7 +241,7 @@
                     {{ t("删除模型") }}
                   </n-tooltip>
                 </template>
-                {{ t("删除此模型？移除后不再路由，下次刷新官方目录时可能再次出现并默认关闭。") }}
+                {{ removeConfirmText(1) }}
               </n-popconfirm>
             </td>
           </tr>
@@ -343,7 +343,8 @@ const matrixModels = computed(() => {
     if (enabledOnly.value && !rowEnabled(modelId)) return false;
     if (!needle) return true;
     return modelId.toLocaleLowerCase().includes(needle)
-      || modelAlias(modelId).toLocaleLowerCase().includes(needle);
+      || modelAlias(modelId).toLocaleLowerCase().includes(needle)
+      || modelSecondary(modelId).toLocaleLowerCase().includes(needle);
   });
 });
 
@@ -372,6 +373,28 @@ function modelContract(modelId: string): ProviderScopeView["models"][number] | u
 
 function modelAlias(modelId: string): string {
   return modelContract(modelId)?.alias?.trim() ?? "";
+}
+
+function modelSecondary(modelId: string): string {
+  const model = modelContract(modelId);
+  const extra = model?.secondary?.trim() ?? "";
+  if (props.scope.scope_kind === "custom_endpoint") return extra;
+  const primary = modelAlias(modelId) || modelId;
+  if (extra && extra !== primary) return extra;
+  if (modelAlias(modelId) && modelAlias(modelId) !== modelId) return modelId;
+  return "";
+}
+
+function removeConfirmText(count: number): string {
+  const http = props.scope.scope_kind === "custom_endpoint";
+  if (count === 1) {
+    return t(http
+      ? "删除此模型？移除后不再路由，下次刷新官方目录时可能再次出现并默认开启。"
+      : "删除此模型？移除后不再路由，下次刷新官方目录时可能再次出现并默认关闭。");
+  }
+  return t(http
+    ? "删除已选的 {count} 个模型？移除后不再路由，下次刷新官方目录时可能再次出现并默认开启。"
+    : "删除已选的 {count} 个模型？移除后不再路由，下次刷新官方目录时可能再次出现并默认关闭。", { count });
 }
 
 function rowChips(modelId: string): ProviderProtocol[] {

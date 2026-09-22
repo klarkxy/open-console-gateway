@@ -50,6 +50,7 @@ function destination(overrides: Partial<DestinationDto> = {}): DestinationDto {
     observerCredentialId: null,
     plan: null,
     protocols: ["chat_completions"],
+    protocolRoutes: [],
     ...overrides,
   };
 }
@@ -98,6 +99,24 @@ test("presentDestination maps the V4 wire row onto snake_case presentation field
   assert.equal(presented.capabilities.redirect_policy, "no_follow");
   assert.equal(presented.catalog[0]?.public_model, "lab-opus");
   assert.equal(presented.observer_credential_id, null);
+  assert.deepEqual(presented.protocol_routes, []);
+});
+
+test("presentDestination maps protocolRoutes with an empty fallback", () => {
+  const row = destination() as ReturnType<typeof destination> & {
+    protocolRoutes: { protocol: "responses"; endpointUrl: string; authScheme: "bearer" }[];
+  };
+  row.protocolRoutes = [{
+    protocol: "responses",
+    endpointUrl: "https://lab.example/responses",
+    authScheme: "bearer",
+  }];
+  const presented = presentDestination(row);
+  assert.deepEqual(presented.protocol_routes, [{
+    protocol: "responses",
+    endpoint_url: "https://lab.example/responses",
+    auth_scheme: "bearer",
+  }]);
 });
 
 test("presentDestinationCredential maps grants, cooldowns, and has_secret", () => {

@@ -81,6 +81,8 @@ export interface ProviderScopeView {
 /** Provider rows may publish a stable client Alias alongside their raw upstream id. */
 export type ProviderModelContract = EffectiveModelContract & {
   alias?: string;
+  /** Extra identity shown under the alias; HTTP uses the upstream model. */
+  secondary?: string;
 };
 
 export function providerScopeKey(scopeKind: string, scopeId: string): string {
@@ -260,7 +262,6 @@ export function buildPreferredProtocolOverrides(
   if (!available.includes(protocol)) return [];
   const writable = modelWritableProtocols(model, scope);
   if (!writable.includes(protocol)) return [];
-  if (scope.scope_kind !== "provider") return [];
   if (modelEffectiveOn(model, scope)) {
     return [{
       model_id: modelId,

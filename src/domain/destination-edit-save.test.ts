@@ -78,6 +78,11 @@ function draftFor(value: Destination): DestinationEditDraft {
     endpoint_url: value.base_url ?? "",
     auth_scheme: value.auth_scheme,
     upstream_protocol: value.protocols[0] ?? "",
+    protocol_routes: [{
+      protocol: value.protocols[0] ?? "",
+      endpoint_url: value.base_url ?? "",
+      auth_scheme: value.auth_scheme,
+    }],
     models: value.catalog.map((model) => ({
       public_model: model.public_model,
       upstream_model: model.upstream_model,

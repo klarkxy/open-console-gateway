@@ -34,21 +34,6 @@ export function connectionForDestination(
   ));
 }
 
-export function destinationOffering(
-  destination: Pick<Destination, "plan">,
-): "plan" | "api" {
-  return destination.plan ? "plan" : "api";
-}
-
-export function groupDestinationsByOffering(
-  destinations: readonly Destination[],
-): { plan: Destination[]; api: Destination[] } {
-  return {
-    plan: destinations.filter((destination) => destinationOffering(destination) === "plan"),
-    api: destinations.filter((destination) => destinationOffering(destination) === "api"),
-  };
-}
-
 /**
  * New API / Sub2API sites live on Accounts. Their parent destination is not a
  * Provider catalog row and must not appear in the Providers rail.

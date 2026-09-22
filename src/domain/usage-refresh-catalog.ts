@@ -77,7 +77,7 @@ export function mergeDiscoveredCatalogModels(
     if (seen.has(key)) continue;
     seen.add(key);
     extra.push({
-      enabled: false,
+      enabled: true,
       preferred: null,
       protocols: [protocol],
       public_model: trimmed,

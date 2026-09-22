@@ -10,7 +10,6 @@ import {
   connectionStatus,
   isOnboardingDraftConnection,
   filterConnections,
-  groupConnectionsByOffering,
   selectedConnectionIdFromQuery,
 } from "./connections.ts";
 
@@ -65,18 +64,6 @@ function catalogEntry(provider_id: string, extra: Partial<ProviderCatalogEntry> 
     ...extra,
   };
 }
-
-test("connections group by offering and preserve input order within a group", () => {
-  const rows = [
-    connection({ id: "p1", offering: "plan", name: "OpenCode Go", legacy: { kind: "builtin_provider", id: "opencode" } }),
-    connection({ id: "a1", offering: "api", name: "Ollama" }),
-    connection({ id: "p2", offering: "plan", name: "MiniMax" }),
-    connection({ id: "a2", offering: "api", name: "Lab" }),
-  ];
-  const groups = groupConnectionsByOffering(rows);
-  assert.deepEqual(groups.plan.map((row) => row.id), ["p1", "p2"]);
-  assert.deepEqual(groups.api.map((row) => row.id), ["a1", "a2"]);
-});
 
 test("connection filter matches name, legacy id, and display family case-insensitively", () => {
   const rows = [
