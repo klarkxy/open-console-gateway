@@ -51,6 +51,7 @@ pub(crate) mod routing_runtime;
 pub(crate) mod routing_snapshot;
 pub mod state;
 pub(crate) mod upstream_limit;
+pub(crate) mod usage_http;
 pub mod usage_sync;
 pub mod zen_models;
 

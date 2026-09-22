@@ -17,7 +17,7 @@
 Provider 注册表始终静态、密封。
 每个静态 Provider 在自己的单一 `provider_id` 身份下拥有目录、证据与覆盖状态。
 
-新增 **preset**（`resources/provider-presets.json` 中的用户定义供应商模板）只需在 JSON 中加入条目；若该 preset 声明 `plan` offering，还需在 `ocg-domain::provider` 的 `PRESET_OFFERINGS` 映射中加入一条，使 `preset_offering(preset_id)` 返回 `"plan"`。其他 preset 保持默认 `"api"`。
+新增 **preset** 只需在 `resources/provider-presets.json` 中加入条目。构建脚本根据各条目的 `offering` 生成 `PRESET_OFFERINGS`，`preset_offering(preset_id)` 读取该生成表；不要另行维护手写 Rust 映射。未声明 plan offering 的 preset 使用 `"api"`。
 
 ## 2. 应用
 

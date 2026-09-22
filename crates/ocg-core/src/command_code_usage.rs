@@ -11,11 +11,12 @@ use crate::provider::{
     COMMAND_CODE_GOAT_QUOTA_5H, COMMAND_CODE_GOAT_QUOTA_MONTH, COMMAND_CODE_GOAT_QUOTA_WEEK,
     COMMAND_CODE_GOAT_USAGE_URL,
 };
+use crate::usage_http::{
+    UsageHttpError, WindowOutOfRange, bounded_resets_in_minutes, classify_transport, read_ok_body,
+};
 use chrono::{DateTime, Utc};
-use futures_util::StreamExt;
 #[cfg(debug_assertions)]
 use parking_lot::Mutex;
-use reqwest::StatusCode;
 use serde_json::Value;
 use std::fmt;
 use std::time::Duration;
@@ -110,6 +111,26 @@ impl fmt::Display for CommandCodeUsageError {
 
 impl std::error::Error for CommandCodeUsageError {}
 
+impl From<UsageHttpError> for CommandCodeUsageError {
+    fn from(error: UsageHttpError) -> Self {
+        match error {
+            UsageHttpError::Unauthorized => Self::Unauthorized,
+            UsageHttpError::Forbidden => Self::Forbidden,
+            UsageHttpError::RateLimited => Self::RateLimited,
+            UsageHttpError::Http(status) => Self::Http(status),
+            UsageHttpError::Timeout => Self::Timeout,
+            UsageHttpError::Network => Self::Network,
+            UsageHttpError::Oversize => Self::Oversize,
+        }
+    }
+}
+
+impl From<WindowOutOfRange> for CommandCodeUsageError {
+    fn from(_: WindowOutOfRange) -> Self {
+        Self::Window
+    }
+}
+
 pub async fn fetch_command_code_usage(
     config: &AppConfig,
     api_key: &str,
@@ -151,39 +172,12 @@ pub(crate) async fn fetch_command_code_usage_from(
         .header(reqwest::header::ACCEPT, "application/json")
         .send()
         .await
-        .map_err(map_reqwest_error)?;
+        .map_err(|error| CommandCodeUsageError::from(classify_transport(&error)))?;
 
-    match response.status() {
-        StatusCode::OK => {
-            let body = read_body_limited(response).await?;
-            parse_command_code_usage_body(&body, now())
-        }
-        StatusCode::UNAUTHORIZED => Err(CommandCodeUsageError::Unauthorized),
-        StatusCode::FORBIDDEN => Err(CommandCodeUsageError::Forbidden),
-        StatusCode::TOO_MANY_REQUESTS => Err(CommandCodeUsageError::RateLimited),
-        status => Err(CommandCodeUsageError::Http(status.as_u16())),
-    }
-}
-
-async fn read_body_limited(response: reqwest::Response) -> Result<Vec<u8>, CommandCodeUsageError> {
-    let mut body = Vec::new();
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(map_reqwest_error)?;
-        if body.len().saturating_add(chunk.len()) > MAX_BODY_BYTES {
-            return Err(CommandCodeUsageError::Oversize);
-        }
-        body.extend_from_slice(&chunk);
-    }
-    Ok(body)
-}
-
-fn map_reqwest_error(error: reqwest::Error) -> CommandCodeUsageError {
-    if error.is_timeout() {
-        CommandCodeUsageError::Timeout
-    } else {
-        CommandCodeUsageError::Network
-    }
+    let body = read_ok_body(response, MAX_BODY_BYTES)
+        .await
+        .map_err(CommandCodeUsageError::from)?;
+    parse_command_code_usage_body(&body, now())
 }
 
 fn parse_command_code_usage_body(
@@ -275,7 +269,8 @@ fn parse_window(
         .and_then(Value::as_i64)
         .and_then(DateTime::<Utc>::from_timestamp_millis)
         .ok_or(CommandCodeUsageError::Schema)?;
-    let resets_in_minutes = bounded_resets_in_minutes(reset_at, now, max_minutes)?;
+    let resets_in_minutes = bounded_resets_in_minutes(reset_at, now, max_minutes)
+        .map_err(CommandCodeUsageError::from)?;
     Ok(ParsedWindow {
         percent: (used / cap * 100.0).clamp(0.0, 100.0),
         resets_in_minutes,
@@ -288,29 +283,6 @@ fn finite_non_negative(value: f64) -> Result<f64, CommandCodeUsageError> {
     } else {
         Err(CommandCodeUsageError::Schema)
     }
-}
-
-fn bounded_resets_in_minutes(
-    resets_at: DateTime<Utc>,
-    now: DateTime<Utc>,
-    max: i64,
-) -> Result<i64, CommandCodeUsageError> {
-    let minutes = ceil_minutes_until(resets_at, now);
-    if minutes <= max {
-        Ok(minutes)
-    } else if minutes == max + 1 {
-        Ok(max)
-    } else {
-        Err(CommandCodeUsageError::Window)
-    }
-}
-
-fn ceil_minutes_until(resets_at: DateTime<Utc>, now: DateTime<Utc>) -> i64 {
-    if resets_at <= now {
-        return 0;
-    }
-    let millis = (resets_at - now).num_milliseconds();
-    (millis + 59_999) / 60_000
 }
 
 #[cfg(debug_assertions)]

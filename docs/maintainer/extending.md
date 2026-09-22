@@ -32,11 +32,10 @@ The Provider registry remains static and sealed.
 Each static Provider owns its catalog, evidence, and override state under its
 single `provider_id` identity.
 
-A new **preset** (the user-defined Provider template list in
-`resources/provider-presets.json`) needs only the JSON entry plus, if the
-preset advertises a `plan` offering, an entry in the `PRESET_OFFERINGS` map
-in `ocg-domain::provider` so `preset_offering(preset_id)` returns `"plan"`.
-Other presets keep the default `"api"` value.
+A new **preset** only needs an entry in `resources/provider-presets.json`.
+The build script generates `PRESET_OFFERINGS` from each entry's `offering`;
+`preset_offering(preset_id)` reads that generated table. Do not maintain a
+second handwritten Rust map. Presets without a plan offering use `"api"`.
 
 ## 2. Applications
 
