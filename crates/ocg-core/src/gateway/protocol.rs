@@ -1,7 +1,6 @@
 use crate::kernel::ids::is_free_model;
 use crate::kernel::protocol::model_protocol;
 use crate::models::UpstreamChannel;
-use crate::provider::{COMMAND_CODE_GOAT_CHAT_COMPLETIONS_PATH, COMMAND_CODE_GOAT_MESSAGES_PATH};
 use axum::http::StatusCode;
 use bytes::Bytes;
 use serde_json::{Value, json};
@@ -15,7 +14,8 @@ pub use crate::kernel::protocol::{
     supported_model_ids, supported_model_protocol_profiles, supported_model_protocols,
 };
 pub use ocg_domain::protocol::{
-    command_code_is_anthropic_model, command_code_preferred_format, command_code_supported_formats,
+    command_code_constructable_formats, command_code_is_anthropic_model,
+    command_code_preferred_format, command_code_supported_formats,
 };
 
 pub(crate) use ocg_gateway::protocol::{
@@ -170,15 +170,11 @@ pub struct UsageCounts {
     pub cache_creation_tokens: u64,
 }
 
-/// Official Command Code relative paths. Responses and Gemini have no upstream
-/// path; client Chat/Responses/Messages convert through the no-I/O kernel onto
-/// Chat (OpenAI/OSS) or Messages (Anthropic).
+/// Official Command Code relative paths. Gemini has no upstream path.
+/// Responses is constructable; per-model enablement stays on persisted
+/// catalog evidence rather than this path table.
 pub fn command_code_upstream_path(format: ApiFormat) -> Option<&'static str> {
-    match format {
-        ApiFormat::ChatCompletions => Some(COMMAND_CODE_GOAT_CHAT_COMPLETIONS_PATH),
-        ApiFormat::Messages => Some(COMMAND_CODE_GOAT_MESSAGES_PATH),
-        ApiFormat::Responses | ApiFormat::Gemini => None,
-    }
+    ocg_domain::protocol::command_code_upstream_path(format)
 }
 
 pub fn parse_client_request(

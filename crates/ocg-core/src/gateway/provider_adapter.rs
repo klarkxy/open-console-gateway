@@ -17,8 +17,8 @@ use crate::provider::{
     COMMAND_CODE_GOAT_MESSAGES_PATH, COMMAND_CODE_GOAT_MODELS_PATH, CredentialKind,
     InferenceAuthDescriptor, KIMI_CN_BASE_URL, KIMI_CN_CHAT_COMPLETIONS_PATH,
     KIMI_CN_MESSAGES_PATH, MINIMAX_CN_ANTHROPIC_BASE_URL, MINIMAX_CN_BASE_URL,
-    MINIMAX_CN_CHAT_COMPLETIONS_PATH, MINIMAX_CN_MESSAGES_PATH, ProviderAdapterKind,
-    ProviderRegistry, QuotaScope, UpstreamAuthScheme,
+    MINIMAX_CN_CHAT_COMPLETIONS_PATH, MINIMAX_CN_MESSAGES_PATH, MINIMAX_CN_RESPONSES_PATH,
+    ProviderAdapterKind, ProviderRegistry, QuotaScope, UpstreamAuthScheme,
 };
 use crate::provider_contracts::EffectiveContractSet;
 use std::collections::HashMap;
@@ -57,6 +57,18 @@ pub(crate) fn resolve_execution_route(
     match destination.adapter {
         AdapterKind::Http => {
             let route = plan.custom_route.as_ref().ok_or("missing HTTP route")?;
+            spec.auth = match route.auth_kind {
+                ocg_domain::dynamic::DynamicAuthKind::Bearer => UpstreamAuth::Bearer,
+                ocg_domain::dynamic::DynamicAuthKind::XApiKey => UpstreamAuth::XApiKey,
+                ocg_domain::dynamic::DynamicAuthKind::None => UpstreamAuth::None,
+            };
+            spec.credential = if route.auth_kind.requires_key() {
+                CredentialHandle::Account {
+                    id: credential.id.clone(),
+                }
+            } else {
+                CredentialHandle::None
+            };
             let endpoint =
                 resolve_custom_endpoints(&route.endpoint_url, protocol_kind_for(plan.upstream)?)
                     .map_err(|error| error.to_string())?
@@ -77,9 +89,8 @@ pub(crate) fn resolve_execution_route(
             spec.proxy_routing = ProxyRoutingModel::RequestEntrySnapshot;
         }
         AdapterKind::Goat => {
-            if !command_code_supports_upstream(&plan.model, plan.upstream) {
-                return Err("Command Code model/protocol is unsupported".into());
-            }
+            // The saved catalog selected this exact model/protocol already.
+            // A code-owned model seed cannot veto newly discovered protocols.
             spec.base_url = GOAT_LOOPBACK_ROUTES
                 .read()
                 .map_err(|_| "GOAT route lock poisoned")?
@@ -96,6 +107,7 @@ pub(crate) fn resolve_execution_route(
                     (MINIMAX_CN_BASE_URL, MINIMAX_CN_CHAT_COMPLETIONS_PATH)
                 }
                 ApiFormat::Messages => (MINIMAX_CN_ANTHROPIC_BASE_URL, MINIMAX_CN_MESSAGES_PATH),
+                ApiFormat::Responses => (MINIMAX_CN_BASE_URL, MINIMAX_CN_RESPONSES_PATH),
                 _ => return Err("unsupported MiniMax protocol".into()),
             };
             spec.base_url = base.into();
@@ -492,12 +504,6 @@ fn resolve_command_code_goat(
     if plan.channel != UpstreamChannel::Go {
         return Err("Command Code GOAT does not serve the Zen free channel".to_string());
     }
-    if !command_code_supports_upstream(&plan.model, plan.upstream) {
-        return Err(format!(
-            "Command Code GOAT has no verified support for model `{}` over {:?}",
-            plan.model, plan.upstream
-        ));
-    }
     require_opencode_protocol_policy(descriptor, account, plan, policy, "Command Code GOAT")?;
     let path = command_code_upstream_path(plan.upstream).ok_or_else(|| {
         format!(
@@ -564,7 +570,8 @@ fn resolve_minimax_cn(
     let (base_url, path) = match plan.upstream {
         ApiFormat::ChatCompletions => (MINIMAX_CN_BASE_URL, MINIMAX_CN_CHAT_COMPLETIONS_PATH),
         ApiFormat::Messages => (MINIMAX_CN_ANTHROPIC_BASE_URL, MINIMAX_CN_MESSAGES_PATH),
-        ApiFormat::Responses | ApiFormat::Gemini => {
+        ApiFormat::Responses => (MINIMAX_CN_BASE_URL, MINIMAX_CN_RESPONSES_PATH),
+        ApiFormat::Gemini => {
             return Err(
                 "MiniMax CN Token Plan has no official upstream path for this protocol".into(),
             );

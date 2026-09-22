@@ -1642,6 +1642,9 @@ pub struct ModelProtocolOverridesUpdate {
     #[serde(flatten)]
     pub expectation: MutationExpectation,
     pub overrides: Vec<ModelProtocolOverride>,
+    /// Explicit consent to add this batch's enabled builtin endpoint grants.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub authorize_credential_ids: Vec<String>,
 }
 
 /// POST protocol-probe body. `accountId` is a deprecated compatibility field

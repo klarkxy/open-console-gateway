@@ -6,6 +6,7 @@
 
 use crate::http_client;
 use crate::models::AppConfig;
+use crate::official_protocols::parse_catalog_supported_endpoints_baseline;
 use crate::provider::{
     COMMAND_CODE_GOAT_BASE_URL, COMMAND_CODE_GOAT_MODELS_PATH, ConnectionVerificationStatus,
     parse_provider_models_catalog,
@@ -27,6 +28,17 @@ pub struct GoatAccountRuntime {
 }
 
 pub const MAX_PROVIDER_CATALOG_BODY_BYTES: usize = 256 * 1024;
+
+/// Public GET `/models` snapshot plus any per-model protocol evidence the JSON
+/// actually listed. Missing endpoint fields leave
+/// [`OfficialProtocolBaseline::Unavailable`] so saved evidence survives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderCatalogDiscovery {
+    pub models: Vec<String>,
+    pub protocol_baseline: OfficialProtocolBaseline,
+}
+
+pub use crate::official_protocols::OfficialProtocolBaseline;
 
 #[cfg(debug_assertions)]
 static GOAT_CATALOG_ORIGINS: LazyLock<RwLock<HashMap<u64, String>>> =
@@ -235,19 +247,44 @@ pub fn ollama_cloud_models_base_url(process_generation: Option<u64>) -> String {
     crate::kernel::ids::OLLAMA_CLOUD_BASE_URL.to_string()
 }
 
+pub async fn refresh_command_code_catalog_discovery(
+    config: &AppConfig,
+    base_url: &str,
+) -> Result<ProviderCatalogDiscovery, GoatVerifyFailure> {
+    let url = goat_models_url_for_base(base_url);
+    probe_public_provider_catalog_at_url(config, &url, "Command Code").await
+}
+
 pub async fn refresh_command_code_models(
     config: &AppConfig,
     base_url: &str,
 ) -> Result<Vec<String>, GoatVerifyFailure> {
-    let url = goat_models_url_for_base(base_url);
-    probe_public_provider_models_at_url(config, &url, "Command Code").await
+    Ok(refresh_command_code_catalog_discovery(config, base_url)
+        .await?
+        .models)
 }
 
-async fn probe_public_provider_models_at_url(
+pub fn parse_provider_catalog_discovery(
+    bytes: &[u8],
+    provider_label: &str,
+) -> Result<ProviderCatalogDiscovery, String> {
+    let models = parse_provider_models_catalog(bytes, provider_label)?;
+    let protocol_baseline = if provider_label == "Command Code" {
+        parse_catalog_supported_endpoints_baseline(bytes)
+    } else {
+        OfficialProtocolBaseline::Unavailable
+    };
+    Ok(ProviderCatalogDiscovery {
+        models,
+        protocol_baseline,
+    })
+}
+
+async fn probe_public_provider_catalog_at_url(
     config: &AppConfig,
     url: &str,
     provider_label: &str,
-) -> Result<Vec<String>, GoatVerifyFailure> {
+) -> Result<ProviderCatalogDiscovery, GoatVerifyFailure> {
     let client = http_client::configured_builder(config)
         .and_then(|builder| {
             builder
@@ -261,6 +298,10 @@ async fn probe_public_provider_models_at_url(
         })?;
     let response = client
         .get(url)
+        .header(
+            reqwest::header::USER_AGENT,
+            concat!("OpenConsoleGateway/", env!("CARGO_PKG_VERSION")),
+        )
         .header(reqwest::header::ACCEPT, "application/json")
         .timeout(Duration::from_secs(config.non_stream_timeout_secs))
         .send()
@@ -268,13 +309,25 @@ async fn probe_public_provider_models_at_url(
         .map_err(|error| GoatVerifyFailure {
             message: format!("{provider_label} GET /models failed: {error}"),
         })?;
-    parse_provider_models_response(response, provider_label).await
+    parse_provider_catalog_response(response, provider_label).await
 }
 
-async fn parse_provider_models_response(
-    response: reqwest::Response,
+async fn probe_public_provider_models_at_url(
+    config: &AppConfig,
+    url: &str,
     provider_label: &str,
 ) -> Result<Vec<String>, GoatVerifyFailure> {
+    Ok(
+        probe_public_provider_catalog_at_url(config, url, provider_label)
+            .await?
+            .models,
+    )
+}
+
+async fn parse_provider_catalog_response(
+    response: reqwest::Response,
+    provider_label: &str,
+) -> Result<ProviderCatalogDiscovery, GoatVerifyFailure> {
     let status = response.status();
     let bytes = read_limited_body(response, provider_label).await?;
     if !status.is_success() {
@@ -282,17 +335,36 @@ async fn parse_provider_models_response(
             message: format!("{provider_label} GET /models returned {}", status.as_u16()),
         });
     }
-    parse_provider_models_catalog(&bytes, provider_label)
+    parse_provider_catalog_discovery(&bytes, provider_label)
         .map_err(|message| GoatVerifyFailure { message })
 }
 
+async fn parse_provider_models_response(
+    response: reqwest::Response,
+    provider_label: &str,
+) -> Result<Vec<String>, GoatVerifyFailure> {
+    Ok(parse_provider_catalog_response(response, provider_label)
+        .await?
+        .models)
+}
+
 /// Read the public Go directory without sending an account credential.
+/// Protocol evidence stays on the official docs table; this JSON list has ids only.
+pub async fn refresh_opencode_go_catalog_discovery(
+    config: &AppConfig,
+    base_url: &str,
+) -> Result<ProviderCatalogDiscovery, GoatVerifyFailure> {
+    let url = opencode_go_models_url_for_base(base_url);
+    probe_public_provider_catalog_at_url(config, &url, "OpenCode Go").await
+}
+
 pub async fn refresh_opencode_go_models(
     config: &AppConfig,
     base_url: &str,
 ) -> Result<Vec<String>, GoatVerifyFailure> {
-    let url = opencode_go_models_url_for_base(base_url);
-    probe_public_provider_models_at_url(config, &url, "OpenCode Go").await
+    Ok(refresh_opencode_go_catalog_discovery(config, base_url)
+        .await?
+        .models)
 }
 
 pub async fn probe_provider_models(
@@ -408,6 +480,51 @@ mod tests {
         assert_eq!(
             opencode_go_models_url_for_base("http://127.0.0.1:9/provider/v1/"),
             "http://127.0.0.1:9/provider/v1/models"
+        );
+    }
+
+    #[test]
+    fn goat_catalog_discovery_keeps_supported_endpoints_metadata() {
+        let discovery = parse_provider_catalog_discovery(
+            br#"{
+                "object":"list",
+                "data":[
+                    {"id":"xiaomi/mimo-v2.6-flash","supported_endpoints":["/chat/completions","/responses"]},
+                    {"id":"claude-sonnet-4-6","supported_endpoints":["/messages"]}
+                ]
+            }"#,
+            "Command Code",
+        )
+        .unwrap();
+        assert_eq!(
+            discovery.models,
+            vec![
+                "xiaomi/mimo-v2.6-flash".to_string(),
+                "claude-sonnet-4-6".to_string()
+            ]
+        );
+        assert_eq!(
+            discovery
+                .protocol_baseline
+                .protocols_for("command-code", "xiaomi/mimo-v2.6-flash"),
+            Some(vec![
+                crate::provider::UpstreamProtocolKind::ChatCompletions,
+                crate::provider::UpstreamProtocolKind::Responses
+            ])
+        );
+    }
+
+    #[test]
+    fn go_catalog_discovery_does_not_invent_protocol_lists() {
+        let discovery = parse_provider_catalog_discovery(
+            br#"{"object":"list","data":[{"id":"mimo-v2.6-flash"}]}"#,
+            "OpenCode Go",
+        )
+        .unwrap();
+        assert_eq!(discovery.models, vec!["mimo-v2.6-flash".to_string()]);
+        assert_eq!(
+            discovery.protocol_baseline,
+            OfficialProtocolBaseline::Unavailable
         );
     }
 }

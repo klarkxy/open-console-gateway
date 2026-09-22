@@ -7,8 +7,9 @@
 use crate::account::{AccountSetupStep, AccountType};
 use crate::catalog::UpstreamAuthScheme;
 use crate::connection::CONNECTION_ID_NAMESPACE;
+use crate::connection::EndpointOperation;
 use crate::credential::{
-    AuthState, ModelScope, OnboardingTaskKind, OnboardingTaskState,
+    AuthState, ModelScope, OnboardingTaskKind, OnboardingTaskState, RouteSpec,
     credential_id_for_legacy_account, derive_auth_state,
     observer_credential_id_for_platform_account,
 };
@@ -23,6 +24,7 @@ use crate::provider::{
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use uuid::Uuid;
 
 /// Wire protocol for destination catalog rows. Reuses the sealed
@@ -147,6 +149,68 @@ impl From<UpstreamAuthScheme> for AuthScheme {
         }
     }
 }
+
+/// One configured HTTP protocol endpoint. Empty [`Destination::protocol_routes`]
+/// means legacy interpretation of `protocols` + `base_url` + `auth_scheme`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpProtocolRoute {
+    pub protocol: Protocol,
+    pub endpoint_url: String,
+    pub auth_scheme: AuthScheme,
+}
+
+/// Bound on a nonempty explicit protocol-route list.
+pub const MAX_HTTP_PROTOCOL_ROUTES: usize = 3;
+
+/// Why stored or imported protocol routes cannot be accepted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProtocolRouteError {
+    TooMany { count: usize },
+    DuplicateProtocol { protocol: Protocol },
+    EmptyEndpoint { protocol: Protocol },
+    FirstRouteMismatch,
+    ProtocolsMismatch,
+    SealedMustBeEmpty,
+}
+
+impl std::fmt::Display for ProtocolRouteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TooMany { count } => {
+                write!(
+                    f,
+                    "at most {MAX_HTTP_PROTOCOL_ROUTES} HTTP protocol routes are supported, found {count}"
+                )
+            }
+            Self::DuplicateProtocol { protocol } => {
+                write!(f, "duplicate HTTP protocol `{}`", protocol.as_str())
+            }
+            Self::EmptyEndpoint { protocol } => {
+                write!(
+                    f,
+                    "HTTP protocol `{}` is missing its endpoint",
+                    protocol.as_str()
+                )
+            }
+            Self::FirstRouteMismatch => write!(
+                f,
+                "first protocol route must match destination base URL and authentication"
+            ),
+            Self::ProtocolsMismatch => {
+                write!(
+                    f,
+                    "destination protocols must match configured protocol routes"
+                )
+            }
+            Self::SealedMustBeEmpty => {
+                write!(f, "sealed destinations cannot store protocol routes")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ProtocolRouteError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -279,6 +343,8 @@ pub struct Destination {
     pub brand_family: Option<String>,
     pub base_url: Option<String>,
     pub protocols: Vec<Protocol>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub protocol_routes: Vec<HttpProtocolRoute>,
     pub auth_scheme: AuthScheme,
     pub model_resolution: ModelResolution,
     pub catalog: Vec<CatalogModel>,
@@ -659,6 +725,7 @@ fn builtin_destination(provider_id: &str) -> Result<Destination, MappingError> {
         brand_family: Some(provider.display_family.to_string()),
         base_url: sealed_base_url(adapter),
         protocols: provider.upstream_protocols.to_vec(),
+        protocol_routes: Vec::new(),
         auth_scheme: auth_scheme_from_builtin(provider.auth_schemes),
         model_resolution: ModelResolution::AdapterDefined,
         // Builtin catalogs are persisted snapshots (`provider_model_catalogs`);
@@ -718,6 +785,7 @@ pub fn destination_from_legacy(
                 brand_family: None,
                 base_url: Some(endpoint.to_string()),
                 protocols: vec![protocol],
+                protocol_routes: Vec::new(),
                 auth_scheme: AuthScheme::from(definition.auth_kind),
                 model_resolution: ModelResolution::PublicAndUpstream,
                 catalog,
@@ -748,6 +816,7 @@ pub fn destination_from_legacy(
                 brand_family: None,
                 base_url: Some(endpoint.to_string()),
                 protocols: vec![*protocol],
+                protocol_routes: Vec::new(),
                 auth_scheme: auth_scheme_for_http_protocol(*protocol),
                 model_resolution: ModelResolution::PublicOnly,
                 catalog: catalog_from_pairs(model_capabilities, *protocol),
@@ -781,6 +850,7 @@ pub fn destination_from_legacy(
                 }),
                 base_url: Some(endpoint.to_string()),
                 protocols: Protocol::ALL.to_vec(),
+                protocol_routes: Vec::new(),
                 auth_scheme: AuthScheme::Bearer,
                 model_resolution: ModelResolution::PublicOnly,
                 // Platform catalogs live in refresh snapshots; the projection
@@ -916,6 +986,157 @@ pub fn credential_from_legacy(
         onboarding_task: onboarding_from_facts(facts),
         purchase_date: purchase_date_from_facts(facts.purchase_date.as_deref()),
     })
+}
+
+/// Explicit stored routes, or one legacy route per `protocols` member.
+pub fn http_protocol_routes(destination: &Destination) -> Vec<HttpProtocolRoute> {
+    if !destination.protocol_routes.is_empty() {
+        return destination.protocol_routes.clone();
+    }
+    let endpoint_url = destination.base_url.clone().unwrap_or_default();
+    destination
+        .protocols
+        .iter()
+        .copied()
+        .map(|protocol| HttpProtocolRoute {
+            protocol,
+            endpoint_url: endpoint_url.clone(),
+            auth_scheme: destination.auth_scheme,
+        })
+        .collect()
+}
+
+/// Protocols this model may use: dest configured routes, or the single override.
+pub fn http_model_protocols(destination: &Destination, model: &CatalogModel) -> Vec<Protocol> {
+    if let Some(route) = &model.upstream_override {
+        return vec![route.protocol];
+    }
+    http_protocol_routes(destination)
+        .into_iter()
+        .map(|route| route.protocol)
+        .collect()
+}
+
+/// Exact saved route for `protocol`. Override models stay single-protocol.
+pub fn http_model_route(
+    destination: &Destination,
+    model: &CatalogModel,
+    protocol: Protocol,
+) -> Option<HttpProtocolRoute> {
+    if let Some(route) = &model.upstream_override {
+        if route.protocol != protocol {
+            return None;
+        }
+        return Some(HttpProtocolRoute {
+            protocol,
+            endpoint_url: route.endpoint_url.clone(),
+            auth_scheme: auth_for_protocol(destination, protocol),
+        });
+    }
+    http_protocol_routes(destination)
+        .into_iter()
+        .find(|route| route.protocol == protocol)
+}
+
+/// Base protocol routes first, then unique catalog overrides. Assignment order
+/// stays stable for [`crate::credential::assigned_endpoints_for_routes`].
+pub fn http_configured_routes(destination: &Destination) -> Vec<RouteSpec> {
+    let mut routes = Vec::new();
+    let mut seen = HashSet::new();
+    for route in http_protocol_routes(destination) {
+        let url = nonempty_route_url(&route.endpoint_url);
+        if seen.insert((route.protocol, url.clone().unwrap_or_default())) {
+            routes.push(RouteSpec {
+                operation: EndpointOperation::from(route.protocol),
+                url,
+            });
+        }
+    }
+    for model in &destination.catalog {
+        let Some(route) = &model.upstream_override else {
+            continue;
+        };
+        if seen.insert((route.protocol, route.endpoint_url.clone())) {
+            routes.push(RouteSpec {
+                operation: EndpointOperation::from(route.protocol),
+                url: Some(route.endpoint_url.clone()),
+            });
+        }
+    }
+    routes
+}
+
+/// Reject inconsistent or duplicate explicit routes. Empty is legacy.
+pub fn validate_http_protocol_route_list(
+    routes: &[HttpProtocolRoute],
+) -> Result<(), ProtocolRouteError> {
+    if routes.is_empty() {
+        return Ok(());
+    }
+    if routes.len() > MAX_HTTP_PROTOCOL_ROUTES {
+        return Err(ProtocolRouteError::TooMany {
+            count: routes.len(),
+        });
+    }
+    let mut seen = HashSet::new();
+    for route in routes {
+        if !seen.insert(route.protocol) {
+            return Err(ProtocolRouteError::DuplicateProtocol {
+                protocol: route.protocol,
+            });
+        }
+        if route.endpoint_url.trim().is_empty() {
+            return Err(ProtocolRouteError::EmptyEndpoint {
+                protocol: route.protocol,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Full destination alignment for a loaded or imported explicit route list.
+pub fn validate_destination_protocol_routes(
+    destination: &Destination,
+) -> Result<(), ProtocolRouteError> {
+    if destination.protocol_routes.is_empty() {
+        return Ok(());
+    }
+    if destination.adapter != AdapterKind::Http {
+        return Err(ProtocolRouteError::SealedMustBeEmpty);
+    }
+    validate_http_protocol_route_list(&destination.protocol_routes)?;
+    let first = &destination.protocol_routes[0];
+    if destination.base_url.as_deref() != Some(first.endpoint_url.as_str())
+        || destination.auth_scheme != first.auth_scheme
+    {
+        return Err(ProtocolRouteError::FirstRouteMismatch);
+    }
+    let derived: Vec<Protocol> = destination
+        .protocol_routes
+        .iter()
+        .map(|route| route.protocol)
+        .collect();
+    if destination.protocols != derived {
+        return Err(ProtocolRouteError::ProtocolsMismatch);
+    }
+    Ok(())
+}
+
+fn auth_for_protocol(destination: &Destination, protocol: Protocol) -> AuthScheme {
+    destination
+        .protocol_routes
+        .iter()
+        .find(|route| route.protocol == protocol)
+        .map(|route| route.auth_scheme)
+        .unwrap_or(destination.auth_scheme)
+}
+
+fn nonempty_route_url(endpoint_url: &str) -> Option<String> {
+    if endpoint_url.is_empty() {
+        None
+    } else {
+        Some(endpoint_url.to_string())
+    }
 }
 
 #[cfg(test)]

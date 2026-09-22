@@ -661,7 +661,25 @@ fn upsert_dynamic_destination_on(
     let dest_id = destination_id_for_dynamic(&runtime.id);
     let origin = runtime.origin.as_str();
     let offering = runtime.offering.as_str();
-    let protocols = serde_json::to_string(&[runtime.upstream_protocol])?;
+    let saved_routes = if destination_exists(conn, &dest_id)? {
+        super::destination_store::load_protocol_routes(conn, &dest_id)?
+    } else {
+        Vec::new()
+    };
+    if let Some(first) = saved_routes.first() {
+        anyhow::ensure!(
+            first.endpoint_url == runtime.endpoint_url
+                && first.protocol == runtime.upstream_protocol
+                && first.auth_scheme == AuthScheme::from(runtime.auth_kind),
+            "changing an explicit HTTP route requires a route-aware destination update"
+        );
+    }
+    let declared: Vec<_> = if saved_routes.is_empty() {
+        vec![runtime.upstream_protocol]
+    } else {
+        saved_routes.iter().map(|route| route.protocol).collect()
+    };
+    let protocols = serde_json::to_string(&declared)?;
     let auth_scheme = AuthScheme::from(runtime.auth_kind).as_str();
     let capabilities = serde_json::to_string(&sealed_capabilities(AdapterKind::Http))?;
     let base_url = trimmed_url(&runtime.endpoint_url);
@@ -735,8 +753,13 @@ fn replace_destination_models(
     runtime: &DynamicProviderRuntime,
 ) -> Result<()> {
     let previous = super::destination_store::load_destination_catalog(conn, dest_id)?;
-    let catalog =
-        super::destination_commands::catalog_from_definition(&previous, &runtime.definition());
+    let preserve_protocols =
+        !super::destination_store::load_protocol_routes(conn, dest_id)?.is_empty();
+    let catalog = super::destination_commands::catalog_from_definition(
+        &previous,
+        &runtime.definition(),
+        preserve_protocols,
+    );
     super::destination_store::replace_destination_catalog(conn, dest_id, &catalog)
 }
 

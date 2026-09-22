@@ -304,6 +304,7 @@ pub(crate) fn persist_custom_config_on(
     account_id: &str,
     input: &AccountCustomConfigInput,
 ) -> Result<bool> {
+    reject_explicit_route_account_edit(conn, account_id)?;
     let endpoint_url = validate_custom_endpoint_url(&input.endpoint_url)?;
     if let Some(parent_id) = platform_parent_id(conn, account_id)? {
         merge_custom_models_onto_platform_parent(conn, account_id, &parent_id)?;
@@ -343,6 +344,7 @@ pub(crate) fn persist_custom_capabilities_on(
     account_id: &str,
     capabilities: &[AccountModelCapabilityInput],
 ) -> Result<()> {
+    reject_explicit_route_account_edit(conn, account_id)?;
     if !capabilities.is_empty() {
         let expected = expected_protocol_for_capabilities(conn, account_id)?.ok_or_else(|| {
             anyhow::anyhow!(
@@ -396,6 +398,16 @@ pub(crate) fn persist_custom_capabilities_on(
                 models: unique_public_models_from_inputs(capabilities),
             },
         )?;
+    }
+    Ok(())
+}
+
+fn reject_explicit_route_account_edit(conn: &Connection, account_id: &str) -> Result<()> {
+    if let Some(destination_id) = destination_id_for_account_custom_facts(conn, account_id)? {
+        anyhow::ensure!(
+            super::destination_store::load_protocol_routes(conn, &destination_id)?.is_empty(),
+            "this connection has explicit protocol routes; edit its configuration and models in Providers"
+        );
     }
     Ok(())
 }

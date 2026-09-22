@@ -27,7 +27,7 @@ fn slash_raw_pin_is_chat_only_and_not_an_opencode_protocol_row() {
         COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
         ApiFormat::ChatCompletions
     ));
-    assert!(!command_code_supports_upstream(
+    assert!(command_code_supports_upstream(
         COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
         ApiFormat::Responses
     ));
@@ -35,7 +35,10 @@ fn slash_raw_pin_is_chat_only_and_not_an_opencode_protocol_row() {
         command_code_upstream_path(ApiFormat::ChatCompletions),
         Some("/chat/completions")
     );
-    assert_eq!(command_code_upstream_path(ApiFormat::Responses), None);
+    assert_eq!(
+        command_code_upstream_path(ApiFormat::Responses),
+        Some("/responses")
+    );
     assert!(
         !opencode_supports_upstream(
             COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,

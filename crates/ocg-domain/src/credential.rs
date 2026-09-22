@@ -584,6 +584,30 @@ pub fn assigned_endpoints_for_routes(
         .collect()
 }
 
+/// Preserve consent to the exact operation and resolved URL when route ordering
+/// changes. Unknown/stale ids are discarded so a reused ordinal cannot revive them.
+pub fn remap_route_grant_ids(
+    connection_id: &ConnectionId,
+    before: &[RouteSpec],
+    after: &[RouteSpec],
+    granted: &[String],
+) -> Vec<String> {
+    let old = assigned_endpoints_for_routes(connection_id, before);
+    let new = assigned_endpoints_for_routes(connection_id, after);
+    let mut result = Vec::new();
+    for (route, endpoint) in after.iter().zip(new) {
+        if before
+            .iter()
+            .zip(&old)
+            .any(|(previous, assigned)| previous == route && granted.contains(&assigned.id))
+            && !result.contains(&endpoint.id)
+        {
+            result.push(endpoint.id);
+        }
+    }
+    result
+}
+
 /// Safe default grants for a new Key or one-time backfill.
 ///
 /// Captures the default route and any additional configured routes that share

@@ -6,7 +6,14 @@ use crate::gateway::protocol::parse_client_request;
 use crate::kernel::protocol::ApiFormat;
 use crate::models::{Account, AccountCustomConfigInput, AccountModelCapabilityInput, AppConfig};
 use bytes::Bytes;
-use ocg_domain::destination::{AuthScheme, LegacyDestinationRef, ModelResolution, Protocol};
+use ocg_domain::credential::{ModelScope, assigned_endpoints_for_routes};
+use ocg_domain::destination::{
+    AuthScheme, CatalogModel, HttpProtocolRoute, LegacyDestinationRef, ModelResolution, Protocol,
+    http_configured_routes,
+};
+use ocg_domain::dynamic::{
+    DynamicAuthKind, DynamicModelMapping, DynamicModelUpstreamOverride, DynamicProviderDefinition,
+};
 
 struct Scratch(std::path::PathBuf);
 impl Drop for Scratch {
@@ -236,6 +243,174 @@ fn persisted_http_identity_is_independent_of_legacy_kind_and_account_provider_la
     );
     let selected = LiveSendSelection::from_execution(&before, "public-model", "public-model");
     verify_execution_authorization(&snapshot, &selected, &before.spec, Utc::now(), true).unwrap();
+}
+
+#[test]
+fn route_grants_keep_an_override_authorized_when_a_same_origin_default_is_added() {
+    use ocg_domain::connection::{LegacyConnectionKind, connection_id_for_legacy};
+
+    let (_directory, db, initial) = fixture();
+    let destination_id = initial
+        .credentials
+        .iter()
+        .find(|credential| credential.id == "snapshot-http-key")
+        .unwrap()
+        .destination_id
+        .clone();
+    let override_a = "https://api.example.com/anthropic-a/v1/messages";
+    let old_catalog = vec![CatalogModel {
+        public_model: "public-model".into(),
+        upstream_model: "upstream-exact".into(),
+        protocols: vec![Protocol::Messages],
+        preferred: Some(Protocol::Messages),
+        enabled: true,
+        upstream_override: Some(DynamicModelUpstreamOverride {
+            protocol: Protocol::Messages,
+            endpoint_url: override_a.into(),
+        }),
+    }];
+    crate::db::destination_store::replace_destination_catalog(
+        &db.conn,
+        &destination_id,
+        &old_catalog,
+    )
+    .unwrap();
+    let before = RoutingSnapshot::load(&db).unwrap();
+    let credential = before
+        .credentials
+        .iter()
+        .find(|credential| credential.id == "snapshot-http-key")
+        .unwrap();
+    let destination = before
+        .projection
+        .destinations
+        .iter()
+        .find(|destination| destination.id == destination_id)
+        .unwrap();
+    let connection =
+        connection_id_for_legacy(LegacyConnectionKind::CustomAccount, "snapshot-http-key");
+    let old_routes = http_configured_routes(destination);
+    let old_override_id = assigned_endpoints_for_routes(&connection, &old_routes)
+        .into_iter()
+        .zip(old_routes.iter())
+        .find(|(_, route)| route.url.as_deref() == Some(override_a))
+        .unwrap()
+        .0
+        .id;
+    db.update_credential_binding(
+        &credential.binding_id,
+        Some(&ModelScope::All),
+        None,
+        Some(&[old_override_id, "unknown-stale-endpoint".into()]),
+        Some(&credential.grants.allowed_origins),
+    )
+    .unwrap();
+
+    let default_messages_b = "https://api.example.com/anthropic/v1/messages";
+    let routes = vec![
+        HttpProtocolRoute {
+            protocol: Protocol::ChatCompletions,
+            endpoint_url: "https://api.example.com/v1".into(),
+            auth_scheme: AuthScheme::Bearer,
+        },
+        HttpProtocolRoute {
+            protocol: Protocol::Messages,
+            endpoint_url: default_messages_b.into(),
+            auth_scheme: AuthScheme::Bearer,
+        },
+    ];
+    crate::db::destination_commands::replace_http_destination_with_routes_on(
+        &db,
+        &destination_id,
+        &DynamicProviderDefinition {
+            preset_id: None,
+            id: "unused".into(),
+            name: "HTTP Key".into(),
+            endpoint_url: "https://api.example.com/v1".into(),
+            upstream_protocol: Protocol::ChatCompletions,
+            auth_kind: DynamicAuthKind::Bearer,
+            mappings: vec![
+                DynamicModelMapping {
+                    public_model: "public-model".into(),
+                    upstream_model: "upstream-exact".into(),
+                    upstream_override: Some(DynamicModelUpstreamOverride {
+                        protocol: Protocol::Messages,
+                        endpoint_url: override_a.into(),
+                    }),
+                },
+                DynamicModelMapping {
+                    public_model: "default-message".into(),
+                    upstream_model: "default-message-upstream".into(),
+                    upstream_override: None,
+                },
+            ],
+        },
+        &[],
+        Some(&routes),
+    )
+    .unwrap();
+
+    let snapshot = RoutingSnapshot::load(&db).unwrap();
+    let authorized = route_for_protocol(&snapshot, "public-model", ApiFormat::Messages);
+    assert_eq!(authorized.spec.request_url().unwrap(), override_a);
+    let selected = LiveSendSelection::from_execution(&authorized, "public-model", "public-model");
+    verify_execution_authorization(&snapshot, &selected, &authorized.spec, Utc::now(), true)
+        .unwrap();
+    let live_credential = snapshot
+        .credentials
+        .iter()
+        .find(|credential| credential.id == "snapshot-http-key")
+        .unwrap();
+    let current_destination = snapshot
+        .projection
+        .destinations
+        .iter()
+        .find(|destination| destination.id == destination_id)
+        .unwrap();
+    let expected_override_id =
+        assigned_endpoints_for_routes(&connection, &http_configured_routes(current_destination))
+            .into_iter()
+            .zip(http_configured_routes(current_destination))
+            .find(|(_, route)| route.url.as_deref() == Some(override_a))
+            .unwrap()
+            .0
+            .id;
+    assert_eq!(
+        live_credential.grants.allowed_endpoint_ids,
+        vec![expected_override_id]
+    );
+
+    let catalog = RuntimeCatalogSnapshot::from_routing(snapshot.clone(), Utc::now());
+    let resolved = catalog.resolve("default-message").unwrap();
+    let parsed = parse_client_request(
+        ApiFormat::Messages,
+        Bytes::from_static(
+            br#"{"model":"default-message","max_tokens":64,"messages":[{"role":"user","content":"hello"}]}"#,
+        ),
+    )
+    .unwrap();
+    let materialized_b = materialize_execution_routes(
+        &snapshot,
+        &AppConfig::default(),
+        &parsed,
+        &resolved,
+        "default-message",
+        "default-message",
+        None,
+    )
+    .unwrap();
+    let route_b = materialized_b
+        .routes
+        .into_iter()
+        .find(|route| route.spec.request_url().unwrap() == default_messages_b)
+        .expect("default-message must select the configured Messages B route");
+    let selected_b =
+        LiveSendSelection::from_execution(&route_b, "default-message", "default-message");
+    assert!(
+        verify_execution_authorization(&snapshot, &selected_b, &route_b.spec, Utc::now(), true)
+            .is_err(),
+        "new default Messages B must not inherit A's exact endpoint grant"
+    );
 }
 
 #[test]

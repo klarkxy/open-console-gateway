@@ -877,6 +877,10 @@ export interface ProviderContractGroup {
  * An empty `overrides` array is rejected by handlers.
  */
 export interface ModelProtocolOverridesUpdate {
+  /**
+   * Explicit consent to add this batch's enabled builtin endpoint grants.
+   */
+  authorizeCredentialIds?: string[];
   expectedRevision: number;
   overrides: ModelProtocolOverride[];
   processGeneration: number;

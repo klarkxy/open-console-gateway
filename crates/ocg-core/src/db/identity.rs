@@ -725,12 +725,12 @@ fn persist_account_identity_on_credentials(
             DEFAULT_INFERENCE_BINDING_ENABLED as i32,
         ],
     )?;
+    backfill_authorization_connections_on(conn)?;
     if existing_binding.is_none() {
         fill_uninitialized_binding_grants_on(conn, Some(&account.id))?;
     }
     persist_onboarding_and_subscription_on_credentials(conn, account, purchase_date, now)?;
     ensure_identity_quota_pool(conn, &identity_id, &account.id, &now.to_rfc3339())?;
-    backfill_authorization_connections_on(conn)?;
     Ok(())
 }
 
@@ -854,6 +854,26 @@ fn configured_endpoints_for_provider(
     provider_id: &str,
     account_id: &str,
 ) -> Result<Vec<AssignedEndpoint>> {
+    if schema_version_on(conn)? >= 63 {
+        let bound: Option<(String, String)> = conn.query_row(
+            "SELECT destination_id, authorization_connection_id FROM credentials WHERE legacy_account_id = ?1 AND authorization_connection_id IS NOT NULL",
+            [account_id], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional()?;
+        if let Some((destination_id, connection_id)) = bound {
+            let destinations = crate::destination_projection::load_destinations_on(conn)?;
+            if let Some(destination) = destinations.iter().find(|destination| {
+                destination.id == destination_id
+                    && destination.adapter == ocg_domain::destination::AdapterKind::Http
+            }) {
+                let connection_id: ConnectionId =
+                    serde_json::from_value(serde_json::Value::String(connection_id))?;
+                return Ok(assigned_endpoints_for_routes(
+                    &connection_id,
+                    &ocg_domain::destination::http_configured_routes(destination),
+                ));
+            }
+        }
+    }
     if provider_id == CUSTOM_PROVIDER_ID {
         if let Some(destination) =
             custom_store::custom_destination_for_account_on(conn, account_id)?
@@ -969,6 +989,64 @@ fn configured_endpoints_for_provider(
         });
     }
     Ok(assigned_endpoints_for_routes(&connection_id, &routes))
+}
+
+/// Explicit grant consent accompanies the same transaction as a builtin
+/// protocol edit. Catalog refreshes never call this path.
+pub(crate) fn authorize_builtin_protocols_on(
+    conn: &Connection,
+    scope: &ContractScope,
+    protocols: &[UpstreamProtocolKind],
+    credential_ids: &[String],
+) -> Result<()> {
+    let ContractScope::Provider(provider_id) = scope else {
+        anyhow::bail!("only builtin provider protocol edits can authorize Keys here");
+    };
+    let plan =
+        builtin_provider(provider_id).ok_or_else(|| anyhow::anyhow!("unknown builtin provider"))?;
+    anyhow::ensure!(
+        provider_id != CUSTOM_PROVIDER_ID && !protocols.is_empty(),
+        "grant consent requires an enabled builtin protocol"
+    );
+    anyhow::ensure!(
+        protocols
+            .iter()
+            .all(|protocol| plan.upstream_protocols.contains(protocol)),
+        "protocol is outside the builtin endpoint set"
+    );
+    anyhow::ensure!(
+        credential_ids.len() <= 1000,
+        "too many credential authorizations"
+    );
+    let destination_id = ocg_domain::destination::destination_id_for_builtin(provider_id);
+    let mut seen = std::collections::HashSet::new();
+    for id in credential_ids {
+        anyhow::ensure!(
+            seen.insert(id),
+            "authorizeCredentialIds contains duplicates"
+        );
+        let (owner, connection): (String, String) = conn.query_row(
+            "SELECT destination_id, authorization_connection_id FROM credentials WHERE id = ?1 AND credential_purpose = 'inference'",
+            [id], |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        anyhow::ensure!(
+            owner == destination_id,
+            "credential does not belong to this provider"
+        );
+        let connection: ConnectionId =
+            serde_json::from_value(serde_json::Value::String(connection))?;
+        for protocol in protocols {
+            let endpoint = ocg_domain::connection::endpoint_id_for(
+                &connection,
+                EndpointOperation::from(*protocol),
+            );
+            conn.execute(
+                "INSERT OR IGNORE INTO credential_grants (credential_id, kind, value) VALUES (?1, 'endpoint_id', ?2)",
+                rusqlite::params![id, endpoint.to_string()],
+            )?;
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn fill_uninitialized_binding_grants_on(
@@ -1122,7 +1200,7 @@ fn replace_credential_grant_rows(
     Ok(())
 }
 
-fn load_credential_grants(
+pub(crate) fn load_credential_grants(
     conn: &Connection,
     credential_id: &str,
 ) -> Result<(Vec<String>, Vec<String>)> {

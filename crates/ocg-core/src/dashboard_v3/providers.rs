@@ -288,7 +288,7 @@ async fn refresh_go_or_command_catalog(
         .try_lock()
         .map_err(|_| V3ApiError::conflict_at(state, "provider model refresh is already running"))?;
     let scope = ContractScope::provider(provider_id);
-    let (config, base_url, source_url, previous_models) = {
+    let (config, base_url, source_url) = {
         let _settings_update = state.settings_update.lock();
         check_expectation(state, expectation)?;
         validate_provider_scope(state, &scope)?;
@@ -310,26 +310,22 @@ async fn refresh_go_or_command_catalog(
         } else {
             goat::goat_models_url_for_base(&base_url)
         };
-        let previous_models = state
-            .provider_contracts()
-            .scope(&scope)
-            .map(|contract| contract.catalog.models.clone())
-            .unwrap_or_default();
-        (config, base_url, source_url, previous_models)
+        (config, base_url, source_url)
     };
 
     let models_result = if provider_id == OPENCODE_PROVIDER_ID {
-        goat::refresh_opencode_go_models(&config, &base_url).await
+        goat::refresh_opencode_go_catalog_discovery(&config, &base_url).await
     } else {
-        goat::refresh_command_code_models(&config, &base_url).await
+        goat::refresh_command_code_catalog_discovery(&config, &base_url).await
     };
-    let models = match models_result {
+    let discovery = match models_result {
         Ok(models) => models,
         Err(failure) => {
             audit_catalog_failure(state, provider_id, "fetch");
             return Err(V3ApiError::outbound_failed(state, failure.message));
         }
     };
+    let models = discovery.models;
     if models.is_empty() {
         audit_catalog_failure(state, provider_id, "empty_catalog");
         return Err(V3ApiError::outbound_failed(
@@ -341,12 +337,13 @@ async fn refresh_go_or_command_catalog(
             },
         ));
     }
-    let official_protocols = crate::official_protocols::fetch_official_protocol_baseline(
+    let docs_protocols = crate::official_protocols::fetch_official_protocol_baseline(
         &config,
         provider_id,
         state.process_generation(),
     )
     .await;
+    let official_protocols = discovery.protocol_baseline.prefer_catalog(docs_protocols);
     // Zen Free owns every `-free` id; keep them out of the persisted Go
     // catalog so they never reach the Go provider-contracts surface.
     let models = if provider_id == OPENCODE_PROVIDER_ID {
@@ -373,15 +370,8 @@ async fn refresh_go_or_command_catalog(
     };
     {
         let db = state.db.lock();
-        db.refresh_contract_catalog_with_default_off(
-            &scope,
-            &previous_models,
-            &models,
-            now,
-            source,
-            &source_url,
-        )
-        .map_err(V3ApiError::internal)?;
+        db.refresh_contract_catalog_preserving_settings(&scope, &models, now, source, &source_url)
+            .map_err(V3ApiError::internal)?;
         db.apply_official_protocol_baseline(&scope, &models, &official_protocols, now)
             .map_err(V3ApiError::internal)?;
         state
@@ -485,14 +475,8 @@ pub(super) async fn refresh_contract_catalog(
         check_expectation(&state, &expectation)?;
         {
             let db = state.db.lock();
-            let previous = db
-                .load_persisted_scope(&scope)
-                .map_err(V3ApiError::internal)?
-                .map(|row| row.catalog_models)
-                .unwrap_or_default();
-            db.refresh_contract_catalog_with_default_off(
+            db.refresh_contract_catalog_preserving_settings(
                 &scope,
-                &previous,
                 &models,
                 now,
                 provider_contracts::CATALOG_SOURCE_OLLAMA_CLOUD_MODELS,
@@ -578,14 +562,8 @@ pub(super) async fn refresh_contract_catalog(
         }
         {
             let db = state.db.lock();
-            let previous = db
-                .load_persisted_scope(&scope)
-                .map_err(V3ApiError::internal)?
-                .map(|row| row.catalog_models)
-                .unwrap_or_default();
-            db.refresh_contract_catalog_with_default_off(
+            db.refresh_contract_catalog_preserving_settings(
                 &scope,
-                &previous,
                 &models,
                 now,
                 source,
@@ -638,7 +616,12 @@ pub(super) async fn put_provider_model_protocol_overrides(
     let scope = ContractScope::provider(&scope_id);
     validate_provider_scope(&state, &scope)?;
     validate_provider_protocol_overrides(&state, &scope_id, &input.overrides)?;
-    commit_model_protocol_overrides(&state, &scope, input.overrides)
+    commit_model_protocol_overrides(
+        &state,
+        &scope,
+        input.overrides,
+        &input.authorize_credential_ids,
+    )
 }
 
 fn validate_provider_protocol_overrides(
@@ -777,13 +760,20 @@ pub(super) async fn put_custom_endpoint_model_protocol_overrides(
             "custom endpoint overrides must use the account's declared upstream protocol",
         ));
     }
-    commit_model_protocol_overrides(&state, &scope, input.overrides)
+    if !input.authorize_credential_ids.is_empty() {
+        return Err(V3ApiError::invalid_request_at(
+            &state,
+            "HTTP route authorization belongs to the destination editor",
+        ));
+    }
+    commit_model_protocol_overrides(&state, &scope, input.overrides, &[])
 }
 
 fn commit_model_protocol_overrides(
     state: &CoreState,
     scope: &ContractScope,
     overrides: Vec<ModelProtocolOverride>,
+    authorize_credential_ids: &[String],
 ) -> Result<Json<ProviderContracts>, V3ApiError> {
     if overrides.is_empty() {
         return Err(V3ApiError::invalid_request_at(
@@ -823,8 +813,14 @@ fn commit_model_protocol_overrides(
     let now = Utc::now();
     {
         let db = state.db.lock();
-        db.set_model_protocol_settings(scope, &rows, &preferences, now)
-            .map_err(V3ApiError::internal)?;
+        db.set_model_protocol_settings_authorized(
+            scope,
+            &rows,
+            &preferences,
+            now,
+            authorize_credential_ids,
+        )
+        .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?;
         state
             .reload_provider_contracts_locked(&db)
             .map_err(V3ApiError::internal)?;

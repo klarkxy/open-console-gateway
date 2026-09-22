@@ -232,6 +232,14 @@ pub fn load_persisted(db: &Database) -> anyhow::Result<DestinationProjection> {
     store::load_all(db)
 }
 
+/// Authoritative configuration inside an existing SQLite transaction. This
+/// does not read secrets or migrate the schema.
+pub(crate) fn load_destinations_on(
+    conn: &rusqlite::Connection,
+) -> anyhow::Result<Vec<Destination>> {
+    store::load_destinations_on(conn)
+}
+
 /// Field equality between a live [`project`] snapshot and a v50 shadow.
 pub fn shadow_compare(live: &DestinationProjection, stored: &DestinationProjection) -> bool {
     live == stored

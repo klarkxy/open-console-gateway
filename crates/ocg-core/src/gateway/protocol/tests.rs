@@ -2144,12 +2144,15 @@ fn command_code_descriptor_is_separate_from_opencode_table() {
         .expect("official GOAT raw id");
     assert_eq!(goat.alias, COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS);
     assert_eq!(goat.preferred, ApiFormat::ChatCompletions);
-    assert_eq!(goat.supported_upstream, &[ApiFormat::ChatCompletions]);
+    assert_eq!(
+        goat.supported_upstream,
+        &[ApiFormat::ChatCompletions, ApiFormat::Responses]
+    );
     assert!(command_code_supports_upstream(
         COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
         ApiFormat::ChatCompletions
     ));
-    assert!(!command_code_supports_upstream(
+    assert!(command_code_supports_upstream(
         COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
         ApiFormat::Responses
     ));
@@ -2180,12 +2183,15 @@ fn command_code_descriptor_is_separate_from_opencode_table() {
         command_code_upstream_path(ApiFormat::Messages),
         Some("/messages")
     );
-    assert_eq!(command_code_upstream_path(ApiFormat::Responses), None);
+    assert_eq!(
+        command_code_upstream_path(ApiFormat::Responses),
+        Some("/responses")
+    );
     assert_eq!(command_code_upstream_path(ApiFormat::Gemini), None);
 }
 
 #[test]
-fn command_code_client_formats_convert_to_chat_and_never_emit_responses() {
+fn command_code_client_formats_use_native_responses_and_convert_messages_to_chat() {
     for (client, body) in [
         (
             ApiFormat::ChatCompletions,
@@ -2226,15 +2232,29 @@ fn command_code_client_formats_convert_to_chat_and_never_emit_responses() {
             },
         )
         .unwrap();
-        assert_eq!(plan.upstream, ApiFormat::ChatCompletions, "{client:?}");
+        let expected_upstream = match client {
+            ApiFormat::Responses => ApiFormat::Responses,
+            ApiFormat::ChatCompletions | ApiFormat::Messages => ApiFormat::ChatCompletions,
+            ApiFormat::Gemini => unreachable!("Gemini is tested below"),
+        };
+        assert_eq!(plan.upstream, expected_upstream, "{client:?}");
         assert_eq!(
             plan.model, COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
             "{client:?}"
         );
-        assert_ne!(plan.upstream, ApiFormat::Responses);
+        let body: serde_json::Value = serde_json::from_slice(&plan.body).unwrap();
+        assert_eq!(body["model"], COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM);
+        if client == ApiFormat::Responses {
+            assert_eq!(body["input"], "hi");
+            assert_eq!(body["store"], false);
+        }
         assert_eq!(
             command_code_upstream_path(plan.upstream),
-            Some("/chat/completions")
+            match expected_upstream {
+                ApiFormat::Responses => Some("/responses"),
+                ApiFormat::ChatCompletions => Some("/chat/completions"),
+                ApiFormat::Messages | ApiFormat::Gemini => unreachable!(),
+            }
         );
     }
 

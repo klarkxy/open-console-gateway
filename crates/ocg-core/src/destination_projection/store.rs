@@ -66,6 +66,10 @@ pub(super) fn load_all(db: &Database) -> anyhow::Result<DestinationProjection> {
     })
 }
 
+pub(super) fn load_destinations_on(conn: &Connection) -> anyhow::Result<Vec<Destination>> {
+    load_destinations(conn, load_catalogs(conn)?)
+}
+
 fn delete_shadow_rows(conn: &Connection) -> anyhow::Result<()> {
     conn.execute_batch(
         "DELETE FROM credential_grants;
@@ -77,13 +81,15 @@ fn delete_shadow_rows(conn: &Connection) -> anyhow::Result<()> {
 }
 
 fn insert_destination(conn: &Connection, destination: &Destination) -> anyhow::Result<()> {
+    crate::db::http_routes::ensure_storage_on(conn)?;
+    crate::db::http_routes::validate_loaded_destination(destination)?;
     let (legacy_kind, legacy_id) = legacy_parts(&destination.legacy);
     conn.execute(
         "INSERT INTO destinations (
             id, legacy_kind, legacy_id, adapter, name, brand_family, base_url,
             protocols_json, auth_scheme, model_resolution, capabilities_json, plan_json,
-            max_credentials, observer_credential_id, enabled
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            max_credentials, observer_credential_id, enabled, protocol_routes_json
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         params![
             destination.id,
             legacy_kind,
@@ -104,6 +110,7 @@ fn insert_destination(conn: &Connection, destination: &Destination) -> anyhow::R
             destination.max_credentials.map(i64::from),
             destination.observer_credential_id,
             i64::from(destination.enabled),
+            crate::db::http_routes::encode_protocol_routes_json(&destination.protocol_routes)?,
         ],
     )?;
     for model in &destination.catalog {
@@ -216,13 +223,19 @@ fn load_destinations(
     conn: &Connection,
     mut catalogs: HashMap<String, Vec<CatalogModel>>,
 ) -> anyhow::Result<Vec<Destination>> {
-    let mut stmt = conn.prepare(
+    let routes_column =
+        if crate::db::table_has_column(conn, "destinations", "protocol_routes_json")? {
+            "protocol_routes_json"
+        } else {
+            "NULL"
+        };
+    let mut stmt = conn.prepare(&format!(
         "SELECT id, legacy_kind, legacy_id, adapter, name, brand_family, base_url,
                 protocols_json, auth_scheme, model_resolution, capabilities_json, plan_json,
-                max_credentials, observer_credential_id, enabled
+                max_credentials, observer_credential_id, enabled, {routes_column}
          FROM destinations
          ORDER BY rowid",
-    )?;
+    ))?;
     let rows = stmt.query_map([], |row| {
         Ok((
             row.get::<_, String>(0)?,
@@ -240,6 +253,7 @@ fn load_destinations(
             row.get::<_, Option<i64>>(12)?,
             row.get::<_, Option<String>>(13)?,
             row.get::<_, i64>(14)?,
+            row.get::<_, Option<String>>(15)?,
         ))
     })?;
     let mut destinations = Vec::new();
@@ -260,9 +274,12 @@ fn load_destinations(
             max_credentials,
             observer_credential_id,
             enabled,
+            protocol_routes_json,
         ) = row?;
         let catalog = catalogs.remove(&id).unwrap_or_default();
-        destinations.push(Destination {
+        let protocol_routes =
+            crate::db::http_routes::decode_protocol_routes_json(protocol_routes_json.as_deref())?;
+        let destination = Destination {
             id,
             legacy: legacy_ref(&legacy_kind, legacy_id)?,
             adapter: adapter_from_str(&adapter)?,
@@ -271,6 +288,7 @@ fn load_destinations(
             base_url,
             protocols: serde_json::from_str(&protocols_json)
                 .with_context(|| "invalid destinations.protocols_json")?,
+            protocol_routes,
             auth_scheme: auth_scheme_from_str(&auth_scheme)?,
             model_resolution: model_resolution_from_str(&model_resolution)?,
             catalog,
@@ -286,7 +304,9 @@ fn load_destinations(
                 .transpose()?,
             observer_credential_id,
             enabled: enabled != 0,
-        });
+        };
+        crate::db::http_routes::validate_loaded_destination(&destination)?;
+        destinations.push(destination);
     }
     anyhow::ensure!(
         catalogs.is_empty(),

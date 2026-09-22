@@ -61,6 +61,12 @@ export type DashboardApiV4 =
   | DestinationUpstreamOverridePatch
   | DestinationPatchRequest
   | DestinationPatchResult
+  | DestinationCatalogRefreshResult
+  | HttpProtocolRouteDto
+  | DestinationCatalogUpdate
+  | DestinationCatalogModelUpdate
+  | DestinationModelTestRequest
+  | DestinationModelTestResult
   | DestinationDeleteResult
   | DestinationCredentialDto
   | QuotaRecoveryDto
@@ -182,6 +188,7 @@ export type OnboardingConnection =
       endpointUrl: string;
       kind: "new";
       name: string;
+      protocolRoutes?: HttpProtocolRouteDto[] | null;
       templateId: string;
       upstreamProtocol: AccountUpstreamProtocol;
     }
@@ -198,6 +205,14 @@ export type OnboardingConnection =
  * Nullable on the wire because builtin rows leave the field empty.
  */
 export type ProviderDefinitionAuthKind = "bearer" | "x-api-key" | "none";
+/**
+ * Destination auth scheme. Wire values match the domain serde names.
+ */
+export type AuthSchemeDto = "none" | "bearer" | "x_api_key";
+/**
+ * Wire protocol for destination catalog and transport rows.
+ */
+export type ProtocolDto = "chat_completions" | "responses" | "messages";
 export type OnboardingCommitMode = "draft" | "complete";
 export type ModelScope =
   | {
@@ -235,17 +250,9 @@ export type DshApplicationStatus =
  */
 export type AdapterKindDto = "opencode_go" | "zen" | "goat" | "minimax" | "kimi" | "ollama" | "cpa" | "http";
 /**
- * Destination auth scheme. Wire values match the domain serde names.
- */
-export type AuthSchemeDto = "none" | "bearer" | "x_api_key";
-/**
  * Redirect policy advertised on a destination.
  */
 export type RedirectPolicyDto = "no_follow" | "follow_keyless";
-/**
- * Wire protocol for destination catalog and transport rows.
- */
-export type ProtocolDto = "chat_completions" | "responses" | "messages";
 /**
  * Which V3-era row a destination was projected from.
  */
@@ -422,6 +429,11 @@ export interface ConnectionSummary {
   adapterKind: string;
   authorization: AuthorizationState;
   credentialCount: number;
+  /**
+   * Personal credit setup for Key forms. None means unsupported; an empty
+   * list permits custom configuration without a provider preset.
+   */
+  creditPresets?: CreditPreset[] | null;
   displayFamily: string | null;
   eligibility: Eligibility;
   enabledCredentialCount: number;
@@ -435,6 +447,38 @@ export interface ConnectionSummary {
   targetCount: number;
   targets: ConnectionTarget[];
   templateRef: TemplateRef | null;
+}
+export interface CreditPreset {
+  configuration: CreditConfiguration;
+  id: string;
+  initialGrant: number;
+}
+export interface CreditConfiguration {
+  creditsPerCurrency: number;
+  currency: string;
+  monthly: MonthlyCredits | null;
+  name: string;
+  rates: CreditRate[];
+  sourceUrl: string | null;
+}
+export interface MonthlyCredits {
+  amount: number;
+  /**
+   * First renewal boundary and immutable calendar anchor, including its UTC time.
+   */
+  nextResetAt: string;
+  renewalEndsAt: string | null;
+  /**
+   * Calendar boundaries use this fixed UTC offset, e.g. 480 for China.
+   */
+  timezoneOffsetMinutes: number;
+}
+export interface CreditRate {
+  cacheReadPerMillion: number | null;
+  cacheWritePerMillion: number | null;
+  inputPerMillion: number;
+  model: string;
+  outputPerMillion: number;
 }
 export interface ConnectionList {
   connections: ConnectionSummary[];
@@ -464,10 +508,16 @@ export interface OnboardingCommitRequest {
   processGeneration: number;
   targets: OnboardingTarget[];
 }
+export interface HttpProtocolRouteDto {
+  authScheme: AuthSchemeDto;
+  endpointUrl: string;
+  protocol: ProtocolDto;
+}
 export interface OnboardingConnectionNew {
   authKind: ProviderDefinitionAuthKind;
   endpointUrl: string;
   name: string;
+  protocolRoutes?: HttpProtocolRouteDto[] | null;
   templateId: string;
   upstreamProtocol: AccountUpstreamProtocol;
 }
@@ -791,6 +841,7 @@ export interface DestinationDto {
    */
   observerCredentialId: string | null;
   plan: PlanDto | null;
+  protocolRoutes: HttpProtocolRouteDto[];
   protocols: ProtocolDto[];
 }
 /**
@@ -892,6 +943,8 @@ export interface PlanWindowDto {
  */
 export interface DestinationModelPatch {
   enabled?: boolean | null;
+  preferred?: ProtocolDto | null;
+  protocols?: ProtocolDto[] | null;
   publicModel: string;
   upstreamModel: string;
   upstreamOverride?: DestinationUpstreamOverridePatch | null;
@@ -913,6 +966,7 @@ export interface DestinationPatchRequest {
   models: DestinationModelPatch[];
   name: string;
   processGeneration: number;
+  protocolRoutes?: HttpProtocolRouteDto[] | null;
   upstreamProtocol: ProtocolDto;
 }
 export interface DestinationPatchResult {
@@ -1045,6 +1099,51 @@ export interface QuotaRecoveryDto {
   resetsAt: string | null;
   status: QuotaRecoveryStatus;
   window: QuotaRecoveryWindow;
+}
+export interface DestinationCatalogRefreshResult {
+  addedCount: number;
+  destination: DestinationDto;
+  revision: ControlRevision;
+  truncated: boolean;
+}
+/**
+ * Required process-scoped mutation precondition.
+ *
+ * Both fields travel at the top level of every mutation request. The random
+ * process generation prevents a revision captured before restart from being
+ * accepted by a fresh process whose in-memory counter reused the same value.
+ */
+export interface DestinationCatalogUpdate {
+  expectedRevision: number;
+  processGeneration: number;
+  removeModels?: string[];
+  updates: DestinationCatalogModelUpdate[];
+}
+export interface DestinationCatalogModelUpdate {
+  enabled?: boolean | null;
+  preferred?: ProtocolDto | null;
+  protocols?: ProtocolDto[] | null;
+  publicModel: string;
+}
+/**
+ * Required process-scoped mutation precondition.
+ *
+ * Both fields travel at the top level of every mutation request. The random
+ * process generation prevents a revision captured before restart from being
+ * accepted by a fresh process whose in-memory counter reused the same value.
+ */
+export interface DestinationModelTestRequest {
+  expectedRevision: number;
+  processGeneration: number;
+  protocol: ProtocolDto;
+  publicModel: string;
+}
+export interface DestinationModelTestResult {
+  error: string | null;
+  ok: boolean;
+  protocol: ProtocolDto;
+  publicModel: string;
+  revision: ControlRevision;
 }
 export interface DestinationDeleteResult {
   revision: ControlRevision;
@@ -1224,38 +1323,6 @@ export interface CreditBucket {
   label: string;
   remaining: number;
   startsAt: string;
-}
-export interface CreditConfiguration {
-  creditsPerCurrency: number;
-  currency: string;
-  monthly: MonthlyCredits | null;
-  name: string;
-  rates: CreditRate[];
-  sourceUrl: string | null;
-}
-export interface MonthlyCredits {
-  amount: number;
-  /**
-   * First renewal boundary and immutable calendar anchor, including its UTC time.
-   */
-  nextResetAt: string;
-  renewalEndsAt: string | null;
-  /**
-   * Calendar boundaries use this fixed UTC offset, e.g. 480 for China.
-   */
-  timezoneOffsetMinutes: number;
-}
-export interface CreditRate {
-  cacheReadPerMillion: number | null;
-  cacheWritePerMillion: number | null;
-  inputPerMillion: number;
-  model: string;
-  outputPerMillion: number;
-}
-export interface CreditPreset {
-  configuration: CreditConfiguration;
-  id: string;
-  initialGrant: number;
 }
 /**
  * GET `/accounts/{id}/provider-usage` body. Distinct from stored quota rows.

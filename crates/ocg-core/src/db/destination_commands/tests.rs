@@ -1,4 +1,4 @@
-use super::replace_http_destination_on;
+use super::{replace_http_catalog_on, replace_http_destination_on};
 use crate::db::Database;
 use crate::destination_projection::load_runtime;
 use ocg_domain::catalog::UpstreamProtocolKind;
@@ -8,7 +8,7 @@ use ocg_domain::credential::{
 };
 use ocg_domain::destination::{
     AdapterKind, AuthScheme, CatalogModel, ModelResolution, Protocol, destination_id_for_builtin,
-    sealed_capabilities,
+    http_configured_routes, sealed_capabilities,
 };
 use ocg_domain::dynamic::{
     DynamicAuthKind, DynamicModelMapping, DynamicModelUpstreamOverride, DynamicProviderDefinition,
@@ -291,6 +291,97 @@ fn apply(
     authorize: &[String],
 ) -> anyhow::Result<()> {
     replace_http_destination_on(db, destination_id, definition, authorize)
+}
+
+fn endpoint_grant_values(db: &Database, credential_id: &str) -> Vec<String> {
+    grant_values(db, credential_id)
+        .into_iter()
+        .filter_map(|(kind, value)| (kind == "endpoint_id").then_some(value))
+        .collect()
+}
+
+fn override_model(public_model: &str, endpoint_url: &str) -> CatalogModel {
+    CatalogModel {
+        public_model: public_model.into(),
+        upstream_model: format!("up-{public_model}"),
+        protocols: vec![Protocol::Messages],
+        preferred: Some(Protocol::Messages),
+        enabled: true,
+        upstream_override: Some(DynamicModelUpstreamOverride {
+            protocol: UpstreamProtocolKind::Messages,
+            endpoint_url: endpoint_url.into(),
+        }),
+    }
+}
+
+#[test]
+fn override_grants_follow_exact_urls_across_reorder_and_removal() {
+    let opened = open_db("override-grant-remap");
+    let db = opened.db();
+    let override_a = "https://same.example/messages-a";
+    let override_c = "https://same.example/messages-c";
+    let seeded = seed(
+        db,
+        "dynamic",
+        "override-grant-remap",
+        ModelResolution::PublicAndUpstream,
+        &[
+            override_model("model-a", override_a),
+            override_model("model-c", override_c),
+        ],
+    );
+    let before = loaded_dest(&load_runtime(db).unwrap(), &seeded.destination_id).clone();
+    let old_routes = http_configured_routes(&before);
+    let old_a = assigned_endpoints_for_routes(&seeded.connection_id, &old_routes)
+        .into_iter()
+        .zip(old_routes.iter())
+        .find(|(_, route)| route.url.as_deref() == Some(override_a))
+        .unwrap()
+        .0
+        .id;
+    db.conn
+        .execute(
+            "INSERT INTO credential_grants (credential_id, kind, value) VALUES (?1, 'endpoint_id', ?2), (?1, 'endpoint_id', 'unknown-stale-endpoint')",
+            rusqlite::params![seeded.credential_id, old_a],
+        )
+        .unwrap();
+
+    let reordered = vec![
+        override_model("model-c", override_c),
+        override_model("model-a", override_a),
+    ];
+    replace_http_catalog_on(&db.conn, &before, &reordered).unwrap();
+    let after_reorder = loaded_dest(&load_runtime(db).unwrap(), &seeded.destination_id).clone();
+    let routes_after_reorder = http_configured_routes(&after_reorder);
+    let expected_a_after_reorder =
+        assigned_endpoints_for_routes(&seeded.connection_id, &routes_after_reorder)
+            .into_iter()
+            .zip(routes_after_reorder.iter())
+            .find(|(_, route)| route.url.as_deref() == Some(override_a))
+            .unwrap()
+            .0
+            .id;
+    assert_eq!(
+        endpoint_grant_values(db, &seeded.credential_id),
+        vec![expected_a_after_reorder]
+    );
+
+    let only_a = vec![override_model("model-a", override_a)];
+    replace_http_catalog_on(&db.conn, &after_reorder, &only_a).unwrap();
+    let after_removal = loaded_dest(&load_runtime(db).unwrap(), &seeded.destination_id).clone();
+    let routes_after_removal = http_configured_routes(&after_removal);
+    let expected_a_after_removal =
+        assigned_endpoints_for_routes(&seeded.connection_id, &routes_after_removal)
+            .into_iter()
+            .zip(routes_after_removal.iter())
+            .find(|(_, route)| route.url.as_deref() == Some(override_a))
+            .unwrap()
+            .0
+            .id;
+    assert_eq!(
+        endpoint_grant_values(db, &seeded.credential_id),
+        vec![expected_a_after_removal]
+    );
 }
 
 #[test]

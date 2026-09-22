@@ -218,16 +218,35 @@
     "family": "minimax",
     "offering": "api",
     "variant": "API (CN)",
-    "defaultModels": ["MiniMax-M2.5"],
+    "defaultModels": [
+      "MiniMax-M3"
+    ],
     "endpointUrl": "https://api.minimax.cn/anthropic/v1/messages",
     "protocol": "messages",
-    "authKind": "bearer",
+    "authKind": "x-api-key",
     "docsUrl": "https://platform.minimaxi.com/docs/api-reference/text-anthropic-api",
     "websiteUrl": "https://platform.minimaxi.com/",
     "note": {
       "en": "Use a CN API Key. For CN Token Plan usage tracking, use the existing MiniMax CN provider.",
       "zh": "使用国内站 API Key；需要国内 Token Plan 用量统计时，请使用已有 MiniMax CN 供应商。"
-    }
+    },
+    "protocolRoutes": [
+      {
+        "protocol": "messages",
+        "endpointUrl": "https://api.minimax.cn/anthropic/v1/messages",
+        "authScheme": "x_api_key"
+      },
+      {
+        "protocol": "chat_completions",
+        "endpointUrl": "https://api.minimax.cn/v1/chat/completions",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "responses",
+        "endpointUrl": "https://api.minimax.cn/v1/responses",
+        "authScheme": "bearer"
+      }
+    ]
   },
   {
     "id": "minimax-api-intl",
@@ -236,16 +255,35 @@
     "family": "minimax",
     "offering": "api",
     "variant": "API / Token Plan (Global)",
-    "defaultModels": ["MiniMax-M3"],
+    "defaultModels": [
+      "MiniMax-M3"
+    ],
     "endpointUrl": "https://api.minimax.io/anthropic/v1/messages",
     "protocol": "messages",
-    "authKind": "bearer",
+    "authKind": "x-api-key",
     "docsUrl": "https://platform.minimax.io/docs/api-reference/text-anthropic-api",
     "websiteUrl": "https://platform.minimax.io/",
     "note": {
       "en": "Use a Global API or Token Plan Key as appropriate. CN Keys are separate; official usage and pricing are not synced here.",
       "zh": "按需使用国际站 API 或 Token Plan Key，不能与国内站 Key 混用；此处不同步官方用量和价格。"
-    }
+    },
+    "protocolRoutes": [
+      {
+        "protocol": "messages",
+        "endpointUrl": "https://api.minimax.io/anthropic/v1/messages",
+        "authScheme": "x_api_key"
+      },
+      {
+        "protocol": "chat_completions",
+        "endpointUrl": "https://api.minimax.io/v1/chat/completions",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "responses",
+        "endpointUrl": "https://api.minimax.io/v1/responses",
+        "authScheme": "bearer"
+      }
+    ]
   },
   {
     "id": "longcat",
@@ -708,7 +746,9 @@
     "family": "xiaomi",
     "offering": "api",
     "variant": "API",
-    "defaultModels": ["mimo-v2.5"],
+    "defaultModels": [
+      "mimo-v2.6-flash"
+    ],
     "endpointUrl": "https://api.xiaomimimo.com/v1/chat/completions",
     "protocol": "chat_completions",
     "authKind": "bearer",
@@ -718,7 +758,24 @@
       "en": "Pay-as-you-go API Key. MiMo accepts Bearer authentication.",
       "zh": "按量 API Key；MiMo 支持 Bearer 鉴权。"
     },
-    "modelDiscovery": false
+    "modelDiscovery": true,
+    "protocolRoutes": [
+      {
+        "protocol": "chat_completions",
+        "endpointUrl": "https://api.xiaomimimo.com/v1/chat/completions",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "messages",
+        "endpointUrl": "https://api.xiaomimimo.com/anthropic/v1/messages",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "responses",
+        "endpointUrl": "https://api.xiaomimimo.com/v1/responses",
+        "authScheme": "bearer"
+      }
+    ]
   },
   {
     "id": "xiaomi-mimo-token",
@@ -727,7 +784,9 @@
     "family": "xiaomi",
     "offering": "plan",
     "variant": "Token Plan (CN)",
-    "defaultModels": ["mimo-v2.5"],
+    "defaultModels": [
+      "mimo-v2.6-flash"
+    ],
     "endpointUrl": "https://token-plan-cn.xiaomimimo.com/v1/chat/completions",
     "protocol": "chat_completions",
     "authKind": "bearer",
@@ -737,7 +796,24 @@
       "en": "China Token Plan Key and endpoint. Pay-as-you-go and Token Plan Keys are not interchangeable.",
       "zh": "中国区 Token Plan 专用 Key 和端点，不能与按量 API Key 混用。"
     },
-    "modelDiscovery": false
+    "modelDiscovery": true,
+    "protocolRoutes": [
+      {
+        "protocol": "chat_completions",
+        "endpointUrl": "https://token-plan-cn.xiaomimimo.com/v1/chat/completions",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "messages",
+        "endpointUrl": "https://token-plan-cn.xiaomimimo.com/anthropic/v1/messages",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "responses",
+        "endpointUrl": "https://token-plan-cn.xiaomimimo.com/v1/responses",
+        "authScheme": "bearer"
+      }
+    ]
   },
   {
     "id": "ant-ling",

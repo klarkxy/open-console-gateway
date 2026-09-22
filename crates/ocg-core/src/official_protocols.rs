@@ -27,7 +27,11 @@ const COMMAND_CODE_PROTOCOL_DOCS_HOST: &str = "commandcode.ai";
 pub enum OfficialProtocolBaseline {
     /// Per-model mapping parsed from an official endpoint table.
     Mapped(BTreeMap<String, UpstreamProtocolKind>),
+    /// Per-model protocol lists parsed from catalog `supported_endpoints`.
+    MappedProtocols(BTreeMap<String, Vec<UpstreamProtocolKind>>),
     /// Command Code provider docs state the Anthropic/Chat family split.
+    /// This is not a Responses default: open models stay Chat until a catalog
+    /// field lists `/responses`.
     FamilyRule,
     /// Fetch or parse failed; preserve saved evidence instead of guessing a protocol.
     Unavailable,
@@ -46,8 +50,50 @@ impl OfficialProtocolBaseline {
         )
     }
 
-    /// Only protocols explicitly described by this document are evidence.
+    pub fn mapped_protocols(
+        pairs: impl IntoIterator<Item = (impl Into<String>, Vec<UpstreamProtocolKind>)>,
+    ) -> Self {
+        let map = pairs
+            .into_iter()
+            .map(|(id, protocols)| {
+                (
+                    normalize_model_name(&id.into()),
+                    unique_protocols(protocols),
+                )
+            })
+            .filter(|(id, protocols)| !id.is_empty() && !protocols.is_empty())
+            .collect::<BTreeMap<_, _>>();
+        if map.is_empty() {
+            Self::Unavailable
+        } else {
+            Self::MappedProtocols(map)
+        }
+    }
+
+    /// Catalog `supported_endpoints` win over plaintext FamilyRule / empty maps.
+    pub fn prefer_catalog(self, docs_fallback: Self) -> Self {
+        match self {
+            Self::Mapped(_) | Self::MappedProtocols(_) => self,
+            Self::FamilyRule | Self::Unavailable => docs_fallback,
+        }
+    }
+
+    /// Preferred protocol for callers that still consume a single mapping.
+    /// MappedProtocols picks the family preferred value when it is listed,
+    /// otherwise the first recognized catalog protocol.
     pub fn protocol_for(&self, provider_id: &str, model_id: &str) -> Option<UpstreamProtocolKind> {
+        let protocols = self.protocols_for(provider_id, model_id)?;
+        preferred_listed_protocol(provider_id, model_id, &protocols)
+    }
+
+    /// Only protocols explicitly described by this document or catalog row.
+    /// Missing or unknown endpoint values are omitted; they never expand to
+    /// Chat+Responses+Messages.
+    pub fn protocols_for(
+        &self,
+        provider_id: &str,
+        model_id: &str,
+    ) -> Option<Vec<UpstreamProtocolKind>> {
         if model_id.trim().is_empty()
             || (provider_id == COMMAND_CODE_PROVIDER_ID
                 && model_id.eq_ignore_ascii_case("stealth/ox-alpha"))
@@ -55,13 +101,21 @@ impl OfficialProtocolBaseline {
             return None;
         }
         match self {
-            Self::Mapped(map) => lookup_mapped(map, model_id).or_else(|| {
+            Self::Mapped(map) => lookup_mapped(map, model_id)
+                .or_else(|| {
+                    (provider_id == OPENCODE_ZEN_FREE_PROVIDER_ID)
+                        .then(|| lookup_mapped(map, &strip_zen_free_suffix(model_id)))
+                        .flatten()
+                })
+                .map(|protocol| vec![protocol]),
+            Self::MappedProtocols(map) => lookup_mapped_protocols(map, model_id).or_else(|| {
                 (provider_id == OPENCODE_ZEN_FREE_PROVIDER_ID)
-                    .then(|| lookup_mapped(map, &strip_zen_free_suffix(model_id)))
+                    .then(|| lookup_mapped_protocols(map, &strip_zen_free_suffix(model_id)))
                     .flatten()
             }),
             Self::FamilyRule if provider_id == COMMAND_CODE_PROVIDER_ID => {
-                ocg_domain::protocol::command_code_preferred_format(model_id).map(api_to_upstream)
+                ocg_domain::protocol::command_code_preferred_format(model_id)
+                    .map(|format| vec![api_to_upstream(format)])
             }
             Self::FamilyRule | Self::Unavailable => None,
         }
@@ -186,6 +240,56 @@ pub fn parse_command_code_official_protocols(html: &str) -> Result<OfficialProto
     bail!("Command Code official protocol documentation was not recognized")
 }
 
+/// Parse GET `/models` JSON `supported_endpoints` into per-model protocol lists.
+///
+/// Missing or unusable fields do not invent Chat+Responses+Messages. When the
+/// snapshot has no recognized endpoint lists, the baseline is Unavailable so
+/// saved evidence survives.
+pub fn parse_catalog_supported_endpoints_baseline(bytes: &[u8]) -> OfficialProtocolBaseline {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return OfficialProtocolBaseline::Unavailable;
+    };
+    let Some(items) = value
+        .as_object()
+        .and_then(|object| object.get("data").or_else(|| object.get("models")))
+        .and_then(|value| value.as_array())
+    else {
+        return OfficialProtocolBaseline::Unavailable;
+    };
+    let mut saw_supported_endpoints_field = false;
+    let mut map = BTreeMap::new();
+    for item in items {
+        let Some(object) = item.as_object() else {
+            continue;
+        };
+        let Some(raw_id) = object
+            .get("id")
+            .and_then(|value| value.as_str())
+            .or_else(|| object.get("model").and_then(|value| value.as_str()))
+        else {
+            continue;
+        };
+        let id = normalize_model_name(raw_id);
+        if id.is_empty() {
+            continue;
+        }
+        let Some(endpoints) = object.get("supported_endpoints") else {
+            continue;
+        };
+        saw_supported_endpoints_field = true;
+        let protocols = protocols_from_supported_endpoints_value(endpoints);
+        if protocols.is_empty() || map.contains_key(&id) {
+            continue;
+        }
+        map.insert(id, protocols);
+    }
+    if !saw_supported_endpoints_field || map.is_empty() {
+        OfficialProtocolBaseline::Unavailable
+    } else {
+        OfficialProtocolBaseline::MappedProtocols(map)
+    }
+}
+
 fn table_has_model_and_endpoint(table: &[Vec<String>]) -> bool {
     let Some(headers) = table.first() else {
         return false;
@@ -271,6 +375,64 @@ pub fn protocol_from_endpoint_url(endpoint: &str) -> Option<UpstreamProtocolKind
     } else {
         None
     }
+}
+
+pub fn protocols_from_supported_endpoints_value(
+    value: &serde_json::Value,
+) -> Vec<UpstreamProtocolKind> {
+    let Some(items) = value.as_array() else {
+        return Vec::new();
+    };
+    unique_protocols(
+        items
+            .iter()
+            .filter_map(|item| item.as_str())
+            .filter_map(protocol_from_endpoint_url),
+    )
+}
+
+fn unique_protocols(
+    protocols: impl IntoIterator<Item = UpstreamProtocolKind>,
+) -> Vec<UpstreamProtocolKind> {
+    let mut unique = Vec::new();
+    for protocol in protocols {
+        if !unique.contains(&protocol) {
+            unique.push(protocol);
+        }
+    }
+    unique
+}
+
+fn preferred_listed_protocol(
+    provider_id: &str,
+    model_id: &str,
+    protocols: &[UpstreamProtocolKind],
+) -> Option<UpstreamProtocolKind> {
+    if protocols.is_empty() {
+        return None;
+    }
+    if provider_id == COMMAND_CODE_PROVIDER_ID
+        && let Some(preferred) =
+            ocg_domain::protocol::command_code_preferred_format(model_id).map(api_to_upstream)
+        && protocols.contains(&preferred)
+    {
+        return Some(preferred);
+    }
+    Some(protocols[0])
+}
+
+fn lookup_mapped_protocols(
+    map: &BTreeMap<String, Vec<UpstreamProtocolKind>>,
+    model_id: &str,
+) -> Option<Vec<UpstreamProtocolKind>> {
+    let normalized = normalize_model_name(model_id);
+    map.get(&normalized)
+        .cloned()
+        .or_else(|| map.get(model_id).cloned())
+        .or_else(|| {
+            let leaf = normalized.rsplit('/').next().unwrap_or(normalized.as_str());
+            map.get(leaf).cloned()
+        })
 }
 
 fn looks_like_command_code_provider_docs(plain: &str) -> bool {

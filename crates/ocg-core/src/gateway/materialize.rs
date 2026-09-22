@@ -33,7 +33,6 @@ use ocg_domain::destination::Destination;
 use ocg_domain::destination::LegacyDestinationRef;
 #[cfg(test)]
 use std::collections::HashMap;
-use std::collections::HashSet;
 
 pub use crate::gateway::protocol::{
     parse_client_request as parse_client, parse_gemini_request as parse_gemini,
@@ -734,7 +733,7 @@ fn routing_accounts<'a>(
         .iter()
         .map(|destination| (destination.id.as_str(), destination))
         .collect();
-    let mut seen = HashSet::new();
+    let mut seen = std::collections::HashSet::new();
     let mut rows = Vec::new();
     for credential in &projection.credentials {
         let Some(account) = by_id.get(credential.legacy_account_id.as_str()).copied() else {
@@ -1053,7 +1052,7 @@ pub(crate) fn endpoint_id_for_target(
     upstream: ApiFormat,
 ) -> Result<String, String> {
     use ocg_domain::connection::{ConnectionId, EndpointOperation, endpoint_id_for};
-    use ocg_domain::credential::{RouteSpec, assigned_endpoints_for_routes};
+    use ocg_domain::credential::assigned_endpoints_for_routes;
     use ocg_domain::destination::AdapterKind;
     let connection: ConnectionId =
         serde_json::from_value(serde_json::json!(credential.authorization_connection_id))
@@ -1070,47 +1069,15 @@ pub(crate) fn endpoint_id_for_target(
     if destination.adapter != AdapterKind::Http {
         return Ok(endpoint_id_for(&connection, EndpointOperation::from(protocol)).to_string());
     }
-    let base = destination
-        .base_url
-        .as_ref()
-        .ok_or("missing HTTP endpoint")?;
-    if destination.protocols.is_empty() {
-        return Err("missing HTTP protocol".into());
-    }
-    // All declared operations share the configured default endpoint. Keep
-    // configured URLs here: secondary endpoint identities historically hash
-    // those URLs, while the adapter resolves the actual inference path.
-    let mut routes = Vec::new();
-    let mut seen = HashSet::new();
-    for protocol in &destination.protocols {
-        if seen.insert((*protocol, base.clone())) {
-            routes.push(RouteSpec {
-                operation: EndpointOperation::from(*protocol),
-                url: Some(base.clone()),
-            });
-        }
-    }
-    for row in &destination.catalog {
-        if let Some(route) = &row.upstream_override
-            && seen.insert((route.protocol, route.endpoint_url.clone()))
-        {
-            routes.push(RouteSpec {
-                operation: EndpointOperation::from(route.protocol),
-                url: Some(route.endpoint_url.clone()),
-            });
-        }
-    }
-    let endpoint = model
-        .upstream_override
-        .as_ref()
-        .map(|r| &r.endpoint_url)
-        .unwrap_or(base);
+    let routes = ocg_domain::destination::http_configured_routes(destination);
+    let selected = ocg_domain::destination::http_model_route(destination, model, protocol)
+        .ok_or("missing configured HTTP protocol route")?;
     assigned_endpoints_for_routes(&connection, &routes)
         .into_iter()
         .zip(routes)
         .find(|(_, route)| {
             route.operation == EndpointOperation::from(protocol)
-                && route.url.as_ref() == Some(endpoint)
+                && route.url.as_deref() == Some(selected.endpoint_url.as_str())
         })
         .map(|(assigned, _)| assigned.id)
         .ok_or_else(|| "missing persisted route grant identity".into())
@@ -1218,14 +1185,30 @@ pub(crate) fn materialize_execution_routes(
             let adapter = ProviderAdapterKind::from(destination.adapter);
             let channel = crate::routing_runtime::channel_for_adapter(adapter);
             let custom_route = if destination.adapter == AdapterKind::Http {
+                let selected_protocol = match upstream {
+                    ApiFormat::ChatCompletions => {
+                        ocg_domain::destination::Protocol::ChatCompletions
+                    }
+                    ApiFormat::Responses => ocg_domain::destination::Protocol::Responses,
+                    ApiFormat::Messages => ocg_domain::destination::Protocol::Messages,
+                    ApiFormat::Gemini => {
+                        return Err(ProtocolError::new("client-only upstream protocol"));
+                    }
+                };
+                let Some(selected) = ocg_domain::destination::http_model_route(
+                    destination,
+                    model,
+                    selected_protocol,
+                ) else {
+                    rejections.push(reject(
+                        RouteRejectionCode::ProductionRouteUnsupported,
+                        "model protocol has no configured route".into(),
+                    ));
+                    continue;
+                };
                 Some(CustomRouteSpec {
-                    endpoint_url: model
-                        .upstream_override
-                        .as_ref()
-                        .map(|r| r.endpoint_url.clone())
-                        .or_else(|| destination.base_url.clone())
-                        .ok_or_else(|| ProtocolError::new("missing HTTP endpoint"))?,
-                    auth_kind: match destination.auth_scheme {
+                    endpoint_url: selected.endpoint_url,
+                    auth_kind: match selected.auth_scheme {
                         AuthScheme::Bearer => ocg_domain::dynamic::DynamicAuthKind::Bearer,
                         AuthScheme::XApiKey => ocg_domain::dynamic::DynamicAuthKind::XApiKey,
                         AuthScheme::None => ocg_domain::dynamic::DynamicAuthKind::None,

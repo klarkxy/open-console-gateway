@@ -1889,6 +1889,7 @@ fn test_destination(adapter: AdapterKind, legacy: LegacyDestinationRef) -> Desti
         brand_family: None,
         base_url: None,
         protocols: Vec::new(),
+        protocol_routes: Vec::new(),
         auth_scheme: AuthScheme::Bearer,
         model_resolution,
         catalog: Vec::new(),

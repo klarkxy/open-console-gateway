@@ -32,8 +32,11 @@ pub const COMMAND_CODE_GOAT_BASE_URL: &str = "https://api.commandcode.ai/provide
 pub const COMMAND_CODE_GOAT_HOST: &str = "api.commandcode.ai";
 /// Relative to [`COMMAND_CODE_GOAT_BASE_URL`].
 pub const COMMAND_CODE_GOAT_CHAT_COMPLETIONS_PATH: &str = "/chat/completions";
+/// Relative to [`COMMAND_CODE_GOAT_BASE_URL`]. Catalog `supported_endpoints`
+/// decide which models actually serve this path.
+pub const COMMAND_CODE_GOAT_RESPONSES_PATH: &str = "/responses";
 /// Relative to [`COMMAND_CODE_GOAT_BASE_URL`]. Anthropic models use this path;
-/// OpenAI and open-source models use Chat Completions.
+/// OpenAI and open-source models use Chat Completions and, when listed, Responses.
 pub const COMMAND_CODE_GOAT_MESSAGES_PATH: &str = "/messages";
 /// Official public GET `/models` discovery path used for Provider catalog refresh.
 pub const COMMAND_CODE_GOAT_MODELS_PATH: &str = "/models";
@@ -52,9 +55,10 @@ pub const MAX_COMMAND_CODE_MODELS_CATALOG: usize = 1_000;
 
 /// Official MiniMax CN Token Plan endpoints. The Plan Key is sent as Bearer
 /// auth to catalog, Chat, and Messages surfaces; redirects stay disabled.
-pub const MINIMAX_CN_BASE_URL: &str = "https://api.minimaxi.com/v1";
+pub const MINIMAX_CN_BASE_URL: &str = "https://api.minimax.cn/v1";
 pub const MINIMAX_CN_CHAT_COMPLETIONS_PATH: &str = "/chat/completions";
-pub const MINIMAX_CN_ANTHROPIC_BASE_URL: &str = "https://api.minimaxi.com/anthropic";
+pub const MINIMAX_CN_RESPONSES_PATH: &str = "/responses";
+pub const MINIMAX_CN_ANTHROPIC_BASE_URL: &str = "https://api.minimax.cn/anthropic";
 pub const MINIMAX_CN_MESSAGES_PATH: &str = "/v1/messages";
 pub const MINIMAX_CN_MODELS_PATH: &str = "/models";
 pub const MINIMAX_CN_USAGE_URL: &str = "https://api.minimaxi.com/v1/token_plan/remains";
@@ -120,8 +124,8 @@ impl OllamaBillingTier {
 }
 
 /// Models included by the GOAT subscription page. These are the default-on
-/// rows in the Provider model/protocol matrix. Models discovered beyond this
-/// preset remain visible but default off until an administrator enables them.
+/// rows in the Provider model/protocol matrix. Other discovered models use
+/// official catalog evidence and preserve saved operator overrides.
 pub const COMMAND_CODE_GOAT_INCLUDED_MODEL_IDS: &[&str] = &[
     "gpt-5.6-sol",
     "gpt-5.6-luna",
@@ -278,7 +282,8 @@ pub const PROTOCOL_FALLBACK_CHAT_RESPONSES_MESSAGES: &[UpstreamProtocolKind] = &
 pub const OPENCODE_CONSTRUCTABLE_PROTOCOLS: &[UpstreamProtocolKind] =
     PROTOCOL_FALLBACK_CHAT_RESPONSES_MESSAGES;
 
-/// Command Code documented surfaces have no Responses path.
+/// Command Code and MiniMax CN share Chat+Messages as a two-protocol ceiling
+/// for adapters that do not expose Responses.
 pub const PROTOCOL_FALLBACK_CHAT_MESSAGES: &[UpstreamProtocolKind] = &[
     UpstreamProtocolKind::ChatCompletions,
     UpstreamProtocolKind::Messages,
@@ -410,12 +415,18 @@ const GO_PROTOCOLS: [UpstreamProtocolKind; 3] = [
     UpstreamProtocolKind::Responses,
     UpstreamProtocolKind::Messages,
 ];
-const GOAT_PROTOCOLS: [UpstreamProtocolKind; 2] = [
+const GOAT_PROTOCOLS: [UpstreamProtocolKind; 3] = [
     UpstreamProtocolKind::ChatCompletions,
+    UpstreamProtocolKind::Responses,
     UpstreamProtocolKind::Messages,
 ];
 const CHAT_MESSAGES_PROTOCOLS: [UpstreamProtocolKind; 2] = [
     UpstreamProtocolKind::ChatCompletions,
+    UpstreamProtocolKind::Messages,
+];
+const MINIMAX_CN_PROTOCOLS: [UpstreamProtocolKind; 3] = [
+    UpstreamProtocolKind::ChatCompletions,
+    UpstreamProtocolKind::Responses,
     UpstreamProtocolKind::Messages,
 ];
 const CHAT_PROTOCOLS: [UpstreamProtocolKind; 1] = [UpstreamProtocolKind::ChatCompletions];
@@ -525,7 +536,7 @@ pub const BUILTIN_PROVIDERS: [BuiltinProvider; 8] = [
         model_source: MINIMAX_CN_MODEL_SOURCE,
         key_prefix: Some("sk-cp"),
         auth_schemes: &BEARER_AUTH,
-        upstream_protocols: &CHAT_MESSAGES_PROTOCOLS,
+        upstream_protocols: &MINIMAX_CN_PROTOCOLS,
         form_fields: &MINIMAX_CN_FORM_FIELDS,
     },
     BuiltinProvider {
@@ -1031,8 +1042,9 @@ pub enum ProtocolMatrixKind {
 pub enum StructuralProbeCeiling {
     /// This adapter does not expose provider-scoped request-path probes.
     Unavailable,
-    /// Command Code GOAT has both route families, while each model's sealed
-    /// family rule selects the one path worth probing.
+    /// Command Code GOAT documents Chat, Responses, and Messages paths.
+    /// Per-model enablement still comes from catalog `supported_endpoints`
+    /// and persisted enabled protocols, not this ceiling.
     CommandCodeConstructable,
     /// This sealed provider exposes exactly the listed documented paths.
     Fixed(&'static [UpstreamProtocolKind]),
@@ -1294,7 +1306,7 @@ fn command_code_goat_capabilities(plan: BuiltinProvider) -> ProviderCapabilities
         protocol_probe: ProtocolProbeDescriptor {
             request_path_may_trial: false,
             matrix: ProtocolMatrixKind::CommandCodeNative,
-            fallback_priority: PROTOCOL_FALLBACK_CHAT_MESSAGES,
+            fallback_priority: PROTOCOL_FALLBACK_CHAT_RESPONSES_MESSAGES,
             explicit_probe: true,
             structural_ceiling: StructuralProbeCeiling::CommandCodeConstructable,
         },
@@ -1358,9 +1370,9 @@ fn minimax_cn_capabilities(plan: BuiltinProvider) -> ProviderCapabilities {
         protocol_probe: ProtocolProbeDescriptor {
             request_path_may_trial: false,
             matrix: ProtocolMatrixKind::FixedProviderProtocols,
-            fallback_priority: &CHAT_MESSAGES_PROTOCOLS,
+            fallback_priority: &MINIMAX_CN_PROTOCOLS,
             explicit_probe: true,
-            structural_ceiling: StructuralProbeCeiling::Fixed(&CHAT_MESSAGES_PROTOCOLS),
+            structural_ceiling: StructuralProbeCeiling::Fixed(&MINIMAX_CN_PROTOCOLS),
         },
         verification: VerificationDescriptor {
             policy: plan.verification_policy,

@@ -94,11 +94,14 @@ fn configurable_destination_patch_round_trips_override_and_delete_requires_no_ke
             name: "After".into(),
             endpoint_url: "https://after.example/v1".into(),
             upstream_protocol: ProtocolDto::Responses,
+            protocol_routes: None,
             auth_scheme: AuthSchemeDto::XApiKey,
             models: vec![DestinationModelPatch {
                 enabled: None,
                 public_model: "public-after".into(),
                 upstream_model: "upstream-after".into(),
+                protocols: None,
+                preferred: None,
                 upstream_override: Some(super::super::types::DestinationUpstreamOverridePatch {
                     protocol: ProtocolDto::Messages,
                     endpoint_url: "https://alternate.example/messages".into(),
@@ -138,4 +141,63 @@ fn configurable_destination_patch_round_trips_override_and_delete_requires_no_ke
     ));
     assert_eq!(deleted.revision.revision, state.settings_revision());
     assert!(load_destination(&state, &destination_id).is_err());
+}
+
+#[test]
+fn metadata_edit_keeps_disabled_default_protocol_and_explicit_routes() {
+    use super::super::types::HttpProtocolRouteDto;
+    let state = dynamic_state();
+    let id = destination_id_for_dynamic("destination-edit-provider");
+    let mut request = DestinationPatchRequest {
+        expectation: expectation(&state),
+        enabled: None,
+        name: "Multi".into(),
+        endpoint_url: "https://before.example/v1".into(),
+        upstream_protocol: ProtocolDto::ChatCompletions,
+        auth_scheme: AuthSchemeDto::Bearer,
+        protocol_routes: Some(vec![
+            HttpProtocolRouteDto {
+                protocol: ProtocolDto::ChatCompletions,
+                endpoint_url: "https://before.example/v1".into(),
+                auth_scheme: AuthSchemeDto::Bearer,
+            },
+            HttpProtocolRouteDto {
+                protocol: ProtocolDto::Messages,
+                endpoint_url: "https://before.example/anthropic/v1/messages".into(),
+                auth_scheme: AuthSchemeDto::XApiKey,
+            },
+        ]),
+        models: vec![DestinationModelPatch {
+            public_model: "public-before".into(),
+            upstream_model: "upstream-before".into(),
+            upstream_override: None,
+            enabled: Some(true),
+            protocols: Some(vec![ProtocolDto::Messages]),
+            preferred: Some(ProtocolDto::Messages),
+        }],
+        authorize_credential_ids: Vec::new(),
+    };
+    expect_ok(patch_destination_locked(&state, &id, request.clone()));
+    request.expectation = expectation(&state);
+    request.name = "Renamed".into();
+    request.protocol_routes = None;
+    request.models[0].protocols = None;
+    request.models[0].preferred = None;
+    let result = expect_ok(patch_destination_locked(&state, &id, request.clone()));
+    assert_eq!(result.destination.protocol_routes.len(), 2);
+    assert_eq!(
+        result.destination.catalog[0].protocols,
+        [ProtocolDto::Messages]
+    );
+    assert_eq!(
+        result.destination.catalog[0].preferred,
+        Some(ProtocolDto::Messages)
+    );
+    request.expectation = expectation(&state);
+    request.endpoint_url = "https://changed.example/v1".into();
+    assert!(patch_destination_locked(&state, &id, request).is_err());
+    assert_eq!(
+        expect_ok(load_destination(&state, &id)).base_url.as_deref(),
+        Some("https://before.example/v1")
+    );
 }

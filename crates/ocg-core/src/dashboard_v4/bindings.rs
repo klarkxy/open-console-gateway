@@ -11,7 +11,7 @@ use crate::db::identity::IdentityAccountRecord;
 use crate::provider::CPA_ACCOUNT_ID;
 use crate::state::CoreState;
 
-use super::identities::{assigned_endpoints, project_binding_dto};
+use super::identities::{assigned_endpoints_current, project_binding_dto};
 use super::types::{BindingPatchRequest, BindingPatchResult};
 
 pub(super) async fn patch(
@@ -84,7 +84,7 @@ fn patch_locked(
         .map(|runtime| (runtime.account_id.as_str(), runtime))
         .collect();
     let (connection_id, endpoints) =
-        assigned_endpoints(&record.account, &dynamic_by_id, &custom_by_id);
+        assigned_endpoints_current(state, &record.account, &dynamic_by_id, &custom_by_id)?;
     let normalized_grants = if let (Some(ids), Some(origins)) = (
         input.allowed_endpoint_ids.as_deref(),
         input.allowed_origins.as_deref(),

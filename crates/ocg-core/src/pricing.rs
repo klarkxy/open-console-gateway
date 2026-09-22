@@ -409,6 +409,10 @@ pub(crate) async fn fetch_approved_host_html(
         .with_context(|| format!("build {label} client"))?;
     let response = client
         .get(url)
+        .header(
+            reqwest::header::USER_AGENT,
+            concat!("OpenConsoleGateway/", env!("CARGO_PKG_VERSION")),
+        )
         .send()
         .await
         .with_context(|| format!("fetch {label} page"))?

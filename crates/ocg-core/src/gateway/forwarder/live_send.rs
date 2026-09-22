@@ -168,6 +168,7 @@ pub(crate) fn verify_execution_authorization(
         || destination.base_url != frozen.base_url
         || destination.auth_scheme != frozen.auth_scheme
         || destination.protocols != frozen.protocols
+        || destination.protocol_routes != frozen.protocol_routes
         || destination.model_resolution != frozen.model_resolution
         || !destination
             .catalog
@@ -184,7 +185,26 @@ pub(crate) fn verify_execution_authorization(
     {
         return Err(LiveSendAuthError::unauthorized(ROUTE_CHANGED));
     }
-    if destination.auth_scheme != AuthScheme::None {
+    let auth_scheme = if destination.adapter == AdapterKind::Http {
+        let protocol = match spec.upstream {
+            crate::gateway::protocol::ApiFormat::ChatCompletions => {
+                ocg_domain::destination::Protocol::ChatCompletions
+            }
+            crate::gateway::protocol::ApiFormat::Responses => {
+                ocg_domain::destination::Protocol::Responses
+            }
+            crate::gateway::protocol::ApiFormat::Messages => {
+                ocg_domain::destination::Protocol::Messages
+            }
+            _ => return Err(deny()),
+        };
+        ocg_domain::destination::http_model_route(destination, &target.model, protocol)
+            .ok_or_else(deny)?
+            .auth_scheme
+    } else {
+        destination.auth_scheme
+    };
+    if auth_scheme != AuthScheme::None {
         if c.key_cipher.is_empty() {
             return Err(deny());
         }

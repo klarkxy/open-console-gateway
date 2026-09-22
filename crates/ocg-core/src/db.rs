@@ -56,6 +56,7 @@ pub(crate) mod custom_store;
 pub(crate) mod destination_commands;
 pub(crate) mod destination_store;
 pub(crate) mod dynamic_store;
+pub(crate) mod http_routes;
 pub(crate) mod identity;
 pub(crate) mod identity_v57;
 mod official_api;
@@ -339,7 +340,7 @@ pub const PRE_V48_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v48.";
 pub const PRE_V58_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v58.";
 pub const PRE_V59_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v59.";
 /// Highest schema this binary can open or migrate. Newer databases fail closed.
-pub const CURRENT_SCHEMA_VERSION: i32 = 62;
+pub const CURRENT_SCHEMA_VERSION: i32 = 63;
 pub const V57_SCHEMA_VERSION: i32 = 57;
 /// Canonical source schema for the v48 inert-column / empty-table cleanup.
 pub const V47_SCHEMA_VERSION: i32 = 47;
@@ -964,6 +965,63 @@ fn clear_provider_protocol_judgments_on(conn: &Connection, scope: &ContractScope
     Ok(())
 }
 
+// Capture whole-model OFF before refresh creates new catalog rows. New evidence
+// must not enable a previously disabled model, while genuinely new ids stay Auto.
+fn preserve_disabled_catalog_models_on(
+    db: &Database,
+    scope: &ContractScope,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    let ContractScope::Provider(provider) = scope else {
+        return Ok(());
+    };
+    let id = ocg_domain::destination::destination_id_for_builtin(provider);
+    let persisted = db.load_persisted_contracts()?;
+    let explicitly_disabled: HashSet<_> = persisted
+        .overrides
+        .get(scope)
+        .into_iter()
+        .flatten()
+        .filter(|row| row.state == ProtocolOverrideState::ForceOff)
+        .map(|row| row.model_id.to_ascii_lowercase())
+        .collect();
+    let contracts = crate::provider_contracts::build_effective_contracts(
+        &db.zen_free_model_catalog()?.unwrap_or_default(),
+        &[],
+        persisted,
+    );
+    for model in destination_store::load_destination_catalog(&db.conn, &id)? {
+        if !model.enabled {
+            // A model with no evidence and no saved disable is merely awaiting
+            // official discovery. Do not turn that temporary state into consent.
+            let deliberately_disabled = explicitly_disabled
+                .contains(&model.public_model.to_ascii_lowercase())
+                || contracts
+                    .scope(scope)
+                    .and_then(|s| s.model(&model.public_model))
+                    .is_some_and(|m| m.protocols.values().any(|p| p.available));
+            if !deliberately_disabled {
+                continue;
+            }
+            for protocol in [
+                UpstreamProtocolKind::ChatCompletions,
+                UpstreamProtocolKind::Messages,
+                UpstreamProtocolKind::Responses,
+            ] {
+                set_model_protocol_override_on(
+                    &db.conn,
+                    scope,
+                    &model.public_model,
+                    protocol,
+                    ProtocolOverrideState::ForceOff,
+                    now,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn apply_official_protocol_baseline_on(
     conn: &Connection,
     scope: &ContractScope,
@@ -975,43 +1033,49 @@ fn apply_official_protocol_baseline_on(
     let evidence = load_scope_evidence_on(conn, scope)?;
     let mut preferences = Vec::new();
     for model_id in current_models {
+        let Some(protocols) = baseline.protocols_for(scope.id(), model_id) else {
+            continue;
+        };
         let Some(protocol) = baseline.protocol_for(scope.id(), model_id) else {
             continue;
         };
+        let protocols_json = serde_json::to_string(&protocols)?;
         // Old static declarations may also carry independent probe history.
         // Demote those declarations, keeping their diagnostics, before pruning.
         conn.execute(
             "UPDATE provider_contract_model_protocols SET source = 'probe_observed'
              WHERE scope_kind = ?1 AND scope_id = ?2 AND model_id = ?3
-               AND source = 'static' AND protocol <> ?4
+               AND source = 'static' AND protocol NOT IN (SELECT value FROM json_each(?4))
                AND (verified_at IS NOT NULL OR observed_at IS NOT NULL
                     OR last_probe_result IS NOT NULL OR last_probe_at IS NOT NULL
                     OR last_probe_error IS NOT NULL)",
-            params![scope.kind_str(), scope.id(), model_id, protocol.as_str()],
+            params![scope.kind_str(), scope.id(), model_id, protocols_json],
         )?;
         conn.execute(
             "DELETE FROM provider_contract_model_protocols
              WHERE scope_kind = ?1 AND scope_id = ?2 AND model_id = ?3
-               AND source = 'static' AND protocol <> ?4",
-            params![scope.kind_str(), scope.id(), model_id, protocol.as_str()],
+               AND source = 'static' AND protocol NOT IN (SELECT value FROM json_each(?4))",
+            params![scope.kind_str(), scope.id(), model_id, protocols_json],
         )?;
-        let mut row = evidence
-            .iter()
-            .find(|row| row.model_id == *model_id && row.protocol == protocol)
-            .cloned()
-            .unwrap_or(PersistedModelProtocol {
-                scope: scope.clone(),
-                model_id: model_id.clone(),
-                protocol,
-                source: ContractEvidenceSource::Static,
-                verified_at: None,
-                observed_at: None,
-                last_probe_result: None,
-                last_probe_at: None,
-                last_probe_error: None,
-            });
-        row.source = ContractEvidenceSource::Static;
-        upsert_model_protocol_row_on(conn, &row)?;
+        for &declared_protocol in &protocols {
+            let mut row = evidence
+                .iter()
+                .find(|row| row.model_id == *model_id && row.protocol == declared_protocol)
+                .cloned()
+                .unwrap_or(PersistedModelProtocol {
+                    scope: scope.clone(),
+                    model_id: model_id.clone(),
+                    protocol: declared_protocol,
+                    source: ContractEvidenceSource::Static,
+                    verified_at: None,
+                    observed_at: None,
+                    last_probe_result: None,
+                    last_probe_at: None,
+                    last_probe_error: None,
+                });
+            row.source = ContractEvidenceSource::Static;
+            upsert_model_protocol_row_on(conn, &row)?;
+        }
         let has_preference: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM provider_model_protocol_preferences
              WHERE provider_id = ?1 AND model_id = ?2)",
@@ -1025,7 +1089,7 @@ fn apply_official_protocol_baseline_on(
         }
         if force_off_extras {
             for extra in UpstreamProtocolKind::ALL {
-                if extra != protocol {
+                if !protocols.contains(&extra) {
                     set_model_protocol_override_on(
                         conn,
                         scope,
@@ -1040,60 +1104,6 @@ fn apply_official_protocol_baseline_on(
     }
     if !preferences.is_empty() {
         set_model_protocol_preferences_on(conn, scope, &preferences)?;
-    }
-    Ok(())
-}
-
-fn insert_default_off_override_on(
-    conn: &Connection,
-    scope: &ContractScope,
-    model_id: &str,
-    protocol: UpstreamProtocolKind,
-    now: DateTime<Utc>,
-) -> Result<()> {
-    conn.execute(
-        "INSERT OR IGNORE INTO provider_contract_model_protocol_overrides
-         (scope_kind, scope_id, model_id, protocol, state, updated_at)
-         VALUES (?1, ?2, ?3, ?4, 'force_off', ?5)",
-        params![
-            scope.kind_str(),
-            scope.id(),
-            model_id,
-            protocol.as_str(),
-            now.to_rfc3339(),
-        ],
-    )?;
-    Ok(())
-}
-
-fn mark_new_catalog_models_default_off_on(
-    conn: &Connection,
-    scope: &ContractScope,
-    previous_models: &[String],
-    refreshed_models: &[String],
-    now: DateTime<Utc>,
-) -> Result<()> {
-    let previous: HashSet<String> = previous_models
-        .iter()
-        .map(|model_id| model_id.to_ascii_lowercase())
-        .collect();
-    for model_id in refreshed_models {
-        if previous.contains(&model_id.to_ascii_lowercase()) {
-            continue;
-        }
-        if scope.kind_str() == crate::provider_contracts::SCOPE_KIND_PROVIDER
-            && scope.id() == COMMAND_CODE_PROVIDER_ID
-            && command_code_goat_includes_model(model_id)
-        {
-            continue;
-        }
-        for protocol in [
-            UpstreamProtocolKind::ChatCompletions,
-            UpstreamProtocolKind::Responses,
-            UpstreamProtocolKind::Messages,
-        ] {
-            insert_default_off_override_on(conn, scope, model_id, protocol, now)?;
-        }
     }
     Ok(())
 }
@@ -3467,6 +3477,18 @@ fn migrate_to_v62(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn migrate_to_v63(conn: &Connection) -> Result<()> {
+    let version = schema_version_on(conn)?;
+    anyhow::ensure!(version >= 62, "v63 requires schema v62");
+    let tx = conn.unchecked_transaction()?;
+    http_routes::ensure_storage_on(&tx)?;
+    if version == 62 {
+        tx.execute_batch("INSERT OR REPLACE INTO schema_version(version) VALUES (63);")?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 fn migrate_v42_body(tx: &Transaction<'_>) -> Result<()> {
     let now = Utc::now().to_rfc3339();
     let v41_dynamic_providers_exists = table_exists(tx, "dynamic_providers")?;
@@ -4808,6 +4830,7 @@ impl Database {
         migrate_to_v60(&db.conn)?;
         migrate_to_v61(&db.conn)?;
         migrate_to_v62(&db.conn)?;
+        migrate_to_v63(&db.conn)?;
         if db.open_guard.can_recover_pending() {
             let tx = db.conn.unchecked_transaction()?;
             billing::recover_pending_on(&tx, Utc::now())?;
@@ -6196,13 +6219,15 @@ impl Database {
         &self,
         catalog: &crate::kernel::zen::ZenFreeModelCatalog,
     ) -> Result<()> {
-        self.set_zen_free_model_catalog_with_default_off(catalog, &catalog.models)
+        self.set_zen_free_model_catalog_preserving_settings(catalog)
     }
 
-    pub fn set_zen_free_model_catalog_with_default_off(
+    /// Persist the Zen Free catalog without inventing protocol overrides.
+    /// Saved force_on / force_off rows and preferred-protocol choices stay as
+    /// written; new IDs follow effective-contract defaults from evidence.
+    pub fn set_zen_free_model_catalog_preserving_settings(
         &self,
         catalog: &crate::kernel::zen::ZenFreeModelCatalog,
-        previous_models: &[String],
     ) -> Result<()> {
         let now = Utc::now();
         let models_json = serde_json::to_string(&catalog.models)?;
@@ -6212,6 +6237,11 @@ impl Database {
             .is_autocommit()
             .then(|| self.conn.unchecked_transaction())
             .transpose()?;
+        preserve_disabled_catalog_models_on(
+            self,
+            &ContractScope::provider(OPENCODE_ZEN_FREE_PROVIDER_ID),
+            now,
+        )?;
         self.conn.execute(
             "INSERT INTO provider_model_catalogs
              (provider_id, models_json, refreshed_at, source_url)
@@ -6234,13 +6264,6 @@ impl Database {
             catalog.refreshed_at,
             CATALOG_SOURCE_OFFICIAL_ZEN,
             &catalog.source_url,
-            now,
-        )?;
-        mark_new_catalog_models_default_off_on(
-            &self.conn,
-            &ContractScope::provider(OPENCODE_ZEN_FREE_PROVIDER_ID),
-            previous_models,
-            &catalog.models,
             now,
         )?;
         destination_store::refresh_builtin_catalog(
@@ -6357,7 +6380,7 @@ impl Database {
     /// Drop models from the persisted local catalog snapshot.
     ///
     /// Source metadata and `refreshed_at` stay as last written. An official
-    /// refresh may add the same IDs back as new (default off). Satellite
+    /// refresh may add the same IDs back as new catalog rows. Satellite
     /// override, preference, and probe rows for the removed IDs are deleted
     /// so they cannot resurrect the models.
     pub fn remove_contract_catalog_models(
@@ -6408,16 +6431,20 @@ impl Database {
         Ok(row)
     }
 
-    pub fn refresh_contract_catalog_with_default_off(
+    /// Replace the saved catalog snapshot without writing protocol overrides.
+    /// Existing force_on / force_off rows and preferences are left untouched,
+    /// including historical auto-off rows that cannot be distinguished from
+    /// an administrator's manual off.
+    pub fn refresh_contract_catalog_preserving_settings(
         &self,
         scope: &ContractScope,
-        previous_models: &[String],
         models: &[String],
         refreshed_at: DateTime<Utc>,
         source: &str,
         source_url: &str,
     ) -> Result<PersistedScopeRow> {
         let tx = self.conn.unchecked_transaction()?;
+        preserve_disabled_catalog_models_on(self, scope, refreshed_at)?;
         upsert_contract_catalog_on(
             &tx,
             scope,
@@ -6427,7 +6454,6 @@ impl Database {
             source_url,
             refreshed_at,
         )?;
-        mark_new_catalog_models_default_off_on(&tx, scope, previous_models, models, refreshed_at)?;
         let row = load_scope_on(&tx, scope)?
             .ok_or_else(|| anyhow::anyhow!("contract scope was not persisted"))?;
         destination_store::refresh_builtin_catalog(self, scope)?;
@@ -6454,6 +6480,17 @@ impl Database {
         preferences: &[(String, UpstreamProtocolKind)],
         now: DateTime<Utc>,
     ) -> Result<PersistedScopeRow> {
+        self.set_model_protocol_settings_authorized(scope, rows, preferences, now, &[])
+    }
+
+    pub fn set_model_protocol_settings_authorized(
+        &self,
+        scope: &ContractScope,
+        rows: &[(String, UpstreamProtocolKind, ProtocolOverrideState)],
+        preferences: &[(String, UpstreamProtocolKind)],
+        now: DateTime<Utc>,
+        authorize_credential_ids: &[String],
+    ) -> Result<PersistedScopeRow> {
         anyhow::ensure!(
             !rows.is_empty(),
             "model protocol override batch must be nonempty"
@@ -6464,6 +6501,19 @@ impl Database {
             set_model_protocol_override_on(&tx, scope, model_id, *protocol, *state, now)?;
         }
         set_model_protocol_preferences_on(&tx, scope, preferences)?;
+        if !authorize_credential_ids.is_empty() {
+            let protocols: Vec<_> = rows
+                .iter()
+                .filter(|(_, _, state)| *state == ProtocolOverrideState::ForceOn)
+                .map(|(_, protocol, _)| *protocol)
+                .collect();
+            identity::authorize_builtin_protocols_on(
+                &tx,
+                scope,
+                &protocols,
+                authorize_credential_ids,
+            )?;
+        }
         bump_scope_revision_on(&tx, scope, now)?;
         let scope = load_scope_on(&tx, scope)?
             .ok_or_else(|| anyhow::anyhow!("contract scope was not persisted"))?;
@@ -6532,6 +6582,7 @@ impl Database {
         let row = load_scope_on(&tx, scope)?
             .ok_or_else(|| anyhow::anyhow!("contract scope was not persisted"))?;
         self.refresh_destination_shadow()?;
+        destination_store::apply_scope_controls(self, scope, Some(current_models))?;
         tx.commit()?;
         Ok(row)
     }
@@ -7049,8 +7100,28 @@ impl Database {
         onboarding_draft: bool,
         operation: &NewDashboardOperation,
     ) -> Result<Vec<DynamicProviderRuntime>> {
+        self.commit_onboarding_new_with_routes(
+            runtime,
+            first_account,
+            onboarding_draft,
+            operation,
+            None,
+        )
+    }
+
+    pub fn commit_onboarding_new_with_routes(
+        &self,
+        runtime: &DynamicProviderRuntime,
+        first_account: Option<&Account>,
+        onboarding_draft: bool,
+        operation: &NewDashboardOperation,
+        protocol_routes: Option<&[ocg_domain::destination::HttpProtocolRoute]>,
+    ) -> Result<Vec<DynamicProviderRuntime>> {
         let tx = self.conn.unchecked_transaction()?;
         insert_dynamic_provider_on(&tx, runtime, onboarding_draft)?;
+        if let Some(routes) = protocol_routes {
+            destination_commands::configure_new_http_routes_on(&tx, runtime, routes)?;
+        }
         dynamic_tx_fault("after_provider_insert")?;
         if let Some(account) = first_account {
             let purchase_date = if account.purchase_date.trim().is_empty() {
@@ -7127,16 +7198,78 @@ impl Database {
         sync_auth: Option<(&str, &str, &str)>,
         operation: &NewDashboardOperation,
     ) -> Result<Vec<DynamicProviderRuntime>> {
+        self.commit_onboarding_resume_with_routes(
+            runtime,
+            onboarding_draft,
+            create_account,
+            rotate,
+            account_meta,
+            grant_union,
+            sync_auth,
+            operation,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn commit_onboarding_resume_with_routes(
+        &self,
+        runtime: &DynamicProviderRuntime,
+        onboarding_draft: bool,
+        create_account: Option<&Account>,
+        rotate: Option<(&str, &str)>,
+        account_meta: Option<OnboardingAccountMeta<'_>>,
+        grant_union: Option<(&str, &[String], &[String])>,
+        sync_auth: Option<(&str, &str, &str)>,
+        operation: &NewDashboardOperation,
+        protocol_routes: Option<&[ocg_domain::destination::HttpProtocolRoute]>,
+    ) -> Result<Vec<DynamicProviderRuntime>> {
         let tx = self.conn.unchecked_transaction()?;
         let existing = get_dynamic_provider_on(&tx, &runtime.id)?
             .ok_or_else(|| anyhow::anyhow!("unknown provider `{}`", runtime.id))?;
         let mut stored = runtime.clone();
         stored.id = existing.id.clone();
+        let destination_id = ocg_domain::destination::destination_id_for_dynamic(&stored.id);
+        let before = destination_commands::load_http_destination(self, &destination_id)?;
+        if let Some(routes) = protocol_routes {
+            let normalized = destination_commands::normalize_http_protocol_routes(routes)?;
+            let first = &normalized[0];
+            anyhow::ensure!(
+                first.endpoint_url == stored.endpoint_url
+                    && first.protocol == stored.upstream_protocol
+                    && first.auth_scheme == AuthScheme::from(stored.auth_kind),
+                "default endpoint, protocol and authentication must match the first protocol route"
+            );
+            // Stage the legacy constructor inside this transaction, then restore
+            // the complete validated declaration before any Key is initialized.
+            tx.execute(
+                "UPDATE destinations SET protocol_routes_json = NULL WHERE id = ?1",
+                [&destination_id],
+            )?;
+        }
         dynamic_store::replace_dynamic_provider_definition_on(
             &tx,
             &stored,
             Some(onboarding_draft),
         )?;
+        if let Some(routes) = protocol_routes {
+            tx.execute(
+                "UPDATE destinations SET protocol_routes_json = ?2 WHERE id = ?1",
+                params![
+                    destination_id,
+                    serde_json::to_string(&before.protocol_routes)?
+                ],
+            )?;
+            let catalog = destination_commands::catalog_from_definition(
+                &before.catalog,
+                &stored.definition(),
+                true,
+            );
+            destination_store::replace_destination_catalog(&tx, &destination_id, &catalog)?;
+            destination_commands::configure_new_http_routes_on(&tx, &stored, routes)?;
+        }
+        let after = destination_commands::load_http_destination(self, &destination_id)?;
+        destination_commands::remap_http_grants_on(&tx, &before, &after)?;
         dynamic_tx_fault("after_mapping_replace")?;
         if let Some(account) = create_account {
             let purchase_date = if account.purchase_date.trim().is_empty() {
@@ -7322,6 +7455,7 @@ impl Database {
         prepare_runtime: impl FnOnce(&Database) -> Result<T>,
     ) -> Result<T> {
         let tx = self.conn.unchecked_transaction()?;
+        let before_import = crate::destination_projection::load_persisted(self)?;
         let mut ordered_ids = Vec::new();
         {
             let mut stmt = tx.prepare(
@@ -7386,6 +7520,24 @@ impl Database {
                 ))
             })
             .collect::<Result<HashMap<_, _>>>()?;
+        let mut original_routes = HashMap::new();
+        for controls in &record.destination_controls {
+            if destination_store::destination_exists(&tx, &controls.id)? {
+                original_routes.insert(
+                    controls.id.clone(),
+                    destination_store::load_protocol_routes(&tx, &controls.id)?,
+                );
+                if !controls.protocol_routes.is_empty() {
+                    http_routes::validate_loaded_destination(controls)?;
+                    // Legacy import constructors stage the default fields. The
+                    // validated complete route set is restored before commit.
+                    tx.execute(
+                        "UPDATE destinations SET protocol_routes_json = NULL WHERE id = ?1",
+                        [&controls.id],
+                    )?;
+                }
+            }
+        }
         for destination in &record.custom_destinations {
             custom_store::upsert_imported_custom_destination_on(
                 &tx,
@@ -7751,6 +7903,23 @@ impl Database {
                 )? == 1,
                 "imported destination controls reference a missing destination"
             );
+            if controls.adapter == ocg_domain::destination::AdapterKind::Http {
+                let mut restored = controls.clone();
+                if restored.protocol_routes.is_empty()
+                    && let Some(routes) = original_routes
+                        .get(&controls.id)
+                        .filter(|routes| !routes.is_empty())
+                {
+                    restored.protocol_routes = routes.clone();
+                    restored.protocols = routes.iter().map(|route| route.protocol).collect();
+                }
+                http_routes::validate_loaded_destination(&restored)?;
+                tx.execute(
+                    "UPDATE destinations SET protocol_routes_json = ?2, protocols_json = ?3, base_url = ?4, auth_scheme = ?5 WHERE id = ?1",
+                    params![restored.id, http_routes::encode_protocol_routes_json(&restored.protocol_routes)?,
+                        serde_json::to_string(&restored.protocols)?, restored.base_url, restored.auth_scheme.as_str()],
+                )?;
+            }
             let mut catalog = original_catalogs
                 .get(&controls.id)
                 .cloned()
@@ -7780,6 +7949,7 @@ impl Database {
             }
             destination_store::replace_destination_catalog(&tx, &controls.id, &catalog)?;
         }
+        destination_commands::reconcile_imported_http_grants_on(self, record, &before_import)?;
         let runtime = prepare_runtime(self)?;
         tx.commit()?;
         Ok(runtime)

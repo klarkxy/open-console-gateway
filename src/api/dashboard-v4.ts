@@ -9,9 +9,11 @@
 import { requestV4, withExpectation, type WithoutExpectation } from "./dashboard-v3.ts";
 import type { MutationExpectation } from "./generated/dashboard-v3.ts";
 import type {
+  AuthSchemeDto,
   BindingPatchRequest,
   BindingPatchResult,
   ConnectionList,
+  ControlRevision,
   CredentialList,
   DestinationList,
   AliasPublication,
@@ -25,6 +27,7 @@ import type {
   DestinationDeleteResult,
   DestinationPatchRequest,
   DestinationPatchResult,
+  DestinationCatalogRefreshResult,
   DshApplication,
   DshApplicationInstallRequest,
   IdentityCredentialCreateRequest,
@@ -32,6 +35,7 @@ import type {
   IdentityList,
   OnboardingCommitRequest,
   OnboardingCommitResult,
+  ProtocolDto,
   QuotaRecoveryDto,
   QuotaRetryResult,
   RoutingCardList,
@@ -43,12 +47,63 @@ import type {
 
 export type { QuotaRecoveryDto, QuotaRetryResult };
 
+/**
+ * Additive catalog DTOs. `generated/dashboard-v4.ts` does not include these
+ * until PRIMARY regenerates the contract; keep them here instead of editing
+ * generated files.
+ */
+export interface HttpProtocolRouteDto {
+  protocol: ProtocolDto;
+  endpointUrl: string;
+  authScheme: AuthSchemeDto;
+}
+
+export interface DestinationCatalogModelUpdate {
+  publicModel: string;
+  enabled?: boolean;
+  protocols?: ProtocolDto[];
+  preferred?: ProtocolDto;
+}
+
+export interface DestinationCatalogUpdate {
+  updates: DestinationCatalogModelUpdate[];
+  removeModels?: string[];
+}
+
+export interface DestinationModelTestResult {
+  revision: ControlRevision;
+  publicModel: string;
+  protocol: ProtocolDto;
+  ok: boolean;
+  error?: string | null;
+}
+
 export const dashboardV4 = {
   getTemplates: () => requestV4<TemplateList>("/templates"),
   getConnections: () => requestV4<ConnectionList>("/connections"),
   getAccounts: () => requestV4<IdentityList>("/accounts"),
   getDestinations: () => requestV4<DestinationList>("/destinations"),
   getCredentials: () => requestV4<CredentialList>("/credentials"),
+  refreshDestinationCatalog: (id: string, expectation: MutationExpectation) =>
+    requestV4<DestinationCatalogRefreshResult>(
+      `/destinations/${encodeURIComponent(id)}/catalog/refresh`,
+      { method: "POST", body: withExpectation({}, expectation) },
+    ),
+  updateDestinationCatalog: (id: string, input: WithoutExpectation<DestinationCatalogUpdate>, expectation: MutationExpectation) =>
+    requestV4<DestinationPatchResult>(
+      `/destinations/${encodeURIComponent(id)}/catalog`,
+      { method: "PUT", body: withExpectation(input, expectation) },
+    ),
+  testDestinationModel: (
+    id: string,
+    publicModel: string,
+    protocol: ProtocolDto,
+    expectation: MutationExpectation,
+  ) =>
+    requestV4<DestinationModelTestResult>(
+      `/destinations/${encodeURIComponent(id)}/model-tests`,
+      { method: "POST", body: withExpectation({ publicModel, protocol }, expectation) },
+    ),
   getRoutingCards: () => requestV4<RoutingCardList>("/routing/cards"),
   putRoutingCards: (
     input: WithoutExpectation<RoutingCardUpdate>,

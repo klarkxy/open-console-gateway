@@ -696,26 +696,11 @@ impl CoreStateInner {
         let config = self.config();
         {
             let db = self.db.lock();
-            let previous = crate::destination_projection::load_runtime(&db)?;
-            let previous_models = previous
-                .destinations
-                .iter()
-                .find(|destination| {
-                    destination.adapter == ocg_domain::destination::AdapterKind::Zen
-                })
-                .map(|destination| {
-                    destination
-                        .catalog
-                        .iter()
-                        .map(|model| model.public_model.clone())
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
             // The setter participates in this transaction. Build from its exact
             // uncommitted rows so a failed client/catalog preflight rolls back
             // both the directory and its canonical routing controls.
             let tx = db.conn.unchecked_transaction()?;
-            db.set_zen_free_model_catalog_with_default_off(&catalog, &previous_models)?;
+            db.set_zen_free_model_catalog_preserving_settings(&catalog)?;
             let projection = crate::destination_projection::load_runtime(&db)?;
             let custom = db.list_custom_account_runtimes()?;
             let persisted = db.load_persisted_contracts()?;

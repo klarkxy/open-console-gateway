@@ -18,6 +18,7 @@ mod catalog;
 mod connections;
 mod cpa;
 mod credentials;
+mod destination_catalog;
 mod destinations;
 mod identities;
 mod official_api;
@@ -55,6 +56,18 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
         .route("/connections", get(connections::list_connections))
         .route("/accounts", get(identities::list_accounts))
         .route("/destinations", get(destinations::list_destinations))
+        .route(
+            "/destinations/{id}/catalog/refresh",
+            post(destination_catalog::refresh),
+        )
+        .route(
+            "/destinations/{id}/catalog",
+            axum::routing::put(destination_catalog::update),
+        )
+        .route(
+            "/destinations/{id}/model-tests",
+            post(destination_catalog::test_model),
+        )
         .route(
             "/destinations/{id}",
             patch(destinations::patch_destination).delete(destinations::delete_destination),

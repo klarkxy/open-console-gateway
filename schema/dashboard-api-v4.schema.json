@@ -609,6 +609,16 @@
           "minimum": 0,
           "type": "integer"
         },
+        "creditPresets": {
+          "description": "Personal credit setup for Key forms. None means unsupported; an empty\nlist permits custom configuration without a provider preset.",
+          "items": {
+            "$ref": "#/$defs/CreditPreset"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "displayFamily": {
           "type": [
             "string",
@@ -1528,6 +1538,104 @@
       ],
       "type": "object"
     },
+    "DestinationCatalogModelUpdate": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "preferred": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProtocolDto"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "protocols": {
+          "items": {
+            "$ref": "#/$defs/ProtocolDto"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "publicModel": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "publicModel"
+      ],
+      "type": "object"
+    },
+    "DestinationCatalogRefreshResult": {
+      "additionalProperties": false,
+      "properties": {
+        "addedCount": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "destination": {
+          "$ref": "#/$defs/DestinationDto"
+        },
+        "revision": {
+          "$ref": "#/$defs/ControlRevision"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "revision",
+        "destination",
+        "addedCount",
+        "truncated"
+      ],
+      "type": "object"
+    },
+    "DestinationCatalogUpdate": {
+      "additionalProperties": false,
+      "description": "Required process-scoped mutation precondition.\n\nBoth fields travel at the top level of every mutation request. The random\nprocess generation prevents a revision captured before restart from being\naccepted by a fresh process whose in-memory counter reused the same value.",
+      "properties": {
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "removeModels": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "updates": {
+          "items": {
+            "$ref": "#/$defs/DestinationCatalogModelUpdate"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "updates"
+      ],
+      "type": "object"
+    },
     "DestinationCredentialDto": {
       "additionalProperties": false,
       "description": "RFC credential projection row. Carries `hasSecret` only; never ciphertext or plaintext.",
@@ -1735,6 +1843,13 @@
             }
           ]
         },
+        "protocolRoutes": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/HttpProtocolRouteDto"
+          },
+          "type": "array"
+        },
         "protocols": {
           "items": {
             "$ref": "#/$defs/ProtocolDto"
@@ -1750,6 +1865,7 @@
         "brandFamily",
         "baseUrl",
         "protocols",
+        "protocolRoutes",
         "authScheme",
         "modelResolution",
         "catalog",
@@ -1792,6 +1908,25 @@
             "null"
           ]
         },
+        "preferred": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProtocolDto"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "protocols": {
+          "items": {
+            "$ref": "#/$defs/ProtocolDto"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "publicModel": {
           "type": "string"
         },
@@ -1813,6 +1948,66 @@
       "required": [
         "publicModel",
         "upstreamModel"
+      ],
+      "type": "object"
+    },
+    "DestinationModelTestRequest": {
+      "additionalProperties": false,
+      "description": "Required process-scoped mutation precondition.\n\nBoth fields travel at the top level of every mutation request. The random\nprocess generation prevents a revision captured before restart from being\naccepted by a fresh process whose in-memory counter reused the same value.",
+      "properties": {
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "protocol": {
+          "$ref": "#/$defs/ProtocolDto"
+        },
+        "publicModel": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "publicModel",
+        "protocol"
+      ],
+      "type": "object"
+    },
+    "DestinationModelTestResult": {
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "protocol": {
+          "$ref": "#/$defs/ProtocolDto"
+        },
+        "publicModel": {
+          "type": "string"
+        },
+        "revision": {
+          "$ref": "#/$defs/ControlRevision"
+        }
+      },
+      "required": [
+        "revision",
+        "publicModel",
+        "protocol",
+        "ok",
+        "error"
       ],
       "type": "object"
     },
@@ -1881,6 +2076,15 @@
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
+        },
+        "protocolRoutes": {
+          "items": {
+            "$ref": "#/$defs/HttpProtocolRouteDto"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
         },
         "upstreamProtocol": {
           "$ref": "#/$defs/ProtocolDto"
@@ -2196,6 +2400,26 @@
         "monthly"
       ],
       "type": "string"
+    },
+    "HttpProtocolRouteDto": {
+      "additionalProperties": false,
+      "properties": {
+        "authScheme": {
+          "$ref": "#/$defs/AuthSchemeDto"
+        },
+        "endpointUrl": {
+          "type": "string"
+        },
+        "protocol": {
+          "$ref": "#/$defs/ProtocolDto"
+        }
+      },
+      "required": [
+        "protocol",
+        "endpointUrl",
+        "authScheme"
+      ],
+      "type": "object"
     },
     "IdentityConfidence": {
       "enum": [
@@ -2948,6 +3172,15 @@
             "name": {
               "type": "string"
             },
+            "protocolRoutes": {
+              "items": {
+                "$ref": "#/$defs/HttpProtocolRouteDto"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
             "templateId": {
               "type": "string"
             },
@@ -3006,6 +3239,15 @@
         },
         "name": {
           "type": "string"
+        },
+        "protocolRoutes": {
+          "items": {
+            "$ref": "#/$defs/HttpProtocolRouteDto"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
         },
         "templateId": {
           "type": "string"
@@ -4510,6 +4752,24 @@
     },
     {
       "$ref": "#/$defs/DestinationPatchResult"
+    },
+    {
+      "$ref": "#/$defs/DestinationCatalogRefreshResult"
+    },
+    {
+      "$ref": "#/$defs/HttpProtocolRouteDto"
+    },
+    {
+      "$ref": "#/$defs/DestinationCatalogUpdate"
+    },
+    {
+      "$ref": "#/$defs/DestinationCatalogModelUpdate"
+    },
+    {
+      "$ref": "#/$defs/DestinationModelTestRequest"
+    },
+    {
+      "$ref": "#/$defs/DestinationModelTestResult"
     },
     {
       "$ref": "#/$defs/DestinationDeleteResult"

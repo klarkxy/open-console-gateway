@@ -120,12 +120,16 @@ pub(super) async fn list_connections(
             .iter()
             .map(|index| (&accounts[*index].0, accounts[*index].1))
             .collect();
-        connections.push(project_dynamic(
-            runtime,
-            &group,
-            now,
-            draft_ids.contains(&runtime.id),
-        ));
+        let mut summary = project_dynamic(runtime, &group, now, draft_ids.contains(&runtime.id));
+        if let Some(destination) = projection.destinations.iter().find(|destination| {
+            matches!(&destination.legacy, LegacyDestinationRef::Dynamic(id) if id == &runtime.id)
+        }) {
+            let connection_id = connection_id_for_legacy(LegacyConnectionKind::DynamicProvider, &runtime.id);
+            let (endpoints, targets) = http_connection_members(destination, &connection_id);
+            summary.endpoints = endpoints;
+            summary.targets = targets;
+        }
+        connections.push(summary);
     }
 
     let accounts_by_id: HashMap<&str, &(Account, ConnectionVerificationStatus)> = accounts
@@ -179,6 +183,70 @@ pub(super) async fn list_connections(
     }))
 }
 
+fn http_connection_members(
+    destination: &Destination,
+    connection_id: &ocg_domain::connection::ConnectionId,
+) -> (Vec<ConnectionEndpoint>, Vec<ConnectionTarget>) {
+    use ocg_domain::destination::{http_configured_routes, http_model_route, http_protocol_routes};
+    let routes = http_configured_routes(destination);
+    let declared = http_protocol_routes(destination);
+    let endpoints: Vec<_> = assigned_endpoints_for_routes(connection_id, &routes)
+        .into_iter()
+        .zip(routes)
+        .map(|(assigned, route)| {
+            let protocol = ocg_domain::catalog::UpstreamProtocolKind::from(route.operation);
+            let auth = declared
+                .iter()
+                .find(|entry| entry.protocol == protocol)
+                .map(|entry| entry.auth_scheme)
+                .unwrap_or(destination.auth_scheme);
+            let auth = match auth {
+                ocg_domain::destination::AuthScheme::Bearer => EndpointAuthScheme::Bearer,
+                ocg_domain::destination::AuthScheme::XApiKey => EndpointAuthScheme::XApiKey,
+                ocg_domain::destination::AuthScheme::None => EndpointAuthScheme::None,
+            };
+            endpoint_dto(
+                connection_id,
+                assigned.id,
+                route.operation,
+                protocol,
+                assigned.url,
+                auth,
+                false,
+            )
+        })
+        .collect();
+    let targets = destination
+        .catalog
+        .iter()
+        .map(|model| {
+            let endpoint_ids = model
+                .protocols
+                .iter()
+                .filter_map(|protocol| {
+                    let route = http_model_route(destination, model, *protocol)?;
+                    endpoints
+                        .iter()
+                        .find(|endpoint| {
+                            endpoint.operation == EndpointOperation::from(*protocol)
+                                && endpoint.url.as_deref() == Some(route.endpoint_url.as_str())
+                        })
+                        .map(|endpoint| endpoint.id.clone())
+                })
+                .collect();
+            ConnectionTarget {
+                id: target_id_for(connection_id, &model.public_model).to_string(),
+                connection_id: connection_id.to_string(),
+                public_name: model.public_model.clone(),
+                upstream_model_id: model.upstream_model.clone(),
+                endpoint_ids,
+                enabled: model.enabled,
+            }
+        })
+        .collect();
+    (endpoints, targets)
+}
+
 fn project_custom_destination(
     destination: &Destination,
     accounts: &[(&Account, ConnectionVerificationStatus)],
@@ -188,82 +256,7 @@ fn project_custom_destination(
         unreachable!("filtered to legacy Custom destinations")
     };
     let connection_id = connection_id_for_legacy(LegacyConnectionKind::CustomAccount, legacy_id);
-    let protocol = destination
-        .protocols
-        .first()
-        .copied()
-        .unwrap_or(ocg_domain::catalog::UpstreamProtocolKind::ChatCompletions);
-    let auth_scheme = match destination.auth_scheme {
-        ocg_domain::destination::AuthScheme::Bearer => EndpointAuthScheme::Bearer,
-        ocg_domain::destination::AuthScheme::XApiKey => EndpointAuthScheme::XApiKey,
-        ocg_domain::destination::AuthScheme::None => EndpointAuthScheme::None,
-    };
-    let mut routes = vec![RouteSpec {
-        operation: EndpointOperation::from(protocol),
-        url: destination.base_url.clone(),
-    }];
-    let mut seen_routes = HashSet::from([(protocol, destination.base_url.clone())]);
-    for model in &destination.catalog {
-        let Some(route) = &model.upstream_override else {
-            continue;
-        };
-        if seen_routes.insert((route.protocol, Some(route.endpoint_url.clone()))) {
-            routes.push(RouteSpec {
-                operation: EndpointOperation::from(route.protocol),
-                url: Some(route.endpoint_url.clone()),
-            });
-        }
-    }
-    let endpoints = assigned_endpoints_for_routes(&connection_id, &routes)
-        .into_iter()
-        .zip(routes)
-        .map(|(assigned, route)| {
-            endpoint_dto(
-                &connection_id,
-                assigned.id,
-                route.operation,
-                ocg_domain::catalog::UpstreamProtocolKind::from(route.operation),
-                assigned.url,
-                auth_scheme,
-                false,
-            )
-        })
-        .collect::<Vec<_>>();
-    let targets = destination
-        .catalog
-        .iter()
-        .map(|model| {
-            let route_protocol = model
-                .upstream_override
-                .as_ref()
-                .map(|route| route.protocol)
-                .unwrap_or(protocol);
-            let route_url = model
-                .upstream_override
-                .as_ref()
-                .map(|route| route.endpoint_url.as_str())
-                .or(destination.base_url.as_deref());
-            let endpoint_id = endpoints
-                .iter()
-                .find(|endpoint| {
-                    endpoint.operation == EndpointOperation::from(route_protocol)
-                        && endpoint.url.as_deref() == route_url
-                })
-                .map(|endpoint| endpoint.id.clone())
-                .unwrap_or_else(|| {
-                    endpoint_id_for(&connection_id, EndpointOperation::from(route_protocol))
-                        .to_string()
-                });
-            ConnectionTarget {
-                id: target_id_for(&connection_id, &model.public_model).to_string(),
-                connection_id: connection_id.to_string(),
-                public_name: model.public_model.clone(),
-                upstream_model_id: model.upstream_model.clone(),
-                endpoint_ids: vec![endpoint_id],
-                enabled: model.enabled,
-            }
-        })
-        .collect();
+    let (endpoints, targets) = http_connection_members(destination, &connection_id);
     let facts = credential_facts(accounts, now);
     finish_summary(SummaryDraft {
         connection_id,
@@ -641,6 +634,22 @@ fn finish_summary(draft: SummaryDraft<'_>) -> ConnectionSummary {
     } else {
         ConnectionLifecycle::from(domain_lifecycle)
     };
+    let credit_presets = if matches!(
+        legacy.kind,
+        LegacyConnectionKind::DynamicProvider | LegacyConnectionKind::CustomAccount
+    ) {
+        Some(
+            endpoints
+                // The first route is the destination's base endpoint. Model
+                // overrides must not change the Key's billing setup.
+                .first()
+                .and_then(|endpoint| endpoint.url.as_deref())
+                .and_then(|url| crate::billing::stepfun_plan_credits(url, Utc::now()))
+                .unwrap_or_default(),
+        )
+    } else {
+        None
+    };
     ConnectionSummary {
         id: connection_id.to_string(),
         name,
@@ -661,6 +670,7 @@ fn finish_summary(draft: SummaryDraft<'_>) -> ConnectionSummary {
         legacy,
         display_family,
         offering,
+        credit_presets,
     }
 }
 

@@ -669,7 +669,7 @@ pub(super) fn validate_new_model_payload(
                 .destinations
                 .iter()
                 .map(super::portable::destination_from_portable)
-                .collect(),
+                .collect::<Result<Vec<_>, _>>()?,
             destinations: payload.destinations.clone(),
             credentials: payload.credentials.clone(),
             routing_cards,
@@ -841,7 +841,7 @@ pub(super) fn map_old_graph_to_unified(
     let domain_destinations: Vec<_> = destinations
         .iter()
         .map(super::portable::destination_from_portable)
-        .collect();
+        .collect::<Result<Vec<_>, _>>()?;
     let mut credentials = Vec::new();
     for (index, account) in accounts.iter().enumerate() {
         let Some(account_id) = account.id.as_deref() else {
@@ -1252,27 +1252,10 @@ fn customs_from_destinations(
                 destination.id
             )));
         }
-        if destination.protocols.len() != 1 {
-            return Err(TransferError::Invalid(format!(
-                "Custom destination `{}` must declare exactly one default protocol",
-                destination.id
-            )));
-        }
-        let protocol = super::portable::protocol_from_dto(destination.protocols[0]);
-        let auth_scheme = super::portable::auth_scheme_from_dto(destination.auth_scheme);
-        let endpoint_url = destination
-            .base_url
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                TransferError::Invalid(format!(
-                    "destination `{}` is missing its Custom Endpoint",
-                    destination.id
-                ))
-            })?;
+        let (protocol, endpoint_url, auth_scheme) =
+            super::portable::verified_default_http_route(destination)?;
         let endpoint_url =
-            crate::custom::validate_custom_endpoint_url(endpoint_url).map_err(|_| {
+            crate::custom::validate_custom_endpoint_url(&endpoint_url).map_err(|_| {
                 TransferError::Invalid(format!(
                     "destination `{}` has an invalid Custom Endpoint",
                     destination.id
@@ -1366,33 +1349,13 @@ fn dynamics_from_destinations(
             continue;
         }
         let draft = destination.onboarding_draft.unwrap_or(false);
-        let protocol = destination
-            .protocols
-            .first()
-            .copied()
-            .map(super::portable::protocol_from_dto)
-            .ok_or_else(|| {
-                TransferError::Invalid(format!(
-                    "dynamic destination `{}` is missing a protocol",
-                    destination.id
-                ))
-            })?;
-        let auth_kind = match destination.auth_scheme {
-            AuthSchemeDto::None => DynamicAuthKind::None,
-            AuthSchemeDto::XApiKey => DynamicAuthKind::XApiKey,
-            AuthSchemeDto::Bearer => DynamicAuthKind::Bearer,
+        let (protocol, endpoint_url, auth_scheme) =
+            super::portable::verified_default_http_route(destination)?;
+        let auth_kind = match auth_scheme {
+            ocg_domain::destination::AuthScheme::None => DynamicAuthKind::None,
+            ocg_domain::destination::AuthScheme::XApiKey => DynamicAuthKind::XApiKey,
+            ocg_domain::destination::AuthScheme::Bearer => DynamicAuthKind::Bearer,
         };
-        let endpoint_url = destination
-            .base_url
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                TransferError::Invalid(format!(
-                    "dynamic destination `{}` is missing its Endpoint",
-                    destination.id
-                ))
-            })?;
         let mappings = destination
             .catalog
             .iter()
@@ -1423,7 +1386,7 @@ fn dynamics_from_destinations(
             preset_id: destination.preset_id.clone(),
             id: destination.legacy.id.clone(),
             name: destination.name.clone(),
-            endpoint_url: endpoint_url.to_string(),
+            endpoint_url,
             upstream_protocol: protocol.as_str().to_string(),
             auth_kind: auth_kind.as_str().to_string(),
             models: mappings

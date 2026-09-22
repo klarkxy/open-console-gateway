@@ -510,21 +510,29 @@ impl RuntimeCatalogSnapshot {
         self.resolve(name).is_ok_and(|resolved| {
             self.routing.projection.destinations.iter().any(|d| {
                 d.enabled
-                    && (d.adapter != ocg_domain::destination::AdapterKind::Http
-                        || self.routing.credentials.iter().any(|c| {
-                            c.destination_id == d.id
-                                && c.enabled
-                                && c.ready
-                                && c.binding_enabled
-                                && (d.auth_scheme == ocg_domain::destination::AuthScheme::None
-                                    || !c.key_cipher.is_empty())
-                        }))
                     && d.catalog.iter().any(|m| {
                         m.enabled
                             && !m.protocols.is_empty()
                             && crate::gateway::materialize::resolved_contains_model(
                                 &resolved, d, m, name,
                             )
+                            && (d.adapter != ocg_domain::destination::AdapterKind::Http
+                                || m.protocols.iter().any(|protocol| {
+                                    let Some(route) =
+                                        ocg_domain::destination::http_model_route(d, m, *protocol)
+                                    else {
+                                        return false;
+                                    };
+                                    self.routing.credentials.iter().any(|c| {
+                                        c.destination_id == d.id
+                                            && c.enabled
+                                            && c.ready
+                                            && c.binding_enabled
+                                            && (route.auth_scheme
+                                                == ocg_domain::destination::AuthScheme::None
+                                                || !c.key_cipher.is_empty())
+                                    })
+                                }))
                     })
             })
         })
@@ -537,16 +545,20 @@ fn same_http_transport(
     second: &ocg_domain::destination::CatalogModel,
 ) -> bool {
     let route = |model: &ocg_domain::destination::CatalogModel| {
-        let (protocol, endpoint) = match &model.upstream_override {
-            Some(route) => (route.protocol, route.endpoint_url.as_str()),
-            None => (
-                *destination.protocols.first()?,
-                destination.base_url.as_deref()?,
-            ),
-        };
-        crate::custom_http::resolve_custom_endpoints(endpoint, protocol)
-            .ok()
-            .map(|route| (protocol, route.inference))
+        let mut routes = Vec::new();
+        for protocol in &model.protocols {
+            let saved = ocg_domain::destination::http_model_route(destination, model, *protocol)?;
+            let resolved =
+                crate::custom_http::resolve_custom_endpoints(&saved.endpoint_url, *protocol)
+                    .ok()?;
+            routes.push((
+                protocol.as_str(),
+                resolved.inference.to_string(),
+                saved.auth_scheme.as_str(),
+            ));
+        }
+        routes.sort_unstable();
+        Some(routes)
     };
     match (route(first), route(second)) {
         (Some(first), Some(second)) => first == second,

@@ -108,6 +108,7 @@ fn destination(adapter: AdapterKind, provider_id: &str) -> Destination {
         brand_family: None,
         base_url: None,
         protocols: Vec::new(),
+        protocol_routes: Vec::new(),
         auth_scheme: AuthScheme::None,
         model_resolution: ModelResolution::AdapterDefined,
         catalog: Vec::new(),

@@ -847,7 +847,14 @@ pub fn static_verified_protocols(
                 ocg_domain::protocol::command_code_supported_formats(model_id).to_vec()
             }
         }
-        ProviderAdapterKind::MiniMaxCn | ProviderAdapterKind::KimiCn => {
+        ProviderAdapterKind::MiniMaxCn => {
+            return vec![
+                UpstreamProtocolKind::ChatCompletions,
+                UpstreamProtocolKind::Messages,
+                UpstreamProtocolKind::Responses,
+            ];
+        }
+        ProviderAdapterKind::KimiCn => {
             return vec![
                 UpstreamProtocolKind::ChatCompletions,
                 UpstreamProtocolKind::Messages,
@@ -1341,9 +1348,14 @@ fn merge_model_contract(
     overrides: &[PersistedModelProtocolOverride],
     adapter_routable: bool,
 ) -> EffectiveModelContract {
-    let default_enabled = adapter != ProviderAdapterKind::CommandCodeGoat
-        || command_code_goat_includes_model(model_id);
     let official_docs = official_static_protocols(adapter, model_id, evidence);
+    // GOAT extras stay Auto-off until official-docs Static evidence exists.
+    // Included preset rows, and every other sealed adapter, default on once a
+    // trusted protocol baseline makes the protocol available. Directory
+    // discovery still cannot assert Chat for a model with no protocol evidence.
+    let default_enabled = adapter != ProviderAdapterKind::CommandCodeGoat
+        || command_code_goat_includes_model(model_id)
+        || !official_docs.is_empty();
     let preferred = official_docs
         .first()
         .copied()

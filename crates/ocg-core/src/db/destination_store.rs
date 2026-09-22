@@ -7,7 +7,7 @@
 use super::*;
 use crate::provider_contracts::{EffectiveScopeContract, build_effective_contracts};
 use ocg_domain::destination::{
-    CatalogModel, Destination, LegacyDestinationFacts, LegacyDestinationRef,
+    CatalogModel, Destination, HttpProtocolRoute, LegacyDestinationFacts, LegacyDestinationRef,
     destination_from_legacy, destination_id_for_builtin,
 };
 use ocg_domain::ids::OPENCODE_ZEN_FREE_PROVIDER_ID;
@@ -393,7 +393,9 @@ pub(crate) fn cpa_catalog(models: &[super::CpaCatalogModel]) -> Vec<CatalogModel
         .collect()
 }
 
-fn insert_destination_row(conn: &Connection, destination: &Destination) -> Result<()> {
+pub(crate) fn insert_destination_row(conn: &Connection, destination: &Destination) -> Result<()> {
+    super::http_routes::ensure_storage_on(conn)?;
+    super::http_routes::validate_loaded_destination(destination)?;
     let (legacy_kind, legacy_id) = match &destination.legacy {
         LegacyDestinationRef::Builtin(id) => ("builtin", id.as_str()),
         LegacyDestinationRef::Dynamic(id) => ("dynamic", id.as_str()),
@@ -404,8 +406,8 @@ fn insert_destination_row(conn: &Connection, destination: &Destination) -> Resul
         "INSERT INTO destinations (
             id, legacy_kind, legacy_id, adapter, name, brand_family, base_url,
             protocols_json, auth_scheme, model_resolution, capabilities_json, plan_json,
-            max_credentials, observer_credential_id, enabled
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            max_credentials, observer_credential_id, enabled, protocol_routes_json
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         params![
             destination.id,
             legacy_kind,
@@ -426,9 +428,25 @@ fn insert_destination_row(conn: &Connection, destination: &Destination) -> Resul
             destination.max_credentials.map(i64::from),
             destination.observer_credential_id,
             i64::from(destination.enabled),
+            super::http_routes::encode_protocol_routes_json(&destination.protocol_routes)?,
         ],
     )?;
     Ok(())
+}
+
+pub(crate) fn load_protocol_routes(
+    conn: &Connection,
+    destination_id: &str,
+) -> Result<Vec<HttpProtocolRoute>> {
+    if !super::table_has_column(conn, "destinations", "protocol_routes_json")? {
+        return Ok(Vec::new());
+    }
+    let raw: Option<String> = conn.query_row(
+        "SELECT protocol_routes_json FROM destinations WHERE id = ?1",
+        [destination_id],
+        |row| row.get(0),
+    )?;
+    super::http_routes::decode_protocol_routes_json(raw.as_deref())
 }
 
 fn catalog_from_persisted_scope(scope: &EffectiveScopeContract) -> Vec<CatalogModel> {

@@ -69,6 +69,7 @@ fn connection_summary_emits_null_optional_fields() {
         },
         display_family: None,
         offering: OfferingKind::Api,
+        credit_presets: None,
     };
     let value = serde_json::to_value(&summary).unwrap();
     assert_eq!(value["templateRef"], Value::Null);
@@ -262,6 +263,7 @@ fn onboarding_commit_request_is_camel_case_and_includes_secret_in_canonical_json
             endpoint_url: "https://lab.example/v1/chat/completions".into(),
             upstream_protocol: AccountUpstreamProtocol::ChatCompletions,
             auth_kind: ProviderDefinitionAuthKind::Bearer,
+            protocol_routes: None,
         }),
         authorization: Some(OnboardingAuthorization::ApiKey(
             OnboardingAuthorizationApiKey {

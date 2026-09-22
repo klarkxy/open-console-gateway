@@ -420,7 +420,8 @@ fn project_account_identity(
         }
     }
     let account = &primary.account;
-    let (connection_id, endpoints) = assigned_endpoints(account, dynamic_by_id, custom_by_id);
+    let (connection_id, endpoints) =
+        assigned_endpoints_current(state, account, dynamic_by_id, custom_by_id)?;
     let facts = LegacyAccountFacts {
         account_id: account.id.clone(),
         name: account.name.clone(),
@@ -462,7 +463,8 @@ fn project_credential(
     now: chrono::DateTime<Utc>,
 ) -> Result<CredentialSummary, V3ApiError> {
     let account = &record.account;
-    let (connection_id, endpoints) = assigned_endpoints(account, dynamic_by_id, custom_by_id);
+    let (connection_id, endpoints) =
+        assigned_endpoints_current(state, account, dynamic_by_id, custom_by_id)?;
     let facts = LegacyAccountFacts {
         account_id: account.id.clone(),
         name: account.name.clone(),
@@ -659,6 +661,35 @@ pub(super) fn project_binding_dto(
         enabled: stored.enabled,
         routing_rank: binding.routing_rank,
     }
+}
+
+pub(super) fn assigned_endpoints_current(
+    state: &CoreState,
+    account: &Account,
+    dynamic_by_id: &HashMap<&str, &DynamicProviderRuntime>,
+    custom_by_id: &HashMap<&str, &crate::custom::CustomAccountRuntime>,
+) -> Result<(ocg_domain::connection::ConnectionId, Vec<AssignedEndpoint>), V3ApiError> {
+    let snapshot = crate::routing_snapshot::RoutingSnapshot::load(&state.db.lock())
+        .map_err(V3ApiError::internal)?;
+    if let Some(credential) = snapshot.credentials.iter().find(|row| row.id == account.id)
+        && let Some(destination) = snapshot.projection.destinations.iter().find(|row| {
+            row.id == credential.destination_id
+                && row.adapter == ocg_domain::destination::AdapterKind::Http
+        })
+    {
+        let connection_id: ocg_domain::connection::ConnectionId = serde_json::from_value(
+            serde_json::Value::String(credential.authorization_connection_id.clone()),
+        )
+        .map_err(V3ApiError::internal)?;
+        return Ok((
+            connection_id.clone(),
+            assigned_endpoints_for_routes(
+                &connection_id,
+                &ocg_domain::destination::http_configured_routes(destination),
+            ),
+        ));
+    }
+    Ok(assigned_endpoints(account, dynamic_by_id, custom_by_id))
 }
 
 pub(super) fn assigned_endpoints(

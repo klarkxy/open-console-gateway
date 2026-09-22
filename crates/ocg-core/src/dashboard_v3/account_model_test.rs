@@ -79,6 +79,25 @@ fn prepare_account_model_test(
     input: AccountModelTestRequest,
 ) -> Result<PreparedAccountModelTest, V3ApiError> {
     let account = load_model_account(state, id)?;
+    let projection = crate::destination_projection::load_runtime(&state.db.lock())
+        .map_err(V3ApiError::internal)?;
+    if projection
+        .credentials
+        .iter()
+        .find(|credential| credential.legacy_account_id == id)
+        .and_then(|credential| {
+            projection
+                .destinations
+                .iter()
+                .find(|destination| destination.id == credential.destination_id)
+        })
+        .is_some_and(|destination| !destination.protocol_routes.is_empty())
+    {
+        return Err(V3ApiError::invalid_request_at(
+            state,
+            "this connection has explicit protocol routes; test the selected protocol in Providers",
+        ));
+    }
     if !account.setup_step.is_ready() {
         return Err(V3ApiError::precondition_failed_at(
             state,

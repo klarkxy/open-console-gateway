@@ -29,14 +29,14 @@ use crate::state::CoreState;
 
 use super::types::{
     AdapterKindDto, AuthSchemeDto, CapabilitiesDto, CatalogModelDto, CredentialCooldownsDto,
-    CredentialGrantsDto, CredentialList, DestinationCredentialDto as CredentialDto,
-    DestinationDeleteResult, DestinationDto, DestinationList, DestinationModelPatch,
-    DestinationOnboardingTaskDto, DestinationPatchRequest, DestinationPatchResult,
-    DestinationProjectionRefusalDto, DestinationProjectionRefusedError, ExpiryCadenceDto,
-    LegacyDestinationKindDto, LegacyDestinationRefDto, MappingErrorCodeDto, ModelResolutionDto,
-    PlanDto, PlanWindowDto, PlanWindowKindDto, PricingSourceDto, ProtocolDto, QuotaRecoveryDto,
-    QuotaRecoveryReason, QuotaRecoveryStatus, QuotaRecoveryWindow, RedirectPolicyDto,
-    RefusedRowDto, RefusedRowKindDto, UsageSourceDto,
+    CredentialGrantsDto, CredentialList, DestinationCatalogModelUpdate,
+    DestinationCredentialDto as CredentialDto, DestinationDeleteResult, DestinationDto,
+    DestinationList, DestinationModelPatch, DestinationOnboardingTaskDto, DestinationPatchRequest,
+    DestinationPatchResult, DestinationProjectionRefusalDto, DestinationProjectionRefusedError,
+    ExpiryCadenceDto, HttpProtocolRouteDto, LegacyDestinationKindDto, LegacyDestinationRefDto,
+    MappingErrorCodeDto, ModelResolutionDto, PlanDto, PlanWindowDto, PlanWindowKindDto,
+    PricingSourceDto, ProtocolDto, QuotaRecoveryDto, QuotaRecoveryReason, QuotaRecoveryStatus,
+    QuotaRecoveryWindow, RedirectPolicyDto, RefusedRowDto, RefusedRowKindDto, UsageSourceDto,
 };
 
 /// Stable 409 code when the stage-4a projection cannot map every live row.
@@ -115,29 +115,61 @@ fn patch_destination_locked(
     let destination = load_destination(state, destination_id)?;
     let definition = destination_definition(&destination, &input)
         .map_err(|message| V3ApiError::invalid_request_at(state, message))?;
-    state.commit_configuration_update(|db| {
-        crate::db::destination_commands::replace_http_destination_on(
-            db, destination_id, &definition, &input.authorize_credential_ids,
-        )?;
-        if let Some(enabled) = input.enabled {
-            db.conn.execute("UPDATE destinations SET enabled = ?2 WHERE id = ?1", rusqlite::params![destination_id, enabled])?;
-        }
-        for model in &input.models {
-            if let Some(enabled) = model.enabled {
-                let protocol: ocg_domain::catalog::UpstreamProtocolKind = model.upstream_override.as_ref()
-                    .map(|route| route.protocol).unwrap_or(input.upstream_protocol).into();
-                db.conn.execute("UPDATE destination_models SET enabled = ?3 WHERE destination_id = ?1 AND public_model_key = ?2",
-                    rusqlite::params![destination_id, model.public_model.trim().to_ascii_lowercase(), enabled])?;
-                if enabled {
-                    db.conn.execute("UPDATE destination_models SET protocols_json = ?3, preferred = ?4 WHERE destination_id = ?1 AND public_model_key = ?2 AND protocols_json = '[]'",
-                        rusqlite::params![destination_id, model.public_model.trim().to_ascii_lowercase(), serde_json::to_string(&[protocol])?, protocol.as_str()])?;
-                }
+    state
+        .commit_configuration_update(|db| {
+            let routes = input.protocol_routes.as_ref().map(|routes| {
+                routes
+                    .iter()
+                    .map(ocg_domain::destination::HttpProtocolRoute::from)
+                    .collect::<Vec<_>>()
+            });
+            crate::db::destination_commands::replace_http_destination_with_routes_on(
+                db,
+                destination_id,
+                &definition,
+                &input.authorize_credential_ids,
+                routes.as_deref(),
+            )?;
+            if let Some(enabled) = input.enabled {
+                db.conn.execute(
+                    "UPDATE destinations SET enabled = ?2 WHERE id = ?1",
+                    rusqlite::params![destination_id, enabled],
+                )?;
             }
-        }
-        Ok(())
-    }).map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?;
+            let configured = crate::destination_projection::load_runtime(db)?
+                .destinations
+                .into_iter()
+                .find(|row| row.id == destination_id)
+                .ok_or_else(|| anyhow::anyhow!("destination not found"))?;
+            let updates: Vec<_> = input
+                .models
+                .iter()
+                .map(|model| DestinationCatalogModelUpdate {
+                    public_model: model.public_model.clone(),
+                    enabled: model.enabled,
+                    protocols: model.protocols.clone(),
+                    preferred: model.preferred,
+                })
+                .collect();
+            let catalog = super::destination_catalog::apply_updates(&configured, &updates, &[])
+                .map_err(anyhow::Error::msg)?;
+            crate::db::destination_store::replace_destination_catalog(
+                &db.conn,
+                destination_id,
+                &catalog,
+            )?;
+            Ok(())
+        })
+        .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?;
 
-    // `patch_destination_locked` already owns `settings_update`; do not call
+    mutation_result_locked(state, destination_id)
+}
+
+pub(super) fn mutation_result_locked(
+    state: &CoreState,
+    destination_id: &str,
+) -> Result<DestinationPatchResult, DestinationsError> {
+    // The caller already owns `settings_update`; do not call
     // `load_projection`, which would try to acquire the non-reentrant lock.
     let (projection, recoveries, probes) = {
         let db = state.db.lock();
@@ -358,6 +390,11 @@ impl From<&Destination> for DestinationDto {
                 .copied()
                 .map(ProtocolDto::from)
                 .collect(),
+            protocol_routes: destination
+                .protocol_routes
+                .iter()
+                .map(HttpProtocolRouteDto::from)
+                .collect(),
             auth_scheme: destination.auth_scheme.into(),
             model_resolution: destination.model_resolution.into(),
             catalog: destination
@@ -451,6 +488,30 @@ impl From<ModelResolution> for ModelResolutionDto {
             ModelResolution::AdapterDefined => Self::AdapterDefined,
             ModelResolution::PublicOnly => Self::PublicOnly,
             ModelResolution::PublicAndUpstream => Self::PublicAndUpstream,
+        }
+    }
+}
+
+impl From<&ocg_domain::destination::HttpProtocolRoute> for HttpProtocolRouteDto {
+    fn from(route: &ocg_domain::destination::HttpProtocolRoute) -> Self {
+        Self {
+            protocol: route.protocol.into(),
+            endpoint_url: route.endpoint_url.clone(),
+            auth_scheme: route.auth_scheme.into(),
+        }
+    }
+}
+
+impl From<&HttpProtocolRouteDto> for ocg_domain::destination::HttpProtocolRoute {
+    fn from(route: &HttpProtocolRouteDto) -> Self {
+        Self {
+            protocol: route.protocol.into(),
+            endpoint_url: route.endpoint_url.clone(),
+            auth_scheme: match route.auth_scheme {
+                AuthSchemeDto::Bearer => AuthScheme::Bearer,
+                AuthSchemeDto::XApiKey => AuthScheme::XApiKey,
+                AuthSchemeDto::None => AuthScheme::None,
+            },
         }
     }
 }

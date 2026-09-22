@@ -1,11 +1,14 @@
 use super::*;
 use crate::account::{AccountSetupStep, AccountType};
 use crate::catalog::UpstreamProtocolKind;
+use crate::connection::EndpointOperation;
 use crate::credential::{
-    AuthState, ModelScope, OnboardingTaskKind, OnboardingTaskState,
+    AuthState, ModelScope, OnboardingTaskKind, OnboardingTaskState, RouteSpec,
     credential_id_for_legacy_account, observer_credential_id_for_platform_account,
 };
-use crate::dynamic::{DynamicAuthKind, DynamicModelMapping, DynamicProviderDefinition};
+use crate::dynamic::{
+    DynamicAuthKind, DynamicModelMapping, DynamicModelUpstreamOverride, DynamicProviderDefinition,
+};
 use crate::ids::{
     COMMAND_CODE_PROVIDER_ID, CPA_ACCOUNT_ID, CPA_ACCOUNT_NAME, CPA_PROVIDER_ID,
     CUSTOM_PROVIDER_ID, KIMI_PROVIDER_ID, MINIMAX_PROVIDER_ID, OLLAMA_PROVIDER_ID,
@@ -295,7 +298,11 @@ fn sealed_builtin_destinations_map_all_seven_ids() {
     assert_eq!(goat.base_url.as_deref(), Some(COMMAND_CODE_GOAT_BASE_URL));
     assert_eq!(
         goat.protocols,
-        vec![Protocol::ChatCompletions, Protocol::Messages]
+        vec![
+            Protocol::ChatCompletions,
+            Protocol::Responses,
+            Protocol::Messages
+        ]
     );
     let goat_plan = goat.plan.expect("GOAT has a plan");
     assert_eq!(goat_plan.usage_source, UsageSource::LocalProjection);
@@ -758,4 +765,322 @@ fn destination_ids_are_deterministic_and_kind_scoped() {
 fn protocol_alias_is_the_catalog_wire_enum() {
     assert_eq!(Protocol::Responses, UpstreamProtocolKind::Responses);
     assert_eq!(Protocol::ALL.len(), 3);
+}
+
+fn route(protocol: Protocol, url: &str, auth: AuthScheme) -> HttpProtocolRoute {
+    HttpProtocolRoute {
+        protocol,
+        endpoint_url: url.to_string(),
+        auth_scheme: auth,
+    }
+}
+
+fn catalog_model(
+    public_model: &str,
+    protocols: Vec<Protocol>,
+    upstream_override: Option<DynamicModelUpstreamOverride>,
+) -> CatalogModel {
+    let preferred = upstream_override
+        .as_ref()
+        .map(|row| row.protocol)
+        .or_else(|| protocols.first().copied());
+    CatalogModel {
+        public_model: public_model.to_string(),
+        upstream_model: public_model.to_string(),
+        protocols,
+        preferred,
+        enabled: true,
+        upstream_override,
+    }
+}
+
+fn http_destination(
+    protocols: Vec<Protocol>,
+    base_url: &str,
+    auth: AuthScheme,
+    protocol_routes: Vec<HttpProtocolRoute>,
+    catalog: Vec<CatalogModel>,
+) -> Destination {
+    Destination {
+        id: destination_id_for_dynamic("lab-provider"),
+        legacy: LegacyDestinationRef::Dynamic("lab-provider".to_string()),
+        adapter: AdapterKind::Http,
+        name: "Lab".to_string(),
+        brand_family: None,
+        base_url: Some(base_url.to_string()),
+        protocols,
+        protocol_routes,
+        auth_scheme: auth,
+        model_resolution: ModelResolution::PublicAndUpstream,
+        catalog,
+        capabilities: sealed_capabilities(AdapterKind::Http),
+        plan: None,
+        max_credentials: None,
+        observer_credential_id: None,
+        enabled: true,
+    }
+}
+
+#[test]
+fn sealed_and_legacy_http_destinations_store_empty_protocol_routes() {
+    let go = map_builtin(OPENCODE_PROVIDER_ID);
+    assert!(go.protocol_routes.is_empty());
+    let dynamic = destination_from_legacy(&LegacyDestinationFacts::Dynamic {
+        definition: dynamic_definition(DynamicAuthKind::Bearer),
+    })
+    .unwrap();
+    assert!(dynamic.protocol_routes.is_empty());
+    assert_eq!(
+        http_protocol_routes(&dynamic),
+        vec![route(
+            Protocol::ChatCompletions,
+            "https://lab.example/v1",
+            AuthScheme::Bearer
+        )]
+    );
+}
+
+#[test]
+fn legacy_fallback_uses_base_url_protocols_and_auth() {
+    let destination = http_destination(
+        vec![Protocol::ChatCompletions, Protocol::Responses],
+        "https://lab.example/v1",
+        AuthScheme::Bearer,
+        Vec::new(),
+        Vec::new(),
+    );
+    assert_eq!(
+        http_protocol_routes(&destination),
+        vec![
+            route(
+                Protocol::ChatCompletions,
+                "https://lab.example/v1",
+                AuthScheme::Bearer
+            ),
+            route(
+                Protocol::Responses,
+                "https://lab.example/v1",
+                AuthScheme::Bearer
+            ),
+        ]
+    );
+    let model = catalog_model("lab-chat", vec![Protocol::ChatCompletions], None);
+    assert_eq!(
+        http_model_protocols(&destination, &model),
+        vec![Protocol::ChatCompletions, Protocol::Responses]
+    );
+    assert_eq!(
+        http_model_route(&destination, &model, Protocol::Responses),
+        Some(route(
+            Protocol::Responses,
+            "https://lab.example/v1",
+            AuthScheme::Bearer
+        ))
+    );
+}
+
+#[test]
+fn explicit_routes_keep_per_protocol_url_and_auth() {
+    let chat = route(
+        Protocol::ChatCompletions,
+        "https://lab.example/v1",
+        AuthScheme::Bearer,
+    );
+    let messages = route(
+        Protocol::Messages,
+        "https://lab.example/anthropic/v1/messages",
+        AuthScheme::XApiKey,
+    );
+    let destination = http_destination(
+        vec![Protocol::ChatCompletions, Protocol::Messages],
+        "https://lab.example/v1",
+        AuthScheme::Bearer,
+        vec![chat.clone(), messages.clone()],
+        Vec::new(),
+    );
+    let model = catalog_model(
+        "lab-chat",
+        vec![Protocol::ChatCompletions, Protocol::Messages],
+        None,
+    );
+    assert_eq!(
+        http_model_route(&destination, &model, Protocol::ChatCompletions),
+        Some(chat)
+    );
+    assert_eq!(
+        http_model_route(&destination, &model, Protocol::Messages),
+        Some(messages)
+    );
+    assert!(http_model_route(&destination, &model, Protocol::Responses).is_none());
+}
+
+#[test]
+fn model_override_is_single_protocol_and_keeps_saved_endpoint() {
+    let destination = http_destination(
+        vec![Protocol::ChatCompletions, Protocol::Responses],
+        "https://lab.example/v1",
+        AuthScheme::Bearer,
+        vec![
+            route(
+                Protocol::ChatCompletions,
+                "https://lab.example/v1",
+                AuthScheme::Bearer,
+            ),
+            route(
+                Protocol::Responses,
+                "https://lab.example/responses",
+                AuthScheme::Bearer,
+            ),
+        ],
+        vec![catalog_model(
+            "overridden",
+            vec![Protocol::Responses],
+            Some(DynamicModelUpstreamOverride {
+                protocol: Protocol::Responses,
+                endpoint_url: "https://override.example/v1/responses".to_string(),
+            }),
+        )],
+    );
+    let model = &destination.catalog[0];
+    assert_eq!(
+        http_model_protocols(&destination, model),
+        vec![Protocol::Responses]
+    );
+    assert!(http_model_route(&destination, model, Protocol::ChatCompletions).is_none());
+    assert_eq!(
+        http_model_route(&destination, model, Protocol::Responses),
+        Some(route(
+            Protocol::Responses,
+            "https://override.example/v1/responses",
+            AuthScheme::Bearer
+        ))
+    );
+}
+
+#[test]
+fn configured_routes_keep_explicit_order_then_unique_overrides() {
+    let destination = http_destination(
+        vec![Protocol::ChatCompletions, Protocol::Responses],
+        "https://lab.example/v1",
+        AuthScheme::Bearer,
+        vec![
+            route(
+                Protocol::ChatCompletions,
+                "https://lab.example/v1",
+                AuthScheme::Bearer,
+            ),
+            route(
+                Protocol::Responses,
+                "https://lab.example/responses",
+                AuthScheme::Bearer,
+            ),
+        ],
+        vec![
+            catalog_model("same-chat", vec![Protocol::ChatCompletions], None),
+            catalog_model(
+                "override-chat",
+                vec![Protocol::ChatCompletions],
+                Some(DynamicModelUpstreamOverride {
+                    protocol: Protocol::ChatCompletions,
+                    endpoint_url: "https://override.example/chat".to_string(),
+                }),
+            ),
+            catalog_model(
+                "override-messages",
+                vec![Protocol::Messages],
+                Some(DynamicModelUpstreamOverride {
+                    protocol: Protocol::Messages,
+                    endpoint_url: "https://override.example/messages".to_string(),
+                }),
+            ),
+            catalog_model(
+                "duplicate-override",
+                vec![Protocol::Messages],
+                Some(DynamicModelUpstreamOverride {
+                    protocol: Protocol::Messages,
+                    endpoint_url: "https://override.example/messages".to_string(),
+                }),
+            ),
+        ],
+    );
+    assert_eq!(
+        http_configured_routes(&destination),
+        vec![
+            RouteSpec {
+                operation: EndpointOperation::ChatCreate,
+                url: Some("https://lab.example/v1".to_string()),
+            },
+            RouteSpec {
+                operation: EndpointOperation::ResponseCreate,
+                url: Some("https://lab.example/responses".to_string()),
+            },
+            RouteSpec {
+                operation: EndpointOperation::ChatCreate,
+                url: Some("https://override.example/chat".to_string()),
+            },
+            RouteSpec {
+                operation: EndpointOperation::MessageCreate,
+                url: Some("https://override.example/messages".to_string()),
+            },
+        ]
+    );
+}
+
+#[test]
+fn destination_serde_skips_empty_protocol_routes_and_defaults_missing() {
+    let destination = http_destination(
+        vec![Protocol::ChatCompletions],
+        "https://lab.example/v1",
+        AuthScheme::Bearer,
+        Vec::new(),
+        Vec::new(),
+    );
+    let value = serde_json::to_value(&destination).unwrap();
+    assert!(value.get("protocol_routes").is_none());
+    let decoded: Destination = serde_json::from_value(value).unwrap();
+    assert!(decoded.protocol_routes.is_empty());
+}
+
+#[test]
+fn explicit_route_validation_rejects_duplicates_and_first_route_mismatch() {
+    let duplicate = vec![
+        route(
+            Protocol::ChatCompletions,
+            "https://lab.example/v1",
+            AuthScheme::Bearer,
+        ),
+        route(
+            Protocol::ChatCompletions,
+            "https://lab.example/other",
+            AuthScheme::Bearer,
+        ),
+    ];
+    assert_eq!(
+        validate_http_protocol_route_list(&duplicate),
+        Err(ProtocolRouteError::DuplicateProtocol {
+            protocol: Protocol::ChatCompletions,
+        })
+    );
+    let mut destination = http_destination(
+        vec![Protocol::ChatCompletions],
+        "https://lab.example/v1",
+        AuthScheme::Bearer,
+        vec![route(
+            Protocol::Responses,
+            "https://lab.example/responses",
+            AuthScheme::Bearer,
+        )],
+        Vec::new(),
+    );
+    assert_eq!(
+        validate_destination_protocol_routes(&destination),
+        Err(ProtocolRouteError::FirstRouteMismatch)
+    );
+    destination.protocol_routes[0].endpoint_url = "https://lab.example/v1".to_string();
+    destination.protocol_routes[0].protocol = Protocol::ChatCompletions;
+    destination.auth_scheme = AuthScheme::XApiKey;
+    assert_eq!(
+        validate_destination_protocol_routes(&destination),
+        Err(ProtocolRouteError::FirstRouteMismatch)
+    );
 }

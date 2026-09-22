@@ -2334,7 +2334,8 @@ async fn saved_grants_are_facts_and_url_edits_do_not_expand_them() {
         .find(|item| item["identity"]["label"] == "Grant Lab")
         .expect("lab identity")["credentials"][0]["bindings"][0]
         .clone();
-    assert_eq!(still["allowedEndpointIds"], original_ids);
+    // Consent to the removed URL must not survive as the new URL's reused id.
+    assert_eq!(still["allowedEndpointIds"], json!([]));
     assert_eq!(still["allowedOrigins"], original_origins);
 
     let (status, patched) = send_v4(
@@ -4154,4 +4155,65 @@ async fn new_api_import_keys_conflicts_when_revision_changes_during_upstream() {
     assert_eq!(listed["links"].as_array().unwrap().len(), 0, "{listed}");
     harness.stop();
     server.abort();
+}
+
+#[tokio::test]
+async fn connections_offer_credit_setup_before_a_key_exists() {
+    let harness = start_loopback("v4-credit-setup-options").await;
+    for (name, endpoint, count) in [
+        (
+            "Step Plan setup",
+            "https://api.stepfun.com/step_plan/v1/chat/completions",
+            4,
+        ),
+        (
+            "Cash setup",
+            "https://api.stepfun.com/v1/chat/completions",
+            0,
+        ),
+    ] {
+        let (status, created) = send_v3(
+            &harness,
+            Method::POST,
+            "/providers",
+            &cas(
+                &harness,
+                create_body(name, endpoint, "chat_completions", "bearer", None),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        if count == 0 {
+            let db = harness.state.db.lock();
+            let mut runtime = db
+                .get_dynamic_provider(created["provider"]["id"].as_str().unwrap())
+                .unwrap()
+                .unwrap();
+            runtime.mappings[0].upstream_override =
+                Some(ocg_domain::dynamic::DynamicModelUpstreamOverride {
+                    protocol: ocg_domain::catalog::UpstreamProtocolKind::ChatCompletions,
+                    endpoint_url: "https://api.stepfun.com/step_plan/v1/chat/completions".into(),
+                });
+            db.replace_dynamic_provider(&runtime, false, false, None)
+                .unwrap();
+        }
+        let (status, body) = send_v4(&harness, Method::GET, "/connections", &Value::Null).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let connection = find_legacy(
+            &body,
+            "dynamic_provider",
+            created["provider"]["id"].as_str().unwrap(),
+        );
+        assert_eq!(connection["credentialCount"], 0);
+        assert_eq!(connection["creditPresets"].as_array().unwrap().len(), count);
+        if count > 0 {
+            assert_eq!(
+                connection["creditPresets"][1]["initialGrant"].as_f64(),
+                Some(1_600_000_000.0)
+            );
+        }
+        let builtin = find_legacy(&body, "builtin_provider", OPENCODE_ZEN_FREE_PROVIDER_ID);
+        assert!(builtin.get("creditPresets").is_none());
+    }
+    harness.stop();
 }

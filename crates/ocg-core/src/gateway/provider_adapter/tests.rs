@@ -8,10 +8,10 @@ use crate::provider::{
     COMMAND_CODE_PROVIDER_ID, CUSTOM_PROVIDER_ID, CredentialKind, KIMI_CN_BASE_URL,
     KIMI_CN_CHAT_COMPLETIONS_PATH, KIMI_CN_MESSAGES_PATH, KIMI_PROVIDER_ID,
     MINIMAX_CN_ANTHROPIC_BASE_URL, MINIMAX_CN_BASE_URL, MINIMAX_CN_CHAT_COMPLETIONS_PATH,
-    MINIMAX_CN_MESSAGES_PATH, MINIMAX_PROVIDER_ID, OLLAMA_CLOUD_BASE_URL,
-    OLLAMA_CLOUD_CHAT_COMPLETIONS_PATH, OLLAMA_PROVIDER_ID, OPENCODE_PROVIDER_ID,
-    OPENCODE_ZEN_FREE_PROVIDER_ID, ProviderAdapterKind, QuotaScope, ZEN_FREE_ACCOUNT_ID,
-    ZEN_FREE_ACCOUNT_NAME,
+    MINIMAX_CN_MESSAGES_PATH, MINIMAX_CN_RESPONSES_PATH, MINIMAX_PROVIDER_ID,
+    OLLAMA_CLOUD_BASE_URL, OLLAMA_CLOUD_CHAT_COMPLETIONS_PATH, OLLAMA_PROVIDER_ID,
+    OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID, ProviderAdapterKind, QuotaScope,
+    ZEN_FREE_ACCOUNT_ID, ZEN_FREE_ACCOUNT_NAME,
 };
 use bytes::Bytes;
 use chrono::Utc;
@@ -122,7 +122,10 @@ fn official_transport_is_fixed_bearer_chat_without_redirects_or_zdr() {
         command_code_goat_official_url(ApiFormat::Messages).unwrap(),
         "https://api.commandcode.ai/provider/v1/messages"
     );
-    assert!(command_code_goat_official_url(ApiFormat::Responses).is_err());
+    assert_eq!(
+        command_code_goat_official_url(ApiFormat::Responses).unwrap(),
+        "https://api.commandcode.ai/provider/v1/responses"
+    );
     let loopback = command_code_goat_loopback_base("http://127.0.0.1:9");
     assert_eq!(loopback, "http://127.0.0.1:9/provider/v1");
     assert_eq!(
@@ -619,16 +622,57 @@ fn fixed_provider_plans_expose_documented_chat_and_messages_routes() {
                 assert!(!route.follow_redirects);
             }
         }
-        assert!(
-            resolve_probe_route(
-                &account,
-                kind(&account),
-                &config,
-                &chat_plan(model_id, UpstreamChannel::Go, ApiFormat::Responses, None,),
-            )
-            .unwrap_err()
-            .contains("no official upstream path")
-        );
+        if provider_id == KIMI_PROVIDER_ID {
+            assert!(
+                resolve_probe_route(
+                    &account,
+                    kind(&account),
+                    &config,
+                    &chat_plan(model_id, UpstreamChannel::Go, ApiFormat::Responses, None,),
+                )
+                .unwrap_err()
+                .contains("no official upstream path")
+            );
+        }
+    }
+
+    let minimax = account(
+        "minimax-responses",
+        MINIMAX_PROVIDER_ID,
+        CredentialKind::ApiKey,
+        QuotaScope::Key,
+    );
+    for route in [
+        resolve_account_test_route_with_dynamics(
+            &minimax,
+            kind(&minimax),
+            &config,
+            &chat_plan(
+                "MiniMax-M3",
+                UpstreamChannel::Go,
+                ApiFormat::Responses,
+                None,
+            ),
+            &[],
+        )
+        .unwrap(),
+        resolve_probe_route(
+            &minimax,
+            kind(&minimax),
+            &config,
+            &chat_plan(
+                "MiniMax-M3",
+                UpstreamChannel::Go,
+                ApiFormat::Responses,
+                None,
+            ),
+        )
+        .unwrap(),
+    ] {
+        assert_eq!(route.base_url, MINIMAX_CN_BASE_URL);
+        assert_eq!(route.path, MINIMAX_CN_RESPONSES_PATH);
+        assert_eq!(route.auth, UpstreamAuth::Bearer);
+        assert!(!route.follow_redirects);
     }
 }
 
@@ -661,7 +705,20 @@ fn minimax_kimi_ollama_do_not_inherit_opencode_responses_for_shared_model_names(
         QuotaScope::Key,
     );
 
-    for account in [&minimax, &kimi, &ollama] {
+    let minimax_route = resolve_account_test_route_with_dynamics(
+        &minimax,
+        kind(&minimax),
+        &config,
+        &chat_plan(shared, UpstreamChannel::Go, ApiFormat::Responses, None),
+        &[],
+    )
+    .unwrap();
+    assert_eq!(minimax_route.base_url, MINIMAX_CN_BASE_URL);
+    assert_eq!(minimax_route.path, MINIMAX_CN_RESPONSES_PATH);
+    assert_eq!(minimax_route.auth, UpstreamAuth::Bearer);
+    assert!(!minimax_route.follow_redirects);
+
+    for account in [&kimi, &ollama] {
         let err = resolve_account_test_route_with_dynamics(
             account,
             kind(account),
@@ -887,18 +944,18 @@ fn resolve_dispatches_on_caller_adapter_not_account_provider_id() {
         .is_ok(),
         "OpenCode Go still serves grok-4.5 Responses when the caller adapter matches"
     );
-    let minimax_err = resolve_route_with_dynamics(
+    let kimi_err = resolve_route_with_dynamics(
         &go,
-        ProviderAdapterKind::MiniMaxCn,
+        ProviderAdapterKind::KimiCn,
         &config,
         &go_responses,
         &[],
     )
     .unwrap_err();
     assert!(
-        minimax_err.contains("no official upstream path")
-            || minimax_err.contains("no verified support")
-            || minimax_err.contains("does not support"),
-        "a MiniMax adapter must not inherit OpenCode Responses from provider_id: {minimax_err}"
+        kimi_err.contains("no official upstream path")
+            || kimi_err.contains("no verified support")
+            || kimi_err.contains("does not support"),
+        "a Kimi adapter must not inherit OpenCode Responses from provider_id: {kimi_err}"
     );
 }

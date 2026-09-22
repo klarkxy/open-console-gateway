@@ -7,7 +7,8 @@ use chrono::{DateTime, Utc};
 use ocg_domain::credential::{AuthState, ModelScope};
 use ocg_domain::destination::{
     AdapterKind, AuthScheme, Capabilities, CatalogModel, Credential, Destination,
-    LegacyDestinationRef, ModelResolution, Plan, Protocol,
+    HttpProtocolRoute, LegacyDestinationRef, ModelResolution, Plan, Protocol,
+    validate_destination_protocol_routes,
 };
 use ocg_domain::dynamic::DynamicModelUpstreamOverride;
 use serde::{Deserialize, Serialize};
@@ -15,9 +16,9 @@ use zeroize::Zeroize;
 
 use crate::dashboard_v4::types::{
     AdapterKindDto, AuthSchemeDto, CapabilitiesDto, CatalogModelDto, CredentialCooldownsDto,
-    CredentialGrantsDto, DestinationOnboardingTaskDto, ExpiryCadenceDto, LegacyDestinationKindDto,
-    LegacyDestinationRefDto, PlanDto, PlanWindowKindDto, PricingSourceDto, ProtocolDto,
-    RedirectPolicyDto, UsageSourceDto,
+    CredentialGrantsDto, DestinationOnboardingTaskDto, ExpiryCadenceDto, HttpProtocolRouteDto,
+    LegacyDestinationKindDto, LegacyDestinationRefDto, PlanDto, PlanWindowKindDto,
+    PricingSourceDto, ProtocolDto, RedirectPolicyDto, UsageSourceDto,
 };
 use crate::platform::PlatformGroup;
 
@@ -54,6 +55,8 @@ pub(super) struct PortableDestination {
     pub brand_family: Option<String>,
     pub base_url: Option<String>,
     pub protocols: Vec<ProtocolDto>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub protocol_routes: Vec<HttpProtocolRouteDto>,
     pub auth_scheme: AuthSchemeDto,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_resolution: Option<ModelResolution>,
@@ -165,6 +168,9 @@ impl Zeroize for PortableDestination {
         self.preset_id.zeroize();
         self.origin.zeroize();
         self.offering.zeroize();
+        for route in &mut self.protocol_routes {
+            route.endpoint_url.zeroize();
+        }
         for model in &mut self.catalog {
             model.public_model.zeroize();
             model.upstream_model.zeroize();
@@ -227,6 +233,11 @@ impl From<&Destination> for PortableDestination {
                 .iter()
                 .copied()
                 .map(ProtocolDto::from)
+                .collect(),
+            protocol_routes: destination
+                .protocol_routes
+                .iter()
+                .map(HttpProtocolRouteDto::from)
                 .collect(),
             auth_scheme: destination.auth_scheme.into(),
             model_resolution: Some(destination.model_resolution),
@@ -428,7 +439,9 @@ pub(super) fn catalog_from_portable(models: &[PortableCatalogModel]) -> Vec<Cata
         .collect()
 }
 
-pub(super) fn destination_from_portable(destination: &PortableDestination) -> Destination {
+pub(super) fn destination_from_portable(
+    destination: &PortableDestination,
+) -> Result<Destination, super::TransferError> {
     let legacy = legacy_ref_from_dto(&destination.legacy);
     let model_resolution = destination.model_resolution.unwrap_or(match &legacy {
         LegacyDestinationRef::Dynamic(_) => ModelResolution::PublicAndUpstream,
@@ -437,7 +450,7 @@ pub(super) fn destination_from_portable(destination: &PortableDestination) -> De
         }
         LegacyDestinationRef::Builtin(_) => ModelResolution::AdapterDefined,
     });
-    Destination {
+    let mapped = Destination {
         id: destination.id.clone(),
         legacy,
         adapter: adapter_from_dto(destination.adapter),
@@ -450,6 +463,11 @@ pub(super) fn destination_from_portable(destination: &PortableDestination) -> De
             .copied()
             .map(protocol_from_dto)
             .collect(),
+        protocol_routes: destination
+            .protocol_routes
+            .iter()
+            .map(HttpProtocolRoute::from)
+            .collect(),
         auth_scheme: auth_scheme_from_dto(destination.auth_scheme),
         model_resolution,
         catalog: catalog_from_portable(&destination.catalog),
@@ -458,7 +476,38 @@ pub(super) fn destination_from_portable(destination: &PortableDestination) -> De
         max_credentials: destination.max_credentials,
         observer_credential_id: destination.observer_credential_id.clone(),
         enabled: destination.enabled,
+    };
+    validate_destination_protocol_routes(&mapped).map_err(|error| {
+        super::TransferError::Invalid(format!("destination `{}`: {error}", mapped.id))
+    })?;
+    for route in &mapped.protocol_routes {
+        crate::custom::validate_custom_endpoint_url(&route.endpoint_url).map_err(|_| {
+            super::TransferError::Invalid(format!(
+                "destination `{}` has an invalid protocol route endpoint",
+                mapped.id
+            ))
+        })?;
     }
+    Ok(mapped)
+}
+
+/// Default HTTP route after destination validation: explicit `protocolRoutes`
+/// when present, otherwise the generated legacy list. First entry is the
+/// stable default (legacy `base_url` / `auth_scheme` / first protocol).
+pub(super) fn verified_default_http_route(
+    destination: &PortableDestination,
+) -> Result<(Protocol, String, AuthScheme), super::TransferError> {
+    let mapped = destination_from_portable(destination)?;
+    let first = ocg_domain::destination::http_protocol_routes(&mapped)
+        .into_iter()
+        .next()
+        .ok_or_else(|| {
+            super::TransferError::Invalid(format!(
+                "destination `{}` is missing a protocol",
+                destination.id
+            ))
+        })?;
+    Ok((first.protocol, first.endpoint_url, first.auth_scheme))
 }
 
 pub(super) fn parse_cooldown_field(value: Option<&str>) -> Option<DateTime<Utc>> {
@@ -492,4 +541,106 @@ pub(super) fn credential_purpose(credential: &PortableCredential) -> &str {
 
 pub(super) fn is_observer_purpose(purpose: &str) -> bool {
     purpose == PURPOSE_PLATFORM_OBSERVER || purpose == PURPOSE_CPA_OBSERVER
+}
+
+#[cfg(test)]
+mod protocol_route_tests {
+    use super::*;
+    use ocg_domain::destination::{
+        AdapterKind, AuthScheme, Destination, HttpProtocolRoute, LegacyDestinationFacts,
+        ModelResolution, Protocol, destination_from_legacy, destination_id_for_dynamic,
+        sealed_capabilities,
+    };
+    use ocg_domain::dynamic::{DynamicAuthKind, DynamicModelMapping, DynamicProviderDefinition};
+
+    fn explicit_destination() -> Destination {
+        Destination {
+            id: destination_id_for_dynamic("lab-provider"),
+            legacy: ocg_domain::destination::LegacyDestinationRef::Dynamic(
+                "lab-provider".to_string(),
+            ),
+            adapter: AdapterKind::Http,
+            name: "Lab".to_string(),
+            brand_family: None,
+            base_url: Some("https://lab.example/v1".to_string()),
+            protocols: vec![Protocol::ChatCompletions, Protocol::Messages],
+            protocol_routes: vec![
+                HttpProtocolRoute {
+                    protocol: Protocol::ChatCompletions,
+                    endpoint_url: "https://lab.example/v1".to_string(),
+                    auth_scheme: AuthScheme::Bearer,
+                },
+                HttpProtocolRoute {
+                    protocol: Protocol::Messages,
+                    endpoint_url: "https://lab.example/anthropic/v1/messages".to_string(),
+                    auth_scheme: AuthScheme::XApiKey,
+                },
+            ],
+            auth_scheme: AuthScheme::Bearer,
+            model_resolution: ModelResolution::PublicAndUpstream,
+            catalog: Vec::new(),
+            capabilities: sealed_capabilities(AdapterKind::Http),
+            plan: None,
+            max_credentials: None,
+            observer_credential_id: None,
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn missing_protocol_routes_default_to_legacy_empty() {
+        let mapped = destination_from_legacy(&LegacyDestinationFacts::Dynamic {
+            definition: DynamicProviderDefinition {
+                preset_id: None,
+                id: "lab-provider".to_string(),
+                name: "Lab".to_string(),
+                endpoint_url: "https://lab.example/v1".to_string(),
+                upstream_protocol: Protocol::ChatCompletions,
+                auth_kind: DynamicAuthKind::Bearer,
+                mappings: vec![DynamicModelMapping {
+                    public_model: "lab".to_string(),
+                    upstream_model: "lab".to_string(),
+                    upstream_override: None,
+                }],
+            },
+        })
+        .unwrap();
+        let portable = PortableDestination::from(&mapped);
+        let mut value = serde_json::to_value(&portable).unwrap();
+        assert!(value.get("protocolRoutes").is_none());
+        value.as_object_mut().unwrap().remove("protocolRoutes");
+        let decoded: PortableDestination = serde_json::from_value(value).unwrap();
+        assert!(decoded.protocol_routes.is_empty());
+        let restored = destination_from_portable(&decoded).unwrap();
+        assert!(restored.protocol_routes.is_empty());
+        assert_eq!(restored.protocols, mapped.protocols);
+        assert_eq!(restored.base_url, mapped.base_url);
+    }
+
+    #[test]
+    fn explicit_protocol_routes_roundtrip_and_unknown_fields_fail() {
+        let destination = explicit_destination();
+        let portable = PortableDestination::from(&destination);
+        let value = serde_json::to_value(&portable).unwrap();
+        assert_eq!(value["protocolRoutes"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            value["protocolRoutes"][1]["endpointUrl"],
+            "https://lab.example/anthropic/v1/messages"
+        );
+        let decoded: PortableDestination = serde_json::from_value(value.clone()).unwrap();
+        let restored = destination_from_portable(&decoded).unwrap();
+        assert_eq!(restored.protocol_routes, destination.protocol_routes);
+        let mut extra = value;
+        extra["protocolRoutes"][0]["rewriteHost"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<PortableDestination>(extra).is_err());
+    }
+
+    #[test]
+    fn duplicate_portable_routes_are_rejected() {
+        let mut destination = explicit_destination();
+        destination.protocol_routes[1].protocol = Protocol::ChatCompletions;
+        destination.protocols = vec![Protocol::ChatCompletions, Protocol::ChatCompletions];
+        let portable = PortableDestination::from(&destination);
+        assert!(destination_from_portable(&portable).is_err());
+    }
 }

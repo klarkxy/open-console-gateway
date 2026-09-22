@@ -5,7 +5,8 @@
 //! secret-free previews/results. Browser profiles, cookies, logs, usage, and
 //! local Host settings stay off the package. V7+ destinations and credentials
 //! are the authoritative transfer model and carry plaintext secrets inside the
-//! already-encrypted envelope. V9 carries `routingCards`. V8 requires
+//! already-encrypted envelope. V11 carries HTTP `protocolRoutes`. V10 carries
+//! personal credit meters. V9 carries `routingCards`. V8 requires
 //! `modelResolution`; V7 fills deterministic defaults. V6 preserves cooldown
 //! deadlines; V4/V5 retain their host-local policy.
 
@@ -74,13 +75,15 @@ const ENVELOPE_VERSION: u32 = 1;
 const LEGACY_PAYLOAD_VERSION: u32 = 1;
 #[cfg(test)]
 const NODE_PAYLOAD_VERSION: u32 = 2;
-const PAYLOAD_VERSION: u32 = 10;
+const PAYLOAD_VERSION: u32 = 11;
 const MIN_SUPPORTED_PAYLOAD_VERSION: u32 = 4;
 const V5_PAYLOAD_VERSION: u32 = 5;
 const V6_PAYLOAD_VERSION: u32 = 6;
 const V7_PAYLOAD_VERSION: u32 = 7;
 const V8_PAYLOAD_VERSION: u32 = 8;
 const V9_PAYLOAD_VERSION: u32 = 9;
+const V10_PAYLOAD_VERSION: u32 = 10;
+const V11_PAYLOAD_VERSION: u32 = 11;
 const MAX_ROUTING_CARDS: usize = 1000;
 const AAD: &[u8] = b"ocg-manager-account-backup:v1:argon2id-m65536-t3-p1:aes-256-gcm";
 const ARGON_MEMORY_KIB: u32 = 64 * 1024;
@@ -1446,7 +1449,7 @@ fn validate_payload(payload: PortablePayload) -> Result<ValidatedMigration, Tran
                 .to_string(),
         ));
     }
-    if payload.version < 10
+    if payload.version < V10_PAYLOAD_VERSION
         && payload
             .credentials
             .iter()
@@ -1454,6 +1457,16 @@ fn validate_payload(payload: PortablePayload) -> Result<ValidatedMigration, Tran
     {
         return Err(TransferError::Invalid(
             "personal credit meters require a V10 backup".to_string(),
+        ));
+    }
+    if payload.version < V11_PAYLOAD_VERSION
+        && payload
+            .destinations
+            .iter()
+            .any(|destination| !destination.protocol_routes.is_empty())
+    {
+        return Err(TransferError::Invalid(
+            "protocol routes require a V11 backup".to_string(),
         ));
     }
     if payload.exported_at.chars().count() > 64

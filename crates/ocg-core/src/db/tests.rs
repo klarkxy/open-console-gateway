@@ -366,7 +366,10 @@ fn v41_model_preferences_migrate_and_survive_reopen_without_enabling_models() {
                 UpstreamProtocolKind::ChatCompletions,
                 ProtocolOverrideState::ForceOn
             )],
-            &[("MiniMax-M3".into(), UpstreamProtocolKind::Responses)],
+            &[
+                ("MiniMax-M3".into(), UpstreamProtocolKind::ChatCompletions),
+                ("MiniMax-M3".into(), UpstreamProtocolKind::ChatCompletions),
+            ],
             now
         )
         .is_err()
@@ -391,6 +394,159 @@ fn v41_model_preferences_migrate_and_survive_reopen_without_enabling_models() {
         ProtocolOverrideState::ForceOff
     );
     drop(reopened);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn authorized_builtin_protocol_edit_grants_only_selected_credentials_atomically() {
+    use ocg_domain::connection::{
+        EndpointOperation, LegacyConnectionKind, connection_id_for_legacy, endpoint_id_for,
+    };
+    use ocg_domain::credential::credential_id_for_legacy_account;
+
+    let dir = temp_data_dir("authorized-protocol-grants");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let mut goat_a = account("authorized-goat-a");
+    goat_a.provider_id = COMMAND_CODE_PROVIDER_ID.into();
+    goat_a.key_cipher = fixture_account_key_cipher();
+    let mut goat_b = account("authorized-goat-b");
+    goat_b.provider_id = COMMAND_CODE_PROVIDER_ID.into();
+    goat_b.key_cipher = fixture_account_key_cipher();
+    let mut foreign = account("authorized-foreign");
+    foreign.provider_id = OPENCODE_PROVIDER_ID.into();
+    foreign.key_cipher = fixture_account_key_cipher();
+    db.create_account(&goat_a).unwrap();
+    db.create_account(&goat_b).unwrap();
+    db.create_account(&foreign).unwrap();
+
+    let goat_a_id = credential_id_for_legacy_account(&goat_a.id).to_string();
+    let goat_b_id = credential_id_for_legacy_account(&goat_b.id).to_string();
+    let foreign_id = credential_id_for_legacy_account(&foreign.id).to_string();
+    let goat_connection = connection_id_for_legacy(
+        LegacyConnectionKind::BuiltinProvider,
+        COMMAND_CODE_PROVIDER_ID,
+    );
+    let responses_endpoint =
+        endpoint_id_for(&goat_connection, EndpointOperation::ResponseCreate).to_string();
+    for credential_id in [&goat_a_id, &goat_b_id] {
+        db.conn
+            .execute(
+                "DELETE FROM credential_grants WHERE credential_id = ?1 AND kind = 'endpoint_id' AND value = ?2",
+                params![credential_id, responses_endpoint],
+            )
+            .unwrap();
+    }
+    fn grants_for(db: &Database, credential_id: &str) -> Vec<(String, String)> {
+        db.conn
+            .prepare(
+                "SELECT kind, value FROM credential_grants WHERE credential_id = ?1 ORDER BY kind, value",
+            )
+            .unwrap()
+            .query_map([credential_id], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    }
+    let before_a = grants_for(&db, &goat_a_id);
+    let before_b = grants_for(&db, &goat_b_id);
+    let before_foreign = grants_for(&db, &foreign_id);
+    assert!(
+        !before_a
+            .iter()
+            .any(|(_, value)| value == &responses_endpoint)
+    );
+    assert!(
+        !before_b
+            .iter()
+            .any(|(_, value)| value == &responses_endpoint)
+    );
+
+    let scope = ContractScope::provider(COMMAND_CODE_PROVIDER_ID);
+    let rows = [(
+        COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM.into(),
+        UpstreamProtocolKind::Responses,
+        ProtocolOverrideState::ForceOn,
+    )];
+    let now = Utc::now();
+    db.set_model_protocol_settings(&scope, &rows, &[], now)
+        .unwrap();
+    assert_eq!(grants_for(&db, &goat_a_id), before_a);
+    assert_eq!(grants_for(&db, &goat_b_id), before_b);
+
+    db.set_model_protocol_settings_authorized(
+        &scope,
+        &rows,
+        &[],
+        now,
+        std::slice::from_ref(&goat_a_id),
+    )
+    .unwrap();
+    let after_a = grants_for(&db, &goat_a_id);
+    assert!(
+        after_a
+            .iter()
+            .any(|(kind, value)| kind == "endpoint_id" && value == &responses_endpoint)
+    );
+    assert_eq!(
+        after_a
+            .iter()
+            .filter(|(_, value)| value != &responses_endpoint)
+            .cloned()
+            .collect::<Vec<_>>(),
+        before_a
+    );
+    assert_eq!(grants_for(&db, &goat_b_id), before_b);
+    assert_eq!(grants_for(&db, &foreign_id), before_foreign);
+
+    let contract_before_foreign = db.load_persisted_contracts().unwrap();
+    let grants_before_foreign = [
+        grants_for(&db, &goat_a_id),
+        grants_for(&db, &goat_b_id),
+        grants_for(&db, &foreign_id),
+    ];
+    assert!(
+        db.set_model_protocol_settings_authorized(
+            &scope,
+            &rows,
+            &[],
+            now,
+            &[goat_a_id.clone(), foreign_id.clone()],
+        )
+        .is_err()
+    );
+    assert_eq!(
+        db.load_persisted_contracts().unwrap(),
+        contract_before_foreign
+    );
+    assert_eq!(grants_for(&db, &goat_a_id), grants_before_foreign[0]);
+    assert_eq!(grants_for(&db, &goat_b_id), grants_before_foreign[1]);
+    assert_eq!(grants_for(&db, &foreign_id), grants_before_foreign[2]);
+
+    let contract_before_duplicate = db.load_persisted_contracts().unwrap();
+    let grants_before_duplicate = [
+        grants_for(&db, &goat_a_id),
+        grants_for(&db, &goat_b_id),
+        grants_for(&db, &foreign_id),
+    ];
+    assert!(
+        db.set_model_protocol_settings_authorized(
+            &scope,
+            &rows,
+            &[],
+            now,
+            &[goat_a_id.clone(), goat_a_id.clone()],
+        )
+        .is_err()
+    );
+    assert_eq!(
+        db.load_persisted_contracts().unwrap(),
+        contract_before_duplicate
+    );
+    assert_eq!(grants_for(&db, &goat_a_id), grants_before_duplicate[0]);
+    assert_eq!(grants_for(&db, &goat_b_id), grants_before_duplicate[1]);
+    assert_eq!(grants_for(&db, &foreign_id), grants_before_duplicate[2]);
+
+    drop(db);
     fs::remove_dir_all(dir).unwrap();
 }
 
@@ -12977,9 +13133,17 @@ fn model_protocol_override_upsert_and_auto_delete_round_trip() {
     fs::remove_dir_all(dir).unwrap();
 }
 
+fn effective_from_db(db: &Database) -> crate::provider_contracts::EffectiveContractSet {
+    crate::provider_contracts::build_effective_contracts(
+        &db.zen_free_model_catalog().unwrap().unwrap_or_default(),
+        &[],
+        db.load_persisted_contracts().unwrap(),
+    )
+}
+
 #[test]
-fn catalog_refresh_defaults_only_new_models_off_and_preserves_existing_choices() {
-    let dir = temp_data_dir("catalog-refresh-default-off");
+fn catalog_refresh_preserves_settings_and_does_not_force_off_new_models() {
+    let dir = temp_data_dir("catalog-refresh-preserving-settings");
     let db = Database::open(dir.clone()).unwrap();
     let now = Utc::now();
     let scope = ContractScope::provider(OPENCODE_PROVIDER_ID);
@@ -13002,6 +13166,11 @@ fn catalog_refresh_defaults_only_new_models_off_and_preserves_existing_choices()
                 ProtocolOverrideState::ForceOn,
             ),
             (
+                "glm-5.2".into(),
+                UpstreamProtocolKind::ChatCompletions,
+                ProtocolOverrideState::ForceOff,
+            ),
+            (
                 "future-go-model".into(),
                 UpstreamProtocolKind::Messages,
                 ProtocolOverrideState::ForceOn,
@@ -13013,13 +13182,13 @@ fn catalog_refresh_defaults_only_new_models_off_and_preserves_existing_choices()
     let revision_before = db.load_persisted_scope(&scope).unwrap().unwrap().revision;
 
     let refreshed = db
-        .refresh_contract_catalog_with_default_off(
+        .refresh_contract_catalog_preserving_settings(
             &scope,
-            &["grok-4.5".into()],
             &[
                 "grok-4.5".into(),
                 "glm-5.2".into(),
                 "future-go-model".into(),
+                "omen-alpha".into(),
             ],
             now,
             crate::provider_contracts::CATALOG_SOURCE_OPENCODE_MODELS,
@@ -13030,41 +13199,174 @@ fn catalog_refresh_defaults_only_new_models_off_and_preserves_existing_choices()
     assert_eq!(refreshed.revision, revision_before + 1);
     assert_eq!(
         refreshed.catalog_models,
-        vec!["grok-4.5", "glm-5.2", "future-go-model"]
+        vec!["grok-4.5", "glm-5.2", "future-go-model", "omen-alpha"]
     );
     let persisted = db.load_persisted_contracts().unwrap();
     let overrides = persisted.overrides.get(&scope).unwrap();
     assert!(overrides.iter().any(|row| row.model_id == "grok-4.5"
         && row.protocol == UpstreamProtocolKind::Responses
         && row.state == ProtocolOverrideState::ForceOn));
-    assert_eq!(
-        overrides
-            .iter()
-            .filter(|row| row.model_id == "grok-4.5")
-            .count(),
-        1,
-        "retained models keep their existing protocol choices"
-    );
-    for protocol in [
-        UpstreamProtocolKind::ChatCompletions,
-        UpstreamProtocolKind::Responses,
-        UpstreamProtocolKind::Messages,
-    ] {
-        assert!(overrides.iter().any(|row| row.model_id == "glm-5.2"
-            && row.protocol == protocol
-            && row.state == ProtocolOverrideState::ForceOff));
-    }
-    for protocol in [
-        UpstreamProtocolKind::ChatCompletions,
-        UpstreamProtocolKind::Responses,
-    ] {
-        assert!(overrides.iter().any(|row| row.model_id == "future-go-model"
-            && row.protocol == protocol
-            && row.state == ProtocolOverrideState::ForceOff));
-    }
+    assert!(overrides.iter().any(|row| row.model_id == "glm-5.2"
+        && row.protocol == UpstreamProtocolKind::ChatCompletions
+        && row.state == ProtocolOverrideState::ForceOff));
     assert!(overrides.iter().any(|row| row.model_id == "future-go-model"
         && row.protocol == UpstreamProtocolKind::Messages
         && row.state == ProtocolOverrideState::ForceOn));
+    assert_eq!(overrides.len(), 3, "refresh must not invent force_off rows");
+    assert!(
+        overrides.iter().all(|row| row.model_id != "omen-alpha"),
+        "unknown new models must not receive guessed overrides: {overrides:?}"
+    );
+
+    let go = effective_from_db(&db)
+        .providers
+        .remove(OPENCODE_PROVIDER_ID)
+        .unwrap();
+    assert!(
+        go.model("glm-5.2")
+            .is_some_and(|model| !model.protocols["chat_completions"].enabled)
+    );
+    assert!(
+        go.model("omen-alpha")
+            .is_some_and(|model| model.enabled_protocols().is_empty() && !model.routable)
+    );
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn catalog_refresh_enables_new_models_with_official_or_known_baseline() {
+    let dir = temp_data_dir("catalog-refresh-official-on");
+    let db = Database::open(dir.clone()).unwrap();
+    let now = Utc::now();
+    let go_scope = ContractScope::provider(OPENCODE_PROVIDER_ID);
+    let goat_scope = ContractScope::provider(COMMAND_CODE_PROVIDER_ID);
+    let extra = "vendor/future-command-model";
+
+    db.refresh_contract_catalog_preserving_settings(
+        &go_scope,
+        &["glm-5.2".into(), "future-go-model".into()],
+        now,
+        crate::provider_contracts::CATALOG_SOURCE_OPENCODE_MODELS,
+        "https://opencode.ai/zen/go/v1/models",
+    )
+    .unwrap();
+    db.apply_official_protocol_baseline(
+        &go_scope,
+        &["glm-5.2".into(), "future-go-model".into()],
+        &crate::official_protocols::OfficialProtocolBaseline::mapped([(
+            "future-go-model",
+            UpstreamProtocolKind::Responses,
+        )]),
+        now,
+    )
+    .unwrap();
+
+    db.refresh_contract_catalog_preserving_settings(
+        &goat_scope,
+        &[extra.into()],
+        now,
+        CATALOG_SOURCE_COMMAND_CODE_MODELS,
+        COMMAND_CODE_GOAT_BASE_URL,
+    )
+    .unwrap();
+    db.apply_official_protocol_baseline(
+        &goat_scope,
+        &[extra.into()],
+        &crate::official_protocols::OfficialProtocolBaseline::mapped([(
+            extra,
+            UpstreamProtocolKind::ChatCompletions,
+        )]),
+        now,
+    )
+    .unwrap();
+
+    let set = effective_from_db(&db);
+    let go = set.providers.get(OPENCODE_PROVIDER_ID).unwrap();
+    let glm = go.model("glm-5.2").unwrap();
+    assert!(glm.protocols["chat_completions"].enabled);
+    assert_eq!(
+        glm.protocols["chat_completions"].r#override,
+        ProtocolOverrideState::Auto
+    );
+    let future = go.model("future-go-model").unwrap();
+    assert!(future.protocols["responses"].enabled);
+    assert_eq!(
+        future.protocols["responses"].r#override,
+        ProtocolOverrideState::Auto
+    );
+    assert!(
+        future
+            .protocols
+            .get("chat_completions")
+            .is_none_or(|row| !row.enabled && !row.available)
+    );
+    let goat = set.providers.get(COMMAND_CODE_PROVIDER_ID).unwrap();
+    let extra_model = goat.model(extra).unwrap();
+    assert!(extra_model.protocols["chat_completions"].enabled);
+    assert_eq!(
+        extra_model.protocols["chat_completions"].r#override,
+        ProtocolOverrideState::Auto
+    );
+
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn unavailable_official_baseline_does_not_drop_catalog_or_overrides() {
+    let dir = temp_data_dir("catalog-refresh-unavailable-baseline");
+    let db = Database::open(dir.clone()).unwrap();
+    let now = Utc::now();
+    let scope = ContractScope::provider(OPENCODE_PROVIDER_ID);
+    db.set_contract_catalog(
+        &scope,
+        &["grok-4.5".into()],
+        Some(now),
+        crate::provider_contracts::CATALOG_SOURCE_OPENCODE_MODELS,
+        "https://opencode.ai/zen/go/v1/models",
+        now,
+    )
+    .unwrap();
+    db.set_model_protocol_overrides(
+        &scope,
+        &[(
+            "grok-4.5".into(),
+            UpstreamProtocolKind::Responses,
+            ProtocolOverrideState::ForceOff,
+        )],
+        now,
+    )
+    .unwrap();
+    let before = db.load_persisted_contracts().unwrap();
+
+    db.apply_official_protocol_baseline(
+        &scope,
+        &["grok-4.5".into()],
+        &crate::official_protocols::OfficialProtocolBaseline::Unavailable,
+        now,
+    )
+    .unwrap();
+
+    let after = db.load_persisted_contracts().unwrap();
+    assert_eq!(
+        after.scopes.get(&scope).unwrap().catalog_models,
+        before.scopes.get(&scope).unwrap().catalog_models
+    );
+    assert_eq!(after.overrides.get(&scope), before.overrides.get(&scope));
+    assert_eq!(after.evidence.get(&scope), before.evidence.get(&scope));
+    let grok = effective_from_db(&db)
+        .providers
+        .remove(OPENCODE_PROVIDER_ID)
+        .unwrap()
+        .model("grok-4.5")
+        .unwrap()
+        .clone();
+    assert!(!grok.protocols["responses"].enabled);
+    assert_eq!(
+        grok.protocols["responses"].r#override,
+        ProtocolOverrideState::ForceOff
+    );
 
     drop(db);
     fs::remove_dir_all(dir).unwrap();
@@ -13145,7 +13447,7 @@ fn zen_catalog_remove_last_and_all_stay_empty_after_reopen() {
 
     {
         let db = Database::open(dir.clone()).unwrap();
-        db.set_zen_free_model_catalog_with_default_off(&snapshot, &[])
+        db.set_zen_free_model_catalog_preserving_settings(&snapshot)
             .unwrap();
         db.remove_contract_catalog_models(&scope, &["second-free".into()], now)
             .unwrap();
@@ -13200,7 +13502,7 @@ fn zen_catalog_remove_all_at_once_stays_empty() {
         source_url: crate::kernel::zen::ZEN_MODELS_SOURCE_URL.into(),
     };
     let db = Database::open(dir.clone()).unwrap();
-    db.set_zen_free_model_catalog_with_default_off(&snapshot, &[])
+    db.set_zen_free_model_catalog_preserving_settings(&snapshot)
         .unwrap();
     db.remove_contract_catalog_models(
         &scope,
@@ -13226,14 +13528,11 @@ fn zen_official_static_preference_saves_responses_and_messages_not_probe_rows() 
     let now = Utc::now();
     let scope = ContractScope::provider(OPENCODE_ZEN_FREE_PROVIDER_ID);
     let db = Database::open(dir.clone()).unwrap();
-    db.set_zen_free_model_catalog_with_default_off(
-        &crate::kernel::zen::ZenFreeModelCatalog {
-            models: vec!["review-model-free".into(), "messages-model-free".into()],
-            refreshed_at: Some(now),
-            source_url: crate::kernel::zen::ZEN_MODELS_SOURCE_URL.into(),
-        },
-        &[],
-    )
+    db.set_zen_free_model_catalog_preserving_settings(&crate::kernel::zen::ZenFreeModelCatalog {
+        models: vec!["review-model-free".into(), "messages-model-free".into()],
+        refreshed_at: Some(now),
+        source_url: crate::kernel::zen::ZEN_MODELS_SOURCE_URL.into(),
+    })
     .unwrap();
     db.apply_official_protocol_baseline(
         &scope,
@@ -13324,18 +13623,16 @@ fn command_catalog_reappearing_preset_returns_to_auto_enabled() {
         now,
     )
     .unwrap();
-    db.refresh_contract_catalog_with_default_off(
+    db.refresh_contract_catalog_preserving_settings(
         &scope,
-        std::slice::from_ref(&preset),
         std::slice::from_ref(&extra),
         now,
         CATALOG_SOURCE_COMMAND_CODE_MODELS,
         COMMAND_CODE_GOAT_BASE_URL,
     )
     .unwrap();
-    db.refresh_contract_catalog_with_default_off(
+    db.refresh_contract_catalog_preserving_settings(
         &scope,
-        std::slice::from_ref(&extra),
         &[extra.clone(), preset.clone()],
         now,
         CATALOG_SOURCE_COMMAND_CODE_MODELS,
@@ -13344,15 +13641,23 @@ fn command_catalog_reappearing_preset_returns_to_auto_enabled() {
     .unwrap();
 
     let persisted = db.load_persisted_contracts().unwrap();
-    let overrides = persisted.overrides.get(&scope).unwrap();
+    let overrides = persisted.overrides.get(&scope);
     assert!(
-        overrides.iter().all(|row| row.model_id != preset),
-        "a GOAT preset must remain Auto when it reappears: {overrides:?}"
+        overrides.is_none_or(|rows| rows.is_empty()),
+        "catalog refresh must not invent GOAT overrides: {overrides:?}"
+    );
+    let goat = effective_from_db(&db)
+        .providers
+        .remove(COMMAND_CODE_PROVIDER_ID)
+        .unwrap();
+    assert!(
+        goat.model(&preset)
+            .is_some_and(crate::provider_contracts::EffectiveModelContract::has_enabled_protocol)
     );
     assert!(
-        overrides
-            .iter()
-            .any(|row| { row.model_id == extra && row.state == ProtocolOverrideState::ForceOff })
+        goat.model(&extra)
+            .is_some_and(|model| !model.has_enabled_protocol()),
+        "GOAT extras stay off until official-docs Static evidence exists"
     );
 
     drop(db);
@@ -13800,6 +14105,373 @@ fn onboarding_operation(
         payload_digest: digest.to_string(),
         result_json: result_json.to_string(),
     }
+}
+
+#[test]
+fn onboarding_resume_route_changes_remap_existing_key_grants_without_authorizing_new_routes() {
+    use ocg_domain::connection::{
+        EndpointOperation, LegacyConnectionKind, connection_id_for_legacy,
+    };
+    use ocg_domain::credential::{RouteSpec, assigned_endpoints_for_routes, remap_route_grant_ids};
+    use ocg_domain::destination::{HttpProtocolRoute, Protocol};
+
+    let dir = temp_data_dir("onboard-resume-route-remap");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let provider_id = uuid::Uuid::new_v4().to_string();
+    let old_chat = "https://resume-old.example/v1/chat/completions";
+    let old_messages = "https://resume-old.example/v1/messages";
+    let old_responses = "https://resume-other.example/v1/responses";
+    let new_responses = "https://resume-new.example/v1/responses";
+    let mut initial = onboarding_runtime(&provider_id, "Resume Routes");
+    initial.endpoint_url = old_chat.into();
+    initial.upstream_protocol = UpstreamProtocolKind::ChatCompletions;
+    initial.auth_kind = DynamicAuthKind::Bearer;
+    let old_routes = vec![
+        HttpProtocolRoute {
+            protocol: Protocol::ChatCompletions,
+            endpoint_url: old_chat.into(),
+            auth_scheme: AuthScheme::Bearer,
+        },
+        HttpProtocolRoute {
+            protocol: Protocol::Messages,
+            endpoint_url: old_messages.into(),
+            auth_scheme: AuthScheme::Bearer,
+        },
+        HttpProtocolRoute {
+            protocol: Protocol::Responses,
+            endpoint_url: old_responses.into(),
+            auth_scheme: AuthScheme::Bearer,
+        },
+    ];
+    let mut first = account("resume-route-key");
+    first.provider_id = provider_id.clone();
+    first.key_cipher = fixture_account_key_cipher();
+    db.commit_onboarding_new_with_routes(
+        &initial,
+        Some(&first),
+        true,
+        &onboarding_operation(
+            &uuid::Uuid::new_v4().to_string(),
+            "resume-route-draft",
+            "{}",
+        ),
+        Some(&old_routes),
+    )
+    .unwrap();
+    let destination_id = ocg_domain::destination::destination_id_for_dynamic(&provider_id);
+    let mut draft_catalog =
+        destination_store::load_destination_catalog(&db.conn, &destination_id).unwrap();
+    draft_catalog[0].protocols = vec![Protocol::Messages];
+    draft_catalog[0].preferred = Some(Protocol::Messages);
+    draft_catalog[0].enabled = false;
+    destination_store::replace_destination_catalog(&db.conn, &destination_id, &draft_catalog)
+        .unwrap();
+    let connection = connection_id_for_legacy(LegacyConnectionKind::DynamicProvider, &provider_id);
+    let to_spec = |route: &HttpProtocolRoute| RouteSpec {
+        operation: EndpointOperation::from(route.protocol),
+        url: Some(route.endpoint_url.clone()),
+    };
+    let old_specs = old_routes.iter().map(to_spec).collect::<Vec<_>>();
+    let before = db
+        .list_identity_model()
+        .unwrap()
+        .accounts
+        .into_iter()
+        .find(|row| row.account.id == first.id)
+        .unwrap();
+    let expected_old_grants = before.allowed_endpoint_ids.clone();
+    let mut updated = initial.clone();
+    updated.endpoint_url = new_responses.into();
+    updated.upstream_protocol = UpstreamProtocolKind::Responses;
+    updated.auth_kind = DynamicAuthKind::XApiKey;
+    let new_routes = vec![
+        HttpProtocolRoute {
+            protocol: Protocol::Responses,
+            endpoint_url: new_responses.into(),
+            auth_scheme: AuthScheme::XApiKey,
+        },
+        HttpProtocolRoute {
+            protocol: Protocol::Messages,
+            endpoint_url: old_messages.into(),
+            auth_scheme: AuthScheme::XApiKey,
+        },
+        HttpProtocolRoute {
+            protocol: Protocol::ChatCompletions,
+            endpoint_url: old_chat.into(),
+            auth_scheme: AuthScheme::XApiKey,
+        },
+    ];
+    let new_specs = new_routes.iter().map(to_spec).collect::<Vec<_>>();
+    let expected = remap_route_grant_ids(&connection, &old_specs, &new_specs, &expected_old_grants);
+    db.commit_onboarding_resume_with_routes(
+        &updated,
+        false,
+        None,
+        None,
+        None,
+        None,
+        None,
+        &onboarding_operation(
+            &uuid::Uuid::new_v4().to_string(),
+            "resume-route-complete",
+            "{}",
+        ),
+        Some(&new_routes),
+    )
+    .unwrap();
+    let persisted = crate::destination_projection::load_persisted(&db).unwrap();
+    let destination = persisted
+        .destinations
+        .iter()
+        .find(|destination| destination.id == destination_id)
+        .unwrap();
+    assert_eq!(destination.protocol_routes, new_routes);
+    assert_eq!(destination.catalog[0].protocols, vec![Protocol::Messages]);
+    assert_eq!(destination.catalog[0].preferred, Some(Protocol::Messages));
+    assert!(!destination.catalog[0].enabled);
+    let after = persisted
+        .credentials
+        .iter()
+        .find(|credential| credential.legacy_account_id == first.id)
+        .unwrap();
+    assert_eq!(after.grants.allowed_endpoint_ids, expected);
+    assert!(
+        !after
+            .grants
+            .allowed_endpoint_ids
+            .iter()
+            .any(|id| id == &assigned_endpoints_for_routes(&connection, &new_specs)[0].id),
+        "the new first Responses route requires explicit authorization"
+    );
+    assert_eq!(
+        after.grants.allowed_origins,
+        vec!["https://resume-old.example"]
+    );
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn catalog_refresh_preserves_disabled_models_when_baseline_adds_responses() {
+    let dir = temp_data_dir("catalog-refresh-disabled-baseline");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let now = Utc::now();
+    for (provider_id, old_model, new_model, source, source_url) in [
+        (
+            OPENCODE_PROVIDER_ID,
+            "grok-4.5",
+            "new-go-model",
+            crate::provider_contracts::CATALOG_SOURCE_OPENCODE_MODELS,
+            "https://opencode.ai/zen/go/v1/models",
+        ),
+        (
+            COMMAND_CODE_PROVIDER_ID,
+            COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
+            "vendor/new-command-model",
+            CATALOG_SOURCE_COMMAND_CODE_MODELS,
+            COMMAND_CODE_GOAT_BASE_URL,
+        ),
+    ] {
+        let scope = ContractScope::provider(provider_id);
+        db.set_contract_catalog(
+            &scope,
+            &[old_model.into()],
+            Some(now),
+            source,
+            source_url,
+            now,
+        )
+        .unwrap();
+        db.upsert_model_protocol(&PersistedModelProtocol {
+            scope: scope.clone(),
+            model_id: old_model.into(),
+            protocol: UpstreamProtocolKind::ChatCompletions,
+            source: ContractEvidenceSource::Static,
+            verified_at: Some(now),
+            observed_at: Some(now),
+            last_probe_result: Some(ProbeResultKind::Success),
+            last_probe_at: Some(now),
+            last_probe_error: None,
+        })
+        .unwrap();
+        db.set_model_protocol_settings(
+            &scope,
+            &[(
+                old_model.into(),
+                UpstreamProtocolKind::ChatCompletions,
+                ProtocolOverrideState::ForceOff,
+            )],
+            &[(old_model.into(), UpstreamProtocolKind::ChatCompletions)],
+            now,
+        )
+        .unwrap();
+        let before_destination = crate::destination_projection::load_persisted(&db)
+            .unwrap()
+            .destinations
+            .into_iter()
+            .find(|destination| {
+                destination.id == ocg_domain::destination::destination_id_for_builtin(provider_id)
+            })
+            .unwrap();
+        assert!(
+            !before_destination
+                .catalog
+                .iter()
+                .find(|model| model.public_model.eq_ignore_ascii_case(old_model))
+                .unwrap()
+                .enabled
+        );
+        assert!(
+            !db.load_persisted_contracts().unwrap().overrides[&scope]
+                .iter()
+                .any(|row| row.protocol == UpstreamProtocolKind::Responses),
+            "new Responses protocol must start Auto so this test detects accidental reopening"
+        );
+        let before_evidence = db
+            .load_persisted_contracts()
+            .unwrap()
+            .evidence
+            .get(&scope)
+            .cloned()
+            .unwrap();
+        db.refresh_contract_catalog_preserving_settings(
+            &scope,
+            &[old_model.into(), new_model.into()],
+            now,
+            source,
+            source_url,
+        )
+        .unwrap();
+        db.apply_official_protocol_baseline(
+            &scope,
+            &[old_model.into(), new_model.into()],
+            &crate::official_protocols::OfficialProtocolBaseline::mapped_protocols([
+                (
+                    old_model,
+                    vec![
+                        UpstreamProtocolKind::ChatCompletions,
+                        UpstreamProtocolKind::Responses,
+                    ],
+                ),
+                (new_model, vec![UpstreamProtocolKind::Responses]),
+            ]),
+            now,
+        )
+        .unwrap();
+        let persisted = db.load_persisted_contracts().unwrap();
+        assert!(
+            persisted.preferences[&scope]
+                .iter()
+                .any(|(model, protocol)| {
+                    model == old_model && *protocol == UpstreamProtocolKind::ChatCompletions
+                })
+        );
+        assert!(before_evidence.iter().all(|before| {
+            persisted.evidence[&scope]
+                .iter()
+                .any(|after| after == before)
+        }));
+        let effective = effective_from_db(&db);
+        let contract = effective.providers.get(provider_id).unwrap();
+        let old = contract.model(old_model).unwrap();
+        let new = contract.model(new_model).unwrap();
+        assert!(
+            !old.has_enabled_protocol(),
+            "old disabled model was resurrected"
+        );
+        assert!(new.protocols["responses"].enabled);
+        let destination_id = ocg_domain::destination::destination_id_for_builtin(provider_id);
+        let destination = crate::destination_projection::load_persisted(&db)
+            .unwrap()
+            .destinations
+            .into_iter()
+            .find(|destination| destination.id == destination_id)
+            .unwrap();
+        assert!(
+            !destination
+                .catalog
+                .iter()
+                .find(|model| model.public_model.eq_ignore_ascii_case(old_model))
+                .unwrap()
+                .enabled
+        );
+        assert!(
+            destination
+                .catalog
+                .iter()
+                .find(|model| model.public_model.eq_ignore_ascii_case(new_model))
+                .unwrap()
+                .enabled
+        );
+    }
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn raw_disabled_unknown_model_stays_off_when_first_official_protocol_arrives() {
+    let dir = temp_data_dir("raw-disabled-unknown-model");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let scope = ContractScope::provider(COMMAND_CODE_PROVIDER_ID);
+    let model = "vendor/awaiting-official-evidence";
+    let now = Utc::now();
+    db.set_contract_catalog(
+        &scope,
+        &[model.into()],
+        Some(now),
+        CATALOG_SOURCE_COMMAND_CODE_MODELS,
+        COMMAND_CODE_GOAT_BASE_URL,
+        now,
+    )
+    .unwrap();
+    db.set_model_protocol_overrides(
+        &scope,
+        &[(
+            model.into(),
+            UpstreamProtocolKind::ChatCompletions,
+            ProtocolOverrideState::ForceOff,
+        )],
+        now,
+    )
+    .unwrap();
+    assert!(
+        !effective_from_db(&db)
+            .scope(&scope)
+            .unwrap()
+            .model(model)
+            .unwrap()
+            .has_enabled_protocol()
+    );
+    db.refresh_contract_catalog_preserving_settings(
+        &scope,
+        &[model.into()],
+        now,
+        CATALOG_SOURCE_COMMAND_CODE_MODELS,
+        COMMAND_CODE_GOAT_BASE_URL,
+    )
+    .unwrap();
+    db.apply_official_protocol_baseline(
+        &scope,
+        &[model.into()],
+        &crate::official_protocols::OfficialProtocolBaseline::mapped([(
+            model,
+            UpstreamProtocolKind::Responses,
+        )]),
+        now,
+    )
+    .unwrap();
+    assert!(
+        !effective_from_db(&db)
+            .scope(&scope)
+            .unwrap()
+            .model(model)
+            .unwrap()
+            .has_enabled_protocol()
+    );
+    let id = ocg_domain::destination::destination_id_for_builtin(COMMAND_CODE_PROVIDER_ID);
+    assert!(!destination_store::load_destination_catalog(&db.conn, &id).unwrap()[0].enabled);
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -14393,7 +15065,7 @@ fn ollama_month_window_is_half_open_and_exposes_overage() {
 
 #[test]
 fn imported_http_controls_survive_fresh_merge_and_failed_preflight() {
-    use ocg_domain::destination::{CatalogModel, ModelResolution};
+    use ocg_domain::destination::{CatalogModel, HttpProtocolRoute, ModelResolution, Protocol};
     let dir = temp_data_dir("http-control-import");
     let db = open_with_host_cipher(dir.clone()).unwrap();
     let legacy_id = "00000000-0000-4000-8000-00000000c099";
@@ -14401,8 +15073,8 @@ fn imported_http_controls_survive_fresh_merge_and_failed_preflight() {
     let model = CatalogModel {
         public_model: "public-model".into(),
         upstream_model: "upstream-model".into(),
-        protocols: Vec::new(),
-        preferred: None,
+        protocols: vec![Protocol::Messages],
+        preferred: Some(Protocol::Messages),
         enabled: false,
         upstream_override: None,
     };
@@ -14429,9 +15101,29 @@ fn imported_http_controls_survive_fresh_merge_and_failed_preflight() {
         .find(|d| d.id == id)
         .unwrap();
     destination.enabled = false;
+    destination.protocols = vec![Protocol::ChatCompletions, Protocol::Messages];
+    destination.protocol_routes = vec![
+        HttpProtocolRoute {
+            protocol: Protocol::ChatCompletions,
+            endpoint_url: "https://custom.example/v1/chat/completions".into(),
+            auth_scheme: AuthScheme::None,
+        },
+        HttpProtocolRoute {
+            protocol: Protocol::Messages,
+            endpoint_url: "https://custom.example/v1/messages".into(),
+            auth_scheme: AuthScheme::None,
+        },
+    ];
     destination.catalog = vec![model.clone()];
     destination.model_resolution = ModelResolution::PublicOnly;
+    let expected_routes = destination.protocol_routes.clone();
     record.destination_controls = vec![destination];
+    db.conn
+        .execute(
+            "DELETE FROM destination_models WHERE destination_id = ?1",
+            [&id],
+        )
+        .unwrap();
     db.conn
         .execute("DELETE FROM destinations WHERE id = ?1", [&id])
         .unwrap();
@@ -14443,6 +15135,25 @@ fn imported_http_controls_survive_fresh_merge_and_failed_preflight() {
             .unwrap();
         assert!(!d.enabled);
         assert_eq!(d.auth_scheme, AuthScheme::None);
+        assert_eq!(
+            d.protocols,
+            vec![Protocol::ChatCompletions, Protocol::Messages]
+        );
+        assert_eq!(
+            d.protocol_routes,
+            vec![
+                HttpProtocolRoute {
+                    protocol: Protocol::ChatCompletions,
+                    endpoint_url: "https://custom.example/v1/chat/completions".into(),
+                    auth_scheme: AuthScheme::None,
+                },
+                HttpProtocolRoute {
+                    protocol: Protocol::Messages,
+                    endpoint_url: "https://custom.example/v1/messages".into(),
+                    auth_scheme: AuthScheme::None,
+                },
+            ]
+        );
         assert_eq!(d.catalog, vec![model.clone()]);
         Ok(())
     })
@@ -14466,6 +15177,12 @@ fn imported_http_controls_survive_fresh_merge_and_failed_preflight() {
         .execute("UPDATE destinations SET enabled = 1 WHERE id = ?1", [&id])
         .unwrap();
     let before = destination_store::load_destination_catalog(&db.conn, &id).unwrap();
+    let before_destination = crate::destination_projection::load_persisted(&db)
+        .unwrap()
+        .destinations
+        .into_iter()
+        .find(|d| d.id == id)
+        .unwrap();
     assert!(
         db.import_node_state(&record, |_| -> Result<()> {
             anyhow::bail!("preflight refused")
@@ -14476,11 +15193,32 @@ fn imported_http_controls_survive_fresh_merge_and_failed_preflight() {
         destination_store::load_destination_catalog(&db.conn, &id).unwrap(),
         before
     );
+    assert_eq!(
+        crate::destination_projection::load_persisted(&db)
+            .unwrap()
+            .destinations
+            .into_iter()
+            .find(|d| d.id == id)
+            .unwrap(),
+        before_destination
+    );
     db.import_node_state(&record, |_| Ok(())).unwrap();
     assert_eq!(
         destination_store::load_destination_catalog(&db.conn, &id).unwrap(),
-        vec![model, target_only]
+        vec![model.clone(), target_only.clone()]
     );
+    let restored = crate::destination_projection::load_persisted(&db)
+        .unwrap()
+        .destinations
+        .into_iter()
+        .find(|d| d.id == id)
+        .unwrap();
+    assert_eq!(
+        restored.protocols,
+        vec![Protocol::ChatCompletions, Protocol::Messages]
+    );
+    assert_eq!(restored.protocol_routes, expected_routes);
+    assert_eq!(restored.catalog, vec![model, target_only]);
     assert_eq!(
         db.conn
             .query_row(
@@ -14491,6 +15229,178 @@ fn imported_http_controls_survive_fresh_merge_and_failed_preflight() {
             .unwrap(),
         0
     );
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn imported_http_routes_remap_old_grants_by_operation_and_url_without_new_routes() {
+    use ocg_domain::connection::{
+        EndpointOperation, LegacyConnectionKind, connection_id_for_legacy,
+    };
+    use ocg_domain::credential::{RouteSpec, remap_route_grant_ids};
+    use ocg_domain::destination::{HttpProtocolRoute, Protocol};
+
+    let dir = temp_data_dir("import-http-grant-remap");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let provider_id = uuid::Uuid::new_v4().to_string();
+    let target_chat = "https://target.example/v1/chat/completions";
+    let target_messages = "https://target.example/v1/messages";
+    let target_responses = "https://target-other.example/v1/responses";
+    let source_responses = "https://source.example/v1/responses";
+    let mut runtime = onboarding_runtime(&provider_id, "Import Grant Remap");
+    runtime.endpoint_url = target_chat.into();
+    let target_routes = vec![
+        HttpProtocolRoute {
+            protocol: Protocol::ChatCompletions,
+            endpoint_url: target_chat.into(),
+            auth_scheme: AuthScheme::Bearer,
+        },
+        HttpProtocolRoute {
+            protocol: Protocol::Messages,
+            endpoint_url: target_messages.into(),
+            auth_scheme: AuthScheme::Bearer,
+        },
+        HttpProtocolRoute {
+            protocol: Protocol::Responses,
+            endpoint_url: target_responses.into(),
+            auth_scheme: AuthScheme::Bearer,
+        },
+    ];
+    let mut key = account("import-grant-key");
+    key.provider_id = provider_id.clone();
+    key.key_cipher = fixture_account_key_cipher();
+    db.commit_onboarding_new_with_routes(
+        &runtime,
+        Some(&key),
+        false,
+        &onboarding_operation(
+            &uuid::Uuid::new_v4().to_string(),
+            "import-grant-target",
+            "{}",
+        ),
+        Some(&target_routes),
+    )
+    .unwrap();
+    let mut source_key = account("import-source-key");
+    source_key.provider_id = provider_id.clone();
+    source_key.key_cipher = fixture_account_key_cipher();
+    db.create_account(&source_key).unwrap();
+    let destination_id = ocg_domain::destination::destination_id_for_dynamic(&provider_id);
+    let before = crate::destination_projection::load_persisted(&db).unwrap();
+    let before_destination = before
+        .destinations
+        .iter()
+        .find(|destination| destination.id == destination_id)
+        .unwrap()
+        .clone();
+    let before_key = before
+        .credentials
+        .iter()
+        .find(|credential| credential.legacy_account_id == key.id)
+        .unwrap()
+        .clone();
+    assert_eq!(before_key.grants.allowed_endpoint_ids.len(), 2);
+
+    let source_routes = vec![
+        HttpProtocolRoute {
+            protocol: Protocol::Responses,
+            endpoint_url: source_responses.into(),
+            auth_scheme: AuthScheme::Bearer,
+        },
+        HttpProtocolRoute {
+            protocol: Protocol::Messages,
+            endpoint_url: target_messages.into(),
+            auth_scheme: AuthScheme::Bearer,
+        },
+        HttpProtocolRoute {
+            protocol: Protocol::ChatCompletions,
+            endpoint_url: target_chat.into(),
+            auth_scheme: AuthScheme::Bearer,
+        },
+    ];
+    let mut source_destination = before_destination.clone();
+    source_destination.protocol_routes = source_routes.clone();
+    source_destination.protocols = source_routes.iter().map(|route| route.protocol).collect();
+    source_destination.base_url = Some(source_responses.into());
+    source_destination.catalog[0].protocols = vec![Protocol::Messages];
+    source_destination.catalog[0].preferred = Some(Protocol::Messages);
+    source_destination.catalog[0].enabled = false;
+    let mut source_import = source_key.clone();
+    source_import.key_cipher = fixture_account_key_cipher();
+    let mut record = node_import_record(
+        &db,
+        vec![AccountImportRecord {
+            account: source_import,
+            custom_config: None,
+            capabilities: Vec::new(),
+            verification_status: ConnectionVerificationStatus::NotRequired,
+            connection_verified_at: None,
+            ollama_billing_tier: None,
+        }],
+        Vec::new(),
+        Vec::new(),
+    );
+    record.destination_controls = vec![source_destination];
+    let mut source_snapshot = identity_snapshot_forcing_all(&db, &[source_key.id.as_str()]);
+    source_snapshot.accounts[0].allowed_endpoint_ids.clear();
+    source_snapshot.accounts[0].allowed_origins.clear();
+    record.identity_snapshot = Some(source_snapshot);
+
+    let connection = connection_id_for_legacy(LegacyConnectionKind::DynamicProvider, &provider_id);
+    let route_specs = |routes: &[HttpProtocolRoute]| {
+        routes
+            .iter()
+            .map(|route| RouteSpec {
+                operation: EndpointOperation::from(route.protocol),
+                url: Some(route.endpoint_url.clone()),
+            })
+            .collect::<Vec<_>>()
+    };
+    let expected_target = remap_route_grant_ids(
+        &connection,
+        &route_specs(&target_routes),
+        &route_specs(&source_routes),
+        &before_key.grants.allowed_endpoint_ids,
+    );
+    db.import_node_state(&record, |_| Ok(())).unwrap();
+    let after = crate::destination_projection::load_persisted(&db).unwrap();
+    let after_destination = after
+        .destinations
+        .iter()
+        .find(|destination| destination.id == destination_id)
+        .unwrap();
+    assert_eq!(after_destination.protocol_routes, source_routes);
+    let after_key = after
+        .credentials
+        .iter()
+        .find(|credential| credential.legacy_account_id == key.id)
+        .unwrap();
+    assert_eq!(after_key.grants.allowed_endpoint_ids, expected_target);
+    assert_eq!(
+        after_key.grants.allowed_origins,
+        before_key.grants.allowed_origins
+    );
+    assert!(!after_key.grants.allowed_endpoint_ids.iter().any(|id| {
+        id == &ocg_domain::connection::endpoint_id_for(
+            &connection,
+            EndpointOperation::ResponseCreate,
+        )
+        .to_string()
+    }));
+    assert!(
+        !after_key
+            .grants
+            .allowed_origins
+            .contains(&"https://source.example".into())
+    );
+    let source_after = after
+        .credentials
+        .iter()
+        .find(|credential| credential.legacy_account_id == source_key.id)
+        .unwrap();
+    assert!(source_after.grants.allowed_endpoint_ids.is_empty());
+    assert!(source_after.grants.allowed_origins.is_empty());
     drop(db);
     fs::remove_dir_all(dir).unwrap();
 }

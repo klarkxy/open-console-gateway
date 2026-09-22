@@ -43,7 +43,7 @@ fn credit_v10_transfer_restores_new_accounts_but_never_refills_existing_accounts
         .unwrap()
         .unwrap();
     let (mut payload, _, _) = export_payload(&source).unwrap();
-    assert_eq!(payload.version, 10);
+    assert_eq!(payload.version, PAYLOAD_VERSION);
     assert!(
         payload
             .credentials
@@ -167,6 +167,188 @@ fn sample_payload() -> PortablePayload {
     payload.platform_accounts.clear();
     payload.platform_links.clear();
     payload
+}
+
+const V11_CUSTOM_ACCOUNT_ID: &str = "00000000-0000-4000-8000-0000000000c1";
+const V11_DYNAMIC_PROVIDER_ID: &str = "00000000-0000-4000-8000-0000000000d1";
+const V11_DEFAULT_ENDPOINT: &str = "https://lab.example/v1";
+const V11_MESSAGES_ENDPOINT: &str = "https://lab.example/anthropic";
+const V11_GRANT_ENDPOINTS: [&str; 2] = [
+    "11111111-1111-4111-8111-111111111111",
+    "22222222-2222-4222-8222-222222222222",
+];
+const V11_GRANT_ORIGIN: &str = "https://lab.example";
+
+fn v11_http_catalog() -> Vec<super::portable::PortableCatalogModel> {
+    use super::portable::{PortableCatalogModel, PortableCatalogOverride};
+    use crate::dashboard_v4::types::ProtocolDto;
+    vec![
+        PortableCatalogModel {
+            public_model: "lab-chat".to_string(),
+            upstream_model: "lab-chat-upstream".to_string(),
+            protocols: vec![ProtocolDto::ChatCompletions, ProtocolDto::Messages],
+            preferred: Some(ProtocolDto::Messages),
+            enabled: true,
+            upstream_override: Some(PortableCatalogOverride {
+                protocol: "messages".to_string(),
+                endpoint_url: V11_MESSAGES_ENDPOINT.to_string(),
+            }),
+        },
+        PortableCatalogModel {
+            public_model: "lab-off".to_string(),
+            upstream_model: "lab-off-upstream".to_string(),
+            protocols: vec![ProtocolDto::ChatCompletions],
+            preferred: None,
+            enabled: false,
+            upstream_override: None,
+        },
+    ]
+}
+
+fn v11_http_routes() -> Vec<crate::dashboard_v4::types::HttpProtocolRouteDto> {
+    use crate::dashboard_v4::types::{AuthSchemeDto, HttpProtocolRouteDto, ProtocolDto};
+    vec![
+        HttpProtocolRouteDto {
+            protocol: ProtocolDto::ChatCompletions,
+            endpoint_url: V11_DEFAULT_ENDPOINT.to_string(),
+            auth_scheme: AuthSchemeDto::Bearer,
+        },
+        HttpProtocolRouteDto {
+            protocol: ProtocolDto::Messages,
+            endpoint_url: V11_MESSAGES_ENDPOINT.to_string(),
+            auth_scheme: AuthSchemeDto::Bearer,
+        },
+    ]
+}
+
+fn v11_http_base_destination(
+    id: String,
+    kind: crate::dashboard_v4::types::LegacyDestinationKindDto,
+    legacy_id: String,
+) -> super::portable::PortableDestination {
+    use crate::dashboard_v4::types::{
+        AdapterKindDto, AuthSchemeDto, CapabilitiesDto, LegacyDestinationRefDto, ProtocolDto,
+    };
+    use ocg_domain::destination::{AdapterKind, ModelResolution, sealed_capabilities};
+    let model_resolution = match kind {
+        crate::dashboard_v4::types::LegacyDestinationKindDto::Dynamic => {
+            ModelResolution::PublicAndUpstream
+        }
+        _ => ModelResolution::PublicOnly,
+    };
+    super::portable::PortableDestination {
+        id,
+        legacy: LegacyDestinationRefDto {
+            kind,
+            id: legacy_id,
+        },
+        adapter: AdapterKindDto::Http,
+        name: "Lab HTTP".to_string(),
+        brand_family: None,
+        base_url: Some(V11_DEFAULT_ENDPOINT.to_string()),
+        protocols: vec![ProtocolDto::ChatCompletions, ProtocolDto::Messages],
+        protocol_routes: v11_http_routes(),
+        auth_scheme: AuthSchemeDto::Bearer,
+        model_resolution: Some(model_resolution),
+        catalog: v11_http_catalog(),
+        capabilities: CapabilitiesDto::from(&sealed_capabilities(AdapterKind::Http)),
+        plan: None,
+        max_credentials: None,
+        observer_credential_id: None,
+        enabled: true,
+        platform_kind: None,
+        platform_version: None,
+        platform_snapshot: None,
+        onboarding_draft: None,
+        preset_id: None,
+        origin: None,
+        offering: None,
+    }
+}
+
+fn v11_http_transfer_payload() -> PortablePayload {
+    use crate::dashboard_v4::types::{CredentialGrantsDto, LegacyDestinationKindDto, RoutingCard};
+    use ocg_domain::connection::{LegacyConnectionKind, connection_id_for_legacy};
+    use ocg_domain::credential::{
+        binding_id_for, credential_id_for_legacy_account, identity_id_for_legacy_account,
+        quota_pool_id_for_identity,
+    };
+    use ocg_domain::destination::{destination_id_for_custom_account, destination_id_for_dynamic};
+    use ocg_domain::provider::{preset_offering, provider_origin_from_preset};
+
+    let mut payload = sample_payload();
+    let custom_dest_id = destination_id_for_custom_account(V11_CUSTOM_ACCOUNT_ID);
+    payload.destinations.push(v11_http_base_destination(
+        custom_dest_id.clone(),
+        LegacyDestinationKindDto::CustomAccount,
+        V11_CUSTOM_ACCOUNT_ID.to_string(),
+    ));
+
+    let mut dynamic = v11_http_base_destination(
+        destination_id_for_dynamic(V11_DYNAMIC_PROVIDER_ID),
+        LegacyDestinationKindDto::Dynamic,
+        V11_DYNAMIC_PROVIDER_ID.to_string(),
+    );
+    dynamic.name = "Lab Dynamic".to_string();
+    dynamic.onboarding_draft = Some(false);
+    dynamic.origin = Some(provider_origin_from_preset(None).as_str().to_string());
+    dynamic.offering = Some(preset_offering("").to_string());
+    payload.destinations.push(dynamic);
+
+    let mut credential = payload.credentials[0].clone();
+    let identity_id = identity_id_for_legacy_account(V11_CUSTOM_ACCOUNT_ID);
+    let credential_id = credential_id_for_legacy_account(V11_CUSTOM_ACCOUNT_ID);
+    let connection_id =
+        connection_id_for_legacy(LegacyConnectionKind::CustomAccount, V11_CUSTOM_ACCOUNT_ID);
+    let binding_id = binding_id_for(&credential_id, &connection_id);
+    credential.id = credential_id.to_string();
+    credential.legacy_account_id = V11_CUSTOM_ACCOUNT_ID.to_string();
+    credential.destination_id = custom_dest_id.clone();
+    credential.name = "Lab HTTP".to_string();
+    credential.provider_id = Some(crate::kernel::ids::CUSTOM_PROVIDER_ID.to_string());
+    credential.identity_id = Some(identity_id.to_string());
+    credential.identity_label = Some("Lab HTTP".to_string());
+    credential.binding_id = Some(binding_id.to_string());
+    credential.grants = CredentialGrantsDto {
+        allowed_endpoint_ids: V11_GRANT_ENDPOINTS
+            .iter()
+            .map(|id| (*id).to_string())
+            .collect(),
+        allowed_origins: vec![V11_GRANT_ORIGIN.to_string()],
+    };
+    credential.routing_rank = payload
+        .credentials
+        .iter()
+        .map(|row| row.routing_rank)
+        .max()
+        .unwrap_or(0)
+        + 1;
+    payload.credentials.push(credential.clone());
+    payload.quota_pools.push(PortableQuotaPool {
+        id: quota_pool_id_for_identity(identity_id.as_str()).to_string(),
+        subject_kind: "credential".to_string(),
+        subject_ref: identity_id.to_string(),
+        relation_confidence: "unknown".to_string(),
+        policy_mode: "authoritative_limit".to_string(),
+        member_account_ids: vec![V11_CUSTOM_ACCOUNT_ID.to_string()],
+    });
+    if let Some(cards) = payload.routing_cards.as_mut() {
+        cards.push(RoutingCard {
+            id: format!("card:{}:custom", custom_dest_id),
+            destination_id: custom_dest_id,
+            credential_ids: vec![credential.id],
+        });
+    }
+    if let Some(node) = payload.node.as_mut() {
+        node.account_order.push(V11_CUSTOM_ACCOUNT_ID.to_string());
+    }
+    payload
+}
+
+fn strip_protocol_routes(payload: &mut PortablePayload) {
+    for destination in &mut payload.destinations {
+        destination.protocol_routes.clear();
+    }
 }
 
 fn sample_legacy_payload(version: u32) -> PortablePayload {
@@ -684,13 +866,14 @@ fn future_payload_version_is_rejected_as_unsupported_not_wrong_password() {
     use std::fs;
     use std::sync::Arc;
 
-    assert_eq!(PAYLOAD_VERSION, 10);
+    assert_eq!(PAYLOAD_VERSION, 11);
+    let future = PAYLOAD_VERSION + 1;
     let mut payload = sample_payload();
-    payload.version = PAYLOAD_VERSION + 1;
+    payload.version = future;
     let bundle = encrypt_payload(&payload, "correct horse battery").unwrap();
     let error = decrypt_and_validate(&bundle, "correct horse battery").unwrap_err();
     assert!(
-        matches!(error, TransferError::UnsupportedVersion(11)),
+        matches!(error, TransferError::UnsupportedVersion(version) if version == future),
         "{error:?}"
     );
     assert!(!matches!(error, TransferError::InvalidBundle));
@@ -709,7 +892,10 @@ fn future_payload_version_is_rejected_as_unsupported_not_wrong_password() {
     assert_eq!(mapped.status, StatusCode::BAD_REQUEST);
     assert_eq!(mapped.body.code, super::super::ERROR_INVALID_REQUEST);
     assert!(
-        mapped.body.message.contains("payload version 11"),
+        mapped
+            .body
+            .message
+            .contains(&format!("payload version {future}")),
         "{}",
         mapped.body.message
     );
@@ -2405,7 +2591,7 @@ fn v9_export_import_restores_interleaved_routing_cards_on_fresh_target() {
     ];
     save_cards(&source, &layout_covering_snapshot(&source, desired));
     let (payload, _, _) = export_payload(&source).unwrap();
-    assert_eq!(payload.version, 10);
+    assert_eq!(payload.version, PAYLOAD_VERSION);
     let exported = payload.routing_cards.clone().unwrap();
     assert_eq!(
         exported
@@ -2521,4 +2707,233 @@ fn imported_empty_routing_card_collision_is_rejected() {
     ];
     let error = proposed_imported_routing_cards(preimport, &imported, &post).unwrap_err();
     assert!(error.to_string().contains("collides"), "{error}");
+}
+
+#[test]
+fn v11_payload_roundtrip_keeps_http_routes_model_controls_and_grants() {
+    use crate::dashboard_v4::types::ProtocolDto;
+    use ocg_domain::destination::{
+        AuthScheme, Protocol, destination_id_for_custom_account, destination_id_for_dynamic,
+    };
+
+    let payload = v11_http_transfer_payload();
+    assert_eq!(payload.version, PAYLOAD_VERSION);
+    let encoded = serde_json::to_value(&payload).unwrap();
+    let custom_json = encoded["destinations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|destination| {
+            destination["protocolRoutes"]
+                .as_array()
+                .map(|routes| routes.len())
+                == Some(2)
+        })
+        .expect("v11 payload must serialize protocolRoutes");
+    assert_eq!(
+        custom_json["protocolRoutes"][0]["protocol"],
+        "chat_completions"
+    );
+    assert_eq!(custom_json["protocolRoutes"][1]["protocol"], "messages");
+
+    let bundle = encrypt_payload(&payload, "correct horse battery").unwrap();
+    assert!(!bundle.contains(V11_DEFAULT_ENDPOINT));
+    let restored = decrypt_and_validate(&bundle, "correct horse battery").unwrap();
+    let custom_id = destination_id_for_custom_account(V11_CUSTOM_ACCOUNT_ID);
+    let dynamic_id = destination_id_for_dynamic(V11_DYNAMIC_PROVIDER_ID);
+
+    let custom = restored
+        .unified
+        .destinations
+        .iter()
+        .find(|destination| destination.id == custom_id)
+        .expect("custom destination");
+    assert_eq!(custom.protocol_routes.len(), 2);
+    assert_eq!(custom.protocols.len(), 2);
+    assert_eq!(custom.catalog.len(), 2);
+    assert!(custom.catalog[0].enabled);
+    assert_eq!(
+        custom.catalog[0].protocols,
+        vec![ProtocolDto::ChatCompletions, ProtocolDto::Messages]
+    );
+    assert_eq!(custom.catalog[0].preferred, Some(ProtocolDto::Messages));
+    assert_eq!(
+        custom.catalog[0]
+            .upstream_override
+            .as_ref()
+            .map(|route| route.endpoint_url.as_str()),
+        Some(V11_MESSAGES_ENDPOINT)
+    );
+    assert!(!custom.catalog[1].enabled);
+
+    let custom_controls = restored
+        .unified
+        .destination_controls
+        .iter()
+        .find(|destination| destination.id == custom_id)
+        .expect("custom destination_controls");
+    assert_eq!(custom_controls.protocol_routes.len(), 2);
+    assert_eq!(
+        custom_controls.protocol_routes[0].protocol,
+        Protocol::ChatCompletions
+    );
+    assert_eq!(
+        custom_controls.protocol_routes[0].endpoint_url,
+        V11_DEFAULT_ENDPOINT
+    );
+    assert_eq!(
+        custom_controls.protocol_routes[1].protocol,
+        Protocol::Messages
+    );
+    assert_eq!(custom_controls.catalog.len(), 2);
+    assert!(custom_controls.catalog[0].enabled);
+    assert_eq!(
+        custom_controls.catalog[0].protocols,
+        vec![Protocol::ChatCompletions, Protocol::Messages]
+    );
+    assert_eq!(
+        custom_controls.catalog[0].preferred,
+        Some(Protocol::Messages)
+    );
+    assert_eq!(
+        custom_controls.catalog[0]
+            .upstream_override
+            .as_ref()
+            .map(|route| route.endpoint_url.as_str()),
+        Some(V11_MESSAGES_ENDPOINT)
+    );
+    assert!(!custom_controls.catalog[1].enabled);
+
+    let imported_custom = restored
+        .unified
+        .custom_destinations
+        .iter()
+        .find(|destination| destination.id == custom_id)
+        .expect("imported custom");
+    assert_eq!(imported_custom.protocol, Protocol::ChatCompletions);
+    assert_eq!(imported_custom.endpoint_url, V11_DEFAULT_ENDPOINT);
+    assert_eq!(imported_custom.auth_scheme, AuthScheme::Bearer);
+    assert_eq!(imported_custom.models.len(), 2);
+    assert_eq!(
+        imported_custom.models[0]
+            .upstream_override
+            .as_ref()
+            .map(|route| (route.protocol, route.endpoint_url.as_str())),
+        Some((Protocol::Messages, V11_MESSAGES_ENDPOINT))
+    );
+
+    let dynamic_controls = restored
+        .unified
+        .destination_controls
+        .iter()
+        .find(|destination| destination.id == dynamic_id)
+        .expect("dynamic destination_controls");
+    assert_eq!(dynamic_controls.protocol_routes.len(), 2);
+    assert_eq!(dynamic_controls.catalog.len(), 2);
+    assert_eq!(
+        dynamic_controls.catalog[0].preferred,
+        Some(Protocol::Messages)
+    );
+    let imported_dynamic = restored
+        .unified
+        .dynamic_providers
+        .iter()
+        .find(|provider| provider.id == V11_DYNAMIC_PROVIDER_ID)
+        .expect("imported dynamic");
+    assert_eq!(
+        imported_dynamic.upstream_protocol,
+        Protocol::ChatCompletions
+    );
+    assert_eq!(imported_dynamic.endpoint_url, V11_DEFAULT_ENDPOINT);
+    assert_eq!(imported_dynamic.mappings.len(), 2);
+    assert_eq!(
+        imported_dynamic.mappings[0]
+            .upstream_override
+            .as_ref()
+            .map(|route| route.protocol),
+        Some(Protocol::Messages)
+    );
+
+    let credential = restored
+        .unified
+        .credentials
+        .iter()
+        .find(|credential| credential.legacy_account_id == V11_CUSTOM_ACCOUNT_ID)
+        .expect("custom credential");
+    assert_eq!(
+        credential.grants.allowed_endpoint_ids,
+        V11_GRANT_ENDPOINTS
+            .iter()
+            .map(|id| (*id).to_string())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        credential.grants.allowed_origins,
+        vec![V11_GRANT_ORIGIN.to_string()]
+    );
+}
+
+#[test]
+fn versions_before_v11_reject_nonempty_protocol_routes() {
+    for version in [
+        V7_PAYLOAD_VERSION,
+        V8_PAYLOAD_VERSION,
+        V9_PAYLOAD_VERSION,
+        V10_PAYLOAD_VERSION,
+    ] {
+        let mut payload = v11_http_transfer_payload();
+        payload.version = version;
+        if version < V9_PAYLOAD_VERSION {
+            payload.routing_cards = None;
+        }
+        let error = validate_payload(payload).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                TransferError::Invalid(ref message) if message.contains("protocol routes")
+            ),
+            "version {version}: {error:?}"
+        );
+    }
+}
+
+#[test]
+fn v4_through_v10_payloads_without_protocol_routes_still_validate() {
+    for version in [4, V5_PAYLOAD_VERSION] {
+        validate_payload(sample_legacy_payload(version)).unwrap();
+    }
+    validate_payload(sample_v6_payload()).unwrap();
+    for version in [
+        V7_PAYLOAD_VERSION,
+        V8_PAYLOAD_VERSION,
+        V9_PAYLOAD_VERSION,
+        V10_PAYLOAD_VERSION,
+    ] {
+        let mut payload = v11_http_transfer_payload();
+        payload.version = version;
+        strip_protocol_routes(&mut payload);
+        if version < V9_PAYLOAD_VERSION {
+            payload.routing_cards = None;
+        }
+        let validated = validate_payload(payload).unwrap();
+        let custom = validated
+            .unified
+            .custom_destinations
+            .iter()
+            .find(|destination| destination.legacy_id == V11_CUSTOM_ACCOUNT_ID)
+            .expect("legacy-compatible custom");
+        assert_eq!(
+            custom.protocol,
+            ocg_domain::destination::Protocol::ChatCompletions
+        );
+        assert_eq!(custom.endpoint_url, V11_DEFAULT_ENDPOINT);
+        assert_eq!(custom.models.len(), 2);
+        assert!(
+            validated
+                .unified
+                .destination_controls
+                .iter()
+                .all(|destination| { destination.protocol_routes.is_empty() })
+        );
+    }
 }

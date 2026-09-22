@@ -3973,6 +3973,13 @@
       "additionalProperties": false,
       "description": "PUT a batch of per-model/per-protocol overrides for one contract scope.\nAn empty `overrides` array is rejected by handlers.",
       "properties": {
+        "authorizeCredentialIds": {
+          "description": "Explicit consent to add this batch's enabled builtin endpoint grants.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "expectedRevision": {
           "format": "uint64",
           "minimum": 0,

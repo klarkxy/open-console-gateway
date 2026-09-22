@@ -70,6 +70,7 @@ const RESPONSES_ONLY: &[ApiFormat] = &[ApiFormat::Responses];
 const MESSAGES_ONLY: &[ApiFormat] = &[ApiFormat::Messages];
 /// 2026-08-27 Go probe: both Chat and Messages returned live_supported.
 const CHAT_AND_MESSAGES: &[ApiFormat] = &[ApiFormat::ChatCompletions, ApiFormat::Messages];
+const CHAT_AND_RESPONSES: &[ApiFormat] = &[ApiFormat::ChatCompletions, ApiFormat::Responses];
 /// 2026-08-27 Go probe: Chat, Responses, and Messages all returned live_supported.
 const CHAT_RESPONSES_MESSAGES: &[ApiFormat] = &[
     ApiFormat::ChatCompletions,
@@ -343,9 +344,10 @@ pub fn opencode_supports_upstream(model: &str, upstream: ApiFormat) -> bool {
 /// never folded onto kebab OpenCode aliases, so `deepseek/deepseek-v4-flash`
 /// cannot steal Go's `deepseek-v4-flash` protocol row.
 ///
-/// Models outside this seed table still follow the official split: Anthropic
-/// IDs use Messages; OpenAI and open-source IDs use Chat Completions. There is
-/// no Responses upstream.
+/// Models outside this seed table have no static supported set. Family
+/// preferred stays Messages for Anthropic IDs and Chat otherwise. Responses
+/// is a constructable path, not an open-family default. Per-model truth is
+/// catalog `supported_endpoints` and persisted enabled protocols.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CommandCodeModelProtocol {
     pub alias: &'static str,
@@ -358,7 +360,7 @@ const COMMAND_CODE_MODEL_PROTOCOLS: &[CommandCodeModelProtocol] = &[CommandCodeM
     alias: COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS,
     upstream_id: COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
     preferred: ApiFormat::ChatCompletions,
-    supported_upstream: CHAT_ONLY,
+    supported_upstream: CHAT_AND_RESPONSES,
 }];
 
 /// Exact Command Code raw-ID lookup. Does not consult OpenCode `MODEL_PROTOCOLS`
@@ -386,7 +388,8 @@ pub fn command_code_is_anthropic_model(model: &str) -> bool {
 }
 
 /// Preferred upstream for a Command Code model ID. Seed-table rows win;
-/// unknown non-empty IDs follow the Anthropic/Chat family rule.
+/// unknown non-empty IDs follow the Anthropic/Chat family rule. Responses is
+/// never the family preferred value.
 pub fn command_code_preferred_format(model: &str) -> Option<ApiFormat> {
     if let Some(profile) = command_code_model_protocol(model) {
         return Some(profile.preferred);
@@ -401,17 +404,52 @@ pub fn command_code_preferred_format(model: &str) -> Option<ApiFormat> {
     })
 }
 
-pub fn command_code_supported_formats(model: &str) -> &'static [ApiFormat] {
-    if let Some(profile) = command_code_model_protocol(model) {
-        return profile.supported_upstream;
-    }
-    if model.trim().is_empty() {
+/// Constructable GOAT inference formats (path ceiling).
+///
+/// Claude IDs construct Messages only. Other non-empty IDs construct Chat and
+/// Responses. This is not a per-model catalog claim and must not be used as
+/// exclusive Chat-only support. Persisted enabled protocols remain
+/// authoritative for unknown models.
+pub fn command_code_constructable_formats(model: &str) -> &'static [ApiFormat] {
+    if model.trim().is_empty() || model.eq_ignore_ascii_case("stealth/ox-alpha") {
         return &[];
     }
     if command_code_is_anthropic_model(model) {
         MESSAGES_ONLY
     } else {
+        CHAT_AND_RESPONSES
+    }
+}
+
+/// Official relative paths for GOAT inference. Gemini has no upstream path.
+pub fn command_code_upstream_path(format: ApiFormat) -> Option<&'static str> {
+    match format {
+        ApiFormat::ChatCompletions => {
+            Some(crate::provider::COMMAND_CODE_GOAT_CHAT_COMPLETIONS_PATH)
+        }
+        ApiFormat::Responses => Some(crate::provider::COMMAND_CODE_GOAT_RESPONSES_PATH),
+        ApiFormat::Messages => Some(crate::provider::COMMAND_CODE_GOAT_MESSAGES_PATH),
+        ApiFormat::Gemini => None,
+    }
+}
+
+/// Seed-table support when present. Unknown non-Anthropic IDs return empty so
+/// callers cannot treat vendor family as exclusive Chat-only support (which
+/// would reject a saved Responses route). Anthropic IDs stay Messages-only
+/// because official docs reject Chat/Responses for Claude.
+pub fn command_code_supported_formats(model: &str) -> &'static [ApiFormat] {
+    if let Some(profile) = command_code_model_protocol(model) {
+        return profile.supported_upstream;
+    }
+    if model.trim().is_empty() || model.eq_ignore_ascii_case("stealth/ox-alpha") {
+        return &[];
+    }
+    if command_code_is_anthropic_model(model) {
+        MESSAGES_ONLY
+    } else if crate::provider::command_code_goat_includes_model(model) {
         CHAT_ONLY
+    } else {
+        &[]
     }
 }
 
@@ -626,14 +664,50 @@ mod tests {
             COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
             ApiFormat::ChatCompletions
         ));
-        assert!(!command_code_supports_upstream(
+        assert!(command_code_supports_upstream(
             COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
             ApiFormat::Responses
         ));
-        assert!(command_code_supports_upstream(
-            "minimax-m2.7",
+        assert!(!command_code_supports_upstream(
+            COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
+            ApiFormat::Messages
+        ));
+        assert_eq!(
+            command_code_constructable_formats(COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM),
+            CHAT_AND_RESPONSES
+        );
+        assert_eq!(
+            command_code_constructable_formats("claude-sonnet-4-6"),
+            MESSAGES_ONLY
+        );
+        assert_eq!(
+            command_code_constructable_formats("xiaomi/mimo-v2.6-flash"),
+            CHAT_AND_RESPONSES
+        );
+        assert!(command_code_constructable_formats("minimax-m2.7").contains(&ApiFormat::Responses));
+        assert!(command_code_supported_formats("minimax-m2.7").is_empty());
+        assert!(command_code_supported_formats("xiaomi/mimo-v2.6-flash").is_empty());
+        assert!(!command_code_supports_upstream(
+            "xiaomi/mimo-v2.6-flash",
             ApiFormat::ChatCompletions
         ));
+        assert_eq!(
+            command_code_preferred_format("xiaomi/mimo-v2.6-flash"),
+            Some(ApiFormat::ChatCompletions)
+        );
+        assert_eq!(
+            command_code_upstream_path(ApiFormat::ChatCompletions),
+            Some("/chat/completions")
+        );
+        assert_eq!(
+            command_code_upstream_path(ApiFormat::Responses),
+            Some("/responses")
+        );
+        assert_eq!(
+            command_code_upstream_path(ApiFormat::Messages),
+            Some("/messages")
+        );
+        assert_eq!(command_code_upstream_path(ApiFormat::Gemini), None);
         assert!(!command_code_supports_upstream(
             "",
             ApiFormat::ChatCompletions

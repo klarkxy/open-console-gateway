@@ -88,6 +88,12 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "DestinationUpstreamOverridePatch",
     "DestinationPatchRequest",
     "DestinationPatchResult",
+    "DestinationCatalogRefreshResult",
+    "HttpProtocolRouteDto",
+    "DestinationCatalogUpdate",
+    "DestinationCatalogModelUpdate",
+    "DestinationModelTestRequest",
+    "DestinationModelTestResult",
     "DestinationDeleteResult",
     "DestinationCredentialDto",
     "QuotaRecoveryDto",
@@ -319,6 +325,10 @@ pub struct ConnectionSummary {
     pub legacy: LegacyIdentity,
     pub display_family: Option<String>,
     pub offering: OfferingKind,
+    /// Personal credit setup for Key forms. None means unsupported; an empty
+    /// list permits custom configuration without a provider preset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credit_presets: Option<Vec<crate::billing_types::CreditPreset>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -374,6 +384,8 @@ pub struct OnboardingConnectionNew {
     pub endpoint_url: String,
     pub upstream_protocol: AccountUpstreamProtocol,
     pub auth_kind: ProviderDefinitionAuthKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol_routes: Option<Vec<HttpProtocolRouteDto>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -983,6 +995,8 @@ pub struct DestinationDto {
     /// Upstream origin. Sealed for builtin adapters; user data for `http`.
     pub base_url: Option<String>,
     pub protocols: Vec<ProtocolDto>,
+    #[serde(default)]
+    pub protocol_routes: Vec<HttpProtocolRouteDto>,
     pub auth_scheme: AuthSchemeDto,
     /// Model-name resolution owned by this destination.
     pub model_resolution: ModelResolutionDto,
@@ -1017,6 +1031,10 @@ pub struct DestinationModelPatch {
     pub upstream_override: Option<DestinationUpstreamOverridePatch>,
     #[serde(default)]
     pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocols: Option<Vec<ProtocolDto>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preferred: Option<ProtocolDto>,
 }
 
 /// Full replacement of editable configuration on one HTTP destination.
@@ -1031,6 +1049,8 @@ pub struct DestinationPatchRequest {
     pub name: String,
     pub endpoint_url: String,
     pub upstream_protocol: ProtocolDto,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol_routes: Option<Vec<HttpProtocolRouteDto>>,
     pub auth_scheme: AuthSchemeDto,
     pub models: Vec<DestinationModelPatch>,
     /// Explicit consent to add safe grants for the destination's current
@@ -1059,6 +1079,72 @@ pub struct DestinationPatchResult {
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DestinationDeleteResult {
     pub revision: ControlRevision,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DestinationCatalogRefreshResult {
+    pub revision: ControlRevision,
+    pub destination: DestinationDto,
+    pub added_count: usize,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HttpProtocolRouteDto {
+    pub protocol: ProtocolDto,
+    pub endpoint_url: String,
+    pub auth_scheme: AuthSchemeDto,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DestinationCatalogModelUpdate {
+    pub public_model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocols: Option<Vec<ProtocolDto>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preferred: Option<ProtocolDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DestinationCatalogUpdate {
+    #[serde(flatten)]
+    #[schemars(flatten)]
+    pub expectation: MutationExpectation,
+    pub updates: Vec<DestinationCatalogModelUpdate>,
+    #[serde(default)]
+    pub remove_models: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DestinationModelTestRequest {
+    #[serde(flatten)]
+    #[schemars(flatten)]
+    pub expectation: MutationExpectation,
+    pub public_model: String,
+    pub protocol: ProtocolDto,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DestinationModelTestResult {
+    pub revision: ControlRevision,
+    pub public_model: String,
+    pub protocol: ProtocolDto,
+    pub ok: bool,
+    pub error: Option<String>,
 }
 
 /// RFC destination list. Revision-tagged and secret-free.
@@ -1480,6 +1566,8 @@ pub fn contract_schema() -> Value {
     include_type::<DestinationDto>(&mut serialize);
     include_type::<ModelResolutionDto>(&mut serialize);
     include_type::<DestinationPatchResult>(&mut serialize);
+    include_type::<DestinationCatalogRefreshResult>(&mut serialize);
+    include_type::<DestinationModelTestResult>(&mut serialize);
     include_type::<DestinationDeleteResult>(&mut serialize);
     include_type::<DestinationCredentialDto>(&mut serialize);
     include_type::<QuotaRecoveryDto>(&mut serialize);
@@ -1530,6 +1618,8 @@ pub fn contract_schema() -> Value {
     include_type::<DestinationModelPatch>(&mut deserialize);
     include_type::<DestinationUpstreamOverridePatch>(&mut deserialize);
     include_type::<DestinationPatchRequest>(&mut deserialize);
+    include_type::<DestinationCatalogUpdate>(&mut deserialize);
+    include_type::<DestinationModelTestRequest>(&mut deserialize);
     include_type::<RoutingCardUpdate>(&mut deserialize);
     include_type::<CreditConfigureRequest>(&mut deserialize);
     include_type::<CreditCalibrationRequest>(&mut deserialize);
