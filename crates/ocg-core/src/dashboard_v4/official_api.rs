@@ -145,9 +145,12 @@ pub(super) async fn refresh_balance(
     body: Bytes,
 ) -> Result<Json<OfficialApiStatus>, V3ApiError> {
     let expectation = parse_mutation_json::<MutationExpectation>(&body)?;
-    let _refresh = state.provider_usage_refresh.try_lock().map_err(|_| {
-        V3ApiError::conflict_at(&state, "provider usage refresh is already running")
-    })?;
+    let _refresh = state
+        .provider_usage_refresh
+        .exclusive(crate::usage_sync::ProviderUsageRefreshGate::balance_key(
+            &id,
+        ))
+        .await;
     let (snapshot, provider, config, key) = {
         let _settings = state.settings_update.lock();
         check_expectation(&state, &expectation)?;

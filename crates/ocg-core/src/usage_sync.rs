@@ -5,7 +5,12 @@
 //! Manual and background paths share one secure fetch + key CAS implementation.
 
 pub mod provider_adapter;
+mod provider_refresh;
 mod reactive;
+
+pub(crate) use provider_refresh::{
+    CalibrationOutcome, ControlRevision, PROVIDER_REFRESH_CONCURRENCY, ProviderUsageRefreshGate,
+};
 
 use crate::go_usage::{GoUsageError, GoUsageSnapshot};
 use crate::kernel::pricing::PricingLimits;
@@ -14,8 +19,8 @@ use crate::usage_sync::provider_adapter::supports_authoritative_auto_sync;
 use chrono::{DateTime, Duration, Utc};
 use futures_util::future::FutureExt;
 use parking_lot::Mutex as ParkingMutex;
-pub(crate) use reactive::official_go_quota_evidence;
 pub use reactive::spawn_reactive_usage_refresh;
+pub(crate) use reactive::{official_go_quota_evidence, refresh_coalesced};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::future::Future;

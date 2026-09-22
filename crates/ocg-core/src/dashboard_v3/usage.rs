@@ -23,7 +23,10 @@ use crate::provider::{
     OllamaBillingTier, ProviderAdapterKind, ProviderRegistry, QUOTA_WINDOW_FREE,
 };
 use crate::state::CoreState;
-use crate::usage_sync::{UsageSyncCommitAuthorization, UsageSyncTrigger};
+use crate::usage_sync::{
+    CalibrationOutcome, ControlRevision, ProviderUsageRefreshGate, UsageSyncCommitAuthorization,
+    UsageSyncTrigger, refresh_coalesced,
+};
 
 use super::types::{
     AccountUsageUpdate, CreditBalance, MutationExpectation, ProviderUsage, QuotaWindow,
@@ -146,82 +149,73 @@ pub(super) async fn refresh_provider_usage(
                 .map(Json)
                 .map_err(RefreshApiError::from);
         }
-        ProviderUsageRefreshKind::Plan => {}
+        ProviderUsageRefreshKind::Plan => {
+            return refresh_plan_usage(&state, &id, &expectation).await;
+        }
         ProviderUsageRefreshKind::Balance { endpoint_url } => {
             return refresh_official_balance(&state, &id, &expectation, endpoint_url).await;
         }
     }
-    let _refresh = state.provider_usage_refresh.try_lock().map_err(|_| {
-        V3ApiError::conflict_at(&state, "provider usage refresh is already running")
-    })?;
-    let (account_snapshot, adapter, config, key) = {
-        let _settings_update = state.settings_update.lock();
-        check_expectation(&state, &expectation)?;
-        let db = state.db.lock();
-        let account = load_account(&db, &state, &id)?;
-        let adapter = ProviderAdapterKind::from_provider_id(&account.provider_id)
-            .ok_or_else(|| V3ApiError::invalid_request_at(&state, "unknown provider offering"))?;
-        if account.key_cipher.trim().is_empty() {
-            return Err(V3ApiError::invalid_request_at(
-                &state,
-                "the selected account has no stored Key",
-            )
-            .into());
-        }
-        let key = state
-            .decrypt_key(&account.key_cipher)
-            .map_err(V3ApiError::internal)?;
-        (account, adapter, state.config(), key)
-    };
+}
 
-    let windows = match crate::plan_usage::fetch(&config, adapter, &id, &key).await {
-        Ok(windows) => windows,
-        Err(message) => {
+async fn refresh_plan_usage(
+    state: &CoreState,
+    id: &str,
+    expectation: &MutationExpectation,
+) -> Result<Json<ProviderUsage>, RefreshApiError> {
+    let outcome = refresh_coalesced(
+        state,
+        id,
+        Some(ControlRevision {
+            revision: expectation.expected_revision,
+            process_generation: expectation.process_generation,
+        }),
+    )
+    .await;
+    match outcome {
+        CalibrationOutcome::Applied => {}
+        CalibrationOutcome::Throttled {
+            next_allowed_at,
+            retry_after_secs,
+        } => {
+            return Err(RefreshApiError::throttled(
+                state,
+                next_allowed_at,
+                retry_after_secs,
+                "provider usage refresh",
+            ));
+        }
+        CalibrationOutcome::FetchFailed(message) => {
             state.log_runtime_event(
                 "warn",
                 "usage_sync",
-                &format!(
-                    "event=provider_usage_refresh_failed account_id={id} provider={} stage=fetch",
-                    account_snapshot.provider_id
-                ),
+                &format!("event=provider_usage_refresh_failed account_id={id} stage=fetch"),
             );
-            return Err(V3ApiError::outbound_failed(&state, message).into());
+            return Err(V3ApiError::outbound_failed(state, message).into());
         }
-    };
-    let window_count = windows.len();
-
-    {
-        let _settings_update = state.settings_update.lock();
-        check_expectation(&state, &expectation)?;
-        let db = state.db.lock();
-        let current = load_account(&db, &state, &id)?;
-        if current.updated_at != account_snapshot.updated_at
-            || current.key_cipher != account_snapshot.key_cipher
-            || current.provider_id != account_snapshot.provider_id
-        {
+        CalibrationOutcome::Stale => {
             return Err(V3ApiError::conflict_at(
-                &state,
+                state,
                 "the account changed while provider usage was being refreshed",
             )
             .into());
         }
-        let source = match adapter {
-            ProviderAdapterKind::MiniMaxCn => crate::plan_usage::MINIMAX_USAGE_SOURCE,
-            ProviderAdapterKind::KimiCn => crate::plan_usage::KIMI_USAGE_SOURCE,
-            _ => unreachable!("adapter checked above"),
-        };
-        db.replace_quota_windows_by_source(&id, source, &windows)
-            .map_err(V3ApiError::internal)?;
+        CalibrationOutcome::RejectedKey | CalibrationOutcome::Skipped => {
+            return Err(V3ApiError::invalid_request_at(
+                state,
+                "this Plan does not expose an official manual usage refresh",
+            )
+            .into());
+        }
     }
+    let _settings_update = state.settings_update.lock();
+    check_expectation(state, expectation)?;
     state.log_runtime_event(
         "info",
         "usage_sync",
-        &format!(
-            "event=provider_usage_refresh_succeeded account_id={id} provider={} window_count={window_count}",
-            account_snapshot.provider_id
-        ),
+        &format!("event=provider_usage_refresh_succeeded account_id={id}"),
     );
-    provider_usage_locked(&state, &id)
+    provider_usage_locked(state, id)
         .map(Json)
         .map_err(RefreshApiError::from)
 }
@@ -234,8 +228,8 @@ async fn refresh_official_balance(
 ) -> Result<Json<ProviderUsage>, RefreshApiError> {
     let _refresh = state
         .provider_usage_refresh
-        .try_lock()
-        .map_err(|_| V3ApiError::conflict_at(state, "provider usage refresh is already running"))?;
+        .exclusive(ProviderUsageRefreshGate::balance_key(id))
+        .await;
     let (account_snapshot, config, key) = {
         let _settings_update = state.settings_update.lock();
         check_expectation(state, expectation)?;

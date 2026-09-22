@@ -91,7 +91,7 @@ pub struct CoreStateInner {
     unpublished_public_models: RwLock<Arc<HashSet<String>>>,
     pub zen_free_models_refresh: tokio::sync::Mutex<()>,
     pub provider_models_refresh: tokio::sync::Mutex<()>,
-    pub provider_usage_refresh: tokio::sync::Mutex<()>,
+    pub(crate) provider_usage_refresh: crate::usage_sync::ProviderUsageRefreshGate,
     /// Serializes typed operations against the one local CPA integration.
     /// Network calls may hold this async gate but never the SQLite mutex.
     pub cpa_operations: tokio::sync::Mutex<()>,
@@ -453,7 +453,9 @@ impl CoreStateInner {
             unpublished_public_models: RwLock::new(Arc::new(unpublished_public_models)),
             zen_free_models_refresh: tokio::sync::Mutex::new(()),
             provider_models_refresh: tokio::sync::Mutex::new(()),
-            provider_usage_refresh: tokio::sync::Mutex::new(()),
+            provider_usage_refresh: crate::usage_sync::ProviderUsageRefreshGate::new(
+                crate::usage_sync::PROVIDER_REFRESH_CONCURRENCY,
+            ),
             cpa_operations: tokio::sync::Mutex::new(()),
             cpa_runtime: crate::cpa_runtime::CpaRuntimeCapabilities::new(),
             provider_contracts: RwLock::new(Arc::new(provider_contracts)),
