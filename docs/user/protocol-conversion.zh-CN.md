@@ -18,7 +18,7 @@ Open Console Gateway 在一个端口上提供四种客户端协议，再把每�
 
 别名配置参考（检入的 2026-09-06 偏好及 2026-08-27 Go `live_supported` 路径）。✓ 表示代码配置中记录了该协议，不保证当前直接透传。模型和协议是否可路由由 Provider 目录与 effective 合约决定。参考配置位于 `crates/ocg-domain/src/protocol.rs` 的 `MODEL_PROTOCOLS`。
 
-`reasoning.effort` 别名（转发或转换前应用）：`muse-spark-1.2`、 `muse-spark-1.2-contributor`、`muse-spark-1.2-contributor-free` 与 `muse-spark-1.3-contributor-free` 把 `max` 映射为 `xhigh`（上游拒绝 `max`）；其他模型的 `reasoning.effort` 原样透传。
+`reasoning.effort` 别名只在携带该兼容策略的 OpenCode Go 路由上、于转发或转换前应用：`muse-spark-1.2`、`muse-spark-1.2-contributor`、`muse-spark-1.2-contributor-free` 与 `muse-spark-1.3-contributor-free` 把 `max` 映射为 `xhigh`（上游拒绝 `max`）。用户定义的 HTTP 路由即使上游模型同名也保留原值。其他模型的 `reasoning.effort` 原样透传。
 
 | 模型 | 推荐 | Chat | Responses | Messages |
 | --- | --- | :---: | :---: | :---: |

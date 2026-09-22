@@ -52,11 +52,13 @@ promise current direct passthrough. Provider catalogs and effective contracts
 decide whether a model and protocol are routable. The reference profiles live in
 `MODEL_PROTOCOLS` in `crates/ocg-domain/src/protocol.rs`.
 
-`reasoning.effort` aliases (applied before forwarding or conversion):
+`reasoning.effort` aliases apply only on an OpenCode Go route that carries
+this compatibility policy, before forwarding or conversion:
 `muse-spark-1.2`, `muse-spark-1.2-contributor`,
 `muse-spark-1.2-contributor-free`, and `muse-spark-1.3-contributor-free`
-map `max` → `xhigh` (upstream rejects `max`). Other models pass
-`reasoning.effort` through unchanged.
+map `max` → `xhigh` (upstream rejects `max`). A user-defined HTTP route
+keeps the original value even when the upstream model name matches. Other
+models pass `reasoning.effort` through unchanged.
 
 | Model | Preferred | Chat | Responses | Messages |
 | --- | --- | :---: | :---: | :---: |

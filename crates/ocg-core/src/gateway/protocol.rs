@@ -133,6 +133,23 @@ pub struct MaterializeSpec {
     /// Skip OpenCode `MODEL_PROTOCOLS` and convert to this account protocol.
     pub forced_upstream: Option<ApiFormat>,
     pub custom_route: Option<CustomRouteSpec>,
+    /// Effort renames carried by the selected route. Empty keeps the client
+    /// value. OpenCode Go sets this from its static profile; other routes do
+    /// not inherit that profile just because the model name matches.
+    pub effort_aliases: &'static [(&'static str, &'static str)],
+}
+
+/// Go's static effort renames, only when this route is OpenCode Go.
+pub(crate) fn route_effort_aliases(
+    adapter: ocg_domain::destination::AdapterKind,
+    model: &str,
+) -> &'static [(&'static str, &'static str)] {
+    if adapter != ocg_domain::destination::AdapterKind::OpencodeGo {
+        return &[];
+    }
+    ocg_domain::protocol::model_protocol(model)
+        .map(|profile| profile.effort_aliases)
+        .unwrap_or(&[])
 }
 
 /// Isolated Custom origin and auth scheme materialized per account.
@@ -289,6 +306,10 @@ fn identity_spec(parsed: &ParsedClientRequest) -> MaterializeSpec {
         original_model: None,
         forced_upstream: None,
         custom_route: None,
+        effort_aliases: route_effort_aliases(
+            ocg_domain::destination::AdapterKind::OpencodeGo,
+            &parsed.requested_model,
+        ),
     }
 }
 
@@ -312,6 +333,7 @@ pub fn materialize_parsed_request(
         spec.upstream_model.clone(),
         parsed.stream,
         spec.forced_upstream,
+        spec.effort_aliases,
     )?;
     plan.client_model = spec.client_model.clone();
     plan.channel = spec.channel;
@@ -333,13 +355,14 @@ fn prepare_parsed_request(
     model: String,
     stream: bool,
     forced_upstream: Option<ApiFormat>,
+    effort_aliases: &[(&str, &str)],
 ) -> Result<RequestPlan, ProtocolError> {
     let upstream = match forced_upstream {
         Some(forced) => forced,
         None => resolve_upstream_format(client, &model)?,
     };
-    let aliased_responses_effort = requested_effort_alias(&parsed, &model);
-    let parsed = apply_effort_aliases(parsed, &model);
+    let aliased_responses_effort = requested_effort_alias(&parsed, effort_aliases);
+    let parsed = apply_effort_aliases(parsed, effort_aliases);
     let response_parallel_tool_calls = parsed
         .get("parallel_tool_calls")
         .and_then(Value::as_bool)
@@ -734,20 +757,16 @@ fn resolve_upstream_format(client: ApiFormat, model: &str) -> Result<ApiFormat, 
 }
 
 /// Rewrite `reasoning.effort` (Responses/Gemini) and `reasoning_effort` (Chat)
-/// according to the model's `effort_aliases`. No-op for models without aliases.
-fn apply_effort_aliases(mut body: Value, model: &str) -> Value {
-    let Some(profile) = model_protocol(model) else {
-        return body;
-    };
-    if profile.effort_aliases.is_empty() {
+/// using the aliases carried by the selected route. Empty means no rewrite.
+fn apply_effort_aliases(mut body: Value, effort_aliases: &[(&str, &str)]) -> Value {
+    if effort_aliases.is_empty() {
         return body;
     }
     let rewrite = |effort: &str| -> Option<String> {
-        profile
-            .effort_aliases
+        effort_aliases
             .iter()
             .find(|(from, _)| *from == effort)
-            .map(|(_, to)| to.to_string())
+            .map(|(_, to)| (*to).to_string())
     };
     if let Some(replacement) = body
         .pointer("/reasoning/effort")
@@ -778,15 +797,16 @@ fn apply_effort_aliases(mut body: Value, model: &str) -> Value {
 /// Returns the aliased effort requested through any supported client shape.
 /// Conversion through Messages represents reasoning as a token budget, so the
 /// original alias must be retained until the final Responses body is built.
-fn requested_effort_alias(body: &Value, model: &str) -> Option<&'static str> {
-    let profile = model_protocol(model)?;
+fn requested_effort_alias<'a>(
+    body: &Value,
+    effort_aliases: &'a [(&'a str, &'a str)],
+) -> Option<&'a str> {
     let effort = body
         .pointer("/reasoning/effort")
         .or_else(|| body.get("reasoning_effort"))
         .or_else(|| body.pointer("/output_config/effort"))
         .and_then(Value::as_str)?;
-    profile
-        .effort_aliases
+    effort_aliases
         .iter()
         .find_map(|(from, to)| (*from == effort).then_some(*to))
 }

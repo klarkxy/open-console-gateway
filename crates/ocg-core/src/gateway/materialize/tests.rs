@@ -867,6 +867,7 @@ fn materialize_keeps_client_name_and_mapped_upstream_alias() {
             original_model: None,
             forced_upstream: None,
             custom_route: None,
+            effort_aliases: &[],
         },
     )
     .unwrap();
@@ -2099,8 +2100,20 @@ fn cn_catalog_snapshot(
     );
     let mut credential = ExecutionCredential::from(&account);
     credential.destination_id = destination.id.clone();
-    credential.authorization_connection_id =
-        connection_id_for_legacy(LegacyConnectionKind::BuiltinProvider, provider_id).to_string();
+    let connection = connection_id_for_legacy(LegacyConnectionKind::BuiltinProvider, provider_id);
+    credential.authorization_connection_id = connection.to_string();
+    credential.binding_id = format!("binding-{account_id}");
+    credential.grants.allowed_endpoint_ids = protocols
+        .iter()
+        .copied()
+        .map(|protocol| {
+            ocg_domain::connection::endpoint_id_for(
+                &connection,
+                ocg_domain::connection::EndpointOperation::from(protocol),
+            )
+            .to_string()
+        })
+        .collect();
     let model_id = destination.catalog[0].public_model.clone();
     let resolved = match adapter {
         AdapterKind::Minimax => alias::resolve_with_runtime_catalogs(
@@ -2480,4 +2493,174 @@ fn only_actual_candidate_conversion_failures_are_client_errors() {
         unavailable.rejections[0].code,
         RouteRejectionCode::CandidateMaterializationFailed
     );
+}
+
+fn http_separator_snapshot(scope: ModelScope) -> (RoutingSnapshot, ResolvedModel) {
+    let account = account(
+        "http-separators",
+        CUSTOM_PROVIDER_ID,
+        CredentialKind::ApiKey,
+        QuotaScope::Key,
+    );
+    let mut destination = test_destination(
+        AdapterKind::Http,
+        LegacyDestinationRef::CustomAccount(account.id.clone()),
+    );
+    destination.base_url = Some("https://lab.example/v1/chat/completions".into());
+    destination.protocols = vec![UpstreamProtocolKind::ChatCompletions];
+    destination.catalog = ["vendor/model", "vendor-model", "vendor_model"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, public)| CatalogModel {
+            public_model: public.into(),
+            upstream_model: format!("upstream-{index}"),
+            protocols: vec![UpstreamProtocolKind::ChatCompletions],
+            preferred: Some(UpstreamProtocolKind::ChatCompletions),
+            enabled: true,
+            upstream_override: None,
+        })
+        .collect();
+    let connection = connection_id_for_legacy(LegacyConnectionKind::CustomAccount, &account.id);
+    let mut credential = ExecutionCredential::from(&account);
+    credential.destination_id = destination.id.clone();
+    credential.authorization_connection_id = connection.to_string();
+    credential.binding_id = "binding-http-separators".into();
+    credential.scope = scope;
+    credential.grants.allowed_endpoint_ids = ocg_domain::credential::assigned_endpoints_for_routes(
+        &connection,
+        &ocg_domain::destination::http_configured_routes(&destination),
+    )
+    .into_iter()
+    .map(|endpoint| endpoint.id)
+    .collect();
+    credential.grants.allowed_origins = vec!["https://lab.example:443".into()];
+    let resolved = ResolvedModel::PinnedRaw {
+        requested: "vendor/model".into(),
+        mapping: mapping(CUSTOM_PROVIDER_ID, "upstream-0"),
+    };
+    (
+        RoutingSnapshot {
+            projection: crate::destination_projection::DestinationProjection {
+                destinations: vec![destination],
+                credentials: Vec::new(),
+            },
+            credentials: vec![credential],
+            ollama_pinned: Vec::new(),
+        },
+        resolved,
+    )
+}
+
+#[test]
+fn model_scope_keeps_separator_identity_through_live_authorization() {
+    use crate::gateway::forwarder::{LiveSendSelection, verify_execution_authorization};
+    let (snapshot, _) = http_separator_snapshot(ModelScope::Only {
+        models: vec!["vendor/model".into()],
+    });
+    let config = AppConfig::default();
+    let wall = Utc::now();
+    for requested in ["vendor/model", "Vendor/Model"] {
+        let resolved = ResolvedModel::PinnedRaw {
+            requested: requested.into(),
+            mapping: mapping(CUSTOM_PROVIDER_ID, "upstream-0"),
+        };
+        let parsed =
+            parse_client_request(ApiFormat::ChatCompletions, chat_body(requested)).unwrap();
+        let set = materialize_execution_routes(
+            &snapshot, &config, &parsed, &resolved, requested, requested, None,
+        )
+        .unwrap();
+        assert_eq!(set.routes.len(), 1, "{requested}: {:?}", set.rejections);
+        assert_eq!(set.routes[0].target.model.public_model, "vendor/model");
+        let selection = LiveSendSelection::from_execution(&set.routes[0], requested, requested);
+        verify_execution_authorization(&snapshot, &selection, &set.routes[0].spec, wall, true)
+            .unwrap_or_else(|error| panic!("{requested} live auth: {error:?}"));
+    }
+    for requested in ["vendor-model", "vendor_model"] {
+        let resolved = ResolvedModel::PinnedRaw {
+            requested: requested.into(),
+            mapping: mapping(CUSTOM_PROVIDER_ID, "upstream-1"),
+        };
+        let parsed =
+            parse_client_request(ApiFormat::ChatCompletions, chat_body(requested)).unwrap();
+        let set = materialize_execution_routes(
+            &snapshot, &config, &parsed, &resolved, requested, requested, None,
+        )
+        .unwrap();
+        assert!(
+            set.routes.is_empty(),
+            "{requested} must stay outside the allow-list"
+        );
+        assert!(
+            set.rejections
+                .iter()
+                .any(|rejection| rejection.code == RouteRejectionCode::ModelScopeDenied),
+            "{requested}: {:?}",
+            set.rejections
+        );
+    }
+
+    let (mut open, _) = http_separator_snapshot(ModelScope::All);
+    let requested = "vendor-model";
+    let resolved = ResolvedModel::PinnedRaw {
+        requested: requested.into(),
+        mapping: mapping(CUSTOM_PROVIDER_ID, "upstream-1"),
+    };
+    let parsed = parse_client_request(ApiFormat::ChatCompletions, chat_body(requested)).unwrap();
+    let set = materialize_execution_routes(
+        &open, &config, &parsed, &resolved, requested, requested, None,
+    )
+    .unwrap();
+    assert_eq!(set.routes.len(), 1, "{:?}", set.rejections);
+    assert_eq!(set.routes[0].target.model.public_model, "vendor-model");
+    open.credentials[0].scope = ModelScope::Only {
+        models: vec!["vendor/model".into()],
+    };
+    let selection = LiveSendSelection::from_execution(&set.routes[0], requested, requested);
+    assert!(
+        verify_execution_authorization(&open, &selection, &set.routes[0].spec, wall, true).is_err(),
+        "live authorization must not widen vendor/model to vendor-model"
+    );
+}
+
+#[test]
+fn granted_messages_endpoint_is_selected_for_a_chat_request() {
+    use crate::gateway::forwarder::{LiveSendSelection, verify_execution_authorization};
+    let (mut snapshot, resolved) = cn_catalog_snapshot(
+        AdapterKind::Minimax,
+        MINIMAX_PROVIDER_ID,
+        "minimax-messages-only",
+        "MiniMax-New",
+        &[
+            UpstreamProtocolKind::ChatCompletions,
+            UpstreamProtocolKind::Messages,
+        ],
+        UpstreamProtocolKind::ChatCompletions,
+    );
+    let connection =
+        connection_id_for_legacy(LegacyConnectionKind::BuiltinProvider, MINIMAX_PROVIDER_ID);
+    let messages = ocg_domain::connection::endpoint_id_for(
+        &connection,
+        ocg_domain::connection::EndpointOperation::MessageCreate,
+    )
+    .to_string();
+    snapshot.credentials[0].grants.allowed_endpoint_ids = vec![messages.clone()];
+    let parsed =
+        parse_client_request(ApiFormat::ChatCompletions, chat_body("MiniMax-New")).unwrap();
+    let set = materialize_execution_routes(
+        &snapshot,
+        &AppConfig::default(),
+        &parsed,
+        &resolved,
+        "MiniMax-New",
+        "MiniMax-New",
+        None,
+    )
+    .unwrap();
+    assert_eq!(set.routes.len(), 1, "{:?}", set.rejections);
+    assert_eq!(set.routes[0].plan.upstream, ApiFormat::Messages);
+    assert_eq!(set.routes[0].target.endpoint_id, messages);
+    let selection = LiveSendSelection::from_execution(&set.routes[0], "MiniMax-New", "MiniMax-New");
+    verify_execution_authorization(&snapshot, &selection, &set.routes[0].spec, Utc::now(), true)
+        .unwrap_or_else(|error| panic!("granted messages route must pass live auth: {error:?}"));
 }

@@ -1919,6 +1919,46 @@ fn muse_spark_max_alias_reaches_responses_upstream_from_every_client_protocol() 
 }
 
 #[test]
+fn muse_spark_effort_alias_follows_the_selected_route_policy() {
+    let responses = parse_client_request(
+        ApiFormat::Responses,
+        bytes(json!({
+            "model": "muse-spark-1.2",
+            "input": "hi",
+            "store": false,
+            "reasoning": {"effort": "max"}
+        })),
+    )
+    .unwrap();
+    let mut go = identity_spec(&responses);
+    go.effort_aliases = route_effort_aliases(
+        ocg_domain::destination::AdapterKind::OpencodeGo,
+        "muse-spark-1.2",
+    );
+    let rewritten = materialize_parsed_request(&responses, &go).unwrap();
+    let body: Value = serde_json::from_slice(&rewritten.body).unwrap();
+    assert_eq!(body["reasoning"]["effort"], "xhigh");
+
+    let chat = parse_client_request(
+        ApiFormat::ChatCompletions,
+        bytes(json!({
+            "model": "muse-spark-1.2",
+            "messages": [{"role": "user", "content": "hi"}],
+            "reasoning_effort": "max"
+        })),
+    )
+    .unwrap();
+    let mut http = identity_spec(&chat);
+    http.upstream_model = "muse-spark-1.2".into();
+    http.forced_upstream = Some(ApiFormat::ChatCompletions);
+    http.effort_aliases =
+        route_effort_aliases(ocg_domain::destination::AdapterKind::Http, "muse-spark-1.2");
+    let passed = materialize_parsed_request(&chat, &http).unwrap();
+    let body: Value = serde_json::from_slice(&passed.body).unwrap();
+    assert_eq!(body["reasoning_effort"], "max");
+}
+
+#[test]
 fn muse_spark_leaves_non_aliased_effort_untouched() {
     let request = json!({
         "model":"muse-spark-1.2","input":"hi","store":false,
@@ -1984,6 +2024,7 @@ fn parse_once_materializes_a_different_upstream_model() {
             original_model: None,
             forced_upstream: None,
             custom_route: None,
+            effort_aliases: &[],
         },
     )
     .unwrap();
@@ -1998,6 +2039,7 @@ fn parse_once_materializes_a_different_upstream_model() {
             original_model: Some("deepseek-v4-flash".into()),
             forced_upstream: None,
             custom_route: None,
+            effort_aliases: &[],
         },
     )
     .unwrap();
@@ -2206,6 +2248,7 @@ fn command_code_client_formats_use_native_responses_and_convert_messages_to_chat
                 original_model: None,
                 forced_upstream: None,
                 custom_route: None,
+                effort_aliases: &[],
             },
         )
         .unwrap();
@@ -2252,6 +2295,7 @@ fn command_code_client_formats_use_native_responses_and_convert_messages_to_chat
             original_model: None,
             forced_upstream: None,
             custom_route: None,
+            effort_aliases: &[],
         },
     )
     .unwrap();

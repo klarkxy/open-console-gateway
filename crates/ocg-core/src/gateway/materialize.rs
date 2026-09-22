@@ -486,6 +486,14 @@ fn materialize_channel_plan(
 ) -> Result<RequestPlan, ProtocolError> {
     let base =
         resolve_upstream_base(channel, &config.upstream_base_url).map_err(ProtocolError::new)?;
+    let effort_aliases = if custom_route.is_none() && channel == UpstreamChannel::Go {
+        crate::gateway::protocol::route_effort_aliases(
+            ocg_domain::destination::AdapterKind::OpencodeGo,
+            model,
+        )
+    } else {
+        &[]
+    };
     materialize_parsed_request(
         parsed,
         &MaterializeSpec {
@@ -500,6 +508,7 @@ fn materialize_channel_plan(
             original_model,
             forced_upstream,
             custom_route,
+            effort_aliases,
         },
     )
 }
@@ -1025,6 +1034,70 @@ pub(crate) fn endpoint_id_for_target(
         .ok_or_else(|| "missing persisted route grant identity".into())
 }
 
+/// Protocols this Key may send on: declared and enabled, with a configured
+/// route, and granted to the credential. Selection then prefers the client
+/// protocol, the saved preference, and the remaining granted protocols.
+fn authorized_model_protocols(
+    credential: &crate::routing_snapshot::ExecutionCredential,
+    destination: &Destination,
+    model: &ocg_domain::destination::CatalogModel,
+) -> Vec<ocg_domain::destination::Protocol> {
+    model
+        .protocols
+        .iter()
+        .copied()
+        .filter(|protocol| protocol_is_authorized(credential, destination, model, *protocol))
+        .collect()
+}
+
+fn protocol_is_authorized(
+    credential: &crate::routing_snapshot::ExecutionCredential,
+    destination: &Destination,
+    model: &ocg_domain::destination::CatalogModel,
+    protocol: ocg_domain::destination::Protocol,
+) -> bool {
+    use ocg_domain::destination::{AdapterKind, AuthScheme};
+    if destination.adapter == AdapterKind::Http {
+        let Some(route) = ocg_domain::destination::http_model_route(destination, model, protocol)
+        else {
+            return false;
+        };
+        if route.auth_scheme == AuthScheme::None {
+            return true;
+        }
+        let upstream = crate::provider_contracts::protocol_to_api(protocol);
+        let Ok(endpoint_id) = endpoint_id_for_target(credential, destination, model, upstream)
+        else {
+            return false;
+        };
+        return credential
+            .grants
+            .allowed_endpoint_ids
+            .iter()
+            .any(|id| id == &endpoint_id)
+            && credential
+                .grants
+                .allowed_origins
+                .iter()
+                .any(|origin| crate::custom_http::origins_match(origin, &route.endpoint_url));
+    }
+    if destination.adapter == AdapterKind::Cpa {
+        return true;
+    }
+    if destination.auth_scheme == AuthScheme::None {
+        return true;
+    }
+    let upstream = crate::provider_contracts::protocol_to_api(protocol);
+    let Ok(endpoint_id) = endpoint_id_for_target(credential, destination, model, upstream) else {
+        return false;
+    };
+    credential
+        .grants
+        .allowed_endpoint_ids
+        .iter()
+        .any(|id| id == &endpoint_id)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn materialize_execution_routes(
     snapshot: &crate::routing_snapshot::RoutingSnapshot,
@@ -1107,15 +1180,23 @@ pub(crate) fn materialize_execution_routes(
                 ));
                 continue;
             }
+            let authorized = authorized_model_protocols(credential, destination, model);
+            if authorized.is_empty() {
+                rejections.push(reject(
+                    RouteRejectionCode::ProductionRouteUnsupported,
+                    "no granted protocol route for this Key".into(),
+                ));
+                continue;
+            }
             let preferred = model
                 .preferred
-                .or_else(|| model.protocols.first().copied())
+                .or_else(|| authorized.first().copied())
                 .ok_or_else(|| ProtocolError::new("missing preferred protocol"))?;
             let upstream = match crate::provider_contracts::select_enabled_upstream(
                 parsed.client,
                 preferred,
-                &model.protocols,
-                &model.protocols,
+                &authorized,
+                &authorized,
             ) {
                 Ok(upstream) => upstream,
                 Err(error) => {
@@ -1182,6 +1263,10 @@ pub(crate) fn materialize_execution_routes(
                     original_model: None,
                     forced_upstream: Some(upstream),
                     custom_route,
+                    effort_aliases: crate::gateway::protocol::route_effort_aliases(
+                        destination.adapter,
+                        &model.upstream_model,
+                    ),
                 },
             );
             let plan = match plan {

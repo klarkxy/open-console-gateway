@@ -152,16 +152,14 @@ fn platform_native_operations_keep_account_authority_and_recheck_persisted_revoc
             endpoint_id_for(&connection, EndpointOperation::from(*protocol)).to_string()
         })
         .collect();
-    // Linking an existing Key must retain its explicitly saved grants.
-    for (client, protocol, _) in cases {
+    // Linking an existing Key must retain its explicitly saved grants. An
+    // ungranted client protocol does not hide the granted Chat route.
+    for (client, _, _) in cases {
         let route = route_for_protocol(&linked, "public-model", client);
-        assert_eq!(route.plan.upstream, client);
+        assert_eq!(route.plan.upstream, ApiFormat::ChatCompletions);
+        assert_eq!(route.target.endpoint_id, original_chat);
         let selected = LiveSendSelection::from_execution(&route, "public-model", "public-model");
-        assert_eq!(
-            verify_execution_authorization(&linked, &selected, &route.spec, Utc::now(), true)
-                .is_ok(),
-            protocol == Protocol::ChatCompletions
-        );
+        verify_execution_authorization(&linked, &selected, &route.spec, Utc::now(), true).unwrap();
     }
     db.update_credential_binding(
         &credential.binding_id,
@@ -399,17 +397,21 @@ fn route_grants_keep_an_override_authorized_when_a_same_origin_default_is_added(
         None,
     )
     .unwrap();
-    let route_b = materialized_b
-        .routes
-        .into_iter()
-        .find(|route| route.spec.request_url().unwrap() == default_messages_b)
-        .expect("default-message must select the configured Messages B route");
-    let selected_b =
-        LiveSendSelection::from_execution(&route_b, "default-message", "default-message");
     assert!(
-        verify_execution_authorization(&snapshot, &selected_b, &route_b.spec, Utc::now(), true)
-            .is_err(),
-        "new default Messages B must not inherit A's exact endpoint grant"
+        materialized_b
+            .routes
+            .iter()
+            .all(|route| { route.spec.request_url().ok().as_deref() != Some(default_messages_b) }),
+        "ungranted Messages B must not be selected: {:?}",
+        materialized_b.rejections
+    );
+    assert!(
+        materialized_b.rejections.iter().any(|rejection| {
+            rejection.code
+                == crate::gateway::materialize::RouteRejectionCode::ProductionRouteUnsupported
+        }),
+        "missing grant is decided before send: {:?}",
+        materialized_b.rejections
     );
 }
 

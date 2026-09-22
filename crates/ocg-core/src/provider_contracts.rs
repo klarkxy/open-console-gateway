@@ -723,14 +723,6 @@ pub fn select_upstream_protocol(
         return Err(ProtocolSelectError::new(NO_ENABLED_UPSTREAM_PROTOCOL));
     }
     let preferred = model.preferred_protocol;
-    // CPA keeps its existing branch: matching Chat/Responses/Messages pass
-    // through; Gemini falls through to preferred / adapter fallback.
-    if contract.adapter_kind == ProviderAdapterKind::Cpa
-        && let Some(client_protocol) = protocol_from_api(client)
-        && available.contains(&client_protocol)
-    {
-        return Ok(protocol_to_api(client_protocol));
-    }
     select_enabled_upstream(client, preferred, &available, contract.fallback_priority)
 }
 

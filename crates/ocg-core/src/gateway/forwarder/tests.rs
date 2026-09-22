@@ -1085,6 +1085,7 @@ async fn p09_forward_attempt_emits_carried_legacy_tool_compat() {
             upstream_base_override: None,
             original_model: None,
             forced_upstream: Some(ApiFormat::ChatCompletions),
+            effort_aliases: &[],
             custom_route: Some(CustomRouteSpec {
                 endpoint_url: endpoint_url.clone(),
                 auth_kind: ocg_domain::dynamic::DynamicAuthKind::Bearer,
@@ -2089,6 +2090,7 @@ fn official_api_attempt_pricing_is_native_frozen_and_never_attaches_to_foreign_r
                 upstream_base_override: None,
                 original_model: None,
                 forced_upstream: Some(ApiFormat::ChatCompletions),
+                effort_aliases: &[],
                 custom_route: Some(CustomRouteSpec {
                     endpoint_url: runtime.endpoint_url.clone(),
                     auth_kind: ocg_domain::dynamic::DynamicAuthKind::Bearer,

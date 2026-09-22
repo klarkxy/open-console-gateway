@@ -48,8 +48,15 @@ from the Accounts view. The selector skips:
 - Accounts whose saved provider contract has no effective enabled upstream
   protocol for the resolved model.
 - Keys whose inference binding is disabled, or whose binding `modelScope`
-  does not include the requested public/routing model. A sibling Key on the
-  same connection keeps its own allow-list.
+  does not include the requested public/routing model. Matching trims and
+  ignores ASCII case; `/`, `_`, spaces, and `-` stay different models. A
+  sibling Key on the same connection keeps its own allow-list.
+- For an otherwise eligible Key, the gateway chooses one upstream protocol
+  from those that are enabled, have a configured route, and are granted to
+  that Key. It prefers the client protocol when that path is granted and the
+  request can be converted, then the saved preference, then the other granted
+  protocols. It does not send a request to discover which protocol is
+  authorized. The pre-send check still re-reads the current grants.
 
 Keys that share a **declared quota pool** can share stored ordinary cooldowns.
 The temporary cooldown created by a `429` remains on the receiving Key.
