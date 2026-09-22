@@ -20,6 +20,7 @@ import {
   type ProviderPresetOffering,
 } from "./provider-presets.ts";
 import { familyOf, groupPresetsByFamily, type ProviderFamily } from "./provider-families.ts";
+import { sortProvidersByName } from "./provider-sort.ts";
 
 /**
  * Presentation logic for the Add Account chooser. Pure helpers only; the
@@ -54,7 +55,7 @@ export interface PresetFamilyOption {
 
 export type ChooserOption = PlanOption | PresetFamilyOption | PresetChooserOption | PlatformKindOption;
 
-/** Exactly two user-visible groups, Plan above API. */
+/** Internal offering buckets; rendered as one flat list. */
 export interface ChooserGroup {
   id: "plan" | "api";
   label: "Plan" | "API";
@@ -196,7 +197,7 @@ function planBrandIconKey(planId: string): string | null {
 }
 
 /**
- * Visible groups for the rail in the given mode. "connections": the V4
+ * Internal offering buckets for the given mode, flattened for display. "connections": the V4
  * connection projection only — built-in families that still have an account
  * head the Plan group, and saved user-defined Providers follow their catalog
  * offering. `dynamicPresetIds` is retained only for caller-side brand artwork.
@@ -280,7 +281,19 @@ export function chooserUniverse(
 
 /** Visible (filtered) options in rail order; arrow-key navigation follows it. */
 export function visibleChooserOptions(groups: readonly ChooserGroup[]): ChooserOption[] {
-  return groups.flatMap((group) => group.options);
+  const options = groups.flatMap((group) => group.options);
+  const labels = new Map<string, number>();
+  for (const option of options) labels.set(option.label, (labels.get(option.label) ?? 0) + 1);
+  const labeled = groups.flatMap((group) => group.options.map((option) => (
+    "family" in option && (labels.get(option.label) ?? 0) > 1
+      ? { ...option, label: `${option.label} · ${group.label}` }
+      : option
+  )));
+  const isCustom = (option: ChooserOption) => "plan" in option && option.plan.kind === "custom";
+  return [
+    ...labeled.filter(isCustom),
+    ...sortProvidersByName(labeled.filter((option) => !isCustom(option)), (option) => option.label),
+  ];
 }
 
 export function isChooserOptionDisabled(option: ChooserOption): boolean {
@@ -339,34 +352,20 @@ export interface ChooserSelectChild {
   [key: string]: unknown;
 }
 
-/** Structurally compatible with Naive UI SelectGroupOption. */
-export interface ChooserSelectGroup {
-  type: "group";
-  key: string;
-  label: string;
-  children: ChooserSelectChild[];
-  [key: string]: unknown;
-}
-
-/** Narrow-screen fallback: the same groups rendered as a grouped select. */
+/** Narrow-screen fallback follows the same flat order as the desktop rail. */
 export function chooserSelectOptions(
   groups: readonly ChooserGroup[],
   userDefinedLabel: string,
-): ChooserSelectGroup[] {
-  return groups.map((group) => ({
-    type: "group" as const,
-    key: group.id,
-    label: group.label,
-    children: group.options.map((option) => {
-      let label = option.label;
-      if ("source" in option && option.source === "user-defined") {
-        label = `${label} · ${userDefinedLabel}`;
-      } else if ("family" in option && option.presets.length > 1) {
-        label = `${label} · ${option.presets.length}`;
-      }
-      return { label, value: option.optionId };
-    }),
-  }));
+): ChooserSelectChild[] {
+  return visibleChooserOptions(groups).map((option) => {
+    let label = option.label;
+    if ("source" in option && option.source === "user-defined") {
+      label = `${label} · ${userDefinedLabel}`;
+    } else if ("family" in option && option.presets.length > 1) {
+      label = `${label} · ${option.presets.length}`;
+    }
+    return { label, value: option.optionId };
+  });
 }
 
 /** Component-side icon map key; the component owns the actual components. */

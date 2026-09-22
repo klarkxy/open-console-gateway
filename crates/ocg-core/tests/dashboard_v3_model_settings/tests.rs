@@ -50,7 +50,8 @@ async fn cn_protocol_choice_survives_disable_reload_transfer_and_static_reset() 
         path,
         json!({"overrides":[
             {"modelId":"MiniMax-M3","protocol":"chat_completions","state":"force_off"},
-            {"modelId":"MiniMax-M3","protocol":"messages","state":"force_off"}
+            {"modelId":"MiniMax-M3","protocol":"messages","state":"force_off"},
+            {"modelId":"MiniMax-M3","protocol":"responses","state":"force_off"}
         ]}),
     )
     .await;
@@ -131,37 +132,45 @@ async fn cn_protocol_choice_survives_disable_reload_transfer_and_static_reset() 
 }
 
 #[tokio::test]
-async fn invalid_preferences_reject_the_whole_override_batch() {
+async fn multiple_preferences_reject_the_batch_while_responses_is_valid() {
     let h = start_loopback("invalid-cn-choice").await;
     refreshed_go_catalog::persist_provider_catalog(&h.state, "minimax", &["MiniMax-M3"]);
     refreshed_go_catalog::persist_provider_catalog(&h.state, "opencode", &["grok-4.5"]);
     let before = h.state.settings_revision();
-    for overrides in [
-        json!([
+    let (status, result) = mutate(
+        &h,
+        Method::PUT,
+        "/provider-contracts/provider/minimax/model-protocol-overrides",
+        json!({"overrides":[
             {"modelId":"MiniMax-M3","protocol":"chat_completions","state":"force_off","preferred":true},
             {"modelId":"MiniMax-M3","protocol":"messages","state":"force_off","preferred":true}
-        ]),
-        json!([{ "modelId":"MiniMax-M3", "protocol":"responses", "state":"force_on", "preferred":true }]),
-    ] {
-        let (status, result) = mutate(
-            &h,
-            Method::PUT,
-            "/provider-contracts/provider/minimax/model-protocol-overrides",
-            json!({"overrides":overrides}),
-        )
-        .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{result}");
-        assert_eq!(h.state.settings_revision(), before);
-        assert!(
-            h.state
-                .db
-                .lock()
-                .load_persisted_contracts()
-                .unwrap()
-                .preferences
-                .is_empty()
-        );
-    }
+        ]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{result}");
+    assert_eq!(h.state.settings_revision(), before);
+    assert!(
+        h.state
+            .db
+            .lock()
+            .load_persisted_contracts()
+            .unwrap()
+            .preferences
+            .is_empty()
+    );
+
+    let (status, result) = mutate(
+        &h,
+        Method::PUT,
+        "/provider-contracts/provider/minimax/model-protocol-overrides",
+        json!({"overrides":[
+            {"modelId":"MiniMax-M3","protocol":"responses","state":"force_on","preferred":true}
+        ]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_eq!(minimax(&result)["preferredProtocol"], "responses");
+    assert_ne!(h.state.settings_revision(), before);
     let (status, result) = mutate(
         &h,
         Method::PUT,

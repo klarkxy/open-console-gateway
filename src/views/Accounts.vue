@@ -39,6 +39,8 @@
         </div>
       </div>
 
+      <AccountRoutingControls />
+
       <span id="account-order-instructions" class="sr-only">
         {{ t("使用上下方向键调整优先级") }}
       </span>
@@ -150,24 +152,6 @@
           </n-button>
         </template>
       </n-empty>
-
-      <p
-        v-if="routingModeLine && accountsLoaded && displayedGroupViews.length > 0"
-        class="routing-mode-line"
-      >
-        <span>{{ t("当前路由模式") }}：{{ routingModeLine.mode }}</span>
-        <span>{{ t("对话粘性") }}：{{ routingModeLine.stickyOn ? t("已开启") : t("已关闭") }}</span>
-        <n-button
-          text
-          tag="a"
-          size="tiny"
-          type="primary"
-          class="routing-mode-line__action"
-          @click="openSettingsView"
-        >
-          {{ t("在设置中更改") }}
-        </n-button>
-      </p>
 
       <div v-if="accountsLoaded && displayedGroupViews.length > 0" class="account-list">
         <template v-for="view in displayedGroupViews" :key="view.group.id">
@@ -502,7 +486,7 @@ import type { BindingPatchInput, IdentityCredentialCreateInput } from "../api/id
 import { accountCapabilities, isManagedOnboardingAccount } from "../domain/account-capabilities.ts";
 import { DEFAULT_PROVIDER_ID, connectionForDestination } from "../domain/destination-providers.ts";
 import { legacyCustomAccountDestinationId } from "../domain/custom-account.ts";
-import { ROUTING_MODE_KEYS } from "../domain/routing-explain.ts";
+import AccountRoutingControls from "../components/AccountRoutingControls.vue";
 import type { Destination, DestinationCredential } from "../api/destinations.ts";
 import {
   includeCredentialRow,
@@ -960,17 +944,6 @@ const displayedGroupViews = computed((): DisplayedGroupView[] => {
   return views;
 });
 
-// Ordering follows the routing mode, so the compact line above the ordered
-// list names the live mode and sticky state; a failed settings load hides it.
-const routingModeLine = computed(() => {
-  const settings = settingsStore.settings;
-  if (!settings) return null;
-  return {
-    mode: t(ROUTING_MODE_KEYS[settings.routing_mode]),
-    stickyOn: settings.conversation_sticky,
-  };
-});
-
 const platformRefreshing = computed(() => platformStore.refreshing);
 const platformPendingLink = computed(() => platformStore.pendingLink);
 
@@ -1204,12 +1177,6 @@ function openCpa(): void {
   const url = new URL(window.location.href);
   url.searchParams.set("view", "cpa");
   url.searchParams.delete("account_id");
-  window.history.pushState(null, "", url);
-  window.dispatchEvent(new PopStateEvent("popstate"));
-}
-
-function openSettingsView(): void {
-  const url = applyAppViewSearchParams(new URL(window.location.href), "settings");
   window.history.pushState(null, "", url);
   window.dispatchEvent(new PopStateEvent("popstate"));
 }
@@ -2143,9 +2110,7 @@ async function loadProviderCatalog(): Promise<void> {
 
 async function initializeAccounts() {
   const registrationOptions = loadRegistrationOptions();
-  const routingSettings = settingsStore.settings
-    ? Promise.resolve()
-    : settingsStore.loadPresented().catch(() => undefined);
+  const routingSettings = settingsStore.loadPresented().catch(() => undefined);
   await loadProviderCatalog();
   await loadQuotaLimits();
   await loadAccounts();
@@ -2529,16 +2494,6 @@ onUnmounted(() => {
 
 .accounts-actions {
   flex: 0 0 auto;
-}
-
-.routing-mode-line {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--ocg-space-xs) var(--ocg-space-md);
-  margin: 0;
-  color: var(--ocg-muted);
-  font-size: var(--ocg-font-xs);
 }
 
 .account-list {

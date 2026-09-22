@@ -1036,7 +1036,7 @@ async fn dashboard_v3_zen_saved_models_are_the_persisted_snapshot() {
 
 #[cfg(debug_assertions)]
 #[tokio::test]
-async fn unified_zen_catalog_refresh_returns_the_shared_layout_with_new_models_off() {
+async fn unified_zen_catalog_refresh_leaves_new_models_auto_without_protocol_evidence() {
     let origin = start_zen_origin(
         StatusCode::OK,
         json!({ "data": [{ "id": "unified-new-free" }] }),
@@ -1072,10 +1072,7 @@ async fn unified_zen_catalog_refresh_returns_the_shared_layout_with_new_models_o
         .find(|model| model["modelId"] == "unified-new-free")
         .expect("new Zen model stays visible");
     assert_eq!(model["routable"], false);
-    assert_eq!(
-        model["protocols"]["chat_completions"]["override"],
-        "force_off"
-    );
+    assert_eq!(model["protocols"]["chat_completions"]["override"], "auto");
     assert_eq!(model["protocols"]["chat_completions"]["enabled"], false);
     assert!(model["protocols"]["responses"].is_null());
     assert!(model["protocols"]["messages"].is_null());

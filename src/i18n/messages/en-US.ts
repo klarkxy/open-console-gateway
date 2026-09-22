@@ -287,6 +287,8 @@ export const enUSMessages = {
   "加载账号筛选失败：{error}": "Failed to load the account filter: {error}",
   "加载模型筛选失败：{error}": "Failed to load the model filter: {error}",
   "排序": "Sort",
+  "名称 A–Z": "Name A–Z",
+  "名称 Z–A": "Name Z–A",
   "升序": "Ascending",
   "降序": "Descending",
   "请求数": "Requests",

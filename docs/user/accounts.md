@@ -2,9 +2,21 @@
 
 # Accounts
 
+Choose **Account routing** from the dropdown above the account list and use the adjacent **Conversation sticky** switch. Each change saves immediately; a successful change resets runtime routing state. Hover or focus the question-mark buttons for explanations.
+
+- **Routing mode** — strict priority, global sticky, or round robin. All three
+  modes apply the one global card order only after filtering incompatible,
+  disabled, cooling, or already-failed cards. Only one base mode is active at
+  a time.
+- **Conversation sticky** — an overlay switch, not a fourth routing mode.
+  When on, the gateway prefers the `X-OCG-Conversation-Id` request header;
+  without it, it uses a prompt fingerprint (system / tools / first user
+  message). If no conversation key can be built, the base routing mode is
+  used. Similar prompts may share a binding.
+
 **Add account** first distinguishes an existing connection from a new service. Existing connections use the same projection as **Providers**: built-in Providers that still have at least one account, and every saved user-defined Provider (with or without a Key). Deleting the last account of a built-in family removes it from existing connections and returns it to the new-service templates. Choose an existing connection to add another Key using its saved address, protocol and models. Choose a new service to browse unused built-in templates, Plan/API presets, Custom API, or a platform site; saving a preset creates a Provider and its first account together. **Providers → Add Provider** opens this same chooser. Saving a preset from **Add account** uses the same onboarding commit as **Providers**. Connection summaries remain visible before entering a Key. Regional variants use a compact picker. Keys are stored by the account service; you can add one here or from a Provider's detail with **Add Key**.
 
-Provider choices are projected in the exact order returned by the V4 destination and catalog projection, and `provider_id` is the chooser, filter, dialog, and cache key. A successful empty catalog stays empty. If the catalog cannot be loaded, only the OpenCode Go creation form remains available; an existing Zen Free singleton can still be displayed, while every other built-in, Custom, and user-defined entry fails closed. Names, Plan/API grouping, creation status, and form fields come from each catalog row. After the first ready account for a sealed Provider is saved, the dashboard consults that Provider's existing contract capability before refreshing its model catalog; another Key does not refresh again. A capability or refresh failure never rolls back the saved account and can be retried from **Providers → Refresh model catalog**.
+Provider choices come from the V4 destination and catalog projection; the chooser lists them by name, with Custom API first when adding a new service. `provider_id` is the chooser, filter, dialog, and cache key. A successful empty catalog stays empty. If the catalog cannot be loaded, only the OpenCode Go creation form remains available; an existing Zen Free singleton can still be displayed, while every other built-in, Custom, and user-defined entry fails closed. Names, offering types, creation status, and form fields come from each catalog row. The chooser has no Plan/API sections. After the first ready account for a sealed Provider is saved, the dashboard consults that Provider's existing contract capability before refreshing its model catalog; another Key does not refresh again. A capability or refresh failure never rolls back the saved account and can be retried from **Providers → Refresh model catalog**.
 
 **Enabled** means the account may enter routing. New ready Key accounts, including Custom API and user-defined Providers, start enabled. Test connection does not change the switch. Already-enabled or disabled accounts stay as stored. Test results stay in the test dialog. User-defined Providers have no modeled subscription period, including those created from Plan presets: their accounts do not show an inferred purchase date, expiry countdown, or expiry alert. Existing stored purchase anchors are preserved for compatibility, but are not presented as confirmed billing facts.
 

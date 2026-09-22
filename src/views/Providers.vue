@@ -30,6 +30,12 @@
             :placeholder="t('搜索供应商')"
             :input-props="{ 'aria-label': t('搜索供应商') }"
           />
+          <n-select
+            v-model:value="providerSort"
+            size="small"
+            :options="providerSortOptions"
+            :aria-label="t('排序')"
+          />
         </div>
         <div class="providers-rail-list">
           <n-menu
@@ -60,6 +66,12 @@
 
       <div class="providers-main">
         <div class="providers-mobile-nav">
+          <n-select
+            v-model:value="providerSort"
+            size="small"
+            :options="providerSortOptions"
+            :aria-label="t('排序')"
+          />
           <n-select
             :value="addStage ? ADD_SELECT_VALUE : selectedRailKey"
             :options="mobileSelectOptions"
@@ -682,6 +694,7 @@
 </template>
 
 <script setup lang="ts">
+import { PROVIDER_SORT_KEYS, sortProvidersByName, type ProviderSort } from "../domain/provider-sort.ts";
 import { computed, h, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from "vue";
 import {
   NAlert,
@@ -827,13 +840,18 @@ const inlineFormBusy = ref(false);
 /** Add flow shown in the main pane; the rail selection is kept underneath. */
 const addStage = ref<ProviderAddStage | null>(null);
 const railQuery = ref("");
+const providerSort = ref<ProviderSort>("name_asc");
+const providerSortOptions = computed(() => Object.entries(PROVIDER_SORT_KEYS).map(([value, key]) => ({
+  value, label: t(key),
+})));
+const sortedConnections = computed(() => sortProvidersByName(connections.value, (item) => item.name, providerSort.value));
 const loading = ref(false);
 const loadError = ref("");
 const selectedConnectionId = ref<string | null>(null);
 const selectedDestinationId = ref<string | null>(null);
 const destinations = computed(() => destinationsStore.destinations);
 const railDestinations = computed(() => (
-  destinations.value.filter(isProvidersRailDestination)
+  sortProvidersByName(destinations.value.filter(isProvidersRailDestination), (item) => item.name, providerSort.value)
 ));
 const selectedRailKey = computed(() => selectedConnectionId.value ?? selectedDestinationId.value);
 const lastCommittedConnectionId = ref<string | null>(null);
@@ -1053,7 +1071,7 @@ const railOptions = computed<MenuOption[]>(() => {
       };
     });
   }
-  return filterConnections(connections.value, railQuery.value).map((item) => ({
+  return filterConnections(sortedConnections.value, railQuery.value).map((item) => ({
     key: item.id,
     label: item.name,
     icon: () => h(ProviderBrandMark, {
@@ -1085,7 +1103,7 @@ const mobileSelectOptions = computed<SelectOption[]>(() => {
       : item.name;
   };
   return [
-    ...connections.value.map((item) => ({
+    ...sortedConnections.value.map((item) => ({
       value: item.id,
       label: labelFor(item),
     })),
@@ -2157,6 +2175,9 @@ onUnmounted(() => {
   background: var(--ocg-surface);
 }
 .providers-rail-search {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ocg-space-sm);
   flex: none;
   padding: 0 var(--ocg-space-sm) var(--ocg-space-sm);
 }
@@ -2317,7 +2338,8 @@ onUnmounted(() => {
     overflow: visible;
   }
   .providers-mobile-nav {
-    display: block;
+    display: grid;
+    gap: var(--ocg-space-sm);
   }
   .providers-catalog-head {
     align-items: stretch;

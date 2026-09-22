@@ -52,6 +52,19 @@ test("settings conflict merge preserves local edits and accepts unrelated remote
   assert.equal(merged.non_stream_timeout_secs, 1_200);
 });
 
+test("settings drafts adopt routing controls owned by Accounts", () => {
+  const saved = config();
+  const current = config({ routing_mode: "sticky-global", conversation_sticky: false, connect_timeout_secs: 45 });
+  const latest = config({ revision: 2, routing_mode: "round-robin", conversation_sticky: true });
+
+  const merged = mergeUnsavedSettings(latest, current, saved);
+
+  assert.equal(merged.routing_mode, "round-robin");
+  assert.equal(merged.conversation_sticky, true);
+  assert.equal(merged.connect_timeout_secs, 45);
+  assert.equal(merged.revision, 2);
+});
+
 test("settings conflict merge adopts the remote OpenCode Go invite URL", () => {
   const saved = config();
   const current = config({

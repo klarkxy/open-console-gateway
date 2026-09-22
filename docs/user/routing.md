@@ -8,7 +8,7 @@ On **Accounts**, card order followed by Key order inside each card is the saved 
 
 ### Newly discovered OpenCode Go models
 
-Refresh the model catalog on Providers, then explicitly enable newly discovered models and select the supported upstream protocol. Models in the saved Go catalog use their effective model contract even when no checked-in alias/protocol profile exists. Diagnostic planning cannot reject such models merely for being new. This does not enable unknown, disabled or removed models, and does not probe protocols during inference. A local catalog/protocol test is not proof that a live account has access to the model.
+Refresh the model catalog on Providers. Newly discovered models are enabled automatically when a supported upstream protocol is known; models without protocol evidence remain unavailable until that evidence exists. Models in the saved Go catalog use their effective model contract even when no checked-in alias/protocol profile exists. Diagnostic planning cannot reject such models merely for being new. This does not re-enable models you explicitly disabled or removed, and does not probe protocols during inference. A local catalog/protocol test is not proof that a live account has access to the model.
 
 ### Recognized quota versus temporary 429
 

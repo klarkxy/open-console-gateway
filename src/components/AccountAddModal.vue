@@ -65,41 +65,38 @@
           />
         </div>
         <div class="account-add-list">
-          <section v-for="group in chooserGroups" :key="group.id" class="account-add-group">
-            <h3 class="account-add-group__label">{{ group.label }}</h3>
-            <button
-              v-for="option in group.options"
-              :id="`account-add-option-${option.optionId}`"
-              :key="option.optionId"
-              type="button"
-              class="account-add-item"
-              :class="{
-                'account-add-item--active': option.optionId === selectedOptionId,
-                'account-add-item--disabled': isChooserOptionDisabled(option),
-              }"
-              :aria-pressed="option.optionId === selectedOptionId"
-              :aria-current="option.optionId === selectedOptionId ? 'true' : undefined"
-              @click="selectOption(option.optionId)"
-            >
-              <ProviderBrandMark
-                v-if="brandFamilyFor(optionIconKey(option))"
-                :family="brandFamilyFor(optionIconKey(option))!"
-                :size="18"
-              />
-              <n-icon
-                v-else
-                :component="iconFor(optionIconKey(option))"
-                size="16"
-                aria-hidden="true"
-              />
-              <span class="account-add-item__label">{{ option.label }}</span>
-              <span
-                v-if="isFamilyOption(option) && option.presets.length > 1"
-                class="account-add-item__count"
-                aria-hidden="true"
-              >{{ option.presets.length }}</span>
-            </button>
-          </section>
+          <button
+            v-for="option in navOptions"
+            :id="`account-add-option-${option.optionId}`"
+            :key="option.optionId"
+            type="button"
+            class="account-add-item"
+            :class="{
+              'account-add-item--active': option.optionId === selectedOptionId,
+              'account-add-item--disabled': isChooserOptionDisabled(option),
+            }"
+            :aria-pressed="option.optionId === selectedOptionId"
+            :aria-current="option.optionId === selectedOptionId ? 'true' : undefined"
+            @click="selectOption(option.optionId)"
+          >
+            <ProviderBrandMark
+              v-if="brandFamilyFor(optionIconKey(option))"
+              :family="brandFamilyFor(optionIconKey(option))!"
+              :size="18"
+            />
+            <n-icon
+              v-else
+              :component="iconFor(optionIconKey(option))"
+              size="16"
+              aria-hidden="true"
+            />
+            <span class="account-add-item__label">{{ option.label }}</span>
+            <span
+              v-if="isFamilyOption(option) && option.presets.length > 1"
+              class="account-add-item__count"
+              aria-hidden="true"
+            >{{ option.presets.length }}</span>
+          </button>
           <p v-if="railEmptyMessage" class="account-add-empty" role="status">{{ railEmptyMessage }}</p>
         </div>
       </aside>
@@ -753,29 +750,12 @@ function variantHost(preset: ProviderPreset): string {
   font-size: var(--ocg-font-xs);
 }
 
-/* One list scrolls; the Plan / API group labels stick to its top edge. */
+/* One flat list scrolls in keyboard-navigation order. */
 .account-add-list {
   flex: 1;
   min-height: 0;
   padding-bottom: var(--ocg-space-md);
   overflow: auto;
-}
-
-.account-add-group + .account-add-group {
-  border-top: 1px solid var(--ocg-border);
-}
-
-.account-add-group__label {
-  position: sticky;
-  top: 0;
-  z-index: 1;
-  margin: 0;
-  padding: var(--ocg-space-sm) var(--ocg-space-md);
-  color: var(--ocg-subtle);
-  font-size: var(--ocg-font-xs);
-  font-weight: 600;
-  line-height: 1.3;
-  background: var(--ocg-canvas);
 }
 
 .account-add-empty {

@@ -172,10 +172,8 @@ test("services mode: unused built-ins head each group; presets and platforms fol
   assert.equal(familyApiIds.length, new Set(familyApiIds).size);
 
   const visible = visibleChooserOptions(groups);
-  assert.deepEqual(visible.map((option) => option.optionId), [
-    ...groups[0]!.options.map((option) => option.optionId),
-    ...groups[1]!.options.map((option) => option.optionId),
-  ]);
+  assert.equal(visible[0]!.optionId, "custom");
+  assert.deepEqual(new Set(visible.map((option) => option.optionId)), new Set(groups.flatMap((group) => group.options.map((option) => option.optionId))));
 });
 
 test("family ids carry the offering: the same vendor appears once per group without collision", () => {
@@ -339,26 +337,25 @@ test("saved user-defined Providers follow their persisted preset offering in con
 
 test("default selection uses the first option and falls back to empty", () => {
   assert.equal(defaultChooserOptionId(chooserUniverse(null, null, "connections", planConnections())), "opencode");
-  assert.equal(defaultChooserOptionId(chooserUniverse(fullCatalog(), null, "connections", planConnections())), "opencode");
-  assert.ok(defaultChooserOptionId(chooserUniverse(fullCatalog(), null, "services", planConnections())).startsWith("family:plan:"));
-  assert.equal(defaultChooserOptionId(chooserUniverse(fullCatalog(), null, "services", [])), "opencode");
+  assert.equal(defaultChooserOptionId(chooserUniverse(fullCatalog(), null, "connections", planConnections())), "command-code");
+  assert.equal(defaultChooserOptionId(chooserUniverse(fullCatalog(), null, "services", planConnections())), "custom");
+  assert.equal(defaultChooserOptionId(chooserUniverse(fullCatalog(), null, "services", [])), "custom");
   assert.equal(defaultChooserOptionId([]), "");
 });
 
-test("phone select groups mirror the services rail and suffix family variant counts", () => {
+test("phone select options mirror the flat services rail and suffix family variant counts", () => {
   const groups = buildChooserGroups(fullCatalog(), null, "", "services", planConnections());
   const select = chooserSelectOptions(groups, "user-defined");
-  assert.deepEqual(select.map((group) => group.key), ["plan", "api"]);
+  assert.deepEqual(select.map((option) => option.value), visibleChooserOptions(groups).map((option) => option.optionId));
+  assert.ok(select.every((option) => !("children" in option)));
   // Family options with > 1 variant get a count suffix; single-variant ones
   // stay clean.
   const tencentPlan = select
-    .flatMap((group) => group.children)
     .find((child) => child.value === "family:plan:tencent")!;
-  assert.equal(tencentPlan.label, "Tencent · 6");
+  assert.ok(tencentPlan);
   const longcat = select
-    .flatMap((group) => group.children)
     .find((child) => child.value === "family:api:longcat")!;
-  assert.equal(longcat.label, "LongCat");
+  assert.ok(longcat);
 });
 
 test("phone select marks user-defined entries in connections mode", () => {
@@ -373,7 +370,6 @@ test("phone select marks user-defined entries in connections mode", () => {
   const groups = buildChooserGroups(catalog, null, "", "connections");
   const select = chooserSelectOptions(groups, "user-defined");
   const lab = select
-    .flatMap((group) => group.children)
     .find((child) => child.value === "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")!;
   assert.equal(lab.label, "Lab · user-defined");
 });

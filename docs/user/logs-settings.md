@@ -57,20 +57,13 @@ changes the quota-debit multiplier.
 
 ## Settings
 
+Routing mode and conversation sticky are configured on **Accounts**, above the account list; see [Accounts](accounts.md).
+
 The **Settings** view holds the gateway's persistent configuration:
 
 - **Gateway Port** — the port the gateway binds (default `9042`). Desktop builds
   also accept the read-only `OCG_GATEWAY_PORT` runtime override; while it is set,
   the Settings field is disabled and the saved value is unchanged.
-- **Routing mode** — strict priority, global sticky, or round robin. All three
-  modes apply the one global card order only after filtering incompatible,
-  disabled, cooling, or already-failed cards. Only one base mode is active at
-  a time.
-- **Conversation sticky** — an overlay switch, not a fourth routing mode.
-  When on, the gateway prefers the `X-OCG-Conversation-Id` request header;
-  without it, it uses a prompt fingerprint (system / tools / first user
-  message). If no conversation key can be built, the base routing mode is
-  used. Similar prompts may share a binding.
 - **Outbound proxy** — shared by every account. Automatic, manual, and force
   direct apply one process-wide policy; **Per-model list** (below) splits chat
   forwarding by model instead.

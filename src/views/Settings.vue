@@ -178,49 +178,6 @@
             <template #unchecked>{{ t("关闭") }}</template>
           </n-switch>
         </section>
-        <section class="settings-subsection" aria-labelledby="routing-title">
-          <h3 id="routing-title">{{ t("账号路由") }}</h3>
-          <n-radio-group
-            v-model:value="config.routing_mode"
-            name="routing-mode"
-            class="routing-mode-group"
-            :disabled="!loaded || saving"
-          >
-            <div
-              v-for="option in routingModeOptions"
-              :key="option.value"
-              class="routing-option"
-              :class="{ 'routing-option--selected': config.routing_mode === option.value }"
-            >
-              <n-radio
-                :value="option.value"
-                :aria-label="t(option.label)"
-                :aria-describedby="`routing-option-desc-${option.value}`"
-              >
-                <span class="routing-option-title">{{ t(option.label) }}</span>
-              </n-radio>
-              <div :id="`routing-option-desc-${option.value}`">
-                <p class="field-caption">{{ t(option.behavior) }}</p>
-              </div>
-            </div>
-          </n-radio-group>
-          <div class="routing-sticky">
-            <div class="routing-sticky-head">
-              <span class="routing-option-title">{{ t("对话粘性") }}</span>
-              <n-switch
-                v-model:value="config.conversation_sticky"
-                :aria-label="t('对话粘性')"
-                :disabled="!loaded || saving"
-              >
-                <template #checked>{{ t("开启") }}</template>
-                <template #unchecked>{{ t("关闭") }}</template>
-              </n-switch>
-            </div>
-            <p class="field-caption">
-              {{ t("同一对话尽量走同一账号。可带 X-OCG-Conversation-Id，否则用 Prompt 指纹。") }}
-            </p>
-          </div>
-        </section>
         <section class="settings-subsection" aria-labelledby="request-timeout-title">
           <h3 id="request-timeout-title">{{ t("请求超时") }}</h3>
           <n-form-item :label="t('连接超时')">
@@ -455,7 +412,6 @@ import { useSettingsStore } from "../stores/settings.ts";
 import type {
   AppConfig,
   ProxyMode,
-  RoutingMode,
   UpdateCheckResult,
   UpdateStatus,
 } from "../api/dashboard";
@@ -539,36 +495,6 @@ const config = ref<AppConfig>({
   routing_mode: "strict-priority",
   conversation_sticky: false,
 });
-
-const routingModeOptions: Array<{
-  value: RoutingMode;
-  label: MessageKey;
-  behavior: MessageKey;
-  pros: MessageKey;
-  cons: MessageKey;
-}> = [
-  {
-    value: "strict-priority",
-    label: "严格优先级",
-    behavior: "每次新请求按账号排序选择第一个可用账号。",
-    pros: "优点：行为确定，高优先级账号恢复后立即接管。",
-    cons: "缺点：冷却恢复可能切换账号，影响按凭据隔离的 prompt cache。",
-  },
-  {
-    value: "sticky-global",
-    label: "全局粘性",
-    behavior: "无对话绑定时优先沿用当前全局账号，不可用时再按排序切换。",
-    pros: "优点：低并发时更容易保持 prompt cache，不会因高优先级恢复而无谓抢切。",
-    cons: "缺点：所有并发对话共享一个账号，恢复后不会自动抢回流量。",
-  },
-  {
-    value: "round-robin",
-    label: "轮询",
-    behavior: "每个新请求从上次位置之后循环选择下一个可用账号。",
-    pros: "优点：多账号可用时分摊请求、额度和风险。",
-    cons: "缺点：账号切换最频繁，prompt cache 命中通常较差，且不是加权均衡。",
-  },
-];
 
 const proxyModeHelp = computed(() => {
   const help: Record<ProxyMode, MessageKey> = {
@@ -792,16 +718,12 @@ async function saveSettings() {
   saving.value = true;
   const payload = { ...config.value };
   const saved = savedConfig.value ? { ...savedConfig.value } : null;
-  const routingChanged = !!savedConfig.value && (
-    savedConfig.value.routing_mode !== payload.routing_mode
-    || savedConfig.value.conversation_sticky !== payload.conversation_sticky
-  );
   try {
     const result = await settingsStore.putPresented(payload);
     payload.revision = result.revision;
     config.value.revision = result.revision;
     savedConfig.value = { ...payload };
-    message.success(routingChanged ? t("设置已保存；运行时路由状态已重置") : t("设置已保存"));
+    message.success(t("设置已保存"));
   } catch (e) {
     if (!(await reloadSettingsAfterConflict(e, payload, saved))) {
       message.error(t("保存失败：{error}", { error: String(e) }));
@@ -1365,50 +1287,6 @@ onUnmounted(() => {
   font-size: var(--ocg-font-xs);
   color: var(--ocg-subtle);
   line-height: 1.4;
-}
-.routing-intro {
-  margin: var(--ocg-space-sm) 0 var(--ocg-space-md);
-}
-.routing-mode-group {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  width: 100%;
-}
-.routing-option {
-  display: flex;
-  flex-direction: column;
-  gap: var(--ocg-space-xs);
-  padding: var(--ocg-space-md);
-  border: 1px solid var(--ocg-border);
-  border-radius: var(--ocg-radius-md);
-  background: var(--ocg-panel-soft, transparent);
-}
-.routing-option--selected {
-  border-color: var(--ocg-accent, var(--ocg-border));
-}
-.routing-option-title {
-  color: var(--ocg-ink);
-  font-weight: 600;
-}
-.routing-option .field-caption {
-  margin: 0;
-  padding-left: var(--ocg-space-xl);
-}
-.routing-sticky {
-  display: flex;
-  flex-direction: column;
-  gap: var(--ocg-space-sm);
-  margin-top: 14px;
-  padding: var(--ocg-space-md);
-  border: 1px solid var(--ocg-border);
-  border-radius: var(--ocg-radius-md);
-}
-.routing-sticky-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--ocg-space-md);
 }
 .theme-grid {
   display: grid;

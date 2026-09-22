@@ -786,8 +786,8 @@ async fn provider_model_refresh_keeps_go_and_command_catalog_requests_keyless() 
         .filter_map(|item| item["id"].as_str())
         .collect::<Vec<_>>();
     assert!(
-        !listed_ids.contains(&"glm-5.3"),
-        "refreshed catalog IDs stay unpublished until their protocol is enabled: {listed_ids:?}"
+        listed_ids.contains(&"glm-5.3"),
+        "new catalog IDs with protocol evidence are enabled and published: {listed_ids:?}"
     );
     assert!(
         !harness
@@ -804,7 +804,7 @@ async fn provider_model_refresh_keeps_go_and_command_catalog_requests_keyless() 
     );
     assert!(
         !listed_ids.contains(&"future-go-model"),
-        "unknown protocols stay visible in Provider catalog but fail closed for routing"
+        "catalog IDs without protocol evidence stay visible but fail closed for routing"
     );
 
     let goat_origin = start_origin(StatusCode::OK, GOAT_MODELS_BODY, Duration::ZERO).await;
@@ -872,7 +872,7 @@ async fn provider_model_refresh_keeps_go_and_command_catalog_requests_keyless() 
 }
 
 #[tokio::test]
-async fn unified_catalog_refresh_with_an_enabled_account_is_keyless_and_defaults_new_models_off() {
+async fn unified_catalog_refresh_leaves_new_models_auto_without_protocol_evidence() {
     let harness = start_loopback("unified-provider-catalog-refresh").await;
     force_direct_proxy(&harness);
     let go_origin = start_origin(
@@ -940,7 +940,7 @@ async fn unified_catalog_refresh_with_an_enabled_account_is_keyless_and_defaults
         .expect("new official model stays visible");
     assert_eq!(future["routable"], false);
     for protocol in ["chat_completions", "responses", "messages"] {
-        assert_eq!(future["protocols"][protocol]["override"], "force_off");
+        assert_eq!(future["protocols"][protocol]["override"], "auto");
         assert_eq!(future["protocols"][protocol]["enabled"], false);
     }
 
@@ -1020,8 +1020,8 @@ async fn unified_catalog_refresh_with_a_disabled_account_remains_keyless() {
 }
 
 #[tokio::test]
-async fn command_code_contract_refresh_defaults_new_rows_off_and_legacy_route_stays_wire_compatible()
- {
+async fn command_code_contract_refresh_leaves_undocumented_rows_unavailable_and_keeps_legacy_wire()
+{
     let harness = start_loopback("command-code-contract-catalog-refresh").await;
     force_direct_proxy(&harness);
     let origin = start_origin(
@@ -1073,11 +1073,11 @@ async fn command_code_contract_refresh_defaults_new_rows_off_and_legacy_route_st
     assert_eq!(discovered["routable"], false);
     assert_eq!(
         discovered["protocols"]["chat_completions"]["override"],
-        "force_off"
+        Value::Null
     );
     assert_eq!(
         discovered["protocols"]["chat_completions"]["enabled"],
-        false
+        Value::Null
     );
 
     let (status, legacy) = send_json(

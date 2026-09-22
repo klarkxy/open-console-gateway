@@ -21,6 +21,12 @@ export const ROUTING_MODE_KEYS = {
   "round-robin": "轮询",
 } as const satisfies Record<RoutingMode, MessageKey>;
 
+export const ROUTING_MODE_DESCRIPTION_KEYS = {
+  "strict-priority": "每次新请求按账号排序选择第一个可用账号。",
+  "sticky-global": "无对话绑定时优先沿用当前全局账号，不可用时再按排序切换。",
+  "round-robin": "每个新请求从上次位置之后循环选择下一个可用账号。",
+} as const satisfies Record<RoutingMode, MessageKey>;
+
 export const ROUTING_CHANNEL_KEYS = {
   go: "Go 通道",
   free: "Free 通道",

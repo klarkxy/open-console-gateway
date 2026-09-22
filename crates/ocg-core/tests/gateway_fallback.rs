@@ -2330,21 +2330,21 @@ async fn goat_loopback_adapter_routes_all_client_formats_with_its_own_auth_contr
             .all(|call| call.authorization.as_deref() == Some("Bearer goat-key"))
     );
     assert!(captured.iter().all(|call| call.x_api_key.is_none()));
-    assert!(
-        captured
-            .iter()
-            .all(|call| call.path == "/provider/v1/chat/completions"),
-        "{:?}",
+    assert_eq!(
         captured
             .iter()
             .map(|call| call.path.as_str())
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>(),
+        [
+            "/provider/v1/chat/completions",
+            "/provider/v1/responses",
+            "/provider/v1/chat/completions",
+            "/provider/v1/chat/completions",
+        ]
     );
     assert!(
-        captured
-            .iter()
-            .all(|call| !call.path.contains("/responses") && !call.path.contains("/messages")),
-        "GOAT must not emit /responses or /messages: {:?}",
+        captured.iter().all(|call| !call.path.contains("/messages")),
+        "this GOAT model must not emit /messages: {:?}",
         captured
             .iter()
             .map(|call| call.path.as_str())
@@ -2362,17 +2362,28 @@ async fn goat_loopback_adapter_routes_all_client_formats_with_its_own_auth_contr
             && log.credential_account_id.as_deref() == Some(goat_id.as_str())
             && log.model == COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM
     }));
-    assert!(logs.iter().all(|log| {
-        log.status == "success_unpriced"
-            && log.cost_state == "unpriced"
-            && log.cost.is_none()
-            && log.raw_cost_usd.is_none()
-            && log.quota_debit.is_none()
-            && log.effective_paid_cost_usd.is_none()
-            && log.pricing_revision_id.is_none()
-            && log.quota_multiplier.is_none()
-            && log.local_adjustment_multiplier.is_none()
-    }));
+    assert!(
+        logs.iter().all(|log| {
+            matches!(
+                (log.status.as_str(), log.cost_state.as_str()),
+                ("success_unpriced", "unpriced") | ("success_no_usage", "usage_missing")
+            ) && log.cost.is_none()
+                && log.raw_cost_usd.is_none()
+                && log.quota_debit.is_none()
+                && log.effective_paid_cost_usd.is_none()
+                && log.pricing_revision_id.is_none()
+                && log.quota_multiplier.is_none()
+                && log.local_adjustment_multiplier.is_none()
+        }),
+        "{logs:#?}"
+    );
+    assert_eq!(
+        logs.iter()
+            .filter(|log| log.status == "success_no_usage")
+            .count(),
+        1,
+        "native Responses mock has no usage while converted Chat responses do: {logs:#?}"
+    );
 }
 
 #[tokio::test]
@@ -2390,11 +2401,18 @@ async fn disabled_goat_protocol_fails_locally_without_upstream() {
         .lock()
         .set_model_protocol_overrides(
             &ocg_core::provider_contracts::ContractScope::provider(COMMAND_CODE_PROVIDER_ID),
-            &[(
-                COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM.into(),
-                ocg_core::provider::UpstreamProtocolKind::ChatCompletions,
-                ocg_core::provider_contracts::ProtocolOverrideState::ForceOff,
-            )],
+            &[
+                (
+                    COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM.into(),
+                    ocg_core::provider::UpstreamProtocolKind::ChatCompletions,
+                    ocg_core::provider_contracts::ProtocolOverrideState::ForceOff,
+                ),
+                (
+                    COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM.into(),
+                    ocg_core::provider::UpstreamProtocolKind::Responses,
+                    ocg_core::provider_contracts::ProtocolOverrideState::ForceOff,
+                ),
+            ],
             Utc::now(),
         )
         .unwrap();
