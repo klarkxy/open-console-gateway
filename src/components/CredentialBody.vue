@@ -58,6 +58,7 @@
 </template>
 
 <script setup lang="ts">
+import { useDestinationsStore } from "../stores/destinations.ts";
 import { computed } from "vue";
 import { NButton } from "naive-ui";
 import type { Account } from "../api/dashboard";
@@ -115,7 +116,9 @@ const emit = defineEmits<{
   "open-wizard": [];
 }>();
 
-const capabilities = computed(() => accountCapabilities(props.account, props.catalog));
+const destinations = useDestinationsStore();
+const destination = computed(() => destinations.destinationForAccount(props.account.id));
+const capabilities = computed(() => accountCapabilities(props.account, props.catalog, destination.value));
 const showsModelCount = computed(() => (
   capabilities.value.endpointOnAccount && !props.hideModelCount
 ));

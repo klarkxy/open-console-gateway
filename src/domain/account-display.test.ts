@@ -1,3 +1,4 @@
+import type { AccountCapabilitySource } from "./account-capabilities.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { Account, AccountSetupStep } from "../api/dashboard.ts";
@@ -392,6 +393,7 @@ test("destination type label follows destination capabilities", () => {
     testable: true,
   };
   assert.equal(destinationTypeLabel({
+    account_controls: { toggleWrite: "account", configurationOwner: "destination", consoleLink: null, browserProfile: false },
     adapter: "cpa",
     auth_scheme: "none",
     brand_family: null,
@@ -401,6 +403,7 @@ test("destination type label follows destination capabilities", () => {
     plan: null,
   }).kind, "cpa");
   assert.equal(destinationTypeLabel({
+    account_controls: { toggleWrite: "account", configurationOwner: "destination", consoleLink: null, browserProfile: false },
     adapter: "zen",
     auth_scheme: "none",
     brand_family: "OpenCode",
@@ -410,6 +413,7 @@ test("destination type label follows destination capabilities", () => {
     plan: null,
   }).kind, "keyless");
   const named = destinationTypeLabel({
+    account_controls: { toggleWrite: "account", configurationOwner: "destination", consoleLink: null, browserProfile: false },
     adapter: "http",
     auth_scheme: "bearer",
     brand_family: null,
@@ -420,4 +424,32 @@ test("destination type label follows destination capabilities", () => {
   });
   assert.equal(named.kind, "plan");
   if (named.kind === "plan") assert.equal(named.label, "lab.example");
+});
+
+test("account menus consume destination actions even when the legacy identity disagrees", () => {
+  const destination: AccountCapabilitySource = {
+    account_controls: { toggleWrite: "account", configurationOwner: "destination", consoleLink: "ollama", browserProfile: false },
+    auth_scheme: "bearer", max_credentials: 1, plan: null,
+    capabilities: { testable: true, managed_signup: false, external_integration: false, billing_tier_required: false },
+  };
+  const account = draftAccount({ provider_id: "opencode", plan_routable: true, enabled: true });
+  const keys = accountMenuOptions(account, Date.now(), null, destination).map((option) => option.key);
+  assert.ok(keys.includes("open-site"));
+  assert.ok(!keys.includes("open-console"));
+  assert.ok(!keys.includes("reset-profile"));
+  assert.deepEqual(accountMenuOptions(account, Date.now(), null, {
+    ...destination, capabilities: { ...destination.capabilities, external_integration: true },
+  }).map((option) => option.key), ["open-cpa"]);
+});
+
+test("generic keyless singleton retains its declared account lifecycle actions", () => {
+  const destination: AccountCapabilitySource = {
+    account_controls: { toggleWrite: "account", configurationOwner: "destination", consoleLink: null, browserProfile: false },
+    auth_scheme: "none", max_credentials: 1, plan: null,
+    capabilities: { testable: true, managed_signup: false, external_integration: false, billing_tier_required: false },
+  };
+  const row = draftAccount({ provider_id: "generic", credential_kind: "none", enabled: true, plan_routable: true });
+  const keys = accountMenuOptions(row, Date.now(), null, destination).map((option) => option.key);
+  assert.ok(keys.includes("edit"));
+  assert.ok(keys.includes("delete"));
 });

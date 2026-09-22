@@ -66,6 +66,7 @@
 </template>
 
 <script setup lang="ts">
+import { useDestinationsStore } from "../stores/destinations.ts";
 import { computed } from "vue";
 import type { Account, UsageWindow } from "../api/dashboard";
 import type { Identity } from "../api/identities.ts";
@@ -128,10 +129,12 @@ const emit = defineEmits<{
   "usage-save": [key: UsageKey];
 }>();
 
-const capabilities = computed(() => accountCapabilities(props.account, props.catalog));
+const destinations = useDestinationsStore();
+const destination = computed(() => destinations.destinationForAccount(props.account.id));
+const capabilities = computed(() => accountCapabilities(props.account, props.catalog, destination.value));
 const brandFamily = computed(() => accountBrandFamily(props.account, props.catalog));
 const typeLabel = computed(() => (
-  accountTypeLabelText(accountTypeLabel(props.account, props.catalog))
+  accountTypeLabelText(accountTypeLabel(props.account, props.catalog, destination.value))
 ));
 const isDraft = computed(() => (
   accountIsReady(props.account)

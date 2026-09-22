@@ -55,6 +55,7 @@ function destinationDto(
   } = {},
 ): DestinationDto {
   return {
+    accountControls: { toggleWrite: "account", configurationOwner: "destination", consoleLink: null, browserProfile: false },
     adapter: "http",
     authScheme: "bearer",
     baseUrl: extra.baseUrl ?? "https://lab.example/v1",
@@ -166,6 +167,8 @@ test("destinations store: a stale slower load does not clobber a newer one", asy
   await second;
   assert.equal(store.destinations[0]?.id, "dest-b");
   assert.equal(store.credentialsByLegacyAccountId.get("acc-b")?.destination_id, "dest-b");
+  assert.equal(store.destinationForAccount("acc-b")?.id, "dest-b");
+  assert.equal(store.destinationForAccount("absent"), null);
   assert.deepEqual(store.expectation, { expectedRevision: 8, processGeneration: 99 });
   assert.equal(store.loading, false);
 
@@ -174,6 +177,8 @@ test("destinations store: a stale slower load does not clobber a newer one", asy
   assert.equal(store.destinations[0]?.id, "dest-b");
   assert.equal(store.byId.get("dest-a"), undefined);
   assert.equal(store.credentialsByLegacyAccountId.get("acc-a"), undefined);
+  assert.equal(store.destinationForAccount("acc-a"), null);
+  assert.equal(store.destinationForAccount("acc-b")?.id, "dest-b");
   assert.equal(store.error, "");
 });
 

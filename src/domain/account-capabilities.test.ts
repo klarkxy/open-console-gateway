@@ -115,7 +115,7 @@ const CUSTOM_API: AccountCapabilities = {
 const USER_DEFINED: AccountCapabilities = {
   toggleWrite: "account",
   testable: true,
-  hasExpiry: true,
+  hasExpiry: false,
   endpointOnAccount: false,
   managedSignup: false,
   externalIntegration: false,
@@ -129,7 +129,7 @@ const USER_DEFINED: AccountCapabilities = {
 const CPA: AccountCapabilities = {
   toggleWrite: "account",
   testable: false,
-  hasExpiry: true,
+  hasExpiry: false,
   endpointOnAccount: false,
   managedSignup: false,
   externalIntegration: true,
@@ -182,7 +182,7 @@ test("custom API capabilities mark the endpoint as account-owned", () => {
   );
 });
 
-test("user-defined provider capabilities stay generic and keep catalog expiry", () => {
+test("user-defined provider capabilities stay generic and have no inferred expiry", () => {
   assert.deepEqual(
     accountCapabilities(
       { id: "lab-1", provider_id: LAB_PROVIDER_ID, account_type: "key" },
@@ -258,111 +258,83 @@ test("catalog-null fallbacks match catalog-present results for built-in kinds", 
   );
 });
 
-function destinationFixture(
-  overrides: Partial<Destination> = {},
-): Pick<Destination, "adapter" | "auth_scheme" | "capabilities" | "max_credentials" | "plan"> {
+const DEFAULT_CONTROLS: Destination["account_controls"] = {
+  toggleWrite: "account", configurationOwner: "destination", consoleLink: null, browserProfile: false,
+};
+const monthly: NonNullable<Destination["plan"]> = {
+  expiry_cadence: "monthly", manual_calibration: false, pricing_source: "official",
+  usage_source: "official_api", windows: [{ kind: "month" }],
+};
+function destinationFixture(overrides: Partial<Destination> = {}): Destination {
   return {
-    adapter: "http",
-    auth_scheme: "bearer",
+    id: "destination", name: "Destination", adapter: "http", legacy: { kind: "dynamic", id: "provider" },
+    account_controls: DEFAULT_CONTROLS, auth_scheme: "bearer", base_url: null, brand_family: null,
+    catalog: [], enabled: true, observer_credential_id: null, protocols: [],
     capabilities: {
-      billing_tier_required: false,
-      discoverable_models: false,
-      external_integration: false,
-      identity_headers: false,
-      managed_signup: false,
-      observer: false,
-      official_balance_probe: [],
-      redirect_policy: "no_follow",
-      testable: true,
+      billing_tier_required: false, discoverable_models: false, external_integration: false,
+      identity_headers: false, managed_signup: false, observer: false, official_balance_probe: [],
+      redirect_policy: "no_follow", testable: true,
     },
-    max_credentials: null,
-    plan: null,
-    ...overrides,
+    max_credentials: null, plan: null, ...overrides,
   };
 }
 
-test("destination capabilities read sealed flags, not account identity", () => {
-  const monthly = {
-    expiry_cadence: "monthly" as const,
-    manual_calibration: false,
-    pricing_source: "official" as const,
-    usage_source: "official_api" as const,
-    windows: [{ kind: "month" as const }],
-  };
-  assert.deepEqual(
-    destinationCapabilities(destinationFixture({
-      adapter: "opencode_go",
-      capabilities: {
-        billing_tier_required: false,
-        discoverable_models: false,
-        external_integration: false,
-        identity_headers: true,
-        managed_signup: true,
-        observer: false,
-        official_balance_probe: [],
-        redirect_policy: "no_follow",
-        testable: true,
-      },
-      plan: monthly,
-    })),
-    PLAN_GO,
-  );
-  assert.deepEqual(
-    destinationCapabilities(destinationFixture({
-      adapter: "http",
-      max_credentials: 1,
-    })),
-    CUSTOM_API,
-  );
-  assert.deepEqual(
-    destinationCapabilities(destinationFixture({
-      adapter: "cpa",
-      capabilities: {
-        billing_tier_required: false,
-        discoverable_models: false,
-        external_integration: true,
-        identity_headers: false,
-        managed_signup: false,
-        observer: false,
-        official_balance_probe: [],
-        redirect_policy: "no_follow",
-        testable: false,
-      },
-      max_credentials: 1,
-    })),
-    { ...CPA, hasExpiry: false },
-  );
-  assert.deepEqual(
-    destinationCapabilities(destinationFixture({
-      adapter: "zen",
-      auth_scheme: "none",
-      max_credentials: 1,
-      plan: {
-        expiry_cadence: null,
-        manual_calibration: false,
-        pricing_source: "unpriced",
-        usage_source: "none",
-        windows: [{ kind: "free" }],
-      },
-    })),
-    ZEN_FREE,
-  );
-  assert.deepEqual(
-    destinationCapabilities(destinationFixture({
-      adapter: "ollama",
-      capabilities: {
-        billing_tier_required: true,
-        discoverable_models: false,
-        external_integration: false,
-        identity_headers: false,
-        managed_signup: false,
-        observer: false,
-        official_balance_probe: [],
-        redirect_policy: "no_follow",
-        testable: true,
-      },
-      plan: monthly,
-    })),
-    OLLAMA_CLOUD,
-  );
+test("explicit ownership survives multiple Custom credentials and a singleton HTTP provider", () => {
+  assert.equal(destinationCapabilities(destinationFixture({
+    legacy: { kind: "custom_account", id: "custom" }, max_credentials: null,
+    account_controls: { ...DEFAULT_CONTROLS, configurationOwner: "account" },
+  })).endpointOnAccount, true);
+  assert.equal(destinationCapabilities(destinationFixture({ max_credentials: 1 })).endpointOnAccount, false);
+});
+
+test("expiry and free cooldown follow commercial facts independently of adapter", () => {
+  assert.equal(destinationCapabilities(destinationFixture({ plan: monthly })).hasExpiry, true);
+  assert.equal(destinationCapabilities(destinationFixture({ adapter: "opencode_go" })).hasExpiry, false);
+  for (const windows of [[], [{ kind: "free" as const }, { kind: "month" as const }]]) {
+    assert.equal(destinationCapabilities(destinationFixture({ plan: { ...monthly, windows } })).freeCooldownOnly, false);
+  }
+  assert.equal(destinationCapabilities(destinationFixture({
+    plan: { ...monthly, expiry_cadence: null, windows: [{ kind: "free" }] },
+  })).freeCooldownOnly, true);
+});
+
+test("keyless singleton does not imply provider settings or free cooldown", () => {
+  const caps = destinationCapabilities(destinationFixture({ auth_scheme: "none", max_credentials: 1 }));
+  assert.equal(caps.keylessSingleton, true);
+  assert.equal(caps.toggleWrite, "account");
+  assert.equal(caps.freeCooldownOnly, false);
+});
+
+test("explicit actions remain independent of adapter and managed signup", () => {
+  const dest = destinationFixture({ account_controls: {
+    toggleWrite: "provider_settings", configurationOwner: "account", consoleLink: "ollama", browserProfile: true,
+  } });
+  const caps = accountCapabilities({ id: "a", provider_id: "opencode", account_type: "key" }, builtinCatalog(), dest);
+  assert.equal(caps.toggleWrite, "provider_settings");
+  assert.equal(caps.consoleLink, "ollama");
+  assert.equal(caps.browserProfile, true);
+  assert.equal(caps.managedSignup, false);
+});
+
+test("legacy and destination paths converge for all supported account families", () => {
+  const base = destinationFixture();
+  const cases: [string, Partial<Destination>][] = [
+    ["opencode", { plan: monthly, capabilities: { ...base.capabilities, managed_signup: true },
+      account_controls: { ...DEFAULT_CONTROLS, consoleLink: "opencode", browserProfile: true } }],
+    ["command-code", { plan: monthly }], ["kimi", { plan: monthly }], ["minimax", { plan: monthly }],
+    ["custom", { account_controls: { ...DEFAULT_CONTROLS, configurationOwner: "account" } }],
+    ["cpa", { capabilities: { ...base.capabilities, testable: false, external_integration: true } }],
+    [LAB_PROVIDER_ID, {}],
+    [OLLAMA_PROVIDER_ID, { plan: monthly, capabilities: { ...base.capabilities, billing_tier_required: true },
+      account_controls: { ...DEFAULT_CONTROLS, consoleLink: "ollama" } }],
+    [ZEN_FREE_PROVIDER_ID, { auth_scheme: "none", max_credentials: 1,
+      plan: { ...monthly, expiry_cadence: null, windows: [{ kind: "free" }] },
+      account_controls: { ...DEFAULT_CONTROLS, toggleWrite: "provider_settings" } }],
+  ];
+  for (const [provider_id, facts] of cases) {
+    const account = { id: "a", provider_id, account_type: "key" as const };
+    for (const catalog of [null, builtinCatalog()]) {
+      assert.deepEqual(accountCapabilities(account, catalog), accountCapabilities(account, catalog, destinationFixture(facts)), provider_id);
+    }
+  }
 });

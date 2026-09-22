@@ -230,6 +230,7 @@
 </template>
 
 <script setup lang="ts">
+import { useDestinationsStore } from "../stores/destinations.ts";
 import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from "vue";
 import { NAlert, NButton, NEmpty, NIcon, NPopconfirm, NPopover, NSpin, NTag, NTooltip, useMessage } from "naive-ui";
 import {
@@ -279,6 +280,7 @@ const message = useMessage();
 const accountsStore = useAccountsStore();
 const connectionStore = useConnectionStore();
 const providersStore = useProvidersStore();
+const destinationsStore = useDestinationsStore();
 const { copiedTarget, copy, cleanup } = useClipboard();
 const characterImage = new URL("../../assets/opencode-mascot.png", import.meta.url).href;
 const accounts = computed(() => accountsStore.accounts);
@@ -368,7 +370,7 @@ const serviceApiUrl = computed(() => connectionUrls.value.apiBaseUrl);
 
 const attentionItems = computed<AttentionItem[]>(() => {
   if (!accountsLoaded.value) return [];
-  return buildNeedsAttention(accounts.value, lifecycleNow.value, providersStore.catalog);
+  return buildNeedsAttention(accounts.value, lifecycleNow.value, providersStore.catalog, destinationsStore.destinationForAccount);
 });
 
 const attentionDesc = computed(() => {
@@ -464,12 +466,13 @@ async function loadDashboard() {
   dashboardError.value = false;
   // Revalidation keeps the current content: successful responses replace
   // state in place, failures keep the previous snapshot visible.
-  const [loadedAccounts, connection, loadedSummary, tokens, catalog] = await Promise.allSettled([
+  const [loadedAccounts, connection, loadedSummary, tokens, catalog, destinations] = await Promise.allSettled([
     accountsStore.loadPresented(),
     connectionStore.load(),
     dashboardApi.getDashboardSummary(),
     dashboardApi.getDailyTokensByModel(30),
     providersStore.loadCatalog(),
+    destinationsStore.load(),
   ]);
   if (loadedSummary.status === "fulfilled") {
     summary.value = loadedSummary.value;
@@ -479,7 +482,7 @@ async function loadDashboard() {
     dailyTokens.value = tokens.value;
     tokensLoaded.value = true;
   }
-  dashboardError.value = [loadedAccounts, connection, loadedSummary, tokens, catalog].some((result) => result.status === "rejected");
+  dashboardError.value = [loadedAccounts, connection, loadedSummary, tokens, catalog, destinations].some((result) => result.status === "rejected");
   if (dashboardError.value) {
     message.error(t("部分仪表盘数据加载失败"));
   }

@@ -9,6 +9,7 @@ import {
 } from "./provider-protocol-grants.ts";
 
 const destination = (overrides: Partial<Destination> = {}): Destination => ({
+  account_controls: { toggleWrite: "account", configurationOwner: "destination", consoleLink: null, browserProfile: false },
   adapter: "opencode_go",
   auth_scheme: "bearer",
   base_url: "https://go.example/v1",

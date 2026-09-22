@@ -1,3 +1,4 @@
+import type { AccountCapabilitySource } from "./account-capabilities.ts";
 import type { Account, AccountSetupStep } from "../api/dashboard";
 import type { Destination } from "../api/destinations.ts";
 import type { ProviderCatalogEntry } from "../api/providers.ts";
@@ -61,8 +62,9 @@ export const ACCOUNT_TYPE_LABEL_KEYS = {
 export function accountTypeLabel(
   account: Pick<Account, "id" | "provider_id" | "account_type">,
   catalog: readonly ProviderCatalogEntry[] | null | undefined,
+  destination?: AccountCapabilitySource | null,
 ): AccountTypeLabel {
-  const caps = accountCapabilities(account, catalog);
+  const caps = accountCapabilities(account, catalog, destination);
   if (caps.externalIntegration) return { kind: "cpa" };
   if (caps.keylessSingleton) return { kind: "keyless" };
   return { kind: "plan", label: planLabel(account, catalog) };
@@ -71,6 +73,7 @@ export function accountTypeLabel(
 export function destinationTypeLabel(
   destination: Pick<
     Destination,
+    | "account_controls"
     | "adapter"
     | "auth_scheme"
     | "brand_family"
@@ -198,8 +201,9 @@ export function accountStatus(
   account: Account,
   now = Date.now(),
   catalog: readonly ProviderCatalogEntry[] | null | undefined = null,
+  destination?: AccountCapabilitySource | null,
 ): AccountStatus {
-  if (accountCapabilities(account, catalog).freeCooldownOnly) {
+  if (accountCapabilities(account, catalog, destination).freeCooldownOnly) {
     if (!account.enabled) return { kind: "disabled" };
     if (isFreeCooling(account, now)) {
       return {
@@ -228,8 +232,9 @@ export function accountStatusTagType(
   account: Account,
   now = Date.now(),
   catalog: readonly ProviderCatalogEntry[] | null | undefined = null,
+  destination?: AccountCapabilitySource | null,
 ): AccountStatusTagType {
-  if (accountCapabilities(account, catalog).freeCooldownOnly) {
+  if (accountCapabilities(account, catalog, destination).freeCooldownOnly) {
     if (!account.enabled) return "error";
     return isFreeCooling(account, now) ? "warning" : "success";
   }
@@ -326,9 +331,10 @@ export function accountMenuOptions(
   account: Account,
   now = Date.now(),
   catalog: readonly ProviderCatalogEntry[] | null | undefined = null,
+  destination?: AccountCapabilitySource | null,
 ): AccountMenuOption[] {
   const options: AccountMenuOption[] = [];
-  const caps = accountCapabilities(account, catalog);
+  const caps = accountCapabilities(account, catalog, destination);
   // CPA is a static external-integration singleton. Account ordering and its
   // enabled switch stay here; all other controls live on the CPA page.
   if (caps.externalIntegration) {
@@ -336,7 +342,7 @@ export function accountMenuOptions(
     return options;
   }
   // The built-in Zen Free singleton has no Key/profile/console actions.
-  if (caps.keylessSingleton) return options;
+  if (caps.toggleWrite === "provider_settings") return options;
   if (caps.endpointOnAccount) {
     // Custom API has no OpenCode console, browser profile, or managed setup;
     // keep only the generic lifecycle actions.

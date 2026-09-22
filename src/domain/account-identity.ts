@@ -1,9 +1,9 @@
+import type { AccountCapabilitySource } from "./account-capabilities.ts";
 import type { Account } from "../api/dashboard.ts";
 import type {
   Identity,
   IdentityBinding,
   IdentityCredential,
-  IdentitySubscription,
 } from "../api/identities.ts";
 import { identityJoinKey } from "../api/identities.ts";
 import type { AuthState } from "../api/identities.ts";
@@ -19,7 +19,6 @@ import {
 } from "./account-display.ts";
 import { isCooling } from "./accounts-usage.ts";
 import { accountCapabilities } from "./account-capabilities.ts";
-import { planForAccount } from "./plans.ts";
 
 /**
  * Overlay the secret-free V4 identity projection onto a V3 Account card.
@@ -77,13 +76,6 @@ export function inferenceLastError(
   accountId: string,
 ): string | null {
   return inferenceCredentialForAccount(identity, accountId)?.last_error ?? null;
-}
-
-function inferenceSubscription(
-  identity: Identity | null,
-  accountId: string,
-): IdentitySubscription | null {
-  return inferenceCredentialForAccount(identity, accountId)?.subscription ?? null;
 }
 
 /** The selected card's inference binding; never a sibling credential's binding. */
@@ -156,43 +148,28 @@ export function selectedModelRestriction(
   return { kind: "count", count: names.length };
 }
 
-function inventsLifecycleDates(
-  account: Pick<Account, "id" | "provider_id" | "account_type">,
-  catalog: readonly ProviderCatalogEntry[] | null,
-): boolean {
-  if (accountCapabilities(account, catalog).endpointOnAccount) return true;
-  return planForAccount(account, catalog)?.dynamic === true;
-}
-
 /** V3 card expiry: built-in billed families with stored dates. Custom/Zen hide. */
 export function v3AccountShowsExpiry(
   account: Account,
   catalog: readonly ProviderCatalogEntry[] | null,
+  destination?: AccountCapabilitySource | null,
 ): boolean {
   return accountIsReady(account)
-    && accountCapabilities(account, catalog).hasExpiry
-    && !!planForAccount(account, catalog)
+    && accountCapabilities(account, catalog, destination).hasExpiry
     && !!account.purchase_date
     && !!account.expires_on;
 }
 
-export type AccountExpiryDisplayKind = "v3" | "hidden" | "unknown";
+export type AccountExpiryDisplayKind = "v3" | "hidden";
 
-/**
- * D07: a null V4 subscription must not fabricate expiry or a zero price.
- * Dynamic/custom invented dates become “未提供” or hidden. Built-in Go
- * cards that already have a real V3 purchase_date keep that V3 UI.
- */
+/** Stored dates are displayed only when the destination declares a lifecycle. */
 export function accountExpiryDisplay(
   account: Account,
-  identity: Identity | null,
+  _identity: Identity | null,
   catalog: readonly ProviderCatalogEntry[] | null,
+  destination?: AccountCapabilitySource | null,
 ): AccountExpiryDisplayKind {
-  const v3Shows = v3AccountShowsExpiry(account, catalog);
-  if (!identity) return v3Shows ? "v3" : "hidden";
-  if (inferenceSubscription(identity, account.id) !== null) return v3Shows ? "v3" : "hidden";
-  if (inventsLifecycleDates(account, catalog)) return v3Shows ? "unknown" : "hidden";
-  return v3Shows ? "v3" : "hidden";
+  return v3AccountShowsExpiry(account, catalog, destination) ? "v3" : "hidden";
 }
 
 export function presentedAccountStatus(
@@ -200,13 +177,14 @@ export function presentedAccountStatus(
   identity: Identity | null,
   now = Date.now(),
   catalog: readonly ProviderCatalogEntry[] | null = null,
+  destination?: AccountCapabilitySource | null,
 ): AccountStatus {
   if (
-    accountCapabilities(account, catalog).freeCooldownOnly
+    accountCapabilities(account, catalog, destination).freeCooldownOnly
     || !accountIsReady(account)
     || accountRoutingDraftState(account)
   ) {
-    return accountStatus(account, now, catalog);
+    return accountStatus(account, now, catalog, destination);
   }
 
   const auth = inferenceAuthState(identity, account.id);
@@ -229,13 +207,14 @@ export function presentedAccountStatusTagType(
   identity: Identity | null,
   now = Date.now(),
   catalog: readonly ProviderCatalogEntry[] | null = null,
+  destination?: AccountCapabilitySource | null,
 ): AccountStatusTagType {
   if (
-    accountCapabilities(account, catalog).freeCooldownOnly
+    accountCapabilities(account, catalog, destination).freeCooldownOnly
     || !accountIsReady(account)
     || accountRoutingDraftState(account)
   ) {
-    return accountStatusTagType(account, now, catalog);
+    return accountStatusTagType(account, now, catalog, destination);
   }
   const auth = inferenceAuthState(identity, account.id);
   if (auth === "invalid" || account.auth_error) return "error";

@@ -68,9 +68,6 @@
       </div>
     </div>
   </n-popover>
-  <n-tag v-if="expiryDisplay === 'unknown'" size="small" :bordered="false">
-    {{ t("未提供") }}
-  </n-tag>
   <n-tag v-if="isManagedOnboardingAccount(account)" size="small" :bordered="false">
     {{ t("托管注册") }}
   </n-tag>
@@ -100,6 +97,7 @@
 </template>
 
 <script setup lang="ts">
+import { useDestinationsStore } from "../stores/destinations.ts";
 import { computed, ref, watch } from "vue";
 import {
   NButton,
@@ -166,6 +164,8 @@ const emit = defineEmits<{
   "update-purchase-date": [date: string];
 }>();
 
+const destinations = useDestinationsStore();
+const destination = computed(() => destinations.destinationForAccount(props.account.id));
 const overlayIdentity = computed(() => props.identity ?? null);
 const credentialCountLabel = computed(() => {
   const count = accountCredentialCount(overlayIdentity.value);
@@ -177,6 +177,7 @@ const statusLabel = computed(() => (
     overlayIdentity.value,
     props.now,
     props.catalog,
+    destination.value,
   ))
 ));
 const statusTagType = computed(() => (
@@ -185,6 +186,7 @@ const statusTagType = computed(() => (
     overlayIdentity.value,
     props.now,
     props.catalog,
+    destination.value,
   )
 ));
 const statusTooltip = computed(() => {
@@ -212,7 +214,7 @@ const quotaShareLabel = computed(() => {
   return share ? quotaShareText(share) : null;
 });
 const expiryDisplay = computed(() => (
-  accountExpiryDisplay(props.account, overlayIdentity.value, props.catalog)
+  accountExpiryDisplay(props.account, overlayIdentity.value, props.catalog, destination.value)
 ));
 const hasValidityPeriod = computed(() => expiryDisplay.value === "v3");
 const purchaseDatePopoverShown = ref(false);

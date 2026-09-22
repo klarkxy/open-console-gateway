@@ -1,3 +1,4 @@
+import type { AccountCapabilitySource } from "../domain/account-capabilities.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { Account } from "../api/dashboard.ts";
@@ -289,4 +290,21 @@ test("custom, dynamic, CPA, and Zen accounts stay excluded with catalog facts", 
     account({ id: "zen", name: "Zen", provider_id: "opencode-zen-free", ...expired }),
   ];
   assert.deepEqual(buildNeedsAttention(accounts, NOW, catalog), []);
+});
+
+test("loaded destination cadence and cooldown facts drive attention and filters", () => {
+  const destination: AccountCapabilitySource = {
+    account_controls: { toggleWrite: "account", configurationOwner: "destination", consoleLink: null, browserProfile: false },
+    auth_scheme: "bearer", max_credentials: null,
+    capabilities: { testable: true, managed_signup: false, external_integration: false, billing_tier_required: false },
+    plan: { expiry_cadence: "monthly", manual_calibration: false, pricing_source: "unpriced", usage_source: "none", windows: [{ kind: "month" }] },
+  };
+  const row = account({ id: "new", provider_id: "unknown", purchase_date: "2026-07-01", expires_on: "2026-08-01" });
+  assert.deepEqual(buildNeedsAttention([row], NOW, [], () => destination).map((item) => item.reason), ["expired"]);
+  const noCadence = { ...destination, plan: null };
+  assert.deepEqual(buildNeedsAttention([row], NOW, null, () => noCadence), []);
+  const freeOnly = { ...destination, plan: { ...destination.plan!, expiry_cadence: null, windows: [{ kind: "free" as const }] } };
+  const cooling = account({ provider_id: "unknown", cooldown_free_until: new Date(NOW + 60_000).toISOString() });
+  assert.equal(accountStatusKey(cooling, NOW, [], freeOnly), "cooling");
+  assert.equal(filterAccounts([cooling], "all", "cooling", NOW, [], () => freeOnly).length, 1);
 });

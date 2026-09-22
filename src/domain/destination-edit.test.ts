@@ -40,6 +40,7 @@ test("editing discovered models preserves default-off until explicitly enabled",
 
 function destination(overrides: Partial<Destination> = {}): Destination {
   return {
+    account_controls: { toggleWrite: "account", configurationOwner: "destination", consoleLink: null, browserProfile: false },
     adapter: "http",
     auth_scheme: "bearer",
     base_url: "https://api.lab.example/v1",

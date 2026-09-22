@@ -131,6 +131,7 @@
 </template>
 
 <script setup lang="ts">
+import { useDestinationsStore } from "../stores/destinations.ts";
 import { computed, ref, watch } from "vue";
 import {
   NButton,
@@ -207,7 +208,9 @@ const emit = defineEmits<{
 }>();
 
 const billing = useBillingStore();
-const capabilities = computed(() => accountCapabilities(props.account, props.catalog));
+const destinations = useDestinationsStore();
+const destination = computed(() => destinations.destinationForAccount(props.account.id));
+const capabilities = computed(() => accountCapabilities(props.account, props.catalog, destination.value));
 const plan = computed(() => findPlanDefinition(props.account.provider_id, props.catalog));
 const billingStatus = computed(() => billing.byId[props.account.id]?.status ?? null);
 const calibrationOpen = ref(false);

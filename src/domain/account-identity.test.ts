@@ -1,3 +1,4 @@
+import type { AccountCapabilitySource } from "./account-capabilities.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { Account } from "../api/dashboard.ts";
@@ -284,12 +285,12 @@ test("d07 null V4 subscription hides invented dynamic dates and keeps real Go pu
     credentials: [credential({ subscription: null })],
   }), null), "v3");
 
-  assert.equal(v3AccountShowsExpiry(dynamic, catalog), true);
+  assert.equal(v3AccountShowsExpiry(dynamic, catalog), false);
   assert.equal(accountExpiryDisplay(dynamic, identity({
     legacy: { kind: "account", id: "dyn-1" },
     credentials: [credential({ subscription: null })],
-  }), catalog), "unknown");
-  assert.equal(accountExpiryDisplay(dynamic, null, catalog), "v3");
+  }), catalog), "hidden");
+  assert.equal(accountExpiryDisplay(dynamic, null, catalog), "hidden");
 
   const custom = account({
     provider_id: "custom",
@@ -431,4 +432,16 @@ test("unnamed siblings fall back to the legacy id, and multiple siblings become 
   assert.deepEqual(selectedQuotaShare(row, "acc-1"), { kind: "count", count: 2 });
   const pair = identity({ credentials: [sharedA, sharedB] });
   assert.deepEqual(selectedQuotaShare(pair, "acc-1"), { kind: "named", name: "acc-2" });
+});
+
+test("expiry display uses declared cadence instead of the legacy provider identity", () => {
+  const destination: AccountCapabilitySource = {
+    account_controls: { toggleWrite: "account", configurationOwner: "destination", consoleLink: "ollama", browserProfile: false },
+    auth_scheme: "bearer", max_credentials: 1, plan: null,
+    capabilities: { testable: true, managed_signup: false, external_integration: false, billing_tier_required: false },
+  };
+  assert.equal(accountExpiryDisplay(account(), identity(), null, destination), "hidden");
+  assert.equal(accountExpiryDisplay(account({ provider_id: "custom" }), null, null, {
+    ...destination, plan: { expiry_cadence: "monthly", manual_calibration: false, pricing_source: "unpriced", usage_source: "none", windows: [{ kind: "month" }] },
+  }), "v3");
 });

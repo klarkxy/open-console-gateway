@@ -892,6 +892,7 @@ const visibleAccountIds = computed(() => new Set(
     statusFilter.value,
     now.value,
     providerCatalog.value,
+    destinationsStore.destinationForAccount,
   ).map((account) => account.id),
 ));
 
@@ -980,6 +981,7 @@ const credentialModalSupport = computed(() => (
       credentialModalAccount.value,
       identityForCard(credentialModalAccount.value.id),
       providerCatalog.value,
+      destinationForAccountId(credentialModalAccount.value.id),
     )
     : null
 ));
@@ -1009,6 +1011,7 @@ const createModalSupport = computed(() => (
       createModalAccount.value,
       identityForCard(createModalAccount.value.id),
       providerCatalog.value,
+      destinationForAccountId(createModalAccount.value.id),
     )
     : null
 ));
@@ -1035,11 +1038,12 @@ const createModalShareTargets = computed(() => {
 });
 
 function cardMenuOptions(account: Account) {
-  const base = accountMenuOptions(account, now.value, providerCatalog.value);
+  const base = accountMenuOptions(account, now.value, providerCatalog.value, destinationForAccountId(account.id));
   const extra = accountCredentialMenuOptions(
     account,
     identityForCard(account.id),
     providerCatalog.value,
+      destinationForAccountId(account.id),
   );
   if (extra.length === 0) return base;
   const editAt = base.findIndex((option) => option.key === "edit");
@@ -1303,6 +1307,7 @@ async function openCredentialModal(accountId: string, mode: CredentialEditorMode
     account,
     identityForCard(accountId),
     providerCatalog.value,
+      destinationForAccountId(account.id),
   );
   if (mode === "rotate" && !support.rotate) {
     if (support.unsupportedReason) message.warning(t(support.unsupportedReason));
@@ -1339,6 +1344,7 @@ async function openCreateModal(accountId: string): Promise<void> {
     account,
     identityForCard(accountId),
     providerCatalog.value,
+      destinationForAccountId(account.id),
   );
   if (!support.create) {
     if (support.unsupportedReason) message.warning(t(support.unsupportedReason));
@@ -1887,9 +1893,7 @@ async function refreshCatalogIfNewProvider(account: Account): Promise<void> {
 const companionCatalogInflight = new Set<string>();
 
 function destinationForAccountId(accountId: string): Destination | null {
-  const credential = destinationsStore.credentialsByLegacyAccountId.get(accountId);
-  if (!credential) return null;
-  return destinationsStore.destinations.find((row) => row.id === credential.destination_id) ?? null;
+  return destinationsStore.destinationForAccount(accountId);
 }
 
 async function refreshCompanionCatalog(accountId: string, isCurrent: () => boolean): Promise<void> {
@@ -2217,8 +2221,7 @@ async function updatePurchaseDate(accountId: string, purchaseDate: string): Prom
   if (
     !account
     || !accountIsReady(account)
-    || accountCapabilities(account, providerCatalog.value).endpointOnAccount
-    || accountCapabilities(account, providerCatalog.value).keylessSingleton
+    || !accountCapabilities(account, providerCatalog.value, destinationForAccountId(account.id)).hasExpiry
     || busy.value
     || purchaseDateSaving.value[accountId]
   ) return;
@@ -2253,7 +2256,7 @@ async function toggleAccount(id: string) {
   const account = accounts.value.find((item) => item.id === id);
   // The Zen Free singleton only accepts the dedicated provider-settings write;
   // never fall back to the generic account PATCH/toggle for it.
-  if (account && accountCapabilities(account, providerCatalog.value).toggleWrite === "provider_settings") {
+  if (account && accountCapabilities(account, providerCatalog.value, destinationForAccountId(account.id)).toggleWrite === "provider_settings") {
     await saveZenProviderSettings(account, !account.enabled);
     return;
   }

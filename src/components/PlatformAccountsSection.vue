@@ -37,6 +37,7 @@
 </template>
 
 <script setup lang="ts">
+import { useDestinationsStore } from "../stores/destinations.ts";
 import { computed, onMounted, ref, watch } from "vue";
 import {
   NAlert,
@@ -113,10 +114,11 @@ const keyFormParentName = computed(() => {
   return platformStore.parents.find((parent) => parent.id === link?.platformAccountId)?.name ?? "";
 });
 
+const destinations = useDestinationsStore();
 const linkCandidates = computed(() => {
   const linked = linkedAccountIdSet(platformStore.links);
   return props.accounts.filter((account) => (
-    accountCapabilities(account, null).endpointOnAccount && !linked.has(account.id)
+    accountCapabilities(account, null, destinations.destinationForAccount(account.id)).endpointOnAccount && !linked.has(account.id)
   ));
 });
 

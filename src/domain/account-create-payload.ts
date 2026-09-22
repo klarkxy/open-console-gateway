@@ -88,7 +88,6 @@ export function buildCreateAccountPayload(
   values: AccountCreateFormValues,
 ): AccountInput {
   if (!values.name.trim()) throw new AccountCreatePayloadError("missing_name");
-  const isDynamic = plan.dynamic;
   const requiresKey = plan.credential_kind !== "none";
   if (requiresKey && !values.key.trim()) throw new AccountCreatePayloadError("missing_key");
 
@@ -147,21 +146,9 @@ export function buildCreateAccountPayload(
       throw error;
     }
   } else if (
-    isDynamic
-    && (
-      values.endpoint_url?.trim()
-      || values.upstream_protocol
-      || values.model_capabilities?.length
-    )
-  ) {
-    throw new AccountCreatePayloadError("custom_fields_not_allowed");
-  } else if (
-    !isDynamic
-    && (
-      values.endpoint_url?.trim()
-      || values.upstream_protocol
-      || values.model_capabilities?.length
-    )
+    values.endpoint_url?.trim()
+    || values.upstream_protocol
+    || values.model_capabilities?.length
   ) {
     throw new AccountCreatePayloadError("custom_fields_not_allowed");
   }

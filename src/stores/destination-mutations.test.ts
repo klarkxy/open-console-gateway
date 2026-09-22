@@ -59,6 +59,7 @@ async function waitForCalls(calls: DeferredCall[], count: number): Promise<void>
 
 function destinationDto(id: string, name = id): DestinationDto {
   return {
+    accountControls: { toggleWrite: "account", configurationOwner: "destination", consoleLink: null, browserProfile: false },
     adapter: "http",
     authScheme: "bearer",
     baseUrl: "https://lab.example/v1",

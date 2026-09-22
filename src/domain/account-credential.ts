@@ -1,3 +1,4 @@
+import type { AccountCapabilitySource } from "./account-capabilities.ts";
 import type { Account } from "../api/dashboard.ts";
 import type { ProviderCatalogEntry } from "../api/providers.ts";
 import type { Connection, ConnectionEndpoint } from "../api/connections.ts";
@@ -109,6 +110,7 @@ export function credentialWriteSupport(
   account: Pick<Account, "id" | "provider_id" | "account_type" | "credential_kind" | "setup_step">,
   identity: Identity | null,
   catalog: readonly ProviderCatalogEntry[] | null | undefined = null,
+  destination?: AccountCapabilitySource | null,
 ): CredentialWriteSupport {
   const hidden: CredentialWriteSupport = {
     rotate: false,
@@ -119,8 +121,8 @@ export function credentialWriteSupport(
     identityId: identity?.identity.id ?? null,
     unsupportedReason: null,
   };
-  const caps = accountCapabilities(account, catalog);
-  if (caps.keylessSingleton) {
+  const caps = accountCapabilities(account, catalog, destination);
+  if (caps.toggleWrite === "provider_settings") {
     return { ...hidden, unsupportedReason: "Zen Free 使用供应商设置" };
   }
   if (caps.externalIntegration) {
@@ -177,8 +179,9 @@ export function accountCredentialMenuOptions(
   account: Pick<Account, "id" | "name" | "provider_id" | "account_type" | "credential_kind" | "setup_step">,
   identity: Identity | null,
   catalog: readonly ProviderCatalogEntry[] | null | undefined = null,
+  destination?: AccountCapabilitySource | null,
 ): AccountMenuOption[] {
-  const support = credentialWriteSupport(account, identity, catalog);
+  const support = credentialWriteSupport(account, identity, catalog, destination);
   const options: AccountMenuOption[] = [];
   if (support.rotate) {
     options.push({

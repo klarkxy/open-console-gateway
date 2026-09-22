@@ -1,3 +1,4 @@
+import type { AccountCapabilitySource } from "../domain/account-capabilities.ts";
 import type { Account } from "../api/dashboard.ts";
 import type { ProviderCatalogEntry } from "../api/providers.ts";
 import type { PlanDefinition } from "../domain/plans.ts";
@@ -25,8 +26,9 @@ export function accountStatusKey(
   account: Account,
   now: number = Date.now(),
   catalog: readonly ProviderCatalogEntry[] | null | undefined = null,
+  destination?: AccountCapabilitySource | null,
 ): AccountStatusKey {
-  if (accountCapabilities(account, catalog).freeCooldownOnly) {
+  if (accountCapabilities(account, catalog, destination).freeCooldownOnly) {
     if (!account.enabled) return "disabled";
     return isFreeCooling(account, now) ? "cooling" : "available";
   }
@@ -47,10 +49,11 @@ export function filterAccounts(
   statusFilter: AccountStatusFilter,
   now: number = Date.now(),
   catalog: readonly ProviderCatalogEntry[] | null | undefined = null,
+  destinationForAccount?: (accountId: string) => AccountCapabilitySource | null,
 ): Account[] {
   return accounts.filter((account) => {
     if (planFilter !== "all" && accountPlanKey(account) !== planFilter) return false;
-    if (statusFilter !== "all" && accountStatusKey(account, now, catalog) !== statusFilter) return false;
+    if (statusFilter !== "all" && accountStatusKey(account, now, catalog, destinationForAccount?.(account.id)) !== statusFilter) return false;
     return true;
   });
 }

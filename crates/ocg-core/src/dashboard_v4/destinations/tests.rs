@@ -201,3 +201,68 @@ fn metadata_edit_keeps_disabled_default_protocol_and_explicit_routes() {
         Some("https://before.example/v1")
     );
 }
+
+#[test]
+fn account_controls_follow_resource_owner_not_credential_capacity() {
+    use ocg_domain::destination::{LegacyDestinationFacts, Protocol, destination_from_legacy};
+    let custom = destination_from_legacy(&LegacyDestinationFacts::CustomAccount {
+        account_id: "custom".into(),
+        name: "Custom".into(),
+        endpoint_url: "https://example.com/v1".into(),
+        protocol: Protocol::ChatCompletions,
+        model_capabilities: vec![("public".into(), "upstream".into())],
+    })
+    .unwrap();
+    assert_eq!(custom.max_credentials, None);
+    assert_eq!(
+        DestinationDto::from(&custom)
+            .account_controls
+            .configuration_owner,
+        AccountConfigurationOwnerDto::Account
+    );
+    let mut generic = custom.clone();
+    generic.legacy = LegacyDestinationRef::Dynamic("provider".into());
+    generic.max_credentials = Some(1);
+    generic.auth_scheme = AuthScheme::None;
+    let controls = DestinationDto::from(&generic).account_controls;
+    assert_eq!(
+        controls.configuration_owner,
+        AccountConfigurationOwnerDto::Destination
+    );
+    assert_eq!(controls.toggle_write, AccountToggleWriteDto::Account);
+}
+
+#[test]
+fn account_controls_keep_profile_and_commercial_facts_independent() {
+    use ocg_domain::destination::{LegacyDestinationFacts, destination_from_legacy};
+    let builtin = |id: &str| {
+        destination_from_legacy(&LegacyDestinationFacts::Builtin {
+            provider_id: id.into(),
+        })
+        .unwrap()
+    };
+    let mut go = builtin("opencode");
+    go.capabilities.managed_signup = false;
+    let dto = DestinationDto::from(&go);
+    assert!(dto.account_controls.browser_profile);
+    assert_eq!(
+        dto.account_controls.console_link,
+        Some(AccountConsoleLinkDto::Opencode)
+    );
+    assert!(dto.plan.unwrap().expiry_cadence.is_some());
+    let zen = DestinationDto::from(&builtin("opencode-zen-free"));
+    assert_eq!(
+        zen.account_controls.toggle_write,
+        AccountToggleWriteDto::ProviderSettings
+    );
+    assert!(zen.plan.unwrap().expiry_cadence.is_none());
+    let cpa = DestinationDto::from(&builtin("cpa"));
+    assert!(cpa.plan.is_none());
+    assert_eq!(cpa.account_controls.console_link, None);
+    assert_eq!(
+        DestinationDto::from(&builtin("ollama"))
+            .account_controls
+            .console_link,
+        Some(AccountConsoleLinkDto::Ollama)
+    );
+}

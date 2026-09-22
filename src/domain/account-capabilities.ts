@@ -15,7 +15,7 @@ export interface AccountCapabilities {
   toggleWrite: "account" | "provider_settings";
   /** Card exposes Test connection. False for external integrations (CPA). */
   testable: boolean;
-  /** Card may show purchase date / expiry UI (built-in billed families only). */
+  /** Card may show purchase date / expiry when the Plan declares a cadence. */
   hasExpiry: boolean;
   /** Endpoint, protocol and model mappings live on the account (Custom API). */
   endpointOnAccount: boolean;
@@ -23,7 +23,7 @@ export interface AccountCapabilities {
   managedSignup: boolean;
   /** Keys are held by an external integration; no local Key actions (CPA). */
   externalIntegration: boolean;
-  /** Account is the backend-owned keyless singleton (Zen Free). */
+  /** Destination needs no credential and permits only one account. */
   keylessSingleton: boolean;
   /** Usage cannot display until a billing tier is chosen (Ollama Cloud). */
   billingTierRequired: boolean;
@@ -77,81 +77,78 @@ export function usesLegacyGoPricingSnapshot(
   return plan.provider_id === DEFAULT_PROVIDER_ID;
 }
 
-/** Card flags from a destination's sealed capabilities, not account identity. */
-export function destinationCapabilities(
-  destination: Pick<
-    Destination,
-    "adapter" | "auth_scheme" | "capabilities" | "max_credentials" | "plan"
-  >,
-): AccountCapabilities {
+/** The single capability input consumed by both V4 and the legacy boundary. */
+export type AccountCapabilitySource = Pick<
+  Destination, "account_controls" | "auth_scheme" | "max_credentials" | "plan"
+> & { capabilities: Pick<Destination["capabilities"],
+  "testable" | "managed_signup" | "external_integration" | "billing_tier_required"
+> };
+
+/** Card flags from explicit destination facts, without provider inference. */
+export function destinationCapabilities(destination: AccountCapabilitySource): AccountCapabilities {
   const caps = destination.capabilities;
-  const keylessSingleton = destination.auth_scheme === "none"
-    && destination.max_credentials === 1;
-  const managedSignup = caps.managed_signup;
-  const go = destination.adapter === "opencode_go";
-  const ollama = destination.adapter === "ollama";
+  const controls = destination.account_controls;
+  const windows = destination.plan?.windows ?? [];
   return {
-    toggleWrite: keylessSingleton ? "provider_settings" : "account",
+    toggleWrite: controls.toggleWrite,
     testable: caps.testable,
-    hasExpiry: destination.plan != null
-      && destination.adapter !== "http"
-      && destination.adapter !== "zen"
-      && destination.adapter !== "cpa",
-    endpointOnAccount: destination.adapter === "http"
-      && destination.max_credentials === 1
-      && !caps.observer,
-    managedSignup,
+    hasExpiry: destination.plan?.expiry_cadence != null,
+    endpointOnAccount: controls.configurationOwner === "account",
+    managedSignup: caps.managed_signup,
     externalIntegration: caps.external_integration,
-    keylessSingleton,
+    keylessSingleton: destination.auth_scheme === "none" && destination.max_credentials === 1,
     billingTierRequired: caps.billing_tier_required,
-    consoleLink: go ? "opencode" : ollama ? "ollama" : null,
-    browserProfile: go && managedSignup,
-    freeCooldownOnly: destination.adapter === "zen",
+    consoleLink: controls.consoleLink,
+    browserProfile: controls.browserProfile,
+    freeCooldownOnly: windows.length > 0 && windows.every((window) => window.kind === "free"),
+  };
+}
+
+/**
+ * Compatibility boundary for accounts displayed before the V4 projection loads.
+ * Only sealed billed families have an expiry cadence; dynamic offerings do not
+ * acquire one merely by calling themselves a Plan.
+ */
+function legacyCapabilitySource(
+  account: AccountRef,
+  catalog: readonly ProviderCatalogEntry[] | null | undefined,
+): AccountCapabilitySource {
+  const entry = catalogEntryFor(account, catalog);
+  const provider = account.provider_id;
+  const go = provider === DEFAULT_PROVIDER_ID;
+  const zen = provider === ZEN_FREE_PROVIDER_ID;
+  const ollama = provider === OLLAMA_PROVIDER_ID;
+  const external = provider === CPA_PROVIDER_ID;
+  const monthly = [DEFAULT_PROVIDER_ID, "command-code", "minimax", "kimi", OLLAMA_PROVIDER_ID].includes(provider);
+  return {
+    account_controls: {
+      toggleWrite: zen ? "provider_settings" : "account",
+      configurationOwner: isCustomApiAccount(account) ? "account" : "destination",
+      consoleLink: go ? "opencode" : ollama ? "ollama" : null,
+      browserProfile: go,
+    },
+    auth_scheme: zen || entry?.credential_kind === "none" ? "none" : "bearer",
+    max_credentials: zen || entry?.singleton ? 1 : null,
+    capabilities: {
+      testable: !external,
+      managed_signup: entry?.managed_registration ?? go,
+      external_integration: external,
+      billing_tier_required: ollama,
+    },
+    plan: monthly || zen ? {
+      expiry_cadence: monthly ? "monthly" : null,
+      windows: [{ kind: zen ? "free" : "month" }],
+      manual_calibration: false,
+      pricing_source: "unpriced",
+      usage_source: "none",
+    } : null,
   };
 }
 
 export function accountCapabilities(
   account: AccountRef,
   catalog: readonly ProviderCatalogEntry[] | null | undefined,
-  destination?: Pick<
-    Destination,
-    "adapter" | "auth_scheme" | "capabilities" | "max_credentials" | "plan"
-  > | null,
+  destination?: AccountCapabilitySource | null,
 ): AccountCapabilities {
-  if (destination) return destinationCapabilities(destination);
-  const entry = catalogEntryFor(account, catalog);
-  const providerId = account.provider_id;
-
-  const managedSignup = entry
-    ? entry.managed_registration
-    : providerId === DEFAULT_PROVIDER_ID;
-
-  const keylessSingleton = providerId === ZEN_FREE_PROVIDER_ID
-    || Boolean(entry && entry.credential_kind === "none" && entry.singleton);
-
-  const externalIntegration = providerId === CPA_PROVIDER_ID;
-  const billingTierRequired = providerId === OLLAMA_PROVIDER_ID;
-  const endpointOnAccount = isCustomApiAccount(account);
-  const browserProfile = providerId === DEFAULT_PROVIDER_ID;
-  const consoleLink = browserProfile
-    ? "opencode"
-    : billingTierRequired
-      ? "ollama"
-      : null;
-
-  const hasExpiry = !endpointOnAccount && !keylessSingleton;
-
-  return {
-    toggleWrite: keylessSingleton ? "provider_settings" : "account",
-    testable: !externalIntegration,
-    hasExpiry,
-    endpointOnAccount,
-    managedSignup,
-    externalIntegration,
-    keylessSingleton,
-    billingTierRequired,
-    consoleLink,
-    browserProfile,
-    freeCooldownOnly: keylessSingleton,
-  };
+  return destinationCapabilities(destination ?? legacyCapabilitySource(account, catalog));
 }

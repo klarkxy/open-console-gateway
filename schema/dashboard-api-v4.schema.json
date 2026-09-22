@@ -9,11 +9,66 @@
       ],
       "type": "string"
     },
+    "AccountConfigurationOwnerDto": {
+      "description": "Owner of endpoint, protocol and model configuration.",
+      "enum": [
+        "account",
+        "destination"
+      ],
+      "type": "string"
+    },
+    "AccountConsoleLinkDto": {
+      "enum": [
+        "opencode",
+        "ollama"
+      ],
+      "type": "string"
+    },
+    "AccountControlsDto": {
+      "additionalProperties": false,
+      "description": "Read-only account actions derived from the destination's resource ownership.",
+      "properties": {
+        "browserProfile": {
+          "type": "boolean"
+        },
+        "configurationOwner": {
+          "$ref": "#/$defs/AccountConfigurationOwnerDto"
+        },
+        "consoleLink": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AccountConsoleLinkDto"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "toggleWrite": {
+          "$ref": "#/$defs/AccountToggleWriteDto"
+        }
+      },
+      "required": [
+        "toggleWrite",
+        "configurationOwner",
+        "consoleLink",
+        "browserProfile"
+      ],
+      "type": "object"
+    },
     "AccountCredentialKind": {
       "description": "Wire identity matching V2 `api_key` / `none`.",
       "enum": [
         "api_key",
         "none"
+      ],
+      "type": "string"
+    },
+    "AccountToggleWriteDto": {
+      "description": "Persistence target for the account enable switch.",
+      "enum": [
+        "account",
+        "provider_settings"
       ],
       "type": "string"
     },
@@ -1766,8 +1821,11 @@
     },
     "DestinationDto": {
       "additionalProperties": false,
-      "description": "RFC destination projection row. Secret-free; field-for-field from the domain `Destination`.",
+      "description": "Secret-free destination facts and derived account controls.",
       "properties": {
+        "accountControls": {
+          "$ref": "#/$defs/AccountControlsDto"
+        },
         "adapter": {
           "$ref": "#/$defs/AdapterKindDto"
         },
@@ -1858,6 +1916,7 @@
         }
       },
       "required": [
+        "accountControls",
         "id",
         "legacy",
         "adapter",
@@ -4803,6 +4862,18 @@
     },
     {
       "$ref": "#/$defs/RoutingCardUpdate"
+    },
+    {
+      "$ref": "#/$defs/AccountControlsDto"
+    },
+    {
+      "$ref": "#/$defs/AccountToggleWriteDto"
+    },
+    {
+      "$ref": "#/$defs/AccountConfigurationOwnerDto"
+    },
+    {
+      "$ref": "#/$defs/AccountConsoleLinkDto"
     },
     {
       "$ref": "#/$defs/CapabilitiesDto"

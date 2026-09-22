@@ -78,6 +78,10 @@ export type DashboardApiV4 =
   | RoutingCard
   | RoutingCardList
   | RoutingCardUpdate
+  | AccountControlsDto
+  | AccountToggleWriteDto
+  | AccountConfigurationOwnerDto
+  | AccountConsoleLinkDto
   | CapabilitiesDto
   | PlanDto
   | CatalogModelDto
@@ -245,6 +249,15 @@ export type QuotaSharing =
     };
 export type DshApplicationStatus =
   "unsupported_runtime" | "not_detected" | "ready" | "installed" | "incompatible" | "conflict";
+/**
+ * Owner of endpoint, protocol and model configuration.
+ */
+export type AccountConfigurationOwnerDto = "account" | "destination";
+export type AccountConsoleLinkDto = "opencode" | "ollama";
+/**
+ * Persistence target for the account enable switch.
+ */
+export type AccountToggleWriteDto = "account" | "provider_settings";
 /**
  * Sealed adapter kind. Wire values match the domain serde names.
  */
@@ -800,9 +813,10 @@ export interface DestinationList {
   revision: ControlRevision;
 }
 /**
- * RFC destination projection row. Secret-free; field-for-field from the domain `Destination`.
+ * Secret-free destination facts and derived account controls.
  */
 export interface DestinationDto {
+  accountControls: AccountControlsDto;
   adapter: AdapterKindDto;
   authScheme: AuthSchemeDto;
   /**
@@ -843,6 +857,15 @@ export interface DestinationDto {
   plan: PlanDto | null;
   protocolRoutes: HttpProtocolRouteDto[];
   protocols: ProtocolDto[];
+}
+/**
+ * Read-only account actions derived from the destination's resource ownership.
+ */
+export interface AccountControlsDto {
+  browserProfile: boolean;
+  configurationOwner: AccountConfigurationOwnerDto;
+  consoleLink: AccountConsoleLinkDto | null;
+  toggleWrite: AccountToggleWriteDto;
 }
 /**
  * Destination capability flags. Mirrors the domain `Capabilities` record.

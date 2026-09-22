@@ -28,6 +28,7 @@ use crate::quota_recovery::{
 use crate::state::CoreState;
 
 use super::types::{
+    AccountConfigurationOwnerDto, AccountConsoleLinkDto, AccountControlsDto, AccountToggleWriteDto,
     AdapterKindDto, AuthSchemeDto, CapabilitiesDto, CatalogModelDto, CredentialCooldownsDto,
     CredentialGrantsDto, CredentialList, DestinationCatalogModelUpdate,
     DestinationCredentialDto as CredentialDto, DestinationDeleteResult, DestinationDto,
@@ -375,9 +376,36 @@ pub(super) fn projection_refused(
     }
 }
 
+impl From<&Destination> for AccountControlsDto {
+    fn from(destination: &Destination) -> Self {
+        Self {
+            toggle_write: if destination.adapter == AdapterKind::Zen {
+                AccountToggleWriteDto::ProviderSettings
+            } else {
+                AccountToggleWriteDto::Account
+            },
+            configuration_owner: if matches!(
+                destination.legacy,
+                LegacyDestinationRef::CustomAccount(_)
+            ) {
+                AccountConfigurationOwnerDto::Account
+            } else {
+                AccountConfigurationOwnerDto::Destination
+            },
+            console_link: match destination.adapter {
+                AdapterKind::OpencodeGo => Some(AccountConsoleLinkDto::Opencode),
+                AdapterKind::Ollama => Some(AccountConsoleLinkDto::Ollama),
+                _ => None,
+            },
+            browser_profile: destination.adapter == AdapterKind::OpencodeGo,
+        }
+    }
+}
+
 impl From<&Destination> for DestinationDto {
     fn from(destination: &Destination) -> Self {
         Self {
+            account_controls: AccountControlsDto::from(destination),
             id: destination.id.clone(),
             legacy: LegacyDestinationRefDto::from(&destination.legacy),
             adapter: destination.adapter.into(),

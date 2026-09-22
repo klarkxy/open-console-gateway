@@ -18,6 +18,7 @@ import type { WithoutExpectation } from "./dashboard-v3.ts";
 import type { MutationExpectation } from "./generated/dashboard-v3.ts";
 import { useControlPlaneStore } from "../stores/controlPlane.ts";
 import type {
+  AccountControlsDto,
   AdapterKindDto,
   AuthSchemeDto,
   AuthState,
@@ -106,6 +107,7 @@ export interface LegacyDestinationRef {
 }
 
 export interface Destination {
+  account_controls: AccountControlsDto;
   adapter: AdapterKindDto;
   legacy: LegacyDestinationRef;
   auth_scheme: AuthSchemeDto;
@@ -339,6 +341,7 @@ function presentProtocolRoutes(value: DestinationDto): DestinationProtocolRoute[
 
 export function presentDestination(value: DestinationDto): Destination {
   return {
+    account_controls: { ...value.accountControls },
     adapter: value.adapter,
     auth_scheme: value.authScheme,
     base_url: value.baseUrl,

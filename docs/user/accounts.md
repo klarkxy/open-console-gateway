@@ -2,6 +2,8 @@
 
 # Accounts
 
+Edit Custom API endpoints, protocols and model mappings on the account, even when it has multiple Keys. For a user-defined HTTP Provider, edit these in **Providers**, even if it has only one Key. Only Plans with a modeled subscription period display expiry; CPA and user-defined API/Plan presets do not.
+
 Choose **Account routing** from the dropdown above the account list and use the adjacent **Conversation sticky** switch. Each change saves immediately; a successful change resets runtime routing state. Hover or focus the question-mark buttons for explanations.
 
 - **Routing mode** — strict priority, global sticky, or round robin. All three
@@ -20,7 +22,7 @@ Provider choices come from the V4 destination and catalog projection; the choose
 
 **Enabled** means the account may enter routing. New ready Key accounts, including Custom API and user-defined Providers, start enabled. Test connection does not change the switch. Already-enabled or disabled accounts stay as stored. Test results stay in the test dialog. User-defined Providers have no modeled subscription period, including those created from Plan presets: their accounts do not show an inferred purchase date, expiry countdown, or expiry alert. Existing stored purchase anchors are preserved for compatibility, but are not presented as confirmed billing facts.
 
-Accounts edit through the same forms used to create them. Ready, routable cards show enabled, disabled, cooling, quota exhausted, or unavailable. Dynamic or Custom dates stay unknown unless a stored purchase date already exists.
+Accounts edit through the same forms used to create them. Ready, routable cards show enabled, disabled, cooling, quota exhausted, or unavailable. Dynamic, Custom and CPA accounts do not display an inferred subscription period, even when compatibility data contains a purchase date.
 
 Confirmed quota exhaustion dims that Key and skips routing. Enabled stays as stored. Disabling a Key dims that row immediately. The card itself is gray only when every Key on it is dimmed (disabled, invalid, cooling, quota-exhausted, or otherwise not routeable). When every Key on the card is quota-exhausted, the card is labeled quota exhausted. A mix of disabled, invalid, and quota-exhausted Keys shows no available Key. An empty card shows no Key. Each presentation card is judged on its own rows.
 

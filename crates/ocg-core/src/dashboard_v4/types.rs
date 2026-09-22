@@ -105,6 +105,10 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "RoutingCard",
     "RoutingCardList",
     "RoutingCardUpdate",
+    "AccountControlsDto",
+    "AccountToggleWriteDto",
+    "AccountConfigurationOwnerDto",
+    "AccountConsoleLinkDto",
     "CapabilitiesDto",
     "PlanDto",
     "CatalogModelDto",
@@ -978,11 +982,46 @@ pub struct LegacyDestinationRefDto {
     pub id: String,
 }
 
-/// RFC destination projection row. Secret-free; field-for-field from the domain `Destination`.
+/// Persistence target for the account enable switch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountToggleWriteDto {
+    Account,
+    ProviderSettings,
+}
+
+/// Owner of endpoint, protocol and model configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountConfigurationOwnerDto {
+    Account,
+    Destination,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountConsoleLinkDto {
+    Opencode,
+    Ollama,
+}
+
+/// Read-only account actions derived from the destination's resource ownership.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AccountControlsDto {
+    pub toggle_write: AccountToggleWriteDto,
+    pub configuration_owner: AccountConfigurationOwnerDto,
+    pub console_link: Option<AccountConsoleLinkDto>,
+    pub browser_profile: bool,
+}
+
+/// Secret-free destination facts and derived account controls.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DestinationDto {
+    pub account_controls: AccountControlsDto,
     /// Stable destination id (deterministic UUIDv5 of the legacy row).
     pub id: String,
     /// V3 row this destination was projected from.

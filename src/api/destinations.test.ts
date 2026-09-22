@@ -18,6 +18,7 @@ import { installFetchMock, setupControlPlane } from "../test-helpers/dashboard-v
 
 function destination(overrides: Partial<DestinationDto> = {}): DestinationDto {
   return {
+    accountControls: { toggleWrite: "account", configurationOwner: "destination", consoleLink: null, browserProfile: false },
     adapter: "http",
     authScheme: "bearer",
     baseUrl: "https://lab.example/v1",
@@ -245,4 +246,11 @@ test("credentialsApi.retryQuota posts flattened CAS and presents the returned Ke
   assert.equal(result.credential.quota_recovery?.status, "ready");
   assert.deepEqual(result.expectation, { expectedRevision: 9, processGeneration: 11 });
   assert.equal(useControlPlaneStore().revision, 9);
+});
+
+test("presentDestination retains server-owned account actions", () => {
+  const controls = { toggleWrite: "provider_settings" as const, configurationOwner: "account" as const, consoleLink: "ollama" as const, browserProfile: true };
+  const row = presentDestination(destination({ accountControls: controls }));
+  assert.deepEqual(row.account_controls, controls);
+  assert.notEqual(row.account_controls, controls);
 });

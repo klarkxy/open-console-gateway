@@ -146,6 +146,11 @@ export const useDestinationsStore = defineStore("destinations", () => {
     return map;
   });
 
+  function destinationForAccount(accountId: string): Destination | null {
+    const credential = credentialsByLegacyAccountId.value.get(accountId);
+    return credential ? destinationsById.value.get(credential.destination_id) ?? null : null;
+  }
+
   function applySnapshot(
     nextDestinations: Destination[],
     nextCredentials: DestinationCredential[],
@@ -462,6 +467,7 @@ export const useDestinationsStore = defineStore("destinations", () => {
     explainErrors: computed(() => explainErrors.value),
     byId: destinationsById,
     credentialsByLegacyAccountId,
+    destinationForAccount,
     load,
     refreshAfterMutation,
     commitSnapshot,

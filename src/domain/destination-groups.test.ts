@@ -25,6 +25,7 @@ function destination(
   overrides: Partial<Destination> = {},
 ): Destination {
   return {
+    account_controls: { toggleWrite: "account", configurationOwner: "destination", consoleLink: null, browserProfile: false },
     adapter: "http",
     legacy: { kind: "builtin", id },
     auth_scheme: "bearer",

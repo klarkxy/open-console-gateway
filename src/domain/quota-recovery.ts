@@ -28,7 +28,7 @@ export type RouteAvailableCredential = Pick<
 
 export type RouteAvailableDestination = Pick<
   Destination,
-  "enabled" | "auth_scheme" | "adapter" | "capabilities" | "max_credentials" | "plan"
+  "account_controls" | "enabled" | "auth_scheme" | "adapter" | "capabilities" | "max_credentials" | "plan"
 >;
 
 /** Backend `status` is the presentation source; `next_retry_at` is only a time label. */

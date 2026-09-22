@@ -1,3 +1,4 @@
+import type { AccountCapabilitySource } from "./account-capabilities.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { Account } from "../api/dashboard.ts";
@@ -551,4 +552,29 @@ test("create operation id stays stable for an uncertain same payload and rejects
     secretInput: "sk",
     quotaSharing: { kind: "independent" },
   }));
+});
+
+test("credential editing uses the loaded resource owner and integration controls", () => {
+  const destination: AccountCapabilitySource = {
+    account_controls: { toggleWrite: "account", configurationOwner: "destination", consoleLink: "ollama", browserProfile: false },
+    auth_scheme: "bearer", max_credentials: 1, plan: null,
+    capabilities: { testable: true, managed_signup: false, external_integration: false, billing_tier_required: false },
+  };
+  assert.equal(credentialWriteSupport(account({ provider_id: "custom" }), identity(), null, destination).create, true);
+  assert.equal(credentialWriteSupport(account(), identity(), null, {
+    ...destination, account_controls: { ...destination.account_controls, configurationOwner: "account" },
+  }).create, false);
+  assert.equal(credentialWriteSupport(account(), identity(), null, {
+    ...destination, capabilities: { ...destination.capabilities, external_integration: true },
+  }).rotate, false);
+});
+
+test("generic keyless singleton uses no-auth restrictions without inheriting Zen writes", () => {
+  const destination: AccountCapabilitySource = {
+    account_controls: { toggleWrite: "account", configurationOwner: "destination", consoleLink: null, browserProfile: false },
+    auth_scheme: "none", max_credentials: 1, plan: null,
+    capabilities: { testable: true, managed_signup: false, external_integration: false, billing_tier_required: false },
+  };
+  const row = account({ provider_id: "generic", credential_kind: "none" });
+  assert.deepEqual(credentialWriteSupport(row, identity(), null, destination), credentialWriteSupport(row, identity(), null));
 });
