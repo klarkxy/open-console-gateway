@@ -2937,3 +2937,66 @@ fn v4_through_v10_payloads_without_protocol_routes_still_validate() {
         );
     }
 }
+
+#[test]
+fn explicit_protocol_close_survives_import_and_pre_v6_radio_shape_is_repaired() {
+    let portable = vec![PortableProviderContract {
+        provider_id: crate::provider::MINIMAX_PROVIDER_ID.into(),
+        catalog_models: vec!["MiniMax-M3".into()],
+        catalog_refreshed_at: None,
+        catalog_source: "test".into(),
+        catalog_source_url: "https://example.test/models".into(),
+        evidence: Vec::new(),
+        preferences: Vec::new(),
+        overrides: vec![
+            PortableProtocolOverride {
+                model_id: "MiniMax-M3".into(),
+                protocol: "messages".into(),
+                state: "force_on".into(),
+            },
+            PortableProtocolOverride {
+                model_id: "MiniMax-M3".into(),
+                protocol: "chat_completions".into(),
+                state: "force_off".into(),
+            },
+            PortableProtocolOverride {
+                model_id: "MiniMax-M3".into(),
+                protocol: "responses".into(),
+                state: "force_off".into(),
+            },
+        ],
+    }];
+    let now = chrono::Utc::now();
+    let scope =
+        crate::provider_contracts::ContractScope::provider(crate::provider::MINIMAX_PROVIDER_ID);
+    let kept = persisted_contracts_from_portable(&portable, now, false).unwrap();
+    let kept_off = kept
+        .overrides
+        .get(&scope)
+        .unwrap()
+        .iter()
+        .filter(|row| row.state == ProtocolOverrideState::ForceOff)
+        .count();
+    assert_eq!(kept_off, 2, "an explicit close is not guessed away");
+
+    let repaired = persisted_contracts_from_portable(&portable, now, true).unwrap();
+    let repaired_off = repaired
+        .overrides
+        .get(&scope)
+        .into_iter()
+        .flatten()
+        .filter(|row| row.state == ProtocolOverrideState::ForceOff)
+        .count();
+    assert_eq!(
+        repaired_off, 0,
+        "pre-V6 radio siblings are restored to Auto"
+    );
+    assert!(
+        repaired
+            .overrides
+            .get(&scope)
+            .unwrap()
+            .iter()
+            .any(|row| row.state == ProtocolOverrideState::ForceOn)
+    );
+}

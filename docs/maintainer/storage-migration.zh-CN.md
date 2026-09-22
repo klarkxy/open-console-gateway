@@ -258,7 +258,7 @@ v41 的 `provider_model_protocol_preferences` 表被重建，去掉了它原本�
 
 ## Schema v43 — 首选协议 CHECK 与互斥单选修复
 
-v43 重建 `provider_model_protocol_preferences`，使 `protocol` 可以是 `chat_completions`、`responses` 或 `messages`。随后删除 MiniMax/Kimi 上与另一条 Chat/Messages `force_on` 成对的 `force_off` 覆盖，恢复 Auto，以便两条 available 协议都能透传。Go 上对 unavailable 兄弟协议的 `force_off` 保留。V5 导入在内存中做同样的 exclusive-available 修复。不另写快照文件。回滚需恢复升级前的整个数据目录。
+v43 重建 `provider_model_protocol_preferences`，使 `protocol` 可以是 `chat_completions`、`responses` 或 `messages`。随后删除 MiniMax/Kimi 上与另一条 Chat/Messages `force_on` 成对的 `force_off` 覆盖，恢复 Auto，以便两条 available 协议都能透传。Go 上对 unavailable 兄弟协议的 `force_off` 保留。V6 之前的负载导入仍在内存中做这项 exclusive-available 修复。V6 及以后的备份保留显式 `force_off`。不另写快照文件。回滚需恢复升级前的整个数据目录。
 
 v42 **不**改 v35 的 Provider 单一身份契约：builtin 适配器路由、CPA 接入、Custom API 与 dynamic Configurable HTTP 绑定行为都保持原样。dynamic 读路径都加 `origin IN ('preset', 'custom')`，使 builtin 种子不会进入路由。V5 节点迁移负载只携带 dynamic 定义；builtin 行从注册表推导，导入时从 `preset_id` 推导 `origin` / `offering`，以保持跨版本兼容。
 

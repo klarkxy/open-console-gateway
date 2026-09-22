@@ -254,7 +254,7 @@ The digest is keyed by a per-database random 32-byte value in `settings` under `
 
 ## Schema v43 — preferred protocol CHECK and exclusive-radio repair
 
-v43 rebuilds `provider_model_protocol_preferences` so `protocol` may be `chat_completions`, `responses`, or `messages`. It then deletes MiniMax/Kimi `force_off` override rows that sat next to a sibling `force_on` on Chat or Messages, restoring Auto so both available protocols can passthrough. Go `force_off` rows on unavailable siblings are left in place. V5 import applies the same exclusive-available repair in memory. No extra snapshot file. Roll back by restoring the whole pre-upgrade data directory.
+v43 rebuilds `provider_model_protocol_preferences` so `protocol` may be `chat_completions`, `responses`, or `messages`. It then deletes MiniMax/Kimi `force_off` override rows that sat next to a sibling `force_on` on Chat or Messages, restoring Auto so both available protocols can passthrough. Go `force_off` rows on unavailable siblings are left in place. Import of payload versions before V6 applies that exclusive-available repair in memory. V6 and later backups keep an explicit `force_off`. No extra snapshot file. Roll back by restoring the whole pre-upgrade data directory.
 
 ## Schema v42 — unified provider table
 

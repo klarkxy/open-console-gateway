@@ -70,6 +70,9 @@ pub(super) struct ValidatedMigration {
     pub accounts: Vec<ValidatedAccount>,
     pub node: Zeroizing<PortableNodeState>,
     pub unified: UnifiedNewModelImport,
+    /// V4/V5 packages may still carry the old exclusive-radio `force_off`
+    /// siblings. Later packages keep an explicit close.
+    pub legacy_exclusive_radio_repair: bool,
 }
 
 pub(super) fn export_new_model(
@@ -2086,11 +2089,13 @@ pub(super) fn finish_new_model_migration(
     let node = validate_node_state(
         payload.node.take().expect("V7+ node was checked"),
         &accounts,
+        false,
     )?;
     Ok(ValidatedMigration {
         exported_at,
         accounts,
         node: Zeroizing::new(node),
         unified,
+        legacy_exclusive_radio_repair: false,
     })
 }

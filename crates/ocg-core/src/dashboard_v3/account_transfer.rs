@@ -906,8 +906,12 @@ async fn import_accounts_inner(
                 .map(|value| value.with_timezone(&Utc)),
             source_url: node.zen_free.source_url.clone(),
         },
-        provider_contracts: persisted_contracts_from_portable(&node.provider_contracts, now)
-            .map_err(|error| V3ApiError::invalid_request_at(&state, error))?,
+        provider_contracts: persisted_contracts_from_portable(
+            &node.provider_contracts,
+            now,
+            validated.legacy_exclusive_radio_repair,
+        )
+        .map_err(|error| V3ApiError::invalid_request_at(&state, error))?,
         dynamic_providers: validated.unified.dynamic_providers,
         custom_destinations: validated.unified.custom_destinations,
         custom_credential_destinations: validated.unified.custom_credential_destinations,
@@ -1875,7 +1879,12 @@ fn validate_payload(payload: PortablePayload) -> Result<ValidatedMigration, Tran
         link.group.verified = false;
         link.group.subscription_type = None;
     }
-    let node = validate_node_state(payload.node.take().expect("node was required"), &validated)?;
+    let legacy_exclusive_radio_repair = payload.version < V6_PAYLOAD_VERSION;
+    let node = validate_node_state(
+        payload.node.take().expect("node was required"),
+        &validated,
+        legacy_exclusive_radio_repair,
+    )?;
     let identity_snapshot = if payload.version >= V6_PAYLOAD_VERSION {
         Some(validate_identity_snapshot(
             &payload.identities,
@@ -1897,6 +1906,7 @@ fn validate_payload(payload: PortablePayload) -> Result<ValidatedMigration, Tran
         exported_at,
         accounts: validated,
         node: Zeroizing::new(node),
+        legacy_exclusive_radio_repair,
         unified,
     })
 }
@@ -2338,6 +2348,7 @@ fn validate_portable_dynamic_providers(
 fn validate_node_state(
     mut node: PortableNodeState,
     accounts: &[ValidatedAccount],
+    legacy_exclusive_radio_repair: bool,
 ) -> Result<PortableNodeState, TransferError> {
     node.config.gateway_key = node.config.gateway_key.trim().to_string();
     if node.config.gateway_key.is_empty()
@@ -2416,14 +2427,19 @@ fn validate_node_state(
             ));
         }
     }
-    persisted_contracts_from_portable(&node.provider_contracts, Utc::now())
-        .map_err(TransferError::Invalid)?;
+    persisted_contracts_from_portable(
+        &node.provider_contracts,
+        Utc::now(),
+        legacy_exclusive_radio_repair,
+    )
+    .map_err(TransferError::Invalid)?;
     Ok(node)
 }
 
 fn persisted_contracts_from_portable(
     portable: &[PortableProviderContract],
     default_time: DateTime<Utc>,
+    legacy_exclusive_radio_repair: bool,
 ) -> Result<PersistedContracts, String> {
     let mut persisted = PersistedContracts::default();
     let mut provider_scope_ids = HashSet::new();
@@ -2548,7 +2564,9 @@ fn persisted_contracts_from_portable(
         }
         persisted.preferences.insert(scope, preference_rows);
     }
-    apply_exclusive_available_override_repair(&mut persisted);
+    if legacy_exclusive_radio_repair {
+        apply_exclusive_available_override_repair(&mut persisted);
+    }
     Ok(persisted)
 }
 
