@@ -323,47 +323,24 @@ function parseExactModelNames(models: readonly string[]): string[] {
   return parsed;
 }
 
-function originFromEndpointUrl(url: string): string | null {
-  const trimmed = url.trim();
-  const split = trimmed.split("://");
-  if (split.length < 2) return null;
-  const scheme = split[0] ?? "";
-  const rest = split.slice(1).join("://");
-  if (!scheme || !rest) return null;
-  const hostport = rest.split(/[/?#]/u, 1)[0] ?? "";
-  if (!hostport) return null;
-  return `${scheme}://${hostport}`;
-}
-
-/** HTTP(S) scheme + host [+ port]; scheme/host lowercased. Matches backend. */
+/**
+ * HTTP(S) origin after URL parsing. Default ports are omitted and IPv6 is
+ * compressed, matching `canonical_origin` / `normalize_origin` in
+ * `ocg-domain`. HTTP vs HTTPS, distinct ports, and distinct hosts stay
+ * different. Whether a URL may be a target is a separate check.
+ */
 export function normalizeOrigin(value: string): string | null {
-  const origin = originFromEndpointUrl(value);
-  if (!origin) return null;
-  const split = origin.split("://");
-  if (split.length < 2) return null;
-  const scheme = (split[0] ?? "").toLowerCase();
-  const hostport = split.slice(1).join("://");
-  if (scheme !== "http" && scheme !== "https") return null;
-  if (!hostport || hostport.includes("/")) return null;
-  let normalizedHostport: string;
-  if (hostport.startsWith("[")) {
-    normalizedHostport = hostport;
-  } else {
-    const colon = hostport.lastIndexOf(":");
-    if (colon > 0) {
-      const host = hostport.slice(0, colon);
-      const port = hostport.slice(colon + 1);
-      if (host && /^[0-9]+$/u.test(port)) {
-        normalizedHostport = `${host.toLowerCase()}:${port}`;
-      } else {
-        normalizedHostport = hostport.toLowerCase();
-      }
-    } else {
-      normalizedHostport = hostport.toLowerCase();
-    }
+  let url: URL;
+  try {
+    url = new URL(value.trim());
+  } catch {
+    return null;
   }
-  if (!normalizedHostport) return null;
-  return `${scheme}://${normalizedHostport}`;
+  if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+  const hostname = url.hostname;
+  if (!hostname) return null;
+  const scheme = url.protocol.slice(0, -1);
+  return url.port ? `${scheme}://${hostname}:${url.port}` : `${scheme}://${hostname}`;
 }
 
 export function unionOriginsForEndpoints(

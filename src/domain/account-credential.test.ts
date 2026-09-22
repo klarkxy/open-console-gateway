@@ -20,6 +20,7 @@ import {
   emptyRotateDraft,
   isUncertainCreateFailure,
   nextCreateOperationId,
+  endpointMatchesSavedGrant,
   normalizeOrigin,
   shareableInferenceCredentials,
   staleSavedEndpointIds,
@@ -467,6 +468,37 @@ test("normalizeOrigin lowercases scheme and host and rejects non-http", () => {
   assert.equal(normalizeOrigin("https://lab.example:8443"), "https://lab.example:8443");
   assert.equal(normalizeOrigin("ftp://lab.example"), null);
   assert.equal(normalizeOrigin("not-a-url"), null);
+  assert.equal(normalizeOrigin("https://service.example:443/v1/messages"), "https://service.example");
+  assert.equal(
+    normalizeOrigin("http://[2001:DB8:0:0:0:0:0:1]:8080"),
+    "http://[2001:db8::1]:8080",
+  );
+  assert.equal(
+    normalizeOrigin("http://[2001:db8::1]:8080/v1/messages"),
+    normalizeOrigin("http://[2001:DB8:0:0:0:0:0:1]:8080"),
+  );
+  assert.notEqual(normalizeOrigin("http://service.example"), normalizeOrigin("https://service.example"));
+  assert.notEqual(normalizeOrigin("https://service.example:8443"), normalizeOrigin("https://service.example"));
+});
+
+test("saved origin grants match canonical endpoint origins", () => {
+  const binding = credential().bindings[0]!;
+  binding.allowed_endpoint_ids = ["ep-1"];
+  binding.allowed_origins = ["https://service.example:443"];
+  assert.equal(endpointMatchesSavedGrant(endpoint({
+    id: "ep-1",
+    url: "https://service.example/v1/messages",
+  }), binding), true);
+  binding.allowed_origins = ["http://[2001:DB8:0:0:0:0:0:1]:8080"];
+  assert.equal(endpointMatchesSavedGrant(endpoint({
+    id: "ep-1",
+    url: "http://[2001:db8::1]:8080/v1/messages",
+  }), binding), true);
+  binding.allowed_origins = ["http://service.example"];
+  assert.equal(endpointMatchesSavedGrant(endpoint({
+    id: "ep-1",
+    url: "https://service.example/v1/messages",
+  }), binding), false);
 });
 
 test("same endpoint ID with a moved Origin stays unchecked and is not granted by another checkbox", () => {

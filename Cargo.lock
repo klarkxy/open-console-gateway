@@ -2847,6 +2847,7 @@ dependencies = [
  "schemars 1.2.2",
  "serde",
  "serde_json",
+ "url",
  "uuid",
 ]
 

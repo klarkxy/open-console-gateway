@@ -57,13 +57,23 @@ pub const PRIMARY_KEY_ID: &str = "00000000-0000-0000-0000-000000000001";
 /// labels the entry with the localized "涓?Key".
 pub const PRIMARY_KEY_NAME: &str = "Primary";
 
-/// Canonicalize a client or catalog model name for table lookup.
+/// Lookup key for static price tables and historical protocol profiles.
 ///
-/// Spaces, underscores, and slashes become `-`; case is folded. Callers that
-/// must treat slash/underscore IDs as raw (alias resolution) must not use this
-/// folding for identity, only for protocol/pricing table keys.
+/// Spaces, underscores, and slashes become `-`; case is folded. This is not
+/// model identity: catalog rows, routing, and authorization use
+/// [`model_ids_match`], which keeps those separators distinct.
 pub fn normalize_model_name(name: &str) -> String {
     name.trim().to_lowercase().replace([' ', '_', '/'], "-")
+}
+
+/// Identity comparison for catalog rows, routing, and authorization.
+///
+/// Trims and ignores ASCII case. `/`, `_`, spaces, and `-` stay different
+/// names, so `vendor/model` and `vendor-model` are not the same model.
+pub fn model_ids_match(left: &str, right: &str) -> bool {
+    let left = left.trim();
+    let right = right.trim();
+    !left.is_empty() && !right.is_empty() && left.eq_ignore_ascii_case(right)
 }
 
 /// True for the Zen catalog naming contract. The discovered catalog remains
@@ -85,21 +95,10 @@ pub fn looks_raw_shaped(name: &str) -> bool {
 
 /// Match a client-requested name against a declared Custom capability ID.
 ///
-/// Raw-shaped IDs (`/`, `_`, whitespace) never fold separators onto kebab
-/// aliases. Otherwise matching is case-insensitive like published aliases.
+/// Same identity rule as [`model_ids_match`]: case-insensitive, with
+/// separators preserved.
 pub fn custom_model_id_matches(declared: &str, requested: &str) -> bool {
-    let declared = declared.trim();
-    let requested = requested.trim();
-    if declared.is_empty() || requested.is_empty() {
-        return false;
-    }
-    if declared == requested {
-        return true;
-    }
-    if looks_raw_shaped(declared) || looks_raw_shaped(requested) {
-        return declared.eq_ignore_ascii_case(requested);
-    }
-    declared.eq_ignore_ascii_case(requested)
+    model_ids_match(declared, requested)
 }
 
 #[cfg(test)]
@@ -128,6 +127,14 @@ mod tests {
         assert!(looks_raw_shaped("Grok 4.5"));
         assert!(!looks_raw_shaped("glm-5.2"));
         assert!(!looks_raw_shaped("my-local"));
+    }
+
+    #[test]
+    fn model_ids_match_ignores_case_and_keeps_separators() {
+        assert!(model_ids_match("vendor/model", "Vendor/Model"));
+        assert!(!model_ids_match("vendor/model", "vendor-model"));
+        assert!(!model_ids_match("vendor/model", "vendor_model"));
+        assert!(!model_ids_match("", "vendor/model"));
     }
 
     #[test]

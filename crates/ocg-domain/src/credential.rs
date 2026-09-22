@@ -8,7 +8,7 @@ use crate::connection::{
     CONNECTION_ID_NAMESPACE, ConnectionId, EndpointOperation, endpoint_id_for,
     endpoint_id_for_route,
 };
-use crate::ids::normalize_model_name;
+use crate::ids::model_ids_match;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -136,18 +136,14 @@ where
     )))
 }
 
-/// `All` admits every model. `Only` is an exact-id allowlist after
-/// [`normalize_model_name`] — no brand or prefix matching.
+/// `All` admits every model. `Only` admits names that [`model_ids_match`]
+/// the saved list: trim and ASCII case, with separators kept distinct.
 pub fn model_scope_allows(scope: &ModelScope, public_or_routing_model: &str) -> bool {
     match scope {
         ModelScope::All => true,
-        ModelScope::Only { models } => {
-            let wanted = normalize_model_name(public_or_routing_model);
-            !wanted.is_empty()
-                && models
-                    .iter()
-                    .any(|model| normalize_model_name(model) == wanted)
-        }
+        ModelScope::Only { models } => models
+            .iter()
+            .any(|model| model_ids_match(model, public_or_routing_model)),
     }
 }
 
@@ -817,32 +813,76 @@ pub fn origin_from_endpoint_url(url: &str) -> Option<String> {
     Some(format!("{scheme}://{hostport}"))
 }
 
-/// Normalized Origin: HTTP(S) scheme + host [+ port], scheme/host lowercased.
-/// Accepts a full inference URL or an already-origin-shaped value.
-pub fn normalize_origin(value: &str) -> Option<String> {
-    let origin = origin_from_endpoint_url(value)?;
-    let (scheme, hostport) = origin.split_once("://")?;
-    let scheme = scheme.to_ascii_lowercase();
+/// Scheme, host, and port of an HTTP(S) URL after URL parsing.
+///
+/// Default ports are part of the value (`https` is 443) so an explicit
+/// `:443` matches an omitted port. IPv6 is compressed and bracketed in
+/// [`CanonicalOrigin::to_grant_string`]. HTTP and HTTPS, distinct ports, and
+/// distinct hosts stay different. Whether a URL may be a target is a
+/// separate check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalOrigin {
+    pub scheme: String,
+    pub host: String,
+    pub port: u16,
+}
+
+impl CanonicalOrigin {
+    /// Stable origin string. Default ports are omitted so persisted grants
+    /// and display comparisons share one form.
+    pub fn to_grant_string(&self) -> String {
+        let default_port = match self.scheme.as_str() {
+            "http" => 80,
+            "https" => 443,
+            _ => 0,
+        };
+        if self.port == default_port {
+            format!("{}://{}", self.scheme, self.host)
+        } else {
+            format!("{}://{}:{}", self.scheme, self.host, self.port)
+        }
+    }
+}
+
+/// Parse `value` into the origin used for grant equality.
+pub fn canonical_origin(value: &str) -> Option<CanonicalOrigin> {
+    let parsed = url::Url::parse(value.trim()).ok()?;
+    let scheme = parsed.scheme();
     if scheme != "http" && scheme != "https" {
         return None;
     }
-    if hostport.is_empty() || hostport.contains('/') {
-        return None;
-    }
-    let normalized_hostport = if hostport.starts_with('[') {
-        hostport.to_string()
-    } else if let Some((host, port)) = hostport.rsplit_once(':')
-        && !host.is_empty()
-        && port.chars().all(|c| c.is_ascii_digit())
-    {
-        format!("{}:{port}", host.to_ascii_lowercase())
-    } else {
-        hostport.to_ascii_lowercase()
+    let host = match parsed.host()? {
+        url::Host::Domain(domain) => domain.to_ascii_lowercase(),
+        url::Host::Ipv4(ip) => ip.to_string(),
+        url::Host::Ipv6(ip) => match std::net::IpAddr::V6(ip).to_canonical() {
+            std::net::IpAddr::V4(ip) => ip.to_string(),
+            std::net::IpAddr::V6(ip) => format!("[{ip}]"),
+        },
     };
-    if normalized_hostport.is_empty() {
+    if host.is_empty() {
         return None;
     }
-    Some(format!("{scheme}://{normalized_hostport}"))
+    Some(CanonicalOrigin {
+        scheme: scheme.to_ascii_lowercase(),
+        host,
+        port: parsed.port_or_known_default()?,
+    })
+}
+
+/// True when both values parse as the same [`CanonicalOrigin`].
+pub fn origins_equivalent(left: &str, right: &str) -> bool {
+    match (canonical_origin(left), canonical_origin(right)) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
+    }
+}
+
+/// Normalized Origin string for persistence and comparison.
+///
+/// Accepts a full inference URL or an already-origin-shaped value. Equality
+/// is [`origins_equivalent`]; this string omits default ports.
+pub fn normalize_origin(value: &str) -> Option<String> {
+    Some(canonical_origin(value)?.to_grant_string())
 }
 
 #[cfg(test)]

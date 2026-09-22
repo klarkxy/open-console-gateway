@@ -322,14 +322,19 @@ fn model_scope_all_allows_every_public_or_routing_id() {
 }
 
 #[test]
-fn model_scope_only_is_normalized_exact_id_allowlist() {
+fn model_scope_only_matches_identity_and_keeps_separators_distinct() {
     let scope = ModelScope::Only {
         models: vec!["glm-5.2".into(), "vendor/opus".into()],
     };
     assert!(model_scope_allows(&scope, "glm-5.2"));
-    assert!(model_scope_allows(&scope, "GLM 5.2"));
-    assert!(model_scope_allows(&scope, "glm_5.2"));
+    assert!(model_scope_allows(&scope, "GLM-5.2"));
+    assert!(model_scope_allows(&scope, " glm-5.2 "));
     assert!(model_scope_allows(&scope, "vendor/opus"));
+    assert!(model_scope_allows(&scope, "Vendor/Opus"));
+    assert!(!model_scope_allows(&scope, "GLM 5.2"));
+    assert!(!model_scope_allows(&scope, "glm_5.2"));
+    assert!(!model_scope_allows(&scope, "vendor-opus"));
+    assert!(!model_scope_allows(&scope, "vendor_opus"));
     assert!(!model_scope_allows(&scope, "glm-5.1"));
     assert!(!model_scope_allows(&scope, "other"));
     assert!(!model_scope_allows(&scope, ""));
@@ -454,4 +459,36 @@ fn normalize_origin_lowercases_scheme_and_host() {
     );
     assert_eq!(normalize_origin("ftp://lab.example"), None);
     assert_eq!(normalize_origin("not-a-url"), None);
+}
+
+#[test]
+fn canonical_origin_equates_default_ports_and_ipv6_forms_only() {
+    assert_eq!(
+        normalize_origin("https://service.example:443/v1/messages"),
+        Some("https://service.example".into())
+    );
+    assert!(origins_equivalent(
+        "https://service.example:443",
+        "https://service.example/v1/messages"
+    ));
+    assert_eq!(
+        normalize_origin("http://[2001:DB8:0:0:0:0:0:1]:8080"),
+        Some("http://[2001:db8::1]:8080".into())
+    );
+    assert!(origins_equivalent(
+        "http://[2001:DB8:0:0:0:0:0:1]:8080",
+        "http://[2001:db8::1]:8080/v1/messages"
+    ));
+    assert!(!origins_equivalent(
+        "http://service.example",
+        "https://service.example"
+    ));
+    assert!(!origins_equivalent(
+        "https://service.example:8443",
+        "https://service.example"
+    ));
+    assert!(!origins_equivalent(
+        "https://a.example",
+        "https://b.example"
+    ));
 }

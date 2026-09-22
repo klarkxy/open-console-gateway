@@ -76,15 +76,16 @@ impl From<ProviderBindingError> for OriginGrantError {
 }
 
 pub fn inference_origin(url: &str) -> Option<InferenceOrigin> {
-    let parsed = reqwest::Url::parse(url.trim()).ok()?;
-    origin_of(&parsed)
+    let origin = ocg_domain::credential::canonical_origin(url)?;
+    Some(InferenceOrigin {
+        scheme: origin.scheme,
+        host: origin.host,
+        port: origin.port,
+    })
 }
 
 pub fn origins_match(left: &str, right: &str) -> bool {
-    match (inference_origin(left), inference_origin(right)) {
-        (Some(left), Some(right)) => left == right,
-        _ => false,
-    }
+    ocg_domain::credential::origins_equivalent(left, right)
 }
 
 /// Host-side grant for one secret-bearing attempt.
@@ -191,18 +192,7 @@ fn blocked_custom_target() -> ProviderBindingError {
 }
 
 fn origin_of(parsed: &reqwest::Url) -> Option<InferenceOrigin> {
-    if !matches!(parsed.scheme(), "http" | "https") {
-        return None;
-    }
-    let host = match custom_url_host(parsed).ok()? {
-        CustomUrlHost::Ip(ip) => ip.to_canonical().to_string(),
-        CustomUrlHost::Domain(domain) => domain,
-    };
-    Some(InferenceOrigin {
-        scheme: parsed.scheme().to_ascii_lowercase(),
-        host,
-        port: parsed.port_or_known_default()?,
-    })
+    inference_origin(parsed.as_str())
 }
 
 /// Shared destination IP policy for URL-host inspection and the IsolatedTrustedAdmin
