@@ -625,8 +625,8 @@ async fn dashboard_v3_provider_catalog_aliases_follow_saved_builtin_catalogs() {
     assert_eq!(
         kimi_entry.model_aliases,
         [
-            "kimi-k2.7-code",
-            "kimi-k2.7-code-highspeed",
+            "kimi-for-coding",
+            "kimi-for-coding-highspeed",
             "kimi-k3",
             "kimi-k3-256k",
         ]
@@ -646,10 +646,10 @@ async fn dashboard_v3_provider_catalog_aliases_follow_saved_builtin_catalogs() {
         .iter()
         .map(|model| (model.model_id.as_str(), model.alias.as_str()))
         .collect::<std::collections::BTreeMap<_, _>>();
-    assert_eq!(aliases.get("kimi-for-coding"), Some(&"kimi-k2.7-code"));
+    assert_eq!(aliases.get("kimi-for-coding"), Some(&"kimi-for-coding"));
     assert_eq!(
         aliases.get("kimi-for-coding-highspeed"),
-        Some(&"kimi-k2.7-code-highspeed")
+        Some(&"kimi-for-coding-highspeed")
     );
     assert_eq!(aliases.get("k3"), Some(&"kimi-k3"));
     assert_eq!(aliases.get("k3-256k"), Some(&"kimi-k3-256k"));
@@ -772,7 +772,7 @@ async fn dashboard_v3_provider_contracts_project_builtin_scopes_and_custom_endpo
         .iter()
         .find(|model| model.model_id == "kimi-for-coding")
         .expect("Kimi coding fallback model");
-    assert_eq!(coding.alias, "kimi-k2.7-code");
+    assert_eq!(coding.alias, "kimi-for-coding");
     assert!(
         kimi.models.iter().any(|model| model.model_id == "kimi-k3"),
         "Kimi fallback catalog must include kimi-k3"

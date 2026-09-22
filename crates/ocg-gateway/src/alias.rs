@@ -50,8 +50,10 @@ const MINIMAX_CN_ALIASES: &[(&str, &str)] = &[
 ];
 
 const KIMI_CN_ALIASES: &[(&str, &str)] = &[
-    ("kimi-for-coding", "kimi-k2.7-code"),
-    ("kimi-for-coding-highspeed", "kimi-k2.7-code-highspeed"),
+    // Kimi upgrades these product IDs in place. Keep their public identity
+    // stable instead of relabelling the rolling target as a fixed version.
+    ("kimi-for-coding", "kimi-for-coding"),
+    ("kimi-for-coding-highspeed", "kimi-for-coding-highspeed"),
     ("k3", "kimi-k3"),
     ("k3-256k", "kimi-k3-256k"),
 ];

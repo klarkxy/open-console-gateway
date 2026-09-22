@@ -46,7 +46,7 @@
 
 可刷新范围都在 **刷新模型目录** 时从该供应商官方 `/models` 取模型列表；协议来自官方文档，或来自通用 HTTP 连接已保存的路由。**OpenCode Go** 读取公开、无 Key 的 `https://opencode.ai/zen/go/v1/models`，并使用 `https://opencode.ai/docs/go/` 的逐模型端点表；`mimo-v2.6-flash` 只支持 Chat Completions。**Command Code GOAT** 读取公开 `https://api.commandcode.ai/provider/v1/models` 目录。每个模型的 `supported_endpoints` 和官方文档为准；`xiaomi/mimo-v2.6-flash` 当前只有 Chat Completions 与 Responses 证据，不能推断 Messages 或未列能力。
 
-轻量来源信息、刷新动作与模型列表共用同一块内容区域。目录刷新是控制面动作：保留既有开关和探测观察，绝不扩大授权；目录需要 Key 时也只能使用已授权的就绪 Key。密封 MiniMax CN 的推理/目录路由使用 `https://api.minimax.cn/v1` 和文档化的 `/anthropic` 路径，旧用量端点不变。Kimi 用就绪 Key 刷新 `https://api.kimi.com/coding/v1/models`。它们保存的模型只激活代码内的密封映射；无法匹配的模型保留为精确 raw ID。
+轻量来源信息、刷新动作与模型列表共用同一块内容区域。目录刷新是控制面动作：保留既有开关和探测观察，绝不扩大授权；目录需要 Key 时也只能使用已授权的就绪 Key。密封 MiniMax CN 的推理/目录路由使用 `https://api.minimax.cn/v1` 和文档化的 `/anthropic` 路径，旧用量端点不变。Kimi 用就绪 Key 刷新 `https://api.kimi.com/coding/v1/models`。Kimi 的滚动产品 ID `kimi-for-coding` 与 `kimi-for-coding-highspeed` 保持原名发布，OCG 不再将它们标成固定模型版本。它们保存的模型只激活代码内的密封映射；无法匹配的模型保留为精确 raw ID。
 
 首次成功刷新前目录为空。刷新成功后，保存的官方快照是权威目录。新发现模型按官方已知或已配置协议默认启用；已有模型仅在已确认支持但被关闭，或由你明确关闭时保持关闭。没有协议证据的模型等待官方资料，刷新补充该声明后可以启用。仍留在目录中的首选、覆盖与探测结果会保留；刷新失败或结果为空时继续保留旧快照。
 

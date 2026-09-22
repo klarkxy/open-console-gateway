@@ -115,7 +115,7 @@ async fn model_discovery_returns_local_list_with_zero_accounts() {
 }
 
 #[tokio::test]
-async fn model_discovery_publishes_saved_sealed_cn_aliases_without_raw_ids() {
+async fn model_discovery_publishes_saved_sealed_cn_public_names() {
     let p = PreparedFallback::go(&[], &[]).await;
     let now = chrono::Utc::now();
     {
@@ -167,19 +167,13 @@ async fn model_discovery_publishes_saved_sealed_cn_aliases_without_raw_ids() {
         "minimax-m2",
         "minimax-m2.1",
         "minimax-m2.1-highspeed",
-        "kimi-k2.7-code-highspeed",
+        "kimi-for-coding-highspeed",
         "kimi-k3",
         "kimi-k3-256k",
     ] {
         assert!(ids.contains(alias), "missing {alias}: {body}");
     }
-    for raw in [
-        "MiniMax-M2",
-        "MiniMax-M2.1",
-        "kimi-for-coding-highspeed",
-        "k3",
-        "k3-256k",
-    ] {
+    for raw in ["MiniMax-M2", "MiniMax-M2.1", "k3", "k3-256k"] {
         assert!(!ids.contains(raw), "raw ID leaked into /v1/models: {body}");
     }
     assert!(

@@ -1149,17 +1149,45 @@ fn sealed_cn_catalogs_join_static_aliases_and_preserve_raw_ambiguity() {
                 .iter()
                 .any(|mapping| { mapping.is_kimi_cn() && mapping.upstream_model == *upstream })
         );
-        assert!(matches!(
-            resolve_with_extended_catalogs(
-                upstream, &[], &[], &[], &[], &minimax, &kimi,
-            ),
-            Ok(ResolvedModel::PinnedRaw { mapping, .. })
-                if mapping.is_kimi_cn() && mapping.upstream_model == *upstream
-        ));
+        let exact =
+            resolve_with_extended_catalogs(upstream, &[], &[], &[], &[], &minimax, &kimi).unwrap();
+        if upstream == alias {
+            assert!(matches!(
+                exact,
+                ResolvedModel::Alias {
+                    alias: resolved_alias,
+                    mappings,
+                    ..
+                } if resolved_alias == *alias
+                    && mappings.iter().any(|mapping| {
+                        mapping.is_kimi_cn() && mapping.upstream_model == *upstream
+                    })
+            ));
+        } else {
+            assert!(matches!(
+                exact,
+                ResolvedModel::PinnedRaw { mapping, .. }
+                    if mapping.is_kimi_cn() && mapping.upstream_model == *upstream
+            ));
+        }
         assert_eq!(
             canonical_alias_for_provider_model(KIMI_PROVIDER_ID, upstream, &[], &[]),
             *alias
         );
+    }
+
+    for fixed_version in ["kimi-k2.7-code", "kimi-k2.7-code-highspeed"] {
+        match resolve_with_extended_catalogs(fixed_version, &[], &[], &[], &[], &minimax, &kimi) {
+            Ok(resolved) => assert!(
+                resolved
+                    .routeable_mappings()
+                    .iter()
+                    .all(|mapping| !mapping.is_kimi_cn()),
+                "fixed K2.7 aliases must not route through Kimi's rolling model IDs"
+            ),
+            Err(ResolveError::Unknown { .. }) => {}
+            Err(other) => panic!("unexpected fixed-version resolution error: {other:?}"),
+        }
     }
 
     let published =
