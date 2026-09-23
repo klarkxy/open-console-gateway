@@ -11,7 +11,7 @@
     </div>
 
     <n-alert
-      v-else-if="loadError && !contracts && connections.length === 0"
+      v-else-if="loadError && !destinationsStore.loaded"
       type="error"
       :title="t('加载供应商失败：{error}', { error: loadError })"
     >
@@ -56,7 +56,7 @@
             secondary
             size="small"
             block
-            :disabled="inlineFormBusy || addKeyBusy"
+            :disabled="addKeyBusy"
             @click="openAddFlow"
           >
             {{ t("添加供应商") }}
@@ -73,18 +73,18 @@
             :aria-label="t('排序')"
           />
           <n-select
-            :value="addStage ? ADD_SELECT_VALUE : selectedRailKey"
+            :value="selectedRailKey"
             :options="mobileSelectOptions"
             filterable
             :aria-label="t('选择供应商范围')"
-            :disabled="actionLocked || inlineFormBusy || addKeyBusy"
+            :disabled="actionLocked || addKeyBusy"
             :consistent-menu-width="false"
             @update:value="onMobileSelect"
           />
         </div>
 
         <n-alert
-          v-if="loadError && (contracts || connections.length > 0)"
+          v-if="loadError && destinationsStore.loaded"
           type="warning"
           :title="t('加载供应商失败：{error}', { error: loadError })"
         >
@@ -93,46 +93,8 @@
           </n-button>
         </n-alert>
 
-        <ProviderPresetBrowser
-          v-if="addStage?.stage === 'browse'"
-          :busy="inlineFormBusy"
-          @select="onPresetBrowserSelect"
-          @cancel="exitAddFlow"
-        />
-
-        <section v-else-if="addStage?.stage === 'form'" class="providers-section" aria-labelledby="add-provider-title">
-          <div class="providers-catalog-head">
-            <div class="providers-catalog-heading">
-              <h2 id="add-provider-title">{{ addPreset ? addPreset.name : t("手动配置") }}</h2>
-              <div v-if="addPreset" class="providers-catalog-meta">
-                <n-tag size="small" :bordered="false">
-                  {{ providerPresetOffering(addPreset) === "plan" ? "Plan" : "API" }}
-                </n-tag>
-                <n-tag size="small" :bordered="false">{{ t("供应商预设") }}</n-tag>
-                <a :href="addPreset.docsUrl" target="_blank" rel="noopener noreferrer">{{ t("官方文档") }}</a>
-                <a :href="addPreset.websiteUrl" target="_blank" rel="noopener noreferrer">{{ t("控制台") }}</a>
-              </div>
-            </div>
-            <n-button secondary size="small" :disabled="inlineFormBusy || addKeyBusy" @click="exitAddFlow">
-              {{ t("返回") }}
-            </n-button>
-          </div>
-          <DynamicProviderModal
-            :key="addFormKey"
-            embedded
-            :show="true"
-            :provider="null"
-            :initial-preset-id="addStage.presetId"
-            :preset-selection-locked="Boolean(addStage.presetId)"
-            @saved="onDynamicSaved"
-            @committed="onDynamicCommitted"
-            @conflict="onDynamicConflict"
-            @busy-change="inlineFormBusy = $event"
-          />
-        </section>
-
         <section
-          v-else-if="selectedConnection && isCustomAccountConnection"
+          v-if="selectedConnection && isCustomAccountConnection"
           class="providers-section"
           aria-labelledby="provider-detail-title"
         >
@@ -366,7 +328,7 @@
                 size="small"
                 type="primary"
                 secondary
-                :disabled="actionLocked || inlineFormBusy || addKeyBusy"
+                :disabled="actionLocked || addKeyBusy"
                 @click="openAddKey"
               >
                 {{ t("添加 Key") }}
@@ -553,7 +515,7 @@
         </section>
 
         <section
-          v-else-if="selectedDestination && !selectedConnection"
+          v-else-if="selectedDestination"
           class="providers-section"
           aria-labelledby="provider-detail-title"
         >
@@ -604,7 +566,7 @@
                 <n-button type="primary" size="small" @click="openAccounts">
                   {{ t("打开账号页") }}
                 </n-button>
-                <n-button secondary size="small" :disabled="inlineFormBusy || addKeyBusy" @click="openAddFlow">
+                <n-button secondary size="small" :disabled="addKeyBusy" @click="openAddFlow">
                   {{ t("添加供应商") }}
                 </n-button>
               </n-space>
@@ -732,7 +694,6 @@ import type {
 } from "../api/providers.ts";
 import type { MutationExpectation } from "../api/generated/dashboard-v3.ts";
 import ProviderModelMatrix from "../components/ProviderModelMatrix.vue";
-import ProviderPresetBrowser from "../components/ProviderPresetBrowser.vue";
 import ProviderSettingsPanel from "../components/ProviderSettingsPanel.vue";
 import PricingCatalog from "../components/PricingCatalog.vue";
 import OfficialApiPanel from "../components/OfficialApiPanel.vue";
@@ -774,7 +735,6 @@ import {
   connectionStatus,
   filterConnections,
   isOnboardingDraftConnection,
-  selectedConnectionIdFromQuery,
 } from "../domain/connections.ts";
 import { destinationBrandFamily } from "../domain/account-brand.ts";
 import { destinationTypeLabel } from "../domain/account-display.ts";
@@ -783,20 +743,21 @@ import {
   connectionForDestination,
   filterDestinations,
   isProvidersRailDestination,
+  providersDestinationProjectionState,
+  providersPageLoadOutcome,
+  providersQueryAction,
+  providersRailItemName,
+  providersRailItems,
+  providersSelectionProjectionReady,
   railKeyForDestination,
+  railKeyForDraftConnection,
+  resolveProvidersSelection,
 } from "../domain/destination-providers.ts";
 
-import {
-  catalogEntryFamily,
-  providerAddStageToQuery,
-  type ProviderAddStage,
-} from "../domain/provider-catalog.ts";
+import { catalogEntryFamily } from "../domain/provider-catalog.ts";
 import { accountCreateRequestInput } from "../domain/account-create-payload.ts";
 import { providerSurfaceFromCatalog } from "../domain/plans.ts";
-import {
-  PROVIDER_PRESETS,
-  providerPresetOffering,
-} from "../domain/provider-presets.ts";
+import { PROVIDER_PRESETS } from "../domain/provider-presets.ts";
 import {
   CATALOG_SOURCE_CUSTOM_DISCOVERY,
   CATALOG_SOURCE_DECLARED,
@@ -835,18 +796,14 @@ const editingDestination = computed(() => (
 ));
 const showAddKeyModal = ref(false);
 const addKeyBusy = ref(false);
-/** In-flight save/test/discovery inside the embedded create form. */
-const inlineFormBusy = ref(false);
-/** Add flow shown in the main pane; the rail selection is kept underneath. */
-const addStage = ref<ProviderAddStage | null>(null);
 const railQuery = ref("");
 const providerSort = ref<ProviderSort>("name_asc");
 const providerSortOptions = computed(() => Object.entries(PROVIDER_SORT_KEYS).map(([value, key]) => ({
   value, label: t(key),
 })));
-const sortedConnections = computed(() => sortProvidersByName(connections.value, (item) => item.name, providerSort.value));
 const loading = ref(false);
 const loadError = ref("");
+/** Writable only for unmatched draft connections; otherwise derived from destination. */
 const selectedConnectionId = ref<string | null>(null);
 const selectedDestinationId = ref<string | null>(null);
 const destinations = computed(() => destinationsStore.destinations);
@@ -854,6 +811,20 @@ const railDestinations = computed(() => (
   sortProvidersByName(destinations.value.filter(isProvidersRailDestination), (item) => item.name, providerSort.value)
 ));
 const selectedRailKey = computed(() => selectedDestinationId.value ?? selectedConnectionId.value);
+const destinationProjectionState = computed(() => providersDestinationProjectionState({
+  loaded: destinationsStore.loaded,
+  loadFailed: Boolean(loadError.value) && !destinationsStore.loaded,
+  railCount: railDestinations.value.length,
+}));
+const railItemRows = computed(() => {
+  if (
+    destinationProjectionState.value === "not_loaded"
+    || destinationProjectionState.value === "failure"
+  ) {
+    return [];
+  }
+  return providersRailItems(destinations.value, providersStore.connections);
+});
 const lastCommittedConnectionId = ref<string | null>(null);
 const activeTab = ref<ProviderDetailTab>("models");
 const definitionLoading = ref(false);
@@ -885,6 +856,8 @@ const protocolGrantSelectedIds = ref<string[]>([]);
 const protocolGrantSaving = ref(false);
 const actionLive = ref("");
 let activatedOnce = false;
+/** A successful necessary-resource load for the current Providers URL. Reset on popstate. */
+let freshRequiredLoadSucceeded = false;
 let overrideSequence = 0;
 let probeSequence = 0;
 let overrideQueue: Promise<void> = Promise.resolve();
@@ -900,21 +873,18 @@ const scopes = computed(() => (
       .filter((scope) => scope.scope_kind === "provider")
     : []
 ));
-const selectedConnection = computed(() => (
-  connections.value.find((item) => item.id === selectedConnectionId.value) ?? null
-));
 const selectedDestination = computed(() => {
-  const match = selectedDestinationId.value
-    ? destinations.value.find((row) => row.id === selectedDestinationId.value) ?? null
-    : (() => {
-      const connection = selectedConnection.value;
-      if (!connection) return null;
-      return destinations.value.find((row) => (
-        connectionForDestination(connections.value, row)?.id === connection.id
-      )) ?? null;
-    })();
+  if (!selectedDestinationId.value) return null;
+  const match = destinations.value.find((row) => row.id === selectedDestinationId.value) ?? null;
   if (match && !isProvidersRailDestination(match)) return null;
   return match;
+});
+const selectedConnection = computed(() => {
+  if (selectedDestination.value) {
+    return connectionForDestination(connections.value, selectedDestination.value) ?? null;
+  }
+  if (!selectedConnectionId.value) return null;
+  return connections.value.find((item) => item.id === selectedConnectionId.value) ?? null;
 });
 const selectedDestinationTypeLabel = computed(() => (
   selectedDestination.value
@@ -1005,17 +975,12 @@ const httpCatalogRefreshVisible = computed(() => (
   Boolean(selectedDestination.value && isDestinationCatalogRefreshable(selectedDestination.value))
   && !isDraftConnection.value
 ));
-const addPreset = computed(() => {
-  const stage = addStage.value;
-  if (!stage || stage.stage !== "form" || !stage.presetId) return null;
-  return PROVIDER_PRESETS.find((preset) => preset.id === stage.presetId) ?? null;
-});
-const addFormKey = computed(() => {
-  const stage = addStage.value;
-  return stage?.stage === "form" ? `add-form:${stage.presetId ?? "manual"}` : "add-form:none";
-});
 const initialLoading = computed(() => (
-  loading.value && !selectedEntry.value && !addStage.value && !loadError.value
+  loading.value
+  && !destinationsStore.loaded
+  && !selectedDestination.value
+  && !selectedConnection.value
+  && !loadError.value
 ));
 const actionLocked = computed(() => (
   catalogRefreshing.value
@@ -1053,60 +1018,83 @@ function railStatusExtra(connection: Connection) {
   }, t(label as MessageKey));
 }
 
-const railOptions = computed<MenuOption[]>(() => {
-  if (destinations.value.length > 0) {
-    const filtered = filterDestinations(railDestinations.value, railQuery.value);
-    return filtered.map((item) => {
-      const joined = connectionForDestination(connections.value, item);
-      return {
-        key: railKeyForDestination(item),
-        label: item.name,
-        icon: () => h(ProviderBrandMark, {
-          family: joined
-            ? connectionBrandFamily(joined, allCatalogEntries.value)
-            : destinationBrandFamily(item, null, allCatalogEntries.value),
-          size: RAIL_BRAND_SIZE,
-        }),
-        extra: joined ? railStatusExtra(joined) : undefined,
-      };
-    });
-  }
-  return filterConnections(sortedConnections.value, railQuery.value).map((item) => ({
-    key: item.id,
+const sortedRailItems = computed(() => {
+  const destinationsForRail = railItemRows.value.flatMap((item) => (
+    item.kind === "destination" ? [item.destination] : []
+  ));
+  const draftsForRail = railItemRows.value.flatMap((item) => (
+    item.kind === "draft_connection" ? [item.connection] : []
+  ));
+  const mixed = [
+    ...filterDestinations(destinationsForRail, railQuery.value).map((destination) => ({
+      kind: "destination" as const,
+      destination,
+    })),
+    ...filterConnections(draftsForRail, railQuery.value).map((connection) => ({
+      kind: "draft_connection" as const,
+      connection,
+    })),
+  ];
+  return sortProvidersByName(mixed, providersRailItemName, providerSort.value);
+});
+
+function railOptionForDestination(item: typeof railDestinations.value[number]): MenuOption {
+  const joined = connectionForDestination(connections.value, item);
+  return {
+    key: railKeyForDestination(item),
+    label: item.name,
+    icon: () => h(ProviderBrandMark, {
+      family: joined
+        ? connectionBrandFamily(joined, allCatalogEntries.value)
+        : destinationBrandFamily(item, null, allCatalogEntries.value),
+      size: RAIL_BRAND_SIZE,
+    }),
+    extra: joined ? railStatusExtra(joined) : undefined,
+  };
+}
+
+function railOptionForDraft(item: Connection): MenuOption {
+  return {
+    key: railKeyForDraftConnection(item),
     label: item.name,
     icon: () => h(ProviderBrandMark, {
       family: connectionBrandFamily(item, allCatalogEntries.value),
       size: RAIL_BRAND_SIZE,
     }),
     extra: railStatusExtra(item),
-  }));
-});
+  };
+}
+
+const railOptions = computed<MenuOption[]>(() => (
+  sortedRailItems.value.map((item) => (
+    item.kind === "destination"
+      ? railOptionForDestination(item.destination)
+      : railOptionForDraft(item.connection)
+  ))
+));
 const railFilteredOut = computed(() => (
   Boolean(railQuery.value.trim()) && railOptions.value.length === 0
 ));
 const mobileSelectOptions = computed<SelectOption[]>(() => {
   // The mobile selector has its own built-in filter; the rail search query
   // must not shrink these options when the rail itself is hidden.
-  if (destinations.value.length > 0) {
-    return [
-      ...railDestinations.value.map((item) => ({
-        value: railKeyForDestination(item),
-        label: item.name,
-      })),
-      { value: ADD_SELECT_VALUE, label: t("添加供应商") },
-    ];
-  }
-  const labelFor = (item: Connection): string => {
+  const unfiltered = sortProvidersByName(
+    railItemRows.value,
+    providersRailItemName,
+    providerSort.value,
+  );
+  const labelForDraft = (item: Connection): string => {
     const status = connectionStatus(item);
     return status.label
       ? `${item.name} · ${t(status.label as MessageKey)}`
       : item.name;
   };
   return [
-    ...sortedConnections.value.map((item) => ({
-      value: item.id,
-      label: labelFor(item),
-    })),
+    ...unfiltered.map((item) => (
+      item.kind === "destination"
+        ? { value: railKeyForDestination(item.destination), label: item.destination.name }
+        : { value: railKeyForDraftConnection(item.connection), label: labelForDraft(item.connection) }
+    )),
     { value: ADD_SELECT_VALUE, label: t("添加供应商") },
   ];
 });
@@ -1141,110 +1129,118 @@ function currentUrlIsProvidersView(): boolean {
   return resolveAppViewKey(view) === "providers";
 }
 
-function writeUrl() {
+function selectionProjectionReady(): boolean {
+  return providersSelectionProjectionReady({
+    destinationsLoaded: destinationsStore.loaded,
+    connectionsLoaded: providersStore.connections !== null,
+    catalogLoaded: providersStore.catalog !== null,
+    contractsLoaded: providersStore.contracts !== null,
+  });
+}
+
+function providersPageCommit(
+  prefer?: { connectionId?: string; providerId?: string },
+  userSelection = false,
+) {
+  const query = readProviderPageQuery(window.location.search);
+  const resolved = resolveProvidersSelection({
+    query: {
+      connection: query.connection,
+      provider: query.provider,
+      destination: query.destination,
+    },
+    prefer,
+    cached: {
+      destinationId: selectedDestinationId.value,
+      connectionId: selectedConnectionId.value,
+    },
+    destinations: destinations.value,
+    connections: providersStore.connections,
+  });
+  return {
+    query,
+    resolved,
+    action: providersQueryAction({
+      add: query.add,
+      projectionReady: selectionProjectionReady(),
+      unresolvedExplicitTarget: resolved.fellBack,
+      freshLoadSucceeded: freshRequiredLoadSucceeded,
+      userSelection,
+    }),
+  };
+}
+
+function writeUrl(userSelection = false) {
   // An in-flight load finishing after navigation must not rewrite the URL
   // (e.g. strip the one-shot Accounts `add` deep link) for another view.
   if (!currentUrlIsProvidersView()) return;
-  const stage = addStage.value;
+  // Hold while an explicit target is still missing from last-success data,
+  // unless this write is a direct rail/mobile pick that supersedes it.
+  if (providersPageCommit(undefined, userSelection).action !== "apply-selection") return;
   const url = applyAppViewSearchParams(new URL(window.location.href), "providers", {
     ...(selectedDestinationId.value ? { destination: selectedDestinationId.value } : {}),
     ...(!selectedDestinationId.value && selectedConnectionId.value
       ? { connection: selectedConnectionId.value }
       : {}),
-    ...(stage
-      ? providerAddStageToQuery(stage)
-      : activeTab.value !== "models" ? { tab: activeTab.value } : {}),
+    ...(activeTab.value !== "models" ? { tab: activeTab.value } : {}),
   });
   window.history.replaceState(null, "", url);
+}
+
+function applySelection(resolved: ReturnType<typeof resolveProvidersSelection>, fellBackNotice: boolean) {
+  selectedDestinationId.value = resolved.destinationId;
+  selectedConnectionId.value = resolved.destinationId ? null : resolved.connectionId;
+  if (fellBackNotice && resolved.fellBack) {
+    actionLive.value = t("所选范围已失效，切换到第一个供应商");
+  }
+}
+
+function redirectProviderAdd(preset: string | null): void {
+  const url = applyAppViewSearchParams(new URL(window.location.href), "accounts");
+  url.searchParams.set(
+    "add",
+    accountAddQueryValue(accountAddDeepLinkFromProviderAdd(preset)),
+  );
+  window.history.replaceState(null, "", url);
+  window.dispatchEvent(new PopStateEvent("popstate"));
 }
 
 function applyFromQuery(
   fellBackNotice = false,
   prefer?: { connectionId?: string; providerId?: string },
-) {
-  const query = readProviderPageQuery(window.location.search);
-  if (query.add) {
-    addStage.value = null;
-    const url = applyAppViewSearchParams(new URL(window.location.href), "accounts");
-    url.searchParams.set(
-      "add",
-      accountAddQueryValue(accountAddDeepLinkFromProviderAdd(query.preset)),
-    );
-    window.history.replaceState(null, "", url);
-    window.dispatchEvent(new PopStateEvent("popstate"));
-    return;
+): ReturnType<typeof providersQueryAction> {
+  const { action, query, resolved } = providersPageCommit(prefer);
+  if (action === "redirect-add") {
+    redirectProviderAdd(query.preset);
+    return action;
   }
-  addStage.value = null;
-  const destWanted = query.connection || prefer?.connectionId
-    ? null
-    : (query.destination ?? selectedDestinationId.value);
-  if (destWanted) {
-    const dest = destinations.value.find((row) => row.id === destWanted);
-    if (dest) {
-      selectedDestinationId.value = dest.id;
-      selectedConnectionId.value = connectionForDestination(connections.value, dest)?.id ?? null;
-      const candidate = query.tab ?? activeTab.value;
-      activeTab.value = candidate;
-      writeUrl();
-      return;
-    }
-  }
-  const wanted = selectedConnectionIdFromQuery({
-    connection: prefer?.connectionId ?? query.connection,
-    provider: prefer?.providerId ?? query.provider,
-  }, connections.value)
-    ?? selectedConnectionId.value;
-  const rows = connections.value;
-  if (rows.length === 0 && destinations.value.length === 0) {
-    selectedConnectionId.value = null;
-    selectedDestinationId.value = null;
-    writeUrl();
-    return;
-  }
-  if (rows.length === 0 && destinations.value.length > 0) {
-    const dest = destinations.value[0]!;
-    selectedDestinationId.value = dest.id;
-    selectedConnectionId.value = connectionForDestination(connections.value, dest)?.id ?? null;
-    const candidate = query.tab ?? activeTab.value;
-    activeTab.value = candidate;
-    writeUrl();
-    return;
-  }
-  const row = rows.find((item) => item.id === wanted) ?? rows[0]!;
-  if (fellBackNotice && wanted && row.id !== wanted) {
-    actionLive.value = t("所选范围已失效，切换到第一个供应商");
-  }
-  selectedConnectionId.value = row.id;
-  selectedDestinationId.value = destinations.value.find((dest) => (
-    connectionForDestination(connections.value, dest)?.id === row.id
-  ))?.id ?? null;
+  if (action === "defer") return action;
+  applySelection(resolved, fellBackNotice);
   const candidate = query.tab ?? activeTab.value;
   activeTab.value = candidate;
   writeUrl();
+  return action;
 }
 
 function selectConnection(key: string | number) {
-  // An embedded form with in-flight save/test/discovery must not be swapped
-  // out; its stale-generation guards only cover responses, not dismissal.
-  if (inlineFormBusy.value || addKeyBusy.value) return;
+  if (addKeyBusy.value) return;
   const railKey = String(key);
   const dest = destinations.value.find((row) => (
-    railKeyForDestination(row) === railKey
+    isProvidersRailDestination(row) && railKeyForDestination(row) === railKey
   ));
   if (dest) {
-    addStage.value = null;
     selectedDestinationId.value = dest.id;
-    selectedConnectionId.value = connectionForDestination(connections.value, dest)?.id ?? null;
-    writeUrl();
+    selectedConnectionId.value = null;
+    writeUrl(true);
     return;
   }
-  if (!connections.value.some((item) => item.id === railKey)) return;
-  addStage.value = null;
-  selectedConnectionId.value = railKey;
-  selectedDestinationId.value = destinations.value.find((row) => (
-    connectionForDestination(connections.value, row)?.id === railKey
-  ))?.id ?? null;
-  writeUrl();
+  const draft = (providersStore.connections ?? []).find((item) => (
+    item.id === railKey && isOnboardingDraftConnection(item)
+  ));
+  if (!draft) return;
+  selectedDestinationId.value = null;
+  selectedConnectionId.value = draft.id;
+  writeUrl(true);
 }
 
 function onMobileSelect(key: string | number) {
@@ -1264,23 +1260,10 @@ function openAccountAdd(link = accountAddDeepLinkFromProviderAdd(null)): void {
 }
 
 function openAddFlow() {
-  if (inlineFormBusy.value || addKeyBusy.value) return;
+  if (addKeyBusy.value) return;
   showEditModal.value = false;
   editingDefinition.value = null;
-  addStage.value = null;
   openAccountAdd();
-}
-
-function onPresetBrowserSelect(presetId: string | null) {
-  if (inlineFormBusy.value || addKeyBusy.value) return;
-  addStage.value = { stage: "form", presetId };
-  writeUrl();
-}
-
-function exitAddFlow() {
-  if (inlineFormBusy.value || addKeyBusy.value) return;
-  addStage.value = null;
-  writeUrl();
 }
 
 function openAccounts() {
@@ -1352,25 +1335,29 @@ async function loadAll(options: {
   loading.value = true;
   if (!options.retain) loadError.value = "";
   try {
-    const [contractsResult, , connectionsResult] = await Promise.allSettled([
+    const [contractsResult, catalogResult, connectionsResult, accountsResult, destinationsResult] = await Promise.allSettled([
       providersStore.loadContracts(),
       providersStore.loadCatalog(),
       providersStore.loadConnections(),
       accountsStore.loadPresented(),
       destinationsStore.load(),
     ]);
-    // Stores commit their own state; loadAll only surfaces failures below.
-    applyFromQuery(true, {
-      connectionId: options.preferConnectionId,
-      providerId: options.preferProviderId,
+    const outcome = providersPageLoadOutcome({
+      destinations: destinationsResult,
+      catalog: catalogResult,
+      connections: connectionsResult,
+      contracts: contractsResult,
+      accounts: accountsResult,
     });
-    if (connectionsResult.status === "rejected") {
-      const error = dashboardErrorDetail(connectionsResult.reason);
-      loadError.value = error;
-      return { ok: false, error };
+    if (outcome.ok) freshRequiredLoadSucceeded = true;
+    if (outcome.applySelection) {
+      applyFromQuery(true, {
+        connectionId: options.preferConnectionId,
+        providerId: options.preferProviderId,
+      });
     }
-    if (contractsResult.status === "rejected") {
-      const error = dashboardErrorDetail(contractsResult.reason);
+    if (!outcome.ok) {
+      const error = dashboardErrorDetail(outcome.reason);
       loadError.value = error;
       return { ok: false, error };
     }
@@ -1432,14 +1419,41 @@ function onDestinationSaved(): void {
   ]).catch(() => {});
 }
 
-/** The store already dropped the row; fall back so the panel never points at it. */
-function onDestinationDeleted(id: string): void {
-  void providersStore.loadConnections().catch(() => {});
+/** Fall back from a destination known to have left the committed store. */
+function fallbackFromRemovedDestination(id: string): void {
   if (selectedDestinationId.value !== id) return;
   selectedDestinationId.value = null;
   selectedConnectionId.value = null;
-  applyFromQuery();
+  // A successful local delete makes the URL target conclusively stale even
+  // if other Providers resources are still loading. Clear that target and
+  // select from the destination snapshot that already committed the delete.
+  if (!currentUrlIsProvidersView()) return;
+  const url = applyAppViewSearchParams(new URL(window.location.href), "providers", null);
+  window.history.replaceState(null, "", url);
+  applySelection(resolveProvidersSelection({
+    query: { connection: null, provider: null, destination: null },
+    cached: { destinationId: null, connectionId: null },
+    destinations: destinations.value,
+    connections: providersStore.connections,
+  }), false);
+  writeUrl(true);
 }
+
+function onDestinationDeleted(id: string): void {
+  void providersStore.loadConnections().catch(() => {});
+  fallbackFromRemovedDestination(id);
+}
+
+// The delete button lives inside the selected detail and may unmount before
+// its async completion emits. Observe the store commit itself, while requiring
+// that the selected row was present in the previous snapshot so an unresolved
+// deep link is never cleared by an unrelated load.
+watch(destinations, (next, previous) => {
+  const id = selectedDestinationId.value;
+  if (id && previous.some((row) => row.id === id) && !next.some((row) => row.id === id)) {
+    fallbackFromRemovedDestination(id);
+  }
+}, { flush: "sync" });
 
 async function deleteDestinationById(id: string): Promise<void> {
   try {
@@ -1494,7 +1508,6 @@ async function onDynamicSaved(providerId: string): Promise<void> {
   const preferConnectionId = lastCommittedConnectionId.value ?? undefined;
   const created = preferConnectionId !== undefined && resumeConnectionId.value === null;
   lastCommittedConnectionId.value = null;
-  addStage.value = null;
   resumeConnectionId.value = null;
   resumeHasSavedKey.value = false;
   providersStore.invalidateDefinition(providerId);
@@ -1521,12 +1534,12 @@ function onAddKeyShow(visible: boolean): void {
 }
 
 function openAddKey(): void {
-  if (inlineFormBusy.value || actionLocked.value || addKeyBusy.value || !canAddKey.value) return;
+  if (actionLocked.value || addKeyBusy.value || !canAddKey.value) return;
   showAddKeyModal.value = true;
 }
 
 async function onAddKeySave(payload: AccountInput | AccountFormPayload): Promise<void> {
-  if (inlineFormBusy.value || actionLocked.value || addKeyBusy.value) return;
+  if (actionLocked.value || addKeyBusy.value) return;
   const input = accountCreateRequestInput(payload as AccountInput);
   addKeyBusy.value = true;
   try {
@@ -1534,7 +1547,7 @@ async function onAddKeySave(payload: AccountInput | AccountFormPayload): Promise
     message.success(t("账号已添加"));
     showAddKeyModal.value = false;
     await accountsStore.loadPresented();
-    await loadAll({ retain: true, preferConnectionId: selectedConnectionId.value ?? undefined });
+    await loadAll({ retain: true, preferConnectionId: selectedConnection.value?.id ?? undefined });
   } catch (error) {
     if (isRevisionConflict(error) || (error instanceof DashboardRequestError && error.status === 409)) {
       await loadAll({ retain: true });
@@ -1560,9 +1573,8 @@ async function deleteSelected(): Promise<void> {
     await providerApi.deleteProviderDefinition(providerId);
     message.success(t("供应商已删除"));
     providersStore.invalidateDefinition(providerId);
-    selectedConnectionId.value = connections.value.find((item) => (
-      !(item.legacy.kind === "dynamic_provider" && item.legacy.id === providerId)
-    ))?.id ?? null;
+    selectedDestinationId.value = null;
+    selectedConnectionId.value = null;
     await loadAll({ retain: true });
   } catch (error) {
     if (isRevisionConflict(error) || (error instanceof DashboardRequestError && error.status === 409)) {
@@ -2068,14 +2080,17 @@ function onPopState() {
   // KeepAlive keeps this view mounted; a popstate for another view (e.g. the
   // Accounts add deep link) is not ours to apply.
   if (!currentUrlIsProvidersView()) return;
-  applyFromQuery();
+  freshRequiredLoadSucceeded = false;
+  const action = applyFromQuery();
+  // Same-view history to an unresolved target has no onActivated; refresh so
+  // fallback cannot run against the previous last-success snapshot.
+  if (action === "defer" && selectionProjectionReady()) {
+    void loadAll({ retain: true });
+  }
 }
 
-watch(selectedConnectionId, () => {
+watch([selectedConnectionId, selectedDestinationId], () => {
   catalogRefreshError.value = "";
-  // The embedded form unmounts on selection change; its busy flags die with
-  // it, so the navigation lock must not outlive the form.
-  inlineFormBusy.value = false;
   if (!addKeyBusy.value) showAddKeyModal.value = false;
 });
 
@@ -2097,7 +2112,7 @@ watch(selectedDestinationId, (id, previous) => {
   resetScopeActions();
 });
 
-watch([selectedConnectionId, selectedDestinationId, activeTab, addStage], () => {
+watch([selectedConnectionId, selectedDestinationId, activeTab], () => {
   writeUrl();
 });
 

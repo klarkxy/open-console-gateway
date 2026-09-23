@@ -131,7 +131,7 @@
           </div>
         </header>
 
-        <p v-if="detail.kind === 'family' || detail.kind === 'preset'" class="account-add-outcome">
+        <p v-if="detail.kind === 'family' || detail.kind === 'preset' || detail.kind === 'manual'" class="account-add-outcome">
           {{ t("可先存草稿，或一次建好供应商和第一个账号。草稿在供应商页继续。") }}
         </p>
 
@@ -205,13 +205,13 @@
         </template>
 
         <DynamicProviderModal
-          v-else-if="currentPreset && show"
-          :key="`dynamic:${currentPreset.id}`"
+          v-else-if="(currentPreset || selectedManualOption) && show"
+          :key="currentPreset ? `dynamic:${currentPreset.id}` : 'dynamic:manual'"
           embedded
           :show="true"
           :provider="null"
-          :initial-preset-id="currentPreset.id"
-          preset-selection-locked
+          :initial-preset-id="currentPreset?.id ?? null"
+          :preset-selection-locked="Boolean(currentPreset)"
           context="account"
           @saved="onPresetSaved"
           @committed="onPresetCommitted"
@@ -262,21 +262,22 @@ import { useLocalizedModalCloseLabel } from "../utils/modal-close-label.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
 import {
   buildChooserGroups,
-  chooserModeForOptionId,
   chooserOptionIconKey,
   chooserSelectOptions,
   chooserUniverse,
-  defaultChooserMode,
   defaultChooserOptionId,
   describeChooserSelection,
   isChooserOptionDisabled,
   isValidChooserOption,
+  resolveChooserInitialOpen,
   resolveChooserSelection,
   visibleChooserOptions,
   type ChooserMode,
   type ChooserOption,
   type PresetFamilyOption,
   CHOOSER_TAG_LABEL_KEYS,
+  MANUAL_CHOOSER_LABEL_KEYS,
+  MANUAL_CHOOSER_OPTION_ID,
 } from "../domain/account-add-chooser.ts";
 import { PROVIDER_FAMILIES, familyOf, type ProviderFamily } from "../domain/provider-families.ts";
 import { PROVIDER_PRESETS, type ProviderPreset } from "../domain/provider-presets.ts";
@@ -393,6 +394,7 @@ watch(
   { immediate: true },
 );
 
+const manualChooserLabel = computed(() => t(MANUAL_CHOOSER_LABEL_KEYS.manual));
 const chooserGroups = computed(() => (
   buildChooserGroups(
     props.catalog,
@@ -400,16 +402,30 @@ const chooserGroups = computed(() => (
     presetQuery.value,
     mode.value,
     props.connections,
+    manualChooserLabel.value,
   )
 ));
 const universe = computed(() => (
-  chooserUniverse(props.catalog, dynamicPresetIds.value, mode.value, props.connections)
+  chooserUniverse(
+    props.catalog,
+    dynamicPresetIds.value,
+    mode.value,
+    props.connections,
+    manualChooserLabel.value,
+  )
 ));
 const navOptions = computed(() => visibleChooserOptions(chooserGroups.value));
 // The phone selector owns its filter, so it always lists the full option
 // universe of the active mode — never the hidden desktop search query.
 const selectOptions = computed(() => chooserSelectOptions(
-  buildChooserGroups(props.catalog, dynamicPresetIds.value, "", mode.value, props.connections),
+  buildChooserGroups(
+    props.catalog,
+    dynamicPresetIds.value,
+    "",
+    mode.value,
+    props.connections,
+    manualChooserLabel.value,
+  ),
   t(CHOOSER_TAG_LABEL_KEYS.user_defined),
 ));
 const railEmptyMessage = computed(() => {
@@ -428,12 +444,10 @@ const selectedFamilyOption = computed(() => (
   selected.value && "family" in selected.value ? selected.value as PresetFamilyOption : null
 ));
 const selectedPlatformOption = computed(() => (
-  selected.value
-    && !("plan" in selected.value)
-    && !("family" in selected.value)
-    && !("preset" in selected.value)
-    ? selected.value
-    : null
+  selected.value && "kind" in selected.value ? selected.value : null
+));
+const selectedManualOption = computed(() => (
+  selected.value?.optionId === MANUAL_CHOOSER_OPTION_ID ? selected.value : null
 ));
 /**
  * Preset actually fed to the embedded dynamic-provider form. Family options
@@ -561,29 +575,32 @@ watch(
     // preset-id reload must not clear what the user is typing.
     if (justOpened) {
       presetQuery.value = "";
-      selectedVariantId.value = "";
-      // Existing connections are the default view; a deep link into a preset
-      // or platform option opens the new-service browsing mode directly.
-      const nextMode = initialOptionId
-        ? chooserModeForOptionId(
-          initialOptionId,
-          props.catalog,
-          dynamicPresetIds.value,
-          props.connections,
-        )
-        : defaultChooserMode(props.catalog, dynamicPresetIds.value, props.connections);
-      mode.value = nextMode;
-      const nextOptions = chooserUniverse(
+      const resolved = resolveChooserInitialOpen(
+        initialOptionId,
         props.catalog,
         dynamicPresetIds.value,
-        nextMode,
         props.connections,
       );
-      if (initialOptionId && isValidChooserOption(nextOptions, initialOptionId)) {
-        selectedOptionId.value = initialOptionId;
-        return;
+      mode.value = resolved.mode;
+      selectedOptionId.value = resolved.optionId;
+      selectedVariantId.value = resolved.variantId;
+      return;
+    }
+    // A deep link may open before the provider catalog arrives. Resolve its
+    // selection once the options are present; an empty initial result must
+    // not leave the detail pane blank for the whole session.
+    if (!selectedOptionId.value) {
+      const resolved = resolveChooserInitialOpen(
+        initialOptionId,
+        props.catalog,
+        dynamicPresetIds.value,
+        props.connections,
+      );
+      if (resolved.optionId) {
+        mode.value = resolved.mode;
+        selectedOptionId.value = resolved.optionId;
+        selectedVariantId.value = resolved.variantId;
       }
-      selectedOptionId.value = defaultChooserOptionId(nextOptions);
       return;
     }
     if (!isValidChooserOption(options, selectedOptionId.value)) {

@@ -549,6 +549,7 @@ export const deDEMessages = {
   "供应商目录未提供该方案": "Der Anbieterkatalog bietet diesen Plan nicht an",
   "单例方案由系统自动管理": "Dieser Singleton-Plan wird automatisch vom System verwaltet",
   "自定义端点": "Benutzerdefinierter Endpunkt",
+  "手动配置": "Manuelle Konfiguration",
   "自定义端点由你自行维护，Gateway 无法验证其价格、额度与协议兼容性。": "Ein benutzerdefinierter Endpunkt wird von Ihnen selbst verwaltet; Gateway kann Preis, Kontingent und Protokollkompatibilität nicht prüfen.",
   "需要关注": "Erfordert Aufmerksamkeit",
   "所有账号状态正常": "Alle Konten sind fehlerfrei",

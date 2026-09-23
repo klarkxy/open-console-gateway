@@ -550,6 +550,7 @@ export const ptBRMessages = {
   "供应商目录未提供该方案": "O catálogo do provedor não oferece este plano",
   "单例方案由系统自动管理": "Este plano singleton é gerenciado automaticamente",
   "自定义端点": "Endpoint personalizado",
+  "手动配置": "Configuração manual",
   "自定义端点由你自行维护，Gateway 无法验证其价格、额度与协议兼容性。": "Um endpoint personalizado é mantido por você; o Gateway não pode verificar seu preço, cota ou compatibilidade de protocolo.",
   "需要关注": "Precisa de atenção",
   "所有账号状态正常": "Todas as contas estão íntegras",

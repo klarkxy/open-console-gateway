@@ -97,6 +97,20 @@ test("writing a connection id emits connection= and strips a leftover provider="
   });
 });
 
+test("provider= and destination= can coexist on read so selection can rank them", () => {
+  assert.deepEqual(
+    readProviderPageQuery("?view=providers&destination=dest-a&provider=lab-http"),
+    {
+      connection: null,
+      provider: "lab-http",
+      destination: "dest-a",
+      tab: null,
+      add: false,
+      preset: null,
+    },
+  );
+});
+
 test("the add flow round-trips with and without a preset", () => {
   const browse = applyAppViewSearchParams(
     new URL("http://127.0.0.1:9042/dashboard/?view=accounts"),
@@ -241,8 +255,9 @@ test("the add-account deep link reads on Accounts and is stripped elsewhere", ()
 });
 
 test("Providers add maps onto the shared Accounts chooser", () => {
-  assert.deepEqual(accountAddDeepLinkFromProviderAdd(null), { optionId: null });
+  assert.deepEqual(accountAddDeepLinkFromProviderAdd(null), { optionId: "custom" });
   assert.deepEqual(accountAddDeepLinkFromProviderAdd("openai"), { optionId: "preset:openai" });
+  assert.deepEqual(accountAddDeepLinkFromProviderAdd("manual"), { optionId: "preset:manual" });
   assert.equal(accountAddQueryValue({ optionId: null }), "1");
   assert.equal(accountAddQueryValue({ optionId: "preset:openai" }), "preset:openai");
 });

@@ -13,10 +13,13 @@ import {
   defaultChooserOptionId,
   describeChooserSelection,
   isValidChooserOption,
+  resolveChooserInitialOpen,
   resolveChooserSelection,
   visibleChooserOptions,
   type ChooserOption,
   type PresetFamilyOption,
+  MANUAL_CHOOSER_LABEL_KEYS,
+  MANUAL_CHOOSER_OPTION_ID,
 } from "./account-add-chooser.ts";
 import { buildPlatformKindOptions } from "./platform-accounts.ts";
 import { familyOf } from "./provider-families.ts";
@@ -167,6 +170,7 @@ test("services mode: unused built-ins head each group; presets and platforms fol
 
   const apiIds = groups[1]!.options.map((option) => option.optionId);
   assert.equal(apiIds[0], "custom");
+  assert.ok(apiIds.includes(MANUAL_CHOOSER_OPTION_ID));
   assert.deepEqual(apiIds.slice(-2), ["platform:new_api", "platform:sub2api"]);
   const familyApiIds = apiIds.filter((id) => id.startsWith("family:api:"));
   assert.equal(familyApiIds.length, new Set(familyApiIds).size);
@@ -263,6 +267,20 @@ test("search matches family labels, variants, and endpoint hosts in a single pas
   assert.equal(visibleChooserOptions(buildChooserGroups(fullCatalog(), null, "no-such-preset", "services", planConnections())).length, 0);
 });
 
+test("manual option search matches the caller-provided localized label, not another vendor", () => {
+  const localized = "localized-manual-row";
+  const hit = visibleChooserOptions(
+    buildChooserGroups(fullCatalog(), null, "LOCALIZED-MANUAL", "services", planConnections(), localized),
+  );
+  assert.deepEqual(hit.map((option) => option.optionId), [MANUAL_CHOOSER_OPTION_ID]);
+  assert.equal(hit[0]!.label, localized);
+  const customOnly = visibleChooserOptions(
+    buildChooserGroups(fullCatalog(), null, "custom", "services", planConnections(), localized),
+  );
+  assert.equal(customOnly.some((option) => option.optionId === MANUAL_CHOOSER_OPTION_ID), false);
+  assert.ok(customOnly.some((option) => option.optionId === "custom"));
+});
+
 test("resolveChooserSelection maps flattened rows to family + variant and keeps the family valid after the query clears", () => {
   const queried = visibleChooserOptions(buildChooserGroups(fullCatalog(), null, "enterprise lite", "services", planConnections()));
   const universe = chooserUniverse(fullCatalog(), null, "services", planConnections());
@@ -301,6 +319,8 @@ test("chooserModeForOptionId routes deep links to the right tab", () => {
   assert.equal(chooserModeForOptionId("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", catalog, null, []), "connections");
   assert.equal(chooserModeForOptionId("family:plan:tencent"), "services");
   assert.equal(chooserModeForOptionId("preset:azure-openai"), "services");
+  assert.equal(chooserModeForOptionId("preset:manual"), "services");
+  assert.equal(chooserModeForOptionId("manual"), "services");
   assert.equal(chooserModeForOptionId("platform:new_api"), "services");
 });
 
@@ -376,7 +396,7 @@ test("phone select marks user-defined entries in connections mode", () => {
 
 test("describeChooserSelection covers plan, family, preset, and platform details", () => {
   const connections = chooserUniverse(fullCatalog(), null, "connections", planConnections());
-  const services = chooserUniverse(fullCatalog(), null, "services", planConnections());
+  const services = chooserUniverse(fullCatalog(), null, "services", planConnections(), "localized-manual-row");
   const byId = (options: ChooserOption[], id: string): ChooserOption => (
     options.find((option) => option.optionId === id)!
   );
@@ -420,6 +440,13 @@ test("describeChooserSelection covers plan, family, preset, and platform details
     tag: null,
     links: null,
   });
+
+  const manual = describeChooserSelection(byId(services, MANUAL_CHOOSER_OPTION_ID));
+  assert.equal(manual.kind, "manual");
+  assert.equal(manual.iconKey, "api");
+  assert.equal(manual.title, "localized-manual-row");
+  assert.deepEqual(manual.tag, { label: "user_defined", type: "default" });
+  assert.equal(manual.links, null);
 });
 
 test("user-defined plan options carry the user_defined tag and family brand icon keys", () => {
@@ -463,4 +490,50 @@ test("every chooser tag label code has a message key", () => {
     Object.keys(CHOOSER_TAG_LABEL_KEYS).sort(),
     ["custom_endpoint", "provider_preset", "user_defined"],
   );
+  assert.equal(MANUAL_CHOOSER_LABEL_KEYS.manual, "手动配置");
+});
+
+test("chooser initial open honors exact preset variants and manual HTTP, not another vendor", () => {
+  const catalog = fullCatalog();
+  const connections = planConnections();
+  const openai = resolveChooserInitialOpen("preset:openai", catalog, null, connections);
+  assert.deepEqual(openai, {
+    mode: "services",
+    optionId: "family:api:openai",
+    variantId: "openai",
+  });
+  const lite = resolveChooserInitialOpen("preset:tencent-enterprise-lite", catalog, null, connections);
+  assert.deepEqual(lite, {
+    mode: "services",
+    optionId: "family:plan:tencent",
+    variantId: "tencent-enterprise-lite",
+  });
+  assert.deepEqual(
+    resolveChooserInitialOpen("preset:manual", catalog, null, connections),
+    { mode: "services", optionId: MANUAL_CHOOSER_OPTION_ID, variantId: "" },
+  );
+  assert.deepEqual(
+    resolveChooserInitialOpen("manual", catalog, null, connections),
+    { mode: "services", optionId: MANUAL_CHOOSER_OPTION_ID, variantId: "" },
+  );
+  const unknown = resolveChooserInitialOpen("preset:not-a-preset", catalog, null, connections);
+  assert.equal(unknown.mode, "services");
+  assert.equal(unknown.optionId, "");
+  assert.equal(unknown.variantId, "");
+  assert.notEqual(unknown.optionId, "custom");
+  assert.equal(unknown.optionId.startsWith("family:"), false);
+
+  const saved = resolveChooserInitialOpen("opencode", catalog, null, connections);
+  assert.deepEqual(saved, { mode: "connections", optionId: "opencode", variantId: "" });
+  const byConnection = resolveChooserInitialOpen("connection:conn-opencode", catalog, null, connections);
+  assert.deepEqual(byConnection, { mode: "connections", optionId: "opencode", variantId: "" });
+  assert.deepEqual(
+    resolveChooserInitialOpen("custom", catalog, null, connections),
+    { mode: "services", optionId: "custom", variantId: "" },
+  );
+  assert.equal(resolveChooserInitialOpen("custom", null, null, connections).optionId, "");
+
+  const noTarget = resolveChooserInitialOpen(null, catalog, null, connections);
+  assert.equal(noTarget.mode, "connections");
+  assert.equal(noTarget.optionId, "command-code");
 });

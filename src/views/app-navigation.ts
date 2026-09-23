@@ -63,8 +63,8 @@ export type ProviderDetailTab = (typeof PROVIDER_DETAIL_TABS)[number];
 /**
  * Providers view deep link. `connection` is a V4 connection id; a leftover
  * `provider` catalog id is still accepted on write by callers that only know
- * the legacy identity (mapped on read). `add` opens the add flow (`preset`
- * picks the embedded form's preset, or the "manual" sentinel).
+ * the legacy identity (mapped on read). `add` / `preset` are one-shot
+ * bookmarks into the shared Accounts add chooser, not an embedded form.
  */
 export interface ProviderScopeQuery {
   connection?: string;
@@ -170,7 +170,7 @@ export function readAccountAddDeepLink(search: string): AccountAddDeepLink | nul
 export function accountAddDeepLinkFromProviderAdd(
   preset: string | null,
 ): AccountAddDeepLink {
-  return preset ? { optionId: `preset:${preset}` } : { optionId: null };
+  return preset ? { optionId: `preset:${preset}` } : { optionId: "custom" };
 }
 
 export function accountAddQueryValue(link: AccountAddDeepLink): string {

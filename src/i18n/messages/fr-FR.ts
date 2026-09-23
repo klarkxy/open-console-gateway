@@ -550,6 +550,7 @@ export const frFRMessages = {
   "供应商目录未提供该方案": "Le catalogue du fournisseur ne propose pas ce plan",
   "单例方案由系统自动管理": "Ce plan singleton est géré automatiquement par le système",
   "自定义端点": "Point de terminaison personnalisé",
+  "手动配置": "Configuration manuelle",
   "自定义端点由你自行维护，Gateway 无法验证其价格、额度与协议兼容性。": "Un point de terminaison personnalisé est maintenu par vous ; Gateway ne peut pas vérifier son tarif, son quota ni sa compatibilité protocolaire.",
   "需要关注": "Nécessite une attention",
   "所有账号状态正常": "Tous les comptes sont en bon état",

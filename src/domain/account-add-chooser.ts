@@ -16,6 +16,7 @@ import {
   PROVIDER_PRESETS,
   filterProviderPresets,
   groupProviderPresetsByOffering,
+  providerPresetOffering,
   type ProviderPreset,
   type ProviderPresetOffering,
 } from "./provider-presets.ts";
@@ -53,7 +54,36 @@ export interface PresetFamilyOption {
   label: string;
 }
 
-export type ChooserOption = PlanOption | PresetFamilyOption | PresetChooserOption | PlatformKindOption;
+/** Query value and chooser id for manual user-defined HTTP, never Custom API. */
+export const MANUAL_PRESET_QUERY_VALUE = "manual";
+export const MANUAL_CHOOSER_OPTION_ID = "manual";
+
+/** Rail/detail/search copy; the view renders `t(MANUAL_CHOOSER_LABEL_KEYS.manual)`. */
+export const MANUAL_CHOOSER_LABEL_KEYS = {
+  manual: "手动配置",
+} as const satisfies Record<"manual", MessageKey>;
+
+/**
+ * Create a user-defined Configurable HTTP Provider without a vendor preset.
+ * Distinct from the built-in Custom API template. `label` is caller-localized
+ * so search and sort follow the active locale, never a hardcoded string.
+ */
+export interface ManualChooserOption {
+  optionId: typeof MANUAL_CHOOSER_OPTION_ID;
+  source: "manual";
+  label: string;
+}
+
+export function manualChooserOption(label: string): ManualChooserOption {
+  return { optionId: MANUAL_CHOOSER_OPTION_ID, source: "manual", label };
+}
+
+export type ChooserOption =
+  | PlanOption
+  | PresetFamilyOption
+  | PresetChooserOption
+  | PlatformKindOption
+  | ManualChooserOption;
 
 /** Internal offering buckets; rendered as one flat list. */
 export interface ChooserGroup {
@@ -126,7 +156,9 @@ export function chooserModeForOptionId(
   connections?: readonly Connection[] | null,
 ): ChooserMode {
   if (
-    optionId.startsWith("family:")
+    optionId === MANUAL_CHOOSER_OPTION_ID
+    || optionId === `preset:${MANUAL_PRESET_QUERY_VALUE}`
+    || optionId.startsWith("family:")
     || optionId.startsWith("preset:")
     || optionId.startsWith(PLATFORM_KIND_OPTION_ID_PREFIX)
   ) {
@@ -219,10 +251,12 @@ export function buildChooserGroups(
   query: string,
   mode: ChooserMode,
   connections?: readonly Connection[] | null,
+  manualLabel = "",
 ): ChooserGroup[] {
   const { existing, unused } = partitionPlanOptions(catalog, dynamicPresetIds, connections);
   const normalized = query.trim().toLocaleLowerCase();
   const matches = (label: string) => label.toLocaleLowerCase().includes(normalized);
+  const manual = manualChooserOption(manualLabel);
 
   if (mode === "connections") {
     return chooserGroupsFrom(
@@ -256,6 +290,7 @@ export function buildChooserGroups(
     ],
     [
       ...unused.api.filter((option) => matches(option.label)),
+      ...(matches(manual.label) ? [manual] : []),
       ...apiPresetOptions,
       ...buildPlatformKindOptions().filter((option) => matches(option.label)),
     ],
@@ -275,8 +310,11 @@ export function chooserUniverse(
   dynamicPresetIds: ReadonlyMap<string, string | null> | null | undefined,
   mode: ChooserMode,
   connections?: readonly Connection[] | null,
+  manualLabel = "",
 ): ChooserOption[] {
-  return visibleChooserOptions(buildChooserGroups(catalog, dynamicPresetIds, "", mode, connections));
+  return visibleChooserOptions(
+    buildChooserGroups(catalog, dynamicPresetIds, "", mode, connections, manualLabel),
+  );
 }
 
 /** Visible (filtered) options in rail order; arrow-key navigation follows it. */
@@ -338,6 +376,71 @@ export function resolveChooserSelection(
   return { optionId: target.optionId, variantId: "" };
 }
 
+export interface ChooserInitialOpen {
+  mode: ChooserMode;
+  optionId: string;
+  variantId: string;
+}
+
+function optionIdForSavedConnection(connection: Connection): string {
+  return connection.legacy.kind === "custom_account" ? "custom" : connection.legacy.id;
+}
+
+/**
+ * Closed-to-open chooser selection. Exact preset variants map onto the family
+ * rail row plus that variant; `manual` / `preset:manual` open manual
+ * user-defined HTTP (not Custom API). Unknown ids do not fall back to another
+ * vendor. A null target uses the ordinary default.
+ */
+export function resolveChooserInitialOpen(
+  initialOptionId: string | null | undefined,
+  catalog?: readonly ProviderCatalogEntry[] | null,
+  dynamicPresetIds?: ReadonlyMap<string, string | null> | null,
+  connections?: readonly Connection[] | null,
+): ChooserInitialOpen {
+  if (!initialOptionId) {
+    const mode = defaultChooserMode(catalog, dynamicPresetIds, connections);
+    return {
+      mode,
+      optionId: defaultChooserOptionId(chooserUniverse(catalog, dynamicPresetIds, mode, connections)),
+      variantId: "",
+    };
+  }
+  if (
+    initialOptionId === MANUAL_CHOOSER_OPTION_ID
+    || initialOptionId === `preset:${MANUAL_PRESET_QUERY_VALUE}`
+  ) {
+    return { mode: "services", optionId: MANUAL_CHOOSER_OPTION_ID, variantId: "" };
+  }
+  if (initialOptionId.startsWith("preset:")) {
+    const presetId = initialOptionId.slice("preset:".length);
+    const preset = PROVIDER_PRESETS.find((entry) => entry.id === presetId);
+    if (!preset) {
+      return { mode: "services", optionId: "", variantId: "" };
+    }
+    return {
+      mode: "services",
+      optionId: presetFamilyOptionId(familyOf(preset), providerPresetOffering(preset)),
+      variantId: preset.id,
+    };
+  }
+  let optionId = initialOptionId;
+  if (initialOptionId.startsWith("connection:")) {
+    const connectionId = initialOptionId.slice("connection:".length);
+    const connection = (connections ?? []).find((row) => row.id === connectionId);
+    if (!connection) {
+      return { mode: "connections", optionId: "", variantId: "" };
+    }
+    optionId = optionIdForSavedConnection(connection);
+  }
+  const mode = chooserModeForOptionId(optionId, catalog, dynamicPresetIds, connections);
+  const universe = chooserUniverse(catalog, dynamicPresetIds, mode, connections);
+  if (!isValidChooserOption(universe, optionId)) {
+    return { mode, optionId: "", variantId: "" };
+  }
+  return { mode, optionId, variantId: "" };
+}
+
 /** First selectable option, or the first option when every one is disabled. */
 export function defaultChooserOptionId(options: readonly ChooserOption[]): string {
   return options.find((option) => !isChooserOptionDisabled(option))?.optionId
@@ -375,6 +478,7 @@ export function chooserOptionIconKey(option: ChooserOption): string {
   }
   if ("family" in option) return `family:${option.family.id}`;
   if ("preset" in option) return `family:${familyOf(option.preset).id}`;
+  if (option.optionId === MANUAL_CHOOSER_OPTION_ID) return "api";
   return "database";
 }
 
@@ -387,7 +491,7 @@ export const CHOOSER_TAG_LABEL_KEYS: Record<ChooserTagLabelCode, MessageKey> = {
 };
 
 export interface ChooserDetail {
-  kind: "plan" | "family" | "preset" | "platform";
+  kind: "plan" | "family" | "preset" | "platform" | "manual";
   iconKey: string;
   title: string;
   tag: { label: ChooserTagLabelCode; type: "warning" | "default" } | null;
@@ -421,6 +525,15 @@ export function describeChooserSelection(
       title: option.preset.name,
       tag: { label: "provider_preset", type: "default" },
       links: { docsUrl: option.preset.docsUrl, websiteUrl: option.preset.websiteUrl },
+    };
+  }
+  if ("source" in option && option.source === "manual") {
+    return {
+      kind: "manual",
+      iconKey: "api",
+      title: option.label,
+      tag: { label: "user_defined", type: "default" },
+      links: null,
     };
   }
   if (!("plan" in option)) {

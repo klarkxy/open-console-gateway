@@ -441,6 +441,7 @@ export const esESMessages = {
   "供应商目录未提供该方案": "El catálogo del proveedor no ofrece este plan",
   "单例方案由系统自动管理": "Este plan único se gestiona automáticamente",
   "自定义端点": "Endpoint personalizado",
+  "手动配置": "Configuración manual",
   "自定义端点由你自行维护，Gateway 无法验证其价格、额度与协议兼容性。": "Un endpoint personalizado lo mantienes tú; Gateway no puede verificar su precio, cuota ni compatibilidad de protocolo.",
   "需要关注": "Requiere atención",
   "所有账号状态正常": "Todas las cuentas están correctas",
