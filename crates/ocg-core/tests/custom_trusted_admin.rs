@@ -1479,7 +1479,7 @@ async fn oversized_verification_body_fails_cleanly() {
 }
 
 #[tokio::test]
-async fn unknown_custom_429_does_not_invent_cooldown_or_parse_go_windows() {
+async fn unknown_custom_429_uses_temporary_wait_without_inventing_quota_windows() {
     let harness = BlackBoxHarness::start_with_upstream(Some({
         let mut replies = HashMap::new();
         replies.insert(
@@ -1492,10 +1492,6 @@ async fn unknown_custom_429_does_not_invent_cooldown_or_parse_go_windows() {
                 FakeReply {
                     status: 429,
                     body: "5-hour usage limit reached. Resets in 13min.",
-                },
-                FakeReply {
-                    status: 200,
-                    body: SUCCESS_CHAT_BODY,
                 },
             ]),
         );
@@ -1526,13 +1522,14 @@ async fn unknown_custom_429_does_not_invent_cooldown_or_parse_go_windows() {
     let (again_status, again_body) = harness.chat(CUSTOM_MODEL).await;
     assert_eq!(
         again_status,
-        StatusCode::OK,
-        "the next request must still be allowed to use this account: {again_body}"
+        StatusCode::TOO_MANY_REQUESTS,
+        "a temporary 429 wait must block an immediate retry: {again_body}"
     );
+    assert_eq!(again_body["error"]["type"], "rate_limit_error");
     assert_eq!(
         harness.fake_calls().len(),
-        3,
-        "one verification and two inference calls"
+        2,
+        "one verification and one inference call; the retry stays local"
     );
     assert!(after["authError"].is_null());
     assert!(after["lastError"].is_null());

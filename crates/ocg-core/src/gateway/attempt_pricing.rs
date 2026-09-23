@@ -277,13 +277,9 @@ pub(crate) fn platform_price_for_attempt(
                         .cloned()
                 })
                 .is_none_or(|destination| {
-                    destination.base_url.as_deref() != Some(url)
-                        && !destination.catalog.iter().any(|model| {
-                            model
-                                .upstream_override
-                                .as_ref()
-                                .is_some_and(|route| route.endpoint_url == url)
-                        })
+                    !ocg_domain::destination::http_configured_routes(&destination)
+                        .iter()
+                        .any(|route| route.url.as_deref() == Some(url))
                 })
         })
     {

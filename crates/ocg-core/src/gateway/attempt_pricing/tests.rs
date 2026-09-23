@@ -247,16 +247,25 @@ fn platform_attempt_rejects_old_key_or_endpoint_and_keeps_billed_row() {
         pinned_group(),
         snapshot(vec![billable_price(), official], false),
     );
-    // Linking rewrites the Key's endpoint to the parent-owned site root, so
-    // the attempt identity check compares against that root.
+    // Linking moves the Key to the parent's configured inference routes.
+    // The attempt identity check compares the exact route sent upstream.
     assert!(matches!(
         platform_price_for_attempt(
             &state,
             &(&account).into(),
             UPSTREAM,
-            Some("https://api.example.com")
+            Some("https://api.example.com/v1/chat/completions")
         ),
         Some(PlatformAttemptPrice::Frozen(_))
+    ));
+    assert!(matches!(
+        platform_price_for_attempt(
+            &state,
+            &(&account).into(),
+            UPSTREAM,
+            Some("https://api.example.com/v1/other")
+        ),
+        Some(PlatformAttemptPrice::Unknown { .. })
     ));
     assert!(matches!(
         platform_price_for_attempt(
