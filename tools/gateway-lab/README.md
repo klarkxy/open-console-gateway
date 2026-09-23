@@ -46,7 +46,7 @@ Reports never include Keys or full prompts. They store SHA-256 fingerprints / pr
 
 ## Report statuses
 
-`PASS` / `FAIL` / `UNSUPPORTED` / `NOT_RUN`. Only `PASS` counts as a pass. Any `UNSUPPORTED` or `NOT_RUN` row makes the process exit **2**. Failures exit **1**. The local report includes a coverage checklist keyed by stable `scenarioId` and `evidenceKind` (`gateway_black_box`, `rust_integration`, `lab_fixture`, `live_remote`). Direct-to-lab fixture checks cannot satisfy Gateway behavior. Named matrix rows that were not executed are `NOT_RUN` and therefore also exit 2. Local verify may spawn exact `cargo test -p ocg-core --test <file> <fn> -- --exact` commands as `rust_integration` evidence.
+`PASS` / `FAIL` / `UNSUPPORTED` / `NOT_RUN`. Only `PASS` counts as a pass. Any `UNSUPPORTED` or `NOT_RUN` row makes the process exit **2**. Failures exit **1**. The local report includes a coverage checklist keyed by stable `scenarioId` and `evidenceKind` (`gateway_black_box`, `rust_integration`, `lab_fixture`, `live_remote`). Direct-to-lab fixture checks cannot satisfy Gateway behavior. Named matrix rows that were not executed are `NOT_RUN` and therefore also exit 2. Local verify may spawn exact `cargo test -p ocg-core --features ollama-cloud-loopback-test --test <file> <fn> -- --exact` commands as `rust_integration` evidence when the named file is `ollama_cloud_gateway`; other files omit that feature.
 
 Each scenario records binary identity, expected vs actual upstream hits, remote call count, and a replay command.
 

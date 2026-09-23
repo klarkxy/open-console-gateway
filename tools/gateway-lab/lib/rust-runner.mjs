@@ -9,7 +9,11 @@ function boundText(text, limit = 8000) {
 }
 
 export function runRustTest({ crate, testFile, testName, timeoutMs = 360000 }) {
-  const args = ["test", "-p", crate, "--test", testFile, testName, "--", "--exact", "--nocapture"];
+  const args = ["test", "-p", crate];
+  if (crate === "ocg-core" && testFile === "ollama_cloud_gateway") {
+    args.push("--features", "ollama-cloud-loopback-test");
+  }
+  args.push("--test", testFile, testName, "--", "--exact", "--nocapture");
   const started = Date.now();
   return new Promise((resolve) => {
     const child = spawn("cargo", args, {

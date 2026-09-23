@@ -11,6 +11,9 @@ description = "Core library for Open Console Gateway, account management, cooldo
 [features]
 default = []
 dsh-local-host = []
+# Loopback-only Ollama Cloud origin substitute for gateway integration tests.
+# Default-off so application builds keep the fixed https://ollama.com origin.
+ollama-cloud-loopback-test = []
 
 [dependencies]
 aes-gcm = "0.10"

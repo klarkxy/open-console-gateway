@@ -46,7 +46,7 @@ Live 默认：并发 1、`max_tokens` 512、超时 60 秒、单次 verify 最多
 
 ## 报告状态
 
-`PASS` / `FAIL` / `UNSUPPORTED` / `NOT_RUN`。只有 `PASS` 算通过。任何 `UNSUPPORTED` 或 `NOT_RUN` 都会使进程以 **2** 退出。失败为 **1**。本地报告带覆盖清单，按稳定 `scenarioId` 与 `evidenceKind`（`gateway_black_box`、`rust_integration`、`lab_fixture`、`live_remote`）计分。直连实验室的 fixture 不能充当 Gateway 行为证据。批准矩阵里未实际执行的项记为 `NOT_RUN`，因此同样退出 2。本地 verify 可按参数数组 spawn 精确的 `cargo test -p ocg-core --test <file> <fn> -- --exact` 作为 `rust_integration` 证据。
+`PASS` / `FAIL` / `UNSUPPORTED` / `NOT_RUN`。只有 `PASS` 算通过。任何 `UNSUPPORTED` 或 `NOT_RUN` 都会使进程以 **2** 退出。失败为 **1**。本地报告带覆盖清单，按稳定 `scenarioId` 与 `evidenceKind`（`gateway_black_box`、`rust_integration`、`lab_fixture`、`live_remote`）计分。直连实验室的 fixture 不能充当 Gateway 行为证据。批准矩阵里未实际执行的项记为 `NOT_RUN`，因此同样退出 2。本地 verify 可按参数数组 spawn 精确的 `cargo test -p ocg-core --features ollama-cloud-loopback-test --test <file> <fn> -- --exact` 作为 `rust_integration` 证据（当文件为 `ollama_cloud_gateway` 时带上该 feature；其他文件不加）。
 
 每条场景记录二进制摘要、预期/实际上游命中、远端次数、可复现命令。
 

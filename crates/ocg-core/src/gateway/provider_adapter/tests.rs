@@ -32,7 +32,7 @@ fn resolve_route(
     config: &AppConfig,
     plan: &RequestPlan,
 ) -> Result<AttemptSpec, String> {
-    resolve_account_test_route_with_dynamics(account, kind(account), config, plan, &[])
+    resolve_account_test_route(account, kind(account), config, plan)
 }
 
 fn account(
@@ -375,7 +375,7 @@ fn adapter_kind_dispatch_preserves_route_auth_and_model_decisions() {
         CredentialKind::ApiKey,
         QuotaScope::Key,
     );
-    assert_eq!(
+    assert!(
         resolve_route(
             &unknown,
             &config,
@@ -386,8 +386,23 @@ fn adapter_kind_dispatch_preserves_route_auth_and_model_decisions() {
                 None
             ),
         )
-        .unwrap_err(),
-        "unsupported provider offering `unknown/unknown`"
+        .unwrap_err()
+        .contains("missing a persisted endpoint URL")
+    );
+    assert!(
+        resolve_probe_route(
+            &unknown,
+            kind(&unknown),
+            &config,
+            &chat_plan(
+                "glm-5.2",
+                UpstreamChannel::Go,
+                ApiFormat::ChatCompletions,
+                None
+            ),
+        )
+        .unwrap_err()
+        .contains("unsupported provider offering")
     );
 }
 
@@ -538,14 +553,9 @@ fn fixed_provider_plans_expose_documented_chat_and_messages_routes() {
             (ApiFormat::Messages, messages_base, messages_path),
         ] {
             let plan = chat_plan(model_id, UpstreamChannel::Go, protocol, None);
-            let account_route = resolve_account_test_route_with_dynamics(
-                &account,
-                kind(&account),
-                &config,
-                &plan,
-                &[],
-            )
-            .expect("account-level tests use the documented production route");
+            let account_route =
+                resolve_account_test_route(&account, kind(&account), &config, &plan)
+                    .expect("account-level tests use the documented production route");
             let provider_route = resolve_probe_route(&account, kind(&account), &config, &plan)
                 .expect("provider probes reuse the documented production route");
             for route in [account_route, provider_route] {
@@ -577,7 +587,7 @@ fn fixed_provider_plans_expose_documented_chat_and_messages_routes() {
         QuotaScope::Key,
     );
     for route in [
-        resolve_account_test_route_with_dynamics(
+        resolve_account_test_route(
             &minimax,
             kind(&minimax),
             &config,
@@ -587,7 +597,6 @@ fn fixed_provider_plans_expose_documented_chat_and_messages_routes() {
                 ApiFormat::Responses,
                 None,
             ),
-            &[],
         )
         .unwrap(),
         resolve_probe_route(
@@ -639,12 +648,11 @@ fn minimax_kimi_ollama_do_not_inherit_opencode_responses_for_shared_model_names(
         QuotaScope::Key,
     );
 
-    let minimax_route = resolve_account_test_route_with_dynamics(
+    let minimax_route = resolve_account_test_route(
         &minimax,
         kind(&minimax),
         &config,
         &chat_plan(shared, UpstreamChannel::Go, ApiFormat::Responses, None),
-        &[],
     )
     .unwrap();
     assert_eq!(minimax_route.base_url, MINIMAX_CN_BASE_URL);
@@ -653,12 +661,11 @@ fn minimax_kimi_ollama_do_not_inherit_opencode_responses_for_shared_model_names(
     assert!(!minimax_route.follow_redirects);
 
     for account in [&kimi, &ollama] {
-        let err = resolve_account_test_route_with_dynamics(
+        let err = resolve_account_test_route(
             account,
             kind(account),
             &config,
             &chat_plan(shared, UpstreamChannel::Go, ApiFormat::Responses, None),
-            &[],
         )
         .unwrap_err();
         assert!(
@@ -681,7 +688,7 @@ fn minimax_kimi_ollama_do_not_inherit_opencode_responses_for_shared_model_names(
         );
     }
 
-    let ollama_chat = resolve_account_test_route_with_dynamics(
+    let ollama_chat = resolve_account_test_route(
         &ollama,
         kind(&ollama),
         &config,
@@ -691,7 +698,6 @@ fn minimax_kimi_ollama_do_not_inherit_opencode_responses_for_shared_model_names(
             ApiFormat::ChatCompletions,
             None,
         ),
-        &[],
     )
     .unwrap();
     assert_eq!(ollama_chat.base_url, OLLAMA_CLOUD_BASE_URL);
@@ -707,7 +713,7 @@ fn p06_ollama_cloud_attempt_normalizes_wire() {
         crate::provider::CredentialKind::ApiKey,
         crate::provider::QuotaScope::Key,
     );
-    let spec = resolve_account_test_route_with_dynamics(
+    let spec = resolve_account_test_route(
         &ollama,
         kind(&ollama),
         &config,
@@ -717,7 +723,6 @@ fn p06_ollama_cloud_attempt_normalizes_wire() {
             ApiFormat::ChatCompletions,
             None,
         ),
-        &[],
     )
     .unwrap();
     assert_eq!(spec.wire_normalization, WireNormalization::OllamaCloud);
@@ -784,7 +789,7 @@ fn s01_dynamic_override_resolves_configured_route_without_granting_the_key() {
         CredentialKind::ApiKey,
         QuotaScope::Key,
     );
-    let foreign = resolve_account_test_route_with_dynamics(
+    let foreign = resolve_account_test_route(
         &account,
         kind(&account),
         &config,
@@ -792,23 +797,38 @@ fn s01_dynamic_override_resolves_configured_route_without_granting_the_key() {
             "vendor/lab",
             UpstreamChannel::Go,
             ApiFormat::ChatCompletions,
-            None,
+            Some(CustomRouteSpec {
+                endpoint_url: "https://evil.example/v1".into(),
+                auth_kind: ocg_domain::dynamic::DynamicAuthKind::Bearer,
+            }),
         ),
-        std::slice::from_ref(&runtime),
     )
-    .expect("route resolve is not the stored-grant gate");
+    .expect("prepared route resolve is not the stored-grant gate");
     assert_eq!(foreign.base_url, "https://evil.example");
     assert!(matches!(
         foreign.credential,
         crate::gateway::attempt::CredentialHandle::Account { .. }
     ));
 
-    let same_origin = dynamic_runtime(
-        "https://lab.example/v1",
-        Some("https://lab.example/other/v1"),
-        ocg_domain::dynamic::DynamicAuthKind::Bearer,
-    );
-    let allowed = resolve_account_test_route_with_dynamics(
+    let allowed = resolve_account_test_route(
+        &account,
+        kind(&account),
+        &config,
+        &chat_plan(
+            "vendor/lab",
+            UpstreamChannel::Go,
+            ApiFormat::ChatCompletions,
+            Some(CustomRouteSpec {
+                endpoint_url: "https://lab.example/other/v1".into(),
+                auth_kind: ocg_domain::dynamic::DynamicAuthKind::Bearer,
+            }),
+        ),
+    )
+    .unwrap();
+    assert_eq!(allowed.base_url, "https://lab.example");
+    assert_eq!(allowed.path, "/other/v1/chat/completions");
+
+    let missing = resolve_account_test_route(
         &account,
         kind(&account),
         &config,
@@ -818,11 +838,12 @@ fn s01_dynamic_override_resolves_configured_route_without_granting_the_key() {
             ApiFormat::ChatCompletions,
             None,
         ),
-        std::slice::from_ref(&same_origin),
     )
-    .unwrap();
-    assert_eq!(allowed.base_url, "https://lab.example");
-    assert_eq!(allowed.path, "/other/v1/chat/completions");
+    .unwrap_err();
+    assert!(
+        missing.contains("missing a persisted endpoint URL"),
+        "AccountTest must not re-resolve a dynamic mapping: {missing}"
+    );
 }
 
 #[test]
@@ -840,7 +861,7 @@ fn s01_keyless_dynamic_override_may_use_another_origin() {
         QuotaScope::Key,
     );
     account.key_cipher.clear();
-    let route = resolve_account_test_route_with_dynamics(
+    let route = resolve_account_test_route(
         &account,
         kind(&account),
         &config,
@@ -848,9 +869,11 @@ fn s01_keyless_dynamic_override_may_use_another_origin() {
             "vendor/lab",
             UpstreamChannel::Go,
             ApiFormat::ChatCompletions,
-            None,
+            Some(CustomRouteSpec {
+                endpoint_url: "https://evil.example/v1".into(),
+                auth_kind: ocg_domain::dynamic::DynamicAuthKind::None,
+            }),
         ),
-        std::slice::from_ref(&runtime),
     )
     .unwrap();
     assert_eq!(route.base_url, "https://evil.example");
@@ -868,24 +891,13 @@ fn resolve_dispatches_on_caller_adapter_not_account_provider_id() {
     );
     let go_responses = chat_plan("grok-4.5", UpstreamChannel::Go, ApiFormat::Responses, None);
     assert!(
-        resolve_account_test_route_with_dynamics(
-            &go,
-            ProviderAdapterKind::OpenCodeGo,
-            &config,
-            &go_responses,
-            &[],
-        )
-        .is_ok(),
+        resolve_account_test_route(&go, ProviderAdapterKind::OpenCodeGo, &config, &go_responses,)
+            .is_ok(),
         "OpenCode Go still serves grok-4.5 Responses when the caller adapter matches"
     );
-    let kimi_err = resolve_account_test_route_with_dynamics(
-        &go,
-        ProviderAdapterKind::KimiCn,
-        &config,
-        &go_responses,
-        &[],
-    )
-    .unwrap_err();
+    let kimi_err =
+        resolve_account_test_route(&go, ProviderAdapterKind::KimiCn, &config, &go_responses)
+            .unwrap_err();
     assert!(
         kimi_err.contains("no official upstream path")
             || kimi_err.contains("no verified support")
@@ -1129,20 +1141,23 @@ fn production_and_probe_share_transport_for_supported_protocols() {
             None,
         ),
     );
-    let _ollama_guard =
-        install_ollama_cloud_loopback_route_for_test(ollama.id.clone(), "http://127.0.0.1:9")
-            .unwrap();
-    assert_production_probe_transport_eq(
-        &ollama,
-        &ollama_dest,
-        &config,
-        &chat_plan(
-            "deepseek-v4-flash",
-            UpstreamChannel::Go,
-            ApiFormat::ChatCompletions,
-            None,
-        ),
-    );
+    #[cfg(feature = "ollama-cloud-loopback-test")]
+    {
+        let _ollama_guard =
+            install_ollama_cloud_loopback_route_for_test(ollama.id.clone(), "http://127.0.0.1:9")
+                .unwrap();
+        assert_production_probe_transport_eq(
+            &ollama,
+            &ollama_dest,
+            &config,
+            &chat_plan(
+                "deepseek-v4-flash",
+                UpstreamChannel::Go,
+                ApiFormat::ChatCompletions,
+                None,
+            ),
+        );
+    }
 
     let custom = account(
         "custom-parity",
@@ -1342,7 +1357,23 @@ fn production_and_probe_deny_unsupported_transport_protocols() {
         CredentialKind::ApiKey,
         QuotaScope::Key,
     );
-    let mapped = resolve_account_test_route_with_dynamics(
+    let mapped = resolve_account_test_route(
+        &dynamic,
+        kind(&dynamic),
+        &config,
+        &chat_plan(
+            "vendor/lab",
+            UpstreamChannel::Go,
+            ApiFormat::ChatCompletions,
+            Some(CustomRouteSpec {
+                endpoint_url: "https://evil.example/v1".into(),
+                auth_kind: ocg_domain::dynamic::DynamicAuthKind::Bearer,
+            }),
+        ),
+    )
+    .expect("prepared dynamic AccountTest uses the selected route");
+    assert_eq!(mapped.base_url, "https://evil.example");
+    let missing = resolve_account_test_route(
         &dynamic,
         kind(&dynamic),
         &config,
@@ -1352,10 +1383,12 @@ fn production_and_probe_deny_unsupported_transport_protocols() {
             ApiFormat::ChatCompletions,
             None,
         ),
-        std::slice::from_ref(&runtime),
     )
-    .expect("dynamic mapping selection stays outside shared transport construction");
-    assert_eq!(mapped.base_url, "https://evil.example");
+    .unwrap_err();
+    assert!(
+        missing.contains("missing a persisted endpoint URL"),
+        "AccountTest must not re-resolve a dynamic mapping: {missing}"
+    );
     let dynamic_probe = resolve_probe_route(
         &dynamic,
         kind(&dynamic),

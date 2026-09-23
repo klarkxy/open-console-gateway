@@ -14,7 +14,8 @@
   `docker compose -f compose.example.yaml config --quiet`。
   `pnpm run test:tooling` 不在此 job。
 - **Rust** — `cargo fmt --all -- --check`、锁定依赖的 workspace 测试与
-  Clippy `-D warnings`，并 `--exclude ocg-manager`（桌面 crate 需要 WebKit
+  Clippy `-D warnings`，并加上 `--features ocg-core/ollama-cloud-loopback-test`
+  与 `--exclude ocg-manager`（桌面 crate 需要 WebKit
   头文件和占位 `dist/index.html`；由 Windows job 覆盖；Linux 上的
   `src-tauri` 编译在 release 矩阵）。
 - **Windows Tauri** — 对 stub `dist/index.html` 跑

@@ -15,7 +15,8 @@ tag. Manual release candidates skip it. Three parallel jobs:
   `docker compose -f compose.example.yaml config --quiet`.
   `pnpm run test:tooling` is not in this job.
 - **Rust** — `cargo fmt --all -- --check`, locked workspace tests and Clippy
-  `-D warnings` with `--exclude ocg-manager` (the desktop crate needs WebKit
+  `-D warnings` with `--features ocg-core/ollama-cloud-loopback-test` and
+  `--exclude ocg-manager` (the desktop crate needs WebKit
   headers and a `dist/index.html` stub; Windows covers it; Linux `src-tauri`
   compile is the release matrix).
 - **Windows Tauri** — `cargo test -p ocg-manager --lib` and Clippy `-D warnings`

@@ -18,6 +18,7 @@ use crate::gateway::protocol::RequestPlan;
 use crate::models::Account;
 use crate::provider_contracts::protocol_to_api;
 use crate::quota_recovery::{QuotaAcquire, QuotaEpisode};
+use crate::routing_snapshot::RoutingSnapshot;
 use crate::state::CoreState;
 use ocg_domain::catalog::UpstreamProtocolKind;
 use ocg_domain::connection::{
@@ -25,6 +26,9 @@ use ocg_domain::connection::{
 };
 use ocg_domain::credential::{
     AssignedEndpoint, RouteSpec, assigned_endpoints_for_routes, normalize_origin,
+};
+use ocg_domain::destination::{
+    AdapterKind, AuthScheme, CatalogModel, Destination, http_model_route,
 };
 use std::collections::HashSet;
 use std::fmt;
@@ -482,7 +486,9 @@ pub(super) fn verify_live_send(
     }
 
     if matches!(spec.proxy_routing, ProxyRoutingModel::IsolatedTrustedAdmin) {
-        let live_route = live_isolated_route(db, &live_account, plan, spec)?;
+        let public_model = selected_public_identity(selection)
+            .ok_or_else(|| LiveSendAuthError::unauthorized(ROUTE_CHANGED))?;
+        let live_route = live_isolated_route(db, &live_account, plan, spec, public_model)?;
         if !binding
             .allowed_endpoint_ids
             .iter()
@@ -528,61 +534,38 @@ fn live_isolated_route(
     account: &Account,
     plan: &RequestPlan,
     spec: &AttemptSpec,
+    public_model: &str,
 ) -> Result<LiveIsolatedRoute, LiveSendAuthError> {
+    if let Some(route) = live_http_destination_route(db, account, plan, spec, public_model)? {
+        return Ok(route);
+    }
     if let Some(destination) = db
         .custom_destination_for_account(&account.id)
         .map_err(|error| LiveSendAuthError::unauthorized(error.to_string()))?
     {
-        let mapping = plan
-            .resolved_alias
-            .as_deref()
-            .and_then(|alias| {
-                destination.models.iter().find(|mapping| {
-                    crate::custom::custom_model_id_matches(&mapping.public_model, alias)
-                })
-            })
-            .or_else(|| {
-                plan.original_model.as_deref().and_then(|model| {
-                    destination.models.iter().find(|mapping| {
-                        crate::custom::custom_model_id_matches(&mapping.public_model, model)
-                    })
-                })
-            })
-            .or_else(|| {
-                let mut matches = destination
-                    .models
-                    .iter()
-                    .filter(|mapping| mapping.upstream_model.trim() == plan.model.trim());
-                let first = matches.next()?;
-                matches.next().is_none().then_some(first)
+        let mapping = destination
+            .models
+            .iter()
+            .find(|mapping| {
+                crate::custom::custom_model_id_matches(&mapping.public_model, public_model)
             })
             .ok_or_else(|| LiveSendAuthError::unauthorized(ROUTE_CHANGED))?;
+        if mapping.upstream_model.trim() != plan.model.trim() {
+            return Err(LiveSendAuthError::unauthorized(ROUTE_CHANGED));
+        }
         let route = crate::dynamic::effective_mapping_route(
             destination.protocol,
             &destination.endpoint_url,
             mapping,
         );
-        let auth_kind = match destination.auth_scheme {
-            ocg_domain::destination::AuthScheme::Bearer => {
-                ocg_domain::dynamic::DynamicAuthKind::Bearer
-            }
-            ocg_domain::destination::AuthScheme::XApiKey => {
-                ocg_domain::dynamic::DynamicAuthKind::XApiKey
-            }
-            ocg_domain::destination::AuthScheme::None => ocg_domain::dynamic::DynamicAuthKind::None,
-        };
+        let auth_kind = auth_kind_from_scheme(destination.auth_scheme);
         if spec.upstream != protocol_to_api(route.protocol)
             || spec.wire_auth() != wire_auth_for_dynamic(auth_kind)
         {
             return Err(LiveSendAuthError::unauthorized(ROUTE_CHANGED));
         }
         let current = resolve_inference_url(&route.endpoint_url, route.protocol)?;
-        if let Some(planned) = plan.custom_route.as_ref() {
-            let planned_url = resolve_inference_url(&planned.endpoint_url, route.protocol)?;
-            if planned_url != current || planned.auth_kind != auth_kind {
-                return Err(LiveSendAuthError::unauthorized(ROUTE_CHANGED));
-            }
-        }
+        confirm_planned_custom_route(plan, &current, route.protocol, auth_kind)?;
         let spec_url = spec
             .request_url()
             .map_err(LiveSendAuthError::unauthorized)?;
@@ -643,13 +626,7 @@ fn live_isolated_route(
             return Err(LiveSendAuthError::unauthorized(ROUTE_CHANGED));
         }
         let current = resolve_inference_url(&config.endpoint_url, config.upstream_protocol)?;
-        if let Some(planned) = plan.custom_route.as_ref() {
-            let planned_url =
-                resolve_inference_url(&planned.endpoint_url, config.upstream_protocol)?;
-            if planned_url != current || planned.auth_kind != auth_kind {
-                return Err(LiveSendAuthError::unauthorized(ROUTE_CHANGED));
-            }
-        }
+        confirm_planned_custom_route(plan, &current, config.upstream_protocol, auth_kind)?;
         let spec_url = spec
             .request_url()
             .map_err(LiveSendAuthError::unauthorized)?;
@@ -690,14 +667,11 @@ fn live_isolated_route(
     let runtime = find_runtime(&runtimes, &account.provider_id)
         .ok_or_else(|| LiveSendAuthError::unauthorized(MISSING_GRANT))?;
     let mapping = runtime
-        .mapping_for_upstream(&plan.model)
-        .or_else(|| runtime.mapping_for_public(&plan.model))
-        .or_else(|| {
-            plan.resolved_alias
-                .as_deref()
-                .and_then(|alias| runtime.mapping_for_public(alias))
-        })
+        .mapping_for_public(public_model)
         .ok_or_else(|| LiveSendAuthError::unauthorized(ROUTE_CHANGED))?;
+    if mapping.upstream_model.trim() != plan.model.trim() {
+        return Err(LiveSendAuthError::unauthorized(ROUTE_CHANGED));
+    }
     let live_route = runtime.effective_route(mapping);
     if spec.upstream != protocol_to_api(live_route.protocol)
         || spec.wire_auth() != wire_auth_for_dynamic(runtime.auth_kind)
@@ -720,6 +694,135 @@ fn live_isolated_route(
         origin,
         inference_url: current,
     })
+}
+
+fn live_http_destination_route(
+    db: &crate::db::Database,
+    account: &Account,
+    plan: &RequestPlan,
+    spec: &AttemptSpec,
+    public_model: &str,
+) -> Result<Option<LiveIsolatedRoute>, LiveSendAuthError> {
+    let snapshot = RoutingSnapshot::load(db)
+        .map_err(|error| LiveSendAuthError::unauthorized(error.to_string()))?;
+    let Some(credential) = snapshot
+        .credentials
+        .iter()
+        .find(|credential| credential.id == account.id)
+    else {
+        return Ok(None);
+    };
+    let Some(destination) = snapshot
+        .projection
+        .destinations
+        .iter()
+        .find(|destination| destination.id == credential.destination_id)
+    else {
+        return Ok(None);
+    };
+    if destination.adapter != AdapterKind::Http || destination.capabilities.observer {
+        return Ok(None);
+    }
+    let mapping = catalog_model_for_public(destination, public_model)
+        .ok_or_else(|| LiveSendAuthError::unauthorized(ROUTE_CHANGED))?;
+    if mapping.upstream_model.trim() != plan.model.trim() {
+        return Err(LiveSendAuthError::unauthorized(ROUTE_CHANGED));
+    }
+    let protocol = protocol_from_upstream(spec.upstream)?;
+    let selected = http_model_route(destination, mapping, protocol)
+        .ok_or_else(|| LiveSendAuthError::unauthorized(ROUTE_CHANGED))?;
+    let auth_kind = auth_kind_from_scheme(selected.auth_scheme);
+    if spec.upstream != protocol_to_api(selected.protocol)
+        || spec.wire_auth() != wire_auth_for_dynamic(auth_kind)
+    {
+        return Err(LiveSendAuthError::unauthorized(ROUTE_CHANGED));
+    }
+    let current = resolve_inference_url(&selected.endpoint_url, selected.protocol)?;
+    confirm_planned_custom_route(plan, &current, selected.protocol, auth_kind)?;
+    let spec_url = spec
+        .request_url()
+        .map_err(LiveSendAuthError::unauthorized)?;
+    if !inference_urls_match(&spec_url, &current) {
+        return Err(LiveSendAuthError::unauthorized(ROUTE_CHANGED));
+    }
+    let endpoint_id = crate::gateway::materialize::endpoint_id_for_target(
+        credential,
+        destination,
+        mapping,
+        spec.upstream,
+    )
+    .map_err(LiveSendAuthError::unauthorized)?;
+    let origin = normalize_origin(&selected.endpoint_url)
+        .ok_or_else(|| LiveSendAuthError::unauthorized(MISSING_GRANT))?;
+    Ok(Some(LiveIsolatedRoute {
+        endpoint_id,
+        origin,
+        inference_url: current,
+    }))
+}
+
+fn selected_public_identity(selection: &LiveSendSelection) -> Option<&str> {
+    if let Some(target) = selection.target.as_ref() {
+        let name = target.model.public_model.as_str();
+        if !name.trim().is_empty() {
+            return Some(name);
+        }
+    }
+    let name = selection.routing_model.as_str();
+    if name.trim().is_empty() {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+fn catalog_model_for_public<'a>(
+    destination: &'a Destination,
+    public_model: &str,
+) -> Option<&'a CatalogModel> {
+    destination
+        .catalog
+        .iter()
+        .find(|model| crate::custom::custom_model_id_matches(&model.public_model, public_model))
+}
+
+fn confirm_planned_custom_route(
+    plan: &RequestPlan,
+    current: &reqwest::Url,
+    protocol: UpstreamProtocolKind,
+    auth_kind: ocg_domain::dynamic::DynamicAuthKind,
+) -> Result<(), LiveSendAuthError> {
+    let Some(planned) = plan.custom_route.as_ref() else {
+        return Ok(());
+    };
+    let planned_url = resolve_inference_url(&planned.endpoint_url, protocol)?;
+    if planned_url != *current || planned.auth_kind != auth_kind {
+        return Err(LiveSendAuthError::unauthorized(ROUTE_CHANGED));
+    }
+    Ok(())
+}
+
+fn protocol_from_upstream(
+    upstream: crate::kernel::protocol::ApiFormat,
+) -> Result<UpstreamProtocolKind, LiveSendAuthError> {
+    match upstream {
+        crate::kernel::protocol::ApiFormat::ChatCompletions => {
+            Ok(UpstreamProtocolKind::ChatCompletions)
+        }
+        crate::kernel::protocol::ApiFormat::Responses => Ok(UpstreamProtocolKind::Responses),
+        crate::kernel::protocol::ApiFormat::Messages => Ok(UpstreamProtocolKind::Messages),
+        crate::kernel::protocol::ApiFormat::Gemini => {
+            Err(LiveSendAuthError::unauthorized(ROUTE_CHANGED))
+        }
+    }
+}
+
+fn auth_kind_from_scheme(scheme: AuthScheme) -> ocg_domain::dynamic::DynamicAuthKind {
+    match scheme {
+        AuthScheme::Bearer => ocg_domain::dynamic::DynamicAuthKind::Bearer,
+        AuthScheme::XApiKey => ocg_domain::dynamic::DynamicAuthKind::XApiKey,
+        AuthScheme::None => ocg_domain::dynamic::DynamicAuthKind::None,
+    }
 }
 
 fn wire_auth_for_dynamic(auth_kind: ocg_domain::dynamic::DynamicAuthKind) -> UpstreamAuth {

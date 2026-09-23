@@ -8,14 +8,13 @@
 use crate::custom_http::{
     HttpInferenceTransport, HttpInferenceTransportSpec, InferenceHttpRequest, json_content_headers,
 };
+use crate::db::identity::StoredInferenceBinding;
 use crate::gateway::attempt::UpstreamAuth;
 use crate::gateway::forwarder::{
     LiveSendAccountGate, LiveSendSelection, authorize_live_send_secret, confirm_live_send_secret,
 };
 use crate::gateway::protocol::{CustomRouteSpec, RequestPlan};
-use crate::gateway::provider_adapter::{
-    resolve_account_test_route_with_dynamics, resolve_probe_route,
-};
+use crate::gateway::provider_adapter::{resolve_account_test_route, resolve_probe_route};
 use crate::models::{Account, AppConfig, UpstreamChannel};
 use crate::provider::{ProviderAdapterKind, UpstreamAuthScheme, UpstreamProtocolKind};
 use crate::provider_contracts::{self, ContractScope, PersistedModelProtocol, protocol_to_api};
@@ -137,7 +136,7 @@ pub(crate) async fn execute_protocol_probe(
     account: &Account,
     protocol: UpstreamProtocolKind,
 ) -> Result<u16, (Option<u16>, String)> {
-    execute_protocol_request(ctx, account, protocol, false, ctx.model_id, &[]).await
+    execute_protocol_request(ctx, account, protocol, false, ctx.model_id).await
 }
 
 /// Send the same minimal protocol request used by provider probes, but lock
@@ -153,7 +152,6 @@ pub(crate) struct AccountModelTestInput<'a> {
     pub protocol: UpstreamProtocolKind,
     /// Route already chosen by preparation. Absent for sealed adapters.
     pub custom_route: Option<CustomRouteSpec>,
-    pub dynamics: &'a [crate::dynamic::DynamicProviderRuntime],
 }
 
 pub(crate) async fn execute_account_model_test(
@@ -174,9 +172,27 @@ pub(crate) async fn execute_account_model_test(
         input.protocol,
         true,
         input.public_model,
-        input.dynamics,
     )
     .await
+}
+
+fn live_send_selection_from_bindings<E: ToString>(
+    account: &Account,
+    bindings: Result<Vec<StoredInferenceBinding>, E>,
+    public_model: &str,
+    upstream_model: &str,
+) -> Result<LiveSendSelection, (Option<u16>, String)> {
+    let binding = bindings
+        .map_err(|error| (None, error.to_string()))?
+        .into_iter()
+        .find(|row| row.account_id == account.id);
+    Ok(LiveSendSelection::from_binding(
+        account,
+        binding.as_ref(),
+        public_model,
+        public_model,
+        upstream_model,
+    ))
 }
 
 async fn execute_protocol_request(
@@ -185,7 +201,6 @@ async fn execute_protocol_request(
     protocol: UpstreamProtocolKind,
     account_test: bool,
     public_model: &str,
-    dynamics: &[crate::dynamic::DynamicProviderRuntime],
 ) -> Result<u16, (Option<u16>, String)> {
     let format = protocol_to_api(protocol);
     let body = crate::custom::minimal_verification_body(protocol, ctx.model_id)
@@ -194,7 +209,7 @@ async fn execute_protocol_request(
         client: format,
         upstream: format,
         model: ctx.model_id.to_string(),
-        client_model: ctx.model_id.to_string(),
+        client_model: public_model.to_string(),
         stream: false,
         body: bytes::Bytes::from(body.clone()),
         channel: if ctx.adapter == ProviderAdapterKind::ZenFree {
@@ -203,8 +218,8 @@ async fn execute_protocol_request(
             UpstreamChannel::Go
         },
         upstream_base_override: None,
-        original_model: None,
-        resolved_alias: None,
+        original_model: (public_model != ctx.model_id).then(|| public_model.to_string()),
+        resolved_alias: (!public_model.is_empty()).then(|| public_model.to_string()),
         custom_route: ctx.custom_route.clone(),
         service_tier: None,
         custom_tools: Vec::new(),
@@ -215,24 +230,19 @@ async fn execute_protocol_request(
         response_tools: Vec::new(),
     };
     let route = if account_test {
-        resolve_account_test_route_with_dynamics(account, ctx.adapter, ctx.config, &plan, dynamics)
+        resolve_account_test_route(account, ctx.adapter, ctx.config, &plan)
     } else {
         resolve_probe_route(account, ctx.adapter, ctx.config, &plan)
     }
     .map_err(|error| (None, error))?;
     let selection = {
         let db = ctx.state.db.lock();
-        let binding = db
-            .list_inference_bindings()
-            .ok()
-            .and_then(|rows| rows.into_iter().find(|row| row.account_id == account.id));
-        LiveSendSelection::from_binding(
+        live_send_selection_from_bindings(
             account,
-            binding.as_ref(),
-            public_model,
+            db.list_inference_bindings(),
             public_model,
             ctx.model_id,
-        )
+        )?
     };
     let secret = authorize_live_send_secret(
         ctx.state,

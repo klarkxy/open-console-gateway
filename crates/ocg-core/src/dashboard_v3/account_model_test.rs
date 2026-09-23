@@ -8,10 +8,8 @@
 use axum::Json;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
-use std::sync::Arc;
 use std::time::Instant;
 
-use crate::dynamic::DynamicProviderRuntime;
 use crate::gateway::protocol::CustomRouteSpec;
 use crate::kernel::protocol::ApiFormat;
 use crate::models::Account as ModelAccount;
@@ -21,6 +19,7 @@ use crate::provider::{
 };
 use crate::provider_contracts::{ContractScope, protocol_from_api, select_upstream_protocol};
 use crate::state::CoreState;
+use ocg_domain::destination::{AdapterKind, AuthScheme, CatalogModel, Destination};
 
 use super::accounts::load_model_account;
 use super::types::{AccountModelTestRequest, AccountModelTestResponse, AccountUpstreamProtocol};
@@ -44,7 +43,6 @@ pub(super) async fn test_account_model(
             model_id: &prepared.upstream_model,
             protocol: prepared.protocol,
             custom_route: prepared.custom_route,
-            dynamics: &prepared.dynamics,
         },
     )
     .await
@@ -72,7 +70,6 @@ struct PreparedAccountModelTest {
     protocol: UpstreamProtocolKind,
     /// Route chosen once here. Later transport construction consumes it.
     custom_route: Option<CustomRouteSpec>,
-    dynamics: Arc<Vec<DynamicProviderRuntime>>,
 }
 
 fn prepare_account_model_test(
@@ -81,28 +78,6 @@ fn prepare_account_model_test(
     input: AccountModelTestRequest,
 ) -> Result<PreparedAccountModelTest, V3ApiError> {
     let account = load_model_account(state, id)?;
-    let projection = crate::destination_projection::load_runtime(&state.db.lock())
-        .map_err(V3ApiError::internal)?;
-    let explicit_destination = projection
-        .credentials
-        .iter()
-        .find(|credential| credential.legacy_account_id == id)
-        .and_then(|credential| {
-            projection
-                .destinations
-                .iter()
-                .find(|destination| destination.id == credential.destination_id)
-        })
-        .filter(|destination| !destination.protocol_routes.is_empty());
-    if explicit_destination.is_some() {
-        // The account-test send still confirms authorization through the
-        // legacy single-route custom record. Explicit protocol routes are
-        // selected by `http_model_route` on the Providers model test.
-        return Err(V3ApiError::invalid_request_at(
-            state,
-            "this connection has explicit protocol routes; test the selected protocol in Providers",
-        ));
-    }
     if !account.setup_step.is_ready() {
         return Err(V3ApiError::precondition_failed_at(
             state,
@@ -113,100 +88,122 @@ fn prepare_account_model_test(
     if model_id.is_empty() {
         return Err(V3ApiError::invalid_request_at(state, "modelId is required"));
     }
-    let dynamics = state.dynamic_providers();
-    if let Some(runtime) = crate::dynamic::find_runtime(&dynamics, &account.provider_id) {
-        let mapping = runtime.mapping_for_public(model_id).ok_or_else(|| {
-            V3ApiError::invalid_request_at(state, "model is not routable for this provider")
-        })?;
-        let route = runtime.effective_route(mapping);
-        return Ok(PreparedAccountModelTest {
-            account,
-            config: state.config(),
-            adapter: ProviderAdapterKind::ConfigurableHttp,
-            public_model: model_id.to_string(),
-            upstream_model: mapping.upstream_model.clone(),
-            protocol: route.protocol,
-            custom_route: Some(CustomRouteSpec {
-                endpoint_url: route.endpoint_url,
-                auth_kind: runtime.auth_kind,
-            }),
-            dynamics,
+    let projection = crate::destination_projection::load_runtime(&state.db.lock())
+        .map_err(V3ApiError::internal)?;
+    let destination = projection
+        .credentials
+        .iter()
+        .find(|credential| credential.legacy_account_id == id)
+        .and_then(|credential| {
+            projection
+                .destinations
+                .iter()
+                .find(|destination| destination.id == credential.destination_id)
         });
+    if let Some(destination) = destination.filter(|destination| {
+        destination.adapter == AdapterKind::Http && !destination.capabilities.observer
+    }) {
+        return prepare_http_destination_model_test(state, account, destination, model_id);
     }
     let plan = builtin_provider(&account.provider_id)
         .ok_or_else(|| V3ApiError::invalid_request_at(state, "unknown provider offering"))?;
     let adapter = ProviderAdapterKind::from_provider_id(&account.provider_id)
         .ok_or_else(|| V3ApiError::invalid_request_at(state, "unknown provider offering"))?;
+    if plan_requires_custom_config(plan) {
+        return Err(V3ApiError::invalid_request_at(
+            state,
+            "Custom API accounts require a persisted endpoint URL and upstream protocol",
+        ));
+    }
 
-    let (protocol, custom_route, upstream_model) = if plan_requires_custom_config(plan) {
-        let runtime = state
-            .db
-            .lock()
-            .list_custom_account_runtimes()
-            .map_err(V3ApiError::internal)?
-            .into_iter()
-            .find(|runtime| runtime.account_id == account.id)
-            .ok_or_else(|| {
-                V3ApiError::invalid_request_at(
-                    state,
-                    "Custom API accounts require a persisted endpoint URL and upstream protocol",
-                )
-            })?;
-        let capability = runtime
-            .capabilities
-            .iter()
-            .find(|capability| {
-                crate::custom::custom_model_id_matches(&capability.public_model, model_id)
-            })
-            .ok_or_else(|| {
-                V3ApiError::invalid_request_at(state, "model is not declared for this account")
-            })?;
-        let endpoint_url = runtime
-            .route_override_matching_public(&capability.public_model)
-            .map(|route| route.endpoint_url.clone())
-            .unwrap_or_else(|| runtime.config.endpoint_url.clone());
-        (
-            capability.protocol,
-            Some(CustomRouteSpec {
-                endpoint_url,
-                auth_kind: runtime.auth_kind,
-            }),
-            capability.upstream_model.clone(),
-        )
+    let scope = ContractScope::from_account(&account)
+        .ok_or_else(|| V3ApiError::invalid_request_at(state, "unknown provider offering"))?;
+    let contracts = state.provider_contracts();
+    let contract = contracts
+        .scope(&scope)
+        .ok_or_else(|| V3ApiError::invalid_request_at(state, "unknown provider offering"))?;
+    if !contract.model(model_id).is_some_and(|model| model.routable) {
+        return Err(V3ApiError::invalid_request_at(
+            state,
+            "model is not routable for this provider",
+        ));
+    }
+    let client = if is_cpa_external_integration(&account.provider_id) {
+        ApiFormat::ChatCompletions
     } else {
-        let scope = ContractScope::from_account(&account)
-            .ok_or_else(|| V3ApiError::invalid_request_at(state, "unknown provider offering"))?;
-        let contracts = state.provider_contracts();
-        let contract = contracts
-            .scope(&scope)
-            .ok_or_else(|| V3ApiError::invalid_request_at(state, "unknown provider offering"))?;
-        if !contract.model(model_id).is_some_and(|model| model.routable) {
-            return Err(V3ApiError::invalid_request_at(
-                state,
-                "model is not routable for this provider",
-            ));
-        }
-        let client = if is_cpa_external_integration(&account.provider_id) {
-            ApiFormat::ChatCompletions
-        } else {
-            ApiFormat::Gemini
-        };
-        let selected = select_upstream_protocol(contract, client, model_id)
-            .map_err(|error| V3ApiError::invalid_request_at(state, error.message))?;
-        let protocol = protocol_from_api(selected).ok_or_else(|| {
-            V3ApiError::invalid_request_at(state, "model is not routable for this provider")
-        })?;
-        (protocol, None, model_id.to_string())
+        ApiFormat::Gemini
     };
+    let selected = select_upstream_protocol(contract, client, model_id)
+        .map_err(|error| V3ApiError::invalid_request_at(state, error.message))?;
+    let protocol = protocol_from_api(selected).ok_or_else(|| {
+        V3ApiError::invalid_request_at(state, "model is not routable for this provider")
+    })?;
 
     Ok(PreparedAccountModelTest {
         account,
         config: state.config(),
         adapter,
         public_model: model_id.to_string(),
-        upstream_model,
+        upstream_model: model_id.to_string(),
         protocol,
-        custom_route,
-        dynamics,
+        custom_route: None,
     })
 }
+
+fn prepare_http_destination_model_test(
+    state: &CoreState,
+    account: ModelAccount,
+    destination: &Destination,
+    model_id: &str,
+) -> Result<PreparedAccountModelTest, V3ApiError> {
+    let mapping = destination
+        .catalog
+        .iter()
+        .find(|model| crate::custom::custom_model_id_matches(&model.public_model, model_id))
+        .ok_or_else(|| {
+            V3ApiError::invalid_request_at(state, "model is not declared for this account")
+        })?;
+    let protocol = selected_http_test_protocol(destination, mapping).ok_or_else(|| {
+        V3ApiError::invalid_request_at(state, "model is not routable for this provider")
+    })?;
+    let route = ocg_domain::destination::http_model_route(destination, mapping, protocol)
+        .ok_or_else(|| {
+            V3ApiError::invalid_request_at(state, "model protocol has no configured route")
+        })?;
+    Ok(PreparedAccountModelTest {
+        account,
+        config: state.config(),
+        adapter: ProviderAdapterKind::ConfigurableHttp,
+        public_model: mapping.public_model.clone(),
+        upstream_model: mapping.upstream_model.clone(),
+        protocol,
+        custom_route: Some(CustomRouteSpec {
+            endpoint_url: route.endpoint_url,
+            auth_kind: match route.auth_scheme {
+                AuthScheme::Bearer => ocg_domain::dynamic::DynamicAuthKind::Bearer,
+                AuthScheme::XApiKey => ocg_domain::dynamic::DynamicAuthKind::XApiKey,
+                AuthScheme::None => ocg_domain::dynamic::DynamicAuthKind::None,
+            },
+        }),
+    })
+}
+
+fn selected_http_test_protocol(
+    destination: &Destination,
+    model: &CatalogModel,
+) -> Option<UpstreamProtocolKind> {
+    if let Some(route) = &model.upstream_override {
+        return Some(route.protocol);
+    }
+    let available = ocg_domain::destination::http_model_protocols(destination, model);
+    if let Some(preferred) = model
+        .preferred
+        .filter(|protocol| available.contains(protocol))
+    {
+        return Some(preferred);
+    }
+    available.into_iter().next()
+}
+
+#[cfg(test)]
+mod tests;

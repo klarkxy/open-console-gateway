@@ -20,9 +20,9 @@ use crate::provider::{
     MINIMAX_CN_CHAT_COMPLETIONS_PATH, MINIMAX_CN_MESSAGES_PATH, MINIMAX_CN_RESPONSES_PATH,
     ProviderAdapterKind, ProviderRegistry, QuotaScope, UpstreamAuthScheme,
 };
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, feature = "ollama-cloud-loopback-test"))]
 use std::collections::HashMap;
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, feature = "ollama-cloud-loopback-test"))]
 use std::sync::{LazyLock, RwLock};
 
 /// Construct transport from explicit destination facts after catalog protocol
@@ -126,9 +126,9 @@ pub fn command_code_goat_loopback_base(origin: &str) -> String {
     format!("{}/provider/v1", origin.trim_end_matches('/'))
 }
 
-/// Loopback substitutes exist only in non-release builds so integration tests
-/// can link them. Release transport uses the official origins and does not
-/// read these tables. `cfg(test)` would hide them from integration tests,
+/// GOAT loopback substitutes exist only in non-release builds so integration
+/// tests can link them. Release transport uses the official origin and does
+/// not read this table. `cfg(test)` would hide it from integration tests,
 /// which link the library without that cfg.
 #[cfg(debug_assertions)]
 #[derive(Debug, Clone)]
@@ -140,21 +140,22 @@ struct GoatLoopbackRoute {
 static GOAT_LOOPBACK_ROUTES: LazyLock<RwLock<HashMap<String, GoatLoopbackRoute>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
-#[cfg(debug_assertions)]
+#[cfg(feature = "ollama-cloud-loopback-test")]
 static OLLAMA_LOOPBACK_ROUTES: LazyLock<RwLock<HashMap<String, String>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
-/// RAII guard for the integration-only Ollama Cloud seam. The production
-/// adapter always uses the fixed `https://ollama.com` origin; without a live
+/// RAII guard for the integration-only Ollama Cloud seam. Compiled only with
+/// the default-off `ollama-cloud-loopback-test` feature. Builds without that
+/// feature always use the fixed `https://ollama.com` origin; without a live
 /// guard, tests cannot reach a fake upstream.
-#[cfg(debug_assertions)]
+#[cfg(feature = "ollama-cloud-loopback-test")]
 #[doc(hidden)]
 pub struct OllamaCloudLoopbackRouteGuard {
     account_id: String,
     origin: String,
 }
 
-#[cfg(debug_assertions)]
+#[cfg(feature = "ollama-cloud-loopback-test")]
 impl Drop for OllamaCloudLoopbackRouteGuard {
     fn drop(&mut self) {
         if let Ok(mut routes) = OLLAMA_LOOPBACK_ROUTES.write()
@@ -171,7 +172,7 @@ impl Drop for OllamaCloudLoopbackRouteGuard {
 /// tests. Path, protocol, Bearer auth, and the wire normalization marker come
 /// from the official Ollama Cloud contract; this cannot configure a remote
 /// production endpoint.
-#[cfg(debug_assertions)]
+#[cfg(feature = "ollama-cloud-loopback-test")]
 #[doc(hidden)]
 pub fn install_ollama_cloud_loopback_route_for_test(
     account_id: impl Into<String>,
@@ -192,7 +193,7 @@ pub fn install_ollama_cloud_loopback_route_for_test(
     Ok(guard)
 }
 
-#[cfg(debug_assertions)]
+#[cfg(feature = "ollama-cloud-loopback-test")]
 fn ollama_cloud_base_url_for_id(account_id: &str) -> Result<String, String> {
     let routes = OLLAMA_LOOPBACK_ROUTES
         .read()
@@ -203,7 +204,7 @@ fn ollama_cloud_base_url_for_id(account_id: &str) -> Result<String, String> {
         .unwrap_or_else(|| OLLAMA_CLOUD_BASE_URL.to_string()))
 }
 
-#[cfg(not(debug_assertions))]
+#[cfg(not(feature = "ollama-cloud-loopback-test"))]
 fn ollama_cloud_base_url_for_id(_account_id: &str) -> Result<String, String> {
     Ok(OLLAMA_CLOUD_BASE_URL.to_string())
 }
@@ -516,24 +517,16 @@ pub(crate) fn resolve_probe_route(
     config: &AppConfig,
     plan: &RequestPlan,
 ) -> Result<AttemptSpec, String> {
-    resolve_route_with_policy(account, adapter, config, plan, RoutePolicy::Probe, &[])
+    resolve_route_with_policy(account, adapter, config, plan, RoutePolicy::Probe)
 }
 
-pub(crate) fn resolve_account_test_route_with_dynamics(
+pub(crate) fn resolve_account_test_route(
     account: &Account,
     adapter: ProviderAdapterKind,
     config: &AppConfig,
     plan: &RequestPlan,
-    dynamics: &[crate::dynamic::DynamicProviderRuntime],
 ) -> Result<AttemptSpec, String> {
-    resolve_route_with_policy(
-        account,
-        adapter,
-        config,
-        plan,
-        RoutePolicy::AccountTest,
-        dynamics,
-    )
+    resolve_route_with_policy(account, adapter, config, plan, RoutePolicy::AccountTest)
 }
 
 fn resolve_route_with_policy(
@@ -542,7 +535,6 @@ fn resolve_route_with_policy(
     config: &AppConfig,
     plan: &RequestPlan,
     policy: RoutePolicy,
-    dynamics: &[crate::dynamic::DynamicProviderRuntime],
 ) -> Result<AttemptSpec, String> {
     match adapter {
         ProviderAdapterKind::OpenCodeGo => resolve_open_code_go(account, config, plan, policy),
@@ -553,15 +545,8 @@ fn resolve_route_with_policy(
         ProviderAdapterKind::MiniMaxCn => resolve_minimax_cn(account, config, plan, policy),
         ProviderAdapterKind::KimiCn => resolve_kimi_cn(account, config, plan, policy),
         ProviderAdapterKind::OllamaCloud => resolve_ollama_cloud(account, config, plan, policy),
-        ProviderAdapterKind::ConfigurableHttp
-            if matches!(policy, RoutePolicy::AccountTest) && plan.custom_route.is_some() =>
-        {
+        ProviderAdapterKind::ConfigurableHttp if matches!(policy, RoutePolicy::AccountTest) => {
             resolve_prepared_http(account, plan)
-        }
-        ProviderAdapterKind::ConfigurableHttp
-            if crate::dynamic::find_runtime(dynamics, &account.provider_id).is_some() =>
-        {
-            resolve_dynamic_http(account, plan, policy, dynamics)
         }
         ProviderAdapterKind::ConfigurableHttp => {
             resolve_configurable_http(account, config, plan, policy)
@@ -760,56 +745,6 @@ fn resolve_configurable_http(
     )
 }
 
-fn resolve_dynamic_http(
-    account: &Account,
-    plan: &RequestPlan,
-    policy: RoutePolicy,
-    dynamics: &[crate::dynamic::DynamicProviderRuntime],
-) -> Result<AttemptSpec, String> {
-    let runtime =
-        crate::dynamic::find_runtime(dynamics, &account.provider_id).ok_or_else(|| {
-            format!(
-                "dynamic provider `{}` is not in the request snapshot",
-                account.provider_id
-            )
-        })?;
-    if matches!(policy, RoutePolicy::Probe) {
-        return Err("dynamic provider protocol probes use POST /providers/test".to_string());
-    }
-    if runtime.auth_kind.requires_key() && account.key_cipher.trim().is_empty() {
-        return Err(format!("account `{}` has no stored Key", account.name));
-    }
-    let selected = runtime
-        .mapping_for_upstream(&plan.model)
-        .or_else(|| runtime.mapping_for_public(&plan.model))
-        .or_else(|| {
-            plan.resolved_alias
-                .as_deref()
-                .and_then(|alias| runtime.mapping_for_public(alias))
-        })
-        .ok_or_else(|| {
-            format!(
-                "dynamic provider `{}` has no mapping for `{}`",
-                runtime.name, plan.model
-            )
-        })?;
-    let route = runtime.effective_route(selected);
-    let protocol = protocol_kind_for(plan.upstream)?;
-    if protocol != route.protocol {
-        return Err(format!(
-            "dynamic provider `{}` model `{}` only supports {:?}",
-            runtime.name, selected.public_model, route.protocol
-        ));
-    }
-    Ok(
-        configurable_http_transport(&route.endpoint_url, runtime.auth_kind, plan.upstream)?
-            .into_spec(
-                plan.upstream,
-                http_credential(&account.id, runtime.auth_kind),
-            ),
-    )
-}
-
 fn resolve_cpa(
     _account: &Account,
     _config: &AppConfig,
@@ -942,7 +877,7 @@ fn require_binding(
     Ok(())
 }
 
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, feature = "ollama-cloud-loopback-test"))]
 fn ensure_loopback_base(base_url: &str) -> Result<(), String> {
     let url = reqwest::Url::parse(base_url).map_err(|error| error.to_string())?;
     if url.scheme() != "http"
@@ -951,7 +886,7 @@ fn ensure_loopback_base(base_url: &str) -> Result<(), String> {
             Some("localhost") | Some("127.0.0.1") | Some("::1") | Some("[::1]")
         )
     {
-        return Err("GOAT test route must be an HTTP loopback URL".to_string());
+        return Err("test route must be an HTTP loopback URL".to_string());
     }
     Ok(())
 }

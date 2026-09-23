@@ -34,12 +34,16 @@ Tauri 与 Vite；变量生效时，设置页以只读方式显示实际端口。
 | 单个前端或脚本测试 | `node --experimental-strip-types --test <file>` |
 | Vue / dashboard | 相邻测试，再 `pnpm run build:web` |
 | 单个 Rust crate | `cargo test -p <package>` |
-| Core / Dashboard V3 | `cargo test -p ocg-core <filter>` |
+| Core / Dashboard V3 | `cargo test -p ocg-core --features ollama-cloud-loopback-test <filter>` |
 | Desktop Host | `cargo test -p ocg-manager --lib` |
 | V3 或 V4 Schema 或生成类型 | `pnpm run contract:v3:check` / `pnpm run contract:v4:check` |
 | `DESIGN.md` / 主题 | `pnpm run design:lint` |
 
-`pnpm run test` 是跨前端/Rust 门禁。`pnpm run test:tooling` 覆盖
+`pnpm run test` 是跨前端/Rust 门禁。`pnpm run test:rust`（以及 quality.yml 的
+Linux Rust job）会加上 `--features ocg-core/ollama-cloud-loopback-test`，以便
+Ollama Cloud 网关集成测试安装仅 loopback 的测试接缝。该 feature 默认关闭：应用构建
+保持固定的 `https://ollama.com` 源，且不编译该接缝。未开启 feature 的 workspace
+`cargo test` 仍会编译 `ollama_cloud_gateway`，但其中用例不会运行。`pnpm run test:tooling` 覆盖
 `scripts/*.test.mjs`，属于发版/工具门禁，不属于 `pnpm run test`。
 `pnpm run build` 只做发版验证（`scripts/release.mjs`）。workspace
 `[profile.release]` 使用 thin LTO、`strip` 和 `panic = "abort"`。

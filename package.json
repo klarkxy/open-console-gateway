@@ -12,7 +12,7 @@
     "build": "node scripts/release.mjs",
     "build:web": "vue-tsc && vite build",
     "release:check": "node scripts/release.mjs --check",
-    "test:rust": "cargo test --workspace --locked",
+    "test:rust": "cargo test --workspace --locked --features ocg-core/ollama-cloud-loopback-test",
     "test:web": "node --experimental-strip-types --test \"src/**/*.test.ts\"",
     "test:tooling": "node --experimental-strip-types --test \"scripts/*.test.mjs\"",
     "test:dsh:plugin": "node --experimental-strip-types --test scripts/dsh-plugin-package.test.mjs",
