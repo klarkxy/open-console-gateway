@@ -1,6 +1,6 @@
 [package]
 name = "ocg-manager"
-version = "2.5.0"
+version = "2.6.0"
 description = "Open Console Gateway"
 authors = ["ocg-manager"]
 license-file = "../LICENSE"

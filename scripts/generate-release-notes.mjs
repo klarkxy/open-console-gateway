@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
-import { resolve } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const PLATFORM_RELEASE_NOTES =
@@ -234,6 +235,14 @@ export function generateReleaseNotes({
   runGit = (args) => defaultRunGit(repoRoot, args),
 } = {}) {
   const current = normalizeTagName(tag, "release tag");
+  const authoredNotes = join(repoRoot, "docs", "releases", `${current}.md`);
+  if (!current.includes("-") && existsSync(authoredNotes)) {
+    const notes = readFileSync(authoredNotes, "utf8").trim();
+    if (!notes.startsWith(`# ${current}\n`) && !notes.startsWith(`# Open Console Gateway ${current}\n`)) {
+      throw new Error(`Release notes heading does not match ${current}: ${authoredNotes}`);
+    }
+    return notes;
+  }
   let previous;
   if (previousTag !== undefined) {
     previous = previousTag ? normalizeTagName(previousTag, "previous tag") : null;
