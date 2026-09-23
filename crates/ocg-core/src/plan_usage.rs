@@ -27,9 +27,28 @@ pub async fn fetch(
     adapter: ProviderAdapterKind,
     account_id: &str,
     key: &str,
+    process_generation: u64,
 ) -> Result<Vec<QuotaWindow>, String> {
-    let (url, _) = official_usage_target(adapter)?;
-    fetch_from_url(config, adapter, account_id, key, url).await
+    let url = resolved_usage_url(adapter, process_generation)?;
+    fetch_from_url(config, adapter, account_id, key, &url).await
+}
+
+fn resolved_usage_url(
+    adapter: ProviderAdapterKind,
+    process_generation: u64,
+) -> Result<String, String> {
+    #[cfg(debug_assertions)]
+    if let Some(key) = plan_usage_override_key(adapter)
+        && let Some(url) = PLAN_USAGE_URL_OVERRIDES
+            .lock()
+            .get(&(process_generation, key))
+            .cloned()
+    {
+        return Ok(url);
+    }
+    #[cfg(not(debug_assertions))]
+    let _ = process_generation;
+    official_usage_target(adapter).map(|(url, _)| url.to_string())
 }
 
 async fn fetch_from_url(
@@ -305,6 +324,78 @@ fn number(data: &Map<String, Value>, key: &str) -> Option<f64> {
 fn integer(data: &Map<String, Value>, key: &str) -> Option<i64> {
     data.get(key)
         .and_then(|value| value.as_i64().or_else(|| value.as_str()?.parse().ok()))
+}
+
+#[cfg(debug_assertions)]
+static PLAN_USAGE_URL_OVERRIDES: parking_lot::Mutex<std::collections::BTreeMap<(u64, u8), String>> =
+    parking_lot::Mutex::new(std::collections::BTreeMap::new());
+
+#[cfg(debug_assertions)]
+fn plan_usage_override_key(adapter: ProviderAdapterKind) -> Option<u8> {
+    match adapter {
+        ProviderAdapterKind::MiniMaxCn => Some(1),
+        ProviderAdapterKind::KimiCn => Some(2),
+        _ => None,
+    }
+}
+
+/// Test-only guard for a process-generation-scoped loopback usage endpoint.
+#[cfg(debug_assertions)]
+pub struct PlanUsageTargetGuard {
+    process_generation: u64,
+    adapter_key: Option<u8>,
+}
+
+#[cfg(debug_assertions)]
+impl Drop for PlanUsageTargetGuard {
+    fn drop(&mut self) {
+        if let Some(key) = self.adapter_key {
+            PLAN_USAGE_URL_OVERRIDES
+                .lock()
+                .remove(&(self.process_generation, key));
+        }
+    }
+}
+
+/// Bind a loopback stand-in for one sealed plan's official usage endpoint.
+#[cfg(debug_assertions)]
+#[must_use]
+pub fn install_plan_usage_target_for_tests(
+    process_generation: u64,
+    adapter: ProviderAdapterKind,
+    url: impl Into<String>,
+) -> PlanUsageTargetGuard {
+    let url = url.into();
+    let adapter_key = plan_usage_override_key(adapter);
+    if let Some(key) = adapter_key {
+        let mut overrides = PLAN_USAGE_URL_OVERRIDES.lock();
+        match parse_loopback_http_url(&url) {
+            Some(canonical) => {
+                overrides.insert((process_generation, key), canonical);
+            }
+            None => {
+                overrides.remove(&(process_generation, key));
+            }
+        }
+    }
+    PlanUsageTargetGuard {
+        process_generation,
+        adapter_key,
+    }
+}
+
+#[cfg(debug_assertions)]
+fn parse_loopback_http_url(url: &str) -> Option<String> {
+    let parsed = reqwest::Url::parse(url.trim()).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return None;
+    }
+    matches!(parsed.host_str(), Some("localhost" | "127.0.0.1" | "::1")).then(|| parsed.to_string())
 }
 
 #[cfg(test)]

@@ -47,6 +47,7 @@ pub mod provider;
 pub mod provider_contracts;
 pub(crate) mod quota_recovery;
 pub(crate) mod redaction;
+pub(crate) mod route_availability;
 pub(crate) mod routing_runtime;
 pub(crate) mod routing_snapshot;
 pub mod state;

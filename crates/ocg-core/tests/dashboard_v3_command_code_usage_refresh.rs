@@ -338,3 +338,55 @@ async fn provider_usage_refresh_uses_response_time_and_shares_legacy_throttle() 
     assert_eq!(body["code"], ERROR_THROTTLED);
     harness.stop();
 }
+
+#[tokio::test]
+async fn refresh_success_returns_goat_limits_and_releases_locks() {
+    let harness = start_loopback("command-code-usage-refresh-locks").await;
+    let account_id = create_goat(&harness).await;
+    let now = Utc::now();
+    harness.state.usage_sync.set_clock_for_test(move || now);
+    let mut body = usage_body(now);
+    body["credits"]["monthlyCredits"] = json!(5.0);
+    body["windowLimits"]["fiveHour"]["used"] = json!(13.0);
+    let (url, _authorization) = serve_usage_once(200, body).await;
+    let _target =
+        install_command_code_usage_target_for_tests(harness.state.process_generation(), url);
+
+    let (status, body) = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        send_json(
+            &harness,
+            Method::POST,
+            &refresh_path(&account_id),
+            &cas(&harness),
+        ),
+    )
+    .await
+    .expect("official usage refresh must return without re-locking");
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let refresh: UsageRefresh = serde_json::from_value(body.clone()).unwrap();
+    assert!((refresh.usage.window_5h - 13.0).abs() < 0.001, "{body}");
+    assert!(refresh.usage.window_5h > 12.0, "{body}");
+    assert!((refresh.usage.window_month - 65.0).abs() < 0.001, "{body}");
+    assert!(refresh.usage.window_month > 60.0, "{body}");
+    assert_secret_free(&body);
+
+    let (settings_status, settings) = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        harness.get_json(&format!("{}/settings", harness.v3_base)),
+    )
+    .await
+    .expect("settings read must not wait on a lock held by refresh");
+    assert_eq!(settings_status, StatusCode::OK, "{settings}");
+    let (usage_status, usage) = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        harness.get_json(&format!(
+            "{}/accounts/{account_id}/provider-usage",
+            harness.v3_base
+        )),
+    )
+    .await
+    .expect("provider usage read must not wait on a lock held by refresh");
+    assert_eq!(usage_status, StatusCode::OK, "{usage}");
+    harness.stop();
+}

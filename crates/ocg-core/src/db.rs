@@ -10625,7 +10625,10 @@ impl Database {
         Ok(Some(usage))
     }
 
-    pub fn account_usage(&self, account_id: &str) -> Result<UsageWindow> {
+    /// OpenCode Go windows. Uses the latest Go pricing snapshot, or
+    /// [`SEED_LIMITS`] when none is stored. Other plans pass their own limits
+    /// to [`Self::account_usage_with_limits`].
+    pub fn opencode_go_account_usage(&self, account_id: &str) -> Result<UsageWindow> {
         let limits = self
             .latest_pricing_snapshot()?
             .map(|snapshot| snapshot.limits)
@@ -10852,27 +10855,25 @@ impl Database {
     }
 
     /// Aggregate `forward_logs` into per-day, per-model token buckets covering
-    /// the last `days` calendar days (UTC). Rows with zero tokens on a given
-    /// day are omitted — the frontend synthesizes empty days so the x-axis
-    /// never collapses. Token totals are independent of pricing state: free,
-    /// priced, legacy estimate, and not_applicable rows all contribute as long
-    /// as they carry non-zero prompt or completion tokens.
+    /// the last `days` UTC calendar days. The window is half-open: from
+    /// midnight UTC of the earliest day, up to but not including midnight UTC
+    /// of the next day. Rows with zero tokens on a given day are omitted — the
+    /// frontend synthesizes empty days so the x-axis never collapses. Token
+    /// totals are independent of pricing state: free, priced, legacy estimate,
+    /// and not_applicable rows all contribute as long as they carry non-zero
+    /// prompt or completion tokens.
     pub fn daily_tokens_by_model(&self, days: i64) -> Result<Vec<DailyModelTokens>> {
-        // Bone-simple SQLite date math: store timestamps as RFC3339 strings,
-        // so group by `substr(timestamp, 1, 10)` to collapse to YYYY-MM-DD.
-        // UTC-only is fine — the gateway runs local and the dashboard is a
-        // single-user tool; a TZ-correct grouping would need a calendar table
-        // or a strftime('%Y-%m-%d', ...) with proper epoch arg, which is more
-        // machinery than this needs right now.
-        let since = (Utc::now() - Duration::days(days - 1)).to_rfc3339();
+        let (start, end) = utc_token_day_bounds(Utc::now(), days)?;
+        let start = start.to_rfc3339();
+        let end = end.to_rfc3339();
         let mut stmt = self.conn.prepare(
             "SELECT substr(timestamp, 1, 10) AS day, model, COALESCE(SUM(prompt_tokens + completion_tokens), 0)
              FROM forward_logs
-             WHERE timestamp > ?1 AND prompt_tokens + completion_tokens > 0
+             WHERE timestamp >= ?1 AND timestamp < ?2 AND prompt_tokens + completion_tokens > 0
              GROUP BY day, model
              ORDER BY day ASC, model ASC",
         )?;
-        let rows = stmt.query_map([&since], |row| {
+        let rows = stmt.query_map(params![start, end], |row| {
             Ok(DailyModelTokens {
                 date: row.get::<_, String>(0)?,
                 model: row.get::<_, String>(1)?,
@@ -10881,6 +10882,33 @@ impl Database {
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.into())
     }
+}
+
+/// Half-open UTC calendar window `[start, end)` covering `days` natural days
+/// ending today. `days` must be at least 1.
+pub(crate) fn utc_token_day_bounds(
+    now: DateTime<Utc>,
+    days: i64,
+) -> Result<(DateTime<Utc>, DateTime<Utc>)> {
+    if days < 1 {
+        anyhow::bail!("days must be at least 1");
+    }
+    let today = now.date_naive();
+    let start_day = today
+        .checked_sub_signed(Duration::days(days - 1))
+        .ok_or_else(|| anyhow::anyhow!("days is outside the supported range"))?;
+    let end_day = today
+        .checked_add_signed(Duration::days(1))
+        .ok_or_else(|| anyhow::anyhow!("days is outside the supported range"))?;
+    let start = start_day
+        .and_hms_opt(0, 0, 0)
+        .ok_or_else(|| anyhow::anyhow!("invalid UTC day start"))?
+        .and_utc();
+    let end = end_day
+        .and_hms_opt(0, 0, 0)
+        .ok_or_else(|| anyhow::anyhow!("invalid UTC day end"))?
+        .and_utc();
+    Ok((start, end))
 }
 
 fn record_account_usage_sync_success_on(

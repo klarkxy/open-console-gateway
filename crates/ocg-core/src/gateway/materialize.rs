@@ -996,43 +996,7 @@ pub(crate) fn resolved_contains_model(
     }
 }
 
-pub(crate) fn endpoint_id_for_target(
-    credential: &crate::routing_snapshot::ExecutionCredential,
-    destination: &Destination,
-    model: &ocg_domain::destination::CatalogModel,
-    upstream: ApiFormat,
-) -> Result<String, String> {
-    use ocg_domain::connection::{ConnectionId, EndpointOperation, endpoint_id_for};
-    use ocg_domain::credential::assigned_endpoints_for_routes;
-    use ocg_domain::destination::AdapterKind;
-    let connection: ConnectionId =
-        serde_json::from_value(serde_json::json!(credential.authorization_connection_id))
-            .map_err(|e| e.to_string())?;
-    if credential.authorization_connection_id.is_empty() {
-        return Err("missing authorization connection identity".into());
-    }
-    let protocol = match upstream {
-        ApiFormat::ChatCompletions => ocg_domain::destination::Protocol::ChatCompletions,
-        ApiFormat::Responses => ocg_domain::destination::Protocol::Responses,
-        ApiFormat::Messages => ocg_domain::destination::Protocol::Messages,
-        ApiFormat::Gemini => return Err("client-only upstream protocol".into()),
-    };
-    if destination.adapter != AdapterKind::Http {
-        return Ok(endpoint_id_for(&connection, EndpointOperation::from(protocol)).to_string());
-    }
-    let routes = ocg_domain::destination::http_configured_routes(destination);
-    let selected = ocg_domain::destination::http_model_route(destination, model, protocol)
-        .ok_or("missing configured HTTP protocol route")?;
-    assigned_endpoints_for_routes(&connection, &routes)
-        .into_iter()
-        .zip(routes)
-        .find(|(_, route)| {
-            route.operation == EndpointOperation::from(protocol)
-                && route.url.as_deref() == Some(selected.endpoint_url.as_str())
-        })
-        .map(|(assigned, _)| assigned.id)
-        .ok_or_else(|| "missing persisted route grant identity".into())
-}
+pub(crate) use crate::route_availability::endpoint_id_for_target;
 
 /// Protocols this Key may send on: declared and enabled, with a configured
 /// route, and granted to the credential. Selection then prefers the client
@@ -1046,56 +1010,15 @@ fn authorized_model_protocols(
         .protocols
         .iter()
         .copied()
-        .filter(|protocol| protocol_is_authorized(credential, destination, model, *protocol))
+        .filter(|protocol| {
+            crate::route_availability::protocol_is_authorized(
+                credential,
+                destination,
+                model,
+                *protocol,
+            )
+        })
         .collect()
-}
-
-fn protocol_is_authorized(
-    credential: &crate::routing_snapshot::ExecutionCredential,
-    destination: &Destination,
-    model: &ocg_domain::destination::CatalogModel,
-    protocol: ocg_domain::destination::Protocol,
-) -> bool {
-    use ocg_domain::destination::{AdapterKind, AuthScheme};
-    if destination.adapter == AdapterKind::Http {
-        let Some(route) = ocg_domain::destination::http_model_route(destination, model, protocol)
-        else {
-            return false;
-        };
-        if route.auth_scheme == AuthScheme::None {
-            return true;
-        }
-        let upstream = crate::provider_contracts::protocol_to_api(protocol);
-        let Ok(endpoint_id) = endpoint_id_for_target(credential, destination, model, upstream)
-        else {
-            return false;
-        };
-        return credential
-            .grants
-            .allowed_endpoint_ids
-            .iter()
-            .any(|id| id == &endpoint_id)
-            && credential
-                .grants
-                .allowed_origins
-                .iter()
-                .any(|origin| crate::custom_http::origins_match(origin, &route.endpoint_url));
-    }
-    if destination.adapter == AdapterKind::Cpa {
-        return true;
-    }
-    if destination.auth_scheme == AuthScheme::None {
-        return true;
-    }
-    let upstream = crate::provider_contracts::protocol_to_api(protocol);
-    let Ok(endpoint_id) = endpoint_id_for_target(credential, destination, model, upstream) else {
-        return false;
-    };
-    credential
-        .grants
-        .allowed_endpoint_ids
-        .iter()
-        .any(|id| id == &endpoint_id)
 }
 
 #[allow(clippy::too_many_arguments)]

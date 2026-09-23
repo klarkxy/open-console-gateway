@@ -1,7 +1,10 @@
 //! Dynamic Provider persistence, V3 control plane, and routing snapshot tests.
 
 use chrono::Utc;
-use ocg_core::dashboard_v3::{ERROR_BUILTIN_PROVIDER_IMMUTABLE, ERROR_INVALID_REQUEST};
+use ocg_core::dashboard_v3::{
+    DashboardSummary, ERROR_BUILTIN_PROVIDER_IMMUTABLE, ERROR_INVALID_REQUEST,
+};
+use ocg_core::models::AccountUpdate;
 use ocg_core::models::ProxyMode;
 use ocg_core::provider::{COMMAND_CODE_PROVIDER_ID, CUSTOM_PROVIDER_ID, OPENCODE_PROVIDER_ID};
 use reqwest::{Method, StatusCode};
@@ -1635,6 +1638,64 @@ async fn deleting_the_last_account_keeps_the_dynamic_provider_definition() {
     .await;
     assert_eq!(status, StatusCode::OK, "{second}");
     assert_eq!(second["account"]["providerId"], provider_id);
+    harness.stop();
+}
+
+#[tokio::test]
+async fn dashboard_summary_counts_a_user_defined_provider_with_a_granted_key() {
+    let harness = start_loopback("dyn-summary-available").await;
+    let (_, before_body) = harness
+        .get_json(&format!("{}/dashboard/summary", harness.v3_base))
+        .await;
+    let before: DashboardSummary = serde_json::from_value(before_body).unwrap();
+    let (status, created) = send_json(
+        &harness,
+        Method::POST,
+        "/providers",
+        &cas(
+            &harness,
+            create_body(
+                "Counted",
+                "http://127.0.0.1:9",
+                "chat_completions",
+                "bearer",
+                Some("sk-counted"),
+            ),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let provider_id = created["provider"]["id"].as_str().unwrap();
+    enable_accounts_for_provider(&harness, provider_id);
+    let account_id = account_id_for_provider(&harness, provider_id).await;
+
+    let (_, after_body) = harness
+        .get_json(&format!("{}/dashboard/summary", harness.v3_base))
+        .await;
+    let after: DashboardSummary = serde_json::from_value(after_body).unwrap();
+    assert_eq!(after.total_accounts, before.total_accounts + 1);
+    assert_eq!(after.available_accounts, before.available_accounts + 1);
+
+    harness
+        .state
+        .db
+        .lock()
+        .update_account(
+            &account_id,
+            &AccountUpdate {
+                enabled: Some(false),
+                ..AccountUpdate::default()
+            },
+            None,
+            None,
+        )
+        .unwrap();
+    let (_, disabled_body) = harness
+        .get_json(&format!("{}/dashboard/summary", harness.v3_base))
+        .await;
+    let disabled: DashboardSummary = serde_json::from_value(disabled_body).unwrap();
+    assert_eq!(disabled.total_accounts, after.total_accounts);
+    assert_eq!(disabled.available_accounts, before.available_accounts);
     harness.stop();
 }
 

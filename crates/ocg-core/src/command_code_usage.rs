@@ -6,6 +6,7 @@
 //! action, keeps redirects disabled, bounds the response, and treats the
 //! response as a calibration baseline for the existing local estimator.
 
+use crate::kernel::pricing::PricingLimits;
 use crate::models::AppConfig;
 use crate::provider::{
     COMMAND_CODE_GOAT_QUOTA_5H, COMMAND_CODE_GOAT_QUOTA_MONTH, COMMAND_CODE_GOAT_QUOTA_WEEK,
@@ -27,6 +28,14 @@ const WEEK_MAX_MINUTES: i64 = 7 * 24 * 60;
 const LIMIT_EPSILON: f64 = 1e-6;
 
 pub const COMMAND_CODE_GOAT_USAGE_SOURCE: &str = "official_command_code_usage";
+
+pub(crate) fn goat_quota_limits() -> PricingLimits {
+    PricingLimits {
+        window_5h: COMMAND_CODE_GOAT_QUOTA_5H,
+        window_week: COMMAND_CODE_GOAT_QUOTA_WEEK,
+        window_month: COMMAND_CODE_GOAT_QUOTA_MONTH,
+    }
+}
 
 #[cfg(debug_assertions)]
 static COMMAND_CODE_USAGE_URL_OVERRIDES: Mutex<std::collections::BTreeMap<u64, String>> =

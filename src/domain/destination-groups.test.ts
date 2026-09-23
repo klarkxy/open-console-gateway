@@ -227,6 +227,28 @@ test("a Custom card is hidden only after its Key has moved to another destinatio
     id: "bare-card",
   };
   assert.equal(isVacatedCustomShell(awaitingKey, [moved]), false);
+  const emptyCard = {
+    destination: destination("custom-d", {
+      legacy: { kind: "custom_account", id: "key-a" },
+    }),
+    credentials: [],
+    id: "empty-card",
+  };
+  const keyB = credential("custom-d", "key-b", 1);
+  const keyA = credential("platform", "key-a", 5);
+  assert.equal(isVacatedCustomShell(emptyCard, [keyA, keyB]), false);
+  assert.equal(isVacatedCustomShell(emptyCard, [keyA]), true);
+  const observerOnly = {
+    destination: destination("custom-d", {
+      legacy: { kind: "custom_account", id: "key-a" },
+      observer_credential_id: "cred-observer",
+    }),
+    credentials: [],
+    id: "observer-shell",
+  };
+  const observer = credential("custom-d", "observer", 0);
+  observer.id = "cred-observer";
+  assert.equal(isVacatedCustomShell(observerOnly, [keyA, observer]), true);
 });
 
 test("filterGroupRows keeps groups with a visible row and does not mutate input", () => {

@@ -101,39 +101,44 @@ pub(super) async fn refresh(
             .into());
         }
     }
-    let _settings_update = state.settings_update.lock();
-    check_expectation(state, expectation)?;
-    let db = state.db.lock();
-    let usage = db.account_usage(id).map_err(V3ApiError::internal)?;
-    let sync = db
-        .account_usage_sync_state(id)
-        .map_err(V3ApiError::internal)?
-        .ok_or_else(|| {
+    let refresh = {
+        let _settings_update = state.settings_update.lock();
+        check_expectation(state, expectation)?;
+        let db = state.db.lock();
+        let usage = db
+            .account_usage_with_limits(id, &crate::command_code_usage::goat_quota_limits())
+            .map_err(V3ApiError::internal)?;
+        let sync = db
+            .account_usage_sync_state(id)
+            .map_err(V3ApiError::internal)?
+            .ok_or_else(|| {
+                V3ApiError::conflict_at(
+                    state,
+                    "the account changed while Command Code usage was being refreshed",
+                )
+            })?;
+        let now = sync.last_success_at.ok_or_else(|| {
             V3ApiError::conflict_at(
                 state,
                 "the account changed while Command Code usage was being refreshed",
             )
         })?;
-    let now = sync.last_success_at.ok_or_else(|| {
-        V3ApiError::conflict_at(
-            state,
-            "the account changed while Command Code usage was being refreshed",
-        )
-    })?;
-    let next_allowed_at = sync
-        .next_eligible_at
-        .unwrap_or_else(|| now + MANUAL_THROTTLE);
+        let next_allowed_at = sync
+            .next_eligible_at
+            .unwrap_or_else(|| now + MANUAL_THROTTLE);
+        UsageRefresh {
+            usage: usage_window_from_model(state, usage, None),
+            source: COMMAND_CODE_GOAT_USAGE_SOURCE.to_string(),
+            last_success_at: now.to_rfc3339(),
+            next_allowed_at: next_allowed_at.to_rfc3339(),
+            revision: state.settings_revision(),
+            process_generation: state.process_generation(),
+        }
+    };
     state.log_runtime_event(
         "info",
         "usage_sync",
         &format!("event=command_code_usage_refresh_succeeded account_id={id}"),
     );
-    Ok(UsageRefresh {
-        usage: usage_window_from_model(state, usage, None),
-        source: COMMAND_CODE_GOAT_USAGE_SOURCE.to_string(),
-        last_success_at: now.to_rfc3339(),
-        next_allowed_at: next_allowed_at.to_rfc3339(),
-        revision: state.settings_revision(),
-        process_generation: state.process_generation(),
-    })
+    Ok(refresh)
 }

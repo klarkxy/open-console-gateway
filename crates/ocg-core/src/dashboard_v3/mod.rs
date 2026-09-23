@@ -117,6 +117,8 @@ pub use updater::{GITHUB_LATEST_RELEASE_API, GITHUB_LATEST_RELEASE_URL};
 pub use crate::command_code_usage::{
     CommandCodeUsageTargetGuard, install_command_code_usage_target_for_tests,
 };
+#[cfg(debug_assertions)]
+pub use crate::plan_usage::{PlanUsageTargetGuard, install_plan_usage_target_for_tests};
 
 pub use crate::official_protocols::OfficialProtocolBaseline;
 #[cfg(debug_assertions)]

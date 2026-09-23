@@ -89,21 +89,28 @@ export function buildCredentialOrder(
 }
 
 /**
- * A zero-row Custom card whose original account now lives on another
- * destination. Adding a New API Key creates that Custom destination, then
- * moves the Key onto the platform parent; the shell is not another account.
- * An intentional empty routing card stays when this destination still holds
- * the Key. A Custom destination with no moved Key stays so a Key can be added.
+ * A zero-row Custom card whose destination no longer holds an inference Key,
+ * and whose original account now lives on another destination. Adding a New
+ * API Key creates that Custom destination, then moves the Key onto the
+ * platform parent; the shell is not another account. An empty routing card
+ * stays while this destination still has any inference Key, even on another
+ * card. A Custom destination with no moved Key stays so a Key can be added.
  */
 export function isVacatedCustomShell(
   group: Pick<DestinationGroup, "credentials" | "destination">,
-  credentials: readonly Pick<DestinationCredential, "destination_id" | "legacy_account_id">[],
+  credentials: readonly Pick<DestinationCredential, "id" | "destination_id" | "legacy_account_id">[],
 ): boolean {
   if (group.credentials.length > 0) return false;
   if (group.destination.legacy.kind !== "custom_account") return false;
+  const destinationId = group.destination.id;
+  const observerId = group.destination.observer_credential_id;
+  const destinationHasInferenceKey = credentials.some((credential) => (
+    credential.destination_id === destinationId && credential.id !== observerId
+  ));
+  if (destinationHasInferenceKey) return false;
   const ownerId = group.destination.legacy.id;
   return credentials.some((credential) => (
-    credential.legacy_account_id === ownerId && credential.destination_id !== group.destination.id
+    credential.legacy_account_id === ownerId && credential.destination_id !== destinationId
   ));
 }
 

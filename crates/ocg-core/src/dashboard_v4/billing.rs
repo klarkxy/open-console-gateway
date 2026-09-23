@@ -61,7 +61,7 @@ fn status(state: &CoreState, id: &str) -> Result<BillingStatus, V3ApiError> {
                 official_cash,
             )
         };
-        let usage = crate::dashboard_v3::usage::provider_usage_locked(state, id)?;
+        let usage = crate::dashboard_v3::usage::load_provider_usage(state, id)?;
         let model = if credits.is_some() {
             BillingModel::Credits
         } else {

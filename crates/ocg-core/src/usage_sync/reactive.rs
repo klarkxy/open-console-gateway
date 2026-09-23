@@ -13,12 +13,8 @@ use super::{
 use crate::command_code_usage::fetch_command_code_usage;
 use crate::db::{AccountUsageCalibrationSnapshot, AccountUsageSyncSuccessMetadata};
 use crate::go_usage::{GoUsageSnapshot, GoUsageWindowStatus};
-use crate::kernel::pricing::PricingLimits;
 use crate::models::AccountSetupStep;
-use crate::provider::{
-    COMMAND_CODE_GOAT_QUOTA_5H, COMMAND_CODE_GOAT_QUOTA_MONTH, COMMAND_CODE_GOAT_QUOTA_WEEK,
-    ProviderAdapterKind,
-};
+use crate::provider::ProviderAdapterKind;
 use crate::state::CoreState;
 use ocg_gateway::quota::{QuotaEvidence, QuotaReason, QuotaWindowKind};
 
@@ -215,9 +211,17 @@ async fn calibrate_provider_usage(
                 Err(error) => Err(error.to_string()),
             }
         }
-        _ => crate::plan_usage::fetch(&config, adapter, account_id, &key)
-            .await
-            .map(Snapshot::Plan),
+        _ => {
+            crate::plan_usage::fetch(
+                &config,
+                adapter,
+                account_id,
+                &key,
+                state.process_generation(),
+            )
+        }
+        .await
+        .map(Snapshot::Plan),
     };
     drop(key);
     let snapshot = match fetched {
@@ -250,7 +254,7 @@ async fn calibrate_provider_usage(
                     rolling_resets_in_minutes: usage.rolling_resets_in_minutes,
                     weekly_resets_in_minutes: usage.weekly_resets_in_minutes,
                 },
-                &goat_limits(),
+                &crate::command_code_usage::goat_quota_limits(),
                 AccountUsageSyncSuccessMetadata {
                     now: usage.observed_at,
                     next_eligible_at: usage.observed_at + MANUAL_THROTTLE,
@@ -274,14 +278,6 @@ async fn calibrate_provider_usage(
         CalibrationOutcome::Applied
     } else {
         CalibrationOutcome::Stale
-    }
-}
-
-fn goat_limits() -> PricingLimits {
-    PricingLimits {
-        window_5h: COMMAND_CODE_GOAT_QUOTA_5H,
-        window_week: COMMAND_CODE_GOAT_QUOTA_WEEK,
-        window_month: COMMAND_CODE_GOAT_QUOTA_MONTH,
     }
 }
 

@@ -7053,7 +7053,9 @@ fn v4_migration_preserves_uncalibrated_usage() {
     drop(conn);
 
     let db = open_with_host_cipher(dir.clone()).expect("v3 db should migrate");
-    let usage = db.account_usage("old").expect("usage should load");
+    let usage = db
+        .opencode_go_account_usage("old")
+        .expect("usage should load");
     assert_eq!(
         db.get_account("old")
             .expect("account should load")
@@ -7271,7 +7273,7 @@ fn v9_migration_preserves_charged_legacy_errors() {
         ]
     );
     assert_cost(
-        db.account_usage("legacy")
+        db.opencode_go_account_usage("legacy")
             .expect("legacy usage should load")
             .window_month,
         3.25,
@@ -7352,7 +7354,7 @@ fn v10_migration_repairs_charged_errors_from_original_v9() {
         ]
     );
     assert_cost(
-        db.account_usage("legacy")
+        db.opencode_go_account_usage("legacy")
             .expect("legacy usage should load")
             .window_month,
         1.25,
@@ -7973,7 +7975,7 @@ fn v13_migration_preserves_legacy_manual_usage_calibration() {
 
     let db = open_with_host_cipher(dir.clone()).expect("legacy database should migrate");
     let usage = db
-        .account_usage("legacy-calibration")
+        .opencode_go_account_usage("legacy-calibration")
         .expect("migrated usage should load");
     // Old effective values: 50% * 12 + 1, 40% * 30 + 1,
     // and 25% * 60 + 1. The migration must preserve all three.
@@ -7995,7 +7997,7 @@ fn v13_migration_preserves_legacy_manual_usage_calibration() {
 
     finalize_success(&db, "legacy-calibration", 2.0, Utc::now());
     let usage = db
-        .account_usage("legacy-calibration")
+        .opencode_go_account_usage("legacy-calibration")
         .expect("new usage should accumulate after migration");
     assert_cost(usage.window_5h, 9.0);
     assert_cost(usage.window_week, 15.0);
@@ -8230,7 +8232,7 @@ fn fixed_window_5h_anchors_at_the_first_unexpired_success() {
         for &(hours_ago, cost) in history {
             finalize_success(&db, id, cost, now - Duration::hours(hours_ago));
         }
-        let usage = db.account_usage(id).unwrap();
+        let usage = db.opencode_go_account_usage(id).unwrap();
         assert_cost(usage.window_5h, expected_cost);
         let reset = usage.resets_in_5h.expect("active window must have a reset");
         let remaining = (reset - Utc::now()).num_minutes();
@@ -8255,7 +8257,9 @@ fn fixed_window_treats_exact_end_as_the_next_window_start() {
     finalize_success(&db, "boundary", 10.0, first);
     finalize_success(&db, "boundary", 2.0, exact_end);
 
-    let usage = db.account_usage("boundary").expect("usage should load");
+    let usage = db
+        .opencode_go_account_usage("boundary")
+        .expect("usage should load");
     assert_cost(usage.window_5h, 2.0);
     assert!(usage.resets_in_5h.is_some());
 
@@ -8286,7 +8290,9 @@ fn fixed_window_5h_advances_through_multiple_expired_windows_in_one_call() {
     finalize_success(&db, "cycle", 2.0, ts4);
 
     // 第一次刷新：应直接走完所有过期窗口，返回 0（无新请求）。
-    let usage = db.account_usage("cycle").expect("usage should load");
+    let usage = db
+        .opencode_go_account_usage("cycle")
+        .expect("usage should load");
     assert_cost(usage.window_5h, 0.0);
     assert!(
         usage.resets_in_5h.is_none(),
@@ -8294,7 +8300,9 @@ fn fixed_window_5h_advances_through_multiple_expired_windows_in_one_call() {
     );
 
     // 第二次刷新：不应回到最旧日志循环重放，仍稳定为 0。
-    let usage2 = db.account_usage("cycle").expect("usage should load again");
+    let usage2 = db
+        .opencode_go_account_usage("cycle")
+        .expect("usage should load again");
     assert_cost(usage2.window_5h, 0.0);
     assert!(usage2.resets_in_5h.is_none());
 
@@ -8309,7 +8317,9 @@ fn fixed_window_5h_with_no_usage_returns_zero_and_full_window_remaining() {
     db.create_account(&account("empty"))
         .expect("account should be created");
 
-    let usage = db.account_usage("empty").expect("usage should load");
+    let usage = db
+        .opencode_go_account_usage("empty")
+        .expect("usage should load");
     assert_cost(usage.window_5h, 0.0);
     // 没用过：倒计时为 None（前端显示"5h0min"由默认值决定）
     assert!(usage.resets_in_5h.is_none());
@@ -8329,7 +8339,9 @@ fn month_window_accumulates_from_purchase_date_to_expires_on() {
     // 模拟一条历史成功请求（任何时间都算，月窗口从 purchase_date 累计）
     finalize_success(&db, "monthly", 5.0, Utc::now());
 
-    let usage = db.account_usage("monthly").expect("usage should load");
+    let usage = db
+        .opencode_go_account_usage("monthly")
+        .expect("usage should load");
     assert_cost(usage.window_month, 5.0);
     let reset = usage
         .resets_in_month
@@ -8358,7 +8370,9 @@ fn manual_calibrate_5h_window_sets_started_at_and_cost_offset() {
     db.calibrate_account_usage("calib", UsageWindowKind::FiveHours, 50.0, Some(180), 12.0)
         .expect("calibrate should save");
 
-    let usage = db.account_usage("calib").expect("usage should load");
+    let usage = db
+        .opencode_go_account_usage("calib")
+        .expect("usage should load");
     // 5h 限额 12.0，50% = 6.0
     assert_cost(usage.window_5h, 6.0);
     let reset = usage
@@ -8372,7 +8386,9 @@ fn manual_calibrate_5h_window_sets_started_at_and_cost_offset() {
 
     // 后续网关内的请求累加到偏移之上
     finalize_success(&db, "calib", 1.0, Utc::now());
-    let usage = db.account_usage("calib").expect("usage should reload");
+    let usage = db
+        .opencode_go_account_usage("calib")
+        .expect("usage should reload");
     assert_cost(usage.window_5h, 7.0);
 
     drop(db);
@@ -8400,12 +8416,16 @@ fn calibrate_subtracts_existing_window_usage_from_offset() {
     // 把 1 小时前的 log 稳稳包含进窗口（避开 finalize 与 calibrate 之间的微秒级时序差）。
     db.calibrate_account_usage("active", UsageWindowKind::FiveHours, 50.0, Some(180), 12.0)
         .expect("calibrate should save with existing usage");
-    let usage = db.account_usage("active").expect("usage should load");
+    let usage = db
+        .opencode_go_account_usage("active")
+        .expect("usage should load");
     assert_cost(usage.window_5h, 6.0);
 
     // 后续请求继续累加：offset=3.0 + actual=3.0 + new=2.0 = 8.0
     finalize_success(&db, "active", 2.0, Utc::now());
-    let usage = db.account_usage("active").expect("usage should reload");
+    let usage = db
+        .opencode_go_account_usage("active")
+        .expect("usage should reload");
     assert_cost(usage.window_5h, 8.0);
 
     drop(db);
@@ -8433,7 +8453,9 @@ fn calibrate_below_actual_usage_allows_negative_offset() {
     // $9 log 稳稳包含进窗口（避开 finalize 与 calibrate 之间的微秒级时序差）。
     db.calibrate_account_usage("clamp", UsageWindowKind::FiveHours, 20.0, Some(180), 12.0)
         .expect("calibrate below actual usage should allow negative offset");
-    let usage = db.account_usage("clamp").expect("usage should load");
+    let usage = db
+        .opencode_go_account_usage("clamp")
+        .expect("usage should load");
     // 显示的 cost = offset(-6.6) + actual(9.0) = 2.4（用户输入的 20%）
     assert_cost(usage.window_5h, 2.4);
 
@@ -8460,7 +8482,7 @@ fn calibrate_month_window_writes_offset_without_started_at() {
     db.calibrate_account_usage("monthly-calib", UsageWindowKind::Month, 50.0, None, 100.0)
         .expect("month window calibrate should save");
     let usage = db
-        .account_usage("monthly-calib")
+        .opencode_go_account_usage("monthly-calib")
         .expect("usage should load");
     assert_cost(usage.window_month, 50.0);
     // resets_in_month 仍是 purchase_date + 1 自然月（不受 resets_in_minutes 影响）
@@ -8495,7 +8517,7 @@ fn changing_purchase_date_resets_month_calibration_offset() {
     db.calibrate_account_usage("monthly-renewal", UsageWindowKind::Month, 0.0, None, 100.0)
         .expect("month calibration should save a negative offset");
     assert_cost(
-        db.account_usage("monthly-renewal")
+        db.opencode_go_account_usage("monthly-renewal")
             .expect("usage should load")
             .window_month,
         0.0,
@@ -8527,7 +8549,7 @@ fn changing_purchase_date_resets_month_calibration_offset() {
         .expect("month offset should load");
     assert_cost(offset, 0.0);
     assert_cost(
-        db.account_usage("monthly-renewal")
+        db.opencode_go_account_usage("monthly-renewal")
             .expect("renewed usage should load")
             .window_month,
         0.0,
@@ -8535,7 +8557,7 @@ fn changing_purchase_date_resets_month_calibration_offset() {
 
     finalize_success(&db, "monthly-renewal", 2.0, Utc::now());
     assert_cost(
-        db.account_usage("monthly-renewal")
+        db.opencode_go_account_usage("monthly-renewal")
             .expect("new cycle usage should load")
             .window_month,
         2.0,
@@ -15522,6 +15544,82 @@ fn platform_discovery_preserves_empty_protocol_controls_and_initializes_new_mode
         .find(|m| m.public_model == "model-b")
         .unwrap();
     assert_eq!(new.protocols.len(), 3);
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn utc_token_day_bounds_include_the_whole_earliest_calendar_day() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-09-22T14:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let (start, end) = utc_token_day_bounds(now, 1).unwrap();
+    assert_eq!(
+        start,
+        chrono::DateTime::parse_from_rfc3339("2026-09-22T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    );
+    assert_eq!(
+        end,
+        chrono::DateTime::parse_from_rfc3339("2026-09-23T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    );
+    let morning = chrono::DateTime::parse_from_rfc3339("2026-09-22T10:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    assert!(morning >= start && morning < end);
+    let (week_start, week_end) = utc_token_day_bounds(now, 7).unwrap();
+    let early_morning = chrono::DateTime::parse_from_rfc3339("2026-09-16T10:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let early_evening = chrono::DateTime::parse_from_rfc3339("2026-09-16T20:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    assert!(early_morning >= week_start && early_morning < week_end);
+    assert!(early_evening >= week_start && early_evening < week_end);
+    assert!(utc_token_day_bounds(now, 0).is_err());
+}
+
+#[test]
+fn daily_tokens_by_model_includes_midnight_of_the_earliest_utc_day() {
+    let dir = temp_data_dir("daily-token-calendar");
+    let db = Database::open(dir.clone()).unwrap();
+    let now = chrono::Utc::now();
+    let mut today = forward_log("acct", "success", 0.0);
+    today.timestamp = now.date_naive().and_hms_opt(0, 0, 0).unwrap().and_utc();
+    today.model = "today-model".into();
+    today.prompt_tokens = 100;
+    db.log_forward(&today).unwrap();
+
+    let earliest = (now.date_naive() - chrono::Duration::days(6))
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc();
+    let mut early = forward_log("acct", "success", 0.0);
+    early.timestamp = earliest;
+    early.model = "early-model".into();
+    early.prompt_tokens = 40;
+    early.completion_tokens = 10;
+    db.log_forward(&early).unwrap();
+    let mut early_evening = forward_log("acct", "success", 0.0);
+    early_evening.timestamp = earliest + chrono::Duration::hours(20);
+    early_evening.model = "early-model".into();
+    early_evening.prompt_tokens = 5;
+    early_evening.completion_tokens = 5;
+    db.log_forward(&early_evening).unwrap();
+
+    let one_day = db.daily_tokens_by_model(1).unwrap();
+    assert_eq!(one_day.iter().map(|row| row.tokens).sum::<i64>(), 100);
+    let week = db.daily_tokens_by_model(7).unwrap();
+    let early_tokens: i64 = week
+        .iter()
+        .filter(|row| row.model == "early-model")
+        .map(|row| row.tokens)
+        .sum();
+    assert_eq!(early_tokens, 60);
+    assert!(db.daily_tokens_by_model(0).is_err());
     drop(db);
     fs::remove_dir_all(dir).unwrap();
 }

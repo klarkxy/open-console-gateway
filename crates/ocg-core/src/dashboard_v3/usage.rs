@@ -19,7 +19,6 @@ use crate::models::{
     QuotaWindow as ModelQuotaWindow, UsageWindow as ModelUsageWindow, UsageWindowKind,
 };
 use crate::provider::{
-    COMMAND_CODE_GOAT_QUOTA_5H, COMMAND_CODE_GOAT_QUOTA_MONTH, COMMAND_CODE_GOAT_QUOTA_WEEK,
     OllamaBillingTier, ProviderAdapterKind, ProviderRegistry, QUOTA_WINDOW_FREE,
 };
 use crate::state::CoreState;
@@ -60,7 +59,7 @@ pub(super) async fn get_provider_usage(
     State(state): State<CoreState>,
     Path(id): Path<String>,
 ) -> Result<Json<ProviderUsage>, V3ApiError> {
-    provider_usage_locked(&state, &id).map(Json)
+    load_provider_usage(&state, &id).map(Json)
 }
 
 enum ProviderUsageRefreshKind {
@@ -145,9 +144,9 @@ pub(super) async fn refresh_provider_usage(
         }
         ProviderUsageRefreshKind::Goat => {
             super::command_code_usage_refresh::refresh(&state, &id, &expectation).await?;
-            return provider_usage_locked(&state, &id)
+            load_provider_usage(&state, &id)
                 .map(Json)
-                .map_err(RefreshApiError::from);
+                .map_err(RefreshApiError::from)
         }
         ProviderUsageRefreshKind::Plan => {
             return refresh_plan_usage(&state, &id, &expectation).await;
@@ -208,16 +207,18 @@ async fn refresh_plan_usage(
             .into());
         }
     }
-    let _settings_update = state.settings_update.lock();
-    check_expectation(state, expectation)?;
+    let usage = {
+        let _settings_update = state.settings_update.lock();
+        check_expectation(state, expectation)?;
+        let db = state.db.lock();
+        provider_usage_from_db(state, &db, id)?
+    };
     state.log_runtime_event(
         "info",
         "usage_sync",
         &format!("event=provider_usage_refresh_succeeded account_id={id}"),
     );
-    provider_usage_locked(state, id)
-        .map(Json)
-        .map_err(RefreshApiError::from)
+    Ok(Json(usage))
 }
 
 async fn refresh_official_balance(
@@ -299,7 +300,7 @@ async fn refresh_official_balance(
             account_snapshot.provider_id
         ),
     );
-    provider_usage_locked(state, id)
+    load_provider_usage(state, id)
         .map(Json)
         .map_err(RefreshApiError::from)
 }
@@ -329,7 +330,7 @@ async fn refresh_go_provider_usage(
         check_expectation(state, expectation)?;
     }
     match observation.result {
-        Ok(_) => provider_usage_locked(state, id)
+        Ok(_) => load_provider_usage(state, id)
             .map(Json)
             .map_err(RefreshApiError::from),
         Err(error) => Err(map_refresh_error(state, error)),
@@ -477,13 +478,25 @@ fn patch_account_usage_locked(
     })
 }
 
-pub(crate) fn provider_usage_locked(
+/// Read provider usage. Acquires `settings_update` and the database lock.
+/// Callers must not already hold either lock.
+pub(crate) fn load_provider_usage(
     state: &CoreState,
     id: &str,
 ) -> Result<ProviderUsage, V3ApiError> {
     let _settings_update = state.settings_update.lock();
     let db = state.db.lock();
-    let account = load_account(&db, state, id)?;
+    provider_usage_from_db(state, &db, id)
+}
+
+/// Project provider usage from a database the caller already locked.
+/// Does not acquire `settings_update` or `db`.
+fn provider_usage_from_db(
+    state: &CoreState,
+    db: &Database,
+    id: &str,
+) -> Result<ProviderUsage, V3ApiError> {
+    let account = load_account(db, state, id)?;
     if crate::dynamic::find_runtime(&state.dynamic_providers(), &account.provider_id).is_some() {
         return Ok(provider_usage_from_parts(
             state,
@@ -493,7 +506,7 @@ pub(crate) fn provider_usage_locked(
             false,
             None,
             Vec::new(),
-            official_credit_balances(&db, &account)?,
+            official_credit_balances(db, &account)?,
             None,
             None,
         ));
@@ -511,7 +524,7 @@ pub(crate) fn provider_usage_locked(
             descriptor.usage.experimental,
             None,
             Vec::new(),
-            official_credit_balances(&db, &account)?,
+            official_credit_balances(db, &account)?,
             db.account_usage_sync_state(&account.id)
                 .map_err(V3ApiError::internal)?,
             None,
@@ -552,11 +565,7 @@ pub(crate) fn provider_usage_locked(
             None,
         )
     } else if descriptor.kind == ProviderAdapterKind::CommandCodeGoat {
-        let limits = PricingLimits {
-            window_5h: COMMAND_CODE_GOAT_QUOTA_5H,
-            window_week: COMMAND_CODE_GOAT_QUOTA_WEEK,
-            window_month: COMMAND_CODE_GOAT_QUOTA_MONTH,
-        };
+        let limits = crate::command_code_usage::goat_quota_limits();
         let observed_at = db
             .account_usage_sync_state(&account.id)
             .map_err(V3ApiError::internal)?
@@ -666,14 +675,7 @@ fn account_usage_limits(
             return Ok((pricing.limits.clone(), Some(pricing.revision.clone())));
         }
         Some(ProviderAdapterKind::CommandCodeGoat) => {
-            return Ok((
-                PricingLimits {
-                    window_5h: COMMAND_CODE_GOAT_QUOTA_5H,
-                    window_week: COMMAND_CODE_GOAT_QUOTA_WEEK,
-                    window_month: COMMAND_CODE_GOAT_QUOTA_MONTH,
-                },
-                None,
-            ));
+            return Ok((crate::command_code_usage::goat_quota_limits(), None));
         }
         Some(ProviderAdapterKind::OllamaCloud) => {
             let limit = db
