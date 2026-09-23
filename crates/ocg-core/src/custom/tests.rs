@@ -35,6 +35,15 @@ fn custom_endpoint_url_rejects_credentials_query_fragment_and_non_http_schemes()
             "https://api.example.com/v1/models"
         );
     }
+    assert_eq!(
+        derive_custom_models_endpoint(
+            "https://api.example.com/chat/v1/chat/completions",
+            UpstreamProtocolKind::ChatCompletions,
+        )
+        .unwrap()
+        .as_str(),
+        "https://api.example.com/chat/v1/models"
+    );
     assert!(
         derive_custom_models_endpoint(
             "https://api.example.com/v1/custom-chat",

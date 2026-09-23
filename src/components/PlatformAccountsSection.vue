@@ -58,6 +58,7 @@ import {
   discoveredModelCapabilities,
   linkedAccountIdSet,
   platformHostedEndpoint,
+  platformInferenceEndpoint,
   platformModelOverlay,
   platformSnapshotErrorKey,
   uniquePublicModelCount,
@@ -384,7 +385,8 @@ async function createAndLinkKey(payload: PlatformKeyFormPayload): Promise<void> 
   const parent = addKeyParent.value;
   if (!parent || platformStore.mutating) return;
   const hosted = platformHostedEndpoint(parent.baseUrl);
-  if (!hosted) {
+  const discoveryEndpoint = platformInferenceEndpoint(parent.baseUrl, "chat_completions");
+  if (!hosted || !discoveryEndpoint) {
     addKeyError.value = t("平台地址无效");
     return;
   }
@@ -392,7 +394,7 @@ async function createAndLinkKey(payload: PlatformKeyFormPayload): Promise<void> 
   addKeyError.value = "";
   try {
     const discovery = await dashboardApi.discoverCustomModels({
-      endpoint_url: hosted,
+      endpoint_url: discoveryEndpoint,
       upstream_protocol: "chat_completions",
       api_key: payload.key,
     });
@@ -467,17 +469,17 @@ async function createAndLinkKey(payload: PlatformKeyFormPayload): Promise<void> 
 
 async function fetchModels(account: Account): Promise<void> {
   if (platformStore.mutating) return;
-  const hosted = account.custom_config?.endpoint_url
-    ? platformHostedEndpoint(account.custom_config.endpoint_url) ?? account.custom_config.endpoint_url
+  const discoveryEndpoint = account.custom_config?.endpoint_url
+    ? platformInferenceEndpoint(account.custom_config.endpoint_url, account.custom_config.upstream_protocol)
     : "";
-  if (!hosted) {
+  if (!discoveryEndpoint) {
     message.error(t("平台地址无效"));
     return;
   }
   if (!platformStore.beginMutation()) return;
   try {
     const discovery = await dashboardApi.discoverCustomModels({
-      endpoint_url: hosted,
+      endpoint_url: discoveryEndpoint,
       upstream_protocol: account.custom_config?.upstream_protocol ?? "chat_completions",
       account_id: account.id,
     });

@@ -91,6 +91,10 @@ test("platform inference endpoint mirrors the backend derivation per protocol", 
     platformInferenceEndpoint("https://newapi.example.com/", "messages"),
     "https://newapi.example.com/v1/messages",
   );
+  assert.equal(
+    platformInferenceEndpoint("https://newapi.example.com/chat/v1", "chat_completions"),
+    "https://newapi.example.com/chat/v1/chat/completions",
+  );
   // Non-URLs, non-http(s) schemes, and credentialed URLs are never derived.
   assert.equal(platformInferenceEndpoint("not a url", "chat_completions"), null);
   assert.equal(platformInferenceEndpoint("ftp://example.com", "chat_completions"), null);

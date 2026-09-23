@@ -994,6 +994,38 @@ pub fn http_protocol_routes(destination: &Destination) -> Vec<HttpProtocolRoute>
         return destination.protocol_routes.clone();
     }
     let endpoint_url = destination.base_url.clone().unwrap_or_default();
+    if matches!(&destination.legacy, LegacyDestinationRef::PlatformParent(_)) {
+        let Ok(parsed) = url::Url::parse(&endpoint_url) else {
+            return Vec::new();
+        };
+        if !matches!(parsed.scheme(), "http" | "https")
+            || parsed.username() != ""
+            || parsed.password().is_some()
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+        {
+            return Vec::new();
+        }
+        let root = endpoint_url.trim_end_matches('/');
+        let root = root.strip_suffix("/v1").unwrap_or(root);
+        return destination
+            .protocols
+            .iter()
+            .copied()
+            .map(|protocol| {
+                let suffix = match protocol {
+                    Protocol::ChatCompletions => "chat/completions",
+                    Protocol::Responses => "responses",
+                    Protocol::Messages => "messages",
+                };
+                HttpProtocolRoute {
+                    protocol,
+                    endpoint_url: format!("{root}/v1/{suffix}"),
+                    auth_scheme: destination.auth_scheme,
+                }
+            })
+            .collect();
+    }
     destination
         .protocols
         .iter()

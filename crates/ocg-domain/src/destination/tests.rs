@@ -601,6 +601,48 @@ fn maps_platform_parent_linked_and_unlinked_keys() {
 }
 
 #[test]
+fn platform_site_root_resolves_each_protocol_path_without_changing_generic_http() {
+    let parent = destination_from_legacy(&LegacyDestinationFacts::PlatformParent {
+        id: "subpath-site".to_string(),
+        kind: PlatformKind::NewApi,
+        name: "Subpath site".to_string(),
+        base_url: "https://site.example/chat".to_string(),
+        has_user_credential: false,
+    })
+    .unwrap();
+    assert_eq!(
+        parent.base_url.as_deref(),
+        Some("https://site.example/chat")
+    );
+    assert_eq!(
+        http_protocol_routes(&parent),
+        vec![
+            route(
+                Protocol::ChatCompletions,
+                "https://site.example/chat/v1/chat/completions",
+                AuthScheme::Bearer,
+            ),
+            route(
+                Protocol::Responses,
+                "https://site.example/chat/v1/responses",
+                AuthScheme::Bearer,
+            ),
+            route(
+                Protocol::Messages,
+                "https://site.example/chat/v1/messages",
+                AuthScheme::Bearer,
+            ),
+        ]
+    );
+    let mut old_base = parent;
+    old_base.base_url = Some("https://site.example/chat/v1".to_string());
+    assert_eq!(
+        http_protocol_routes(&old_base)[0].endpoint_url,
+        "https://site.example/chat/v1/chat/completions"
+    );
+}
+
+#[test]
 fn linked_key_targets_platform_destination_never_per_account() {
     let parent = destination_from_legacy(&LegacyDestinationFacts::PlatformParent {
         id: "plat-2".to_string(),
