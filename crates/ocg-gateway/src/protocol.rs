@@ -298,7 +298,49 @@ fn validate_request_features(
             "Responses custom tool grammar format cannot be preserved by protocol conversion",
         ));
     }
+    if let Some(field) = unpreserved_request_field(client, upstream, body) {
+        return Err(ConversionError::new(format!(
+            "{field} cannot be preserved by protocol conversion"
+        )));
+    }
     Ok(())
+}
+
+fn unpreserved_request_field(
+    client: ApiFormat,
+    upstream: ApiFormat,
+    body: &Value,
+) -> Option<&'static str> {
+    if client == ApiFormat::ChatCompletions {
+        match body.get("n") {
+            None | Some(Value::Null) => {}
+            Some(Value::Number(n)) if n.as_u64() == Some(1) => {}
+            Some(_) => return Some("Chat Completions n"),
+        }
+        if body.get("logprobs") == Some(&Value::Bool(true))
+            || body
+                .get("top_logprobs")
+                .is_some_and(|value| !value.is_null())
+        {
+            return Some("Chat Completions logprobs");
+        }
+    }
+    if upstream == ApiFormat::Responses && nonempty_stop(body) {
+        return Some(match client {
+            ApiFormat::ChatCompletions => "Chat Completions stop",
+            ApiFormat::Messages => "Messages stop_sequences",
+            _ => "stop",
+        });
+    }
+    None
+}
+
+fn nonempty_stop(body: &Value) -> bool {
+    match body.get("stop").or_else(|| body.get("stop_sequences")) {
+        Some(Value::String(stop)) => !stop.is_empty(),
+        Some(Value::Array(stops)) => !stops.is_empty(),
+        _ => false,
+    }
 }
 
 fn validate_gemini_request(body: &Value) -> Result<(), ConversionError> {
@@ -1416,6 +1458,14 @@ fn chat_request_to_messages(body: Value) -> Result<Value, ConversionError> {
     Ok(Value::Object(out))
 }
 
+fn flush_response_parts(input: &mut Vec<Value>, parts: &mut Vec<Value>, role: &str) {
+    if parts.is_empty() {
+        return;
+    }
+    let content = std::mem::take(parts);
+    input.push(json!({ "type": "message", "role": role, "content": content }));
+}
+
 fn messages_request_to_responses(body: Value) -> Result<Value, ConversionError> {
     let mut out = Map::new();
     copy(&body, &mut out, "model", "model");
@@ -1423,6 +1473,9 @@ fn messages_request_to_responses(body: Value) -> Result<Value, ConversionError> 
     copy(&body, &mut out, "temperature", "temperature");
     copy(&body, &mut out, "top_p", "top_p");
     copy(&body, &mut out, "max_tokens", "max_output_tokens");
+    if let Some(service_tier) = body.get("service_tier").and_then(Value::as_str) {
+        out.insert("service_tier".into(), json!(service_tier));
+    }
     if let Some(system) = system_text(body.get("system")) {
         out.insert("instructions".into(), json!(system));
     }
@@ -1446,21 +1499,30 @@ fn messages_request_to_responses(body: Value) -> Result<Value, ConversionError> 
                         parts.push(json!({ "type": "input_image", "image_url": url }));
                     }
                 }
-                Some("tool_use") => input.push(json!({
-                    "type": "function_call",
-                    "call_id": block.get("id").cloned().unwrap_or_else(|| json!("")),
-                    "name": block.get("name").cloned().unwrap_or_else(|| json!("")),
-                    "arguments": json_string(block.get("input"))
-                })),
-                Some("tool_result") => input.push(json!({
-                    "type": "function_call_output",
-                    "call_id": block.get("tool_use_id").cloned().unwrap_or_else(|| json!("")),
-                    "output": tool_result_text(block.get("content"))
-                })),
-                Some("thinking") => input.push(json!({
-                    "type": "reasoning",
-                    "summary": [{ "type": "summary_text", "text": block.get("thinking").cloned().unwrap_or_else(|| json!("")) }]
-                })),
+                Some("tool_use") => {
+                    flush_response_parts(&mut input, &mut parts, role);
+                    input.push(json!({
+                        "type": "function_call",
+                        "call_id": block.get("id").cloned().unwrap_or_else(|| json!("")),
+                        "name": block.get("name").cloned().unwrap_or_else(|| json!("")),
+                        "arguments": json_string(block.get("input"))
+                    }));
+                }
+                Some("tool_result") => {
+                    flush_response_parts(&mut input, &mut parts, role);
+                    input.push(json!({
+                        "type": "function_call_output",
+                        "call_id": block.get("tool_use_id").cloned().unwrap_or_else(|| json!("")),
+                        "output": tool_result_text(block.get("content"))
+                    }));
+                }
+                Some("thinking") => {
+                    flush_response_parts(&mut input, &mut parts, role);
+                    input.push(json!({
+                        "type": "reasoning",
+                        "summary": [{ "type": "summary_text", "text": block.get("thinking").cloned().unwrap_or_else(|| json!("")) }]
+                    }));
+                }
                 _ => {}
             }
         }

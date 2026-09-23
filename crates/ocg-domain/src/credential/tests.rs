@@ -448,6 +448,55 @@ fn safe_default_grants_for_sealed_adapters_have_ids_and_no_origins() {
 }
 
 #[test]
+fn unique_granted_route_uses_the_override_when_the_default_is_not_granted() {
+    let connection = connection_id_for_legacy(LegacyConnectionKind::DynamicProvider, "lab");
+    let default_url = "https://api.moonshot.cn/v1/chat/completions";
+    let override_url = "https://api.deepseek.com/v1/chat/completions";
+    let routes = vec![
+        RouteSpec {
+            operation: EndpointOperation::ChatCreate,
+            url: Some(default_url.into()),
+        },
+        RouteSpec {
+            operation: EndpointOperation::ChatCreate,
+            url: Some(override_url.into()),
+        },
+    ];
+    let assigned = assigned_endpoints_for_routes(&connection, &routes);
+    let override_id = assigned
+        .iter()
+        .find(|endpoint| endpoint.url.as_deref() == Some(override_url))
+        .unwrap()
+        .id
+        .clone();
+    assert_eq!(
+        unique_granted_route_url(
+            &connection,
+            &routes,
+            &[override_id],
+            &["https://api.deepseek.com".into()],
+        )
+        .as_deref(),
+        Some(override_url)
+    );
+    assert!(
+        unique_granted_route_url(
+            &connection,
+            &routes,
+            &assigned
+                .iter()
+                .map(|endpoint| endpoint.id.clone())
+                .collect::<Vec<_>>(),
+            &[
+                "https://api.moonshot.cn".into(),
+                "https://api.deepseek.com".into()
+            ],
+        )
+        .is_none()
+    );
+}
+
+#[test]
 fn normalize_origin_lowercases_scheme_and_host() {
     assert_eq!(
         normalize_origin("HTTPS://Lab.Example/v1/chat/completions"),

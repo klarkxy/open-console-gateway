@@ -44,6 +44,11 @@ pub fn probe_from_endpoint(endpoint_url: &str) -> Option<()> {
     official_service::has_official_balance(endpoint_url).then_some(())
 }
 
+/// Balance URL `fetch` will request for an inference endpoint.
+pub(crate) fn balance_request_url(endpoint_url: &str) -> Result<String, String> {
+    Ok(probe_for(endpoint_url)?.url.to_string())
+}
+
 fn probe_for(endpoint_url: &str) -> Result<BalanceProbe, String> {
     let reader = official_service::identify(endpoint_url)
         .and_then(|service| service.balance_reader())

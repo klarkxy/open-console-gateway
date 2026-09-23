@@ -420,11 +420,20 @@ fn restrict_platform_to_token_coverage(
     plan: &RequestPlan,
     pricing: RequestPricingSnapshot,
 ) -> RequestPricingSnapshot {
-    if matches!(&pricing, RequestPricingSnapshot::Platform(_))
-        && !token_pricing_covers_request(&plan.body, plan.service_tier.as_deref())
-    {
+    if !matches!(&pricing, RequestPricingSnapshot::Platform(_)) {
+        return pricing;
+    }
+    let hosted_tools = serde_json::from_slice::<Value>(&plan.body)
+        .ok()
+        .is_some_and(|body| request_has_hosted_tool_charges(&body));
+    if hosted_tools || !token_pricing_covers_request(&plan.body, plan.service_tier.as_deref()) {
+        let reason = if hosted_tools {
+            "platform:hosted_tool_unpriced"
+        } else {
+            "platform:unsupported_request_pricing"
+        };
         RequestPricingSnapshot::Platform(PlatformAttemptPrice::Unknown {
-            provenance: Some("platform:unsupported_request_pricing".into()),
+            provenance: Some(reason.into()),
         })
     } else {
         pricing
@@ -551,40 +560,95 @@ fn request_has_hosted_tool_charges(body: &Value) -> bool {
 /// tier, and a JSON body without non-text media. Unparseable bodies are not
 /// covered. Hosted-tool charges are a separate gate.
 pub(crate) fn token_pricing_covers_request(body: &[u8], service_tier: Option<&str>) -> bool {
-    fn media(value: &Value) -> bool {
-        match value {
-            Value::Object(object) => {
-                object
-                    .get("type")
-                    .and_then(Value::as_str)
-                    .is_some_and(|kind| {
-                        matches!(
-                            kind,
-                            "image"
-                                | "image_url"
-                                | "input_image"
-                                | "input_audio"
-                                | "audio"
-                                | "video"
-                                | "input_video"
-                                | "file"
-                                | "input_file"
-                        )
-                    })
-                    || object
-                        .get("modalities")
-                        .and_then(Value::as_array)
-                        .is_some_and(|values| values.iter().any(|v| v.as_str() != Some("text")))
-                    || object.contains_key("inline_data")
-                    || object.contains_key("inlineData")
-                    || object.values().any(media)
-            }
-            Value::Array(values) => values.iter().any(media),
-            _ => false,
-        }
-    }
     service_tier.is_none_or(|tier| tier == "default")
-        && serde_json::from_slice::<Value>(body).is_ok_and(|value| !media(&value))
+        && serde_json::from_slice::<Value>(body)
+            .is_ok_and(|value| !request_has_unpriced_media(&value))
+}
+
+/// Media that token rates do not cover, read from protocol content positions.
+/// Tool schemas, examples, and parameter names are not content.
+fn request_has_unpriced_media(body: &Value) -> bool {
+    if modalities_include_non_text(body.get("modalities")) {
+        return true;
+    }
+    if body
+        .get("messages")
+        .and_then(Value::as_array)
+        .is_some_and(|messages| {
+            messages
+                .iter()
+                .any(|message| content_has_media(message.get("content")))
+        })
+    {
+        return true;
+    }
+    if body
+        .get("input")
+        .is_some_and(|input| content_has_media(Some(input)))
+    {
+        return true;
+    }
+    body.get("contents")
+        .and_then(Value::as_array)
+        .is_some_and(|contents| {
+            contents
+                .iter()
+                .any(|content| part_is_media(content) || content_has_media(content.get("parts")))
+        })
+}
+
+fn modalities_include_non_text(value: Option<&Value>) -> bool {
+    value
+        .and_then(Value::as_array)
+        .is_some_and(|values| values.iter().any(|value| value.as_str() != Some("text")))
+}
+
+fn content_has_media(content: Option<&Value>) -> bool {
+    match content {
+        Some(Value::Array(parts)) => parts.iter().any(item_has_media),
+        Some(value) => item_has_media(value),
+        None => false,
+    }
+}
+
+fn item_has_media(part: &Value) -> bool {
+    if part_is_media(part) {
+        return true;
+    }
+    part.get("type").and_then(Value::as_str) == Some("message")
+        && content_has_media(part.get("content"))
+}
+
+fn part_is_media(part: &Value) -> bool {
+    if part
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|kind| {
+            matches!(
+                kind,
+                "image"
+                    | "image_url"
+                    | "input_image"
+                    | "input_audio"
+                    | "audio"
+                    | "video"
+                    | "input_video"
+                    | "file"
+                    | "input_file"
+            )
+        })
+    {
+        return true;
+    }
+    part.get("inlineData")
+        .or_else(|| part.get("inline_data"))
+        .is_some_and(|data| {
+            data.as_object().is_some_and(|object| {
+                object.contains_key("data")
+                    || object.contains_key("mimeType")
+                    || object.contains_key("mime_type")
+            })
+        })
 }
 
 pub(crate) fn apply_native_cost_attribution(

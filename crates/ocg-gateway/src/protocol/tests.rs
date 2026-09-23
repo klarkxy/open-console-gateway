@@ -359,3 +359,88 @@ fn convert_response_json_rejects_non_object_messages_with_exact_string() {
     .expect_err("non-object Messages response should be rejected");
     assert_eq!(error.message, "Messages response must be a JSON object");
 }
+
+#[test]
+fn chat_conversion_rejects_unpreserved_fields_and_keeps_service_tier() {
+    let rejected = convert_request_json(
+        ApiFormat::ChatCompletions,
+        ApiFormat::Messages,
+        json!({
+            "model": "registered-model",
+            "messages": [{"role": "user", "content": "给出一个标题"}],
+            "n": 2,
+            "logprobs": true
+        }),
+    )
+    .expect_err("n and logprobs cannot be dropped");
+    assert!(
+        rejected.message.contains("Chat Completions n"),
+        "{rejected:?}"
+    );
+    let logprobs = convert_request_json(
+        ApiFormat::ChatCompletions,
+        ApiFormat::Messages,
+        json!({
+            "model": "registered-model",
+            "messages": [{"role": "user", "content": "hello"}],
+            "logprobs": true
+        }),
+    )
+    .expect_err("logprobs cannot be dropped");
+    assert!(
+        logprobs.message.contains("Chat Completions logprobs"),
+        "{logprobs:?}"
+    );
+}
+
+#[test]
+fn chat_to_responses_rejects_stop_and_preserves_service_tier_and_order() {
+    let stopped = convert_request_json(
+        ApiFormat::ChatCompletions,
+        ApiFormat::Responses,
+        json!({
+            "model": "registered-model",
+            "messages": [{"role": "user", "content": "hello"}],
+            "stop": ["END"]
+        }),
+    );
+    assert!(
+        stopped.is_err(),
+        "stop must be rejected when Responses cannot express it"
+    );
+
+    let converted = convert_req(
+        ApiFormat::ChatCompletions,
+        ApiFormat::Responses,
+        json!({
+            "model": "registered-model",
+            "messages": [{
+                "role": "assistant",
+                "content": "先说明我要查询什么",
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "lookup", "arguments": "{}"}
+                }]
+            }],
+            "service_tier": "priority",
+            "parallel_tool_calls": false,
+            "tools": [{"type": "function", "function": {"name": "lookup", "parameters": {"type": "object"}}}]
+        }),
+    );
+    assert_eq!(converted.body["service_tier"], "priority");
+    assert_eq!(converted.body["parallel_tool_calls"], false);
+    let input = converted.body["input"].as_array().unwrap();
+    let types: Vec<_> = input
+        .iter()
+        .filter_map(|item| item.get("type").and_then(Value::as_str))
+        .collect();
+    assert_eq!(types.first().copied(), Some("message"));
+    assert!(types.iter().any(|kind| *kind == "function_call"));
+    let message_at = types.iter().position(|kind| *kind == "message").unwrap();
+    let call_at = types
+        .iter()
+        .position(|kind| *kind == "function_call")
+        .unwrap();
+    assert!(message_at < call_at, "{types:?}");
+}

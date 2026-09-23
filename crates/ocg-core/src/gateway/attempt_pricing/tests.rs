@@ -185,6 +185,54 @@ fn token_pricing_covers_plain_text_and_rejects_media_or_priority_tiers() {
         br#"{"input":"hello"}"#,
         Some("priority")
     ));
+    assert!(token_pricing_covers_request(
+        br#"{"tools":[{"type":"function","function":{"name":"save_record","parameters":{"type":"object","properties":{"inline_data":{"type":"string"}}}}}]}"#,
+        None
+    ));
+}
+
+#[test]
+fn platform_price_does_not_freeze_a_hosted_tool_request() {
+    use crate::gateway::protocol::RequestPlan;
+    use crate::kernel::protocol::ApiFormat;
+    use crate::models::UpstreamChannel;
+    use bytes::Bytes;
+    let plan = RequestPlan {
+        client: ApiFormat::Responses,
+        upstream: ApiFormat::Responses,
+        model: "m".into(),
+        client_model: "m".into(),
+        stream: false,
+        body: Bytes::from_static(br#"{"tools":[{"type":"web_search"}]}"#),
+        channel: UpstreamChannel::Go,
+        upstream_base_override: None,
+        original_model: None,
+        resolved_alias: None,
+        custom_route: None,
+        service_tier: None,
+        custom_tools: Vec::new(),
+        namespace_tools: Vec::new(),
+        legacy_tool_compat: None,
+        response_parallel_tool_calls: true,
+        response_tool_choice: serde_json::json!("auto"),
+        response_tools: Vec::new(),
+    };
+    let pricing =
+        RequestPricingSnapshot::Platform(PlatformAttemptPrice::Frozen(FrozenPlatformPrice {
+            provenance: "platform".into(),
+            currency: "USD".into(),
+            input: 1.0,
+            output: 1.0,
+            cache_read: None,
+            cache_write: None,
+        }));
+    let restricted = restrict_platform_to_token_coverage(&plan, pricing);
+    match restricted {
+        RequestPricingSnapshot::Platform(PlatformAttemptPrice::Unknown { provenance }) => {
+            assert_eq!(provenance.as_deref(), Some("platform:hosted_tool_unpriced"));
+        }
+        _ => panic!("hosted tools must not keep a frozen platform price"),
+    }
 }
 
 #[test]

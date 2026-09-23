@@ -240,7 +240,7 @@ pub(crate) fn persisted_proxy_model_candidates(
                 .filter(|protocol| model.protocols.contains(protocol))
                 .unwrap_or(model.protocols[0]);
             candidates
-                .entry(crate::kernel::ids::normalize_model_name(
+                .entry(crate::kernel::ids::model_identity_key(
                     &model.upstream_model,
                 ))
                 .and_modify(|candidate| {

@@ -80,6 +80,29 @@ impl Drop for WaiterGuard<'_> {
     }
 }
 
+struct KeyLockLease {
+    key: String,
+    arc: Option<Arc<Mutex<()>>>,
+    locks: Arc<parking_lot::Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    disarmed: bool,
+}
+
+impl Drop for KeyLockLease {
+    fn drop(&mut self) {
+        self.arc.take();
+        if self.disarmed {
+            return;
+        }
+        let mut locks = self.locks.lock();
+        if locks
+            .get(&self.key)
+            .is_some_and(|lock| Arc::strong_count(lock) == 1)
+        {
+            locks.remove(&self.key);
+        }
+    }
+}
+
 impl Drop for ExclusiveRefresh {
     fn drop(&mut self) {
         self.guard.take();
@@ -168,6 +191,12 @@ impl ProviderUsageRefreshGate {
                 .or_insert_with(|| Arc::new(Mutex::new(())))
                 .clone()
         };
+        let mut lease = KeyLockLease {
+            key: key.clone(),
+            arc: Some(key_lock.clone()),
+            locks: Arc::clone(&self.key_locks),
+            disarmed: false,
+        };
         let guard = key_lock.lock_owned().await;
         let permit = self
             .limit
@@ -175,6 +204,7 @@ impl ProviderUsageRefreshGate {
             .acquire_owned()
             .await
             .expect("provider refresh semaphore stays open");
+        lease.disarmed = true;
         ExclusiveRefresh {
             key,
             locks: Arc::clone(&self.key_locks),
@@ -425,6 +455,42 @@ mod tests {
             .await
             .expect("queued refresh finishes after the account lock is released")
             .unwrap();
+        assert_eq!(gate.key_lock_len(), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelled_exclusive_while_waiting_for_a_permit_drops_the_key_lock() {
+        let gate = Arc::new(ProviderUsageRefreshGate::new(1));
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let holder_gate = Arc::clone(&gate);
+        let holder = tokio::spawn(async move {
+            let _refresh = holder_gate.exclusive("balance:holder").await;
+            let _ = entered_tx.send(());
+            let _ = release_rx.await;
+        });
+        entered_rx.await.unwrap();
+        let queued_gate = Arc::clone(&gate);
+        let queued = tokio::spawn(async move {
+            let _refresh = queued_gate.exclusive("balance:A").await;
+        });
+        for _ in 0..50 {
+            if gate.key_lock_holders("balance:A") >= 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            gate.key_lock_holders("balance:A") >= 1,
+            "the waiting refresh should own a key-lock entry"
+        );
+        queued.abort();
+        let _ = queued.await;
+        tokio::task::yield_now().await;
+        assert_eq!(gate.key_lock_holders("balance:A"), 0);
+        release_tx.send(()).unwrap();
+        holder.await.unwrap();
         assert_eq!(gate.key_lock_len(), 0);
     }
 }

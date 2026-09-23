@@ -71,9 +71,15 @@ pub fn normalize_model_name(name: &str) -> String {
 /// Trims and ignores ASCII case. `/`, `_`, spaces, and `-` stay different
 /// names, so `vendor/model` and `vendor-model` are not the same model.
 pub fn model_ids_match(left: &str, right: &str) -> bool {
-    let left = left.trim();
-    let right = right.trim();
-    !left.is_empty() && !right.is_empty() && left.eq_ignore_ascii_case(right)
+    let left = model_identity_key(left);
+    let right = model_identity_key(right);
+    !left.is_empty() && !right.is_empty() && left == right
+}
+
+/// Proxy-list and catalog identity. Trims and folds ASCII case. Separators stay
+/// distinct, so `vendor/model` and `vendor-model` are different keys.
+pub fn model_identity_key(name: &str) -> String {
+    name.trim().to_lowercase()
 }
 
 /// True for the Zen catalog naming contract. The discovered catalog remains

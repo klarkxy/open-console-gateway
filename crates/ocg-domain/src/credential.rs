@@ -11,7 +11,7 @@ use crate::connection::{
 use crate::ids::model_ids_match;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use uuid::Uuid;
 
 #[cfg(feature = "schemars")]
@@ -578,6 +578,45 @@ pub fn assigned_endpoints_for_routes(
             }
         })
         .collect()
+}
+
+/// The single inference URL this credential is allowed to send to.
+///
+/// Zero granted URLs and more than one distinct granted URL are both unknown.
+/// A model-override route is selected only when its endpoint id and origin are
+/// granted; the destination's default URL is not substituted.
+pub fn unique_granted_route_url(
+    connection_id: &ConnectionId,
+    routes: &[RouteSpec],
+    allowed_endpoint_ids: &[String],
+    allowed_origins: &[String],
+) -> Option<String> {
+    let mut urls = BTreeSet::new();
+    for endpoint in assigned_endpoints_for_routes(connection_id, routes) {
+        let Some(url) = endpoint
+            .url
+            .as_deref()
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+        else {
+            continue;
+        };
+        if !allowed_endpoint_ids.iter().any(|id| id == &endpoint.id) {
+            continue;
+        }
+        if !allowed_origins
+            .iter()
+            .any(|origin| origins_equivalent(origin, url))
+        {
+            continue;
+        }
+        urls.insert(url.to_string());
+    }
+    if urls.len() == 1 {
+        urls.into_iter().next()
+    } else {
+        None
+    }
 }
 
 /// Preserve consent to the exact operation and resolved URL when route ordering

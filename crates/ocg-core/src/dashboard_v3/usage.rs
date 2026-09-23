@@ -88,10 +88,11 @@ fn classify_provider_usage_refresh(
             balance_refresh_kind(state, endpoint)
         }
         None => {
-            let endpoint =
-                crate::dynamic::find_runtime(&state.dynamic_providers(), &account.provider_id)
-                    .map(|runtime| runtime.endpoint_url.clone());
-            if endpoint.is_none() {
+            let endpoint = granted_http_balance_endpoint(db, account)?;
+            if endpoint.is_none()
+                && crate::dynamic::find_runtime(&state.dynamic_providers(), &account.provider_id)
+                    .is_none()
+            {
                 return Err(V3ApiError::invalid_request_at(
                     state,
                     "unknown provider offering",
@@ -650,12 +651,50 @@ fn configured_balance_endpoint(
             .map(|config| config.map(|config| config.endpoint_url))
             .map_err(V3ApiError::internal);
     }
-    Ok(db
-        .list_dynamic_providers()
-        .map_err(V3ApiError::internal)?
-        .into_iter()
-        .find(|provider| provider.id == account.provider_id)
-        .map(|provider| provider.endpoint_url))
+    granted_http_balance_endpoint(db, account)
+}
+
+/// Inference URL the current credential is allowed to use for a balance read.
+///
+/// This is the same grant rule as the dashboard: one authorized route URL.
+/// The provider default address is not used when the Key is granted a
+/// different route.
+fn granted_http_balance_endpoint(
+    db: &Database,
+    account: &ModelAccount,
+) -> Result<Option<String>, V3ApiError> {
+    let snapshot =
+        crate::routing_snapshot::RoutingSnapshot::load(db).map_err(V3ApiError::internal)?;
+    let Some(credential) = snapshot
+        .credentials
+        .iter()
+        .find(|credential| credential.id == account.id)
+    else {
+        return Ok(None);
+    };
+    let Some(destination) = snapshot
+        .projection
+        .destinations
+        .iter()
+        .find(|destination| destination.id == credential.destination_id)
+    else {
+        return Ok(None);
+    };
+    if destination.adapter != ocg_domain::destination::AdapterKind::Http {
+        return Ok(None);
+    }
+    let Ok(connection) = serde_json::from_value::<ocg_domain::connection::ConnectionId>(
+        serde_json::Value::String(credential.authorization_connection_id.clone()),
+    ) else {
+        return Ok(None);
+    };
+    let routes = ocg_domain::destination::http_configured_routes(destination);
+    Ok(ocg_domain::credential::unique_granted_route_url(
+        &connection,
+        &routes,
+        &credential.grants.allowed_endpoint_ids,
+        &credential.grants.allowed_origins,
+    ))
 }
 
 fn load_account(db: &Database, state: &CoreState, id: &str) -> Result<ModelAccount, V3ApiError> {

@@ -18,6 +18,17 @@ fn config() -> AppConfig {
 }
 
 #[test]
+fn granted_override_balance_request_targets_that_host() {
+    let deepseek = balance_request_url("https://api.deepseek.com/v1/chat/completions").unwrap();
+    let moonshot = balance_request_url("https://api.moonshot.cn/v1/chat/completions").unwrap();
+    assert!(deepseek.starts_with("https://api.deepseek.com/"));
+    assert!(deepseek.contains("/user/balance"));
+    assert!(moonshot.starts_with("https://api.moonshot.cn/"));
+    assert!(!deepseek.contains("moonshot"));
+    assert!(!moonshot.contains("deepseek"));
+}
+
+#[test]
 fn only_exact_official_hosts_are_balance_capable() {
     assert!(probe_from_endpoint("https://api.deepseek.com/chat/completions").is_some());
     assert!(probe_from_endpoint("https://api.deepseek.com/v1/chat/completions").is_some());
