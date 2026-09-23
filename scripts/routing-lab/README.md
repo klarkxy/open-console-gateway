@@ -14,7 +14,7 @@ Pass a gateway executable. Parent should supply a freshly built CLI when the cur
 node scripts/routing-lab/run.mjs --cli ".\target\debug\ocg-manager-cli.exe"
 ```
 
-`--shadow` sets `OCG_SHADOW_COMPARE=1` on the freshly spawned gateway only. The default launch still strips that variable. Cleanup always stops the PID this script started and verifies listener plus gateway ports are closed. SIGINT/SIGTERM run that same owned cleanup; this lab never broad-kills unrelated processes.
+Cleanup always stops the PID this script started and verifies listener plus gateway ports are closed. SIGINT/SIGTERM run that same owned cleanup; this lab never broad-kills unrelated processes.
 
 ## What it checks
 

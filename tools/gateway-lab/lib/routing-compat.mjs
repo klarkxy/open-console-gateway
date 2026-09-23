@@ -12,20 +12,18 @@ import { selfCheck } from "./lab.mjs";
 import { runCompatibilityScenarios } from "./scenarios-routing.mjs";
 
 function parseArgs(argv) {
-  const args = { shadow: false, cli: null };
+  const args = { cli: null };
   for (let i = 0; i < argv.length; i += 1) {
     const token = argv[i];
-    if (token === "--shadow") args.shadow = true;
-    else if (token === "--cli") args.cli = argv[++i];
+    if (token === "--cli") args.cli = argv[++i];
     else if (token.startsWith("--cli=")) args.cli = token.slice("--cli=".length);
     else if (!token.startsWith("-") && !args.cli) args.cli = token;
   }
   return args;
 }
 
-function replayCommand(cliPath, shadow = false) {
-  const quoted = `"${cliPath}"`;
-  return `node scripts/routing-lab/run.mjs --cli ${quoted}${shadow ? " --shadow" : ""}`;
+function replayCommand(cliPath) {
+  return `node scripts/routing-lab/run.mjs --cli "${cliPath}"`;
 }
 
 export async function runRoutingLab(argv = process.argv.slice(2), { artifactDir } = {}) {
@@ -50,7 +48,6 @@ export async function runRoutingLab(argv = process.argv.slice(2), { artifactDir 
       cliPath,
       profile,
       artifactDir: here,
-      shadow: args.shadow,
       encryptionKey: "routing-lab-dummy-not-a-real-secret",
       register: false,
       onCleanup(fn) {
@@ -74,7 +71,6 @@ export async function runRoutingLab(argv = process.argv.slice(2), { artifactDir 
           listeners: started.listeners,
           dataDir: runtime.dataDir,
           oldLab: runtime.oldLab,
-          shadow: args.shadow,
         },
         null,
         2,
@@ -95,8 +91,7 @@ export async function runRoutingLab(argv = process.argv.slice(2), { artifactDir 
       startedAt,
       evidenceClass: binary.evidenceClass,
       binary,
-      replay: replayCommand(cliPath, args.shadow),
-      shadow: args.shadow,
+      replay: replayCommand(cliPath),
       gateway: { pid: runtime.gatewayPid, url: gatewayBase, port: runtime.gatewayPort, host: "127.0.0.1" },
       listeners: started.listeners,
       dataDir: runtime.dataDir,
@@ -122,8 +117,7 @@ export async function runRoutingLab(argv = process.argv.slice(2), { artifactDir 
       startedAt,
       evidenceClass: binary?.evidenceClass ?? "unknown",
       binary,
-      replay: replayCommand(cliPath, args.shadow),
-      shadow: args.shadow,
+      replay: replayCommand(cliPath),
       passed: collector.counts().PASS,
       failed: collector.counts().FAIL,
       counts: collector.counts(),

@@ -9,7 +9,7 @@ import { FORBIDDEN_PORTS, repoRoot, sha256Buffer } from "./common.mjs";
 
 const ownedChildren = new Map();
 
-export function startHidden(executable, { cwd, stdout, stderr, args, argsPath, shadow = false }) {
+export function startHidden(executable, { cwd, stdout, stderr, args, argsPath }) {
   const resolved = Array.isArray(args)
     ? args
     : JSON.parse(readFileSync(argsPath, "utf8"));
@@ -18,7 +18,6 @@ export function startHidden(executable, { cwd, stdout, stderr, args, argsPath, s
   const argsForSpawn = launchArgs;
   const env = { ...process.env };
   for (const name of ["OCG_MANAGER_ENCRYPTION_KEY", "OCG_GATEWAY_PORT", "OCG_CLIENT_ROOT_URL", "OCG_ADMIN_USERNAME", "OCG_ADMIN_PASSWORD", "OCG_SHADOW_COMPARE"]) delete env[name];
-  if (shadow) env.OCG_SHADOW_COMPARE = "1";
   const out = openSync(stdout, "a");
   const err = openSync(stderr, "a");
   try {

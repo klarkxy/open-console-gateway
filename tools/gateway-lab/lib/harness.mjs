@@ -57,7 +57,6 @@ export async function startGatewayCli({
   dataDir,
   logDir,
   port,
-  shadow = false,
   encryptionKey = "gateway-lab-dummy-not-a-real-secret",
 }) {
   rememberSecret(encryptionKey);
@@ -100,7 +99,7 @@ export async function startGatewayCli({
       2,
     )}\n`,
   );
-  const pid = startHidden(cliPath, { cwd: root, stdout, stderr, args: cliArgs, shadow });
+  const pid = startHidden(cliPath, { cwd: root, stdout, stderr, args: cliArgs });
   return { pid, stdout, stderr, argsPath };
 }
 
@@ -136,7 +135,6 @@ export async function withRuntime({
   cliPath: cliArg,
   profile,
   artifactDir,
-  shadow = false,
   live = null,
   runId,
   encryptionKey,
@@ -205,7 +203,6 @@ export async function withRuntime({
       dataDir,
       logDir,
       port: gatewayPort,
-      shadow,
       encryptionKey,
     });
     gatewayPid = launched.pid;
@@ -288,7 +285,6 @@ export async function smokeCliHelp(cliPath, logDir) {
     stdout: helpStdout,
     stderr: helpStderr,
     argsPath: helpArgsPath,
-    shadow: false,
   });
   await waitFor(
     async () => {

@@ -4,10 +4,8 @@
 //! Dummy keys are explicit test credentials (`dummy-*`). Listeners bind
 //! `127.0.0.1` only and shut down with the harness.
 //!
-//! Shadow compare stays default-off. This binary never mutates process
-//! environment. To replay with shadow, set `OCG_SHADOW_COMPARE=1` in the
-//! launching shell before `cargo test`. Journal asserts still catch extra
-//! origin hits whether shadow is on or off.
+//! This binary never mutates process environment. Journal asserts catch
+//! extra origin hits.
 
 use axum::http::StatusCode;
 use ocg_core::models::{ProxyListDirection, ProxyMode, RoutingMode};

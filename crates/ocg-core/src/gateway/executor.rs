@@ -191,16 +191,6 @@ impl GatewayExecutor {
                     );
                 }
             };
-            crate::gateway::shadow::maybe_compare_execution_routes(
-                &snapshots.routing,
-                &snapshots.config,
-                &parsed,
-                &snapshots.resolved,
-                &client_model,
-                &routing_model,
-                snapshots.cpa_base_url.as_deref(),
-                &route_set,
-            );
             if route_set.routes.is_empty()
                 && !route_set.rejections.is_empty()
                 && route_set.rejections.iter().all(|rejection| {

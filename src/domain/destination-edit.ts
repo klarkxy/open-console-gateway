@@ -37,9 +37,7 @@ export interface DestinationProtocolRouteDraft {
 export interface DestinationEditDraft {
   enabled?: boolean;
   name: string;
-  endpoint_url: string;
-  auth_scheme: AuthSchemeDto;
-  upstream_protocol: ProtocolDto | "";
+  /** First route is the legacy default. Extra routes are additional protocols. */
   protocol_routes: DestinationProtocolRouteDraft[];
   models: DestinationModelDraft[];
 }
@@ -146,29 +144,11 @@ export function destinationDraftRoutes(
   }];
 }
 
-/** Keep the first route identical to the legacy default directory fields. */
-export function syncDraftDefaultRoute(draft: DestinationEditDraft): void {
-  const first = draft.protocol_routes[0] ?? {
-    protocol: draft.upstream_protocol,
-    endpoint_url: draft.endpoint_url,
-    auth_scheme: draft.auth_scheme,
-  };
-  first.protocol = draft.upstream_protocol;
-  first.endpoint_url = draft.endpoint_url;
-  first.auth_scheme = draft.auth_scheme;
-  draft.protocol_routes[0] = first;
-}
-
 export function destinationEditDraft(destination: Destination): DestinationEditDraft {
-  const protocolRoutes = destinationDraftRoutes(destination);
-  const first = protocolRoutes[0];
   return {
     enabled: destination.enabled,
     name: destination.name,
-    endpoint_url: first?.endpoint_url ?? destination.base_url ?? "",
-    auth_scheme: first?.auth_scheme ?? destination.auth_scheme,
-    upstream_protocol: first?.protocol || destination.protocols[0] || "",
-    protocol_routes: protocolRoutes,
+    protocol_routes: destinationDraftRoutes(destination),
     models: destination.catalog.map((model) => ({
       enabled: model.enabled,
       public_model: model.public_model,
@@ -222,7 +202,6 @@ function routeEndpointIssue(value: string): DestinationEditIssue | null {
 function parsedProtocolRoutes(
   draft: DestinationEditDraft,
 ): { protocol: ProtocolDto; endpoint_url: string; auth_scheme: AuthSchemeDto }[] {
-  syncDraftDefaultRoute(draft);
   if (draft.protocol_routes.length > MAX_HTTP_PROTOCOL_ROUTES) {
     throw new DestinationEditError("too_many_protocol_routes");
   }
@@ -261,7 +240,6 @@ export function buildDestinationPatch(
   const models = draft.models.map((model) => {
     const publicModel = model.public_model.trim();
     const upstreamModel = model.upstream_model.trim();
-    if (!publicModel && !upstreamModel) throw new DestinationEditError("missing_public_model");
     if (!publicModel) throw new DestinationEditError("missing_public_model");
     if (!upstreamModel) throw new DestinationEditError("missing_upstream_model");
     const overrideProblem = overrideIssue(model.upstream_override);
@@ -506,7 +484,7 @@ export function addDraftProtocolRoute(draft: DestinationEditDraft): boolean {
   draft.protocol_routes.push({
     protocol,
     endpoint_url: "",
-    auth_scheme: first?.auth_scheme ?? draft.auth_scheme,
+    auth_scheme: first?.auth_scheme ?? "bearer",
   });
   return true;
 }
@@ -533,9 +511,5 @@ export function applyPresetProtocolRoutesToDraft(
     auth_scheme: route.authScheme,
   }));
   const first = draft.protocol_routes[0];
-  if (!first || !isProtocol(first.protocol)) return false;
-  draft.endpoint_url = first.endpoint_url;
-  draft.upstream_protocol = first.protocol;
-  draft.auth_scheme = first.auth_scheme;
-  return true;
+  return Boolean(first && isProtocol(first.protocol));
 }

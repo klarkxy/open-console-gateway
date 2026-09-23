@@ -107,19 +107,26 @@ function credential(overrides: Partial<DestinationCredential> = {}): Destination
   };
 }
 
-function draft(overrides: Partial<DestinationEditDraft> = {}): DestinationEditDraft {
+function draft(overrides: Partial<DestinationEditDraft> & {
+  endpoint_url?: string;
+  auth_scheme?: DestinationEditDraft["protocol_routes"][number]["auth_scheme"];
+  upstream_protocol?: DestinationEditDraft["protocol_routes"][number]["protocol"];
+} = {}): DestinationEditDraft {
+  const { endpoint_url, auth_scheme, upstream_protocol, protocol_routes, ...rest } = overrides;
+  const routes = protocol_routes ?? [{
+    protocol: "chat_completions" as const,
+    endpoint_url: "https://api.lab.example/v1",
+    auth_scheme: "bearer" as const,
+  }];
+  const first = { ...routes[0]! };
+  if (endpoint_url !== undefined) first.endpoint_url = endpoint_url;
+  if (auth_scheme !== undefined) first.auth_scheme = auth_scheme;
+  if (upstream_protocol !== undefined) first.protocol = upstream_protocol;
   return {
     name: "Lab HTTP",
-    endpoint_url: "https://api.lab.example/v1",
-    auth_scheme: "bearer",
-    upstream_protocol: "chat_completions",
-    protocol_routes: [{
-      protocol: "chat_completions",
-      endpoint_url: "https://api.lab.example/v1",
-      auth_scheme: "bearer",
-    }],
+    protocol_routes: [first, ...routes.slice(1)],
     models: [{ public_model: "lab-opus", upstream_model: "vendor/opus", upstream_override: null }],
-    ...overrides,
+    ...rest,
   };
 }
 
@@ -191,9 +198,6 @@ test("draft round-trips the persisted destination including per-model overrides"
   });
   const result = destinationEditDraft(value);
   assert.equal(result.name, "Lab HTTP");
-  assert.equal(result.endpoint_url, "https://api.lab.example/v1");
-  assert.equal(result.auth_scheme, "bearer");
-  assert.equal(result.upstream_protocol, "chat_completions");
   assert.deepEqual(result.protocol_routes, [{
     protocol: "chat_completions",
     endpoint_url: "https://api.lab.example/v1",
@@ -339,16 +343,16 @@ test("duplicate protocols and more than three routes are rejected", () => {
 test("preset protocol routes fill the draft only when applied", () => {
   const next = draft({ endpoint_url: "https://user.example/v1" });
   assert.equal(applyPresetProtocolRoutesToDraft(next, {}), false);
-  assert.equal(next.endpoint_url, "https://user.example/v1");
+  assert.equal(next.protocol_routes[0]?.endpoint_url, "https://user.example/v1");
   assert.equal(applyPresetProtocolRoutesToDraft(next, {
     protocolRoutes: [
       { protocol: "responses", endpointUrl: "https://api.preset.example/v1", authScheme: "bearer" },
       { protocol: "messages", endpointUrl: "https://api.preset.example/anthropic", authScheme: "x_api_key" },
     ],
   }), true);
-  assert.equal(next.endpoint_url, "https://api.preset.example/v1");
-  assert.equal(next.upstream_protocol, "responses");
-  assert.equal(next.auth_scheme, "bearer");
+  assert.equal(next.protocol_routes[0]?.endpoint_url, "https://api.preset.example/v1");
+  assert.equal(next.protocol_routes[0]?.protocol, "responses");
+  assert.equal(next.protocol_routes[0]?.auth_scheme, "bearer");
   assert.equal(next.protocol_routes.length, 2);
 });
 
@@ -447,8 +451,8 @@ test("grant consent attaches only the explicit selection", () => {
 test("route changes reconcile model protocols while metadata edits preserve manual selection", () => {
   const row = destination();
   const draft = destinationEditDraft(row);
-  draft.upstream_protocol = "messages";
-  draft.endpoint_url = "https://api.lab.example/anthropic/v1/messages";
+  draft.protocol_routes[0]!.protocol = "messages";
+  draft.protocol_routes[0]!.endpoint_url = "https://api.lab.example/anthropic/v1/messages";
   const changed = buildDestinationPatch(row, draft).models[0]!;
   assert.deepEqual(changed.protocols, ["messages"]);
   assert.equal(changed.preferred, "messages");

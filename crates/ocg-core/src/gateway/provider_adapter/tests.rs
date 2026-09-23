@@ -32,7 +32,7 @@ fn resolve_route(
     config: &AppConfig,
     plan: &RequestPlan,
 ) -> Result<AttemptSpec, String> {
-    resolve_route_with_dynamics(account, kind(account), config, plan, &[])
+    resolve_account_test_route_with_dynamics(account, kind(account), config, plan, &[])
 }
 
 fn account(
@@ -453,7 +453,7 @@ fn adapter_kind_match_is_exhaustive_and_consistent_with_descriptors() {
 }
 
 #[test]
-fn probe_route_allows_ceiling_without_static_support_production_requires_contract() {
+fn probe_route_reaches_constructible_protocols_without_a_static_table_entry() {
     let config = AppConfig::default();
     let go = account(
         "go-1",
@@ -483,77 +483,6 @@ fn probe_route_allows_ceiling_without_static_support_production_requires_contrac
     )
     .expect("the Dashboard catalog gate admits fetched models before route construction");
     assert_eq!(fetched_model_probe.path, "/v1/messages");
-
-    let now = Utc::now();
-    let scope = crate::provider_contracts::ContractScope::provider(OPENCODE_PROVIDER_ID);
-    let mut persisted = crate::provider_contracts::PersistedContracts::default();
-    persisted.scopes.insert(
-        scope.clone(),
-        crate::provider_contracts::PersistedScopeRow {
-            scope: scope.clone(),
-            catalog_models: vec!["grok-4.5".into()],
-            catalog_refreshed_at: Some(now),
-            catalog_source: "test".into(),
-            catalog_source_url: "https://example.test/models".into(),
-            revision: 1,
-            updated_at: now,
-        },
-    );
-    persisted.evidence.insert(
-        scope.clone(),
-        vec![crate::provider_contracts::PersistedModelProtocol {
-            scope: scope.clone(),
-            model_id: "grok-4.5".into(),
-            protocol: crate::provider::UpstreamProtocolKind::Responses,
-            source: crate::provider_contracts::ContractEvidenceSource::Static,
-            verified_at: None,
-            observed_at: None,
-            last_probe_result: None,
-            last_probe_at: None,
-            last_probe_error: None,
-        }],
-    );
-    let static_contracts = crate::provider_contracts::build_effective_contracts(
-        &crate::zen_models::ZenFreeModelCatalog::default(),
-        &[],
-        persisted.clone(),
-    );
-    assert!(
-        supports_production_plan(&go, kind(&go), &config, &chat_grok, &static_contracts, &[])
-            .is_err(),
-        "official-docs grok-4.5 Chat must stay unverified until a probe succeeds"
-    );
-    assert!(
-        supports_production_plan(
-            &go,
-            kind(&go),
-            &config,
-            &chat_plan("grok-4.5", UpstreamChannel::Go, ApiFormat::Responses, None),
-            &static_contracts,
-            &[],
-        )
-        .is_ok()
-    );
-
-    persisted.evidence.get_mut(&scope).unwrap().push(
-        crate::provider_contracts::PersistedModelProtocol {
-            scope,
-            model_id: "grok-4.5".into(),
-            protocol: crate::provider::UpstreamProtocolKind::ChatCompletions,
-            source: crate::provider_contracts::ContractEvidenceSource::ProbeConfirmed,
-            verified_at: Some(now),
-            observed_at: Some(now),
-            last_probe_result: Some(crate::provider_contracts::ProbeResultKind::Success),
-            last_probe_at: Some(now),
-            last_probe_error: None,
-        },
-    );
-    let probed = crate::provider_contracts::build_effective_contracts(
-        &crate::zen_models::ZenFreeModelCatalog::default(),
-        &[],
-        persisted,
-    );
-    assert!(supports_production_plan(&go, kind(&go), &config, &chat_grok, &probed, &[]).is_ok());
 
     let goat = account(
         "goat-probe-official",
@@ -855,7 +784,7 @@ fn s01_dynamic_override_resolves_configured_route_without_granting_the_key() {
         CredentialKind::ApiKey,
         QuotaScope::Key,
     );
-    let foreign = resolve_route_with_dynamics(
+    let foreign = resolve_account_test_route_with_dynamics(
         &account,
         kind(&account),
         &config,
@@ -879,7 +808,7 @@ fn s01_dynamic_override_resolves_configured_route_without_granting_the_key() {
         Some("https://lab.example/other/v1"),
         ocg_domain::dynamic::DynamicAuthKind::Bearer,
     );
-    let allowed = resolve_route_with_dynamics(
+    let allowed = resolve_account_test_route_with_dynamics(
         &account,
         kind(&account),
         &config,
@@ -911,7 +840,7 @@ fn s01_keyless_dynamic_override_may_use_another_origin() {
         QuotaScope::Key,
     );
     account.key_cipher.clear();
-    let route = resolve_route_with_dynamics(
+    let route = resolve_account_test_route_with_dynamics(
         &account,
         kind(&account),
         &config,
@@ -939,7 +868,7 @@ fn resolve_dispatches_on_caller_adapter_not_account_provider_id() {
     );
     let go_responses = chat_plan("grok-4.5", UpstreamChannel::Go, ApiFormat::Responses, None);
     assert!(
-        resolve_route_with_dynamics(
+        resolve_account_test_route_with_dynamics(
             &go,
             ProviderAdapterKind::OpenCodeGo,
             &config,
@@ -949,7 +878,7 @@ fn resolve_dispatches_on_caller_adapter_not_account_provider_id() {
         .is_ok(),
         "OpenCode Go still serves grok-4.5 Responses when the caller adapter matches"
     );
-    let kimi_err = resolve_route_with_dynamics(
+    let kimi_err = resolve_account_test_route_with_dynamics(
         &go,
         ProviderAdapterKind::KimiCn,
         &config,
@@ -1413,7 +1342,7 @@ fn production_and_probe_deny_unsupported_transport_protocols() {
         CredentialKind::ApiKey,
         QuotaScope::Key,
     );
-    let mapped = resolve_route_with_dynamics(
+    let mapped = resolve_account_test_route_with_dynamics(
         &dynamic,
         kind(&dynamic),
         &config,

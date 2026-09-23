@@ -115,7 +115,6 @@ export async function verifyCommand(flags, positional) {
     cli,
     suite,
     profile: flags.profile || "default",
-    shadow: Boolean(flags.shadow),
   });
   return Number.isInteger(process.exitCode) ? process.exitCode : 0;
 }

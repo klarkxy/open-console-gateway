@@ -76,9 +76,6 @@ function credential(overrides: Partial<DestinationCredential> = {}): Destination
 function draftFor(value: Destination): DestinationEditDraft {
   return {
     name: value.name,
-    endpoint_url: value.base_url ?? "",
-    auth_scheme: value.auth_scheme,
-    upstream_protocol: value.protocols[0] ?? "",
     protocol_routes: [{
       protocol: value.protocols[0] ?? "",
       endpoint_url: value.base_url ?? "",
@@ -107,7 +104,7 @@ test("unchanged draft plans a direct patch", () => {
 test("route change with no keys on the destination plans a direct patch", () => {
   const dest = destination();
   const draft = draftFor(dest);
-  draft.endpoint_url = "https://api.other.example/v1";
+  draft.protocol_routes[0]!.endpoint_url = "https://api.other.example/v1";
   const plan = planDestinationSave(dest, [], draft);
   assert.equal(plan.status, "patch");
 });
@@ -126,7 +123,7 @@ test("route change with keys plans explicit grant consent with coverage flags", 
     destination_id: "dest-1",
   });
   const draft = draftFor(dest);
-  draft.endpoint_url = "https://api.other.example/v1";
+  draft.protocol_routes[0]!.endpoint_url = "https://api.other.example/v1";
   const plan = planDestinationSave(dest, [covered, uncovered], draft);
   assert.equal(plan.status, "grant_consent");
   if (plan.status === "grant_consent") {
@@ -165,7 +162,7 @@ test("keys on other destinations never enter the consent list", () => {
   const dest = destination();
   const elsewhere = credential({ id: "cred-9", destination_id: "dest-2" });
   const draft = draftFor(dest);
-  draft.endpoint_url = "https://api.other.example/v1";
+  draft.protocol_routes[0]!.endpoint_url = "https://api.other.example/v1";
   const plan = planDestinationSave(dest, [elsewhere], draft);
   assert.equal(plan.status, "patch");
 });
@@ -181,7 +178,7 @@ test("invalid drafts surface the semantic issue", () => {
 test("auth scheme change without origin change plans a direct patch", () => {
   const dest = destination();
   const draft = draftFor(dest);
-  draft.auth_scheme = "x_api_key";
+  draft.protocol_routes[0]!.auth_scheme = "x_api_key";
   const plan = planDestinationSave(dest, [credential()], draft);
   assert.equal(plan.status, "patch");
 });
@@ -189,7 +186,7 @@ test("auth scheme change without origin change plans a direct patch", () => {
 test("disabled keys are still listed for consent", () => {
   const dest = destination();
   const draft = draftFor(dest);
-  draft.endpoint_url = "https://api.other.example/v1";
+  draft.protocol_routes[0]!.endpoint_url = "https://api.other.example/v1";
   const plan = planDestinationSave(dest, [credential({ enabled: false })], draft);
   assert.equal(plan.status, "grant_consent");
   if (plan.status === "grant_consent") {

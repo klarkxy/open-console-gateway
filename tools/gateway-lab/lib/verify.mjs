@@ -632,7 +632,7 @@ async function runLiveSuite(runtime, collector, live) {
   }
 }
 
-export async function runVerify({ cli, suite = "local", profile = "default", shadow = false } = {}) {
+export async function runVerify({ cli, suite = "local", profile = "default" } = {}) {
   const suiteName = suite || "local";
   if (!["local", "live", "all"].includes(suiteName)) throw new Error(`unknown suite ${suiteName}`);
   const cliPath = path.resolve(cli || process.env.OCG_GATEWAY_LAB_CLI || defaultCliPath());
@@ -694,7 +694,6 @@ export async function runVerify({ cli, suite = "local", profile = "default", sha
       cliPath,
       profile: loaded,
       artifactDir,
-      shadow,
       live: suiteName === "local" ? null : liveClient,
       runId,
       onCleanup(fn) {
@@ -727,7 +726,6 @@ export async function runVerify({ cli, suite = "local", profile = "default", sha
       evidenceClass: binary?.evidenceClass,
       binary,
       replay: replayVerify(cliPath, suiteName),
-      shadow,
       gateway: { pid: runtime.gatewayPid, url: runtime.gatewayBase, port: runtime.gatewayPort, host: "127.0.0.1" },
       control: runtime.lab.runtime().control,
       listeners: runtime.started.listeners,

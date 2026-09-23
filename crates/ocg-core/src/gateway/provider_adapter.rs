@@ -20,7 +20,6 @@ use crate::provider::{
     MINIMAX_CN_CHAT_COMPLETIONS_PATH, MINIMAX_CN_MESSAGES_PATH, MINIMAX_CN_RESPONSES_PATH,
     ProviderAdapterKind, ProviderRegistry, QuotaScope, UpstreamAuthScheme,
 };
-use crate::provider_contracts::EffectiveContractSet;
 use std::collections::HashMap;
 use std::sync::{LazyLock, RwLock};
 
@@ -474,15 +473,7 @@ fn cpa_transport(base_url: String, upstream: ApiFormat) -> Result<TransportConst
 }
 
 #[derive(Clone, Copy)]
-enum RoutePolicy<'a> {
-    /// Production inference. When `contracts` is present, the effective
-    /// contract (static/preset/probe-confirmed + switches) is required.
-    /// The forwarder keeps the historical three-argument signature and
-    /// still refuses protocols outside the adapter safety ceiling.
-    #[allow(dead_code)] // Account contract policy remains in compatibility tests.
-    Production {
-        contracts: Option<&'a EffectiveContractSet>,
-    },
+enum RoutePolicy {
     /// Explicit admin probe: validate the structural ceiling and construct
     /// the endpoint/auth path without requiring prior verified support.
     Probe,
@@ -490,46 +481,6 @@ enum RoutePolicy<'a> {
     /// (including GOAT and CN routes) while deliberately bypassing normal
     /// availability selection: the dashboard has already locked one account.
     AccountTest,
-}
-
-#[cfg(test)]
-pub(crate) fn supports_production_plan(
-    account: &Account,
-    adapter: ProviderAdapterKind,
-    config: &AppConfig,
-    plan: &RequestPlan,
-    contracts: &EffectiveContractSet,
-    dynamics: &[crate::dynamic::DynamicProviderRuntime],
-) -> Result<(), String> {
-    resolve_route_with_policy(
-        account,
-        adapter,
-        config,
-        plan,
-        RoutePolicy::Production {
-            contracts: Some(contracts),
-        },
-        dynamics,
-    )
-    .map(|_| ())
-}
-
-#[cfg(test)]
-pub(crate) fn resolve_route_with_dynamics(
-    account: &Account,
-    adapter: ProviderAdapterKind,
-    config: &AppConfig,
-    plan: &RequestPlan,
-    dynamics: &[crate::dynamic::DynamicProviderRuntime],
-) -> Result<AttemptSpec, String> {
-    resolve_route_with_policy(
-        account,
-        adapter,
-        config,
-        plan,
-        RoutePolicy::Production { contracts: None },
-        dynamics,
-    )
 }
 
 pub(crate) fn resolve_probe_route(
@@ -563,7 +514,7 @@ fn resolve_route_with_policy(
     adapter: ProviderAdapterKind,
     config: &AppConfig,
     plan: &RequestPlan,
-    policy: RoutePolicy<'_>,
+    policy: RoutePolicy,
     dynamics: &[crate::dynamic::DynamicProviderRuntime],
 ) -> Result<AttemptSpec, String> {
     match adapter {
@@ -591,7 +542,7 @@ fn resolve_open_code_go(
     account: &Account,
     config: &AppConfig,
     plan: &RequestPlan,
-    policy: RoutePolicy<'_>,
+    policy: RoutePolicy,
 ) -> Result<AttemptSpec, String> {
     let descriptor = sealed_descriptor(ProviderAdapterKind::OpenCodeGo)?;
     require_binding(
@@ -614,7 +565,7 @@ fn resolve_zen_free(
     account: &Account,
     config: &AppConfig,
     plan: &RequestPlan,
-    policy: RoutePolicy<'_>,
+    policy: RoutePolicy,
 ) -> Result<AttemptSpec, String> {
     let descriptor = sealed_descriptor(ProviderAdapterKind::ZenFree)?;
     require_binding(
@@ -644,7 +595,7 @@ fn resolve_command_code_goat(
     account: &Account,
     _config: &AppConfig,
     plan: &RequestPlan,
-    policy: RoutePolicy<'_>,
+    policy: RoutePolicy,
 ) -> Result<AttemptSpec, String> {
     let descriptor = sealed_descriptor(ProviderAdapterKind::CommandCodeGoat)?;
     require_binding(
@@ -663,7 +614,7 @@ fn resolve_command_code_goat(
 fn resolve_fixed_provider_plan(
     account: &Account,
     plan: &RequestPlan,
-    policy: RoutePolicy<'_>,
+    policy: RoutePolicy,
     adapter: ProviderAdapterKind,
     label: &str,
     transport: TransportConstruction,
@@ -685,7 +636,7 @@ fn resolve_minimax_cn(
     account: &Account,
     _config: &AppConfig,
     plan: &RequestPlan,
-    policy: RoutePolicy<'_>,
+    policy: RoutePolicy,
 ) -> Result<AttemptSpec, String> {
     resolve_fixed_provider_plan(
         account,
@@ -701,7 +652,7 @@ fn resolve_ollama_cloud(
     account: &Account,
     _config: &AppConfig,
     plan: &RequestPlan,
-    policy: RoutePolicy<'_>,
+    policy: RoutePolicy,
 ) -> Result<AttemptSpec, String> {
     resolve_fixed_provider_plan(
         account,
@@ -717,7 +668,7 @@ fn resolve_kimi_cn(
     account: &Account,
     _config: &AppConfig,
     plan: &RequestPlan,
-    policy: RoutePolicy<'_>,
+    policy: RoutePolicy,
 ) -> Result<AttemptSpec, String> {
     resolve_fixed_provider_plan(
         account,
@@ -733,7 +684,7 @@ fn resolve_configurable_http(
     account: &Account,
     _config: &AppConfig,
     plan: &RequestPlan,
-    policy: RoutePolicy<'_>,
+    _policy: RoutePolicy,
 ) -> Result<AttemptSpec, String> {
     let descriptor = registered_descriptor(ProviderAdapterKind::ConfigurableHttp, account)?;
     require_binding(
@@ -747,22 +698,6 @@ fn resolve_configurable_http(
     let custom = plan.custom_route.as_ref().ok_or_else(|| {
         "Custom API account is missing a persisted endpoint URL and upstream protocol".to_string()
     })?;
-    let protocol = protocol_kind_for(plan.upstream)?;
-    if let RoutePolicy::Production {
-        contracts: Some(contracts),
-    } = policy
-        && !contracts.production_protocol_allowed(
-            account,
-            plan.resolved_alias.as_deref().unwrap_or(&plan.model),
-            protocol,
-        )
-    {
-        return Err(format!(
-            "Custom API has no verified support for public model `{}` over {:?}",
-            plan.resolved_alias.as_deref().unwrap_or(&plan.model),
-            plan.upstream
-        ));
-    }
     Ok(
         configurable_http_transport(&custom.endpoint_url, custom.auth_kind, plan.upstream)?
             .into_spec(
@@ -775,7 +710,7 @@ fn resolve_configurable_http(
 fn resolve_dynamic_http(
     account: &Account,
     plan: &RequestPlan,
-    policy: RoutePolicy<'_>,
+    policy: RoutePolicy,
     dynamics: &[crate::dynamic::DynamicProviderRuntime],
 ) -> Result<AttemptSpec, String> {
     let runtime =
@@ -823,29 +758,12 @@ fn resolve_dynamic_http(
 }
 
 fn resolve_cpa(
-    account: &Account,
+    _account: &Account,
     _config: &AppConfig,
-    plan: &RequestPlan,
-    policy: RoutePolicy<'_>,
+    _plan: &RequestPlan,
+    _policy: RoutePolicy,
 ) -> Result<AttemptSpec, String> {
-    if matches!(policy, RoutePolicy::Probe | RoutePolicy::AccountTest) {
-        return Err("CPA protocol probes and account tests are not available".to_string());
-    }
-    let descriptor = sealed_descriptor(ProviderAdapterKind::Cpa)?;
-    require_binding(
-        account,
-        descriptor.inference.credential_kind,
-        descriptor.inference.quota_scope,
-    )?;
-    if plan.channel != UpstreamChannel::Go {
-        return Err("CPA does not serve the Zen free channel".to_string());
-    }
-    let base_url = plan
-        .upstream_base_override
-        .clone()
-        .ok_or_else(|| "CPA is not configured".to_string())?;
-    Ok(cpa_transport(base_url, plan.upstream)?
-        .into_spec(plan.upstream, credential_handle(account, descriptor)))
+    Err("CPA protocol probes and account tests are not available".to_string())
 }
 
 fn sealed_descriptor(
@@ -889,7 +807,7 @@ fn require_opencode_protocol_policy(
     descriptor: crate::provider::ProviderDescriptor,
     account: &Account,
     plan: &RequestPlan,
-    policy: RoutePolicy<'_>,
+    policy: RoutePolicy,
     label: &str,
 ) -> Result<(), String> {
     let protocol = protocol_kind_for(plan.upstream)?;
@@ -904,21 +822,10 @@ fn require_opencode_protocol_policy(
             // explicit admin probe must reach every constructible protocol
             // endpoint; the static model table is evidence, not an admission
             // gate for freshly fetched catalog models.
-            let _ = (protocol, ceiling, label);
+            let _ = (protocol, ceiling, label, account);
             Ok(())
         }
-        RoutePolicy::Production {
-            contracts: Some(contracts),
-        } => {
-            if !contracts.production_protocol_allowed(account, &plan.model, protocol) {
-                return Err(format!(
-                    "{label} has no verified support for model `{}` over {:?}",
-                    plan.model, plan.upstream
-                ));
-            }
-            Ok(())
-        }
-        RoutePolicy::AccountTest | RoutePolicy::Production { contracts: None } => {
+        RoutePolicy::AccountTest => {
             let opencode_ok = matches!(
                 descriptor.kind,
                 ProviderAdapterKind::OpenCodeGo | ProviderAdapterKind::ZenFree

@@ -24,29 +24,29 @@
           </n-form-item>
           <n-form-item :label="t('API 地址')" class="full-width-field">
             <n-input
-              v-model:value="draft.endpoint_url"
+              v-if="defaultRoute"
+              v-model:value="defaultRoute.endpoint_url"
               :disabled="saving"
               :placeholder="t('推荐填写不带 /v1 的 API 根地址；OCG 会自动补全 /v1 和协议路径。已带 /v1 时不会重复添加。')"
               :input-props="{ 'aria-label': t('API 地址') }"
-              @update:value="onDefaultRouteFieldChange"
             />
           </n-form-item>
           <n-form-item :label="t('鉴权方式')">
             <n-select
-              v-model:value="draft.auth_scheme"
+              v-if="defaultRoute"
+              v-model:value="defaultRoute.auth_scheme"
               :options="authOptions"
               :disabled="saving"
               :aria-label="t('鉴权方式')"
-              @update:value="onDefaultRouteFieldChange"
             />
           </n-form-item>
           <n-form-item :label="t('上游协议')">
             <n-select
-              v-model:value="draft.upstream_protocol"
+              v-if="defaultRoute"
+              v-model:value="defaultRoute.protocol"
               :options="protocolOptions"
               :disabled="saving"
               :aria-label="t('上游协议')"
-              @update:value="onDefaultRouteFieldChange"
             />
           </n-form-item>
           <n-form-item v-if="presetWithRoutes" class="full-width-field">
@@ -254,7 +254,6 @@ import {
   applyPresetProtocolRoutesToDraft,
   destinationEditDraft,
   removeDraftProtocolRoute,
-  syncDraftDefaultRoute,
   unusedDraftProtocol,
   withAuthorizedCredentials,
   type DestinationEditDraft,
@@ -322,6 +321,8 @@ const presetWithRoutes = computed(() => {
   return preset?.protocolRoutes && preset.protocolRoutes.length > 0 ? preset : null;
 });
 
+const defaultRoute = computed(() => draft.value?.protocol_routes[0] ?? null);
+
 const extraProtocolRoutes = computed(() => (
   (draft.value?.protocol_routes ?? []).slice(1).map((route, offset) => ({
     index: offset + 1,
@@ -332,11 +333,6 @@ const extraProtocolRoutes = computed(() => (
 const canAddProtocolRoute = computed(() => (
   Boolean(draft.value && unusedDraftProtocol(draft.value))
 ));
-
-function onDefaultRouteFieldChange(): void {
-  if (!draft.value || saving.value) return;
-  syncDraftDefaultRoute(draft.value);
-}
 
 function addProtocolRoute(): void {
   if (!draft.value || saving.value) return;
@@ -389,8 +385,9 @@ watch(
 
 function addModel(): void {
   if (!draft.value || saving.value) return;
-  const protocol = PROVIDER_PROTOCOLS.includes(draft.value.upstream_protocol as ProtocolDto)
-    ? draft.value.upstream_protocol as ProtocolDto
+  const selected = draft.value.protocol_routes[0]?.protocol ?? "";
+  const protocol = PROVIDER_PROTOCOLS.includes(selected as ProtocolDto)
+    ? selected as ProtocolDto
     : undefined;
   draft.value.models.push({
     enabled: true,
@@ -412,7 +409,7 @@ function setRowRouteMode(row: DestinationModelDraft, mode: string): void {
   if (mode === "override") {
     if (row.upstream_override) return;
     row.upstream_override = {
-      protocol: draft.value.upstream_protocol || "chat_completions",
+      protocol: draft.value.protocol_routes[0]?.protocol || "chat_completions",
       endpoint_url: "",
     };
     return;
