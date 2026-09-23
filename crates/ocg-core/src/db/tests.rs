@@ -1402,6 +1402,80 @@ fn v45_unlink_returns_identity_to_opaque() {
 }
 
 #[test]
+fn unlink_to_unchanged_empty_custom_source_does_not_duplicate_connection() {
+    use crate::platform::{PlatformGroup, PlatformKind};
+
+    let dir = temp_data_dir("platform-unlink-reuses-empty-source");
+    let mut db = open_with_host_cipher(dir.clone()).unwrap();
+    let mut key = account("site-key");
+    key.provider_id = CUSTOM_PROVIDER_ID.into();
+    key.key_cipher = fixture_account_key_cipher();
+    db.create_account_with_contract(
+        &key,
+        Some(&AccountCustomConfigInput {
+            endpoint_url: "https://site.example/chat".into(),
+            upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+        }),
+        &[AccountModelCapabilityInput {
+            public_model: "site-model".into(),
+            upstream_model: "site-model".into(),
+            protocol: UpstreamProtocolKind::ChatCompletions,
+            source: None,
+        }],
+    )
+    .unwrap();
+    let source_id = ocg_domain::destination::destination_id_for_custom_account(&key.id);
+    db.create_platform_account(
+        "site-parent",
+        PlatformKind::NewApi,
+        "Site Parent",
+        "https://site.example/chat/v1",
+        None,
+    )
+    .unwrap();
+    db.link_platform_account(&key.id, "site-parent", &PlatformGroup::default())
+        .unwrap();
+    db.unlink_platform_account(&key.id).unwrap();
+    let destination_id: String = db
+        .conn
+        .query_row(
+            "SELECT destination_id FROM credentials WHERE legacy_account_id = ?1",
+            [&key.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(destination_id, source_id);
+    db.delete_account(&key.id).unwrap();
+    db.delete_platform_account("site-parent").unwrap();
+    let remaining: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM destinations WHERE legacy_kind = 'custom_account'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(remaining, 1);
+    drop(db);
+    let reopened = open_with_host_cipher(dir.clone()).unwrap();
+    let projected = crate::destination_projection::load_persisted(&reopened).unwrap();
+    let custom = projected
+        .destinations
+        .iter()
+        .filter(|row| {
+            matches!(
+                &row.legacy,
+                ocg_domain::destination::LegacyDestinationRef::CustomAccount(_)
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(custom.len(), 1);
+    assert_eq!(custom[0].id, source_id);
+    drop(reopened);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn shared_custom_link_and_unlink_preserve_sibling_connection() {
     use crate::platform::{PlatformGroup, PlatformKind};
 

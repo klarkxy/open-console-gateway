@@ -703,31 +703,38 @@ pub(crate) fn persist_custom_destination_after_unlink(
         }
     }
     let name = credential_name(conn, account_id)?.unwrap_or_else(|| account_id.to_string());
-    // A v58 Custom connection can outlive and be shared by the account whose
-    // id originally named it. Unlinking that owner must not overwrite the
-    // retained source connection used by siblings (or its zero-Key config).
-    // Allocate a fresh connection identity on collision and persist it on the
-    // credential through `upsert_custom_destination` below.
+    // Return to the original connection when it is empty and still points to
+    // the same route. This is the normal Add Key -> link -> unlink path and
+    // avoids creating a second identical zero-Key connection. A shared or
+    // edited source stays untouched; in that case allocate a new identity.
     let mut legacy_owner_id = account_id.to_string();
     let mut destination_id = destination_id_for_custom_account(&legacy_owner_id);
-    while destination_exists(conn, &destination_id)? {
-        legacy_owner_id = uuid::Uuid::new_v4().to_string();
-        destination_id = destination_id_for_custom_account(&legacy_owner_id);
+    let reuse_source =
+        reusable_unlinked_custom_destination(conn, &destination_id, &endpoint, protocol, &models)?;
+    if reuse_source {
+        conn.execute(
+            "UPDATE credentials SET destination_id = ?2 WHERE legacy_account_id = ?1",
+            params![account_id, destination_id],
+        )?;
+    } else {
+        while destination_exists(conn, &destination_id)? {
+            legacy_owner_id = uuid::Uuid::new_v4().to_string();
+            destination_id = destination_id_for_custom_account(&legacy_owner_id);
+        }
+        upsert_custom_destination(
+            conn,
+            account_id,
+            &destination_id,
+            &legacy_owner_id,
+            &name,
+            &endpoint,
+            protocol,
+            &models,
+        )?;
     }
-    upsert_custom_destination(
-        conn,
-        account_id,
-        &destination_id,
-        &legacy_owner_id,
-        &name,
-        &endpoint,
-        protocol,
-        &models,
-    )?;
-    // The unlinked Key now belongs to a fresh Custom connection identity.
-    // Platform endpoint ids (and any ids from a retained shared source) are
-    // not valid for it, so replace the binding grants with this connection's
-    // default route before the transaction commits.
+    // Platform endpoint ids are not valid for the Custom connection, whether
+    // it is the reusable source or a fresh identity. Rebuild the grant from
+    // the saved authorization before committing.
     let connection_id =
         connection_id_for_legacy(LegacyConnectionKind::CustomAccount, &legacy_owner_id);
     let (ids, origins) = if had_old_endpoint && had_new_origin {
@@ -744,6 +751,63 @@ pub(crate) fn persist_custom_destination_after_unlink(
     };
     identity::replace_binding_grants_for_account_on(conn, account_id, &ids, &origins)?;
     Ok(())
+}
+
+fn reusable_unlinked_custom_destination(
+    conn: &Connection,
+    destination_id: &str,
+    endpoint: &str,
+    protocol: UpstreamProtocolKind,
+    models: &[AccountModelCapabilityInput],
+) -> Result<bool> {
+    let source: Option<(Option<String>, String, String)> = conn
+        .query_row(
+            "SELECT base_url, protocols_json, auth_scheme FROM destinations
+             WHERE id = ?1 AND legacy_kind = 'custom_account' AND adapter = 'http'",
+            [destination_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let Some((base_url, protocols_json, auth_scheme)) = source else {
+        return Ok(false);
+    };
+    let protocols: Vec<UpstreamProtocolKind> = serde_json::from_str(&protocols_json)?;
+    let expected_auth_scheme = if protocol == UpstreamProtocolKind::Messages {
+        AuthScheme::XApiKey
+    } else {
+        AuthScheme::Bearer
+    };
+    if base_url.as_deref() != Some(endpoint)
+        || protocols.as_slice() != [protocol]
+        || auth_scheme != expected_auth_scheme.as_str()
+        || !super::destination_store::load_protocol_routes(conn, destination_id)?.is_empty()
+    {
+        return Ok(false);
+    }
+    let override_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM destination_models
+         WHERE destination_id = ?1 AND upstream_override IS NOT NULL",
+        [destination_id],
+        |row| row.get(0),
+    )?;
+    if override_count != 0 {
+        return Ok(false);
+    }
+    let source_models = load_destination_model_inputs(conn, destination_id, true)?;
+    let pairs = |rows: &[AccountModelCapabilityInput]| -> HashSet<(String, String)> {
+        rows.iter()
+            .map(|row| (row.public_model.clone(), row.upstream_model.clone()))
+            .collect()
+    };
+    if pairs(&source_models) != pairs(models) {
+        return Ok(false);
+    }
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM credentials WHERE destination_id = ?1",
+        [destination_id],
+        |row| row.get(0),
+    )?;
+    Ok(count == 0)
 }
 
 fn linked_custom_config(
