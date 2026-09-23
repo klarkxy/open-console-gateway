@@ -2378,6 +2378,7 @@ async function deleteAccount(id: string) {
     removeAccountState(id);
     const destRefreshed = await refreshDestinationProjection("deleted_refresh_failed");
     if (!destRefreshed) notifyDestinationRefreshFailure();
+    void identitiesStore.loadPresented().catch(() => undefined);
     void providersStore.loadConnections().catch(() => undefined);
   } catch (e) {
     if (await recoverAccountMutationConflict(e)) return;

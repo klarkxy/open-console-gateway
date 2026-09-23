@@ -122,10 +122,15 @@ export function selectedQuotaShare(
 ): QuotaShare | null {
   const siblings = sharedQuotaSiblings(identity, accountId);
   if (siblings.length === 0) return null;
-  const names = siblings.map((row) => {
-    const named = nameForAccountId?.(row.legacy.id)?.trim();
-    return named || row.legacy.id;
+  // The account list commits a deletion before the identity overlay reloads.
+  // A missing account name means that sibling has already left the visible
+  // list; never expose its opaque legacy id in the intervening render.
+  const names = siblings.flatMap((row) => {
+    if (!nameForAccountId) return [row.legacy.id];
+    const named = nameForAccountId(row.legacy.id)?.trim();
+    return named ? [named] : [];
   });
+  if (names.length === 0) return null;
   if (names.length === 1) return { kind: "named", name: names[0] };
   return { kind: "count", count: names.length };
 }

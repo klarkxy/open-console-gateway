@@ -432,6 +432,9 @@ test("unnamed siblings fall back to the legacy id, and multiple siblings become 
   assert.deepEqual(selectedQuotaShare(row, "acc-1"), { kind: "count", count: 2 });
   const pair = identity({ credentials: [sharedA, sharedB] });
   assert.deepEqual(selectedQuotaShare(pair, "acc-1"), { kind: "named", name: "acc-2" });
+  assert.equal(selectedQuotaShare(pair, "acc-1", () => null), null);
+  assert.deepEqual(selectedQuotaShare(row, "acc-1", (id) => id === "acc-2" ? "Key B" : null),
+    { kind: "named", name: "Key B" });
 });
 
 test("expiry display uses declared cadence instead of the legacy provider identity", () => {
