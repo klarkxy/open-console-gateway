@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::dynamic::DynamicProviderRuntime;
+use crate::gateway::protocol::CustomRouteSpec;
 use crate::kernel::protocol::ApiFormat;
 use crate::models::Account as ModelAccount;
 use crate::provider::{
@@ -42,7 +43,7 @@ pub(super) async fn test_account_model(
             public_model: &prepared.public_model,
             model_id: &prepared.upstream_model,
             protocol: prepared.protocol,
-            custom_endpoint_url: prepared.custom_endpoint_url.as_deref(),
+            custom_route: prepared.custom_route,
             dynamics: &prepared.dynamics,
         },
     )
@@ -69,7 +70,8 @@ struct PreparedAccountModelTest {
     public_model: String,
     upstream_model: String,
     protocol: UpstreamProtocolKind,
-    custom_endpoint_url: Option<String>,
+    /// Route chosen once here. Later transport construction consumes it.
+    custom_route: Option<CustomRouteSpec>,
     dynamics: Arc<Vec<DynamicProviderRuntime>>,
 }
 
@@ -81,7 +83,7 @@ fn prepare_account_model_test(
     let account = load_model_account(state, id)?;
     let projection = crate::destination_projection::load_runtime(&state.db.lock())
         .map_err(V3ApiError::internal)?;
-    if projection
+    let explicit_destination = projection
         .credentials
         .iter()
         .find(|credential| credential.legacy_account_id == id)
@@ -91,8 +93,11 @@ fn prepare_account_model_test(
                 .iter()
                 .find(|destination| destination.id == credential.destination_id)
         })
-        .is_some_and(|destination| !destination.protocol_routes.is_empty())
-    {
+        .filter(|destination| !destination.protocol_routes.is_empty());
+    if explicit_destination.is_some() {
+        // The account-test send still confirms authorization through the
+        // legacy single-route custom record. Explicit protocol routes are
+        // selected by `http_model_route` on the Providers model test.
         return Err(V3ApiError::invalid_request_at(
             state,
             "this connection has explicit protocol routes; test the selected protocol in Providers",
@@ -121,7 +126,10 @@ fn prepare_account_model_test(
             public_model: model_id.to_string(),
             upstream_model: mapping.upstream_model.clone(),
             protocol: route.protocol,
-            custom_endpoint_url: Some(route.endpoint_url),
+            custom_route: Some(CustomRouteSpec {
+                endpoint_url: route.endpoint_url,
+                auth_kind: runtime.auth_kind,
+            }),
             dynamics,
         });
     }
@@ -130,7 +138,7 @@ fn prepare_account_model_test(
     let adapter = ProviderAdapterKind::from_provider_id(&account.provider_id)
         .ok_or_else(|| V3ApiError::invalid_request_at(state, "unknown provider offering"))?;
 
-    let (protocol, custom_endpoint_url, upstream_model) = if plan_requires_custom_config(plan) {
+    let (protocol, custom_route, upstream_model) = if plan_requires_custom_config(plan) {
         let runtime = state
             .db
             .lock()
@@ -159,7 +167,10 @@ fn prepare_account_model_test(
             .unwrap_or_else(|| runtime.config.endpoint_url.clone());
         (
             capability.protocol,
-            Some(endpoint_url),
+            Some(CustomRouteSpec {
+                endpoint_url,
+                auth_kind: runtime.auth_kind,
+            }),
             capability.upstream_model.clone(),
         )
     } else {
@@ -195,7 +206,7 @@ fn prepare_account_model_test(
         public_model: model_id.to_string(),
         upstream_model,
         protocol,
-        custom_endpoint_url,
+        custom_route,
         dynamics,
     })
 }

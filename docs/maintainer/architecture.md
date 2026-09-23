@@ -15,7 +15,7 @@ ocg-cli     -> ocg-core
 src-tauri   -> ocg-core
 
 ocg-browser-worker   separate process; no internal ocg-* dependency
-Vue SPA              static assets; HTTP Dashboard V3 + V4 only
+Vue SPA              static assets; HTTP Dashboard V4 only
 ```
 
 The **Adapter Registry** is static and sealed. Runtime Provider definitions
@@ -26,7 +26,7 @@ are typed data bound to Configurable HTTP.
 | `ocg-domain` | IDs, `BUILTIN_PROVIDERS`, `ProviderAdapterKind`, protocol tables, typed dynamic definitions | DB, `CoreState`, HTTP clients, filesystem, clocks |
 | `ocg-gateway` | Alias resolution, `AttemptSpec`, classification, selector state machines, no-I/O JSON conversion | DB, `CoreState`, plaintext credentials, outbound HTTP |
 | `ocg-infra` | Key obfuscation, proxy-aware HTTP helpers, inference transport, SQLite log statements | Product catalogs, Dashboard DTOs, routing policy |
-| `ocg-core` | SQLite, `CoreState`, Dashboard V3, adapters, gateway execution, usage sync, Host composition | Runtime plugin loading; adapter-owned DB or HTTP clients |
+| `ocg-core` | SQLite, `CoreState`, Dashboard control plane, adapters, gateway execution, usage sync, Host composition | Runtime plugin loading; adapter-owned DB or HTTP clients |
 | `ocg-cli` / `src-tauri` | Process composition for CLI and Desktop | A second control plane or direct WebView mutation path |
 
 `ocg-domain::credential` holds the identity/credential/binding vocabulary and the single legacy mapper.
@@ -44,8 +44,8 @@ alias, and conversion behavior belongs in the lower crates.
     OpenAI Chat / Responses / Anthropic Messages
     Gemini generateContent / streamGenerateContent
     local GET /v1/models
-  /dashboard/api/v3       current Dashboard control plane
-  /dashboard/api/v4       parallel, additive Dashboard control plane
+  /dashboard/api/v3       410 tombstone
+  /dashboard/api/v4       live Dashboard control plane
   /dashboard/api          preserved auth + browser WS; other REST -> 410 tombstone
   /dashboard/             Vue SPA and assets
 ```

@@ -853,7 +853,7 @@ const destinations = computed(() => destinationsStore.destinations);
 const railDestinations = computed(() => (
   sortProvidersByName(destinations.value.filter(isProvidersRailDestination), (item) => item.name, providerSort.value)
 ));
-const selectedRailKey = computed(() => selectedConnectionId.value ?? selectedDestinationId.value);
+const selectedRailKey = computed(() => selectedDestinationId.value ?? selectedConnectionId.value);
 const lastCommittedConnectionId = ref<string | null>(null);
 const activeTab = ref<ProviderDetailTab>("models");
 const definitionLoading = ref(false);
@@ -1059,7 +1059,7 @@ const railOptions = computed<MenuOption[]>(() => {
     return filtered.map((item) => {
       const joined = connectionForDestination(connections.value, item);
       return {
-        key: railKeyForDestination(item, connections.value),
+        key: railKeyForDestination(item),
         label: item.name,
         icon: () => h(ProviderBrandMark, {
           family: joined
@@ -1090,7 +1090,7 @@ const mobileSelectOptions = computed<SelectOption[]>(() => {
   if (destinations.value.length > 0) {
     return [
       ...railDestinations.value.map((item) => ({
-        value: railKeyForDestination(item, connections.value),
+        value: railKeyForDestination(item),
         label: item.name,
       })),
       { value: ADD_SELECT_VALUE, label: t("添加供应商") },
@@ -1147,9 +1147,9 @@ function writeUrl() {
   if (!currentUrlIsProvidersView()) return;
   const stage = addStage.value;
   const url = applyAppViewSearchParams(new URL(window.location.href), "providers", {
-    ...(selectedConnectionId.value ? { connection: selectedConnectionId.value } : {}),
-    ...(!selectedConnectionId.value && selectedDestinationId.value
-      ? { destination: selectedDestinationId.value }
+    ...(selectedDestinationId.value ? { destination: selectedDestinationId.value } : {}),
+    ...(!selectedDestinationId.value && selectedConnectionId.value
+      ? { connection: selectedConnectionId.value }
       : {}),
     ...(stage
       ? providerAddStageToQuery(stage)
@@ -1229,7 +1229,7 @@ function selectConnection(key: string | number) {
   if (inlineFormBusy.value || addKeyBusy.value) return;
   const railKey = String(key);
   const dest = destinations.value.find((row) => (
-    railKeyForDestination(row, connections.value) === railKey
+    railKeyForDestination(row) === railKey
   ));
   if (dest) {
     addStage.value = null;

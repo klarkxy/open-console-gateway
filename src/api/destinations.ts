@@ -12,7 +12,6 @@
 import {
   dashboardV4,
   type DestinationCatalogUpdate,
-  type HttpProtocolRouteDto,
 } from "./dashboard-v4.ts";
 import type { WithoutExpectation } from "./dashboard-v3.ts";
 import type { MutationExpectation } from "./generated/dashboard-v3.ts";
@@ -219,13 +218,7 @@ export interface RoutingCardListSnapshot {
 export type RoutingCardLayoutInput = WithoutExpectation<RoutingCardUpdate>;
 
 /** Presented body of a destination PATCH; the CAS pair is supplied per attempt. */
-export type DestinationPatchInput = Omit<WithoutExpectation<DestinationPatchRequest>, "models"> & {
-  protocolRoutes?: HttpProtocolRouteDto[];
-  models: Array<DestinationPatchRequest["models"][number] & {
-    protocols?: ProtocolDto[];
-    preferred?: ProtocolDto;
-  }>;
-};
+export type DestinationPatchInput = WithoutExpectation<DestinationPatchRequest>;
 
 export type DestinationCatalogUpdateInput = DestinationCatalogUpdate;
 
@@ -330,7 +323,7 @@ function presentCatalogModel(value: CatalogModelDto): DestinationCatalogModel {
 }
 
 function presentProtocolRoutes(value: DestinationDto): DestinationProtocolRoute[] {
-  const routes = (value as DestinationDto & { protocolRoutes?: HttpProtocolRouteDto[] }).protocolRoutes;
+  const routes = value.protocolRoutes;
   if (!Array.isArray(routes)) return [];
   return routes.map((route) => ({
     protocol: route.protocol,

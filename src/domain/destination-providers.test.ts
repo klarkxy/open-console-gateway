@@ -109,12 +109,11 @@ test("destination filtering matches connection identity", () => {
   assert.deepEqual(filterDestinations(rows, "opencode").map((row) => row.id), ["go"]);
 });
 
-test("rail key prefers the joined connection id", () => {
+test("rail key is the destination id even when a connection join exists", () => {
   const dest = destination("dest-go", { legacy: { kind: "builtin", id: "opencode" } });
   const platform = destination("dest-site", { legacy: { kind: "platform_parent", id: "site-1" } });
-  const rows = [connection({ id: "c-go", legacy: { kind: "builtin_provider", id: "opencode" } })];
-  assert.equal(railKeyForDestination(dest, rows), "c-go");
-  assert.equal(railKeyForDestination(platform, rows), "dest-site");
+  assert.equal(railKeyForDestination(dest), "dest-go");
+  assert.equal(railKeyForDestination(platform), "dest-site");
   assert.equal(isProvidersRailDestination(dest), true);
   assert.equal(isProvidersRailDestination(platform), false);
 });

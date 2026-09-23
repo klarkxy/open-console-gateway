@@ -14,7 +14,7 @@ ocg-cli     -> ocg-core
 src-tauri   -> ocg-core
 
 ocg-browser-worker   独立进程；不依赖内部 ocg-* crate
-Vue SPA              静态资源；只走 HTTP Dashboard V3 + V4
+Vue SPA              静态资源；只走 HTTP Dashboard V4
 ```
 
 **Adapter Registry** 静态密封。运行时 Provider 定义是绑定 Configurable HTTP 的
@@ -25,7 +25,7 @@ Vue SPA              静态资源；只走 HTTP Dashboard V3 + V4
 | `ocg-domain` | ID、`BUILTIN_PROVIDERS`、`ProviderAdapterKind`、协议表、类型化动态定义 | DB、`CoreState`、HTTP client、文件系统、时钟 |
 | `ocg-gateway` | Alias 解析、`AttemptSpec`、分类、selector 状态机、无 I/O JSON 转换 | DB、`CoreState`、明文凭据、出站 HTTP |
 | `ocg-infra` | Key 混淆、代理感知 HTTP helper、推理传输、SQLite 日志语句 | 产品目录、Dashboard DTO、路由策略 |
-| `ocg-core` | SQLite、`CoreState`、Dashboard V3、适配器、Gateway 执行、用量同步、Host 组合 | 运行时插件加载；适配器自持 DB 或 HTTP client |
+| `ocg-core` | SQLite、`CoreState`、Dashboard 控制面、适配器、Gateway 执行、用量同步、Host 组合 | 运行时插件加载；适配器自持 DB 或 HTTP client |
 | `ocg-cli` / `src-tauri` | CLI 与 Desktop 进程组合 | 第二套控制面或 WebView 直接变更路径 |
 
 `ocg-domain::credential` 持有身份/凭据/绑定词汇以及唯一的遗留映射器。
@@ -43,8 +43,8 @@ Vue SPA              静态资源；只走 HTTP Dashboard V3 + V4
     OpenAI Chat / Responses / Anthropic Messages
     Gemini generateContent / streamGenerateContent
     本地 GET /v1/models
-  /dashboard/api/v3       当前 Dashboard 控制面
-  /dashboard/api/v4       并行、仅增量的 Dashboard 控制面
+  /dashboard/api/v3       410 墓碑
+  /dashboard/api/v4       当前唯一的 Dashboard 控制面
   /dashboard/api          保留 auth + browser WS；其余 REST -> 410 墓碑
   /dashboard/             Vue SPA 与静态资源
 ```

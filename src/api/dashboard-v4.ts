@@ -9,11 +9,9 @@
 import { requestV4, withExpectation, type WithoutExpectation } from "./dashboard-v3.ts";
 import type { MutationExpectation } from "./generated/dashboard-v3.ts";
 import type {
-  AuthSchemeDto,
   BindingPatchRequest,
   BindingPatchResult,
   ConnectionList,
-  ControlRevision,
   CredentialList,
   DestinationList,
   AliasPublication,
@@ -24,12 +22,16 @@ import type {
   CpaCatalogUpdate,
   CredentialRotateRequest,
   CredentialRotateResult,
+  DestinationCatalogModelUpdate,
+  DestinationCatalogUpdate as DestinationCatalogUpdateDto,
   DestinationDeleteResult,
+  DestinationModelTestResult,
   DestinationPatchRequest,
   DestinationPatchResult,
   DestinationCatalogRefreshResult,
   DshApplication,
   DshApplicationInstallRequest,
+  HttpProtocolRouteDto,
   IdentityCredentialCreateRequest,
   IdentityCredentialCreateResult,
   IdentityList,
@@ -45,38 +47,19 @@ import type {
   TemplateList,
 } from "./generated/dashboard-v4.ts";
 
-export type { QuotaRecoveryDto, QuotaRetryResult };
+export type {
+  DestinationCatalogModelUpdate,
+  DestinationModelTestResult,
+  HttpProtocolRouteDto,
+  QuotaRecoveryDto,
+  QuotaRetryResult,
+};
 
 /**
- * Additive catalog DTOs. `generated/dashboard-v4.ts` does not include these
- * until PRIMARY regenerates the contract; keep them here instead of editing
- * generated files.
+ * Catalog write body without CAS. Callers pass this business input; the
+ * client attaches `expectedRevision` and `processGeneration` per attempt.
  */
-export interface HttpProtocolRouteDto {
-  protocol: ProtocolDto;
-  endpointUrl: string;
-  authScheme: AuthSchemeDto;
-}
-
-export interface DestinationCatalogModelUpdate {
-  publicModel: string;
-  enabled?: boolean;
-  protocols?: ProtocolDto[];
-  preferred?: ProtocolDto;
-}
-
-export interface DestinationCatalogUpdate {
-  updates: DestinationCatalogModelUpdate[];
-  removeModels?: string[];
-}
-
-export interface DestinationModelTestResult {
-  revision: ControlRevision;
-  publicModel: string;
-  protocol: ProtocolDto;
-  ok: boolean;
-  error?: string | null;
-}
+export type DestinationCatalogUpdate = WithoutExpectation<DestinationCatalogUpdateDto>;
 
 export const dashboardV4 = {
   getTemplates: () => requestV4<TemplateList>("/templates"),

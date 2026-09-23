@@ -20,7 +20,9 @@ use crate::provider::{
     MINIMAX_CN_CHAT_COMPLETIONS_PATH, MINIMAX_CN_MESSAGES_PATH, MINIMAX_CN_RESPONSES_PATH,
     ProviderAdapterKind, ProviderRegistry, QuotaScope, UpstreamAuthScheme,
 };
+#[cfg(debug_assertions)]
 use std::collections::HashMap;
+#[cfg(debug_assertions)]
 use std::sync::{LazyLock, RwLock};
 
 /// Construct transport from explicit destination facts after catalog protocol
@@ -124,26 +126,35 @@ pub fn command_code_goat_loopback_base(origin: &str) -> String {
     format!("{}/provider/v1", origin.trim_end_matches('/'))
 }
 
+/// Loopback substitutes exist only in non-release builds so integration tests
+/// can link them. Release transport uses the official origins and does not
+/// read these tables. `cfg(test)` would hide them from integration tests,
+/// which link the library without that cfg.
+#[cfg(debug_assertions)]
 #[derive(Debug, Clone)]
 struct GoatLoopbackRoute {
     origin: String,
 }
 
+#[cfg(debug_assertions)]
 static GOAT_LOOPBACK_ROUTES: LazyLock<RwLock<HashMap<String, GoatLoopbackRoute>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
+#[cfg(debug_assertions)]
 static OLLAMA_LOOPBACK_ROUTES: LazyLock<RwLock<HashMap<String, String>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
 /// RAII guard for the integration-only Ollama Cloud seam. The production
 /// adapter always uses the fixed `https://ollama.com` origin; without a live
 /// guard, tests cannot reach a fake upstream.
+#[cfg(debug_assertions)]
 #[doc(hidden)]
 pub struct OllamaCloudLoopbackRouteGuard {
     account_id: String,
     origin: String,
 }
 
+#[cfg(debug_assertions)]
 impl Drop for OllamaCloudLoopbackRouteGuard {
     fn drop(&mut self) {
         if let Ok(mut routes) = OLLAMA_LOOPBACK_ROUTES.write()
@@ -160,6 +171,7 @@ impl Drop for OllamaCloudLoopbackRouteGuard {
 /// tests. Path, protocol, Bearer auth, and the wire normalization marker come
 /// from the official Ollama Cloud contract; this cannot configure a remote
 /// production endpoint.
+#[cfg(debug_assertions)]
 #[doc(hidden)]
 pub fn install_ollama_cloud_loopback_route_for_test(
     account_id: impl Into<String>,
@@ -180,6 +192,7 @@ pub fn install_ollama_cloud_loopback_route_for_test(
     Ok(guard)
 }
 
+#[cfg(debug_assertions)]
 fn ollama_cloud_base_url_for_id(account_id: &str) -> Result<String, String> {
     let routes = OLLAMA_LOOPBACK_ROUTES
         .read()
@@ -190,18 +203,25 @@ fn ollama_cloud_base_url_for_id(account_id: &str) -> Result<String, String> {
         .unwrap_or_else(|| OLLAMA_CLOUD_BASE_URL.to_string()))
 }
 
+#[cfg(not(debug_assertions))]
+fn ollama_cloud_base_url_for_id(_account_id: &str) -> Result<String, String> {
+    Ok(OLLAMA_CLOUD_BASE_URL.to_string())
+}
+
 #[cfg(debug_assertions)]
 #[doc(hidden)]
 pub use crate::goat::{GoatCatalogOriginGuard, install_goat_catalog_origin_for_test};
 
 /// RAII guard for the integration-only GOAT seam. The production adapter has
 /// no endpoint or protocol guesses: without a live guard, GOAT is unsupported.
+#[cfg(debug_assertions)]
 #[doc(hidden)]
 pub struct GoatLoopbackRouteGuard {
     account_id: String,
     base_url: String,
 }
 
+#[cfg(debug_assertions)]
 impl Drop for GoatLoopbackRouteGuard {
     fn drop(&mut self) {
         if let Ok(mut routes) = GOAT_LOOPBACK_ROUTES.write()
@@ -217,6 +237,7 @@ impl Drop for GoatLoopbackRouteGuard {
 /// Installs a loopback-only origin substitute used by gateway integration tests.
 /// Models, protocol, path, and Bearer auth come from the official Command Code
 /// contract; this cannot configure a remote production endpoint.
+#[cfg(debug_assertions)]
 #[doc(hidden)]
 pub fn install_goat_loopback_route_for_test(
     account_id: impl Into<String>,
@@ -383,6 +404,7 @@ fn zen_free_transport(
     )
 }
 
+#[cfg(debug_assertions)]
 fn goat_base_url_for(account_id: &str) -> Result<String, String> {
     let routes = GOAT_LOOPBACK_ROUTES
         .read()
@@ -391,6 +413,11 @@ fn goat_base_url_for(account_id: &str) -> Result<String, String> {
         || COMMAND_CODE_GOAT_BASE_URL.to_string(),
         |route| command_code_goat_loopback_base(&route.origin),
     ))
+}
+
+#[cfg(not(debug_assertions))]
+fn goat_base_url_for(_account_id: &str) -> Result<String, String> {
+    Ok(COMMAND_CODE_GOAT_BASE_URL.to_string())
 }
 
 fn goat_transport(account_id: &str, upstream: ApiFormat) -> Result<TransportConstruction, String> {
@@ -526,6 +553,11 @@ fn resolve_route_with_policy(
         ProviderAdapterKind::MiniMaxCn => resolve_minimax_cn(account, config, plan, policy),
         ProviderAdapterKind::KimiCn => resolve_kimi_cn(account, config, plan, policy),
         ProviderAdapterKind::OllamaCloud => resolve_ollama_cloud(account, config, plan, policy),
+        ProviderAdapterKind::ConfigurableHttp
+            if matches!(policy, RoutePolicy::AccountTest) && plan.custom_route.is_some() =>
+        {
+            resolve_prepared_http(account, plan)
+        }
         ProviderAdapterKind::ConfigurableHttp
             if crate::dynamic::find_runtime(dynamics, &account.provider_id).is_some() =>
         {
@@ -677,6 +709,27 @@ fn resolve_kimi_cn(
         ProviderAdapterKind::KimiCn,
         "Kimi Code CN",
         kimi_cn_transport(plan.upstream)?,
+    )
+}
+
+/// Account tests already chose the endpoint and auth. This builds transport
+/// from that route and does not look the mapping up again.
+fn resolve_prepared_http(account: &Account, plan: &RequestPlan) -> Result<AttemptSpec, String> {
+    if plan.channel != UpstreamChannel::Go {
+        return Err("Custom API does not serve the Zen free channel".to_string());
+    }
+    let custom = plan.custom_route.as_ref().ok_or_else(|| {
+        "Custom API account is missing a persisted endpoint URL and upstream protocol".to_string()
+    })?;
+    if custom.auth_kind.requires_key() && account.key_cipher.trim().is_empty() {
+        return Err(format!("account `{}` has no stored Key", account.name));
+    }
+    Ok(
+        configurable_http_transport(&custom.endpoint_url, custom.auth_kind, plan.upstream)?
+            .into_spec(
+                plan.upstream,
+                http_credential(&account.id, custom.auth_kind),
+            ),
     )
 }
 
@@ -889,6 +942,7 @@ fn require_binding(
     Ok(())
 }
 
+#[cfg(debug_assertions)]
 fn ensure_loopback_base(base_url: &str) -> Result<(), String> {
     let url = reqwest::Url::parse(base_url).map_err(|error| error.to_string())?;
     if url.scheme() != "http"

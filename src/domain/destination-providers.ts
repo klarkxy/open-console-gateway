@@ -58,10 +58,13 @@ export function filterDestinations(
   ));
 }
 
-/** Rail / URL key: connection id when a join exists, else the destination id. */
+/**
+ * Providers navigation key. Always the destination id.
+ * Old `connection` and `provider` query params are converted once at page entry.
+ * Writes that still need a connection id use `connectionForDestination`.
+ */
 export function railKeyForDestination(
-  destination: Destination,
-  connections: readonly Connection[],
+  destination: Pick<Destination, "id">,
 ): string {
-  return connectionForDestination(connections, destination)?.id ?? destination.id;
+  return destination.id;
 }

@@ -223,7 +223,10 @@ async fn stored_key_probe_does_not_send_to_ungranted_destination() {
         public_model: "local-custom",
         model_id: "local-custom",
         protocol: UpstreamProtocolKind::ChatCompletions,
-        custom_endpoint_url: Some(&endpoint),
+        custom_route: Some(crate::gateway::protocol::CustomRouteSpec {
+            endpoint_url: endpoint.clone(),
+            auth_kind: ocg_domain::dynamic::DynamicAuthKind::Bearer,
+        }),
         dynamics: &[],
     })
     .await
@@ -276,7 +279,10 @@ async fn stored_key_probe_does_not_send_to_ungranted_destination() {
         public_model: "local-custom",
         model_id: "local-custom",
         protocol: UpstreamProtocolKind::ChatCompletions,
-        custom_endpoint_url: Some(&endpoint),
+        custom_route: Some(crate::gateway::protocol::CustomRouteSpec {
+            endpoint_url: endpoint.clone(),
+            auth_kind: ocg_domain::dynamic::DynamicAuthKind::Bearer,
+        }),
         dynamics: &[],
     })
     .await
@@ -382,7 +388,7 @@ async fn stored_key_probe_honors_cleared_sealed_endpoint_grant() {
         public_model: "deepseek-v4-flash",
         model_id: "deepseek-v4-flash",
         protocol: UpstreamProtocolKind::ChatCompletions,
-        custom_endpoint_url: None,
+        custom_route: None,
         dynamics: &[],
     })
     .await
@@ -425,7 +431,7 @@ async fn stored_key_probe_honors_cleared_sealed_endpoint_grant() {
         public_model: "deepseek-v4-flash",
         model_id: "deepseek-v4-flash",
         protocol: UpstreamProtocolKind::ChatCompletions,
-        custom_endpoint_url: None,
+        custom_route: None,
         dynamics: &[],
     })
     .await

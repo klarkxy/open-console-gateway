@@ -151,53 +151,21 @@ pub(crate) struct AccountModelTestInput<'a> {
     pub public_model: &'a str,
     pub model_id: &'a str,
     pub protocol: UpstreamProtocolKind,
-    pub custom_endpoint_url: Option<&'a str>,
+    /// Route already chosen by preparation. Absent for sealed adapters.
+    pub custom_route: Option<CustomRouteSpec>,
     pub dynamics: &'a [crate::dynamic::DynamicProviderRuntime],
 }
 
 pub(crate) async fn execute_account_model_test(
     input: AccountModelTestInput<'_>,
 ) -> Result<u16, (Option<u16>, String)> {
-    let custom_auth_kind = if input.account.provider_id == ocg_domain::ids::CUSTOM_PROVIDER_ID {
-        input
-            .state
-            .db
-            .lock()
-            .list_custom_account_runtimes()
-            .ok()
-            .and_then(|runtimes| {
-                runtimes
-                    .into_iter()
-                    .find(|runtime| runtime.account_id == input.account.id)
-                    .map(|runtime| runtime.auth_kind)
-            })
-    } else {
-        crate::dynamic::find_runtime(input.dynamics, &input.account.provider_id)
-            .map(|runtime| runtime.auth_kind)
-    }
-    .unwrap_or_else(
-        || match crate::custom_http::custom_auth_scheme(input.protocol) {
-            crate::provider::UpstreamAuthScheme::Bearer => {
-                ocg_domain::dynamic::DynamicAuthKind::Bearer
-            }
-            crate::provider::UpstreamAuthScheme::XApiKey => {
-                ocg_domain::dynamic::DynamicAuthKind::XApiKey
-            }
-        },
-    );
-    let custom_route = input
-        .custom_endpoint_url
-        .map(|endpoint_url| CustomRouteSpec {
-            endpoint_url: endpoint_url.to_string(),
-            auth_kind: custom_auth_kind,
-        });
     let ctx = ProtocolProbeContext {
         state: input.state,
         config: input.config,
         accounts: std::slice::from_ref(input.account),
         adapter: input.adapter,
         model_id: input.model_id,
-        custom_route,
+        custom_route: input.custom_route.clone(),
         now: chrono::Utc::now(),
     };
     execute_protocol_request(
