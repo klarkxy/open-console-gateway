@@ -760,9 +760,12 @@ export async function runRustPriceAndFree(collector) {
 }
 
 export async function runAuthIsolation(runtime, collector) {
-  const { lab, gatewayBase, gatewayKey } = runtime;
+  const { lab, gatewayBase, gatewayKey, api } = runtime;
   const chat = protocolSlotsOf(runtime.started).find((slot) => slot.slot === "chat");
   const responses = protocolSlotsOf(runtime.started).find((slot) => slot.slot === "responses");
+  // Prior scenarios can leave a temporary 429 cooldown on this exact Key.
+  // The isolation case must reach the scripted upstream once.
+  await api.resetCooldowns([chat.accountId]);
   lab.scriptIsolation(
     { endpointId: chat.id || chat.slot, keyFingerprint: sha256(chat.secret), model: chat.model, scenario: "" },
     [{ kind: "http", status: 429, body: { error: { message: "isolated" } } }],
@@ -771,9 +774,9 @@ export async function runAuthIsolation(runtime, collector) {
     const mark = lab.snapshot().length;
     const blocked = await request(gatewayBase, "/v1/chat/completions", "POST", input("chat", chat.publicModel, false), inferenceHeaders("chat", gatewayKey));
     const other = await request(gatewayBase, "/v1/responses", "POST", input("responses", responses.publicModel, false), inferenceHeaders("responses", gatewayKey));
-    // An unclassified upstream 429 excludes this candidate for the request;
-    // exhausting its route returns 503 without inventing a quota reset.
-    assert.equal(blocked.status, 503, await blocked.text());
+    // An upstream 429 excludes only this Key and returns its temporary
+    // Retry-After when no other candidate can serve this model.
+    assert.equal(blocked.status, 429, await blocked.text());
     assert.equal(other.status, 200, await other.text());
     const hits = lab.snapshot().slice(mark);
     assert.equal(hits.length, 2, "each isolated endpoint must receive exactly one request");
