@@ -673,8 +673,8 @@ pub fn extract_usage(format: ApiFormat, payload: &Value, _model_hint: Option<&st
     };
     match format {
         ApiFormat::ChatCompletions => UsageCounts {
-            input_tokens: uint(&usage, "prompt_tokens"),
-            output_tokens: uint(&usage, "completion_tokens"),
+            input_tokens: uint(usage, "prompt_tokens"),
+            output_tokens: uint(usage, "completion_tokens"),
             cached_tokens: usage
                 .pointer("/prompt_tokens_details/cached_tokens")
                 .or_else(|| usage.get("prompt_cache_hit_tokens"))
@@ -686,10 +686,10 @@ pub fn extract_usage(format: ApiFormat, payload: &Value, _model_hint: Option<&st
             let cached = uint(usage, "cache_read_input_tokens");
             let created = uint(usage, "cache_creation_input_tokens");
             UsageCounts {
-                input_tokens: uint(&usage, "input_tokens")
+                input_tokens: uint(usage, "input_tokens")
                     .saturating_add(cached)
                     .saturating_add(created),
-                output_tokens: uint(&usage, "output_tokens"),
+                output_tokens: uint(usage, "output_tokens"),
                 cached_tokens: cached,
                 cache_creation_tokens: created,
             }

@@ -390,7 +390,7 @@ impl UsageSyncRuntime {
     pub(crate) fn reactive_refresh_enabled(&self) -> bool {
         #[cfg(debug_assertions)]
         {
-            return self.reactive_enabled_for_test.load(Ordering::Relaxed);
+            self.reactive_enabled_for_test.load(Ordering::Relaxed)
         }
         #[cfg(not(debug_assertions))]
         {
@@ -444,10 +444,6 @@ impl UsageSyncRuntime {
             .as_ref()
             .map(|jitter| jitter().clamp(0.0, 1.0))
             .unwrap_or_else(random_jitter01)
-    }
-
-    fn wake(&self) {
-        self.wake.notify_one();
     }
 
     fn wake_handle(&self) -> Arc<Notify> {
@@ -1118,10 +1114,10 @@ async fn execute_official_usage_refresh(
     let usage = {
         let committed: anyhow::Result<Option<UsageWindow>> = state
             .with_authorized_sync_store(authorization, |store| {
-                if let Some(identity) = &identity {
-                    if !store.usage_identity_is_current(identity)? {
-                        return Ok(None);
-                    }
+                if let Some(identity) = &identity
+                    && !store.usage_identity_is_current(identity)?
+                {
+                    return Ok(None);
                 }
                 let usage = store.commit_official_usage_sync_success(
                     account_id,
@@ -1211,10 +1207,10 @@ fn record_attempt_failure_guarded(
     let jitter = state.usage_runtime().jitter01();
     state
         .with_authorized_sync_store(authorization, |store| {
-            if let Some(identity) = identity {
-                if !store.usage_identity_is_current(identity).unwrap_or(false) {
-                    return;
-                }
+            if let Some(identity) = identity
+                && !store.usage_identity_is_current(identity).unwrap_or(false)
+            {
+                return;
             }
             let current = store.account_usage_sync_state(account_id).ok().flatten();
             let streak = current.as_ref().map(|s| s.failure_streak).unwrap_or(0) + 1;

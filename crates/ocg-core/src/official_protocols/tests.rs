@@ -26,7 +26,7 @@ fn go_endpoint_table_maps_documented_paths() {
         Some(&UpstreamProtocolKind::ChatCompletions)
     );
     assert_eq!(map.get("minimax-m3"), Some(&UpstreamProtocolKind::Messages));
-    let baseline = OfficialProtocolBaseline::mapped(map.into_iter());
+    let baseline = OfficialProtocolBaseline::mapped(map);
     assert_eq!(
         baseline.protocols_for("opencode", "mimo-v2.6-flash"),
         Some(vec![UpstreamProtocolKind::ChatCompletions])

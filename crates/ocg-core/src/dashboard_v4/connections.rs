@@ -61,7 +61,7 @@ fn list_connections_locked(state: &CoreState) -> Result<ConnectionList, V3ApiErr
             .map_err(V3ApiError::internal)?;
         let projection = crate::destination_projection::read_v4_projection(&db)
             .map_err(V3ApiError::internal)?
-            .map_err(|_| V3ApiError::conflict_at(&state, "destination projection refused"))?;
+            .map_err(|_| V3ApiError::conflict_at(state, "destination projection refused"))?;
         let mut verification = HashMap::new();
         for account in &accounts {
             if let Some(row) = db

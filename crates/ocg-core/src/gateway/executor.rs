@@ -340,7 +340,7 @@ impl GatewayExecutor {
                             let cooldown = credential
                                 .cooldown_ends_at_for(route.routing.channel, decision_wall);
                             let quota = (!credential.quota_probe)
-                                .then(|| credential.quota_recovery.as_ref())
+                                .then_some(credential.quota_recovery.as_ref())
                                 .flatten()
                                 .and_then(|recovery| {
                                     (recovery.next_retry_at > decision_wall)

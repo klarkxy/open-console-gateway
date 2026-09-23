@@ -436,7 +436,7 @@ fn chat_to_responses_rejects_stop_and_preserves_service_tier_and_order() {
         .filter_map(|item| item.get("type").and_then(Value::as_str))
         .collect();
     assert_eq!(types.first().copied(), Some("message"));
-    assert!(types.iter().any(|kind| *kind == "function_call"));
+    assert!(types.contains(&"function_call"));
     let message_at = types.iter().position(|kind| *kind == "message").unwrap();
     let call_at = types
         .iter()

@@ -242,15 +242,6 @@ impl RoutingRuntime {
     }
 }
 
-#[cfg(test)]
-pub(crate) fn account_is_available_for(
-    account: &Account,
-    channel: UpstreamChannel,
-    exclude_ids: &[&str],
-) -> bool {
-    account_is_available_for_at(account, channel, exclude_ids, Utc::now())
-}
-
 pub(crate) fn account_is_available_for_at(
     account: &Account,
     channel: UpstreamChannel,

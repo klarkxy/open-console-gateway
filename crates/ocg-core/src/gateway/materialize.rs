@@ -492,10 +492,9 @@ pub(crate) fn materialize_execution_routes(
                 })
                 .count()
             == rejections.len()
+        && let Some(error) = conversion_error
     {
-        if let Some(error) = conversion_error {
-            return Err(error);
-        }
+        return Err(error);
     }
     let free_only = !routes.is_empty()
         && routes

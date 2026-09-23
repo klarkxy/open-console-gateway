@@ -80,6 +80,7 @@ fn sync_at(home: &Path) -> Result<SkillSyncResult> {
     }
     let lock = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .write(true)
         .open(&lock_path)
         .with_context(|| format!("opening OCG skill lock at {}", lock_path.display()))?;

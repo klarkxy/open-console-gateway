@@ -246,10 +246,11 @@ async fn serve(
     port: Option<u16>,
     dashboard_dir: Option<PathBuf>,
 ) -> Result<()> {
-    if cfg!(feature = "install-codex-skill") && !cfg!(debug_assertions) {
-        if let Err(error) = skill_install::sync_user_skill() {
-            eprintln!("warning: Codex skill synchronization failed: {error:#}");
-        }
+    if cfg!(feature = "install-codex-skill")
+        && !cfg!(debug_assertions)
+        && let Err(error) = skill_install::sync_user_skill()
+    {
+        eprintln!("warning: Codex skill synchronization failed: {error:#}");
     }
     let state = start_serve(data_dir, cipher, host, port, dashboard_dir).await?;
     println!("press Ctrl+C to stop");

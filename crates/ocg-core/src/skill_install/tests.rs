@@ -19,10 +19,7 @@ fn installs_and_skips_identical_bundled_skill() {
     let second = sync_at(&home).unwrap();
     assert_eq!(second.status, SkillSyncStatus::UpToDate);
     assert_eq!(first.path, second.path);
-    assert_eq!(
-        fs::read_dir(home.join(".agents/skill-backups")).is_err(),
-        true
-    );
+    assert!(fs::read_dir(home.join(".agents/skill-backups")).is_err());
     fs::remove_dir_all(home).unwrap();
 }
 

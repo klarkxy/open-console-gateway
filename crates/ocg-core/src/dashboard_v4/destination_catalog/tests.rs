@@ -754,49 +754,44 @@ async fn model_test_refuses_revoked_selected_endpoint_or_origin_without_outbound
         add_multi_route_model(&fixture);
         grant_message_endpoint(&fixture);
         let endpoint_id = message_endpoint_id(&fixture);
-        let db = fixture.state.as_ref().unwrap().db.lock();
-        let credential_id: String = db
-            .conn
-            .query_row(
-                "SELECT id FROM credentials WHERE legacy_account_id = ?1",
-                [&fixture.account_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        if revoke == "endpoint_id" {
-            let origins: i64 = db
+        {
+            let db = fixture.state.as_ref().unwrap().db.lock();
+            let credential_id: String = db
                 .conn
                 .query_row(
+                    "SELECT id FROM credentials WHERE legacy_account_id = ?1",
+                    [&fixture.account_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            if revoke == "endpoint_id" {
+                let origins: i64 = db.conn.query_row(
                     "SELECT COUNT(*) FROM credential_grants WHERE credential_id = ?1 AND kind = 'origin'",
                     [&credential_id],
                     |row| row.get(0),
                 )
                 .unwrap();
-            assert!(origins > 0);
-            db.conn
-                .execute(
+                assert!(origins > 0);
+                db.conn.execute(
                     "DELETE FROM credential_grants WHERE credential_id = ?1 AND kind = 'endpoint_id' AND value = ?2",
                     rusqlite::params![credential_id, endpoint_id],
                 )
                 .unwrap();
-        } else {
-            let endpoints: i64 = db
-                .conn
-                .query_row(
+            } else {
+                let endpoints: i64 = db.conn.query_row(
                     "SELECT COUNT(*) FROM credential_grants WHERE credential_id = ?1 AND kind = 'endpoint_id' AND value = ?2",
                     rusqlite::params![credential_id, endpoint_id],
                     |row| row.get(0),
                 )
                 .unwrap();
-            assert_eq!(endpoints, 1);
-            db.conn
-                .execute(
+                assert_eq!(endpoints, 1);
+                db.conn.execute(
                     "DELETE FROM credential_grants WHERE credential_id = ?1 AND kind = 'origin'",
                     [&credential_id],
                 )
                 .unwrap();
+            }
         }
-        drop(db);
 
         assert!(test_once(&fixture, fixture.expectation()).await.is_err());
         assert!(

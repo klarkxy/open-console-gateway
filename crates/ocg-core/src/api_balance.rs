@@ -45,6 +45,7 @@ pub fn probe_from_endpoint(endpoint_url: &str) -> Option<()> {
 }
 
 /// Balance URL `fetch` will request for an inference endpoint.
+#[cfg(test)]
 pub(crate) fn balance_request_url(endpoint_url: &str) -> Result<String, String> {
     Ok(probe_for(endpoint_url)?.url.to_string())
 }
