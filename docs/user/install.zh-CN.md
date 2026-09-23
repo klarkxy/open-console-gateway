@@ -27,6 +27,8 @@
 
 Windows 下开启自动启动后，程序只会安静地回到托盘，不会替你重新打开浏览器。
 
+正式版桌面程序内置 `ocg-manager` Codex skill。安装或升级后首次成功启动应用时，会同步到 `~/.agents/skills/ocg-manager`（Windows 为 `%USERPROFILE%\.agents\skills\ocg-manager`）。仅当内置 skill 内容变化时，旧的 OCG 管理版本才会备份到 `~/.agents/skill-backups/`；同名但不属于 OCG 管理的 skill 不会覆盖。若安装后尚未启动应用，安装器本身不会执行同步；开发构建也不自动安装。
+
 ---
 
 [用户指南索引](../USER.zh-CN.md) · [English](install.md) · [文档索引](../README.zh-CN.md)

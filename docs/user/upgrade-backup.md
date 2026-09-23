@@ -118,6 +118,14 @@ dashboard, accounts, and a real gateway request have all been verified.
 
 The direct GUI steps also work when in-app update is unavailable.
 
+The first successful desktop launch after an upgrade synchronizes the bundled
+Codex skill. A native release CLI synchronizes it on the next `serve`, or immediately
+with `skill sync`; this also means an intentional binary downgrade installs
+that binary's matching skill version. When its content differs, the previous
+OCG-managed skill is backed up under `~/.agents/skill-backups/`. Uninstalling the app or CLI leaves the
+user-level skill in place so it can still guide a reinstall; remove it
+separately only if no other OCG installation uses it.
+
 - **Windows GUI:** quit the tray app and run the new installer; it replaces
   the existing copy in place. Uninstall from Windows **Installed apps**. The
   confirm page deletes `%USERPROFILE%\.ocg-mgr` only when you select **Delete

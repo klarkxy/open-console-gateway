@@ -66,6 +66,8 @@ docker compose ps
 
 应用内升级不可用时，按下面方式直接覆盖安装。
 
+升级后首次成功启动桌面程序，会同步随该构建内置的 Codex skill。原生正式版 CLI 下次执行 `serve` 时同步，也可用 `skill sync` 立即同步；有意回退二进制时，会同步回与该二进制匹配的 skill。内容变化时，旧的 OCG 管理版本备份在 `~/.agents/skill-backups/`。卸载应用或 CLI 后，用户级 skill 会保留以便辅助重装；只有确认没有其他 OCG 安装在使用它时才单独移除。
+
 - **Windows GUI**：退出托盘程序并运行新版安装包，安装器会原地替换已有副本。从 Windows **已安装的应用** 卸载。只有在确认页勾选 **删除应用数据目录** 时才会删除 `%USERPROFILE%\.ocg-mgr`。卸载时未删除数据目录的，重装后会沿用原配置。
 - **macOS GUI**：用新版 DMG 中的应用替换 **Applications** 里的旧应用。删除应用即可卸载；只有确定也要删除数据时才另行删除 `~/.ocg-mgr`。
 - **Linux GUI**：用新版 `.deb` 覆盖安装，或替换 AppImage。卸载软件包或删除 AppImage 后，数据仍保留在 `~/.ocg-mgr`，除非手动删除。

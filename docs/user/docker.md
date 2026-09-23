@@ -188,9 +188,10 @@ port `9042`. Open `http://127.0.0.1:<OCG_PORT>/dashboard/` and sign in. Use
   sandboxes. The sidecar does not use `--no-sandbox` and has 1 GiB of shared
   memory. `ocg-data` and `ocg-browser-profiles` are the two persistent state
   volumes.
-- The startup log contains the Key, so log output and Docker daemon
-  access are sensitive. Configure log rotation on the Docker host if its
-  defaults are not bounded.
+- CLI builds with `status --show-key` hide the Gateway Key in startup logs.
+  Older images may print it, so existing logs and Docker daemon access remain
+  sensitive. Configure log rotation on the Docker host if its defaults are not
+  bounded.
 
 Routine operational checks:
 

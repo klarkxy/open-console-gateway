@@ -85,6 +85,13 @@ assert on source text, workflow YAML, or documentation prose.
 
 CLI sandbox (OpenCode Go cards only; no Custom, sub keys, or settings):
 
+Debug `serve` builds skip automatic user-skill synchronization. Native release
+`serve` builds and desktop startup synchronize the embedded skill; use an
+isolated `USERPROFILE` (Windows) or `HOME` (macOS/Linux) for release smokes.
+Explicit `skill sync` always writes to the selected user home, including in
+debug builds. The sample Key below is synthetic; do not put real secrets in
+agent-run command arguments.
+
 ```bash
 ocg-manager-cli --data-dir /tmp/ocg-cli-test key add smoke sk-smoke
 ocg-manager-cli --data-dir /tmp/ocg-cli-test serve --port 19042

@@ -9,8 +9,9 @@ rust-version.workspace = true
 description = "Headless CLI for Open Console Gateway"
 
 [features]
-default = ["dsh-local-host"]
+default = ["dsh-local-host", "install-codex-skill"]
 dsh-local-host = ["ocg-core/dsh-local-host"]
+install-codex-skill = []
 
 [[bin]]
 name = "ocg-manager-cli"

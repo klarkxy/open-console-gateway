@@ -154,7 +154,7 @@ Google 可能把数据中心出口 IP 视为高风险，要求额外验证，甚
   `seccomp=unconfined`，以便普通 Chromium 建立自身的 namespace 和 renderer
   seccomp 沙箱。Sidecar 不使用 `--no-sandbox`，另有 1 GiB 共享内存；命名卷
   `ocg-data` 与 `ocg-browser-profiles` 是两类持久化应用状态。
-- 启动日志会打印 Key，因此日志输出和 Docker daemon 权限都属于敏感信息。
+- 支持 `status --show-key` 的 CLI 构建会在启动日志中隐藏 Gateway Key；旧版镜像可能打印过它，因此既有日志和 Docker daemon 权限仍属于敏感信息。
   如果 Docker 主机默认没有限制日志大小，请由部署方配置日志轮转。
 
 常用检查命令：

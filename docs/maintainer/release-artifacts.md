@@ -35,6 +35,11 @@ SHA256SUMS
 Each CLI archive ships with its executable, a `dist/` directory, and `LICENSE`.
 `serve` needs the sibling dashboard assets, so distribute the whole archive.
 Windows has no portable GUI artifact.
+The `ocg-manager` Codex skill is embedded in the desktop and CLI binaries,
+not a separate archive member. Native release startup synchronizes that exact
+build's skill into the current user's `~/.agents/skills`; the packaged CLI
+smoke uses an isolated home and checks the installed copy. The Docker build
+does not synchronize a skill into the container or host.
 
 The `linux/amd64` and `linux/arm64` containers are published separately as
 `ghcr.io/klarkxy/opencode-go-mgr`. A GitHub Release contains the seven platform

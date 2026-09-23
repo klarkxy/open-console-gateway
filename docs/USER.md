@@ -26,7 +26,7 @@ This guide is for people running Open Console Gateway as a desktop app, a headle
 - [Gateway Behavior](user/gateway.md) — Endpoints, authentication, and aliases.
 - [Protocol Conversion](user/protocol-conversion.md) — Preferred/supported protocols, passthrough, and conversion limits.
 - [Routing, Cost, And Failover](user/routing.md) — Selection order, sticky/round-robin, cost accounting, circuit breakers, and failover.
-- [CLI](user/cli.md) — Headless CLI archive, data directory, and `serve` / `key` / `status`.
+- [CLI](user/cli.md) — Headless CLI archive, data directory, `serve` / `key` / `status`, and bundled skill sync.
 - [Docker](user/docker.md) — GHCR image, Compose setup, browser sidecar, and source builds.
 - [External Integrations](user/external-integrations.md) — Local CPA setup, ownership boundaries, routing pool, and disconnect behavior.
 - [Data And Security](user/data-security.md) — Data locations, credential storage, and encryption boundaries.

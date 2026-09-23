@@ -73,6 +73,8 @@ Rust 单元测试放在同名子模块：`src/db.rs` 声明 `mod tests;`，测�
 
 CLI 沙箱（只创建 OpenCode Go 卡；不能创建 Custom、子 Key 或设置）：
 
+调试构建的 `serve` 不会自动同步用户 skill。原生正式版 `serve` 和桌面启动会同步内置 skill；正式版冒烟应使用隔离的 `USERPROFILE`（Windows）或 `HOME`（macOS/Linux）。显式 `skill sync` 即使在调试构建中也会写入所选用户目录。下面的 Key 是合成测试值，不要把真实秘密放进 agent 执行的命令参数。
+
 ```bash
 ocg-manager-cli --data-dir /tmp/ocg-cli-test key add smoke sk-smoke
 ocg-manager-cli --data-dir /tmp/ocg-cli-test serve --port 19042

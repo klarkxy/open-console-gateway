@@ -1,7 +1,7 @@
 use super::{
-    Cli, Commands, KeyAction, build_state, key_command, ping_keys, register_dsh_application_host,
-    resolve_cipher_with, resolve_dashboard_dir, resolve_data_dir, start_serve, status_command,
-    stop_serve, toggle_account,
+    Cli, Commands, KeyAction, SkillAction, build_state, key_command, ping_keys,
+    register_dsh_application_host, resolve_cipher_with, resolve_dashboard_dir, resolve_data_dir,
+    start_serve, status_command, stop_serve, toggle_account,
 };
 use chrono::Utc;
 use clap::{CommandFactory, Parser};
@@ -98,7 +98,21 @@ fn cli_parses_key_and_status_subcommands() {
         Cli::try_parse_from(["ocg-manager-cli", "status"])
             .unwrap()
             .command,
-        Commands::Status
+        Commands::Status { show_key: false }
+    ));
+    assert!(matches!(
+        Cli::try_parse_from(["ocg-manager-cli", "status", "--show-key"])
+            .unwrap()
+            .command,
+        Commands::Status { show_key: true }
+    ));
+    assert!(matches!(
+        Cli::try_parse_from(["ocg-manager-cli", "skill", "sync"])
+            .unwrap()
+            .command,
+        Commands::Skill {
+            action: SkillAction::Sync
+        }
     ));
 }
 
@@ -256,7 +270,9 @@ async fn key_lifecycle_and_status_cover_cli_account_commands() {
     key_command(dir.clone(), cipher.clone(), KeyAction::List)
         .await
         .unwrap();
-    status_command(dir.clone(), cipher.clone()).await.unwrap();
+    status_command(dir.clone(), cipher.clone(), false)
+        .await
+        .unwrap();
 
     key_command(
         dir.clone(),
@@ -754,7 +770,9 @@ async fn cli_key_mutations_share_control_plane_revision_in_process() {
     key_command(dir.clone(), cipher.clone(), KeyAction::List)
         .await
         .unwrap();
-    status_command(dir.clone(), cipher.clone()).await.unwrap();
+    status_command(dir.clone(), cipher.clone(), false)
+        .await
+        .unwrap();
 
     let go = serving
         .db

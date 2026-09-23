@@ -7,7 +7,7 @@ crates/ocg-domain          IDs, catalogs, protocol policy
 crates/ocg-gateway         I/O-free alias, AttemptSpec, selector, JSON convert
 crates/ocg-infra           crypto, proxy/inference HTTP, log SQL
 crates/ocg-core            SQLite, Dashboard V3, adapters, executor
-crates/ocg-cli             ocg-manager-cli: serve / key / status
+crates/ocg-cli             ocg-manager-cli: serve / key / status / skill sync
 crates/ocg-browser-worker  Linux Chromium sidecar (no ocg-* deps)
 src/                       Vue 3 dashboard (HTTP Dashboard V3 + V4 only)
 src-tauri/                 Desktop host capabilities registered into CoreState

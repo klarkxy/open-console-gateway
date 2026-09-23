@@ -26,7 +26,7 @@
 - [Gateway 行为](user/gateway.zh-CN.md) — 端点、鉴权与别名。
 - [协议转换](user/protocol-conversion.zh-CN.md) — 推荐/已验证协议、透传与转换边界。
 - [路由、费用与故障转移](user/routing.zh-CN.md) — 选择顺序、粘性/轮询、费用估算、熔断与故障转移。
-- [CLI](user/cli.zh-CN.md) — 无头 CLI 压缩包、数据目录与 `serve` / `key` / `status`。
+- [CLI](user/cli.zh-CN.md) — 无头 CLI 压缩包、数据目录、`serve` / `key` / `status` 与内置 skill 同步。
 - [Docker](user/docker.zh-CN.md) — GHCR 镜像、Compose 部署、浏览器 Sidecar 与源码构建。
 - [外部接入](user/external-integrations.zh-CN.md) — 本机 CPA 配置、数据归属、路由订阅池与断开行为。
 - [数据与安全](user/data-security.zh-CN.md) — 数据目录、凭据存储与加密边界。

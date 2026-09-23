@@ -41,6 +41,14 @@ done. The rest is mostly convincing your OS that small developers exist.
 
 If you enable auto-start on Windows, the app resumes from the tray and leaves the browser closed.
 
+Release desktop builds bundle the `ocg-manager` Codex skill. On the first
+successful app launch after installation or upgrade, they synchronize it to
+`~/.agents/skills/ocg-manager` (Windows: `%USERPROFILE%\.agents\skills\ocg-manager`).
+An older OCG-managed copy is backed up under `~/.agents/skill-backups/` when the bundled skill changes;
+an unrelated same-name skill is left unchanged. The installer alone does not
+run this step when the app has not yet launched. Development builds do not
+auto-install the skill.
+
 ---
 
 [User guide index](../USER.md) · [简体中文](install.zh-CN.md) · [Docs index](../README.md)

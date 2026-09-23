@@ -207,6 +207,8 @@ jobs:
           }
 
           $data = Join-Path $env:RUNNER_TEMP cli-data
+          New-Item -ItemType Directory -Path $data -Force | Out-Null
+          $env:USERPROFILE = $data
           $added = (& $cli "--data-dir=$data" key add ci-smoke sk-ci-smoke | Out-String)
           if ($added -notmatch 'added key ([0-9a-f-]{36})') { throw "Cannot read account id: $added" }
           $id = $Matches[1]
@@ -214,9 +216,9 @@ jobs:
           & $cli "--data-dir=$data" key disable $id
           & $cli "--data-dir=$data" key enable $id
           if (-not (& $cli "--data-dir=$data" status | Select-String -SimpleMatch '1 total, 1 enabled')) { throw 'Unexpected CLI status' }
-          # The primary gateway key (legacy mirror field) must stay visible.
-          $gatewayKey = (& $cli "--data-dir=$data" status | Select-String -Pattern '^gateway key: (\S+)$').Matches[0].Groups[1].Value
-          if (-not $gatewayKey.StartsWith('ocg-')) { throw "CLI status did not expose the primary gateway key: $gatewayKey" }
+          if (-not (& $cli "--data-dir=$data" status | Select-String -SimpleMatch 'gateway key: [hidden')) { throw 'CLI status exposed a key by default' }
+          $gatewayKey = (& $cli "--data-dir=$data" status --show-key | Select-String -Pattern '^gateway key: (\S+)$').Matches[0].Groups[1].Value
+          if (-not $gatewayKey.StartsWith('ocg-')) { throw 'Explicit CLI key display failed' }
 
           $stdout = Join-Path $env:RUNNER_TEMP cli-serve.stdout.log
           $stderr = Join-Path $env:RUNNER_TEMP cli-serve.stderr.log
@@ -229,7 +231,9 @@ jobs:
               } catch {}
               Start-Sleep 1
             }
-            if (!$ready) { throw "Packaged CLI dashboard did not start`n$(Get-Content $stdout, $stderr -ErrorAction SilentlyContinue | Out-String)" }
+            if (!$ready) { throw 'Packaged CLI dashboard did not start' }
+            if ((Get-Content $stdout -Raw) -match [regex]::Escape($gatewayKey)) { throw 'CLI serve exposed the key in its log' }
+            if (!(Test-Path (Join-Path $data '.agents/skills/ocg-manager/SKILL.md'))) { throw 'CLI serve did not synchronize its bundled skill' }
           } finally {
             if (!$server.HasExited) { Stop-Process -Id $server.Id -Force; $server.WaitForExit() }
           }
@@ -258,6 +262,8 @@ jobs:
           if [ "$RUNNER_OS" = macOS ]; then archs=$(lipo -archs "$cli"); grep -qw x86_64 <<<"$archs"; grep -qw arm64 <<<"$archs"; fi
 
           data="$RUNNER_TEMP/cli-data"
+          mkdir -p "$data"
+          export HOME="$data"
           added=$("$cli" --data-dir="$data" key add ci-smoke sk-ci-smoke)
           id=$(printf '%s\n' "$added" | sed -n 's/^added key \([^ ]*\).*/\1/p')
           test -n "$id"
@@ -265,8 +271,9 @@ jobs:
           "$cli" --data-dir="$data" key disable "$id"
           "$cli" --data-dir="$data" key enable "$id"
           "$cli" --data-dir="$data" status | grep -q '1 total, 1 enabled'
-          # The primary gateway key (legacy mirror field) must stay visible.
-          "$cli" --data-dir="$data" status | grep -Eq '^gateway key: ocg-\S+'
+          "$cli" --data-dir="$data" status | grep -Fq 'gateway key: [hidden'
+          gateway_key=$("$cli" --data-dir="$data" status --show-key | sed -n 's/^gateway key: \(ocg-[^ ]*\)$/\1/p')
+          test -n "$gateway_key"
 
           log="$RUNNER_TEMP/cli-serve.log"
           "$cli" --data-dir="$data" serve --port=19042 >"$log" 2>&1 &
@@ -277,7 +284,9 @@ jobs:
             if curl -fsS http://127.0.0.1:19042/dashboard/ -o "$RUNNER_TEMP/dashboard.html" && grep -q 'id="app"' "$RUNNER_TEMP/dashboard.html"; then ready=1; break; fi
             sleep 1
           done
-          if [ -z "$ready" ]; then cat "$log"; exit 1; fi
+          if [ -z "$ready" ]; then echo 'Packaged CLI dashboard did not start'; exit 1; fi
+          if grep -Fq "$gateway_key" "$log"; then echo 'CLI serve exposed the key in its log'; exit 1; fi
+          test -f "$data/.agents/skills/ocg-manager/SKILL.md"
           kill "$server_pid"
           wait "$server_pid" || true
           trap - EXIT
