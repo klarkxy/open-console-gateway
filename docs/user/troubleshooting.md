@@ -23,7 +23,8 @@ get billed for a bad guess.
   only, `scripts/free-dev-port.mjs` clears stale Vite
   processes on port `30001`; it does not release `9042` or the desktop
   single-instance lock.
-- **`401 Unauthorized` from the upstream.** Zen Free returns it unchanged.
+- **`401 Unauthorized` from the upstream.** Zen Free temporarily cools its
+  anonymous channel and tries the next compatible card.
   OpenCode Go rotates and records `auth_error` only for a structured
   `CreditsError`; re-save the same Key after renewal to clear it. `ModelError`,
   unknown, and malformed OpenCode 401 responses remain unchanged. Custom API

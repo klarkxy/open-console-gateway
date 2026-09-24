@@ -47,9 +47,36 @@ pub(crate) fn decode(
             facts.retry_not_before = Some(temporary_429_deadline(retry_after, observed_at));
             facts.rule_id = "zen.free_egress";
         }
+        ProviderErrorClass::FreeRejected => {
+            // Free is a trial route. A rejected HTTP response temporarily
+            // removes the anonymous channel without inventing quota evidence.
+            facts.cause = Cause::Transient;
+            facts.scope = Scope::SharedFreeEgress;
+            facts.retry_not_before = Some(temporary_429_deadline(retry_after, observed_at));
+            facts.rule_id = "zen.free_rejected";
+        }
         _ => return None,
     }
     Some(facts)
+}
+
+/// A keyed OpenRouter free-model rejection is a temporary model restriction,
+/// not evidence that the account's paid balance or quota is exhausted.
+pub(crate) fn openrouter_free_rejection(
+    retry_after: Option<&str>,
+    observed_at: DateTime<Utc>,
+) -> FailureFacts {
+    FailureFacts {
+        cause: Cause::Transient,
+        // The existing model-scoped pool resource is per Key unless the user
+        // explicitly declared a shared pool. It leaves paid model IDs usable.
+        scope: Scope::QuotaPool,
+        window: None,
+        upstream_reset_at: None,
+        retry_not_before: Some(temporary_429_deadline(retry_after, observed_at)),
+        rule_id: "openrouter.free_model_retry",
+        rule_version: 1,
+    }
 }
 
 /// Short Key-scoped 429 wait: honor a valid future Retry-After, otherwise 30s.

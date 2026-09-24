@@ -323,6 +323,44 @@ const GROUP: &str = "default";
 const PARENT: &str = "parent-1";
 const ACCOUNT: &str = "custom-1";
 
+#[test]
+fn openrouter_free_policy_requires_the_official_route_and_exact_free_model_id() {
+    for model in ["openrouter/free", "vendor/model:free"] {
+        for path in ["chat/completions", "responses", "messages"] {
+            let url = reqwest::Url::parse(&format!("https://openrouter.ai/api/v1/{path}")).unwrap();
+            assert!(is_openrouter_free_request(&url, model), "{url} {model}");
+        }
+    }
+    for (url, model) in [
+        (
+            "https://openrouter.ai/api/v1/chat/completions",
+            "vendor/model",
+        ),
+        (
+            "https://example.com/api/v1/chat/completions",
+            "openrouter/free",
+        ),
+        (
+            "http://openrouter.ai/api/v1/chat/completions",
+            "openrouter/free",
+        ),
+        (
+            "https://openrouter.ai:8443/api/v1/chat/completions",
+            "openrouter/free",
+        ),
+        ("https://openrouter.ai/api/v1/models", "openrouter/free"),
+        (
+            "https://openrouter.ai/api/v1/chat/completions?route=other",
+            "openrouter/free",
+        ),
+    ] {
+        assert!(!is_openrouter_free_request(
+            &reqwest::Url::parse(url).unwrap(),
+            model
+        ));
+    }
+}
+
 fn temp_dir(label: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "ocg-platform-price-{}-{}",

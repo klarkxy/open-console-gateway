@@ -33,6 +33,8 @@ pub enum ProviderErrorClass {
     RateLimited {
         profile: ErrorProfile,
     },
+    /// A rejected Zen Free attempt can use another compatible route.
+    FreeRejected,
     UnauthorizedPassthrough,
     UnauthorizedRotate,
     ForbiddenStop,
@@ -162,6 +164,8 @@ fn policy_for_kind(kind: ProviderAdapterKind) -> ProviderErrorPolicy {
             error_profile: ErrorProfile::OpenCodeGo,
         },
         ProviderAdapterKind::ZenFree => ProviderErrorPolicy {
+            // The active Free channel is handled before this status-only
+            // fallback. Keep the non-Free classification conservative.
             inference_401: Auth401Policy::Passthrough,
             error_profile: ErrorProfile::OpenCodeGo,
         },
@@ -234,15 +238,18 @@ pub fn classify_http(
     free_channel: bool,
     anonymous: bool,
 ) -> ProviderErrorClass {
-    if (500..600).contains(&status) {
-        return ProviderErrorClass::ServerError;
-    }
     if status == 429 {
         let profile = match provider_error_policy(provider_id).error_profile {
             ErrorProfile::OpenCodeGo if free_channel => ErrorProfile::ZenFree,
             profile => profile,
         };
         return ProviderErrorClass::RateLimited { profile };
+    }
+    if free_channel && provider_id == OPENCODE_ZEN_FREE_PROVIDER_ID && status >= 400 {
+        return ProviderErrorClass::FreeRejected;
+    }
+    if (500..600).contains(&status) {
+        return ProviderErrorClass::ServerError;
     }
 
     if status == 408 {

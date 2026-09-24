@@ -67,7 +67,8 @@ A `429` cools the receiving Key temporarily and the gateway tries the next
 eligible Key. Other failures follow their observed scope and retry constraints,
 without treating arbitrary error text as quota evidence. A `403` fails over
 for this request without writing a cooldown or `auth_error`, including Kimi
-responses. Zen Free `401` is returned as-is. OpenCode Go structured
+responses. Any rejected Zen Free HTTP response briefly cools its anonymous
+channel and tries the next compatible card. OpenCode Go structured
 `CreditsError` 401 rotates to the next eligible card and persists `auth_error`
 (it may still be an inactive subscription, not quota recovery);
 re-saving the same Key clears that breaker after renewal. Its `ModelError`,
@@ -174,13 +175,37 @@ channel with the same OpenCode client headers the TUI uses (`User-Agent`,
 `x-opencode-session`, `x-opencode-client`, `x-opencode-request`,
 `x-opencode-project`) so session stickiness and the shared egress-IP free
 pool apply. Client-supplied OpenCode values win; otherwise the gateway fills
-them in. Its promo quota is shared per egress IP, so a Free `429` temporarily
-restricts the anonymous Free channel rather than rotating Keys. Routing
-continues to later compatible cards in saved order. A Free-only request with no
-known eligibility time returns local unavailability rather than a fictitious
-quota deadline. Successful Free rows keep token counts, use `cost_state=free`, and
+them in. Its promo quota is shared per egress IP. Any Free HTTP error, malformed
+JSON, or explicit error body temporarily restricts the anonymous channel rather
+than rotating Keys; `429` also honors a valid `Retry-After`. A connection
+failure known to precede sending follows the same fallback. Routing continues
+to later compatible cards in saved order.
+An exact `-free` raw pin stays on Free and cannot silently switch to a different
+model. With no other compatible route, the gateway returns a local unavailable
+or rate-limited response. Once SSE output has begun, it cannot switch sources.
+Successful Free rows keep token counts, use `cost_state=free`, and
 do not enter Go quota totals. Free models are promotional and may use request
 data to improve models — do not submit confidential content.
+
+## OpenRouter Free
+
+OpenRouter and OpenRouter Free are separate, reorderable preset connections that
+use an OpenRouter API Key. The Free preset starts with `openrouter/free` on Chat
+Completions; OpenRouter chooses the underlying free model for each request. To
+use a particular free model, add its exact catalog ID ending in `:free`. A paid
+model does not become free merely by appending that suffix. The Free preset
+does not refresh OpenRouter's mixed paid/free catalog into enabled routes.
+
+Free-model HTTP errors, explicit error bodies and malformed JSON temporarily
+pause that model route and try another compatible route for the same public
+name. A `429` instead waits on the receiving Key and honors a valid
+`Retry-After`. These temporary waits do not mark the paid balance exhausted or
+cool Zen Free. An exact `openrouter/free` or `:free` public model remains pinned;
+switching to a paid model requires a shared public alias configured by you.
+Free attempts do not debit a configured local paid Credit estimate. OCG leaves
+their total cost unknown and does not provide an official daily-limit meter;
+check OpenRouter's bill for any optional charged features. Once
+streaming output begins, the gateway cannot change providers mid-response.
 
 ### GOAT credit errors
 

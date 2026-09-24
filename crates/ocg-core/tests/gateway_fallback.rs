@@ -1924,7 +1924,7 @@ async fn unknown_zen_catalog_requires_explicit_chat_for_raw_pin_and_stripped_ali
 }
 
 #[tokio::test]
-async fn registered_zen_model_401_is_returned_without_credential_fallback_or_breaker() {
+async fn registered_zen_model_401_uses_local_cooldown_without_credential_fallback_or_breaker() {
     let h = FallbackHarness::zen_go(
         &[
             ("", &[reply(401, r#"{"error":{"message":"expired key"}}"#)]),
@@ -1935,7 +1935,7 @@ async fn registered_zen_model_401_is_returned_without_credential_fallback_or_bre
     .await;
 
     let (status, body) = h.protocol("/v1/chat/completions", "mimo-v2.5-free").await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
     assert_eq!(h.call_keys(), [""]);
     assert!(
         h.account("acct-1").auth_error.is_none(),
@@ -2221,42 +2221,68 @@ async fn zen_free_stream_success_without_usage_is_still_zero_cost_free() {
 }
 
 #[tokio::test]
-async fn zen_free_401_and_403_stop_without_touching_a_normal_credential() {
-    let h = FallbackHarness::zen_go(
-        &[
-            (
-                "",
-                &[
-                    reply(401, r#"{"error":{"message":"anonymous route disabled"}}"#),
-                    reply(403, r#"{"error":{"message":"anonymous route forbidden"}}"#),
-                ],
-            ),
-            ("normal-key", &[ok()]),
-        ],
-        &["normal-key"],
-    )
-    .await;
+async fn zen_free_http_rejections_cool_the_channel_and_try_the_next_compatible_card() {
+    for status in [400, 401, 403, 408, 500, 502] {
+        let h = FallbackHarness::zen_go(
+            &[
+                (
+                    "",
+                    &[reply(
+                        status,
+                        r#"{"error":{"message":"trial unavailable"}}"#,
+                    )],
+                ),
+                ("normal-key", &[ok(), ok()]),
+            ],
+            &["normal-key"],
+        )
+        .await;
 
-    let (status, body) = h.protocol("/v1/chat/completions", "mimo-v2.5-free").await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
-    assert!(
-        body.to_string().contains("anonymous route disabled"),
-        "{body}"
-    );
+        let (first_status, body) = h.protocol("/v1/chat/completions", "mimo-v2.5").await;
+        assert_eq!(first_status, StatusCode::OK, "upstream {status}: {body}");
+        assert_eq!(h.call_keys(), ["", "normal-key"], "upstream {status}");
 
-    let (status, body) = h.protocol("/v1/chat/completions", "mimo-v2.5-free").await;
-    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
-    assert!(body.to_string().contains("403"), "{body}");
-    let captured = h.calls.lock().unwrap().clone();
-    assert_eq!(captured.len(), 2);
-    assert!(captured.iter().all(|call| call.key.is_empty()));
-    assert!(h.account("acct-1").auth_error.is_none());
+        let (second_status, body) = h.protocol("/v1/chat/completions", "mimo-v2.5").await;
+        assert_eq!(second_status, StatusCode::OK, "upstream {status}: {body}");
+        assert_eq!(
+            h.call_keys(),
+            ["", "normal-key", "normal-key"],
+            "the cooled Free channel must be skipped after upstream {status}"
+        );
+        assert!(h.account("acct-1").auth_error.is_none());
+        assert!(
+            h.state
+                .db
+                .lock()
+                .free_channel_cooldown_until()
+                .unwrap()
+                .is_none(),
+            "a transient Free rejection must not become a durable quota window"
+        );
+    }
+}
+
+#[tokio::test]
+async fn zen_free_success_status_with_an_error_body_falls_through() {
+    for body in [r#"{"error":{"message":"trial unavailable"}}"#, "not-json"] {
+        let h = FallbackHarness::zen_go(
+            &[("", &[reply(200, body)]), ("normal-key", &[ok(), ok()])],
+            &["normal-key"],
+        )
+        .await;
+
+        let (status, response) = h.protocol("/v1/chat/completions", "mimo-v2.5").await;
+        assert_eq!(status, StatusCode::OK, "{body}: {response}");
+        let (status, response) = h.protocol("/v1/chat/completions", "mimo-v2.5").await;
+        assert_eq!(status, StatusCode::OK, "{body}: {response}");
+        assert_eq!(h.call_keys(), ["", "normal-key", "normal-key"], "{body}");
+    }
 }
 
 #[tokio::test]
 async fn ordered_zen_candidate_429_falls_through_to_the_next_normal_card() {
     let h = FallbackHarness::zen_go(
-        &[("", &[limited()]), ("normal-key", &[ok()])],
+        &[("", &[limited()]), ("normal-key", &[ok(), ok()])],
         &["normal-key"],
     )
     .await;
@@ -2282,6 +2308,9 @@ async fn ordered_zen_candidate_429_falls_through_to_the_next_normal_card() {
     assert!(logs.iter().any(|log| {
         log.route_account_id.as_deref() == Some("acct-1") && log.status == "success"
     }));
+    let (status, body) = h.protocol("/v1/chat/completions", "mimo-v2.5").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(h.call_keys(), ["", "normal-key", "normal-key"]);
 }
 
 #[tokio::test]

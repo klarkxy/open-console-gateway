@@ -34,7 +34,7 @@ Gateway 绝不从 HTTP 状态、错误正文或正文文本推断持久化额度
 
 共用**已声明额度池**的 Key 可以共用已保存的普通冷却。`429` 创建的临时冷却只作用于收到它的 Key。名称相同不会自动变成共享池。在同一身份上换 Key 也不会另起一个新池。
 
-`429` 会临时冷却收到它的 Key，然后 Gateway 尝试下一把合格 Key。其他失败按已观测到的范围和重试约束处理，不把任意错误文案当作额度证据。`403` 只在本次请求内换号，不写冷却或 `auth_error`，包括 Kimi 响应。Zen Free 的 `401` 原样返回。OpenCode Go 的结构化 `CreditsError` 401 会换到下一张合格卡片并写入 `auth_error`（仍可能是订阅未生效，不是额度恢复）；续费后重新保存同一个 Key 即可清除。它的 `ModelError`、未知或畸形 401 仍原样返回，因为 OpenCode 也会用 401 表示模型不支持。Custom API 的 `401` 同样换号并写入 `auth_error`。托管账号 Key 验证与 Custom **验证连接** 拿到 401 时仍会记录 `auth_error`。CLI `key ping` 只打印真实上游状态，不写该字段。只有能证明请求尚未发出的 DNS/TCP/TLS 建连失败，才会在同一账号重试一次，流式请求也遵循这一规则。
+`429` 会临时冷却收到它的 Key，然后 Gateway 尝试下一把合格 Key。其他失败按已观测到的范围和重试约束处理，不把任意错误文案当作额度证据。`403` 只在本次请求内换号，不写冷却或 `auth_error`，包括 Kimi 响应。Zen Free 收到任意上游 HTTP 错误时会临时冷却匿名通道，并尝试下一张兼容卡片。OpenCode Go 的结构化 `CreditsError` 401 会换到下一张合格卡片并写入 `auth_error`（仍可能是订阅未生效，不是额度恢复）；续费后重新保存同一个 Key 即可清除。它的 `ModelError`、未知或畸形 401 仍原样返回，因为 OpenCode 也会用 401 表示模型不支持。Custom API 的 `401` 同样换号并写入 `auth_error`。托管账号 Key 验证与 Custom **验证连接** 拿到 401 时仍会记录 `auth_error`。CLI `key ping` 只打印真实上游状态，不写该字段。只有能证明请求尚未发出的 DNS/TCP/TLS 建连失败，才会在同一账号重试一次，流式请求也遵循这一规则。
 
 开启 **对话粘性** 时，匹配的会话 key 会先于基础路由方案尝试。存在 `X-OCG-Conversation-Id` 请求头时优先使用；否则 Gateway 对 system / tools / 首条 user 做指纹。无法生成可用 key 时，严格优先级、全局粘性或轮询按原样执行。
 
@@ -74,7 +74,13 @@ Zen Free 是一张不需要 Key 的账号卡，只有一个启用开关。不需
 
 在 **供应商** 页点击 **刷新模型目录** 才会请求官方无鉴权 Zen 模型目录。后端只保留 ID 以 `-free` 结尾的模型并持久化成功结果；原始 ID 始终可以作为精确 raw pin。去掉官方 `-free` 后缀后会公布对应 Alias，不要求该短名已经出现在 Go 静态表里。例如 `mimo-v2.5-free` 既可以按原 ID 请求，也可以按 `mimo-v2.5` 请求；共享 Alias 按账号卡顺序选择。仅有 Zen 行的模型（例如 `muse-spark-1.3-contributor-free`）同样公布 `muse-spark-1.3-contributor`。**供应商** 页展示已保存目录与各模型合约。刷新失败或过滤结果为空时，继续使用上一次成功快照。
 
-Free 与 Go 使用**独立冷却窗口**。Zen Free 不发送鉴权头。每次 Free 推理会带上官方 TUI 使用的同一组 OpenCode 客户端身份头（`User-Agent`、`x-opencode-session`、`x-opencode-client`、`x-opencode-request`、`x-opencode-project`），以便会话粘滞和按出口 IP 共享的免费池生效。客户端已提供的 OpenCode 值优先，否则由 Gateway 补齐。促销额度按出口 IP 共享；Free `429` 临时限制匿名 Free 通道，而不是切换 Key。路由继续尝试顺序中后续兼容卡片；仅有 Free 映射且没有已知可用时间时，返回本地不可用，而不是虚构额度截止时间。成功的 Free 请求会记录 token，使用 `cost_state=free`，且不计入 Go 额度。Free 为限时促销，请求数据可能用于改进模型，机密内容请谨慎处理。
+Free 与 Go 使用**独立冷却窗口**。Zen Free 不发送鉴权头。每次 Free 推理会带上官方 TUI 使用的同一组 OpenCode 客户端身份头（`User-Agent`、`x-opencode-session`、`x-opencode-client`、`x-opencode-request`、`x-opencode-project`），以便会话粘滞和按出口 IP 共享的免费池生效。客户端已提供的 OpenCode 值优先，否则由 Gateway 补齐。促销额度按出口 IP 共享；Free 收到 HTTP 错误、无效 JSON 或明确的错误对象时都会临时冷却匿名通道，而不是切换 Key；`429` 还会遵守有效的 `Retry-After`。确认请求尚未发出的连接失败也按相同规则回退。路由继续尝试顺序中后续兼容卡片。明确请求原始 `-free` ID 时不会悄悄改成其他模型；没有其他兼容路线时由 Gateway 返回本地不可用或限流响应。SSE 已开始输出后无法中途换源。成功的 Free 请求会记录 token，使用 `cost_state=free`，且不计入 Go 额度。Free 为限时促销，请求数据可能用于改进模型，机密内容请谨慎处理。
+
+## OpenRouter Free
+
+OpenRouter 与 OpenRouter Free 是可分别排序的预设连接，都使用 OpenRouter API Key。Free 预设默认通过 Chat Completions 请求 `openrouter/free`，由 OpenRouter 在每次请求时选择具体免费模型。若要指定免费模型，请手动添加目录中确实存在的准确 `:free` ID；不能给任意付费模型加后缀就视为免费。Free 预设不会把混有付费模型的 OpenRouter 全目录刷新成已启用路线。
+
+免费模型收到 HTTP 错误、明确的错误对象或无效 JSON 后，会短暂暂停该模型路线，并尝试相同公开名称下的下一条兼容路线。`429` 则临时冷却收到它的 Key，并遵守有效的 `Retry-After`。这些等待不会把付费余额标为耗尽，也不会冷却 Zen Free。明确请求 `openrouter/free` 或 `:free` 原始模型时仍保持精确绑定；若要切到付费模型，须由你先配置共用的公开别名。Free 请求不扣本地付费 Credit 估算；OCG 将总费用保留为未知，也不提供官方每日额度计量。若请求启用了可能收费的附加功能，以 OpenRouter 账单为准。流式内容一旦开始输出，就不能在中途换源。
 
 ### GOAT 余额错误
 

@@ -1,4 +1,4 @@
-use super::decode::{decode, parse_retry_after};
+use super::decode::{decode, openrouter_free_rejection, parse_retry_after};
 use super::*;
 use chrono::Duration;
 use ocg_gateway::classify::{ErrorProfile, ProviderErrorClass};
@@ -91,6 +91,39 @@ fn known_exhaustion_without_reset_is_pending_not_a_fake_deadline() {
     assert!(free.decide().exhaust_free);
     assert!(free.decide().wait_for_recovery);
     assert!(free.upstream_reset_at.is_none());
+}
+
+#[test]
+fn zen_free_rejection_waits_briefly_without_inventing_quota_exhaustion() {
+    let facts = decode(
+        ProviderErrorClass::FreeRejected,
+        "Weekly usage limit reached. Resets in 1 day.",
+        None,
+        now(),
+    )
+    .unwrap();
+    assert_eq!(facts.scope, Scope::SharedFreeEgress);
+    assert_eq!(facts.window, None);
+    assert_eq!(facts.upstream_reset_at, None);
+    assert_eq!(facts.decide().persist_reset, None);
+    assert!(facts.decide().wait_for_recovery);
+    assert_eq!(
+        facts.retry_not_before,
+        Some(RetryHint::Until(now() + Duration::seconds(30)))
+    );
+}
+
+#[test]
+fn openrouter_free_rejection_is_temporary_and_has_no_persistent_quota_window() {
+    let facts = openrouter_free_rejection(Some("90"), now());
+    assert_eq!(facts.scope, Scope::QuotaPool);
+    assert_eq!(facts.window, None);
+    assert_eq!(facts.decide().persist_reset, None);
+    assert!(!facts.decide().wait_for_recovery);
+    assert_eq!(
+        facts.retry_not_before,
+        Some(RetryHint::Until(now() + Duration::seconds(90)))
+    );
 }
 
 #[test]

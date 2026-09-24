@@ -1,4 +1,5 @@
 use super::*;
+use crate::gateway::failure::decode::openrouter_free_rejection;
 use crate::gateway::failure::{Cause, FailureFacts};
 
 fn clock() -> (DateTime<Utc>, Instant) {
@@ -139,6 +140,24 @@ fn pool_model_and_endpoint_scopes_are_distinct() {
             .is_err()
     );
     assert!(runtime.acquire(b, wall, mono).is_ok());
+}
+
+#[test]
+fn openrouter_free_wait_keeps_paid_models_other_keys_and_zen_available() {
+    let runtime = Arc::new(RecoveryRuntime::default());
+    let (wall, mono) = clock();
+    let free = ResourceSet::fixture(1, 9, 1, &["openrouter-a"], false);
+    let paid = ResourceSet::fixture(1, 9, 2, &["openrouter-a"], false);
+    let other_key = ResourceSet::fixture(2, 9, 1, &["openrouter-b"], false);
+    let zen = ResourceSet::fixture(3, 9, 1, &["zen"], true);
+    let facts = openrouter_free_rejection(None, wall);
+    let mut permit = runtime.acquire(free.clone(), wall, mono).unwrap();
+    permit.observe_failure(&facts, facts.decide(), mono);
+    drop(permit);
+    assert!(runtime.acquire(free, wall, mono).is_err());
+    assert!(runtime.acquire(paid, wall, mono).is_ok());
+    assert!(runtime.acquire(other_key, wall, mono).is_ok());
+    assert!(runtime.acquire(zen, wall, mono).is_ok());
 }
 
 #[test]

@@ -17,7 +17,9 @@ use crate::gateway::diagnostics::{
     redact_known_secret, redact_known_secret_values, safe_upstream_headers,
     sanitize_upstream_error_value_with_known_secret, serialize_diagnostic,
 };
-use crate::gateway::failure::decode::{decode as decode_failure, temporary_429_deadline};
+use crate::gateway::failure::decode::{
+    decode as decode_failure, openrouter_free_rejection, temporary_429_deadline,
+};
 use crate::gateway::materialize::native_log_identity;
 use crate::gateway::protocol::{
     RequestPlan, UsageCounts, error_body, extract_usage, format_error, has_complete_usage,
@@ -569,6 +571,19 @@ pub(crate) async fn forward_request_with_deadline(
     let policy_provider_id = crate::provider::ProviderRegistry::get_by_kind(adapter)
         .map(|descriptor| descriptor.provider_id)
         .unwrap_or(crate::provider::CUSTOM_PROVIDER_ID);
+    let openrouter_free = attempt_spec
+        .request_url()
+        .ok()
+        .and_then(|raw| reqwest::Url::parse(&raw).ok())
+        .is_some_and(|url| is_openrouter_free_request(&url, &plan.model));
+    let pricing_snapshot = if openrouter_free {
+        // Do not debit a configured paid Credit estimate for an official Free
+        // model. Keep total cost unknown because optional upstream features may
+        // have independent charges.
+        RequestPricingSnapshot::Unpriced
+    } else {
+        pricing_snapshot
+    };
     let mut attempt_context =
         ForwardAttemptContext::new(trace, client_body.len(), attempt, plan, route);
     attempt_context.attach_pricing(&pricing_snapshot);
@@ -1072,7 +1087,33 @@ pub(crate) async fn forward_request_with_deadline(
             } else {
                 StatusCode::BAD_GATEWAY
             };
-            let action = forward_action_for_class(class, allow_same_account_retry, None);
+            let action = if free_contract && connect_failure {
+                observe_free_rejection(
+                    state,
+                    account,
+                    selection,
+                    &mut recovery_permit,
+                    &restriction_endpoint,
+                    &plan.model,
+                    None,
+                    &mut attempt_context,
+                )?;
+                ForwardAction::ExhaustFreeChannel
+            } else if openrouter_free && connect_failure {
+                observe_openrouter_free_rejection(
+                    state,
+                    account,
+                    selection,
+                    &mut recovery_permit,
+                    &restriction_endpoint,
+                    &plan.model,
+                    None,
+                    &mut attempt_context,
+                )?;
+                ForwardAction::TryNextAccount
+            } else {
+                forward_action_for_class(class, allow_same_account_retry, None)
+            };
             let failure = attempt_context.failure(FailureSpec {
                 error_source: "transport",
                 error_stage: if connect_failure {
@@ -1146,10 +1187,72 @@ pub(crate) async fn forward_request_with_deadline(
         None => body_timeout,
     };
 
+    if openrouter_free
+        && (status.is_server_error()
+            || (status.is_client_error() && status != StatusCode::TOO_MANY_REQUESTS))
+    {
+        let error_headers = upstream_resp.headers().clone();
+        let text = response_text_with_timeout(
+            upstream_resp,
+            body_timeout,
+            Some(MAX_UPSTREAM_ERROR_BODY_BYTES),
+        )
+        .await
+        .unwrap_or_else(ResponseBodyFailure::into_detail);
+        let retry_after = error_headers
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok());
+        observe_openrouter_free_rejection(
+            state,
+            account,
+            selection,
+            &mut recovery_permit,
+            &restriction_endpoint,
+            &plan.model,
+            retry_after,
+            &mut attempt_context,
+        )?;
+        let action = ForwardAction::TryNextAccount;
+        let message = format!("OpenRouter free model was rejected ({status})");
+        let failure = attempt_context.failure(FailureSpec {
+            error_source: "upstream",
+            error_stage: "upstream_http",
+            downstream_status: Some(StatusCode::BAD_GATEWAY.as_u16()),
+            upstream_status: Some(status.as_u16()),
+            upstream_wait_ms: Some(upstream_wait_ms),
+            retry_action: Some(retry_action_name(action)),
+            upstream_headers: Some(&error_headers),
+            upstream_error: Some(&text),
+            request_body: Some(client_body),
+        });
+        DbAttemptSink::new(&state.db.lock()).insert(
+            account,
+            &model,
+            if status.is_client_error() {
+                "client_error"
+            } else {
+                "error"
+            },
+            Some(status.as_u16() as i32),
+            metadata_metrics(
+                &pricing_snapshot,
+                plan.service_tier.as_deref(),
+                "not_applicable",
+            ),
+            Some(&attempt_context.sanitize_upstream_error(&text)),
+            &attempt_context,
+            Some(failure),
+        )?;
+        return Ok(ForwardResult {
+            response: error_response(plan.client, &message, None),
+            action,
+            error_message: Some(message),
+        });
+    }
+
     if status.is_server_error() {
-        // A response status is authoritative even if its error body stalls. Keep
-        // that status and never replay the request; the bounded read only affects
-        // how much safe diagnostic text we can return.
+        // A response status is authoritative even if its error body stalls.
+        // Ordinary routes retain it; Zen Free can try another compatible route.
         let error_headers = upstream_resp.headers().clone();
         let text = response_text_with_timeout(
             upstream_resp,
@@ -1165,6 +1268,21 @@ pub(crate) async fn forward_request_with_deadline(
             attempt_spec.auth == UpstreamAuth::None,
         );
         let action = forward_action_for_class(class, allow_same_account_retry, None);
+        if class == ProviderErrorClass::FreeRejected {
+            let retry_after = error_headers
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok());
+            observe_free_rejection(
+                state,
+                account,
+                selection,
+                &mut recovery_permit,
+                &restriction_endpoint,
+                &plan.model,
+                retry_after,
+                &mut attempt_context,
+            )?;
+        }
         let error_message = format!(
             "upstream error {}: {}",
             status.as_u16(),
@@ -1206,9 +1324,8 @@ pub(crate) async fn forward_request_with_deadline(
     }
 
     if status.is_client_error() {
-        // As above, a known 4xx proves the upstream rejected the request. Body
-        // read failures must not turn into a replay or account fallback except
-        // for the explicit 401/403/429 status policy below.
+        // A known 4xx proves the upstream rejected the request. Its status
+        // policy still applies if the bounded error-body read fails.
         let error_headers = upstream_resp.headers().clone();
         let text = response_text_with_timeout(
             upstream_resp,
@@ -2213,13 +2330,40 @@ pub(crate) async fn forward_request_with_deadline(
             Ok(value) => value,
             Err(_) => {
                 let message = "upstream returned invalid JSON";
+                let action = if free_contract {
+                    observe_free_rejection(
+                        state,
+                        account,
+                        selection,
+                        &mut recovery_permit,
+                        &restriction_endpoint,
+                        &plan.model,
+                        None,
+                        &mut attempt_context,
+                    )?;
+                    ForwardAction::ExhaustFreeChannel
+                } else if openrouter_free {
+                    observe_openrouter_free_rejection(
+                        state,
+                        account,
+                        selection,
+                        &mut recovery_permit,
+                        &restriction_endpoint,
+                        &plan.model,
+                        None,
+                        &mut attempt_context,
+                    )?;
+                    ForwardAction::TryNextAccount
+                } else {
+                    ForwardAction::Return
+                };
                 let failure = attempt_context.failure(FailureSpec {
                     error_source: "upstream",
                     error_stage: "response_body",
                     downstream_status: Some(StatusCode::BAD_GATEWAY.as_u16()),
                     upstream_status: Some(status.as_u16()),
                     upstream_wait_ms: Some(upstream_wait_ms),
-                    retry_action: Some("return"),
+                    retry_action: Some(retry_action_name(action)),
                     upstream_headers: None,
                     upstream_error: Some(&text),
                     request_body: Some(client_body),
@@ -2241,7 +2385,7 @@ pub(crate) async fn forward_request_with_deadline(
                 )?;
                 return Ok(ForwardResult {
                     response: error_response(plan.client, message, None),
-                    action: ForwardAction::Return,
+                    action,
                     error_message: Some(message.to_string()),
                 });
             }
@@ -2280,6 +2424,64 @@ pub(crate) async fn forward_request_with_deadline(
         }
 
         let application_error = explicit_nonquota_application_error(&upstream_json);
+        if application_error && (free_contract || openrouter_free) {
+            let action = if free_contract {
+                observe_free_rejection(
+                    state,
+                    account,
+                    selection,
+                    &mut recovery_permit,
+                    &restriction_endpoint,
+                    &plan.model,
+                    None,
+                    &mut attempt_context,
+                )?;
+                ForwardAction::ExhaustFreeChannel
+            } else {
+                observe_openrouter_free_rejection(
+                    state,
+                    account,
+                    selection,
+                    &mut recovery_permit,
+                    &restriction_endpoint,
+                    &plan.model,
+                    None,
+                    &mut attempt_context,
+                )?;
+                ForwardAction::TryNextAccount
+            };
+            let message = attempt_context.sanitize_upstream_error(&text);
+            let failure = attempt_context.failure(FailureSpec {
+                error_source: "upstream",
+                error_stage: "response_body",
+                downstream_status: Some(StatusCode::BAD_GATEWAY.as_u16()),
+                upstream_status: Some(status.as_u16()),
+                upstream_wait_ms: Some(upstream_wait_ms),
+                retry_action: Some(retry_action_name(action)),
+                upstream_headers: None,
+                upstream_error: Some(&text),
+                request_body: Some(client_body),
+            });
+            DbAttemptSink::new(&state.db.lock()).insert(
+                account,
+                &model,
+                "client_error",
+                Some(status.as_u16() as i32),
+                metadata_metrics(
+                    &pricing_snapshot,
+                    plan.service_tier.as_deref(),
+                    "not_applicable",
+                ),
+                Some(&message),
+                &attempt_context,
+                Some(failure),
+            )?;
+            return Ok(ForwardResult {
+                response: error_response(plan.client, &message, None),
+                action,
+                error_message: Some(message),
+            });
+        }
         let metrics = if has_complete_usage(plan.upstream, &upstream_json) {
             let usage = extract_usage(plan.upstream, &upstream_json, Some(&model));
             let (prompt_tokens, completion_tokens, cached_tokens, cache_creation_tokens) =
@@ -2319,13 +2521,40 @@ pub(crate) async fn forward_request_with_deadline(
             Ok(value) => value,
             Err(error) => {
                 let message = format!("response conversion failed: {}", error.message);
+                let action = if free_contract {
+                    observe_free_rejection(
+                        state,
+                        account,
+                        selection,
+                        &mut recovery_permit,
+                        &restriction_endpoint,
+                        &plan.model,
+                        None,
+                        &mut attempt_context,
+                    )?;
+                    ForwardAction::ExhaustFreeChannel
+                } else if openrouter_free {
+                    observe_openrouter_free_rejection(
+                        state,
+                        account,
+                        selection,
+                        &mut recovery_permit,
+                        &restriction_endpoint,
+                        &plan.model,
+                        None,
+                        &mut attempt_context,
+                    )?;
+                    ForwardAction::TryNextAccount
+                } else {
+                    ForwardAction::Return
+                };
                 let failure = attempt_context.failure(FailureSpec {
                     error_source: "gateway",
                     error_stage: "response_transform",
                     downstream_status: Some(StatusCode::BAD_GATEWAY.as_u16()),
                     upstream_status: Some(status.as_u16()),
                     upstream_wait_ms: Some(upstream_wait_ms),
-                    retry_action: Some("return"),
+                    retry_action: Some(retry_action_name(action)),
                     upstream_headers: None,
                     upstream_error: Some(&message),
                     request_body: Some(client_body),
@@ -2343,7 +2572,7 @@ pub(crate) async fn forward_request_with_deadline(
                 )?;
                 return Ok(ForwardResult {
                     response: error_response(plan.client, &message, Some(&upstream_json)),
-                    action: ForwardAction::Return,
+                    action,
                     error_message: Some(message),
                 });
             }
@@ -3028,6 +3257,83 @@ fn error_response(format: ApiFormat, message: &str, upstream: Option<&Value>) ->
     (StatusCode::BAD_GATEWAY, axum::Json(body)).into_response()
 }
 
+fn is_openrouter_free_request(url: &reqwest::Url, model: &str) -> bool {
+    url.scheme() == "https"
+        && url.host_str() == Some("openrouter.ai")
+        && url.port_or_known_default() == Some(443)
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && matches!(
+            url.path().trim_end_matches('/'),
+            "/api/v1/chat/completions" | "/api/v1/responses" | "/api/v1/messages"
+        )
+        && (model == "openrouter/free" || model.ends_with(":free"))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn observe_openrouter_free_rejection(
+    state: &CoreState,
+    account: &ExecutionCredential,
+    selection: &LiveSendSelection,
+    recovery_permit: &mut RecoveryPermit,
+    endpoint: &str,
+    model: &str,
+    retry_after: Option<&str>,
+    attempt: &mut ForwardAttemptContext,
+) -> Result<()> {
+    let (observed_at, observed_mono) = state.sample_gateway_clock();
+    let facts = openrouter_free_rejection(retry_after, observed_at);
+    let decision = facts.decide();
+    let db = state.db.lock();
+    let current = live_send::selection_identity_is_current(&db, selection)?
+        && recovery_permit.permits_observation(&facts)
+        && recovery_permit
+            .same_generation(&ResourceSet::capture(&db, account, endpoint, model, false)?);
+    if current {
+        recovery_permit.observe_failure(&facts, decision, observed_mono);
+    }
+    attempt.restriction_details = Some(serde_json::json!({
+        "facts": facts, "recorded_for_current_generation": current,
+        "local_reprobe": decision.wait_for_recovery,
+    }));
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn observe_free_rejection(
+    state: &CoreState,
+    account: &ExecutionCredential,
+    selection: &LiveSendSelection,
+    recovery_permit: &mut RecoveryPermit,
+    endpoint: &str,
+    model: &str,
+    retry_after: Option<&str>,
+    attempt: &mut ForwardAttemptContext,
+) -> Result<()> {
+    let (observed_at, observed_mono) = state.sample_gateway_clock();
+    let facts = decode_failure(
+        ProviderErrorClass::FreeRejected,
+        "",
+        retry_after,
+        observed_at,
+    )
+    .ok_or_else(|| anyhow::anyhow!("Free rejection lacks a recovery policy"))?;
+    let decision = facts.decide();
+    let db = state.db.lock();
+    let current = live_send::selection_identity_is_current(&db, selection)?
+        && recovery_permit.permits_observation(&facts)
+        && recovery_permit
+            .same_generation(&ResourceSet::capture(&db, account, endpoint, model, true)?);
+    if current {
+        recovery_permit.observe_failure(&facts, decision, observed_mono);
+    }
+    attempt.restriction_details = Some(serde_json::json!({
+        "facts": facts, "recorded_for_current_generation": current,
+        "local_reprobe": decision.wait_for_recovery,
+    }));
+    Ok(())
+}
+
 pub(crate) fn forward_action_for_class(
     class: ProviderErrorClass,
     allow_same_account_retry: bool,
@@ -3042,6 +3348,7 @@ pub(crate) fn forward_action_for_class(
         | ProviderErrorClass::UnauthorizedRotate
         | ProviderErrorClass::ForbiddenRotate
         | ProviderErrorClass::InsufficientCredits => ForwardAction::TryNextAccount,
+        ProviderErrorClass::FreeRejected => ForwardAction::ExhaustFreeChannel,
         ProviderErrorClass::RateLimited { .. } => match rate_limit_fallback(rate_limit_window) {
             RateLimitFallback::ExhaustFreeChannel => ForwardAction::ExhaustFreeChannel,
             RateLimitFallback::TryNextAccount => ForwardAction::TryNextAccount,
