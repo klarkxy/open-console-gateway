@@ -13360,7 +13360,15 @@ fn catalog_refresh_enables_new_models_with_official_or_known_baseline() {
 
     db.refresh_contract_catalog_preserving_settings(
         &goat_scope,
-        &[extra.into()],
+        &["gpt-6-luna".into()],
+        now,
+        CATALOG_SOURCE_COMMAND_CODE_MODELS,
+        COMMAND_CODE_GOAT_BASE_URL,
+    )
+    .unwrap();
+    db.refresh_contract_catalog_preserving_settings(
+        &goat_scope,
+        &["gpt-6-luna".into(), extra.into()],
         now,
         CATALOG_SOURCE_COMMAND_CODE_MODELS,
         COMMAND_CODE_GOAT_BASE_URL,
@@ -13697,6 +13705,87 @@ fn zen_official_static_preference_saves_responses_and_messages_not_probe_rows() 
         rejected.is_err(),
         "probe-manufactured evidence must not expand Zen preference admission: {rejected:?}"
     );
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn command_first_refresh_enables_goat_cohort_then_new_discoveries() {
+    let dir = temp_data_dir("command-first-refresh-goat-cohort");
+    let db = Database::open(dir.clone()).unwrap();
+    let now = Utc::now();
+    let scope = ContractScope::provider(COMMAND_CODE_PROVIDER_ID);
+    let included = "gpt-6-luna".to_string();
+    let premium = "vendor/premium-model".to_string();
+    let preenabled = "vendor/saved-on".to_string();
+    let later = "vendor/new-model".to_string();
+    let baseline = crate::official_protocols::OfficialProtocolBaseline::mapped([
+        (included.as_str(), UpstreamProtocolKind::ChatCompletions),
+        (premium.as_str(), UpstreamProtocolKind::ChatCompletions),
+        (preenabled.as_str(), UpstreamProtocolKind::ChatCompletions),
+        (later.as_str(), UpstreamProtocolKind::ChatCompletions),
+    ]);
+    set_model_protocol_override_on(
+        &db.conn,
+        &scope,
+        &preenabled,
+        UpstreamProtocolKind::ChatCompletions,
+        ProtocolOverrideState::ForceOn,
+        now,
+    )
+    .unwrap();
+
+    db.refresh_contract_catalog_preserving_settings(
+        &scope,
+        &[included.clone(), premium.clone(), preenabled.clone()],
+        now,
+        CATALOG_SOURCE_COMMAND_CODE_MODELS,
+        COMMAND_CODE_GOAT_BASE_URL,
+    )
+    .unwrap();
+    db.apply_official_protocol_baseline(
+        &scope,
+        &[included.clone(), premium.clone(), preenabled.clone()],
+        &baseline,
+        now,
+    )
+    .unwrap();
+    let initial = effective_from_db(&db)
+        .providers
+        .remove(COMMAND_CODE_PROVIDER_ID)
+        .unwrap();
+    assert!(initial.model(&included).unwrap().has_enabled_protocol());
+    assert!(!initial.model(&premium).unwrap().has_enabled_protocol());
+    assert!(initial.model(&preenabled).unwrap().has_enabled_protocol());
+
+    db.refresh_contract_catalog_preserving_settings(
+        &scope,
+        &[
+            included.clone(),
+            premium.clone(),
+            preenabled.clone(),
+            later.clone(),
+        ],
+        now,
+        CATALOG_SOURCE_COMMAND_CODE_MODELS,
+        COMMAND_CODE_GOAT_BASE_URL,
+    )
+    .unwrap();
+    db.apply_official_protocol_baseline(
+        &scope,
+        &[included, premium.clone(), preenabled.clone(), later.clone()],
+        &baseline,
+        now,
+    )
+    .unwrap();
+    let refreshed = effective_from_db(&db)
+        .providers
+        .remove(COMMAND_CODE_PROVIDER_ID)
+        .unwrap();
+    assert!(!refreshed.model(&premium).unwrap().has_enabled_protocol());
+    assert!(refreshed.model(&preenabled).unwrap().has_enabled_protocol());
+    assert!(refreshed.model(&later).unwrap().has_enabled_protocol());
+
     drop(db);
     fs::remove_dir_all(dir).unwrap();
 }
@@ -14279,12 +14368,12 @@ fn onboarding_resume_route_changes_remap_existing_key_grants_without_authorizing
     let mut updated = initial.clone();
     updated.endpoint_url = new_responses.into();
     updated.upstream_protocol = UpstreamProtocolKind::Responses;
-    updated.auth_kind = DynamicAuthKind::XApiKey;
+    updated.auth_kind = DynamicAuthKind::ApiKey;
     let new_routes = vec![
         HttpProtocolRoute {
             protocol: Protocol::Responses,
             endpoint_url: new_responses.into(),
-            auth_scheme: AuthScheme::XApiKey,
+            auth_scheme: AuthScheme::ApiKey,
         },
         HttpProtocolRoute {
             protocol: Protocol::Messages,

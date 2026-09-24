@@ -123,15 +123,19 @@ impl OllamaBillingTier {
     }
 }
 
-/// Models included by the GOAT subscription page. These are the default-on
-/// rows in the Provider model/protocol matrix. Other discovered models use
-/// official catalog evidence and preserve saved operator overrides.
+/// Models included by the GOAT subscription page as of 2026-09-24. These
+/// are the default-on rows in the first Provider model/protocol snapshot.
+/// Later newly discovered rows use official catalog evidence and preserve
+/// saved operator switches.
 pub const COMMAND_CODE_GOAT_INCLUDED_MODEL_IDS: &[&str] = &[
     "gpt-5.6-sol",
     "gpt-5.6-luna",
+    "gpt-6-luna",
     "deepseek/deepseek-v4-pro",
     "deepseek/deepseek-v4-flash",
     "deepseek/deepseek-v4-flash-vision-exp",
+    "deepseek/deepseek-v4-flash-fast",
+    "deepseek/deepseek-v4.1-flash",
     "moonshotai/Kimi-K3",
     "moonshotai/Kimi-K2.7-Code",
     "moonshotai/Kimi-K2.7-Code-Highspeed",
@@ -142,13 +146,21 @@ pub const COMMAND_CODE_GOAT_INCLUDED_MODEL_IDS: &[&str] = &[
     "zai-org/GLM-5.2-Fast",
     "zai-org/GLM-5.1",
     "zai-org/GLM-5",
+    "z-ai/glm-5.3-flashx",
+    "z-ai/glm-5.3-flash",
     "MiniMaxAI/MiniMax-M3",
     "MiniMaxAI/MiniMax-M2.7",
     "MiniMaxAI/MiniMax-M2.5",
     "xiaomi/mimo-v2.5-pro",
     "xiaomi/mimo-v2.5",
+    "xiaomi/mimo-v2.6-flash",
+    "xiaomi/mimo-v2.6-pro",
+    "xiaomi/mimo-v2.6-pro-ultraspeed",
     "Qwen/Qwen3.8-Max",
     "Qwen/Qwen3.8-27B",
+    "Qwen/Qwen3.8-Omni-Flash",
+    "Qwen/Qwen3.8-Max-0902",
+    "Qwen/Qwen3.8-Flash",
     "Qwen/Qwen3.7-Max",
     "Qwen/Qwen3.7-Plus",
     "Qwen/Qwen3.7-Flash",
@@ -156,17 +168,26 @@ pub const COMMAND_CODE_GOAT_INCLUDED_MODEL_IDS: &[&str] = &[
     "Qwen/Qwen3.6-Plus",
     "stepfun/Step-3.7-Flash",
     "stepfun/Step-3.5-Flash",
+    "stepfun/Step-5-Preview",
     "tencent/hy3-paid",
     "google/gemini-3.7-flash",
+    "google/gemini-3.8-flash",
+    "tencent/hy4-preview",
+    "meituan/LongCat-2.0",
+    "inclusionai/ling-3.0-flash-sante:free",
     "nvidia/nemotron-3-ultra-550b-a55b",
     "thinkingmachines/inkling",
     "thinkingmachines/inkling-small",
-    "stealth/ox-alpha",
+    "stealth/space-bunny-alpha",
+    "typesafe/jev",
     "poolside/laguna-s-2.1-free",
     "meta/muse-spark-1.2",
     "meta/muse-spark-1.2-contributor",
+    "meta/muse-spark-1.3",
+    "meta/muse-spark-1.3-contributor",
     "xai/grok-4.5",
     "xai/grok-4.6",
+    "xai/grok-4.7",
 ];
 
 pub fn command_code_goat_includes_model(model_id: &str) -> bool {

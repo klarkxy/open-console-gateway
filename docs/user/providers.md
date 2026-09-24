@@ -79,14 +79,14 @@ Every refreshable scope takes its model list from that Provider's official `/mod
 
 The compact source line, refresh action, and model list share one content panel. A catalog refresh is a control-plane action. It preserves existing switches and probe observations, never expands grants, and uses an already authorized ready Key only when the directory requires one. MiniMax CN sealed inference/catalog routes use `https://api.minimax.cn/v1` plus the documented `/anthropic` path; its older usage endpoint is unchanged. Kimi refreshes `https://api.kimi.com/coding/v1/models` with a ready Key. Kimi's rolling product IDs `kimi-for-coding` and `kimi-for-coding-highspeed` are published unchanged; OCG does not relabel them as fixed model versions. Their saved rows activate only code-owned sealed mappings; unmatched rows remain exact raw model IDs.
 
-Before the first successful refresh the catalog is empty. After success, the saved official snapshot is authoritative. Newly discovered models appear enabled with their official known or configured protocols. An existing model remains off only when it is confirmed supported but disabled, or when you explicitly turned it off; a model with no protocol evidence waits for official documentation and can be enabled when refresh adds that declaration. Existing preferences, overrides, and probe results for surviving models are preserved. A failed or empty refresh keeps the previous snapshot.
+Before the first successful refresh the catalog is empty. After success, the saved official snapshot is authoritative. Newly discovered models appear enabled with their official known or configured protocols, except that GOAT's first snapshot enables only models included in its plan. Other GOAT models in that first snapshot stay off until you turn them on; models first discovered in later refreshes use the normal enabled default. An existing model remains off when its saved switch is off; a model with no protocol evidence waits for official documentation and can be enabled when refresh adds that declaration. Existing preferences, overrides, and probe results for surviving models are preserved. A failed or empty refresh keeps the previous snapshot.
 
 Migrated Custom API connections retain public-name → upstream-ID mappings and
 `public_only` lookup; discovery never silently replaces them. Ordinary new
 configurable HTTP connections may also accept a unique exact upstream ID. Command Code uses its public official
-`/models` directory: the GOAT preset starts enabled, while additional models
-discovered later start disabled until you enable their supported protocol in
-the list.
+`/models` directory: the initial GOAT cohort follows the plan's included-model
+list, while genuinely new models discovered by later refreshes enable once
+their supported protocol is documented. Saved switches remain in effect.
 
 Local catalogs feed resolution without another request-time upstream call.
 Built-in Alias authority is static and code-owned: the original OpenCode Go
