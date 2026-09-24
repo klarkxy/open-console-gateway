@@ -1,7 +1,7 @@
 {
   "name": "ocg-manager-ui",
   "private": true,
-  "version": "2.6.0",
+  "version": "2.6.1",
   "packageManager": "pnpm@10.29.2",
   "type": "module",
   "scripts": {

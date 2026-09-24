@@ -1,4 +1,4 @@
-# Pull-only Docker Compose example for Open Console Gateway v2.6.0.
+# Pull-only Docker Compose example for Open Console Gateway v2.6.1.
 # Save this file as compose.yaml. Optionally create a neighboring .env file
 # with OCG_PORT, OCG_IMAGE, OCG_BROWSER_IMAGE, or the runtime variables below.
 # The images are multi-architecture (linux/amd64 and linux/arm64); Compose
@@ -6,7 +6,7 @@
 # without manifest-list support, re-add "platform: linux/amd64" to pin amd64.
 services:
   ocg-manager:
-    image: ${OCG_IMAGE:-ghcr.io/klarkxy/opencode-go-mgr:2.6.0}
+    image: ${OCG_IMAGE:-ghcr.io/klarkxy/opencode-go-mgr:2.6.1}
     restart: unless-stopped
     environment:
       - OCG_ADMIN_USERNAME
@@ -67,7 +67,7 @@ services:
   # Reserve at least 2 CPU, 2 GiB RAM, and 1 GiB shared memory on the host.
   browser:
     profiles: ["browser"]
-    image: ${OCG_BROWSER_IMAGE:-ghcr.io/klarkxy/opencode-go-mgr-browser:2.6.0}
+    image: ${OCG_BROWSER_IMAGE:-ghcr.io/klarkxy/opencode-go-mgr-browser:2.6.1}
     restart: unless-stopped
     environment:
       - OCG_BROWSER_CONTROL_ADDR=0.0.0.0:9080
