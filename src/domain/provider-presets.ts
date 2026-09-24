@@ -11,7 +11,7 @@ import type { AuthSchemeDto } from "../api/generated/dashboard-v4.ts";
 
 export type ProviderPresetCategory = "official" | "aggregator";
 export type ProviderPresetOffering = "plan" | "api";
-export type ProviderPresetAuthKind = Extract<DynamicAuthKind, "bearer" | "x-api-key">;
+export type ProviderPresetAuthKind = Extract<DynamicAuthKind, "bearer" | "x-api-key" | "api-key">;
 
 export interface ProviderPreset {
   id: string;
@@ -63,6 +63,46 @@ export interface ProviderPresetProtocolRoute {
   authScheme: AuthSchemeDto;
 }
 
+/** Resolve only the two customer-specific hosts whose route paths are documented. */
+export function providerPresetRoutesForEndpoint(
+  preset: Pick<ProviderPreset, "id" | "endpointUrl" | "protocolRoutes">,
+  endpoint: string,
+): ProviderPresetProtocolRoute[] | undefined {
+  if (preset.endpointUrl && preset.endpointUrl === endpoint) {
+    return preset.protocolRoutes?.map((route) => ({ ...route }));
+  }
+  if (preset.endpointUrl || !endpoint) return undefined;
+  let url: URL;
+  try {
+    url = new URL(endpoint);
+  } catch {
+    return undefined;
+  }
+  if (url.protocol !== "https:" || url.port || url.username || url.password || url.search || url.hash) return undefined;
+  const host = url.hostname.toLowerCase();
+  const path = url.pathname.replace(/\/$/, "");
+  if (preset.id === "azure-openai"
+    && /^[a-z0-9][a-z0-9-]*\.openai\.azure\.com$/.test(host)
+    && path === "/openai/v1/responses") {
+    const origin = url.origin;
+    return [
+      { protocol: "responses", endpointUrl: `${origin}/openai/v1/responses`, authScheme: "api_key" },
+      { protocol: "chat_completions", endpointUrl: `${origin}/openai/v1/chat/completions`, authScheme: "api_key" },
+    ];
+  }
+  if (preset.id === "bedrock"
+    && /^bedrock-runtime\.[a-z0-9-]+\.amazonaws\.com$/.test(host)
+    && path === "/openai/v1/responses") {
+    const origin = url.origin;
+    return [
+      { protocol: "responses", endpointUrl: `${origin}/openai/v1/responses`, authScheme: "bearer" },
+      { protocol: "chat_completions", endpointUrl: `${origin}/openai/v1/chat/completions`, authScheme: "bearer" },
+      { protocol: "messages", endpointUrl: `${origin}/anthropic/v1/messages`, authScheme: "x_api_key" },
+    ];
+  }
+  return undefined;
+}
+
 const PRESET_CATEGORIES: readonly ProviderPresetCategory[] = ["official", "aggregator"];
 const PRESET_OFFERINGS: readonly ProviderPresetOffering[] = ["plan", "api"];
 const PRESET_PROTOCOLS: readonly DynamicUpstreamProtocol[] = [
@@ -70,11 +110,13 @@ const PRESET_PROTOCOLS: readonly DynamicUpstreamProtocol[] = [
   "responses",
   "messages",
 ];
-const PRESET_AUTH_KINDS: readonly ProviderPresetAuthKind[] = ["bearer", "x-api-key"];
+const PRESET_AUTH_KINDS: readonly ProviderPresetAuthKind[] = ["bearer", "x-api-key", "api-key"];
 const PRESET_ROUTE_AUTH: Record<string, AuthSchemeDto> = {
   bearer: "bearer",
   "x-api-key": "x_api_key",
   x_api_key: "x_api_key",
+  "api-key": "api_key",
+  api_key: "api_key",
   none: "none",
 };
 
@@ -113,7 +155,7 @@ export function providerPresetShapeIssues(raw: unknown, index = 0): string[] {
     issues.push(`${where}: protocol must be chat_completions, responses, or messages`);
   }
   if (!PRESET_AUTH_KINDS.includes(row.authKind as ProviderPresetAuthKind)) {
-    issues.push(`${where}: authKind must be bearer or x-api-key`);
+    issues.push(`${where}: authKind must be bearer, x-api-key, or api-key`);
   }
   if (!isHttpUrl(row.docsUrl)) issues.push(`${where}: docsUrl is not an http(s) URL`);
   if (!isHttpUrl(row.websiteUrl)) issues.push(`${where}: websiteUrl is not an http(s) URL`);
@@ -185,7 +227,7 @@ function providerPresetProtocolRouteIssues(raw: unknown, where: string): string[
       issues.push(`${routeWhere}: endpointUrl is not an http(s) URL`);
     }
     if (PRESET_ROUTE_AUTH[String(route.authScheme)] === undefined) {
-      issues.push(`${routeWhere}: authScheme must be bearer, x-api-key, or none`);
+      issues.push(`${routeWhere}: authScheme must be bearer, x-api-key, api-key, or none`);
     }
   }
   return issues;
@@ -399,7 +441,7 @@ export function resolveProviderPreset(
 ): ProviderPreset | null {
   const target = normalizeProviderPresetEndpoint(endpointUrl);
   if (!target) return null;
-  if (authKind !== "bearer" && authKind !== "x-api-key") return null;
+  if (authKind !== "bearer" && authKind !== "x-api-key" && authKind !== "api-key") return null;
   const matches = presets.filter((preset) => (
     Boolean(preset.endpointUrl)
     && preset.authKind === authKind

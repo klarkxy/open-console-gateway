@@ -5,7 +5,8 @@
       "description": "Custom auth scheme. Wire values match V2 kebab-case.",
       "enum": [
         "bearer",
-        "x-api-key"
+        "x-api-key",
+        "api-key"
       ],
       "type": "string"
     },
@@ -149,7 +150,8 @@
       "enum": [
         "none",
         "bearer",
-        "x_api_key"
+        "x_api_key",
+        "api_key"
       ],
       "type": "string"
     },
@@ -2465,6 +2467,7 @@
       "enum": [
         "bearer",
         "x-api-key",
+        "api-key",
         "sealed",
         "none"
       ],
@@ -3617,6 +3620,7 @@
       "enum": [
         "bearer",
         "x-api-key",
+        "api-key",
         "none"
       ],
       "type": "string"

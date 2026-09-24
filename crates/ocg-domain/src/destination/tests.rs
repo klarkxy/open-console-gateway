@@ -155,6 +155,10 @@ fn wire_names_are_snake_case() {
         serde_json::json!("x_api_key")
     );
     assert_eq!(
+        serde_json::to_value(AuthScheme::ApiKey).unwrap(),
+        serde_json::json!("api_key")
+    );
+    assert_eq!(
         serde_json::to_value(RedirectPolicy::FollowKeyless).unwrap(),
         serde_json::json!("follow_keyless")
     );

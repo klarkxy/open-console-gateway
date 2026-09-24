@@ -1,7 +1,7 @@
 import type { WithoutExpectation } from "../api/dashboard-v3.ts";
 import type { MutationExpectation } from "../api/generated/dashboard-v3.ts";
 import type { ProviderDefinitionView } from "../api/providers.ts";
-import { PROVIDER_PRESETS } from "./provider-presets.ts";
+import { PROVIDER_PRESETS, providerPresetRoutesForEndpoint } from "./provider-presets.ts";
 import type {
   OnboardingCommitMode,
   OnboardingCommitRequest,
@@ -131,9 +131,9 @@ export function validateOnboardingDraft(
 
 function connectionConfiguration(draft: ProviderDefinitionDraft): OnboardingConnectionNew {
   const preset = PROVIDER_PRESETS.find((entry) => entry.id === draft.preset_id);
-  const protocolRoutes = preset?.endpointUrl === draft.endpoint_url.trim()
-    && preset.protocol === draft.upstream_protocol && preset.authKind === draft.auth_kind
-    ? preset.protocolRoutes?.map((route) => ({ ...route })) : undefined;
+  const protocolRoutes = preset?.protocol === draft.upstream_protocol
+    && preset.authKind === draft.auth_kind
+    ? providerPresetRoutesForEndpoint(preset, draft.endpoint_url.trim()) : undefined;
   return {
     templateId: draft.preset_id || "custom-http",
     name: draft.name.trim(),

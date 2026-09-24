@@ -119,6 +119,7 @@ pub enum AuthScheme {
     None,
     Bearer,
     XApiKey,
+    ApiKey,
 }
 
 impl AuthScheme {
@@ -127,6 +128,7 @@ impl AuthScheme {
             Self::None => "none",
             Self::Bearer => "bearer",
             Self::XApiKey => "x_api_key",
+            Self::ApiKey => "api_key",
         }
     }
 }
@@ -137,6 +139,7 @@ impl From<DynamicAuthKind> for AuthScheme {
             DynamicAuthKind::None => Self::None,
             DynamicAuthKind::Bearer => Self::Bearer,
             DynamicAuthKind::XApiKey => Self::XApiKey,
+            DynamicAuthKind::ApiKey => Self::ApiKey,
         }
     }
 }
@@ -146,6 +149,7 @@ impl From<UpstreamAuthScheme> for AuthScheme {
         match kind {
             UpstreamAuthScheme::Bearer => Self::Bearer,
             UpstreamAuthScheme::XApiKey => Self::XApiKey,
+            UpstreamAuthScheme::ApiKey => Self::ApiKey,
         }
     }
 }

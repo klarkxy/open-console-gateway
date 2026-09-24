@@ -19,7 +19,7 @@
 ## 手动创建用户定义供应商
 
 1. 打开 **供应商** 或 **账号**，点击 **添加供应商** / **新增账号**，并在同一套选择器中选择 **手动配置**。
-2. 填写名称、一个 API Endpoint、一个上游协议（Chat Completions、Responses 或 Messages），以及一种鉴权方式（Bearer、`x-api-key` 或无鉴权）。
+2. 填写名称、一个 API Endpoint、一个上游协议（Chat Completions、Responses 或 Messages），以及一种鉴权方式（Bearer、`x-api-key`、`api-key` 或无鉴权）。
 3. 至少添加一条对外模型名 → 精确上游 ID 映射。**获取模型** 和 **测试模型** 仍在本表单，但需要 Key；需要 Key 的鉴权在填写 Key 之前这两个按钮保持禁用。
 4. 保存。需要 Key 的鉴权可填写可选 Key：填写则同一次写入创建首个账号，留空则只保存定义（显示为 **待补充凭据**，之后可用 **添加 Key**）。无鉴权供应商会创建一张不带 Key 的单例账号。写入走 `POST /dashboard/api/v4/onboarding/commit`，不要求探测成功。若响应返回前网络中断，面板会自动重试同一次提交；再次保存未改动的草稿会重放已存结果，而不会创建第二个供应商。
 

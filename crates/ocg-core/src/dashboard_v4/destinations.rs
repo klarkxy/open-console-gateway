@@ -237,6 +237,7 @@ fn destination_definition(
     let auth_kind = match input.auth_scheme {
         AuthSchemeDto::Bearer => DynamicAuthKind::Bearer,
         AuthSchemeDto::XApiKey => DynamicAuthKind::XApiKey,
+        AuthSchemeDto::ApiKey => DynamicAuthKind::ApiKey,
         AuthSchemeDto::None => DynamicAuthKind::None,
     };
     if destination.capabilities.observer {
@@ -506,6 +507,7 @@ impl From<AuthScheme> for AuthSchemeDto {
             AuthScheme::None => Self::None,
             AuthScheme::Bearer => Self::Bearer,
             AuthScheme::XApiKey => Self::XApiKey,
+            AuthScheme::ApiKey => Self::ApiKey,
         }
     }
 }
@@ -538,6 +540,7 @@ impl From<&HttpProtocolRouteDto> for ocg_domain::destination::HttpProtocolRoute 
             auth_scheme: match route.auth_scheme {
                 AuthSchemeDto::Bearer => AuthScheme::Bearer,
                 AuthSchemeDto::XApiKey => AuthScheme::XApiKey,
+                AuthSchemeDto::ApiKey => AuthScheme::ApiKey,
                 AuthSchemeDto::None => AuthScheme::None,
             },
         }

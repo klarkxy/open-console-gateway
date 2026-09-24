@@ -1327,7 +1327,7 @@ async fn v8_roundtrip_preserves_shared_and_empty_custom_connections() {
             "name": "Shared imported name",
             "endpointUrl": "https://shared.example/v1/chat/completions",
             "upstreamProtocol": "chat_completions",
-            "authScheme": "x_api_key",
+            "authScheme": "api_key",
             "models": [{
                 "publicModel": "shared-model",
                 "upstreamModel": "vendor/shared-model",
@@ -1400,7 +1400,7 @@ async fn v8_roundtrip_preserves_shared_and_empty_custom_connections() {
         .find(|destination| destination.id == shared_destination_id)
         .unwrap();
     assert_eq!(shared.name, "Shared imported name");
-    assert_eq!(shared.auth_scheme.as_str(), "x_api_key");
+    assert_eq!(shared.auth_scheme.as_str(), "api_key");
     assert_eq!(
         shared.catalog[0]
             .upstream_override

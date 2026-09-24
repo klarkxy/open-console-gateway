@@ -401,6 +401,7 @@ pub(crate) fn materialize_execution_routes(
                     auth_kind: match selected.auth_scheme {
                         AuthScheme::Bearer => ocg_domain::dynamic::DynamicAuthKind::Bearer,
                         AuthScheme::XApiKey => ocg_domain::dynamic::DynamicAuthKind::XApiKey,
+                        AuthScheme::ApiKey => ocg_domain::dynamic::DynamicAuthKind::ApiKey,
                         AuthScheme::None => ocg_domain::dynamic::DynamicAuthKind::None,
                     },
                 })

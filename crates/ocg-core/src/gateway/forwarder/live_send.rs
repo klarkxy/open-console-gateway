@@ -821,6 +821,7 @@ fn auth_kind_from_scheme(scheme: AuthScheme) -> ocg_domain::dynamic::DynamicAuth
     match scheme {
         AuthScheme::Bearer => ocg_domain::dynamic::DynamicAuthKind::Bearer,
         AuthScheme::XApiKey => ocg_domain::dynamic::DynamicAuthKind::XApiKey,
+        AuthScheme::ApiKey => ocg_domain::dynamic::DynamicAuthKind::ApiKey,
         AuthScheme::None => ocg_domain::dynamic::DynamicAuthKind::None,
     }
 }
@@ -829,6 +830,7 @@ fn wire_auth_for_dynamic(auth_kind: ocg_domain::dynamic::DynamicAuthKind) -> Ups
     match auth_kind {
         ocg_domain::dynamic::DynamicAuthKind::Bearer => UpstreamAuth::Bearer,
         ocg_domain::dynamic::DynamicAuthKind::XApiKey => UpstreamAuth::XApiKey,
+        ocg_domain::dynamic::DynamicAuthKind::ApiKey => UpstreamAuth::ApiKey,
         ocg_domain::dynamic::DynamicAuthKind::None => UpstreamAuth::None,
     }
 }

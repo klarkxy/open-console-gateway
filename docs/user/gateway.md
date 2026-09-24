@@ -29,7 +29,7 @@ Default bind is `127.0.0.1:9042`. Override with `serve --host 0.0.0.0` and `serv
 
 ## Authentication
 
-Gateway API endpoints need the **Key** in one of three header forms: `Authorization: Bearer <key>`, `x-api-key: <key>`, or `x-goog-api-key: <key>`. The gateway strips the client auth header before forwarding and injects the selected account's credential instead. OpenCode Go sends `x-api-key` to Messages upstreams and `Authorization: Bearer` to Chat Completions / Responses. Custom API derives the one upstream header from its selected protocol: Messages uses `x-api-key`, while Chat Completions and Responses use Bearer. The gateway does not forward dashboard or client credentials.
+Gateway API endpoints need the **Key** in one of three header forms: `Authorization: Bearer <key>`, `x-api-key: <key>`, or `x-goog-api-key: <key>`. The gateway strips client authentication before forwarding and injects the selected account's credential instead. OpenCode Go sends `x-api-key` to Messages upstreams and `Authorization: Bearer` to Chat Completions / Responses. Configurable HTTP sends the authentication header saved for each route: Bearer, `x-api-key`, or `api-key`. The gateway does not forward dashboard or client credentials.
 
 Dashboard auth depends on the listener bind. The current SPA uses `/dashboard/api/v4/auth/status`, `/dashboard/api/v4/auth/register`, `/dashboard/api/v4/auth/login`, and `/dashboard/api/v4/auth/logout`. Register, login, and logout need the same `expectedRevision` / `processGeneration` tokens as other V4 writes. The matching `/dashboard/api/auth/...` routes are labeled V2 compatibility routes for cached older pages.
 

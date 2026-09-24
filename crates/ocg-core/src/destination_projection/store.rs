@@ -534,6 +534,7 @@ fn auth_scheme_from_str(value: &str) -> anyhow::Result<AuthScheme> {
         "none" => Ok(AuthScheme::None),
         "bearer" => Ok(AuthScheme::Bearer),
         "x_api_key" => Ok(AuthScheme::XApiKey),
+        "api_key" => Ok(AuthScheme::ApiKey),
         other => anyhow::bail!("unknown destinations.auth_scheme `{other}`"),
     }
 }

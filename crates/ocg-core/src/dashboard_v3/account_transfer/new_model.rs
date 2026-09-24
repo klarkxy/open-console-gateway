@@ -1299,6 +1299,7 @@ fn customs_from_destinations(
             auth_kind: match auth_scheme {
                 ocg_domain::destination::AuthScheme::Bearer => DynamicAuthKind::Bearer,
                 ocg_domain::destination::AuthScheme::XApiKey => DynamicAuthKind::XApiKey,
+                ocg_domain::destination::AuthScheme::ApiKey => DynamicAuthKind::ApiKey,
                 ocg_domain::destination::AuthScheme::None => DynamicAuthKind::None,
             },
             mappings: models.clone(),
@@ -1357,6 +1358,7 @@ fn dynamics_from_destinations(
         let auth_kind = match auth_scheme {
             ocg_domain::destination::AuthScheme::None => DynamicAuthKind::None,
             ocg_domain::destination::AuthScheme::XApiKey => DynamicAuthKind::XApiKey,
+            ocg_domain::destination::AuthScheme::ApiKey => DynamicAuthKind::ApiKey,
             ocg_domain::destination::AuthScheme::Bearer => DynamicAuthKind::Bearer,
         };
         let mappings = destination

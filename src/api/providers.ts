@@ -69,13 +69,13 @@ export interface ProviderCatalogEntry {
   quota_unit: string;
   model_source: string;
   key_prefix?: string | null;
-  auth_schemes: ("bearer" | "x-api-key")[];
+  auth_schemes: ("bearer" | "x-api-key" | "api-key")[];
   upstream_protocols: ("chat_completions" | "responses" | "messages")[];
   form_fields: ProviderCatalogFormField[];
   model_aliases: string[];
 }
 
-export type ProviderDefinitionAuthKind = "bearer" | "x-api-key" | "none";
+export type ProviderDefinitionAuthKind = "bearer" | "x-api-key" | "api-key" | "none";
 
 export interface ProviderDefinitionModelView {
   public_model: string;

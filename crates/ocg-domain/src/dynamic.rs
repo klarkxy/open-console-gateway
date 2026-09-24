@@ -17,23 +17,25 @@ use serde::{Deserialize, Serialize};
 pub enum DynamicAuthKind {
     Bearer,
     XApiKey,
+    ApiKey,
     None,
 }
 
 impl DynamicAuthKind {
-    pub const ALL: [Self; 3] = [Self::Bearer, Self::XApiKey, Self::None];
+    pub const ALL: [Self; 4] = [Self::Bearer, Self::XApiKey, Self::ApiKey, Self::None];
 
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Bearer => "bearer",
             Self::XApiKey => "x-api-key",
+            Self::ApiKey => "api-key",
             Self::None => "none",
         }
     }
 
     pub const fn credential_kind(self) -> CredentialKind {
         match self {
-            Self::Bearer | Self::XApiKey => CredentialKind::ApiKey,
+            Self::Bearer | Self::XApiKey | Self::ApiKey => CredentialKind::ApiKey,
             Self::None => CredentialKind::None,
         }
     }
@@ -54,6 +56,7 @@ impl DynamicAuthKind {
         match self {
             Self::Bearer => Some(UpstreamAuthScheme::Bearer),
             Self::XApiKey => Some(UpstreamAuthScheme::XApiKey),
+            Self::ApiKey => Some(UpstreamAuthScheme::ApiKey),
             Self::None => None,
         }
     }
@@ -66,6 +69,7 @@ impl TryFrom<&str> for DynamicAuthKind {
         match value {
             "bearer" => Ok(Self::Bearer),
             "x-api-key" | "x_api_key" => Ok(Self::XApiKey),
+            "api-key" | "api_key" => Ok(Self::ApiKey),
             "none" => Ok(Self::None),
             _ => Err(CatalogParseError::UnknownAuthScheme(value.to_string())),
         }

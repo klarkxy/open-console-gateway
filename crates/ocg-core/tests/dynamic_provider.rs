@@ -43,6 +43,13 @@ async fn discovered_model_probes_and_routes_all_three_client_formats_with_stream
             dynamic_protocols::RESPONSES_STREAM,
         ),
         (
+            "responses",
+            "responses",
+            "api-key",
+            dynamic_protocols::RESPONSES,
+            dynamic_protocols::RESPONSES_STREAM,
+        ),
+        (
             "messages",
             "messages",
             "x-api-key",
@@ -151,6 +158,7 @@ async fn discovered_model_probes_and_routes_all_three_client_formats_with_stream
                     ))
                     .bearer_auth(&harness.state.config().gateway_key)
                     .header("cookie", "session=must-not-leak")
+                    .header("api-key", "inbound-must-not-leak")
                     .json(&body)
                     .send()
                     .await
@@ -196,9 +204,15 @@ async fn discovered_model_probes_and_routes_all_three_client_formats_with_stream
             if auth == "bearer" {
                 assert_eq!(call.authorization.as_deref(), Some("Bearer sk-matrix"));
                 assert!(call.x_api_key.is_none());
+                assert!(call.api_key.is_none());
+            } else if auth == "api-key" {
+                assert_eq!(call.api_key.as_deref(), Some("sk-matrix"));
+                assert!(call.authorization.is_none());
+                assert!(call.x_api_key.is_none());
             } else {
                 assert_eq!(call.x_api_key.as_deref(), Some("sk-matrix"));
                 assert!(call.authorization.is_none());
+                assert!(call.api_key.is_none());
                 assert!(call.anthropic_version.is_some());
             }
         }

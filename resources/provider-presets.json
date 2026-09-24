@@ -9,6 +9,18 @@
     "endpointUrl": "https://api.openai.com/v1/responses",
     "protocol": "responses",
     "authKind": "bearer",
+    "protocolRoutes": [
+      {
+        "protocol": "responses",
+        "endpointUrl": "https://api.openai.com/v1/responses",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "chat_completions",
+        "endpointUrl": "https://api.openai.com/v1/chat/completions",
+        "authScheme": "bearer"
+      }
+    ],
     "docsUrl": "https://developers.openai.com/api/reference/overview",
     "websiteUrl": "https://platform.openai.com/api-keys",
     "note": {
@@ -26,11 +38,23 @@
     "endpointUrl": "https://api.anthropic.com/v1/messages",
     "protocol": "messages",
     "authKind": "x-api-key",
+    "protocolRoutes": [
+      {
+        "protocol": "messages",
+        "endpointUrl": "https://api.anthropic.com/v1/messages",
+        "authScheme": "x-api-key"
+      },
+      {
+        "protocol": "chat_completions",
+        "endpointUrl": "https://api.anthropic.com/v1/chat/completions",
+        "authScheme": "bearer"
+      }
+    ],
     "docsUrl": "https://platform.claude.com/docs/en/api/overview",
     "websiteUrl": "https://console.anthropic.com/",
     "note": {
-      "en": "Use an Anthropic API Key. Claude subscriptions use a separate billing system.",
-      "zh": "使用 Anthropic API Key；Claude 订阅与 API 分开计费。"
+      "en": "Use an Anthropic API Key. Native Messages is preferred; Chat compatibility is for evaluation. Claude subscriptions use separate billing.",
+      "zh": "使用 Anthropic API Key；优先使用原生 Messages，Chat 兼容接口适合评估。Claude 订阅与 API 分开计费。"
     }
   },
   {
@@ -60,6 +84,18 @@
     "endpointUrl": "https://api.x.ai/v1/responses",
     "protocol": "responses",
     "authKind": "bearer",
+    "protocolRoutes": [
+      {
+        "protocol": "responses",
+        "endpointUrl": "https://api.x.ai/v1/responses",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "chat_completions",
+        "endpointUrl": "https://api.x.ai/v1/chat/completions",
+        "authScheme": "bearer"
+      }
+    ],
     "docsUrl": "https://docs.x.ai/developers/quickstart",
     "websiteUrl": "https://console.x.ai/",
     "note": {
@@ -75,12 +111,12 @@
     "offering": "api",
     "endpointUrl": "",
     "protocol": "responses",
-    "authKind": "bearer",
+    "authKind": "api-key",
     "docsUrl": "https://learn.microsoft.com/en-us/azure/foundry/openai/api-version-lifecycle",
     "websiteUrl": "https://ai.azure.com/",
     "note": {
-      "en": "Enter your resource's full v1 Responses URL and use its API Key. The upstream model must be your deployment name.",
-      "zh": "填写资源的完整 v1 Responses 地址，使用该资源的 API Key；上游模型 ID 应填部署名称。"
+      "en": "Enter the full v1 Responses URL and static API Key for your resource. OCG fills Chat for a matching Azure address. Use the deployment name as the model ID; Entra tokens use Bearer instead.",
+      "zh": "填写资源的完整 v1 Responses 地址和静态 API Key；地址匹配 Azure 资源格式时，OCG 会补齐 Chat 路由。模型 ID 填部署名称；Entra 令牌应改用 Bearer。"
     },
     "endpointPlaceholder": "https://YOUR-RESOURCE.openai.azure.com/openai/v1/responses",
     "modelDiscovery": false
@@ -97,11 +133,11 @@
     "docsUrl": "https://docs.aws.amazon.com/bedrock/latest/userguide/bedrock-mantle.html",
     "websiteUrl": "https://console.aws.amazon.com/bedrock/",
     "note": {
-      "en": "Enter the regional OpenAI-compatible Responses endpoint from AWS and a Bedrock API Key. AK/SK signing and automatic token refresh are not provided.",
-      "zh": "填写 AWS 文档中对应地区的 OpenAI 兼容 Responses 端点，使用 Bedrock API Key；不提供 AK/SK 签名和令牌自动刷新。"
+      "en": "Enter a regional Responses URL and Bedrock API Key. OCG fills Chat and Claude Messages for a matching bedrock-runtime region; model support varies. AK/SK signing is not provided.",
+      "zh": "填写 Bedrock 地区专属 Responses 地址和 API Key；地址匹配 bedrock-runtime 地区格式时，OCG 会补齐 Chat 和 Claude Messages 路由，具体模型支持仍有差异。不提供 AK/SK 签名。"
     },
     "endpointPlaceholder": "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1/responses",
-    "modelDiscovery": true
+    "modelDiscovery": false
   },
   {
     "id": "deepseek",
@@ -109,10 +145,27 @@
     "category": "official",
     "family": "deepseek",
     "offering": "api",
-    "defaultModels": ["deepseek-v4-flash"],
+    "defaultModels": ["deepseek-flash"],
     "endpointUrl": "https://api.deepseek.com/chat/completions",
     "protocol": "chat_completions",
     "authKind": "bearer",
+    "protocolRoutes": [
+      {
+        "protocol": "chat_completions",
+        "endpointUrl": "https://api.deepseek.com/chat/completions",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "responses",
+        "endpointUrl": "https://api.deepseek.com/responses",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "messages",
+        "endpointUrl": "https://api.deepseek.com/anthropic/v1/messages",
+        "authScheme": "x_api_key"
+      }
+    ],
     "docsUrl": "https://api-docs.deepseek.com/",
     "websiteUrl": "https://platform.deepseek.com/api_keys",
     "note": {
@@ -130,6 +183,23 @@
     "endpointUrl": "https://api.moonshot.cn/v1/chat/completions",
     "protocol": "chat_completions",
     "authKind": "bearer",
+    "protocolRoutes": [
+      {
+        "protocol": "chat_completions",
+        "endpointUrl": "https://api.moonshot.cn/v1/chat/completions",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "responses",
+        "endpointUrl": "https://api.moonshot.cn/v1/responses",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "messages",
+        "endpointUrl": "https://api.moonshot.cn/anthropic/v1/messages",
+        "authScheme": "bearer"
+      }
+    ],
     "docsUrl": "https://platform.kimi.com/docs/api/overview",
     "websiteUrl": "https://platform.kimi.com/console/api-keys",
     "note": {
@@ -148,6 +218,23 @@
     "endpointUrl": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
     "protocol": "chat_completions",
     "authKind": "bearer",
+    "protocolRoutes": [
+      {
+        "protocol": "chat_completions",
+        "endpointUrl": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "responses",
+        "endpointUrl": "https://open.bigmodel.cn/api/v1/responses",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "messages",
+        "endpointUrl": "https://open.bigmodel.cn/api/anthropic/v1/messages",
+        "authScheme": "x_api_key"
+      }
+    ],
     "docsUrl": "https://docs.bigmodel.cn/cn/guide/develop/http/introduction",
     "websiteUrl": "https://open.bigmodel.cn/",
     "note": {
@@ -166,6 +253,23 @@
     "endpointUrl": "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions",
     "protocol": "chat_completions",
     "authKind": "bearer",
+    "protocolRoutes": [
+      {
+        "protocol": "chat_completions",
+        "endpointUrl": "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "responses",
+        "endpointUrl": "https://open.bigmodel.cn/api/v1/responses",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "messages",
+        "endpointUrl": "https://open.bigmodel.cn/api/anthropic/v1/messages",
+        "authScheme": "x_api_key"
+      }
+    ],
     "docsUrl": "https://docs.bigmodel.cn/cn/guide/develop/cursor",
     "websiteUrl": "https://open.bigmodel.cn/",
     "note": {
@@ -203,6 +307,23 @@
     "endpointUrl": "https://api.z.ai/api/coding/paas/v4/chat/completions",
     "protocol": "chat_completions",
     "authKind": "bearer",
+    "protocolRoutes": [
+      {
+        "protocol": "chat_completions",
+        "endpointUrl": "https://api.z.ai/api/coding/paas/v4/chat/completions",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "responses",
+        "endpointUrl": "https://api.z.ai/api/v1/responses",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "messages",
+        "endpointUrl": "https://api.z.ai/api/anthropic/v1/messages",
+        "authScheme": "x_api_key"
+      }
+    ],
     "docsUrl": "https://docs.z.ai/devpack/tool/others",
     "websiteUrl": "https://z.ai/manage-apikey/apikey-list",
     "note": {
@@ -295,6 +416,18 @@
     "endpointUrl": "https://api.longcat.chat/openai/v1/chat/completions",
     "protocol": "chat_completions",
     "authKind": "bearer",
+    "protocolRoutes": [
+      {
+        "protocol": "chat_completions",
+        "endpointUrl": "https://api.longcat.chat/openai/v1/chat/completions",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "messages",
+        "endpointUrl": "https://api.longcat.chat/anthropic/v1/messages",
+        "authScheme": "bearer"
+      }
+    ],
     "docsUrl": "https://longcat.chat/platform/docs/api/chat.html",
     "websiteUrl": "https://longcat.chat/platform/api_keys",
     "note": {
@@ -313,6 +446,23 @@
     "endpointUrl": "https://tokenhub.tencentmaas.com/v1/chat/completions",
     "protocol": "chat_completions",
     "authKind": "bearer",
+    "protocolRoutes": [
+      {
+        "protocol": "chat_completions",
+        "endpointUrl": "https://tokenhub.tencentmaas.com/v1/chat/completions",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "responses",
+        "endpointUrl": "https://tokenhub.tencentmaas.com/v1/responses",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "messages",
+        "endpointUrl": "https://tokenhub.tencentmaas.com/v1/messages",
+        "authScheme": "x_api_key"
+      }
+    ],
     "docsUrl": "https://cloud.tencent.com/document/product/1823/130078",
     "websiteUrl": "https://console.cloud.tencent.com/tokenhub/apikey",
     "note": {
@@ -332,6 +482,18 @@
     "endpointUrl": "https://api.lkeap.cloud.tencent.com/plan/v3/chat/completions",
     "protocol": "chat_completions",
     "authKind": "bearer",
+    "protocolRoutes": [
+      {
+        "protocol": "chat_completions",
+        "endpointUrl": "https://api.lkeap.cloud.tencent.com/plan/v3/chat/completions",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "messages",
+        "endpointUrl": "https://api.lkeap.cloud.tencent.com/plan/anthropic/v1/messages",
+        "authScheme": "x_api_key"
+      }
+    ],
     "docsUrl": "https://cloud.tencent.com/document/product/1823/130119",
     "websiteUrl": "https://console.cloud.tencent.com/tokenhub/",
     "note": {
@@ -351,6 +513,18 @@
     "endpointUrl": "https://tokenhub-intl.tencentcloudmaas.com/plan/v3/chat/completions",
     "protocol": "chat_completions",
     "authKind": "bearer",
+    "protocolRoutes": [
+      {
+        "protocol": "chat_completions",
+        "endpointUrl": "https://tokenhub-intl.tencentcloudmaas.com/plan/v3/chat/completions",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "messages",
+        "endpointUrl": "https://tokenhub-intl.tencentcloudmaas.com/plan/anthropic/v1/messages",
+        "authScheme": "x_api_key"
+      }
+    ],
     "docsUrl": "https://www.tencentcloud.com/document/product/1300/81037",
     "websiteUrl": "https://console.tencentcloud.com/tokenhub/",
     "note": {
@@ -370,6 +544,23 @@
     "endpointUrl": "https://tokenhub.tencentmaas.com/plan/v3/chat/completions",
     "protocol": "chat_completions",
     "authKind": "bearer",
+    "protocolRoutes": [
+      {
+        "protocol": "chat_completions",
+        "endpointUrl": "https://tokenhub.tencentmaas.com/plan/v3/chat/completions",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "responses",
+        "endpointUrl": "https://tokenhub.tencentmaas.com/plan/v3/responses",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "messages",
+        "endpointUrl": "https://tokenhub.tencentmaas.com/plan/anthropic/v1/messages",
+        "authScheme": "x_api_key"
+      }
+    ],
     "docsUrl": "https://cloud.tencent.com/document/product/1823/130659",
     "websiteUrl": "https://console.cloud.tencent.com/tokenhub/",
     "note": {
@@ -389,6 +580,23 @@
     "endpointUrl": "https://tokenhub-intl.tencentcloudmaas.com/plan/v3/chat/completions",
     "protocol": "chat_completions",
     "authKind": "bearer",
+    "protocolRoutes": [
+      {
+        "protocol": "chat_completions",
+        "endpointUrl": "https://tokenhub-intl.tencentcloudmaas.com/plan/v3/chat/completions",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "responses",
+        "endpointUrl": "https://tokenhub-intl.tencentcloudmaas.com/plan/v3/responses",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "messages",
+        "endpointUrl": "https://tokenhub-intl.tencentcloudmaas.com/plan/anthropic/v1/messages",
+        "authScheme": "x_api_key"
+      }
+    ],
     "docsUrl": "https://www.tencentcloud.com/document/product/1300/81489",
     "websiteUrl": "https://console.tencentcloud.com/tokenhub/",
     "note": {
@@ -408,6 +616,23 @@
     "endpointUrl": "https://tokenhub.tencentmaas.com/plan/v3/chat/completions",
     "protocol": "chat_completions",
     "authKind": "bearer",
+    "protocolRoutes": [
+      {
+        "protocol": "chat_completions",
+        "endpointUrl": "https://tokenhub.tencentmaas.com/plan/v3/chat/completions",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "responses",
+        "endpointUrl": "https://tokenhub.tencentmaas.com/plan/v3/responses",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "messages",
+        "endpointUrl": "https://tokenhub.tencentmaas.com/plan/anthropic/v1/messages",
+        "authScheme": "x_api_key"
+      }
+    ],
     "docsUrl": "https://cloud.tencent.com/document/product/1823/131173",
     "websiteUrl": "https://console.cloud.tencent.com/tokenhub/",
     "note": {
@@ -427,6 +652,23 @@
     "endpointUrl": "https://tokenhub-intl.tencentcloudmaas.com/plan/v3/chat/completions",
     "protocol": "chat_completions",
     "authKind": "bearer",
+    "protocolRoutes": [
+      {
+        "protocol": "chat_completions",
+        "endpointUrl": "https://tokenhub-intl.tencentcloudmaas.com/plan/v3/chat/completions",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "responses",
+        "endpointUrl": "https://tokenhub-intl.tencentcloudmaas.com/plan/v3/responses",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "messages",
+        "endpointUrl": "https://tokenhub-intl.tencentcloudmaas.com/plan/anthropic/v1/messages",
+        "authScheme": "x_api_key"
+      }
+    ],
     "docsUrl": "https://www.tencentcloud.com/document/product/1300/81490",
     "websiteUrl": "https://console.tencentcloud.com/tokenhub/",
     "note": {
@@ -446,6 +688,23 @@
     "endpointUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
     "protocol": "chat_completions",
     "authKind": "bearer",
+    "protocolRoutes": [
+      {
+        "protocol": "chat_completions",
+        "endpointUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "messages",
+        "endpointUrl": "https://dashscope.aliyuncs.com/apps/anthropic/v1/messages",
+        "authScheme": "x_api_key"
+      },
+      {
+        "protocol": "responses",
+        "endpointUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1/responses",
+        "authScheme": "bearer"
+      }
+    ],
     "docsUrl": "https://help.aliyun.com/zh/model-studio/base-url",
     "websiteUrl": "https://bailian.console.aliyun.com/",
     "note": {
@@ -465,6 +724,18 @@
     "endpointUrl": "https://coding.dashscope.aliyuncs.com/v1/chat/completions",
     "protocol": "chat_completions",
     "authKind": "bearer",
+    "protocolRoutes": [
+      {
+        "protocol": "chat_completions",
+        "endpointUrl": "https://coding.dashscope.aliyuncs.com/v1/chat/completions",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "messages",
+        "endpointUrl": "https://coding.dashscope.aliyuncs.com/apps/anthropic/v1/messages",
+        "authScheme": "x_api_key"
+      }
+    ],
     "docsUrl": "https://help.aliyun.com/zh/model-studio/coding-plan",
     "websiteUrl": "https://bailian.console.aliyun.com/",
     "note": {
@@ -484,6 +755,23 @@
     "endpointUrl": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions",
     "protocol": "chat_completions",
     "authKind": "bearer",
+    "protocolRoutes": [
+      {
+        "protocol": "chat_completions",
+        "endpointUrl": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "messages",
+        "endpointUrl": "https://dashscope-intl.aliyuncs.com/apps/anthropic/v1/messages",
+        "authScheme": "x_api_key"
+      },
+      {
+        "protocol": "responses",
+        "endpointUrl": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/responses",
+        "authScheme": "bearer"
+      }
+    ],
     "docsUrl": "https://www.alibabacloud.com/help/en/model-studio/base-url",
     "websiteUrl": "https://home.qwencloud.com/api-keys",
     "note": {
@@ -503,6 +791,18 @@
     "endpointUrl": "https://coding-intl.dashscope.aliyuncs.com/v1/chat/completions",
     "protocol": "chat_completions",
     "authKind": "bearer",
+    "protocolRoutes": [
+      {
+        "protocol": "chat_completions",
+        "endpointUrl": "https://coding-intl.dashscope.aliyuncs.com/v1/chat/completions",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "messages",
+        "endpointUrl": "https://coding-intl.dashscope.aliyuncs.com/apps/anthropic/v1/messages",
+        "authScheme": "x_api_key"
+      }
+    ],
     "docsUrl": "https://www.alibabacloud.com/help/en/model-studio/coding-plan",
     "websiteUrl": "https://home.qwencloud.com/api-keys",
     "note": {
@@ -522,6 +822,23 @@
     "endpointUrl": "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/chat/completions",
     "protocol": "chat_completions",
     "authKind": "bearer",
+    "protocolRoutes": [
+      {
+        "protocol": "chat_completions",
+        "endpointUrl": "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/chat/completions",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "messages",
+        "endpointUrl": "https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic/v1/messages",
+        "authScheme": "x_api_key"
+      },
+      {
+        "protocol": "responses",
+        "endpointUrl": "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/responses",
+        "authScheme": "bearer"
+      }
+    ],
     "docsUrl": "https://www.alibabacloud.com/help/en/model-studio/base-url",
     "websiteUrl": "https://home.qwencloud.com/api-keys",
     "note": {
@@ -541,6 +858,23 @@
     "endpointUrl": "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
     "protocol": "chat_completions",
     "authKind": "bearer",
+    "protocolRoutes": [
+      {
+        "protocol": "chat_completions",
+        "endpointUrl": "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "responses",
+        "endpointUrl": "https://ark.cn-beijing.volces.com/api/v3/responses",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "messages",
+        "endpointUrl": "https://ark.cn-beijing.volces.com/api/compatible/v1/messages",
+        "authScheme": "bearer"
+      }
+    ],
     "docsUrl": "https://www.volcengine.com/docs/ark/chat-api",
     "websiteUrl": "https://console.volcengine.com/ark/",
     "note": {
@@ -560,6 +894,23 @@
     "endpointUrl": "https://ark.cn-beijing.volces.com/api/plan/v3/chat/completions",
     "protocol": "chat_completions",
     "authKind": "bearer",
+    "protocolRoutes": [
+      {
+        "protocol": "chat_completions",
+        "endpointUrl": "https://ark.cn-beijing.volces.com/api/plan/v3/chat/completions",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "responses",
+        "endpointUrl": "https://ark.cn-beijing.volces.com/api/plan/v3/responses",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "messages",
+        "endpointUrl": "https://ark.cn-beijing.volces.com/api/plan/v1/messages",
+        "authScheme": "bearer"
+      }
+    ],
     "docsUrl": "https://www.volcengine.com/docs/82379/2160841",
     "websiteUrl": "https://console.volcengine.com/ark/",
     "note": {
@@ -579,6 +930,23 @@
     "endpointUrl": "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions",
     "protocol": "chat_completions",
     "authKind": "bearer",
+    "protocolRoutes": [
+      {
+        "protocol": "chat_completions",
+        "endpointUrl": "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "responses",
+        "endpointUrl": "https://ark.cn-beijing.volces.com/api/coding/v3/responses",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "messages",
+        "endpointUrl": "https://ark.cn-beijing.volces.com/api/coding/v1/messages",
+        "authScheme": "bearer"
+      }
+    ],
     "docsUrl": "https://www.volcengine.com/docs/82379/1928261",
     "websiteUrl": "https://console.volcengine.com/ark/",
     "note": {
@@ -598,11 +966,28 @@
     "endpointUrl": "https://ark.ap-southeast.bytepluses.com/api/coding/v3/chat/completions",
     "protocol": "chat_completions",
     "authKind": "bearer",
+    "protocolRoutes": [
+      {
+        "protocol": "chat_completions",
+        "endpointUrl": "https://ark.ap-southeast.bytepluses.com/api/coding/v3/chat/completions",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "responses",
+        "endpointUrl": "https://ark.ap-southeast.bytepluses.com/api/coding/v3/responses",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "messages",
+        "endpointUrl": "https://ark.ap-southeast.bytepluses.com/api/coding/v1/messages",
+        "authScheme": "bearer"
+      }
+    ],
     "docsUrl": "https://docs.byteplus.com/en/docs/ModelArk/1928261",
     "websiteUrl": "https://console.byteplus.com/ark/",
     "note": {
-      "en": "Singapore Coding Plan endpoint and dedicated Key. The pay-as-you-go endpoint is separate.",
-      "zh": "新加坡 Coding Plan 端点与专用 Key，按量 API 使用不同端点。"
+      "en": "Singapore Coding Plan endpoints and dedicated Key. The pay-as-you-go endpoints are separate; Messages uses the official Claude-compatible base URL plus /v1/messages.",
+      "zh": "新加坡 Coding Plan 专用端点与 Key，按量 API 使用不同端点；Messages 使用官方 Claude 兼容 Base URL 加 /v1/messages。"
     },
     "modelDiscovery": false
   },
@@ -617,6 +1002,18 @@
     "endpointUrl": "https://qianfan.baidubce.com/v2/chat/completions",
     "protocol": "chat_completions",
     "authKind": "bearer",
+    "protocolRoutes": [
+      {
+        "protocol": "chat_completions",
+        "endpointUrl": "https://qianfan.baidubce.com/v2/chat/completions",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "responses",
+        "endpointUrl": "https://qianfan.baidubce.com/v2/responses",
+        "authScheme": "bearer"
+      }
+    ],
     "docsUrl": "https://cloud.baidu.com/doc/qianfan/s/Hmh4suq26",
     "websiteUrl": "https://console.bce.baidu.com/qianfan/",
     "note": {
@@ -636,6 +1033,18 @@
     "endpointUrl": "https://qianfan.baidubce.com/v2/coding/chat/completions",
     "protocol": "chat_completions",
     "authKind": "bearer",
+    "protocolRoutes": [
+      {
+        "protocol": "chat_completions",
+        "endpointUrl": "https://qianfan.baidubce.com/v2/coding/chat/completions",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "messages",
+        "endpointUrl": "https://qianfan.baidubce.com/anthropic/coding/v1/messages",
+        "authScheme": "bearer"
+      }
+    ],
     "docsUrl": "https://cloud.baidu.com/doc/qianfan/s/imlg0beiu",
     "websiteUrl": "https://console.bce.baidu.com/qianfan/",
     "note": {
@@ -655,6 +1064,18 @@
     "endpointUrl": "https://qianfan.baidubce.com/v2/tokenplan/team/chat/completions",
     "protocol": "chat_completions",
     "authKind": "bearer",
+    "protocolRoutes": [
+      {
+        "protocol": "chat_completions",
+        "endpointUrl": "https://qianfan.baidubce.com/v2/tokenplan/team/chat/completions",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "messages",
+        "endpointUrl": "https://qianfan.baidubce.com/anthropic/tokenplan/team/v1/messages",
+        "authScheme": "bearer"
+      }
+    ],
     "docsUrl": "https://cloud.baidu.com/doc/qianfan/s/smqeup7hm",
     "websiteUrl": "https://console.bce.baidu.com/qianfan/",
     "note": {
@@ -674,6 +1095,23 @@
     "endpointUrl": "https://api.stepfun.com/v1/chat/completions",
     "protocol": "chat_completions",
     "authKind": "bearer",
+    "protocolRoutes": [
+      {
+        "protocol": "chat_completions",
+        "endpointUrl": "https://api.stepfun.com/v1/chat/completions",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "responses",
+        "endpointUrl": "https://api.stepfun.com/v1/responses",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "messages",
+        "endpointUrl": "https://api.stepfun.com/v1/messages",
+        "authScheme": "bearer"
+      }
+    ],
     "docsUrl": "https://platform.stepfun.com/docs/zh/api-reference/chat/chat-completion-create",
     "websiteUrl": "https://platform.stepfun.com/interface-key",
     "note": {
@@ -693,6 +1131,18 @@
     "endpointUrl": "https://api.stepfun.com/step_plan/v1/chat/completions",
     "protocol": "chat_completions",
     "authKind": "bearer",
+    "protocolRoutes": [
+      {
+        "protocol": "chat_completions",
+        "endpointUrl": "https://api.stepfun.com/step_plan/v1/chat/completions",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "messages",
+        "endpointUrl": "https://api.stepfun.com/step_plan/v1/messages",
+        "authScheme": "bearer"
+      }
+    ],
     "docsUrl": "https://platform.stepfun.com/docs/zh/step-plan/integrations/reasoning-api",
     "websiteUrl": "https://platform.stepfun.com/interface-key",
     "note": {
@@ -712,6 +1162,23 @@
     "endpointUrl": "https://api.stepfun.ai/v1/chat/completions",
     "protocol": "chat_completions",
     "authKind": "bearer",
+    "protocolRoutes": [
+      {
+        "protocol": "chat_completions",
+        "endpointUrl": "https://api.stepfun.ai/v1/chat/completions",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "responses",
+        "endpointUrl": "https://api.stepfun.ai/v1/responses",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "messages",
+        "endpointUrl": "https://api.stepfun.ai/v1/messages",
+        "authScheme": "bearer"
+      }
+    ],
     "docsUrl": "https://platform.stepfun.ai/docs/en/api-reference/chat/chat-completion-create",
     "websiteUrl": "https://platform.stepfun.ai/interface-key",
     "note": {
@@ -731,6 +1198,18 @@
     "endpointUrl": "https://api.stepfun.ai/step_plan/v1/chat/completions",
     "protocol": "chat_completions",
     "authKind": "bearer",
+    "protocolRoutes": [
+      {
+        "protocol": "chat_completions",
+        "endpointUrl": "https://api.stepfun.ai/step_plan/v1/chat/completions",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "messages",
+        "endpointUrl": "https://api.stepfun.ai/step_plan/v1/messages",
+        "authScheme": "bearer"
+      }
+    ],
     "docsUrl": "https://platform.stepfun.ai/docs/en/step-plan/integrations/reasoning-api",
     "websiteUrl": "https://platform.stepfun.ai/interface-key",
     "note": {
@@ -825,6 +1304,18 @@
     "endpointUrl": "https://api.ant-ling.com/v1/chat/completions",
     "protocol": "chat_completions",
     "authKind": "bearer",
+    "protocolRoutes": [
+      {
+        "protocol": "chat_completions",
+        "endpointUrl": "https://api.ant-ling.com/v1/chat/completions",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "messages",
+        "endpointUrl": "https://api.ant-ling.com/anthropic/v1/messages",
+        "authScheme": "bearer"
+      }
+    ],
     "docsUrl": "https://developer.ant-ling.com/zh-CN/docs/api-reference/openai/",
     "websiteUrl": "https://chat.ant-ling.com/",
     "note": {
@@ -844,11 +1335,23 @@
     "endpointUrl": "https://vanchin.streamlake.ai/api/gateway/v1/endpoints/chat/completions",
     "protocol": "chat_completions",
     "authKind": "bearer",
+    "protocolRoutes": [
+      {
+        "protocol": "chat_completions",
+        "endpointUrl": "https://vanchin.streamlake.ai/api/gateway/v1/endpoints/chat/completions",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "messages",
+        "endpointUrl": "https://vanchin.streamlake.ai/api/gateway/v1/endpoints/kat-coder-pro-v2.5/claude-code-proxy/v1/messages",
+        "authScheme": "bearer"
+      }
+    ],
     "docsUrl": "https://www.streamlake.ai/document/DOC/mg6k6nlp8j6qxicx4c9",
     "websiteUrl": "https://console.streamlake.ai/",
     "note": {
-      "en": "Pay-as-you-go endpoint composed from the official OpenAI-compatible Base URL. Enter the model ID shown in your console.",
-      "zh": "按官方 OpenAI 兼容 Base URL 拼接的按量端点；填写控制台中的模型 ID。"
+      "en": "Pay-as-you-go Chat endpoint; the Messages proxy URL is specific to kat-coder-pro-v2.5. Review it when changing models.",
+      "zh": "按量 Chat 端点；Messages 代理地址专用于 kat-coder-pro-v2.5，更换模型时请复核。"
     },
     "modelDiscovery": false
   },
@@ -863,11 +1366,23 @@
     "endpointUrl": "https://vanchin.streamlake.ai/api/gateway/coding/v1/chat/completions",
     "protocol": "chat_completions",
     "authKind": "bearer",
+    "protocolRoutes": [
+      {
+        "protocol": "chat_completions",
+        "endpointUrl": "https://vanchin.streamlake.ai/api/gateway/coding/v1/chat/completions",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "messages",
+        "endpointUrl": "https://vanchin.streamlake.ai/api/gateway/coding/kat-coder-pro-v2.5/claude-code-proxy/v1/messages",
+        "authScheme": "bearer"
+      }
+    ],
     "docsUrl": "https://www.streamlake.ai/document/DOC/mg6k6nlp8j6qxicx4c9",
     "websiteUrl": "https://console.streamlake.ai/",
     "note": {
-      "en": "Official Coding Plan Base URL with the standard Chat Completions path. Use the plan's API Key.",
-      "zh": "官方 Coding Plan Base URL 加标准 Chat Completions 路径，使用套餐 API Key。"
+      "en": "Use the Coding Plan Key. The Messages proxy URL is specific to kat-coder-pro-v2.5; review it when changing models and follow the plan's permitted-use terms.",
+      "zh": "使用 Coding Plan Key；Messages 代理地址专用于 kat-coder-pro-v2.5，更换模型时请复核，并遵守套餐适用范围。"
     },
     "modelDiscovery": false
   },
@@ -877,16 +1392,70 @@
     "category": "aggregator",
     "family": "openrouter",
     "offering": "api",
+    "variant": "API",
     "defaultModels": ["~openai/gpt-latest"],
     "endpointUrl": "https://openrouter.ai/api/v1/chat/completions",
     "protocol": "chat_completions",
     "authKind": "bearer",
+    "protocolRoutes": [
+      {
+        "protocol": "chat_completions",
+        "endpointUrl": "https://openrouter.ai/api/v1/chat/completions",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "responses",
+        "endpointUrl": "https://openrouter.ai/api/v1/responses",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "messages",
+        "endpointUrl": "https://openrouter.ai/api/v1/messages",
+        "authScheme": "bearer"
+      }
+    ],
     "docsUrl": "https://openrouter.ai/docs/quickstart",
     "websiteUrl": "https://openrouter.ai/settings/keys",
     "note": {
       "en": "Use exact provider/model IDs. Choose chat models from the catalog.",
       "zh": "使用完整 provider/model ID，从目录中选择对话模型。"
     }
+  },
+  {
+    "id": "openrouter-free",
+    "name": "OpenRouter Free",
+    "category": "aggregator",
+    "family": "openrouter",
+    "offering": "api",
+    "variant": "Free",
+    "defaultModels": ["openrouter/free"],
+    "endpointUrl": "https://openrouter.ai/api/v1/chat/completions",
+    "protocol": "chat_completions",
+    "authKind": "bearer",
+    "protocolRoutes": [
+      {
+        "protocol": "chat_completions",
+        "endpointUrl": "https://openrouter.ai/api/v1/chat/completions",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "responses",
+        "endpointUrl": "https://openrouter.ai/api/v1/responses",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "messages",
+        "endpointUrl": "https://openrouter.ai/api/v1/messages",
+        "authScheme": "bearer"
+      }
+    ],
+    "docsUrl": "https://openrouter.ai/docs/cookbook/get-started/free-models-router-playground",
+    "websiteUrl": "https://openrouter.ai/settings/keys",
+    "note": {
+      "en": "Uses your OpenRouter Key and the free-model router. Specific free models need an exact :free catalog ID. Free limits and availability can vary.",
+      "zh": "使用 OpenRouter Key 与免费模型路由。指定免费模型须填写目录中的准确 :free ID；免费额度和可用性可能变化。"
+    },
+    "modelDiscovery": false
   },
   {
     "id": "siliconflow-cn",
@@ -899,6 +1468,18 @@
     "endpointUrl": "https://api.siliconflow.cn/v1/chat/completions",
     "protocol": "chat_completions",
     "authKind": "bearer",
+    "protocolRoutes": [
+      {
+        "protocol": "chat_completions",
+        "endpointUrl": "https://api.siliconflow.cn/v1/chat/completions",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "messages",
+        "endpointUrl": "https://api.siliconflow.cn/v1/messages",
+        "authScheme": "bearer"
+      }
+    ],
     "docsUrl": "https://docs.siliconflow.cn/docs/userguide/quickstart",
     "websiteUrl": "https://cloud.siliconflow.cn/",
     "note": {
@@ -917,11 +1498,23 @@
     "endpointUrl": "https://api.siliconflow.com/v1/chat/completions",
     "protocol": "chat_completions",
     "authKind": "bearer",
+    "protocolRoutes": [
+      {
+        "protocol": "chat_completions",
+        "endpointUrl": "https://api.siliconflow.com/v1/chat/completions",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "messages",
+        "endpointUrl": "https://api.siliconflow.com/v1/messages",
+        "authScheme": "bearer"
+      }
+    ],
     "docsUrl": "https://docs.siliconflow.com/en/userguide/quickstart",
     "websiteUrl": "https://cloud.siliconflow.com/",
     "note": {
-      "en": "Use a Global-site Key and select a chat-capable model.",
-      "zh": "使用国际站 Key，并选择支持对话的模型。"
+      "en": "Use a Global-site Key and a model supported by the selected format. The Messages path follows the documented international Claude-compatible base URL.",
+      "zh": "使用国际站 Key 和支持所选格式的模型；Messages 地址按官方国际站 Claude 兼容 Base URL 补全。"
     }
   },
   {
@@ -968,11 +1561,23 @@
     "endpointUrl": "https://api.ppio.com/openai/v1/chat/completions",
     "protocol": "chat_completions",
     "authKind": "bearer",
+    "protocolRoutes": [
+      {
+        "protocol": "chat_completions",
+        "endpointUrl": "https://api.ppio.com/openai/v1/chat/completions",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "messages",
+        "endpointUrl": "https://api.ppio.com/anthropic/v1/messages",
+        "authScheme": "bearer"
+      }
+    ],
     "docsUrl": "https://ppio.com/docs/models/reference-llm-create-chat-completion",
     "websiteUrl": "https://ppio.com/",
     "note": {
-      "en": "Use PPIO's API Key and full model ID.",
-      "zh": "使用 PPIO API Key 和完整模型 ID。"
+      "en": "Use PPIO's API Key and full model ID. Messages availability depends on the model.",
+      "zh": "使用 PPIO API Key 和完整模型 ID；Messages 是否可用取决于模型。"
     }
   },
   {
@@ -985,6 +1590,18 @@
     "endpointUrl": "https://api.qnaigc.com/v1/chat/completions",
     "protocol": "chat_completions",
     "authKind": "bearer",
+    "protocolRoutes": [
+      {
+        "protocol": "chat_completions",
+        "endpointUrl": "https://api.qnaigc.com/v1/chat/completions",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "messages",
+        "endpointUrl": "https://api.qnaigc.com/v1/messages",
+        "authScheme": "bearer"
+      }
+    ],
     "docsUrl": "https://developer.qiniu.com/aitokenapi/13379/real-time-ai-interface-api",
     "websiteUrl": "https://portal.qiniu.com/",
     "note": {
@@ -1002,11 +1619,23 @@
     "endpointUrl": "https://api.novita.ai/openai/v1/chat/completions",
     "protocol": "chat_completions",
     "authKind": "bearer",
+    "protocolRoutes": [
+      {
+        "protocol": "chat_completions",
+        "endpointUrl": "https://api.novita.ai/openai/v1/chat/completions",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "messages",
+        "endpointUrl": "https://api.novita.ai/anthropic/v1/messages",
+        "authScheme": "bearer"
+      }
+    ],
     "docsUrl": "https://docs.novita.ai/api-reference/model-apis-llm-create-chat-completion",
     "websiteUrl": "https://novita.ai/",
     "note": {
-      "en": "Use a Novita API Key and a model from its LLM catalog.",
-      "zh": "使用 Novita API Key 和其 LLM 目录中的模型。"
+      "en": "Use a Novita API Key and a model from its LLM catalog. Messages availability depends on the model.",
+      "zh": "使用 Novita API Key 和其 LLM 目录中的模型；Messages 是否可用取决于模型。"
     }
   },
   {
@@ -1020,6 +1649,23 @@
     "endpointUrl": "https://api.modelverse.cn/v1/chat/completions",
     "protocol": "chat_completions",
     "authKind": "bearer",
+    "protocolRoutes": [
+      {
+        "protocol": "chat_completions",
+        "endpointUrl": "https://api.modelverse.cn/v1/chat/completions",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "responses",
+        "endpointUrl": "https://api.modelverse.cn/v1/responses",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "messages",
+        "endpointUrl": "https://api.modelverse.cn/v1/messages",
+        "authScheme": "bearer"
+      }
+    ],
     "docsUrl": "https://compshare.cn/docs/modelverse/models/text_api/openai_compatible",
     "websiteUrl": "https://www.compshare.cn/",
     "note": {
@@ -1038,6 +1684,18 @@
     "endpointUrl": "https://cp.compshare.cn/v1/chat/completions",
     "protocol": "chat_completions",
     "authKind": "bearer",
+    "protocolRoutes": [
+      {
+        "protocol": "chat_completions",
+        "endpointUrl": "https://cp.compshare.cn/v1/chat/completions",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "messages",
+        "endpointUrl": "https://cp.compshare.cn/v1/messages",
+        "authScheme": "bearer"
+      }
+    ],
     "docsUrl": "https://compshare.cn/docs/modelverse/codingfaq",
     "websiteUrl": "https://www.compshare.cn/",
     "note": {
@@ -1055,6 +1713,23 @@
     "endpointUrl": "https://api.atlascloud.ai/v1/chat/completions",
     "protocol": "chat_completions",
     "authKind": "bearer",
+    "protocolRoutes": [
+      {
+        "protocol": "chat_completions",
+        "endpointUrl": "https://api.atlascloud.ai/v1/chat/completions",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "responses",
+        "endpointUrl": "https://api.atlascloud.ai/v1/responses",
+        "authScheme": "bearer"
+      },
+      {
+        "protocol": "messages",
+        "endpointUrl": "https://api.atlascloud.ai/v1/messages",
+        "authScheme": "x_api_key"
+      }
+    ],
     "docsUrl": "https://www.atlascloud.ai/docs/coding-plan/api",
     "websiteUrl": "https://www.atlascloud.ai/console/coding-plan",
     "note": {

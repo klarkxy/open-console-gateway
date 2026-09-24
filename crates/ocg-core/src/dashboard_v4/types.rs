@@ -853,6 +853,7 @@ pub enum AuthSchemeDto {
     None,
     Bearer,
     XApiKey,
+    ApiKey,
 }
 
 /// Which client model names may resolve to a destination mapping.

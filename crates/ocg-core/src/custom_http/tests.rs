@@ -22,6 +22,25 @@ fn official_presets_resolve_to_their_exact_inference_endpoints() {
             ocg_domain::dynamic::DynamicAuthKind::try_from(preset["authKind"].as_str().unwrap())
                 .unwrap();
         assert!(auth.requires_key(), "{id}");
+        if let Some(routes) = preset["protocolRoutes"].as_array() {
+            for route in routes {
+                let route_url = route["endpointUrl"].as_str().unwrap();
+                let route_protocol =
+                    UpstreamProtocolKind::try_from(route["protocol"].as_str().unwrap()).unwrap();
+                let route_auth = ocg_domain::dynamic::DynamicAuthKind::try_from(
+                    route["authScheme"].as_str().unwrap(),
+                )
+                .unwrap();
+                let resolved = resolve_custom_endpoints(route_url, route_protocol).unwrap();
+                assert_eq!(resolved.inference.as_str(), route_url, "{id}");
+                let headers = isolated_inference_headers(
+                    route_auth.upstream_auth().unwrap(),
+                    "preset-test-key",
+                )
+                .unwrap();
+                assert_eq!(headers.len(), 1, "{id}");
+            }
+        }
         if endpoint.is_empty() {
             assert!(
                 resolve_custom_endpoints(endpoint, protocol).is_err(),
@@ -42,6 +61,10 @@ fn official_presets_resolve_to_their_exact_inference_endpoints() {
             }
             ocg_domain::dynamic::DynamicAuthKind::XApiKey => {
                 assert_eq!(headers["x-api-key"], "preset-test-key", "{id}");
+                assert!(!headers.contains_key(AUTHORIZATION), "{id}");
+            }
+            ocg_domain::dynamic::DynamicAuthKind::ApiKey => {
+                assert_eq!(headers["api-key"], "preset-test-key", "{id}");
                 assert!(!headers.contains_key(AUTHORIZATION), "{id}");
             }
             ocg_domain::dynamic::DynamicAuthKind::None => unreachable!(),
@@ -385,6 +408,20 @@ fn isolated_headers_do_not_copy_client_or_dashboard_credentials() {
         UpstreamAuthScheme::XApiKey
     ));
     assert_eq!(x_api.len(), 1);
+    let api_key = isolated_custom_headers(UpstreamAuthScheme::ApiKey, "sk-custom").unwrap();
+    assert_eq!(api_key.get("api-key").unwrap(), "sk-custom");
+    assert!(api_key.get(AUTHORIZATION).is_none());
+    assert!(api_key.get("x-api-key").is_none());
+    assert!(!header_map_contains_forbidden_client_credentials(
+        &api_key,
+        UpstreamAuthScheme::ApiKey
+    ));
+    let mut poisoned = api_key.clone();
+    poisoned.insert(AUTHORIZATION, "Bearer inbound".parse().unwrap());
+    assert!(header_map_contains_forbidden_client_credentials(
+        &poisoned,
+        UpstreamAuthScheme::ApiKey
+    ));
     assert!(forbidden_forwarded_header_names().contains(&"cookie"));
     assert!(forbidden_forwarded_header_names().contains(&"authorization"));
 }

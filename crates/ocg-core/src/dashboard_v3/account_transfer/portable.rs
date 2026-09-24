@@ -340,6 +340,7 @@ pub(super) fn auth_scheme_from_dto(value: AuthSchemeDto) -> AuthScheme {
         AuthSchemeDto::None => AuthScheme::None,
         AuthSchemeDto::Bearer => AuthScheme::Bearer,
         AuthSchemeDto::XApiKey => AuthScheme::XApiKey,
+        AuthSchemeDto::ApiKey => AuthScheme::ApiKey,
     }
 }
 

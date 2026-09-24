@@ -20,7 +20,7 @@ The **Adapter Registry** stays static and sealed. User-defined Providers are typ
 
 1. Open **Providers** or **Accounts**, choose **Add Provider** / **Add account**,
    then pick **Manual setup** in the shared chooser.
-2. Enter a name, one API Endpoint, one upstream protocol (Chat Completions, Responses, or Messages), and one auth kind (Bearer, `x-api-key`, or none).
+2. Enter a name, one API Endpoint, one upstream protocol (Chat Completions, Responses, or Messages), and one auth kind (Bearer, `x-api-key`, `api-key`, or none).
 3. Add at least one public-model → exact-upstream-ID mapping. **Fetch models** and **Test model** stay on this form but need a Key; for keyed auth they remain disabled until you enter one.
 4. Save. Keyed auth may include an optional Key: filling it creates the first account in the same write; leaving it empty saves the definition only (shown as **Missing credential** until you use **Add Key**). A no-auth Provider creates one singleton account without a Key. The write goes through `POST /dashboard/api/v4/onboarding/commit` and does not require a successful probe. If the network drops before a response, the dashboard retries the same commit automatically; saving the unchanged draft again replays the stored result instead of creating a second Provider.
 

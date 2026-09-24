@@ -40,7 +40,7 @@ An account stores one Key (when auth requires it), notes, enablement, model
 scope, grants, quota relation, and runtime state. No-auth connections expose
 one singleton credential and reject a second.
 
-Quota cards follow catalog capabilities instead of Provider IDs. `usageAvailability=available` loads Provider quota windows and enables the refresh action. `manualUsageCalibration=true` additionally loads the local calibration object for editing, while the card itself still renders the Provider windows. Other rows show no quota strip; Zen Free keeps its separate egress cooldown. Known MiniMax/Kimi window names remain friendly, and unknown window names are humanized without changing stored wire values. Custom API and user-defined Provider cards whose stored Endpoint host is exactly `api.deepseek.com`, `api.moonshot.cn`, or `api.moonshot.ai` can also **Refresh quota** to read that official current balance. Pay-as-you-go API cards (DeepSeek / Zhipu presets and New API / Sub2API sites) show **Balance**, **This month**, and **Lifetime** as figures, never a quota bar. Known-host official balances keep a remaining figure. **Refresh quota** also refreshes that destination’s model list (the official Provider catalog for built-in Plans; `/v1/models` discovery for Custom / known-host balance cards and platform Keys), so you do not need to open **Providers** only to refresh the catalog. Newly discovered built-in catalog rows stay off until enabled on Providers. Usage snapshots stay display-only: a bar at 100%, unknown, or failed never marks a Key exhausted and never changes routing. Other Custom destinations have no balance endpoint in this product.
+Quota cards follow catalog capabilities instead of Provider IDs. `usageAvailability=available` loads Provider quota windows and enables the refresh action. `manualUsageCalibration=true` additionally loads the local calibration object for editing, while the card itself still renders the Provider windows. Other rows show no quota strip; Zen Free keeps its separate egress cooldown. Known MiniMax/Kimi window names remain friendly, and unknown window names are humanized without changing stored wire values. Custom API and user-defined Provider cards whose stored Endpoint host is exactly `api.deepseek.com`, `api.moonshot.cn`, or `api.moonshot.ai` can also **Refresh quota** to read that official current balance. Pay-as-you-go API cards (DeepSeek / Zhipu presets and New API / Sub2API sites) show **Balance**, **This month**, and **Lifetime** as figures, never a quota bar. Known-host official balances keep a remaining figure. **Refresh quota** also refreshes that destination’s model list (the official Provider catalog for built-in Plans; `/v1/models` discovery for Custom / known-host balance cards and platform Keys), so you do not need to open **Providers** only to refresh the catalog. Built-in catalog rows follow each Provider's documented default policy; GOAT's first snapshot starts only its plan-included models on. Usage snapshots stay display-only: a bar at 100%, unknown, or failed never marks a Key exhausted and never changes routing. Other Custom destinations have no balance endpoint in this product.
 
 GOAT cards offer **Refresh quota** to read the `$14 / $35 / $70`
 windows from Command Code first-party account usage. The endpoint is used
@@ -63,7 +63,7 @@ The Adapter Registry is sealed. Built-in Provider families are:
 | --- | --- | --- | --- |
 | OpenCode Go | `opencode` | Yes | One officially distributable API Key per account; managed signup remains Beta |
 | Zen Free | `opencode-zen-free` | Yes | One credentialless, anonymous singleton; sortable and enableable, not deletable; quota shared by egress IP |
-| Command Code GOAT | `command-code` | Yes | Public Provider catalog; discovered models with documented supported endpoints default on. Existing models stay off only when confirmed supported but disabled, or when you explicitly turned them off; models with no protocol evidence wait for official documentation. No account-level GOAT/All or Max mode. |
+| Command Code GOAT | `command-code` | Yes | Public Provider catalog; the first snapshot starts only GOAT plan models on. Models first discovered later default on with documented endpoints. Saved switches persist; models with no protocol evidence wait for official documentation. No account-level GOAT/All or Max mode. |
 | MiniMax CN Token Plan | `minimax` | Yes | Dedicated `sk-cp` Key; fixed official Chat, Responses, and Messages routes, authenticated model directory, and manual official Token Plan usage refresh |
 | Kimi Code CN | `kimi` | Yes | Dedicated Kimi Code Key; fixed official Chat and Messages routes, authenticated model directory, and manual official weekly/rate-window usage refresh |
 | Ollama Cloud | `ollama` | Yes | Fixed-origin Chat Completions only (`https://ollama.com`, Bearer); public keyless catalog refresh; account billing tier (Pro $60 / Max $300 / Team $1000 USD Credits per billing month) plus purchase date; local monthly soft-credit estimate from official per-request usage and the manual `https://ollama.com/pricing` table; unconfigured existing accounts stay routeable with no meter |
@@ -174,10 +174,10 @@ yet refreshed** quota bar; official windows replace it after refresh.
 Command Code's official `GET /models` is public and refreshes one
 Provider-level catalog. **Refresh quota** on the account card also runs that
 catalog refresh. The Providers matrix remains the model-supply control: GOAT
-preset rows and newly discovered models with documented supported endpoints
-default on. Existing models stay off only when confirmed supported but disabled,
-or when you explicitly turned them off; models with no protocol evidence wait
-for official documentation.
+plan-included rows start on in the first catalog snapshot. Other rows in that
+snapshot start off; models first discovered in later refreshes default on with
+documented supported endpoints. Saved switches persist, and models without
+protocol evidence wait for official documentation.
 
 Custom API is a live trusted-administrator destination. **Providers** edits its mappings: each row pairs a public model name (what the client requests) with the exact upstream model ID (what OCG sends). A connection stores either its legacy route or one to three explicit Chat Completions, Responses, and/or Messages routes, each with its endpoint and authentication. Each mapping inherits the route for its protocol unless it has a single explicit upstream override. **Accounts** edits only attached Keys and bindings. Existing complete endpoints remain exact. **Fetch models** uses the saved directory route; non-standard routes remain exact for inference and retain manual model entry instead of guessing a directory URL. Discovery returns upstream IDs only. Choosing one imports a row with the public name and upstream ID exactly equal. Fetching does not save, verify, enable, or grant a Key.
 
@@ -187,8 +187,9 @@ origin. Metadata, link-local, and opaque IPv4-trick hosts (for example
 credentials, query strings, and fragments are rejected. The gateway
 rejects redirects and does not forward dashboard or client authentication.
 A model or endpoint override to another Origin does not inherit the stored Key.
-Chat Completions and Responses use `Authorization: Bearer <key>`; Messages uses
-`x-api-key: <key>`. A 401 does not retry with a different auth header. Root and
+Each configurable HTTP route sends the authentication header saved for that route:
+`Authorization: Bearer <key>`, `x-api-key: <key>`, or `api-key: <key>`.
+A 401 does not retry with a different auth header. Root and
 `/v1` bases resolve through the same rule for discovery, verification, and
 production inference; legacy complete Endpoints are requested verbatim.
 Custom HTTP uses the same process-wide Direct / Manual / Auto proxy policy;

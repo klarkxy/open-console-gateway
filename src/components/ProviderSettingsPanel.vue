@@ -98,6 +98,7 @@ function authDisplayName(kind: string): string {
   if (kind === "none") return t("无鉴权");
   if (kind === "bearer") return "Bearer";
   if (kind === "x-api-key") return "x-api-key";
+  if (kind === "api-key") return "api-key";
   return kind;
 }
 </script>

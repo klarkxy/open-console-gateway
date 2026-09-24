@@ -576,6 +576,7 @@ pub(crate) fn custom_auth_kind_on(
         .map(|value| match value.as_str() {
             "bearer" => Ok(ocg_domain::dynamic::DynamicAuthKind::Bearer),
             "x_api_key" | "x-api-key" => Ok(ocg_domain::dynamic::DynamicAuthKind::XApiKey),
+            "api_key" | "api-key" => Ok(ocg_domain::dynamic::DynamicAuthKind::ApiKey),
             "none" => Ok(ocg_domain::dynamic::DynamicAuthKind::None),
             other => anyhow::bail!("unknown destinations.auth_scheme `{other}`"),
         })
@@ -1219,6 +1220,7 @@ pub(crate) fn custom_destination_for_update_on(
     let auth_scheme = match auth_scheme.as_str() {
         "bearer" => AuthScheme::Bearer,
         "x_api_key" | "x-api-key" => AuthScheme::XApiKey,
+        "api_key" | "api-key" => AuthScheme::ApiKey,
         "none" => AuthScheme::None,
         other => anyhow::bail!("unknown destinations.auth_scheme `{other}`"),
     };
@@ -1283,6 +1285,7 @@ pub(crate) fn upsert_imported_custom_destination_on(
         auth_kind: match auth_scheme {
             AuthScheme::Bearer => ocg_domain::dynamic::DynamicAuthKind::Bearer,
             AuthScheme::XApiKey => ocg_domain::dynamic::DynamicAuthKind::XApiKey,
+            AuthScheme::ApiKey => ocg_domain::dynamic::DynamicAuthKind::ApiKey,
             AuthScheme::None => ocg_domain::dynamic::DynamicAuthKind::None,
         },
         mappings: models.to_vec(),

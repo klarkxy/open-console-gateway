@@ -648,6 +648,7 @@ pub(crate) async fn forward_request_with_deadline(
             header.as_str(),
             "authorization"
                 | "x-api-key"
+                | "api-key"
                 | "x-goog-api-key"
                 | "cookie"
                 | "proxy-authorization"
@@ -690,7 +691,10 @@ pub(crate) async fn forward_request_with_deadline(
     let url = attempt_spec
         .request_url()
         .map_err(|error| anyhow::anyhow!(error))?;
-    if matches!(resolved_auth, UpstreamAuth::Bearer | UpstreamAuth::XApiKey) {
+    if matches!(
+        resolved_auth,
+        UpstreamAuth::Bearer | UpstreamAuth::XApiKey | UpstreamAuth::ApiKey
+    ) {
         let key = key
             .as_deref()
             .expect("credential-bearing provider route must decrypt a key");
@@ -735,6 +739,9 @@ pub(crate) async fn forward_request_with_deadline(
             UpstreamAuth::XApiKey => {
                 upstream_headers.insert("x-api-key", key_header);
             }
+            UpstreamAuth::ApiKey => {
+                upstream_headers.insert("api-key", key_header);
+            }
             UpstreamAuth::Bearer => {
                 let authorization =
                     reqwest::header::HeaderValue::from_str(&format!("Bearer {key}"))
@@ -767,6 +774,7 @@ pub(crate) async fn forward_request_with_deadline(
                 .ok_or_else(|| anyhow::anyhow!("isolated route requires a decrypted key"))?;
             let scheme = match attempt_spec.auth {
                 UpstreamAuth::XApiKey => crate::provider::UpstreamAuthScheme::XApiKey,
+                UpstreamAuth::ApiKey => crate::provider::UpstreamAuthScheme::ApiKey,
                 _ => crate::provider::UpstreamAuthScheme::Bearer,
             };
             let mut headers = crate::custom_http::isolated_custom_headers(scheme, api_key)
@@ -2899,7 +2907,7 @@ pub(crate) fn headers_carry_upstream_secret(headers: &reqwest::header::HeaderMap
     headers.keys().any(|name| {
         matches!(
             name.as_str(),
-            "authorization" | "x-api-key" | "x-goog-api-key"
+            "authorization" | "x-api-key" | "api-key" | "x-goog-api-key"
         )
     })
 }

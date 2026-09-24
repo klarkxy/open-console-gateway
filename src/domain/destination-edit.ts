@@ -9,7 +9,7 @@ import type { ConnectionEndpoint } from "../api/connections.ts";
 import type { MessageKey } from "../i18n/index.ts";
 import { customEndpointUrlIssue } from "./custom-account.ts";
 import { MAX_HTTP_PROTOCOL_ROUTES } from "./destination-catalog.ts";
-import type { ProviderPreset } from "./provider-presets.ts";
+import { providerPresetRoutesForEndpoint, type ProviderPreset } from "./provider-presets.ts";
 
 /**
  * Edit planning for configurable HTTP destinations (dynamic providers and
@@ -501,9 +501,15 @@ export function removeDraftProtocolRoute(draft: DestinationEditDraft, index: num
  */
 export function applyPresetProtocolRoutesToDraft(
   draft: DestinationEditDraft,
-  preset: Pick<ProviderPreset, "protocolRoutes">,
+  preset: Pick<ProviderPreset, "protocolRoutes"> & Partial<Pick<ProviderPreset, "id" | "endpointUrl">>,
 ): boolean {
-  const routes = preset.protocolRoutes;
+  const routes = preset.endpointUrl === "" && preset.id
+    ? providerPresetRoutesForEndpoint({
+      id: preset.id,
+      endpointUrl: preset.endpointUrl,
+      protocolRoutes: preset.protocolRoutes,
+    }, draft.protocol_routes[0]?.endpoint_url ?? "")
+    : preset.protocolRoutes;
   if (!routes || routes.length === 0) return false;
   draft.protocol_routes = routes.slice(0, MAX_HTTP_PROTOCOL_ROUTES).map((route) => ({
     protocol: route.protocol,

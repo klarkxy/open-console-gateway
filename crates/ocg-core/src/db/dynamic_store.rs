@@ -681,7 +681,13 @@ fn upsert_dynamic_destination_on(
     };
     let protocols = serde_json::to_string(&declared)?;
     let auth_scheme = AuthScheme::from(runtime.auth_kind).as_str();
-    let capabilities = serde_json::to_string(&sealed_capabilities(AdapterKind::Http))?;
+    let mut capability_facts = sealed_capabilities(AdapterKind::Http);
+    if runtime.preset_id.as_deref() == Some("openrouter-free") {
+        // The ordinary OpenRouter catalog also contains paid models. Refreshing
+        // this trial template must not add those models as enabled routes.
+        capability_facts.discoverable_models = false;
+    }
+    let capabilities = serde_json::to_string(&capability_facts)?;
     let base_url = trimmed_url(&runtime.endpoint_url);
     let existing_draft = if onboarding_draft.is_none() {
         provider_is_onboarding_draft_on(conn, &runtime.id)?.unwrap_or(false)
@@ -979,6 +985,7 @@ fn builtin_runtime(provider_id: &str) -> Option<DynamicProviderRuntime> {
     } else {
         match plan.auth_schemes.first() {
             Some(ocg_domain::catalog::UpstreamAuthScheme::XApiKey) => DynamicAuthKind::XApiKey,
+            Some(ocg_domain::catalog::UpstreamAuthScheme::ApiKey) => DynamicAuthKind::ApiKey,
             _ => DynamicAuthKind::Bearer,
         }
     };
@@ -1076,3 +1083,6 @@ struct DynamicProviderRow {
     origin: String,
     offering: String,
 }
+
+#[cfg(test)]
+mod tests;

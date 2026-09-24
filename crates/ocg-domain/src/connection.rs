@@ -226,6 +226,7 @@ pub enum ConnectionOrigin {
 pub enum EndpointAuthScheme {
     Bearer,
     XApiKey,
+    ApiKey,
     Sealed,
     None,
 }
@@ -235,6 +236,7 @@ impl From<UpstreamAuthScheme> for EndpointAuthScheme {
         match value {
             UpstreamAuthScheme::Bearer => Self::Bearer,
             UpstreamAuthScheme::XApiKey => Self::XApiKey,
+            UpstreamAuthScheme::ApiKey => Self::ApiKey,
         }
     }
 }

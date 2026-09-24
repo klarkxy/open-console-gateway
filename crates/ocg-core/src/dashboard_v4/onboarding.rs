@@ -398,6 +398,7 @@ fn resolve_existing_key_connection(
         let auth_kind = match destination.auth_scheme {
             AuthScheme::Bearer => DynamicAuthKind::Bearer,
             AuthScheme::XApiKey => DynamicAuthKind::XApiKey,
+            AuthScheme::ApiKey => DynamicAuthKind::ApiKey,
             AuthScheme::None => DynamicAuthKind::None,
         };
         return Ok(ExistingKeyConnection {

@@ -31,6 +31,7 @@ pub(crate) struct FakeCall {
     pub path: String,
     pub authorization: Option<String>,
     pub x_api_key: Option<String>,
+    pub api_key: Option<String>,
     pub x_goog_api_key: Option<String>,
     pub anthropic_version: Option<String>,
     pub body: String,
@@ -302,11 +303,13 @@ async fn fake_reply(
 ) -> impl IntoResponse {
     let authorization = header(&headers, axum::http::header::AUTHORIZATION);
     let x_api_key = header(&headers, "x-api-key");
+    let api_key = header(&headers, "api-key");
     let x_goog_api_key = header(&headers, "x-goog-api-key");
     let key = authorization
         .as_deref()
         .and_then(|value| value.strip_prefix("Bearer "))
         .or(x_api_key.as_deref())
+        .or(api_key.as_deref())
         .or(x_goog_api_key.as_deref())
         .unwrap_or_default()
         .to_owned();
@@ -322,6 +325,7 @@ async fn fake_reply(
         && key.is_empty()
         && authorization.is_none()
         && x_api_key.is_none()
+        && api_key.is_none()
         && x_goog_api_key.is_none()
         && user_agent.as_deref() == Some("WebSocket++/0.8.2");
     if external_listener_probe {
@@ -353,6 +357,7 @@ async fn fake_reply(
             path,
             authorization,
             x_api_key,
+            api_key,
             x_goog_api_key,
             anthropic_version,
             body,

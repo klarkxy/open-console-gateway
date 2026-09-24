@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { Destination, DestinationCredential } from "../api/destinations.ts";
+import { PROVIDER_PRESETS } from "./provider-presets.ts";
 import {
   DESTINATION_EDIT_ISSUE_KEYS,
   DestinationEditError,
@@ -354,6 +355,29 @@ test("preset protocol routes fill the draft only when applied", () => {
   assert.equal(next.protocol_routes[0]?.protocol, "responses");
   assert.equal(next.protocol_routes[0]?.auth_scheme, "bearer");
   assert.equal(next.protocol_routes.length, 2);
+});
+
+test("Azure preset routes can be explicitly reapplied to a saved resource connection", () => {
+  const azure = PROVIDER_PRESETS.find((preset) => preset.id === "azure-openai")!;
+  const next = draft({
+    endpoint_url: "https://my-resource.openai.azure.com/openai/v1/responses",
+    auth_scheme: "bearer",
+  });
+  assert.equal(applyPresetProtocolRoutesToDraft(next, azure), true);
+  assert.deepEqual(next.protocol_routes.map(({ protocol, auth_scheme }) => ({ protocol, auth_scheme })), [
+    { protocol: "responses", auth_scheme: "api_key" },
+    { protocol: "chat_completions", auth_scheme: "api_key" },
+  ]);
+});
+
+test("fixed preset routes can be explicitly reapplied after an endpoint was edited", () => {
+  const openai = PROVIDER_PRESETS.find((preset) => preset.id === "openai")!;
+  const next = draft({ endpoint_url: "https://previous.example/v1/chat/completions" });
+  assert.equal(applyPresetProtocolRoutesToDraft(next, openai), true);
+  assert.deepEqual(next.protocol_routes.map((route) => route.protocol), [
+    "responses", "chat_completions",
+  ]);
+  assert.equal(next.protocol_routes[0]?.endpoint_url, openai.endpointUrl);
 });
 
 test("route change detection covers origin, protocol, and override edits", () => {

@@ -29,7 +29,7 @@ Custom API 的地址、协议和模型映射在账号中编辑，即使它拥有
 / 冷却 / 额度恢复状态。本地目录、协议探测、按模型协议覆盖、用户定义供应商的 Endpoint/协议/映射，以及范围内价格都在
 **供应商** 页。账号只保存 Key（鉴权需要时）、备注、启停、模型范围、发送授权、额度关系和运行时状态；Endpoint、鉴权、协议和模型映射归连接所有。无鉴权连接只暴露一份单例凭据，并拒绝第二份。
 
-额度卡按目录能力而不是 Provider ID 决定行为。`usageAvailability=available` 时加载通用 Provider quota windows 并显示刷新动作；`manualUsageCalibration=true` 时额外加载本地校准对象供编辑，但卡片本身仍渲染 Provider windows。其余目录行不显示额度条；Zen Free 继续使用独立的出口冷却。已知 MiniMax/Kimi 窗口名保持友好显示，未知窗口名安全地人类化，不改存储 wire 值。Custom API 与用户定义 Provider 账号，若保存的 Endpoint 主机恰好是 `api.deepseek.com`、`api.moonshot.cn` 或 `api.moonshot.ai`，也可以点**刷新额度**读取官方当前余额。按量 API 卡（DeepSeek / 智谱预设和 New API / Sub2API 站点）用 **余额**、**本月**、**历史** 三个数字展示，不用额度条。已知主机的官方余额仍只显示剩余。**刷新额度**会同时刷新该目的地的模型列表（内置 Plan 走官方目录刷新；Custom / 已知主机余额卡和平台 Key 走 `/v1/models` 发现），不必只为刷新目录再打开**供应商**页。新发现的内置目录行默认关闭，需在供应商页打开。用量快照只用于展示：进度条到 100%、未知或失败都不会把 Key 标为耗尽，也不改变路由。其他 Custom 目的地在本产品中没有余额接口。
+额度卡按目录能力而不是 Provider ID 决定行为。`usageAvailability=available` 时加载通用 Provider quota windows 并显示刷新动作；`manualUsageCalibration=true` 时额外加载本地校准对象供编辑，但卡片本身仍渲染 Provider windows。其余目录行不显示额度条；Zen Free 继续使用独立的出口冷却。已知 MiniMax/Kimi 窗口名保持友好显示，未知窗口名安全地人类化，不改存储 wire 值。Custom API 与用户定义 Provider 账号，若保存的 Endpoint 主机恰好是 `api.deepseek.com`、`api.moonshot.cn` 或 `api.moonshot.ai`，也可以点**刷新额度**读取官方当前余额。按量 API 卡（DeepSeek / 智谱预设和 New API / Sub2API 站点）用 **余额**、**本月**、**历史** 三个数字展示，不用额度条。已知主机的官方余额仍只显示剩余。**刷新额度**会同时刷新该目的地的模型列表（内置 Plan 走官方目录刷新；Custom / 已知主机余额卡和平台 Key 走 `/v1/models` 发现），不必只为刷新目录再打开**供应商**页。内置目录行遵循各供应商的默认启用规则；GOAT 首次快照只开启套餐包含的模型。用量快照只用于展示：进度条到 100%、未知或失败都不会把 Key 标为耗尽，也不改变路由。其他 Custom 目的地在本产品中没有余额接口。
 
 GOAT 卡片可通过 **刷新额度** 从 Command Code 第一方账号用量读取 `$14 / $35 / $70` 三个窗口。该端点由官方 CLI 使用，但未列入公开 Provider API 文档。两次快照之间继续本地累计 OCG 内已定价请求日志。官方快照就是基线，卡片不再提供手工校准。月窗口重置时间仍由已配置的购买日期推导，不是上游返回的月重置时间。付费档 Ollama Cloud 卡片（Pro / Max / Team）把 OCG 内已定价请求日志投影到每月 `$60 / $300 / $1000` USD Credits 软额度。Ollama Cloud 在本产品中没有官方用量 API。实际已用可以超过软上限，进度条只把显示钳在 100%，满了也不会写冷却或改变路由。新建账号必须选择 Pro / Max / Team 并填写购买日期。既有无计费行的账号保持未配置且仍可路由，直到编辑档位。
 
@@ -39,7 +39,7 @@ GOAT 卡片可通过 **刷新额度** 从 Command Code 第一方账号用量读�
 | --- | --- | --- | --- |
 | OpenCode Go | `opencode` | 是 | 每个账号一份官方分发的 API Key；托管注册仍是 Beta |
 | Zen Free | `opencode-zen-free` | 是 | 一张不带鉴权头、无需凭据的匿名单例卡；可排序、可启停，不可删除；额度按出口 IP 共享 |
-| Command Code GOAT | `command-code` | 是 | 使用公开的供应商目录；具有文档化支持端点的新发现模型默认开启。已有模型仅在已确认支持但被关闭，或由你明确关闭时保持关闭；没有协议证据的模型等待官方资料。没有账号级 GOAT/全部或 Max 模式。 |
+| Command Code GOAT | `command-code` | 是 | 使用公开的供应商目录；首次快照只默认开启 GOAT 套餐模型，以后新发现且有文档化端点的模型默认开启。保存的开关状态会保留；没有协议证据的模型等待官方资料。没有账号级 GOAT/全部或 Max 模式。 |
 | MiniMax CN Token Plan | `minimax` | 是 | 使用独立 `sk-cp` Key；固定官方 Chat、Responses 与 Messages 路由、鉴权模型目录与手工官方 Token Plan 用量刷新 |
 | Kimi Code CN | `kimi` | 是 | 使用独立 Kimi Code Key；固定官方 Chat 与 Messages 路由、鉴权模型目录与手工官方周额度/限频窗口刷新 |
 | Ollama Cloud | `ollama` | 是 | 固定源、仅 Chat Completions（`https://ollama.com`，Bearer）；公开无鉴权目录刷新；账号计费档位（Pro $60 / Max $300 / Team $1000 每月 USD Credits）及购买日期；按官方每请求用量与手动刷新的 `https://ollama.com/pricing` 表做本月软额度估算；未配置档位的既有账号仍可路由且无进度条 |
@@ -94,14 +94,14 @@ MiniMax 与 Kimi 的 Key 同样绑定固定来源：密封 MiniMax CN 的推理�
 `https://api.minimax.cn/v1` 及文档化的 `/anthropic` 路由；旧用量端点保持不变。Kimi Code CN 使用
 `https://api.kimi.com/coding/v1`。模型和用量只在用户点击面板动作时访问；显示的用量不改变推理资格。第一次成功刷新用量前，账号卡仍显示一条中性的 **尚未刷新** 额度条；刷新成功后再由官方窗口替换。
 
-Command Code 官方 `GET /models` 是公开的供应商级目录刷新。账号卡点 **刷新额度** 时也会跑这次目录刷新。供应商矩阵仍是模型供应控制面：GOAT 预设与具有文档化支持端点的新发现模型默认开启；已有模型仅在已确认支持但被关闭，或由你明确关闭时保持关闭，没有协议证据的模型等待官方资料。
+Command Code 官方 `GET /models` 是公开的供应商级目录刷新。账号卡点 **刷新额度** 时也会跑这次目录刷新。供应商矩阵仍是模型供应控制面：首次快照只默认开启 GOAT 套餐模型，其他模型先保持关闭；以后刷新中新出现且有文档化端点的模型默认开启。保存的开关状态会保留，没有协议证据的模型等待官方资料。
 
 Custom API 是已上线的受信管理员目的地。**供应商** 编辑映射：每行把公开模型名（客户端请求的名称）与精确上游模型 ID（OCG 实际发送的名称）配对。一条连接使用遗留路由，或保存一到三条显式 Chat Completions、Responses、Messages 路由；每条路由都有自己的端点和鉴权。映射继承所属协议的路由，除非它保存一条单独的上游覆盖。**账号** 只编辑挂在该连接上的 Key 和绑定。已有完整 Endpoint 继续原样使用。**获取模型** 使用保存的目录路由；非标准路由仍原样用于推理，不猜测目录地址，保留手动添加模型。发现结果只返回上游 ID；选择导入时公开名称与上游 ID 原样相同。获取不会保存、验证、启用或授权 Key。
 
 受信管理员可配置公网、局域网或回环 HTTP / HTTPS 源。元数据、链路本地以及不透明 IPv4 把戏主机（例如
 `169.254.169.254` 或 `metadata.google.internal`）会被拒绝。URL
 内嵌凭据、query 与 fragment 会被拒绝。Gateway 拒绝重定向，也不会转发 dashboard 或客户端鉴权。
-模型或 Endpoint 覆盖到另一 Origin 时，不会自动继承已保存的 Key。Chat Completions 与 Responses 使用 `Authorization: Bearer <key>`；Messages 使用 `x-api-key: <key>`。401 不会换用另一种鉴权头重试。根地址和 `/v1` 基址在模型发现、验证与正式推理中采用同一补全规则；历史完整 Endpoint 仍原样请求。Custom HTTP 使用同一套进程级 Direct / Manual / Auto 代理策略；连接与请求超时按配置的连接超时夹到
+模型或 Endpoint 覆盖到另一 Origin 时，不会自动继承已保存的 Key。可配置 HTTP 路由按已保存的鉴权方式发送 `Authorization: Bearer <key>`、`x-api-key: <key>` 或 `api-key: <key>`。401 不会换用另一种鉴权头重试。根地址和 `/v1` 基址在模型发现、验证与正式推理中采用同一补全规则；历史完整 Endpoint 仍原样请求。Custom HTTP 使用同一套进程级 Direct / Manual / Auto 代理策略；连接与请求超时按配置的连接超时夹到
 5–60 秒。
 
 所有 ready 账号卡片使用同一个 **测试连接** 动作。弹窗提供可搜索的模型表格、单模型测试与顺序执行的 **测试全部**。每次测试只通过当前这一账号及其当前有效协议发送一次最小真实请求。测试留在该账号上：不切换其他账号，不走 Gateway fallback，不改变启停、冷却或额度恢复，也不写入 Provider 协议证据。测试不是额度恢复试探。结果只保留在当前弹窗；关闭后不再派发排队中的测试，已经发出的请求可按现有超时结束。测试可能消耗供应商额度。Provider 页的测试仍是独立的低频控制面，用于新增 Provider 模型时验证模型/协议能力，并可按其语义使用符合条件的账号回退。

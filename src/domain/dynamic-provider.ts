@@ -3,7 +3,7 @@ import { customEndpointUrlIssue } from "./custom-account.ts";
 
 const DYNAMIC_PROVIDER_MODEL_SOURCE = "dynamic_provider";
 
-export type DynamicAuthKind = "bearer" | "x-api-key" | "none";
+export type DynamicAuthKind = "bearer" | "x-api-key" | "api-key" | "none";
 export type DynamicUpstreamProtocol = "chat_completions" | "responses" | "messages";
 
 /**
@@ -86,7 +86,7 @@ export const DYNAMIC_PROVIDER_DRAFT_ERROR_KEYS = {
   missing_replacement_key: "从无鉴权改为需要 Key 时必须填写替换 Key",
 } as const satisfies Record<ProviderDefinitionDraftError, string>;
 
-export const DYNAMIC_AUTH_KINDS: readonly DynamicAuthKind[] = ["bearer", "x-api-key", "none"];
+export const DYNAMIC_AUTH_KINDS: readonly DynamicAuthKind[] = ["bearer", "x-api-key", "api-key", "none"];
 export const DYNAMIC_PROTOCOLS: readonly DynamicUpstreamProtocol[] = [
   "chat_completions",
   "responses",
@@ -100,7 +100,7 @@ export function isDynamicCatalogEntry(
 }
 
 export function dynamicAuthRequiresKey(authKind: DynamicAuthKind | ""): boolean {
-  return authKind === "bearer" || authKind === "x-api-key";
+  return authKind === "bearer" || authKind === "x-api-key" || authKind === "api-key";
 }
 
 export function emptyProviderDefinitionDraft(): ProviderDefinitionDraft {
@@ -248,7 +248,7 @@ export function validateProviderDefinitionDraft(
     && draft.upstream_protocol !== "messages") {
     return "missing_protocol";
   }
-  if (draft.auth_kind !== "bearer" && draft.auth_kind !== "x-api-key" && draft.auth_kind !== "none") {
+  if (draft.auth_kind !== "bearer" && draft.auth_kind !== "x-api-key" && draft.auth_kind !== "api-key" && draft.auth_kind !== "none") {
     return "missing_auth_kind";
   }
   const mappings = normalizeDynamicMappings(draft.models);

@@ -307,6 +307,7 @@ const protocolOptions = computed(() => PROVIDER_PROTOCOLS.map((value) => ({
 const authOptions = computed(() => ([
   { value: "bearer", label: "Bearer" },
   { value: "x_api_key", label: "x-api-key" },
+  { value: "api_key", label: "api-key" },
   { value: "none", label: t("无鉴权") },
 ]));
 const routeModeOptions = computed(() => [
@@ -318,7 +319,8 @@ const presetWithRoutes = computed(() => {
   const presetId = props.presetId?.trim();
   if (!presetId) return null;
   const preset = PROVIDER_PRESETS.find((entry) => entry.id === presetId) ?? null;
-  return preset?.protocolRoutes && preset.protocolRoutes.length > 0 ? preset : null;
+  return preset?.protocolRoutes?.length || preset?.id === "azure-openai" || preset?.id === "bedrock"
+    ? preset : null;
 });
 
 const defaultRoute = computed(() => draft.value?.protocol_routes[0] ?? null);

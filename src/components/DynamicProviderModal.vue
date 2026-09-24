@@ -37,11 +37,11 @@
           </div>
           <div class="connection-summary__row">
             <dt>{{ t("上游协议") }}</dt>
-            <dd>{{ protocolDisplayName(fixedPreset.protocol) }}</dd>
+            <dd>{{ fixedPresetProtocolSummary }}</dd>
           </div>
           <div class="connection-summary__row">
             <dt>{{ t("鉴权方式") }}</dt>
-            <dd>{{ fixedPreset.authKind === "bearer" ? "Bearer" : "x-api-key" }}</dd>
+            <dd>{{ fixedPresetAuthSummary }}</dd>
           </div>
           <div v-if="fixedSeeded" class="connection-summary__row">
             <dt>{{ t("默认模型") }}</dt>
@@ -373,6 +373,7 @@ import {
   providerPresetImportPublicName,
   providerPresetModelDiscoveryEnabled,
   providerPresetNote,
+  providerPresetRoutesForEndpoint,
   resolveEditPreset,
 } from "../domain/provider-presets.ts";
 import {
@@ -570,6 +571,23 @@ const discoveryUnavailable = computed(() => (
  * as controls. Edit mode and manual creation keep every existing control.
  */
 const fixedPreset = computed(() => (isCreate.value ? selectedPreset.value : null));
+const fixedPresetRoutes = computed(() => (
+  fixedPreset.value
+    ? providerPresetRoutesForEndpoint(fixedPreset.value, draft.value.endpoint_url.trim())
+      ?? fixedPreset.value.protocolRoutes ?? []
+    : []
+));
+const fixedPresetProtocolSummary = computed(() => (
+  fixedPresetRoutes.value.length
+    ? fixedPresetRoutes.value.map((route) => protocolDisplayName(route.protocol)).join(" · ")
+    : fixedPreset.value ? protocolDisplayName(fixedPreset.value.protocol) : ""
+));
+const fixedPresetAuthSummary = computed(() => {
+  const schemes = fixedPresetRoutes.value.length
+    ? [...new Set(fixedPresetRoutes.value.map((route) => route.authScheme))]
+    : fixedPreset.value ? [fixedPreset.value.authKind] : [];
+  return schemes.map((scheme) => scheme === "bearer" ? "Bearer" : scheme.replaceAll("_", "-")).join(" · ");
+});
 const fixedSeededModels = computed(() => (
   fixedPreset.value ? providerPresetDefaultModels(fixedPreset.value) : []
 ));
@@ -670,7 +688,7 @@ function setMappingRouteMode(row: ProviderDefinitionMapping, mode: string): void
 }
 const authOptions = computed(() => DYNAMIC_AUTH_KINDS.map((value) => ({
   value,
-  label: value === "none" ? t("无鉴权") : value === "bearer" ? "Bearer" : "x-api-key",
+  label: value === "none" ? t("无鉴权") : value === "bearer" ? "Bearer" : value,
 })));
 
 let formWasVisible = false;

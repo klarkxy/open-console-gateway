@@ -182,6 +182,7 @@ fn prepare_http_destination_model_test(
             auth_kind: match route.auth_scheme {
                 AuthScheme::Bearer => ocg_domain::dynamic::DynamicAuthKind::Bearer,
                 AuthScheme::XApiKey => ocg_domain::dynamic::DynamicAuthKind::XApiKey,
+                AuthScheme::ApiKey => ocg_domain::dynamic::DynamicAuthKind::ApiKey,
                 AuthScheme::None => ocg_domain::dynamic::DynamicAuthKind::None,
             },
         }),

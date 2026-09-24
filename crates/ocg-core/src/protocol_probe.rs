@@ -288,6 +288,7 @@ async fn execute_protocol_request(
     let auth = match (route.auth, secret.as_deref()) {
         (UpstreamAuth::None, _) => None,
         (UpstreamAuth::XApiKey, Some(key)) => Some((UpstreamAuthScheme::XApiKey, key)),
+        (UpstreamAuth::ApiKey, Some(key)) => Some((UpstreamAuthScheme::ApiKey, key)),
         (UpstreamAuth::Bearer, Some(key)) => Some((UpstreamAuthScheme::Bearer, key)),
         (UpstreamAuth::OpenCodeProtocolDefault, Some(key))
             if format == crate::kernel::protocol::ApiFormat::Messages =>

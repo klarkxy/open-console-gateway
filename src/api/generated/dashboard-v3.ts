@@ -228,7 +228,7 @@ export type AccountModelCapabilityWrite = AccountModelCapabilityWriteCanonical |
 /**
  * Custom auth scheme. Wire values match V2 kebab-case.
  */
-export type AccountAuthScheme = "bearer" | "x-api-key";
+export type AccountAuthScheme = "bearer" | "x-api-key" | "api-key";
 /**
  * Last explicit probe outcome stored on evidence. Distinct from
  * [`ProtocolProbeResult`].
@@ -287,7 +287,7 @@ export type CpaRuntimePhase = "idle" | "checking" | "downloading" | "installing"
  * Auth kind owned by a Provider definition. Independent of protocol.
  * Nullable on the wire because builtin rows leave the field empty.
  */
-export type ProviderDefinitionAuthKind = "bearer" | "x-api-key" | "none";
+export type ProviderDefinitionAuthKind = "bearer" | "x-api-key" | "api-key" | "none";
 export type PlatformKind = "new_api" | "sub2api";
 export type PlatformQuotaKind = "wallet" | "subscription" | "key_limit";
 

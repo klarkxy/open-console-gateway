@@ -65,6 +65,7 @@ impl std::error::Error for InferenceHttpError {}
 pub enum InferenceAuthScheme {
     Bearer,
     XApiKey,
+    ApiKey,
 }
 
 /// Join `path` onto an already-canonical http(s) base while keeping the origin
@@ -136,6 +137,11 @@ pub fn isolated_inference_headers(
                 .map_err(|error| InferenceHttpError::InvalidUrl(error.to_string()))?;
             headers.insert(HeaderName::from_static("x-api-key"), value);
         }
+        InferenceAuthScheme::ApiKey => {
+            let value = HeaderValue::from_str(api_key)
+                .map_err(|error| InferenceHttpError::InvalidUrl(error.to_string()))?;
+            headers.insert(HeaderName::from_static("api-key"), value);
+        }
     }
     Ok(headers)
 }
@@ -177,7 +183,7 @@ impl HttpInferenceTransportSpec {
 }
 
 /// One outbound inference attempt. Auth is optional so keyless adapters can
-/// reuse the same send path; callers that need isolated Bearer / `x-api-key`
+/// reuse the same send path; callers that need isolated Bearer / `x-api-key` / `api-key`
 /// supply the scheme and key here.
 #[derive(Debug)]
 pub struct InferenceHttpRequest<'a> {
@@ -604,6 +610,13 @@ mod tests {
         assert_eq!(x_api.get("x-api-key").unwrap(), "sk-test");
         assert!(x_api.get(AUTHORIZATION).is_none());
         assert_eq!(x_api.len(), 1);
+
+        let api_key = isolated_inference_headers(InferenceAuthScheme::ApiKey, "sk-test").unwrap();
+        assert_eq!(api_key.get("api-key").unwrap(), "sk-test");
+        assert!(api_key.get(AUTHORIZATION).is_none());
+        assert!(api_key.get("x-api-key").is_none());
+        assert_eq!(api_key.len(), 1);
+        assert!(isolated_inference_headers(InferenceAuthScheme::ApiKey, "bad\nkey").is_err());
     }
 
     #[test]

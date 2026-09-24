@@ -2325,6 +2325,9 @@ fn frozen_test_plan(
                 ocg_domain::destination::AuthScheme::XApiKey => {
                     ocg_domain::dynamic::DynamicAuthKind::XApiKey
                 }
+                ocg_domain::destination::AuthScheme::ApiKey => {
+                    ocg_domain::dynamic::DynamicAuthKind::ApiKey
+                }
                 ocg_domain::destination::AuthScheme::None => {
                     ocg_domain::dynamic::DynamicAuthKind::None
                 }

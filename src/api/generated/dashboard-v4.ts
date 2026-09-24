@@ -133,7 +133,7 @@ export type AccountUpstreamProtocol = "chat_completions" | "responses" | "messag
 /**
  * Custom auth scheme. Wire values match V2 kebab-case.
  */
-export type AccountAuthScheme = "bearer" | "x-api-key";
+export type AccountAuthScheme = "bearer" | "x-api-key" | "api-key";
 /**
  * Wire identity matching V2 `api_key` / `none`.
  */
@@ -144,7 +144,7 @@ export type TemplateSource = "builtin" | "preset";
  * Auth advertised on a connection endpoint. `Sealed` is used for built-in
  * adapters whose scheme is owned by code, not by the projected row.
  */
-export type EndpointAuthScheme = "bearer" | "x-api-key" | "sealed" | "none";
+export type EndpointAuthScheme = "bearer" | "x-api-key" | "api-key" | "sealed" | "none";
 /**
  * Pre-unification row a connection was projected from.
  */
@@ -222,11 +222,11 @@ export type OnboardingConnection =
  * Auth kind owned by a Provider definition. Independent of protocol.
  * Nullable on the wire because builtin rows leave the field empty.
  */
-export type ProviderDefinitionAuthKind = "bearer" | "x-api-key" | "none";
+export type ProviderDefinitionAuthKind = "bearer" | "x-api-key" | "api-key" | "none";
 /**
  * Destination auth scheme. Wire values match the domain serde names.
  */
-export type AuthSchemeDto = "none" | "bearer" | "x_api_key";
+export type AuthSchemeDto = "none" | "bearer" | "x_api_key" | "api_key";
 /**
  * Wire protocol for destination catalog and transport rows.
  */
