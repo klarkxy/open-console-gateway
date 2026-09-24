@@ -686,10 +686,17 @@ mod tests {
         );
         assert!(command_code_constructable_formats("minimax-m2.7").contains(&ApiFormat::Responses));
         assert!(command_code_supported_formats("minimax-m2.7").is_empty());
-        assert!(command_code_supported_formats("xiaomi/mimo-v2.6-flash").is_empty());
-        assert!(!command_code_supports_upstream(
+        assert_eq!(
+            command_code_supported_formats("xiaomi/mimo-v2.6-flash"),
+            CHAT_ONLY
+        );
+        assert!(command_code_supports_upstream(
             "xiaomi/mimo-v2.6-flash",
             ApiFormat::ChatCompletions
+        ));
+        assert!(!command_code_supports_upstream(
+            "xiaomi/mimo-v2.6-flash",
+            ApiFormat::Responses
         ));
         assert_eq!(
             command_code_preferred_format("xiaomi/mimo-v2.6-flash"),
