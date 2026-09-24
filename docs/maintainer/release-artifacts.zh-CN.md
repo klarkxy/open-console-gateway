@@ -33,6 +33,7 @@ SHA256SUMS
 
 每个 CLI 压缩包包含可执行文件、`dist/` 和 `LICENSE`。`serve` 依赖同级 dashboard
 资源，因此要分发整个压缩包。Windows 没有便携 GUI 安装包。
+`ocg-manager` Codex skill 内置在桌面与 CLI 二进制中，不另占压缩包文件。原生正式版启动时会把该构建对应的 skill 同步到当前用户的 `~/.agents/skills`；打包后的 CLI 冒烟检查使用隔离 Home 并核对安装结果。Docker 构建不会在容器或宿主机同步 skill。
 
 `linux/amd64` 与 `linux/arm64` 容器单独发布为
 `ghcr.io/klarkxy/opencode-go-mgr`。GitHub Release 包含七份平台 payload、macOS

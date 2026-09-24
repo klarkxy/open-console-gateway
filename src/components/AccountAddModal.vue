@@ -65,41 +65,38 @@
           />
         </div>
         <div class="account-add-list">
-          <section v-for="group in chooserGroups" :key="group.id" class="account-add-group">
-            <h3 class="account-add-group__label">{{ group.label }}</h3>
-            <button
-              v-for="option in group.options"
-              :id="`account-add-option-${option.optionId}`"
-              :key="option.optionId"
-              type="button"
-              class="account-add-item"
-              :class="{
-                'account-add-item--active': option.optionId === selectedOptionId,
-                'account-add-item--disabled': isChooserOptionDisabled(option),
-              }"
-              :aria-pressed="option.optionId === selectedOptionId"
-              :aria-current="option.optionId === selectedOptionId ? 'true' : undefined"
-              @click="selectOption(option.optionId)"
-            >
-              <ProviderBrandMark
-                v-if="brandFamilyFor(optionIconKey(option))"
-                :family="brandFamilyFor(optionIconKey(option))!"
-                :size="18"
-              />
-              <n-icon
-                v-else
-                :component="iconFor(optionIconKey(option))"
-                size="16"
-                aria-hidden="true"
-              />
-              <span class="account-add-item__label">{{ option.label }}</span>
-              <span
-                v-if="isFamilyOption(option) && option.presets.length > 1"
-                class="account-add-item__count"
-                aria-hidden="true"
-              >{{ option.presets.length }}</span>
-            </button>
-          </section>
+          <button
+            v-for="option in navOptions"
+            :id="`account-add-option-${option.optionId}`"
+            :key="option.optionId"
+            type="button"
+            class="account-add-item"
+            :class="{
+              'account-add-item--active': option.optionId === selectedOptionId,
+              'account-add-item--disabled': isChooserOptionDisabled(option),
+            }"
+            :aria-pressed="option.optionId === selectedOptionId"
+            :aria-current="option.optionId === selectedOptionId ? 'true' : undefined"
+            @click="selectOption(option.optionId)"
+          >
+            <ProviderBrandMark
+              v-if="brandFamilyFor(optionIconKey(option))"
+              :family="brandFamilyFor(optionIconKey(option))!"
+              :size="18"
+            />
+            <n-icon
+              v-else
+              :component="iconFor(optionIconKey(option))"
+              size="16"
+              aria-hidden="true"
+            />
+            <span class="account-add-item__label">{{ option.label }}</span>
+            <span
+              v-if="isFamilyOption(option) && option.presets.length > 1"
+              class="account-add-item__count"
+              aria-hidden="true"
+            >{{ option.presets.length }}</span>
+          </button>
           <p v-if="railEmptyMessage" class="account-add-empty" role="status">{{ railEmptyMessage }}</p>
         </div>
       </aside>
@@ -125,7 +122,7 @@
               :bordered="false"
               :type="detail.tag.type"
             >
-              {{ t(detail.tag.label) }}
+              {{ t(CHOOSER_TAG_LABEL_KEYS[detail.tag.label]) }}
             </n-tag>
             <span v-if="detail.links" class="account-add-detail__links">
               <a :href="detail.links.docsUrl" target="_blank" rel="noopener noreferrer">{{ t("官方文档") }}</a>
@@ -134,7 +131,7 @@
           </div>
         </header>
 
-        <p v-if="detail.kind === 'family' || detail.kind === 'preset'" class="account-add-outcome">
+        <p v-if="detail.kind === 'family' || detail.kind === 'preset' || detail.kind === 'manual'" class="account-add-outcome">
           {{ t("可先存草稿，或一次建好供应商和第一个账号。草稿在供应商页继续。") }}
         </p>
 
@@ -160,7 +157,7 @@
           <n-alert
             v-if="selectedPlanOption.disabled"
             type="warning"
-            :title="selectedPlanOption.disabledReason ? t(selectedPlanOption.disabledReason) : ''"
+            :title="selectedPlanOption.disabledReason ? t(PLAN_CREATE_DISABLED_REASON_KEYS[selectedPlanOption.disabledReason]) : ''"
           />
 
           <template v-else>
@@ -170,6 +167,7 @@
               :show="true"
               :account="null"
               :busy="createBusy"
+              :setup-pending="setupPending"
               :plan="selectedPlanOption.plan"
               :catalog="catalog ?? null"
               @save="(payload) => emit('saveAccount', payload)"
@@ -207,13 +205,13 @@
         </template>
 
         <DynamicProviderModal
-          v-else-if="currentPreset && show"
-          :key="`dynamic:${currentPreset.id}`"
+          v-else-if="(currentPreset || selectedManualOption) && show"
+          :key="currentPreset ? `dynamic:${currentPreset.id}` : 'dynamic:manual'"
           embedded
           :show="true"
           :provider="null"
-          :initial-preset-id="currentPreset.id"
-          preset-selection-locked
+          :initial-preset-id="currentPreset?.id ?? null"
+          :preset-selection-locked="Boolean(currentPreset)"
           context="account"
           @saved="onPresetSaved"
           @committed="onPresetCommitted"
@@ -264,24 +262,27 @@ import { useLocalizedModalCloseLabel } from "../utils/modal-close-label.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
 import {
   buildChooserGroups,
-  chooserModeForOptionId,
   chooserOptionIconKey,
   chooserSelectOptions,
   chooserUniverse,
-  defaultChooserMode,
   defaultChooserOptionId,
   describeChooserSelection,
   isChooserOptionDisabled,
   isValidChooserOption,
+  resolveChooserInitialOpen,
   resolveChooserSelection,
   visibleChooserOptions,
   type ChooserMode,
   type ChooserOption,
   type PresetFamilyOption,
+  CHOOSER_TAG_LABEL_KEYS,
+  MANUAL_CHOOSER_LABEL_KEYS,
+  MANUAL_CHOOSER_OPTION_ID,
 } from "../domain/account-add-chooser.ts";
 import { PROVIDER_FAMILIES, familyOf, type ProviderFamily } from "../domain/provider-families.ts";
 import { PROVIDER_PRESETS, type ProviderPreset } from "../domain/provider-presets.ts";
 import { isDynamicCatalogEntry } from "../domain/dynamic-provider.ts";
+import { PLAN_CREATE_DISABLED_REASON_KEYS } from "../domain/plans.ts";
 import { providerApi } from "../api/providers.ts";
 import type { Connection } from "../api/connections.ts";
 import type { AccountInput } from "../api/dashboard.ts";
@@ -301,6 +302,7 @@ const props = defineProps<{
   catalogLoading: boolean;
   /** V4 connection projection; unused built-ins stay out of Existing connections. */
   connections?: readonly Connection[] | null;
+  setupPending?: boolean;
   managedAvailable: boolean;
   managedReason: string;
   inviteMissing: boolean;
@@ -392,6 +394,7 @@ watch(
   { immediate: true },
 );
 
+const manualChooserLabel = computed(() => t(MANUAL_CHOOSER_LABEL_KEYS.manual));
 const chooserGroups = computed(() => (
   buildChooserGroups(
     props.catalog,
@@ -399,22 +402,36 @@ const chooserGroups = computed(() => (
     presetQuery.value,
     mode.value,
     props.connections,
+    manualChooserLabel.value,
   )
 ));
 const universe = computed(() => (
-  chooserUniverse(props.catalog, dynamicPresetIds.value, mode.value, props.connections)
+  chooserUniverse(
+    props.catalog,
+    dynamicPresetIds.value,
+    mode.value,
+    props.connections,
+    manualChooserLabel.value,
+  )
 ));
 const navOptions = computed(() => visibleChooserOptions(chooserGroups.value));
 // The phone selector owns its filter, so it always lists the full option
 // universe of the active mode — never the hidden desktop search query.
 const selectOptions = computed(() => chooserSelectOptions(
-  buildChooserGroups(props.catalog, dynamicPresetIds.value, "", mode.value, props.connections),
-  t("用户定义"),
+  buildChooserGroups(
+    props.catalog,
+    dynamicPresetIds.value,
+    "",
+    mode.value,
+    props.connections,
+    manualChooserLabel.value,
+  ),
+  t(CHOOSER_TAG_LABEL_KEYS.user_defined),
 ));
 const railEmptyMessage = computed(() => {
   if (navOptions.value.length > 0) return "";
   if (presetQuery.value.trim()) return t("无匹配选项");
-  return mode.value === "connections" ? t("暂无已有连接") : t("无匹配选项");
+  return mode.value === "connections" ? t("暂无连接") : t("无匹配选项");
 });
 
 const selected = computed(() => (
@@ -427,12 +444,10 @@ const selectedFamilyOption = computed(() => (
   selected.value && "family" in selected.value ? selected.value as PresetFamilyOption : null
 ));
 const selectedPlatformOption = computed(() => (
-  selected.value
-    && !("plan" in selected.value)
-    && !("family" in selected.value)
-    && !("preset" in selected.value)
-    ? selected.value
-    : null
+  selected.value && "kind" in selected.value ? selected.value : null
+));
+const selectedManualOption = computed(() => (
+  selected.value?.optionId === MANUAL_CHOOSER_OPTION_ID ? selected.value : null
 ));
 /**
  * Preset actually fed to the embedded dynamic-provider form. Family options
@@ -496,7 +511,7 @@ const currentVariantHost = computed(() => {
  * success can never land in a different form or duplicate a write.
  */
 const interactionLocked = computed(() => (
-  props.createBusy || props.platformBusy || embeddedFormBusy.value
+  props.createBusy || props.platformBusy || embeddedFormBusy.value || props.setupPending
 ));
 
 function setMode(next: ChooserMode): void {
@@ -560,29 +575,32 @@ watch(
     // preset-id reload must not clear what the user is typing.
     if (justOpened) {
       presetQuery.value = "";
-      selectedVariantId.value = "";
-      // Existing connections are the default view; a deep link into a preset
-      // or platform option opens the new-service browsing mode directly.
-      const nextMode = initialOptionId
-        ? chooserModeForOptionId(
-          initialOptionId,
-          props.catalog,
-          dynamicPresetIds.value,
-          props.connections,
-        )
-        : defaultChooserMode(props.catalog, dynamicPresetIds.value, props.connections);
-      mode.value = nextMode;
-      const nextOptions = chooserUniverse(
+      const resolved = resolveChooserInitialOpen(
+        initialOptionId,
         props.catalog,
         dynamicPresetIds.value,
-        nextMode,
         props.connections,
       );
-      if (initialOptionId && isValidChooserOption(nextOptions, initialOptionId)) {
-        selectedOptionId.value = initialOptionId;
-        return;
+      mode.value = resolved.mode;
+      selectedOptionId.value = resolved.optionId;
+      selectedVariantId.value = resolved.variantId;
+      return;
+    }
+    // A deep link may open before the provider catalog arrives. Resolve its
+    // selection once the options are present; an empty initial result must
+    // not leave the detail pane blank for the whole session.
+    if (!selectedOptionId.value) {
+      const resolved = resolveChooserInitialOpen(
+        initialOptionId,
+        props.catalog,
+        dynamicPresetIds.value,
+        props.connections,
+      );
+      if (resolved.optionId) {
+        mode.value = resolved.mode;
+        selectedOptionId.value = resolved.optionId;
+        selectedVariantId.value = resolved.variantId;
       }
-      selectedOptionId.value = defaultChooserOptionId(nextOptions);
       return;
     }
     if (!isValidChooserOption(options, selectedOptionId.value)) {
@@ -617,11 +635,11 @@ function onPresetCommitted(result: {
 }): void {
   lastCommitWasDraft = result.mode === "draft";
   if (result.readbackFailed) {
-    message.warning(t("已保存，但未能刷新列表。请手动刷新，不要再次提交。"));
+    message.warning(t("已保存，但列表刷新失败。手动刷新，不要再次提交。"));
   }
   if (!lastCommitWasDraft) return;
   if (!result.readbackFailed) {
-    message.success(t("草稿已保存，请到供应商页继续设置"));
+    message.success(t("草稿已保存，到供应商页继续设置"));
   }
   const url = applyAppViewSearchParams(new URL(window.location.href), "providers", {
     connection: result.connectionId,
@@ -645,7 +663,7 @@ function onOuterUpdateShow(value: boolean): void {
     return;
   }
   // Failed saves keep the draft; in-flight work keeps the modal open.
-  if (interactionLocked.value) return;
+  if (props.createBusy || props.platformBusy || embeddedFormBusy.value) return;
   emit("update:show", false);
 }
 
@@ -702,7 +720,7 @@ function variantHost(preset: ProviderPreset): string {
   height: min(620px, calc(100vh - 96px));
   overflow: hidden;
   border: 1px solid var(--ocg-border);
-  border-radius: 14px;
+  border-radius: var(--ocg-radius-lg);
   background: var(--ocg-surface);
 }
 
@@ -722,14 +740,14 @@ function variantHost(preset: ProviderPreset): string {
 
 .account-add-search {
   flex: none;
-  padding: 8px 12px;
+  padding: var(--ocg-space-sm) var(--ocg-space-md);
   background: var(--ocg-canvas);
 }
 
 .account-add-mode {
   flex: none;
   display: flex;
-  padding: 8px 12px 0;
+  padding: var(--ocg-space-sm) var(--ocg-space-md) 0;
   background: var(--ocg-canvas);
 }
 
@@ -749,34 +767,17 @@ function variantHost(preset: ProviderPreset): string {
   font-size: var(--ocg-font-xs);
 }
 
-/* One list scrolls; the Plan / API group labels stick to its top edge. */
+/* One flat list scrolls in keyboard-navigation order. */
 .account-add-list {
   flex: 1;
   min-height: 0;
-  padding-bottom: 12px;
+  padding-bottom: var(--ocg-space-md);
   overflow: auto;
-}
-
-.account-add-group + .account-add-group {
-  border-top: 1px solid var(--ocg-border);
-}
-
-.account-add-group__label {
-  position: sticky;
-  top: 0;
-  z-index: 1;
-  margin: 0;
-  padding: 8px 12px;
-  color: var(--ocg-subtle);
-  font-size: var(--ocg-font-xs);
-  font-weight: 600;
-  line-height: 1.3;
-  background: var(--ocg-canvas);
 }
 
 .account-add-empty {
   margin: 0;
-  padding: 8px 12px;
+  padding: var(--ocg-space-sm) var(--ocg-space-md);
   color: var(--ocg-muted);
   font-size: var(--ocg-font-xs);
 }
@@ -784,10 +785,10 @@ function variantHost(preset: ProviderPreset): string {
 .account-add-item {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
   width: 100%;
   margin: 0;
-  padding: 8px 12px;
+  padding: var(--ocg-space-sm) var(--ocg-space-md);
   border: 0;
   border-radius: 0;
   color: var(--ocg-ink);
@@ -840,10 +841,10 @@ function variantHost(preset: ProviderPreset): string {
 .account-add-detail {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: var(--ocg-space-md);
   min-width: 0;
   min-height: 0;
-  padding: 16px 20px;
+  padding: var(--ocg-space-lg) 20px;
   overflow: auto;
 }
 
@@ -851,7 +852,7 @@ function variantHost(preset: ProviderPreset): string {
   display: flex;
   flex: none;
   align-items: center;
-  gap: 12px;
+  gap: var(--ocg-space-md);
 }
 
 .account-add-detail__header :deep(.n-icon) {
@@ -862,7 +863,7 @@ function variantHost(preset: ProviderPreset): string {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
   min-width: 0;
 }
 
@@ -876,14 +877,14 @@ function variantHost(preset: ProviderPreset): string {
 
 .account-add-detail__links {
   display: flex;
-  gap: 12px;
+  gap: var(--ocg-space-md);
   font-size: var(--ocg-font-xs);
 }
 
 .account-add-detail__actions {
   display: flex;
   flex: none;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
 }
 
 .account-add-hint {
@@ -895,7 +896,7 @@ function variantHost(preset: ProviderPreset): string {
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
 }
 
 .variant-picker {
@@ -924,8 +925,8 @@ function variantHost(preset: ProviderPreset): string {
 
   .account-add-mobile {
     display: grid;
-    gap: 8px;
-    padding: 12px 12px 0;
+    gap: var(--ocg-space-sm);
+    padding: var(--ocg-space-md) var(--ocg-space-md) 0;
   }
 
   .account-add-detail {

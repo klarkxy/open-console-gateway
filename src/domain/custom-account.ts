@@ -1,11 +1,9 @@
 import type {
   Account,
-  AccountCustomConfigUpdateInput,
-  AccountModelCapability,
   AccountModelCapabilityInput,
   AccountProtocol,
-  AccountUpdate,
 } from "../api/dashboard.ts";
+import type { Destination, DestinationCredential } from "../api/destinations.ts";
 
 /**
  * Custom API accounts are administrator-trusted endpoints: the UI accepts any
@@ -24,7 +22,7 @@ export function isCustomApiAccount(
 export type CustomEndpointUrlIssue = "empty" | "malformed" | "not_http" | "with_credentials";
 
 export const CUSTOM_ENDPOINT_URL_ISSUE_KEYS = {
-  empty: "请填写 API 地址",
+  empty: "填写 API 地址",
   malformed: "Endpoint 格式无效",
   not_http: "Endpoint 必须是 http:// 或 https:// URL",
   with_credentials: "Endpoint 不能包含用户名或密码",
@@ -63,16 +61,6 @@ export function customEndpointUrlIssue(value: string): CustomEndpointUrlIssue | 
   if (!parsed.hostname) return "malformed";
   if (parsed.username || parsed.password) return "with_credentials";
   return null;
-}
-
-/** Comparison identity only; the submitted API URL preserves administrator input. */
-function canonicalCustomEndpointUrl(value: string): string {
-  const parsed = new URL(value.trim());
-  if (parsed.username || parsed.password) {
-    throw new Error("Custom Endpoint must not contain credentials");
-  }
-  const pathname = parsed.pathname.replace(/\/+$/u, "");
-  return `${parsed.protocol}//${parsed.host}${pathname}${parsed.search}${parsed.hash}`;
 }
 
 export const CUSTOM_PROTOCOLS: readonly AccountProtocol[] = [
@@ -155,92 +143,21 @@ export function normalizeCustomCapabilities(
   });
 }
 
-export type CustomAccountEditInput = {
-  name: string;
-  notes?: string;
-  key?: string;
-  endpoint_url?: string;
-  upstream_protocol?: AccountProtocol;
-  model_capabilities?: readonly Pick<AccountModelCapabilityInput, "public_model" | "upstream_model" | "protocol">[];
-};
-
-export type CustomAccountEditPlan = {
-  account?: AccountUpdate;
-  customConfig?: AccountCustomConfigUpdateInput;
-};
-
-export type CustomAccountEditWriters = {
-  account: (update: AccountUpdate) => Promise<void>;
-  customConfig: (config: AccountCustomConfigUpdateInput) => Promise<void>;
-};
-
-function sameCapabilities(
-  saved: readonly AccountModelCapability[],
-  next: readonly AccountModelCapabilityInput[],
-): boolean {
-  return saved.length === next.length && saved.every((capability, index) => (
-    capability.public_model.trim() === next[index]?.public_model
-      && capability.upstream_model.trim() === next[index]?.upstream_model
-      && capability.protocol === next[index]?.protocol
-  ));
-}
-
-/** Validate all Custom sections before any write, then combine config and models. */
-export function planCustomAccountEdit(
-  account: Account,
-  input: CustomAccountEditInput,
-): CustomAccountEditPlan {
-  const config = account.custom_config;
-  if (!config) throw new Error("Custom account configuration is missing");
-
-  const endpoint_url = (input.endpoint_url ?? config.endpoint_url).trim();
-  const endpointUrlIssue = customEndpointUrlIssue(endpoint_url);
-  if (endpointUrlIssue) throw new Error(CUSTOM_ENDPOINT_URL_ISSUE_KEYS[endpointUrlIssue]);
-  const canonicalEndpointUrl = canonicalCustomEndpointUrl(endpoint_url);
-  const canonicalSavedEndpointUrl = canonicalCustomEndpointUrl(config.endpoint_url);
-  const upstream_protocol = input.upstream_protocol ?? config.upstream_protocol;
-  if (!isCustomProtocol(upstream_protocol)) throw new CustomCapabilityError("protocol_mismatch");
-
-  const capabilities = normalizeCustomCapabilities(
-    input.model_capabilities ?? account.model_capabilities,
-    upstream_protocol,
-  );
-  const name = input.name.trim();
-  const notes = input.notes ?? "";
-  const keyReplacement = input.key !== undefined;
-  const metadataChanged = name !== account.name || notes !== account.notes || keyReplacement;
-  const capabilitiesChanged = !sameCapabilities(account.model_capabilities, capabilities);
-  const configChanged = canonicalEndpointUrl !== canonicalSavedEndpointUrl
-    || upstream_protocol !== config.upstream_protocol;
-
-  return {
-    ...(metadataChanged
-      ? { account: { name, notes, ...(input.key === undefined ? {} : { key: input.key }) } }
-      : {}),
-    ...(configChanged || capabilitiesChanged || keyReplacement
-      ? {
-        customConfig: {
-          endpoint_url,
-          upstream_protocol,
-          model_capabilities: capabilities,
-        },
-      }
-      : {}),
-  };
-}
-
-export async function applyCustomAccountEditPlan(
-  plan: CustomAccountEditPlan,
-  writers: CustomAccountEditWriters,
-): Promise<void> {
-  if (plan.account) await writers.account(plan.account);
-  if (plan.customConfig) await writers.customConfig(plan.customConfig);
-}
-
-export async function executeCustomAccountEdit(
-  account: Account,
-  input: CustomAccountEditInput,
-  writers: CustomAccountEditWriters,
-): Promise<void> {
-  await applyCustomAccountEditPlan(planCustomAccountEdit(account, input), writers);
+/**
+ * Resolve the Providers destination that owns a legacy Custom account's
+ * connection. The credential row points straight at it (multi-Key
+ * destinations project one row per account); when that row is missing, fall
+ * back to the account-owned Custom destination. Null means the projection
+ * has no match and the link navigates to Providers unscoped.
+ */
+export function legacyCustomAccountDestinationId(
+  accountId: string,
+  credentialsByLegacyAccountId: ReadonlyMap<string, Pick<DestinationCredential, "destination_id">>,
+  destinations: readonly Pick<Destination, "id" | "legacy">[],
+): string | null {
+  const credentialDestination = credentialsByLegacyAccountId.get(accountId)?.destination_id;
+  if (credentialDestination) return credentialDestination;
+  return destinations.find((destination) => (
+    destination.legacy.kind === "custom_account" && destination.legacy.id === accountId
+  ))?.id ?? null;
 }

@@ -1,7 +1,6 @@
 use crate::kernel::ids::is_free_model;
 use crate::kernel::protocol::model_protocol;
 use crate::models::UpstreamChannel;
-use crate::provider::{COMMAND_CODE_GOAT_CHAT_COMPLETIONS_PATH, COMMAND_CODE_GOAT_MESSAGES_PATH};
 use axum::http::StatusCode;
 use bytes::Bytes;
 use serde_json::{Value, json};
@@ -15,13 +14,13 @@ pub use crate::kernel::protocol::{
     supported_model_ids, supported_model_protocol_profiles, supported_model_protocols,
 };
 pub use ocg_domain::protocol::{
-    command_code_is_anthropic_model, command_code_preferred_format, command_code_supported_formats,
+    command_code_constructable_formats, command_code_is_anthropic_model,
+    command_code_preferred_format, command_code_supported_formats,
 };
 
 pub(crate) use ocg_gateway::protocol::{
     LegacyToolCompat, NamespaceToolMapping, decode_anthropic_thinking_block, decode_chat_reasoning,
-    encode_anthropic_thinking_block, encode_chat_reasoning, sanitize_minimax_anthropic_usage,
-    sanitize_minimax_chat_usage,
+    encode_anthropic_thinking_block, encode_chat_reasoning,
 };
 
 #[cfg(test)]
@@ -98,6 +97,27 @@ pub struct ParsedClientRequest {
     parsed: Value,
 }
 
+/// Client request facts captured at entry for budgets and pre-candidate logs.
+///
+/// This context does not select, convert, or validate an upstream protocol.
+/// Candidate materialization remains the sole upstream conversion authority.
+#[derive(Debug, Clone)]
+pub(crate) struct RequestFacts {
+    pub client: ApiFormat,
+    pub client_model: String,
+    pub stream: bool,
+}
+
+impl RequestFacts {
+    pub(crate) fn from_parsed(parsed: &ParsedClientRequest) -> Self {
+        Self {
+            client: parsed.client,
+            client_model: parsed.requested_model.clone(),
+            stream: parsed.stream,
+        }
+    }
+}
+
 /// Per-candidate identity used to turn a parsed client request into a
 /// [`RequestPlan`]. Endpoint and auth stay in the provider adapter.
 #[derive(Debug, Clone)]
@@ -113,12 +133,30 @@ pub struct MaterializeSpec {
     /// Skip OpenCode `MODEL_PROTOCOLS` and convert to this account protocol.
     pub forced_upstream: Option<ApiFormat>,
     pub custom_route: Option<CustomRouteSpec>,
+    /// Effort renames carried by the selected route. Empty keeps the client
+    /// value. OpenCode Go sets this from its static profile; other routes do
+    /// not inherit that profile just because the model name matches.
+    pub effort_aliases: &'static [(&'static str, &'static str)],
+}
+
+/// Go's static effort renames, only when this route is OpenCode Go.
+pub(crate) fn route_effort_aliases(
+    adapter: ocg_domain::destination::AdapterKind,
+    model: &str,
+) -> &'static [(&'static str, &'static str)] {
+    if adapter != ocg_domain::destination::AdapterKind::OpencodeGo {
+        return &[];
+    }
+    ocg_domain::protocol::model_protocol(model)
+        .map(|profile| profile.effort_aliases)
+        .unwrap_or(&[])
 }
 
 /// Isolated Custom origin and auth scheme materialized per account.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CustomRouteSpec {
     pub endpoint_url: String,
+    pub auth_kind: ocg_domain::dynamic::DynamicAuthKind,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProtocolError {
@@ -169,15 +207,11 @@ pub struct UsageCounts {
     pub cache_creation_tokens: u64,
 }
 
-/// Official Command Code relative paths. Responses and Gemini have no upstream
-/// path; client Chat/Responses/Messages convert through the no-I/O kernel onto
-/// Chat (OpenAI/OSS) or Messages (Anthropic).
+/// Official Command Code relative paths. Gemini has no upstream path.
+/// Responses is constructable; per-model enablement stays on persisted
+/// catalog evidence rather than this path table.
 pub fn command_code_upstream_path(format: ApiFormat) -> Option<&'static str> {
-    match format {
-        ApiFormat::ChatCompletions => Some(COMMAND_CODE_GOAT_CHAT_COMPLETIONS_PATH),
-        ApiFormat::Messages => Some(COMMAND_CODE_GOAT_MESSAGES_PATH),
-        ApiFormat::Responses | ApiFormat::Gemini => None,
-    }
+    ocg_domain::protocol::command_code_upstream_path(format)
 }
 
 pub fn parse_client_request(
@@ -227,6 +261,15 @@ pub fn parse_gemini_request(
     })
 }
 
+/// Request features that apply regardless of which candidate is later
+/// selected. Conversion-only checks stay in [`materialize_parsed_request`].
+pub(crate) fn validate_client_request_features(
+    parsed: &ParsedClientRequest,
+) -> Result<(), ProtocolError> {
+    ocg_gateway::protocol::validate_client_request_features(parsed.client, &parsed.parsed)
+        .map_err(protocol_conversion_error)
+}
+
 /// Test-only identity planner. Production inference must parse once, resolve
 /// the name through [`crate::alias::resolve`], then call
 /// [`materialize_parsed_request`]. This helper never bypasses alias
@@ -263,13 +306,19 @@ fn identity_spec(parsed: &ParsedClientRequest) -> MaterializeSpec {
         original_model: None,
         forced_upstream: None,
         custom_route: None,
+        effort_aliases: route_effort_aliases(
+            ocg_domain::destination::AdapterKind::OpencodeGo,
+            &parsed.requested_model,
+        ),
     }
 }
 
 /// Convert a request that was already parsed once for a specific candidate.
 ///
 /// Protocol selection uses the OpenCode `MODEL_PROTOCOLS` table for the
-/// upstream model. Callers must never trial a billable inference path.
+/// upstream model unless the caller supplies `forced_upstream` from that
+/// candidate's contract. Request-level diagnostics must not call this to
+/// guess an upstream. Callers must never trial a billable inference path.
 pub fn materialize_parsed_request(
     parsed: &ParsedClientRequest,
     spec: &MaterializeSpec,
@@ -284,6 +333,7 @@ pub fn materialize_parsed_request(
         spec.upstream_model.clone(),
         parsed.stream,
         spec.forced_upstream,
+        spec.effort_aliases,
     )?;
     plan.client_model = spec.client_model.clone();
     plan.channel = spec.channel;
@@ -305,13 +355,14 @@ fn prepare_parsed_request(
     model: String,
     stream: bool,
     forced_upstream: Option<ApiFormat>,
+    effort_aliases: &[(&str, &str)],
 ) -> Result<RequestPlan, ProtocolError> {
     let upstream = match forced_upstream {
         Some(forced) => forced,
         None => resolve_upstream_format(client, &model)?,
     };
-    let aliased_responses_effort = requested_effort_alias(&parsed, &model);
-    let parsed = apply_effort_aliases(parsed, &model);
+    let aliased_responses_effort = requested_effort_alias(&parsed, effort_aliases);
+    let parsed = apply_effort_aliases(parsed, effort_aliases);
     let response_parallel_tool_calls = parsed
         .get("parallel_tool_calls")
         .and_then(Value::as_bool)
@@ -584,12 +635,7 @@ fn gemini_status_for_kind(kind: &str) -> &'static str {
     }
 }
 
-/// Work around MiniMax's Anthropic-compatible endpoint returning the entire prompt as
-/// `cache_read_input_tokens` with `input_tokens: 0` on the first turn. When that happens,
-/// move the tokens back to `input_tokens` so the gateway doesn't report a 100% cache hit.
-///
-/// `model` is the model name reported by the upstream response; `model_hint` is the model
-/// from the original request plan. OpenCode Go sometimes returns a generic or internal model
+/// Report upstream usage without model-name-based corrections.
 fn usage_payload(format: ApiFormat, payload: &Value) -> Option<&Value> {
     match format {
         ApiFormat::ChatCompletions => payload.get("usage"),
@@ -620,41 +666,30 @@ pub fn has_complete_usage(format: ApiFormat, payload: &Value) -> bool {
     }
 }
 
-pub fn extract_usage(format: ApiFormat, payload: &Value, model_hint: Option<&str>) -> UsageCounts {
+pub fn extract_usage(format: ApiFormat, payload: &Value, _model_hint: Option<&str>) -> UsageCounts {
     let usage = usage_payload(format, payload);
     let Some(usage) = usage else {
         return UsageCounts::default();
     };
     match format {
-        ApiFormat::ChatCompletions => {
-            let mut usage = usage.clone();
-            let model = payload.get("model").and_then(Value::as_str);
-            sanitize_minimax_chat_usage(model, model_hint, &mut usage);
-            UsageCounts {
-                input_tokens: uint(&usage, "prompt_tokens"),
-                output_tokens: uint(&usage, "completion_tokens"),
-                cached_tokens: usage
-                    .pointer("/prompt_tokens_details/cached_tokens")
-                    .or_else(|| usage.get("prompt_cache_hit_tokens"))
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0),
-                cache_creation_tokens: 0,
-            }
-        }
+        ApiFormat::ChatCompletions => UsageCounts {
+            input_tokens: uint(usage, "prompt_tokens"),
+            output_tokens: uint(usage, "completion_tokens"),
+            cached_tokens: usage
+                .pointer("/prompt_tokens_details/cached_tokens")
+                .or_else(|| usage.get("prompt_cache_hit_tokens"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+            cache_creation_tokens: 0,
+        },
         ApiFormat::Messages => {
-            let mut usage = usage.clone();
-            let model = payload
-                .get("model")
-                .or_else(|| payload.pointer("/message/model"))
-                .and_then(Value::as_str);
-            sanitize_minimax_anthropic_usage(model, model_hint, &mut usage);
-            let cached = uint(&usage, "cache_read_input_tokens");
-            let created = uint(&usage, "cache_creation_input_tokens");
+            let cached = uint(usage, "cache_read_input_tokens");
+            let created = uint(usage, "cache_creation_input_tokens");
             UsageCounts {
-                input_tokens: uint(&usage, "input_tokens")
+                input_tokens: uint(usage, "input_tokens")
                     .saturating_add(cached)
                     .saturating_add(created),
-                output_tokens: uint(&usage, "output_tokens"),
+                output_tokens: uint(usage, "output_tokens"),
                 cached_tokens: cached,
                 cache_creation_tokens: created,
             }
@@ -722,20 +757,16 @@ fn resolve_upstream_format(client: ApiFormat, model: &str) -> Result<ApiFormat, 
 }
 
 /// Rewrite `reasoning.effort` (Responses/Gemini) and `reasoning_effort` (Chat)
-/// according to the model's `effort_aliases`. No-op for models without aliases.
-fn apply_effort_aliases(mut body: Value, model: &str) -> Value {
-    let Some(profile) = model_protocol(model) else {
-        return body;
-    };
-    if profile.effort_aliases.is_empty() {
+/// using the aliases carried by the selected route. Empty means no rewrite.
+fn apply_effort_aliases(mut body: Value, effort_aliases: &[(&str, &str)]) -> Value {
+    if effort_aliases.is_empty() {
         return body;
     }
     let rewrite = |effort: &str| -> Option<String> {
-        profile
-            .effort_aliases
+        effort_aliases
             .iter()
             .find(|(from, _)| *from == effort)
-            .map(|(_, to)| to.to_string())
+            .map(|(_, to)| (*to).to_string())
     };
     if let Some(replacement) = body
         .pointer("/reasoning/effort")
@@ -766,15 +797,16 @@ fn apply_effort_aliases(mut body: Value, model: &str) -> Value {
 /// Returns the aliased effort requested through any supported client shape.
 /// Conversion through Messages represents reasoning as a token budget, so the
 /// original alias must be retained until the final Responses body is built.
-fn requested_effort_alias(body: &Value, model: &str) -> Option<&'static str> {
-    let profile = model_protocol(model)?;
+fn requested_effort_alias<'a>(
+    body: &Value,
+    effort_aliases: &'a [(&'a str, &'a str)],
+) -> Option<&'a str> {
     let effort = body
         .pointer("/reasoning/effort")
         .or_else(|| body.get("reasoning_effort"))
         .or_else(|| body.pointer("/output_config/effort"))
         .and_then(Value::as_str)?;
-    profile
-        .effort_aliases
+    effort_aliases
         .iter()
         .find_map(|(from, to)| (*from == effort).then_some(*to))
 }

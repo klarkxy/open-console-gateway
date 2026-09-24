@@ -33,7 +33,7 @@
           :border-radius="4"
         />
         <time v-if="window.resets_at" class="provider-quota-row__reset">
-          {{ t("{time}后重置", { time: formatCooldownRemainingUntil(window.resets_at, now) }) }}
+          {{ t("{time}后重置", { time: formatCooldownRemainingText(cooldownRemainingUntil(window.resets_at, now)) }) }}
         </time>
       </div>
     </template>
@@ -44,7 +44,8 @@
 import { NProgress } from "naive-ui";
 import { computed } from "vue";
 import type { ProviderQuotaWindow, ProviderUsageResponse } from "../api/providers.ts";
-import { formatCooldownRemainingUntil } from "../domain/account-display.ts";
+import { cooldownRemainingUntil } from "../domain/account-display.ts";
+import { formatCooldownRemainingText } from "../views/account-status-text.ts";
 import { isMiniMaxVideoQuotaWindow, providerQuotaWindowLabel } from "../domain/accounts-usage.ts";
 import { t } from "../i18n/index.ts";
 
@@ -56,7 +57,7 @@ const displayedWindows = computed(() => (
 
 function windowLabel(window: ProviderQuotaWindow): string {
   return providerQuotaWindowLabel(window, {
-    fiveHours: t("5小时"),
+    fiveHours: t("5 小时"),
     week: t("本周"),
     month: t("本月"),
     hours: (count) => `${count}${t("小时")}`,
@@ -87,7 +88,7 @@ function usedLabel(window: ProviderQuotaWindow): string {
 .provider-quota-summary {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 12px;
+  gap: var(--ocg-space-md);
 }
 
 .provider-quota-row {
@@ -99,7 +100,7 @@ function usedLabel(window: ProviderQuotaWindow): string {
 .provider-quota-row__heading {
   display: flex;
   justify-content: space-between;
-  gap: 12px;
+  gap: var(--ocg-space-md);
   color: var(--ocg-muted);
   font-size: var(--ocg-font-sm);
 }

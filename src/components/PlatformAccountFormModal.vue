@@ -45,7 +45,37 @@
           :input-props="{ 'aria-label': t('平台地址') }"
         />
       </n-form-item>
-      <n-form-item :label="t('管理凭证（可选）')">
+      <template v-if="form.kind === 'new_api'">
+        <n-form-item
+          :label="t('用户 ID')"
+          :validation-status="userIdIssue ? 'error' : undefined"
+          :feedback="userIdFeedback"
+        >
+          <n-input
+            v-model:value="form.userId"
+            class="mono"
+            maxlength="20"
+            :disabled="busy || clearCredential"
+            :placeholder="t('站点个人设置中的数字 ID')"
+            :input-props="{ 'aria-label': t('用户 ID'), autocomplete: 'off', inputmode: 'numeric' }"
+          />
+        </n-form-item>
+        <n-form-item
+          :label="t('系统访问令牌')"
+          :validation-status="tokenIssue ? 'error' : undefined"
+          :feedback="tokenFeedback"
+        >
+          <n-input
+            v-model:value="form.userCredential"
+            type="password"
+            show-password-on="click"
+            :disabled="busy || clearCredential"
+            :placeholder="credentialPlaceholder"
+            :input-props="{ 'aria-label': t('系统访问令牌'), autocomplete: 'off' }"
+          />
+        </n-form-item>
+      </template>
+      <n-form-item v-else :label="t('管理凭证（可选）')">
         <n-input
           v-model:value="form.userCredential"
           type="password"
@@ -54,11 +84,7 @@
           :placeholder="credentialPlaceholder"
           :input-props="{ 'aria-label': t('管理凭证（可选）'), autocomplete: 'off' }"
         />
-        <template #feedback>
-          {{ editing && editing.hasUserCredential
-            ? t("已保存凭证；留空保持不变")
-            : t("仅用于刷新余额、分组与价格等平台数据，不会用作推理 Key") }}
-        </template>
+        <template #feedback>{{ t("请填站点登录用户的访问令牌，不要填用于调用模型的推理 Key。") }}</template>
       </n-form-item>
       <n-form-item v-if="editing && editing.hasUserCredential" :show-label="false">
         <n-checkbox v-model:checked="clearCredential" :disabled="busy">
@@ -89,7 +115,12 @@ import {
   NSpace,
 } from "naive-ui";
 import type { PlatformAccount, PlatformKind } from "../api/platform-accounts.ts";
-import { PLATFORM_KIND_LABELS } from "../domain/platform-accounts.ts";
+import {
+  composeNewApiUserCredential,
+  NEW_API_CREDENTIAL_ISSUE_KEYS,
+  newApiCredentialIssue,
+  PLATFORM_KIND_LABELS,
+} from "../domain/platform-accounts.ts";
 import {
   CUSTOM_ENDPOINT_URL_ISSUE_KEYS,
   customApiUrlPlaceholder,
@@ -120,7 +151,13 @@ const emit = defineEmits<{
   save: [payload: PlatformAccountFormPayload];
 }>();
 
-const form = ref({ kind: props.presetKind as PlatformKind, name: "", baseUrl: "", userCredential: "" });
+const form = ref({
+  kind: props.presetKind as PlatformKind,
+  name: "",
+  baseUrl: "",
+  userId: "",
+  userCredential: "",
+});
 const clearCredential = ref(false);
 const baseUrlTouched = ref(false);
 
@@ -140,10 +177,32 @@ const baseUrlFeedback = computed(() => {
 const credentialPlaceholder = computed(() => (
   props.editing?.hasUserCredential ? t("已保存凭证；留空保持不变") : ""
 ));
+const credentialIssue = computed(() => {
+  if (form.value.kind !== "new_api" || clearCredential.value) return null;
+  return newApiCredentialIssue(form.value.userId, form.value.userCredential);
+});
+const userIdIssue = computed(() => {
+  const issue = credentialIssue.value;
+  return issue === "user_id_not_digits" || issue === "token_without_user_id" ? issue : null;
+});
+const tokenIssue = computed(() => (
+  credentialIssue.value === "user_id_without_token" ? credentialIssue.value : null
+));
+const userIdFeedback = computed(() => (
+  userIdIssue.value
+    ? t(NEW_API_CREDENTIAL_ISSUE_KEYS[userIdIssue.value] as MessageKey)
+    : t("部分站点刷新钱包时需要，与令牌一起填写")
+));
+const tokenFeedback = computed(() => (
+  tokenIssue.value
+    ? t(NEW_API_CREDENTIAL_ISSUE_KEYS[tokenIssue.value] as MessageKey)
+    : t("个人设置 → 安全设置 → 系统访问令牌，不要填令牌页的推理 Key")
+));
 
 const canSubmit = computed(() => {
   if (!form.value.name.trim() || form.value.name.trim().length > 200) return false;
   if (!props.editing && customEndpointUrlIssue(form.value.baseUrl) !== null) return false;
+  if (credentialIssue.value) return false;
   return true;
 });
 
@@ -156,6 +215,7 @@ watch([() => props.show, () => props.presetKind], ([show]) => {
     kind: props.editing?.kind ?? props.presetKind,
     name: props.editing?.name ?? "",
     baseUrl: props.editing?.baseUrl ?? "",
+    userId: "",
     userCredential: "",
   };
   clearCredential.value = false;
@@ -175,7 +235,9 @@ function submit(): void {
   if (!canSubmit.value || props.busy) return;
   const userCredential = clearCredential.value
     ? ""
-    : form.value.userCredential.trim() || undefined;
+    : form.value.kind === "new_api"
+      ? composeNewApiUserCredential(form.value.userId, form.value.userCredential)
+      : form.value.userCredential.trim() || undefined;
   emit("save", {
     kind: form.value.kind,
     name: form.value.name.trim(),

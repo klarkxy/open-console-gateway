@@ -51,6 +51,31 @@ pub fn run() {
                 app_state = initialize_host()?;
             }
             let core = &app_state.core;
+            if !cfg!(debug_assertions) {
+                match ocg_core::skill_install::sync_user_skill() {
+                    Ok(result)
+                        if result.status != ocg_core::skill_install::SkillSyncStatus::UpToDate =>
+                    {
+                        let _ = core.db.lock().log_gateway(
+                            "info",
+                            "skill",
+                            &format!(
+                                "Codex skill {:?} at {}",
+                                result.status,
+                                result.path.display()
+                            ),
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        let _ = core.db.lock().log_gateway(
+                            "warn",
+                            "skill",
+                            &format!("Codex skill synchronization failed: {error:#}"),
+                        );
+                    }
+                }
+            }
             if let Ok(resource_dir) = app.path().resource_dir() {
                 core.set_dashboard_dir(Some(resource_dir.join("dist")));
             }

@@ -53,3 +53,9 @@ test("non-list modes keep stored lists untouched", () => {
     ["removed-model"],
   );
 });
+
+
+test("proxy model casing does not erase a saved selection or merge distinct separators", () => {
+  assert.deepEqual(validateProxyList("list", ["MINIMAX-M3", "minimax-m3"], ["MiniMax-M3"]), ["MINIMAX-M3"]);
+  assert.throws(() => validateProxyList("list", ["vendor/model"], ["vendor-model"]));
+});

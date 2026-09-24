@@ -1,18 +1,17 @@
-import { computed, nextTick, ref } from "vue";
+import { computed, getCurrentScope, nextTick, onScopeDispose, ref, watch } from "vue";
 import type { Ref } from "vue";
 import { useMessage } from "naive-ui";
-import { DashboardRequestError, dashboardApi } from "../api/dashboard";
-import type { Account, PricingLimits, UsageWindow } from "../api/dashboard";
-import { providerApi } from "../api/providers.ts";
+import { DashboardRequestError, dashboardApi } from "../api/dashboard.ts";
+import type { Account, UsageWindow } from "../api/dashboard";
 import type {
   ProviderCatalogEntry,
   ProviderQuotaWindow,
   ProviderUsageResponse,
 } from "../api/providers.ts";
+import { useBillingStore } from "../stores/billing.ts";
 import {
   defaultResetsInMinutes,
   isUsageLimitReached,
-  mergeCalibratedProviderUsage,
   mergeUsageEdit,
   normalizeUsagePercent,
   resetsFieldsToMinutes,
@@ -24,7 +23,15 @@ import {
   windowResetsAt,
 } from "./accounts-usage.ts";
 import type { UsageEditState, UsageKey } from "./accounts-usage.ts";
+import { isLegacyGoFallbackPlan } from "./account-capabilities.ts";
 import { accountIsReady } from "./account-display.ts";
+import {
+  BILLING_ERROR_KEYS,
+  billingBinding,
+  billingManualCalibration,
+  presentedUsageOf,
+  usageWindowFromProviderUsage,
+} from "./billing.ts";
 import { findPlanDefinition } from "./plans.ts";
 import { t } from "../i18n/index.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
@@ -35,47 +42,107 @@ export type AccountUsageEdits = Record<UsageKey, UsageEditState>;
 export type UsageLimitView = { key: UsageKey; label: string; limit: number };
 
 /**
- * Quota window state for the account list: OpenCode Go pricing limits,
- * per-account usage snapshots, the manual calibration drafts, and the
- * official-usage refresh flow (including 429 throttle handling). GOAT and
- * paid Ollama Cloud have no machine-readable usage endpoint, so their
- * windows project locally priced OCG request logs and allow an explicit
- * manual correction. Ollama accounts without a billing row skip the meter.
+ * Account-list usage editors. Server snapshots live in useBillingStore;
+ * this composable keeps calibration drafts, messages, and focus, and
+ * projects usageMap / providerUsageMap from BillingStatus.usage.
  */
 export function useAccountUsage(
   accounts: Ref<Account[]>,
   now: Ref<number>,
   catalog: Ref<ProviderCatalogEntry[] | null>,
+  options?: {
+    message?: Pick<ReturnType<typeof useMessage>, "success" | "warning" | "error">;
+    endpointUrlFor?: (account: Account) => string | null;
+    officialBalanceFor?: (account: Account) => boolean;
+    /** Runs after an attempted quota refresh (success or failure), while the button still spins. */
+    afterUsageRefresh?: (accountId: string, isCurrent: () => boolean) => Promise<void>;
+  },
 ) {
-  const message = useMessage();
+  const message = options?.message ?? useMessage();
+  const billing = useBillingStore();
+  let disposed = false;
+  if (getCurrentScope()) onScopeDispose(() => { disposed = true; });
 
-  const quotaLimits = ref<PricingLimits | null>(null);
-  const quotaLimitsLoading = ref(false);
-  const quotaLimitsError = ref("");
-  const providerUsageLimits = ref<Record<string, UsageLimitView[]>>({});
+  const quotaLimits = computed(() => billing.pricingLimits);
+  const quotaLimitsLoading = computed(() => billing.pricingLoading);
+  const quotaLimitsError = computed(() => billing.pricingError);
   const usageLimits = computed<UsageLimitView[]>(() => {
     const limits = quotaLimits.value;
     if (!limits) return [];
     return [
-      { key: "window_5h", label: t("5小时"), limit: limits.window_5h },
+      { key: "window_5h", label: t("5 小时"), limit: limits.window_5h },
       { key: "window_week", label: t("本周"), limit: limits.window_week },
       { key: "window_month", label: t("本月"), limit: limits.window_month },
     ];
   });
 
+  const providerUsageMap = computed(() => {
+    const out: Record<string, ProviderUsageResponse> = {};
+    for (const [id, slot] of Object.entries(billing.byId)) {
+      const presented = presentedUsageOf(slot.status);
+      if (presented) out[id] = presented;
+    }
+    return out;
+  });
+
+  const usageMap = computed(() => {
+    const out: Record<string, UsageWindow> = {};
+    for (const [id, slot] of Object.entries(billing.byId)) {
+      out[id] = usageWindowFromProviderUsage(slot.status?.usage ?? null, id);
+    }
+    return out;
+  });
+
+  const usageLoading = computed(() => {
+    const out: Record<string, boolean> = {};
+    for (const [id, slot] of Object.entries(billing.byId)) out[id] = slot.loading;
+    return out;
+  });
+
+  const usageLoadErrors = computed(() => {
+    const out: Record<string, string | null> = {};
+    for (const [id, slot] of Object.entries(billing.byId)) {
+      out[id] = slot.error ? t(BILLING_ERROR_KEYS[slot.error]) : null;
+    }
+    return out;
+  });
+
+  const usageRefreshLoading = computed(() => {
+    const out: Record<string, boolean> = {};
+    for (const [id, slot] of Object.entries(billing.byId)) out[id] = slot.mutating;
+    return out;
+  });
+
   function usageLimitsFor(account: Account): UsageLimitView[] {
-    const providerLimits = providerUsageLimits.value[account.id];
-    if (providerLimits?.length) return providerLimits;
+    const presented = providerUsageMap.value[account.id];
+    if (presented?.quota_windows.length) return limitsFromProviderWindows(presented.quota_windows);
     const surface = findPlanDefinition(account.provider_id, catalog.value);
-    const limits = surface?.legacy && account.provider_id === "opencode"
+    const limits = surface && isLegacyGoFallbackPlan(surface, catalog.value)
       ? quotaLimits.value
       : null;
     if (!limits) return [];
     return [
-      { key: "window_5h", label: t("5小时"), limit: limits.window_5h },
+      { key: "window_5h", label: t("5 小时"), limit: limits.window_5h },
       { key: "window_week", label: t("本周"), limit: limits.window_week },
       { key: "window_month", label: t("本月"), limit: limits.window_month },
     ];
+  }
+
+  function bindingFor(account: Account): string {
+    return billingBinding(
+      account.updated_at,
+      options?.endpointUrlFor?.(account) ?? account.custom_config?.endpoint_url ?? null,
+    );
+  }
+
+  function requestStillCurrent(account: Account): () => boolean {
+    const session = billing.sessionEpoch;
+    const binding = bindingFor(account);
+    return () => {
+      const current = accounts.value.find(({ id }) => id === account.id);
+      return !disposed && session === billing.sessionEpoch
+        && current !== undefined && bindingFor(current) === binding;
+    };
   }
 
   function usageCapabilities(account: Account): {
@@ -83,16 +150,29 @@ export function useAccountUsage(
     refresh: boolean;
     manual: boolean;
   } {
+    const status = billing.byId[account.id]?.status;
+    if (status) {
+      return {
+        providerWindows: Boolean(status.usage) || status.model === "quota",
+        refresh: status.officialRefresh,
+        manual: billingManualCalibration(status),
+      };
+    }
     const surface = findPlanDefinition(account.provider_id, catalog.value);
     const manual = surface?.manual_usage_calibration === true;
     const refresh = surface?.usage_availability === "available";
-    return { providerWindows: refresh || manual, refresh, manual };
+    const creditBalance = options?.officialBalanceFor?.(account) === true;
+    return {
+      providerWindows: refresh || manual || creditBalance,
+      refresh: refresh || creditBalance,
+      manual,
+    };
   }
 
   function limitsFromProviderWindows(windows: ProviderQuotaWindow[]): UsageLimitView[] {
     const byKind = new Map(windows.map((window) => [window.window_kind, window]));
     const definitions: Array<[UsageKey, string, string]> = [
-      ["window_5h", "five_hours", t("5小时")],
+      ["window_5h", "five_hours", t("5 小时")],
       ["window_week", "week", t("本周")],
       ["window_month", "month", t("本月")],
     ];
@@ -104,12 +184,7 @@ export function useAccountUsage(
     });
   }
 
-  const usageMap = ref<Record<string, UsageWindow>>({});
-  const providerUsageMap = ref<Record<string, ProviderUsageResponse>>({});
   const usageEdits = ref<Record<string, AccountUsageEdits>>({});
-  const usageLoading = ref<Record<string, boolean>>({});
-  const usageLoadErrors = ref<Record<string, string | null>>({});
-  const usageRefreshLoading = ref<Record<string, boolean>>({});
 
   function blankUsage(accountId: string): UsageWindow {
     return {
@@ -228,8 +303,12 @@ export function useAccountUsage(
   }
 
   async function saveUsage(accountId: string, key: UsageKey) {
+    const account = accounts.value.find(({ id }) => id === accountId);
     const edit = usageEdits.value[accountId]?.[key];
-    if (!edit || edit.saving) return;
+    if (!account || !edit || edit.saving) return;
+    const currentRequest = requestStillCurrent(account);
+    const isCurrent = () => currentRequest() && usageEdits.value[accountId]?.[key] === edit;
+    const binding = bindingFor(account);
     const percent = normalizeUsagePercent(edit.draft);
     edit.draft = percent;
     const resetsChanged = edit.resets_dirty;
@@ -244,25 +323,20 @@ export function useAccountUsage(
         percent,
         resetsInMin,
       );
-      usageMap.value[accountId] = {
-        ...getUsage(accountId),
-        [key]: usage[key],
-        ...(key === "window_5h" ? { resets_in_5h: usage.resets_in_5h } : {}),
-        ...(key === "window_week" ? { resets_in_week: usage.resets_in_week } : {}),
-        ...(key === "window_month" ? { resets_in_month: usage.resets_in_month } : {}),
-      };
-      const patchedProviderUsage = mergeCalibratedProviderUsage(
-        providerUsageMap.value[accountId],
+      if (!isCurrent()) return;
+      billing.applyCalibratedUsage(
+        accountId,
+        binding,
         key,
-        usage,
+        {
+          ...getUsage(accountId),
+          [key]: usage[key],
+          ...(key === "window_5h" ? { resets_in_5h: usage.resets_in_5h } : {}),
+          ...(key === "window_week" ? { resets_in_week: usage.resets_in_week } : {}),
+          ...(key === "window_month" ? { resets_in_month: usage.resets_in_month } : {}),
+        },
         new Date().toISOString(),
       );
-      if (patchedProviderUsage) {
-        providerUsageMap.value = {
-          ...providerUsageMap.value,
-          [accountId]: patchedProviderUsage,
-        };
-      }
       const saved = usagePercentFromCost(usage[key], usageLimit(accountId, key));
       edit.draft = saved;
       edit.saved = saved;
@@ -270,10 +344,11 @@ export function useAccountUsage(
       edit.resets_in_minutes_draft = defaultResetsInMinutes(usage, key);
       edit.resets_dirty = false;
     } catch (error) {
+      if (!isCurrent()) return;
       edit.error = dashboardErrorDetail(error);
-      message.error(t("用量保存失败: {error}", { error: edit.error }));
+      message.error(t("用量保存失败：{error}", { error: edit.error }));
     } finally {
-      edit.saving = false;
+      if (usageEdits.value[accountId]?.[key] === edit) edit.saving = false;
     }
   }
 
@@ -289,28 +364,29 @@ export function useAccountUsage(
   async function refreshAccountUsage(accountId: string): Promise<void> {
     const account = accounts.value.find((item) => item.id === accountId);
     if (!account || !usageCapabilities(account).refresh) return;
+    const isCurrent = requestStillCurrent(account);
     if (usageRefreshLoading.value[accountId] || usageLoading.value[accountId]) {
       return;
     }
-    usageRefreshLoading.value = { ...usageRefreshLoading.value, [accountId]: true };
+    const status = billing.byId[accountId]?.status;
     try {
-      const result = await providerApi.refreshProviderUsage(accountId);
-      providerUsageMap.value = { ...providerUsageMap.value, [accountId]: result };
-      providerUsageLimits.value = {
-        ...providerUsageLimits.value,
-        [accountId]: limitsFromProviderWindows(result.quota_windows),
-      };
+      if (status?.model === "cash") {
+        await billing.refreshCash(accountId, bindingFor(account));
+      } else {
+        await billing.refreshUsage(accountId, bindingFor(account));
+      }
+      if (!isCurrent()) return;
+      const presented = providerUsageMap.value[accountId];
       patchAccountUsageSync(accountId, {
-        usage_sync_last_success_at: result.sync_state?.last_success_at ?? null,
-        usage_sync_next_allowed_at: result.sync_state?.next_eligible_at ?? null,
+        usage_sync_last_success_at: presented?.sync_state?.last_success_at ?? null,
+        usage_sync_next_allowed_at: presented?.sync_state?.next_eligible_at ?? null,
       });
       if (usageCapabilities(account).manual) {
-        const usage = await dashboardApi.getAccountUsage(accountId);
-        usageMap.value[accountId] = usage;
-        syncUsageEdits(accountId, usage);
+        syncUsageEdits(accountId, getUsage(accountId));
       }
       message.success(t("成功"));
     } catch (error) {
+      if (!isCurrent()) return;
       if (error instanceof DashboardRequestError && error.status === 429) {
         const nextAllowed = error.nextAllowedAt;
         if (nextAllowed) {
@@ -319,66 +395,45 @@ export function useAccountUsage(
         const seconds = error.retryAfterSeconds;
         message.warning(
           seconds
-            ? t("请稍后再试（约 {seconds} 秒）", { seconds: String(seconds) })
-            : t("刷新额度失败: {error}", { error: dashboardErrorDetail(error) }),
+            ? t("稍后再试（约 {seconds} 秒）", { seconds: String(seconds) })
+            : t("刷新额度失败：{error}", { error: dashboardErrorDetail(error) }),
         );
       } else {
-        message.error(t("刷新额度失败: {error}", { error: dashboardErrorDetail(error) }));
+        message.error(t("刷新额度失败：{error}", { error: dashboardErrorDetail(error) }));
       }
     } finally {
-      usageRefreshLoading.value = { ...usageRefreshLoading.value, [accountId]: false };
+      try {
+        if (isCurrent()) await options?.afterUsageRefresh?.(accountId, isCurrent);
+      } catch {
+        // Companion catalog refresh reports its own failure.
+      }
     }
   }
 
   async function loadQuotaLimits(): Promise<boolean> {
-    quotaLimitsLoading.value = true;
-    quotaLimitsError.value = "";
-    try {
-      quotaLimits.value = (await dashboardApi.getPricing()).limits;
-      return true;
-    } catch (error) {
-      quotaLimits.value = null;
-      quotaLimitsError.value = dashboardErrorDetail(error);
-      return false;
-    } finally {
-      quotaLimitsLoading.value = false;
-    }
+    return billing.loadPricing();
   }
 
   async function loadAccountUsage(accountId: string) {
-    usageLoading.value[accountId] = true;
-    usageLoadErrors.value[accountId] = null;
-    try {
-      const account = accounts.value.find(({ id }) => id === accountId);
-      if (!account) return;
-      const capabilities = usageCapabilities(account);
-      if (!capabilities.providerWindows && !capabilities.manual) return;
-      const [providerUsage, usage] = await Promise.all([
-        capabilities.providerWindows
-          ? providerApi.getProviderUsage(accountId)
-          : Promise.resolve(null),
-        capabilities.manual
-          ? dashboardApi.getAccountUsage(accountId)
-          : Promise.resolve(null),
-      ]);
-      if (providerUsage) {
-        providerUsageMap.value = { ...providerUsageMap.value, [accountId]: providerUsage };
-        providerUsageLimits.value = {
-          ...providerUsageLimits.value,
-          [accountId]: limitsFromProviderWindows(providerUsage.quota_windows),
-        };
-      }
-      if (usage) {
-        usageMap.value[accountId] = usage;
-        syncUsageEdits(accountId, usage);
-      } else {
-        usageMap.value[accountId] = blankUsage(accountId);
-      }
-    } catch (error) {
-      usageLoadErrors.value[accountId] = dashboardErrorDetail(error);
-    } finally {
-      usageLoading.value[accountId] = false;
+    const account = accounts.value.find(({ id }) => id === accountId);
+    if (!account) return;
+    const isCurrent = requestStillCurrent(account);
+    await billing.load(accountId, bindingFor(account));
+    if (!isCurrent()) return;
+    if (usageCapabilities(account).manual) {
+      syncUsageEdits(accountId, getUsage(accountId));
     }
+  }
+
+  async function revalidateAccountUsage(accountId: string): Promise<void> {
+    const slot = billing.byId[accountId];
+    if (slot?.loading || slot?.mutating) return;
+    await loadAccountUsage(accountId);
+  }
+
+  function forgetAccount(accountId: string): void {
+    billing.remove(accountId);
+    delete usageEdits.value[accountId];
   }
 
   async function retryQuotaLimits() {
@@ -392,6 +447,10 @@ export function useAccountUsage(
       (account) => loadAccountUsage(account.id),
     );
   }
+
+  watch(() => billing.sessionEpoch, () => {
+    usageEdits.value = {};
+  });
 
   return {
     quotaLimits,
@@ -415,6 +474,8 @@ export function useAccountUsage(
     refreshAccountUsage,
     loadQuotaLimits,
     loadAccountUsage,
+    revalidateAccountUsage,
     retryQuotaLimits,
+    forgetAccount,
   };
 }

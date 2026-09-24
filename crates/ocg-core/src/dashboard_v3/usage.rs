@@ -19,11 +19,13 @@ use crate::models::{
     QuotaWindow as ModelQuotaWindow, UsageWindow as ModelUsageWindow, UsageWindowKind,
 };
 use crate::provider::{
-    COMMAND_CODE_GOAT_QUOTA_5H, COMMAND_CODE_GOAT_QUOTA_MONTH, COMMAND_CODE_GOAT_QUOTA_WEEK,
     OllamaBillingTier, ProviderAdapterKind, ProviderRegistry, QUOTA_WINDOW_FREE,
 };
 use crate::state::CoreState;
-use crate::usage_sync::{UsageSyncCommitAuthorization, UsageSyncTrigger};
+use crate::usage_sync::{
+    CalibrationOutcome, ControlRevision, ProviderUsageRefreshGate, UsageSyncCommitAuthorization,
+    UsageSyncTrigger, refresh_coalesced,
+};
 
 use super::types::{
     AccountUsageUpdate, CreditBalance, MutationExpectation, ProviderUsage, QuotaWindow,
@@ -57,7 +59,71 @@ pub(super) async fn get_provider_usage(
     State(state): State<CoreState>,
     Path(id): Path<String>,
 ) -> Result<Json<ProviderUsage>, V3ApiError> {
-    provider_usage_locked(&state, &id).map(Json)
+    load_provider_usage(&state, &id).map(Json)
+}
+
+enum ProviderUsageRefreshKind {
+    Go,
+    Goat,
+    Plan,
+    Balance { endpoint_url: String },
+}
+
+fn classify_provider_usage_refresh(
+    state: &CoreState,
+    db: &Database,
+    account: &ModelAccount,
+) -> Result<ProviderUsageRefreshKind, V3ApiError> {
+    match ProviderAdapterKind::from_provider_id(&account.provider_id) {
+        Some(ProviderAdapterKind::OpenCodeGo) => Ok(ProviderUsageRefreshKind::Go),
+        Some(ProviderAdapterKind::CommandCodeGoat) => Ok(ProviderUsageRefreshKind::Goat),
+        Some(ProviderAdapterKind::MiniMaxCn | ProviderAdapterKind::KimiCn) => {
+            Ok(ProviderUsageRefreshKind::Plan)
+        }
+        Some(ProviderAdapterKind::ConfigurableHttp) => {
+            let endpoint = db
+                .account_custom_config(&account.id)
+                .map_err(V3ApiError::internal)?
+                .map(|config| config.endpoint_url);
+            balance_refresh_kind(state, endpoint)
+        }
+        None => {
+            let endpoint = granted_http_balance_endpoint(db, account)?;
+            if endpoint.is_none()
+                && crate::dynamic::find_runtime(&state.dynamic_providers(), &account.provider_id)
+                    .is_none()
+            {
+                return Err(V3ApiError::invalid_request_at(
+                    state,
+                    "unknown provider offering",
+                ));
+            }
+            balance_refresh_kind(state, endpoint)
+        }
+        Some(_) => Err(V3ApiError::invalid_request_at(
+            state,
+            "this Plan does not expose an official manual usage refresh",
+        )),
+    }
+}
+
+fn balance_refresh_kind(
+    state: &CoreState,
+    endpoint_url: Option<String>,
+) -> Result<ProviderUsageRefreshKind, V3ApiError> {
+    let Some(endpoint_url) = endpoint_url.filter(|value| !value.trim().is_empty()) else {
+        return Err(V3ApiError::invalid_request_at(
+            state,
+            "this Plan does not expose an official manual usage refresh",
+        ));
+    };
+    if crate::api_balance::probe_from_endpoint(&endpoint_url).is_none() {
+        return Err(V3ApiError::invalid_request_at(
+            state,
+            "this destination does not expose an official balance endpoint",
+        ));
+    }
+    Ok(ProviderUsageRefreshKind::Balance { endpoint_url })
 }
 
 pub(super) async fn refresh_provider_usage(
@@ -66,46 +132,121 @@ pub(super) async fn refresh_provider_usage(
     body: Bytes,
 ) -> Result<Json<ProviderUsage>, RefreshApiError> {
     let expectation = parse_mutation_json::<MutationExpectation>(&body)?;
-    let adapter = {
+    let kind = {
         let _settings_update = state.settings_update.lock();
         check_expectation(&state, &expectation)?;
         let db = state.db.lock();
         let account = load_account(&db, &state, &id)?;
-        ProviderAdapterKind::from_provider_id(&account.provider_id)
-            .ok_or_else(|| V3ApiError::invalid_request_at(&state, "unknown provider offering"))?
+        classify_provider_usage_refresh(&state, &db, &account)?
     };
-    match adapter {
-        ProviderAdapterKind::OpenCodeGo => {
+    match kind {
+        ProviderUsageRefreshKind::Go => {
             return refresh_go_provider_usage(&state, &id, &expectation).await;
         }
-        ProviderAdapterKind::CommandCodeGoat => {
+        ProviderUsageRefreshKind::Goat => {
             super::command_code_usage_refresh::refresh(&state, &id, &expectation).await?;
-            return provider_usage_locked(&state, &id)
+            load_provider_usage(&state, &id)
                 .map(Json)
-                .map_err(RefreshApiError::from);
+                .map_err(RefreshApiError::from)
         }
-        ProviderAdapterKind::MiniMaxCn | ProviderAdapterKind::KimiCn => {}
-        _ => {
+        ProviderUsageRefreshKind::Plan => {
+            return refresh_plan_usage(&state, &id, &expectation).await;
+        }
+        ProviderUsageRefreshKind::Balance { endpoint_url } => {
+            return refresh_official_balance(&state, &id, &expectation, endpoint_url).await;
+        }
+    }
+}
+
+async fn refresh_plan_usage(
+    state: &CoreState,
+    id: &str,
+    expectation: &MutationExpectation,
+) -> Result<Json<ProviderUsage>, RefreshApiError> {
+    let outcome = refresh_coalesced(
+        state,
+        id,
+        Some(ControlRevision {
+            revision: expectation.expected_revision,
+            process_generation: expectation.process_generation,
+        }),
+    )
+    .await;
+    match outcome {
+        CalibrationOutcome::Applied => {}
+        CalibrationOutcome::Throttled {
+            next_allowed_at,
+            retry_after_secs,
+        } => {
+            return Err(RefreshApiError::throttled(
+                state,
+                next_allowed_at,
+                retry_after_secs,
+                "provider usage refresh",
+            ));
+        }
+        CalibrationOutcome::FetchFailed(message) => {
+            state.log_runtime_event(
+                "warn",
+                "usage_sync",
+                &format!("event=provider_usage_refresh_failed account_id={id} stage=fetch"),
+            );
+            return Err(V3ApiError::outbound_failed(state, message).into());
+        }
+        CalibrationOutcome::Stale => {
+            return Err(V3ApiError::conflict_at(
+                state,
+                "the account changed while provider usage was being refreshed",
+            )
+            .into());
+        }
+        CalibrationOutcome::RejectedKey | CalibrationOutcome::Skipped => {
             return Err(V3ApiError::invalid_request_at(
-                &state,
+                state,
                 "this Plan does not expose an official manual usage refresh",
             )
             .into());
         }
     }
-    let _refresh = state.provider_usage_refresh.try_lock().map_err(|_| {
-        V3ApiError::conflict_at(&state, "provider usage refresh is already running")
-    })?;
-    let (account_snapshot, adapter, config, key) = {
+    let usage = {
         let _settings_update = state.settings_update.lock();
-        check_expectation(&state, &expectation)?;
+        check_expectation(state, expectation)?;
         let db = state.db.lock();
-        let account = load_account(&db, &state, &id)?;
-        let adapter = ProviderAdapterKind::from_provider_id(&account.provider_id)
-            .ok_or_else(|| V3ApiError::invalid_request_at(&state, "unknown provider offering"))?;
+        provider_usage_from_db(state, &db, id)?
+    };
+    state.log_runtime_event(
+        "info",
+        "usage_sync",
+        &format!("event=provider_usage_refresh_succeeded account_id={id}"),
+    );
+    Ok(Json(usage))
+}
+
+async fn refresh_official_balance(
+    state: &CoreState,
+    id: &str,
+    expectation: &MutationExpectation,
+    endpoint_url: String,
+) -> Result<Json<ProviderUsage>, RefreshApiError> {
+    let _refresh = state
+        .provider_usage_refresh
+        .exclusive(ProviderUsageRefreshGate::balance_key(id))
+        .await;
+    let (account_snapshot, config, key) = {
+        let _settings_update = state.settings_update.lock();
+        check_expectation(state, expectation)?;
+        let db = state.db.lock();
+        let account = load_account(&db, state, id)?;
+        if configured_balance_endpoint(&db, &account)?.as_deref() != Some(endpoint_url.as_str()) {
+            return Err(V3ApiError::conflict_at(
+                state,
+                "the destination changed before balance refresh",
+            )
+            .into());
+        }
         if account.key_cipher.trim().is_empty() {
             return Err(V3ApiError::invalid_request_at(
-                &state,
+                state,
                 "the selected account has no stored Key",
             )
             .into());
@@ -113,57 +254,54 @@ pub(super) async fn refresh_provider_usage(
         let key = state
             .decrypt_key(&account.key_cipher)
             .map_err(V3ApiError::internal)?;
-        (account, adapter, state.config(), key)
+        (account, state.config(), key)
     };
-
-    let windows = match crate::plan_usage::fetch(&config, adapter, &id, &key).await {
-        Ok(windows) => windows,
+    let rows = match crate::api_balance::fetch(&config, id, &key, &endpoint_url).await {
+        Ok(rows) => rows,
         Err(message) => {
             state.log_runtime_event(
                 "warn",
                 "usage_sync",
                 &format!(
-                    "event=provider_usage_refresh_failed account_id={id} provider={} stage=fetch",
+                    "event=provider_usage_refresh_failed account_id={id} provider={} stage=balance",
                     account_snapshot.provider_id
                 ),
             );
-            return Err(V3ApiError::outbound_failed(&state, message).into());
+            return Err(V3ApiError::outbound_failed(state, message).into());
         }
     };
-    let window_count = windows.len();
-
+    let source = rows.first().map(|row| row.source.clone()).ok_or_else(|| {
+        V3ApiError::outbound_failed(state, "balance endpoint returned no usable amount")
+    })?;
+    let row_count = rows.len();
     {
         let _settings_update = state.settings_update.lock();
-        check_expectation(&state, &expectation)?;
+        check_expectation(state, expectation)?;
         let db = state.db.lock();
-        let current = load_account(&db, &state, &id)?;
+        let current = load_account(&db, state, id)?;
         if current.updated_at != account_snapshot.updated_at
             || current.key_cipher != account_snapshot.key_cipher
             || current.provider_id != account_snapshot.provider_id
+            || configured_balance_endpoint(&db, &current)?.as_deref() != Some(endpoint_url.as_str())
         {
             return Err(V3ApiError::conflict_at(
-                &state,
+                state,
                 "the account changed while provider usage was being refreshed",
             )
             .into());
         }
-        let source = match adapter {
-            ProviderAdapterKind::MiniMaxCn => crate::plan_usage::MINIMAX_USAGE_SOURCE,
-            ProviderAdapterKind::KimiCn => crate::plan_usage::KIMI_USAGE_SOURCE,
-            _ => unreachable!("adapter checked above"),
-        };
-        db.replace_quota_windows_by_source(&id, source, &windows)
+        db.replace_credit_balances_by_source(id, &source, &rows)
             .map_err(V3ApiError::internal)?;
     }
     state.log_runtime_event(
         "info",
         "usage_sync",
         &format!(
-            "event=provider_usage_refresh_succeeded account_id={id} provider={} window_count={window_count}",
+            "event=provider_usage_refresh_succeeded account_id={id} provider={} window_count={row_count}",
             account_snapshot.provider_id
         ),
     );
-    provider_usage_locked(&state, &id)
+    load_provider_usage(state, id)
         .map(Json)
         .map_err(RefreshApiError::from)
 }
@@ -193,7 +331,7 @@ async fn refresh_go_provider_usage(
         check_expectation(state, expectation)?;
     }
     match observation.result {
-        Ok(_) => provider_usage_locked(state, id)
+        Ok(_) => load_provider_usage(state, id)
             .map(Json)
             .map_err(RefreshApiError::from),
         Err(error) => Err(map_refresh_error(state, error)),
@@ -341,13 +479,25 @@ fn patch_account_usage_locked(
     })
 }
 
-pub(super) fn provider_usage_locked(
+/// Read provider usage. Acquires `settings_update` and the database lock.
+/// Callers must not already hold either lock.
+pub(crate) fn load_provider_usage(
     state: &CoreState,
     id: &str,
 ) -> Result<ProviderUsage, V3ApiError> {
     let _settings_update = state.settings_update.lock();
     let db = state.db.lock();
-    let account = load_account(&db, state, id)?;
+    provider_usage_from_db(state, &db, id)
+}
+
+/// Project provider usage from a database the caller already locked.
+/// Does not acquire `settings_update` or `db`.
+fn provider_usage_from_db(
+    state: &CoreState,
+    db: &Database,
+    id: &str,
+) -> Result<ProviderUsage, V3ApiError> {
+    let account = load_account(db, state, id)?;
     if crate::dynamic::find_runtime(&state.dynamic_providers(), &account.provider_id).is_some() {
         return Ok(provider_usage_from_parts(
             state,
@@ -357,7 +507,7 @@ pub(super) fn provider_usage_locked(
             false,
             None,
             Vec::new(),
-            Vec::new(),
+            official_credit_balances(db, &account)?,
             None,
             None,
         ));
@@ -375,7 +525,7 @@ pub(super) fn provider_usage_locked(
             descriptor.usage.experimental,
             None,
             Vec::new(),
-            Vec::new(),
+            official_credit_balances(db, &account)?,
             db.account_usage_sync_state(&account.id)
                 .map_err(V3ApiError::internal)?,
             None,
@@ -416,11 +566,7 @@ pub(super) fn provider_usage_locked(
             None,
         )
     } else if descriptor.kind == ProviderAdapterKind::CommandCodeGoat {
-        let limits = PricingLimits {
-            window_5h: COMMAND_CODE_GOAT_QUOTA_5H,
-            window_week: COMMAND_CODE_GOAT_QUOTA_WEEK,
-            window_month: COMMAND_CODE_GOAT_QUOTA_MONTH,
-        };
+        let limits = crate::command_code_usage::goat_quota_limits();
         let observed_at = db
             .account_usage_sync_state(&account.id)
             .map_err(V3ApiError::internal)?
@@ -475,6 +621,82 @@ fn captured_pricing(state: &CoreState) -> CapturedPricing {
     }
 }
 
+fn official_credit_balances(
+    db: &Database,
+    account: &ModelAccount,
+) -> Result<Vec<ModelCreditBalance>, V3ApiError> {
+    let endpoint = configured_balance_endpoint(db, account)?;
+    let stepfun_api = endpoint.as_deref().is_some_and(|endpoint| {
+        crate::api_balance::probe_from_endpoint(endpoint).is_some()
+            && reqwest::Url::parse(endpoint)
+                .ok()
+                .is_some_and(|url| url.host_str() == Some("api.stepfun.com"))
+    });
+    Ok(db
+        .list_credit_balances(&account.id)
+        .map_err(V3ApiError::internal)?
+        .into_iter()
+        .filter(|row| crate::api_balance::is_official_balance_source(&row.source))
+        .filter(|row| row.source != "stepfun-api-official" || stepfun_api)
+        .collect())
+}
+
+fn configured_balance_endpoint(
+    db: &Database,
+    account: &ModelAccount,
+) -> Result<Option<String>, V3ApiError> {
+    if account.provider_id == crate::provider::CUSTOM_PROVIDER_ID {
+        return db
+            .account_custom_config(&account.id)
+            .map(|config| config.map(|config| config.endpoint_url))
+            .map_err(V3ApiError::internal);
+    }
+    granted_http_balance_endpoint(db, account)
+}
+
+/// Inference URL the current credential is allowed to use for a balance read.
+///
+/// This is the same grant rule as the dashboard: one authorized route URL.
+/// The provider default address is not used when the Key is granted a
+/// different route.
+fn granted_http_balance_endpoint(
+    db: &Database,
+    account: &ModelAccount,
+) -> Result<Option<String>, V3ApiError> {
+    let snapshot =
+        crate::routing_snapshot::RoutingSnapshot::load(db).map_err(V3ApiError::internal)?;
+    let Some(credential) = snapshot
+        .credentials
+        .iter()
+        .find(|credential| credential.id == account.id)
+    else {
+        return Ok(None);
+    };
+    let Some(destination) = snapshot
+        .projection
+        .destinations
+        .iter()
+        .find(|destination| destination.id == credential.destination_id)
+    else {
+        return Ok(None);
+    };
+    if destination.adapter != ocg_domain::destination::AdapterKind::Http {
+        return Ok(None);
+    }
+    let Ok(connection) = serde_json::from_value::<ocg_domain::connection::ConnectionId>(
+        serde_json::Value::String(credential.authorization_connection_id.clone()),
+    ) else {
+        return Ok(None);
+    };
+    let routes = ocg_domain::destination::http_configured_routes(destination);
+    Ok(ocg_domain::credential::unique_granted_route_url(
+        &connection,
+        &routes,
+        &credential.grants.allowed_endpoint_ids,
+        &credential.grants.allowed_origins,
+    ))
+}
+
 fn load_account(db: &Database, state: &CoreState, id: &str) -> Result<ModelAccount, V3ApiError> {
     db.get_account(id)
         .map_err(V3ApiError::internal)?
@@ -492,14 +714,7 @@ fn account_usage_limits(
             return Ok((pricing.limits.clone(), Some(pricing.revision.clone())));
         }
         Some(ProviderAdapterKind::CommandCodeGoat) => {
-            return Ok((
-                PricingLimits {
-                    window_5h: COMMAND_CODE_GOAT_QUOTA_5H,
-                    window_week: COMMAND_CODE_GOAT_QUOTA_WEEK,
-                    window_month: COMMAND_CODE_GOAT_QUOTA_MONTH,
-                },
-                None,
-            ));
+            return Ok((crate::command_code_usage::goat_quota_limits(), None));
         }
         Some(ProviderAdapterKind::OllamaCloud) => {
             let limit = db

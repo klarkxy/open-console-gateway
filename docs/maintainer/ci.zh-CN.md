@@ -14,7 +14,8 @@
   `docker compose -f compose.example.yaml config --quiet`。
   `pnpm run test:tooling` 不在此 job。
 - **Rust** — `cargo fmt --all -- --check`、锁定依赖的 workspace 测试与
-  Clippy `-D warnings`，并 `--exclude ocg-manager`（桌面 crate 需要 WebKit
+  Clippy `-D warnings`，并加上 `--features ocg-core/ollama-cloud-loopback-test`
+  与 `--exclude ocg-manager`（桌面 crate 需要 WebKit
   头文件和占位 `dist/index.html`；由 Windows job 覆盖；Linux 上的
   `src-tauri` 编译在 release 矩阵）。
 - **Windows Tauri** — 对 stub `dist/index.html` 跑
@@ -38,7 +39,7 @@
 `make_latest=false`。
 
 Windows GUI 冒烟是 `scripts/smoke-windows-release.ps1`（自启用 V3 CAS，
-NSIS `/UPDATE` 原地升级）。macOS 检查 universal `lipo` 与 ad-hoc
+NSIS `/UPDATE` 原地升级、静默卸载保留数据、再装回记住的目录）。macOS 检查 universal `lipo` 与 ad-hoc
 `codesign`，并重跑 Linux quality.yml 已覆盖的 Unix CPA 进程归属测试
 （`cpa_runtime::host`）。Linux 在 Xvfb 下启动 AppImage。
 

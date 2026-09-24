@@ -594,6 +594,35 @@ fn highspeed_only_doubles_input_and_output() {
 }
 
 #[test]
+fn go_estimate_matches_shared_billing_groups_and_quota_scale() {
+    let snapshot = embedded_seed();
+    let model = snapshot
+        .models
+        .iter()
+        .find(|entry| entry.model_id == "minimax-m2.7")
+        .unwrap();
+    let tokens = ocg_domain::billing::BillingTokens::clamped(1000, 100, 400, 300);
+    let raw = ocg_domain::billing::token_charge(
+        tokens,
+        ocg_domain::billing::TokenRates::per_million(
+            model.input,
+            model.output,
+            Some(model.cache_read),
+            Some(model.cache_write.unwrap_or(model.input)),
+        ),
+    )
+    .unwrap();
+    let estimate = snapshot.estimate("minimax-m2.7", 1000, 100, 400, 300, None);
+    assert_eq!(estimate.cost_state, "priced");
+    assert!((estimate.raw_cost_usd.unwrap() - raw).abs() < 1e-12);
+    assert_eq!(
+        estimate.quota_debit,
+        ocg_domain::billing::convert_charge(raw, model.quota_multiplier)
+    );
+    assert_eq!(estimate.cost, estimate.quota_debit);
+}
+
+#[test]
 fn unknown_model_is_unpriced() {
     let estimate = embedded_seed().estimate("future-model", 1000, 100, 0, 0, None);
     assert_eq!(estimate.cost, None);

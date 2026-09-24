@@ -1,21 +1,21 @@
+import type { AccountCapabilitySource } from "./account-capabilities.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { Account } from "../api/dashboard.ts";
 import type { Identity, IdentityCredential } from "../api/identities.ts";
 import type { ProviderCatalogEntry } from "../api/providers.ts";
 import {
-  accountCredentialCountLabel,
+  accountCredentialCount,
   accountExpiryDisplay,
-  accountShowsDeclaredRelation,
   credentialForAccount,
   inferenceAuthState,
   inferenceCredentials,
   inferenceLastError,
-  presentedAccountStatusLabel,
+  presentedAccountStatus,
   presentedAccountStatusTagType,
   selectedBindingDisabled,
-  selectedModelRestrictionLabel,
-  selectedQuotaShareLabel,
+  selectedModelRestriction,
+  selectedQuotaShare,
   sharedQuotaSiblings,
   v3AccountShowsExpiry,
 } from "./account-identity.ts";
@@ -154,8 +154,8 @@ test("a multi-key identity is found by credential.legacy and never the first sib
   assert.equal(inferenceAuthState(row, "acc-2"), "invalid");
   assert.equal(inferenceLastError(row, "acc-1"), null);
   assert.equal(inferenceLastError(row, "acc-2"), "401-sibling");
-  assert.equal(presentedAccountStatusLabel(account({ id: "acc-1" }), row), "已启用");
-  assert.equal(presentedAccountStatusLabel(account({ id: "acc-2" }), row), "不可用");
+  assert.deepEqual(presentedAccountStatus(account({ id: "acc-1" }), row), { kind: "enabled" });
+  assert.deepEqual(presentedAccountStatus(account({ id: "acc-2" }), row), { kind: "unavailable" });
   assert.equal(accountExpiryDisplay(account({ id: "acc-1" }), row, null), "v3");
 });
 
@@ -194,12 +194,46 @@ test("selected binding disabled and model restriction stay on this card, not a s
 
   assert.equal(selectedBindingDisabled(row, "acc-1"), true);
   assert.equal(selectedBindingDisabled(row, "acc-2"), false);
-  assert.equal(selectedModelRestrictionLabel(row, "acc-1"), "仅 model-x");
-  assert.equal(selectedModelRestrictionLabel(row, "acc-2"), null);
-  assert.equal(presentedAccountStatusLabel(account({ id: "acc-1" }), row), "已启用");
-  assert.equal(presentedAccountStatusLabel(account({ id: "acc-2" }), row), "不可用");
+  assert.deepEqual(selectedModelRestriction(row, "acc-1"), { kind: "single", model: "model-x" });
+  assert.equal(selectedModelRestriction(row, "acc-2"), null);
+  assert.deepEqual(presentedAccountStatus(account({ id: "acc-1" }), row), { kind: "enabled" });
+  assert.deepEqual(presentedAccountStatus(account({ id: "acc-2" }), row), { kind: "unavailable" });
   assert.equal(presentedAccountStatusTagType(account({ id: "acc-1" }), row), "success");
   assert.equal(presentedAccountStatusTagType(account({ id: "acc-2" }), row), "error");
+});
+
+test("model restriction data covers blank, single, and multi-model scopes", () => {
+  const restricted = identity({
+    credentials: [credential({
+      bindings: [{
+        id: "bind-1",
+        connection_id: "conn-1",
+        allowed_endpoint_ids: [],
+        allowed_origins: [],
+        model_scope: { kind: "only", models: ["", "  "] },
+        enabled: true,
+        routing_rank: 0,
+      }],
+    })],
+  });
+  assert.deepEqual(selectedModelRestriction(restricted, "acc-1"), { kind: "restricted" });
+
+  const multi = identity({
+    credentials: [credential({
+      bindings: [{
+        id: "bind-1",
+        connection_id: "conn-1",
+        allowed_endpoint_ids: [],
+        allowed_origins: [],
+        model_scope: { kind: "only", models: ["model-x", " model-y "] },
+        enabled: true,
+        routing_rank: 0,
+      }],
+    })],
+  });
+  assert.deepEqual(selectedModelRestriction(multi, "acc-1"), { kind: "count", count: 2 });
+  assert.equal(selectedModelRestriction(identity(), "acc-1"), null);
+  assert.equal(selectedModelRestriction(null, "acc-1"), null);
 });
 
 test("platform observer credentials are not inference Keys", () => {
@@ -218,28 +252,20 @@ test("platform observer credentials are not inference Keys", () => {
   const observerOnly = identity({ credentials: [observer] });
   assert.deepEqual(inferenceCredentials(observerOnly), []);
   assert.equal(inferenceAuthState(observerOnly, "acc-1"), null);
-  assert.equal(presentedAccountStatusLabel(account(), observerOnly), "已启用");
-  assert.equal(accountCredentialCountLabel(observerOnly), null);
+  assert.deepEqual(presentedAccountStatus(account(), observerOnly), { kind: "enabled" });
+  assert.equal(accountCredentialCount(observerOnly), null);
 });
 
-test("d04 declared relations are a declared tag, never a verified-wallet claim", () => {
-  assert.equal(accountShowsDeclaredRelation(identity()), false);
-  assert.equal(accountShowsDeclaredRelation(identity({
-    declared_relations: [{ group: "team-a", platform_account_id: "plat-1" }],
-  })), true);
-  assert.equal(accountShowsDeclaredRelation(null), false);
-});
-
-test("multiple credentials show a count; a single credential adds no chrome", () => {
-  assert.equal(accountCredentialCountLabel(identity()), null);
-  assert.equal(accountCredentialCountLabel(null), null);
+test("multiple credentials yield a count; a single credential adds no chrome", () => {
+  assert.equal(accountCredentialCount(identity()), null);
+  assert.equal(accountCredentialCount(null), null);
   assert.equal(
-    accountCredentialCountLabel(identity({
+    accountCredentialCount(identity({
       credentials: [credential(), credential({
         credential: { ...credential().credential, id: "cred-2" },
       })],
     })),
-    "2 个凭据",
+    2,
   );
 });
 
@@ -259,12 +285,12 @@ test("d07 null V4 subscription hides invented dynamic dates and keeps real Go pu
     credentials: [credential({ subscription: null })],
   }), null), "v3");
 
-  assert.equal(v3AccountShowsExpiry(dynamic, catalog), true);
+  assert.equal(v3AccountShowsExpiry(dynamic, catalog), false);
   assert.equal(accountExpiryDisplay(dynamic, identity({
     legacy: { kind: "account", id: "dyn-1" },
     credentials: [credential({ subscription: null })],
-  }), catalog), "unknown");
-  assert.equal(accountExpiryDisplay(dynamic, null, catalog), "v3");
+  }), catalog), "hidden");
+  assert.equal(accountExpiryDisplay(dynamic, null, catalog), "hidden");
 
   const custom = account({
     provider_id: "custom",
@@ -279,11 +305,11 @@ test("d07 null V4 subscription hides invented dynamic dates and keeps real Go pu
 
 test("authState unknown follows the enable switch, invalid is auth_error, and valid does not upgrade V3 pending", () => {
   const ready = account({ verification_status: "verified" });
-  assert.equal(presentedAccountStatusLabel(ready, identity()), "已启用");
+  assert.deepEqual(presentedAccountStatus(ready, identity()), { kind: "enabled" });
   assert.equal(presentedAccountStatusTagType(ready, identity()), "success");
 
   const draftReady = account({ verification_status: "verified", enabled: false });
-  assert.equal(presentedAccountStatusLabel(draftReady, identity()), "已禁用");
+  assert.deepEqual(presentedAccountStatus(draftReady, identity()), { kind: "disabled" });
   assert.equal(presentedAccountStatusTagType(draftReady, identity()), "error");
 
   const invalid = identity({
@@ -292,7 +318,7 @@ test("authState unknown follows the enable switch, invalid is auth_error, and va
       last_error: "401",
     })],
   });
-  assert.equal(presentedAccountStatusLabel(ready, invalid), "不可用");
+  assert.deepEqual(presentedAccountStatus(ready, invalid), { kind: "unavailable" });
   assert.equal(presentedAccountStatusTagType(ready, invalid), "error");
 
   const valid = identity({
@@ -300,7 +326,7 @@ test("authState unknown follows the enable switch, invalid is auth_error, and va
       credential: { ...credential().credential, auth_state: "valid" },
     })],
   });
-  assert.equal(presentedAccountStatusLabel(ready, valid), "已启用");
+  assert.deepEqual(presentedAccountStatus(ready, valid), { kind: "enabled" });
   assert.equal(presentedAccountStatusTagType(ready, valid), "success");
 
   const pendingDraft = account({
@@ -308,7 +334,7 @@ test("authState unknown follows the enable switch, invalid is auth_error, and va
     verification_status: "pending",
     enabled: false,
   });
-  assert.equal(presentedAccountStatusLabel(pendingDraft, valid), "待验证");
+  assert.deepEqual(presentedAccountStatus(pendingDraft, valid), { kind: "draft", state: "pending" });
   assert.equal(presentedAccountStatusTagType(pendingDraft, valid), "warning");
 
   const failedDraft = account({
@@ -316,15 +342,27 @@ test("authState unknown follows the enable switch, invalid is auth_error, and va
     verification_status: "failed",
     enabled: false,
   });
-  assert.equal(presentedAccountStatusLabel(failedDraft, valid), "验证失败");
+  assert.deepEqual(presentedAccountStatus(failedDraft, valid), { kind: "draft", state: "failed" });
   assert.equal(presentedAccountStatusTagType(failedDraft, valid), "error");
 
   const v3FailedReady = account({ verification_status: "failed", auth_error: "401" });
-  assert.equal(presentedAccountStatusLabel(v3FailedReady, valid), "不可用");
+  assert.deepEqual(presentedAccountStatus(v3FailedReady, valid), { kind: "unavailable" });
   assert.equal(presentedAccountStatusTagType(v3FailedReady, valid), "error");
 
-  assert.equal(presentedAccountStatusLabel(ready, null), "已启用");
+  assert.deepEqual(presentedAccountStatus(ready, null), { kind: "enabled" });
   assert.equal(presentedAccountStatusTagType(ready, null), "success");
+});
+
+test("presented cooling status carries the structured remaining time", () => {
+  const now = Date.parse("2026-09-01T00:00:00Z");
+  const cooling = account({
+    cooldown_until: new Date(now + 30_000).toISOString(),
+  });
+  assert.deepEqual(presentedAccountStatus(cooling, identity(), now), {
+    kind: "cooling",
+    remaining: { unit: "seconds", seconds: 30 },
+  });
+  assert.equal(presentedAccountStatusTagType(cooling, identity(), now), "warning");
 });
 
 test("quota pool id names shared siblings and leaves an independent third Key alone", () => {
@@ -361,11 +399,52 @@ test("quota pool id names shared siblings and leaves an independent third Key al
   assert.deepEqual(sharedQuotaSiblings(row, "acc-2").map((item) => item.credential.id), ["cred-a"]);
   assert.deepEqual(sharedQuotaSiblings(row, "acc-3"), []);
   assert.deepEqual(sharedQuotaSiblings(row, "acc-4"), []);
-  assert.equal(selectedQuotaShareLabel(row, "acc-1", names), "与 Key B 共享额度");
-  assert.equal(selectedQuotaShareLabel(row, "acc-2", names), "与 Key A 共享额度");
-  assert.equal(selectedQuotaShareLabel(row, "acc-3", names), null);
-  assert.equal(selectedQuotaShareLabel(row, "acc-4", names), null);
-  assert.equal(selectedQuotaShareLabel(identity({
+  assert.deepEqual(selectedQuotaShare(row, "acc-1", names), { kind: "named", name: "Key B" });
+  assert.deepEqual(selectedQuotaShare(row, "acc-2", names), { kind: "named", name: "Key A" });
+  assert.equal(selectedQuotaShare(row, "acc-3", names), null);
+  assert.equal(selectedQuotaShare(row, "acc-4", names), null);
+  assert.equal(selectedQuotaShare(identity({
     credentials: [credential({ quota_pool_id: "solo", quota_windows: [] })],
   }), "acc-1", names), null);
+});
+
+test("unnamed siblings fall back to the legacy id, and multiple siblings become a count", () => {
+  const sharedA = credential({
+    credential: { ...credential().credential, id: "cred-a" },
+    legacy: { kind: "account", id: "acc-1" },
+    quota_pool_id: "pool-ab",
+    quota_windows: [],
+  });
+  const sharedB = credential({
+    credential: { ...credential().credential, id: "cred-b" },
+    legacy: { kind: "account", id: "acc-2" },
+    quota_pool_id: "pool-ab",
+    quota_windows: [],
+  });
+  const sharedC = credential({
+    credential: { ...credential().credential, id: "cred-c" },
+    legacy: { kind: "account", id: "acc-3" },
+    quota_pool_id: "pool-ab",
+    quota_windows: [],
+  });
+  const row = identity({ credentials: [sharedA, sharedB, sharedC] });
+
+  assert.deepEqual(selectedQuotaShare(row, "acc-1"), { kind: "count", count: 2 });
+  const pair = identity({ credentials: [sharedA, sharedB] });
+  assert.deepEqual(selectedQuotaShare(pair, "acc-1"), { kind: "named", name: "acc-2" });
+  assert.equal(selectedQuotaShare(pair, "acc-1", () => null), null);
+  assert.deepEqual(selectedQuotaShare(row, "acc-1", (id) => id === "acc-2" ? "Key B" : null),
+    { kind: "named", name: "Key B" });
+});
+
+test("expiry display uses declared cadence instead of the legacy provider identity", () => {
+  const destination: AccountCapabilitySource = {
+    account_controls: { toggleWrite: "account", configurationOwner: "destination", consoleLink: "ollama", browserProfile: false },
+    auth_scheme: "bearer", max_credentials: 1, plan: null,
+    capabilities: { testable: true, managed_signup: false, external_integration: false, billing_tier_required: false },
+  };
+  assert.equal(accountExpiryDisplay(account(), identity(), null, destination), "hidden");
+  assert.equal(accountExpiryDisplay(account({ provider_id: "custom" }), null, null, {
+    ...destination, plan: { expiry_cadence: "monthly", manual_calibration: false, pricing_source: "unpriced", usage_source: "none", windows: [{ kind: "month" }] },
+  }), "v3");
 });

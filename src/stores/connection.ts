@@ -2,6 +2,7 @@ import { computed, ref } from "vue";
 import { defineStore } from "pinia";
 import { dashboardApi, isRevisionConflict } from "../api/dashboard.ts";
 import type { ConnectionInfo, ConnectionSubKey } from "../api/dashboard.ts";
+import { t } from "../i18n/index.ts";
 import { useControlPlaneStore } from "./controlPlane.ts";
 
 /**
@@ -81,7 +82,7 @@ export const useConnectionStore = defineStore("connection", () => {
     const connection = await reloadAfterMutation();
     const created = connection.sub_keys.filter((key) => !previousIds.has(key.id));
     if (created.length !== 1) {
-      throw new Error("创建 Key 后无法唯一识别新条目，请刷新后重试");
+      throw new Error(t("创建 Key 后未能识别新条目，刷新后重试"));
     }
     return created[0]!;
   }
@@ -100,7 +101,7 @@ export const useConnectionStore = defineStore("connection", () => {
     await runKeyMutation(() => controlPlane.runMutation((exp) => dashboardApi.regenerateKey(id, exp)));
     const connection = await reloadAfterMutation();
     const regenerated = connection.sub_keys.find((key) => key.id === id);
-    if (!regenerated) throw new Error("重新生成后找不到对应 Key，请刷新后重试");
+    if (!regenerated) throw new Error(t("重新生成后找不到对应 Key，刷新后重试"));
     return regenerated;
   }
 

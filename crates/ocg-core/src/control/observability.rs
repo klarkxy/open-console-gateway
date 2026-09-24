@@ -15,9 +15,11 @@ use crate::models::{
     ForwardLogSummary, GatewayLog, UpstreamChannel,
 };
 use crate::provider::CredentialKind;
-use crate::provider_contracts::{ContractScope, EffectiveContractSet};
+use crate::provider_contracts::EffectiveContractSet;
 use crate::redaction::redact_known_secret;
+use crate::route_availability::credential_contributes_production_route;
 use crate::routing_runtime::{account_channel, account_is_available_for_at};
+use crate::routing_snapshot::RoutingSnapshot;
 use chrono::{DateTime, SecondsFormat, Utc};
 use std::collections::BTreeMap;
 
@@ -161,11 +163,11 @@ pub(crate) fn application_models_from_snapshot(
 pub(crate) fn dashboard_summary(
     db: &Database,
     gateway_running: bool,
-    contracts: &EffectiveContractSet,
     decrypt_key: impl Fn(&str) -> Option<String>,
 ) -> Result<DashboardSummary, ObservabilityError> {
     let accounts = db.list_accounts()?;
     let total_accounts = accounts.len();
+    let snapshot = RoutingSnapshot::load(db).map_err(ObservabilityError::Internal)?;
     let now = Utc::now();
     let free_channel_cooling = db.free_channel_cooldown_until()?.is_some();
     let available_accounts = accounts
@@ -173,9 +175,9 @@ pub(crate) fn dashboard_summary(
         .filter(|account| {
             dashboard_account_is_available(
                 account,
+                &snapshot,
                 now,
                 free_channel_cooling,
-                contracts,
                 &decrypt_key,
             )
         })
@@ -191,11 +193,16 @@ pub(crate) fn dashboard_summary(
     })
 }
 
+/// One legacy account row can contribute a production route.
+///
+/// The count uses the same destination, credential, and grant facts as
+/// routing. Being a builtin provider is not required. A stored Key must still
+/// decrypt to a non-empty value; that check does not send a request.
 fn dashboard_account_is_available(
     account: &Account,
+    snapshot: &RoutingSnapshot,
     now: DateTime<Utc>,
     free_channel_cooling: bool,
-    contracts: &EffectiveContractSet,
     decrypt_key: &impl Fn(&str) -> Option<String>,
 ) -> bool {
     let Some(channel) = account_channel(account) else {
@@ -213,23 +220,30 @@ fn dashboard_account_is_available(
         CredentialKind::None => true,
     };
     credential_available
-        && ContractScope::from_account(account)
-            .and_then(|scope| contracts.scope(&scope))
-            .is_some_and(|contract| {
-                contract.catalog_routable
-                    && contract.production_inference
-                    && contract
-                        .models
-                        .values()
-                        .any(|model| model.has_enabled_protocol())
-            })
+        && snapshot.credentials.iter().any(|credential| {
+            credential.id == account.id
+                && snapshot
+                    .projection
+                    .destinations
+                    .iter()
+                    .find(|destination| destination.id == credential.destination_id)
+                    .is_some_and(|destination| {
+                        credential_contributes_production_route(credential, destination)
+                    })
+        })
 }
 
 pub(crate) fn daily_tokens_by_model(
     db: &Database,
     days: Option<i64>,
 ) -> Result<Vec<DailyModelTokens>, ObservabilityError> {
-    db.daily_tokens_by_model(days.unwrap_or(30))
+    let days = days.unwrap_or(30);
+    if days < 1 {
+        return Err(ObservabilityError::InvalidQuery(
+            "days must be at least 1".into(),
+        ));
+    }
+    db.daily_tokens_by_model(days)
         .map_err(ObservabilityError::from)
 }
 

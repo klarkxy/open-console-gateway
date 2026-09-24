@@ -6,6 +6,7 @@ use ocg_core::db::Database;
 use ocg_core::gateway::{self, GatewayLifecycle};
 use ocg_core::models::{Account, AppConfig};
 use ocg_core::provider::CredentialKind;
+use ocg_core::skill_install;
 use ocg_core::state::CoreStateInner;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -15,6 +16,35 @@ use std::sync::Arc;
 #[command(name = "ocg-manager-cli")]
 #[command(about = "Headless CLI for Open Console Gateway")]
 #[command(version)]
+#[command(after_long_help = r#"FIRST RUN
+  ocg-manager-cli serve --port 9042
+  Open http://127.0.0.1:9042/dashboard/ in your browser. Add an upstream
+  account in Accounts, then copy the Gateway Key and API Base URL from Access
+  Center directly into your client. The usual local Base URL ends in /v1.
+
+DOWNLOAD AND UPGRADE
+  Get the matching platform archive and SHA256SUMS from the same GitHub
+  Release. Verify the checksum, extract the whole archive (binary and dist/),
+  and replace that extraction as a unit on upgrade. Keep the data directory.
+
+CAPABILITY BOUNDARY
+  The CLI starts the Gateway and offers limited account operations. Use the
+  dashboard for other Providers, client Access Keys, Custom API destinations,
+  model/protocol settings, routing, proxy, and backup/import.
+
+CODEX SKILL
+  Native release builds sync the bundled ocg-manager skill to ~/.agents/skills on
+  serve. Run `ocg-manager-cli skill sync` to install or repair it explicitly.
+  Existing OCG-managed versions are backed up; an unrelated same-name skill
+  is left untouched.
+
+SECRET HANDLING
+  Do not paste Keys or passwords into an agent conversation. `key add` and
+  --encryption-key accept plaintext process arguments; enter credentials in
+  the local dashboard when an agent is helping. status hides the Gateway Key
+  unless --show-key is explicitly requested in a private terminal.
+
+Guide: https://github.com/klarkxy/open-console-gateway/tree/main/docs/user"#)]
 struct Cli {
     /// Data directory for the CLI (default: ~/.ocg-mgr-cli)
     #[arg(long, global = true)]
@@ -31,7 +61,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Start the gateway server
+    /// Start the gateway server and, in native releases, sync the Codex skill
+    #[command(
+        after_long_help = "The default listener is 127.0.0.1:9042. --port saves the port in SQLite. Keep dist/ beside the executable for the dashboard. A non-loopback --host requires dashboard administrator login; plan authentication, TLS, and network access before exposing it. Native release builds sync the bundled Codex skill when serve starts; the Docker build does not install it on the host."
+    )]
     Serve {
         /// Address to listen on
         #[arg(long, default_value = "127.0.0.1")]
@@ -43,20 +76,47 @@ enum Commands {
         #[arg(long)]
         dashboard_dir: Option<PathBuf>,
     },
-    /// Manage API keys
+    /// Manage account API keys (see key --help for scope)
+    #[command(
+        after_long_help = "key add and key ping target OpenCode Go only. key list includes API-key accounts across Providers, while key remove/enable/disable act on the supplied account ID even for other Providers; confirm identity in the dashboard first. key ping makes a real upstream request and may print an upstream response excerpt. Enter new secrets in the local dashboard when an agent is assisting."
+    )]
     Key {
         #[command(subcommand)]
         action: KeyAction,
     },
-    /// Show gateway status
-    Status,
+    /// Show gateway status (Gateway Key hidden by default)
+    #[command(
+        after_long_help = "Ordinary status output hides the primary Gateway Key. --show-key prints the complete value; use it only in a private terminal and do not copy its output into agent chat, logs, or support tickets."
+    )]
+    Status {
+        /// Print the primary gateway key (only in a private terminal)
+        #[arg(long)]
+        show_key: bool,
+    },
+    /// Install or update the bundled Codex skill
+    Skill {
+        #[command(subcommand)]
+        action: SkillAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum SkillAction {
+    /// Sync to ~/.agents/skills/ocg-manager; back up a prior OCG-managed copy
+    #[command(
+        after_long_help = "Install the skill embedded in this binary into the current user's ~/.agents/skills/ocg-manager. Repeating the command is safe when the installed copy matches. When bundled skill content changes, the previous OCG-managed copy is moved to ~/.agents/skill-backups before replacement. A same-name skill without OCG's ownership marker, or a locally edited matching-copy, is left unchanged."
+    )]
+    Sync,
 }
 
 #[derive(Subcommand)]
 enum KeyAction {
     /// List all keys and their status
     List,
-    /// Add a new key
+    /// Add an OpenCode Go key (plaintext argument; prefer the dashboard)
+    #[command(
+        after_long_help = "The Key and optional --password are process arguments and may appear in shell history or process inspection. When an agent is helping, enter them directly in the local dashboard instead of chat or a tool command."
+    )]
     Add {
         /// Display name for the key
         name: String,
@@ -84,7 +144,7 @@ enum KeyAction {
         /// Account ID
         id: String,
     },
-    /// Ping upstream with one or all enabled keys — shows real status code / body
+    /// Ping OpenCode Go with one or all enabled keys; shows real status/body
     Ping {
         /// Account ID; omit to ping every enabled key
         id: Option<String>,
@@ -108,6 +168,15 @@ fn main() -> Result<()> {
 #[tokio::main]
 async fn run_cli() -> Result<()> {
     let cli = Cli::parse();
+    if let Commands::Skill { action } = &cli.command {
+        return match action {
+            SkillAction::Sync => {
+                let result = skill_install::sync_user_skill()?;
+                println!("Codex skill {:?}: {}", result.status, result.path.display());
+                Ok(())
+            }
+        };
+    }
     let data_dir = resolve_data_dir(cli.data_dir);
     let cipher = resolve_cipher(&data_dir, cli.encryption_key)?;
 
@@ -118,7 +187,8 @@ async fn run_cli() -> Result<()> {
             dashboard_dir,
         } => serve(data_dir, cipher, host, port, dashboard_dir).await,
         Commands::Key { action } => key_command(data_dir, cipher, action).await,
-        Commands::Status => status_command(data_dir, cipher).await,
+        Commands::Status { show_key } => status_command(data_dir, cipher, show_key).await,
+        Commands::Skill { .. } => unreachable!(),
     }
 }
 
@@ -176,6 +246,12 @@ async fn serve(
     port: Option<u16>,
     dashboard_dir: Option<PathBuf>,
 ) -> Result<()> {
+    if cfg!(feature = "install-codex-skill")
+        && !cfg!(debug_assertions)
+        && let Err(error) = skill_install::sync_user_skill()
+    {
+        eprintln!("warning: Codex skill synchronization failed: {error:#}");
+    }
     let state = start_serve(data_dir, cipher, host, port, dashboard_dir).await?;
     println!("press Ctrl+C to stop");
     tokio::signal::ctrl_c().await?;
@@ -211,7 +287,7 @@ async fn start_serve(
         gateway::start_gateway_on(state.clone(), SocketAddr::new(host, config.gateway_port))
             .await?;
     println!("gateway started on http://{}:{}", host, handle.port);
-    println!("gateway key: {}", config.gateway_key);
+    println!("gateway key: [hidden; use status --show-key in a private terminal]");
     println!("dashboard: http://{}:{}/dashboard/", host, handle.port);
     println!(
         "upstream: {}",
@@ -339,7 +415,11 @@ fn reject_zen_key_operation(account: &Account) -> Result<()> {
     Ok(())
 }
 
-async fn status_command(data_dir: PathBuf, cipher: Arc<dyn KeyCipher + Send + Sync>) -> Result<()> {
+async fn status_command(
+    data_dir: PathBuf,
+    cipher: Arc<dyn KeyCipher + Send + Sync>,
+    show_key: bool,
+) -> Result<()> {
     let state = build_state(data_dir, cipher)?;
     let config: AppConfig = state.config();
     let db = state.db.lock();
@@ -354,7 +434,11 @@ async fn status_command(data_dir: PathBuf, cipher: Arc<dyn KeyCipher + Send + Sy
 
     println!("data dir: {:?}", state.data_dir());
     println!("gateway port: {}", config.gateway_port);
-    println!("gateway key: {}", config.gateway_key);
+    if show_key {
+        println!("gateway key: {}", config.gateway_key);
+    } else {
+        println!("gateway key: [hidden; use --show-key in a private terminal]");
+    }
     println!(
         "upstream: {}",
         ocg_core::gateway::free_models::opencode_go_base_url(&config.upstream_base_url)

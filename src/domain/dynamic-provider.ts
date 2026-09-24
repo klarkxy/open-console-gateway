@@ -3,7 +3,7 @@ import { customEndpointUrlIssue } from "./custom-account.ts";
 
 const DYNAMIC_PROVIDER_MODEL_SOURCE = "dynamic_provider";
 
-export type DynamicAuthKind = "bearer" | "x-api-key" | "none";
+export type DynamicAuthKind = "bearer" | "x-api-key" | "api-key" | "none";
 export type DynamicUpstreamProtocol = "chat_completions" | "responses" | "messages";
 
 /**
@@ -63,30 +63,30 @@ export type ProviderDefinitionDraftError =
   | "missing_replacement_key";
 
 export const DYNAMIC_PROVIDER_DRAFT_ERROR_KEYS = {
-  missing_name: "请填写供应商名称",
-  missing_endpoint_url: "请填写 API 地址",
+  missing_name: "填写供应商名称",
+  missing_endpoint_url: "填写 API 地址",
   invalid_endpoint_url: "Endpoint 格式无效",
   endpoint_url_not_http: "Endpoint 必须是 http:// 或 https:// URL",
   endpoint_url_with_credentials: "Endpoint 不能包含用户名或密码",
-  missing_protocol: "请选择上游协议",
-  missing_auth_kind: "请选择鉴权方式",
-  missing_mappings: "请至少添加一个完整模型映射",
+  missing_protocol: "选择上游协议",
+  missing_auth_kind: "选择鉴权方式",
+  missing_mappings: "至少添加一个完整模型映射",
   duplicate_public_model: "对外模型名不能重复",
-  missing_public_model: "请填写对外模型名",
-  missing_upstream_model: "请填写上游模型 ID",
+  missing_public_model: "填写对外模型名",
+  missing_upstream_model: "填写上游模型 ID",
   public_model_too_long: "对外模型名最多 200 个字符",
   public_model_has_control_character: "对外模型名不能包含控制字符",
   upstream_model_too_long: "上游模型 ID 最多 200 个字符",
   upstream_model_has_control_character: "上游模型 ID 不能包含控制字符",
-  missing_override_endpoint: "请填写该模型覆盖的上游地址，或改回跟随供应商默认",
+  missing_override_endpoint: "填写该模型覆盖的上游地址，或改回跟随供应商默认",
   invalid_override_endpoint: "覆盖的上游地址格式无效",
   override_endpoint_not_http: "覆盖的上游地址必须是 http:// 或 https:// URL",
   override_endpoint_with_credentials: "覆盖的上游地址不能包含用户名或密码",
-  missing_key: "请填写 API Key",
+  missing_key: "填写 API Key",
   missing_replacement_key: "从无鉴权改为需要 Key 时必须填写替换 Key",
 } as const satisfies Record<ProviderDefinitionDraftError, string>;
 
-export const DYNAMIC_AUTH_KINDS: readonly DynamicAuthKind[] = ["bearer", "x-api-key", "none"];
+export const DYNAMIC_AUTH_KINDS: readonly DynamicAuthKind[] = ["bearer", "x-api-key", "api-key", "none"];
 export const DYNAMIC_PROTOCOLS: readonly DynamicUpstreamProtocol[] = [
   "chat_completions",
   "responses",
@@ -100,7 +100,7 @@ export function isDynamicCatalogEntry(
 }
 
 export function dynamicAuthRequiresKey(authKind: DynamicAuthKind | ""): boolean {
-  return authKind === "bearer" || authKind === "x-api-key";
+  return authKind === "bearer" || authKind === "x-api-key" || authKind === "api-key";
 }
 
 export function emptyProviderDefinitionDraft(): ProviderDefinitionDraft {
@@ -248,7 +248,7 @@ export function validateProviderDefinitionDraft(
     && draft.upstream_protocol !== "messages") {
     return "missing_protocol";
   }
-  if (draft.auth_kind !== "bearer" && draft.auth_kind !== "x-api-key" && draft.auth_kind !== "none") {
+  if (draft.auth_kind !== "bearer" && draft.auth_kind !== "x-api-key" && draft.auth_kind !== "api-key" && draft.auth_kind !== "none") {
     return "missing_auth_kind";
   }
   const mappings = normalizeDynamicMappings(draft.models);

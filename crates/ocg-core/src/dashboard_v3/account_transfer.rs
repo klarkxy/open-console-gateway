@@ -3,7 +3,12 @@
 //! Plaintext upstream Keys are decrypted and re-encrypted only inside the Host.
 //! The dashboard receives a versioned Argon2id + AES-256-GCM envelope, plus
 //! secret-free previews/results. Browser profiles, cookies, logs, usage, and
-//! V6 also preserves cooldown deadlines; V4/V5 retain their host-local policy.
+//! local Host settings stay off the package. V7+ destinations and credentials
+//! are the authoritative transfer model and carry plaintext secrets inside the
+//! already-encrypted envelope. V11 carries HTTP `protocolRoutes`. V10 carries
+//! personal credit meters. V9 carries `routingCards`. V8 requires
+//! `modelResolution`; V7 fills deterministic defaults. V6 preserves cooldown
+//! deadlines; V4/V5 retain their host-local policy.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
@@ -35,6 +40,7 @@ use crate::models::{
 use ocg_domain::credential::ModelScope;
 use ocg_domain::dynamic::{DynamicAuthKind, DynamicModelMapping, DynamicProviderDefinition};
 
+use crate::dashboard_v4::types::RoutingCard;
 use crate::dynamic::DynamicProviderRuntime;
 use crate::provider::{
     ConnectionVerificationStatus, CreationAvailability, CredentialKind, QuotaScope,
@@ -54,15 +60,31 @@ use super::types::{
 };
 use super::{V3ApiError, check_expectation, parse_json, parse_mutation_json};
 
+mod new_model;
+mod portable;
+
+use new_model::{
+    ValidatedMigration, export_new_model, finish_new_model_migration, map_old_graph_to_unified,
+    observer_plaintext_by_parent,
+};
+use portable::{PortableCredential, PortableDestination, credential_purpose, is_observer_purpose};
+
 const ENVELOPE_FORMAT: &str = "ocg-manager-account-backup";
 const ENVELOPE_VERSION: u32 = 1;
 #[cfg(test)]
 const LEGACY_PAYLOAD_VERSION: u32 = 1;
 #[cfg(test)]
 const NODE_PAYLOAD_VERSION: u32 = 2;
-const PAYLOAD_VERSION: u32 = 6;
+const PAYLOAD_VERSION: u32 = 11;
 const MIN_SUPPORTED_PAYLOAD_VERSION: u32 = 4;
 const V5_PAYLOAD_VERSION: u32 = 5;
+const V6_PAYLOAD_VERSION: u32 = 6;
+const V7_PAYLOAD_VERSION: u32 = 7;
+const V8_PAYLOAD_VERSION: u32 = 8;
+const V9_PAYLOAD_VERSION: u32 = 9;
+const V10_PAYLOAD_VERSION: u32 = 10;
+const V11_PAYLOAD_VERSION: u32 = 11;
+const MAX_ROUTING_CARDS: usize = 1000;
 const AAD: &[u8] = b"ocg-manager-account-backup:v1:argon2id-m65536-t3-p1:aes-256-gcm";
 const ARGON_MEMORY_KIB: u32 = 64 * 1024;
 const ARGON_ITERATIONS: u32 = 3;
@@ -100,12 +122,13 @@ struct EncryptedEnvelope {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PortablePayload {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     platform_accounts: Vec<crate::platform::PortablePlatformAccount>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     platform_links: Vec<crate::platform::PortablePlatformLink>,
     version: u32,
     exported_at: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     accounts: Vec<PortableAccount>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     dynamic_providers: Vec<PortableProviderDefinition>,
@@ -113,6 +136,12 @@ struct PortablePayload {
     identities: Vec<PortableIdentity>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     quota_pools: Vec<PortableQuotaPool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    destinations: Vec<PortableDestination>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    credentials: Vec<PortableCredential>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    routing_cards: Option<Vec<RoutingCard>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     node: Option<PortableNodeState>,
 }
@@ -338,6 +367,11 @@ impl Zeroize for PortablePayload {
         self.dynamic_providers.zeroize();
         self.identities.zeroize();
         self.quota_pools.zeroize();
+        self.destinations.zeroize();
+        self.credentials.zeroize();
+        if let Some(cards) = self.routing_cards.as_mut() {
+            cards.clear();
+        }
         self.node.zeroize();
     }
 }
@@ -520,6 +554,7 @@ struct ValidatedAccount {
     name: String,
     username: Option<String>,
     key: Zeroizing<String>,
+    password: Option<Zeroizing<String>>,
     enabled: bool,
     account_type: ModelAccountType,
     setup_step: ModelSetupStep,
@@ -535,19 +570,6 @@ struct ValidatedAccount {
     quota_scope: QuotaScope,
     identity: Option<ImportedAccountIdentity>,
     cooldowns: PortableCooldowns,
-}
-
-#[derive(Debug)]
-struct ValidatedMigration {
-    platform_links_authoritative: bool,
-    platform_accounts: Vec<crate::platform::PortablePlatformAccount>,
-    platform_links: Vec<crate::platform::PortablePlatformLink>,
-    exported_at: String,
-    accounts: Vec<ValidatedAccount>,
-    node: Option<Zeroizing<PortableNodeState>>,
-    dynamic_providers: Vec<DynamicProviderRuntime>,
-    draft_provider_ids: HashSet<String>,
-    identity_snapshot: Option<IdentityImportSnapshot>,
 }
 
 #[derive(Debug)]
@@ -613,7 +635,11 @@ async fn export_accounts_inner(
         let _permit = permit;
         let (payload, skipped_accounts, revision) = export_payload(&blocking_state)?;
         let payload = Zeroizing::new(payload);
-        let exported_accounts = payload.accounts.len() as u64;
+        let exported_accounts = payload
+            .credentials
+            .iter()
+            .filter(|credential| !is_observer_purpose(credential_purpose(credential)))
+            .count() as u64;
         let bundle = encrypt_payload(&payload, bundle_password.as_str())?;
         Ok::<_, TransferError>((bundle, exported_accounts, skipped_accounts, revision))
     })
@@ -690,39 +716,21 @@ async fn import_accounts_inner(
 
     let _settings_update = state.settings_update.lock();
     check_expectation(&state, &expectation)?;
-    let is_node_migration = validated.node.is_some();
-    if let Some(node) = validated.node.as_deref() {
-        validate_node_merge_against_current(&state, node)?;
-    }
-    validate_platform_merge_against_current(&state, &validated.platform_accounts)?;
+    validate_node_merge_against_current(&state, &validated.node)?;
+    validate_platform_merge_against_current(&state, &validated.unified.platform_accounts)?;
     validate_identity_merge_against_current(&state, &validated)?;
-    let existing = current_logical_accounts(&state)?;
     let existing_ids = current_account_ids(&state)?;
     let mut records = Vec::new();
     let mut items = Vec::with_capacity(validated.accounts.len());
-    let mut duplicate_accounts = 0_u64;
+    let duplicate_accounts = 0_u64;
     let mut account_id_map = HashMap::new();
     let mut imported_account_ids = HashSet::new();
     for account in validated.accounts {
-        let logical = logical_key(&account.provider_id, &account.name);
-        if !is_node_migration && existing.contains(&logical) {
-            duplicate_accounts += 1;
-            items.push(preview_item(
-                &account,
-                AccountImportDisposition::Duplicate,
-                Some("an account with the same Plan and name already exists".to_string()),
-            ));
-            continue;
-        }
         let now = Utc::now();
-        let id = account
-            .id
-            .clone()
-            .filter(|_| is_node_migration)
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        if let Some(source_id) = account.id.as_ref() {
-            account_id_map.insert(source_id.clone(), id.clone());
-        }
+        let id = account.id.clone().ok_or_else(|| {
+            V3ApiError::invalid_request_at(&state, "imported credential is missing a stable id")
+        })?;
+        account_id_map.insert(id.clone(), id.clone());
         imported_account_ids.insert(id.clone());
         let key_cipher = if account.key.is_empty() {
             String::new()
@@ -731,6 +739,14 @@ async fn import_accounts_inner(
                 .encrypt_key(account.key.as_str())
                 .map_err(|_| V3ApiError::internal("failed to protect an imported credential"))?
         };
+        let password_cipher = account
+            .password
+            .as_ref()
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .map(|plaintext| state.encrypt_key(plaintext))
+            .transpose()
+            .map_err(|_| V3ApiError::internal("failed to protect an imported credential"))?;
         let model = ModelAccount {
             id,
             provider_id: account.provider_id.clone(),
@@ -739,7 +755,7 @@ async fn import_accounts_inner(
             quota_scope: account.quota_scope,
             name: account.name.clone(),
             username: account.username.clone(),
-            password_cipher: None,
+            password_cipher,
             key_cipher,
             enabled: account.enabled,
             account_type: account.account_type,
@@ -769,8 +785,7 @@ async fn import_accounts_inner(
         });
         items.push(preview_item(
             &account,
-            if is_node_migration && existing_ids.contains(account.id.as_deref().unwrap_or_default())
-            {
+            if existing_ids.contains(account.id.as_deref().unwrap_or_default()) {
                 AccountImportDisposition::Merged
             } else {
                 AccountImportDisposition::Imported
@@ -780,7 +795,7 @@ async fn import_accounts_inner(
     }
 
     let imported_accounts = records.len() as u64;
-    let identity_snapshot = match validated.identity_snapshot.as_ref() {
+    let identity_snapshot = match validated.unified.identity_snapshot.as_ref() {
         Some(snapshot) => {
             let remapped = snapshot
                 .remap_account_ids(&account_id_map)
@@ -803,85 +818,127 @@ async fn import_accounts_inner(
         }
         None => None,
     };
-    let revision = if records.is_empty() && !is_node_migration {
-        state.settings_revision()
-    } else if let Some(mut node) = validated.node {
-        let previous = state.config();
-        node.config.gateway_port = previous.gateway_port;
-        node.config.client_root_url = previous.client_root_url;
-        node.config.auto_start = previous.auto_start;
-        node.config.show_dock_icon = previous.show_dock_icon;
-        node.config
-            .validate()
-            .map_err(|message| V3ApiError::invalid_request_at(&state, message))?;
-        let now = Utc::now();
-        let sub_keys = node
-            .access_keys
-            .iter()
-            .map(|key| {
-                Ok(SubGatewayKey {
-                    id: key.id.clone(),
-                    name: key.name.clone(),
-                    key: key.key.clone(),
-                    enabled: key.enabled,
-                    deleted_at: None,
-                    created_at: DateTime::parse_from_rfc3339(&key.created_at)
-                        .map_err(|_| {
-                            V3ApiError::invalid_request_at(&state, "invalid Access Key time")
-                        })?
-                        .with_timezone(&Utc),
-                })
+    let mut node = validated.node;
+    let previous = state.config();
+    node.config.gateway_port = previous.gateway_port;
+    node.config.client_root_url = previous.client_root_url;
+    node.config.auto_start = previous.auto_start;
+    node.config.show_dock_icon = previous.show_dock_icon;
+    node.config
+        .validate()
+        .map_err(|message| V3ApiError::invalid_request_at(&state, message))?;
+    let now = Utc::now();
+    let sub_keys = node
+        .access_keys
+        .iter()
+        .map(|key| {
+            Ok(SubGatewayKey {
+                id: key.id.clone(),
+                name: key.name.clone(),
+                key: key.key.clone(),
+                enabled: key.enabled,
+                deleted_at: None,
+                created_at: DateTime::parse_from_rfc3339(&key.created_at)
+                    .map_err(|_| V3ApiError::invalid_request_at(&state, "invalid Access Key time"))?
+                    .with_timezone(&Utc),
             })
-            .collect::<Result<Vec<_>, V3ApiError>>()?;
-        let node_record = NodeImportRecord {
-            platform_links_authoritative: validated.platform_links_authoritative,
-            platform_accounts: validated.platform_accounts,
-            platform_links: validated.platform_links,
-            accounts: records,
-            account_order: node.account_order.clone(),
-            config_json: serde_json::to_string(&node.config)
-                .map_err(|_| V3ApiError::internal("failed to encode imported settings"))?,
-            sub_keys,
-            zen_free_enabled: node.zen_free.enabled,
-            zen_catalog: crate::kernel::zen::ZenFreeModelCatalog {
-                models: node.zen_free.models.clone(),
-                refreshed_at: node
-                    .zen_free
-                    .refreshed_at
-                    .as_deref()
-                    .map(DateTime::parse_from_rfc3339)
-                    .transpose()
-                    .map_err(|_| {
-                        V3ApiError::invalid_request_at(&state, "invalid Zen catalog time")
-                    })?
-                    .map(|value| value.with_timezone(&Utc)),
-                source_url: node.zen_free.source_url.clone(),
-            },
-            provider_contracts: persisted_contracts_from_portable(&node.provider_contracts, now)
-                .map_err(|error| V3ApiError::invalid_request_at(&state, error))?,
-            dynamic_providers: validated.dynamic_providers,
-            identity_snapshot,
-            draft_provider_ids: validated.draft_provider_ids,
-        };
-        let runtime = state
-            .db
-            .lock()
-            .import_node_state(&node_record, |db| state.prepare_imported_node_runtime(db))
-            .map_err(|error| V3ApiError::conflict_at(&state, error.to_string()))?;
-        state.install_imported_node_runtime(runtime);
-        state.settings_revision()
+        })
+        .collect::<Result<Vec<_>, V3ApiError>>()?;
+    let mut platform_observer_ciphers = HashMap::new();
+    for (parent_id, plaintext) in observer_plaintext_by_parent(&validated.unified) {
+        platform_observer_ciphers.insert(
+            parent_id,
+            state.encrypt_key(&plaintext).map_err(|_| {
+                V3ApiError::internal("failed to protect an imported observer secret")
+            })?,
+        );
+    }
+    let cpa_management_key_cipher = validated
+        .unified
+        .cpa_management_key
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .map(|plaintext| state.encrypt_key(plaintext))
+        .transpose()
+        .map_err(|_| V3ApiError::internal("failed to protect an imported CPA secret"))?;
+    let db = state.db.lock();
+    let preimport_cards = if validated.unified.routing_cards.is_some() {
+        Some(
+            crate::db::routing_cards::load_on(&db.conn)
+                .map_err(|_| V3ApiError::internal("failed to read destination routing cards"))?,
+        )
     } else {
-        state
-            .db
-            .lock()
-            .import_accounts_with_contracts(&records)
-            .map_err(|_| V3ApiError::internal("failed to import account migration package"))?;
-        let revision = state.bump_settings_revision();
-        state.reload_provider_contracts().map_err(|_| {
-            V3ApiError::internal("accounts imported but runtime contracts could not reload")
-        })?;
-        revision
+        None
     };
+    let credit_meters: Vec<_> = validated
+        .unified
+        .credentials
+        .iter()
+        .filter_map(|credential| {
+            let meter = credential.credit_meter.as_ref()?;
+            let account_id = account_id_map.get(&credential.legacy_account_id)?;
+            imported_account_ids
+                .contains(account_id)
+                .then(|| (account_id.clone(), meter.clone()))
+        })
+        .collect();
+    let node_record = NodeImportRecord {
+        destination_controls: validated.unified.destination_controls,
+        platform_links_authoritative: validated.unified.platform_links_authoritative,
+        platform_accounts: validated.unified.platform_accounts,
+        platform_links: validated.unified.platform_links,
+        platform_catalogs: validated.unified.platform_catalogs,
+        accounts: records,
+        account_order: node.account_order.clone(),
+        config_json: serde_json::to_string(&node.config)
+            .map_err(|_| V3ApiError::internal("failed to encode imported settings"))?,
+        sub_keys,
+        zen_free_enabled: node.zen_free.enabled,
+        zen_catalog: crate::kernel::zen::ZenFreeModelCatalog {
+            models: node.zen_free.models.clone(),
+            refreshed_at: node
+                .zen_free
+                .refreshed_at
+                .as_deref()
+                .map(DateTime::parse_from_rfc3339)
+                .transpose()
+                .map_err(|_| V3ApiError::invalid_request_at(&state, "invalid Zen catalog time"))?
+                .map(|value| value.with_timezone(&Utc)),
+            source_url: node.zen_free.source_url.clone(),
+        },
+        provider_contracts: persisted_contracts_from_portable(
+            &node.provider_contracts,
+            now,
+            validated.legacy_exclusive_radio_repair,
+        )
+        .map_err(|error| V3ApiError::invalid_request_at(&state, error))?,
+        dynamic_providers: validated.unified.dynamic_providers,
+        custom_destinations: validated.unified.custom_destinations,
+        custom_credential_destinations: validated.unified.custom_credential_destinations,
+        identity_snapshot,
+        draft_provider_ids: validated.unified.draft_provider_ids,
+        platform_observer_ciphers,
+        platform_snapshots: validated.unified.platform_snapshots,
+        platform_versions: validated.unified.platform_versions,
+        cpa_base_url: validated.unified.cpa_base_url,
+        cpa_management_key_cipher,
+    };
+    let runtime = db
+        .import_node_state_with_cipher(&node_record, Some(state.cipher.as_ref()), |db| {
+            for (account_id, meter) in &credit_meters {
+                crate::db::billing::import_on(&db.conn, account_id, meter, now)?;
+            }
+            if let (Some(preimport), Some(cards)) = (
+                preimport_cards.as_ref(),
+                validated.unified.routing_cards.as_ref(),
+            ) {
+                restore_imported_routing_cards_on(&db.conn, preimport, cards)?;
+            }
+            state.prepare_imported_node_runtime(db)
+        })
+        .map_err(|error| V3ApiError::conflict_at(&state, error.to_string()))?;
+    state.install_imported_node_runtime(runtime);
+    let revision = state.settings_revision();
 
     Ok(Json(AccountImportResult {
         items,
@@ -892,207 +949,238 @@ async fn import_accounts_inner(
     }))
 }
 
+fn routing_cards_for_export(
+    cards: Vec<RoutingCard>,
+    destinations: &[PortableDestination],
+    credentials: &[PortableCredential],
+) -> Vec<RoutingCard> {
+    let dest_ids: HashSet<&str> = destinations
+        .iter()
+        .map(|destination| destination.id.as_str())
+        .collect();
+    let cred_ids: HashSet<&str> = credentials
+        .iter()
+        .filter(|credential| !is_observer_purpose(credential_purpose(credential)))
+        .map(|credential| credential.id.as_str())
+        .collect();
+    cards
+        .into_iter()
+        .filter_map(|mut card| {
+            if !dest_ids.contains(card.destination_id.as_str()) {
+                return None;
+            }
+            let was_empty = card.credential_ids.is_empty();
+            card.credential_ids
+                .retain(|credential_id| cred_ids.contains(credential_id.as_str()));
+            if was_empty || !card.credential_ids.is_empty() {
+                Some(card)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Build the membership layout restored after node import.
+///
+/// Pre-import cards are preserved — including empty and adjacent same-destination
+/// cards — for destinations that still exist. Source grouping applies only to
+/// credential IDs that were not already on the target. Same card id on the same
+/// destination absorbs new members; the same id on a different destination is
+/// rejected so the import transaction rolls back. Remaining live credentials
+/// omitted from the portable snapshot (Zen/CPA) keep their generated singleton
+/// cards from the post-import layout.
+fn proposed_imported_routing_cards(
+    preimport: Vec<RoutingCard>,
+    imported: &[RoutingCard],
+    post_import: &[RoutingCard],
+) -> anyhow::Result<Vec<RoutingCard>> {
+    let live_destinations: HashSet<String> = post_import
+        .iter()
+        .map(|card| card.destination_id.clone())
+        .collect();
+    let mut credential_destination = HashMap::<String, String>::new();
+    for card in post_import {
+        for id in &card.credential_ids {
+            credential_destination.insert(id.clone(), card.destination_id.clone());
+        }
+    }
+    let preexisting: HashSet<String> = preimport
+        .iter()
+        .flat_map(|card| card.credential_ids.iter().cloned())
+        .filter(|id| credential_destination.contains_key(id))
+        .collect();
+
+    let mut proposed = Vec::new();
+    let mut proposed_ids = HashSet::new();
+    for mut card in preimport {
+        if !live_destinations.contains(&card.destination_id) {
+            continue;
+        }
+        card.credential_ids
+            .retain(|id| credential_destination.get(id) == Some(&card.destination_id));
+        proposed_ids.insert(card.id.clone());
+        proposed.push(card);
+    }
+
+    for source in imported {
+        if !live_destinations.contains(&source.destination_id) {
+            continue;
+        }
+        if proposed
+            .iter()
+            .any(|card| card.id == source.id && card.destination_id != source.destination_id)
+        {
+            anyhow::bail!(
+                "imported routing card `{}` collides with a different destination",
+                source.id
+            );
+        }
+        let was_empty = source.credential_ids.is_empty();
+        let new_members: Vec<String> = source
+            .credential_ids
+            .iter()
+            .filter(|id| {
+                !preexisting.contains(*id)
+                    && credential_destination.get(*id) == Some(&source.destination_id)
+            })
+            .cloned()
+            .collect();
+        if new_members.is_empty() && !was_empty {
+            continue;
+        }
+        if was_empty && proposed_ids.contains(&source.id) {
+            continue;
+        }
+        if let Some(existing) = proposed.iter_mut().find(|card| card.id == source.id) {
+            if existing.destination_id != source.destination_id {
+                anyhow::bail!(
+                    "imported routing card `{}` collides with a different destination",
+                    source.id
+                );
+            }
+            for id in new_members {
+                if !existing.credential_ids.contains(&id) {
+                    existing.credential_ids.push(id);
+                }
+            }
+            continue;
+        }
+        proposed_ids.insert(source.id.clone());
+        proposed.push(RoutingCard {
+            id: source.id.clone(),
+            destination_id: source.destination_id.clone(),
+            credential_ids: new_members,
+        });
+    }
+
+    let covered: HashSet<String> = proposed
+        .iter()
+        .flat_map(|card| card.credential_ids.iter().cloned())
+        .collect();
+    for current in post_import {
+        let leftover: Vec<String> = current
+            .credential_ids
+            .iter()
+            .filter(|id| !covered.contains(*id))
+            .cloned()
+            .collect();
+        if leftover.is_empty() {
+            continue;
+        }
+        if let Some(existing) = proposed.iter_mut().find(|card| card.id == current.id) {
+            if existing.destination_id != current.destination_id {
+                anyhow::bail!(
+                    "imported routing card `{}` collides with a different destination",
+                    current.id
+                );
+            }
+            for id in leftover {
+                if !existing.credential_ids.contains(&id) {
+                    existing.credential_ids.push(id);
+                }
+            }
+            continue;
+        }
+        proposed.push(RoutingCard {
+            id: current.id.clone(),
+            destination_id: current.destination_id.clone(),
+            credential_ids: leftover,
+        });
+    }
+    Ok(proposed)
+}
+
+fn restore_imported_routing_cards_on(
+    conn: &rusqlite::Connection,
+    preimport: &[RoutingCard],
+    imported: &[RoutingCard],
+) -> anyhow::Result<()> {
+    let post_import = crate::db::routing_cards::load_on(conn)?;
+    let proposed = proposed_imported_routing_cards(preimport.to_vec(), imported, &post_import)?;
+    crate::db::routing_cards::restore_on(conn, &proposed)
+}
+
 fn export_payload(state: &CoreState) -> Result<(PortablePayload, u64, u64), TransferError> {
     let _settings_update = state.settings_update.lock();
     let revision = state.settings_revision();
-    let (
-        snapshots,
-        sub_keys,
-        persisted_contracts,
-        (dynamic_runtimes, draft_provider_ids),
-        identity_model,
-        quota_pools,
-        platform_accounts,
-        platform_links,
-    ) = {
+    let (destinations, credentials, skipped) = export_new_model(state)?;
+    let routing_cards = routing_cards_for_export(
+        {
+            let db = state.db.lock();
+            crate::db::routing_cards::load_on(&db.conn).map_err(|_| TransferError::Internal)?
+        },
+        &destinations,
+        &credentials,
+    );
+    if credentials
+        .iter()
+        .filter(|credential| !is_observer_purpose(credential_purpose(credential)))
+        .count()
+        > MAX_ACCOUNTS
+    {
+        return Err(TransferError::Invalid(format!(
+            "at most {MAX_ACCOUNTS} accounts can be exported at once"
+        )));
+    }
+    let (sub_keys, persisted_contracts, quota_pools, account_order, zen_enabled) = {
         let db = state.db.lock();
-        let accounts = db.list_accounts().map_err(|_| TransferError::Internal)?;
-        let snapshots = accounts
-            .into_iter()
-            .map(|account| {
-                let contract = db
-                    .load_account_contract(&account.id)
-                    .map_err(|_| TransferError::Internal)?;
-                let ollama_billing = if account.provider_id == crate::provider::OLLAMA_PROVIDER_ID {
-                    db.ollama_cloud_billing_tier(&account.id)
-                        .map_err(|_| TransferError::Internal)?
-                } else {
-                    None
-                };
-                Ok((account, contract, ollama_billing))
-            })
-            .collect::<Result<Vec<_>, TransferError>>()?;
         let sub_keys = db
             .list_active_sub_gateway_keys()
             .map_err(|_| TransferError::Internal)?;
         let persisted_contracts = db
             .load_persisted_contracts()
             .map_err(|_| TransferError::Internal)?;
-        let dynamic_runtimes = db
-            .list_control_plane_dynamic_providers()
-            .map_err(|_| TransferError::Internal)?;
-        let draft_provider_ids = db
-            .onboarding_draft_provider_ids()
-            .map_err(|_| TransferError::Internal)?;
-        let identity_model = db
-            .list_identity_model()
-            .map_err(|_| TransferError::Internal)?;
         let quota_pools = db.list_quota_pools().map_err(|_| TransferError::Internal)?;
-        let parents = db
-            .list_platform_accounts()
-            .map_err(|_| TransferError::Internal)?
-            .into_iter()
-            .map(|p| crate::platform::PortablePlatformAccount {
-                id: p.id,
-                kind: p.kind,
-                name: p.name,
-                base_url: p.base_url,
-            })
-            .collect::<Vec<_>>();
-        let links = db
-            .list_platform_links()
-            .map_err(|_| TransferError::Internal)?
-            .into_iter()
-            .map(|l| {
-                let mut group = l.group;
-                group.verified = false;
-                group.subscription_type = None;
-                crate::platform::PortablePlatformLink {
-                    account_id: l.account_id,
-                    platform_account_id: l.platform_account_id,
-                    group,
-                }
-            })
-            .collect::<Vec<_>>();
+        let accounts = db.list_accounts().map_err(|_| TransferError::Internal)?;
+        let exported_ids = credentials
+            .iter()
+            .filter(|credential| !is_observer_purpose(credential_purpose(credential)))
+            .map(|credential| credential.legacy_account_id.clone())
+            .collect::<HashSet<_>>();
+        let mut account_order = Vec::new();
+        let mut zen_enabled = false;
+        for account in accounts {
+            if account.id == crate::provider::CPA_ACCOUNT_ID {
+                continue;
+            }
+            if account.is_zen_free() {
+                zen_enabled = account.enabled;
+                account_order.push(account.id);
+                continue;
+            }
+            if exported_ids.contains(&account.id) {
+                account_order.push(account.id);
+            }
+        }
         (
-            snapshots,
             sub_keys,
             persisted_contracts,
-            (dynamic_runtimes, draft_provider_ids),
-            identity_model,
             quota_pools,
-            parents,
-            links,
+            account_order,
+            zen_enabled,
         )
     };
-    let mut accounts = Zeroizing::new(Vec::new());
-    let mut account_order = Vec::new();
-    let mut skipped = 0_u64;
-    let mut zen_enabled = false;
-    for (account, contract, ollama_billing) in snapshots {
-        if account.id == crate::provider::CPA_ACCOUNT_ID {
-            continue;
-        }
-        if account.is_zen_free() {
-            zen_enabled = account.enabled;
-            account_order.push(account.id);
-            continue;
-        }
-        if account.account_type == ModelAccountType::Managed
-            && account.setup_step != ModelSetupStep::Ready
-        {
-            skipped += 1;
-            continue;
-        }
-        account_order.push(account.id.clone());
-        let dynamic = dynamic_runtimes
-            .iter()
-            .find(|runtime| crate::dynamic::provider_ids_equal(&runtime.id, &account.provider_id));
-        let plan = builtin_provider(&account.provider_id);
-        if plan.is_none() && dynamic.is_none() {
-            return Err(TransferError::Internal);
-        }
-        let portable_key_required =
-            if dynamic.is_some_and(|runtime| !runtime.auth_kind.requires_key()) {
-                false
-            } else {
-                migration_exports_key(account.account_type, account.setup_step)
-            };
-        let mut key = Zeroizing::new(if !portable_key_required || account.key_cipher.is_empty() {
-            String::new()
-        } else {
-            state
-                .decrypt_key(&account.key_cipher)
-                .map_err(|_| TransferError::Internal)?
-        });
-        if portable_key_required && key.trim().is_empty() {
-            return Err(TransferError::Internal);
-        }
-        let (custom_config, model_capabilities) =
-            if plan.is_some_and(crate::provider::plan_requires_custom_config) {
-                (
-                    contract.custom_config.map(|config| PortableCustomConfig {
-                        endpoint_url: config.endpoint_url,
-                        upstream_protocol: config.upstream_protocol.as_str().to_string(),
-                    }),
-                    contract
-                        .model_capabilities
-                        .into_iter()
-                        .map(|capability| {
-                            PortableModelCapability::Canonical(PortableModelCapabilityCanonical {
-                                public_model: capability.public_model,
-                                upstream_model: capability.upstream_model,
-                                protocol: capability.protocol.as_str().to_string(),
-                            })
-                        })
-                        .collect(),
-                )
-            } else {
-                // Non-Custom account capability rows are runtime/provider
-                // evidence, not portable Custom declarations. Provider-level
-                // catalogs and evidence are carried separately in node V2.
-                (None, Vec::new())
-            };
-        let identity_row = identity_model
-            .accounts
-            .iter()
-            .find(|row| row.account.id == account.id)
-            .ok_or(TransferError::Internal)?;
-        accounts.push(PortableAccount {
-            id: Some(account.id.clone()),
-            provider_id: account.provider_id,
-
-            name: account.name,
-            username: account.username,
-            key: std::mem::take(&mut *key),
-            enabled: account.enabled,
-            account_type: account.account_type.as_str().to_string(),
-            setup_step: account.setup_step.as_str().to_string(),
-            purchase_date: account.purchase_date,
-            expires_on: account.expires_on,
-            notes: account.notes,
-            verification_status: Some(contract.verification.status.as_str().to_string()),
-            connection_verified_at: contract
-                .verification
-                .connection_verified_at
-                .map(|value| value.to_rfc3339()),
-            custom_config,
-            model_capabilities,
-            ollama_billing_tier: ollama_billing.map(|tier| tier.as_str().to_string()),
-            identity_id: Some(identity_row.identity_id.clone()),
-            credential_id: Some(identity_row.credential_id.clone()),
-            credential_version: Some(identity_row.credential_version),
-            auth_state_version: Some(identity_row.auth_state_version),
-            binding_id: Some(identity_row.binding_id.clone()),
-            binding_enabled: Some(identity_row.binding_enabled),
-            binding_model_scope: Some(identity_row.binding_model_scope.clone()),
-            allowed_endpoint_ids: Some(identity_row.allowed_endpoint_ids.clone()),
-            allowed_origins: Some(identity_row.allowed_origins.clone()),
-            cooldowns: Some(PortableCooldowns {
-                until: account.cooldown_until,
-                generic: account.cooldown_generic_until,
-                five_hours: account.cooldown_5h_until,
-                week: account.cooldown_week_until,
-                month: account.cooldown_month_until,
-                free: account.cooldown_free_until,
-            }),
-        });
-    }
-    if accounts.len() > MAX_ACCOUNTS {
-        return Err(TransferError::Invalid(format!(
-            "at most {MAX_ACCOUNTS} accounts can be exported at once"
-        )));
-    }
     let access_keys = sub_keys
         .into_iter()
         .map(|key| PortableAccessKey {
@@ -1159,59 +1247,11 @@ fn export_payload(state: &CoreState) -> Result<(PortablePayload, u64, u64), Tran
         })
         .collect::<Vec<_>>();
     provider_contracts.sort_by(|left, right| left.provider_id.cmp(&right.provider_id));
-    let mut portable_dynamics = dynamic_runtimes
-        .into_iter()
-        .map(|runtime| {
-            let onboarding_draft = draft_provider_ids.contains(&runtime.id);
-            PortableProviderDefinition {
-                preset_id: runtime.preset_id,
-                id: runtime.id,
-                name: runtime.name,
-                endpoint_url: runtime.endpoint_url,
-                upstream_protocol: runtime.upstream_protocol.as_str().to_string(),
-                auth_kind: runtime.auth_kind.as_str().to_string(),
-                models: runtime
-                    .mappings
-                    .into_iter()
-                    .map(|mapping| PortableProviderDefinitionModel {
-                        public_model: mapping.public_model,
-                        upstream_model: mapping.upstream_model,
-                        upstream_override: mapping.upstream_override.map(|value| {
-                            PortableProviderDefinitionModelOverride {
-                                protocol: value.protocol.as_str().to_string(),
-                                endpoint_url: value.endpoint_url,
-                            }
-                        }),
-                    })
-                    .collect(),
-                onboarding_draft: Some(onboarding_draft),
-            }
-        })
-        .collect::<Vec<_>>();
-    portable_dynamics.sort_by(|left, right| left.id.cmp(&right.id));
-    let exported_ids = accounts
+    let exported_ids = credentials
         .iter()
-        .filter_map(|account| account.id.clone())
+        .filter(|credential| !is_observer_purpose(credential_purpose(credential)))
+        .map(|credential| credential.legacy_account_id.clone())
         .collect::<HashSet<_>>();
-    let exported_identity_ids = accounts
-        .iter()
-        .filter_map(|account| account.identity_id.clone())
-        .collect::<HashSet<_>>();
-    let mut identities = identity_model
-        .identities
-        .into_iter()
-        .filter(|identity| exported_identity_ids.contains(&identity.id))
-        .map(|identity| PortableIdentity {
-            id: identity.id,
-            label: identity.label,
-            identity_confidence: identity.identity_confidence,
-            authority_site: identity.authority_site,
-            authority_subject: identity.authority_subject,
-            enabled: identity.enabled,
-            notes: identity.notes,
-        })
-        .collect::<Vec<_>>();
-    identities.sort_by(|left, right| left.id.cmp(&right.id));
     let mut portable_quota_pools = quota_pools
         .into_iter()
         .filter_map(|pool| {
@@ -1238,21 +1278,17 @@ fn export_payload(state: &CoreState) -> Result<(PortablePayload, u64, u64), Tran
     let zen_catalog = state.zen_free_model_catalog();
     Ok((
         PortablePayload {
-            platform_accounts,
-            platform_links: platform_links
-                .into_iter()
-                .filter(|l| {
-                    accounts
-                        .iter()
-                        .any(|a| a.id.as_deref() == Some(l.account_id.as_str()))
-                })
-                .collect(),
+            platform_accounts: Vec::new(),
+            platform_links: Vec::new(),
             version: PAYLOAD_VERSION,
             exported_at: Utc::now().to_rfc3339(),
-            accounts: std::mem::take(&mut *accounts),
-            dynamic_providers: portable_dynamics,
-            identities,
+            accounts: Vec::new(),
+            dynamic_providers: Vec::new(),
+            identities: Vec::new(),
             quota_pools: portable_quota_pools,
+            destinations,
+            credentials,
+            routing_cards: Some(routing_cards),
             node: Some(PortableNodeState {
                 config: state.config(),
                 access_keys,
@@ -1271,6 +1307,7 @@ fn export_payload(state: &CoreState) -> Result<(PortablePayload, u64, u64), Tran
     ))
 }
 
+#[cfg(test)]
 fn migration_exports_key(account_type: ModelAccountType, setup_step: ModelSetupStep) -> bool {
     account_type == ModelAccountType::Key
         || (account_type == ModelAccountType::Managed && setup_step == ModelSetupStep::Ready)
@@ -1396,48 +1433,78 @@ fn validate_payload(payload: PortablePayload) -> Result<ValidatedMigration, Tran
                 || account.allowed_origins.is_some()
                 || account.cooldowns.is_some()
         });
-    if payload.version < PAYLOAD_VERSION && has_identity_semantics {
+    if payload.version < V6_PAYLOAD_VERSION && has_identity_semantics {
         return Err(TransferError::Invalid(
             "this backup carries identity semantics that cannot be imported as a V4/V5 package"
                 .to_string(),
         ));
     }
-    if payload.accounts.len() > MAX_ACCOUNTS || payload.node.is_none() {
-        return Err(TransferError::InvalidBundle);
+    let has_destination_semantics =
+        !payload.destinations.is_empty() || !payload.credentials.is_empty();
+    if payload.version < V7_PAYLOAD_VERSION && has_destination_semantics {
+        return Err(TransferError::Invalid(
+            "this backup carries destination semantics that cannot be imported as a V4/V5/V6 package"
+                .to_string(),
+        ));
     }
-    let is_node_migration = true;
+    if payload.version < V9_PAYLOAD_VERSION && payload.routing_cards.is_some() {
+        return Err(TransferError::Invalid(
+            "this backup carries routing card semantics that cannot be imported as a V4/V5/V6/V7/V8 package"
+                .to_string(),
+        ));
+    }
+    if payload.version < V10_PAYLOAD_VERSION
+        && payload
+            .credentials
+            .iter()
+            .any(|credential| credential.credit_meter.is_some())
+    {
+        return Err(TransferError::Invalid(
+            "personal credit meters require a V10 backup".to_string(),
+        ));
+    }
+    if payload.version < V11_PAYLOAD_VERSION
+        && payload
+            .destinations
+            .iter()
+            .any(|destination| !destination.protocol_routes.is_empty())
+    {
+        return Err(TransferError::Invalid(
+            "protocol routes require a V11 backup".to_string(),
+        ));
+    }
     if payload.exported_at.chars().count() > 64
         || DateTime::parse_from_rfc3339(&payload.exported_at).is_err()
     {
         return Err(TransferError::InvalidBundle);
     }
     let exported_at = payload.exported_at.clone();
+    if payload.version >= V7_PAYLOAD_VERSION {
+        return finish_new_model_migration(&mut payload, exported_at);
+    }
+    if payload.accounts.len() > MAX_ACCOUNTS || payload.node.is_none() {
+        return Err(TransferError::InvalidBundle);
+    }
     let (validated_dynamics, draft_provider_ids) =
         validate_portable_dynamic_providers(&payload.dynamic_providers, payload.version)?;
-    let mut logical = HashSet::new();
     let mut account_ids = HashSet::new();
     let mut validated = Vec::with_capacity(payload.accounts.len());
-    let carries_cooldowns = payload.version == PAYLOAD_VERSION;
+    let carries_cooldowns = payload.version >= V6_PAYLOAD_VERSION;
     for (index, account) in payload.accounts.iter_mut().enumerate() {
         let prefix = || format!("account {}", index + 1);
         let id = match account.id.as_deref().map(str::trim) {
             Some(id) => {
-                if !is_node_migration {
-                    None
-                } else {
-                    uuid::Uuid::parse_str(id).map_err(|_| {
-                        TransferError::Invalid(format!("{} has an invalid account id", prefix()))
-                    })?;
-                    Some(id.to_string())
-                }
+                uuid::Uuid::parse_str(id).map_err(|_| {
+                    TransferError::Invalid(format!("{} has an invalid account id", prefix()))
+                })?;
+                Some(id.to_string())
             }
-            None if is_node_migration => {
+            None => {
                 return Err(TransferError::Invalid(format!(
                     "{} is missing its account id",
                     prefix()
                 )));
             }
-            None => None,
         };
         account.provider_id = account.provider_id.trim().to_string();
         account.name = account.name.trim().to_string();
@@ -1626,11 +1693,7 @@ fn validate_payload(payload: PortablePayload) -> Result<ValidatedMigration, Tran
                 && crate::provider::ProviderRegistry::get(&account.provider_id)
                     .is_some_and(|descriptor| descriptor.card_actions.enable_requires_verification)
         });
-        if is_node_migration
-            && enabled
-            && verification_gates_enablement
-            && !verification_status.allows_enablement()
-        {
+        if enabled && verification_gates_enablement && !verification_status.allows_enablement() {
             return Err(TransferError::Invalid(format!(
                 "{} is enabled without a usable verification state",
                 prefix()
@@ -1736,12 +1799,7 @@ fn validate_payload(payload: PortablePayload) -> Result<ValidatedMigration, Tran
             }
             (None, Vec::new())
         };
-        let logical_key = logical_key(&account.provider_id, &account.name);
-        let duplicate = if is_node_migration {
-            !account_ids.insert(id.clone().expect("V2 account id was validated"))
-        } else {
-            !logical.insert(logical_key)
-        };
+        let duplicate = !account_ids.insert(id.clone().expect("account id was validated"));
         if duplicate {
             return Err(TransferError::Invalid(format!(
                 "{} duplicates an earlier account identity in the package",
@@ -1756,6 +1814,7 @@ fn validate_payload(payload: PortablePayload) -> Result<ValidatedMigration, Tran
             name: account.name.clone(),
             username: account.username.clone().and_then(trim_optional),
             key,
+            password: None,
             enabled,
             account_type,
             setup_step,
@@ -1820,13 +1879,13 @@ fn validate_payload(payload: PortablePayload) -> Result<ValidatedMigration, Tran
         link.group.verified = false;
         link.group.subscription_type = None;
     }
-    let node = payload
-        .node
-        .take()
-        .map(|node| validate_node_state(node, &validated))
-        .transpose()?
-        .map(Zeroizing::new);
-    let identity_snapshot = if payload.version == PAYLOAD_VERSION {
+    let legacy_exclusive_radio_repair = payload.version < V6_PAYLOAD_VERSION;
+    let node = validate_node_state(
+        payload.node.take().expect("node was required"),
+        &validated,
+        legacy_exclusive_radio_repair,
+    )?;
+    let identity_snapshot = if payload.version >= V6_PAYLOAD_VERSION {
         Some(validate_identity_snapshot(
             &payload.identities,
             &payload.quota_pools,
@@ -1836,16 +1895,19 @@ fn validate_payload(payload: PortablePayload) -> Result<ValidatedMigration, Tran
     } else {
         None
     };
-    Ok(ValidatedMigration {
-        platform_links_authoritative: payload.version >= V5_PAYLOAD_VERSION,
-        platform_accounts: payload.platform_accounts.clone(),
-        platform_links: payload.platform_links.clone(),
-        exported_at,
-        accounts: validated,
-        node,
-        dynamic_providers: validated_dynamics,
+    let unified = map_old_graph_to_unified(
+        &payload,
+        &validated,
+        validated_dynamics,
         draft_provider_ids,
         identity_snapshot,
+    )?;
+    Ok(ValidatedMigration {
+        exported_at,
+        accounts: validated,
+        node: Zeroizing::new(node),
+        legacy_exclusive_radio_repair,
+        unified,
     })
 }
 
@@ -2154,7 +2216,7 @@ fn validate_portable_dynamic_providers(
     let mut seen_ids = HashSet::new();
     let mut validated = Vec::with_capacity(providers.len());
     let mut draft_ids = HashSet::new();
-    let require_draft_flag = payload_version == PAYLOAD_VERSION;
+    let require_draft_flag = payload_version >= V6_PAYLOAD_VERSION;
     for (index, provider) in providers.iter().enumerate() {
         let prefix = || format!("dynamic provider {}", index + 1);
         let id = provider.id.trim();
@@ -2286,6 +2348,7 @@ fn validate_portable_dynamic_providers(
 fn validate_node_state(
     mut node: PortableNodeState,
     accounts: &[ValidatedAccount],
+    legacy_exclusive_radio_repair: bool,
 ) -> Result<PortableNodeState, TransferError> {
     node.config.gateway_key = node.config.gateway_key.trim().to_string();
     if node.config.gateway_key.is_empty()
@@ -2364,14 +2427,19 @@ fn validate_node_state(
             ));
         }
     }
-    persisted_contracts_from_portable(&node.provider_contracts, Utc::now())
-        .map_err(TransferError::Invalid)?;
+    persisted_contracts_from_portable(
+        &node.provider_contracts,
+        Utc::now(),
+        legacy_exclusive_radio_repair,
+    )
+    .map_err(TransferError::Invalid)?;
     Ok(node)
 }
 
 fn persisted_contracts_from_portable(
     portable: &[PortableProviderContract],
     default_time: DateTime<Utc>,
+    legacy_exclusive_radio_repair: bool,
 ) -> Result<PersistedContracts, String> {
     let mut persisted = PersistedContracts::default();
     let mut provider_scope_ids = HashSet::new();
@@ -2496,7 +2564,9 @@ fn persisted_contracts_from_portable(
         }
         persisted.preferences.insert(scope, preference_rows);
     }
-    apply_exclusive_available_override_repair(&mut persisted);
+    if legacy_exclusive_radio_repair {
+        apply_exclusive_available_override_repair(&mut persisted);
+    }
     Ok(persisted)
 }
 
@@ -2522,46 +2592,28 @@ fn preview_against_current(
 ) -> Result<(Vec<AccountImportPreviewItem>, u64, u64, u64), V3ApiError> {
     let _settings_update = state.settings_update.lock();
     let revision = state.settings_revision();
-    if let Some(node) = validated.node.as_deref() {
-        validate_node_merge_against_current(state, node)?;
-    }
-    validate_platform_merge_against_current(state, &validated.platform_accounts)?;
+    validate_node_merge_against_current(state, &validated.node)?;
+    validate_platform_merge_against_current(state, &validated.unified.platform_accounts)?;
     validate_identity_merge_against_current(state, validated)?;
-    let existing = current_logical_accounts(state)?;
     let existing_ids = current_account_ids(state)?;
     let mut importable = 0_u64;
-    let mut duplicates = 0_u64;
     let items = validated
         .accounts
         .iter()
         .map(|account| {
-            if validated.node.is_some() {
-                importable += 1;
-                return preview_item(
-                    account,
-                    if existing_ids.contains(account.id.as_deref().unwrap_or_default()) {
-                        AccountImportDisposition::Merge
-                    } else {
-                        AccountImportDisposition::Import
-                    },
-                    None,
-                );
-            }
-            let duplicate = existing.contains(&logical_key(&account.provider_id, &account.name));
-            if duplicate {
-                duplicates += 1;
-                preview_item(
-                    account,
-                    AccountImportDisposition::Duplicate,
-                    Some("an account with the same Plan and name already exists".to_string()),
-                )
-            } else {
-                importable += 1;
-                preview_item(account, AccountImportDisposition::Import, None)
-            }
+            importable += 1;
+            preview_item(
+                account,
+                if existing_ids.contains(account.id.as_deref().unwrap_or_default()) {
+                    AccountImportDisposition::Merge
+                } else {
+                    AccountImportDisposition::Import
+                },
+                None,
+            )
         })
         .collect();
-    Ok((items, importable, duplicates, revision))
+    Ok((items, importable, 0, revision))
 }
 
 fn validate_node_merge_against_current(
@@ -2633,7 +2685,7 @@ fn validate_identity_merge_against_current(
     state: &CoreState,
     validated: &ValidatedMigration,
 ) -> Result<(), V3ApiError> {
-    let Some(snapshot) = validated.identity_snapshot.as_ref() else {
+    let Some(snapshot) = validated.unified.identity_snapshot.as_ref() else {
         return Ok(());
     };
     let imported = validated
@@ -2664,18 +2716,6 @@ fn current_account_ids(state: &CoreState) -> Result<HashSet<String>, V3ApiError>
         .collect())
 }
 
-fn current_logical_accounts(state: &CoreState) -> Result<HashSet<(String, String)>, V3ApiError> {
-    Ok(state
-        .db
-        .lock()
-        .list_accounts()
-        .map_err(|_| V3ApiError::internal("failed to inspect existing accounts"))?
-        .into_iter()
-        .filter(|account| !account.is_zen_free() && account.id != crate::provider::CPA_ACCOUNT_ID)
-        .map(|account| logical_key(&account.provider_id, &account.name))
-        .collect())
-}
-
 fn preview_item(
     account: &ValidatedAccount,
     disposition: AccountImportDisposition,
@@ -2690,10 +2730,6 @@ fn preview_item(
         disposition,
         reason,
     }
-}
-
-fn logical_key(provider_id: &str, name: &str) -> (String, String) {
-    (provider_id.trim().to_string(), name.trim().to_string())
 }
 
 fn trim_optional(value: String) -> Option<String> {

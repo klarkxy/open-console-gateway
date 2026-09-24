@@ -47,6 +47,11 @@ fn wire_fields_are_camel_case() {
 #[test]
 fn connection_summary_emits_null_optional_fields() {
     let summary = ConnectionSummary {
+        credential_create: CredentialCreateCapabilityDto {
+            allowed: true,
+            material_kinds: vec![ocg_domain::credential::MaterialKind::ApiKey],
+            reason: None,
+        },
         id: "id".into(),
         name: "Lab".into(),
         origin: ConnectionOrigin::Custom,
@@ -69,6 +74,7 @@ fn connection_summary_emits_null_optional_fields() {
         },
         display_family: None,
         offering: OfferingKind::Api,
+        credit_presets: None,
     };
     let value = serde_json::to_value(&summary).unwrap();
     assert_eq!(value["templateRef"], Value::Null);
@@ -95,6 +101,157 @@ fn schema_catalog_names_v4_types_and_shared_error() {
             "{field} must stay required so responses emit T|null"
         );
     }
+    assert!(defs.contains_key("RoutingExplanation"));
+}
+
+#[test]
+fn routing_explanation_emits_camel_case_and_null_optionals() {
+    let explanation = RoutingExplanation {
+        requested_model: "glm-5.2".into(),
+        client_protocol: RoutingClientProtocol::ChatCompletions,
+        resolved: RoutingResolvedModel {
+            kind: RoutingResolvedKind::PinnedRaw,
+            alias: None,
+            mappings: vec![RoutingResolvedMapping {
+                provider_id: "opencode".into(),
+                upstream_model: "glm-5.2".into(),
+                routeable: true,
+            }],
+        },
+        revision: ControlRevision {
+            revision: 1,
+            process_generation: 2,
+            pricing_revision: "p".into(),
+        },
+        observed_at: "2024-01-02T03:04:05Z".into(),
+        routing_mode: RoutingMode::StrictPriority,
+        conversation_sticky: true,
+        conversation_binding: RoutingConversationBinding::NotEvaluated,
+        eligible: Vec::new(),
+        exclusions: vec![RoutingExclusion {
+            code: RoutingExclusionCode::AccountDisabled,
+            detail: "account `a` is disabled".into(),
+            account_id: Some("a".into()),
+            provider_id: Some("opencode".into()),
+            upstream_model: None,
+        }],
+        expected_base_policy_first_pick: None,
+        runtime_only_uncertainty: vec![RuntimeOnlyUncertainty::UpstreamResultUnknown],
+    };
+    let value = serde_json::to_value(&explanation).unwrap();
+    assert_eq!(value["requestedModel"], "glm-5.2");
+    assert_eq!(value["clientProtocol"], "chat_completions");
+    assert_eq!(value["resolved"]["kind"], "pinned_raw");
+    assert_eq!(value["resolved"]["alias"], Value::Null);
+    assert_eq!(value["routingMode"], "strict-priority");
+    assert_eq!(value["conversationBinding"], "not_evaluated");
+    assert_eq!(value["expectedBasePolicyFirstPick"], Value::Null);
+    assert_eq!(value["exclusions"][0]["accountId"], "a");
+    assert_eq!(value["exclusions"][0]["upstreamModel"], Value::Null);
+    assert_eq!(value["exclusions"][0]["code"], "account_disabled");
+    assert_eq!(
+        value["runtimeOnlyUncertainty"],
+        json!(["upstream_result_unknown"])
+    );
+}
+
+#[test]
+fn quota_recovery_dto_is_camel_case_and_nullable_on_credentials() {
+    let recovery = QuotaRecoveryDto {
+        status: QuotaRecoveryStatus::Waiting,
+        reason: QuotaRecoveryReason::QuotaExhausted,
+        window: QuotaRecoveryWindow::FiveHours,
+        observed_at: "2026-09-20T00:00:00Z".into(),
+        resets_at: None,
+        next_retry_at: "2026-09-20T00:15:00Z".into(),
+        failure_count: 1,
+    };
+    let value = serde_json::to_value(&recovery).unwrap();
+    assert_eq!(value["status"], "waiting");
+    assert_eq!(value["reason"], "quota_exhausted");
+    assert_eq!(value["window"], "five_hours");
+    assert_eq!(value["observedAt"], "2026-09-20T00:00:00Z");
+    assert_eq!(value["resetsAt"], Value::Null);
+    assert_eq!(value["nextRetryAt"], "2026-09-20T00:15:00Z");
+    assert_eq!(value["failureCount"], 1);
+    let schema = contract_schema();
+    let defs = schema["$defs"].as_object().unwrap();
+    for name in [
+        "QuotaRecoveryDto",
+        "QuotaRecoveryStatus",
+        "QuotaRecoveryReason",
+        "QuotaRecoveryWindow",
+        "QuotaRetryResult",
+    ] {
+        assert!(defs.contains_key(name), "missing $defs/{name}");
+    }
+    let required = defs["DestinationCredentialDto"]["required"]
+        .as_array()
+        .expect("DestinationCredentialDto.required");
+    assert!(
+        !required.iter().any(|value| value == "quotaRecovery"),
+        "quotaRecovery must be optional so older listings may omit it"
+    );
+}
+
+#[test]
+fn quota_recovery_field_may_be_omitted_null_or_object() {
+    let mut body = json!({
+        "id": "cred-1",
+        "legacyAccountId": "acct-1",
+        "destinationId": "dest-1",
+        "name": "Key",
+        "notes": null,
+        "hasSecret": true,
+        "enabled": true,
+        "routingRank": 0,
+        "scope": { "kind": "all" },
+        "grants": { "allowedEndpointIds": [], "allowedOrigins": [] },
+        "authState": "unknown",
+        "lastError": null,
+        "cooldowns": {
+            "genericUntil": null,
+            "fiveHourUntil": null,
+            "weekUntil": null,
+            "monthUntil": null,
+            "freeUntil": null
+        },
+        "quotaPoolId": null,
+        "onboardingTask": null,
+        "purchaseDate": null
+    });
+    let omitted: DestinationCredentialDto = serde_json::from_value(body.clone()).unwrap();
+    assert!(omitted.quota_recovery.is_none());
+    let omitted_json = serde_json::to_value(&omitted).unwrap();
+    assert!(omitted_json.get("quotaRecovery").is_none());
+
+    body["quotaRecovery"] = Value::Null;
+    let null_field: DestinationCredentialDto = serde_json::from_value(body.clone()).unwrap();
+    assert!(null_field.quota_recovery.is_none());
+    assert!(
+        serde_json::to_value(&null_field)
+            .unwrap()
+            .get("quotaRecovery")
+            .is_none()
+    );
+
+    body["quotaRecovery"] = json!({
+        "status": "ready",
+        "reason": "insufficient_balance",
+        "window": "unknown",
+        "observedAt": "2026-09-20T00:00:00Z",
+        "resetsAt": null,
+        "nextRetryAt": "2026-09-20T00:15:00Z",
+        "failureCount": 2
+    });
+    let present: DestinationCredentialDto = serde_json::from_value(body).unwrap();
+    let recovery = present.quota_recovery.as_ref().expect("object present");
+    assert_eq!(recovery.status, QuotaRecoveryStatus::Ready);
+    assert_eq!(recovery.reason, QuotaRecoveryReason::InsufficientBalance);
+    assert_eq!(recovery.failure_count, 2);
+    let present_json = serde_json::to_value(&present).unwrap();
+    assert_eq!(present_json["quotaRecovery"]["status"], "ready");
+    assert_eq!(present_json["quotaRecovery"]["resetsAt"], Value::Null);
 }
 
 #[test]
@@ -111,6 +268,7 @@ fn onboarding_commit_request_is_camel_case_and_includes_secret_in_canonical_json
             endpoint_url: "https://lab.example/v1/chat/completions".into(),
             upstream_protocol: AccountUpstreamProtocol::ChatCompletions,
             auth_kind: ProviderDefinitionAuthKind::Bearer,
+            protocol_routes: None,
         }),
         authorization: Some(OnboardingAuthorization::ApiKey(
             OnboardingAuthorizationApiKey {

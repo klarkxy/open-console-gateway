@@ -1,25 +1,8 @@
-//! Provider offering adapters: endpoint, auth, and capability checks.
-//!
-//! Authentication belongs to the provider/offering, not the wire protocol.
-//! [`resolve_route_with_dynamics`] dispatches exhaustively on
-//! [`crate::provider::ProviderAdapterKind`] onto sealed route helpers. Alias resolution
-//! stays ahead of this seam: Alias and PinnedRaw candidates both materialize a
-//! [`RequestPlan`] then call here. Adapters must not probe a billable inference
-//! path to discover protocol support.
-//!
-//! Route resolution returns a data-only [`crate::gateway::attempt::AttemptSpec`]:
-//! endpoint, path, upstream protocol, auth scheme, redirect policy, an opaque
-//! credential handle, and the proxy-routing model. Adapters take an account,
-//! config, and request plan. They do not decrypt keys, open databases, or
-//! build HTTP clients; the Host resolver and single-attempt executor do that.
-//!
-//! Production Command Code GOAT uses the official Provider API origin after
-//! explicit verification. [`command_code_goat_transport_spec`] proves
-//! host/path/auth construction. The GOAT loopback helper substitutes a
-//! loopback origin only and still uses `/provider/v1/...`.
-//! Configurable HTTP is the Custom API identity, not a base class.
+//! Sealed provider transport construction. Production receives an execution
+//! credential, a destination and an already-selected protocol/model. Account
+//! interfaces below are operational probe and compatibility boundaries.
 
-use crate::custom_http::{custom_auth_scheme, join_inference_endpoint, resolve_custom_endpoints};
+use crate::custom_http::{join_inference_endpoint, resolve_custom_endpoints};
 use crate::gateway::attempt::{AttemptSpec, CredentialHandle, ProxyRoutingModel};
 use crate::gateway::free_models::resolve_upstream_base;
 use crate::gateway::protocol::{
@@ -31,15 +14,69 @@ use crate::kernel::ids::{OLLAMA_CLOUD_BASE_URL, OLLAMA_CLOUD_CHAT_COMPLETIONS_PA
 use crate::models::{Account, AppConfig, UpstreamChannel};
 use crate::provider::{
     COMMAND_CODE_GOAT_BASE_URL, COMMAND_CODE_GOAT_CHAT_COMPLETIONS_PATH, COMMAND_CODE_GOAT_HOST,
-    COMMAND_CODE_GOAT_MESSAGES_PATH, COMMAND_CODE_GOAT_MODELS_PATH, CPA_ACCOUNT_ID, CredentialKind,
+    COMMAND_CODE_GOAT_MESSAGES_PATH, COMMAND_CODE_GOAT_MODELS_PATH, CredentialKind,
     InferenceAuthDescriptor, KIMI_CN_BASE_URL, KIMI_CN_CHAT_COMPLETIONS_PATH,
     KIMI_CN_MESSAGES_PATH, MINIMAX_CN_ANTHROPIC_BASE_URL, MINIMAX_CN_BASE_URL,
-    MINIMAX_CN_CHAT_COMPLETIONS_PATH, MINIMAX_CN_MESSAGES_PATH, ProviderAdapterKind,
-    ProviderRegistry, QuotaScope, UpstreamAuthScheme, ZEN_FREE_ACCOUNT_ID,
+    MINIMAX_CN_CHAT_COMPLETIONS_PATH, MINIMAX_CN_MESSAGES_PATH, MINIMAX_CN_RESPONSES_PATH,
+    ProviderAdapterKind, ProviderRegistry, QuotaScope, UpstreamAuthScheme,
 };
-use crate::provider_contracts::EffectiveContractSet;
+#[cfg(any(debug_assertions, feature = "ollama-cloud-loopback-test"))]
 use std::collections::HashMap;
+#[cfg(any(debug_assertions, feature = "ollama-cloud-loopback-test"))]
 use std::sync::{LazyLock, RwLock};
+
+/// Construct transport from explicit destination facts after catalog protocol
+/// selection. This is the production seam; Account adapters below serve probes.
+pub(crate) fn resolve_execution_route(
+    credential: &crate::routing_snapshot::ExecutionCredential,
+    destination: &ocg_domain::destination::Destination,
+    config: &AppConfig,
+    plan: &RequestPlan,
+) -> Result<AttemptSpec, String> {
+    use ocg_domain::destination::AdapterKind;
+    let id = credential.id.as_str();
+    let (transport, handle) = match destination.adapter {
+        AdapterKind::Http => {
+            let route = plan.custom_route.as_ref().ok_or("missing HTTP route")?;
+            (
+                configurable_http_transport(&route.endpoint_url, route.auth_kind, plan.upstream)?,
+                http_credential(id, route.auth_kind),
+            )
+        }
+        AdapterKind::OpencodeGo => (
+            opencode_go_transport(
+                resolve_upstream_base(plan.channel, &config.upstream_base_url)?,
+                plan.upstream,
+            )?,
+            keyed_credential(id),
+        ),
+        AdapterKind::Zen => (
+            zen_free_transport(
+                zen_resolved_base(config, plan.upstream_base_override.as_deref(), plan.channel)?,
+                plan.upstream,
+            )?,
+            CredentialHandle::None,
+        ),
+        AdapterKind::Goat => (goat_transport(id, plan.upstream)?, keyed_credential(id)),
+        AdapterKind::Minimax => (minimax_cn_transport(plan.upstream)?, keyed_credential(id)),
+        AdapterKind::Kimi => (kimi_cn_transport(plan.upstream)?, keyed_credential(id)),
+        AdapterKind::Ollama => (
+            ollama_cloud_transport(id, plan.upstream)?,
+            keyed_credential(id),
+        ),
+        AdapterKind::Cpa => {
+            let base_url = plan
+                .upstream_base_override
+                .clone()
+                .ok_or("CPA is not configured")?;
+            (
+                cpa_transport(base_url, plan.upstream)?,
+                keyed_credential(id),
+            )
+        }
+    };
+    Ok(transport.into_spec(plan.upstream, handle))
+}
 
 pub(crate) use crate::gateway::attempt::UpstreamAuth;
 
@@ -89,26 +126,36 @@ pub fn command_code_goat_loopback_base(origin: &str) -> String {
     format!("{}/provider/v1", origin.trim_end_matches('/'))
 }
 
+/// GOAT loopback substitutes exist only in non-release builds so integration
+/// tests can link them. Release transport uses the official origin and does
+/// not read this table. `cfg(test)` would hide it from integration tests,
+/// which link the library without that cfg.
+#[cfg(debug_assertions)]
 #[derive(Debug, Clone)]
 struct GoatLoopbackRoute {
     origin: String,
 }
 
+#[cfg(debug_assertions)]
 static GOAT_LOOPBACK_ROUTES: LazyLock<RwLock<HashMap<String, GoatLoopbackRoute>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
+#[cfg(feature = "ollama-cloud-loopback-test")]
 static OLLAMA_LOOPBACK_ROUTES: LazyLock<RwLock<HashMap<String, String>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
-/// RAII guard for the integration-only Ollama Cloud seam. The production
-/// adapter always uses the fixed `https://ollama.com` origin; without a live
+/// RAII guard for the integration-only Ollama Cloud seam. Compiled only with
+/// the default-off `ollama-cloud-loopback-test` feature. Builds without that
+/// feature always use the fixed `https://ollama.com` origin; without a live
 /// guard, tests cannot reach a fake upstream.
+#[cfg(feature = "ollama-cloud-loopback-test")]
 #[doc(hidden)]
 pub struct OllamaCloudLoopbackRouteGuard {
     account_id: String,
     origin: String,
 }
 
+#[cfg(feature = "ollama-cloud-loopback-test")]
 impl Drop for OllamaCloudLoopbackRouteGuard {
     fn drop(&mut self) {
         if let Ok(mut routes) = OLLAMA_LOOPBACK_ROUTES.write()
@@ -125,6 +172,7 @@ impl Drop for OllamaCloudLoopbackRouteGuard {
 /// tests. Path, protocol, Bearer auth, and the wire normalization marker come
 /// from the official Ollama Cloud contract; this cannot configure a remote
 /// production endpoint.
+#[cfg(feature = "ollama-cloud-loopback-test")]
 #[doc(hidden)]
 pub fn install_ollama_cloud_loopback_route_for_test(
     account_id: impl Into<String>,
@@ -145,16 +193,20 @@ pub fn install_ollama_cloud_loopback_route_for_test(
     Ok(guard)
 }
 
-fn ollama_cloud_base_url_for(account: &Account) -> String {
-    OLLAMA_LOOPBACK_ROUTES
+#[cfg(feature = "ollama-cloud-loopback-test")]
+fn ollama_cloud_base_url_for_id(account_id: &str) -> Result<String, String> {
+    let routes = OLLAMA_LOOPBACK_ROUTES
         .read()
-        .map(|routes| {
-            routes
-                .get(&account.id)
-                .cloned()
-                .unwrap_or_else(|| OLLAMA_CLOUD_BASE_URL.to_string())
-        })
-        .unwrap_or_else(|_| OLLAMA_CLOUD_BASE_URL.to_string())
+        .map_err(|_| "Ollama Cloud loopback route lock is poisoned".to_string())?;
+    Ok(routes
+        .get(account_id)
+        .cloned()
+        .unwrap_or_else(|| OLLAMA_CLOUD_BASE_URL.to_string()))
+}
+
+#[cfg(not(feature = "ollama-cloud-loopback-test"))]
+fn ollama_cloud_base_url_for_id(_account_id: &str) -> Result<String, String> {
+    Ok(OLLAMA_CLOUD_BASE_URL.to_string())
 }
 
 #[cfg(debug_assertions)]
@@ -163,12 +215,14 @@ pub use crate::goat::{GoatCatalogOriginGuard, install_goat_catalog_origin_for_te
 
 /// RAII guard for the integration-only GOAT seam. The production adapter has
 /// no endpoint or protocol guesses: without a live guard, GOAT is unsupported.
+#[cfg(debug_assertions)]
 #[doc(hidden)]
 pub struct GoatLoopbackRouteGuard {
     account_id: String,
     base_url: String,
 }
 
+#[cfg(debug_assertions)]
 impl Drop for GoatLoopbackRouteGuard {
     fn drop(&mut self) {
         if let Ok(mut routes) = GOAT_LOOPBACK_ROUTES.write()
@@ -184,6 +238,7 @@ impl Drop for GoatLoopbackRouteGuard {
 /// Installs a loopback-only origin substitute used by gateway integration tests.
 /// Models, protocol, path, and Bearer auth come from the official Command Code
 /// contract; this cannot configure a remote production endpoint.
+#[cfg(debug_assertions)]
 #[doc(hidden)]
 pub fn install_goat_loopback_route_for_test(
     account_id: impl Into<String>,
@@ -206,15 +261,248 @@ pub fn install_goat_loopback_route_for_test(
     Ok(guard)
 }
 
+/// Shared transport construction for production `resolve_execution_route` and
+/// probe/account-test resolvers. Eligibility, credential/grant checks, model
+/// identity, Custom PublicOnly, and dynamic mapping selection stay with the
+/// caller.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TransportConstruction {
+    base_url: String,
+    path: String,
+    auth: UpstreamAuth,
+    follow_redirects: bool,
+    proxy_routing: ProxyRoutingModel,
+    wire_normalization: WireNormalization,
+}
+
+impl TransportConstruction {
+    fn into_spec(self, upstream: ApiFormat, credential: CredentialHandle) -> AttemptSpec {
+        AttemptSpec {
+            base_url: self.base_url,
+            path: self.path,
+            upstream,
+            auth: self.auth,
+            follow_redirects: self.follow_redirects,
+            credential,
+            proxy_routing: self.proxy_routing,
+            wire_normalization: self.wire_normalization,
+        }
+    }
+}
+
+fn keyed_credential(id: &str) -> CredentialHandle {
+    CredentialHandle::Account { id: id.to_string() }
+}
+
+fn http_credential(id: &str, auth_kind: ocg_domain::dynamic::DynamicAuthKind) -> CredentialHandle {
+    if auth_kind.requires_key() {
+        keyed_credential(id)
+    } else {
+        CredentialHandle::None
+    }
+}
+
+fn http_auth(kind: ocg_domain::dynamic::DynamicAuthKind) -> UpstreamAuth {
+    match kind {
+        ocg_domain::dynamic::DynamicAuthKind::Bearer => UpstreamAuth::Bearer,
+        ocg_domain::dynamic::DynamicAuthKind::XApiKey => UpstreamAuth::XApiKey,
+        ocg_domain::dynamic::DynamicAuthKind::ApiKey => UpstreamAuth::ApiKey,
+        ocg_domain::dynamic::DynamicAuthKind::None => UpstreamAuth::None,
+    }
+}
+
+fn http_inference_origin(
+    endpoint_url: &str,
+    protocol: crate::provider::UpstreamProtocolKind,
+) -> Result<(String, String), String> {
+    let endpoint = resolve_custom_endpoints(endpoint_url, protocol)
+        .map_err(|error| error.to_string())?
+        .inference;
+    let path = endpoint.path().to_string();
+    let mut base = endpoint;
+    base.set_path("");
+    base.set_query(None);
+    base.set_fragment(None);
+    Ok((base.as_str().trim_end_matches('/').to_string(), path))
+}
+
+fn configurable_http_transport(
+    endpoint_url: &str,
+    auth_kind: ocg_domain::dynamic::DynamicAuthKind,
+    upstream: ApiFormat,
+) -> Result<TransportConstruction, String> {
+    let protocol = protocol_kind_for(upstream)?;
+    let (base_url, path) = http_inference_origin(endpoint_url, protocol)?;
+    Ok(TransportConstruction {
+        base_url,
+        path,
+        auth: http_auth(auth_kind),
+        follow_redirects: false,
+        proxy_routing: ProxyRoutingModel::IsolatedTrustedAdmin,
+        wire_normalization: WireNormalization::None,
+    })
+}
+
+fn sealed_transport(
+    kind: ProviderAdapterKind,
+    base_url: String,
+    path: String,
+    proxy_routing: ProxyRoutingModel,
+    wire_normalization: WireNormalization,
+) -> Result<TransportConstruction, String> {
+    let descriptor = sealed_descriptor(kind)?;
+    let auth = match descriptor.inference.auth {
+        InferenceAuthDescriptor::OpenCodeProtocolDefault => UpstreamAuth::OpenCodeProtocolDefault,
+        InferenceAuthDescriptor::Bearer => UpstreamAuth::Bearer,
+        InferenceAuthDescriptor::None => UpstreamAuth::None,
+        InferenceAuthDescriptor::ProtocolDerivedBearerOrXApiKey => {
+            return Err("HTTP authentication must come from the selected route".into());
+        }
+    };
+    Ok(TransportConstruction {
+        base_url,
+        path,
+        auth,
+        follow_redirects: descriptor.inference.follow_redirects,
+        proxy_routing,
+        wire_normalization,
+    })
+}
+
+fn opencode_go_transport(
+    base_url: String,
+    upstream: ApiFormat,
+) -> Result<TransportConstruction, String> {
+    sealed_transport(
+        ProviderAdapterKind::OpenCodeGo,
+        base_url,
+        opencode_upstream_path(upstream)?,
+        ProxyRoutingModel::RequestEntrySnapshot,
+        WireNormalization::None,
+    )
+}
+
+fn zen_resolved_base(
+    config: &AppConfig,
+    override_url: Option<&str>,
+    channel: UpstreamChannel,
+) -> Result<String, String> {
+    match override_url {
+        Some(url) => Ok(url.to_string()),
+        None => resolve_upstream_base(channel, &config.upstream_base_url),
+    }
+}
+
+fn zen_free_transport(
+    base_url: String,
+    upstream: ApiFormat,
+) -> Result<TransportConstruction, String> {
+    sealed_transport(
+        ProviderAdapterKind::ZenFree,
+        base_url,
+        opencode_upstream_path(upstream)?,
+        ProxyRoutingModel::RequestEntrySnapshot,
+        WireNormalization::None,
+    )
+}
+
+#[cfg(debug_assertions)]
+fn goat_base_url_for(account_id: &str) -> Result<String, String> {
+    let routes = GOAT_LOOPBACK_ROUTES
+        .read()
+        .map_err(|_| "GOAT loopback route lock is poisoned".to_string())?;
+    Ok(routes.get(account_id).map_or_else(
+        || COMMAND_CODE_GOAT_BASE_URL.to_string(),
+        |route| command_code_goat_loopback_base(&route.origin),
+    ))
+}
+
+#[cfg(not(debug_assertions))]
+fn goat_base_url_for(_account_id: &str) -> Result<String, String> {
+    Ok(COMMAND_CODE_GOAT_BASE_URL.to_string())
+}
+
+fn goat_transport(account_id: &str, upstream: ApiFormat) -> Result<TransportConstruction, String> {
+    let path = command_code_upstream_path(upstream)
+        .ok_or_else(|| format!("Command Code GOAT has no upstream path for {upstream:?}"))?;
+    sealed_transport(
+        ProviderAdapterKind::CommandCodeGoat,
+        goat_base_url_for(account_id)?,
+        path.to_string(),
+        ProxyRoutingModel::ProcessWideNoRedirect,
+        WireNormalization::None,
+    )
+}
+
+fn minimax_cn_transport(upstream: ApiFormat) -> Result<TransportConstruction, String> {
+    let (base_url, path) = match upstream {
+        ApiFormat::ChatCompletions => (MINIMAX_CN_BASE_URL, MINIMAX_CN_CHAT_COMPLETIONS_PATH),
+        ApiFormat::Messages => (MINIMAX_CN_ANTHROPIC_BASE_URL, MINIMAX_CN_MESSAGES_PATH),
+        ApiFormat::Responses => (MINIMAX_CN_BASE_URL, MINIMAX_CN_RESPONSES_PATH),
+        ApiFormat::Gemini => {
+            return Err(
+                "MiniMax CN Token Plan has no official upstream path for this protocol".into(),
+            );
+        }
+    };
+    sealed_transport(
+        ProviderAdapterKind::MiniMaxCn,
+        base_url.to_string(),
+        path.to_string(),
+        ProxyRoutingModel::ProcessWideNoRedirect,
+        WireNormalization::None,
+    )
+}
+
+fn kimi_cn_transport(upstream: ApiFormat) -> Result<TransportConstruction, String> {
+    let path = match upstream {
+        ApiFormat::ChatCompletions => KIMI_CN_CHAT_COMPLETIONS_PATH,
+        ApiFormat::Messages => KIMI_CN_MESSAGES_PATH,
+        ApiFormat::Responses | ApiFormat::Gemini => {
+            return Err("Kimi Code CN has no official upstream path for this protocol".into());
+        }
+    };
+    sealed_transport(
+        ProviderAdapterKind::KimiCn,
+        KIMI_CN_BASE_URL.to_string(),
+        path.to_string(),
+        ProxyRoutingModel::ProcessWideNoRedirect,
+        WireNormalization::None,
+    )
+}
+
+fn ollama_cloud_transport(
+    account_id: &str,
+    upstream: ApiFormat,
+) -> Result<TransportConstruction, String> {
+    if upstream != ApiFormat::ChatCompletions {
+        return Err("Ollama Cloud has no official upstream path for this protocol".into());
+    }
+    sealed_transport(
+        ProviderAdapterKind::OllamaCloud,
+        ollama_cloud_base_url_for_id(account_id)?,
+        OLLAMA_CLOUD_CHAT_COMPLETIONS_PATH.to_string(),
+        ProxyRoutingModel::ProcessWideNoRedirect,
+        WireNormalization::OllamaCloud,
+    )
+}
+
+fn cpa_transport(base_url: String, upstream: ApiFormat) -> Result<TransportConstruction, String> {
+    crate::cpa::normalize_base_url(&base_url, true).map_err(|error| error.to_string())?;
+    let path = upstream
+        .upstream_path()
+        .ok_or_else(|| "CPA has no native Gemini inference path".to_string())?;
+    sealed_transport(
+        ProviderAdapterKind::Cpa,
+        base_url,
+        path.to_string(),
+        ProxyRoutingModel::LocalExternalIntegration,
+        WireNormalization::None,
+    )
+}
+
 #[derive(Clone, Copy)]
-enum RoutePolicy<'a> {
-    /// Production inference. When `contracts` is present, the effective
-    /// contract (static/preset/probe-confirmed + switches) is required.
-    /// The forwarder keeps the historical three-argument signature and
-    /// still refuses protocols outside the adapter safety ceiling.
-    Production {
-        contracts: Option<&'a EffectiveContractSet>,
-    },
+enum RoutePolicy {
     /// Explicit admin probe: validate the structural ceiling and construct
     /// the endpoint/auth path without requiring prior verified support.
     Probe,
@@ -224,90 +512,47 @@ enum RoutePolicy<'a> {
     AccountTest,
 }
 
-pub(crate) fn supports_production_plan(
-    account: &Account,
-    config: &AppConfig,
-    plan: &RequestPlan,
-    contracts: &EffectiveContractSet,
-    dynamics: &[crate::dynamic::DynamicProviderRuntime],
-) -> Result<(), String> {
-    resolve_route_with_policy(
-        account,
-        config,
-        plan,
-        RoutePolicy::Production {
-            contracts: Some(contracts),
-        },
-        dynamics,
-    )
-    .map(|_| ())
-}
-
-pub(crate) fn resolve_route_with_dynamics(
-    account: &Account,
-    config: &AppConfig,
-    plan: &RequestPlan,
-    dynamics: &[crate::dynamic::DynamicProviderRuntime],
-) -> Result<AttemptSpec, String> {
-    resolve_route_with_policy(
-        account,
-        config,
-        plan,
-        RoutePolicy::Production { contracts: None },
-        dynamics,
-    )
-}
-
 pub(crate) fn resolve_probe_route(
     account: &Account,
+    adapter: ProviderAdapterKind,
     config: &AppConfig,
     plan: &RequestPlan,
 ) -> Result<AttemptSpec, String> {
-    resolve_route_with_policy(account, config, plan, RoutePolicy::Probe, &[])
+    resolve_route_with_policy(account, adapter, config, plan, RoutePolicy::Probe)
 }
 
-pub(crate) fn resolve_account_test_route_with_dynamics(
+pub(crate) fn resolve_account_test_route(
     account: &Account,
+    adapter: ProviderAdapterKind,
     config: &AppConfig,
     plan: &RequestPlan,
-    dynamics: &[crate::dynamic::DynamicProviderRuntime],
 ) -> Result<AttemptSpec, String> {
-    resolve_route_with_policy(account, config, plan, RoutePolicy::AccountTest, dynamics)
+    resolve_route_with_policy(account, adapter, config, plan, RoutePolicy::AccountTest)
 }
 
 fn resolve_route_with_policy(
     account: &Account,
+    adapter: ProviderAdapterKind,
     config: &AppConfig,
     plan: &RequestPlan,
-    policy: RoutePolicy<'_>,
-    dynamics: &[crate::dynamic::DynamicProviderRuntime],
+    policy: RoutePolicy,
 ) -> Result<AttemptSpec, String> {
-    match crate::dynamic::adapter_kind_for(&account.provider_id, dynamics) {
-        Some(ProviderAdapterKind::OpenCodeGo) => {
-            resolve_open_code_go(account, config, plan, policy)
-        }
-        Some(ProviderAdapterKind::ZenFree) => resolve_zen_free(account, config, plan, policy),
-        Some(ProviderAdapterKind::CommandCodeGoat) => {
+    match adapter {
+        ProviderAdapterKind::OpenCodeGo => resolve_open_code_go(account, config, plan, policy),
+        ProviderAdapterKind::ZenFree => resolve_zen_free(account, config, plan, policy),
+        ProviderAdapterKind::CommandCodeGoat => {
             resolve_command_code_goat(account, config, plan, policy)
         }
-        Some(ProviderAdapterKind::MiniMaxCn) => resolve_minimax_cn(account, config, plan, policy),
-        Some(ProviderAdapterKind::KimiCn) => resolve_kimi_cn(account, config, plan, policy),
-        Some(ProviderAdapterKind::OllamaCloud) => {
-            resolve_ollama_cloud(account, config, plan, policy)
+        ProviderAdapterKind::MiniMaxCn => resolve_minimax_cn(account, config, plan, policy),
+        ProviderAdapterKind::KimiCn => resolve_kimi_cn(account, config, plan, policy),
+        ProviderAdapterKind::OllamaCloud => resolve_ollama_cloud(account, config, plan, policy),
+        ProviderAdapterKind::ConfigurableHttp if matches!(policy, RoutePolicy::AccountTest) => {
+            resolve_prepared_http(account, plan)
         }
-        Some(ProviderAdapterKind::ConfigurableHttp)
-            if crate::provider::is_custom_api(&account.provider_id) =>
-        {
+        ProviderAdapterKind::ConfigurableHttp => {
             resolve_configurable_http(account, config, plan, policy)
         }
-        Some(ProviderAdapterKind::ConfigurableHttp) => {
-            resolve_dynamic_http(account, plan, policy, dynamics)
-        }
-        Some(ProviderAdapterKind::Cpa) => resolve_cpa(account, config, plan, policy),
-        None => Err(format!(
-            "unsupported provider offering `{}/{}`",
-            account.provider_id, account.provider_id
-        )),
+        ProviderAdapterKind::Cpa => resolve_cpa(account, config, plan, policy),
     }
 }
 
@@ -315,9 +560,9 @@ fn resolve_open_code_go(
     account: &Account,
     config: &AppConfig,
     plan: &RequestPlan,
-    policy: RoutePolicy<'_>,
+    policy: RoutePolicy,
 ) -> Result<AttemptSpec, String> {
-    let descriptor = registered_descriptor(ProviderAdapterKind::OpenCodeGo, account)?;
+    let descriptor = sealed_descriptor(ProviderAdapterKind::OpenCodeGo)?;
     require_binding(
         account,
         descriptor.inference.credential_kind,
@@ -326,64 +571,51 @@ fn resolve_open_code_go(
     if plan.channel != UpstreamChannel::Go {
         return Err("OpenCode Go does not serve the Zen free channel".to_string());
     }
+    let transport = opencode_go_transport(
+        resolve_upstream_base(UpstreamChannel::Go, &config.upstream_base_url)?,
+        plan.upstream,
+    )?;
     require_opencode_protocol_policy(descriptor, account, plan, policy, "OpenCode Go")?;
-    Ok(AttemptSpec {
-        base_url: crate::gateway::free_models::opencode_go_base_url(&config.upstream_base_url),
-        path: opencode_upstream_path(plan.upstream)?,
-        upstream: plan.upstream,
-        auth: descriptor_auth(descriptor.inference.auth)?,
-        follow_redirects: descriptor.inference.follow_redirects,
-        credential: credential_handle(account, descriptor),
-        proxy_routing: ProxyRoutingModel::RequestEntrySnapshot,
-        wire_normalization: WireNormalization::None,
-    })
+    Ok(transport.into_spec(plan.upstream, credential_handle(account, descriptor)))
 }
 
 fn resolve_zen_free(
     account: &Account,
     config: &AppConfig,
     plan: &RequestPlan,
-    policy: RoutePolicy<'_>,
+    policy: RoutePolicy,
 ) -> Result<AttemptSpec, String> {
-    let descriptor = registered_descriptor(ProviderAdapterKind::ZenFree, account)?;
+    let descriptor = sealed_descriptor(ProviderAdapterKind::ZenFree)?;
     require_binding(
         account,
         descriptor.inference.credential_kind,
         descriptor.inference.quota_scope,
     )?;
-    if account.id != ZEN_FREE_ACCOUNT_ID {
-        return Err("Zen Free route must use the reserved singleton account".to_string());
-    }
     if plan.channel != UpstreamChannel::Free {
         return Err(format!(
             "Zen Free does not support routed model `{}` on this channel",
             plan.model
         ));
     }
-    require_opencode_protocol_policy(descriptor, account, plan, policy, "Zen Free")?;
-    let base_url = plan.upstream_base_override.clone().map_or_else(
-        || resolve_upstream_base(UpstreamChannel::Free, &config.upstream_base_url),
-        Ok,
+    let transport = zen_free_transport(
+        zen_resolved_base(
+            config,
+            plan.upstream_base_override.as_deref(),
+            UpstreamChannel::Free,
+        )?,
+        plan.upstream,
     )?;
-    Ok(AttemptSpec {
-        base_url,
-        path: opencode_upstream_path(plan.upstream)?,
-        upstream: plan.upstream,
-        auth: descriptor_auth(descriptor.inference.auth)?,
-        follow_redirects: descriptor.inference.follow_redirects,
-        credential: credential_handle(account, descriptor),
-        proxy_routing: ProxyRoutingModel::RequestEntrySnapshot,
-        wire_normalization: WireNormalization::None,
-    })
+    require_opencode_protocol_policy(descriptor, account, plan, policy, "Zen Free")?;
+    Ok(transport.into_spec(plan.upstream, credential_handle(account, descriptor)))
 }
 
 fn resolve_command_code_goat(
     account: &Account,
     _config: &AppConfig,
     plan: &RequestPlan,
-    policy: RoutePolicy<'_>,
+    policy: RoutePolicy,
 ) -> Result<AttemptSpec, String> {
-    let descriptor = registered_descriptor(ProviderAdapterKind::CommandCodeGoat, account)?;
+    let descriptor = sealed_descriptor(ProviderAdapterKind::CommandCodeGoat)?;
     require_binding(
         account,
         descriptor.inference.credential_kind,
@@ -392,48 +624,20 @@ fn resolve_command_code_goat(
     if plan.channel != UpstreamChannel::Go {
         return Err("Command Code GOAT does not serve the Zen free channel".to_string());
     }
-    if !command_code_supports_upstream(&plan.model, plan.upstream) {
-        return Err(format!(
-            "Command Code GOAT has no verified support for model `{}` over {:?}",
-            plan.model, plan.upstream
-        ));
-    }
+    let transport = goat_transport(&account.id, plan.upstream)?;
     require_opencode_protocol_policy(descriptor, account, plan, policy, "Command Code GOAT")?;
-    let path = command_code_upstream_path(plan.upstream).ok_or_else(|| {
-        format!(
-            "Command Code GOAT has no upstream path for {:?}",
-            plan.upstream
-        )
-    })?;
-    let routes = GOAT_LOOPBACK_ROUTES
-        .read()
-        .map_err(|_| "GOAT loopback route lock is poisoned".to_string())?;
-    let base_url = routes.get(&account.id).map_or_else(
-        || COMMAND_CODE_GOAT_BASE_URL.to_string(),
-        |route| command_code_goat_loopback_base(&route.origin),
-    );
-    Ok(AttemptSpec {
-        base_url,
-        path: path.to_string(),
-        upstream: plan.upstream,
-        auth: descriptor_auth(descriptor.inference.auth)?,
-        follow_redirects: descriptor.inference.follow_redirects,
-        credential: credential_handle(account, descriptor),
-        proxy_routing: ProxyRoutingModel::ProcessWideNoRedirect,
-        wire_normalization: WireNormalization::None,
-    })
+    Ok(transport.into_spec(plan.upstream, credential_handle(account, descriptor)))
 }
 
 fn resolve_fixed_provider_plan(
     account: &Account,
     plan: &RequestPlan,
-    policy: RoutePolicy<'_>,
+    policy: RoutePolicy,
     adapter: ProviderAdapterKind,
     label: &str,
-    base_url: &str,
-    path: &str,
+    transport: TransportConstruction,
 ) -> Result<AttemptSpec, String> {
-    let descriptor = registered_descriptor(adapter, account)?;
+    let descriptor = sealed_descriptor(adapter)?;
     require_binding(
         account,
         descriptor.inference.credential_kind,
@@ -443,41 +647,22 @@ fn resolve_fixed_provider_plan(
         return Err(format!("{label} does not serve the Zen free channel"));
     }
     require_opencode_protocol_policy(descriptor, account, plan, policy, label)?;
-    Ok(AttemptSpec {
-        base_url: base_url.to_string(),
-        path: path.to_string(),
-        upstream: plan.upstream,
-        auth: descriptor_auth(descriptor.inference.auth)?,
-        follow_redirects: descriptor.inference.follow_redirects,
-        credential: credential_handle(account, descriptor),
-        proxy_routing: ProxyRoutingModel::ProcessWideNoRedirect,
-        wire_normalization: WireNormalization::None,
-    })
+    Ok(transport.into_spec(plan.upstream, credential_handle(account, descriptor)))
 }
 
 fn resolve_minimax_cn(
     account: &Account,
     _config: &AppConfig,
     plan: &RequestPlan,
-    policy: RoutePolicy<'_>,
+    policy: RoutePolicy,
 ) -> Result<AttemptSpec, String> {
-    let (base_url, path) = match plan.upstream {
-        ApiFormat::ChatCompletions => (MINIMAX_CN_BASE_URL, MINIMAX_CN_CHAT_COMPLETIONS_PATH),
-        ApiFormat::Messages => (MINIMAX_CN_ANTHROPIC_BASE_URL, MINIMAX_CN_MESSAGES_PATH),
-        ApiFormat::Responses | ApiFormat::Gemini => {
-            return Err(
-                "MiniMax CN Token Plan has no official upstream path for this protocol".into(),
-            );
-        }
-    };
     resolve_fixed_provider_plan(
         account,
         plan,
         policy,
         ProviderAdapterKind::MiniMaxCn,
         "MiniMax CN Token Plan",
-        base_url,
-        path,
+        minimax_cn_transport(plan.upstream)?,
     )
 }
 
@@ -485,45 +670,52 @@ fn resolve_ollama_cloud(
     account: &Account,
     _config: &AppConfig,
     plan: &RequestPlan,
-    policy: RoutePolicy<'_>,
+    policy: RoutePolicy,
 ) -> Result<AttemptSpec, String> {
-    if plan.upstream != ApiFormat::ChatCompletions {
-        return Err("Ollama Cloud has no official upstream path for this protocol".into());
-    }
-    let mut spec = resolve_fixed_provider_plan(
+    resolve_fixed_provider_plan(
         account,
         plan,
         policy,
         ProviderAdapterKind::OllamaCloud,
         "Ollama Cloud",
-        &ollama_cloud_base_url_for(account),
-        OLLAMA_CLOUD_CHAT_COMPLETIONS_PATH,
-    )?;
-    spec.wire_normalization = WireNormalization::OllamaCloud;
-    Ok(spec)
+        ollama_cloud_transport(&account.id, plan.upstream)?,
+    )
 }
 
 fn resolve_kimi_cn(
     account: &Account,
     _config: &AppConfig,
     plan: &RequestPlan,
-    policy: RoutePolicy<'_>,
+    policy: RoutePolicy,
 ) -> Result<AttemptSpec, String> {
-    let path = match plan.upstream {
-        ApiFormat::ChatCompletions => KIMI_CN_CHAT_COMPLETIONS_PATH,
-        ApiFormat::Messages => KIMI_CN_MESSAGES_PATH,
-        ApiFormat::Responses | ApiFormat::Gemini => {
-            return Err("Kimi Code CN has no official upstream path for this protocol".into());
-        }
-    };
     resolve_fixed_provider_plan(
         account,
         plan,
         policy,
         ProviderAdapterKind::KimiCn,
         "Kimi Code CN",
-        KIMI_CN_BASE_URL,
-        path,
+        kimi_cn_transport(plan.upstream)?,
+    )
+}
+
+/// Account tests already chose the endpoint and auth. This builds transport
+/// from that route and does not look the mapping up again.
+fn resolve_prepared_http(account: &Account, plan: &RequestPlan) -> Result<AttemptSpec, String> {
+    if plan.channel != UpstreamChannel::Go {
+        return Err("Custom API does not serve the Zen free channel".to_string());
+    }
+    let custom = plan.custom_route.as_ref().ok_or_else(|| {
+        "Custom API account is missing a persisted endpoint URL and upstream protocol".to_string()
+    })?;
+    if custom.auth_kind.requires_key() && account.key_cipher.trim().is_empty() {
+        return Err(format!("account `{}` has no stored Key", account.name));
+    }
+    Ok(
+        configurable_http_transport(&custom.endpoint_url, custom.auth_kind, plan.upstream)?
+            .into_spec(
+                plan.upstream,
+                http_credential(&account.id, custom.auth_kind),
+            ),
     )
 }
 
@@ -531,7 +723,7 @@ fn resolve_configurable_http(
     account: &Account,
     _config: &AppConfig,
     plan: &RequestPlan,
-    policy: RoutePolicy<'_>,
+    _policy: RoutePolicy,
 ) -> Result<AttemptSpec, String> {
     let descriptor = registered_descriptor(ProviderAdapterKind::ConfigurableHttp, account)?;
     require_binding(
@@ -545,157 +737,28 @@ fn resolve_configurable_http(
     let custom = plan.custom_route.as_ref().ok_or_else(|| {
         "Custom API account is missing a persisted endpoint URL and upstream protocol".to_string()
     })?;
-    let protocol = protocol_kind_for(plan.upstream)?;
-    if let RoutePolicy::Production {
-        contracts: Some(contracts),
-    } = policy
-        && !contracts.production_protocol_allowed(
-            account,
-            plan.resolved_alias.as_deref().unwrap_or(&plan.model),
-            protocol,
-        )
-    {
-        return Err(format!(
-            "Custom API has no verified support for public model `{}` over {:?}",
-            plan.resolved_alias.as_deref().unwrap_or(&plan.model),
-            plan.upstream
-        ));
-    }
-    let endpoint = resolve_custom_endpoints(&custom.endpoint_url, protocol)
-        .map_err(|error| error.to_string())?
-        .inference;
-    let endpoint_path = endpoint.path().to_string();
-    let mut base = endpoint;
-    base.set_path("");
-    base.set_query(None);
-    base.set_fragment(None);
-    Ok(AttemptSpec {
-        base_url: base.as_str().trim_end_matches('/').to_string(),
-        path: endpoint_path,
-        upstream: plan.upstream,
-        auth: match custom_auth_scheme(protocol) {
-            UpstreamAuthScheme::Bearer => UpstreamAuth::Bearer,
-            UpstreamAuthScheme::XApiKey => UpstreamAuth::XApiKey,
-        },
-        follow_redirects: descriptor.inference.follow_redirects,
-        credential: credential_handle(account, descriptor),
-        proxy_routing: ProxyRoutingModel::IsolatedTrustedAdmin,
-        wire_normalization: WireNormalization::None,
-    })
-}
-
-fn resolve_dynamic_http(
-    account: &Account,
-    plan: &RequestPlan,
-    policy: RoutePolicy<'_>,
-    dynamics: &[crate::dynamic::DynamicProviderRuntime],
-) -> Result<AttemptSpec, String> {
-    let runtime =
-        crate::dynamic::find_runtime(dynamics, &account.provider_id).ok_or_else(|| {
-            format!(
-                "dynamic provider `{}` is not in the request snapshot",
-                account.provider_id
-            )
-        })?;
-    if matches!(policy, RoutePolicy::Probe) {
-        return Err("dynamic provider protocol probes use POST /providers/test".to_string());
-    }
-    if runtime.auth_kind.requires_key() && account.key_cipher.trim().is_empty() {
-        return Err(format!("account `{}` has no stored Key", account.name));
-    }
-    let selected = runtime
-        .mapping_for_upstream(&plan.model)
-        .or_else(|| runtime.mapping_for_public(&plan.model))
-        .or_else(|| {
-            plan.resolved_alias
-                .as_deref()
-                .and_then(|alias| runtime.mapping_for_public(alias))
-        })
-        .ok_or_else(|| {
-            format!(
-                "dynamic provider `{}` has no mapping for `{}`",
-                runtime.name, plan.model
-            )
-        })?;
-    let route = runtime.effective_route(selected);
-    let protocol = protocol_kind_for(plan.upstream)?;
-    if protocol != route.protocol {
-        return Err(format!(
-            "dynamic provider `{}` model `{}` only supports {:?}",
-            runtime.name, selected.public_model, route.protocol
-        ));
-    }
-    let endpoint = resolve_custom_endpoints(&route.endpoint_url, protocol)
-        .map_err(|error| error.to_string())?
-        .inference;
-    let endpoint_path = endpoint.path().to_string();
-    let mut base = endpoint;
-    base.set_path("");
-    base.set_query(None);
-    base.set_fragment(None);
-    let auth = match runtime.auth_kind {
-        ocg_domain::dynamic::DynamicAuthKind::Bearer => UpstreamAuth::Bearer,
-        ocg_domain::dynamic::DynamicAuthKind::XApiKey => UpstreamAuth::XApiKey,
-        ocg_domain::dynamic::DynamicAuthKind::None => UpstreamAuth::None,
-    };
-    Ok(AttemptSpec {
-        base_url: base.as_str().trim_end_matches('/').to_string(),
-        path: endpoint_path,
-        upstream: plan.upstream,
-        auth,
-        follow_redirects: false,
-        credential: if runtime.auth_kind.requires_key() {
-            CredentialHandle::Account {
-                id: account.id.clone(),
-            }
-        } else {
-            CredentialHandle::None
-        },
-        proxy_routing: ProxyRoutingModel::IsolatedTrustedAdmin,
-        wire_normalization: WireNormalization::None,
-    })
+    Ok(
+        configurable_http_transport(&custom.endpoint_url, custom.auth_kind, plan.upstream)?
+            .into_spec(
+                plan.upstream,
+                http_credential(&account.id, custom.auth_kind),
+            ),
+    )
 }
 
 fn resolve_cpa(
-    account: &Account,
+    _account: &Account,
     _config: &AppConfig,
-    plan: &RequestPlan,
-    policy: RoutePolicy<'_>,
+    _plan: &RequestPlan,
+    _policy: RoutePolicy,
 ) -> Result<AttemptSpec, String> {
-    if matches!(policy, RoutePolicy::Probe | RoutePolicy::AccountTest) {
-        return Err("CPA protocol probes and account tests are not available".to_string());
-    }
-    let descriptor = registered_descriptor(ProviderAdapterKind::Cpa, account)?;
-    require_binding(
-        account,
-        descriptor.inference.credential_kind,
-        descriptor.inference.quota_scope,
-    )?;
-    if account.id != CPA_ACCOUNT_ID {
-        return Err("CPA route must use the reserved singleton account".to_string());
-    }
-    if plan.channel != UpstreamChannel::Go {
-        return Err("CPA does not serve the Zen free channel".to_string());
-    }
-    let path = plan
-        .upstream
-        .upstream_path()
-        .ok_or_else(|| "CPA has no native Gemini inference path".to_string())?;
-    let base_url = plan
-        .upstream_base_override
-        .clone()
-        .ok_or_else(|| "CPA is not configured".to_string())?;
-    crate::cpa::normalize_base_url(&base_url, true).map_err(|error| error.to_string())?;
-    Ok(AttemptSpec {
-        base_url,
-        path: path.to_string(),
-        upstream: plan.upstream,
-        auth: UpstreamAuth::Bearer,
-        follow_redirects: false,
-        credential: credential_handle(account, descriptor),
-        proxy_routing: ProxyRoutingModel::LocalExternalIntegration,
-        wire_normalization: WireNormalization::None,
-    })
+    Err("CPA protocol probes and account tests are not available".to_string())
+}
+
+fn sealed_descriptor(
+    kind: ProviderAdapterKind,
+) -> Result<crate::provider::ProviderDescriptor, String> {
+    ProviderRegistry::get_by_kind(kind).ok_or_else(|| format!("unsupported adapter `{kind:?}`"))
 }
 
 fn registered_descriptor(
@@ -717,19 +780,6 @@ fn registered_descriptor(
     Ok(descriptor)
 }
 
-fn descriptor_auth(auth: InferenceAuthDescriptor) -> Result<UpstreamAuth, String> {
-    match auth {
-        InferenceAuthDescriptor::OpenCodeProtocolDefault => {
-            Ok(UpstreamAuth::OpenCodeProtocolDefault)
-        }
-        InferenceAuthDescriptor::Bearer => Ok(UpstreamAuth::Bearer),
-        InferenceAuthDescriptor::None => Ok(UpstreamAuth::None),
-        InferenceAuthDescriptor::ProtocolDerivedBearerOrXApiKey => {
-            Err("Configurable HTTP auth is derived from the account protocol".to_string())
-        }
-    }
-}
-
 fn credential_handle(
     account: &Account,
     descriptor: crate::provider::ProviderDescriptor,
@@ -746,7 +796,7 @@ fn require_opencode_protocol_policy(
     descriptor: crate::provider::ProviderDescriptor,
     account: &Account,
     plan: &RequestPlan,
-    policy: RoutePolicy<'_>,
+    policy: RoutePolicy,
     label: &str,
 ) -> Result<(), String> {
     let protocol = protocol_kind_for(plan.upstream)?;
@@ -761,21 +811,10 @@ fn require_opencode_protocol_policy(
             // explicit admin probe must reach every constructible protocol
             // endpoint; the static model table is evidence, not an admission
             // gate for freshly fetched catalog models.
-            let _ = (protocol, ceiling, label);
+            let _ = (protocol, ceiling, label, account);
             Ok(())
         }
-        RoutePolicy::Production {
-            contracts: Some(contracts),
-        } => {
-            if !contracts.production_protocol_allowed(account, &plan.model, protocol) {
-                return Err(format!(
-                    "{label} has no verified support for model `{}` over {:?}",
-                    plan.model, plan.upstream
-                ));
-            }
-            Ok(())
-        }
-        RoutePolicy::AccountTest | RoutePolicy::Production { contracts: None } => {
+        RoutePolicy::AccountTest => {
             let opencode_ok = matches!(
                 descriptor.kind,
                 ProviderAdapterKind::OpenCodeGo | ProviderAdapterKind::ZenFree
@@ -839,6 +878,7 @@ fn require_binding(
     Ok(())
 }
 
+#[cfg(any(debug_assertions, feature = "ollama-cloud-loopback-test"))]
 fn ensure_loopback_base(base_url: &str) -> Result<(), String> {
     let url = reqwest::Url::parse(base_url).map_err(|error| error.to_string())?;
     if url.scheme() != "http"
@@ -847,7 +887,7 @@ fn ensure_loopback_base(base_url: &str) -> Result<(), String> {
             Some("localhost") | Some("127.0.0.1") | Some("::1") | Some("[::1]")
         )
     {
-        return Err("GOAT test route must be an HTTP loopback URL".to_string());
+        return Err("test route must be an HTTP loopback URL".to_string());
     }
     Ok(())
 }

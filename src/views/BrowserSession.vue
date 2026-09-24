@@ -45,7 +45,7 @@
           v-model:value="clipboardText"
           type="textarea"
           :autosize="{ minRows: 5, maxRows: 12 }"
-          :placeholder="t('从 OpenCode 复制 Key 后会显示在这里，也可粘贴文本发送到远程浏览器')"
+          :placeholder="t('从 OpenCode 复制的 Key 会显示在这里，也可粘贴文本发送到远程浏览器。')"
           :input-props="{ 'aria-label': t('远程剪贴板内容') }"
         />
         <n-space vertical>
@@ -197,9 +197,9 @@ onUnmounted(disposeRfb);
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: var(--ocg-space-lg);
   max-width: 1680px;
-  margin: 0 auto 16px;
+  margin: 0 auto var(--ocg-space-lg);
 }
 
 .browser-session__header h1,
@@ -212,7 +212,7 @@ onUnmounted(disposeRfb);
 }
 
 .browser-session__eyebrow {
-  margin: 0 0 4px;
+  margin: 0 0 var(--ocg-space-xs);
   color: var(--ocg-primary);
   font-size: var(--ocg-font-xs);
   font-weight: 700;
@@ -228,20 +228,20 @@ onUnmounted(disposeRfb);
 }
 
 .browser-session__alert {
-  margin-bottom: 16px;
+  margin-bottom: var(--ocg-space-lg);
 }
 
 .browser-session__workspace {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 320px;
-  gap: 16px;
+  gap: var(--ocg-space-lg);
   min-height: calc(100vh - 108px);
 }
 
 .browser-session__screen-shell,
 .browser-session__clipboard {
   border: 1px solid var(--ocg-divider);
-  border-radius: 14px;
+  border-radius: var(--ocg-radius-lg);
   background: var(--ocg-surface);
   box-shadow: var(--ocg-shadow-sm);
 }
@@ -265,7 +265,7 @@ onUnmounted(disposeRfb);
   display: grid;
   place-content: center;
   justify-items: center;
-  gap: 12px;
+  gap: var(--ocg-space-md);
   color: #f7f7fa;
   background: rgba(17, 19, 24, 0.82);
 }
@@ -273,7 +273,7 @@ onUnmounted(disposeRfb);
 .browser-session__clipboard {
   align-self: start;
   display: grid;
-  gap: 16px;
+  gap: var(--ocg-space-lg);
   padding: 18px;
 }
 

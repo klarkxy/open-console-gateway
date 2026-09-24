@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -157,6 +157,30 @@ test("generateReleaseNotes uses git helpers and previous-tag range", () => {
   const notes = generateReleaseNotes({ tag: "v1.5.7", runGit });
   assert.match(notes, /### Features\n\n- shipping notes/);
   assert.equal(calls.length, 2);
+});
+
+test("authored release notes take precedence and must match the tag", () => {
+  const repoRoot = mkdtempSync(join(tmpdir(), "ocg-authored-release-notes-"));
+  try {
+    const folder = join(repoRoot, "docs", "releases");
+    mkdirSync(folder, { recursive: true });
+    const file = join(folder, "v1.5.7.md");
+    const runGit = () => { throw new Error("authored notes should not query Git"); };
+    writeFileSync(file, "# v1.5.7\n\nUpgrade details.\n", "utf8");
+    assert.equal(generateReleaseNotes({ tag: "v1.5.7", repoRoot, runGit }), "# v1.5.7\n\nUpgrade details.");
+    writeFileSync(file, "# v1.5.6\n\nStale notes.\n", "utf8");
+    assert.throws(() => generateReleaseNotes({ tag: "v1.5.7", repoRoot, runGit }), /heading does not match/);
+    writeFileSync(join(folder, "v1.5.8-beta.1.md"), "# v1.5.8-beta.1\n\nNo warning.\n", "utf8");
+    const beta = generateReleaseNotes({
+      tag: "v1.5.8-beta.1",
+      previousTag: "v1.5.7",
+      repoRoot,
+      runGit: (args) => args[0] === "log" ? "feat: preview\n" : "",
+    });
+    assert.ok(beta.startsWith(PRERELEASE_WARNING));
+  } finally {
+    rmSync(repoRoot, { recursive: true, force: true });
+  }
 });
 
 test("stable generation uses the previous stable tag across same-version Betas", () => {

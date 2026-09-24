@@ -1,7 +1,7 @@
 //! Host runtime for persisted dynamic Provider definitions.
 //!
 //! Adapter identity is always the sealed Configurable HTTP adapter. Custom API
-//! remains account-owned and is not a dynamic Provider.
+//! remains a distinct compatibility identity and is not a dynamic Provider.
 
 use chrono::{DateTime, Utc};
 use ocg_domain::catalog::UpstreamProtocolKind;

@@ -98,7 +98,9 @@ import type {
 
 /**
  * Hand-written Dashboard V3 endpoint client for the frozen
- * `/dashboard/api/v3` contract (schema/dashboard-api-v3.schema.json).
+ * contract (schema/dashboard-api-v3.schema.json). Requests go to
+ * `/dashboard/api/v4`; the `/dashboard/api/v3` prefix is a 410 tombstone.
+ * The remounted account-list shim is `GET /account-records`.
  *
  * Every non-2xx response uses the stable `V3Error` envelope
  * (`{ code, message, currentRevision, processGeneration }`); the transport
@@ -176,6 +178,8 @@ export class DashboardRequestError extends Error {
   readonly processGeneration: number | null;
   readonly retryAfterSeconds: number | null;
   readonly nextAllowedAt: string | null;
+  /** Extra rows from structured envelopes such as `destinationProjectionRefused`. */
+  readonly details: unknown[];
 
   constructor(
     message: string,
@@ -185,6 +189,7 @@ export class DashboardRequestError extends Error {
     processGeneration: number | null = null,
     retryAfterSeconds: number | null = null,
     nextAllowedAt: string | null = null,
+    details: unknown[] = [],
   ) {
     super(message);
     this.name = "DashboardRequestError";
@@ -194,6 +199,7 @@ export class DashboardRequestError extends Error {
     this.processGeneration = processGeneration;
     this.retryAfterSeconds = retryAfterSeconds;
     this.nextAllowedAt = nextAllowedAt;
+    this.details = details;
   }
 }
 
@@ -240,9 +246,7 @@ export class DashboardThrottledError extends DashboardRequestError {
 
 /** Structured upgrade/refresh guidance surfaced on old-API 410 responses. */
 function goneGuidance(): string {
-  // This is intentionally a stable transport-level fallback, outside the
-  // generated i18n key union. Shell-level UI may localize it further.
-  return "页面版本与服务不匹配，请刷新页面后重试；若仍失败请升级到最新版本";
+  return t("页面版本与服务不匹配，刷新页面后重试；仍失败请升级到最新版本");
 }
 
 export function isRevisionConflict(error: unknown): error is DashboardConflictError {
@@ -250,12 +254,12 @@ export function isRevisionConflict(error: unknown): error is DashboardConflictEr
     || (error instanceof DashboardRequestError && error.status === 409 && error.code === "revisionConflict");
 }
 
-function dashboardApiBase(base: "v3" | "v4"): string {
+function dashboardApiBase(_base: "v3" | "v4"): string {
   if (window.location.pathname.startsWith("/dashboard")) {
-    return `/dashboard/api/${base}`;
+    return "/dashboard/api/v4";
   }
   // 回退仅覆盖 Gateway 监听默认端口 9042 的纯静态托管场景（如直接打开构建产物）
-  return `http://127.0.0.1:9042/dashboard/api/${base}`;
+  return "http://127.0.0.1:9042/dashboard/api/v4";
 }
 
 interface V3ErrorBody {
@@ -264,6 +268,7 @@ interface V3ErrorBody {
   currentRevision?: unknown;
   processGeneration?: unknown;
   nextAllowedAt?: unknown;
+  details?: unknown;
 }
 
 export async function requestDashboard<T>(
@@ -283,7 +288,7 @@ export async function requestDashboard<T>(
   });
   if (!response.ok) {
     if (response.status === 401 && notifyAuthRequired) {
-      const message = t("登录已失效，请重新登录");
+      const message = t("登录已失效，重新登录");
       window.dispatchEvent(new CustomEvent(DASHBOARD_AUTH_REQUIRED_EVENT, { detail: message }));
       throw new DashboardAuthError(message);
     }
@@ -329,6 +334,7 @@ export async function requestDashboard<T>(
       processGeneration,
       retryAfterSeconds,
       nextAllowedAt,
+      Array.isArray(body?.details) ? body.details : [],
     );
   }
   if (response.status === 204) return undefined as T;
@@ -342,7 +348,7 @@ export async function requestV3<T>(
   init: RequestInit = {},
   notifyAuthRequired = true,
 ): Promise<T> {
-  return requestDashboard<T>("v3", path, init, notifyAuthRequired);
+  return requestDashboard<T>("v4", path, init, notifyAuthRequired);
 }
 
 export async function requestV4<T>(
@@ -605,7 +611,7 @@ export const dashboardV3 = {
     requestV3<ProviderPricing>(`/providers/${encode(providerId)}/pricing`),
 
   // --- accounts ---
-  listAccounts: () => requestV3<AccountList>("/accounts"),
+  listAccounts: () => requestV3<AccountList>("/account-records"),
   getAccount: (id: string) => requestV3<Account>(`/accounts/${encode(id)}`),
   createAccount: (input: WithoutExpectation<AccountCreate>, expectation: MutationExpectation) =>
     requestV3<AccountMutation>("/accounts", {
@@ -826,7 +832,7 @@ export const dashboardV3 = {
 
 export function browserSessionWebSocketUrl(token: string): string {
   const url = new URL(
-    `${dashboardApiBase("v3")}/browser/sessions/${encodeURIComponent(token)}/ws`,
+    `${dashboardApiBase("v4")}/browser/sessions/${encodeURIComponent(token)}/ws`,
     window.location.href,
   );
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";

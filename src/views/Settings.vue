@@ -60,7 +60,7 @@
                   :class="{ 'proxy-model-free': isZenFreeModel(model.id) }"
                 >
                   <n-checkbox
-                    :checked="config.proxy_list_models.includes(model.id)"
+                    :checked="config.proxy_list_models.some((id) => proxyModelKey(id) === proxyModelKey(model.id))"
                     :disabled="!loaded || saving || testingProxy"
                     @update:checked="(checked: boolean) => toggleProxyListModel(model.id, checked)"
                   >
@@ -109,7 +109,7 @@
               ><template #minus-icon><span aria-hidden="true">−</span><span class="sr-only">{{ t('减少{field}', { field: t('Gateway 端口') }) }}</span></template>
               <template #add-icon><span aria-hidden="true">+</span><span class="sr-only">{{ t('增加{field}', { field: t('Gateway 端口') }) }}</span></template></n-input-number>
               <p v-if="config.gateway_port_from_env">
-                {{ t("由环境变量 OCG_GATEWAY_PORT 管理；修改环境变量并重启后生效。") }}
+                {{ t("由环境变量 OCG_GATEWAY_PORT 管理，修改后重启生效。") }}
               </p>
             </div>
           </n-form-item>
@@ -135,7 +135,7 @@
               />
               <p id="client-root-help">
                 <template v-if="config.client_root_url_from_env">
-                  {{ t("由环境变量 OCG_CLIENT_ROOT_URL 管理；修改环境变量并重启后生效。") }}<br />
+                  {{ t("由环境变量 OCG_CLIENT_ROOT_URL 管理，修改后重启生效。") }}<br />
                 </template>
                 <span v-else-if="!config.client_root_url.trim()" class="sr-only">
                   {{ automaticClientRootFeedback }}
@@ -177,49 +177,6 @@
             <template #checked>{{ t("开启") }}</template>
             <template #unchecked>{{ t("关闭") }}</template>
           </n-switch>
-        </section>
-        <section class="settings-subsection" aria-labelledby="routing-title">
-          <h3 id="routing-title">{{ t("账号路由") }}</h3>
-          <n-radio-group
-            v-model:value="config.routing_mode"
-            name="routing-mode"
-            class="routing-mode-group"
-            :disabled="!loaded || saving"
-          >
-            <div
-              v-for="option in routingModeOptions"
-              :key="option.value"
-              class="routing-option"
-              :class="{ 'routing-option--selected': config.routing_mode === option.value }"
-            >
-              <n-radio
-                :value="option.value"
-                :aria-label="t(option.label)"
-                :aria-describedby="`routing-option-desc-${option.value}`"
-              >
-                <span class="routing-option-title">{{ t(option.label) }}</span>
-              </n-radio>
-              <div :id="`routing-option-desc-${option.value}`">
-                <p class="field-caption">{{ t(option.behavior) }}</p>
-              </div>
-            </div>
-          </n-radio-group>
-          <div class="routing-sticky">
-            <div class="routing-sticky-head">
-              <span class="routing-option-title">{{ t("对话粘性") }}</span>
-              <n-switch
-                v-model:value="config.conversation_sticky"
-                :aria-label="t('对话粘性')"
-                :disabled="!loaded || saving"
-              >
-                <template #checked>{{ t("开启") }}</template>
-                <template #unchecked>{{ t("关闭") }}</template>
-              </n-switch>
-            </div>
-            <p class="field-caption">
-              {{ t("同一对话尽量走同一账号。可带 X-OCG-Conversation-Id，否则用 Prompt 指纹。") }}
-            </p>
-          </div>
         </section>
         <section class="settings-subsection" aria-labelledby="request-timeout-title">
           <h3 id="request-timeout-title">{{ t("请求超时") }}</h3>
@@ -270,7 +227,7 @@
           </n-form-item>
         </section>
       </n-form>
-      <n-alert v-if="settingsLoadError" type="error" :title="t('设置加载失败，请先重试')">
+      <n-alert v-if="settingsLoadError" type="error" :title="t('设置加载失败，请重试')">
         <div class="settings-load-error">
           <span>{{ settingsLoadError }}</span>
           <n-button size="small" secondary @click="loadSettings">{{ t("重试") }}</n-button>
@@ -366,7 +323,7 @@
                       :disabled="updateBusy"
                     >{{ t("下载并安装") }}</n-button>
                   </template>
-                  {{ t("将下载并安装 v{version}。安装时 Open Console Gateway 会短暂退出并自动重新启动，继续吗？", {
+                  {{ t("将下载并安装 v{version}，安装时 Open Console Gateway 会短暂退出并自动重启，继续吗？", {
                     version: updateResult.latest_version,
                   }) }}
                 </n-popconfirm>
@@ -397,7 +354,7 @@
                 :show-indicator="updateDownloadPercentage !== null"
               />
               <p v-if="activeUpdateStatus.phase === 'installing' || waitingForRestart">
-                {{ t("Open Console Gateway 会短暂离线并自动重新启动。") }}
+                {{ t("Open Console Gateway 会短暂离线并自动重启。") }}
               </p>
               <p v-if="activeUpdateStatus.phase === 'failed'">
                 {{ activeUpdateStatus.error || t("升级未完成，请重试。") }}
@@ -411,7 +368,7 @@
                 <template #trigger>
                   <n-button size="small" type="primary">{{ t("重试升级") }}</n-button>
                 </template>
-                {{ t("将下载并安装 v{version}。安装时 Open Console Gateway 会短暂退出并自动重新启动，继续吗？", {
+                {{ t("将下载并安装 v{version}，安装时 Open Console Gateway 会短暂退出并自动重启，继续吗？", {
                   version: updateResult?.latest_version || updateTargetVersion,
                 }) }}
               </n-popconfirm>
@@ -455,7 +412,6 @@ import { useSettingsStore } from "../stores/settings.ts";
 import type {
   AppConfig,
   ProxyMode,
-  RoutingMode,
   UpdateCheckResult,
   UpdateStatus,
 } from "../api/dashboard";
@@ -469,7 +425,7 @@ import {
 } from "./dashboard-connection";
 import { DEFAULT_OPENCODE_INVITE_URL } from "../domain/managed-account.ts";
 import { mergeUnsavedSettings } from "./settings-merge";
-import { normalizeProxyUrl, validateProxyList } from "./settings-proxy";
+import { normalizeProxyUrl, proxyModelKey, validateProxyList } from "./settings-proxy";
 import {
   clearUpdateTarget,
   decideInstallRequestFailure,
@@ -540,56 +496,26 @@ const config = ref<AppConfig>({
   conversation_sticky: false,
 });
 
-const routingModeOptions: Array<{
-  value: RoutingMode;
-  label: MessageKey;
-  behavior: MessageKey;
-  pros: MessageKey;
-  cons: MessageKey;
-}> = [
-  {
-    value: "strict-priority",
-    label: "严格优先级",
-    behavior: "每次新请求按账号排序选择第一个可用账号。",
-    pros: "优点：行为确定，高优先级账号恢复后立即接管。",
-    cons: "缺点：冷却恢复可能切换账号，影响按凭据隔离的 prompt cache。",
-  },
-  {
-    value: "sticky-global",
-    label: "全局粘性",
-    behavior: "无对话绑定时优先沿用当前全局账号，不可用时再按排序切换。",
-    pros: "优点：低并发时更容易保持 prompt cache，不会因高优先级恢复而无谓抢切。",
-    cons: "缺点：所有并发对话共享一个账号，恢复后不会自动抢回流量。",
-  },
-  {
-    value: "round-robin",
-    label: "轮询",
-    behavior: "每个新请求从上次位置之后循环选择下一个可用账号。",
-    pros: "优点：多账号可用时分摊请求、额度和风险。",
-    cons: "缺点：账号切换最频繁，prompt cache 命中通常较差，且不是加权均衡。",
-  },
-];
-
 const proxyModeHelp = computed(() => {
   const help: Record<ProxyMode, MessageKey> = {
     auto: "自动读取 HTTP_PROXY、HTTPS_PROXY、ALL_PROXY、NO_PROXY；Windows 也会读取系统代理，未配置时直连。",
     manual: "所有 HTTP 与 HTTPS 目标都走此代理；代理不可用时直接报错，不会静默回退直连。",
     direct: "忽略系统代理和代理环境变量，始终直接连接。",
-    list: "按模型名单分流：只有名单内模型按方向走代理或直连；“测试连接”验证的是方向默认段。",
+    list: "按模型名单分流：仅名单内模型按方向走代理或直连；“测试连接”验证方向默认段。",
   };
   return t(help[config.value.proxy_mode]);
 });
 
 const proxyTestHelp = computed(() => (
   config.value.proxy_mode === "list"
-    ? t("测试当前表单值，不会保存设置；验证的是方向默认段，不能代表名单内模型的真实转发路径。")
+    ? t("测试当前表单值，不会保存设置；仅验证方向默认段，不代表名单内模型的真实转发路径。")
     : t("测试当前表单值，不会保存设置；收到任意 HTTP 响应即表示链路可用。")
 ));
 
 const proxyDirectionHelp = computed(() => (
   config.value.proxy_list_direction === "whitelist"
-    ? t("名单内模型走代理地址，名单外模型直连；非聊天出站（价格 / 用量 / 升级检查）将改为直连。")
-    : t("名单内模型直连，名单外模型走代理地址；非聊天出站（价格 / 用量 / 升级检查）走代理地址。")
+    ? t("名单内模型走代理，名单外模型直连；非聊天出站（价格 / 用量 / 升级检查）改为直连。")
+    : t("名单内模型直连，名单外模型走代理；非聊天出站（价格 / 用量 / 升级检查）走代理。")
 ));
 
 const proxySupportedIds = computed(() =>
@@ -599,7 +525,7 @@ const proxySupportedIds = computed(() =>
 /** Stored ids the current registry no longer knows; inert and dropped on save. */
 const proxyUnknownModels = computed(() => (
   config.value.proxy_mode === "list"
-    ? config.value.proxy_list_models.filter((id) => !proxySupportedIds.value.includes(id))
+    ? config.value.proxy_list_models.filter((id) => !proxySupportedIds.value.some((known) => proxyModelKey(known) === proxyModelKey(id)))
     : []
 ));
 
@@ -607,7 +533,7 @@ const proxyUnknownModels = computed(() => (
  * ids may end in `-free` without being on the free channel, so the hint must
  * follow the registry flag, not the suffix. */
 function isZenFreeModel(id: string): boolean {
-  return config.value.proxy_supported_models.some((model) => model.id === id && model.zen_free);
+  return config.value.proxy_supported_models.some((model) => proxyModelKey(model.id) === proxyModelKey(id) && model.zen_free);
 }
 
 function protocolLabel(protocol: string): string {
@@ -618,13 +544,9 @@ function protocolLabel(protocol: string): string {
 }
 
 function toggleProxyListModel(id: string, checked: boolean) {
-  const models = new Set(config.value.proxy_list_models);
-  if (checked) {
-    models.add(id);
-  } else {
-    models.delete(id);
-  }
-  config.value.proxy_list_models = [...models];
+  const models = config.value.proxy_list_models.filter((model) => proxyModelKey(model) !== proxyModelKey(id));
+  if (checked) models.push(id);
+  config.value.proxy_list_models = models;
 }
 
 const proxyUrlPreview = computed<{ status?: "error"; feedback: string }>(() => {
@@ -765,7 +687,7 @@ async function loadSettings(): Promise<boolean> {
   } catch (e) {
     if (generation !== settingsLoadGeneration) return false;
     settingsLoadError.value = e instanceof Error ? e.message : String(e);
-    message.error(t("加载设置失败: {error}", { error: settingsLoadError.value }));
+    message.error(t("加载设置失败：{error}", { error: settingsLoadError.value }));
     return false;
   }
 }
@@ -781,7 +703,7 @@ async function reloadSettingsAfterConflict(
     message.warning(t("设置已被其他操作修改，已合并最新设置并保留本地修改，请再次保存"));
   } else {
     pendingSettingsMerge = null;
-    message.error(t("保存失败: {error}", { error: String(error) }));
+    message.error(t("保存失败：{error}", { error: String(error) }));
   }
   return true;
 }
@@ -796,19 +718,15 @@ async function saveSettings() {
   saving.value = true;
   const payload = { ...config.value };
   const saved = savedConfig.value ? { ...savedConfig.value } : null;
-  const routingChanged = !!savedConfig.value && (
-    savedConfig.value.routing_mode !== payload.routing_mode
-    || savedConfig.value.conversation_sticky !== payload.conversation_sticky
-  );
   try {
     const result = await settingsStore.putPresented(payload);
     payload.revision = result.revision;
     config.value.revision = result.revision;
     savedConfig.value = { ...payload };
-    message.success(routingChanged ? t("设置已保存；运行时路由状态已重置") : t("设置已保存"));
+    message.success(t("设置已保存"));
   } catch (e) {
     if (!(await reloadSettingsAfterConflict(e, payload, saved))) {
-      message.error(t("保存失败: {error}", { error: String(e) }));
+      message.error(t("保存失败：{error}", { error: String(e) }));
     }
   } finally {
     saving.value = false;
@@ -840,7 +758,7 @@ function normalizeProxyListInput(): boolean {
   const supported = proxySupportedIds.value;
   const knownOnly = config.value.proxy_list_models
     .map((id) => id.trim())
-    .filter((id) => supported.includes(id));
+    .filter((id) => supported.some((known) => proxyModelKey(known) === proxyModelKey(id)));
   try {
     config.value.proxy_list_models = validateProxyList(config.value.proxy_mode, knownOnly, supported);
     return true;
@@ -870,7 +788,7 @@ async function testProxyConnection() {
     }
     proxyTestResult.value = {
       type: "success",
-      title: t("连接可用"),
+      title: t("连接成功"),
       message: t("收到 HTTP {status} 响应，耗时 {latency} ms。", {
         status: result.status,
         latency: result.latency_ms,
@@ -910,7 +828,7 @@ async function handleAutoStartToggle(newValue: boolean) {
   } catch (e) {
     if (!(await reloadSettingsAfterConflict(e, current, saved))) {
       config.value.auto_start = savedConfig.value.auto_start;
-      message.error(t("自动启动设置失败: {error}", { error: String(e) }));
+      message.error(t("自动启动设置失败：{error}", { error: String(e) }));
     }
   } finally {
     saving.value = false;
@@ -933,7 +851,7 @@ async function handleDockVisibilityToggle(newValue: boolean) {
   } catch (e) {
     if (!(await reloadSettingsAfterConflict(e, current, saved))) {
       config.value.show_dock_icon = savedConfig.value.show_dock_icon;
-      message.error(t("Dock 图标设置失败: {error}", { error: String(e) }));
+      message.error(t("Dock 图标设置失败：{error}", { error: String(e) }));
     }
   } finally {
     saving.value = false;
@@ -961,7 +879,7 @@ function validateTimeouts(): boolean {
     !Number.isInteger(value) || value < min || value > max
   ));
   if (!invalid) return true;
-  message.error(t("{field}必须为 {min}–{max} 秒的整数", invalid));
+  message.error(t("{field}必须是 {min}–{max} 秒之间的整数", invalid));
   return false;
 }
 
@@ -1120,7 +1038,7 @@ function acceptObservedUpdateStatus(status: UpdateStatus): boolean {
 async function pollUpdateStatus(generation: number) {
   if (!isActiveUpdateGeneration(generation)) return;
   if (Date.now() >= updatePollDeadline) {
-    failUpdate(t("等待新版本启动超时。请确认安装窗口是否被安全软件拦截，然后重试。"));
+    failUpdate(t("等待新版本启动超时。请确认安装是否被安全软件拦截，然后重试。"));
     return;
   }
   try {
@@ -1238,14 +1156,14 @@ onUnmounted(() => {
 .settings-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  gap: 16px;
+  gap: var(--ocg-space-lg);
   max-width: 1080px;
   margin: 0 auto;
 }
 .settings-card {
   padding: 22px;
   border: 1px solid var(--ocg-border);
-  border-radius: 14px;
+  border-radius: var(--ocg-radius-lg);
   background: var(--ocg-surface);
   box-shadow: var(--ocg-shadow-sm);
 }
@@ -1253,13 +1171,13 @@ onUnmounted(() => {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   align-self: start;
-  gap: 16px;
+  gap: var(--ocg-space-lg);
 }
 .downstream-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   align-items: start;
-  gap: 16px;
+  gap: var(--ocg-space-lg);
   padding-top: 18px;
   border-top: 1px solid var(--ocg-border);
 }
@@ -1275,7 +1193,7 @@ onUnmounted(() => {
   font: 700 var(--ocg-font-lg)/1.3 "Bahnschrift", "Segoe UI Variable Display", sans-serif;
 }
 .settings-head p {
-  margin: 4px 0 0;
+  margin: var(--ocg-space-xs) 0 0;
   color: var(--ocg-subtle);
   font-size: var(--ocg-font-sm);
 }
@@ -1295,7 +1213,7 @@ onUnmounted(() => {
   line-height: 1.5;
 }
 .settings-subsection {
-  margin-top: 8px;
+  margin-top: var(--ocg-space-sm);
   padding-top: 18px;
   border-top: 1px solid var(--ocg-border);
 }
@@ -1307,12 +1225,12 @@ onUnmounted(() => {
 .proxy-mode-group {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px 18px;
+  gap: var(--ocg-space-sm) 18px;
   width: 100%;
 }
 .proxy-mode-help {
   min-height: 1.4em;
-  margin: 8px 0 12px;
+  margin: var(--ocg-space-sm) 0 var(--ocg-space-md);
 }
 .proxy-test-row {
   display: flex;
@@ -1320,24 +1238,24 @@ onUnmounted(() => {
   gap: 10px;
 }
 .proxy-test-result {
-  margin-top: 12px;
+  margin-top: var(--ocg-space-md);
 }
 .proxy-direction-group {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px 16px;
+  gap: var(--ocg-space-xs) var(--ocg-space-lg);
 }
 .proxy-model-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: 6px 16px;
+  gap: 6px var(--ocg-space-lg);
   width: 100%;
 }
 .proxy-model-option {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 0 8px;
+  gap: 0 var(--ocg-space-sm);
 }
 .proxy-model-hint {
   color: var(--n-text-color-disabled, inherit);
@@ -1345,24 +1263,24 @@ onUnmounted(() => {
 }
 .proxy-model-free-hint {
   flex-basis: 100%;
-  padding-left: 24px;
+  padding-left: var(--ocg-space-xl);
   color: var(--n-text-color-warning, inherit);
   font-size: 12px;
 }
 .proxy-stale-note {
-  margin-top: 8px;
+  margin-top: var(--ocg-space-sm);
 }
 .settings-load-error {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 12px;
+  gap: var(--ocg-space-md);
+  margin-bottom: var(--ocg-space-md);
 }
 .timeout-field {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--ocg-space-xs);
   width: 100%;
 }
 .field-caption {
@@ -1370,54 +1288,10 @@ onUnmounted(() => {
   color: var(--ocg-subtle);
   line-height: 1.4;
 }
-.routing-intro {
-  margin: 8px 0 12px;
-}
-.routing-mode-group {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  width: 100%;
-}
-.routing-option {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 12px;
-  border: 1px solid var(--ocg-border);
-  border-radius: 10px;
-  background: var(--ocg-panel-soft, transparent);
-}
-.routing-option--selected {
-  border-color: var(--ocg-accent, var(--ocg-border));
-}
-.routing-option-title {
-  color: var(--ocg-ink);
-  font-weight: 600;
-}
-.routing-option .field-caption {
-  margin: 0;
-  padding-left: 24px;
-}
-.routing-sticky {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-top: 14px;
-  padding: 12px;
-  border: 1px solid var(--ocg-border);
-  border-radius: 10px;
-}
-.routing-sticky-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
 .theme-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(72px, 1fr));
-  gap: 8px;
+  gap: var(--ocg-space-sm);
 }
 .theme-option {
   position: relative;
@@ -1426,10 +1300,10 @@ onUnmounted(() => {
   min-height: 64px;
   align-items: center;
   justify-content: center;
-  gap: 8px;
-  padding: 8px;
+  gap: var(--ocg-space-sm);
+  padding: var(--ocg-space-sm);
   border: 1px solid var(--ocg-border);
-  border-radius: 10px;
+  border-radius: var(--ocg-radius-md);
   color: var(--ocg-muted);
   background: var(--ocg-canvas);
   font: 600 var(--ocg-font-sm)/1 "Segoe UI Variable Text", "Microsoft YaHei UI", sans-serif;
@@ -1478,12 +1352,12 @@ onUnmounted(() => {
 .update-result-content {
   display: grid;
   justify-items: start;
-  gap: 12px;
+  gap: var(--ocg-space-md);
 }
 .update-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
 }
 .update-status-body {
   display: grid;

@@ -134,13 +134,18 @@ fn catalog_hardcodes_providers_and_keeps_unverified_providers_unroutable() {
     assert_eq!(goat.auth_schemes, &BEARER_AUTH);
     assert_eq!(goat.upstream_protocols, &GOAT_PROTOCOLS);
     assert!(
-        !goat
-            .upstream_protocols
+        goat.upstream_protocols
             .contains(&UpstreamProtocolKind::Responses)
     );
     assert_eq!(goat.model_source, COMMAND_CODE_GOAT_MODEL_SOURCE);
     assert!(is_command_code_goat(COMMAND_CODE_PROVIDER_ID));
     assert!(!is_command_code_goat(OPENCODE_PROVIDER_ID));
+
+    let minimax_plan = builtin_provider(MINIMAX_PROVIDER_ID).unwrap();
+    assert_eq!(minimax_plan.upstream_protocols, &MINIMAX_CN_PROTOCOLS);
+    assert_eq!(MINIMAX_CN_RESPONSES_PATH, "/responses");
+    assert_eq!(COMMAND_CODE_GOAT_RESPONSES_PATH, "/responses");
+    assert_eq!(minimax_plan.upstream_protocols.len(), 3);
 
     let custom = builtin_provider(CUSTOM_PROVIDER_ID).unwrap();
     assert!(custom.routable);
@@ -491,9 +496,14 @@ fn adapter_descriptors_preserve_current_capability_decisions() {
         goat.protocol_probe.structural_ceiling,
         StructuralProbeCeiling::CommandCodeConstructable
     );
+    assert_eq!(
+        goat.protocol_probe.fallback_priority,
+        PROTOCOL_FALLBACK_CHAT_RESPONSES_MESSAGES
+    );
     assert!(goat.card_actions.protocol_probe);
     assert!(goat.card_actions.catalog_refresh);
     assert!(goat.card_actions.usage_refresh);
+    assert!(goat.card_actions.manual_usage_calibration);
     assert_eq!(
         goat.card_actions.connection_verify,
         CardVerifyAction::NotApplicable
@@ -501,25 +511,38 @@ fn adapter_descriptors_preserve_current_capability_decisions() {
     assert!(!goat.verification.uses_get_models);
     assert!(!goat.verification.never_auto_enable);
 
-    for fixed_provider in [
-        ProviderRegistry::get(MINIMAX_PROVIDER_ID).unwrap(),
-        ProviderRegistry::get(KIMI_PROVIDER_ID).unwrap(),
-    ] {
-        assert!(fixed_provider.protocol_probe.explicit_probe);
-        assert_eq!(
-            fixed_provider.protocol_probe.structural_ceiling,
-            StructuralProbeCeiling::Fixed(&CHAT_MESSAGES_PROTOCOLS)
-        );
-        assert_eq!(
-            fixed_provider.protocol_probe.matrix,
-            ProtocolMatrixKind::FixedProviderProtocols
-        );
-        assert_eq!(
-            fixed_provider.protocol_probe.fallback_priority,
-            &CHAT_MESSAGES_PROTOCOLS
-        );
-        assert!(fixed_provider.card_actions.protocol_probe);
-    }
+    let minimax = ProviderRegistry::get(MINIMAX_PROVIDER_ID).unwrap();
+    assert!(minimax.protocol_probe.explicit_probe);
+    assert_eq!(
+        minimax.protocol_probe.matrix,
+        ProtocolMatrixKind::FixedProviderProtocols
+    );
+    assert_eq!(
+        minimax.protocol_probe.structural_ceiling,
+        StructuralProbeCeiling::Fixed(&MINIMAX_CN_PROTOCOLS)
+    );
+    assert_eq!(
+        minimax.protocol_probe.fallback_priority,
+        &MINIMAX_CN_PROTOCOLS
+    );
+    assert_eq!(minimax.protocol_probe.fallback_priority.len(), 3);
+    assert!(minimax.card_actions.protocol_probe);
+
+    let kimi = ProviderRegistry::get(KIMI_PROVIDER_ID).unwrap();
+    assert!(kimi.protocol_probe.explicit_probe);
+    assert_eq!(
+        kimi.protocol_probe.structural_ceiling,
+        StructuralProbeCeiling::Fixed(&CHAT_MESSAGES_PROTOCOLS)
+    );
+    assert_eq!(
+        kimi.protocol_probe.matrix,
+        ProtocolMatrixKind::FixedProviderProtocols
+    );
+    assert_eq!(
+        kimi.protocol_probe.fallback_priority,
+        &CHAT_MESSAGES_PROTOCOLS
+    );
+    assert!(kimi.card_actions.protocol_probe);
 
     let ollama = ProviderRegistry::get(OLLAMA_PROVIDER_ID).unwrap();
     assert_eq!(ollama.kind, ProviderAdapterKind::OllamaCloud);

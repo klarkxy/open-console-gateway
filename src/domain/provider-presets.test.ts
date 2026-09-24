@@ -12,6 +12,7 @@ import {
   providerPresetEndpointPlaceholder,
   providerPresetImportPublicName,
   providerPresetModelDiscoveryEnabled,
+  providerPresetRoutesForEndpoint,
   providerPresetNote,
   providerPresetDefaultModels,
   providerPresetOffering,
@@ -312,10 +313,124 @@ test("an unseeded preset keeps the empty mapping row so model editing stays requ
   );
 });
 
+test("protocolRoutes validate as 1–3 unique official routes and parse auth schemes", () => {
+  const withRoutes = {
+    ...samplePreset(),
+    protocolRoutes: [
+      { protocol: "chat_completions", endpointUrl: "https://a.example/v1", authScheme: "bearer" },
+      { protocol: "messages", endpointUrl: "https://a.example/anthropic", authScheme: "x-api-key" },
+    ],
+  };
+  assert.deepEqual(providerPresetShapeIssues(withRoutes), []);
+  assert.ok(providerPresetShapeIssues({ ...samplePreset(), protocolRoutes: [] }).length > 0);
+  assert.ok(providerPresetShapeIssues({
+    ...samplePreset(),
+    protocolRoutes: [
+      { protocol: "chat_completions", endpointUrl: "https://a.example/v1", authScheme: "bearer" },
+      { protocol: "chat_completions", endpointUrl: "https://b.example/v1", authScheme: "bearer" },
+    ],
+  }).length > 0);
+  const parsed = parseProviderPresets([
+    {
+      ...samplePreset({ id: "multi-route" }),
+      protocolRoutes: [
+        { protocol: "responses", endpointUrl: "https://api.preset.example/v1", authScheme: "bearer" },
+        { protocol: "messages", endpointUrl: "https://api.preset.example/anthropic", authScheme: "x-api-key" },
+      ],
+    },
+    {
+      ...samplePreset({ id: "bad-routes" }),
+      protocolRoutes: [{ protocol: "chat_completions", endpointUrl: "not-a-url", authScheme: "bearer" }],
+    },
+  ]);
+  assert.deepEqual(parsed.map((preset) => preset.id), ["multi-route"]);
+  assert.deepEqual(parsed[0]?.protocolRoutes, [
+    { protocol: "responses", endpointUrl: "https://api.preset.example/v1", authScheme: "bearer" },
+    { protocol: "messages", endpointUrl: "https://api.preset.example/anthropic", authScheme: "x_api_key" },
+  ]);
+});
+
 test("model discovery opt-out defaults to enabled and respects an explicit false", () => {
   assert.equal(providerPresetModelDiscoveryEnabled(samplePreset()), true);
   assert.equal(providerPresetModelDiscoveryEnabled(samplePreset({ modelDiscovery: true })), true);
   assert.equal(providerPresetModelDiscoveryEnabled(samplePreset({ modelDiscovery: false })), false);
+});
+
+test("resource-specific presets seed only routes on a matching resource address", () => {
+  const azure = PROVIDER_PRESETS.find((preset) => preset.id === "azure-openai")!;
+  const bedrock = PROVIDER_PRESETS.find((preset) => preset.id === "bedrock")!;
+  const azureUrl = "https://my-resource.openai.azure.com/openai/v1/responses";
+  const bedrockUrl = "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1/responses";
+  assert.equal(azure.authKind, "api-key");
+  assert.deepEqual(providerPresetRoutesForEndpoint(azure, azureUrl), [
+    { protocol: "responses", endpointUrl: azureUrl, authScheme: "api_key" },
+    { protocol: "chat_completions", endpointUrl: "https://my-resource.openai.azure.com/openai/v1/chat/completions", authScheme: "api_key" },
+  ]);
+  assert.deepEqual(providerPresetRoutesForEndpoint(bedrock, bedrockUrl), [
+    { protocol: "responses", endpointUrl: bedrockUrl, authScheme: "bearer" },
+    { protocol: "chat_completions", endpointUrl: "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1/chat/completions", authScheme: "bearer" },
+    { protocol: "messages", endpointUrl: "https://bedrock-runtime.us-east-1.amazonaws.com/anthropic/v1/messages", authScheme: "x_api_key" },
+  ]);
+  for (const invalid of [
+    "https://other.example/openai/v1/responses",
+    "https://user:password@my-resource.openai.azure.com/openai/v1/responses",
+    "https://my-resource.openai.azure.com/openai/v1/responses?api-version=2024-01-01",
+  ]) {
+    assert.equal(providerPresetRoutesForEndpoint(azure, invalid), undefined);
+  }
+  const draft = {
+    ...applyProviderPresetToDraft(emptyProviderDefinitionDraft(), azure),
+    endpoint_url: azureUrl,
+    key: "local-test-key",
+    models: [{ public_model: "azure-model", upstream_model: "deployment" }],
+  };
+  const payload = buildOnboardingCommitPayload({
+    draft,
+    operationId: "11111111-1111-4111-8111-111111111111",
+    mode: "complete",
+  });
+  assert.equal(payload.connection.kind, "new");
+  if (payload.connection.kind === "new") {
+    assert.deepEqual(payload.connection.protocolRoutes, providerPresetRoutesForEndpoint(azure, azureUrl));
+  }
+});
+
+test("OpenRouter Free starts on the official free router without paid catalog discovery", () => {
+  const paid = PROVIDER_PRESETS.find((preset) => preset.id === "openrouter");
+  const free = PROVIDER_PRESETS.find((preset) => preset.id === "openrouter-free");
+  assert.ok(paid && free);
+  assert.equal(paid.family, free.family);
+  assert.equal(free.protocol, "chat_completions");
+  assert.equal(free.authKind, "bearer");
+  assert.equal(providerPresetModelDiscoveryEnabled(free), false);
+  const draft = applyProviderPresetToDraft(emptyProviderDefinitionDraft(), free);
+  assert.deepEqual(draft.models, [{
+    public_model: "openrouter-free/openrouter/free",
+    upstream_model: "openrouter/free",
+    upstream_override: null,
+  }]);
+  assert.equal(draft.endpoint_url, "https://openrouter.ai/api/v1/chat/completions");
+  assert.equal(resolveProviderPreset(draft.endpoint_url, "bearer"), null);
+  assert.equal(
+    resolveEditPreset(free.id, draft.endpoint_url, "bearer", draft.models).discoveryPreset?.id,
+    free.id,
+  );
+  draft.key = "sk-or-test";
+  const payload = buildOnboardingCommitPayload({
+    draft,
+    operationId: "11111111-1111-4111-8111-111111111111",
+    mode: "complete",
+  });
+  assert.equal(payload.connection.kind, "new");
+  if (payload.connection.kind === "new") {
+    assert.equal(payload.connection.templateId, free.id);
+    assert.equal(payload.connection.endpointUrl, free.endpointUrl);
+  }
+  assert.deepEqual(payload.targets, [{
+    publicModel: "openrouter-free/openrouter/free",
+    upstreamModel: "openrouter/free",
+    upstreamOverride: null,
+  }]);
 });
 
 test("offering comes from metadata only and defaults to api", () => {

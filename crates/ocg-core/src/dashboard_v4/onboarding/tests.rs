@@ -22,6 +22,7 @@ fn sample_request(
             endpoint_url: "https://lab.example/v1/chat/completions".into(),
             upstream_protocol: AccountUpstreamProtocol::ChatCompletions,
             auth_kind: ProviderDefinitionAuthKind::Bearer,
+            protocol_routes: None,
         }),
         authorization: Some(OnboardingAuthorization::ApiKey(
             OnboardingAuthorizationApiKey {
@@ -92,6 +93,141 @@ fn historical_receipt_replays_account_id_as_credential_id() {
     assert_eq!(stored.account_id, None);
 }
 
+#[tokio::test]
+async fn existing_legacy_custom_connection_accepts_a_second_key_and_survives_last_key_delete() {
+    use crate::crypto::{KeyCipher, StaticKeyCipher};
+    use crate::db::Database;
+    use crate::models::{AccountCustomConfigInput, AccountModelCapabilityInput};
+    use crate::provider::UpstreamProtocolKind;
+    use crate::state::CoreStateInner;
+    use ocg_domain::connection::{LegacyConnectionKind, connection_id_for_legacy};
+    use ocg_domain::destination::LegacyDestinationRef;
+    use std::fs;
+    use std::sync::Arc;
+
+    let mut dir = std::env::temp_dir();
+    dir.push(format!(
+        "ocg-onboard-custom-second-key-{}",
+        uuid::Uuid::new_v4()
+    ));
+    fs::create_dir_all(&dir).unwrap();
+    let cipher: Arc<dyn KeyCipher + Send + Sync> =
+        Arc::new(StaticKeyCipher::new("onboard-custom-second-key"));
+    let db = Database::open(dir.clone()).unwrap();
+    let first = dynamic_provider_account(
+        DynamicAuthKind::Bearer,
+        CUSTOM_PROVIDER_ID,
+        "Primary".into(),
+        cipher.encrypt("sk-primary").unwrap(),
+        None,
+        Utc::now(),
+    );
+    db.create_account_with_contract(
+        &first,
+        Some(&AccountCustomConfigInput {
+            endpoint_url: "https://legacy-custom.example/v1/chat/completions".into(),
+            upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+        }),
+        &[AccountModelCapabilityInput {
+            public_model: "legacy-public".into(),
+            upstream_model: "vendor/raw".into(),
+            protocol: UpstreamProtocolKind::ChatCompletions,
+            source: None,
+        }],
+    )
+    .unwrap();
+    let state = Arc::new(CoreStateInner::new(db, dir.clone(), cipher).unwrap());
+    let projection = crate::destination_projection::load_persisted(&state.db.lock()).unwrap();
+    let destination = projection
+        .destinations
+        .iter()
+        .find(
+            |row| matches!(&row.legacy, LegacyDestinationRef::CustomAccount(id) if id == &first.id),
+        )
+        .unwrap()
+        .clone();
+    assert_eq!(destination.max_credentials, None);
+    let connection_id = connection_id_for_legacy(LegacyConnectionKind::CustomAccount, &first.id);
+    let request = OnboardingCommitRequest {
+        expectation: MutationExpectation {
+            expected_revision: state.settings_revision(),
+            process_generation: state.process_generation(),
+        },
+        operation_id: "99999999-1111-4111-8111-111111111111".into(),
+        connection: OnboardingConnection::Existing(OnboardingConnectionExisting {
+            connection_id: connection_id.to_string(),
+            configuration: None,
+        }),
+        authorization: Some(OnboardingAuthorization::ApiKey(
+            OnboardingAuthorizationApiKey {
+                secret_input: "sk-secondary".into(),
+                account_label: Some("Secondary".into()),
+                notes: None,
+            },
+        )),
+        targets: Vec::new(),
+        mode: None,
+        authorize_current_endpoint: false,
+    };
+    let result = commit_locked(&state, request)
+        .map_err(|error| error.into_response().status())
+        .unwrap();
+    let second_id = result.account_id.unwrap();
+    let after = crate::destination_projection::load_persisted(&state.db.lock()).unwrap();
+    let attached: Vec<_> = after
+        .credentials
+        .iter()
+        .filter(|credential| credential.destination_id == destination.id)
+        .collect();
+    assert_eq!(attached.len(), 2);
+    assert!(
+        attached
+            .iter()
+            .any(|credential| credential.legacy_account_id == first.id)
+    );
+    assert!(
+        attached
+            .iter()
+            .any(|credential| credential.legacy_account_id == second_id)
+    );
+    let connections = match crate::dashboard_v4::connections::list_connections(
+        axum::extract::State(state.clone()),
+    )
+    .await
+    {
+        Ok(value) => value.0,
+        Err(_) => panic!("connection projection unexpectedly failed"),
+    };
+    let grouped = connections
+        .connections
+        .iter()
+        .filter(|connection| {
+            connection.legacy.kind == LegacyConnectionKind::CustomAccount
+                && connection.legacy.id == first.id
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(grouped.len(), 1);
+    assert_eq!(grouped[0].credential_count, 2);
+
+    state.db.lock().delete_account(&first.id).unwrap();
+    state.db.lock().delete_account(&second_id).unwrap();
+    let empty = crate::destination_projection::load_persisted(&state.db.lock()).unwrap();
+    assert!(
+        empty
+            .destinations
+            .iter()
+            .any(|row| row.id == destination.id)
+    );
+    assert!(
+        empty
+            .credentials
+            .iter()
+            .all(|row| row.destination_id != destination.id)
+    );
+    drop(state);
+    fs::remove_dir_all(dir).unwrap();
+}
+
 #[test]
 fn resume_returns_stored_nondeterministic_credential_id_and_replays() {
     use crate::crypto::{KeyCipher, StaticKeyCipher};
@@ -124,6 +260,7 @@ fn resume_returns_stored_nondeterministic_credential_id_and_replays() {
             endpoint_url: "https://imported-cred.example/v1/chat/completions".into(),
             upstream_protocol: AccountUpstreamProtocol::ChatCompletions,
             auth_kind: ProviderDefinitionAuthKind::Bearer,
+            protocol_routes: None,
         }),
         authorization: Some(OnboardingAuthorization::ApiKey(
             OnboardingAuthorizationApiKey {
@@ -175,6 +312,7 @@ fn resume_returns_stored_nondeterministic_credential_id_and_replays() {
                 endpoint_url: "https://imported-cred.example/v1/chat/completions".into(),
                 upstream_protocol: AccountUpstreamProtocol::ChatCompletions,
                 auth_kind: ProviderDefinitionAuthKind::Bearer,
+                protocol_routes: None,
             }),
         }),
         authorization: None,
@@ -208,4 +346,127 @@ fn resume_returns_stored_nondeterministic_credential_id_and_replays() {
     assert_eq!(kept.binding_id, prior.binding_id);
     drop(state);
     fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn explicit_routes_persist_before_first_and_second_key_safe_grants() {
+    use super::super::types::{AuthSchemeDto, HttpProtocolRouteDto, ProtocolDto};
+    use crate::crypto::StaticKeyCipher;
+    use crate::db::Database;
+    use crate::state::CoreStateInner;
+    use std::sync::Arc;
+    let dir = std::env::temp_dir().join(format!("ocg-onboard-routes-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let state = Arc::new(
+        CoreStateInner::new(
+            Database::open(dir.clone()).unwrap(),
+            dir.clone(),
+            Arc::new(StaticKeyCipher::new("routes")),
+        )
+        .unwrap(),
+    );
+    let mut input = sample_request(
+        state.settings_revision(),
+        state.process_generation(),
+        "synthetic-key",
+    );
+    let OnboardingConnection::New(connection) = &mut input.connection else {
+        unreachable!()
+    };
+    connection.protocol_routes = Some(vec![
+        HttpProtocolRouteDto {
+            protocol: ProtocolDto::ChatCompletions,
+            endpoint_url: connection.endpoint_url.clone(),
+            auth_scheme: AuthSchemeDto::Bearer,
+        },
+        HttpProtocolRouteDto {
+            protocol: ProtocolDto::Messages,
+            endpoint_url: "https://lab.example/anthropic/v1/messages".into(),
+            auth_scheme: AuthSchemeDto::XApiKey,
+        },
+        HttpProtocolRouteDto {
+            protocol: ProtocolDto::Responses,
+            endpoint_url: "https://separate.example/v1/responses".into(),
+            auth_scheme: AuthSchemeDto::Bearer,
+        },
+    ]);
+    let first = commit_locked(&state, input)
+        .map_err(|error| error.into_response().status())
+        .unwrap();
+    let before = crate::destination_projection::load_persisted(&state.db.lock()).unwrap();
+    let first_credential = before
+        .credentials
+        .iter()
+        .find(|row| Some(&row.legacy_account_id) == first.account_id.as_ref())
+        .unwrap();
+    let destination = before
+        .destinations
+        .iter()
+        .find(|row| row.id == first_credential.destination_id)
+        .unwrap();
+    assert_eq!(destination.protocol_routes.len(), 3);
+    assert_eq!(destination.catalog[0].protocols.len(), 3);
+    assert!(destination.catalog[0].enabled);
+    assert_eq!(first_credential.grants.allowed_endpoint_ids.len(), 2);
+    assert_eq!(
+        first_credential.grants.allowed_origins,
+        ["https://lab.example"]
+    );
+    let second = OnboardingCommitRequest {
+        expectation: MutationExpectation {
+            expected_revision: state.settings_revision(),
+            process_generation: state.process_generation(),
+        },
+        operation_id: uuid::Uuid::new_v4().to_string(),
+        connection: OnboardingConnection::Existing(OnboardingConnectionExisting {
+            connection_id: first.connection_id.clone(),
+            configuration: None,
+        }),
+        authorization: Some(OnboardingAuthorization::ApiKey(
+            OnboardingAuthorizationApiKey {
+                secret_input: "second-synthetic-key".into(),
+                account_label: Some("Second".into()),
+                notes: None,
+            },
+        )),
+        targets: Vec::new(),
+        mode: None,
+        authorize_current_endpoint: false,
+    };
+    let second = commit_locked(&state, second)
+        .map_err(|error| error.into_response().status())
+        .unwrap();
+    let after = crate::destination_projection::load_persisted(&state.db.lock()).unwrap();
+    let second_credential = after
+        .credentials
+        .iter()
+        .find(|row| Some(&row.legacy_account_id) == second.account_id.as_ref())
+        .unwrap();
+    assert_eq!(second_credential.grants, first_credential.grants);
+    let connections = crate::dashboard_v4::connections::list_connections(State(state.clone()))
+        .await
+        .map_err(|error| error.into_response().status())
+        .unwrap()
+        .0;
+    let connection = connections
+        .connections
+        .iter()
+        .find(|row| row.id == first.connection_id)
+        .unwrap();
+    assert_eq!(connection.endpoints.len(), 3);
+    assert_eq!(connection.targets[0].endpoint_ids.len(), 3);
+    drop(state);
+    let reopened = Database::open(dir.clone()).unwrap();
+    let persisted = crate::destination_projection::load_persisted(&reopened).unwrap();
+    assert_eq!(
+        persisted
+            .destinations
+            .iter()
+            .find(|row| row.id == destination.id)
+            .unwrap()
+            .protocol_routes,
+        destination.protocol_routes
+    );
+    drop(reopened);
+    std::fs::remove_dir_all(dir).unwrap();
 }

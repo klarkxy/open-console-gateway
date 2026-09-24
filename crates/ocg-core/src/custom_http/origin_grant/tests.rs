@@ -44,6 +44,27 @@ fn s01_cross_origin_override_does_not_inherit_the_key() {
 }
 
 #[test]
+fn origins_match_equates_default_ports_and_ipv6_text_only() {
+    assert!(origins_match(
+        "https://service.example:443",
+        "https://service.example/v1/messages"
+    ));
+    assert!(origins_match(
+        "http://[2001:DB8:0:0:0:0:0:1]:8080",
+        "http://[2001:db8::1]:8080/v1/messages"
+    ));
+    assert!(!origins_match(
+        "http://service.example",
+        "https://service.example"
+    ));
+    assert!(!origins_match(
+        "https://service.example:8443",
+        "https://service.example"
+    ));
+    assert!(!origins_match("https://a.example", "https://b.example"));
+}
+
+#[test]
 fn s01_extra_allowed_origin_is_an_explicit_grant() {
     let granted = vec![
         "https://lab.example/v1".to_string(),

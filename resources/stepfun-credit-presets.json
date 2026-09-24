@@ -1,0 +1,57 @@
+{
+  "currency": "CNY",
+  "creditsPerCurrency": 1000000.0,
+  "sourceUrl": "https://platform.stepfun.com/docs/zh/guides/pricing/details",
+  "tiers": [
+    {
+      "id": "mini",
+      "name": "Mini",
+      "amount": 400000000.0
+    },
+    {
+      "id": "plus",
+      "name": "Plus",
+      "amount": 1600000000.0
+    },
+    {
+      "id": "pro",
+      "name": "Pro",
+      "amount": 8000000000.0
+    },
+    {
+      "id": "max",
+      "name": "Max",
+      "amount": 40000000000.0
+    }
+  ],
+  "rates": [
+    {
+      "model": "step-5-preview",
+      "inputPerMillion": 7.0,
+      "outputPerMillion": 20.0,
+      "cacheReadPerMillion": 0.35,
+      "cacheWritePerMillion": 7.0
+    },
+    {
+      "model": "step-3.7-flash",
+      "inputPerMillion": 1.35,
+      "outputPerMillion": 8.1,
+      "cacheReadPerMillion": 0.27,
+      "cacheWritePerMillion": 1.35
+    },
+    {
+      "model": "step-3.5-flash",
+      "inputPerMillion": 0.7,
+      "outputPerMillion": 2.1,
+      "cacheReadPerMillion": 0.14,
+      "cacheWritePerMillion": 0.7
+    },
+    {
+      "model": "step-3.5-flash-2603",
+      "inputPerMillion": 0.7,
+      "outputPerMillion": 2.1,
+      "cacheReadPerMillion": 0.14,
+      "cacheWritePerMillion": 0.7
+    }
+  ]
+}

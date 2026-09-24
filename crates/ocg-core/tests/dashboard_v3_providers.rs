@@ -625,8 +625,8 @@ async fn dashboard_v3_provider_catalog_aliases_follow_saved_builtin_catalogs() {
     assert_eq!(
         kimi_entry.model_aliases,
         [
-            "kimi-k2.7-code",
-            "kimi-k2.7-code-highspeed",
+            "kimi-for-coding",
+            "kimi-for-coding-highspeed",
             "kimi-k3",
             "kimi-k3-256k",
         ]
@@ -646,10 +646,10 @@ async fn dashboard_v3_provider_catalog_aliases_follow_saved_builtin_catalogs() {
         .iter()
         .map(|model| (model.model_id.as_str(), model.alias.as_str()))
         .collect::<std::collections::BTreeMap<_, _>>();
-    assert_eq!(aliases.get("kimi-for-coding"), Some(&"kimi-k2.7-code"));
+    assert_eq!(aliases.get("kimi-for-coding"), Some(&"kimi-for-coding"));
     assert_eq!(
         aliases.get("kimi-for-coding-highspeed"),
-        Some(&"kimi-k2.7-code-highspeed")
+        Some(&"kimi-for-coding-highspeed")
     );
     assert_eq!(aliases.get("k3"), Some(&"kimi-k3"));
     assert_eq!(aliases.get("k3-256k"), Some(&"kimi-k3-256k"));
@@ -772,7 +772,7 @@ async fn dashboard_v3_provider_contracts_project_builtin_scopes_and_custom_endpo
         .iter()
         .find(|model| model.model_id == "kimi-for-coding")
         .expect("Kimi coding fallback model");
-    assert_eq!(coding.alias, "kimi-k2.7-code");
+    assert_eq!(coding.alias, "kimi-for-coding");
     assert!(
         kimi.models.iter().any(|model| model.model_id == "kimi-k3"),
         "Kimi fallback catalog must include kimi-k3"
@@ -994,7 +994,7 @@ async fn dashboard_v3_zen_settings_cas_bumps_without_account_or_secrets() {
 
     let accounts = harness
         .client
-        .get(format!("{}/accounts", harness.v3_base))
+        .get(format!("{}/account-records", harness.v3_base))
         .send()
         .await
         .unwrap()
@@ -1036,7 +1036,7 @@ async fn dashboard_v3_zen_saved_models_are_the_persisted_snapshot() {
 
 #[cfg(debug_assertions)]
 #[tokio::test]
-async fn unified_zen_catalog_refresh_returns_the_shared_layout_with_new_models_off() {
+async fn unified_zen_catalog_refresh_leaves_new_models_auto_without_protocol_evidence() {
     let origin = start_zen_origin(
         StatusCode::OK,
         json!({ "data": [{ "id": "unified-new-free" }] }),
@@ -1072,10 +1072,7 @@ async fn unified_zen_catalog_refresh_returns_the_shared_layout_with_new_models_o
         .find(|model| model["modelId"] == "unified-new-free")
         .expect("new Zen model stays visible");
     assert_eq!(model["routable"], false);
-    assert_eq!(
-        model["protocols"]["chat_completions"]["override"],
-        "force_off"
-    );
+    assert_eq!(model["protocols"]["chat_completions"]["override"], "auto");
     assert_eq!(model["protocols"]["chat_completions"]["enabled"], false);
     assert!(model["protocols"]["responses"].is_null());
     assert!(model["protocols"]["messages"].is_null());

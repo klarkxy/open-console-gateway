@@ -7,11 +7,16 @@ use ocg_domain::catalog::CredentialKind;
 use ocg_domain::credential::observer_credential_id_for_platform_account;
 
 use crate::dashboard_v3::dynamic_providers::first_account_key;
-use crate::dashboard_v3::{ControlRevision, V3ApiError, check_expectation, parse_mutation_json};
+use crate::dashboard_v3::{
+    ControlRevision, MutationExpectation, V3ApiError, check_expectation, parse_mutation_json,
+};
 use crate::provider::{CPA_ACCOUNT_ID, builtin_provider, validate_plan_key};
 use crate::state::CoreState;
 
-use super::types::{CredentialRotateRequest, CredentialRotateResult};
+use super::destinations::{DestinationsError, overlay_one_credential_dto, projection_refused};
+use super::types::{CredentialRotateRequest, CredentialRotateResult, QuotaRetryResult};
+use crate::destination_projection::read_v4_projection;
+use crate::quota_recovery::QuotaEpisode;
 
 /// Rotate the Key on an existing Credential.
 ///
@@ -109,3 +114,96 @@ fn rotate_locked(
         replayed: false,
     })
 }
+
+/// Permit one next normal selection for a confirmed exhausted Key.
+///
+/// Does not send, enable, or clear backoff. Idempotent while already ready
+/// or probing.
+pub(super) async fn quota_retry(
+    State(state): State<CoreState>,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> Result<Json<QuotaRetryResult>, DestinationsError> {
+    let input = parse_mutation_json::<MutationExpectation>(&body)?;
+    quota_retry_locked(&state, &id, input).map(Json)
+}
+
+fn quota_retry_locked(
+    state: &CoreState,
+    credential_id: &str,
+    expectation: MutationExpectation,
+) -> Result<QuotaRetryResult, DestinationsError> {
+    let _settings_update = state.settings_update.lock();
+    check_expectation(state, &expectation)?;
+    let now = state.sample_gateway_clock().0;
+    let (projection, recovery, probing, revision) = {
+        let db = state.db.lock();
+        let projection = read_v4_projection(&db)
+            .map_err(V3ApiError::internal)?
+            .map_err(|refusals| DestinationsError::Refused(projection_refused(state, &refusals)))?;
+        let account_id = projection
+            .credentials
+            .iter()
+            .find(|credential| credential.id == credential_id)
+            .ok_or_else(|| V3ApiError::not_found_at(state, "credential not found"))?
+            .legacy_account_id
+            .clone();
+        let loaded = crate::db::quota_recovery::load_for_legacy_on(&db.conn, &account_id)
+            .map_err(V3ApiError::internal)?;
+        let Some((id, version, key_cipher, Some(recovery))) = loaded else {
+            return Err(V3ApiError::invalid_request_at(
+                state,
+                "credential has no confirmed quota exhaustion",
+            )
+            .into());
+        };
+        let probing = state.is_quota_probing(&id, version, &key_cipher, recovery.epoch);
+        let due = recovery.due_at(now);
+        let episode = QuotaEpisode {
+            credential_id: id,
+            account_id,
+            credential_version: version,
+            epoch: recovery.epoch,
+            key_cipher,
+        };
+        if probing || due {
+            (
+                projection,
+                recovery,
+                probing,
+                ControlRevision::from_state(state),
+            )
+        } else {
+            let mut updated = recovery.clone();
+            updated.next_retry_at = now;
+            let saved = crate::db::quota_recovery::save_on(&db.conn, &episode, &updated)
+                .map_err(V3ApiError::internal)?;
+            if !saved {
+                return Err(V3ApiError::invalid_request_at(
+                    state,
+                    "credential has no confirmed quota exhaustion",
+                )
+                .into());
+            }
+            state.bump_settings_revision();
+            (
+                projection,
+                updated,
+                probing,
+                ControlRevision::from_state(state),
+            )
+        }
+    };
+    let credential = projection
+        .credentials
+        .iter()
+        .find(|credential| credential.id == credential_id)
+        .expect("credential existed under settings lock");
+    Ok(QuotaRetryResult {
+        revision,
+        credential: overlay_one_credential_dto(state, credential, Some(&recovery), probing),
+    })
+}
+
+#[cfg(test)]
+mod tests;

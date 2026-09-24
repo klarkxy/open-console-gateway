@@ -1,7 +1,9 @@
 pub mod attempt;
+pub(crate) mod attempt_pricing;
 pub mod classify;
 pub mod diagnostics;
 pub mod executor;
+pub(crate) mod failure;
 pub mod forwarder;
 pub mod free_models;
 pub mod handler;
@@ -11,9 +13,9 @@ pub mod materialize;
 pub mod protocol;
 pub mod protocol_stream;
 pub mod provider_adapter;
+pub(crate) mod recovery;
 mod response;
 pub mod routing;
-pub mod shadow;
 pub mod wire;
 
 use crate::state::CoreState;

@@ -38,6 +38,7 @@ pub enum UpstreamAuth {
     OpenCodeProtocolDefault,
     Bearer,
     XApiKey,
+    ApiKey,
     None,
 }
 

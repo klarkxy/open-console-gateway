@@ -8,14 +8,13 @@
 use crate::custom_http::{
     HttpInferenceTransport, HttpInferenceTransportSpec, InferenceHttpRequest, json_content_headers,
 };
+use crate::db::identity::StoredInferenceBinding;
 use crate::gateway::attempt::UpstreamAuth;
 use crate::gateway::forwarder::{
     LiveSendAccountGate, LiveSendSelection, authorize_live_send_secret, confirm_live_send_secret,
 };
 use crate::gateway::protocol::{CustomRouteSpec, RequestPlan};
-use crate::gateway::provider_adapter::{
-    resolve_account_test_route_with_dynamics, resolve_probe_route,
-};
+use crate::gateway::provider_adapter::{resolve_account_test_route, resolve_probe_route};
 use crate::models::{Account, AppConfig, UpstreamChannel};
 use crate::provider::{ProviderAdapterKind, UpstreamAuthScheme, UpstreamProtocolKind};
 use crate::provider_contracts::{self, ContractScope, PersistedModelProtocol, protocol_to_api};
@@ -137,7 +136,7 @@ pub(crate) async fn execute_protocol_probe(
     account: &Account,
     protocol: UpstreamProtocolKind,
 ) -> Result<u16, (Option<u16>, String)> {
-    execute_protocol_request(ctx, account, protocol, false, &[]).await
+    execute_protocol_request(ctx, account, protocol, false, ctx.model_id).await
 }
 
 /// Send the same minimal protocol request used by provider probes, but lock
@@ -148,30 +147,52 @@ pub(crate) struct AccountModelTestInput<'a> {
     pub config: &'a AppConfig,
     pub account: &'a Account,
     pub adapter: ProviderAdapterKind,
+    pub public_model: &'a str,
     pub model_id: &'a str,
     pub protocol: UpstreamProtocolKind,
-    pub custom_endpoint_url: Option<&'a str>,
-    pub dynamics: &'a [crate::dynamic::DynamicProviderRuntime],
+    /// Route already chosen by preparation. Absent for sealed adapters.
+    pub custom_route: Option<CustomRouteSpec>,
 }
 
 pub(crate) async fn execute_account_model_test(
     input: AccountModelTestInput<'_>,
 ) -> Result<u16, (Option<u16>, String)> {
-    let custom_route = input
-        .custom_endpoint_url
-        .map(|endpoint_url| CustomRouteSpec {
-            endpoint_url: endpoint_url.to_string(),
-        });
     let ctx = ProtocolProbeContext {
         state: input.state,
         config: input.config,
         accounts: std::slice::from_ref(input.account),
         adapter: input.adapter,
         model_id: input.model_id,
-        custom_route,
+        custom_route: input.custom_route.clone(),
         now: chrono::Utc::now(),
     };
-    execute_protocol_request(&ctx, input.account, input.protocol, true, input.dynamics).await
+    execute_protocol_request(
+        &ctx,
+        input.account,
+        input.protocol,
+        true,
+        input.public_model,
+    )
+    .await
+}
+
+fn live_send_selection_from_bindings<E: ToString>(
+    account: &Account,
+    bindings: Result<Vec<StoredInferenceBinding>, E>,
+    public_model: &str,
+    upstream_model: &str,
+) -> Result<LiveSendSelection, (Option<u16>, String)> {
+    let binding = bindings
+        .map_err(|error| (None, error.to_string()))?
+        .into_iter()
+        .find(|row| row.account_id == account.id);
+    Ok(LiveSendSelection::from_binding(
+        account,
+        binding.as_ref(),
+        public_model,
+        public_model,
+        upstream_model,
+    ))
 }
 
 async fn execute_protocol_request(
@@ -179,7 +200,7 @@ async fn execute_protocol_request(
     account: &Account,
     protocol: UpstreamProtocolKind,
     account_test: bool,
-    dynamics: &[crate::dynamic::DynamicProviderRuntime],
+    public_model: &str,
 ) -> Result<u16, (Option<u16>, String)> {
     let format = protocol_to_api(protocol);
     let body = crate::custom::minimal_verification_body(protocol, ctx.model_id)
@@ -188,7 +209,7 @@ async fn execute_protocol_request(
         client: format,
         upstream: format,
         model: ctx.model_id.to_string(),
-        client_model: ctx.model_id.to_string(),
+        client_model: public_model.to_string(),
         stream: false,
         body: bytes::Bytes::from(body.clone()),
         channel: if ctx.adapter == ProviderAdapterKind::ZenFree {
@@ -197,8 +218,8 @@ async fn execute_protocol_request(
             UpstreamChannel::Go
         },
         upstream_base_override: None,
-        original_model: None,
-        resolved_alias: None,
+        original_model: (public_model != ctx.model_id).then(|| public_model.to_string()),
+        resolved_alias: (!public_model.is_empty()).then(|| public_model.to_string()),
         custom_route: ctx.custom_route.clone(),
         service_tier: None,
         custom_tools: Vec::new(),
@@ -208,31 +229,20 @@ async fn execute_protocol_request(
         response_tool_choice: serde_json::json!("auto"),
         response_tools: Vec::new(),
     };
-    if crate::provider::is_custom_api(&account.provider_id) && plan.custom_route.is_none() {
-        return Err((
-            None,
-            "Custom API accounts require a persisted API URL and upstream protocol".to_string(),
-        ));
-    }
     let route = if account_test {
-        resolve_account_test_route_with_dynamics(account, ctx.config, &plan, dynamics)
+        resolve_account_test_route(account, ctx.adapter, ctx.config, &plan)
     } else {
-        resolve_probe_route(account, ctx.config, &plan)
+        resolve_probe_route(account, ctx.adapter, ctx.config, &plan)
     }
     .map_err(|error| (None, error))?;
     let selection = {
         let db = ctx.state.db.lock();
-        let binding = db
-            .list_inference_bindings()
-            .ok()
-            .and_then(|rows| rows.into_iter().find(|row| row.account_id == account.id));
-        LiveSendSelection::from_binding(
+        live_send_selection_from_bindings(
             account,
-            binding.as_ref(),
+            db.list_inference_bindings(),
+            public_model,
             ctx.model_id,
-            ctx.model_id,
-            ctx.model_id,
-        )
+        )?
     };
     let secret = authorize_live_send_secret(
         ctx.state,
@@ -268,7 +278,7 @@ async fn execute_protocol_request(
     crate::gateway::forwarder::apply_provider_identity_headers(
         &mut extra,
         &reqwest::header::HeaderMap::new(),
-        &account.provider_id,
+        ctx.adapter,
         format,
         ctx.model_id,
         &body,
@@ -278,6 +288,7 @@ async fn execute_protocol_request(
     let auth = match (route.auth, secret.as_deref()) {
         (UpstreamAuth::None, _) => None,
         (UpstreamAuth::XApiKey, Some(key)) => Some((UpstreamAuthScheme::XApiKey, key)),
+        (UpstreamAuth::ApiKey, Some(key)) => Some((UpstreamAuthScheme::ApiKey, key)),
         (UpstreamAuth::Bearer, Some(key)) => Some((UpstreamAuthScheme::Bearer, key)),
         (UpstreamAuth::OpenCodeProtocolDefault, Some(key))
             if format == crate::kernel::protocol::ApiFormat::Messages =>

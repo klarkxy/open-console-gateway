@@ -50,8 +50,10 @@ const MINIMAX_CN_ALIASES: &[(&str, &str)] = &[
 ];
 
 const KIMI_CN_ALIASES: &[(&str, &str)] = &[
-    ("kimi-for-coding", "kimi-k2.7-code"),
-    ("kimi-for-coding-highspeed", "kimi-k2.7-code-highspeed"),
+    // Kimi upgrades these product IDs in place. Keep their public identity
+    // stable instead of relabelling the rolling target as a fixed version.
+    ("kimi-for-coding", "kimi-for-coding"),
+    ("kimi-for-coding-highspeed", "kimi-for-coding-highspeed"),
     ("k3", "kimi-k3"),
     ("k3-256k", "kimi-k3-256k"),
 ];
@@ -281,7 +283,7 @@ fn build_runtime_registry(catalogs: RuntimeCatalogs<'_>) -> Registry {
         kimi_mapping,
         kimi_catalog_alias,
     );
-    insert_goat_catalog(&mut registry, catalogs.command_code);
+    insert_goat_catalog(&mut registry, catalogs.command_code, catalogs.go);
     insert_cpa_catalog(&mut registry, catalogs.cpa);
     insert_ollama_catalog(&mut registry, catalogs.ollama, catalogs.ollama_pinned);
     insert_extra_catalogs(&mut registry, catalogs.extra);
@@ -304,7 +306,7 @@ fn insert_extra_catalogs(registry: &mut Registry, extras: &[ExtraProviderCatalog
     }
 }
 
-fn insert_goat_catalog(registry: &mut Registry, model_ids: &[String]) {
+fn insert_goat_catalog(registry: &mut Registry, model_ids: &[String], go_model_ids: &[String]) {
     for model_id in model_ids {
         upsert_mapping(registry, None, goat_mapping(model_id, true));
     }
@@ -317,7 +319,7 @@ fn insert_goat_catalog(registry: &mut Registry, model_ids: &[String]) {
             })
             .count()
             == 1;
-        if unique && is_code_owned_alias(registry, &alias) {
+        if goat_leaf_alias_is_publishable(model_id, &alias, unique, go_model_ids, registry) {
             upsert_mapping(registry, Some(&alias), goat_mapping(model_id, true));
         }
     }
@@ -1198,6 +1200,29 @@ fn command_catalog_alias(model_id: &str) -> Option<&'static str> {
     sealed_catalog_alias(model_id, COMMAND_CODE_GOAT_ALIASES)
 }
 
+/// Unique last-segment kebab names from slash (or other raw-shaped) Command
+/// IDs become Aliases even when they are not already code-owned. Slash-free
+/// unmatched rows stay raw pins. Existing Go/Zen names still join instead of
+/// stealing the alias.
+fn goat_leaf_alias_is_publishable(
+    model_id: &str,
+    alias: &str,
+    unique: bool,
+    go_model_ids: &[String],
+    registry: &Registry,
+) -> bool {
+    if !unique || alias.is_empty() || looks_raw_shaped(alias) {
+        return false;
+    }
+    if is_code_owned_alias(registry, alias) {
+        return true;
+    }
+    if !looks_raw_shaped(model_id) {
+        return false;
+    }
+    !go_model_ids.iter().any(|id| id.eq_ignore_ascii_case(alias))
+}
+
 fn is_code_owned_alias(registry: &Registry, alias: &str) -> bool {
     code_owned_alias(registry, alias).is_some()
 }
@@ -1283,7 +1308,7 @@ pub fn canonical_alias_for_provider_model(
     }
     if provider_id == COMMAND_CODE_PROVIDER_ID {
         let candidate = command_alias_for_catalog(upstream_model, &registry);
-        return if is_code_owned_alias(&registry, &candidate) {
+        return if goat_leaf_alias_is_publishable(upstream_model, &candidate, true, &[], &registry) {
             candidate
         } else {
             String::new()

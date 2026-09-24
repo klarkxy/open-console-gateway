@@ -16,6 +16,8 @@ export type DashboardApiV4 =
   | Eligibility
   | TemplateRef
   | ConnectionSummary
+  | CredentialCreateCapabilityDto
+  | CredentialCreateUnavailableReasonDto
   | ConnectionList
   | OnboardingCommitRequest
   | OnboardingCommitMode
@@ -51,13 +53,74 @@ export type DashboardApiV4 =
   | DshApplicationStatus
   | DshApplication
   | DshApplicationInstallRequest
+  | PlatformKeyImportRequest
+  | PlatformKeyImportResult
+  | PlatformKeyImportFailure
+  | DestinationList
+  | DestinationDto
+  | ModelResolutionDto
+  | DestinationModelPatch
+  | DestinationUpstreamOverridePatch
+  | DestinationPatchRequest
+  | DestinationPatchResult
+  | DestinationCatalogRefreshResult
+  | HttpProtocolRouteDto
+  | DestinationCatalogUpdate
+  | DestinationCatalogModelUpdate
+  | DestinationModelTestRequest
+  | DestinationModelTestResult
+  | DestinationDeleteResult
+  | DestinationCredentialDto
+  | QuotaRecoveryDto
+  | QuotaRecoveryStatus
+  | QuotaRecoveryReason
+  | QuotaRecoveryWindow
+  | QuotaRetryResult
+  | CredentialList
+  | RoutingCard
+  | RoutingCardList
+  | RoutingCardUpdate
+  | AccountControlsDto
+  | AccountToggleWriteDto
+  | AccountConfigurationOwnerDto
+  | AccountConsoleLinkDto
+  | CapabilitiesDto
+  | PlanDto
+  | CatalogModelDto
+  | DestinationProjectionRefusedError
   | OfficialApiKind
   | OfficialPriceRow
   | OfficialPriceSheet
   | OfficialBalance
   | OfficialSpend
   | OfficialApiStatus
-  | OfficialApiPrices;
+  | OfficialApiPrices
+  | BillingModel
+  | BillingSource
+  | BillingStatus
+  | CreditRate
+  | MonthlyCredits
+  | CreditConfiguration
+  | CreditBucketKind
+  | CreditBucket
+  | CreditPreset
+  | CreditMeterView
+  | CreditConfigureRequest
+  | CreditBalanceCorrection
+  | CreditCalibrationRequest
+  | CreditGrantRequest
+  | RoutingMode
+  | RoutingClientProtocol
+  | RoutingResolvedKind
+  | RoutingResolvedMapping
+  | RoutingResolvedModel
+  | RoutingChannel
+  | RoutingEligibleCandidate
+  | RoutingExclusionCode
+  | RoutingExclusion
+  | RoutingConversationBinding
+  | RuntimeOnlyUncertainty
+  | RoutingExplanation;
 /**
  * Inference operation advertised by one endpoint. Mapped 1:1 from
  * [`UpstreamProtocolKind`].
@@ -70,7 +133,7 @@ export type AccountUpstreamProtocol = "chat_completions" | "responses" | "messag
 /**
  * Custom auth scheme. Wire values match V2 kebab-case.
  */
-export type AccountAuthScheme = "bearer" | "x-api-key";
+export type AccountAuthScheme = "bearer" | "x-api-key" | "api-key";
 /**
  * Wire identity matching V2 `api_key` / `none`.
  */
@@ -81,7 +144,7 @@ export type TemplateSource = "builtin" | "preset";
  * Auth advertised on a connection endpoint. `Sealed` is used for built-in
  * adapters whose scheme is owned by code, not by the projected row.
  */
-export type EndpointAuthScheme = "bearer" | "x-api-key" | "sealed" | "none";
+export type EndpointAuthScheme = "bearer" | "x-api-key" | "api-key" | "sealed" | "none";
 /**
  * Pre-unification row a connection was projected from.
  */
@@ -105,6 +168,18 @@ export type EligibilityState = "eligible" | "ineligible" | "cooling";
  * Local authorization projection. Unknown is not a verified success.
  */
 export type AuthorizationState = "not_required" | "missing" | "unknown" | "valid" | "invalid";
+export type MaterialKind = "api_key" | "external_reference";
+/**
+ * Why this connection cannot accept another credential through identity creation.
+ */
+export type CredentialCreateUnavailableReasonDto =
+  | "external_integration"
+  | "singleton"
+  | "no_authentication"
+  | "dedicated_account_flow"
+  | "builtin_definition"
+  | "unavailable"
+  | "draft";
 /**
  * V4 connection lifecycle, including persisted onboarding drafts.
  *
@@ -131,6 +206,7 @@ export type OnboardingConnection =
       endpointUrl: string;
       kind: "new";
       name: string;
+      protocolRoutes?: HttpProtocolRouteDto[] | null;
       templateId: string;
       upstreamProtocol: AccountUpstreamProtocol;
     }
@@ -146,7 +222,15 @@ export type OnboardingConnection =
  * Auth kind owned by a Provider definition. Independent of protocol.
  * Nullable on the wire because builtin rows leave the field empty.
  */
-export type ProviderDefinitionAuthKind = "bearer" | "x-api-key" | "none";
+export type ProviderDefinitionAuthKind = "bearer" | "x-api-key" | "api-key" | "none";
+/**
+ * Destination auth scheme. Wire values match the domain serde names.
+ */
+export type AuthSchemeDto = "none" | "bearer" | "x_api_key" | "api_key";
+/**
+ * Wire protocol for destination catalog and transport rows.
+ */
+export type ProtocolDto = "chat_completions" | "responses" | "messages";
 export type OnboardingCommitMode = "draft" | "complete";
 export type ModelScope =
   | {
@@ -157,7 +241,6 @@ export type ModelScope =
       models: string[];
     };
 export type AuthState = "unknown" | "valid" | "invalid";
-export type MaterialKind = "api_key" | "external_reference";
 export type CredentialPurpose = "inference" | "platform_observer";
 export type IdentityLegacyKind = "account" | "platform_account";
 export type OnboardingTaskKind = "managed_registration";
@@ -179,7 +262,124 @@ export type QuotaSharing =
     };
 export type DshApplicationStatus =
   "unsupported_runtime" | "not_detected" | "ready" | "installed" | "incompatible" | "conflict";
+/**
+ * Owner of endpoint, protocol and model configuration.
+ */
+export type AccountConfigurationOwnerDto = "account" | "destination";
+export type AccountConsoleLinkDto = "opencode" | "ollama";
+/**
+ * Persistence target for the account enable switch.
+ */
+export type AccountToggleWriteDto = "account" | "provider_settings";
+/**
+ * Sealed adapter kind. Wire values match the domain serde names.
+ */
+export type AdapterKindDto = "opencode_go" | "zen" | "goat" | "minimax" | "kimi" | "ollama" | "cpa" | "http";
+/**
+ * Redirect policy advertised on a destination.
+ */
+export type RedirectPolicyDto = "no_follow" | "follow_keyless";
+/**
+ * Which V3-era row a destination was projected from.
+ */
+export type LegacyDestinationKindDto = "builtin" | "dynamic" | "custom_account" | "platform_parent";
+/**
+ * How a Plan expires, when it has a cadence.
+ */
+export type ExpiryCadenceDto = "monthly";
+/**
+ * Where a Plan's prices come from.
+ */
+export type PricingSourceDto = "official" | "verified_snapshot" | "unpriced";
+/**
+ * Where a Plan reads usage from.
+ */
+export type UsageSourceDto = "official_api" | "local_projection" | "none";
+/**
+ * One Plan usage window kind.
+ */
+export type PlanWindowKindDto = "five_hours" | "week" | "month" | "free";
+/**
+ * Which client model names may resolve to a destination mapping.
+ */
+export type ModelResolutionDto = "adapter_defined" | "public_only" | "public_and_upstream";
+/**
+ * Why the credential was confirmed exhausted.
+ */
+export type QuotaRecoveryReason = "quota_exhausted" | "insufficient_balance";
+/**
+ * Presentation status for a confirmed quota-recovery episode.
+ */
+export type QuotaRecoveryStatus = "waiting" | "ready" | "probing";
+/**
+ * Window named by confirmed exhaustion evidence.
+ */
+export type QuotaRecoveryWindow = "five_hours" | "week" | "month" | "unknown";
+/**
+ * Mapping-error variant name in camelCase.
+ */
+export type MappingErrorCodeDto =
+  | "unknownProvider"
+  | "missingDestination"
+  | "customRequiresAccount"
+  | "customAccountMissingEndpoint"
+  | "dynamicMissingEndpoint"
+  | "platformMissingBaseUrl";
+/**
+ * Legacy row kind named in a destination-projection refusal.
+ */
+export type RefusedRowKindDto = "account" | "dynamic_provider" | "platform_parent";
 export type OfficialApiKind = "deepseek" | "zhipu";
+export type BillingModel = "quota" | "cash" | "credits";
+export type BillingSource = "official" | "local_estimate" | "unavailable";
+export type CreditBucketKind = "monthly" | "top_up" | "manual";
+/**
+ * Registry usage availability. Wire values stay snake_case.
+ */
+export type UsageAvailability = "available" | "unavailable" | "local_state";
+/**
+ * Account selection mode. Wire values stay kebab-case, matching V2.
+ */
+export type RoutingMode = "strict-priority" | "sticky-global" | "round-robin";
+/**
+ * Client protocol accepted by `GET /routing/explain`.
+ */
+export type RoutingClientProtocol = "chat_completions" | "responses" | "messages" | "gemini";
+/**
+ * How the requested name resolved against the live alias registry.
+ */
+export type RoutingResolvedKind = "alias" | "pinned_raw";
+export type RoutingChannel = "go" | "free";
+export type RoutingExclusionCode =
+  | "mapping_protocol_incompatible"
+  | "credential_disabled"
+  | "binding_disabled"
+  | "model_scope_denied"
+  | "goat_not_eligible"
+  | "goat_unverified"
+  | "candidate_materialization_failed"
+  | "production_route_unsupported"
+  | "account_disabled"
+  | "setup_not_ready"
+  | "channel_mismatch"
+  | "credential_missing"
+  | "auth_error"
+  | "cooling_down"
+  | "free_channel_unavailable"
+  | "quota_waiting"
+  | "quota_due"
+  | "quota_probing";
+/**
+ * Conversation stickiness is reported, not applied: this endpoint has no
+ * conversation input.
+ */
+export type RoutingConversationBinding = "not_evaluated";
+export type RuntimeOnlyUncertainty =
+  | "state_changed_after_snapshot"
+  | "conversation_binding_not_evaluated"
+  | "retry_exclusions_not_applied"
+  | "credential_recheck_pending"
+  | "upstream_result_unknown";
 
 /**
  * Live CAS token, process generation, and pricing snapshot id.
@@ -227,6 +427,10 @@ export interface ConnectionEndpoint {
   connectionId: string;
   id: string;
   locked: boolean;
+  /**
+   * Official balance support for this exact configured URL, including its path.
+   */
+  officialBalance: boolean;
   operation: EndpointOperation;
   url: string | null;
   wireProtocol: AccountUpstreamProtocol;
@@ -255,6 +459,12 @@ export interface ConnectionSummary {
   adapterKind: string;
   authorization: AuthorizationState;
   credentialCount: number;
+  credentialCreate: CredentialCreateCapabilityDto;
+  /**
+   * Personal credit setup for Key forms. None means unsupported; an empty
+   * list permits custom configuration without a provider preset.
+   */
+  creditPresets?: CreditPreset[] | null;
   displayFamily: string | null;
   eligibility: Eligibility;
   enabledCredentialCount: number;
@@ -268,6 +478,46 @@ export interface ConnectionSummary {
   targetCount: number;
   targets: ConnectionTarget[];
   templateRef: TemplateRef | null;
+}
+/**
+ * Server-owned operation capability; writes recheck it against current state.
+ */
+export interface CredentialCreateCapabilityDto {
+  allowed: boolean;
+  materialKinds: MaterialKind[];
+  reason: CredentialCreateUnavailableReasonDto | null;
+}
+export interface CreditPreset {
+  configuration: CreditConfiguration;
+  id: string;
+  initialGrant: number;
+}
+export interface CreditConfiguration {
+  creditsPerCurrency: number;
+  currency: string;
+  monthly: MonthlyCredits | null;
+  name: string;
+  rates: CreditRate[];
+  sourceUrl: string | null;
+}
+export interface MonthlyCredits {
+  amount: number;
+  /**
+   * First renewal boundary and immutable calendar anchor, including its UTC time.
+   */
+  nextResetAt: string;
+  renewalEndsAt: string | null;
+  /**
+   * Calendar boundaries use this fixed UTC offset, e.g. 480 for China.
+   */
+  timezoneOffsetMinutes: number;
+}
+export interface CreditRate {
+  cacheReadPerMillion: number | null;
+  cacheWritePerMillion: number | null;
+  inputPerMillion: number;
+  model: string;
+  outputPerMillion: number;
 }
 export interface ConnectionList {
   connections: ConnectionSummary[];
@@ -297,10 +547,16 @@ export interface OnboardingCommitRequest {
   processGeneration: number;
   targets: OnboardingTarget[];
 }
+export interface HttpProtocolRouteDto {
+  authScheme: AuthSchemeDto;
+  endpointUrl: string;
+  protocol: ProtocolDto;
+}
 export interface OnboardingConnectionNew {
   authKind: ProviderDefinitionAuthKind;
   endpointUrl: string;
   name: string;
+  protocolRoutes?: HttpProtocolRouteDto[] | null;
   templateId: string;
   upstreamProtocol: AccountUpstreamProtocol;
 }
@@ -557,6 +813,473 @@ export interface DshApplicationInstallRequest {
   keyId: string;
   processGeneration: number;
 }
+/**
+ * Import New API inference tokens as local Custom Keys. Secret-free.
+ */
+export interface PlatformKeyImportRequest {
+  expectedRevision: number;
+  processGeneration: number;
+}
+export interface PlatformKeyImportResult {
+  failed: PlatformKeyImportFailure[];
+  imported: number;
+  revision: ControlRevision;
+  skippedDisabled: number;
+  skippedExisting: number;
+}
+export interface PlatformKeyImportFailure {
+  code: string;
+  name: string;
+}
+/**
+ * RFC destination list. Revision-tagged and secret-free.
+ */
+export interface DestinationList {
+  destinations: DestinationDto[];
+  revision: ControlRevision;
+}
+/**
+ * Secret-free destination facts and derived account controls.
+ */
+export interface DestinationDto {
+  accountControls: AccountControlsDto;
+  adapter: AdapterKindDto;
+  authScheme: AuthSchemeDto;
+  /**
+   * Upstream origin. Sealed for builtin adapters; user data for `http`.
+   */
+  baseUrl: string | null;
+  /**
+   * Brand family for grouping, when the adapter or platform kind has one.
+   */
+  brandFamily: string | null;
+  capabilities: CapabilitiesDto;
+  catalog: CatalogModelDto[];
+  /**
+   * Destination enablement.
+   */
+  enabled: boolean;
+  /**
+   * Stable destination id (deterministic UUIDv5 of the legacy row).
+   */
+  id: string;
+  legacy: LegacyDestinationRefDto;
+  /**
+   * `1` for true singletons; `null` for multi-credential destinations.
+   */
+  maxCredentials: number | null;
+  /**
+   * Model-name resolution owned by this destination.
+   */
+  modelResolution: "adapter_defined" | "public_only" | "public_and_upstream";
+  /**
+   * Display name.
+   */
+  name: string;
+  /**
+   * Non-inference observer credential id when `capabilities.observer` is set.
+   */
+  observerCredentialId: string | null;
+  plan: PlanDto | null;
+  protocolRoutes: HttpProtocolRouteDto[];
+  protocols: ProtocolDto[];
+}
+/**
+ * Read-only account actions derived from the destination's resource ownership.
+ */
+export interface AccountControlsDto {
+  browserProfile: boolean;
+  configurationOwner: AccountConfigurationOwnerDto;
+  consoleLink: AccountConsoleLinkDto | null;
+  toggleWrite: AccountToggleWriteDto;
+}
+/**
+ * Destination capability flags. Mirrors the domain `Capabilities` record.
+ */
+export interface CapabilitiesDto {
+  /**
+   * A billing tier must be selected before the destination is usable.
+   */
+  billingTierRequired: boolean;
+  /**
+   * The destination can discover models from the upstream.
+   */
+  discoverableModels: boolean;
+  /**
+   * The destination is an external integration and holds no local inference secret.
+   */
+  externalIntegration: boolean;
+  /**
+   * The adapter attaches identity headers on egress.
+   */
+  identityHeaders: boolean;
+  /**
+   * Managed signup can start an onboarding task on a credential.
+   */
+  managedSignup: boolean;
+  /**
+   * The destination holds a non-inference observer credential (platform parent).
+   */
+  observer: boolean;
+  /**
+   * Hosts Configurable HTTP may probe for an official current-balance API.
+   */
+  officialBalanceProbe: string[];
+  redirectPolicy: RedirectPolicyDto;
+  /**
+   * Test connection is offered on every ready credential except external integrations.
+   */
+  testable: boolean;
+}
+/**
+ * One catalog model on a destination.
+ */
+export interface CatalogModelDto {
+  /**
+   * Whether any protocol is enabled.
+   */
+  enabled: boolean;
+  preferred: ProtocolDto | null;
+  protocols: ProtocolDto[];
+  /**
+   * Public name exposed to clients.
+   */
+  publicModel: string;
+  /**
+   * Upstream model id sent on egress.
+   */
+  upstreamModel: string;
+  upstreamOverride: DestinationUpstreamOverridePatch | null;
+}
+/**
+ * Optional per-model route override for a configurable HTTP destination.
+ */
+export interface DestinationUpstreamOverridePatch {
+  endpointUrl: string;
+  protocol: ProtocolDto;
+}
+/**
+ * V3 row this destination was projected from.
+ */
+export interface LegacyDestinationRefDto {
+  /**
+   * Row id in the V3 model named by `kind`.
+   */
+  id: string;
+  kind: LegacyDestinationKindDto;
+}
+/**
+ * Commercial offering embedded in a destination. Mirrors the domain `Plan`.
+ */
+export interface PlanDto {
+  expiryCadence: ExpiryCadenceDto | null;
+  /**
+   * Operators may enter local usage numbers by hand.
+   */
+  manualCalibration: boolean;
+  pricingSource: PricingSourceDto;
+  usageSource: UsageSourceDto;
+  windows: PlanWindowDto[];
+}
+/**
+ * One Plan usage window.
+ */
+export interface PlanWindowDto {
+  kind: PlanWindowKindDto;
+}
+/**
+ * Complete public-to-upstream mapping written by a destination PATCH.
+ */
+export interface DestinationModelPatch {
+  enabled?: boolean | null;
+  preferred?: ProtocolDto | null;
+  protocols?: ProtocolDto[] | null;
+  publicModel: string;
+  upstreamModel: string;
+  upstreamOverride?: DestinationUpstreamOverridePatch | null;
+}
+/**
+ * Full replacement of editable configuration on one HTTP destination.
+ * Keys remain account-owned and are never accepted by this route.
+ */
+export interface DestinationPatchRequest {
+  authScheme: AuthSchemeDto;
+  /**
+   * Explicit consent to add safe grants for the destination's current
+   * endpoints to these existing credentials.
+   */
+  authorizeCredentialIds?: string[];
+  enabled?: boolean | null;
+  endpointUrl: string;
+  expectedRevision: number;
+  models: DestinationModelPatch[];
+  name: string;
+  processGeneration: number;
+  protocolRoutes?: HttpProtocolRouteDto[] | null;
+  upstreamProtocol: ProtocolDto;
+}
+export interface DestinationPatchResult {
+  /**
+   * Complete secret-free credential projection after the mutation. A
+   * destination edit can reset verification, auth/cooldowns, and grants on
+   * more than one Key, so returning only the destination row is stale by
+   * construction.
+   */
+  credentials: DestinationCredentialDto[];
+  destination: DestinationDto;
+  revision: ControlRevision;
+}
+/**
+ * RFC credential projection row. Carries `hasSecret` only; never ciphertext or plaintext.
+ */
+export interface DestinationCredentialDto {
+  authState: AuthState;
+  cooldowns: CredentialCooldownsDto;
+  /**
+   * Destination this credential routes through.
+   */
+  destinationId: string;
+  /**
+   * Routing enable switch (`account.enabled && binding.enabled`).
+   */
+  enabled: boolean;
+  grants: CredentialGrantsDto;
+  /**
+   * Whether a secret is stored. Always false for keyless Zen and CPA.
+   */
+  hasSecret: boolean;
+  /**
+   * Stable credential id (deterministic UUIDv5 of the legacy account).
+   */
+  id: string;
+  /**
+   * Last error string from the legacy account row, or null.
+   */
+  lastError: string | null;
+  /**
+   * The V3 `accounts` row this credential was projected from (migration-era
+   * bridge to the V3 mutation routes).
+   */
+  legacyAccountId: string;
+  /**
+   * Display name.
+   */
+  name: string;
+  /**
+   * Operator notes.
+   */
+  notes: string | null;
+  onboardingTask: DestinationOnboardingTaskDto | null;
+  /**
+   * Purchase date when the destination has a Plan.
+   */
+  purchaseDate: string | null;
+  /**
+   * Shared quota pool id when the credential joined one.
+   */
+  quotaPoolId: string | null;
+  /**
+   * Confirmed per-Key exhaustion/recovery. Omitted or null means no confirmed exhaustion.
+   */
+  quotaRecovery?: QuotaRecoveryDto | null;
+  /**
+   * Position in the persisted account order.
+   */
+  routingRank: number;
+  scope: ModelScope;
+}
+/**
+ * Per-window cooldown timestamps on a projected credential.
+ */
+export interface CredentialCooldownsDto {
+  /**
+   * Five-hour window cooldown expiry as RFC 3339, or null.
+   */
+  fiveHourUntil: string | null;
+  /**
+   * Free-window cooldown expiry as RFC 3339, or null.
+   */
+  freeUntil: string | null;
+  /**
+   * Generic cooldown expiry as RFC 3339, or null.
+   */
+  genericUntil: string | null;
+  /**
+   * Monthly window cooldown expiry as RFC 3339, or null.
+   */
+  monthUntil: string | null;
+  /**
+   * Weekly window cooldown expiry as RFC 3339, or null.
+   */
+  weekUntil: string | null;
+}
+/**
+ * Allowed egress grants on a projected credential.
+ */
+export interface CredentialGrantsDto {
+  /**
+   * Endpoint ids this secret may be sent to.
+   */
+  allowedEndpointIds: string[];
+  /**
+   * Origins this secret may be sent to.
+   */
+  allowedOrigins: string[];
+}
+/**
+ * Managed-signup task on a projected credential. Domain shape; no task id.
+ */
+export interface DestinationOnboardingTaskDto {
+  kind: OnboardingTaskKind;
+  state: OnboardingTaskState;
+  /**
+   * Current setup step string.
+   */
+  step: string;
+}
+/**
+ * Optional per-Key quota recovery overlay. Status is presentation-only.
+ */
+export interface QuotaRecoveryDto {
+  failureCount: number;
+  nextRetryAt: string;
+  observedAt: string;
+  reason: QuotaRecoveryReason;
+  resetsAt: string | null;
+  status: QuotaRecoveryStatus;
+  window: QuotaRecoveryWindow;
+}
+export interface DestinationCatalogRefreshResult {
+  addedCount: number;
+  destination: DestinationDto;
+  revision: ControlRevision;
+  truncated: boolean;
+}
+/**
+ * Required process-scoped mutation precondition.
+ *
+ * Both fields travel at the top level of every mutation request. The random
+ * process generation prevents a revision captured before restart from being
+ * accepted by a fresh process whose in-memory counter reused the same value.
+ */
+export interface DestinationCatalogUpdate {
+  expectedRevision: number;
+  processGeneration: number;
+  removeModels?: string[];
+  updates: DestinationCatalogModelUpdate[];
+}
+export interface DestinationCatalogModelUpdate {
+  enabled?: boolean | null;
+  preferred?: ProtocolDto | null;
+  protocols?: ProtocolDto[] | null;
+  publicModel: string;
+}
+/**
+ * Required process-scoped mutation precondition.
+ *
+ * Both fields travel at the top level of every mutation request. The random
+ * process generation prevents a revision captured before restart from being
+ * accepted by a fresh process whose in-memory counter reused the same value.
+ */
+export interface DestinationModelTestRequest {
+  expectedRevision: number;
+  processGeneration: number;
+  protocol: ProtocolDto;
+  publicModel: string;
+}
+export interface DestinationModelTestResult {
+  error: string | null;
+  ok: boolean;
+  protocol: ProtocolDto;
+  publicModel: string;
+  revision: ControlRevision;
+}
+export interface DestinationDeleteResult {
+  revision: ControlRevision;
+}
+/**
+ * POST `/credentials/{id}/quota-retry` result.
+ */
+export interface QuotaRetryResult {
+  credential: DestinationCredentialDto;
+  revision: ControlRevision;
+}
+/**
+ * RFC credential list. Revision-tagged and secret-free.
+ */
+export interface CredentialList {
+  credentials: DestinationCredentialDto[];
+  revision: ControlRevision;
+}
+export interface RoutingCard {
+  credentialIds: string[];
+  destinationId: string;
+  id: string;
+}
+/**
+ * One consistent, secret-free snapshot of cards and the resources they show.
+ */
+export interface RoutingCardList {
+  cards: RoutingCard[];
+  credentials: DestinationCredentialDto[];
+  destinations: DestinationDto[];
+  revision: ControlRevision;
+}
+/**
+ * The flattened card and row sequence is the complete routing priority order.
+ */
+export interface RoutingCardUpdate {
+  cards: RoutingCard[];
+  expectedRevision: number;
+  processGeneration: number;
+}
+/**
+ * 409 envelope when `destination_projection` refuses. Same V3 fields plus `details`.
+ */
+export interface DestinationProjectionRefusedError {
+  /**
+   * Stable error code (`destinationProjectionRefused`).
+   */
+  code: string;
+  /**
+   * Live settings revision.
+   */
+  currentRevision: number | null;
+  details: DestinationProjectionRefusalDto[];
+  /**
+   * Human-readable summary.
+   */
+  message: string;
+  /**
+   * Live process generation.
+   */
+  processGeneration: number | null;
+}
+/**
+ * One refused row in a `destinationProjectionRefused` 409.
+ */
+export interface DestinationProjectionRefusalDto {
+  /**
+   * Human-readable mapping error.
+   */
+  detail: string;
+  error: MappingErrorCodeDto;
+  row: RefusedRowDto;
+}
+/**
+ * Identity of one legacy row the stage-4a projection refused.
+ */
+export interface RefusedRowDto {
+  /**
+   * Persisted row id.
+   */
+  id: string;
+  kind: RefusedRowKindDto;
+  /**
+   * Provider id when the refused row is an account.
+   */
+  providerId: string | null;
+}
 export interface OfficialPriceRow {
   cacheReadPerMillion: number | null;
   currency: string;
@@ -593,6 +1316,7 @@ export interface OfficialApiStatus {
   balanceAvailable: boolean;
   balances: OfficialBalance[];
   kind: OfficialApiKind;
+  lifetimeSpend: OfficialSpend[];
   monthSpend: OfficialSpend[];
   monthStartedAt: string;
   prices: OfficialPriceSheet;
@@ -606,4 +1330,201 @@ export interface OfficialApiPrices {
   processGeneration: number;
   providerId: string;
   revision: number;
+}
+export interface BillingStatus {
+  accountId: string;
+  cash: OfficialApiStatus | null;
+  configurableCredits: boolean;
+  credits: CreditMeterView | null;
+  manualCalibration: boolean;
+  model: BillingModel;
+  officialRefresh: boolean;
+  presets: CreditPreset[];
+  processGeneration: number;
+  revision: number;
+  source: BillingSource;
+  unit: string;
+  usage: ProviderUsage | null;
+}
+export interface CreditMeterView {
+  activeGranted: number;
+  buckets: CreditBucket[];
+  configuration: CreditConfiguration;
+  credentialId: string;
+  estimatedAt: string;
+  lastCalibrationAt: string | null;
+  meterId: string;
+  /**
+   * Next actual renewal; configuration.next_reset_at remains the calendar anchor.
+   */
+  nextResetAt: string | null;
+  overdrawn: number;
+  pendingRequests: number;
+  remaining: number;
+  spentSinceCalibration: number;
+  unpricedRequests: number;
+}
+export interface CreditBucket {
+  expiresAt: string | null;
+  granted: number;
+  id: string;
+  kind: CreditBucketKind;
+  label: string;
+  remaining: number;
+  startsAt: string;
+}
+/**
+ * GET `/accounts/{id}/provider-usage` body. Distinct from stored quota rows.
+ *
+ * `pricingRevision` is present when live Go quota windows use one captured
+ * pricing snapshot.
+ */
+export interface ProviderUsage {
+  accountId: string;
+  availability: UsageAvailability;
+  creditBalances: CreditBalance[];
+  experimental: boolean;
+  freeCooldownUntil: string | null;
+  pricingRevision: string | null;
+  processGeneration: number;
+  providerId: string;
+  quotaWindows: QuotaWindow[];
+  revision: number;
+  syncState: UsageSyncState | null;
+}
+/**
+ * One credit balance row as projected for provider usage. Distinct from the
+ * stored provider credit row.
+ */
+export interface CreditBalance {
+  accountId: string;
+  amount: number;
+  balanceKind: string;
+  observedAt: string | null;
+  source: string;
+  unit: string;
+  updatedAt: string;
+}
+/**
+ * One live or synthetic quota window. Distinct from `models::QuotaWindow`.
+ */
+export interface QuotaWindow {
+  accountId: string;
+  calibrationOffset: number;
+  limitValue: number | null;
+  observedAt: string | null;
+  resetsAt: string | null;
+  source: string;
+  startedAt: string | null;
+  unit: string;
+  updatedAt: string;
+  used: number;
+  windowKind: string;
+}
+/**
+ * Official-usage sync metadata as projected for provider usage. Distinct from
+ * the stored `provider_usage_sync_state` row.
+ */
+export interface UsageSyncState {
+  accountId: string;
+  failureStreak: number;
+  lastAttemptAt: string | null;
+  lastExpeditedAt: string | null;
+  lastSuccessAt: string | null;
+  nextEligibleAt: string | null;
+}
+/**
+ * Required process-scoped mutation precondition.
+ *
+ * Both fields travel at the top level of every mutation request. The random
+ * process generation prevents a revision captured before restart from being
+ * accepted by a fresh process whose in-memory counter reused the same value.
+ */
+export interface CreditConfigureRequest {
+  configuration: CreditConfiguration;
+  expectedRevision: number;
+  /**
+   * Required for initial setup; omitted for a rate/settings edit so balances survive.
+   */
+  initialBuckets?: CreditBucket[] | null;
+  processGeneration: number;
+}
+export interface CreditBalanceCorrection {
+  bucketId: string;
+  remaining: number;
+}
+/**
+ * Required process-scoped mutation precondition.
+ *
+ * Both fields travel at the top level of every mutation request. The random
+ * process generation prevents a revision captured before restart from being
+ * accepted by a fresh process whose in-memory counter reused the same value.
+ */
+export interface CreditCalibrationRequest {
+  balances: CreditBalanceCorrection[];
+  expectedRevision: number;
+  processGeneration: number;
+}
+/**
+ * Required process-scoped mutation precondition.
+ *
+ * Both fields travel at the top level of every mutation request. The random
+ * process generation prevents a revision captured before restart from being
+ * accepted by a fresh process whose in-memory counter reused the same value.
+ */
+export interface CreditGrantRequest {
+  amount: number;
+  expectedRevision: number;
+  expiresAt?: string | null;
+  label: string;
+  processGeneration: number;
+}
+export interface RoutingResolvedMapping {
+  providerId: string;
+  routeable: boolean;
+  upstreamModel: string;
+}
+export interface RoutingResolvedModel {
+  alias: string | null;
+  kind: RoutingResolvedKind;
+  mappings: RoutingResolvedMapping[];
+}
+export interface RoutingEligibleCandidate {
+  accountId: string;
+  accountName: string;
+  adapterKind: string;
+  channel: RoutingChannel;
+  destinationId: string | null;
+  destinationName: string | null;
+  providerId: string;
+  resolvedModel: string;
+  routingRank: number;
+  upstreamProtocol: RoutingClientProtocol;
+}
+export interface RoutingExclusion {
+  accountId: string | null;
+  code: RoutingExclusionCode;
+  detail: string;
+  providerId: string | null;
+  upstreamModel: string | null;
+}
+/**
+ * Read-only routing prediction for `GET /routing/explain`.
+ *
+ * This is not a send guarantee. `runtimeOnlyUncertainty` names the live
+ * steps this snapshot does not execute.
+ */
+export interface RoutingExplanation {
+  clientProtocol: RoutingClientProtocol;
+  conversationBinding: RoutingConversationBinding;
+  conversationSticky: boolean;
+  eligible: RoutingEligibleCandidate[];
+  exclusions: RoutingExclusion[];
+  expectedBasePolicyFirstPick: RoutingEligibleCandidate | null;
+  observedAt: string;
+  requestedModel: string;
+  resolved: RoutingResolvedModel;
+  revision: ControlRevision;
+  routingMode: RoutingMode;
+  runtimeOnlyUncertainty: RuntimeOnlyUncertainty[];
 }

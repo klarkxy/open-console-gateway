@@ -6,7 +6,7 @@
 
 ## CPA
 
-CPA（CLI Proxy API）是本机订阅运行时。Open Console Gateway 可管理其当前稳定支持的 Codex、Claude、Antigravity、Kimi 和 xAI 账号流程，并路由得到的订阅池；但 OAuth 浏览器会话、Token、auth 文件和内部调度始终由 CPA 持有。OCG 只保存本地连接配置、两把 CPA 凭据和本地模型快照。Management Key 在 OCG 存储中加密，托管子进程只通过 `MANAGEMENT_PASSWORD` 接收它。CPA 自身的配置必须包含客户端 `api-keys`，因此受保护的 Inference Key 和直连客户端 Key 必然出现在 OCG 数据目录下的 CPA 本地配置中。创建客户端 Key 时，V3 仍只返回一次明文；列表只显示指纹。
+CPA（CLI Proxy API）是本机订阅运行时。Open Console Gateway 可管理其当前稳定支持的 Codex、Claude、Antigravity、Kimi 和 xAI 账号流程，并路由得到的订阅池；但 OAuth 浏览器会话、Token、auth 文件和内部调度始终由 CPA 持有。OCG 只保存本地连接配置、两把 CPA 凭据和本地模型快照。Management Key 在 OCG 存储中加密，托管子进程只通过 `MANAGEMENT_PASSWORD` 接收它。CPA 自身的配置必须包含客户端 `api-keys`，因此受保护的 Inference Key 和直连客户端 Key 必然出现在 OCG 数据目录下的 CPA 本地配置中。创建客户端 Key 时，V3 只返回一次明文；列表只显示指纹。
 
 只支持以下本机部署：
 
@@ -19,9 +19,9 @@ CPA（CLI Proxy API）是本机订阅运行时。Open Console Gateway 可管理�
 ### 连接与运维
 
 1. 在 Windows x64、macOS 或 Linux x64 上（桌面版或 CLI），从 **扩展 → CPA** 安装或启动托管 CPA 运行时；也可以自行在回环上安装并启动 CPA，再保存其 **Management Key** 与 **Inference Key**。托管运行时由 OCG 生成这两把 Key；额外的直连客户端 Key 放在 **概览**，只显示指纹，新生成的密钥只返回一次。OCG 保护的 Inference Key 不能删除。Management Key 不会写入 CPA 的 `config.yaml`；Inference Key 与直连客户端 Key 会写入，因为 CPA 要求该文件包含 `api-keys`。
-2. 打开 **扩展 → CPA**，在连接外部 CPA 时保存本地地址和两把 Key，再运行连接检测。它分别显示可达性、受支持的 CPA 版本、Management 鉴权和 Inference 鉴权。OCG 要求 CPA 7.1.0 或更高版本；更高 major 仍继续接受相同的 typed 响应与精确账号校验，不会只因版本号被拒绝。
+2. 打开 **扩展 → CPA**，在连接外部 CPA 时保存本地地址和两把 Key，再运行连接检测。它分别显示可达性、受支持的 CPA 版本、Management 鉴权和 Inference 鉴权。OCG 要求 CPA 7.1.0 或更高版本；更高 major 继续通过相同的 typed 响应与精确账号校验。
 3. 全新托管安装可以在模型目录为空时正常启动；这表示 CPA 与本机鉴权正常，并不意味着已有可路由模型。在 CPA 账号表中发起 OAuth。浏览器回调类 provider 使用 CPA 自己的回环回调端口；Kimi 与 xAI 使用设备码流程。OCG 不会运行 OAuth 回调服务器，刷新页面或重启后也不会恢复旧流程。
-4. 打开 **模型目录** 并刷新。该页签按 CPA 报告的来源（`owned_by`）把已保存快照排成可选中的卡片；高亮的卡片加入路由，未选中的 ID 仍保存在快照里但不发布。首次刷新，以及之后新出现的模型，默认不加入路由，需要你再点选。在此选择标记出现之前保存的目录会继续路由全部 ID，直到你改选。全新安装的目录可以为空；OAuth 账号就绪后再刷新。然后启用 CPA 订阅池。Accounts 页中的 **CPA 订阅池** 单例卡可像其他路由候选一样排序、启停，但不会暴露 Key、不能删除，也不会把 CPA 内部 OAuth 账号伪装成 OCG 账号。托管运行时的额外直连客户端 Key 放在 **概览**，不再单独占一个页签；日常使用走 OCG 的接入 Key。
+4. 打开 **模型目录** 并刷新。该页签按 CPA 报告的来源（`owned_by`）把已保存快照排成可选中的卡片；高亮的卡片加入路由，未选中的 ID 仍保存在快照里但不发布。首次刷新，以及之后新出现的模型，默认不加入路由，需要你再点选。没有保存选择标记的目录会继续路由全部 ID，直到你改选。全新安装的目录可以为空；OAuth 账号就绪后再刷新。然后启用 CPA 订阅池。Accounts 页中的 **CPA 订阅池** 单例卡可像其他路由候选一样排序、启停，但不会暴露 Key、不能删除，也不会把 CPA 内部 OAuth 账号伪装成 OCG 账号。卡片会显示托管运行时是运行中、已停止、未安装还是处于安装/启动过程；外部连接只标为外部连接。运行中或外部连接不置灰；托管进程已停止、未安装或失败时置灰。托管运行时的额外直连客户端 Key 放在 **概览**；日常使用走 OCG 的接入 Key。
 
 停用订阅池只会移出路由，不会忘记 CPA 配置。经确认的 **断开并清除** 会删除 OCG 保存的 CPA 配置、订阅池卡和本地模型快照；不会删除 CPA 自己的 OAuth 文件。CPA 故障只会让当前路由跳过该候选，其他合格 OCG 账号仍可继续被选择。
 
@@ -31,7 +31,7 @@ CPA（CLI Proxy API）是本机订阅运行时。Open Console Gateway 可管理�
 
 Codex 提供**浏览器登录**和**设备码登录**。设备码登录需要已安装并运行的 OCG 托管 CPA，且该版本支持 `--codex-device-login`（已核对 CPA 7.2.152）。打开授权页面并输入页面显示的设备码；ChatGPT 账号的安全设置或工作区须允许设备码登录。
 
-设备码通道不监听 1455，因此可以避开 Windows 保留该端口的问题。OCG 启动独立的受控 CPA 登录子进程，令牌兑换和凭据保存仍由 CPA 完成，不中断现有网关。取消、约 15 分钟后过期、OCG 退出或托管运行时生命周期操作都会停止登录子进程；取消不会删除 CPA 已经保存的凭据。外部 CPA 仍使用浏览器登录：当前 CPA 版本没有 Codex 设备码登录管理 API。
+设备码通道不监听 1455，因此可以避开 Windows 保留该端口的问题。OCG 启动独立的受控 CPA 登录子进程，令牌兑换和凭据保存仍由 CPA 完成，不中断现有网关。取消、约 15 分钟后过期、OCG 退出或托管运行时生命周期操作都会停止登录子进程；取消不会删除 CPA 已经保存的凭据。外部 CPA 使用浏览器登录：当前 CPA 版本没有 Codex 设备码登录管理 API。
 
 ### 从本机 CLI 导入登录态
 

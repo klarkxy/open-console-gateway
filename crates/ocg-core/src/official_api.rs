@@ -13,6 +13,7 @@ use crate::dynamic::DynamicProviderRuntime;
 use crate::models::Account;
 use crate::provider::UpstreamProtocolKind;
 use chrono::{DateTime, Datelike, Timelike, Utc, Weekday};
+use ocg_domain::billing::{BillingTokens, TokenRates, token_charge};
 use ocg_domain::dynamic::DynamicAuthKind;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -160,6 +161,7 @@ pub struct OfficialApiStatus {
     pub prices: OfficialPriceSheet,
     pub month_started_at: DateTime<Utc>,
     pub month_spend: Vec<OfficialSpend>,
+    pub lifetime_spend: Vec<OfficialSpend>,
     pub unpriced_requests: u64,
     pub revision: u64,
     pub process_generation: u64,
@@ -206,14 +208,11 @@ pub(crate) struct OfficialAttemptPrice {
 
 impl OfficialAttemptPrice {
     pub fn amount(&self, prompt: i64, output: i64, cached: i64, created: i64) -> Option<f64> {
-        if self.at < self.sheet.observed_at
-            || self.at >= self.sheet.valid_until
-            || created != 0
-            || prompt < 0
-            || output < 0
-            || cached < 0
-            || cached > prompt
-        {
+        if self.at < self.sheet.observed_at || self.at >= self.sheet.valid_until || created != 0 {
+            return None;
+        }
+        let tokens = BillingTokens::new(prompt, output, cached, 0);
+        if !tokens.valid() {
             return None;
         }
         let period = if peak_at(self.at) { "peak" } else { "off_peak" };
@@ -225,16 +224,15 @@ impl OfficialAttemptPrice {
         if rows.next().is_some() || row.currency != self.sheet.kind.currency() {
             return None;
         }
-        let cache_rate = if cached == 0 {
-            0.0
-        } else {
-            row.cache_read_per_million?
-        };
-        let value = ((prompt - cached) as f64 * row.input_per_million
-            + output as f64 * row.output_per_million
-            + cached as f64 * cache_rate)
-            / 1_000_000.0;
-        (value.is_finite() && value >= 0.0).then_some(value)
+        token_charge(
+            tokens,
+            TokenRates::per_million(
+                row.input_per_million,
+                row.output_per_million,
+                row.cache_read_per_million,
+                None,
+            ),
+        )
     }
 }
 

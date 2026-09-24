@@ -37,6 +37,7 @@ export type {
 };
 
 export interface ConnectionEndpoint {
+  official_balance?: boolean;
   id: string;
   connection_id: string;
   auth_scheme: EndpointAuthScheme;
@@ -71,6 +72,7 @@ export interface ConnectionTemplateRef {
 }
 
 export interface Connection {
+  credential_create?: import("./generated/dashboard-v4.ts").CredentialCreateCapabilityDto;
   id: string;
   name: string;
   origin: ConnectionOrigin;
@@ -87,6 +89,7 @@ export interface Connection {
   legacy: LegacyIdentity;
   display_family: string | null;
   offering: OfferingKind;
+  credit_presets?: import("./billing.ts").CreditPreset[] | null;
 }
 
 export interface OnboardingCommitView {
@@ -106,6 +109,7 @@ function presentEndpoint(value: V4ConnectionEndpoint): ConnectionEndpoint {
   return {
     id: value.id,
     connection_id: value.connectionId,
+    official_balance: value.officialBalance,
     auth_scheme: value.authScheme,
     locked: value.locked,
     operation: value.operation,
@@ -136,6 +140,7 @@ function presentTemplateRef(value: TemplateRef | null): ConnectionTemplateRef | 
 
 export function presentConnection(value: ConnectionSummary): Connection {
   return {
+    credential_create: value.credentialCreate,
     id: value.id,
     name: value.name,
     origin: value.origin,
@@ -155,6 +160,7 @@ export function presentConnection(value: ConnectionSummary): Connection {
     legacy: presentLegacy(value.legacy),
     display_family: value.displayFamily,
     offering: value.offering,
+    credit_presets: value.creditPresets ?? null,
   };
 }
 

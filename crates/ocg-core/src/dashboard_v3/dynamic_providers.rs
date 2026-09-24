@@ -280,7 +280,6 @@ fn update_locked(
             "no-auth provider requires a singleton account",
         ));
     }
-    let changing_to_none = !existing.auth_kind.is_singleton() && auth_kind.is_singleton();
     let changing_from_none = existing.auth_kind.is_singleton() && !auth_kind.is_singleton();
     let supplied_key = input
         .key
@@ -300,23 +299,21 @@ fn update_locked(
     };
     let now = Utc::now();
     let runtime = runtime_from_definition(definition, existing.created_at, now);
-    let substantive = existing.endpoint_url != runtime.endpoint_url
-        || existing.upstream_protocol != runtime.upstream_protocol
-        || existing.auth_kind != runtime.auth_kind
-        || existing.mappings != runtime.mappings;
-    let snapshot = {
-        let db = state.db.lock();
-        db.replace_dynamic_provider(
-            &runtime,
-            substantive,
-            changing_to_none,
-            replacement_key.as_deref(),
-        )
-        .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?
-    };
+    let destination_id = ocg_domain::destination::destination_id_for_dynamic(&existing.id);
     state
-        .install_dynamic_providers_snapshot(snapshot)
-        .map_err(V3ApiError::internal)?;
+        .commit_configuration_update(|db| {
+            crate::db::destination_commands::replace_http_destination_on(
+                db,
+                &destination_id,
+                &runtime.definition(),
+                &[],
+            )?;
+            if let Some(cipher) = replacement_key.as_deref() {
+                db.replace_destination_singleton_key_on(&destination_id, cipher)?;
+            }
+            Ok(())
+        })
+        .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?;
     Ok(provider_mutation(state, runtime, state.settings_revision()))
 }
 
@@ -328,14 +325,12 @@ fn delete_locked(
     let _settings_update = state.settings_update.lock();
     check_expectation(state, expectation)?;
     reject_builtin_id(state, provider_id)?;
-    let snapshot = {
-        let db = state.db.lock();
-        db.delete_dynamic_provider(provider_id)
-            .map_err(|error| map_delete_error(state, error))?
-    };
+    let destination_id = ocg_domain::destination::destination_id_for_dynamic(provider_id);
     state
-        .install_dynamic_providers_snapshot(snapshot)
-        .map_err(V3ApiError::internal)?;
+        .commit_configuration_update(|db| {
+            crate::db::destination_commands::delete_http_destination_on(db, &destination_id)
+        })
+        .map_err(|error| map_delete_error(state, error))?;
     Ok(MutationAck {
         revision: state.settings_revision(),
         process_generation: state.process_generation(),

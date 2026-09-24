@@ -14,6 +14,13 @@ pub mod alias;
 #[doc(hidden)]
 pub mod attempt;
 
+/// Strict per-Key quota exhaustion recognition. Side effects stay in the host.
+///
+/// Public only as the cross-crate bridge; the host crate's quota-recovery
+/// facade keeps these items crate-private.
+#[doc(hidden)]
+pub mod quota;
+
 /// Pure attempt-adjacent provider/transport error classification policy.
 ///
 /// Public only as the cross-crate bridge; the host crate's `gateway::classify`

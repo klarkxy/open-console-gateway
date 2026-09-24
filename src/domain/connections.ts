@@ -34,15 +34,6 @@ export interface ConnectionStatus {
   label: ConnectionStatusLabel | null;
 }
 
-export function groupConnectionsByOffering(
-  connections: readonly Connection[],
-): { plan: Connection[]; api: Connection[] } {
-  return {
-    plan: connections.filter((connection) => connection.offering === "plan"),
-    api: connections.filter((connection) => connection.offering !== "plan"),
-  };
-}
-
 export function filterConnections(
   connections: readonly Connection[],
   query: string,

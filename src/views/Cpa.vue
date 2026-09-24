@@ -1,6 +1,6 @@
 <template>
   <div class="cpa-page">
-    <n-alert v-if="loadError" type="error" :title="t('加载 CPA 失败: {error}', { error: loadError })">
+    <n-alert v-if="loadError" type="error" :title="t('加载 CPA 失败：{error}', { error: loadError })">
       <n-button size="small" secondary :loading="loading" @click="load">{{ t("重试") }}</n-button>
     </n-alert>
 
@@ -27,7 +27,7 @@
           >{{ t("托管安装") }}</n-button>
         </n-space>
 
-        <n-alert v-if="runtimeError" type="error" :title="t('加载 CPA 运行时失败: {error}', { error: runtimeError })">
+        <n-alert v-if="runtimeError" type="error" :title="t('加载 CPA 运行时失败：{error}', { error: runtimeError })">
           <n-button size="small" secondary :loading="loading" @click="load">{{ t("重试") }}</n-button>
         </n-alert>
 
@@ -103,7 +103,7 @@
 
         <template v-else>
           <n-alert v-if="mode === 'unsupported'" type="warning" :title="t('当前环境不支持托管 CPA 运行时')">
-            {{ integration.runtimeUnavailableReason || runtime?.unavailableReason || t("当前平台没有官方 CLIProxyAPI 构建（支持 Windows x64、macOS、Linux x64）；请改用外部连接。") }}
+            {{ integration.runtimeUnavailableReason || runtime?.unavailableReason || t("当前平台无官方 CLIProxyAPI 构建（支持 Windows x64、macOS、Linux x64），改用外部连接。") }}
           </n-alert>
 
           <template v-else>
@@ -139,7 +139,7 @@
                 <span v-if="runtime.phase === 'failed' && runtime.error" class="cpa-status-detail">{{ runtime.error }}</span>
               </div>
 
-              <n-alert v-if="runtimePollError" type="error" :title="t('CPA 运行时状态刷新失败: {error}', { error: runtimePollError })">
+              <n-alert v-if="runtimePollError" type="error" :title="t('CPA 运行时状态刷新失败：{error}', { error: runtimePollError })">
                 <n-button size="small" secondary @click="retryRuntimePoll">{{ t("重试") }}</n-button>
               </n-alert>
 
@@ -207,12 +207,12 @@
             </n-space>
           </template>
           <n-alert v-if="revealedSecret" type="success" class="cpa-secret" :title="t('新 Key 仅显示这一次')">
-            <p>{{ t("请立即复制并妥善保存；关闭后将无法再次查看。") }}</p>
+            <p>{{ t("立即复制并妥善保存；关闭后无法再次查看。") }}</p>
             <div class="cpa-secret-row">
               <code class="mono cpa-secret-value">{{ revealedSecret.secret }}</code>
               <n-space wrap>
                 <n-button size="small" @click="copyRevealedSecret">
-                  {{ copiedTarget === "cpa-runtime-secret" ? t("已复制 Key") : t("复制 Key") }}
+                  {{ copiedTarget === "cpa-runtime-secret" ? t("Key 已复制") : t("复制 Key") }}
                 </n-button>
                 <n-button size="small" secondary @click="dismissRevealedSecret">{{ t("我已保存，关闭") }}</n-button>
               </n-space>
@@ -220,60 +220,27 @@
           </n-alert>
 
           <div v-if="keysLoading" class="cpa-state"><n-spin size="small" /></div>
-          <n-alert v-else-if="keysError" type="error" :title="t('加载客户端 Key 失败: {error}', { error: keysError })">
+          <n-alert v-else-if="keysError" type="error" :title="t('加载客户端 Key 失败：{error}', { error: keysError })">
             <n-button size="small" secondary @click="loadRuntimeKeys">{{ t("重试") }}</n-button>
           </n-alert>
           <template v-else>
             <div v-if="runtimeKeys.length" class="cpa-key-list">
-              <article v-for="key in keyPartition.protectedKeys" :key="key.fingerprint" class="cpa-key-row">
-                <div class="cpa-account-main">
-                  <div class="cpa-account-title">
-                    <strong class="mono">{{ key.hint }}</strong>
-                    <n-tag type="info" size="small">{{ t("OCG 路由 Key") }}</n-tag>
-                  </div>
-                  <n-tooltip trigger="hover">
-                    <template #trigger>
-                      <span class="cpa-muted">{{ t("指纹") }} · {{ key.fingerprint.slice(0, 12) }}…</span>
-                    </template>
-                    {{ key.fingerprint }}
-                  </n-tooltip>
-                </div>
-                <n-button
-                  size="small"
-                  secondary
-                  :disabled="!!keyAction"
-                  :loading="keyAction === `rotate:${key.fingerprint}`"
-                  @click="rotateClientKey(key)"
-                >{{ t("轮换 OCG 路由 Key") }}</n-button>
-              </article>
-              <article v-for="key in keyPartition.directKeys" :key="key.fingerprint" class="cpa-key-row">
-                <div class="cpa-account-main">
-                  <strong class="mono">{{ key.hint }}</strong>
-                  <n-tooltip trigger="hover">
-                    <template #trigger>
-                      <span class="cpa-muted">{{ t("指纹") }} · {{ key.fingerprint.slice(0, 12) }}…</span>
-                    </template>
-                    {{ key.fingerprint }}
-                  </n-tooltip>
-                </div>
-                <n-space wrap>
-                  <n-button
-                    size="small"
-                    secondary
-                    :disabled="!!keyAction"
-                    :loading="keyAction === `rotate:${key.fingerprint}`"
-                    @click="rotateClientKey(key)"
-                  >{{ t("轮换 Key") }}</n-button>
-                  <n-button
-                    size="small"
-                    type="error"
-                    secondary
-                    :disabled="!!keyAction"
-                    :loading="keyAction === `delete:${key.fingerprint}`"
-                    @click="confirmDeleteClientKey(key)"
-                  >{{ t("删除") }}</n-button>
-                </n-space>
-              </article>
+              <CpaKeyRow
+                v-for="key in keyPartition.protectedKeys"
+                :key="key.fingerprint"
+                :runtime-key="key"
+                :key-action="keyAction"
+                @rotate="rotateClientKey"
+                @delete="confirmDeleteClientKey"
+              />
+              <CpaKeyRow
+                v-for="key in keyPartition.directKeys"
+                :key="key.fingerprint"
+                :runtime-key="key"
+                :key-action="keyAction"
+                @rotate="rotateClientKey"
+                @delete="confirmDeleteClientKey"
+              />
             </div>
             <n-empty v-else :description="t('暂无客户端 Key')" />
           </template>
@@ -313,7 +280,7 @@
             </template>
           </n-space>
           <p v-if="!codexDeviceLoginAvailable" class="cpa-help">
-            {{ t("设备码登录需要托管 CPA 运行中；外部连接请使用浏览器登录。") }}
+            {{ t("设备码登录需要托管 CPA 运行；外部连接使用浏览器登录。") }}
           </p>
           <n-alert v-if="codexBrowserFailure" type="warning" class="cpa-oauth-status" :title="t('Codex 浏览器登录失败')">
             <p>{{ codexBrowserFailure }}</p>
@@ -326,11 +293,11 @@
                 @click="startOAuth('codex', 'device')"
               >{{ t("改用设备码登录") }}</n-button>
             </template>
-            <p v-else>{{ t("设备码登录需要托管 CPA 运行中。") }}</p>
+            <p v-else>{{ t("设备码登录需要托管 CPA 处于运行状态。") }}</p>
           </n-alert>
           <n-alert v-if="oauth" type="info" class="cpa-oauth-status" :show-icon="false">
             <template v-if="oauth.flow === 'device'">
-              <p v-if="oauth.provider === 'codex'">{{ t("打开授权页面并输入下方设备码；请确认 ChatGPT 账号的安全设置或工作区允许设备登录。") }}</p>
+              <p v-if="oauth.provider === 'codex'">{{ t("打开授权页面并输入下方设备码；确认 ChatGPT 账号的安全设置或工作区允许设备登录。") }}</p>
               <p v-else>{{ t("打开授权页面并输入下方设备码完成授权。") }}</p>
               <div v-if="oauth.userCode" class="cpa-device-code-row">
                 <code class="mono cpa-device-code">{{ oauth.userCode }}</code>
@@ -368,7 +335,7 @@
             <p class="cpa-help">
               {{ t("导入时复制到 CPA，源文件不会被修改。") }}
             </p>
-            <n-alert v-if="cliImportsError" type="warning" :title="t('检测本机 CLI 账号失败: {error}', { error: cliImportsError })">
+            <n-alert v-if="cliImportsError" type="warning" :title="t('检测本机 CLI 账号失败：{error}', { error: cliImportsError })">
               <n-button size="small" secondary :loading="cliImportsLoading" @click="loadCliImports">{{ t("重试") }}</n-button>
             </n-alert>
             <div v-else-if="cliImportsLoading && cliImports.length === 0" class="cpa-state"><n-spin size="small" /></div>
@@ -409,7 +376,7 @@
           </div>
 
           <div v-if="accountsLoading" class="cpa-state"><n-spin size="small" /></div>
-          <n-alert v-else-if="accountsError" type="error" :title="t('CPA 账号操作失败: {error}', { error: accountsError })">
+          <n-alert v-else-if="accountsError" type="error" :title="t('CPA 账号操作失败：{error}', { error: accountsError })">
             <n-button size="small" secondary @click="loadAccounts">{{ t("重试") }}</n-button>
           </n-alert>
           <n-empty v-else-if="cpaAccounts.length === 0" :description="t('暂无账号')" />
@@ -479,14 +446,14 @@
             </n-space>
           </div>
           <p v-if="catalogModels.length" class="cpa-help">{{ t("点选加入路由；新发现的默认关闭。") }}</p>
-          <n-alert v-if="!integration.configured" type="info" :title="t('请先在概览中配置并启动 CPA，再刷新模型目录。')">
+          <n-alert v-if="!integration.configured" type="info" :title="t('先在概览中配置并启动 CPA，再刷新模型目录。')">
             <n-button size="small" @click="activeTab = 'overview'">{{ t('返回概览') }}</n-button>
           </n-alert>
           <div v-else-if="catalogLoading" class="cpa-state"><n-spin size="small" /></div>
-          <n-alert v-else-if="catalogError" type="error" :title="t('加载模型目录失败: {error}', { error: catalogError })">
+          <n-alert v-else-if="catalogError" type="error" :title="t('加载模型目录失败：{error}', { error: catalogError })">
             <n-button size="small" secondary @click="loadCatalog">{{ t("重试") }}</n-button>
           </n-alert>
-          <p v-else-if="catalogModels.length === 0" class="cpa-help">{{ t("尚未刷新模型目录；启用路由前请先刷新。") }}</p>
+          <p v-else-if="catalogModels.length === 0" class="cpa-help">{{ t("尚未刷新模型目录；启用路由前需先刷新。") }}</p>
           <div v-else class="cpa-catalog-groups">
             <section v-for="group in catalogGroups" :key="group.source || 'unknown'" class="cpa-catalog-group">
               <h3>{{ group.source || t("未知来源") }} · {{ group.models.length }}</h3>
@@ -522,7 +489,7 @@
             <n-button size="small" @click="activeTab = 'overview'">{{ t('返回概览') }}</n-button>
           </n-alert>
           <div v-else-if="logsLoading" class="cpa-state"><n-spin size="small" /></div>
-          <n-alert v-else-if="logsError" type="error" :title="t('加载 CPA 运行时日志失败: {error}', { error: logsError })">
+          <n-alert v-else-if="logsError" type="error" :title="t('加载 CPA 运行时日志失败：{error}', { error: logsError })">
             <n-button size="small" secondary @click="refreshLogs">{{ t("重试") }}</n-button>
           </n-alert>
           <template v-else-if="logs">
@@ -586,6 +553,7 @@ import { dashboardErrorDetail } from "../utils/errors.ts";
 import { useClipboard } from "../utils/format.ts";
 import {
   CPA_OAUTH_PROVIDERS,
+  CPA_RUNTIME_PHASE_KEYS,
   cpaAccountKey,
   cpaCliImportAlreadyPresent,
   cpaOAuthProviderForCliAccount,
@@ -602,6 +570,7 @@ import {
   isCpaPhaseBusy,
 } from "../domain/cpa-runtime.ts";
 import type { CpaRuntimeModePreference } from "../domain/cpa-runtime.ts";
+import CpaKeyRow from "../components/CpaKeyRow.vue";
 
 const dialog = useDialog();
 const message = useMessage();
@@ -764,14 +733,7 @@ const modelCatalogDetail = computed(() => {
 });
 
 function runtimePhaseLabel(phase: CpaRuntimePhase): string {
-  switch (phase) {
-    case "checking": return t("检查中");
-    case "downloading": return t("下载中");
-    case "installing": return t("安装中");
-    case "starting": return t("启动中");
-    case "failed": return t("失败");
-    default: return t("空闲");
-  }
+  return t(CPA_RUNTIME_PHASE_KEYS[phase]);
 }
 
 function selectMode(next: Exclude<CpaRuntimeModePreference, null>): void {
@@ -854,7 +816,7 @@ async function save(): Promise<void> {
     await loadAccounts();
     await loadCatalog();
   } catch (error) {
-    message.error(t("CPA 配置失败: {error}", { error: dashboardErrorDetail(error) }));
+    message.error(t("CPA 配置失败：{error}", { error: dashboardErrorDetail(error) }));
   } finally {
     saving.value = false;
   }
@@ -870,7 +832,7 @@ async function testConnection(): Promise<void> {
       ...(draft.value.managementKey.trim() ? { managementKey: draft.value.managementKey.trim() } : {}),
     });
   } catch (error) {
-    message.error(t("CPA 连接测试失败: {error}", { error: dashboardErrorDetail(error) }));
+    message.error(t("CPA 连接测试失败：{error}", { error: dashboardErrorDetail(error) }));
   } finally {
     testing.value = false;
   }
@@ -882,7 +844,7 @@ async function setRoutingEnabled(enabled: boolean): Promise<void> {
   try {
     integration.value = await runMutation((expectation) => dashboardV3.putCpaIntegration({ enabled }, expectation));
   } catch (error) {
-    message.error(t("CPA 配置失败: {error}", { error: dashboardErrorDetail(error) }));
+    message.error(t("CPA 配置失败：{error}", { error: dashboardErrorDetail(error) }));
   } finally {
     saving.value = false;
   }
@@ -956,7 +918,7 @@ function persistCatalogSelection(): void {
         if (!isCurrentWrite()) return;
         catalogError.value = dashboardErrorDetail(reloadError);
       }
-      message.error(t("CPA 模型选择失败: {error}", { error: detail }));
+      message.error(t("CPA 模型选择失败：{error}", { error: detail }));
     }
   });
 }
@@ -986,7 +948,7 @@ async function refreshModels(): Promise<void> {
     if (isCurrentCatalogWrite(epoch)) applyCatalog(snapshot);
     message.success(t("模型目录已刷新，共 {count} 个模型", { count: snapshot.models.length }));
   } catch (error) {
-    message.error(t("CPA 模型刷新失败: {error}", { error: dashboardErrorDetail(error) }));
+    message.error(t("CPA 模型刷新失败：{error}", { error: dashboardErrorDetail(error) }));
   } finally {
     refreshingModels.value = false;
   }
@@ -1014,7 +976,7 @@ async function setAccountStatus(account: CpaAccount, disabled: boolean): Promise
     }, expectation));
     await loadAccounts();
   } catch (error) {
-    message.error(t("CPA 账号操作失败: {error}", { error: dashboardErrorDetail(error) }));
+    message.error(t("CPA 账号操作失败：{error}", { error: dashboardErrorDetail(error) }));
   } finally {
     accountAction.value = "";
   }
@@ -1030,7 +992,7 @@ async function resetQuota(account: CpaAccount): Promise<void> {
     }, expectation));
     await loadAccounts();
   } catch (error) {
-    message.error(t("CPA 账号操作失败: {error}", { error: dashboardErrorDetail(error) }));
+    message.error(t("CPA 账号操作失败：{error}", { error: dashboardErrorDetail(error) }));
   } finally {
     accountAction.value = "";
   }
@@ -1059,7 +1021,7 @@ async function deleteAccount(account: CpaAccount): Promise<void> {
       unmarkCliProviderImported(importedProvider);
     }
   } catch (error) {
-    message.error(t("CPA 账号操作失败: {error}", { error: dashboardErrorDetail(error) }));
+    message.error(t("CPA 账号操作失败：{error}", { error: dashboardErrorDetail(error) }));
   } finally {
     accountAction.value = "";
   }
@@ -1092,7 +1054,7 @@ async function startOAuth(provider: CpaOAuthProvider, method: CpaOAuthMethod): P
     // local callback server never came up) gets the same device alternative as
     // a mid-flow failure.
     if (provider === "codex" && method === "browser") codexBrowserFailure.value = detail;
-    message.error(t("CPA 账号操作失败: {error}", { error: detail }));
+    message.error(t("CPA 账号操作失败：{error}", { error: detail }));
   } finally {
     oauthStartingAction.value = null;
   }
@@ -1145,7 +1107,7 @@ async function pollOAuth(): Promise<void> {
     oauth.value = null;
     const detail = dashboardErrorDetail(error);
     if (failed?.provider === "codex" && failed.flow !== "device") codexBrowserFailure.value = detail;
-    message.error(t("CPA 账号操作失败: {error}", { error: detail }));
+    message.error(t("CPA 账号操作失败：{error}", { error: detail }));
   }
 }
 
@@ -1215,7 +1177,7 @@ const cliImportBlockedTip = computed(() => {
   const providers = cliImportBlockedSources.value
     .map((source) => cliImportProviderLabel(source.provider))
     .join("、");
-  return t("{providers} 无法从本机导入，请改用上方登录。", { providers });
+  return t("{providers} 无法从本机导入，改用上方的新登录。", { providers });
 });
 
 function cliImportBlockedText(source: CpaCliImportSource): string {
@@ -1284,7 +1246,7 @@ async function importCliAccount(source: CpaCliImportSource): Promise<void> {
     if (result.outcome === "unconfirmed") {
       cliImportNotice.value = {
         type: "warning",
-        text: t("导入结果未确认：请先刷新账号列表确认是否已导入，再决定是否重试；重复导入会按生成的文件名幂等处理，不会产生重复账号。"),
+        text: t("导入结果未确认：先刷新账号列表确认是否已导入，再决定是否重试；重复导入按生成的文件名幂等处理，不会产生重复账号。"),
       };
     } else {
       // Product copy names the provider, never the hashed implementation file.
@@ -1300,7 +1262,7 @@ async function importCliAccount(source: CpaCliImportSource): Promise<void> {
     }
   } catch (error) {
     if (generation !== cliImportGeneration) return;
-    message.error(t("CPA 账号操作失败: {error}", { error: dashboardErrorDetail(error) }));
+    message.error(t("CPA 账号操作失败：{error}", { error: dashboardErrorDetail(error) }));
   } finally {
     cliImporting.value = null;
   }
@@ -1337,7 +1299,7 @@ async function disconnect(): Promise<void> {
     draft.value = { baseUrl: integration.value.baseUrl, inferenceKey: "", managementKey: "" };
     message.success(t("CPA 已断开"));
   } catch (error) {
-    message.error(t("CPA 配置失败: {error}", { error: dashboardErrorDetail(error) }));
+    message.error(t("CPA 配置失败：{error}", { error: dashboardErrorDetail(error) }));
   } finally {
     disconnecting.value = false;
   }
@@ -1451,7 +1413,7 @@ async function runRuntimeAction(
     }
   } catch (error) {
     if (generation !== runtimePollGeneration) return;
-    message.error(t("CPA 运行时操作失败: {error}", { error: dashboardErrorDetail(error) }));
+    message.error(t("CPA 运行时操作失败：{error}", { error: dashboardErrorDetail(error) }));
   } finally {
     runtimeAction.value = "";
   }
@@ -1483,7 +1445,7 @@ async function checkUpdate(): Promise<void> {
     syncRuntimePolling();
   } catch (error) {
     if (generation !== runtimePollGeneration) return;
-    message.error(t("CPA 运行时操作失败: {error}", { error: dashboardErrorDetail(error) }));
+    message.error(t("CPA 运行时操作失败：{error}", { error: dashboardErrorDetail(error) }));
   } finally {
     runtimeAction.value = "";
   }
@@ -1556,7 +1518,7 @@ async function addClientKey(): Promise<void> {
     revealedSecret.value = { fingerprint: created.fingerprint, hint: created.hint, secret: created.secret };
     await loadRuntimeKeys();
   } catch (error) {
-    message.error(t("客户端 Key 操作失败: {error}", { error: dashboardErrorDetail(error) }));
+    message.error(t("客户端 Key 操作失败：{error}", { error: dashboardErrorDetail(error) }));
   } finally {
     keyAction.value = "";
   }
@@ -1570,7 +1532,7 @@ async function rotateClientKey(key: CpaRuntimeKey): Promise<void> {
     revealedSecret.value = { fingerprint: rotated.fingerprint, hint: rotated.hint, secret: rotated.secret };
     await loadRuntimeKeys();
   } catch (error) {
-    message.error(t("客户端 Key 操作失败: {error}", { error: dashboardErrorDetail(error) }));
+    message.error(t("客户端 Key 操作失败：{error}", { error: dashboardErrorDetail(error) }));
   } finally {
     keyAction.value = "";
   }
@@ -1594,7 +1556,7 @@ async function deleteClientKey(key: CpaRuntimeKey): Promise<void> {
     if (revealedSecret.value?.fingerprint === key.fingerprint) revealedSecret.value = null;
     await loadRuntimeKeys();
   } catch (error) {
-    message.error(t("客户端 Key 操作失败: {error}", { error: dashboardErrorDetail(error) }));
+    message.error(t("客户端 Key 操作失败：{error}", { error: dashboardErrorDetail(error) }));
   } finally {
     keyAction.value = "";
   }
@@ -1604,7 +1566,7 @@ async function copyRevealedSecret(): Promise<void> {
   if (!revealedSecret.value) return;
   try {
     await copy("cpa-runtime-secret", revealedSecret.value.secret, "Key");
-    message.success(t("已复制 Key"));
+    message.success(t("Key 已复制"));
   } catch (error) {
     message.error(error instanceof Error ? error.message : t("复制失败"));
   }
@@ -1644,16 +1606,16 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-.cpa-page { display: grid; gap: 16px; max-width: 1060px; }
+.cpa-page { display: grid; gap: var(--ocg-space-lg); max-width: 1060px; }
 .cpa-help, .cpa-danger p { margin: 6px 0 0; color: var(--ocg-muted); line-height: 1.6; }
-.cpa-section { display: grid; gap: 12px; }
-.cpa-section-title { margin: 8px 0 0; color: var(--ocg-ink); font-size: var(--ocg-font-lg); }
-.cpa-tabs :deep(.n-tabs-nav) { margin-bottom: 12px; }
+.cpa-section { display: grid; gap: var(--ocg-space-md); }
+.cpa-section-title { margin: var(--ocg-space-sm) 0 0; color: var(--ocg-ink); font-size: var(--ocg-font-lg); }
+.cpa-tabs :deep(.n-tabs-nav) { margin-bottom: var(--ocg-space-md); }
 .cpa-card { box-shadow: var(--ocg-shadow-sm); }
-.cpa-status-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+.cpa-status-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: var(--ocg-space-md); }
 .cpa-status-cell { display: grid; gap: 6px; min-width: 0; align-content: start; }
 .cpa-status-detail, .cpa-muted { overflow-wrap: anywhere; color: var(--ocg-muted); font-size: var(--ocg-font-sm); }
-.cpa-phase { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 14px; }
+.cpa-phase { display: flex; flex-wrap: wrap; align-items: center; gap: var(--ocg-space-sm); margin-top: 14px; }
 .cpa-runtime-actions { margin-top: 14px; }
 .cpa-log-title { margin: 0; color: var(--ocg-muted); font-size: var(--ocg-font-sm); font-weight: 600; }
 .cpa-log {
@@ -1661,7 +1623,7 @@ onBeforeUnmount(() => {
   width: 100%;
   max-height: 240px;
   margin: 0;
-  padding: 10px 12px;
+  padding: 10px var(--ocg-space-md);
   overflow: auto;
   border: 1px solid var(--ocg-divider);
   border-radius: 8px;
@@ -1674,19 +1636,19 @@ onBeforeUnmount(() => {
 }
 .cpa-oauth-status { margin-top: 14px; }
 .cpa-oauth-status p { margin-top: 0; }
-.cpa-device-code-row { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin: 10px 0 14px; }
+.cpa-device-code-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--ocg-space-md); margin: 10px 0 14px; }
 .cpa-device-code {
-  padding: 8px 14px;
+  padding: var(--ocg-space-sm) 14px;
   border: 1px solid var(--ocg-divider);
-  border-radius: 6px;
+  border-radius: var(--ocg-radius-sm);
   background: var(--ocg-surface);
   color: var(--ocg-ink);
   font-size: var(--ocg-font-lg);
   letter-spacing: 0.08em;
   overflow-wrap: anywhere;
 }
-.cpa-cli-import { display: grid; gap: 8px; margin-top: 16px; }
-.cpa-cli-import-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 2px; color: var(--ocg-ink); }
+.cpa-cli-import { display: grid; gap: var(--ocg-space-sm); margin-top: var(--ocg-space-lg); }
+.cpa-cli-import-head { display: flex; align-items: center; justify-content: space-between; gap: var(--ocg-space-md); margin-top: 2px; color: var(--ocg-ink); }
 .cpa-cli-import .cpa-help { margin: 0; }
 .cpa-cli-import-tip { width: fit-content; max-width: 100%; }
 .cpa-cli-import-tip-text {
@@ -1694,16 +1656,16 @@ onBeforeUnmount(() => {
   cursor: help;
 }
 .cpa-state { display: grid; justify-content: center; padding: 20px; }
-.cpa-catalog-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
-.cpa-catalog-meta { display: flex; flex-wrap: wrap; gap: 8px 16px; color: var(--ocg-muted); font-size: var(--ocg-font-sm); }
-.cpa-catalog-groups { display: grid; gap: 16px; margin-top: 14px; }
-.cpa-catalog-group h3 { margin: 0 0 8px; color: var(--ocg-muted); font-size: var(--ocg-font-sm); font-weight: 600; }
-.cpa-catalog-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 8px; }
+.cpa-catalog-head { display: flex; align-items: center; justify-content: space-between; gap: var(--ocg-space-lg); }
+.cpa-catalog-meta { display: flex; flex-wrap: wrap; gap: var(--ocg-space-sm) var(--ocg-space-lg); color: var(--ocg-muted); font-size: var(--ocg-font-sm); }
+.cpa-catalog-groups { display: grid; gap: var(--ocg-space-lg); margin-top: 14px; }
+.cpa-catalog-group h3 { margin: 0 0 var(--ocg-space-sm); color: var(--ocg-muted); font-size: var(--ocg-font-sm); font-weight: 600; }
+.cpa-catalog-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: var(--ocg-space-sm); }
 .cpa-catalog-card {
   margin: 0;
-  padding: 8px 10px;
+  padding: var(--ocg-space-sm) 10px;
   border: 1px solid var(--ocg-divider);
-  border-radius: 10px;
+  border-radius: var(--ocg-radius-md);
   background: var(--ocg-surface);
   color: var(--ocg-ink);
   text-align: left;
@@ -1714,24 +1676,24 @@ onBeforeUnmount(() => {
   border-color: var(--ocg-success);
   background: var(--ocg-success-soft);
 }
-.cpa-account-list, .cpa-key-list { display: grid; gap: 8px; margin-top: 14px; }
-.cpa-account-row, .cpa-key-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px; border: 1px solid var(--ocg-divider); border-radius: 10px; }
-.cpa-account-main { display: grid; gap: 4px; min-width: 0; }
+.cpa-account-list, .cpa-key-list { display: grid; gap: var(--ocg-space-sm); margin-top: 14px; }
+.cpa-account-row { display: flex; align-items: center; justify-content: space-between; gap: var(--ocg-space-lg); padding: var(--ocg-space-md); border: 1px solid var(--ocg-divider); border-radius: var(--ocg-radius-md); }
+.cpa-account-main { display: grid; gap: var(--ocg-space-xs); min-width: 0; }
 .cpa-account-title { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--ocg-ink); }
 .cpa-secret { margin-bottom: 14px; }
 .cpa-secret p { margin: 0 0 10px; }
-.cpa-secret-row { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.cpa-secret-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--ocg-space-md); }
 .cpa-secret-value {
   padding: 6px 10px;
   border: 1px solid var(--ocg-divider);
-  border-radius: 6px;
+  border-radius: var(--ocg-radius-sm);
   background: var(--ocg-surface);
   color: var(--ocg-ink);
   overflow-wrap: anywhere;
 }
 .cpa-danger { border-color: color-mix(in srgb, var(--ocg-error) 34%, var(--ocg-divider)); }
 @media (max-width: 760px) {
-  .cpa-account-row, .cpa-key-row, .cpa-catalog-head { align-items: stretch; flex-direction: column; }
+  .cpa-account-row, .cpa-catalog-head { align-items: stretch; flex-direction: column; }
   .cpa-status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 </style>

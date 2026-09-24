@@ -14,7 +14,7 @@
     </n-alert>
     <n-empty
       v-if="candidates.length === 0"
-      :description="t('该 Key 暂无候选模型，请先刷新平台快照。')"
+      :description="t('该 Key 暂无候选模型，需先刷新平台快照。')"
     />
     <n-checkbox-group v-else v-model:value="selectedIds">
       <div class="platform-import-list">
@@ -136,7 +136,7 @@ function submit(): void {
 <style scoped>
 .platform-import-list {
   display: grid;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
   max-height: 50vh;
   overflow-y: auto;
 }
@@ -145,10 +145,10 @@ function submit(): void {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
-  padding: 6px 8px;
+  gap: var(--ocg-space-sm);
+  padding: 6px var(--ocg-space-sm);
   border: 1px solid var(--ocg-border);
-  border-radius: 6px;
+  border-radius: var(--ocg-radius-sm);
 }
 
 .platform-import-row.is-mapped {

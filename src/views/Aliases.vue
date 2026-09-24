@@ -13,7 +13,7 @@
     <n-alert
       v-else-if="loadError && !contracts"
       type="error"
-      :title="t('加载供应商失败: {error}', { error: loadError })"
+      :title="t('加载供应商失败：{error}', { error: loadError })"
     >
       <n-button size="small" secondary :loading="loading" @click="loadAliases()">
         {{ t("重试") }}
@@ -26,7 +26,7 @@
       <n-alert
         v-if="loadError && contracts"
         type="warning"
-        :title="t('加载供应商失败: {error}', { error: loadError })"
+        :title="t('加载供应商失败：{error}', { error: loadError })"
       >
         <n-button size="small" secondary :loading="loading" @click="loadAliases({ retain: true })">
           {{ t("重试") }}
@@ -35,7 +35,7 @@
       <n-alert
         v-if="accountsLoadError"
         type="warning"
-        :title="t('加载 Custom Alias 账号失败: {error}', { error: accountsLoadError })"
+        :title="t('加载 Custom Alias 账号失败：{error}', { error: accountsLoadError })"
       >
         <n-button size="small" secondary :loading="loading" @click="loadAliases({ retain: true })">
           {{ t("重试") }}
@@ -44,7 +44,7 @@
       <n-alert
         v-if="dynamicLoadError"
         type="warning"
-        :title="t('加载供应商失败: {error}', { error: dynamicLoadError })"
+        :title="t('加载供应商失败：{error}', { error: dynamicLoadError })"
       >
         <n-button size="small" secondary :loading="loading" @click="loadAliases({ retain: true })">
           {{ t("重试") }}
@@ -53,7 +53,7 @@
       <n-alert
         v-if="cpaLoadError"
         type="warning"
-        :title="t('加载 CPA 模型目录失败: {error}', { error: cpaLoadError })"
+        :title="t('加载 CPA 模型目录失败：{error}', { error: cpaLoadError })"
       >
         <n-button size="small" secondary :loading="loading" @click="loadAliases({ retain: true })">
           {{ t("重试") }}
@@ -63,7 +63,7 @@
       <n-alert
         v-if="publicationLoadError"
         type="warning"
-        :title="t('加载对外展示失败: {error}', { error: publicationLoadError })"
+        :title="t('加载对外展示失败：{error}', { error: publicationLoadError })"
       >
         <n-button size="small" secondary :loading="loading" @click="loadAliases({ retain: true })">
           {{ t("重试") }}
@@ -72,7 +72,7 @@
       <n-alert
         v-if="publicationSaveError"
         type="warning"
-        :title="t('更新对外展示失败: {error}', { error: publicationSaveError })"
+        :title="t('更新对外展示失败：{error}', { error: publicationSaveError })"
       />
       <n-empty v-if="aliasGroups.length === 0" :description="search.trim() ? t('无匹配模型') : t('暂无 Alias')" />
       <div v-else class="aliases-table-wrap" tabindex="0" role="region" :aria-label="t('模型映射')">
@@ -109,10 +109,30 @@
                   <code>{{ group.public_model }}</code>
                 </div>
                 <p v-if="groupHasOverlap(group.rows)" class="alias-warning">{{ t('名称与其他上游 ID 重叠，请检查调用名称。') }}</p>
+                <n-button
+                  size="tiny"
+                  quaternary
+                  type="primary"
+                  :aria-expanded="isExplainOpen(group.public_model)"
+                  @click="toggleExplain(group.public_model)"
+                >
+                  {{ t(isExplainOpen(group.public_model) ? "收起路由解释" : "查看路由解释") }}
+                </n-button>
               </td>
-              <td>{{ row.provider_plan }}</td>
+              <td>
+                {{ row.provider_plan }}
+                <n-tag v-if="!row.routable" size="tiny" :bordered="false" class="alias-model-disabled">
+                  {{ t("模型未启用") }}
+                </n-tag>
+              </td>
               <td><code>{{ row.upstream_model }}</code></td>
             </tr>
+            <AliasRoutingExplain
+              v-if="isExplainOpen(group.public_model)"
+              :model="group.public_model"
+              :protocol="explainProtocol(group.public_model)"
+              @update:protocol="setExplainProtocol(group.public_model, $event)"
+            />
           </tbody>
         </table>
       </div>
@@ -122,8 +142,9 @@
 
 <script setup lang="ts">
 import { computed, onActivated, onMounted, ref } from "vue";
-import { NAlert, NButton, NEmpty, NInput, NSpin, NSwitch, NTooltip } from "naive-ui";
+import { NAlert, NButton, NEmpty, NInput, NSpin, NSwitch, NTag, NTooltip } from "naive-ui";
 import type { Account } from "../api/dashboard.ts";
+import type { RoutingClientProtocol } from "../api/destinations.ts";
 import type {
   ProviderDefinitionView,
   ProviderCatalogEntry,
@@ -132,6 +153,7 @@ import type {
 import { dashboardV4 } from "../api/dashboard-v4.ts";
 import type { CpaCatalogEntry } from "../api/generated/dashboard-v4.ts";
 import { providerApi } from "../api/providers.ts";
+import AliasRoutingExplain from "../components/AliasRoutingExplain.vue";
 import { isDynamicCatalogEntry } from "../domain/dynamic-provider.ts";
 import { flattenProviderScopes, normalizeProviderContractsResponse } from "../domain/provider-contracts.ts";
 import { isRevisionConflict } from "../api/dashboard.ts";
@@ -145,12 +167,14 @@ import {
 import { t } from "../i18n/index.ts";
 import { useAccountsStore } from "../stores/accounts.ts";
 import { useControlPlaneStore } from "../stores/controlPlane.ts";
+import { useDestinationsStore } from "../stores/destinations.ts";
 import { useProvidersStore } from "../stores/providers.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
 
 const accountsStore = useAccountsStore();
 const controlPlane = useControlPlaneStore();
 const providersStore = useProvidersStore();
+const destinationsStore = useDestinationsStore();
 const contracts = ref<ProviderContractsResponse | null>(null);
 const catalog = ref<ProviderCatalogEntry[] | null>(null);
 const accounts = ref<Account[]>([]);
@@ -167,6 +191,9 @@ const publicationReady = ref(false);
 const publicationLoadError = ref("");
 const publicationSaveError = ref("");
 const saving = ref<Record<string, boolean>>({});
+// UI-local expansion state per public model; explanations stay in the store.
+const explainOpen = ref<Record<string, boolean>>({});
+const explainProtocols = ref<Record<string, RoutingClientProtocol>>({});
 let activatedOnce = false;
 
 const initialLoading = computed(() => loading.value && !contracts.value);
@@ -201,6 +228,30 @@ const aliasGroups = computed(() => {
 
 function groupHasOverlap(rows: readonly ProviderAliasRow[]): boolean {
   return rows.some((row) => aliasNameOverlaps(row, aliasRows.value));
+}
+
+function isExplainOpen(publicModel: string): boolean {
+  return Boolean(explainOpen.value[publicModelPublicationKey(publicModel)]);
+}
+
+function explainProtocol(publicModel: string): RoutingClientProtocol {
+  return explainProtocols.value[publicModelPublicationKey(publicModel)] ?? "chat_completions";
+}
+
+function ensureExplanation(publicModel: string): void {
+  void destinationsStore.explainRouting(publicModel, explainProtocol(publicModel)).catch(() => {});
+}
+
+function toggleExplain(publicModel: string): void {
+  const key = publicModelPublicationKey(publicModel);
+  const open = !explainOpen.value[key];
+  explainOpen.value = { ...explainOpen.value, [key]: open };
+  if (open) ensureExplanation(publicModel);
+}
+
+function setExplainProtocol(publicModel: string, protocol: RoutingClientProtocol): void {
+  explainProtocols.value = { ...explainProtocols.value, [publicModelPublicationKey(publicModel)]: protocol };
+  if (isExplainOpen(publicModel)) ensureExplanation(publicModel);
 }
 
 async function setPublished(publicModel: string, published: boolean): Promise<void> {
@@ -342,28 +393,33 @@ onActivated(() => {
 }
 .aliases-section {
   min-width: 0;
-  padding: 16px;
+  padding: var(--ocg-space-lg);
   border: 1px solid var(--ocg-border);
-  border-radius: 14px;
+  border-radius: var(--ocg-radius-lg);
   background: var(--ocg-surface);
   box-shadow: var(--ocg-shadow-sm);
 }
 .aliases-section > .n-alert {
-  margin-bottom: 12px;
+  margin-bottom: var(--ocg-space-md);
 }
 .aliases-table-wrap {
   overflow-x: auto;
 }
-.aliases-search { margin-bottom: 16px; }
+.aliases-search { margin-bottom: var(--ocg-space-lg); }
 .aliases-name-row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
 }
 .aliases-unpublished {
   opacity: 0.55;
 }
-.alias-warning { color: var(--ocg-warning); margin: 4px 0 0; }
+.alias-warning { color: var(--ocg-warning); margin: var(--ocg-space-xs) 0 0; }
+.alias-model-disabled {
+  margin-left: var(--ocg-space-xs);
+  color: var(--ocg-muted);
+  background-color: var(--ocg-primary-soft);
+}
 .aliases-table {
   width: 100%;
   min-width: 520px;
@@ -372,7 +428,7 @@ onActivated(() => {
 }
 .aliases-table th,
 .aliases-table td {
-  padding: 10px 12px;
+  padding: 10px var(--ocg-space-md);
   border-bottom: 1px solid var(--ocg-border);
   text-align: left;
   vertical-align: middle;

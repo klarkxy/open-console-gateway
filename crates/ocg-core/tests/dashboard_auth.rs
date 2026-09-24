@@ -1,7 +1,10 @@
 use ocg_core::crypto::{KeyCipher, StaticKeyCipher};
 use ocg_core::db::Database;
 use ocg_core::gateway;
-use ocg_core::host_router::{DASHBOARD_V2_REMOVED_CODE, DASHBOARD_V2_REMOVED_MESSAGE};
+use ocg_core::host_router::{
+    DASHBOARD_V2_REMOVED_CODE, DASHBOARD_V2_REMOVED_MESSAGE, DASHBOARD_V3_REMOVED_CODE,
+    DASHBOARD_V3_REMOVED_MESSAGE,
+};
 use ocg_core::models::RoutingMode;
 use ocg_core::provider::ZEN_FREE_ACCOUNT_ID;
 use ocg_core::state::CoreStateInner;
@@ -34,8 +37,8 @@ fn loopback_client() -> reqwest::Client {
         .expect("test client should build")
 }
 
-fn v3_url(port: u16, path: &str) -> String {
-    format!("http://127.0.0.1:{port}/dashboard/api/v3{path}")
+fn v4_url(port: u16, path: &str) -> String {
+    format!("http://127.0.0.1:{port}/dashboard/api/v4{path}")
 }
 
 fn cas(state: &CoreStateInner, extra: serde_json::Value) -> serde_json::Value {
@@ -59,6 +62,17 @@ async fn assert_v2_removed(response: reqwest::Response) {
     );
 }
 
+async fn assert_v3_removed(response: reqwest::Response) {
+    assert_eq!(response.status(), StatusCode::GONE);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(
+        body,
+        json!({
+            "code": DASHBOARD_V3_REMOVED_CODE,
+            "message": DASHBOARD_V3_REMOVED_MESSAGE })
+    );
+}
+
 async fn start_session_protected(state: Arc<CoreStateInner>) -> ocg_core::state::GatewayHandle {
     #[cfg(windows)]
     let addr = SocketAddr::from(([127, 0, 0, 1], 0));
@@ -78,7 +92,7 @@ async fn public_dashboard_uses_first_registration_and_session_cookie() {
     let state = state("public");
     let handle = start_session_protected(state.clone()).await;
     let base = format!("http://127.0.0.1:{}/dashboard/api", handle.port);
-    let v3 = format!("{base}/v3");
+    let v4 = format!("{base}/v4");
     let client = loopback_client();
 
     let status = client
@@ -113,7 +127,7 @@ async fn public_dashboard_uses_first_registration_and_session_cookie() {
 
     assert_eq!(
         client
-            .get(format!("{v3}/settings"))
+            .get(format!("{v4}/settings"))
             .header(reqwest::header::COOKIE, &cookie)
             .send()
             .await
@@ -131,7 +145,7 @@ async fn public_dashboard_uses_first_registration_and_session_cookie() {
     )
     .await;
     let reordered = client
-        .put(format!("{v3}/accounts/order"))
+        .put(format!("{v4}/accounts/order"))
         .header(reqwest::header::COOKIE, &cookie)
         .json(&cas(&state, json!({ "accountIds": [ZEN_FREE_ACCOUNT_ID] })))
         .send()
@@ -151,7 +165,7 @@ async fn public_dashboard_uses_first_registration_and_session_cookie() {
         .collect::<Vec<_>>();
     assert_eq!(reordered_ids, [ZEN_FREE_ACCOUNT_ID]);
     let application_models = client
-        .get(format!("{v3}/application-models"))
+        .get(format!("{v4}/application-models"))
         .header(reqwest::header::COOKIE, &cookie)
         .send()
         .await
@@ -239,7 +253,7 @@ async fn public_dashboard_uses_first_registration_and_session_cookie() {
     assert_ne!(replacement_cookie, cookie);
     assert_eq!(
         client
-            .get(format!("{v3}/settings"))
+            .get(format!("{v4}/settings"))
             .header(reqwest::header::COOKIE, &replacement_cookie)
             .send()
             .await
@@ -282,7 +296,7 @@ async fn local_connection_rejects_rebinding_and_cross_origin_requests() {
         (host.as_str(), Some("null"), StatusCode::FORBIDDEN),
     ] {
         let mut request = client
-            .get(v3_url(handle.port, "/connection"))
+            .get(v4_url(handle.port, "/connection"))
             .header("host", request_host);
         if let Some(value) = request_origin {
             request = request.header("origin", value);
@@ -300,7 +314,7 @@ async fn local_connection_rejects_rebinding_and_cross_origin_requests() {
         );
     }
     let response = client
-        .get(v3_url(handle.port, "/connection"))
+        .get(v4_url(handle.port, "/connection"))
         .header("sec-fetch-site", "cross-site")
         .send()
         .await
@@ -309,6 +323,7 @@ async fn local_connection_rejects_rebinding_and_cross_origin_requests() {
     for path in [
         "/dashboard/api/auth/register",
         "/dashboard/api/v3/auth/register",
+        "/dashboard/api/v4/auth/register",
     ] {
         let response = client
             .post(format!("http://{host}{path}"))
@@ -324,7 +339,7 @@ async fn local_connection_rejects_rebinding_and_cross_origin_requests() {
         assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
     }
     let response = client
-        .get(v3_url(handle.port, "/connection"))
+        .get(v4_url(handle.port, "/connection"))
         .header("host", "attacker.invalid")
         .header(
             "cookie",
@@ -361,13 +376,21 @@ async fn loopback_dashboard_skips_login() {
     assert_eq!(status["authenticated"], true);
     assert_eq!(
         client
-            .get(v3_url(handle.port, "/settings"))
+            .get(v4_url(handle.port, "/settings"))
             .send()
             .await
             .unwrap()
             .status(),
         StatusCode::OK
     );
+    assert_v3_removed(
+        client
+            .get(format!("{base}/v3/settings"))
+            .send()
+            .await
+            .unwrap(),
+    )
+    .await;
     assert_v2_removed(client.get(format!("{base}/settings")).send().await.unwrap()).await;
 
     gateway::stop_gateway(handle);
@@ -379,7 +402,7 @@ async fn loopback_settings_trim_and_require_gateway_key() {
     let handle = gateway::start_gateway_on(state.clone(), SocketAddr::from(([127, 0, 0, 1], 0)))
         .await
         .unwrap();
-    let url = v3_url(handle.port, "/settings");
+    let url = v4_url(handle.port, "/settings");
     let client = loopback_client();
     let primary_before = state.config().gateway_key.clone();
 
@@ -512,7 +535,7 @@ async fn loopback_settings_round_trip_routing_modes_and_reject_unknown_values() 
     let handle = gateway::start_gateway_on(state.clone(), SocketAddr::from(([127, 0, 0, 1], 0)))
         .await
         .unwrap();
-    let url = v3_url(handle.port, "/settings");
+    let url = v4_url(handle.port, "/settings");
     let client = loopback_client();
 
     for mode in [
@@ -572,7 +595,7 @@ async fn loopback_settings_reject_stale_revision_after_key_regeneration() {
     let handle = gateway::start_gateway_on(state.clone(), SocketAddr::from(([127, 0, 0, 1], 0)))
         .await
         .unwrap();
-    let url = v3_url(handle.port, "/settings");
+    let url = v4_url(handle.port, "/settings");
     let client = loopback_client();
     let loaded = client
         .get(&url)
@@ -586,7 +609,7 @@ async fn loopback_settings_reject_stale_revision_after_key_regeneration() {
     let stale_timeout = loaded["connectTimeoutSecs"].as_u64().unwrap();
 
     let regenerated = client
-        .post(v3_url(handle.port, "/keys/primary/regenerate"))
+        .post(v4_url(handle.port, "/keys/primary/regenerate"))
         .json(&cas(&state, json!({})))
         .send()
         .await
@@ -595,7 +618,7 @@ async fn loopback_settings_reject_stale_revision_after_key_regeneration() {
     let regenerated = regenerated.json::<serde_json::Value>().await.unwrap();
     assert_ne!(regenerated["revision"].as_u64().unwrap(), stale_revision);
     let connection = client
-        .get(v3_url(handle.port, "/connection"))
+        .get(v4_url(handle.port, "/connection"))
         .send()
         .await
         .unwrap()

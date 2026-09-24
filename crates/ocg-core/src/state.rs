@@ -7,9 +7,10 @@ use crate::models::{
     AppConfig, normalize_client_root_url, normalize_opencode_invite_url, normalize_proxy_url,
 };
 use crate::pricing::{embedded_seed, ensure_current_adjustment_policy, ensure_seed_model_coverage};
+use crate::quota_recovery::QuotaEpisode;
 use crate::routing_runtime::RoutingRuntime;
 use parking_lot::{Mutex, RwLock};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -26,7 +27,8 @@ pub use crate::gateway_runtime::GatewayHandle;
 
 const CLIENT_ROOT_URL_ENV: &str = "OCG_CLIENT_ROOT_URL";
 
-// Note: Mutex lock ordering is (1) settings_update, (2) db, (3) config,
+// Note: Mutex lock ordering is (1) settings_update, (2) db, (2b) quota_probes,
+// (3) config,
 // (4) http_client, (5) gateway, (6) pricing, (7) zen_free_models,
 // (8) cpa_models, (9) unpublished_public_models, (10) provider_contracts,
 // (11) dynamic_providers, (12) routing, (13) credential_snapshot.
@@ -89,7 +91,7 @@ pub struct CoreStateInner {
     unpublished_public_models: RwLock<Arc<HashSet<String>>>,
     pub zen_free_models_refresh: tokio::sync::Mutex<()>,
     pub provider_models_refresh: tokio::sync::Mutex<()>,
-    pub provider_usage_refresh: tokio::sync::Mutex<()>,
+    pub(crate) provider_usage_refresh: crate::usage_sync::ProviderUsageRefreshGate,
     /// Serializes typed operations against the one local CPA integration.
     /// Network calls may hold this async gate but never the SQLite mutex.
     pub cpa_operations: tokio::sync::Mutex<()>,
@@ -100,10 +102,15 @@ pub struct CoreStateInner {
     provider_contracts: RwLock<Arc<crate::provider_contracts::EffectiveContractSet>>,
     dynamic_providers: RwLock<Arc<Vec<crate::dynamic::DynamicProviderRuntime>>>,
     pub routing: RoutingRuntime,
+    /// Ephemeral resource admission. Never held while acquiring the database lock.
+    pub(crate) recovery: Arc<crate::gateway::recovery::RecoveryRuntime>,
     pub browser: crate::browser::BrowserRuntime,
     /// Official Go usage sync gates (concurrency, dedupe, clock/jitter seams).
     /// The background loop is started from gateway startup, not construction.
     pub usage_sync: crate::usage_sync::UsageSyncRuntime,
+    /// In-process per-Key quota trial leases. Never persisted. Taken after
+    /// `db` and never held across network I/O.
+    pub(crate) quota_probes: Mutex<HashMap<String, QuotaEpisode>>,
     /// Host-private dual clock for Gateway selection (wall + monotonic).
     /// Distinct from `usage_sync`'s calendar clock and not stored on request
     /// snapshots. Sampled through [`Self::sample_gateway_clock`].
@@ -132,6 +139,7 @@ pub(crate) struct ProxyModelCandidate {
     pub zen_free: bool,
 }
 
+#[cfg(test)]
 pub(crate) fn build_proxy_model_candidates(
     contracts: &crate::provider_contracts::EffectiveContractSet,
     custom_runtimes: &[crate::custom::CustomAccountRuntime],
@@ -213,15 +221,51 @@ fn proxy_candidate_ids(candidates: &[ProxyModelCandidate]) -> Vec<String> {
         .collect()
 }
 
+pub(crate) fn persisted_proxy_model_candidates(
+    projection: &crate::destination_projection::DestinationProjection,
+) -> Vec<ProxyModelCandidate> {
+    let mut candidates = std::collections::BTreeMap::<String, ProxyModelCandidate>::new();
+    for destination in projection
+        .destinations
+        .iter()
+        .filter(|destination| destination.enabled)
+    {
+        for model in destination
+            .catalog
+            .iter()
+            .filter(|model| model.enabled && !model.protocols.is_empty())
+        {
+            let preferred = model
+                .preferred
+                .filter(|protocol| model.protocols.contains(protocol))
+                .unwrap_or(model.protocols[0]);
+            candidates
+                .entry(crate::kernel::ids::model_identity_key(
+                    &model.upstream_model,
+                ))
+                .and_modify(|candidate| {
+                    if model.upstream_model < candidate.id {
+                        candidate.id = model.upstream_model.clone();
+                        candidate.preferred_protocol = preferred.as_str().to_string();
+                    }
+                    candidate.zen_free |=
+                        destination.adapter == ocg_domain::destination::AdapterKind::Zen;
+                })
+                .or_insert_with(|| ProxyModelCandidate {
+                    id: model.upstream_model.clone(),
+                    preferred_protocol: preferred.as_str().to_string(),
+                    zen_free: destination.adapter == ocg_domain::destination::AdapterKind::Zen,
+                });
+        }
+    }
+    candidates.into_values().collect()
+}
+
 fn build_proxy_route_set(
     config: &crate::models::AppConfig,
-    contracts: &crate::provider_contracts::EffectiveContractSet,
-    custom_runtimes: &[crate::custom::CustomAccountRuntime],
-    dynamic_providers: &[crate::dynamic::DynamicProviderRuntime],
-    cpa_models: &[String],
+    projection: &crate::destination_projection::DestinationProjection,
 ) -> crate::Result<crate::http_client::ForwardRouteSet> {
-    let candidates =
-        build_proxy_model_candidates(contracts, custom_runtimes, dynamic_providers, cpa_models);
+    let candidates = persisted_proxy_model_candidates(projection);
     crate::http_client::build_route_set_from_known_models(config, &proxy_candidate_ids(&candidates))
 }
 
@@ -370,18 +414,15 @@ impl CoreStateInner {
             .collect::<HashSet<_>>();
         let custom_runtimes = db.list_custom_account_runtimes()?;
         let dynamic_providers = db.list_dynamic_providers()?;
-        let provider_contracts = crate::provider_contracts::build_effective_contracts(
+        let mut provider_contracts = crate::provider_contracts::build_effective_contracts(
             &zen_free_models,
             &custom_runtimes,
             db.load_persisted_contracts()?,
         );
-        let http_client = build_proxy_route_set(
-            &config,
-            &provider_contracts,
-            &custom_runtimes,
-            &dynamic_providers,
-            &cpa_models,
-        )?;
+        provider_contracts
+            .apply_destination_configuration(&crate::destination_projection::load_runtime(&db)?);
+        let http_client =
+            build_proxy_route_set(&config, &crate::destination_projection::load_runtime(&db)?)?;
         Ok(Self {
             db: Mutex::new(db),
             config: Mutex::new(config),
@@ -412,14 +453,18 @@ impl CoreStateInner {
             unpublished_public_models: RwLock::new(Arc::new(unpublished_public_models)),
             zen_free_models_refresh: tokio::sync::Mutex::new(()),
             provider_models_refresh: tokio::sync::Mutex::new(()),
-            provider_usage_refresh: tokio::sync::Mutex::new(()),
+            provider_usage_refresh: crate::usage_sync::ProviderUsageRefreshGate::new(
+                crate::usage_sync::PROVIDER_REFRESH_CONCURRENCY,
+            ),
             cpa_operations: tokio::sync::Mutex::new(()),
             cpa_runtime: crate::cpa_runtime::CpaRuntimeCapabilities::new(),
             provider_contracts: RwLock::new(Arc::new(provider_contracts)),
             dynamic_providers: RwLock::new(Arc::new(dynamic_providers)),
             routing: RoutingRuntime::new(),
+            recovery: Arc::new(crate::gateway::recovery::RecoveryRuntime::default()),
             browser: crate::browser::BrowserRuntime::new(),
             usage_sync: crate::usage_sync::UsageSyncRuntime::new(),
+            quota_probes: Mutex::new(HashMap::new()),
             gateway_clock,
             data_dir,
             cipher,
@@ -433,6 +478,27 @@ impl CoreStateInner {
         &self,
     ) -> (chrono::DateTime<chrono::Utc>, std::time::Instant) {
         (self.gateway_clock.now_wall(), self.gateway_clock.now_mono())
+    }
+
+    pub(crate) fn is_quota_probing(
+        &self,
+        credential_id: &str,
+        credential_version: u64,
+        key_cipher: &str,
+        epoch: u64,
+    ) -> bool {
+        self.quota_probes
+            .lock()
+            .get(credential_id)
+            .is_some_and(|episode| {
+                crate::routing_snapshot::quota_episode_matches(
+                    episode,
+                    credential_id,
+                    credential_version,
+                    key_cipher,
+                    epoch,
+                )
+            })
     }
 
     pub fn config(&self) -> AppConfig {
@@ -545,14 +611,15 @@ impl CoreStateInner {
         refreshed_at: chrono::DateTime<chrono::Utc>,
     ) -> crate::Result<()> {
         let ids = crate::db::CpaCatalogModel::enabled_ids(&models);
-        let custom = self.db.lock().list_custom_account_runtimes()?;
-        let route_set = build_proxy_route_set(
-            &self.config(),
-            &self.provider_contracts(),
-            &custom,
-            &self.dynamic_providers(),
-            &ids,
-        )?;
+        let mut projection = crate::destination_projection::load_runtime(&self.db.lock())?;
+        if let Some(destination) = projection
+            .destinations
+            .iter_mut()
+            .find(|destination| destination.adapter == ocg_domain::destination::AdapterKind::Cpa)
+        {
+            destination.catalog = crate::db::destination_store::cpa_catalog(&models);
+        }
+        let route_set = build_proxy_route_set(&self.config(), &projection)?;
         {
             let db = self.db.lock();
             let mut http_client = self.http_client.lock();
@@ -607,14 +674,11 @@ impl CoreStateInner {
     /// Atomically remove OCG-owned CPA configuration, singleton account, and
     /// catalog snapshot. CPA auth files and OAuth state remain external.
     pub fn disconnect_cpa_integration(&self) -> crate::Result<()> {
-        let custom = self.db.lock().list_custom_account_runtimes()?;
-        let route_set = build_proxy_route_set(
-            &self.config(),
-            &self.provider_contracts(),
-            &custom,
-            &self.dynamic_providers(),
-            &[],
-        )?;
+        let mut projection = crate::destination_projection::load_runtime(&self.db.lock())?;
+        projection
+            .destinations
+            .retain(|destination| destination.adapter != ocg_domain::destination::AdapterKind::Cpa);
+        let route_set = build_proxy_route_set(&self.config(), &projection)?;
         {
             let db = self.db.lock();
             let mut http_client = self.http_client.lock();
@@ -631,28 +695,24 @@ impl CoreStateInner {
         &self,
         catalog: crate::kernel::zen::ZenFreeModelCatalog,
     ) -> crate::Result<()> {
-        let previous_models = self
-            .provider_contracts()
-            .scope(&crate::provider_contracts::ContractScope::provider(
-                crate::kernel::ids::OPENCODE_ZEN_FREE_PROVIDER_ID,
-            ))
-            .map(|contract| contract.catalog.models.clone())
-            .unwrap_or_default();
-        let dynamics = self.dynamic_providers();
-        let cpa_models = self.cpa_model_catalog();
         let config = self.config();
-        let (new_contracts, route_set) = {
+        {
             let db = self.db.lock();
-            db.set_zen_free_model_catalog_with_default_off(&catalog, &previous_models)?;
+            // The setter participates in this transaction. Build from its exact
+            // uncommitted rows so a failed client/catalog preflight rolls back
+            // both the directory and its canonical routing controls.
+            let tx = db.conn.unchecked_transaction()?;
+            db.set_zen_free_model_catalog_preserving_settings(&catalog)?;
+            let projection = crate::destination_projection::load_runtime(&db)?;
             let custom = db.list_custom_account_runtimes()?;
             let persisted = db.load_persisted_contracts()?;
-            let new_contracts =
+            let mut new_contracts =
                 crate::provider_contracts::build_effective_contracts(&catalog, &custom, persisted);
-            let route_set =
-                build_proxy_route_set(&config, &new_contracts, &custom, &dynamics, &cpa_models)?;
-            (new_contracts, route_set)
-        };
-        {
+            new_contracts.apply_destination_configuration(&projection);
+            let route_set = build_proxy_route_set(&config, &projection)?;
+            tx.commit()?;
+            // Keep the DB lock until every pointer has been installed. Request
+            // capture cannot observe committed catalog rows with an old route set.
             let mut http_client = self.http_client.lock();
             let mut active = self.zen_free_models.write();
             let mut contracts = self.provider_contracts.write();
@@ -675,13 +735,9 @@ impl CoreStateInner {
 
     pub fn reload_dynamic_providers_locked(&self, db: &Database) -> crate::Result<()> {
         let loaded = db.list_dynamic_providers()?;
-        let custom = db.list_custom_account_runtimes()?;
         let route_set = build_proxy_route_set(
             &self.config(),
-            &self.provider_contracts(),
-            &custom,
-            &loaded,
-            &self.cpa_model_catalog(),
+            &crate::destination_projection::load_runtime(db)?,
         )?;
         *self.http_client.lock() = Arc::new(route_set);
         *self.dynamic_providers.write() = Arc::new(loaded);
@@ -697,6 +753,22 @@ impl CoreStateInner {
         self.reload_provider_contracts_locked(&db)
     }
 
+    /// Caller holds settings_update. Build every fallible runtime view before
+    /// committing, then install while the DB lock still excludes new readers.
+    pub(crate) fn commit_configuration_update<T>(
+        &self,
+        mutation: impl FnOnce(&Database) -> crate::Result<T>,
+    ) -> crate::Result<T> {
+        let db = self.db.lock();
+        let tx = db.conn.unchecked_transaction()?;
+        let result = mutation(&db)?;
+        crate::db::routing_cards::reconcile_on(&db.conn)?;
+        let runtime = self.prepare_imported_node_runtime(&db)?;
+        tx.commit()?;
+        self.install_imported_node_runtime(runtime);
+        Ok(result)
+    }
+
     /// Build every fallible runtime snapshot from an uncommitted V2 node
     /// migration. The caller must hold the database transaction open while
     /// passing the same connection view here.
@@ -704,6 +776,7 @@ impl CoreStateInner {
         &self,
         db: &Database,
     ) -> crate::Result<ImportedNodeRuntime> {
+        crate::routing_snapshot::RoutingSnapshot::load(db)?;
         let (config, needs_persist) = load_config(db)?;
         config.validate().map_err(anyhow::Error::msg)?;
         // Sanitized config JSON can differ in field order and legacy defaults
@@ -713,20 +786,16 @@ impl CoreStateInner {
         let _ = needs_persist;
         let zen = db.zen_free_model_catalog()?.unwrap_or_default();
         let custom = db.list_custom_account_runtimes()?;
-        let contracts = crate::provider_contracts::build_effective_contracts(
+        let mut contracts = crate::provider_contracts::build_effective_contracts(
             &zen,
             &custom,
             db.load_persisted_contracts()?,
         );
+        contracts
+            .apply_destination_configuration(&crate::destination_projection::load_runtime(db)?);
         let dynamic_providers = db.list_dynamic_providers()?;
-        let cpa_models = self.cpa_model_catalog();
-        let route_set = build_proxy_route_set(
-            &config,
-            &contracts,
-            &custom,
-            &dynamic_providers,
-            &cpa_models,
-        )?;
+        let route_set =
+            build_proxy_route_set(&config, &crate::destination_projection::load_runtime(db)?)?;
         let credentials = crate::gateway_keys::build_credential_snapshot(db, &config.gateway_key)?;
         Ok(ImportedNodeRuntime {
             config,
@@ -757,13 +826,9 @@ impl CoreStateInner {
         &self,
         providers: Vec<crate::dynamic::DynamicProviderRuntime>,
     ) -> crate::Result<()> {
-        let custom = self.db.lock().list_custom_account_runtimes()?;
         let route_set = build_proxy_route_set(
             &self.config(),
-            &self.provider_contracts(),
-            &custom,
-            &providers,
-            &self.cpa_model_catalog(),
+            &crate::destination_projection::load_runtime(&self.db.lock())?,
         )?;
         *self.http_client.lock() = Arc::new(route_set);
         *self.dynamic_providers.write() = Arc::new(providers);
@@ -791,25 +856,14 @@ impl CoreStateInner {
         }
 
         // The durable removal must also make a stale proxy-list membership
-        // inert. Prefer a full candidate rebuild from the now-restricted
-        // contract snapshot. If the same corrupt persistence that broke the
-        // reload also prevents reading Custom runtimes, install the
+        // inert. Rebuild from the authoritative saved destination catalog.
+        // If the same corrupt persistence that broke the reload also prevents
+        // reading that configuration, install the
         // conservative empty-known-model route set: whitelist falls back to
         // direct and blacklist falls back to proxy for every stale entry.
         let config = self.config();
-        let rebuilt = self
-            .db
-            .lock()
-            .list_custom_account_runtimes()
-            .and_then(|custom| {
-                build_proxy_route_set(
-                    &config,
-                    &self.provider_contracts(),
-                    &custom,
-                    &self.dynamic_providers(),
-                    &self.cpa_model_catalog(),
-                )
-            })
+        let rebuilt = crate::destination_projection::load_runtime(&self.db.lock())
+            .and_then(|projection| build_proxy_route_set(&config, &projection))
             .or_else(|_| crate::http_client::build_route_set_from_known_models(&config, &[]));
         if let Ok(route_set) = rebuilt {
             *self.http_client.lock() = Arc::new(route_set);
@@ -819,17 +873,15 @@ impl CoreStateInner {
     pub fn reload_provider_contracts_locked(&self, db: &Database) -> crate::Result<()> {
         let zen = self.zen_free_model_catalog();
         let custom = db.list_custom_account_runtimes()?;
-        let set = crate::provider_contracts::build_effective_contracts(
+        let mut set = crate::provider_contracts::build_effective_contracts(
             &zen,
             &custom,
             db.load_persisted_contracts()?,
         );
+        set.apply_destination_configuration(&crate::destination_projection::load_runtime(db)?);
         let route_set = build_proxy_route_set(
             &self.config(),
-            &set,
-            &custom,
-            &self.dynamic_providers(),
-            &self.cpa_model_catalog(),
+            &crate::destination_projection::load_runtime(db)?,
         )?;
         *self.http_client.lock() = Arc::new(route_set);
         *self.provider_contracts.write() = Arc::new(set);
@@ -1008,13 +1060,9 @@ impl CoreStateInner {
             .map_err(anyhow::Error::msg)?;
         // validate() enforces the non-blank primary key on every write path.
         config.validate().map_err(anyhow::Error::msg)?;
-        let custom = self.db.lock().list_custom_account_runtimes()?;
         let http_client = build_proxy_route_set(
             &config,
-            &self.provider_contracts(),
-            &custom,
-            &self.dynamic_providers(),
-            &self.cpa_model_catalog(),
+            &crate::destination_projection::load_runtime(&self.db.lock())?,
         )?;
         Ok((config, http_client))
     }
@@ -1565,6 +1613,34 @@ impl crate::account_control::AccountControlHost for CoreStateInner {
 }
 
 impl crate::usage_sync::UsageSyncStore for Database {
+    fn capture_usage_identity(
+        &self,
+        account_id: &str,
+    ) -> anyhow::Result<Option<crate::usage_sync::UsageRefreshIdentity>> {
+        let identity = crate::usage_sync::UsageRefreshIdentity::capture(self, account_id)?;
+        anyhow::ensure!(
+            identity.is_some(),
+            "inference credential is unavailable for usage refresh"
+        );
+        Ok(identity)
+    }
+    fn usage_identity_is_current(
+        &self,
+        identity: &crate::usage_sync::UsageRefreshIdentity,
+    ) -> anyhow::Result<bool> {
+        identity.is_current(self)
+    }
+    fn reconcile_authoritative_usage(
+        &self,
+        account_id: &str,
+        snapshot: &crate::go_usage::GoUsageSnapshot,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> anyhow::Result<()> {
+        crate::db::quota_recovery::reconcile_official_go_usage(
+            &self.conn, account_id, snapshot, now,
+        )
+    }
+
     fn list_accounts(&self) -> anyhow::Result<Vec<crate::models::Account>> {
         Database::list_accounts(self)
     }

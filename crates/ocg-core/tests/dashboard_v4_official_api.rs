@@ -119,6 +119,8 @@ async fn official_api_balance_refresh_is_selected_key_only_and_retains_evidence_
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["balances"], json!([]));
     assert_eq!(body["balanceAvailable"], true);
+    assert_eq!(body["monthSpend"], json!([]));
+    assert_eq!(body["lifetimeSpend"], json!([]));
     assert!(calls.lock().unwrap().is_empty());
     let (status, body) = send(&h, Method::POST, &format!("{path}/balance"), cas(&h)).await;
     assert_eq!(status, StatusCode::OK, "{body}");

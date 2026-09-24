@@ -133,12 +133,12 @@ function flagLabel(flag: PlatformPriceFlag, price: PlatformPrice | null): string
   font-size: var(--ocg-font-xs);
   font-weight: 600;
   color: var(--ocg-muted);
-  padding: 4px 8px;
+  padding: var(--ocg-space-xs) var(--ocg-space-sm);
   border-bottom: 1px solid var(--ocg-border);
 }
 
 .platform-table td {
-  padding: 4px 8px;
+  padding: var(--ocg-space-xs) var(--ocg-space-sm);
   border-bottom: 1px solid var(--ocg-divider);
   vertical-align: top;
 }

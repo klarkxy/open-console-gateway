@@ -8,7 +8,10 @@ use ocg_core::dashboard_v3::{
 };
 use ocg_core::db::Database;
 use ocg_core::gateway;
-use ocg_core::host_router::{DASHBOARD_V2_REMOVED_CODE, DASHBOARD_V2_REMOVED_MESSAGE};
+use ocg_core::host_router::{
+    DASHBOARD_V2_REMOVED_CODE, DASHBOARD_V2_REMOVED_MESSAGE, DASHBOARD_V3_REMOVED_CODE,
+    DASHBOARD_V3_REMOVED_MESSAGE,
+};
 use ocg_core::models::AccountUpdate;
 use ocg_core::state::{CoreStateInner, GatewayHandle};
 use reqwest::StatusCode;
@@ -25,6 +28,8 @@ pub(crate) struct V3Harness {
     pub client: reqwest::Client,
     pub v2_base: String,
     pub v3_base: String,
+    pub v3_tombstone_base: String,
+    pub v4_base: String,
     #[allow(dead_code)]
     official_protocol_guard: OfficialProtocolFetchGuard,
 }
@@ -58,6 +63,20 @@ pub(crate) async fn start_loopback(label: &str) -> V3Harness {
     start_on(label, SocketAddr::from(([127, 0, 0, 1], 0))).await
 }
 
+pub(crate) async fn start_on_existing_dir(dir: PathBuf) -> V3Harness {
+    start_state_on(
+        state_on_existing_dir(dir),
+        SocketAddr::from(([127, 0, 0, 1], 0)),
+    )
+    .await
+}
+
+fn state_on_existing_dir(dir: PathBuf) -> Arc<CoreStateInner> {
+    let db = Database::open(dir.clone()).unwrap();
+    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("v3-contract"));
+    Arc::new(CoreStateInner::new(db, dir, cipher).unwrap())
+}
+
 pub(crate) async fn start_public(label: &str) -> V3Harness {
     #[cfg(windows)]
     {
@@ -75,7 +94,10 @@ pub(crate) async fn start_public(label: &str) -> V3Harness {
 }
 
 async fn start_on(label: &str, addr: SocketAddr) -> V3Harness {
-    let state = state(label);
+    start_state_on(state(label), addr).await
+}
+
+async fn start_state_on(state: Arc<CoreStateInner>, addr: SocketAddr) -> V3Harness {
     let dir = state.data_dir();
     let handle = gateway::start_gateway_on(state.clone(), addr)
         .await
@@ -89,7 +111,9 @@ async fn start_on(label: &str, addr: SocketAddr) -> V3Harness {
         handle,
         client: loopback_client(),
         v2_base: format!("{host}/dashboard/api"),
-        v3_base: format!("{host}/dashboard/api/v3"),
+        v3_base: format!("{host}/dashboard/api/v4"),
+        v3_tombstone_base: format!("{host}/dashboard/api/v3"),
+        v4_base: format!("{host}/dashboard/api/v4"),
         official_protocol_guard,
     }
 }
@@ -109,6 +133,16 @@ impl V3Harness {
             &json!({
                 "code": DASHBOARD_V2_REMOVED_CODE,
                 "message": DASHBOARD_V2_REMOVED_MESSAGE })
+        );
+    }
+
+    pub(crate) fn assert_v3_removed(status: StatusCode, body: &Value) {
+        assert_eq!(status, StatusCode::GONE, "{body}");
+        assert_eq!(
+            body,
+            &json!({
+                "code": DASHBOARD_V3_REMOVED_CODE,
+                "message": DASHBOARD_V3_REMOVED_MESSAGE })
         );
     }
 
@@ -150,5 +184,11 @@ impl V3Harness {
     pub(crate) fn stop(self) {
         gateway::stop_gateway(self.handle);
         let _ = fs::remove_dir_all(self.dir);
+    }
+
+    pub(crate) fn close_keep_dir(self) -> PathBuf {
+        let dir = self.dir.clone();
+        gateway::stop_gateway(self.handle);
+        dir
     }
 }

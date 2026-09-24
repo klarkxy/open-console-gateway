@@ -8,10 +8,10 @@
 
 锁顺序：(1) `settings_update`，(2) `db`，(3) `config`，(4) `http_client`， (5) `gateway`，(6) `pricing`，(7) `zen_free_models`，(8) `provider_contracts`，(9) `routing`，(10) `credential_snapshot`。反向获取会造成死锁；持有 `routing` 锁时不应执行 DB 或网络 I/O。异步闸口：设置写同时重绑时， `settings_host_effects`（持久化 → 监听器重绑 → 补偿）先于 `gateway_lifecycle`。这些 await 期间应释放 `parking_lot` 锁。
 
-从 schema v27 起，权威表是 `access_keys`。两层凭证共用该表（当前 schema v49）和一份鉴权快照：
+访问 Key 的权威表是 `access_keys`。两层凭证共用该表（当前 schema v62）和一份鉴权快照：
 
-- 主 Key：固定 id `00000000-0000-0000-0000-000000000001`，显示名 `"Primary"`。始终启用，没有删除入口。公开 `AppConfig` 与面板 API 仍暴露 `gateway_key`；v27 之后经消毒的 config JSON 把 `gateway_key` 存为 `""`。
-- 子 Key：非主行，活跃上限 64，软删保留身份/名称并清除明文。只经 `/dashboard/api/v3/keys*` 生命周期 API 变更。CLI 没有子 Key 命令。
+- 主 Key：固定 id `00000000-0000-0000-0000-000000000001`，显示名 `"Primary"`。始终启用，没有删除入口。公开 `AppConfig` 与面板 API 暴露 `gateway_key`；经消毒的 config JSON 把 `gateway_key` 存为 `""`。
+- 子 Key：非主行，活跃上限 64，软删保留身份/名称并清除明文。只经 `/dashboard/api/v4/keys*` 生命周期 API 变更。CLI 没有子 Key 命令。
 
 主/子 Key 值互斥由 `gateway_keys::ensure_primary_value_allowed` 在 dashboard、settings 与子 Key 启用路径强制。
 
@@ -19,11 +19,11 @@
 
 **回环监听时** 直接访问跳过登录。带标准反向代理转发头但没 Cookie 的请求仍需登录。**非回环监听** 走单管理员模型：密码以 Argon2 哈希存 SQLite，登录下发 HttpOnly 会话 Cookie。Docker 用 **同时设置的** `OCG_ADMIN_USERNAME` 与 `OCG_ADMIN_PASSWORD` 引导首个管理员；只设一个会启动失败；不提供时由首位注册者创建。
 
-设置页通过 `GET /dashboard/api/v3/settings/check-update` 获取 GitHub Release 元数据。支持升级的已安装桌面运行时可下载、校验签名并安装；开发构建、CLI、Docker 只保留元数据/发布页路径。出站请求只在用户点击时发起。
+设置页通过 `GET /dashboard/api/v4/settings/check-update` 获取 GitHub Release 元数据。支持升级的已安装桌面运行时可下载、校验签名并安装；开发构建、CLI、Docker 只保留元数据/发布页路径。出站请求只在用户点击时发起。
 
 ## 账号生命周期与浏览器运行时
 
-schema v16 给账号增加 `account_type`（`key | managed`）与 `setup_step` （`google_account → opencode_registration → payment → key_verification → ready`）。旧行迁移为 `key + ready`。托管草稿立即持久化为空 Key、`enabled=false`；选择器、启用接口和路由都必须同时要求 `ready` 与非空 Key。步骤名 `google_account` 在 UI 上展示为「登录身份」，可跳过。
+`credentials` 带 `account_type`（`key | managed`）与 `setup_step` （`google_account → opencode_registration → payment → key_verification → ready`）。非托管行为 `key + ready`。遗留 `accounts` 表在 v52 之后已删除。托管草稿立即持久化为空 Key、`enabled=false`；选择器、启用接口和路由都必须同时要求 `ready` 与非空 Key。步骤名 `google_account` 在 UI 上展示为「登录身份」，可跳过。
 
 `AppConfig::default()` 的 `opencode_invite_url` 带演示默认值（`DEFAULT_OPENCODE_INVITE_URL`）。规范化后只接受最长 2048 字符、无用户名密码的 HTTPS URL，主机严格限定为 `opencode.ai` 或 `console.opencode.ai`。面板在 OpenCode Go 供应商的 **设置** 页签编辑该值。创建托管草稿时可编辑邀请链接；与已保存值不同时写回 SQLite。注册/支付/验证码仍由用户在浏览器中完成，Key 由用户复制回填；Open Console Gateway 不会使用 CDP 自动填表或代点支付。
 
@@ -37,7 +37,7 @@ schema v16 给账号增加 `account_type`（`key | managed`）与 `setup_step` �
 
 普通 setup PATCH 只能向前一步，或回到更早的未完成步骤；它不会写入 `ready`。独立的 Key 验证请求在收到 `2xx` 或 `429` 时将账号置为 `ready + enabled`。Key 无效等 `4xx` 与重定向让草稿保持 pending 并返回 `400`；网络、超时与 `5xx` 同样保持 pending，但返回 `502`，用户可重试或回退步骤。
 
-官方 Go usage（`go_usage.rs`，`https://opencode.ai/zen/go/v1/usage`）是校准基线，由 `usage_sync.rs` 协调。手动 `POST /dashboard/api/v3/accounts/{id}/usage/refresh` 与后台对账共用同一条 fetch + key CAS + 三窗口校准路径。
+官方 Go usage（`go_usage.rs`，`https://opencode.ai/zen/go/v1/usage`）是校准基线，由 `usage_sync.rs` 协调。手动 `POST /dashboard/api/v4/accounts/{id}/usage/refresh` 与后台对账共用同一条 fetch + key CAS + 三窗口校准路径。
 
 ready+enabled 且近 24h 有本地活动的账号约每小时对账，无活动约每天；禁用、非 ready、空 Key 排除。启动时避免轰鸣：全局并发 1、节奏控制、有界抖动，并提供可注入 clock/jitter/fetch 缝。
 
@@ -45,11 +45,11 @@ ready+enabled 且近 24h 有本地活动的账号约每小时对账，无活动�
 
 真实推理 `429` 仍写现有 cooldown/selector，并额外调度约 1–2 分钟后的官方同步（非 inline）。官方失败或 `status=rate-limited` 不会写推理冷却。成功后按最早 `resetsAt`（有界抖动）调度，同时尊重活跃/非活跃节奏。失败退避：5m → 15m → 1h → 6h；last-success 与上次基线不会被清除。
 
-sync 元数据在 `provider_usage_sync_state`；v27 删除遗留的五列 `accounts.usage_sync_*`。公开 Go docs 尚未列出该路径。
+sync 元数据在 `provider_usage_sync_state`。公开 Go docs 尚未列出该路径。
 
 Zen Free 由数据库持有：可启用、停用、排序，但不能通过通用账号 API 创建或删除。Command Code 账号在 enabled、ready 且 Key 非空时可路由；供应商矩阵控制模型供应，GOAT 预设行默认开启，额外行默认关闭。Custom 声明协议后即可路由；验证为可选。
 
-浏览器：`GET /dashboard/api/v3/browser/capabilities`、 `POST /accounts/{id}/browser`、`DELETE /accounts/{id}/browser-profile` 与 `/browser/sessions/{token}/ws`。浏览目标允许 Google 注册/登录、GitHub 注册/ 登录、配置的邀请 URL 与 OpenCode 控制台（`https://opencode.ai/auth`）。 worker 主机白名单含 `accounts.google.com`、`github.com`、`opencode.ai`、 `console.opencode.ai`、`auth.opencode.ai`。远程会话令牌只在内存中保存，绑定管理员会话并检查 Origin，空闲 30 分钟或总计 4 小时失效。
+浏览器：`GET /dashboard/api/v4/browser/capabilities`、 `POST /accounts/{id}/browser`、`DELETE /accounts/{id}/browser-profile` 与 `/browser/sessions/{token}/ws`。浏览目标允许 Google 注册/登录、GitHub 注册/ 登录、配置的邀请 URL 与 OpenCode 控制台（`https://opencode.ai/auth`）。 worker 主机白名单含 `accounts.google.com`、`github.com`、`opencode.ai`、 `console.opencode.ai`、`auth.opencode.ai`。远程会话令牌只在内存中保存，绑定管理员会话并检查 Origin，空闲 30 分钟或总计 4 小时失效。
 
 桌面原生浏览器 hook 由 `src-tauri/src/host/` 注册进 `CoreState`。Vue 仍通过 HTTP 调用。Windows 依次查 Edge、Chrome；macOS 查 Chrome、Edge、Chromium； Linux 从 `PATH` 查 Chrome/Chromium/Edge。外部浏览器使用 `browser-profiles/<account_id>`、`--no-first-run`、 `--no-default-browser-check` 与新窗口，启动参数中不包含 CDP、automation、`--no-sandbox` 或关闭 Web 安全的选项。
 
@@ -63,12 +63,12 @@ Profile 删除先停浏览器，校验账号 ID 防目录穿越，再把新旧 P
 
 ## 持久化
 
-`crates/ocg-core/src/db.rs` 定义 SQLite schema、迁移与查询。当前 schema 是 **v49**。版本沿革见 [storage-migration.zh-CN.md](storage-migration.zh-CN.md)。`provider_contracts.rs` 负责供应商合约范围、按模型/按协议覆盖、effective 合约推导与模型协议证据。`models.rs` 定义共享 serde 类型和 `AppConfig`。本机 Key 存放在 `ocg-infra::crypto`（门面 `ocg_core::crypto`）：AES-256-GCM `v2:` 密文，不是 KMS。旧 XOR 仍可解密；正确的 `open_with_cipher` 会在同一事务里把剩余账号 `key_cipher` / `password_cipher` 改写成 v2。Windows 桌面使用 `MachineBoundCipher`；CLI/Docker 使用来自 `OCG_MANAGER_ENCRYPTION_KEY` 或 `<data-dir>/.encryption-key` 的 `StaticKeyCipher`。生产宿主必须调用 `Database::open_with_cipher`，让密文探测使用已经解析的 cipher。比本构建支持的更新 schema 会 fail closed。
+`crates/ocg-core/src/db.rs` 定义 SQLite schema、迁移与查询。当前 schema 是 **v62**。版本沿革见 [storage-migration.zh-CN.md](storage-migration.zh-CN.md)。v60 增量保存本机按 Key 额度恢复运行时列 `credentials.quota_recovery_json`，不进入可移植导出。重启保留等待与退避，不保留探测租约。`provider_contracts.rs` 负责供应商合约范围、按模型/按协议覆盖、effective 合约推导与模型协议证据。`models.rs` 定义共享 serde 类型和 `AppConfig`。本机 Key 存放在 `ocg-infra::crypto`（门面 `ocg_core::crypto`）：AES-256-GCM `v2:` 密文，不是 KMS。旧 XOR 仍可解密；正确的 `open_with_cipher` 会在同一事务里把剩余账号 `key_cipher` / `password_cipher` 改写成 v2。Windows 桌面使用 `MachineBoundCipher`；CLI/Docker 使用来自 `OCG_MANAGER_ENCRYPTION_KEY` 或 `<data-dir>/.encryption-key` 的 `StaticKeyCipher`。生产宿主必须调用 `Database::open_with_cipher`，让密文探测使用已经解析的 cipher。比本构建支持的更新 schema 会 fail closed。
 
-升级路径上历史版本仍然重要：
+升级路径上的历史版本：
 
 - v16：托管 setup 列。
-- v21：usage-sync 元数据（v27 从 `accounts` 迁走）。
+- v21：usage-sync 元数据（现在在 `provider_usage_sync_state`）。
 - v22：不可变 provider/offering 绑定、供应商价格/用量、额度窗口、供应商感知转发日志。
 - v23：Plan 验证状态、别名 / 上游日志身份、可选原生成本、Custom 配置表。
 - v24：转发日志新增实际代理路由段（`auto` / `proxy` / `direct`；历史空串= 未记录）。

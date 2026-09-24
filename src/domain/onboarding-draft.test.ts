@@ -337,9 +337,9 @@ test("saved-key indicator requires api_key material on the exact connection and 
   }), false);
 });
 
-test("destination origin lowercases host and keeps an explicit 443 port", () => {
+test("destination origin lowercases host and omits default HTTPS 443", () => {
   assert.equal(
     destinationOriginFromEndpointUrl("https://API.Example.com:443/v1/chat"),
-    "https://api.example.com:443",
+    "https://api.example.com",
   );
 });

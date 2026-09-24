@@ -1,12 +1,12 @@
-//! Custom API runtime helpers: capability matching, verification probe, and
-//! per-account route identity.
+//! Custom API runtime helpers: connection-owned route configuration projected
+//! per credential for capability matching and verification.
 //!
 //! Account model capabilities are the client-facing IDs and the exact upstream
-//! IDs, each bound to the account's one upstream protocol. Verification sends
+//! IDs, each bound to its effective destination route. Verification sends
 //! one protocol-correct non-stream request against the first declared model.
 //! Discovery never mutates the declared list.
 //! The adapter identity is Configurable HTTP, not a base class other providers
-//! inherit from. Custom keeps a configurable API URL and explicit enablement;
+//! inherit from. Custom keeps destination-owned HTTP configuration and per-Key enablement;
 //! connection verification is an optional tool, not an enablement gate.
 
 use crate::custom_http::{
@@ -58,8 +58,14 @@ pub struct CustomAccountRuntime {
     pub verification_status: ConnectionVerificationStatus,
     pub setup_ready: bool,
     pub has_key: bool,
+    pub auth_kind: ocg_domain::dynamic::DynamicAuthKind,
     pub config: AccountCustomConfig,
     pub capabilities: Vec<AccountModelCapability>,
+    pub route_overrides: Vec<(String, ocg_domain::dynamic::DynamicModelUpstreamOverride)>,
+    /// Linked New API / Sub2API Key: the site converts Chat, Messages, and
+    /// Responses, so the contract enables those protocols and the gateway
+    /// passes the matching client format through.
+    pub protocol_passthrough: bool,
 }
 
 impl CustomAccountRuntime {
@@ -71,6 +77,42 @@ impl CustomAccountRuntime {
         self.capabilities
             .iter()
             .find(|capability| custom_model_id_matches(&capability.public_model, requested))
+    }
+
+    pub fn route_override_matching_public(
+        &self,
+        requested: &str,
+    ) -> Option<&ocg_domain::dynamic::DynamicModelUpstreamOverride> {
+        self.route_overrides
+            .iter()
+            .find(|(public_model, _)| custom_model_id_matches(public_model, requested))
+            .map(|(_, route)| route)
+    }
+
+    /// Public-name / protocol rows used to build the Custom contract.
+    ///
+    /// A passthrough Key advertises Chat, Responses, and Messages for each
+    /// declared model so client formats pass through. Ordinary Custom Keys
+    /// keep the single stored protocol.
+    pub fn declared_protocols(&self) -> Vec<(String, UpstreamProtocolKind)> {
+        if !self.protocol_passthrough {
+            return self
+                .capabilities
+                .iter()
+                .map(|capability| (capability.public_model.clone(), capability.protocol))
+                .collect();
+        }
+        let mut rows = Vec::new();
+        let mut seen = HashSet::new();
+        for capability in &self.capabilities {
+            if !seen.insert(capability.public_model.to_ascii_lowercase()) {
+                continue;
+            }
+            for protocol in UpstreamProtocolKind::ALL {
+                rows.push((capability.public_model.clone(), protocol));
+            }
+        }
+        rows
     }
 }
 

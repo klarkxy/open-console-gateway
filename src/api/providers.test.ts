@@ -160,7 +160,7 @@ test("Go protocol probe sends only provider, model, and protocol intent", async 
 
   assert.equal(result.model_id, "gpt-5.6-luna");
   assert.deepEqual(requests[0], {
-    url: "/dashboard/api/v3/providers/opencode/protocol-probes",
+    url: "/dashboard/api/v4/providers/opencode/protocol-probes",
     method: "POST",
     body: {
       modelId: "gpt-5.6-luna",
@@ -189,9 +189,44 @@ test("unified catalog refresh sends only the selected contract scope and CAS tok
   await providerApi.refreshContractCatalog("provider", "opencode");
 
   assert.deepEqual(requests, [{
-    url: "/dashboard/api/v3/provider-contracts/provider/opencode/catalog/refresh",
+    url: "/dashboard/api/v4/provider-contracts/provider/opencode/catalog/refresh",
     method: "POST",
     body: { expectedRevision: 12, processGeneration: 42 },
+  }]);
+});
+
+test("provider protocol override sends only selected Key grants with its captured CAS pair", async () => {
+  setupControlPlane(12, 42, "p1");
+  const requests = installFetchMock(({ url, method }) => {
+    if (url.endsWith("/provider-contracts/provider/opencode/model-protocol-overrides") && method === "PUT") {
+      return {
+        revision: 9,
+        processGeneration: 42,
+        pricingRevision: "p1",
+        providers: [],
+        customEndpoints: [],
+      };
+    }
+    throw new Error(`unexpected request ${method} ${url}`);
+  });
+
+  await providerApi.updateModelProtocolOverrides(
+    "provider",
+    "opencode",
+    [{ model_id: "mimo-v2.6-flash", protocol: "responses", state: "force_on" }],
+    ["key-selected"],
+    { expectedRevision: 8, processGeneration: 42 },
+  );
+
+  assert.deepEqual(requests, [{
+    url: "/dashboard/api/v4/provider-contracts/provider/opencode/model-protocol-overrides",
+    method: "PUT",
+    body: {
+      overrides: [{ modelId: "mimo-v2.6-flash", protocol: "responses", state: "force_on" }],
+      authorizeCredentialIds: ["key-selected"],
+      expectedRevision: 8,
+      processGeneration: 42,
+    },
   }]);
 });
 
@@ -226,7 +261,7 @@ test("catalog remove posts V4 model ids then reloads contracts", async () => {
       body: { modelIds: ["drop-me"], expectedRevision: 12, processGeneration: 42 },
     },
     {
-      url: "/dashboard/api/v3/provider-contracts",
+      url: "/dashboard/api/v4/provider-contracts",
       method: "GET",
       body: null,
     },
@@ -251,13 +286,16 @@ test("Custom endpoint protocol probe stays blocked while overrides use the model
     throw new Error(`unsupported request ${url}`);
   });
 
+  // The probe is guarded client-side: it rejects as an Error and never
+  // reaches the network.
   await assert.rejects(
     () => providerApi.runProtocolProbes("custom", {
       model_id: "Org/Model",
       protocols: ["chat_completions"],
     }),
-    /尚未纳入 Dashboard V3 合同/,
+    Error,
   );
+  assert.equal(requests.length, 0, "blocked custom probe must not issue any request");
   await providerApi.updateModelProtocolOverrides(
     "custom_endpoint",
     "custom-1",
@@ -266,7 +304,7 @@ test("Custom endpoint protocol probe stays blocked while overrides use the model
   assert.deepEqual(requests.map(({ method, url }) => ({ method, url })), [
     {
       method: "PUT",
-      url: "/dashboard/api/v3/provider-contracts/custom-endpoint/custom-1/model-protocol-overrides",
+      url: "/dashboard/api/v4/provider-contracts/custom-endpoint/custom-1/model-protocol-overrides",
     },
   ]);
   assert.deepEqual(requests[0]?.body, {
@@ -327,10 +365,10 @@ test("Zen Free provider settings reject non-Zen accounts before the dedicated wr
 
   await assert.rejects(
     () => providerApi.updateProviderSettings("go-account-2", { enabled: false }),
-    /only Zen Free has provider settings/,
+    (error: unknown) => error instanceof Error && error.message.includes("Zen Free"),
   );
   assert.deepEqual(requests.map(({ method, url }) => ({ method, url })), [
-    { method: "GET", url: "/dashboard/api/v3/accounts/go-account-2" },
+    { method: "GET", url: "/dashboard/api/v4/accounts/go-account-2" },
   ]);
 });
 
@@ -360,7 +398,7 @@ test("Zen Free enable switch writes the catalog provider through PATCH /provider
   assert.equal(result.account.enabled, false);
   assert.equal(result.revision, 13);
   assert.deepEqual(requests[1], {
-    url: "/dashboard/api/v3/providers/zen-free",
+    url: "/dashboard/api/v4/providers/zen-free",
     method: "PATCH",
     body: {
       enabled: false,

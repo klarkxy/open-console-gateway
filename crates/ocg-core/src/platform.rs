@@ -1,7 +1,9 @@
-//! Account-owned New API and Sub2API metadata. Inference remains Custom HTTP.
+//! Account-owned New API and Sub2API metadata. Inference remains Custom HTTP
+//! with the site root as the endpoint; linked Keys pass client protocols through.
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+pub mod import;
 pub mod reader;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -137,17 +139,25 @@ pub struct PortablePlatformLink {
     pub group: PlatformGroup,
 }
 
+/// Site root stored as the Custom endpoint while a Key is linked.
+///
+/// New API and Sub2API convert Chat Completions, Messages, and Responses
+/// themselves. Request-time path selection uses this root plus the client
+/// protocol; OCG does not pick or convert a single upstream protocol per Key.
+pub fn hosted_endpoint(base: &str) -> anyhow::Result<String> {
+    validate_platform_base_url(base)
+}
+
 pub fn inference_endpoint(
     base: &str,
     protocol: crate::provider::UpstreamProtocolKind,
 ) -> anyhow::Result<String> {
-    let base = validate_platform_base_url(base)?;
+    let base = hosted_endpoint(base)?;
     let suffix = match protocol {
         crate::provider::UpstreamProtocolKind::ChatCompletions => "chat/completions",
         crate::provider::UpstreamProtocolKind::Responses => "responses",
         crate::provider::UpstreamProtocolKind::Messages => "messages",
     };
-    let base = base.strip_suffix("/v1").unwrap_or(&base);
     Ok(format!("{base}/v1/{suffix}"))
 }
 
@@ -160,4 +170,22 @@ pub fn validate_platform_base_url(value: &str) -> anyhow::Result<String> {
         "platform address must be the site root, not a complete inference endpoint"
     );
     Ok(base.strip_suffix("/v1").unwrap_or(&base).to_string())
+}
+
+#[cfg(test)]
+mod hosted_endpoint_tests {
+    use super::*;
+
+    #[test]
+    fn hosted_endpoint_is_the_site_root() {
+        assert_eq!(
+            hosted_endpoint("https://api.example.com/v1").unwrap(),
+            "https://api.example.com"
+        );
+        assert_eq!(
+            hosted_endpoint("https://api.example.com").unwrap(),
+            "https://api.example.com"
+        );
+        assert!(hosted_endpoint("https://api.example.com/v1/chat/completions").is_err());
+    }
 }

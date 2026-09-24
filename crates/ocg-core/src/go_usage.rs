@@ -7,9 +7,11 @@
 //! `d4704347465c1ee63d0c213ed00e648e7f0231c5`.
 
 use crate::models::AppConfig;
+use crate::usage_http::{
+    UsageHttpError, WindowOutOfRange, bounded_resets_in_minutes, ceil_minutes_until,
+    classify_transport, read_ok_body,
+};
 use chrono::{DateTime, Utc};
-use futures_util::StreamExt;
-use reqwest::StatusCode;
 use serde_json::Value;
 use std::fmt;
 use std::time::Duration;
@@ -33,8 +35,8 @@ pub enum GoUsageWindowStatus {
 
 /// Pure data snapshot used to calibrate local Go usage windows.
 ///
-/// `monthly` `resetsAt` is validated when fetching but is not converted into
-/// local remaining minutes — month reset still follows `purchase_date`.
+/// Official reset minutes are retained for quota evidence. Local monthly
+/// calibration still follows `purchase_date`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GoUsageSnapshot {
     pub rolling_status: GoUsageWindowStatus,
@@ -45,6 +47,7 @@ pub struct GoUsageSnapshot {
     pub monthly_percent: f64,
     pub rolling_resets_in_minutes: i64,
     pub weekly_resets_in_minutes: i64,
+    pub monthly_resets_in_minutes: i64,
     /// Earliest of the three official `resetsAt` values, in whole minutes from
     /// the parse clock. Used to schedule a post-reset reconciliation.
     pub earliest_resets_in_minutes: i64,
@@ -82,6 +85,26 @@ impl fmt::Display for GoUsageError {
 
 impl std::error::Error for GoUsageError {}
 
+impl From<UsageHttpError> for GoUsageError {
+    fn from(error: UsageHttpError) -> Self {
+        match error {
+            UsageHttpError::Unauthorized => Self::Unauthorized,
+            UsageHttpError::Forbidden => Self::Forbidden,
+            UsageHttpError::RateLimited => Self::RateLimited,
+            UsageHttpError::Http(status) => Self::Http(status),
+            UsageHttpError::Timeout => Self::Timeout,
+            UsageHttpError::Network => Self::Network,
+            UsageHttpError::Oversize => Self::Oversize,
+        }
+    }
+}
+
+impl From<WindowOutOfRange> for GoUsageError {
+    fn from(_: WindowOutOfRange) -> Self {
+        Self::Window
+    }
+}
+
 /// Fetch the official Go usage snapshot for `api_key`.
 ///
 /// Always uses [`GO_USAGE_URL`]. Tests that need a local server must call the
@@ -101,7 +124,7 @@ pub(crate) async fn fetch_go_usage_from(
 ) -> Result<GoUsageSnapshot, GoUsageError> {
     let client = crate::http_client::configured_builder(config)
         .map_err(|_| GoUsageError::Network)?
-        .redirect(reqwest::redirect::Policy::none())
+        .redirect(crate::http_client::no_redirect_policy())
         .timeout(REQUEST_TIMEOUT)
         .build()
         .map_err(|_| GoUsageError::Network)?;
@@ -111,39 +134,12 @@ pub(crate) async fn fetch_go_usage_from(
         .bearer_auth(api_key)
         .send()
         .await
-        .map_err(map_reqwest_error)?;
+        .map_err(|error| GoUsageError::from(classify_transport(&error)))?;
 
-    match response.status() {
-        StatusCode::OK => {
-            let body = read_body_limited(response).await?;
-            parse_go_usage_body(&body, Utc::now())
-        }
-        StatusCode::UNAUTHORIZED => Err(GoUsageError::Unauthorized),
-        StatusCode::FORBIDDEN => Err(GoUsageError::Forbidden),
-        StatusCode::TOO_MANY_REQUESTS => Err(GoUsageError::RateLimited),
-        status => Err(GoUsageError::Http(status.as_u16())),
-    }
-}
-
-async fn read_body_limited(response: reqwest::Response) -> Result<Vec<u8>, GoUsageError> {
-    let mut body = Vec::new();
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(map_reqwest_error)?;
-        if body.len().saturating_add(chunk.len()) > MAX_BODY_BYTES {
-            return Err(GoUsageError::Oversize);
-        }
-        body.extend_from_slice(&chunk);
-    }
-    Ok(body)
-}
-
-fn map_reqwest_error(error: reqwest::Error) -> GoUsageError {
-    if error.is_timeout() {
-        GoUsageError::Timeout
-    } else {
-        GoUsageError::Network
-    }
+    let body = read_ok_body(response, MAX_BODY_BYTES)
+        .await
+        .map_err(GoUsageError::from)?;
+    parse_go_usage_body(&body, Utc::now())
 }
 
 fn parse_go_usage_body(bytes: &[u8], now: DateTime<Utc>) -> Result<GoUsageSnapshot, GoUsageError> {
@@ -185,6 +181,7 @@ fn parse_go_usage_body(bytes: &[u8], now: DateTime<Utc>) -> Result<GoUsageSnapsh
         monthly_percent: monthly.percent,
         rolling_resets_in_minutes,
         weekly_resets_in_minutes,
+        monthly_resets_in_minutes,
         earliest_resets_in_minutes,
     })
 }
@@ -217,7 +214,9 @@ fn parse_window(
         .map_err(|_| GoUsageError::Schema)?;
 
     let resets_in_minutes = match max_minutes {
-        Some(max) => Some(bounded_resets_in_minutes(resets_at, now, max)?),
+        Some(max) => {
+            Some(bounded_resets_in_minutes(resets_at, now, max).map_err(GoUsageError::from)?)
+        }
         None => None,
     };
 
@@ -241,34 +240,6 @@ fn parse_percent(value: &Value) -> Result<f64, GoUsageError> {
         return Err(GoUsageError::Schema);
     }
     Ok(percent)
-}
-
-fn bounded_resets_in_minutes(
-    resets_at: DateTime<Utc>,
-    now: DateTime<Utc>,
-    max: i64,
-) -> Result<i64, GoUsageError> {
-    let minutes = ceil_minutes_until(resets_at, now);
-    // Official expired windows return exactly `window` hours from server now.
-    // Ceil-to-minutes plus sub-second skew is commonly max+1, not a new length.
-    if minutes <= max {
-        Ok(minutes)
-    } else if minutes == max + 1 {
-        Ok(max)
-    } else {
-        Err(GoUsageError::Window)
-    }
-}
-
-fn ceil_minutes_until(resets_at: DateTime<Utc>, now: DateTime<Utc>) -> i64 {
-    if resets_at <= now {
-        return 0;
-    }
-    let millis = (resets_at - now).num_milliseconds();
-    if millis <= 0 {
-        return 0;
-    }
-    (millis + 59_999) / 60_000
 }
 
 #[cfg(test)]

@@ -12,6 +12,8 @@ import type {
   BindingPatchRequest,
   BindingPatchResult,
   ConnectionList,
+  CredentialList,
+  DestinationList,
   AliasPublication,
   AliasPublicationUpdate,
   CatalogModelsRemoveRequest,
@@ -20,20 +22,102 @@ import type {
   CpaCatalogUpdate,
   CredentialRotateRequest,
   CredentialRotateResult,
+  DestinationCatalogModelUpdate,
+  DestinationCatalogUpdate as DestinationCatalogUpdateDto,
+  DestinationDeleteResult,
+  DestinationModelTestResult,
+  DestinationPatchRequest,
+  DestinationPatchResult,
+  DestinationCatalogRefreshResult,
   DshApplication,
   DshApplicationInstallRequest,
+  HttpProtocolRouteDto,
   IdentityCredentialCreateRequest,
   IdentityCredentialCreateResult,
   IdentityList,
   OnboardingCommitRequest,
   OnboardingCommitResult,
+  ProtocolDto,
+  QuotaRecoveryDto,
+  QuotaRetryResult,
+  RoutingCardList,
+  RoutingCardUpdate,
+  RoutingClientProtocol,
+  RoutingExplanation,
   TemplateList,
 } from "./generated/dashboard-v4.ts";
+
+export type {
+  DestinationCatalogModelUpdate,
+  DestinationModelTestResult,
+  HttpProtocolRouteDto,
+  QuotaRecoveryDto,
+  QuotaRetryResult,
+};
+
+/**
+ * Catalog write body without CAS. Callers pass this business input; the
+ * client attaches `expectedRevision` and `processGeneration` per attempt.
+ */
+export type DestinationCatalogUpdate = WithoutExpectation<DestinationCatalogUpdateDto>;
 
 export const dashboardV4 = {
   getTemplates: () => requestV4<TemplateList>("/templates"),
   getConnections: () => requestV4<ConnectionList>("/connections"),
   getAccounts: () => requestV4<IdentityList>("/accounts"),
+  getDestinations: () => requestV4<DestinationList>("/destinations"),
+  getCredentials: () => requestV4<CredentialList>("/credentials"),
+  refreshDestinationCatalog: (id: string, expectation: MutationExpectation) =>
+    requestV4<DestinationCatalogRefreshResult>(
+      `/destinations/${encodeURIComponent(id)}/catalog/refresh`,
+      { method: "POST", body: withExpectation({}, expectation) },
+    ),
+  updateDestinationCatalog: (id: string, input: WithoutExpectation<DestinationCatalogUpdate>, expectation: MutationExpectation) =>
+    requestV4<DestinationPatchResult>(
+      `/destinations/${encodeURIComponent(id)}/catalog`,
+      { method: "PUT", body: withExpectation(input, expectation) },
+    ),
+  testDestinationModel: (
+    id: string,
+    publicModel: string,
+    protocol: ProtocolDto,
+    expectation: MutationExpectation,
+  ) =>
+    requestV4<DestinationModelTestResult>(
+      `/destinations/${encodeURIComponent(id)}/model-tests`,
+      { method: "POST", body: withExpectation({ publicModel, protocol }, expectation) },
+    ),
+  getRoutingCards: () => requestV4<RoutingCardList>("/routing/cards"),
+  putRoutingCards: (
+    input: WithoutExpectation<RoutingCardUpdate>,
+    expectation: MutationExpectation,
+  ) => requestV4<RoutingCardList>("/routing/cards", {
+    method: "PUT",
+    body: withExpectation(input, expectation),
+  }),
+  patchDestination: (
+    id: string,
+    input: WithoutExpectation<DestinationPatchRequest>,
+    expectation: MutationExpectation,
+  ) => requestV4<DestinationPatchResult>(
+    `/destinations/${encodeURIComponent(id)}`,
+    {
+      method: "PATCH",
+      body: withExpectation(input, expectation),
+    },
+  ),
+  deleteDestination: (id: string, expectation: MutationExpectation) =>
+    requestV4<DestinationDeleteResult>(
+      `/destinations/${encodeURIComponent(id)}`,
+      {
+        method: "DELETE",
+        body: withExpectation({}, expectation),
+      },
+    ),
+  explainRouting: (model: string, clientProtocol: RoutingClientProtocol) =>
+    requestV4<RoutingExplanation>(
+      `/routing/explain?model=${encodeURIComponent(model)}&clientProtocol=${encodeURIComponent(clientProtocol)}`,
+    ),
   commitOnboarding: (
     input: WithoutExpectation<OnboardingCommitRequest>,
     expectation: MutationExpectation,
@@ -50,6 +134,16 @@ export const dashboardV4 = {
     {
       method: "POST",
       body: withExpectation(input, expectation),
+    },
+  ),
+  retryCredentialQuota: (
+    id: string,
+    expectation: MutationExpectation,
+  ) => requestV4<QuotaRetryResult>(
+    `/credentials/${encodeURIComponent(id)}/quota-retry`,
+    {
+      method: "POST",
+      body: withExpectation({}, expectation),
     },
   ),
   patchBinding: (

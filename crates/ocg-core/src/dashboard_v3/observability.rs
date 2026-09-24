@@ -69,15 +69,11 @@ pub(super) async fn get_dashboard_summary(
     State(state): State<CoreState>,
 ) -> Result<Json<DashboardSummary>, V3ApiError> {
     let _settings_update = state.settings_update.lock();
-    let contracts = state.provider_contracts();
     let summary = {
         let db = state.db.lock();
-        observability::dashboard_summary(
-            &db,
-            state.gateway.lock().is_some(),
-            &contracts,
-            |cipher| state.decrypt_key(cipher).ok(),
-        )
+        observability::dashboard_summary(&db, state.gateway.lock().is_some(), |cipher| {
+            state.decrypt_key(cipher).ok()
+        })
         .map_err(|error| map_error(&state, error))?
     };
     let (revision, process_generation, pricing_revision) = snapshot_tokens(&state);

@@ -1,13 +1,61 @@
 {
-  "$comment": "Extensible Dashboard V4 contract catalog. Add new $defs for later DTOs; do not rename or reshape existing definitions. Connection and template listings are secret-free. OnboardingCommitRequest.secretInput, CredentialRotateRequest.secretInput, and IdentityCredentialCreateRequest.secretInput are write-only.",
+  "$comment": "Extensible Dashboard V4 contract catalog. Add new $defs for later DTOs; do not rename or reshape existing definitions. Connection, template, destination, and credential listings are secret-free. OnboardingCommitRequest.secretInput, CredentialRotateRequest.secretInput, and IdentityCredentialCreateRequest.secretInput are write-only.",
   "$defs": {
     "AccountAuthScheme": {
       "description": "Custom auth scheme. Wire values match V2 kebab-case.",
       "enum": [
         "bearer",
-        "x-api-key"
+        "x-api-key",
+        "api-key"
       ],
       "type": "string"
+    },
+    "AccountConfigurationOwnerDto": {
+      "description": "Owner of endpoint, protocol and model configuration.",
+      "enum": [
+        "account",
+        "destination"
+      ],
+      "type": "string"
+    },
+    "AccountConsoleLinkDto": {
+      "enum": [
+        "opencode",
+        "ollama"
+      ],
+      "type": "string"
+    },
+    "AccountControlsDto": {
+      "additionalProperties": false,
+      "description": "Read-only account actions derived from the destination's resource ownership.",
+      "properties": {
+        "browserProfile": {
+          "type": "boolean"
+        },
+        "configurationOwner": {
+          "$ref": "#/$defs/AccountConfigurationOwnerDto"
+        },
+        "consoleLink": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AccountConsoleLinkDto"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "toggleWrite": {
+          "$ref": "#/$defs/AccountToggleWriteDto"
+        }
+      },
+      "required": [
+        "toggleWrite",
+        "configurationOwner",
+        "consoleLink",
+        "browserProfile"
+      ],
+      "type": "object"
     },
     "AccountCredentialKind": {
       "description": "Wire identity matching V2 `api_key` / `none`.",
@@ -17,12 +65,34 @@
       ],
       "type": "string"
     },
+    "AccountToggleWriteDto": {
+      "description": "Persistence target for the account enable switch.",
+      "enum": [
+        "account",
+        "provider_settings"
+      ],
+      "type": "string"
+    },
     "AccountUpstreamProtocol": {
       "description": "Custom/upstream protocol. Wire values match V2 snake_case.",
       "enum": [
         "chat_completions",
         "responses",
         "messages"
+      ],
+      "type": "string"
+    },
+    "AdapterKindDto": {
+      "description": "Sealed adapter kind. Wire values match the domain serde names.",
+      "enum": [
+        "opencode_go",
+        "zen",
+        "goat",
+        "minimax",
+        "kimi",
+        "ollama",
+        "cpa",
+        "http"
       ],
       "type": "string"
     },
@@ -75,6 +145,16 @@
       ],
       "type": "object"
     },
+    "AuthSchemeDto": {
+      "description": "Destination auth scheme. Wire values match the domain serde names.",
+      "enum": [
+        "none",
+        "bearer",
+        "x_api_key",
+        "api_key"
+      ],
+      "type": "string"
+    },
     "AuthState": {
       "enum": [
         "unknown",
@@ -112,6 +192,110 @@
         "invalid"
       ],
       "type": "string"
+    },
+    "BillingModel": {
+      "enum": [
+        "quota",
+        "cash",
+        "credits"
+      ],
+      "type": "string"
+    },
+    "BillingSource": {
+      "enum": [
+        "official",
+        "local_estimate",
+        "unavailable"
+      ],
+      "type": "string"
+    },
+    "BillingStatus": {
+      "additionalProperties": false,
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "cash": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OfficialApiStatus"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "configurableCredits": {
+          "type": "boolean"
+        },
+        "credits": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CreditMeterView"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "manualCalibration": {
+          "type": "boolean"
+        },
+        "model": {
+          "$ref": "#/$defs/BillingModel"
+        },
+        "officialRefresh": {
+          "type": "boolean"
+        },
+        "presets": {
+          "items": {
+            "$ref": "#/$defs/CreditPreset"
+          },
+          "type": "array"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "source": {
+          "$ref": "#/$defs/BillingSource"
+        },
+        "unit": {
+          "type": "string"
+        },
+        "usage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderUsage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "accountId",
+        "model",
+        "source",
+        "unit",
+        "configurableCredits",
+        "manualCalibration",
+        "officialRefresh",
+        "usage",
+        "cash",
+        "credits",
+        "presets",
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
     },
     "BindingDto": {
       "additionalProperties": false,
@@ -228,6 +412,115 @@
       ],
       "type": "object"
     },
+    "CapabilitiesDto": {
+      "additionalProperties": false,
+      "description": "Destination capability flags. Mirrors the domain `Capabilities` record.",
+      "properties": {
+        "billingTierRequired": {
+          "description": "A billing tier must be selected before the destination is usable.",
+          "type": "boolean"
+        },
+        "discoverableModels": {
+          "description": "The destination can discover models from the upstream.",
+          "type": "boolean"
+        },
+        "externalIntegration": {
+          "description": "The destination is an external integration and holds no local inference secret.",
+          "type": "boolean"
+        },
+        "identityHeaders": {
+          "description": "The adapter attaches identity headers on egress.",
+          "type": "boolean"
+        },
+        "managedSignup": {
+          "description": "Managed signup can start an onboarding task on a credential.",
+          "type": "boolean"
+        },
+        "observer": {
+          "description": "The destination holds a non-inference observer credential (platform parent).",
+          "type": "boolean"
+        },
+        "officialBalanceProbe": {
+          "description": "Hosts Configurable HTTP may probe for an official current-balance API.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "redirectPolicy": {
+          "$ref": "#/$defs/RedirectPolicyDto"
+        },
+        "testable": {
+          "description": "Test connection is offered on every ready credential except external integrations.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "testable",
+        "discoverableModels",
+        "officialBalanceProbe",
+        "observer",
+        "managedSignup",
+        "externalIntegration",
+        "billingTierRequired",
+        "redirectPolicy",
+        "identityHeaders"
+      ],
+      "type": "object"
+    },
+    "CatalogModelDto": {
+      "additionalProperties": false,
+      "description": "One catalog model on a destination.",
+      "properties": {
+        "enabled": {
+          "description": "Whether any protocol is enabled.",
+          "type": "boolean"
+        },
+        "preferred": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProtocolDto"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "protocols": {
+          "items": {
+            "$ref": "#/$defs/ProtocolDto"
+          },
+          "type": "array"
+        },
+        "publicModel": {
+          "description": "Public name exposed to clients.",
+          "type": "string"
+        },
+        "upstreamModel": {
+          "description": "Upstream model id sent on egress.",
+          "type": "string"
+        },
+        "upstreamOverride": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DestinationUpstreamOverridePatch"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "publicModel",
+        "upstreamModel",
+        "protocols",
+        "preferred",
+        "enabled",
+        "upstreamOverride"
+      ],
+      "type": "object"
+    },
     "CatalogModelsRemoveRequest": {
       "additionalProperties": false,
       "description": "Remove models from a persisted built-in Provider catalog snapshot.\n\nLocal-only. An official catalog refresh may add the same IDs back.",
@@ -297,6 +590,10 @@
         "locked": {
           "type": "boolean"
         },
+        "officialBalance": {
+          "description": "Official balance support for this exact configured URL, including its path.",
+          "type": "boolean"
+        },
         "operation": {
           "$ref": "#/$defs/EndpointOperation"
         },
@@ -311,6 +608,7 @@
         }
       },
       "required": [
+        "officialBalance",
         "id",
         "connectionId",
         "operation",
@@ -373,6 +671,19 @@
           "minimum": 0,
           "type": "integer"
         },
+        "credentialCreate": {
+          "$ref": "#/$defs/CredentialCreateCapabilityDto"
+        },
+        "creditPresets": {
+          "description": "Personal credit setup for Key forms. None means unsupported; an empty\nlist permits custom configuration without a provider preset.",
+          "items": {
+            "$ref": "#/$defs/CreditPreset"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "displayFamily": {
           "type": [
             "string",
@@ -434,6 +745,7 @@
         }
       },
       "required": [
+        "credentialCreate",
         "id",
         "name",
         "origin",
@@ -597,6 +909,99 @@
       ],
       "type": "object"
     },
+    "CredentialCooldownsDto": {
+      "additionalProperties": false,
+      "description": "Per-window cooldown timestamps on a projected credential.",
+      "properties": {
+        "fiveHourUntil": {
+          "description": "Five-hour window cooldown expiry as RFC 3339, or null.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "freeUntil": {
+          "description": "Free-window cooldown expiry as RFC 3339, or null.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "genericUntil": {
+          "description": "Generic cooldown expiry as RFC 3339, or null.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "monthUntil": {
+          "description": "Monthly window cooldown expiry as RFC 3339, or null.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "weekUntil": {
+          "description": "Weekly window cooldown expiry as RFC 3339, or null.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "genericUntil",
+        "fiveHourUntil",
+        "weekUntil",
+        "monthUntil",
+        "freeUntil"
+      ],
+      "type": "object"
+    },
+    "CredentialCreateCapabilityDto": {
+      "additionalProperties": false,
+      "description": "Server-owned operation capability; writes recheck it against current state.",
+      "properties": {
+        "allowed": {
+          "type": "boolean"
+        },
+        "materialKinds": {
+          "items": {
+            "$ref": "#/$defs/MaterialKind"
+          },
+          "type": "array"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CredentialCreateUnavailableReasonDto"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "allowed",
+        "materialKinds",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "CredentialCreateUnavailableReasonDto": {
+      "description": "Why this connection cannot accept another credential through identity creation.",
+      "enum": [
+        "external_integration",
+        "singleton",
+        "no_authentication",
+        "dedicated_account_flow",
+        "builtin_definition",
+        "unavailable",
+        "draft"
+      ],
+      "type": "string"
+    },
     "CredentialDto": {
       "additionalProperties": false,
       "properties": {
@@ -649,6 +1054,51 @@
         "authState",
         "authStateVersion",
         "expiresAt"
+      ],
+      "type": "object"
+    },
+    "CredentialGrantsDto": {
+      "additionalProperties": false,
+      "description": "Allowed egress grants on a projected credential.",
+      "properties": {
+        "allowedEndpointIds": {
+          "description": "Endpoint ids this secret may be sent to.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "allowedOrigins": {
+          "description": "Origins this secret may be sent to.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "allowedEndpointIds",
+        "allowedOrigins"
+      ],
+      "type": "object"
+    },
+    "CredentialList": {
+      "additionalProperties": false,
+      "description": "RFC credential list. Revision-tagged and secret-free.",
+      "properties": {
+        "credentials": {
+          "items": {
+            "$ref": "#/$defs/DestinationCredentialDto"
+          },
+          "type": "array"
+        },
+        "revision": {
+          "$ref": "#/$defs/ControlRevision"
+        }
+      },
+      "required": [
+        "revision",
+        "credentials"
       ],
       "type": "object"
     },
@@ -787,6 +1237,401 @@
       ],
       "type": "object"
     },
+    "CreditBalance": {
+      "additionalProperties": false,
+      "description": "One credit balance row as projected for provider usage. Distinct from the\nstored provider credit row.",
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "amount": {
+          "format": "double",
+          "type": "number"
+        },
+        "balanceKind": {
+          "type": "string"
+        },
+        "observedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "type": "string"
+        },
+        "unit": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "accountId",
+        "balanceKind",
+        "amount",
+        "unit",
+        "source",
+        "observedAt",
+        "updatedAt"
+      ],
+      "type": "object"
+    },
+    "CreditBalanceCorrection": {
+      "additionalProperties": false,
+      "properties": {
+        "bucketId": {
+          "type": "string"
+        },
+        "remaining": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "bucketId",
+        "remaining"
+      ],
+      "type": "object"
+    },
+    "CreditBucket": {
+      "additionalProperties": false,
+      "properties": {
+        "expiresAt": {
+          "format": "date-time",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "granted": {
+          "format": "double",
+          "type": "number"
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/CreditBucketKind"
+        },
+        "label": {
+          "type": "string"
+        },
+        "remaining": {
+          "format": "double",
+          "type": "number"
+        },
+        "startsAt": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "label",
+        "granted",
+        "remaining",
+        "startsAt",
+        "expiresAt"
+      ],
+      "type": "object"
+    },
+    "CreditBucketKind": {
+      "enum": [
+        "monthly",
+        "top_up",
+        "manual"
+      ],
+      "type": "string"
+    },
+    "CreditCalibrationRequest": {
+      "additionalProperties": false,
+      "description": "Required process-scoped mutation precondition.\n\nBoth fields travel at the top level of every mutation request. The random\nprocess generation prevents a revision captured before restart from being\naccepted by a fresh process whose in-memory counter reused the same value.",
+      "properties": {
+        "balances": {
+          "items": {
+            "$ref": "#/$defs/CreditBalanceCorrection"
+          },
+          "type": "array"
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "balances",
+        "expectedRevision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "CreditConfiguration": {
+      "additionalProperties": false,
+      "properties": {
+        "creditsPerCurrency": {
+          "format": "double",
+          "type": "number"
+        },
+        "currency": {
+          "type": "string"
+        },
+        "monthly": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MonthlyCredits"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "rates": {
+          "items": {
+            "$ref": "#/$defs/CreditRate"
+          },
+          "type": "array"
+        },
+        "sourceUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "currency",
+        "creditsPerCurrency",
+        "rates",
+        "monthly",
+        "sourceUrl"
+      ],
+      "type": "object"
+    },
+    "CreditConfigureRequest": {
+      "additionalProperties": false,
+      "description": "Required process-scoped mutation precondition.\n\nBoth fields travel at the top level of every mutation request. The random\nprocess generation prevents a revision captured before restart from being\naccepted by a fresh process whose in-memory counter reused the same value.",
+      "properties": {
+        "configuration": {
+          "$ref": "#/$defs/CreditConfiguration"
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "initialBuckets": {
+          "description": "Required for initial setup; omitted for a rate/settings edit so balances survive.",
+          "items": {
+            "$ref": "#/$defs/CreditBucket"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "configuration",
+        "expectedRevision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "CreditGrantRequest": {
+      "additionalProperties": false,
+      "description": "Required process-scoped mutation precondition.\n\nBoth fields travel at the top level of every mutation request. The random\nprocess generation prevents a revision captured before restart from being\naccepted by a fresh process whose in-memory counter reused the same value.",
+      "properties": {
+        "amount": {
+          "format": "double",
+          "type": "number"
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "expiresAt": {
+          "format": "date-time",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "label": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "label",
+        "amount",
+        "expectedRevision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "CreditMeterView": {
+      "additionalProperties": false,
+      "properties": {
+        "activeGranted": {
+          "format": "double",
+          "type": "number"
+        },
+        "buckets": {
+          "items": {
+            "$ref": "#/$defs/CreditBucket"
+          },
+          "type": "array"
+        },
+        "configuration": {
+          "$ref": "#/$defs/CreditConfiguration"
+        },
+        "credentialId": {
+          "type": "string"
+        },
+        "estimatedAt": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "lastCalibrationAt": {
+          "format": "date-time",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "meterId": {
+          "type": "string"
+        },
+        "nextResetAt": {
+          "description": "Next actual renewal; configuration.next_reset_at remains the calendar anchor.",
+          "format": "date-time",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "overdrawn": {
+          "format": "double",
+          "type": "number"
+        },
+        "pendingRequests": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "remaining": {
+          "format": "double",
+          "type": "number"
+        },
+        "spentSinceCalibration": {
+          "format": "double",
+          "type": "number"
+        },
+        "unpricedRequests": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "credentialId",
+        "meterId",
+        "configuration",
+        "buckets",
+        "remaining",
+        "activeGranted",
+        "spentSinceCalibration",
+        "overdrawn",
+        "unpricedRequests",
+        "pendingRequests",
+        "lastCalibrationAt",
+        "estimatedAt",
+        "nextResetAt"
+      ],
+      "type": "object"
+    },
+    "CreditPreset": {
+      "additionalProperties": false,
+      "properties": {
+        "configuration": {
+          "$ref": "#/$defs/CreditConfiguration"
+        },
+        "id": {
+          "type": "string"
+        },
+        "initialGrant": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "id",
+        "configuration",
+        "initialGrant"
+      ],
+      "type": "object"
+    },
+    "CreditRate": {
+      "additionalProperties": false,
+      "properties": {
+        "cacheReadPerMillion": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "cacheWritePerMillion": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "inputPerMillion": {
+          "format": "double",
+          "type": "number"
+        },
+        "model": {
+          "type": "string"
+        },
+        "outputPerMillion": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "model",
+        "inputPerMillion",
+        "outputPerMillion",
+        "cacheReadPerMillion",
+        "cacheWritePerMillion"
+      ],
+      "type": "object"
+    },
     "DeclaredRelationDto": {
       "additionalProperties": false,
       "properties": {
@@ -800,6 +1645,682 @@
       "required": [
         "platformAccountId",
         "group"
+      ],
+      "type": "object"
+    },
+    "DestinationCatalogModelUpdate": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "preferred": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProtocolDto"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "protocols": {
+          "items": {
+            "$ref": "#/$defs/ProtocolDto"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "publicModel": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "publicModel"
+      ],
+      "type": "object"
+    },
+    "DestinationCatalogRefreshResult": {
+      "additionalProperties": false,
+      "properties": {
+        "addedCount": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "destination": {
+          "$ref": "#/$defs/DestinationDto"
+        },
+        "revision": {
+          "$ref": "#/$defs/ControlRevision"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "revision",
+        "destination",
+        "addedCount",
+        "truncated"
+      ],
+      "type": "object"
+    },
+    "DestinationCatalogUpdate": {
+      "additionalProperties": false,
+      "description": "Required process-scoped mutation precondition.\n\nBoth fields travel at the top level of every mutation request. The random\nprocess generation prevents a revision captured before restart from being\naccepted by a fresh process whose in-memory counter reused the same value.",
+      "properties": {
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "removeModels": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "updates": {
+          "items": {
+            "$ref": "#/$defs/DestinationCatalogModelUpdate"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "updates"
+      ],
+      "type": "object"
+    },
+    "DestinationCredentialDto": {
+      "additionalProperties": false,
+      "description": "RFC credential projection row. Carries `hasSecret` only; never ciphertext or plaintext.",
+      "properties": {
+        "authState": {
+          "$ref": "#/$defs/AuthState"
+        },
+        "cooldowns": {
+          "$ref": "#/$defs/CredentialCooldownsDto"
+        },
+        "destinationId": {
+          "description": "Destination this credential routes through.",
+          "type": "string"
+        },
+        "enabled": {
+          "description": "Routing enable switch (`account.enabled && binding.enabled`).",
+          "type": "boolean"
+        },
+        "grants": {
+          "$ref": "#/$defs/CredentialGrantsDto"
+        },
+        "hasSecret": {
+          "description": "Whether a secret is stored. Always false for keyless Zen and CPA.",
+          "type": "boolean"
+        },
+        "id": {
+          "description": "Stable credential id (deterministic UUIDv5 of the legacy account).",
+          "type": "string"
+        },
+        "lastError": {
+          "description": "Last error string from the legacy account row, or null.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "legacyAccountId": {
+          "description": "The V3 `accounts` row this credential was projected from (migration-era\nbridge to the V3 mutation routes).",
+          "type": "string"
+        },
+        "name": {
+          "description": "Display name.",
+          "type": "string"
+        },
+        "notes": {
+          "description": "Operator notes.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "onboardingTask": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DestinationOnboardingTaskDto"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "purchaseDate": {
+          "description": "Purchase date when the destination has a Plan.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "quotaPoolId": {
+          "description": "Shared quota pool id when the credential joined one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "quotaRecovery": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/QuotaRecoveryDto"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Confirmed per-Key exhaustion/recovery. Omitted or null means no confirmed exhaustion."
+        },
+        "routingRank": {
+          "description": "Position in the persisted account order.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scope": {
+          "$ref": "#/$defs/ModelScope"
+        }
+      },
+      "required": [
+        "id",
+        "legacyAccountId",
+        "destinationId",
+        "name",
+        "notes",
+        "hasSecret",
+        "enabled",
+        "routingRank",
+        "scope",
+        "grants",
+        "authState",
+        "lastError",
+        "cooldowns",
+        "quotaPoolId",
+        "onboardingTask",
+        "purchaseDate"
+      ],
+      "type": "object"
+    },
+    "DestinationDeleteResult": {
+      "additionalProperties": false,
+      "properties": {
+        "revision": {
+          "$ref": "#/$defs/ControlRevision"
+        }
+      },
+      "required": [
+        "revision"
+      ],
+      "type": "object"
+    },
+    "DestinationDto": {
+      "additionalProperties": false,
+      "description": "Secret-free destination facts and derived account controls.",
+      "properties": {
+        "accountControls": {
+          "$ref": "#/$defs/AccountControlsDto"
+        },
+        "adapter": {
+          "$ref": "#/$defs/AdapterKindDto"
+        },
+        "authScheme": {
+          "$ref": "#/$defs/AuthSchemeDto"
+        },
+        "baseUrl": {
+          "description": "Upstream origin. Sealed for builtin adapters; user data for `http`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "brandFamily": {
+          "description": "Brand family for grouping, when the adapter or platform kind has one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "capabilities": {
+          "$ref": "#/$defs/CapabilitiesDto"
+        },
+        "catalog": {
+          "items": {
+            "$ref": "#/$defs/CatalogModelDto"
+          },
+          "type": "array"
+        },
+        "enabled": {
+          "description": "Destination enablement.",
+          "type": "boolean"
+        },
+        "id": {
+          "description": "Stable destination id (deterministic UUIDv5 of the legacy row).",
+          "type": "string"
+        },
+        "legacy": {
+          "$ref": "#/$defs/LegacyDestinationRefDto",
+          "description": "V3 row this destination was projected from."
+        },
+        "maxCredentials": {
+          "description": "`1` for true singletons; `null` for multi-credential destinations.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "modelResolution": {
+          "$ref": "#/$defs/ModelResolutionDto",
+          "description": "Model-name resolution owned by this destination."
+        },
+        "name": {
+          "description": "Display name.",
+          "type": "string"
+        },
+        "observerCredentialId": {
+          "description": "Non-inference observer credential id when `capabilities.observer` is set.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "plan": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PlanDto"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "protocolRoutes": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/HttpProtocolRouteDto"
+          },
+          "type": "array"
+        },
+        "protocols": {
+          "items": {
+            "$ref": "#/$defs/ProtocolDto"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "accountControls",
+        "id",
+        "legacy",
+        "adapter",
+        "name",
+        "brandFamily",
+        "baseUrl",
+        "protocols",
+        "protocolRoutes",
+        "authScheme",
+        "modelResolution",
+        "catalog",
+        "capabilities",
+        "plan",
+        "maxCredentials",
+        "observerCredentialId",
+        "enabled"
+      ],
+      "type": "object"
+    },
+    "DestinationList": {
+      "additionalProperties": false,
+      "description": "RFC destination list. Revision-tagged and secret-free.",
+      "properties": {
+        "destinations": {
+          "items": {
+            "$ref": "#/$defs/DestinationDto"
+          },
+          "type": "array"
+        },
+        "revision": {
+          "$ref": "#/$defs/ControlRevision"
+        }
+      },
+      "required": [
+        "revision",
+        "destinations"
+      ],
+      "type": "object"
+    },
+    "DestinationModelPatch": {
+      "additionalProperties": false,
+      "description": "Complete public-to-upstream mapping written by a destination PATCH.",
+      "properties": {
+        "enabled": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "preferred": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProtocolDto"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "protocols": {
+          "items": {
+            "$ref": "#/$defs/ProtocolDto"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "publicModel": {
+          "type": "string"
+        },
+        "upstreamModel": {
+          "type": "string"
+        },
+        "upstreamOverride": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DestinationUpstreamOverridePatch"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "publicModel",
+        "upstreamModel"
+      ],
+      "type": "object"
+    },
+    "DestinationModelTestRequest": {
+      "additionalProperties": false,
+      "description": "Required process-scoped mutation precondition.\n\nBoth fields travel at the top level of every mutation request. The random\nprocess generation prevents a revision captured before restart from being\naccepted by a fresh process whose in-memory counter reused the same value.",
+      "properties": {
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "protocol": {
+          "$ref": "#/$defs/ProtocolDto"
+        },
+        "publicModel": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "publicModel",
+        "protocol"
+      ],
+      "type": "object"
+    },
+    "DestinationModelTestResult": {
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "protocol": {
+          "$ref": "#/$defs/ProtocolDto"
+        },
+        "publicModel": {
+          "type": "string"
+        },
+        "revision": {
+          "$ref": "#/$defs/ControlRevision"
+        }
+      },
+      "required": [
+        "revision",
+        "publicModel",
+        "protocol",
+        "ok",
+        "error"
+      ],
+      "type": "object"
+    },
+    "DestinationOnboardingTaskDto": {
+      "additionalProperties": false,
+      "description": "Managed-signup task on a projected credential. Domain shape; no task id.",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/OnboardingTaskKind"
+        },
+        "state": {
+          "$ref": "#/$defs/OnboardingTaskState"
+        },
+        "step": {
+          "description": "Current setup step string.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "state",
+        "step"
+      ],
+      "type": "object"
+    },
+    "DestinationPatchRequest": {
+      "additionalProperties": false,
+      "description": "Full replacement of editable configuration on one HTTP destination.\nKeys remain account-owned and are never accepted by this route.",
+      "properties": {
+        "authScheme": {
+          "$ref": "#/$defs/AuthSchemeDto"
+        },
+        "authorizeCredentialIds": {
+          "default": [],
+          "description": "Explicit consent to add safe grants for the destination's current\nendpoints to these existing credentials.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "enabled": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "endpointUrl": {
+          "type": "string"
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "models": {
+          "items": {
+            "$ref": "#/$defs/DestinationModelPatch"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "protocolRoutes": {
+          "items": {
+            "$ref": "#/$defs/HttpProtocolRouteDto"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "upstreamProtocol": {
+          "$ref": "#/$defs/ProtocolDto"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "name",
+        "endpointUrl",
+        "upstreamProtocol",
+        "authScheme",
+        "models"
+      ],
+      "type": "object"
+    },
+    "DestinationPatchResult": {
+      "additionalProperties": false,
+      "properties": {
+        "credentials": {
+          "description": "Complete secret-free credential projection after the mutation. A\ndestination edit can reset verification, auth/cooldowns, and grants on\nmore than one Key, so returning only the destination row is stale by\nconstruction.",
+          "items": {
+            "$ref": "#/$defs/DestinationCredentialDto"
+          },
+          "type": "array"
+        },
+        "destination": {
+          "$ref": "#/$defs/DestinationDto"
+        },
+        "revision": {
+          "$ref": "#/$defs/ControlRevision"
+        }
+      },
+      "required": [
+        "revision",
+        "destination",
+        "credentials"
+      ],
+      "type": "object"
+    },
+    "DestinationProjectionRefusalDto": {
+      "additionalProperties": false,
+      "description": "One refused row in a `destinationProjectionRefused` 409.",
+      "properties": {
+        "detail": {
+          "description": "Human-readable mapping error.",
+          "type": "string"
+        },
+        "error": {
+          "$ref": "#/$defs/MappingErrorCodeDto"
+        },
+        "row": {
+          "$ref": "#/$defs/RefusedRowDto"
+        }
+      },
+      "required": [
+        "row",
+        "error",
+        "detail"
+      ],
+      "type": "object"
+    },
+    "DestinationProjectionRefusedError": {
+      "additionalProperties": false,
+      "description": "409 envelope when `destination_projection` refuses. Same V3 fields plus `details`.",
+      "properties": {
+        "code": {
+          "description": "Stable error code (`destinationProjectionRefused`).",
+          "type": "string"
+        },
+        "currentRevision": {
+          "description": "Live settings revision.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "details": {
+          "items": {
+            "$ref": "#/$defs/DestinationProjectionRefusalDto"
+          },
+          "type": "array"
+        },
+        "message": {
+          "description": "Human-readable summary.",
+          "type": "string"
+        },
+        "processGeneration": {
+          "description": "Live process generation.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "currentRevision",
+        "processGeneration",
+        "details"
+      ],
+      "type": "object"
+    },
+    "DestinationUpstreamOverridePatch": {
+      "additionalProperties": false,
+      "description": "Optional per-model route override for a configurable HTTP destination.",
+      "properties": {
+        "endpointUrl": {
+          "type": "string"
+        },
+        "protocol": {
+          "$ref": "#/$defs/ProtocolDto"
+        }
+      },
+      "required": [
+        "protocol",
+        "endpointUrl"
       ],
       "type": "object"
     },
@@ -946,6 +2467,7 @@
       "enum": [
         "bearer",
         "x-api-key",
+        "api-key",
         "sealed",
         "none"
       ],
@@ -984,6 +2506,33 @@
         "wireProtocol",
         "url",
         "locked"
+      ],
+      "type": "object"
+    },
+    "ExpiryCadenceDto": {
+      "description": "How a Plan expires, when it has a cadence.",
+      "enum": [
+        "monthly"
+      ],
+      "type": "string"
+    },
+    "HttpProtocolRouteDto": {
+      "additionalProperties": false,
+      "properties": {
+        "authScheme": {
+          "$ref": "#/$defs/AuthSchemeDto"
+        },
+        "endpointUrl": {
+          "type": "string"
+        },
+        "protocol": {
+          "$ref": "#/$defs/ProtocolDto"
+        }
+      },
+      "required": [
+        "protocol",
+        "endpointUrl",
+        "authScheme"
       ],
       "type": "object"
     },
@@ -1167,6 +2716,49 @@
       ],
       "type": "string"
     },
+    "LegacyDestinationKindDto": {
+      "description": "Which V3-era row a destination was projected from.",
+      "oneOf": [
+        {
+          "const": "builtin",
+          "description": "Sealed builtin; `id` is the `provider_id`.",
+          "type": "string"
+        },
+        {
+          "const": "dynamic",
+          "description": "User-defined Provider; `id` is the dynamic `provider_id`.",
+          "type": "string"
+        },
+        {
+          "const": "custom_account",
+          "description": "Account-owned Custom API endpoint; `id` is the account id.",
+          "type": "string"
+        },
+        {
+          "const": "platform_parent",
+          "description": "New API / Sub2API site; `id` is the platform parent id.",
+          "type": "string"
+        }
+      ]
+    },
+    "LegacyDestinationRefDto": {
+      "additionalProperties": false,
+      "description": "Migration-era bridge from a projected destination back to the V3 row that\nstill owns its mutations. Removed once destinations become primary.",
+      "properties": {
+        "id": {
+          "description": "Row id in the V3 model named by `kind`.",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/LegacyDestinationKindDto"
+        }
+      },
+      "required": [
+        "kind",
+        "id"
+      ],
+      "type": "object"
+    },
     "LegacyIdentity": {
       "additionalProperties": false,
       "properties": {
@@ -1183,10 +2775,31 @@
       ],
       "type": "object"
     },
+    "MappingErrorCodeDto": {
+      "description": "Mapping-error variant name in camelCase.",
+      "enum": [
+        "unknownProvider",
+        "missingDestination",
+        "customRequiresAccount",
+        "customAccountMissingEndpoint",
+        "dynamicMissingEndpoint",
+        "platformMissingBaseUrl"
+      ],
+      "type": "string"
+    },
     "MaterialKind": {
       "enum": [
         "api_key",
         "external_reference"
+      ],
+      "type": "string"
+    },
+    "ModelResolutionDto": {
+      "description": "Which client model names may resolve to a destination mapping.",
+      "enum": [
+        "adapter_defined",
+        "public_only",
+        "public_and_upstream"
       ],
       "type": "string"
     },
@@ -1224,6 +2837,39 @@
           "type": "object"
         }
       ]
+    },
+    "MonthlyCredits": {
+      "additionalProperties": false,
+      "properties": {
+        "amount": {
+          "format": "double",
+          "type": "number"
+        },
+        "nextResetAt": {
+          "description": "First renewal boundary and immutable calendar anchor, including its UTC time.",
+          "format": "date-time",
+          "type": "string"
+        },
+        "renewalEndsAt": {
+          "format": "date-time",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "timezoneOffsetMinutes": {
+          "description": "Calendar boundaries use this fixed UTC offset, e.g. 480 for China.",
+          "format": "int32",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "amount",
+        "nextResetAt",
+        "timezoneOffsetMinutes",
+        "renewalEndsAt"
+      ],
+      "type": "object"
     },
     "OfferingKind": {
       "enum": [
@@ -1283,6 +2929,12 @@
         "kind": {
           "$ref": "#/$defs/OfficialApiKind"
         },
+        "lifetimeSpend": {
+          "items": {
+            "$ref": "#/$defs/OfficialSpend"
+          },
+          "type": "array"
+        },
         "monthSpend": {
           "items": {
             "$ref": "#/$defs/OfficialSpend"
@@ -1324,6 +2976,7 @@
         "prices",
         "monthStartedAt",
         "monthSpend",
+        "lifetimeSpend",
         "unpricedRequests",
         "revision",
         "processGeneration"
@@ -1634,6 +3287,15 @@
             "name": {
               "type": "string"
             },
+            "protocolRoutes": {
+              "items": {
+                "$ref": "#/$defs/HttpProtocolRouteDto"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
             "templateId": {
               "type": "string"
             },
@@ -1692,6 +3354,15 @@
         },
         "name": {
           "type": "string"
+        },
+        "protocolRoutes": {
+          "items": {
+            "$ref": "#/$defs/HttpProtocolRouteDto"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
         },
         "templateId": {
           "type": "string"
@@ -1789,11 +3460,167 @@
       ],
       "type": "object"
     },
+    "PlanDto": {
+      "additionalProperties": false,
+      "description": "Commercial offering embedded in a destination. Mirrors the domain `Plan`.",
+      "properties": {
+        "expiryCadence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExpiryCadenceDto"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "manualCalibration": {
+          "description": "Operators may enter local usage numbers by hand.",
+          "type": "boolean"
+        },
+        "pricingSource": {
+          "$ref": "#/$defs/PricingSourceDto"
+        },
+        "usageSource": {
+          "$ref": "#/$defs/UsageSourceDto"
+        },
+        "windows": {
+          "items": {
+            "$ref": "#/$defs/PlanWindowDto"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "usageSource",
+        "windows",
+        "expiryCadence",
+        "pricingSource",
+        "manualCalibration"
+      ],
+      "type": "object"
+    },
+    "PlanWindowDto": {
+      "additionalProperties": false,
+      "description": "One Plan usage window.",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/PlanWindowKindDto"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "type": "object"
+    },
+    "PlanWindowKindDto": {
+      "description": "One Plan usage window kind.",
+      "enum": [
+        "five_hours",
+        "week",
+        "month",
+        "free"
+      ],
+      "type": "string"
+    },
+    "PlatformKeyImportFailure": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "code"
+      ],
+      "type": "object"
+    },
+    "PlatformKeyImportRequest": {
+      "additionalProperties": false,
+      "description": "Import New API inference tokens as local Custom Keys. Secret-free.",
+      "properties": {
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "PlatformKeyImportResult": {
+      "additionalProperties": false,
+      "properties": {
+        "failed": {
+          "items": {
+            "$ref": "#/$defs/PlatformKeyImportFailure"
+          },
+          "type": "array"
+        },
+        "imported": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "$ref": "#/$defs/ControlRevision"
+        },
+        "skippedDisabled": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "skippedExisting": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "imported",
+        "skippedExisting",
+        "skippedDisabled",
+        "failed",
+        "revision"
+      ],
+      "type": "object"
+    },
+    "PricingSourceDto": {
+      "description": "Where a Plan's prices come from.",
+      "enum": [
+        "official",
+        "verified_snapshot",
+        "unpriced"
+      ],
+      "type": "string"
+    },
+    "ProtocolDto": {
+      "description": "Wire protocol for destination catalog and transport rows.",
+      "enum": [
+        "chat_completions",
+        "responses",
+        "messages"
+      ],
+      "type": "string"
+    },
     "ProviderDefinitionAuthKind": {
       "description": "Auth kind owned by a Provider definition. Independent of protocol.\nNullable on the wire because builtin rows leave the field empty.",
       "enum": [
         "bearer",
         "x-api-key",
+        "api-key",
         "none"
       ],
       "type": "string"
@@ -1878,6 +3705,82 @@
       ],
       "type": "object"
     },
+    "ProviderUsage": {
+      "additionalProperties": false,
+      "description": "GET `/accounts/{id}/provider-usage` body. Distinct from stored quota rows.\n\n`pricingRevision` is present when live Go quota windows use one captured\npricing snapshot.",
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "availability": {
+          "$ref": "#/$defs/UsageAvailability"
+        },
+        "creditBalances": {
+          "items": {
+            "$ref": "#/$defs/CreditBalance"
+          },
+          "type": "array"
+        },
+        "experimental": {
+          "type": "boolean"
+        },
+        "freeCooldownUntil": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pricingRevision": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "providerId": {
+          "type": "string"
+        },
+        "quotaWindows": {
+          "items": {
+            "$ref": "#/$defs/QuotaWindow"
+          },
+          "type": "array"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "syncState": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UsageSyncState"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "accountId",
+        "providerId",
+        "availability",
+        "experimental",
+        "freeCooldownUntil",
+        "quotaWindows",
+        "creditBalances",
+        "syncState",
+        "revision",
+        "processGeneration",
+        "pricingRevision"
+      ],
+      "type": "object"
+    },
     "QuotaMetricDto": {
       "additionalProperties": false,
       "properties": {
@@ -1919,6 +3822,92 @@
       ],
       "type": "string"
     },
+    "QuotaRecoveryDto": {
+      "additionalProperties": false,
+      "description": "Optional per-Key quota recovery overlay. Status is presentation-only.",
+      "properties": {
+        "failureCount": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "nextRetryAt": {
+          "type": "string"
+        },
+        "observedAt": {
+          "type": "string"
+        },
+        "reason": {
+          "$ref": "#/$defs/QuotaRecoveryReason"
+        },
+        "resetsAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/QuotaRecoveryStatus"
+        },
+        "window": {
+          "$ref": "#/$defs/QuotaRecoveryWindow"
+        }
+      },
+      "required": [
+        "status",
+        "reason",
+        "window",
+        "observedAt",
+        "resetsAt",
+        "nextRetryAt",
+        "failureCount"
+      ],
+      "type": "object"
+    },
+    "QuotaRecoveryReason": {
+      "description": "Why the credential was confirmed exhausted.",
+      "enum": [
+        "quota_exhausted",
+        "insufficient_balance"
+      ],
+      "type": "string"
+    },
+    "QuotaRecoveryStatus": {
+      "description": "Presentation status for a confirmed quota-recovery episode.",
+      "enum": [
+        "waiting",
+        "ready",
+        "probing"
+      ],
+      "type": "string"
+    },
+    "QuotaRecoveryWindow": {
+      "description": "Window named by confirmed exhaustion evidence.",
+      "enum": [
+        "five_hours",
+        "week",
+        "month",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "QuotaRetryResult": {
+      "additionalProperties": false,
+      "description": "POST `/credentials/{id}/quota-retry` result.",
+      "properties": {
+        "credential": {
+          "$ref": "#/$defs/DestinationCredentialDto"
+        },
+        "revision": {
+          "$ref": "#/$defs/ControlRevision"
+        }
+      },
+      "required": [
+        "revision",
+        "credential"
+      ],
+      "type": "object"
+    },
     "QuotaSharing": {
       "oneOf": [
         {
@@ -1957,6 +3946,74 @@
         "egress"
       ],
       "type": "string"
+    },
+    "QuotaWindow": {
+      "additionalProperties": false,
+      "description": "One live or synthetic quota window. Distinct from `models::QuotaWindow`.",
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "calibrationOffset": {
+          "format": "double",
+          "type": "number"
+        },
+        "limitValue": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "observedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resetsAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "type": "string"
+        },
+        "startedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "unit": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "type": "string"
+        },
+        "used": {
+          "format": "double",
+          "type": "number"
+        },
+        "windowKind": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "accountId",
+        "windowKind",
+        "used",
+        "limitValue",
+        "startedAt",
+        "resetsAt",
+        "calibrationOffset",
+        "unit",
+        "source",
+        "observedAt",
+        "updatedAt"
+      ],
+      "type": "object"
     },
     "QuotaWindowDto": {
       "additionalProperties": false,
@@ -2004,10 +4061,424 @@
       ],
       "type": "object"
     },
+    "RedirectPolicyDto": {
+      "description": "Redirect policy advertised on a destination.",
+      "enum": [
+        "no_follow",
+        "follow_keyless"
+      ],
+      "type": "string"
+    },
+    "RefusedRowDto": {
+      "additionalProperties": false,
+      "description": "Identity of one legacy row the stage-4a projection refused.",
+      "properties": {
+        "id": {
+          "description": "Persisted row id.",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/RefusedRowKindDto"
+        },
+        "providerId": {
+          "description": "Provider id when the refused row is an account.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "id",
+        "providerId"
+      ],
+      "type": "object"
+    },
+    "RefusedRowKindDto": {
+      "description": "Legacy row kind named in a destination-projection refusal.",
+      "enum": [
+        "account",
+        "dynamic_provider",
+        "platform_parent"
+      ],
+      "type": "string"
+    },
     "RelationConfidence": {
       "enum": [
         "unknown",
         "declared"
+      ],
+      "type": "string"
+    },
+    "RoutingCard": {
+      "additionalProperties": false,
+      "properties": {
+        "credentialIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "destinationId": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "destinationId",
+        "credentialIds"
+      ],
+      "type": "object"
+    },
+    "RoutingCardList": {
+      "additionalProperties": false,
+      "description": "One consistent, secret-free snapshot of cards and the resources they show.",
+      "properties": {
+        "cards": {
+          "items": {
+            "$ref": "#/$defs/RoutingCard"
+          },
+          "type": "array"
+        },
+        "credentials": {
+          "items": {
+            "$ref": "#/$defs/DestinationCredentialDto"
+          },
+          "type": "array"
+        },
+        "destinations": {
+          "items": {
+            "$ref": "#/$defs/DestinationDto"
+          },
+          "type": "array"
+        },
+        "revision": {
+          "$ref": "#/$defs/ControlRevision"
+        }
+      },
+      "required": [
+        "revision",
+        "cards",
+        "destinations",
+        "credentials"
+      ],
+      "type": "object"
+    },
+    "RoutingCardUpdate": {
+      "additionalProperties": false,
+      "description": "The flattened card and row sequence is the complete routing priority order.",
+      "properties": {
+        "cards": {
+          "items": {
+            "$ref": "#/$defs/RoutingCard"
+          },
+          "type": "array"
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "cards"
+      ],
+      "type": "object"
+    },
+    "RoutingChannel": {
+      "enum": [
+        "go",
+        "free"
+      ],
+      "type": "string"
+    },
+    "RoutingClientProtocol": {
+      "description": "Client protocol accepted by `GET /routing/explain`.",
+      "enum": [
+        "chat_completions",
+        "responses",
+        "messages",
+        "gemini"
+      ],
+      "type": "string"
+    },
+    "RoutingConversationBinding": {
+      "description": "Conversation stickiness is reported, not applied: this endpoint has no\nconversation input.",
+      "enum": [
+        "not_evaluated"
+      ],
+      "type": "string"
+    },
+    "RoutingEligibleCandidate": {
+      "additionalProperties": false,
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "accountName": {
+          "type": "string"
+        },
+        "adapterKind": {
+          "type": "string"
+        },
+        "channel": {
+          "$ref": "#/$defs/RoutingChannel"
+        },
+        "destinationId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "destinationName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "providerId": {
+          "type": "string"
+        },
+        "resolvedModel": {
+          "type": "string"
+        },
+        "routingRank": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "upstreamProtocol": {
+          "$ref": "#/$defs/RoutingClientProtocol"
+        }
+      },
+      "required": [
+        "accountId",
+        "accountName",
+        "providerId",
+        "destinationId",
+        "destinationName",
+        "adapterKind",
+        "channel",
+        "resolvedModel",
+        "upstreamProtocol",
+        "routingRank"
+      ],
+      "type": "object"
+    },
+    "RoutingExclusion": {
+      "additionalProperties": false,
+      "properties": {
+        "accountId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "code": {
+          "$ref": "#/$defs/RoutingExclusionCode"
+        },
+        "detail": {
+          "type": "string"
+        },
+        "providerId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "upstreamModel": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "code",
+        "detail",
+        "accountId",
+        "providerId",
+        "upstreamModel"
+      ],
+      "type": "object"
+    },
+    "RoutingExclusionCode": {
+      "enum": [
+        "mapping_protocol_incompatible",
+        "credential_disabled",
+        "binding_disabled",
+        "model_scope_denied",
+        "goat_not_eligible",
+        "goat_unverified",
+        "candidate_materialization_failed",
+        "production_route_unsupported",
+        "account_disabled",
+        "setup_not_ready",
+        "channel_mismatch",
+        "credential_missing",
+        "auth_error",
+        "cooling_down",
+        "free_channel_unavailable",
+        "quota_waiting",
+        "quota_due",
+        "quota_probing"
+      ],
+      "type": "string"
+    },
+    "RoutingExplanation": {
+      "additionalProperties": false,
+      "description": "Read-only routing prediction for `GET /routing/explain`.\n\nThis is not a send guarantee. `runtimeOnlyUncertainty` names the live\nsteps this snapshot does not execute.",
+      "properties": {
+        "clientProtocol": {
+          "$ref": "#/$defs/RoutingClientProtocol"
+        },
+        "conversationBinding": {
+          "$ref": "#/$defs/RoutingConversationBinding"
+        },
+        "conversationSticky": {
+          "type": "boolean"
+        },
+        "eligible": {
+          "items": {
+            "$ref": "#/$defs/RoutingEligibleCandidate"
+          },
+          "type": "array"
+        },
+        "exclusions": {
+          "items": {
+            "$ref": "#/$defs/RoutingExclusion"
+          },
+          "type": "array"
+        },
+        "expectedBasePolicyFirstPick": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RoutingEligibleCandidate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "observedAt": {
+          "type": "string"
+        },
+        "requestedModel": {
+          "type": "string"
+        },
+        "resolved": {
+          "$ref": "#/$defs/RoutingResolvedModel"
+        },
+        "revision": {
+          "$ref": "#/$defs/ControlRevision"
+        },
+        "routingMode": {
+          "$ref": "#/$defs/RoutingMode"
+        },
+        "runtimeOnlyUncertainty": {
+          "items": {
+            "$ref": "#/$defs/RuntimeOnlyUncertainty"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "requestedModel",
+        "clientProtocol",
+        "resolved",
+        "revision",
+        "observedAt",
+        "routingMode",
+        "conversationSticky",
+        "conversationBinding",
+        "eligible",
+        "exclusions",
+        "expectedBasePolicyFirstPick",
+        "runtimeOnlyUncertainty"
+      ],
+      "type": "object"
+    },
+    "RoutingMode": {
+      "description": "Account selection mode. Wire values stay kebab-case, matching V2.",
+      "enum": [
+        "strict-priority",
+        "sticky-global",
+        "round-robin"
+      ],
+      "type": "string"
+    },
+    "RoutingResolvedKind": {
+      "description": "How the requested name resolved against the live alias registry.",
+      "enum": [
+        "alias",
+        "pinned_raw"
+      ],
+      "type": "string"
+    },
+    "RoutingResolvedMapping": {
+      "additionalProperties": false,
+      "properties": {
+        "providerId": {
+          "type": "string"
+        },
+        "routeable": {
+          "type": "boolean"
+        },
+        "upstreamModel": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "providerId",
+        "upstreamModel",
+        "routeable"
+      ],
+      "type": "object"
+    },
+    "RoutingResolvedModel": {
+      "additionalProperties": false,
+      "properties": {
+        "alias": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "$ref": "#/$defs/RoutingResolvedKind"
+        },
+        "mappings": {
+          "items": {
+            "$ref": "#/$defs/RoutingResolvedMapping"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "kind",
+        "alias",
+        "mappings"
+      ],
+      "type": "object"
+    },
+    "RuntimeOnlyUncertainty": {
+      "enum": [
+        "state_changed_after_snapshot",
+        "conversation_binding_not_evaluated",
+        "retry_exclusions_not_applied",
+        "credential_recheck_pending",
+        "upstream_result_unknown"
       ],
       "type": "string"
     },
@@ -2128,6 +4599,70 @@
       ],
       "type": "object"
     },
+    "UsageAvailability": {
+      "description": "Registry usage availability. Wire values stay snake_case.",
+      "enum": [
+        "available",
+        "unavailable",
+        "local_state"
+      ],
+      "type": "string"
+    },
+    "UsageSourceDto": {
+      "description": "Where a Plan reads usage from.",
+      "enum": [
+        "official_api",
+        "local_projection",
+        "none"
+      ],
+      "type": "string"
+    },
+    "UsageSyncState": {
+      "additionalProperties": false,
+      "description": "Official-usage sync metadata as projected for provider usage. Distinct from\nthe stored `provider_usage_sync_state` row.",
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "failureStreak": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "lastAttemptAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lastExpeditedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lastSuccessAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nextEligibleAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "accountId",
+        "lastSuccessAt",
+        "lastAttemptAt",
+        "nextEligibleAt",
+        "failureStreak",
+        "lastExpeditedAt"
+      ],
+      "type": "object"
+    },
     "V3Error": {
       "additionalProperties": false,
       "description": "Stable non-2xx JSON envelope for every Dashboard V3 error.",
@@ -2198,6 +4733,12 @@
     },
     {
       "$ref": "#/$defs/ConnectionSummary"
+    },
+    {
+      "$ref": "#/$defs/CredentialCreateCapabilityDto"
+    },
+    {
+      "$ref": "#/$defs/CredentialCreateUnavailableReasonDto"
     },
     {
       "$ref": "#/$defs/ConnectionList"
@@ -2305,6 +4846,111 @@
       "$ref": "#/$defs/DshApplicationInstallRequest"
     },
     {
+      "$ref": "#/$defs/PlatformKeyImportRequest"
+    },
+    {
+      "$ref": "#/$defs/PlatformKeyImportResult"
+    },
+    {
+      "$ref": "#/$defs/PlatformKeyImportFailure"
+    },
+    {
+      "$ref": "#/$defs/DestinationList"
+    },
+    {
+      "$ref": "#/$defs/DestinationDto"
+    },
+    {
+      "$ref": "#/$defs/ModelResolutionDto"
+    },
+    {
+      "$ref": "#/$defs/DestinationModelPatch"
+    },
+    {
+      "$ref": "#/$defs/DestinationUpstreamOverridePatch"
+    },
+    {
+      "$ref": "#/$defs/DestinationPatchRequest"
+    },
+    {
+      "$ref": "#/$defs/DestinationPatchResult"
+    },
+    {
+      "$ref": "#/$defs/DestinationCatalogRefreshResult"
+    },
+    {
+      "$ref": "#/$defs/HttpProtocolRouteDto"
+    },
+    {
+      "$ref": "#/$defs/DestinationCatalogUpdate"
+    },
+    {
+      "$ref": "#/$defs/DestinationCatalogModelUpdate"
+    },
+    {
+      "$ref": "#/$defs/DestinationModelTestRequest"
+    },
+    {
+      "$ref": "#/$defs/DestinationModelTestResult"
+    },
+    {
+      "$ref": "#/$defs/DestinationDeleteResult"
+    },
+    {
+      "$ref": "#/$defs/DestinationCredentialDto"
+    },
+    {
+      "$ref": "#/$defs/QuotaRecoveryDto"
+    },
+    {
+      "$ref": "#/$defs/QuotaRecoveryStatus"
+    },
+    {
+      "$ref": "#/$defs/QuotaRecoveryReason"
+    },
+    {
+      "$ref": "#/$defs/QuotaRecoveryWindow"
+    },
+    {
+      "$ref": "#/$defs/QuotaRetryResult"
+    },
+    {
+      "$ref": "#/$defs/CredentialList"
+    },
+    {
+      "$ref": "#/$defs/RoutingCard"
+    },
+    {
+      "$ref": "#/$defs/RoutingCardList"
+    },
+    {
+      "$ref": "#/$defs/RoutingCardUpdate"
+    },
+    {
+      "$ref": "#/$defs/AccountControlsDto"
+    },
+    {
+      "$ref": "#/$defs/AccountToggleWriteDto"
+    },
+    {
+      "$ref": "#/$defs/AccountConfigurationOwnerDto"
+    },
+    {
+      "$ref": "#/$defs/AccountConsoleLinkDto"
+    },
+    {
+      "$ref": "#/$defs/CapabilitiesDto"
+    },
+    {
+      "$ref": "#/$defs/PlanDto"
+    },
+    {
+      "$ref": "#/$defs/CatalogModelDto"
+    },
+    {
+      "$ref": "#/$defs/DestinationProjectionRefusedError"
+    },
+    {
       "$ref": "#/$defs/OfficialApiKind"
     },
     {
@@ -2324,6 +4970,84 @@
     },
     {
       "$ref": "#/$defs/OfficialApiPrices"
+    },
+    {
+      "$ref": "#/$defs/BillingModel"
+    },
+    {
+      "$ref": "#/$defs/BillingSource"
+    },
+    {
+      "$ref": "#/$defs/BillingStatus"
+    },
+    {
+      "$ref": "#/$defs/CreditRate"
+    },
+    {
+      "$ref": "#/$defs/MonthlyCredits"
+    },
+    {
+      "$ref": "#/$defs/CreditConfiguration"
+    },
+    {
+      "$ref": "#/$defs/CreditBucketKind"
+    },
+    {
+      "$ref": "#/$defs/CreditBucket"
+    },
+    {
+      "$ref": "#/$defs/CreditPreset"
+    },
+    {
+      "$ref": "#/$defs/CreditMeterView"
+    },
+    {
+      "$ref": "#/$defs/CreditConfigureRequest"
+    },
+    {
+      "$ref": "#/$defs/CreditBalanceCorrection"
+    },
+    {
+      "$ref": "#/$defs/CreditCalibrationRequest"
+    },
+    {
+      "$ref": "#/$defs/CreditGrantRequest"
+    },
+    {
+      "$ref": "#/$defs/RoutingMode"
+    },
+    {
+      "$ref": "#/$defs/RoutingClientProtocol"
+    },
+    {
+      "$ref": "#/$defs/RoutingResolvedKind"
+    },
+    {
+      "$ref": "#/$defs/RoutingResolvedMapping"
+    },
+    {
+      "$ref": "#/$defs/RoutingResolvedModel"
+    },
+    {
+      "$ref": "#/$defs/RoutingChannel"
+    },
+    {
+      "$ref": "#/$defs/RoutingEligibleCandidate"
+    },
+    {
+      "$ref": "#/$defs/RoutingExclusionCode"
+    },
+    {
+      "$ref": "#/$defs/RoutingExclusion"
+    },
+    {
+      "$ref": "#/$defs/RoutingConversationBinding"
+    },
+    {
+      "$ref": "#/$defs/RuntimeOnlyUncertainty"
+    },
+    {
+      "$ref": "#/$defs/RoutingExplanation"
     }
   ],
   "title": "DashboardApiV4"

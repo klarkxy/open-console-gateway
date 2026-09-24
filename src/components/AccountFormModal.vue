@@ -10,6 +10,7 @@
     <n-form
       ref="formRef"
       :model="form"
+      :disabled="busy || savedForSetup"
       :rules="rules"
       label-placement="top"
     >
@@ -132,12 +133,22 @@
               :placeholder="t('选择计费档位')"
               :aria-label="t('计费档位')"
             />
-            <p class="field-hint">{{ t("新建须选择 Pro / Max / Team 并填写购买日期；未配置的既有账号仍可路由。") }}</p>
+            <p class="field-hint">{{ t("新建账号须选择 Pro / Max / Team 并填写购买日期；未配置的既有账号仍可路由。") }}</p>
           </div>
         </n-form-item>
 
+        <div
+          v-if="isCustomConnectionEdit"
+          class="custom-connection-edit full-width-field"
+        >
+          <p class="field-hint">{{ t("连接的地址、协议与模型映射在 Providers 中管理。") }}</p>
+          <n-button text type="primary" @click="$emit('editConnection')">
+            {{ t("在 Providers 中编辑此连接") }}
+          </n-button>
+        </div>
+
         <n-form-item
-          v-if="isCustomPlan"
+          v-if="showCustomSections"
           path="endpointUrl"
           :label="t('API 地址')"
           class="full-width-field"
@@ -160,7 +171,7 @@
         </n-form-item>
 
         <n-form-item
-          v-if="isCustomPlan"
+          v-if="showCustomSections"
           path="upstreamProtocol"
           :label="t('上游协议')"
         >
@@ -178,7 +189,7 @@
         </n-form-item>
 
         <n-form-item
-          v-if="isCustomPlan"
+          v-if="showCustomSections"
           path="modelCapabilities"
           :label="t('模型映射')"
           class="full-width-field"
@@ -200,7 +211,7 @@
               <span v-if="discoverySuccess" class="field-hint">{{ discoverySuccess }}</span>
             </div>
             <p v-if="showManualModelHint" class="field-hint">
-              {{ t("非标准完整 Endpoint 无法自动推导 /models；请手动添加模型映射。") }}
+              {{ t("非标准完整 Endpoint 无法自动推导 /models，需手动添加模型映射。") }}
             </p>
             <n-alert v-if="discoveryError" type="error" :show-icon="false">
               {{ discoveryError }}
@@ -272,6 +283,8 @@
           />
         </n-form-item>
       </div>
+      <AccountCreditSetup v-if="show && account && !endpointLocked && (isDynamicPlan || isCustomConnectionEdit)" :account="account" :disabled="busy || savedForSetup" @change="creditSetup = $event" />
+      <CreditSetupFields v-else-if="show && !account && createCreditPresets" :key="effectivePlan?.provider_id" :presets="createCreditPresets" :disabled="busy || setupPending" @change="creditSetup = $event" />
     </n-form>
     </div>
     <template #footer>
@@ -287,7 +300,7 @@
         </n-button>
         <n-space>
           <n-button v-if="!embedded" @click="$emit('update:show', false)">{{ t("取消") }}</n-button>
-          <n-button type="primary" :loading="busy" @click="handleSave">{{ t("保存") }}</n-button>
+          <n-button type="primary" :loading="busy" :disabled="!creditSetup.valid && !savedForSetup" @click="handleSave">{{ savedForSetup ? t("重试") : t("保存") }}</n-button>
         </n-space>
       </div>
     </template>
@@ -332,24 +345,19 @@ import {
 } from "../domain/custom-account.ts";
 import { protocolDisplayName } from "../domain/provider-contracts.ts";
 import FormSurface from "./FormSurface.vue";
+import AccountCreditSetup from "./AccountCreditSetup.vue";
+import CreditSetupFields from "./CreditSetupFields.vue";
+import { useProvidersStore } from "../stores/providers.ts";
+import type { CreditSetupInput } from "../domain/credit-setup.ts";
 
 export type AccountFormPayload = {
+  credits?: CreditSetupInput | null;
   name: string;
   username: string;
   key?: string;
   provider_id?: string;
   purchase_date?: string;
   notes: string;
-  /** Custom API edit only; persisted via the dedicated custom-config route. */
-  endpoint_url?: string;
-  /** Custom API edit only; persisted via the dedicated custom-config route. */
-  upstream_protocol?: AccountProtocol;
-  /** Custom API edit only; atomically persisted with the dedicated custom-config route. */
-  model_capabilities?: Array<{
-    public_model: string;
-    upstream_model: string;
-    protocol: AccountProtocol;
-  }>;
   ollama_billing_tier?: "pro" | "max" | "team";
 };
 
@@ -400,6 +408,7 @@ const props = withDefaults(defineProps<{
   externalError?: string;
   /** Inline rendering inside the Add Account chooser instead of a modal. */
   embedded?: boolean;
+  setupPending?: boolean;
 }>(), {
   account: null,
   isCooling: false,
@@ -412,12 +421,14 @@ const props = withDefaults(defineProps<{
   titleOverride: "",
   externalError: "",
   embedded: false,
+  setupPending: false,
 });
 
 const emit = defineEmits<{
   (e: "update:show", value: boolean): void;
   (e: "save", payload: AccountInput | AccountFormPayload): void;
   (e: "resetCooldown"): void;
+  (e: "editConnection"): void;
 }>();
 
 const formRef = ref<FormInst | null>(null);
@@ -425,6 +436,16 @@ const formElement = ref<HTMLElement | null>(null);
 const form = ref<FormModel>(blankForm());
 const nameWasEdited = ref(false);
 const formError = ref("");
+const providers = useProvidersStore();
+const createCreditPresets = computed(() => !props.account && !props.platformParent
+  ? providers.connections?.find(row => row.legacy.kind === "dynamic_provider" && row.legacy.id === effectivePlan.value?.provider_id)?.credit_presets ?? null : null);
+const creditSetup = ref<{ input: CreditSetupInput | null; valid: boolean }>({ input: null, valid: true });
+const locallySaved = ref(false);
+const savedForSetup = computed(() => locallySaved.value || props.setupPending);
+function noteSaved(): void { locallySaved.value = true; formError.value = t("Key 已保存，请重试额度初始化。"); }
+defineExpose({ noteSaved });
+watch(() => [props.show, props.account?.id, props.plan?.provider_id], () => { locallySaved.value = false; creditSetup.value = { input: null, valid: true }; });
+watch(() => props.setupPending, pending => { if (pending) formError.value = t("Key 已保存，请重试额度初始化。"); });
 const discoveringModels = ref(false);
 const discoveryError = ref("");
 const discoverySuccess = ref("");
@@ -452,6 +473,10 @@ const effectivePlan = computed<PlanDefinition | null>(() => {
 });
 
 const isCustomPlan = computed(() => effectivePlan.value?.kind === "custom");
+// Legacy Custom edit: address/protocol/mappings editing lives in Providers;
+// create (and the platform Add Key flow) keeps the full Custom sections.
+const isCustomConnectionEdit = computed(() => isEdit.value && isCustomPlan.value);
+const showCustomSections = computed(() => isCustomPlan.value && !isCustomConnectionEdit.value);
 const isOllamaPlan = computed(() => effectivePlan.value?.provider_id === "ollama");
 const ollamaBillingOptions = [
   { value: "pro", label: "Pro · $60" },
@@ -533,7 +558,7 @@ const rules = computed<FormRules>(() => {
       {
         required: true,
         type: "number",
-        message: t("请选择购买日期"),
+        message: t("选择购买日期"),
         trigger: ["change", "blur"],
       },
       {
@@ -559,12 +584,12 @@ const rules = computed<FormRules>(() => {
     base.key = {
       required: true,
       whitespace: true,
-      message: t("请填写 API Key"),
+      message: t("填写 API Key"),
       trigger: ["input", "blur"],
     };
   }
 
-  if (isCustomPlan.value) {
+  if (showCustomSections.value) {
     base.endpointUrl = {
       required: true,
       validator: (_rule: unknown, value: string) => {
@@ -577,7 +602,7 @@ const rules = computed<FormRules>(() => {
       required: true,
       type: "string",
       validator: (_rule: unknown, value: AccountProtocol | null) => !!value,
-      message: t("请选择上游协议"),
+      message: t("选择上游协议"),
       trigger: ["change", "blur"],
     };
     base.modelCapabilities = {
@@ -587,7 +612,7 @@ const rules = computed<FormRules>(() => {
         Array.isArray(value) && value.length > 0 && value.every((cap) => (
           cap.public_model.trim() && cap.upstream_model.trim()
         )),
-      message: t("请至少添加一个完整模型映射"),
+      message: t("至少添加一个完整模型映射"),
       trigger: ["change"],
     };
   }
@@ -822,7 +847,7 @@ async function discoverModels() {
 
 async function handleSave() {
   // The parent's mutation owns `busy`; never submit twice for one intent.
-  if (props.busy) return;
+  if (props.busy || (!creditSetup.value.valid && !savedForSetup.value)) return;
   try {
     await formRef.value?.validate();
   } catch {
@@ -835,6 +860,7 @@ async function handleSave() {
 
   if (isEdit.value) {
     const payload: AccountFormPayload = {
+      credits: creditSetup.value.input,
       name: form.value.name.trim(),
       username: form.value.username.trim(),
       notes: form.value.notes,
@@ -847,15 +873,6 @@ async function handleSave() {
     if (form.value.key.trim()) {
       payload.key = form.value.key.trim();
     }
-    if (isCustomPlan.value) {
-      payload.endpoint_url = form.value.endpointUrl.trim();
-      payload.upstream_protocol = form.value.upstreamProtocol ?? undefined;
-      payload.model_capabilities = form.value.modelCapabilities.map((capability) => ({
-        public_model: capability.public_model,
-        upstream_model: capability.upstream_model,
-        protocol: form.value.upstreamProtocol ?? "chat_completions",
-      }));
-    }
     if (hasField("ollama_billing_tier") && form.value.ollamaBillingTier) {
       payload.ollama_billing_tier = form.value.ollamaBillingTier;
     }
@@ -865,7 +882,7 @@ async function handleSave() {
 
   const plan = effectivePlan.value;
   if (!plan) {
-    formError.value = t("无法确定账号方案，请关闭后重试");
+    formError.value = t("无法确定账号方案，关闭后重试");
     return;
   }
 
@@ -893,6 +910,7 @@ async function handleSave() {
 
   try {
     const payload = buildCreateAccountPayload(plan, values);
+    if (createCreditPresets.value) (payload as AccountFormPayload).credits = creditSetup.value.input;
     if (hasField("ollama_billing_tier") && form.value.ollamaBillingTier) {
       payload.ollama_billing_tier = form.value.ollamaBillingTier;
     }
@@ -909,12 +927,12 @@ async function handleSave() {
 .modal-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
+  gap: var(--ocg-space-md);
   align-items: start;
 }
 
 .form-error {
-  margin-bottom: 12px;
+  margin-bottom: var(--ocg-space-md);
 }
 
 .full-width-field,
@@ -928,14 +946,25 @@ async function handleSave() {
   font-size: var(--ocg-font-xs);
 }
 
+.custom-connection-edit {
+  display: grid;
+  gap: var(--ocg-space-xs);
+  justify-items: start;
+  margin-bottom: var(--ocg-space-md);
+}
+
+.custom-connection-edit .field-hint {
+  margin: 0;
+}
+
 .connection-summary {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-  gap: 8px 16px;
-  margin: 0 0 12px;
-  padding: 10px 12px;
+  gap: var(--ocg-space-sm) var(--ocg-space-lg);
+  margin: 0 0 var(--ocg-space-md);
+  padding: 10px var(--ocg-space-md);
   border: 1px solid var(--ocg-border);
-  border-radius: 10px;
+  border-radius: var(--ocg-radius-md);
   background: var(--ocg-canvas);
 }
 
@@ -966,31 +995,31 @@ async function handleSave() {
 
 .capability-rows {
   display: grid;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
 }
 
 .capability-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
 }
 
 .discovery-import {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
   align-items: center;
 }
 
 .mapping-rows {
   display: grid;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
 }
 
 .mapping-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
   align-items: center;
 }
 
@@ -1003,7 +1032,7 @@ async function handleSave() {
 .protocol-field,
 .billing-field {
   display: grid;
-  gap: 4px;
+  gap: var(--ocg-space-xs);
   width: 100%;
 }
 
@@ -1014,7 +1043,7 @@ async function handleSave() {
 .purchase-date-control {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
   width: 100%;
 }
 
@@ -1022,7 +1051,7 @@ async function handleSave() {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 12px;
+  gap: var(--ocg-space-md);
 }
 
 .modal-footer--embedded {

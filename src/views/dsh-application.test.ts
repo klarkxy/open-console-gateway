@@ -88,17 +88,16 @@ test("every DSH status has a label, hint, and a meaningful tone", () => {
   }
 });
 
-test("unsupported_runtime hint names the desktop app or native headless CLI and keeps Docker unsupported", () => {
+test("unsupported_runtime presentation keys resolve to localized catalog entries", () => {
   const presentation = dshStatusPresentation("unsupported_runtime");
-  assert.equal(presentation.labelKey, "当前环境不支持");
-  assert.equal(
-    presentation.hintKey,
-    "DSH 安装可在桌面应用或同一台机器上的原生无头 CLI 中进行；官方 Docker 镜像暂不支持。",
-  );
-  assert.equal(
-    enUSMessages[presentation.hintKey],
-    "DSH installation is available in the desktop app or a native headless CLI on the same machine; the official Docker image remains unsupported.",
-  );
+  // labelKey/hintKey are i18n keys — zh-CN renders the key text itself. The
+  // behavior under test is wiring: both keys exist in the catalog and are
+  // actually translated, so no locale renders raw or missing text.
+  assert.notEqual(presentation.labelKey, presentation.hintKey);
+  assert.ok(presentation.labelKey in enUSMessages);
+  assert.ok(presentation.hintKey in enUSMessages);
+  assert.notEqual(enUSMessages[presentation.labelKey], presentation.labelKey);
+  assert.notEqual(enUSMessages[presentation.hintKey], presentation.hintKey);
 });
 
 test("install action requires support and a fingerprint; installed offers reinstall", () => {

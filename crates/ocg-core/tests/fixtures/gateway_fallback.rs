@@ -165,6 +165,15 @@ pub(crate) fn build_state_with_routing(
     config.routing_mode = routing_mode;
     config.conversation_sticky = conversation_sticky;
     state.set_config(config).unwrap();
+    // Inference-only gateway tests must never contact an official usage API.
+    // Individual authoritative-Go cases explicitly re-enable the reactive path
+    // and replace this failure seam with their expected snapshot.
+    state
+        .usage_sync
+        .set_reactive_refresh_enabled_for_test(false);
+    state.usage_sync.set_fetch_for_test(|_, _| {
+        Box::pin(async { Err(ocg_core::go_usage::GoUsageError::Network) })
+    });
 
     let now = chrono::Utc::now();
     for (idx, key) in keys.iter().enumerate() {
@@ -687,21 +696,13 @@ pub(crate) fn force_enable_unroutable_account_for_loopback_test(data_dir: &Path,
         .expect("loopback test sqlite should set busy timeout");
     let changed = conn
         .execute(
-            "UPDATE accounts SET enabled = 1 WHERE id = ?1",
+            "UPDATE credentials SET enabled = 1 WHERE legacy_account_id = ?1",
             [account_id],
         )
         .expect("loopback test enable poke should execute");
     assert_eq!(changed, 1, "loopback test account {account_id} must exist");
-    // This fixture inserts a disabled account, then enables the test route
-    // directly. Enable its independent binding too; ordinary account toggles
-    // must not override a binding the user explicitly disabled.
-    let binding_changed = conn
-        .execute(
-            "UPDATE credential_bindings SET enabled = 1 WHERE account_id = ?1",
-            [account_id],
-        )
-        .expect("loopback fixture binding should enable");
-    assert_eq!(binding_changed, 1, "loopback fixture binding must exist");
+    // On schema v57 the credential row owns both account and binding
+    // enablement, so this single write makes the synthetic route selectable.
 }
 
 pub(crate) fn prepare_goat(
@@ -932,7 +933,7 @@ pub(crate) async fn get_application_models(
 ) -> (axum::http::StatusCode, serde_json::Value) {
     let response = loopback_client()
         .get(format!(
-            "http://127.0.0.1:{port}/dashboard/api/v3/application-models"
+            "http://127.0.0.1:{port}/dashboard/api/v4/application-models"
         ))
         .send()
         .await
@@ -1078,7 +1079,7 @@ pub(crate) async fn dashboard_protocol_probe(
 ) -> (axum::http::StatusCode, serde_json::Value) {
     let response = loopback_client()
         .post(format!(
-            "http://127.0.0.1:{port}/dashboard/api/v3/providers/{OPENCODE_PROVIDER_ID}/protocol-probes"
+            "http://127.0.0.1:{port}/dashboard/api/v4/providers/{OPENCODE_PROVIDER_ID}/protocol-probes"
         ))
         .json(&serde_json::json!({
             "expectedRevision": state.settings_revision(),
@@ -1232,22 +1233,6 @@ pub(crate) async fn dashboard_json(
     (status, parsed)
 }
 
-pub(crate) async fn v3_mutate(
-    port: u16,
-    state: &CoreStateInner,
-    path: &str,
-    patch: serde_json::Value,
-) -> (axum::http::StatusCode, serde_json::Value) {
-    dashboard_json(
-        port,
-        reqwest::Method::POST,
-        "v3",
-        path,
-        Some(&dashboard_cas(state, patch)),
-    )
-    .await
-}
-
 pub(crate) async fn v4_mutate(
     port: u16,
     state: &CoreStateInner,
@@ -1303,7 +1288,7 @@ pub(crate) async fn create_dynamic_lab(
     if let Some(key) = key {
         patch["key"] = serde_json::json!(key);
     }
-    let (status, created) = v3_mutate(port, state, "/providers", patch).await;
+    let (status, created) = v4_mutate(port, state, "/providers", patch).await;
     assert_eq!(status, axum::http::StatusCode::OK, "{created}");
     let provider_id = created["provider"]["id"]
         .as_str()
@@ -1318,7 +1303,7 @@ pub(crate) async fn create_dynamic_lab(
         .find(|account| account.provider_id == provider_id);
     let account_id = account.as_ref().map(|account| account.id.clone());
     if let Some(account) = account.filter(|account| !account.enabled) {
-        let (status, body) = v3_mutate(
+        let (status, body) = v4_mutate(
             port,
             state,
             &format!("/accounts/{}/toggle", account.id),
@@ -1342,7 +1327,7 @@ pub(crate) async fn create_custom_lab(
     model_id: &str,
     protocol: &str,
 ) -> String {
-    let (status, created) = v3_mutate(
+    let (status, created) = v4_mutate(
         port,
         state,
         "/accounts",
@@ -1368,7 +1353,7 @@ pub(crate) async fn create_custom_lab(
         .unwrap_or_else(|| panic!("custom account id missing: {created}"))
         .to_string();
     if created["account"]["enabled"] == false {
-        let (status, body) = v3_mutate(
+        let (status, body) = v4_mutate(
             port,
             state,
             &format!("/accounts/{id}/toggle"),

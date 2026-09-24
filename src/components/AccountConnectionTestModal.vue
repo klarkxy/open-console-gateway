@@ -35,7 +35,7 @@
             {{ t("测试全部 {count} 个模型", { count: filteredModels.length }) }}
           </n-button>
         </template>
-        {{ t("将通过当前账号依次测试筛选结果中的 {count} 个模型，是否继续？", { count: filteredModels.length }) }}
+        {{ t("将通过当前账号依次测试筛选结果中的 {count} 个模型，继续？", { count: filteredModels.length }) }}
       </n-popconfirm>
     </div>
 
@@ -223,7 +223,7 @@ async function loadModels() {
   } catch (error) {
     if (!props.show || props.account?.id !== account.id) return;
     models.value = [];
-    loadError.value = t("加载测试模型失败: {error}", { error: dashboardErrorDetail(error) });
+    loadError.value = t("加载测试模型失败：{error}", { error: dashboardErrorDetail(error) });
   } finally {
     if (props.account?.id === account.id) loadingModels.value = false;
   }
@@ -311,15 +311,15 @@ function resultSummary(model: AccountTestModel): string {
 <style scoped>
 .test-warning,
 .test-error {
-  margin-bottom: 16px;
+  margin-bottom: var(--ocg-space-lg);
 }
 
 .test-toolbar {
   display: grid;
   grid-template-columns: minmax(220px, 1fr) auto;
-  gap: 12px;
+  gap: var(--ocg-space-md);
   align-items: center;
-  margin-bottom: 16px;
+  margin-bottom: var(--ocg-space-lg);
 }
 
 .test-table-wrap {
@@ -337,7 +337,7 @@ function resultSummary(model: AccountTestModel): string {
 
 .test-table th,
 .test-table td {
-  padding: 10px 12px;
+  padding: 10px var(--ocg-space-md);
   border-bottom: 1px solid var(--ocg-divider);
   text-align: left;
   vertical-align: middle;
@@ -393,13 +393,13 @@ function resultSummary(model: AccountTestModel): string {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 12px;
+  gap: var(--ocg-space-md);
   color: var(--ocg-muted);
   font-size: var(--ocg-font-sm);
   font-variant-numeric: tabular-nums;
 }
 
-.test-pagination { margin-top: 12px; }
+.test-pagination { margin-top: var(--ocg-space-md); }
 
 @media (max-width: 640px) {
   .test-toolbar { grid-template-columns: 1fr; }

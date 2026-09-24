@@ -1,4 +1,6 @@
+import type { AccountCapabilitySource } from "./account-capabilities.ts";
 import type { Account } from "../api/dashboard.ts";
+import type { ProviderCatalogEntry } from "../api/providers.ts";
 import type { Connection, ConnectionEndpoint } from "../api/connections.ts";
 import type {
   BindingPatchInput,
@@ -9,10 +11,9 @@ import type {
   QuotaSharing,
 } from "../api/identities.ts";
 import { DashboardAuthError, DashboardRequestError } from "../api/dashboard-v3.ts";
-import { isCpaIntegrationAccount, isZenFreeAccount } from "./account-providers.ts";
+import { accountCapabilities } from "./account-capabilities.ts";
 import { accountIsReady } from "./account-display.ts";
 import { credentialForAccount, inferenceCredentials } from "./account-identity.ts";
-import { isCustomApiAccount } from "./custom-account.ts";
 import { protocolDisplayName } from "./provider-contracts.ts";
 import type { AccountMenuOption } from "./account-display.ts";
 import { t, type MessageKey } from "../i18n/index.ts";
@@ -55,14 +56,14 @@ export type CredentialEditorIssue =
   | "uncertain_payload_locked";
 
 export const CREDENTIAL_EDITOR_ISSUE_KEYS = {
-  missing_secret: "请填写新 Key",
-  missing_models: "请至少填写一个准确的模型名称",
+  missing_secret: "填写新 Key",
+  missing_models: "至少填写一个准确的模型名称",
   duplicate_model: "模型名称不能重复",
   model_too_long: "模型名称最多 200 个字符",
   model_has_control_character: "模型名称不能包含控制字符",
-  missing_connection: "请选择连接",
-  missing_share_target: "请选择同一身份下要共享额度的 Key",
-  uncertain_payload_locked: "提交结果未知，请用原内容重试或取消。不能改内容后再提交。",
+  missing_connection: "选择连接",
+  missing_share_target: "选择同一身份下要共享额度的 Key",
+  uncertain_payload_locked: "提交结果未知。用原内容重试或取消，勿修改后提交。",
 } as const satisfies Record<CredentialEditorIssue, MessageKey>;
 
 export class CredentialEditorError extends Error {
@@ -88,7 +89,7 @@ export type CredentialWriteSupport = {
   credential: IdentityCredential | null;
   bindingRecord: IdentityBinding | null;
   identityId: string | null;
-  unsupportedReason: string | null;
+  unsupportedReason: MessageKey | null;
 };
 
 function selectedInferenceCredential(
@@ -102,12 +103,15 @@ function selectedInferenceCredential(
 
 /**
  * V4 rotate/binding are hidden for Zen, CPA, no-auth, and observer credentials.
- * Add Key also hides Custom API (dedicated account path) and missing overlay
- * rows rather than inventing ids. Matches backend `resolve_connection_target`.
+ * Add Key consumes the selected connection's current server capability.
+ * Missing connection projections remain unavailable until loaded.
  */
 export function credentialWriteSupport(
-  account: Pick<Account, "id" | "provider_id" | "credential_kind" | "setup_step">,
+  account: Pick<Account, "id" | "provider_id" | "account_type" | "credential_kind" | "setup_step">,
   identity: Identity | null,
+  catalog: readonly ProviderCatalogEntry[] | null | undefined = null,
+  destination?: AccountCapabilitySource | null,
+  connections: readonly Connection[] = [],
 ): CredentialWriteSupport {
   const hidden: CredentialWriteSupport = {
     rotate: false,
@@ -118,11 +122,12 @@ export function credentialWriteSupport(
     identityId: identity?.identity.id ?? null,
     unsupportedReason: null,
   };
-  if (isZenFreeAccount(account)) {
-    return { ...hidden, unsupportedReason: "Zen Free 请使用供应商设置" };
+  const caps = accountCapabilities(account, catalog, destination);
+  if (caps.toggleWrite === "provider_settings") {
+    return { ...hidden, unsupportedReason: "Zen Free 使用供应商设置" };
   }
-  if (isCpaIntegrationAccount(account)) {
-    return { ...hidden, unsupportedReason: "CPA 订阅池请使用 CPA 页面" };
+  if (caps.externalIntegration) {
+    return { ...hidden, unsupportedReason: "CPA 订阅池使用 CPA 页面" };
   }
   if (account.credential_kind === "none") {
     return { ...hidden, unsupportedReason: "无鉴权账号不支持此操作" };
@@ -155,9 +160,8 @@ export function credentialWriteSupport(
   const identityId = identity?.identity.id ?? null;
   const rotate = true;
   const binding = bindingRecord !== null;
-  const create = !isCustomApiAccount(account)
-    && !!identityId
-    && !!bindingRecord?.connection_id;
+  const connection = connections.find((row) => row.id === bindingRecord?.connection_id);
+  const create = !!identityId && !!connection && connectionAllowsIdentityCredentialCreate(connection);
   return {
     rotate,
     binding,
@@ -165,17 +169,20 @@ export function credentialWriteSupport(
     credential,
     bindingRecord,
     identityId,
-    unsupportedReason: isCustomApiAccount(account)
-      ? "Custom API 请使用账号编辑，不能在此添加 Key"
+    unsupportedReason: connection?.credential_create?.reason === "dedicated_account_flow"
+      ? "Custom API 需到账号编辑中添加 Key"
       : null,
   };
 }
 
 export function accountCredentialMenuOptions(
-  account: Pick<Account, "id" | "name" | "provider_id" | "credential_kind" | "setup_step">,
+  account: Pick<Account, "id" | "name" | "provider_id" | "account_type" | "credential_kind" | "setup_step">,
   identity: Identity | null,
+  catalog: readonly ProviderCatalogEntry[] | null | undefined = null,
+  destination?: AccountCapabilitySource | null,
+  connections: readonly Connection[] = [],
 ): AccountMenuOption[] {
-  const support = credentialWriteSupport(account, identity);
+  const support = credentialWriteSupport(account, identity, catalog, destination, connections);
   const options: AccountMenuOption[] = [];
   if (support.rotate) {
     options.push({
@@ -218,27 +225,14 @@ export function shareableInferenceCredentials(
 }
 
 /**
- * Backend `resolve_connection_target`: Custom API dedicated rows, CPA, Zen,
- * no-auth, and singleton/unavailable builtins cannot receive a Key here.
+ * The server shares this projection with the credential mutation guard.
+ * Do not infer creation rights from origin, owner, or provider names.
  */
 export function connectionAllowsIdentityCredentialCreate(
-  connection: Pick<Connection, "legacy" | "origin">,
+  connection: Pick<Connection, "credential_create">,
 ): boolean {
-  if (connection.legacy.kind === "custom_account" || connection.origin === "custom_account") {
-    return false;
-  }
-  const providerId = connection.legacy.id;
-  if (
-    providerId === "cpa"
-    || providerId === "opencode-zen-free"
-    || providerId === "custom"
-  ) {
-    return false;
-  }
-  if (connection.legacy.kind === "dynamic_provider" && connection.origin === "builtin") {
-    return false;
-  }
-  return true;
+  const capability = connection.credential_create;
+  return capability?.allowed === true && capability.materialKinds.includes("api_key");
 }
 
 export function emptyRotateDraft(): CredentialRotateDraft {
@@ -329,47 +323,24 @@ function parseExactModelNames(models: readonly string[]): string[] {
   return parsed;
 }
 
-function originFromEndpointUrl(url: string): string | null {
-  const trimmed = url.trim();
-  const split = trimmed.split("://");
-  if (split.length < 2) return null;
-  const scheme = split[0] ?? "";
-  const rest = split.slice(1).join("://");
-  if (!scheme || !rest) return null;
-  const hostport = rest.split(/[/?#]/u, 1)[0] ?? "";
-  if (!hostport) return null;
-  return `${scheme}://${hostport}`;
-}
-
-/** HTTP(S) scheme + host [+ port]; scheme/host lowercased. Matches backend. */
+/**
+ * HTTP(S) origin after URL parsing. Default ports are omitted and IPv6 is
+ * compressed, matching `canonical_origin` / `normalize_origin` in
+ * `ocg-domain`. HTTP vs HTTPS, distinct ports, and distinct hosts stay
+ * different. Whether a URL may be a target is a separate check.
+ */
 export function normalizeOrigin(value: string): string | null {
-  const origin = originFromEndpointUrl(value);
-  if (!origin) return null;
-  const split = origin.split("://");
-  if (split.length < 2) return null;
-  const scheme = (split[0] ?? "").toLowerCase();
-  const hostport = split.slice(1).join("://");
-  if (scheme !== "http" && scheme !== "https") return null;
-  if (!hostport || hostport.includes("/")) return null;
-  let normalizedHostport: string;
-  if (hostport.startsWith("[")) {
-    normalizedHostport = hostport;
-  } else {
-    const colon = hostport.lastIndexOf(":");
-    if (colon > 0) {
-      const host = hostport.slice(0, colon);
-      const port = hostport.slice(colon + 1);
-      if (host && /^[0-9]+$/u.test(port)) {
-        normalizedHostport = `${host.toLowerCase()}:${port}`;
-      } else {
-        normalizedHostport = hostport.toLowerCase();
-      }
-    } else {
-      normalizedHostport = hostport.toLowerCase();
-    }
+  let url: URL;
+  try {
+    url = new URL(value.trim());
+  } catch {
+    return null;
   }
-  if (!normalizedHostport) return null;
-  return `${scheme}://${normalizedHostport}`;
+  if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+  const hostname = url.hostname;
+  if (!hostname) return null;
+  const scheme = url.protocol.slice(0, -1);
+  return url.port ? `${scheme}://${hostname}:${url.port}` : `${scheme}://${hostname}`;
 }
 
 export function unionOriginsForEndpoints(

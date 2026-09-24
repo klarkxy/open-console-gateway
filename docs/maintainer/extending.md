@@ -17,15 +17,14 @@ catalog, protocol, key, and failure contract.
    `ocg-gateway::alias`. The request path uses the saved contract.
 3. Implement `resolve_route` in `ocg-core` so it returns an `AttemptSpec`
    only. Adapters cannot own DB, `CoreState`, or a raw reqwest client.
-4. Register the sealed adapter in the schema v42 builtin seed so the unified
-   `providers` table exposes it as a `builtin` row in the V3 Provider
-   catalog. The row's `endpoint_url` / `upstream_protocol` / `auth_kind` /
-   `offering` / `endpoint_per_account` columns are display mirrors of the
-   sealed registry — traffic and routing still flow through the sealed
-   adapter code constants, never through the seeded row. Add the new id to
+4. Register the sealed adapter in `BUILTIN_PROVIDERS` (leftover `providers` /
+   `provider_models` tables are gone after v56). The adapter's `endpoint_url` /
+   `upstream_protocol` / `auth_kind` / `offering` / `endpoint_per_account`
+   values are display mirrors of the sealed registry — traffic and routing
+   still flow through the sealed adapter code constants. Add the new id to
    the `builtin_offering` map in `ocg-domain::provider` (`plan` for paid
-   families, `api` for free or account-owned surfaces). CPA is the static
-   external integration and is **not** seeded: do not add it here.
+   families, `api` for free or one-credential destinations). CPA is the static
+   external integration and is **not** catalogued here.
 5. Fail closed until control-plane and routing semantics exist, then test the
    domain, gateway, and core boundaries.
 
@@ -33,11 +32,10 @@ The Provider registry remains static and sealed.
 Each static Provider owns its catalog, evidence, and override state under its
 single `provider_id` identity.
 
-A new **preset** (the user-defined Provider template list in
-`resources/provider-presets.json`) needs only the JSON entry plus, if the
-preset advertises a `plan` offering, an entry in the `PRESET_OFFERINGS` map
-in `ocg-domain::provider` so `preset_offering(preset_id)` returns `"plan"`.
-Other presets keep the default `"api"` value.
+A new **preset** only needs an entry in `resources/provider-presets.json`.
+The build script generates `PRESET_OFFERINGS` from each entry's `offering`;
+`preset_offering(preset_id)` reads that generated table. Do not maintain a
+second handwritten Rust map. Presets without a plan offering use `"api"`.
 
 ## 2. Applications
 
@@ -52,7 +50,7 @@ Use this for a local service integrated through a code-reviewed adapter. It appe
 the general **Extensions** navigation group below Settings, not in
 Providers, Plans, or the Add Account selector.
 
-- Define a narrow typed Dashboard V3 contract and CAS-protected mutations; do
+- Define a narrow typed Dashboard V4 contract and CAS-protected mutations; do
   not add a raw management proxy or arbitrary upstream path/body forwarding.
 - Make the ownership boundary explicit. OCG may retain only what it needs to
   connect and route; the external service retains its own OAuth tokens, auth
@@ -71,19 +69,21 @@ CPA is the current instance of this path. Reuse its existing helpers where they
 fit; justify a shared framework with concrete requirements from the integrations
 that will use it.
 
-## Dashboard V3 and V4 endpoint changes
+## Dashboard V4 endpoint changes
 
-New provider, connection, or credential semantics go to `dashboard_v4`
+New provider, destination, or credential semantics go to `dashboard_v4`
 (`types.rs` and its `CATALOG_TYPE_NAMES`; routes in `dashboard_v4/mod.rs`).
-Run `pnpm run contract:v4:check`. V3 accepts no new DTO fields or routes;
-bug fixes only.
+Run `pnpm run contract:v4:check`. `/dashboard/api/v3` is a 410 tombstone:
+do not add V3 HTTP routes or DTO fields.
 
-Frozen V3 contract maintenance:
+Remounted operational handlers still live in `dashboard_v3/` and mount under
+V4. If a remounted DTO or route must change:
 
 1. Add or extend DTOs in `dashboard_v3/types.rs` and append new names to
    `CATALOG_TYPE_NAMES`. Do not change existing `$defs` objects.
-2. Mount routes in `dashboard_v3/mod.rs`; mutations use
-   `parse_mutation_json` and `check_expectation` and preserve secret redaction.
+2. Mount routes in `dashboard_v3/mod.rs` (they are nested under V4);
+   mutations use `parse_mutation_json` and `check_expectation` and preserve
+   secret redaction.
 3. Prefer existing persistence/control helpers and keep `dashboard_v3`
    independent of `gateway`.
 4. Add a focused integration test, update `src/api/dashboard-v3.ts`, and run

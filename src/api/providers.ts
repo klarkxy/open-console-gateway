@@ -1,5 +1,10 @@
-import { dashboardV3, isRevisionConflict, type WithoutExpectation } from "./dashboard-v3.ts";
+import {
+  dashboardV3,
+  isRevisionConflict,
+  type WithoutExpectation,
+} from "./dashboard-v3.ts";
 import { dashboardV4 } from "./dashboard-v4.ts";
+import { t } from "../i18n/index.ts";
 import { useControlPlaneStore } from "../stores/controlPlane.ts";
 import type {
   AccountCredentialKind,
@@ -64,13 +69,13 @@ export interface ProviderCatalogEntry {
   quota_unit: string;
   model_source: string;
   key_prefix?: string | null;
-  auth_schemes: ("bearer" | "x-api-key")[];
+  auth_schemes: ("bearer" | "x-api-key" | "api-key")[];
   upstream_protocols: ("chat_completions" | "responses" | "messages")[];
   form_fields: ProviderCatalogFormField[];
   model_aliases: string[];
 }
 
-export type ProviderDefinitionAuthKind = "bearer" | "x-api-key" | "none";
+export type ProviderDefinitionAuthKind = "bearer" | "x-api-key" | "api-key" | "none";
 
 export interface ProviderDefinitionModelView {
   public_model: string;
@@ -294,6 +299,8 @@ export interface CustomEndpointContract {
 export interface ProviderContractsResponse {
   /** Shared settings revision for PUT `expected_revision`. Distinct from each scope `revision`. */
   revision: number;
+  /** Backend process identity; revisions are comparable only within one generation. */
+  process_generation: number;
   providers: ProviderContractGroup[];
   custom_endpoints: CustomEndpointContract[];
 }
@@ -503,6 +510,7 @@ function presentAccountChoice(value: V3ProviderContracts["providers"][number]["a
 function presentContracts(value: V3ProviderContracts): ProviderContractsResponse {
   return {
     revision: value.revision,
+    process_generation: value.processGeneration,
     providers: value.providers.map((scope) => ({
       scope_kind: scope.scopeKind,
       scope_id: scope.scopeId,
@@ -579,7 +587,7 @@ function presentProviderPricingSnapshot(value: V3ProviderPricingSnapshot): Provi
   };
 }
 
-function presentProviderUsage(value: V3ProviderUsage): ProviderUsageResponse {
+export function presentProviderUsage(value: V3ProviderUsage): ProviderUsageResponse {
   return {
     account_id: value.accountId,
     provider_id: value.providerId,
@@ -702,6 +710,8 @@ export const providerApi = {
     scopeKind: ContractScopeKind,
     scopeId: string,
     overrides: ModelProtocolOverrideUpdate[],
+    authorizeCredentialIds?: string[],
+    capturedExpectation?: MutationExpectation,
   ): Promise<ProviderContractsResponse> => {
     const control = useControlPlaneStore();
     if (!control.hasTokens()) await control.refresh();
@@ -715,9 +725,13 @@ export const providerApi = {
             protocol: item.protocol,
             state: item.state,
             ...(item.preferred !== undefined ? { preferred: item.preferred } : {}),
-          })) } satisfies WithoutExpectation<ModelProtocolOverridesUpdate>,
+          })),
+          ...(authorizeCredentialIds && authorizeCredentialIds.length > 0
+            ? { authorizeCredentialIds: [...authorizeCredentialIds] }
+            : {}),
+          } satisfies WithoutExpectation<ModelProtocolOverridesUpdate>,
           expectation,
-        )));
+        ), capturedExpectation));
     } catch (cause) {
       if (isRevisionConflict(cause)) await dashboardV3.getProviderContracts();
       throw cause;
@@ -727,7 +741,7 @@ export const providerApi = {
     const control = useControlPlaneStore();
     if (!control.hasTokens()) await control.refresh();
     if (providerId === "custom") {
-      throw new Error("Custom API 协议探测尚未纳入 Dashboard V3 合同");
+      throw new Error(t("Custom API 暂不支持协议探测"));
     }
     return presentProbe(await control.runMutation((expectation) =>
       dashboardV3.runProviderProtocolProbes(providerId, {

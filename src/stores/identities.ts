@@ -65,6 +65,16 @@ export const useIdentitiesStore = defineStore("identities", () => {
     }
   }
 
+  /** Drop the cached overlay on 401 / logout so the next session reloads fresh. */
+  function clear(): void {
+    loadGeneration++;
+    identities.value = [];
+    snapshotExpectation.value = null;
+    loaded.value = false;
+    loading.value = false;
+    error.value = "";
+  }
+
   return {
     identities: computed(() => identities.value),
     snapshotExpectation: computed(() => snapshotExpectation.value),
@@ -74,5 +84,6 @@ export const useIdentitiesStore = defineStore("identities", () => {
     byJoinKey,
     byAccountId,
     loadPresented,
+    clear,
   };
 });

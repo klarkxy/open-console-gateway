@@ -166,7 +166,7 @@ struct ConversationBinding {
     last_seen: Instant,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 struct ConversationMap {
     entries: HashMap<String, ConversationBinding>,
     order: VecDeque<String>,
@@ -259,7 +259,7 @@ impl ConversationMap {
 /// the caller supplies any sharing wrapper.
 ///
 /// Public only as the cross-crate bridge.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 #[doc(hidden)]
 pub struct SelectorState {
     global_account_id: Option<String>,
@@ -329,6 +329,29 @@ impl SelectorState {
         }
 
         Ok(selected.map(|candidate_index| Selection { candidate_index }))
+    }
+
+    /// Clone-based selection preview. Sticky-global, round-robin, and
+    /// conversation LRU on `self` stay unchanged, including when the cloned
+    /// machine would have rewritten them.
+    pub fn preview_at(
+        &self,
+        candidates: &[Candidate<'_>],
+        policy: SelectionPolicy,
+        conversation_sticky: bool,
+        conversation_key: Option<&str>,
+        exclude_ids: &[&str],
+        now: Instant,
+    ) -> Result<Option<Selection>, SelectionError> {
+        let mut preview = self.clone();
+        preview.select_at(
+            candidates,
+            policy,
+            conversation_sticky,
+            conversation_key,
+            exclude_ids,
+            now,
+        )
     }
 
     /// Read a conversation binding if it is still fresh. A hit refreshes LRU

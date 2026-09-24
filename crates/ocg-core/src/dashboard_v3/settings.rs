@@ -8,7 +8,7 @@ use crate::models::{
     AppConfig, ProxyListDirection as AppProxyListDirection, ProxyMode as AppProxyMode,
     RoutingMode as AppRoutingMode, normalize_client_root_url,
 };
-use crate::state::{CoreState, HostSettingsError, build_proxy_model_candidates};
+use crate::state::{CoreState, HostSettingsError, persisted_proxy_model_candidates};
 
 use super::types::{
     ProxyListDirection, ProxyMode, ProxySupportedModel, RoutingMode, Settings, SettingsUpdate,
@@ -261,24 +261,18 @@ fn settings_from_state(state: &CoreState) -> Settings {
 }
 
 fn proxy_supported_models(state: &CoreState) -> Vec<ProxySupportedModel> {
-    let custom = state
-        .db
-        .lock()
-        .list_custom_account_runtimes()
-        .unwrap_or_default();
-    let mut models = build_proxy_model_candidates(
-        &state.provider_contracts(),
-        &custom,
-        &state.dynamic_providers(),
-        &state.cpa_model_catalog(),
-    )
-    .into_iter()
-    .map(|candidate| ProxySupportedModel {
-        id: candidate.id,
-        preferred_protocol: candidate.preferred_protocol,
-        zen_free: candidate.zen_free,
-    })
-    .collect::<Vec<_>>();
+    let projection = crate::destination_projection::load_runtime(&state.db.lock());
+    let mut models = projection
+        .as_ref()
+        .map(persisted_proxy_model_candidates)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|candidate| ProxySupportedModel {
+            id: candidate.id,
+            preferred_protocol: candidate.preferred_protocol,
+            zen_free: candidate.zen_free,
+        })
+        .collect::<Vec<_>>();
     models.sort_by(|left, right| left.id.cmp(&right.id));
     models
 }
@@ -292,13 +286,13 @@ fn validate_proxy_list(state: &CoreState, config: &mut AppConfig) -> Result<(), 
     }
     let known = proxy_supported_models(state)
         .into_iter()
-        .map(|model| model.id)
+        .map(|model| model.id.to_lowercase())
         .collect::<std::collections::HashSet<_>>();
     let persisted = state
         .config()
         .proxy_list_models
         .into_iter()
-        .map(|model| model.trim().to_string())
+        .map(|model| model.trim().to_lowercase())
         .collect::<std::collections::HashSet<_>>();
     let mut deduped: Vec<String> = Vec::new();
     for model in config.proxy_list_models.iter() {
@@ -306,8 +300,8 @@ fn validate_proxy_list(state: &CoreState, config: &mut AppConfig) -> Result<(), 
         if model.is_empty() {
             continue;
         }
-        if !known.contains(model) {
-            if persisted.contains(model) {
+        if !known.contains(&model.to_lowercase()) {
+            if persisted.contains(&model.to_lowercase()) {
                 // A once-valid persisted entry may disappear with its
                 // catalog. It stays inert on read and is pruned by the next
                 // save, but a newly submitted unknown id still fails closed.
@@ -315,7 +309,10 @@ fn validate_proxy_list(state: &CoreState, config: &mut AppConfig) -> Result<(), 
             }
             return Err(format!("proxy list model `{model}` is not supported"));
         }
-        if !deduped.iter().any(|existing| existing == model) {
+        if !deduped
+            .iter()
+            .any(|existing| existing.to_lowercase() == model.to_lowercase())
+        {
             deduped.push(model.to_string());
         }
     }

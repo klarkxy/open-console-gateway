@@ -3,10 +3,12 @@ import test from "node:test";
 import { createPinia, setActivePinia } from "pinia";
 import { toRaw } from "vue";
 import { installWindowDashboard, v3AccountDto } from "../test-helpers/dashboard-v3-fetch.ts";
+import { DashboardConflictError, type Account } from "../api/dashboard.ts";
 import { useAccountsStore } from "./accounts.ts";
 import { useConnectionStore } from "./connection.ts";
 import { useControlPlaneStore } from "./controlPlane.ts";
 import { useProvidersStore } from "./providers.ts";
+import { useSessionStore } from "./session.ts";
 import { useSettingsStore } from "./settings.ts";
 
 /**
@@ -102,8 +104,28 @@ function settingsBody(revision: number): object {
   };
 }
 
-function contractsBody(revision: number): object {
-  return { revision, processGeneration: 99, providers: [], customEndpoints: [] };
+function contractsBody(revision: number, processGeneration = 99): object {
+  return { revision, processGeneration, providers: [], customEndpoints: [] };
+}
+
+function definitionBody(name: string, revision: number): object {
+  return {
+    id: "dynamic-one",
+    name,
+    origin: "custom",
+    offering: "api",
+    editable: true,
+    deletable: true,
+    endpointUrl: "https://dynamic.example/v1",
+    upstreamProtocol: "chat_completions",
+    authKind: "bearer",
+    models: [],
+    presetId: null,
+    createdAt: "2026-09-20T00:00:00Z",
+    updatedAt: "2026-09-20T00:00:00Z",
+    revision,
+    processGeneration: 99,
+  };
 }
 
 test("accounts store: an older load resolving last does not clobber newer state", async () => {
@@ -146,6 +168,28 @@ test("accounts store: a stale load failure does not overwrite a fresh success", 
   assert.equal(store.error, "");
   assert.deepEqual(store.accounts.map(({ id }) => id), ["b1"]);
   assert.equal(store.loading, false);
+});
+
+test("accounts store: a pending load cannot clobber an in-place mutation", async () => {
+  freshPinia();
+  const calls = installDeferredFetch();
+  const store = useAccountsStore();
+
+  const pendingLoad = store.loadPresented();
+  await waitForCalls(calls, 1);
+
+  store.upsertAccount(v3AccountDto("m1") as unknown as Account);
+  assert.deepEqual(store.accounts.map(({ id }) => id), ["m1"]);
+  assert.equal(store.loading, false, "mutation releases the superseded load flag");
+
+  calls[0]!.resolve(accountsBody(["a1", "a2"], 8));
+  const stale = await pendingLoad;
+  assert.deepEqual(stale.map(({ id }) => id), ["a1", "a2"], "stale caller still gets its own payload");
+  assert.deepEqual(store.accounts.map(({ id }) => id), ["m1"], "stale load must not clobber the mutation");
+
+  store.removeAccount("m1");
+  assert.deepEqual(store.accounts, []);
+  assert.equal(store.loaded, true);
 });
 
 test("connection store: a pending load cannot clobber post-mutation state", async () => {
@@ -297,6 +341,244 @@ test("providers store: an older catalog load resolving last does not clobber new
   calls[0]!.reject(new Error("stale failure"));
   await assert.rejects(first, /stale failure/);
   assert.equal(toRaw(store.catalog), fresh, "stale resolution must not replace the fresh catalog");
+});
+
+test("providers store: clear() invalidates in-flight catalog, contracts, and connections", async () => {
+  freshPinia();
+  const calls = installDeferredFetch();
+  const store = useProvidersStore();
+
+  const catalogLoad = store.loadCatalog();
+  const contractsLoad = store.loadContracts();
+  const connectionsLoad = store.loadConnections();
+  await waitForCalls(calls, 3);
+  store.clear();
+  assert.equal(store.catalog, null);
+  assert.equal(store.contracts, null);
+  assert.equal(store.connections, null);
+  assert.equal(store.loading, false);
+  assert.equal(store.error, "");
+
+  for (const call of calls) {
+    if (call.url.includes("provider-contracts")) {
+      call.resolve(contractsBody(8));
+    } else if (call.url.endsWith("/providers")) {
+      call.resolve({ entries: [], revision: 8, processGeneration: 99 });
+    } else if (call.url.endsWith("/connections")) {
+      call.resolve({
+        connections: [],
+        revision: { revision: 8, processGeneration: 99 },
+      });
+    } else {
+      call.resolve({});
+    }
+  }
+  await Promise.allSettled([catalogLoad, contractsLoad, connectionsLoad]);
+  assert.equal(store.catalog, null);
+  assert.equal(store.contracts, null);
+  assert.equal(store.connections, null);
+  assert.equal(store.loading, false);
+  assert.equal(store.error, "");
+});
+
+test("providers store owns definition invalidation, refresh, and session guards", async () => {
+  freshPinia();
+  const calls = installDeferredFetch();
+  const store = useProvidersStore();
+
+  const first = store.loadDefinition("dynamic-one");
+  await waitForCalls(calls, 1);
+  calls[0]!.resolve(definitionBody("Before", 4));
+  await first;
+  assert.equal(store.definitions.get("dynamic-one")?.name, "Before");
+
+  store.invalidateDefinition("dynamic-one");
+  assert.equal(store.definitions.has("dynamic-one"), false);
+  const refreshed = store.loadDefinition("dynamic-one", true);
+  await waitForCalls(calls, 2);
+  calls[1]!.resolve(definitionBody("After", 5));
+  await refreshed;
+  assert.equal(store.definitions.get("dynamic-one")?.name, "After");
+
+  const stale = store.loadDefinition("dynamic-one", true);
+  await waitForCalls(calls, 3);
+  store.clear();
+  calls[2]!.resolve(definitionBody("Stale", 6));
+  await stale;
+  assert.equal(store.definitions.size, 0);
+});
+
+test("providers store: a contract refresh resolving after clear returns to its caller without restoring cache", async () => {
+  freshPinia();
+  useControlPlaneStore().sync({ revision: 7, processGeneration: 99, pricingRevision: null });
+  const calls = installDeferredFetch();
+  const store = useProvidersStore();
+
+  const pending = store.refreshContractCatalog("provider", "opencode");
+  await waitForCalls(calls, 1);
+  store.clear();
+
+  calls[0]!.resolve(contractsBody(9));
+  const result = await pending;
+  assert.equal(result.revision, 9, "the original caller still receives the mutation result");
+  assert.equal(store.contracts, null, "a response from the old session must not restore cache");
+  assert.equal(store.loading, false);
+  assert.equal(store.error, "");
+});
+
+test("providers store: a successful mutation wins over a load started after it", async () => {
+  freshPinia();
+  useControlPlaneStore().sync({ revision: 7, processGeneration: 99, pricingRevision: null });
+  const calls = installDeferredFetch();
+  const store = useProvidersStore();
+
+  const mutation = store.refreshContractCatalog("provider", "opencode");
+  await waitForCalls(calls, 1);
+  const load = store.loadContracts();
+  await waitForCalls(calls, 2);
+
+  calls[1]!.resolve(contractsBody(7));
+  await load;
+  assert.equal(store.contracts?.revision, 7);
+
+  calls[0]!.resolve(contractsBody(8));
+  await mutation;
+  assert.equal(store.contracts?.revision, 8, "the mutation receipt is authoritative");
+  assert.equal(store.loading, false);
+});
+
+test("providers store: a failed mutation releases the load it invalidated", async () => {
+  freshPinia();
+  useControlPlaneStore().sync({ revision: 7, processGeneration: 99, pricingRevision: null });
+  const calls = installDeferredFetch();
+  const store = useProvidersStore();
+
+  const staleLoad = store.loadContracts();
+  await waitForCalls(calls, 1);
+  const mutation = store.refreshContractCatalog("provider", "opencode");
+  await waitForCalls(calls, 2);
+  calls[1]!.reject(new Error("refresh failed"));
+  await assert.rejects(mutation, /refresh failed/);
+
+  calls[0]!.resolve(contractsBody(7));
+  await staleLoad;
+  assert.equal(store.contracts, null, "the invalidated load must not commit");
+  assert.equal(store.loading, false, "no request owns the loading flag after failure");
+});
+
+test("providers store: a later failed mutation does not discard an earlier successful receipt", async () => {
+  freshPinia();
+  useControlPlaneStore().sync({ revision: 7, processGeneration: 99, pricingRevision: null });
+  const calls = installDeferredFetch();
+  const store = useProvidersStore();
+
+  const initial = store.loadContracts();
+  await waitForCalls(calls, 1);
+  calls[0]!.resolve(contractsBody(7));
+  await initial;
+
+  const first = store.refreshContractCatalog("provider", "opencode");
+  const later = store.refreshContractCatalog("provider", "minimax");
+  await waitForCalls(calls, 3);
+  calls[2]!.reject(new Error("later mutation failed"));
+  await assert.rejects(later, /later mutation failed/);
+  calls[1]!.resolve(contractsBody(8));
+  await first;
+
+  assert.equal(store.contracts?.revision, 8, "a valid successful receipt must still commit");
+  assert.equal(store.loading, false);
+});
+
+test("providers store: a new backend generation accepts its lower mutation revision", async () => {
+  freshPinia();
+  const control = useControlPlaneStore();
+  control.sync({ revision: 900, processGeneration: 99, pricingRevision: null });
+  const calls = installDeferredFetch();
+  const store = useProvidersStore();
+
+  const initial = store.loadContracts();
+  await waitForCalls(calls, 1);
+  calls[0]!.resolve(contractsBody(900, 99));
+  await initial;
+  assert.equal(store.contracts?.revision, 900);
+  assert.equal(store.contracts?.process_generation, 99);
+
+  control.sync({ revision: 10, processGeneration: 100, pricingRevision: null });
+  const mutation = store.refreshContractCatalog("provider", "opencode");
+  await waitForCalls(calls, 2);
+  calls[1]!.resolve(contractsBody(11, 100));
+  await mutation;
+
+  assert.equal(store.contracts?.revision, 11, "new-process revisions are not ordered against the old process");
+  assert.equal(store.contracts?.process_generation, 100);
+});
+
+test("providers store: stale mutation conflicts after clear do not trigger a contracts reload", async () => {
+  const mutations: Array<{
+    name: string;
+    run: (store: ReturnType<typeof useProvidersStore>) => Promise<unknown>;
+  }> = [
+    {
+      name: "remove catalog models",
+      run: (store) => store.removeContractCatalogModels("provider", "opencode", ["model-a"]),
+    },
+    {
+      name: "put protocol overrides",
+      run: (store) => store.putModelProtocolOverrides("provider", "opencode", []),
+    },
+  ];
+
+  for (const mutation of mutations) {
+    freshPinia();
+    useControlPlaneStore().sync({ revision: 7, processGeneration: 99, pricingRevision: null });
+    const calls = installDeferredFetch();
+    const store = useProvidersStore();
+
+    const pending = mutation.run(store);
+    await waitForCalls(calls, 1);
+    store.clear();
+    calls[0]!.reject(new DashboardConflictError("stale conflict", 8, 99));
+    // The control-plane helper refreshes `/contract`, then the API helper
+    // observes provider contracts before rethrowing. The stale store
+    // generation must not add a third recovery GET of its own.
+    await waitForCalls(calls, 2);
+    calls[1]!.resolve({ revision: 8, processGeneration: 99, pricingRevision: "p2" });
+    await waitForCalls(calls, 3);
+    calls[2]!.resolve(contractsBody(8));
+    await assert.rejects(pending, DashboardConflictError, mutation.name);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(calls.length, 3, `${mutation.name}: stale store must not add another reload`);
+    assert.equal(store.contracts, null, `${mutation.name}: cache stays cleared`);
+  }
+});
+
+test("dropSession clears providers and a deferred catalog fetch cannot write back", async () => {
+  freshPinia();
+  const calls = installDeferredFetch();
+  const providers = useProvidersStore();
+  const catalogLoad = providers.loadCatalog();
+  const contractsLoad = providers.loadContracts();
+  await waitForCalls(calls, 2);
+
+  useSessionStore().dropSession();
+  assert.equal(providers.catalog, null);
+  assert.equal(providers.contracts, null);
+  assert.equal(providers.connections, null);
+  assert.equal(providers.loading, false);
+  assert.equal(providers.error, "");
+
+  for (const call of calls) {
+    if (call.url.includes("provider-contracts")) {
+      call.resolve(contractsBody(9));
+    } else {
+      call.resolve({ entries: [], revision: 9, processGeneration: 99 });
+    }
+  }
+  await Promise.allSettled([catalogLoad, contractsLoad]);
+  assert.equal(providers.catalog, null);
+  assert.equal(providers.contracts, null);
+  assert.equal(providers.error, "");
 });
 
 test("control plane sync never regresses the revision within one process generation", () => {

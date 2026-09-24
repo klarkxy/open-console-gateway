@@ -215,13 +215,13 @@ function verifyKey(): void {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
   font-size: var(--ocg-font-lg);
   font-weight: 700;
 }
 
 .managed-wizard__steps {
-  margin-bottom: 16px;
+  margin-bottom: var(--ocg-space-lg);
 }
 
 .managed-wizard__step-btn {
@@ -262,7 +262,7 @@ function verifyKey(): void {
   min-height: 220px;
   padding: 22px;
   border: 1px solid var(--ocg-divider);
-  border-radius: 14px;
+  border-radius: var(--ocg-radius-lg);
 }
 
 .managed-wizard__stage h2 {
@@ -291,7 +291,7 @@ function verifyKey(): void {
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: var(--ocg-space-md);
 }
 
 @media (max-width: 640px) {

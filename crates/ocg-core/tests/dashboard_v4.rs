@@ -1,6 +1,7 @@
 //! Dashboard V4 connection projection and onboarding commit.
 
 use chrono::{Duration, Utc};
+use ocg_core::db::Database;
 use ocg_core::models::{Account, AccountSetupStep, AccountType, AccountUpdate, ProxyMode};
 use ocg_core::provider::{
     COMMAND_CODE_PROVIDER_ID, CPA_PROVIDER_ID, CUSTOM_PROVIDER_ID, KIMI_PROVIDER_ID,
@@ -23,7 +24,7 @@ mod fake_upstream;
 mod harness;
 
 use fake_upstream::{FakeReply, start_fake_upstream};
-use harness::{V3Harness, start_loopback, start_public};
+use harness::{V3Harness, start_loopback, start_on_existing_dir, start_public, temp_data_dir};
 
 fn cas(harness: &V3Harness, patch: Value) -> Value {
     let mut body = patch.as_object().cloned().unwrap_or_default();
@@ -39,9 +40,7 @@ fn cas(harness: &V3Harness, patch: Value) -> Value {
 }
 
 fn v4_base(harness: &V3Harness) -> String {
-    harness
-        .v3_base
-        .replacen("/dashboard/api/v3", "/dashboard/api/v4", 1)
+    harness.v4_base.clone()
 }
 
 async fn send_v3(
@@ -472,7 +471,7 @@ async fn v4_listing_makes_zero_outbound_requests() {
 #[tokio::test]
 async fn v4_requires_session_like_v3() {
     let harness = start_public("v4-session").await;
-    for path in ["/contract", "/accounts"] {
+    for path in ["/contract", "/accounts", "/destinations", "/credentials"] {
         let response = harness
             .client
             .get(format!("{}{path}", v4_base(&harness)))
@@ -870,7 +869,7 @@ async fn commit_existing_dynamic_connection_adds_second_key() {
 }
 
 #[tokio::test]
-async fn commit_existing_builtin_or_custom_connection_is_rejected() {
+async fn commit_existing_builtin_is_not_exposed_and_custom_adds_second_key() {
     let harness = start_loopback("v4-commit-reject-legacy").await;
     let builtin_id =
         connection_id_for_legacy(LegacyConnectionKind::BuiltinProvider, OPENCODE_PROVIDER_ID);
@@ -887,15 +886,8 @@ async fn commit_existing_builtin_or_custom_connection_is_rejected() {
         }),
     );
     let (status, error) = send_v4(&harness, Method::POST, "/onboarding/commit", &builtin).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
-    assert_eq!(error["code"], "invalidRequest");
-    assert!(
-        error["message"]
-            .as_str()
-            .unwrap()
-            .contains("builtin and Custom API connections add Keys on Accounts"),
-        "{error}"
-    );
+    assert_eq!(status, StatusCode::NOT_FOUND, "{error}");
+    assert_eq!(error["code"], "notFound");
 
     let (status, created) = send_v3(
         &harness,
@@ -927,22 +919,32 @@ async fn commit_existing_builtin_or_custom_connection_is_rejected() {
         .iter()
         .find(|connection| connection["legacy"]["kind"] == "custom_account")
         .expect("custom connection");
+    let custom_connection_id = custom["id"].as_str().unwrap().to_string();
+    assert_eq!(custom["credentialCount"], 1);
     let custom_commit = commit_cas(
         &harness,
         &operation_id(10),
         json!({
             "connection": {
                 "kind": "existing",
-                "connectionId": custom["id"]
+                "connectionId": custom_connection_id
             },
             "authorization": api_key_auth("sk-custom-second", None),
             "targets": []
         }),
     );
-    let (status, error) =
+    let (status, added) =
         send_v4(&harness, Method::POST, "/onboarding/commit", &custom_commit).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
-    assert_eq!(error["code"], "invalidRequest");
+    assert_eq!(status, StatusCode::OK, "{added}");
+    assert_eq!(added["connectionId"], custom_connection_id);
+    assert_ne!(added["credentialId"], created["account"]["id"]);
+    let (status, connections) = send_v4(&harness, Method::GET, "/connections", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{connections}");
+    let custom = connections_of(&connections)
+        .iter()
+        .find(|connection| connection["id"] == custom_connection_id)
+        .expect("custom connection after second Key");
+    assert_eq!(custom["credentialCount"], 2);
     harness.stop();
 }
 
@@ -1088,6 +1090,53 @@ async fn identities_project_one_container_one_credential_one_binding_per_account
         1
     );
     assert_eq!(identity["credentials"][0]["subject"], "account_credential");
+    harness.stop();
+}
+
+#[tokio::test]
+async fn v57_get_accounts_after_migrate_lists_reconstructed_identity_secret_free() {
+    let dir = temp_data_dir("v57-get-accounts-migrate");
+    let secret = "sk-v57-migrate-secret";
+    {
+        let db = Database::open(dir.clone()).unwrap();
+        let now = Utc::now();
+        db.create_account(&Account {
+            id: "v57-go".into(),
+            provider_id: OPENCODE_PROVIDER_ID.to_string(),
+            credential_kind: default_credential_kind(),
+            quota_scope: default_quota_scope(),
+            name: "Go Key".into(),
+            username: None,
+            password_cipher: None,
+            key_cipher: secret.into(),
+            enabled: true,
+            account_type: AccountType::Key,
+            setup_step: AccountSetupStep::Ready,
+            referral_code: None,
+            purchase_date: String::new(),
+            expires_on: String::new(),
+            cooldown_until: None,
+            cooldown_generic_until: None,
+            cooldown_5h_until: None,
+            cooldown_week_until: None,
+            cooldown_month_until: None,
+            cooldown_free_until: None,
+            last_error: None,
+            auth_error: None,
+            notes: None,
+            created_at: now,
+            updated_at: now,
+        })
+        .unwrap();
+        db.test_rewind_identity_satellites_to_v56().unwrap();
+    }
+    let harness = start_on_existing_dir(dir).await;
+    let (status, body) = send_v4(&harness, Method::GET, "/accounts", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_secret_free(&body, &[secret]);
+    let identity = find_identity_legacy(&body, "account", "v57-go");
+    assert_eq!(identity["credentials"].as_array().unwrap().len(), 1);
+    assert!(!identity["identity"]["id"].as_str().unwrap().is_empty());
     harness.stop();
 }
 
@@ -2285,7 +2334,8 @@ async fn saved_grants_are_facts_and_url_edits_do_not_expand_them() {
         .find(|item| item["identity"]["label"] == "Grant Lab")
         .expect("lab identity")["credentials"][0]["bindings"][0]
         .clone();
-    assert_eq!(still["allowedEndpointIds"], original_ids);
+    // Consent to the removed URL must not survive as the new URL's reused id.
+    assert_eq!(still["allowedEndpointIds"], json!([]));
     assert_eq!(still["allowedOrigins"], original_origins);
 
     let (status, patched) = send_v4(
@@ -3927,5 +3977,243 @@ async fn dsh_application_install_resolves_the_selected_key_only_inside_the_host(
             .any(|call| call.ends_with(&selected)),
         "selected Key did not reach the private host seam"
     );
+    harness.stop();
+}
+
+#[tokio::test]
+async fn new_api_import_keys_creates_local_custom_keys_without_echoing_secrets() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let app = axum::Router::new().fallback(|method: Method, uri: axum::http::Uri| async move {
+        use axum::response::IntoResponse;
+        let path = uri.path();
+        let body = if (path == "/api/token" || path == "/api/token/") && method == Method::GET {
+            json!({
+                "success": true,
+                "data": {
+                    "items": [
+                        {"id": 7, "name": "Codex 稳定", "status": 1},
+                        {"id": 8, "name": "disabled", "status": 2}
+                    ],
+                    "total": 2
+                }
+            })
+        } else if path == "/api/token/7/key" && method == Method::POST {
+            json!({"success": true, "data": {"key": "sk-import-live-secret"}})
+        } else if path == "/api/token/8/key" && method == Method::POST {
+            json!({"success": true, "data": {"key": "sk-disabled-secret"}})
+        } else if path == "/v1/models" && method == Method::GET {
+            json!({"object": "list", "data": [{"id": "imported-model"}]})
+        } else if path == "/api/token/7/key" || path == "/api/token/8/key" {
+            return axum::http::StatusCode::METHOD_NOT_ALLOWED.into_response();
+        } else {
+            return axum::http::StatusCode::NOT_FOUND.into_response();
+        };
+        axum::Json(body).into_response()
+    });
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let harness = start_loopback("platform-import-keys").await;
+    let (status, parent) = send_v3(
+        &harness,
+        Method::POST,
+        "/platform-accounts",
+        &cas(
+            &harness,
+            json!({
+                "kind": "new_api",
+                "name": "Import Site",
+                "baseUrl": origin,
+                "userCredential": "9:pat-import-secret"
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{parent}");
+    let id = parent["accounts"][0]["id"].as_str().unwrap();
+    let (status, imported) = send_v4(
+        &harness,
+        Method::POST,
+        &format!("/platform-accounts/{id}/import-keys"),
+        &cas(&harness, json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{imported}");
+    assert_eq!(imported["imported"], 1, "{imported}");
+    assert_eq!(imported["skippedDisabled"], 1, "{imported}");
+    assert_eq!(imported["skippedExisting"], 0, "{imported}");
+    assert_secret_free(
+        &imported,
+        &[
+            "sk-import-live-secret",
+            "pat-import-secret",
+            "sk-disabled-secret",
+        ],
+    );
+    let (status, again) = send_v4(
+        &harness,
+        Method::POST,
+        &format!("/platform-accounts/{id}/import-keys"),
+        &cas(&harness, json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    assert_eq!(again["imported"], 0, "{again}");
+    assert_eq!(again["skippedExisting"], 1, "{again}");
+    let (status, listed) = send_v3(&harness, Method::GET, "/platform-accounts", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    assert_eq!(listed["links"].as_array().unwrap().len(), 1, "{listed}");
+    harness.stop();
+    server.abort();
+}
+
+#[tokio::test]
+async fn new_api_import_keys_conflicts_when_revision_changes_during_upstream() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let mut started_tx = Some(started_tx);
+        let mut release_rx = Some(release_rx);
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            let mut buf = vec![0_u8; 8192];
+            let n = stream.read(&mut buf).await.unwrap_or(0);
+            let head = String::from_utf8_lossy(&buf[..n]);
+            let line = head.lines().next().unwrap_or_default();
+            let token_list = line.starts_with("GET /api/token");
+            let body = if token_list {
+                if let Some(tx) = started_tx.take() {
+                    let _ = tx.send(());
+                }
+                if let Some(rx) = release_rx.take() {
+                    let _ = rx.await;
+                }
+                r#"{"success":true,"data":{"items":[{"id":7,"name":"Codex","status":1}],"total":1}}"#
+            } else if line.starts_with("POST /api/token/7/key") {
+                r#"{"success":true,"data":{"key":"sk-stale-import"}}"#
+            } else if line.starts_with("GET /v1/models") {
+                r#"{"object":"list","data":[{"id":"imported-model"}]}"#
+            } else {
+                r#"{"success":false}"#
+            };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+        }
+    });
+    let harness = start_loopback("platform-import-cas").await;
+    let (status, parent) = send_v3(
+        &harness,
+        Method::POST,
+        "/platform-accounts",
+        &cas(
+            &harness,
+            json!({
+                "kind": "new_api",
+                "name": "CAS Site",
+                "baseUrl": origin,
+                "userCredential": "9:pat-import-secret"
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{parent}");
+    let id = parent["accounts"][0]["id"].as_str().unwrap().to_string();
+    let (status, imported) = {
+        let import_path = format!("/platform-accounts/{id}/import-keys");
+        let import_body = cas(&harness, json!({}));
+        let import_fut = send_v4(&harness, Method::POST, &import_path, &import_body);
+        tokio::pin!(import_fut);
+        tokio::select! {
+            biased;
+            started = started_rx => started.unwrap(),
+            unexpected = &mut import_fut => {
+                panic!("import finished before the token list was gated: {unexpected:?}");
+            }
+        }
+        let (status, updated) = send_v3(
+            &harness,
+            Method::PUT,
+            &format!("/platform-accounts/{id}"),
+            &cas(&harness, json!({"name": "Renamed Site"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{updated}");
+        let _ = release_tx.send(());
+        import_fut.await
+    };
+    assert_eq!(status, StatusCode::CONFLICT, "{imported}");
+    let (status, listed) = send_v3(&harness, Method::GET, "/platform-accounts", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    assert_eq!(listed["links"].as_array().unwrap().len(), 0, "{listed}");
+    harness.stop();
+    server.abort();
+}
+
+#[tokio::test]
+async fn connections_offer_credit_setup_before_a_key_exists() {
+    let harness = start_loopback("v4-credit-setup-options").await;
+    for (name, endpoint, count) in [
+        (
+            "Step Plan setup",
+            "https://api.stepfun.com/step_plan/v1/chat/completions",
+            4,
+        ),
+        (
+            "Cash setup",
+            "https://api.stepfun.com/v1/chat/completions",
+            0,
+        ),
+    ] {
+        let (status, created) = send_v3(
+            &harness,
+            Method::POST,
+            "/providers",
+            &cas(
+                &harness,
+                create_body(name, endpoint, "chat_completions", "bearer", None),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        if count == 0 {
+            let db = harness.state.db.lock();
+            let mut runtime = db
+                .get_dynamic_provider(created["provider"]["id"].as_str().unwrap())
+                .unwrap()
+                .unwrap();
+            runtime.mappings[0].upstream_override =
+                Some(ocg_domain::dynamic::DynamicModelUpstreamOverride {
+                    protocol: ocg_domain::catalog::UpstreamProtocolKind::ChatCompletions,
+                    endpoint_url: "https://api.stepfun.com/step_plan/v1/chat/completions".into(),
+                });
+            db.replace_dynamic_provider(&runtime, false, false, None)
+                .unwrap();
+        }
+        let (status, body) = send_v4(&harness, Method::GET, "/connections", &Value::Null).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let connection = find_legacy(
+            &body,
+            "dynamic_provider",
+            created["provider"]["id"].as_str().unwrap(),
+        );
+        assert_eq!(connection["credentialCount"], 0);
+        assert_eq!(connection["creditPresets"].as_array().unwrap().len(), count);
+        if count > 0 {
+            assert_eq!(
+                connection["creditPresets"][1]["initialGrant"].as_f64(),
+                Some(1_600_000_000.0)
+            );
+        }
+        let builtin = find_legacy(&body, "builtin_provider", OPENCODE_ZEN_FREE_PROVIDER_ID);
+        assert!(builtin.get("creditPresets").is_none());
+    }
     harness.stop();
 }

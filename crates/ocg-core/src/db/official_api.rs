@@ -94,7 +94,7 @@ impl Database {
     ) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         let cipher: String = tx.query_row(
-            "SELECT key_cipher FROM accounts WHERE id=?1 AND provider_id=?2",
+            "SELECT key_cipher FROM credentials WHERE legacy_account_id=?1 AND provider_id=?2",
             params![account.id, runtime.id],
             |row| row.get(0),
         )?;

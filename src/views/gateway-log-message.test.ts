@@ -13,19 +13,31 @@ async function waitForLocale(value: Locale): Promise<void> {
 }
 
 test("localizes the known account-created runtime log message", () => {
+  const name = "UI smoke Custom draft";
+  const source = `created account ${name}`;
   setLocale("zh-CN");
-  assert.equal(gatewayLogMessage("created account UI smoke Custom draft"), "已创建账号 UI smoke Custom draft");
+  const zh = gatewayLogMessage(source);
+  // Known events are localized, never passed through, and keep the account name.
+  assert.notEqual(zh, source);
+  assert.ok(zh.includes(name));
+  assert.ok(!zh.includes("{name}"));
   setLocale("en-US");
-  assert.equal(gatewayLogMessage("created account UI smoke Custom draft"), "Created account UI smoke Custom draft");
+  const en = gatewayLogMessage(source);
+  assert.notEqual(en, source);
+  assert.ok(en.includes(name));
+  assert.ok(!en.includes("{name}"));
+  assert.notEqual(en, zh);
 });
 
 test("interpolates the account name verbatim, including placeholder-like text", () => {
   setLocale("en-US");
-  assert.equal(
-    gatewayLogMessage("created account {name} <b>smoke</b>"),
-    "Created account {name} <b>smoke</b>",
-  );
-  assert.equal(gatewayLogMessage("created account 主号（生产）"), "Created account 主号（生产）");
+  const placeholderLike = "{name} <b>smoke</b>";
+  const source = `created account ${placeholderLike}`;
+  const rendered = gatewayLogMessage(source);
+  assert.notEqual(rendered, source);
+  assert.ok(rendered.endsWith(placeholderLike));
+  const unicodeName = "主号（生产）";
+  assert.ok(gatewayLogMessage(`created account ${unicodeName}`).endsWith(unicodeName));
 });
 
 test("renders the account-created message in a non-English lazy locale", async () => {

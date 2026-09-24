@@ -4,8 +4,7 @@ use super::diagnostics::{
 use super::protocol::{
     ApiFormat, NamespaceToolMapping, ProtocolError, RequestPlan, UsageCounts,
     encode_anthropic_thinking_block, encode_chat_reasoning, responses_id,
-    rewrite_existing_visible_model, sanitize_minimax_anthropic_usage, sanitize_minimax_chat_usage,
-    unix_seconds,
+    rewrite_existing_visible_model, unix_seconds,
 };
 use super::wire::WireNormalization;
 use bytes::{Bytes, BytesMut};
@@ -1264,19 +1263,11 @@ impl StreamConverter {
         events
     }
 
-    fn decode_messages(&mut self, mut value: Value) -> Vec<PivotEvent> {
+    fn decode_messages(&mut self, value: Value) -> Vec<PivotEvent> {
         let event_type = value.get("type").and_then(Value::as_str).unwrap_or("");
         match event_type {
             "message_start" => {
                 self.input.started = true;
-                let model = value
-                    .pointer("/message/model")
-                    .and_then(Value::as_str)
-                    .unwrap_or(&self.model)
-                    .to_string();
-                if let Some(usage) = value.pointer_mut("/message/usage") {
-                    sanitize_minimax_anthropic_usage(Some(&model), Some(&self.model), usage);
-                }
                 self.input
                     .usage
                     .merge(anthropic_usage(value.pointer("/message/usage")));
@@ -1387,9 +1378,6 @@ impl StreamConverter {
             }
             "message_delta" => {
                 self.input.message_delta_seen = true;
-                if let Some(usage) = value.get_mut("usage") {
-                    sanitize_minimax_anthropic_usage(Some(&self.model), Some(&self.model), usage);
-                }
                 let usage = anthropic_usage(value.get("usage"));
                 self.input.usage.merge(usage);
                 let stop_reason = string_at(
@@ -2722,7 +2710,7 @@ fn done_frame() -> Bytes {
 fn sanitize_passthrough_sse_frame(
     format: ApiFormat,
     frame: Bytes,
-    model_hint: &str,
+    _model_hint: &str,
     client_model: &str,
     known_secret: Option<&str>,
     parsed: Option<&Value>,
@@ -2744,34 +2732,6 @@ fn sanitize_passthrough_sse_frame(
         wire_normalization.normalize_response_value(&mut value);
         if let Some(secret) = secret {
             redact_known_secret_stream_values(&mut value, secret);
-        }
-        match format {
-            ApiFormat::ChatCompletions => {
-                let model = value
-                    .get("model")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned);
-                if let Some(usage) = value.get_mut("usage") {
-                    sanitize_minimax_chat_usage(model.as_deref(), Some(model_hint), usage);
-                }
-            }
-            ApiFormat::Messages => {
-                let model = value
-                    .pointer("/message/model")
-                    .or_else(|| value.get("model"))
-                    .and_then(Value::as_str)
-                    .map(str::to_owned);
-                let has_top_level_usage = value.get("usage").is_some();
-                let usage = if has_top_level_usage {
-                    value.get_mut("usage")
-                } else {
-                    value.pointer_mut("/message/usage")
-                };
-                if let Some(usage) = usage {
-                    sanitize_minimax_anthropic_usage(model.as_deref(), Some(model_hint), usage);
-                }
-            }
-            ApiFormat::Responses | ApiFormat::Gemini => {}
         }
         rewrite_existing_visible_model(format, &mut value, client_model);
         if value != source_value {

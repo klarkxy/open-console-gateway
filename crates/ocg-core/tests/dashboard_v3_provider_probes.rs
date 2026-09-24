@@ -768,7 +768,7 @@ async fn zen_static_protocol_reset_uses_go_docs_and_keeps_unknown_protocols_disa
 }
 
 #[tokio::test]
-async fn goat_static_protocol_reset_restores_official_family_without_enabling_extra_models() {
+async fn goat_static_protocol_reset_enables_documented_family_and_preserves_explicit_off() {
     let harness = start_probes("goat-static-protocol-reset").await;
     let scope = ContractScope::provider(COMMAND_CODE_PROVIDER_ID);
     let models = vec![
@@ -819,7 +819,7 @@ async fn goat_static_protocol_reset_restores_official_family_without_enabling_ex
     assert_eq!(fable["protocols"]["messages"]["override"], "auto");
     assert_eq!(fable["protocols"]["messages"]["source"], "static");
     assert_eq!(fable["protocols"]["messages"]["available"], true);
-    assert_eq!(fable["protocols"]["messages"]["enabled"], false);
+    assert_eq!(fable["protocols"]["messages"]["enabled"], true);
     assert!(fable["protocols"]["messages"]["verifiedAt"].is_null());
     assert!(fable["protocols"]["chat_completions"].is_null());
     assert!(fable["protocols"]["responses"].is_null());
@@ -829,8 +829,9 @@ async fn goat_static_protocol_reset_restores_official_family_without_enabling_ex
         .iter()
         .find(|model| model["modelId"] == "stealth/ox-alpha")
         .unwrap();
-    assert_eq!(stealth["protocols"]["chat_completions"]["override"], "auto");
-    assert_eq!(stealth["protocols"]["chat_completions"]["enabled"], false);
+    assert!(stealth["protocols"]["chat_completions"].is_null());
+    assert!(stealth["protocols"]["responses"].is_null());
+    assert!(stealth["protocols"]["messages"].is_null());
     let future = goat["models"]
         .as_array()
         .unwrap()
@@ -839,7 +840,7 @@ async fn goat_static_protocol_reset_restores_official_family_without_enabling_ex
         .unwrap();
     assert_eq!(future["protocols"]["chat_completions"]["override"], "auto");
     assert_eq!(future["protocols"]["chat_completions"]["source"], "static");
-    assert_eq!(future["protocols"]["chat_completions"]["enabled"], false);
+    assert_eq!(future["protocols"]["chat_completions"]["enabled"], true);
     assert!(future["protocols"]["responses"].is_null());
     assert!(future["protocols"]["messages"].is_null());
     let (status, overridden) = send_json(&harness, Method::PUT, "/provider-contracts/provider/command-code/model-protocol-overrides", &cas(&harness, json!({"overrides":[{"modelId":"future-goat-model","protocol":"chat_completions","state":"force_off"}]}))).await;
@@ -861,7 +862,7 @@ async fn goat_static_protocol_reset_restores_official_family_without_enabling_ex
 }
 
 #[tokio::test]
-async fn fixed_provider_resets_restore_documented_chat_and_messages() {
+async fn fixed_provider_resets_restore_each_documented_protocol() {
     let harness = start_probes("fixed-provider-official-protocol-reset").await;
     let now = chrono::Utc::now();
     for (provider_id, model_id) in [
@@ -915,22 +916,28 @@ async fn fixed_provider_resets_restore_documented_chat_and_messages() {
         assert_eq!(model["protocols"]["messages"]["override"], "auto");
         assert_eq!(model["protocols"]["messages"]["source"], "static");
         assert_eq!(model["protocols"]["messages"]["enabled"], true);
-        assert!(model["protocols"]["responses"].is_null());
+        if provider_id == MINIMAX_PROVIDER_ID {
+            assert_eq!(model["protocols"]["responses"]["override"], "auto");
+            assert_eq!(model["protocols"]["responses"]["source"], "static");
+            assert_eq!(model["protocols"]["responses"]["enabled"], true);
+        } else {
+            assert!(model["protocols"]["responses"].is_null());
+        }
     }
     harness.stop();
 }
 
 #[tokio::test]
-async fn fixed_provider_overrides_reject_protocols_outside_official_ceiling() {
+async fn fixed_provider_overrides_accept_minimax_responses_and_reject_kimi_responses() {
     let harness = start_probes("fixed-provider-override-ceiling").await;
     let (status, rejected) = send_json(
         &harness,
         Method::PUT,
-        "/provider-contracts/provider/minimax/model-protocol-overrides",
+        "/provider-contracts/provider/kimi/model-protocol-overrides",
         &cas(
             &harness,
             json!({"overrides":[{
-                "modelId":"MiniMax-M3",
+                "modelId":"kimi-k3",
                 "protocol":"responses",
                 "state":"force_on"
             }]}),
@@ -948,7 +955,7 @@ async fn fixed_provider_overrides_reject_protocols_outside_official_ceiling() {
             &harness,
             json!({"overrides":[{
                 "modelId":"MiniMax-M3",
-                "protocol":"messages",
+                "protocol":"responses",
                 "state":"force_on"
             }]}),
         ),
@@ -1224,12 +1231,15 @@ async fn goat_protocol_probes_use_only_each_models_sealed_native_family_path() {
         .unwrap();
     harness.state.reload_provider_contracts().unwrap();
 
-    for (model_id, expected_protocol) in [
+    for (model_id, expected_protocols) in [
         (
             "deepseek/deepseek-v4-flash",
-            AccountUpstreamProtocol::ChatCompletions,
+            vec![
+                AccountUpstreamProtocol::ChatCompletions,
+                AccountUpstreamProtocol::Responses,
+            ],
         ),
-        ("claude-sonnet-5", AccountUpstreamProtocol::Messages),
+        ("claude-sonnet-5", vec![AccountUpstreamProtocol::Messages]),
     ] {
         let previously_enabled = harness
             .state
@@ -1237,8 +1247,7 @@ async fn goat_protocol_probes_use_only_each_models_sealed_native_family_path() {
             .scope(&scope)
             .and_then(|scope| scope.model(model_id))
             .unwrap()
-            .enabled_protocols()
-            .contains(&expected_protocol.into());
+            .enabled_protocols();
         let (status, body) = send_json(
             &harness,
             Method::POST,
@@ -1254,27 +1263,42 @@ async fn goat_protocol_probes_use_only_each_models_sealed_native_family_path() {
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
         let parsed = parse_probe(&body);
-        assert_eq!(parsed.results.len(), 1, "{body}");
-        assert_eq!(parsed.results[0].protocol, expected_protocol);
-        assert!(parsed.results[0].success);
+        assert_eq!(parsed.results.len(), expected_protocols.len(), "{body}");
+        assert_eq!(
+            parsed
+                .results
+                .iter()
+                .map(|result| result.protocol)
+                .collect::<Vec<_>>(),
+            expected_protocols
+        );
+        assert!(parsed.results.iter().all(|result| result.success));
         let contract = parsed
             .contract
             .expect("probe returns the updated model contract");
-        let evidence = match expected_protocol {
-            AccountUpstreamProtocol::ChatCompletions => contract.protocols.chat_completions,
-            AccountUpstreamProtocol::Responses => contract.protocols.responses,
-            AccountUpstreamProtocol::Messages => contract.protocols.messages,
+        for expected_protocol in expected_protocols {
+            let evidence = match expected_protocol {
+                AccountUpstreamProtocol::ChatCompletions => {
+                    contract.protocols.chat_completions.as_ref()
+                }
+                AccountUpstreamProtocol::Responses => contract.protocols.responses.as_ref(),
+                AccountUpstreamProtocol::Messages => contract.protocols.messages.as_ref(),
+            }
+            .expect("probed family protocol");
+            assert!(evidence.available);
+            assert_eq!(
+                evidence.enabled,
+                previously_enabled.contains(&expected_protocol.into())
+            );
         }
-        .expect("probed family protocol");
-        assert!(evidence.available);
-        assert_eq!(evidence.enabled, previously_enabled);
         assert_secret_free(&body, &[GO_KEY]);
     }
 
     let calls = origin.calls.lock().unwrap().clone();
-    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert_eq!(calls.len(), 3, "{calls:?}");
     assert_eq!(calls[0].path, "/provider/v1/chat/completions");
-    assert_eq!(calls[1].path, "/provider/v1/messages");
+    assert_eq!(calls[1].path, "/provider/v1/responses");
+    assert_eq!(calls[2].path, "/provider/v1/messages");
     assert!(calls.iter().all(|call| {
         call.authorization.as_deref() == Some("Bearer sk-probe-secret-key")
             && call.x_api_key.is_none()
@@ -2204,7 +2228,6 @@ async fn static_reset_advances_global_revision_before_reload_failure() {
         )
         .unwrap();
     harness.state.reload_provider_contracts().unwrap();
-    // Reach the post-commit reload fault, rather than failing before any write.
     let _docs =
         install_official_protocol_fetch_for_tests(harness.state.process_generation(), |_| {
             OfficialProtocolBaseline::mapped([("grok-4.5", UpstreamProtocolKind::Responses)])
@@ -2212,12 +2235,23 @@ async fn static_reset_advances_global_revision_before_reload_failure() {
     let before = harness.state.settings_revision();
     let before_contracts = harness.state.provider_contracts();
     let conn = open_sqlite(&harness);
-    conn.execute(
-        "INSERT OR REPLACE INTO provider_contract_model_protocols
-         (scope_kind, scope_id, model_id, protocol, source)
-         VALUES ('provider', ?1, 'kimi-for-coding', 'chat_completions', 'invalid-before-reload')",
-        [KIMI_PROVIDER_ID],
-    )
+    // Protocol controls now read all evidence inside the reset transaction.
+    // Corrupt only after that read, while its final destination catalog writes
+    // are running, so the durable commit precedes the reload failure.
+    conn.execute_batch(&format!(
+        "CREATE TRIGGER corrupt_static_reset_evidence_before_reload
+         AFTER INSERT ON destination_models
+         WHEN NEW.destination_id = (
+             SELECT id FROM destinations
+              WHERE legacy_kind = 'builtin' AND legacy_id = '{OPENCODE_PROVIDER_ID}'
+         )
+         BEGIN
+             INSERT OR REPLACE INTO provider_contract_model_protocols
+             (scope_kind, scope_id, model_id, protocol, source)
+             VALUES ('provider', '{KIMI_PROVIDER_ID}', 'kimi-for-coding',
+                     'chat_completions', 'invalid-before-reload');
+         END;"
+    ))
     .unwrap();
 
     let (status, body) = send_json(
@@ -2251,6 +2285,91 @@ async fn static_reset_advances_global_revision_before_reload_failure() {
     assert!(
         go_override_count > 0,
         "the reset transaction must be durable"
+    );
+    assert_eq!(
+        before_contracts.as_ref(),
+        harness.state.provider_contracts().as_ref()
+    );
+    drop(conn);
+    harness.stop();
+}
+
+#[tokio::test]
+async fn static_reset_rolls_back_without_revision_bump_when_evidence_is_invalid() {
+    let harness = start_probes("static-reset-invalid-evidence").await;
+    let now = chrono::Utc::now();
+    harness
+        .state
+        .db
+        .lock()
+        .set_contract_catalog(
+            &ContractScope::provider(KIMI_PROVIDER_ID),
+            &["kimi-for-coding".to_string()],
+            Some(now),
+            "provider_get_models",
+            "https://example.test/models",
+            now,
+        )
+        .unwrap();
+    harness.state.reload_provider_contracts().unwrap();
+    // Supply valid official docs so the fault occurs while applying controls.
+    let _docs =
+        install_official_protocol_fetch_for_tests(harness.state.process_generation(), |_| {
+            OfficialProtocolBaseline::mapped([("grok-4.5", UpstreamProtocolKind::Responses)])
+        });
+    let before = harness.state.settings_revision();
+    let before_contracts = harness.state.provider_contracts();
+    let before_scope = go_scope_revision(&harness);
+    assert!(before_scope.is_some());
+    let conn = open_sqlite(&harness);
+    let before_override_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM provider_contract_model_protocol_overrides
+         WHERE scope_kind = 'provider' AND scope_id = ?1",
+            [OPENCODE_PROVIDER_ID],
+            |row| row.get(0),
+        )
+        .unwrap();
+    conn.execute(
+        "INSERT OR REPLACE INTO provider_contract_model_protocols
+         (scope_kind, scope_id, model_id, protocol, source)
+         VALUES ('provider', ?1, 'kimi-for-coding', 'chat_completions', 'invalid-before-reload')",
+        [KIMI_PROVIDER_ID],
+    )
+    .unwrap();
+
+    let (status, body) = send_json(
+        &harness,
+        Method::POST,
+        &static_reset_path(),
+        &cas(&harness, json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert_v3_error(&body, ERROR_INTERNAL);
+    assert_eq!(harness.state.settings_revision(), before);
+    assert_eq!(go_scope_revision(&harness), before_scope);
+    let stored_source: String = conn
+        .query_row(
+            "SELECT source FROM provider_contract_model_protocols
+             WHERE scope_kind = 'provider' AND scope_id = ?1
+             LIMIT 1",
+            [KIMI_PROVIDER_ID],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored_source, "invalid-before-reload");
+    let go_override_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM provider_contract_model_protocol_overrides
+             WHERE scope_kind = 'provider' AND scope_id = ?1",
+            [OPENCODE_PROVIDER_ID],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        go_override_count, before_override_count,
+        "the failed reset must roll back its protocol-control writes"
     );
     assert_eq!(
         before_contracts.as_ref(),

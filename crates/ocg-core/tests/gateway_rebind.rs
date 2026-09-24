@@ -141,7 +141,7 @@ async fn assert_not_serving(port: u16, key: &str) {
 #[cfg(not(windows))]
 async fn assert_dashboard_auth(port: u16, expected: reqwest::StatusCode) {
     let client = loopback_client();
-    for path in ["/dashboard/api/v3/contract"] {
+    for path in ["/dashboard/api/v4/contract"] {
         let response = client
             .get(format!("http://127.0.0.1:{port}{path}"))
             .send()

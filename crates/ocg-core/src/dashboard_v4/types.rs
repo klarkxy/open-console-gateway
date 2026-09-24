@@ -9,9 +9,15 @@ use schemars::generate::{SchemaGenerator, SchemaSettings};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
+pub use crate::billing_types::{
+    BillingStatus, CreditBalanceCorrection, CreditCalibrationRequest, CreditConfigureRequest,
+    CreditGrantRequest,
+};
+pub use crate::db::routing_cards::RoutingCard;
+
 use crate::dashboard_v3::{
     AccountAuthScheme, AccountCredentialKind, AccountUpstreamProtocol, ControlRevision,
-    MutationExpectation, ProviderDefinitionAuthKind, V3Error,
+    MutationExpectation, ProviderDefinitionAuthKind, RoutingMode, V3Error,
 };
 use ocg_domain::connection::{
     AuthorizationState, ConnectionLifecycle as DomainConnectionLifecycle, ConnectionOrigin,
@@ -37,6 +43,8 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "Eligibility",
     "TemplateRef",
     "ConnectionSummary",
+    "CredentialCreateCapabilityDto",
+    "CredentialCreateUnavailableReasonDto",
     "ConnectionList",
     "OnboardingCommitRequest",
     "OnboardingCommitMode",
@@ -72,6 +80,41 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "DshApplicationStatus",
     "DshApplication",
     "DshApplicationInstallRequest",
+    "PlatformKeyImportRequest",
+    "PlatformKeyImportResult",
+    "PlatformKeyImportFailure",
+    "DestinationList",
+    "DestinationDto",
+    "ModelResolutionDto",
+    "DestinationModelPatch",
+    "DestinationUpstreamOverridePatch",
+    "DestinationPatchRequest",
+    "DestinationPatchResult",
+    "DestinationCatalogRefreshResult",
+    "HttpProtocolRouteDto",
+    "DestinationCatalogUpdate",
+    "DestinationCatalogModelUpdate",
+    "DestinationModelTestRequest",
+    "DestinationModelTestResult",
+    "DestinationDeleteResult",
+    "DestinationCredentialDto",
+    "QuotaRecoveryDto",
+    "QuotaRecoveryStatus",
+    "QuotaRecoveryReason",
+    "QuotaRecoveryWindow",
+    "QuotaRetryResult",
+    "CredentialList",
+    "RoutingCard",
+    "RoutingCardList",
+    "RoutingCardUpdate",
+    "AccountControlsDto",
+    "AccountToggleWriteDto",
+    "AccountConfigurationOwnerDto",
+    "AccountConsoleLinkDto",
+    "CapabilitiesDto",
+    "PlanDto",
+    "CatalogModelDto",
+    "DestinationProjectionRefusedError",
     "OfficialApiKind",
     "OfficialPriceRow",
     "OfficialPriceSheet",
@@ -79,6 +122,32 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "OfficialSpend",
     "OfficialApiStatus",
     "OfficialApiPrices",
+    "BillingModel",
+    "BillingSource",
+    "BillingStatus",
+    "CreditRate",
+    "MonthlyCredits",
+    "CreditConfiguration",
+    "CreditBucketKind",
+    "CreditBucket",
+    "CreditPreset",
+    "CreditMeterView",
+    "CreditConfigureRequest",
+    "CreditBalanceCorrection",
+    "CreditCalibrationRequest",
+    "CreditGrantRequest",
+    "RoutingMode",
+    "RoutingClientProtocol",
+    "RoutingResolvedKind",
+    "RoutingResolvedMapping",
+    "RoutingResolvedModel",
+    "RoutingChannel",
+    "RoutingEligibleCandidate",
+    "RoutingExclusionCode",
+    "RoutingExclusion",
+    "RoutingConversationBinding",
+    "RuntimeOnlyUncertainty",
+    "RoutingExplanation",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -176,6 +245,8 @@ pub struct TemplateList {
 #[serde(rename_all = "camelCase")]
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ConnectionEndpoint {
+    /// Official balance support for this exact configured URL, including its path.
+    pub official_balance: bool,
     pub id: String,
     pub connection_id: String,
     pub operation: EndpointOperation,
@@ -242,10 +313,34 @@ impl From<DomainConnectionLifecycle> for ConnectionLifecycle {
     }
 }
 
+/// Why this connection cannot accept another credential through identity creation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialCreateUnavailableReasonDto {
+    ExternalIntegration,
+    Singleton,
+    NoAuthentication,
+    DedicatedAccountFlow,
+    BuiltinDefinition,
+    Unavailable,
+    Draft,
+}
+
+/// Server-owned operation capability; writes recheck it against current state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CredentialCreateCapabilityDto {
+    pub allowed: bool,
+    pub material_kinds: Vec<MaterialKind>,
+    pub reason: Option<CredentialCreateUnavailableReasonDto>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ConnectionSummary {
+    pub credential_create: CredentialCreateCapabilityDto,
     pub id: String,
     pub name: String,
     pub origin: ConnectionOrigin,
@@ -262,6 +357,10 @@ pub struct ConnectionSummary {
     pub legacy: LegacyIdentity,
     pub display_family: Option<String>,
     pub offering: OfferingKind,
+    /// Personal credit setup for Key forms. None means unsupported; an empty
+    /// list permits custom configuration without a provider preset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credit_presets: Option<Vec<crate::billing_types::CreditPreset>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -317,6 +416,8 @@ pub struct OnboardingConnectionNew {
     pub endpoint_url: String,
     pub upstream_protocol: AccountUpstreamProtocol,
     pub auth_kind: ProviderDefinitionAuthKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol_routes: Option<Vec<HttpProtocolRouteDto>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -701,6 +802,789 @@ pub struct AliasPublicationUpdate {
     pub published: bool,
 }
 
+/// Import New API inference tokens as local Custom Keys. Secret-free.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlatformKeyImportRequest {
+    #[serde(flatten)]
+    pub expectation: MutationExpectation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlatformKeyImportFailure {
+    pub name: String,
+    pub code: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlatformKeyImportResult {
+    pub imported: u32,
+    pub skipped_existing: u32,
+    pub skipped_disabled: u32,
+    pub failed: Vec<PlatformKeyImportFailure>,
+    pub revision: ControlRevision,
+}
+
+/// Sealed adapter kind. Wire values match the domain serde names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum AdapterKindDto {
+    OpencodeGo,
+    Zen,
+    Goat,
+    Minimax,
+    Kimi,
+    Ollama,
+    Cpa,
+    Http,
+}
+
+/// Destination auth scheme. Wire values match the domain serde names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum AuthSchemeDto {
+    None,
+    Bearer,
+    XApiKey,
+    ApiKey,
+}
+
+/// Which client model names may resolve to a destination mapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum ModelResolutionDto {
+    AdapterDefined,
+    PublicOnly,
+    PublicAndUpstream,
+}
+
+/// Wire protocol for destination catalog and transport rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum ProtocolDto {
+    ChatCompletions,
+    Responses,
+    Messages,
+}
+
+/// Redirect policy advertised on a destination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum RedirectPolicyDto {
+    NoFollow,
+    FollowKeyless,
+}
+
+/// Where a Plan reads usage from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum UsageSourceDto {
+    OfficialApi,
+    LocalProjection,
+    None,
+}
+
+/// One Plan usage window kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum PlanWindowKindDto {
+    FiveHours,
+    Week,
+    Month,
+    Free,
+}
+
+/// One Plan usage window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlanWindowDto {
+    pub kind: PlanWindowKindDto,
+}
+
+/// How a Plan expires, when it has a cadence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum ExpiryCadenceDto {
+    Monthly,
+}
+
+/// Where a Plan's prices come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum PricingSourceDto {
+    Official,
+    VerifiedSnapshot,
+    Unpriced,
+}
+
+/// Destination capability flags. Mirrors the domain `Capabilities` record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CapabilitiesDto {
+    /// Test connection is offered on every ready credential except external integrations.
+    pub testable: bool,
+    /// The destination can discover models from the upstream.
+    pub discoverable_models: bool,
+    /// Hosts Configurable HTTP may probe for an official current-balance API.
+    pub official_balance_probe: Vec<String>,
+    /// The destination holds a non-inference observer credential (platform parent).
+    pub observer: bool,
+    /// Managed signup can start an onboarding task on a credential.
+    pub managed_signup: bool,
+    /// The destination is an external integration and holds no local inference secret.
+    pub external_integration: bool,
+    /// A billing tier must be selected before the destination is usable.
+    pub billing_tier_required: bool,
+    pub redirect_policy: RedirectPolicyDto,
+    /// The adapter attaches identity headers on egress.
+    pub identity_headers: bool,
+}
+
+/// Commercial offering embedded in a destination. Mirrors the domain `Plan`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlanDto {
+    pub usage_source: UsageSourceDto,
+    pub windows: Vec<PlanWindowDto>,
+    pub expiry_cadence: Option<ExpiryCadenceDto>,
+    pub pricing_source: PricingSourceDto,
+    /// Operators may enter local usage numbers by hand.
+    pub manual_calibration: bool,
+}
+
+/// One catalog model on a destination.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CatalogModelDto {
+    /// Public name exposed to clients.
+    pub public_model: String,
+    /// Upstream model id sent on egress.
+    pub upstream_model: String,
+    pub protocols: Vec<ProtocolDto>,
+    pub preferred: Option<ProtocolDto>,
+    /// Whether any protocol is enabled.
+    pub enabled: bool,
+    pub upstream_override: Option<DestinationUpstreamOverridePatch>,
+}
+
+/// Which V3-era row a destination was projected from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum LegacyDestinationKindDto {
+    /// Sealed builtin; `id` is the `provider_id`.
+    Builtin,
+    /// User-defined Provider; `id` is the dynamic `provider_id`.
+    Dynamic,
+    /// Account-owned Custom API endpoint; `id` is the account id.
+    CustomAccount,
+    /// New API / Sub2API site; `id` is the platform parent id.
+    PlatformParent,
+}
+
+/// Migration-era bridge from a projected destination back to the V3 row that
+/// still owns its mutations. Removed once destinations become primary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LegacyDestinationRefDto {
+    pub kind: LegacyDestinationKindDto,
+    /// Row id in the V3 model named by `kind`.
+    pub id: String,
+}
+
+/// Persistence target for the account enable switch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountToggleWriteDto {
+    Account,
+    ProviderSettings,
+}
+
+/// Owner of endpoint, protocol and model configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountConfigurationOwnerDto {
+    Account,
+    Destination,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountConsoleLinkDto {
+    Opencode,
+    Ollama,
+}
+
+/// Read-only account actions derived from the destination's resource ownership.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AccountControlsDto {
+    pub toggle_write: AccountToggleWriteDto,
+    pub configuration_owner: AccountConfigurationOwnerDto,
+    pub console_link: Option<AccountConsoleLinkDto>,
+    pub browser_profile: bool,
+}
+
+/// Secret-free destination facts and derived account controls.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DestinationDto {
+    pub account_controls: AccountControlsDto,
+    /// Stable destination id (deterministic UUIDv5 of the legacy row).
+    pub id: String,
+    /// V3 row this destination was projected from.
+    pub legacy: LegacyDestinationRefDto,
+    pub adapter: AdapterKindDto,
+    /// Display name.
+    pub name: String,
+    /// Brand family for grouping, when the adapter or platform kind has one.
+    pub brand_family: Option<String>,
+    /// Upstream origin. Sealed for builtin adapters; user data for `http`.
+    pub base_url: Option<String>,
+    pub protocols: Vec<ProtocolDto>,
+    #[serde(default)]
+    pub protocol_routes: Vec<HttpProtocolRouteDto>,
+    pub auth_scheme: AuthSchemeDto,
+    /// Model-name resolution owned by this destination.
+    pub model_resolution: ModelResolutionDto,
+    pub catalog: Vec<CatalogModelDto>,
+    pub capabilities: CapabilitiesDto,
+    pub plan: Option<PlanDto>,
+    /// `1` for true singletons; `null` for multi-credential destinations.
+    pub max_credentials: Option<u32>,
+    /// Non-inference observer credential id when `capabilities.observer` is set.
+    pub observer_credential_id: Option<String>,
+    /// Destination enablement.
+    pub enabled: bool,
+}
+
+/// Optional per-model route override for a configurable HTTP destination.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DestinationUpstreamOverridePatch {
+    pub protocol: ProtocolDto,
+    pub endpoint_url: String,
+}
+
+/// Complete public-to-upstream mapping written by a destination PATCH.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DestinationModelPatch {
+    pub public_model: String,
+    pub upstream_model: String,
+    #[serde(default)]
+    pub upstream_override: Option<DestinationUpstreamOverridePatch>,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocols: Option<Vec<ProtocolDto>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preferred: Option<ProtocolDto>,
+}
+
+/// Full replacement of editable configuration on one HTTP destination.
+/// Keys remain account-owned and are never accepted by this route.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DestinationPatchRequest {
+    #[serde(flatten)]
+    #[schemars(flatten)]
+    pub expectation: MutationExpectation,
+    pub name: String,
+    pub endpoint_url: String,
+    pub upstream_protocol: ProtocolDto,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol_routes: Option<Vec<HttpProtocolRouteDto>>,
+    pub auth_scheme: AuthSchemeDto,
+    pub models: Vec<DestinationModelPatch>,
+    /// Explicit consent to add safe grants for the destination's current
+    /// endpoints to these existing credentials.
+    #[serde(default)]
+    pub authorize_credential_ids: Vec<String>,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DestinationPatchResult {
+    pub revision: ControlRevision,
+    pub destination: DestinationDto,
+    /// Complete secret-free credential projection after the mutation. A
+    /// destination edit can reset verification, auth/cooldowns, and grants on
+    /// more than one Key, so returning only the destination row is stale by
+    /// construction.
+    pub credentials: Vec<DestinationCredentialDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DestinationDeleteResult {
+    pub revision: ControlRevision,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DestinationCatalogRefreshResult {
+    pub revision: ControlRevision,
+    pub destination: DestinationDto,
+    pub added_count: usize,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HttpProtocolRouteDto {
+    pub protocol: ProtocolDto,
+    pub endpoint_url: String,
+    pub auth_scheme: AuthSchemeDto,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DestinationCatalogModelUpdate {
+    pub public_model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocols: Option<Vec<ProtocolDto>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preferred: Option<ProtocolDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DestinationCatalogUpdate {
+    #[serde(flatten)]
+    #[schemars(flatten)]
+    pub expectation: MutationExpectation,
+    pub updates: Vec<DestinationCatalogModelUpdate>,
+    #[serde(default)]
+    pub remove_models: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DestinationModelTestRequest {
+    #[serde(flatten)]
+    #[schemars(flatten)]
+    pub expectation: MutationExpectation,
+    pub public_model: String,
+    pub protocol: ProtocolDto,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DestinationModelTestResult {
+    pub revision: ControlRevision,
+    pub public_model: String,
+    pub protocol: ProtocolDto,
+    pub ok: bool,
+    pub error: Option<String>,
+}
+
+/// RFC destination list. Revision-tagged and secret-free.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DestinationList {
+    pub revision: ControlRevision,
+    pub destinations: Vec<DestinationDto>,
+}
+
+/// Allowed egress grants on a projected credential.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CredentialGrantsDto {
+    /// Endpoint ids this secret may be sent to.
+    pub allowed_endpoint_ids: Vec<String>,
+    /// Origins this secret may be sent to.
+    pub allowed_origins: Vec<String>,
+}
+
+/// Per-window cooldown timestamps on a projected credential.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CredentialCooldownsDto {
+    /// Generic cooldown expiry as RFC 3339, or null.
+    pub generic_until: Option<String>,
+    /// Five-hour window cooldown expiry as RFC 3339, or null.
+    pub five_hour_until: Option<String>,
+    /// Weekly window cooldown expiry as RFC 3339, or null.
+    pub week_until: Option<String>,
+    /// Monthly window cooldown expiry as RFC 3339, or null.
+    pub month_until: Option<String>,
+    /// Free-window cooldown expiry as RFC 3339, or null.
+    pub free_until: Option<String>,
+}
+
+/// Managed-signup task on a projected credential. Domain shape; no task id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DestinationOnboardingTaskDto {
+    pub kind: OnboardingTaskKind,
+    pub state: OnboardingTaskState,
+    /// Current setup step string.
+    pub step: String,
+}
+
+/// RFC credential projection row. Carries `hasSecret` only; never ciphertext or plaintext.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DestinationCredentialDto {
+    /// Stable credential id (deterministic UUIDv5 of the legacy account).
+    pub id: String,
+    /// The V3 `accounts` row this credential was projected from (migration-era
+    /// bridge to the V3 mutation routes).
+    pub legacy_account_id: String,
+    /// Destination this credential routes through.
+    pub destination_id: String,
+    /// Display name.
+    pub name: String,
+    /// Operator notes.
+    pub notes: Option<String>,
+    /// Whether a secret is stored. Always false for keyless Zen and CPA.
+    pub has_secret: bool,
+    /// Routing enable switch (`account.enabled && binding.enabled`).
+    pub enabled: bool,
+    /// Position in the persisted account order.
+    pub routing_rank: u32,
+    pub scope: ModelScope,
+    pub grants: CredentialGrantsDto,
+    pub auth_state: AuthState,
+    /// Last error string from the legacy account row, or null.
+    pub last_error: Option<String>,
+    pub cooldowns: CredentialCooldownsDto,
+    /// Shared quota pool id when the credential joined one.
+    pub quota_pool_id: Option<String>,
+    pub onboarding_task: Option<DestinationOnboardingTaskDto>,
+    /// Purchase date when the destination has a Plan.
+    pub purchase_date: Option<String>,
+    /// Confirmed per-Key exhaustion/recovery. Omitted or null means no confirmed exhaustion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_recovery: Option<QuotaRecoveryDto>,
+}
+
+/// Presentation status for a confirmed quota-recovery episode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum QuotaRecoveryStatus {
+    Waiting,
+    Ready,
+    Probing,
+}
+
+/// Why the credential was confirmed exhausted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum QuotaRecoveryReason {
+    QuotaExhausted,
+    InsufficientBalance,
+}
+
+/// Window named by confirmed exhaustion evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum QuotaRecoveryWindow {
+    FiveHours,
+    Week,
+    Month,
+    Unknown,
+}
+
+/// Optional per-Key quota recovery overlay. Status is presentation-only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QuotaRecoveryDto {
+    pub status: QuotaRecoveryStatus,
+    pub reason: QuotaRecoveryReason,
+    pub window: QuotaRecoveryWindow,
+    pub observed_at: String,
+    pub resets_at: Option<String>,
+    pub next_retry_at: String,
+    pub failure_count: u32,
+}
+
+/// POST `/credentials/{id}/quota-retry` result.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QuotaRetryResult {
+    pub revision: ControlRevision,
+    pub credential: DestinationCredentialDto,
+}
+
+/// RFC credential list. Revision-tagged and secret-free.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CredentialList {
+    pub revision: ControlRevision,
+    pub credentials: Vec<DestinationCredentialDto>,
+}
+
+/// One consistent, secret-free snapshot of cards and the resources they show.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RoutingCardList {
+    pub revision: ControlRevision,
+    pub cards: Vec<RoutingCard>,
+    pub destinations: Vec<DestinationDto>,
+    pub credentials: Vec<DestinationCredentialDto>,
+}
+
+/// The flattened card and row sequence is the complete routing priority order.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase")]
+pub struct RoutingCardUpdate {
+    #[serde(flatten)]
+    pub expectation: MutationExpectation,
+    pub cards: Vec<RoutingCard>,
+}
+
+/// Legacy row kind named in a destination-projection refusal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum RefusedRowKindDto {
+    Account,
+    DynamicProvider,
+    PlatformParent,
+}
+
+/// Identity of one legacy row the stage-4a projection refused.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RefusedRowDto {
+    pub kind: RefusedRowKindDto,
+    /// Persisted row id.
+    pub id: String,
+    /// Provider id when the refused row is an account.
+    pub provider_id: Option<String>,
+}
+
+/// Mapping-error variant name in camelCase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase")]
+pub enum MappingErrorCodeDto {
+    UnknownProvider,
+    MissingDestination,
+    CustomRequiresAccount,
+    CustomAccountMissingEndpoint,
+    DynamicMissingEndpoint,
+    PlatformMissingBaseUrl,
+}
+
+/// One refused row in a `destinationProjectionRefused` 409.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DestinationProjectionRefusalDto {
+    pub row: RefusedRowDto,
+    pub error: MappingErrorCodeDto,
+    /// Human-readable mapping error.
+    pub detail: String,
+}
+
+/// 409 envelope when `destination_projection` refuses. Same V3 fields plus `details`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DestinationProjectionRefusedError {
+    /// Stable error code (`destinationProjectionRefused`).
+    pub code: String,
+    /// Human-readable summary.
+    pub message: String,
+    /// Live settings revision.
+    pub current_revision: Option<u64>,
+    /// Live process generation.
+    pub process_generation: Option<u64>,
+    pub details: Vec<DestinationProjectionRefusalDto>,
+}
+
+/// Client protocol accepted by `GET /routing/explain`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum RoutingClientProtocol {
+    ChatCompletions,
+    Responses,
+    Messages,
+    Gemini,
+}
+
+/// How the requested name resolved against the live alias registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum RoutingResolvedKind {
+    Alias,
+    PinnedRaw,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RoutingResolvedMapping {
+    pub provider_id: String,
+    pub upstream_model: String,
+    pub routeable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RoutingResolvedModel {
+    pub kind: RoutingResolvedKind,
+    pub alias: Option<String>,
+    pub mappings: Vec<RoutingResolvedMapping>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum RoutingChannel {
+    Go,
+    Free,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RoutingEligibleCandidate {
+    pub account_id: String,
+    pub account_name: String,
+    pub provider_id: String,
+    pub destination_id: Option<String>,
+    pub destination_name: Option<String>,
+    pub adapter_kind: String,
+    pub channel: RoutingChannel,
+    pub resolved_model: String,
+    pub upstream_protocol: RoutingClientProtocol,
+    pub routing_rank: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum RoutingExclusionCode {
+    MappingProtocolIncompatible,
+    CredentialDisabled,
+    BindingDisabled,
+    ModelScopeDenied,
+    GoatNotEligible,
+    GoatUnverified,
+    CandidateMaterializationFailed,
+    ProductionRouteUnsupported,
+    AccountDisabled,
+    SetupNotReady,
+    ChannelMismatch,
+    CredentialMissing,
+    AuthError,
+    CoolingDown,
+    FreeChannelUnavailable,
+    QuotaWaiting,
+    QuotaDue,
+    QuotaProbing,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RoutingExclusion {
+    pub code: RoutingExclusionCode,
+    pub detail: String,
+    pub account_id: Option<String>,
+    pub provider_id: Option<String>,
+    pub upstream_model: Option<String>,
+}
+
+/// Conversation stickiness is reported, not applied: this endpoint has no
+/// conversation input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum RoutingConversationBinding {
+    NotEvaluated,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum RuntimeOnlyUncertainty {
+    StateChangedAfterSnapshot,
+    ConversationBindingNotEvaluated,
+    RetryExclusionsNotApplied,
+    CredentialRecheckPending,
+    UpstreamResultUnknown,
+}
+
+/// Read-only routing prediction for `GET /routing/explain`.
+///
+/// This is not a send guarantee. `runtimeOnlyUncertainty` names the live
+/// steps this snapshot does not execute.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RoutingExplanation {
+    pub requested_model: String,
+    pub client_protocol: RoutingClientProtocol,
+    pub resolved: RoutingResolvedModel,
+    pub revision: ControlRevision,
+    pub observed_at: String,
+    pub routing_mode: RoutingMode,
+    pub conversation_sticky: bool,
+    pub conversation_binding: RoutingConversationBinding,
+    pub eligible: Vec<RoutingEligibleCandidate>,
+    pub exclusions: Vec<RoutingExclusion>,
+    pub expected_base_policy_first_pick: Option<RoutingEligibleCandidate>,
+    pub runtime_only_uncertainty: Vec<RuntimeOnlyUncertainty>,
+}
+
 /// Deterministic JSON Schema catalog for the V4 contract.
 ///
 /// Generator settings match V3: draft 2020-12, serialize-mode for response
@@ -744,8 +1628,44 @@ pub fn contract_schema() -> Value {
     include_type::<AliasPublication>(&mut serialize);
     include_type::<DshApplicationStatus>(&mut serialize);
     include_type::<DshApplication>(&mut serialize);
+    include_type::<PlatformKeyImportResult>(&mut serialize);
+    include_type::<PlatformKeyImportFailure>(&mut serialize);
+    include_type::<DestinationList>(&mut serialize);
+    include_type::<DestinationDto>(&mut serialize);
+    include_type::<ModelResolutionDto>(&mut serialize);
+    include_type::<DestinationPatchResult>(&mut serialize);
+    include_type::<DestinationCatalogRefreshResult>(&mut serialize);
+    include_type::<DestinationModelTestResult>(&mut serialize);
+    include_type::<DestinationDeleteResult>(&mut serialize);
+    include_type::<DestinationCredentialDto>(&mut serialize);
+    include_type::<QuotaRecoveryDto>(&mut serialize);
+    include_type::<QuotaRecoveryStatus>(&mut serialize);
+    include_type::<QuotaRecoveryReason>(&mut serialize);
+    include_type::<QuotaRecoveryWindow>(&mut serialize);
+    include_type::<QuotaRetryResult>(&mut serialize);
+    include_type::<CredentialList>(&mut serialize);
+    include_type::<RoutingCard>(&mut serialize);
+    include_type::<RoutingCardList>(&mut serialize);
+    include_type::<CapabilitiesDto>(&mut serialize);
+    include_type::<PlanDto>(&mut serialize);
+    include_type::<CatalogModelDto>(&mut serialize);
+    include_type::<DestinationProjectionRefusedError>(&mut serialize);
     include_type::<crate::official_api::OfficialApiStatus>(&mut serialize);
     include_type::<crate::official_api::OfficialApiPrices>(&mut serialize);
+    include_type::<BillingStatus>(&mut serialize);
+    include_type::<CreditBalanceCorrection>(&mut serialize);
+    include_type::<RoutingMode>(&mut serialize);
+    include_type::<RoutingClientProtocol>(&mut serialize);
+    include_type::<RoutingResolvedKind>(&mut serialize);
+    include_type::<RoutingResolvedMapping>(&mut serialize);
+    include_type::<RoutingResolvedModel>(&mut serialize);
+    include_type::<RoutingChannel>(&mut serialize);
+    include_type::<RoutingEligibleCandidate>(&mut serialize);
+    include_type::<RoutingExclusionCode>(&mut serialize);
+    include_type::<RoutingExclusion>(&mut serialize);
+    include_type::<RoutingConversationBinding>(&mut serialize);
+    include_type::<RuntimeOnlyUncertainty>(&mut serialize);
+    include_type::<RoutingExplanation>(&mut serialize);
     let mut defs = serialize.take_definitions(true);
 
     let mut deserialize = SchemaSettings::draft2020_12().into_generator();
@@ -762,6 +1682,16 @@ pub fn contract_schema() -> Value {
     include_type::<CatalogModelsRemoveRequest>(&mut deserialize);
     include_type::<AliasPublicationUpdate>(&mut deserialize);
     include_type::<DshApplicationInstallRequest>(&mut deserialize);
+    include_type::<PlatformKeyImportRequest>(&mut deserialize);
+    include_type::<DestinationModelPatch>(&mut deserialize);
+    include_type::<DestinationUpstreamOverridePatch>(&mut deserialize);
+    include_type::<DestinationPatchRequest>(&mut deserialize);
+    include_type::<DestinationCatalogUpdate>(&mut deserialize);
+    include_type::<DestinationModelTestRequest>(&mut deserialize);
+    include_type::<RoutingCardUpdate>(&mut deserialize);
+    include_type::<CreditConfigureRequest>(&mut deserialize);
+    include_type::<CreditCalibrationRequest>(&mut deserialize);
+    include_type::<CreditGrantRequest>(&mut deserialize);
     for (name, schema) in deserialize.take_definitions(true) {
         defs.entry(name).or_insert(schema);
     }
@@ -775,7 +1705,7 @@ pub fn contract_schema() -> Value {
     json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "DashboardApiV4",
-        "$comment": "Extensible Dashboard V4 contract catalog. Add new $defs for later DTOs; do not rename or reshape existing definitions. Connection and template listings are secret-free. OnboardingCommitRequest.secretInput, CredentialRotateRequest.secretInput, and IdentityCredentialCreateRequest.secretInput are write-only.",
+        "$comment": "Extensible Dashboard V4 contract catalog. Add new $defs for later DTOs; do not rename or reshape existing definitions. Connection, template, destination, and credential listings are secret-free. OnboardingCommitRequest.secretInput, CredentialRotateRequest.secretInput, and IdentityCredentialCreateRequest.secretInput are write-only.",
         "anyOf": catalog_refs(&defs),
         "$defs": defs })
 }

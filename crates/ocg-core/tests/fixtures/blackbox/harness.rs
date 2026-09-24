@@ -1,6 +1,6 @@
 //! HTTP-only helpers for the alias / multi-Plan black-box suite.
 //!
-//! Tests talk to Gateway and dashboard V3 JSON (`/dashboard/api/v3`) using
+//! Tests talk to Gateway and dashboard JSON (`/dashboard/api/v4`) using
 //! camelCase field names. Named helpers may unwrap a V3 envelope
 //! (`entries`, `accounts`, `account`); raw `*_json` methods return the HTTP
 //! body unchanged. They do not construct private gateway types.
@@ -147,7 +147,7 @@ impl BlackBoxHarness {
     }
 
     pub(crate) fn dashboard(&self, path: &str) -> String {
-        format!("http://127.0.0.1:{}/dashboard/api/v3{path}", self.port)
+        format!("http://127.0.0.1:{}/dashboard/api/v4{path}", self.port)
     }
 
     pub(crate) fn mutation_body(&self, body: Value) -> Value {
@@ -234,11 +234,11 @@ impl BlackBoxHarness {
     }
 
     pub(crate) async fn accounts(&self) -> Value {
-        let (status, body) = self.get_json("/accounts").await;
+        let (status, body) = self.get_json("/account-records").await;
         assert_eq!(status, StatusCode::OK, "account list: {body}");
         body.get("accounts")
             .cloned()
-            .unwrap_or_else(|| panic!("GET /accounts must return accounts: {body}"))
+            .unwrap_or_else(|| panic!("GET /account-records must return accounts: {body}"))
     }
 
     pub(crate) async fn create_account(&self, payload: Value) -> (StatusCode, Value) {

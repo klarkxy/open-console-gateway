@@ -1,0 +1,86 @@
+{
+  "name": "default",
+  "host": "127.0.0.1",
+  "live": {
+    "model": "minimax-m3",
+    "maxTokens": 512,
+    "timeoutMs": 60000,
+    "concurrency": 1,
+    "maxCallsPerVerify": 24
+  },
+  "listeners": [{ "id": "alpha" }, { "id": "bravo" }, { "id": "charlie" }],
+  "endpoints": [
+    {
+      "id": "chat",
+      "listener": "alpha",
+      "protocol": "chat_completions",
+      "path": "/chat/v1/chat/completions",
+      "auth": "bearer",
+      "secret": "sk-lab-chat",
+      "ok": "LAB_OK_chat",
+      "publicModel": "lab-chat",
+      "upstreamModel": "upstream-chat",
+      "catalog": ["upstream-chat"]
+    },
+    {
+      "id": "responses",
+      "listener": "bravo",
+      "protocol": "responses",
+      "path": "/responses/v1/responses",
+      "auth": "bearer",
+      "secret": "sk-lab-responses",
+      "ok": "LAB_OK_responses",
+      "publicModel": "lab-responses",
+      "upstreamModel": "upstream-responses",
+      "catalog": ["upstream-responses"]
+    },
+    {
+      "id": "messages",
+      "listener": "charlie",
+      "protocol": "messages",
+      "path": "/messages/v1/messages",
+      "auth": "x-api-key",
+      "secret": "sk-lab-messages",
+      "ok": "LAB_OK_messages",
+      "publicModel": "lab-messages",
+      "upstreamModel": "upstream-messages",
+      "catalog": ["upstream-messages"]
+    },
+    {
+      "id": "alpha",
+      "listener": "alpha",
+      "protocol": "chat_completions",
+      "path": "/chat/v1/chat/completions",
+      "auth": "bearer",
+      "secret": "sk-lab-alpha",
+      "ok": "LAB_OK_alpha",
+      "publicModel": "lab-route",
+      "upstreamModel": "upstream-alpha",
+      "catalog": ["upstream-alpha"]
+    },
+    {
+      "id": "bravo",
+      "listener": "bravo",
+      "protocol": "chat_completions",
+      "path": "/chat/v1/chat/completions",
+      "auth": "bearer",
+      "secret": "sk-lab-bravo",
+      "ok": "LAB_OK_bravo",
+      "publicModel": "lab-route",
+      "upstreamModel": "upstream-bravo",
+      "catalog": ["upstream-bravo"]
+    },
+    {
+      "id": "charlie",
+      "listener": "charlie",
+      "protocol": "chat_completions",
+      "path": "/chat/v1/chat/completions",
+      "auth": "bearer",
+      "secret": "sk-lab-charlie",
+      "ok": "LAB_OK_charlie",
+      "publicModel": "lab-route",
+      "upstreamModel": "upstream-charlie",
+      "catalog": ["upstream-charlie"]
+    }
+  ]
+}

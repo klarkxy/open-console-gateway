@@ -91,7 +91,11 @@ fn custom_http_template() -> ProviderTemplate {
         adapter_kind: ProviderAdapterKind::ConfigurableHttp.as_str().to_string(),
         source: TemplateSource::Builtin,
         credential_kind: AccountCredentialKind::ApiKey,
-        auth_schemes: vec![AccountAuthScheme::Bearer, AccountAuthScheme::XApiKey],
+        auth_schemes: vec![
+            AccountAuthScheme::Bearer,
+            AccountAuthScheme::XApiKey,
+            AccountAuthScheme::ApiKey,
+        ],
         upstream_protocols: UpstreamProtocolKind::ALL
             .iter()
             .copied()

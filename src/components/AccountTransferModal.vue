@@ -10,17 +10,17 @@
   >
     <template v-if="mode === 'export'">
       <n-alert type="info" :show-icon="false" class="transfer-note">
-        {{ t('节点迁移包由服务端加密，浏览器不会读取或显示明文 Key。设置一个独立密码后，即可迁移账号、Access Keys、路由设置、Zen Free 与 Provider 模型配置。') }}
+        {{ t('节点迁移包由服务端加密，浏览器不读取或显示明文 Key。设置独立密码后即可迁移账号、Access Keys、路由设置、Zen Free 与 Provider 模型配置。') }}
       </n-alert>
       <n-form label-placement="top" @submit.prevent="exportBundle">
-        <n-form-item :label="t('迁移包密码')" :feedback="t('至少 12 个字符；此密码只用于加密迁移文件，密码丢失后无法找回。')" required>
+        <n-form-item :label="t('迁移包密码')" :feedback="t('至少 12 个字符；此密码仅用于加密迁移文件，丢失后无法找回。')" required>
           <n-input v-model:value="bundlePassword" :input-props="{ 'aria-label': t('迁移包密码') }" type="password" show-password-on="click" autocomplete="new-password" :disabled="operationLocked" />
         </n-form-item>
         <n-form-item :label="t('确认迁移包密码')" required>
           <n-input v-model:value="bundlePasswordConfirmation" :input-props="{ 'aria-label': t('确认迁移包密码') }" type="password" show-password-on="click" autocomplete="new-password" :disabled="operationLocked" />
         </n-form-item>
       </n-form>
-      <p class="transfer-lifecycle">{{ t('同 ID 记录会在目标端原位置归并；目标端现有顺序保持不变，迁移包中新增的账号按包内顺序接在后面。浏览器 Profile/Cookie、登录密码、邀请码、日志、用量、冷却状态及系统专属设置不会迁移；未完成的托管注册草稿会跳过。') }}</p>
+      <p class="transfer-lifecycle">{{ t('同 ID 记录会在目标端原位置归并；现有顺序保持不变，新增账号按包内顺序追加。浏览器 Profile/Cookie、登录密码、邀请码、日志、用量、冷却状态及系统专属设置不迁移；未完成的托管注册草稿跳过。') }}</p>
       <n-alert v-if="errorText" type="error" :title="errorText" class="transfer-note" />
       <n-alert v-if="resultText" type="success" :title="resultText" class="transfer-note" />
       <div class="transfer-actions">
@@ -56,7 +56,7 @@
           <n-input v-model:value="bundlePassword" :input-props="{ 'aria-label': t('迁移包密码') }" type="password" show-password-on="click" autocomplete="current-password" :disabled="operationLocked" @update:value="clearPreview" />
         </n-form-item>
       </n-form>
-      <p class="transfer-lifecycle">{{ t('同 ID 记录会采用迁移包内容但保留目标端位置；目标端现有顺序不变，新增账号按迁移包顺序接在后面。导入后原有主/子 Key、可用账号、Custom API、Zen Free 与模型路由设置可直接继续使用。') }}</p>
+      <p class="transfer-lifecycle">{{ t('同 ID 记录会采用迁移包内容但保留目标端位置；现有顺序不变，新增账号按包内顺序追加。导入后原有主/子 Key、可用账号、Custom API、Zen Free 与模型路由设置可直接继续使用。') }}</p>
 
       <n-alert v-if="errorText" type="error" :title="errorText" class="transfer-note" />
       <n-alert v-if="resultText" type="success" :title="resultText" class="transfer-note" />
@@ -74,7 +74,7 @@
           </div>
         </div>
         <n-checkbox v-model:checked="importConfirmed" :disabled="operationLocked" class="transfer-confirmation">
-          {{ t('我确认同 ID 的账号与 Key 将采用迁移包内容；目标端账号顺序保持不变，新增账号按迁移包顺序接在后面。') }}
+          {{ t('我确认同 ID 的账号与 Key 将采用迁移包内容；目标端顺序保持不变，新增账号按包内顺序追加。') }}
         </n-checkbox>
       </template>
 
@@ -312,15 +312,15 @@ async function importBundle(): Promise<void> {
 </script>
 
 <style scoped>
-.transfer-note { margin-bottom: 12px; }
+.transfer-note { margin-bottom: var(--ocg-space-md); }
 .transfer-lifecycle { color: var(--ocg-subtle); font-size: var(--ocg-font-sm); line-height: 1.55; }
-.transfer-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+.transfer-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--ocg-space-sm); margin-top: var(--ocg-space-lg); }
 .transfer-file-name { min-width: 0; overflow-wrap: anywhere; color: var(--ocg-subtle); }
-.transfer-preview { max-height: 260px; overflow: auto; border: 1px solid var(--ocg-border); border-radius: 6px; margin: 12px 0; }
-.transfer-preview-row { display: grid; grid-template-columns: minmax(84px, auto) minmax(0, 1fr) minmax(0, 1.2fr); gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--ocg-border); font-size: var(--ocg-font-sm); }
+.transfer-preview { max-height: 260px; overflow: auto; border: 1px solid var(--ocg-border); border-radius: var(--ocg-radius-sm); margin: var(--ocg-space-md) 0; }
+.transfer-preview-row { display: grid; grid-template-columns: minmax(84px, auto) minmax(0, 1fr) minmax(0, 1.2fr); gap: var(--ocg-space-sm); padding: var(--ocg-space-sm) var(--ocg-space-md); border-bottom: 1px solid var(--ocg-border); font-size: var(--ocg-font-sm); }
 .transfer-preview-row:last-child { border-bottom: 0; }
 .transfer-disposition { font-weight: 600; }
 .transfer-reason { grid-column: 2 / -1; color: var(--ocg-subtle); }
-.transfer-confirmation { display: flex; align-items: flex-start; margin-top: 12px; }
-@media (max-width: 560px) { .transfer-preview-row { grid-template-columns: minmax(0, 1fr); gap: 4px; } .transfer-reason { grid-column: auto; } .transfer-actions > * { flex: 1 1 auto; } }
+.transfer-confirmation { display: flex; align-items: flex-start; margin-top: var(--ocg-space-md); }
+@media (max-width: 560px) { .transfer-preview-row { grid-template-columns: minmax(0, 1fr); gap: var(--ocg-space-xs); } .transfer-reason { grid-column: auto; } .transfer-actions > * { flex: 1 1 auto; } }
 </style>

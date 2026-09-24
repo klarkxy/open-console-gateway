@@ -220,10 +220,13 @@ async fn stored_key_probe_does_not_send_to_ungranted_destination() {
         config: &config,
         account: &account,
         adapter: ProviderAdapterKind::ConfigurableHttp,
+        public_model: "local-custom",
         model_id: "local-custom",
         protocol: UpstreamProtocolKind::ChatCompletions,
-        custom_endpoint_url: Some(&endpoint),
-        dynamics: &[],
+        custom_route: Some(crate::gateway::protocol::CustomRouteSpec {
+            endpoint_url: endpoint.clone(),
+            auth_kind: ocg_domain::dynamic::DynamicAuthKind::Bearer,
+        }),
     })
     .await
     .expect_err("ungranted stored-key probe must fail closed");
@@ -272,10 +275,13 @@ async fn stored_key_probe_does_not_send_to_ungranted_destination() {
         config: &config,
         account: &account,
         adapter: ProviderAdapterKind::ConfigurableHttp,
+        public_model: "local-custom",
         model_id: "local-custom",
         protocol: UpstreamProtocolKind::ChatCompletions,
-        custom_endpoint_url: Some(&endpoint),
-        dynamics: &[],
+        custom_route: Some(crate::gateway::protocol::CustomRouteSpec {
+            endpoint_url: endpoint.clone(),
+            auth_kind: ocg_domain::dynamic::DynamicAuthKind::Bearer,
+        }),
     })
     .await
     .expect("granted stored-key probe may send");
@@ -377,10 +383,10 @@ async fn stored_key_probe_honors_cleared_sealed_endpoint_grant() {
         config: &config,
         account: &account,
         adapter: ProviderAdapterKind::OpenCodeGo,
+        public_model: "deepseek-v4-flash",
         model_id: "deepseek-v4-flash",
         protocol: UpstreamProtocolKind::ChatCompletions,
-        custom_endpoint_url: None,
-        dynamics: &[],
+        custom_route: None,
     })
     .await
     .expect_err("cleared sealed endpoint grant must fail closed");
@@ -419,14 +425,470 @@ async fn stored_key_probe_honors_cleared_sealed_endpoint_grant() {
         config: &config,
         account: &account,
         adapter: ProviderAdapterKind::OpenCodeGo,
+        public_model: "deepseek-v4-flash",
         model_id: "deepseek-v4-flash",
         protocol: UpstreamProtocolKind::ChatCompletions,
-        custom_endpoint_url: None,
-        dynamics: &[],
+        custom_route: None,
     })
     .await
     .expect("restored official protocol grant may send");
     assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+    let _ = stop_tx.send(());
+    drop(state);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[derive(Clone)]
+struct SharedUpstreamProbeState {
+    hits: Arc<AtomicUsize>,
+    captured: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+#[tokio::test]
+async fn account_test_follows_selected_public_mapping_when_upstream_is_shared() {
+    use crate::crypto::{KeyCipher, StaticKeyCipher};
+    use crate::db::Database;
+    use crate::models::{
+        Account, AccountCustomConfigInput, AccountModelCapabilityInput, AccountSetupStep,
+        AccountType, AppConfig, ProxyMode,
+    };
+    use crate::provider::{CUSTOM_PROVIDER_ID, ProviderAdapterKind, UpstreamProtocolKind};
+    use crate::state::CoreStateInner;
+    use chrono::Utc;
+    use ocg_domain::connection::{
+        EndpointOperation, LegacyConnectionKind, connection_id_for_legacy,
+    };
+    use ocg_domain::credential::{RouteSpec, assigned_endpoints_for_routes, normalize_origin};
+
+    let secret = "sk-shared-public";
+    let probe = SharedUpstreamProbeState {
+        hits: Arc::new(AtomicUsize::new(0)),
+        captured: Arc::new(std::sync::Mutex::new(Vec::<String>::new())),
+    };
+    let app = axum::Router::new()
+        .fallback(axum::routing::any(
+            |axum::extract::State(probe): axum::extract::State<SharedUpstreamProbeState>,
+             body: axum::body::Bytes| async move {
+                probe.hits.fetch_add(1, Ordering::SeqCst);
+                probe
+                    .captured
+                    .lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&body).into_owned());
+                (
+                    axum::http::StatusCode::OK,
+                    [("content-type", "application/json")],
+                    r#"{"id":"ok","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#,
+                )
+            },
+        ))
+        .with_state(probe.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                let _ = stop_rx.await;
+            })
+            .await;
+    });
+    let endpoint = format!("http://{addr}/v1/chat/completions");
+    let dir = std::env::temp_dir().join(format!("ocg-probe-shared-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("probe-shared"));
+    let db = Database::open(dir.clone()).unwrap();
+    let state = Arc::new(CoreStateInner::new(db, dir.clone(), cipher).unwrap());
+    let now = Utc::now();
+    let account = Account {
+        id: "probe-shared".into(),
+        provider_id: CUSTOM_PROVIDER_ID.into(),
+        credential_kind: crate::provider::default_credential_kind(),
+        quota_scope: crate::provider::default_quota_scope(),
+        name: "shared".into(),
+        username: None,
+        password_cipher: None,
+        key_cipher: state.encrypt_key(secret).unwrap(),
+        enabled: true,
+        account_type: AccountType::Key,
+        setup_step: AccountSetupStep::Ready,
+        referral_code: None,
+        purchase_date: String::new(),
+        expires_on: String::new(),
+        cooldown_until: None,
+        cooldown_generic_until: None,
+        cooldown_5h_until: None,
+        cooldown_week_until: None,
+        cooldown_month_until: None,
+        cooldown_free_until: None,
+        last_error: None,
+        auth_error: None,
+        notes: None,
+        created_at: now,
+        updated_at: now,
+    };
+    state
+        .db
+        .lock()
+        .create_account_with_contract(
+            &account,
+            Some(&AccountCustomConfigInput {
+                endpoint_url: endpoint.clone(),
+                upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+            }),
+            &[
+                AccountModelCapabilityInput {
+                    public_model: "public-a".into(),
+                    upstream_model: "upstream-x".into(),
+                    protocol: UpstreamProtocolKind::ChatCompletions,
+                    source: None,
+                },
+                AccountModelCapabilityInput {
+                    public_model: "public-b".into(),
+                    upstream_model: "upstream-x".into(),
+                    protocol: UpstreamProtocolKind::ChatCompletions,
+                    source: None,
+                },
+            ],
+        )
+        .unwrap();
+    let assigned = assigned_endpoints_for_routes(
+        &connection_id_for_legacy(LegacyConnectionKind::CustomAccount, &account.id),
+        &[RouteSpec {
+            operation: EndpointOperation::ChatCreate,
+            url: Some(endpoint.clone()),
+        }],
+    );
+    let ids: Vec<String> = assigned
+        .iter()
+        .map(|endpoint| endpoint.id.clone())
+        .collect();
+    let origins: Vec<String> = assigned
+        .iter()
+        .filter_map(|endpoint| endpoint.url.as_deref().and_then(normalize_origin))
+        .collect();
+    {
+        let db = state.db.lock();
+        let binding = db
+            .list_inference_bindings()
+            .unwrap()
+            .into_iter()
+            .find(|row| row.account_id == account.id)
+            .unwrap();
+        db.update_credential_binding(
+            &binding.binding_id,
+            None,
+            None,
+            Some(ids.as_slice()),
+            Some(origins.as_slice()),
+        )
+        .unwrap();
+    }
+    let config = AppConfig {
+        proxy_mode: ProxyMode::Direct,
+        ..AppConfig::default()
+    };
+    for public in ["public-a", "public-b"] {
+        super::execute_account_model_test(super::AccountModelTestInput {
+            state: &state,
+            config: &config,
+            account: &account,
+            adapter: ProviderAdapterKind::ConfigurableHttp,
+            public_model: public,
+            model_id: "upstream-x",
+            protocol: UpstreamProtocolKind::ChatCompletions,
+            custom_route: Some(crate::gateway::protocol::CustomRouteSpec {
+                endpoint_url: endpoint.clone(),
+                auth_kind: ocg_domain::dynamic::DynamicAuthKind::Bearer,
+            }),
+        })
+        .await
+        .unwrap_or_else(|_| panic!("selected {public} must send on the shared upstream route"));
+    }
+    assert_eq!(probe.hits.load(Ordering::SeqCst), 2);
+    let bodies = probe.captured.lock().unwrap().clone();
+    assert_eq!(bodies.len(), 2);
+    for body in &bodies {
+        assert!(body.contains("upstream-x"), "{body}");
+        assert!(!body.contains("public-a"), "{body}");
+        assert!(!body.contains("public-b"), "{body}");
+        assert!(!body.contains(secret), "{body}");
+    }
+
+    let destination_id = ocg_domain::destination::destination_id_for_custom_account(&account.id);
+    {
+        let db = state.db.lock();
+        let catalog = vec![ocg_domain::destination::CatalogModel {
+            public_model: "public-a".into(),
+            upstream_model: "upstream-x".into(),
+            protocols: vec![ocg_domain::destination::Protocol::ChatCompletions],
+            preferred: Some(ocg_domain::destination::Protocol::ChatCompletions),
+            enabled: true,
+            upstream_override: None,
+        }];
+        crate::db::destination_store::replace_destination_catalog(
+            &db.conn,
+            &destination_id,
+            &catalog,
+        )
+        .unwrap();
+    }
+    let stale = super::execute_account_model_test(super::AccountModelTestInput {
+        state: &state,
+        config: &config,
+        account: &account,
+        adapter: ProviderAdapterKind::ConfigurableHttp,
+        public_model: "public-b",
+        model_id: "upstream-x",
+        protocol: UpstreamProtocolKind::ChatCompletions,
+        custom_route: Some(crate::gateway::protocol::CustomRouteSpec {
+            endpoint_url: endpoint.clone(),
+            auth_kind: ocg_domain::dynamic::DynamicAuthKind::Bearer,
+        }),
+    })
+    .await
+    .expect_err("stale public-b must not send via sibling public-a");
+    assert!(
+        stale.1.contains("granted route") || stale.1.contains("refusing"),
+        "{}",
+        stale.1
+    );
+    assert_eq!(probe.hits.load(Ordering::SeqCst), 2);
+
+    super::execute_account_model_test(super::AccountModelTestInput {
+        state: &state,
+        config: &config,
+        account: &account,
+        adapter: ProviderAdapterKind::ConfigurableHttp,
+        public_model: "public-a",
+        model_id: "upstream-x",
+        protocol: UpstreamProtocolKind::ChatCompletions,
+        custom_route: Some(crate::gateway::protocol::CustomRouteSpec {
+            endpoint_url: endpoint.clone(),
+            auth_kind: ocg_domain::dynamic::DynamicAuthKind::Bearer,
+        }),
+    })
+    .await
+    .expect("remaining public-a must still send");
+    assert_eq!(probe.hits.load(Ordering::SeqCst), 3);
+
+    let _ = stop_tx.send(());
+    drop(state);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn binding_list_failure_is_a_probe_failure() {
+    use crate::models::{Account, AccountSetupStep, AccountType};
+    use crate::provider::CUSTOM_PROVIDER_ID;
+    use chrono::Utc;
+
+    let now = Utc::now();
+    let account = Account {
+        id: "acct".into(),
+        provider_id: CUSTOM_PROVIDER_ID.into(),
+        credential_kind: crate::provider::default_credential_kind(),
+        quota_scope: crate::provider::default_quota_scope(),
+        name: "acct".into(),
+        username: None,
+        password_cipher: None,
+        key_cipher: "cipher".into(),
+        enabled: true,
+        account_type: AccountType::Key,
+        setup_step: AccountSetupStep::Ready,
+        referral_code: None,
+        purchase_date: String::new(),
+        expires_on: String::new(),
+        cooldown_until: None,
+        cooldown_generic_until: None,
+        cooldown_5h_until: None,
+        cooldown_week_until: None,
+        cooldown_month_until: None,
+        cooldown_free_until: None,
+        last_error: None,
+        auth_error: None,
+        notes: None,
+        created_at: now,
+        updated_at: now,
+    };
+    let error = super::live_send_selection_from_bindings(
+        &account,
+        Result::<Vec<crate::db::identity::StoredInferenceBinding>, _>::Err("sqlite read failed"),
+        "public-b",
+        "upstream-x",
+    )
+    .expect_err("DB read failure must not become a missing binding");
+    assert_eq!(error.0, None);
+    assert!(error.1.contains("sqlite read failed"), "{}", error.1);
+}
+
+#[tokio::test]
+async fn dynamic_provider_account_test_sends_selected_public_mappings() {
+    use crate::crypto::{KeyCipher, StaticKeyCipher};
+    use crate::db::Database;
+    use crate::models::{Account, AccountSetupStep, AccountType, AppConfig, ProxyMode};
+    use crate::provider::{ProviderAdapterKind, UpstreamProtocolKind};
+    use crate::state::CoreStateInner;
+    use chrono::Utc;
+    use ocg_domain::credential::normalize_origin;
+    use ocg_domain::destination::http_configured_routes;
+    use ocg_domain::dynamic::{DynamicAuthKind, DynamicModelMapping};
+
+    let secret = "sk-dynamic-public";
+    let hits = Arc::new(AtomicUsize::new(0));
+    let app = axum::Router::new()
+        .fallback(axum::routing::any(
+            |axum::extract::State(hits): axum::extract::State<Arc<AtomicUsize>>| async move {
+                hits.fetch_add(1, Ordering::SeqCst);
+                (
+                    axum::http::StatusCode::OK,
+                    [("content-type", "application/json")],
+                    r#"{"id":"ok","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#,
+                )
+            },
+        ))
+        .with_state(hits.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                let _ = stop_rx.await;
+            })
+            .await;
+    });
+    let endpoint = format!("http://{addr}/v1");
+    let dir = std::env::temp_dir().join(format!("ocg-probe-dynamic-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("probe-dynamic"));
+    let db = Database::open(dir.clone()).unwrap();
+    let state = Arc::new(CoreStateInner::new(db, dir.clone(), cipher).unwrap());
+    let now = Utc::now();
+    let provider_id = uuid::Uuid::new_v4().to_string();
+    let account = Account {
+        id: "probe-dynamic".into(),
+        provider_id: provider_id.clone(),
+        credential_kind: crate::provider::default_credential_kind(),
+        quota_scope: crate::provider::default_quota_scope(),
+        name: "dynamic".into(),
+        username: None,
+        password_cipher: None,
+        key_cipher: state.encrypt_key(secret).unwrap(),
+        enabled: false,
+        account_type: AccountType::Key,
+        setup_step: AccountSetupStep::Ready,
+        referral_code: None,
+        purchase_date: String::new(),
+        expires_on: String::new(),
+        cooldown_until: None,
+        cooldown_generic_until: None,
+        cooldown_5h_until: None,
+        cooldown_week_until: None,
+        cooldown_month_until: None,
+        cooldown_free_until: None,
+        last_error: None,
+        auth_error: None,
+        notes: None,
+        created_at: now,
+        updated_at: now,
+    };
+    state
+        .db
+        .lock()
+        .create_dynamic_provider(
+            &crate::dynamic::DynamicProviderRuntime {
+                preset_id: None,
+                id: provider_id,
+                name: "Lab".into(),
+                endpoint_url: endpoint.clone(),
+                upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+                auth_kind: DynamicAuthKind::Bearer,
+                mappings: vec![
+                    DynamicModelMapping {
+                        public_model: "public-a".into(),
+                        upstream_model: "upstream-x".into(),
+                        upstream_override: None,
+                    },
+                    DynamicModelMapping {
+                        public_model: "public-b".into(),
+                        upstream_model: "upstream-x".into(),
+                        upstream_override: None,
+                    },
+                ],
+                created_at: now,
+                updated_at: now,
+                origin: crate::provider::ProviderOrigin::Custom,
+                offering: "api".into(),
+            },
+            &account,
+        )
+        .unwrap();
+    {
+        let db = state.db.lock();
+        let snapshot = crate::routing_snapshot::RoutingSnapshot::load(&db).unwrap();
+        let credential = snapshot
+            .credentials
+            .iter()
+            .find(|credential| credential.id == account.id)
+            .unwrap();
+        let destination = snapshot
+            .projection
+            .destinations
+            .iter()
+            .find(|destination| destination.id == credential.destination_id)
+            .unwrap();
+        let assigned = ocg_domain::credential::assigned_endpoints_for_routes(
+            &serde_json::from_value(serde_json::json!(credential.authorization_connection_id))
+                .unwrap(),
+            &http_configured_routes(destination),
+        );
+        let ids: Vec<String> = assigned
+            .iter()
+            .map(|endpoint| endpoint.id.clone())
+            .collect();
+        let origins: Vec<String> = assigned
+            .iter()
+            .filter_map(|endpoint| endpoint.url.as_deref().and_then(normalize_origin))
+            .collect();
+        let binding = db
+            .list_inference_bindings()
+            .unwrap()
+            .into_iter()
+            .find(|row| row.account_id == account.id)
+            .unwrap();
+        db.update_credential_binding(
+            &binding.binding_id,
+            None,
+            None,
+            Some(ids.as_slice()),
+            Some(origins.as_slice()),
+        )
+        .unwrap();
+    }
+    let config = AppConfig {
+        proxy_mode: ProxyMode::Direct,
+        ..AppConfig::default()
+    };
+    for public in ["public-a", "public-b"] {
+        super::execute_account_model_test(super::AccountModelTestInput {
+            state: &state,
+            config: &config,
+            account: &account,
+            adapter: ProviderAdapterKind::ConfigurableHttp,
+            public_model: public,
+            model_id: "upstream-x",
+            protocol: UpstreamProtocolKind::ChatCompletions,
+            custom_route: Some(crate::gateway::protocol::CustomRouteSpec {
+                endpoint_url: endpoint.clone(),
+                auth_kind: DynamicAuthKind::Bearer,
+            }),
+        })
+        .await
+        .unwrap_or_else(|_| panic!("dynamic {public} must send on the prepared route"));
+    }
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
 
     let _ = stop_tx.send(());
     drop(state);

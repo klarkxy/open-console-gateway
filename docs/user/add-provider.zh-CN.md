@@ -10,24 +10,24 @@
 | 给一张账号接入 OpenAI 或 Anthropic 兼容端点 | 新增 **Custom API** 账号 | 否 |
 | 让所有 Open Console Gateway 用户获得一个具名内置 Provider（产品中的 Provider/Plan 身份） | 新增密封的内置供应商 | 是，需要经过审查的代码与测试 |
 
-**适配器注册表**保持静态密封。用户定义供应商是类型化的持久定义；每一条都绑定代码持有的 Configurable HTTP 适配器。OCG 从不加载用户脚本、插件或二进制。未知 `provider_id` 除非匹配已保存的定义，否则 fail closed。Custom API 仍是独立的账号所有路径：Endpoint、协议和模型映射留在账号卡上。
+**适配器注册表**保持静态密封。用户定义供应商是类型化的持久定义；每一条都绑定代码持有的 Configurable HTTP 适配器。OCG 从不加载用户脚本、插件或二进制。未知 `provider_id` 除非匹配已保存的定义，否则 fail closed。迁移后的 Custom API 是普通可配置 HTTP 连接：地址、鉴权、协议和模型映射在供应商页编辑，可挂多把 Key。
 
 ## 从预设创建
 
-在 **账号 → 新增账号** 选择 [Plan 或 API 预设](provider-presets.zh-CN.md)，会同时创建供应商和第一把 Key（必须填写 Key）；在 **供应商 → 添加供应商** 保存连接，Key 为可选。固定地址预设已填好协议、鉴权、地址和默认对话模型；可选设置提供名称和模型调整。Azure、Bedrock 还需填写客户专属地址和模型／部署信息。切换预设会清除上一渠道的 Key 和映射，再填入新预设的默认模型。**供应商** 表单的 Key 可选；**账号** 的预设仍必须填写 Key。任一入口的保存都走 `POST /dashboard/api/v4/onboarding/commit`。
+**供应商 → 添加供应商** 与 **账号 → 新增账号** 打开同一套账号页选择器。在其中选择 [Plan 或 API 预设](provider-presets.zh-CN.md)，会同时创建供应商和第一把 Key。固定地址预设已填好协议、鉴权、地址和默认对话模型；可选设置提供名称和模型调整。Azure、Bedrock 还需填写客户专属地址和模型／部署信息。切换预设会清除上一渠道的 Key 和映射，再填入新预设的默认模型。完成预设必须填写 Key；**保存草稿** 可以省略。任一按钮的保存都走 `POST /dashboard/api/v4/onboarding/commit`。
 
 ## 手动创建用户定义供应商
 
-1. 打开 **供应商**，点击列表底部的 **添加供应商**，并在预设浏览中选择 **手动配置**。
-2. 填写名称、一个 API Endpoint、一个上游协议（Chat Completions、Responses 或 Messages），以及一种鉴权方式（Bearer、`x-api-key` 或无鉴权）。
+1. 打开 **供应商** 或 **账号**，点击 **添加供应商** / **新增账号**，并在同一套选择器中选择 **手动配置**。
+2. 填写名称、一个 API Endpoint、一个上游协议（Chat Completions、Responses 或 Messages），以及一种鉴权方式（Bearer、`x-api-key`、`api-key` 或无鉴权）。
 3. 至少添加一条对外模型名 → 精确上游 ID 映射。**获取模型** 和 **测试模型** 仍在本表单，但需要 Key；需要 Key 的鉴权在填写 Key 之前这两个按钮保持禁用。
 4. 保存。需要 Key 的鉴权可填写可选 Key：填写则同一次写入创建首个账号，留空则只保存定义（显示为 **待补充凭据**，之后可用 **添加 Key**）。无鉴权供应商会创建一张不带 Key 的单例账号。写入走 `POST /dashboard/api/v4/onboarding/commit`，不要求探测成功。若响应返回前网络中断，面板会自动重试同一次提交；再次保存未改动的草稿会重放已存结果，而不会创建第二个供应商。
 
-编辑通过 `PATCH /providers/{id}` 整份替换供应商配置。供应商 id 不可变。从无鉴权改为需要 Key 时必须显式填写替换 Key，并且只写到那张单例账号。已经带 Key 的供应商会拒绝供应商更新里的 Key；请在 **账号** 页轮换 Key。只有先删除全部引用账号后才能删除供应商；不会级联删除。
+编辑通过 `PATCH /dashboard/api/v4/providers/{id}` 整份替换供应商配置。供应商 id 不可变。从无鉴权改为需要 Key 时必须显式填写替换 Key，并且只写到那张单例账号。已经带 Key 的供应商会拒绝供应商更新里的 Key；请在 **账号** 页轮换 Key。只有先删除全部引用账号后才能删除供应商；不会级联删除。
 
 供应商所有字段留在 **供应商** 页。账号 **Key**、启停、顺序、备注、冷却和测试留在 **账号** 页。用户定义供应商始终未定价：没有官方用量、额度估算或价格行。请求日志仍会归因供应商、账号和模型。
 
-节点备份以 payload V6 导出，每一份已保存的用户定义供应商定义只携带 `providerId`；仍可导入 payload V4 与 V5 包。当前 SQLite schema（v49）将用户定义供应商保存在统一的 `providers` 与 `provider_models` 表中。
+节点备份以 payload V9 导出，携带目的地、凭据、模型解析策略与按模型路由覆盖。导入接受 V4 至 V9。当前 SQLite schema（v60）把可配置 HTTP 连接存在 destinations 与 `destination_models` 上；遗留 Custom 连接保持独立并可挂多把 Key。密封 builtin 仍编译在代码里。
 
 ## 立即接入兼容上游
 
@@ -86,7 +86,7 @@ OCG 根据协议派生鉴权。它不会同时发送两类鉴权头，不会在 
 2. 只把已经验证的协议事实加入 `crates/ocg-domain/src/protocol.rs`。请求路由使用已保存的合约。
 3. 在 `crates/ocg-gateway/src/alias.rs` 添加由代码持有的客户端 Alias 映射。保留准确上游 ID，拒绝有歧义的 raw ID；发现的新目录行不能擅自创造公开 Alias。
 4. 在 `ocg-core` 实现宿主路由 resolver。适配器只返回 `AttemptSpec`；数据库访问、Key 解密、代理选择和出站 HTTP 继续由宿主持有。
-5. 补齐账号与 **供应商** 控制面/UI 流程；只在该供应商真实支持时加入目录刷新、启停、验证、错误、冷却、价格和用量。所有面板变更都带 CAS：用户定义供应商的创建走 V4 onboarding commit（`/dashboard/api/v4`）；供应商定义编辑与仍在 V3 的账号操作走 `/dashboard/api/v3`；Key 轮换、绑定编辑与身份内新增凭据走 V4。
+5. 补齐账号与 **供应商** 控制面/UI 流程；只在该供应商真实支持时加入目录刷新、启停、验证、错误、冷却、价格和用量。所有面板变更都带 CAS，且只走 `/dashboard/api/v4`：用户定义供应商的创建走 onboarding commit；供应商定义编辑、账号操作、Key 轮换、绑定编辑与身份内新增凭据走挂回或原生的 V4 路由。`/dashboard/api/v3` 是 410 墓碑。
 6. 更新成对用户文档与测试。按[开发](../maintainer/development.zh-CN.md)对改动的 crate 与 UI 跑对应检查。
 
 提交贡献前，请写清上游来源、鉴权方式、目录来源、支持的模型/协议组合、流式行为、错误语义、额度/价格来源，以及不产生费用的验证方案。在完整路由与控制面路径真正存在前，让新家族保持 fail closed。

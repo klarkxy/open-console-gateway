@@ -8,6 +8,13 @@ import {
 import type { AuthStatus } from "../api/generated/dashboard-v3.ts";
 import { useConnectionStore } from "./connection.ts";
 import { useControlPlaneStore } from "./controlPlane.ts";
+import { useAccountsStore } from "./accounts.ts";
+import { useDestinationsStore } from "./destinations.ts";
+import { useIdentitiesStore } from "./identities.ts";
+import { useCpaStore } from "./cpa.ts";
+import { usePlatformAccountsStore } from "./platformAccounts.ts";
+import { useProvidersStore } from "./providers.ts";
+import { useBillingStore } from "./billing.ts";
 
 export type SessionPhase = "checking" | "login" | "register" | "ready";
 
@@ -95,6 +102,13 @@ export const useSessionStore = defineStore("session", () => {
   /** Local-only teardown: secrets are wiped and the shell returns to login. */
   function dropSession(): void {
     connection.clearSecrets();
+    useAccountsStore().clearAccounts();
+    usePlatformAccountsStore().clear();
+    useIdentitiesStore().clear();
+    useDestinationsStore().clear();
+    useProvidersStore().clear();
+    useCpaStore().clear();
+    useBillingStore().clear();
     status.value = null;
     phase.value = "login";
   }

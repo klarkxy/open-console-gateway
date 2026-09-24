@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ProviderCatalogEntry } from "../api/providers.ts";
-import { buildPlanOptions, splitPlanOptionsByOffering } from "./account-plan-options.ts";
+import { buildPlanOptions, PLAN_OPTION_CREATION_HINT_KEYS, splitPlanOptionsByOffering } from "./account-plan-options.ts";
+import { PLAN_CREATE_DISABLED_REASON_KEYS } from "./plans.ts";
 
 function row(provider_id: string, extra: Partial<ProviderCatalogEntry> = {}): ProviderCatalogEntry {
   return {
@@ -87,5 +88,17 @@ test("catalog creation status and singleton state are enforced without family br
   ]);
   assert.equal(options.length, 1);
   assert.equal(options[0]?.optionId, "blocked");
-  assert.equal(options[0]?.disabledReason, "该方案暂不可用");
+  assert.equal(options[0]?.disabledReason, "creation_unavailable");
+});
+
+test("every disabled-reason and creation-hint code has a message key", () => {
+  const reason = buildPlanOptions([row("blocked", { creation_availability: "unavailable" })])[0]
+    ?.disabledReason;
+  if (!reason) assert.fail("blocked option must carry a disabled-reason code");
+  assert.ok(PLAN_CREATE_DISABLED_REASON_KEYS[reason]);
+  assert.deepEqual(
+    Object.keys(PLAN_CREATE_DISABLED_REASON_KEYS).sort(),
+    ["catalog_entry_missing", "catalog_unavailable", "creation_unavailable", "singleton_managed"],
+  );
+  assert.deepEqual(Object.keys(PLAN_OPTION_CREATION_HINT_KEYS), ["missing_mappings"]);
 });

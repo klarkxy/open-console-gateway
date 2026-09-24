@@ -41,9 +41,15 @@ fn identity_and_credential_ids_are_deterministic_and_distinct() {
     let platform = identity_id_for_platform_account("acct-1");
     let credential = credential_id_for_legacy_account("acct-1");
     let observer = observer_credential_id_for_platform_account("acct-1");
+    let cpa_observer = observer_credential_id_for_cpa();
+    let cpa_identity = identity_id_for_cpa();
+    assert_eq!(cpa_observer, observer_credential_id_for_cpa());
+    assert_eq!(cpa_identity, identity_id_for_cpa());
     assert_ne!(first.as_str(), platform.as_str());
     assert_ne!(first.as_str(), credential.as_str());
     assert_ne!(credential.as_str(), observer.as_str());
+    assert_ne!(observer.as_str(), cpa_observer.as_str());
+    assert_ne!(cpa_identity.as_str(), platform.as_str());
     assert_ne!(
         identity_id_for_legacy_account("a").as_str(),
         identity_id_for_legacy_account("b").as_str()
@@ -316,14 +322,19 @@ fn model_scope_all_allows_every_public_or_routing_id() {
 }
 
 #[test]
-fn model_scope_only_is_normalized_exact_id_allowlist() {
+fn model_scope_only_matches_identity_and_keeps_separators_distinct() {
     let scope = ModelScope::Only {
         models: vec!["glm-5.2".into(), "vendor/opus".into()],
     };
     assert!(model_scope_allows(&scope, "glm-5.2"));
-    assert!(model_scope_allows(&scope, "GLM 5.2"));
-    assert!(model_scope_allows(&scope, "glm_5.2"));
+    assert!(model_scope_allows(&scope, "GLM-5.2"));
+    assert!(model_scope_allows(&scope, " glm-5.2 "));
     assert!(model_scope_allows(&scope, "vendor/opus"));
+    assert!(model_scope_allows(&scope, "Vendor/Opus"));
+    assert!(!model_scope_allows(&scope, "GLM 5.2"));
+    assert!(!model_scope_allows(&scope, "glm_5.2"));
+    assert!(!model_scope_allows(&scope, "vendor-opus"));
+    assert!(!model_scope_allows(&scope, "vendor_opus"));
     assert!(!model_scope_allows(&scope, "glm-5.1"));
     assert!(!model_scope_allows(&scope, "other"));
     assert!(!model_scope_allows(&scope, ""));
@@ -437,6 +448,55 @@ fn safe_default_grants_for_sealed_adapters_have_ids_and_no_origins() {
 }
 
 #[test]
+fn unique_granted_route_uses_the_override_when_the_default_is_not_granted() {
+    let connection = connection_id_for_legacy(LegacyConnectionKind::DynamicProvider, "lab");
+    let default_url = "https://api.moonshot.cn/v1/chat/completions";
+    let override_url = "https://api.deepseek.com/v1/chat/completions";
+    let routes = vec![
+        RouteSpec {
+            operation: EndpointOperation::ChatCreate,
+            url: Some(default_url.into()),
+        },
+        RouteSpec {
+            operation: EndpointOperation::ChatCreate,
+            url: Some(override_url.into()),
+        },
+    ];
+    let assigned = assigned_endpoints_for_routes(&connection, &routes);
+    let override_id = assigned
+        .iter()
+        .find(|endpoint| endpoint.url.as_deref() == Some(override_url))
+        .unwrap()
+        .id
+        .clone();
+    assert_eq!(
+        unique_granted_route_url(
+            &connection,
+            &routes,
+            &[override_id],
+            &["https://api.deepseek.com".into()],
+        )
+        .as_deref(),
+        Some(override_url)
+    );
+    assert!(
+        unique_granted_route_url(
+            &connection,
+            &routes,
+            &assigned
+                .iter()
+                .map(|endpoint| endpoint.id.clone())
+                .collect::<Vec<_>>(),
+            &[
+                "https://api.moonshot.cn".into(),
+                "https://api.deepseek.com".into()
+            ],
+        )
+        .is_none()
+    );
+}
+
+#[test]
 fn normalize_origin_lowercases_scheme_and_host() {
     assert_eq!(
         normalize_origin("HTTPS://Lab.Example/v1/chat/completions"),
@@ -448,4 +508,36 @@ fn normalize_origin_lowercases_scheme_and_host() {
     );
     assert_eq!(normalize_origin("ftp://lab.example"), None);
     assert_eq!(normalize_origin("not-a-url"), None);
+}
+
+#[test]
+fn canonical_origin_equates_default_ports_and_ipv6_forms_only() {
+    assert_eq!(
+        normalize_origin("https://service.example:443/v1/messages"),
+        Some("https://service.example".into())
+    );
+    assert!(origins_equivalent(
+        "https://service.example:443",
+        "https://service.example/v1/messages"
+    ));
+    assert_eq!(
+        normalize_origin("http://[2001:DB8:0:0:0:0:0:1]:8080"),
+        Some("http://[2001:db8::1]:8080".into())
+    );
+    assert!(origins_equivalent(
+        "http://[2001:DB8:0:0:0:0:0:1]:8080",
+        "http://[2001:db8::1]:8080/v1/messages"
+    ));
+    assert!(!origins_equivalent(
+        "http://service.example",
+        "https://service.example"
+    ));
+    assert!(!origins_equivalent(
+        "https://service.example:8443",
+        "https://service.example"
+    ));
+    assert!(!origins_equivalent(
+        "https://a.example",
+        "https://b.example"
+    ));
 }

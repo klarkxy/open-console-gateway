@@ -1,0 +1,47 @@
+/* Application chrome: one quiet workspace, not a stack of floating cards. */
+.app-provider, .app-shell, .app-main { height: 100%; }
+.app-sider { background: var(--ocg-surface-sunken); border-right: 1px solid var(--ocg-divider); }
+.brand { display: flex; align-items: center; gap: var(--ocg-space-md); height: calc(var(--ocg-header-height) + 16px); padding: 0 var(--ocg-space-xl); overflow: hidden; }
+.brand.collapsed { justify-content: center; padding: 0; }
+.brand-symbol { flex: none; display: inline-grid; place-items: center; width: 30px; height: 30px; border: 1px solid var(--ocg-border); border-radius: var(--ocg-radius-md); background: var(--ocg-surface); color: var(--ocg-primary); font: 600 var(--ocg-font-lg)/1 var(--ocg-font-ui); }
+.brand-name { display: grid; gap: 2px; min-width: 0; color: var(--ocg-ink); font-size: var(--ocg-font-md); font-weight: 600; line-height: 1.3; white-space: nowrap; }
+.brand-name small { color: var(--ocg-muted); font-size: var(--ocg-font-xs); font-weight: 400; letter-spacing: 0.02em; }
+.app-sider :deep(.n-menu) { padding: 0 var(--ocg-space-xs); }
+.app-sider :deep(.n-menu-item-content) { font-weight: 500; }
+.app-sider :deep(.n-menu-item-content--selected)::before { box-shadow: inset 2px 0 0 var(--ocg-primary); }
+.app-sider--collapsed :deep(.n-menu) { padding: 0; }
+.app-header { height: var(--ocg-header-height); padding: 0 var(--ocg-space-2xl); display: flex; align-items: center; justify-content: space-between; gap: var(--ocg-space-lg); background: var(--ocg-surface); border-bottom: 1px solid var(--ocg-divider); }
+.desktop-title { margin: 0; color: var(--ocg-ink); font-size: var(--ocg-font-lg); font-weight: 600; line-height: 1.4; }
+.header-actions { display: flex; align-items: center; gap: var(--ocg-space-xs); flex: none; }
+.header-divider { height: 18px; width: 1px; margin: 0 var(--ocg-space-xs); background: var(--ocg-divider); }
+.mobile-nav { display: none; min-width: 0; align-items: center; gap: var(--ocg-space-sm); }
+.mobile-nav-chevron { margin-left: var(--ocg-space-sm); color: var(--ocg-muted); }
+.app-content { height: calc(100% - var(--ocg-header-height)); min-width: 0; min-height: 0; padding: var(--ocg-space-xl) var(--ocg-space-2xl); overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; background: var(--ocg-canvas); }
+.app-content > :deep(*) { max-width: var(--ocg-content-max); margin-inline: auto; }
+.app-error { margin-bottom: var(--ocg-space-lg); }
+.auth-page { position: relative; min-height: 100%; overflow: hidden; display: flex; align-items: center; justify-content: center; padding: var(--ocg-space-2xl); background: var(--ocg-canvas); }
+.auth-panel { position: relative; z-index: 1; width: min(440px, 100%); padding: var(--ocg-space-2xl); border: 1px solid var(--ocg-border); border-radius: var(--ocg-radius-xl); background: var(--ocg-surface); box-shadow: var(--ocg-shadow-lg); }
+.auth-panel-head { display: flex; align-items: center; justify-content: space-between; gap: var(--ocg-space-sm); }
+.auth-brand { display: flex; align-items: center; gap: var(--ocg-space-sm); min-width: 0; font-size: var(--ocg-font-sm); font-weight: 600; }
+.auth-panel h1 { margin: var(--ocg-space-2xl) 0 var(--ocg-space-xl); color: var(--ocg-ink); font-size: var(--ocg-font-2xl); font-weight: 600; letter-spacing: -0.02em; }
+.auth-copy { color: var(--ocg-muted); }
+.auth-form :deep(.n-form-item) { margin-bottom: var(--ocg-space-lg); }
+.auth-error { margin: 0 0 var(--ocg-space-md); color: var(--ocg-error); font-size: var(--ocg-font-sm); }
+.auth-character { position: absolute; z-index: 0; right: max(24px, calc(50% - 540px)); bottom: -32px; height: min(46vh, 400px); max-width: 30vw; object-fit: contain; opacity: 0.8; pointer-events: none; user-select: none; }
+@media (max-width: 1023px) {
+  .app-sider, .desktop-title { display: none; }
+  .mobile-nav { display: flex; flex: 1 1 auto; }
+  .mobile-nav-dropdown { min-width: 0; }
+  .mobile-nav-trigger { max-width: 100%; }
+  .app-header { padding-inline: var(--ocg-space-lg); }
+  .app-content { padding: var(--ocg-space-lg); }
+  .auth-character { display: none; }
+}
+@media (max-width: 640px) {
+  .app-header { padding-inline: var(--ocg-space-sm); gap: var(--ocg-space-xs); }
+  .mobile-nav > .brand-symbol, .header-divider { display: none; }
+  .mobile-nav-trigger { padding-inline: var(--ocg-space-sm); }
+  .app-content { padding: var(--ocg-space-md); }
+  .auth-page { padding: var(--ocg-space-lg); }
+  .auth-panel { padding: var(--ocg-space-xl); }
+}

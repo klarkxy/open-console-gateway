@@ -1277,6 +1277,7 @@ impl From<AccountUpstreamProtocol> for UpstreamProtocolKind {
 pub enum AccountAuthScheme {
     Bearer,
     XApiKey,
+    ApiKey,
 }
 
 impl From<UpstreamAuthScheme> for AccountAuthScheme {
@@ -1284,6 +1285,7 @@ impl From<UpstreamAuthScheme> for AccountAuthScheme {
         match value {
             UpstreamAuthScheme::Bearer => Self::Bearer,
             UpstreamAuthScheme::XApiKey => Self::XApiKey,
+            UpstreamAuthScheme::ApiKey => Self::ApiKey,
         }
     }
 }
@@ -1293,6 +1295,7 @@ impl From<AccountAuthScheme> for UpstreamAuthScheme {
         match value {
             AccountAuthScheme::Bearer => Self::Bearer,
             AccountAuthScheme::XApiKey => Self::XApiKey,
+            AccountAuthScheme::ApiKey => Self::ApiKey,
         }
     }
 }
@@ -1642,6 +1645,9 @@ pub struct ModelProtocolOverridesUpdate {
     #[serde(flatten)]
     pub expectation: MutationExpectation,
     pub overrides: Vec<ModelProtocolOverride>,
+    /// Explicit consent to add this batch's enabled builtin endpoint grants.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub authorize_credential_ids: Vec<String>,
 }
 
 /// POST protocol-probe body. `accountId` is a deprecated compatibility field
@@ -2966,6 +2972,8 @@ pub enum ProviderDefinitionAuthKind {
     Bearer,
     #[serde(rename = "x-api-key")]
     XApiKey,
+    #[serde(rename = "api-key")]
+    ApiKey,
     None,
 }
 
@@ -2974,6 +2982,7 @@ impl From<ocg_domain::dynamic::DynamicAuthKind> for ProviderDefinitionAuthKind {
         match value {
             ocg_domain::dynamic::DynamicAuthKind::Bearer => Self::Bearer,
             ocg_domain::dynamic::DynamicAuthKind::XApiKey => Self::XApiKey,
+            ocg_domain::dynamic::DynamicAuthKind::ApiKey => Self::ApiKey,
             ocg_domain::dynamic::DynamicAuthKind::None => Self::None,
         }
     }
@@ -2984,6 +2993,7 @@ impl From<ProviderDefinitionAuthKind> for ocg_domain::dynamic::DynamicAuthKind {
         match value {
             ProviderDefinitionAuthKind::Bearer => Self::Bearer,
             ProviderDefinitionAuthKind::XApiKey => Self::XApiKey,
+            ProviderDefinitionAuthKind::ApiKey => Self::ApiKey,
             ProviderDefinitionAuthKind::None => Self::None,
         }
     }

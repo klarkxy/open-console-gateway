@@ -20,10 +20,9 @@ docker compose ps
 
 镜像标签会动；先决定是跟车还是钉死。
 
-源码仓库现为 `klarkxy/open-console-gateway`。已发布的 GHCR 镜像继续使用
+源码仓库是 `klarkxy/open-console-gateway`。已发布的 GHCR 镜像包名是
 `ghcr.io/klarkxy/opencode-go-mgr` 和 `ghcr.io/klarkxy/opencode-go-mgr-browser`；
-仓库改名不会同步更改镜像包名。Compose 和容器发布工作流保留这些现有名称，
-使已有安装继续沿用同一升级通道。
+Compose 和容器发布工作流使用这些镜像名。
 
 ## 选择镜像
 
@@ -32,7 +31,7 @@ docker compose ps
 - 生产部署建议在 `.env` 中用 `OCG_IMAGE` 固定完整版本标签，例如
   `ghcr.io/klarkxy/opencode-go-mgr:2.4.1`。
 - 完整版本与 `sha-<commit>` 标签指向单次发布，按策略不应移动；
-  `1.5` 与 `latest` 会继续移动。技术上只有 digest
+  `latest` 会继续移动。技术上只有 digest
   `ghcr.io/klarkxy/opencode-go-mgr@sha256:...` 真正不可变。
 - 想调试当前源码时，设置 `OCG_IMAGE=ocg-manager:local`，再执行
   `docker compose up -d --build`。`NPM_REGISTRY` 与 `CARGO_REGISTRY`
@@ -155,7 +154,7 @@ Google 可能把数据中心出口 IP 视为高风险，要求额外验证，甚
   `seccomp=unconfined`，以便普通 Chromium 建立自身的 namespace 和 renderer
   seccomp 沙箱。Sidecar 不使用 `--no-sandbox`，另有 1 GiB 共享内存；命名卷
   `ocg-data` 与 `ocg-browser-profiles` 是两类持久化应用状态。
-- 启动日志会打印 Key，因此日志输出和 Docker daemon 权限都属于敏感信息。
+- 支持 `status --show-key` 的 CLI 构建会在启动日志中隐藏 Gateway Key；旧版镜像可能打印过它，因此既有日志和 Docker daemon 权限仍属于敏感信息。
   如果 Docker 主机默认没有限制日志大小，请由部署方配置日志轮转。
 
 常用检查命令：

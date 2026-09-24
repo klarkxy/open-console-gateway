@@ -1,85 +1,64 @@
-//! Candidate request materialization for the alias runtime.
-//!
-//! # Adapter interface
-//!
-//! Later provider adapters should treat this module as the boundary between
-//! a parsed client request and an upstream call:
-//!
-//! 1. Parse the client protocol **once** with
-//!    [`parse_client_request`] / [`parse_gemini_request`].
-//! 2. Resolve the requested name through [`crate::alias::resolve`]. Alias
-//!    results may follow account order, sticky, and fallback. A unique raw
-//!    upstream ID is pinned to its single mapping; overlapping raw IDs return
-//!    [`crate::alias::AMBIGUOUS_MODEL_ID`].
-//! 3. Build candidate plans from [`ResolvedModel`] mappings. Match accounts in saved
-//!    account order through [`super::provider_adapter::supports_production_plan`], using
-//!    mapping order only as the per-account tie-break. Protocol selection
-//!    uses the OpenCode `MODEL_PROTOCOLS` table for Go/Zen upstream models
-//!    and Command Code family rules (Chat vs Messages) for GOAT IDs.
-//!    **Never** trial a billable inference path.
-//!    Adapter identity is [`crate::provider::ProviderAdapterKind`]; Custom is
-//!    Configurable HTTP, not a base class.
-//! 4. Ask [`super::provider_adapter::resolve_route_with_dynamics`] for endpoint + auth.
-//!    Production GOAT uses the official Provider API after a saved verified
-//!    catalog snapshot. The official slash raw ID pins to command-code/goat
-//!    without stealing Go kebab aliases.
-//!
-//! OpenCode Go, Zen Free, and the shared Configurable HTTP materialization
-//! boundary are implemented here.
+//! Materializes frozen destination/catalog targets into request and transport
+//! plans. Model resolution, protocol selection, endpoint and credential grants
+//! consume explicit persisted facts.
 
 use crate::alias::{ProviderMapping, ResolveError, ResolvedModel};
-use crate::custom::CustomAccountRuntime;
-use crate::gateway::free_models::resolve_upstream_base;
 use crate::gateway::protocol::{
     CustomRouteSpec, MaterializeSpec, ParsedClientRequest, ProtocolError, RequestPlan,
     materialize_parsed_request,
 };
 use crate::gateway::provider_adapter;
 use crate::gateway::routing::RoutingCandidate;
-use crate::goat::GoatAccountRuntime;
-use crate::kernel::ids::normalize_model_name;
+use crate::kernel::ids::{custom_model_id_matches, normalize_model_name};
 use crate::kernel::protocol::ApiFormat;
-use crate::models::{Account, AppConfig, UpstreamChannel};
+use crate::models::{AppConfig, UpstreamChannel};
 use crate::provider::ProviderAdapterKind;
-use crate::provider_contracts::{ContractScope, EffectiveContractSet};
 use axum::http::StatusCode;
 use ocg_domain::credential::{ModelScope, model_scope_allows};
-use std::collections::HashMap;
+use ocg_domain::destination::Destination;
 
 pub use crate::gateway::protocol::{
     parse_client_request as parse_client, parse_gemini_request as parse_gemini,
 };
 
-#[derive(Debug, Clone)]
-pub(crate) struct MaterializedCandidate {
-    pub routing: RoutingCandidate,
-    pub plan: RequestPlan,
+/// Stable internal rejection identity. Wire/explain codes are `as_str()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RouteRejectionCode {
+    MappingProtocolIncompatible,
+    CredentialDisabled,
+    BindingDisabled,
+    ModelScopeDenied,
+    #[allow(dead_code)] // Historical explanation code retained for compatibility fixtures.
+    GoatNotEligible,
+    #[allow(dead_code)] // Historical explanation code retained for compatibility fixtures.
+    GoatUnverified,
+    CandidateMaterializationFailed,
+    ProductionRouteUnsupported,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct MaterializedRouteSet {
-    pub routes: Vec<MaterializedCandidate>,
-    pub free_only: bool,
-    pub incompatibility: Option<String>,
-    /// Account/mapping rejection notes collected while building candidates.
-    /// Empty when every considered account produced a route. Live send ignores
-    /// this list; the read-only shadow planner surfaces it for compare.
-    pub rejected: Vec<String>,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct InferenceBindingGate {
-    pub enabled: bool,
-    pub model_scope: ModelScope,
-}
-
-pub(crate) type InferenceBindingIndex = HashMap<String, InferenceBindingGate>;
-
-fn default_inference_binding() -> InferenceBindingGate {
-    InferenceBindingGate {
-        enabled: true,
-        model_scope: ModelScope::All,
+impl RouteRejectionCode {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::MappingProtocolIncompatible => "mapping_protocol_incompatible",
+            Self::CredentialDisabled => "credential_disabled",
+            Self::BindingDisabled => "binding_disabled",
+            Self::ModelScopeDenied => "model_scope_denied",
+            Self::GoatNotEligible => "goat_not_eligible",
+            Self::GoatUnverified => "goat_unverified",
+            Self::CandidateMaterializationFailed => "candidate_materialization_failed",
+            Self::ProductionRouteUnsupported => "production_route_unsupported",
+        }
     }
+}
+
+/// Typed materialize rejection with the historical human detail string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RouteRejection {
+    pub code: RouteRejectionCode,
+    pub detail: String,
+    pub account_id: Option<String>,
+    pub provider_id: Option<String>,
+    pub upstream_model: Option<String>,
 }
 
 pub(crate) fn binding_allows_requested_model(
@@ -95,64 +74,7 @@ pub(crate) fn binding_allows_requested_model(
             .any(|model| model_scope_allows(scope, model.as_ref()))
 }
 
-/// Diagnostics are not a candidate protocol decision. If a resolution can use
-/// Custom, Command Code GOAT, or Ollama Cloud, preserve the client wire format
-/// until each actual mapping/account is materialized. Unique GOAT and Ollama
-/// catalog IDs are not in OpenCode `MODEL_PROTOCOLS`. Zen-only resolutions
-/// default to Chat so unknown catalog `-free` rows (and their stripped Alias)
-/// are not rejected against the Go protocol table. A Go mapping admitted by a
-/// refreshed catalog may also lack a checked-in profile: defer its protocol to
-/// the effective per-candidate contract instead of vetoing it for diagnostics.
-/// Known builtin profiles keep their normal early validation.
-pub(crate) fn diagnostic_forced_upstream(
-    resolved: &ResolvedModel,
-    client: ApiFormat,
-) -> Option<ApiFormat> {
-    if let ResolvedModel::PinnedRaw { mapping, .. } = resolved
-        && mapping_adapter_kind(mapping) == Some(ProviderAdapterKind::Cpa)
-    {
-        return Some(
-            crate::kernel::protocol::model_protocol(&mapping.upstream_model)
-                .map(|profile| profile.preferred)
-                .unwrap_or(ApiFormat::ChatCompletions),
-        );
-    }
-    let zen_only = match resolved {
-        ResolvedModel::PinnedRaw { mapping, .. } => mapping_is_zen_free(mapping),
-        ResolvedModel::Alias { mappings, .. } => {
-            let routeable: Vec<_> = mappings
-                .iter()
-                .filter(|mapping| mapping.routeable)
-                .collect();
-            !routeable.is_empty() && routeable.iter().all(|mapping| mapping_is_zen_free(mapping))
-        }
-    };
-    if zen_only {
-        return Some(ApiFormat::ChatCompletions);
-    }
-    let preserve_client = match resolved {
-        ResolvedModel::PinnedRaw { mapping, .. } => mapping_preserves_client_wire(mapping),
-        ResolvedModel::Alias { mappings, .. } => mappings
-            .iter()
-            .any(|mapping| mapping.routeable && mapping_preserves_client_wire(mapping)),
-    };
-    preserve_client.then_some(match client {
-        // Gemini is client-only. This diagnostic conversion does not select
-        // the actual upstream, which still comes from the candidate contract.
-        ApiFormat::Gemini => ApiFormat::ChatCompletions,
-        client => client,
-    })
-}
-
-fn mapping_preserves_client_wire(mapping: &ProviderMapping) -> bool {
-    mapping_is_configurable_http(mapping)
-        || mapping_is_command_code_goat(mapping)
-        || mapping_is_ollama_cloud(mapping)
-        || (mapping.is_opencode_go()
-            && crate::kernel::protocol::model_protocol(&mapping.upstream_model).is_none())
-}
-
-fn mapping_adapter_kind(mapping: &ProviderMapping) -> Option<ProviderAdapterKind> {
+pub(crate) fn mapping_adapter_kind(mapping: &ProviderMapping) -> Option<ProviderAdapterKind> {
     crate::dynamic::adapter_kind_for(&mapping.provider_id, &[]).or_else(|| {
         uuid::Uuid::parse_str(&mapping.provider_id)
             .ok()
@@ -160,16 +82,12 @@ fn mapping_adapter_kind(mapping: &ProviderMapping) -> Option<ProviderAdapterKind
     })
 }
 
-fn mapping_is_configurable_http(mapping: &ProviderMapping) -> bool {
+/// Custom/platform catalog row: Configurable HTTP whose `provider_id` is the
+/// sealed custom catalog key, not a dynamic UUID.
+pub(crate) fn mapping_is_custom_http_catalog(mapping: &ProviderMapping) -> bool {
     mapping_adapter_kind(mapping) == Some(ProviderAdapterKind::ConfigurableHttp)
-}
-
-fn mapping_is_zen_free(mapping: &ProviderMapping) -> bool {
-    mapping_adapter_kind(mapping) == Some(ProviderAdapterKind::ZenFree)
-}
-
-fn mapping_is_ollama_cloud(mapping: &ProviderMapping) -> bool {
-    mapping_adapter_kind(mapping) == Some(ProviderAdapterKind::OllamaCloud)
+        && crate::dynamic::adapter_kind_for(&mapping.provider_id, &[])
+            == Some(ProviderAdapterKind::ConfigurableHttp)
 }
 
 pub(crate) fn protocol_error_from_resolve(error: ResolveError) -> ProtocolError {
@@ -253,514 +171,348 @@ pub(crate) fn upstream_model_for(requested: &str, canonical: &str) -> String {
     }
 }
 
-struct MappingPlan {
-    mapping: ProviderMapping,
-    plan: RequestPlan,
+/// The persisted model selected at entry. Authorization compares this identity;
+/// it never selects a different row after an edit.
+#[derive(Clone, Debug)]
+pub(crate) struct FrozenTarget {
+    pub destination: Destination,
+    pub model: ocg_domain::destination::CatalogModel,
+    pub endpoint_id: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ExecutionRoute {
+    pub routing: RoutingCandidate<crate::routing_snapshot::ExecutionCredential>,
+    pub plan: RequestPlan,
+    pub spec: crate::gateway::attempt::AttemptSpec,
+    pub target: FrozenTarget,
+}
+
+pub(crate) struct ExecutionRouteSet {
+    pub routes: Vec<ExecutionRoute>,
+    pub free_only: bool,
+    pub incompatibility: Option<String>,
+    pub rejections: Vec<RouteRejection>,
+}
+
+pub(crate) fn resolved_contains_model(
+    resolved: &ResolvedModel,
+    destination: &Destination,
+    model: &ocg_domain::destination::CatalogModel,
+    requested: &str,
+) -> bool {
+    use ocg_domain::destination::{AdapterKind, ModelResolution};
+    let mapping_matches = |mapping: &ProviderMapping| {
+        if !mapping.routeable {
+            return false;
+        }
+        if destination.adapter == AdapterKind::Http {
+            match destination.model_resolution {
+                ModelResolution::PublicOnly => {
+                    mapping.provider_id == crate::provider::CUSTOM_PROVIDER_ID
+                        && custom_model_id_matches(&model.public_model, requested)
+                }
+                ModelResolution::PublicAndUpstream => {
+                    let requested_public = destination
+                        .catalog
+                        .iter()
+                        .find(|row| custom_model_id_matches(&row.public_model, requested));
+                    mapping.provider_id == destination.id
+                        && mapping.upstream_model == model.upstream_model
+                        && requested_public.is_none_or(|row| row.public_model == model.public_model)
+                }
+                ModelResolution::AdapterDefined => false,
+            }
+        } else {
+            crate::provider::ProviderRegistry::get_by_kind(ProviderAdapterKind::from(
+                destination.adapter,
+            ))
+            .is_some_and(|descriptor| descriptor.provider_id == mapping.provider_id)
+                && normalize_model_name(&mapping.upstream_model)
+                    == normalize_model_name(&model.upstream_model)
+        }
+    };
+    match resolved {
+        ResolvedModel::Alias { mappings, .. } => mappings.iter().any(mapping_matches),
+        ResolvedModel::PinnedRaw { mapping, .. } => mapping_matches(mapping),
+    }
+}
+
+pub(crate) use crate::route_availability::endpoint_id_for_target;
+
+/// Protocols this Key may send on: declared and enabled, with a configured
+/// route, and granted to the credential. Selection then prefers the client
+/// protocol, the saved preference, and the remaining granted protocols.
+fn authorized_model_protocols(
+    credential: &crate::routing_snapshot::ExecutionCredential,
+    destination: &Destination,
+    model: &ocg_domain::destination::CatalogModel,
+) -> Vec<ocg_domain::destination::Protocol> {
+    model
+        .protocols
+        .iter()
+        .copied()
+        .filter(|protocol| {
+            crate::route_availability::protocol_is_authorized(
+                credential,
+                destination,
+                model,
+                *protocol,
+            )
+        })
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn materialize_account_routes_with_bindings(
-    accounts: &[Account],
+pub(crate) fn materialize_execution_routes(
+    snapshot: &crate::routing_snapshot::RoutingSnapshot,
     config: &AppConfig,
     parsed: &ParsedClientRequest,
     resolved: &ResolvedModel,
     client_model: &str,
     routing_model: &str,
-    free_available: bool,
-    custom_runtimes: &std::collections::HashMap<String, CustomAccountRuntime>,
-    goat_runtimes: &std::collections::HashMap<String, GoatAccountRuntime>,
     cpa_base_url: Option<&str>,
-    contracts: &EffectiveContractSet,
-    dynamics: &[crate::dynamic::DynamicProviderRuntime],
-    bindings: &InferenceBindingIndex,
-) -> Result<MaterializedRouteSet, ProtocolError> {
-    match resolved {
-        ResolvedModel::PinnedRaw { mapping, .. } => {
-            let zen_only = mapping_is_zen_free(mapping);
-            let plan = materialize_mapping_plan(
-                config,
-                parsed,
-                client_model,
-                routing_model,
-                mapping,
-                resolved_alias_from_model(resolved),
-                None,
-                cpa_base_url,
-                contracts,
-            )?;
-            collect_mapping_plans(
-                accounts,
-                config,
-                parsed,
-                client_model,
-                routing_model,
-                resolved_alias_from_model(resolved),
-                vec![MappingPlan {
-                    mapping: mapping.clone(),
-                    plan,
-                }],
-                zen_only,
-                Vec::new(),
-                custom_runtimes,
-                goat_runtimes,
-                contracts,
-                dynamics,
-                bindings,
-            )
-        }
-        ResolvedModel::Alias {
-            mappings, alias, ..
-        } => {
-            let routeable: Vec<ProviderMapping> = mappings
-                .iter()
-                .filter(|mapping| mapping.routeable)
-                .cloned()
-                .collect();
-            let zen_only = !routeable.is_empty() && routeable.iter().all(mapping_is_zen_free);
-            let mut plans = Vec::new();
-            let mut rejected = Vec::new();
-            let mut first_materialization_error = None;
-            let resolved_alias = Some(alias.to_string());
-            for mapping in &routeable {
-                if mapping_is_zen_free(mapping) && !free_available && !zen_only {
-                    continue;
-                }
-                match materialize_mapping_plan(
-                    config,
-                    parsed,
-                    client_model,
-                    routing_model,
-                    mapping,
-                    resolved_alias.clone(),
-                    None,
-                    cpa_base_url,
-                    contracts,
-                ) {
-                    Ok(plan) => plans.push(MappingPlan {
-                        mapping: mapping.clone(),
-                        plan,
-                    }),
-                    Err(error) => {
-                        rejected.push(format!(
-                            "{}/{} mapping `{}`: {error}",
-                            mapping.provider_id, mapping.provider_id, mapping.upstream_model
-                        ));
-                        first_materialization_error.get_or_insert(error);
-                    }
-                }
-            }
-
-            // Preserve the existing pure-builtin 400 when every actual
-            // mapping rejects the request. Mixed resolutions continue so a
-            // compatible Custom account can still be materialized below.
-            if plans.is_empty()
-                && let Some(error) = first_materialization_error
-            {
-                return Err(error);
-            }
-
-            collect_mapping_plans(
-                accounts,
-                config,
-                parsed,
-                client_model,
-                routing_model,
-                Some(alias.to_string()),
-                plans,
-                zen_only,
-                rejected,
-                custom_runtimes,
-                goat_runtimes,
-                contracts,
-                dynamics,
-                bindings,
-            )
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn materialize_mapping_plan(
-    config: &AppConfig,
-    parsed: &ParsedClientRequest,
-    client_model: &str,
-    routing_model: &str,
-    mapping: &ProviderMapping,
-    resolved_alias: Option<String>,
-    original_model: Option<String>,
-    cpa_base_url: Option<&str>,
-    contracts: &EffectiveContractSet,
-) -> Result<RequestPlan, ProtocolError> {
-    let adapter_kind = mapping_adapter_kind(mapping);
-    let channel = if adapter_kind == Some(ProviderAdapterKind::ZenFree) {
-        UpstreamChannel::Free
-    } else {
-        // GOAT / Configurable HTTP share the Go channel discriminator.
-        // Custom is rematerialized per account with that account's configured
-        // protocol. Configurable HTTP is not a base class.
-        UpstreamChannel::Go
-    };
-    let model = if adapter_kind == Some(ProviderAdapterKind::ConfigurableHttp) {
-        routing_model.to_string()
-    } else if original_model.is_some() {
-        mapping.upstream_model.to_string()
-    } else {
-        upstream_model_for(routing_model, &mapping.upstream_model)
-    };
-    let forced_upstream = if adapter_kind == Some(ProviderAdapterKind::ConfigurableHttp) {
-        Some(parsed.client)
-    } else if adapter_kind == Some(ProviderAdapterKind::Cpa) {
-        // CPA owns the model's upstream choice. Only Gemini is client-only
-        // here and must be converted to a protocol exposed by CPA.
-        Some(match parsed.client {
-            ApiFormat::Gemini => ApiFormat::ChatCompletions,
-            protocol => protocol,
-        })
-    } else {
-        Some(
-            contracts
-                .select_for_mapping(mapping, parsed.client, &model)
-                .map_err(|error| ProtocolError::new(error.message))?,
-        )
-    };
-    let mut plan = materialize_channel_plan(
-        config,
-        parsed,
-        client_model,
-        &model,
-        resolved_alias,
-        channel,
-        original_model,
-        forced_upstream,
-        None,
-    )?;
-    if adapter_kind == Some(ProviderAdapterKind::Cpa) {
-        plan.upstream_base_override = Some(
-            cpa_base_url
-                .ok_or_else(|| ProtocolError::new("CPA is not configured"))?
-                .to_string(),
-        );
-    }
-    Ok(plan)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn materialize_channel_plan(
-    config: &AppConfig,
-    parsed: &ParsedClientRequest,
-    client_model: &str,
-    model: &str,
-    resolved_alias: Option<String>,
-    channel: UpstreamChannel,
-    original_model: Option<String>,
-    forced_upstream: Option<ApiFormat>,
-    custom_route: Option<CustomRouteSpec>,
-) -> Result<RequestPlan, ProtocolError> {
-    let base =
-        resolve_upstream_base(channel, &config.upstream_base_url).map_err(ProtocolError::new)?;
-    materialize_parsed_request(
-        parsed,
-        &MaterializeSpec {
-            client_model: client_model.to_string(),
-            upstream_model: model.to_string(),
-            resolved_alias,
-            channel,
-            upstream_base_override: match channel {
-                UpstreamChannel::Free => Some(base),
-                UpstreamChannel::Go => None,
-            },
-            original_model,
-            forced_upstream,
-            custom_route,
-        },
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn materialize_custom_account_plan(
-    account: &Account,
-    runtime: Option<&CustomAccountRuntime>,
-    config: &AppConfig,
-    parsed: &ParsedClientRequest,
-    client_model: &str,
-    routing_model: &str,
-    resolved_alias: Option<String>,
-    contracts: &EffectiveContractSet,
-) -> Result<RequestPlan, ProtocolError> {
-    let runtime = runtime.ok_or_else(|| {
-        ProtocolError::new(format!(
-            "Custom account `{}` is missing a persisted API URL and upstream protocol",
-            account.name
-        ))
-    })?;
-    if !runtime.eligible() {
-        return Err(ProtocolError::new(format!(
-            "Custom account `{}` is not enabled, ready, and configured with a non-empty Key",
-            account.name
-        )));
-    }
-    let capability = runtime
-        .capability_matching_public(routing_model)
-        .ok_or_else(|| {
-            ProtocolError::new(format!(
-                "Custom account `{}` did not declare model `{routing_model}`",
-                account.name
-            ))
-        })?;
-    let resolved_alias = resolved_alias
-        .filter(|alias| !alias.is_empty())
-        .or_else(|| Some(capability.public_model.clone()));
-    let contract = contracts
-        .scope(&ContractScope::custom_endpoint(&account.id))
-        .ok_or_else(|| {
-            ProtocolError::new(format!(
-                "no effective contract for custom_endpoint `{}`",
-                account.id
-            ))
-        })?;
-    // Every Custom account has one declared upstream protocol. The contract
-    // passes the same client format through or converts every other format to it.
-    let upstream = crate::provider_contracts::select_upstream_protocol(
-        contract,
-        parsed.client,
-        &capability.public_model,
-    )
-    .map_err(|error| ProtocolError::new(error.message))?;
-    materialize_channel_plan(
-        config,
-        parsed,
-        client_model,
-        &capability.upstream_model,
-        resolved_alias,
-        UpstreamChannel::Go,
-        None,
-        Some(upstream),
-        Some(CustomRouteSpec {
-            endpoint_url: runtime.config.endpoint_url.clone(),
-        }),
-    )
-}
-
-struct DynamicPlanNames<'a> {
-    client_model: &'a str,
-    routing_model: &'a str,
-    resolved_alias: Option<String>,
-    mapping_upstream: &'a str,
-}
-
-fn materialize_dynamic_account_plan(
-    account: &Account,
-    runtime: Option<&crate::dynamic::DynamicProviderRuntime>,
-    config: &AppConfig,
-    parsed: &ParsedClientRequest,
-    names: DynamicPlanNames<'_>,
-) -> Result<RequestPlan, ProtocolError> {
-    let runtime = runtime.ok_or_else(|| {
-        ProtocolError::new(format!(
-            "dynamic provider `{}` is not in the request snapshot",
-            account.provider_id
-        ))
-    })?;
-    if runtime.auth_kind.requires_key() && account.key_cipher.trim().is_empty() {
-        return Err(ProtocolError::new(format!(
-            "account `{}` has no stored Key",
-            account.name
-        )));
-    }
-    let selected = runtime
-        .mapping_for_public(names.routing_model)
-        .or_else(|| runtime.mapping_for_upstream(names.mapping_upstream))
-        .or_else(|| runtime.mapping_for_upstream(names.routing_model))
-        .ok_or_else(|| {
-            ProtocolError::new(format!(
-                "dynamic provider `{}` has no mapping for `{}`",
-                runtime.name, names.routing_model
-            ))
-        })?;
-    let route = runtime.effective_route(selected);
-    let upstream = crate::provider_contracts::select_enabled_upstream(
-        parsed.client,
-        route.protocol,
-        std::slice::from_ref(&route.protocol),
-        std::slice::from_ref(&route.protocol),
-    )
-    .map_err(|error| ProtocolError::new(error.message))?;
-    materialize_channel_plan(
-        config,
-        parsed,
-        names.client_model,
-        &selected.upstream_model,
-        names
-            .resolved_alias
-            .or_else(|| Some(selected.public_model.clone())),
-        UpstreamChannel::Go,
-        None,
-        Some(upstream),
-        Some(CustomRouteSpec {
-            endpoint_url: route.endpoint_url,
-        }),
-    )
-}
-
-fn mapping_is_command_code_goat(mapping: &ProviderMapping) -> bool {
-    mapping_adapter_kind(mapping) == Some(ProviderAdapterKind::CommandCodeGoat)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn collect_mapping_plans(
-    accounts: &[Account],
-    config: &AppConfig,
-    parsed: &ParsedClientRequest,
-    client_model: &str,
-    routing_model: &str,
-    resolved_alias: Option<String>,
-    plans: Vec<MappingPlan>,
-    free_only: bool,
-    mut rejected: Vec<String>,
-    custom_runtimes: &std::collections::HashMap<String, CustomAccountRuntime>,
-    goat_runtimes: &std::collections::HashMap<String, GoatAccountRuntime>,
-    contracts: &EffectiveContractSet,
-    dynamics: &[crate::dynamic::DynamicProviderRuntime],
-    bindings: &InferenceBindingIndex,
-) -> Result<MaterializedRouteSet, ProtocolError> {
+) -> Result<ExecutionRouteSet, ProtocolError> {
+    use ocg_domain::destination::{AdapterKind, AuthScheme};
     let mut routes = Vec::new();
-    for account in accounts {
-        let binding = bindings
-            .get(&account.id)
-            .cloned()
-            .unwrap_or_else(default_inference_binding);
-        if !binding.enabled {
-            rejected.push(format!(
-                "{}/{} account `{}`: inference binding is disabled",
-                account.provider_id, account.provider_id, account.name
+    let mut rejections = Vec::new();
+    let mut conversion_error = None;
+    let mut conversion_failures = 0;
+    for credential in &snapshot.credentials {
+        let Some(destination) = snapshot
+            .projection
+            .destinations
+            .iter()
+            .find(|d| d.id == credential.destination_id)
+        else {
+            continue;
+        };
+        let reject = |code, detail: String| RouteRejection {
+            code,
+            detail,
+            account_id: Some(credential.id.clone()),
+            provider_id: Some(credential.provider_id.clone()),
+            upstream_model: None,
+        };
+        if !destination
+            .catalog
+            .iter()
+            .any(|m| resolved_contains_model(resolved, destination, m, routing_model))
+        {
+            continue;
+        }
+        if !destination.enabled || !credential.enabled {
+            rejections.push(reject(
+                RouteRejectionCode::CredentialDisabled,
+                "credential or destination disabled".into(),
             ));
             continue;
         }
-        for candidate in &plans {
-            if account.provider_id != candidate.mapping.provider_id {
+        if !credential.binding_enabled {
+            rejections.push(reject(
+                RouteRejectionCode::BindingDisabled,
+                "inference binding disabled".into(),
+            ));
+            continue;
+        }
+        for model in &destination.catalog {
+            if !resolved_contains_model(resolved, destination, model, routing_model) {
                 continue;
             }
-            // Scope is per candidate. OR-ing every same-provider plan would let
-            // an allowlisted sibling model admit a request for X (D01).
-            if !binding_allows_requested_model(
-                &binding.model_scope,
-                client_model,
-                routing_model,
-                std::iter::once(candidate.plan.model.as_str()),
-            ) {
-                rejected.push(format!(
-                    "{}/{} account `{}`: model `{routing_model}` is outside binding model scope",
-                    account.provider_id, account.provider_id, account.name
+            if !model.enabled || model.protocols.is_empty() {
+                rejections.push(reject(
+                    RouteRejectionCode::MappingProtocolIncompatible,
+                    "model has no enabled protocol".into(),
                 ));
                 continue;
             }
-            if routes.iter().any(|route: &MaterializedCandidate| {
-                route.routing.account.id == account.id
-                    && route.routing.channel == candidate.plan.channel
-            }) {
+            if !binding_allows_requested_model(
+                &credential.scope,
+                client_model,
+                routing_model,
+                [&model.upstream_model, &model.public_model],
+            ) {
+                rejections.push(reject(
+                    RouteRejectionCode::ModelScopeDenied,
+                    "model is outside credential scope".into(),
+                ));
                 continue;
             }
-            if mapping_is_command_code_goat(&candidate.mapping) {
-                match goat_runtimes.get(&account.id) {
-                    Some(runtime) if runtime.eligible() => {}
-                    Some(_) => {
-                        rejected.push(format!(
-                            "{}/{} account `{}`: Command Code GOAT account is not eligible for routing",
-                            account.provider_id,
-                            account.provider_id,
-                            account.name
-                        ));
-                        continue;
-                    }
-                    None => {
-                        rejected.push(format!(
-                            "{}/{} account `{}`: Command Code GOAT production inference endpoint, auth, protocol, and model catalog are not verified; route is disabled",
-                            account.provider_id, account.provider_id, account.name
-                        ));
-                        continue;
-                    }
-                }
+            if destination.auth_scheme != AuthScheme::None && credential.key_cipher.is_empty() {
+                rejections.push(reject(
+                    RouteRejectionCode::CandidateMaterializationFailed,
+                    "credential has no Key".into(),
+                ));
+                continue;
             }
-            let plan = if mapping_is_configurable_http(&candidate.mapping)
-                && crate::provider::is_custom_api(&account.provider_id)
-            {
-                match materialize_custom_account_plan(
-                    account,
-                    custom_runtimes.get(&account.id),
-                    config,
-                    parsed,
-                    client_model,
-                    routing_model,
-                    resolved_alias.clone(),
-                    contracts,
-                ) {
-                    Ok(plan) => plan,
-                    Err(error) => {
-                        rejected.push(format!(
-                            "{}/{} account `{}`: {error}",
-                            account.provider_id, account.provider_id, account.name
-                        ));
-                        continue;
-                    }
-                }
-            } else if mapping_is_configurable_http(&candidate.mapping) {
-                match materialize_dynamic_account_plan(
-                    account,
-                    crate::dynamic::find_runtime(dynamics, &account.provider_id),
-                    config,
-                    parsed,
-                    DynamicPlanNames {
-                        client_model,
-                        routing_model,
-                        resolved_alias: resolved_alias.clone(),
-                        mapping_upstream: &candidate.mapping.upstream_model,
-                    },
-                ) {
-                    Ok(plan) => plan,
-                    Err(error) => {
-                        rejected.push(format!(
-                            "{}/{} account `{}`: {error}",
-                            account.provider_id, account.provider_id, account.name
-                        ));
-                        continue;
-                    }
-                }
-            } else {
-                candidate.plan.clone()
-            };
-            match provider_adapter::supports_production_plan(
-                account, config, &plan, contracts, dynamics,
+            let authorized = authorized_model_protocols(credential, destination, model);
+            if authorized.is_empty() {
+                rejections.push(reject(
+                    RouteRejectionCode::ProductionRouteUnsupported,
+                    "no granted protocol route for this Key".into(),
+                ));
+                continue;
+            }
+            let preferred = model
+                .preferred
+                .or_else(|| authorized.first().copied())
+                .ok_or_else(|| ProtocolError::new("missing preferred protocol"))?;
+            let upstream = match crate::provider_contracts::select_enabled_upstream(
+                parsed.client,
+                preferred,
+                &authorized,
+                &authorized,
             ) {
-                Ok(()) => {
-                    routes.push(MaterializedCandidate {
-                        routing: RoutingCandidate {
-                            account: account.clone(),
-                            channel: plan.channel,
-                            resolved_model: plan.model.clone(),
-                        },
-                        plan,
-                    });
-                    break;
+                Ok(upstream) => upstream,
+                Err(error) => {
+                    rejections.push(reject(
+                        RouteRejectionCode::MappingProtocolIncompatible,
+                        error.message,
+                    ));
+                    continue;
                 }
-                Err(error) => rejected.push(format!(
-                    "{}/{} account `{}`: {error}",
-                    account.provider_id, account.provider_id, account.name
-                )),
-            }
+            };
+            let adapter = ProviderAdapterKind::from(destination.adapter);
+            let channel = crate::routing_runtime::channel_for_adapter(adapter);
+            let custom_route = if destination.adapter == AdapterKind::Http {
+                let selected_protocol = match upstream {
+                    ApiFormat::ChatCompletions => {
+                        ocg_domain::destination::Protocol::ChatCompletions
+                    }
+                    ApiFormat::Responses => ocg_domain::destination::Protocol::Responses,
+                    ApiFormat::Messages => ocg_domain::destination::Protocol::Messages,
+                    ApiFormat::Gemini => {
+                        return Err(ProtocolError::new("client-only upstream protocol"));
+                    }
+                };
+                let Some(selected) = ocg_domain::destination::http_model_route(
+                    destination,
+                    model,
+                    selected_protocol,
+                ) else {
+                    rejections.push(reject(
+                        RouteRejectionCode::ProductionRouteUnsupported,
+                        "model protocol has no configured route".into(),
+                    ));
+                    continue;
+                };
+                Some(CustomRouteSpec {
+                    endpoint_url: selected.endpoint_url,
+                    auth_kind: match selected.auth_scheme {
+                        AuthScheme::Bearer => ocg_domain::dynamic::DynamicAuthKind::Bearer,
+                        AuthScheme::XApiKey => ocg_domain::dynamic::DynamicAuthKind::XApiKey,
+                        AuthScheme::ApiKey => ocg_domain::dynamic::DynamicAuthKind::ApiKey,
+                        AuthScheme::None => ocg_domain::dynamic::DynamicAuthKind::None,
+                    },
+                })
+            } else {
+                None
+            };
+            let plan = materialize_parsed_request(
+                parsed,
+                &MaterializeSpec {
+                    client_model: client_model.into(),
+                    upstream_model: if destination.adapter == AdapterKind::Http {
+                        model.upstream_model.clone()
+                    } else {
+                        upstream_model_for(routing_model, &model.upstream_model)
+                    },
+                    resolved_alias: resolved_alias_from_model(resolved),
+                    channel,
+                    upstream_base_override: if destination.adapter == AdapterKind::Cpa {
+                        cpa_base_url
+                            .map(str::to_string)
+                            .or_else(|| destination.base_url.clone())
+                    } else {
+                        None
+                    },
+                    original_model: None,
+                    forced_upstream: Some(upstream),
+                    custom_route,
+                    effort_aliases: crate::gateway::protocol::route_effort_aliases(
+                        destination.adapter,
+                        &model.upstream_model,
+                    ),
+                },
+            );
+            let plan = match plan {
+                Ok(plan) => plan,
+                Err(error) => {
+                    conversion_failures += 1;
+                    conversion_error.get_or_insert_with(|| error.clone());
+                    rejections.push(reject(
+                        RouteRejectionCode::CandidateMaterializationFailed,
+                        error.message,
+                    ));
+                    continue;
+                }
+            };
+            let spec = match provider_adapter::resolve_execution_route(
+                credential,
+                destination,
+                config,
+                &plan,
+            ) {
+                Ok(spec) => spec,
+                Err(error) => {
+                    rejections.push(reject(
+                        RouteRejectionCode::ProductionRouteUnsupported,
+                        error,
+                    ));
+                    continue;
+                }
+            };
+            let endpoint_id = endpoint_id_for_target(credential, destination, model, upstream)
+                .map_err(ProtocolError::new)?;
+            routes.push(ExecutionRoute {
+                routing: RoutingCandidate {
+                    account: credential.clone(),
+                    adapter,
+                    channel,
+                    resolved_model: model.upstream_model.clone(),
+                },
+                plan,
+                spec,
+                target: FrozenTarget {
+                    destination: destination.clone(),
+                    model: model.clone(),
+                    endpoint_id,
+                },
+            });
+            break;
         }
     }
-    let incompatibility = (routes.is_empty() && !rejected.is_empty()).then(|| {
-        format!(
-            "no compatible provider account for model `{client_model}` and {:?}: {}",
-            parsed.client,
-            rejected.join("; ")
-        )
+    // Only real candidate conversions can reject client features. Unavailable
+    // credentials still produce availability errors, and any viable route wins.
+    if routes.is_empty()
+        && conversion_failures
+            + rejections
+                .iter()
+                .filter(|rejection| {
+                    rejection.code == RouteRejectionCode::MappingProtocolIncompatible
+                })
+                .count()
+            == rejections.len()
+        && let Some(error) = conversion_error
+    {
+        return Err(error);
+    }
+    let free_only = !routes.is_empty()
+        && routes
+            .iter()
+            .all(|r| r.routing.channel == UpstreamChannel::Free);
+    let incompatibility = (routes.is_empty() && !rejections.is_empty()).then(|| {
+        rejections
+            .iter()
+            .map(|r| r.detail.as_str())
+            .collect::<Vec<_>>()
+            .join("; ")
     });
-    Ok(MaterializedRouteSet {
+    Ok(ExecutionRouteSet {
         routes,
         free_only,
         incompatibility,
-        rejected,
+        rejections,
     })
 }
 

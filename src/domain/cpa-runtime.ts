@@ -8,6 +8,7 @@ import type {
   CpaRuntimeKey,
   CpaRuntimePhase,
 } from "../api/generated/dashboard-v3.ts";
+import type { MessageKey } from "../i18n/index.ts";
 
 /**
  * Pure state helpers for the CPA page. The external connection and the managed
@@ -76,8 +77,99 @@ const CPA_BUSY_PHASES: readonly CpaRuntimePhase[] = [
   "starting",
 ];
 
-export function isCpaPhaseBusy(phase: CpaRuntimePhase): boolean {
-  return CPA_BUSY_PHASES.includes(phase);
+export function isCpaPhaseBusy(
+  phase: CpaRuntimePhase,
+): phase is Exclude<CpaRuntimePhase, "idle" | "failed"> {
+  return (CPA_BUSY_PHASES as readonly CpaRuntimePhase[]).includes(phase);
+}
+
+/**
+ * Operational status for the Accounts CPA pool card. Routing enablement stays
+ * on the existing Enabled tag; this is the managed process (or external
+ * connection) the pool actually talks to.
+ */
+export type CpaCardStatus =
+  | "checking"
+  | "downloading"
+  | "installing"
+  | "starting"
+  | "failed"
+  | "running"
+  | "stopped"
+  | "not_installed"
+  | "external";
+
+export const CPA_RUNTIME_PHASE_KEYS = {
+  idle: "空闲",
+  checking: "检查中",
+  downloading: "下载中",
+  installing: "安装中",
+  starting: "启动中",
+  failed: "失败",
+} as const satisfies Record<CpaRuntimePhase, MessageKey>;
+
+export const CPA_CARD_STATUS_KEYS = {
+  checking: "检查中",
+  downloading: "下载中",
+  installing: "安装中",
+  starting: "启动中",
+  failed: "失败",
+  running: "运行中",
+  stopped: "已停止",
+  not_installed: "未安装",
+  external: "外部连接",
+} as const satisfies Record<CpaCardStatus, MessageKey>;
+
+type CpaCardIntegration = Pick<
+  CpaIntegration,
+  "configured" | "runtimeOwned" | "runtimeRunning" | "installedVersion"
+>;
+type CpaCardRuntime = Pick<CpaRuntime, "installed" | "running" | "owned" | "phase">;
+
+/**
+ * Prefer an in-flight lifecycle phase. A managed install reports running /
+ * stopped; an external connection is not an OCG-owned process.
+ */
+export function cpaCardStatus(
+  integration: CpaCardIntegration | null,
+  runtime: CpaCardRuntime | null,
+): CpaCardStatus | null {
+  if (!integration) return null;
+  if (runtime && isCpaPhaseBusy(runtime.phase)) return runtime.phase;
+  if (runtime?.phase === "failed") return "failed";
+  const owned = integration.runtimeOwned || runtime?.owned === true;
+  if (owned) {
+    const installed = runtime?.installed ?? integration.installedVersion != null;
+    if (!installed) return "not_installed";
+    const running = runtime?.running ?? integration.runtimeRunning;
+    return running ? "running" : "stopped";
+  }
+  if (integration.configured) return "external";
+  return null;
+}
+
+export function cpaCardStatusTagType(
+  status: CpaCardStatus,
+): "success" | "warning" | "error" | "default" {
+  switch (status) {
+    case "running":
+      return "success";
+    case "failed":
+      return "error";
+    case "checking":
+    case "downloading":
+    case "installing":
+    case "starting":
+    case "not_installed":
+      return "warning";
+    default:
+      return "default";
+  }
+}
+
+/** A managed process that is not up yet should gray the Accounts pool card. */
+export function cpaCardProcessDown(status: CpaCardStatus | null | undefined): boolean {
+  return status != null && status !== "running" && status !== "external";
 }
 
 export type CpaRuntimeAction =

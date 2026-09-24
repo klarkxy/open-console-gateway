@@ -450,7 +450,7 @@ function updateTooltip(bi: number, e: PointerEvent) {
   z-index: 5;
   min-width: 168px;
   max-width: 200px;
-  padding: 8px 10px;
+  padding: var(--ocg-space-sm) 10px;
   border: 1px solid var(--ocg-border);
   border-radius: 8px;
   background: var(--ocg-surface-raised);

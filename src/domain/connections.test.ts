@@ -3,13 +3,13 @@ import test from "node:test";
 import type { Connection } from "../api/connections.ts";
 import type { ProviderCatalogEntry } from "../api/providers.ts";
 import {
+  CONNECTION_STATUS_LABELS,
   catalogEntryForConnection,
   connectionBrandFamily,
   connectionForLegacyProvider,
   connectionStatus,
   isOnboardingDraftConnection,
   filterConnections,
-  groupConnectionsByOffering,
   selectedConnectionIdFromQuery,
 } from "./connections.ts";
 
@@ -65,18 +65,6 @@ function catalogEntry(provider_id: string, extra: Partial<ProviderCatalogEntry> 
   };
 }
 
-test("connections group by offering and preserve input order within a group", () => {
-  const rows = [
-    connection({ id: "p1", offering: "plan", name: "OpenCode Go", legacy: { kind: "builtin_provider", id: "opencode" } }),
-    connection({ id: "a1", offering: "api", name: "Ollama" }),
-    connection({ id: "p2", offering: "plan", name: "MiniMax" }),
-    connection({ id: "a2", offering: "api", name: "Lab" }),
-  ];
-  const groups = groupConnectionsByOffering(rows);
-  assert.deepEqual(groups.plan.map((row) => row.id), ["p1", "p2"]);
-  assert.deepEqual(groups.api.map((row) => row.id), ["a1", "a2"]);
-});
-
 test("connection filter matches name, legacy id, and display family case-insensitively", () => {
   const rows = [
     connection({ name: "OpenCode Go", display_family: "OpenCode", legacy: { kind: "builtin_provider", id: "opencode" } }),
@@ -99,7 +87,7 @@ test("connectionStatus uses only authorization, lifecycle, and eligibility", () 
     lifecycle: "draft",
     authorization: "valid",
     eligibility: { state: "ineligible", reason: "missing_credential" },
-  })).label, "草稿");
+  })).label, CONNECTION_STATUS_LABELS.draft);
   assert.equal(isOnboardingDraftConnection(connection({ lifecycle: "draft" })), true);
   assert.equal(isOnboardingDraftConnection(connection({ lifecycle: "configured" })), false);
   assert.equal(connectionStatus(connection({

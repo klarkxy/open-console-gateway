@@ -16,7 +16,6 @@ use base64::{
     Engine as _,
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
-use ocg_domain::ids::normalize_model_name;
 use ocg_domain::protocol::ApiFormat;
 use serde_json::{Map, Value, json};
 use std::fmt;
@@ -147,18 +146,14 @@ pub fn convert_response_json(
 ) -> Result<ResponseConversion, ConversionError> {
     let mut body = body.clone();
     if upstream == ApiFormat::Messages {
-        let response_model = body.get("model").and_then(Value::as_str).map(str::to_owned);
         let object = body
             .as_object_mut()
             .ok_or_else(|| ConversionError::new("Messages response must be a JSON object"))?;
-        if let Some(usage) = object.get_mut("usage") {
-            sanitize_minimax_anthropic_usage(response_model.as_deref(), model_hint, usage);
-        }
         if let Some(model) = model_hint {
             object.insert("model".to_string(), json!(model));
         }
     }
-    let mut transformed = convert_between(
+    let transformed = convert_between(
         upstream,
         client,
         &body,
@@ -167,15 +162,6 @@ pub fn convert_response_json(
         model_hint,
         &synthesis,
     )?;
-    if client == ApiFormat::ChatCompletions && upstream == ApiFormat::ChatCompletions {
-        let model = transformed
-            .get("model")
-            .and_then(Value::as_str)
-            .map(str::to_owned);
-        if let Some(usage) = transformed.get_mut("usage") {
-            sanitize_minimax_chat_usage(model.as_deref(), model_hint, usage);
-        }
-    }
     Ok(ResponseConversion { body: transformed })
 }
 
@@ -234,9 +220,10 @@ const ANTHROPIC_THINKING_ENCRYPTED_PREFIX: &str = "ocg-anthropic-thinking-v1:";
 const CHAT_REASONING_ENCRYPTED_PREFIX: &str = "ocg-chat-reasoning-v1:";
 const CHAT_TOOL_REASONING_PLACEHOLDER: &str = "Tool call reasoning unavailable.";
 
-fn validate_request_features(
+/// Checks only client features; no candidate protocol or conversion is required.
+#[doc(hidden)]
+pub fn validate_client_request_features(
     client: ApiFormat,
-    upstream: ApiFormat,
     body: &Value,
 ) -> Result<(), ConversionError> {
     if client == ApiFormat::Responses {
@@ -276,6 +263,16 @@ fn validate_request_features(
         validate_gemini_request(body)?;
     }
 
+    Ok(())
+}
+
+fn validate_request_features(
+    client: ApiFormat,
+    upstream: ApiFormat,
+    body: &Value,
+) -> Result<(), ConversionError> {
+    validate_client_request_features(client, body)?;
+
     if client == upstream {
         return Ok(());
     }
@@ -301,7 +298,49 @@ fn validate_request_features(
             "Responses custom tool grammar format cannot be preserved by protocol conversion",
         ));
     }
+    if let Some(field) = unpreserved_request_field(client, upstream, body) {
+        return Err(ConversionError::new(format!(
+            "{field} cannot be preserved by protocol conversion"
+        )));
+    }
     Ok(())
+}
+
+fn unpreserved_request_field(
+    client: ApiFormat,
+    upstream: ApiFormat,
+    body: &Value,
+) -> Option<&'static str> {
+    if client == ApiFormat::ChatCompletions {
+        match body.get("n") {
+            None | Some(Value::Null) => {}
+            Some(Value::Number(n)) if n.as_u64() == Some(1) => {}
+            Some(_) => return Some("Chat Completions n"),
+        }
+        if body.get("logprobs") == Some(&Value::Bool(true))
+            || body
+                .get("top_logprobs")
+                .is_some_and(|value| !value.is_null())
+        {
+            return Some("Chat Completions logprobs");
+        }
+    }
+    if upstream == ApiFormat::Responses && nonempty_stop(body) {
+        return Some(match client {
+            ApiFormat::ChatCompletions => "Chat Completions stop",
+            ApiFormat::Messages => "Messages stop_sequences",
+            _ => "stop",
+        });
+    }
+    None
+}
+
+fn nonempty_stop(body: &Value) -> bool {
+    match body.get("stop").or_else(|| body.get("stop_sequences")) {
+        Some(Value::String(stop)) => !stop.is_empty(),
+        Some(Value::Array(stops)) => !stops.is_empty(),
+        _ => false,
+    }
 }
 
 fn validate_gemini_request(body: &Value) -> Result<(), ConversionError> {
@@ -670,84 +709,6 @@ fn contains_input_image_file_id(value: &Value) -> bool {
                 || object.values().any(contains_input_image_file_id)
         }
         _ => false,
-    }
-}
-
-/// Work around MiniMax's Anthropic-compatible endpoint returning the entire prompt as
-/// `cache_read_input_tokens` with `input_tokens: 0` on the first turn. When that happens,
-/// move the tokens back to `input_tokens` so the gateway doesn't report a 100% cache hit.
-///
-/// `model` is the model name reported by the upstream response; `model_hint` is the model
-/// from the original request plan. OpenCode Go sometimes returns a generic or internal model
-/// identifier in the response, so we trust the hint when either name identifies MiniMax.
-fn is_minimax_family(model: Option<&str>) -> bool {
-    model
-        .map(|m| normalize_model_name(m).starts_with("minimax"))
-        .unwrap_or(false)
-}
-
-pub fn sanitize_minimax_anthropic_usage(
-    model: Option<&str>,
-    model_hint: Option<&str>,
-    usage: &mut Value,
-) {
-    let is_minimax = is_minimax_family(model) || is_minimax_family(model_hint);
-    if !is_minimax {
-        return;
-    }
-    let Some(obj) = usage.as_object_mut() else {
-        return;
-    };
-    let input = obj.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
-    let cached = obj
-        .get("cache_read_input_tokens")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    let creation = obj
-        .get("cache_creation_input_tokens")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    let total = input.saturating_add(cached).saturating_add(creation);
-    // Bogus all-cache signature: every input token is reported as a cache read and
-    // no new/cache-creation tokens exist. This is impossible on a first turn.
-    if total > 0 && input == 0 && creation == 0 && cached == total {
-        obj.insert("input_tokens".into(), json!(total));
-        obj.insert("cache_read_input_tokens".into(), json!(0));
-    }
-}
-
-/// Same normalization as `sanitize_minimax_anthropic_usage`, but for the OpenAI Chat
-/// Completions wire format where cache hits live in `prompt_tokens_details.cached_tokens`.
-/// If the entire prompt is reported as a cache hit (and no cache-creation tokens are
-/// present), zero out the cached count so it is billed as regular input.
-pub fn sanitize_minimax_chat_usage(
-    model: Option<&str>,
-    model_hint: Option<&str>,
-    usage: &mut Value,
-) {
-    let is_minimax = is_minimax_family(model) || is_minimax_family(model_hint);
-    if !is_minimax {
-        return;
-    }
-    let Some(obj) = usage.as_object_mut() else {
-        return;
-    };
-    let prompt = obj
-        .get("prompt_tokens")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    let cached = obj
-        .get("prompt_tokens_details")
-        .and_then(|v| v.get("cached_tokens"))
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    if prompt > 0
-        && cached == prompt
-        && let Some(details) = obj
-            .get_mut("prompt_tokens_details")
-            .and_then(Value::as_object_mut)
-    {
-        details.insert("cached_tokens".into(), json!(0));
     }
 }
 
@@ -1497,6 +1458,14 @@ fn chat_request_to_messages(body: Value) -> Result<Value, ConversionError> {
     Ok(Value::Object(out))
 }
 
+fn flush_response_parts(input: &mut Vec<Value>, parts: &mut Vec<Value>, role: &str) {
+    if parts.is_empty() {
+        return;
+    }
+    let content = std::mem::take(parts);
+    input.push(json!({ "type": "message", "role": role, "content": content }));
+}
+
 fn messages_request_to_responses(body: Value) -> Result<Value, ConversionError> {
     let mut out = Map::new();
     copy(&body, &mut out, "model", "model");
@@ -1504,6 +1473,9 @@ fn messages_request_to_responses(body: Value) -> Result<Value, ConversionError> 
     copy(&body, &mut out, "temperature", "temperature");
     copy(&body, &mut out, "top_p", "top_p");
     copy(&body, &mut out, "max_tokens", "max_output_tokens");
+    if let Some(service_tier) = body.get("service_tier").and_then(Value::as_str) {
+        out.insert("service_tier".into(), json!(service_tier));
+    }
     if let Some(system) = system_text(body.get("system")) {
         out.insert("instructions".into(), json!(system));
     }
@@ -1527,21 +1499,30 @@ fn messages_request_to_responses(body: Value) -> Result<Value, ConversionError> 
                         parts.push(json!({ "type": "input_image", "image_url": url }));
                     }
                 }
-                Some("tool_use") => input.push(json!({
-                    "type": "function_call",
-                    "call_id": block.get("id").cloned().unwrap_or_else(|| json!("")),
-                    "name": block.get("name").cloned().unwrap_or_else(|| json!("")),
-                    "arguments": json_string(block.get("input"))
-                })),
-                Some("tool_result") => input.push(json!({
-                    "type": "function_call_output",
-                    "call_id": block.get("tool_use_id").cloned().unwrap_or_else(|| json!("")),
-                    "output": tool_result_text(block.get("content"))
-                })),
-                Some("thinking") => input.push(json!({
-                    "type": "reasoning",
-                    "summary": [{ "type": "summary_text", "text": block.get("thinking").cloned().unwrap_or_else(|| json!("")) }]
-                })),
+                Some("tool_use") => {
+                    flush_response_parts(&mut input, &mut parts, role);
+                    input.push(json!({
+                        "type": "function_call",
+                        "call_id": block.get("id").cloned().unwrap_or_else(|| json!("")),
+                        "name": block.get("name").cloned().unwrap_or_else(|| json!("")),
+                        "arguments": json_string(block.get("input"))
+                    }));
+                }
+                Some("tool_result") => {
+                    flush_response_parts(&mut input, &mut parts, role);
+                    input.push(json!({
+                        "type": "function_call_output",
+                        "call_id": block.get("tool_use_id").cloned().unwrap_or_else(|| json!("")),
+                        "output": tool_result_text(block.get("content"))
+                    }));
+                }
+                Some("thinking") => {
+                    flush_response_parts(&mut input, &mut parts, role);
+                    input.push(json!({
+                        "type": "reasoning",
+                        "summary": [{ "type": "summary_text", "text": block.get("thinking").cloned().unwrap_or_else(|| json!("")) }]
+                    }));
+                }
                 _ => {}
             }
         }
@@ -1848,7 +1829,7 @@ fn messages_response_to_gemini(body: &Value) -> Result<Value, ConversionError> {
 
 fn messages_response_to_chat(
     body: &Value,
-    model_hint: Option<&str>,
+    _model_hint: Option<&str>,
 ) -> Result<Value, ConversionError> {
     let blocks = body
         .get("content")
@@ -1890,12 +1871,7 @@ fn messages_response_to_chat(
             message["content"] = Value::Null;
         }
     }
-    let mut usage = body.get("usage").cloned().unwrap_or(Value::Null);
-    sanitize_minimax_anthropic_usage(
-        body.get("model").and_then(Value::as_str),
-        model_hint,
-        &mut usage,
-    );
+    let usage = body.get("usage").cloned().unwrap_or(Value::Null);
     Ok(json!({
         "id": body.get("id").cloned().unwrap_or_else(|| json!("")),
         "object": "chat.completion",

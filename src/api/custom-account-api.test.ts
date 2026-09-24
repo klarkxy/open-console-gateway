@@ -35,7 +35,7 @@ test("account model tests target one encoded account without CAS tokens", async 
   const result = await dashboardApi.testAccountModel("account/1", "Org/Model-A");
 
   assert.equal(result.success, true);
-  assert.equal(requests[0]?.url, "/dashboard/api/v3/accounts/account%2F1/model-tests");
+  assert.equal(requests[0]?.url, "/dashboard/api/v4/accounts/account%2F1/model-tests");
   assert.equal(requests[0]?.method, "POST");
   assert.deepEqual(requests[0]?.body, { modelId: "Org/Model-A" });
 });
@@ -50,7 +50,7 @@ test("custom config PUT sends one Endpoint, protocol, and capability list with C
     model_capabilities: [{ public_model: "model-a", upstream_model: "provider/model-a", protocol: "messages", source: "manual" }],
   });
 
-  assert.equal(requests[0]?.url, "/dashboard/api/v3/accounts/custom-1/custom-config");
+  assert.equal(requests[0]?.url, "/dashboard/api/v4/accounts/custom-1/custom-config");
   assert.equal(requests[0]?.method, "PUT");
   assert.deepEqual(requests[0]?.body, {
     endpointUrl: "http://192.168.1.10:8080/v1/messages",
@@ -70,7 +70,7 @@ test("model capabilities PUT wraps the list and keeps exact model IDs and order"
     { public_model: "custom_model.a", upstream_model: "vendor/model-b", protocol: "chat_completions", source: "manual" },
   ]);
 
-  assert.equal(requests[0]?.url, "/dashboard/api/v3/accounts/custom-1/model-capabilities");
+  assert.equal(requests[0]?.url, "/dashboard/api/v4/accounts/custom-1/model-capabilities");
   assert.equal(requests[0]?.method, "PUT");
   assert.deepEqual(requests[0]?.body, {
     capabilities: [
@@ -93,7 +93,7 @@ test("model discovery posts only the transient form fields to its protected rout
     account_id: "custom-1",
   });
 
-  assert.equal(requests[0]?.url, "/dashboard/api/v3/custom/models/discover");
+  assert.equal(requests[0]?.url, "/dashboard/api/v4/custom/models/discover");
   assert.equal(requests[0]?.method, "POST");
   assert.deepEqual(requests[0]?.body, {
     endpointUrl: "https://api.example.com/v1/messages",

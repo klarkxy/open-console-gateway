@@ -1,23 +1,73 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { Account } from "../api/dashboard.ts";
 import type { PlatformLink, PlatformPrice, PlatformSnapshot } from "../api/platform-accounts.ts";
 import {
+  canImportPlatformKeys,
+  composeNewApiUserCredential,
+  discoveredModelCapabilities,
+  PLATFORM_CREDENTIAL_TAG_KEYS,
+  platformCredentialTags,
+  platformKeyGroupLabel,
+  uniquePublicModelCount,
+  platformKeyModelRows,
+  platformKeyQuotaName,
+  platformModelOverlay,
   formatPlatformRate,
   formatPlatformTime,
   formatQuotaAmount,
+  primaryQuota,
+  platformWalletMeter,
+  walletMonthQuota,
   importCandidateCapabilities,
   linkForAccount,
   linkedAccountIdSet,
+  newApiCredentialIssue,
+  platformSnapshotErrorKey,
   platformGroupLabel,
+  platformHostedEndpoint,
   platformInferenceEndpoint,
   platformModelCandidates,
   platformManualGroup,
   platformPriceFlags,
   platformPriceForModel,
   platformPriceRows,
+  PLATFORM_UNAVAILABLE_REASON_KEYS,
   platformUnavailableReasonKey,
   quotasByKind,
 } from "./platform-accounts.ts";
+
+test("New API key import is only offered with a user credential", () => {
+  assert.equal(canImportPlatformKeys({ kind: "new_api", hasUserCredential: true }), true);
+  assert.equal(canImportPlatformKeys({ kind: "new_api", hasUserCredential: false }), false);
+  assert.equal(canImportPlatformKeys({ kind: "sub2api", hasUserCredential: true }), false);
+});
+
+test("snapshot error codes map to copy keys and unknown codes stay generic", () => {
+  assert.equal(platformSnapshotErrorKey("auth.missing"), "未保存管理凭证");
+  assert.equal(platformSnapshotErrorKey("unauthorized"), "管理凭证无效");
+  assert.equal(platformSnapshotErrorKey("not-a-real-code"), "刷新未完成");
+});
+
+test("New API credential is user id and token together, or omitted", () => {
+  assert.equal(newApiCredentialIssue("", ""), null);
+  assert.equal(newApiCredentialIssue("  ", "  "), null);
+  assert.equal(newApiCredentialIssue("18", ""), "user_id_without_token");
+  assert.equal(newApiCredentialIssue("", "pat"), "token_without_user_id");
+  assert.equal(newApiCredentialIssue("ab", "pat"), "user_id_not_digits");
+  assert.equal(newApiCredentialIssue("18", "pat"), null);
+  assert.equal(composeNewApiUserCredential("", ""), undefined);
+  assert.equal(composeNewApiUserCredential("18", ""), undefined);
+  assert.equal(composeNewApiUserCredential("18", " pat "), "18:pat");
+});
+
+test("platform hosted endpoint is the site root", () => {
+  assert.equal(platformHostedEndpoint("https://newapi.example.com"), "https://newapi.example.com");
+  assert.equal(platformHostedEndpoint("https://newapi.example.com/v1"), "https://newapi.example.com");
+  assert.equal(platformHostedEndpoint("https://newapi.example.com/"), "https://newapi.example.com");
+  assert.equal(platformHostedEndpoint("not a url"), null);
+  assert.equal(platformHostedEndpoint("https://user:pass@example.com"), null);
+});
 
 test("platform inference endpoint mirrors the backend derivation per protocol", () => {
   assert.equal(
@@ -40,6 +90,10 @@ test("platform inference endpoint mirrors the backend derivation per protocol", 
   assert.equal(
     platformInferenceEndpoint("https://newapi.example.com/", "messages"),
     "https://newapi.example.com/v1/messages",
+  );
+  assert.equal(
+    platformInferenceEndpoint("https://newapi.example.com/chat/v1", "chat_completions"),
+    "https://newapi.example.com/chat/v1/chat/completions",
   );
   // Non-URLs, non-http(s) schemes, and credentialed URLs are never derived.
   assert.equal(platformInferenceEndpoint("not a url", "chat_completions"), null);
@@ -89,6 +143,133 @@ function link(accountId: string, platformAccountId: string): PlatformLink {
   };
 }
 
+test("same public models on two Keys overlay without merging rates", () => {
+  const overlay = platformModelOverlay([
+    {
+      id: "stable",
+      model_capabilities: [
+        { public_model: "gpt-5.5", upstream_model: "gpt-5.5", protocol: "chat_completions", source: "discovery", verified_at: null },
+        { public_model: "gpt-6-astra", upstream_model: "gpt-6-astra", protocol: "chat_completions", source: "discovery", verified_at: null },
+      ],
+    } as Account,
+    {
+      id: "pro",
+      model_capabilities: [
+        { public_model: "GPT-5.5", upstream_model: "GPT-5.5", protocol: "chat_completions", source: "discovery", verified_at: null },
+        { public_model: "gpt-5.3-codex-spark", upstream_model: "gpt-5.3-codex-spark", protocol: "chat_completions", source: "discovery", verified_at: null },
+      ],
+    } as Account,
+  ]);
+  assert.equal(overlay.uniqueIds.length, 3);
+  assert.deepEqual(overlay.sharedIds, ["gpt-5.5"]);
+  assert.deepEqual(overlay.keys.find((row) => row.accountId === "stable"), {
+    accountId: "stable",
+    total: 2,
+    shared: 1,
+    exclusive: 1,
+  });
+  assert.deepEqual(overlay.keys.find((row) => row.accountId === "pro"), {
+    accountId: "pro",
+    total: 2,
+    shared: 1,
+    exclusive: 1,
+  });
+});
+
+test("unique public model count collapses protocol rows for the same name", () => {
+  assert.equal(uniquePublicModelCount(null), 0);
+  assert.equal(uniquePublicModelCount({
+    model_capabilities: [
+      { public_model: "gpt-5.5", upstream_model: "gpt-5.5", protocol: "chat_completions", source: "discovery", verified_at: null },
+      { public_model: "gpt-5.5", upstream_model: "gpt-5.5", protocol: "messages", source: "discovery", verified_at: null },
+      { public_model: "gpt-5.5", upstream_model: "gpt-5.5", protocol: "responses", source: "discovery", verified_at: null },
+      { public_model: "GPT-5.5", upstream_model: "GPT-5.5", protocol: "chat_completions", source: "discovery", verified_at: null },
+      { public_model: "codex", upstream_model: "codex", protocol: "chat_completions", source: "discovery", verified_at: null },
+    ],
+  } as Account), 2);
+});
+
+test("platform Key model rows collapse protocols and keep the first upstream id", () => {
+  assert.deepEqual(platformKeyModelRows(null), []);
+  assert.deepEqual(platformKeyModelRows({
+    model_capabilities: [
+      { public_model: "gpt-5.5", upstream_model: "openai/gpt-5.5", protocol: "chat_completions", source: "discovery", verified_at: null },
+      { public_model: "gpt-5.5", upstream_model: "ignored", protocol: "messages", source: "discovery", verified_at: null },
+      { public_model: "codex", upstream_model: "codex", protocol: "responses", source: "discovery", verified_at: null },
+      { public_model: "  ", upstream_model: "blank", protocol: "chat_completions", source: "discovery", verified_at: null },
+    ],
+  } as Account), [
+    { public_model: "gpt-5.5", upstream_model: "openai/gpt-5.5", protocols: ["chat_completions", "messages"] },
+    { public_model: "codex", upstream_model: "codex", protocols: ["responses"] },
+  ]);
+});
+
+test("platform credential tags label group and token, never a bare snapshot id", () => {
+  assert.deepEqual(platformCredentialTags({
+    group: "codex-pro",
+    tokenName: "cli-pro",
+    accountName: "codex-pro-0.25",
+    modelCount: 9,
+  }), [
+    { kind: "group", name: "codex-pro" },
+    { kind: "token", name: "cli-pro" },
+    { kind: "models", count: 9 },
+  ]);
+  assert.deepEqual(platformCredentialTags({
+    group: "  ",
+    tokenName: "gpt-0.05",
+    accountName: "gpt-0.05",
+    modelCount: 7,
+  }), [{ kind: "models", count: 7 }]);
+  assert.deepEqual(platformCredentialTags({
+    group: "",
+    tokenName: "",
+    accountName: "orphan",
+    modelCount: 0,
+  }), [{ kind: "models", count: 0 }]);
+  assert.deepEqual(Object.keys(PLATFORM_CREDENTIAL_TAG_KEYS).sort(), ["group", "models", "token"]);
+});
+
+test("key identity uses observed token name and group", () => {
+  assert.equal(platformKeyQuotaName({
+    observedAt: 1,
+    stale: false,
+    errors: [],
+    quotas: [{
+      kind: "key_limit",
+      scopeId: "cli-pro",
+      unit: "quota",
+      used: 1,
+      remaining: 2,
+      limit: 3,
+      unlimited: false,
+      period: null,
+      resetsAt: null,
+      expiresAt: null,
+      source: "new_api.token_usage",
+    }],
+    models: [],
+    prices: [],
+    groups: [{ id: "Codex-Pro", platform: null, subscriptionType: null, autoGroups: [], verified: true }],
+    billingPreference: null,
+    walletOverflow: null,
+  }), "cli-pro");
+  assert.equal(
+    platformKeyGroupLabel(
+      { group: { id: null, platform: null, subscriptionType: null, autoGroups: [], verified: false } },
+      { observedAt: 1, stale: false, errors: [], quotas: [], models: [], prices: [], groups: [{ id: "Codex稳定", platform: null, subscriptionType: null, autoGroups: [], verified: true }], billingPreference: null, walletOverflow: null },
+    ),
+    "Codex稳定",
+  );
+});
+
+test("discovered models become exact public=upstream mappings", () => {
+  assert.deepEqual(discoveredModelCapabilities(["claude-sonnet", "gpt-4o"]), [
+    { public_model: "claude-sonnet", upstream_model: "claude-sonnet", protocol: "chat_completions", source: "discovery" },
+    { public_model: "gpt-4o", upstream_model: "gpt-4o", protocol: "chat_completions", source: "discovery" },
+  ]);
+});
+
 test("links resolve by account and collect linked ids", () => {
   const links = [link("a1", "p1"), link("a2", "p1"), link("a3", "p2")];
   assert.equal(linkForAccount(links, "a3")?.platformAccountId, "p2");
@@ -107,9 +288,9 @@ test("group label joins id, platform, and subscription type; empty when none", (
 });
 
 test("known unavailable reasons map to i18n keys, unknown codes stay raw", () => {
-  assert.equal(platformUnavailableReasonKey("user_identity_required"), "需要登录身份才能查看价格");
-  assert.equal(platformUnavailableReasonKey("group_model_unavailable"), "该分组不提供此模型");
-  assert.equal(platformUnavailableReasonKey("reasoning_multiplier"), "按推理强度倍率计费");
+  assert.equal(platformUnavailableReasonKey("user_identity_required"), PLATFORM_UNAVAILABLE_REASON_KEYS.user_identity_required);
+  assert.equal(platformUnavailableReasonKey("group_model_unavailable"), PLATFORM_UNAVAILABLE_REASON_KEYS.group_model_unavailable);
+  assert.equal(platformUnavailableReasonKey("reasoning_multiplier"), PLATFORM_UNAVAILABLE_REASON_KEYS.reasoning_multiplier);
   assert.equal(platformUnavailableReasonKey("some_future_code"), null);
   assert.equal(platformUnavailableReasonKey(null), null);
 });
@@ -126,8 +307,46 @@ test("manual group entry trims and treats empty as unknown", () => {
 });
 
 test("quota amounts carry their unit and never invent totals", () => {
-  assert.equal(formatQuotaAmount(12.3456, "USD", "en-US"), "12.35 USD");
+  assert.equal(formatQuotaAmount(12.3456, "USD", "en-US"), "$12.3456");
+  assert.equal(formatQuotaAmount(3, "usd", "en-US"), "$3.00");
   assert.equal(formatQuotaAmount(100, "", "en-US"), "100");
+  assert.equal(formatQuotaAmount(1.5, "quota", "en-US"), "1.5 quota");
+});
+
+test("primary remaining prefers the overall Key quota over a time window", () => {
+  const quotas = [
+    { kind: "key_limit" as const, remaining: 16, used: 4, limit: 20, unit: "usd", scopeId: "key:5h", unlimited: false, period: "5h", resetsAt: 1, expiresAt: null, source: "key" },
+    { kind: "key_limit" as const, remaining: 27.5, used: 12.5, limit: 40, unit: "usd", scopeId: "key", unlimited: false, period: null, resetsAt: null, expiresAt: null, source: "key" },
+    { kind: "wallet" as const, remaining: 15.5, used: null, limit: null, unit: "usd", scopeId: "wallet", unlimited: false, period: null, resetsAt: null, expiresAt: null, source: "profile" },
+  ];
+  assert.equal(primaryQuota(quotas, "key_limit")?.remaining, 27.5);
+  assert.equal(primaryQuota(quotas, "wallet")?.remaining, 15.5);
+  assert.equal(primaryQuota([], "wallet"), null);
+});
+
+test("wallet month used stays off the remaining figure", () => {
+  const quotas = [
+    { kind: "wallet" as const, remaining: null, used: 4, limit: null, unit: "usd", scopeId: "wallet:month", unlimited: false, period: "month", resetsAt: null, expiresAt: null, source: "new_api.log_self_stat" },
+    { kind: "wallet" as const, remaining: 27.79, used: 82.21, limit: null, unit: "usd", scopeId: "wallet", unlimited: false, period: null, resetsAt: null, expiresAt: null, source: "new_api.user_self" },
+  ];
+  assert.equal(primaryQuota(quotas, "wallet")?.remaining, 27.79);
+  assert.equal(walletMonthQuota(quotas)?.used, 4);
+  const meter = platformWalletMeter({
+    observedAt: 1_753_000_000,
+    stale: false,
+    errors: [],
+    quotas,
+    models: [],
+    prices: [],
+    groups: [],
+    billingPreference: null,
+    walletOverflow: null,
+  });
+  assert.equal(meter?.remaining, 27.79);
+  assert.equal(meter?.historyUsed, 82.21);
+  assert.equal(meter?.monthUsed, 4);
+  assert.equal(meter?.remainingUnlimited, false);
+  assert.equal(platformWalletMeter(null), null);
 });
 
 test("o03 wallet subscription and key limits stay separate and are never summed", () => {

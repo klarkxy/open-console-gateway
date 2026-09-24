@@ -5,8 +5,8 @@
 //!   (`router/api-router.go`, `router/relay-router.go`, `controller/user.go`,
 //!   `controller/group.go`, `controller/subscription.go`, `controller/token.go`,
 //!   `controller/pricing.go`, `controller/model.go`, `controller/misc.go`,
-//!   `middleware/auth.go`, `model/pricing.go`, `model/token.go`,
-//!   `model/subscription.go`)
+//!   `controller/log.go`, `middleware/auth.go`, `model/pricing.go`,
+//!   `model/token.go`, `model/subscription.go`)
 //! - Sub2API `772a0382f079676983c06f24b0d41e09139a8462`
 //!   (`backend/internal/server/router.go`, `.../routes/user.go`,
 //!   `.../routes/gateway.go`, `.../routes/model_plaza.go`,
@@ -25,6 +25,7 @@ use super::{
     PlatformReadRequest, PlatformSnapshot,
 };
 use crate::custom_http::join_inference_endpoint;
+use chrono::{DateTime, Datelike, TimeZone, Utc};
 use futures_util::StreamExt;
 use reqwest::StatusCode;
 use reqwest::header::HeaderValue;
@@ -35,6 +36,8 @@ use std::time::Duration;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_BODY_BYTES: usize = 256 * 1024;
 const SNAPSHOT_TTL_SECS: i64 = 24 * 60 * 60;
+// New API 71c1fd7 sets this only after establishing dashboard user context.
+const NEW_API_AUTH_VERSION: &str = "864b7076dbcd0a3c01b5520316720ebf";
 
 const ERR_BASE_URL_INVALID: &str = "base_url.invalid";
 const ERR_AUTH_MISSING: &str = "auth.missing";
@@ -42,6 +45,8 @@ const CODE_REDIRECT: &str = "redirect_rejected";
 const CODE_NETWORK: &str = "network";
 const CODE_TIMEOUT: &str = "timeout";
 const CODE_UNAUTHORIZED: &str = "unauthorized";
+const CODE_USER_ID_REQUIRED: &str = "user_id_required";
+const CODE_USER_ID_MISMATCH: &str = "user_id_mismatch";
 const CODE_FORBIDDEN: &str = "forbidden";
 const CODE_HTTP_STATUS: &str = "http_status";
 const CODE_PARSE: &str = "parse";
@@ -135,8 +140,9 @@ fn same_origin(left: &reqwest::Url, right: &reqwest::Url) -> bool {
         && left.port_or_known_default() == right.port_or_known_default()
 }
 
-struct Fetched {
-    value: Value,
+pub(crate) struct Fetched {
+    pub value: Value,
+    new_api_user_authenticated: bool,
 }
 
 async fn get_json(
@@ -145,21 +151,90 @@ async fn get_json(
     path: &str,
     component: &str,
     auth: Option<&str>,
+    new_api_user: Option<&str>,
 ) -> Result<Fetched, String> {
-    let url = join_inference_endpoint(base.as_str(), path)
+    get_json_query(client, base, path, component, auth, new_api_user, &[]).await
+}
+
+pub(crate) async fn get_json_query(
+    client: &reqwest::Client,
+    base: &reqwest::Url,
+    path: &str,
+    component: &str,
+    auth: Option<&str>,
+    new_api_user: Option<&str>,
+    query: &[(&str, &str)],
+) -> Result<Fetched, String> {
+    request_json(
+        client,
+        reqwest::Method::GET,
+        base,
+        path,
+        component,
+        auth,
+        new_api_user,
+        query,
+    )
+    .await
+}
+
+pub(crate) async fn post_json(
+    client: &reqwest::Client,
+    base: &reqwest::Url,
+    path: &str,
+    component: &str,
+    auth: Option<&str>,
+    new_api_user: Option<&str>,
+) -> Result<Fetched, String> {
+    request_json(
+        client,
+        reqwest::Method::POST,
+        base,
+        path,
+        component,
+        auth,
+        new_api_user,
+        &[],
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn request_json(
+    client: &reqwest::Client,
+    method: reqwest::Method,
+    base: &reqwest::Url,
+    path: &str,
+    component: &str,
+    auth: Option<&str>,
+    new_api_user: Option<&str>,
+    query: &[(&str, &str)],
+) -> Result<Fetched, String> {
+    let mut url = join_inference_endpoint(base.as_str(), path)
         .map_err(|_| component_error(component, CODE_ENDPOINT))?;
+    if !query.is_empty() {
+        let mut pairs = url.query_pairs_mut();
+        for (key, value) in query {
+            pairs.append_pair(key, value);
+        }
+    }
     if !same_origin(base, &url) {
         return Err(component_error(component, CODE_ENDPOINT));
     }
 
     let mut builder = client
-        .get(url.clone())
+        .request(method, url.clone())
         .header(reqwest::header::ACCEPT, "application/json")
         .timeout(REQUEST_TIMEOUT);
     if let Some(token) = auth {
         let value = HeaderValue::from_str(&format!("Bearer {token}"))
             .map_err(|_| component_error(component, CODE_PARSE))?;
         builder = builder.header(reqwest::header::AUTHORIZATION, value);
+    }
+    if let Some(user_id) = new_api_user {
+        let value =
+            HeaderValue::from_str(user_id).map_err(|_| component_error(component, CODE_PARSE))?;
+        builder = builder.header("New-Api-User", value);
     }
 
     let response = builder.send().await.map_err(|error| {
@@ -173,12 +248,12 @@ async fn get_json(
     if response.status().is_redirection() || !same_origin(&url, response.url()) {
         return Err(component_error(component, CODE_REDIRECT));
     }
-    match response.status() {
-        StatusCode::OK | StatusCode::CREATED => {}
-        StatusCode::UNAUTHORIZED => return Err(component_error(component, CODE_UNAUTHORIZED)),
-        StatusCode::FORBIDDEN => return Err(component_error(component, CODE_FORBIDDEN)),
-        _ => return Err(component_error(component, CODE_HTTP_STATUS)),
-    }
+    let status = response.status();
+    let new_api_user_authenticated = auth.is_some()
+        && response
+            .headers()
+            .get("Auth-Version")
+            .is_some_and(|value| value == NEW_API_AUTH_VERSION);
 
     let mut body = Vec::new();
     let mut stream = response.bytes_stream();
@@ -196,16 +271,69 @@ async fn get_json(
         body.extend_from_slice(&chunk);
     }
 
+    match status {
+        StatusCode::OK | StatusCode::CREATED => {}
+        StatusCode::UNAUTHORIZED => {
+            return Err(classify_unauthorized(component, &body));
+        }
+        StatusCode::FORBIDDEN => return Err(component_error(component, CODE_FORBIDDEN)),
+        _ => return Err(component_error(component, CODE_HTTP_STATUS)),
+    }
+
     let value: Value =
         serde_json::from_slice(&body).map_err(|_| component_error(component, CODE_PARSE))?;
-    Ok(Fetched { value })
+    Ok(Fetched {
+        value,
+        new_api_user_authenticated,
+    })
+}
+
+fn strip_bearer_prefix(value: &str) -> &str {
+    value
+        .strip_prefix("Bearer ")
+        .or_else(|| value.strip_prefix("bearer "))
+        .unwrap_or(value)
+        .trim()
+}
+
+/// New API v0.4.6+ PAT calls need `New-Api-User: <numeric id>` alongside Bearer.
+/// Store that as `userId:token`. Newer builds ignore the extra header.
+pub(crate) fn split_new_api_user_credential(raw: &str) -> (Option<&str>, &str) {
+    let raw = strip_bearer_prefix(raw.trim());
+    if let Some((id, token)) = raw.split_once(':') {
+        let id = id.trim();
+        let token = strip_bearer_prefix(token.trim());
+        if !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()) && !token.is_empty() {
+            return (Some(id), token);
+        }
+    }
+    (None, raw)
+}
+
+fn classify_unauthorized(component: &str, body: &[u8]) -> String {
+    let parsed = serde_json::from_slice::<Value>(body).ok();
+    let message = parsed
+        .as_ref()
+        .and_then(|value| json_str(value.get("message")))
+        .unwrap_or("");
+    let lower = message.to_ascii_lowercase();
+    let code = if message.contains("New-Api-User") || lower.contains("new-api-user") {
+        if lower.contains("match") || message.contains("不匹配") || message.contains("不符") {
+            CODE_USER_ID_MISMATCH
+        } else {
+            CODE_USER_ID_REQUIRED
+        }
+    } else {
+        CODE_UNAUTHORIZED
+    };
+    component_error(component, code)
 }
 
 fn payload(value: &Value) -> &Value {
     value.get("data").unwrap_or(value)
 }
 
-fn new_api_data<'a>(value: &'a Value, component: &str) -> Result<&'a Value, String> {
+pub(crate) fn new_api_data<'a>(value: &'a Value, component: &str) -> Result<&'a Value, String> {
     match value.get("success") {
         Some(Value::Bool(true)) => value
             .get("data")
@@ -354,8 +482,16 @@ async fn read_new_api(
     key: Option<&str>,
     snapshot: &mut PlatformSnapshot,
 ) {
+    let (new_api_user, bearer) = match user {
+        Some(raw) => {
+            let (id, token) = split_new_api_user_credential(raw);
+            (id, Some(token))
+        }
+        None => (None, None),
+    };
+
     let mut quota_per_unit: Option<f64> = None;
-    match get_json(client, base, "api/status", "new_api.status", None).await {
+    match get_json(client, base, "api/status", "new_api.status", None, None).await {
         Ok(fetched) => match new_api_data(&fetched.value, "new_api.status") {
             Ok(data) => {
                 quota_per_unit = json_f64(data.get("quota_per_unit")).filter(|value| *value > 0.0);
@@ -366,18 +502,23 @@ async fn read_new_api(
     }
 
     let mut user_group: Option<String> = None;
-    if let Some(user) = user {
+    // A Key refresh must not read the site wallet. User-scoped endpoints stay
+    // on the parent refresh (no inference Key).
+    if let Some(user) = bearer
+        && key.is_none()
+    {
         match get_json(
             client,
             base,
             "api/user/self",
             "new_api.user_self",
             Some(user),
+            new_api_user,
         )
         .await
         {
             Ok(fetched) => match new_api_data(&fetched.value, "new_api.user_self") {
-                Ok(data) => parse_new_api_self(data, snapshot, &mut user_group),
+                Ok(data) => parse_new_api_self(data, snapshot, &mut user_group, quota_per_unit),
                 Err(error) => push_error(snapshot, error),
             },
             Err(error) => push_error(snapshot, error),
@@ -389,6 +530,7 @@ async fn read_new_api(
             "api/user/self/groups",
             "new_api.user_groups",
             Some(user),
+            new_api_user,
         )
         .await
         {
@@ -409,36 +551,62 @@ async fn read_new_api(
             "api/subscription/self",
             "new_api.subscription_self",
             Some(user),
+            new_api_user,
         )
         .await
         {
             Ok(fetched) => match new_api_data(&fetched.value, "new_api.subscription_self") {
-                Ok(data) => parse_new_api_subscriptions(data, snapshot),
+                Ok(data) => parse_new_api_subscriptions(data, snapshot, quota_per_unit),
                 Err(error) => push_error(snapshot, error),
             },
             Err(error) => push_error(snapshot, error),
         }
 
-        match get_json(
+        // Optional catalog: older sites omit or change this envelope, so a
+        // fetch or envelope error is not recorded.
+        if let Ok(fetched) = get_json(
             client,
             base,
             "api/token/auto-groups",
             "new_api.token_auto_groups",
             Some(user),
+            new_api_user,
         )
         .await
+            && let Ok(data) = new_api_data(&fetched.value, "new_api.token_auto_groups")
         {
-            Ok(fetched) => match new_api_data(&fetched.value, "new_api.token_auto_groups") {
-                Ok(data) => parse_new_api_auto_groups(data, snapshot),
-                Err(error) => push_error(snapshot, error),
-            },
-            Err(error) => push_error(snapshot, error),
+            parse_new_api_auto_groups(data, snapshot);
+        }
+
+        // Optional: current UTC-month consume total. Missing or forked sites
+        // must not stale the wallet snapshot.
+        if let Some(start) = utc_month_start_secs(request.now) {
+            let start_s = start.to_string();
+            let end_s = request.now.to_string();
+            if let Ok(fetched) = get_json_query(
+                client,
+                base,
+                "api/log/self/stat",
+                "new_api.log_self_stat",
+                Some(user),
+                new_api_user,
+                &[
+                    ("type", "2"),
+                    ("start_timestamp", &start_s),
+                    ("end_timestamp", &end_s),
+                ],
+            )
+            .await
+                && let Ok(data) = new_api_data(&fetched.value, "new_api.log_self_stat")
+            {
+                parse_new_api_month_stat(data, snapshot, quota_per_unit);
+            }
         }
     }
 
     let mut allowed_models: BTreeSet<String> = BTreeSet::new();
     if let Some(key) = key {
-        match get_json(client, base, "v1/models", "new_api.models", Some(key)).await {
+        match get_json(client, base, "v1/models", "new_api.models", Some(key), None).await {
             Ok(fetched) => {
                 if let Err(error) = collect_models(
                     &fetched.value,
@@ -461,24 +629,36 @@ async fn read_new_api(
             "api/usage/token/",
             "new_api.token_usage",
             Some(key),
+            None,
         )
         .await
         {
             Ok(fetched) => match new_api_token_usage_data(&fetched.value, "new_api.token_usage") {
-                Ok(data) => parse_new_api_token_usage(data, &mut allowed_models, snapshot),
+                Ok(data) => {
+                    parse_new_api_token_usage(data, &mut allowed_models, snapshot, quota_per_unit)
+                }
                 Err(error) => push_error(snapshot, error),
             },
             Err(error) => push_error(snapshot, error),
         }
     }
 
-    let pricing_auth = user;
-    match get_json(client, base, "api/pricing", "new_api.pricing", pricing_auth).await {
+    match get_json(
+        client,
+        base,
+        "api/pricing",
+        "new_api.pricing",
+        bearer,
+        new_api_user,
+    )
+    .await
+    {
         Ok(fetched) => match new_api_data(&fetched.value, "new_api.pricing") {
             Ok(_) => parse_new_api_pricing(
                 &fetched.value,
                 request,
                 user_group.as_deref(),
+                fetched.new_api_user_authenticated,
                 quota_per_unit,
                 &allowed_models,
                 snapshot,
@@ -489,10 +669,61 @@ async fn read_new_api(
     }
 }
 
+/// New API stores wallet/token amounts as integer quota points. The site
+/// `quota_per_unit` (typically 500000) is the observed points-per-dollar rate
+/// from `GET /api/status`. Convert when that rate is known so remaining is a
+/// dollar balance; otherwise keep the native `quota` unit.
+fn scale_new_api_quota(value: Option<f64>, quota_per_unit: Option<f64>) -> Option<f64> {
+    match (value, quota_per_unit) {
+        (Some(raw), Some(unit)) if unit > 0.0 && raw.is_finite() => Some(raw / unit),
+        (Some(raw), _) if raw.is_finite() => Some(raw),
+        _ => None,
+    }
+}
+
+fn new_api_quota_unit(quota_per_unit: Option<f64>) -> &'static str {
+    if quota_per_unit.filter(|unit| *unit > 0.0).is_some() {
+        "usd"
+    } else {
+        "quota"
+    }
+}
+
+fn utc_month_start_secs(now: i64) -> Option<i64> {
+    let dt = DateTime::from_timestamp(now, 0)?;
+    Utc.with_ymd_and_hms(dt.year(), dt.month(), 1, 0, 0, 0)
+        .single()
+        .map(|start| start.timestamp())
+}
+
+fn parse_new_api_month_stat(
+    data: &Value,
+    snapshot: &mut PlatformSnapshot,
+    quota_per_unit: Option<f64>,
+) {
+    let Some(used) = scale_new_api_quota(json_f64(data.get("quota")), quota_per_unit) else {
+        return;
+    };
+    snapshot.quotas.push(PlatformQuota {
+        kind: PlatformQuotaKind::Wallet,
+        scope_id: "wallet:month".to_string(),
+        unit: new_api_quota_unit(quota_per_unit).to_string(),
+        used: Some(used),
+        remaining: None,
+        limit: None,
+        unlimited: false,
+        period: Some("month".to_string()),
+        resets_at: None,
+        expires_at: None,
+        source: "new_api.log_self_stat".to_string(),
+    });
+}
+
 fn parse_new_api_self(
     data: &Value,
     snapshot: &mut PlatformSnapshot,
     user_group: &mut Option<String>,
+    quota_per_unit: Option<f64>,
 ) {
     if !data.is_object() {
         push_error(snapshot, component_error("new_api.user_self", CODE_PARSE));
@@ -515,13 +746,13 @@ fn parse_new_api_self(
         }
     }
 
-    let remaining = json_f64(data.get("quota"));
-    let used = json_f64(data.get("used_quota"));
+    let remaining = scale_new_api_quota(json_f64(data.get("quota")), quota_per_unit);
+    let used = scale_new_api_quota(json_f64(data.get("used_quota")), quota_per_unit);
     if remaining.is_some() || used.is_some() {
         snapshot.quotas.push(PlatformQuota {
             kind: PlatformQuotaKind::Wallet,
             scope_id: "wallet".to_string(),
-            unit: "quota".to_string(),
+            unit: new_api_quota_unit(quota_per_unit).to_string(),
             used,
             remaining,
             // Wallet balance + lifetime consumption is not an observed limit.
@@ -589,7 +820,11 @@ fn parse_new_api_auto_groups(data: &Value, snapshot: &mut PlatformSnapshot) {
     });
 }
 
-fn parse_new_api_subscriptions(data: &Value, snapshot: &mut PlatformSnapshot) {
+fn parse_new_api_subscriptions(
+    data: &Value,
+    snapshot: &mut PlatformSnapshot,
+    quota_per_unit: Option<f64>,
+) {
     if !data.is_object() {
         push_error(
             snapshot,
@@ -607,8 +842,8 @@ fn parse_new_api_subscriptions(data: &Value, snapshot: &mut PlatformSnapshot) {
                 .map(|id| id.to_string())
                 .or_else(|| json_str(sub.get("id")).map(str::to_string))
                 .unwrap_or_else(|| "subscription".to_string());
-            let total = json_f64(sub.get("amount_total"));
-            let used = json_f64(sub.get("amount_used"));
+            let total = scale_new_api_quota(json_f64(sub.get("amount_total")), quota_per_unit);
+            let used = scale_new_api_quota(json_f64(sub.get("amount_used")), quota_per_unit);
             let remaining = match (total, used) {
                 (Some(total), Some(used)) => Some(total - used),
                 _ => None,
@@ -617,7 +852,7 @@ fn parse_new_api_subscriptions(data: &Value, snapshot: &mut PlatformSnapshot) {
             snapshot.quotas.push(PlatformQuota {
                 kind: PlatformQuotaKind::Subscription,
                 scope_id: scope,
-                unit: "quota".to_string(),
+                unit: new_api_quota_unit(quota_per_unit).to_string(),
                 used,
                 remaining: if unlimited { None } else { remaining },
                 limit: if unlimited { None } else { total },
@@ -641,15 +876,16 @@ fn parse_new_api_token_usage(
     data: &Value,
     allowed_models: &mut BTreeSet<String>,
     snapshot: &mut PlatformSnapshot,
+    quota_per_unit: Option<f64>,
 ) {
     let unlimited = json_bool(data.get("unlimited_quota")).unwrap_or(false);
-    let used = json_f64(data.get("total_used"));
-    let remaining = json_f64(data.get("total_available"));
-    let granted = json_f64(data.get("total_granted"));
+    let used = scale_new_api_quota(json_f64(data.get("total_used")), quota_per_unit);
+    let remaining = scale_new_api_quota(json_f64(data.get("total_available")), quota_per_unit);
+    let granted = scale_new_api_quota(json_f64(data.get("total_granted")), quota_per_unit);
     snapshot.quotas.push(PlatformQuota {
         kind: PlatformQuotaKind::KeyLimit,
         scope_id: json_str(data.get("name")).unwrap_or("key").to_string(),
-        unit: "quota".to_string(),
+        unit: new_api_quota_unit(quota_per_unit).to_string(),
         used,
         remaining: if unlimited { None } else { remaining },
         limit: if unlimited { None } else { granted },
@@ -659,6 +895,20 @@ fn parse_new_api_token_usage(
         expires_at: json_i64(data.get("expires_at")).filter(|ts| *ts > 0),
         source: "new_api.token_usage".to_string(),
     });
+    if let Some(group) = json_str(data.get("group"))
+        && !snapshot
+            .groups
+            .iter()
+            .any(|item| item.id.as_deref() == Some(group))
+    {
+        snapshot.groups.push(PlatformGroup {
+            subscription_type: None,
+            id: Some(group.to_string()),
+            platform: None,
+            auto_groups: Vec::new(),
+            verified: true,
+        });
+    }
 
     if json_bool(data.get("model_limits_enabled")) == Some(true) {
         if let Some(limits) = data.get("model_limits").and_then(Value::as_object) {
@@ -720,6 +970,7 @@ fn parse_new_api_pricing(
     value: &Value,
     request: &PlatformReadRequest<'_>,
     user_group: Option<&str>,
+    user_authenticated: bool,
     quota_per_unit: Option<f64>,
     allowed_models: &BTreeSet<String>,
     snapshot: &mut PlatformSnapshot,
@@ -854,8 +1105,10 @@ fn parse_new_api_pricing(
         if let Some(create_ratio) = json_f64(row.get("create_cache_ratio")) {
             price.cache_write = Some(input * create_ratio);
         }
-        // Anonymous pricing cannot resolve the user's group-to-group override.
-        if user_group.is_none() {
+        // Authenticated pricing already applies user group-to-group overrides.
+        // A supplied bearer can fall through TryUserAuth as anonymous, and Key
+        // refresh intentionally does not fetch user/self just to learn a group.
+        if !user_authenticated {
             price.unavailable_reason = Some("user_identity_required".into());
         } else if !row
             .get("enable_groups")
@@ -891,6 +1144,7 @@ async fn read_sub2(
             "api/v1/user/profile",
             "sub2api.profile",
             Some(user),
+            None,
         )
         .await
         {
@@ -907,6 +1161,7 @@ async fn read_sub2(
             "api/v1/subscriptions/summary",
             "sub2api.subscriptions",
             Some(user),
+            None,
         )
         .await
         {
@@ -923,6 +1178,7 @@ async fn read_sub2(
             "api/v1/groups/available",
             "sub2api.groups",
             Some(user),
+            None,
         )
         .await
         {
@@ -935,7 +1191,7 @@ async fn read_sub2(
     }
 
     if let Some(key) = key {
-        match get_json(client, base, "v1/models", "sub2api.models", Some(key)).await {
+        match get_json(client, base, "v1/models", "sub2api.models", Some(key), None).await {
             Ok(fetched) => {
                 if let Err(error) = collect_models(
                     &fetched.value,
@@ -952,7 +1208,7 @@ async fn read_sub2(
             Err(error) => push_error(snapshot, error),
         }
 
-        match get_json(client, base, "v1/usage", "sub2api.usage", Some(key)).await {
+        match get_json(client, base, "v1/usage", "sub2api.usage", Some(key), None).await {
             Ok(fetched) => {
                 if let Err(error) = parse_sub2_usage(&fetched.value, snapshot) {
                     push_error(snapshot, error);
@@ -967,6 +1223,7 @@ async fn read_sub2(
             "v1/sub2api/billing",
             "sub2api.billing",
             Some(key),
+            None,
         )
         .await
         {
@@ -988,6 +1245,7 @@ async fn read_sub2(
         "api/v1/model-plaza",
         "sub2api.plaza",
         plaza_auth,
+        None,
     )
     .await
     {

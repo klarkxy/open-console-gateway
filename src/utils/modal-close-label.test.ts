@@ -2,7 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { watch } from "vue";
 import { setLocale } from "../i18n/index.ts";
+import { enUSMessages } from "../i18n/messages/en-US.ts";
+import { frFRMessages } from "../i18n/messages/fr-FR.ts";
 import { applyModalCloseAriaLabel, modalCloseAriaLabel } from "./modal-close-label.ts";
+
+// The zh-CN catalog renders keys verbatim and every other locale renders its
+// catalog value, so expected labels are derived from the message catalogs
+// instead of spelled out as literal copy.
+const CLOSE_DIALOG_KEY = "关闭对话框" as const;
 
 type StubElement = {
   attrs: Record<string, string>;
@@ -30,10 +37,16 @@ function stubElement(attrs: Record<string, string>): StubElement {
 
 test("modal close accessible name is localized, never naive-ui's hardcoded English", () => {
   setLocale("zh-CN");
-  assert.equal(modalCloseAriaLabel(), "关闭对话框");
+  const zhLabel = modalCloseAriaLabel();
+  assert.equal(zhLabel, CLOSE_DIALOG_KEY, "zh-CN renders the catalog key itself");
+
   setLocale("en-US");
-  assert.equal(modalCloseAriaLabel(), "Close dialog");
-  assert.notEqual(modalCloseAriaLabel(), "close");
+  const enLabel = modalCloseAriaLabel();
+  assert.equal(enLabel, enUSMessages[CLOSE_DIALOG_KEY]);
+  assert.notEqual(enLabel, "close", "must never fall back to naive-ui's hardcoded English");
+  assert.notEqual(enLabel, zhLabel, "accessible name must follow the active locale");
+
+  setLocale("zh-CN");
 });
 
 test("applyModalCloseAriaLabel rewrites naive close buttons scoped to the modal class", () => {
@@ -43,13 +56,17 @@ test("applyModalCloseAriaLabel rewrites naive close buttons scoped to the modal 
   setLocale("zh-CN");
   applyModalCloseAriaLabel(root as unknown as ParentNode, "account-modal");
   assert.deepEqual(root.queried, [".account-modal .n-base-close"]);
-  assert.equal(elements[0].attrs["aria-label"], "关闭对话框");
-  assert.equal(elements[1].attrs["aria-label"], "关闭对话框");
+  const zhLabel = modalCloseAriaLabel();
+  assert.equal(elements[0].attrs["aria-label"], zhLabel);
+  assert.equal(elements[1].attrs["aria-label"], zhLabel);
 
   // Re-applying after a locale switch keeps the label in the active language.
   setLocale("en-US");
   applyModalCloseAriaLabel(root as unknown as ParentNode, "account-modal");
-  assert.equal(elements[0].attrs["aria-label"], "Close dialog");
+  const enLabel = modalCloseAriaLabel();
+  assert.equal(elements[0].attrs["aria-label"], enLabel);
+  assert.notEqual(elements[0].attrs["aria-label"], zhLabel);
+  assert.equal(elements[1].attrs["aria-label"], enLabel);
 });
 
 test("a stored lazy locale activates its catalog at startup without a locale change", async () => {
@@ -68,19 +85,19 @@ test("a stored lazy locale activates its catalog at startup without a locale cha
 
     assert.equal(fresh.locale.value, "fr-FR");
     // The lazy chunk has not arrived yet, so the catalog is the zh-CN fallback.
-    assert.equal(fresh.t("关闭对话框"), "关闭对话框");
+    assert.equal(fresh.t(CLOSE_DIALOG_KEY), CLOSE_DIALOG_KEY);
 
     let localeFires = 0;
     let catalogFires = 0;
     watch(fresh.locale, () => { localeFires += 1; });
     watch(fresh.effectiveCatalog, () => { catalogFires += 1; });
 
-    for (let attempt = 0; attempt < 200 && fresh.t("关闭对话框") === "关闭对话框"; attempt += 1) {
+    for (let attempt = 0; attempt < 200 && fresh.t(CLOSE_DIALOG_KEY) === CLOSE_DIALOG_KEY; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
 
     assert.equal(fresh.locale.value, "fr-FR");
-    assert.equal(fresh.t("关闭对话框"), "Fermer la boîte de dialogue");
+    assert.equal(fresh.t(CLOSE_DIALOG_KEY), frFRMessages[CLOSE_DIALOG_KEY]);
     assert.equal(localeFires, 0, "lazy startup activation must not change locale");
     assert.ok(catalogFires > 0, "effectiveCatalog must fire when the lazy catalog activates");
   } finally {

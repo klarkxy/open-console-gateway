@@ -10,7 +10,7 @@
 2. 在开始菜单中启动 **Open Console Gateway**。正常启动会在系统浏览器打开管理面板；之后可从托盘图标重新打开。
 3. 当前 Windows 包未签名，SmartScreen 可能弹出警告，点击 **更多信息 → 仍要运行** 继续。
 4. 在 **账号** 视图添加 OpenCode-Go 账号，复制 Key，把客户端指向 `http://127.0.0.1:9042/v1`。
-5. 卸载时会询问是否删除 `%USERPROFILE%\.ocg-mgr`；静默升级与静默卸载保留数据目录。
+5. 再次运行安装包会原地替换已有副本，并保留 `%USERPROFILE%\.ocg-mgr`。从 Windows **已安装的应用** 卸载。确认页有 **删除应用数据目录** 选项，不勾选则保留数据。静默卸载和应用内更新都不会删除它。
 
 ## macOS 11+ Intel / Apple Silicon
 
@@ -26,6 +26,8 @@
 4. 数据保存在 `~/.ocg-mgr/`。
 
 Windows 下开启自动启动后，程序只会安静地回到托盘，不会替你重新打开浏览器。
+
+正式版桌面程序内置 `ocg-manager` Codex skill。安装或升级后首次成功启动应用时，会同步到 `~/.agents/skills/ocg-manager`（Windows 为 `%USERPROFILE%\.agents\skills\ocg-manager`）。仅当内置 skill 内容变化时，旧的 OCG 管理版本才会备份到 `~/.agents/skill-backups/`；同名但不属于 OCG 管理的 skill 不会覆盖。若安装后尚未启动应用，安装器本身不会执行同步；开发构建也不自动安装。
 
 ---
 

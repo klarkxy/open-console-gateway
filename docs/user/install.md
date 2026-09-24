@@ -15,8 +15,11 @@ done. The rest is mostly convincing your OS that small developers exist.
    **More info → Run anyway** to continue.
 4. Add an OpenCode-Go account in the **Accounts** view, copy the Key,
    and point your client at `http://127.0.0.1:9042/v1`.
-5. The uninstaller asks whether to delete `%USERPROFILE%\.ocg-mgr`; silent
-   upgrades and uninstalls preserve it.
+5. Running the installer again replaces the existing copy in place and keeps
+   `%USERPROFILE%\.ocg-mgr`. Uninstall from Windows **Installed apps**. The
+   confirm page includes **Delete application data**; leave it unchecked to
+   keep the data directory. Silent uninstalls and in-app updates never delete
+   it.
 
 ## macOS 11+ Intel / Apple Silicon
 
@@ -37,6 +40,14 @@ done. The rest is mostly convincing your OS that small developers exist.
 4. Data lives in `~/.ocg-mgr/`.
 
 If you enable auto-start on Windows, the app resumes from the tray and leaves the browser closed.
+
+Release desktop builds bundle the `ocg-manager` Codex skill. On the first
+successful app launch after installation or upgrade, they synchronize it to
+`~/.agents/skills/ocg-manager` (Windows: `%USERPROFILE%\.agents\skills\ocg-manager`).
+An older OCG-managed copy is backed up under `~/.agents/skill-backups/` when the bundled skill changes;
+an unrelated same-name skill is left unchanged. The installer alone does not
+run this step when the app has not yet launched. Development builds do not
+auto-install the skill.
 
 ---
 

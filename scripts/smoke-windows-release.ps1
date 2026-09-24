@@ -40,29 +40,45 @@ function Wait-Dashboard {
     try {
       $html = (Invoke-WebRequest http://127.0.0.1:9042/dashboard/ -UseBasicParsing).Content
       if ($html -notmatch 'id="app"') { throw 'Dashboard HTML is incomplete' }
-      if (!$ExpectedVersion) { return $null }
-      $status = Invoke-RestMethod http://127.0.0.1:9042/dashboard/api/v3/settings/update-status
-      if ($status.currentVersion -eq $ExpectedVersion) { return $status }
+      if (!$ExpectedVersion) {
+        # The overwrite bootstrap may be a published V3 build. Only that old
+        # binary may select V3; the candidate must expose the current V4 API.
+        foreach ($version in @('v4', 'v3')) {
+          try {
+            $settings = Invoke-RestMethod "http://127.0.0.1:9042/dashboard/api/$version/settings"
+            if ($null -ne $settings.revision -and $null -ne $settings.processGeneration) {
+              $script:DashboardApiVersion = $version
+              return $null
+            }
+          } catch {}
+        }
+        throw 'Published dashboard settings are not ready'
+      }
+      $status = Invoke-RestMethod http://127.0.0.1:9042/dashboard/api/v4/settings/update-status
+      if ($status.currentVersion -eq $ExpectedVersion) {
+        $script:DashboardApiVersion = 'v4'
+        return $status
+      }
     } catch {}
     Start-Sleep 1
   }
   throw "Installed GUI did not expose dashboard version $ExpectedVersion"
 }
 
-function Get-V3Settings {
-  return Invoke-RestMethod http://127.0.0.1:9042/dashboard/api/v3/settings
+function Get-DashboardSettings {
+  return Invoke-RestMethod "http://127.0.0.1:9042/dashboard/api/$script:DashboardApiVersion/settings"
 }
 
-function Set-V3AutoStart {
+function Set-DashboardAutoStart {
   param([bool]$Enabled)
-  $settings = Get-V3Settings
+  $settings = Get-DashboardSettings
   $body = @{
     autoStart = $Enabled
     expectedRevision = [uint64]$settings.revision
     processGeneration = [uint64]$settings.processGeneration
   } | ConvertTo-Json
   Invoke-RestMethod `
-    http://127.0.0.1:9042/dashboard/api/v3/settings `
+    "http://127.0.0.1:9042/dashboard/api/$script:DashboardApiVersion/settings" `
     -Method Put `
     -ContentType 'application/json' `
     -Body $body | Out-Null
@@ -181,7 +197,7 @@ try {
 
     New-Item -ItemType Directory -Force $data | Out-Null
     Set-Content $sentinel $sentinelValue
-    Set-V3AutoStart -Enabled $true
+    Set-DashboardAutoStart -Enabled $true
     $expectedStartupValue = "`"$guiPath`" --startup"
     $previousRunName = Get-StartupEntryName -RunKey $runKey
     if (!$previousRunName) { throw 'Published install did not write a startup entry' }
@@ -207,11 +223,22 @@ try {
       throw "Published GUI process $previousPid survived the overwrite update"
     }
 
+    if (!(Test-Path -LiteralPath $guiPath)) {
+      throw 'Overwrite update moved the GUI out of the existing installation directory'
+    }
+    $defaultInstallDir = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'Open Console Gateway'))
+    if ($installDir -ne $defaultInstallDir) {
+      $secondCopy = Join-Path $defaultInstallDir 'ocg-manager.exe'
+      if (Test-Path -LiteralPath $secondCopy) {
+        throw 'Overwrite update installed a second copy under the renamed default directory'
+      }
+    }
+
     $updateStatus = Wait-Dashboard -ExpectedVersion $CandidateVersion -Attempts 90
     if ($updateStatus.currentVersion -ne $CandidateVersion) {
       throw "Unexpected updated GUI version: $($updateStatus.currentVersion)"
     }
-    $updatedSettings = Get-V3Settings
+    $updatedSettings = Get-DashboardSettings
     if (!$updatedSettings.autoStart) { throw 'Overwrite update did not preserve the auto-start setting' }
     if ((Get-Content $sentinel -Raw).Trim() -ne $sentinelValue) {
       throw 'Overwrite update did not preserve the data sentinel'
@@ -259,7 +286,7 @@ try {
     Set-Content $sentinel $sentinelValue
   }
 
-  Set-V3AutoStart -Enabled $true
+  Set-DashboardAutoStart -Enabled $true
   $startupValue = Get-StartupEntryValue -RunKey $runKey -Name $CurrentRunValue
   $expectedStartupValue = "`"$guiPath`" --startup"
   if ($startupValue -ne $expectedStartupValue) { throw "Unexpected startup value: $startupValue" }
@@ -267,11 +294,11 @@ try {
     throw 'Enabling auto-start left the legacy startup entry behind'
   }
 
-  Set-V3AutoStart -Enabled $false
+  Set-DashboardAutoStart -Enabled $false
   if (Get-StartupEntryName -RunKey $runKey) {
     throw 'Disabling auto-start left the startup entry behind'
   }
-  Set-V3AutoStart -Enabled $true
+  Set-DashboardAutoStart -Enabled $true
   $startupValue = Get-StartupEntryValue -RunKey $runKey -Name $CurrentRunValue
   if ($startupValue -ne $expectedStartupValue) { throw "Unexpected restored startup value: $startupValue" }
 } finally {
@@ -289,6 +316,42 @@ Wait-UninstallComplete -ExecutablePath $guiPath -UninstallerPath $uninstaller.Fu
 if (Get-StartupEntryName -RunKey $runKey) {
   throw 'Uninstall left the startup entry behind'
 }
+if (Test-Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Open Console Gateway') {
+  throw 'Uninstall left the installed-app registration behind'
+}
+if (Test-Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\OCG Manager') {
+  throw 'Uninstall left the legacy installed-app registration behind'
+}
+if (Test-Path 'HKCU:\Software\klarkxy\OCG Manager') {
+  throw 'Uninstall left the legacy installation location behind'
+}
 if (!(Test-Path $sentinel)) { throw 'Silent uninstall deleted user data' }
+
+Invoke-Installer -Path $CandidateInstaller -Arguments @('/S', "/D=$installDir") -Label 'candidate reinstall'
+$gui = Get-ChildItem $installDir -Recurse -Filter ocg-manager.exe | Select-Object -First 1
+if (!$gui) { throw 'Reinstalled GUI executable is missing' }
+$guiPath = $gui.FullName
+$process = Start-Process $guiPath -ArgumentList '--startup' -PassThru -WindowStyle Hidden
+try {
+  Wait-Dashboard -ExpectedVersion $CandidateVersion | Out-Null
+  if ((Get-Content $sentinel -Raw).Trim() -ne $sentinelValue) {
+    throw 'Reinstall after silent uninstall lost the data sentinel'
+  }
+} finally {
+  if ($process -and !$process.HasExited) {
+    Stop-Process -Id $process.Id -Force
+    if (!$process.WaitForExit(30000)) { throw "Reinstalled GUI process $($process.Id) did not stop" }
+  }
+  Stop-InstalledGui $guiPath
+}
+
+$uninstaller = Get-ChildItem $installDir -Recurse -Filter uninstall.exe | Select-Object -First 1
+if (!$uninstaller) { throw 'Reinstall uninstaller is missing' }
+Invoke-Installer -Path $uninstaller.FullName -Arguments @('/S') -Label 'candidate reinstall uninstall'
+Wait-UninstallComplete -ExecutablePath $guiPath -UninstallerPath $uninstaller.FullName -RunKey $runKey
+if (Get-StartupEntryName -RunKey $runKey) {
+  throw 'Reinstall uninstall left the startup entry behind'
+}
+if (!(Test-Path $sentinel)) { throw 'Second silent uninstall deleted user data' }
 
 Write-Host "Windows release smoke passed for v$CandidateVersion."

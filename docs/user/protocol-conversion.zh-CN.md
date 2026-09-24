@@ -6,7 +6,7 @@ Open Console Gateway 在一个端口上提供四种客户端协议，再把每�
 
 协议选择使用已保存的供应商合约。显式刷新目录时导入官方模型列表和协议基线：Go、Zen 使用 Go 文档，Command Code 使用自己的供应商文档，MiniMax CN / Kimi Code CN 使用文档声明的 Chat 与 Messages 家族。Go、Zen、Command Code 在文档缺少模型或抓取失败时回退到 Chat。已保存的覆盖与探测证据仍受密封适配器约束。刷新和启用操作见[供应商](providers.zh-CN.md)；推理请求不会刷新目录，也不会通过尝试另一种上游协议来发现支持。
 
-客户端协议在当前模型合约中启用时，请求和响应透传；否则 **请求体** 转到已启用的首选协议，或适配器回退顺序中的第一个可用协议，**响应体** 或 SSE 流转回客户端协议。Gemini 始终转换到已启用的上游协议。供应商目录里的全部供应商（含用户定义 Configurable HTTP，每条 mapping 一个协议）共用这条规则。Custom API 同样转到该账号声明的上游协议，再遵守该端点的合约与按模型覆盖。CPA 不在此转换默认控制范围内，行为不变。转换覆盖文本、system、图像、工具调用与结果、推理内容、完成状态、错误与 usage 字段。SSE 用量、错误和终止状态按事件顺序解析，支持同一次响应混用 LF 与 CRLF 事件分隔符。
+客户端协议在当前模型合约中启用时，请求和响应透传；否则 **请求体** 转到已启用的首选协议，或适配器回退顺序中的第一个可用协议，**响应体** 或 SSE 流转回客户端协议。Gemini 始终转换到已启用的上游协议。供应商目录里的全部供应商（含用户定义 Configurable HTTP，每条 mapping 一个协议）共用这条规则。Custom API 同样转到该账号声明的上游协议，再遵守该端点的合约与按模型覆盖。New API / Sub2API 关联 Key 是例外：这些站点自己会转换 Chat Completions、Messages 和 Responses，因此 OCG 保存站点根地址并把匹配的客户端格式原样交给上游（Gemini 仍转换为 Chat Completions）。CPA 不在此转换默认控制范围内。转换覆盖文本、system、图像、工具调用与结果、推理内容、完成状态、错误与 usage 字段。SSE 用量、错误和终止状态按事件顺序解析，支持同一次响应混用 LF 与 CRLF 事件分隔符。
 
 下表记录代码内的别名配置，不代表供应商当前可用性。刷新写入的官方基线与已保存的启用状态决定 **供应商** 页显示的实际默认协议和可用协议。
 
@@ -18,7 +18,7 @@ Open Console Gateway 在一个端口上提供四种客户端协议，再把每�
 
 别名配置参考（检入的 2026-09-06 偏好及 2026-08-27 Go `live_supported` 路径）。✓ 表示代码配置中记录了该协议，不保证当前直接透传。模型和协议是否可路由由 Provider 目录与 effective 合约决定。参考配置位于 `crates/ocg-domain/src/protocol.rs` 的 `MODEL_PROTOCOLS`。
 
-`reasoning.effort` 别名（转发或转换前应用）：`muse-spark-1.2`、 `muse-spark-1.2-contributor`、`muse-spark-1.2-contributor-free` 与 `muse-spark-1.3-contributor-free` 把 `max` 映射为 `xhigh`（上游拒绝 `max`）；其他模型的 `reasoning.effort` 原样透传。
+`reasoning.effort` 别名只在携带该兼容策略的 OpenCode Go 路由上、于转发或转换前应用：`muse-spark-1.2`、`muse-spark-1.2-contributor`、`muse-spark-1.2-contributor-free` 与 `muse-spark-1.3-contributor-free` 把 `max` 映射为 `xhigh`（上游拒绝 `max`）。用户定义的 HTTP 路由即使上游模型同名也保留原值。其他模型的 `reasoning.effort` 原样透传。
 
 | 模型 | 推荐 | Chat | Responses | Messages |
 | --- | --- | :---: | :---: | :---: |

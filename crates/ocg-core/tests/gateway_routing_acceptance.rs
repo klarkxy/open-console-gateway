@@ -4,10 +4,8 @@
 //! Dummy keys are explicit test credentials (`dummy-*`). Listeners bind
 //! `127.0.0.1` only and shut down with the harness.
 //!
-//! Shadow compare stays default-off. This binary never mutates process
-//! environment. To replay with shadow, set `OCG_SHADOW_COMPARE=1` in the
-//! launching shell before `cargo test`. Journal asserts still catch extra
-//! origin hits whether shadow is on or off.
+//! This binary never mutates process environment. Journal asserts catch
+//! extra origin hits.
 
 use axum::http::StatusCode;
 use ocg_core::models::{ProxyListDirection, ProxyMode, RoutingMode};
@@ -102,7 +100,7 @@ async fn proxy_list_matches_the_materialized_upstream_id_in_both_directions() {
     )
     .await;
     let (settings_status, settings) =
-        dashboard_json(h.port, reqwest::Method::GET, "v3", "/settings", None).await;
+        dashboard_json(h.port, reqwest::Method::GET, "v4", "/settings", None).await;
     assert_eq!(settings_status, StatusCode::OK, "{settings}");
     assert!(
         settings["proxySupportedModels"]
@@ -250,6 +248,10 @@ async fn fallthrough_429_then_403_then_success_across_three_upstreams() {
     assert_eq!(logs[0].http_status, Some(429));
     assert_eq!(logs[1].account_id, ids[1]);
     assert_eq!(logs[1].http_status, Some(403));
+    assert!(
+        h.account(&ids[1]).auth_error.is_none(),
+        "a 403 is request-local and must not disable the Key"
+    );
     assert_eq!(logs[2].account_id, ids[2]);
     assert!(logs[2].status.starts_with("success"), "{logs:?}");
     let request_ids = logs
@@ -330,7 +332,7 @@ async fn disabled_account_and_model_scope_never_call_upstream() {
 }
 
 #[tokio::test]
-async fn shared_quota_skips_sibling_credential_on_429() {
+async fn unknown_custom_429_does_not_invent_shared_pool_exhaustion() {
     let journal = SharedJournal::new();
     let labs = [
         start_journaled_lab(&journal, "lab-a", DUMMY_A, &[limited()]).await,
@@ -428,20 +430,36 @@ async fn shared_quota_skips_sibling_credential_on_429() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(
         journal.listeners(),
-        ["lab-a", "lab-c"],
-        "shared-quota sibling must not be contacted: {:?}",
+        ["lab-a", "lab-b"],
+        "unknown Custom 429 must not claim shared quota exhaustion: {:?}",
         journal.snapshot()
     );
-    assert_eq!(journal.keys(), [DUMMY_A, DUMMY_C]);
+    assert_eq!(journal.keys(), [DUMMY_A, DUMMY_B]);
     let logs = sorted_logs(&h.state);
+    assert!(h.account(&first_id).cooldown_until.is_none());
+    assert!(h.account(&first_id).auth_error.is_none());
+    let credential_id = identity_refs_for(&h.state, &first_id).credential_id;
+    let (status, credentials) = v4_get(h.port, "/credentials").await;
+    assert_eq!(status, StatusCode::OK, "{credentials}");
+    let credential = credentials["credentials"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == credential_id)
+        .unwrap();
     assert!(
-        logs.iter().all(|log| log.account_id != sibling_id),
-        "sibling credential must not appear in forward logs: {logs:?}"
+        credential.get("quotaRecovery").is_none(),
+        "an unknown 429 must not create durable quota state: {credential}"
+    );
+    assert!(
+        logs.iter()
+            .any(|log| log.account_id == sibling_id && log.http_status == Some(200)),
+        "eligible sibling should serve after an unknown request-local rejection: {logs:?}"
     );
     evidence(
-        "shared-quota-skips-sibling",
-        &["lab-a", "lab-c"],
-        &[DUMMY_A, DUMMY_C],
+        "unknown-429-keeps-shared-pool-eligible",
+        &["lab-a", "lab-b"],
+        &[DUMMY_A, DUMMY_B],
         &journal,
         &logs,
         status.as_u16(),

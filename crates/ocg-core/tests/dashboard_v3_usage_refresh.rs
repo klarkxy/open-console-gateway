@@ -157,6 +157,7 @@ fn sample_snapshot() -> GoUsageSnapshot {
         monthly_percent: 10.0,
         rolling_resets_in_minutes: 180,
         weekly_resets_in_minutes: 1_440,
+        monthly_resets_in_minutes: 43200,
         earliest_resets_in_minutes: 180,
     }
 }

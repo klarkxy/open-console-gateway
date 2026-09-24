@@ -1,3 +1,4 @@
+import type { AccountCapabilitySource } from "./account-capabilities.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { Account } from "../api/dashboard.ts";
@@ -19,6 +20,7 @@ import {
   emptyRotateDraft,
   isUncertainCreateFailure,
   nextCreateOperationId,
+  endpointMatchesSavedGrant,
   normalizeOrigin,
   shareableInferenceCredentials,
   staleSavedEndpointIds,
@@ -234,14 +236,14 @@ test("write actions stay on the matching card credential and hide Zen, CPA, no-a
       credential(),
     ],
   });
-  const card = credentialWriteSupport(account(), shared);
+  const card = credentialWriteSupport(account(), shared, null, null, [connection()]);
   assert.equal(card.rotate, true);
   assert.equal(card.binding, true);
   assert.equal(card.create, true);
   assert.equal(card.credential?.credential.id, "cred-1");
   assert.equal(card.bindingRecord?.id, "bind-1");
   assert.deepEqual(
-    accountCredentialMenuOptions(account(), shared).map((option) => option.key),
+    accountCredentialMenuOptions(account(), shared, null, null, [connection()]).map((option) => option.key),
     ["rotate-key", "add-key", "edit-binding"],
   );
 
@@ -286,6 +288,7 @@ function endpoint(overrides: Partial<ConnectionEndpoint> = {}): ConnectionEndpoi
 
 function connection(overrides: Partial<Connection> = {}): Connection {
   return {
+    credential_create: { allowed: true, materialKinds: ["api_key"], reason: null },
     id: "conn-1",
     name: "Go",
     origin: "builtin",
@@ -365,12 +368,15 @@ test("Add Key stays hidden for observers, Zen, CPA, no-auth, and Custom API", ()
   assert.equal(connectionAllowsIdentityCredentialCreate(connection({
     legacy: { kind: "custom_account", id: "acc-9" },
     origin: "custom_account",
+    credential_create: { allowed: false, materialKinds: [], reason: "dedicated_account_flow" },
   })), false);
   assert.equal(connectionAllowsIdentityCredentialCreate(connection({
     legacy: { kind: "builtin_provider", id: "cpa" },
+    credential_create: { allowed: false, materialKinds: [], reason: "external_integration" },
   })), false);
   assert.equal(connectionAllowsIdentityCredentialCreate(connection({
     legacy: { kind: "builtin_provider", id: "opencode-zen-free" },
+    credential_create: { allowed: false, materialKinds: [], reason: "no_authentication" },
   })), false);
   assert.equal(connectionAllowsIdentityCredentialCreate(connection({
     origin: "custom",
@@ -379,6 +385,7 @@ test("Add Key stays hidden for observers, Zen, CPA, no-auth, and Custom API", ()
   assert.equal(connectionAllowsIdentityCredentialCreate(connection({
     origin: "builtin",
     legacy: { kind: "dynamic_provider", id: "lab" },
+    credential_create: { allowed: false, materialKinds: [], reason: "builtin_definition" },
   })), false);
 });
 
@@ -461,6 +468,37 @@ test("normalizeOrigin lowercases scheme and host and rejects non-http", () => {
   assert.equal(normalizeOrigin("https://lab.example:8443"), "https://lab.example:8443");
   assert.equal(normalizeOrigin("ftp://lab.example"), null);
   assert.equal(normalizeOrigin("not-a-url"), null);
+  assert.equal(normalizeOrigin("https://service.example:443/v1/messages"), "https://service.example");
+  assert.equal(
+    normalizeOrigin("http://[2001:DB8:0:0:0:0:0:1]:8080"),
+    "http://[2001:db8::1]:8080",
+  );
+  assert.equal(
+    normalizeOrigin("http://[2001:db8::1]:8080/v1/messages"),
+    normalizeOrigin("http://[2001:DB8:0:0:0:0:0:1]:8080"),
+  );
+  assert.notEqual(normalizeOrigin("http://service.example"), normalizeOrigin("https://service.example"));
+  assert.notEqual(normalizeOrigin("https://service.example:8443"), normalizeOrigin("https://service.example"));
+});
+
+test("saved origin grants match canonical endpoint origins", () => {
+  const binding = credential().bindings[0]!;
+  binding.allowed_endpoint_ids = ["ep-1"];
+  binding.allowed_origins = ["https://service.example:443"];
+  assert.equal(endpointMatchesSavedGrant(endpoint({
+    id: "ep-1",
+    url: "https://service.example/v1/messages",
+  }), binding), true);
+  binding.allowed_origins = ["http://[2001:DB8:0:0:0:0:0:1]:8080"];
+  assert.equal(endpointMatchesSavedGrant(endpoint({
+    id: "ep-1",
+    url: "http://[2001:db8::1]:8080/v1/messages",
+  }), binding), true);
+  binding.allowed_origins = ["http://service.example"];
+  assert.equal(endpointMatchesSavedGrant(endpoint({
+    id: "ep-1",
+    url: "https://service.example/v1/messages",
+  }), binding), false);
 });
 
 test("same endpoint ID with a moved Origin stays unchecked and is not granted by another checkbox", () => {
@@ -551,4 +589,38 @@ test("create operation id stays stable for an uncertain same payload and rejects
     secretInput: "sk",
     quotaSharing: { kind: "independent" },
   }));
+});
+
+test("credential editing uses the loaded resource owner and integration controls", () => {
+  const destination: AccountCapabilitySource = {
+    account_controls: { toggleWrite: "account", configurationOwner: "destination", consoleLink: "ollama", browserProfile: false },
+    auth_scheme: "bearer", max_credentials: 1, plan: null,
+    capabilities: { testable: true, managed_signup: false, external_integration: false, billing_tier_required: false },
+  };
+  assert.equal(credentialWriteSupport(account({ provider_id: "custom" }), identity(), null, destination, [connection()]).create, true);
+  assert.equal(credentialWriteSupport(account(), identity(), null, {
+    ...destination, account_controls: { ...destination.account_controls, configurationOwner: "account" },
+  }, [connection()]).create, true);
+  assert.equal(credentialWriteSupport(account(), identity(), null, {
+    ...destination, capabilities: { ...destination.capabilities, external_integration: true },
+  }).rotate, false);
+});
+
+test("generic keyless singleton uses no-auth restrictions without inheriting Zen writes", () => {
+  const destination: AccountCapabilitySource = {
+    account_controls: { toggleWrite: "account", configurationOwner: "destination", consoleLink: null, browserProfile: false },
+    auth_scheme: "none", max_credentials: 1, plan: null,
+    capabilities: { testable: true, managed_signup: false, external_integration: false, billing_tier_required: false },
+  };
+  const row = account({ provider_id: "generic", credential_kind: "none" });
+  assert.deepEqual(credentialWriteSupport(row, identity(), null, destination), credentialWriteSupport(row, identity(), null));
+});
+
+test("creation authority comes from the selected connection projection", () => {
+  for (const capability of [undefined, { allowed: false, materialKinds: [], reason: "no_authentication" as const }, { allowed: true, materialKinds: ["external_reference" as const], reason: null }]) {
+    const row = connection({ credential_create: capability });
+    assert.equal(connectionAllowsIdentityCredentialCreate(row), false);
+    assert.equal(credentialWriteSupport(account(), identity(), null, null, [row]).create, false);
+  }
+  assert.equal(credentialWriteSupport(account(), identity(), null, null, [connection({ id: "other" })]).create, false);
 });

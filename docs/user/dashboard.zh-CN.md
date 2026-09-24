@@ -8,17 +8,17 @@
 
 新增账号的搜索会一起筛选方案、预设、已保存的供应商和平台类型；改变搜索不会丢弃当前选中的表单。窄屏下，供应商表格只在面板内部横向滚动，供应商选择和目录操作仍保持可见。日志保留状态、模型和时间筛选；其余选项通过**更多筛选**展开，并显示正在使用的额外筛选数量。CPA 尚未完成配置时会引导返回概览。
 
-## 面板 V3 与 V4
+## 面板 API
 
-当前 SPA 同时使用冻结的 `/dashboard/api/v3` 与增量 `/dashboard/api/v4`。DSH 状态/安装端点属于 V4；安装请求携带 `expectedRevision`、`processGeneration` 和用于校验外部 DSH 状态的检查指纹。若另一个标签页或进程先改变任一侧，服务端返回冲突，页面会刷新而不会自动重放写入。这些 token 只属于当前 OCG 进程；多个进程共用一个数据目录时，并不构成统一的 CAS 域。OpenCode Go 价格快照使用独立的 `pricingRevision`，与设置 token 无关。
+当前 SPA **只走 `/dashboard/api/v4`**。`/dashboard/api/v3` 是 410 墓碑。账号、设置、鉴权、日志与转移处理器挂回 V4，与原生的目的地、凭据和 DSH 路由并列。DSH 安装请求携带 `expectedRevision`、`processGeneration` 和用于校验外部 DSH 状态的检查指纹。若另一个标签页或进程先改变任一侧，服务端返回冲突，页面会刷新而不会自动重放写入。这些 token 只属于当前 OCG 进程；多个进程共用一个数据目录时，并不构成统一的 CAS 域。OpenCode Go 价格快照使用独立的 `pricingRevision`，与设置 token 无关。
 
-明文 Key 只出现在接入中心载荷（`GET /dashboard/api/v3/connection`）里。Settings 资源从不包含 Key 值。浏览器只把秘密留在内存；退出登录或 401 会话失效会立即清除。
+明文 Key 只出现在接入中心载荷（`GET /dashboard/api/v4/connection`）里。Settings 资源从不包含 Key 值。浏览器只把秘密留在内存；退出登录或 401 会话失效会立即清除。
 
 切换标签时视图保持缓存（`KeepAlive`），返回时刷新服务端数据；**仪表盘** 视图在浏览器标签回到前台时也会刷新。目录、价格与供应商模型列表不会自动轮询；官方用量同步由服务端调度。**设置** 页开始签名桌面安装后，可能会轮询安装进度，直到进程重启。
 
-仍调用无版本号 `/dashboard/api` REST 的缓存页面会收到 HTTP 410，错误码 `dashboardV2Removed`，提示先刷新页面，不够再升级。未登录请求会先返回 401。两类 V2 路径仅作为缓存旧页面的兼容例外保留：`/dashboard/api/auth/status`、`/dashboard/api/auth/register`、`/dashboard/api/auth/login`、`/dashboard/api/auth/logout`，以及 `/dashboard/api/browser/sessions/{token}/ws`。当前面板改用 V3 的鉴权与浏览器 WebSocket 路由。
+仍调用无版本号 `/dashboard/api` REST 的缓存页面会收到 HTTP 410，错误码 `dashboardV2Removed`，提示先刷新页面，不够再升级。未登录请求会先返回 401。两类 V2 路径仅作为缓存旧页面的兼容例外保留：`/dashboard/api/auth/status`、`/dashboard/api/auth/register`、`/dashboard/api/auth/login`、`/dashboard/api/auth/logout`，以及 `/dashboard/api/browser/sessions/{token}/ws`。当前面板改用 V4 的鉴权与浏览器 WebSocket 路由。
 
-要探测 OpenCode Go Key，请用 CLI `key ping` 或发一次真实客户端请求。Custom 卡片仍有 **验证连接**；托管注册仍有 Key 验证。
+要探测 OpenCode Go Key，请用 CLI `key ping` 或发一次真实客户端请求。Custom 卡片有 **测试连接**；托管注册会执行 Key 验证。
 
 ## 接入中心
 

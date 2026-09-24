@@ -35,6 +35,15 @@ fn custom_endpoint_url_rejects_credentials_query_fragment_and_non_http_schemes()
             "https://api.example.com/v1/models"
         );
     }
+    assert_eq!(
+        derive_custom_models_endpoint(
+            "https://api.example.com/chat/v1/chat/completions",
+            UpstreamProtocolKind::ChatCompletions,
+        )
+        .unwrap()
+        .as_str(),
+        "https://api.example.com/chat/v1/models"
+    );
     assert!(
         derive_custom_models_endpoint(
             "https://api.example.com/v1/custom-chat",
@@ -196,6 +205,7 @@ fn custom_runtime_identity_is_configurable_http_not_a_base_class() {
         verification_status: ConnectionVerificationStatus::Verified,
         setup_ready: true,
         has_key: true,
+        auth_kind: ocg_domain::dynamic::DynamicAuthKind::Bearer,
         config: AccountCustomConfig {
             account_id: "acc".into(),
             endpoint_url: "http://127.0.0.1:9/v1/chat/completions".into(),
@@ -204,6 +214,8 @@ fn custom_runtime_identity_is_configurable_http_not_a_base_class() {
             updated_at: chrono::Utc::now(),
         },
         capabilities: Vec::new(),
+        route_overrides: Vec::new(),
+        protocol_passthrough: false,
     };
     assert!(runtime.eligible());
     let plan = crate::provider::builtin_provider(CUSTOM_PROVIDER_ID).unwrap();

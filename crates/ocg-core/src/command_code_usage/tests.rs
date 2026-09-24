@@ -75,6 +75,73 @@ fn rejects_non_goat_or_malformed_usage_shapes() {
     );
 }
 
+fn with_five_hour_reset(now: DateTime<Utc>, reset_at: DateTime<Utc>) -> String {
+    let mut body: Value = serde_json::from_str(&usage_body(now)).unwrap();
+    body["windowLimits"]["fiveHour"]["resetAt"] = Value::from(reset_at.timestamp_millis());
+    body.to_string()
+}
+
+#[test]
+fn goat_window_minutes_use_shared_ceil_and_max_plus_one_tolerance() {
+    let now = fixed_now();
+    assert_eq!(
+        parse_command_code_usage_body(
+            with_five_hour_reset(now, now - ChronoDuration::hours(1)).as_bytes(),
+            now
+        )
+        .unwrap()
+        .rolling_resets_in_minutes,
+        0
+    );
+    assert_eq!(
+        parse_command_code_usage_body(
+            with_five_hour_reset(now, now + ChronoDuration::milliseconds(1)).as_bytes(),
+            now
+        )
+        .unwrap()
+        .rolling_resets_in_minutes,
+        1
+    );
+    assert_eq!(
+        parse_command_code_usage_body(
+            with_five_hour_reset(now, now + ChronoDuration::hours(5)).as_bytes(),
+            now
+        )
+        .unwrap()
+        .rolling_resets_in_minutes,
+        300
+    );
+    assert_eq!(
+        parse_command_code_usage_body(
+            with_five_hour_reset(
+                now,
+                now + ChronoDuration::hours(5) + ChronoDuration::milliseconds(1)
+            )
+            .as_bytes(),
+            now
+        )
+        .unwrap()
+        .rolling_resets_in_minutes,
+        300
+    );
+    assert_eq!(
+        parse_command_code_usage_body(
+            with_five_hour_reset(now, now + ChronoDuration::minutes(301)).as_bytes(),
+            now
+        )
+        .unwrap()
+        .rolling_resets_in_minutes,
+        300
+    );
+    assert_eq!(
+        parse_command_code_usage_body(
+            with_five_hour_reset(now, now + ChronoDuration::minutes(302)).as_bytes(),
+            now
+        ),
+        Err(CommandCodeUsageError::Window)
+    );
+}
+
 #[derive(Debug)]
 struct CapturedRequest {
     method: String,
@@ -112,6 +179,30 @@ async fn serve_once(
             authorization,
             accept,
         }
+    });
+    (endpoint_url(addr), task)
+}
+
+async fn serve_chunked_oversize() -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let _ = read_http_head(&mut stream).await;
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let chunk = vec![b'x'; 16 * 1024];
+        let header = format!("{:x}\r\n", chunk.len());
+        for _ in 0..5 {
+            stream.write_all(header.as_bytes()).await.unwrap();
+            stream.write_all(&chunk).await.unwrap();
+            stream.write_all(b"\r\n").await.unwrap();
+        }
+        stream.write_all(b"0\r\n\r\n").await.unwrap();
     });
     (endpoint_url(addr), task)
 }
@@ -168,6 +259,40 @@ async fn http_fetch_uses_fixed_shape_bearer_auth_and_no_key_in_errors() {
     assert_eq!(error, CommandCodeUsageError::Unauthorized);
     assert!(!error.to_string().contains(TEST_KEY));
     assert!(!format!("{error:?}").contains(TEST_KEY));
+}
+
+async fn assert_http_status(status: u16, reason: &str, expected: CommandCodeUsageError) {
+    let (url, server) = serve_once(status, reason, "{}".to_string()).await;
+    let error = fetch_command_code_usage_from(&AppConfig::default(), TEST_KEY, &url, Utc::now)
+        .await
+        .expect_err("HTTP error should fail");
+    let _ = server.await;
+    assert_eq!(error, expected);
+    assert!(!error.to_string().contains(TEST_KEY));
+    assert!(!format!("{error:?}").contains(TEST_KEY));
+}
+
+#[tokio::test]
+async fn fetch_maps_403_429_and_5xx() {
+    assert_http_status(403, "Forbidden", CommandCodeUsageError::Forbidden).await;
+    assert_http_status(429, "Too Many Requests", CommandCodeUsageError::RateLimited).await;
+    assert_http_status(
+        500,
+        "Internal Server Error",
+        CommandCodeUsageError::Http(500),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn fetch_rejects_chunked_oversize_without_trusting_content_length() {
+    let (url, server) = serve_chunked_oversize().await;
+    let error = fetch_command_code_usage_from(&AppConfig::default(), TEST_KEY, &url, Utc::now)
+        .await
+        .expect_err("oversize chunked body must fail");
+    let _ = server.await;
+    assert_eq!(error, CommandCodeUsageError::Oversize);
+    assert!(!error.to_string().contains(TEST_KEY));
 }
 
 #[test]

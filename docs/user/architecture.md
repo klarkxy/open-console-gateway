@@ -59,9 +59,10 @@ These reads use saved local state. Catalog refreshes are explicit actions on
 | Endpoint | Published models |
 | --- | --- |
 | Authenticated `GET /v1/models` | Currently routeable code-owned Aliases, saved Zen/Command/CN mappings, saved user-defined Provider public models, and eligible Custom declared IDs |
-| `GET /dashboard/api/v3/application-models` | Go-routeable Aliases intersected with the current Go pricing snapshot; excludes Custom API, user-defined Providers, and CN Plans |
+| `GET /dashboard/api/v4/application-models` | Go-routeable Aliases intersected with the current Go pricing snapshot; excludes Custom API, user-defined Providers, and CN Plans |
 
-Saved catalog rows keep exact raw pins until code assigns an Alias. A Custom ID
+Command ids that contain `/` publish a unique last-segment lowercase kebab Alias;
+other unmatched catalog rows keep exact raw pins until code assigns an Alias. A Custom ID
 that collides with a published built-in Alias is excluded from publication.
 
 ## Protocol conversion

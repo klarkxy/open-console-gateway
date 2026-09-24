@@ -64,8 +64,8 @@ mod imp {
             "检测到旧版本的 OCG 后台服务占用端口 {port}，桌面端无法启动。\r\n\r\n\
              进程 PID：{pid}\r\n\
              程序路径：{}\r\n\r\n\
-             是否停止旧服务并重新启动桌面端？\r\n\r\n\
-             该进程正在处理的当前请求会中断，但账号、配置和数据不会被删除。",
+             是否停止旧服务并重启桌面端？\r\n\r\n\
+             该进程正在处理的请求会中断，账号、配置和数据不会被删除。",
             image.display()
         );
         let answer = message_box(
@@ -84,7 +84,7 @@ mod imp {
         let text = format!(
             "Open Console Gateway 桌面端启动失败。\r\n\r\n\
              错误详情：{error}\r\n\r\n\
-             请根据上述信息解决问题（例如停止冲突的 OCG 后台服务），然后重新启动 \
+             请解决问题（例如停止冲突的 OCG 后台服务）后重新启动 \
              Open Console Gateway。"
         );
         message_box(

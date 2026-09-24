@@ -137,6 +137,7 @@ impl TryFrom<&str> for UpstreamProtocolKind {
 pub enum UpstreamAuthScheme {
     Bearer,
     XApiKey,
+    ApiKey,
 }
 
 impl UpstreamAuthScheme {
@@ -144,6 +145,7 @@ impl UpstreamAuthScheme {
         match self {
             Self::Bearer => "bearer",
             Self::XApiKey => "x-api-key",
+            Self::ApiKey => "api-key",
         }
     }
 }
@@ -155,6 +157,7 @@ impl TryFrom<&str> for UpstreamAuthScheme {
         match value {
             "bearer" => Ok(Self::Bearer),
             "x-api-key" => Ok(Self::XApiKey),
+            "api-key" => Ok(Self::ApiKey),
             _ => Err(CatalogParseError::UnknownAuthScheme(value.to_string())),
         }
     }

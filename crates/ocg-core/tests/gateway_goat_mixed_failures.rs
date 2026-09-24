@@ -1,8 +1,16 @@
-//! Mixed GOAT failures must not turn request-local fallback into sticky lock-in.
+//! Mixed GOAT failures preserve sticky routing across temporary Key waits.
 use axum::http::StatusCode;
+use ocg_core::crypto::StaticKeyCipher;
+use ocg_core::db::Database;
 use ocg_core::gateway::provider_adapter::install_goat_loopback_route_for_test;
 use ocg_core::models::RoutingMode;
 use ocg_core::provider::{COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS as MODEL, ZEN_FREE_ACCOUNT_ID};
+use ocg_core::state::CoreStateInner;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
+use std::time::{Duration, Instant};
 #[path = "fixtures/gateway_fallback.rs"]
 mod fixture;
 use fixture::*;
@@ -11,8 +19,8 @@ const TRANSIENT: &str = r#"{"error":{"message":"Upstream model provider is tempo
 const CREDIT_ERROR: &str = r#"{"error":{"code":"BAD_REQUEST","message":"You have insufficient credits to make this request. Please purchase more credits to continue using the service.","type":"invalid_request_error"}}"#;
 
 #[tokio::test]
-async fn goat_transient_then_credit_error_reaches_third_account_without_changing_sticky_target() {
-    let p = PreparedFallback::routing(
+async fn goat_mixed_failures_respect_temporary_key_waits_without_changing_sticky_target() {
+    let mut p = PreparedFallback::routing(
         &[
             (
                 "key-a",
@@ -20,15 +28,35 @@ async fn goat_transient_then_credit_error_reaches_third_account_without_changing
             ),
             (
                 "key-h",
-                &[reply(400, CREDIT_ERROR), reply(400, CREDIT_ERROR)],
+                &[
+                    reply(400, CREDIT_ERROR),
+                    reply(400, CREDIT_ERROR),
+                    reply(400, CREDIT_ERROR),
+                    reply(400, CREDIT_ERROR),
+                ],
             ),
-            ("key-c", &[ok(), ok()]),
+            ("key-c", &[ok(), ok(), ok(), ok()]),
         ],
         &["unused"],
         RoutingMode::StickyGlobal,
         false,
     )
     .await;
+    let seconds = Arc::new(AtomicU64::new(0));
+    let wall = chrono::Utc::now();
+    let mono = Instant::now();
+    let w = seconds.clone();
+    let m = seconds.clone();
+    p.state = Arc::new(
+        CoreStateInner::new_with_test_gateway_clock(
+            Database::open(p.dir.clone()).unwrap(),
+            p.dir.clone(),
+            Arc::new(StaticKeyCipher::new("test")),
+            move || wall + chrono::Duration::seconds(w.load(Ordering::SeqCst) as i64),
+            move || mono + Duration::from_secs(m.load(Ordering::SeqCst)),
+        )
+        .unwrap(),
+    );
     let a = format!("goat-a-{}", uuid::Uuid::new_v4());
     let h_id = format!("goat-h-{}", uuid::Uuid::new_v4());
     let c = format!("goat-c-{}", uuid::Uuid::new_v4());
@@ -58,23 +86,30 @@ async fn goat_transient_then_credit_error_reaches_third_account_without_changing
     let before_a = h.account(&a);
     let before_h = h.account(&h_id);
 
-    // A's transient 429 must not stop at H's credit 400. Repeat the chain to
-    // expose any accidental persistent cooldown or replacement of sticky A.
-    for _ in 0..2 {
+    // Each 429 holds only A for 30 seconds. During that wait A emits a local
+    // resource_wait, while H's credit 400 remains eligible on the next request.
+    let mut expected_calls = vec!["key-a"];
+    for start in [0, 30] {
+        seconds.store(start, Ordering::SeqCst);
         let (status, body) = h.protocol("/v1/chat/completions", MODEL).await;
         assert_eq!(status, StatusCode::OK, "{body}");
+        expected_calls.extend(["key-a", "key-h", "key-c"]);
+        assert_eq!(h.call_keys(), expected_calls);
+
+        seconds.store(start + 29, Ordering::SeqCst);
+        let (status, body) = h.protocol("/v1/chat/completions", MODEL).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        expected_calls.extend(["key-h", "key-c"]);
+        assert_eq!(h.call_keys(), expected_calls);
     }
+    // At the second deadline, the original sticky target is tried directly.
+    seconds.store(60, Ordering::SeqCst);
     let (status, body) = h.protocol("/v1/chat/completions", MODEL).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(
-        h.call_keys(),
-        [
-            "key-a", "key-a", "key-h", "key-c", "key-a", "key-h", "key-c", "key-a"
-        ]
-    );
+    expected_calls.push("key-a");
+    assert_eq!(h.call_keys(), expected_calls);
 
-    // Neither upstream supplied a recovery deadline. In particular, a credit
-    // error remains distinct from both an authentication error and a quota reset.
+    // Temporary admission state never becomes persistent account or quota state.
     for (before, after) in [(&before_a, h.account(&a)), (&before_h, h.account(&h_id))] {
         assert_eq!(after.enabled, before.enabled);
         assert_eq!(after.cooldown_until, before.cooldown_until);
@@ -87,15 +122,45 @@ async fn goat_transient_then_credit_error_reaches_third_account_without_changing
         assert_eq!(after.last_error, before.last_error);
         assert_eq!(after.updated_at, before.updated_at);
     }
+    let (status, view) = v4_get(h.port, "/credentials").await;
+    assert_eq!(status, StatusCode::OK, "{view}");
+    for account_id in [&a, &h_id] {
+        let credential = identity_refs_for(&h.state, account_id).credential_id;
+        let row = view["credentials"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == credential)
+            .unwrap();
+        assert!(
+            row.get("quotaRecovery").is_none(),
+            "an inference error must not publish durable quota recovery: {row}"
+        );
+    }
 
     let logs = h.logs();
-    assert_eq!(logs.len(), 8);
-    for (code, account_id, attempt) in [(429, &a, 1), (400, &h_id, 2)] {
+    assert_eq!(logs.len(), 14);
+    let waits: Vec<_> = logs
+        .iter()
+        .filter(|row| row.error_stage.as_deref() == Some("resource_wait"))
+        .collect();
+    assert_eq!(waits.len(), 2);
+    for row in waits {
+        assert_eq!(row.account_id, a);
+        assert_eq!(row.attempt, Some(1));
+        assert!(row.http_status.is_none());
+        assert!(row.cost.is_none());
+        assert_eq!(
+            row.diagnostic.as_ref().unwrap()["retry_action"],
+            "try_next_account"
+        );
+    }
+    for (code, account_id, attempt, count) in [(429, &a, 1, 2), (400, &h_id, 2, 4)] {
         let failed: Vec<_> = logs
             .iter()
             .filter(|row| row.http_status == Some(code))
             .collect();
-        assert_eq!(failed.len(), 2);
+        assert_eq!(failed.len(), count);
         for row in failed {
             assert_eq!(&row.account_id, account_id);
             assert_eq!(row.attempt, Some(attempt));
@@ -112,6 +177,6 @@ async fn goat_transient_then_credit_error_reaches_third_account_without_changing
                 row.account_id == c && row.http_status == Some(200) && row.attempt == Some(3)
             })
             .count(),
-        2
+        4
     );
 }

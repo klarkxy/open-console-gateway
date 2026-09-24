@@ -8,7 +8,7 @@
     @update:show="setVisible"
   >
     <n-alert v-if="unsupportedReason" type="warning" :show-icon="false" class="form-error" role="status">
-      {{ unsupportedReason }}
+      {{ t(unsupportedReason) }}
     </n-alert>
     <n-alert v-else-if="formError" type="error" class="form-error" role="alert">
       {{ formError }}
@@ -20,7 +20,7 @@
       @submit.prevent="submit"
     >
       <template v-if="mode === 'rotate'">
-        <p class="field-hint">{{ t("只替换本机此后请求使用的 Key。供应商侧原凭据不会被撤销，仍由你自行管理。") }}</p>
+        <p class="field-hint">{{ t("仅替换本机后续请求使用的 Key。供应商侧原凭据不会被撤销，仍由你自行管理。") }}</p>
         <n-form-item :label="t('API Key')" required>
           <n-input
             ref="secretInputRef"
@@ -29,7 +29,7 @@
             show-password-on="click"
             autofocus
             :disabled="busy"
-            :placeholder="t('请填写新 Key')"
+            :placeholder="t('填写新 Key')"
             :input-props="{ 'aria-label': t('API Key'), autocomplete: 'off' }"
           />
         </n-form-item>
@@ -161,7 +161,7 @@ import {
   type CredentialEditorMode,
   type CredentialRotateDraft,
 } from "../domain/account-credential.ts";
-import { t } from "../i18n/index.ts";
+import { t, type MessageKey } from "../i18n/index.ts";
 import FormSurface from "./FormSurface.vue";
 
 const props = defineProps<{
@@ -169,7 +169,7 @@ const props = defineProps<{
   mode: CredentialEditorMode;
   binding: IdentityBinding | null;
   connection: Connection | null;
-  unsupportedReason: string | null;
+  unsupportedReason: MessageKey | null;
   busy: boolean;
 }>();
 
@@ -284,11 +284,11 @@ watch(() => [props.show, props.mode] as const, ([show]) => {
 
 <style scoped>
 .form-error {
-  margin-bottom: 12px;
+  margin-bottom: var(--ocg-space-md);
 }
 
 .field-hint {
-  margin: 0 0 12px;
+  margin: 0 0 var(--ocg-space-md);
   color: var(--ocg-muted);
   font-size: var(--ocg-font-xs);
 }
@@ -296,13 +296,13 @@ watch(() => [props.show, props.mode] as const, ([show]) => {
 .model-rows,
 .destination-rows {
   display: grid;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
 }
 
 .model-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
   align-items: center;
 }
 

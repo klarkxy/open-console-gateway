@@ -112,7 +112,7 @@
           class="usage-save-error"
           role="alert"
         >
-          {{ t("用量保存失败: {error}", {
+          {{ t("用量保存失败：{error}", {
             error: edits[limit.key].error || "",
           }) }}
         </span>
@@ -175,7 +175,7 @@ function resetsSecondLabel(key: UsageKey): string {
 .usage-editor-popover {
   display: grid;
   width: 100%;
-  gap: 12px;
+  gap: var(--ocg-space-md);
 }
 
 .usage-editor-caption {
@@ -187,11 +187,11 @@ function resetsSecondLabel(key: UsageKey): string {
 
 .usage-editor-row {
   display: grid;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
 }
 
 .usage-editor-row + .usage-editor-row {
-  padding-top: 12px;
+  padding-top: var(--ocg-space-md);
   border-top: 1px solid var(--ocg-divider);
 }
 
@@ -199,7 +199,7 @@ function resetsSecondLabel(key: UsageKey): string {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: 12px;
+  gap: var(--ocg-space-md);
   color: var(--ocg-ink);
   font-size: var(--ocg-font-sm);
   font-weight: 600;

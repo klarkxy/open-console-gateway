@@ -14,6 +14,7 @@ function account(id: string, providerId: string, setupStep: "ready" | "google_ac
 function contracts(providerId: string, supported: boolean): ProviderContractsResponse {
   return {
     revision: 1,
+    process_generation: 1,
     providers: [{
       scope_kind: "provider",
       scope_id: providerId,

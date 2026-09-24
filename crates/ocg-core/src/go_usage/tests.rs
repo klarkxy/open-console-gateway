@@ -434,24 +434,6 @@ fn expired_window_ceil_slack_clamps_to_max() {
     );
 }
 
-#[test]
-fn remaining_minutes_round_up() {
-    let now = fixed_now();
-    assert_eq!(ceil_minutes_until(now, now), 0);
-    assert_eq!(
-        ceil_minutes_until(now + ChronoDuration::milliseconds(1), now),
-        1
-    );
-    assert_eq!(
-        ceil_minutes_until(now + ChronoDuration::seconds(90), now),
-        2
-    );
-    assert_eq!(
-        ceil_minutes_until(now + ChronoDuration::minutes(300), now),
-        300
-    );
-}
-
 #[tokio::test]
 async fn fetch_official_success_fixture_over_http() {
     let now = Utc::now();

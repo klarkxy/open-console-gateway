@@ -521,6 +521,73 @@ pub struct EffectiveContractSet {
 }
 
 impl EffectiveContractSet {
+    /// Compatibility/dashboard evidence view. Routing decisions belong to the
+    /// saved destination catalog; evidence and override labels remain visible.
+    pub(crate) fn apply_destination_configuration(
+        &mut self,
+        projection: &crate::destination_projection::DestinationProjection,
+    ) {
+        let destinations: HashMap<_, _> = projection
+            .destinations
+            .iter()
+            .map(|destination| (destination.id.as_str(), destination))
+            .collect();
+        let by_account: HashMap<_, _> = projection
+            .credentials
+            .iter()
+            .filter_map(|credential| {
+                destinations
+                    .get(credential.destination_id.as_str())
+                    .map(|destination| (credential.legacy_account_id.as_str(), *destination))
+            })
+            .collect();
+        for scope in self
+            .providers
+            .values_mut()
+            .chain(self.custom_endpoints.values_mut())
+        {
+            let destination = match &scope.scope {
+                ContractScope::Provider(id) => destinations
+                    .get(ocg_domain::destination::destination_id_for_builtin(id).as_str())
+                    .copied(),
+                ContractScope::CustomEndpoint(id) => by_account.get(id.as_str()).copied(),
+            };
+            let Some(destination) = destination else {
+                continue;
+            };
+            scope.catalog.models = destination
+                .catalog
+                .iter()
+                .map(|model| model.public_model.clone())
+                .collect();
+            for model in scope.models.values_mut() {
+                let saved = destination
+                    .catalog
+                    .iter()
+                    .find(|saved| saved.public_model.eq_ignore_ascii_case(&model.model_id));
+                for evidence in model.protocols.values_mut() {
+                    evidence.enabled = destination.enabled
+                        && saved.is_some_and(|saved| {
+                            saved.enabled && saved.protocols.contains(&evidence.protocol)
+                        });
+                    if saved.is_some_and(|saved| saved.protocols.contains(&evidence.protocol)) {
+                        evidence.available = true;
+                    }
+                }
+                if let Some(preferred) = saved.and_then(|saved| saved.preferred) {
+                    model.preferred_protocol = preferred;
+                }
+                model.routable = model.has_enabled_protocol() && scope.production_inference;
+                if !model.routable && model.disabled_reasons.is_empty() {
+                    model.disabled_reasons.push("model_disabled".to_string());
+                } else if model.routable {
+                    model.disabled_reasons.clear();
+                }
+            }
+            scope.catalog_routable = scope.models.values().any(|model| model.routable);
+        }
+    }
+
     pub fn scope(&self, scope: &ContractScope) -> Option<&EffectiveScopeContract> {
         match scope {
             ContractScope::Provider(id) => self.providers.get(id),
@@ -656,14 +723,6 @@ pub fn select_upstream_protocol(
         return Err(ProtocolSelectError::new(NO_ENABLED_UPSTREAM_PROTOCOL));
     }
     let preferred = model.preferred_protocol;
-    // CPA keeps its existing branch: matching Chat/Responses/Messages pass
-    // through; Gemini falls through to preferred / adapter fallback.
-    if contract.adapter_kind == ProviderAdapterKind::Cpa
-        && let Some(client_protocol) = protocol_from_api(client)
-        && available.contains(&client_protocol)
-    {
-        return Ok(protocol_to_api(client_protocol));
-    }
     select_enabled_upstream(client, preferred, &available, contract.fallback_priority)
 }
 
@@ -780,7 +839,14 @@ pub fn static_verified_protocols(
                 ocg_domain::protocol::command_code_supported_formats(model_id).to_vec()
             }
         }
-        ProviderAdapterKind::MiniMaxCn | ProviderAdapterKind::KimiCn => {
+        ProviderAdapterKind::MiniMaxCn => {
+            return vec![
+                UpstreamProtocolKind::ChatCompletions,
+                UpstreamProtocolKind::Messages,
+                UpstreamProtocolKind::Responses,
+            ];
+        }
+        ProviderAdapterKind::KimiCn => {
             return vec![
                 UpstreamProtocolKind::ChatCompletions,
                 UpstreamProtocolKind::Messages,
@@ -1150,11 +1216,7 @@ fn merge_custom_scope(
     let descriptor =
         ProviderRegistry::get(CUSTOM_PROVIDER_ID).expect("custom offering is registered");
     let revision = persisted.map(|row| row.revision).unwrap_or(1);
-    let declared: Vec<(String, UpstreamProtocolKind)> = runtime
-        .capabilities
-        .iter()
-        .map(|capability| (capability.public_model.clone(), capability.protocol))
-        .collect();
+    let declared: Vec<(String, UpstreamProtocolKind)> = runtime.declared_protocols();
     let mut catalog_models = Vec::new();
     let mut catalog_seen = HashSet::new();
     for (model_id, _) in &declared {
@@ -1278,9 +1340,14 @@ fn merge_model_contract(
     overrides: &[PersistedModelProtocolOverride],
     adapter_routable: bool,
 ) -> EffectiveModelContract {
-    let default_enabled = adapter != ProviderAdapterKind::CommandCodeGoat
-        || command_code_goat_includes_model(model_id);
     let official_docs = official_static_protocols(adapter, model_id, evidence);
+    // GOAT extras stay Auto-off until official-docs Static evidence exists.
+    // Included preset rows, and every other sealed adapter, default on once a
+    // trusted protocol baseline makes the protocol available. Directory
+    // discovery still cannot assert Chat for a model with no protocol evidence.
+    let default_enabled = adapter != ProviderAdapterKind::CommandCodeGoat
+        || command_code_goat_includes_model(model_id)
+        || !official_docs.is_empty();
     let preferred = official_docs
         .first()
         .copied()

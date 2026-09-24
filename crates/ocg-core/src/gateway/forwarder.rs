@@ -1,3 +1,4 @@
+use crate::account_control::AccountControlHost;
 use crate::custom_http::{build_custom_http_client_for_route, json_content_headers};
 use crate::db::{Database, ForwardLogDiagnosticUpdate};
 use crate::gateway::attempt::{
@@ -5,15 +6,19 @@ use crate::gateway::attempt::{
     CredentialResolver, ProxyRoutingModel, TransportFailureKind, TransportSendFailure,
     UpstreamAuth,
 };
+use crate::gateway::attempt_pricing::apply_native_cost_attribution;
 use crate::gateway::classify::{
     PreflightKind, ProviderErrorClass, RateLimitFallback, StreamClassifyInput,
     TransportClassifyInput, classify_http, classify_preflight, classify_stream, classify_transport,
-    rate_limit_fallback, rate_limit_window_and_deadline, schedule_go_usage_sync,
+    rate_limit_fallback,
 };
 use crate::gateway::diagnostics::{
     ErrorDiagnostic, RequestTrace, api_format_name, emit_failure, emit_legacy_tool_compat,
     redact_known_secret, redact_known_secret_values, safe_upstream_headers,
     sanitize_upstream_error_value_with_known_secret, serialize_diagnostic,
+};
+use crate::gateway::failure::decode::{
+    decode as decode_failure, openrouter_free_rejection, temporary_429_deadline,
 };
 use crate::gateway::materialize::native_log_identity;
 use crate::gateway::protocol::{
@@ -21,19 +26,15 @@ use crate::gateway::protocol::{
     has_usage, merge_stream_usage, transform_response,
 };
 use crate::gateway::protocol_stream::StreamConverter;
-use crate::gateway::provider_adapter;
+use crate::gateway::recovery::{RecoveryPermit, ResourceSet};
 use crate::gateway::routing::resolve_conversation_key;
 use crate::http_client::RouteLabel;
-use crate::kernel::pricing::PricingSnapshot;
 use crate::kernel::protocol::ApiFormat;
-use crate::models::{
-    Account, AppConfig, ForwardLog, ForwardLogNativeAttribution, ForwardMetrics, UsageWindowKind,
-};
-use crate::platform::{PlatformAccount, PlatformLink};
-use crate::pricing::{
-    ProviderPricingEvidence, ProviderScopedPricingSnapshot, latest_provider_pricing_snapshot,
-};
+use crate::models::{AppConfig, ForwardLog, ForwardMetrics, UsageWindowKind};
+use crate::provider::ProviderAdapterKind;
+use crate::routing_snapshot::ExecutionCredential;
 use crate::state::CoreState;
+use crate::usage_sync::spawn_reactive_usage_refresh;
 use anyhow::Result;
 use axum::body::Body;
 use axum::http::{HeaderMap, StatusCode};
@@ -41,6 +42,7 @@ use axum::response::{IntoResponse, Response};
 use bytes::BytesMut;
 use chrono::Utc;
 use futures_util::StreamExt;
+use ocg_domain::destination::{AdapterKind, sealed_capabilities};
 use parking_lot::Mutex;
 use reqwest::Client;
 use serde_json::Value;
@@ -51,9 +53,12 @@ const MAX_UPSTREAM_ERROR_BODY_BYTES: usize = 64 * 1024;
 
 mod live_send;
 
+use crate::gateway::attempt_pricing::{
+    PlatformAttemptPrice, RequestPricingSnapshot, metadata_metrics, pricing_metrics,
+};
 pub(crate) use live_send::{
     LiveSendAccountGate, LiveSendAuthError, LiveSendSelection, authorize_live_send_secret,
-    confirm_live_send_secret,
+    confirm_live_send_secret, verify_execution_authorization,
 };
 
 /// Host secret resolution for the account the outer loop selected. Live
@@ -61,60 +66,35 @@ pub(crate) use live_send::{
 /// retry reuses the original captured selection.
 pub(crate) struct HostCredentialResolver<'a> {
     state: &'a CoreState,
-    account: &'a Account,
     selection: &'a LiveSendSelection,
-    plan: &'a RequestPlan,
     spec: &'a AttemptSpec,
 }
 
 impl<'a> HostCredentialResolver<'a> {
     pub(crate) fn new(
         state: &'a CoreState,
-        account: &'a Account,
+        _account: &'a ExecutionCredential,
         selection: &'a LiveSendSelection,
-        plan: &'a RequestPlan,
+        _plan: &'a RequestPlan,
         spec: &'a AttemptSpec,
     ) -> Self {
         Self {
             state,
-            account,
             selection,
-            plan,
             spec,
         }
     }
 
-    fn resolve_live(&self, handle: &CredentialHandle) -> Result<Option<String>, LiveSendAuthError> {
-        match handle {
-            CredentialHandle::None => Ok(None),
-            CredentialHandle::Account { id } => {
-                if id != &self.account.id {
-                    return Err(LiveSendAuthError::Unauthorized(
-                        "refusing to send credentials: selected credential is no longer authorized for this attempt"
-                            .into(),
-                    ));
-                }
-                authorize_live_send_secret(
-                    self.state,
-                    self.selection,
-                    self.account,
-                    self.plan,
-                    self.spec,
-                    LiveSendAccountGate::RequireEnabled,
-                )
-            }
-        }
+    fn resolve_live(
+        &self,
+        _handle: &CredentialHandle,
+    ) -> Result<Option<String>, LiveSendAuthError> {
+        live_send::authorize_execution_send(self.state, self.selection, self.spec, true)
     }
-
-    fn confirm_live(&self) -> Result<(), LiveSendAuthError> {
-        confirm_live_send_secret(
-            self.state,
-            self.selection,
-            self.account,
-            self.plan,
-            self.spec,
-            LiveSendAccountGate::RequireEnabled,
-        )
+    fn confirm_live(
+        &self,
+    ) -> Result<Option<crate::quota_recovery::QuotaEpisode>, LiveSendAuthError> {
+        live_send::confirm_execution_send(self.state, self.selection, self.spec)
     }
 }
 
@@ -139,7 +119,7 @@ trait AttemptSink {
     #[allow(clippy::too_many_arguments)]
     fn insert(
         &self,
-        account: &Account,
+        account: &ExecutionCredential,
         model: &str,
         status: &str,
         http_status: Option<i32>,
@@ -176,7 +156,7 @@ impl<'a> DbAttemptSink<'a> {
 impl AttemptSink for DbAttemptSink<'_> {
     fn insert(
         &self,
-        account: &Account,
+        account: &ExecutionCredential,
         model: &str,
         status: &str,
         http_status: Option<i32>,
@@ -226,9 +206,9 @@ struct ForwardOnceOutput {
     result: std::result::Result<reqwest::Response, AttemptTransportError>,
 }
 
-/// Exactly one upstream POST. Owns transport selection and timeouts only.
+/// Prepare transport and request before the final live credential check.
 #[allow(clippy::too_many_arguments)]
-async fn forward_once(
+fn build_attempt_request(
     spec: &AttemptSpec,
     snapshot_client: &Client,
     route: RouteLabel,
@@ -238,7 +218,7 @@ async fn forward_once(
     headers: reqwest::header::HeaderMap,
     body: bytes::Bytes,
     stream: bool,
-) -> Result<ForwardOnceOutput> {
+) -> Result<reqwest::RequestBuilder> {
     let secret_bearing = headers_carry_upstream_secret(&headers);
     let mut request = match spec.proxy_routing {
         ProxyRoutingModel::IsolatedTrustedAdmin => {
@@ -276,6 +256,14 @@ async fn forward_once(
     if !stream {
         request = request.timeout(timeouts.non_stream);
     }
+    Ok(request)
+}
+
+async fn forward_once(
+    request: reqwest::RequestBuilder,
+    timeouts: AttemptTimeouts,
+    stream: bool,
+) -> Result<ForwardOnceOutput> {
     let started = Instant::now();
     let send_future = request.send();
     let result = if stream {
@@ -318,495 +306,6 @@ pub struct ForwardResult {
 }
 
 #[derive(Clone)]
-enum RequestPricingSnapshot {
-    OpenCode(Arc<PricingSnapshot>),
-    Provider(Arc<ProviderScopedPricingSnapshot>),
-    /// Linked Custom Key: exact frozen platform price, or fail-closed unknown.
-    /// Never inherits Go / GOAT / Ollama / USD provider rows.
-    Platform(PlatformAttemptPrice),
-    OfficialApi(crate::official_api::OfficialAttemptPrice),
-    Unpriced,
-}
-
-/// Per-attempt platform price captured from the link snapshot only.
-#[derive(Clone)]
-enum PlatformAttemptPrice {
-    Frozen(FrozenPlatformPrice),
-    Unknown { provenance: Option<String> },
-}
-
-#[derive(Clone)]
-struct FrozenPlatformPrice {
-    provenance: String,
-    currency: String,
-    input: f64,
-    output: f64,
-    cache_read: Option<f64>,
-    cache_write: Option<f64>,
-}
-
-impl From<Arc<PricingSnapshot>> for RequestPricingSnapshot {
-    fn from(snapshot: Arc<PricingSnapshot>) -> Self {
-        Self::OpenCode(snapshot)
-    }
-}
-
-impl RequestPricingSnapshot {
-    fn for_account(state: &CoreState, account: &Account, go: Arc<PricingSnapshot>) -> Self {
-        if account.provider_id == crate::provider::OPENCODE_PROVIDER_ID {
-            return Self::OpenCode(go);
-        }
-        if !crate::provider::is_command_code_goat(&account.provider_id)
-            && account.provider_id != crate::provider::OLLAMA_PROVIDER_ID
-        {
-            return Self::Unpriced;
-        }
-        let loaded = latest_provider_pricing_snapshot(&state.db.lock(), &account.provider_id);
-        match loaded {
-            Ok(Some(snapshot)) if snapshot.evidence() == ProviderPricingEvidence::Verified => {
-                Self::Provider(Arc::new(snapshot))
-            }
-            Ok(_) => Self::Unpriced,
-            Err(error) => {
-                eprintln!(
-                    "warning: failed to load provider pricing for {}/{}: {error}",
-                    account.provider_id, account.provider_id
-                );
-                Self::Unpriced
-            }
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn estimate(
-        &self,
-        model: &str,
-        prompt_tokens: i64,
-        completion_tokens: i64,
-        cached_tokens: i64,
-        cache_creation_tokens: i64,
-        service_tier: Option<&str>,
-    ) -> crate::kernel::pricing::PricingEstimate {
-        match self {
-            Self::OpenCode(snapshot) => snapshot.estimate(
-                model,
-                prompt_tokens,
-                completion_tokens,
-                cached_tokens,
-                cache_creation_tokens,
-                service_tier,
-            ),
-            Self::Provider(snapshot) => snapshot.estimate(
-                model,
-                prompt_tokens,
-                completion_tokens,
-                cached_tokens,
-                cache_creation_tokens,
-                Utc::now(),
-            ),
-            Self::Platform(price) => price.estimate(),
-            Self::OfficialApi(price) => {
-                let amount = (model == price.model)
-                    .then(|| {
-                        price.amount(
-                            prompt_tokens,
-                            completion_tokens,
-                            cached_tokens,
-                            cache_creation_tokens,
-                        )
-                    })
-                    .flatten();
-                let usd = amount.filter(|_| price.sheet.kind.currency() == "USD");
-                crate::kernel::pricing::PricingEstimate {
-                    raw_cost_usd: usd,
-                    quota_debit: None,
-                    effective_paid_cost_usd: None,
-                    cost: usd,
-                    pricing_revision_id: Some(price.sheet.revision.clone()),
-                    quota_multiplier: None,
-                    local_adjustment_multiplier: None,
-                    cost_state: if usd.is_some() {
-                        "priced"
-                    } else if amount.is_some() {
-                        "unknown"
-                    } else {
-                        "unpriced"
-                    },
-                }
-            }
-            Self::Unpriced => crate::kernel::pricing::PricingEstimate {
-                raw_cost_usd: None,
-                quota_debit: None,
-                effective_paid_cost_usd: None,
-                cost: None,
-                pricing_revision_id: None,
-                quota_multiplier: None,
-                local_adjustment_multiplier: None,
-                cost_state: "unpriced",
-            },
-        }
-    }
-
-    fn revision(&self) -> Option<&str> {
-        match self {
-            Self::OpenCode(snapshot) => Some(&snapshot.revision),
-            Self::Provider(snapshot) => Some(snapshot.revision()),
-            Self::Platform(price) => price.provenance(),
-            Self::OfficialApi(price) => Some(&price.sheet.revision),
-            Self::Unpriced => None,
-        }
-    }
-
-    fn provider_identity(&self) -> Option<&str> {
-        match self {
-            Self::OpenCode(_) => Some(crate::provider::OPENCODE_PROVIDER_ID),
-            Self::Provider(snapshot) => Some(snapshot.provider_id()),
-            Self::Platform(_) => Some(crate::provider::CUSTOM_PROVIDER_ID),
-            Self::OfficialApi(price) => Some(&price.provider_id),
-            Self::Unpriced => None,
-        }
-    }
-}
-
-impl PlatformAttemptPrice {
-    fn provenance(&self) -> Option<&str> {
-        match self {
-            Self::Frozen(price) => Some(&price.provenance),
-            Self::Unknown { provenance } => provenance.as_deref(),
-        }
-    }
-
-    fn estimate(&self) -> crate::kernel::pricing::PricingEstimate {
-        crate::kernel::pricing::PricingEstimate {
-            raw_cost_usd: None,
-            quota_debit: None,
-            effective_paid_cost_usd: None,
-            cost: None,
-            pricing_revision_id: self.provenance().map(str::to_string),
-            quota_multiplier: None,
-            local_adjustment_multiplier: None,
-            cost_state: "unknown",
-        }
-    }
-}
-
-fn estimate_platform_native(
-    price: &FrozenPlatformPrice,
-    prompt_tokens: i64,
-    completion_tokens: i64,
-    cached_tokens: i64,
-    cache_creation_tokens: i64,
-) -> Option<f64> {
-    let prompt = prompt_tokens.max(0) as f64;
-    let completion = completion_tokens.max(0) as f64;
-    let cached = (cached_tokens.max(0) as f64).min(prompt);
-    let cache_creation = (cache_creation_tokens.max(0) as f64).min((prompt - cached).max(0.0));
-    let uncached = prompt - cached - cache_creation;
-    if cached > 0.0 && price.cache_read.is_none() {
-        return None;
-    }
-    if cache_creation > 0.0 && price.cache_write.is_none() {
-        return None;
-    }
-    let mut native = uncached * price.input + completion * price.output;
-    if let Some(cache_read) = price.cache_read {
-        native += cached * cache_read;
-    }
-    if let Some(cache_write) = price.cache_write {
-        native += cache_creation * cache_write;
-    }
-    native.is_finite().then_some(native)
-}
-
-fn platform_price_for_attempt(
-    state: &CoreState,
-    account: &Account,
-    upstream_model: &str,
-    endpoint: Option<&str>,
-) -> Option<PlatformAttemptPrice> {
-    let db = state.db.lock();
-    let links = db.list_platform_links().ok()?;
-    let link = links
-        .into_iter()
-        .find(|link| link.account_id == account.id)?;
-    if db
-        .get_account(&account.id)
-        .ok()
-        .flatten()
-        .is_none_or(|current| current.key_cipher != account.key_cipher)
-        || endpoint.is_some_and(|url| {
-            db.account_custom_config(&account.id)
-                .ok()
-                .flatten()
-                .is_none_or(|config| config.endpoint_url != url)
-        })
-    {
-        return Some(PlatformAttemptPrice::Unknown {
-            provenance: Some("platform:attempt_identity_changed".into()),
-        });
-    }
-    let parent = match db.platform_account(&link.platform_account_id) {
-        Ok(Some(parent)) => parent,
-        _ => {
-            return Some(PlatformAttemptPrice::Unknown {
-                provenance: Some(format!("{}:missing", link.platform_account_id)),
-            });
-        }
-    };
-    Some(select_link_platform_price(
-        &link,
-        &parent,
-        upstream_model,
-        Utc::now().timestamp(),
-    ))
-}
-
-fn select_link_platform_price(
-    link: &PlatformLink,
-    parent: &PlatformAccount,
-    upstream_model: &str,
-    now: i64,
-) -> PlatformAttemptPrice {
-    let unknown = |reason: &str| PlatformAttemptPrice::Unknown {
-        provenance: Some(format!(
-            "{}:{}:{}:{}:{reason}",
-            parent.id,
-            parent.version,
-            link.group.id.as_deref().unwrap_or(""),
-            upstream_model
-        )),
-    };
-    let Some(group_id) = link
-        .group
-        .id
-        .as_deref()
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-    else {
-        return unknown("auto");
-    };
-    if group_id == "auto" || !link.group.auto_groups.is_empty() {
-        return unknown("auto");
-    }
-    let Some(snapshot) = link.snapshot.as_ref() else {
-        return unknown("nosnap");
-    };
-    if snapshot.stale {
-        return unknown("stale");
-    }
-    let matches = snapshot
-        .prices
-        .iter()
-        .filter(|price| {
-            price.model == upstream_model
-                && price.group_id.as_deref() == Some(group_id)
-                && !price.official_reference
-        })
-        .collect::<Vec<_>>();
-    if matches.len() != 1 {
-        return unknown("nomatch");
-    }
-    let price = matches[0];
-    if price.official_reference {
-        return unknown("official");
-    }
-    if price.unavailable_reason.is_some() {
-        return unknown("unavailable");
-    }
-    if now >= price.valid_until {
-        return unknown("expired");
-    }
-    let Some(input) = finite_nonneg_rate(price.input) else {
-        return unknown("incomplete");
-    };
-    let Some(output) = finite_nonneg_rate(price.output) else {
-        return unknown("incomplete");
-    };
-    let currency = price.currency.trim();
-    if currency.is_empty() {
-        return unknown("incomplete");
-    }
-    let cache_read = match optional_finite_nonneg_rate(price.cache_read) {
-        Ok(rate) => rate,
-        Err(()) => return unknown("incomplete"),
-    };
-    let cache_write = match optional_finite_nonneg_rate(price.cache_write) {
-        Ok(rate) => rate,
-        Err(()) => return unknown("incomplete"),
-    };
-    PlatformAttemptPrice::Frozen(FrozenPlatformPrice {
-        provenance: format!(
-            "{}:{}:{group_id}:{upstream_model}:{}:{}:{}",
-            parent.id, parent.version, price.valid_until, price.source, snapshot.observed_at
-        ),
-        currency: currency.to_string(),
-        input,
-        output,
-        cache_read,
-        cache_write,
-    })
-}
-
-fn finite_nonneg_rate(value: Option<f64>) -> Option<f64> {
-    value.filter(|rate| rate.is_finite() && *rate >= 0.0)
-}
-
-fn optional_finite_nonneg_rate(value: Option<f64>) -> Result<Option<f64>, ()> {
-    match value {
-        None => Ok(None),
-        Some(rate) if rate.is_finite() && rate >= 0.0 => Ok(Some(rate)),
-        Some(_) => Err(()),
-    }
-}
-
-fn bind_platform_attempt_price(
-    state: &CoreState,
-    account: &Account,
-    context: &mut ForwardAttemptContext,
-    pricing: RequestPricingSnapshot,
-    endpoint: Option<&str>,
-) -> RequestPricingSnapshot {
-    let Some(platform) =
-        platform_price_for_attempt(state, account, &context.upstream_model, endpoint)
-    else {
-        return pricing;
-    };
-    context.platform_price = Some(platform.clone());
-    RequestPricingSnapshot::Platform(platform)
-}
-
-fn bind_official_attempt_price(
-    state: &CoreState,
-    account: &Account,
-    plan: &RequestPlan,
-    dynamics: &[crate::dynamic::DynamicProviderRuntime],
-    context: &mut ForwardAttemptContext,
-    original: RequestPricingSnapshot,
-) -> RequestPricingSnapshot {
-    if !matches!(original, RequestPricingSnapshot::Unpriced)
-        || platform_request_has_variable_cost(&plan.body, plan.service_tier.as_deref())
-    {
-        return original;
-    }
-    let Ok(body) = serde_json::from_slice::<Value>(&plan.body) else {
-        return original;
-    };
-    // Hosted tools have charges outside token pricing; ordinary function tools do not.
-    if body
-        .get("tools")
-        .and_then(Value::as_array)
-        .is_some_and(|tools| {
-            tools.iter().any(|tool| {
-                tool.get("type")
-                    .and_then(Value::as_str)
-                    .is_some_and(|kind| !matches!(kind, "function" | "custom"))
-            })
-        })
-        || body.get("web_search_options").is_some()
-    {
-        return original;
-    }
-    let Some(runtime) = dynamics
-        .iter()
-        .find(|runtime| runtime.id == account.provider_id)
-    else {
-        return original;
-    };
-    let Some(kind) = crate::official_api::kind_for_runtime(runtime) else {
-        return original;
-    };
-    let Some(endpoint) = plan
-        .custom_route
-        .as_ref()
-        .map(|route| route.endpoint_url.as_str())
-    else {
-        return original;
-    };
-    let protocol = match plan.upstream {
-        ApiFormat::ChatCompletions => crate::provider::UpstreamProtocolKind::ChatCompletions,
-        ApiFormat::Responses => crate::provider::UpstreamProtocolKind::Responses,
-        ApiFormat::Messages => crate::provider::UpstreamProtocolKind::Messages,
-        ApiFormat::Gemini => return original,
-    };
-    if !crate::official_api::route_is_official(kind, endpoint, protocol) {
-        return original;
-    }
-    let Ok(sheet) = state.db.lock().official_api_prices(&runtime.id, kind) else {
-        return original;
-    };
-    let price = crate::official_api::OfficialAttemptPrice {
-        provider_id: runtime.id.clone(),
-        sheet,
-        model: plan.model.clone(),
-        at: state.sample_gateway_clock().0,
-    };
-    context.official_price = Some(price.clone());
-    RequestPricingSnapshot::OfficialApi(price)
-}
-
-fn apply_platform_native_attribution(
-    attribution: &mut ForwardLogNativeAttribution,
-    context: &ForwardAttemptContext,
-    metrics: &ForwardMetrics,
-) {
-    let Some(PlatformAttemptPrice::Frozen(price)) = context.platform_price.as_ref() else {
-        return;
-    };
-    if metrics.cost_state != "unknown" {
-        return;
-    }
-    let Some(value) = estimate_platform_native(
-        price,
-        metrics.prompt_tokens,
-        metrics.completion_tokens,
-        metrics.cached_tokens,
-        metrics.cache_creation_tokens,
-    ) else {
-        return;
-    };
-    attribution.native_cost_value = Some(value);
-    attribution.native_cost_unit = Some(price.currency.clone());
-    attribution.native_cost_currency = Some(price.currency.clone());
-}
-
-fn platform_request_has_variable_cost(body: &[u8], service_tier: Option<&str>) -> bool {
-    fn media(value: &Value) -> bool {
-        match value {
-            Value::Object(object) => {
-                object
-                    .get("type")
-                    .and_then(Value::as_str)
-                    .is_some_and(|kind| {
-                        matches!(
-                            kind,
-                            "image"
-                                | "image_url"
-                                | "input_image"
-                                | "input_audio"
-                                | "audio"
-                                | "video"
-                                | "input_video"
-                                | "file"
-                                | "input_file"
-                        )
-                    })
-                    || object
-                        .get("modalities")
-                        .and_then(Value::as_array)
-                        .is_some_and(|values| values.iter().any(|v| v.as_str() != Some("text")))
-                    || object.contains_key("inline_data")
-                    || object.contains_key("inlineData")
-                    || object.values().any(media)
-            }
-            Value::Array(values) => values.iter().any(media),
-            _ => false,
-        }
-    }
-    service_tier.is_some_and(|tier| tier != "default")
-        || serde_json::from_slice::<Value>(body).map_or(true, |value| media(&value))
-}
-
-#[derive(Clone)]
 struct ForwardAttemptContext {
     trace: RequestTrace,
     client_body_bytes: usize,
@@ -823,6 +322,7 @@ struct ForwardAttemptContext {
     /// the request's route-set snapshot; recorded on the forward log row.
     route: RouteLabel,
     known_secret: Option<String>,
+    restriction_details: Option<Value>,
     route_account_id: Option<String>,
     provider_id: Option<String>,
 
@@ -831,6 +331,9 @@ struct ForwardAttemptContext {
     client_key_name: Option<String>,
     platform_price: Option<PlatformAttemptPrice>,
     official_price: Option<crate::official_api::OfficialAttemptPrice>,
+    credit_attempt: Option<crate::billing::CreditAttempt>,
+    credit_log_id: Option<i64>,
+    credit_token_pricing_supported: bool,
 }
 
 impl ForwardAttemptContext {
@@ -864,6 +367,10 @@ impl ForwardAttemptContext {
             client_key_name: None,
             platform_price: None,
             official_price: None,
+            restriction_details: None,
+            credit_attempt: None,
+            credit_log_id: None,
+            credit_token_pricing_supported: true,
         }
     }
 
@@ -880,10 +387,30 @@ impl ForwardAttemptContext {
         self.known_secret = Some(known_secret.to_string());
     }
 
-    fn set_provider_route(&mut self, account: &Account, spec: &AttemptSpec) {
+    fn set_provider_route(&mut self, account: &ExecutionCredential, spec: &AttemptSpec) {
         self.route_account_id = Some(account.id.clone());
         self.provider_id = Some(account.provider_id.clone());
         self.credential_account_id = spec.credential_account_id().map(str::to_string);
+    }
+
+    fn attach_pricing(&mut self, pricing: &RequestPricingSnapshot) {
+        match pricing {
+            RequestPricingSnapshot::Platform(price) => {
+                self.platform_price = Some(price.clone());
+            }
+            RequestPricingSnapshot::OfficialApi(price) => {
+                self.official_price = Some(price.clone());
+            }
+            RequestPricingSnapshot::Credits {
+                attempt,
+                token_pricing_supported,
+                ..
+            } => {
+                self.credit_attempt = Some(attempt.clone());
+                self.credit_token_pricing_supported = *token_pricing_supported;
+            }
+            _ => {}
+        }
     }
 
     fn redact_known_secret(&self, text: &str) -> String {
@@ -931,7 +458,13 @@ impl ForwardAttemptContext {
             ));
         }
         let duration_ms = diagnostic.duration_ms.min(i64::MAX as u64) as i64;
-        let diagnostic_json = serialize_diagnostic(diagnostic);
+        let mut diagnostic_json = serialize_diagnostic(diagnostic);
+        if let Some(details) = &self.restriction_details
+            && let Ok(Value::Object(mut value)) = serde_json::from_str::<Value>(&diagnostic_json)
+        {
+            value.insert("restriction".into(), details.clone());
+            diagnostic_json = Value::Object(value).to_string();
+        }
         emit_failure(&diagnostic_json);
         FailureRecord {
             error_source: spec.error_source.to_string(),
@@ -972,12 +505,15 @@ impl FailureRecord {
     }
 }
 
+// Isolated attempt tests do not own a logical-request budget.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn forward_request(
     client: &Client,
     route: RouteLabel,
     state: &CoreState,
-    account: &Account,
+    account: &ExecutionCredential,
+    adapter: ProviderAdapterKind,
     config: &AppConfig,
     plan: &RequestPlan,
     trace: &RequestTrace,
@@ -985,16 +521,17 @@ pub(crate) async fn forward_request(
     attempt: u32,
     allow_same_account_retry: bool,
     headers: HeaderMap,
-    pricing_snapshot: Arc<PricingSnapshot>,
+    pricing_snapshot: RequestPricingSnapshot,
     client_key_id: Option<&str>,
-    dynamics: &[crate::dynamic::DynamicProviderRuntime],
+    attempt_spec: &AttemptSpec,
     selection: &LiveSendSelection,
 ) -> Result<ForwardResult> {
-    forward_request_impl(
+    forward_request_with_deadline(
         client,
         route,
         state,
         account,
+        adapter,
         config,
         plan,
         trace,
@@ -1004,18 +541,20 @@ pub(crate) async fn forward_request(
         headers,
         pricing_snapshot,
         client_key_id,
-        dynamics,
+        attempt_spec,
         selection,
+        None,
     )
     .await
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn forward_request_impl(
+pub(crate) async fn forward_request_with_deadline(
     client: &Client,
     route: RouteLabel,
     state: &CoreState,
-    account: &Account,
+    account: &ExecutionCredential,
+    adapter: ProviderAdapterKind,
     config: &AppConfig,
     plan: &RequestPlan,
     trace: &RequestTrace,
@@ -1023,81 +562,33 @@ async fn forward_request_impl(
     attempt: u32,
     allow_same_account_retry: bool,
     headers: HeaderMap,
-    pricing_snapshot: Arc<PricingSnapshot>,
+    pricing_snapshot: RequestPricingSnapshot,
     client_key_id: Option<&str>,
-    dynamics: &[crate::dynamic::DynamicProviderRuntime],
+    attempt_spec: &AttemptSpec,
     selection: &LiveSendSelection,
+    request_deadline: Option<tokio::time::Instant>,
 ) -> Result<ForwardResult> {
-    let mut attempt_context =
-        ForwardAttemptContext::new(trace, client_body.len(), attempt, plan, route);
-    let pricing_snapshot = bind_platform_attempt_price(
-        state,
-        account,
-        &mut attempt_context,
-        RequestPricingSnapshot::for_account(state, account, pricing_snapshot),
-        plan.custom_route
-            .as_ref()
-            .map(|route| route.endpoint_url.as_str()),
-    );
-    let pricing_snapshot = if matches!(&pricing_snapshot, RequestPricingSnapshot::Platform(_))
-        && platform_request_has_variable_cost(&plan.body, plan.service_tier.as_deref())
-    {
-        let unknown = PlatformAttemptPrice::Unknown {
-            provenance: Some("platform:unsupported_request_pricing".into()),
-        };
-        attempt_context.platform_price = Some(unknown.clone());
-        RequestPricingSnapshot::Platform(unknown)
+    let policy_provider_id = crate::provider::ProviderRegistry::get_by_kind(adapter)
+        .map(|descriptor| descriptor.provider_id)
+        .unwrap_or(crate::provider::CUSTOM_PROVIDER_ID);
+    let openrouter_free = attempt_spec
+        .request_url()
+        .ok()
+        .and_then(|raw| reqwest::Url::parse(&raw).ok())
+        .is_some_and(|url| is_openrouter_free_request(&url, &plan.model));
+    let pricing_snapshot = if openrouter_free {
+        // Do not debit a configured paid Credit estimate for an official Free
+        // model. Keep total cost unknown because optional upstream features may
+        // have independent charges.
+        RequestPricingSnapshot::Unpriced
     } else {
         pricing_snapshot
     };
-    let pricing_snapshot = bind_official_attempt_price(
-        state,
-        account,
-        plan,
-        dynamics,
-        &mut attempt_context,
-        pricing_snapshot,
-    );
+    let mut attempt_context =
+        ForwardAttemptContext::new(trace, client_body.len(), attempt, plan, route);
+    attempt_context.attach_pricing(&pricing_snapshot);
     attempt_context.set_client_key(client_key_id, state);
-    let attempt_spec =
-        match provider_adapter::resolve_route_with_dynamics(account, config, plan, dynamics) {
-            Ok(spec) => spec,
-            Err(error) => {
-                let class = classify_preflight(PreflightKind::Route);
-                let message = format!("provider route is unavailable: {error}");
-                let failure = attempt_context.failure(FailureSpec {
-                    error_source: "gateway",
-                    error_stage: "provider_route",
-                    downstream_status: Some(StatusCode::BAD_GATEWAY.as_u16()),
-                    upstream_status: None,
-                    upstream_wait_ms: None,
-                    retry_action: Some(retry_action_name(forward_action_for_class(
-                        class,
-                        allow_same_account_retry,
-                        None,
-                    ))),
-                    upstream_headers: None,
-                    upstream_error: None,
-                    request_body: Some(client_body),
-                });
-                DbAttemptSink::new(&state.db.lock()).insert(
-                    account,
-                    &plan.model,
-                    "error",
-                    None,
-                    metadata_metrics(
-                        &pricing_snapshot,
-                        plan.service_tier.as_deref(),
-                        "not_applicable",
-                    ),
-                    Some(&message),
-                    &attempt_context,
-                    Some(failure),
-                )?;
-                return Ok(account_preflight_failure(plan, message));
-            }
-        };
-    attempt_context.set_provider_route(account, &attempt_spec);
+    attempt_context.set_provider_route(account, attempt_spec);
     // Attempt-level wire normalization: request-plan bytes are shared by every
     // candidate of a mixed chain, so the rewrite happens here after the
     // attempt is chosen and before the single send, and only for the family
@@ -1113,7 +604,7 @@ async fn forward_request_impl(
     } else if attempt_spec.restricted_upstream_url() {
         ensure_safe_upstream_base_url(&attempt_spec.base_url)?;
     }
-    let resolver = HostCredentialResolver::new(state, account, selection, plan, &attempt_spec);
+    let resolver = HostCredentialResolver::new(state, account, selection, plan, attempt_spec);
     let key = match resolver.resolve_live(&attempt_spec.credential) {
         Ok(key) => key,
         Err(error) => {
@@ -1172,6 +663,7 @@ async fn forward_request_impl(
             header.as_str(),
             "authorization"
                 | "x-api-key"
+                | "api-key"
                 | "x-goog-api-key"
                 | "cookie"
                 | "proxy-authorization"
@@ -1197,7 +689,7 @@ async fn forward_request_impl(
     apply_provider_identity_headers(
         &mut upstream_headers,
         &headers,
-        &account.provider_id,
+        adapter,
         plan.client,
         plan.log_requested_model(),
         client_body,
@@ -1214,7 +706,10 @@ async fn forward_request_impl(
     let url = attempt_spec
         .request_url()
         .map_err(|error| anyhow::anyhow!(error))?;
-    if matches!(resolved_auth, UpstreamAuth::Bearer | UpstreamAuth::XApiKey) {
+    if matches!(
+        resolved_auth,
+        UpstreamAuth::Bearer | UpstreamAuth::XApiKey | UpstreamAuth::ApiKey
+    ) {
         let key = key
             .as_deref()
             .expect("credential-bearing provider route must decrypt a key");
@@ -1259,6 +754,9 @@ async fn forward_request_impl(
             UpstreamAuth::XApiKey => {
                 upstream_headers.insert("x-api-key", key_header);
             }
+            UpstreamAuth::ApiKey => {
+                upstream_headers.insert("api-key", key_header);
+            }
             UpstreamAuth::Bearer => {
                 let authorization =
                     reqwest::header::HeaderValue::from_str(&format!("Bearer {key}"))
@@ -1291,6 +789,7 @@ async fn forward_request_impl(
                 .ok_or_else(|| anyhow::anyhow!("isolated route requires a decrypted key"))?;
             let scheme = match attempt_spec.auth {
                 UpstreamAuth::XApiKey => crate::provider::UpstreamAuthScheme::XApiKey,
+                UpstreamAuth::ApiKey => crate::provider::UpstreamAuthScheme::ApiKey,
                 _ => crate::provider::UpstreamAuthScheme::Bearer,
             };
             let mut headers = crate::custom_http::isolated_custom_headers(scheme, api_key)
@@ -1304,48 +803,184 @@ async fn forward_request_impl(
         upstream_headers
     };
 
-    if let Err(error) = resolver.confirm_live() {
-        let class = if error.is_decrypt() {
-            classify_preflight(PreflightKind::Decrypt)
-        } else {
-            classify_preflight(PreflightKind::Route)
-        };
-        let message = if error.is_decrypt() {
-            format!("failed to decrypt account credentials: {error}")
-        } else {
-            error.to_string()
-        };
-        let failure = attempt_context.failure(FailureSpec {
-            error_source: "gateway",
-            error_stage: "credential",
-            downstream_status: Some(StatusCode::BAD_GATEWAY.as_u16()),
-            upstream_status: None,
-            upstream_wait_ms: None,
-            retry_action: Some(retry_action_name(forward_action_for_class(
-                class,
-                allow_same_account_retry,
+    // Admission is operational state, not account quota or selector state.
+    // Its key uses the authorized exact endpoint/model, route and current
+    // credential/pool generation. No raw identity digest is logged.
+    let free_contract = matches!(
+        classify_http(
+            429,
+            &account.provider_id,
+            plan.channel,
+            attempt_spec.auth == UpstreamAuth::None
+        ),
+        ProviderErrorClass::RateLimited {
+            profile: ocg_gateway::classify::ErrorProfile::ZenFree
+        }
+    );
+    let proxy_identity = (route == RouteLabel::Proxy).then_some(config.proxy_url.as_str());
+    let restriction_endpoint = format!("{url}|{route:?}|{:?}|{proxy_identity:?}", plan.upstream);
+    let resources = ResourceSet::capture(
+        &state.db.lock(),
+        account,
+        &restriction_endpoint,
+        &plan.model,
+        free_contract,
+    )?;
+    let (wall, mono) = state.sample_gateway_clock();
+    let mut recovery_permit = match state.recovery.acquire(resources, wall, mono) {
+        Ok(permit) => permit,
+        Err(wait) => {
+            let message =
+                "compatible upstream resource is waiting for recovery; no upstream request sent";
+            attempt_context.restriction_details = Some(serde_json::json!({"wait": wait}));
+            let failure = attempt_context.failure(FailureSpec {
+                error_source: "gateway",
+                error_stage: "resource_wait",
+                downstream_status: Some(StatusCode::SERVICE_UNAVAILABLE.as_u16()),
+                upstream_status: None,
+                upstream_wait_ms: None,
+                retry_action: Some("try_next_account"),
+                upstream_headers: None,
+                upstream_error: None,
+                request_body: Some(client_body),
+            });
+            DbAttemptSink::new(&state.db.lock()).insert(
+                account,
+                &plan.model,
+                "error",
                 None,
-            ))),
-            upstream_headers: None,
-            upstream_error: None,
-            request_body: Some(client_body),
-        });
-        DbAttemptSink::new(&state.db.lock()).insert(
-            account,
-            &plan.model,
-            "error",
-            None,
-            metadata_metrics(
-                &pricing_snapshot,
-                plan.service_tier.as_deref(),
-                "not_applicable",
-            ),
-            Some(&message),
-            &attempt_context,
-            Some(failure),
-        )?;
-        return Ok(account_preflight_failure(plan, message));
+                metadata_metrics(
+                    &pricing_snapshot,
+                    plan.service_tier.as_deref(),
+                    "not_applicable",
+                ),
+                Some(message),
+                &attempt_context,
+                Some(failure),
+            )?;
+            return Ok(ForwardResult {
+                response: protocol_status_error_response(
+                    plan.client,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    message,
+                    None,
+                ),
+                action: ForwardAction::TryNextAccount,
+                error_message: Some(message.into()),
+            });
+        }
+    };
+
+    let mut timeouts = AttemptTimeouts::from_secs(
+        config.non_stream_timeout_secs,
+        config.stream_idle_timeout_secs,
+    );
+    if let Some(deadline) = request_deadline {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            let message = "Gateway request deadline exceeded before send; no upstream request sent";
+            let failure = attempt_context.failure(FailureSpec {
+                error_source: "gateway",
+                error_stage: "request_budget",
+                downstream_status: Some(StatusCode::SERVICE_UNAVAILABLE.as_u16()),
+                upstream_status: None,
+                upstream_wait_ms: None,
+                retry_action: Some("return"),
+                upstream_headers: None,
+                upstream_error: None,
+                request_body: Some(client_body),
+            });
+            DbAttemptSink::new(&state.db.lock()).insert(
+                account,
+                &model,
+                "error",
+                None,
+                metadata_metrics(
+                    &pricing_snapshot,
+                    plan.service_tier.as_deref(),
+                    "not_applicable",
+                ),
+                Some(message),
+                &attempt_context,
+                Some(failure),
+            )?;
+            return Ok(ForwardResult {
+                response: protocol_status_error_response(
+                    plan.client,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    message,
+                    None,
+                ),
+                action: ForwardAction::Return,
+                error_message: Some(message.into()),
+            });
+        }
+        timeouts.non_stream = timeouts.non_stream.min(remaining);
+        timeouts.stream_header = timeouts.stream_header.min(remaining);
     }
+    let request = build_attempt_request(
+        attempt_spec,
+        client,
+        route,
+        config,
+        timeouts,
+        &url,
+        send_headers,
+        attempt_body,
+        plan.stream,
+    )?;
+    let quota_observation = QuotaObservation {
+        selection: selection.clone(),
+        fence: recovery_permit.quota_observation(),
+    };
+    let quota_trial = match resolver.confirm_live() {
+        Ok(episode) => episode.map(|episode| {
+            QuotaTrialGuard::new(state.clone(), episode).with_observation(quota_observation.clone())
+        }),
+        Err(error) => {
+            let class = if error.is_decrypt() {
+                classify_preflight(PreflightKind::Decrypt)
+            } else {
+                classify_preflight(PreflightKind::Route)
+            };
+            let message = if error.is_decrypt() {
+                format!("failed to decrypt account credentials: {error}")
+            } else {
+                error.to_string()
+            };
+            let failure = attempt_context.failure(FailureSpec {
+                error_source: "gateway",
+                error_stage: "credential",
+                downstream_status: Some(StatusCode::BAD_GATEWAY.as_u16()),
+                upstream_status: None,
+                upstream_wait_ms: None,
+                retry_action: Some(retry_action_name(forward_action_for_class(
+                    class,
+                    allow_same_account_retry,
+                    None,
+                ))),
+                upstream_headers: None,
+                upstream_error: None,
+                request_body: Some(client_body),
+            });
+            DbAttemptSink::new(&state.db.lock()).insert(
+                account,
+                &plan.model,
+                "error",
+                None,
+                metadata_metrics(
+                    &pricing_snapshot,
+                    plan.service_tier.as_deref(),
+                    "not_applicable",
+                ),
+                Some(&message),
+                &attempt_context,
+                Some(failure),
+            )?;
+            return Ok(account_preflight_failure(plan, message));
+        }
+    };
+    let quota_trial = Arc::new(Mutex::new(quota_trial));
 
     if let Some(compat) = &plan.legacy_tool_compat {
         emit_legacy_tool_compat(
@@ -1356,28 +991,42 @@ async fn forward_request_impl(
         );
     }
 
-    let sent = forward_once(
-        &attempt_spec,
-        client,
-        route,
-        config,
-        AttemptTimeouts::from_secs(
-            config.non_stream_timeout_secs,
-            config.stream_idle_timeout_secs,
-        ),
-        &url,
-        send_headers,
-        attempt_body,
-        plan.stream,
-    )
-    .await?;
+    // Persist the attempt before the upstream can consume it. A process exit or
+    // cancelled header/body read must remain visible to credit calibration.
+    let mut credit_guard = if attempt_context.credit_attempt.is_some() {
+        let id = DbAttemptSink::new(&state.db.lock()).insert(
+            account,
+            &model,
+            "streaming",
+            None,
+            metadata_metrics(
+                &pricing_snapshot,
+                plan.service_tier.as_deref(),
+                "not_applicable",
+            ),
+            None,
+            &attempt_context,
+            None,
+        )?;
+        attempt_context.credit_log_id = Some(id);
+        Some(CreditRequestGuard {
+            state: state.clone(),
+            context: attempt_context.clone(),
+            pricing: pricing_snapshot.clone(),
+            service_tier: plan.service_tier.clone(),
+            armed: true,
+        })
+    } else {
+        None
+    };
+    let sent = forward_once(request, timeouts, plan.stream).await?;
     let upstream_started = sent.started;
     let upstream_resp = match sent.result {
         Ok(resp) => resp,
         Err(AttemptTransportError::HeaderTimeout { timeout }) => {
             let class = classify_transport(TransportClassifyInput::HeaderTimeout);
             let detail = format!(
-                "upstream did not return response headers within {}s",
+                "upstream response header timeout after {}s",
                 timeout.as_secs()
             );
             let error_message = outcome_unknown_message(&detail);
@@ -1438,7 +1087,33 @@ async fn forward_request_impl(
             } else {
                 StatusCode::BAD_GATEWAY
             };
-            let action = forward_action_for_class(class, allow_same_account_retry, None);
+            let action = if free_contract && connect_failure {
+                observe_free_rejection(
+                    state,
+                    account,
+                    selection,
+                    &mut recovery_permit,
+                    &restriction_endpoint,
+                    &plan.model,
+                    None,
+                    &mut attempt_context,
+                )?;
+                ForwardAction::ExhaustFreeChannel
+            } else if openrouter_free && connect_failure {
+                observe_openrouter_free_rejection(
+                    state,
+                    account,
+                    selection,
+                    &mut recovery_permit,
+                    &restriction_endpoint,
+                    &plan.model,
+                    None,
+                    &mut attempt_context,
+                )?;
+                ForwardAction::TryNextAccount
+            } else {
+                forward_action_for_class(class, allow_same_account_retry, None)
+            };
             let failure = attempt_context.failure(FailureSpec {
                 error_source: "transport",
                 error_stage: if connect_failure {
@@ -1504,11 +1179,80 @@ async fn forward_request_impl(
     let body_timeout = plan
         .stream
         .then(|| StdDuration::from_secs(config.stream_idle_timeout_secs));
+    let body_timeout = match request_deadline {
+        Some(deadline) => {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            Some(body_timeout.map_or(remaining, |timeout| timeout.min(remaining)))
+        }
+        None => body_timeout,
+    };
+
+    if openrouter_free
+        && (status.is_server_error()
+            || (status.is_client_error() && status != StatusCode::TOO_MANY_REQUESTS))
+    {
+        let error_headers = upstream_resp.headers().clone();
+        let text = response_text_with_timeout(
+            upstream_resp,
+            body_timeout,
+            Some(MAX_UPSTREAM_ERROR_BODY_BYTES),
+        )
+        .await
+        .unwrap_or_else(ResponseBodyFailure::into_detail);
+        let retry_after = error_headers
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok());
+        observe_openrouter_free_rejection(
+            state,
+            account,
+            selection,
+            &mut recovery_permit,
+            &restriction_endpoint,
+            &plan.model,
+            retry_after,
+            &mut attempt_context,
+        )?;
+        let action = ForwardAction::TryNextAccount;
+        let message = format!("OpenRouter free model was rejected ({status})");
+        let failure = attempt_context.failure(FailureSpec {
+            error_source: "upstream",
+            error_stage: "upstream_http",
+            downstream_status: Some(StatusCode::BAD_GATEWAY.as_u16()),
+            upstream_status: Some(status.as_u16()),
+            upstream_wait_ms: Some(upstream_wait_ms),
+            retry_action: Some(retry_action_name(action)),
+            upstream_headers: Some(&error_headers),
+            upstream_error: Some(&text),
+            request_body: Some(client_body),
+        });
+        DbAttemptSink::new(&state.db.lock()).insert(
+            account,
+            &model,
+            if status.is_client_error() {
+                "client_error"
+            } else {
+                "error"
+            },
+            Some(status.as_u16() as i32),
+            metadata_metrics(
+                &pricing_snapshot,
+                plan.service_tier.as_deref(),
+                "not_applicable",
+            ),
+            Some(&attempt_context.sanitize_upstream_error(&text)),
+            &attempt_context,
+            Some(failure),
+        )?;
+        return Ok(ForwardResult {
+            response: error_response(plan.client, &message, None),
+            action,
+            error_message: Some(message),
+        });
+    }
 
     if status.is_server_error() {
-        // A response status is authoritative even if its error body stalls. Keep
-        // that status and never replay the request; the bounded read only affects
-        // how much safe diagnostic text we can return.
+        // A response status is authoritative even if its error body stalls.
+        // Ordinary routes retain it; Zen Free can try another compatible route.
         let error_headers = upstream_resp.headers().clone();
         let text = response_text_with_timeout(
             upstream_resp,
@@ -1519,11 +1263,26 @@ async fn forward_request_impl(
         .unwrap_or_else(ResponseBodyFailure::into_detail);
         let class = classify_http(
             status.as_u16(),
-            &account.provider_id,
+            policy_provider_id,
             plan.channel,
             attempt_spec.auth == UpstreamAuth::None,
         );
         let action = forward_action_for_class(class, allow_same_account_retry, None);
+        if class == ProviderErrorClass::FreeRejected {
+            let retry_after = error_headers
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok());
+            observe_free_rejection(
+                state,
+                account,
+                selection,
+                &mut recovery_permit,
+                &restriction_endpoint,
+                &plan.model,
+                retry_after,
+                &mut attempt_context,
+            )?;
+        }
         let error_message = format!(
             "upstream error {}: {}",
             status.as_u16(),
@@ -1565,9 +1324,8 @@ async fn forward_request_impl(
     }
 
     if status.is_client_error() {
-        // As above, a known 4xx proves the upstream rejected the request. Body
-        // read failures must not turn into a replay or account fallback except
-        // for the explicit 401/403/429 status policy below.
+        // A known 4xx proves the upstream rejected the request. Its status
+        // policy still applies if the bounded error-body read fails.
         let error_headers = upstream_resp.headers().clone();
         let text = response_text_with_timeout(
             upstream_resp,
@@ -1578,83 +1336,104 @@ async fn forward_request_impl(
         .unwrap_or_else(ResponseBodyFailure::into_detail);
         let class = super::classify::classify_http_response(
             status.as_u16(),
-            &account.provider_id,
+            policy_provider_id,
             plan.channel,
             attempt_spec.auth == UpstreamAuth::None,
             &text,
         );
-
-        match class {
-            ProviderErrorClass::RateLimited { policy } => {
-                let observed_at = state.sample_gateway_clock().0;
-                let cooldown = rate_limit_window_and_deadline(
-                    &account.provider_id,
-                    policy,
-                    &text,
-                    error_headers
-                        .get(reqwest::header::RETRY_AFTER)
-                        .and_then(|value| value.to_str().ok()),
-                    observed_at,
-                );
-                let window = cooldown.and_then(|(window, _)| window);
-                let sanitized = attempt_context.sanitize_upstream_error(&text);
-                let error_message = match cooldown {
-                    Some((_, until)) => format!(
-                        "rate limited: {} (resets in {}s)",
-                        sanitized,
-                        until.signed_duration_since(observed_at).num_seconds()
-                    ),
-                    None => format!("upstream temporarily rate limited: {sanitized}"),
-                };
-                let action = forward_action_for_class(class, allow_same_account_retry, window);
-                let failure = attempt_context.failure(FailureSpec {
-                    error_source: "upstream",
-                    error_stage: "upstream_http",
-                    downstream_status: Some(StatusCode::BAD_GATEWAY.as_u16()),
-                    upstream_status: Some(status.as_u16()),
-                    upstream_wait_ms: Some(upstream_wait_ms),
-                    retry_action: Some(retry_action_name(action)),
-                    upstream_headers: Some(&error_headers),
-                    upstream_error: Some(&text),
-                    request_body: Some(client_body),
-                });
-                {
-                    let db = state.db.lock();
-                    DbAttemptSink::new(&db).insert(
+        let retry_after = error_headers
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok());
+        let (observed_at, observed_mono) = state.sample_gateway_clock();
+        if let Some(facts) = decode_failure(class, &text, retry_after, observed_at) {
+            let decision = facts.decide();
+            let sanitized = attempt_context.sanitize_upstream_error(&text);
+            let action = if decision.exhaust_free {
+                ForwardAction::ExhaustFreeChannel
+            } else {
+                ForwardAction::TryNextAccount
+            };
+            let error_message = format!(
+                "upstream rejected this resource ({:?}): {sanitized}",
+                facts.cause
+            );
+            let downstream = if status == StatusCode::TOO_MANY_REQUESTS {
+                StatusCode::BAD_GATEWAY
+            } else {
+                status
+            };
+            let rate_limited = matches!(class, ProviderErrorClass::RateLimited { .. });
+            // Re-read live Key/binding/endpoint identity after I/O. Stale
+            // replies never write backoff, and output has not started so
+            // fallback remains allowed.
+            let recorded = {
+                let db = state.db.lock();
+                let same_generation = live_send::selection_identity_is_current(&db, selection)?
+                    && recovery_permit.permits_observation(&facts)
+                    && recovery_permit.same_generation(&ResourceSet::capture(
+                        &db,
                         account,
-                        &model,
-                        "client_error",
-                        Some(429),
-                        metadata_metrics(
-                            &pricing_snapshot,
-                            plan.service_tier.as_deref(),
-                            "not_applicable",
-                        ),
-                        Some(&sanitized),
-                        &attempt_context,
-                        Some(failure),
-                    )?;
-                    if let Some((window, until)) = cooldown {
-                        db.set_account_rate_limit_if_key_matches(
-                            &account.id,
-                            &account.key_cipher,
-                            until,
-                            &sanitized,
-                            window,
-                        )?;
+                        &restriction_endpoint,
+                        &plan.model,
+                        free_contract,
+                    )?);
+                if same_generation {
+                    if rate_limited && !free_contract {
+                        recovery_permit.observe_credential_retry(
+                            Some(temporary_429_deadline(retry_after, observed_at)),
+                            observed_mono,
+                        );
+                    } else {
+                        recovery_permit.observe_failure(&facts, decision, observed_mono);
                     }
                 }
-                // Schedule (never inline) an official usage reconciliation shortly
-                // after a real inference 429. Does not alter cooldown/failover.
-                if schedule_go_usage_sync(class) {
-                    crate::usage_sync::schedule_after_inference_429(state, &account.id);
-                }
-                return Ok(ForwardResult {
-                    response: error_response(plan.client, &error_message, None),
-                    action,
-                    error_message: Some(error_message),
-                });
+                same_generation
+            };
+            attempt_context.restriction_details = Some(serde_json::json!({
+                "facts": facts, "recorded_for_current_generation": recorded,
+                "local_reprobe": decision.wait_for_recovery,
+            }));
+            let failure = attempt_context.failure(FailureSpec {
+                error_source: "upstream",
+                error_stage: "upstream_http",
+                downstream_status: Some(downstream.as_u16()),
+                upstream_status: Some(status.as_u16()),
+                upstream_wait_ms: Some(upstream_wait_ms),
+                retry_action: Some(retry_action_name(action)),
+                upstream_headers: Some(&error_headers),
+                upstream_error: Some(&text),
+                request_body: Some(client_body),
+            });
+            DbAttemptSink::new(&state.db.lock()).insert(
+                account,
+                &model,
+                "client_error",
+                Some(status.as_u16() as i32),
+                metadata_metrics(
+                    &pricing_snapshot,
+                    plan.service_tier.as_deref(),
+                    "not_applicable",
+                ),
+                Some(&sanitized),
+                &attempt_context,
+                Some(failure),
+            )?;
+            if recorded && rate_limited && !free_contract {
+                spawn_reactive_usage_refresh(state, &account.id);
             }
+            return Ok(ForwardResult {
+                response: protocol_status_error_response(
+                    plan.client,
+                    downstream,
+                    &error_message,
+                    None,
+                ),
+                action,
+                error_message: Some(error_message),
+            });
+        }
+
+        match class {
             ProviderErrorClass::HttpRequestTimeout => {
                 let detail = format!(
                     "upstream returned 408: {}",
@@ -1780,11 +1559,13 @@ async fn forward_request_impl(
                         &attempt_context,
                         Some(failure),
                     )?;
-                    db.set_account_auth_error_if_key_matches(
-                        &account.id,
-                        &account.key_cipher,
-                        Some(&error_message),
-                    )?;
+                    if quota_observation.is_current(&db)? {
+                        db.set_account_auth_error_if_key_matches(
+                            &account.id,
+                            &account.key_cipher,
+                            Some(&error_message),
+                        )?;
+                    }
                 }
                 return Ok(ForwardResult {
                     response: error_response(plan.client, &error_message, None),
@@ -1801,7 +1582,7 @@ async fn forward_request_impl(
                     )
                 } else {
                     format!(
-                        "upstream auth error 403: {}",
+                        "upstream returned 403: {}",
                         attempt_context.sanitize_upstream_error(&text)
                     )
                 };
@@ -1842,10 +1623,8 @@ async fn forward_request_impl(
                 });
             }
             _ => {
-                // A proven GOAT credit rejection is account-scoped and may fall
-                // through for this request only. It supplies no reset deadline:
-                // do not invent a cooldown or mislabel it as an invalid Key.
-                // Other 4xx remain request errors and never replay on another Key.
+                // Unrecognized 4xx remain request errors. Provider decoders may
+                // refine only verified rejection envelopes above.
                 let sanitized = attempt_context.sanitize_upstream_error(&text);
                 let action = forward_action_for_class(class, allow_same_account_retry, None);
                 let failure = attempt_context.failure(FailureSpec {
@@ -1950,7 +1729,13 @@ async fn forward_request_impl(
         // downstream SSE events. The upstream outcome and quota charge can still
         // be ambiguous, so the retry remains bounded to the same account.
         let (initial_chunks, upstream_finished) = loop {
-            let preflight = tokio::time::timeout(stream_idle_timeout, upstream_stream.next()).await;
+            // Heartbeats or partial frames must not restart the logical request
+            // budget while no usable downstream output has been produced.
+            let read_timeout = request_deadline.map_or(stream_idle_timeout, |deadline| {
+                stream_idle_timeout
+                    .min(deadline.saturating_duration_since(tokio::time::Instant::now()))
+            });
+            let preflight = tokio::time::timeout(read_timeout, upstream_stream.next()).await;
             match preflight {
                 Ok(Some(Ok(chunk))) => {
                     process_chunk_for_usage(&mut st.lock(), upstream_format, &chunk, Some(&model));
@@ -2052,8 +1837,14 @@ async fn forward_request_impl(
                     }
                 }
                 Err(_) => {
-                    let detail =
-                        format!("upstream stream idle timeout after {stream_idle_timeout_secs}s");
+                    let budget_expired = request_deadline
+                        .is_some_and(|deadline| tokio::time::Instant::now() >= deadline);
+                    let detail = if budget_expired {
+                        "Gateway request deadline exceeded before stream output (timeout)"
+                            .to_string()
+                    } else {
+                        format!("upstream stream idle timeout after {stream_idle_timeout_secs}s")
+                    };
                     match handle_pre_output_stream_failure(
                         state,
                         &st,
@@ -2066,10 +1857,14 @@ async fn forward_request_impl(
                         upstream_wait_ms,
                         StatusCode::GATEWAY_TIMEOUT,
                         "transport",
-                        "stream",
+                        if budget_expired {
+                            "request_budget"
+                        } else {
+                            "stream"
+                        },
                         &detail,
                         StreamClassifyInput::IdleTimeoutBeforeOutput,
-                        allow_same_account_retry,
+                        allow_same_account_retry && !budget_expired,
                     ) {
                         PreOutputFailure::Retry(result) => return Ok(result),
                         PreOutputFailure::Return(chunks) => break (chunks, true),
@@ -2277,7 +2072,7 @@ async fn forward_request_impl(
             let service_tier_f = plan.service_tier.clone();
             let pricing_f = pricing_snapshot.clone();
             let attempt_f = attempt_context.clone();
-            let stream_guard = StreamOutcomeGuard::new(
+            let mut stream_guard = StreamOutcomeGuard::new(
                 state.clone(),
                 initial_id,
                 st.clone(),
@@ -2287,7 +2082,9 @@ async fn forward_request_impl(
                 attempt_context.clone(),
                 status.as_u16(),
                 upstream_wait_ms,
+                quota_trial.clone(),
             );
+            stream_guard.recovery = Some(recovery_permit);
             // `unfold` is a clean "run once, then end" stream. The DB write is the
             // unfold's state transition, the body emits a single empty chunk, and
             // the stream then terminates — no need for once() + flatten gymnastics.
@@ -2443,6 +2240,13 @@ async fn forward_request_impl(
                                 &format!("failed to finalize streaming row {initial_id}: {e}"),
                             );
                         }
+                        if !st_f.lock().error
+                            && let Some(permit) = guard.recovery.as_mut()
+                        {
+                            permit.confirm_success();
+                        }
+                        drop(db);
+                        guard.settle_quota(status_str.starts_with("success"));
                         guard.disarm();
                         Some((
                             Ok::<bytes::Bytes, std::io::Error>(output),
@@ -2459,9 +2263,14 @@ async fn forward_request_impl(
                 .map(Ok::<bytes::Bytes, std::io::Error>),
         );
 
+        let response =
+            response_builder.body(Body::from_stream(initial.chain(mapped).chain(finalizer)))?;
+        // StreamOutcomeGuard now owns cancellation and settlement.
+        if let Some(guard) = credit_guard.as_mut() {
+            guard.armed = false;
+        }
         Ok(ForwardResult {
-            response: response_builder
-                .body(Body::from_stream(initial.chain(mapped).chain(finalizer)))?,
+            response,
             action: ForwardAction::Return,
             error_message: None,
         })
@@ -2521,13 +2330,40 @@ async fn forward_request_impl(
             Ok(value) => value,
             Err(_) => {
                 let message = "upstream returned invalid JSON";
+                let action = if free_contract {
+                    observe_free_rejection(
+                        state,
+                        account,
+                        selection,
+                        &mut recovery_permit,
+                        &restriction_endpoint,
+                        &plan.model,
+                        None,
+                        &mut attempt_context,
+                    )?;
+                    ForwardAction::ExhaustFreeChannel
+                } else if openrouter_free {
+                    observe_openrouter_free_rejection(
+                        state,
+                        account,
+                        selection,
+                        &mut recovery_permit,
+                        &restriction_endpoint,
+                        &plan.model,
+                        None,
+                        &mut attempt_context,
+                    )?;
+                    ForwardAction::TryNextAccount
+                } else {
+                    ForwardAction::Return
+                };
                 let failure = attempt_context.failure(FailureSpec {
                     error_source: "upstream",
                     error_stage: "response_body",
                     downstream_status: Some(StatusCode::BAD_GATEWAY.as_u16()),
                     upstream_status: Some(status.as_u16()),
                     upstream_wait_ms: Some(upstream_wait_ms),
-                    retry_action: Some("return"),
+                    retry_action: Some(retry_action_name(action)),
                     upstream_headers: None,
                     upstream_error: Some(&text),
                     request_body: Some(client_body),
@@ -2549,12 +2385,103 @@ async fn forward_request_impl(
                 )?;
                 return Ok(ForwardResult {
                     response: error_response(plan.client, message, None),
-                    action: ForwardAction::Return,
+                    action,
                     error_message: Some(message.to_string()),
                 });
             }
         };
 
+        let body_for_quota = serde_json::to_string(&upstream_json).unwrap_or_else(|_| text.clone());
+        if crate::provider::ProviderAdapterKind::from_provider_id(policy_provider_id)
+            == Some(crate::provider::ProviderAdapterKind::MiniMaxCn)
+            && let Some(envelope) = crate::quota_recovery::minimax_envelope(&body_for_quota)
+            && !matches!(envelope, crate::quota_recovery::MiniMaxEnvelope::Success)
+        {
+            let sanitized = attempt_context.sanitize_upstream_error(&body_for_quota);
+            let action = ForwardAction::TryNextAccount;
+            {
+                let db = state.db.lock();
+                DbAttemptSink::new(&db).insert(
+                    account,
+                    &model,
+                    "client_error",
+                    Some(status.as_u16() as i32),
+                    metadata_metrics(
+                        &pricing_snapshot,
+                        plan.service_tier.as_deref(),
+                        "not_applicable",
+                    ),
+                    Some(&sanitized),
+                    &attempt_context,
+                    None,
+                )?;
+            }
+            return Ok(ForwardResult {
+                response: error_response(plan.client, &sanitized, Some(&upstream_json)),
+                action,
+                error_message: Some(sanitized),
+            });
+        }
+
+        let application_error = explicit_nonquota_application_error(&upstream_json);
+        if application_error && (free_contract || openrouter_free) {
+            let action = if free_contract {
+                observe_free_rejection(
+                    state,
+                    account,
+                    selection,
+                    &mut recovery_permit,
+                    &restriction_endpoint,
+                    &plan.model,
+                    None,
+                    &mut attempt_context,
+                )?;
+                ForwardAction::ExhaustFreeChannel
+            } else {
+                observe_openrouter_free_rejection(
+                    state,
+                    account,
+                    selection,
+                    &mut recovery_permit,
+                    &restriction_endpoint,
+                    &plan.model,
+                    None,
+                    &mut attempt_context,
+                )?;
+                ForwardAction::TryNextAccount
+            };
+            let message = attempt_context.sanitize_upstream_error(&text);
+            let failure = attempt_context.failure(FailureSpec {
+                error_source: "upstream",
+                error_stage: "response_body",
+                downstream_status: Some(StatusCode::BAD_GATEWAY.as_u16()),
+                upstream_status: Some(status.as_u16()),
+                upstream_wait_ms: Some(upstream_wait_ms),
+                retry_action: Some(retry_action_name(action)),
+                upstream_headers: None,
+                upstream_error: Some(&text),
+                request_body: Some(client_body),
+            });
+            DbAttemptSink::new(&state.db.lock()).insert(
+                account,
+                &model,
+                "client_error",
+                Some(status.as_u16() as i32),
+                metadata_metrics(
+                    &pricing_snapshot,
+                    plan.service_tier.as_deref(),
+                    "not_applicable",
+                ),
+                Some(&message),
+                &attempt_context,
+                Some(failure),
+            )?;
+            return Ok(ForwardResult {
+                response: error_response(plan.client, &message, None),
+                action,
+                error_message: Some(message),
+            });
+        }
         let metrics = if has_complete_usage(plan.upstream, &upstream_json) {
             let usage = extract_usage(plan.upstream, &upstream_json, Some(&model));
             let (prompt_tokens, completion_tokens, cached_tokens, cache_creation_tokens) =
@@ -2594,13 +2521,40 @@ async fn forward_request_impl(
             Ok(value) => value,
             Err(error) => {
                 let message = format!("response conversion failed: {}", error.message);
+                let action = if free_contract {
+                    observe_free_rejection(
+                        state,
+                        account,
+                        selection,
+                        &mut recovery_permit,
+                        &restriction_endpoint,
+                        &plan.model,
+                        None,
+                        &mut attempt_context,
+                    )?;
+                    ForwardAction::ExhaustFreeChannel
+                } else if openrouter_free {
+                    observe_openrouter_free_rejection(
+                        state,
+                        account,
+                        selection,
+                        &mut recovery_permit,
+                        &restriction_endpoint,
+                        &plan.model,
+                        None,
+                        &mut attempt_context,
+                    )?;
+                    ForwardAction::TryNextAccount
+                } else {
+                    ForwardAction::Return
+                };
                 let failure = attempt_context.failure(FailureSpec {
                     error_source: "gateway",
                     error_stage: "response_transform",
                     downstream_status: Some(StatusCode::BAD_GATEWAY.as_u16()),
                     upstream_status: Some(status.as_u16()),
                     upstream_wait_ms: Some(upstream_wait_ms),
-                    retry_action: Some("return"),
+                    retry_action: Some(retry_action_name(action)),
                     upstream_headers: None,
                     upstream_error: Some(&message),
                     request_body: Some(client_body),
@@ -2618,7 +2572,7 @@ async fn forward_request_impl(
                 )?;
                 return Ok(ForwardResult {
                     response: error_response(plan.client, &message, Some(&upstream_json)),
-                    action: ForwardAction::Return,
+                    action,
                     error_message: Some(message),
                 });
             }
@@ -2640,12 +2594,246 @@ async fn forward_request_impl(
                 None,
             )?;
         }
-
+        let protocol = match plan.upstream {
+            ApiFormat::ChatCompletions => {
+                Some(ocg_domain::catalog::UpstreamProtocolKind::ChatCompletions)
+            }
+            ApiFormat::Responses => Some(ocg_domain::catalog::UpstreamProtocolKind::Responses),
+            ApiFormat::Messages => Some(ocg_domain::catalog::UpstreamProtocolKind::Messages),
+            ApiFormat::Gemini => None,
+        };
+        let complete_success = !application_error
+            && protocol.is_some_and(|protocol| {
+                crate::custom::prove_verified_protocol_response(status, text.as_bytes(), protocol)
+                    .is_ok()
+            });
+        if let Some(trial) = quota_trial.lock().as_mut() {
+            if complete_success {
+                trial.succeed();
+            } else {
+                trial.fail_nonquota(state.sample_gateway_clock().0);
+            }
+        }
+        if complete_success {
+            recovery_permit.confirm_success();
+        }
         Ok(ForwardResult {
             response: (status, axum::Json(response_json)).into_response(),
             action: ForwardAction::Return,
             error_message: None,
         })
+    }
+}
+
+#[derive(Clone)]
+struct QuotaObservation {
+    selection: LiveSendSelection,
+    fence: crate::gateway::recovery::RecoveryObservation,
+}
+impl QuotaObservation {
+    fn is_current(&self, db: &Database) -> Result<bool> {
+        Ok(
+            self.fence.is_current()
+                && live_send::selection_allows_observation(db, &self.selection)?,
+        )
+    }
+}
+
+struct QuotaTrialGuard {
+    state: CoreState,
+    episode: crate::quota_recovery::QuotaEpisode,
+    observation: Option<QuotaObservation>,
+    settled: bool,
+}
+
+impl QuotaTrialGuard {
+    fn new(state: CoreState, episode: crate::quota_recovery::QuotaEpisode) -> Self {
+        Self {
+            state,
+            episode,
+            observation: None,
+            settled: false,
+        }
+    }
+
+    fn with_observation(mut self, observation: QuotaObservation) -> Self {
+        self.observation = Some(observation);
+        self
+    }
+
+    fn succeed(&mut self) {
+        if self.settled {
+            return;
+        }
+        persist_quota_write(
+            &self.state,
+            Some(&self.episode),
+            |db| {
+                if let Some(observation) = &self.observation
+                    && !observation.is_current(db)?
+                {
+                    return Ok(false);
+                }
+                crate::db::quota_recovery::clear_matching_on(&db.conn, &self.episode)
+            },
+            "quota recovery clear",
+        );
+        self.settled = true;
+    }
+
+    #[allow(dead_code)]
+    fn fail_quota(
+        &mut self,
+        account: &ExecutionCredential,
+        evidence: &ocg_gateway::quota::QuotaEvidence,
+        now: chrono::DateTime<Utc>,
+    ) {
+        if self.settled {
+            return;
+        }
+        let recorded = persist_quota_write(
+            &self.state,
+            Some(&self.episode),
+            |db| {
+                if let Some(observation) = &self.observation
+                    && !observation.is_current(db)?
+                {
+                    return Ok(false);
+                }
+                crate::db::quota_recovery::record_evidence_on(
+                    &db.conn,
+                    account,
+                    evidence,
+                    Some(&self.episode),
+                    now,
+                )
+            },
+            "quota recovery evidence",
+        );
+        if recorded {
+            self.settled = true;
+        }
+    }
+
+    fn fail_nonquota(&mut self, now: chrono::DateTime<Utc>) {
+        if self.settled {
+            return;
+        }
+        persist_quota_write(
+            &self.state,
+            Some(&self.episode),
+            |db| {
+                if let Some(observation) = &self.observation
+                    && !observation.is_current(db)?
+                {
+                    return Ok(false);
+                }
+                crate::db::quota_recovery::release_nonquota_trial_on(&db.conn, &self.episode, now)
+            },
+            "quota trial nonquota release",
+        );
+        self.settled = true;
+    }
+}
+
+impl Drop for QuotaTrialGuard {
+    fn drop(&mut self) {
+        if self.settled {
+            return;
+        }
+        let now = self.state.sample_gateway_clock().0;
+        self.fail_nonquota(now);
+    }
+}
+
+/// Protocol-supported explicit application error on HTTP 200. Root `error`
+/// object or `type=error` / `response.failed` only. Nested assistant content
+/// and `error: null` are not exhaustion and are not a completed trial.
+fn explicit_nonquota_application_error(value: &Value) -> bool {
+    let Some(root) = value.as_object() else {
+        return false;
+    };
+    if matches!(
+        root.get("type").and_then(Value::as_str),
+        Some("error" | "response.failed")
+    ) {
+        return true;
+    }
+    root.get("error").is_some_and(Value::is_object)
+}
+
+fn persist_quota_write(
+    state: &CoreState,
+    episode: Option<&crate::quota_recovery::QuotaEpisode>,
+    write: impl FnOnce(&Database) -> anyhow::Result<bool>,
+    what: &str,
+) -> bool {
+    state.with_settings_update(|| {
+        let db = state.db.lock();
+        let persisted = match write(&db) {
+            Ok(changed) => changed,
+            Err(error) => {
+                let _ = db.log_gateway(
+                    "warn",
+                    "forwarder",
+                    &format!("failed to persist {what}: {error}"),
+                );
+                false
+            }
+        };
+        let released = episode.is_some_and(|episode| {
+            let mut probes = state.quota_probes.lock();
+            if probes.get(&episode.credential_id) == Some(episode) {
+                probes.remove(&episode.credential_id);
+                true
+            } else {
+                false
+            }
+        });
+        if persisted || released {
+            state.bump_settings_revision();
+        }
+        persisted
+    })
+}
+
+struct CreditRequestGuard {
+    state: CoreState,
+    context: ForwardAttemptContext,
+    pricing: RequestPricingSnapshot,
+    service_tier: Option<String>,
+    armed: bool,
+}
+
+impl Drop for CreditRequestGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let Some(id) = self.context.credit_log_id else {
+            return;
+        };
+        let db = self.state.db.lock();
+        if let Err(error) = finalize_logged_forward(
+            &db,
+            id,
+            "outcome_unknown",
+            None,
+            metadata_metrics(
+                &self.pricing,
+                self.service_tier.as_deref(),
+                "outcome_unknown",
+            ),
+            Some("request ended before its upstream usage was confirmed"),
+            None,
+            &self.context,
+        ) {
+            let _ = db.log_gateway(
+                "warn",
+                "forwarder",
+                &format!("credit request {id} finalization failed: {error}"),
+            );
+        }
     }
 }
 
@@ -2660,6 +2848,8 @@ struct StreamOutcomeGuard {
     upstream_status: u16,
     upstream_wait_ms: u64,
     armed: bool,
+    recovery: Option<RecoveryPermit>,
+    quota_trial: Arc<Mutex<Option<QuotaTrialGuard>>>,
 }
 
 impl StreamOutcomeGuard {
@@ -2674,6 +2864,7 @@ impl StreamOutcomeGuard {
         attempt_context: ForwardAttemptContext,
         upstream_status: u16,
         upstream_wait_ms: u64,
+        quota_trial: Arc<Mutex<Option<QuotaTrialGuard>>>,
     ) -> Self {
         Self {
             state,
@@ -2686,11 +2877,24 @@ impl StreamOutcomeGuard {
             upstream_status,
             upstream_wait_ms,
             armed: true,
+            recovery: None,
+            quota_trial,
         }
     }
 
     fn disarm(&mut self) {
         self.armed = false;
+    }
+
+    fn settle_quota(&mut self, success: bool) {
+        let mut trial = self.quota_trial.lock();
+        if let Some(trial) = trial.as_mut() {
+            if success {
+                trial.succeed();
+            } else {
+                trial.fail_nonquota(self.state.sample_gateway_clock().0);
+            }
+        }
     }
 }
 
@@ -2814,6 +3018,9 @@ impl Drop for StreamOutcomeGuard {
                 ),
             );
         }
+        drop(db);
+        let success = status.starts_with("success");
+        self.settle_quota(success);
     }
 }
 
@@ -2929,7 +3136,7 @@ pub(crate) fn headers_carry_upstream_secret(headers: &reqwest::header::HeaderMap
     headers.keys().any(|name| {
         matches!(
             name.as_str(),
-            "authorization" | "x-api-key" | "x-goog-api-key"
+            "authorization" | "x-api-key" | "api-key" | "x-goog-api-key"
         )
     })
 }
@@ -3050,6 +3257,83 @@ fn error_response(format: ApiFormat, message: &str, upstream: Option<&Value>) ->
     (StatusCode::BAD_GATEWAY, axum::Json(body)).into_response()
 }
 
+fn is_openrouter_free_request(url: &reqwest::Url, model: &str) -> bool {
+    url.scheme() == "https"
+        && url.host_str() == Some("openrouter.ai")
+        && url.port_or_known_default() == Some(443)
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && matches!(
+            url.path().trim_end_matches('/'),
+            "/api/v1/chat/completions" | "/api/v1/responses" | "/api/v1/messages"
+        )
+        && (model == "openrouter/free" || model.ends_with(":free"))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn observe_openrouter_free_rejection(
+    state: &CoreState,
+    account: &ExecutionCredential,
+    selection: &LiveSendSelection,
+    recovery_permit: &mut RecoveryPermit,
+    endpoint: &str,
+    model: &str,
+    retry_after: Option<&str>,
+    attempt: &mut ForwardAttemptContext,
+) -> Result<()> {
+    let (observed_at, observed_mono) = state.sample_gateway_clock();
+    let facts = openrouter_free_rejection(retry_after, observed_at);
+    let decision = facts.decide();
+    let db = state.db.lock();
+    let current = live_send::selection_identity_is_current(&db, selection)?
+        && recovery_permit.permits_observation(&facts)
+        && recovery_permit
+            .same_generation(&ResourceSet::capture(&db, account, endpoint, model, false)?);
+    if current {
+        recovery_permit.observe_failure(&facts, decision, observed_mono);
+    }
+    attempt.restriction_details = Some(serde_json::json!({
+        "facts": facts, "recorded_for_current_generation": current,
+        "local_reprobe": decision.wait_for_recovery,
+    }));
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn observe_free_rejection(
+    state: &CoreState,
+    account: &ExecutionCredential,
+    selection: &LiveSendSelection,
+    recovery_permit: &mut RecoveryPermit,
+    endpoint: &str,
+    model: &str,
+    retry_after: Option<&str>,
+    attempt: &mut ForwardAttemptContext,
+) -> Result<()> {
+    let (observed_at, observed_mono) = state.sample_gateway_clock();
+    let facts = decode_failure(
+        ProviderErrorClass::FreeRejected,
+        "",
+        retry_after,
+        observed_at,
+    )
+    .ok_or_else(|| anyhow::anyhow!("Free rejection lacks a recovery policy"))?;
+    let decision = facts.decide();
+    let db = state.db.lock();
+    let current = live_send::selection_identity_is_current(&db, selection)?
+        && recovery_permit.permits_observation(&facts)
+        && recovery_permit
+            .same_generation(&ResourceSet::capture(&db, account, endpoint, model, true)?);
+    if current {
+        recovery_permit.observe_failure(&facts, decision, observed_mono);
+    }
+    attempt.restriction_details = Some(serde_json::json!({
+        "facts": facts, "recorded_for_current_generation": current,
+        "local_reprobe": decision.wait_for_recovery,
+    }));
+    Ok(())
+}
+
 pub(crate) fn forward_action_for_class(
     class: ProviderErrorClass,
     allow_same_account_retry: bool,
@@ -3064,6 +3348,7 @@ pub(crate) fn forward_action_for_class(
         | ProviderErrorClass::UnauthorizedRotate
         | ProviderErrorClass::ForbiddenRotate
         | ProviderErrorClass::InsufficientCredits => ForwardAction::TryNextAccount,
+        ProviderErrorClass::FreeRejected => ForwardAction::ExhaustFreeChannel,
         ProviderErrorClass::RateLimited { .. } => match rate_limit_fallback(rate_limit_window) {
             RateLimitFallback::ExhaustFreeChannel => ForwardAction::ExhaustFreeChannel,
             RateLimitFallback::TryNextAccount => ForwardAction::TryNextAccount,
@@ -3119,7 +3404,11 @@ fn outcome_unknown_retry_message(detail: &str) -> String {
     )
 }
 
-fn outcome_unknown_response(format: ApiFormat, status: StatusCode, detail: &str) -> Response {
+pub(crate) fn outcome_unknown_response(
+    format: ApiFormat,
+    status: StatusCode,
+    detail: &str,
+) -> Response {
     let message = outcome_unknown_message(detail);
     outcome_unknown_response_with_message(format, status, &message)
 }
@@ -3147,13 +3436,23 @@ pub(crate) fn rate_limited_response(
     );
     let mut body = format_error(format, StatusCode::TOO_MANY_REQUESTS, &message, None);
     body["error"]["resets_at"] = serde_json::json!(resets_at.to_rfc3339());
-    (StatusCode::TOO_MANY_REQUESTS, axum::Json(body)).into_response()
+    let retry_after = resets_at
+        .signed_duration_since(Utc::now())
+        .num_seconds()
+        .max(1)
+        .to_string();
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [(axum::http::header::RETRY_AFTER, retry_after)],
+        axum::Json(body),
+    )
+        .into_response()
 }
 
 #[allow(clippy::too_many_arguments)]
 fn log_forward(
     db: &Database,
-    account: &Account,
+    account: &ExecutionCredential,
     model: &str,
     status: &str,
     http_status: Option<i32>,
@@ -3162,6 +3461,34 @@ fn log_forward(
     context: &ForwardAttemptContext,
     failure: Option<FailureRecord>,
 ) -> Result<i64> {
+    if let Some(id) = context.credit_log_id {
+        // The pre-send credit row also becomes the existing SSE row.
+        if status != "streaming" {
+            let diagnostic = failure.as_ref().map(FailureRecord::update);
+            let redacted = error_message.map(|message| context.redact_known_secret(message));
+            finalize_logged_forward(
+                db,
+                id,
+                status,
+                http_status,
+                metrics,
+                redacted.as_deref(),
+                diagnostic.as_ref(),
+                context,
+            )?;
+        } else if let Some(http_status) = http_status {
+            db.conn.execute(
+                "UPDATE forward_logs SET http_status=?1 WHERE id=?2",
+                rusqlite::params![http_status, id],
+            )?;
+        }
+        return Ok(id);
+    }
+    let transaction = context
+        .credit_attempt
+        .as_ref()
+        .map(|_| db.conn.unchecked_transaction())
+        .transpose()?;
     metrics.scope_to_provider(
         Some(account.provider_id.as_str()),
         status.starts_with("success"),
@@ -3217,7 +3544,59 @@ fn log_forward(
         diagnostic: failure_value,
     })?;
     persist_log_identity(db, id, context, &persist_metrics)?;
+    if let Some(credit) = context.credit_attempt.as_ref() {
+        crate::db::billing::attach_attempt_on(&db.conn, id, credit)?;
+        if status != "streaming" {
+            settle_credit_log(db, id, context, &persist_metrics, status)?;
+        }
+    }
+    if let Some(transaction) = transaction {
+        transaction.commit()?;
+    }
     Ok(id)
+}
+
+fn settle_credit_log(
+    db: &Database,
+    id: i64,
+    context: &ForwardAttemptContext,
+    metrics: &ForwardMetrics,
+    status: &str,
+) -> Result<()> {
+    let Some(credit) = context.credit_attempt.as_ref() else {
+        return Ok(());
+    };
+    let tokens = ocg_domain::billing::BillingTokens::new(
+        metrics.prompt_tokens,
+        metrics.completion_tokens,
+        metrics.cached_tokens,
+        metrics.cache_creation_tokens,
+    );
+    let usable_usage = matches!(metrics.cost_state, "unknown" | "priced" | "free");
+    let settlement_status = if !context.credit_token_pricing_supported
+        && (status.starts_with("success") || usable_usage)
+    {
+        "success_no_usage"
+    } else if usable_usage {
+        "success_unpriced"
+    } else if status == "error" {
+        // A failed decode/transform after upstream acceptance is not proof of
+        // zero usage. Preserve the HTTP/log/retry behavior while settling the
+        // receipt as uncertain. Known token usage above can still be priced.
+        let upstream_status: Option<i32> = db.conn.query_row(
+            "SELECT http_status FROM forward_logs WHERE id = ?1",
+            [id],
+            |row| row.get(0),
+        )?;
+        if upstream_status.is_some_and(|code| (200..300).contains(&code)) {
+            "outcome_unknown"
+        } else {
+            status
+        }
+    } else {
+        status
+    };
+    crate::db::billing::settle_on(&db.conn, id, credit, tokens, settlement_status, Utc::now())
 }
 
 fn persist_log_identity(
@@ -3232,22 +3611,12 @@ fn persist_log_identity(
     attribution.requested_model = Some(context.requested_model.clone());
     attribution.resolved_alias = context.resolved_alias.clone();
     attribution.upstream_model = Some(context.upstream_model.clone());
-    apply_platform_native_attribution(&mut attribution, context, metrics);
-    if let Some(price) = &context.official_price
-        && matches!(metrics.cost_state, "priced" | "unknown")
-        && metrics.pricing_provider_id.as_deref() == Some(price.provider_id.as_str())
-        && metrics.pricing_revision_id.as_deref() == Some(price.sheet.revision.as_str())
-        && let Some(amount) = price.amount(
-            metrics.prompt_tokens,
-            metrics.completion_tokens,
-            metrics.cached_tokens,
-            metrics.cache_creation_tokens,
-        )
-    {
-        attribution.native_cost_value = Some(amount);
-        attribution.native_cost_unit = Some(price.sheet.kind.currency().into());
-        attribution.native_cost_currency = Some(price.sheet.kind.currency().into());
-    }
+    apply_native_cost_attribution(
+        &mut attribution,
+        context.platform_price.as_ref(),
+        context.official_price.as_ref(),
+        metrics,
+    );
     db.set_forward_log_native_attribution(id, &attribution)?;
     Ok(())
 }
@@ -3263,6 +3632,15 @@ fn finalize_logged_forward(
     diagnostic: Option<&ForwardLogDiagnosticUpdate<'_>>,
     context: &ForwardAttemptContext,
 ) -> Result<()> {
+    let transaction = context
+        .credit_attempt
+        .as_ref()
+        .map(|_| db.conn.unchecked_transaction())
+        .transpose()?;
+    if context.credit_attempt.is_some() && crate::db::billing::settlement_finished_on(&db.conn, id)?
+    {
+        return Ok(());
+    }
     db.update_forward_log(
         id,
         status,
@@ -3271,7 +3649,12 @@ fn finalize_logged_forward(
         error_message,
         diagnostic,
     )?;
-    persist_log_identity(db, id, context, &metrics)
+    persist_log_identity(db, id, context, &metrics)?;
+    settle_credit_log(db, id, context, &metrics, status)?;
+    if let Some(transaction) = transaction {
+        transaction.commit()?;
+    }
+    Ok(())
 }
 
 fn success_status_for_cost(cost_state: &str) -> &'static str {
@@ -3279,59 +3662,6 @@ fn success_status_for_cost(cost_state: &str) -> &'static str {
         "priced" | "free" => "success",
         "usage_missing" => "success_no_usage",
         _ => "success_unpriced",
-    }
-}
-
-fn pricing_metrics(
-    snapshot: &RequestPricingSnapshot,
-    model: &str,
-    prompt_tokens: i64,
-    completion_tokens: i64,
-    cached_tokens: i64,
-    cache_creation_tokens: i64,
-    service_tier: Option<&str>,
-) -> ForwardMetrics {
-    let estimate = snapshot.estimate(
-        model,
-        prompt_tokens,
-        completion_tokens,
-        cached_tokens,
-        cache_creation_tokens,
-        service_tier,
-    );
-    let provider_identity = snapshot.provider_identity();
-    ForwardMetrics {
-        prompt_tokens,
-        completion_tokens,
-        cached_tokens,
-        cache_creation_tokens,
-        cost: estimate.cost.unwrap_or(0.0),
-        raw_cost_usd: estimate.raw_cost_usd,
-        quota_debit: estimate.quota_debit,
-        effective_paid_cost_usd: estimate.effective_paid_cost_usd,
-        pricing_revision_id: estimate.pricing_revision_id,
-        quota_multiplier: estimate.quota_multiplier,
-        local_adjustment_multiplier: estimate.local_adjustment_multiplier,
-        pricing_provider_id: provider_identity.map(str::to_string),
-
-        service_tier: service_tier.map(str::to_string),
-        cost_state: estimate.cost_state,
-    }
-}
-
-fn metadata_metrics(
-    snapshot: &RequestPricingSnapshot,
-    service_tier: Option<&str>,
-    cost_state: &'static str,
-) -> ForwardMetrics {
-    let provider_identity = snapshot.provider_identity();
-    ForwardMetrics {
-        pricing_revision_id: snapshot.revision().map(str::to_string),
-        pricing_provider_id: provider_identity.map(str::to_string),
-
-        service_tier: service_tier.map(str::to_string),
-        cost_state,
-        ..ForwardMetrics::default()
     }
 }
 
@@ -3511,6 +3841,10 @@ mod stream_usage_tests {
             client_key_name: None,
             platform_price: None,
             official_price: None,
+            restriction_details: None,
+            credit_attempt: None,
+            credit_log_id: None,
+            credit_token_pricing_supported: true,
         };
         let mut headers = HeaderMap::new();
         headers.insert("x-request-id", format!("request-{secret}").parse().unwrap());
@@ -3638,10 +3972,7 @@ mod stream_usage_tests {
     }
 
     #[test]
-    fn messages_stream_sanitizes_minimax_bogus_cache_from_request_hint() {
-        // Upstream may omit the model field in message_start or rewrite it to an
-        // internal id, and the plan's hint may arrive in mixed case ("MiniMax-M3");
-        // the request hint must still sanitize the bogus all-cache usage in every shape.
+    fn messages_stream_keeps_raw_minimax_cache_read_tokens() {
         for (hint, start_model) in [
             ("minimax-m3", None),
             ("minimax-m3", Some("ocg-generic")),
@@ -3661,7 +3992,7 @@ mod stream_usage_tests {
             let (input, output, cached, _) = token_counts(st.usage);
             assert_eq!(
                 (input, output, cached),
-                (40500, 5, 0),
+                (40500, 5, 40500),
                 "hint={hint} start_model={start_model:?}"
             );
         }
@@ -3852,6 +4183,10 @@ mod stream_outcome_guard_tests {
             client_key_name: None,
             platform_price: None,
             official_price: None,
+            restriction_details: None,
+            credit_attempt: None,
+            credit_log_id: None,
+            credit_token_pricing_supported: true,
         }
     }
 
@@ -3863,7 +4198,7 @@ mod stream_outcome_guard_tests {
         let pricing = RequestPricingSnapshot::from(state.pricing_snapshot());
         DbAttemptSink::new(&state.db.lock())
             .insert(
-                account,
+                &(account).into(),
                 "deepseek-v4-flash",
                 "streaming",
                 Some(200),
@@ -3873,81 +4208,6 @@ mod stream_outcome_guard_tests {
                 None,
             )
             .unwrap()
-    }
-
-    #[test]
-    fn command_code_requests_use_the_verified_provider_price_and_multiplier() {
-        let (dir, state) = test_state("goat-pricing");
-        let mut goat = account(&state);
-        goat.provider_id = crate::provider::COMMAND_CODE_PROVIDER_ID.into();
-        let missing = RequestPricingSnapshot::for_account(&state, &goat, state.pricing_snapshot());
-        let mut missing_metrics = pricing_metrics(
-            &missing,
-            "deepseek-v4-flash",
-            1_000_000,
-            100_000,
-            0,
-            0,
-            None,
-        );
-        missing_metrics.scope_to_provider(Some(&goat.provider_id), true);
-        assert_eq!(missing_metrics.cost_state, "unpriced");
-        assert_eq!(missing_metrics.raw_cost_usd, None);
-        assert_eq!(missing_metrics.pricing_revision_id, None);
-
-        let snapshot = crate::pricing::ProviderScopedPricingSnapshot::new(
-            crate::provider::COMMAND_CODE_PROVIDER_ID,
-            "goat-runtime-test",
-            "2030-01-01T00:00:00Z",
-            None,
-            crate::pricing::GOAT_SOURCE_URL,
-            "goat-runtime-hash",
-            crate::pricing::ProviderPricingEvidence::Verified,
-            vec![
-                crate::pricing::ProviderPricingValue::new(
-                    "deepseek-v4-flash",
-                    "DeepSeek V4 Flash (latest)",
-                    Some(0.22),
-                    Some(0.66),
-                    Some(0.007),
-                    None,
-                    Some(70.0),
-                    Some(60.0),
-                    Some(10.0),
-                    Some("USD".into()),
-                    None,
-                    None,
-                    crate::pricing::PricingTimeWindow::Always,
-                )
-                .unwrap(),
-            ],
-        )
-        .unwrap();
-        crate::pricing::store_provider_pricing_snapshot(&state.db.lock(), &snapshot).unwrap();
-
-        let pricing = RequestPricingSnapshot::for_account(&state, &goat, state.pricing_snapshot());
-        let mut metrics = pricing_metrics(
-            &pricing,
-            "deepseek/deepseek-v4-flash",
-            1_000_000,
-            100_000,
-            0,
-            0,
-            None,
-        );
-        metrics.scope_to_provider(Some(&goat.provider_id), true);
-
-        assert_eq!(metrics.cost_state, "priced");
-        assert!((metrics.raw_cost_usd.unwrap() - 0.286).abs() < 1e-12);
-        assert!((metrics.quota_multiplier.unwrap() - (70.0 / 60.0)).abs() < 1e-12);
-        assert!((metrics.cost - (0.286 * 70.0 / 60.0)).abs() < 1e-12);
-        assert_eq!(
-            metrics.pricing_revision_id.as_deref(),
-            Some("goat-runtime-test")
-        );
-
-        drop(state);
-        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -3968,6 +4228,7 @@ mod stream_outcome_guard_tests {
                 context,
                 200,
                 0,
+                Arc::new(Mutex::new(None)),
             );
         }
         let log = state.db.lock().list_forward_logs(1).unwrap().remove(0);
@@ -4013,6 +4274,7 @@ mod stream_outcome_guard_tests {
                 context,
                 200,
                 0,
+                Arc::new(Mutex::new(None)),
             );
         }
         let log = state.db.lock().list_forward_logs(1).unwrap().remove(0);
@@ -4047,6 +4309,7 @@ mod stream_outcome_guard_tests {
                 context,
                 200,
                 0,
+                Arc::new(Mutex::new(None)),
             );
             guard.disarm();
         }
@@ -4068,7 +4331,7 @@ mod stream_outcome_guard_tests {
             let sink = DbAttemptSink::new(&db);
             let id = sink
                 .insert(
-                    &account,
+                    &(&account).into(),
                     "deepseek-v4-flash",
                     "streaming",
                     Some(200),
@@ -4107,30 +4370,31 @@ mod stream_outcome_guard_tests {
 const OPENCODE_ZEN_FREE_CLIENT: &str = "cli";
 const OPENCODE_ZEN_FREE_USER_AGENT: &str = "opencode";
 
-fn carries_opencode_session_header(provider_id: &str) -> bool {
-    provider_id == crate::provider::OPENCODE_PROVIDER_ID
-        || provider_id == crate::provider::OPENCODE_ZEN_FREE_PROVIDER_ID
+fn identity_headers_enabled(adapter: ProviderAdapterKind) -> bool {
+    sealed_capabilities(AdapterKind::from(adapter)).identity_headers
 }
 
 /// Shared by inference and operational probes so a working account is not
 /// rejected merely because its test omitted provider-required identity.
+/// Session / anonymous headers follow destination `identity_headers` and
+/// adapter kind, not a reserved provider UUID.
 pub(crate) fn apply_provider_identity_headers(
     upstream: &mut reqwest::header::HeaderMap,
     client_headers: &HeaderMap,
-    provider_id: &str,
+    adapter: ProviderAdapterKind,
     client: ApiFormat,
     model: &str,
     body: &[u8],
     request_id: &str,
 ) {
-    if carries_opencode_session_header(provider_id) {
-        let session =
-            resolve_opencode_session_header(client_headers, client, model, body, request_id);
-        upstream.insert("x-opencode-session", session.clone());
-        copy_explicit_opencode_identity_headers(upstream, client_headers);
-        if provider_id == crate::provider::OPENCODE_ZEN_FREE_PROVIDER_ID {
-            apply_zen_free_identity_headers(upstream, &session, request_id);
-        }
+    if !identity_headers_enabled(adapter) {
+        return;
+    }
+    let session = resolve_opencode_session_header(client_headers, client, model, body, request_id);
+    upstream.insert("x-opencode-session", session.clone());
+    copy_explicit_opencode_identity_headers(upstream, client_headers);
+    if adapter == ProviderAdapterKind::ZenFree {
+        apply_zen_free_identity_headers(upstream, &session, request_id);
     }
 }
 
@@ -4293,16 +4557,54 @@ mod forward_once_tests {
     }
 
     #[test]
-    fn opencode_session_header_is_go_and_zen_free_only() {
-        assert!(carries_opencode_session_header(
-            crate::provider::OPENCODE_PROVIDER_ID
+    fn identity_headers_follow_adapter_capability() {
+        assert!(identity_headers_enabled(ProviderAdapterKind::OpenCodeGo));
+        assert!(identity_headers_enabled(ProviderAdapterKind::ZenFree));
+        assert!(!identity_headers_enabled(
+            ProviderAdapterKind::CommandCodeGoat
         ));
-        assert!(carries_opencode_session_header(
-            crate::provider::OPENCODE_ZEN_FREE_PROVIDER_ID
+        assert!(!identity_headers_enabled(
+            ProviderAdapterKind::ConfigurableHttp
         ));
-        assert!(!carries_opencode_session_header(
-            crate::provider::COMMAND_CODE_PROVIDER_ID
-        ));
+
+        let empty = HeaderMap::new();
+        let mut zen = reqwest::header::HeaderMap::new();
+        apply_provider_identity_headers(
+            &mut zen,
+            &empty,
+            ProviderAdapterKind::ZenFree,
+            ApiFormat::ChatCompletions,
+            "m-free",
+            b"{}",
+            "req_1",
+        );
+        assert!(zen.get("x-opencode-session").is_some());
+        assert_eq!(zen.get("x-opencode-client").unwrap(), "cli");
+
+        let mut go = reqwest::header::HeaderMap::new();
+        apply_provider_identity_headers(
+            &mut go,
+            &empty,
+            ProviderAdapterKind::OpenCodeGo,
+            ApiFormat::ChatCompletions,
+            "glm-5.2",
+            b"{}",
+            "req_1",
+        );
+        assert!(go.get("x-opencode-session").is_some());
+        assert!(go.get("x-opencode-client").is_none());
+
+        let mut goat = reqwest::header::HeaderMap::new();
+        apply_provider_identity_headers(
+            &mut goat,
+            &empty,
+            ProviderAdapterKind::CommandCodeGoat,
+            ApiFormat::ChatCompletions,
+            "goat",
+            b"{}",
+            "req_1",
+        );
+        assert!(goat.get("x-opencode-session").is_none());
     }
 }
 

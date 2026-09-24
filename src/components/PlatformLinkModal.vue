@@ -2,7 +2,7 @@
   <n-modal
     :show="show"
     preset="card"
-    :title="t('关联 Key（手动关联）')"
+    :title="t('手动关联 Key')"
     class="platform-link-modal"
     style="width: 480px; max-width: calc(100vw - 32px)"
     :mask-closable="false"
@@ -178,6 +178,6 @@ function submit(): void {
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
 }
 </style>

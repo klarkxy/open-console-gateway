@@ -1,3 +1,5 @@
+#![cfg(feature = "ollama-cloud-loopback-test")]
+
 //! Gateway integration regressions for the Ollama Cloud sealed family.
 //!
 //! Covers the spec scenarios that only the full request path can prove:
@@ -5,6 +7,10 @@
 //! and SSE reasoning backfill), mixed candidate-chain byte isolation, the
 //! `upstream_body_bytes` diagnostic contract, Cookie-free inference egress,
 //! fail-closed unknown-model 400s, and unpriced-vs-Go pricing attribution.
+//!
+//! The loopback origin substitute lives behind the default-off
+//! `ollama-cloud-loopback-test` feature so this target still compiles in
+//! release without the seam. Project test and CI commands enable the feature.
 
 use axum::http::StatusCode;
 use chrono::Utc;

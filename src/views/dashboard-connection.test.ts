@@ -1,13 +1,24 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { setLocale } from "../i18n/index.ts";
 import {
   maskConnectionKey,
   normalizeClientRootUrl,
   resolveConnectionUrls,
 } from "./dashboard-connection.ts";
 
-test("connection helpers mask display values", () => {
-  assert.equal(maskConnectionKey(""), "未设置");
+test("connection helpers mask display values", async () => {
+  // An empty Key renders a localized placeholder rather than a mask pattern:
+  // non-empty, free of masking characters, and it follows the active locale.
+  setLocale("zh-CN");
+  const zhPlaceholder = maskConnectionKey("");
+  assert.ok(zhPlaceholder.length > 0);
+  assert.doesNotMatch(zhPlaceholder, /[•…]/);
+  await setLocale("en-US");
+  const enPlaceholder = maskConnectionKey("");
+  assert.ok(enPlaceholder.length > 0);
+  assert.doesNotMatch(enPlaceholder, /[•…]/);
+  assert.notEqual(enPlaceholder, zhPlaceholder);
   assert.equal(maskConnectionKey("tinykey"), "ti…ey");
   assert.equal(maskConnectionKey("ocg-1234567890"), "ocg-…7890");
 });

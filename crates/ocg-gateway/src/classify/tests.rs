@@ -20,34 +20,37 @@ fn provider_error_policy_covers_every_adapter_kind() {
         match kind {
             ProviderAdapterKind::OpenCodeGo => {
                 assert_eq!(policy.inference_401, Auth401Policy::Passthrough);
-                assert_eq!(policy.rate_limit_429, RateLimit429Policy::GoWindow);
+                assert_eq!(policy.error_profile, ErrorProfile::OpenCodeGo);
             }
             ProviderAdapterKind::ZenFree => {
                 assert_eq!(policy.inference_401, Auth401Policy::Passthrough);
-                assert_eq!(policy.rate_limit_429, RateLimit429Policy::GoWindow);
+                assert_eq!(policy.error_profile, ErrorProfile::OpenCodeGo);
             }
-            ProviderAdapterKind::CommandCodeGoat
-            | ProviderAdapterKind::MiniMaxCn
+            ProviderAdapterKind::CommandCodeGoat => {
+                assert_eq!(policy.inference_401, Auth401Policy::RotatePersistAuthError);
+                assert_eq!(policy.error_profile, ErrorProfile::CommandCodeGoat);
+            }
+            ProviderAdapterKind::MiniMaxCn
             | ProviderAdapterKind::KimiCn
             | ProviderAdapterKind::OllamaCloud
             | ProviderAdapterKind::ConfigurableHttp
             | ProviderAdapterKind::Cpa => {
                 assert_eq!(policy.inference_401, Auth401Policy::RotatePersistAuthError);
-                assert_eq!(policy.rate_limit_429, RateLimit429Policy::GenericFiveMinute);
+                assert_eq!(policy.error_profile, ErrorProfile::GenericHttp);
             }
         }
     }
 }
 
 #[test]
-fn opencode_and_zen_401_passthrough_without_rotation() {
+fn opencode_401_passthrough_but_zen_free_rejection_rotates() {
     assert_eq!(
         classify(401, OPENCODE_PROVIDER_ID, false, false),
         ProviderErrorClass::UnauthorizedPassthrough
     );
     assert_eq!(
         classify(401, OPENCODE_ZEN_FREE_PROVIDER_ID, true, true),
-        ProviderErrorClass::UnauthorizedPassthrough
+        ProviderErrorClass::FreeRejected
     );
 }
 
@@ -90,7 +93,7 @@ fn credits_error_refinement_is_go_only() {
     let body = r#"{"error":{"type":"CreditsError"}}"#;
     assert_eq!(
         classify_http_response(401, OPENCODE_ZEN_FREE_PROVIDER_ID, true, true, body),
-        ProviderErrorClass::UnauthorizedPassthrough
+        ProviderErrorClass::FreeRejected
     );
     assert_eq!(
         classify_http_response(401, CUSTOM_PROVIDER_ID, false, false, body),
@@ -118,40 +121,40 @@ fn go_zen_free_and_generic_429_policies() {
     assert_eq!(
         classify(429, OPENCODE_PROVIDER_ID, false, false),
         ProviderErrorClass::RateLimited {
-            policy: RateLimitPolicy::GoWindow
+            profile: ErrorProfile::OpenCodeGo
         }
     );
     assert_eq!(
         classify(429, OPENCODE_ZEN_FREE_PROVIDER_ID, true, true),
         ProviderErrorClass::RateLimited {
-            policy: RateLimitPolicy::ZenFreeShared
+            profile: ErrorProfile::ZenFree
         }
     );
     assert_eq!(
         classify(429, CUSTOM_PROVIDER_ID, false, false),
         ProviderErrorClass::RateLimited {
-            policy: RateLimitPolicy::GenericFiveMinute
+            profile: ErrorProfile::GenericHttp
         }
     );
     assert_eq!(
         classify(429, COMMAND_CODE_PROVIDER_ID, false, false),
         ProviderErrorClass::RateLimited {
-            policy: RateLimitPolicy::GenericFiveMinute
+            profile: ErrorProfile::CommandCodeGoat
         }
     );
     assert!(schedule_go_usage_sync(ProviderErrorClass::RateLimited {
-        policy: RateLimitPolicy::GoWindow
+        profile: ErrorProfile::OpenCodeGo
     }));
     assert!(!schedule_go_usage_sync(ProviderErrorClass::RateLimited {
-        policy: RateLimitPolicy::ZenFreeShared
+        profile: ErrorProfile::ZenFree
     }));
     assert!(!schedule_go_usage_sync(ProviderErrorClass::RateLimited {
-        policy: RateLimitPolicy::GenericFiveMinute
+        profile: ErrorProfile::GenericHttp
     }));
 }
 
 #[test]
-fn unknown_and_dynamic_shaped_429_use_generic_five_minute() {
+fn unknown_and_dynamic_shaped_429_use_generic_http_dialect() {
     for provider_id in [
         "unknown-provider",
         "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -160,14 +163,14 @@ fn unknown_and_dynamic_shaped_429_use_generic_five_minute() {
         assert_eq!(
             classify(429, provider_id, false, false),
             ProviderErrorClass::RateLimited {
-                policy: RateLimitPolicy::GenericFiveMinute
+                profile: ErrorProfile::GenericHttp
             },
             "{provider_id}"
         );
         assert_eq!(
             classify(429, provider_id, true, false),
             ProviderErrorClass::RateLimited {
-                policy: RateLimitPolicy::GenericFiveMinute
+                profile: ErrorProfile::GenericHttp
             },
             "{provider_id}"
         );
@@ -185,30 +188,49 @@ fn generic_429_wins_over_free_channel_and_zen_go_channel_parses_windows() {
     assert_eq!(
         classify(429, CUSTOM_PROVIDER_ID, true, false),
         ProviderErrorClass::RateLimited {
-            policy: RateLimitPolicy::GenericFiveMinute
+            profile: ErrorProfile::GenericHttp
         }
     );
     assert_eq!(
         classify(429, OPENCODE_ZEN_FREE_PROVIDER_ID, false, true),
         ProviderErrorClass::RateLimited {
-            policy: RateLimitPolicy::GoWindow
+            profile: ErrorProfile::OpenCodeGo
         }
     );
 }
 
 #[test]
-fn credentialed_403_rotates_anonymous_403_stops() {
+fn credentialed_403_rotates_and_zen_free_403_rejects_channel() {
     assert_eq!(
         classify(403, OPENCODE_PROVIDER_ID, false, false),
         ProviderErrorClass::ForbiddenRotate
     );
     assert_eq!(
         classify(403, OPENCODE_ZEN_FREE_PROVIDER_ID, true, true),
-        ProviderErrorClass::ForbiddenStop
+        ProviderErrorClass::FreeRejected
     );
     assert_eq!(
         classify(403, CUSTOM_PROVIDER_ID, false, false),
         ProviderErrorClass::ForbiddenRotate
+    );
+}
+
+#[test]
+fn zen_free_http_errors_reject_the_channel_without_changing_other_routes() {
+    for status in [400, 401, 403, 408, 500, 502, 503] {
+        assert_eq!(
+            classify(status, OPENCODE_ZEN_FREE_PROVIDER_ID, true, true),
+            ProviderErrorClass::FreeRejected,
+            "{status}"
+        );
+    }
+    assert_eq!(
+        classify(403, OPENCODE_ZEN_FREE_PROVIDER_ID, false, true),
+        ProviderErrorClass::ForbiddenStop
+    );
+    assert_eq!(
+        classify(500, OPENCODE_PROVIDER_ID, false, false),
+        ProviderErrorClass::ServerError
     );
 }
 

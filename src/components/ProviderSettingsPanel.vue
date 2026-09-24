@@ -44,14 +44,14 @@
 
       <template v-if="entry.provider_id === 'custom' && entry.origin === 'builtin'">
         <p class="provider-settings-note">
-          {{ t("模型与端点按账号配置；每个 Custom API 账号独立管理自己的连接与映射。") }}
+          {{ t("模型与 Endpoint 按账号配置；每个 Custom API 账号独立管理自己的连接与映射。") }}
         </p>
         <n-button secondary size="small" @click="$emit('openAccounts')">
           {{ t("打开账号页") }}
         </n-button>
       </template>
 
-      <OpenCodeInviteUrlField v-if="entry.provider_id === 'opencode' && entry.origin === 'builtin'" />
+      <OpenCodeInviteUrlField v-if="entry.managed_registration && entry.origin === 'builtin'" />
 
       <div v-if="entry.origin !== 'builtin' && (entry.editable || entry.deletable)" class="provider-settings-actions">
         <n-button v-if="entry.editable" secondary :disabled="actionLocked" @click="$emit('edit')">
@@ -66,7 +66,7 @@
           <template #trigger>
             <n-button type="error" secondary :disabled="actionLocked">{{ t("删除供应商") }}</n-button>
           </template>
-          {{ t("请先删除引用该供应商的账号，再删除供应商。不会级联删除账号。") }}
+          {{ t("先删除引用该供应商的账号，再删除供应商；不会级联删除账号。") }}
         </n-popconfirm>
       </div>
     </template>
@@ -98,6 +98,7 @@ function authDisplayName(kind: string): string {
   if (kind === "none") return t("无鉴权");
   if (kind === "bearer") return "Bearer";
   if (kind === "x-api-key") return "x-api-key";
+  if (kind === "api-key") return "api-key";
   return kind;
 }
 </script>
@@ -105,13 +106,13 @@ function authDisplayName(kind: string): string {
 <style scoped>
 .provider-settings {
   display: grid;
-  gap: 12px;
+  gap: var(--ocg-space-md);
   min-width: 0;
   justify-items: start;
 }
 .provider-settings-facts {
   display: grid;
-  gap: 8px 16px;
+  gap: var(--ocg-space-sm) var(--ocg-space-lg);
   margin: 0;
   width: 100%;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -134,7 +135,7 @@ function authDisplayName(kind: string): string {
 .provider-settings-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
 }
 .provider-settings :deep(.invite-section) {
   width: 100%;

@@ -20,14 +20,14 @@ export function normalizeClientRootUrl(value: string): string {
   const input = value.trim();
   if (!input) return "";
   if (!/^https?:\/\//i.test(input)) {
-    throw new Error(t("请输入完整的 http:// 或 https:// 地址"));
+    throw new Error(t("输入完整的 http:// 或 https:// 地址"));
   }
 
   let url: URL;
   try {
     url = new URL(input);
   } catch {
-    throw new Error(t("请输入有效的绝对 URL"));
+    throw new Error(t("输入有效的绝对 URL"));
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw new Error(t("仅支持 HTTP 或 HTTPS 地址"));
@@ -43,7 +43,7 @@ export function normalizeClientRootUrl(value: string): string {
   const v1Index = segments.findIndex((segment) => segment.toLowerCase() === "v1");
   if (v1Index >= 0) {
     if (v1Index + 1 !== segments.length) {
-      throw new Error(t("请填写根地址，不要包含 /v1 后的接口路径"));
+      throw new Error(t("填写根地址，不含 /v1 后的接口路径"));
     }
     path = path.slice(0, path.length - 3).replace(/\/+$/, "");
   }

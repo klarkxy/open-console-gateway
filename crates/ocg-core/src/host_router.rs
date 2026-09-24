@@ -1,7 +1,8 @@
 //! Host HTTP router composition.
 //!
-//! Assembles the inference router with Dashboard V3/V4, the retired V2 REST
-//! tombstone, public V2 auth, the V2 browser WebSocket, and dashboard assets.
+//! Assembles the inference router with Dashboard V4 (including remounted V3
+//! operational handlers), the retired V2 and V3 REST tombstones, public V2
+//! auth, the V2 browser WebSocket, and dashboard assets.
 //! This module is the HTTP composition root: it depends on `gateway`,
 //! `dashboard`, `dashboard_v3`, and `dashboard_v4`. Those modules, and `state`,
 //! must not import this module.
@@ -23,6 +24,12 @@ pub const DASHBOARD_V2_REMOVED_CODE: &str = "dashboardV2Removed";
 pub const DASHBOARD_V2_REMOVED_MESSAGE: &str =
     "Dashboard API V2 has been removed; refresh the page and retry.";
 
+/// Structured code for the authenticated Dashboard V3 REST tombstone.
+pub const DASHBOARD_V3_REMOVED_CODE: &str = "dashboardV3Removed";
+/// Client-visible message for the authenticated Dashboard V3 REST tombstone.
+pub const DASHBOARD_V3_REMOVED_MESSAGE: &str =
+    "Dashboard API V3 has been removed; refresh the page and retry.";
+
 /// Authenticated HTTP 410 body for retired `/dashboard/api` REST paths.
 pub fn v2_removed_response() -> Response {
     (
@@ -34,12 +41,23 @@ pub fn v2_removed_response() -> Response {
         .into_response()
 }
 
+/// Authenticated HTTP 410 body for retired `/dashboard/api/v3` REST paths.
+pub fn v3_removed_response() -> Response {
+    (
+        StatusCode::GONE,
+        Json(json!({
+            "code": DASHBOARD_V3_REMOVED_CODE,
+            "message": DASHBOARD_V3_REMOVED_MESSAGE })),
+    )
+        .into_response()
+}
+
 pub fn build_router(state: CoreState) -> Router {
     Router::new()
         .merge(crate::gateway::inference_router(state.clone()))
         .nest(
             "/dashboard/api/v3",
-            crate::dashboard_v3::api_router(state.clone()),
+            dashboard_v3_tombstone_router(state.clone()),
         )
         .nest(
             "/dashboard/api/v4",
@@ -114,7 +132,17 @@ impl GatewayRouterHost for CoreState {
     }
 }
 
+fn dashboard_v3_tombstone_router(state: CoreState) -> Router<CoreState> {
+    Router::new()
+        .fallback(unmatched_legacy_v3_rest)
+        .layer(middleware::from_fn_with_state(state, retire_legacy_v3_rest))
+}
+
 async fn unmatched_legacy_v2_rest() -> StatusCode {
+    StatusCode::NOT_FOUND
+}
+
+async fn unmatched_legacy_v3_rest() -> StatusCode {
     StatusCode::NOT_FOUND
 }
 
@@ -145,6 +173,29 @@ async fn retire_legacy_v2_rest(
     }
 }
 
+/// Auth runs before the tombstone: anonymous retired V3 stays 401; a valid
+/// dashboard session (including loopback local mode) receives 410. Every
+/// path under the `/dashboard/api/v3` nest is retired.
+async fn retire_legacy_v3_rest(
+    State(state): State<CoreState>,
+    req: Request,
+    _next: Next,
+) -> Response {
+    let authorized = {
+        let current = state.dashboard_session_token.lock();
+        dashboard_session::is_authorized(
+            state.dashboard_local_mode(),
+            current.as_str(),
+            req.headers(),
+        )
+    };
+    if authorized {
+        v3_removed_response()
+    } else {
+        StatusCode::UNAUTHORIZED.into_response()
+    }
+}
+
 fn request_path(req: &Request) -> String {
     req.extensions()
         .get::<OriginalUri>()
@@ -160,7 +211,8 @@ fn request_path(req: &Request) -> String {
 }
 
 /// Retired protected V2 REST, including unknown `/dashboard/api/...` paths.
-/// Auth, V3, browser WS, dashboard assets, and inference are not retired.
+/// Auth, the V3 tombstone prefix, V4, browser WS, dashboard assets, and
+/// inference are not V2-retired.
 pub(crate) fn is_retired_legacy_v2_rest_path(path: &str) -> bool {
     match v2_api_remainder(path) {
         Some(rest) => !is_preserved_legacy_v2_path(rest),
@@ -188,6 +240,13 @@ fn is_preserved_legacy_v2_path(rest: &str) -> bool {
     ) || is_browser_session_ws(rest)
 }
 
+/// Retired Dashboard V3 prefix. Not classified as V2-retired; it has its own
+/// 410 family (`dashboardV3Removed`).
+#[cfg(test)]
+pub(crate) fn is_retired_dashboard_v3_path(path: &str) -> bool {
+    path == "/dashboard/api/v3" || path.starts_with("/dashboard/api/v3/")
+}
+
 fn is_browser_session_ws(rest: &str) -> bool {
     let Some(after) = rest.strip_prefix("browser/sessions/") else {
         return false;
@@ -200,7 +259,7 @@ fn is_browser_session_ws(rest: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::is_retired_legacy_v2_rest_path;
+    use super::{is_retired_dashboard_v3_path, is_retired_legacy_v2_rest_path};
 
     #[test]
     fn host_router_path_matrix_classifies_retired_and_preserved() {
@@ -244,6 +303,25 @@ mod tests {
             "/dashboard/api/v4-contract",
         ] {
             assert!(is_retired_legacy_v2_rest_path(path), "{path}");
+            assert!(!is_retired_dashboard_v3_path(path), "{path}");
+        }
+        for path in [
+            "/dashboard/api/v3",
+            "/dashboard/api/v3/",
+            "/dashboard/api/v3/contract",
+            "/dashboard/api/v3/accounts",
+            "/dashboard/api/v3/auth/status",
+            "/dashboard/api/v3/browser/sessions/tok/ws",
+            "/dashboard/api/v3/settings",
+        ] {
+            assert!(
+                is_retired_dashboard_v3_path(path),
+                "{path} must be the V3 410 family"
+            );
+            assert!(
+                !is_retired_legacy_v2_rest_path(path),
+                "{path} must not be classified as V2-retired"
+            );
         }
         for path in [
             "/dashboard/api/auth/status",
@@ -252,13 +330,6 @@ mod tests {
             "/dashboard/api/auth/logout",
             "/dashboard/api/browser/sessions/opaque-token/ws",
             "/dashboard/api/browser/sessions/a/ws",
-            "/dashboard/api/v3",
-            "/dashboard/api/v3/",
-            "/dashboard/api/v3/contract",
-            "/dashboard/api/v3/accounts",
-            "/dashboard/api/v3/auth/status",
-            "/dashboard/api/v3/browser/sessions/tok/ws",
-            "/dashboard/api/v3/settings",
             "/dashboard/api/v4",
             "/dashboard/api/v4/",
             "/dashboard/api/v4/contract",
@@ -267,6 +338,9 @@ mod tests {
             "/dashboard/api/v4/credentials/abc/rotate",
             "/dashboard/api/v4/bindings/abc",
             "/dashboard/api/v4/identities/abc/credentials",
+            "/dashboard/api/v4/settings",
+            "/dashboard/api/v4/account-records",
+            "/dashboard/api/v4/auth/status",
             "/dashboard",
             "/dashboard/",
             "/dashboard/assets/index.js",
@@ -279,6 +353,7 @@ mod tests {
             "/v1/models/m:generateContent",
         ] {
             assert!(!is_retired_legacy_v2_rest_path(path), "{path}");
+            assert!(!is_retired_dashboard_v3_path(path), "{path}");
         }
     }
 }

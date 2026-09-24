@@ -29,13 +29,20 @@
     "windows": {
       "nsis": {
         "installMode": "currentUser",
-        "installerHooks": "installer.nsh"
+        "template": "windows/installer.nsi",
+        "installerHooks": "installer.nsh",
+        "languages": ["English", "SimpChinese"],
+        "displayLanguageSelector": false,
+        "customLanguageFiles": {
+          "English": "windows/languages/English.nsh",
+          "SimpChinese": "windows/languages/SimpChinese.nsh"
+        }
       }
     }
   },
   "identifier": "com.klarkxy.ocgmanager",
   "productName": "Open Console Gateway",
-  "version": "2.4.2",
+  "version": "2.6.1",
   "app": {
     "security": {
       "csp": "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'",

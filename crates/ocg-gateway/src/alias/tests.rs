@@ -363,11 +363,15 @@ fn command_catalog_uses_go_canonical_aliases_and_keeps_raw_ids_pinned() {
     ));
 
     match resolve_with_all_catalogs("model-name", &go, &zen, &[], &command).unwrap() {
-        ResolvedModel::PinnedRaw { mapping, .. } => {
-            assert!(mapping.is_command_code_goat());
-            assert_eq!(mapping.upstream_model, "acme/Model_Name");
+        ResolvedModel::Alias {
+            alias, mappings, ..
+        } => {
+            assert_eq!(alias, "model-name");
+            assert!(mappings.iter().any(|mapping| {
+                mapping.is_command_code_goat() && mapping.upstream_model == "acme/Model_Name"
+            }));
         }
-        other => panic!("expected raw-only Command pin, got {other:?}"),
+        other => panic!("unique slash Command ids publish the last-segment Alias, got {other:?}"),
     }
     assert!(matches!(
         resolve_with_all_catalogs("acme/Model_Name", &go, &zen, &[], &command),
@@ -385,7 +389,7 @@ fn command_catalog_uses_go_canonical_aliases_and_keeps_raw_ids_pinned() {
         published.iter().filter(|item| item.alias == "hy3").count(),
         1
     );
-    assert!(!published.iter().any(|item| item.alias == "model-name"));
+    assert!(published.iter().any(|item| item.alias == "model-name"));
     assert!(
         !published
             .iter()
@@ -394,7 +398,7 @@ fn command_catalog_uses_go_canonical_aliases_and_keeps_raw_ids_pinned() {
 }
 
 #[test]
-fn command_catalog_shortens_only_code_owned_long_names() {
+fn command_catalog_shortens_code_owned_and_unique_slash_leaves() {
     let nemotron_upstream = COMMAND_CODE_GOAT_ALIASES[0].0.to_string();
     let command = vec![nemotron_upstream.clone()];
 
@@ -442,21 +446,47 @@ fn command_catalog_shortens_only_code_owned_long_names() {
     );
 
     let future = vec!["vendor/future-model-with-a-very-long-name".to_string()];
-    assert!(matches!(
-        resolve_with_all_catalogs(
-            "future-model-with-a-very-long-name",
-            &[],
-            &[],
-            &[],
-            &future,
-        ),
-        Ok(ResolvedModel::PinnedRaw { mapping, .. })
-            if mapping.is_command_code_goat()
-    ));
+    match resolve_with_all_catalogs("future-model-with-a-very-long-name", &[], &[], &[], &future)
+        .unwrap()
+    {
+        ResolvedModel::Alias {
+            alias, mappings, ..
+        } => {
+            assert_eq!(alias, "future-model-with-a-very-long-name");
+            assert!(mappings.iter().any(|mapping| {
+                mapping.is_command_code_goat()
+                    && mapping.upstream_model == "vendor/future-model-with-a-very-long-name"
+            }));
+        }
+        other => panic!("unique slash Command ids publish the last-segment Alias, got {other:?}"),
+    }
     assert!(
-        !published_routeable_aliases_with_all_catalogs(&[], &[], &future)
+        published_routeable_aliases_with_all_catalogs(&[], &[], &future)
             .iter()
             .any(|item| item.alias == "future-model-with-a-very-long-name")
+    );
+    assert_eq!(
+        canonical_alias_for_provider_model(
+            COMMAND_CODE_PROVIDER_ID,
+            "google/gemini-3.5-flash",
+            &[],
+            &[],
+        ),
+        "gemini-3.5-flash"
+    );
+    assert_eq!(
+        canonical_alias_for_provider_model(COMMAND_CODE_PROVIDER_ID, "claude-sonnet-4-6", &[], &[],),
+        ""
+    );
+    let colliding = vec![
+        "deepseek/deepseek-v4-flash-fast".to_string(),
+        "other/deepseek-v4-flash-fast".to_string(),
+    ];
+    assert!(
+        !published_routeable_aliases_with_all_catalogs(&[], &[], &colliding)
+            .iter()
+            .any(|item| item.alias == "deepseek-v4-flash-fast"),
+        "ambiguous last-segment names stay raw pins"
     );
 }
 
@@ -717,7 +747,8 @@ fn eligible_goat_catalog_joins_static_aliases_and_keeps_other_ids_raw() {
     assert!(
         !published
             .iter()
-            .any(|item| item.alias == "claude-sonnet-4-6")
+            .any(|item| item.alias == "claude-sonnet-4-6"),
+        "slash-free unmatched Command ids stay unpublished raw pins"
     );
     assert!(
         published
@@ -1118,17 +1149,45 @@ fn sealed_cn_catalogs_join_static_aliases_and_preserve_raw_ambiguity() {
                 .iter()
                 .any(|mapping| { mapping.is_kimi_cn() && mapping.upstream_model == *upstream })
         );
-        assert!(matches!(
-            resolve_with_extended_catalogs(
-                upstream, &[], &[], &[], &[], &minimax, &kimi,
-            ),
-            Ok(ResolvedModel::PinnedRaw { mapping, .. })
-                if mapping.is_kimi_cn() && mapping.upstream_model == *upstream
-        ));
+        let exact =
+            resolve_with_extended_catalogs(upstream, &[], &[], &[], &[], &minimax, &kimi).unwrap();
+        if upstream == alias {
+            assert!(matches!(
+                exact,
+                ResolvedModel::Alias {
+                    alias: resolved_alias,
+                    mappings,
+                    ..
+                } if resolved_alias == *alias
+                    && mappings.iter().any(|mapping| {
+                        mapping.is_kimi_cn() && mapping.upstream_model == *upstream
+                    })
+            ));
+        } else {
+            assert!(matches!(
+                exact,
+                ResolvedModel::PinnedRaw { mapping, .. }
+                    if mapping.is_kimi_cn() && mapping.upstream_model == *upstream
+            ));
+        }
         assert_eq!(
             canonical_alias_for_provider_model(KIMI_PROVIDER_ID, upstream, &[], &[]),
             *alias
         );
+    }
+
+    for fixed_version in ["kimi-k2.7-code", "kimi-k2.7-code-highspeed"] {
+        match resolve_with_extended_catalogs(fixed_version, &[], &[], &[], &[], &minimax, &kimi) {
+            Ok(resolved) => assert!(
+                resolved
+                    .routeable_mappings()
+                    .iter()
+                    .all(|mapping| !mapping.is_kimi_cn()),
+                "fixed K2.7 aliases must not route through Kimi's rolling model IDs"
+            ),
+            Err(ResolveError::Unknown { .. }) => {}
+            Err(other) => panic!("unexpected fixed-version resolution error: {other:?}"),
+        }
     }
 
     let published =

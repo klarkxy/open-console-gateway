@@ -2,9 +2,30 @@
 
 # Dashboard API
 
+## Billing and local credit estimates (V4)
+
+`GET /dashboard/api/v4/accounts/{id}/billing` presents timed quota, cash, or credits together with its observation source and available actions. Here `id` identifies one account (one Key); several accounts in a supplier container remain independent. The read makes no upstream request. Existing official balance and quota refresh endpoints retain their provider-specific observation adapters.
+
+`PUT .../billing/credits` configures a personal credit estimate. Initial setup supplies current buckets; later rate/settings edits preserve balances. `POST .../billing/credits/calibrate` corrects current bucket balances, `POST .../billing/credits/grants` adds a grant or top-up, and `DELETE .../billing/credits` disables this estimate. Mutations require `expectedRevision` and `processGeneration` and return the updated `BillingStatus`. Requests that start after calibration settle against that new baseline; pending and unpriced requests remain visible. Estimated exhaustion never changes routing eligibility.
+
+Step Plan uses this local estimation/calibration contract until an official usage API is available. The former private console-token endpoints and `StepFunUsageStatus` contract are retired. StepFun ordinary API balance remains separate from the `/step_plan` channel.
+
+Personal credits are configurable only for `http` destinations of legacy kind `custom_account` or `dynamic`. Platform-linked Keys, observer credentials and sealed built-in Plans retain their existing billing contracts. Credit calibration rejects pending requests; it does not move their baseline while they are in flight.
+
 ## Dashboard V3
 
-Dashboard JSON is `/dashboard/api/v3`. DTOs are camelCase, mutation bodies deny unknown fields, and nullable response fields serialize as `T | null`.
+The `/dashboard/api/v3` HTTP mount is **removed**. The dashboard speaks V4
+only. Anonymous `/dashboard/api/v3` and `/dashboard/api/v3/*` return
+empty-body **401** (auth runs before the tombstone). Authenticated requests
+(including loopback local mode) return **410**
+`{ "code": "dashboardV3Removed", "message": "Dashboard API V3 has been removed; refresh the page and retry." }`.
+
+Operational V3 handlers are remounted under `/dashboard/api/v4` with the same
+relative paths, except the account-list shim is `GET /account-records` so it
+does not collide with V4 `GET /accounts` (identities). `GET /contract` is the
+existing V4 ControlRevision. **The remounted handlers are a compatibility
+shim** over the destination and credential tables. New clients should use V4
+`GET /destinations` and `GET /credentials`. Remounted listings reconstruct from destinations and credentials. Key ciphertext stays on credential SQL rows and never appears on V4 GET destination/credential DTOs. DTOs are camelCase, mutation bodies deny unknown fields, and nullable response fields serialize as `T | null`.
 
 Control-plane identity:
 
@@ -23,7 +44,7 @@ Mutations require top-level `expectedRevision` and `processGeneration`
 `POST /accounts/{id}/usage/refresh`). A missing `expectedRevision` returns
 `400` `missingExpectedRevision`; a mismatch returns `409` `revisionConflict`
 with `currentRevision` and `processGeneration` in the error envelope. The Vue
-`controlPlane` store records both tokens from every V3 payload. On 409 the
+`controlPlane` store records both tokens from every remounted V3 payload. On 409 the
 client refreshes the control tokens and affected resource without replaying
 the mutation; the user can review current state and submit again. Tokens are process-local
 and do not coordinate separate processes sharing a data directory.
@@ -50,8 +71,8 @@ The frozen contract is `schema/dashboard-api-v3.schema.json`, generated from
 `CATALOG_TYPE_NAMES` in `dashboard_v3/types.rs` is the ordered `$defs` catalog;
 appending must keep existing definitions byte-identical.
 
-Pinia stores call `dashboardV3` directly. Pages that still use older field names
-go through `src/api/dashboard.ts` presenters.
+The `src/api/dashboard.ts` presentation client wraps `dashboardV3` and projects
+the fields each page and store needs.
 
 `dashboard.rs` serves the SPA and preserves the V2 auth and browser WebSocket
 handlers. Other `/dashboard/api/...` REST paths are tombstoned in
@@ -59,12 +80,14 @@ handlers. Other `/dashboard/api/...` REST paths are tombstoned in
 
 ## Dashboard V4
 
-Dashboard V4 JSON is `/dashboard/api/v4`. It is a parallel, additive control
-plane beside frozen V3. V3 `$defs` and routes do not gain new fields.
+Dashboard V4 JSON is `/dashboard/api/v4`. This is the only live dashboard
+JSON prefix: additive V4 routes plus remounted V3 operational handlers.
+V3 `$defs` do not gain new fields.
 
 V4 reuses V3 session middleware. Its listings return the same `ControlRevision`
 (`expectedRevision` / `processGeneration`) that V3 uses for CAS. V4 mutations are `POST /onboarding/commit`,
-`POST /credentials/{id}/rotate`, `PATCH /bindings/{id}`,
+`POST /credentials/{id}/rotate`, `POST /credentials/{id}/quota-retry`,
+`PATCH /bindings/{id}`,
 `POST /identities/{id}/credentials`, `POST /applications/dsh` (which also
 binds the GET inspection fingerprint), `PUT /cpa/models`,
 `POST /provider-contracts/{scope_kind}/{scope_id}/catalog/remove`, and
@@ -79,17 +102,19 @@ The checked-in additive V4 contract is `schema/dashboard-api-v4.schema.json`, ge
 appending must keep existing definitions byte-identical.
 
 Read-only routes are `GET /contract`, `GET /templates`,
-`GET /connections`, `GET /accounts`, `GET /applications/dsh`,
+`GET /connections`, `GET /accounts` (identities), `GET /account-records`
+(remounted V3 account-list shim), `GET /destinations`, `GET /credentials`,
+`GET /applications/dsh`,
 `GET /cpa/models`, and `GET /alias-publication`. Those reads perform no outbound
 requests.
 
 `GET /templates` is the read-only add catalog: the sealed built-ins (CPA
-excluded) plus the `custom-http` manual template. Presets are not part of it
-yet. Templates have no user instances or secrets.
+excluded) plus the `custom-http` manual template. Presets are not part of the
+template catalog. Templates have no user instances or secrets.
 
 `GET /connections` is a projection of saved instances: built-ins that already
-have an account, every user-defined Provider, and each Custom API account
-individually; CPA is never a connection. Each connection carries lifecycle, authorization state, local
+have an account and every configurable HTTP connection, including each
+persisted Custom API destination grouped with all of its Keys; CPA is never a connection. Each connection carries lifecycle, authorization state, local
 eligibility with a reason, endpoints, model targets, and a legacy identity
 reference. Connection ids are deterministic UUIDv5 values derived from that
 legacy identity, never from names or URLs.
@@ -110,16 +135,38 @@ legacy identity, never from names or URLs.
 `enabled`, `routingRank`), `quotaWindows[]`, `onboardingTask`,
 `subscription` (null when unknown), `lastError` (redacted; null when it
 cannot be redacted safely), and `legacy`. The platform parent's
-`platform_observer` credential is a projection in this stage (no
+`platform_observer` credential is a projection (no
 `credential_state` row). `authState` is local: `unknown` is never
 `valid`; `valid` requires the existing verification record. The Vue
-Accounts page overlays this projection for display; Key rotation, binding
+Accounts page overlays this projection for display; Key rotation, quota retry,
+binding
 edits, and additional identity credentials use V4, while the remaining
-account mutations stay on V3. Some enum values in the V4
-catalog are reserved for the next stage and not yet produced:
-`subject: external_runtime`, `policyMode: observe_only`,
-`relationConfidence: unknown`, `subscription.source: managed_payment`,
-`onboardingTask.state: completed`.
+account mutations stay on V3.
+
+`GET /destinations` and `GET /credentials` are secret-free, revision-tagged, local-only projections. `DestinationCredentialDto` may include optional nullable `quotaRecovery` (camelCase). Absence means no confirmed exhaustion, not verified upstream health. `status` on that object is presentation only (`waiting` | `ready` | `probing`). `IdentitySummary` credentials do not carry this field.
+CAS-protected `PATCH /destinations/{id}` fully replaces editable HTTP name, endpoint, auth,
+protocol, mappings, and route overrides. It never accepts Key material and unions safe grants
+only for explicit `authorizeCredentialIds`. `DELETE /destinations/{id}` requires zero referencing
+credentials. Sealed and platform-managed destinations reject both mutations. A
+populated destinations/credentials store is served even when live
+`project()` would refuse. An empty store or leftover-table upgrade window
+falls back to `project()`; only that empty-store fallback can return
+`409` `destinationProjectionRefused` with a `details` array naming each
+refused row.
+
+Node transfer (`POST /accounts/transfer/export|preview|import`) is remounted
+on V4. Latest export is payload V10: `destinations` and `credentials`
+(plaintext secrets, platform and CPA observer management credentials, and
+identity / grant / cooldown extras stay inside the encrypted envelope), plus
+`quotaPools` and `node`. Merging a package that has no CPA observer key
+preserves the destination's existing management key. It does not emit
+`accounts`, `platformAccounts`, `platformLinks`, `dynamicProviders`, or
+`identities`. Those portable types are transfer-only and are not V4 listing
+DTOs. V4–V10 packages remain importable; V7 receives deterministic model-resolution defaults and V8 and later require the field. Local quota recovery is not a portable field: it is omitted from export, retained on an unchanged target Key, and cleared when the Key is replaced.
+
+`GET /routing/cards` returns one revision-tagged snapshot of `cards`, `destinations` and `credentials`. `PUT /routing/cards` accepts CAS tokens and the complete ordered card list. A card has `id`, `destinationId` and ordered `credentialIds`; every inference credential, including disabled rows, must appear exactly once under its existing destination. Observer credentials are excluded. Layout and flattened routing ranks commit together, and the response returns the complete committed snapshot. Multiple cards share one destination; creating or removing an empty extra card does not create or delete a supplier.
+
+`GET /routing/explain?model=...&clientProtocol=...` is read-only and authenticated. It reuses live alias resolution, route materialization, availability gates, and a clone-based base-policy preview. It never sends, decrypts a Key, probes DNS, writes logs/cooldowns/quota recovery, or advances sticky, round-robin or quota-trial state. The response includes eligible Keys, typed exclusions, effective upstream protocol/global rank, and explicit runtime-only uncertainties.
 
 V4 does not treat authorization `unknown` as `valid`. Eligibility is a local
 projection, never upstream health.
@@ -134,7 +181,7 @@ plus `name`, `endpointUrl`, `upstreamProtocol`, `authKind`) or
 (`secretInput`, optional `accountLabel` / `notes`) or `kind: none`.
 `targets` map a public model to an exact upstream model, with an optional
 per-target upstream override. `new` requires a non-empty `targets` list;
-`existing` requires it empty (model edits stay on V3 `PATCH /providers/{id}`).
+`existing` requires it empty (connection edits use V4 `PATCH /destinations/{id}`).
 
 Evaluation order: (1) parse; (2) `operationId` must be a UUID; (3) take the
 `settings_update` lock, then idempotency lookup before CAS — if that `operationId` was already committed with the same
@@ -145,7 +192,9 @@ returns `409` `operationPayloadMismatch` and writes nothing; (4) CAS check
 (`409` `revisionConflict`); (5) write.
 
 `new` reuses V3 user-defined Provider validation. Template ids pass through as
-opaque preset ids; Rust still does not load presets. Omitting `authorization`
+opaque preset ids; preset forms stay frontend-owned and Rust consumes only the
+offering projection generated from `resources/provider-presets.json`.
+Omitting `authorization`
 on keyed auth saves the definition only (V4 connections then show
 authorization `missing`); `api_key` requires a non-empty secret on keyed
 auth; `none` is valid only for no-auth templates, which always create the
@@ -153,9 +202,8 @@ singleton account. The Provider row, optional first account row, and the
 operation record commit in one SQLite transaction; the dynamic-provider
 snapshot is installed after commit exactly as V3 does.
 
-`existing` in this stage accepts a new `api_key` only on user-defined
-(dynamic) Provider connections with keyed auth. Built-in and Custom API
-connection ids return `400` ("add Keys on Accounts"). Account row and
+`existing` accepts a new `api_key` on keyed dynamic Providers and legacy Custom HTTP connections. Built-in, platform-managed, and no-auth
+connection ids return `400`. Account row and
 operation record commit in one transaction, then the revision bump only
 (`reload_contracts=false`), the same as V3 plain account create.
 
@@ -168,7 +216,7 @@ model. The response never contains the secret, ciphers, or the digest.
 the digest is hex HMAC-SHA256 over the semantic payload only — `operationId`,
 `connection`, `authorization` (so the secret is covered), and `targets`.
 `expectedRevision` / `processGeneration` are excluded, so a retry with
-refreshed CAS tokens still replays. Schema v44 stores each commit in
+refreshed CAS tokens still replays. Each commit is stored in
 `dashboard_operations`; the stored `result_json` is secret-free. Rows older
 than 30 days are pruned on insert; after pruning, the same `operationId` is a
 new write.
@@ -178,11 +226,26 @@ credential. CAS tokens are required; there is no `operationId`. The
 credential id, binding, and quota relationship stay the same. `version`
 and `authStateVersion` increment together; `authState` becomes `unknown`;
 the underlying account's `auth_error` / `last_error` and verification
-result are cleared so the old version cannot pollute the new one. The
+result are cleared so the old version cannot pollute the new one.
+Rotating replaces the Key and clears local quota recovery. The
 body is `{ secretInput }` plus CAS tokens. The result is secret-free.
 Platform observer, anonymous, no-auth, and CPA credentials return `400`.
 Unknown ids return `404`. A stale CAS token returns `409` and writes
 nothing.
+
+`QuotaRecoveryDto` is `{ status: "waiting" | "ready" | "probing", reason:
+"quota_exhausted" | "insufficient_balance", window: "five_hours" | "week" |
+"month" | "unknown", observedAt: string (RFC3339), resetsAt: string | null,
+nextRetryAt: string (RFC3339), failureCount: number }`.
+
+`POST /credentials/{id}/quota-retry` uses the existing flattened
+`MutationExpectation` body (`expectedRevision`, `processGeneration`) with no
+`operationId`. The result is `{ revision: ControlRevision, credential:
+DestinationCredentialDto }` and is secret-free. It permits one next normal
+selection: no outbound request, no enablement change, and no backoff clear.
+It is idempotent while status is already `ready` or `probing` and may return
+the current updated row. Unknown ids return `404`. A stale CAS token returns
+`409` and writes nothing.
 
 `PATCH /bindings/{id}` edits one inference binding. CAS tokens are
 required; there is no `operationId`. The body is `{ modelScope?, enabled? }`
@@ -211,8 +274,8 @@ The dashboard consumes `GET /connections` for the Providers rail,
 `GET /accounts` as a display overlay on the Accounts page. The client generates a new `operationId` when
 the draft changes, keeps that id across retries of an unchanged draft, and
 regenerates it after success. Editing and deleting accounts and the
-remaining Accounts-page operations stay on V3; Key rotation, binding edits,
-and adding a Key to an existing identity use V4.
+remaining Accounts-page operations stay on V3; Key rotation, quota retry,
+binding edits, and adding a Key to an existing identity use V4.
 
 ## Settings mutation workflow
 
@@ -241,9 +304,9 @@ Protected Dashboard V2 REST answers with a fixed tombstone.
   tombstone).
 - Authenticated V2 REST (including loopback local mode): **410** with
   `{ "code": "dashboardV2Removed", "message": "Dashboard API V2 has been removed; refresh the page and retry." }`.
-- Unknown `/dashboard/api/...` paths that are not V3, not V4, and not a
-  preserved family are also 410 once authenticated. Unknown V4 paths are V4
-  `404`s, not tombstones.
+- Unknown `/dashboard/api/...` paths that are not the V3 tombstone prefix,
+  not V4, and not a preserved family are also 410 once authenticated.
+  Unknown V4 paths are V4 `404`s, not tombstones.
 
 Preserved `/dashboard/api` families (exact path, no trailing slash, no
 extra segments):
@@ -251,10 +314,11 @@ extra segments):
 - `auth/status`, `auth/register`, `auth/login`, `auth/logout`
 - `browser/sessions/{token}/ws` (non-empty token)
 
-V3 auth and browser WebSocket live under `/dashboard/api/v3/...`; the Vue
-shell uses them, and current product views also call the additive V4 routes
-under `/dashboard/api/v4/...`. Inference routes, dashboard HTML, and
-`/dashboard/assets/...` are outside the tombstone.
+The `/dashboard/api/v3` prefix is a separate 410 family
+(`dashboardV3Removed`). The Vue shell and product views call
+`/dashboard/api/v4` only (`requestV3` and `requestV4` share that base;
+`dashboardV3.listAccounts` uses `GET /account-records`). Inference routes,
+dashboard HTML, and `/dashboard/assets/...` are outside the tombstone.
 
 ---
 

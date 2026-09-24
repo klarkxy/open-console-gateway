@@ -3,7 +3,7 @@
 //! Custom destinations are administrator-trusted. Direct, Manual, and Auto all
 //! inherit the process-wide proxy policy from [`crate::http_client`]. The
 //! client never follows redirects, never forwards dashboard/client auth, and
-//! always composes isolated Bearer / `x-api-key` headers. IsolatedTrustedAdmin
+//! always composes isolated Bearer / `x-api-key` / `api-key` headers. IsolatedTrustedAdmin
 //! connectors attach a destination DNS guard; an explicit or system proxy still
 //! owns destination DNS and is not forced Direct.
 //!
@@ -232,6 +232,7 @@ fn inference_auth_scheme(
     match scheme {
         UpstreamAuthScheme::Bearer => ocg_infra::inference_http::InferenceAuthScheme::Bearer,
         UpstreamAuthScheme::XApiKey => ocg_infra::inference_http::InferenceAuthScheme::XApiKey,
+        UpstreamAuthScheme::ApiKey => ocg_infra::inference_http::InferenceAuthScheme::ApiKey,
     }
 }
 
@@ -277,7 +278,7 @@ impl HttpInferenceTransportSpec {
 }
 
 /// One outbound inference attempt. Auth is optional so keyless adapters can
-/// reuse the same send path; callers that need isolated Bearer / `x-api-key`
+/// reuse the same send path; callers that need isolated Bearer / `x-api-key` / `api-key`
 /// supply the scheme and key here.
 #[derive(Debug)]
 pub struct InferenceHttpRequest<'a> {
@@ -571,6 +572,7 @@ const FORBIDDEN_CLIENT_HEADERS: &[&str] = &[
     "authorization",
     "proxy-authorization",
     "x-api-key",
+    "api-key",
     "x-goog-api-key",
     "x-ocg-session",
 ];
@@ -617,6 +619,7 @@ pub fn header_map_contains_forbidden_client_credentials(
         match scheme {
             UpstreamAuthScheme::Bearer if lower == "authorization" => false,
             UpstreamAuthScheme::XApiKey if lower == "x-api-key" => false,
+            UpstreamAuthScheme::ApiKey if lower == "api-key" => false,
             _ => FORBIDDEN_CLIENT_HEADERS.contains(&lower),
         }
     })

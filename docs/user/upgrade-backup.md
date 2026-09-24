@@ -9,98 +9,47 @@ and verify them against the release's `SHA256SUMS`:
 on macOS, or `sha256sum <file>` on Linux. Backups, restores, and removal are
 the kind of operations that are boring right up until they aren't.
 
-On Windows, the in-app updater preserves the existing installation directory
-when upgrading from OCG Manager to Open Console Gateway. A manual installer
-should use the existing directory to replace the old installation. The upgrade
-keeps the data directory and auto-start setting, migrates existing desktop and
-Start-menu shortcuts, and replaces the old installed-app registration with the
-new product name.
+On Windows, install, in-app update, and running the setup again all reuse the
+existing installation directory. The installer never uninstalls first. The
+upgrade keeps the data directory and auto-start setting and migrates existing
+desktop and Start-menu shortcuts. Uninstall only from Windows **Installed apps**.
 
-## Database Migration And Access Keys (Schema v49)
+## Database Migration And Access Keys (Schema v62)
 
-The database schema is **v49**; historical databases migrate in place on
-startup. Upgrading from a single-key version keeps your existing credential
-as the **primary key** (fixed id
-`00000000-0000-0000-0000-000000000001`), so clients keep authenticating
-with the same value. The `access_keys` table holds the primary key plus up
-to 64 non-deleted sub keys; deleting a sub key clears its plaintext but
-keeps the name for log attribution.
+The database schema is **v62**; historical databases migrate in place on
+startup. The primary access key keeps the fixed id
+`00000000-0000-0000-0000-000000000001`, so clients keep authenticating with
+the same value across upgrades. The `access_keys` table holds the primary key
+plus up to 64 non-deleted sub keys; deleting a sub key clears its plaintext
+but keeps the name for log attribution.
 
-An existing, non-empty database migrates canonically to v26 first. The v27
-rewrite copies the primary Key and every `sub_gateway_keys` row into
-`access_keys`, drops `sub_gateway_keys`, and drops the legacy
-`accounts.usage_sync_*` columns. Before any v27 write the database receives a
-sibling snapshot `data.sqlite.pre-v3.<timestamp>.bak` plus a SHA-256 sidecar.
-A fresh empty data directory creates schema v49 directly and skips the
-snapshot. That snapshot is a v26 rollback point, not a substitute for a
-complete backup; verify the sidecar before restoring it, and restore it only
-onto a v26-capable binary or to retry a v27 open that never committed. Never
-open a migrated database with an older build — extra Keys do not authenticate
-on a single-key-era build, and a revoked value cannot come back to life by
-downgrading.
-
-v29 removes SCNet Token Plans from the catalog and deletes any existing
-SCNet account rows during migration. Every startup normalizes historical
-Command Code GOAT verification state to `not_required`, because the public
-catalog is not Key verification. Custom API enabled state is preserved.
-OpenCode Go, Zen Free, and unknown provider identities are left alone.
-
-v30 expands Custom API `account_custom_configs` from the single
-`upstream_protocol` column to a JSON `upstream_protocols` set, backfilling
-each existing Custom account from its old value. Custom config/capability
-edits keep the account enabled but reset `verification_status` to `pending`.
-
-v31 adds `provider_contract_model_protocol_overrides` for per-model/per-protocol
-enablement and stops reading the deprecated `provider_contract_scopes` switch
-columns.
-
-v32 replaces the Custom API base URL, protocol set, and configurable auth with
-one complete inference Endpoint and one upstream protocol. Historical Custom
-rows choose Chat Completions, then Responses, then Messages; the corresponding
-standard inference suffix is appended, the account is disabled/pending for
-administrator review, and non-selected protocol state is removed atomically.
-
-v33 adds `account_model_capabilities.upstream_model`. Existing mapping rows are
-backfilled with their prior public `model_id`, so an upgrade preserves existing
-routing exactly. New Custom rows may use distinct public and upstream names.
-
-v35 collapses Provider/Plan identity to `provider_id` only after a fail-closed
-preflight of known v34 pairs, and stores typed user-defined Providers in
-`dynamic_providers` / `dynamic_provider_models`. Non-empty v34 databases also
-write `data.sqlite.pre-v35.<timestamp>.bak`.
-
-v36 briefly added the unreleased Ollama Cookie-usage state. v37 removes that
-table and adds account-scoped Ollama Cloud billing tiers (Pro/Max/Team).
-
-v38 adds `platform_accounts` / `platform_links` for account-owned platform
-Keys (New API / Sub2API parents). v39 records Provider preset provenance
-(`preset_id`); v40 adds per-model `upstream_override`; v41 adds the
-MiniMax/Kimi per-model preferred-protocol table.
-
-v42 unifies user-defined Providers and the sealed builtin catalog into one
-`providers` / `provider_models` pair. Non-empty v41 databases write
-`data.sqlite.pre-v42.<timestamp>.bak` plus a SHA-256 sidecar first.
-
-v43 admits Responses as a stored preferred protocol; v44 adds the
-secret-free `dashboard_operations` ledger behind idempotent dashboard V4
-writes. v45 adds the identity / credential / binding / quota-pool satellite
-tables and backfills them from existing accounts; v46 adds saved endpoint
-and Origin grants on credential bindings. v47 persists the onboarding-draft
-flag on `providers`.
-
-v48 drops inert protocol-switch and `free_alias_enabled` columns and the
-empty legacy dynamic-Provider tables. Non-empty v47 databases write
-`data.sqlite.pre-v48.<timestamp>.bak` plus a SHA-256 sidecar first, and
-nonempty leftovers fail closed instead of being dropped. v49 adds
-`unpublished_public_models` (additive; no pre-migration backup).
+Before protected schema migrations (v27, v35, v42, v48, v58, v59), the migrator writes
+a unique, never-overwritten sibling snapshot — `data.sqlite.pre-v3.<timestamp>.bak`,
+`data.sqlite.pre-v35.<timestamp>.bak`, `data.sqlite.pre-v42.<timestamp>.bak`,
+`data.sqlite.pre-v48.<timestamp>.bak`, `data.sqlite.pre-v58.<timestamp>.bak`, or `data.sqlite.pre-v59.<timestamp>.bak` — plus a SHA-256 sidecar. A fresh
+empty data directory creates schema v62 directly and skips the snapshot. That
+snapshot is a rollback point, not a substitute for a complete backup: verify
+the sidecar before restoring it, and restore it only onto a binary that can
+open that schema version or to retry an upgrade that never committed. Never
+open a migrated database with an older build — newer Keys do not authenticate
+there, and a revoked value cannot come back to life by downgrading.
+Migrations are fail-closed: data a rewrite cannot migrate safely (for example
+a non-empty leftover legacy table) refuses the upgrade instead of being
+dropped.
 
 ### Portable Node Backup Payloads
 
-Node backups export payload V6 with `providerId` plus the identity snapshot,
-including saved user-defined Provider definitions. V4/V5 backups remain
-importable with their older host-local cooldown behavior. Payload V1–V3
-backups are rejected with an explicit unsupported-version error; that is not
-a wrong password or a damaged file.
+Node backups export payload V10 with destinations and credentials as the
+authority, including model-resolution policy and per-model route overrides
+(secrets and identity extras stay inside the encrypted envelope).
+V4–V10 backups remain importable; V7 receives deterministic resolution defaults.
+Payload V1–V3 backups, and V11 or newer, are rejected with an
+explicit unsupported-version error; that is not a wrong password or a damaged
+file.
+
+Supplier card IDs, grouping and order travel in V9 backups. Multiple cards can reference the same supplier without duplicating its configuration or Keys. During a merge, existing accounts keep their order and card membership; source grouping applies to newly imported accounts. Older backups retain their saved credential priority and receive matching cards on import.
+
+V10 also carries each account's credit configuration, remaining buckets and monthly issuance cursor. Existing target meters survive a merge; older backups do not reset them. In-flight requests are represented as uncertainty in the exported estimate, since their local settlement receipts do not transfer.
 
 ## Backup
 
@@ -169,9 +118,19 @@ dashboard, accounts, and a real gateway request have all been verified.
 
 The direct GUI steps also work when in-app update is unavailable.
 
-- **Windows GUI:** quit the tray app, run the new installer, and choose
-  **Install without uninstalling**. Uninstall from Windows **Installed
-  apps**; the uninstaller asks whether to delete `%USERPROFILE%\.ocg-mgr`.
+The first successful desktop launch after an upgrade synchronizes the bundled
+Codex skill. A native release CLI synchronizes it on the next `serve`, or immediately
+with `skill sync`; this also means an intentional binary downgrade installs
+that binary's matching skill version. When its content differs, the previous
+OCG-managed skill is backed up under `~/.agents/skill-backups/`. Uninstalling the app or CLI leaves the
+user-level skill in place so it can still guide a reinstall; remove it
+separately only if no other OCG installation uses it.
+
+- **Windows GUI:** quit the tray app and run the new installer; it replaces
+  the existing copy in place. Uninstall from Windows **Installed apps**. The
+  confirm page deletes `%USERPROFILE%\.ocg-mgr` only when you select **Delete
+  application data**. Reinstalling after an uninstall that left the data
+  directory in place restores the same configuration.
 - **macOS GUI:** replace the app in **Applications** with the new DMG copy.
   Delete the app to uninstall; remove `~/.ocg-mgr` separately only when you
   also intend to delete the data.

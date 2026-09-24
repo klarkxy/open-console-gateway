@@ -244,19 +244,19 @@ function rowKey(row: GoatPricingRow): string {
   margin: 0 0 14px;
   overflow: hidden;
   border: 1px solid var(--ocg-border);
-  border-radius: 10px;
+  border-radius: var(--ocg-radius-md);
   background: var(--ocg-border);
   font-variant-numeric: tabular-nums;
 }
 
 .pricing-ledger > div {
   min-width: 0;
-  padding: 10px 12px;
+  padding: 10px var(--ocg-space-md);
   background: var(--ocg-canvas);
 }
 
 .pricing-ledger dt {
-  margin-bottom: 4px;
+  margin-bottom: var(--ocg-space-xs);
   color: var(--ocg-subtle);
   font-size: var(--ocg-font-xs);
 }

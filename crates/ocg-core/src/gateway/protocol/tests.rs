@@ -632,6 +632,37 @@ fn p07_responses_requires_explicit_store_false_and_rejects_stateful_async_fields
 }
 
 #[test]
+fn client_feature_validation_does_not_select_or_convert_upstream() {
+    let structured = parse_client_request(
+        ApiFormat::Responses,
+        bytes(json!({
+            "model": "MiniMax-New",
+            "input": "hi",
+            "store": false,
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "answer",
+                    "schema": {"type": "object"}
+                }
+            }
+        })),
+    )
+    .unwrap();
+    validate_client_request_features(&structured)
+        .expect("json_schema is conversion-dependent and must wait for the candidate");
+
+    let missing_store = parse_client_request(
+        ApiFormat::Responses,
+        bytes(json!({"model": "MiniMax-New", "input": "hi"})),
+    )
+    .unwrap();
+    let error = validate_client_request_features(&missing_store)
+        .expect_err("stateless store=false is independent of upstream");
+    assert!(error.message.contains("requires Responses store=false"));
+}
+
+#[test]
 fn p02_cross_protocol_structured_formats_are_rejected() {
     let cases = [
         (
@@ -1070,95 +1101,60 @@ fn messages_response_maps_reasoning_tools_and_usage_to_both_openai_formats() {
 }
 
 #[test]
-fn minimax_usage_sanitize_table() {
-    for (label, model, hint, input, output, cache, expect_input, expect_cache) in [
+fn extract_usage_preserves_reported_messages_cache_counters() {
+    for (label, usage, expected) in [
         (
-            "zero-input-all-cache",
-            Some("minimax-m3"),
-            None,
-            0,
-            5,
-            40500,
-            40500,
-            0,
+            "all-cache-model-absent",
+            json!({
+                "type":"message_start",
+                "message":{"usage":{"input_tokens":0,"output_tokens":5,"cache_read_input_tokens":40500}}
+            }),
+            UsageCounts {
+                input_tokens: 40500,
+                output_tokens: 5,
+                cached_tokens: 40500,
+                cache_creation_tokens: 0,
+            },
         ),
         (
-            "normal-minimax-untouched",
-            Some("minimax-m3"),
-            None,
-            108,
-            91,
-            14813,
-            108,
-            14813,
+            "all-cache-model-different",
+            json!({
+                "type":"message_start",
+                "message":{"model":"qwen3.7-max","usage":{"input_tokens":0,"output_tokens":5,"cache_read_input_tokens":40500}}
+            }),
+            UsageCounts {
+                input_tokens: 40500,
+                output_tokens: 5,
+                cached_tokens: 40500,
+                cache_creation_tokens: 0,
+            },
         ),
         (
-            "qwen-not-minimax",
-            Some("qwen3.7-max"),
-            None,
-            0,
-            5,
-            40500,
-            0,
-            40500,
-        ),
-        (
-            "plan-hint-minimax",
-            Some("ocg-generic"),
-            Some("minimax-m3"),
-            0,
-            5,
-            40500,
-            40500,
-            0,
-        ),
-        (
-            "case-insensitive-id",
-            Some("MiniMax-M3"),
-            None,
-            0,
-            5,
-            40500,
-            40500,
-            0,
-        ),
-        (
-            "separator-insensitive-hint",
-            Some("ocg-generic"),
-            Some("MiniMax_M3"),
-            0,
-            5,
-            40500,
-            40500,
-            0,
-        ),
-        (
-            "qwen-mixed-case-untouched",
-            Some("Qwen3.7-Max"),
-            None,
-            0,
-            5,
-            40500,
-            0,
-            40500,
+            "partial-cache",
+            json!({
+                "type":"message_start",
+                "message":{"model":"minimax-m3","usage":{"input_tokens":108,"output_tokens":91,"cache_read_input_tokens":14813,"cache_creation_input_tokens":2}}
+            }),
+            UsageCounts {
+                input_tokens: 14923,
+                output_tokens: 91,
+                cached_tokens: 14813,
+                cache_creation_tokens: 2,
+            },
         ),
     ] {
-        let mut usage = json!({
-            "input_tokens": input,
-            "output_tokens": output,
-            "cache_read_input_tokens": cache
-        });
-        sanitize_minimax_anthropic_usage(model, hint, &mut usage);
-        assert_eq!(usage["input_tokens"], expect_input, "{label}");
-        assert_eq!(usage["cache_read_input_tokens"], expect_cache, "{label}");
+        assert_eq!(
+            extract_usage(ApiFormat::Messages, &usage, Some("minimax-m3")),
+            expected,
+            "{label}"
+        );
     }
 }
 
 #[test]
-fn messages_response_to_chat_sanitizes_minimax_bogus_all_cache() {
+fn messages_response_to_chat_preserves_reported_minimax_all_cache() {
     // OpenCode Go's Anthropic-compatible endpoint sometimes returns a rewritten model
-    // id or omits the field entirely; the request plan's model must still trigger
-    // sanitization either way.
+    // id or omits the field entirely; usage remains the provider-reported total either way.
     for model_field in [Some("minimax-m3"), None] {
         let mut response = json!({
             "id":"m1",
@@ -1179,15 +1175,18 @@ fn messages_response_to_chat_sanitizes_minimax_bogus_all_cache() {
         )
         .expect("Messages to Chat");
         assert_eq!(chat["usage"]["prompt_tokens"], 40500);
-        assert_eq!(chat["usage"]["prompt_tokens_details"]["cached_tokens"], 0);
+        assert_eq!(
+            chat["usage"]["prompt_tokens_details"]["cached_tokens"],
+            40500
+        );
     }
 }
 
 #[test]
-fn chat_to_messages_minimax_end_to_end_sanitizes_bogus_all_cache() {
+fn chat_to_messages_minimax_end_to_end_preserves_reported_all_cache() {
     // MiniMax accepts Chat natively; exercise Messages→Chat conversion via a client
     // that still needs preferred Messages (Responses). OpenCode may rewrite the
-    // response model to an internal id while returning a bogus all-cache signature.
+    // response model to an internal id while returning an all-cache usage signature.
     let plan = prepare_request(
         ApiFormat::Responses,
         bytes(json!({
@@ -1213,39 +1212,17 @@ fn chat_to_messages_minimax_end_to_end_sanitizes_bogus_all_cache() {
     assert_eq!(responses["usage"]["input_tokens"], 40669);
     assert_eq!(
         responses["usage"]["input_tokens_details"]["cached_tokens"],
-        0
+        40669
     );
 
     let counts = extract_usage(plan.upstream, &upstream_response, Some(&plan.model));
     assert_eq!(counts.input_tokens, 40669);
-    assert_eq!(counts.cached_tokens, 0);
+    assert_eq!(counts.cached_tokens, 40669);
 }
 
 #[test]
-fn extract_usage_sanitizes_minimax_with_model_hint() {
-    let usage = json!({
-        "type":"message_start",
-        "message":{"usage":{"input_tokens":0,"output_tokens":5,"cache_read_input_tokens":40500}}
-    });
-    let counts = extract_usage(ApiFormat::Messages, &usage, Some("minimax-m3"));
-    assert_eq!(counts.input_tokens, 40500);
-    assert_eq!(counts.cached_tokens, 0);
-
-    // When the upstream response contains a non-MiniMax model identifier but the request
-    // plan is MiniMax, the hint must still trigger sanitization.
-    let usage = json!({
-        "type":"message_start",
-        "message":{"model":"qwen3.7-max","usage":{"input_tokens":0,"output_tokens":5,"cache_read_input_tokens":40500}}
-    });
-    let counts = extract_usage(ApiFormat::Messages, &usage, Some("minimax-m3"));
-    assert_eq!(counts.input_tokens, 40500);
-    assert_eq!(counts.cached_tokens, 0);
-}
-
-#[test]
-fn extract_usage_sanitizes_minimax_chat_completion_usage() {
-    // When a MiniMax model is routed/answered over the OpenAI Chat Completions wire
-    // format, the bogus all-cache signature appears as prompt_tokens == cached_tokens.
+fn extract_usage_preserves_reported_chat_completion_cache_counters() {
+    // Chat Completions reports prompt_tokens as the total, including cached tokens.
     let usage = json!({
         "model": "minimax-m3",
         "usage": {
@@ -1256,14 +1233,14 @@ fn extract_usage_sanitizes_minimax_chat_completion_usage() {
     });
     let counts = extract_usage(ApiFormat::ChatCompletions, &usage, Some("minimax-m3"));
     assert_eq!(counts.input_tokens, 40669);
-    assert_eq!(counts.cached_tokens, 0);
+    assert_eq!(counts.cached_tokens, 40669);
 }
 
 #[test]
-fn transform_response_sanitizes_minimax_chat_completion_passthrough() {
+fn transform_response_preserves_reported_minimax_chat_completion_passthrough() {
     // If a MiniMax model name does not route to the Anthropic Messages upstream,
     // the response is passed through in Chat Completions format and still needs
-    // the bogus all-cache signature removed.
+    // the provider-reported all-cache signature preserved.
     let response = json!({
         "id": "chatcmpl-1",
         "model": "minimax-m3",
@@ -1282,11 +1259,11 @@ fn transform_response_sanitizes_minimax_chat_completion_passthrough() {
         ),
         &response,
     )
-    .expect("Chat Completions passthrough should sanitize");
+    .expect("Chat Completions passthrough should preserve usage");
     assert_eq!(converted["usage"]["prompt_tokens"], 40669);
     assert_eq!(
         converted["usage"]["prompt_tokens_details"]["cached_tokens"],
-        0
+        40669
     );
 }
 
@@ -1302,7 +1279,7 @@ fn transform_response_rejects_non_object_messages_without_panicking() {
 }
 
 #[test]
-fn transform_response_sanitizes_minimax_messages_for_every_client_format() {
+fn transform_response_preserves_reported_minimax_messages_for_every_client_format() {
     let response = json!({
         "id": "msg_1",
         "type": "message",
@@ -1322,28 +1299,28 @@ fn transform_response_sanitizes_minimax_messages_for_every_client_format() {
         &plan_with_model(ApiFormat::Messages, ApiFormat::Messages, "minimax-m3"),
         &response,
     )
-    .expect("Messages passthrough should sanitize");
-    assert_eq!(messages["usage"]["input_tokens"], 40500);
-    assert_eq!(messages["usage"]["cache_read_input_tokens"], 0);
+    .expect("Messages passthrough should preserve usage");
+    assert_eq!(messages["usage"]["input_tokens"], 0);
+    assert_eq!(messages["usage"]["cache_read_input_tokens"], 40500);
 
     let responses = transform_response(
         &plan_with_model(ApiFormat::Responses, ApiFormat::Messages, "minimax-m3"),
         &response,
     )
-    .expect("Messages to Responses should sanitize");
+    .expect("Messages to Responses should preserve usage");
     assert_eq!(responses["usage"]["input_tokens"], 40500);
     assert_eq!(
         responses["usage"]["input_tokens_details"]["cached_tokens"],
-        0
+        40500
     );
 
     let gemini = transform_response(
         &plan_with_model(ApiFormat::Gemini, ApiFormat::Messages, "minimax-m3"),
         &response,
     )
-    .expect("Messages to Gemini should sanitize");
+    .expect("Messages to Gemini should preserve usage");
     assert_eq!(gemini["usageMetadata"]["promptTokenCount"], 40500);
-    assert_eq!(gemini["usageMetadata"]["cachedContentTokenCount"], 0);
+    assert_eq!(gemini["usageMetadata"]["cachedContentTokenCount"], 40500);
 }
 
 #[test]
@@ -1942,6 +1919,46 @@ fn muse_spark_max_alias_reaches_responses_upstream_from_every_client_protocol() 
 }
 
 #[test]
+fn muse_spark_effort_alias_follows_the_selected_route_policy() {
+    let responses = parse_client_request(
+        ApiFormat::Responses,
+        bytes(json!({
+            "model": "muse-spark-1.2",
+            "input": "hi",
+            "store": false,
+            "reasoning": {"effort": "max"}
+        })),
+    )
+    .unwrap();
+    let mut go = identity_spec(&responses);
+    go.effort_aliases = route_effort_aliases(
+        ocg_domain::destination::AdapterKind::OpencodeGo,
+        "muse-spark-1.2",
+    );
+    let rewritten = materialize_parsed_request(&responses, &go).unwrap();
+    let body: Value = serde_json::from_slice(&rewritten.body).unwrap();
+    assert_eq!(body["reasoning"]["effort"], "xhigh");
+
+    let chat = parse_client_request(
+        ApiFormat::ChatCompletions,
+        bytes(json!({
+            "model": "muse-spark-1.2",
+            "messages": [{"role": "user", "content": "hi"}],
+            "reasoning_effort": "max"
+        })),
+    )
+    .unwrap();
+    let mut http = identity_spec(&chat);
+    http.upstream_model = "muse-spark-1.2".into();
+    http.forced_upstream = Some(ApiFormat::ChatCompletions);
+    http.effort_aliases =
+        route_effort_aliases(ocg_domain::destination::AdapterKind::Http, "muse-spark-1.2");
+    let passed = materialize_parsed_request(&chat, &http).unwrap();
+    let body: Value = serde_json::from_slice(&passed.body).unwrap();
+    assert_eq!(body["reasoning_effort"], "max");
+}
+
+#[test]
 fn muse_spark_leaves_non_aliased_effort_untouched() {
     let request = json!({
         "model":"muse-spark-1.2","input":"hi","store":false,
@@ -2007,6 +2024,7 @@ fn parse_once_materializes_a_different_upstream_model() {
             original_model: None,
             forced_upstream: None,
             custom_route: None,
+            effort_aliases: &[],
         },
     )
     .unwrap();
@@ -2021,6 +2039,7 @@ fn parse_once_materializes_a_different_upstream_model() {
             original_model: Some("deepseek-v4-flash".into()),
             forced_upstream: None,
             custom_route: None,
+            effort_aliases: &[],
         },
     )
     .unwrap();
@@ -2144,12 +2163,15 @@ fn command_code_descriptor_is_separate_from_opencode_table() {
         .expect("official GOAT raw id");
     assert_eq!(goat.alias, COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS);
     assert_eq!(goat.preferred, ApiFormat::ChatCompletions);
-    assert_eq!(goat.supported_upstream, &[ApiFormat::ChatCompletions]);
+    assert_eq!(
+        goat.supported_upstream,
+        &[ApiFormat::ChatCompletions, ApiFormat::Responses]
+    );
     assert!(command_code_supports_upstream(
         COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
         ApiFormat::ChatCompletions
     ));
-    assert!(!command_code_supports_upstream(
+    assert!(command_code_supports_upstream(
         COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
         ApiFormat::Responses
     ));
@@ -2180,12 +2202,15 @@ fn command_code_descriptor_is_separate_from_opencode_table() {
         command_code_upstream_path(ApiFormat::Messages),
         Some("/messages")
     );
-    assert_eq!(command_code_upstream_path(ApiFormat::Responses), None);
+    assert_eq!(
+        command_code_upstream_path(ApiFormat::Responses),
+        Some("/responses")
+    );
     assert_eq!(command_code_upstream_path(ApiFormat::Gemini), None);
 }
 
 #[test]
-fn command_code_client_formats_convert_to_chat_and_never_emit_responses() {
+fn command_code_client_formats_use_native_responses_and_convert_messages_to_chat() {
     for (client, body) in [
         (
             ApiFormat::ChatCompletions,
@@ -2223,18 +2248,33 @@ fn command_code_client_formats_convert_to_chat_and_never_emit_responses() {
                 original_model: None,
                 forced_upstream: None,
                 custom_route: None,
+                effort_aliases: &[],
             },
         )
         .unwrap();
-        assert_eq!(plan.upstream, ApiFormat::ChatCompletions, "{client:?}");
+        let expected_upstream = match client {
+            ApiFormat::Responses => ApiFormat::Responses,
+            ApiFormat::ChatCompletions | ApiFormat::Messages => ApiFormat::ChatCompletions,
+            ApiFormat::Gemini => unreachable!("Gemini is tested below"),
+        };
+        assert_eq!(plan.upstream, expected_upstream, "{client:?}");
         assert_eq!(
             plan.model, COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
             "{client:?}"
         );
-        assert_ne!(plan.upstream, ApiFormat::Responses);
+        let body: serde_json::Value = serde_json::from_slice(&plan.body).unwrap();
+        assert_eq!(body["model"], COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM);
+        if client == ApiFormat::Responses {
+            assert_eq!(body["input"], "hi");
+            assert_eq!(body["store"], false);
+        }
         assert_eq!(
             command_code_upstream_path(plan.upstream),
-            Some("/chat/completions")
+            match expected_upstream {
+                ApiFormat::Responses => Some("/responses"),
+                ApiFormat::ChatCompletions => Some("/chat/completions"),
+                ApiFormat::Messages | ApiFormat::Gemini => unreachable!(),
+            }
         );
     }
 
@@ -2255,6 +2295,7 @@ fn command_code_client_formats_convert_to_chat_and_never_emit_responses() {
             original_model: None,
             forced_upstream: None,
             custom_route: None,
+            effort_aliases: &[],
         },
     )
     .unwrap();

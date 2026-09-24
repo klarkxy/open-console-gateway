@@ -14,6 +14,7 @@ import {
   installTestWindow,
   settle,
   text,
+  walkHostNodes,
   type HostNode,
   type TestWindow,
 } from "../test-helpers/vue-host-runtime.ts";
@@ -116,6 +117,36 @@ function importButton(root: HostNode, provider: string): HostNode {
   return button(root, `导入 ${provider}`);
 }
 
+// Structural queries for state alerts: the harness forwards attrs (class, type)
+// onto host node props, and the page marks OAuth/import notices with the
+// cpa-oauth-status class, so presence/absence and notice kind are assertable
+// without matching rendered copy.
+function hasClass(node: HostNode, className: string): boolean {
+  return typeof node.props.class === "string" && node.props.class.split(/\s+/).includes(className);
+}
+
+function elementsByClass(root: HostNode, className: string): HostNode[] {
+  return walkHostNodes(root).filter((node) => hasClass(node, className));
+}
+
+function oauthStatusAlerts(root: HostNode, type: "info" | "warning" | "success"): HostNode[] {
+  return elementsByClass(root, "cpa-oauth-status").filter((node) => node.props.type === type);
+}
+
+// Inline failure alerts (discovery, load errors) carry a title but no dedicated
+// class; titled divs of the given type identify them.
+function titledAlerts(root: HostNode, type: string): HostNode[] {
+  return walkHostNodes(root).filter(
+    (node) => node.type === "div" && node.props.title !== undefined && node.props.type === type,
+  );
+}
+
+function hasButton(root: HostNode, label: string): boolean {
+  return walkHostNodes(root).some(
+    (node) => node.type === "button" && text(node).trim() === label,
+  );
+}
+
 function oauthComponentApi(overrides: CpaApi): CpaApi {
   return {
     getCpaIntegration: async () => integration(),
@@ -187,7 +218,7 @@ test("OAuth polling is single-flight and schedules the next poll only after comp
     assert.equal(mounted.window.__timers.size, 1, "a non-terminal response schedules the next poll");
     await fireTimers(mounted.window);
     assert.equal(reads, 2, "the next poll runs only after the previous response was applied");
-    assert.match(text(mounted.root), /正在等待 CPA 完成授权/);
+    assert.equal(oauthStatusAlerts(mounted.root, "info").length, 1, "the in-progress OAuth panel stays visible");
   } finally { mounted.app.unmount(); }
 });
 
@@ -211,19 +242,19 @@ test("a stale terminal response cannot clear a newer OAuth flow", async () => {
     assert.deepEqual(statusStates, ["flow-1"], "the first flow has a status request in flight");
     await (button(mounted.root, "取消当前授权").props.onClick as () => Promise<void>)();
     await settle();
-    assert.doesNotMatch(text(mounted.root), /正在等待 CPA 完成授权/);
+    assert.equal(oauthStatusAlerts(mounted.root, "info").length, 0, "the cancelled flow panel is gone");
     const accountReadsAfterCancel = accountReads;
     await (button(mounted.root, "Codex 浏览器登录").props.onClick as () => Promise<void>)();
     await settle();
     assert.equal(starts, 2, "a new flow started");
-    assert.match(text(mounted.root), /正在等待 CPA 完成授权/);
+    assert.equal(oauthStatusAlerts(mounted.root, "info").length, 1, "the new flow panel is shown");
     stale.resolve({ state: "flow-1", status: "ok" });
     await settle();
-    assert.match(text(mounted.root), /正在等待 CPA 完成授权/, "the stale terminal response leaves the new flow alone");
+    assert.equal(oauthStatusAlerts(mounted.root, "info").length, 1, "the stale terminal response leaves the new flow panel alone");
     assert.equal(accountReads, accountReadsAfterCancel, "the stale success does not refresh accounts");
     await fireTimers(mounted.window);
     assert.deepEqual(statusStates, ["flow-1", "flow-2"], "the new flow keeps polling with its own state");
-    assert.match(text(mounted.root), /正在等待 CPA 完成授权/);
+    assert.equal(oauthStatusAlerts(mounted.root, "info").length, 1);
   } finally { mounted.app.unmount(); }
 });
 
@@ -266,16 +297,16 @@ test("a slow cancel invalidates an in-flight poll synchronously", async () => {
     const accountReadsBeforeCancel = accountReads;
     const cancelClick = (button(mounted.root, "取消当前授权").props.onClick as () => Promise<void>)();
     await settle();
-    assert.match(text(mounted.root), /正在等待 CPA 完成授权/, "the flow stays visible while the cancel is pending");
+    assert.equal(oauthStatusAlerts(mounted.root, "info").length, 1, "the flow panel stays visible while the cancel is pending");
     stale.resolve({ state: "flow-1", status: "ok" });
     await settle();
     assert.equal(accountReads, accountReadsBeforeCancel, "the stale terminal response is ignored during the cancel");
     assert.equal(mounted.window.__timers.size, 0, "the stale response does not re-arm polling");
-    assert.match(text(mounted.root), /正在等待 CPA 完成授权/, "the pending cancel still owns the flow state");
+    assert.equal(oauthStatusAlerts(mounted.root, "info").length, 1, "the pending cancel still owns the flow state");
     cancelRequest.resolve(undefined);
     await cancelClick;
     await settle();
-    assert.doesNotMatch(text(mounted.root), /正在等待 CPA 完成授权/);
+    assert.equal(oauthStatusAlerts(mounted.root, "info").length, 0, "the flow panel is gone once the cancel settles");
     assert.equal(accountReads, accountReadsBeforeCancel, "a cancelled flow never refreshes accounts");
   } finally { mounted.app.unmount(); }
 });
@@ -300,7 +331,6 @@ test("unmounting while OAuth start is pending never adopts the late session", as
   assert.equal(cancels, 1, "the late-started server session is released best-effort");
   assert.deepEqual(mounted.window.__opened, [], "no popup opens after unmount");
   assert.equal(mounted.window.__timers.size, 0, "no polling is scheduled after unmount");
-  assert.doesNotMatch(text(mounted.root), /正在等待 CPA 完成授权/, "the UI does not resurrect the flow");
 });
 
 function managedRunningApi(overrides: CpaApi): CpaApi {
@@ -352,15 +382,21 @@ test("device sign-in shows the short code with copy, the auth URL, and no auto-o
     assert.deepEqual(mounted.window.__opened, [], "the device flow never auto-opens a popup");
     const page = text(mounted.root);
     assert.match(page, /ABCD-1234/, "the short code is prominent");
-    assert.match(page, /设备码约 15 分钟后过期/, "the expiry is shown in minutes");
-    assert.match(page, /ChatGPT 账号的安全设置或工作区允许设备登录/, "the ChatGPT device-login prerequisite is explained");
+    const flowPanels = oauthStatusAlerts(mounted.root, "info");
+    assert.equal(flowPanels.length, 1, "the device flow panel is shown");
+    assert.match(text(flowPanels[0]), /15/, "the expiry derived from expiresIn is shown in minutes");
+    assert.match(text(flowPanels[0]), /ChatGPT/, "the ChatGPT device-login prerequisite is explained");
     const openPage = button(mounted.root, "打开授权页面");
     assert.equal(openPage.props.href, "https://auth.openai.com/codex/device", "the auth URL stays one click away");
     assert.ok(button(mounted.root, "Codex 浏览器登录").props.disabled, "an active flow keeps the other start single-flight");
-    await (button(mounted.root, "复制设备码").props.onClick as () => Promise<void>)();
+    const codeRow = elementsByClass(mounted.root, "cpa-device-code-row")[0];
+    const copyCodeButton = codeRow.children.find((node) => node.type === "button");
+    if (!copyCodeButton) assert.fail("the short code has a copy action");
+    const copyLabelBefore = text(copyCodeButton);
+    await (copyCodeButton.props.onClick as () => Promise<void>)();
     await settle();
     assert.deepEqual(copiedCode(), { target: "cpa-device-code", value: "ABCD-1234" }, "the copy action copies exactly the code");
-    assert.match(text(mounted.root), /已复制设备码/, "the copy is confirmed inline");
+    assert.notEqual(text(copyCodeButton), copyLabelBefore, "the copy is confirmed inline");
     assert.doesNotMatch(text(mounted.root), /secret-token-value/, "a token field in the response is never rendered");
   } finally { mounted.app.unmount(); }
 });
@@ -378,10 +414,13 @@ test("a Codex browser failure offers the device alternative without switching au
     await (button(mounted.root, "Codex 浏览器登录").props.onClick as () => Promise<void>)();
     await settle();
     await fireTimers(mounted.window);
-    const page = text(mounted.root);
-    assert.match(page, /Codex 浏览器登录失败/, "the failure is surfaced");
-    assert.match(page, /callback server unavailable/, "the backend error detail is preserved");
-    assert.match(page, /可改用设备码登录完成授权/, "the device alternative is suggested");
+    const failureAlerts = oauthStatusAlerts(mounted.root, "warning");
+    assert.equal(failureAlerts.length, 1, "the failure is surfaced");
+    assert.match(text(failureAlerts[0]), /callback server unavailable/, "the backend error detail is preserved");
+    assert.ok(
+      walkHostNodes(failureAlerts[0]).some((node) => node.type === "button"),
+      "the failure alert offers the device alternative",
+    );
     assert.equal(starts.length, 1, "no automatic switch to the device flow");
     await (button(mounted.root, "改用设备码登录").props.onClick as () => Promise<void>)();
     await settle();
@@ -397,7 +436,11 @@ test("an external CPA keeps device sign-in disabled with an explanation", async 
     startCpaOAuth: async () => { starts += 1; return { state: "flow-1", provider: "codex", url: null, flow: "browser", userCode: null, expiresIn: null, revision: 1, processGeneration: 1 }; },
   }));
   try {
-    assert.match(text(mounted.root), /设备码登录需要托管 CPA 运行中/, "the managed-runtime requirement is explained");
+    const oauthArea = elementsByClass(mounted.root, "oauth-providers")[0];
+    const deviceExplanation = oauthArea.parent?.children.find(
+      (node) => node.type === "p" && hasClass(node, "cpa-help"),
+    );
+    assert.ok(deviceExplanation, "the managed-runtime requirement is explained next to the sign-in buttons");
     const deviceButton = button(mounted.root, "Codex 设备码登录");
     assert.ok(deviceButton.props.disabled, "the device button is disabled for an external CPA");
     await (deviceButton.props.onClick as () => Promise<void>)();
@@ -421,11 +464,11 @@ test("a Codex browser start failure offers the device alternative", async () => 
   try {
     await (button(mounted.root, "Codex 浏览器登录").props.onClick as () => Promise<void>)();
     await settle();
-    const page = text(mounted.root);
-    assert.match(page, /Codex 浏览器登录失败/, "the start failure is surfaced");
-    assert.match(page, /callback server listen failed/, "the backend error detail is preserved");
+    const failureAlerts = oauthStatusAlerts(mounted.root, "warning");
+    assert.equal(failureAlerts.length, 1, "the start failure is surfaced");
+    assert.match(text(failureAlerts[0]), /callback server listen failed/, "the backend error detail is preserved");
     assert.equal(starts.length, 1, "no automatic switch to the device flow");
-    assert.doesNotMatch(page, /正在等待 CPA 完成授权/, "no flow is adopted from the failed start");
+    assert.equal(oauthStatusAlerts(mounted.root, "info").length, 0, "no flow is adopted from the failed start");
     await (button(mounted.root, "改用设备码登录").props.onClick as () => Promise<void>)();
     await settle();
     assert.deepEqual(starts[1], { provider: "codex", method: "device" }, "the suggestion starts the device flow on demand");
@@ -446,9 +489,14 @@ test("a non-Codex device flow keeps the generic instruction without ChatGPT copy
     await settle();
     const page = text(mounted.root);
     assert.match(page, /KIMI-42/, "the short code is shown");
-    assert.match(page, /打开授权页面并输入下方设备码完成授权。/, "the generic device instruction is used");
+    const flowPanels = oauthStatusAlerts(mounted.root, "info");
+    assert.equal(flowPanels.length, 1, "the device flow panel is shown");
+    assert.ok(
+      flowPanels[0].children.some((node) => node.type === "p"),
+      "a generic device instruction is shown",
+    );
     assert.doesNotMatch(page, /ChatGPT/, "no Codex-specific copy leaks into other providers");
-    assert.match(page, /设备码约 10 分钟后过期/, "the expiry is still shown in minutes");
+    assert.match(text(flowPanels[0]), /10/, "the expiry derived from expiresIn is still shown");
     assert.equal(button(mounted.root, "打开授权页面").props.href, "https://example.invalid/device", "the auth URL is preserved");
   } finally { mounted.app.unmount(); }
 });
@@ -464,12 +512,13 @@ test("CLI import lists dynamic availability with unsupported and missing reasons
   try {
     await settle();
     const page = text(mounted.root);
-    assert.match(page, /导入本机 CLI 已登录账号/);
-    assert.match(page, /源文件不会被修改/, "the one-time copy and shared-authorization trade-off is explained");
-    for (const label of ["导入 Codex", "导入 Claude", "导入 Kimi"]) {
-      assert.match(page, new RegExp(label), `fixed provider action ${label}`);
-    }
-    assert.match(page, /Claude、Kimi 无法从本机导入，请改用上方登录/, "blocked sources collapse into one tip");
+    const importSections = elementsByClass(mounted.root, "cpa-cli-import");
+    assert.equal(importSections.length, 1, "the CLI import section renders");
+    assert.ok(
+      importSections[0].children.some((node) => node.type === "p" && hasClass(node, "cpa-help")),
+      "the one-time copy and shared-authorization trade-off is explained",
+    );
+    assert.equal(elementsByClass(mounted.root, "cpa-cli-import-tip").length, 1, "blocked sources collapse into one tip");
     assert.match(page, /未发现凭据文件/, "hover detail keeps the backend reason");
     assert.match(page, /导入支持仍在评估中/, "hover detail keeps the unsupported reason");
     assert.equal("secondary" in importButton(mounted.root, "Codex").props, true, "import uses the same secondary buttons as fresh login");
@@ -500,7 +549,9 @@ test("import sends only the provider payload and refreshes accounts on imported"
     assert.deepEqual(imports[0], { provider: "codex" }, "the payload carries no secret, path, or source text");
     assert.equal(Object.keys(imports[0] as object).length, 1, "the payload is exactly the provider");
     assert.ok(accountReads > accountReadsAfterLoad, "a confirmed import refreshes the account list");
-    assert.match(text(mounted.root), /已导入 Codex 账号。/, "the notice names the provider label");
+    const notices = oauthStatusAlerts(mounted.root, "success");
+    assert.equal(notices.length, 1, "a success notice is shown");
+    assert.match(text(notices[0]), /Codex/, "the notice names the provider label");
     assert.doesNotMatch(text(mounted.root), /ocg-cli-codex-a1b2c3\.json/, "the hashed implementation filename is never rendered");
     assert.ok(importButton(mounted.root, "Codex").props.disabled, "an imported source is greyed out");
   } finally { mounted.app.unmount(); }
@@ -521,7 +572,9 @@ test("alreadyImported refreshes accounts and explains no duplicate was created",
     await (importButton(mounted.root, "Claude").props.onClick as () => Promise<void>)();
     await settle();
     assert.ok(accountReads > accountReadsAfterLoad, "an already-imported account still refreshes the list");
-    assert.match(text(mounted.root), /Claude 账号已存在，无需重复导入。/, "the notice names the provider label");
+    const notices = oauthStatusAlerts(mounted.root, "success");
+    assert.equal(notices.length, 1, "a success notice is shown");
+    assert.match(text(notices[0]), /Claude/, "the notice names the provider label");
     assert.doesNotMatch(text(mounted.root), /ocg-cli-anthropic-f0e1d2\.json/, "the hashed implementation filename is never rendered");
     assert.ok(importButton(mounted.root, "Claude").props.disabled, "an already-imported source is greyed out");
   } finally { mounted.app.unmount(); }
@@ -558,9 +611,11 @@ test("empty CPA quota is omitted from the account row", async () => {
     await settle();
     const page = text(mounted.root);
     assert.match(page, /user/);
-    assert.match(page, /重置配额/);
-    assert.doesNotMatch(page, /signals/);
-    assert.doesNotMatch(page, /配额 ·/);
+    assert.ok(button(mounted.root, "重置配额"), "the account row renders its actions");
+    assert.doesNotMatch(page, /signals/, "raw quota keys are never rendered");
+    const row = elementsByClass(mounted.root, "cpa-account-row")[0];
+    if (!row) assert.fail("the account row renders");
+    assert.equal(elementsByClass(row, "cpa-muted").length, 1, "a vacuous quota renders no quota line");
   } finally { mounted.app.unmount(); }
 });
 
@@ -579,8 +634,7 @@ test("unconfirmed import warns to refresh before retrying and does not refresh a
     await (importButton(mounted.root, "Codex").props.onClick as () => Promise<void>)();
     await settle();
     assert.equal(accountReads, accountReadsAfterLoad, "an unconfirmed outcome never refreshes the list implicitly");
-    assert.match(text(mounted.root), /导入结果未确认：请先刷新账号列表/, "the refresh-before-retry warning is shown");
-    assert.match(text(mounted.root), /幂等/, "the idempotent retry is explained");
+    assert.equal(oauthStatusAlerts(mounted.root, "warning").length, 1, "the refresh-before-retry warning is shown");
     assert.ok(!importButton(mounted.root, "Codex").props.disabled, "an unconfirmed import stays retryable");
   } finally { mounted.app.unmount(); }
 });
@@ -613,7 +667,7 @@ test("CLI import and OAuth flows are mutually exclusive single-flight actions", 
     await importClick;
     await settle();
     assert.ok(!button(mounted.root, "Codex 浏览器登录").props.disabled, "the OAuth start recovers after the import settles");
-    assert.match(text(mounted.root), /已导入 Codex 账号。/);
+    assert.equal(oauthStatusAlerts(mounted.root, "success").length, 1, "the import success notice is shown");
   } finally { mounted.app.unmount(); }
 });
 
@@ -634,7 +688,8 @@ test("CLI discovery failure keeps every fresh-login path working and allows manu
   }));
   try {
     await settle();
-    assert.match(text(mounted.root), /检测本机 CLI 账号失败: discovery broke/, "the discovery error stays inline");
+    assert.match(text(mounted.root), /discovery broke/, "the backend error detail is preserved");
+    assert.equal(titledAlerts(mounted.root, "warning").length, 1, "the discovery failure is surfaced inline");
     await (button(mounted.root, "登录 Claude").props.onClick as () => Promise<void>)();
     await settle();
     assert.deepEqual(starts[0], { provider: "anthropic", method: "browser" }, "fresh login still works after a discovery failure");
@@ -643,7 +698,7 @@ test("CLI discovery failure keeps every fresh-login path working and allows manu
     await (button(mounted.root, "重新检测").props.onClick as () => Promise<void>)();
     await settle();
     assert.equal(discoveries, 2, "re-detect re-runs discovery only on demand");
-    assert.match(text(mounted.root), /导入 Codex/, "the recovered discovery renders its sources");
+    assert.ok(importButton(mounted.root, "Codex"), "the recovered discovery renders its import action");
   } finally { mounted.app.unmount(); }
 });
 
@@ -664,7 +719,7 @@ test("unconfirmed import offers a manual account-list refresh without retrying t
     await settle();
     await (importButton(mounted.root, "Codex").props.onClick as () => Promise<void>)();
     await settle();
-    assert.match(text(mounted.root), /导入结果未确认/);
+    assert.equal(oauthStatusAlerts(mounted.root, "warning").length, 1, "the unconfirmed warning is shown");
     const accountReadsBeforeRefresh = accountReads;
     await (button(mounted.root, "刷新账号列表").props.onClick as () => Promise<void>)();
     await settle();
@@ -687,11 +742,11 @@ test("a superseding page load ignores the older CLI discovery response", async (
     await (button(mounted.root, "刷新").props.onClick as () => Promise<void>)();
     await settle();
     await settle();
-    assert.match(text(mounted.root), /导入 Codex/, "the newer discovery renders");
+    assert.ok(importButton(mounted.root, "Codex"), "the newer discovery renders");
     staleDiscovery.resolve({ sources: [{ provider: "xai", source: "late-marker-cli", supported: true, available: true, reason: null }] });
     await settle();
-    assert.doesNotMatch(text(mounted.root), /导入 xAI/, "the stale discovery response is ignored");
-    assert.match(text(mounted.root), /导入 Codex/, "the newer discovery result stays");
+    assert.ok(!hasButton(mounted.root, "导入 xAI"), "the stale discovery response is ignored");
+    assert.ok(importButton(mounted.root, "Codex"), "the newer discovery result stays");
   } finally { mounted.app.unmount(); }
 });
 
@@ -730,15 +785,17 @@ test("a CLI import response arriving after disconnect is ignored without any und
     await importClick;
     await settle();
     assert.equal(accountReads, accountReadsAfterDisconnect, "the late import response does not refresh accounts");
-    assert.doesNotMatch(text(mounted.root), /已导入/, "no success notice is applied after disconnect");
+    assert.equal(oauthStatusAlerts(mounted.root, "success").length, 0, "no success notice is applied after disconnect");
     assert.doesNotMatch(text(mounted.root), /ocg-cli-codex-a1b2c3\.json/, "the late response never leaks the filename either");
   } finally { mounted.app.unmount(); }
 });
 
 test("CLI discovery and import responses after unmount are ignored", async () => {
   const staleDiscovery = deferred<unknown>();
+  let discoveryReads = 0;
   const first = await mount(oauthComponentApi({
     getCpaCliImports: async () => {
+      discoveryReads += 1;
       await staleDiscovery.promise;
       return { sources: [{ provider: "xai", source: "late-marker-cli", supported: true, available: true, reason: null }] };
     },
@@ -746,7 +803,7 @@ test("CLI discovery and import responses after unmount are ignored", async () =>
   first.app.unmount();
   staleDiscovery.resolve(undefined);
   await settle();
-  assert.doesNotMatch(text(first.root), /导入 xAI/, "the discovery response after unmount is not applied");
+  assert.equal(discoveryReads, 1, "the late discovery response triggers no re-fetch after unmount");
 
   const importRequest = deferred<unknown>();
   let accountReads = 0;

@@ -39,12 +39,18 @@ covers the changed boundary:
 | One frontend or script test | `node --experimental-strip-types --test <file>` |
 | Vue / dashboard | adjacent test, then `pnpm run build:web` |
 | One Rust crate | `cargo test -p <package>` |
-| Core / Dashboard V3 | `cargo test -p ocg-core <filter>` |
+| Core / Dashboard V3 | `cargo test -p ocg-core --features ollama-cloud-loopback-test <filter>` |
 | Desktop Host | `cargo test -p ocg-manager --lib` |
 | V3 or V4 schema or generated types | `pnpm run contract:v3:check` / `pnpm run contract:v4:check` |
 | `DESIGN.md` / theme | `pnpm run design:lint` |
 
-`pnpm run test` is the cross-frontend/Rust gate. `pnpm run test:tooling`
+`pnpm run test` is the cross-frontend/Rust gate. `pnpm run test:rust` and
+the quality.yml Linux Rust job pass `--features ocg-core/ollama-cloud-loopback-test`
+so the Ollama Cloud gateway integration suite can install its loopback-only
+test seam. That feature is default-off: application builds keep the fixed
+`https://ollama.com` origin and do not compile the seam. A workspace
+`cargo test` without the feature still compiles `ollama_cloud_gateway` but
+runs none of its cases. `pnpm run test:tooling`
 covers `scripts/*.test.mjs` and is a release/tooling gate, not part of
 `pnpm run test`. `pnpm run build` is release validation only
 (`scripts/release.mjs`). Workspace `[profile.release]` uses thin LTO,
@@ -78,6 +84,13 @@ Rust unit tests live in sibling `tests.rs` modules (`src/db.rs` declares
 assert on source text, workflow YAML, or documentation prose.
 
 CLI sandbox (OpenCode Go cards only; no Custom, sub keys, or settings):
+
+Debug `serve` builds skip automatic user-skill synchronization. Native release
+`serve` builds and desktop startup synchronize the embedded skill; use an
+isolated `USERPROFILE` (Windows) or `HOME` (macOS/Linux) for release smokes.
+Explicit `skill sync` always writes to the selected user home, including in
+debug builds. The sample Key below is synthetic; do not put real secrets in
+agent-run command arguments.
 
 ```bash
 ocg-manager-cli --data-dir /tmp/ocg-cli-test key add smoke sk-smoke

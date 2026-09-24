@@ -1,6 +1,6 @@
 import type { Account } from "../api/dashboard.ts";
 import type { ProviderDefinitionView } from "../api/providers.ts";
-import { CPA_PROVIDER_ID } from "./account-providers.ts";
+import { CPA_PROVIDER_ID } from "./destination-providers.ts";
 import type { ProviderScopeView } from "./provider-contracts.ts";
 
 export interface ProviderAliasRow {

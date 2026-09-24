@@ -14,7 +14,7 @@
     <n-alert
       v-else-if="loadError && !dsh"
       type="error"
-      :title="t('加载应用状态失败: {error}', { error: loadError })"
+      :title="t('加载应用状态失败：{error}', { error: loadError })"
     >
       <n-button size="small" secondary :loading="loading" @click="load()">
         {{ t("重试") }}
@@ -39,7 +39,7 @@
           <n-alert
             v-if="loadError"
             type="warning"
-            :title="t('加载应用状态失败: {error}', { error: loadError })"
+            :title="t('加载应用状态失败：{error}', { error: loadError })"
           >
             <n-button size="small" secondary :loading="loading" @click="load({ retain: true })">
               {{ t("重试") }}
@@ -48,7 +48,7 @@
           <n-alert
             v-if="installError && !installConfirmShown"
             type="error"
-            :title="t('安装失败: {error}', { error: installError })"
+            :title="t('安装失败：{error}', { error: installError })"
             closable
             @close="installError = ''"
           />
@@ -62,7 +62,7 @@
           <p class="dsh-hint">{{ t(presentation.hintKey) }}</p>
           <p v-if="hostDetail" class="dsh-detail">{{ hostDetail }}</p>
           <p v-if="dsh.activationRequired" class="dsh-hint">
-            {{ t("请启动或重启 DSH，让它导入所选 Key 并加载 OCG 插件。") }}
+            {{ t("启动或重启 DSH，以导入所选 Key 并加载 OCG 插件。") }}
           </p>
           <p class="dsh-hint">
             {{ t("DSH 会动态同步完整的已鉴权 OCG /v1/models 目录，范围大于控制台中列出的应用模型。") }}
@@ -99,7 +99,7 @@
         <n-alert
           v-if="installError"
           type="error"
-          :title="t('安装失败: {error}', { error: installError })"
+          :title="t('安装失败：{error}', { error: installError })"
           closable
           @close="installError = ''"
         />
@@ -303,15 +303,15 @@ onActivated(() => {
   place-items: center;
 }
 .applications-tabs :deep(.n-tabs-nav) {
-  margin-bottom: 12px;
+  margin-bottom: var(--ocg-space-md);
 }
 .dsh-section {
   min-width: 0;
   display: grid;
-  gap: 12px;
-  padding: 16px;
+  gap: var(--ocg-space-md);
+  padding: var(--ocg-space-lg);
   border: 1px solid var(--ocg-border);
-  border-radius: 14px;
+  border-radius: var(--ocg-radius-lg);
   background: var(--ocg-surface);
   box-shadow: var(--ocg-shadow-sm);
 }
@@ -319,7 +319,7 @@ onActivated(() => {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
 }
 .dsh-version {
   color: var(--ocg-muted);
@@ -340,12 +340,12 @@ onActivated(() => {
 }
 .dsh-actions {
   display: flex;
-  gap: 8px;
-  margin-top: 4px;
+  gap: var(--ocg-space-sm);
+  margin-top: var(--ocg-space-xs);
 }
 .dsh-confirm {
   display: grid;
-  gap: 12px;
+  gap: var(--ocg-space-md);
 }
 .dsh-paths-title {
   margin: 0;
@@ -357,7 +357,7 @@ onActivated(() => {
   margin: 0;
   padding-left: 20px;
   display: grid;
-  gap: 4px;
+  gap: var(--ocg-space-xs);
   font-size: var(--ocg-font-sm);
 }
 .dsh-paths code {
@@ -365,11 +365,11 @@ onActivated(() => {
 }
 .dsh-key-group {
   display: grid;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
 }
 .dsh-confirm-footer {
   display: flex;
   justify-content: flex-end;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
 }
 </style>

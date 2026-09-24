@@ -6,12 +6,11 @@ use axum::body::Bytes;
 use axum::extract::State;
 use chrono::Utc;
 use hmac::{Hmac, Mac};
-use ocg_domain::connection::{
-    EndpointOperation, LegacyConnectionKind, connection_id_for_legacy, target_id_for,
-};
+use ocg_domain::connection::{LegacyConnectionKind, connection_id_for_legacy, target_id_for};
 use ocg_domain::credential::{
-    RouteSpec, assigned_endpoints_for_routes, credential_id_for_legacy_account, safe_default_grants,
+    assigned_endpoints_for_routes, credential_id_for_legacy_account, safe_default_grants,
 };
+use ocg_domain::destination::{AuthScheme, LegacyDestinationRef};
 use ocg_domain::dynamic::DynamicAuthKind;
 use ocg_domain::ids::CUSTOM_PROVIDER_ID;
 use sha2::Sha256;
@@ -44,7 +43,8 @@ use super::types::{
 const DIGEST_KEY_SETTING: &str = "dashboard_operation_digest_key";
 const OPERATION_KIND: &str = "onboarding_commit";
 const CUSTOM_HTTP_TEMPLATE: &str = "custom-http";
-const BUILTIN_OR_CUSTOM_MESSAGE: &str = "builtin and Custom API connections add Keys on Accounts";
+const NON_DYNAMIC_DRAFT_MESSAGE: &str =
+    "only configurable HTTP draft connections can resume explicit onboarding";
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -128,6 +128,12 @@ fn commit_new(
         ));
     }
     let auth_kind = DynamicAuthKind::from(connection.auth_kind);
+    let protocol_routes = connection.protocol_routes.as_ref().map(|routes| {
+        routes
+            .iter()
+            .map(ocg_domain::destination::HttpProtocolRoute::from)
+            .collect::<Vec<_>>()
+    });
     let now = Utc::now();
     let models = to_definition_models(targets);
     let mut definition = if draft {
@@ -181,7 +187,15 @@ fn commit_new(
         ));
     }
     let runtime = runtime_from_definition(definition, now, now);
-    finish_new(state, operation_id, digest, runtime, first_account, draft)
+    finish_new(
+        state,
+        operation_id,
+        digest,
+        runtime,
+        first_account,
+        draft,
+        protocol_routes,
+    )
 }
 
 fn finish_new(
@@ -191,6 +205,7 @@ fn finish_new(
     runtime: DynamicProviderRuntime,
     first_account: Option<ModelAccount>,
     onboarding_draft: bool,
+    protocol_routes: Option<Vec<ocg_domain::destination::HttpProtocolRoute>>,
 ) -> Result<OnboardingCommitResult, V3ApiError> {
     let connection_id =
         connection_id_for_legacy(LegacyConnectionKind::DynamicProvider, &runtime.id);
@@ -209,11 +224,12 @@ fn finish_new(
     let operation = ledger_row(operation_id, digest, &stored)?;
     let snapshot = {
         let db = state.db.lock();
-        db.commit_onboarding_new(
+        db.commit_onboarding_new_with_routes(
             &runtime,
             first_account.as_ref(),
             onboarding_draft,
             &operation,
+            protocol_routes.as_deref(),
         )
         .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?
     };
@@ -277,8 +293,8 @@ fn commit_existing_second_key(
             "existing connections cannot change model targets on onboarding commit",
         ));
     }
-    let runtime = resolve_existing_dynamic(state, connection_id)?;
-    if !runtime.auth_kind.requires_key() {
+    let connection = resolve_existing_key_connection(state, connection_id)?;
+    if !connection.auth_kind.requires_key() {
         return Err(V3ApiError::invalid_request_at(
             state,
             "no-auth provider already has a singleton account",
@@ -309,17 +325,17 @@ fn commit_existing_second_key(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or(runtime.name.as_str())
+        .unwrap_or(connection.name.as_str())
         .to_string();
     let notes = match api_key.notes.as_deref() {
         Some(value) => normalize_account_notes(value)
             .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?,
         None => None,
     };
-    let key_cipher = first_account_key(state, runtime.auth_kind, Some(secret))?;
+    let key_cipher = first_account_key(state, connection.auth_kind, Some(secret))?;
     let account = dynamic_provider_account(
-        runtime.auth_kind,
-        &runtime.id,
+        connection.auth_kind,
+        &connection.provider_id,
         account_name,
         key_cipher,
         notes,
@@ -334,11 +350,65 @@ fn commit_existing_second_key(
     let operation = ledger_row(operation_id, digest, &stored)?;
     {
         let db = state.db.lock();
-        db.commit_onboarding_existing_account(&account, &operation)
-            .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?;
+        db.commit_onboarding_existing_account(
+            &account,
+            connection.destination_id.as_deref(),
+            &operation,
+        )
+        .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?;
     }
     state.bump_settings_revision();
     Ok(committed_result(state, stored))
+}
+
+struct ExistingKeyConnection {
+    provider_id: String,
+    name: String,
+    auth_kind: DynamicAuthKind,
+    destination_id: Option<String>,
+}
+
+fn resolve_existing_key_connection(
+    state: &CoreState,
+    connection_id: &str,
+) -> Result<ExistingKeyConnection, V3ApiError> {
+    if let Ok(runtime) = resolve_existing_dynamic(state, connection_id) {
+        return Ok(ExistingKeyConnection {
+            provider_id: runtime.id,
+            name: runtime.name,
+            auth_kind: runtime.auth_kind,
+            destination_id: None,
+        });
+    }
+    let projection = {
+        let db = state.db.lock();
+        crate::destination_projection::read_v4_projection(&db)
+            .map_err(V3ApiError::internal)?
+            .map_err(|_| V3ApiError::conflict_at(state, "destination projection refused"))?
+    };
+    for destination in projection.destinations {
+        let LegacyDestinationRef::CustomAccount(legacy_id) = &destination.legacy else {
+            continue;
+        };
+        if connection_id_for_legacy(LegacyConnectionKind::CustomAccount, legacy_id).as_str()
+            != connection_id
+        {
+            continue;
+        }
+        let auth_kind = match destination.auth_scheme {
+            AuthScheme::Bearer => DynamicAuthKind::Bearer,
+            AuthScheme::XApiKey => DynamicAuthKind::XApiKey,
+            AuthScheme::ApiKey => DynamicAuthKind::ApiKey,
+            AuthScheme::None => DynamicAuthKind::None,
+        };
+        return Ok(ExistingKeyConnection {
+            provider_id: CUSTOM_PROVIDER_ID.to_string(),
+            name: destination.name,
+            auth_kind,
+            destination_id: Some(destination.id),
+        });
+    }
+    Err(V3ApiError::not_found_at(state, "connection not found"))
 }
 
 /// Draft resume is one CAS write over configuration, auth, targets, and mode.
@@ -379,6 +449,27 @@ fn resume_existing_draft(
             "explicit-mode existing onboarding can only resume a stored draft",
         ));
     }
+    let protocol_routes = match configuration.protocol_routes.as_ref() {
+        Some(routes) => Some(
+            routes
+                .iter()
+                .map(ocg_domain::destination::HttpProtocolRoute::from)
+                .collect::<Vec<_>>(),
+        ),
+        None => {
+            let projection = crate::destination_projection::load_runtime(&state.db.lock())
+                .map_err(V3ApiError::internal)?;
+            projection
+                .destinations
+                .iter()
+                .find(|destination| {
+                    destination.id
+                        == ocg_domain::destination::destination_id_for_dynamic(&existing.id)
+                })
+                .filter(|destination| !destination.protocol_routes.is_empty())
+                .map(|destination| destination.protocol_routes.clone())
+        }
+    };
     let auth_kind = DynamicAuthKind::from(configuration.auth_kind);
     let now = Utc::now();
     let models = to_definition_models(targets);
@@ -541,6 +632,7 @@ fn resume_existing_draft(
                 create_account.is_some(),
                 authorize_current_endpoint,
                 saved_record,
+                protocol_routes.as_deref().unwrap_or_default(),
             )?
         } else {
             None
@@ -582,7 +674,7 @@ fn resume_existing_draft(
         .map(|(id, kind, quota)| (id.as_str(), kind.as_str(), quota.as_str()));
     let snapshot = {
         let db = state.db.lock();
-        db.commit_onboarding_resume(
+        db.commit_onboarding_resume_with_routes(
             &runtime,
             draft,
             create_account.as_ref(),
@@ -591,6 +683,7 @@ fn resume_existing_draft(
             grant_ref,
             sync_ref,
             &operation,
+            protocol_routes.as_deref(),
         )
         .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?
     };
@@ -678,11 +771,12 @@ fn resolve_complete_grants(
     newly_created: bool,
     authorize_current_endpoint: bool,
     saved_record: Option<&crate::db::identity::IdentityAccountRecord>,
+    protocol_routes: &[ocg_domain::destination::HttpProtocolRoute],
 ) -> Result<Option<BindingGrantUnion>, V3ApiError> {
     if newly_created {
         return Ok(None);
     }
-    let (safe_ids, safe_origins) = safe_grants_for_runtime(runtime);
+    let (safe_ids, safe_origins) = safe_grants_for_runtime(runtime, protocol_routes);
     let record = if let Some(record) = saved_record {
         record
     } else {
@@ -697,9 +791,33 @@ fn resolve_complete_grants(
             "saved Key is missing identity, credential, or binding state",
         ));
     }
+    let connection_id =
+        connection_id_for_legacy(LegacyConnectionKind::DynamicProvider, &runtime.id);
+    let before = crate::destination_projection::load_persisted(&state.db.lock())
+        .map_err(V3ApiError::internal)?
+        .destinations
+        .into_iter()
+        .find(|d| d.id == ocg_domain::destination::destination_id_for_dynamic(&runtime.id))
+        .ok_or_else(|| V3ApiError::invalid_request_at(state, "saved destination is missing"))?;
+    let mut after = ocg_domain::destination::destination_from_legacy(
+        &ocg_domain::destination::LegacyDestinationFacts::Dynamic {
+            definition: runtime.definition(),
+        },
+    )
+    .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?;
+    after.protocol_routes = protocol_routes.to_vec();
+    if !protocol_routes.is_empty() {
+        after.protocols = protocol_routes.iter().map(|r| r.protocol).collect();
+    }
+    let preserved_ids = ocg_domain::credential::remap_route_grant_ids(
+        &connection_id,
+        &ocg_domain::destination::http_configured_routes(&before),
+        &ocg_domain::destination::http_configured_routes(&after),
+        &record.allowed_endpoint_ids,
+    );
     let missing_destination = safe_ids
         .iter()
-        .any(|id| !record.allowed_endpoint_ids.iter().any(|got| got == id))
+        .any(|id| !preserved_ids.iter().any(|got| got == id))
         || safe_origins
             .iter()
             .any(|origin| !record.allowed_origins.iter().any(|got| got == origin));
@@ -714,31 +832,29 @@ fn resolve_complete_grants(
     }
     Ok(Some((
         account_id.to_string(),
-        union_unique(&record.allowed_endpoint_ids, &safe_ids),
+        union_unique(&preserved_ids, &safe_ids),
         union_unique(&record.allowed_origins, &safe_origins),
     )))
 }
 
-fn safe_grants_for_runtime(runtime: &DynamicProviderRuntime) -> (Vec<String>, Vec<String>) {
+fn safe_grants_for_runtime(
+    runtime: &DynamicProviderRuntime,
+    protocol_routes: &[ocg_domain::destination::HttpProtocolRoute],
+) -> (Vec<String>, Vec<String>) {
+    use ocg_domain::destination::{
+        LegacyDestinationFacts, destination_from_legacy, http_configured_routes,
+    };
     let connection_id =
         connection_id_for_legacy(LegacyConnectionKind::DynamicProvider, &runtime.id);
-    let mut routes = vec![RouteSpec {
-        operation: EndpointOperation::from(runtime.upstream_protocol),
-        url: Some(runtime.endpoint_url.clone()),
-    }];
-    let mut seen = HashSet::from([(runtime.upstream_protocol, runtime.endpoint_url.clone())]);
-    for mapping in &runtime.mappings {
-        let Some(override_route) = &mapping.upstream_override else {
-            continue;
-        };
-        if !seen.insert((override_route.protocol, override_route.endpoint_url.clone())) {
-            continue;
-        }
-        routes.push(RouteSpec {
-            operation: EndpointOperation::from(override_route.protocol),
-            url: Some(override_route.endpoint_url.clone()),
-        });
+    let mut destination = destination_from_legacy(&LegacyDestinationFacts::Dynamic {
+        definition: runtime.definition(),
+    })
+    .expect("validated dynamic definition");
+    destination.protocol_routes = protocol_routes.to_vec();
+    if !protocol_routes.is_empty() {
+        destination.protocols = protocol_routes.iter().map(|route| route.protocol).collect();
     }
+    let routes = http_configured_routes(&destination);
     let assigned = assigned_endpoints_for_routes(&connection_id, &routes);
     safe_default_grants(&assigned)
 }
@@ -917,7 +1033,7 @@ fn resolve_existing_dynamic(
         {
             return Err(V3ApiError::invalid_request_at(
                 state,
-                BUILTIN_OR_CUSTOM_MESSAGE,
+                NON_DYNAMIC_DRAFT_MESSAGE,
             ));
         }
     }
@@ -933,7 +1049,7 @@ fn resolve_existing_dynamic(
         {
             return Err(V3ApiError::invalid_request_at(
                 state,
-                BUILTIN_OR_CUSTOM_MESSAGE,
+                NON_DYNAMIC_DRAFT_MESSAGE,
             ));
         }
     }

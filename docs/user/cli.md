@@ -13,47 +13,44 @@ override it with `--data-dir <path>`. The obfuscation secret lives at
 `<data-dir>/.encryption-key` by default, or set it with `--encryption-key <key>`
 or `OCG_MANAGER_ENCRYPTION_KEY`.
 
-The CLI only does `serve`, `key`, and `status`. `key` manages OpenCode Go
-account credentials — not dashboard Keys and not Custom or Zen Free cards.
+The CLI has `serve`, `key`, `status`, and `skill sync`. Run the installed binary's
+`--help` and each subcommand's `--help` for its exact version. `key add` and `key ping` are
+OpenCode Go-only. `key list` and `status` count API-key accounts across
+Providers; `key remove/enable/disable` act on an account ID even for other
+Providers. Confirm its Provider in the dashboard before changing it. Dashboard
 Keys, Custom destinations, per-model protocol overrides, and catalogs stay on
-the dashboard. CLI writes bump that process's settings revision directly; there is
-no `--expectedRevision` flag.
+the dashboard. CLI writes bump that process's settings revision directly.
+
+`serve` and `status` hide the primary Gateway Key by default. A person can run
+`status --show-key` in a private terminal when they need its value. Do not paste
+that output into an agent conversation or a shared log. The legacy `key add`
+syntax puts the upstream Key (and optional password) in process arguments and
+possibly shell history; enter credentials in the local dashboard instead when
+an agent is assisting. Avoid `--encryption-key <key>` for the same reason; the
+default data-directory key file is sufficient for a new installation.
 
 While native `serve` is running, **Applications > DSH** can install the OCG
 plugin into a DSH owned by the same OS user on that machine. The official
 Docker image does not support this local installation.
 
-```text
-ocg-manager-cli
-├── serve         Start the gateway server
-│   --host        Address to listen on (default 127.0.0.1)
-│   -p, --port    Gateway port (sets and saves config)
-│   --dashboard-dir  Directory containing the built web dashboard
-├── key list      List OpenCode Go API-key accounts (excludes Zen Free)
-├── key add <name> <key>
-│   --username    OpenCode-Go login account
-│   --password    OpenCode-Go login password
-├── key remove <id>      Remove an account
-├── key enable <id>      Enable an account
-├── key disable <id>     Disable an account
-├── key ping [id]
-│   --model       Model to send (default mimo-v2.5)
-│   --message     User message (default "ping")
-│   --max-tokens  max_tokens for the ping (default 3)
-└── status        Show data dir, gateway port/key, upstream, account totals
-```
+Native release CLI builds bundle the `ocg-manager` Codex skill. `serve` installs or
+upgrades it at `~/.agents/skills/ocg-manager`; `skill sync` does so without
+starting the Gateway. When bundled skill content changes, a prior OCG-managed copy is backed up under
+`~/.agents/skill-backups/`; a same-name user-owned skill is left unchanged.
+Development builds do not auto-sync on `serve`.
+The Docker build does not install a skill into the container or Docker host.
 
-`key add` stores a disabled OpenCode Go draft. Enable it after you have checked the Key (`key ping`, then `key enable`).
+`key add` stores a ready, enabled OpenCode Go account; confirm it with
+`key ping` before you rely on it.
 
-Headless bootstrap:
+Start the headless Gateway, then add the upstream Key in its local dashboard:
 
 ```bash
-./ocg-manager-cli key add main sk-...
-./ocg-manager-cli key list
-./ocg-manager-cli key ping <id>
-./ocg-manager-cli key enable <id>
 ./ocg-manager-cli serve --port 9042
 ```
+
+After saving the account, a second terminal can run `key list` and
+`key ping <id>` if a real upstream diagnostic is needed.
 
 `serve --port <port>` writes the port to SQLite; later runs without the flag
 reuse it.
@@ -61,6 +58,7 @@ reuse it.
 `key ping` sends a tiny chat completion through one key and prints the real
 upstream status code with a short body excerpt — a quick way to surface
 `401`/`403`/`429`/`200` without opening the dashboard.
+Treat that upstream-provided excerpt as sensitive when sharing diagnostics.
 
 ---
 

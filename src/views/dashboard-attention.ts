@@ -1,8 +1,9 @@
+import type { AccountCapabilitySource } from "../domain/account-capabilities.ts";
 import type { Account } from "../api/dashboard.ts";
 import type { ProviderCatalogEntry } from "../api/providers.ts";
 import { isCooling, isFreeCooling } from "../domain/accounts-usage.ts";
 import { daysUntilDate } from "../domain/account-lifecycle.ts";
-import { isZenFreeAccount } from "../domain/account-providers.ts";
+import { accountCapabilities } from "../domain/account-capabilities.ts";
 import { planForAccount } from "../domain/plans.ts";
 
 /**
@@ -31,8 +32,13 @@ const REASON_PRIORITY: Record<AttentionReason, number> = {
   "setup-incomplete": 3,
 };
 
-function accountCooling(account: Account, now: number): boolean {
-  return isZenFreeAccount(account)
+function accountCooling(
+  account: Account,
+  now: number,
+  catalog?: readonly ProviderCatalogEntry[] | null,
+  destination?: AccountCapabilitySource | null,
+): boolean {
+  return accountCapabilities(account, catalog, destination).freeCooldownOnly
     ? isFreeCooling(account, now)
     : isCooling(account, now);
 }
@@ -41,27 +47,23 @@ export function buildNeedsAttention(
   accounts: readonly Account[],
   now: number = Date.now(),
   catalog?: readonly ProviderCatalogEntry[] | null,
+  destinationForAccount?: (accountId: string) => AccountCapabilitySource | null,
 ): AttentionItem[] {
   const items: AttentionItem[] = [];
   for (const account of accounts) {
+    const destination = destinationForAccount?.(account.id);
     const ready = account.setup_step === "ready";
     if (ready && account.auth_error) {
       items.push({ accountId: account.id, accountName: account.name, reason: "auth-error" });
       continue;
     }
     if (ready && account.enabled) {
-      // Only built-in billed families model a purchase/expiry cadence, and the
-      // catalog is the authority on which providers those are. Custom API,
-      // Zen Free, CPA, and user-defined (dynamic) Providers carry no lifecycle
-      // dates, so their accounts never raise expiry attention — a synthetic or
-      // blanked date there is not a billing fact. A failed (null) catalog
-      // keeps the narrow offline Go/Zen projection; a successful empty catalog
-      // stays authoritative.
+      // A loaded destination owns cadence. Before that projection is available,
+      // retain the catalog's existing scope for offline expiry attention.
       const plan = planForAccount(account, catalog);
-      const expiryDays = plan
-        && plan.kind !== "custom"
-        && !plan.dynamic
-        && !isZenFreeAccount(account)
+      const caps = accountCapabilities(account, catalog, destination);
+      const expiryDays = (destination != null || (plan && !plan.dynamic))
+        && caps.hasExpiry
         && account.expires_on
         ? daysUntilDate(account.expires_on, now)
         : Number.POSITIVE_INFINITY;
@@ -69,7 +71,7 @@ export function buildNeedsAttention(
         items.push({ accountId: account.id, accountName: account.name, reason: "expired" });
         continue;
       }
-      if (accountCooling(account, now)) {
+      if (accountCooling(account, now, catalog, destination)) {
         items.push({ accountId: account.id, accountName: account.name, reason: "cooling" });
         continue;
       }

@@ -1,8 +1,8 @@
 //! Dashboard V3 HTTP contract kernel.
 //!
-//! Mounted at `/dashboard/api/v3` beside the retired V2 REST tombstone and the
-//! preserved V2 auth/browser-WebSocket routes. This module owns the shared DTO
-//! / error / CAS envelope, process
+//! Handlers are remounted at `/dashboard/api/v4` (see `dashboard_v4::api_router`).
+//! The `/dashboard/api/v3` prefix is a 410 tombstone. This module owns the
+//! shared DTO / error / CAS envelope, process
 //! generation, public auth/session issuance, connection/settings reads, the settings write path,
 //! access-key lifecycle, the local accounts control plane including connection
 //! verify, local account usage calibration, official Go usage refresh, and
@@ -39,7 +39,7 @@ mod proxy_test;
 mod settings;
 mod types;
 mod updater;
-mod usage;
+pub(crate) mod usage;
 mod usage_refresh;
 
 use axum::extract::{DefaultBodyLimit, FromRequestParts, Query, Request, State};
@@ -117,6 +117,8 @@ pub use updater::{GITHUB_LATEST_RELEASE_API, GITHUB_LATEST_RELEASE_URL};
 pub use crate::command_code_usage::{
     CommandCodeUsageTargetGuard, install_command_code_usage_target_for_tests,
 };
+#[cfg(debug_assertions)]
+pub use crate::plan_usage::{PlanUsageTargetGuard, install_plan_usage_target_for_tests};
 
 pub use crate::official_protocols::OfficialProtocolBaseline;
 #[cfg(debug_assertions)]
@@ -170,7 +172,6 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
             "/accounts/{id}/platform-link",
             put(platforms::link).delete(platforms::unlink),
         )
-        .route("/contract", get(get_contract))
         .route("/connection", get(connection::get_connection))
         .route(
             "/external-integrations/cpa",
@@ -289,10 +290,8 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
             patch(keys::update_key).delete(keys::delete_key),
         )
         .route("/keys/{id}/regenerate", post(keys::regenerate_key))
-        .route(
-            "/accounts",
-            get(accounts::list_accounts).post(accounts::create_account),
-        )
+        .route("/account-records", get(accounts::list_accounts))
+        .route("/accounts", post(accounts::create_account))
         .route("/accounts/managed", post(accounts::create_managed_account))
         .route("/accounts/order", put(accounts::reorder_accounts))
         .route(
@@ -473,6 +472,7 @@ where
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct V3ApiError {
     status: StatusCode,
     body: V3Error,
@@ -715,10 +715,6 @@ pub(crate) async fn require_v3_session(
     } else {
         V3ApiError::unauthorized().into_response()
     }
-}
-
-async fn get_contract(State(state): State<CoreState>) -> Json<ControlRevision> {
-    Json(ControlRevision::from_state(&state))
 }
 
 /// Shared mutation-body parser: missing `expectedRevision` is a dedicated

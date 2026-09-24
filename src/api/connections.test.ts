@@ -10,10 +10,12 @@ function summary(overrides: Partial<ConnectionSummary> = {}): ConnectionSummary 
     adapterKind: "configurable_http",
     authorization: "missing",
     credentialCount: 0,
+    credentialCreate: { allowed: true, materialKinds: ["api_key"], reason: null },
     displayFamily: "Lab",
     eligibility: { reason: "missing_credential", state: "ineligible" },
     enabledCredentialCount: 0,
     endpoints: [{
+      officialBalance: false,
       authScheme: "bearer",
       connectionId: "conn-1",
       id: "ep-1",
@@ -282,4 +284,10 @@ test("connectionsApi.commitOnboarding publishes nested V4 CAS tokens", async () 
   assert.equal(control.revision, 9);
   assert.equal(control.processGeneration, 11);
   assert.equal(control.pricingRevision, "p3");
+});
+
+
+test("connection setup distinguishes unsupported from configurable without presets", () => {
+  assert.equal(presentConnection(summary()).credit_presets, null);
+  assert.deepEqual(presentConnection(summary({ creditPresets: [] })).credit_presets, []);
 });

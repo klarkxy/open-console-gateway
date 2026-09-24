@@ -37,10 +37,7 @@ pub(super) async fn list_accounts(
     State(state): State<CoreState>,
 ) -> Result<Json<AccountList>, V3ApiError> {
     let _settings_update = state.settings_update.lock();
-    let accounts = state
-        .db
-        .lock()
-        .list_accounts()
+    let accounts = crate::destination_projection::list_accounts_for_v3(&state.db.lock())
         .map_err(V3ApiError::internal)?;
     Ok(Json(account_list_from_state(&state, accounts)?))
 }
@@ -584,13 +581,11 @@ fn reorder_accounts_locked(
                     "account list changed; reload accounts and try again",
                 ),
                 ReorderAccountsError::Database(error) => V3ApiError::internal(error),
+                ReorderAccountsError::Layout(error) => V3ApiError::internal(error),
             })?;
     }
     let (revision, accounts) = with_committed_revision(state, || {
-        state
-            .db
-            .lock()
-            .list_accounts()
+        crate::destination_projection::list_accounts_for_v3(&state.db.lock())
             .map_err(V3ApiError::internal)
     })?;
     account_list_at(state, accounts, revision)
@@ -670,6 +665,7 @@ fn reset_cooldown_locked(
         let db = state.db.lock();
         db.clear_account_cooldown(id)
             .map_err(V3ApiError::internal)?;
+        state.recovery.reset_account(id);
     }
     mutation_after_commit(state, id, false)
 }
@@ -687,6 +683,7 @@ fn put_custom_config_locked(
         &account,
         "custom config is only available for Custom API accounts",
     )?;
+    reject_shared_custom_account_edit(state, id)?;
     let mut config = AccountCustomConfigInput {
         endpoint_url: input.endpoint_url,
         upstream_protocol: input.upstream_protocol.into(),
@@ -694,7 +691,7 @@ fn put_custom_config_locked(
     {
         let db = state.db.lock();
         if let Some(endpoint) = db
-            .platform_endpoint(id, config.upstream_protocol)
+            .platform_hosted_endpoint(id)
             .map_err(V3ApiError::internal)?
         {
             let old = db.account_custom_config(id).map_err(V3ApiError::internal)?;
@@ -735,6 +732,7 @@ fn put_capabilities_locked(
         &account,
         "model capabilities are only available for Custom API accounts",
     )?;
+    reject_shared_custom_account_edit(state, id)?;
     let capabilities = input
         .capabilities
         .iter()
@@ -746,6 +744,24 @@ fn put_capabilities_locked(
         .commit_account_model_capabilities(id, &capabilities)
         .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?;
     mutation_after_commit(state, id, true)
+}
+
+fn reject_shared_custom_account_edit(
+    state: &CoreState,
+    account_id: &str,
+) -> Result<(), V3ApiError> {
+    let count = state
+        .db
+        .lock()
+        .custom_connection_credential_count(account_id)
+        .map_err(V3ApiError::internal)?;
+    if count > 1 {
+        return Err(V3ApiError::invalid_request_at(
+            state,
+            "this Custom HTTP connection has multiple Keys; edit the service connection on Providers",
+        ));
+    }
+    Ok(())
 }
 
 fn ensure_account_can_enable(state: &CoreState, account: &ModelAccount) -> Result<(), V3ApiError> {

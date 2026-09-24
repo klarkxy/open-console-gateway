@@ -384,6 +384,7 @@ async fn provider_usage_refresh_reuses_official_go_coordinator_and_returns_provi
                 monthly_percent: 10.0,
                 rolling_resets_in_minutes: 180,
                 weekly_resets_in_minutes: 1_440,
+                monthly_resets_in_minutes: 43200,
                 earliest_resets_in_minutes: 180,
             })
         })
@@ -698,6 +699,63 @@ async fn dashboard_v3_unsupported_provider_usage_is_unavailable_and_empty() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{custom_usage}");
     assert_v3_error(&custom_usage, ERROR_INVALID_REQUEST);
 
+    harness.stop();
+}
+
+#[tokio::test]
+async fn dashboard_v3_custom_official_balance_is_returned_on_provider_usage() {
+    let harness = start_loopback("usage-official-balance").await;
+    let (status, custom) = send_json(
+        &harness,
+        Method::POST,
+        "/accounts",
+        &cas(
+            &harness,
+            json!({
+                "name": "DeepSeek",
+                "key": "deepseek-key",
+                "providerId": CUSTOM_PROVIDER_ID,
+                "customConfig": {
+                    "endpointUrl": "https://api.deepseek.com/chat/completions",
+                    "upstreamProtocol": "chat_completions"
+                },
+                "modelCapabilities": [{ "modelId": "deepseek-chat", "protocol": "chat_completions" }]
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{custom}");
+    let custom_id = custom["account"]["id"].as_str().unwrap().to_string();
+    let now = Utc::now();
+    harness
+        .state
+        .db
+        .lock()
+        .upsert_credit_balance(&CreditBalance {
+            account_id: custom_id.clone(),
+            balance_kind: "available:CNY".to_string(),
+            amount: 12.5,
+            unit: "cny".to_string(),
+            source: "deepseek-official".to_string(),
+            observed_at: Some(now),
+            updated_at: now,
+        })
+        .unwrap();
+
+    let (status, body) = harness
+        .get_json(&format!(
+            "{}/accounts/{custom_id}/provider-usage",
+            harness.v3_base
+        ))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["availability"], "unavailable", "{body}");
+    let credits = body["creditBalances"].as_array().expect("creditBalances");
+    assert_eq!(credits.len(), 1, "{body}");
+    assert_eq!(credits[0]["amount"], 12.5);
+    assert_eq!(credits[0]["unit"], "cny");
+    assert_eq!(credits[0]["source"], "deepseek-official");
+    assert_secret_free(&body);
     harness.stop();
 }
 

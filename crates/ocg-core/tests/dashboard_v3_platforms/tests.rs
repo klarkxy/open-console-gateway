@@ -58,7 +58,14 @@ async fn mock_platform(
         }
         _ => return axum::http::StatusCode::NOT_FOUND.into_response(),
     };
-    axum::Json(body).into_response()
+    let mut response = axum::Json(body).into_response();
+    if uri.path() == "/api/pricing" && auth == "Bearer user-metadata-key" {
+        response.headers_mut().insert(
+            "auth-version",
+            axum::http::HeaderValue::from_static("864b7076dbcd0a3c01b5520316720ebf"),
+        );
+    }
+    response
 }
 
 #[tokio::test]
@@ -116,6 +123,15 @@ async fn platform_refresh_fallback_stream_and_stale_price_end_to_end() {
             .find(|l| l["accountId"] == key_id)
             .unwrap();
         assert_eq!(link["snapshot"]["stale"], false, "{link}");
+        assert!(
+            link["snapshot"]["prices"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|price| price["model"] == "platform-e2e-model"
+                    && price["unavailableReason"].is_null()),
+            "{link}"
+        );
         keys.push(key_id);
     }
     let response=h.client.post(format!("http://127.0.0.1:{}/v1/chat/completions",h.handle.port)).bearer_auth(h.state.config().gateway_key).json(&json!({"model":"platform-e2e-model","stream":true,"messages":[{"role":"user","content":"hello"}]})).send().await.unwrap();
@@ -213,7 +229,7 @@ async fn export_import(source: &V3Harness, target: &V3Harness, password: &str) {
 }
 
 #[tokio::test]
-async fn platform_accounts_cas_link_and_v5_secret_free_roundtrip() {
+async fn platform_accounts_cas_link_and_v7_secret_restoring_roundtrip() {
     let source = start_loopback("platform-v5-source").await;
     let target = start_loopback("platform-v5-target").await;
     let (status,parent)=send(&source,Method::POST,"/platform-accounts",cas(&source,json!({"kind":"new_api","name":"New API","baseUrl":"https://platform.example","userCredential":"management-secret-test"}))).await;
@@ -252,13 +268,23 @@ async fn platform_accounts_cas_link_and_v5_secret_free_roundtrip() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+    let expected_model_contract = model_contract_of(&source, key_id);
+    assert!(ocg_domain::credential::model_scope_allows(
+        &expected_model_contract.0,
+        "model-a"
+    ));
+    assert_eq!(
+        expected_model_contract.1,
+        vec![("model-a".into(), "model-a".into())]
+    );
     export_import(&source, &target, "platform-bundle-password").await;
     let (_, loaded) = send(&target, Method::GET, "/platform-accounts", json!({})).await;
     assert_eq!(loaded["accounts"][0]["id"], id);
-    assert_eq!(loaded["accounts"][0]["hasUserCredential"], false);
+    assert_eq!(loaded["accounts"][0]["hasUserCredential"], true);
     assert!(loaded["accounts"][0]["snapshot"].is_null());
     assert_eq!(loaded["links"][0]["accountId"], key_id);
     assert_eq!(loaded["links"][0]["group"]["verified"], false);
+    assert_eq!(model_contract_of(&target, key_id), expected_model_contract);
     let (status, _) = send(
         &source,
         Method::DELETE,
@@ -286,7 +312,7 @@ async fn platform_accounts_cas_link_and_v5_secret_free_roundtrip() {
             .unwrap()
             .unwrap()
             .endpoint_url,
-        "https://platform.example/v1/chat/completions"
+        "https://platform.example"
     );
     let (status, _) = send(
         &target,
@@ -328,6 +354,7 @@ struct IsolatedSite {
 async fn isolated_site(
     axum::extract::State(state): axum::extract::State<IsolatedSite>,
     uri: axum::http::Uri,
+    headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
     state.hits.lock().unwrap().push(uri.path().to_string());
@@ -380,7 +407,17 @@ async fn isolated_site(
         (_, "/v1/models") => json!({"object":"list","data":[{"id":model,"object":"model"}]}),
         _ => return axum::http::StatusCode::NOT_FOUND.into_response(),
     };
-    axum::Json(body).into_response()
+    let mut response = axum::Json(body).into_response();
+    if state.kind == "new_api"
+        && uri.path() == "/api/pricing"
+        && headers.contains_key("authorization")
+    {
+        response.headers_mut().insert(
+            "auth-version",
+            axum::http::HeaderValue::from_static("864b7076dbcd0a3c01b5520316720ebf"),
+        );
+    }
+    response
 }
 
 async fn spawn_isolated_site(
@@ -452,6 +489,30 @@ fn endpoint_of(h: &V3Harness, account_id: &str) -> String {
         .unwrap()
         .unwrap()
         .endpoint_url
+}
+
+fn model_contract_of(
+    h: &V3Harness,
+    account_id: &str,
+) -> (ocg_domain::credential::ModelScope, Vec<(String, String)>) {
+    let db = h.state.db.lock();
+    let scope = db
+        .list_identity_model()
+        .unwrap()
+        .accounts
+        .into_iter()
+        .find(|row| row.account.id == account_id)
+        .expect("identity row")
+        .binding_model_scope;
+    let mut capabilities: Vec<_> = db
+        .list_account_model_capabilities(account_id)
+        .unwrap()
+        .into_iter()
+        .map(|row| (row.public_model, row.upstream_model))
+        .collect();
+    // Model identity is independent of its three explicit platform protocols.
+    capabilities.dedup();
+    (scope, capabilities)
 }
 
 async fn create_parent(
@@ -592,22 +653,10 @@ async fn same_kind_site_instances_keep_independent_refresh_and_links() {
     link_key(&source, &sub_a_key, &sub_a, "claude").await;
     link_key(&source, &sub_b_key, &sub_b, "openai").await;
     assert_eq!(link_of(&linked, &new_a_key)["platformAccountId"], new_a);
-    assert_eq!(
-        endpoint_of(&source, &new_a_key),
-        format!("{new_a_url}/v1/chat/completions")
-    );
-    assert_eq!(
-        endpoint_of(&source, &new_b_key),
-        format!("{new_b_url}/v1/chat/completions")
-    );
-    assert_eq!(
-        endpoint_of(&source, &sub_a_key),
-        format!("{sub_a_url}/v1/chat/completions")
-    );
-    assert_eq!(
-        endpoint_of(&source, &sub_b_key),
-        format!("{sub_b_url}/v1/chat/completions")
-    );
+    assert_eq!(endpoint_of(&source, &new_a_key), new_a_url.clone());
+    assert_eq!(endpoint_of(&source, &new_b_key), new_b_url.clone());
+    assert_eq!(endpoint_of(&source, &sub_a_key), sub_a_url.clone());
+    assert_eq!(endpoint_of(&source, &sub_b_key), sub_b_url.clone());
 
     let after_a = refresh_parent(&source, &new_a).await;
     assert!(
@@ -699,14 +748,8 @@ async fn same_kind_site_instances_keep_independent_refresh_and_links() {
         snapshot_ids(&parent(&keys, &new_a)["snapshot"], "groups", "id"),
         new_a_groups
     );
-    assert_eq!(
-        endpoint_of(&source, &new_a_key),
-        format!("{new_a_url}/v1/chat/completions")
-    );
-    assert_eq!(
-        endpoint_of(&source, &new_b_key),
-        format!("{new_b_url}/v1/chat/completions")
-    );
+    assert_eq!(endpoint_of(&source, &new_a_key), new_a_url.clone());
+    assert_eq!(endpoint_of(&source, &new_b_key), new_b_url.clone());
 
     let (status, renamed) = send(
         &source,
@@ -755,45 +798,56 @@ async fn same_kind_site_instances_keep_independent_refresh_and_links() {
     export_import(&source, &target, "platform-bundle-password").await;
     let (_, loaded) = send(&target, Method::GET, "/platform-accounts", json!({})).await;
     assert_eq!(account_ids(&loaded).len(), 4, "{loaded}");
-    for (id, kind, name, url) in [
+    for (id, kind, name, url, has_user_credential, has_snapshot) in [
         (
             new_a.as_str(),
             "new_api",
             "New API East",
             new_a_url.as_str(),
+            false,
+            false,
         ),
-        (new_b.as_str(), "new_api", "New API", new_b_url.as_str()),
-        (sub_a.as_str(), "sub2api", "Sub2API", sub_a_url.as_str()),
-        (sub_b.as_str(), "sub2api", "Sub2API", sub_b_url.as_str()),
+        (
+            new_b.as_str(),
+            "new_api",
+            "New API",
+            new_b_url.as_str(),
+            true,
+            true,
+        ),
+        (
+            sub_a.as_str(),
+            "sub2api",
+            "Sub2API",
+            sub_a_url.as_str(),
+            true,
+            true,
+        ),
+        (
+            sub_b.as_str(),
+            "sub2api",
+            "Sub2API",
+            sub_b_url.as_str(),
+            true,
+            true,
+        ),
     ] {
         let row = parent(&loaded, id);
         assert_eq!(row["kind"], kind, "{row}");
         assert_eq!(row["name"], name, "{row}");
         assert_eq!(row["baseUrl"], url, "{row}");
-        assert_eq!(row["hasUserCredential"], false, "{row}");
-        assert!(row["snapshot"].is_null(), "{row}");
+        assert_eq!(row["hasUserCredential"], has_user_credential, "{row}");
+        assert_eq!(row["snapshot"].is_object(), has_snapshot, "{row}");
     }
     assert_eq!(link_of(&loaded, &new_a_key)["platformAccountId"], new_a);
     assert_eq!(link_of(&loaded, &new_b_key)["platformAccountId"], new_b);
     assert_eq!(link_of(&loaded, &sub_a_key)["platformAccountId"], sub_a);
     assert_eq!(link_of(&loaded, &sub_b_key)["platformAccountId"], sub_b);
     assert!(link_of(&loaded, &new_b_key)["snapshot"].is_null());
-    assert_eq!(
-        endpoint_of(&target, &new_a_key),
-        format!("{new_a_url}/v1/chat/completions")
-    );
-    assert_eq!(
-        endpoint_of(&target, &new_b_key),
-        format!("{new_b_url}/v1/chat/completions")
-    );
-    assert_eq!(
-        endpoint_of(&target, &sub_a_key),
-        format!("{sub_a_url}/v1/chat/completions")
-    );
-    assert_eq!(
-        endpoint_of(&target, &sub_b_key),
-        format!("{sub_b_url}/v1/chat/completions")
-    );
+    assert_eq!(endpoint_of(&target, &new_a_key), new_a_url.clone());
+    assert_eq!(endpoint_of(&target, &new_b_key), new_b_url.clone());
+    assert_eq!(endpoint_of(&target, &sub_a_key), sub_a_url.clone());
+    assert_eq!(endpoint_of(&target, &sub_b_key), sub_b_url.clone());
 
     let rediscovered = refresh_key(&target, &new_a, &new_a_key).await;
     assert_eq!(
@@ -868,14 +922,8 @@ async fn same_kind_site_instances_keep_independent_refresh_and_links() {
         snapshot_ids(&link_of(&remaining, &sub_a_key)["snapshot"], "models", "id"),
         ["site-sub2-a-model"]
     );
-    assert_eq!(
-        endpoint_of(&source, &new_b_key),
-        format!("{new_b_url}/v1/chat/completions")
-    );
-    assert_eq!(
-        endpoint_of(&source, &new_a_key),
-        format!("{new_a_url}/v1/chat/completions")
-    );
+    assert_eq!(endpoint_of(&source, &new_b_key), new_b_url.clone());
+    assert_eq!(endpoint_of(&source, &new_a_key), new_a_url.clone());
 
     new_a_server.abort();
     new_b_server.abort();

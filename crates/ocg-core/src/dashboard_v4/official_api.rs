@@ -12,7 +12,7 @@ use axum::{
     body::Bytes,
     extract::{Path, State},
 };
-use chrono::{Datelike, TimeZone, Utc};
+use chrono::{DateTime, Datelike, TimeZone, Utc};
 use ocg_domain::connection::{
     EndpointOperation, LegacyConnectionKind, connection_id_for_legacy, endpoint_id_for,
 };
@@ -41,7 +41,7 @@ fn account(db: &Database, id: &str, state: &CoreState) -> Result<Account, V3ApiE
         .map_err(V3ApiError::internal)?
         .ok_or_else(|| V3ApiError::not_found_at(state, "account not found"))
 }
-fn status(state: &CoreState, id: &str) -> Result<OfficialApiStatus, V3ApiError> {
+pub(super) fn status(state: &CoreState, id: &str) -> Result<OfficialApiStatus, V3ApiError> {
     let _settings = state.settings_update.lock();
     let db = state.db.lock();
     let account = account(&db, id, state)?;
@@ -53,6 +53,9 @@ fn status(state: &CoreState, id: &str) -> Result<OfficialApiStatus, V3ApiError> 
         .expect("valid UTC month");
     let (spend, unpriced) = db
         .official_api_spend(&account, since, now)
+        .map_err(V3ApiError::internal)?;
+    let (lifetime_spend, _) = db
+        .official_api_spend(&account, DateTime::<Utc>::UNIX_EPOCH, now)
         .map_err(V3ApiError::internal)?;
     Ok(OfficialApiStatus {
         account_id: id.into(),
@@ -67,6 +70,7 @@ fn status(state: &CoreState, id: &str) -> Result<OfficialApiStatus, V3ApiError> 
             .map_err(V3ApiError::internal)?,
         month_started_at: since,
         month_spend: spend,
+        lifetime_spend,
         unpriced_requests: unpriced,
         revision: state.settings_revision(),
         process_generation: state.process_generation(),
@@ -141,9 +145,12 @@ pub(super) async fn refresh_balance(
     body: Bytes,
 ) -> Result<Json<OfficialApiStatus>, V3ApiError> {
     let expectation = parse_mutation_json::<MutationExpectation>(&body)?;
-    let _refresh = state.provider_usage_refresh.try_lock().map_err(|_| {
-        V3ApiError::conflict_at(&state, "provider usage refresh is already running")
-    })?;
+    let _refresh = state
+        .provider_usage_refresh
+        .exclusive(crate::usage_sync::ProviderUsageRefreshGate::balance_key(
+            &id,
+        ))
+        .await;
     let (snapshot, provider, config, key) = {
         let _settings = state.settings_update.lock();
         check_expectation(&state, &expectation)?;

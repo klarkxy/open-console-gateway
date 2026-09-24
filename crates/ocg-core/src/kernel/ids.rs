@@ -9,5 +9,6 @@ pub use ocg_domain::ids::{
     OLLAMA_CLOUD_BASE_URL, OLLAMA_CLOUD_CHAT_COMPLETIONS_PATH, OLLAMA_CLOUD_MODELS_PATH,
     OLLAMA_CLOUD_PRICING_URL, OLLAMA_PROVIDER_ID, OPENCODE_PROVIDER_ID,
     OPENCODE_ZEN_FREE_PROVIDER_ID, PRIMARY_KEY_ID, PRIMARY_KEY_NAME, ZEN_FREE_ACCOUNT_ID,
-    ZEN_FREE_ACCOUNT_NAME, custom_model_id_matches, is_free_model, normalize_model_name,
+    ZEN_FREE_ACCOUNT_NAME, custom_model_id_matches, is_free_model, model_identity_key,
+    normalize_model_name,
 };

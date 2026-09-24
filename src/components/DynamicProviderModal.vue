@@ -37,11 +37,11 @@
           </div>
           <div class="connection-summary__row">
             <dt>{{ t("上游协议") }}</dt>
-            <dd>{{ protocolDisplayName(fixedPreset.protocol) }}</dd>
+            <dd>{{ fixedPresetProtocolSummary }}</dd>
           </div>
           <div class="connection-summary__row">
             <dt>{{ t("鉴权方式") }}</dt>
-            <dd>{{ fixedPreset.authKind === "bearer" ? "Bearer" : "x-api-key" }}</dd>
+            <dd>{{ fixedPresetAuthSummary }}</dd>
           </div>
           <div v-if="fixedSeeded" class="connection-summary__row">
             <dt>{{ t("默认模型") }}</dt>
@@ -124,13 +124,13 @@
             :placeholder="keyPlaceholder"
           />
           <p v-if="keyIsTemporary" class="field-hint">
-            {{ t("此 Key 仅临时用于获取模型和测试模型，保存不会更新它；更换已保存的 Key 请到账号页。") }}
+            {{ t("此 Key 仅临时用于获取模型和测试模型，保存不会更新；在账号页更换已保存的 Key。") }}
           </p>
           <p v-else-if="savedKeyRetainHint" class="field-hint">
             {{ t("已保存 Key，留空则保留；填写新 Key 会在继续设置时轮换。") }}
           </p>
           <p v-else-if="optionalCreateKeyHint" class="field-hint">
-            {{ t("保存草稿可不填 Key。完成设置时，需要 Key 的鉴权必须填写。") }}
+            {{ t("保存草稿可不填 Key；完成设置时，Key 鉴权必填。") }}
           </p>
         </n-form-item>
         <n-form-item v-if="showFirstAccountFields && (!fixedPreset || settingsOpen)" :label="t('备注')" class="full-width-field">
@@ -246,7 +246,7 @@
               :aria-label="t('选择要测试的模型')"
             />
             <p class="field-hint">
-              {{ t("按所选模型的当前配置测试连接：模型覆盖优先，否则跟随供应商默认；测试只作观测，不会开启或改动路由。") }}
+              {{ t("按所选模型当前配置测试连接：模型覆盖优先，否则跟随供应商默认；仅作观测，不会启用或改动路由。") }}
             </p>
           </div>
         </n-form-item>
@@ -373,6 +373,7 @@ import {
   providerPresetImportPublicName,
   providerPresetModelDiscoveryEnabled,
   providerPresetNote,
+  providerPresetRoutesForEndpoint,
   resolveEditPreset,
 } from "../domain/provider-presets.ts";
 import {
@@ -570,6 +571,23 @@ const discoveryUnavailable = computed(() => (
  * as controls. Edit mode and manual creation keep every existing control.
  */
 const fixedPreset = computed(() => (isCreate.value ? selectedPreset.value : null));
+const fixedPresetRoutes = computed(() => (
+  fixedPreset.value
+    ? providerPresetRoutesForEndpoint(fixedPreset.value, draft.value.endpoint_url.trim())
+      ?? fixedPreset.value.protocolRoutes ?? []
+    : []
+));
+const fixedPresetProtocolSummary = computed(() => (
+  fixedPresetRoutes.value.length
+    ? fixedPresetRoutes.value.map((route) => protocolDisplayName(route.protocol)).join(" · ")
+    : fixedPreset.value ? protocolDisplayName(fixedPreset.value.protocol) : ""
+));
+const fixedPresetAuthSummary = computed(() => {
+  const schemes = fixedPresetRoutes.value.length
+    ? [...new Set(fixedPresetRoutes.value.map((route) => route.authScheme))]
+    : fixedPreset.value ? [fixedPreset.value.authKind] : [];
+  return schemes.map((scheme) => scheme === "bearer" ? "Bearer" : scheme.replaceAll("_", "-")).join(" · ");
+});
 const fixedSeededModels = computed(() => (
   fixedPreset.value ? providerPresetDefaultModels(fixedPreset.value) : []
 ));
@@ -670,7 +688,7 @@ function setMappingRouteMode(row: ProviderDefinitionMapping, mode: string): void
 }
 const authOptions = computed(() => DYNAMIC_AUTH_KINDS.map((value) => ({
   value,
-  label: value === "none" ? t("无鉴权") : value === "bearer" ? "Bearer" : "x-api-key",
+  label: value === "none" ? t("无鉴权") : value === "bearer" ? "Bearer" : value,
 })));
 
 let formWasVisible = false;
@@ -856,7 +874,7 @@ async function runTest(): Promise<void> {
   if (busy.value || probeKeyMissing.value) return;
   const mapping = testTarget.value;
   if (!mapping) {
-    formError.value = t("请至少添加一个完整模型映射");
+    formError.value = t("至少添加一个完整模型映射");
     return;
   }
   // Validate the selected mapping's route before any request: a present but
@@ -891,11 +909,11 @@ async function runTest(): Promise<void> {
         source: usesOverride ? t("模型覆盖") : t("供应商默认"),
       });
     } else {
-      formError.value = t("测试失败: {error}", { error: result.error || "" });
+      formError.value = t("测试失败：{error}", { error: result.error || "" });
     }
   } catch (error) {
     if (generation !== requestGeneration.value) return;
-    formError.value = t("测试失败: {error}", { error: dashboardErrorDetail(error) });
+    formError.value = t("测试失败：{error}", { error: dashboardErrorDetail(error) });
   } finally {
     testing.value = false;
   }
@@ -920,7 +938,7 @@ async function captureFormSnapshot(): Promise<void> {
     });
   } catch (error) {
     if (generation !== snapshotGeneration) return;
-    snapshotError.value = t("加载草稿失败: {error}", { error: dashboardErrorDetail(error) });
+    snapshotError.value = t("加载草稿失败：{error}", { error: dashboardErrorDetail(error) });
   } finally {
     if (generation === snapshotGeneration) snapshotLoading.value = false;
   }
@@ -1049,7 +1067,7 @@ async function saveConfigured(): Promise<void> {
     emit("update:show", false);
   } catch (cause) {
     if (isRevisionConflict(cause)) {
-      conflictNotice.value = t("数据已更新，请检查后重新保存。不会自动重试。");
+      conflictNotice.value = t("数据已更新，检查后再保存；不会自动重试。");
       adoptRefreshedExpectation();
       emit("conflict");
     } else {
@@ -1063,7 +1081,7 @@ async function saveConfigured(): Promise<void> {
 async function commitOnboarding(intent: OnboardingIntent): Promise<void> {
   if (busy.value || committedWrite) return;
   if (lastFailure.value === "uncertain" && lastIntent.value && lastIntent.value !== intent) {
-    formError.value = t("提交结果未知，请用原内容重试或取消。不能改内容后再提交。");
+    formError.value = t("提交结果未知。用原内容重试或取消，勿修改后提交。");
     return;
   }
   const error = validateOnboardingDraft(draft.value, {
@@ -1084,7 +1102,7 @@ async function commitOnboarding(intent: OnboardingIntent): Promise<void> {
       await captureFormSnapshot();
     }
     if (!capturedExpectation.value) {
-      formError.value = snapshotError.value || t("加载草稿失败: {error}", { error: t("保存失败，请重试") });
+      formError.value = snapshotError.value || t("加载草稿失败：{error}", { error: t("保存失败，请重试") });
       return;
     }
   }
@@ -1094,7 +1112,7 @@ async function commitOnboarding(intent: OnboardingIntent): Promise<void> {
     ({ payload, signature } = buildIntentPayload(intent));
   } catch (cause) {
     if (onboardingUnknownLockedError(cause)) {
-      formError.value = t("提交结果未知，请用原内容重试或取消。不能改内容后再提交。");
+      formError.value = t("提交结果未知。用原内容重试或取消，勿修改后提交。");
       return;
     }
     const key = cause instanceof Error ? cause.message : "";
@@ -1131,18 +1149,18 @@ async function commitOnboarding(intent: OnboardingIntent): Promise<void> {
     }
     if (isRevisionConflict(cause)) {
       lastFailure.value = "definitive";
-      conflictNotice.value = t("数据已更新，请检查后重新保存。不会自动重试。");
+      conflictNotice.value = t("数据已更新，检查后再保存；不会自动重试。");
       adoptRefreshedExpectation();
       emit("conflict");
     } else if (cause instanceof DashboardRequestError && cause.code === "operationPayloadMismatch") {
       lastFailure.value = "definitive";
-      formError.value = t("之前的提交已生效，页面已刷新，请核对后再操作。");
+      formError.value = t("之前的提交已生效，页面已刷新，核对后再操作。");
       operationId.value = null;
       lastSignature.value = null;
       emit("conflict");
     } else if (isUncertainOnboardingFailure(cause)) {
       lastFailure.value = "uncertain";
-      formError.value = t("提交结果未知，供应商可能已保存。请用相同内容重试，不要修改后再提交。");
+      formError.value = t("提交结果未知，供应商可能已保存。用相同内容重试，勿修改后提交。");
     } else {
       lastFailure.value = "definitive";
       formError.value = dashboardErrorDetail(cause);
@@ -1157,42 +1175,42 @@ async function commitOnboarding(intent: OnboardingIntent): Promise<void> {
 .modal-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
+  gap: var(--ocg-space-md);
 }
-.form-error { margin-bottom: 12px; }
+.form-error { margin-bottom: var(--ocg-space-md); }
 .full-width-field { grid-column: 1 / -1; }
 .field-hint {
   margin: 6px 0 0;
   color: var(--ocg-muted);
   font-size: var(--ocg-font-xs);
 }
-.capability-rows, .mapping-row { display: grid; gap: 8px; }
-.preset-picker { display: grid; gap: 8px; width: 100%; }
+.capability-rows, .mapping-row { display: grid; gap: var(--ocg-space-sm); }
+.preset-picker { display: grid; gap: var(--ocg-space-sm); width: 100%; }
 .preset-details {
   display: flex;
   align-items: baseline;
-  gap: 12px;
+  gap: var(--ocg-space-md);
   flex-wrap: wrap;
 }
-.preset-links { display: flex; gap: 12px; }
+.preset-links { display: flex; gap: var(--ocg-space-md); }
 .capability-actions, .modal-footer, .discovery-import {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
   justify-content: space-between;
 }
 .mapping-row-main {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
 }
 .mapping-row-route {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-  gap: 8px;
+  gap: var(--ocg-space-sm);
 }
 .discovery-import { grid-column: 1 / -1; }
-.test-section { display: grid; gap: 8px; width: 100%; }
+.test-section { display: grid; gap: var(--ocg-space-sm); width: 100%; }
 .fixed-models-summary {
   grid-column: 1 / -1;
   margin: 0;
@@ -1202,11 +1220,11 @@ async function commitOnboarding(intent: OnboardingIntent): Promise<void> {
 .connection-summary {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-  gap: 8px 16px;
+  gap: var(--ocg-space-sm) var(--ocg-space-lg);
   margin: 0;
-  padding: 10px 12px;
+  padding: 10px var(--ocg-space-md);
   border: 1px solid var(--ocg-border);
-  border-radius: 10px;
+  border-radius: var(--ocg-radius-md);
   background: var(--ocg-canvas);
 }
 .connection-summary__row {

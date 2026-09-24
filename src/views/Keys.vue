@@ -8,7 +8,7 @@
         </p>
       </div>
 
-      <n-alert v-if="loadError" type="error" :title="t('接入 Key 加载失败，请先重试')">
+      <n-alert v-if="loadError" type="error" :title="t('接入 Key 加载失败，请重试')">
         <div class="keys-load-error">
           <span>{{ loadError }}</span>
           <n-button size="small" secondary :loading="loading" @click="loadConnection">{{ t("重试") }}</n-button>
@@ -271,7 +271,7 @@ async function loadConnection(): Promise<boolean> {
   } catch (error) {
     if (generation !== loadGeneration) return false;
     loadError.value = error instanceof Error ? error.message : String(error);
-    message.error(t("加载接入 Key 失败: {error}", { error: loadError.value }));
+    message.error(t("加载接入 Key 失败：{error}", { error: loadError.value }));
     return false;
   } finally {
     if (generation === loadGeneration) loading.value = false;
@@ -309,7 +309,7 @@ async function runKeyMutation(
       if (isConflict(mutationError)) {
         message.warning(t("接入 Key 已被其他操作修改，已刷新列表并保留本地修改，请再次保存"));
       } else {
-        message.error(t("操作失败: {error}", { error: String(mutationError) }));
+        message.error(t("操作失败：{error}", { error: String(mutationError) }));
       }
       return false;
     } catch (reloadError) {
@@ -321,9 +321,9 @@ async function runKeyMutation(
       } else if (isConflict(mutationError)) {
         message.warning(t("接入 Key 已被其他操作修改，已刷新列表并保留本地修改，请再次保存"));
       } else {
-        message.error(t("操作失败: {error}", { error: String(mutationError) }));
+        message.error(t("操作失败：{error}", { error: String(mutationError) }));
       }
-      message.error(t("加载接入 Key 失败: {error}", { error: loadError.value }));
+      message.error(t("加载接入 Key 失败：{error}", { error: loadError.value }));
       return mutationError === null;
     }
   } finally {
@@ -355,7 +355,7 @@ async function copyPrimaryKey(): Promise<void> {
   if (!connection.value.primary_key) return;
   try {
     await copy("keys-primary", connection.value.primary_key, "Key");
-    message.success(t("已复制 Key"));
+    message.success(t("Key 已复制"));
   } catch (error) {
     message.error(error instanceof Error ? error.message : t("复制失败"));
   }
@@ -419,7 +419,7 @@ async function copyEntryKey(entry: ConnectionSubKey): Promise<void> {
   if (!entry.value) return;
   try {
     await copy(`keys-${entry.id}`, entry.value, "Key");
-    message.success(t("已复制 Key"));
+    message.success(t("Key 已复制"));
   } catch (error) {
     message.error(error instanceof Error ? error.message : t("复制失败"));
   }
@@ -469,7 +469,7 @@ onUnmounted(cleanup);
 .keys-card {
   padding: 22px;
   border: 1px solid var(--ocg-border);
-  border-radius: 14px;
+  border-radius: var(--ocg-radius-lg);
   background: var(--ocg-surface);
   box-shadow: var(--ocg-shadow-sm);
 }
@@ -488,24 +488,24 @@ onUnmounted(cleanup);
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: var(--ocg-space-md);
 }
 .key-create-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
   max-width: 28em;
-  margin-top: 16px;
+  margin-top: var(--ocg-space-lg);
 }
 .key-create-submit {
   min-width: 0;
-  padding-inline: 12px;
+  padding-inline: var(--ocg-space-md);
 }
 .gateway-key-list {
   display: grid;
-  gap: 8px;
-  margin: 16px 0 0;
+  gap: var(--ocg-space-sm);
+  margin: var(--ocg-space-lg) 0 0;
   padding: 0;
   list-style: none;
 }
@@ -513,18 +513,18 @@ onUnmounted(cleanup);
   display: grid;
   grid-template-columns: minmax(11em, 16em) minmax(0, 1fr) auto;
   align-items: center;
-  gap: 12px;
+  gap: var(--ocg-space-md);
   min-height: 48px;
-  padding: 8px 12px;
+  padding: var(--ocg-space-sm) var(--ocg-space-md);
   border: 1px solid var(--ocg-border);
-  border-radius: 6px;
+  border-radius: var(--ocg-radius-sm);
   background: var(--ocg-canvas);
 }
 .gateway-key-main {
   display: flex;
   min-width: 0;
   align-items: center;
-  gap: 8px;
+  gap: var(--ocg-space-sm);
 }
 .gateway-key-main .n-input {
   max-width: 240px;
@@ -540,7 +540,7 @@ onUnmounted(cleanup);
 }
 .gateway-key-badge {
   flex: none;
-  padding: 1px 8px;
+  padding: 1px var(--ocg-space-sm);
   border: 1px solid var(--ocg-border);
   border-radius: 999px;
   color: var(--ocg-subtle);

@@ -33,7 +33,7 @@ export default defineConfig({
       },
     },
     watch: {
-      ignored: ["**/target/**", "**/src-tauri/target/**"],
+      ignored: ["**/target/**", "**/target-agent/**", "**/src-tauri/target/**"],
     },
   },
   envPrefix: ["VITE_", "TAURI_"],

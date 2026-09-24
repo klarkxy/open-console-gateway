@@ -7,10 +7,11 @@ import {
   type ProviderDefinitionMapping,
   type DynamicUpstreamProtocol,
 } from "./dynamic-provider.ts";
+import type { AuthSchemeDto } from "../api/generated/dashboard-v4.ts";
 
 export type ProviderPresetCategory = "official" | "aggregator";
 export type ProviderPresetOffering = "plan" | "api";
-export type ProviderPresetAuthKind = Extract<DynamicAuthKind, "bearer" | "x-api-key">;
+export type ProviderPresetAuthKind = Extract<DynamicAuthKind, "bearer" | "x-api-key" | "api-key">;
 
 export interface ProviderPreset {
   id: string;
@@ -49,6 +50,57 @@ export interface ProviderPreset {
   endpointPlaceholder?: string;
   /** False means no model-discovery interface is configured for this preset. */
   modelDiscovery?: boolean;
+  /**
+   * Official protocol endpoints declared on the preset. Absent means the
+   * editor keeps the single default route. Never inferred from display names.
+   */
+  protocolRoutes?: ProviderPresetProtocolRoute[];
+}
+
+export interface ProviderPresetProtocolRoute {
+  protocol: DynamicUpstreamProtocol;
+  endpointUrl: string;
+  authScheme: AuthSchemeDto;
+}
+
+/** Resolve only the two customer-specific hosts whose route paths are documented. */
+export function providerPresetRoutesForEndpoint(
+  preset: Pick<ProviderPreset, "id" | "endpointUrl" | "protocolRoutes">,
+  endpoint: string,
+): ProviderPresetProtocolRoute[] | undefined {
+  if (preset.endpointUrl && preset.endpointUrl === endpoint) {
+    return preset.protocolRoutes?.map((route) => ({ ...route }));
+  }
+  if (preset.endpointUrl || !endpoint) return undefined;
+  let url: URL;
+  try {
+    url = new URL(endpoint);
+  } catch {
+    return undefined;
+  }
+  if (url.protocol !== "https:" || url.port || url.username || url.password || url.search || url.hash) return undefined;
+  const host = url.hostname.toLowerCase();
+  const path = url.pathname.replace(/\/$/, "");
+  if (preset.id === "azure-openai"
+    && /^[a-z0-9][a-z0-9-]*\.openai\.azure\.com$/.test(host)
+    && path === "/openai/v1/responses") {
+    const origin = url.origin;
+    return [
+      { protocol: "responses", endpointUrl: `${origin}/openai/v1/responses`, authScheme: "api_key" },
+      { protocol: "chat_completions", endpointUrl: `${origin}/openai/v1/chat/completions`, authScheme: "api_key" },
+    ];
+  }
+  if (preset.id === "bedrock"
+    && /^bedrock-runtime\.[a-z0-9-]+\.amazonaws\.com$/.test(host)
+    && path === "/openai/v1/responses") {
+    const origin = url.origin;
+    return [
+      { protocol: "responses", endpointUrl: `${origin}/openai/v1/responses`, authScheme: "bearer" },
+      { protocol: "chat_completions", endpointUrl: `${origin}/openai/v1/chat/completions`, authScheme: "bearer" },
+      { protocol: "messages", endpointUrl: `${origin}/anthropic/v1/messages`, authScheme: "x_api_key" },
+    ];
+  }
+  return undefined;
 }
 
 const PRESET_CATEGORIES: readonly ProviderPresetCategory[] = ["official", "aggregator"];
@@ -58,7 +110,15 @@ const PRESET_PROTOCOLS: readonly DynamicUpstreamProtocol[] = [
   "responses",
   "messages",
 ];
-const PRESET_AUTH_KINDS: readonly ProviderPresetAuthKind[] = ["bearer", "x-api-key"];
+const PRESET_AUTH_KINDS: readonly ProviderPresetAuthKind[] = ["bearer", "x-api-key", "api-key"];
+const PRESET_ROUTE_AUTH: Record<string, AuthSchemeDto> = {
+  bearer: "bearer",
+  "x-api-key": "x_api_key",
+  x_api_key: "x_api_key",
+  "api-key": "api_key",
+  api_key: "api_key",
+  none: "none",
+};
 
 function isHttpUrl(value: unknown): value is string {
   if (typeof value !== "string" || !value) return false;
@@ -95,7 +155,7 @@ export function providerPresetShapeIssues(raw: unknown, index = 0): string[] {
     issues.push(`${where}: protocol must be chat_completions, responses, or messages`);
   }
   if (!PRESET_AUTH_KINDS.includes(row.authKind as ProviderPresetAuthKind)) {
-    issues.push(`${where}: authKind must be bearer or x-api-key`);
+    issues.push(`${where}: authKind must be bearer, x-api-key, or api-key`);
   }
   if (!isHttpUrl(row.docsUrl)) issues.push(`${where}: docsUrl is not an http(s) URL`);
   if (!isHttpUrl(row.websiteUrl)) issues.push(`${where}: websiteUrl is not an http(s) URL`);
@@ -137,7 +197,52 @@ export function providerPresetShapeIssues(raw: unknown, index = 0): string[] {
       issues.push(`${where}: defaultModels must be a non-empty array of trimmed unique non-empty IDs`);
     }
   }
+  if (row.protocolRoutes !== undefined) {
+    issues.push(...providerPresetProtocolRouteIssues(row.protocolRoutes, where));
+  }
   return issues;
+}
+
+function providerPresetProtocolRouteIssues(raw: unknown, where: string): string[] {
+  if (!Array.isArray(raw) || raw.length === 0 || raw.length > 3) {
+    return [`${where}: protocolRoutes must be 1–3 routes when present`];
+  }
+  const issues: string[] = [];
+  const seen = new Set<string>();
+  for (const [index, entry] of raw.entries()) {
+    const routeWhere = `${where} protocolRoutes[${index}]`;
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      issues.push(`${routeWhere}: not an object`);
+      continue;
+    }
+    const route = entry as Record<string, unknown>;
+    if (!PRESET_PROTOCOLS.includes(route.protocol as DynamicUpstreamProtocol)) {
+      issues.push(`${routeWhere}: protocol must be chat_completions, responses, or messages`);
+    } else if (seen.has(route.protocol as string)) {
+      issues.push(`${routeWhere}: protocol is duplicated`);
+    } else {
+      seen.add(route.protocol as string);
+    }
+    if (typeof route.endpointUrl !== "string" || !isHttpUrl(route.endpointUrl)) {
+      issues.push(`${routeWhere}: endpointUrl is not an http(s) URL`);
+    }
+    if (PRESET_ROUTE_AUTH[String(route.authScheme)] === undefined) {
+      issues.push(`${routeWhere}: authScheme must be bearer, x-api-key, api-key, or none`);
+    }
+  }
+  return issues;
+}
+
+function presentPresetProtocolRoutes(raw: unknown): ProviderPresetProtocolRoute[] | undefined {
+  if (!Array.isArray(raw) || providerPresetProtocolRouteIssues(raw, "row").length > 0) return undefined;
+  return raw.map((entry) => {
+    const route = entry as Record<string, unknown>;
+    return {
+      protocol: route.protocol as DynamicUpstreamProtocol,
+      endpointUrl: route.endpointUrl as string,
+      authScheme: PRESET_ROUTE_AUTH[String(route.authScheme)]!,
+    };
+  });
 }
 
 /** Keeps only contract-valid rows so a bad entry cannot break the dashboard. */
@@ -147,7 +252,11 @@ export function parseProviderPresets(raw: unknown): ProviderPreset[] {
   const presets: ProviderPreset[] = [];
   for (const [index, row] of raw.entries()) {
     if (providerPresetShapeIssues(row, index).length > 0) continue;
-    const preset = row as ProviderPreset;
+    const record = row as Record<string, unknown>;
+    const preset = {
+      ...(row as ProviderPreset),
+      protocolRoutes: presentPresetProtocolRoutes(record.protocolRoutes),
+    };
     if (seen.has(preset.id)) continue;
     seen.add(preset.id);
     presets.push(preset);
@@ -332,7 +441,7 @@ export function resolveProviderPreset(
 ): ProviderPreset | null {
   const target = normalizeProviderPresetEndpoint(endpointUrl);
   if (!target) return null;
-  if (authKind !== "bearer" && authKind !== "x-api-key") return null;
+  if (authKind !== "bearer" && authKind !== "x-api-key" && authKind !== "api-key") return null;
   const matches = presets.filter((preset) => (
     Boolean(preset.endpointUrl)
     && preset.authKind === authKind
