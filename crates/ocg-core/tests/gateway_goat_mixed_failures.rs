@@ -57,6 +57,13 @@ async fn goat_mixed_failures_respect_temporary_key_waits_without_changing_sticky
         )
         .unwrap(),
     );
+    // Rebuilding the state must preserve the fixture's inference-only isolation.
+    p.state
+        .usage_sync
+        .set_reactive_refresh_enabled_for_test(false);
+    p.state.usage_sync.set_fetch_for_test(|_, _| {
+        Box::pin(async { Err(ocg_core::go_usage::GoUsageError::Network) })
+    });
     let a = format!("goat-a-{}", uuid::Uuid::new_v4());
     let h_id = format!("goat-h-{}", uuid::Uuid::new_v4());
     let c = format!("goat-c-{}", uuid::Uuid::new_v4());
@@ -85,6 +92,20 @@ async fn goat_mixed_failures_respect_temporary_key_waits_without_changing_sticky
     assert_eq!(h.call_keys(), ["key-a"]);
     let before_a = h.account(&a);
     let before_h = h.account(&h_id);
+
+    // Make H higher priority without clearing routing state. Losing sticky A
+    // would now send H first, including once A's temporary wait expires.
+    h.state
+        .db
+        .lock()
+        .reorder_accounts(&[
+            h_id.clone(),
+            a.clone(),
+            c.clone(),
+            "acct-1".into(),
+            ZEN_FREE_ACCOUNT_ID.into(),
+        ])
+        .unwrap();
 
     // Each 429 holds only A for 30 seconds. During that wait A emits a local
     // resource_wait, while H's credit 400 remains eligible on the next request.
