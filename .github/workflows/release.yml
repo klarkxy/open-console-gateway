@@ -267,11 +267,13 @@ jobs:
           added=$("$cli" --data-dir="$data" key add ci-smoke sk-ci-smoke)
           id=$(printf '%s\n' "$added" | sed -n 's/^added key \([^ ]*\).*/\1/p')
           test -n "$id"
-          "$cli" --data-dir="$data" key list | grep -q ci-smoke
+          listed=$("$cli" --data-dir="$data" key list)
+          grep -q ci-smoke <<<"$listed"
           "$cli" --data-dir="$data" key disable "$id"
           "$cli" --data-dir="$data" key enable "$id"
-          "$cli" --data-dir="$data" status | grep -q '1 total, 1 enabled'
-          "$cli" --data-dir="$data" status | grep -Fq 'gateway key: [hidden'
+          status_text=$("$cli" --data-dir="$data" status)
+          grep -q '1 total, 1 enabled' <<<"$status_text"
+          grep -Fq 'gateway key: [hidden' <<<"$status_text"
           gateway_key=$("$cli" --data-dir="$data" status --show-key | sed -n 's/^gateway key: \(ocg-[^ ]*\)$/\1/p')
           test -n "$gateway_key"
 
