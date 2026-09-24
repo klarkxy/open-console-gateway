@@ -1,13 +1,14 @@
+/* Fallbacks mirror theme.ts; runtime applies persisted/system preferences before mounting. */
 :root {
   color-scheme: light;
-  /* 字号阶梯：层级由字号 + 字重共同承担，各档用途见 DESIGN.md Typography */
+  --ocg-font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", "Noto Sans SC", "Microsoft YaHei UI", sans-serif;
+  --ocg-font-mono: "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   --ocg-font-xs: 12px;
   --ocg-font-sm: 13px;
   --ocg-font-md: 14px;
   --ocg-font-lg: 16px;
   --ocg-font-xl: 20px;
   --ocg-font-2xl: 24px;
-  /* 间距与圆角刻度：与主题无关的回退默认值，见 DESIGN.md Layout / Shapes */
   --ocg-space-xs: 4px;
   --ocg-space-sm: 8px;
   --ocg-space-md: 12px;
@@ -15,91 +16,55 @@
   --ocg-space-xl: 24px;
   --ocg-space-2xl: 32px;
   --ocg-radius-sm: 6px;
-  --ocg-radius-md: 10px;
-  --ocg-radius-lg: 14px;
-  --ocg-canvas: #f7f7f8;
-  --ocg-surface: #ffffff;
-  --ocg-surface-raised: #ffffff;
-  --ocg-ink: #18181b;
-  --ocg-muted: #5f6068;
-  --ocg-subtle: #6f6f78;
-  --ocg-primary: #18181b;
-  --ocg-primary-soft: #ececef;
-  --ocg-success: #0b6844;
-  --ocg-success-soft: #e6f4ee;
-  --ocg-warning: #8a4d00;
-  --ocg-warning-soft: #fff1d8;
-  --ocg-error: #a92742;
-  --ocg-info: #245db6;
-  --ocg-border: #e3e3e8;
-  --ocg-divider: #e9e9ed;
-  --ocg-shadow-sm: 0 1px 2px rgba(24, 24, 32, 0.05);
-  --ocg-shadow-lg: 0 22px 60px rgba(35, 30, 66, 0.12);
-  --ocg-mascot-halo: rgba(24, 24, 27, 0.06);
+  --ocg-radius-md: 8px;
+  --ocg-radius-lg: 12px;
+  --ocg-radius-xl: 16px;
+  --ocg-motion-fast: 120ms;
+  --ocg-motion-normal: 180ms;
+  --ocg-ease: cubic-bezier(0.2, 0, 0, 1);
+  --ocg-header-height: 60px;
+  --ocg-content-max: 1440px;
+  --ocg-canvas: #F4F6FA;
+  --ocg-surface: #FFFFFF;
+  --ocg-surface-raised: #FFFFFF;
+  --ocg-surface-sunken: #F3F5F8;
+  --ocg-ink: #1B2430;
+  --ocg-muted: #566171;
+  --ocg-subtle: #657080;
+  --ocg-accent: #1783FF;
+  --ocg-primary: #0967D2;
+  --ocg-primary-hover: #085AB8;
+  --ocg-primary-pressed: #064999;
+  --ocg-primary-soft: #E8F3FF;
+  --ocg-on-primary: #FFFFFF;
+  --ocg-success: #0B6844;
+  --ocg-success-soft: #E6F4EE;
+  --ocg-warning: #8A4D00;
+  --ocg-warning-soft: #FFF1D8;
+  --ocg-error: #A92742;
+  --ocg-info: #245DB6;
+  --ocg-border: #DFE5ED;
+  --ocg-divider: #E9EDF3;
+  --ocg-shadow-sm: 0 1px 2px rgba(28, 40, 66, 0.04);
+  --ocg-shadow-lg: 0 8px 24px rgba(28, 40, 66, 0.08), 0 24px 64px rgba(28, 40, 66, 0.12);
+  --ocg-mascot-halo: rgba(23, 131, 255, 0.06);
   --ocg-mascot-rim: transparent;
 }
-
-html,
-body,
-#app {
-  height: 100%;
-  margin: 0;
-  padding: 0;
-  font-size: var(--ocg-font-md);
-  line-height: 1.6;
-  font-family: "Segoe UI Variable Text", "Noto Sans SC", "Microsoft YaHei UI", sans-serif;
-  background: var(--ocg-canvas);
-}
-
-* {
-  box-sizing: border-box;
-}
-
-button,
-input,
-select,
-textarea {
-  font: inherit;
-}
-
-button:focus-visible,
-a:focus-visible,
-[tabindex]:focus-visible {
-  outline: 2px solid var(--ocg-primary);
-  outline-offset: 2px;
-}
-
-.mono {
-  font-family: "Cascadia Mono", Consolas, monospace;
-  font-variant-numeric: tabular-nums;
-}
-
-.sr-only {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  margin: -1px;
-  overflow: hidden;
-  clip: rect(0, 0, 0, 0);
-  white-space: nowrap;
-  border: 0;
-}
-
-@media (max-width: 640px) {
-  :root[data-theme="black"] .auth-character,
-  :root[data-theme="black"] .hero-character {
-    opacity: 0.22;
-  }
-}
-
+html, body, #app { height: 100%; margin: 0; padding: 0; font-size: var(--ocg-font-md); line-height: 1.6; font-family: var(--ocg-font-ui); background: var(--ocg-canvas); color: var(--ocg-ink); }
+html { -webkit-text-size-adjust: 100%; }
+*, *::before, *::after { box-sizing: border-box; }
+button, input, select, textarea { font: inherit; }
+button:focus-visible, a:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--ocg-primary); outline-offset: 3px; }
+::selection { color: var(--ocg-ink); background: var(--ocg-primary-soft); }
+a { text-underline-offset: 3px; }
+.mono, code, pre, kbd { font-family: var(--ocg-font-mono); font-variant-numeric: tabular-nums; font-variant-ligatures: none; }
+kbd { padding: 1px var(--ocg-space-xs); border: 1px solid var(--ocg-border); border-radius: var(--ocg-radius-sm); background: var(--ocg-surface-sunken); font-size: var(--ocg-font-xs); color: var(--ocg-muted); }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+/* Scrollable data stays in its own pane; never hide focus or make the page wider. */
+:where(.n-data-table-wrapper, .n-data-table-base-table, .n-modal, .n-drawer-body-content) { scrollbar-width: thin; scrollbar-color: var(--ocg-border) transparent; }
+:where(.n-data-table) { font-variant-numeric: tabular-nums; }
+:where(.n-modal) { box-shadow: var(--ocg-shadow-lg); }
+:where(.n-empty) { padding-block: var(--ocg-space-xl); }
 @media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
-    scroll-behavior: auto !important;
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
-  }
+  *, *::before, *::after { scroll-behavior: auto !important; animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
 }
