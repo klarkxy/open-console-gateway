@@ -33,6 +33,13 @@ fn clocked(p: &mut PreparedFallback) -> Arc<AtomicU64> {
         )
         .unwrap(),
     );
+    // Rebuilding the state must preserve the fixture's inference-only isolation.
+    p.state
+        .usage_sync
+        .set_reactive_refresh_enabled_for_test(false);
+    p.state.usage_sync.set_fetch_for_test(|_, _| {
+        Box::pin(async { Err(ocg_core::go_usage::GoUsageError::Network) })
+    });
     seconds
 }
 
