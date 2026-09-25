@@ -67,18 +67,14 @@ jobs:
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
           echo "production=$production" >> "$GITHUB_OUTPUT"
 
-  quality:
-    # Only production tag pushes re-run the full quality gate; manual
-    # candidate dispatches build a commit that already passed it on PR/main.
-    needs: plan
-    if: needs.plan.outputs.production == 'true'
-    uses: ./.github/workflows/quality.yml
-
   preflight:
     name: Release preflight
     needs: plan
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
 
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -95,7 +91,15 @@ jobs:
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
+      - name: Reuse successful main quality checks
+        if: needs.plan.outputs.production == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/verify-release-quality.mjs
+
       - name: Test release helpers
+        # Production reuses the same tests from the exact main Quality run.
+        if: needs.plan.outputs.production != 'true'
         run: pnpm run test:tooling
       - name: Validate release contract and signing pair
         # On a production tag push this also proves the updater signing pair
@@ -168,7 +172,7 @@ jobs:
         with:
           shared-key: release-${{ matrix.artifact }}
           workspaces: ". -> target"
-          cache-on-failure: ${{ github.event_name == 'workflow_dispatch' }}
+          cache-on-failure: true
           save-if: "true"
 
       - run: pnpm install --frozen-lockfile
@@ -416,7 +420,6 @@ jobs:
     if: needs.plan.outputs.production == 'true'
     needs:
       - plan
-      - quality
       - build
     runs-on: ubuntu-latest
     outputs:
@@ -473,6 +476,7 @@ jobs:
           if [ "$prerelease" = true ]; then
             release_type_flags+=(--prerelease)
           fi
+
           if [ "$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft 2>/dev/null)" = true ]; then
             gh release upload "$GITHUB_REF_NAME" release/* --clobber
             gh release edit "$GITHUB_REF_NAME" --notes-file "$notes_file" "${release_type_flags[@]}"
@@ -657,3 +661,21 @@ jobs:
           else
             echo "$GITHUB_REF_NAME was published without rolling back newer latest release $current_latest."
           fi
+
+  dispatch-containers:
+    name: Start container publication
+    needs: publish-release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      # Publishing with GITHUB_TOKEN does not trigger the release event.
+      # workflow_dispatch does, and keeps container recovery independent.
+      - name: Dispatch containers for the published tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: >-
+          gh workflow run container.yml --repo "$GITHUB_REPOSITORY" --ref main
+          -f "tag=$RELEASE_TAG" -f publish_latest=true

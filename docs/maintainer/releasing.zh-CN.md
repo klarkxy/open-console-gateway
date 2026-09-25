@@ -2,49 +2,62 @@
 
 # 发布流程
 
-1. 在 `package.json`、`src-tauri/tauri.conf.json`、两份 `Cargo.toml`，以及
-   `compose.example.yaml` 的标题和默认镜像中写入 `X.Y.Z`（或
-   `X.Y.Z-beta.N`）。
-2. 用常规 Cargo/pnpm 命令刷新 lockfile，再运行 `pnpm run test`、
-   `pnpm run test:tooling`、`pnpm run design:lint`、
-   `pnpm run contract:v3:check`、`pnpm run contract:v4:check`、
-   `pnpm run release:check` 和
-   `pnpm run build`。提交工具生成的 lockfile 差异，不要手改。
-3. 复核相对上一个 tag 的 diff 和当前平台的 `release/` payload，然后提交
-   版本、lockfile、文档与 Release notes。
-4. 先合并。在已经位于 `main` 的 commit 上打附注 tag `vX.Y.Z` 并推送。不要
-   在之后还会 squash-merge 的 commit 上打 tag。
-5. 等待 quality、preflight、原生矩阵、`draft-release`、`verify-release` 和
-   `publish-release`。确认公开的是同一个 draft。
-6. 对该 tag 触发 `container.yml`
-   （`gh workflow run container.yml --ref main -f tag=vX.Y.Z -f publish_latest=true`），
-   确认两个 GHCR package 已公开，并匿名拉取两个完整版本标签。
+1. **一次准备。** 复核相对上一个 tag 的差异，用 Node.js 22 完成受影响行为的检查。
+   在 `package.json`、`src-tauri/tauri.conf.json`、两份 `Cargo.toml` 和
+   `compose.example.yaml` 的标题、默认镜像中写入 `X.Y.Z`（或 `X.Y.Z-beta.N`）。
+   用对应包管理器刷新受影响的 lockfile，编写双语发布说明，运行
+   `pnpm run release:check`，提交候选。只有安装器/打包路径受影响或明确要求本机试用时，
+   才需要先在本地构建原生发布包。
+2. **最终提交完整验证一次。** 推送或合入 `main`，等待 Quality 工作流。它负责完整
+   Web/工具/Rust 测试、类型检查、Clippy、格式、契约、设计检查和 Compose 校验。
+   失败时修复并在本地重跑受影响检查，再推送修正。不再把 CI 已覆盖的整套本地发布
+   检查另列为前置门槛。
+3. **打标签，由 CI 发布。** 在 main Quality 成功的同一提交上创建附注 tag `vX.Y.Z`
+   并推送。预检核对该 SHA 最新的 main Quality 结果，不再重跑一遍；缺失、失败或未完成
+   都会在原生构建前阻止发布。之后 CI 检查签名，构建并试运行三平台产物，核验草稿资产，
+   再公开同一个草稿。手动平台候选仍不签名、不公开发布。
+4. **确认两项发布。** 发布工作流会自动从 `main` 为该 tag 触发 `container.yml`。
+   等待这次独立运行完成，包括匿名拉取、两种架构和两套镜像的 digest 验证。
+   回读 GitHub Release 元数据及预期镜像标签，报告版本/tag/SHA、两项工作流结果和
+   受影响的人工检查。
 
 已发布资产与 tag 不可变。发布有误时用新的 patch 版本修复。
 
-## CI 覆盖不到的人工检查
+## 检查分工与完成条件
 
-协议、schema、CAS 与本地列表行为属于 `cargo test` / `pnpm run test`，不放进
-本清单。按受影响的 Gateway 协议选择真实客户端检查，并在发布说明中记录客户端版本、平台、结果与未执行项；此前验证的排除项不自动沿用。
+最终验证期间保持候选不变；提交变化后需要对应 SHA 的 main Quality 成功结果。
+未改变行为的本地定向结果可以保留，局部修复不重跑无关测试套件。共用 `target/` 的
+Cargo 类检查顺序执行，保持构建配置稳定。
 
-- [ ] 质量门、签名 `release:check` 与所选平台冒烟全绿；四份版本清单、
-      `compose.example.yaml` 与 `Cargo.lock` 中的 workspace 包条目一致。
-- [ ] 对受影响的客户端路径完成文本与工具调用（例如 Gemini 兼容性改动时覆盖
-      Gemini CLI）。DSH Applications 流发生改动时覆盖该流程，包括原生插件与
-      CLI 冒烟。检查接入中心显示的 Key 已脱敏，复制结果是所选 Key。
-- [ ] 可选托管注册（登录身份 → 邀请链接 → OpenCode 登录 → 支付前确认 →
-      Key 回填）。真实支付只在明确打算时执行。对已完成 Key 账号与托管账号
-      验证官方 `/zen/go/v1/usage` 的额度刷新。
-- [ ] Windows：SmartScreen 文案、面板、一个账号、一条请求，`auto_start` 与
-      `HKCU\...\Run\Open Console Gateway` 对应，卸载后该值消失。
-      对已有副本再跑安装包须保留 `%USERPROFILE%\.ocg-mgr`。交互卸载只有勾选
-      **删除应用数据目录** 才删除该目录。
-- [ ] macOS：**Open Anyway**、面板、一个账号、一条请求。
-- [ ] Linux：在真实 Wayland 或 X11 会话中安装 `.deb` 并运行 AppImage。
-- [ ] 浏览器发现（Windows 上 Edge/Chrome；macOS/Linux 上的平台浏览器）、
-      Profile 隔离、重启后 Cookie 保留。
-- [ ] 发布后：`container.yml` 全绿，按预期 digest 匿名拉取两个镜像，GitHub
-      Release 附件集合未变。
+签名、校验和、服务端资产摘要、打包后 CLI/GUI 冒烟、Windows 覆盖安装、容器匿名
+拉取由 CI 负责。两项发布工作流和元数据核对通过后即完成，不再为重复 CI 证据而下载
+全部平台附件或在本机重拉大镜像。下载、更新或客户端路径受影响时，可以选择一个正式包
+做代表性试用，使用隔离数据并记录清理。本机网络问题不会推翻成功的 CI 证据，除非
+本机运行本身就是本次约定的验收内容。
+
+## 按改动选择额外检查
+
+- 网关路由/协议、计费或存储变更：针对候选二进制运行受影响的隔离 Gateway Lab 场景，
+  要求无失败、无 `NOT_RUN`、`remoteCalls=0`，并确认进程和端口清理。广泛跨模块变更
+  使用完整 Lab。必要时覆盖受影响的真实客户端；DSH 流发生变化时覆盖插件和 CLI。
+- 接入中心或托管注册变更：检查 Key 展示脱敏、复制所选 Key，以及受影响的登录/额度
+  路径。真实支付只在明确打算时执行。
+- 安装器/启动/更新变更：按平台检查相关原生行为，包括 Windows 自启动、卸载与数据
+  保留，macOS **Open Anyway**，或真实桌面会话中的 Linux `.deb`/AppImage。
+- 浏览器集成变更：在受影响平台检查发现、Profile 隔离和重启后的 Cookie 保留。
+
+发布说明记录客户端版本、平台、结果与未执行项。CI 冒烟与真实交互试用分别报告。
+
+## 失败恢复
+
+重跑失败的 job，保留已成功的平台；原生构建在冒烟失败后也保存缓存。
+源码修正需要对应 SHA 的新检查。容器触发失败时，只重跑 `dispatch-containers`，或执行：
+
+```bash
+gh workflow run container.yml --ref main -f tag=vX.Y.Z -f publish_latest=true
+```
+
+已经触发容器任务时，查看并恢复那次运行，不要重复触发。恢复容器发布不需要重建桌面资产。
 
 ---
 

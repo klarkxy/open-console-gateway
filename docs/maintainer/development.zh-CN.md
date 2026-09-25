@@ -44,9 +44,13 @@ Linux Rust job）会加上 `--features ocg-core/ollama-cloud-loopback-test`，�
 Ollama Cloud 网关集成测试安装仅 loopback 的测试接缝。该 feature 默认关闭：应用构建
 保持固定的 `https://ollama.com` 源，且不编译该接缝。未开启 feature 的 workspace
 `cargo test` 仍会编译 `ollama_cloud_gateway`，但其中用例不会运行。`pnpm run test:tooling` 覆盖
-`scripts/*.test.mjs`，属于发版/工具门禁，不属于 `pnpm run test`。
-`pnpm run build` 只做发版验证（`scripts/release.mjs`）。workspace
+`scripts/*.test.mjs`，已包含在 `pnpm run test` 和 Quality 工作流中；完整测试通过后不用再跑一遍。
+`pnpm run build` 构建原生发布包（`scripts/release.mjs`）。workspace
 `[profile.release]` 使用 thin LTO、`strip` 和 `panic = "abort"`。
+
+本地使用与 CI 一致的 Node.js 22。共用 `target/` 的 Cargo 测试、Clippy、契约生成和
+原生构建应顺序执行，保持构建配置一致以复用编译结果。修复后重跑受影响检查，最终
+main Quality 承担完整发布门禁。各项检查在本地与 CI 之间的分工见[发布流程](releasing.zh-CN.md)。
 
 ## DSH 插件契约测试与真实冒烟
 

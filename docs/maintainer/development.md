@@ -51,10 +51,17 @@ test seam. That feature is default-off: application builds keep the fixed
 `https://ollama.com` origin and do not compile the seam. A workspace
 `cargo test` without the feature still compiles `ollama_cloud_gateway` but
 runs none of its cases. `pnpm run test:tooling`
-covers `scripts/*.test.mjs` and is a release/tooling gate, not part of
-`pnpm run test`. `pnpm run build` is release validation only
+covers `scripts/*.test.mjs` and is already included in `pnpm run test`
+and the Quality workflow; do not run it again after a passing full test.
+`pnpm run build` is native release packaging
 (`scripts/release.mjs`). Workspace `[profile.release]` uses thin LTO,
 `strip`, and `panic = "abort"`.
+
+Use Node.js 22 locally as in CI. Run Cargo tests, Clippy, contract generators,
+and native builds sequentially when they share `target/`; keep the same build
+configuration to reuse compiled work. After a fix, rerun the affected checks;
+the final main Quality run supplies the full release gate. See the
+[release procedure](releasing.md) for which checks belong locally or in CI.
 
 ## DSH plugin contract vs real smokes
 

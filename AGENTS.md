@@ -25,3 +25,5 @@ Open Console Gateway is a local multi-Plan console: Rust workspace, Vue 3 dashbo
 Use checks that can expose a failure in the changed behavior. Documentation-only work needs paired English and `.zh-CN.md` content review, not a Rust or frontend build. Contract changes require `pnpm run contract:v4:check`; Vue changes require `pnpm run build:web`.
 
 Quit the release tray app before local Tauri development. Report source checks, builds, and real desktop use as distinct evidence.
+
+For releases, use the current release procedure as the gate and completion checklist. Reuse exact-commit CI evidence; do not add blanket local packaging, repeated full suites, all-platform asset downloads, or local image pulls after CI has already verified them. Select extra runtime checks by the changed boundary and report material stage changes or failures rather than narrating every poll.
