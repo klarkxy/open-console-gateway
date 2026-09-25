@@ -65,6 +65,7 @@ pub(crate) mod platform;
 pub(crate) mod quota_recovery;
 pub(crate) mod routing_cards;
 pub(crate) mod routing_credentials;
+pub(crate) mod temporary_policy;
 
 /// Local configuration for the one code-owned CPA external integration.
 /// Both credential values stay encrypted outside the short-lived V3 write path.

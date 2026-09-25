@@ -79,6 +79,8 @@ export type DashboardApiV4 =
   | CredentialList
   | RoutingCard
   | RoutingCardList
+  | TemporaryPolicySnapshot
+  | TemporaryPolicyUpdate
   | RoutingCardUpdate
   | AccountControlsDto
   | AccountToggleWriteDto
@@ -315,6 +317,19 @@ export type QuotaRecoveryStatus = "waiting" | "ready" | "probing";
  * Window named by confirmed exhaustion evidence.
  */
 export type QuotaRecoveryWindow = "five_hours" | "week" | "month" | "unknown";
+export type TemporaryRuleMatch =
+  | {
+      kind: "knownCreditsRejection";
+    }
+  | {
+      bodyContains: string[];
+      fields: ErrorFieldMatch[];
+      kind: "httpError";
+      statuses: number[];
+    };
+export type ErrorFieldMatchMode = "exact" | "contains";
+export type TemporaryRuleScope = "credential" | "credentialModel";
+export type TemporaryWaitStatus = "waiting" | "ready" | "probing";
 /**
  * Mapping-error variant name in camelCase.
  */
@@ -1224,6 +1239,62 @@ export interface RoutingCardList {
   credentials: DestinationCredentialDto[];
   destinations: DestinationDto[];
   revision: ControlRevision;
+}
+/**
+ * Persisted node-local rule configuration plus process-local diagnostic waits.
+ */
+export interface TemporaryPolicySnapshot {
+  revision: ControlRevision;
+  rules: TemporaryRule[];
+  waits: TemporaryWait[];
+}
+export interface TemporaryRule {
+  /**
+   * None is global. A destination's same-id row replaces that global rule,
+   * including an explicitly disabled override. No provider-wide propagation.
+   */
+  destinationId: string | null;
+  enabled: boolean;
+  id: string;
+  initialSeconds: number;
+  matcher: TemporaryRuleMatch;
+  maxSeconds: number;
+  scope: TemporaryRuleScope;
+}
+export interface ErrorFieldMatch {
+  mode: ErrorFieldMatchMode;
+  pointer: string;
+  values: string[];
+}
+/**
+ * Local scheduling evidence only. No error body, Key, URL, quota balance or
+ * opaque resource digest is exposed by this read-only diagnostic projection.
+ */
+export interface TemporaryWait {
+  credentialId: string;
+  credentialName: string;
+  destinationId: string;
+  failures: number;
+  id: string;
+  model: string | null;
+  nextProbeInSeconds: number | null;
+  retryNotBefore: string | null;
+  retryUnbounded: boolean;
+  ruleId: string;
+  ruleVersion: number;
+  status: TemporaryWaitStatus;
+}
+/**
+ * Required process-scoped mutation precondition.
+ *
+ * Both fields travel at the top level of every mutation request. The random
+ * process generation prevents a revision captured before restart from being
+ * accepted by a fresh process whose in-memory counter reused the same value.
+ */
+export interface TemporaryPolicyUpdate {
+  expectedRevision: number;
+  processGeneration: number;
+  rules: TemporaryRule[];
 }
 /**
  * The flattened card and row sequence is the complete routing priority order.

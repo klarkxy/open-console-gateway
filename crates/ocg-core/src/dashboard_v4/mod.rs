@@ -28,6 +28,7 @@ mod publication;
 mod routing;
 mod routing_cards;
 mod templates;
+mod temporary_policies;
 pub(crate) mod types;
 
 use axum::extract::State;
@@ -122,6 +123,14 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
         .route(
             "/alias-publication",
             get(publication::get_publication).patch(publication::patch_publication),
+        )
+        .route(
+            "/routing/temporary-policies",
+            get(temporary_policies::get).put(temporary_policies::put),
+        )
+        .route(
+            "/routing/temporary-policies/waits/{id}/reset",
+            post(temporary_policies::reset),
         )
         .route("/routing/explain", get(routing::explain))
         .route(

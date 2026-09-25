@@ -52,6 +52,7 @@ pub(crate) mod routing_runtime;
 pub(crate) mod routing_snapshot;
 pub mod skill_install;
 pub mod state;
+pub(crate) mod temporary_policy;
 pub(crate) mod upstream_limit;
 pub(crate) mod usage_http;
 pub mod usage_sync;

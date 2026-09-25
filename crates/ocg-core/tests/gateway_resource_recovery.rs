@@ -1,4 +1,4 @@
-//! New upstream errors stay request-local; only seeded legacy quota episodes persist.
+//! Local admission waits remain separate from durable quota episodes.
 use axum::http::StatusCode;
 use ocg_core::gateway::provider_adapter::{
     GoatLoopbackRouteGuard, install_goat_loopback_route_for_test,
@@ -37,7 +37,7 @@ async fn succeeds(h: &FallbackHarness) {
 }
 
 #[tokio::test]
-async fn goat_credit_400_is_request_local_and_never_publishes_quota_recovery() {
+async fn goat_credit_400_waits_across_strict_priority_requests_without_quota_recovery() {
     let p = PreparedFallback::routing(
         &[
             ("a", &[reply(400, CREDITS), reply(400, CREDITS)]),
@@ -53,7 +53,7 @@ async fn goat_credit_400_is_request_local_and_never_publishes_quota_recovery() {
     let before = h.account(&ids[0]);
     succeeds(&h).await;
     succeeds(&h).await;
-    assert_eq!(h.call_keys(), ["a", "b", "a", "b"]);
+    assert_eq!(h.call_keys(), ["a", "b", "b"]);
     let after = h.account(&ids[0]);
     assert_eq!(after.cooldown_until, before.cooldown_until);
     assert_eq!(after.auth_error, before.auth_error);

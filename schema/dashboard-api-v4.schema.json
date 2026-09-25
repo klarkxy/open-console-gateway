@@ -2509,6 +2509,36 @@
       ],
       "type": "object"
     },
+    "ErrorFieldMatch": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/ErrorFieldMatchMode"
+        },
+        "pointer": {
+          "type": "string"
+        },
+        "values": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "pointer",
+        "mode",
+        "values"
+      ],
+      "type": "object"
+    },
+    "ErrorFieldMatchMode": {
+      "enum": [
+        "exact",
+        "contains"
+      ],
+      "type": "string"
+    },
     "ExpiryCadenceDto": {
       "description": "How a Plan expires, when it has a cadence.",
       "enum": [
@@ -4557,6 +4587,245 @@
       ],
       "type": "string"
     },
+    "TemporaryPolicySnapshot": {
+      "description": "Persisted node-local rule configuration plus process-local diagnostic waits.",
+      "properties": {
+        "revision": {
+          "$ref": "#/$defs/ControlRevision"
+        },
+        "rules": {
+          "items": {
+            "$ref": "#/$defs/TemporaryRule"
+          },
+          "type": "array"
+        },
+        "waits": {
+          "items": {
+            "$ref": "#/$defs/TemporaryWait"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "revision",
+        "rules",
+        "waits"
+      ],
+      "type": "object"
+    },
+    "TemporaryPolicyUpdate": {
+      "additionalProperties": false,
+      "description": "Required process-scoped mutation precondition.\n\nBoth fields travel at the top level of every mutation request. The random\nprocess generation prevents a revision captured before restart from being\naccepted by a fresh process whose in-memory counter reused the same value.",
+      "properties": {
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rules": {
+          "items": {
+            "$ref": "#/$defs/TemporaryRule"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "rules"
+      ],
+      "type": "object"
+    },
+    "TemporaryRule": {
+      "additionalProperties": false,
+      "properties": {
+        "destinationId": {
+          "description": "None is global. A destination's same-id row replaces that global rule,\nincluding an explicitly disabled override. No provider-wide propagation.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "initialSeconds": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "matcher": {
+          "$ref": "#/$defs/TemporaryRuleMatch"
+        },
+        "maxSeconds": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scope": {
+          "$ref": "#/$defs/TemporaryRuleScope"
+        }
+      },
+      "required": [
+        "id",
+        "destinationId",
+        "enabled",
+        "scope",
+        "matcher",
+        "initialSeconds",
+        "maxSeconds"
+      ],
+      "type": "object"
+    },
+    "TemporaryRuleMatch": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Reuse the sealed adapter's exact classification, not a second parser.",
+          "properties": {
+            "kind": {
+              "const": "knownCreditsRejection",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "bodyContains": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "fields": {
+              "items": {
+                "$ref": "#/$defs/ErrorFieldMatch"
+              },
+              "type": "array"
+            },
+            "kind": {
+              "const": "httpError",
+              "type": "string"
+            },
+            "statuses": {
+              "items": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "statuses",
+            "fields",
+            "bodyContains"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "TemporaryRuleScope": {
+      "enum": [
+        "credential",
+        "credentialModel"
+      ],
+      "type": "string"
+    },
+    "TemporaryWait": {
+      "description": "Local scheduling evidence only. No error body, Key, URL, quota balance or\nopaque resource digest is exposed by this read-only diagnostic projection.",
+      "properties": {
+        "credentialId": {
+          "type": "string"
+        },
+        "credentialName": {
+          "type": "string"
+        },
+        "destinationId": {
+          "type": "string"
+        },
+        "failures": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "id": {
+          "type": "string"
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nextProbeInSeconds": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "retryNotBefore": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "retryUnbounded": {
+          "type": "boolean"
+        },
+        "ruleId": {
+          "type": "string"
+        },
+        "ruleVersion": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "status": {
+          "$ref": "#/$defs/TemporaryWaitStatus"
+        }
+      },
+      "required": [
+        "id",
+        "ruleId",
+        "ruleVersion",
+        "credentialId",
+        "credentialName",
+        "destinationId",
+        "model",
+        "status",
+        "nextProbeInSeconds",
+        "retryNotBefore",
+        "retryUnbounded",
+        "failures"
+      ],
+      "type": "object"
+    },
+    "TemporaryWaitStatus": {
+      "enum": [
+        "waiting",
+        "ready",
+        "probing"
+      ],
+      "type": "string"
+    },
     "UpstreamAccountDto": {
       "additionalProperties": false,
       "properties": {
@@ -4922,6 +5191,12 @@
     },
     {
       "$ref": "#/$defs/RoutingCardList"
+    },
+    {
+      "$ref": "#/$defs/TemporaryPolicySnapshot"
+    },
+    {
+      "$ref": "#/$defs/TemporaryPolicyUpdate"
     },
     {
       "$ref": "#/$defs/RoutingCardUpdate"

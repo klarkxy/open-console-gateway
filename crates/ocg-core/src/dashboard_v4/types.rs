@@ -14,6 +14,7 @@ pub use crate::billing_types::{
     CreditGrantRequest,
 };
 pub use crate::db::routing_cards::RoutingCard;
+pub use crate::temporary_policy::{TemporaryRule, TemporaryWait};
 
 use crate::dashboard_v3::{
     AccountAuthScheme, AccountCredentialKind, AccountUpstreamProtocol, ControlRevision,
@@ -106,6 +107,8 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "CredentialList",
     "RoutingCard",
     "RoutingCardList",
+    "TemporaryPolicySnapshot",
+    "TemporaryPolicyUpdate",
     "RoutingCardUpdate",
     "AccountControlsDto",
     "AccountToggleWriteDto",
@@ -1585,6 +1588,23 @@ pub struct RoutingExplanation {
     pub runtime_only_uncertainty: Vec<RuntimeOnlyUncertainty>,
 }
 
+/// Persisted node-local rule configuration plus process-local diagnostic waits.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TemporaryPolicySnapshot {
+    pub revision: ControlRevision,
+    pub rules: Vec<TemporaryRule>,
+    pub waits: Vec<TemporaryWait>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TemporaryPolicyUpdate {
+    #[serde(flatten)]
+    pub expectation: MutationExpectation,
+    pub rules: Vec<TemporaryRule>,
+}
+
 /// Deterministic JSON Schema catalog for the V4 contract.
 ///
 /// Generator settings match V3: draft 2020-12, serialize-mode for response
@@ -1646,6 +1666,7 @@ pub fn contract_schema() -> Value {
     include_type::<CredentialList>(&mut serialize);
     include_type::<RoutingCard>(&mut serialize);
     include_type::<RoutingCardList>(&mut serialize);
+    include_type::<TemporaryPolicySnapshot>(&mut serialize);
     include_type::<CapabilitiesDto>(&mut serialize);
     include_type::<PlanDto>(&mut serialize);
     include_type::<CatalogModelDto>(&mut serialize);
@@ -1689,6 +1710,7 @@ pub fn contract_schema() -> Value {
     include_type::<DestinationCatalogUpdate>(&mut deserialize);
     include_type::<DestinationModelTestRequest>(&mut deserialize);
     include_type::<RoutingCardUpdate>(&mut deserialize);
+    include_type::<TemporaryPolicyUpdate>(&mut deserialize);
     include_type::<CreditConfigureRequest>(&mut deserialize);
     include_type::<CreditCalibrationRequest>(&mut deserialize);
     include_type::<CreditGrantRequest>(&mut deserialize);
