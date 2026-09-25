@@ -6,10 +6,13 @@ import { useControlPlaneStore } from "./controlPlane.ts";
 import { useDestinationsStore } from "./destinations.ts";
 import { usePlatformAccountsStore } from "./platformAccounts.ts";
 import type { PlatformAccountsView, PlatformLink } from "../api/platform-accounts.ts";
+import { presentDestination } from "../api/destinations.ts";
+import type { DestinationDto } from "../api/generated/dashboard-v4.ts";
 
 interface DeferredCall {
   url: string;
   method: string;
+  body: unknown;
   resolve: (body: object) => void;
   reject: (error: unknown) => void;
 }
@@ -23,6 +26,7 @@ function installDeferredFetch(): DeferredCall[] {
       calls.push({
         url: String(input),
         method: init.method ?? "GET",
+        body: typeof init.body === "string" ? JSON.parse(init.body) : null,
         resolve: (body) => resolvePromise(new Response(
           JSON.stringify(body),
           { headers: { "Content-Type": "application/json" } },
@@ -79,6 +83,24 @@ function listBody(
   links: PlatformLink[] = [],
 ): object {
   return platformView(accountId, revision, processGeneration, links);
+}
+
+function parentDestination(name: string): DestinationDto {
+  return {
+    accountControls: { toggleWrite: "account", configurationOwner: "destination", consoleLink: null, browserProfile: false },
+    adapter: "http",
+    authScheme: "bearer",
+    baseUrl: "https://example.test",
+    brandFamily: null,
+    capabilities: {
+      billingTierRequired: false, discoverableModels: true, externalIntegration: false,
+      identityHeaders: false, managedSignup: false, observer: true,
+      officialBalanceProbe: [], redirectPolicy: "no_follow", testable: true,
+    },
+    catalog: [], enabled: true, id: "dest-parent", legacy: { kind: "platform_parent", id: "parent-1" },
+    maxCredentials: null, modelResolution: "public_only", name,
+    observerCredentialId: null, plan: null, protocols: ["chat_completions"], protocolRoutes: [],
+  };
 }
 
 test("platform accounts store: a stale older-revision snapshot from the same process generation is rejected while a different generation is adopted", () => {
@@ -179,4 +201,72 @@ test("platform accounts store: a committed create reports a destination refresh 
   assert.equal(destinations.loaded, true, "the prior destination snapshot stays rendered");
   assert.deepEqual(destinations.destinations, []);
   assert.deepEqual(destinations.credentials, []);
+});
+
+test("platform rename refreshes the destination revision before a layout write", async () => {
+  setActivePinia(createPinia());
+  useControlPlaneStore().sync({ revision: 7, processGeneration: 99, pricingRevision: "p1" });
+  const calls = installDeferredFetch();
+  const destinations = useDestinationsStore();
+  destinations.commitSnapshot({
+    destinations: [presentDestination(parentDestination("Site"))], credentials: [],
+    cards: [{ id: "card-parent", destination_id: "dest-parent", credential_ids: [] }],
+    expectation: { expectedRevision: 7, processGeneration: 99 },
+  });
+  const store = usePlatformAccountsStore();
+  store.acceptView(platformView("parent-1", 7, 99));
+
+  const save = store.createOrUpdate({ kind: "new_api", name: "Renamed", baseUrl: "https://example.test" }, store.parents[0]!);
+  await waitForCalls(calls, 1);
+  assert.equal(calls[0]!.method, "PUT");
+  calls[0]!.resolve({
+    ...platformView("parent-1", 8, 99),
+    accounts: [{ ...platformView("parent-1", 8, 99).accounts[0]!, name: "Renamed" }],
+  });
+  await waitForCalls(calls, 2);
+  assert.ok(calls[1]!.url.endsWith("/routing/cards"));
+  assert.equal(destinations.expectation?.expectedRevision, 7, "the old revision is not paired with an optimistic rename");
+  calls[1]!.resolve({
+    destinations: [parentDestination("Renamed")], credentials: [],
+    cards: [{ id: "card-parent", destinationId: "dest-parent", credentialIds: [] }],
+    revision: { revision: 8, processGeneration: 99, pricingRevision: "p1" },
+  });
+  assert.equal(await save, "saved");
+  assert.equal(destinations.destinations[0]?.name, "Renamed");
+  assert.deepEqual(destinations.expectation, { expectedRevision: 8, processGeneration: 99 });
+
+  const layout = [{ id: "card-parent", destinationId: "dest-parent", credentialIds: [] }];
+  const reorder = destinations.replaceRoutingCardLayout(layout, destinations.expectation!);
+  await waitForCalls(calls, 3);
+  assert.deepEqual(calls[2]!.body, { cards: layout, expectedRevision: 8, processGeneration: 99 });
+  calls[2]!.resolve({
+    destinations: [parentDestination("Renamed")], credentials: [],
+    cards: [{ id: "card-parent", destinationId: "dest-parent", credentialIds: [] }],
+    revision: { revision: 9, processGeneration: 99, pricingRevision: "p1" },
+  });
+  await reorder;
+});
+
+test("platform edit reports projection refresh failure and retains its last coherent snapshot", async () => {
+  setActivePinia(createPinia());
+  useControlPlaneStore().sync({ revision: 7, processGeneration: 99, pricingRevision: "p1" });
+  const calls = installDeferredFetch();
+  const destinations = useDestinationsStore();
+  destinations.commitSnapshot({
+    destinations: [presentDestination(parentDestination("Site"))], credentials: [], cards: [],
+    expectation: { expectedRevision: 7, processGeneration: 99 },
+  });
+  const store = usePlatformAccountsStore();
+  store.acceptView(platformView("parent-1", 7, 99));
+
+  const save = store.createOrUpdate({ kind: "new_api", name: "Renamed", baseUrl: "https://example.test" }, store.parents[0]!);
+  await waitForCalls(calls, 1);
+  calls[0]!.resolve(platformView("parent-1", 8, 99));
+  await waitForCalls(calls, 2);
+  calls[1]!.reject(new Error("projection unavailable"));
+
+  assert.equal(await save, "saved_refresh_failed");
+  assert.equal(store.destinationRefreshError, "projection unavailable");
+  assert.equal(destinations.destinations[0]?.name, "Site");
+  assert.deepEqual(destinations.expectation, { expectedRevision: 7, processGeneration: 99 });
 });

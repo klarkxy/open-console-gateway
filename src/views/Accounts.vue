@@ -2532,13 +2532,8 @@ async function toggleAccount(id: string) {
   try {
     const updated = await dashboardApi.toggleAccount(id);
     replaceAccount(updated);
-    // The toggle only flips this Key's enablement; commit the accepted value
-    // onto its projected credential in place instead of refetching the whole
-    // destination snapshot. The 409 path below still reloads everything.
-    const credential = destinationsStore.credentialsByLegacyAccountId.get(id);
-    if (credential && credential.enabled !== updated.enabled) {
-      destinationsStore.upsertCredential({ ...credential, enabled: updated.enabled });
-    }
+    const destRefreshed = await refreshDestinationProjection();
+    if (!destRefreshed) notifyDestinationRefreshFailure();
   } catch (e) {
     if (await recoverAccountMutationConflict(e)) return;
     message.error(t("切换失败：{error}", { error: dashboardErrorDetail(e) }));

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createPinia, setActivePinia } from "pinia";
 import { DashboardRequestError } from "../api/dashboard-v3.ts";
+import { dashboardApi } from "../api/dashboard.ts";
 import type {
   DestinationCredentialDto,
   DestinationDto,
@@ -13,6 +14,7 @@ import { useDestinationsStore } from "./destinations.ts";
 interface DeferredCall {
   url: string;
   method: string;
+  body: unknown;
   resolve: (body: object, status?: number) => void;
   reject: (error: unknown) => void;
 }
@@ -26,6 +28,7 @@ function installDeferredFetch(): DeferredCall[] {
       calls.push({
         url: String(input),
         method: init.method ?? "GET",
+        body: typeof init.body === "string" ? JSON.parse(init.body) : null,
         resolve: (body, status = 200) => resolvePromise(new Response(
           JSON.stringify(body),
           { status, headers: { "Content-Type": "application/json" } },
@@ -418,4 +421,47 @@ test("destination cards and pending loads are cleared on logout", async () => {
   const pending = store.load(); await waitForCalls(calls, 1); store.clear();
   resolvePair(calls, 0, "old-dest", "old-account", 2); await pending;
   assert.equal(store.loaded, false); assert.deepEqual(store.cards, []); assert.deepEqual(store.destinations, []);
+});
+
+test("account toggle refreshes the projected Key and revision before a layout write", async () => {
+  setActivePinia(createPinia());
+  useControlPlaneStore().sync({ revision: 7, processGeneration: 99, pricingRevision: "p1" });
+  const calls = installDeferredFetch();
+  const store = useDestinationsStore();
+  const initial = store.load();
+  await waitForCalls(calls, 1);
+  resolvePair(calls, 0, "dest-a", "acc-a", 7);
+  await initial;
+
+  const toggle = dashboardApi.toggleAccount("acc-a");
+  await waitForCalls(calls, 2);
+  assert.ok(calls[1]!.url.endsWith("/accounts/acc-a/toggle"));
+  calls[1]!.resolve({
+    account: { id: "acc-a", name: "Key", enabled: false, customConfig: null, modelCapabilities: [] },
+    revision: { revision: 8, processGeneration: 99, pricingRevision: "p1" },
+  });
+  assert.equal((await toggle).enabled, false);
+
+  const refresh = store.refreshAfterMutation();
+  await waitForCalls(calls, 3);
+  const credential = credentialDto("cred-acc-a", "dest-a", "acc-a", 0);
+  resolvePairWith(calls, 2, destListBody("dest-a", "acc-a", 8), {
+    credentials: [{ ...credential, enabled: false }],
+    revision: { revision: 8, processGeneration: 99, pricingRevision: "p1" },
+  });
+  await refresh;
+  assert.equal(store.credentialsByLegacyAccountId.get("acc-a")?.enabled, false);
+  assert.deepEqual(store.expectation, { expectedRevision: 8, processGeneration: 99 });
+
+  const layout = store.cards.map((card) => ({
+    id: card.id, destinationId: card.destination_id, credentialIds: [...card.credential_ids],
+  }));
+  const save = store.replaceRoutingCardLayout(layout, store.expectation!);
+  await waitForCalls(calls, 4);
+  assert.deepEqual(calls[3]!.body, { cards: layout, expectedRevision: 8, processGeneration: 99 });
+  resolvePairWith(calls, 3, destListBody("dest-a", "acc-a", 9), {
+    credentials: [{ ...credential, enabled: false }],
+    revision: { revision: 9, processGeneration: 99, pricingRevision: "p1" },
+  });
+  await save;
 });

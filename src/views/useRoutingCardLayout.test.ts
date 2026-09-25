@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ref } from "vue";
+import { Fragment, createRenderer, h, nextTick, ref, renderSlot } from "vue";
 import { useRoutingCardLayout, type RoutingCardLayoutDraft } from "./useRoutingCardLayout.ts";
 import type { MutationExpectation } from "../api/generated/dashboard-v3.ts";
 function deferred() { let resolve!: () => void; let reject!: (e: Error) => void; const promise = new Promise<void>((a,b) => { resolve=a; reject=b; }); return { resolve, reject, promise }; }
@@ -63,11 +63,91 @@ test("pointer preview moves rows inside their card and cancels if the saved revi
   const beforeFlush=f.draft.value;
   assert.equal(frame.pending(),1);assert.equal(beforeFlush,null);
   frame.flush();
-  // The preview reorders DOM nodes directly; the reactive draft stays
-  // untouched until the drop commits the final order.
-  assert.equal(f.draft.value,null);
+  assert.deepEqual(f.draft.value?.[0].credentialIds,["a2","a1"]);
   f.revision.value={expectedRevision:5,processGeneration:99};
   assert.equal(f.draft.value,null);assert.equal(handlers.size,0);assert.equal(f.requests.length,0);f.layout.revertActiveArrangement();
+});
+
+type HostNode = { type:string; parent:HostNode|null; children:HostNode[]; props:Record<string,unknown>; text:string };
+function hostNode(type:string, text=""):HostNode { return {type,parent:null,children:[],props:{},text}; }
+function renderRows(f:ReturnType<typeof fixture>) {
+  const renderer=createRenderer<HostNode,HostNode>({
+    createElement:(type)=>hostNode(type),createText:(text)=>hostNode("#text",text),createComment:(text)=>hostNode("#comment",text),
+    setText:(node,text)=>{node.text=text;},setElementText:(node,text)=>{node.children=[];node.text=text;},
+    patchProp:(node,key,_previous,next)=>{node.props[key]=next;},
+    insert:(node,parent,anchor=null)=>{
+      if(node.parent){const index=node.parent.children.indexOf(node);if(index>=0)node.parent.children.splice(index,1);}
+      const index=anchor?parent.children.indexOf(anchor):-1;
+      parent.children.splice(index<0?parent.children.length:index,0,node);node.parent=parent;
+    },
+    remove:(node)=>{if(node.parent){const index=node.parent.children.indexOf(node);if(index>=0)node.parent.children.splice(index,1);node.parent=null;}},
+    parentNode:(node)=>node.parent,
+    nextSibling:(node)=>{if(!node.parent)return null;return node.parent.children[node.parent.children.indexOf(node)+1]??null;},
+  });
+  const Rows={props:["credentials"],render(this:{credentials:string[];$slots:Record<string,unknown>}){
+    return h("div",{class:"destination-rows"},this.credentials.map(id=>
+      h(Fragment,{key:id},[renderSlot(this.$slots as Parameters<typeof renderSlot>[0],"row",{id})])));
+  }};
+  const root=hostNode("root");
+  renderer.createApp({render(){
+    const card=(f.draft.value??f.committedLayout.value)[0];
+    return h(Rows,{credentials:card.credentialIds},{row:({id}:{id:string})=>h("div",{"data-layout-row-id":id},id)});
+  }}).mount(root);
+  const rowIds=()=>{
+    const found:string[]=[];
+    const visit=(node:HostNode)=>{if(typeof node.props["data-layout-row-id"]==="string")found.push(node.props["data-layout-row-id"] as string);node.children.forEach(visit);};
+    visit(root);return found;
+  };
+  return {rowIds};
+}
+
+test("Vue keeps slot fragment rows consistent after preview, save, delete, and cancellation", async()=>{
+  const handlers=new Map<string,(event:PointerEvent)=>unknown>();
+  let targetRow="a2";
+  Object.defineProperty(globalThis,"window",{configurable:true,value:{addEventListener:(name:string,fn:(event:PointerEvent)=>unknown)=>handlers.set(name,fn),removeEventListener:(name:string)=>handlers.delete(name)}});
+  Object.defineProperty(globalThis,"document",{configurable:true,value:{elementFromPoint:()=>({closest:(selector:string)=>selector.includes("account-card")?{dataset:{accountId:"a"}}:{dataset:{credentialId:targetRow}}})}});
+  const frame=stubPreviewFrame();
+  const f=fixture();const rendered=renderRows(f);
+  const handle={setPointerCapture(){},hasPointerCapture(){return true;},releasePointerCapture(){}};
+  const event={isPrimary:true,pointerType:"mouse",button:0,pointerId:1,currentTarget:handle,preventDefault(){},clientX:0,clientY:0} as unknown as PointerEvent;
+  assert.deepEqual(rendered.rowIds(),["a1","a2"]);
+  f.layout.startCredentialDrag(event,"a","a1");handlers.get("pointermove")!(event);frame.flush();await nextTick();
+  assert.deepEqual(rendered.rowIds(),["a2","a1"]);
+  const finishing=handlers.get("pointerup")!(event) as Promise<unknown>;
+  f.committedLayout.value=f.requests[0].layout;
+  f.pending.resolve();await finishing;await nextTick();
+  assert.deepEqual(rendered.rowIds(),["a2","a1"]);
+  f.committedLayout.value=f.committedLayout.value.map(card=>card.id==="a"?{...card,credentialIds:["a2"]}:card);
+  await nextTick();assert.deepEqual(rendered.rowIds(),["a2"]);
+  f.committedLayout.value=f.committedLayout.value.map(card=>card.id==="a"?{...card,credentialIds:["a2","a3"]}:card);
+  await nextTick();
+  targetRow="a3";
+  f.layout.startCredentialDrag(event,"a","a2");handlers.get("pointermove")!(event);frame.flush();await nextTick();
+  assert.deepEqual(rendered.rowIds(),["a3","a2"]);
+  handlers.get("pointercancel")!(event);await nextTick();
+  assert.deepEqual(rendered.rowIds(),["a2","a3"]);
+  f.committedLayout.value=f.committedLayout.value.map(card=>card.id==="a"?{...card,credentialIds:["a3"]}:card);
+  await nextTick();assert.deepEqual(rendered.rowIds(),["a3"]);
+  f.layout.revertActiveArrangement();
+});
+test("card pointer preview reorders the reactive draft and cancellation restores the committed order",()=>{
+  const handlers=new Map<string,(event:PointerEvent)=>unknown>();
+  Object.defineProperty(globalThis,"window",{configurable:true,value:{addEventListener:(name:string,fn:(event:PointerEvent)=>unknown)=>handlers.set(name,fn),removeEventListener:(name:string)=>handlers.delete(name)}});
+  Object.defineProperty(globalThis,"document",{configurable:true,value:{elementFromPoint:()=>({closest:()=>({dataset:{accountId:"b"}})})}});
+  const frame=stubPreviewFrame();
+  const f=fixture();
+  const handle={setPointerCapture(){},hasPointerCapture(){return true;},releasePointerCapture(){}};
+  const event={isPrimary:true,pointerType:"mouse",button:0,pointerId:1,currentTarget:handle,preventDefault(){},clientX:0,clientY:0} as unknown as PointerEvent;
+  f.layout.startCardDrag(event,"a");handlers.get("pointermove")!(event);
+  assert.equal(f.draft.value,null);
+  frame.flush();
+  const preview=f.draft.value as RoutingCardLayoutDraft[] | null;
+  assert.deepEqual(preview?.map(card=>card.id),["empty","b","a"]);
+  handlers.get("pointercancel")!(event);
+  assert.equal(f.draft.value,null);
+  assert.deepEqual(f.committedLayout.value.map(card=>card.id),["a","empty","b"]);
+  assert.equal(f.requests.length,0);
+  f.layout.revertActiveArrangement();
 });
 test("finishing a drag applies a pending pointer preview before saving", async()=>{
   const handlers = new Map<string, (event:PointerEvent)=>unknown>();

@@ -121,10 +121,8 @@ async function connect(): Promise<void> {
     client.clipViewport = false;
     client.focusOnClick = true;
     client.resizeSession = true;
-    // Display-side scaling only: the canvas stays at framebuffer size (1:1
-    // blits), and the CSS below fits it into the shell. scaleViewport would
-    // make the WebView composite a full-size bitmap on every frame.
-    client.scaleViewport = false;
+    // noVNC uses the same scale for rendering and remote pointer coordinates.
+    client.scaleViewport = true;
     client.viewOnly = false;
     client.addEventListener("connect", () => {
       if (rfb !== client) return;
@@ -264,14 +262,6 @@ onUnmounted(disposeRfb);
   height: 100%;
   min-height: 640px;
   overflow: hidden;
-}
-
-/* noVNC sizes the canvas to the framebuffer; contain-scaling keeps the full
-   remote picture visible inside the shell without per-frame compositing. */
-.browser-session__screen :deep(canvas) {
-  max-width: 100%;
-  max-height: 100%;
-  object-fit: contain;
 }
 
 .browser-session__loading {
