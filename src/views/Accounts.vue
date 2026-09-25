@@ -555,6 +555,7 @@ import { createRevalidateGate } from "../domain/revalidate.ts";
 import { linkForAccount } from "../domain/platform-accounts.ts";
 import type { PlatformAccount, PlatformLink } from "../api/platform-accounts.ts";
 import { useAccountUsage, type UsageLimitView } from "../domain/useAccountUsage.ts";
+import { createAccountsAutoRefresh, type AccountRefreshTarget } from "../domain/accounts-auto-refresh.ts";
 import { accountInferenceEndpointUrl, officialBalanceSupported } from "../domain/upstream-balance.ts";
 import { useRoutingCardLayout } from "./useRoutingCardLayout.ts";
 import { MotionConfig, motion } from "motion-v";
@@ -850,6 +851,7 @@ const {
   updateResetsSecondField,
   saveUsage,
   refreshAccountUsage,
+  automaticRefreshTarget,
   loadQuotaLimits,
   loadAccountUsage,
   revalidateAccountUsage,
@@ -2388,10 +2390,11 @@ async function initializeAccounts() {
   const registrationOptions = loadRegistrationOptions();
   await Promise.allSettled([loadProviderCatalog(), loadQuotaLimits()]);
   await loadAccounts();
-  await Promise.allSettled([
-    registrationOptions,
-    providersStore.loadConnections(),
-  ]);
+  await providersStore.loadConnections().catch(() => undefined);
+  // Usage is the primary entry task. Registration/browser capabilities must
+  // not delay the first stale-usage pass or block account configuration.
+  void automaticRefresh.run();
+  await registrationOptions;
 }
 
 async function onFormSave(payload: AccountInput | AccountFormPayload) {
@@ -2743,11 +2746,42 @@ function accountHasActiveCountdown(account: Account): boolean {
   return destination ? credentialHasActiveCooldown(credential, destination, now.value) : false;
 }
 
+let accountsViewActive = false;
+const automaticRefresh = createAccountsAutoRefresh({
+  allowed: () => accountsViewActive && document.visibilityState === "visible"
+    && sessionStore.authenticated && !busy.value && !platformStore.mutating
+    && !sortMode.value && !layoutDraft.value && !showModal.value
+    && !showCredentialModal.value && !showCreateModal.value && !showAddModal.value
+    && !showTransfer.value && !showManagedWizard.value,
+  // Automatic writes advance CAS; keep the next card-layout edit on current tokens.
+  afterRefresh: () => destinationsStore.load().then(() => undefined),
+  targets: () => accounts.value.flatMap((account): AccountRefreshTarget[] => {
+    if (!account.enabled || !accountIsReady(account)) return [];
+    const link = platformStore.linkForAccount(account.id);
+    if (link) {
+      const parent = platformStore.parents.find(row => row.id === link.platformAccountId);
+      if (!parent) return [];
+      return [{
+        id: account.id,
+        binding: `${account.updated_at}\0${parent.id}\0${parent.version}`,
+        observedAt: (link.snapshot?.observedAt ?? 0) * 1000,
+        nextAllowedAt: 0,
+        busy: platformStore.loading || Boolean(platformStore.refreshing[`${parent.id}:${account.id}`])
+          || Boolean(platformStore.refreshing[parent.id]),
+        refresh: async (isCurrent) => {
+          if (isCurrent()) await platformStore.refreshChild(parent.id, account.id);
+        },
+      }];
+    }
+    const target = automaticRefreshTarget(account);
+    return target ? [target] : [];
+  }),
+});
+
 const projectionRefresh = createAccountsProjectionRefresh({
   host: browserAccountsProjectionRefreshHost(),
   isAuthenticated: () => sessionStore.authenticated,
   refresh: async () => {
-    if (!destinationsStore.loaded) return;
     const targets = projectionUsageRevalidationScope({
       accounts: accounts.value.filter(account => accountIsReady(account) && accountHasUsageDisplay(account)),
       idOf: (account) => account.id,
@@ -2762,12 +2796,14 @@ const projectionRefresh = createAccountsProjectionRefresh({
         account => revalidateAccountUsage(account.id),
       ),
     ]);
+    await automaticRefresh.run();
   },
 });
 
 watch(() => sessionStore.authenticated, (ok) => {
   if (!ok) {
     projectionRefresh.onSessionDropped();
+    automaticRefresh.reset();
     fullRefreshGate.reset();
   }
 });
@@ -2788,25 +2824,33 @@ onMounted(() => {
 // destination/card revalidation is a separate 15s timer gated on visibility
 // and auth.
 onActivated(() => {
+  accountsViewActive = true;
   startClock();
   projectionRefresh.activate();
   now.value = Date.now();
   applyAccountAddDeepLink();
   applyCachedAccountDeepLink();
   if (!activatedOnce) { activatedOnce = true; return; }
-  if (!accountListError.value && !catalogError.value && !fullRefreshGate.shouldRun()) return;
+  if (!accountListError.value && !catalogError.value && !fullRefreshGate.shouldRun()) {
+    void automaticRefresh.run();
+    return;
+  }
   fullRefreshGate.record();
   // initializeAccounts already covers destinations and the CPA snapshot.
   void initializeAccounts();
   void platformStore.load().catch(() => undefined);
 });
 onDeactivated(() => {
+  accountsViewActive = false;
+  automaticRefresh.pause();
   stopClock();
   projectionRefresh.deactivate();
   sortMode.value = false;
   cancelArrangement();
 });
 onUnmounted(() => {
+  accountsViewActive = false;
+  automaticRefresh.reset();
   stopClock();
   projectionRefresh.deactivate();
   revertActiveArrangement();

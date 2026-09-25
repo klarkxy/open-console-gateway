@@ -5,6 +5,8 @@ import { effectScope, nextTick, ref } from "vue";
 import { dashboardApi, type Account, type UsageWindow } from "../api/dashboard.ts";
 import { billingApi, type BillingStatus } from "../api/billing.ts";
 import { useBillingStore } from "../stores/billing.ts";
+import { installFetchMock, setupControlPlane } from "../test-helpers/dashboard-v3-fetch.ts";
+import { createAccountsAutoRefresh } from "./accounts-auto-refresh.ts";
 import { useAccountUsage } from "./useAccountUsage.ts";
 
 function status(used: number): BillingStatus {
@@ -157,4 +159,107 @@ test("late usage load cannot recreate disposed editor drafts", async (t) => {
   resolve(status(25));
   await loading;
   assert.deepEqual(f.usage.usageEdits.value, {});
+});
+
+
+test("automatic refresh uses the existing mutation silently without companion discovery", async (t) => {
+  let companions = 0;
+  const f = await fixture(t, async () => { companions++; });
+  let refreshes = 0;
+  f.store.refreshUsage = async () => { refreshes++; return status(10); };
+  f.accounts.value[0]!.enabled = true;
+  f.accounts.value[0]!.setup_step = "ready";
+  // An unsaved calibration defers automatic work.
+  assert.equal(f.usage.automaticRefreshTarget(f.accounts.value[0]!)?.busy, true);
+  f.usage.updateUsageDraft("a", "window_5h", 10);
+  const target = f.usage.automaticRefreshTarget(f.accounts.value[0]!)!;
+  assert.equal(target.busy, false);
+  await target.refresh(() => true);
+  assert.equal(refreshes, 1);
+  assert.equal(f.notifications(), 0);
+  assert.equal(companions, 0);
+  f.accounts.value[0]!.enabled = false;
+  assert.equal(f.usage.automaticRefreshTarget(f.accounts.value[0]!), null);
+});
+
+test("automatic work rechecks visibility after its local read and keeps manual feedback", async (t) => {
+  const f = await fixture(t);
+  f.accounts.value[0]!.enabled = true;
+  f.accounts.value[0]!.setup_step = "ready";
+  f.usage.updateUsageDraft("a", "window_5h", 10);
+  let refreshes = 0;
+  f.store.refreshUsage = async () => { refreshes++; return status(10); };
+  await f.usage.automaticRefreshTarget(f.accounts.value[0]!)!.refresh(() => false);
+  assert.equal(refreshes, 0);
+  await f.usage.refreshAccountUsage("a");
+  assert.equal(refreshes, 1);
+  assert.equal(f.notifications(), 1);
+});
+
+test("automatic refresh failure is quiet and cannot wipe the last good usage", async (t) => {
+  const f = await fixture(t);
+  f.store.refreshUsage = async () => { throw new Error("offline"); };
+  await f.usage.refreshAccountUsage("a", true);
+  assert.equal(f.notifications(), 0);
+  assert.equal(f.usage.getUsage("a").window_5h, 10);
+});
+
+
+test("a serial automatic pass obtains fresh CAS tokens for each real billing mutation", async (t) => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  setupControlPlane(3, 1);
+  let revision = 3;
+  const posts: string[] = [];
+  installFetchMock(req => {
+    const id = req.url.includes("/accounts/a/") ? "a" : "b";
+    const snapshot = status(10);
+    snapshot.accountId = id;
+    snapshot.revision = revision;
+    snapshot.usage!.accountId = id;
+    snapshot.usage!.revision = revision;
+    if (req.method === "POST") {
+      assert.equal(req.body?.expectedRevision, revision);
+      posts.push(id);
+      snapshot.usage!.revision = ++revision;
+      return snapshot.usage!;
+    }
+    assert.ok(req.url.endsWith("/billing"));
+    return snapshot;
+  });
+  const accounts = ref(["a", "b"].map(id => ({
+    id, provider_id: "opencode-go", updated_at: "v1", enabled: true, setup_step: "ready",
+  } as Account)));
+  const scope = effectScope(); t.after(() => scope.stop());
+  const unexpectedToast = () => { assert.fail("automatic pass must be quiet"); };
+  const usage = scope.run(() => useAccountUsage(accounts, ref(Date.now()), ref(null), {
+    message: { success: unexpectedToast, warning: unexpectedToast, error: unexpectedToast },
+  }))!;
+  await Promise.all(accounts.value.map(account => usage.loadAccountUsage(account.id)));
+  const refresh = createAccountsAutoRefresh({
+    allowed: () => true,
+    targets: () => accounts.value.flatMap(account => {
+      const target = usage.automaticRefreshTarget(account); return target ? [target] : [];
+    }),
+  });
+  await refresh.run();
+  assert.deepEqual(posts, ["a", "b"]);
+  assert.equal(useBillingStore().byId.b?.status?.revision, 5);
+});
+
+
+test("declared support retries a missing billing snapshot before any upstream refresh", async (t) => {
+  const f = await fixture(t);
+  f.accounts.value[0] = { ...f.accounts.value[0]!, provider_id: "opencode", enabled: true, setup_step: "ready" };
+  f.store.remove("a");
+  delete f.usage.usageEdits.value.a;
+  let refreshes = 0;
+  f.store.refreshUsage = async () => { refreshes++; return status(10); };
+  billingApi.status = async () => { throw new Error("temporary local read failure"); };
+  await f.usage.automaticRefreshTarget(f.accounts.value[0]!)!.refresh(() => true);
+  assert.equal(refreshes, 0);
+  billingApi.status = async () => status(10);
+  await f.usage.automaticRefreshTarget(f.accounts.value[0]!)!.refresh(() => true);
+  assert.equal(refreshes, 1);
+  assert.equal(f.notifications(), 0);
 });

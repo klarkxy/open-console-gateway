@@ -44,6 +44,7 @@ export const usePlatformAccountsStore = defineStore("platformAccounts", () => {
   // Overlapping loads resolve out of order; only the latest operation commits
   // loading/error presentation. Mirrors the load guard in stores/accounts.ts.
   let loadGeneration = 0;
+  let sessionEpoch = 0;
 
   const parents = computed(() => view.value?.accounts ?? []);
   const links = computed(() => view.value?.links ?? []);
@@ -101,8 +102,10 @@ export const usePlatformAccountsStore = defineStore("platformAccounts", () => {
 
   /** Revision-conflict recovery: tokens already refreshed by the CAS layer. */
   async function recoverConflict(): Promise<"conflict"> {
+    const session = sessionEpoch;
     try {
-      acceptView(await platformAccountsApi.list());
+      const next = await platformAccountsApi.list();
+      if (session === sessionEpoch) acceptView(next);
     } catch {
       // The next explicit action retries; the caller still surfaces conflict.
     }
@@ -191,15 +194,19 @@ export const usePlatformAccountsStore = defineStore("platformAccounts", () => {
   async function refreshChild(parentId: string, accountId: string): Promise<PlatformWriteOutcome> {
     const key = `${parentId}:${accountId}`;
     if (refreshing.value[key]) return "error";
+    const session = sessionEpoch;
     refreshing.value[key] = true;
     try {
-      acceptView(await platformAccountsApi.refresh(parentId, accountId));
+      const next = await platformAccountsApi.refresh(parentId, accountId);
+      if (session !== sessionEpoch) return "error";
+      acceptView(next);
       return "ok";
     } catch (e) {
+      if (session !== sessionEpoch) return "error";
       if (isRevisionConflict(e)) return recoverConflict();
       throw e;
     } finally {
-      refreshing.value[key] = false;
+      if (session === sessionEpoch) refreshing.value[key] = false;
     }
   }
 
@@ -287,6 +294,7 @@ export const usePlatformAccountsStore = defineStore("platformAccounts", () => {
 
   /** Drop the cached view on 401 / logout so the next session reloads fresh. */
   function clear(): void {
+    sessionEpoch += 1;
     loadGeneration += 1;
     view.value = null;
     loaded.value = false;

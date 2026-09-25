@@ -36,6 +36,7 @@ import { findPlanDefinition } from "./plans.ts";
 import { t } from "../i18n/index.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
 import { mapWithConcurrency } from "../utils/async.ts";
+import { ACCOUNT_AUTO_REFRESH_MS, billingObservedAt, timestampMs, type AccountRefreshTarget } from "./accounts-auto-refresh.ts";
 
 export type AccountUsageEdits = Record<UsageKey, UsageEditState>;
 
@@ -181,7 +182,8 @@ export function useAccountUsage(
     refresh: boolean;
     manual: boolean;
   } {
-    const status = billing.slotFor(account.id).value?.status;
+    const slot = billing.slotFor(account.id).value;
+    const status = slot?.boundVersion === bindingFor(account) ? slot.status : null;
     if (status) {
       return {
         providerWindows: Boolean(status.usage) || status.model === "quota",
@@ -380,7 +382,7 @@ export function useAccountUsage(
     );
   }
 
-  async function refreshAccountUsage(accountId: string): Promise<void> {
+  async function refreshAccountUsage(accountId: string, automatic = false): Promise<void> {
     const account = accounts.value.find((item) => item.id === accountId);
     if (!account || !usageCapabilities(account).refresh) return;
     const isCurrent = requestStillCurrent(account);
@@ -403,30 +405,60 @@ export function useAccountUsage(
       if (usageCapabilities(account).manual) {
         syncUsageEdits(accountId, getUsage(accountId));
       }
-      message.success(t("成功"));
+      if (!automatic) message.success(t("成功"));
     } catch (error) {
       if (!isCurrent()) return;
       if (error instanceof DashboardRequestError && error.status === 429) {
-        const nextAllowed = error.nextAllowedAt;
+        const nextAllowed = error.nextAllowedAt ?? (error.retryAfterSeconds
+          ? new Date(Date.now() + error.retryAfterSeconds * 1000).toISOString() : null);
         if (nextAllowed) {
           patchAccountUsageSync(accountId, { usage_sync_next_allowed_at: nextAllowed });
         }
         const seconds = error.retryAfterSeconds;
-        message.warning(
+        if (!automatic) message.warning(
           seconds
             ? t("稍后再试（约 {seconds} 秒）", { seconds: String(seconds) })
             : t("刷新额度失败：{error}", { error: dashboardErrorDetail(error) }),
         );
-      } else {
+      } else if (!automatic) {
         message.error(t("刷新额度失败：{error}", { error: dashboardErrorDetail(error) }));
       }
     } finally {
       try {
-        if (isCurrent()) await options?.afterUsageRefresh?.(accountId, isCurrent);
+        if (!automatic && isCurrent()) await options?.afterUsageRefresh?.(accountId, isCurrent);
       } catch {
         // Companion catalog refresh reports its own failure.
       }
     }
+  }
+
+  function automaticRefreshTarget(account: Account): AccountRefreshTarget | null {
+    const slot = billing.slotFor(account.id).value;
+    if (!account.enabled || !accountIsReady(account) || !usageCapabilities(account).refresh) return null;
+    const binding = bindingFor(account);
+    const status = slot?.boundVersion === binding ? slot.status : null;
+    return {
+      id: account.id,
+      binding,
+      observedAt: Math.max(billingObservedAt(status), timestampMs(account.usage_sync_last_success_at)),
+      nextAllowedAt: Math.max(
+        timestampMs(status?.usage?.syncState?.nextEligibleAt),
+        timestampMs(account.usage_sync_next_allowed_at),
+      ),
+      busy: Boolean(slot?.loading || slot?.mutating)
+        || Object.values(usageEdits.value[account.id] ?? {}).some(edit => edit.saving || edit.resets_dirty || edit.draft !== edit.saved),
+      refresh: async (allowed) => {
+        const isCurrent = requestStillCurrent(account);
+        // Every preceding refresh can advance global CAS. Read this row again
+        // immediately before its mutation, preserving the existing CAS contract.
+        await revalidateAccountUsage(account.id);
+        if (!allowed() || !isCurrent()) return;
+        const latest = automaticRefreshTarget(account);
+        if (!latest || latest.busy || billing.slotFor(account.id).value?.error) return;
+        if (latest.nextAllowedAt > Date.now() || latest.observedAt + ACCOUNT_AUTO_REFRESH_MS > Date.now()) return;
+        await refreshAccountUsage(account.id, true);
+      },
+    };
   }
 
   async function loadQuotaLimits(): Promise<boolean> {
@@ -496,6 +528,7 @@ export function useAccountUsage(
     updateResetsSecondField,
     saveUsage,
     refreshAccountUsage,
+    automaticRefreshTarget,
     loadQuotaLimits,
     loadAccountUsage,
     revalidateAccountUsage,

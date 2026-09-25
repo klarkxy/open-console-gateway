@@ -270,3 +270,19 @@ test("platform edit reports projection refresh failure and retains its last cohe
   assert.equal(destinations.destinations[0]?.name, "Site");
   assert.deepEqual(destinations.expectation, { expectedRevision: 7, processGeneration: 99 });
 });
+
+
+test("late platform child refresh cannot repopulate a logged-out store", async () => {
+  setActivePinia(createPinia());
+  const calls = installDeferredFetch();
+  useControlPlaneStore().sync({ revision: 1, processGeneration: 1 });
+  const store = usePlatformAccountsStore();
+  store.acceptView(platformView("parent", 1, 1));
+  const pending = store.refreshChild("parent", "child");
+  await waitForCalls(calls, 1);
+  store.clear();
+  calls[0]!.resolve(platformView("parent", 2, 1));
+  assert.equal(await pending, "error");
+  assert.equal(store.view, null);
+  assert.deepEqual(store.refreshing, {});
+});
