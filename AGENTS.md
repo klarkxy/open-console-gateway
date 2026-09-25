@@ -10,6 +10,7 @@ Open Console Gateway is a local multi-Plan console: Rust workspace, Vue 3 dashbo
 - Changes to user-visible facts update paired English and `.zh-CN.md` guides. Keep capability tables in `docs/user/`, not the root README.
 - Rust tests belong in sibling `tests.rs` modules. Test behavior, not source text, documentation wording, or workflow spelling. Frontend tests likewise never assert literal UI copy: domain functions return semantic codes, copy mapping lives in exported `*_KEYS` tables (`Record<Code, MessageKey>`), and views compose text with `t()`.
 - Frontend server state has a single owner: the Pinia stores in `src/stores/`. Loads are generation-guarded so stale responses never commit, mutations commit their results into the store in place, revalidations keep current content rendered (loading gates show skeletons only before the first successful load), and `dropSession` wipes cached resources on logout/401. Views keep only UI-local state (modals, drafts, filters, optimistic layers) and must not copy store data into local refs; shared presentation logic stays pure in `src/domain/`.
+- New components and pages prefer Reka UI primitives with Tailwind CSS v4 utilities; existing Naive UI usage stays as-is. The token bridge is `src/styles/tailwind.css` (theme + utilities only, never preflight), and overlay components are wrapped once under `src/components/ocg/`.
 
 ## Read for the affected task
 

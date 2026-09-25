@@ -27,3 +27,12 @@
 在浏览器中检查 1440×900、1280×720、768×1024、390×844 的浅色和暗色。还要检查所有彩色主题、中英文长标签、有数据和空数据、加载/重试、长表单滚动、Tab/Escape/焦点恢复、Ctrl/Command K 选择与取消、折叠状态持久化，以及减少动态效果。确认复制使用当前 Key，轮换仍需确认，外观检查不会触发上游测试。
 
 Tauri 另行检查原生窗口缩放、125%/150% 系统缩放、中文输入法和剪贴板权限。记录被测提交，把单元测试、构建、浏览器和桌面结果分开报告。使用模拟数据的截图必须说明是测试样例，不得当成真实余额或服务状态。
+
+## 组件技术栈方向（Reka UI + Tailwind CSS v4）
+
+新组件和新页面优先使用 **Reka UI 原语 + Tailwind CSS v4 utilities**；存量 Naive UI 不主动重写。规则如下：
+
+- `src/styles/tailwind.css` 是 token 桥：只引入 `tailwindcss/theme.css` 与 `tailwindcss/utilities.css`，并在 `@theme` 块中把运行时 `--ocg-*` 变量映射为 Tailwind 主题键（`--color-*`、`--font-mono`、`--radius-sm/md/lg`）。取值必须保持 `var()` 引用，utilities 才能自动跟随全部 7 套运行时主题。Tailwind 只会输出实际用到的主题变量，未用的桥接键不出现在产物中属正常现象。
+- **绝不引入 Tailwind 的 preflight**——它对所有元素的 margin/padding 全局重置会摧毁 Naive UI 与现有样式。由于没有 preflight，`<button>` 等表单元素需要显式补上 `border-0 bg-transparent [font:inherit]` 之类的 utilities。
+- 浮层类组件（tooltip、popover，以及后续的菜单/对话框）统一在 `src/components/ocg/` 封装一次（`OcgTooltip.vue`、`OcgPopover.vue`），业务侧只使用封装件；浮层固定 `z-[2000]`，与 Naive UI 动态分配的浮层层级共存。浮层进出动画共用 `.ocg-overlay-*` 过渡类（opacity + 2px `translate`，`var(--ocg-motion-fast) var(--ocg-ease)`）；使用 `translate` 而非 `transform`，避免与 floating-ui 定位冲突。
+- 示范迁移：`src/views/Dashboard.vue` 的接入中心（tooltip 与 Key 切换 popover）。

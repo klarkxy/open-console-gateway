@@ -29,16 +29,20 @@
   "dependencies": {
     "@novnc/novnc": "^1.7.0",
     "@vicons/antd": "^0.13.0",
+    "motion-v": "^2.4.4",
     "naive-ui": "^2.44.1",
     "pinia": "^4.0.3",
+    "reka-ui": "^2.10.5",
     "vue": "^3",
     "vue-router": "^4.6.4"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
     "@tauri-apps/cli": "^2.11.4",
     "@types/node": "^20",
     "@vitejs/plugin-vue": "^5",
     "json-schema-to-typescript": "15.0.4",
+    "tailwindcss": "^4.3.3",
     "typescript": "^5",
     "vite": "^5",
     "vue-tsc": "^2"

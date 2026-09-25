@@ -1,5 +1,6 @@
 import { defineConfig } from "vite";
 import vue from "@vitejs/plugin-vue";
+import tailwindcss from "@tailwindcss/vite";
 import path from "path";
 
 const gatewayPort = (() => {
@@ -15,7 +16,7 @@ const gatewayPort = (() => {
 
 export default defineConfig({
   base: "/dashboard/",
-  plugins: [vue()],
+  plugins: [vue(), tailwindcss()],
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
@@ -59,6 +60,10 @@ export default defineConfig({
           // the dynamic imports in src/i18n; do not merge them back into one.
           if (id.includes("/node_modules/@vicons/")) return "icons";
           if (id.includes("/node_modules/vue/") || id.includes("/node_modules/@vue/")) return "vue";
+          // naive-ui is intentionally NOT grouped: the entry (App.vue) only
+          // uses the shell components, and a forced single chunk made every
+          // first screen preload the entire library (~1.7 MB). Letting Rollup
+          // follow the import graph splits it across the lazy view chunks.
         },
       },
     },

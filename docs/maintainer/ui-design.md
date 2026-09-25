@@ -27,3 +27,12 @@ Run `pnpm run test:web`, `pnpm run build:web`, and `pnpm run design:lint`. Unit 
 In a browser, inspect 1440×900, 1280×720, 768×1024 and 390×844 in light/dark mode. Also inspect all colored themes, Chinese/English long labels, non-empty and empty data, loading/retry, long form scrolling, tab/escape/focus restoration, Ctrl/Command K selection and cancellation, collapsed-sidebar persistence and reduced motion. Ensure copying a Key uses the selected credential, rotating it still confirms, and visual inspection does not invoke an upstream probe.
 
 For Tauri, separately check native window resizing, 125%/150% scaling, IME input and clipboard permissions. Record the exact tested commit and distinguish unit, build, browser and desktop results. Screenshots from mocked data must be labeled as fixtures rather than real account balances or service health.
+
+## Component stack direction (Reka UI + Tailwind CSS v4)
+
+New components and new pages prefer **Reka UI primitives styled with Tailwind CSS v4 utilities**; existing Naive UI usage stays and is not proactively rewritten. The rules:
+
+- `src/styles/tailwind.css` is the token bridge: it imports only `tailwindcss/theme.css` and `tailwindcss/utilities.css`, and its `@theme` block maps the runtime `--ocg-*` variables to Tailwind theme keys (`--color-*`, `--font-mono`, `--radius-sm/md/lg`). Values must stay `var()` references so utilities follow all seven runtime themes. Tailwind emits only the theme variables actually used, so unused bridge keys are normal.
+- **Never import Tailwind's preflight** — its global margin/padding reset would break Naive UI and the existing stylesheets. Because preflight is off, `<button>`/form elements need explicit `border-0 bg-transparent [font:inherit]`-style utilities.
+- Overlay-style components (tooltip, popover, and future menus/dialogs) are wrapped once under `src/components/ocg/` (`OcgTooltip.vue`, `OcgPopover.vue`) and consumed through those wrappers, with a fixed `z-[2000]` alongside Naive UI's dynamically allocated overlay z-indices. Overlay enter/leave uses the shared `.ocg-overlay-*` transition classes (opacity + 2px `translate`, `var(--ocg-motion-fast) var(--ocg-ease)`); `translate` is used instead of `transform` so it never fights floating-ui positioning.
+- Reference migration: the Dashboard connection center (tooltips + Key switcher popover) in `src/views/Dashboard.vue`.

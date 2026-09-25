@@ -1,0 +1,49 @@
+/* New UI stack: Tailwind CSS v4 utilities without preflight.
+ * Preflight is intentionally NOT imported — it would reset margins/padding
+ * globally and break naive-ui plus the existing stylesheets.
+ * The @theme block bridges the runtime theme variables (applyTheme rewrites
+ * --ocg-* on :root), so every value must stay a var() reference: utilities
+ * then follow all seven runtime themes automatically.
+ */
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);
+
+@theme {
+  --color-canvas: var(--ocg-canvas);
+  --color-surface: var(--ocg-surface);
+  --color-surface-raised: var(--ocg-surface-raised);
+  --color-surface-sunken: var(--ocg-surface-sunken);
+  --color-ink: var(--ocg-ink);
+  --color-muted: var(--ocg-muted);
+  --color-subtle: var(--ocg-subtle);
+  --color-accent: var(--ocg-accent);
+  --color-primary: var(--ocg-primary);
+  --color-primary-hover: var(--ocg-primary-hover);
+  --color-primary-soft: var(--ocg-primary-soft);
+  --color-on-primary: var(--ocg-on-primary);
+  --color-success: var(--ocg-success);
+  --color-warning: var(--ocg-warning);
+  --color-error: var(--ocg-error);
+  --color-border: var(--ocg-border);
+  --color-divider: var(--ocg-divider);
+
+  --font-mono: var(--ocg-font-mono);
+
+  /* Intentionally override Tailwind's default radii so rounded-* utilities
+   * resolve to the project design tokens. */
+  --radius-sm: var(--ocg-radius-sm);
+  --radius-md: var(--ocg-radius-md);
+  --radius-lg: var(--ocg-radius-lg);
+}
+
+/* Shared enter/leave transition for reka-ui overlays (OcgTooltip/OcgPopover).
+ * `translate` (not `transform`) stays clear of floating-ui's positioning. */
+.ocg-overlay-enter-active,
+.ocg-overlay-leave-active {
+  transition: opacity var(--ocg-motion-fast) var(--ocg-ease), translate var(--ocg-motion-fast) var(--ocg-ease);
+}
+.ocg-overlay-enter-from,
+.ocg-overlay-leave-to {
+  opacity: 0;
+  translate: 0 -2px;
+}

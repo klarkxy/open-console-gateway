@@ -4,6 +4,7 @@ import App from "./App.vue";
 import "./styles/main.css";
 import { createAppRouter, prefetchAppViews } from "./router.ts";
 import { convertLegacyAppLocation } from "./views/app-navigation.ts";
+import "./styles/tailwind.css";
 import { applyTheme, getThemeStorage, getThemeTokens, readTheme, resolveTheme } from "./theme";
 
 // Theme and language resolve before mount so the first paint already uses the
