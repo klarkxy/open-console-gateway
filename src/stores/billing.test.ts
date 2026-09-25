@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createPinia, setActivePinia } from "pinia";
+import { effectScope, watch } from "vue";
 import { installWindowDashboard } from "../test-helpers/dashboard-v3-fetch.ts";
 import { useControlPlaneStore } from "./controlPlane.ts";
 import { useBillingStore } from "./billing.ts";
@@ -98,6 +99,53 @@ function billingStatus(overrides: Partial<BillingStatus> = {}): BillingStatus {
     ...overrides,
   };
 }
+
+test("a per-account slot update does not invalidate another account's selector", async () => {
+  setActivePinia(createPinia());
+  const store = useBillingStore();
+  const original = billingApi.status;
+  try {
+    billingApi.status = async () => billingStatus();
+    await store.load("acc-1", "v1");
+    await store.load("acc-2", "v1");
+  } finally {
+    billingApi.status = original;
+  }
+
+  const scope = effectScope();
+  let acc2Runs = 0;
+  scope.run(() => {
+    const slot = store.slotFor("acc-2");
+    watch(slot, () => { acc2Runs += 1; }, { flush: "sync" });
+  });
+  const before = store.slotFor("acc-2").value;
+
+  const calls = installDeferredFetch();
+  const pending = store.load("acc-1", "v2");
+  await waitForCalls(calls, 1);
+  calls[0]!.resolve(billingStatus({ revision: 5 }));
+  await pending;
+
+  assert.equal(acc2Runs, 0);
+  assert.equal(store.slotFor("acc-2").value, before);
+  assert.equal(store.slotFor("acc-1").value?.boundVersion, "v2");
+  assert.equal(store.byId["acc-1"]?.status?.revision, 5);
+  scope.stop();
+});
+
+test("slotFor tracks a slot added after the selector was created", async () => {
+  setActivePinia(createPinia());
+  const store = useBillingStore();
+  const late = store.slotFor("acc-late");
+  const read = () => late.value;
+  assert.equal(read(), undefined);
+  const calls = installDeferredFetch();
+  const pending = store.load("acc-late", "v1");
+  await waitForCalls(calls, 1);
+  calls[0]!.resolve(billingStatus());
+  await pending;
+  assert.equal(read()?.loaded, true);
+});
 
 test("a stale load cannot overwrite a newer snapshot, mutation, or cleared session", async () => {
   setActivePinia(createPinia());

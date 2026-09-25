@@ -136,6 +136,22 @@ export const usePlatformAccountsStore = defineStore("platformAccounts", () => {
           baseUrl: payload.baseUrl,
           ...(payload.userCredential !== undefined ? { userCredential: payload.userCredential } : {}),
         }));
+      if (editing) {
+        // An update renames the parent (and maybe rotates its credential);
+        // the projection maps the parent name straight onto its destination
+        // row, so commit that one field in place instead of refetching the
+        // whole destination snapshot. Creates introduce new projection rows
+        // and still refetch below.
+        const destinations = useDestinationsStore();
+        const row = destinations.destinations.find((destination) => (
+          destination.legacy.kind === "platform_parent" && destination.legacy.id === editing.id
+        ));
+        if (row && row.name !== payload.name) {
+          destinations.upsertDestination({ ...row, name: payload.name });
+        }
+        destinationRefreshError.value = "";
+        return "saved";
+      }
       try {
         await useDestinationsStore().refreshAfterMutation();
         destinationRefreshError.value = "";

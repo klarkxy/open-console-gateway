@@ -1,4 +1,5 @@
-import { computed, ref } from "vue";
+import { computed, ref, shallowRef } from "vue";
+import type { ComputedRef, ShallowRef } from "vue";
 import { defineStore } from "pinia";
 import { dashboardApi, type PricingLimits, type UsageWindow } from "../api/dashboard.ts";
 import { dashboardV3, isRevisionConflict, type WithoutExpectation } from "../api/dashboard-v3.ts";
@@ -65,31 +66,55 @@ function clientErrorFrom(error: unknown): BillingClientError {
  * plus endpoint. Evidence is kept only for the same binding.
  */
 export const useBillingStore = defineStore("billing", () => {
-  const slots = ref<Record<string, BillingSlot>>({});
+  // Each account/provider gets its own shallow ref so a begin/write on one
+  // key only invalidates subscribers of that key. Slots are always replaced
+  // wholesale, never mutated in place, so shallow refs are sufficient.
+  const slots = new Map<string, ShallowRef<BillingSlot>>();
+  // Membership version: byId and the per-key selectors track it so a key
+  // add/remove invalidates them; value updates flow through each slot ref.
+  const slotIndex = ref(0);
   const sessionEpoch = ref(0);
   const pricingLimits = ref<PricingLimits | null>(null);
   const pricingLoading = ref(false);
   const pricingError = ref("");
   let pricingGeneration = 0;
-  const priceSlots = ref<Record<string, BillingPriceSlot>>({});
+  const priceSlots = new Map<string, ShallowRef<BillingPriceSlot>>();
+  const priceSlotIndex = ref(0);
+
+  function putSlot(accountId: string, slot: BillingSlot): void {
+    const existing = slots.get(accountId);
+    if (existing) {
+      existing.value = slot;
+      return;
+    }
+    slots.set(accountId, shallowRef(slot));
+    slotIndex.value += 1;
+  }
+
+  function putPriceSlot(providerId: string, slot: BillingPriceSlot): void {
+    const existing = priceSlots.get(providerId);
+    if (existing) {
+      existing.value = slot;
+      return;
+    }
+    priceSlots.set(providerId, shallowRef(slot));
+    priceSlotIndex.value += 1;
+  }
 
   function begin(accountId: string, binding: string, flags: BeginFlags): RequestToken {
-    const current = slots.value[accountId];
+    const current = slots.get(accountId)?.value;
     const sameBinding = current !== undefined && current.boundVersion === binding;
     const generation = (current?.generation ?? 0) + 1;
-    slots.value = {
-      ...slots.value,
-      [accountId]: {
-        status: sameBinding ? current.status : null,
-        loaded: sameBinding ? current.loaded : false,
-        loading: flags.loading,
-        mutating: flags.mutating,
-        error: sameBinding && !flags.clearError ? current.error : null,
-        boundVersion: binding,
-        generation,
-        resyncBeforeMutate: sameBinding ? current.resyncBeforeMutate : false,
-      },
-    };
+    putSlot(accountId, {
+      status: sameBinding ? current.status : null,
+      loaded: sameBinding ? current.loaded : false,
+      loading: flags.loading,
+      mutating: flags.mutating,
+      error: sameBinding && !flags.clearError ? current.error : null,
+      boundVersion: binding,
+      generation,
+      resyncBeforeMutate: sameBinding ? current.resyncBeforeMutate : false,
+    });
     return {
       session: sessionEpoch.value,
       accountId,
@@ -100,16 +125,16 @@ export const useBillingStore = defineStore("billing", () => {
 
   function owns(token: RequestToken): boolean {
     if (token.session !== sessionEpoch.value) return false;
-    const slot = slots.value[token.accountId];
+    const slot = slots.get(token.accountId)?.value;
     if (!slot) return false;
     if (slot.boundVersion !== token.accountVersion) return false;
     return slot.generation === token.generation;
   }
 
   function write(accountId: string, patch: Partial<BillingSlot>): void {
-    const current = slots.value[accountId];
+    const current = slots.get(accountId);
     if (!current) return;
-    slots.value = { ...slots.value, [accountId]: { ...current, ...patch } };
+    current.value = { ...current.value, ...patch };
   }
 
   function applyStatus(accountId: string, status: BillingStatus): void {
@@ -122,7 +147,7 @@ export const useBillingStore = defineStore("billing", () => {
   }
 
   function expectationFor(accountId: string): MutationExpectation | undefined {
-    const status = slots.value[accountId]?.status;
+    const status = slots.get(accountId)?.value.status;
     if (!status) return undefined;
     return {
       expectedRevision: status.revision,
@@ -149,7 +174,7 @@ export const useBillingStore = defineStore("billing", () => {
 
   async function resyncIfNeeded(token: RequestToken, accountId: string): Promise<boolean> {
     if (!owns(token)) return false;
-    if (!slots.value[accountId]?.resyncBeforeMutate) return true;
+    if (!slots.get(accountId)?.value.resyncBeforeMutate) return true;
     try {
       const status = await billingApi.status(accountId);
       if (!owns(token)) return false;
@@ -212,8 +237,8 @@ export const useBillingStore = defineStore("billing", () => {
         (expectation) => dashboardV3.refreshProviderUsage(accountId, expectation),
         expectationFor(accountId),
       );
-      if (!owns(token)) return slots.value[accountId]?.status ?? null;
-      const current = slots.value[accountId]?.status;
+      if (!owns(token)) return slots.get(accountId)?.value.status ?? null;
+      const current = slots.get(accountId)?.value.status;
       if (current) {
         const status: BillingStatus = {
           ...current,
@@ -246,7 +271,7 @@ export const useBillingStore = defineStore("billing", () => {
       if (!await resyncIfNeeded(token, accountId)) {
         throw new Error("billing is not current");
       }
-      const current = slots.value[accountId]?.status;
+      const current = slots.get(accountId)?.value.status;
       const control = useControlPlaneStore();
       if (!control.hasTokens()) await control.refresh();
       if (current && cashRefreshKind(current) === "official_balance") {
@@ -254,8 +279,8 @@ export const useBillingStore = defineStore("billing", () => {
           accountId,
           expectationFor(accountId) ?? control.expectation(),
         );
-        if (!owns(token)) return slots.value[accountId]?.status ?? null;
-        const latest = slots.value[accountId]?.status;
+        if (!owns(token)) return slots.get(accountId)?.value.status ?? null;
+        const latest = slots.get(accountId)?.value.status;
         if (!latest) {
           const status = await billingApi.status(accountId);
           if (!owns(token)) return status;
@@ -275,8 +300,8 @@ export const useBillingStore = defineStore("billing", () => {
         (expectation) => dashboardV3.refreshProviderUsage(accountId, expectation),
         expectationFor(accountId),
       );
-      if (!owns(token)) return slots.value[accountId]?.status ?? null;
-      const latest = slots.value[accountId]?.status;
+      if (!owns(token)) return slots.get(accountId)?.value.status ?? null;
+      const latest = slots.get(accountId)?.value.status;
       if (latest) {
         const status: BillingStatus = {
           ...latest,
@@ -398,7 +423,7 @@ export const useBillingStore = defineStore("billing", () => {
     updatedAt: string,
   ): void {
     const token = begin(accountId, binding, { loading: false, mutating: false, clearError: false });
-    const current = slots.value[accountId]?.status;
+    const current = slots.get(accountId)?.value.status;
     if (!owns(token) || !current?.usage) return;
     applyStatus(accountId, {
       ...current,
@@ -411,34 +436,31 @@ export const useBillingStore = defineStore("billing", () => {
     providerId: string;
     generation: number;
   } {
-    const current = priceSlots.value[providerId];
+    const current = priceSlots.get(providerId)?.value;
     const generation = (current?.generation ?? 0) + 1;
-    priceSlots.value = {
-      ...priceSlots.value,
-      [providerId]: {
-        prices: current?.prices ?? null,
-        loaded: current?.loaded ?? false,
-        loading: flags.loading,
-        mutating: flags.mutating,
-        error: current?.error ?? null,
-        boundVersion: providerId,
-        generation,
-      },
-    };
+    putPriceSlot(providerId, {
+      prices: current?.prices ?? null,
+      loaded: current?.loaded ?? false,
+      loading: flags.loading,
+      mutating: flags.mutating,
+      error: current?.error ?? null,
+      boundVersion: providerId,
+      generation,
+    });
     return { session: sessionEpoch.value, providerId, generation };
   }
 
   function ownsPrices(token: { session: number; providerId: string; generation: number }): boolean {
     if (token.session !== sessionEpoch.value) return false;
-    const slot = priceSlots.value[token.providerId];
+    const slot = priceSlots.get(token.providerId)?.value;
     if (!slot) return false;
     return slot.boundVersion === token.providerId && slot.generation === token.generation;
   }
 
   function writePrices(providerId: string, patch: Partial<BillingPriceSlot>): void {
-    const current = priceSlots.value[providerId];
+    const current = priceSlots.get(providerId);
     if (!current) return;
-    priceSlots.value = { ...priceSlots.value, [providerId]: { ...current, ...patch } };
+    current.value = { ...current.value, ...patch };
   }
 
   async function loadPrices(providerId: string): Promise<void> {
@@ -457,7 +479,7 @@ export const useBillingStore = defineStore("billing", () => {
 
   async function refreshPrices(providerId: string): Promise<void> {
     const token = beginPrices(providerId, { loading: false, mutating: true });
-    const snapshot = priceSlots.value[providerId]?.prices;
+    const snapshot = priceSlots.get(providerId)?.value.prices;
     try {
       const control = useControlPlaneStore();
       if (!control.hasTokens()) await control.refresh();
@@ -498,30 +520,55 @@ export const useBillingStore = defineStore("billing", () => {
   }
 
   function remove(accountId: string): void {
-    const current = slots.value[accountId];
-    if (!current) return;
-    const next = { ...slots.value };
-    delete next[accountId];
-    slots.value = next;
+    if (!slots.delete(accountId)) return;
+    slotIndex.value += 1;
   }
 
   function clear(): void {
     sessionEpoch.value += 1;
     pricingGeneration += 1;
-    slots.value = {};
-    priceSlots.value = {};
+    slots.clear();
+    slotIndex.value += 1;
+    priceSlots.clear();
+    priceSlotIndex.value += 1;
     pricingLimits.value = null;
     pricingLoading.value = false;
     pricingError.value = "";
   }
 
+  function slotFor(accountId: string): ComputedRef<BillingSlot | undefined> {
+    return computed(() => {
+      slotIndex.value;
+      return slots.get(accountId)?.value;
+    });
+  }
+
+  function priceSlotFor(providerId: string): ComputedRef<BillingPriceSlot | undefined> {
+    return computed(() => {
+      priceSlotIndex.value;
+      return priceSlots.get(providerId)?.value;
+    });
+  }
+
   return {
-    byId: computed(() => slots.value),
-    pricesById: computed(() => priceSlots.value),
+    byId: computed(() => {
+      slotIndex.value;
+      const out: Record<string, BillingSlot> = {};
+      for (const [id, slot] of slots) out[id] = slot.value;
+      return out;
+    }),
+    pricesById: computed(() => {
+      priceSlotIndex.value;
+      const out: Record<string, BillingPriceSlot> = {};
+      for (const [id, slot] of priceSlots) out[id] = slot.value;
+      return out;
+    }),
     sessionEpoch: computed(() => sessionEpoch.value),
     pricingLimits: computed(() => pricingLimits.value),
     pricingLoading: computed(() => pricingLoading.value),
     pricingError: computed(() => pricingError.value),
+    slotFor,
+    priceSlotFor,
     load,
     refreshUsage,
     refreshCash,

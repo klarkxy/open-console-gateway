@@ -1,4 +1,4 @@
-import { computed, ref } from "vue";
+import { computed, ref, shallowRef } from "vue";
 import { defineStore } from "pinia";
 import { DashboardRequestError } from "../api/dashboard-v3.ts";
 import { isRevisionConflict } from "../api/dashboard.ts";
@@ -67,9 +67,12 @@ function refusalsFromError(error: DashboardRequestError): DestinationProjectionR
  * snapshot, and a 409 refusal keeps the last successful lists on screen.
  */
 export const useDestinationsStore = defineStore("destinations", () => {
-  const destinations = ref<Destination[]>([]);
-  const credentials = ref<DestinationCredential[]>([]);
-  const cards = ref<RoutingCardView[]>([]);
+  // Every write path replaces these arrays wholesale (applySnapshot, map /
+  // filter commits, upserts), so shallow refs are sufficient and skip deep
+  // traversal of the largest lists in the projection.
+  const destinations = shallowRef<Destination[]>([]);
+  const credentials = shallowRef<DestinationCredential[]>([]);
+  const cards = shallowRef<RoutingCardView[]>([]);
   const expectation = ref<MutationExpectation | null>(null);
   const loaded = ref(false);
   const loading = ref(false);
@@ -198,6 +201,30 @@ export const useDestinationsStore = defineStore("destinations", () => {
   /** Generation-guarded reload after a mutation. Keeps the last snapshot on failure. */
   async function refreshAfterMutation(): Promise<void> {
     await load();
+  }
+
+  /**
+   * Commit a single accepted row in place after a mutation whose response
+   * carries the row (or its one changed field), instead of refetching the
+   * whole snapshot. Like the accounts store's upsert, the commit invalidates
+   * in-flight loads so a stale response cannot clobber it.
+   */
+  function upsertDestination(destination: Destination): void {
+    loadGeneration += 1;
+    loading.value = false;
+    const exists = destinations.value.some((row) => row.id === destination.id);
+    destinations.value = exists
+      ? destinations.value.map((row) => (row.id === destination.id ? destination : row))
+      : [...destinations.value, destination];
+  }
+
+  function upsertCredential(credential: DestinationCredential): void {
+    loadGeneration += 1;
+    loading.value = false;
+    const exists = credentials.value.some((row) => row.id === credential.id);
+    credentials.value = exists
+      ? credentials.value.map((row) => (row.id === credential.id ? credential : row))
+      : [...credentials.value, credential];
   }
 
   async function refreshCatalog(id: string) {
@@ -470,6 +497,8 @@ export const useDestinationsStore = defineStore("destinations", () => {
     destinationForAccount,
     load,
     refreshAfterMutation,
+    upsertDestination,
+    upsertCredential,
     commitSnapshot,
     patchDestination,
     refreshCatalog,

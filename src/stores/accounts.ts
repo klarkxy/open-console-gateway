@@ -1,4 +1,4 @@
-import { computed, ref } from "vue";
+import { computed, ref, shallowRef } from "vue";
 import { defineStore } from "pinia";
 import { dashboardApi } from "../api/dashboard.ts";
 import type { Account } from "../api/dashboard.ts";
@@ -7,10 +7,11 @@ import type { Account } from "../api/dashboard.ts";
  * Single owner of the account list. Views issue API mutations through
  * `dashboardApi`, then commit the results here via `upsertAccount` /
  * `removeAccount` / `setAccounts`; a pending load can never clobber state
- * committed by a newer load or an in-place mutation.
+ * committed by a newer load or an in-place mutation. Commits always replace
+ * the list wholesale, so the snapshot is a shallow ref.
  */
 export const useAccountsStore = defineStore("accounts", () => {
-  const accounts = ref<Account[]>([]);
+  const accounts = shallowRef<Account[]>([]);
   const loaded = ref(false);
   const loading = ref(false);
   const error = ref("");

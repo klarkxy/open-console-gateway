@@ -6,13 +6,14 @@ import { locale, t } from "../i18n/index.ts";
  * StackedBarChart. Centralising them here avoids duplication and keeps
  * locale-aware formatting consistent.
  *
- * Intl.NumberFormat construction is one to two orders of magnitude slower than
+ * Intl formatter construction is one to two orders of magnitude slower than
  * format(), and these helpers run per table cell / per list card, so instances
- * are cached per (locale, fraction digits) combination.
+ * are cached per locale (and per fraction digits where they vary).
  */
 const currencyFormatters = new Map<string, Intl.NumberFormat>();
 const numberFormatters = new Map<string, Intl.NumberFormat>();
 const compactTokenFormatters = new Map<string, Intl.NumberFormat>();
+const dateTimeFormatters = new Map<string, Intl.DateTimeFormat>();
 // Token counts always use en-US compact suffixes (K/M/B). Locale-aware compact
 // notation would render 万/億 in CJK locales, which the dashboard rejects.
 const COMPACT_TOKEN_LOCALE = "en-US";
@@ -54,17 +55,26 @@ function compactTokenFormatter(): Intl.NumberFormat {
   return formatter;
 }
 
+function dateTimeFormatter(localeTag: string): Intl.DateTimeFormat {
+  let formatter = dateTimeFormatters.get(localeTag);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat(localeTag, {
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+    dateTimeFormatters.set(localeTag, formatter);
+  }
+  return formatter;
+}
+
 /** Locale-aware date+time for timestamps; invalid input renders verbatim. */
 export function formatDateTime(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat(locale.value, {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(date);
+  return dateTimeFormatter(locale.value).format(date);
 }
 
 /** Format a number as USD currency with adaptive or caller-specified decimal places. */

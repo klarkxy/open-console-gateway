@@ -1,20 +1,12 @@
 import { computed, ref } from "vue";
-import { defineStore } from "pinia";
+import { defineStore, getActivePinia } from "pinia";
 import {
   DashboardConflictError,
   DashboardRequestError,
   dashboardApi,
 } from "../api/dashboard.ts";
 import type { AuthStatus } from "../api/generated/dashboard-v3.ts";
-import { useConnectionStore } from "./connection.ts";
 import { useControlPlaneStore } from "./controlPlane.ts";
-import { useAccountsStore } from "./accounts.ts";
-import { useDestinationsStore } from "./destinations.ts";
-import { useIdentitiesStore } from "./identities.ts";
-import { useCpaStore } from "./cpa.ts";
-import { usePlatformAccountsStore } from "./platformAccounts.ts";
-import { useProvidersStore } from "./providers.ts";
-import { useBillingStore } from "./billing.ts";
 
 export type SessionPhase = "checking" | "login" | "register" | "ready";
 
@@ -31,7 +23,6 @@ export type SessionPhase = "checking" | "login" | "register" | "ready";
  */
 export const useSessionStore = defineStore("session", () => {
   const controlPlane = useControlPlaneStore();
-  const connection = useConnectionStore();
 
   const phase = ref<SessionPhase>("checking");
   const status = ref<AuthStatus | null>(null);
@@ -99,16 +90,34 @@ export const useSessionStore = defineStore("session", () => {
     dropSession();
   }
 
+  /**
+   * Session-owned teardown that clears every business store without importing
+   * one: a static import here would pull the whole store → api → domain graph
+   * (including the provider preset data) into the entry chunk. A store
+   * registers itself in the Pinia instance on first use, and a store that was
+   * never used has no cached state to wipe, so clearing through the registry
+   * keeps the exact dropSession semantics without the dependency edge.
+   */
+  const SESSION_RESETTERS = {
+    connection: "clearSecrets",
+    accounts: "clearAccounts",
+    platformAccounts: "clear",
+    identities: "clear",
+    destinations: "clear",
+    providers: "clear",
+    cpa: "clear",
+    billing: "clear",
+  } as const;
+
   /** Local-only teardown: secrets are wiped and the shell returns to login. */
   function dropSession(): void {
-    connection.clearSecrets();
-    useAccountsStore().clearAccounts();
-    usePlatformAccountsStore().clear();
-    useIdentitiesStore().clear();
-    useDestinationsStore().clear();
-    useProvidersStore().clear();
-    useCpaStore().clear();
-    useBillingStore().clear();
+    const registry = getActivePinia()?._s;
+    for (const [storeId, method] of Object.entries(SESSION_RESETTERS)) {
+      const store = registry?.get(storeId) as
+        | { clear?: () => void; clearAccounts?: () => void; clearSecrets?: () => void }
+        | undefined;
+      store?.[method]?.();
+    }
     status.value = null;
     phase.value = "login";
   }

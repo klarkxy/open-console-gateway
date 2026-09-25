@@ -1,5 +1,5 @@
 import { computed, getCurrentScope, nextTick, onScopeDispose, ref, watch } from "vue";
-import type { Ref } from "vue";
+import type { ComputedRef, Ref } from "vue";
 import { useMessage } from "naive-ui";
 import { DashboardRequestError, dashboardApi } from "../api/dashboard.ts";
 import type { Account, UsageWindow } from "../api/dashboard";
@@ -44,7 +44,10 @@ export type UsageLimitView = { key: UsageKey; label: string; limit: number };
 /**
  * Account-list usage editors. Server snapshots live in useBillingStore;
  * this composable keeps calibration drafts, messages, and focus, and
- * projects usageMap / providerUsageMap from BillingStatus.usage.
+ * projects usageMap / providerUsageMap from BillingStatus.usage. The
+ * whole-table computeds serve list-level consumers; row-level consumers
+ * should subscribe to the per-account `*For(accountId)` selectors so one
+ * account's update does not invalidate every row.
  */
 export function useAccountUsage(
   accounts: Ref<Account[]>,
@@ -113,8 +116,36 @@ export function useAccountUsage(
     return out;
   });
 
+  // Row-level selectors: subscribing to one account's slot keeps an update
+  // for account X from invalidating rows that only render account Y.
+  function providerUsageFor(accountId: string): ComputedRef<ProviderUsageResponse | null> {
+    return computed(() => presentedUsageOf(billing.slotFor(accountId).value?.status ?? null));
+  }
+
+  function usageFor(accountId: string): ComputedRef<UsageWindow> {
+    return computed(() => usageWindowFromProviderUsage(
+      billing.slotFor(accountId).value?.status?.usage ?? null,
+      accountId,
+    ));
+  }
+
+  function usageLoadingFor(accountId: string): ComputedRef<boolean> {
+    return computed(() => billing.slotFor(accountId).value?.loading ?? false);
+  }
+
+  function usageLoadErrorFor(accountId: string): ComputedRef<string | null> {
+    return computed(() => {
+      const error = billing.slotFor(accountId).value?.error;
+      return error ? t(BILLING_ERROR_KEYS[error]) : null;
+    });
+  }
+
+  function usageRefreshLoadingFor(accountId: string): ComputedRef<boolean> {
+    return computed(() => billing.slotFor(accountId).value?.mutating ?? false);
+  }
+
   function usageLimitsFor(account: Account): UsageLimitView[] {
-    const presented = providerUsageMap.value[account.id];
+    const presented = providerUsageFor(account.id).value;
     if (presented?.quota_windows.length) return limitsFromProviderWindows(presented.quota_windows);
     const surface = findPlanDefinition(account.provider_id, catalog.value);
     const limits = surface && isLegacyGoFallbackPlan(surface, catalog.value)
@@ -150,7 +181,7 @@ export function useAccountUsage(
     refresh: boolean;
     manual: boolean;
   } {
-    const status = billing.byId[account.id]?.status;
+    const status = billing.slotFor(account.id).value?.status;
     if (status) {
       return {
         providerWindows: Boolean(status.usage) || status.model === "quota",
@@ -186,20 +217,8 @@ export function useAccountUsage(
 
   const usageEdits = ref<Record<string, AccountUsageEdits>>({});
 
-  function blankUsage(accountId: string): UsageWindow {
-    return {
-      account_id: accountId,
-      window_5h: 0,
-      window_week: 0,
-      window_month: 0,
-      resets_in_5h: null,
-      resets_in_week: null,
-      resets_in_month: null,
-    };
-  }
-
   function getUsage(accountId: string): UsageWindow {
-    return usageMap.value[accountId] || blankUsage(accountId);
+    return usageFor(accountId).value;
   }
 
   function usageLimit(accountId: string, key: UsageKey): number {
@@ -214,7 +233,7 @@ export function useAccountUsage(
   }
 
   function hasAvailableUsageEditor(account: Account): boolean {
-    if (usageLoading.value[account.id] || usageLoadErrors.value[account.id]) return false;
+    if (usageLoadingFor(account.id).value || usageLoadErrorFor(account.id).value) return false;
     return usageLimitsFor(account).some(({ key }) => !accountUsageLimitReached(account, key));
   }
 
@@ -365,10 +384,10 @@ export function useAccountUsage(
     const account = accounts.value.find((item) => item.id === accountId);
     if (!account || !usageCapabilities(account).refresh) return;
     const isCurrent = requestStillCurrent(account);
-    if (usageRefreshLoading.value[accountId] || usageLoading.value[accountId]) {
+    if (usageRefreshLoadingFor(accountId).value || usageLoadingFor(accountId).value) {
       return;
     }
-    const status = billing.byId[accountId]?.status;
+    const status = billing.slotFor(accountId).value?.status;
     try {
       if (status?.model === "cash") {
         await billing.refreshCash(accountId, bindingFor(account));
@@ -376,7 +395,7 @@ export function useAccountUsage(
         await billing.refreshUsage(accountId, bindingFor(account));
       }
       if (!isCurrent()) return;
-      const presented = providerUsageMap.value[accountId];
+      const presented = providerUsageFor(accountId).value;
       patchAccountUsageSync(accountId, {
         usage_sync_last_success_at: presented?.sync_state?.last_success_at ?? null,
         usage_sync_next_allowed_at: presented?.sync_state?.next_eligible_at ?? null,
@@ -426,7 +445,7 @@ export function useAccountUsage(
   }
 
   async function revalidateAccountUsage(accountId: string): Promise<void> {
-    const slot = billing.byId[accountId];
+    const slot = billing.slotFor(accountId).value;
     if (slot?.loading || slot?.mutating) return;
     await loadAccountUsage(accountId);
   }
@@ -460,6 +479,11 @@ export function useAccountUsage(
     usageLimitsFor,
     usageMap,
     providerUsageMap,
+    providerUsageFor,
+    usageFor,
+    usageLoadingFor,
+    usageLoadErrorFor,
+    usageRefreshLoadingFor,
     usageEdits,
     usageLoading,
     usageLoadErrors,
