@@ -15,7 +15,7 @@
     </n-tooltip>
   </div>
 
-  <div v-if="refreshVisible" :class="actionClass('secondary')">
+  <div v-if="!compact && refreshVisible" :class="actionClass('secondary')">
     <n-tooltip trigger="hover">
       <template #trigger>
         <n-button
@@ -23,7 +23,7 @@
           quaternary
           size="small"
           :aria-label="t('刷新')"
-          :loading="refreshLoading"
+          :loading="usageRefreshLoading"
           :disabled="usageLoading || !!usageLoadError"
           @click="emit('refresh-usage')"
         >
@@ -67,7 +67,7 @@
       <CreditCalibrationEditor
         v-if="hasCreditMeter && calibrationOpen"
         :account-id="account.id"
-        :binding="billing.byId[account.id]!.boundVersion"
+        :binding="billingSlot!.boundVersion"
         :status="billingStatus!"
         :now="now"
         @saved="calibrationOpen = false"
@@ -88,7 +88,7 @@
     </n-popover>
   </div>
 
-  <div v-if="capabilities.testable" :class="actionClass('tertiary')">
+  <div v-if="!compact && capabilities.testable" :class="actionClass('tertiary')">
     <n-tooltip trigger="hover">
       <template #trigger>
         <n-button
@@ -183,15 +183,11 @@ const props = withDefaults(
     menuOptions: AccountMenuOption[];
     connections?: readonly Connection[] | null;
     compact?: boolean;
-    showRefresh?: boolean;
-    refreshing?: boolean;
   }>(),
   {
     identity: null,
     connections: null,
     compact: false,
-    showRefresh: undefined,
-    refreshing: undefined,
   },
 );
 
@@ -212,10 +208,12 @@ const destinations = useDestinationsStore();
 const destination = computed(() => destinations.destinationForAccount(props.account.id));
 const capabilities = computed(() => accountCapabilities(props.account, props.catalog, destination.value));
 const plan = computed(() => findPlanDefinition(props.account.provider_id, props.catalog));
-const billingStatus = computed(() => billing.byId[props.account.id]?.status ?? null);
+// Row-level subscription: only this account's slot invalidates these computeds.
+const billingSlot = computed(() => billing.slotFor(props.account.id).value);
+const billingStatus = computed(() => billingSlot.value?.status ?? null);
 const calibrationOpen = ref(false);
 const hasCreditMeter = computed(() => Boolean(billingStatus.value?.credits));
-const creditCalibrationDisabled = computed(() => Boolean(billing.byId[props.account.id]?.mutating)
+const creditCalibrationDisabled = computed(() => Boolean(billingSlot.value?.mutating)
   || Boolean(creditCalibrationBlock(billingStatus.value?.credits))
   || partitionCreditBuckets(billingStatus.value?.credits?.buckets ?? [], props.now).active.length === 0);
 function setCalibrationOpen(show: boolean): void {
@@ -238,13 +236,10 @@ const canRefreshUsage = computed(() => usageRefreshAvailable.value || (
   billingStatus.value ? false : balanceRefreshAvailable.value
 ));
 const refreshVisible = computed(() => {
-  if (props.showRefresh === true) return true;
-  if (props.showRefresh === false) return false;
   if (billingStatus.value?.cash) return false;
   if (!billingStatus.value && plan.value?.model_source === "official_api_preset") return false;
   return canRefreshUsage.value && accountIsReady(props.account);
 });
-const refreshLoading = computed(() => props.refreshing ?? props.usageRefreshLoading);
 const toggleBlockedReason = computed(() => {
   if (!props.account.plan_routable) return t("该方案暂不可路由");
   return "";

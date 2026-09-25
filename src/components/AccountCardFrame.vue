@@ -18,7 +18,7 @@
         </n-tooltip>
         <ProviderBrandMark :family="family" :size="BRAND_SIZE" class="account-brand" />
         <div class="account-heading">
-          <div class="account-name-row"><span class="account-name">{{ name }}</span><n-tag size="small" :bordered="false">{{ typeLabel }}</n-tag><slot name="tags" /></div>
+          <div class="account-name-row"><span class="account-name">{{ name }}</span><n-tag v-if="showTypeTag" size="small" :bordered="false">{{ typeLabel }}</n-tag><slot name="tags" /></div>
           <span v-if="subtitle" class="account-subtitle mono">{{ subtitle }}</span>
         </div>
       </div>
@@ -29,6 +29,7 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from "vue";
 import { NButton, NCard, NIcon, NTag, NTooltip } from "naive-ui";
 import { HolderOutlined } from "@vicons/antd";
 import type { ProviderFamily } from "../domain/provider-families.ts";
@@ -38,7 +39,7 @@ import ProviderBrandMark from "./ProviderBrandMark.vue";
 /** One shared header/action grammar for singleton accounts and credential groups. */
 export type AccountCardTone = "cooling" | "pending" | "draft" | "unavailable" | null;
 const BRAND_SIZE = 20;
-withDefaults(defineProps<{
+const props = withDefaults(defineProps<{
   routeId: string; name: string; family: ProviderFamily; typeLabel: string;
   subtitle?: string; tone?: AccountCardTone; orderHandleDisabled: boolean;
   orderHandleHint?: string; dragging: boolean;
@@ -47,6 +48,13 @@ const emit = defineEmits<{
   "order-keydown": [event: KeyboardEvent];
   "order-drag-start": [event: PointerEvent];
 }>();
+/** The type tag is redundant when the card name already carries the same text. */
+const showTypeTag = computed(() => {
+  const label = props.typeLabel.trim().toLowerCase();
+  if (!label) return false;
+  const name = props.name.trim().toLowerCase();
+  return label !== name && !name.includes(label);
+});
 </script>
 
 <style scoped>
@@ -64,13 +72,10 @@ const emit = defineEmits<{
 .account-name { overflow: hidden; color: var(--ocg-ink); font-size: var(--ocg-font-md); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .account-name-row :slotted(.n-tag), .account-name-row .n-tag { flex: 0 0 auto; }
 .account-subtitle { overflow: hidden; color: var(--ocg-subtle); font-size: var(--ocg-font-xs); text-overflow: ellipsis; white-space: nowrap; max-width: 64ch; }
-/* Preserve the four action positions even when a caller omits a utility. */
-.account-actions { display: grid; grid-template-columns: repeat(4, 40px); align-items: center; justify-content: end; column-gap: var(--ocg-space-xs); }
+.account-actions { display: flex; align-items: center; justify-content: flex-end; column-gap: var(--ocg-space-xs); }
 .account-actions :slotted(.account-action) { display: flex; align-items: center; justify-content: center; min-width: 0; }
-.account-actions :slotted(.account-action--enabled) { grid-column: 1; }
-.account-actions :slotted(.account-action--secondary) { grid-column: 2; }
-.account-actions :slotted(.account-action--tertiary) { grid-column: 3; }
-.account-actions :slotted(.account-action--menu) { grid-column: 4; }
+.account-card--collapsed .account-subtitle { display: none; }
+.account-card--collapsed :deep(.n-card__content) { display: none; }
 @media (max-width: 900px) {
   .account-card :deep(.n-card-header) { align-items: flex-start; }
   .account-card :deep(.n-card-header__extra) { margin-left: var(--ocg-space-sm); }

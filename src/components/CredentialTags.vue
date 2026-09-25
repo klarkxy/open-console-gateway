@@ -98,10 +98,9 @@
 
 <script setup lang="ts">
 import { useDestinationsStore } from "../stores/destinations.ts";
-import { computed, ref, watch } from "vue";
+import { computed, defineAsyncComponent, ref, watch } from "vue";
 import {
   NButton,
-  NDatePicker,
   NPopover,
   NTag,
   NTooltip,
@@ -137,6 +136,12 @@ import {
   quotaShareText,
 } from "../views/account-status-text.ts";
 import { t } from "../i18n/index.ts";
+
+// NDatePicker only renders inside the purchase-date popover, so load it on
+// demand instead of pulling the date picker into the accounts chunk.
+const NDatePicker = defineAsyncComponent(() =>
+  import("naive-ui").then((m) => m.NDatePicker),
+);
 
 const props = withDefaults(
   defineProps<{

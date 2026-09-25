@@ -90,7 +90,7 @@
         </n-tooltip>
       </div>
     </div>
-    <p v-if="allMatrixModels.length > 0 && matrixModels.length === 0" class="matrix-empty" role="status">
+    <p v-if="allMatrixModels.length > 0 && filteredRows.length === 0" class="matrix-empty" role="status">
       {{ t("无匹配模型") }}
     </p>
     <div class="matrix-scroll">
@@ -104,7 +104,7 @@
               <n-checkbox
                 :checked="allVisibleSelected"
                 :indeterminate="someVisibleSelected"
-                :disabled="matrixModels.length === 0 || props.actionLocked || props.removing"
+                :disabled="filteredRows.length === 0 || props.actionLocked || props.removing"
                 :aria-label="t('全选当前列表')"
                 @update:checked="toggleVisibleSelection"
               />
@@ -123,60 +123,60 @@
           </tr>
         </thead>
         <tbody>
-          <tr v-for="modelId in matrixModels" :key="modelId" :class="{ 'is-selected': selecting && isSelected(modelId) }">
+          <tr v-for="row in visibleRows" :key="row.modelId" :class="{ 'is-selected': selecting && isSelected(row.modelId) }">
             <td v-if="selecting" class="matrix-cell matrix-cell--select">
               <n-checkbox
-                :checked="isSelected(modelId)"
+                :checked="isSelected(row.modelId)"
                 :disabled="props.actionLocked || props.removing"
-                :aria-label="t('选择 {model}', { model: modelId })"
-                @update:checked="(on: boolean) => setSelected(modelId, on)"
+                :aria-label="t('选择 {model}', { model: row.modelId })"
+                @update:checked="(on: boolean) => setSelected(row.modelId, on)"
               />
             </td>
             <td class="matrix-cell matrix-cell--model">
-              <code>{{ modelAlias(modelId) || modelId }}</code>
+              <code>{{ row.alias || row.modelId }}</code>
               <code
-                v-if="modelSecondary(modelId)"
+                v-if="row.secondary"
                 class="matrix-model-id"
-              >{{ modelSecondary(modelId) }}</code>
+              >{{ row.secondary }}</code>
             </td>
             <td class="matrix-cell matrix-cell--protocol">
               <div
-                v-if="rowChips(modelId).length > 0"
+                v-if="row.chips.length > 0"
                 class="matrix-chips"
                 role="group"
-                :aria-label="`${modelId} ${t('首选协议')}`"
+                :aria-label="`${row.modelId} ${t('首选协议')}`"
               >
                 <button
-                  v-for="choice in rowChips(modelId)"
+                  v-for="choice in row.chips"
                   :key="choice"
                   type="button"
                   class="matrix-chip"
                   :class="{
-                    'matrix-chip--on': rowProtocolOn(modelId, choice),
-                    'matrix-chip--preferred': rowPreferred(modelId) === choice,
+                    'matrix-chip--on': rowProtocolOn(row, choice),
+                    'matrix-chip--preferred': row.preferred === choice,
                   }"
-                  :disabled="rowEditLocked(modelId)"
-                  :aria-pressed="rowProtocolOn(modelId, choice) && rowPreferred(modelId) === choice"
-                  @click="preferRowProtocol(modelId, choice)"
+                  :disabled="rowEditLocked(row.modelId)"
+                  :aria-pressed="rowProtocolOn(row, choice) && row.preferred === choice"
+                  @click="preferRowProtocol(row.modelId, choice)"
                 >
                   {{ protocolDisplayName(choice) }}
                 </button>
               </div>
               <div v-else class="matrix-chips">
                 <n-popconfirm
-                  v-for="choice in rowUnverifiedProtocols(modelId)"
+                  v-for="choice in row.unverified"
                   :key="choice"
-                  :disabled="rowEditLocked(modelId)"
-                  @positive-click="enableUnverifiedProtocol(modelId, choice)"
+                  :disabled="rowEditLocked(row.modelId)"
+                  @positive-click="enableUnverifiedProtocol(row.modelId, choice)"
                 >
                   <template #trigger>
-                    <n-button text size="tiny" :disabled="rowEditLocked(modelId)">
+                    <n-button text size="tiny" :disabled="rowEditLocked(row.modelId)">
                       {{ t("{protocol}（未验证）", { protocol: protocolDisplayName(choice) }) }}
                     </n-button>
                   </template>
                   {{ t("官方协议资料不可用。确认手动启用 {protocol}？此操作只修改配置，不发送测试请求；后续推理可能失败或产生费用。", { protocol: protocolDisplayName(choice) }) }}
                 </n-popconfirm>
-                <span v-if="rowUnverifiedProtocols(modelId).length === 0" class="matrix-protocol-label matrix-protocol-label--muted">
+                <span v-if="row.unverified.length === 0" class="matrix-protocol-label matrix-protocol-label--muted">
                   {{ t("无可用协议") }}
                 </span>
               </div>
@@ -185,17 +185,17 @@
               <n-switch
                 class="matrix-switch"
                 size="small"
-                :value="rowEnabled(modelId)"
-                :loading="rowSaving(modelId) && !rowProbing(modelId)"
-                :disabled="rowEditLocked(modelId) || !rowControllable(modelId)"
-                :aria-label="`${modelId} ${t('允许路由')}`"
-                @update:value="(on: boolean) => toggleRow(modelId, on)"
+                :value="rowEnabled(row)"
+                :loading="rowSaving(row.modelId) && !rowProbing(row.modelId)"
+                :disabled="rowEditLocked(row.modelId) || !row.controllable"
+                :aria-label="`${row.modelId} ${t('允许路由')}`"
+                @update:value="(on: boolean) => toggleRow(row.modelId, on)"
               />
             </td>
             <td class="matrix-cell matrix-cell--actions">
               <n-popconfirm
                 v-if="probeSupported"
-                @positive-click="runRowProbe(modelId)"
+                @positive-click="runRowProbe(row.modelId)"
               >
                 <template #trigger>
                   <n-tooltip trigger="hover">
@@ -203,24 +203,24 @@
                       <n-button
                         text
                         size="tiny"
-                        :loading="rowProbing(modelId)"
-                        :disabled="rowEditLocked(modelId)"
-                        :aria-label="t('测试 {model}', { model: modelId })"
+                        :loading="rowProbing(row.modelId)"
+                        :disabled="rowEditLocked(row.modelId)"
+                        :aria-label="t('测试 {model}', { model: row.modelId })"
                       >
                         <template #icon>
                           <n-icon :component="ApiOutlined" />
                         </template>
                       </n-button>
                     </template>
-                    {{ t("测试 {model}", { model: modelId }) }}
+                    {{ t("测试 {model}", { model: row.modelId }) }}
                   </n-tooltip>
                 </template>
                 {{ t("将按当前生效的协议发送一次最小真实请求以测试连接，可能消耗额度；仅作观测，不会启用路由。是否继续？") }}
               </n-popconfirm>
               <n-popconfirm
                 :positive-text="t('删除')"
-                :disabled="rowActionLocked(modelId)"
-                @positive-click="removeRows([modelId])"
+                :disabled="rowActionLocked(row.modelId)"
+                @positive-click="removeRows([row.modelId])"
               >
                 <template #trigger>
                   <n-tooltip trigger="hover">
@@ -229,7 +229,7 @@
                         text
                         size="tiny"
                         type="error"
-                        :disabled="rowActionLocked(modelId)"
+                        :disabled="rowActionLocked(row.modelId)"
                         :loading="props.removing"
                         :aria-label="t('删除模型')"
                       >
@@ -247,6 +247,14 @@
           </tr>
         </tbody>
       </table>
+    </div>
+    <div v-if="rowsCapped" class="matrix-limit" role="status">
+      <span v-if="!showAllRows">
+        {{ t("已显示 {shown} 个，共 {total} 个模型", { shown: visibleRows.length, total: filteredRows.length }) }}
+      </span>
+      <n-button text size="tiny" @click="showAllRows = !showAllRows">
+        {{ showAllRows ? t("收起列表") : t("显示全部 {count} 个模型", { count: filteredRows.length }) }}
+      </n-button>
     </div>
   </div>
 </template>
@@ -307,17 +315,9 @@ const emit = defineEmits<{
   (e: "error", message: string): void;
 }>();
 
-// Unknown support is not silently guessed. Only an explicit confirmed
-// operator choice can enable one of the backend-admitted protocol slots.
-function rowUnverifiedProtocols(modelId: string): ProviderProtocol[] {
-  if (props.scope.scope_kind !== "provider") return [];
-  const model = props.scope.models.find((entry) => entry.model_id === modelId);
-  if (!model || modelAvailableProtocols(model).length > 0) return [];
-  return PROVIDER_PROTOCOLS.filter((protocol) => Boolean(model.protocols[protocol]));
-}
-
 function enableUnverifiedProtocol(modelId: string, protocol: ProviderProtocol): void {
-  if (rowEditLocked(modelId) || !rowUnverifiedProtocols(modelId).includes(protocol)) return;
+  const row = matrixRowById.value.get(modelId);
+  if (rowEditLocked(modelId) || !row || !row.unverified.includes(protocol)) return;
   emit("update:overrides", {
     scopeKind: props.scope.scope_kind,
     scopeId: props.scope.scope_id,
@@ -329,24 +329,110 @@ const modelQuery = ref("");
 const enabledOnly = ref(false);
 const selecting = ref(false);
 const selectedIds = ref(new Set<string>());
+const showAllRows = ref(false);
+
+const DEFAULT_ROW_CAP = 50;
+const SEARCH_ROW_CAP = 200;
 
 const allMatrixModels = computed(() => {
   return [...new Set(props.scope.catalog.models)].sort();
 });
 
+// One pass over scope.models builds every field the row template needs, so
+// rendering and filtering are Map/array reads instead of repeated linear
+// contract lookups per cell.
+interface MatrixRow {
+  modelId: string;
+  alias: string;
+  secondary: string;
+  chips: ProviderProtocol[];
+  preferred: ProviderProtocol | null;
+  protocolOn: Partial<Record<ProviderProtocol, boolean>>;
+  effectiveOn: boolean;
+  controllable: boolean;
+  unverified: ProviderProtocol[];
+  searchable: string;
+}
+
+const matrixRows = computed<MatrixRow[]>(() => {
+  const scope = props.scope;
+  const contracts = new Map(scope.models.map((model) => [model.model_id, model]));
+  return allMatrixModels.value.map((modelId) => {
+    const model = contracts.get(modelId);
+    const alias = model?.alias?.trim() ?? "";
+    const extra = model?.secondary?.trim() ?? "";
+    let secondary = extra;
+    if (scope.scope_kind !== "custom_endpoint") {
+      const primary = alias || modelId;
+      if (extra && extra !== primary) secondary = extra;
+      else if (alias && alias !== modelId) secondary = modelId;
+      else secondary = "";
+    }
+    const chips = model ? modelAvailableProtocols(model) : [];
+    const protocolOn: Partial<Record<ProviderProtocol, boolean>> = {};
+    for (const protocol of PROVIDER_PROTOCOLS) {
+      protocolOn[protocol] = model?.protocols[protocol]?.enabled === true;
+    }
+    // Unknown support is not silently guessed. Only an explicit confirmed
+    // operator choice can enable one of the backend-admitted protocol slots.
+    const unverified = scope.scope_kind === "provider" && model && chips.length === 0
+      ? PROVIDER_PROTOCOLS.filter((protocol) => Boolean(model.protocols[protocol]))
+      : [];
+    return {
+      modelId,
+      alias,
+      secondary,
+      chips,
+      preferred: model?.preferred_protocol ?? null,
+      protocolOn,
+      effectiveOn: model ? modelEffectiveOn(model, scope) : false,
+      controllable: model ? modelTargetProtocol(model, scope) !== null : false,
+      unverified,
+      searchable: `${modelId}\n${alias}\n${secondary}`.toLocaleLowerCase(),
+    };
+  });
+});
+
+const matrixRowById = computed(() => {
+  return new Map(matrixRows.value.map((row) => [row.modelId, row]));
+});
+
+function rowEnabled(row: MatrixRow): boolean {
+  const overrides = props.optimisticOverrides;
+  if (overrides) {
+    for (const protocol of PROVIDER_PROTOCOLS) {
+      if (overrides.get(cellKey(row.modelId, protocol)) === true) return true;
+    }
+  }
+  return row.effectiveOn;
+}
+
+function rowProtocolOn(row: MatrixRow, protocol: ProviderProtocol): boolean {
+  const optimistic = props.optimisticOverrides?.get(cellKey(row.modelId, protocol));
+  if (optimistic !== undefined) return optimistic;
+  return row.protocolOn[protocol] === true;
+}
+
 // Search matches the raw model id and the published alias; the enabled
 // filter reads the same effective-on state as the row switch. Filtering only
 // narrows the visible rows — it never changes configuration.
-const matrixModels = computed(() => {
+const filteredRows = computed(() => {
   const needle = modelQuery.value.trim().toLocaleLowerCase();
-  return allMatrixModels.value.filter((modelId) => {
-    if (enabledOnly.value && !rowEnabled(modelId)) return false;
+  return matrixRows.value.filter((row) => {
+    if (enabledOnly.value && !rowEnabled(row)) return false;
     if (!needle) return true;
-    return modelId.toLocaleLowerCase().includes(needle)
-      || modelAlias(modelId).toLocaleLowerCase().includes(needle)
-      || modelSecondary(modelId).toLocaleLowerCase().includes(needle);
+    return row.searchable.includes(needle);
   });
 });
+
+// Rendering is capped so providers with hundreds of models do not mount the
+// full table; searching raises the cap, and a toggle reveals everything.
+const isFiltering = computed(() => modelQuery.value.trim() !== "" || enabledOnly.value);
+const rowCap = computed(() => (isFiltering.value ? SEARCH_ROW_CAP : DEFAULT_ROW_CAP));
+const rowsCapped = computed(() => filteredRows.value.length > rowCap.value);
+const visibleRows = computed(() => (
+  showAllRows.value ? filteredRows.value : filteredRows.value.slice(0, rowCap.value)
+));
 
 // CPA is a separate static external integration: it never gets a scan/test
 // column here even if a backend card flag claims probe support.
@@ -359,6 +445,11 @@ watch(() => props.scope.key, () => {
   selectedIds.value = new Set();
   modelQuery.value = "";
   enabledOnly.value = false;
+  showAllRows.value = false;
+});
+
+watch([modelQuery, enabledOnly], () => {
+  showAllRows.value = false;
 });
 
 watch(allMatrixModels, (models) => {
@@ -366,24 +457,6 @@ watch(allMatrixModels, (models) => {
   const next = new Set([...selectedIds.value].filter((modelId) => known.has(modelId)));
   if (next.size !== selectedIds.value.size) selectedIds.value = next;
 });
-
-function modelContract(modelId: string): ProviderScopeView["models"][number] | undefined {
-  return props.scope.models.find((model) => model.model_id === modelId);
-}
-
-function modelAlias(modelId: string): string {
-  return modelContract(modelId)?.alias?.trim() ?? "";
-}
-
-function modelSecondary(modelId: string): string {
-  const model = modelContract(modelId);
-  const extra = model?.secondary?.trim() ?? "";
-  if (props.scope.scope_kind === "custom_endpoint") return extra;
-  const primary = modelAlias(modelId) || modelId;
-  if (extra && extra !== primary) return extra;
-  if (modelAlias(modelId) && modelAlias(modelId) !== modelId) return modelId;
-  return "";
-}
 
 function removeConfirmText(count: number): string {
   const http = props.scope.scope_kind === "custom_endpoint";
@@ -395,38 +468,6 @@ function removeConfirmText(count: number): string {
   return t(http
     ? "删除已选的 {count} 个模型？移除后不再路由，下次刷新官方目录时可能再次出现并默认开启。"
     : "删除已选的 {count} 个模型？移除后不再路由，下次刷新官方目录时可能再次出现并默认关闭。", { count });
-}
-
-function rowChips(modelId: string): ProviderProtocol[] {
-  const model = modelContract(modelId);
-  if (!model) return [];
-  return modelAvailableProtocols(model);
-}
-
-function rowPreferred(modelId: string): ProviderProtocol | null {
-  return modelContract(modelId)?.preferred_protocol ?? null;
-}
-
-function rowProtocolOn(modelId: string, protocol: ProviderProtocol): boolean {
-  const optimistic = props.optimisticOverrides?.get(cellKey(modelId, protocol));
-  if (optimistic !== undefined) return optimistic;
-  return modelContract(modelId)?.protocols[protocol]?.enabled === true;
-}
-
-function rowEnabled(modelId: string): boolean {
-  const model = modelContract(modelId);
-  if (!model) return false;
-  for (const protocol of PROVIDER_PROTOCOLS) {
-    const optimistic = props.optimisticOverrides?.get(cellKey(modelId, protocol));
-    if (optimistic === true) return true;
-  }
-  return modelEffectiveOn(model, props.scope);
-}
-
-function rowControllable(modelId: string): boolean {
-  const model = modelContract(modelId);
-  if (!model) return false;
-  return modelTargetProtocol(model, props.scope) !== null;
 }
 
 function cellKey(modelId: string, protocol: ProviderProtocol): string {
@@ -473,12 +514,12 @@ const canMutateSelection = computed(() => (
   && !props.removing
 ));
 const allVisibleSelected = computed(() => (
-  matrixModels.value.length > 0
-  && matrixModels.value.every((modelId) => selectedIds.value.has(modelId))
+  filteredRows.value.length > 0
+  && filteredRows.value.every((row) => selectedIds.value.has(row.modelId))
 ));
 const someVisibleSelected = computed(() => {
   if (allVisibleSelected.value) return false;
-  return matrixModels.value.some((modelId) => selectedIds.value.has(modelId));
+  return filteredRows.value.some((row) => selectedIds.value.has(row.modelId));
 });
 const batchSaving = computed(() => {
   const pending = props.pendingOverrideKeys;
@@ -489,8 +530,8 @@ const batchSaving = computed(() => {
 });
 
 const providerDisabled = computed(() => {
-  if (allMatrixModels.value.length === 0) return false;
-  return !allMatrixModels.value.some((modelId) => rowEnabled(modelId));
+  if (matrixRows.value.length === 0) return false;
+  return !matrixRows.value.some((row) => rowEnabled(row));
 });
 
 function emitOverrides(overrides: ModelProtocolOverrideUpdate[]): void {
@@ -553,9 +594,9 @@ function setSelected(modelId: string, on: boolean): void {
 
 function toggleVisibleSelection(on: boolean): void {
   const next = new Set(selectedIds.value);
-  for (const modelId of matrixModels.value) {
-    if (on) next.add(modelId);
-    else next.delete(modelId);
+  for (const row of filteredRows.value) {
+    if (on) next.add(row.modelId);
+    else next.delete(row.modelId);
   }
   selectedIds.value = next;
 }
@@ -699,6 +740,7 @@ function runRowProbe(modelId: string): void {
   font: inherit;
   font-size: var(--ocg-font-xs);
   cursor: pointer;
+  transition: background-color var(--ocg-motion-fast) var(--ocg-ease), border-color var(--ocg-motion-fast) var(--ocg-ease), color var(--ocg-motion-fast) var(--ocg-ease);
 }
 .matrix-chip--on {
   border-color: var(--ocg-ink);
@@ -732,5 +774,13 @@ function runRowProbe(modelId: string): void {
 }
 .matrix-status {
   margin-bottom: var(--ocg-space-sm);
+}
+.matrix-limit {
+  display: flex;
+  align-items: center;
+  gap: var(--ocg-space-sm);
+  margin-top: var(--ocg-space-sm);
+  color: var(--ocg-muted);
+  font-size: var(--ocg-font-xs);
 }
 </style>

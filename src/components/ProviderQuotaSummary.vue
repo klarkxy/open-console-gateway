@@ -5,10 +5,7 @@
       class="provider-quota-row provider-quota-row--empty"
       role="status"
     >
-      <div class="provider-quota-row__heading">
-        <span>{{ t("尚未刷新") }}</span>
-        <strong>—</strong>
-      </div>
+      <span class="provider-quota-row__label">{{ t("尚未刷新") }}</span>
       <n-progress
         type="line"
         :percentage="0"
@@ -17,13 +14,12 @@
         :height="8"
         :border-radius="4"
       />
+      <strong class="provider-quota-row__used">—</strong>
+      <span class="provider-quota-row__reset" aria-hidden="true" />
     </div>
     <template v-else>
       <div v-for="window in displayedWindows" :key="window.window_kind" class="provider-quota-row">
-        <div class="provider-quota-row__heading">
-          <span>{{ windowLabel(window) }}</span>
-          <strong>{{ usedLabel(window) }}</strong>
-        </div>
+        <span class="provider-quota-row__label">{{ windowLabel(window) }}</span>
         <n-progress
           type="line"
           :percentage="usedPercent(window)"
@@ -32,9 +28,11 @@
           :height="8"
           :border-radius="4"
         />
+        <strong class="provider-quota-row__used">{{ usedLabel(window) }}</strong>
         <time v-if="window.resets_at" class="provider-quota-row__reset">
           {{ t("{time}后重置", { time: formatCooldownRemainingText(cooldownRemainingUntil(window.resets_at, now)) }) }}
         </time>
+        <span v-else class="provider-quota-row__reset" aria-hidden="true" />
       </div>
     </template>
   </div>
@@ -87,41 +85,50 @@ function usedLabel(window: ProviderQuotaWindow): string {
 <style scoped>
 .provider-quota-summary {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: var(--ocg-space-md);
+  gap: var(--ocg-space-sm);
 }
 
 .provider-quota-row {
   display: grid;
-  gap: 6px;
+  grid-template-columns: minmax(4.5rem, auto) 1fr minmax(6.5rem, auto) minmax(6rem, auto);
+  align-items: center;
+  gap: var(--ocg-space-sm) var(--ocg-space-md);
   min-width: 0;
 }
 
-.provider-quota-row__heading {
-  display: flex;
-  justify-content: space-between;
-  gap: var(--ocg-space-md);
+.provider-quota-row__label {
+  overflow: hidden;
   color: var(--ocg-muted);
   font-size: var(--ocg-font-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.provider-quota-row__heading strong {
+.provider-quota-row__used {
   color: var(--ocg-ink);
   font-family: "Cascadia Mono", Consolas, monospace;
-  font-size: var(--ocg-font-md);
+  font-size: var(--ocg-font-sm);
   font-variant-numeric: tabular-nums;
   font-weight: 600;
+  justify-self: end;
+  text-align: right;
 }
 
 .provider-quota-row__reset {
   color: var(--ocg-muted);
   font-size: var(--ocg-font-xs);
   font-variant-numeric: tabular-nums;
+  justify-self: end;
+  text-align: right;
 }
 
 @media (max-width: 640px) {
-  .provider-quota-summary {
-    grid-template-columns: 1fr;
+  .provider-quota-row {
+    grid-template-columns: auto 1fr auto;
+  }
+
+  .provider-quota-row__reset {
+    grid-column: 1 / -1;
   }
 }
 </style>

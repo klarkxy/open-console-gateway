@@ -1,4 +1,14 @@
 import { managedAccountEnUSMessages } from "./managed-account.ts";
+  "收起列表": "Collapse list",
+  "显示全部 {count} 个模型": "Show all {count} models",
+  "已显示 {shown} 个，共 {total} 个模型": "Showing {shown} of {total} models",
+  "移到底部": "Move to bottom",
+  "移到顶部": "Move to top",
+  "展开卡片": "Expand card",
+  "收起卡片": "Collapse card",
+  "拖拽手柄调整顺序，点击“完成”退出": "Drag a handle to reorder; click Done to exit",
+  "完成": "Done",
+  "调整顺序": "Reorder",
   "补齐上游协议失败：{error}": "Failed to add the missing upstream protocols: {error}",
   "已为该连接补齐 {count} 条上游协议：{names}": "Added {count} missing upstream protocols to this connection: {names}",
 

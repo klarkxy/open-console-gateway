@@ -6,20 +6,38 @@
     :type-label="typeLabel"
     :subtitle="group.destination.base_url ?? ''"
     :tone="cardTone"
+    :class="{ 'account-card--collapsed': collapsed }"
     :order-handle-disabled="orderHandleDisabled"
     :order-handle-hint="orderHandleHint"
     :dragging="dragging"
     @order-keydown="emit('order-keydown', $event)"
     @order-drag-start="emit('order-drag-start', $event)"
   >
-    <template v-if="cpaStatusLabel || cardAvailabilityLabel" #tags>
+    <template v-if="cpaStatusLabel || cardAvailabilityLabel || sortMode || collapsed" #tags>
       <n-tag v-if="cpaStatusLabel" size="small" role="status" :type="cpaStatusType">
         {{ cpaStatusLabel }}
       </n-tag>
       <n-tag v-if="cardAvailabilityLabel" size="small" role="status">{{ cardAvailabilityLabel }}</n-tag>
+      <span v-if="sortMode || collapsed" class="destination-card-summary">{{ summaryText }}</span>
     </template>
     <template #actions>
-      <div v-if="parent || group.destination.max_credentials !== 1" class="account-action account-action--secondary">
+      <div v-if="!sortMode" class="account-action account-action--enabled">
+        <n-tooltip trigger="hover">
+          <template #trigger>
+            <n-button
+              circle
+              quaternary
+              size="small"
+              :aria-label="collapsed ? t('展开卡片') : t('收起卡片')"
+              @click="emit('toggle-collapse')"
+            >
+              <template #icon><n-icon :component="collapsed ? RightOutlined : DownOutlined" /></template>
+            </n-button>
+          </template>
+          {{ collapsed ? t("展开卡片") : t("收起卡片") }}
+        </n-tooltip>
+      </div>
+      <div v-if="!sortMode && (parent || group.destination.max_credentials !== 1)" class="account-action account-action--secondary">
         <n-tooltip trigger="hover">
           <template #trigger>
             <n-button
@@ -34,24 +52,6 @@
             </n-button>
           </template>
           {{ t("添加 Key") }}
-        </n-tooltip>
-      </div>
-      <div v-if="parent" class="account-action account-action--tertiary">
-        <n-tooltip trigger="hover">
-          <template #trigger>
-            <n-button
-              circle
-              quaternary
-              size="small"
-              :loading="refreshingParent"
-              :disabled="mutating"
-              :aria-label="t('刷新')"
-              @click="emit('refresh-parent')"
-            >
-              <template #icon><n-icon :component="ReloadOutlined" /></template>
-            </n-button>
-          </template>
-          {{ t("刷新") }}
         </n-tooltip>
       </div>
       <div class="account-action account-action--menu">
@@ -73,32 +73,34 @@
       </div>
     </template>
 
-    <div class="destination-card-body">
-      <ApiPriceMeter
-        v-if="walletMeterCells.length > 0"
-        :cells="walletMeterCells"
-        :caption="walletMeterCaption"
-      />
-      <PlatformPriceTable v-if="parent?.snapshot" :snapshot="parent.snapshot" />
+    <div v-if="!collapsed" class="destination-card-body">
+      <template v-if="!sortMode">
+        <ApiPriceMeter
+          v-if="walletMeterCells.length > 0"
+          :cells="walletMeterCells"
+          :caption="walletMeterCaption"
+        />
+        <PlatformPriceTable v-if="parent?.snapshot" :snapshot="parent.snapshot" />
 
-      <n-alert
-        v-if="parent && pendingLink && pendingLink.parentId === parent.id"
-        type="warning"
-        :show-icon="false"
-      >
-        <div class="destination-pending-link">
-          <span>{{ t("Key 已创建，关联尚未完成。") }}</span>
-          <n-button size="tiny" secondary :loading="mutating" :disabled="mutating" @click="emit('retry-pending-link')">
-            {{ t("重试关联") }}
-          </n-button>
+        <n-alert
+          v-if="parent && pendingLink && pendingLink.parentId === parent.id"
+          type="warning"
+          :show-icon="false"
+        >
+          <div class="destination-pending-link">
+            <span>{{ t("Key 已创建，关联尚未完成。") }}</span>
+            <n-button size="tiny" secondary :loading="mutating" :disabled="mutating" @click="emit('retry-pending-link')">
+              {{ t("重试关联") }}
+            </n-button>
+          </div>
+        </n-alert>
+        <div
+          v-if="cardAvailability === 'no_keys' && (!parent || pendingLink?.parentId !== parent.id)"
+          class="destination-hint"
+        >
+          {{ t(CARD_QUOTA_AVAILABILITY_KEYS.no_keys) }}
         </div>
-      </n-alert>
-      <div
-        v-if="cardAvailability === 'no_keys' && (!parent || pendingLink?.parentId !== parent.id)"
-        class="destination-hint"
-      >
-        {{ t(CARD_QUOTA_AVAILABILITY_KEYS.no_keys) }}
-      </div>
+      </template>
       <div v-if="group.credentials.length > 0" class="destination-rows">
         <template v-for="(credential, index) in group.credentials" :key="credential.id">
           <slot
@@ -127,7 +129,7 @@ import {
   NTag,
   NTooltip,
 } from "naive-ui";
-import { MoreOutlined, PlusOutlined, ReloadOutlined } from "@vicons/antd";
+import { DownOutlined, MoreOutlined, PlusOutlined, RightOutlined } from "@vicons/antd";
 import type { Account } from "../api/dashboard.ts";
 import type { DestinationCredential } from "../api/destinations.ts";
 import type { ProviderCatalogEntry } from "../api/providers.ts";
@@ -137,6 +139,8 @@ import type {
 } from "../api/platform-accounts.ts";
 import { destinationBrandFamily, platformBrandFamily } from "../domain/account-brand.ts";
 import { destinationTypeLabel } from "../domain/account-display.ts";
+import { useProvidersStore } from "../stores/providers.ts";
+import type { RoutingCardMove } from "../domain/routing-cards.ts";
 import {
   isSingleAccountGroup,
   overlayAccountForCredential,
@@ -195,6 +199,13 @@ const props = defineProps<{
   arrangingDisabled?: boolean;
   canRemoveEmptyCard?: boolean;
   cpaStatus?: CpaCardStatus | null;
+  /** UI-local fold state; sort mode forces the expanded compact form. */
+  collapsed?: boolean;
+  /** Key totals for the inline summary shown while collapsed or sorting. */
+  summary: { total: number; enabled: number };
+  sortMode?: boolean;
+  cardFirst?: boolean;
+  cardLast?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -210,8 +221,11 @@ const emit = defineEmits<{
   "link-existing": [];
   "retry-pending-link": [];
   "fetch-all-models": [];
+  "toggle-collapse": [];
+  "move-card": [move: RoutingCardMove];
 }>();
 
+const providersStore = useProvidersStore();
 const overlayAccounts = computed(() => (
   props.group.credentials
     .map((credential) => overlayAccountForCredential(credential, props.accountsById))
@@ -224,6 +238,7 @@ const family = computed(() => {
     props.group.destination,
     firstAccount.value,
     props.catalog,
+    providersStore.presetIds,
   );
 });
 const typeLabel = computed(() => {
@@ -262,6 +277,9 @@ const cpaStatusType = computed(() => (
 const refreshingParent = computed(() => (
   props.parent ? Boolean(props.refreshing[props.parent.id]) : false
 ));
+const summaryText = computed(() => (
+  `${t("{count} 个 Key", { count: props.summary.total })} · ${t("{count} 个启用账号", { count: props.summary.enabled })}`
+));
 const overlay = computed(() => platformModelOverlay(overlayAccounts.value));
 const duplicateNames = computed(() => {
   const counts = new Map<string, number>();
@@ -274,12 +292,20 @@ const duplicateNames = computed(() => {
 });
 
 const parentMenuOptions = computed(() => {
+  const moves = [
+    { label: t("上移"), key: "move-card-up", disabled: props.arrangingDisabled || props.cardFirst },
+    { label: t("下移"), key: "move-card-down", disabled: props.arrangingDisabled || props.cardLast },
+    { label: t("移到顶部"), key: "move-card-top", disabled: props.arrangingDisabled || props.cardFirst },
+    { label: t("移到底部"), key: "move-card-bottom", disabled: props.arrangingDisabled || props.cardLast },
+  ];
   const arrangement = [
+    ...moves,
     { label: t("再建一张卡片"), key: "add-card", disabled: props.arrangingDisabled },
     ...(props.canRemoveEmptyCard ? [{ label: t("删除空卡片"), key: "remove-empty-card", disabled: props.arrangingDisabled }] : []),
   ];
   if (!props.parent) return arrangement;
   return [
+    { label: t("刷新"), key: "refresh-parent", disabled: props.mutating || refreshingParent.value },
     ...arrangement,
     { label: t("获取全部模型"), key: "fetch-all-models", disabled: props.mutating || props.group.credentials.length === 0 },
     ...(props.parent.kind === "new_api"
@@ -301,7 +327,23 @@ const parentMenuOptions = computed(() => {
   ];
 });
 
+const CARD_MOVE_KEYS: Record<string, RoutingCardMove> = {
+  "move-card-up": "up",
+  "move-card-down": "down",
+  "move-card-top": "top",
+  "move-card-bottom": "bottom",
+};
+
 function handleParentMenuSelect(key: string | number) {
+  if (key === "refresh-parent") {
+    emit("refresh-parent");
+    return;
+  }
+  const move = CARD_MOVE_KEYS[key];
+  if (move) {
+    if (!props.arrangingDisabled) emit("move-card", move);
+    return;
+  }
   if (key === "add-card" || key === "remove-empty-card") {
     if (!props.arrangingDisabled) {
       if (key === "add-card") emit("add-card");
@@ -404,10 +446,18 @@ function figureFor(credential: DestinationCredential): CredentialFigure | null {
 
 .destination-rows {
   display: grid;
-  gap: var(--ocg-space-xs);
+}
+
+.destination-rows > :deep(* + *) {
+  border-top: 1px solid var(--ocg-border);
 }
 
 .destination-hint {
+  font-size: var(--ocg-font-xs);
+  color: var(--ocg-subtle);
+}
+
+.destination-card-summary {
   font-size: var(--ocg-font-xs);
   color: var(--ocg-subtle);
 }

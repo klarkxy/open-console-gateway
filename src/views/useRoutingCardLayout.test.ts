@@ -46,14 +46,40 @@ test("unmount and logout suppress late messages and do not revive a layout", asy
     assert.equal(f.draft.value,null);assert.equal(f.notifications(),0);f.layout.revertActiveArrangement();
   }
 });
+function stubPreviewFrame() {
+  let frames: FrameRequestCallback[] = [];
+  Object.defineProperty(globalThis,"requestAnimationFrame",{configurable:true,value:(cb:FrameRequestCallback)=>{frames.push(cb);return frames.length;}});
+  Object.defineProperty(globalThis,"cancelAnimationFrame",{configurable:true,value:(id:number)=>{frames=frames.filter((_,index)=>index!==id-1);}});
+  return { flush:()=>{ const cb=frames.shift(); if(cb) cb(0); }, pending:()=>frames.length };
+}
 test("pointer preview moves rows inside their card and cancels if the saved revision changes", async()=>{
   const handlers = new Map<string, (event:PointerEvent)=>unknown>();
   Object.defineProperty(globalThis,"window",{configurable:true,value:{addEventListener:(name:string,fn:(e:PointerEvent)=>unknown)=>handlers.set(name,fn),removeEventListener:(name:string)=>handlers.delete(name)}});
   Object.defineProperty(globalThis,"document",{configurable:true,value:{elementFromPoint:()=>({closest:(selector:string)=>selector.includes("account-card")?{dataset:{accountId:"a"}}:{dataset:{credentialId:"a2"}}})}});
-  const f=fixture();const handle={setPointerCapture(){},hasPointerCapture(){return true;},releasePointerCapture(){}};
+  const frame=stubPreviewFrame();
+  const f=fixture();const handle={setPointerCapture(){},hasPointerCapture(){return true;},releasePointerCapture(){},closest(){return null;}};
   const event={isPrimary:true,pointerType:"mouse",button:0,pointerId:1,currentTarget:handle,preventDefault(){},clientX:0,clientY:0} as unknown as PointerEvent;
   f.layout.startCredentialDrag(event,"a","a1");handlers.get("pointermove")!(event);
-  assert.deepEqual(f.draft.value?.[0].credentialIds,["a2","a1"]);
+  const beforeFlush=f.draft.value;
+  assert.equal(frame.pending(),1);assert.equal(beforeFlush,null);
+  frame.flush();
+  // The preview reorders DOM nodes directly; the reactive draft stays
+  // untouched until the drop commits the final order.
+  assert.equal(f.draft.value,null);
   f.revision.value={expectedRevision:5,processGeneration:99};
   assert.equal(f.draft.value,null);assert.equal(handlers.size,0);assert.equal(f.requests.length,0);f.layout.revertActiveArrangement();
+});
+test("finishing a drag applies a pending pointer preview before saving", async()=>{
+  const handlers = new Map<string, (event:PointerEvent)=>unknown>();
+  Object.defineProperty(globalThis,"window",{configurable:true,value:{addEventListener:(name:string,fn:(e:PointerEvent)=>unknown)=>handlers.set(name,fn),removeEventListener:(name:string)=>handlers.delete(name)}});
+  Object.defineProperty(globalThis,"document",{configurable:true,value:{elementFromPoint:()=>({closest:(selector:string)=>selector.includes("account-card")?{dataset:{accountId:"a"}}:{dataset:{credentialId:"a2"}}})}});
+  const frame=stubPreviewFrame();
+  const f=fixture();const handle={setPointerCapture(){},hasPointerCapture(){return true;},releasePointerCapture(){},closest(){return null;}};
+  const event={isPrimary:true,pointerType:"mouse",button:0,pointerId:1,currentTarget:handle,preventDefault(){},clientX:0,clientY:0} as unknown as PointerEvent;
+  f.layout.startCredentialDrag(event,"a","a1");handlers.get("pointermove")!(event);
+  assert.equal(frame.pending(),1);
+  const finishing=handlers.get("pointerup")!(event) as Promise<unknown>;
+  assert.equal(frame.pending(),0);
+  assert.deepEqual(f.requests[0].layout[0].credentialIds,["a2","a1"]);
+  f.pending.resolve();await finishing;f.layout.revertActiveArrangement();
 });

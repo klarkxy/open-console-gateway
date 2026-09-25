@@ -235,6 +235,7 @@ function verifyKey(): void {
   text-align: left;
   background: transparent;
   cursor: pointer;
+  transition: color var(--ocg-motion-fast) var(--ocg-ease);
 }
 
 .managed-wizard__step-btn:disabled {

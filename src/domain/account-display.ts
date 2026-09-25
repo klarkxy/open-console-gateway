@@ -16,8 +16,8 @@ import type { MessageKey } from "../i18n/index.ts";
  * and the per-card overflow menu. Domain functions return semantic codes and
  * raw data only — never MessageKey or t() output. The view layer maps codes
  * through the exported `*_KEYS` tables (see src/views/account-status-text.ts).
- * Everything takes `now` explicitly so the view's 15s clock stays the single
- * re-render driver.
+ * Everything takes `now` explicitly so the view's deadline-driven clock
+ * stays the single re-render driver.
  */
 
 export type AccountStatusTagType = "success" | "warning" | "error" | "default";

@@ -34,13 +34,55 @@ export function useRoutingCardLayout(options: {
   let drag: {
     cardId: string; credentialId?: string; handle: HTMLElement; pointerId: number;
     revision: MutationExpectation; previous: RoutingCardLayoutDraft[];
+    /** Live preview order, moved by pointer events without touching reactive state. */
+    previewCardIds: string[];
+    previewCredentialIds: string[] | null;
+    cardsContainer: HTMLElement | null;
+    rowsContainer: HTMLElement | null;
   } | null = null;
+
+  let previewFrame: number | null = null;
+  let previewEvent: PointerEvent | null = null;
+
+  function dropPendingPreview() {
+    if (previewFrame !== null) { cancelAnimationFrame(previewFrame); previewFrame = null; }
+    previewEvent = null;
+  }
+
+  /** Physically reorder the wrapper elements to `ids`; Vue state is untouched. */
+  function applyDomOrder(container: HTMLElement | null, attr: string, ids: readonly string[]): void {
+    if (!container) return;
+    const wrappers = new Map<string, HTMLElement>();
+    for (const el of Array.from(container.querySelectorAll<HTMLElement>(`[${attr}]`))) {
+      const id = el.getAttribute(attr);
+      if (id) wrappers.set(id, el);
+    }
+    if (wrappers.size !== ids.length) return;
+    let anchor: Node | null = null;
+    for (let index = ids.length - 1; index >= 0; index--) {
+      const el = wrappers.get(ids[index]!);
+      if (!el) return;
+      if (el.nextSibling !== anchor) container.insertBefore(el, anchor);
+      anchor = el;
+    }
+  }
+
+  /** Undo the manual DOM preview so the physical order matches the last Vue render again. */
+  function restoreDomOrder(active: NonNullable<typeof drag>): void {
+    if (active.credentialId) {
+      const card = active.previous.find((item) => item.id === active.cardId);
+      if (card) applyDomOrder(active.rowsContainer, "data-layout-row-id", card.credentialIds);
+    } else {
+      applyDomOrder(active.cardsContainer, "data-layout-card-id", active.previous.map((card) => card.id));
+    }
+  }
 
   function clearDrag() {
     const old = drag;
     drag = null;
     draggingCardId.value = null;
     draggingCredentialId.value = null;
+    dropPendingPreview();
     window.removeEventListener("pointermove", previewDrag);
     window.removeEventListener("pointerup", finishDrag);
     window.removeEventListener("pointercancel", cancelArrangement);
@@ -48,7 +90,14 @@ export function useRoutingCardLayout(options: {
   }
   function cancelArrangement() {
     options.draft.value = null;
-    if (drag) clearDrag();
+    const old = drag;
+    if (old) {
+      clearDrag();
+      // The sync revision/busy watcher runs before the cancelling commit's
+      // render flushes, so restoring here keeps the DOM at the order Vue last
+      // rendered and the patch stays consistent.
+      restoreDomOrder(old);
+    }
   }
   const stopWatch = watch([options.revision, options.busy], ([revision, busy]) => {
     if (!revision) { operation += 1; cancelArrangement(); }
@@ -96,7 +145,21 @@ export function useRoutingCardLayout(options: {
     event.preventDefault();
     const handle = event.currentTarget as HTMLElement;
     handle.setPointerCapture(event.pointerId);
-    drag = { cardId, credentialId, handle, pointerId: event.pointerId, revision: { ...options.revision.value }, previous: clone(activeLayout.value) };
+    const layout = activeLayout.value;
+    drag = {
+      cardId,
+      credentialId,
+      handle,
+      pointerId: event.pointerId,
+      revision: { ...options.revision.value },
+      previous: clone(layout),
+      previewCardIds: layout.map((card) => card.id),
+      previewCredentialIds: credentialId
+        ? [...(layout.find((card) => card.id === cardId)?.credentialIds ?? [])]
+        : null,
+      cardsContainer: handle.closest<HTMLElement>(".account-list"),
+      rowsContainer: credentialId ? handle.closest<HTMLElement>(".destination-rows") : null,
+    };
     if (credentialId) draggingCredentialId.value = credentialId;
     else draggingCardId.value = cardId;
     window.addEventListener("pointermove", previewDrag, { passive: false });
@@ -106,32 +169,60 @@ export function useRoutingCardLayout(options: {
   function previewDrag(event: PointerEvent) {
     if (!drag || drag.pointerId !== event.pointerId) return;
     event.preventDefault();
+    previewEvent = event;
+    if (previewFrame === null) previewFrame = requestAnimationFrame(applyPendingPreview);
+  }
+  /**
+   * Reorder the preview from the latest throttled pointer event; boundary
+   * crossings only. The preview moves DOM nodes directly and keeps the order
+   * in plain drag state, so a mid-drag frame costs one insertBefore instead
+   * of a reactive draft commit that re-renders the whole list.
+   */
+  function applyPendingPreview() {
+    if (previewFrame !== null) { cancelAnimationFrame(previewFrame); previewFrame = null; }
+    const event = previewEvent;
+    previewEvent = null;
+    if (!drag || !event) return;
     const target = document.elementFromPoint(event.clientX, event.clientY);
     const targetCard = target?.closest<HTMLElement>(".account-card[data-account-id]")?.dataset.accountId;
-    const items = clone(activeLayout.value);
     if (drag.credentialId) {
       if (targetCard !== drag.cardId) return;
       const targetRow = target?.closest<HTMLElement>(".credential-row[data-credential-id]")?.dataset.credentialId;
-      const card = items.find(card => card.id === drag!.cardId);
-      if (!card || !targetRow) return;
-      const from = card.credentialIds.indexOf(drag.credentialId);
-      const to = card.credentialIds.indexOf(targetRow);
+      const ids = drag.previewCredentialIds;
+      if (!ids || !targetRow) return;
+      const from = ids.indexOf(drag.credentialId);
+      const to = ids.indexOf(targetRow);
       if (from < 0 || to < 0 || from === to) return;
-      card.credentialIds = moveItem(card.credentialIds, from, to);
-      options.draft.value = items;
+      drag.previewCredentialIds = moveItem(ids, from, to);
+      applyDomOrder(drag.rowsContainer, "data-layout-row-id", drag.previewCredentialIds);
     } else {
-      const from = items.findIndex(card => card.id === drag!.cardId);
-      const to = items.findIndex(card => card.id === targetCard);
+      const ids = drag.previewCardIds;
+      const from = ids.indexOf(drag.cardId);
+      const to = targetCard ? ids.indexOf(targetCard) : -1;
       if (from < 0 || to < 0 || from === to) return;
-      options.draft.value = moveItem(items, from, to);
+      drag.previewCardIds = moveItem(ids, from, to);
+      applyDomOrder(drag.cardsContainer, "data-layout-card-id", drag.previewCardIds);
     }
   }
   async function finishDrag(event: PointerEvent) {
     if (!drag || event.pointerId !== drag.pointerId) return;
+    applyPendingPreview();
     const old = drag;
-    const next = clone(activeLayout.value);
+    const byId = new Map(old.previous.map((card) => [card.id, card] as const));
+    // The drop commits the previewed order once; the render then finds the DOM
+    // already in that order and only reconciles props.
+    const next = old.credentialId
+      ? old.previous.map((card) => (card.id === old.cardId
+        ? { ...card, credentialIds: [...(old.previewCredentialIds ?? card.credentialIds)] }
+        : card))
+      : old.previewCardIds
+        .map((id) => byId.get(id))
+        .filter((card): card is RoutingCardLayoutDraft => Boolean(card));
     clearDrag();
-    if (JSON.stringify(old.previous) === JSON.stringify(next)) { options.draft.value = null; return; }
+    if (next.length !== old.previous.length || JSON.stringify(old.previous) === JSON.stringify(next)) {
+      restoreDomOrder(old);
+      return;
+    }
     await persist(next, old.revision);
   }
   async function handleCardKeydown(event: KeyboardEvent, cardId: string) {

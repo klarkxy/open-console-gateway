@@ -797,6 +797,7 @@ function variantHost(preset: ProviderPreset): string {
   text-align: left;
   background: transparent;
   cursor: pointer;
+  transition: background-color var(--ocg-motion-fast) var(--ocg-ease);
 }
 
 .account-add-item :deep(.n-icon) {

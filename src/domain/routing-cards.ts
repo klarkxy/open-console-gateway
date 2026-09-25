@@ -1,4 +1,5 @@
 import type { Destination, DestinationCredential, RoutingCardView } from "../api/destinations.ts";
+import { moveItem } from "./account-lifecycle.ts";
 import type { DestinationGroup } from "./destination-groups.ts";
 
 /**
@@ -142,6 +143,27 @@ export function moveCredentialToCard(
     ids.splice(at, 0, credentialId);
     return { ...card, credential_ids: ids };
   });
+}
+
+export type RoutingCardMove = "up" | "down" | "top" | "bottom";
+
+/**
+ * Move one card within the saved card order. Returns null when the card is
+ * unknown or already at the requested boundary; never mutates the input.
+ */
+export function moveCardInLayout(
+  cards: readonly RoutingCardView[],
+  cardId: string,
+  move: RoutingCardMove,
+): RoutingCardView[] | null {
+  const from = cards.findIndex((card) => card.id === cardId);
+  if (from < 0) return null;
+  const to = move === "up" ? from - 1
+    : move === "down" ? from + 1
+    : move === "top" ? 0
+    : cards.length - 1;
+  if (to === from || to < 0 || to >= cards.length) return null;
+  return moveItem(cards, from, to);
 }
 
 /** Reorder a credential within its own card; returns null when the move is invalid. */

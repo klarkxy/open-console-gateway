@@ -335,6 +335,7 @@ than a key quota.
   disables an account or prevents the gateway from selecting it. Zen Free and
   Custom API have no purchase-cycle expiry and show no expiry tag or alert.
 - **Priority order.** Reorder cards and the accounts inside them directly. Move a whole card, reorder its rows, or move a Key to another card of the same supplier. To arrange `A1 → B1 → A2`, create another A card and move A2 into it. Pointer and keyboard controls save the same order. Sorting is disabled while filters are active so hidden accounts keep their positions. Empty cards and adjacent cards of the same supplier remain separate.
+- **Card folding and sort mode.** Each card header chevron folds the card to a one-line summary (Key count and enabled count); folding is view-only state saved in this browser across page reloads. A card's overflow menu also offers **Move up**, **Move down**, **Move to top**, and **Move to bottom**, saved through the same full-layout write as dragging. The toolbar **Reorder** toggle switches the list to a compact sort mode: the filters are bypassed and disabled so every card and Key stays visible as a single draggable line, and **Done** exits, restoring the previous filters and folded cards.
 - **Cooldown reset.** You can reset an ordinary cooldown manually from this view. The bar
   snaps back to its local estimate as soon as the cooldown is cleared.
 - **429 cooldown.** A `429` cools its exact Key for 30 seconds unless a valid

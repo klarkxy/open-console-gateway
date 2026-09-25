@@ -4,8 +4,25 @@ import {
   ACCOUNTS_PROJECTION_REFRESH_MS,
   canRefreshAccountsProjection,
   createAccountsProjectionRefresh,
+  projectionUsageRevalidationScope,
   type AccountsProjectionRefreshHost,
 } from "./accounts-projection-refresh.ts";
+
+test("usage revalidation keeps visible rows and countdown rows, skips the rest", () => {
+  const accounts = [
+    { id: "visible" },
+    { id: "countdown" },
+    { id: "both" },
+    { id: "stale" },
+  ];
+  const scoped = projectionUsageRevalidationScope({
+    accounts,
+    idOf: (account) => account.id,
+    visibleIds: new Set(["visible", "both"]),
+    hasCountdown: (account) => account.id === "countdown" || account.id === "both",
+  });
+  assert.deepEqual(scoped.map((account) => account.id), ["visible", "countdown", "both"]);
+});
 
 test("projection refresh runs only while Accounts is active, visible, and authenticated", () => {
   assert.equal(canRefreshAccountsProjection({

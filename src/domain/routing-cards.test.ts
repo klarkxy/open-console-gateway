@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { Destination, DestinationCredential, RoutingCardView } from "../api/destinations.ts";
-import { addEmptyCardAfter, buildRoutingCardGroups, moveCredentialToCard, moveCredentialWithinCard, removeEmptyCard } from "./routing-cards.ts";
+import { addEmptyCardAfter, buildRoutingCardGroups, moveCardInLayout, moveCredentialToCard, moveCredentialWithinCard, removeEmptyCard } from "./routing-cards.ts";
 import { moveItem } from "./account-lifecycle.ts";
 const initial: RoutingCardView[] = [
   { id: "a", destination_id: "supplier-a", credential_ids: ["a1", "a2"] },
@@ -40,4 +40,22 @@ test("row movement keeps card boundaries and leaves the input unchanged", () => 
   assert.deepEqual(moveCredentialWithinCard(initial, "a", "a2", -1)?.[0].credential_ids, ["a2", "a1"]);
   assert.equal(moveCredentialWithinCard(initial, "a", "a1", -1), null);
   assert.deepEqual(initial[0].credential_ids, ["a1", "a2"]);
+});
+test("card movement reorders the layout without touching card contents", () => {
+  const cards: RoutingCardView[] = [...initial, { id: "c", destination_id: "supplier-b", credential_ids: ["c1"] }];
+  assert.deepEqual(moveCardInLayout(cards, "b", "up")?.map(c => c.id), ["b", "a", "c"]);
+  assert.deepEqual(moveCardInLayout(cards, "a", "down")?.map(c => c.id), ["b", "a", "c"]);
+  assert.deepEqual(moveCardInLayout(cards, "c", "top")?.map(c => c.id), ["c", "a", "b"]);
+  assert.deepEqual(moveCardInLayout(cards, "a", "bottom")?.map(c => c.id), ["b", "c", "a"]);
+  assert.deepEqual(moveCardInLayout(cards, "a", "bottom")?.[2].credential_ids, ["a1", "a2"]);
+  assert.deepEqual(cards.map(c => c.id), ["a", "b", "c"]);
+});
+test("card movement rejects boundary and unknown cards", () => {
+  const cards: RoutingCardView[] = [...initial, { id: "c", destination_id: "supplier-b", credential_ids: [] }];
+  assert.equal(moveCardInLayout(cards, "a", "up"), null);
+  assert.equal(moveCardInLayout(cards, "c", "down"), null);
+  assert.equal(moveCardInLayout(cards, "a", "top"), null);
+  assert.equal(moveCardInLayout(cards, "c", "bottom"), null);
+  assert.equal(moveCardInLayout(cards, "missing", "up"), null);
+  assert.equal(moveCardInLayout([initial[0]], "a", "down"), null);
 });

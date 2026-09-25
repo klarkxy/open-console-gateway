@@ -6,6 +6,7 @@
     :class="{
       'credential-row--dragging': dragging,
       'credential-row--unavailable': unavailable,
+      'credential-row--compact': sortMode,
     }"
   >
     <div class="credential-row__head">
@@ -20,82 +21,80 @@
       <n-tag v-if="cpaStatusLabel" size="small" role="status" :type="cpaStatusType">
         {{ cpaStatusLabel }}
       </n-tag>
-      <n-button
-        v-if="modelCount !== null"
-        text
-        size="small"
-        class="credential-models-trigger"
-        :aria-label="t('{count} 个模型', { count: modelCount })"
-        @click="emit('open-models')"
-      >
-        <n-tag size="small" :bordered="false">{{ t("{count} 个模型", { count: modelCount }) }}</n-tag>
-      </n-button>
-      <n-button
-        v-if="canRetryQuota"
-        size="tiny"
-        secondary
-        :loading="quotaRetrying"
-        :aria-label="t('重新尝试')"
-        @click="emit('retry-quota')"
-      >
-        {{ t("重新尝试") }}
-      </n-button>
-      <CredentialTags
-        v-if="account"
-        :account="account"
-        :identity="identity"
-        :catalog="catalog"
-        :limits="limits"
-        :now="now"
-        :purchase-date-saving="purchaseDateSaving"
-        :account-names="accountNames"
-        :extra-tags="extraTags"
-        :duplicate-name="duplicateName"
-        :hide-model-restriction="hideModelCount"
-        @update-purchase-date="emit('update-purchase-date', $event)"
-      />
-      <template v-else>
-        <n-tag
-          v-for="(tag, index) in extraTags"
-          :key="`${tag}:${index}`"
+      <template v-if="!sortMode">
+        <n-button
+          v-if="modelCount !== null"
+          text
           size="small"
-          :bordered="false"
+          class="credential-models-trigger"
+          :aria-label="t('{count} 个模型', { count: modelCount })"
+          @click="emit('open-models')"
         >
-          {{ tag }}
-        </n-tag>
-      </template>
-      <div class="credential-row__actions">
-        <CredentialActions
+          <n-tag size="small" :bordered="false">{{ t("{count} 个模型", { count: modelCount }) }}</n-tag>
+        </n-button>
+        <n-button
+          v-if="canRetryQuota"
+          size="tiny"
+          secondary
+          :loading="quotaRetrying"
+          :aria-label="t('重新尝试')"
+          @click="emit('retry-quota')"
+        >
+          {{ t("重新尝试") }}
+        </n-button>
+        <CredentialTags
           v-if="account"
-          compact
           :account="account"
           :identity="identity"
           :catalog="catalog"
-          :usage="usage"
           :limits="limits"
-          :edits="edits"
           :now="now"
-          :usage-loading="usageLoading"
-          :usage-load-error="usageLoadError"
-          :usage-refresh-loading="usageRefreshLoading"
-          :menu-options="menuOptions"
-          :connections="connections"
-          :show-refresh="showRefresh"
-          :refreshing="refreshing"
-          @toggle="emit('toggle')"
-          @test-connection="emit('test-connection')"
-          @refresh-usage="emit('refresh-usage')"
-          @menu-select="emit('menu-select', $event)"
-          @usage-editor-open="emit('usage-editor-open')"
-          @usage-update-draft="(key, value) => emit('usage-update-draft', key, value)"
-          @usage-update-resets-first="(key, value) => emit('usage-update-resets-first', key, value)"
-          @usage-update-resets-second="(key, value) => emit('usage-update-resets-second', key, value)"
-          @usage-save="(key) => emit('usage-save', key)"
+          :purchase-date-saving="purchaseDateSaving"
+          :account-names="accountNames"
+          :extra-tags="extraTags"
+          :duplicate-name="duplicateName"
+          :hide-model-restriction="hideModelCount"
+          @update-purchase-date="emit('update-purchase-date', $event)"
         />
-      </div>
+        <template v-else>
+          <n-tag
+            v-for="(tag, index) in extraTags"
+            :key="`${tag}:${index}`"
+            size="small"
+            :bordered="false"
+          >
+            {{ tag }}
+          </n-tag>
+        </template>
+        <div class="credential-row__actions">
+          <CredentialActions
+            v-if="account"
+            compact
+            :account="account"
+            :identity="identity"
+            :catalog="catalog"
+            :usage="usage"
+            :limits="limits"
+            :edits="edits"
+            :now="now"
+            :usage-loading="usageLoading"
+            :usage-load-error="usageLoadError"
+            :usage-refresh-loading="usageRefreshLoading"
+            :menu-options="menuOptions"
+            :connections="connections"
+            @toggle="emit('toggle')"
+            @menu-select="emit('menu-select', $event)"
+            @usage-editor-open="emit('usage-editor-open')"
+            @usage-update-draft="(key, value) => emit('usage-update-draft', key, value)"
+            @usage-update-resets-first="(key, value) => emit('usage-update-resets-first', key, value)"
+            @usage-update-resets-second="(key, value) => emit('usage-update-resets-second', key, value)"
+            @usage-save="(key) => emit('usage-save', key)"
+          />
+        </div>
+      </template>
     </div>
     <CredentialBody
-      v-if="account"
+      v-if="account && !sortMode"
       :account="account"
       :identity="identity"
       :catalog="catalog"
@@ -164,13 +163,13 @@ const props = withDefaults(
     figure?: CredentialFigure | null;
     hideModelCount?: boolean;
     duplicateName?: boolean;
-    showRefresh?: boolean;
-    refreshing?: boolean;
     orderDisabled?: boolean;
     dragging?: boolean;
     quotaRetrying?: boolean;
     cpaStatus?: CpaCardStatus | null;
     modelCount?: number | null;
+    /** Compact single-line rendering for card sort mode. */
+    sortMode?: boolean;
   }>(),
   {
     account: null,
@@ -182,13 +181,12 @@ const props = withDefaults(
     figure: null,
     hideModelCount: false,
     duplicateName: false,
-    showRefresh: undefined,
-    refreshing: undefined,
     orderDisabled: true,
     dragging: false,
     quotaRetrying: false,
     cpaStatus: null,
     modelCount: null,
+    sortMode: false,
   },
 );
 
@@ -196,8 +194,6 @@ const emit = defineEmits<{
   toggle: [];
   "order-drag-start": [event: PointerEvent];
   "order-keydown": [event: KeyboardEvent];
-  "test-connection": [];
-  "refresh-usage": [];
   "update-purchase-date": [date: string];
   "reload-usage": [];
   "open-wizard": [];
@@ -236,10 +232,9 @@ const canRetryQuota = computed(() => quotaRetryRequestNeeded(props.credential.qu
 
 <style scoped>
 .credential-order-handle { touch-action: none; cursor: grab; }
-.credential-row--dragging { opacity: 0.65; border-color: var(--ocg-primary); }
+.credential-row--dragging { opacity: 0.65; }
 .credential-row--unavailable {
-  background: color-mix(in srgb, var(--ocg-muted) 12%, var(--ocg-surface));
-  border-color: var(--ocg-border);
+  color: var(--ocg-muted);
 }
 .credential-row--unavailable .credential-row__name {
   color: var(--ocg-muted);
@@ -248,8 +243,15 @@ const canRetryQuota = computed(() => quotaRetryRequestNeeded(props.credential.qu
   display: grid;
   gap: var(--ocg-space-xs);
   padding: var(--ocg-space-sm);
-  border: 1px solid var(--ocg-border);
-  border-radius: var(--ocg-radius-md);
+  transition: background-color var(--ocg-motion-fast) var(--ocg-ease);
+}
+
+.credential-row:hover {
+  background: var(--ocg-surface-sunken);
+}
+
+.credential-row--compact {
+  padding: var(--ocg-space-xs) var(--ocg-space-sm);
 }
 
 .credential-models-trigger {

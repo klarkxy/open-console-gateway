@@ -23,6 +23,7 @@
               :placeholder="t('按方案筛选')"
               :aria-label="t('按方案筛选')"
               :consistent-menu-width="false"
+              :disabled="sortMode"
               size="small"
             />
           </div>
@@ -33,9 +34,19 @@
               :placeholder="t('按状态筛选')"
               :aria-label="t('按状态筛选')"
               :consistent-menu-width="false"
+              :disabled="sortMode"
               size="small"
             />
           </div>
+          <n-button
+            size="small"
+            :type="sortMode ? 'primary' : 'default'"
+            :disabled="sortMode ? orderSaving : !canEnterSortMode"
+            @click="toggleSortMode"
+          >
+            {{ sortMode ? t("完成") : t("调整顺序") }}
+          </n-button>
+          <span v-if="sortMode" class="sort-mode-hint">{{ t("拖拽手柄调整顺序，点击“完成”退出") }}</span>
         </div>
       </div>
 
@@ -153,15 +164,22 @@
         </template>
       </n-empty>
 
-      <div v-if="accountsLoaded && displayedGroupViews.length > 0" class="account-list">
-        <template v-for="view in displayedGroupViews" :key="view.group.id">
+      <MotionConfig v-if="accountsLoaded && displayedGroupViews.length > 0" reduced-motion="user">
+      <div class="account-list">
+        <component
+          :is="cardWrapperComponent"
+          v-for="view in displayedGroupViews"
+          :key="view.group.id"
+          v-bind="cardWrapperProps(view.group.id)"
+          :data-layout-card-id="view.group.id"
+        >
           <DestinationCard
             :group="view.displayGroup"
             :membership="view.group.credentials"
             :parent="view.parent"
             :accounts-by-id="accountsStore.byId"
             :catalog="providerCatalog"
-            :links="view.parent ? platformStore.linksFor(view.parent.id) : []"
+            :links="cardLinksFor(view.parent)"
             :mutating="platformMutating || busy"
             :importing="view.parent ? Boolean(platformStore.importing[view.parent.id]) : false"
             :refreshing="platformRefreshing"
@@ -173,6 +191,13 @@
             :can-remove-empty-card="view.group.credentials.length === 0 && removableEmptyCardIds.has(view.group.id)"
             :arranging-disabled="!arrangementEnabled"
             :cpa-status="cpaStatusFor(view.displayGroup)"
+            :collapsed="!sortMode && collapsedCardIds.has(view.group.id)"
+            :summary="cardSummaryFor(view.group)"
+            :sort-mode="sortMode"
+            :card-first="(cardPositions.get(view.group.id) ?? 0) === 0"
+            :card-last="(cardPositions.get(view.group.id) ?? 0) === destinationsStore.cards.length - 1"
+            @toggle-collapse="toggleCardCollapse(view.group.id)"
+            @move-card="handleCardMove(view.group.id, $event)"
             @order-keydown="handleCardKeydown($event, view.group.id)"
             @order-drag-start="startCardDrag($event, view.group.id)"
             @add-card="addCardAfter(view.group.id)"
@@ -187,30 +212,33 @@
             @fetch-all-models="fetchAllPlatformModels(overlayAccountsFor(view.group))"
           >
             <template #row="{ credential, index, extraTags, figure, duplicateName, hideModelCount, modelCount }">
-              <CredentialRow
-                v-bind="credentialRowBindings(credential, view.displayGroup.destination)"
+              <component
+                :is="cardWrapperComponent"
+                v-bind="rowWrapperProps(credential.id)"
+                :data-layout-row-id="credential.id"
+              >
+                <CredentialRow
+                v-bind="credentialRowBindingsFor(credential, view.displayGroup.destination)"
+                :now="now"
                 :extra-tags="extraTags"
                 :figure="figure"
                 :duplicate-name="duplicateName"
                 :hide-model-count="hideModelCount"
                 :model-count="modelCount"
-                :menu-options="rowMenuOptions(view.group, credential, index)"
+                :menu-options="rowMenuOptionsFor(view.group, credential, index, view.parent)"
                 :order-disabled="!arrangementEnabled || view.group.credentials.length < 2"
                 :dragging="draggingCredentialId === credential.id"
                 :quota-retrying="!!quotaRetrying[credential.id]"
                 :cpa-status="cpaStatusFor(view.displayGroup)"
+                :sort-mode="sortMode"
                 @order-drag-start="startCredentialDrag($event, view.group.id, credential.id)"
                 @order-keydown="handleRowKeydown($event, credential.legacy_account_id)"
-                :show-refresh="view.parent ? true : undefined"
-                :refreshing="view.parent ? !!platformRefreshing[`${view.parent.id}:${credential.legacy_account_id}`] : undefined"
                 :usage-loading="!!usageLoading[credential.legacy_account_id] || (!!view.parent && (platformMutating || busy))"
                 @toggle="toggleAccount(credential.legacy_account_id)"
-                @test-connection="openAccountTest(credential.legacy_account_id)"
-                @refresh-usage="view.parent ? refreshPlatformChild(view.parent, credential.legacy_account_id) : refreshAccountUsage(credential.legacy_account_id)"
                 @update-purchase-date="updatePurchaseDate(credential.legacy_account_id, $event)"
                 @reload-usage="loadAccountUsage(credential.legacy_account_id)"
                 @open-wizard="openManagedWizard(credential.legacy_account_id)"
-                @menu-select="handleMenuSelect($event, credential.legacy_account_id)"
+                @menu-select="handleMenuSelect($event, credential.legacy_account_id, view.parent)"
                 @usage-editor-open="focusUsageEditor(credential.legacy_account_id)"
                 @usage-update-draft="(key, value) => updateUsageDraft(credential.legacy_account_id, key, value)"
                 @usage-update-resets-first="(key, value) => updateResetsFirstField(credential.legacy_account_id, key, value)"
@@ -219,10 +247,12 @@
                 @retry-quota="retryQuotaRecovery(credential.id)"
                 @open-models="openPlatformKeyModels(credential.legacy_account_id)"
               />
+              </component>
             </template>
           </DestinationCard>
-        </template>
+        </component>
       </div>
+      </MotionConfig>
 
       <span class="sr-only" aria-live="polite" aria-atomic="true">{{ orderAnnouncement }}</span>
     </n-space>
@@ -498,10 +528,12 @@ import {
 import {
   addEmptyCardAfter,
   buildRoutingCardGroups,
+  moveCardInLayout,
   moveCredentialToCard,
   moveCredentialWithinCard,
   newRoutingCardId,
   removeEmptyCard,
+  type RoutingCardMove,
 } from "../domain/routing-cards.ts";
 import {
   DESTINATION_LOAD_KEYS,
@@ -510,19 +542,22 @@ import {
   refreshDestinationProjection as loadDestinationProjection,
   type DestinationProjectionRefreshCode,
 } from "../domain/destination-projection-refresh.ts";
-import { quotaRetryRequestNeeded } from "../domain/quota-recovery.ts";
+import { quotaRetryRequestNeeded, credentialHasActiveCooldown, withAccountEnablement } from "../domain/quota-recovery.ts";
+import { accountsNextDeadline, accountsTickDelay } from "../domain/accounts-tick.ts";
 import type { CpaCardStatus } from "../domain/cpa-runtime.ts";
 import {
   ACCOUNTS_PROJECTION_REFRESH_MS,
   browserAccountsProjectionRefreshHost,
   createAccountsProjectionRefresh,
+  projectionUsageRevalidationScope,
 } from "../domain/accounts-projection-refresh.ts";
 import { createRevalidateGate } from "../domain/revalidate.ts";
 import { linkForAccount } from "../domain/platform-accounts.ts";
-import type { PlatformAccount } from "../api/platform-accounts.ts";
-import { useAccountUsage } from "../domain/useAccountUsage.ts";
+import type { PlatformAccount, PlatformLink } from "../api/platform-accounts.ts";
+import { useAccountUsage, type UsageLimitView } from "../domain/useAccountUsage.ts";
 import { accountInferenceEndpointUrl, officialBalanceSupported } from "../domain/upstream-balance.ts";
 import { useRoutingCardLayout } from "./useRoutingCardLayout.ts";
+import { MotionConfig, motion } from "motion-v";
 import {
   filterAccounts,
   plansInUse,
@@ -694,17 +729,115 @@ const editingEndpointLockHint = computed(() => {
 const OLLAMA_WEBSITE_URL = "https://ollama.com";
 
 const statusFilter = ref<AccountStatusFilter>("all");
-// The provider catalog lives in the providers store (single owner); this
-// view only tracks its own loading/error presentation around the fetch.
+// Card collapse persists across reloads (localStorage); sort mode stays
+// in-memory. Sort mode bypasses the plan/status filters (dragging operates on
+// the full layout, which the routing-cards replacement write requires) and
+// restores the previous filter and collapse values untouched on exit.
+const COLLAPSED_CARDS_STORAGE_KEY = "ocg-manager.accounts-collapsed-cards";
+function readCollapsedCardIds(): ReadonlySet<string> {
+  try {
+    const raw = window.localStorage.getItem(COLLAPSED_CARDS_STORAGE_KEY);
+    const parsed: unknown = raw ? JSON.parse(raw) : [];
+    if (!Array.isArray(parsed)) return new Set();
+    return new Set(parsed.filter((id): id is string => typeof id === "string"));
+  } catch {
+    return new Set();
+  }
+}
+const collapsedCardIds = ref<ReadonlySet<string>>(readCollapsedCardIds());
+watch(collapsedCardIds, (ids) => {
+  try {
+    window.localStorage.setItem(COLLAPSED_CARDS_STORAGE_KEY, JSON.stringify([...ids]));
+  } catch {
+    // Private/locked-down browsers can reject persistence; the in-memory state still works.
+  }
+});
+const sortMode = ref(false);
+const effectivePlanFilter = computed<AccountPlanFilter>(() => sortMode.value ? "all" : planFilter.value);
+const effectiveStatusFilter = computed<AccountStatusFilter>(() => sortMode.value ? "all" : statusFilter.value);
+const canEnterSortMode = computed(() => (
+  destinationsStore.loaded
+  && destinationsStore.cards.length > 0
+  && !busy.value
+  && !platformMutating.value
+));
+function toggleSortMode(): void {
+  if (sortMode.value) {
+    sortMode.value = false;
+    return;
+  }
+  if (!canEnterSortMode.value) return;
+  cancelArrangement();
+  sortMode.value = true;
+}
+function toggleCardCollapse(cardId: string): void {
+  const next = new Set(collapsedCardIds.value);
+  if (next.has(cardId)) next.delete(cardId);
+  else next.add(cardId);
+  collapsedCardIds.value = next;
+}
+function sameInputs(a: readonly unknown[], b: readonly unknown[]): boolean {
+  return a.length === b.length && a.every((value, index) => Object.is(value, b[index]));
+}
+
+/**
+ * Per-key memo for row/card props. A re-render triggered by an unrelated
+ * commit (clock tick, billing slot write, another row's usage) reuses the
+ * cached object while every input reference is unchanged, so the row
+ * component sees identical props and skips its own update.
+ */
+function createKeyedMemo<K>() {
+  const cache = new Map<K, { inputs: readonly unknown[]; value: unknown }>();
+  return {
+    get<V>(key: K, inputs: readonly unknown[], build: () => V): V {
+      const hit = cache.get(key);
+      if (hit && sameInputs(hit.inputs, inputs)) return hit.value as V;
+      const value = build();
+      cache.set(key, { inputs, value });
+      return value;
+    },
+    prune(keys: ReadonlySet<K>): void {
+      for (const key of Array.from(cache.keys())) if (!keys.has(key)) cache.delete(key);
+    },
+  };
+}
+
+const cardSummaryMemo = createKeyedMemo<string>();
+const cardLinksMemo = createKeyedMemo<string>();
+/** Stable per-parent link list; `linksFor` filters a fresh array on every call. */
+function cardLinksFor(parent: PlatformAccount | null) {
+  if (!parent) return EMPTY_LINKS;
+  const links = platformStore.links;
+  return cardLinksMemo.get(parent.id, [links], () => platformStore.linksFor(parent.id));
+}
+const EMPTY_LINKS: PlatformLink[] = [];
+function cardSummaryFor(group: DestinationGroup): { total: number; enabled: number } {
+  const byId = accountsStore.byId;
+  return cardSummaryMemo.get(group.id, [group.credentials, byId], () => {
+    let enabled = 0;
+    for (const credential of group.credentials) {
+      const account = overlayAccountForCredential(credential, byId);
+      if (withAccountEnablement(credential, account?.enabled).enabled) enabled += 1;
+    }
+    return { total: group.credentials.length, enabled };
+  });
+}
+const cardPositions = computed(() => new Map(
+  destinationsStore.cards.map((card, index) => [card.id, index] as const)),
+);
+// The catalog is store-owned so preset-brand prefetch and cross-page caching
+// apply; this view only tracks its own loading/error surface.
 const providerCatalog = computed(() => providersStore.catalog);
 const catalogLoading = ref(false);
 const catalogError = ref("");
 const platformMutating = computed(() => platformStore.mutating);
 
 const {
+  quotaLimits,
   quotaLimitsLoading,
   quotaLimitsError,
   usageLimitsFor,
+  usageMap,
   providerUsageMap,
   usageEdits,
   usageLoading,
@@ -767,7 +900,7 @@ const committedCardLayout = computed(() => destinationsStore.cards.map((card) =>
 })));
 
 const arrangementBlocked = computed(() => busy.value || platformMutating.value
-  || planFilter.value !== "all" || statusFilter.value !== "all" || !destinationsStore.loaded);
+  || effectivePlanFilter.value !== "all" || effectiveStatusFilter.value !== "all" || !destinationsStore.loaded);
 async function saveCardLayout(layout: { id: string; destinationId: string; credentialIds: string[] }[], revision: MutationExpectation): Promise<void> {
   await destinationsStore.replaceRoutingCardLayout(layout, revision);
 }
@@ -785,7 +918,23 @@ const {
   refreshConflict: () => Promise.all([accountsStore.loadPresented(), identitiesStore.loadPresented(), providersStore.loadConnections()]),
 });
 const arrangementEnabled = computed(() => !arrangementBlocked.value && !orderSaving.value);
-const arrangementDisabledHint = computed(() => planFilter.value !== "all" || statusFilter.value !== "all"
+/** Calm position-only FLIP for card/row reorders; the dragged element itself snaps. */
+const arrangementLayoutTransition = { layout: { duration: 0.18, ease: "easeOut" } };
+// Layout FLIP measurement only pays off while arranging: outside sort mode
+// the wrappers render as plain divs, so a store commit or clock tick never
+// triggers a motion measurement pass over the whole list.
+const cardWrapperComponent = computed(() => (sortMode.value ? motion.div : "div"));
+function cardWrapperProps(cardId: string): Record<string, unknown> {
+  return sortMode.value
+    ? { layout: draggingCardId.value === cardId ? false : "position", transition: arrangementLayoutTransition }
+    : {};
+}
+function rowWrapperProps(credentialId: string): Record<string, unknown> {
+  return sortMode.value
+    ? { layout: draggingCredentialId.value === credentialId ? false : "position", transition: arrangementLayoutTransition }
+    : {};
+}
+const arrangementDisabledHint = computed(() => effectivePlanFilter.value !== "all" || effectiveStatusFilter.value !== "all"
   ? t("清除筛选后可调整顺序") : "");
 const removableEmptyCardIds = computed(() => new Set(destinationsStore.cards
   .filter(card => card.credential_ids.length === 0 && destinationsStore.cards.some(other => other.id !== card.id && other.destination_id === card.destination_id))
@@ -801,6 +950,11 @@ async function addCardAfter(cardId: string) {
 async function removeEmptyCardById(cardId: string) {
   if (!arrangementEnabled.value) return;
   const next = removeEmptyCard(destinationsStore.cards, cardId);
+  if (next) await applyLayoutChange(draftCards(next));
+}
+async function handleCardMove(cardId: string, move: RoutingCardMove) {
+  if (!arrangementEnabled.value) return;
+  const next = moveCardInLayout(destinationsStore.cards, cardId, move);
   if (next) await applyLayoutChange(draftCards(next));
 }
 const moveToCardState = ref<string | null>(null);
@@ -901,8 +1055,8 @@ const canCreateManagedDraft = computed(() => (
 const visibleAccountIds = computed(() => new Set(
   filterAccounts(
     accounts.value,
-    planFilter.value,
-    statusFilter.value,
+    effectivePlanFilter.value,
+    effectiveStatusFilter.value,
     now.value,
     providerCatalog.value,
     destinationsStore.destinationForAccount,
@@ -912,14 +1066,15 @@ const visibleAccountIds = computed(() => new Set(
 const displayedGroups = computed(() => {
   const visibleIds = visibleAccountIds.value;
   const knownIds = knownAccountIds.value;
+  const unfiltered = effectivePlanFilter.value === "all" && effectiveStatusFilter.value === "all";
   return allGroups.value.filter((group) => {
     if (group.credentials.length === 0) {
       if (isVacatedCustomShell(group, destinationsStore.credentials)) return false;
-      return planFilter.value === "all" && statusFilter.value === "all";
+      return unfiltered;
     }
     if (group.destination.legacy.kind === "platform_parent") {
-      if (group.credentials.length === 0) return planFilter.value === "all" && statusFilter.value === "all";
-      if (planFilter.value !== "all" && planFilter.value !== "custom") return false;
+      if (group.credentials.length === 0) return unfiltered;
+      if (effectivePlanFilter.value !== "all" && effectivePlanFilter.value !== "custom") return false;
       return group.credentials.some((credential) => (
         includeCredentialRow(credential, visibleIds, knownIds)
       ));
@@ -963,6 +1118,23 @@ const displayedGroupViews = computed((): DisplayedGroupView[] => {
 
 const platformRefreshing = computed(() => platformStore.refreshing);
 const platformPendingLink = computed(() => platformStore.pendingLink);
+
+// Drop memo entries for cards/rows that left the projection so the caches
+// cannot grow across deletions and imports.
+watch(displayedGroupViews, (views) => {
+  const cardIds = new Set<string>();
+  const credentialIds = new Set<string>();
+  const parentIds = new Set<string>();
+  for (const view of views) {
+    cardIds.add(view.group.id);
+    if (view.parent) parentIds.add(view.parent.id);
+    for (const credential of view.displayGroup.credentials) credentialIds.add(credential.id);
+  }
+  cardSummaryMemo.prune(cardIds);
+  cardLinksMemo.prune(parentIds);
+  rowBindingsMemo.prune(credentialIds);
+  rowMenuMemo.prune(credentialIds);
+});
 
 const planFilterOptions = computed(() => [
   { value: "all", label: t("全部方案") },
@@ -1085,20 +1257,46 @@ function refreshCpaSnapshot(): void {
   void cpaStore.load().catch(() => undefined);
 }
 
-function credentialRowBindings(credential: DestinationCredential, destination: Destination) {
+const EMPTY_ROW_LIMITS: UsageLimitView[] = [];
+const rowBindingsMemo = createKeyedMemo<string>();
+/**
+ * Row props bundle, memoized per credential. `now` is deliberately not part
+ * of the bundle — it is passed as its own prop so a clock tick does not
+ * rebuild every row's bindings, and the memo inputs stay tick-independent.
+ */
+function credentialRowBindingsFor(credential: DestinationCredential, destination: Destination) {
   const account = overlayAccountForCredential(credential, accountsStore.byId) ?? null;
   const overlayId = account?.id ?? credential.legacy_account_id;
-  return {
+  const usage = usageMap.value[overlayId] ?? null;
+  const providerUsage = providerUsageMap.value[overlayId] ?? null;
+  return rowBindingsMemo.get(credential.id, [
+    credential,
+    destination,
+    account,
+    identityForCard(overlayId),
+    providerCatalog.value,
+    usage,
+    providerUsage,
+    quotaLimits.value,
+    usageEdits.value[overlayId] ?? null,
+    !!usageLoading.value[overlayId],
+    usageLoadErrors.value[overlayId] ?? null,
+    !!usageRefreshLoading.value[overlayId],
+    !!purchaseDateSaving.value[overlayId],
+    busy.value,
+    !!quotaLimitsError.value,
+    accountNamesById.value,
+    providersStore.connections ?? null,
+  ], () => ({
     credential,
     destination,
     account,
     identity: identityForCard(overlayId),
     catalog: providerCatalog.value,
-    usage: getUsage(overlayId),
-    providerUsage: providerUsageMap.value[overlayId] ?? null,
-    limits: account ? usageLimitsFor(account) : [],
+    usage: usage ?? getUsage(overlayId),
+    providerUsage,
+    limits: account ? usageLimitsFor(account) : EMPTY_ROW_LIMITS,
     edits: usageEdits.value[overlayId],
-    now: now.value,
     usageLoading: !!usageLoading.value[overlayId],
     usageLoadError: usageLoadErrors.value[overlayId] ?? null,
     usageRefreshLoading: !!usageRefreshLoading.value[overlayId],
@@ -1106,13 +1304,14 @@ function credentialRowBindings(credential: DestinationCredential, destination: D
     quotaLimitsFailed: !!quotaLimitsError.value,
     accountNames: accountNamesById.value,
     connections: providersStore.connections,
-  };
+  }));
 }
 
 function rowMenuOptions(
   group: DestinationGroup,
   credential: DestinationCredential,
   index: number,
+  parent: PlatformAccount | null,
 ): AccountMenuOption[] {
   const at = group.credentials.findIndex((row) => row.id === credential.id);
   const resolved = at >= 0 ? at : index;
@@ -1123,20 +1322,80 @@ function rowMenuOptions(
   };
   const moves = groupMoveMenuOptions(menuTarget, resolved, group.credentials.length, { canMoveToCard: true })
     .map(option => ({ ...option, disabled: !arrangementEnabled.value || Boolean(option.disabled) }));
+  const utilities: AccountMenuOption[] = [];
+  if (overlay) {
+    utilities.push({
+      key: "refresh-usage",
+      label: t("刷新"),
+      accountId: menuTarget.id,
+      accountName: menuTarget.name,
+      disabled: parent
+        ? platformMutating.value || busy.value || !!platformRefreshing.value[`${parent.id}:${credential.legacy_account_id}`]
+        : busy.value || !!usageRefreshLoading.value[overlay.id],
+    });
+    if (accountCapabilities(overlay, providerCatalog.value, destinationForAccountId(overlay.id)).testable) {
+      utilities.push({
+        key: "test-connection",
+        label: t("测试连接"),
+        accountId: menuTarget.id,
+        accountName: menuTarget.name,
+        disabled: busy.value || !accountIsReady(overlay),
+      });
+    }
+  }
   if (group.destination.legacy.kind === "platform_parent") {
     const blocked = platformMutating.value || busy.value;
     return [
+      ...utilities,
       { key: "fetch-models", accountId: menuTarget.id, accountName: menuTarget.name, disabled: blocked },
       ...moves.map((option) => ({ ...option, disabled: blocked || Boolean(option.disabled) })),
       { key: "edit-key", accountId: menuTarget.id, accountName: menuTarget.name, disabled: blocked },
       { key: "unlink", accountId: menuTarget.id, accountName: menuTarget.name, disabled: blocked },
     ];
   }
-  return overlay ? [...cardMenuOptions(overlay), ...moves] : moves;
+  return overlay ? [...utilities, ...cardMenuOptions(overlay), ...moves] : [...utilities, ...moves];
 }
 
-function handleMenuSelect(key: string | number, accountId: string) {
+const rowMenuMemo = createKeyedMemo<string>();
+/** Memoized per credential; `now` is an input because cooling state gates menu items. */
+function rowMenuOptionsFor(
+  group: DestinationGroup,
+  credential: DestinationCredential,
+  index: number,
+  parent: PlatformAccount | null,
+): AccountMenuOption[] {
+  const overlay = overlayAccountForCredential(credential, accountsStore.byId) ?? null;
+  const overlayId = overlay?.id ?? credential.legacy_account_id;
+  return rowMenuMemo.get(credential.id, [
+    credential,
+    group.credentials,
+    index,
+    overlay,
+    parent,
+    arrangementEnabled.value,
+    platformMutating.value,
+    busy.value,
+    parent ? !!platformRefreshing.value[`${parent.id}:${credential.legacy_account_id}`] : false,
+    overlay ? !!usageRefreshLoading.value[overlay.id] : false,
+    providerCatalog.value,
+    identityForCard(overlayId),
+    destinationForAccountId(overlayId),
+    providersStore.connections ?? null,
+    now.value,
+  ], () => rowMenuOptions(group, credential, index, parent));
+}
+
+function handleMenuSelect(key: string | number, accountId: string, parent: PlatformAccount | null = null) {
   if (busy.value) return;
+  if (key === "refresh-usage") {
+    if (parent) refreshPlatformChild(parent, accountId);
+    else refreshAccountUsage(accountId);
+    return;
+  }
+  if (key === "test-connection") {
+    openAccountTest(accountId);
+    return;
+  }
   if (key === "rotate-key") {
     void openCredentialModal(accountId, "rotate");
     return;
@@ -2273,8 +2532,13 @@ async function toggleAccount(id: string) {
   try {
     const updated = await dashboardApi.toggleAccount(id);
     replaceAccount(updated);
-    const destRefreshed = await refreshDestinationProjection();
-    if (!destRefreshed) notifyDestinationRefreshFailure();
+    // The toggle only flips this Key's enablement; commit the accepted value
+    // onto its projected credential in place instead of refetching the whole
+    // destination snapshot. The 409 path below still reloads everything.
+    const credential = destinationsStore.credentialsByLegacyAccountId.get(id);
+    if (credential && credential.enabled !== updated.enabled) {
+      destinationsStore.upsertCredential({ ...credential, enabled: updated.enabled });
+    }
   } catch (e) {
     if (await recoverAccountMutationConflict(e)) return;
     message.error(t("切换失败：{error}", { error: dashboardErrorDetail(e) }));
@@ -2294,9 +2558,10 @@ async function reloadControlPlaneView(): Promise<boolean> {
   for (const id of knownIds) {
     if (!loadedIds.has(id)) removeAccountState(id);
   }
+  // Only the CAS-tracked projections are invalidated by an account/credential
+  // conflict; provider connections are not, so they keep their cached list.
   await Promise.allSettled([
     loadIdentitiesOverlay(),
-    providersStore.loadConnections(),
     destinationsStore.load(),
   ]);
   if (editingAccount.value) {
@@ -2412,22 +2677,75 @@ async function resetCooldown(id: string) {
   }
 }
 
+const providerUsageWindows = computed(() => (
+  Object.values(providerUsageMap.value).flatMap((usage) => usage.quota_windows)
+));
+
+// Nearest future moment a `now`-driven display (cooldown tags, quota-retry
+// countdowns, quota-window reset captions) changes state; null means nothing
+// is time-sensitive and the clock may idle at the coarse fallback rate.
+const accountsClockDeadline = computed(() => accountsNextDeadline({
+  accounts: accounts.value,
+  credentials: destinationsStore.credentials,
+  quotaWindows: providerUsageWindows.value,
+  now: now.value,
+}));
+
 let clock: number | undefined;
 let activatedOnce = false;
 
+function nextAccountsClockDelay(): number {
+  const at = Date.now();
+  return accountsTickDelay(accountsNextDeadline({
+    accounts: accounts.value,
+    credentials: destinationsStore.credentials,
+    quotaWindows: providerUsageWindows.value,
+    now: at,
+  }), at);
+}
+
+function tickClock() {
+  clock = undefined;
+  now.value = Date.now();
+  startClock();
+}
+
 function startClock() {
   if (clock === undefined) {
-    clock = window.setInterval(() => {
-      now.value = Date.now();
-    }, 15_000);
+    clock = window.setTimeout(tickClock, nextAccountsClockDelay());
   }
 }
 
 function stopClock() {
   if (clock !== undefined) {
-    window.clearInterval(clock);
+    window.clearTimeout(clock);
     clock = undefined;
   }
+}
+
+// Store commits (cooldown writes, quota probes, usage revalidation) move the
+// deadline. Re-arm only when the computed deadline actually changed, so
+// batched reloads never churn timers. While deactivated the clock stays off;
+// onActivated re-arms from fresh data.
+watch(accountsClockDeadline, () => {
+  if (clock === undefined) return;
+  window.clearTimeout(clock);
+  clock = window.setTimeout(tickClock, nextAccountsClockDelay());
+});
+
+/**
+ * True while the account's rendered state flips on its own as time passes
+ * (cooldown tag or quota-retry countdown). Those rows need fresh billing data
+ * on every projection tick; rows without a countdown keep their committed
+ * usage until an explicit refresh or mutation receipt updates them.
+ */
+function accountHasActiveCountdown(account: Account): boolean {
+  if (isCooling(account, now.value)) return true;
+  const credential = destinationsStore.credentialsByLegacyAccountId.get(account.id);
+  if (!credential) return false;
+  if (quotaRetryRequestNeeded(credential.quota_recovery)) return true;
+  const destination = destinationsStore.destinationForAccount(account.id);
+  return destination ? credentialHasActiveCooldown(credential, destination, now.value) : false;
 }
 
 const projectionRefresh = createAccountsProjectionRefresh({
@@ -2435,10 +2753,16 @@ const projectionRefresh = createAccountsProjectionRefresh({
   isAuthenticated: () => sessionStore.authenticated,
   refresh: async () => {
     if (!destinationsStore.loaded) return;
+    const targets = projectionUsageRevalidationScope({
+      accounts: accounts.value.filter(account => accountIsReady(account) && accountHasUsageDisplay(account)),
+      idOf: (account) => account.id,
+      visibleIds: visibleAccountIds.value,
+      hasCountdown: accountHasActiveCountdown,
+    });
     await Promise.all([
       destinationsStore.load().catch(() => undefined),
       mapWithConcurrency(
-        accounts.value.filter(account => accountIsReady(account) && accountHasUsageDisplay(account)),
+        targets,
         4,
         account => revalidateAccountUsage(account.id),
       ),
@@ -2463,9 +2787,11 @@ onMounted(() => {
   void initializeAccounts();
 });
 // This view is kept alive by App.vue; coarse states (cooling tags, editor
-// enablement) recompute on a 15s clock. Returning to the view refreshes
-// server-side cooldown changes. Local V4 destination/card revalidation is
-// a separate 15s timer gated on visibility and auth.
+// enablement) recompute on a deadline-driven clock — at most every 15s while
+// time-sensitive states exist, otherwise a 5-minute idle fallback. Returning
+// to the view refreshes server-side cooldown changes. Local V4
+// destination/card revalidation is a separate 15s timer gated on visibility
+// and auth.
 onActivated(() => {
   startClock();
   projectionRefresh.activate();
@@ -2473,7 +2799,7 @@ onActivated(() => {
   applyAccountAddDeepLink();
   applyCachedAccountDeepLink();
   if (!activatedOnce) { activatedOnce = true; return; }
-  if (!fullRefreshGate.shouldRun()) return;
+  if (!accountListError.value && !catalogError.value && !fullRefreshGate.shouldRun()) return;
   fullRefreshGate.record();
   // initializeAccounts already covers destinations and the CPA snapshot.
   void initializeAccounts();
@@ -2482,6 +2808,7 @@ onActivated(() => {
 onDeactivated(() => {
   stopClock();
   projectionRefresh.deactivate();
+  sortMode.value = false;
   cancelArrangement();
 });
 onUnmounted(() => {
@@ -2552,6 +2879,12 @@ onUnmounted(() => {
 
 .accounts-filter-bar .n-select {
   min-width: 160px;
+}
+
+.sort-mode-hint {
+  font-size: var(--ocg-font-xs);
+  color: var(--ocg-subtle);
+  align-self: center;
 }
 
 @media (max-width: 640px) {

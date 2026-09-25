@@ -1,5 +1,22 @@
 export const ACCOUNTS_PROJECTION_REFRESH_MS = 15_000;
 
+/**
+ * Scope of one billing revalidation pass: accounts whose row is on screen, or
+ * whose display changes with time (cooldown / quota-retry countdown), need
+ * fresh usage; everything else keeps its last committed usage. Explicit
+ * refreshes and mutation receipts still update the skipped accounts.
+ */
+export function projectionUsageRevalidationScope<T>(input: {
+  accounts: readonly T[];
+  idOf: (account: T) => string;
+  visibleIds: ReadonlySet<string>;
+  hasCountdown: (account: T) => boolean;
+}): T[] {
+  return input.accounts.filter((account) => (
+    input.visibleIds.has(input.idOf(account)) || input.hasCountdown(account)
+  ));
+}
+
 export function canRefreshAccountsProjection(input: {
   viewActive: boolean;
   documentVisible: boolean;
