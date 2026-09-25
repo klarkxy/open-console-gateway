@@ -46,6 +46,13 @@ jobs:
           echo '9bbe2f7e902e0b59d9dcf9920bcc60252e0ffe8765e9e4e8b2418f54c25e8b0d  ../change.patch' | sha256sum --check
           git apply --check ../change.patch
           git apply ../change.patch
+          python3 - <<'PYFIX'
+          from pathlib import Path
+          p = Path('crates/ocg-core/src/dashboard_v4/temporary_policies/tests.rs')
+          text = p.read_text()
+          assert text.count('unwrap_err().status,') == 1
+          p.write_text(text.replace('use super::*;', 'use super::*;\nuse axum::response::IntoResponse;').replace('unwrap_err().status,', 'unwrap_err().into_response().status(),'))
+          PYFIX
           cargo fmt --all
       - name: Focused Rust regression tests
         working-directory: candidate
