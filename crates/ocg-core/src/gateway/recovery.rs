@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 mod context;
+mod policies;
 pub(crate) use context::ResourceSet;
 
 const MAX_TRACKED_RESOURCES: usize = 4096;
@@ -21,12 +22,24 @@ const MAX_PROBE_SECS: u64 = 300;
 pub(super) enum ResourceKind {
     /// Independent upstream not-before for a persistent per-Key quota episode.
     CredentialRetry,
+    /// Header constraint independent of any configurable local rule.
+    CredentialModelRetry,
+    PolicyCredential,
+    PolicyCredentialModel,
     EndpointModel,
     Credits,
     FiveHours,
     Week,
     Month,
     FreeEgress,
+}
+impl ResourceKind {
+    fn header_only(self) -> bool {
+        matches!(self, Self::CredentialRetry | Self::CredentialModelRetry)
+    }
+    fn credential_scoped(self) -> bool {
+        self.header_only() || matches!(self, Self::PolicyCredential | Self::PolicyCredentialModel)
+    }
 }
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub(super) struct ResourceKey {
@@ -55,6 +68,8 @@ struct Slot {
     next_probe: Option<Instant>,
     probe_owner: Option<u64>,
     failures: u32,
+    policy: Option<policies::PolicyResource>,
+    policy_id: String,
 }
 impl Slot {
     fn restricted(&self) -> bool {
@@ -138,7 +153,7 @@ impl RecoveryRuntime {
         inner.slots.retain(|key, slot| {
             // A credential not-before has no probe to clear it. Once elapsed,
             // release it so expired hints cannot accumulate toward capacity.
-            if key.kind == ResourceKind::CredentialRetry
+            if key.kind.header_only()
                 && matches!(slot.upstream_not_before, Some(RetryHint::Until(at)) if at <= wall)
             {
                 slot.upstream_not_before = None;
@@ -192,8 +207,15 @@ impl RecoveryRuntime {
         let ticket = inner.sequence;
         let claims = keys
             .into_iter()
-            .map(|key| {
+            .enumerate()
+            .map(|(index, key)| {
                 let slot = inner.slots.entry(key.clone()).or_default();
+                if let Some(policy) = resources.policy_for(&key) {
+                    slot.policy = Some(policy.clone());
+                    if slot.policy_id.is_empty() {
+                        slot.policy_id = format!("{ticket}-{index}");
+                    }
+                }
                 slot.owner_generation = resources.owner_generation(&key);
                 for owner in resources.owners(&key) {
                     if !slot.owners.contains(owner) {
@@ -201,9 +223,8 @@ impl RecoveryRuntime {
                     }
                 }
                 slot.active += 1;
-                let probe = key.kind != ResourceKind::CredentialRetry
-                    && resources.enforces(&key)
-                    && slot.restricted();
+                let probe =
+                    !key.kind.header_only() && resources.enforces(&key) && slot.restricted();
                 if probe {
                     slot.probe_owner = Some(ticket);
                 }
@@ -334,6 +355,17 @@ impl RecoveryPermit {
     }
 
     fn observe_key(&mut self, key: ResourceKey, decision: FailureDecision, mono: Instant) {
+        self.observe_key_with_backoff(key, decision, mono, INITIAL_PROBE_SECS, MAX_PROBE_SECS);
+    }
+
+    fn observe_key_with_backoff(
+        &mut self,
+        key: ResourceKey,
+        decision: FailureDecision,
+        mono: Instant,
+        initial: u64,
+        maximum: u64,
+    ) {
         if !decision.wait_for_recovery && decision.retry_not_before.is_none() {
             return;
         }
@@ -354,11 +386,11 @@ impl RecoveryPermit {
             }
             slot.awaiting_recovery = true;
             // Bounded local probe policy, explicitly not an upstream reset.
-            let base = INITIAL_PROBE_SECS
-                .saturating_mul(1u64 << slot.failures.saturating_sub(1).min(4))
-                .min(MAX_PROBE_SECS);
+            let base = initial
+                .saturating_mul(1u64 << slot.failures.saturating_sub(1).min(31))
+                .min(maximum);
             let jitter = u64::from(key.generation[0]) % (base / 10 + 1);
-            let next = mono + Duration::from_secs((base + jitter).min(MAX_PROBE_SECS));
+            let next = mono + Duration::from_secs((base + jitter).min(maximum));
             slot.next_probe = Some(slot.next_probe.map_or(next, |old| old.max(next)));
         }
         if let Some(hint) = decision.retry_not_before {
@@ -395,7 +427,13 @@ impl Drop for RecoveryPermit {
                     // Cancellation, malformed 2xx, or an unrelated error is not
                     // proof of recovery. Leave a small local recheck interval.
                     if !self.observed.contains(&claim.key) && slot.restricted() {
-                        let next = self.cancelled_probe_at + self.lease_started.elapsed();
+                        let initial = slot
+                            .policy
+                            .as_ref()
+                            .map_or(INITIAL_PROBE_SECS, |p| p.rule.rule.initial_seconds);
+                        let next = self.cancelled_probe_at
+                            + self.lease_started.elapsed()
+                            + Duration::from_secs(initial.saturating_sub(INITIAL_PROBE_SECS));
                         slot.next_probe = Some(slot.next_probe.map_or(next, |at| at.max(next)));
                     }
                 }

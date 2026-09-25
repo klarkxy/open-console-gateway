@@ -1,9 +1,12 @@
 //! Host snapshot of an authorized route and explicitly stored quota membership.
 //! Identity digests contain no plaintext Key and are never serialized to logs.
+use super::policies::PolicyResource;
 use super::{ResourceKey, ResourceKind, kind_for};
 use crate::db::Database;
+use crate::db::temporary_policy::SavedRules;
 use crate::gateway::failure::FailureFacts;
 use crate::routing_snapshot::{ExecutionCredential, RoutingSnapshot};
+use crate::temporary_policy::TemporaryRuleScope;
 use anyhow::Result;
 use sha2::{Digest, Sha256};
 
@@ -16,6 +19,7 @@ pub(crate) struct ResourceSet {
     owner: String,
     pub(super) members: Vec<String>,
     free_contract: bool,
+    pub(super) policies: Vec<PolicyResource>,
 }
 impl ResourceSet {
     pub(crate) fn capture(
@@ -26,7 +30,11 @@ impl ResourceSet {
         free_contract: bool,
     ) -> Result<Self> {
         let snapshot = RoutingSnapshot::load(db)?;
-        Self::from_snapshot(&snapshot, account, endpoint, model, free_contract)
+        let mut resources =
+            Self::from_snapshot(&snapshot, account, endpoint, model, free_contract)?;
+        let rules = crate::db::temporary_policy::load_on(&db.conn)?;
+        resources.add_policies(&rules, account, endpoint, model);
+        Ok(resources)
     }
     pub(crate) fn from_snapshot(
         snapshot: &RoutingSnapshot,
@@ -83,17 +91,76 @@ impl ResourceSet {
             owner: account.id.clone(),
             members,
             free_contract,
+            policies: Vec::new(),
         })
     }
+    pub(super) fn add_policies(
+        &mut self,
+        saved: &SavedRules,
+        account: &ExecutionCredential,
+        endpoint: &str,
+        model: &str,
+    ) {
+        // Anonymous shared Free keeps its existing declared egress policy.
+        if self.free_contract {
+            return;
+        }
+        self.policies = saved
+            .effective(&account.destination_id)
+            .into_iter()
+            .filter_map(|rule| {
+                if rule.rule.scope == TemporaryRuleScope::CredentialModel && model.is_empty() {
+                    return None; // Missing model never widens the configured scope.
+                }
+                let kind = match rule.rule.scope {
+                    TemporaryRuleScope::Credential => ResourceKind::PolicyCredential,
+                    TemporaryRuleScope::CredentialModel => ResourceKind::PolicyCredentialModel,
+                };
+                let version = rule.revision.to_le_bytes();
+                let route = if kind == ResourceKind::PolicyCredentialModel {
+                    &self.endpoint[..]
+                } else {
+                    &[]
+                };
+                let generation = digest(&[
+                    &self.credential,
+                    route,
+                    rule.rule.id.as_bytes(),
+                    rule.rule.destination_id.as_deref().unwrap_or("").as_bytes(),
+                    &version,
+                ]);
+                Some(PolicyResource {
+                    key: ResourceKey { kind, generation },
+                    retry_key: self.key(ResourceKind::CredentialModelRetry),
+                    credential_key: self.key(ResourceKind::CredentialRetry),
+                    rule,
+                    credential_id: account.credential_id.clone(),
+                    account_id: account.id.clone(),
+                    destination_id: account.destination_id.clone(),
+                    endpoint: endpoint.into(),
+                    model: model.into(),
+                })
+            })
+            .collect();
+    }
+
+    pub(super) fn credential_generation(&self) -> [u8; 32] {
+        self.credential
+    }
+
+    pub(super) fn policy_for(&self, key: &ResourceKey) -> Option<&PolicyResource> {
+        self.policies.iter().find(|policy| policy.key == *key)
+    }
+
     pub(super) fn owner_generation(&self, key: &ResourceKey) -> [u8; 32] {
-        if key.kind == ResourceKind::CredentialRetry {
+        if key.kind.credential_scoped() {
             self.credential
         } else {
             self.quota
         }
     }
     pub(super) fn owners(&self, key: &ResourceKey) -> &[String] {
-        if key.kind == ResourceKind::CredentialRetry {
+        if key.kind.credential_scoped() {
             std::slice::from_ref(&self.owner)
         } else {
             &self.members
@@ -102,6 +169,7 @@ impl ResourceSet {
     pub(super) fn keys(&self) -> Vec<ResourceKey> {
         [
             ResourceKind::CredentialRetry,
+            ResourceKind::CredentialModelRetry,
             ResourceKind::EndpointModel,
             ResourceKind::Credits,
             ResourceKind::FiveHours,
@@ -111,11 +179,16 @@ impl ResourceSet {
         ]
         .into_iter()
         .map(|kind| self.key(kind))
+        .chain(self.policies.iter().map(|policy| policy.key.clone()))
         .collect()
     }
     pub(super) fn enforces(&self, key: &ResourceKey) -> bool {
         match key.kind {
-            ResourceKind::EndpointModel | ResourceKind::CredentialRetry => true,
+            ResourceKind::EndpointModel
+            | ResourceKind::CredentialRetry
+            | ResourceKind::CredentialModelRetry
+            | ResourceKind::PolicyCredential
+            | ResourceKind::PolicyCredentialModel => true,
             ResourceKind::FreeEgress => self.free_contract,
             _ => !self.free_contract,
         }
@@ -126,7 +199,10 @@ impl ResourceSet {
             generation: match kind {
                 ResourceKind::EndpointModel => self.endpoint,
                 ResourceKind::Credits => self.credits,
-                ResourceKind::CredentialRetry => self.credential,
+                ResourceKind::CredentialRetry | ResourceKind::PolicyCredential => self.credential,
+                ResourceKind::CredentialModelRetry | ResourceKind::PolicyCredentialModel => {
+                    digest(&[&self.credential, &self.endpoint])
+                }
                 ResourceKind::FreeEgress => [0; 32],
                 _ => self.quota,
             },
@@ -162,6 +238,7 @@ impl ResourceSet {
             endpoint: digest(&[&[endpoint], &[model]]),
             members: members.iter().map(|v| (*v).into()).collect(),
             free_contract,
+            policies: Vec::new(),
         }
     }
 }

@@ -1192,16 +1192,36 @@ pub(crate) async fn forward_request_with_deadline(
             || (status.is_client_error() && status != StatusCode::TOO_MANY_REQUESTS))
     {
         let error_headers = upstream_resp.headers().clone();
-        let text = response_text_with_timeout(
+        let error_body = response_text_with_timeout(
             upstream_resp,
             body_timeout,
             Some(MAX_UPSTREAM_ERROR_BODY_BYTES),
         )
-        .await
-        .unwrap_or_else(ResponseBodyFailure::into_detail);
+        .await;
+        let body_complete = error_body.is_ok();
+        let text = error_body.unwrap_or_else(ResponseBodyFailure::into_detail);
         let retry_after = error_headers
             .get(reqwest::header::RETRY_AFTER)
             .and_then(|value| value.to_str().ok());
+        observe_temporary_rules(
+            state,
+            account,
+            selection,
+            &mut recovery_permit,
+            &restriction_endpoint,
+            &plan.model,
+            free_contract,
+            status.as_u16(),
+            classify_http(
+                status.as_u16(),
+                policy_provider_id,
+                plan.channel,
+                attempt_spec.auth == UpstreamAuth::None,
+            ),
+            body_complete.then_some(text.as_str()),
+            retry_after,
+            &mut attempt_context,
+        )?;
         observe_openrouter_free_rejection(
             state,
             account,
@@ -1254,19 +1274,36 @@ pub(crate) async fn forward_request_with_deadline(
         // A response status is authoritative even if its error body stalls.
         // Ordinary routes retain it; Zen Free can try another compatible route.
         let error_headers = upstream_resp.headers().clone();
-        let text = response_text_with_timeout(
+        let error_body = response_text_with_timeout(
             upstream_resp,
             body_timeout,
             Some(MAX_UPSTREAM_ERROR_BODY_BYTES),
         )
-        .await
-        .unwrap_or_else(ResponseBodyFailure::into_detail);
+        .await;
+        let body_complete = error_body.is_ok();
+        let text = error_body.unwrap_or_else(ResponseBodyFailure::into_detail);
         let class = classify_http(
             status.as_u16(),
             policy_provider_id,
             plan.channel,
             attempt_spec.auth == UpstreamAuth::None,
         );
+        observe_temporary_rules(
+            state,
+            account,
+            selection,
+            &mut recovery_permit,
+            &restriction_endpoint,
+            &plan.model,
+            free_contract,
+            status.as_u16(),
+            class,
+            body_complete.then_some(text.as_str()),
+            error_headers
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok()),
+            &mut attempt_context,
+        )?;
         let action = forward_action_for_class(class, allow_same_account_retry, None);
         if class == ProviderErrorClass::FreeRejected {
             let retry_after = error_headers
@@ -1327,13 +1364,14 @@ pub(crate) async fn forward_request_with_deadline(
         // A known 4xx proves the upstream rejected the request. Its status
         // policy still applies if the bounded error-body read fails.
         let error_headers = upstream_resp.headers().clone();
-        let text = response_text_with_timeout(
+        let error_body = response_text_with_timeout(
             upstream_resp,
             body_timeout,
             Some(MAX_UPSTREAM_ERROR_BODY_BYTES),
         )
-        .await
-        .unwrap_or_else(ResponseBodyFailure::into_detail);
+        .await;
+        let body_complete = error_body.is_ok();
+        let text = error_body.unwrap_or_else(ResponseBodyFailure::into_detail);
         let class = super::classify::classify_http_response(
             status.as_u16(),
             policy_provider_id,
@@ -1344,6 +1382,20 @@ pub(crate) async fn forward_request_with_deadline(
         let retry_after = error_headers
             .get(reqwest::header::RETRY_AFTER)
             .and_then(|value| value.to_str().ok());
+        observe_temporary_rules(
+            state,
+            account,
+            selection,
+            &mut recovery_permit,
+            &restriction_endpoint,
+            &plan.model,
+            free_contract,
+            status.as_u16(),
+            class,
+            body_complete.then_some(text.as_str()),
+            retry_after,
+            &mut attempt_context,
+        )?;
         let (observed_at, observed_mono) = state.sample_gateway_clock();
         if let Some(facts) = decode_failure(class, &text, retry_after, observed_at) {
             let decision = facts.decide();
@@ -1389,9 +1441,15 @@ pub(crate) async fn forward_request_with_deadline(
                 }
                 same_generation
             };
+            let temporary_rules = attempt_context
+                .restriction_details
+                .as_ref()
+                .and_then(|details| details.get("temporary_rules"))
+                .cloned();
             attempt_context.restriction_details = Some(serde_json::json!({
                 "facts": facts, "recorded_for_current_generation": recorded,
                 "local_reprobe": decision.wait_for_recovery,
+                "temporary_rules": temporary_rules,
             }));
             let failure = attempt_context.failure(FailureSpec {
                 error_source: "upstream",
@@ -3255,6 +3313,44 @@ async fn response_text(
 fn error_response(format: ApiFormat, message: &str, upstream: Option<&Value>) -> Response {
     let body = format_error(format, StatusCode::BAD_GATEWAY, message, upstream);
     (StatusCode::BAD_GATEWAY, axum::Json(body)).into_response()
+}
+
+/// A local scheduling effect only. The existing forwarding action, deadline,
+/// stream boundary and same-request replay permissions remain authoritative.
+#[allow(clippy::too_many_arguments)]
+fn observe_temporary_rules(
+    state: &CoreState,
+    account: &ExecutionCredential,
+    selection: &LiveSendSelection,
+    permit: &mut RecoveryPermit,
+    endpoint: &str,
+    model: &str,
+    free_contract: bool,
+    status: u16,
+    class: ProviderErrorClass,
+    body: Option<&str>,
+    retry_after: Option<&str>,
+    attempt: &mut ForwardAttemptContext,
+) -> Result<()> {
+    let (wall, mono) = state.sample_gateway_clock();
+    let db = state.db.lock();
+    if !live_send::selection_identity_is_current(&db, selection)? {
+        return Ok(());
+    }
+    let current = ResourceSet::capture(&db, account, endpoint, model, free_contract)?;
+    let receipts = permit.observe_policies(
+        &current,
+        status,
+        class,
+        body,
+        retry_after
+            .and_then(|value| crate::gateway::failure::decode::parse_retry_after(value, wall)),
+        mono,
+    );
+    if !receipts.is_empty() {
+        attempt.restriction_details = Some(serde_json::json!({"temporary_rules": receipts}));
+    }
+    Ok(())
 }
 
 fn is_openrouter_free_request(url: &reqwest::Url, model: &str) -> bool {

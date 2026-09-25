@@ -107,24 +107,41 @@ async fn goat_mixed_failures_respect_temporary_key_waits_without_changing_sticky
         ])
         .unwrap();
 
-    // Each 429 holds only A for 30 seconds. During that wait A emits a local
-    // resource_wait, while H's credit 400 remains eligible on the next request.
+    // A's two 429s hold only that Key for 30s each. H's first credit
+    // rejection now waits across requests, including when A is locally skipped.
     let mut expected_calls = vec!["key-a"];
-    for start in [0, 30] {
-        seconds.store(start, Ordering::SeqCst);
+    for (at, additions) in [
+        (0, vec!["key-a", "key-h", "key-c"]),
+        (29, vec!["key-c"]),
+        (30, vec!["key-a"]),
+    ] {
+        seconds.store(at, Ordering::SeqCst);
+        if at == 30 {
+            // H's local jitter may put its first probe at 30..33 seconds.
+            // Use the diagnostic deadline instead of assuming a jitter value.
+            let (status, view) = v4_get(h.port, "/routing/temporary-policies").await;
+            assert_eq!(status, StatusCode::OK, "{view}");
+            let remaining = view["waits"][0]["nextProbeInSeconds"].as_u64().unwrap();
+            assert!(remaining <= 3);
+            seconds.store(at + remaining, Ordering::SeqCst);
+        }
         let (status, body) = h.protocol("/v1/chat/completions", MODEL).await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        expected_calls.extend(["key-a", "key-h", "key-c"]);
-        assert_eq!(h.call_keys(), expected_calls);
-
-        seconds.store(start + 29, Ordering::SeqCst);
-        let (status, body) = h.protocol("/v1/chat/completions", MODEL).await;
-        assert_eq!(status, StatusCode::OK, "{body}");
-        expected_calls.extend(["key-h", "key-c"]);
+        expected_calls.extend(additions);
+        if at == 30 {
+            expected_calls.extend(["key-h", "key-c"]);
+        }
         assert_eq!(h.call_keys(), expected_calls);
     }
-    // At the second deadline, the original sticky target is tried directly.
-    seconds.store(60, Ordering::SeqCst);
+    // Before the second 429 deadline, both failures are locally skipped.
+    let second_start = seconds.load(Ordering::SeqCst);
+    seconds.store(second_start + 29, Ordering::SeqCst);
+    let (status, body) = h.protocol("/v1/chat/completions", MODEL).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    expected_calls.push("key-c");
+    assert_eq!(h.call_keys(), expected_calls);
+    // At the second deadline, the original healthy sticky target is tried.
+    seconds.store(second_start + 30, Ordering::SeqCst);
     let (status, body) = h.protocol("/v1/chat/completions", MODEL).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     expected_calls.push("key-a");
@@ -165,10 +182,10 @@ async fn goat_mixed_failures_respect_temporary_key_waits_without_changing_sticky
         .iter()
         .filter(|row| row.error_stage.as_deref() == Some("resource_wait"))
         .collect();
-    assert_eq!(waits.len(), 2);
+    assert_eq!(waits.len(), 4);
     for row in waits {
-        assert_eq!(row.account_id, a);
-        assert_eq!(row.attempt, Some(1));
+        assert!(row.account_id == a || row.account_id == h_id);
+        assert_eq!(row.attempt, Some(if row.account_id == a { 1 } else { 2 }));
         assert!(row.http_status.is_none());
         assert!(row.cost.is_none());
         assert_eq!(
@@ -176,7 +193,7 @@ async fn goat_mixed_failures_respect_temporary_key_waits_without_changing_sticky
             "try_next_account"
         );
     }
-    for (code, account_id, attempt, count) in [(429, &a, 1, 2), (400, &h_id, 2, 4)] {
+    for (code, account_id, attempt, count) in [(429, &a, 1, 2), (400, &h_id, 2, 2)] {
         let failed: Vec<_> = logs
             .iter()
             .filter(|row| row.http_status == Some(code))
