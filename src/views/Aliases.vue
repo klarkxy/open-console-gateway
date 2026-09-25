@@ -51,6 +51,15 @@
         </n-button>
       </n-alert>
       <n-alert
+        v-if="identitiesLoadError"
+        type="warning"
+        :title="t('加载路由顺位失败：{error}', { error: identitiesLoadError })"
+      >
+        <n-button size="small" secondary :loading="loading" @click="loadAliases({ retain: true })">
+          {{ t("重试") }}
+        </n-button>
+      </n-alert>
+      <n-alert
         v-if="cpaLoadError"
         type="warning"
         :title="t('加载 CPA 模型目录失败：{error}', { error: cpaLoadError })"
@@ -81,6 +90,7 @@
             <tr>
               <th>{{ t("对外模型名") }}</th>
               <th>{{ t("供应商 / 方案") }}</th>
+              <th>{{ t("路由顺位") }}</th>
               <th>{{ t("上游模型 ID") }}</th>
             </tr>
           </thead>
@@ -109,30 +119,19 @@
                   <code>{{ group.public_model }}</code>
                 </div>
                 <p v-if="groupHasOverlap(group.rows)" class="alias-warning">{{ t('名称与其他上游 ID 重叠，请检查调用名称。') }}</p>
-                <n-button
-                  size="tiny"
-                  quaternary
-                  type="primary"
-                  :aria-expanded="isExplainOpen(group.public_model)"
-                  @click="toggleExplain(group.public_model)"
-                >
-                  {{ t(isExplainOpen(group.public_model) ? "收起路由解释" : "查看路由解释") }}
-                </n-button>
               </td>
               <td>
                 {{ row.provider_plan }}
+                <n-tag v-if="platformLabels.get(row.key)" size="tiny" :bordered="false" class="alias-platform-tag">
+                  {{ platformLabels.get(row.key) }}
+                </n-tag>
                 <n-tag v-if="!row.routable" size="tiny" :bordered="false" class="alias-model-disabled">
                   {{ t("模型未启用") }}
                 </n-tag>
               </td>
+              <td class="aliases-rank">{{ rankText(row) }}</td>
               <td><code>{{ row.upstream_model }}</code></td>
             </tr>
-            <AliasRoutingExplain
-              v-if="isExplainOpen(group.public_model)"
-              :model="group.public_model"
-              :protocol="explainProtocol(group.public_model)"
-              @update:protocol="setExplainProtocol(group.public_model, $event)"
-            />
           </tbody>
         </table>
       </div>
@@ -143,34 +142,34 @@
 <script setup lang="ts">
 import { computed, onActivated, onMounted, ref, watch } from "vue";
 import { NAlert, NButton, NEmpty, NInput, NSpin, NSwitch, NTag, NTooltip } from "naive-ui";
-import type { RoutingClientProtocol } from "../api/destinations.ts";
 import type { ProviderDefinitionView } from "../api/providers.ts";
 import { dashboardV4 } from "../api/dashboard-v4.ts";
 import type { CpaCatalogEntry } from "../api/generated/dashboard-v4.ts";
-import AliasRoutingExplain from "../components/AliasRoutingExplain.vue";
 import { isDynamicCatalogEntry } from "../domain/dynamic-provider.ts";
-import { createRevalidateGate } from "../domain/revalidate.ts";
 import { flattenProviderScopes, normalizeProviderContractsResponse } from "../domain/provider-contracts.ts";
 import { isRevisionConflict } from "../api/dashboard.ts";
 import {
   aliasNameOverlaps,
+  aliasRowPlatformLabel,
+  aliasRowRoutingRanks,
   isPublicModelPublished,
   mergeProviderAliasRows,
   publicModelPublicationKey,
+  sortAliasRowsByRouting,
   type ProviderAliasRow,
 } from "../domain/provider-aliases.ts";
 import { t } from "../i18n/index.ts";
 import { useAccountsStore } from "../stores/accounts.ts";
 import { useControlPlaneStore } from "../stores/controlPlane.ts";
-import { useDestinationsStore } from "../stores/destinations.ts";
+import { useIdentitiesStore } from "../stores/identities.ts";
 import { useProvidersStore } from "../stores/providers.ts";
 import { useSessionStore } from "../stores/session.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
 
 const accountsStore = useAccountsStore();
 const controlPlane = useControlPlaneStore();
+const identitiesStore = useIdentitiesStore();
 const providersStore = useProvidersStore();
-const destinationsStore = useDestinationsStore();
 const sessionStore = useSessionStore();
 // Server state lives in the stores; these are read-through projections.
 const contracts = computed(() => {
@@ -187,15 +186,17 @@ const loadError = ref("");
 const accountsLoadError = ref("");
 const dynamicLoadError = ref("");
 const cpaLoadError = ref("");
+const identitiesLoadError = ref("");
 const unpublished = ref<string[]>([]);
 const publicationReady = ref(false);
 const publicationLoadError = ref("");
 const publicationSaveError = ref("");
 const saving = ref<Record<string, boolean>>({});
-// UI-local expansion state per public model; explanations stay in the store.
-const explainOpen = ref<Record<string, boolean>>({});
-const explainProtocols = ref<Record<string, RoutingClientProtocol>>({});
 let activatedOnce = false;
+let aliasesLoadedAt = 0;
+// Activation refreshes skip data loaded recently; user actions call
+// loadAliases directly and stay immediate.
+const ACTIVATED_REFRESH_FRESHNESS_MS = 30_000;
 
 const initialLoading = computed(() => loading.value && !contracts.value);
 const aliasRows = computed(() => (
@@ -208,6 +209,21 @@ const aliasRows = computed(() => (
     )
     : []
 ));
+const routingRanks = computed(() => {
+  const ranks = new Map<string, number[]>();
+  for (const row of aliasRows.value) {
+    ranks.set(row.key, aliasRowRoutingRanks(row, accounts.value, identitiesStore.identities));
+  }
+  return ranks;
+});
+const platformLabels = computed(() => {
+  const labels = new Map<string, string>();
+  for (const row of aliasRows.value) {
+    const label = aliasRowPlatformLabel(row, identitiesStore.identities);
+    if (label) labels.set(row.key, label);
+  }
+  return labels;
+});
 const aliasGroups = computed(() => {
   const groups = new Map<string, typeof aliasRows.value>();
   const query = search.value.trim().toLocaleLowerCase();
@@ -222,37 +238,18 @@ const aliasGroups = computed(() => {
     .map((rows) => ({
       public_model: rows[0]?.public_model ?? "",
       published: isPublicModelPublished(rows[0]?.public_model ?? "", unpublished.value),
-      rows,
+      rows: sortAliasRowsByRouting(rows, (row) => routingRanks.value.get(row.key) ?? []),
     }))
     .sort((left, right) => left.public_model.localeCompare(right.public_model));
 });
 
+function rankText(row: ProviderAliasRow): string {
+  const ranks = routingRanks.value.get(row.key) ?? [];
+  return ranks.length > 0 ? ranks.join(" · ") : "—";
+}
+
 function groupHasOverlap(rows: readonly ProviderAliasRow[]): boolean {
   return rows.some((row) => aliasNameOverlaps(row, aliasRows.value));
-}
-
-function isExplainOpen(publicModel: string): boolean {
-  return Boolean(explainOpen.value[publicModelPublicationKey(publicModel)]);
-}
-
-function explainProtocol(publicModel: string): RoutingClientProtocol {
-  return explainProtocols.value[publicModelPublicationKey(publicModel)] ?? "chat_completions";
-}
-
-function ensureExplanation(publicModel: string): void {
-  void destinationsStore.explainRouting(publicModel, explainProtocol(publicModel)).catch(() => {});
-}
-
-function toggleExplain(publicModel: string): void {
-  const key = publicModelPublicationKey(publicModel);
-  const open = !explainOpen.value[key];
-  explainOpen.value = { ...explainOpen.value, [key]: open };
-  if (open) ensureExplanation(publicModel);
-}
-
-function setExplainProtocol(publicModel: string, protocol: RoutingClientProtocol): void {
-  explainProtocols.value = { ...explainProtocols.value, [publicModelPublicationKey(publicModel)]: protocol };
-  if (isExplainOpen(publicModel)) ensureExplanation(publicModel);
 }
 
 async function setPublished(publicModel: string, published: boolean): Promise<void> {
@@ -297,16 +294,23 @@ async function loadAliases(options: { retain?: boolean } = {}): Promise<void> {
     loadError.value = "";
     dynamicLoadError.value = "";
     cpaLoadError.value = "";
+    identitiesLoadError.value = "";
     publicationLoadError.value = "";
   }
   try {
-    const [contractsResult, catalogResult, accountsResult, cpaResult, publicationResult] = await Promise.allSettled([
+    const [contractsResult, catalogResult, accountsResult, cpaResult, publicationResult, identitiesResult] = await Promise.allSettled([
       providersStore.loadContracts(),
       providersStore.loadCatalog(),
       accountsStore.loadPresented(),
       dashboardV4.getCpaCatalog(),
       dashboardV4.getAliasPublication(),
+      identitiesStore.loadPresented(),
     ]);
+    if (identitiesResult.status === "fulfilled") {
+      identitiesLoadError.value = "";
+    } else {
+      identitiesLoadError.value = dashboardErrorDetail(identitiesResult.reason);
+    }
     if (publicationResult.status === "fulfilled") {
       unpublished.value = publicationResult.value.unpublished;
       publicationReady.value = true;
@@ -362,6 +366,7 @@ async function loadAliases(options: { retain?: boolean } = {}): Promise<void> {
     }
     if (contractsResult.status === "fulfilled") {
       loadError.value = "";
+      aliasesLoadedAt = Date.now();
     } else {
       loadError.value = dashboardErrorDetail(contractsResult.reason);
     }
@@ -370,14 +375,14 @@ async function loadAliases(options: { retain?: boolean } = {}): Promise<void> {
   }
 }
 
-const revalidateGate = createRevalidateGate(30_000);
-watch(() => sessionStore.authenticated, (ok) => { if (!ok) revalidateGate.reset(); });
+watch(() => sessionStore.authenticated, (ok) => { if (!ok) aliasesLoadedAt = 0; });
 onMounted(() => void loadAliases());
 onActivated(() => {
-  if (!activatedOnce) { activatedOnce = true; return; }
-  if (providersStore.contracts && !revalidateGate.shouldRun()) return;
-  revalidateGate.record();
-  void loadAliases({ retain: true });
+  if (activatedOnce) {
+    if (Date.now() - aliasesLoadedAt >= ACTIVATED_REFRESH_FRESHNESS_MS) void loadAliases({ retain: true });
+  } else {
+    activatedOnce = true;
+  }
 });
 </script>
 
@@ -422,6 +427,10 @@ onActivated(() => {
   color: var(--ocg-muted);
   background-color: var(--ocg-primary-soft);
 }
+.alias-platform-tag {
+  margin-left: var(--ocg-space-xs);
+  color: var(--ocg-muted);
+}
 .aliases-table {
   width: 100%;
   min-width: 520px;
@@ -442,6 +451,10 @@ onActivated(() => {
 }
 .aliases-table .aliases-name {
   vertical-align: top;
+}
+.aliases-table .aliases-rank {
+  white-space: nowrap;
+  color: var(--ocg-muted);
 }
 @media (max-width: 720px) {
   .aliases-table th:first-child,

@@ -35,7 +35,7 @@ create them.
 
 ## Account Selection And Failover
 
-On **Aliases**, expand a model to request a read-only routing explanation. It shows the resolved mapping, eligible service connections and Keys, upstream protocol, global order, structured exclusion reasons, and the base policy's expected first pick. This preview sends no upstream request, decrypts no Key, writes no cooldown, quota state or log, and does not advance sticky or round-robin state. It does not simulate a conversation binding, retry-time exclusions, state changes after the snapshot, or an upstream result, so it is an explanation of the observed base policy rather than a delivery guarantee.
+On **Aliases**, each mapping row carries a **routing order** column: the global routing ranks of the Keys that can serve that public name at the configuration level (the same order you drag into shape on the Accounts view). Rows within a model are sorted by ascending rank; a plan backed by several eligible Keys lists each rank in turn; "—" means no enabled Key currently serves the mapping. This is the configured order — runtime states such as cooldowns or quota waits are not reflected here, and it is not a delivery guarantee. Custom Keys linked from a platform (new-api/sub-api) also show the platform name as a tag next to the plan name, so rows serving the same model are easy to tell apart by origin.
 
 Accounts are tried in **list order**, which you can drag into shape and persist
 from the Accounts view. The selector skips:

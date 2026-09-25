@@ -1,4 +1,5 @@
 import type { Account } from "../api/dashboard.ts";
+import type { Identity, ModelScope } from "../api/identities.ts";
 import type { ProviderDefinitionView } from "../api/providers.ts";
 import { CPA_PROVIDER_ID } from "./destination-providers.ts";
 import type { ProviderScopeView } from "./provider-contracts.ts";
@@ -123,7 +124,13 @@ export function providerAliasRows(
     const scope = scopes.find((candidate) => (
       candidate.scope_kind === "custom_endpoint" && candidate.scope_id === account.id
     ));
+    // Capabilities are stored per protocol; the Alias table has no protocol
+    // column, so identical mappings collapse to one row per account.
+    const seenMappings = new Set<string>();
     for (const capability of account.model_capabilities) {
+      const mappingKey = `${capability.public_model.toLocaleLowerCase()}:${capability.upstream_model}`;
+      if (seenMappings.has(mappingKey)) continue;
+      seenMappings.add(mappingKey);
       const contract = scope?.models.find((model) => (
         (model.alias || model.model_id).toLocaleLowerCase()
           === capability.public_model.toLocaleLowerCase()
@@ -191,4 +198,74 @@ export function aliasNameOverlaps(row: ProviderAliasRow, rows: readonly Provider
   return rows.some((other) => other.provider_id !== row.provider_id
     && other.upstream_model === row.public_model
     && other.public_model.toLocaleLowerCase() !== row.public_model.toLocaleLowerCase());
+}
+
+/** Platform label for a platform-linked Custom Key row; null for anything else. */
+export function aliasRowPlatformLabel(
+  row: ProviderAliasRow,
+  identities: readonly Identity[],
+): string | null {
+  if (!row.custom_account_id) return null;
+  const accountIdentity = identities.find((identity) => (
+    identity.legacy.kind === "account" && identity.legacy.id === row.custom_account_id
+  ));
+  const platformId = accountIdentity?.declared_relations[0]?.platform_account_id;
+  if (!platformId) return null;
+  const label = identities.find((identity) => (
+    identity.legacy.kind === "platform_account" && identity.legacy.id === platformId
+  ))?.identity.label.trim();
+  return label || null;
+}
+
+/** Config-level scope check mirroring the gateway's binding model scope. */
+export function aliasModelScopeAllows(scope: ModelScope, publicModel: string): boolean {
+  if (scope.kind === "all") return true;
+  const needle = publicModel.toLocaleLowerCase();
+  return scope.models.some((model) => model.toLocaleLowerCase() === needle);
+}
+
+/**
+ * Ascending routing ranks of the inference credentials that serve one Alias
+ * row at config level: enabled accounts, enabled bindings, scope allowing the
+ * public name. Non-routable rows serve nothing. Runtime state (cooldowns,
+ * quota) is not reflected, so this is the configured order, not a live pick.
+ */
+export function aliasRowRoutingRanks(
+  row: ProviderAliasRow,
+  accounts: readonly Account[],
+  identities: readonly Identity[],
+): number[] {
+  if (!row.routable) return [];
+  const accountIds = new Set(
+    accounts
+      .filter((account) => (row.custom_account_id
+        ? account.id === row.custom_account_id
+        : account.provider_id === row.provider_id))
+      .filter((account) => account.enabled)
+      .map((account) => account.id),
+  );
+  const ranks = new Set<number>();
+  for (const identity of identities) {
+    for (const credential of identity.credentials) {
+      if (credential.legacy.kind !== "account" || !accountIds.has(credential.legacy.id)) continue;
+      if (credential.credential.purpose !== "inference" || !credential.credential.enabled) continue;
+      for (const binding of credential.bindings) {
+        if (!binding.enabled) continue;
+        if (!aliasModelScopeAllows(binding.model_scope, row.public_model)) continue;
+        ranks.add(binding.routing_rank);
+      }
+    }
+  }
+  return [...ranks].sort((left, right) => left - right);
+}
+
+/** Order one group's rows by first serving rank; unrouted rows keep their relative order at the end. */
+export function sortAliasRowsByRouting(
+  rows: readonly ProviderAliasRow[],
+  ranksOf: (row: ProviderAliasRow) => readonly number[],
+): ProviderAliasRow[] {
+  return rows
+    .map((row, index) => ({ row, index, rank: ranksOf(row)[0] ?? Number.POSITIVE_INFINITY }))
+    .sort((left, right) => left.rank - right.rank || left.index - right.index)
+    .map((entry) => entry.row);
 }

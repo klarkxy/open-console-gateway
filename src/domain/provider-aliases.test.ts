@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { Account } from "../api/dashboard.ts";
+import type { Identity } from "../api/identities.ts";
 import type { ProviderScopeView } from "./provider-contracts.ts";
 import {
+  aliasModelScopeAllows,
+  aliasRowPlatformLabel,
+  aliasRowRoutingRanks,
   cpaAliasRows,
   cpaPublicModelName,
   dynamicProviderAliasRows,
@@ -12,6 +16,7 @@ import {
   aliasNameOverlaps,
   isPublicModelPublished,
   publicModelPublicationKey,
+  sortAliasRowsByRouting,
 } from "./provider-aliases.ts";
 
 const protocol = {
@@ -200,6 +205,24 @@ test("Custom Alias routeability includes account readiness and built-in raw conf
   assert.equal(row?.routable, false);
 });
 
+test("Custom Alias rows collapse per-protocol capabilities of one mapping", () => {
+  const capability = customAccount.model_capabilities[0]!;
+  const account = {
+    ...customAccount,
+    model_capabilities: [
+      capability,
+      { ...capability, protocol: "responses" },
+      { ...capability, protocol: "messages" },
+      { ...capability, public_model: "other-model", upstream_model: "vendor/other" },
+    ],
+  } as Account;
+  const rows = providerAliasRows([customScope], [account]);
+  assert.deepEqual(rows.map((row) => row.key), [
+    "custom:custom-1:public-model:vendor/model:free",
+    "custom:custom-1:other-model:vendor/other",
+  ]);
+});
+
 test("user-defined Provider mappings appear as Alias rows labelled by Provider name", () => {
   assert.deepEqual(dynamicProviderAliasRows([dynamic]), [{
     provider_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -290,4 +313,110 @@ test("Go raw model rows preserve disabled protocol state and account filtering",
   assert.equal(rows[0]?.public_model, "raw-only-model");
   assert.equal(rows[0]?.routable, false);
   assert.deepEqual(providerAliasRows([scope], [{ ...goAccount, enabled: false }]), []);
+});
+
+function identityWithCredentials(credentials: Array<{
+  accountId: string;
+  rank: number;
+  purpose?: string;
+  credentialEnabled?: boolean;
+  bindingEnabled?: boolean;
+  scope?: { kind: "all" } | { kind: "only"; models: string[] };
+}>): Identity {
+  return {
+    credentials: credentials.map((entry, index) => ({
+      bindings: [{
+        id: `binding-${index}`,
+        connection_id: "conn-1",
+        allowed_endpoint_ids: [],
+        allowed_origins: [],
+        model_scope: entry.scope ?? { kind: "all" },
+        enabled: entry.bindingEnabled ?? true,
+        routing_rank: entry.rank,
+      }],
+      credential: {
+        id: `cred-${index}`,
+        purpose: entry.purpose ?? "inference",
+        enabled: entry.credentialEnabled ?? true,
+      },
+      legacy: { kind: "account", id: entry.accountId },
+    })),
+  } as unknown as Identity;
+}
+
+test("Alias routing ranks follow enabled scoped inference bindings of the row's accounts", () => {
+  const routableScope = {
+    ...customScope,
+    models: [{ ...customScope.models[0], routable: true }],
+  } as ProviderScopeView;
+  const routableAccount = { ...customAccount, setup_step: "ready" } as Account;
+  const row = providerAliasRows([routableScope], [routableAccount])[0]!;
+  const identities = [
+    identityWithCredentials([
+      { accountId: "custom-1", rank: 8 },
+      { accountId: "custom-1", rank: 3, scope: { kind: "only", models: ["PUBLIC-model"] } },
+    ]),
+    identityWithCredentials([
+      { accountId: "custom-1", rank: 5, scope: { kind: "only", models: ["other-model"] } },
+      { accountId: "custom-1", rank: 9, bindingEnabled: false },
+      { accountId: "custom-1", rank: 10, credentialEnabled: false },
+      { accountId: "custom-1", rank: 11, purpose: "platform_observer" },
+      { accountId: "someone-else", rank: 1 },
+    ]),
+  ];
+  assert.deepEqual(aliasRowRoutingRanks(row, [routableAccount], identities), [3, 8]);
+});
+
+test("provider Alias rows read ranks from every enabled account of the provider", () => {
+  const row = providerAliasRows([builtinScope], [goAccount])[0]!;
+  const identities = [identityWithCredentials([{ accountId: "go-1", rank: 7 }])];
+  assert.deepEqual(aliasRowRoutingRanks(row, [goAccount], identities), [7]);
+  assert.deepEqual(aliasRowRoutingRanks(row, [{ ...goAccount, enabled: false }], identities), []);
+});
+
+test("non-routable Alias rows serve nothing and have no routing rank", () => {
+  const row = { ...providerAliasRows([builtinScope], [goAccount])[0]!, routable: false };
+  const identities = [identityWithCredentials([{ accountId: "go-1", rank: 7 }])];
+  assert.deepEqual(aliasRowRoutingRanks(row, [goAccount], identities), []);
+});
+
+test("Alias model scope allows everything or listed names case-insensitively", () => {
+  assert.equal(aliasModelScopeAllows({ kind: "all" }, "anything"), true);
+  assert.equal(aliasModelScopeAllows({ kind: "only", models: ["GPT-5.6"] }, "gpt-5.6"), true);
+  assert.equal(aliasModelScopeAllows({ kind: "only", models: ["gpt-5.6"] }, "grok-4"), false);
+});
+
+test("Alias rows sort by first serving rank with unrouted rows last in original order", () => {
+  const [first, second] = providerAliasRows([builtinScope], [goAccount]);
+  const ranks = new Map<string, number[]>([[first!.key, [9]], [second!.key, []]]);
+  const sorted = sortAliasRowsByRouting([second!, first!], (row) => ranks.get(row.key) ?? []);
+  assert.deepEqual(sorted.map((row) => row.key), [first!.key, second!.key]);
+  const stable = sortAliasRowsByRouting([first!, second!], () => []);
+  assert.deepEqual(stable.map((row) => row.key), [first!.key, second!.key]);
+});
+
+test("platform-linked Custom rows resolve their platform label", () => {
+  const linked = {
+    legacy: { kind: "account", id: "custom-1" },
+    declared_relations: [{ platform_account_id: "plat-1", group: "" }],
+    credentials: [],
+  } as unknown as Identity;
+  const platform = {
+    legacy: { kind: "platform_account", id: "plat-1" },
+    identity: { label: " Zoowyoo " },
+    declared_relations: [],
+    credentials: [],
+  } as unknown as Identity;
+  const standalone = {
+    legacy: { kind: "account", id: "custom-2" },
+    declared_relations: [],
+    credentials: [],
+  } as unknown as Identity;
+  const linkedRow = { ...providerAliasRows([customScope], [customAccount])[0]!, custom_account_id: "custom-1" };
+  const standaloneRow = { ...linkedRow, custom_account_id: "custom-2" };
+  const providerRow = { ...linkedRow, custom_account_id: null };
+  assert.equal(aliasRowPlatformLabel(linkedRow, [linked, platform]), "Zoowyoo");
+  assert.equal(aliasRowPlatformLabel(standaloneRow, [standalone]), null);
+  assert.equal(aliasRowPlatformLabel(providerRow, [linked, platform]), null);
+  assert.equal(aliasRowPlatformLabel(linkedRow, [linked]), null);
 });
