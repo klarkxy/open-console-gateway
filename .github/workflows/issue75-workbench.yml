@@ -1,0 +1,28 @@
+name: Issue 75 isolated workbench
+
+on:
+  push:
+    branches: [workbench/issue-75-local-policy]
+
+permissions:
+  contents: read
+
+jobs:
+  source:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - name: Export the exact source without credentials or build outputs
+        run: |
+          git rev-parse HEAD > source-commit.txt
+          git archive --format=tar.gz --output=source.tar.gz HEAD
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: issue75-source
+          path: |
+            source.tar.gz
+            source-commit.txt
+          retention-days: 1
