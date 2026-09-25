@@ -306,7 +306,7 @@ Accounts 上每张已保存的路由卡都走同一套 `DestinationCard` 外壳�
 capabilities。`AccountCard` 不再挂在这个页面上。Providers 左侧列出目的地
 （仍 join 到负责变更的 V4 connection；平台目的地没有 connection，用
 `destination=`）。Add 是一条流程：Providers 的「添加供应商」和
-`?view=providers&add=1` 都打开 Accounts 选择器（`add=1`；带 preset 的书签映射成
+`#/providers?add=1` 都打开 Accounts 选择器（`add=1`；带 preset 的书签映射成
 `preset:<id>`）。Providers 自己的预设浏览器不再是 Add 入口。
 
 ---

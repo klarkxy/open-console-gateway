@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url";
 import { build } from "vite";
 import vue from "@vitejs/plugin-vue";
 import { reactive, ssrContextKey, type App, type Component } from "vue";
+import { createMemoryHistory, createRouter } from "vue-router";
 import type { DshApplication } from "../api/generated/dashboard-v4.ts";
 import {
   createVueHostRenderer,
@@ -91,6 +92,7 @@ function applicationsHarnessPlugin() {
       export const dashboardV4 = new Proxy({}, { get: (_, key) => (...args) => globalThis.__dshComponentApi[key](...args) });
     `,
     connection: `export const useConnectionStore = () => globalThis.__dshConnectionStore;`,
+    session: `export const useSessionStore = () => ({ authenticated: true });`,
     store: `
       export const useControlPlaneStore = () => ({
         hasTokens: () => true,
@@ -109,6 +111,7 @@ function applicationsHarnessPlugin() {
     "../api/dashboard-v4.ts": "api",
     "../stores/connection.ts": "connection",
     "../stores/controlPlane.ts": "store",
+    "../stores/session.ts": "session",
     "../i18n/index.ts": "i18n",
     "../utils/errors.ts": "errors",
     "../utils/modal-close-label.ts": "modal",
@@ -208,6 +211,12 @@ async function mount(options: {
   const root: HostNode = { children: [], props: {}, type: "root" };
   const app = renderer.createApp(Applications);
   app.provide(ssrContextKey, { modules: new Set<string>() });
+  const router = createRouter({
+    history: createMemoryHistory(),
+    routes: [{ path: "/:pathMatch(.*)*", name: "applications", component: { render: () => null } }],
+  });
+  await router.push("/applications");
+  app.use(router);
   app.mount(root);
   await settle();
   return { app, root, connection };
@@ -229,7 +238,7 @@ before(async () => {
         formats: ["es"],
       },
       outDir: buildDir,
-      rollupOptions: { external: ["vue"] },
+      rollupOptions: { external: ["vue", "vue-router"] },
     },
   });
   Applications = (await import(pathToFileURL(path.join(buildDir, "applications.mjs")).href)).default;

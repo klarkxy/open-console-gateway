@@ -1,4 +1,5 @@
 import type { MessageKey } from "../i18n/index.ts";
+import type { LocationQuery, LocationQueryRaw, RouteLocationRaw } from "vue-router";
 
 export const APP_NAVIGATION_GROUPS = {
   core: { key: "core" },
@@ -228,4 +229,71 @@ export function applyAppViewSearchParams(
   if (scope.preset) url.searchParams.set("preset", scope.preset);
   else url.searchParams.delete("preset");
   return url;
+}
+
+/**
+ * Router target for a view, reusing the legacy `?view=` query semantics from
+ * applyAppViewSearchParams. `extra` merges additional one-shot params (the
+ * Accounts `add` / `account_id` deep links) on top.
+ */
+export function appViewRoute(
+  view: AppViewKey,
+  scope?: ProviderScopeQuery | null,
+  extra?: Record<string, string>,
+): RouteLocationRaw {
+  const url = applyAppViewSearchParams(new URL("https://ocg.invalid/"), view, scope);
+  url.searchParams.delete("view");
+  const query: LocationQueryRaw = {};
+  url.searchParams.forEach((value, key) => {
+    query[key] = value;
+  });
+  if (extra) Object.assign(query, extra);
+  return { name: view, query };
+}
+
+/**
+ * Serializes a route's query back into a `?view=…` search string so the
+ * legacy readers above (readProviderPageQuery, readAccountDeepLink, …) keep
+ * working unchanged against vue-router state.
+ */
+export function routeQuerySearch(view: AppViewKey, query: LocationQuery): string {
+  const params = new URLSearchParams();
+  params.set("view", view);
+  for (const [key, value] of Object.entries(query)) {
+    if (typeof value === "string") params.set(key, value);
+  }
+  return `?${params.toString()}`;
+}
+
+/**
+ * One-shot translation of pre-router URLs into hash routes so old bookmarks
+ * and externally generated links keep working: `?view=accounts&account_id=1`
+ * becomes `#/accounts?account_id=1`, and `?view=browser#session=…` becomes
+ * `#/browser?session=…`. Already-routed URLs (`#/…`) are left untouched.
+ */
+export function legacyAppHash(href: string): string | null {
+  const url = new URL(href);
+  if (url.hash.startsWith("#/")) return null;
+  const raw = url.searchParams.get("view");
+  const hashParams = new URLSearchParams(url.hash.slice(1));
+  if (!raw && !hashParams.get("session")) return null;
+  const view = resolveAppViewKey(raw);
+  const query = new URLSearchParams(url.search);
+  query.delete("view");
+  if (view === "browser") {
+    hashParams.forEach((value, key) => query.set(key, value));
+  }
+  const text = query.toString();
+  return `#/${view}${text ? `?${text}` : ""}`;
+}
+
+export function convertLegacyAppLocation(): void {
+  const hash = legacyAppHash(window.location.href);
+  if (!hash) return;
+  // Every legacy search param moved into the hash route; drop the search so
+  // it cannot linger in the hash-history base and leak into future URLs.
+  const url = new URL(window.location.href);
+  url.search = "";
+  url.hash = hash;
+  window.history.replaceState(null, "", url);
 }

@@ -236,6 +236,7 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, toRef, watch } from "vue";
 import type { Component } from "vue";
+import { useRouter } from "vue-router";
 import {
   NAlert,
   NButton,
@@ -293,7 +294,7 @@ import PlatformAccountFormModal, {
   type PlatformAccountFormPayload,
 } from "./PlatformAccountFormModal.vue";
 import ProviderBrandMark from "./ProviderBrandMark.vue";
-import { applyAppViewSearchParams } from "../views/app-navigation.ts";
+import { appViewRoute } from "../views/app-navigation.ts";
 import type { OnboardingIntent } from "../domain/onboarding-draft.ts";
 
 const props = defineProps<{
@@ -333,6 +334,7 @@ const emit = defineEmits<{
 
 useLocalizedModalCloseLabel(toRef(props, "show"), "account-add-modal");
 const message = useMessage();
+const router = useRouter();
 
 const selectedOptionId = ref<string>("");
 const selectedVariantId = ref<string>("");
@@ -641,11 +643,9 @@ function onPresetCommitted(result: {
   if (!result.readbackFailed) {
     message.success(t("草稿已保存，到供应商页继续设置"));
   }
-  const url = applyAppViewSearchParams(new URL(window.location.href), "providers", {
+  void router.push(appViewRoute("providers", {
     connection: result.connectionId,
-  });
-  window.history.pushState(null, "", url);
-  window.dispatchEvent(new PopStateEvent("popstate"));
+  }));
 }
 
 function onPresetSaved(providerId: string): void {

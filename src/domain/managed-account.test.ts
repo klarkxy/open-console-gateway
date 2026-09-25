@@ -51,6 +51,6 @@ test("OpenCode invite URLs are HTTPS, credential-free, bounded, and host allowli
 test("remote browser view URL preserves dashboard location and carries the opaque session token", () => {
   assert.equal(
     browserViewUrl("https://mgr.example/dashboard/?view=accounts", "abc/123"),
-    "https://mgr.example/dashboard/?view=browser#session=abc%2F123",
+    "https://mgr.example/dashboard/#/browser?session=abc%2F123",
   );
 });

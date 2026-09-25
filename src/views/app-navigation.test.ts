@@ -6,12 +6,15 @@ import {
   PROVIDER_OTHER_TAB,
   accountAddDeepLinkFromProviderAdd,
   accountAddQueryValue,
+  appViewRoute,
   applyAppViewSearchParams,
   isLegacyPricingView,
+  legacyAppHash,
   normalizeProviderDetailTab,
   readAccountAddDeepLink,
   readProviderPageQuery,
   resolveAppViewKey,
+  routeQuerySearch,
 } from "./app-navigation.ts";
 
 test("navigation metadata keeps the fixed core order and exposes CPA under Extensions", () => {
@@ -296,4 +299,61 @@ test("the Accounts add deep link survives a providers write untouched", () => {
     "accounts",
   );
   assert.equal(url.searchParams.get("add"), "custom-endpoint");
+});
+
+test("appViewRoute targets the named route with the legacy query semantics, minus view", () => {
+  assert.deepEqual(appViewRoute("accounts"), { name: "accounts", query: {} });
+  assert.deepEqual(appViewRoute("providers", { destination: "dest-site", tab: "pricing" }), {
+    name: "providers",
+    query: { destination: "dest-site", tab: "pricing" },
+  });
+  assert.deepEqual(appViewRoute("accounts", undefined, { account_id: "acct-1" }), {
+    name: "accounts",
+    query: { account_id: "acct-1" },
+  });
+  // A scoped providers write never leaks connection/destination across.
+  assert.deepEqual(appViewRoute("providers", { connection: "uuid-open" }), {
+    name: "providers",
+    query: { connection: "uuid-open" },
+  });
+});
+
+test("routeQuerySearch round-trips into the legacy readers", () => {
+  const search = routeQuerySearch("providers", { destination: "dest-site", tab: "pricing" });
+  assert.deepEqual(readProviderPageQuery(search), {
+    connection: null,
+    provider: null,
+    destination: "dest-site",
+    tab: "pricing",
+    add: false,
+    preset: null,
+  });
+  // The view name rides along so view-scoped readers (Accounts add) still match.
+  assert.deepEqual(readAccountAddDeepLink(routeQuerySearch("accounts", { add: "custom" })), {
+    optionId: "custom",
+  });
+  assert.equal(readAccountAddDeepLink(routeQuerySearch("providers", { add: "custom" })), null);
+  // Repeated or empty values never reach the readers.
+  assert.equal(routeQuerySearch("logs", {}), "?view=logs");
+});
+
+test("legacyAppHash converts pre-router URLs and leaves routed ones untouched", () => {
+  assert.equal(legacyAppHash("http://127.0.0.1:9042/dashboard/"), null);
+  assert.equal(legacyAppHash("http://127.0.0.1:9042/dashboard/#/accounts"), null);
+  assert.equal(
+    legacyAppHash("http://127.0.0.1:9042/dashboard/?view=accounts&account_id=acct-1"),
+    "#/accounts?account_id=acct-1",
+  );
+  assert.equal(
+    legacyAppHash("http://127.0.0.1:9042/dashboard/?view=pricing"),
+    "#/providers",
+  );
+  assert.equal(
+    legacyAppHash("http://127.0.0.1:9042/dashboard/?view=applications&app=dsh"),
+    "#/applications?app=dsh",
+  );
+  assert.equal(
+    legacyAppHash("http://127.0.0.1:9042/dashboard/?view=browser#session=abc%2F123"),
+    "#/browser?session=abc%2F123",
+  );
 });

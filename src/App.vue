@@ -27,7 +27,10 @@
     </main>
     <n-message-provider v-else>
       <n-dialog-provider>
-        <BrowserSession v-if="activeKey === 'browser'" :session-token="browserSessionToken" />
+        <!-- Bare routes (remote browser) take over the whole window: no shell, no KeepAlive. -->
+        <router-view v-if="isBareView" v-slot="{ Component }">
+          <component :is="Component" :session-token="browserSessionToken" />
+        </router-view>
         <n-layout v-else has-sider class="app-shell">
           <n-layout-sider collapse-mode="width" :collapsed-width="64" :width="224" :collapsed="collapsed" show-trigger class="app-sider" :class="{ 'app-sider--collapsed': collapsed }" @collapse="collapsed = true" @expand="collapsed = false">
             <div class="brand" :class="{ collapsed }" aria-label="Open Console Gateway">
@@ -62,17 +65,11 @@
               <n-alert v-if="logoutError" class="app-error" type="error" closable @close="logoutError = ''">{{ logoutError }}</n-alert>
               <n-alert v-if="upgradeGuidance" class="app-error" type="warning" closable @close="upgradeGuidance = ''">{{ upgradeGuidance }}</n-alert>
               <!-- Keep views mounted across navigation: filters, scroll and drafts survive. -->
-              <KeepAlive>
-                <Dashboard v-if="activeKey === 'dashboard'" @navigate="selectView" />
-                <Keys v-else-if="activeKey === 'keys'" />
-                <Accounts v-else-if="activeKey === 'accounts'" />
-                <Providers v-else-if="activeKey === 'providers'" />
-                <Aliases v-else-if="activeKey === 'aliases'" />
-                <Applications v-else-if="activeKey === 'applications'" />
-                <Logs v-else-if="activeKey === 'logs'" />
-                <Settings v-else-if="activeKey === 'settings'" :theme-name="themeName" :resolved-theme="resolvedTheme" @update:theme-name="themeName = $event" />
-                <Cpa v-else-if="activeKey === 'cpa'" />
-              </KeepAlive>
+              <router-view v-slot="{ Component }">
+                <KeepAlive>
+                  <component :is="Component" v-bind="viewBindings" />
+                </KeepAlive>
+              </router-view>
             </main>
           </n-layout>
         </n-layout>
@@ -82,8 +79,9 @@
 </template>
 
 <script setup lang="ts">
-import { computed, defineAsyncComponent, h, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, h, onMounted, onUnmounted, ref, watch } from "vue";
 import type { Component } from "vue";
+import { useRoute, useRouter } from "vue-router";
 import { NAlert, NButton, NConfigProvider, NDialogProvider, NDropdown, NForm, NFormItem, NGlobalStyle, NIcon, NInput, NLayout, NLayoutHeader, NLayoutSider, NMenu, NMessageProvider, NTooltip, darkTheme, useOsTheme } from "naive-ui";
 import type { DropdownOption, MenuOption } from "naive-ui";
 import { ApiOutlined, AppstoreOutlined, DashboardOutlined, CloudServerOutlined, FileTextOutlined, KeyOutlined, LinkOutlined, LogoutOutlined, SettingOutlined, TeamOutlined } from "@vicons/antd";
@@ -97,23 +95,14 @@ import { useSessionStore } from "./stores/session.ts";
 import { applyTheme, getThemeStorage, getThemeTokens, readTheme, resolveTheme, toNaiveThemeOverrides, writeTheme } from "./theme";
 import type { ThemeName } from "./theme";
 import { userFacingError } from "./utils/errors.ts";
-import { APP_NAVIGATION, APP_NAVIGATION_GROUPS, CORE_APP_NAVIGATION, EXTENSION_APP_NAVIGATION, applyAppViewSearchParams, isLegacyPricingView, resolveAppViewKey, type AppNavigationItem, type AppViewKey, type ProviderScopeQuery } from "./views/app-navigation.ts";
+import { APP_NAVIGATION, APP_NAVIGATION_GROUPS, CORE_APP_NAVIGATION, EXTENSION_APP_NAVIGATION, appViewRoute, resolveAppViewKey, type AppNavigationItem, type AppViewKey, type ProviderScopeQuery } from "./views/app-navigation.ts";
 
 type ViewKey = AppViewKey;
-const Dashboard = defineAsyncComponent(() => import("./views/Dashboard.vue"));
-const Keys = defineAsyncComponent(() => import("./views/Keys.vue"));
-const Accounts = defineAsyncComponent(() => import("./views/Accounts.vue"));
-const Providers = defineAsyncComponent(() => import("./views/Providers.vue"));
-const Aliases = defineAsyncComponent(() => import("./views/Aliases.vue"));
-const Applications = defineAsyncComponent(() => import("./views/Applications.vue"));
-const Logs = defineAsyncComponent(() => import("./views/Logs.vue"));
-const Settings = defineAsyncComponent(() => import("./views/Settings.vue"));
-const Cpa = defineAsyncComponent(() => import("./views/Cpa.vue"));
-const BrowserSession = defineAsyncComponent(() => import("./views/BrowserSession.vue"));
+const route = useRoute();
+const router = useRouter();
 const osTheme = useOsTheme();
 const themeStorage = getThemeStorage();
 const collapsed = ref(readSidebarCollapsed(themeStorage));
-const activeKey = ref<ViewKey>(readView());
 const themeName = ref<ThemeName>(readTheme(themeStorage));
 const mobileMenuShown = ref(false);
 const characterImage = new URL("../assets/opencode-mascot.png", import.meta.url).href;
@@ -127,12 +116,17 @@ const loggingOut = ref(false);
 const logoutError = ref("");
 const upgradeGuidance = ref("");
 const session = useSessionStore();
-const browserSessionToken = ref(new URLSearchParams(window.location.hash.slice(1)).get("session") ?? "");
-if (browserSessionToken.value) {
-  const sanitizedBrowserUrl = new URL(window.location.href);
-  sanitizedBrowserUrl.hash = "";
-  window.history.replaceState(null, "", sanitizedBrowserUrl);
-}
+const activeKey = computed<ViewKey>(() => (typeof route.name === "string" ? route.name as ViewKey : "dashboard"));
+const isBareView = computed(() => route.meta.bare === true);
+// The browser session token lives in memory only: it is lifted out of the
+// URL on arrival so the address bar and history never keep it.
+const browserSessionToken = ref("");
+watch(() => route.query.session, (value) => {
+  if (typeof value === "string" && value) {
+    browserSessionToken.value = value;
+    void router.replace({ name: "browser" });
+  }
+}, { immediate: true });
 let suppressAuthRequired = false;
 const authFormModel = computed(() => ({ username: authUsername.value, password: authPassword.value, passwordConfirm: authPasswordConfirm.value }));
 const resolvedTheme = computed(() => resolveTheme(themeName.value, osTheme.value));
@@ -164,31 +158,25 @@ const mobileMenuOptions = computed<DropdownOption[]>(() => {
   return options;
 });
 const currentTitle = computed(() => t(APP_NAVIGATION.find(({ key }) => key === activeKey.value)?.label ?? "远程浏览器"));
-const pendingProviderScope = ref<ProviderScopeQuery | null | undefined>(undefined);
-function readView(): ViewKey {
-  const params = new URLSearchParams(window.location.search);
-  const raw = params.get("view");
-  if (isLegacyPricingView(raw)) {
-    const url = applyAppViewSearchParams(new URL(window.location.href), "providers");
-    window.history.replaceState(null, "", url);
-    return "providers";
+// Per-view bindings so extra props/listeners never fall through to the DOM of
+// views that do not declare them.
+const viewBindings = computed(() => {
+  if (route.name === "settings") {
+    return {
+      themeName: themeName.value,
+      resolvedTheme: resolvedTheme.value,
+      "onUpdate:themeName": (value: ThemeName) => { themeName.value = value; },
+    };
   }
-  return resolveAppViewKey(raw);
-}
+  if (route.name === "dashboard") {
+    return { onNavigate: (key: string) => selectView(key) };
+  }
+  return {};
+});
 function selectView(key: string, extras?: ProviderScopeQuery) {
-  const view = resolveAppViewKey(key);
-  pendingProviderScope.value = extras;
-  if (extras && view === "providers") window.history.replaceState(null, "", applyAppViewSearchParams(new URL(window.location.href), view, extras));
-  activeKey.value = view;
+  void router.push(appViewRoute(resolveAppViewKey(key), extras));
 }
 function selectMobileView(key: string | number) { mobileMenuShown.value = false; selectView(String(key)); }
-function syncView(view: ViewKey) {
-  const extras = pendingProviderScope.value;
-  pendingProviderScope.value = undefined;
-  const url = applyAppViewSearchParams(new URL(window.location.href), view, view === "providers" ? extras : null);
-  window.history.replaceState(null, "", url);
-}
-function onPopState() { activeKey.value = readView(); }
 function onAuthRequired(event: Event) {
   if (suppressAuthRequired) return;
   session.handleAuthRequired();
@@ -275,7 +263,6 @@ async function logout() {
     logoutError.value = t("退出登录失败：{error}", { error });
   } finally { loggingOut.value = false; }
 }
-watch(activeKey, syncView);
 watch(locale, () => { authError.value = ""; });
 watch(collapsed, (value) => writeSidebarCollapsed(themeStorage, value));
 watch(themeName, (value) => writeTheme(themeStorage, value));
@@ -283,13 +270,11 @@ watch([resolvedTheme, themeTokens], ([resolved, tokens]) => { applyTheme(documen
 onMounted(() => {
   window.addEventListener(DASHBOARD_AUTH_REQUIRED_EVENT, onAuthRequired);
   window.addEventListener(DASHBOARD_GONE_EVENT, onDashboardGone);
-  window.addEventListener("popstate", onPopState);
   void loadAuthStatus();
 });
 onUnmounted(() => {
   window.removeEventListener(DASHBOARD_AUTH_REQUIRED_EVENT, onAuthRequired);
   window.removeEventListener(DASHBOARD_GONE_EVENT, onDashboardGone);
-  window.removeEventListener("popstate", onPopState);
 });
 </script>
 

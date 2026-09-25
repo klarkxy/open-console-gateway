@@ -31,7 +31,8 @@
     "@vicons/antd": "^0.13.0",
     "naive-ui": "^2.44.1",
     "pinia": "^4.0.3",
-    "vue": "^3"
+    "vue": "^3",
+    "vue-router": "^4.6.4"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.11.4",

@@ -518,7 +518,7 @@ destination `brand_family` / capabilities when the group is not a platform
 parent. `AccountCard` is no longer mounted on this page. Providers lists
 destinations on the rail (joined to the V4 connection that still owns
 mutations; platform destinations have no connection and use `destination=`).
-Add is one flow: Providers `添加供应商` and `?view=providers&add=1` open the
+Add is one flow: Providers `添加供应商` and `#/providers?add=1` open the
 Accounts chooser (`add=1`, or `preset:<id>` when a Providers preset bookmark
 is mapped). The separate Providers preset browser is no longer the Add entry.
 

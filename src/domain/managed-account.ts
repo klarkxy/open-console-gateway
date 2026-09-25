@@ -35,8 +35,10 @@ export function normalizeOpenCodeInviteUrl(value: string): string {
 
 export function browserViewUrl(currentUrl: string, sessionToken: string): string {
   const url = new URL(currentUrl);
-  url.searchParams.set("view", "browser");
-  url.searchParams.delete("session");
-  url.hash = new URLSearchParams({ session: sessionToken }).toString();
+  // The token rides inside the hash route's query, so it is never part of the
+  // request URL; any legacy `?view=` search is dropped so the one-shot
+  // legacy-URL conversion cannot hijack the browser session on load.
+  url.search = "";
+  url.hash = `/browser?${new URLSearchParams({ session: sessionToken }).toString()}`;
   return url.toString();
 }
