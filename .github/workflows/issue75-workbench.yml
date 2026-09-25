@@ -1,28 +1,89 @@
 name: Issue 75 isolated workbench
-
 on:
   push:
     branches: [workbench/issue-75-local-policy]
-
 permissions:
   contents: read
-
+concurrency:
+  group: issue75-workbench
+  cancel-in-progress: true
+env:
+  CARGO_INCREMENTAL: '0'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  CARGO_TERM_COLOR: always
 jobs:
-  source:
+  prepare:
     runs-on: ubuntu-22.04
-    timeout-minutes: 5
+    timeout-minutes: 30
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
+          path: recipe
           persist-credentials: false
-      - name: Export the exact source without credentials or build outputs
-        run: |
-          git rev-parse HEAD > source-commit.txt
-          git archive --format=tar.gz --output=source.tar.gz HEAD
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
-          name: issue75-source
+          ref: aa6241cd23d6d92a2cf2102b1be02bd878967902
+          path: candidate
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271
+        with:
+          version: 10.29.2
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
+        with:
+          shared-key: quality-linux
+          workspaces: 'candidate -> target'
+          cache-on-failure: true
+      - name: Verify and apply isolated patch
+        working-directory: candidate
+        run: |
+          test "$(git rev-parse HEAD)" = aa6241cd23d6d92a2cf2102b1be02bd878967902
+          cat ../recipe/.workbench/patch.* | base64 --decode | gzip -d > ../change.patch
+          echo '9bbe2f7e902e0b59d9dcf9920bcc60252e0ffe8765e9e4e8b2418f54c25e8b0d  ../change.patch' | sha256sum --check
+          git apply --check ../change.patch
+          git apply ../change.patch
+          cargo fmt --all
+      - name: Focused Rust regression tests
+        working-directory: candidate
+        run: |
+          cargo test -p ocg-core --lib --locked --features ollama-cloud-loopback-test temporary_policy
+          cargo test -p ocg-core --lib --locked --features ollama-cloud-loopback-test temporary_policies
+          cargo test -p ocg-core --lib --locked --features ollama-cloud-loopback-test gateway::recovery
+          cargo test -p ocg-core --locked --features ollama-cloud-loopback-test --test gateway_goat_credits --test gateway_goat_mixed_failures --test gateway_resource_recovery
+      - name: Generate authoritative V4 contract
+        working-directory: candidate
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run contract:v4:generate
+      - name: Publish clean candidate without workbench files
+        working-directory: candidate
+        run: |
+          test ! -e .workbench
+          test ! -e .github/workflows/issue75-workbench.yml
+          test -z "$(git ls-remote --heads origin fix/issue-75-temporary-admission)"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add crates schema src/api/generated
+          git diff --cached --check
+          git commit -m 'fix(gateway): add credential-scoped temporary admission policies'
+          git push origin HEAD:refs/heads/fix/issue-75-temporary-admission
+          git rev-parse HEAD > ../candidate-head.txt
+      - name: Export prepared source and patch even on failure
+        if: always()
+        working-directory: candidate
+        run: |
+          git diff --binary > ../formatted.patch
+          tar --exclude=.git --exclude=target --exclude=node_modules -czf ../candidate-source.tar.gz .
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: issue75-candidate
           path: |
-            source.tar.gz
-            source-commit.txt
+            candidate-source.tar.gz
+            candidate-head.txt
+            formatted.patch
           retention-days: 1
