@@ -98,7 +98,7 @@ onUnmounted(() => window.removeEventListener("keydown", onShortcut));
 .command-trigger-label { font-size: var(--ocg-font-sm); }
 .command-shortcut { margin-left: var(--ocg-space-sm); }
 .command-results { display: grid; gap: var(--ocg-space-xs); margin-top: var(--ocg-space-md); max-height: min(420px, 52vh); overflow-y: auto; overscroll-behavior: contain; }
-.command-result { display: grid; grid-template-columns: 20px minmax(0, 1fr) 16px; align-items: center; gap: var(--ocg-space-md); padding: var(--ocg-space-md); color: var(--ocg-muted); border-radius: var(--ocg-radius-md); cursor: pointer; }
+.command-result { display: grid; grid-template-columns: 20px minmax(0, 1fr) 16px; align-items: center; gap: var(--ocg-space-md); padding: var(--ocg-space-md); color: var(--ocg-muted); border-radius: var(--ocg-radius-md); cursor: pointer; transition: background-color var(--ocg-motion-fast) var(--ocg-ease), color var(--ocg-motion-fast) var(--ocg-ease); }
 .command-result--active { background: var(--ocg-primary-soft); color: var(--ocg-primary); }
 .command-empty { padding: var(--ocg-space-2xl); text-align: center; color: var(--ocg-muted); }
 .command-footer { display: flex; justify-content: space-between; align-items: center; gap: var(--ocg-space-md); color: var(--ocg-muted); font-size: var(--ocg-font-xs); }

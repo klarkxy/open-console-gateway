@@ -1070,6 +1070,13 @@ function bumpOAuthPollGeneration(): void {
   stopOAuthPoll();
 }
 
+// Hidden or minimized windows keep their single-flight cadence but skip the
+// network read; the next scheduled tick picks the flow back up. Hosts without
+// a DOM document (component behavior tests) count as visible.
+function isCpaPageVisible(): boolean {
+  return typeof document === "undefined" || document.visibilityState === "visible";
+}
+
 // Completion-scheduled single flight: the next poll is queued only after the
 // previous response has been applied, so a slow status read never overlaps itself.
 function scheduleOAuthPoll(): void {
@@ -1085,6 +1092,11 @@ function stopOAuthPoll(): void {
 async function pollOAuth(): Promise<void> {
   const active = oauth.value;
   if (!active) return;
+  if (!isCpaPageVisible()) {
+    // Skip this round while hidden; re-arm below keeps the single-flight cadence.
+    scheduleOAuthPoll();
+    return;
+  }
   const generation = oauthPollGeneration;
   const flowState = active.state;
   try {
@@ -1330,6 +1342,11 @@ function stopRuntimePoll(): void {
 }
 
 async function pollRuntime(): Promise<void> {
+  if (!isCpaPageVisible()) {
+    // Skip this round while hidden; the busy-phase re-arm keeps the cadence.
+    syncRuntimePolling();
+    return;
+  }
   const generation = runtimePollGeneration;
   runtimePollError.value = "";
   try {
@@ -1681,6 +1698,7 @@ onBeforeUnmount(() => {
   text-align: left;
   cursor: pointer;
   overflow-wrap: anywhere;
+  transition: background-color var(--ocg-motion-fast) var(--ocg-ease), border-color var(--ocg-motion-fast) var(--ocg-ease);
 }
 .cpa-catalog-card.is-selected {
   border-color: var(--ocg-success);

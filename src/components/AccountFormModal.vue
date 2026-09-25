@@ -308,12 +308,11 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from "vue";
+import { computed, defineAsyncComponent, nextTick, ref, watch } from "vue";
 import type { FormInst, FormRules } from "naive-ui";
 import {
   NAlert,
   NButton,
-  NDatePicker,
   NForm,
   NFormItem,
   NInput,
@@ -349,6 +348,12 @@ import AccountCreditSetup from "./AccountCreditSetup.vue";
 import CreditSetupFields from "./CreditSetupFields.vue";
 import { useProvidersStore } from "../stores/providers.ts";
 import type { CreditSetupInput } from "../domain/credit-setup.ts";
+
+// NDatePicker is a heavy component only needed while the form is open; load it
+// on demand so the accounts chunk stays free of the date picker.
+const NDatePicker = defineAsyncComponent(() =>
+  import("naive-ui").then((m) => m.NDatePicker),
+);
 
 export type AccountFormPayload = {
   credits?: CreditSetupInput | null;

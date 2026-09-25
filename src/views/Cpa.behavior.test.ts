@@ -279,6 +279,37 @@ test("runtime polling stays serial while a request is in flight", async () => {
   mounted.app.unmount();
 });
 
+test("runtime polling is gated on page visibility", async () => {
+  const visibility = { state: "hidden" as "hidden" | "visible" };
+  Object.defineProperty(globalThis, "document", {
+    configurable: true,
+    writable: true,
+    value: { get visibilityState() { return visibility.state; } },
+  });
+  try {
+    let runtimeReads = 0;
+    const mounted = await mount({
+      getCpaIntegration: async () => integration({ currentOperation: "install" }),
+      getCpaRuntime: async () => {
+        runtimeReads += 1;
+        return runtime({ phase: "downloading", currentOperation: "install" });
+      },
+      getCpaAccounts: async () => ({ accounts: [] }),
+      getCpaRuntimeKeys: async () => ({ keys: [], processGeneration: 1, revision: 1 }),
+    });
+    assert.equal(runtimeReads, 1, "the initial load still reads the runtime");
+    await fireTimers(mounted.window);
+    await fireTimers(mounted.window);
+    assert.equal(runtimeReads, 1, "hidden polls skip the network read but keep re-arming");
+    visibility.state = "visible";
+    await fireTimers(mounted.window);
+    assert.equal(runtimeReads, 2, "a visible poll reads the runtime again");
+    mounted.app.unmount();
+  } finally {
+    delete (globalThis as { document?: unknown }).document;
+  }
+});
+
 test("stale runtime polls are ignored after a refresh", async () => {
   let runtimeReads = 0;
   const stale = deferred<ReturnType<typeof runtime>>();

@@ -16,66 +16,79 @@
               <span class="connection-label">{{ t("API 地址") }}</span>
               <code>{{ serviceApiUrl }}</code>
             </div>
-            <n-tooltip trigger="hover" :delay="200">
+            <OcgTooltip :delay="200">
               <template #trigger>
                 <n-button circle quaternary size="small" :aria-label="t('复制 API Base URL')" @click="copyConnection('api', serviceApiUrl, t('API 地址'))">
                   <template #icon><n-icon :component="copiedTarget === 'api' ? CheckOutlined : CopyOutlined" /></template>
                 </n-button>
               </template>
               {{ t("复制 API Base URL") }}
-            </n-tooltip>
+            </OcgTooltip>
           </div>
           <div class="connection-row">
             <n-icon size="18" aria-hidden="true"><KeyOutlined /></n-icon>
             <div class="connection-value">
               <div class="connection-key-label">
                 <span class="connection-label">{{ t("Key") }}</span>
-                <n-popover v-if="enabledGatewayKeys.length > 1" trigger="click" placement="bottom-start" :show="keyMenuOpen" @update:show="keyMenuOpen = $event">
+                <OcgPopover v-if="enabledGatewayKeys.length > 1" v-model:open="keyMenuOpen">
                   <template #trigger>
-                    <button type="button" class="key-switcher-trigger" :disabled="refreshingKey || loading" :aria-label="t('选择 Key')" :aria-expanded="keyMenuOpen" @keydown.esc="keyMenuOpen = false">
-                      <span class="key-switcher-name">{{ selectedKey?.name }}</span>
+                    <button
+                      type="button"
+                      class="inline-flex max-w-[min(220px,70%)] cursor-pointer items-center gap-1 rounded-sm border-0 bg-transparent px-1 [font:inherit] text-[length:var(--ocg-font-xs)] leading-[1.6] text-primary transition-[background-color] duration-[var(--ocg-motion-fast)] ease-[var(--ocg-ease)] not-disabled:hover:bg-primary-soft disabled:cursor-default disabled:opacity-60"
+                      :disabled="refreshingKey || loading"
+                      :aria-label="t('选择 Key')"
+                    >
+                      <span class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">{{ selectedKey?.name }}</span>
                       <n-icon size="12" aria-hidden="true"><DownOutlined /></n-icon>
                     </button>
                   </template>
-                  <div class="key-switcher-menu" @keydown.esc="keyMenuOpen = false">
-                    <button v-for="entry in enabledGatewayKeys" :key="entry.id" type="button" class="key-switcher-option" :class="{ selected: entry.id === selectedKey?.id }" :aria-pressed="entry.id === selectedKey?.id" @click="selectGatewayKey(entry.id)">
-                      <span class="key-switcher-option-main"><span class="key-switcher-option-name">{{ entry.name }}</span><span v-if="entry.id === PRIMARY_KEY_ID" class="key-switcher-badge">{{ t("主 Key") }}</span></span>
-                      <code class="key-switcher-option-value">{{ maskConnectionKey(entry.value) }}</code>
-                      <n-icon v-if="entry.id === selectedKey?.id" class="key-switcher-check" size="14" aria-hidden="true"><CheckOutlined /></n-icon>
+                  <div class="grid max-h-[min(360px,60vh)] w-[min(320px,calc(100vw-64px))] gap-1 overflow-auto">
+                    <button
+                      v-for="entry in enabledGatewayKeys"
+                      :key="entry.id"
+                      type="button"
+                      class="grid cursor-pointer grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-0.5 rounded-sm border-0 px-3 py-2 text-left [font:inherit] text-ink transition-[background-color] duration-[var(--ocg-motion-fast)] ease-[var(--ocg-ease)] hover:bg-primary-soft"
+                      :class="entry.id === selectedKey?.id ? 'bg-primary-soft' : 'bg-transparent'"
+                      :aria-pressed="entry.id === selectedKey?.id"
+                      @click="selectGatewayKey(entry.id)"
+                    >
+                      <span class="col-start-1 flex min-w-0 items-center gap-2"><span class="overflow-hidden text-ellipsis whitespace-nowrap text-[length:var(--ocg-font-sm)]">{{ entry.name }}</span><span v-if="entry.id === PRIMARY_KEY_ID" class="flex-none text-[length:var(--ocg-font-xs)] text-muted">{{ t("主 Key") }}</span></span>
+                      <code class="col-start-1 font-mono text-[length:var(--ocg-font-xs)] text-muted">{{ maskConnectionKey(entry.value) }}</code>
+                      <n-icon v-if="entry.id === selectedKey?.id" class="col-start-2 row-span-2 row-start-1 text-primary" size="14" aria-hidden="true"><CheckOutlined /></n-icon>
                     </button>
                   </div>
-                </n-popover>
+                </OcgPopover>
               </div>
               <code>{{ maskedKey }}</code>
             </div>
             <div class="row-actions">
               <n-popconfirm :positive-text="t('生成新 Key')" :negative-text="t('取消')" @positive-click="regenerateKey">
                 <template #trigger>
-                  <n-tooltip trigger="hover" :delay="200">
+                  <OcgTooltip :delay="200">
                     <template #trigger>
                       <n-button circle quaternary size="small" :aria-label="t('刷新 Key')" :loading="refreshingKey" :disabled="refreshingKey || loading || !selectedKey">
                         <template #icon><n-icon :component="ReloadOutlined" /></template>
                       </n-button>
                     </template>
                     {{ t("刷新 Key") }}
-                  </n-tooltip>
+                  </OcgTooltip>
                 </template>
                 {{ t("仅当前 Key 的旧值立即失效，其他 Key 不受影响。确定生成新值？") }}
               </n-popconfirm>
-              <n-tooltip trigger="hover" :delay="200">
+              <OcgTooltip :delay="200">
                 <template #trigger>
                   <n-button circle quaternary size="small" :aria-label="t('复制 Key')" :disabled="refreshingKey || !selectedKey" @click="copyConnection('key', selectedKey?.value ?? '', t('Key'))">
                     <template #icon><n-icon :component="copiedTarget === 'key' ? CheckOutlined : CopyOutlined" /></template>
                   </n-button>
                 </template>
                 {{ t("复制 Key") }}
-              </n-tooltip>
-              <n-tooltip trigger="hover" :delay="200">
+              </OcgTooltip>
+              <OcgTooltip :delay="200">
                 <template #trigger>
                   <n-button circle quaternary size="small" :aria-label="t('管理接入 Key')" @click="goToKeys"><template #icon><n-icon :component="UnorderedListOutlined" /></template></n-button>
                 </template>
                 {{ t("管理接入 Key") }}
-              </n-tooltip>
+              </OcgTooltip>
             </div>
           </div>
         </div>
@@ -118,9 +131,11 @@
 <script setup lang="ts">
 import { useDestinationsStore } from "../stores/destinations.ts";
 import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from "vue";
-import { NAlert, NButton, NEmpty, NIcon, NPopconfirm, NPopover, NSpin, NTag, NTooltip, useMessage } from "naive-ui";
+import { NAlert, NButton, NEmpty, NIcon, NPopconfirm, NSpin, NTag, useMessage } from "naive-ui";
 import { ApiOutlined, CheckOutlined, CopyOutlined, DownOutlined, KeyOutlined, ReloadOutlined, UnorderedListOutlined } from "@vicons/antd";
 import StackedBarChart from "../components/StackedBarChart.vue";
+import OcgPopover from "../components/ocg/OcgPopover.vue";
+import OcgTooltip from "../components/ocg/OcgTooltip.vue";
 import { PRIMARY_KEY_ID, dashboardApi } from "../api/dashboard";
 import { useAccountsStore } from "../stores/accounts.ts";
 import { useConnectionStore } from "../stores/connection.ts";
@@ -132,7 +147,6 @@ import { t } from "../i18n/index.ts";
 import { formatNumber, formatTokens, useClipboard } from "../utils/format.ts";
 import { userFacingError } from "../utils/errors.ts";
 import { accountExpiry } from "../domain/account-display.ts";
-import { createRevalidateGate } from "../domain/revalidate.ts";
 import { accountExpiryText } from "./account-status-text.ts";
 import { maskConnectionKey, resolveConnectionUrls } from "./dashboard-connection";
 import { buildNeedsAttention } from "./dashboard-attention.ts";
@@ -147,10 +161,9 @@ const connectionStore = useConnectionStore();
 const providersStore = useProvidersStore();
 const destinationsStore = useDestinationsStore();
 const sessionStore = useSessionStore();
-const revalidateGate = createRevalidateGate(30_000);
-watch(() => sessionStore.authenticated, (ok) => { if (!ok) revalidateGate.reset(); });
+watch(() => sessionStore.authenticated, (ok) => { if (!ok) dashboardLoadedAt = 0; });
 const { copiedTarget, copy, cleanup } = useClipboard();
-const characterImage = new URL("../../assets/opencode-mascot.png", import.meta.url).href;
+const characterImage = new URL("../../assets/opencode-mascot-sm.webp", import.meta.url).href;
 const accounts = computed(() => accountsStore.accounts);
 const dailyTokens = ref<DailyModelTokens[]>([]);
 const loading = ref(true);
@@ -235,6 +248,10 @@ async function regenerateKey() {
 function goToAccounts() { emit("navigate", "accounts"); }
 function goToKeys() { emit("navigate", "keys"); }
 let dashboardRequestActive = false;
+let dashboardLoadedAt = 0;
+// Activation refreshes skip data loaded recently; a failed load never updates
+// the timestamp, so the next activation retries.
+const ACTIVATED_REFRESH_FRESHNESS_MS = 30_000;
 async function loadDashboard() {
   if (dashboardRequestActive || refreshingKey.value) return;
   dashboardRequestActive = true;
@@ -247,6 +264,7 @@ async function loadDashboard() {
   if (loadedSummary.status === "fulfilled") { summary.value = loadedSummary.value; summaryLoaded.value = true; }
   if (tokens.status === "fulfilled") { dailyTokens.value = tokens.value; tokensLoaded.value = true; }
   dashboardError.value = [loadedAccounts, connection, loadedSummary, tokens, catalog, destinations].some((result) => result.status === "rejected");
+  if (!dashboardError.value) dashboardLoadedAt = Date.now();
   if (dashboardError.value) message.error(t("部分仪表盘数据加载失败"));
   loading.value = false;
   dashboardRequestActive = false;
@@ -261,10 +279,11 @@ function unbindVisibilityRefresh() { document.removeEventListener("visibilitycha
 onMounted(() => { bindVisibilityRefresh(); void loadDashboard(); });
 onActivated(() => {
   bindVisibilityRefresh(); startLifecycleClock();
-  if (!activatedOnce) { activatedOnce = true; return; }
-  if (summaryLoaded.value && !revalidateGate.shouldRun()) return;
-  revalidateGate.record();
-  void loadDashboard();
+  if (activatedOnce) {
+    if (Date.now() - dashboardLoadedAt >= ACTIVATED_REFRESH_FRESHNESS_MS) void loadDashboard();
+  } else {
+    activatedOnce = true;
+  }
 });
 onDeactivated(() => { stopLifecycleClock(); unbindVisibilityRefresh(); });
 onUnmounted(() => { cleanup(); stopLifecycleClock(); unbindVisibilityRefresh(); });

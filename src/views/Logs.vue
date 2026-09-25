@@ -36,6 +36,8 @@
           :loading="gatewayLoading"
           :pagination="gatewayPagination"
           :scroll-x="1200"
+          :virtual-scroll="true"
+          max-height="560"
           size="small"
           @update:page="changeGatewayPage"
         />
@@ -298,7 +300,6 @@ import { locale } from "../i18n/index.ts";
 import { useAccountsStore } from "../stores/accounts.ts";
 import { useProvidersStore } from "../stores/providers.ts";
 import { useSessionStore } from "../stores/session.ts";
-import { createRevalidateGate } from "../domain/revalidate.ts";
 import { formatCost, formatNumber, useClipboard } from "../utils/format.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
 import { computeTimeRange, resolveTimeRange, timePresetValues } from "./log-time-range.ts";
@@ -338,8 +339,12 @@ const message = useMessage();
 const accountsStore = useAccountsStore();
 const providersStore = useProvidersStore();
 const sessionStore = useSessionStore();
-const revalidateGate = createRevalidateGate(15_000);
-watch(() => sessionStore.authenticated, (ok) => { if (!ok) revalidateGate.reset(); });
+watch(() => sessionStore.authenticated, (ok) => {
+  if (!ok) {
+    gatewayLoadedAt = 0;
+    forwardLoadedAt = 0;
+  }
+});
 const { copiedTarget, copy, cleanup } = useClipboard();
 const activeTab = ref<LogTab>(query.get("tab") === "gateway" ? "gateway" : "forward");
 const gatewayLogs = ref<GatewayLog[]>([]);
@@ -698,6 +703,11 @@ function syncQueryState() {
 }
 
 let gatewayRequest = 0;
+let gatewayLoadedAt = 0;
+// Auto-refresh on activation skips resources loaded recently, and never
+// duplicates a load that is already in flight (the loading flags cover
+// user-driven triggers too, since those carry the current filters).
+const ACTIVATED_REFRESH_FRESHNESS_MS = 30_000;
 
 async function loadGatewayLogs() {
   const request = ++gatewayRequest;
@@ -707,6 +717,7 @@ async function loadGatewayLogs() {
     const logs = await dashboardApi.getGatewayLogs(200, requestIdFilter.value);
     if (request !== gatewayRequest) return;
     gatewayLogs.value = logs;
+    gatewayLoadedAt = Date.now();
     gatewayPage.value = 1;
   } catch (e) {
     if (request === gatewayRequest) {
@@ -719,6 +730,7 @@ async function loadGatewayLogs() {
 }
 
 let forwardRequest = 0;
+let forwardLoadedAt = 0;
 
 async function loadForwardLogs() {
   const request = ++forwardRequest;
@@ -747,6 +759,7 @@ async function loadForwardLogs() {
     if (request !== forwardRequest) return;
     forwardLogs.value = result.items;
     forwardTotals.value = result.summary;
+    forwardLoadedAt = Date.now();
   } catch (e) {
     if (request === forwardRequest) {
       forwardLogs.value = [];
@@ -835,11 +848,18 @@ let activatedOnce = false;
 // Logs accumulate server-side while another tab is active (this view is kept
 // alive by App.vue); refresh both lists when returning, keeping filters.
 onActivated(() => {
-  if (!activatedOnce) { activatedOnce = true; return; }
-  if (!revalidateGate.shouldRun()) return;
-  revalidateGate.record();
-  void loadGatewayLogs();
-  void loadForwardLogs();
+  if (activatedOnce) {
+    // Only the automatic refresh is gated; user actions (search, filters,
+    // paging, refresh buttons) call the loaders directly and stay immediate.
+    if (!gatewayLoading.value && Date.now() - gatewayLoadedAt >= ACTIVATED_REFRESH_FRESHNESS_MS) {
+      void loadGatewayLogs();
+    }
+    if (!forwardLoading.value && Date.now() - forwardLoadedAt >= ACTIVATED_REFRESH_FRESHNESS_MS) {
+      void loadForwardLogs();
+    }
+  } else {
+    activatedOnce = true;
+  }
 });
 
 onMounted(() => {

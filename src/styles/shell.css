@@ -1,11 +1,13 @@
 /* Application chrome: one quiet workspace, not a stack of floating cards. */
-.app-provider, .app-shell, .app-main { height: 100%; }
+.app-provider, .app-ready, .app-shell, .app-main { height: 100%; }
 .app-sider { background: var(--ocg-surface-sunken); border-right: 1px solid var(--ocg-divider); }
 .brand { display: flex; align-items: center; gap: var(--ocg-space-md); height: calc(var(--ocg-header-height) + 16px); padding: 0 var(--ocg-space-xl); overflow: hidden; }
 .brand.collapsed { justify-content: center; padding: 0; }
 .brand-symbol { flex: none; display: inline-grid; place-items: center; width: 30px; height: 30px; border: 1px solid var(--ocg-border); border-radius: var(--ocg-radius-md); background: var(--ocg-surface); color: var(--ocg-primary); font: 600 var(--ocg-font-lg)/1 var(--ocg-font-ui); }
 .brand-name { display: grid; gap: 2px; min-width: 0; color: var(--ocg-ink); font-size: var(--ocg-font-md); font-weight: 600; line-height: 1.3; white-space: nowrap; }
 .brand-name small { color: var(--ocg-muted); font-size: var(--ocg-font-xs); font-weight: 400; letter-spacing: 0.02em; }
+.brand-fade-enter-active, .brand-fade-leave-active { transition: opacity var(--ocg-motion-fast) var(--ocg-ease); }
+.brand-fade-enter-from, .brand-fade-leave-to { opacity: 0; }
 .app-sider :deep(.n-menu) { padding: 0 var(--ocg-space-xs); }
 .app-sider :deep(.n-menu-item-content) { font-weight: 500; }
 .app-sider :deep(.n-menu-item-content--selected)::before { box-shadow: inset 2px 0 0 var(--ocg-primary); }

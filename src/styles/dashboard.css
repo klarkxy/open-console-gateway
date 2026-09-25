@@ -7,25 +7,15 @@
 .ready-mark > span { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 .ready-mark.not-ready { color: var(--ocg-error); }
 .ready-mark.pending { color: var(--ocg-subtle); }
-.connection-rows { border: 1px solid var(--ocg-divider); border-radius: var(--ocg-radius-md); background: var(--ocg-surface-sunken); }
+.connection-rows { border: 1px solid var(--ocg-border); border-radius: var(--ocg-radius-md); background: var(--ocg-surface-sunken); }
 .connection-row { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; gap: var(--ocg-space-md); align-items: center; min-height: 68px; padding: var(--ocg-space-md) var(--ocg-space-lg); color: var(--ocg-muted); }
-.connection-row + .connection-row { border-top: 1px solid var(--ocg-divider); }
+.connection-row + .connection-row { border-top: 1px solid var(--ocg-border); }
 .connection-value { min-width: 0; color: var(--ocg-ink); }
 .connection-label { display: block; color: var(--ocg-muted); font-size: var(--ocg-font-xs); }
 .connection-value code { display: block; overflow: hidden; font-family: var(--ocg-font-mono); font-size: var(--ocg-font-md); line-height: 1.6; text-overflow: ellipsis; white-space: nowrap; }
 .connection-key-label { display: flex; align-items: center; gap: var(--ocg-space-sm); min-width: 0; }
-.key-switcher-trigger { display: inline-flex; align-items: center; gap: var(--ocg-space-xs); max-width: min(220px, 70%); border: 0; border-radius: var(--ocg-radius-sm); padding: 0 var(--ocg-space-xs); background: transparent; color: var(--ocg-primary); font-size: var(--ocg-font-xs); line-height: 1.6; cursor: pointer; }
-.key-switcher-trigger:hover:not(:disabled) { background: var(--ocg-primary-soft); }
-.key-switcher-trigger:disabled { opacity: 0.6; cursor: default; }
-.key-switcher-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.key-switcher-menu { display: grid; gap: var(--ocg-space-xs); width: min(320px, calc(100vw - 64px)); max-height: min(360px, 60vh); overflow: auto; }
-.key-switcher-option { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px var(--ocg-space-md); align-items: center; padding: var(--ocg-space-sm) var(--ocg-space-md); border: 0; border-radius: var(--ocg-radius-sm); background: transparent; color: var(--ocg-ink); text-align: left; cursor: pointer; }
-.key-switcher-option:hover, .key-switcher-option.selected { background: var(--ocg-primary-soft); }
-.key-switcher-option-main { display: flex; align-items: center; gap: var(--ocg-space-sm); grid-column: 1; min-width: 0; }
-.key-switcher-option-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--ocg-font-sm); }
-.key-switcher-badge { flex: none; color: var(--ocg-muted); font-size: var(--ocg-font-xs); }
-.key-switcher-option-value { grid-column: 1; color: var(--ocg-muted); font-family: var(--ocg-font-mono); font-size: var(--ocg-font-xs); }
-.key-switcher-check { grid-column: 2; grid-row: 1 / span 2; color: var(--ocg-primary); }
+/* The Key switcher (trigger + menu options) is styled with Tailwind utilities
+ * directly in Dashboard.vue; it migrated to the reka-ui OcgPopover wrapper. */
 .row-actions { display: flex; align-items: center; gap: var(--ocg-space-xs); }
 .connection-warning { margin: var(--ocg-space-md) 0 0; color: var(--ocg-warning); font-size: var(--ocg-font-sm); line-height: 1.6; }
 .hero-character { width: 140px; height: 190px; object-fit: cover; object-position: top; align-self: flex-end; flex: none; margin-right: var(--ocg-space-xl); pointer-events: none; user-select: none; }

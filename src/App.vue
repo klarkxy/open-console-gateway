@@ -1,80 +1,87 @@
 <template>
   <n-config-provider class="app-provider" :theme="naiveTheme" :theme-overrides="themeOverrides" :locale="naiveLocale" :date-locale="naiveDateLocale">
     <n-global-style />
-    <main v-if="authState !== 'ready'" class="auth-page">
-      <section class="auth-panel">
-        <div class="auth-panel-head">
-          <div class="auth-brand"><span class="brand-symbol" aria-hidden="true">O</span><span>Open Console Gateway</span></div>
-          <LocaleSwitcher />
-        </div>
-        <h1>{{ authState === "register" ? t("创建管理员") : t("管理员登录") }}</h1>
-        <p v-if="authState === 'checking'" class="auth-copy" role="status">{{ t("正在连接管理服务…") }}</p>
-        <n-form v-else class="auth-form" :model="authFormModel" label-placement="top" :show-feedback="false" @submit.prevent="submitAuth">
-          <n-form-item :label="t('用户名')">
-            <n-input v-model:value="authUsername" :input-props="{ 'aria-label': t('用户名') }" autocomplete="username" placeholder="admin" autofocus />
-          </n-form-item>
-          <n-form-item :label="t('密码')">
-            <n-input v-model:value="authPassword" :input-props="{ 'aria-label': t('密码') }" type="password" :autocomplete="authState === 'register' ? 'new-password' : 'current-password'" :placeholder="t('至少 8 个字符')" show-password-on="click" />
-          </n-form-item>
-          <n-form-item v-if="authState === 'register'" :label="t('确认密码')">
-            <n-input v-model:value="authPasswordConfirm" :input-props="{ 'aria-label': t('确认密码') }" type="password" autocomplete="new-password" :placeholder="t('再次输入密码')" show-password-on="click" />
-          </n-form-item>
-          <p v-if="authError" class="auth-error" role="alert">{{ authError }}</p>
-          <n-button attr-type="submit" type="primary" block :disabled="!authUsername.trim() || !authPassword">{{ authState === "register" ? t("创建并进入") : t("登录") }}</n-button>
-        </n-form>
-      </section>
-      <img :src="characterImage" alt="" class="auth-character" aria-hidden="true" />
-    </main>
-    <n-message-provider v-else>
-      <n-dialog-provider>
-        <!-- Bare routes (remote browser) take over the whole window: no shell, no KeepAlive. -->
-        <router-view v-if="isBareView" v-slot="{ Component }">
-          <component :is="Component" :session-token="browserSessionToken" />
-        </router-view>
-        <n-layout v-else has-sider class="app-shell">
-          <n-layout-sider collapse-mode="width" :collapsed-width="64" :width="224" :collapsed="collapsed" show-trigger class="app-sider" :class="{ 'app-sider--collapsed': collapsed }" @collapse="collapsed = true" @expand="collapsed = false">
-            <div class="brand" :class="{ collapsed }" aria-label="Open Console Gateway">
-              <span class="brand-symbol" aria-hidden="true">O</span>
-              <span v-if="!collapsed" class="brand-name"><span>Open Console</span><small>Gateway</small></span>
-            </div>
-            <nav aria-label="Open Console Gateway">
-              <n-menu :collapsed="collapsed" :collapsed-width="64" :collapsed-icon-size="20" :options="menuOptions" :value="activeKey" @update:value="(key: string) => selectView(key)" />
-            </nav>
-          </n-layout-sider>
-          <n-layout class="app-main">
-            <n-layout-header class="app-header">
-              <h1 class="desktop-title">{{ currentTitle }}</h1>
-              <div class="mobile-nav">
-                <span class="brand-symbol" role="img" aria-label="Open Console Gateway">O</span>
-                <n-dropdown class="mobile-nav-dropdown" trigger="click" :keyboard="true" :show="mobileMenuShown" :options="mobileMenuOptions" @select="selectMobileView" @update:show="mobileMenuShown = $event">
-                  <n-button quaternary class="mobile-nav-trigger" aria-haspopup="menu" :aria-expanded="mobileMenuShown" :aria-label="currentTitle">{{ currentTitle }}<span class="mobile-nav-chevron" aria-hidden="true">⌄</span></n-button>
-                </n-dropdown>
-              </div>
-              <div class="header-actions">
-                <AppCommandPalette :items="navigationItems" :active-key="activeKey" @select="selectView" />
-                <span class="header-divider" aria-hidden="true" />
-                <LocaleSwitcher />
-                <ThemeSwitcher v-model:theme-name="themeName" :resolved-theme="resolvedTheme" />
-                <n-tooltip v-if="!localMode" trigger="hover">
-                  <template #trigger><n-button circle quaternary :aria-label="t('退出登录')" :loading="loggingOut" :disabled="loggingOut" @click="logout"><template #icon><n-icon :component="LogoutOutlined" /></template></n-button></template>
-                  {{ t("退出登录") }}
-                </n-tooltip>
-              </div>
-            </n-layout-header>
-            <main class="app-content">
-              <n-alert v-if="logoutError" class="app-error" type="error" closable @close="logoutError = ''">{{ logoutError }}</n-alert>
-              <n-alert v-if="upgradeGuidance" class="app-error" type="warning" closable @close="upgradeGuidance = ''">{{ upgradeGuidance }}</n-alert>
-              <!-- Keep views mounted across navigation: filters, scroll and drafts survive. -->
-              <router-view v-slot="{ Component }">
-                <KeepAlive>
-                  <component :is="Component" v-bind="viewBindings" />
-                </KeepAlive>
-              </router-view>
-            </main>
-          </n-layout>
-        </n-layout>
-      </n-dialog-provider>
-    </n-message-provider>
+    <Transition name="auth-fade" mode="out-in">
+      <main v-if="authState !== 'ready'" class="auth-page">
+        <section class="auth-panel">
+          <div class="auth-panel-head">
+            <div class="auth-brand"><span class="brand-symbol" aria-hidden="true">O</span><span>Open Console Gateway</span></div>
+            <LocaleSwitcher />
+          </div>
+          <h1>{{ authState === "register" ? t("创建管理员") : t("管理员登录") }}</h1>
+          <p v-if="authState === 'checking'" class="auth-copy" role="status">{{ t("正在连接管理服务…") }}</p>
+          <n-form v-else class="auth-form" :model="authFormModel" label-placement="top" :show-feedback="false" @submit.prevent="submitAuth">
+            <n-form-item :label="t('用户名')">
+              <n-input v-model:value="authUsername" :input-props="{ 'aria-label': t('用户名') }" autocomplete="username" placeholder="admin" autofocus />
+            </n-form-item>
+            <n-form-item :label="t('密码')">
+              <n-input v-model:value="authPassword" :input-props="{ 'aria-label': t('密码') }" type="password" :autocomplete="authState === 'register' ? 'new-password' : 'current-password'" :placeholder="t('至少 8 个字符')" show-password-on="click" />
+            </n-form-item>
+            <n-form-item v-if="authState === 'register'" :label="t('确认密码')">
+              <n-input v-model:value="authPasswordConfirm" :input-props="{ 'aria-label': t('确认密码') }" type="password" autocomplete="new-password" :placeholder="t('再次输入密码')" show-password-on="click" />
+            </n-form-item>
+            <p v-if="authError" class="auth-error" role="alert">{{ authError }}</p>
+            <n-button attr-type="submit" type="primary" block :disabled="!authUsername.trim() || !authPassword">{{ authState === "register" ? t("创建并进入") : t("登录") }}</n-button>
+          </n-form>
+        </section>
+        <img :src="characterImage" alt="" class="auth-character" aria-hidden="true" />
+      </main>
+      <div v-else class="app-ready">
+        <n-message-provider>
+          <n-dialog-provider>
+            <router-view v-if="isBareView" v-slot="{ Component }">
+              <component :is="Component" :session-token="browserSessionToken" />
+            </router-view>
+            <n-layout v-else has-sider class="app-shell">
+              <n-layout-sider collapse-mode="width" :collapsed-width="64" :width="224" :collapsed="collapsed" show-trigger class="app-sider" :class="{ 'app-sider--collapsed': collapsed }" @collapse="collapsed = true" @expand="collapsed = false">
+                <div class="brand" :class="{ collapsed }" aria-label="Open Console Gateway">
+                  <span class="brand-symbol" aria-hidden="true">O</span>
+                  <Transition name="brand-fade">
+                    <span v-if="!collapsed" class="brand-name"><span>Open Console</span><small>Gateway</small></span>
+                  </Transition>
+                </div>
+                <nav aria-label="Open Console Gateway">
+                  <n-menu :collapsed="collapsed" :collapsed-width="64" :collapsed-icon-size="20" :options="menuOptions" :value="activeKey" @update:value="(key: string) => selectView(key)" />
+                </nav>
+              </n-layout-sider>
+              <n-layout class="app-main">
+                <n-layout-header class="app-header">
+                  <h1 class="desktop-title">{{ currentTitle }}</h1>
+                  <div class="mobile-nav">
+                    <span class="brand-symbol" role="img" aria-label="Open Console Gateway">O</span>
+                    <n-dropdown class="mobile-nav-dropdown" trigger="click" :keyboard="true" :show="mobileMenuShown" :options="mobileMenuOptions" @select="selectMobileView" @update:show="mobileMenuShown = $event">
+                      <n-button quaternary class="mobile-nav-trigger" aria-haspopup="menu" :aria-expanded="mobileMenuShown" :aria-label="currentTitle">{{ currentTitle }}<span class="mobile-nav-chevron" aria-hidden="true">⌄</span></n-button>
+                    </n-dropdown>
+                  </div>
+                  <div class="header-actions">
+                    <AppCommandPalette :items="navigationItems" :active-key="activeKey" @select="selectView" />
+                    <span class="header-divider" aria-hidden="true" />
+                    <LocaleSwitcher />
+                    <ThemeSwitcher v-model:theme-name="themeName" :resolved-theme="resolvedTheme" />
+                    <n-tooltip v-if="!localMode" trigger="hover">
+                      <template #trigger><n-button circle quaternary :aria-label="t('退出登录')" :loading="loggingOut" :disabled="loggingOut" @click="logout"><template #icon><n-icon :component="LogoutOutlined" /></template></n-button></template>
+                      {{ t("退出登录") }}
+                    </n-tooltip>
+                  </div>
+                </n-layout-header>
+                <main class="app-content">
+                  <n-alert v-if="logoutError" class="app-error" type="error" closable @close="logoutError = ''">{{ logoutError }}</n-alert>
+                  <n-alert v-if="upgradeGuidance" class="app-error" type="warning" closable @close="upgradeGuidance = ''">{{ upgradeGuidance }}</n-alert>
+                  <!-- Keep views mounted across navigation: filters, scroll and drafts survive. -->
+                  <router-view v-slot="{ Component }">
+                    <Transition name="view-fade" mode="out-in">
+                      <KeepAlive :max="4">
+                        <component :is="Component" :key="activeKey" v-bind="viewBindings" />
+                      </KeepAlive>
+                    </Transition>
+                  </router-view>
+                </main>
+              </n-layout>
+            </n-layout>
+          </n-dialog-provider>
+        </n-message-provider>
+      </div>
+    </Transition>
   </n-config-provider>
 </template>
 
@@ -105,7 +112,7 @@ const themeStorage = getThemeStorage();
 const collapsed = ref(readSidebarCollapsed(themeStorage));
 const themeName = ref<ThemeName>(readTheme(themeStorage));
 const mobileMenuShown = ref(false);
-const characterImage = new URL("../assets/opencode-mascot.png", import.meta.url).href;
+const characterImage = new URL("../assets/opencode-mascot-sm.webp", import.meta.url).href;
 const authUsername = ref("");
 const authPassword = ref("");
 const authPasswordConfirm = ref("");
@@ -279,3 +286,14 @@ onUnmounted(() => {
 </script>
 
 <style scoped src="./styles/shell.css"></style>
+
+<style scoped>
+.view-fade-enter-active,
+.view-fade-leave-active { transition: opacity var(--ocg-motion-normal) var(--ocg-ease), transform var(--ocg-motion-normal) var(--ocg-ease); }
+.view-fade-enter-from { opacity: 0; transform: translateY(4px); }
+.view-fade-leave-to { opacity: 0; }
+.auth-fade-enter-active,
+.auth-fade-leave-active { transition: opacity var(--ocg-motion-normal) var(--ocg-ease); }
+.auth-fade-enter-from,
+.auth-fade-leave-to { opacity: 0; }
+</style>
