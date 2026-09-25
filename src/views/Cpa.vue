@@ -548,6 +548,8 @@ import { dashboardV3 } from "../api/dashboard-v3.ts";
 import { dashboardV4 } from "../api/dashboard-v4.ts";
 import type { CpaCatalog, CpaCatalogEntry } from "../api/generated/dashboard-v4.ts";
 import { useControlPlaneStore } from "../stores/controlPlane.ts";
+import { useSessionStore } from "../stores/session.ts";
+import { createRevalidateGate } from "../domain/revalidate.ts";
 import { t } from "../i18n/index.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
 import { useClipboard } from "../utils/format.ts";
@@ -575,6 +577,9 @@ import CpaKeyRow from "../components/CpaKeyRow.vue";
 const dialog = useDialog();
 const message = useMessage();
 const controlPlane = useControlPlaneStore();
+const sessionStore = useSessionStore();
+const revalidateGate = createRevalidateGate(15_000);
+watch(() => sessionStore.authenticated, (ok) => { if (!ok) revalidateGate.reset(); });
 const { copiedTarget, copy, cleanup: cleanupClipboard } = useClipboard();
 
 const integration = ref<CpaIntegration | null>(null);
@@ -1588,7 +1593,12 @@ onMounted(() => {
   window.addEventListener("pagehide", cancelOAuthOnLeave);
   void load();
 });
-onActivated(() => { if (!loading.value) void load(); });
+onActivated(() => {
+  if (loading.value) return;
+  if (integration.value && !revalidateGate.shouldRun()) return;
+  revalidateGate.record();
+  void load();
+});
 onDeactivated(() => {
   cancelOAuthOnLeave();
   bumpRuntimePollGeneration();

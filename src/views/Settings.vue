@@ -409,6 +409,8 @@ import {
 } from "@vicons/antd";
 import { DashboardRequestError, dashboardApi } from "../api/dashboard";
 import { useSettingsStore } from "../stores/settings.ts";
+import { useSessionStore } from "../stores/session.ts";
+import { createRevalidateGate } from "../domain/revalidate.ts";
 import type {
   AppConfig,
   ProxyMode,
@@ -443,6 +445,9 @@ const emit = defineEmits<{ "update:themeName": [value: ThemeName] }>();
 
 const message = useMessage();
 const settingsStore = useSettingsStore();
+const sessionStore = useSessionStore();
+const revalidateGate = createRevalidateGate(60_000);
+watch(() => sessionStore.authenticated, (ok) => { if (!ok) revalidateGate.reset(); });
 const saving = ref(false);
 const testingProxy = ref(false);
 const proxyTestResult = ref<{
@@ -1138,6 +1143,8 @@ onMounted(() => {
 });
 onActivated(() => {
   if (saving.value || testingProxy.value) return;
+  if (settingsStore.settings && !revalidateGate.shouldRun()) return;
+  revalidateGate.record();
   if (savedConfig.value) {
     pendingSettingsMerge = {
       current: { ...config.value },

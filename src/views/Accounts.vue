@@ -427,7 +427,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, defineAsyncComponent, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from "vue";
+import { useRoute, useRouter } from "vue-router";
 import {
   NAlert,
   NButton,
@@ -457,7 +458,6 @@ import { usePlatformAccountsStore } from "../stores/platformAccounts.ts";
 import { useProvidersStore } from "../stores/providers.ts";
 import { useSettingsStore } from "../stores/settings.ts";
 import type { MutationExpectation } from "../api/generated/dashboard-v3.ts";
-import type { ProviderCatalogEntry } from "../api/providers.ts";
 import type {
   Account,
   AccountInput,
@@ -513,9 +513,11 @@ import {
 import { quotaRetryRequestNeeded } from "../domain/quota-recovery.ts";
 import type { CpaCardStatus } from "../domain/cpa-runtime.ts";
 import {
+  ACCOUNTS_PROJECTION_REFRESH_MS,
   browserAccountsProjectionRefreshHost,
   createAccountsProjectionRefresh,
 } from "../domain/accounts-projection-refresh.ts";
+import { createRevalidateGate } from "../domain/revalidate.ts";
 import { linkForAccount } from "../domain/platform-accounts.ts";
 import type { PlatformAccount } from "../api/platform-accounts.ts";
 import { useAccountUsage } from "../domain/useAccountUsage.ts";
@@ -552,7 +554,7 @@ import {
 import { planDestinationSave } from "../domain/destination-edit-save.ts";
 import { t, type MessageKey } from "../i18n/index.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
-import { applyAppViewSearchParams, readAccountAddDeepLink, readAccountDeepLink } from "./app-navigation.ts";
+import { appViewRoute, readAccountAddDeepLink, readAccountDeepLink, routeQuerySearch } from "./app-navigation.ts";
 import { mapWithConcurrency } from "../utils/async.ts";
 import { useLocalizedModalCloseLabel } from "../utils/modal-close-label.ts";
 import {
@@ -563,24 +565,28 @@ import {
   browserViewUrl,
   normalizeOpenCodeInviteUrl,
 } from "../domain/managed-account.ts";
-import AccountAddModal from "../components/AccountAddModal.vue";
+// Modals load on demand instead of inflating the view chunk.
+const AccountAddModal = defineAsyncComponent(() => import("../components/AccountAddModal.vue"));
 import CredentialRow from "../components/CredentialRow.vue";
 import DestinationCard from "../components/DestinationCard.vue";
-import AccountConnectionTestModal from "../components/AccountConnectionTestModal.vue";
-import AccountFormModal, { type AccountFormPayload } from "../components/AccountFormModal.vue";
-import ManagedAccountWizard from "../components/ManagedAccountWizard.vue";
-import AccountTransferModal from "../components/AccountTransferModal.vue";
-import AccountCredentialModal from "../components/AccountCredentialModal.vue";
-import IdentityCredentialCreateModal from "../components/IdentityCredentialCreateModal.vue";
+const AccountConnectionTestModal = defineAsyncComponent(() => import("../components/AccountConnectionTestModal.vue"));
+const AccountFormModal = defineAsyncComponent(() => import("../components/AccountFormModal.vue"));
+import type { AccountFormPayload } from "../components/AccountFormModal.vue";
+const ManagedAccountWizard = defineAsyncComponent(() => import("../components/ManagedAccountWizard.vue"));
+const AccountTransferModal = defineAsyncComponent(() => import("../components/AccountTransferModal.vue"));
+const AccountCredentialModal = defineAsyncComponent(() => import("../components/AccountCredentialModal.vue"));
+const IdentityCredentialCreateModal = defineAsyncComponent(() => import("../components/IdentityCredentialCreateModal.vue"));
 import { useBillingStore } from "../stores/billing.ts";
 import { billingBinding } from "../domain/billing.ts";
 import type { CreditSetupInput } from "../domain/credit-setup.ts";
 import PlatformAccountsSection from "../components/PlatformAccountsSection.vue";
-import PlatformKeyModelsModal from "../components/PlatformKeyModelsModal.vue";
+const PlatformKeyModelsModal = defineAsyncComponent(() => import("../components/PlatformKeyModelsModal.vue"));
 import type { PlatformAccountFormPayload } from "../components/PlatformAccountFormModal.vue";
 
 const dialog = useDialog();
 const message = useMessage();
+const route = useRoute();
+const router = useRouter();
 const accountsStore = useAccountsStore();
 const destinationsStore = useDestinationsStore();
 const sessionStore = useSessionStore();
@@ -630,8 +636,8 @@ let accountViewSession = 0;
 watch(() => destinationsStore.loaded, loaded => { if (!loaded) accountViewSession += 1; }, { flush: "sync" });
 const createModalAccountId = ref<string | null>(null);
 const createModalExpectation = ref<MutationExpectation | null>(null);
-const createModalRef = ref<InstanceType<typeof IdentityCredentialCreateModal> | null>(null);
-const accountFormRef = ref<InstanceType<typeof AccountFormModal> | null>(null);
+const createModalRef = ref<{ noteSaved(): void; noteFailure(error: unknown): void } | null>(null);
+const accountFormRef = ref<{ noteSaved(): void } | null>(null);
 const billingStore = useBillingStore();
 let pendingCreditCreate: { created: Awaited<ReturnType<typeof identitiesApi.createIdentityCredential>>; credits: CreditSetupInput } | null = null;
 let pendingCreditEdit: { account: Account; credits: CreditSetupInput } | null = null;
@@ -688,7 +694,9 @@ const editingEndpointLockHint = computed(() => {
 const OLLAMA_WEBSITE_URL = "https://ollama.com";
 
 const statusFilter = ref<AccountStatusFilter>("all");
-const providerCatalog = ref<ProviderCatalogEntry[] | null>(null);
+// The provider catalog lives in the providers store (single owner); this
+// view only tracks its own loading/error presentation around the fetch.
+const providerCatalog = computed(() => providersStore.catalog);
 const catalogLoading = ref(false);
 const catalogError = ref("");
 const platformMutating = computed(() => platformStore.mutating);
@@ -1189,11 +1197,7 @@ function handleMenuSelect(key: string | number, accountId: string) {
 }
 
 function openCpa(): void {
-  const url = new URL(window.location.href);
-  url.searchParams.set("view", "cpa");
-  url.searchParams.delete("account_id");
-  window.history.pushState(null, "", url);
-  window.dispatchEvent(new PopStateEvent("popstate"));
+  void router.push({ name: "cpa" });
 }
 
 // The edit form for a legacy Custom account defers address/protocol/mapping
@@ -1214,11 +1218,9 @@ async function openCustomConnectionInProviders(account: Account): Promise<void> 
     destinationsStore.credentialsByLegacyAccountId,
     destinationsStore.destinations,
   );
-  const url = applyAppViewSearchParams(new URL(window.location.href), "providers", {
+  void router.push(appViewRoute("providers", {
     ...(destinationId ? { destination: destinationId } : {}),
-  });
-  window.history.pushState(null, "", url);
-  window.dispatchEvent(new PopStateEvent("popstate"));
+  }));
 }
 
 function openAddModal(): void {
@@ -1236,11 +1238,11 @@ function openAddModal(): void {
  * modal opens so a reload or close never replays it.
  */
 function applyAccountAddDeepLink(): void {
-  const link = readAccountAddDeepLink(window.location.search);
+  const link = readAccountAddDeepLink(routeQuerySearch("accounts", route.query));
   if (!link) return;
-  const url = new URL(window.location.href);
-  url.searchParams.delete("add");
-  window.history.replaceState(null, "", url);
+  const query = { ...route.query };
+  delete query.add;
+  void router.replace({ query });
   editingAccount.value = null;
   addInitialOptionId.value = link.optionId;
   showAddModal.value = true;
@@ -1694,14 +1696,10 @@ function openManagedWizard(accountId: string): void {
 
 function openInviteUrl(): void {
   showAddModal.value = false;
-  const url = applyAppViewSearchParams(new URL(window.location.href), "providers", {
+  void router.push(appViewRoute("providers", {
     provider: DEFAULT_PROVIDER_ID,
     tab: "settings",
-  });
-  url.searchParams.delete("session");
-  url.hash = "";
-  window.history.pushState(null, "", url);
-  window.dispatchEvent(new PopStateEvent("popstate"));
+  }));
 }
 
 function openEditModal(id: string): void {
@@ -1710,10 +1708,10 @@ function openEditModal(id: string): void {
 }
 
 function clearAccountDeepLink(): void {
-  const url = new URL(window.location.href);
-  if (!url.searchParams.has("account_id")) return;
-  url.searchParams.delete("account_id");
-  window.history.replaceState(null, "", url);
+  if (!("account_id" in route.query)) return;
+  const query = { ...route.query };
+  delete query.account_id;
+  void router.replace({ query });
 }
 
 function setAccountFormVisible(show: boolean): void {
@@ -1721,7 +1719,7 @@ function setAccountFormVisible(show: boolean): void {
 }
 
 function applyAccountDeepLink(): void {
-  const accountId = readAccountDeepLink(window.location.search);
+  const accountId = readAccountDeepLink(routeQuerySearch("accounts", route.query));
   if (!accountId) return;
   const account = accounts.value.find((item) => item.id === accountId);
   if (!account) {
@@ -1734,7 +1732,7 @@ function applyAccountDeepLink(): void {
 }
 
 function applyCachedAccountDeepLink(): void {
-  const accountId = readAccountDeepLink(window.location.search);
+  const accountId = readAccountDeepLink(routeQuerySearch("accounts", route.query));
   if (!accountId) return;
   const account = accountsStore.byId.get(accountId);
   if (!account) return;
@@ -2092,7 +2090,7 @@ async function loadAccounts() {
 
 async function loadRegistrationOptions(): Promise<void> {
   const [settingsResult, browserResult] = await Promise.allSettled([
-    dashboardApi.getSettings(),
+    settingsStore.loadPresented(),
     dashboardApi.getBrowserCapabilities(),
   ]);
   if (settingsResult.status === "fulfilled") {
@@ -2114,9 +2112,8 @@ async function loadProviderCatalog(): Promise<void> {
   catalogLoading.value = true;
   catalogError.value = "";
   try {
-    providerCatalog.value = await providerApi.getProviderCatalog();
+    await providersStore.loadCatalog();
   } catch (e) {
-    providerCatalog.value = null;
     catalogError.value = dashboardErrorDetail(e);
     // Fail closed: the add modal will fall back to the legacy OpenCode Go flow
     // so the primary creation path keeps working even when the catalog is down.
@@ -2126,14 +2123,14 @@ async function loadProviderCatalog(): Promise<void> {
 }
 
 async function initializeAccounts() {
+  // Catalog and quota limits gate nothing but the usage fan-out inside
+  // loadAccounts, so they fetch in parallel; the account list follows so
+  // usage display decisions read the settled catalog.
   const registrationOptions = loadRegistrationOptions();
-  const routingSettings = settingsStore.loadPresented().catch(() => undefined);
-  await loadProviderCatalog();
-  await loadQuotaLimits();
+  await Promise.allSettled([loadProviderCatalog(), loadQuotaLimits()]);
   await loadAccounts();
   await Promise.allSettled([
     registrationOptions,
-    routingSettings,
     providersStore.loadConnections(),
   ]);
 }
@@ -2450,11 +2447,19 @@ const projectionRefresh = createAccountsProjectionRefresh({
 });
 
 watch(() => sessionStore.authenticated, (ok) => {
-  if (!ok) projectionRefresh.onSessionDropped();
+  if (!ok) {
+    projectionRefresh.onSessionDropped();
+    fullRefreshGate.reset();
+  }
 });
+
+// Returning to the view restorms the local server with the same reads the
+// 15s projection refresh already covers; gate full re-inits to that cadence.
+const fullRefreshGate = createRevalidateGate(ACCOUNTS_PROJECTION_REFRESH_MS);
 
 onMounted(() => {
   applyAccountAddDeepLink();
+  fullRefreshGate.record();
   void initializeAccounts();
 });
 // This view is kept alive by App.vue; coarse states (cooling tags, editor
@@ -2467,12 +2472,12 @@ onActivated(() => {
   now.value = Date.now();
   applyAccountAddDeepLink();
   applyCachedAccountDeepLink();
-  if (activatedOnce) {
-    void initializeAccounts();
-    void platformStore.load().catch(() => undefined);
-    void destinationsStore.load().catch(() => undefined);
-    refreshCpaSnapshot();
-  } else activatedOnce = true;
+  if (!activatedOnce) { activatedOnce = true; return; }
+  if (!fullRefreshGate.shouldRun()) return;
+  fullRefreshGate.record();
+  // initializeAccounts already covers destinations and the CPA snapshot.
+  void initializeAccounts();
+  void platformStore.load().catch(() => undefined);
 });
 onDeactivated(() => {
   stopClock();

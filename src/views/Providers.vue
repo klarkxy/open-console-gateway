@@ -657,7 +657,8 @@
 
 <script setup lang="ts">
 import { PROVIDER_SORT_KEYS, sortProvidersByName, type ProviderSort } from "../domain/provider-sort.ts";
-import { computed, h, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, defineAsyncComponent, h, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from "vue";
+import { useRoute, useRouter } from "vue-router";
 import {
   NAlert,
   NButton,
@@ -684,6 +685,8 @@ import { isRevisionConflict, providerApi } from "../api/providers.ts";
 import { useAccountsStore } from "../stores/accounts.ts";
 import { useDestinationsStore } from "../stores/destinations.ts";
 import { useProvidersStore } from "../stores/providers.ts";
+import { useSessionStore } from "../stores/session.ts";
+import { createRevalidateGate } from "../domain/revalidate.ts";
 import { useControlPlaneStore } from "../stores/controlPlane.ts";
 import type {
   ProviderDefinitionView,
@@ -693,14 +696,16 @@ import type {
   ProtocolProbeResult,
 } from "../api/providers.ts";
 import type { MutationExpectation } from "../api/generated/dashboard-v3.ts";
-import ProviderModelMatrix from "../components/ProviderModelMatrix.vue";
-import ProviderSettingsPanel from "../components/ProviderSettingsPanel.vue";
-import PricingCatalog from "../components/PricingCatalog.vue";
-import OfficialApiPanel from "../components/OfficialApiPanel.vue";
-import DynamicProviderModal from "../components/DynamicProviderModal.vue";
-import DestinationEditModal from "../components/DestinationEditModal.vue";
+// Detail panes and modals load on demand instead of inflating the view chunk.
+const ProviderModelMatrix = defineAsyncComponent(() => import("../components/ProviderModelMatrix.vue"));
+const ProviderSettingsPanel = defineAsyncComponent(() => import("../components/ProviderSettingsPanel.vue"));
+const PricingCatalog = defineAsyncComponent(() => import("../components/PricingCatalog.vue"));
+const OfficialApiPanel = defineAsyncComponent(() => import("../components/OfficialApiPanel.vue"));
+const DynamicProviderModal = defineAsyncComponent(() => import("../components/DynamicProviderModal.vue"));
+const DestinationEditModal = defineAsyncComponent(() => import("../components/DestinationEditModal.vue"));
+const AccountFormModal = defineAsyncComponent(() => import("../components/AccountFormModal.vue"));
+import type { AccountFormPayload } from "../components/AccountFormModal.vue";
 import DestinationDeleteButton from "../components/DestinationDeleteButton.vue";
-import AccountFormModal, { type AccountFormPayload } from "../components/AccountFormModal.vue";
 import ProviderBrandMark from "../components/ProviderBrandMark.vue";
 import { t, type MessageKey } from "../i18n/index.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
@@ -714,9 +719,9 @@ import {
 import {
   accountAddDeepLinkFromProviderAdd,
   accountAddQueryValue,
-  applyAppViewSearchParams,
+  appViewRoute,
   readProviderPageQuery,
-  resolveAppViewKey,
+  routeQuerySearch,
   type ProviderDetailTab,
 } from "./app-navigation.ts";
 import {
@@ -777,6 +782,11 @@ const message = useMessage();
 const accountsStore = useAccountsStore();
 const destinationsStore = useDestinationsStore();
 const providersStore = useProvidersStore();
+const sessionStore = useSessionStore();
+const route = useRoute();
+const router = useRouter();
+const revalidateGate = createRevalidateGate(30_000);
+watch(() => sessionStore.authenticated, (ok) => { if (!ok) revalidateGate.reset(); });
 const controlPlane = useControlPlaneStore();
 const contracts = computed(() => {
   const value = providersStore.contracts;
@@ -856,7 +866,7 @@ const protocolGrantSelectedIds = ref<string[]>([]);
 const protocolGrantSaving = ref(false);
 const actionLive = ref("");
 let activatedOnce = false;
-/** A successful necessary-resource load for the current Providers URL. Reset on popstate. */
+/** A successful necessary-resource load for the current Providers route. Reset on route query changes. */
 let freshRequiredLoadSucceeded = false;
 let overrideSequence = 0;
 let probeSequence = 0;
@@ -1121,12 +1131,10 @@ function catalogSourceLabel(source: string): string {
 
 /**
  * This view stays mounted under KeepAlive after the user leaves it; only
- * touch selection state or the URL when the current URL actually targets it.
- * Legacy "pricing" resolves to providers, so bookmarks keep working.
+ * touch selection state or the URL when the active route actually targets it.
  */
 function currentUrlIsProvidersView(): boolean {
-  const view = new URL(window.location.href).searchParams.get("view");
-  return resolveAppViewKey(view) === "providers";
+  return route.name === "providers";
 }
 
 function selectionProjectionReady(): boolean {
@@ -1142,7 +1150,7 @@ function providersPageCommit(
   prefer?: { connectionId?: string; providerId?: string },
   userSelection = false,
 ) {
-  const query = readProviderPageQuery(window.location.search);
+  const query = readProviderPageQuery(routeQuerySearch("providers", route.query));
   const resolved = resolveProvidersSelection({
     query: {
       connection: query.connection,
@@ -1177,14 +1185,13 @@ function writeUrl(userSelection = false) {
   // Hold while an explicit target is still missing from last-success data,
   // unless this write is a direct rail/mobile pick that supersedes it.
   if (providersPageCommit(undefined, userSelection).action !== "apply-selection") return;
-  const url = applyAppViewSearchParams(new URL(window.location.href), "providers", {
+  void router.replace(appViewRoute("providers", {
     ...(selectedDestinationId.value ? { destination: selectedDestinationId.value } : {}),
     ...(!selectedDestinationId.value && selectedConnectionId.value
       ? { connection: selectedConnectionId.value }
       : {}),
     ...(activeTab.value !== "models" ? { tab: activeTab.value } : {}),
-  });
-  window.history.replaceState(null, "", url);
+  }));
 }
 
 function applySelection(resolved: ReturnType<typeof resolveProvidersSelection>, fellBackNotice: boolean) {
@@ -1196,13 +1203,9 @@ function applySelection(resolved: ReturnType<typeof resolveProvidersSelection>, 
 }
 
 function redirectProviderAdd(preset: string | null): void {
-  const url = applyAppViewSearchParams(new URL(window.location.href), "accounts");
-  url.searchParams.set(
-    "add",
-    accountAddQueryValue(accountAddDeepLinkFromProviderAdd(preset)),
-  );
-  window.history.replaceState(null, "", url);
-  window.dispatchEvent(new PopStateEvent("popstate"));
+  void router.replace(appViewRoute("accounts", undefined, {
+    add: accountAddQueryValue(accountAddDeepLinkFromProviderAdd(preset)),
+  }));
 }
 
 function applyFromQuery(
@@ -1253,10 +1256,7 @@ function onMobileSelect(key: string | number) {
 }
 
 function openAccountAdd(link = accountAddDeepLinkFromProviderAdd(null)): void {
-  const url = applyAppViewSearchParams(new URL(window.location.href), "accounts");
-  url.searchParams.set("add", accountAddQueryValue(link));
-  window.history.pushState(null, "", url);
-  window.dispatchEvent(new PopStateEvent("popstate"));
+  void router.push(appViewRoute("accounts", undefined, { add: accountAddQueryValue(link) }));
 }
 
 function openAddFlow() {
@@ -1267,16 +1267,11 @@ function openAddFlow() {
 }
 
 function openAccounts() {
-  const url = applyAppViewSearchParams(new URL(window.location.href), "accounts");
-  window.history.pushState(null, "", url);
-  window.dispatchEvent(new PopStateEvent("popstate"));
+  void router.push(appViewRoute("accounts"));
 }
 
 function openAccountEditor(accountId: string) {
-  const url = applyAppViewSearchParams(new URL(window.location.href), "accounts");
-  url.searchParams.set("account_id", accountId);
-  window.history.pushState(null, "", url);
-  window.dispatchEvent(new PopStateEvent("popstate"));
+  void router.push(appViewRoute("accounts", undefined, { account_id: accountId }));
 }
 
 function resetScopeActions() {
@@ -1428,8 +1423,7 @@ function fallbackFromRemovedDestination(id: string): void {
   // if other Providers resources are still loading. Clear that target and
   // select from the destination snapshot that already committed the delete.
   if (!currentUrlIsProvidersView()) return;
-  const url = applyAppViewSearchParams(new URL(window.location.href), "providers", null);
-  window.history.replaceState(null, "", url);
+  void router.replace(appViewRoute("providers", null));
   applySelection(resolveProvidersSelection({
     query: { connection: null, provider: null, destination: null },
     cached: { destinationId: null, connectionId: null },
@@ -2076,9 +2070,10 @@ function probeResultUrl(error: string | null): string {
   return findSafeHttpUrl(value?.parsed) ?? findSafeHttpUrl(value?.raw) ?? "";
 }
 
-function onPopState() {
-  // KeepAlive keeps this view mounted; a popstate for another view (e.g. the
-  // Accounts add deep link) is not ours to apply.
+// KeepAlive keeps this view mounted; a route change for another view (e.g.
+// the Accounts add deep link) is not ours to apply. Same-view query changes
+// (history back/forward) arrive here instead of onActivated.
+watch(() => route.query, () => {
   if (!currentUrlIsProvidersView()) return;
   freshRequiredLoadSucceeded = false;
   const action = applyFromQuery();
@@ -2087,7 +2082,7 @@ function onPopState() {
   if (action === "defer" && selectionProjectionReady()) {
     void loadAll({ retain: true });
   }
-}
+});
 
 watch([selectedConnectionId, selectedDestinationId], () => {
   catalogRefreshError.value = "";
@@ -2117,17 +2112,17 @@ watch([selectedConnectionId, selectedDestinationId, activeTab], () => {
 });
 
 onMounted(() => {
-  window.addEventListener("popstate", onPopState);
   void loadAll();
 });
 onActivated(() => {
-  if (activatedOnce) void loadAll({ retain: true });
-  else activatedOnce = true;
+  if (!activatedOnce) { activatedOnce = true; return; }
+  if (providersStore.contracts && !revalidateGate.shouldRun()) return;
+  revalidateGate.record();
+  void loadAll({ retain: true });
 });
 onDeactivated(resetScopeActions);
 onUnmounted(() => {
   resetScopeActions();
-  window.removeEventListener("popstate", onPopState);
 });
 </script>
 

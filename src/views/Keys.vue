@@ -204,7 +204,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onActivated, onMounted, onUnmounted, ref } from "vue";
+import { computed, onActivated, onMounted, onUnmounted, ref, watch } from "vue";
 import {
   NAlert,
   NButton,
@@ -225,12 +225,17 @@ import {
 import { DashboardRequestError } from "../api/dashboard";
 import type { ConnectionInfo, ConnectionSubKey } from "../api/dashboard";
 import { useConnectionStore } from "../stores/connection.ts";
+import { useSessionStore } from "../stores/session.ts";
+import { createRevalidateGate } from "../domain/revalidate.ts";
 import { t } from "../i18n/index.ts";
 import { useClipboard } from "../utils/format.ts";
 import { maskConnectionKey } from "./dashboard-connection";
 
 const message = useMessage();
 const connectionStore = useConnectionStore();
+const sessionStore = useSessionStore();
+const revalidateGate = createRevalidateGate(60_000);
+watch(() => sessionStore.authenticated, (ok) => { if (!ok) revalidateGate.reset(); });
 const { copiedTarget: keyCopied, copy, cleanup } = useClipboard();
 const loaded = ref(false);
 const loading = ref(false);
@@ -456,7 +461,10 @@ onMounted(() => {
   void loadConnection();
 });
 onActivated(() => {
-  if (!loading.value) void loadConnection();
+  if (loading.value) return;
+  if (connectionStore.info && !revalidateGate.shouldRun()) return;
+  revalidateGate.record();
+  void loadConnection();
 });
 onUnmounted(cleanup);
 </script>

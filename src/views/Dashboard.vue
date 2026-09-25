@@ -125,12 +125,14 @@ import { PRIMARY_KEY_ID, dashboardApi } from "../api/dashboard";
 import { useAccountsStore } from "../stores/accounts.ts";
 import { useConnectionStore } from "../stores/connection.ts";
 import { useProvidersStore } from "../stores/providers.ts";
+import { useSessionStore } from "../stores/session.ts";
 import type { Account, ConnectionInfo, DailyModelTokens, DashboardSummary } from "../api/dashboard";
 import { CHART_PALETTE } from "../theme";
 import { t } from "../i18n/index.ts";
 import { formatNumber, formatTokens, useClipboard } from "../utils/format.ts";
 import { userFacingError } from "../utils/errors.ts";
 import { accountExpiry } from "../domain/account-display.ts";
+import { createRevalidateGate } from "../domain/revalidate.ts";
 import { accountExpiryText } from "./account-status-text.ts";
 import { maskConnectionKey, resolveConnectionUrls } from "./dashboard-connection";
 import { buildNeedsAttention } from "./dashboard-attention.ts";
@@ -144,6 +146,9 @@ const accountsStore = useAccountsStore();
 const connectionStore = useConnectionStore();
 const providersStore = useProvidersStore();
 const destinationsStore = useDestinationsStore();
+const sessionStore = useSessionStore();
+const revalidateGate = createRevalidateGate(30_000);
+watch(() => sessionStore.authenticated, (ok) => { if (!ok) revalidateGate.reset(); });
 const { copiedTarget, copy, cleanup } = useClipboard();
 const characterImage = new URL("../../assets/opencode-mascot.png", import.meta.url).href;
 const accounts = computed(() => accountsStore.accounts);
@@ -254,7 +259,13 @@ function stopLifecycleClock() { if (lifecycleClock !== undefined) { window.clear
 function bindVisibilityRefresh() { document.addEventListener("visibilitychange", refreshWhenVisible); }
 function unbindVisibilityRefresh() { document.removeEventListener("visibilitychange", refreshWhenVisible); }
 onMounted(() => { bindVisibilityRefresh(); void loadDashboard(); });
-onActivated(() => { bindVisibilityRefresh(); startLifecycleClock(); if (activatedOnce) void loadDashboard(); else activatedOnce = true; });
+onActivated(() => {
+  bindVisibilityRefresh(); startLifecycleClock();
+  if (!activatedOnce) { activatedOnce = true; return; }
+  if (summaryLoaded.value && !revalidateGate.shouldRun()) return;
+  revalidateGate.record();
+  void loadDashboard();
+});
 onDeactivated(() => { stopLifecycleClock(); unbindVisibilityRefresh(); });
 onUnmounted(() => { cleanup(); stopLifecycleClock(); unbindVisibilityRefresh(); });
 </script>

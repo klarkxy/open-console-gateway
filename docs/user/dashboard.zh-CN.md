@@ -14,7 +14,7 @@
 
 明文 Key 只出现在接入中心载荷（`GET /dashboard/api/v4/connection`）里。Settings 资源从不包含 Key 值。浏览器只把秘密留在内存；退出登录或 401 会话失效会立即清除。
 
-切换标签时视图保持缓存（`KeepAlive`），返回时刷新服务端数据；**仪表盘** 视图在浏览器标签回到前台时也会刷新。目录、价格与供应商模型列表不会自动轮询；官方用量同步由服务端调度。**设置** 页开始签名桌面安装后，可能会轮询安装进度，直到进程重启。
+切换标签时视图保持缓存（`KeepAlive`），返回时会重新校验服务端数据，但按短暂的新鲜度窗口节流（各视图 15–60 秒，与 Accounts 投影刷新同节奏），快速来回切换不会重复发起相同的读取。**仪表盘** 视图在浏览器标签回到前台时也会刷新。目录、价格与供应商模型列表不会自动轮询；官方用量同步由服务端调度。**设置** 页开始签名桌面安装后，可能会轮询安装进度，直到进程重启。
 
 仍调用无版本号 `/dashboard/api` REST 的缓存页面会收到 HTTP 410，错误码 `dashboardV2Removed`，提示先刷新页面，不够再升级。未登录请求会先返回 401。两类 V2 路径仅作为缓存旧页面的兼容例外保留：`/dashboard/api/auth/status`、`/dashboard/api/auth/register`、`/dashboard/api/auth/login`、`/dashboard/api/auth/logout`，以及 `/dashboard/api/browser/sessions/{token}/ws`。当前面板改用 V4 的鉴权与浏览器 WebSocket 路由。
 

@@ -268,6 +268,7 @@
 
 <script setup lang="ts">
 import { computed, h, onActivated, onMounted, onUnmounted, ref, watch } from "vue";
+import { useRoute, useRouter } from "vue-router";
 import {
   NAlert,
   NButton,
@@ -287,7 +288,6 @@ import {
 import { ArrowDownOutlined, ArrowUpOutlined, CalendarOutlined, CheckOutlined, ClearOutlined, CopyOutlined, ReloadOutlined } from "@vicons/antd";
 import { UNATTRIBUTED_KEY_FILTER, dashboardApi } from "../api/dashboard";
 import type {
-  Account,
   ForwardLog,
   ForwardLogClientKey,
   ForwardLogSummary,
@@ -295,12 +295,16 @@ import type {
 } from "../api/dashboard";
 import { t } from "../i18n/index.ts";
 import { locale } from "../i18n/index.ts";
+import { useAccountsStore } from "../stores/accounts.ts";
+import { useProvidersStore } from "../stores/providers.ts";
+import { useSessionStore } from "../stores/session.ts";
+import { createRevalidateGate } from "../domain/revalidate.ts";
 import { formatCost, formatNumber, useClipboard } from "../utils/format.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
 import { computeTimeRange, resolveTimeRange, timePresetValues } from "./log-time-range.ts";
+import { routeQuerySearch } from "./app-navigation.ts";
 import type { TimePreset } from "./log-time-range.ts";
 import { gatewayLogMessage } from "./gateway-log-message.ts";
-import { providerApi, type ProviderCatalogEntry } from "../api/providers.ts";
 import {
   forwardLogAlias,
   forwardLogLatencyMs,
@@ -327,16 +331,24 @@ const sortValues = new Set<SortBy>([
   "cost",
 ]);
 
-const query = new URLSearchParams(window.location.search);
+const route = useRoute();
+const router = useRouter();
+const query = new URLSearchParams(routeQuerySearch("logs", route.query));
 const message = useMessage();
+const accountsStore = useAccountsStore();
+const providersStore = useProvidersStore();
+const sessionStore = useSessionStore();
+const revalidateGate = createRevalidateGate(15_000);
+watch(() => sessionStore.authenticated, (ok) => { if (!ok) revalidateGate.reset(); });
 const { copiedTarget, copy, cleanup } = useClipboard();
 const activeTab = ref<LogTab>(query.get("tab") === "gateway" ? "gateway" : "forward");
 const gatewayLogs = ref<GatewayLog[]>([]);
 const forwardLogs = ref<ForwardLog[]>([]);
-const accounts = ref<Account[]>([]);
+// Server state lives in the stores; these are read-through projections.
+const accounts = computed(() => accountsStore.accounts);
 const models = ref<string[]>([]);
 const clientKeys = ref<ForwardLogClientKey[]>([]);
-const providerCatalog = ref<ProviderCatalogEntry[] | null>(null);
+const providerCatalog = computed(() => providersStore.catalog);
 const gatewayLoading = ref(false);
 const gatewayError = ref("");
 const forwardLoading = ref(false);
@@ -665,38 +677,24 @@ function toggleSortOrder() {
 }
 
 function syncQueryState() {
-  const url = new URL(window.location.href);
-  url.searchParams.set("tab", activeTab.value);
-  if (statusFilter.value) url.searchParams.set("status", statusFilter.value);
-  else url.searchParams.delete("status");
-  if (accountFilter.value) url.searchParams.set("account", accountFilter.value);
-  else url.searchParams.delete("account");
-  if (modelFilter.value) url.searchParams.set("model", modelFilter.value);
-  else url.searchParams.delete("model");
-  if (keyFilter.value) url.searchParams.set("key", keyFilter.value);
-  else url.searchParams.delete("key");
-  if (providerFilter.value) url.searchParams.set("provider", providerFilter.value);
-  else url.searchParams.delete("provider");
-  if (routeAccountFilter.value) url.searchParams.set("route_account", routeAccountFilter.value);
-  else url.searchParams.delete("route_account");
-  if (credentialAccountFilter.value) url.searchParams.set("credential_account", credentialAccountFilter.value);
-  else url.searchParams.delete("credential_account");
-  if (requestIdFilter.value) url.searchParams.set("request_id", requestIdFilter.value);
-  else url.searchParams.delete("request_id");
+  const query: Record<string, string> = { tab: activeTab.value };
+  if (statusFilter.value) query.status = statusFilter.value;
+  if (accountFilter.value) query.account = accountFilter.value;
+  if (modelFilter.value) query.model = modelFilter.value;
+  if (keyFilter.value) query.key = keyFilter.value;
+  if (providerFilter.value) query.provider = providerFilter.value;
+  if (routeAccountFilter.value) query.route_account = routeAccountFilter.value;
+  if (credentialAccountFilter.value) query.credential_account = credentialAccountFilter.value;
+  if (requestIdFilter.value) query.request_id = requestIdFilter.value;
   if (activePreset.value === "custom" && timeRange.value) {
-    url.searchParams.set("start", toIsoString(timeRange.value[0]));
-    url.searchParams.set("end", toIsoString(timeRange.value[1]));
-    url.searchParams.delete("range");
+    query.start = toIsoString(timeRange.value[0]);
+    query.end = toIsoString(timeRange.value[1]);
   } else {
-    url.searchParams.delete("start");
-    url.searchParams.delete("end");
-    url.searchParams.set("range", activePreset.value);
+    query.range = activePreset.value;
   }
-  if (sortBy.value) url.searchParams.set("sort", sortBy.value);
-  else url.searchParams.delete("sort");
-  if (sortOrder.value) url.searchParams.set("order", sortOrder.value);
-  else url.searchParams.delete("order");
-  window.history.replaceState(null, "", url);
+  if (sortBy.value) query.sort = sortBy.value;
+  if (sortOrder.value) query.order = sortOrder.value;
+  void router.replace({ query });
 }
 
 let gatewayRequest = 0;
@@ -763,7 +761,7 @@ async function loadForwardLogs() {
 
 async function loadAccounts() {
   try {
-    accounts.value = await dashboardApi.getAccounts();
+    await accountsStore.loadPresented();
   } catch (e) {
     message.error(t("加载账号筛选失败：{error}", { error: String(e) }));
   }
@@ -787,10 +785,9 @@ async function loadForwardLogKeys() {
 
 async function loadProviderCatalog() {
   try {
-    providerCatalog.value = await providerApi.getProviderCatalog();
+    await providersStore.loadCatalog();
   } catch {
     // Catalog failure only disables plan labels; logs remain usable.
-    providerCatalog.value = null;
   }
 }
 
@@ -838,12 +835,11 @@ let activatedOnce = false;
 // Logs accumulate server-side while another tab is active (this view is kept
 // alive by App.vue); refresh both lists when returning, keeping filters.
 onActivated(() => {
-  if (activatedOnce) {
-    void loadGatewayLogs();
-    void loadForwardLogs();
-  } else {
-    activatedOnce = true;
-  }
+  if (!activatedOnce) { activatedOnce = true; return; }
+  if (!revalidateGate.shouldRun()) return;
+  revalidateGate.record();
+  void loadGatewayLogs();
+  void loadForwardLogs();
 });
 
 onMounted(() => {

@@ -141,20 +141,15 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onActivated, onMounted, ref } from "vue";
+import { computed, onActivated, onMounted, ref, watch } from "vue";
 import { NAlert, NButton, NEmpty, NInput, NSpin, NSwitch, NTag, NTooltip } from "naive-ui";
-import type { Account } from "../api/dashboard.ts";
 import type { RoutingClientProtocol } from "../api/destinations.ts";
-import type {
-  ProviderDefinitionView,
-  ProviderCatalogEntry,
-  ProviderContractsResponse,
-} from "../api/providers.ts";
+import type { ProviderDefinitionView } from "../api/providers.ts";
 import { dashboardV4 } from "../api/dashboard-v4.ts";
 import type { CpaCatalogEntry } from "../api/generated/dashboard-v4.ts";
-import { providerApi } from "../api/providers.ts";
 import AliasRoutingExplain from "../components/AliasRoutingExplain.vue";
 import { isDynamicCatalogEntry } from "../domain/dynamic-provider.ts";
+import { createRevalidateGate } from "../domain/revalidate.ts";
 import { flattenProviderScopes, normalizeProviderContractsResponse } from "../domain/provider-contracts.ts";
 import { isRevisionConflict } from "../api/dashboard.ts";
 import {
@@ -169,15 +164,21 @@ import { useAccountsStore } from "../stores/accounts.ts";
 import { useControlPlaneStore } from "../stores/controlPlane.ts";
 import { useDestinationsStore } from "../stores/destinations.ts";
 import { useProvidersStore } from "../stores/providers.ts";
+import { useSessionStore } from "../stores/session.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
 
 const accountsStore = useAccountsStore();
 const controlPlane = useControlPlaneStore();
 const providersStore = useProvidersStore();
 const destinationsStore = useDestinationsStore();
-const contracts = ref<ProviderContractsResponse | null>(null);
-const catalog = ref<ProviderCatalogEntry[] | null>(null);
-const accounts = ref<Account[]>([]);
+const sessionStore = useSessionStore();
+// Server state lives in the stores; these are read-through projections.
+const contracts = computed(() => {
+  const raw = providersStore.contracts;
+  return raw ? normalizeProviderContractsResponse(raw) : null;
+});
+const catalog = computed(() => providersStore.catalog);
+const accounts = computed(() => accountsStore.accounts);
 const dynamicProviders = ref<ProviderDefinitionView[]>([]);
 const cpaModels = ref<CpaCatalogEntry[]>([]);
 const loading = ref(false);
@@ -321,7 +322,6 @@ async function loadAliases(options: { retain?: boolean } = {}): Promise<void> {
       cpaLoadError.value = dashboardErrorDetail(cpaResult.reason);
     }
     if (catalogResult.status === "fulfilled") {
-      catalog.value = catalogResult.value;
       const enabledProviderIds = new Set(
         (accountsResult.status === "fulfilled" ? accountsResult.value : accounts.value)
           .filter((account) => account.enabled)
@@ -335,7 +335,7 @@ async function loadAliases(options: { retain?: boolean } = {}): Promise<void> {
         dynamicLoadError.value = "";
       } else {
         const details = await Promise.allSettled(
-          entries.map((entry) => providerApi.getProviderDefinition(entry.provider_id)),
+          entries.map((entry) => providersStore.loadDefinition(entry.provider_id)),
         );
         const previous = new Map(dynamicProviders.value.map((provider) => [provider.id, provider]));
         const next: ProviderDefinitionView[] = [];
@@ -356,13 +356,11 @@ async function loadAliases(options: { retain?: boolean } = {}): Promise<void> {
       }
     }
     if (accountsResult.status === "fulfilled") {
-      accounts.value = accountsResult.value;
       accountsLoadError.value = "";
     } else {
       accountsLoadError.value = dashboardErrorDetail(accountsResult.reason);
     }
     if (contractsResult.status === "fulfilled") {
-      contracts.value = normalizeProviderContractsResponse(contractsResult.value);
       loadError.value = "";
     } else {
       loadError.value = dashboardErrorDetail(contractsResult.reason);
@@ -372,10 +370,14 @@ async function loadAliases(options: { retain?: boolean } = {}): Promise<void> {
   }
 }
 
+const revalidateGate = createRevalidateGate(30_000);
+watch(() => sessionStore.authenticated, (ok) => { if (!ok) revalidateGate.reset(); });
 onMounted(() => void loadAliases());
 onActivated(() => {
-  if (activatedOnce) void loadAliases({ retain: true });
-  else activatedOnce = true;
+  if (!activatedOnce) { activatedOnce = true; return; }
+  if (providersStore.contracts && !revalidateGate.shouldRun()) return;
+  revalidateGate.record();
+  void loadAliases({ retain: true });
 });
 </script>
 

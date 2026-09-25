@@ -55,6 +55,7 @@ function cpaHarnessPlugin() {
         runMutation: async (run) => run({ expectedRevision: 1, processGeneration: 1 }),
       });
     `,
+    session: `export const useSessionStore = () => ({ authenticated: true });`,
     i18n: `export const t = (key, values = {}) => key.replace(/\\{(\\w+)\\}/g, (_, name) => String(values[name] ?? ""));`,
     errors: `export const dashboardErrorDetail = (error) => error instanceof Error ? error.message : String(error);`,
     clipboard: `
@@ -72,6 +73,7 @@ function cpaHarnessPlugin() {
     "../api/dashboard-v3.ts": "api",
     "../api/dashboard-v4.ts": "api",
     "../stores/controlPlane.ts": "store",
+    "../stores/session.ts": "session",
     "../i18n/index.ts": "i18n",
     "../utils/errors.ts": "errors",
     "../utils/format.ts": "clipboard",

@@ -150,6 +150,7 @@
 
 <script setup lang="ts">
 import { computed, onActivated, onMounted, ref, watch } from "vue";
+import { useRoute, useRouter } from "vue-router";
 import {
   NAlert,
   NButton,
@@ -168,6 +169,8 @@ import type { DshApplication } from "../api/generated/dashboard-v4.ts";
 import { t } from "../i18n/index.ts";
 import { useConnectionStore } from "../stores/connection.ts";
 import { useControlPlaneStore } from "../stores/controlPlane.ts";
+import { useSessionStore } from "../stores/session.ts";
+import { createRevalidateGate } from "../domain/revalidate.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
 import { useLocalizedModalCloseLabel } from "../utils/modal-close-label.ts";
 import {
@@ -179,10 +182,16 @@ import {
   readApplicationTab,
   type ApplicationTab,
 } from "./dsh-application.ts";
+import { routeQuerySearch } from "./app-navigation.ts";
 
 const message = useMessage();
+const route = useRoute();
+const router = useRouter();
 const connectionStore = useConnectionStore();
 const controlPlane = useControlPlaneStore();
+const sessionStore = useSessionStore();
+const revalidateGate = createRevalidateGate(60_000);
+watch(() => sessionStore.authenticated, (ok) => { if (!ok) revalidateGate.reset(); });
 
 const dsh = ref<DshApplication | null>(null);
 const loading = ref(false);
@@ -192,7 +201,7 @@ const installConfirmShown = ref(false);
 const installing = ref(false);
 const keysLoading = ref(false);
 const selectedKeyId = ref("");
-const activeTab = ref<ApplicationTab>(readApplicationTab(window.location.search));
+const activeTab = ref<ApplicationTab>(readApplicationTab(routeQuerySearch("applications", route.query)));
 let activatedOnce = false;
 
 const initialLoading = computed(() => loading.value && !dsh.value);
@@ -278,15 +287,15 @@ async function confirmInstall(): Promise<void> {
 useLocalizedModalCloseLabel(installConfirmShown, "dsh-install-modal");
 
 watch(activeTab, (tab) => {
-  const url = new URL(window.location.href);
-  url.searchParams.set("app", tab);
-  window.history.replaceState(null, "", url);
+  void router.replace({ query: { ...route.query, app: tab } });
 });
 
 onMounted(() => void load());
 onActivated(() => {
-  if (activatedOnce) void load({ retain: true });
-  else activatedOnce = true;
+  if (!activatedOnce) { activatedOnce = true; return; }
+  if (dsh.value && !revalidateGate.shouldRun()) return;
+  revalidateGate.record();
+  void load({ retain: true });
 });
 </script>
 
