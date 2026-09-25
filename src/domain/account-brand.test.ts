@@ -65,22 +65,42 @@ test("platform brands are keyed by kind and never collide with provider ids", ()
 test("destination brand prefers the catalog row, then brand_family, then name", () => {
   const catalog = [catalogEntry("minimax", { display_family: "MiniMax" })];
   const fromAccount = destinationBrandFamily(
-    { id: "d1", name: "MiniMax CN", brand_family: "MiniMax", adapter: "minimax" },
+    { id: "d1", legacy: { kind: "builtin", id: "minimax" }, name: "MiniMax CN", brand_family: "MiniMax", adapter: "minimax" },
     { provider_id: "minimax" },
     catalog,
   );
   assert.equal(fromAccount.id, "minimax");
   const known = destinationBrandFamily(
-    { id: "d2", name: "MiniMax CN", brand_family: "MiniMax", adapter: "minimax" },
+    { id: "d2", legacy: { kind: "builtin", id: "minimax" }, name: "MiniMax CN", brand_family: "MiniMax", adapter: "minimax" },
     null,
     null,
   );
   assert.equal(known.id, "minimax");
   const named = destinationBrandFamily(
-    { id: "d3", name: "lab.example", brand_family: null, adapter: "http" },
+    { id: "d3", legacy: { kind: "dynamic", id: "p-1" }, name: "lab.example", brand_family: null, adapter: "http" },
     null,
     null,
   );
   assert.equal(named.id, "d3");
   assert.equal(named.label, "lab.example");
+});
+
+test("dynamic destination brands resolve through the persisted preset id", () => {
+  const providerId = "9f8cbd7a-9f2f-4605-a7f8-8d1020a9e79b";
+  const catalog = [catalogEntry(providerId, { origin: "preset", display_family: "DeepSeek API" })];
+  const destination = {
+    id: "d9",
+    legacy: { kind: "dynamic", id: providerId },
+    name: "DeepSeek API",
+    brand_family: null,
+    adapter: "http",
+  } as const;
+  const presetIds = new Map([[providerId, "deepseek"]]);
+  assert.equal(destinationBrandFamily(destination, null, catalog, presetIds).id, "deepseek");
+  assert.equal(
+    destinationBrandFamily(destination, { provider_id: providerId }, catalog, presetIds).id,
+    "deepseek",
+  );
+  // Before the definition prefetch lands, the row keeps its neutral monogram.
+  assert.equal(destinationBrandFamily(destination, null, catalog).id, providerId);
 });

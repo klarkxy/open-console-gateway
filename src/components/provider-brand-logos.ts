@@ -25,7 +25,9 @@ export function providerBrandLogo(familyId: string): string | null {
  */
 const DARK_LOGO_FAMILY_IDS: ReadonlySet<string> = new Set([
   "anthropic",
+  "moonshot",
   "ollama",
+  "opencode",
 ]);
 
 export function providerBrandLogoNeedsPlate(familyId: string): boolean {

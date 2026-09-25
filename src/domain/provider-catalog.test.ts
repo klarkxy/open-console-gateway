@@ -42,10 +42,25 @@ test("brand families use the vendor family when known and a monogram otherwise",
   // Kimi Code CN carries the Moonshot / Kimi vendor brand.
   const kimi = catalogEntryFamily(catalogEntry("kimi", { display_family: "Kimi" }));
   assert.equal(kimi.id, "moonshot");
+  // Both OpenCode surfaces carry the OpenCode vendor brand.
+  assert.equal(catalogEntryFamily(catalogEntry("opencode")).id, "opencode");
+  assert.equal(catalogEntryFamily(catalogEntry("opencode-zen-free")).id, "opencode");
   const custom = catalogEntryFamily(
     catalogEntry("my-lab", { display_family: "", display_name: "My Lab" }),
   );
   assert.equal(custom.id, "my-lab");
   assert.equal(custom.label, "My Lab");
   assert.match(custom.tint, /^#[0-9A-Fa-f]{6}$/);
+});
+
+test("preset-derived rows resolve the preset's vendor family", () => {
+  const entry = catalogEntry("9f8cbd7a-9f2f-4605-a7f8-8d1020a9e79b", {
+    origin: "preset",
+    display_family: "DeepSeek API",
+    display_name: "DeepSeek API",
+  });
+  assert.equal(catalogEntryFamily(entry, "deepseek").id, "deepseek");
+  // Unknown or absent preset ids keep the neutral monogram.
+  assert.equal(catalogEntryFamily(entry, "no-such-preset").id, entry.provider_id);
+  assert.equal(catalogEntryFamily(entry).id, entry.provider_id);
 });

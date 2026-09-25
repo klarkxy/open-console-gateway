@@ -1,4 +1,11 @@
-import presetsJson from "../../resources/provider-presets.json" with { type: "json" };
+// The preset data is loaded through a top-level dynamic import so Rollup emits
+// it as its own chunk: every consumer of this module sits behind a lazy
+// view/modal boundary, and a static JSON import would inline the data into the
+// first chunk that pulls the domain graph. The attribute is required so the
+// import also works under Node's type-stripping test runner.
+const presetsJson = (await import("../../resources/provider-presets.json", {
+  with: { type: "json" },
+})).default as unknown;
 import { familyOf } from "./provider-families.ts";
 import {
   emptyProviderDefinitionDraft,
@@ -294,6 +301,14 @@ export function providerPresetDefaultModels(
   return preset.defaultModels ? [...preset.defaultModels] : [];
 }
 
+/** Preset lookup by persisted ID; unknown or absent IDs return null. */
+export function providerPresetById(
+  presetId: string | null | undefined,
+  presets: readonly ProviderPreset[] = PROVIDER_PRESETS,
+): ProviderPreset | null {
+  return presetId ? presets.find((entry) => entry.id === presetId) ?? null : null;
+}
+
 /**
  * Offering of a saved provider's persisted preset ID. Unknown or absent IDs
  * are API; nothing is inferred from display names.
@@ -302,7 +317,7 @@ export function providerPresetOfferingForId(
   presetId: string | null | undefined,
   presets: readonly ProviderPreset[] = PROVIDER_PRESETS,
 ): ProviderPresetOffering {
-  const preset = presetId ? presets.find((entry) => entry.id === presetId) ?? null : null;
+  const preset = providerPresetById(presetId, presets);
   return preset ? providerPresetOffering(preset) : "api";
 }
 

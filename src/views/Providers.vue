@@ -154,15 +154,6 @@
                 >
                   {{ catalogRefreshing ? t("正在刷新模型目录…") : t("刷新模型目录") }}
                 </n-button>
-                <n-button
-                  v-if="selectedEditableDestination"
-                  secondary
-                  size="small"
-                  :disabled="actionLocked"
-                  @click="openDestinationEditor"
-                >
-                  {{ t("编辑映射") }}
-                </n-button>
               </div>
             </div>
             <n-alert
@@ -388,15 +379,6 @@
                       @click="refreshCatalog"
                     >
                       {{ catalogRefreshing ? t("正在刷新模型目录…") : t("刷新模型目录") }}
-                    </n-button>
-                    <n-button
-                      v-if="selectedEditableDestination && !isDraftConnection"
-                      secondary
-                      size="small"
-                      :disabled="actionLocked"
-                      @click="openDestinationEditor"
-                    >
-                      {{ t("编辑映射") }}
                     </n-button>
                   </div>
                 </div>
@@ -686,7 +668,6 @@ import { useAccountsStore } from "../stores/accounts.ts";
 import { useDestinationsStore } from "../stores/destinations.ts";
 import { useProvidersStore } from "../stores/providers.ts";
 import { useSessionStore } from "../stores/session.ts";
-import { createRevalidateGate } from "../domain/revalidate.ts";
 import { useControlPlaneStore } from "../stores/controlPlane.ts";
 import type {
   ProviderDefinitionView,
@@ -710,7 +691,10 @@ import ProviderBrandMark from "../components/ProviderBrandMark.vue";
 import { t, type MessageKey } from "../i18n/index.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
 import { formatDateTime } from "../utils/format.ts";
-import { isDestinationCatalogRefreshable, isDestinationDeletable, isDestinationEditable } from "../domain/destination-edit.ts";
+import { isDestinationCatalogRefreshable, isDestinationDeletable, isDestinationEditable, destinationEditDraft, withAuthorizedCredentials } from "../domain/destination-edit.ts";
+import { planDestinationSave } from "../domain/destination-edit-save.ts";
+import { planPresetProtocolMigration } from "../domain/destination-protocol-migration.ts";
+import type { Destination } from "../api/destinations.ts";
 import {
   catalogUpdatesFromOverrides,
   destinationProbeIdentity,
@@ -785,8 +769,7 @@ const providersStore = useProvidersStore();
 const sessionStore = useSessionStore();
 const route = useRoute();
 const router = useRouter();
-const revalidateGate = createRevalidateGate(30_000);
-watch(() => sessionStore.authenticated, (ok) => { if (!ok) revalidateGate.reset(); });
+watch(() => sessionStore.authenticated, (ok) => { if (!ok) lastLoadAllSucceededAt = 0; });
 const controlPlane = useControlPlaneStore();
 const contracts = computed(() => {
   const value = providersStore.contracts;
@@ -868,6 +851,10 @@ const actionLive = ref("");
 let activatedOnce = false;
 /** A successful necessary-resource load for the current Providers route. Reset on route query changes. */
 let freshRequiredLoadSucceeded = false;
+// Activation refreshes skip data loaded recently; popstate and user actions
+// call loadAll directly and stay immediate.
+const ACTIVATED_REFRESH_FRESHNESS_MS = 30_000;
+let lastLoadAllSucceededAt = 0;
 let overrideSequence = 0;
 let probeSequence = 0;
 let overrideQueue: Promise<void> = Promise.resolve();
@@ -927,10 +914,10 @@ const selectedStatus = computed(() => (
 ));
 const selectedConnectionFamily = computed(() => {
   if (selectedConnection.value) {
-    return connectionBrandFamily(selectedConnection.value, allCatalogEntries.value);
+    return connectionBrandFamily(selectedConnection.value, allCatalogEntries.value, providersStore.presetIds);
   }
   if (selectedDestination.value) {
-    return destinationBrandFamily(selectedDestination.value, null, allCatalogEntries.value);
+    return destinationBrandFamily(selectedDestination.value, null, allCatalogEntries.value, providersStore.presetIds);
   }
   return catalogEntryFamily({ provider_id: "", display_family: "", display_name: "" });
 });
@@ -1055,8 +1042,8 @@ function railOptionForDestination(item: typeof railDestinations.value[number]): 
     label: item.name,
     icon: () => h(ProviderBrandMark, {
       family: joined
-        ? connectionBrandFamily(joined, allCatalogEntries.value)
-        : destinationBrandFamily(item, null, allCatalogEntries.value),
+        ? connectionBrandFamily(joined, allCatalogEntries.value, providersStore.presetIds)
+        : destinationBrandFamily(item, null, allCatalogEntries.value, providersStore.presetIds),
       size: RAIL_BRAND_SIZE,
     }),
     extra: joined ? railStatusExtra(joined) : undefined,
@@ -1068,7 +1055,7 @@ function railOptionForDraft(item: Connection): MenuOption {
     key: railKeyForDraftConnection(item),
     label: item.name,
     icon: () => h(ProviderBrandMark, {
-      family: connectionBrandFamily(item, allCatalogEntries.value),
+      family: connectionBrandFamily(item, allCatalogEntries.value, providersStore.presetIds),
       size: RAIL_BRAND_SIZE,
     }),
     extra: railStatusExtra(item),
@@ -1344,7 +1331,10 @@ async function loadAll(options: {
       contracts: contractsResult,
       accounts: accountsResult,
     });
-    if (outcome.ok) freshRequiredLoadSucceeded = true;
+    if (outcome.ok) {
+      freshRequiredLoadSucceeded = true;
+      lastLoadAllSucceededAt = Date.now();
+    }
     if (outcome.applySelection) {
       applyFromQuery(true, {
         connectionId: options.preferConnectionId,
@@ -1643,6 +1633,7 @@ async function refreshHttpCatalog() {
   catalogRefreshing.value = true;
   catalogRefreshError.value = "";
   try {
+    const migrationNotice = await migrateMissingPresetProtocols(destination);
     const result = await destinationsStore.refreshCatalog(id);
     // A cleared session must not start new loads or resurrect provider caches.
     if (!destinationsStore.byId.has(id)) return;
@@ -1650,15 +1641,59 @@ async function refreshHttpCatalog() {
     // The model table already renders the mutation receipt from the destination store.
     void Promise.all([providersStore.loadConnections(), providersStore.loadCatalog()]).catch(() => {});
     if (selectedDestination.value?.id !== id) return;
-    actionLive.value = t("已刷新模型目录，新增 {count} 个模型（默认启用）。", { count: result.addedCount });
+    const refreshText = t("已刷新模型目录，新增 {count} 个模型（默认启用）。", { count: result.addedCount });
+    actionLive.value = migrationNotice ? `${migrationNotice} ${refreshText}` : refreshText;
     if (result.truncated) message.warning(t("模型目录仅返回部分结果，已有模型已保留。"));
-    else message.success(actionLive.value);
+    else message.success(refreshText);
   } catch (error) {
     if (selectedDestination.value?.id !== id) return;
     catalogRefreshError.value = dashboardErrorDetail(error);
     message.error(t("刷新模型目录失败：{error}", { error: catalogRefreshError.value }));
   } finally {
     catalogRefreshing.value = false;
+  }
+}
+
+/**
+ * Migration for connections created before their official preset declared
+ * extra protocolRoutes: append the missing preset routes through the regular
+ * destination PATCH so the refreshed model matrix sees them immediately.
+ * Existing routes keep their custom URLs, and no Key is ever authorized for
+ * the appended endpoints — grant consent stays a manual editor step. Any
+ * failure (including a CAS conflict) only warns; the refresh still runs.
+ */
+async function migrateMissingPresetProtocols(destination: Destination): Promise<string | null> {
+  const presetId = selectedDefinition.value?.preset_id;
+  const preset = presetId ? PROVIDER_PRESETS.find((entry) => entry.id === presetId) ?? null : null;
+  if (!preset) return null;
+  const plan = planPresetProtocolMigration(destination, preset);
+  if (!plan) return null;
+  try {
+    const draft = destinationEditDraft(destination);
+    draft.protocol_routes = plan.routes;
+    const savePlan = planDestinationSave(
+      destination,
+      destinationsStore.credentials,
+      draft,
+      selectedConnection.value?.endpoints ?? [],
+    );
+    // An invalid plan means the persisted row cannot round-trip the editor's
+    // own validation (e.g. an unparseable saved endpoint); leave it untouched.
+    if (savePlan.status === "invalid") return null;
+    await destinationsStore.patchDestination(
+      destination.id,
+      withAuthorizedCredentials(savePlan.input, []),
+      destinationsStore.expectation ?? undefined,
+    );
+    const notice = t("已为该连接补齐 {count} 条上游协议：{names}", {
+      count: plan.added.length,
+      names: plan.added.map((route) => protocolDisplayName(route.protocol)).join(", "),
+    });
+    message.success(notice);
+    return notice;
+  } catch (error) {
+    message.warning(t("补齐上游协议失败：{error}", { error: dashboardErrorDetail(error) }));
+    return null;
   }
 }
 
@@ -2115,10 +2150,11 @@ onMounted(() => {
   void loadAll();
 });
 onActivated(() => {
-  if (!activatedOnce) { activatedOnce = true; return; }
-  if (providersStore.contracts && !revalidateGate.shouldRun()) return;
-  revalidateGate.record();
-  void loadAll({ retain: true });
+  if (activatedOnce) {
+    if (Date.now() - lastLoadAllSucceededAt >= ACTIVATED_REFRESH_FRESHNESS_MS) void loadAll({ retain: true });
+  } else {
+    activatedOnce = true;
+  }
 });
 onDeactivated(resetScopeActions);
 onUnmounted(() => {

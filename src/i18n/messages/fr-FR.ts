@@ -626,6 +626,8 @@ export const frFRMessages = {
   "刷新模型目录": "Actualiser le catalogue de modèles",
   "正在刷新模型目录…": "Actualisation du catalogue de modèles…",
   "已刷新模型目录": "Catalogue de modèles actualisé",
+  "已为该连接补齐 {count} 条上游协议：{names}": "{count} protocoles en amont manquants ont été ajoutés à cette connexion : {names}",
+  "补齐上游协议失败：{error}": "Échec de l'ajout des protocoles en amont manquants : {error}",
   "刷新模型目录失败：{error}": "Échec de l’actualisation du catalogue de modèles : {error}",
   "静态目录": "Catalogue statique",
   "官方 Zen 目录": "Catalogue Zen officiel",

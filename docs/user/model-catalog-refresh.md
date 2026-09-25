@@ -8,6 +8,8 @@ Newly discovered models are saved enabled with the protocols supported by offici
 
 For configurable HTTP connections, the configured one to three routes define the available protocols. Refresh uses the saved directory route and, where needed, a ready Key already authorized for that route. It never grants a Key, expands a Key's scope, or proves that a model accepts every configured protocol. Manual mappings remain editable when a service has no compatible model-list endpoint.
 
+A connection created before its official preset gained extra protocol routes is migrated by **Refresh model catalog**: the refresh first checks the upstream protocols declared by that preset and appends the missing routes to the connection (keeping every existing address and authentication untouched), then refreshes the directory. The backfill never authorizes any Key for the new protocols; whether a Key may use them stays a manual grant when you edit the connection.
+
 ## Protocols, tests, and access
 
 The model matrix provides search, an enabled filter, batch enable/disable/delete, protocol preference, per-model test, and refresh. It also keeps the mapping editor for public-name to upstream-ID mappings. Enabling a model enables its declared available protocols; turning it off removes it from routing and `GET /v1/models`.

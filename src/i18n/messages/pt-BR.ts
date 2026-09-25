@@ -626,6 +626,8 @@ export const ptBRMessages = {
   "刷新模型目录": "Atualizar catálogo de modelos",
   "正在刷新模型目录…": "Atualizando o catálogo de modelos…",
   "已刷新模型目录": "Catálogo de modelos atualizado",
+  "已为该连接补齐 {count} 条上游协议：{names}": "{count} protocolos upstream ausentes foram adicionados a esta conexão: {names}",
+  "补齐上游协议失败：{error}": "Falha ao adicionar os protocolos upstream ausentes: {error}",
   "刷新模型目录失败：{error}": "Falha ao atualizar o catálogo de modelos: {error}",
   "静态目录": "Catálogo estático",
   "官方 Zen 目录": "Catálogo oficial do Zen",

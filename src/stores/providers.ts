@@ -1,4 +1,4 @@
-import { computed, ref } from "vue";
+import { computed, ref, shallowRef } from "vue";
 import { defineStore } from "pinia";
 import { connectionsApi, type Connection } from "../api/connections.ts";
 import { isRevisionConflict } from "../api/dashboard.ts";
@@ -18,10 +18,12 @@ import { applyModelContractToResponse, type ProviderScopeRef } from "../domain/p
  * Probe progress and pricing refresh stay page-local.
  */
 export const useProvidersStore = defineStore("providers", () => {
-  const catalog = ref<ProviderCatalogEntry[] | null>(null);
-  const contracts = ref<ProviderContractsResponse | null>(null);
-  const connections = ref<Connection[] | null>(null);
-  const definitions = ref<Map<string, ProviderDefinitionView>>(new Map());
+  // Snapshots are always committed wholesale (immutable style), so shallow
+  // refs skip the deep reactive wrap of these large payloads.
+  const catalog = shallowRef<ProviderCatalogEntry[] | null>(null);
+  const contracts = shallowRef<ProviderContractsResponse | null>(null);
+  const connections = shallowRef<Connection[] | null>(null);
+  const definitions = shallowRef<Map<string, ProviderDefinitionView>>(new Map());
   const loading = ref(false);
   const error = ref("");
 
@@ -32,7 +34,9 @@ export const useProvidersStore = defineStore("providers", () => {
   let catalogGeneration = 0;
   let contractsGeneration = 0;
   let connectionsGeneration = 0;
-  let definitionsGeneration = 0;
+  // Definition loads are per provider: concurrent loads for different
+  // providers must not invalidate each other.
+  const definitionsGenerations = new Map<string, number>();
   let sessionGeneration = 0;
 
   interface ContractsMutationToken {
@@ -87,6 +91,12 @@ export const useProvidersStore = defineStore("providers", () => {
     const result = await providerApi.getProviderCatalog();
     if (generation !== catalogGeneration) return result;
     catalog.value = result;
+    // Brand marks for preset-derived rows resolve through the persisted
+    // preset id on the definition; warm those definitions in the background.
+    for (const entry of result) {
+      if (entry.origin !== "preset" || definitions.value.has(entry.provider_id)) continue;
+      void loadDefinition(entry.provider_id).catch(() => {});
+    }
     return result;
   }
 
@@ -138,10 +148,11 @@ export const useProvidersStore = defineStore("providers", () => {
   ): Promise<ProviderDefinitionView> {
     const cached = definitions.value.get(providerId);
     if (cached && !force) return cached;
-    const generation = ++definitionsGeneration;
+    const generation = (definitionsGenerations.get(providerId) ?? 0) + 1;
+    definitionsGenerations.set(providerId, generation);
     const session = sessionGeneration;
     const result = await providerApi.getProviderDefinition(providerId);
-    if (generation !== definitionsGeneration || session !== sessionGeneration) return result;
+    if (definitionsGenerations.get(providerId) !== generation || session !== sessionGeneration) return result;
     const next = new Map(definitions.value);
     next.set(providerId, result);
     definitions.value = next;
@@ -149,7 +160,7 @@ export const useProvidersStore = defineStore("providers", () => {
   }
 
   function invalidateDefinition(providerId: string): void {
-    definitionsGeneration += 1;
+    definitionsGenerations.set(providerId, (definitionsGenerations.get(providerId) ?? 0) + 1);
     if (!definitions.value.has(providerId)) return;
     const next = new Map(definitions.value);
     next.delete(providerId);
@@ -217,7 +228,7 @@ export const useProvidersStore = defineStore("providers", () => {
     catalogGeneration += 1;
     contractsGeneration += 1;
     connectionsGeneration += 1;
-    definitionsGeneration += 1;
+    definitionsGenerations.clear();
     catalog.value = null;
     contracts.value = null;
     connections.value = null;
@@ -231,6 +242,13 @@ export const useProvidersStore = defineStore("providers", () => {
     contracts: computed(() => contracts.value),
     connections: computed(() => connections.value),
     definitions: computed(() => definitions.value),
+    presetIds: computed(() => {
+      const map = new Map<string, string | null>();
+      for (const [providerId, definition] of definitions.value) {
+        map.set(providerId, definition.preset_id ?? null);
+      }
+      return map;
+    }),
     loading: computed(() => loading.value),
     error: computed(() => error.value),
     loadCatalog,

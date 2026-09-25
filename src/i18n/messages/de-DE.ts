@@ -625,6 +625,8 @@ export const deDEMessages = {
   "刷新模型目录": "Modellkatalog aktualisieren",
   "正在刷新模型目录…": "Modellkatalog wird aktualisiert…",
   "已刷新模型目录": "Modellkatalog aktualisiert",
+  "已为该连接补齐 {count} 条上游协议：{names}": "{count} fehlende Upstream-Protokolle zu dieser Verbindung hinzugefügt: {names}",
+  "补齐上游协议失败：{error}": "Fehler beim Hinzufügen der fehlenden Upstream-Protokolle: {error}",
   "刷新模型目录失败：{error}": "Modellkatalog konnte nicht aktualisiert werden: {error}",
   "静态目录": "Statischer Katalog",
   "官方 Zen 目录": "Offizieller Zen-Katalog",

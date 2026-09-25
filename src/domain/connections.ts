@@ -1,5 +1,6 @@
 import type { Connection } from "../api/connections.ts";
 import type { ProviderCatalogEntry } from "../api/providers.ts";
+import type { PresetIdLookup } from "./account-brand.ts";
 import { catalogEntryFamily } from "./provider-catalog.ts";
 import type { ProviderFamily } from "./provider-families.ts";
 
@@ -116,9 +117,10 @@ const CUSTOM_ACCOUNT_FAMILY_ID = "custom";
 export function connectionBrandFamily(
   connection: Pick<Connection, "legacy" | "display_family" | "name">,
   catalog: readonly ProviderCatalogEntry[],
+  presetIds?: PresetIdLookup,
 ): ProviderFamily {
   const entry = catalogEntryForConnection(connection, catalog);
-  if (entry) return catalogEntryFamily(entry);
+  if (entry) return catalogEntryFamily(entry, presetIds?.get(entry.provider_id));
   return {
     id: CUSTOM_ACCOUNT_FAMILY_ID,
     label: connection.display_family?.trim() || "Custom",

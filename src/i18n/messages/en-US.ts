@@ -1,4 +1,6 @@
 import { managedAccountEnUSMessages } from "./managed-account.ts";
+  "补齐上游协议失败：{error}": "Failed to add the missing upstream protocols: {error}",
+  "已为该连接补齐 {count} 条上游协议：{names}": "Added {count} missing upstream protocols to this connection: {names}",
 
 export const enUSMessages = {
   "移到卡片": "Move to card",
@@ -46,7 +48,6 @@ export const enUSMessages = {
   "无匹配选项": "No matching options",
   "无匹配模型": "No matching models",
   "已启用": "Enabled",
-  "编辑映射": "Edit mappings",
   "迁移包密码错误或文件损坏，请检查密码或重新选择备份文件。": "The backup password is incorrect or the file is damaged. Check the password or select another backup.",
   "填写 CPA Management Key 后重新测试连接。": "Enter the CPA Management Key, then test the connection again.",
   "填写 CPA Inference Key 后重新测试连接。": "Enter the CPA Inference Key, then test the connection again.",

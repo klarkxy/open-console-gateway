@@ -625,6 +625,8 @@ export const esESMessages = {
   "刷新模型目录": "Actualizar catálogo de modelos",
   "正在刷新模型目录…": "Actualizando el catálogo de modelos…",
   "已刷新模型目录": "Catálogo de modelos actualizado",
+  "已为该连接补齐 {count} 条上游协议：{names}": "Se añadieron {count} protocolos ascendentes que faltaban a esta conexión: {names}",
+  "补齐上游协议失败：{error}": "Error al añadir los protocolos ascendentes que faltaban: {error}",
   "刷新模型目录失败：{error}": "No se pudo actualizar el catálogo de modelos: {error}",
   "静态目录": "Catálogo estático",
   "官方 Zen 目录": "Catálogo oficial de Zen",

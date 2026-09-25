@@ -19,12 +19,16 @@ import { PROVIDER_FAMILIES, type ProviderFamily } from "./provider-families.ts";
 
 const NEUTRAL_TINT = "#5F6068";
 
+/** Persisted preset IDs keyed by provider id, used to brand preset-derived dynamic rows. */
+export type PresetIdLookup = ReadonlyMap<string, string | null | undefined>;
+
 export function accountBrandFamily(
   account: Pick<Account, "provider_id">,
   catalog: readonly ProviderCatalogEntry[] | null | undefined,
+  presetIds?: PresetIdLookup,
 ): ProviderFamily {
   const entry = findCatalogEntry(catalog, account.provider_id);
-  if (entry) return catalogEntryFamily(entry);
+  if (entry) return catalogEntryFamily(entry, presetIds?.get(account.provider_id));
   return { id: account.provider_id, label: account.provider_id, tint: NEUTRAL_TINT };
 }
 
@@ -36,17 +40,22 @@ export function platformBrandFamily(kind: PlatformKind): ProviderFamily {
  *  credential is present so vendor logos stay; otherwise uses destination
  *  `brand_family` / name. */
 export function destinationBrandFamily(
-  destination: Pick<Destination, "id" | "name" | "brand_family" | "adapter">,
+  destination: Pick<Destination, "id" | "legacy" | "name" | "brand_family" | "adapter">,
   account: Pick<Account, "provider_id"> | null | undefined,
   catalog: readonly ProviderCatalogEntry[] | null | undefined,
+  presetIds?: PresetIdLookup,
 ): ProviderFamily {
-  if (account) return accountBrandFamily(account, catalog);
+  if (account) return accountBrandFamily(account, catalog, presetIds);
   if (destination.brand_family) {
     const known = PROVIDER_FAMILIES.find((family) => (
       family.label === destination.brand_family || family.id === destination.adapter
     ));
     if (known) return known;
     return { id: destination.adapter, label: destination.brand_family, tint: NEUTRAL_TINT };
+  }
+  if (destination.legacy.kind === "dynamic") {
+    const entry = findCatalogEntry(catalog, destination.legacy.id);
+    if (entry) return catalogEntryFamily(entry, presetIds?.get(destination.legacy.id));
   }
   return { id: destination.id, label: destination.name, tint: NEUTRAL_TINT };
 }

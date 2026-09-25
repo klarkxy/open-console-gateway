@@ -20,8 +20,8 @@ export interface ProviderFamily {
 /**
  * Static brand metadata. Frozen so callers can rely on identity. Tints are
  * chosen to be recognizable per brand and to remain readable against the
- * dashboard's neutral surface. OpenAI, Microsoft, AWS, xAI and the small
- * Chinese vendors that have no simple-icons entry fall back to a monogram.
+ * dashboard's neutral surface. Vendors without a shipped SVG logo (see
+ * `src/assets/provider-logos/`) fall back to a tinted monogram.
  */
 const FAMILIES: readonly ProviderFamily[] = Object.freeze([
   { id: "openai", label: "OpenAI", tint: "#10A37F" },
@@ -53,6 +53,7 @@ const FAMILIES: readonly ProviderFamily[] = Object.freeze([
   { id: "compshare", label: "Compshare", tint: "#2E7CF6" },
   { id: "atlascloud", label: "AtlasCloud", tint: "#3DDC97" },
   { id: "ollama", label: "Ollama", tint: "#000000" },
+  { id: "opencode", label: "OpenCode", tint: "#000000" },
 ]);
 
 const FAMILIES_BY_ID: ReadonlyMap<string, ProviderFamily> = new Map(

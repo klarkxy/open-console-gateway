@@ -67,6 +67,7 @@
 
 <script setup lang="ts">
 import { useDestinationsStore } from "../stores/destinations.ts";
+import { useProvidersStore } from "../stores/providers.ts";
 import { computed } from "vue";
 import type { Account, UsageWindow } from "../api/dashboard";
 import type { Identity } from "../api/identities.ts";
@@ -130,9 +131,10 @@ const emit = defineEmits<{
 }>();
 
 const destinations = useDestinationsStore();
+const providersStore = useProvidersStore();
 const destination = computed(() => destinations.destinationForAccount(props.account.id));
 const capabilities = computed(() => accountCapabilities(props.account, props.catalog, destination.value));
-const brandFamily = computed(() => accountBrandFamily(props.account, props.catalog));
+const brandFamily = computed(() => accountBrandFamily(props.account, props.catalog, providersStore.presetIds));
 const typeLabel = computed(() => (
   accountTypeLabelText(accountTypeLabel(props.account, props.catalog, destination.value))
 ));
