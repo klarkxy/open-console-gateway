@@ -236,7 +236,7 @@ test("user-defined Provider mappings appear as Alias rows labelled by Provider n
   }]);
 });
 
-test("production Alias merge keeps only enabled-account providers and selected CPA models", () => {
+test("production Alias merge keeps only routable mappings from enabled-account providers and selected CPA models", () => {
   const rows = mergeProviderAliasRows(
     [builtinScope, customScope],
     [goAccount, customAccount, cpaAccount, { ...customAccount, id: "dyn-1", provider_id: dynamic.id }],
@@ -250,7 +250,6 @@ test("production Alias merge keeps only enabled-account providers and selected C
   assert.deepEqual(rows.map((row) => row.key), [
     "provider:go:gpt-5.6:gpt-5.6-upstream",
     "provider:go:raw-only-model:raw-only-model",
-    "custom:custom-1:public-model:vendor/model:free",
     "dynamic:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa:lab-opus:vendor/opus",
     "cpa:gpt-5.6",
     "cpa:grok-3-mini",

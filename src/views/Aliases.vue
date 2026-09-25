@@ -125,9 +125,6 @@
                 <n-tag v-if="platformLabels.get(row.key)" size="tiny" :bordered="false" class="alias-platform-tag">
                   {{ platformLabels.get(row.key) }}
                 </n-tag>
-                <n-tag v-if="!row.routable" size="tiny" :bordered="false" class="alias-model-disabled">
-                  {{ t("模型未启用") }}
-                </n-tag>
               </td>
               <td class="aliases-rank">{{ rankText(row) }}</td>
               <td><code>{{ row.upstream_model }}</code></td>
@@ -422,11 +419,6 @@ onActivated(() => {
   opacity: 0.55;
 }
 .alias-warning { color: var(--ocg-warning); margin: var(--ocg-space-xs) 0 0; }
-.alias-model-disabled {
-  margin-left: var(--ocg-space-xs);
-  color: var(--ocg-muted);
-  background-color: var(--ocg-primary-soft);
-}
 .alias-platform-tag {
   margin-left: var(--ocg-space-xs);
   color: var(--ocg-muted);

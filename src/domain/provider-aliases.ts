@@ -170,7 +170,7 @@ export function dynamicProviderAliasRows(
   })));
 }
 
-/** Production Alias table: enabled-account providers, then CPA catalog pins. */
+/** Production Alias table: enabled mappings from enabled-account providers and CPA. */
 export function mergeProviderAliasRows(
   scopes: readonly ProviderScopeView[],
   accounts: readonly Account[],
@@ -182,7 +182,7 @@ export function mergeProviderAliasRows(
     ...providerAliasRows(scopes, accounts),
     ...dynamicProviderAliasRows(providers.filter((provider) => enabled.has(provider.id))),
     ...(enabled.has(CPA_PROVIDER_ID) ? cpaAliasRows(cpaModels, scopes) : []),
-  ];
+  ].filter((row) => row.routable);
 }
 
 /** Configuration inventory only; these counts do not predict request-time eligibility. */

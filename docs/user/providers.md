@@ -59,7 +59,8 @@ credentials and their routing bindings. User-defined Providers stay unpriced unt
 **Aliases** is a separate core page because its table spans every
 currently enabled account instead of the selected Provider. It lists only
 Providers that have at least one enabled account, including CPA as its own
-Provider. Public names and exact upstream identities come from those
+Provider. Disabled model mappings are hidden; a public name disappears from
+this page when none of its mappings is enabled. Public names and exact upstream identities come from those
 Providers' contracts, user-defined mappings, Custom capabilities, and the
 selected CPA catalog. Overlapping public names and upstream IDs are flagged
 for inspection. Search by public name, upstream ID, or Provider.
