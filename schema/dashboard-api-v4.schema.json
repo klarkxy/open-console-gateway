@@ -2011,6 +2011,89 @@
       ],
       "type": "object"
     },
+    "DestinationModelMetadata": {
+      "additionalProperties": false,
+      "properties": {
+        "destinationId": {
+          "type": "string"
+        },
+        "models": {
+          "items": {
+            "$ref": "#/$defs/DestinationModelMetadataEntry"
+          },
+          "type": "array"
+        },
+        "revision": {
+          "$ref": "#/$defs/ControlRevision"
+        }
+      },
+      "required": [
+        "revision",
+        "destinationId",
+        "models"
+      ],
+      "type": "object"
+    },
+    "DestinationModelMetadataEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "metadata": {
+          "$ref": "#/$defs/ModelMetadata"
+        },
+        "publicModel": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "upstreamModel": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "publicModel",
+        "upstreamModel",
+        "metadata",
+        "source"
+      ],
+      "type": "object"
+    },
+    "DestinationModelMetadataUpdate": {
+      "additionalProperties": false,
+      "description": "Required process-scoped mutation precondition.\n\nBoth fields travel at the top level of every mutation request. The random\nprocess generation prevents a revision captured before restart from being\naccepted by a fresh process whose in-memory counter reused the same value.",
+      "properties": {
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "metadata": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModelMetadata"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "null removes the operator declaration and reveals discovered facts."
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "publicModel": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "publicModel"
+      ],
+      "type": "object"
+    },
     "DestinationModelPatch": {
       "additionalProperties": false,
       "description": "Complete public-to-upstream mapping written by a destination PATCH.",
@@ -2909,6 +2992,80 @@
         "external_reference"
       ],
       "type": "string"
+    },
+    "ModelMetadata": {
+      "additionalProperties": false,
+      "properties": {
+        "contextWindow": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "inputModalities": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "maxOutputTokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "outputModalities": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "parallelToolCalls": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "reasoning": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "reasoningEfforts": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Exact DSH selector level -> Chat Completions reasoning_effort spelling.\nAbsence is unknown, an empty map explicitly offers no selectable levels.",
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "toolCalling": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
     },
     "ModelResolutionDto": {
       "description": "Which client model names may resolve to a destination mapping.",
@@ -5348,6 +5505,18 @@
     },
     {
       "$ref": "#/$defs/DestinationCatalogUpdate"
+    },
+    {
+      "$ref": "#/$defs/ModelMetadata"
+    },
+    {
+      "$ref": "#/$defs/DestinationModelMetadata"
+    },
+    {
+      "$ref": "#/$defs/DestinationModelMetadataEntry"
+    },
+    {
+      "$ref": "#/$defs/DestinationModelMetadataUpdate"
     },
     {
       "$ref": "#/$defs/DestinationCatalogModelUpdate"

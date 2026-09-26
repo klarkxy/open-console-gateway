@@ -54,6 +54,10 @@ const PACKAGE_FILES: &[(&str, &str)] = &[
         include_str!("../../../integrations/dsh-plugin/index.js"),
     ),
     (
+        "model-catalog.js",
+        include_str!("../../../integrations/dsh-plugin/model-catalog.js"),
+    ),
+    (
         "cordis.patch.yml",
         include_str!("../../../integrations/dsh-plugin/cordis.patch.yml"),
     ),
