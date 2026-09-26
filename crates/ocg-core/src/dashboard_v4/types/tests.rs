@@ -1,6 +1,6 @@
 use super::*;
 use crate::dashboard_v3::{ControlRevision, MutationExpectation, ProviderDefinitionAuthKind};
-use serde_json::json;
+use serde_json::{Value, json};
 
 #[test]
 fn wire_fields_are_camel_case() {
@@ -153,6 +153,85 @@ fn routing_explanation_emits_camel_case_and_null_optionals() {
         value["runtimeOnlyUncertainty"],
         json!(["upstream_result_unknown"])
     );
+}
+
+#[test]
+fn temporary_policy_dtos_are_camel_case_tagged_unions() {
+    let rule = TemporaryPolicyRule::Custom {
+        id: "status-400".into(),
+        destination_id: None,
+        enabled: true,
+        scope: TemporaryPolicyScope::Credential,
+        matcher: TemporaryPolicyMatch {
+            status_codes: Some(vec![400]),
+            error_codes: None,
+            error_types: None,
+            message_contains: None,
+        },
+        backoff: TemporaryPolicyBackoff {
+            initial_seconds: 30,
+            max_seconds: 300,
+        },
+    };
+    let value = serde_json::to_value(&rule).unwrap();
+    assert_eq!(value["kind"], "custom");
+    assert_eq!(value["destinationId"], Value::Null);
+    assert_eq!(value["match"]["statusCodes"], json!([400]));
+    assert_eq!(value["backoff"]["initialSeconds"], 30);
+    let dest_rule = TemporaryPolicyRule::Custom {
+        id: "status-400".into(),
+        destination_id: Some("dest-a".into()),
+        enabled: true,
+        scope: TemporaryPolicyScope::Credential,
+        matcher: TemporaryPolicyMatch {
+            status_codes: Some(vec![400]),
+            error_codes: None,
+            error_types: None,
+            message_contains: None,
+        },
+        backoff: TemporaryPolicyBackoff {
+            initial_seconds: 30,
+            max_seconds: 300,
+        },
+    };
+    let dest_value = serde_json::to_value(&dest_rule).unwrap();
+    assert_eq!(dest_value["destinationId"], "dest-a");
+    assert!(dest_value.get("destination_id").is_none());
+    let decoded: TemporaryPolicyRule = serde_json::from_value(json!({
+        "kind": "custom",
+        "id": "status-400",
+        "destinationId": "dest-a",
+        "enabled": true,
+        "scope": "credential",
+        "match": { "statusCodes": [400] },
+        "backoff": { "initialSeconds": 30, "maxSeconds": 300 }
+    }))
+    .unwrap();
+    assert_eq!(decoded, dest_rule);
+    assert!(
+        serde_json::from_value::<TemporaryPolicyRule>(json!({
+            "kind": "custom",
+            "id": "status-400",
+            "destinationId": "dest-a",
+            "enabled": true,
+            "scope": "credential",
+            "match": { "statusCodes": [400] },
+            "backoff": { "initialSeconds": 30, "maxSeconds": 300 },
+            "unknownField": true
+        }))
+        .is_err()
+    );
+    let schema = contract_schema();
+    let defs = schema["$defs"].as_object().unwrap();
+    for name in [
+        "TemporaryPolicyConfiguration",
+        "TemporaryPolicyRule",
+        "TemporaryPolicyRestrictions",
+        "TemporaryPolicyUpdate",
+        "TemporaryPolicyClearRequest",
+    ] {
+        assert!(defs.contains_key(name), "missing $defs/{name}");
+    }
 }
 
 #[test]
@@ -602,6 +681,7 @@ fn alias_publication_is_camel_case() {
 #[test]
 fn dsh_application_contract_is_camel_case_and_secret_free() {
     let application = DshApplication {
+        selected_profile_path: "DSH web profile".into(),
         status: DshApplicationStatus::Ready,
         detected: true,
         installed: false,
@@ -610,28 +690,62 @@ fn dsh_application_contract_is_camel_case_and_secret_free() {
         version: Some("0.1.5-rc.2".into()),
         detail: Some("ready".into()),
         target_paths: vec!["DSH web profile".into()],
+        discovered_profiles: vec![DshDiscoveredProfile {
+            home: "C:\\Users\\example\\.dsh".into(),
+            name: "web".into(),
+            path: "C:\\Users\\example\\.dsh\\profiles\\web".into(),
+        }],
         fingerprint: Some("abc".into()),
         revision: ControlRevision {
             revision: 7,
             process_generation: 2,
             pricing_revision: "p".into(),
         },
+        runtime_url: Some("http://127.0.0.1:3080".into()),
+        uninstall_supported: false,
+        enabled: false,
+        application: None,
     };
     let value = serde_json::to_value(&application).unwrap();
     assert_eq!(value["installSupported"], true);
     assert_eq!(value["activationRequired"], false);
     assert_eq!(value["targetPaths"], json!(["DSH web profile"]));
+    assert_eq!(value["discoveredProfiles"][0]["name"], "web");
     assert_eq!(value["status"], "ready");
+    assert_eq!(value["selectedProfilePath"], "DSH web profile");
+    assert_eq!(value["runtimeUrl"], "http://127.0.0.1:3080");
+    assert_eq!(value["uninstallSupported"], false);
+    assert_eq!(value["enabled"], false);
+    assert!(value["application"].is_null());
     assert!(value.get("key").is_none());
 
     let request: DshApplicationInstallRequest = serde_json::from_value(json!({
         "expectedRevision": 7,
         "processGeneration": 2,
         "keyId": "primary",
-        "expectedFingerprint": "abc"
+        "expectedFingerprint": "abc",
+        "runtimeUrl": "http://127.0.0.1:19387"
     }))
     .unwrap();
     assert_eq!(request.key_id, "primary");
+    assert_eq!(request.profile_path, None);
+    assert_eq!(
+        request.runtime_url.as_deref(),
+        Some("http://127.0.0.1:19387")
+    );
     assert_eq!(request.expected_fingerprint, "abc");
     assert_eq!(request.expectation.expected_revision, 7);
+
+    let uninstall: DshApplicationUninstallRequest = serde_json::from_value(json!({
+        "expectedRevision": 7,
+        "processGeneration": 2,
+        "expectedFingerprint": "abc",
+        "runtimeUrl": "http://127.0.0.1:3080"
+    }))
+    .unwrap();
+    assert_eq!(uninstall.expected_fingerprint, "abc");
+    assert_eq!(
+        uninstall.runtime_url.as_deref(),
+        Some("http://127.0.0.1:3080")
+    );
 }

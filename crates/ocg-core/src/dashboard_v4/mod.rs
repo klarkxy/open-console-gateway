@@ -28,6 +28,7 @@ mod publication;
 mod routing;
 mod routing_cards;
 mod templates;
+mod temporary_policy;
 pub(crate) mod types;
 
 use axum::extract::State;
@@ -97,7 +98,9 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
         )
         .route(
             "/applications/dsh",
-            get(applications::get_dsh).post(applications::install_dsh),
+            get(applications::get_dsh)
+                .post(applications::install_dsh)
+                .delete(applications::uninstall_dsh),
         )
         .route("/onboarding/commit", post(onboarding::commit))
         .route(
@@ -127,6 +130,18 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
         .route(
             "/routing/cards",
             get(routing_cards::list).put(routing_cards::replace),
+        )
+        .route(
+            "/routing/temporary-unavailability",
+            get(temporary_policy::get_configuration).put(temporary_policy::put_configuration),
+        )
+        .route(
+            "/routing/temporary-unavailability/restrictions",
+            get(temporary_policy::get_restrictions),
+        )
+        .route(
+            "/routing/temporary-unavailability/restrictions/{id}/clear",
+            post(temporary_policy::clear_restriction),
         )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),

@@ -20,22 +20,13 @@
           <span>{{ t("仅看已启用") }}</span>
         </label>
       </div>
-      <n-button
-        v-if="!selecting"
-        secondary
-        size="small"
-        :disabled="props.actionLocked || props.removing"
-        @click="enterSelectMode"
-      >
-        {{ t("多选") }}
-      </n-button>
       <div
-        v-else
+        v-if="selectedCount > 0"
         class="matrix-toolbar__select"
         role="toolbar"
-        :aria-label="t('多选')"
+        :aria-label="t('批量操作')"
       >
-        <span class="matrix-select-count" :data-empty="selectedCount === 0 ? 'true' : 'false'">
+        <span class="matrix-select-count">
           {{ t("已选 {count} 个模型", { count: selectedCount }) }}
         </span>
         <n-button-group size="small">
@@ -78,17 +69,31 @@
               circle
               quaternary
               :disabled="props.actionLocked || props.removing"
-              :aria-label="t('退出多选')"
-              @click="exitSelectMode"
+              :aria-label="t('清除选择')"
+              @click="clearSelection"
             >
               <template #icon>
                 <n-icon :component="CloseOutlined" />
               </template>
             </n-button>
           </template>
-          {{ t("退出多选") }}
+          {{ t("清除选择") }}
         </n-tooltip>
       </div>
+    </div>
+    <div v-if="showSelectAllBanner" class="matrix-select-all" role="status">
+      <template v-if="allFilteredSelected">
+        <span>{{ t("已选全部 {total} 个筛选结果", { total: filteredRows.length }) }}</span>
+        <n-button text size="tiny" :disabled="props.actionLocked || props.removing" @click="clearSelection">
+          {{ t("清除选择") }}
+        </n-button>
+      </template>
+      <template v-else>
+        <span>{{ t("已选当前显示的 {shown} 个模型", { shown: visibleRows.length }) }}</span>
+        <n-button text size="tiny" :disabled="props.actionLocked || props.removing" @click="selectAllFiltered">
+          {{ t("选择全部 {total} 个筛选结果", { total: filteredRows.length }) }}
+        </n-button>
+      </template>
     </div>
     <p v-if="allMatrixModels.length > 0 && filteredRows.length === 0" class="matrix-empty" role="status">
       {{ t("无匹配模型") }}
@@ -97,14 +102,11 @@
       <table class="matrix-table">
         <thead>
           <tr>
-            <th
-              v-if="selecting"
-              class="matrix-cell matrix-cell--select-header"
-            >
+            <th class="matrix-cell matrix-cell--select-header">
               <n-checkbox
                 :checked="allVisibleSelected"
                 :indeterminate="someVisibleSelected"
-                :disabled="filteredRows.length === 0 || props.actionLocked || props.removing"
+                :disabled="visibleRows.length === 0 || props.actionLocked || props.removing"
                 :aria-label="t('全选当前列表')"
                 @update:checked="toggleVisibleSelection"
               />
@@ -123,8 +125,8 @@
           </tr>
         </thead>
         <tbody>
-          <tr v-for="row in visibleRows" :key="row.modelId" :class="{ 'is-selected': selecting && isSelected(row.modelId) }">
-            <td v-if="selecting" class="matrix-cell matrix-cell--select">
+          <tr v-for="row in visibleRows" :key="row.modelId" :class="{ 'is-selected': isSelected(row.modelId) }">
+            <td class="matrix-cell matrix-cell--select">
               <n-checkbox
                 :checked="isSelected(row.modelId)"
                 :disabled="props.actionLocked || props.removing"
@@ -260,7 +262,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
   NButton,
   NButtonGroup,
@@ -327,7 +329,6 @@ function enableUnverifiedProtocol(modelId: string, protocol: ProviderProtocol): 
 
 const modelQuery = ref("");
 const enabledOnly = ref(false);
-const selecting = ref(false);
 const selectedIds = ref(new Set<string>());
 const showAllRows = ref(false);
 
@@ -441,7 +442,6 @@ const probeSupported = computed(() => (
 ));
 
 watch(() => props.scope.key, () => {
-  selecting.value = false;
   selectedIds.value = new Set();
   modelQuery.value = "";
   enabledOnly.value = false;
@@ -503,7 +503,7 @@ function rowActionLocked(modelId: string): boolean {
 }
 
 function rowEditLocked(modelId: string): boolean {
-  return selecting.value || rowActionLocked(modelId);
+  return rowActionLocked(modelId);
 }
 
 const selectedCount = computed(() => selectedIds.value.size);
@@ -514,13 +514,22 @@ const canMutateSelection = computed(() => (
   && !props.removing
 ));
 const allVisibleSelected = computed(() => (
-  filteredRows.value.length > 0
-  && filteredRows.value.every((row) => selectedIds.value.has(row.modelId))
+  visibleRows.value.length > 0
+  && visibleRows.value.every((row) => selectedIds.value.has(row.modelId))
 ));
 const someVisibleSelected = computed(() => {
   if (allVisibleSelected.value) return false;
-  return filteredRows.value.some((row) => selectedIds.value.has(row.modelId));
+  return visibleRows.value.some((row) => selectedIds.value.has(row.modelId));
 });
+const allFilteredSelected = computed(() => (
+  filteredRows.value.length > 0
+  && filteredRows.value.every((row) => selectedIds.value.has(row.modelId))
+));
+// Visible rows can be capped below the filtered total, so the header checkbox
+// only promises the visible slice; the banner offers the explicit wider pick.
+const showSelectAllBanner = computed(() => (
+  rowsCapped.value && allVisibleSelected.value
+));
 const batchSaving = computed(() => {
   const pending = props.pendingOverrideKeys;
   if (!pending || pending.size === 0) return false;
@@ -559,6 +568,7 @@ function applyBatch(on: boolean): void {
   const modelIds = selectedModelIds();
   if (modelIds.length === 0) return;
   emitOverrides(buildModelToggleOverrides(props.scope, modelIds, on));
+  clearSelection();
 }
 
 function removeRows(modelIds: string[]): void {
@@ -570,14 +580,10 @@ function removeRows(modelIds: string[]): void {
 
 function removeSelected(): void {
   removeRows(selectedModelIds());
+  clearSelection();
 }
 
-function enterSelectMode(): void {
-  selecting.value = true;
-}
-
-function exitSelectMode(): void {
-  selecting.value = false;
+function clearSelection(): void {
   selectedIds.value = new Set();
 }
 
@@ -594,12 +600,28 @@ function setSelected(modelId: string, on: boolean): void {
 
 function toggleVisibleSelection(on: boolean): void {
   const next = new Set(selectedIds.value);
-  for (const row of filteredRows.value) {
+  for (const row of visibleRows.value) {
     if (on) next.add(row.modelId);
     else next.delete(row.modelId);
   }
   selectedIds.value = next;
 }
+
+function selectAllFiltered(): void {
+  const next = new Set(selectedIds.value);
+  for (const row of filteredRows.value) next.add(row.modelId);
+  selectedIds.value = next;
+}
+
+function onSelectionKeydown(event: KeyboardEvent): void {
+  if (event.key !== "Escape" || selectedCount.value === 0) return;
+  const target = event.target as HTMLElement | null;
+  if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
+  clearSelection();
+}
+
+onMounted(() => window.addEventListener("keydown", onSelectionKeydown));
+onBeforeUnmount(() => window.removeEventListener("keydown", onSelectionKeydown));
 
 function runRowProbe(modelId: string): void {
   if (!probeSupported.value) return;
@@ -655,8 +677,18 @@ function runRowProbe(modelId: string): void {
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
-.matrix-select-count[data-empty="true"] {
+.matrix-select-all {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--ocg-space-sm);
+  margin-bottom: var(--ocg-space-sm);
+  padding: 6px var(--ocg-space-md);
+  border: 1px solid var(--ocg-border);
+  border-radius: var(--ocg-radius-sm);
   color: var(--ocg-muted);
+  font-size: var(--ocg-font-xs);
+  background: color-mix(in srgb, var(--ocg-ink) 4%, var(--ocg-surface));
 }
 .matrix-scroll {
   overflow-x: auto;

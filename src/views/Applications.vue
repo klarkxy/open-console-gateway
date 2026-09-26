@@ -12,11 +12,11 @@
     </div>
 
     <n-alert
-      v-else-if="loadError && !dsh"
+      v-else-if="dshStore.error && !dsh"
       type="error"
-      :title="t('加载应用状态失败：{error}', { error: loadError })"
+      :title="t('加载应用状态失败：{error}', { error: dshStore.error })"
     >
-      <n-button size="small" secondary :loading="loading" @click="load()">
+      <n-button size="small" secondary :loading="dshStore.loading" @click="load()">
         {{ t("重试") }}
       </n-button>
     </n-alert>
@@ -29,7 +29,7 @@
       display-directive="if"
     >
       <template #suffix>
-        <n-button secondary size="small" :loading="loading" @click="load({ retain: true })">
+        <n-button secondary size="small" :loading="dshStore.loading" @click="load({ retain: true })">
           {{ t("刷新") }}
         </n-button>
       </template>
@@ -37,20 +37,20 @@
         <section v-if="dsh" class="dsh-section" aria-labelledby="dsh-title">
           <h2 id="dsh-title" class="sr-only">DSH</h2>
           <n-alert
-            v-if="loadError"
+            v-if="dshStore.error"
             type="warning"
-            :title="t('加载应用状态失败：{error}', { error: loadError })"
+            :title="t('加载应用状态失败：{error}', { error: dshStore.error })"
           >
-            <n-button size="small" secondary :loading="loading" @click="load({ retain: true })">
+            <n-button size="small" secondary :loading="dshStore.loading" @click="load({ retain: true })">
               {{ t("重试") }}
             </n-button>
           </n-alert>
           <n-alert
-            v-if="installError && !installConfirmShown"
+            v-if="actionError && !installConfirmShown && !uninstallConfirmShown"
             type="error"
-            :title="t('安装失败：{error}', { error: installError })"
+            :title="actionError"
             closable
-            @close="installError = ''"
+            @close="actionError = ''"
           />
 
           <div class="dsh-status-row">
@@ -61,6 +61,7 @@
           </div>
           <p class="dsh-hint">{{ t(presentation.hintKey) }}</p>
           <p v-if="hostDetail" class="dsh-detail">{{ hostDetail }}</p>
+          <p v-if="outcomeHint" class="dsh-hint">{{ t(outcomeHint) }}</p>
           <p v-if="dsh.activationRequired" class="dsh-hint">
             {{ t("启动或重启 DSH，以导入所选 Key 并加载 OCG 插件。") }}
           </p>
@@ -71,6 +72,35 @@
             {{ t("安装完成仅表示包注册成功，不代表模型连接已验证。") }}
           </p>
 
+          <div class="dsh-discovery">
+            <label for="dsh-profile-select" class="dsh-paths-title">{{ t("安装目标 Profile") }}</label>
+            <n-select
+              v-if="profileOptions.length > 0"
+              id="dsh-profile-select"
+              class="dsh-profile-select"
+              :value="selectedProfilePath"
+              :options="profileOptions"
+              :disabled="dshStore.loading || dshStore.mutating"
+              :aria-label="t('安装目标 Profile')"
+              filterable
+              @update:value="selectProfile"
+            />
+            <code v-if="selectedProfilePath" class="dsh-selected-path">{{ selectedProfilePath }}</code>
+            <p class="dsh-hint">{{ t("所选 Profile 提供本机 DSH Home 与会话上下文；实际变更目标是显示的运行地址。") }}</p>
+            <p v-if="dsh.discoveredProfiles.length === 0" class="dsh-hint">{{ t("在指定范围内未发现有效的 DSH Profile。") }}</p>
+            <label for="dsh-runtime-url" class="dsh-paths-title">{{ t("DSH 运行地址") }}</label>
+            <n-input
+              id="dsh-runtime-url"
+              class="dsh-runtime-input"
+              :value="runtimeUrlDraft"
+              :disabled="dshStore.loading || dshStore.mutating"
+              :placeholder="suggestedUrl ?? ''"
+              :aria-label="t('DSH 运行地址')"
+              @update:value="runtimeUrlDraft = $event"
+              @blur="load({ retain: true })"
+            />
+          </div>
+
           <div class="dsh-actions">
             <n-button
               type="primary"
@@ -78,7 +108,15 @@
               :disabled="installAction === 'unavailable'"
               @click="openInstall"
             >
-              {{ installAction === "reinstall" ? t("重新安装 DSH") : t("安装 DSH") }}
+              {{ installAction === "reinstall" ? t("重新安装到 {profile}", { profile: selectedProfileName }) : t("安装到 {profile}", { profile: selectedProfileName }) }}
+            </n-button>
+            <n-button
+              v-if="uninstallAction === 'uninstall'"
+              secondary
+              :disabled="dshStore.mutating"
+              @click="openUninstall"
+            >
+              {{ t("从 {profile} 卸载", { profile: selectedProfileName }) }}
             </n-button>
           </div>
         </section>
@@ -88,20 +126,20 @@
     <n-modal
       :show="installConfirmShown"
       preset="card"
-      :title="installAction === 'reinstall' ? t('重新安装 DSH') : t('安装 DSH')"
+      :title="installAction === 'reinstall' ? t('重新安装到 {profile}', { profile: selectedProfileName }) : t('安装到 {profile}', { profile: selectedProfileName })"
       class="dsh-install-modal"
       style="width: 520px; max-width: calc(100vw - 32px)"
       :mask-closable="false"
-      :close-on-esc="!installing"
+      :close-on-esc="!dshStore.mutating"
       @update:show="setInstallConfirmVisible"
     >
       <div v-if="dsh" class="dsh-confirm">
         <n-alert
-          v-if="installError"
+          v-if="actionError"
           type="error"
-          :title="t('安装失败：{error}', { error: installError })"
+          :title="actionError"
           closable
-          @close="installError = ''"
+          @close="actionError = ''"
         />
         <div class="dsh-status-row">
           <n-tag :type="presentation.tone" size="small">{{ t(presentation.labelKey) }}</n-tag>
@@ -109,6 +147,15 @@
             {{ t("当前版本") }}: <code>{{ dsh.version ?? t("未知") }}</code>
           </span>
         </div>
+        <p v-if="selectedProfileName === 'dsh-editor'" class="dsh-hint">
+          {{ t("安装到 DSH Editor 前请先退出 Editor；安装后重新启动。") }}
+        </p>
+        <template v-if="dsh.runtimeUrl">
+          <p class="dsh-paths-title">{{ t("DSH 运行地址") }}</p>
+          <code class="dsh-selected-path">{{ displayedRuntimeUrl }}</code>
+          <p class="dsh-hint">{{ t("将使用本机 DSH 会话操作所显示的运行地址。") }}</p>
+          <p v-if="dsh.installed" class="dsh-hint">{{ t("将替换此地址上现有的 {package}，包括其他来源安装的同名包。", { package: "@open-console-gateway/dsh-plugin" }) }}</p>
+        </template>
         <p class="dsh-paths-title">{{ t("安装将写入以下路径：") }}</p>
         <ul v-if="dsh.targetPaths.length > 0" class="dsh-paths">
           <li v-for="path in dsh.targetPaths" :key="path"><code>{{ path }}</code></li>
@@ -119,7 +166,7 @@
           v-model:value="selectedKeyId"
           class="dsh-key-group"
           aria-labelledby="dsh-key-label"
-          :disabled="installing"
+          :disabled="dshStore.mutating"
         >
           <n-radio v-for="option in keyOptions" :key="option.id" :value="option.id">
             {{ option.kind === "primary" ? t("主 Key") : option.name }}
@@ -131,16 +178,56 @@
       </div>
       <template #footer>
         <div class="dsh-confirm-footer">
-          <n-button quaternary :disabled="installing" @click="setInstallConfirmVisible(false)">
+          <n-button quaternary :disabled="dshStore.mutating" @click="setInstallConfirmVisible(false)">
             {{ t("取消") }}
           </n-button>
           <n-button
             type="primary"
-            :loading="installing"
+            :loading="dshStore.mutating"
             :disabled="!selectedKeyUsable"
             @click="confirmInstall"
           >
-            {{ installing ? t("安装中…") : t("确认安装") }}
+            {{ dshStore.mutating ? t("安装中…") : t("确认安装") }}
+          </n-button>
+        </div>
+      </template>
+    </n-modal>
+
+    <n-modal
+      :show="uninstallConfirmShown"
+      preset="card"
+      :title="t('从 {profile} 卸载', { profile: selectedProfileName })"
+      class="dsh-uninstall-modal"
+      style="width: 480px; max-width: calc(100vw - 32px)"
+      :mask-closable="false"
+      :close-on-esc="!dshStore.mutating"
+      @update:show="setUninstallConfirmVisible"
+    >
+      <div v-if="dsh" class="dsh-confirm">
+        <n-alert
+          v-if="actionError"
+          type="error"
+          :title="actionError"
+          closable
+          @close="actionError = ''"
+        />
+        <p class="dsh-paths-title">{{ t("DSH 运行地址") }}</p>
+        <code class="dsh-selected-path">{{ displayedRuntimeUrl }}</code>
+        <p class="dsh-hint">{{ t("将使用本机 DSH 会话操作所显示的运行地址。") }}</p>
+        <p class="dsh-hint">{{ t("卸载只移除 OCG 插件包，不会删除 DSH 凭据或 OCG Key。") }}</p>
+        <p class="dsh-hint">{{ t("将移除此地址上的 {package}，包括其他来源安装的同名包。", { package: "@open-console-gateway/dsh-plugin" }) }}</p>
+      </div>
+      <template #footer>
+        <div class="dsh-confirm-footer">
+          <n-button quaternary :disabled="dshStore.mutating" @click="setUninstallConfirmVisible(false)">
+            {{ t("取消") }}
+          </n-button>
+          <n-button
+            type="primary"
+            :loading="dshStore.mutating"
+            @click="confirmUninstall"
+          >
+            {{ dshStore.mutating ? t("卸载中…") : t("确认卸载") }}
           </n-button>
         </div>
       </template>
@@ -154,9 +241,11 @@ import { useRoute, useRouter } from "vue-router";
 import {
   NAlert,
   NButton,
+  NInput,
   NModal,
   NRadio,
   NRadioGroup,
+  NSelect,
   NSpin,
   NTabPane,
   NTabs,
@@ -164,22 +253,27 @@ import {
   useMessage,
 } from "naive-ui";
 import { DashboardRequestError, isRevisionConflict } from "../api/dashboard.ts";
-import { dashboardV4 } from "../api/dashboard-v4.ts";
-import type { DshApplication } from "../api/generated/dashboard-v4.ts";
+import type { DshApplicationView } from "../api/dashboard-v4.ts";
 import { t } from "../i18n/index.ts";
 import { useConnectionStore } from "../stores/connection.ts";
 import { useControlPlaneStore } from "../stores/controlPlane.ts";
+import { useDshStore } from "../stores/dsh.ts";
 import { useSessionStore } from "../stores/session.ts";
 import { createRevalidateGate } from "../domain/revalidate.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
 import { useLocalizedModalCloseLabel } from "../utils/modal-close-label.ts";
 import {
+  DSH_APPLICATION_OUTCOME_KEYS,
+  DSH_MUTATION_FEEDBACK_KEYS,
   buildDshInstallKeyOptions,
   dshHostDetail,
   dshInstallAction,
-  dshInstallExpectation,
+  dshMutationExpectation,
+  dshMutationFeedback,
   dshStatusPresentation,
+  dshUninstallAction,
   readApplicationTab,
+  suggestedRuntimeUrl,
   type ApplicationTab,
 } from "./dsh-application.ts";
 import { routeQuerySearch } from "./app-navigation.ts";
@@ -190,101 +284,195 @@ const router = useRouter();
 const connectionStore = useConnectionStore();
 const controlPlane = useControlPlaneStore();
 const sessionStore = useSessionStore();
+const dshStore = useDshStore();
 const revalidateGate = createRevalidateGate(60_000);
 watch(() => sessionStore.authenticated, (ok) => { if (!ok) revalidateGate.reset(); });
 
-const dsh = ref<DshApplication | null>(null);
-const loading = ref(false);
-const loadError = ref("");
-const installError = ref("");
+const actionError = ref("");
 const installConfirmShown = ref(false);
-const installing = ref(false);
+const uninstallConfirmShown = ref(false);
 const keysLoading = ref(false);
 const selectedKeyId = ref("");
+const selectedProfilePath = ref("");
+const runtimeUrlDraft = ref("");
 const activeTab = ref<ApplicationTab>(readApplicationTab(routeQuerySearch("applications", route.query)));
 let activatedOnce = false;
 
-const initialLoading = computed(() => loading.value && !dsh.value);
+const dsh = computed(() => dshStore.application);
+const initialLoading = computed(() => dshStore.loading && !dsh.value);
 const presentation = computed(() => dshStatusPresentation(dsh.value?.status ?? "not_detected"));
-const installAction = computed(() => (dsh.value ? dshInstallAction(dsh.value) : "unavailable"));
+const installAction = computed(() => (dsh.value && !dshStore.loading && selectedProfilePath.value === dsh.value.selectedProfilePath
+  ? dshInstallAction(dsh.value)
+  : "unavailable"));
+const uninstallAction = computed(() => (dsh.value && !dshStore.loading && selectedProfilePath.value === dsh.value.selectedProfilePath
+  ? dshUninstallAction(dsh.value)
+  : "unavailable"));
+const selectedProfileName = computed(() => dsh.value?.discoveredProfiles.find((profile) => profile.path === selectedProfilePath.value)?.name
+  ?? selectedProfilePath.value.split(/[\\/]/).pop() ?? "web");
+const suggestedUrl = computed(() => suggestedRuntimeUrl(selectedProfileName.value));
+const displayedRuntimeUrl = computed(() => runtimeUrlDraft.value || dsh.value?.runtimeUrl || suggestedUrl.value || "");
+const profileOptions = computed(() => {
+  if (!dsh.value) return [];
+  const options = dsh.value.discoveredProfiles.map((profile) => ({ label: `${profile.name} · ${profile.home}`, value: profile.path }));
+  if (dsh.value.selectedProfilePath && !options.some((option) => option.value === dsh.value!.selectedProfilePath)) {
+    options.unshift({ label: dsh.value.selectedProfilePath, value: dsh.value.selectedProfilePath });
+  }
+  return options;
+});
 const hostDetail = computed(() => dshHostDetail(dsh.value));
+const outcomeHint = computed(() => {
+  const outcome = dsh.value?.application;
+  return outcome && outcome !== "applied" ? DSH_APPLICATION_OUTCOME_KEYS[outcome] : null;
+});
 const keyOptions = computed(() => buildDshInstallKeyOptions(connectionStore.info));
 const selectedKeyUsable = computed(() =>
   keyOptions.value.some((option) => option.id === selectedKeyId.value),
 );
 
 async function load(options: { retain?: boolean } = {}): Promise<void> {
-  if (loading.value) return;
-  loading.value = true;
-  if (!options.retain) loadError.value = "";
-  try {
-    try {
-      dsh.value = await dashboardV4.getDshApplication();
-      loadError.value = "";
-    } catch (error) {
-      loadError.value = dashboardErrorDetail(error);
-    }
-  } finally {
-    loading.value = false;
+  await dshStore.load({
+    profilePath: selectedProfilePath.value || undefined,
+    runtimeUrl: runtimeUrlDraft.value || undefined,
+    retain: options.retain,
+  });
+  const result = dshStore.application;
+  if (!result) {
+    selectedProfilePath.value = "";
+    return;
   }
+  selectedProfilePath.value = result.selectedProfilePath;
+  if (result.runtimeUrl) runtimeUrlDraft.value = result.runtimeUrl;
+  else if (!runtimeUrlDraft.value) runtimeUrlDraft.value = suggestedRuntimeUrl(selectedProfileName.value) ?? "";
+}
+
+function selectProfile(value: string | number | null): void {
+  if (typeof value !== "string") return;
+  if (dshStore.loading || dshStore.mutating || value === selectedProfilePath.value) return;
+  selectedProfilePath.value = value;
+  actionError.value = "";
+  const name = dsh.value?.discoveredProfiles.find((profile) => profile.path === value)?.name
+    ?? value.split(/[\\/]/).pop();
+  runtimeUrlDraft.value = suggestedRuntimeUrl(name) ?? "";
+  void load({ retain: true });
 }
 
 async function openInstall(): Promise<void> {
   if (!dsh.value || installAction.value === "unavailable" || keysLoading.value) return;
-  installError.value = "";
+  actionError.value = "";
   keysLoading.value = true;
   try {
     if (!connectionStore.info) await connectionStore.load();
     selectedKeyId.value = keyOptions.value[0]?.id ?? "";
     if (!selectedKeyId.value) {
-      installError.value = t("没有可用于 DSH 的已启用 Key。");
+      actionError.value = t("没有可用于 DSH 的已启用 Key。");
       return;
     }
     installConfirmShown.value = true;
   } catch (error) {
-    installError.value = dashboardErrorDetail(error);
+    actionError.value = dashboardErrorDetail(error);
   } finally {
     keysLoading.value = false;
   }
 }
 
+function openUninstall(): void {
+  if (!dsh.value || uninstallAction.value === "unavailable") return;
+  actionError.value = "";
+  uninstallConfirmShown.value = true;
+}
+
 function setInstallConfirmVisible(show: boolean): void {
-  if (installing.value) return;
+  if (dshStore.mutating) return;
   installConfirmShown.value = show;
+}
+
+function setUninstallConfirmVisible(show: boolean): void {
+  if (dshStore.mutating) return;
+  uninstallConfirmShown.value = show;
+}
+
+function reportMutation(result: DshApplicationView, operation: "install" | "uninstall"): void {
+  const feedback = dshMutationFeedback(result, operation);
+  if (feedback === "success") {
+    message.success(t(operation === "install" ? "DSH 安装完成" : "DSH 卸载完成"));
+    return;
+  }
+  const hint = t(DSH_MUTATION_FEEDBACK_KEYS[feedback]);
+  if (feedback === "restart-required") message.warning(hint);
+  else {
+    actionError.value = result.detail ? `${hint} ${result.detail}` : hint;
+    message.warning(hint);
+  }
 }
 
 async function confirmInstall(): Promise<void> {
   const app = dsh.value;
   const fingerprint = app?.fingerprint;
-  if (!app || !fingerprint || installing.value || !selectedKeyUsable.value) return;
-  installing.value = true;
-  installError.value = "";
+  if (!app || !fingerprint || dshStore.mutating || !selectedKeyUsable.value) return;
+  actionError.value = "";
   try {
-    if (!controlPlane.hasTokens()) await controlPlane.refresh();
+
     const result = await controlPlane.runMutation(
-      (expectation) => dashboardV4.installDshApplication(
-        { keyId: selectedKeyId.value, expectedFingerprint: fingerprint },
+      (expectation) => dshStore.install(
+        {
+          keyId: selectedKeyId.value,
+          profilePath: app.selectedProfilePath,
+          runtimeUrl: displayedRuntimeUrl.value || undefined,
+          expectedFingerprint: fingerprint,
+        },
         expectation,
       ),
-      dshInstallExpectation(app),
+      dshMutationExpectation(app),
     );
-    dsh.value = result;
+    selectedProfilePath.value = dshStore.application?.selectedProfilePath ?? selectedProfilePath.value;
+    if (dshStore.application?.runtimeUrl) runtimeUrlDraft.value = dshStore.application.runtimeUrl;
     installConfirmShown.value = false;
-    message.success(t("DSH 安装完成"));
+    reportMutation(result, "install");
   } catch (error) {
     if (isRevisionConflict(error) || (error instanceof DashboardRequestError && error.status === 409)) {
       installConfirmShown.value = false;
-      installError.value = t("DSH 状态已变化，已刷新当前状态。");
+      actionError.value = t("DSH 状态已变化，已刷新当前状态。");
       await load({ retain: true }).catch(() => {});
     } else {
-      installError.value = dashboardErrorDetail(error);
+      actionError.value = t("安装失败：{error}", { error: dashboardErrorDetail(error) });
     }
-  } finally {
-    installing.value = false;
+  }
+}
+
+async function confirmUninstall(): Promise<void> {
+  const app = dsh.value;
+  const fingerprint = app?.fingerprint;
+  if (!app || !fingerprint || dshStore.mutating) return;
+  actionError.value = "";
+  try {
+
+    const result = await controlPlane.runMutation(
+      (expectation) => dshStore.uninstall(
+        {
+          profilePath: app.selectedProfilePath,
+          runtimeUrl: displayedRuntimeUrl.value || undefined,
+          expectedFingerprint: fingerprint,
+        },
+        expectation,
+      ),
+      dshMutationExpectation(app),
+    );
+    selectedProfilePath.value = dshStore.application?.selectedProfilePath ?? selectedProfilePath.value;
+    uninstallConfirmShown.value = false;
+    reportMutation(result, "uninstall");
+  } catch (error) {
+    if (isRevisionConflict(error) || (error instanceof DashboardRequestError && error.status === 409)) {
+      uninstallConfirmShown.value = false;
+      actionError.value = t("DSH 状态已变化，已刷新当前状态。");
+      await load({ retain: true }).catch(() => {});
+    } else {
+      actionError.value = t("卸载失败：{error}", { error: dashboardErrorDetail(error) });
+    }
   }
 }
 
 useLocalizedModalCloseLabel(installConfirmShown, "dsh-install-modal");
+useLocalizedModalCloseLabel(uninstallConfirmShown, "dsh-uninstall-modal");
 
 watch(activeTab, (tab) => {
   void router.replace({ query: { ...route.query, app: tab } });
@@ -351,6 +539,14 @@ onActivated(() => {
   display: flex;
   gap: var(--ocg-space-sm);
   margin-top: var(--ocg-space-xs);
+}
+
+.dsh-discovery {
+  display: grid;
+  gap: var(--ocg-space-sm);
+}
+.dsh-selected-path {
+  overflow-wrap: anywhere;
 }
 .dsh-confirm {
   display: grid;

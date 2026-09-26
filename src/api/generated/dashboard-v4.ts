@@ -52,6 +52,7 @@ export type DashboardApiV4 =
   | AliasPublicationUpdate
   | DshApplicationStatus
   | DshApplication
+  | DshDiscoveredProfile
   | DshApplicationInstallRequest
   | PlatformKeyImportRequest
   | PlatformKeyImportResult
@@ -120,7 +121,21 @@ export type DashboardApiV4 =
   | RoutingExclusion
   | RoutingConversationBinding
   | RuntimeOnlyUncertainty
-  | RoutingExplanation;
+  | RoutingExplanation
+  | DshApplicationOutcome
+  | DshApplicationUninstallRequest
+  | TemporaryPolicyBackoff
+  | TemporaryPolicyMatch
+  | TemporaryPolicyScope
+  | TemporaryPolicySource
+  | TemporaryPolicyRestrictionState
+  | TemporaryPolicyBuiltin
+  | TemporaryPolicyRule
+  | TemporaryPolicyConfiguration
+  | TemporaryPolicyRestriction
+  | TemporaryPolicyRestrictions
+  | TemporaryPolicyUpdate
+  | TemporaryPolicyClearRequest;
 /**
  * Inference operation advertised by one endpoint. Mapped 1:1 from
  * [`UpstreamProtocolKind`].
@@ -262,6 +277,7 @@ export type QuotaSharing =
     };
 export type DshApplicationStatus =
   "unsupported_runtime" | "not_detected" | "ready" | "installed" | "incompatible" | "conflict";
+export type DshApplicationOutcome = "applied" | "restart-required" | "overridden" | "failed" | "cancelled";
 /**
  * Owner of endpoint, protocol and model configuration.
  */
@@ -380,6 +396,26 @@ export type RuntimeOnlyUncertainty =
   | "retry_exclusions_not_applied"
   | "credential_recheck_pending"
   | "upstream_result_unknown";
+export type TemporaryPolicyScope = "credential" | "credential_model";
+export type TemporaryPolicySource = "global" | "connection" | "builtin";
+export type TemporaryPolicyRestrictionState = "waiting" | "ready" | "probing";
+export type TemporaryPolicyRule =
+  | {
+      backoff: TemporaryPolicyBackoff;
+      destinationId: string | null;
+      enabled: boolean;
+      id: string;
+      kind: "custom";
+      match: TemporaryPolicyMatch;
+      scope: TemporaryPolicyScope;
+    }
+  | {
+      backoff?: TemporaryPolicyBackoff | null;
+      destinationId: string | null;
+      enabled: boolean;
+      id: string;
+      kind: "builtin_override";
+    };
 
 /**
  * Live CAS token, process generation, and pricing snapshot id.
@@ -790,15 +826,26 @@ export interface AliasPublicationUpdate {
 }
 export interface DshApplication {
   activationRequired: boolean;
+  application: DshApplicationOutcome | null;
   detail: string | null;
   detected: boolean;
+  discoveredProfiles: DshDiscoveredProfile[];
+  enabled: boolean;
   fingerprint: string | null;
   installSupported: boolean;
   installed: boolean;
   revision: ControlRevision;
+  runtimeUrl: string | null;
+  selectedProfilePath: string;
   status: DshApplicationStatus;
   targetPaths: string[];
+  uninstallSupported: boolean;
   version: string | null;
+}
+export interface DshDiscoveredProfile {
+  home: string;
+  name: string;
+  path: string;
 }
 /**
  * Required process-scoped mutation precondition.
@@ -812,6 +859,8 @@ export interface DshApplicationInstallRequest {
   expectedRevision: number;
   keyId: string;
   processGeneration: number;
+  profilePath?: string | null;
+  runtimeUrl?: string | null;
 }
 /**
  * Import New API inference tokens as local Custom Keys. Secret-free.
@@ -1527,4 +1576,78 @@ export interface RoutingExplanation {
   revision: ControlRevision;
   routingMode: RoutingMode;
   runtimeOnlyUncertainty: RuntimeOnlyUncertainty[];
+}
+/**
+ * Required process-scoped mutation precondition.
+ *
+ * Both fields travel at the top level of every mutation request. The random
+ * process generation prevents a revision captured before restart from being
+ * accepted by a fresh process whose in-memory counter reused the same value.
+ */
+export interface DshApplicationUninstallRequest {
+  expectedFingerprint: string;
+  expectedRevision: number;
+  processGeneration: number;
+  profilePath?: string | null;
+  runtimeUrl?: string | null;
+}
+export interface TemporaryPolicyBackoff {
+  initialSeconds: number;
+  maxSeconds: number;
+}
+export interface TemporaryPolicyMatch {
+  errorCodes?: string[] | null;
+  errorTypes?: string[] | null;
+  messageContains?: string[] | null;
+  statusCodes?: number[] | null;
+}
+export interface TemporaryPolicyBuiltin {
+  backoff: TemporaryPolicyBackoff;
+  id: string;
+  scope: TemporaryPolicyScope;
+}
+export interface TemporaryPolicyConfiguration {
+  builtins: TemporaryPolicyBuiltin[];
+  revision: ControlRevision;
+  rules: TemporaryPolicyRule[];
+}
+export interface TemporaryPolicyRestriction {
+  credentialId: string;
+  destinationId: string;
+  id: string;
+  nextProbeInSeconds: number | null;
+  probeInFlight: boolean;
+  ruleGeneration: number;
+  ruleId: string;
+  scope: TemporaryPolicyScope;
+  source: TemporaryPolicySource;
+  state: TemporaryPolicyRestrictionState;
+  upstreamModel: string | null;
+}
+export interface TemporaryPolicyRestrictions {
+  restrictions: TemporaryPolicyRestriction[];
+  revision: ControlRevision;
+}
+/**
+ * Required process-scoped mutation precondition.
+ *
+ * Both fields travel at the top level of every mutation request. The random
+ * process generation prevents a revision captured before restart from being
+ * accepted by a fresh process whose in-memory counter reused the same value.
+ */
+export interface TemporaryPolicyUpdate {
+  expectedRevision: number;
+  processGeneration: number;
+  rules: TemporaryPolicyRule[];
+}
+/**
+ * Required process-scoped mutation precondition.
+ *
+ * Both fields travel at the top level of every mutation request. The random
+ * process generation prevents a revision captured before restart from being
+ * accepted by a fresh process whose in-memory counter reused the same value.
+ */
+export interface TemporaryPolicyClearRequest {
+  expectedRevision: number;
+  processGeneration: number;
 }

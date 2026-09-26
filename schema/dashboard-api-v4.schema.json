@@ -2330,6 +2330,16 @@
         "activationRequired": {
           "type": "boolean"
         },
+        "application": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DshApplicationOutcome"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "detail": {
           "type": [
             "string",
@@ -2337,6 +2347,15 @@
           ]
         },
         "detected": {
+          "type": "boolean"
+        },
+        "discoveredProfiles": {
+          "items": {
+            "$ref": "#/$defs/DshDiscoveredProfile"
+          },
+          "type": "array"
+        },
+        "enabled": {
           "type": "boolean"
         },
         "fingerprint": {
@@ -2354,6 +2373,15 @@
         "revision": {
           "$ref": "#/$defs/ControlRevision"
         },
+        "runtimeUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "selectedProfilePath": {
+          "type": "string"
+        },
         "status": {
           "$ref": "#/$defs/DshApplicationStatus"
         },
@@ -2363,6 +2391,9 @@
           },
           "type": "array"
         },
+        "uninstallSupported": {
+          "type": "boolean"
+        },
         "version": {
           "type": [
             "string",
@@ -2371,6 +2402,7 @@
         }
       },
       "required": [
+        "selectedProfilePath",
         "status",
         "detected",
         "installed",
@@ -2379,8 +2411,13 @@
         "version",
         "detail",
         "targetPaths",
+        "discoveredProfiles",
         "fingerprint",
-        "revision"
+        "revision",
+        "runtimeUrl",
+        "uninstallSupported",
+        "enabled",
+        "application"
       ],
       "type": "object"
     },
@@ -2403,6 +2440,18 @@
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
+        },
+        "profilePath": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runtimeUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -2412,6 +2461,16 @@
         "expectedFingerprint"
       ],
       "type": "object"
+    },
+    "DshApplicationOutcome": {
+      "enum": [
+        "applied",
+        "restart-required",
+        "overridden",
+        "failed",
+        "cancelled"
+      ],
+      "type": "string"
     },
     "DshApplicationStatus": {
       "enum": [
@@ -2423,6 +2482,63 @@
         "conflict"
       ],
       "type": "string"
+    },
+    "DshApplicationUninstallRequest": {
+      "additionalProperties": false,
+      "description": "Required process-scoped mutation precondition.\n\nBoth fields travel at the top level of every mutation request. The random\nprocess generation prevents a revision captured before restart from being\naccepted by a fresh process whose in-memory counter reused the same value.",
+      "properties": {
+        "expectedFingerprint": {
+          "type": "string"
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "profilePath": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runtimeUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "expectedFingerprint"
+      ],
+      "type": "object"
+    },
+    "DshDiscoveredProfile": {
+      "additionalProperties": false,
+      "properties": {
+        "home": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "home",
+        "name",
+        "path"
+      ],
+      "type": "object"
     },
     "Eligibility": {
       "additionalProperties": false,
@@ -4557,6 +4673,352 @@
       ],
       "type": "string"
     },
+    "TemporaryPolicyBackoff": {
+      "additionalProperties": false,
+      "properties": {
+        "initialSeconds": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxSeconds": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "initialSeconds",
+        "maxSeconds"
+      ],
+      "type": "object"
+    },
+    "TemporaryPolicyBuiltin": {
+      "additionalProperties": false,
+      "properties": {
+        "backoff": {
+          "$ref": "#/$defs/TemporaryPolicyBackoff"
+        },
+        "id": {
+          "type": "string"
+        },
+        "scope": {
+          "$ref": "#/$defs/TemporaryPolicyScope"
+        }
+      },
+      "required": [
+        "id",
+        "scope",
+        "backoff"
+      ],
+      "type": "object"
+    },
+    "TemporaryPolicyClearRequest": {
+      "additionalProperties": false,
+      "description": "Required process-scoped mutation precondition.\n\nBoth fields travel at the top level of every mutation request. The random\nprocess generation prevents a revision captured before restart from being\naccepted by a fresh process whose in-memory counter reused the same value.",
+      "properties": {
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "TemporaryPolicyConfiguration": {
+      "additionalProperties": false,
+      "properties": {
+        "builtins": {
+          "items": {
+            "$ref": "#/$defs/TemporaryPolicyBuiltin"
+          },
+          "type": "array"
+        },
+        "revision": {
+          "$ref": "#/$defs/ControlRevision"
+        },
+        "rules": {
+          "items": {
+            "$ref": "#/$defs/TemporaryPolicyRule"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "revision",
+        "rules",
+        "builtins"
+      ],
+      "type": "object"
+    },
+    "TemporaryPolicyMatch": {
+      "additionalProperties": false,
+      "properties": {
+        "errorCodes": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "errorTypes": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "messageContains": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "statusCodes": {
+          "items": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "TemporaryPolicyRestriction": {
+      "additionalProperties": false,
+      "properties": {
+        "credentialId": {
+          "type": "string"
+        },
+        "destinationId": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "nextProbeInSeconds": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "probeInFlight": {
+          "type": "boolean"
+        },
+        "ruleGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "ruleId": {
+          "type": "string"
+        },
+        "scope": {
+          "$ref": "#/$defs/TemporaryPolicyScope"
+        },
+        "source": {
+          "$ref": "#/$defs/TemporaryPolicySource"
+        },
+        "state": {
+          "$ref": "#/$defs/TemporaryPolicyRestrictionState"
+        },
+        "upstreamModel": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "ruleId",
+        "ruleGeneration",
+        "source",
+        "credentialId",
+        "destinationId",
+        "scope",
+        "upstreamModel",
+        "state",
+        "nextProbeInSeconds",
+        "probeInFlight"
+      ],
+      "type": "object"
+    },
+    "TemporaryPolicyRestrictionState": {
+      "enum": [
+        "waiting",
+        "ready",
+        "probing"
+      ],
+      "type": "string"
+    },
+    "TemporaryPolicyRestrictions": {
+      "additionalProperties": false,
+      "properties": {
+        "restrictions": {
+          "items": {
+            "$ref": "#/$defs/TemporaryPolicyRestriction"
+          },
+          "type": "array"
+        },
+        "revision": {
+          "$ref": "#/$defs/ControlRevision"
+        }
+      },
+      "required": [
+        "revision",
+        "restrictions"
+      ],
+      "type": "object"
+    },
+    "TemporaryPolicyRule": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "backoff": {
+              "$ref": "#/$defs/TemporaryPolicyBackoff"
+            },
+            "destinationId": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "custom",
+              "type": "string"
+            },
+            "match": {
+              "$ref": "#/$defs/TemporaryPolicyMatch"
+            },
+            "scope": {
+              "$ref": "#/$defs/TemporaryPolicyScope"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "destinationId",
+            "enabled",
+            "scope",
+            "match",
+            "backoff"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "backoff": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TemporaryPolicyBackoff"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "destinationId": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "builtin_override",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "destinationId",
+            "enabled"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "TemporaryPolicyScope": {
+      "enum": [
+        "credential",
+        "credential_model"
+      ],
+      "type": "string"
+    },
+    "TemporaryPolicySource": {
+      "enum": [
+        "global",
+        "connection",
+        "builtin"
+      ],
+      "type": "string"
+    },
+    "TemporaryPolicyUpdate": {
+      "additionalProperties": false,
+      "description": "Required process-scoped mutation precondition.\n\nBoth fields travel at the top level of every mutation request. The random\nprocess generation prevents a revision captured before restart from being\naccepted by a fresh process whose in-memory counter reused the same value.",
+      "properties": {
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rules": {
+          "items": {
+            "$ref": "#/$defs/TemporaryPolicyRule"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "rules"
+      ],
+      "type": "object"
+    },
     "UpstreamAccountDto": {
       "additionalProperties": false,
       "properties": {
@@ -4843,6 +5305,9 @@
       "$ref": "#/$defs/DshApplication"
     },
     {
+      "$ref": "#/$defs/DshDiscoveredProfile"
+    },
+    {
       "$ref": "#/$defs/DshApplicationInstallRequest"
     },
     {
@@ -5048,6 +5513,48 @@
     },
     {
       "$ref": "#/$defs/RoutingExplanation"
+    },
+    {
+      "$ref": "#/$defs/DshApplicationOutcome"
+    },
+    {
+      "$ref": "#/$defs/DshApplicationUninstallRequest"
+    },
+    {
+      "$ref": "#/$defs/TemporaryPolicyBackoff"
+    },
+    {
+      "$ref": "#/$defs/TemporaryPolicyMatch"
+    },
+    {
+      "$ref": "#/$defs/TemporaryPolicyScope"
+    },
+    {
+      "$ref": "#/$defs/TemporaryPolicySource"
+    },
+    {
+      "$ref": "#/$defs/TemporaryPolicyRestrictionState"
+    },
+    {
+      "$ref": "#/$defs/TemporaryPolicyBuiltin"
+    },
+    {
+      "$ref": "#/$defs/TemporaryPolicyRule"
+    },
+    {
+      "$ref": "#/$defs/TemporaryPolicyConfiguration"
+    },
+    {
+      "$ref": "#/$defs/TemporaryPolicyRestriction"
+    },
+    {
+      "$ref": "#/$defs/TemporaryPolicyRestrictions"
+    },
+    {
+      "$ref": "#/$defs/TemporaryPolicyUpdate"
+    },
+    {
+      "$ref": "#/$defs/TemporaryPolicyClearRequest"
     }
   ],
   "title": "DashboardApiV4"

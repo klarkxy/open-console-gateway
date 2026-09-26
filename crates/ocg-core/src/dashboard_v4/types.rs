@@ -79,6 +79,7 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "AliasPublicationUpdate",
     "DshApplicationStatus",
     "DshApplication",
+    "DshDiscoveredProfile",
     "DshApplicationInstallRequest",
     "PlatformKeyImportRequest",
     "PlatformKeyImportResult",
@@ -148,6 +149,20 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "RoutingConversationBinding",
     "RuntimeOnlyUncertainty",
     "RoutingExplanation",
+    "DshApplicationOutcome",
+    "DshApplicationUninstallRequest",
+    "TemporaryPolicyBackoff",
+    "TemporaryPolicyMatch",
+    "TemporaryPolicyScope",
+    "TemporaryPolicySource",
+    "TemporaryPolicyRestrictionState",
+    "TemporaryPolicyBuiltin",
+    "TemporaryPolicyRule",
+    "TemporaryPolicyConfiguration",
+    "TemporaryPolicyRestriction",
+    "TemporaryPolicyRestrictions",
+    "TemporaryPolicyUpdate",
+    "TemporaryPolicyClearRequest",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -162,10 +177,22 @@ pub enum DshApplicationStatus {
     Conflict,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+#[schemars(rename_all = "kebab-case")]
+pub enum DshApplicationOutcome {
+    Applied,
+    RestartRequired,
+    Overridden,
+    Failed,
+    Cancelled,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DshApplication {
+    pub selected_profile_path: String,
     pub status: DshApplicationStatus,
     pub detected: bool,
     pub installed: bool,
@@ -174,8 +201,22 @@ pub struct DshApplication {
     pub version: Option<String>,
     pub detail: Option<String>,
     pub target_paths: Vec<String>,
+    pub discovered_profiles: Vec<DshDiscoveredProfile>,
     pub fingerprint: Option<String>,
     pub revision: ControlRevision,
+    pub runtime_url: Option<String>,
+    pub uninstall_supported: bool,
+    pub enabled: bool,
+    pub application: Option<DshApplicationOutcome>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DshDiscoveredProfile {
+    pub home: String,
+    pub name: String,
+    pub path: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -186,6 +227,20 @@ pub struct DshApplicationInstallRequest {
     #[schemars(flatten)]
     pub expectation: MutationExpectation,
     pub key_id: String,
+    pub profile_path: Option<String>,
+    pub runtime_url: Option<String>,
+    pub expected_fingerprint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DshApplicationUninstallRequest {
+    #[serde(flatten)]
+    #[schemars(flatten)]
+    pub expectation: MutationExpectation,
+    pub profile_path: Option<String>,
+    pub runtime_url: Option<String>,
     pub expected_fingerprint: String,
 }
 
@@ -1585,6 +1640,142 @@ pub struct RoutingExplanation {
     pub runtime_only_uncertainty: Vec<RuntimeOnlyUncertainty>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TemporaryPolicyBackoff {
+    pub initial_seconds: u64,
+    pub max_seconds: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TemporaryPolicyMatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_codes: Option<Vec<u16>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_codes: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_types: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_contains: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum TemporaryPolicyScope {
+    Credential,
+    CredentialModel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum TemporaryPolicySource {
+    Global,
+    Connection,
+    Builtin,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum TemporaryPolicyRestrictionState {
+    Waiting,
+    Ready,
+    Probing,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TemporaryPolicyBuiltin {
+    pub id: String,
+    pub scope: TemporaryPolicyScope,
+    pub backoff: TemporaryPolicyBackoff,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[schemars(rename_all = "snake_case", deny_unknown_fields)]
+pub enum TemporaryPolicyRule {
+    Custom {
+        id: String,
+        #[serde(rename = "destinationId")]
+        #[schemars(rename = "destinationId")]
+        destination_id: Option<String>,
+        enabled: bool,
+        scope: TemporaryPolicyScope,
+        #[serde(rename = "match")]
+        matcher: TemporaryPolicyMatch,
+        backoff: TemporaryPolicyBackoff,
+    },
+    BuiltinOverride {
+        id: String,
+        #[serde(rename = "destinationId")]
+        #[schemars(rename = "destinationId")]
+        destination_id: Option<String>,
+        enabled: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        backoff: Option<TemporaryPolicyBackoff>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TemporaryPolicyConfiguration {
+    pub revision: ControlRevision,
+    pub rules: Vec<TemporaryPolicyRule>,
+    pub builtins: Vec<TemporaryPolicyBuiltin>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TemporaryPolicyRestriction {
+    pub id: String,
+    pub rule_id: String,
+    pub rule_generation: u64,
+    pub source: TemporaryPolicySource,
+    pub credential_id: String,
+    pub destination_id: String,
+    pub scope: TemporaryPolicyScope,
+    pub upstream_model: Option<String>,
+    pub state: TemporaryPolicyRestrictionState,
+    pub next_probe_in_seconds: Option<u64>,
+    pub probe_in_flight: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TemporaryPolicyRestrictions {
+    pub revision: ControlRevision,
+    pub restrictions: Vec<TemporaryPolicyRestriction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TemporaryPolicyUpdate {
+    #[serde(flatten)]
+    #[schemars(flatten)]
+    pub expectation: MutationExpectation,
+    pub rules: Vec<TemporaryPolicyRule>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TemporaryPolicyClearRequest {
+    #[serde(flatten)]
+    #[schemars(flatten)]
+    pub expectation: MutationExpectation,
+}
+
 /// Deterministic JSON Schema catalog for the V4 contract.
 ///
 /// Generator settings match V3: draft 2020-12, serialize-mode for response
@@ -1627,7 +1818,9 @@ pub fn contract_schema() -> Value {
     include_type::<CatalogModelsRemoveResult>(&mut serialize);
     include_type::<AliasPublication>(&mut serialize);
     include_type::<DshApplicationStatus>(&mut serialize);
+    include_type::<DshApplicationOutcome>(&mut serialize);
     include_type::<DshApplication>(&mut serialize);
+    include_type::<DshDiscoveredProfile>(&mut serialize);
     include_type::<PlatformKeyImportResult>(&mut serialize);
     include_type::<PlatformKeyImportFailure>(&mut serialize);
     include_type::<DestinationList>(&mut serialize);
@@ -1666,6 +1859,16 @@ pub fn contract_schema() -> Value {
     include_type::<RoutingConversationBinding>(&mut serialize);
     include_type::<RuntimeOnlyUncertainty>(&mut serialize);
     include_type::<RoutingExplanation>(&mut serialize);
+    include_type::<TemporaryPolicyBackoff>(&mut serialize);
+    include_type::<TemporaryPolicyMatch>(&mut serialize);
+    include_type::<TemporaryPolicyScope>(&mut serialize);
+    include_type::<TemporaryPolicySource>(&mut serialize);
+    include_type::<TemporaryPolicyRestrictionState>(&mut serialize);
+    include_type::<TemporaryPolicyBuiltin>(&mut serialize);
+    include_type::<TemporaryPolicyRule>(&mut serialize);
+    include_type::<TemporaryPolicyConfiguration>(&mut serialize);
+    include_type::<TemporaryPolicyRestriction>(&mut serialize);
+    include_type::<TemporaryPolicyRestrictions>(&mut serialize);
     let mut defs = serialize.take_definitions(true);
 
     let mut deserialize = SchemaSettings::draft2020_12().into_generator();
@@ -1682,6 +1885,8 @@ pub fn contract_schema() -> Value {
     include_type::<CatalogModelsRemoveRequest>(&mut deserialize);
     include_type::<AliasPublicationUpdate>(&mut deserialize);
     include_type::<DshApplicationInstallRequest>(&mut deserialize);
+    include_type::<DshApplicationUninstallRequest>(&mut deserialize);
+    include_type::<DshDiscoveredProfile>(&mut deserialize);
     include_type::<PlatformKeyImportRequest>(&mut deserialize);
     include_type::<DestinationModelPatch>(&mut deserialize);
     include_type::<DestinationUpstreamOverridePatch>(&mut deserialize);
@@ -1692,6 +1897,11 @@ pub fn contract_schema() -> Value {
     include_type::<CreditConfigureRequest>(&mut deserialize);
     include_type::<CreditCalibrationRequest>(&mut deserialize);
     include_type::<CreditGrantRequest>(&mut deserialize);
+    include_type::<TemporaryPolicyUpdate>(&mut deserialize);
+    include_type::<TemporaryPolicyClearRequest>(&mut deserialize);
+    include_type::<TemporaryPolicyRule>(&mut deserialize);
+    include_type::<TemporaryPolicyMatch>(&mut deserialize);
+    include_type::<TemporaryPolicyBackoff>(&mut deserialize);
     for (name, schema) in deserialize.take_definitions(true) {
         defs.entry(name).or_insert(schema);
     }

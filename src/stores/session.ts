@@ -107,6 +107,8 @@ export const useSessionStore = defineStore("session", () => {
     providers: "clear",
     cpa: "clear",
     billing: "clear",
+    dsh: "clear",
+    temporaryPolicy: "clear",
   } as const;
 
   /** Local-only teardown: secrets are wiped and the shell returns to login. */

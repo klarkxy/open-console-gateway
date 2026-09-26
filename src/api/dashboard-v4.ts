@@ -31,6 +31,8 @@ import type {
   DestinationCatalogRefreshResult,
   DshApplication,
   DshApplicationInstallRequest,
+  DshApplicationOutcome,
+  DshApplicationUninstallRequest,
   HttpProtocolRouteDto,
   IdentityCredentialCreateRequest,
   IdentityCredentialCreateResult,
@@ -45,11 +47,16 @@ import type {
   RoutingClientProtocol,
   RoutingExplanation,
   TemplateList,
+  TemporaryPolicyClearRequest,
+  TemporaryPolicyConfiguration,
+  TemporaryPolicyRestrictions,
+  TemporaryPolicyUpdate,
 } from "./generated/dashboard-v4.ts";
 
 export type {
   DestinationCatalogModelUpdate,
   DestinationModelTestResult,
+  DshApplicationOutcome,
   HttpProtocolRouteDto,
   QuotaRecoveryDto,
   QuotaRetryResult,
@@ -196,7 +203,14 @@ export const dashboardV4 = {
       body: withExpectation(input, expectation),
     },
   ),
-  getDshApplication: () => requestV4<DshApplication>("/applications/dsh"),
+  getDshApplication: (profilePath?: string, runtimeUrl?: string) => {
+    const query = new URLSearchParams();
+    if (profilePath) query.set("profilePath", profilePath);
+    if (runtimeUrl) query.set("runtimeUrl", runtimeUrl);
+    const encoded = query.toString();
+    const suffix = encoded ? `?${encoded}` : "";
+    return requestV4<DshApplication>(`/applications/dsh${suffix}`);
+  },
   installDshApplication: (
     input: WithoutExpectation<DshApplicationInstallRequest>,
     expectation: MutationExpectation,
@@ -204,4 +218,39 @@ export const dashboardV4 = {
     method: "POST",
     body: withExpectation(input, expectation),
   }),
+  uninstallDshApplication: (
+    input: WithoutExpectation<DshApplicationUninstallRequest>,
+    expectation: MutationExpectation,
+  ) => requestV4<DshApplication>("/applications/dsh", {
+    method: "DELETE",
+    body: withExpectation(input, expectation),
+  }),
+  getTemporaryUnavailability: () =>
+    requestV4<TemporaryPolicyConfiguration>("/routing/temporary-unavailability"),
+  putTemporaryUnavailability: (
+    input: WithoutExpectation<TemporaryPolicyUpdate>,
+    expectation: MutationExpectation,
+  ) => requestV4<TemporaryPolicyConfiguration>("/routing/temporary-unavailability", {
+    method: "PUT",
+    body: withExpectation(input, expectation),
+  }),
+  getTemporaryUnavailabilityRestrictions: () =>
+    requestV4<TemporaryPolicyRestrictions>("/routing/temporary-unavailability/restrictions"),
+  clearTemporaryUnavailabilityRestriction: (
+    id: string,
+    input: WithoutExpectation<TemporaryPolicyClearRequest>,
+    expectation: MutationExpectation,
+  ) => requestV4<TemporaryPolicyRestrictions>(
+    `/routing/temporary-unavailability/restrictions/${encodeURIComponent(id)}/clear`,
+    {
+      method: "POST",
+      body: withExpectation(input, expectation),
+    },
+  ),
 };
+
+export type DshApplicationView = DshApplication;
+export type DshApplicationInstallInput = DshApplicationInstallRequest;
+export type DshApplicationUninstallInput = DshApplicationUninstallRequest;
+export type TemporaryPolicyConfigurationView = TemporaryPolicyConfiguration;
+export type TemporaryPolicyRestrictionsView = TemporaryPolicyRestrictions;

@@ -3911,12 +3911,18 @@ async fn dsh_application_install_resolves_the_selected_key_only_inside_the_host(
     harness
         .state
         .set_dsh_application_host(Arc::new(move |request| match request {
-            DshApplicationHostRequest::Inspect { gateway_v1_url } => {
-                calls_for_host
-                    .lock()
-                    .unwrap()
-                    .push(format!("inspect:{gateway_v1_url}"));
+            DshApplicationHostRequest::Inspect {
+                gateway_v1_url,
+                profile_path,
+                runtime_url,
+            } => {
+                let selected_path = profile_path.unwrap_or_else(|| "DSH web profile".into());
+                calls_for_host.lock().unwrap().push(format!(
+                    "inspect:{gateway_v1_url}:{selected_path}:{}",
+                    runtime_url.as_deref().unwrap_or("")
+                ));
                 Ok(DshApplicationInspection {
+                    selected_profile_path: selected_path,
                     phase: DshApplicationPhase::Ready,
                     detected: true,
                     installed: false,
@@ -3925,20 +3931,29 @@ async fn dsh_application_install_resolves_the_selected_key_only_inside_the_host(
                     version: Some("0.1.5-rc.2".into()),
                     detail: Some("ready".into()),
                     target_paths: vec!["DSH web profile".into()],
+                    discovered_profiles: Vec::new(),
                     fingerprint: Some("inspection-fingerprint".into()),
+                    runtime_url,
+                    uninstall_supported: false,
+                    enabled: false,
+                    application: None,
                 })
             }
             DshApplicationHostRequest::Install {
                 expected_fingerprint,
                 gateway_v1_url,
+                profile_path,
+                runtime_url,
                 secret,
             } => {
+                let selected_path = profile_path.unwrap_or_else(|| "DSH web profile".into());
                 assert_eq!(expected_fingerprint, "inspection-fingerprint");
                 calls_for_host.lock().unwrap().push(format!(
-                    "install:{gateway_v1_url}:{}",
+                    "install:{gateway_v1_url}:{selected_path}:{}",
                     secret.expose_to_host()
                 ));
                 Ok(DshApplicationInspection {
+                    selected_profile_path: selected_path,
                     phase: DshApplicationPhase::Installed,
                     detected: true,
                     installed: true,
@@ -3947,7 +3962,42 @@ async fn dsh_application_install_resolves_the_selected_key_only_inside_the_host(
                     version: Some("0.1.5-rc.2".into()),
                     detail: Some("installed".into()),
                     target_paths: vec!["DSH web profile".into()],
+                    discovered_profiles: Vec::new(),
                     fingerprint: Some("installed-fingerprint".into()),
+                    runtime_url,
+                    uninstall_supported: true,
+                    enabled: true,
+                    application: None,
+                })
+            }
+            DshApplicationHostRequest::Uninstall {
+                expected_fingerprint,
+                gateway_v1_url,
+                profile_path,
+                runtime_url,
+            } => {
+                let selected_path = profile_path.unwrap_or_else(|| "DSH web profile".into());
+                assert_eq!(expected_fingerprint, "installed-fingerprint");
+                calls_for_host.lock().unwrap().push(format!(
+                    "uninstall:{gateway_v1_url}:{selected_path}:{}",
+                    runtime_url.as_deref().unwrap_or("")
+                ));
+                Ok(DshApplicationInspection {
+                    selected_profile_path: selected_path,
+                    phase: DshApplicationPhase::Ready,
+                    detected: true,
+                    installed: false,
+                    install_supported: true,
+                    activation_required: false,
+                    version: None,
+                    detail: Some("removed".into()),
+                    target_paths: vec!["DSH web profile".into()],
+                    discovered_profiles: Vec::new(),
+                    fingerprint: Some("removed-fingerprint".into()),
+                    runtime_url,
+                    uninstall_supported: false,
+                    enabled: false,
+                    application: None,
                 })
             }
         }));
@@ -3969,6 +4019,33 @@ async fn dsh_application_install_resolves_the_selected_key_only_inside_the_host(
     assert_eq!(installed["installed"], true);
     assert_eq!(installed["activationRequired"], true);
     assert_secret_free(&installed, &[&selected]);
+    let (status, selected_profile) = send_v4(
+        &harness,
+        Method::GET,
+        "/applications/dsh?profilePath=profile%2Feditor&runtimeUrl=http%3A%2F%2F127.0.0.1%3A3080",
+        &Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{selected_profile}");
+    assert_eq!(selected_profile["selectedProfilePath"], "profile/editor");
+    assert_eq!(selected_profile["runtimeUrl"], "http://127.0.0.1:3080");
+    let selected_request = cas(
+        &harness,
+        json!({
+            "keyId": PRIMARY_KEY_ID,
+            "profilePath": "profile/editor",
+            "expectedFingerprint": selected_profile["fingerprint"]
+        }),
+    );
+    let (status, selected_install) = send_v4(
+        &harness,
+        Method::POST,
+        "/applications/dsh",
+        &selected_request,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{selected_install}");
+    assert_eq!(selected_install["selectedProfilePath"], "profile/editor");
     assert!(
         calls
             .lock()
@@ -3977,6 +4054,48 @@ async fn dsh_application_install_resolves_the_selected_key_only_inside_the_host(
             .any(|call| call.ends_with(&selected)),
         "selected Key did not reach the private host seam"
     );
+    let unknown_install = cas(
+        &harness,
+        json!({
+            "keyId": PRIMARY_KEY_ID,
+            "expectedFingerprint": "inspection-fingerprint",
+            "extra": true
+        }),
+    );
+    let (status, body) = send_v4(
+        &harness,
+        Method::POST,
+        "/applications/dsh",
+        &unknown_install,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let unknown_delete = cas(
+        &harness,
+        json!({
+            "expectedFingerprint": "installed-fingerprint",
+            "keyId": PRIMARY_KEY_ID
+        }),
+    );
+    let (status, body) = send_v4(
+        &harness,
+        Method::DELETE,
+        "/applications/dsh",
+        &unknown_delete,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let delete = cas(
+        &harness,
+        json!({
+            "expectedFingerprint": "installed-fingerprint",
+            "runtimeUrl": "http://127.0.0.1:3080"
+        }),
+    );
+    let (status, removed) = send_v4(&harness, Method::DELETE, "/applications/dsh", &delete).await;
+    assert_eq!(status, StatusCode::OK, "{removed}");
+    assert_eq!(removed["installed"], false);
+    assert_eq!(removed["runtimeUrl"], "http://127.0.0.1:3080");
     harness.stop();
 }
 

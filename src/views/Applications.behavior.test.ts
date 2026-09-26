@@ -7,7 +7,7 @@ import { build } from "vite";
 import vue from "@vitejs/plugin-vue";
 import { reactive, ssrContextKey, type App, type Component } from "vue";
 import { createMemoryHistory, createRouter } from "vue-router";
-import type { DshApplication } from "../api/generated/dashboard-v4.ts";
+import type { DshApplicationView } from "../api/dashboard-v4.ts";
 import {
   createVueHostRenderer,
   deferred,
@@ -19,11 +19,15 @@ import {
 } from "../test-helpers/vue-host-runtime.ts";
 
 type DshApi = {
-  getDshApplication: () => Promise<DshApplication>;
+  getDshApplication: (profilePath?: string, runtimeUrl?: string) => Promise<DshApplicationView>;
   installDshApplication: (
-    input: { keyId: string; expectedFingerprint: string },
+    input: { keyId: string; profilePath: string; runtimeUrl?: string | null; expectedFingerprint: string },
     expectation: { expectedRevision: number; processGeneration: number },
-  ) => Promise<DshApplication>;
+  ) => Promise<DshApplicationView>;
+  uninstallDshApplication: (
+    input: { profilePath?: string; runtimeUrl?: string | null; expectedFingerprint: string },
+    expectation: { expectedRevision: number; processGeneration: number },
+  ) => Promise<DshApplicationView>;
 };
 
 type ConnectionState = {
@@ -62,6 +66,10 @@ function applicationsHarnessPlugin() {
         return () => h("label", attrs, slots.default?.());
       } });
       export const NRadioGroup = pass;
+      export const NSelect = pass;
+      export const NInput = defineComponent({ inheritAttrs: false, props: { value: String }, setup(props, { attrs }) {
+        return () => h("input", { ...attrs, value: props.value });
+      } });
       export const NSpin = pass;
       export const NTabPane = pass;
       export const NTabs = defineComponent({ inheritAttrs: false, setup(_, { attrs, slots }) {
@@ -93,6 +101,7 @@ function applicationsHarnessPlugin() {
     `,
     connection: `export const useConnectionStore = () => globalThis.__dshConnectionStore;`,
     session: `export const useSessionStore = () => ({ authenticated: true });`,
+    dsh: `export const useDshStore = () => globalThis.__dshStore;`,
     store: `
       export const useControlPlaneStore = () => ({
         hasTokens: () => true,
@@ -112,6 +121,7 @@ function applicationsHarnessPlugin() {
     "../stores/connection.ts": "connection",
     "../stores/controlPlane.ts": "store",
     "../stores/session.ts": "session",
+    "../stores/dsh.ts": "dsh",
     "../i18n/index.ts": "i18n",
     "../utils/errors.ts": "errors",
     "../utils/modal-close-label.ts": "modal",
@@ -131,8 +141,9 @@ function applicationsHarnessPlugin() {
   };
 }
 
-function dshApp(overrides: Partial<DshApplication> = {}): DshApplication {
+function dshApp(overrides: Partial<DshApplicationView> = {}): DshApplicationView {
   return {
+    selectedProfilePath: "C:\\Users\\author\\.dsh\\profiles\\web",
     status: "ready",
     detected: true,
     installed: false,
@@ -141,8 +152,13 @@ function dshApp(overrides: Partial<DshApplication> = {}): DshApplication {
     version: "0.1.5-rc.2",
     detail: "Ready to install the OCG provider into the DSH web profile",
     targetPaths: ["C:\\\\ocg\\\\applications\\\\dsh"],
+    discoveredProfiles: [],
     fingerprint: "fp-1",
     revision: { revision: 7, processGeneration: 3, pricingRevision: "p" },
+    runtimeUrl: "http://127.0.0.1:3080",
+    uninstallSupported: false,
+    enabled: false,
+    application: null,
     ...overrides,
   };
 }
@@ -205,9 +221,57 @@ async function mount(options: {
     installDshApplication: async () => {
       throw new Error("installDshApplication not stubbed");
     },
+    uninstallDshApplication: async () => {
+      throw new Error("uninstallDshApplication not stubbed");
+    },
     ...options.api,
   };
   (globalThis as { __dshComponentApi?: DshApi }).__dshComponentApi = api;
+  const store = reactive({
+    application: null as DshApplicationView | null,
+    loaded: false,
+    loading: false,
+    mutating: false,
+    error: "",
+    async load(input: { profilePath?: string; runtimeUrl?: string } = {}) {
+      this.loading = true;
+      try {
+        this.application = await api.getDshApplication(input.profilePath, input.runtimeUrl);
+        this.error = "";
+        this.loaded = true;
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error);
+      } finally {
+        this.loading = false;
+      }
+    },
+    async install(input: { keyId: string; profilePath: string; runtimeUrl?: string; expectedFingerprint: string }, expectation: { expectedRevision: number; processGeneration: number }) {
+      this.mutating = true;
+      try {
+        this.application = await api.installDshApplication(input, expectation);
+        return this.application;
+      } finally {
+        this.mutating = false;
+      }
+    },
+    async uninstall(input: { profilePath?: string; runtimeUrl?: string; expectedFingerprint: string }, expectation: { expectedRevision: number; processGeneration: number }) {
+      this.mutating = true;
+      try {
+        this.application = await api.uninstallDshApplication(input, expectation);
+        return this.application;
+      } finally {
+        this.mutating = false;
+      }
+    },
+    clear() {
+      this.application = null;
+      this.loaded = false;
+      this.loading = false;
+      this.mutating = false;
+      this.error = "";
+    },
+  });
+  (globalThis as { __dshStore?: typeof store }).__dshStore = store;
   const root: HostNode = { children: [], props: {}, type: "root" };
   const app = renderer.createApp(Applications);
   app.provide(ssrContextKey, { modules: new Set<string>() });
@@ -266,6 +330,56 @@ test("opening install without an enabled Key shows an error and keeps the dialog
       walkHostNodes(mounted.root).some((node) => node.props.role === "dialog"),
       false,
     );
+  } finally {
+    mounted.app.unmount();
+  }
+});
+
+test("selecting a detected profile inspects and installs that exact target", async () => {
+  const editorPath = "C:\\Users\\author\\.dsh-editor\\profiles\\dsh-editor";
+  const inspected: Array<{ path?: string; runtimeUrl?: string }> = [];
+  let installedTarget: string | undefined;
+  let installedFingerprint: string | undefined;
+  let installedRuntime: string | undefined | null;
+  const discoveredProfiles = [
+    { home: "C:\\Users\\author\\.dsh", name: "web", path: "C:\\Users\\author\\.dsh\\profiles\\web" },
+    { home: "C:\\Users\\author\\.dsh-editor", name: "dsh-editor", path: editorPath },
+  ];
+  const mounted = await mount({
+    api: {
+      getDshApplication: async (path, runtimeUrl) => {
+        inspected.push({ path, runtimeUrl });
+        return dshApp({
+          selectedProfilePath: path ?? discoveredProfiles[0].path,
+          targetPaths: [path ?? discoveredProfiles[0].path],
+          fingerprint: path ? "editor-fingerprint" : "web-fingerprint",
+          runtimeUrl: runtimeUrl ?? (path ? null : "http://127.0.0.1:3080"),
+          discoveredProfiles,
+        });
+      },
+      installDshApplication: async (input) => {
+        installedTarget = input.profilePath;
+        installedFingerprint = input.expectedFingerprint;
+        installedRuntime = input.runtimeUrl;
+        return dshApp({ selectedProfilePath: editorPath, status: "installed", installed: true, discoveredProfiles });
+      },
+    },
+  });
+  try {
+    const select = walkHostNodes(mounted.root).find((node) => node.props.class === "dsh-profile-select");
+    assert.ok(select);
+    assert.equal((select.props.options as Array<{ value: string }>).length, 2);
+    (select.props["onUpdate:value"] as (value: string) => void)(editorPath);
+    await settle();
+    assert.deepEqual(inspected.map((item) => item.path), [undefined, editorPath]);
+    assert.equal(installActionButton(mounted.root).props.disabled, false);
+    await (installActionButton(mounted.root).props.onClick as () => Promise<void>)();
+    await settle();
+    await (installConfirmButton(mounted.root).props.onClick as () => Promise<void>)();
+    await settle();
+    assert.equal(installedTarget, editorPath);
+    assert.equal(installedFingerprint, "editor-fingerprint");
+    assert.equal(installedRuntime, undefined);
   } finally {
     mounted.app.unmount();
   }
@@ -338,7 +452,7 @@ test("confirm stays disabled without a usable Key and does not install", async (
 });
 
 test("a repeated click while installing is ignored when a Key is selected", async () => {
-  const pending = deferred<DshApplication>();
+  const pending = deferred<DshApplicationView>();
   let installs = 0;
   const mounted = await mount({
     api: {
@@ -411,5 +525,63 @@ test("blocked conflict and incompatible states keep the action disabled and show
     assert.doesNotMatch(text(ready.root), /Ready to install the OCG provider into the DSH web profile/);
   } finally {
     ready.app.unmount();
+  }
+});
+
+test("uninstall confirm targets the displayed runtime URL and does not send a Key", async () => {
+  let uninstallInput: { profilePath?: string; runtimeUrl?: string | null; expectedFingerprint: string } | undefined;
+  const mounted = await mount({
+    api: {
+      getDshApplication: async () => dshApp({
+        status: "installed",
+        installed: true,
+        uninstallSupported: true,
+        runtimeUrl: "http://127.0.0.1:19387",
+      }),
+      uninstallDshApplication: async (input) => {
+        uninstallInput = input;
+        return dshApp({ status: "ready", installed: false, uninstallSupported: false });
+      },
+    },
+  });
+  try {
+    const uninstall = walkHostNodes(mounted.root).find((node) => (
+      node.type === "button" && node.props.type !== "primary" && walkHostNodes(node)
+    ));
+    const actions = walkHostNodes(mounted.root).find((node) => node.props.class === "dsh-actions");
+    const buttons = actions ? walkHostNodes(actions).filter((node) => node.type === "button") : [];
+    assert.equal(buttons.length, 2);
+    await (buttons[1]!.props.onClick as () => Promise<void>)();
+    await settle();
+    const dialog = walkHostNodes(mounted.root).find((node) => node.props.role === "dialog");
+    assert.ok(dialog);
+    const confirm = walkHostNodes(dialog).find((node) => node.type === "button" && node.props.type === "primary");
+    assert.ok(confirm);
+    await (confirm!.props.onClick as () => Promise<void>)();
+    await settle();
+    assert.equal(uninstallInput?.expectedFingerprint, "fp-1");
+    assert.equal(uninstallInput?.runtimeUrl, "http://127.0.0.1:19387");
+    assert.equal(Object.prototype.hasOwnProperty.call(uninstallInput ?? {}, "keyId"), false);
+    void uninstall;
+  } finally {
+    mounted.app.unmount();
+  }
+});
+
+test("HTTP failures, pending restarts and unconfirmed results never show a success toast", async () => {
+  for (const application of ["failed", "restart-required", null] as const) {
+    const mounted = await mount({ api: {
+      getDshApplication: async () => dshApp(),
+      installDshApplication: async () => dshApp({ installed: true, application }),
+    } });
+    try {
+      await (installActionButton(mounted.root).props.onClick as () => Promise<void>)();
+      await settle();
+      await (installConfirmButton(mounted.root).props.onClick as () => Promise<void>)();
+      await settle();
+      const messages = (globalThis as unknown as { __dshMessages: Array<{ type: string }> }).__dshMessages;
+      assert.equal(messages.some((entry) => entry.type === "success"), false);
+      assert.equal(messages.some((entry) => entry.type === "warning"), true);
+    } finally { mounted.app.unmount(); }
   }
 });

@@ -1,21 +1,38 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { PRIMARY_KEY_ID } from "../api/dashboard-v3.ts";
-import type { DshApplication } from "../api/generated/dashboard-v4.ts";
+import type { DshApplicationView } from "../api/dashboard-v4.ts";
 import { enUSMessages } from "../i18n/messages/en-US.ts";
 import {
   DEFAULT_APPLICATION_TAB,
+  DSH_APPLICATION_OUTCOME_KEYS,
   buildDshInstallKeyOptions,
   dshHostDetail,
   dshInstallAction,
   dshInstallExpectation,
+  dshMutationFeedback,
   dshStatusPresentation,
+  dshUninstallAction,
   normalizeApplicationTab,
   readApplicationTab,
+  suggestedRuntimeUrl,
 } from "./dsh-application.ts";
 
-function dshApp(overrides: Partial<DshApplication> = {}): DshApplication {
+test("mutation feedback requires a confirmed runtime outcome and matching final state", () => {
+  const installed = dshApp({ installed: true, enabled: true, application: "applied" });
+  assert.equal(dshMutationFeedback(installed, "install"), "success");
+  assert.equal(dshMutationFeedback(installed, "uninstall"), "unconfirmed");
+  for (const application of ["failed", "cancelled", "overridden", "restart-required"] as const) {
+    assert.equal(dshMutationFeedback({ ...installed, application }, "install"), application);
+  }
+  assert.equal(dshMutationFeedback({ ...installed, application: null }, "install"), "unconfirmed");
+  assert.equal(dshMutationFeedback({ ...installed, application: null, runtimeUrl: null }, "install"), "success");
+  assert.equal(dshMutationFeedback({ ...installed, installed: false }, "uninstall"), "success");
+});
+
+function dshApp(overrides: Partial<DshApplicationView> = {}): DshApplicationView {
   return {
+    selectedProfilePath: "C:\\Users\\author\\.dsh\\profiles\\web",
     status: "ready",
     detected: true,
     installed: false,
@@ -24,8 +41,13 @@ function dshApp(overrides: Partial<DshApplication> = {}): DshApplication {
     version: "1.2.3",
     detail: null,
     targetPaths: [],
+    discoveredProfiles: [],
     fingerprint: "fp-1",
     revision: { revision: 7, processGeneration: 3, pricingRevision: "p" },
+    runtimeUrl: "http://127.0.0.1:3080",
+    uninstallSupported: false,
+    enabled: false,
+    application: null,
     ...overrides,
   };
 }
@@ -81,7 +103,7 @@ test("every DSH status has a label, hint, and a meaningful tone", () => {
     conflict: "warning",
   } as const;
   for (const [status, tone] of Object.entries(tones)) {
-    const presentation = dshStatusPresentation(status as DshApplication["status"]);
+    const presentation = dshStatusPresentation(status as DshApplicationView["status"]);
     assert.equal(presentation.tone, tone, status);
     assert.ok(presentation.labelKey.length > 0, status);
     assert.ok(presentation.hintKey.length > 0, status);
@@ -113,6 +135,19 @@ test("install action requires support and a fingerprint; installed offers reinst
 
 test("install expectation is captured from the confirmed inspection revision", () => {
   assert.deepEqual(dshInstallExpectation(dshApp()), { expectedRevision: 7, processGeneration: 3 });
+});
+
+test("uninstall action and suggested runtime URL stay semantic", () => {
+  assert.equal(dshUninstallAction(dshApp()), "unavailable");
+  assert.equal(dshUninstallAction(dshApp({ uninstallSupported: true })), "uninstall");
+  assert.equal(dshUninstallAction(dshApp({ uninstallSupported: true, fingerprint: null })), "unavailable");
+  assert.equal(suggestedRuntimeUrl("web"), "http://127.0.0.1:3080");
+  assert.equal(suggestedRuntimeUrl("desktop"), "http://127.0.0.1:19387");
+  assert.equal(suggestedRuntimeUrl("dsh-editor"), null);
+  for (const [code, key] of Object.entries(DSH_APPLICATION_OUTCOME_KEYS)) {
+    assert.ok(key.length > 0, code);
+    assert.ok(key in enUSMessages, code);
+  }
 });
 
 test("host detail is shown when the action is blocked and omitted for ready/installed summaries", () => {

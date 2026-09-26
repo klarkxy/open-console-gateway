@@ -241,6 +241,8 @@
       >{{ t("保存设置") }}</n-button>
     </section>
 
+    <TemporaryUnavailabilitySection />
+
     <div class="settings-side">
       <section class="settings-card" aria-labelledby="appearance-title">
         <div class="settings-head">
@@ -436,6 +438,7 @@ import {
   readUpdateTarget,
   writeUpdateTarget,
 } from "./settings-update-state";
+import TemporaryUnavailabilitySection from "../components/TemporaryUnavailabilitySection.vue";
 
 const { themeName } = defineProps<{
   themeName: ThemeName;

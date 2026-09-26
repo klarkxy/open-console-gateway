@@ -1,7 +1,8 @@
 import { PRIMARY_KEY_ID } from "../api/dashboard-v3.ts";
+import type { DshApplicationOutcome, DshApplicationView } from "../api/dashboard-v4.ts";
 import type { ConnectionInfo } from "../api/dashboard.ts";
 import type { MutationExpectation } from "../api/generated/dashboard-v3.ts";
-import type { DshApplication, DshApplicationStatus } from "../api/generated/dashboard-v4.ts";
+import type { DshApplicationStatus } from "../api/generated/dashboard-v4.ts";
 import type { MessageKey } from "../i18n/index.ts";
 
 /**
@@ -71,7 +72,7 @@ export function dshStatusPresentation(status: DshApplicationStatus): DshStatusPr
       return {
         tone: "warning",
         labelKey: "未检测到 DSH",
-        hintKey: "先安装 DSH 客户端，再刷新状态。",
+        hintKey: "未连接到所显示的 DSH 运行地址，或本机 DSH 会话不可用。Profile 目录仍可单独检测。",
       };
     case "ready":
       return {
@@ -107,10 +108,54 @@ export type DshInstallAction = "install" | "reinstall" | "unavailable";
  * pin the CAS precondition; an installed DSH offers reinstall instead.
  */
 export function dshInstallAction(
-  app: Pick<DshApplication, "installSupported" | "installed" | "fingerprint">,
+  app: Pick<DshApplicationView, "installSupported" | "installed" | "fingerprint">,
 ): DshInstallAction {
   if (!app.installSupported || !app.fingerprint) return "unavailable";
   return app.installed ? "reinstall" : "install";
+}
+
+export type DshUninstallAction = "uninstall" | "unavailable";
+
+export function dshUninstallAction(
+  app: Pick<DshApplicationView, "uninstallSupported" | "fingerprint">,
+): DshUninstallAction {
+  if (!app.uninstallSupported || !app.fingerprint) return "unavailable";
+  return "uninstall";
+}
+
+export function suggestedRuntimeUrl(profileName: string | null | undefined): string | null {
+  switch (profileName) {
+    case "web":
+      return "http://127.0.0.1:3080";
+    case "desktop":
+      return "http://127.0.0.1:19387";
+    default:
+      return null;
+  }
+}
+
+export const DSH_APPLICATION_OUTCOME_KEYS: Record<DshApplicationOutcome, MessageKey> = {
+  applied: "运行时已应用变更",
+  "restart-required": "需要重启 DSH 后才会加载插件。",
+  overridden: "运行时覆盖了此次变更",
+  failed: "运行时报告操作失败",
+  cancelled: "运行时取消了此次操作",
+};
+
+export type DshMutationFeedback = "success" | "unconfirmed" | Exclude<DshApplicationOutcome, "applied">;
+export const DSH_MUTATION_FEEDBACK_KEYS: Record<Exclude<DshMutationFeedback, "success">, MessageKey> = {
+  ...DSH_APPLICATION_OUTCOME_KEYS,
+  unconfirmed: "尚未确认操作结果，请刷新状态后再操作。",
+};
+
+export function dshMutationFeedback(
+  app: Pick<DshApplicationView, "application" | "runtimeUrl" | "installed" | "enabled">,
+  operation: "install" | "uninstall",
+): DshMutationFeedback {
+  if (app.application && app.application !== "applied") return app.application;
+  if (app.runtimeUrl && app.application !== "applied") return "unconfirmed";
+  const achieved = operation === "install" ? app.installed && (!app.runtimeUrl || app.enabled) : !app.installed;
+  return achieved ? "success" : "unconfirmed";
 }
 
 /**
@@ -119,7 +164,7 @@ export function dshInstallAction(
  * English summaries stay off the page.
  */
 export function dshHostDetail(
-  app: Pick<DshApplication, "detail" | "status" | "installSupported" | "installed" | "fingerprint"> | null | undefined,
+  app: Pick<DshApplicationView, "detail" | "status" | "installSupported" | "installed" | "fingerprint"> | null | undefined,
 ): string | null {
   if (!app) return null;
   const detail = app.detail?.trim() ?? "";
@@ -137,11 +182,14 @@ export function dshHostDetail(
 }
 
 /** CAS precondition captured from the inspection that the user confirmed. */
-export function dshInstallExpectation(
-  app: Pick<DshApplication, "revision">,
+export function dshMutationExpectation(
+  app: Pick<DshApplicationView, "revision">,
 ): MutationExpectation {
   return {
     expectedRevision: app.revision.revision,
     processGeneration: app.revision.processGeneration,
   };
 }
+
+/** @deprecated Use dshMutationExpectation. */
+export const dshInstallExpectation = dshMutationExpectation;
