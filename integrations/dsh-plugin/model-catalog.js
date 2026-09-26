@@ -45,7 +45,7 @@ function reasoning(source) {
     if (declared === false && pairs.length > 0) throw new Error("Non-reasoning model declares reasoning efforts");
   }
   // A bare `true` cannot justify offering arbitrary low/medium/high choices.
-  return { enabled: Object.values(map).some((v) => v !== null), map, declared };
+  return { enabled: Object.values(map).some((v) => v !== null), map, declared, hasEfforts: raw !== undefined && raw !== null };
 }
 
 function modelFromRow(row, id, providerId, baseUrl) {
@@ -77,7 +77,8 @@ function modelFromRow(row, id, providerId, baseUrl) {
     ...(inputModalities === undefined ? {} : { inputModalities }),
     ...(outputModalities === undefined ? {} : { outputModalities }),
     ...(thinking.declared === undefined || thinking.declared === null ? {} : { reasoning: thinking.declared }),
-    reasoningEfforts: Object.fromEntries(Object.entries(thinking.map).filter(([, v]) => v !== null)),
+    ...(thinking.hasEfforts ? { reasoningEfforts: Object.fromEntries(Object.entries(thinking.map).filter(([, v]) => v !== null)) } : {}),
+    ...(Array.isArray(source.sources) ? { sources: source.sources.filter((value) => ["operator", "upstream", "unknown"].includes(value)) } : {}),
     // Only whitelisted boolean facts cross into the runtime metadata object.
     ...Object.fromEntries(["toolCalling", "parallelToolCalls"].filter((k) => typeof source[k] === "boolean").map((k) => [k, source[k]])),
     fallbacks: [contextWindow === undefined ? "contextWindow" : null, maxOutputTokens === undefined ? "maxOutputTokens" : null,

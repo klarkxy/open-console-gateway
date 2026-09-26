@@ -38,6 +38,14 @@ pub struct ModelMetadata {
 }
 
 impl ModelMetadata {
+    pub(crate) fn redact_secret(&mut self, secret: &str) {
+        if !secret.is_empty()
+            && serde_json::to_string(self).is_ok_and(|encoded| encoded.contains(secret))
+        {
+            *self = Self::default();
+        }
+    }
+
     pub(crate) fn validate(&self) -> Result<(), String> {
         if [self.context_window, self.max_output_tokens]
             .into_iter()
@@ -210,7 +218,6 @@ pub(crate) fn observe(
             continue;
         }
         if let Some(value) = metadata.get(&model.upstream_model) {
-            value.validate().map_err(anyhow::Error::msg)?;
             record_for(&mut records, destination, model).observed = Some(value.clone());
         }
     }
@@ -321,15 +328,15 @@ pub(crate) fn parse_catalog(bytes: &[u8]) -> BTreeMap<String, ModelMetadata> {
             };
             metadata.reasoning_efforts = parsed;
         }
-        if metadata.validate().is_ok() {
-            // Duplicate rows are not authoritative. Keep only common guarantees.
-            result
-                .entry(id)
-                .and_modify(|old: &mut ModelMetadata| {
-                    *old = common(&[old.clone(), metadata.clone()])
-                })
-                .or_insert(metadata);
+        if metadata.validate().is_err() {
+            // A malformed new declaration withdraws old facts for this ID.
+            metadata = ModelMetadata::default();
         }
+        // Duplicate rows are not authoritative. Keep only common guarantees.
+        result
+            .entry(id)
+            .and_modify(|old: &mut ModelMetadata| *old = common(&[old.clone(), metadata.clone()]))
+            .or_insert(metadata);
     }
     result
 }

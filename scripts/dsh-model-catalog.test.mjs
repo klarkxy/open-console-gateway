@@ -69,3 +69,20 @@ test("explicit Off wire spelling survives; Off is never added implicitly", () =>
   const { models: [m] } = parse(declared({ reasoningEfforts: { off: "none", high: "high" } }));
   assert.equal(m.thinkingLevelMap.off, "none"); assert.equal(m.thinkingLevelMap.low, null);
 });
+
+
+test("unknown reasoning controls stay distinguishable from an explicit empty offer", () => {
+  assert.equal(parse({ id: "legacy" }).metadata.get("legacy").reasoningEfforts, undefined);
+  assert.deepEqual(parse(declared({ reasoningEfforts: {} })).metadata.get("private-alias").reasoningEfforts, {});
+});
+
+test("disjoint alias modalities cannot silently acquire text support", () => {
+  assert.ok(parse(declared({ inputModalities: [] })).modelErrors.has("private-alias"));
+});
+
+test("an output-only limit is preserved without a contradictory internal context", () => {
+  const { models: [model], metadata } = parse({ id: "output-only", maxTokens: 262144 });
+  assert.equal(model.maxTokens, 262144);
+  assert.ok(model.contextWindow >= model.maxTokens);
+  assert.equal(metadata.get("output-only").contextWindow, undefined);
+});

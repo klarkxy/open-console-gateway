@@ -276,12 +276,8 @@ pub(crate) async fn discover_models_with_metadata(
         ),
     })??;
     metadata.retain(|id, value| {
-        result.models.contains(id)
-            && (api_key.is_empty()
-                || (!id.contains(api_key)
-                    && !serde_json::to_string(value)
-                        .unwrap_or_default()
-                        .contains(api_key)))
+        value.redact_secret(api_key);
+        result.models.contains(id) && (api_key.is_empty() || !id.contains(api_key))
     });
     Ok((result, metadata))
 }

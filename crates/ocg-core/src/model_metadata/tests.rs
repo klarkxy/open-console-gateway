@@ -102,3 +102,101 @@ fn duplicate_rows_only_keep_common_guarantees() {
     );
     assert_eq!(rows["a"].context_window, Some(4000));
 }
+
+#[test]
+fn invalid_reported_metadata_withdraws_the_fact_instead_of_preserving_a_stale_record() {
+    let rows = parse_catalog(br#"{"data":[{"id":"a","contextWindow":100,"maxTokens":200}]}"#);
+    assert_eq!(rows["a"], ModelMetadata::default());
+}
+
+#[test]
+fn secret_echoes_become_unknown_without_deleting_the_model_identity() {
+    let mut facts = ModelMetadata {
+        name: Some("echo private-key".into()),
+        context_window: Some(8000),
+        ..Default::default()
+    };
+    facts.redact_secret("private-key");
+    assert_eq!(facts, ModelMetadata::default());
+    let mut facts = ModelMetadata {
+        context_window: Some(8000),
+        ..Default::default()
+    };
+    facts.redact_secret("");
+    assert_eq!(facts.context_window, Some(8000));
+}
+
+#[test]
+fn disjoint_known_modalities_do_not_turn_into_an_unknown_text_fallback() {
+    let result = common(&[
+        metadata(8000, 1000, &["text"], &[]),
+        metadata(8000, 1000, &["image"], &[]),
+    ]);
+    assert_eq!(result.input_modalities, Some(vec![]));
+}
+
+fn route_fixture() -> Destination {
+    use ocg_domain::destination::*;
+    Destination {
+        id: "route-one".into(),
+        legacy: LegacyDestinationRef::Dynamic("test".into()),
+        adapter: AdapterKind::Http,
+        name: "test".into(),
+        brand_family: None,
+        base_url: Some("https://example.test/v1".into()),
+        protocols: vec![Protocol::ChatCompletions],
+        protocol_routes: vec![],
+        auth_scheme: AuthScheme::Bearer,
+        model_resolution: ModelResolution::PublicAndUpstream,
+        catalog: vec![CatalogModel {
+            public_model: "public".into(),
+            upstream_model: "upstream".into(),
+            protocols: vec![Protocol::ChatCompletions],
+            preferred: Some(Protocol::ChatCompletions),
+            enabled: true,
+            upstream_override: None,
+        }],
+        capabilities: sealed_capabilities(AdapterKind::Http),
+        plan: None,
+        max_credentials: None,
+        observer_credential_id: None,
+        enabled: true,
+    }
+}
+
+#[test]
+fn declarations_are_bound_to_the_exact_destination_route_and_model_mapping() {
+    let destination = route_fixture();
+    let model = &destination.catalog[0];
+    let mut records = vec![];
+    let record = record_for(&mut records, &destination, model);
+    record.observed = Some(ModelMetadata {
+        context_window: Some(8000),
+        ..Default::default()
+    });
+    record.declared = Some(ModelMetadata {
+        context_window: Some(16000),
+        ..Default::default()
+    });
+    assert_eq!(
+        effective(&records, &destination, model).0.context_window,
+        Some(16000)
+    );
+    assert_eq!(effective(&records, &destination, model).1, "operator");
+    let mut changed = destination.clone();
+    changed.base_url = Some("https://other.test/v1".into());
+    assert_eq!(effective(&records, &changed, model).1, "unknown");
+    let record = record_for(&mut records, &changed, model);
+    assert!(record.observed.is_none() && record.declared.is_none());
+    let record = record_for(&mut records, &destination, model);
+    record.observed = Some(ModelMetadata {
+        context_window: Some(8000),
+        ..Default::default()
+    });
+    let mut changed_model = model.clone();
+    changed_model.upstream_model = "different".into();
+    assert_eq!(
+        effective(&records, &destination, &changed_model).1,
+        "unknown"
+    );
+}
