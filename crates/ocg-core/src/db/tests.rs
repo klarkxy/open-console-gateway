@@ -9184,6 +9184,46 @@ fn attributed_log(account_id: &str, key_id: Option<&str>, cost: f64) -> ForwardL
 }
 
 #[test]
+fn forward_logs_success_filter_includes_unpriced_rows() {
+    let dir = temp_data_dir("forward-success-includes-unpriced");
+    let db = Database::open(dir.clone()).unwrap();
+    db.log_forward(&forward_log("acct", "success", 1.0))
+        .unwrap();
+    db.log_forward(&forward_log("acct", "success_unpriced", 2.0))
+        .unwrap();
+    db.log_forward(&forward_log("acct", "error", 4.0)).unwrap();
+
+    let query = |status: Option<&str>| {
+        db.query_forward_logs(ForwardLogQueryOptions {
+            status,
+            ..empty_forward_query()
+        })
+        .unwrap()
+    };
+
+    let success = query(Some("success"));
+    assert_eq!(success.summary.total_requests, 2);
+    let mut statuses = success
+        .items
+        .iter()
+        .map(|log| log.status.as_str())
+        .collect::<Vec<_>>();
+    statuses.sort_unstable();
+    assert_eq!(statuses, ["success", "success_unpriced"]);
+
+    let unpriced = query(Some("success_unpriced"));
+    assert_eq!(unpriced.summary.total_requests, 1);
+    assert_eq!(unpriced.items[0].status, "success_unpriced");
+
+    let errors = query(Some("error"));
+    assert_eq!(errors.summary.total_requests, 1);
+    assert_eq!(errors.items[0].status, "error");
+
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn forward_logs_filter_by_key_and_unattributed_sentinel() {
     let dir = temp_data_dir("forward-key-filter");
     let db = Database::open(dir.clone()).unwrap();

@@ -39,6 +39,14 @@ export function forwardLogLatencyMs(
     : null;
 }
 
+/**
+ * Status shown on the request log. A completed request without a price is
+ * ordinary success; the stored `success_unpriced` value stays on the row.
+ */
+export function forwardLogPresentedStatus(status: string): string {
+  return status === "success_unpriced" ? "success" : status;
+}
+
 /** Plan label for the row's provider attribution, or null when unattributed. */
 export function forwardLogPlanLabel(
   row: Pick<ForwardLog, "provider_id">,

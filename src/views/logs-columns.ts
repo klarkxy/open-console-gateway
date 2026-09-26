@@ -1,9 +1,11 @@
 import { h, type Component, type Ref } from "vue";
 import type { Account, ForwardLog, GatewayLog } from "../api/dashboard.ts";
+import type { ProviderCatalogEntry } from "../api/providers.ts";
 import { locale, t } from "../i18n/index.ts";
 import { formatCost } from "../utils/format.ts";
 import { formatNativeCostEstimate, forwardLogNativeEstimate } from "../domain/native-cost.ts";
 import {
+  forwardLogPlanLabel,
   forwardLogProtocol,
   forwardLogRequestedModel,
   forwardLogResolvedAlias,
@@ -26,6 +28,7 @@ export interface LogsColumnContext {
   copyText: (target: string, value: string, label: string) => void;
   focusRequestChain: (requestId: string) => void;
   accounts: Ref<Account[]>;
+  catalog: Ref<ProviderCatalogEntry[] | null>;
 }
 
 export function shortRequestId(requestId: string): string {
@@ -117,7 +120,11 @@ function renderProviderCost(row: ForwardLog, ctx: LogsColumnContext) {
     if (!id) return t("未知");
     return ctx.accounts.value.find((account) => account.id === id)?.name ?? id;
   };
+  const plan = forwardLogPlanLabel(row, ctx.catalog.value);
+  const accountName = row.account_name.trim();
   const items: Array<[string, string]> = [
+    [t("方案"), plan ?? "—"],
+    [t("账号"), accountName || "—"],
     [t("服务商"), row.provider_id ?? t("未知")],
     [t("路由账号"), accountLabel(row.route_account_id)],
     [t("凭证账号"), accountLabel(row.credential_account_id)],

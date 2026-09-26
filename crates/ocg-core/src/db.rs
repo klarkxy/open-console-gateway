@@ -11464,16 +11464,29 @@ fn forward_log_filter(options: &ForwardLogQueryOptions<'_>) -> (String, Vec<Valu
     // (clause, bound text values); clause order must match parameter order.
     // The key filter goes last because the unattributed sentinel expands to
     // a literal `IS NULL` clause with no parameter.
-    let mut clauses: Vec<(String, Vec<&str>)> = [
-        ("status = ?", options.status),
-        ("account_id = ?", options.account_id),
-        ("provider_id = ?", options.provider_id),
-        ("route_account_id = ?", options.route_account_id),
-        ("credential_account_id = ?", options.credential_account_id),
-    ]
-    .into_iter()
-    .filter_map(|(clause, value)| value.map(|value| (clause.to_string(), vec![value])))
-    .collect();
+    let mut clauses: Vec<(String, Vec<&str>)> = Vec::new();
+    // Missing prices are the common success case. The logs page presents
+    // `success_unpriced` as success, so that filter has to include both.
+    if let Some(status) = options.status {
+        if status == "success" {
+            clauses.push((
+                "status IN ('success', 'success_unpriced')".to_string(),
+                Vec::new(),
+            ));
+        } else {
+            clauses.push(("status = ?".to_string(), vec![status]));
+        }
+    }
+    clauses.extend(
+        [
+            ("account_id = ?", options.account_id),
+            ("provider_id = ?", options.provider_id),
+            ("route_account_id = ?", options.route_account_id),
+            ("credential_account_id = ?", options.credential_account_id),
+        ]
+        .into_iter()
+        .filter_map(|(clause, value)| value.map(|value| (clause.to_string(), vec![value]))),
+    );
     // Exact-match any stored identity so alias/upstream/legacy rows stay
     // filterable. Bind the same value once per column; OR stays inside this
     // predicate so other filters still AND and a row never duplicates.

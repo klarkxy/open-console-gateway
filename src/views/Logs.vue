@@ -254,7 +254,7 @@
           :row-key="logRowKey"
           :loading="forwardLoading"
           :pagination="forwardPagination"
-          :scroll-x="2150"
+          :scroll-x="1870"
           remote
           size="small"
           @update:page="changeForwardPage"
@@ -309,7 +309,7 @@ import { gatewayLogMessage } from "./gateway-log-message.ts";
 import {
   forwardLogAlias,
   forwardLogLatencyMs,
-  forwardLogPlanLabel,
+  forwardLogPresentedStatus,
   forwardLogTotalTokens,
 } from "./forward-log-display.ts";
 import {
@@ -358,7 +358,8 @@ const gatewayLoading = ref(false);
 const gatewayError = ref("");
 const forwardLoading = ref(false);
 const forwardError = ref("");
-const statusFilter = ref<string>(query.get("status") ?? "");
+const queryStatus = query.get("status") ?? "";
+const statusFilter = ref<string>(queryStatus === "success_unpriced" ? "success" : queryStatus);
 const accountFilter = ref<string>(query.get("account") ?? "");
 const modelFilter = ref<string>(query.get("model") ?? "");
 const keyFilter = ref<string>(query.get("key") ?? "");
@@ -456,7 +457,6 @@ const timeRangeLabel = computed(() => {
 const statusMeta = computed<Record<string, { label: string; type: "success" | "warning" | "error" | "default" }>>(() => ({
   success: { label: t("成功"), type: "success" },
   success_no_usage: { label: t("成功·无用量"), type: "success" },
-  success_unpriced: { label: t("无价格"), type: "warning" },
   outcome_unknown: { label: t("结果未知"), type: "warning" },
   streaming: { label: t("进行中"), type: "warning" },
   client_error: { label: t("客户端错误"), type: "error" },
@@ -590,6 +590,7 @@ const logsColumnContext: LogsColumnContext = {
   copyText,
   focusRequestChain,
   accounts,
+  catalog: providerCatalog,
 };
 
 const gatewayColumns = computed(() => [
@@ -621,8 +622,6 @@ const forwardColumns = computed(() => [
     render: (row: ForwardLog) => row.attempt ? `#${row.attempt}` : "—",
   },
   { title: t("模型别名"), key: "model_alias", width: 180, ellipsis: { tooltip: true }, render: (row: ForwardLog) => forwardLogAlias(row) },
-  { title: t("方案"), key: "plan", width: 160, ellipsis: { tooltip: true }, render: (row: ForwardLog) => forwardLogPlanLabel(row, providerCatalog.value) ?? "—" },
-  { title: t("账号"), key: "account_name", width: 120, ellipsis: { tooltip: true } },
   {
     title: t("状态"),
     key: "status",
@@ -637,9 +636,10 @@ const forwardColumns = computed(() => [
             : row.error_source === "downstream"
               ? t("下游断开")
               : null;
+      const presentedStatus = forwardLogPresentedStatus(row.status);
       const meta = sourceLabel
         ? { label: sourceLabel, type: row.error_source === "downstream" ? "warning" as const : "error" as const }
-        : statusMeta.value[row.status] ?? { label: row.status, type: "default" as const };
+        : statusMeta.value[presentedStatus] ?? { label: presentedStatus, type: "default" as const };
       const tags = [h(NTag, { type: meta.type, size: "small", bordered: false }, { default: () => meta.label })];
       if (row.cost_state === "free") {
         tags.push(h(NTag, { type: "success", size: "small", bordered: false }, { default: () => t("免费") }));

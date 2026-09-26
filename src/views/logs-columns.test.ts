@@ -90,6 +90,7 @@ function makeContext(accounts: Account[] = []) {
     copyText: (target, value, label) => { calls.copied.push({ target, value, label }); },
     focusRequestChain: (requestId) => { calls.focused.push(requestId); },
     accounts: ref(accounts),
+    catalog: ref(null),
   };
   return { ctx, calls };
 }
@@ -205,14 +206,22 @@ test("renderForwardDetail resolves provider accounts through the injected accoun
   ] as Account[];
   const { ctx } = makeContext(accounts);
   const row = forwardRow({
+    account_name: "Primary",
+    provider_id: "command-code",
     route_account_id: "acc-2",
     credential_account_id: "acc-missing",
     raw_cost_usd: 0.5,
   });
   const vnode = renderForwardDetail(row, ctx) as VNode;
+  assert.equal(descriptionValue(vnode, t("方案")), "command-code");
+  assert.equal(descriptionValue(vnode, t("账号")), "Primary");
   assert.equal(descriptionValue(vnode, t("路由账号")), "Fallback");
   assert.equal(descriptionValue(vnode, t("凭证账号")), "acc-missing");
   assert.equal(descriptionValue(vnode, t("原始供应商成本")), formatCost(0.5, 5));
+
+  const blank = renderForwardDetail(forwardRow({ account_name: "  ", provider_id: null }), ctx) as VNode;
+  assert.equal(descriptionValue(blank, t("方案")), "—");
+  assert.equal(descriptionValue(blank, t("账号")), "—");
 });
 
 test("renderForwardDetail lists the frozen native estimate only for custom-provider rows", () => {

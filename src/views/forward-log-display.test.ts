@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   forwardLogAlias,
+  forwardLogPresentedStatus,
   forwardLogRequestedModel,
   forwardLogResolvedAlias,
   forwardLogTotalTokens,
@@ -25,6 +26,13 @@ test("legacy forward logs still expose their stored model without inventing an A
   assert.equal(forwardLogAlias({ model: "legacy", requested_model: null, resolved_alias: null }), "legacy");
   assert.equal(forwardLogRequestedModel({ requested_model: null }), null);
   assert.equal(forwardLogResolvedAlias({ resolved_alias: "  " }), null);
+});
+
+test("unpriced success is presented as ordinary success", () => {
+  assert.equal(forwardLogPresentedStatus("success_unpriced"), "success");
+  assert.equal(forwardLogPresentedStatus("success"), "success");
+  assert.equal(forwardLogPresentedStatus("success_no_usage"), "success_no_usage");
+  assert.equal(forwardLogPresentedStatus("error"), "error");
 });
 
 test("forward log total tokens stay input + output and do not add cache fields", () => {
