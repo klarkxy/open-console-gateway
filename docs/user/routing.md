@@ -42,7 +42,7 @@ from the Accounts view. The selector skips:
 
 - Disabled accounts.
 - Accounts that are cooling down.
-- Keys with an active temporary `429` wait or a quota-recovery deadline that has not elapsed.
+- Keys with an active temporary `429` wait, a local-policy wait (for example a GOAT insufficient-credits wait on that Key and model), or a quota-recovery deadline that has not elapsed.
 - Accounts that have already failed during the current request (e.g. with a
   `429`).
 - Accounts whose saved provider contract has no effective enabled upstream
@@ -95,7 +95,7 @@ budget and one pre-output deadline. Unresolved outcomes are reported as
 `upstream_outcome_unknown` because the upstream may already have charged.
 If every account is cooling or has persisted quota-recovery state, the gateway returns
 `429` with the next known eligibility time. Purely process-local resource waits
-without a known eligibility time return `503`.
+without a known eligibility time, including local-policy waits, return `503`.
 
 ## Cost Accounting
 
@@ -149,7 +149,7 @@ cooldowns remain effective until their stored deadline or an explicit reset.
 Resetting an ordinary cooldown does not rewrite persisted quota-recovery state.
 
 No background or synthetic inference is sent to clear a temporary cooldown.
-Restart clears process-local waits while retained persisted quota episodes
+The same holds for local-policy waits. Restart clears process-local waits while retained persisted quota episodes
 remain available for authoritative Go usage to reconcile.
 
 ## Zen Free models
@@ -209,10 +209,22 @@ streaming output begins, the gateway cannot change providers mid-response.
 
 ### GOAT credit errors
 
-A GOAT response that reports insufficient credits is an upstream error for the
-current request; its body does not create persistent quota or balance state.
-Other 400s (context, model, reasoning validation), 413s, and similar errors
-remain request-local as well. Only a `429` starts the temporary cooldown and
+A classified GOAT insufficient-credits response is an upstream error on that
+send. The current request may still fall over to the next eligible Key (the
+existing first fallback). The Key that reported insufficient credits, plus the
+actual upstream model, starts a process-local wait, so later requests skip it
+until a real client request on that same route is due. The same Key is not
+retried on this request. The body
+does not create persistent quota or balance state, change enablement, or
+record `auth_error`.
+
+Other 400s (context, model, reasoning validation), unknown 400s, 413s, and
+similar errors remain request-local: this policy does not add a first
+fallback for them. A custom matcher on Settings can still install a later
+skip; the current unknown-400 request fails as it did before. Configure
+global and per-connection rules in [Temporary unavailability](temporary-unavailability.md).
+
+Only a `429` starts the Retry-After temporary cooldown and
 optional asynchronous official refresh described above.
 
 MiniMax reports cache counters unchanged through JSON, SSE, and request

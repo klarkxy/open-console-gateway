@@ -70,7 +70,7 @@ the final main Quality run supplies the full release gate. See the
 It does not start DSH, the Gateway, or any credential-dependent path.
 
 The following commands are **manual acceptance smokes**. They need a real DSH
-`0.1.5-rc.2` CLI and/or a locally built `target/debug/ocg-manager-cli`. They
+CLI (the installed version is reported, not pinned) and/or a locally built `target/debug/ocg-manager-cli`. They
 are not part of `pnpm run test`, `pnpm run test:web`, `pnpm run test:tooling`,
 or CI.
 
@@ -81,10 +81,13 @@ pnpm run smoke:dsh:cli
 
 `smoke:dsh:plugin` uses the installed DSH CLI (Windows: `%APPDATA%/npm/node_modules/@deepseek-ai/dsh/lib/bin.js`)
 with an isolated `DSH_HOME` and a loopback models/chat stub. `smoke:dsh:cli`
-drives `GET|POST /dashboard/api/v4/applications/dsh` against a native
+drives `GET|POST|DELETE /dashboard/api/v4/applications/dsh` against a native
 `ocg-manager-cli serve` with `dsh-local-host`. Pass `--expect-unsupported` when
 the CLI was built without that feature, or `--relative-roots` to exercise
-relative `--data-dir` / `DSH_HOME` values.
+relative `--data-dir` / `DSH_HOME` values. The default smoke installs into
+`web` and a selected `coding` profile. Run
+`node scripts/dsh-headless-cli-smoke.mjs --scan-user-homes` to verify selection
+across isolated `.dsh` and `.dsh-editor` Homes.
 
 Rust unit tests live in sibling `tests.rs` modules (`src/db.rs` declares
 `mod tests;` and the tests are in `src/db/tests.rs`). Do not add tests that

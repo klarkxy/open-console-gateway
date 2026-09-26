@@ -21,11 +21,13 @@ This guide is for people running Open Console Gateway as a desktop app, a headle
 - [Applications](user/applications.md) — The DSH plugin installation flow, recovery, and removal.
 - [Accounts](user/accounts.md) — Plans, credentials, ordering, quota behavior, and managed onboarding.
 - [Providers](user/providers.md) — Catalog, provider contracts, per-model protocol overrides, probes, and user-defined Providers.
+- [Model Catalog Refresh](user/model-catalog-refresh.md) — What Refresh model catalog does: directory updates, protocol evidence, first-snapshot defaults, and per-model tests.
 - [Plan And API Presets](user/provider-presets.md) — Browse Plan/API presets from Accounts or Providers; fixed presets supply address, protocol, authentication, and a default model.
 - [Logs And Settings](user/logs-settings.md) — Request logs, settings, and proxy modes.
 - [Gateway Behavior](user/gateway.md) — Endpoints, authentication, and aliases.
 - [Protocol Conversion](user/protocol-conversion.md) — Preferred/supported protocols, passthrough, and conversion limits.
 - [Routing, Cost, And Failover](user/routing.md) — Selection order, sticky/round-robin, cost accounting, circuit breakers, and failover.
+- [Temporary Unavailability](user/temporary-unavailability.md) — Global or per-connection Settings rules that skip a Key or model locally after a matching upstream error, then retry on real traffic.
 - [CLI](user/cli.md) — Headless CLI archive, data directory, `serve` / `key` / `status`, and bundled skill sync.
 - [Docker](user/docker.md) — GHCR image, Compose setup, browser sidecar, and source builds.
 - [External Integrations](user/external-integrations.md) — Local CPA setup, ownership boundaries, routing pool, and disconnect behavior.
@@ -36,7 +38,7 @@ This guide is for people running Open Console Gateway as a desktop app, a headle
 ## Reading paths
 
 - **New user** — `overview` → `architecture` → `install` → `first-client` → `accounts` → `providers` → `gateway` → `troubleshooting`.
-- **Docker / CLI operator** — `overview` → `architecture` → `docker` → `external-integrations` → `cli` → `accounts` → `providers` → `routing` → `logs-settings` → `troubleshooting`.
+- **Docker / CLI operator** — `overview` → `architecture` → `docker` → `external-integrations` → `cli` → `accounts` → `providers` → `routing` → `temporary-unavailability` → `logs-settings` → `troubleshooting`.
 - **Integration author** — `add-provider` for an upstream; `add-application` for a downstream client.
 
 ---

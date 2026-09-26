@@ -88,8 +88,10 @@ V4 reuses V3 session middleware. Its listings return the same `ControlRevision`
 (`expectedRevision` / `processGeneration`) that V3 uses for CAS. V4 mutations are `POST /onboarding/commit`,
 `POST /credentials/{id}/rotate`, `POST /credentials/{id}/quota-retry`,
 `PATCH /bindings/{id}`,
-`POST /identities/{id}/credentials`, `POST /applications/dsh` (which also
-binds the GET inspection fingerprint), `PUT /cpa/models`,
+`POST /identities/{id}/credentials`, `POST|DELETE /applications/dsh` (which also
+binds the GET inspection fingerprint; DELETE has no `keyId`), `PUT /destinations/{id}/catalog`,
+`POST /destinations/{id}/catalog/refresh`, `POST /destinations/{id}/model-tests`,
+`POST /platform-accounts/{id}/import-keys`, `PUT /cpa/models`,
 `POST /provider-contracts/{scope_kind}/{scope_id}/catalog/remove`, and
 `PATCH /alias-publication`; they check those tokens. Read routes
 do not.
@@ -104,9 +106,18 @@ appending must keep existing definitions byte-identical.
 Read-only routes are `GET /contract`, `GET /templates`,
 `GET /connections`, `GET /accounts` (identities), `GET /account-records`
 (remounted V3 account-list shim), `GET /destinations`, `GET /credentials`,
-`GET /applications/dsh`,
+`GET /accounts/{id}/billing`, `GET /accounts/{id}/official-api`,
+`GET /providers/{id}/official-api/pricing`, `GET /routing/cards`,
+`GET /applications/dsh` (optional `profilePath` and `runtimeUrl`),
 `GET /cpa/models`, and `GET /alias-publication`. Those reads perform no outbound
 requests.
+
+The official-api family — `GET /accounts/{id}/official-api`,
+`POST /accounts/{id}/official-api/balance`, and
+`GET|POST /providers/{id}/official-api/pricing` — exposes official-API preset
+financial evidence. The GETs are local projections; the CAS-protected POSTs are
+the only network paths. See
+[Official API Financial Evidence](runtime-invariants.md#official-api-financial-evidence).
 
 `GET /templates` is the read-only add catalog: the sealed built-ins (CPA
 excluded) plus the `custom-http` manual template. Presets are not part of the
@@ -155,14 +166,15 @@ falls back to `project()`; only that empty-store fallback can return
 refused row.
 
 Node transfer (`POST /accounts/transfer/export|preview|import`) is remounted
-on V4. Latest export is payload V10: `destinations` and `credentials`
+on V4. The latest export uses the current transfer payload: `destinations` and `credentials`
 (plaintext secrets, platform and CPA observer management credentials, and
 identity / grant / cooldown extras stay inside the encrypted envelope), plus
-`quotaPools` and `node`. Merging a package that has no CPA observer key
-preserves the destination's existing management key. It does not emit
+`quotaPools` and `node`, and explicit HTTP protocol routes.
+Merging a package that has no CPA observer key preserves the destination's
+existing management key. It does not emit
 `accounts`, `platformAccounts`, `platformLinks`, `dynamicProviders`, or
 `identities`. Those portable types are transfer-only and are not V4 listing
-DTOs. V4–V10 packages remain importable; V7 receives deterministic model-resolution defaults and V8 and later require the field. Local quota recovery is not a portable field: it is omitted from export, retained on an unchanged target Key, and cleared when the Key is replaced.
+DTOs. The supported import range, per-version defaults, and the explicit-routes rejection are the node-transfer payload policy in [runtime invariants](runtime-invariants.md). Local quota recovery is not a portable field: it is omitted from export, retained on an unchanged target Key, and cleared when the Key is replaced.
 
 `GET /routing/cards` returns one revision-tagged snapshot of `cards`, `destinations` and `credentials`. `PUT /routing/cards` accepts CAS tokens and the complete ordered card list. A card has `id`, `destinationId` and ordered `credentialIds`; every inference credential, including disabled rows, must appear exactly once under its existing destination. Observer credentials are excluded. Layout and flattened routing ranks commit together, and the response returns the complete committed snapshot. Multiple cards share one destination; creating or removing an empty extra card does not create or delete a supplier.
 

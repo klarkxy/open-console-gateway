@@ -42,11 +42,13 @@ Step Plan 在官方用量 API 开放前使用上述本地估算与校准方式�
 
 面板 JSON 位于 `/dashboard/api/v4`。这是唯一存活的面板 JSON 前缀：增量 V4 路由加上挂回的 V3 操作处理器。V3 的 `$defs` 不再增加新字段。
 
-V4 复用 V3 会话中间件。其列表返回与 V3 CAS 相同的 `ControlRevision`（`expectedRevision` / `processGeneration`）。V4 变更是 `POST /onboarding/commit`、`POST /credentials/{id}/rotate`、`POST /credentials/{id}/quota-retry`、`PATCH /bindings/{id}`、`POST /identities/{id}/credentials`、`POST /applications/dsh`（同时绑定 GET 检查指纹）、`PUT /cpa/models`、`POST /provider-contracts/{scope_kind}/{scope_id}/catalog/remove` 与 `PATCH /alias-publication`，它们检查这两枚令牌；只读路由不检查。
+V4 复用 V3 会话中间件。其列表返回与 V3 CAS 相同的 `ControlRevision`（`expectedRevision` / `processGeneration`）。V4 变更是 `POST /onboarding/commit`、`POST /credentials/{id}/rotate`、`POST /credentials/{id}/quota-retry`、`PATCH /bindings/{id}`、`POST /identities/{id}/credentials`、`POST|DELETE /applications/dsh`（同时绑定 GET 检查指纹；DELETE 不带 `keyId`）、`PUT /destinations/{id}/catalog`、`POST /destinations/{id}/catalog/refresh`、`POST /destinations/{id}/model-tests`、`POST /platform-accounts/{id}/import-keys`、`PUT /cpa/models`、`POST /provider-contracts/{scope_kind}/{scope_id}/catalog/remove` 与 `PATCH /alias-publication`，它们检查这两枚令牌；只读路由不检查。
 
 已检入的仅增量 V4 契约是 `schema/dashboard-api-v4.schema.json`，由 `dashboard_v4::contract_schema_pretty()` 经 `crates/ocg-core/examples/export_dashboard_v4_schema.rs` 生成。生成的 TypeScript（`src/api/generated/dashboard-v4.ts`）只有类型，没有 HTTP 封装。`dashboard_v4/types.rs` 的 `CATALOG_TYPE_NAMES` 同样是有序 `$defs` 目录；追加时必须保持既有 definition 对象字节一致。
 
-只读路由为 `GET /contract`、`GET /templates`、`GET /connections`、`GET /accounts`（身份列表）、`GET /account-records`（挂回的 V3 账号列表垫片）、`GET /destinations`、`GET /credentials`、`GET /applications/dsh`、`GET /cpa/models` 与 `GET /alias-publication`。这些读取不会发出出站请求。
+只读路由为 `GET /contract`、`GET /templates`、`GET /connections`、`GET /accounts`（身份列表）、`GET /account-records`（挂回的 V3 账号列表垫片）、`GET /destinations`、`GET /credentials`、`GET /accounts/{id}/billing`、`GET /accounts/{id}/official-api`、`GET /providers/{id}/official-api/pricing`、`GET /routing/cards`、`GET /applications/dsh`（可选 `profilePath` 与 `runtimeUrl`）、`GET /cpa/models` 与 `GET /alias-publication`。这些读取不会发出出站请求。
+
+official-api 族——`GET /accounts/{id}/official-api`、`POST /accounts/{id}/official-api/balance` 与 `GET|POST /providers/{id}/official-api/pricing`——暴露官网 API 预设的账务依据。GET 是本地投影；带 CAS 的 POST 是唯一的联网路径。详见[官网 API 账务依据](runtime-invariants.zh-CN.md#官网-api-账务依据)。
 
 `GET /templates` 是只读的添加目录：密封内置项（不含 CPA）加上 `custom-http` 手动模板。预设不属于该模板目录。模板没有用户实例或密钥。
 
@@ -56,7 +58,7 @@ V4 复用 V3 会话中间件。其列表返回与 V3 CAS 相同的 `ControlRevis
 
 `GET /destinations` 与 `GET /credentials` 是不含密钥、带 revision、只读本机的投影。`DestinationCredentialDto` 可带可选可空的 `quotaRecovery`（camelCase）。缺省表示没有已确认耗尽，不是已验证的上游健康。该对象上的 `status` 只用于展示（`waiting` | `ready` | `probing`）。`IdentitySummary` 的凭据不带该字段。带 CAS 的 `PATCH /destinations/{id}` 完整替换可编辑 HTTP 目的地的名称、地址、鉴权、协议、映射与按模型路由覆盖；它不接收 Key，只给 `authorizeCredentialIds` 明确列出的凭据并入安全授权。`DELETE /destinations/{id}` 要求没有凭据引用。密封与平台管理目的地拒绝两种变更。空库或遗留表升级窗口回落到 `project()`；拒绝时返回结构化 `409`。
 
-节点转移（`POST /accounts/transfer/export|preview|import`）挂在 V4。最新导出是 payload V10，以 `destinations` 与 `credentials` 为权威，并携带按模型路由覆盖、模型解析策略、`quotaPools` 与 `node`。V4–V10 可导入：V7 确定性补解析策略，V8 及以上必须显式携带。本机额度恢复不是可迁移字段：导出省略；目标 Key 未改则保留；替换 Key 则清除。
+节点转移（`POST /accounts/transfer/export|preview|import`）挂在 V4。最新导出使用当前迁移 payload，以 `destinations` 与 `credentials` 为权威，并携带按模型路由覆盖、模型解析策略、`quotaPools` 与 `node`，以及显式 HTTP 协议路由。支持的导入范围、逐版本默认值与显式路由拒绝规则见[运行时不变量](runtime-invariants.zh-CN.md)的节点迁移 payload 策略。本机额度恢复不是可迁移字段：导出省略；目标 Key 未改则保留；替换 Key 则清除。
 
 `GET /routing/cards` 返回带同一 revision 的 `cards`、`destinations` 与 `credentials` 快照。`PUT /routing/cards` 接收 CAS 令牌和完整有序卡片列表。每张卡包含 `id`、`destinationId` 与有序 `credentialIds`；包括禁用行在内，每份推理凭据必须在原目的地下恰好出现一次，观察者凭据不参与。布局和展开后的路由顺序一起提交，响应返回完整快照。多张卡共用同一目的地；新增或移除额外空卡不会新建或删除供应商。
 

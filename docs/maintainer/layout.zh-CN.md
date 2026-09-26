@@ -6,10 +6,10 @@
 crates/ocg-domain          ID、目录、协议策略
 crates/ocg-gateway         无 I/O 的 alias、AttemptSpec、selector、JSON 转换
 crates/ocg-infra           加密、代理/推理 HTTP、日志 SQL
-crates/ocg-core            SQLite、Dashboard V3、适配器、执行器
+crates/ocg-core            SQLite、Dashboard V4 控制面（+ V3 挂回 shim / 墓碑）、适配器、执行器
 crates/ocg-cli             ocg-manager-cli：serve / key / status / skill sync
 crates/ocg-browser-worker  Linux Chromium sidecar（不依赖 ocg-*）
-src/                       Vue 3 面板（只走 HTTP Dashboard V3 + V4）
+src/                       Vue 3 面板（只走 HTTP Dashboard V4）
 src-tauri/                 Desktop Host capability，注册进 CoreState
 schema/                    冻结的 dashboard-api-v3 与增量的 dashboard-api-v4 schema
 docs/                      USER / MAINTAINER / 防滥用

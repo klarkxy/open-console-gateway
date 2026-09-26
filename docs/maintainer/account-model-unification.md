@@ -2,7 +2,7 @@
 
 # RFC: Redesigning The Account And Provider Model
 
-Status: **schema v59 makes destinations, credentials and model mappings the normal routing authority.** V4 provides transactional HTTP destination edits and read-only routing explanation. Payload V10 preserves HTTP destination/model controls, model-resolution policy and route overrides; V4–V10 imports remain supported. See [runtime invariants](runtime-invariants.md) and [dashboard API](dashboard-api.md).
+Status: **schema v59 makes destinations, credentials and model mappings the normal routing authority.** V4 provides transactional HTTP destination edits and read-only routing explanation. The export payload preserves HTTP destination/model controls, model-resolution policy and route overrides; its import version policy is the node-transfer payload policy in [runtime invariants](runtime-invariants.md). See also [dashboard API](dashboard-api.md).
 
 ## Runtime cutover (v59)
 
@@ -497,16 +497,16 @@ reserved account UUIDs. `/dashboard/api/v3` is a 410 tombstone.
 
 ### Deprecation rules started in stage 7
 
-New node backups export payload V10. The encrypted envelope stays v1. V9
+New node backups export payload V11. The encrypted envelope stays v1. V9
 carries `destinations` and `credentials` (including plaintext secrets,
 platform and CPA observer management credentials, and identity / grant /
 cooldown extras inside that envelope), plus `quotaPools` and `node`. A merge
 import that omits a CPA observer key keeps the destination's existing
 management key. Latest export does not emit `accounts`, platform rows, dynamic
-provider definitions, or a separate identities array. V4–V6 remain
-importable through an old-graph decoder that maps into the same new-model
-import object. A V7 package that still carries leftover old fields must
-match dest/cred or is rejected. V11 and newer are an unsupported-version
+provider definitions, or a separate identities array. V4–V11 remain
+importable, with V4–V6 going through an old-graph decoder that maps into the
+same new-model import object. A V7 package that still carries leftover old fields must
+match dest/cred or is rejected. V12 and newer are an unsupported-version
 error. Remounted `/accounts*` handlers are I/O adapters; V4
 destinations/credentials are the read model.
 

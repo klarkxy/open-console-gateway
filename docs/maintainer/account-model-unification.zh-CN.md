@@ -2,7 +2,7 @@
 
 # RFC：重新设计账号与供应商模型
 
-状态：**schema v59 以目的地、凭据和模型映射作为正常路由的权威。** V4 提供 HTTP 目的地编辑事务和只读路由解释。Payload V10 保留 HTTP 目的地与模型控制、模型解析策略和按模型覆盖；仍支持 V4–V10 导入。详见[运行时不变量](runtime-invariants.zh-CN.md)和[Dashboard API](dashboard-api.zh-CN.md)。
+状态：**schema v59 以目的地、凭据和模型映射作为正常路由的权威。** V4 提供 HTTP 目的地编辑事务和只读路由解释。导出 payload 保留 HTTP 目的地与模型控制、模型解析策略和按模型覆盖；导入版本策略见[运行时不变量](runtime-invariants.zh-CN.md)的节点迁移 payload 策略。另见[Dashboard API](dashboard-api.zh-CN.md)。
 
 ## 运行时切换（v59）
 
@@ -291,12 +291,12 @@ V4 GET 列表仍不含秘密。Key
 
 ### 阶段 7 已开始的弃用规则
 
-新节点备份导出 payload V10。加密 envelope 仍为 v1。V9 携带 `destinations` 与
+新节点备份导出 payload V11。加密 envelope 仍为 v1。V9 携带 `destinations` 与
 `credentials`（明文密钥、平台与 CPA observer 管理凭据，以及 identity / grant /
 cooldown 等 extras 只存在该信封内），以及 `quotaPools` 与 `node`。合并导入时，若包中没有
 CPA observer key，会保留目标已有 management key。最新导出不再生成 `accounts`、平台行、动态供应商定义
-或单独的 identities 数组。V4–V6 仍可通过旧图解码器转入同一套新模型导入对象。
-若 V7 包仍带旧字段，必须与 dest/cred 一致，否则拒绝。V11 及更新是不支持版本错误。
+或单独的 identities 数组。V4–V11 均可导入，其中 V4–V6 经旧图解码器转入同一套新模型导入对象。
+若 V7 包仍带旧字段，必须与 dest/cred 一致，否则拒绝。V12 及更新是不支持版本错误。
 重挂的 `/accounts*` 是输入输出适配器；新客户端的读模型是 V4 目的地/凭据。
 
 ### 阶段 6 已开始的界面规则

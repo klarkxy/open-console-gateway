@@ -4,6 +4,8 @@
 
 The dashboard is the gateway's own single-page Vue 3 interface. **Dashboard**, **Access Keys**, **Accounts**, **Providers**, **Aliases**, **Applications**, **Logs**, and **Settings** are its eight fixed core views in the left rail (or horizontal menu below 1024px). Applications hosts the DSH plugin flow. A divider below Settings starts the optional **Extensions** group; CPA is its local-only entry. On a Windows x64, macOS, or Linux x64 desktop app or CLI, that page can also install and manually start an OCG-owned CPA runtime; other platforms keep connect-only CPA. Theme and language switches and a sign-out button live in the header. It speaks ten languages — 简体中文, 繁體中文, English, 日本語, 한국어, Español, Français, Deutsch, Português (Brasil), and Русский — with 简体中文 as the default. Your choice persists in `localStorage` under `ocg-manager.locale`; when persistence is unavailable, the in-memory locale still works for the session.
 
+The mascot face identifies the app in the dashboard, browser tab, and desktop icons. In the dark dashboard theme, a fine light outline keeps the logo visible; browser and desktop icons retain the original artwork.
+
 ## Finding and editing configuration
 
 The Add account search filters plans, presets, saved Providers, and platform
@@ -49,7 +51,7 @@ Set an externally reachable root such as `https://ocg.example.com` when clients 
 
 ## Access Keys
 
-The **Access Keys** view is the home for client-facing credentials. Primary and sub Keys live together in `access_keys`. Create, rename, enable, disable, regenerate, and delete go through Dashboard V3; a successful change bumps the settings revision. Mutation acknowledgements do not include plaintext, so the page reloads Connection Center to show the new value.
+The **Access Keys** view is the home for client-facing credentials. Primary and sub Keys live together in `access_keys`. Create, rename, enable, disable, regenerate, and delete go through Dashboard V4; a successful change bumps the settings revision. Mutation acknowledgements do not include plaintext, so the page reloads Connection Center to show the new value.
 
 - The **primary key** is always active and cannot be disabled or deleted; rotate it with the reset control. Its id is `00000000-0000-0000-0000-000000000001`. There is no custom-value field.
 - **Sub keys** are additional credentials you create, name, rename, enable/disable, regenerate, or delete — useful for handing one key to each device. Deleting a sub key is a soft delete: it stops authenticating immediately and its plaintext is cleared, but forward logs keep resolving to its name. A sub key value may never equal the primary key value or another sub key value, and at most 64 non-deleted sub keys are supported.

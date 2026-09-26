@@ -93,7 +93,7 @@ requests; changing rates preserves the current balance. An estimated zero
 balance never disables routing. Step Plan uses local estimation and manual
 calibration; it does not read a private console usage API.
 
-Payload V11 backups carry credit settings and remaining balances. Existing
+Current backups carry credit settings and remaining balances. Existing
 target meters survive a merge. Pending requests appear as uncertainty in the
 exported estimate. See [Upgrade and backup](upgrade-backup.md).
 
@@ -108,7 +108,7 @@ transfer it separately from the file; Open Console Gateway cannot recover it. Th
 operation remains available only from the node's loopback dashboard; forwarded
 scheme headers do not grant access to a remote dashboard.
 
-The current V11 payload moves destinations and credentials as the authority
+The current payload moves destinations and credentials as the authority
 (ready Keys, platform and CPA observer management credentials, and identity /
 grant / cooldown extras stay inside the encrypted envelope), Custom Endpoint/public-model → upstream-ID mappings and verification
 state encoded on those entities, user-defined Providers as destination extras,
@@ -138,12 +138,12 @@ account fields replace the stored credential.
 Machine-local listener/root URL, auto-start, and Dock settings also stay with
 the destination. Ready managed accounts keep their Key, but their browser login
 does not move; unfinished managed drafts are skipped. Import accepts payload
-V4, V5, V6, V7, V8, V9, V10, and V11. V4–V10 packages without protocol routes remain compatible; a pre-V11 package carrying nonempty explicit routes is rejected rather than losing those routes. V4/V5 packages rebuild one identity, credential, All-scope
-binding, and identity quota pool per account. Payload V1–V3 and V12 or newer
-backups are rejected with an explicit unsupported-version error. A V4/V5 file
+V4 through the current export version. Pre-V11 packages remain compatible when they omit protocol routes; a pre-V11 package carrying nonempty explicit routes is rejected rather than losing those routes. V4/V5 packages rebuild one identity, credential, All-scope
+binding, and identity quota pool per account. Payloads older than V4 or newer than the current export version are rejected with an
+explicit unsupported-version error. A V4/V5 file
 that already contains V6 identity fields, or a V6 file that already contains
 V7 destination fields, is rejected rather than silently dropping them. The outer encrypted envelope remains version 1 and
-is distinct from the portable payload version.
+is distinct from the portable payload version. The current payload version is listed in [Upgrade and backup](upgrade-backup.md).
 
 Every persistent mutation path rejects `enabled=true` for a catalogued
 `routable=false` Provider before it mutates the row, revision, or timestamps.
@@ -316,8 +316,9 @@ than a key quota.
   routing. There is no separate manual calibration editor.
 - **GOAT inference restrictions.** Each `429` starts the same 30-second
   temporary Key cooldown, extended but never shortened by valid `Retry-After`.
-  GOAT error text, caps, and displayed usage do not create or clear permanent
-  quota state. See [Routing](routing.md).
+  An insufficient-credits response starts a process-local wait on that Key and
+  model route. GOAT error text, caps, and displayed usage do not create or clear
+  permanent quota state. See [Routing](routing.md).
 - **Identity and credentials.** The name is the account's required primary
   display label. The login account field is optional; on Key-account creation,
   entering it first copies it into the name until you edit the name yourself.

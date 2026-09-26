@@ -5,9 +5,10 @@
 - **Keep the crate DAG.** Domain and gateway stay I/O-free. Facades reexport
   item-by-item. Adapters return `AttemptSpec`. `forward_once` is one upstream
   call. Dashboard V3 does not import `gateway`.
-- **No Tauri `invoke()` paths.** The Vue data path is HTTP `/dashboard/api/v3`
-  and `/dashboard/api/v4`.
-- **Protected V2 REST stays tombstoned.** New dashboard JSON is V3 or V4. The
+- **No Tauri `invoke()` paths.** The Vue data path is HTTP `/dashboard/api/v4`
+  only; `/dashboard/api/v3` is a 410 tombstone and its kernel handlers are
+  remounted under V4.
+- **Protected V2 REST stays tombstoned.** New dashboard JSON is V4. The
   410 tombstone stays.
 - **Do not weaken security boundaries.** Gateway authentication, key
   obfuscation, URL validation, cooldown writes, SSE pass-through, and the

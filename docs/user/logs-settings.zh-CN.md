@@ -14,7 +14,7 @@
 
 当该 Provider 有足够价格证据时，每行还会保留原始供应商成本、额度扣减和实际付费成本。allowance 只改变额度扣减倍率。
 
-- Chat 流式请求会设置 `stream_options.include_usage`，让 OpenAI 兼容上游返回 usage chunk。仍然没有 usage chunk 的行会标 `success_no_usage`。usage chunk 让 token 数量准确；汇总区显示输入 + 输出的总 Tokens。额度消耗按本次选中 Provider 的已验证价格快照估算：OpenCode Go 使用当前快照，Command Code GOAT 使用独立刷新的模型价格与倍率。Ollama Cloud 使用手动刷新的 `https://ollama.com/pricing` 快照且配额倍率为 `1.0`；这些已定价行计入一个月 USD Credits 窗口，可以超过 Pro/Max/Team 软上限且不改变路由。旧日志不会用新价格追溯重算。已登记的 Zen free 模型（`big-pickle`、`mimo-v2.5-free` 等）会记录 token，但 `cost_state=free`，不计入 Go 额度。Custom API 行记 `cost_state=unknown`，不扣供应商额度。展开行可查看请求 ID 与诊断详情。
+- Chat 流式请求会设置 `stream_options.include_usage`，让 OpenAI 兼容上游返回 usage chunk。仍然没有 usage chunk 的行会标 `success_no_usage`。usage chunk 让 token 数量准确；汇总区显示输入 + 输出的总 Tokens。额度消耗按本次选中 Provider 的已验证价格快照估算：OpenCode Go 使用当前快照，Command Code GOAT 使用独立刷新的模型价格与倍率。Ollama Cloud 使用手动刷新的 `https://ollama.com/pricing` 快照且配额倍率为 `1.0`；这些已定价行计入一个月 USD Credits 窗口，可以超过 Pro/Max/Team 软上限且不改变路由。旧日志不会用新价格追溯重算。已登记的 Zen free 模型（`big-pickle`、`mimo-v2.5-free` 等）会记录 token，但 `cost_state=free`，不计入 Go 额度。Custom API 行记 `cost_state=unknown`，不扣供应商额度。列表显示时间、尝试次数、模型别名和状态。展开行可查看方案、账号、请求 ID 与诊断详情。没有价格的成功请求显示为成功；缺价格是常态，不是单独状态。按成功筛选时包含这些行。存储状态仍可能是 `success_unpriced`，额度消耗保持为空。
 - `outcome_unknown` 表示上游可能已经完成并扣额，但 Gateway 超时或丢失响应；这类请求不会自动重试，且本地额度消耗保持未知。
 - **Key** 筛选把行与汇总统计限定到单个客户端 Key。选项来自日志表本身，因此已停用、已删除或未知的 Key 仍可筛选。**未归因** 筛选没有客户端 Key 归因的行；后台任务会近似归到主 Key。
 
@@ -35,7 +35,7 @@
 - **检查更新 / 立即升级**：支持升级的已安装桌面版会检查 GitHub 最新 Release，并可下载、校验签名、原地替换已有副本。数据目录与开机启动设置保留。开发构建、CLI、Docker 仍显示发布页并手动升级。主机必须能访问 GitHub；检查或安装失败不影响 Gateway 转发。
 - **Zen Free**：在账号卡上直接启用或关闭；在 **供应商** 页刷新 Free 模型目录、查看协议证据，并切换 Chat Completions / Responses / Messages。
 
-配置项写入 SQLite，下次启动时重新加载。Settings 资源从不包含 Key 明文。保存使用与其他 Dashboard V3 写入相同的 `expectedRevision` / `processGeneration` token。检查更新是按需动作。
+配置项写入 SQLite，下次启动时重新加载。Settings 资源从不包含 Key 明文。保存使用与其他 Dashboard V4 写入相同的 `expectedRevision` / `processGeneration` token。检查更新是按需动作。
 
 ---
 

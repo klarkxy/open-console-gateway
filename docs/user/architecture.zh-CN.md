@@ -13,7 +13,7 @@ Open Console Gateway 是一个本地节点。Desktop、CLI 与 Docker 只是承�
 
 Dashboard 与推理入口共用 `9042`，但使用两类不同凭据。客户端 **Key** 用于 AI
 工具向 Open Console Gateway 鉴权；选定账号后，账号凭据只会发往该账号配置的上游，Zen
-Free 没有凭据。Vue SPA 通过 HTTP Dashboard V3 与 V4 通信。
+Free 没有凭据。Vue SPA 只通过 HTTP Dashboard V4 通信；仅保留 auth 与 browser WS 两个 V2 兼容族。
 
 ## 请求生命周期
 

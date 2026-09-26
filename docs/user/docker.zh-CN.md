@@ -4,11 +4,12 @@
 
 Docker 版在同一个端口 `9042` 上无头提供 Dashboard 和 Gateway。镜像在 GHCR 上匿名可拉，`linux/amd64`
 与 `linux/arm64` 自动匹配。把 Release 的 `compose.example.yaml` 存为
-`compose.yaml`，按需加 `.env`，然后执行下面命令；或者检出对应 tag
+`compose.yaml`，按需加 `.env`，然后执行下面命令；命令用 `VERSION` shell 变量钉住同一个版本，取值与该 Release 附带的 `compose.example.yaml` 一致，运行时可替换为最新发布版。也可以检出对应 tag
 的仓库：
 
 ```bash
-git clone --branch v2.4.1 --depth 1 https://github.com/klarkxy/open-console-gateway.git
+VERSION=2.6.2
+git clone --branch "v$VERSION" --depth 1 https://github.com/klarkxy/open-console-gateway.git
 cd open-console-gateway
 cp .env.example .env
 # PowerShell: Copy-Item .env.example .env
@@ -29,7 +30,7 @@ Compose 和容器发布工作流使用这些镜像名。
 - 仓库源码里的 `compose.yaml` 默认用 `latest`；Release 的
   `compose.example.yaml` 钉死对应完整版本。
 - 生产部署建议在 `.env` 中用 `OCG_IMAGE` 固定完整版本标签，例如
-  `ghcr.io/klarkxy/opencode-go-mgr:2.4.1`。
+  `ghcr.io/klarkxy/opencode-go-mgr:<version>`。
 - 完整版本与 `sha-<commit>` 标签指向单次发布，按策略不应移动；
   `latest` 会继续移动。技术上只有 digest
   `ghcr.io/klarkxy/opencode-go-mgr@sha256:...` 真正不可变。
@@ -44,6 +45,7 @@ Compose 和容器发布工作流使用这些镜像名。
 | `OCG_PORT` | Compose | 宿主机回环端口；容器内仍监听 `9042`。 |
 | `OCG_ADMIN_USERNAME` + `OCG_ADMIN_PASSWORD` | 首次启动 | 可选管理员引导；必须同时设置或都不设置。 |
 | `OCG_CLIENT_ROOT_URL` | 运行时 | 只读覆盖外部客户端根地址。 |
+| `OCG_MAX_REQUEST_BODY_BYTES` | 运行时 | Gateway JSON 请求体大小上限（字节）；默认 64 MiB。 |
 | `OCG_CPA_BASE_URL` | Compose CPA profile | 只读 CPA 并列服务地址；保持 `http://cpa:8317`。 |
 | `CPA_MANAGEMENT_PASSWORD` | Compose CPA profile | CPA Management API 密码；只保存在部署用 `.env`。 |
 | `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY` | 运行时 | “自动（系统 / 环境）”出站代理模式使用的标准代理变量。 |
@@ -176,13 +178,14 @@ curl --fail http://127.0.0.1:9042/dashboard/
 的 provenance attestation。可这样检查发布版本：
 
 ```bash
-docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr:2.4.1
-docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr-browser:2.4.1
+VERSION=2.6.2
+docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr:$VERSION
+docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr-browser:$VERSION
 gh attestation verify \
-  oci://ghcr.io/klarkxy/opencode-go-mgr:2.4.1 \
+  oci://ghcr.io/klarkxy/opencode-go-mgr:$VERSION \
   --repo klarkxy/open-console-gateway
 gh attestation verify \
-  oci://ghcr.io/klarkxy/opencode-go-mgr-browser:2.4.1 \
+  oci://ghcr.io/klarkxy/opencode-go-mgr-browser:$VERSION \
   --repo klarkxy/open-console-gateway
 ```
 

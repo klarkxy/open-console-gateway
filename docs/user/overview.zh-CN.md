@@ -2,7 +2,7 @@
 
 # 产品定位
 
-Open Console Gateway 是一台本地 Gateway：把内置供应商 Key、受信的 Custom API 目的地和用户定义供应商定义保存在 SQLite 数据库里，并通过回环地址 `http://127.0.0.1:9042/v1` 暴露给客户端。Provider 与 Plan 是同一个产品身份，只以 `provider_id` 为键；每张账号卡归属其中一个 Provider。客户端发送本地注册表里的 **别名** 或符合要求的 Custom 模型 ID；当前可路由的是 OpenCode Go、Zen Free、Command Code GOAT、MiniMax CN Token Plan、Kimi Code CN、Custom API 与已保存的用户定义供应商。Vue 3 管理面板在 `/dashboard/`，当前 SPA 只通过 `/dashboard/api/v4` 读写 JSON（`/dashboard/api/v3` 是 410 墓碑）。每个节点把数据保存在本地。
+Open Console Gateway 是一台本地 Gateway：把内置供应商 Key、受信的 Custom API 目的地和用户定义供应商定义保存在 SQLite 数据库里，并通过回环地址 `http://127.0.0.1:9042/v1` 暴露给客户端。Provider 与 Plan 是同一个产品身份，只以 `provider_id` 为键；每张账号卡归属其中一个 Provider。客户端发送本地注册表里的 **别名** 或符合要求的 Custom 模型 ID；当前可路由的是 OpenCode Go、Zen Free、Command Code GOAT、MiniMax CN Token Plan、Kimi Code CN、Ollama Cloud、Custom API、CPA 订阅池与已保存的用户定义供应商。Vue 3 管理面板在 `/dashboard/`，当前 SPA 只通过 `/dashboard/api/v4` 读写 JSON（`/dashboard/api/v3` 是 410 墓碑）。每个节点把数据保存在本地。
 
 Gateway 只做四件事，顺序基本符合直觉：
 

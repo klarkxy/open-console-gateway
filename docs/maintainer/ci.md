@@ -10,10 +10,9 @@ not obvious from the YAML.
 Runs on pull requests and `main`, and via `workflow_call` from a production
 tag. Manual release candidates skip it. Three parallel jobs:
 
-- **Web** — `contract:v3:check`, `contract:v4:check`, `typecheck`, `test:web`, Vite production
-  build, `DESIGN.md` lint, and
+- **Web** — `contract:v3:check`, `contract:v4:check`, `typecheck`, `test:web`,
+  `test:tooling`, Vite production build, `DESIGN.md` lint, and
   `docker compose -f compose.example.yaml config --quiet`.
-  `pnpm run test:tooling` is not in this job.
 - **Rust** — `cargo fmt --all -- --check`, locked workspace tests and Clippy
   `-D warnings` with `--features ocg-core/ollama-cloud-loopback-test` and
   `--exclude ocg-manager` (the desktop crate needs WebKit

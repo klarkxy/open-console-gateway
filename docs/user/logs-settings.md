@@ -43,9 +43,12 @@ changes the quota-debit multiplier.
   Zen free models (`big-pickle`, `mimo-v2.5-free`, and other ids on the Zen
   allowlist) record tokens with `cost_state=free` and do not enter Go quota
   totals. Custom API rows record `cost_state=unknown` with no provider quota
-  debit. Expand a row to
-  see the request ID and diagnostic
-  detail.
+  debit. The list shows time, attempt, model alias, and status. Expand a row to
+  see the plan, account, request ID, and diagnostic
+  detail. A completed request without a price is shown as success; missing
+  prices are ordinary and are not a separate status. Filtering by success
+  includes those rows. The stored status can still be `success_unpriced`, and
+  its quota cost stays empty.
 - An `outcome_unknown` row means the upstream may already have completed and
   charged the request, but the gateway lost the response or timed out. Such a
   request is not replayed automatically and its local cost remains unknown.
@@ -136,7 +139,7 @@ The **Settings** view holds the gateway's persistent configuration:
 
 Settings are written to SQLite and reloaded on the next start. The Settings
 resource never includes Key plaintext. Saves use the same `expectedRevision` /
-`processGeneration` tokens as other Dashboard V3 writes. The update check is
+`processGeneration` tokens as other Dashboard V4 writes. The update check is
 on-demand.
 
 ---

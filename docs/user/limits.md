@@ -61,7 +61,9 @@ supported protocol matrix lives in
 - Command Code GOAT is a live fixed-origin route. Its public `/models` catalog
   is refreshed explicitly on **Providers**, and also when **Refresh quota**
   runs on **Accounts**; GOAT preset and newly discovered rows default on when
-  a supported protocol is known. GOAT catalog refresh updates the model
+  a supported protocol is known, except that GOAT's first snapshot starts only
+  plan-included models on and keeps the rest of that snapshot off until enabled
+  manually. GOAT catalog refresh updates the model
   directory; Key auth is observed from inference 401/403. Its verified price
   snapshot estimates new request costs, with a saved editable multiplier per
   priced model. The account card can explicitly **Refresh quota** to read local

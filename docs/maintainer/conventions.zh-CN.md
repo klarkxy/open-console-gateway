@@ -3,8 +3,8 @@
 # 编码约定
 
 - **保持 crate DAG**。domain 与 gateway 保持无 I/O。门面按条目再导出。适配器返回 `AttemptSpec`。`forward_once` 是一次上游调用。Dashboard V3 不导入 `gateway`。
-- **前端不新增 Tauri `invoke()` 路径**。Vue 主数据路径是 HTTP `/dashboard/api/v3` 与 `/dashboard/api/v4`。
-- **受保护的 V2 REST 保持墓碑状态**。新面板 JSON 属于 V3 或 V4。410 墓碑保留。
+- **前端不新增 Tauri `invoke()` 路径**。Vue 主数据路径是 HTTP `/dashboard/api/v4`；`/dashboard/api/v3` 是 410 墓碑，原 V3 kernel handler 挂回 V4。
+- **受保护的 V2 REST 保持墓碑状态**。新面板 JSON 只走 V4。410 墓碑保留。
 - **安全边界不能为了简化而削弱**。Gateway 鉴权、Key 混淆、URL 校验、冷却写入、SSE 透传以及 ConnectionInfo 密钥边界均保留。
 - **不引入远端同步**。每个节点由自己的面板管理。
 - **`auto_start` 与 `show_dock_icon` 受能力门控**。Windows x64、macOS 和 Linux x64 的 release / 已安装 Tauri 进程注入登录自启同步钩子；Dock 仅 macOS Tauri。

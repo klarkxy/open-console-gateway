@@ -16,7 +16,9 @@ trace relationships, or export another format.
 The Dashboard and inference endpoints share port `9042`, but they use different
 credentials. A client **Key** authenticates an AI tool to Open Console Gateway. After
 selection, the account credential is sent only to that account's configured
-upstream; Zen Free has no credential. The Vue SPA talks HTTP Dashboard V3 and V4.
+upstream; Zen Free has no credential. The Vue SPA talks HTTP Dashboard V4
+only; the only V2 compatibility families kept are auth and the browser
+WebSocket.
 
 ## Request lifecycle
 

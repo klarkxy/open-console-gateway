@@ -21,11 +21,13 @@
 - [应用](user/applications.zh-CN.md) — DSH 插件安装流程、恢复与移除。
 - [账号](user/accounts.zh-CN.md) — Plan、凭据、排序、额度行为与托管注册。
 - [供应商](user/providers.zh-CN.md) — 目录、供应商合约、按模型协议覆盖、探测与用户定义供应商。
+- [模型目录刷新](user/model-catalog-refresh.zh-CN.md) — 刷新模型目录的作用：目录更新、协议证据、首次快照默认与单模型测试。
 - [Plan 与 API 预设](user/provider-presets.zh-CN.md) — 从账号或供应商入口浏览 Plan/API 预设；固定预设提供地址、协议、鉴权与默认模型。
 - [日志与设置](user/logs-settings.zh-CN.md) — 请求日志、设置与代理模式。
 - [Gateway 行为](user/gateway.zh-CN.md) — 端点、鉴权与别名。
 - [协议转换](user/protocol-conversion.zh-CN.md) — 推荐/已验证协议、透传与转换边界。
 - [路由、费用与故障转移](user/routing.zh-CN.md) — 选择顺序、粘性/轮询、费用估算、熔断与故障转移。
+- [临时停调](user/temporary-unavailability.zh-CN.md) — 在设置里按全局或连接匹配上游错误后本地跳过 Key 或模型，再用真实流量重试。
 - [CLI](user/cli.zh-CN.md) — 无头 CLI 压缩包、数据目录、`serve` / `key` / `status` 与内置 skill 同步。
 - [Docker](user/docker.zh-CN.md) — GHCR 镜像、Compose 部署、浏览器 Sidecar 与源码构建。
 - [外部接入](user/external-integrations.zh-CN.md) — 本机 CPA 配置、数据归属、路由订阅池与断开行为。
@@ -36,7 +38,7 @@
 ## 阅读路径
 
 - **新用户** — `overview` → `architecture` → `install` → `first-client` → `accounts` → `providers` → `gateway` → `troubleshooting`。
-- **Docker / CLI 运维** — `overview` → `architecture` → `docker` → `external-integrations` → `cli` → `accounts` → `providers` → `routing` → `logs-settings` → `troubleshooting`。
+- **Docker / CLI 运维** — `overview` → `architecture` → `docker` → `external-integrations` → `cli` → `accounts` → `providers` → `routing` → `temporary-unavailability` → `logs-settings` → `troubleshooting`。
 - **集成作者** — 上游供应商读 `add-provider`；下游客户端读 `add-application`。
 
 ---

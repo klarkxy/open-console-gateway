@@ -6,10 +6,14 @@ Open Console Gateway runs headlessly in Docker, serving the same dashboard and g
 on port `9042`. Pull the image from GHCR anonymously — it ships `linux/amd64`
 and `linux/arm64`, and Docker picks the right variant. Save the release's
 `compose.example.yaml` as `compose.yaml`, add `.env` if needed, and run the
-commands below. You can also use a checkout of the matching tag.
+commands below; they pin one release through a `VERSION` shell variable, and
+the pinned value matches the `compose.example.yaml` shipped with that release
+— substitute the latest release when you run them. You can also use a
+checkout of the matching tag.
 
 ```bash
-git clone --branch v2.4.1 --depth 1 https://github.com/klarkxy/open-console-gateway.git
+VERSION=2.6.2
+git clone --branch "v$VERSION" --depth 1 https://github.com/klarkxy/open-console-gateway.git
 cd open-console-gateway
 cp .env.example .env
 # PowerShell: Copy-Item .env.example .env
@@ -31,7 +35,7 @@ workflow use these image names.
 - The checkout's `compose.yaml` defaults to `latest`; the Release
   `compose.example.yaml` pins its matching full version.
 - For repeatable production deployments, set `OCG_IMAGE` in `.env` to a full
-  release tag such as `ghcr.io/klarkxy/opencode-go-mgr:2.4.1`.
+  release tag such as `ghcr.io/klarkxy/opencode-go-mgr:<version>`.
 - Full-version and `sha-<commit>` tags identify one release and are intended
   not to move; `latest` does. Only a digest such as
   `ghcr.io/klarkxy/opencode-go-mgr@sha256:...` is truly immutable.
@@ -46,6 +50,7 @@ workflow use these image names.
 | `OCG_PORT` | Compose | Host loopback port; the container still listens on `9042`. |
 | `OCG_ADMIN_USERNAME` + `OCG_ADMIN_PASSWORD` | First start | Optional administrator bootstrap; both or neither. |
 | `OCG_CLIENT_ROOT_URL` | Runtime | Read-only external client root override. |
+| `OCG_MAX_REQUEST_BODY_BYTES` | Runtime | Maximum gateway JSON request body size in bytes; defaults to 64 MiB. |
 | `OCG_CPA_BASE_URL` | Compose CPA profile | Read-only CPA sibling URL; leave at `http://cpa:8317`. |
 | `CPA_MANAGEMENT_PASSWORD` | Compose CPA profile | CPA Management API password; keep only in the deployment's `.env`. |
 | `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY` | Runtime | Standard proxy variables used by `Automatic (system / environment)` outbound proxy mode. |
@@ -214,13 +219,14 @@ provenance, and a GitHub signed provenance attestation. Inspect and verify a
 release with:
 
 ```bash
-docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr:2.4.1
-docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr-browser:2.4.1
+VERSION=2.6.2
+docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr:$VERSION
+docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr-browser:$VERSION
 gh attestation verify \
-  oci://ghcr.io/klarkxy/opencode-go-mgr:2.4.1 \
+  oci://ghcr.io/klarkxy/opencode-go-mgr:$VERSION \
   --repo klarkxy/open-console-gateway
 gh attestation verify \
-  oci://ghcr.io/klarkxy/opencode-go-mgr-browser:2.4.1 \
+  oci://ghcr.io/klarkxy/opencode-go-mgr-browser:$VERSION \
   --repo klarkxy/open-console-gateway
 ```
 
