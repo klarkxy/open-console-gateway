@@ -1,8 +1,9 @@
 use super::*;
+use serde_json::json;
 use std::sync::Mutex as StdMutex;
 
 struct FakeRunner {
-    manifest: PathBuf,
+    version: String,
     commands: StdMutex<Vec<CommandSpec>>,
 }
 
@@ -71,7 +72,7 @@ impl CommandRunner for FakeRunner {
         if command.args == [OsString::from("--version")] {
             return Ok(CommandOutput {
                 success: true,
-                stdout: "0.1.5-rc.2\n".into(),
+                stdout: self.version.clone(),
                 stderr: String::new(),
             });
         }
@@ -82,9 +83,15 @@ impl CommandRunner for FakeRunner {
             .ok_or_else(|| "missing package path".to_string())?
             .trim_matches('"')
             .to_string();
-        fs::create_dir_all(self.manifest.parent().unwrap()).map_err(|error| error.to_string())?;
+        let profile = command.args[2].to_string_lossy();
+        let manifest = command
+            .dsh_home
+            .join("profiles")
+            .join(profile.as_ref())
+            .join("package.json");
+        fs::create_dir_all(manifest.parent().unwrap()).map_err(|error| error.to_string())?;
         fs::write(
-            &self.manifest,
+            &manifest,
             serde_json::to_vec_pretty(&serde_json::json!({
                 "name": "dsh-profile-web",
                 "private": true,
@@ -155,6 +162,10 @@ fn claimed_handoff(live: &Path, token: &str) -> PathBuf {
 }
 
 fn fixture(name: &str) -> (PathBuf, DshDesktopHost, Arc<FakeRunner>) {
+    fixture_with_version(name, "0.1.5-rc.2")
+}
+
+fn fixture_with_version(name: &str, version: &str) -> (PathBuf, DshDesktopHost, Arc<FakeRunner>) {
     let root =
         std::env::temp_dir().join(format!("ocg-dsh-{name}-{}", uuid::Uuid::new_v4().simple()));
     let data_dir = root.join("data");
@@ -164,12 +175,15 @@ fn fixture(name: &str) -> (PathBuf, DshDesktopHost, Arc<FakeRunner>) {
     let executable = root.join(if cfg!(windows) { "dsh.cmd" } else { "dsh" });
     fs::write(&executable, b"test-only").unwrap();
     let runner = Arc::new(FakeRunner {
-        manifest: home.join("profiles/web/package.json"),
+        version: version.into(),
         commands: StdMutex::new(Vec::new()),
     });
     let host = DshDesktopHost {
         data_dir,
         home,
+        profile: PROFILE.into(),
+        legacy_bootstrap: true,
+        scan_user_home: None,
         runner: runner.clone(),
         dsh_executable: Some(executable),
         operation: Mutex::new(()),
@@ -178,16 +192,292 @@ fn fixture(name: &str) -> (PathBuf, DshDesktopHost, Arc<FakeRunner>) {
 }
 
 #[test]
-fn supported_version_range_is_explicit() {
-    assert!(compatible_version("0.1.5-rc.1"));
-    assert!(compatible_version("0.1.5-rc.2"));
-    assert!(!compatible_version("0.1.5"));
-    assert!(!compatible_version("0.1.6"));
-    assert!(!compatible_version("0.1.4"));
-    assert!(!compatible_version("0.1.5-rc.0"));
-    assert!(!compatible_version("0.1.5-rc.3"));
-    assert!(!compatible_version("0.2.0"));
-    assert!(!compatible_version("garbage"));
+fn discovery_reads_only_named_dsh_homes_and_valid_profile_manifests() {
+    let root = std::env::temp_dir().join(format!(
+        "ocg-dsh-discovery-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    let manifest = br#"{"dsh":{"profile":{"bundles":[]}}}"#;
+    for (home, profile) in [
+        (".dsh", "web"),
+        (".dsh-editor", "dsh-editor"),
+        (".dsh-spaces", "spaces-hub"),
+        (".dshother", "ignored"),
+    ] {
+        let path = root.join(home).join("profiles").join(profile);
+        fs::create_dir_all(&path).unwrap();
+        fs::write(path.join("package.json"), manifest).unwrap();
+    }
+    let invalid = root.join(".dsh-editor/profiles/invalid");
+    fs::create_dir_all(&invalid).unwrap();
+    fs::write(invalid.join("package.json"), b"not json").unwrap();
+
+    let found = discover_profiles(&root);
+    assert_eq!(found.len(), 3);
+    assert_eq!(
+        found
+            .iter()
+            .map(|profile| profile.name.as_str())
+            .collect::<Vec<_>>(),
+        ["web", "dsh-editor", "spaces-hub"]
+    );
+    assert!(
+        found
+            .iter()
+            .all(|profile| Path::new(&profile.path).join("package.json").is_file())
+    );
+    assert!(!root.join(".dsh/profiles/web/node_modules").exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn profile_discovery_remains_available_without_a_dsh_executable() {
+    let (root, mut host, _runner) = fixture("discovery-without-cli");
+    let scan_root = root.join("user");
+    let profile = scan_root.join(".dsh-editor/profiles/dsh-editor");
+    fs::create_dir_all(&profile).unwrap();
+    fs::write(profile.join("package.json"), br#"{"dsh":{"profile":{}}}"#).unwrap();
+    host.scan_user_home = Some(scan_root);
+    host.dsh_executable = Some(root.join("no-dsh-executable"));
+
+    let inspected = host.inspect("http://127.0.0.1:9042/v1").unwrap();
+    assert_eq!(inspected.phase, DshApplicationPhase::NotDetected);
+    assert_eq!(inspected.discovered_profiles.len(), 1);
+    assert_eq!(inspected.discovered_profiles[0].name, "dsh-editor");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn selected_profile_install_uses_its_home_profile_and_private_handoff() {
+    let (root, mut host, runner) = fixture("selected-profile");
+    let user = root.join("user");
+    let editor_home = user.join(".dsh-editor");
+    let editor_profile = editor_home.join("profiles/dsh-editor");
+    fs::create_dir_all(&editor_profile).unwrap();
+    fs::write(
+        editor_profile.join("package.json"),
+        br#"{"dsh":{"profile":{"bundles":[]}}}"#,
+    )
+    .unwrap();
+    fs::write(
+        editor_profile.join(".dsh-editor-owner.json"),
+        br#"{"app":"dsh-editor","schema":1}"#,
+    )
+    .unwrap();
+    host.scan_user_home = Some(user);
+    let gateway = "http://127.0.0.1:9042/v1";
+    let path = editor_profile.display().to_string();
+    let found = host.discovered_profiles();
+    assert!(
+        found
+            .iter()
+            .any(|profile| same_lexical_path(Path::new(&profile.path), Path::new(&path))),
+        "wanted {path}; found {found:?}"
+    );
+    let inspected = host
+        .execute(DshApplicationHostRequest::Inspect {
+            gateway_v1_url: gateway.into(),
+            profile_path: Some(path.clone()),
+            runtime_url: None,
+        })
+        .unwrap();
+    assert!(same_lexical_path(
+        Path::new(&inspected.selected_profile_path),
+        Path::new(&path)
+    ));
+    assert_eq!(inspected.phase, DshApplicationPhase::Ready);
+
+    let installed = host
+        .execute(DshApplicationHostRequest::Install {
+            expected_fingerprint: inspected.fingerprint.unwrap(),
+            gateway_v1_url: gateway.into(),
+            profile_path: Some(path.clone()),
+            runtime_url: None,
+            secret: crate::dsh_application::DshGatewaySecret::new("editor-test-key".into()),
+        })
+        .unwrap();
+    assert!(same_lexical_path(
+        Path::new(&installed.selected_profile_path),
+        Path::new(&path)
+    ));
+    assert_eq!(installed.phase, DshApplicationPhase::Installed);
+    let target = host.for_profile(Some(&path)).unwrap();
+    assert_eq!(
+        fs::read(target.bootstrap_path()).unwrap(),
+        b"editor-test-key"
+    );
+    assert_ne!(target.bootstrap_path(), host.bootstrap_path());
+    assert!(!host.home.join("profiles/web/package.json").exists());
+    let editor_source = editor_home.join("user-plugins/@open-console-gateway/dsh-plugin");
+    assert!(editor_source.join("index.js").is_file());
+    let editor_state: Value =
+        serde_json::from_slice(&fs::read(editor_home.join("dsh-plugins.json")).unwrap()).unwrap();
+    assert!(
+        editor_state["installed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["name"] == PACKAGE_NAME && item["spec"] == "ocg-manager")
+    );
+    mutate_test_manifest(&editor_profile.join("package.json"), Some("*".into())).unwrap();
+    let after_editor_restart = host
+        .execute(DshApplicationHostRequest::Inspect {
+            gateway_v1_url: gateway.into(),
+            profile_path: Some(path.clone()),
+            runtime_url: None,
+        })
+        .unwrap();
+    assert_eq!(after_editor_restart.phase, DshApplicationPhase::Installed);
+    let commands = runner.commands.lock().unwrap();
+    let add = commands
+        .iter()
+        .find(|command| command.args.get(3) == Some(&OsString::from("add")))
+        .unwrap();
+    assert_eq!(add.args[2], "dsh-editor");
+    assert_eq!(add.dsh_home, editor_home);
+    drop(commands);
+
+    let outside_scope = root.join("user/.dshother/profiles/web");
+    fs::create_dir_all(&outside_scope).unwrap();
+    fs::write(
+        outside_scope.join("package.json"),
+        br#"{"dsh":{"profile":{}}}"#,
+    )
+    .unwrap();
+    assert!(
+        host.for_profile(Some(&outside_scope.display().to_string()))
+            .is_err()
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn default_web_can_be_selected_before_its_manifest_exists() {
+    let (root, host, runner) = fixture("explicit-default-web");
+    let path = host.home.join("profiles/web").display().to_string();
+    let fake = HttpPluginFake::start(HttpPluginState::empty());
+    write_browser_grant(&host.home);
+    let inspected = host
+        .execute(DshApplicationHostRequest::Inspect {
+            gateway_v1_url: "http://127.0.0.1:9042/v1".into(),
+            profile_path: Some(path.clone()),
+            runtime_url: Some(fake.origin()),
+        })
+        .unwrap();
+    assert_eq!(inspected.phase, DshApplicationPhase::Ready);
+    assert_eq!(
+        inspected.runtime_url.as_deref(),
+        Some(fake.origin().as_str())
+    );
+    assert!(!host.home.join("profiles/web/package.json").exists());
+    let installed = host
+        .execute(DshApplicationHostRequest::Install {
+            expected_fingerprint: inspected.fingerprint.unwrap(),
+            gateway_v1_url: "http://127.0.0.1:9042/v1".into(),
+            profile_path: Some(path),
+            runtime_url: Some(fake.origin()),
+            secret: crate::dsh_application::DshGatewaySecret::new("default-web-key".into()),
+        })
+        .unwrap();
+    assert_eq!(installed.phase, DshApplicationPhase::Installed);
+    assert!(installed.installed);
+    assert!(runner.commands.lock().unwrap().is_empty());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn editor_source_collision_blocks_install_before_external_writes() {
+    let (root, mut host, runner) = fixture("editor-source-collision");
+    let user = root.join("user");
+    let home = user.join(".dsh-editor");
+    let profile = home.join("profiles/dsh-editor");
+    fs::create_dir_all(&profile).unwrap();
+    fs::write(
+        profile.join("package.json"),
+        br#"{"dsh":{"profile":{"bundles":[]}}}"#,
+    )
+    .unwrap();
+    fs::write(
+        profile.join(".dsh-editor-owner.json"),
+        br#"{"app":"dsh-editor","schema":1}"#,
+    )
+    .unwrap();
+    let foreign = home.join("user-plugins/@open-console-gateway/dsh-plugin");
+    fs::create_dir_all(&foreign).unwrap();
+    fs::write(foreign.join("package.json"), b"foreign package").unwrap();
+    host.scan_user_home = Some(user);
+    let path = profile.display().to_string();
+    let inspected = host
+        .execute(DshApplicationHostRequest::Inspect {
+            gateway_v1_url: "http://127.0.0.1:9042/v1".into(),
+            profile_path: Some(path.clone()),
+            runtime_url: None,
+        })
+        .unwrap();
+    let error = host
+        .execute(DshApplicationHostRequest::Install {
+            expected_fingerprint: inspected.fingerprint.unwrap(),
+            gateway_v1_url: "http://127.0.0.1:9042/v1".into(),
+            profile_path: Some(path.clone()),
+            runtime_url: None,
+            secret: crate::dsh_application::DshGatewaySecret::new("test-key".into()),
+        })
+        .unwrap_err();
+    assert_eq!(
+        error.kind,
+        crate::dsh_application::DshApplicationErrorKind::Conflict
+    );
+    assert_eq!(
+        fs::read(foreign.join("package.json")).unwrap(),
+        b"foreign package"
+    );
+    assert!(
+        !host
+            .for_profile(Some(&path))
+            .unwrap()
+            .bootstrap_path()
+            .exists()
+    );
+    assert!(
+        !runner
+            .commands
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|command| command.args.get(3) == Some(&OsString::from("add")))
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn installation_is_not_gated_by_dsh_version() {
+    for version in [
+        "0.1.4",
+        "0.1.5-rc.1",
+        "0.1.5-rc.2",
+        "0.1.5",
+        "0.1.7-rc.2",
+        "0.2.0",
+        "dev-build",
+    ] {
+        let (root, host, _) = fixture_with_version("versions", version);
+        let gateway = "http://127.0.0.1:9042/v1";
+        let inspected = host.inspect(gateway).unwrap();
+        assert_eq!(inspected.phase, DshApplicationPhase::Ready, "{version}");
+        assert!(inspected.install_supported);
+        assert_eq!(inspected.version.as_deref(), Some(version));
+        let installed = host
+            .install(
+                inspected.fingerprint.as_deref().unwrap(),
+                gateway,
+                "test-key",
+            )
+            .unwrap();
+        assert_eq!(installed.phase, DshApplicationPhase::Installed, "{version}");
+        assert_eq!(installed.version.as_deref(), Some(version));
+        fs::remove_dir_all(root).unwrap();
+    }
 }
 
 #[test]
@@ -580,7 +870,8 @@ fn windows_cmd_launch_preserves_package_path_with_spaces_and_ampersand() {
              set \"NEXT=%~2\"\r\n\
              setlocal EnableDelayedExpansion\r\n\
              >\"{captured}\" echo(!ARG!\r\n\
-             >>\"{captured}\" echo(!NEXT!\r\n",
+             >>\"{captured}\" echo(!NEXT!\r\n\
+             >>\"{captured}\" echo(!DSH_HOME!\r\n",
             captured = captured.display()
         ),
     )
@@ -590,6 +881,7 @@ fn windows_cmd_launch_preserves_package_path_with_spaces_and_ampersand() {
         .run(&CommandSpec {
             executable: script,
             display_executable: "probe.cmd".into(),
+            dsh_home: root.clone(),
             args: vec![dsh_package_argument(&package), OsString::from("next-arg")],
             timeout: Duration::from_secs(10),
         })
@@ -608,7 +900,8 @@ fn windows_cmd_launch_preserves_package_path_with_spaces_and_ampersand() {
         lines,
         [
             package.to_str().expect("package path is Unicode"),
-            "next-arg"
+            "next-arg",
+            root.to_str().expect("DSH home path is Unicode")
         ]
     );
     fs::remove_dir_all(root).unwrap();
@@ -625,6 +918,7 @@ fn windows_cmd_launch_rejects_percent_exclamation_and_newlines() {
             .run(&CommandSpec {
                 executable: script.clone(),
                 display_executable: "probe.cmd".into(),
+                dsh_home: root.clone(),
                 args: vec![OsString::from(argument)],
                 timeout: Duration::from_secs(5),
             })
@@ -659,6 +953,7 @@ fn unix_shell_command(
     CommandSpec {
         executable: PathBuf::from("/bin/sh"),
         display_executable: display.into(),
+        dsh_home: std::env::temp_dir(),
         args,
         timeout,
     }
@@ -798,4 +1093,590 @@ fn unix_command_returns_short_process_output() {
     assert!(output.success, "stderr={}", output.stderr);
     assert_eq!(output.stdout.trim(), "hello-dsh");
     fs::remove_dir_all(root).unwrap();
+}
+
+const FIXTURE_GRANT_SECRET: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+fn write_browser_grant(home: &Path) {
+    fs::write(
+        home.join(".credentials.yaml"),
+        format!(
+            "version: 1\nrecords:\n  client-connection/browser-session:\n    kind: grant\n    payload:\n      version: 1\n      secret: {FIXTURE_GRANT_SECRET}\n  refs/other:\n    kind: ref\n    payload: {{}}\n"
+        ),
+    )
+    .unwrap();
+}
+
+fn ocg_bundle(installed: bool, enabled: bool, removable: bool) -> Value {
+    json!({
+        "name": PACKAGE_NAME,
+        "enabled": enabled,
+        "installed": installed,
+        "removable": removable,
+        "version": "0.1.0"
+    })
+}
+
+struct HttpPluginState {
+    bundles: Vec<Value>,
+    plugins: Vec<Value>,
+    inspect_problem: Option<String>,
+    install_application: String,
+    remove_application: String,
+    drop_install: bool,
+    wait_null: bool,
+    methods: Vec<String>,
+}
+
+impl HttpPluginState {
+    fn empty() -> Self {
+        Self {
+            bundles: Vec::new(),
+            plugins: Vec::new(),
+            inspect_problem: None,
+            install_application: "applied".into(),
+            remove_application: "applied".into(),
+            drop_install: false,
+            wait_null: false,
+            methods: Vec::new(),
+        }
+    }
+}
+
+struct HttpPluginFake {
+    port: u16,
+    state: Arc<Mutex<HttpPluginState>>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl HttpPluginFake {
+    fn start(state: HttpPluginState) -> Self {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        let state = Arc::new(Mutex::new(state));
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let thread_state = state.clone();
+        let thread_stop = stop.clone();
+        let thread = std::thread::spawn(move || {
+            while !thread_stop.load(std::sync::atomic::Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                        if let Ok((rpc_id, method, _body)) = read_rpc(&mut stream) {
+                            let mut state = thread_state.lock().unwrap();
+                            state.methods.push(method.clone());
+                            if method.ends_with("installBundle") && state.drop_install {
+                                state.drop_install = false;
+                                state.bundles = vec![ocg_bundle(true, true, true)];
+                                continue;
+                            }
+                            let value = match method.as_str() {
+                                "pluginManager/listBundles" => Value::Array(state.bundles.clone()),
+                                "pluginManager/listPlugins" => Value::Array(state.plugins.clone()),
+                                "pluginManager/inspect" => {
+                                    if let Some(problem) = &state.inspect_problem {
+                                        json!({ "status": "refused", "problem": problem })
+                                    } else {
+                                        json!({
+                                            "status": "accepted",
+                                            "kind": "path",
+                                            "name": PACKAGE_NAME,
+                                            "bundle": true
+                                        })
+                                    }
+                                }
+                                "pluginManager/installBundle" => {
+                                    let application = state.install_application.clone();
+                                    let stage = if application == "failed" {
+                                        "stop-profile"
+                                    } else {
+                                        "install"
+                                    };
+                                    if application != "failed" && application != "cancelled" {
+                                        state.bundles = vec![ocg_bundle(true, true, true)];
+                                        if application == "applied" {
+                                            state.plugins = vec![json!({
+                                                "moduleName": PACKAGE_NAME,
+                                                "enabled": true,
+                                                "fiberPhase": "active"
+                                            })];
+                                        } else {
+                                            state.plugins = Vec::new();
+                                        }
+                                    }
+                                    json!({
+                                        "changed": application != "failed" && application != "cancelled",
+                                        "application": application,
+                                        "stage": stage,
+                                        "target": PACKAGE_NAME,
+                                        "bundle": PACKAGE_NAME
+                                    })
+                                }
+                                "pluginManager/removeBundle" => {
+                                    let application = state.remove_application.clone();
+                                    if application == "applied" {
+                                        state
+                                            .bundles
+                                            .retain(|bundle| bundle["name"] != PACKAGE_NAME);
+                                        state
+                                            .plugins
+                                            .retain(|plugin| plugin["moduleName"] != PACKAGE_NAME);
+                                    }
+                                    json!({
+                                        "changed": application == "applied",
+                                        "application": application,
+                                        "stage": "remove",
+                                        "target": PACKAGE_NAME,
+                                        "bundle": PACKAGE_NAME
+                                    })
+                                }
+                                "pluginManager/waitForInstall" => {
+                                    if state.wait_null {
+                                        Value::Null
+                                    } else {
+                                        state.plugins = vec![json!({
+                                            "moduleName": PACKAGE_NAME,
+                                            "enabled": true,
+                                            "fiberPhase": "active"
+                                        })];
+                                        json!({
+                                            "changed": true,
+                                            "application": "applied",
+                                            "stage": "install",
+                                            "target": PACKAGE_NAME,
+                                            "bundle": PACKAGE_NAME
+                                        })
+                                    }
+                                }
+                                _ => Value::Null,
+                            };
+                            write_rpc(&mut stream, &rpc_id, value);
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        Self {
+            port,
+            state,
+            stop,
+            thread: Some(thread),
+        }
+    }
+
+    fn origin(&self) -> String {
+        format!("http://127.0.0.1:{}", self.port)
+    }
+
+    fn methods(&self) -> Vec<String> {
+        self.state.lock().unwrap().methods.clone()
+    }
+}
+
+impl Drop for HttpPluginFake {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = std::net::TcpStream::connect(("127.0.0.1", self.port));
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+fn read_rpc(stream: &mut std::net::TcpStream) -> std::io::Result<(String, String, Value)> {
+    use std::io::Read;
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 512];
+    loop {
+        let read = stream.read(&mut chunk)?;
+        if read == 0 {
+            break;
+        }
+        buf.extend_from_slice(&chunk[..read]);
+        if buf.windows(4).any(|window| window == b"\r\n\r\n") {
+            break;
+        }
+        if buf.len() > 64 * 1024 {
+            return Err(std::io::Error::other("headers too large"));
+        }
+    }
+    let header_end = buf
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or_else(|| std::io::Error::other("incomplete headers"))?;
+    let header_text = String::from_utf8_lossy(&buf[..header_end]);
+    let mut content_length = 0usize;
+    for line in header_text.split("\r\n") {
+        if let Some(value) = line
+            .split_once(':')
+            .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+            .map(|(_, value)| value.trim().parse().unwrap_or(0))
+        {
+            content_length = value;
+        }
+    }
+    let mut leftover = buf[header_end + 4..].to_vec();
+    while leftover.len() < content_length {
+        let read = stream.read(&mut chunk)?;
+        if read == 0 {
+            break;
+        }
+        leftover.extend_from_slice(&chunk[..read]);
+    }
+    leftover.truncate(content_length);
+    let body: Value = serde_json::from_slice(&leftover).unwrap_or(Value::Null);
+    let rpc_id = body
+        .get("rpcId")
+        .and_then(Value::as_str)
+        .unwrap_or("missing")
+        .to_owned();
+    let method = body
+        .get("method")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    Ok((rpc_id, method, body))
+}
+
+fn write_rpc(stream: &mut std::net::TcpStream, rpc_id: &str, value: Value) {
+    use std::io::Write;
+    let body = serde_json::to_vec(&json!({
+        "type": "server-response",
+        "rpcId": rpc_id,
+        "result": { "ok": true, "value": value }
+    }))
+    .unwrap();
+    let _ = stream.write_all(
+        format!(
+            "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .as_bytes(),
+    );
+    let _ = stream.write_all(&body);
+}
+
+#[test]
+fn http_web_install_uninstall_and_restart_do_not_use_desktop_cli() {
+    let (root, host, runner) = fixture("http-web");
+    write_browser_grant(&host.home);
+    let fake = HttpPluginFake::start(HttpPluginState::empty());
+    let gateway = "http://127.0.0.1:9042/v1";
+    let inspected = host
+        .execute(DshApplicationHostRequest::Inspect {
+            gateway_v1_url: gateway.into(),
+            profile_path: None,
+            runtime_url: Some(fake.origin()),
+        })
+        .unwrap();
+    assert_eq!(inspected.phase, DshApplicationPhase::Ready);
+    assert_eq!(
+        inspected.runtime_url.as_deref(),
+        Some(fake.origin().as_str())
+    );
+    let installed = host
+        .execute(DshApplicationHostRequest::Install {
+            expected_fingerprint: inspected.fingerprint.clone().unwrap(),
+            gateway_v1_url: gateway.into(),
+            profile_path: None,
+            runtime_url: Some(fake.origin()),
+            secret: crate::dsh_application::DshGatewaySecret::new("http-key".into()),
+        })
+        .unwrap();
+    assert_eq!(installed.phase, DshApplicationPhase::Installed);
+    assert!(installed.installed);
+    assert!(installed.enabled);
+    assert!(installed.uninstall_supported);
+    assert_eq!(installed.application, Some(DshApplicationOutcome::Applied));
+    assert_eq!(installed.version, None);
+    assert!(
+        installed
+            .target_paths
+            .iter()
+            .all(|path| !path.ends_with("package.json"))
+    );
+    assert_eq!(fs::read(host.bootstrap_path()).unwrap(), b"http-key");
+
+    fake.state.lock().unwrap().install_application = "restart-required".into();
+    fake.state.lock().unwrap().bundles = Vec::new();
+    fake.state.lock().unwrap().plugins = Vec::new();
+    let again = host
+        .execute(DshApplicationHostRequest::Inspect {
+            gateway_v1_url: gateway.into(),
+            profile_path: None,
+            runtime_url: Some(fake.origin()),
+        })
+        .unwrap();
+    let restarted = host
+        .execute(DshApplicationHostRequest::Install {
+            expected_fingerprint: again.fingerprint.unwrap(),
+            gateway_v1_url: gateway.into(),
+            profile_path: None,
+            runtime_url: Some(fake.origin()),
+            secret: crate::dsh_application::DshGatewaySecret::new("http-key-2".into()),
+        })
+        .unwrap();
+    assert_eq!(
+        restarted.application,
+        Some(DshApplicationOutcome::RestartRequired)
+    );
+    assert!(restarted.installed);
+
+    let ready_for_remove = host
+        .execute(DshApplicationHostRequest::Inspect {
+            gateway_v1_url: gateway.into(),
+            profile_path: None,
+            runtime_url: Some(fake.origin()),
+        })
+        .unwrap();
+    let removed = host
+        .execute(DshApplicationHostRequest::Uninstall {
+            expected_fingerprint: ready_for_remove.fingerprint.unwrap(),
+            gateway_v1_url: gateway.into(),
+            profile_path: None,
+            runtime_url: Some(fake.origin()),
+        })
+        .unwrap();
+    assert!(!removed.installed);
+    assert!(host.bootstrap_path().exists());
+    assert!(host.home.join(".credentials.yaml").exists());
+    assert!(runner.commands.lock().unwrap().is_empty());
+    assert!(
+        fake.methods()
+            .iter()
+            .any(|method| method == "pluginManager/installBundle")
+    );
+    assert!(
+        fake.methods()
+            .iter()
+            .any(|method| method == "pluginManager/removeBundle")
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn http_partial_failure_and_lost_response_keep_handoff_without_duplicate_install() {
+    let (root, host, runner) = fixture("http-partial");
+    write_browser_grant(&host.home);
+    let mut failed = HttpPluginState::empty();
+    failed.install_application = "failed".into();
+    let fake = HttpPluginFake::start(failed);
+    let gateway = "http://127.0.0.1:9042/v1";
+    let inspected = host
+        .execute(DshApplicationHostRequest::Inspect {
+            gateway_v1_url: gateway.into(),
+            profile_path: None,
+            runtime_url: Some(fake.origin()),
+        })
+        .unwrap();
+    let result = host
+        .execute(DshApplicationHostRequest::Install {
+            expected_fingerprint: inspected.fingerprint.unwrap(),
+            gateway_v1_url: gateway.into(),
+            profile_path: None,
+            runtime_url: Some(fake.origin()),
+            secret: crate::dsh_application::DshGatewaySecret::new("keep-handoff".into()),
+        })
+        .unwrap();
+    assert_eq!(result.application, Some(DshApplicationOutcome::Failed));
+    assert!(!result.installed);
+    assert!(
+        result
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("stop-profile"))
+    );
+    assert_eq!(fs::read(host.bootstrap_path()).unwrap(), b"keep-handoff");
+
+    let mut lost = HttpPluginState::empty();
+    lost.drop_install = true;
+    let lost_fake = HttpPluginFake::start(lost);
+    let before = host
+        .execute(DshApplicationHostRequest::Inspect {
+            gateway_v1_url: gateway.into(),
+            profile_path: None,
+            runtime_url: Some(lost_fake.origin()),
+        })
+        .unwrap();
+    let recovered = host
+        .execute(DshApplicationHostRequest::Install {
+            expected_fingerprint: before.fingerprint.unwrap(),
+            gateway_v1_url: gateway.into(),
+            profile_path: None,
+            runtime_url: Some(lost_fake.origin()),
+            secret: crate::dsh_application::DshGatewaySecret::new("lost-response".into()),
+        })
+        .unwrap();
+    assert!(recovered.installed);
+    assert_eq!(recovered.application, Some(DshApplicationOutcome::Applied));
+    assert_eq!(
+        lost_fake
+            .methods()
+            .iter()
+            .filter(|method| method.as_str() == "pluginManager/installBundle")
+            .count(),
+        1
+    );
+    assert!(
+        lost_fake
+            .methods()
+            .iter()
+            .any(|method| method == "pluginManager/waitForInstall")
+    );
+    assert!(runner.commands.lock().unwrap().is_empty());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn http_stale_fingerprint_and_wrong_url_have_no_runtime_side_effects() {
+    let (root, host, runner) = fixture("http-stale");
+    write_browser_grant(&host.home);
+    let fake = HttpPluginFake::start(HttpPluginState::empty());
+    let gateway = "http://127.0.0.1:9042/v1";
+    let inspected = host
+        .execute(DshApplicationHostRequest::Inspect {
+            gateway_v1_url: gateway.into(),
+            profile_path: None,
+            runtime_url: Some(fake.origin()),
+        })
+        .unwrap();
+    fake.state.lock().unwrap().bundles = vec![ocg_bundle(true, true, true)];
+    let error = host
+        .execute(DshApplicationHostRequest::Install {
+            expected_fingerprint: inspected.fingerprint.unwrap(),
+            gateway_v1_url: gateway.into(),
+            profile_path: None,
+            runtime_url: Some(fake.origin()),
+            secret: crate::dsh_application::DshGatewaySecret::new("stale-key".into()),
+        })
+        .unwrap_err();
+    assert_eq!(
+        error.kind,
+        crate::dsh_application::DshApplicationErrorKind::Conflict
+    );
+    assert!(!host.bootstrap_path().exists());
+    assert!(
+        !fake
+            .methods()
+            .iter()
+            .any(|method| method == "pluginManager/installBundle")
+    );
+
+    let rejected = host.execute(DshApplicationHostRequest::Inspect {
+        gateway_v1_url: gateway.into(),
+        profile_path: None,
+        runtime_url: Some("http://192.168.1.9:3080".into()),
+    });
+    assert_eq!(
+        rejected.unwrap_err().kind,
+        crate::dsh_application::DshApplicationErrorKind::Invalid
+    );
+    assert!(runner.commands.lock().unwrap().is_empty());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn http_wait_for_install_null_is_unknown_and_reinstall_targets_runtime_package_name() {
+    let gateway = "http://127.0.0.1:9042/v1";
+    let (unknown_root, unknown_host, unknown_runner) = fixture("http-wait-null");
+    write_browser_grant(&unknown_host.home);
+    let mut unknown = HttpPluginState::empty();
+    unknown.drop_install = true;
+    unknown.wait_null = true;
+    let fake = HttpPluginFake::start(unknown);
+    let inspected = unknown_host
+        .execute(DshApplicationHostRequest::Inspect {
+            gateway_v1_url: gateway.into(),
+            profile_path: None,
+            runtime_url: Some(fake.origin()),
+        })
+        .unwrap();
+    let lost = unknown_host
+        .execute(DshApplicationHostRequest::Install {
+            expected_fingerprint: inspected.fingerprint.unwrap(),
+            gateway_v1_url: gateway.into(),
+            profile_path: None,
+            runtime_url: Some(fake.origin()),
+            secret: crate::dsh_application::DshGatewaySecret::new("unknown-key".into()),
+        })
+        .unwrap();
+    assert_eq!(lost.application, None);
+    assert_eq!(
+        fake.methods()
+            .iter()
+            .filter(|method| method.as_str() == "pluginManager/installBundle")
+            .count(),
+        1
+    );
+    assert!(unknown_runner.commands.lock().unwrap().is_empty());
+    fs::remove_dir_all(unknown_root).unwrap();
+
+    let (collision_root, collision_host, collision_runner) = fixture("http-collision");
+    write_browser_grant(&collision_host.home);
+    let mut present = HttpPluginState::empty();
+    present.bundles = vec![ocg_bundle(true, true, true)];
+    let collision = HttpPluginFake::start(present);
+    let seen = collision_host
+        .execute(DshApplicationHostRequest::Inspect {
+            gateway_v1_url: gateway.into(),
+            profile_path: None,
+            runtime_url: Some(collision.origin()),
+        })
+        .unwrap();
+    let replaced = collision_host
+        .execute(DshApplicationHostRequest::Install {
+            expected_fingerprint: seen.fingerprint.unwrap(),
+            gateway_v1_url: gateway.into(),
+            profile_path: None,
+            runtime_url: Some(collision.origin()),
+            secret: crate::dsh_application::DshGatewaySecret::new("foreign-key".into()),
+        })
+        .unwrap();
+    assert_eq!(replaced.application, Some(DshApplicationOutcome::Applied));
+    assert!(
+        collision
+            .methods()
+            .iter()
+            .any(|method| method == "pluginManager/installBundle")
+    );
+    assert!(collision_host.bootstrap_path().exists());
+    assert!(collision_runner.commands.lock().unwrap().is_empty());
+    fs::remove_dir_all(collision_root).unwrap();
+
+    let (cancel_root, cancel_host, cancel_runner) = fixture("http-cancelled");
+    write_browser_grant(&cancel_host.home);
+    let mut cancelled = HttpPluginState::empty();
+    cancelled.install_application = "cancelled".into();
+    let cancel_fake = HttpPluginFake::start(cancelled);
+    fs::create_dir_all(cancel_host.bootstrap_path().parent().unwrap()).unwrap();
+    fs::write(cancel_host.bootstrap_path(), b"prior-live").unwrap();
+    let ready = cancel_host
+        .execute(DshApplicationHostRequest::Inspect {
+            gateway_v1_url: gateway.into(),
+            profile_path: None,
+            runtime_url: Some(cancel_fake.origin()),
+        })
+        .unwrap();
+    let cancelled_result = cancel_host
+        .execute(DshApplicationHostRequest::Install {
+            expected_fingerprint: ready.fingerprint.unwrap(),
+            gateway_v1_url: gateway.into(),
+            profile_path: None,
+            runtime_url: Some(cancel_fake.origin()),
+            secret: crate::dsh_application::DshGatewaySecret::new("cancelled-key".into()),
+        })
+        .unwrap();
+    assert_eq!(
+        cancelled_result.application,
+        Some(DshApplicationOutcome::Cancelled)
+    );
+    assert_eq!(
+        fs::read(cancel_host.bootstrap_path()).unwrap(),
+        b"prior-live"
+    );
+    assert!(cancel_runner.commands.lock().unwrap().is_empty());
+    fs::remove_dir_all(cancel_root).unwrap();
 }

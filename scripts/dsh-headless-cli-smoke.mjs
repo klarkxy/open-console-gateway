@@ -1,13 +1,16 @@
 #!/usr/bin/env node
 
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { access, mkdtemp, mkdir, readFile, rm } from "node:fs/promises";
+import { execFile, spawn } from "node:child_process";
+import { access, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { once } from "node:events";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const executable = join(
@@ -20,6 +23,7 @@ const packageName = "@open-console-gateway/dsh-plugin";
 const primaryKeyId = "00000000-0000-0000-0000-000000000001";
 const expectUnsupported = process.argv.includes("--expect-unsupported");
 const useRelativeRoots = process.argv.includes("--relative-roots");
+const scanUserHomes = process.argv.includes("--scan-user-homes");
 
 async function freePort() {
   const server = createServer();
@@ -80,10 +84,48 @@ async function main() {
   await access(executable);
   const root = await mkdtemp(join(tmpdir(), "ocg-dsh-headless-"));
   const data = join(root, "data");
-  const home = join(root, "dsh-home");
+  const home = join(root, scanUserHomes ? ".dsh" : "dsh-home");
+  const secondHome = scanUserHomes ? join(root, ".dsh-editor") : home;
   await Promise.all([mkdir(data), mkdir(home)]);
+  if (scanUserHomes) await mkdir(secondHome);
+  if (!expectUnsupported) {
+    const dshBin = process.platform === "win32"
+      ? join(process.env.APPDATA ?? "", "npm", "node_modules", "@deepseek-ai", "dsh", "lib", "bin.js")
+      : "dsh";
+    const executable = process.platform === "win32" ? process.execPath : dshBin;
+    const prefix = process.platform === "win32" ? [dshBin] : [];
+    for (const [targetHome, args] of [
+      [home, ["--profile", "web", "--dump-config"]],
+      [home, ["--profile", "coding", "--from-default-profile", "web", "--dump-config"]],
+      ...(scanUserHomes ? [
+        [secondHome, ["--profile", "web", "--dump-config"]],
+        [secondHome, ["--profile", "dsh-editor", "--from-default-profile", "web", "--dump-config"]],
+      ] : []),
+    ]) {
+      await execFileAsync(executable, [...prefix, ...args], {
+        env: { ...process.env, DSH_HOME: targetHome },
+        windowsHide: true,
+        timeout: 120_000,
+        maxBuffer: 2 * 1024 * 1024,
+      });
+    }
+    if (scanUserHomes) {
+      await writeFile(
+        join(secondHome, "profiles", "dsh-editor", ".dsh-editor-owner.json"),
+        JSON.stringify({ app: "dsh-editor", schema: 1 }),
+      );
+    }
+  }
   const port = await freePort();
   const output = { text: "" };
+  const childEnv = { ...process.env };
+  if (scanUserHomes) {
+    delete childEnv.DSH_HOME;
+    childEnv.USERPROFILE = root;
+    childEnv.HOME = root;
+  } else {
+    childEnv.DSH_HOME = useRelativeRoots ? "dsh-home" : home;
+  }
   const child = spawn(
     executable,
     [
@@ -99,7 +141,7 @@ async function main() {
     ],
     {
       cwd: useRelativeRoots ? root : repo,
-      env: { ...process.env, DSH_HOME: useRelativeRoots ? "dsh-home" : home },
+      env: childEnv,
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
     },
@@ -127,13 +169,14 @@ async function main() {
     assert.equal(inspected.detected, true);
     assert.equal(inspected.installSupported, true);
     assert.ok(inspected.fingerprint);
-    assert.equal(inspected.version, "0.1.5-rc.2");
+    assert.ok(inspected.version?.length > 0);
 
     const installedResponse = await fetch(endpoint, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         keyId: primaryKeyId,
+        profilePath: inspected.selectedProfilePath,
         expectedFingerprint: inspected.fingerprint,
         expectedRevision: inspected.revision.revision,
         processGeneration: inspected.revision.processGeneration,
@@ -162,12 +205,51 @@ async function main() {
       ),
     );
 
+    const codingPath = join(secondHome, "profiles", scanUserHomes ? "dsh-editor" : "coding");
+    const codingResponse = await fetch(`${endpoint}?profilePath=${encodeURIComponent(codingPath)}`);
+    assert.equal(codingResponse.status, 200);
+    const coding = await codingResponse.json();
+    assert.equal(comparablePath(coding.selectedProfilePath), comparablePath(codingPath));
+    assert.equal(coding.status, "ready");
+    assert.ok(coding.discoveredProfiles.some((profile) => comparablePath(profile.path) === comparablePath(codingPath)));
+    const codingInstallResponse = await fetch(endpoint, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        keyId: primaryKeyId,
+        profilePath: codingPath,
+        expectedFingerprint: coding.fingerprint,
+        expectedRevision: coding.revision.revision,
+        processGeneration: coding.revision.processGeneration,
+      }),
+    });
+    if (codingInstallResponse.status !== 200) {
+      throw new Error(`selected DSH install returned HTTP ${codingInstallResponse.status}: ${await codingInstallResponse.text()}`);
+    }
+    const codingInstalled = await codingInstallResponse.json();
+    assert.equal(codingInstalled.status, "installed");
+    assert.equal(comparablePath(codingInstalled.selectedProfilePath), comparablePath(codingPath));
+    const codingManifest = JSON.parse(await readFile(join(codingPath, "package.json"), "utf8"));
+    assert.ok(codingManifest.dependencies?.[packageName]);
+    assert.ok(codingManifest.dsh?.profile?.bundles?.includes(packageName));
+    assert.notDeepEqual(installed.targetPaths, codingInstalled.targetPaths);
+    if (scanUserHomes) {
+      const editorState = JSON.parse(await readFile(join(secondHome, "dsh-plugins.json"), "utf8"));
+      assert.ok(editorState.installed.some((item) => item.name === packageName && item.spec === "ocg-manager"));
+      await access(join(secondHome, "user-plugins", "@open-console-gateway", "dsh-plugin", "index.js"));
+    }
+    const webAfterResponse = await fetch(endpoint);
+    assert.equal(webAfterResponse.status, 200);
+    assert.equal((await webAfterResponse.json()).status, "installed");
+
     process.stdout.write(`${JSON.stringify({
       status: "pass",
       runtime: "native-headless-cli",
       dshVersion: installed.version,
       installed: true,
       activationRequired: true,
+      selectedProfileInstalled: true,
+      scannedUserHomes: scanUserHomes,
       isolatedDshHome: true,
       relativeRoots: useRelativeRoots,
       realUserHomeTouched: false,

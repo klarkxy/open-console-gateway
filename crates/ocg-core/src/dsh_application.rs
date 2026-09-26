@@ -18,8 +18,25 @@ pub enum DshApplicationPhase {
     Conflict,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DshApplicationOutcome {
+    Applied,
+    RestartRequired,
+    Overridden,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DshDiscoveredProfile {
+    pub home: String,
+    pub name: String,
+    pub path: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DshApplicationInspection {
+    pub selected_profile_path: String,
     pub phase: DshApplicationPhase,
     pub detected: bool,
     pub installed: bool,
@@ -28,12 +45,18 @@ pub struct DshApplicationInspection {
     pub version: Option<String>,
     pub detail: Option<String>,
     pub target_paths: Vec<String>,
+    pub discovered_profiles: Vec<DshDiscoveredProfile>,
     pub fingerprint: Option<String>,
+    pub runtime_url: Option<String>,
+    pub uninstall_supported: bool,
+    pub enabled: bool,
+    pub application: Option<DshApplicationOutcome>,
 }
 
 impl DshApplicationInspection {
     pub fn unsupported() -> Self {
         Self {
+            selected_profile_path: String::new(),
             phase: DshApplicationPhase::UnsupportedRuntime,
             detected: false,
             installed: false,
@@ -45,7 +68,12 @@ impl DshApplicationInspection {
                     .into(),
             ),
             target_paths: Vec::new(),
+            discovered_profiles: Vec::new(),
             fingerprint: None,
+            runtime_url: None,
+            uninstall_supported: false,
+            enabled: false,
+            application: None,
         }
     }
 }
@@ -75,11 +103,21 @@ impl fmt::Debug for DshGatewaySecret {
 pub enum DshApplicationHostRequest {
     Inspect {
         gateway_v1_url: String,
+        profile_path: Option<String>,
+        runtime_url: Option<String>,
     },
     Install {
         expected_fingerprint: String,
         gateway_v1_url: String,
+        profile_path: Option<String>,
+        runtime_url: Option<String>,
         secret: DshGatewaySecret,
+    },
+    Uninstall {
+        expected_fingerprint: String,
+        gateway_v1_url: String,
+        profile_path: Option<String>,
+        runtime_url: Option<String>,
     },
 }
 

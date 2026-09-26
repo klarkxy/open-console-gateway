@@ -8,8 +8,8 @@
 //! belong to the plugin.
 
 use crate::dsh_application::{
-    DshApplicationError, DshApplicationHostRequest, DshApplicationInspection, DshApplicationPhase,
-    DshApplicationResult,
+    DshApplicationError, DshApplicationHostRequest, DshApplicationInspection,
+    DshApplicationOutcome, DshApplicationPhase, DshApplicationResult, DshDiscoveredProfile,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -30,6 +30,8 @@ use std::time::{Duration, Instant};
 
 const PACKAGE_NAME: &str = "@open-console-gateway/dsh-plugin";
 const PROFILE: &str = "web";
+const DEFAULT_WEB_RUNTIME: &str = "http://127.0.0.1:3080";
+const DEFAULT_DESKTOP_RUNTIME: &str = "http://127.0.0.1:19387";
 const PACKAGE_ROOT: &str = "applications/dsh/packages-v1";
 const BOOTSTRAP_FILE: &str = "applications/dsh/credential-handoff";
 const BOOTSTRAP_CLAIM_MARKER: &str = ".claimed-";
@@ -62,13 +64,19 @@ const PACKAGE_FILES: &[(&str, &str)] = &[
 ];
 
 pub fn register(core: &crate::state::CoreState) {
-    let home = std::env::var_os("DSH_HOME")
+    let configured_home = std::env::var_os("DSH_HOME")
         .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| user_home().join(".dsh"));
+        .map(PathBuf::from);
+    let user_home = absolute_host_path(user_home());
+    let home = configured_home
+        .clone()
+        .unwrap_or_else(|| user_home.join(".dsh"));
     let host = Arc::new(DshDesktopHost {
         data_dir: absolute_host_path(core.data_dir()),
         home: absolute_host_path(home),
+        profile: PROFILE.into(),
+        legacy_bootstrap: true,
+        scan_user_home: configured_home.is_none().then_some(user_home),
         runner: Arc::new(ProcessCommandRunner),
         dsh_executable: None,
         operation: Mutex::new(()),
@@ -88,6 +96,9 @@ fn absolute_host_path(path: PathBuf) -> PathBuf {
 struct DshDesktopHost {
     data_dir: PathBuf,
     home: PathBuf,
+    profile: String,
+    legacy_bootstrap: bool,
+    scan_user_home: Option<PathBuf>,
     runner: Arc<dyn CommandRunner>,
     dsh_executable: Option<PathBuf>,
     operation: Mutex<()>,
@@ -103,23 +114,114 @@ impl DshDesktopHost {
             .lock()
             .map_err(|_| internal("DSH application operation lock is poisoned"))?;
         match request {
-            DshApplicationHostRequest::Inspect { gateway_v1_url } => self.inspect(&gateway_v1_url),
+            DshApplicationHostRequest::Inspect {
+                gateway_v1_url,
+                profile_path,
+                runtime_url,
+            } => {
+                let host = self.for_profile(profile_path.as_deref())?;
+                if host.uses_http_runtime(runtime_url.as_deref()) {
+                    host.inspect_http(&gateway_v1_url, runtime_url.as_deref(), None)
+                } else {
+                    host.inspect(&gateway_v1_url)
+                }
+            }
             DshApplicationHostRequest::Install {
                 expected_fingerprint,
                 gateway_v1_url,
+                profile_path,
+                runtime_url,
                 secret,
-            } => self.install(
-                &expected_fingerprint,
-                &gateway_v1_url,
-                secret.expose_to_host(),
-            ),
+            } => {
+                let host = self.for_profile(profile_path.as_deref())?;
+                if host.uses_http_runtime(runtime_url.as_deref()) {
+                    host.install_http(
+                        &expected_fingerprint,
+                        &gateway_v1_url,
+                        runtime_url.as_deref(),
+                        secret.expose_to_host(),
+                    )
+                } else {
+                    host.install(
+                        &expected_fingerprint,
+                        &gateway_v1_url,
+                        secret.expose_to_host(),
+                    )
+                }
+            }
+            DshApplicationHostRequest::Uninstall {
+                expected_fingerprint,
+                gateway_v1_url,
+                profile_path,
+                runtime_url,
+            } => {
+                let host = self.for_profile(profile_path.as_deref())?;
+                if host.uses_http_runtime(runtime_url.as_deref()) {
+                    host.uninstall_http(
+                        &expected_fingerprint,
+                        &gateway_v1_url,
+                        runtime_url.as_deref(),
+                    )
+                } else {
+                    Err(DshApplicationError::precondition(
+                        "this DSH target has no running-address uninstall; supply a runtime URL",
+                    ))
+                }
+            }
         }
+    }
+
+    fn for_profile(&self, requested: Option<&str>) -> DshApplicationResult<Self> {
+        let (home, profile) = match requested {
+            None => (self.home.clone(), self.profile.clone()),
+            Some(path)
+                if same_lexical_path(
+                    Path::new(path),
+                    &self.home.join("profiles").join(&self.profile),
+                ) =>
+            {
+                (self.home.clone(), self.profile.clone())
+            }
+            Some(path) => {
+                let found = self
+                    .discovered_profiles()
+                    .into_iter()
+                    .find(|candidate| {
+                        same_lexical_path(Path::new(&candidate.path), Path::new(path))
+                    })
+                    .ok_or_else(|| {
+                        DshApplicationError::precondition(
+                            "selected DSH profile was not found in the allowed homes",
+                        )
+                    })?;
+                (PathBuf::from(found.home), found.name)
+            }
+        };
+        let legacy_bootstrap = same_lexical_path(&home, &self.home) && profile == self.profile;
+        Ok(Self {
+            data_dir: self.data_dir.clone(),
+            home,
+            profile,
+            legacy_bootstrap,
+            scan_user_home: self.scan_user_home.clone(),
+            runner: self.runner.clone(),
+            dsh_executable: self.dsh_executable.clone(),
+            operation: Mutex::new(()),
+        })
     }
 
     fn inspect(&self, gateway_v1_url: &str) -> DshApplicationResult<DshApplicationInspection> {
         let target_paths = self.target_paths();
+        let discovered_profiles = self.discovered_profiles();
+        let selected_profile_path = self
+            .home
+            .join("profiles")
+            .join(&self.profile)
+            .display()
+            .to_string();
         let Some(executable) = self.resolve_dsh_executable() else {
             return Ok(DshApplicationInspection {
+                selected_profile_path,
                 phase: DshApplicationPhase::NotDetected,
                 detected: false,
                 installed: false,
@@ -128,25 +230,17 @@ impl DshDesktopHost {
                 version: None,
                 detail: Some("DSH was not found on PATH".into()),
                 target_paths,
+                discovered_profiles,
                 fingerprint: None,
+                runtime_url: None,
+                uninstall_supported: false,
+                enabled: false,
+                application: None,
             });
         };
         let version = self.read_version(&executable)?;
-        if !compatible_version(&version) {
-            return Ok(DshApplicationInspection {
-                phase: DshApplicationPhase::Incompatible,
-                detected: true,
-                installed: false,
-                install_supported: false,
-                activation_required: false,
-                version: Some(version.clone()),
-                detail: Some(format!(
-                    "DSH {version} is not a supported 0.1.5-rc.1 or 0.1.5-rc.2 build"
-                )),
-                target_paths,
-                fingerprint: Some(self.fingerprint(&executable, &version, gateway_v1_url)?),
-            });
-        }
+        // Version is diagnostic/CAS evidence, not an installation allowlist.
+        // Let DSH's plugin command and registration readback determine success.
 
         let package = self.render_package(gateway_v1_url)?;
         let registration = self.registration_state(&package);
@@ -157,7 +251,7 @@ impl DshDesktopHost {
                 DshApplicationPhase::Ready,
                 false,
                 true,
-                Some("Ready to install the OCG provider into the DSH web profile".into()),
+                Some(format!("Ready to install the OCG provider into the DSH {} profile", self.profile)),
             ),
             RegistrationState::Exact if handoff_pending => (
                 DshApplicationPhase::Installed,
@@ -171,6 +265,18 @@ impl DshDesktopHost {
                 true,
                 Some("Installed. DSH refreshes the authenticated OCG model catalog on use".into()),
             ),
+            RegistrationState::EditorExact if handoff_pending => (
+                DshApplicationPhase::Installed,
+                true,
+                true,
+                Some("Installed in DSH Editor. Restart Editor once to import the selected Key".into()),
+            ),
+            RegistrationState::EditorExact => (
+                DshApplicationPhase::Installed,
+                true,
+                true,
+                Some("Installed in the DSH Editor managed profile. Restart Editor to load the OCG provider".into()),
+            ),
             RegistrationState::OwnedOlder(_) => (
                 DshApplicationPhase::Ready,
                 false,
@@ -182,6 +288,7 @@ impl DshDesktopHost {
             }
         };
         Ok(DshApplicationInspection {
+            selected_profile_path,
             phase,
             detected: true,
             installed,
@@ -190,8 +297,430 @@ impl DshDesktopHost {
             version: Some(version),
             detail,
             target_paths,
+            discovered_profiles,
             fingerprint,
+            runtime_url: None,
+            uninstall_supported: false,
+            enabled: installed,
+            application: None,
         })
+    }
+
+    fn uses_http_runtime(&self, runtime_url: Option<&str>) -> bool {
+        runtime_url.is_some_and(|value| !value.trim().is_empty())
+            || self.profile == "web"
+            || self.profile == "desktop"
+    }
+
+    fn resolve_runtime_url(&self, runtime_url: Option<&str>) -> DshApplicationResult<String> {
+        let supplied = runtime_url.map(str::trim).filter(|value| !value.is_empty());
+        let raw = match supplied {
+            Some(url) => url.to_owned(),
+            None => match self.profile.as_str() {
+                "web" => DEFAULT_WEB_RUNTIME.to_owned(),
+                "desktop" => DEFAULT_DESKTOP_RUNTIME.to_owned(),
+                _ => {
+                    return Err(DshApplicationError::invalid(
+                        "this DSH target needs an explicit runtime URL",
+                    ));
+                }
+            },
+        };
+        let origin = runtime::DshRuntimeOrigin::parse(&raw).map_err(|_| {
+            DshApplicationError::invalid("DSH runtime URL is not a permitted loopback HTTP origin")
+        })?;
+        Ok(origin.as_str().to_owned())
+    }
+
+    fn inspect_http(
+        &self,
+        gateway_v1_url: &str,
+        runtime_url: Option<&str>,
+        observed: Option<HttpObservedChange>,
+    ) -> DshApplicationResult<DshApplicationInspection> {
+        let runtime_url = self.resolve_runtime_url(runtime_url)?;
+        let origin = runtime::DshRuntimeOrigin::parse(&runtime_url).map_err(|_| {
+            DshApplicationError::invalid("DSH runtime URL is not a permitted loopback HTTP origin")
+        })?;
+        let target_paths = self.http_target_paths();
+        let discovered_profiles = self.discovered_profiles();
+        let selected_profile_path = self
+            .home
+            .join("profiles")
+            .join(&self.profile)
+            .display()
+            .to_string();
+        let grant = auth::read_browser_session_grant(&self.home);
+        let grant_digest = grant.as_ref().ok().map(|secret| secret.digest());
+        let fingerprint =
+            Some(self.runtime_fingerprint(gateway_v1_url, origin.as_str(), grant_digest, None)?);
+        let mut inspection = DshApplicationInspection {
+            selected_profile_path,
+            phase: DshApplicationPhase::NotDetected,
+            detected: false,
+            installed: false,
+            install_supported: false,
+            activation_required: false,
+            version: None,
+            detail: None,
+            target_paths,
+            discovered_profiles,
+            fingerprint,
+            runtime_url: Some(origin.as_str().to_owned()),
+            uninstall_supported: false,
+            enabled: false,
+            application: None,
+        };
+        let secret = match grant {
+            Ok(secret) => secret,
+            Err(auth::BrowserGrantError::Missing) => {
+                inspection.detail = Some(auth::BrowserGrantError::Missing.message().into());
+                return Ok(inspection);
+            }
+            Err(auth::BrowserGrantError::Unsupported) => {
+                inspection.phase = DshApplicationPhase::Incompatible;
+                inspection.detail = Some(auth::BrowserGrantError::Unsupported.message().into());
+                return Ok(inspection);
+            }
+        };
+        let cookie = secret.mint_cookie(&origin).map_err(|_| {
+            DshApplicationError::precondition(auth::BrowserGrantError::Unsupported.message())
+        })?;
+        let client = match runtime::DshRuntimeClient::connect_session(origin.as_str(), cookie) {
+            Ok(client) => client,
+            Err(error) if error.kind == runtime::DshRuntimeErrorKind::Invalid => {
+                return Err(DshApplicationError::invalid(error.message));
+            }
+            Err(_) => {
+                inspection.detail = Some("DSH running address is not reachable".into());
+                return Ok(inspection);
+            }
+        };
+        let bundles = match client.list_bundles() {
+            Ok(bundles) => bundles,
+            Err(error) => return Ok(self.http_connect_failure(inspection, error)),
+        };
+        let plugins = match client.list_plugins() {
+            Ok(plugins) => plugins,
+            Err(error) => return Ok(self.http_connect_failure(inspection, error)),
+        };
+        let bundle = bundles.iter().find(|bundle| bundle.name == PACKAGE_NAME);
+        let plugin = plugins
+            .iter()
+            .find(|plugin| plugin.module_name == PACKAGE_NAME);
+        let handoff_pending = credential_handoff_pending(&self.bootstrap_path());
+        inspection.detected = true;
+        inspection.fingerprint = Some(self.runtime_fingerprint(
+            gateway_v1_url,
+            origin.as_str(),
+            grant_digest,
+            bundle,
+        )?);
+        if let Some(bundle) = bundle {
+            inspection.installed = bundle.installed;
+            inspection.enabled = bundle.enabled;
+            inspection.uninstall_supported = bundle.installed && bundle.removable;
+            inspection.install_supported = true;
+            let restart_required = bundle.installed
+                && bundle.enabled
+                && plugin.is_none_or(|plugin| plugin.fiber_phase.as_deref() != Some("active"));
+            inspection.activation_required = inspection.installed && handoff_pending;
+            inspection.phase = if inspection.installed {
+                DshApplicationPhase::Installed
+            } else {
+                DshApplicationPhase::Ready
+            };
+            inspection.application = if restart_required {
+                Some(DshApplicationOutcome::RestartRequired)
+            } else {
+                None
+            };
+            inspection.detail = Some(if !inspection.installed {
+                format!("Ready to install the OCG provider at {}", origin.as_str())
+            } else if handoff_pending {
+                "Installed. Start or restart DSH once to import the selected Key".into()
+            } else if restart_required {
+                "Installed. Restart DSH to load the OCG plugin".into()
+            } else {
+                "Installed. DSH refreshes the authenticated OCG model catalog on use".into()
+            });
+        } else {
+            inspection.phase = DshApplicationPhase::Ready;
+            inspection.install_supported = true;
+            inspection.detail = Some(format!(
+                "Ready to install the OCG provider at {}",
+                origin.as_str()
+            ));
+        }
+        if let Some(observed) = observed {
+            apply_observed_change(&mut inspection, observed);
+        }
+        Ok(inspection)
+    }
+
+    fn http_connect_failure(
+        &self,
+        mut inspection: DshApplicationInspection,
+        error: runtime::DshRuntimeError,
+    ) -> DshApplicationInspection {
+        inspection.detected = false;
+        inspection.install_supported = false;
+        inspection.uninstall_supported = false;
+        inspection.detail = Some(
+            match error.kind {
+                runtime::DshRuntimeErrorKind::Unauthenticated
+                | runtime::DshRuntimeErrorKind::Forbidden => {
+                    "DSH running address refused the local session"
+                }
+                _ => "DSH running address is not reachable",
+            }
+            .into(),
+        );
+        inspection
+    }
+
+    fn runtime_fingerprint(
+        &self,
+        gateway_v1_url: &str,
+        runtime_url: &str,
+        grant_digest: Option<[u8; 32]>,
+        bundle: Option<&runtime::DshRuntimeBundle>,
+    ) -> DshApplicationResult<String> {
+        let package = self.render_package(gateway_v1_url)?;
+        let bootstrap = read_optional(&self.bootstrap_path())?;
+        let mut hash = Sha256::new();
+        hash.update(b"open-console-gateway-dsh-runtime-v1\0");
+        hash.update(self.home.to_string_lossy().as_bytes());
+        hash.update([0]);
+        hash.update(self.profile.as_bytes());
+        hash.update([0]);
+        hash.update(runtime_url.as_bytes());
+        hash.update([0]);
+        hash.update(package.digest.as_bytes());
+        hash.update([0]);
+        hash.update(grant_digest.unwrap_or([0u8; 32]));
+        hash.update([0]);
+        hash.update(Sha256::digest(bootstrap.as_deref().unwrap_or_default()));
+        if let Some(bundle) = bundle {
+            hash.update(bundle.name.as_bytes());
+            hash.update([
+                u8::from(bundle.installed),
+                u8::from(bundle.enabled),
+                u8::from(bundle.removable),
+            ]);
+            hash.update(bundle.version.as_deref().unwrap_or_default().as_bytes());
+        }
+        Ok(format!("{:x}", hash.finalize()))
+    }
+
+    fn install_http(
+        &self,
+        expected_fingerprint: &str,
+        gateway_v1_url: &str,
+        runtime_url: Option<&str>,
+        secret: &str,
+    ) -> DshApplicationResult<DshApplicationInspection> {
+        if expected_fingerprint.is_empty() {
+            return Err(DshApplicationError::invalid(
+                "expectedFingerprint is required",
+            ));
+        }
+        if secret.is_empty() || secret.contains(['\0', '\r', '\n']) {
+            return Err(DshApplicationError::invalid(
+                "the selected Gateway Key cannot be handed to DSH",
+            ));
+        }
+        let before = self.inspect_http(gateway_v1_url, runtime_url, None)?;
+        if before.fingerprint.as_deref() != Some(expected_fingerprint) {
+            return Err(DshApplicationError::conflict(
+                "DSH installation state changed after it was inspected",
+            ));
+        }
+        if !before.install_supported {
+            return Err(DshApplicationError::precondition(
+                before
+                    .detail
+                    .unwrap_or_else(|| "DSH installation is unavailable".into()),
+            ));
+        }
+        let package = self.render_package(gateway_v1_url)?;
+        package.materialize()?;
+        let origin = before
+            .runtime_url
+            .as_deref()
+            .ok_or_else(|| DshApplicationError::invalid("DSH runtime URL is missing"))?;
+        let grant = auth::read_browser_session_grant(&self.home)
+            .map_err(|error| DshApplicationError::precondition(error.message()))?;
+        let parsed = runtime::DshRuntimeOrigin::parse(origin).map_err(|_| {
+            DshApplicationError::invalid("DSH runtime URL is not a permitted loopback HTTP origin")
+        })?;
+        let cookie = grant.mint_cookie(&parsed).map_err(|_| {
+            DshApplicationError::precondition(auth::BrowserGrantError::Unsupported.message())
+        })?;
+        let client =
+            runtime::DshRuntimeClient::connect_session(origin, cookie).map_err(|error| {
+                if error.kind == runtime::DshRuntimeErrorKind::Invalid {
+                    DshApplicationError::invalid(error.message)
+                } else {
+                    DshApplicationError::precondition("DSH running address is not reachable")
+                }
+            })?;
+        let spec = package.path.to_string_lossy().into_owned();
+        match client.inspect(&spec) {
+            Ok(runtime::DshSpecInspection::Accepted { .. }) => {}
+            Ok(runtime::DshSpecInspection::Refused { problem })
+                if problem == "already-installed" => {}
+            Ok(runtime::DshSpecInspection::Refused { .. }) => {
+                return Err(DshApplicationError::precondition(
+                    "DSH refused the OCG plugin source",
+                ));
+            }
+            Err(error) if error.kind == runtime::DshRuntimeErrorKind::Unauthenticated => {
+                return Err(DshApplicationError::precondition(
+                    "DSH running address refused the local session",
+                ));
+            }
+            Err(_) => {
+                return Err(DshApplicationError::precondition(
+                    "DSH running address is not reachable",
+                ));
+            }
+        }
+        let bootstrap = self.bootstrap_path();
+        let bootstrap_before = read_optional(&bootstrap)?;
+        write_private_atomic(&self.data_dir, &bootstrap, secret.as_bytes())?;
+        let request_id = uuid::Uuid::new_v4().to_string();
+        // DSH identifies unchanged local dependencies by an explicit package
+        // name; a repeated bare directory spec is rejected as ambiguous.
+        let install_spec = if before.installed {
+            format!("{PACKAGE_NAME}@file:{}", spec.replace('\\', "/"))
+        } else {
+            spec
+        };
+        let change = match client.install_bundle(
+            &install_spec,
+            runtime::DshInstallOptions {
+                enabled: Some(true),
+                request_id: Some(request_id.clone()),
+            },
+        ) {
+            Ok(result) => result.change,
+            Err(error) if error.is_unknown() => {
+                match error.request_id().map(|id| client.wait_for_install(id)) {
+                    Some(Ok(Some(change))) => change,
+                    Some(Ok(None)) | Some(Err(_)) | None => {
+                        let mut inspection =
+                            self.inspect_http(gateway_v1_url, runtime_url, None)?;
+                        inspection.application = None;
+                        inspection.detail = Some(
+                            "DSH install response was lost; the running address was rechecked without repeating install"
+                                .into(),
+                        );
+                        return Ok(inspection);
+                    }
+                }
+            }
+            Err(error) if error.kind == runtime::DshRuntimeErrorKind::Remote => {
+                return Ok(self.inspect_http(
+                    gateway_v1_url,
+                    runtime_url,
+                    Some(HttpObservedChange::failed(
+                        None,
+                        error.remote_code.as_deref(),
+                    )),
+                )?);
+            }
+            Err(_) => {
+                let mut inspection = self.inspect_http(gateway_v1_url, runtime_url, None)?;
+                inspection.application = None;
+                inspection.detail = Some("DSH running address did not confirm the install".into());
+                return Ok(inspection);
+            }
+        };
+        if is_definitive_no_side_effect(&change) {
+            restore_live_if_present(&self.data_dir, &bootstrap, bootstrap_before.as_deref())?;
+        }
+        self.inspect_http(
+            gateway_v1_url,
+            runtime_url,
+            Some(HttpObservedChange::from_change(&change)),
+        )
+    }
+
+    fn uninstall_http(
+        &self,
+        expected_fingerprint: &str,
+        gateway_v1_url: &str,
+        runtime_url: Option<&str>,
+    ) -> DshApplicationResult<DshApplicationInspection> {
+        if expected_fingerprint.is_empty() {
+            return Err(DshApplicationError::invalid(
+                "expectedFingerprint is required",
+            ));
+        }
+        let before = self.inspect_http(gateway_v1_url, runtime_url, None)?;
+        if before.fingerprint.as_deref() != Some(expected_fingerprint) {
+            return Err(DshApplicationError::conflict(
+                "DSH installation state changed after it was inspected",
+            ));
+        }
+        if !before.uninstall_supported {
+            return Err(DshApplicationError::precondition(
+                before
+                    .detail
+                    .unwrap_or_else(|| "DSH uninstallation is unavailable".into()),
+            ));
+        }
+        let origin = before
+            .runtime_url
+            .as_deref()
+            .ok_or_else(|| DshApplicationError::invalid("DSH runtime URL is missing"))?;
+        let grant = auth::read_browser_session_grant(&self.home)
+            .map_err(|error| DshApplicationError::precondition(error.message()))?;
+        let parsed = runtime::DshRuntimeOrigin::parse(origin).map_err(|_| {
+            DshApplicationError::invalid("DSH runtime URL is not a permitted loopback HTTP origin")
+        })?;
+        let cookie = grant.mint_cookie(&parsed).map_err(|_| {
+            DshApplicationError::precondition(auth::BrowserGrantError::Unsupported.message())
+        })?;
+        let client = runtime::DshRuntimeClient::connect_session(origin, cookie).map_err(|_| {
+            DshApplicationError::precondition("DSH running address is not reachable")
+        })?;
+        let change = match client.remove_bundle(PACKAGE_NAME) {
+            Ok(change) => change,
+            Err(error) if error.kind == runtime::DshRuntimeErrorKind::Remote => {
+                return self.inspect_http(
+                    gateway_v1_url,
+                    runtime_url,
+                    Some(HttpObservedChange::failed(
+                        None,
+                        error.remote_code.as_deref(),
+                    )),
+                );
+            }
+            Err(_) => {
+                let mut inspection = self.inspect_http(gateway_v1_url, runtime_url, None)?;
+                inspection.application = None;
+                inspection.detail =
+                    Some("DSH running address did not confirm the uninstall".into());
+                return Ok(inspection);
+            }
+        };
+        let observed = HttpObservedChange::from_change(&change);
+        let after = self.inspect_http(gateway_v1_url, runtime_url, Some(observed.clone()))?;
+        if after.installed && observed.outcome == DshApplicationOutcome::Applied {
+            let mut partial = after;
+            partial.detail = Some("DSH still lists the OCG plugin after uninstall".into());
+            return Ok(partial);
+        }
+        Ok(after)
+    }
+
+    fn discovered_profiles(&self) -> Vec<DshDiscoveredProfile> {
+        match &self.scan_user_home {
+            Some(user_home) => discover_profiles(user_home),
+            None => discover_home_profiles(&self.home),
+        }
     }
 
     fn install(
@@ -233,6 +762,7 @@ impl DshDesktopHost {
                 "the DSH profile has a conflicting package with the OCG plugin name",
             ));
         }
+        let editor_restore = self.editor_restore_plan()?;
         package.materialize()?;
 
         let bootstrap = self.bootstrap_path();
@@ -245,10 +775,11 @@ impl DshDesktopHost {
         let command = CommandSpec {
             executable: executable.path.clone(),
             display_executable: executable.display.clone(),
+            dsh_home: self.home.clone(),
             args: vec![
                 OsString::from("plugin"),
                 OsString::from("--profile"),
-                OsString::from(PROFILE),
+                OsString::from(self.profile.as_str()),
                 OsString::from("add"),
                 dsh_package_argument(&package.path),
                 OsString::from("--config.auto-install-peers=true"),
@@ -291,6 +822,13 @@ impl DshDesktopHost {
                 _ => thread::sleep(Duration::from_millis(25)),
             }
         }
+        if let Some(plan) = editor_restore {
+            if let Err(error) = plan.commit(&package) {
+                restore_optional(&self.data_dir, &bootstrap, bootstrap_before.as_deref())?;
+                self.restore_registration(&executable, &package, &registration_before)?;
+                return Err(error);
+            }
+        }
         self.inspect(gateway_v1_url)
     }
 
@@ -312,6 +850,9 @@ impl DshDesktopHost {
         let (action, target) = match before {
             RegistrationState::Absent => ("remove", OsString::from(PACKAGE_NAME)),
             RegistrationState::Exact => ("add", dsh_package_argument(&expected.path)),
+            RegistrationState::EditorExact => {
+                ("add", dsh_package_argument(&self.editor_source_path()))
+            }
             RegistrationState::OwnedOlder(source) => ("add", dsh_package_argument(source)),
             RegistrationState::Conflict(_) => {
                 return Err(internal(
@@ -322,10 +863,11 @@ impl DshDesktopHost {
         let command = CommandSpec {
             executable: executable.path.clone(),
             display_executable: executable.display.clone(),
+            dsh_home: self.home.clone(),
             args: vec![
                 OsString::from("plugin"),
                 OsString::from("--profile"),
-                OsString::from(PROFILE),
+                OsString::from(self.profile.as_str()),
                 OsString::from(action),
                 target,
                 OsString::from("--config.auto-install-peers=true"),
@@ -361,6 +903,7 @@ impl DshDesktopHost {
         let command = CommandSpec {
             executable: executable.path.clone(),
             display_executable: executable.display.clone(),
+            dsh_home: self.home.clone(),
             args: vec![OsString::from("--version")],
             timeout: VERSION_TIMEOUT,
         };
@@ -416,14 +959,14 @@ impl DshDesktopHost {
         let manifest = self
             .home
             .join("profiles")
-            .join(PROFILE)
+            .join(&self.profile)
             .join("package.json");
         let content = match fs::read(&manifest) {
             Ok(content) => content,
             Err(error) if error.kind() == ErrorKind::NotFound => return RegistrationState::Absent,
             Err(error) => {
                 return RegistrationState::Conflict(format!(
-                    "could not read the DSH web profile: {error}"
+                    "could not read the selected DSH profile: {error}"
                 ));
             }
         };
@@ -431,7 +974,7 @@ impl DshDesktopHost {
             Ok(value) => value,
             Err(_) => {
                 return RegistrationState::Conflict(
-                    "the DSH web profile manifest is not valid JSON".into(),
+                    "the selected DSH profile manifest is not valid JSON".into(),
                 );
             }
         };
@@ -450,10 +993,28 @@ impl DshDesktopHost {
         match (dependency, bundle) {
             (None, false) => RegistrationState::Absent,
             (Some(Value::String(spec)), true) => {
+                if spec == "*" {
+                    return self
+                        .editor_source_registration(expected)
+                        .unwrap_or_else(|| {
+                            RegistrationState::Conflict(
+                                "DSH has a same-name package that OCG does not own".into(),
+                            )
+                        });
+                }
                 let source = match dependency_source(spec, &manifest) {
                     Ok(source) => source,
                     Err(detail) => return RegistrationState::Conflict(detail),
                 };
+                if same_lexical_path(&source, &self.editor_source_path()) {
+                    return self
+                        .editor_source_registration(expected)
+                        .unwrap_or_else(|| {
+                            RegistrationState::Conflict(
+                                "DSH Editor has a same-name package that OCG does not own".into(),
+                            )
+                        });
+                }
                 if same_lexical_path(&source, &expected.path) && expected.exists_and_matches() {
                     RegistrationState::Exact
                 } else if is_owned_package_source(&source, &expected.trusted_root) {
@@ -470,6 +1031,152 @@ impl DshDesktopHost {
         }
     }
 
+    fn editor_source_path(&self) -> PathBuf {
+        self.home
+            .join("user-plugins")
+            .join("@open-console-gateway")
+            .join("dsh-plugin")
+    }
+
+    fn editor_source_registration(&self, expected: &RenderedPackage) -> Option<RegistrationState> {
+        let source = self.editor_source_path();
+        if !self.editor_owned_profile() || !plain_directory(&source) {
+            return None;
+        }
+        let marker_path = source.join(".ocg-owner.json");
+        if is_link_or_reparse(&marker_path) {
+            return None;
+        }
+        let marker: Value = serde_json::from_slice(&fs::read(marker_path).ok()?).ok()?;
+        if marker.get("owner").and_then(Value::as_str) != Some("open-console-gateway") {
+            return None;
+        }
+        let state: Value =
+            serde_json::from_slice(&fs::read(self.home.join("dsh-plugins.json")).ok()?).ok()?;
+        let registered = state.get("installed")?.as_array()?.iter().any(|item| {
+            item.get("name").and_then(Value::as_str) == Some(PACKAGE_NAME)
+                && item.get("spec").and_then(Value::as_str) == Some("ocg-manager")
+        });
+        if !registered {
+            return None;
+        }
+        let files_match = expected.files.iter().all(|(path, bytes)| {
+            fs::read(source.join(path)).ok().as_deref() == Some(bytes.as_slice())
+        });
+        if marker.get("digest").and_then(Value::as_str) == Some(expected.digest.as_str())
+            && files_match
+        {
+            Some(RegistrationState::EditorExact)
+        } else {
+            Some(RegistrationState::OwnedOlder(source))
+        }
+    }
+
+    fn editor_owned_profile(&self) -> bool {
+        if self.profile != "dsh-editor" {
+            return false;
+        }
+        let marker = self
+            .home
+            .join("profiles")
+            .join(&self.profile)
+            .join(".dsh-editor-owner.json");
+        if is_link_or_reparse(&marker) {
+            return false;
+        }
+        fs::read(marker)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .is_some_and(|value| {
+                value.get("app").and_then(Value::as_str) == Some("dsh-editor")
+                    && value.get("schema").and_then(Value::as_u64) == Some(1)
+            })
+    }
+
+    fn editor_restore_plan(&self) -> DshApplicationResult<Option<EditorRestorePlan>> {
+        if self.profile != "dsh-editor" {
+            return Ok(None);
+        }
+        let owner = self
+            .home
+            .join("profiles")
+            .join(&self.profile)
+            .join(".dsh-editor-owner.json");
+        match fs::symlink_metadata(&owner) {
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(internal(error.to_string())),
+            Ok(_) if !self.editor_owned_profile() => {
+                return Err(DshApplicationError::conflict(
+                    "DSH Editor profile ownership marker is invalid",
+                ));
+            }
+            Ok(_) => {}
+        }
+        let source = self.editor_source_path();
+        let source_exists = fs::symlink_metadata(&source).is_ok();
+        if source_exists {
+            if !plain_directory(&source) {
+                return Err(DshApplicationError::conflict(
+                    "DSH Editor has a conflicting OCG plugin source",
+                ));
+            }
+            if is_link_or_reparse(&source.join(".ocg-owner.json")) {
+                return Err(DshApplicationError::conflict(
+                    "DSH Editor OCG plugin ownership marker is a link",
+                ));
+            }
+            let marker: Value = serde_json::from_slice(
+                &fs::read(source.join(".ocg-owner.json")).map_err(|_| {
+                    DshApplicationError::conflict(
+                        "DSH Editor has a same-name plugin not owned by OCG",
+                    )
+                })?,
+            )
+            .map_err(|_| {
+                DshApplicationError::conflict("DSH Editor OCG plugin ownership marker is invalid")
+            })?;
+            if marker.get("owner").and_then(Value::as_str) != Some("open-console-gateway") {
+                return Err(DshApplicationError::conflict(
+                    "DSH Editor has a same-name plugin not owned by OCG",
+                ));
+            }
+        }
+        let state_path = self.home.join("dsh-plugins.json");
+        if is_link_or_reparse(&state_path) {
+            return Err(DshApplicationError::conflict(
+                "DSH Editor plugin state is a link",
+            ));
+        }
+        let state_before = read_optional(&state_path)?;
+        let state = editor_plugin_state(state_before.as_deref())?;
+        if state
+            .get("installed")
+            .and_then(Value::as_array)
+            .is_some_and(|items| {
+                items.iter().any(|item| {
+                    item.get("name").and_then(Value::as_str) == Some(PACKAGE_NAME)
+                        && item.get("spec").and_then(Value::as_str) != Some("ocg-manager")
+                })
+            })
+        {
+            return Err(DshApplicationError::conflict(
+                "DSH Editor already tracks this plugin from another source",
+            ));
+        }
+        Ok(Some(EditorRestorePlan {
+            home: self.home.clone(),
+            source,
+            source_exists,
+            source_marker_before: if source_exists {
+                read_optional(&self.editor_source_path().join(".ocg-owner.json"))?
+            } else {
+                None
+            },
+            state_path,
+            state_before,
+        }))
+    }
+
     fn fingerprint(
         &self,
         executable: &ResolvedExecutable,
@@ -481,12 +1188,16 @@ impl DshDesktopHost {
             &self
                 .home
                 .join("profiles")
-                .join(PROFILE)
+                .join(&self.profile)
                 .join("package.json"),
         )?;
         let bootstrap = read_optional(&self.bootstrap_path())?;
         let mut hash = Sha256::new();
         hash.update(b"open-console-gateway-dsh-install-v1\0");
+        hash.update(self.home.to_string_lossy().as_bytes());
+        hash.update([0]);
+        hash.update(self.profile.as_bytes());
+        hash.update([0]);
         hash.update(executable.path.to_string_lossy().as_bytes());
         hash.update([0]);
         hash.update(version.as_bytes());
@@ -496,21 +1207,49 @@ impl DshDesktopHost {
         hash.update(Sha256::digest(manifest.as_deref().unwrap_or_default()));
         hash.update([0]);
         hash.update(Sha256::digest(bootstrap.as_deref().unwrap_or_default()));
+        if self.editor_owned_profile() {
+            let state = read_optional(&self.home.join("dsh-plugins.json"))?;
+            hash.update(Sha256::digest(state.as_deref().unwrap_or_default()));
+            let owner = read_optional(&self.editor_source_path().join(".ocg-owner.json"))?;
+            hash.update(Sha256::digest(owner.as_deref().unwrap_or_default()));
+        }
         Ok(format!("{:x}", hash.finalize()))
     }
 
     fn bootstrap_path(&self) -> PathBuf {
-        self.data_dir.join(BOOTSTRAP_FILE)
+        if self.legacy_bootstrap {
+            return self.data_dir.join(BOOTSTRAP_FILE);
+        }
+        let mut hash = Sha256::new();
+        hash.update(self.home.to_string_lossy().as_bytes());
+        hash.update([0]);
+        hash.update(self.profile.as_bytes());
+        let digest = format!("{:x}", hash.finalize());
+        self.data_dir
+            .join("applications/dsh/handoffs")
+            .join(&digest[..24])
     }
 
     fn target_paths(&self) -> Vec<String> {
-        vec![
+        let mut paths = vec![
             self.home
                 .join("profiles")
-                .join(PROFILE)
+                .join(&self.profile)
                 .join("package.json")
                 .display()
                 .to_string(),
+            self.data_dir.join(PACKAGE_ROOT).display().to_string(),
+            self.bootstrap_path().display().to_string(),
+        ];
+        if self.editor_owned_profile() {
+            paths.push(self.editor_source_path().display().to_string());
+            paths.push(self.home.join("dsh-plugins.json").display().to_string());
+        }
+        paths
+    }
+
+    fn http_target_paths(&self) -> Vec<String> {
+        vec![
             self.data_dir.join(PACKAGE_ROOT).display().to_string(),
             self.bootstrap_path().display().to_string(),
         ]
@@ -522,6 +1261,148 @@ impl DshDesktopHost {
                 .as_deref()
                 .unwrap_or_else(|| Path::new("dsh")),
         )
+    }
+}
+
+struct EditorRestorePlan {
+    home: PathBuf,
+    source: PathBuf,
+    source_exists: bool,
+    source_marker_before: Option<Vec<u8>>,
+    state_path: PathBuf,
+    state_before: Option<Vec<u8>>,
+}
+
+fn editor_plugin_state(bytes: Option<&[u8]>) -> DshApplicationResult<Value> {
+    let value = match bytes {
+        Some(bytes) => serde_json::from_slice::<Value>(bytes).map_err(|_| {
+            DshApplicationError::conflict("DSH Editor plugin state is not valid JSON")
+        })?,
+        None => serde_json::json!({"schema": 1, "overrides": {}, "presets": {}, "installed": []}),
+    };
+    if value.get("schema").and_then(Value::as_u64) != Some(1)
+        || !value.get("installed").is_some_and(Value::is_array)
+    {
+        return Err(DshApplicationError::conflict(
+            "DSH Editor plugin state has an unsupported schema",
+        ));
+    }
+    Ok(value)
+}
+
+impl EditorRestorePlan {
+    fn commit(self, package: &RenderedPackage) -> DshApplicationResult<()> {
+        if read_optional(&self.state_path)? != self.state_before
+            || fs::symlink_metadata(&self.source).is_ok() != self.source_exists
+            || is_link_or_reparse(&self.source.join(".ocg-owner.json"))
+            || read_optional(&self.source.join(".ocg-owner.json"))? != self.source_marker_before
+        {
+            return Err(DshApplicationError::conflict(
+                "DSH Editor plugin state changed during installation",
+            ));
+        }
+        let mut state = editor_plugin_state(self.state_before.as_deref())?;
+        let installed = state
+            .get_mut("installed")
+            .and_then(Value::as_array_mut)
+            .ok_or_else(|| internal("DSH Editor plugin state has no installed list"))?;
+        installed.retain(|item| item.get("name").and_then(Value::as_str) != Some(PACKAGE_NAME));
+        let package_manifest: Value = serde_json::from_slice(
+            package
+                .files
+                .get(Path::new("package.json"))
+                .ok_or_else(|| internal("OCG DSH package has no manifest"))?,
+        )
+        .map_err(|error| internal(error.to_string()))?;
+        let version = package_manifest
+            .get("version")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        installed.push(
+            serde_json::json!({"name": PACKAGE_NAME, "spec": "ocg-manager", "version": version}),
+        );
+        let mut state_bytes =
+            serde_json::to_vec_pretty(&state).map_err(|error| internal(error.to_string()))?;
+        state_bytes.push(b'\n');
+        if state_bytes.len() > MAX_PACKAGE_BYTES as usize {
+            return Err(DshApplicationError::precondition(
+                "DSH Editor plugin state exceeds the size limit",
+            ));
+        }
+
+        let parent = self
+            .source
+            .parent()
+            .ok_or_else(|| internal("DSH Editor plugin source has no parent"))?;
+        ensure_safe_directory_chain(&self.home, parent)?;
+        let nonce = uuid::Uuid::new_v4().simple().to_string();
+        let stage = parent.join(format!(".ocg-stage-{nonce}"));
+        let backup = parent.join(format!(".ocg-backup-{nonce}"));
+        fs::create_dir(&stage).map_err(|error| internal(error.to_string()))?;
+        let staged = (|| -> DshApplicationResult<()> {
+            for (relative, bytes) in &package.files {
+                fs::write(stage.join(relative), bytes)
+                    .map_err(|error| internal(error.to_string()))?;
+            }
+            let marker =
+                serde_json::json!({"owner": "open-console-gateway", "digest": package.digest});
+            fs::write(
+                stage.join(".ocg-owner.json"),
+                serde_json::to_vec(&marker).map_err(|error| internal(error.to_string()))?,
+            )
+            .map_err(|error| internal(error.to_string()))?;
+            Ok(())
+        })();
+        if let Err(error) = staged {
+            let _ = fs::remove_dir_all(&stage);
+            return Err(error);
+        }
+        if self.source_exists {
+            if let Err(error) = fs::rename(&self.source, &backup) {
+                let _ = fs::remove_dir_all(&stage);
+                return Err(internal(error.to_string()));
+            }
+        }
+        if let Err(error) = fs::rename(&stage, &self.source) {
+            let restored = if self.source_exists {
+                fs::rename(&backup, &self.source).map_err(|io| io.to_string())
+            } else {
+                Ok(())
+            };
+            let _ = fs::remove_dir_all(&stage);
+            if let Err(restore) = restored {
+                return Err(internal(format!(
+                    "{error}; DSH Editor plugin source rollback failed: {restore}"
+                )));
+            }
+            return Err(internal(error.to_string()));
+        }
+        if let Err(error) = write_private_atomic(&self.home, &self.state_path, &state_bytes) {
+            let state_restore =
+                restore_optional(&self.home, &self.state_path, self.state_before.as_deref());
+            let source_restore = (|| -> DshApplicationResult<()> {
+                if !safe_directory_chain(&self.home, &self.source) {
+                    return Err(DshApplicationError::conflict(
+                        "DSH Editor OCG source changed during rollback",
+                    ));
+                }
+                fs::remove_dir_all(&self.source).map_err(|io| internal(io.to_string()))?;
+                if self.source_exists {
+                    fs::rename(&backup, &self.source).map_err(|io| internal(io.to_string()))?;
+                }
+                Ok(())
+            })();
+            if let Err(restore) = state_restore.and(source_restore) {
+                return Err(internal(format!(
+                    "{error}; DSH Editor state rollback failed: {restore}"
+                )));
+            }
+            return Err(error);
+        }
+        if self.source_exists && safe_directory_chain(&self.home, &backup) {
+            let _ = fs::remove_dir_all(&backup);
+        }
+        Ok(())
     }
 }
 
@@ -566,6 +1447,7 @@ fn credential_handoff_pending(path: &Path) -> bool {
 enum RegistrationState {
     Absent,
     Exact,
+    EditorExact,
     OwnedOlder(PathBuf),
     Conflict(String),
 }
@@ -573,7 +1455,8 @@ enum RegistrationState {
 fn registration_matches(left: &RegistrationState, right: &RegistrationState) -> bool {
     match (left, right) {
         (RegistrationState::Absent, RegistrationState::Absent)
-        | (RegistrationState::Exact, RegistrationState::Exact) => true,
+        | (RegistrationState::Exact, RegistrationState::Exact)
+        | (RegistrationState::EditorExact, RegistrationState::EditorExact) => true,
         (RegistrationState::OwnedOlder(left), RegistrationState::OwnedOlder(right)) => {
             same_lexical_path(left, right)
         }
@@ -676,6 +1559,7 @@ struct ResolvedExecutable {
 struct CommandSpec {
     executable: PathBuf,
     display_executable: String,
+    dsh_home: PathBuf,
     args: Vec<OsString>,
     timeout: Duration,
 }
@@ -711,6 +1595,7 @@ fn run_non_windows_command(command: &CommandSpec) -> Result<CommandOutput, Strin
     let mut process = Command::new(&command.executable);
     process
         .args(&command.args)
+        .env("DSH_HOME", &command.dsh_home)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -834,8 +1719,80 @@ fn user_home() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-fn compatible_version(raw: &str) -> bool {
-    matches!(raw, "0.1.5-rc.1" | "0.1.5-rc.2")
+/// Inspect only the user's `.dsh` and `.dsh-*` homes, one profile level deep.
+/// Directory links and invalid manifests are not presented as real profiles.
+fn discover_profiles(user_home: &Path) -> Vec<DshDiscoveredProfile> {
+    let Ok(entries) = fs::read_dir(user_home) else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if name != ".dsh" && !(name.starts_with(".dsh-") && name.len() > ".dsh-".len()) {
+            continue;
+        }
+        found.extend(discover_home_profiles(&entry.path()));
+    }
+    found.sort_by(|left, right| (&left.home, &left.name).cmp(&(&right.home, &right.name)));
+    found
+}
+
+fn discover_home_profiles(home: &Path) -> Vec<DshDiscoveredProfile> {
+    let profiles = home.join("profiles");
+    if !plain_directory(home) || !plain_directory(&profiles) {
+        return Vec::new();
+    }
+    let Ok(entries) = fs::read_dir(&profiles) else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if name.is_empty()
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        {
+            continue;
+        }
+        let profile = entry.path();
+        if !plain_directory(&profile) {
+            continue;
+        }
+        let manifest = profile.join("package.json");
+        let Ok(metadata) = fs::symlink_metadata(&manifest) else {
+            continue;
+        };
+        if !metadata.is_file() || is_link_or_reparse(&manifest) || metadata.len() > 1024 * 1024 {
+            continue;
+        }
+        let Ok(content) = fs::read(&manifest) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_slice::<Value>(&content) else {
+            continue;
+        };
+        if !value.pointer("/dsh/profile").is_some_and(Value::is_object) {
+            continue;
+        }
+        found.push(DshDiscoveredProfile {
+            home: home.display().to_string(),
+            name: name.to_owned(),
+            path: profile.display().to_string(),
+        });
+    }
+    found.sort_by(|left, right| left.name.cmp(&right.name));
+    found
+}
+
+fn plain_directory(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir() && !is_link_or_reparse(path))
 }
 
 fn valid_gateway_v1_url(value: &str) -> bool {
@@ -863,6 +1820,105 @@ fn safe_relative_path(value: &str) -> DshApplicationResult<PathBuf> {
         ));
     }
     Ok(path.to_path_buf())
+}
+
+fn map_runtime_application(application: runtime::DshRuntimeApplication) -> DshApplicationOutcome {
+    match application {
+        runtime::DshRuntimeApplication::Applied => DshApplicationOutcome::Applied,
+        runtime::DshRuntimeApplication::RestartRequired => DshApplicationOutcome::RestartRequired,
+        runtime::DshRuntimeApplication::Overridden => DshApplicationOutcome::Overridden,
+        runtime::DshRuntimeApplication::Failed => DshApplicationOutcome::Failed,
+        runtime::DshRuntimeApplication::Cancelled => DshApplicationOutcome::Cancelled,
+    }
+}
+
+#[derive(Clone)]
+struct HttpObservedChange {
+    outcome: DshApplicationOutcome,
+    stage: Option<String>,
+    error_code: Option<String>,
+}
+
+impl HttpObservedChange {
+    fn from_change(change: &runtime::DshChangeResult) -> Self {
+        Self {
+            outcome: map_runtime_application(change.application),
+            stage: change.stage.clone(),
+            error_code: change.error_code.clone(),
+        }
+    }
+
+    fn failed(stage: Option<&str>, error_code: Option<&str>) -> Self {
+        Self {
+            outcome: DshApplicationOutcome::Failed,
+            stage: stage.map(str::to_owned),
+            error_code: error_code.map(str::to_owned),
+        }
+    }
+}
+
+fn apply_observed_change(inspection: &mut DshApplicationInspection, observed: HttpObservedChange) {
+    inspection.application = Some(observed.outcome);
+    match observed.outcome {
+        DshApplicationOutcome::Applied => {}
+        DshApplicationOutcome::RestartRequired => {
+            inspection.detail = Some("Installed. Restart DSH to load the OCG plugin".into());
+        }
+        DshApplicationOutcome::Failed
+        | DshApplicationOutcome::Cancelled
+        | DshApplicationOutcome::Overridden => {
+            inspection.detail = Some(format_observed_detail(
+                observed.outcome,
+                observed.stage.as_deref(),
+                observed.error_code.as_deref(),
+            ));
+        }
+    }
+}
+
+fn format_observed_detail(
+    outcome: DshApplicationOutcome,
+    stage: Option<&str>,
+    error_code: Option<&str>,
+) -> String {
+    let mut detail = match outcome {
+        DshApplicationOutcome::Failed => "DSH running address reported a failed change".to_owned(),
+        DshApplicationOutcome::Cancelled => "DSH running address cancelled the change".to_owned(),
+        DshApplicationOutcome::Overridden => "DSH running address overrode the change".to_owned(),
+        DshApplicationOutcome::Applied | DshApplicationOutcome::RestartRequired => {
+            return String::new();
+        }
+    };
+    if let Some(stage) = stage.filter(|value| safe_runtime_token(value)) {
+        detail.push_str(&format!(" ({stage})"));
+    }
+    if let Some(code) = error_code.filter(|value| safe_runtime_token(value)) {
+        detail.push_str(&format!(" [{code}]"));
+    }
+    detail
+}
+
+fn safe_runtime_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn is_definitive_no_side_effect(change: &runtime::DshChangeResult) -> bool {
+    change.application == runtime::DshRuntimeApplication::Cancelled && change.changed != Some(true)
+}
+
+fn restore_live_if_present(
+    trusted_root: &Path,
+    path: &Path,
+    bytes: Option<&[u8]>,
+) -> DshApplicationResult<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    restore_optional(trusted_root, path, bytes)
 }
 
 fn package_digest(files: &BTreeMap<PathBuf, Vec<u8>>) -> String {
@@ -1023,7 +2079,7 @@ fn same_lexical_path(left: &Path, right: &Path) -> bool {
     canonical_lexical_path(left).ok() == canonical_lexical_path(right).ok()
 }
 
-fn is_link_or_reparse(path: &Path) -> bool {
+pub(super) fn is_link_or_reparse(path: &Path) -> bool {
     let Ok(metadata) = fs::symlink_metadata(path) else {
         return false;
     };
@@ -1702,13 +2758,40 @@ fn windows_pipe(parent_reads: bool) -> Result<(OwnedWindowsHandle, OwnedWindowsH
 }
 
 #[cfg(windows)]
+fn windows_environment_block(home: &Path) -> Result<Vec<u16>, String> {
+    use std::os::windows::ffi::OsStrExt;
+
+    let mut entries: Vec<(OsString, OsString)> = std::env::vars_os()
+        .filter(|(name, _)| !name.to_string_lossy().eq_ignore_ascii_case("DSH_HOME"))
+        .collect();
+    entries.push((OsString::from("DSH_HOME"), home.as_os_str().to_os_string()));
+    entries.sort_by_key(|(name, _)| name.to_string_lossy().to_ascii_uppercase());
+    let mut block = Vec::new();
+    for (name, value) in entries {
+        let key: Vec<u16> = name.encode_wide().collect();
+        let value: Vec<u16> = value.encode_wide().collect();
+        if key.contains(&0) || value.contains(&0) {
+            return Err("DSH command environment contains an invalid NUL".into());
+        }
+        block.extend(key);
+        block.push(b'=' as u16);
+        block.extend(value);
+        block.push(0);
+    }
+    block.push(0);
+    Ok(block)
+}
+
+#[cfg(windows)]
 fn run_windows_command(command: &CommandSpec) -> Result<CommandOutput, String> {
     use windows_sys::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
     use windows_sys::Win32::System::Threading::{
-        CREATE_NO_WINDOW, CREATE_SUSPENDED, CreateProcessW, GetExitCodeProcess,
-        PROCESS_INFORMATION, ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOW, WaitForSingleObject,
+        CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
+        GetExitCodeProcess, PROCESS_INFORMATION, ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOW,
+        WaitForSingleObject,
     };
     let (application, mut command_line) = windows_process_command_line(command)?;
+    let environment = windows_environment_block(&command.dsh_home)?;
     let (stdout_read, stdout_write) = windows_pipe(true)?;
     let (stderr_read, stderr_write) = windows_pipe(true)?;
     let (stdin_read, stdin_write) = windows_pipe(false)?;
@@ -1727,8 +2810,8 @@ fn run_windows_command(command: &CommandSpec) -> Result<CommandOutput, String> {
             std::ptr::null(),
             std::ptr::null(),
             1,
-            CREATE_SUSPENDED | CREATE_NO_WINDOW,
-            std::ptr::null(),
+            CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
+            environment.as_ptr().cast(),
             std::ptr::null(),
             &startup,
             &mut process_information,
@@ -1921,6 +3004,10 @@ fn quote_windows_argument_always(value: &str) -> String {
     quoted.push('"');
     quoted
 }
+
+mod auth;
+pub(crate) mod runtime;
+
 #[cfg(test)]
 #[path = "dsh_application_host/tests.rs"]
 mod tests;

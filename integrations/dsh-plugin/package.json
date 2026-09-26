@@ -14,10 +14,5 @@
     "bundle": {
       "patch": "./cordis.patch.yml"
     }
-  },
-  "peerDependencies": {
-    "@deepseek-ai/dsh-llm": ">=0.1.5-rc.1 <0.1.6",
-    "@deepseek-ai/dsh-llm-pi-ai": ">=0.1.5-rc.1 <0.1.6",
-    "@earendil-works/pi-ai": ">=0.85.1 <0.86.0"
   }
 }

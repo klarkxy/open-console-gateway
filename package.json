@@ -18,6 +18,7 @@
     "test:dsh:plugin": "node --experimental-strip-types --test scripts/dsh-plugin-package.test.mjs",
     "smoke:dsh:plugin": "node scripts/dsh-application-install-smoke.mjs",
     "smoke:dsh:cli": "node scripts/dsh-headless-cli-smoke.mjs",
+    "smoke:dsh:runtime": "node scripts/dsh-web-runtime-smoke.mjs",
     "contract:v3:generate": "node scripts/dashboard-v3-contract.mjs --write",
     "contract:v3:check": "node scripts/dashboard-v3-contract.mjs --check",
     "contract:v4:generate": "node scripts/dashboard-v4-contract.mjs --write",
