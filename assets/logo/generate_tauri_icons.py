@@ -1,29 +1,39 @@
+"""Export the approved, unmodified mascot artwork with Pillow (no recoloring)."""
+from pathlib import Path
 from PIL import Image
-import os
 
-src = Image.open("d:/0 code/ocg-manager/design/logo-concepts/ocg_logo_final_transparent.png").convert("RGBA")
 
-max_dim = max(src.width, src.height)
-square = Image.new("RGBA", (max_dim, max_dim), (0, 0, 0, 0))
-x = (max_dim - src.width) // 2
-y = (max_dim - src.height) // 2
-square.paste(src, (x, y), src)
+def main():
+    logo_dir = Path(__file__).resolve().parent
+    icons_dir = logo_dir.parents[1] / "src-tauri" / "icons"
+    icons_dir.mkdir(parents=True, exist_ok=True)
+    with Image.open(logo_dir / "ocg-big-face-v3-selected.png") as source:
+        artwork = source.convert("RGBA")
 
-icons_dir = "d:/0 code/ocg-manager/src-tauri/icons"
-os.makedirs(icons_dir, exist_ok=True)
+    # Do not apply alpha twice: paste without an alpha mask.
+    side = max(artwork.size)
+    square = Image.new("RGBA", (side, side), (0, 0, 0, 0))
+    square.paste(artwork, ((side - artwork.width) // 2, (side - artwork.height) // 2))
 
-sizes = [32, 128, 256, 512]
-for size in sizes:
-    resized = square.resize((size, size), Image.LANCZOS)
-    resized.save(os.path.join(icons_dir, f"{size}x{size}.png"))
-    print(f"Saved {size}x{size}.png")
+    def resized(size):
+        return square.resize((size, size), Image.Resampling.LANCZOS)
 
-ico_sizes = [16, 24, 32, 48, 64, 128, 256]
-frames = [square.resize((s, s), Image.LANCZOS) for s in ico_sizes]
-frames[0].save(
-    os.path.join(icons_dir, "icon.ico"),
-    save_all=True,
-    append_images=frames[1:],
-    sizes=[(s, s) for s in ico_sizes]
-)
-print("Saved icon.ico")
+    resized(256).save(logo_dir / "ocg_logo_final_transparent.png", optimize=True)
+    for size in (32, 128, 256, 512):
+        resized(size).save(icons_dir / f"{size}x{size}.png", optimize=True)
+
+    # Use the largest frame so Pillow includes every requested size.
+    resized(256).save(
+        icons_dir / "icon.ico",
+        sizes=[(size, size) for size in (16, 24, 32, 48, 64, 128, 256)],
+    )
+    resized(64).save(
+        logo_dir / "ocg-favicon.ico",
+        sizes=[(size, size) for size in (16, 24, 32, 48, 64)],
+    )
+    resized(1024).save(icons_dir / "icon.icns")
+    print("Exported web logo, favicon, four PNG sizes, ICO and ICNS.")
+
+
+if __name__ == "__main__":
+    main()

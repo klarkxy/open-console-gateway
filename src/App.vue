@@ -5,7 +5,7 @@
       <main v-if="authState !== 'ready'" class="auth-page">
         <section class="auth-panel">
           <div class="auth-panel-head">
-            <div class="auth-brand"><span class="brand-symbol" aria-hidden="true">O</span><span>Open Console Gateway</span></div>
+            <div class="auth-brand"><img class="brand-symbol" :src="brandImage" alt="" /><span>Open Console Gateway</span></div>
             <LocaleSwitcher />
           </div>
           <h1>{{ authState === "register" ? t("创建管理员") : t("管理员登录") }}</h1>
@@ -35,7 +35,7 @@
             <n-layout v-else has-sider class="app-shell">
               <n-layout-sider collapse-mode="width" :collapsed-width="64" :width="224" :collapsed="collapsed" show-trigger class="app-sider" :class="{ 'app-sider--collapsed': collapsed }" @collapse="collapsed = true" @expand="collapsed = false">
                 <div class="brand" :class="{ collapsed }" aria-label="Open Console Gateway">
-                  <span class="brand-symbol" aria-hidden="true">O</span>
+                  <img class="brand-symbol" :src="brandImage" alt="" />
                   <Transition name="brand-fade">
                     <span v-if="!collapsed" class="brand-name"><span>Open Console</span><small>Gateway</small></span>
                   </Transition>
@@ -48,7 +48,7 @@
                 <n-layout-header class="app-header">
                   <h1 class="desktop-title">{{ currentTitle }}</h1>
                   <div class="mobile-nav">
-                    <span class="brand-symbol" role="img" aria-label="Open Console Gateway">O</span>
+                    <img class="brand-symbol" :src="brandImage" alt="Open Console Gateway" />
                     <n-dropdown class="mobile-nav-dropdown" trigger="click" :keyboard="true" :show="mobileMenuShown" :options="mobileMenuOptions" @select="selectMobileView" @update:show="mobileMenuShown = $event">
                       <n-button quaternary class="mobile-nav-trigger" aria-haspopup="menu" :aria-expanded="mobileMenuShown" :aria-label="currentTitle">{{ currentTitle }}<span class="mobile-nav-chevron" aria-hidden="true">⌄</span></n-button>
                     </n-dropdown>
@@ -113,6 +113,7 @@ const collapsed = ref(readSidebarCollapsed(themeStorage));
 const themeName = ref<ThemeName>(readTheme(themeStorage));
 const mobileMenuShown = ref(false);
 const characterImage = new URL("../assets/opencode-mascot-sm.webp", import.meta.url).href;
+const brandImage = new URL("../assets/logo/ocg_logo_final_transparent.png", import.meta.url).href;
 const authUsername = ref("");
 const authPassword = ref("");
 const authPasswordConfirm = ref("");

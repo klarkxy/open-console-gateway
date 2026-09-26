@@ -28,6 +28,8 @@ rounded:
   large: 14
 ---
 
+> **Superseded for appearance.** The visual specification in this file — palette, pure-black/tint requirements, typography, decorative hero, and layout styling — has been replaced by [DESIGN.md](DESIGN.md), the current appearance authority (see its supersession declaration). The product structure and API facts below remain in effect.
+
 # Open Console Gateway
 
 ## Overview
