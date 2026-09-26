@@ -89,6 +89,8 @@ relative `--data-dir` / `DSH_HOME` values. The default smoke installs into
 `node scripts/dsh-headless-cli-smoke.mjs --scan-user-homes` to verify selection
 across isolated `.dsh` and `.dsh-editor` Homes.
 
+`node scripts/dsh-web-runtime-smoke.mjs --ocg` exercises install, replacement and removal through the OCG V4 API against an isolated installed DSH Web runtime. Add `--desktop` to exercise the installed official Desktop Host. These smokes use temporary profiles and do not call a real model provider.
+
 Rust unit tests live in sibling `tests.rs` modules (`src/db.rs` declares
 `mod tests;` and the tests are in `src/db/tests.rs`). Do not add tests that
 assert on source text, workflow YAML, or documentation prose.

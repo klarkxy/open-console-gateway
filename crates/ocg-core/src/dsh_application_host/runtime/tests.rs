@@ -87,15 +87,12 @@ impl FakeServer {
                     Ok((mut stream, _)) => {
                         let _ = stream.set_nodelay(true);
                         let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-                        match read_http_request(&mut stream) {
-                            Ok(request) => {
-                                let action = script.lock().expect("script").pop_front();
-                                thread_log.lock().expect("log").push(request.clone());
-                                if let Some(action) = action {
-                                    write_action(&mut stream, port, &request, action);
-                                }
+                        if let Ok(request) = read_http_request(&mut stream) {
+                            let action = script.lock().expect("script").pop_front();
+                            thread_log.lock().expect("log").push(request.clone());
+                            if let Some(action) = action {
+                                write_action(&mut stream, port, &request, action);
                             }
-                            Err(_) => {}
                         }
                     }
                     Err(_) => break,

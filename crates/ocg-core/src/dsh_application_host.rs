@@ -621,14 +621,14 @@ impl DshDesktopHost {
                 }
             }
             Err(error) if error.kind == runtime::DshRuntimeErrorKind::Remote => {
-                return Ok(self.inspect_http(
+                return self.inspect_http(
                     gateway_v1_url,
                     runtime_url,
                     Some(HttpObservedChange::failed(
                         None,
                         error.remote_code.as_deref(),
                     )),
-                )?);
+                );
             }
             Err(_) => {
                 let mut inspection = self.inspect_http(gateway_v1_url, runtime_url, None)?;
@@ -822,12 +822,12 @@ impl DshDesktopHost {
                 _ => thread::sleep(Duration::from_millis(25)),
             }
         }
-        if let Some(plan) = editor_restore {
-            if let Err(error) = plan.commit(&package) {
-                restore_optional(&self.data_dir, &bootstrap, bootstrap_before.as_deref())?;
-                self.restore_registration(&executable, &package, &registration_before)?;
-                return Err(error);
-            }
+        if let Some(plan) = editor_restore
+            && let Err(error) = plan.commit(&package)
+        {
+            restore_optional(&self.data_dir, &bootstrap, bootstrap_before.as_deref())?;
+            self.restore_registration(&executable, &package, &registration_before)?;
+            return Err(error);
         }
         self.inspect(gateway_v1_url)
     }
@@ -1357,11 +1357,11 @@ impl EditorRestorePlan {
             let _ = fs::remove_dir_all(&stage);
             return Err(error);
         }
-        if self.source_exists {
-            if let Err(error) = fs::rename(&self.source, &backup) {
-                let _ = fs::remove_dir_all(&stage);
-                return Err(internal(error.to_string()));
-            }
+        if self.source_exists
+            && let Err(error) = fs::rename(&self.source, &backup)
+        {
+            let _ = fs::remove_dir_all(&stage);
+            return Err(internal(error.to_string()));
         }
         if let Err(error) = fs::rename(&stage, &self.source) {
             let restored = if self.source_exists {

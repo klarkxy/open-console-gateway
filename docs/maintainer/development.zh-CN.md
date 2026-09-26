@@ -74,6 +74,8 @@ pnpm run smoke:dsh:cli
 运行 `node scripts/dsh-headless-cli-smoke.mjs --scan-user-homes` 可验证隔离的
 `.dsh` 与 `.dsh-editor` 两个 Home 之间的目标选择。
 
+`node scripts/dsh-web-runtime-smoke.mjs --ocg` 通过 OCG V4 API，在隔离的已安装 DSH Web 运行时中验证安装、替换和卸载。加 `--desktop` 可验证已安装的官方 Desktop Host。这些冒烟使用临时 Profile，不调用真实模型供应商。
+
 Rust 单元测试放在同名子模块：`src/db.rs` 声明 `mod tests;`，测试正文在
 `src/db/tests.rs`。不要写断言源码文本、工作流 YAML 或文档正文的测试。
 

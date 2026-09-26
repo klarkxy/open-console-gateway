@@ -598,16 +598,7 @@ impl DshRuntimeClient {
         } else {
             self.limits.rpc_timeout
         };
-        rpc_call(
-            &self.http,
-            &self.origin,
-            &self.cookie,
-            self.limits.max_body_bytes,
-            timeout,
-            method,
-            args,
-            request_id,
-        )
+        rpc_call(self, timeout, method, args, request_id)
     }
 }
 
@@ -697,15 +688,19 @@ fn exchange_cookie(
 }
 
 fn rpc_call(
-    http: &Client,
-    origin: &DshRuntimeOrigin,
-    cookie: &DshRuntimeCookie,
-    max_body_bytes: usize,
+    client: &DshRuntimeClient,
     timeout: Duration,
     method: DshRpc,
     args: Value,
     request_id: Option<String>,
 ) -> Result<Value, DshRuntimeError> {
+    let DshRuntimeClient {
+        http,
+        origin,
+        cookie,
+        limits,
+    } = client;
+    let max_body_bytes = limits.max_body_bytes;
     let rpc_id = Uuid::new_v4().to_string();
     let endpoint = method.endpoint();
     let url = Url::parse(&format!("{}/api/{endpoint}", origin.display)).map_err(|_| {
