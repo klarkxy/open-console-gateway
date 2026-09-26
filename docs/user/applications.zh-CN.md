@@ -70,3 +70,7 @@ Editor 托管且未填写运行地址的 profile，还需通过 Editor 插件管
 容器不能把插件安装到浏览器所在电脑或 Docker 宿主机的 DSH，但仍可通过普通 Gateway 配置服务 DSH。
 
 [用户指南索引](../USER.zh-CN.md) · [手动客户端配置](add-application.zh-CN.md) · [文档索引](../README.zh-CN.md)
+
+## DSH 中的模型信息
+
+参见[模型元数据与推理档位](model-metadata.zh-CN.md)，了解目录刷新、按连接声明参数，以及升级已安装的 OCG 插件。

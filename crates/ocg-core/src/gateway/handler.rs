@@ -295,6 +295,14 @@ fn published_alias_models_response(state: &CoreState) -> axum::response::Respons
             }));
         }
     }
+    if crate::model_metadata::enrich(&state.db.lock(), &snapshot, &mut data).is_err() {
+        return protocol_error_response(
+            ApiFormat::ChatCompletions,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to load model metadata",
+            None,
+        );
+    }
     axum::Json(serde_json::json!({
         "object": "list",
         "data": data

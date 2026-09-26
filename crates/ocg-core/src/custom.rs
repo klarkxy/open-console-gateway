@@ -247,16 +247,43 @@ pub(crate) async fn discover_models_with_auth(
     auth: Option<crate::provider::UpstreamAuthScheme>,
     api_key: &str,
 ) -> Result<CustomModelDiscoveryResult, CustomModelDiscoveryFailure> {
-    tokio::time::timeout(
+    discover_models_with_metadata(config, input, auth, api_key)
+        .await
+        .map(|(result, _)| result)
+}
+
+pub(crate) async fn discover_models_with_metadata(
+    config: &AppConfig,
+    input: &AccountCustomConfigInput,
+    auth: Option<crate::provider::UpstreamAuthScheme>,
+    api_key: &str,
+) -> Result<
+    (
+        CustomModelDiscoveryResult,
+        std::collections::BTreeMap<String, crate::model_metadata::ModelMetadata>,
+    ),
+    CustomModelDiscoveryFailure,
+> {
+    let mut metadata = std::collections::BTreeMap::new();
+    let result = tokio::time::timeout(
         Duration::from_secs(CUSTOM_MODEL_DISCOVERY_TIMEOUT_SECS),
-        discover_custom_models_inner(config, input, auth, api_key),
+        discover_custom_models_inner(config, input, auth, api_key, &mut metadata),
     )
     .await
     .map_err(|_| CustomModelDiscoveryFailure {
         message: format!(
             "Custom model discovery timed out after {CUSTOM_MODEL_DISCOVERY_TIMEOUT_SECS} seconds"
         ),
-    })?
+    })??;
+    metadata.retain(|id, value| {
+        result.models.contains(id)
+            && (api_key.is_empty()
+                || (!id.contains(api_key)
+                    && !serde_json::to_string(value)
+                        .unwrap_or_default()
+                        .contains(api_key)))
+    });
+    Ok((result, metadata))
 }
 
 async fn discover_custom_models_inner(
@@ -264,6 +291,7 @@ async fn discover_custom_models_inner(
     input: &AccountCustomConfigInput,
     auth: Option<crate::provider::UpstreamAuthScheme>,
     api_key: &str,
+    metadata: &mut std::collections::BTreeMap<String, crate::model_metadata::ModelMetadata>,
 ) -> Result<CustomModelDiscoveryResult, CustomModelDiscoveryFailure> {
     if auth.is_some() && api_key.trim().is_empty() {
         return Err(CustomModelDiscoveryFailure {
@@ -304,8 +332,12 @@ async fn discover_custom_models_inner(
             });
         }
         let page_result = parse_model_discovery_page(&body)?;
+        let page_metadata = crate::model_metadata::parse_catalog(&body);
         for model in page_result.models {
             if seen_models.insert(model.to_ascii_lowercase()) {
+                if let Some(facts) = page_metadata.get(&model) {
+                    metadata.insert(model.clone(), facts.clone());
+                }
                 models.push(model);
                 if models.len() >= MAX_CUSTOM_MODEL_DISCOVERY_MODELS {
                     return Ok(CustomModelDiscoveryResult {

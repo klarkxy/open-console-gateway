@@ -9,11 +9,15 @@ use schemars::generate::{SchemaGenerator, SchemaSettings};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
+pub use super::model_metadata::{
+    DestinationModelMetadata, DestinationModelMetadataEntry, DestinationModelMetadataUpdate,
+};
 pub use crate::billing_types::{
     BillingStatus, CreditBalanceCorrection, CreditCalibrationRequest, CreditConfigureRequest,
     CreditGrantRequest,
 };
 pub use crate::db::routing_cards::RoutingCard;
+pub use crate::model_metadata::ModelMetadata;
 
 use crate::dashboard_v3::{
     AccountAuthScheme, AccountCredentialKind, AccountUpstreamProtocol, ControlRevision,
@@ -94,6 +98,10 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "DestinationCatalogRefreshResult",
     "HttpProtocolRouteDto",
     "DestinationCatalogUpdate",
+    "ModelMetadata",
+    "DestinationModelMetadata",
+    "DestinationModelMetadataEntry",
+    "DestinationModelMetadataUpdate",
     "DestinationCatalogModelUpdate",
     "DestinationModelTestRequest",
     "DestinationModelTestResult",
@@ -1824,6 +1832,9 @@ pub fn contract_schema() -> Value {
     include_type::<PlatformKeyImportResult>(&mut serialize);
     include_type::<PlatformKeyImportFailure>(&mut serialize);
     include_type::<DestinationList>(&mut serialize);
+    include_type::<ModelMetadata>(&mut serialize);
+    include_type::<DestinationModelMetadata>(&mut serialize);
+    include_type::<DestinationModelMetadataEntry>(&mut serialize);
     include_type::<DestinationDto>(&mut serialize);
     include_type::<ModelResolutionDto>(&mut serialize);
     include_type::<DestinationPatchResult>(&mut serialize);
@@ -1892,6 +1903,7 @@ pub fn contract_schema() -> Value {
     include_type::<DestinationUpstreamOverridePatch>(&mut deserialize);
     include_type::<DestinationPatchRequest>(&mut deserialize);
     include_type::<DestinationCatalogUpdate>(&mut deserialize);
+    include_type::<DestinationModelMetadataUpdate>(&mut deserialize);
     include_type::<DestinationModelTestRequest>(&mut deserialize);
     include_type::<RoutingCardUpdate>(&mut deserialize);
     include_type::<CreditConfigureRequest>(&mut deserialize);

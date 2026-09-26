@@ -92,14 +92,15 @@ pub(super) async fn refresh(
         AuthScheme::ApiKey => Some(crate::provider::UpstreamAuthScheme::ApiKey),
         AuthScheme::None => None,
     };
-    let discovered = crate::custom::discover_models_with_auth(&config, &input, auth, &key)
-        .await
-        .map_err(|error| {
-            V3ApiError::outbound_failed(
-                &state,
-                crate::redaction::redact_known_secret(&error.message, &key),
-            )
-        })?;
+    let (discovered, metadata) =
+        crate::custom::discover_models_with_metadata(&config, &input, auth, &key)
+            .await
+            .map_err(|error| {
+                V3ApiError::outbound_failed(
+                    &state,
+                    crate::redaction::redact_known_secret(&error.message, &key),
+                )
+            })?;
     // Upstreams are untrusted: never persist or expose an echoed credential as a model id.
     let models: Vec<_> = discovered
         .models
@@ -148,7 +149,10 @@ pub(super) async fn refresh(
                 &db.conn,
                 &destination,
                 &catalog,
-            )
+            )?;
+            let mut updated = destination.clone();
+            updated.catalog = catalog.clone();
+            crate::model_metadata::observe(db, &updated, &metadata)
         })
         .map_err(V3ApiError::internal)?;
     let mut updated = destination;
