@@ -143,6 +143,7 @@ export function createLab({ host = HOST, profile, live = null, runId = "in-proce
     isolationQueues.clear();
     activeScenarios.clear();
     modelQueues.clear();
+    if (live) liveArmed = true;
   }
 
   function acceptSecret(endpointId, secret) {
@@ -276,6 +277,8 @@ export function createLab({ host = HOST, profile, live = null, runId = "in-proce
       return true;
     }
     if (scripted.kind === "http") {
+      const delayMs = Number(scripted.delayMs) || 0;
+      if (delayMs > 0) await sleep(delayMs);
       writeJson(res, scripted.status, scripted.body, scripted.headers);
       return true;
     }
@@ -590,6 +593,7 @@ export function createLab({ host = HOST, profile, live = null, runId = "in-proce
         const liveResult = await forwardLive(req, res, slot, parsed);
         row.liveStatus = liveResult.status;
         row.liveAborted = liveResult.aborted;
+        row.liveModel = live.model;
         return;
       } catch (error) {
         row.liveError = error instanceof Error ? error.message : String(error);

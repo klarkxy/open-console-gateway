@@ -18,7 +18,7 @@ use crate::gateway::diagnostics::{
     sanitize_upstream_error_value_with_known_secret, serialize_diagnostic,
 };
 use crate::gateway::failure::decode::{
-    decode as decode_failure, openrouter_free_rejection, temporary_429_deadline,
+    decode as decode_failure, openrouter_free_rejection, parse_retry_after, temporary_429_deadline,
 };
 use crate::gateway::materialize::native_log_identity;
 use crate::gateway::protocol::{
@@ -26,7 +26,7 @@ use crate::gateway::protocol::{
     has_usage, merge_stream_usage, transform_response,
 };
 use crate::gateway::protocol_stream::StreamConverter;
-use crate::gateway::recovery::{RecoveryPermit, ResourceSet};
+use crate::gateway::recovery::{RecoveryPermit, ResourceSet, restriction_endpoint_identity};
 use crate::gateway::routing::resolve_conversation_key;
 use crate::http_client::RouteLabel;
 use crate::kernel::protocol::ApiFormat;
@@ -303,6 +303,9 @@ pub struct ForwardResult {
     pub response: Response,
     pub(crate) action: ForwardAction,
     pub error_message: Option<String>,
+    /// False when admission failed before the HTTP send. Inspect→acquire races
+    /// must not consume the request send budget.
+    pub(crate) sent: bool,
 }
 
 #[derive(Clone)]
@@ -818,7 +821,8 @@ pub(crate) async fn forward_request_with_deadline(
         }
     );
     let proxy_identity = (route == RouteLabel::Proxy).then_some(config.proxy_url.as_str());
-    let restriction_endpoint = format!("{url}|{route:?}|{:?}|{proxy_identity:?}", plan.upstream);
+    let restriction_endpoint =
+        restriction_endpoint_identity(&url, route, plan.upstream, proxy_identity);
     let resources = ResourceSet::capture(
         &state.db.lock(),
         account,
@@ -830,12 +834,17 @@ pub(crate) async fn forward_request_with_deadline(
     let mut recovery_permit = match state.recovery.acquire(resources, wall, mono) {
         Ok(permit) => permit,
         Err(wait) => {
-            let message =
-                "compatible upstream resource is waiting for recovery; no upstream request sent";
+            let message = if wait.is_local_policy() {
+                "compatible upstream resource is waiting on local_policy; no upstream request sent"
+            } else if wait.is_capacity() {
+                "compatible upstream resource cannot be tracked (recovery_capacity); no upstream request sent"
+            } else {
+                "compatible upstream resource is waiting for recovery; no upstream request sent"
+            };
             attempt_context.restriction_details = Some(serde_json::json!({"wait": wait}));
             let failure = attempt_context.failure(FailureSpec {
                 error_source: "gateway",
-                error_stage: "resource_wait",
+                error_stage: wait.skip_stage(),
                 downstream_status: Some(StatusCode::SERVICE_UNAVAILABLE.as_u16()),
                 upstream_status: None,
                 upstream_wait_ms: None,
@@ -867,6 +876,7 @@ pub(crate) async fn forward_request_with_deadline(
                 ),
                 action: ForwardAction::TryNextAccount,
                 error_message: Some(message.into()),
+                sent: false,
             });
         }
     };
@@ -913,6 +923,7 @@ pub(crate) async fn forward_request_with_deadline(
                 ),
                 action: ForwardAction::Return,
                 error_message: Some(message.into()),
+                sent: false,
             });
         }
         timeouts.non_stream = timeouts.non_stream.min(remaining);
@@ -1068,6 +1079,7 @@ pub(crate) async fn forward_request_with_deadline(
                 ),
                 action,
                 error_message: Some(error_message),
+                sent: true,
             });
         }
         Err(AttemptTransportError::Send(failure)) => {
@@ -1162,6 +1174,7 @@ pub(crate) async fn forward_request_with_deadline(
                 },
                 action,
                 error_message: Some(error_message),
+                sent: true,
             });
         }
     };
@@ -1192,16 +1205,45 @@ pub(crate) async fn forward_request_with_deadline(
             || (status.is_client_error() && status != StatusCode::TOO_MANY_REQUESTS))
     {
         let error_headers = upstream_resp.headers().clone();
-        let text = response_text_with_timeout(
+        let (text, policy_body) = match response_text_with_timeout(
             upstream_resp,
             body_timeout,
             Some(MAX_UPSTREAM_ERROR_BODY_BYTES),
         )
         .await
-        .unwrap_or_else(ResponseBodyFailure::into_detail);
+        {
+            Ok(text) => {
+                let policy = text.clone();
+                (text, Some(policy))
+            }
+            Err(error) => (error.into_detail(), None),
+        };
+        let class = classify_http(
+            status.as_u16(),
+            policy_provider_id,
+            plan.channel,
+            attempt_spec.auth == UpstreamAuth::None,
+        );
         let retry_after = error_headers
             .get(reqwest::header::RETRY_AFTER)
             .and_then(|value| value.to_str().ok());
+        let (observed_at, observed_mono) = state.sample_gateway_clock();
+        observe_local_policy(
+            state,
+            account,
+            adapter,
+            class,
+            selection,
+            &mut recovery_permit,
+            &restriction_endpoint,
+            &plan.model,
+            free_contract,
+            status.as_u16(),
+            policy_body.as_deref(),
+            retry_after,
+            observed_at,
+            observed_mono,
+        )?;
         observe_openrouter_free_rejection(
             state,
             account,
@@ -1247,6 +1289,7 @@ pub(crate) async fn forward_request_with_deadline(
             response: error_response(plan.client, &message, None),
             action,
             error_message: Some(message),
+            sent: true,
         });
     }
 
@@ -1254,24 +1297,47 @@ pub(crate) async fn forward_request_with_deadline(
         // A response status is authoritative even if its error body stalls.
         // Ordinary routes retain it; Zen Free can try another compatible route.
         let error_headers = upstream_resp.headers().clone();
-        let text = response_text_with_timeout(
+        let (text, policy_body) = match response_text_with_timeout(
             upstream_resp,
             body_timeout,
             Some(MAX_UPSTREAM_ERROR_BODY_BYTES),
         )
         .await
-        .unwrap_or_else(ResponseBodyFailure::into_detail);
+        {
+            Ok(text) => {
+                let policy = text.clone();
+                (text, Some(policy))
+            }
+            Err(error) => (error.into_detail(), None),
+        };
         let class = classify_http(
             status.as_u16(),
             policy_provider_id,
             plan.channel,
             attempt_spec.auth == UpstreamAuth::None,
         );
+        let retry_after = error_headers
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok());
+        let (observed_at, observed_mono) = state.sample_gateway_clock();
+        observe_local_policy(
+            state,
+            account,
+            adapter,
+            class,
+            selection,
+            &mut recovery_permit,
+            &restriction_endpoint,
+            &plan.model,
+            free_contract,
+            status.as_u16(),
+            policy_body.as_deref(),
+            retry_after,
+            observed_at,
+            observed_mono,
+        )?;
         let action = forward_action_for_class(class, allow_same_account_retry, None);
         if class == ProviderErrorClass::FreeRejected {
-            let retry_after = error_headers
-                .get(reqwest::header::RETRY_AFTER)
-                .and_then(|value| value.to_str().ok());
             observe_free_rejection(
                 state,
                 account,
@@ -1320,6 +1386,7 @@ pub(crate) async fn forward_request_with_deadline(
             response: protocol_status_error_response(plan.client, status, &error_message, None),
             action,
             error_message: Some(error_message),
+            sent: true,
         });
     }
 
@@ -1327,13 +1394,19 @@ pub(crate) async fn forward_request_with_deadline(
         // A known 4xx proves the upstream rejected the request. Its status
         // policy still applies if the bounded error-body read fails.
         let error_headers = upstream_resp.headers().clone();
-        let text = response_text_with_timeout(
+        let (text, policy_body) = match response_text_with_timeout(
             upstream_resp,
             body_timeout,
             Some(MAX_UPSTREAM_ERROR_BODY_BYTES),
         )
         .await
-        .unwrap_or_else(ResponseBodyFailure::into_detail);
+        {
+            Ok(text) => {
+                let policy = text.clone();
+                (text, Some(policy))
+            }
+            Err(error) => (error.into_detail(), None),
+        };
         let class = super::classify::classify_http_response(
             status.as_u16(),
             policy_provider_id,
@@ -1345,6 +1418,22 @@ pub(crate) async fn forward_request_with_deadline(
             .get(reqwest::header::RETRY_AFTER)
             .and_then(|value| value.to_str().ok());
         let (observed_at, observed_mono) = state.sample_gateway_clock();
+        observe_local_policy(
+            state,
+            account,
+            adapter,
+            class,
+            selection,
+            &mut recovery_permit,
+            &restriction_endpoint,
+            &plan.model,
+            free_contract,
+            status.as_u16(),
+            policy_body.as_deref(),
+            retry_after,
+            observed_at,
+            observed_mono,
+        )?;
         if let Some(facts) = decode_failure(class, &text, retry_after, observed_at) {
             let decision = facts.decide();
             let sanitized = attempt_context.sanitize_upstream_error(&text);
@@ -1430,6 +1519,7 @@ pub(crate) async fn forward_request_with_deadline(
                 ),
                 action,
                 error_message: Some(error_message),
+                sent: true,
             });
         }
 
@@ -1477,6 +1567,7 @@ pub(crate) async fn forward_request_with_deadline(
                     ),
                     action,
                     error_message: Some(error_message),
+                    sent: true,
                 });
             }
             ProviderErrorClass::UnauthorizedPassthrough => {
@@ -1523,6 +1614,7 @@ pub(crate) async fn forward_request_with_deadline(
                     response: (status, axum::Json(body)).into_response(),
                     action,
                     error_message: Some(error_message),
+                    sent: true,
                 });
             }
             ProviderErrorClass::UnauthorizedRotate => {
@@ -1571,6 +1663,7 @@ pub(crate) async fn forward_request_with_deadline(
                     response: error_response(plan.client, &error_message, None),
                     action,
                     error_message: Some(error_message),
+                    sent: true,
                 });
             }
             ProviderErrorClass::ForbiddenStop | ProviderErrorClass::ForbiddenRotate => {
@@ -1620,6 +1713,7 @@ pub(crate) async fn forward_request_with_deadline(
                     response: error_response(plan.client, &error_message, None),
                     action,
                     error_message: Some(error_message),
+                    sent: true,
                 });
             }
             _ => {
@@ -1672,6 +1766,7 @@ pub(crate) async fn forward_request_with_deadline(
                     action,
                     error_message: (class == ProviderErrorClass::InsufficientCredits)
                         .then_some(message),
+                    sent: true,
                 });
             }
         }
@@ -2273,6 +2368,7 @@ pub(crate) async fn forward_request_with_deadline(
             response,
             action: ForwardAction::Return,
             error_message: None,
+            sent: true,
         })
     } else {
         let text = match response_text_with_timeout(upstream_resp, body_timeout, None).await {
@@ -2323,6 +2419,7 @@ pub(crate) async fn forward_request_with_deadline(
                     response: outcome_unknown_response(plan.client, downstream_status, &detail),
                     action,
                     error_message: Some(error_message),
+                    sent: true,
                 });
             }
         };
@@ -2387,6 +2484,7 @@ pub(crate) async fn forward_request_with_deadline(
                     response: error_response(plan.client, message, None),
                     action,
                     error_message: Some(message.to_string()),
+                    sent: true,
                 });
             }
         };
@@ -2420,6 +2518,7 @@ pub(crate) async fn forward_request_with_deadline(
                 response: error_response(plan.client, &sanitized, Some(&upstream_json)),
                 action,
                 error_message: Some(sanitized),
+                sent: true,
             });
         }
 
@@ -2480,6 +2579,7 @@ pub(crate) async fn forward_request_with_deadline(
                 response: error_response(plan.client, &message, None),
                 action,
                 error_message: Some(message),
+                sent: true,
             });
         }
         let metrics = if has_complete_usage(plan.upstream, &upstream_json) {
@@ -2574,6 +2674,7 @@ pub(crate) async fn forward_request_with_deadline(
                     response: error_response(plan.client, &message, Some(&upstream_json)),
                     action,
                     error_message: Some(message),
+                    sent: true,
                 });
             }
         };
@@ -2621,6 +2722,7 @@ pub(crate) async fn forward_request_with_deadline(
             response: (status, axum::Json(response_json)).into_response(),
             action: ForwardAction::Return,
             error_message: None,
+            sent: true,
         })
     }
 }
@@ -3117,6 +3219,7 @@ fn handle_pre_output_stream_failure(
             response: outcome_unknown_response_with_message(plan.client, failure_status, &message),
             action,
             error_message: Some(message),
+            sent: true,
         })
     } else {
         PreOutputFailure::Return(chunks)
@@ -3271,6 +3374,60 @@ fn is_openrouter_free_request(url: &reqwest::Url, model: &str) -> bool {
 }
 
 #[allow(clippy::too_many_arguments)]
+fn observe_local_policy(
+    state: &CoreState,
+    account: &ExecutionCredential,
+    adapter: ProviderAdapterKind,
+    class: ProviderErrorClass,
+    selection: &LiveSendSelection,
+    recovery_permit: &mut RecoveryPermit,
+    endpoint: &str,
+    model: &str,
+    free_contract: bool,
+    http_status: u16,
+    policy_body: Option<&str>,
+    retry_after: Option<&str>,
+    observed_at: chrono::DateTime<chrono::Utc>,
+    observed_mono: Instant,
+) -> Result<()> {
+    if !(400..=599).contains(&http_status) {
+        return Ok(());
+    }
+    let input = crate::gateway::policy::PolicyInput {
+        adapter,
+        class,
+        http_status: Some(http_status),
+        error: policy_body.and_then(crate::gateway::policy::extract_top_level_error),
+    };
+    let decisions = recovery_permit.evaluate_captured(&input);
+    if decisions.is_empty() {
+        return Ok(());
+    }
+    let retry_hint = retry_after.and_then(|value| parse_retry_after(value, observed_at));
+    let db = state.db.lock();
+    let identity_ok = live_send::selection_identity_is_current(&db, selection)?
+        && recovery_permit.same_policy_identity(&ResourceSet::capture(
+            &db,
+            account,
+            endpoint,
+            model,
+            free_contract,
+        )?);
+    if identity_ok {
+        for decision in &decisions {
+            if !recovery_permit.permits_policy(decision) {
+                continue;
+            }
+            recovery_permit.observe_policy(decision, observed_mono);
+            if let Some(hint) = retry_hint {
+                recovery_permit.observe_policy_retry(decision.scope, hint, observed_mono);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 fn observe_openrouter_free_rejection(
     state: &CoreState,
     account: &ExecutionCredential,
@@ -3374,11 +3531,67 @@ fn retry_action_name(action: ForwardAction) -> &'static str {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn log_unsent_admission_skip(
+    state: &CoreState,
+    account: &ExecutionCredential,
+    plan: &RequestPlan,
+    route: RouteLabel,
+    spec: &AttemptSpec,
+    trace: &RequestTrace,
+    client_body: &[u8],
+    attempt: u32,
+    client_key_id: Option<&str>,
+    pricing_snapshot: &RequestPricingSnapshot,
+    wait: &crate::gateway::recovery::WaitState,
+) -> Result<()> {
+    let mut attempt_context =
+        ForwardAttemptContext::new(trace, client_body.len(), attempt, plan, route);
+    attempt_context.attach_pricing(pricing_snapshot);
+    attempt_context.set_client_key(client_key_id, state);
+    attempt_context.set_provider_route(account, spec);
+    attempt_context.restriction_details = Some(serde_json::json!({"wait": wait}));
+    let message = if wait.is_local_policy() {
+        "compatible upstream resource is waiting on local_policy; no upstream request sent"
+    } else if wait.is_capacity() {
+        "compatible upstream resource cannot be tracked (recovery_capacity); no upstream request sent"
+    } else {
+        "compatible upstream resource is waiting for recovery; no upstream request sent"
+    };
+    let failure = attempt_context.failure(FailureSpec {
+        error_source: "gateway",
+        error_stage: wait.skip_stage(),
+        downstream_status: Some(StatusCode::SERVICE_UNAVAILABLE.as_u16()),
+        upstream_status: None,
+        upstream_wait_ms: None,
+        retry_action: Some("try_next_account"),
+        upstream_headers: None,
+        upstream_error: None,
+        request_body: Some(client_body),
+    });
+    DbAttemptSink::new(&state.db.lock()).insert(
+        account,
+        &plan.model,
+        "error",
+        None,
+        metadata_metrics(
+            pricing_snapshot,
+            plan.service_tier.as_deref(),
+            "not_applicable",
+        ),
+        Some(message),
+        &attempt_context,
+        Some(failure),
+    )?;
+    Ok(())
+}
+
 fn account_preflight_failure(plan: &RequestPlan, message: String) -> ForwardResult {
     ForwardResult {
         response: error_response(plan.client, &message, None),
         action: ForwardAction::TryNextAccount,
         error_message: Some(message),
+        sent: false,
     }
 }
 

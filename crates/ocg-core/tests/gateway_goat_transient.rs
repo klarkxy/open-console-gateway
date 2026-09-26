@@ -98,7 +98,7 @@ async fn goat_429_holds_only_that_key_for_thirty_seconds() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(h.call_keys(), ["key-a", "key-b", "key-b", "key-b"]);
 
-    clock.store(31, std::sync::atomic::Ordering::SeqCst);
+    clock.store(40, std::sync::atomic::Ordering::SeqCst);
     let (status, body) = h.protocol("/v1/chat/completions", MODEL).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(h.call_keys(), ["key-a", "key-b", "key-b", "key-b", "key-a"]);

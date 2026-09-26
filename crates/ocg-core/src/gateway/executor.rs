@@ -3,11 +3,13 @@
 //! client authentication and parsing; single-attempt I/O lives in forwarder.
 
 use crate::alias;
+use crate::gateway::classify::{ProviderErrorClass, classify_http};
 use crate::gateway::diagnostics::{
     ErrorDiagnostic, RequestTrace, emit_failure, log_request_failure, serialize_diagnostic,
 };
 use crate::gateway::forwarder::{
-    ForwardAction, LiveSendSelection, forward_request_with_deadline, rate_limited_response,
+    ForwardAction, LiveSendSelection, forward_request_with_deadline, log_unsent_admission_skip,
+    rate_limited_response,
 };
 use crate::gateway::materialize::materialize_execution_routes;
 use crate::gateway::protocol::{
@@ -16,6 +18,8 @@ use crate::gateway::protocol::{
 use crate::gateway::response::{local_protocol_failure, protocol_error_response};
 use crate::gateway::routing::resolve_conversation_key;
 
+use crate::gateway::attempt::UpstreamAuth;
+use crate::gateway::recovery::{ResourceSet, restriction_endpoint_identity};
 use crate::http_client::{ForwardRouteSet, RouteLabel};
 use crate::kernel::pricing::PricingSnapshot;
 use crate::kernel::protocol::ApiFormat;
@@ -82,6 +86,7 @@ struct LoopState {
     last_error: Option<String>,
     failed_ids: Vec<String>,
     attempt: u32,
+    send_attempts: u32,
 }
 
 impl LoopState {
@@ -90,6 +95,7 @@ impl LoopState {
             last_error: None,
             failed_ids: Vec::new(),
             attempt: 0,
+            send_attempts: 0,
         }
     }
 }
@@ -231,6 +237,51 @@ impl GatewayExecutor {
         let request_deadline =
             tokio::time::Instant::now() + request_budget_duration(&snapshots.config, facts.stream);
         loop {
+            if tokio::time::Instant::now() >= request_deadline {
+                let message =
+                    "Gateway request retry budget exhausted; no further upstream attempt sent";
+                record_request_failure(
+                    &state,
+                    &trace,
+                    &client_body,
+                    loop_state.attempt.max(1),
+                    &facts,
+                    "gateway",
+                    "request_budget",
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    message,
+                );
+                return protocol_error_response(
+                    client_format,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    message,
+                    None,
+                );
+            }
+            let max_scans = (route_set.routes.len() as u32)
+                .saturating_add(MAX_REQUEST_ATTEMPTS)
+                .max(1);
+            if loop_state.attempt >= max_scans {
+                let message =
+                    "Gateway request candidate scan exhausted; no further upstream attempt sent";
+                record_request_failure(
+                    &state,
+                    &trace,
+                    &client_body,
+                    loop_state.attempt.max(1),
+                    &facts,
+                    "gateway",
+                    "request_budget",
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    message,
+                );
+                return protocol_error_response(
+                    client_format,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    message,
+                    None,
+                );
+            }
             let (decision_wall, decision_mono) = state.sample_gateway_clock();
             let live = {
                 let db = state.db.lock();
@@ -329,6 +380,7 @@ impl GatewayExecutor {
                         );
                         return rate_limited_response(client_format, until);
                     }
+                    let mut any_local_policy = false;
                     let soonest = route_set
                         .routes
                         .iter()
@@ -348,7 +400,7 @@ impl GatewayExecutor {
                                 });
                             let free_contract =
                                 route.routing.channel == crate::models::UpstreamChannel::Free;
-                            let temporary = crate::gateway::recovery::ResourceSet::from_snapshot(
+                            let temporary = ResourceSet::from_snapshot(
                                 &live,
                                 credential,
                                 "",
@@ -361,6 +413,16 @@ impl GatewayExecutor {
                                     .recovery
                                     .credential_retry_until(&resources, decision_wall)
                             });
+                            if let Ok(resources) = capture_route_resources(&live, route, &snapshots)
+                                && let Err(wait) = state.recovery.inspect_admission(
+                                    &resources,
+                                    decision_wall,
+                                    decision_mono,
+                                )
+                                && (wait.is_local_policy() || wait.is_capacity())
+                            {
+                                any_local_policy = true;
+                            }
                             let free = free_contract.then_some(free_egress_wait).flatten();
                             // A Key must outwait every known blocker; another Key
                             // may become available sooner.
@@ -401,6 +463,26 @@ impl GatewayExecutor {
                                 &facts,
                                 "gateway",
                                 "account_selection",
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                msg,
+                            );
+                            protocol_error_response(
+                                client_format,
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                msg,
+                                None,
+                            )
+                        }
+                        None if any_local_policy => {
+                            let msg = "all compatible accounts are waiting on local_policy";
+                            record_request_failure(
+                                &state,
+                                &trace,
+                                &client_body,
+                                loop_state.attempt.max(1),
+                                &facts,
+                                "gateway",
+                                "local_policy",
                                 StatusCode::SERVICE_UNAVAILABLE,
                                 msg,
                             );
@@ -479,6 +561,40 @@ impl GatewayExecutor {
             };
             let selection =
                 LiveSendSelection::from_execution(&route, &client_model, &routing_model);
+            if let Ok(resources) = capture_route_resources(&live, &route, &snapshots)
+                && let Err(wait) =
+                    state
+                        .recovery
+                        .inspect_admission(&resources, decision_wall, decision_mono)
+            {
+                loop_state.attempt = loop_state.attempt.saturating_add(1);
+                let skip_route = send_route_label(&snapshots, route.routing.adapter, &route.plan);
+                let _ = log_unsent_admission_skip(
+                    &state,
+                    &route.routing.account,
+                    &route.plan,
+                    skip_route,
+                    &route.spec,
+                    &trace,
+                    &client_body,
+                    loop_state.attempt,
+                    client_key_id.as_deref(),
+                    &prices[selected_index],
+                    &wait,
+                );
+                loop_state.last_error = Some(
+                    if wait.is_local_policy() {
+                        "compatible upstream resource is waiting on local_policy; no upstream request sent"
+                    } else if wait.is_capacity() {
+                        "compatible upstream resource cannot be tracked (recovery_capacity); no upstream request sent"
+                    } else {
+                        "compatible upstream resource is waiting for recovery; no upstream request sent"
+                    }
+                    .into(),
+                );
+                loop_state.failed_ids.push(route.routing.account.id.clone());
+                continue;
+            }
             let adapter = route.routing.adapter;
             let account = route.routing.account;
             let active_plan = route.plan;
@@ -486,7 +602,7 @@ impl GatewayExecutor {
 
             let mut retried_same_account = false;
             loop {
-                if loop_state.attempt >= MAX_REQUEST_ATTEMPTS
+                if loop_state.send_attempts >= MAX_REQUEST_ATTEMPTS
                     || tokio::time::Instant::now() >= request_deadline
                 {
                     let message =
@@ -542,24 +658,29 @@ impl GatewayExecutor {
                 )
                 .await;
                 match forwarded {
-                    Ok(result) => match result.action {
-                        ForwardAction::Return => return result.response,
-                        ForwardAction::RetrySameAccount if !retried_same_account => {
-                            retried_same_account = true;
-                            continue;
+                    Ok(result) => {
+                        if result.sent {
+                            loop_state.send_attempts = loop_state.send_attempts.saturating_add(1);
                         }
-                        ForwardAction::RetrySameAccount => return result.response,
-                        ForwardAction::ExhaustFreeChannel => {
-                            loop_state.last_error = result.error_message.clone();
-                            loop_state.failed_ids.push(account.id.clone());
-                            break;
+                        match result.action {
+                            ForwardAction::Return => return result.response,
+                            ForwardAction::RetrySameAccount if !retried_same_account => {
+                                retried_same_account = true;
+                                continue;
+                            }
+                            ForwardAction::RetrySameAccount => return result.response,
+                            ForwardAction::ExhaustFreeChannel => {
+                                loop_state.last_error = result.error_message.clone();
+                                loop_state.failed_ids.push(account.id.clone());
+                                break;
+                            }
+                            ForwardAction::TryNextAccount => {
+                                loop_state.last_error = result.error_message.clone();
+                                loop_state.failed_ids.push(account.id.clone());
+                                break;
+                            }
                         }
-                        ForwardAction::TryNextAccount => {
-                            loop_state.last_error = result.error_message.clone();
-                            loop_state.failed_ids.push(account.id.clone());
-                            break;
-                        }
-                    },
+                    }
                     Err(e) => {
                         let message = format!("forward error: {e}");
                         record_plan_failure(
@@ -667,6 +788,48 @@ fn routing_selector_invariant(failure: SelectorInvariant) -> (StatusCode, String
         StatusCode::INTERNAL_SERVER_ERROR,
         format!("routing selector invariant: {detail}"),
     )
+}
+
+fn send_route_label(
+    snapshots: &RequestSnapshots,
+    adapter: crate::provider::ProviderAdapterKind,
+    plan: &RequestPlan,
+) -> RouteLabel {
+    if adapter == crate::provider::ProviderAdapterKind::Cpa {
+        RouteLabel::Direct
+    } else {
+        snapshots.routes.client_for(&plan.model).1
+    }
+}
+
+fn capture_route_resources(
+    live: &crate::routing_snapshot::RoutingSnapshot,
+    route: &crate::gateway::materialize::ExecutionRoute,
+    snapshots: &RequestSnapshots,
+) -> anyhow::Result<ResourceSet> {
+    let account = live
+        .credentials
+        .iter()
+        .find(|row| row.id == route.routing.account.id)
+        .unwrap_or(&route.routing.account);
+    let url = route.spec.request_url().unwrap_or_default();
+    let route_label = send_route_label(snapshots, route.routing.adapter, &route.plan);
+    let proxy_identity =
+        (route_label == RouteLabel::Proxy).then_some(snapshots.config.proxy_url.as_str());
+    let endpoint =
+        restriction_endpoint_identity(&url, route_label, route.plan.upstream, proxy_identity);
+    let free_contract = matches!(
+        classify_http(
+            429,
+            &account.provider_id,
+            route.plan.channel,
+            route.spec.auth == UpstreamAuth::None
+        ),
+        ProviderErrorClass::RateLimited {
+            profile: ocg_gateway::classify::ErrorProfile::ZenFree
+        }
+    );
+    ResourceSet::from_snapshot(live, account, &endpoint, &route.plan.model, free_contract)
 }
 
 #[cfg(test)]

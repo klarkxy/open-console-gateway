@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import net from "node:net";
-import { MARKER, sha256 } from "../lib/common.mjs";
+import { LIVE_MODEL, MARKER, sha256 } from "../lib/common.mjs";
 import { createLab } from "../lib/lab.mjs";
 import { isolationKey } from "../lib/faults.mjs";
+import { createLiveClient } from "../lib/live.mjs";
 
 function portOpen(port) {
   return new Promise((resolve) => {
@@ -150,5 +151,67 @@ test("control reset clears receipts", async () => {
     const reset = await fetch(`${started.control.url}/reset`, { method: "POST" });
     assert.equal(reset.status, 200);
     assert.equal(lab.snapshot().length, 0);
+  });
+});
+
+test("control reset re-arms when a live client exists and the next success is forwarded", async () => {
+  const calls = [];
+  const live = createLiveClient({
+    url: "http://127.0.0.1:9/v1/chat/completions",
+    key: "sk-test-not-real",
+    fetchImpl: async (_url, init) => {
+      calls.push(JSON.parse(init.body));
+      return new Response(
+        JSON.stringify({
+          id: "chatcmpl-reset",
+          model: LIVE_MODEL,
+          choices: [{ index: 0, message: { role: "assistant", content: "from-remote" }, finish_reason: "stop" }],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    },
+  });
+  const lab = createLab({ live, runId: "lab-reset-rearm" });
+  const started = await lab.start();
+  try {
+    lab.armLive(false);
+    assert.equal(lab.stats().liveEnabled, false);
+    const reset = await fetch(`${started.control.url}/reset`, { method: "POST" });
+    assert.equal(reset.status, 200);
+    assert.equal(lab.stats().liveEnabled, true, "POST /reset must change liveEnabled from false to true");
+    const chat = started.slots.find((slot) => slot.slot === "chat");
+    const response = await fetch(chat.url, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${chat.secret}` },
+      body: JSON.stringify({ model: chat.model, messages: [{ role: "user", content: MARKER }] }),
+    });
+    const body = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(body.choices[0].message.content, "from-remote");
+    assert.equal(calls.length, 1);
+    assert.equal(lab.stats().remoteCalls, 1);
+  } finally {
+    await lab.close();
+  }
+});
+
+test("control reset does not invent liveEnabled when no live client is configured", async () => {
+  await withLab(async (lab, started) => {
+    lab.armLive(true);
+    assert.equal(lab.stats().liveEnabled, false);
+    const reset = await fetch(`${started.control.url}/reset`, { method: "POST" });
+    assert.equal(reset.status, 200);
+    assert.equal(lab.stats().liveEnabled, false);
+    const chat = started.slots.find((slot) => slot.slot === "chat");
+    const response = await fetch(chat.url, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${chat.secret}` },
+      body: JSON.stringify({ model: chat.model, messages: [{ role: "user", content: MARKER }] }),
+    });
+    const body = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(body.choices[0].message.content, chat.ok);
+    assert.equal(lab.stats().remoteCalls, 0);
   });
 });

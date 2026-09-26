@@ -423,6 +423,7 @@ impl CoreStateInner {
             .apply_destination_configuration(&crate::destination_projection::load_runtime(&db)?);
         let http_client =
             build_proxy_route_set(&config, &crate::destination_projection::load_runtime(&db)?)?;
+        let policy_snapshot = crate::gateway::policy::load_runtime_snapshot(&db)?;
         Ok(Self {
             db: Mutex::new(db),
             config: Mutex::new(config),
@@ -461,7 +462,9 @@ impl CoreStateInner {
             provider_contracts: RwLock::new(Arc::new(provider_contracts)),
             dynamic_providers: RwLock::new(Arc::new(dynamic_providers)),
             routing: RoutingRuntime::new(),
-            recovery: Arc::new(crate::gateway::recovery::RecoveryRuntime::default()),
+            recovery: Arc::new(crate::gateway::recovery::RecoveryRuntime::with_snapshot(
+                policy_snapshot,
+            )),
             browser: crate::browser::BrowserRuntime::new(),
             usage_sync: crate::usage_sync::UsageSyncRuntime::new(),
             quota_probes: Mutex::new(HashMap::new()),
@@ -766,7 +769,15 @@ impl CoreStateInner {
         let runtime = self.prepare_imported_node_runtime(&db)?;
         tx.commit()?;
         self.install_imported_node_runtime(runtime);
+        self.publish_temporary_policy(&db)?;
         Ok(result)
+    }
+
+    pub(crate) fn publish_temporary_policy(&self, db: &Database) -> crate::Result<()> {
+        let previous = self.recovery.policy_snapshot();
+        let compiled = crate::gateway::policy::compile_published(db, &previous)?;
+        self.recovery.install_snapshot(compiled);
+        Ok(())
     }
 
     /// Build every fallible runtime snapshot from an uncommitted V2 node

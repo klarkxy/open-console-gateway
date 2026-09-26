@@ -48,6 +48,7 @@ pub(crate) fn delete_http_destination_on(db: &Database, destination_id: &str) ->
     )?;
     db.conn
         .execute("DELETE FROM destinations WHERE id = ?1", [destination_id])?;
+    crate::gateway::policy::strip_destination_rules(db, destination_id)?;
     Ok(())
 }
 

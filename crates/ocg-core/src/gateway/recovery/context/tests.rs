@@ -53,3 +53,26 @@ fn only_anonymous_sealed_free_recovery_ignores_catalog_replacement() {
         destination_identity(&refreshed, true)
     );
 }
+
+#[test]
+fn empty_endpoint_skips_model_policy_identity() {
+    let missing = super::ResourceSet::fixture(1, 1, 1, &["a"], false).without_model();
+    assert!(
+        missing
+            .policy_key(crate::gateway::policy::RestrictionScope::CredentialModel)
+            .is_none()
+    );
+    assert!(
+        missing
+            .policy_key(crate::gateway::policy::RestrictionScope::Credential)
+            .is_some()
+    );
+    let labeled = super::restriction_endpoint_identity(
+        "http://127.0.0.1/v1/chat/completions",
+        "Direct",
+        "ChatCompletions",
+        None,
+    );
+    assert!(labeled.contains("127.0.0.1"));
+    assert!(!labeled.is_empty());
+}

@@ -38,11 +38,14 @@ export function normalizeScript(item) {
     : "success";
   if (kind === "http") {
     const status = Number.parseInt(item.status, 10);
+    const delayRaw = Number.parseInt(item.delayMs, 10);
+    const delayMs = Number.isFinite(delayRaw) && delayRaw > 0 ? Math.min(delayRaw, 30_000) : undefined;
     return {
       kind: "http",
       status: Number.isFinite(status) ? status : 500,
       headers: item.headers ?? {},
       body: item.body ?? { error: { message: item.message || "scripted_http", type: "api_error" } },
+      ...(delayMs ? { delayMs } : {}),
     };
   }
   if (kind === "delay") {

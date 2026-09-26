@@ -28,12 +28,7 @@ async fn goat_mixed_failures_respect_temporary_key_waits_without_changing_sticky
             ),
             (
                 "key-h",
-                &[
-                    reply(400, CREDIT_ERROR),
-                    reply(400, CREDIT_ERROR),
-                    reply(400, CREDIT_ERROR),
-                    reply(400, CREDIT_ERROR),
-                ],
+                &[reply(400, CREDIT_ERROR), reply(400, CREDIT_ERROR)],
             ),
             ("key-c", &[ok(), ok(), ok(), ok()]),
         ],
@@ -107,10 +102,12 @@ async fn goat_mixed_failures_respect_temporary_key_waits_without_changing_sticky
         ])
         .unwrap();
 
-    // Each 429 holds only A for 30 seconds. During that wait A emits a local
-    // resource_wait, while H's credit 400 remains eligible on the next request.
+    // Each 429 holds only A for ~30 seconds (plus bounded jitter). During that
+    // wait A emits a local resource_wait. H's first credit 400 starts a
+    // credential_model local_policy wait, so later requests skip H without
+    // another upstream hit. 29s is still waiting; 40s is due.
     let mut expected_calls = vec!["key-a"];
-    for start in [0, 30] {
+    for start in [0, 40] {
         seconds.store(start, Ordering::SeqCst);
         let (status, body) = h.protocol("/v1/chat/completions", MODEL).await;
         assert_eq!(status, StatusCode::OK, "{body}");
@@ -120,11 +117,11 @@ async fn goat_mixed_failures_respect_temporary_key_waits_without_changing_sticky
         seconds.store(start + 29, Ordering::SeqCst);
         let (status, body) = h.protocol("/v1/chat/completions", MODEL).await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        expected_calls.extend(["key-h", "key-c"]);
+        expected_calls.extend(["key-c"]);
         assert_eq!(h.call_keys(), expected_calls);
     }
     // At the second deadline, the original sticky target is tried directly.
-    seconds.store(60, Ordering::SeqCst);
+    seconds.store(80, Ordering::SeqCst);
     let (status, body) = h.protocol("/v1/chat/completions", MODEL).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     expected_calls.push("key-a");
@@ -176,7 +173,18 @@ async fn goat_mixed_failures_respect_temporary_key_waits_without_changing_sticky
             "try_next_account"
         );
     }
-    for (code, account_id, attempt, count) in [(429, &a, 1, 2), (400, &h_id, 2, 4)] {
+    let policy_skips: Vec<_> = logs
+        .iter()
+        .filter(|row| row.error_stage.as_deref() == Some("local_policy_skip"))
+        .collect();
+    assert_eq!(policy_skips.len(), 2);
+    for row in policy_skips {
+        assert_eq!(row.account_id, h_id);
+        assert_eq!(row.attempt, Some(2));
+        assert!(row.http_status.is_none());
+        assert!(row.cost.is_none());
+    }
+    for (code, account_id, attempt, count) in [(429, &a, 1, 2), (400, &h_id, 2, 2)] {
         let failed: Vec<_> = logs
             .iter()
             .filter(|row| row.http_status == Some(code))

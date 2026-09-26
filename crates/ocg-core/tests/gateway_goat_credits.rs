@@ -12,10 +12,7 @@ const CREDIT_ERROR: &str = r#"{"error":{"code":"BAD_REQUEST","message":"You have
 #[tokio::test]
 async fn goat_credit_400_retries_another_key_without_publishing_quota_recovery() {
     let p = PreparedFallback::routing(
-        &[
-            ("a", &[reply(400, CREDIT_ERROR), reply(400, CREDIT_ERROR)]),
-            ("b", &[ok(), ok()]),
-        ],
+        &[("a", &[reply(400, CREDIT_ERROR)]), ("b", &[ok(), ok()])],
         &["unused"],
         RoutingMode::StickyGlobal,
         false,
@@ -45,8 +42,8 @@ async fn goat_credit_400_retries_another_key_without_publishing_quota_recovery()
     }
     assert_eq!(
         h.call_keys(),
-        ["a", "b", "a", "b"],
-        "a request-local credit 400 must not make StickyGlobal abandon the higher card"
+        ["a", "b", "b"],
+        "sticky keeps A as the target while request-local exclude skips the waiting Key"
     );
     let credential = identity_refs_for(&h.state, &a).credential_id;
     let (status, view) = v4_get(h.port, "/credentials").await;
@@ -70,7 +67,7 @@ async fn goat_credit_400_retries_another_key_without_publishing_quota_recovery()
         .iter()
         .filter(|row| row.http_status == Some(400))
         .collect();
-    assert_eq!(failed.len(), 2);
+    assert_eq!(failed.len(), 1);
     for row in failed {
         assert_eq!(row.attempt, Some(1));
         let diagnostic = row.diagnostic.as_ref().unwrap();
