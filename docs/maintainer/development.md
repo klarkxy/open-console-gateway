@@ -84,8 +84,7 @@ with an isolated `DSH_HOME` and a loopback models/chat stub. `smoke:dsh:cli`
 drives `GET|POST|DELETE /dashboard/api/v4/applications/dsh` against a native
 `ocg-manager-cli serve` with `dsh-local-host`. Pass `--expect-unsupported` when
 the CLI was built without that feature, or `--relative-roots` to exercise
-relative `--data-dir` / `DSH_HOME` values. The default smoke installs into
-`web` and a selected `coding` profile. Run
+relative `--data-dir` / `DSH_HOME` values. The default smoke checks profile discovery, verifies that stopped Web profiles require a live session, and runs the Web HTTP lifecycle through OCG. Run
 `node scripts/dsh-headless-cli-smoke.mjs --scan-user-homes` to verify selection
 across isolated `.dsh` and `.dsh-editor` Homes.
 

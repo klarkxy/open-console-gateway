@@ -165,90 +165,67 @@ async function main() {
       }, null, 2)}\n`);
       return;
     }
-    assert.equal(inspected.status, "ready");
-    assert.equal(inspected.detected, true);
-    assert.equal(inspected.installSupported, true);
-    assert.ok(inspected.fingerprint);
-    assert.ok(inspected.version?.length > 0);
-
-    const installedResponse = await fetch(endpoint, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        keyId: primaryKeyId,
-        profilePath: inspected.selectedProfilePath,
-        expectedFingerprint: inspected.fingerprint,
-        expectedRevision: inspected.revision.revision,
-        processGeneration: inspected.revision.processGeneration,
-      }),
-    });
-    if (installedResponse.status !== 200) {
-      throw new Error(
-        `headless DSH install returned HTTP ${installedResponse.status}: ${await installedResponse.text()}`,
-      );
-    }
-    const installed = await installedResponse.json();
-    assert.equal(installed.status, "installed");
-    assert.equal(installed.installed, true);
-    assert.equal(installed.activationRequired, true);
-
-    const manifest = JSON.parse(
-      await readFile(join(home, "profiles", "web", "package.json"), "utf8"),
-    );
-    assert.ok(manifest.dependencies?.[packageName]);
-    assert.ok(manifest.dsh?.profile?.bundles?.includes(packageName));
-    assert.ok(
-      installed.targetPaths.every((path) =>
-        [data, home].some((rootPath) =>
-          comparablePath(path).startsWith(comparablePath(rootPath)),
-        ),
-      ),
-    );
+    // Ordinary profiles require a running address and its local session.
+    assert.equal(inspected.status, "not_detected", inspected.detail ?? inspected.reason);
+    assert.equal(inspected.installSupported, false);
+    assert.ok(inspected.discoveredProfiles.some((profile) =>
+      comparablePath(profile.path) === comparablePath(join(home, "profiles", "web"))));
 
     const codingPath = join(secondHome, "profiles", scanUserHomes ? "dsh-editor" : "coding");
     const codingResponse = await fetch(`${endpoint}?profilePath=${encodeURIComponent(codingPath)}`);
     assert.equal(codingResponse.status, 200);
     const coding = await codingResponse.json();
     assert.equal(comparablePath(coding.selectedProfilePath), comparablePath(codingPath));
-    assert.equal(coding.status, "ready");
+    assert.equal(coding.status, scanUserHomes ? "ready" : "not_detected", coding.detail ?? coding.reason);
     assert.ok(coding.discoveredProfiles.some((profile) => comparablePath(profile.path) === comparablePath(codingPath)));
-    const codingInstallResponse = await fetch(endpoint, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        keyId: primaryKeyId,
-        profilePath: codingPath,
-        expectedFingerprint: coding.fingerprint,
-        expectedRevision: coding.revision.revision,
-        processGeneration: coding.revision.processGeneration,
-      }),
-    });
-    if (codingInstallResponse.status !== 200) {
-      throw new Error(`selected DSH install returned HTTP ${codingInstallResponse.status}: ${await codingInstallResponse.text()}`);
-    }
-    const codingInstalled = await codingInstallResponse.json();
-    assert.equal(codingInstalled.status, "installed");
-    assert.equal(comparablePath(codingInstalled.selectedProfilePath), comparablePath(codingPath));
-    const codingManifest = JSON.parse(await readFile(join(codingPath, "package.json"), "utf8"));
-    assert.ok(codingManifest.dependencies?.[packageName]);
-    assert.ok(codingManifest.dsh?.profile?.bundles?.includes(packageName));
-    assert.notDeepEqual(installed.targetPaths, codingInstalled.targetPaths);
+    let editorVersion = null;
     if (scanUserHomes) {
-      const editorState = JSON.parse(await readFile(join(secondHome, "dsh-plugins.json"), "utf8"));
-      assert.ok(editorState.installed.some((item) => item.name === packageName && item.spec === "ocg-manager"));
-      await access(join(secondHome, "user-plugins", "@open-console-gateway", "dsh-plugin", "index.js"));
+      const codingInstallResponse = await fetch(endpoint, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          keyId: primaryKeyId,
+          profilePath: codingPath,
+          expectedFingerprint: coding.fingerprint,
+          expectedRevision: coding.revision.revision,
+          processGeneration: coding.revision.processGeneration,
+        }),
+      });
+      if (codingInstallResponse.status !== 200) {
+        throw new Error(`selected DSH install returned HTTP ${codingInstallResponse.status}: ${await codingInstallResponse.text()}`);
+      }
+      const codingInstalled = await codingInstallResponse.json();
+      assert.equal(codingInstalled.status, "installed");
+      assert.equal(comparablePath(codingInstalled.selectedProfilePath), comparablePath(codingPath));
+      const codingManifest = JSON.parse(await readFile(join(codingPath, "package.json"), "utf8"));
+      assert.ok(codingManifest.dependencies?.[packageName]);
+      assert.ok(codingManifest.dsh?.profile?.bundles?.includes(packageName));
+      assert.ok(codingInstalled.targetPaths.every((target) =>
+        [data, secondHome].some((scope) => comparablePath(target).startsWith(comparablePath(scope)))));
+      {
+        const editorState = JSON.parse(await readFile(join(secondHome, "dsh-plugins.json"), "utf8"));
+        assert.ok(editorState.installed.some((item) => item.name === packageName && item.spec === "ocg-manager"));
+        await access(join(secondHome, "user-plugins", "@open-console-gateway", "dsh-plugin", "index.js"));
+      }
+      editorVersion = codingInstalled.version;
     }
-    const webAfterResponse = await fetch(endpoint);
-    assert.equal(webAfterResponse.status, 200);
-    assert.equal((await webAfterResponse.json()).status, "installed");
+    const webManifest = JSON.parse(await readFile(join(home, "profiles", "web", "package.json"), "utf8"));
+    assert.equal(webManifest.dependencies?.[packageName], undefined);
+    assert.ok(!webManifest.dsh?.profile?.bundles?.includes(packageName));
+    // Exercise the supported live Web route using the same native CLI binary.
+    const live = await execFileAsync(process.execPath, [join(repo, "scripts", "dsh-web-runtime-smoke.mjs"), "--ocg"], {
+      env: process.env, windowsHide: true, timeout: 180_000, maxBuffer: 2 * 1024 * 1024,
+    });
+    const liveResult = JSON.parse(live.stdout.trim().split(/\r?\n/).at(-1));
+    assert.equal(liveResult.success, true);
 
     process.stdout.write(`${JSON.stringify({
       status: "pass",
       runtime: "native-headless-cli",
-      dshVersion: installed.version,
+      editorVersion,
       installed: true,
-      activationRequired: true,
-      selectedProfileInstalled: true,
+      liveWebApplied: true,
+      selectedEditorProfileInstalled: scanUserHomes,
       scannedUserHomes: scanUserHomes,
       isolatedDshHome: true,
       relativeRoots: useRelativeRoots,

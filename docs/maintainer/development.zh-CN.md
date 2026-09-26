@@ -70,7 +70,7 @@ pnpm run smoke:dsh:cli
 配合隔离的 `DSH_HOME` 和本机 loopback 的 models/chat 桩。`smoke:dsh:cli` 对带
 `dsh-local-host` 的原生 `ocg-manager-cli serve` 调用 `GET|POST|DELETE /dashboard/api/v4/applications/dsh`。
 若 CLI 构建时未启用该能力，加 `--expect-unsupported`；若要覆盖相对路径的 `--data-dir` /
-`DSH_HOME`，加 `--relative-roots`。默认冒烟会安装到 `web` 和选中的 `coding` profile；
+`DSH_HOME`，加 `--relative-roots`。默认冒烟检查 Profile 发现、验证已停止的 Web Profile 需要运行会话，并通过 OCG 验证 Web HTTP 安装生命周期；
 运行 `node scripts/dsh-headless-cli-smoke.mjs --scan-user-homes` 可验证隔离的
 `.dsh` 与 `.dsh-editor` 两个 Home 之间的目标选择。
 
