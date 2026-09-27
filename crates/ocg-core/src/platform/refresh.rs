@@ -26,7 +26,9 @@ pub(crate) fn refresh_identity(
 
 fn failed(snapshot: &PlatformSnapshot, component: &str) -> bool {
     snapshot.errors.iter().any(|error| {
-        error.strip_prefix(component).is_some_and(|tail| tail.starts_with('.'))
+        error
+            .strip_prefix(component)
+            .is_some_and(|tail| tail.starts_with('.'))
     })
 }
 
@@ -38,11 +40,18 @@ fn source_failed(snapshot: &PlatformSnapshot, source: &str) -> bool {
         "v1_models" => failed(snapshot, "new_api.models") || failed(snapshot, "sub2api.models"),
         "token_limits" => failed(snapshot, "new_api.token_usage"),
         "new_api.pricing" => [
-            "new_api.pricing", "new_api.status", "new_api.models", "new_api.token_usage",
-        ].iter().any(|component| failed(snapshot, component)),
-        "sub2api.official_pricing" | "sub2api.billed_pricing" => [
-            "sub2api.plaza", "sub2api.billing", "sub2api.models",
-        ].iter().any(|component| failed(snapshot, component)),
+            "new_api.pricing",
+            "new_api.status",
+            "new_api.models",
+            "new_api.token_usage",
+        ]
+        .iter()
+        .any(|component| failed(snapshot, component)),
+        "sub2api.official_pricing" | "sub2api.billed_pricing" => {
+            ["sub2api.plaza", "sub2api.billing", "sub2api.models"]
+                .iter()
+                .any(|component| failed(snapshot, component))
+        }
         _ => failed(snapshot, source),
     }
 }
@@ -61,7 +70,10 @@ pub(crate) fn merge_snapshot(
         return saved;
     };
     let whole_read_failed = incoming.errors.iter().any(|error| {
-        matches!(error.as_str(), "auth.missing" | "base_url.invalid" | "snapshot.secret_reflected")
+        matches!(
+            error.as_str(),
+            "auth.missing" | "base_url.invalid" | "snapshot.secret_reflected"
+        )
     }) || (incoming.stale && incoming.errors.is_empty());
     if whole_read_failed {
         let mut saved = previous.clone();
@@ -72,25 +84,57 @@ pub(crate) fn merge_snapshot(
 
     let mut saved = incoming.clone();
     saved.stale |= !saved.errors.is_empty();
-    saved.quotas.retain(|row| !source_failed(incoming, &row.source));
-    saved.quotas.extend(previous.quotas.iter()
-        .filter(|row| source_failed(incoming, &row.source)).cloned());
-    saved.models.retain(|row| !source_failed(incoming, &row.source));
-    saved.models.extend(previous.models.iter()
-        .filter(|row| source_failed(incoming, &row.source)).cloned());
-    saved.prices.retain(|row| !source_failed(incoming, &row.source));
-    saved.prices.extend(previous.prices.iter()
-        .filter(|row| source_failed(incoming, &row.source)).cloned());
+    saved
+        .quotas
+        .retain(|row| !source_failed(incoming, &row.source));
+    saved.quotas.extend(
+        previous
+            .quotas
+            .iter()
+            .filter(|row| source_failed(incoming, &row.source))
+            .cloned(),
+    );
+    saved
+        .models
+        .retain(|row| !source_failed(incoming, &row.source));
+    saved.models.extend(
+        previous
+            .models
+            .iter()
+            .filter(|row| source_failed(incoming, &row.source))
+            .cloned(),
+    );
+    saved
+        .prices
+        .retain(|row| !source_failed(incoming, &row.source));
+    saved.prices.extend(
+        previous
+            .prices
+            .iter()
+            .filter(|row| source_failed(incoming, &row.source))
+            .cloned(),
+    );
 
     // The legacy group DTO has no source field. Retain missing last-known
     // groups only when a group-producing endpoint failed, and keep the whole
     // observation stale rather than claiming those rows are newly verified.
     if [
-        "new_api.user_self", "new_api.user_groups", "new_api.token_auto_groups",
-        "new_api.token_usage", "sub2api.subscriptions", "sub2api.groups",
-    ].iter().any(|component| failed(incoming, component)) {
+        "new_api.user_self",
+        "new_api.user_groups",
+        "new_api.token_auto_groups",
+        "new_api.token_usage",
+        "sub2api.subscriptions",
+        "sub2api.groups",
+    ]
+    .iter()
+    .any(|component| failed(incoming, component))
+    {
         for old in &previous.groups {
-            if !saved.groups.iter().any(|group| group.id == old.id && group.platform == old.platform) {
+            if !saved
+                .groups
+                .iter()
+                .any(|group| group.id == old.id && group.platform == old.platform)
+            {
                 saved.groups.push(old.clone());
             }
         }

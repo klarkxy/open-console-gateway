@@ -1567,3 +1567,79 @@ async fn new_api_user_id_mismatch_is_fixed_code() {
         snapshot.errors
     );
 }
+
+#[test]
+fn key_authenticated_balance_is_not_suppressed_by_a_management_wallet() {
+    let mut snapshot = PlatformSnapshot::default();
+    parse_sub2_profile(&json!({"balance": 100}), &mut snapshot);
+    parse_sub2_usage(
+        &json!({"mode": "unrestricted", "balance": 20}),
+        &mut snapshot,
+    )
+    .unwrap();
+    snapshot.quotas.retain(|quota| {
+        matches!(quota.kind, PlatformQuotaKind::KeyLimit) || quota.source == "sub2api.v1.usage"
+    });
+    let wallet = snapshot
+        .quotas
+        .iter()
+        .find(|quota| matches!(quota.kind, PlatformQuotaKind::Wallet))
+        .unwrap();
+    assert_eq!(wallet.remaining, Some(20.0));
+    assert_eq!(wallet.source, "sub2api.v1.usage");
+}
+
+#[tokio::test]
+async fn sub2_key_refresh_does_not_fetch_management_wallet_subscriptions_or_groups() {
+    let mut routes = HashMap::new();
+    routes.insert(
+        "/api/v1/user/profile".into(),
+        Route::ok(r#"{"code":0,"data":{"balance":100}}"#),
+    );
+    routes.insert(
+        "/v1/models".into(),
+        Route::ok(r#"{"data":[{"id":"model-a"}]}"#),
+    );
+    routes.insert(
+        "/v1/usage".into(),
+        Route::ok(r#"{"mode":"unrestricted","balance":20}"#),
+    );
+    routes.insert("/v1/sub2api/billing".into(), Route::ok(r#"{"object":"sub2api.key_billing","schema_version":1,"billing_scope":"token","effective_rate_multiplier":1}"#));
+    routes.insert(
+        "/api/v1/model-plaza".into(),
+        Route::ok(r#"{"code":0,"data":{"groups":[]}}"#),
+    );
+    let (base, client, hits) = spawn_mock(routes).await;
+    let group = PlatformGroup::default();
+    let snapshot = read(
+        &client,
+        &PlatformReadRequest {
+            kind: PlatformKind::Sub2api,
+            base_url: &base,
+            user_credential: Some(USER),
+            key: Some(KEY),
+            group: &group,
+            now: now(),
+        },
+    )
+    .await;
+    let wallet = snapshot
+        .quotas
+        .iter()
+        .find(|quota| matches!(quota.kind, PlatformQuotaKind::Wallet))
+        .unwrap();
+    assert_eq!(wallet.remaining, Some(20.0));
+    assert_eq!(wallet.source, "sub2api.v1.usage");
+    let hits = hits.lock().unwrap();
+    for forbidden in [
+        "/api/v1/user/profile",
+        "/api/v1/subscriptions/summary",
+        "/api/v1/groups/available",
+    ] {
+        assert!(!hits.iter().any(|hit| hit.path == forbidden));
+    }
+    assert!(hits.iter().any(|hit| hit.path == "/v1/usage"
+        && hit.authorization.as_deref() == Some(format!("Bearer {KEY}").as_str())));
+    assert!(hits.iter().any(|hit| hit.path == "/api/v1/model-plaza"
+        && hit.authorization.as_deref() == Some(format!("Bearer {USER}").as_str())));
+}

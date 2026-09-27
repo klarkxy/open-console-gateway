@@ -871,11 +871,19 @@ export interface DshApplicationInstallRequest {
  */
 export interface PlatformKeyImportRequest {
   expectedRevision: number;
+  /**
+   * One bounded remote page; omission starts at page one.
+   */
+  page?: number | null;
   processGeneration: number;
 }
 export interface PlatformKeyImportResult {
   failed: PlatformKeyImportFailure[];
   imported: number;
+  /**
+   * More remote rows exist, even if every row in this batch was skipped.
+   */
+  nextPage: number | null;
   revision: ControlRevision;
   skippedDisabled: number;
   skippedExisting: number;
