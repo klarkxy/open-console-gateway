@@ -46,6 +46,9 @@ export type DashboardApiV4 =
   | CpaCatalogEntry
   | CpaCatalog
   | CpaCatalogUpdate
+  | CatalogModelEditRequest
+  | CatalogModelsAddRequest
+  | ProviderContracts
   | CatalogModelsRemoveRequest
   | CatalogModelsRemoveResult
   | AliasPublication
@@ -279,6 +282,27 @@ export type QuotaSharing =
       credentialId: string;
       kind: "shared";
     };
+/**
+ * Connection-verification status. Wire values match V2 snake_case.
+ */
+export type AccountVerificationStatus = "not_required" | "pending" | "verified" | "failed";
+/**
+ * Last explicit probe outcome stored on evidence. Distinct from
+ * [`ProtocolProbeResult`].
+ */
+export type ProbeResultKind = "success" | "failure";
+/**
+ * Per-model/per-protocol override state. `auto` removes any persisted override.
+ */
+export type ProtocolOverrideState = "auto" | "force_on" | "force_off";
+/**
+ * How a protocol row was established. Wire values match V2 snake_case.
+ */
+export type ContractEvidenceSource = "static" | "preset" | "probe_confirmed" | "probe_observed";
+/**
+ * Contract scope kind. Wire values match V2 `provider` / `custom_endpoint`.
+ */
+export type ContractScopeKind = "provider" | "custom_endpoint";
 export type DshApplicationStatus =
   "unsupported_runtime" | "not_detected" | "ready" | "installed" | "incompatible" | "conflict";
 export type DshApplicationOutcome = "applied" | "restart-required" | "overridden" | "failed" | "cancelled";
@@ -793,6 +817,158 @@ export interface CpaCatalogUpdate {
   enabledIds: string[];
   expectedRevision: number;
   processGeneration: number;
+}
+/**
+ * A built-in model mapping edit. The original upstream identity is immutable
+ * for selection, while the replacement may change its public and upstream IDs.
+ */
+export interface CatalogModelEditRequest {
+  enabled: boolean;
+  expectedRevision: number;
+  originalModelId?: string | null;
+  preferred?: ProtocolDto | null;
+  processGeneration: number;
+  protocols: ProtocolDto[];
+  publicModel: string;
+  upstreamModel: string;
+}
+/**
+ * Add disabled model IDs to a local built-in Provider catalog. No outbound I/O.
+ */
+export interface CatalogModelsAddRequest {
+  expectedRevision: number;
+  modelIds: string[];
+  processGeneration: number;
+}
+/**
+ * Effective provider-scope and custom-endpoint contracts.
+ *
+ * Top-level `revision` is the settings CAS token. Nested `revision` values
+ * are display-only and must not be sent as `expectedRevision`.
+ */
+export interface ProviderContracts {
+  customEndpoints: CustomEndpointContract[];
+  pricingRevision: string;
+  processGeneration: number;
+  providers: ProviderContractGroup[];
+  revision: number;
+}
+/**
+ * One Custom API account scope. Distinct from built-in provider groups.
+ */
+export interface CustomEndpointContract {
+  account: ProviderAccountChoice;
+  card: CardCapabilitySummary;
+  catalog: EffectiveCatalog;
+  catalogRoutable: boolean;
+  disabledReasons: string[];
+  models: EffectiveModelContract[];
+  pricing: CapabilitySummary;
+  productionInference: boolean;
+  providerId: string;
+  /**
+   * Display revision for this endpoint, distinct from the top-level CAS token.
+   */
+  revision: number;
+  scopeId: string;
+  scopeKind: ContractScopeKind;
+  usage: CapabilitySummary;
+}
+/**
+ * Secret-free account identity on a contract card.
+ */
+export interface ProviderAccountChoice {
+  enabled: boolean;
+  id: string;
+  name: string;
+  verificationStatus: AccountVerificationStatus;
+}
+/**
+ * Provider-page actions that are actually implemented for this scope.
+ */
+export interface CardCapabilitySummary {
+  catalogRefresh: boolean;
+  discoverModels: boolean;
+  fetchZenModels: boolean;
+  protocolProbe: boolean;
+}
+/**
+ * Merged model-id catalog for one contract scope.
+ */
+export interface EffectiveCatalog {
+  models: string[];
+  refreshSupported: boolean;
+  refreshedAt: string | null;
+  source: string;
+  sourceUrl: string;
+}
+/**
+ * One model's preferred protocol and per-protocol evidence.
+ */
+export interface EffectiveModelContract {
+  alias: string;
+  disabledReasons: string[];
+  modelId: string;
+  preferredProtocol: AccountUpstreamProtocol;
+  protocols: EffectiveModelProtocols;
+  routable: boolean;
+}
+/**
+ * Per-protocol evidence keyed by snake_case protocol tokens. Missing
+ * protocols serialize as `null` and must not be invented as available.
+ */
+export interface EffectiveModelProtocols {
+  chat_completions: EffectiveProtocolEvidence | null;
+  messages: EffectiveProtocolEvidence | null;
+  responses: EffectiveProtocolEvidence | null;
+}
+/**
+ * Merged evidence for one upstream protocol on one model.
+ */
+export interface EffectiveProtocolEvidence {
+  available: boolean;
+  enabled: boolean;
+  lastProbeAt: string | null;
+  lastProbeError: string | null;
+  lastProbeResult: ProbeResultKind | null;
+  observedAt: string | null;
+  override: ProtocolOverrideState;
+  protocol: AccountUpstreamProtocol;
+  source: ContractEvidenceSource;
+  verifiedAt: string | null;
+}
+/**
+ * Registry pricing or usage availability copied as display data.
+ */
+export interface CapabilitySummary {
+  availability: string;
+}
+/**
+ * One built-in Provider contract scope.
+ */
+export interface ProviderContractGroup {
+  accounts: ProviderAccountChoice[];
+  card: CardCapabilitySummary;
+  catalog: EffectiveCatalog;
+  catalogRoutable: boolean;
+  disabledReasons: string[];
+  models: EffectiveModelContract[];
+  pricing: CapabilitySummary;
+  productionInference: boolean;
+  providerId: string;
+  /**
+   * Display revision for this scope, distinct from the top-level CAS token.
+   */
+  revision: number;
+  scopeId: string;
+  scopeKind: ContractScopeKind;
+  /**
+   * The built-in provider's static protocol-evidence snapshot date. This is
+   * `null` when the scope has no restorable snapshot and is distinct from
+   * catalog `refreshed_at`.
+   */
+  staticProtocolSnapshotDate: string | null;
+  usage: CapabilitySummary;
 }
 /**
  * Remove models from a persisted built-in Provider catalog snapshot.

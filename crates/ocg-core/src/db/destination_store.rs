@@ -179,8 +179,8 @@ pub(crate) fn sync_builtin_catalogs(db: &Database) -> Result<()> {
         for model in catalog_from_persisted_scope(scope) {
             if !catalog.iter().any(|existing| {
                 existing
-                    .public_model
-                    .eq_ignore_ascii_case(&model.public_model)
+                    .upstream_model
+                    .eq_ignore_ascii_case(&model.upstream_model)
             }) {
                 catalog.push(model);
             }
@@ -214,7 +214,11 @@ pub(crate) fn refresh_builtin_catalog(
         .map(|next| {
             previous
                 .iter()
-                .find(|model| model.public_model.eq_ignore_ascii_case(&next.public_model))
+                .find(|model| {
+                    model
+                        .upstream_model
+                        .eq_ignore_ascii_case(&next.upstream_model)
+                })
                 .cloned()
                 .unwrap_or(next)
         })
@@ -275,12 +279,21 @@ pub(crate) fn apply_scope_controls(
     let mut catalog = load_destination_catalog(&db.conn, &dest_id)?;
     for model in &mut catalog {
         if model_ids.is_some_and(|ids| {
-            !ids.iter()
-                .any(|id| id.eq_ignore_ascii_case(&model.public_model))
+            !ids.iter().any(|id| {
+                id.eq_ignore_ascii_case(if matches!(scope, ContractScope::Provider(_)) {
+                    &model.upstream_model
+                } else {
+                    &model.public_model
+                })
+            })
         }) {
             continue;
         }
-        if let Some(effective) = contract.model(&model.public_model) {
+        if let Some(effective) = contract.model(if matches!(scope, ContractScope::Provider(_)) {
+            &model.upstream_model
+        } else {
+            &model.public_model
+        }) {
             model.protocols = effective.enabled_protocols();
             model.preferred = Some(effective.preferred_protocol);
             model.enabled = effective.has_enabled_protocol();
@@ -313,7 +326,9 @@ pub(crate) fn remove_scope_models(
     };
     for id in ids {
         db.conn.execute(
-            "DELETE FROM destination_models WHERE destination_id = ?1 AND public_model_key = ?2",
+            if matches!(scope, crate::provider_contracts::ContractScope::Provider(_)) {
+                "DELETE FROM destination_models WHERE destination_id = ?1 AND upstream_model = ?2 COLLATE NOCASE"
+            } else { "DELETE FROM destination_models WHERE destination_id = ?1 AND public_model_key = ?2" },
             params![dest_id, id.to_ascii_lowercase()],
         )?;
     }

@@ -59,6 +59,7 @@ use crate::state::CoreState;
 pub use managed_key_verify::{
     ManagedKeyVerifyTargetGuard, install_managed_key_verify_target_for_tests,
 };
+pub(crate) use providers::provider_contracts_response;
 #[cfg(debug_assertions)]
 pub use providers::set_zen_models_source_url_override_for_tests;
 pub use proxy_test::PROXY_TEST_TARGET;

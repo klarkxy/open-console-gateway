@@ -82,6 +82,16 @@
       ],
       "type": "string"
     },
+    "AccountVerificationStatus": {
+      "description": "Connection-verification status. Wire values match V2 snake_case.",
+      "enum": [
+        "not_required",
+        "pending",
+        "verified",
+        "failed"
+      ],
+      "type": "string"
+    },
     "AdapterKindDto": {
       "description": "Sealed adapter kind. Wire values match the domain serde names.",
       "enum": [
@@ -468,6 +478,44 @@
       ],
       "type": "object"
     },
+    "CapabilitySummary": {
+      "additionalProperties": false,
+      "description": "Registry pricing or usage availability copied as display data.",
+      "properties": {
+        "availability": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "availability"
+      ],
+      "type": "object"
+    },
+    "CardCapabilitySummary": {
+      "additionalProperties": false,
+      "description": "Provider-page actions that are actually implemented for this scope.",
+      "properties": {
+        "catalogRefresh": {
+          "type": "boolean"
+        },
+        "discoverModels": {
+          "type": "boolean"
+        },
+        "fetchZenModels": {
+          "type": "boolean"
+        },
+        "protocolProbe": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "fetchZenModels",
+        "discoverModels",
+        "protocolProbe",
+        "catalogRefresh"
+      ],
+      "type": "object"
+    },
     "CatalogModelDto": {
       "additionalProperties": false,
       "description": "One catalog model on a destination.",
@@ -518,6 +566,90 @@
         "preferred",
         "enabled",
         "upstreamOverride"
+      ],
+      "type": "object"
+    },
+    "CatalogModelEditRequest": {
+      "additionalProperties": false,
+      "description": "A built-in model mapping edit. The original upstream identity is immutable\nfor selection, while the replacement may change its public and upstream IDs.",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "originalModelId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "preferred": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProtocolDto"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "protocols": {
+          "items": {
+            "$ref": "#/$defs/ProtocolDto"
+          },
+          "type": "array"
+        },
+        "publicModel": {
+          "type": "string"
+        },
+        "upstreamModel": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "publicModel",
+        "upstreamModel",
+        "protocols",
+        "enabled"
+      ],
+      "type": "object"
+    },
+    "CatalogModelsAddRequest": {
+      "additionalProperties": false,
+      "description": "Add disabled model IDs to a local built-in Provider catalog. No outbound I/O.",
+      "properties": {
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "modelIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "modelIds"
       ],
       "type": "object"
     },
@@ -799,6 +931,24 @@
         "enabled"
       ],
       "type": "object"
+    },
+    "ContractEvidenceSource": {
+      "description": "How a protocol row was established. Wire values match V2 snake_case.",
+      "enum": [
+        "static",
+        "preset",
+        "probe_confirmed",
+        "probe_observed"
+      ],
+      "type": "string"
+    },
+    "ContractScopeKind": {
+      "description": "Contract scope kind. Wire values match V2 `provider` / `custom_endpoint`.",
+      "enum": [
+        "provider",
+        "custom_endpoint"
+      ],
+      "type": "string"
     },
     "ControlRevision": {
       "additionalProperties": false,
@@ -1629,6 +1779,76 @@
         "outputPerMillion",
         "cacheReadPerMillion",
         "cacheWritePerMillion"
+      ],
+      "type": "object"
+    },
+    "CustomEndpointContract": {
+      "additionalProperties": false,
+      "description": "One Custom API account scope. Distinct from built-in provider groups.",
+      "properties": {
+        "account": {
+          "$ref": "#/$defs/ProviderAccountChoice"
+        },
+        "card": {
+          "$ref": "#/$defs/CardCapabilitySummary"
+        },
+        "catalog": {
+          "$ref": "#/$defs/EffectiveCatalog"
+        },
+        "catalogRoutable": {
+          "type": "boolean"
+        },
+        "disabledReasons": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "models": {
+          "items": {
+            "$ref": "#/$defs/EffectiveModelContract"
+          },
+          "type": "array"
+        },
+        "pricing": {
+          "$ref": "#/$defs/CapabilitySummary"
+        },
+        "productionInference": {
+          "type": "boolean"
+        },
+        "providerId": {
+          "type": "string"
+        },
+        "revision": {
+          "description": "Display revision for this endpoint, distinct from the top-level CAS token.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scopeId": {
+          "type": "string"
+        },
+        "scopeKind": {
+          "$ref": "#/$defs/ContractScopeKind"
+        },
+        "usage": {
+          "$ref": "#/$defs/CapabilitySummary"
+        }
+      },
+      "required": [
+        "scopeKind",
+        "scopeId",
+        "providerId",
+        "account",
+        "catalog",
+        "models",
+        "pricing",
+        "usage",
+        "card",
+        "catalogRoutable",
+        "productionInference",
+        "disabledReasons",
+        "revision"
       ],
       "type": "object"
     },
@@ -2620,6 +2840,187 @@
         "home",
         "name",
         "path"
+      ],
+      "type": "object"
+    },
+    "EffectiveCatalog": {
+      "additionalProperties": false,
+      "description": "Merged model-id catalog for one contract scope.",
+      "properties": {
+        "models": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "refreshSupported": {
+          "type": "boolean"
+        },
+        "refreshedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "type": "string"
+        },
+        "sourceUrl": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "sourceUrl",
+        "refreshedAt",
+        "models",
+        "refreshSupported"
+      ],
+      "type": "object"
+    },
+    "EffectiveModelContract": {
+      "additionalProperties": false,
+      "description": "One model's preferred protocol and per-protocol evidence.",
+      "properties": {
+        "alias": {
+          "type": "string"
+        },
+        "disabledReasons": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "modelId": {
+          "type": "string"
+        },
+        "preferredProtocol": {
+          "$ref": "#/$defs/AccountUpstreamProtocol"
+        },
+        "protocols": {
+          "$ref": "#/$defs/EffectiveModelProtocols"
+        },
+        "routable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "alias",
+        "modelId",
+        "preferredProtocol",
+        "protocols",
+        "routable",
+        "disabledReasons"
+      ],
+      "type": "object"
+    },
+    "EffectiveModelProtocols": {
+      "additionalProperties": false,
+      "description": "Per-protocol evidence keyed by snake_case protocol tokens. Missing\nprotocols serialize as `null` and must not be invented as available.",
+      "properties": {
+        "chat_completions": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EffectiveProtocolEvidence"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "messages": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EffectiveProtocolEvidence"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "responses": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EffectiveProtocolEvidence"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "chat_completions",
+        "responses",
+        "messages"
+      ],
+      "type": "object"
+    },
+    "EffectiveProtocolEvidence": {
+      "additionalProperties": false,
+      "description": "Merged evidence for one upstream protocol on one model.",
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "lastProbeAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lastProbeError": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lastProbeResult": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProbeResultKind"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "observedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "override": {
+          "$ref": "#/$defs/ProtocolOverrideState"
+        },
+        "protocol": {
+          "$ref": "#/$defs/AccountUpstreamProtocol"
+        },
+        "source": {
+          "$ref": "#/$defs/ContractEvidenceSource"
+        },
+        "verifiedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "protocol",
+        "available",
+        "enabled",
+        "source",
+        "verifiedAt",
+        "observedAt",
+        "lastProbeResult",
+        "lastProbeAt",
+        "lastProbeError",
+        "override"
       ],
       "type": "object"
     },
@@ -3879,6 +4280,14 @@
       ],
       "type": "string"
     },
+    "ProbeResultKind": {
+      "description": "Last explicit probe outcome stored on evidence. Distinct from\n[`ProtocolProbeResult`].",
+      "enum": [
+        "success",
+        "failure"
+      ],
+      "type": "string"
+    },
     "ProtocolDto": {
       "description": "Wire protocol for destination catalog and transport rows.",
       "enum": [
@@ -3887,6 +4296,160 @@
         "messages"
       ],
       "type": "string"
+    },
+    "ProtocolOverrideState": {
+      "description": "Per-model/per-protocol override state. `auto` removes any persisted override.",
+      "enum": [
+        "auto",
+        "force_on",
+        "force_off"
+      ],
+      "type": "string"
+    },
+    "ProviderAccountChoice": {
+      "additionalProperties": false,
+      "description": "Secret-free account identity on a contract card.",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "verificationStatus": {
+          "$ref": "#/$defs/AccountVerificationStatus"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "enabled",
+        "verificationStatus"
+      ],
+      "type": "object"
+    },
+    "ProviderContractGroup": {
+      "additionalProperties": false,
+      "description": "One built-in Provider contract scope.",
+      "properties": {
+        "accounts": {
+          "items": {
+            "$ref": "#/$defs/ProviderAccountChoice"
+          },
+          "type": "array"
+        },
+        "card": {
+          "$ref": "#/$defs/CardCapabilitySummary"
+        },
+        "catalog": {
+          "$ref": "#/$defs/EffectiveCatalog"
+        },
+        "catalogRoutable": {
+          "type": "boolean"
+        },
+        "disabledReasons": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "models": {
+          "items": {
+            "$ref": "#/$defs/EffectiveModelContract"
+          },
+          "type": "array"
+        },
+        "pricing": {
+          "$ref": "#/$defs/CapabilitySummary"
+        },
+        "productionInference": {
+          "type": "boolean"
+        },
+        "providerId": {
+          "type": "string"
+        },
+        "revision": {
+          "description": "Display revision for this scope, distinct from the top-level CAS token.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scopeId": {
+          "type": "string"
+        },
+        "scopeKind": {
+          "$ref": "#/$defs/ContractScopeKind"
+        },
+        "staticProtocolSnapshotDate": {
+          "description": "The built-in provider's static protocol-evidence snapshot date. This is\n`null` when the scope has no restorable snapshot and is distinct from\ncatalog `refreshed_at`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "usage": {
+          "$ref": "#/$defs/CapabilitySummary"
+        }
+      },
+      "required": [
+        "scopeKind",
+        "scopeId",
+        "providerId",
+        "staticProtocolSnapshotDate",
+        "accounts",
+        "catalog",
+        "models",
+        "pricing",
+        "usage",
+        "card",
+        "catalogRoutable",
+        "productionInference",
+        "disabledReasons",
+        "revision"
+      ],
+      "type": "object"
+    },
+    "ProviderContracts": {
+      "additionalProperties": false,
+      "description": "Effective provider-scope and custom-endpoint contracts.\n\nTop-level `revision` is the settings CAS token. Nested `revision` values\nare display-only and must not be sent as `expectedRevision`.",
+      "properties": {
+        "customEndpoints": {
+          "items": {
+            "$ref": "#/$defs/CustomEndpointContract"
+          },
+          "type": "array"
+        },
+        "pricingRevision": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "providers": {
+          "items": {
+            "$ref": "#/$defs/ProviderContractGroup"
+          },
+          "type": "array"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "providers",
+        "customEndpoints",
+        "revision",
+        "processGeneration",
+        "pricingRevision"
+      ],
+      "type": "object"
     },
     "ProviderDefinitionAuthKind": {
       "description": "Auth kind owned by a Provider definition. Independent of protocol.\nNullable on the wire because builtin rows leave the field empty.",
@@ -5442,6 +6005,15 @@
     },
     {
       "$ref": "#/$defs/CpaCatalogUpdate"
+    },
+    {
+      "$ref": "#/$defs/CatalogModelEditRequest"
+    },
+    {
+      "$ref": "#/$defs/CatalogModelsAddRequest"
+    },
+    {
+      "$ref": "#/$defs/ProviderContracts"
     },
     {
       "$ref": "#/$defs/CatalogModelsRemoveRequest"

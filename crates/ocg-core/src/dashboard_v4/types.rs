@@ -77,6 +77,9 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "CpaCatalogEntry",
     "CpaCatalog",
     "CpaCatalogUpdate",
+    "CatalogModelEditRequest",
+    "CatalogModelsAddRequest",
+    "ProviderContracts",
     "CatalogModelsRemoveRequest",
     "CatalogModelsRemoveResult",
     "AliasPublication",
@@ -819,6 +822,32 @@ pub struct CpaCatalogUpdate {
     #[serde(flatten)]
     pub expectation: MutationExpectation,
     pub enabled_ids: Vec<String>,
+}
+
+/// A built-in model mapping edit. The original upstream identity is immutable
+/// for selection, while the replacement may change its public and upstream IDs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CatalogModelEditRequest {
+    #[serde(flatten)]
+    pub expectation: MutationExpectation,
+    pub original_model_id: Option<String>,
+    pub public_model: String,
+    pub upstream_model: String,
+    pub protocols: Vec<ProtocolDto>,
+    pub preferred: Option<ProtocolDto>,
+    pub enabled: bool,
+}
+
+/// Add disabled model IDs to a local built-in Provider catalog. No outbound I/O.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CatalogModelsAddRequest {
+    #[serde(flatten)]
+    pub expectation: MutationExpectation,
+    pub model_ids: Vec<String>,
 }
 
 /// Remove models from a persisted built-in Provider catalog snapshot.
@@ -1823,6 +1852,7 @@ pub fn contract_schema() -> Value {
     include_type::<IdentityCredentialCreateResult>(&mut serialize);
     include_type::<CpaCatalogEntry>(&mut serialize);
     include_type::<CpaCatalog>(&mut serialize);
+    include_type::<crate::dashboard_v3::ProviderContracts>(&mut serialize);
     include_type::<CatalogModelsRemoveResult>(&mut serialize);
     include_type::<AliasPublication>(&mut serialize);
     include_type::<DshApplicationStatus>(&mut serialize);
@@ -1893,6 +1923,8 @@ pub fn contract_schema() -> Value {
     include_type::<QuotaSharing>(&mut deserialize);
     include_type::<IdentityCredentialCreateRequest>(&mut deserialize);
     include_type::<CpaCatalogUpdate>(&mut deserialize);
+    include_type::<CatalogModelEditRequest>(&mut deserialize);
+    include_type::<CatalogModelsAddRequest>(&mut deserialize);
     include_type::<CatalogModelsRemoveRequest>(&mut deserialize);
     include_type::<AliasPublicationUpdate>(&mut deserialize);
     include_type::<DshApplicationInstallRequest>(&mut deserialize);

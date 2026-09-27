@@ -15718,6 +15718,47 @@ fn imported_builtin_controls_replace_target_choices_for_old_and_new_payloads() {
 }
 
 #[test]
+fn imported_builtin_alias_replaces_same_upstream_and_remains_editable() {
+    let dir = temp_data_dir("builtin-alias-import");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let scope = ContractScope::provider("minimax");
+    let now = Utc::now();
+    db.set_contract_catalog(&scope, &["MiniMax-M2".into()], Some(now), "test", "", now)
+        .unwrap();
+    let id = ocg_domain::destination::destination_id_for_builtin("minimax");
+    let mut source = crate::destination_projection::load_persisted(&db)
+        .unwrap()
+        .destinations
+        .into_iter()
+        .find(|d| d.id == id)
+        .unwrap();
+    source.catalog[0].public_model = "imported-minimax".into();
+    source.catalog[0].protocols = vec![ocg_domain::destination::Protocol::Messages];
+    source.catalog[0].preferred = Some(ocg_domain::destination::Protocol::Messages);
+    source.catalog[0].enabled = true;
+    let mut record = node_import_record(&db, Vec::new(), Vec::new(), Vec::new());
+    record.provider_contracts = db.load_persisted_contracts().unwrap();
+    record.destination_controls = vec![source.clone()];
+    for _ in 0..2 {
+        db.import_node_state(&record, |_| Ok(())).unwrap();
+        assert_eq!(
+            destination_store::load_destination_catalog(&db.conn, &id).unwrap(),
+            source.catalog
+        );
+    }
+    let mut edited = source.catalog[0].clone();
+    edited.public_model = "edited-minimax".into();
+    db.edit_contract_catalog_model(&scope, Some("MiniMax-M2"), edited.clone(), now)
+        .unwrap();
+    assert_eq!(
+        destination_store::load_destination_catalog(&db.conn, &id).unwrap(),
+        vec![edited]
+    );
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn platform_discovery_preserves_empty_protocol_controls_and_initializes_new_models() {
     let dir = temp_data_dir("platform-protocol-controls");
     let db = Database::open(dir.clone()).unwrap();

@@ -77,6 +77,12 @@ hosts are rejected. Do not reuse an Open Console Gateway Key as either CPA key.
    a managed runtime, extra direct-client keys live on Overview; daily use goes
    through the OCG Access Key.
 
+If CPA and another catalog declare the same public model name, the Gateway
+lists that name once and considers their routes in the configured account
+order. Use the name shown on **Aliases**. Differently named mappings to the
+same raw upstream ID remain ambiguous; slash-shaped raw IDs are not turned
+into shared aliases.
+
 Disabling the pool removes it from routing without forgetting CPA setup.
 **Disconnect and clear** removes OCG's CPA configuration, the pool card, and
 the local model snapshot after confirmation; it does not delete CPA's OAuth

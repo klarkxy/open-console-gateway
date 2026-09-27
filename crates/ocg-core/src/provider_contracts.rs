@@ -558,13 +558,22 @@ impl EffectiveContractSet {
             scope.catalog.models = destination
                 .catalog
                 .iter()
-                .map(|model| model.public_model.clone())
+                .map(|model| {
+                    if matches!(scope.scope, ContractScope::Provider(_)) {
+                        model.upstream_model.clone()
+                    } else {
+                        model.public_model.clone()
+                    }
+                })
                 .collect();
             for model in scope.models.values_mut() {
-                let saved = destination
-                    .catalog
-                    .iter()
-                    .find(|saved| saved.public_model.eq_ignore_ascii_case(&model.model_id));
+                let saved = destination.catalog.iter().find(|saved| {
+                    if matches!(scope.scope, ContractScope::Provider(_)) {
+                        saved.upstream_model.eq_ignore_ascii_case(&model.model_id)
+                    } else {
+                        saved.public_model.eq_ignore_ascii_case(&model.model_id)
+                    }
+                });
                 for evidence in model.protocols.values_mut() {
                     evidence.enabled = destination.enabled
                         && saved.is_some_and(|saved| {
@@ -1008,7 +1017,7 @@ fn refreshed_catalog(
             } else {
                 String::new()
             },
-            source_url: if fetched {
+            source_url: if fetched && !persisted.is_some_and(|row| row.catalog_source == "manual") {
                 persisted
                     .map(|row| row.catalog_source_url.clone())
                     .filter(|url| !url.is_empty())

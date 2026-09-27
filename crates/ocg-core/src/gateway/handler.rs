@@ -332,6 +332,7 @@ pub(crate) struct RuntimeCatalogSnapshot {
     pub ollama: Vec<String>,
     pub ollama_pinned: Vec<String>,
     pub extra: Vec<crate::alias::ExtraProviderCatalog>,
+    pub builtin_aliases: Vec<crate::alias::ExtraProviderCatalog>,
 }
 
 impl RuntimeCatalogSnapshot {
@@ -347,6 +348,7 @@ impl RuntimeCatalogSnapshot {
             ollama: &self.ollama,
             ollama_pinned: &self.ollama_pinned,
             extra: &self.extra,
+            builtin_aliases: &self.builtin_aliases,
         }
     }
 }
@@ -382,6 +384,7 @@ impl RuntimeCatalogSnapshot {
             ollama: vec![],
             ollama_pinned: vec![],
             extra: vec![],
+            builtin_aliases: vec![],
             routing,
         };
         for d in &result.routing.projection.destinations {
@@ -401,6 +404,26 @@ impl RuntimeCatalogSnapshot {
                 .iter()
                 .map(|m| m.upstream_model.clone())
                 .collect::<Vec<_>>();
+            if d.adapter != AdapterKind::Http && d.adapter != AdapterKind::Cpa {
+                if let ocg_domain::destination::LegacyDestinationRef::Builtin(provider_id) =
+                    &d.legacy
+                {
+                    let mappings = d
+                        .catalog
+                        .iter()
+                        .filter(|m| m.public_model != m.upstream_model)
+                        .map(|m| (m.public_model.clone(), m.upstream_model.clone()))
+                        .collect::<Vec<_>>();
+                    if !mappings.is_empty() {
+                        result
+                            .builtin_aliases
+                            .push(crate::alias::ExtraProviderCatalog {
+                                provider_id: provider_id.clone(),
+                                mappings,
+                            });
+                    }
+                }
+            }
             match d.adapter {
                 AdapterKind::OpencodeGo => result.go.extend(ids),
                 AdapterKind::Zen => result.zen_free.extend(ids),

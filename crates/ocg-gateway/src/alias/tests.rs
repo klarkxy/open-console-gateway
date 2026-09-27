@@ -20,6 +20,7 @@ fn catalogs<'a>(
         cpa: NO_IDS,
         ollama: NO_IDS,
         ollama_pinned: NO_IDS,
+        builtin_aliases: &[],
         extra: &[],
     }
 }
@@ -1343,6 +1344,78 @@ fn cpa_catalog_joins_code_owned_aliases_and_keeps_raw_ids_exact_and_fail_closed(
 }
 
 #[test]
+fn cpa_and_other_catalogs_share_an_exact_public_name_without_merging_other_raw_pins() {
+    let id = "gpt-6-sol".to_string();
+    let go = vec![id.clone()];
+    let cpa = vec![id.clone()];
+    let http = ExtraProviderCatalog {
+        provider_id: "11111111-1111-4111-8111-111111111111".into(),
+        mappings: vec![(id.clone(), id.clone())],
+    };
+    let extras = [http.clone()];
+    let catalogs = RuntimeCatalogs {
+        go: &go,
+        cpa: &cpa,
+        extra: &extras,
+        ..RuntimeCatalogs::default()
+    };
+    match resolve_with_runtime_catalogs(&id, catalogs).unwrap() {
+        ResolvedModel::Alias {
+            alias, mappings, ..
+        } => {
+            assert_eq!(alias, id);
+            assert!(mappings.iter().any(ProviderMapping::is_cpa));
+            assert!(mappings.iter().any(ProviderMapping::is_opencode_go));
+            assert!(
+                mappings
+                    .iter()
+                    .any(|mapping| mapping.provider_id == http.provider_id)
+            );
+        }
+        other => panic!("expected a shared public Alias, got {other:?}"),
+    }
+    assert_eq!(
+        published_routeable_models_with_runtime_catalogs(catalogs)
+            .iter()
+            .filter(|item| item.alias == id)
+            .count(),
+        1
+    );
+
+    let http_and_cpa = RuntimeCatalogs {
+        cpa: &cpa,
+        extra: &extras,
+        ..RuntimeCatalogs::default()
+    };
+    assert!(matches!(
+        resolve_with_runtime_catalogs(&id, http_and_cpa),
+        Ok(ResolvedModel::Alias { mappings, .. })
+            if mappings.iter().any(ProviderMapping::is_cpa)
+                && mappings.iter().any(|mapping| mapping.provider_id == http.provider_id)
+    ));
+    assert!(
+        published_routeable_models_with_runtime_catalogs(http_and_cpa)
+            .iter()
+            .any(|item| item.alias == id)
+    );
+
+    let differently_named = [ExtraProviderCatalog {
+        mappings: vec![("other-public-name".into(), id.clone())],
+        ..http
+    }];
+    let error = resolve_with_runtime_catalogs(
+        &id,
+        RuntimeCatalogs {
+            cpa: &cpa,
+            extra: &differently_named,
+            ..RuntimeCatalogs::default()
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.code(), Some(AMBIGUOUS_MODEL_ID));
+}
+
+#[test]
 fn extra_catalogs_aggregate_public_aliases_and_fail_closed_on_raw_ambiguity() {
     let one = ExtraProviderCatalog {
         provider_id: "11111111-1111-4111-8111-111111111111".into(),
@@ -1832,4 +1905,382 @@ fn public_go_catalog_names_include_new_pins_without_creating_shared_aliases() {
             .any(|item| item.alias == "future-go-model")
     );
     assert!(resolve_with_runtime_catalogs("not-in-catalog", catalogs).is_err());
+}
+
+#[test]
+fn builtin_alias_overrides_preserve_exact_upstreams_for_every_adapter() {
+    for (provider, upstream, old_alias) in [
+        (OPENCODE_PROVIDER_ID, "glm-5.2", "glm-5.2"),
+        (OPENCODE_ZEN_FREE_PROVIDER_ID, "glm-5.2-free", "glm-5.2"),
+        (COMMAND_CODE_PROVIDER_ID, "vendor/glm-5.2", "glm-5.2"),
+        (MINIMAX_PROVIDER_ID, "MiniMax-M3", "minimax-m3"),
+        (KIMI_PROVIDER_ID, "k3", "kimi-k3"),
+        (OLLAMA_PROVIDER_ID, "glm-5.2:cloud", "glm-5.2"),
+    ] {
+        let models = [upstream.to_string()];
+        let overrides = [ExtraProviderCatalog {
+            provider_id: provider.into(),
+            mappings: vec![("My-Alias".into(), upstream.into())],
+        }];
+        let mut catalogs = RuntimeCatalogs {
+            builtin_aliases: &overrides,
+            ..RuntimeCatalogs::default()
+        };
+        match provider {
+            OPENCODE_PROVIDER_ID => catalogs.go = &models,
+            OPENCODE_ZEN_FREE_PROVIDER_ID => catalogs.zen_free = &models,
+            COMMAND_CODE_PROVIDER_ID => catalogs.command_code = &models,
+            MINIMAX_PROVIDER_ID => catalogs.minimax = &models,
+            KIMI_PROVIDER_ID => catalogs.kimi = &models,
+            OLLAMA_PROVIDER_ID => catalogs.ollama = &models,
+            _ => unreachable!(),
+        }
+        for requested in ["My-Alias", "my-alias"] {
+            let resolved = resolve_with_runtime_catalogs(requested, catalogs).unwrap();
+            assert!(matches!(&resolved, ResolvedModel::Alias { alias, .. } if alias == "My-Alias"));
+            assert_eq!(
+                resolved.routeable_mappings(),
+                vec![&mapping(provider, upstream, true)]
+            );
+        }
+        let raw = resolve_with_runtime_catalogs(upstream, catalogs).unwrap();
+        assert!(
+            matches!(raw, ResolvedModel::PinnedRaw { mapping, .. } if mapping.provider_id == provider && mapping.upstream_model == upstream && mapping.routeable)
+        );
+        let published = published_routeable_models_with_runtime_catalogs(catalogs);
+        assert!(
+            published
+                .iter()
+                .any(|item| item.alias == "My-Alias" && item.owned_by == provider)
+        );
+        let registry = build_runtime_registry(catalogs);
+        assert!(!registry.aliases.get(old_alias).is_some_and(|entry| {
+            entry.mappings.iter().any(|mapping| {
+                mapping.provider_id == provider && mapping.upstream_model == upstream
+            })
+        }));
+        if provider != OPENCODE_PROVIDER_ID
+            && let Ok(old) = resolve_with_runtime_catalogs(old_alias, catalogs)
+        {
+            assert!(
+                !old.routeable_mappings()
+                    .iter()
+                    .any(|mapping| mapping.provider_id == provider)
+            );
+        }
+    }
+}
+
+#[test]
+fn builtin_override_removes_only_its_mapping_and_joins_existing_public_names() {
+    let go = ["glm-5.2".into()];
+    let zen = ["glm-5.2-free".into()];
+    let goat = ["vendor/glm-5.2".to_string()];
+    let overrides = [ExtraProviderCatalog {
+        provider_id: COMMAND_CODE_PROVIDER_ID.into(),
+        mappings: vec![("new-shared".into(), goat[0].clone())],
+    }];
+    let extras = [ExtraProviderCatalog {
+        provider_id: "http-provider".into(),
+        mappings: vec![("new-shared".into(), "vendor/http".into())],
+    }];
+    let cpa = ["new-shared".into()];
+    let catalogs = RuntimeCatalogs {
+        go: &go,
+        zen_free: &zen,
+        command_code: &goat,
+        cpa: &cpa,
+        builtin_aliases: &overrides,
+        extra: &extras,
+        ..RuntimeCatalogs::default()
+    };
+    let old = resolve_with_runtime_catalogs("glm-5.2", catalogs).unwrap();
+    assert!(
+        old.routeable_mappings()
+            .iter()
+            .any(|mapping| mapping.is_opencode_go())
+    );
+    assert!(
+        old.routeable_mappings()
+            .iter()
+            .any(|mapping| mapping.is_zen_free())
+    );
+    assert!(
+        !old.routeable_mappings()
+            .iter()
+            .any(|mapping| mapping.is_command_code_goat())
+    );
+    let shared = resolve_with_runtime_catalogs("new-shared", catalogs).unwrap();
+    assert_eq!(shared.routeable_mappings().len(), 3);
+    assert!(
+        shared
+            .routeable_mappings()
+            .iter()
+            .any(|mapping| mapping.is_cpa())
+    );
+    assert!(
+        shared
+            .routeable_mappings()
+            .iter()
+            .any(|mapping| mapping.is_command_code_goat() && mapping.upstream_model == goat[0])
+    );
+    assert!(
+        shared
+            .routeable_mappings()
+            .iter()
+            .any(|mapping| mapping.provider_id == "http-provider")
+    );
+}
+
+#[test]
+fn builtin_explicit_raw_shaped_names_have_publication_and_resolution_parity() {
+    for public in ["org/Public", "my_model", "my model"] {
+        let minimax = ["MiniMax-M3".to_string()];
+        let overrides = [ExtraProviderCatalog {
+            provider_id: MINIMAX_PROVIDER_ID.into(),
+            mappings: vec![(public.into(), minimax[0].clone())],
+        }];
+        let catalogs = RuntimeCatalogs {
+            minimax: &minimax,
+            builtin_aliases: &overrides,
+            ..RuntimeCatalogs::default()
+        };
+        let resolved = resolve_with_runtime_catalogs(public, catalogs).unwrap();
+        assert_eq!(
+            resolved.routeable_mappings(),
+            vec![&minimax_mapping("MiniMax-M3")]
+        );
+        assert!(
+            published_routeable_models_with_runtime_catalogs(catalogs)
+                .iter()
+                .any(|item| item.alias == public && item.owned_by == MINIMAX_PROVIDER_ID)
+        );
+        assert!(
+            !published_routeable_aliases_with_runtime_catalogs(catalogs)
+                .iter()
+                .any(|item| item.alias == public)
+        );
+        assert!(
+            routeable_models_for_with_runtime_catalogs(MINIMAX_PROVIDER_ID, catalogs)
+                .contains(&public.to_string())
+        );
+    }
+}
+
+#[test]
+fn builtin_overrides_keep_raw_collisions_ambiguous_and_unpublished() {
+    let models = ["vendor/shared".to_string(), "collision".to_string()];
+    let overrides = [
+        ExtraProviderCatalog {
+            provider_id: MINIMAX_PROVIDER_ID.into(),
+            mappings: vec![
+                ("first".into(), models[0].clone()),
+                ("other".into(), models[1].clone()),
+            ],
+        },
+        ExtraProviderCatalog {
+            provider_id: KIMI_PROVIDER_ID.into(),
+            mappings: vec![
+                ("second".into(), models[0].clone()),
+                ("collision".into(), "kimi-for-coding".into()),
+            ],
+        },
+    ];
+    let kimi = [models[0].clone(), "kimi-for-coding".into()];
+    let catalogs = RuntimeCatalogs {
+        minimax: &models,
+        kimi: &kimi,
+        builtin_aliases: &overrides,
+        ..RuntimeCatalogs::default()
+    };
+    for requested in ["vendor/shared", "collision"] {
+        assert_eq!(
+            resolve_with_runtime_catalogs(requested, catalogs)
+                .unwrap_err()
+                .code(),
+            Some(AMBIGUOUS_MODEL_ID)
+        );
+        assert!(
+            !published_routeable_models_with_runtime_catalogs(catalogs)
+                .iter()
+                .any(|item| item.alias == requested)
+        );
+    }
+    assert_eq!(
+        resolve_with_runtime_catalogs("first", catalogs)
+            .unwrap()
+            .routeable_mappings(),
+        vec![&minimax_mapping("vendor/shared")]
+    );
+    assert_eq!(
+        resolve_with_runtime_catalogs("second", catalogs)
+            .unwrap()
+            .routeable_mappings(),
+        vec![&kimi_mapping("vendor/shared")]
+    );
+}
+
+#[test]
+fn builtin_override_cannot_replace_an_unrelated_same_provider_raw_target() {
+    for provider in [OPENCODE_PROVIDER_ID, COMMAND_CODE_PROVIDER_ID] {
+        let models = ["vendor/one".to_string(), "custom-public".to_string()];
+        let overrides = [ExtraProviderCatalog {
+            provider_id: provider.into(),
+            mappings: vec![("custom-public".into(), models[0].clone())],
+        }];
+        let mut catalogs = RuntimeCatalogs {
+            builtin_aliases: &overrides,
+            ..RuntimeCatalogs::default()
+        };
+        if provider == OPENCODE_PROVIDER_ID {
+            catalogs.go = &models;
+        } else {
+            catalogs.command_code = &models;
+        }
+        assert_eq!(
+            resolve_with_runtime_catalogs("custom-public", catalogs)
+                .unwrap_err()
+                .code(),
+            Some(AMBIGUOUS_MODEL_ID)
+        );
+        assert!(
+            !published_routeable_models_with_runtime_catalogs(catalogs)
+                .iter()
+                .any(|item| item.alias == "custom-public")
+        );
+    }
+}
+
+#[test]
+fn builtin_overrides_require_a_saved_exact_upstream_and_static_provider() {
+    let models = ["MiniMax-M3".into()];
+    let overrides = [
+        ExtraProviderCatalog {
+            provider_id: MINIMAX_PROVIDER_ID.into(),
+            mappings: vec![
+                ("bad-case".into(), "minimax-m3".into()),
+                ("stale".into(), "removed".into()),
+            ],
+        },
+        ExtraProviderCatalog {
+            provider_id: "http-provider".into(),
+            mappings: vec![("wrong-provider".into(), "MiniMax-M3".into())],
+        },
+    ];
+    let catalogs = RuntimeCatalogs {
+        minimax: &models,
+        builtin_aliases: &overrides,
+        ..RuntimeCatalogs::default()
+    };
+    for requested in ["bad-case", "stale", "wrong-provider"] {
+        assert!(matches!(
+            resolve_with_runtime_catalogs(requested, catalogs),
+            Err(ResolveError::Unknown { .. })
+        ));
+    }
+    assert!(
+        resolve_with_runtime_catalogs("minimax-m3", catalogs)
+            .unwrap()
+            .routeable_mappings()
+            .iter()
+            .any(|mapping| mapping.is_minimax_cn())
+    );
+}
+
+#[test]
+fn builtin_shared_explicit_names_keep_all_provider_mappings_and_one_publication() {
+    for public in ["Shared-Name", "org/Shared"] {
+        let minimax = ["MiniMax-M3".to_string()];
+        let kimi = ["k3".to_string()];
+        let mut overrides = [
+            ExtraProviderCatalog {
+                provider_id: MINIMAX_PROVIDER_ID.into(),
+                mappings: vec![(public.into(), minimax[0].clone())],
+            },
+            ExtraProviderCatalog {
+                provider_id: KIMI_PROVIDER_ID.into(),
+                mappings: vec![(public.into(), kimi[0].clone())],
+            },
+        ];
+        for _ in 0..2 {
+            let catalogs = RuntimeCatalogs {
+                minimax: &minimax,
+                kimi: &kimi,
+                builtin_aliases: &overrides,
+                ..RuntimeCatalogs::default()
+            };
+            let resolved = resolve_with_runtime_catalogs(public, catalogs).unwrap();
+            assert_eq!(resolved.routeable_mappings().len(), 2);
+            assert!(
+                resolved
+                    .routeable_mappings()
+                    .contains(&&minimax_mapping("MiniMax-M3"))
+            );
+            assert!(resolved.routeable_mappings().contains(&&kimi_mapping("k3")));
+            assert_eq!(
+                published_routeable_models_with_runtime_catalogs(catalogs)
+                    .iter()
+                    .filter(|item| item.alias == public)
+                    .count(),
+                1
+            );
+            overrides.reverse();
+        }
+    }
+}
+
+#[test]
+fn builtin_explicit_case_variant_of_existing_alias_is_not_published_twice() {
+    let models = ["MiniMax-M3".to_string()];
+    let overrides = [ExtraProviderCatalog {
+        provider_id: MINIMAX_PROVIDER_ID.into(),
+        mappings: vec![("GLM-5.2".into(), models[0].clone())],
+    }];
+    let catalogs = RuntimeCatalogs {
+        minimax: &models,
+        builtin_aliases: &overrides,
+        ..RuntimeCatalogs::default()
+    };
+    assert_eq!(
+        published_routeable_models_with_runtime_catalogs(catalogs)
+            .iter()
+            .filter(|item| item.alias.eq_ignore_ascii_case("glm-5.2"))
+            .count(),
+        1
+    );
+    assert!(
+        resolve_with_runtime_catalogs("GLM-5.2", catalogs)
+            .unwrap()
+            .routeable_mappings()
+            .contains(&&minimax_mapping("MiniMax-M3"))
+    );
+}
+
+#[test]
+fn renaming_go_keeps_other_providers_on_its_previous_shared_alias() {
+    let go = ["glm-5.2".to_string()];
+    let zen = ["glm-5.2-free".to_string()];
+    let overrides = [ExtraProviderCatalog {
+        provider_id: OPENCODE_PROVIDER_ID.into(),
+        mappings: vec![("private-go".into(), go[0].clone())],
+    }];
+    let catalogs = RuntimeCatalogs {
+        go: &go,
+        zen_free: &zen,
+        builtin_aliases: &overrides,
+        ..RuntimeCatalogs::default()
+    };
+    let old = resolve_with_runtime_catalogs("glm-5.2", catalogs).unwrap();
+    assert_eq!(old.routeable_mappings(), vec![&zen_mapping("glm-5.2-free")]);
+    assert_eq!(
+        resolve_with_runtime_catalogs("private-go", catalogs)
+            .unwrap()
+            .routeable_mappings(),
+        vec![&go_mapping("glm-5.2")]
+    );
+    assert!(
+        published_routeable_models_with_runtime_catalogs(catalogs)
+            .iter()
+            .any(|item| item.alias == "glm-5.2" && item.owned_by == OPENCODE_ZEN_FREE_PROVIDER_ID)
+    );
 }

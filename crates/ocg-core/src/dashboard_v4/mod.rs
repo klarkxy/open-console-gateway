@@ -124,6 +124,14 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
         )
         .route("/cpa/models", get(cpa::get_models).put(cpa::put_models))
         .route(
+            "/provider-contracts/provider/{scope_id}/catalog/model",
+            axum::routing::put(catalog::edit_model),
+        )
+        .route(
+            "/provider-contracts/{scope_kind}/{scope_id}/catalog/add",
+            post(catalog::add_models),
+        )
+        .route(
             "/provider-contracts/{scope_kind}/{scope_id}/catalog/remove",
             post(catalog::remove_models),
         )

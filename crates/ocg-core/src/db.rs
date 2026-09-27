@@ -50,6 +50,7 @@ pub struct Database {
 
 pub(crate) mod account_store;
 pub(crate) mod billing;
+mod catalog_edit;
 pub(crate) mod cpa;
 pub(crate) mod credit_lifecycle;
 pub(crate) mod custom_store;
@@ -995,10 +996,10 @@ fn preserve_disabled_catalog_models_on(
             // A model with no evidence and no saved disable is merely awaiting
             // official discovery. Do not turn that temporary state into consent.
             let deliberately_disabled = explicitly_disabled
-                .contains(&model.public_model.to_ascii_lowercase())
+                .contains(&model.upstream_model.to_ascii_lowercase())
                 || contracts
                     .scope(scope)
-                    .and_then(|s| s.model(&model.public_model))
+                    .and_then(|s| s.model(&model.upstream_model))
                     .is_some_and(|m| m.protocols.values().any(|p| p.available));
             if !deliberately_disabled {
                 continue;
@@ -1011,7 +1012,7 @@ fn preserve_disabled_catalog_models_on(
                 set_model_protocol_override_on(
                     &db.conn,
                     scope,
-                    &model.public_model,
+                    &model.upstream_model,
                     protocol,
                     ProtocolOverrideState::ForceOff,
                     now,
@@ -7959,6 +7960,30 @@ impl Database {
                 .cloned()
                 .unwrap_or_default();
             for incoming in &controls.catalog {
+                if matches!(
+                    controls.legacy,
+                    ocg_domain::destination::LegacyDestinationRef::Builtin(_)
+                ) {
+                    anyhow::ensure!(
+                        !catalog.iter().any(|model| model
+                            .public_model
+                            .eq_ignore_ascii_case(&incoming.public_model)
+                            && !model
+                                .upstream_model
+                                .eq_ignore_ascii_case(&incoming.upstream_model)),
+                        "imported model controls conflict with the destination mapping"
+                    );
+                    if let Some(existing) = catalog.iter_mut().find(|model| {
+                        model
+                            .upstream_model
+                            .eq_ignore_ascii_case(&incoming.upstream_model)
+                    }) {
+                        *existing = incoming.clone();
+                    } else {
+                        catalog.push(incoming.clone());
+                    }
+                    continue;
+                }
                 if let Some(existing) = catalog.iter_mut().find(|model| {
                     model
                         .public_model

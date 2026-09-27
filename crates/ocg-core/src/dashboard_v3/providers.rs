@@ -134,9 +134,11 @@ fn host_is_exact_loopback(parsed: &reqwest::Url) -> bool {
     rendered.eq_ignore_ascii_case("localhost")
 }
 
-pub(super) async fn get_providers(State(state): State<CoreState>) -> Json<ProviderCatalog> {
+pub(super) async fn get_providers(
+    State(state): State<CoreState>,
+) -> Result<Json<ProviderCatalog>, V3ApiError> {
     let _settings_update = state.settings_update.lock();
-    Json(provider_catalog_from_state(&state))
+    provider_catalog_from_state(&state).map(Json)
 }
 
 pub(super) async fn get_model_capabilities(
@@ -604,17 +606,15 @@ pub(super) async fn get_provider_contracts(
     let _settings_update = state.settings_update.lock();
     let contracts = state.provider_contracts();
     let (accounts, statuses) = load_accounts_with_verification(&state)?;
-    Ok(Json(provider_contracts_from_state(
-        &state, &contracts, &accounts, &statuses,
-    )))
+    provider_contracts_from_state(&state, &contracts, &accounts, &statuses).map(Json)
 }
 
-fn provider_contracts_response(state: &CoreState) -> Result<Json<ProviderContracts>, V3ApiError> {
+pub(crate) fn provider_contracts_response(
+    state: &CoreState,
+) -> Result<Json<ProviderContracts>, V3ApiError> {
     let contracts = state.provider_contracts();
     let (accounts, statuses) = load_accounts_with_verification(state)?;
-    Ok(Json(provider_contracts_from_state(
-        state, &contracts, &accounts, &statuses,
-    )))
+    provider_contracts_from_state(state, &contracts, &accounts, &statuses).map(Json)
 }
 
 pub(super) async fn put_provider_model_protocol_overrides(
@@ -841,9 +841,7 @@ fn commit_model_protocol_overrides(
     let _revision = state.bump_settings_revision();
     let contracts = state.provider_contracts();
     let (accounts, statuses) = load_accounts_with_verification(state)?;
-    Ok(Json(provider_contracts_from_state(
-        state, &contracts, &accounts, &statuses,
-    )))
+    provider_contracts_from_state(state, &contracts, &accounts, &statuses).map(Json)
 }
 
 fn override_state_to_domain(state: ProtocolOverrideState) -> DomainProtocolOverrideState {
@@ -908,11 +906,17 @@ pub(super) async fn run_provider_protocol_probes(
         prepared.now,
     )?;
     let revision = ControlRevision::from_state(&state);
-    let contract = state
-        .provider_contracts()
-        .scope(&prepared.scope)
-        .and_then(|scope| scope.model(&prepared.model_id).cloned())
-        .map(|model| model_contract_from_domain(&model, model.model_id.clone()));
+    let contract = provider_contracts_response(&state)?
+        .0
+        .providers
+        .into_iter()
+        .find(|scope| scope.scope_id == prepared.scope.id())
+        .and_then(|scope| {
+            scope
+                .models
+                .into_iter()
+                .find(|model| model.model_id == prepared.model_id)
+        });
     Ok(Json(ProtocolProbeResponse {
         account_id: None,
         provider_id: prepared.provider_id,
@@ -1253,7 +1257,7 @@ fn validate_custom_endpoint_scope(
     }
 }
 
-fn provider_catalog_from_state(state: &CoreState) -> ProviderCatalog {
+fn provider_catalog_from_state(state: &CoreState) -> Result<ProviderCatalog, V3ApiError> {
     let revision = ControlRevision::from_state(state);
     let zen_catalog = state.zen_free_model_catalog();
     let contracts = state.provider_contracts();
@@ -1278,21 +1282,9 @@ fn provider_catalog_from_state(state: &CoreState) -> ProviderCatalog {
         .map(|scope| scope.catalog.models.as_slice())
         .unwrap_or_default();
     let ollama_pinned_models = provider_contracts::ollama_cloud_pinned_model_ids(&contracts);
-    let go_models = contracts
-        .providers
-        .get(OPENCODE_PROVIDER_ID)
-        .map(|scope| scope.catalog.models.as_slice())
-        .unwrap_or_default();
-    let public_catalogs = alias::RuntimeCatalogs {
-        go: go_models,
-        zen_free: &zen_catalog.models,
-        command_code: goat_models,
-        minimax: minimax_models,
-        kimi: kimi_models,
-        ollama: ollama_models,
-        ollama_pinned: &ollama_pinned_models,
-        ..alias::RuntimeCatalogs::default()
-    };
+    let runtime =
+        crate::gateway::handler::runtime_catalog_snapshot(state).map_err(V3ApiError::internal)?;
+    let public_catalogs = runtime.catalogs();
     let mut entries: Vec<ProviderCatalogEntry> = BUILTIN_PROVIDERS
         .iter()
         .filter(|plan| !plan.product_surface.is_external_integration())
@@ -1306,7 +1298,7 @@ fn provider_catalog_from_state(state: &CoreState) -> ProviderCatalog {
                 ollama_models,
                 &ollama_pinned_models,
             );
-            if plan.provider_id == OPENCODE_PROVIDER_ID {
+            if provider_contracts::builtin_provider_scope_ids().contains(&plan.provider_id) {
                 entry.model_aliases = alias::routeable_models_for_with_runtime_catalogs(
                     plan.provider_id,
                     public_catalogs,
@@ -1318,12 +1310,12 @@ fn provider_catalog_from_state(state: &CoreState) -> ProviderCatalog {
     for runtime in state.dynamic_providers().iter() {
         entries.push(dynamic_catalog_entry(runtime));
     }
-    ProviderCatalog {
+    Ok(ProviderCatalog {
         entries,
         revision: revision.revision,
         process_generation: revision.process_generation,
         pricing_revision: revision.pricing_revision,
-    }
+    })
 }
 
 fn dynamic_catalog_entry(runtime: &crate::dynamic::DynamicProviderRuntime) -> ProviderCatalogEntry {
@@ -1638,8 +1630,10 @@ fn provider_contracts_from_state(
     contracts: &EffectiveContractSet,
     accounts: &[ModelAccount],
     statuses: &HashMap<String, ConnectionVerificationStatus>,
-) -> ProviderContracts {
+) -> Result<ProviderContracts, V3ApiError> {
     let revision = ControlRevision::from_state(state);
+    let saved_projection = crate::destination_projection::load_persisted(&state.db.lock())
+        .map_err(V3ApiError::internal)?;
     let mut providers = Vec::new();
     for scope_id in provider_contracts::builtin_provider_scope_ids() {
         let Some(contract) = contracts.providers.get(scope_id) else {
@@ -1660,6 +1654,21 @@ fn provider_contracts_from_state(
             .values()
             .map(|model| model_contract_from_provider(descriptor.provider_id, model, contracts))
             .collect();
+        if let Some(destination) = saved_projection.destinations.iter().find(|d| {
+            d.id == ocg_domain::destination::destination_id_for_builtin(descriptor.provider_id)
+        }) {
+            for model in &mut models {
+                if let Some(saved) = destination
+                    .catalog
+                    .iter()
+                    .find(|m| m.upstream_model.eq_ignore_ascii_case(&model.model_id))
+                {
+                    if saved.public_model != saved.upstream_model {
+                        model.alias = saved.public_model.clone();
+                    }
+                }
+            }
+        }
         if descriptor.provider_id == OPENCODE_PROVIDER_ID {
             // Presentation-only filter: Zen Free owns every `-free` id, so the
             // Go scope must not project them even when a persisted catalog row
@@ -1733,13 +1742,13 @@ fn provider_contracts_from_state(
             }
         })
         .collect();
-    ProviderContracts {
+    Ok(ProviderContracts {
         providers,
         custom_endpoints,
         revision: revision.revision,
         process_generation: revision.process_generation,
         pricing_revision: revision.pricing_revision,
-    }
+    })
 }
 
 fn account_choice(
