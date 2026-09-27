@@ -80,10 +80,10 @@
             :usage-loading="usageLoading"
             :usage-load-error="usageLoadError"
             :usage-refresh-loading="usageRefreshLoading"
-            :menu-options="menuOptions"
+            :menu-options="rowActions"
             :connections="connections"
-            @toggle="emit('toggle')"
-            @menu-select="emit('menu-select', $event)"
+            @toggle="!accountDeleting && emit('toggle')"
+            @menu-select="selectAction"
             @usage-editor-open="emit('usage-editor-open')"
             @usage-update-draft="(key, value) => emit('usage-update-draft', key, value)"
             @usage-update-resets-first="(key, value) => emit('usage-update-resets-first', key, value)"
@@ -127,6 +127,14 @@ import type { Connection } from "../api/connections.ts";
 import type { UsageKey } from "../domain/accounts-usage.ts";
 import type { AccountMenuOption } from "../domain/account-display.ts";
 import type { AccountUsageEdits, UsageLimitView } from "../domain/useAccountUsage.ts";
+import { accountCapabilities } from "../domain/account-capabilities.ts";
+import { accountRowActions } from "../domain/account-row-actions.ts";
+import { billingBinding } from "../domain/billing.ts";
+import { findPlanDefinition } from "../domain/plans.ts";
+import { accountInferenceEndpointUrl, officialBalanceSupported } from "../domain/upstream-balance.ts";
+import { usageCompanionCatalog } from "../domain/usage-refresh-catalog.ts";
+import { useAccountRemoval } from "../domain/useAccountRemoval.ts";
+import { useBillingStore } from "../stores/billing.ts";
 import {
   credentialIsRouteAvailable,
   quotaRecoveryPresentation,
@@ -206,6 +214,40 @@ const emit = defineEmits<{
   "retry-quota": [];
   "open-models": [];
 }>();
+
+const billing = useBillingStore();
+const { confirmDelete, deleting } = useAccountRemoval();
+const accountDeleting = computed(() => Boolean(props.account && deleting.value[props.account.id]));
+const refreshSupported = computed(() => {
+  const account = props.account;
+  if (!account || account.setup_step !== "ready") return false;
+  const caps = accountCapabilities(account, props.catalog, props.destination);
+  if (caps.externalIntegration || caps.toggleWrite === "provider_settings") return false;
+  if (props.destination.legacy.kind === "platform_parent") return true;
+  const endpoint = accountInferenceEndpointUrl(account, props.identity, props.connections);
+  const slot = billing.slotFor(account.id).value;
+  const status = slot?.boundVersion === billingBinding(account.updated_at, endpoint) ? slot.status : null;
+  const surface = findPlanDefinition(account.provider_id, props.catalog);
+  const quota = status ? status.officialRefresh
+    : surface?.usage_availability === "available" || officialBalanceSupported(endpoint, props.connections);
+  const models = usageCompanionCatalog({
+    providerId: account.provider_id, catalog: props.catalog, destination: props.destination,
+  }).kind !== "none";
+  return quota || models;
+});
+const rowActions = computed(() => accountRowActions(props.menuOptions, props.account, {
+  platformLinked: props.destination.legacy.kind === "platform_parent",
+  refreshSupported: refreshSupported.value,
+  deleting: accountDeleting.value,
+  refreshBusy: props.usageLoading || props.usageRefreshLoading,
+}));
+
+function selectAction(key: string | number): void {
+  const action = rowActions.value.find(option => option.key === key);
+  if (!action || action.disabled) return;
+  if (key === "delete" && props.account) confirmDelete(props.account);
+  else emit("menu-select", key);
+}
 
 const quotaPresentation = computed(() => (
   quotaRecoveryPresentation(props.credential.quota_recovery, props.now)
