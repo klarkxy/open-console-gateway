@@ -21,6 +21,7 @@ mod credentials;
 mod destination_catalog;
 mod destinations;
 mod identities;
+mod model_metadata;
 mod official_api;
 mod onboarding;
 mod platform_keys;
@@ -64,6 +65,10 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
         .route(
             "/destinations/{id}/catalog",
             axum::routing::put(destination_catalog::update),
+        )
+        .route(
+            "/destinations/{id}/model-metadata",
+            get(model_metadata::get).put(model_metadata::put),
         )
         .route(
             "/destinations/{id}/model-tests",

@@ -378,6 +378,18 @@ async fn refresh_go_or_command_catalog(
             .reload_provider_contracts_locked(&db)
             .map_err(V3ApiError::internal)?;
     }
+    {
+        let db = state.db.lock();
+        let snapshot =
+            crate::routing_snapshot::RoutingSnapshot::load(&db).map_err(V3ApiError::internal)?;
+        let adapter = ocg_domain::destination::adapter_kind_for_builtin(provider_id);
+        for destination in &snapshot.projection.destinations {
+            if Some(destination.adapter) == adapter {
+                crate::model_metadata::observe(&db, destination, &discovery.metadata)
+                    .map_err(V3ApiError::internal)?;
+            }
+        }
+    }
     state.routing.reset();
     let revision = state.bump_settings_revision();
     audit_catalog_success(state, provider_id, models.len(), revision);

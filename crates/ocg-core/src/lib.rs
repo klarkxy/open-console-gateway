@@ -35,6 +35,7 @@ pub(crate) mod host_gateway;
 pub mod host_router;
 pub(crate) mod http_client;
 pub mod kernel;
+pub(crate) mod model_metadata;
 pub mod models;
 pub mod official_api;
 pub(crate) mod official_protocols;

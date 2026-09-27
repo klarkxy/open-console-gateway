@@ -67,6 +67,10 @@ export type DashboardApiV4 =
   | DestinationCatalogRefreshResult
   | HttpProtocolRouteDto
   | DestinationCatalogUpdate
+  | ModelMetadata
+  | DestinationModelMetadata
+  | DestinationModelMetadataEntry
+  | DestinationModelMetadataUpdate
   | DestinationCatalogModelUpdate
   | DestinationModelTestRequest
   | DestinationModelTestResult
@@ -1221,6 +1225,50 @@ export interface DestinationCatalogModelUpdate {
   enabled?: boolean | null;
   preferred?: ProtocolDto | null;
   protocols?: ProtocolDto[] | null;
+  publicModel: string;
+}
+export interface ModelMetadata {
+  contextWindow?: number | null;
+  inputModalities?: string[] | null;
+  maxOutputTokens?: number | null;
+  name?: string | null;
+  outputModalities?: string[] | null;
+  parallelToolCalls?: boolean | null;
+  reasoning?: boolean | null;
+  /**
+   * Exact DSH selector level -> Chat Completions reasoning_effort spelling.
+   * Absence is unknown, an empty map explicitly offers no selectable levels.
+   */
+  reasoningEfforts?: {
+    [k: string]: string;
+  } | null;
+  toolCalling?: boolean | null;
+}
+export interface DestinationModelMetadata {
+  destinationId: string;
+  models: DestinationModelMetadataEntry[];
+  revision: ControlRevision;
+}
+export interface DestinationModelMetadataEntry {
+  metadata: ModelMetadata;
+  publicModel: string;
+  source: string;
+  upstreamModel: string;
+}
+/**
+ * Required process-scoped mutation precondition.
+ *
+ * Both fields travel at the top level of every mutation request. The random
+ * process generation prevents a revision captured before restart from being
+ * accepted by a fresh process whose in-memory counter reused the same value.
+ */
+export interface DestinationModelMetadataUpdate {
+  expectedRevision: number;
+  /**
+   * null removes the operator declaration and reveals discovered facts.
+   */
+  metadata?: ModelMetadata | null;
+  processGeneration: number;
   publicModel: string;
 }
 /**

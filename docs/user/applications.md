@@ -111,3 +111,7 @@ container cannot install into the browser user's or Docker host's DSH. It may
 still serve DSH through ordinary Gateway configuration.
 
 [User guide index](../USER.md) · [Manual client setup](add-application.md) · [Docs index](../README.md)
+
+## Model details in DSH
+
+See [model metadata and reasoning tiers](model-metadata.md) for discovery, route-specific declarations, and upgrading the installed OCG plugin.

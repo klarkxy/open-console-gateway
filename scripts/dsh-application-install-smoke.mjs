@@ -24,6 +24,7 @@ const packageName = "@open-console-gateway/dsh-plugin";
 const secret = "ocg-isolated-smoke-key";
 
 function dshBin() {
+  if (process.env.OCG_DSH_SMOKE_BIN) return resolve(process.env.OCG_DSH_SMOKE_BIN);
   const appData = process.env.APPDATA;
   if (!appData) throw new Error("APPDATA is unavailable; cannot locate the installed DSH CLI");
   return join(appData, "npm", "node_modules", "@deepseek-ai", "dsh", "lib", "bin.js");
@@ -67,7 +68,11 @@ async function main() {
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify({
         object: "list",
-        data: [{ id: "smoke-model-a" }, { id: "org/smoke-model-b" }],
+        data: [{ id: "smoke-model-a", ocg: {
+          schemaVersion: 1, contextWindow: 262144, maxOutputTokens: 32768,
+          inputModalities: ["text", "image"], reasoning: true,
+          reasoningEfforts: { low: "low", high: "high", xhigh: "max" },
+        } }, { id: "org/smoke-model-b" }],
       }));
       return;
     }
@@ -78,6 +83,7 @@ async function main() {
       const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
       assert.equal(body.model, "smoke-model-a");
       assert.equal(body.stream, true);
+      assert.equal(body.reasoning_effort, "max");
       response.writeHead(200, {
         "content-type": "text/event-stream",
         "cache-control": "no-cache",
@@ -182,10 +188,13 @@ async function main() {
         await plugin.apply(ctx);
         const models = await adapter.listModels("open-console-gateway");
         const prepared = await adapter.prepareCall("open-console-gateway", "smoke-model-a");
+        if (prepared.model.context.contextWindow !== 262144) throw new Error("context metadata did not reach DSH");
+        if (JSON.stringify(prepared.model.reasoning.efforts.map((effort) => effort.id)) !== JSON.stringify(["low", "high", "xhigh"])) throw new Error("reasoning tiers did not reach DSH");
         const streamChunks = [];
         for await (const chunk of prepared.stream({
           provider: "open-console-gateway",
           model: "smoke-model-a",
+          reasoningEffort: "xhigh",
           messages: [{
             id: "smoke-user-message",
             role: "user",
@@ -230,6 +239,8 @@ async function main() {
       credentialImported: runtime.storedValueMatches,
       modelCallPrepared: runtime.preparedModel === "smoke-model-a",
       chatStreamCompleted: true,
+      contextAndReasoningTiersVerified: true,
+      reasoningWireMappingVerified: true,
       realUserHomeTouched: false,
     }, null, 2));
     process.stdout.write("\n");

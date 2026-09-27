@@ -75,6 +75,7 @@ async function writeRenderedPlugin(root, bootstrap) {
     );
   const plugin = join(root, "plugin.mjs");
   await writeFile(plugin, rendered);
+  await writeFile(join(root, "model-catalog.js"), await readFile(new URL("model-catalog.js", sourceRoot)));
   return plugin;
 }
 
@@ -176,7 +177,9 @@ test("generated DSH plugin imports its one-time Key and prepares every live OCG 
       result.models.map(({ id }) => id),
       ["model-a", "org/model-b"],
     );
-    assert.deepEqual(result.prepared.model, {
+    assert.equal(result.prepared.model.ocg.status, "legacy");
+    const { ocg: _metadata, ...preparedModel } = result.prepared.model;
+    assert.deepEqual(preparedModel, {
       provider: "open-console-gateway",
       id: "model-a",
       name: "model-a",

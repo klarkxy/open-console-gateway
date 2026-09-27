@@ -1,3 +1,4 @@
+import { parseModelCatalog, describeOcgModel } from "./model-catalog.js";
 import { randomBytes } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { chmod, copyFile, readFile, readdir, rename, unlink } from "node:fs/promises";
@@ -41,36 +42,6 @@ const credentialRef = "OCG_GATEWAY_KEY";
 const credentialBootstrapPath = __OCG_CREDENTIAL_BOOTSTRAP_PATH_JSON__;
 const catalogTtlMs = 5_000;
 const catalogTimeoutMs = 10_000;
-
-function modelDefinition(id) {
-  return {
-    id,
-    provider: providerId,
-    api: "openai-completions",
-    baseUrl,
-    name: id,
-    reasoning: false,
-    input: ["text"],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 128_000,
-    maxTokens: 16_384,
-  };
-}
-
-function parseModelCatalog(value) {
-  if (value === null || typeof value !== "object" || !Array.isArray(value.data)) {
-    throw new LlmError("Open Console Gateway returned an invalid /v1/models payload", "INVALID_CONFIG");
-  }
-  const seen = new Set();
-  const models = [];
-  for (const row of value.data) {
-    const id = typeof row?.id === "string" ? row.id.trim() : "";
-    if (id.length === 0 || seen.has(id)) continue;
-    seen.add(id);
-    models.push(modelDefinition(id));
-  }
-  return models;
-}
 
 const HANDOFF_CLAIM_MARKER = ".claimed-";
 
@@ -230,7 +201,13 @@ export async function apply(ctx) {
           "INVALID_CONFIG",
         );
       }
-      const models = parseModelCatalog(await response.json());
+      let catalog;
+      try {
+        catalog = parseModelCatalog(await response.json(), { providerId, baseUrl });
+      } catch {
+        throw new LlmError("Open Console Gateway returned an invalid /v1/models payload", "INVALID_CONFIG");
+      }
+      const { models, modelErrors, metadata } = catalog;
       const piProvider = createProvider({
         id: providerId,
         name: displayName,
@@ -264,7 +241,8 @@ export async function apply(ctx) {
             requestImageMaxBytes: 1024 * 1024,
             retryPolicy: resolveRetryPolicy(undefined, name),
             configuredMaxTokens: new Map(),
-            modelErrors: new Map(),
+            modelErrors,
+            ocgMetadata: metadata,
             piProvider,
           },
         ],
@@ -279,17 +257,22 @@ export async function apply(ctx) {
   class OcgAdapter extends PiAiAdapter {
     async listModels(provider) {
       await refreshCatalog(true);
-      return super.listModels(provider);
+      const metadata = profiles.get(provider)?.ocgMetadata;
+      return (await super.listModels(provider)).map((info) => describeOcgModel(info, metadata?.get(info.id)));
     }
 
     async resolveModel(provider, model, signal) {
       await refreshCatalog();
-      return super.resolveModel(provider, model, signal);
+      const metadata = profiles.get(provider)?.ocgMetadata.get(model);
+      return describeOcgModel(await super.resolveModel(provider, model, signal), metadata);
     }
 
     async prepareCall(provider, model, signal) {
       await refreshCatalog();
-      return super.prepareCall(provider, model, signal);
+      // Capture metadata before the await, just like PiAiAdapter captures its provider.
+      const metadata = profiles.get(provider)?.ocgMetadata.get(model);
+      const prepared = await super.prepareCall(provider, model, signal);
+      return { ...prepared, model: describeOcgModel(prepared.model, metadata) };
     }
   }
 

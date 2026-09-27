@@ -36,6 +36,7 @@ pub const MAX_PROVIDER_CATALOG_BODY_BYTES: usize = 256 * 1024;
 pub struct ProviderCatalogDiscovery {
     pub models: Vec<String>,
     pub protocol_baseline: OfficialProtocolBaseline,
+    pub(crate) metadata: std::collections::BTreeMap<String, crate::model_metadata::ModelMetadata>,
 }
 
 pub use crate::official_protocols::OfficialProtocolBaseline;
@@ -277,6 +278,7 @@ pub fn parse_provider_catalog_discovery(
     Ok(ProviderCatalogDiscovery {
         models,
         protocol_baseline,
+        metadata: crate::model_metadata::parse_catalog(bytes),
     })
 }
 

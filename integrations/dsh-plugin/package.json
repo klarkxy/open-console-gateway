@@ -7,6 +7,7 @@
   "main": "./index.js",
   "files": [
     "index.js",
+    "model-catalog.js",
     "cordis.patch.yml",
     "README.md"
   ],
