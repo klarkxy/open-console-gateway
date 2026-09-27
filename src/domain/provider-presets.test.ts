@@ -214,7 +214,7 @@ test("defaultModels validate as a non-empty array of trimmed unique IDs", () => 
   assert.deepEqual(parsed.map((preset) => preset.id), ["seeded"]);
 });
 
-test("a seeded fixed preset replaces Key and old mappings with exact prefixed IDs", () => {
+test("a seeded fixed preset replaces Key and old mappings with leaf public names", () => {
   const preset = samplePreset({ defaultModels: ["claude-opus-4-1", "claude-sonnet-4-5"] });
   const dirty: ProviderDefinitionDraft = {
     ...emptyProviderDefinitionDraft(),
@@ -233,8 +233,8 @@ test("a seeded fixed preset replaces Key and old mappings with exact prefixed ID
   const applied = applyProviderPresetToDraft(dirty, preset);
   assert.equal(applied.key, "");
   assert.deepEqual(applied.models, [
-    { public_model: "anthropic/claude-opus-4-1", upstream_model: "claude-opus-4-1", upstream_override: null },
-    { public_model: "anthropic/claude-sonnet-4-5", upstream_model: "claude-sonnet-4-5", upstream_override: null },
+    { public_model: "claude-opus-4-1", upstream_model: "claude-opus-4-1", upstream_override: null },
+    { public_model: "claude-sonnet-4-5", upstream_model: "claude-sonnet-4-5", upstream_override: null },
   ]);
   // An empty account name defaults to the preset name; typed notes survive.
   assert.equal(applied.account_name, "Anthropic API");
@@ -246,8 +246,8 @@ test("a seeded fixed preset replaces Key and old mappings with exact prefixed ID
     mode: "complete",
   });
   assert.deepEqual(payload.targets, [
-    { publicModel: "anthropic/claude-opus-4-1", upstreamModel: "claude-opus-4-1", upstreamOverride: null },
-    { publicModel: "anthropic/claude-sonnet-4-5", upstreamModel: "claude-sonnet-4-5", upstreamOverride: null },
+    { publicModel: "claude-opus-4-1", upstreamModel: "claude-opus-4-1", upstreamOverride: null },
+    { publicModel: "claude-sonnet-4-5", upstreamModel: "claude-sonnet-4-5", upstreamOverride: null },
   ]);
   assert.equal(payload.authorization?.kind, "api_key");
   if (payload.authorization?.kind === "api_key") {
@@ -297,7 +297,7 @@ test("switching reseeds models and a manual switch clears seeds", () => {
     samplePreset({ id: "openai", name: "OpenAI API", defaultModels: ["gpt-5"] }),
   );
   assert.deepEqual(switched.models, [
-    { public_model: "openai/gpt-5", upstream_model: "gpt-5", upstream_override: null },
+    { public_model: "gpt-5", upstream_model: "gpt-5", upstream_override: null },
   ]);
   const manual = applyProviderPresetToDraft(switched, null);
   assert.deepEqual(manual.models, [{ public_model: "", upstream_model: "" }]);
@@ -405,7 +405,7 @@ test("OpenRouter Free starts on the official free router without paid catalog di
   assert.equal(providerPresetModelDiscoveryEnabled(free), false);
   const draft = applyProviderPresetToDraft(emptyProviderDefinitionDraft(), free);
   assert.deepEqual(draft.models, [{
-    public_model: "openrouter-free/openrouter/free",
+    public_model: "free",
     upstream_model: "openrouter/free",
     upstream_override: null,
   }]);
@@ -427,7 +427,7 @@ test("OpenRouter Free starts on the official free router without paid catalog di
     assert.equal(payload.connection.endpointUrl, free.endpointUrl);
   }
   assert.deepEqual(payload.targets, [{
-    publicModel: "openrouter-free/openrouter/free",
+    publicModel: "free",
     upstreamModel: "openrouter/free",
     upstreamOverride: null,
   }]);
@@ -453,9 +453,9 @@ test("offering comes from metadata only and defaults to api", () => {
   assert.deepEqual(grouped.api.map((preset) => preset.id), ["plain-api"]);
 });
 
-test("preset imports use a predictable preset-prefixed public name and keep the exact upstream ID", () => {
-  assert.equal(providerPresetImportPublicName("anthropic", "claude-opus-4-1"), "anthropic/claude-opus-4-1");
-  assert.equal(providerPresetImportPublicName(null, "claude-opus-4-1"), "claude-opus-4-1");
+test("preset imports use the last model segment and keep the exact upstream ID", () => {
+  assert.equal(providerPresetImportPublicName("claude-opus-4-1"), "claude-opus-4-1");
+  assert.equal(providerPresetImportPublicName("vendor/claude-opus-4-1"), "claude-opus-4-1");
 });
 
 test("notes localize between Chinese and English", () => {
@@ -517,7 +517,7 @@ test("ambiguous or unknown endpoints resolve to null so the user chooses manuall
   assert.equal(resolveProviderPreset("https://unknown.example.com/v1/chat/completions", "bearer"), null);
 });
 
-test("edit-mode prefix evidence keeps import naming consistent only when unambiguous", () => {
+test("legacy prefix evidence identifies a discovery preset only when unambiguous", () => {
   assert.equal(
     inferMappingPresetPrefix([
       { public_model: "anthropic/claude-opus-4-1" },
@@ -570,7 +570,6 @@ test("an Azure draft roundtrip keeps the template ID while manual deployment map
   );
   assert.equal(edit.template?.id, "azure-openai");
   assert.equal(edit.endpointMatch, null);
-  assert.equal(edit.importPresetId, "azure-openai");
   assert.equal(edit.discoveryPreset?.id, "azure-openai");
   assert.equal(providerPresetModelDiscoveryEnabled(edit.discoveryPreset!), false);
   // The roundtripped update body carries the ID through unchanged.
@@ -597,17 +596,16 @@ test("update provenance: omitted preserves, an explicit empty string clears", ()
   }
 });
 
-test("legacy rows keep bare import names even when the endpoint matches an official preset", () => {
+test("legacy rows use endpoint and prefix evidence only for discovery context", () => {
   const legacy = resolveEditPreset(
     null,
     "https://api.openai.com/v1/responses",
     "bearer",
     [{ public_model: "gpt-5" }],
   );
-  // The live endpoint match still informs discovery, but never renames imports.
+  // The live endpoint match informs discovery but does not rename saved rows.
   assert.equal(legacy.template, null);
   assert.equal(legacy.endpointMatch?.id, "openai");
-  assert.equal(legacy.importPresetId, null);
   assert.equal(legacy.discoveryPreset?.id, "openai");
   // Mapping prefix evidence still applies for legacy rows without a stored ID.
   const prefixed = resolveEditPreset(
@@ -616,6 +614,5 @@ test("legacy rows keep bare import names even when the endpoint matches an offic
     "bearer",
     [{ public_model: "anthropic/claude-opus-4-1" }],
   );
-  assert.equal(prefixed.importPresetId, "anthropic");
   assert.equal(prefixed.discoveryPreset?.id, "anthropic");
 });

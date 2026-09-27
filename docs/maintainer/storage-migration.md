@@ -4,6 +4,10 @@
 
 Operator contract for upgrades, backups, and rollback. Schema details are in [Persistence](state-and-lifecycle.md#persistence).
 
+## Schema v64 — preset public model names
+
+v64 renames only saved Configurable HTTP mappings whose public name exactly matches `<preset-id>/<upstream-id>` to the last upstream-ID segment. Exact upstream IDs, manually named mappings, and historical logs are unchanged. Same-destination leaf collisions remain unchanged for operator review. The migration updates matching credential model scopes and downstream publication choices with the renamed model. It skips a hidden name if the new name is already used by another destination, avoiding a global publication change. Clients using a renamed public name must update their requested model. The change is transactional; back up the full data directory before upgrading and restore it to roll back, since older binaries cannot open schema v64.
+
 ## Schema v63 — explicit HTTP protocol routes
 
 v63 additively adds nullable `destinations.protocol_routes_json`. `NULL` and an empty list retain legacy behavior: the destination's existing base URL and authentication apply to its legacy protocol set. A nonempty list stores one to three unique protocol routes, each with its complete endpoint and authentication; the first route remains consistent with the legacy base fields. Malformed, duplicate, or unknown route values reject the write or transfer rather than being repaired at read time.
@@ -74,7 +78,7 @@ Downgrades are not supported: never point an older binary at a migrated database
 
 ## Schema v27 and the pre-v3 snapshot
 
-`CURRENT_SCHEMA_VERSION = 63` (`crates/ocg-core/src/db.rs`). Historical migrations v1–v57 remain described below. v58 adds `destinations.model_resolution`, backfills `adapter_defined` / `public_only` / `public_and_upstream`, changes legacy Custom destinations to unbounded credential capacity, preserves every destination and credential ID, and writes a verified pre-v58 SQLite backup for a non-fresh canonical v57 source before mutation. v60 additively stores `credentials.quota_recovery_json` (see above).
+`CURRENT_SCHEMA_VERSION = 64` (`crates/ocg-core/src/db.rs`). Historical migrations v1–v57 remain described below. v58 adds `destinations.model_resolution`, backfills `adapter_defined` / `public_only` / `public_and_upstream`, changes legacy Custom destinations to unbounded credential capacity, preserves every destination and credential ID, and writes a verified pre-v58 SQLite backup for a non-fresh canonical v57 source before mutation. v60 additively stores `credentials.quota_recovery_json` (see above).
 
 ## Schema v45 — identity / credential / binding satellites
 

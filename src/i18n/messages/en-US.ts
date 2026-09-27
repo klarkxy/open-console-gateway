@@ -924,7 +924,7 @@ export const enUSMessages = {
   "此预设未配置模型发现，请手动填写准确的模型 ID。": "No model-discovery interface is configured for this preset; enter exact model IDs manually.",
   "更多设置": "More settings",
   "默认模型：{models}": "Default models: {models}",
-  "导入的对外模型名使用“预设 ID/模型 ID”格式；上游模型 ID 保持原样。": "Imported rows use preset-id/model-id as the public name; the upstream model ID is kept exactly.",
+  "导入时对外模型名只取最后一段；上游模型 ID 保持原样。": "Imported public names use only the last segment; upstream model IDs stay exact.",
   "模型测试": "Model test",
   "选择要测试的模型": "Select the model to test",
   "跟随供应商默认": "Inherit supplier default",

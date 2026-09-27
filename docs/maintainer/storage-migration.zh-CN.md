@@ -2,6 +2,10 @@
 
 # 存储与迁移
 
+## Schema v64 — 预设的对外模型名
+
+v64 仅将已保存的 Configurable HTTP 映射中与 `<preset-id>/<upstream-id>` 完全一致的对外名称改为上游 ID 的最后一段。准确上游 ID、手动命名的映射和历史日志不变。同一目的地内最后一段重名的映射保留原名，供用户检查。迁移会同步修改相应 Key 的模型范围和下游展示设置。如果新名称已被其他目的地使用，原名称又处于隐藏状态，则跳过该映射，避免改变全局展示状态。使用旧对外名称的客户端需要更新模型设置。迁移在事务中完成；升级前备份整个数据目录，回退时还原该备份，因为旧版程序无法打开 v64 数据库。
+
 本页是升级、备份与回滚的运维约定。schema 细节见 [持久化](state-and-lifecycle.zh-CN.md#持久化)。
 
 ## Schema v63 — 显式 HTTP 协议路由
@@ -67,7 +71,7 @@ GUI 或 CLI 启动时会原地执行 SQLite 迁移。打开新版二进制前：
 
 ## Schema v27 与 pre-v3 快照
 
-`CURRENT_SCHEMA_VERSION = 63`（`crates/ocg-core/src/db.rs`）。下文保留 v1–v57 的历史迁移细节。v58 新增 `destinations.model_resolution`，回填 `adapter_defined` / `public_only` / `public_and_upstream`，把遗留 Custom 目的地改为不限制凭据数量，保留全部目的地与凭据 ID，并在修改非全新规范 v57 源之前写入经校验的 pre-v58 SQLite 备份。v60 增量保存 `credentials.quota_recovery_json`（见上文）。
+`CURRENT_SCHEMA_VERSION = 64`（`crates/ocg-core/src/db.rs`）。下文保留 v1–v57 的历史迁移细节。v58 新增 `destinations.model_resolution`，回填 `adapter_defined` / `public_only` / `public_and_upstream`，把遗留 Custom 目的地改为不限制凭据数量，保留全部目的地与凭据 ID，并在修改非全新规范 v57 源之前写入经校验的 pre-v58 SQLite 备份。v60 增量保存 `credentials.quota_recovery_json`（见上文）。
 
 ## Schema v45 — 身份 / 凭据 / 绑定附属表
 

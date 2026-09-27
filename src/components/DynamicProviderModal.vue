@@ -230,8 +230,8 @@
               />
               <n-button attr-type="button" size="small" :disabled="busy" @click="importDiscovered">{{ t("导入所选") }}</n-button>
             </div>
-            <p v-if="discoveredModels.length && importPresetId" class="field-hint">
-              {{ t("导入的对外模型名使用“预设 ID/模型 ID”格式；上游模型 ID 保持原样。") }}
+            <p v-if="discoveredModels.length" class="field-hint">
+              {{ t("导入时对外模型名只取最后一段；上游模型 ID 保持原样。") }}
             </p>
           </div>
         </n-form-item>
@@ -540,9 +540,6 @@ const templatePreset = computed(() => editPreset.value?.template ?? null);
 const effectivePreset = computed(() => (
   hydratingFromProvider.value ? editPreset.value?.discoveryPreset ?? null : selectedPreset.value
 ));
-const importPresetId = computed(() => (
-  hydratingFromProvider.value ? editPreset.value?.importPresetId ?? null : selectedPreset.value?.id ?? null
-));
 const presetOptions = computed(() => {
   const manual = { label: t("手动（自定义）"), value: MANUAL_PRESET_ID };
   const offeringGroups = groupProviderPresetsByOffering(PROVIDER_PRESETS);
@@ -828,11 +825,15 @@ function removeMapping(index: number): void {
 
 function importDiscovered(): void {
   if (fieldsLocked.value) return;
-  const presetId = importPresetId.value;
   const existing = new Set(draft.value.models.map((row) => row.public_model.trim().toLocaleLowerCase()));
   for (const model of selectedDiscovery.value) {
-    const publicName = providerPresetImportPublicName(presetId, model);
-    if (existing.has(publicName.toLocaleLowerCase())) continue;
+    const publicName = providerPresetImportPublicName(model);
+    if (existing.has(publicName.toLocaleLowerCase())) {
+      if (!draft.value.models.some((row) => row.upstream_model === model)) {
+        draft.value.models.push({ public_model: "", upstream_model: model, upstream_override: null });
+      }
+      continue;
+    }
     if (draft.value.models.length === 1 && !draft.value.models[0]?.public_model && !draft.value.models[0]?.upstream_model) {
       draft.value.models[0] = { public_model: publicName, upstream_model: model, upstream_override: null };
     } else {

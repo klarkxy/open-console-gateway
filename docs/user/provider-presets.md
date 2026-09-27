@@ -8,11 +8,13 @@ Presets are build-time data, not per-vendor code: `crates/ocg-domain/build.rs` c
 
 Presets create ordinary user-defined Providers through the atomic Dashboard V4 onboarding commit. The saved Provider participates in account ordering, fallback, model routing and request logs. Its configuration stays editable. It does not add a separate adapter or automatically create an account before saving.
 
-Models imported while a preset is selected receive a public name such as `openrouter/vendor/model`, while the exact upstream ID remains `vendor/model`. Both fields can be edited. Manual configuration imports add no preset prefix.
+Models imported from a preset use only the last segment as the public name: `vendor/model` becomes `model`. The exact upstream ID remains `vendor/model`. Both fields can be edited. If two upstream IDs end in the same segment, choose distinct public names before saving.
+
+On upgrade, OCG renames saved, unchanged preset-generated public names to their last segment. A mapping with a manually edited name or a conflicting last segment keeps its saved name for review. Renaming a public model changes the name clients send; update client model settings that still use the old prefixed name.
 
 Switching presets clears the previous channel's Key and model mappings, then fills the selected channel's default model. Operator links contain no referral parameters. Discovery only changes the draft; model tests remain explicit and may be billable. Use models supporting the fixed upstream protocol. Image, audio, video and embedding-only models are outside this chat gateway's preset workflow.
 
-Default models come from operator model documentation or request examples. They are editable starting points and do not certify account entitlement. Saving makes no upstream calls, imports no full model catalog and performs no paid test. Template updates do not rewrite saved connections or mappings.
+Default models come from operator model documentation or request examples. They are editable starting points and do not certify account entitlement. Saving makes no upstream calls, imports no full model catalog and performs no paid test. Template updates do not rewrite saved connections; the v64 name migration above is a one-time exception.
 
 ## Discover, test and edit
 
@@ -28,7 +30,7 @@ Choose a model and use **Test model**. The test uses its explicit protocol/endpo
 
 Testing never changes routing or preference. **Save Provider** commits the configuration you edited. Configurable HTTP tests use the selected connection route; they do not read back or replace a saved Key. Linked platform Keys keep their managed endpoint constraints. Model protocol/endpoint overrides are connection-owned and available to both ordinary dynamic and migrated Custom HTTP connections.
 
-The selected preset is retained when saving and reopening, including resource-specific addresses such as Azure. It preserves template hints, discovery restrictions and import naming; it does not certify an edited endpoint as official. Entries without preset provenance use only unambiguous existing configuration evidence, and manually named models are not rewritten. Changing the endpoint, Key, model or protocol clears stale test results.
+The selected preset is retained when saving and reopening, including resource-specific addresses such as Azure. It preserves template hints and discovery restrictions; it does not certify an edited endpoint as official. Entries without preset provenance use only unambiguous existing configuration evidence, and manually named models are not rewritten. Changing the endpoint, Key, model or protocol clears stale test results.
 
 ## Coverage and sources
 

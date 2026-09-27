@@ -341,7 +341,7 @@ pub const PRE_V48_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v48.";
 pub const PRE_V58_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v58.";
 pub const PRE_V59_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v59.";
 /// Highest schema this binary can open or migrate. Newer databases fail closed.
-pub const CURRENT_SCHEMA_VERSION: i32 = 63;
+pub const CURRENT_SCHEMA_VERSION: i32 = 64;
 pub const V57_SCHEMA_VERSION: i32 = 57;
 /// Canonical source schema for the v48 inert-column / empty-table cleanup.
 pub const V47_SCHEMA_VERSION: i32 = 47;
@@ -3490,6 +3490,19 @@ fn migrate_to_v63(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn migrate_to_v64(conn: &Connection) -> Result<()> {
+    let version = schema_version_on(conn)?;
+    if version >= 64 {
+        return Ok(());
+    }
+    anyhow::ensure!(version == 63, "v64 requires schema v63");
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    dynamic_store::migrate_preset_public_model_leaves(&tx)?;
+    tx.execute_batch("INSERT OR REPLACE INTO schema_version(version) VALUES (64);")?;
+    tx.commit()?;
+    Ok(())
+}
+
 fn migrate_v42_body(tx: &Transaction<'_>) -> Result<()> {
     let now = Utc::now().to_rfc3339();
     let v41_dynamic_providers_exists = table_exists(tx, "dynamic_providers")?;
@@ -4832,6 +4845,7 @@ impl Database {
         migrate_to_v61(&db.conn)?;
         migrate_to_v62(&db.conn)?;
         migrate_to_v63(&db.conn)?;
+        migrate_to_v64(&db.conn)?;
         if db.open_guard.can_recover_pending() {
             let tx = db.conn.unchecked_transaction()?;
             billing::recover_pending_on(&tx, Utc::now())?;

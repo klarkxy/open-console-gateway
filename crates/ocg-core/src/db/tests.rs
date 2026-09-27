@@ -3,10 +3,110 @@ use super::{V27MigrationFault, v27_test_hooks};
 use crate::crypto::{
     KeyCipher, LOCAL_CIPHER_V2_PREFIX, StaticKeyCipher, is_legacy_local_ciphertext,
 };
+use ocg_domain::credential::ModelScope;
 use ocg_domain::dynamic::DynamicAuthKind;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::sync::Arc;
+
+#[test]
+fn v64_renames_only_safe_preset_names_and_preserves_routing_scope() {
+    let dir = temp_data_dir("v64-preset-leaves");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let now = Utc::now();
+    let provider_id = uuid::Uuid::new_v4().to_string();
+    let account_id = "v64-preset-account";
+    let runtime = crate::dynamic::DynamicProviderRuntime {
+        preset_id: Some("stepfun-plan".into()),
+        id: provider_id.clone(),
+        name: "Step Plan".into(),
+        endpoint_url: "http://127.0.0.1:9".into(),
+        upstream_protocol: crate::provider::UpstreamProtocolKind::ChatCompletions,
+        auth_kind: DynamicAuthKind::Bearer,
+        mappings: [
+            ("stepfun-plan/step-router-v1", "step-router-v1"),
+            ("stepfun-plan/vendor/one", "vendor/one"),
+            ("stepfun-plan/other/one", "other/one"),
+            ("stepfun-plan/custom", "manually-changed"),
+        ]
+        .into_iter()
+        .map(
+            |(public_model, upstream_model)| ocg_domain::dynamic::DynamicModelMapping {
+                public_model: public_model.into(),
+                upstream_model: upstream_model.into(),
+                upstream_override: None,
+            },
+        )
+        .collect(),
+        created_at: now,
+        updated_at: now,
+        origin: ocg_domain::provider::ProviderOrigin::Preset,
+        offering: "plan".into(),
+    };
+    let mut first = account(account_id);
+    first.provider_id = provider_id.clone();
+    first.key_cipher = fixture_account_key_cipher();
+    db.create_dynamic_provider(&runtime, &first).unwrap();
+    let old = "stepfun-plan/step-router-v1";
+    db.conn
+        .execute(
+            "UPDATE credentials SET scope_json=?2 WHERE legacy_account_id=?1",
+            params![
+                account_id,
+                serde_json::to_string(&ModelScope::Only {
+                    models: vec![old.into()]
+                })
+                .unwrap()
+            ],
+        )
+        .unwrap();
+    db.upsert_unpublished_public_model(old).unwrap();
+    db.conn
+        .execute_batch(
+            "DELETE FROM schema_version; INSERT INTO schema_version(version) VALUES (63);",
+        )
+        .unwrap();
+    migrate_to_v64(&db.conn).unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), 64);
+    let updated = db.get_dynamic_provider(&provider_id).unwrap().unwrap();
+    let names: Vec<_> = updated
+        .mappings
+        .iter()
+        .map(|row| row.public_model.as_str())
+        .collect();
+    assert!(names.contains(&"step-router-v1"));
+    assert!(!names.contains(&old));
+    assert!(names.contains(&"stepfun-plan/vendor/one"));
+    assert!(names.contains(&"stepfun-plan/other/one"));
+    assert!(names.contains(&"stepfun-plan/custom"));
+    let scope: String = db
+        .conn
+        .query_row(
+            "SELECT scope_json FROM credentials WHERE legacy_account_id=?1",
+            [account_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<ModelScope>(&scope).unwrap(),
+        ModelScope::Only {
+            models: vec!["step-router-v1".into()]
+        }
+    );
+    assert!(
+        db.list_unpublished_public_models()
+            .unwrap()
+            .contains(&"step-router-v1".into())
+    );
+    assert!(
+        !db.list_unpublished_public_models()
+            .unwrap()
+            .contains(&old.into())
+    );
+    migrate_to_v64(&db.conn).unwrap();
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
 
 const TEST_HOST_SECRET: &str = "ocg-db-v27-test-host";
 

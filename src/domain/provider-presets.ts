@@ -355,7 +355,7 @@ export function filterProviderPresets(
  * Builds the draft for a preset selection. Preset-filled fields (name,
  * endpoint, protocol, auth) always reset; the Key and model mappings are
  * cleared on every switch so a secret can never cross providers. Vetted
- * defaultModels then seed exact upstream IDs with preset-prefixed public
+ * defaultModels then seed exact upstream IDs with leaf public
  * names and no per-model override. Typed account names and notes survive a
  * switch; an auto-generated or empty account name follows the new preset so
  * the first account is never created nameless.
@@ -385,7 +385,7 @@ export function applyProviderPresetToDraft(
     preset_id: preset ? preset.id : "",
     models: seeds.length > 0
       ? seeds.map((id) => ({
-        public_model: providerPresetImportPublicName(preset!.id, id),
+        public_model: providerPresetImportPublicName(id),
         upstream_model: id,
         upstream_override: null,
       }))
@@ -404,16 +404,11 @@ export function providerPresetModelDiscoveryEnabled(preset: ProviderPreset): boo
   return preset.modelDiscovery !== false;
 }
 
-/**
- * Preset imports get a predictable `<preset-id>/<exact-id>` public name so
- * rows stay distinguishable on the aggregated Aliases view; manual imports
- * keep the plain upstream ID. The upstream ID is always the exact model ID.
- */
+/** The public name is the last segment; the upstream ID stays exact. */
 export function providerPresetImportPublicName(
-  presetId: string | null,
   upstreamModelId: string,
 ): string {
-  return presetId ? `${presetId}/${upstreamModelId}` : upstreamModelId;
+  return upstreamModelId.split("/").at(-1) || upstreamModelId;
 }
 
 export function providerPresetNote(preset: ProviderPreset, locale: string): string {
@@ -465,12 +460,7 @@ export function resolveProviderPreset(
   return matches.length === 1 ? matches[0] ?? null : null;
 }
 
-/**
- * Naming-style evidence from existing mappings: when every non-empty public
- * name shares the same `<preset-id>/` prefix and that prefix is a known
- * preset, imports keep that prefix. Mixed, unknown, or absent prefixes return
- * null; a preset is never inferred from the provider's display name.
- */
+/** Legacy mapping prefixes can identify a preset for discovery restrictions. */
 export function inferMappingPresetPrefix(
   models: readonly Pick<ProviderDefinitionMapping, "public_model">[],
   presets: readonly ProviderPreset[] = PROVIDER_PRESETS,
@@ -497,19 +487,13 @@ export interface EditPresetResolution {
   template: ProviderPreset | null;
   /** Unique live endpoint+auth match; verified endpoint evidence only. */
   endpointMatch: ProviderPreset | null;
-  /**
-   * Naming preset for imports: the persisted template first, then a shared
-   * mapping prefix. An endpoint-only match never prefixes previously
-   * unprefixed manual mappings.
-   */
-  importPresetId: string | null;
   /** Preset gating model discovery: template first, then legacy inference. */
   discoveryPreset: ProviderPreset | null;
 }
 
 /**
  * Edit-mode preset context. Persisted provenance wins; legacy rows without a
- * stored ID fall back to the safe endpoint/prefix inference. Template metadata
+ * stored ID fall back to the safe endpoint/legacy-prefix inference. Template metadata
  * and the verified endpoint claim stay separate so a modified custom URL is
  * never presented as the official endpoint.
  */
@@ -531,7 +515,6 @@ export function resolveEditPreset(
   return {
     template,
     endpointMatch,
-    importPresetId: template?.id ?? prefix,
     discoveryPreset: template ?? endpointMatch ?? prefixPreset,
   };
 }

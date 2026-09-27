@@ -18,6 +18,120 @@ use rusqlite::OptionalExtension;
 
 const CONFIGURABLE_HTTP: &str = "configurable_http";
 
+/// Rename only untouched preset-generated public names. A conflicting leaf is
+/// left as-is so an upgrade never discards a distinct mapping.
+pub(crate) fn migrate_preset_public_model_leaves(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare(
+        "SELECT d.id, d.preset_id, m.public_model, m.upstream_model
+         FROM destinations d JOIN destination_models m ON m.destination_id = d.id
+         WHERE d.legacy_kind = 'dynamic' AND d.preset_id IS NOT NULL",
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut candidates = Vec::new();
+    let mut counts = std::collections::HashMap::<(String, String), usize>::new();
+    for (destination_id, preset_id, public_model, upstream_model) in rows {
+        if public_model != format!("{preset_id}/{upstream_model}") {
+            continue;
+        }
+        let Some(leaf) = upstream_model
+            .rsplit('/')
+            .next()
+            .filter(|leaf| !leaf.is_empty())
+        else {
+            continue;
+        };
+        let leaf_key = leaf.to_ascii_lowercase();
+        *counts
+            .entry((destination_id.clone(), leaf_key.clone()))
+            .or_default() += 1;
+        candidates.push((destination_id, public_model, leaf.to_string(), leaf_key));
+    }
+    for (destination_id, old_name, leaf, leaf_key) in candidates {
+        if counts[&(destination_id.clone(), leaf_key.clone())] != 1 {
+            continue;
+        }
+        let occupied: i64 = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM destination_models
+             WHERE destination_id=?1 AND public_model_key=?2)",
+            params![destination_id, leaf_key],
+            |row| row.get(0),
+        )?;
+        if occupied != 0 {
+            continue;
+        }
+        let old_key = old_name.to_ascii_lowercase();
+        let unpublished: i64 = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM unpublished_public_models WHERE public_model=?1)",
+            [&old_key],
+            |row| row.get(0),
+        )?;
+        if unpublished != 0 {
+            let shared: i64 = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM destination_models WHERE public_model_key=?1)",
+                [&leaf_key],
+                |row| row.get(0),
+            )?;
+            if shared != 0 {
+                continue;
+            }
+        }
+        conn.execute(
+            "UPDATE destination_models SET public_model=?3, public_model_key=?4
+             WHERE destination_id=?1 AND public_model_key=?2",
+            params![destination_id, old_key, leaf, leaf_key],
+        )?;
+        let mut credentials =
+            conn.prepare("SELECT id, scope_json FROM credentials WHERE destination_id=?1")?;
+        let scopes = credentials
+            .query_map([&destination_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (credential_id, raw) in scopes {
+            let Some(raw) = raw else {
+                continue;
+            };
+            let mut scope: ocg_domain::credential::ModelScope = serde_json::from_str(&raw)?;
+            if let ocg_domain::credential::ModelScope::Only { models } = &mut scope {
+                let mut changed = false;
+                for model in models.iter_mut() {
+                    if model.eq_ignore_ascii_case(&old_name) {
+                        *model = leaf.clone();
+                        changed = true;
+                    }
+                }
+                if changed {
+                    conn.execute(
+                        "UPDATE credentials SET scope_json=?2 WHERE id=?1",
+                        params![credential_id, serde_json::to_string(&scope)?],
+                    )?;
+                }
+            }
+        }
+        if unpublished != 0 {
+            conn.execute(
+                "INSERT OR IGNORE INTO unpublished_public_models(public_model, updated_at)
+                 SELECT ?1, updated_at FROM unpublished_public_models WHERE public_model=?2",
+                params![leaf_key, old_key],
+            )?;
+            conn.execute(
+                "DELETE FROM unpublished_public_models WHERE public_model=?1",
+                [&old_key],
+            )?;
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct DynamicDestinationExtras {
     pub id: String,
