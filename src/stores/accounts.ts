@@ -17,7 +17,7 @@ export const useAccountsStore = defineStore("accounts", () => {
   const error = ref("");
   // A delayed model/usage mutation may return an account after its DELETE.
   // Only a newer authoritative list can confirm an intentional restoration.
-  const removedIds = new Set<string>();
+  const removedIds = shallowRef<ReadonlySet<string>>(new Set());
 
   const byId = computed(() => {
     const map = new Map<string, Account>();
@@ -35,7 +35,8 @@ export const useAccountsStore = defineStore("accounts", () => {
     try {
       const list = await dashboardApi.getAccounts();
       if (generation !== loadGeneration) return list;
-      for (const account of list) removedIds.delete(account.id);
+      const listedIds = new Set(list.map(account => account.id));
+      removedIds.value = new Set([...removedIds.value].filter(id => !listedIds.has(id)));
       accounts.value = list;
       loaded.value = true;
       error.value = "";
@@ -56,13 +57,13 @@ export const useAccountsStore = defineStore("accounts", () => {
   function setAccounts(list: Account[]): void {
     loadGeneration++;
     loading.value = false;
-    accounts.value = list.filter(account => !removedIds.has(account.id));
+    accounts.value = list.filter(account => !removedIds.value.has(account.id));
     loaded.value = true;
     error.value = "";
   }
 
   function upsertAccount(account: Account): void {
-    if (removedIds.has(account.id)) return;
+    if (removedIds.value.has(account.id)) return;
     const exists = accounts.value.some((item) => item.id === account.id);
     setAccounts(exists
       ? accounts.value.map((item) => (item.id === account.id ? account : item))
@@ -70,14 +71,14 @@ export const useAccountsStore = defineStore("accounts", () => {
   }
 
   function removeAccount(id: string): void {
-    removedIds.add(id);
+    removedIds.value = new Set([...removedIds.value, id]);
     setAccounts(accounts.value.filter((item) => item.id !== id));
   }
 
   /** Drop the cached list on 401 / logout so the next session reloads fresh. */
   function clearAccounts(): void {
     loadGeneration++;
-    removedIds.clear();
+    removedIds.value = new Set();
     accounts.value = [];
     loaded.value = false;
     loading.value = false;
@@ -86,6 +87,7 @@ export const useAccountsStore = defineStore("accounts", () => {
 
   return {
     accounts: computed(() => accounts.value),
+    removedAccountIds: computed(() => removedIds.value),
     loaded: computed(() => loaded.value),
     loading: computed(() => loading.value),
     error: computed(() => error.value),
