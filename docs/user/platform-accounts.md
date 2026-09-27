@@ -37,3 +37,13 @@ Node exports use the current payload. Destinations and credentials remain author
 Back up the complete data directory before upgrading. Rollback restores that full backup; do not open a migrated database with an older binary. See [storage and migrations](../maintainer/storage-migration.md).
 
 The reader baseline is New API `71c1fd7caad738db4d13aabbf28eeadb293d0cfe` and Sub2API `772a0382f079676983c06f24b0d41e09139a8462`. Older releases and forks may omit or change these interfaces; an unavailable observation is not an inference failure.
+
+## Refresh isolation and bounded imports
+
+The parent **Refresh** and each Key's **Refresh** update observations only. They do not run model discovery a second time or change saved model routing. Use **Fetch models** explicitly for that configuration change. A truncated discovery result leaves the existing model configuration unchanged; empty and failed results likewise do not replace it.
+
+A Key refresh reports that Key's errors, not an old parent error. Sub2API Key refresh does not fetch the management user's wallet, subscriptions, or available groups. A saved management token may still authenticate the separate model-plaza price lookup. A Key-authenticated balance remains scoped to the Key.
+
+When an endpoint fails, successful components are saved and only rows from failed sources retain their last-known values. A partial snapshot remains globally marked stale for the conservative price estimator, and retained prices never receive a renewed expiry. The snapshot time describes the latest attempt, not proof every retained row was observed then. A parent observation no longer invalidates an in-flight child refresh; origin, management credential, link, and inference Key changes still invalidate it.
+
+New API import copies at most 50 remote rows per action and returns an explicit `nextPage`. Even a page of entirely disabled or already imported Keys can have a continuation. Invoke **Import Keys from site** again to continue in the current session. Completing all pages resets the next import to page one. Reloading or signing out also resets the cursor. This is bounded copying, not remote synchronization; rescan after concurrent remote inventory changes. Duplicate secrets are checked within the selected platform instance, and already imported Keys skip model discovery.

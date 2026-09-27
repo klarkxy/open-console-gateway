@@ -263,12 +263,12 @@ export const platformAccountsApi = {
       } satisfies WithoutExpectation<PlatformRefresh> & MutationExpectation),
     }))),
 
-  importKeys: (id: string): Promise<PlatformKeyImportResult> =>
+  importKeys: (id: string, page?: number): Promise<PlatformKeyImportResult> =>
     withCas(async (expectation) => adaptImportResult(await requestV4<unknown>(
       `/platform-accounts/${encode(id)}/import-keys`,
       {
         method: "POST",
-        body: JSON.stringify({ ...expectation }),
+        body: JSON.stringify({ ...expectation, ...(page !== undefined ? { page } : {}) }),
       },
     ))),
 };
@@ -279,6 +279,8 @@ export interface PlatformKeyImportFailure {
 }
 
 export interface PlatformKeyImportResult {
+  /** Absent on older servers; a positive page continues this bounded import. */
+  nextPage?: number | null;
   imported: number;
   skippedExisting: number;
   skippedDisabled: number;
@@ -288,6 +290,8 @@ export interface PlatformKeyImportResult {
 function adaptImportResult(value: unknown): PlatformKeyImportResult {
   const dto = record(value);
   return {
+    nextPage: typeof dto.nextPage === "number" && Number.isInteger(dto.nextPage) && dto.nextPage > 0
+      ? dto.nextPage : null,
     imported: num(dto.imported),
     skippedExisting: num(dto.skippedExisting),
     skippedDisabled: num(dto.skippedDisabled),

@@ -286,3 +286,61 @@ test("late platform child refresh cannot repopulate a logged-out store", async (
   assert.equal(store.view, null);
   assert.deepEqual(store.refreshing, {});
 });
+
+test("platform refresh: a pending link is not completed by another parent", () => {
+  setActivePinia(createPinia());
+  useControlPlaneStore();
+  const store = usePlatformAccountsStore();
+  store.setPendingLink({ accountId: "key", parentId: "expected" });
+  store.acceptView(platformView("other", 1, 99, [platformLink("key", "other")]));
+  assert.deepEqual(store.pendingLink, { accountId: "key", parentId: "expected" });
+});
+
+test("platform refresh: a parent response after session clear cannot repopulate state", async () => {
+  setActivePinia(createPinia());
+  useControlPlaneStore().sync({ revision: 7, processGeneration: 99, pricingRevision: null });
+  const calls = installDeferredFetch();
+  const store = usePlatformAccountsStore();
+  const pending = store.refreshParent("parent");
+  await waitForCalls(calls, 1);
+  store.clear();
+  calls[0]!.resolve(listBody("parent", 8, 99));
+  assert.equal(await pending, "error");
+  assert.equal(store.view, null);
+  assert.equal(store.loaded, false);
+});
+
+test("platform import: a committed continuation survives failed list revalidation", async () => {
+  setActivePinia(createPinia());
+  useControlPlaneStore().sync({ revision: 7, processGeneration: 99, pricingRevision: null });
+  const calls = installDeferredFetch();
+  const store = usePlatformAccountsStore();
+  const first = store.importKeys("parent");
+  await waitForCalls(calls, 1);
+  assert.equal((calls[0]!.body as { page?: number }).page, undefined);
+  calls[0]!.resolve({ imported: 0, skippedExisting: 0, skippedDisabled: 50, failed: [], nextPage: 2,
+    revision: { revision: 7, processGeneration: 99, pricingRevision: null } });
+  await waitForCalls(calls, 2);
+  calls[1]!.reject(new Error("list unavailable"));
+  const result = await first;
+  assert.notEqual(typeof result, "string");
+  assert.equal(typeof result === "object" ? result.nextPage : null, 2);
+  assert.equal(store.error, "list unavailable");
+  const second = store.importKeys("parent");
+  await waitForCalls(calls, 3);
+  assert.equal((calls[2]!.body as { page?: number }).page, 2);
+  calls[2]!.resolve({ imported: 1, skippedExisting: 0, skippedDisabled: 0, failed: [], nextPage: null,
+    revision: { revision: 8, processGeneration: 99, pricingRevision: null } });
+  await waitForCalls(calls, 4);
+  calls[3]!.resolve(listBody("parent", 8, 99));
+  await second;
+  assert.equal(store.error, "");
+  const third = store.importKeys("parent");
+  await waitForCalls(calls, 5);
+  assert.equal((calls[4]!.body as { page?: number }).page, undefined);
+  calls[4]!.resolve({ imported: 0, skippedExisting: 1, skippedDisabled: 0, failed: [], nextPage: null,
+    revision: { revision: 8, processGeneration: 99, pricingRevision: null } });
+  await waitForCalls(calls, 6);
+  calls[5]!.resolve(listBody("parent", 8, 99));
+  await third;
+});

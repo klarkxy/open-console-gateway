@@ -14,7 +14,7 @@ Once deletion is confirmed by the service, the local account and link are remove
 
 For a New API or Sub2API platform, **Refresh** updates the platform observation. On a linked Key, it updates that Key's observation and reports that Key's errors, not the parent's errors. These refresh actions no longer automatically import models for every linked Key. Use the existing **Fetch models** or card-wide model-fetch action to explicitly update model capabilities.
 
-Explicit platform model discovery adds discovered model IDs while preserving existing mappings. A partial or truncated response must not erase previously saved models.
+Explicit platform model discovery adds discovered model IDs while preserving existing mappings. A truncated response leaves the saved configuration unchanged and reports the truncation.
 
 For other accounts, manual refresh retains the existing companion model-discovery behavior. A model-only account can run that discovery even when it has no official quota endpoint, without sending an unsupported quota request. The busy indicator covers both the quota request and companion work. A quota failure or rate-limit response does not start further model writes. Automatic quota refresh remains silent, observes its next-eligible time, and does not run companion discovery.
 

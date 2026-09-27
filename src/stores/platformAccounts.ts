@@ -37,6 +37,7 @@ export const usePlatformAccountsStore = defineStore("platformAccounts", () => {
   const error = ref("");
   const mutating = ref(false);
   const importing = ref<Record<string, boolean>>({});
+  const nextImportPage = ref<Record<string, number>>({});
   const refreshing = ref<Record<string, boolean>>({});
   const pendingLink = ref<PlatformPendingLink | null>(null);
   const destinationRefreshError = ref("");
@@ -78,7 +79,7 @@ export const usePlatformAccountsStore = defineStore("platformAccounts", () => {
     loaded.value = true;
     // A reloaded view that already contains the pending account's link settles
     // the retry state without another write.
-    if (pendingLink.value && next.links.some((link) => link.accountId === pendingLink.value!.accountId)) {
+    if (pendingLink.value && next.links.some((link) => link.accountId === pendingLink.value!.accountId && link.platformAccountId === pendingLink.value!.parentId)) {
       pendingLink.value = null;
     }
   }
@@ -192,6 +193,7 @@ export const usePlatformAccountsStore = defineStore("platformAccounts", () => {
     try {
       const ack = await platformAccountsApi.remove(parentId);
       if (session !== sessionEpoch) return "error";
+      delete nextImportPage.value[parentId];
       invalidateObservations();
       if (view.value) {
         acceptView({
@@ -288,12 +290,19 @@ export const usePlatformAccountsStore = defineStore("platformAccounts", () => {
     mutating.value = true;
     importing.value[parentId] = true;
     try {
-      const result = await platformAccountsApi.importKeys(parentId);
+      const result = await platformAccountsApi.importKeys(parentId, nextImportPage.value[parentId]);
       if (session !== sessionEpoch) return "error";
-      const next = await platformAccountsApi.list();
-      if (session !== sessionEpoch) return "error";
-      acceptView(next);
-      return result;
+      if (result.nextPage != null) nextImportPage.value[parentId] = result.nextPage;
+      else delete nextImportPage.value[parentId];
+      try {
+        const next = await platformAccountsApi.list();
+        if (session === sessionEpoch) acceptView(next);
+      } catch (e) {
+        // Import already committed. A failed revalidation must not hide its
+        // result or lose the page continuation and invite a duplicate write.
+        if (session === sessionEpoch) error.value = dashboardErrorDetail(e);
+      }
+      return session === sessionEpoch ? result : "error";
     } catch (e) {
       if (session !== sessionEpoch) return "error";
       if (isRevisionConflict(e)) return recoverConflict();
@@ -384,6 +393,7 @@ export const usePlatformAccountsStore = defineStore("platformAccounts", () => {
     error.value = "";
     mutating.value = false;
     importing.value = {};
+    nextImportPage.value = {};
     pendingLink.value = null;
     destinationRefreshError.value = "";
   }

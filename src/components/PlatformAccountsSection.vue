@@ -247,11 +247,12 @@ async function runImportKeys(parent: PlatformAccount): Promise<void> {
       return;
     }
     emit("changed");
-    if (result.imported === 0 && result.failed.length === 0) {
+    if (result.imported === 0 && result.failed.length === 0 && result.nextPage == null) {
       message.info(t("没有可导入的 Key"));
       return;
     }
     const parts = [t("已导入 {imported} 把 Key", { imported: result.imported })];
+    if (result.nextPage != null) parts.push(t("还有更多 Key；再次导入将继续下一批。"));
     if (result.skippedExisting > 0) {
       parts.push(t("已跳过 {count} 把已存在的 Key", { count: result.skippedExisting }));
     }
@@ -502,12 +503,16 @@ async function fetchModels(account: Account): Promise<void> {
       account_id: account.id,
     });
     if (!isCurrent()) return;
+    if (discovery.truncated) {
+      message.warning(t("模型列表被截断，未修改已保存的模型。"));
+      return;
+    }
     if (discovery.models.length === 0) {
       message.warning(t("该 Key 未返回可用模型；确认 Key 与站点地址无误后重试。"));
       return;
     }
-    // Preserve existing mappings, including models absent from a truncated
-    // discovery response. Discovery is additive, not an implicit reset.
+    // Preserve existing mappings omitted by discovery. Complete discovery
+    // is additive, not an implicit reset.
     const merged = mergeDiscoveredAccountCapabilities(
       account.model_capabilities,
       discovery.models,

@@ -1566,14 +1566,16 @@ impl Database {
         let parent = self
             .platform_account(parent_id)?
             .context("platform account not found")?;
-        let mut token = format!("{}:{}", parent.id, parent.version);
         if let Some(id) = account_id {
             let version = link_version_on(&self.conn, id, parent_id)?;
             let account = self.get_account(id)?.context("account not found")?;
-            // Private comparison token; never returned or logged.
-            token.push_str(&format!(":{id}:{version}:{}", account.key_cipher));
+            return crate::platform::refresh::refresh_identity(
+                &parent,
+                self.platform_credential_cipher(parent_id)?.as_deref(),
+                Some((id, version, &account.key_cipher)),
+            );
         }
-        Ok(token)
+        crate::platform::refresh::refresh_identity(&parent, None, None)
     }
 
     pub(crate) fn save_platform_refresh(
@@ -1599,14 +1601,7 @@ impl Database {
         } else {
             self.platform_account(parent_id)?.and_then(|p| p.snapshot)
         };
-        let mut saved = snapshot.clone();
-        if snapshot.stale
-            && let Some(mut old) = previous
-        {
-            old.stale = true;
-            old.errors = snapshot.errors.clone();
-            saved = old;
-        }
+        let saved = crate::platform::refresh::merge_snapshot(previous.as_ref(), snapshot);
         let json = serde_json::to_string(&saved)?;
         if let Some(id) = account_id {
             self.conn.execute(

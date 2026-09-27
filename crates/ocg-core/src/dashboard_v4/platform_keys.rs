@@ -31,6 +31,13 @@ pub(super) async fn import_keys(
     body: Bytes,
 ) -> Result<Json<PlatformKeyImportResult>, V3ApiError> {
     let input = parse_mutation_json::<PlatformKeyImportRequest>(&body)?;
+    let page = input.page.unwrap_or(1);
+    if !(1..=import::MAX_PAGE).contains(&page) {
+        return Err(V3ApiError::invalid_request_at(
+            &state,
+            "invalid import page",
+        ));
+    }
     let (base_url, credential, captured_version) = {
         let _lock = state.settings_update.lock();
         check_expectation(&state, &input.expectation)?;
@@ -67,16 +74,26 @@ pub(super) async fn import_keys(
         crate::http_client::build_no_redirect(&state.config()).map_err(V3ApiError::internal)?;
     let origin = reqwest::Url::parse(&hosted)
         .map_err(|error| V3ApiError::invalid_request_at(&state, error.to_string()))?;
-    let (secrets, skipped_disabled, mut failed) =
-        import::collect_remote_secrets(&client, &origin, &credential)
-            .await
-            .map_err(|error| {
-                V3ApiError::invalid_request_at(&state, redact_known_secret(&error, &credential))
-            })?;
+    let import::RemoteKeyBatch {
+        secrets,
+        skipped_disabled,
+        mut failed,
+        next_page,
+    } = import::collect_remote_secrets(&client, &origin, &credential, page)
+        .await
+        .map_err(|error| {
+            V3ApiError::invalid_request_at(&state, redact_known_secret(&error, &credential))
+        })?;
 
+    let known_keys = local_custom_keys(&state, &id)?;
+    let mut skipped_existing = 0_u32;
     let config = state.config();
     let mut pending: Vec<(String, String, Vec<AccountModelCapabilityInput>)> = Vec::new();
     for secret in secrets {
+        if known_keys.contains(&secret.key) {
+            skipped_existing += 1;
+            continue;
+        }
         match custom::discover_custom_models(
             &config,
             &AccountCustomConfigInput {
@@ -111,7 +128,6 @@ pub(super) async fn import_keys(
         .ok_or_else(|| V3ApiError::internal(anyhow::anyhow!("custom provider is required")))?;
     let now = Utc::now();
     let mut imported = 0_u32;
-    let mut skipped_existing = 0_u32;
 
     {
         let _lock = state.settings_update.lock();
@@ -142,7 +158,7 @@ pub(super) async fn import_keys(
                 ));
             }
         }
-        let mut existing_keys = local_custom_keys(&state)?;
+        let mut existing_keys = local_custom_keys(&state, &id)?;
         for (name, key, capabilities) in pending {
             if existing_keys.contains(&key) {
                 skipped_existing += 1;
@@ -216,6 +232,7 @@ pub(super) async fn import_keys(
         })
         .collect();
     Ok(Json(PlatformKeyImportResult {
+        next_page,
         imported,
         skipped_existing,
         skipped_disabled: u32::try_from(skipped_disabled).unwrap_or(u32::MAX),
@@ -224,11 +241,18 @@ pub(super) async fn import_keys(
     }))
 }
 
-fn local_custom_keys(state: &CoreState) -> Result<HashSet<String>, V3ApiError> {
+fn local_custom_keys(state: &CoreState, parent_id: &str) -> Result<HashSet<String>, V3ApiError> {
     let db = state.db.lock();
+    let linked_ids: HashSet<String> = db
+        .list_platform_links()
+        .map_err(V3ApiError::internal)?
+        .into_iter()
+        .filter(|link| link.platform_account_id == parent_id)
+        .map(|link| link.account_id)
+        .collect();
     let mut keys = HashSet::new();
     for account in db.list_accounts().map_err(V3ApiError::internal)? {
-        if account.provider_id != CUSTOM_PROVIDER_ID {
+        if account.provider_id != CUSTOM_PROVIDER_ID || !linked_ids.contains(&account.id) {
             continue;
         }
         if let Ok(plain) = state.decrypt_key(&account.key_cipher)

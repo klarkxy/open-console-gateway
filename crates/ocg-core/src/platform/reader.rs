@@ -1137,7 +1137,9 @@ async fn read_sub2(
     let mut billing_multiplier: Option<f64> = None;
     let mut peak_enabled = false;
 
-    if let Some(user) = user {
+    if let Some(user) = user
+        && key.is_none()
+    {
         match get_json(
             client,
             base,
@@ -1381,11 +1383,10 @@ fn parse_sub2_usage(value: &Value, snapshot: &mut PlatformSnapshot) -> Result<()
                 }
                 return Ok(());
             }
-            if snapshot
-                .quotas
-                .iter()
-                .any(|quota| matches!(quota.kind, PlatformQuotaKind::Wallet))
-            {
+            if snapshot.quotas.iter().any(|quota| {
+                matches!(quota.kind, PlatformQuotaKind::Wallet)
+                    && quota.source == "sub2api.v1.usage"
+            }) {
                 return Ok(());
             }
             // Subscription mode may expose a limiting-window `remaining` too.
