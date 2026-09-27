@@ -58,12 +58,15 @@ export function useAccountUsage(
     message?: Pick<ReturnType<typeof useMessage>, "success" | "warning" | "error">;
     endpointUrlFor?: (account: Account) => string | null;
     officialBalanceFor?: (account: Account) => boolean;
-    /** Runs after an attempted quota refresh (success or failure), while the button still spins. */
+    /** Manual companion work, including model-only accounts; covered by the refresh lock. */
     afterUsageRefresh?: (accountId: string, isCurrent: () => boolean) => Promise<void>;
   },
 ) {
   const message = options?.message ?? useMessage();
   const billing = useBillingStore();
+  // The billing mutation flag ends before companion discovery. Operation
+  // identities cover the entire action and cannot unlock a newer session.
+  const refreshOperations = ref<Record<string, symbol>>({});
   let disposed = false;
   if (getCurrentScope()) onScopeDispose(() => { disposed = true; });
 
@@ -114,6 +117,7 @@ export function useAccountUsage(
   const usageRefreshLoading = computed(() => {
     const out: Record<string, boolean> = {};
     for (const [id, slot] of Object.entries(billing.byId)) out[id] = slot.mutating;
+    for (const id of Object.keys(refreshOperations.value)) out[id] = true;
     return out;
   });
 
@@ -142,7 +146,8 @@ export function useAccountUsage(
   }
 
   function usageRefreshLoadingFor(accountId: string): ComputedRef<boolean> {
-    return computed(() => billing.slotFor(accountId).value?.mutating ?? false);
+    return computed(() => Boolean(refreshOperations.value[accountId])
+      || (billing.slotFor(accountId).value?.mutating ?? false));
   }
 
   function usageLimitsFor(account: Account): UsageLimitView[] {
@@ -384,28 +389,33 @@ export function useAccountUsage(
 
   async function refreshAccountUsage(accountId: string, automatic = false): Promise<void> {
     const account = accounts.value.find((item) => item.id === accountId);
-    if (!account || !usageCapabilities(account).refresh) return;
-    const isCurrent = requestStillCurrent(account);
-    if (usageRefreshLoadingFor(accountId).value || usageLoadingFor(accountId).value) {
-      return;
-    }
-    const status = billing.slotFor(accountId).value?.status;
+    if (!account) return;
+    const canRefreshUsage = usageCapabilities(account).refresh;
+    if (!canRefreshUsage && (automatic || !options?.afterUsageRefresh)) return;
+    if (usageRefreshLoadingFor(accountId).value || usageLoadingFor(accountId).value) return;
+    const operation = Symbol(accountId);
+    refreshOperations.value[accountId] = operation;
+    const requestCurrent = requestStillCurrent(account);
+    const isCurrent = () => requestCurrent() && refreshOperations.value[accountId] === operation;
+    const slot = billing.slotFor(accountId).value;
+    const status = slot?.boundVersion === bindingFor(account) ? slot.status : null;
+    let refreshed = false;
     try {
-      if (status?.model === "cash") {
-        await billing.refreshCash(accountId, bindingFor(account));
-      } else {
-        await billing.refreshUsage(accountId, bindingFor(account));
+      if (canRefreshUsage) {
+        if (status?.model === "cash") {
+          await billing.refreshCash(accountId, bindingFor(account));
+        } else {
+          await billing.refreshUsage(accountId, bindingFor(account));
+        }
+        if (!isCurrent()) return;
+        const presented = providerUsageFor(accountId).value;
+        patchAccountUsageSync(accountId, {
+          usage_sync_last_success_at: presented?.sync_state?.last_success_at ?? null,
+          usage_sync_next_allowed_at: presented?.sync_state?.next_eligible_at ?? null,
+        });
+        if (usageCapabilities(account).manual) syncUsageEdits(accountId, getUsage(accountId));
+        refreshed = true;
       }
-      if (!isCurrent()) return;
-      const presented = providerUsageFor(accountId).value;
-      patchAccountUsageSync(accountId, {
-        usage_sync_last_success_at: presented?.sync_state?.last_success_at ?? null,
-        usage_sync_next_allowed_at: presented?.sync_state?.next_eligible_at ?? null,
-      });
-      if (usageCapabilities(account).manual) {
-        syncUsageEdits(accountId, getUsage(accountId));
-      }
-      if (!automatic) message.success(t("成功"));
     } catch (error) {
       if (!isCurrent()) return;
       if (error instanceof DashboardRequestError && error.status === 429) {
@@ -425,9 +435,16 @@ export function useAccountUsage(
       }
     } finally {
       try {
-        if (!automatic && isCurrent()) await options?.afterUsageRefresh?.(accountId, isCurrent);
+        // A failed/rate-limited quota request must not start unrelated writes.
+        // Manual model-only accounts do not issue an unsupported billing POST.
+        if (!automatic && isCurrent() && (refreshed || !canRefreshUsage)) {
+          await options?.afterUsageRefresh?.(accountId, isCurrent);
+          if (refreshed && isCurrent()) message.success(t("成功"));
+        }
       } catch {
         // Companion catalog refresh reports its own failure.
+      } finally {
+        if (refreshOperations.value[accountId] === operation) delete refreshOperations.value[accountId];
       }
     }
   }
@@ -445,7 +462,7 @@ export function useAccountUsage(
         timestampMs(status?.usage?.syncState?.nextEligibleAt),
         timestampMs(account.usage_sync_next_allowed_at),
       ),
-      busy: Boolean(slot?.loading || slot?.mutating)
+      busy: Boolean(slot?.loading || slot?.mutating || refreshOperations.value[account.id])
         || Object.values(usageEdits.value[account.id] ?? {}).some(edit => edit.saving || edit.resets_dirty || edit.draft !== edit.saved),
       refresh: async (allowed) => {
         const isCurrent = requestStillCurrent(account);
@@ -478,11 +495,12 @@ export function useAccountUsage(
 
   async function revalidateAccountUsage(accountId: string): Promise<void> {
     const slot = billing.slotFor(accountId).value;
-    if (slot?.loading || slot?.mutating) return;
+    if (slot?.loading || slot?.mutating || refreshOperations.value[accountId]) return;
     await loadAccountUsage(accountId);
   }
 
   function forgetAccount(accountId: string): void {
+    delete refreshOperations.value[accountId];
     billing.remove(accountId);
     delete usageEdits.value[accountId];
   }
@@ -499,9 +517,17 @@ export function useAccountUsage(
     );
   }
 
+  watch(() => accounts.value.map(account => account.id), ids => {
+    const current = new Set(ids);
+    for (const id of new Set([...Object.keys(refreshOperations.value), ...Object.keys(usageEdits.value)])) {
+      if (!current.has(id)) forgetAccount(id);
+    }
+  }, { flush: "sync" });
+
   watch(() => billing.sessionEpoch, () => {
+    refreshOperations.value = {};
     usageEdits.value = {};
-  });
+  }, { flush: "sync" });
 
   return {
     quotaLimits,
