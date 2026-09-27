@@ -46,6 +46,14 @@ const RECONCILE_TIMEOUT: Duration = Duration::from_secs(2);
 
 const PACKAGE_FILES: &[(&str, &str)] = &[
     (
+        "locale/en.json",
+        include_str!("../../../integrations/dsh-plugin/locale/en.json"),
+    ),
+    (
+        "locale/zh.json",
+        include_str!("../../../integrations/dsh-plugin/locale/zh.json"),
+    ),
+    (
         "package.json",
         include_str!("../../../integrations/dsh-plugin/package.json"),
     ),
@@ -948,6 +956,10 @@ impl DshDesktopHost {
             }
             files.insert(relative, rendered.into_bytes());
         }
+        files.insert(
+            safe_relative_path("icon.png")?,
+            include_bytes!("../../../integrations/dsh-plugin/icon.png").to_vec(),
+        );
         let digest = package_digest(&files);
         let trusted_root = self.data_dir.join(PACKAGE_ROOT);
         let path = trusted_root.join(&digest[..24]);
@@ -1345,8 +1357,12 @@ impl EditorRestorePlan {
         fs::create_dir(&stage).map_err(|error| internal(error.to_string()))?;
         let staged = (|| -> DshApplicationResult<()> {
             for (relative, bytes) in &package.files {
-                fs::write(stage.join(relative), bytes)
-                    .map_err(|error| internal(error.to_string()))?;
+                let destination = stage.join(relative);
+                let directory = destination
+                    .parent()
+                    .ok_or_else(|| internal("invalid DSH plugin resource path"))?;
+                ensure_safe_directory_chain(&self.home, directory)?;
+                fs::write(destination, bytes).map_err(|error| internal(error.to_string()))?;
             }
             let marker =
                 serde_json::json!({"owner": "open-console-gateway", "digest": package.digest});
@@ -1521,6 +1537,10 @@ impl RenderedPackage {
         }
         for (relative, bytes) in &self.files {
             let destination = temporary.join(relative);
+            let directory = destination
+                .parent()
+                .ok_or_else(|| internal("invalid DSH plugin resource path"))?;
+            ensure_safe_directory_chain(&self.trusted_root, directory)?;
             let mut file = OpenOptions::new()
                 .write(true)
                 .create_new(true)

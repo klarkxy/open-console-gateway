@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Open Console Gateway",
+    "description": "Use models available through your local Open Console Gateway in DSH, with a shared Gateway Key."
+  }
+}

@@ -49,9 +49,13 @@ async function writePluginRuntime(root) {
     "lib/index.js": `
       export class PiAiAdapter {
         constructor(config) { this.config = config; }
+        providerInfo(provider) {
+          const profile = this.config.profiles().get(provider);
+          return { id: provider, name: profile?.displayName ?? provider };
+        }
         async listModels(provider) {
           const profile = this.config.profiles().get(provider);
-          return profile.piProvider.models.map((model) => ({ provider, id: model.id, name: model.name }));
+          return profile.piProvider.models.map((model) => ({ provider, id: model.id, name: model.name, inputModalities: model.input }));
         }
         async resolveModel(provider, model) {
           const profile = this.config.profiles().get(provider);
@@ -131,7 +135,8 @@ function applyOnlySource(plugin, bootstrap, extra = "") {
   `;
 }
 
-test("generated DSH plugin imports its one-time Key and prepares every live OCG model", async () => {
+for (const explicitMetadata of [false, true]) {
+test(`generated DSH plugin prepares both provider names with ${explicitMetadata ? "explicit metadata" : "legacy image support"}`, async () => {
   const root = await mkdtemp(join(tmpdir(), "ocg-dsh-plugin-"));
   try {
     const bootstrap = join(root, "credential-handoff");
@@ -144,11 +149,15 @@ test("generated DSH plugin imports its one-time Key and prepares every live OCG 
         import { access } from "node:fs/promises";
         let stored;
         let adapter;
+        let registeredProviders;
         globalThis.fetch = async (url, init) => ({
           ok: true,
           status: 200,
           async json() {
-            return { object: "list", data: [{ id: "model-a" }, { id: "org/model-b" }] };
+            return { object: "list", data: [{ id: 42 }, { id: "model-a" }, { id: "org/model-b" }, ${JSON.stringify({
+              id: "mimo-v2.6-flash",
+              ...(explicitMetadata ? { ocg: { schemaVersion: 1, inputModalities: ["text"], reasoning: true, reasoningEfforts: { medium: "medium" } } } : {}),
+            })}] };
           },
           requested: { url, init },
         });
@@ -158,37 +167,69 @@ test("generated DSH plugin imports its one-time Key and prepares every live OCG 
         };
         const ctx = {
           get(name) { return name === "credentials" ? credentials : undefined; },
-          llm: { registerAdapter(_providers, value) { adapter = value; } },
+          llm: { registerAdapter(providers, value) {
+            registeredProviders = providers;
+            adapter = value;
+          } },
         };
         const plugin = await import(${JSON.stringify(fileUrl(plugin))});
         await plugin.apply(ctx);
-        const models = await adapter.listModels("open-console-gateway");
-        const prepared = await adapter.prepareCall("open-console-gateway", "model-a");
+        const routes = {};
+        for (const provider of registeredProviders) {
+          routes[provider] = {
+            info: adapter.providerInfo(provider),
+            models: await adapter.listModels(provider),
+            prepared: await adapter.prepareCall(provider, "model-a"),
+          };
+        }
         let bootstrapExists = true;
         try { await access(${JSON.stringify(bootstrap)}); } catch { bootstrapExists = false; }
-        process.stdout.write(JSON.stringify({ stored, models, prepared, bootstrapExists }));
+        process.stdout.write(JSON.stringify({ stored, registeredProviders, routes, bootstrapExists }));
       `,
     );
     assert.deepEqual(result.stored, {
       ref: "OCG_GATEWAY_KEY",
       value: "ocg-test-key",
     });
-    assert.deepEqual(
-      result.models.map(({ id }) => id),
-      ["model-a", "org/model-b"],
-    );
-    assert.equal(result.prepared.model.ocg.status, "legacy");
-    const { ocg: _metadata, ...preparedModel } = result.prepared.model;
-    assert.deepEqual(preparedModel, {
-      provider: "open-console-gateway",
-      id: "model-a",
-      name: "model-a",
-    });
+    assert.deepEqual(result.registeredProviders, ["ocg", "open-console-gateway"]);
+    for (const provider of result.registeredProviders) {
+      assert.deepEqual(result.routes[provider].info, {
+        id: provider,
+        name: provider === "ocg" ? "Open Console Gateway" : "Open Console Gateway (legacy)",
+      });
+      assert.deepEqual(
+        result.routes[provider].models.map(({ id }) => id),
+        ["model-a", "org/model-b", "mimo-v2.6-flash"],
+      );
+      assert.deepEqual(
+        result.routes[provider].models.find(({ id }) => id === "mimo-v2.6-flash").inputModalities,
+        explicitMetadata ? ["text"] : ["text", "image"],
+      );
+      if (explicitMetadata) {
+        assert.deepEqual(
+          result.routes[provider].models.find(({ id }) => id === "mimo-v2.6-flash").ocg.reasoningEfforts,
+          { medium: "medium" },
+        );
+      }
+      assert.deepEqual(
+        result.routes[provider].models.find(({ id }) => id === "model-a").inputModalities,
+        ["text"],
+      );
+      assert.equal(result.routes[provider].prepared.model.ocg.status, "legacy");
+      const { ocg: _metadata, ...preparedModel } = result.routes[provider].prepared.model;
+      assert.deepEqual(preparedModel, {
+        provider,
+        id: "model-a",
+        name: "model-a",
+      });
+    }
     assert.equal(result.bootstrapExists, false);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+}
 
 test("an older consumer does not delete a newer handoff written during credentials.set", async () => {
   const root = await mkdtemp(join(tmpdir(), "ocg-dsh-plugin-race-"));

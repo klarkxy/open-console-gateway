@@ -28,13 +28,23 @@ test("reasoning=true alone never manufactures selectable tiers", () => {
   assert.equal(m.reasoning, false); assert.ok(Object.values(m.thinkingLevelMap).every((v) => v === null));
 });
 
-test("legacy ID-only catalog stays usable but fallback context is not a declared fact", () => {
-  const { models: [m], metadata } = parse({ id: "model" });
-  const info = describeOcgModel({ id: "model", context: { contextWindow: m.contextWindow } }, metadata.get("model"));
-  assert.equal(info.context.contextWindow, undefined);
-  assert.equal(info.ocg.contextWindow, undefined); assert.ok(info.ocg.fallbacks.includes("contextWindow"));
-  assert.equal(m.reasoning, false);
-});
+for (const row of [
+  { id: "deepseek-flash" },
+  { id: "metadata-without-context", ocg: { schemaVersion: 1, inputModalities: ["text"] } },
+  { id: "output-only", maxTokens: 262144 },
+]) {
+  test(`unknown context is omitted entirely from the DSH descriptor: ${row.id}`, () => {
+    const { models: [m], metadata } = parse(row);
+    const original = { id: row.id, context: { contextWindow: m.contextWindow } };
+    const info = describeOcgModel(original, metadata.get(row.id));
+    assert.equal(info.context, undefined);
+    assert.equal(Object.hasOwn(info, "context"), false);
+    assert.equal(original.context.contextWindow, m.contextWindow);
+    assert.equal(info.ocg.contextWindow, undefined);
+    assert.ok(info.ocg.fallbacks.includes("contextWindow"));
+    assert.equal(m.reasoning, false);
+  });
+}
 
 test("bad limits, future schemas, and invalid tiers isolate errors to their row", () => {
   for (const bad of [declared({ contextWindow: -1 }), declared({ contextWindow: 0 }), declared({ contextWindow: "262144" }),

@@ -35,13 +35,14 @@ const { PiAiAdapter } = dshPiAi;
 export const name = "open-console-gateway-dsh";
 export const inject = ["llm", "credentials"];
 
-const providerId = "open-console-gateway";
+const providerIds = ["ocg", "open-console-gateway"];
 const displayName = "Open Console Gateway";
 const baseUrl = "__OCG_GATEWAY_V1_URL__";
 const credentialRef = "OCG_GATEWAY_KEY";
 const credentialBootstrapPath = __OCG_CREDENTIAL_BOOTSTRAP_PATH_JSON__;
 const catalogTtlMs = 5_000;
 const catalogTimeoutMs = 10_000;
+const imageModelIds = new Set(["mimo-v2.6-flash"]);
 
 const HANDOFF_CLAIM_MARKER = ".claimed-";
 
@@ -201,52 +202,59 @@ export async function apply(ctx) {
           "INVALID_CONFIG",
         );
       }
-      let catalog;
-      try {
-        catalog = parseModelCatalog(await response.json(), { providerId, baseUrl });
-      } catch {
-        throw new LlmError("Open Console Gateway returned an invalid /v1/models payload", "INVALID_CONFIG");
+      const payload = await response.json();
+      if (Array.isArray(payload?.data)) {
+        // Retain the locally verified legacy image capability. Explicit
+        // upstream metadata always takes precedence over this compatibility fallback.
+        payload.data = payload.data.map((row) => (
+          typeof row?.id === "string" && imageModelIds.has(row.id.trim()) && row.ocg === undefined
+            && row.inputModalities == null && row.input == null
+            ? { ...row, inputModalities: ["text", "image"] } : row
+        ));
       }
-      const { models, modelErrors, metadata } = catalog;
-      const piProvider = createProvider({
-        id: providerId,
-        name: displayName,
-        baseUrl,
-        auth: {
-          apiKey: {
-            name: `${displayName} Key`,
-            async resolve({ credential }) {
-              return {
-                auth: credential?.key ? { apiKey: credential.key } : {},
-                source: displayName,
-              };
+      profiles = new Map(providerIds.map((providerId) => {
+        let catalog;
+        try {
+          catalog = parseModelCatalog(payload, { providerId, baseUrl });
+        } catch {
+          throw new LlmError("Open Console Gateway returned an invalid /v1/models payload", "INVALID_CONFIG");
+        }
+        const { models, modelErrors, metadata } = catalog;
+        const piProvider = createProvider({
+          id: providerId,
+          name: displayName,
+          baseUrl,
+          auth: {
+            apiKey: {
+              name: `${displayName} Key`,
+              async resolve({ credential }) {
+                return {
+                  auth: credential?.key ? { apiKey: credential.key } : {},
+                  source: displayName,
+                };
+              },
             },
           },
-        },
-        models,
-        api: openAICompletionsApi(),
-      });
-      profiles = new Map([
-        [
-          providerId,
-          {
-            provider: providerId,
-            displayName,
-            apiKeyEnv: credentialRef,
-            api: "openai-completions",
-            baseURL: baseUrl,
-            streamIdleTimeoutMs: 300_000,
-            maxRequestImageBytes: 20 * 1024 * 1024,
-            requestImagePixelBudget: 2048 * 2048,
-            requestImageMaxBytes: 1024 * 1024,
-            retryPolicy: resolveRetryPolicy(undefined, name),
-            configuredMaxTokens: new Map(),
-            modelErrors,
-            ocgMetadata: metadata,
-            piProvider,
-          },
-        ],
-      ]);
+          models,
+          api: openAICompletionsApi(),
+        });
+        return [providerId, {
+          provider: providerId,
+          displayName,
+          apiKeyEnv: credentialRef,
+          api: "openai-completions",
+          baseURL: baseUrl,
+          streamIdleTimeoutMs: 300_000,
+          maxRequestImageBytes: 20 * 1024 * 1024,
+          requestImagePixelBudget: 2048 * 2048,
+          requestImageMaxBytes: 1024 * 1024,
+          retryPolicy: resolveRetryPolicy(undefined, name),
+          configuredMaxTokens: new Map(),
+          modelErrors,
+          ocgMetadata: metadata,
+          piProvider,
+        }];
+      }));
       refreshedAt = Date.now();
     })().finally(() => {
       refreshPromise = undefined;
@@ -255,6 +263,13 @@ export async function apply(ctx) {
   };
 
   class OcgAdapter extends PiAiAdapter {
+    providerInfo(provider) {
+      return {
+        id: provider,
+        name: provider === "ocg" ? displayName : `${displayName} (legacy)`,
+      };
+    }
+
     async listModels(provider) {
       await refreshCatalog(true);
       const metadata = profiles.get(provider)?.ocgMetadata;
@@ -293,5 +308,5 @@ export async function apply(ctx) {
     resolveAttachments: () => ctx.get("attachments"),
   });
 
-  ctx.llm.registerAdapter([providerId], adapter);
+  ctx.llm.registerAdapter(providerIds, adapter);
 }

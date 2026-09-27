@@ -8,6 +8,9 @@
 
 **DSH** 子页签通过页面上显示的**运行地址**安装或卸载 OCG 自有插件。
 
+在 DSH 插件列表中，集成显示为 **Open Console Gateway**，使用 OCG 图标，
+并随 DSH 语言显示中文或英文说明。旧版插件需通过 OCG 重新安装，按提示重启 DSH 后更新。
+
 页面还会检测当前用户 `~/.dsh/profiles` 和 `~/.dsh-*/profiles` 下一层的 profile。
 只列出具有有效 DSH profile 清单的目录，跳过链接目录。如果 OCG Host 显式设置了 `DSH_HOME`，
 检测沿用该 Home 的原有位置。默认 `web` 目标在清单尚未建立时仍可选择。
@@ -49,9 +52,12 @@ DSH 加载插件后，插件会把该值导入 DSH 自己的凭据服务，并�
 对于 Editor 托管的 profile，OCG 还会把插件登记到 Editor 的用户插件状态，使其在 profile 重建后保留；
 安装前先退出 Editor，安装后重新启动。
 
-插件注册一个 **Open Console Gateway** 供应商；当 DSH 读取模型或准备调用时，它会刷新带鉴权的
-`GET /v1/models`。这里使用的是 OCG 当前提供给客户端的完整公开名称集合，包含符合条件的
-Custom ID，而不是范围更窄的 Dashboard `application-models` 列表。因此，模型可见性发生变化时无需重新安装插件。
+插件以 `ocg` 注册 **Open Console Gateway**，并保留 `open-console-gateway` 旧标识，兼容已有的 DSH 模型选择。
+两个标识共用同一把 Key 和模型目录；DSH 的模型页会单独显示旧标识。当 DSH 读取模型或准备调用时，
+插件会刷新带鉴权的 `GET /v1/models`。这里使用的是 OCG 当前提供给客户端的完整公开名称集合，
+包含符合条件的 Custom ID，而不是范围更窄的 Dashboard `application-models` 列表。
+因此，模型可见性发生变化时无需重新安装插件。`mimo-v2.6-flash` 在 DSH 中可接收图片附件；
+其他模型在图片能力得到验证前仍标记为仅文字。
 
 页面显示**已安装**，只证明插件登记和凭据交接已经准备完成；它不等于 DSH 已重启、已加载插件，
 也不等于真实模型调用已经成功。重启后请在 DSH 中选择一个 OCG 模型发送请求，并到 OCG **日志**中确认。

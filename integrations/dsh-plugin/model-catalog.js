@@ -126,11 +126,11 @@ export function parseModelCatalog(value, { providerId, baseUrl }) {
 export function describeOcgModel(info, metadata) {
   if (metadata === undefined) return info;
   const result = { ...info, ocg: structuredClone(metadata) };
-  // pi-ai requires numeric internals, but do not present its legacy fallback
-  // as an upstream-declared context limit in DSH's public model descriptor.
-  if (result.context !== undefined && metadata.contextWindow === undefined) {
-    result.context = { ...result.context };
-    delete result.context.contextWindow;
+  // DSH permits an absent context, but requires a positive contextWindow when
+  // the object is present. Keep pi-ai's numeric fallback internal and report
+  // unknown capacity by omitting the entire public context descriptor.
+  if (metadata.contextWindow === undefined) {
+    delete result.context;
   }
   return result;
 }

@@ -12,7 +12,7 @@ The DSH plugin maps context and text/image input to native model descriptors, an
 
 DSH's existing native interface does not consume every capability. Additional facts are retained on the adapter descriptor under `ocg`; this does not add audio/video transports, hosted tools or an arbitrary-capability UI. Maximum output capability is not inserted into `configuredMaxTokens`, so it does not silently become a deployment's default per-request output budget.
 
-For legacy ID-only catalogs the plugin retains bounded internal compatibility defaults, but removes the fabricated context value from the public resolved descriptor and marks the fallback fields in `ocg.fallbacks`. Malformed metadata is isolated to its model and fails that model's resolution instead of taking down unrelated models.
+For catalogs without a known context window, the plugin retains bounded internal compatibility defaults, but omits the entire public `context` descriptor and marks the fallback fields in `ocg.fallbacks`. DSH requires a positive `contextWindow` whenever `context` is present; an empty object would prevent model loading. Declared context windows remain visible. Malformed metadata is isolated to its model and fails that model's resolution instead of taking down unrelated models.
 
 ## Discovery and explicit declarations
 

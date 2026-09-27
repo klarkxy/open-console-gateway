@@ -10,6 +10,10 @@ hosts the **DSH** tab, which connects DSH itself to the gateway.
 The **DSH** tab installs or removes the OCG-owned plugin through the **running
 address** shown on the page.
 
+In DSH's plugin list, the integration appears as **Open Console Gateway** with
+the OCG icon and an English or Chinese description matching DSH's language.
+Reinstall through OCG to update an older plugin package, then restart DSH if prompted.
+
 The page also detects profiles one level below the current user's
 `~/.dsh/profiles` and `~/.dsh-*/profiles`. It lists directories with a valid
 DSH profile manifest and skips linked directories. When `DSH_HOME` is explicitly
@@ -76,12 +80,17 @@ Editor-owned profiles also register the package in Editor's user-plugin state
 so it survives Editor profile rebuilds; close Editor before installing, then
 restart it.
 
-The plugin registers one **Open Console Gateway** provider and refreshes the
-authenticated `GET /v1/models` list when DSH asks for models or prepares a
-call. That is the full set of public names currently offered to clients,
+The plugin registers **Open Console Gateway** as `ocg` and keeps
+`open-console-gateway` as a legacy route for existing DSH selections. Both
+routes use the same Key and model catalog; DSH's Models page shows the legacy
+route separately. The plugin refreshes the authenticated `GET /v1/models` list
+when DSH asks for models or prepares a call. That is the full set of public
+names currently offered to clients,
 including eligible Custom IDs; it is not the narrower dashboard
 `application-models` list. Model visibility changes therefore do not require
-reinstalling the plugin.
+reinstalling the plugin. The `mimo-v2.6-flash` route accepts image attachments
+in DSH; other models remain marked as text-only until their image support is
+verified.
 
 An **Installed** status proves the package registration and credential handoff
 were prepared. It does not prove that DSH has restarted, loaded the plugin, or

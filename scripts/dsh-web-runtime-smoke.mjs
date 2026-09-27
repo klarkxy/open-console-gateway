@@ -29,7 +29,13 @@ await cp(new URL("../integrations/dsh-plugin/", import.meta.url), plugin, { recu
 const models = createServer((request, response) => {
   if (request.url === "/v1/models" && request.headers.authorization === `Bearer ${secret}`) {
     response.writeHead(200, { "content-type": "application/json" });
-    response.end(JSON.stringify({ object: "list", data: [{ id: "http-smoke-model" }] }));
+    response.end(JSON.stringify({ object: "list", data: [
+      { id: "http-smoke-model" }, { id: "mimo-v2.6-flash" }, { id: "deepseek-flash" },
+      { id: "output-only", maxTokens: 262144 },
+      { id: "metadata-without-context", ocg: { schemaVersion: 1, inputModalities: ["text"] } },
+      { id: "declared-model", ocg: { schemaVersion: 1, contextWindow: 262144,
+        maxOutputTokens: 32768, reasoning: true, reasoningEfforts: { high: "high" } } },
+    ] }));
   } else response.writeHead(404).end();
 });
 await new Promise((done) => models.listen(0, "127.0.0.1", done));
@@ -180,6 +186,25 @@ try {
   assert.ok(after.some((entry) => entry.name === packageName && entry.installed && entry.enabled));
   const live = await rpc("pluginManager/listPlugins");
   assert.ok(live.some((entry) => entry.moduleName === packageName && entry.fiberPhase === "active"));
+  const providers = await rpc("llm/listProviders");
+  const modelCatalog = await rpc("session/modelCatalog");
+  for (const provider of ["ocg", "open-console-gateway"]) {
+    const name = provider === "ocg" ? "Open Console Gateway" : "Open Console Gateway (legacy)";
+    assert.ok(providers.some((entry) => entry.id === provider && entry.name === name));
+    assert.deepEqual(modelCatalog.failures.filter((failure) => failure.id === provider), []);
+    assert.ok(modelCatalog.groups.some((group) =>
+      group.id === provider &&
+      group.models.some((model) => model.id === "http-smoke-model") &&
+      group.models.some((model) => model.id === "mimo-v2.6-flash")));
+    if (!throughOcg) {
+      const group = modelCatalog.groups.find((entry) => entry.id === provider);
+      for (const id of ["deepseek-flash", "output-only", "metadata-without-context", "declared-model"]) {
+        assert.ok(group.models.some((model) => model.id === id), `missing ${provider}/${id}`);
+      }
+      assert.deepEqual(group.models.find((model) => model.id === "declared-model")
+        .reasoning.efforts.map((effort) => effort.id), ["high"]);
+    }
+  }
   const credentials = yaml.load(await readFile(join(home, ".credentials.yaml"), "utf8"));
   if (throughOcg) assert.ok(credentials.refs.OCG_GATEWAY_KEY?.length > 0);
   else assert.equal(credentials.refs.OCG_GATEWAY_KEY, secret);

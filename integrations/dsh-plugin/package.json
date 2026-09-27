@@ -2,12 +2,15 @@
   "name": "@open-console-gateway/dsh-plugin",
   "version": "0.1.0",
   "private": true,
-  "description": "Open Console Gateway model provider for DSH",
+  "description": "Use models available through your local Open Console Gateway in DSH, with a shared Gateway Key.",
+  "icon": "./icon.png",
   "type": "module",
   "main": "./index.js",
   "files": [
     "index.js",
     "model-catalog.js",
+    "icon.png",
+    "locale/*.json",
     "cordis.patch.yml",
     "README.md"
   ],
