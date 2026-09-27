@@ -21,6 +21,7 @@ This guide is for people running Open Console Gateway as a desktop app, a headle
 - [Applications](user/applications.md) — The DSH plugin installation flow, recovery, and removal.
 - [Accounts](user/accounts.md) — Plans, credentials, ordering, quota behavior, and managed onboarding.
 - [Providers](user/providers.md) — Catalog, provider contracts, per-model protocol overrides, probes, and user-defined Providers.
+- [Individual Supplier Models](user/provider-models.md) — Add and edit HTTP model mappings, public aliases and allowed upstream protocols; delete local catalog rows.
 - [Model Catalog Refresh](user/model-catalog-refresh.md) — What Refresh model catalog does: directory updates, protocol evidence, first-snapshot defaults, and per-model tests.
 - [Plan And API Presets](user/provider-presets.md) — Browse Plan/API presets from Accounts or Providers; fixed presets supply address, protocol, authentication, and a default model.
 - [Logs And Settings](user/logs-settings.md) — Request logs, settings, and proxy modes.
