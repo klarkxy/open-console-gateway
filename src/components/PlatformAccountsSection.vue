@@ -65,6 +65,7 @@ import {
   type PlatformKeyImportFailureCode,
 } from "../domain/platform-accounts.ts";
 import { accountCapabilities } from "../domain/account-capabilities.ts";
+import { platformRefreshErrors } from "../domain/platform-refresh.ts";
 import { t, type MessageKey } from "../i18n/index.ts";
 import { usePlatformAccountsStore, type PlatformPersistOutcome } from "../stores/platformAccounts.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
@@ -211,7 +212,10 @@ async function deletePlatform(parent: PlatformAccount): Promise<void> {
   try {
     const outcome = await platformStore.remove(parent.id);
     if (outcome === "conflict") notifyConflict();
-    else if (outcome === "ok") message.success(t("平台账号已删除"));
+    else if (outcome === "ok") {
+      message.success(t("平台账号已删除"));
+      emit("changed");
+    }
   } catch (error) {
     mutationError(error, "删除失败：{error}");
   }
@@ -237,11 +241,12 @@ async function runImportKeys(parent: PlatformAccount): Promise<void> {
       return;
     }
     emit("changed");
-    if (result.imported === 0 && result.failed.length === 0) {
+    if (result.imported === 0 && result.failed.length === 0 && result.nextPage == null) {
       message.info(t("没有可导入的 Key"));
       return;
     }
     const parts = [t("已导入 {imported} 把 Key", { imported: result.imported })];
+    if (result.nextPage != null) parts.push(t("还有更多 Key；再次导入将继续下一批。"));
     if (result.skippedExisting > 0) {
       parts.push(t("已跳过 {count} 把已存在的 Key", { count: result.skippedExisting }));
     }
@@ -262,9 +267,8 @@ async function runImportKeys(parent: PlatformAccount): Promise<void> {
   }
 }
 
-function notifyRefreshOutcome(parentId: string): void {
-  const latest = platformStore.parents.find((item) => item.id === parentId);
-  const errors = latest?.snapshot?.errors ?? [];
+function notifyRefreshOutcome(parentId: string, accountId?: string): void {
+  const errors = platformRefreshErrors(platformStore.parents, platformStore.links, parentId, accountId);
   if (errors.length === 0) {
     message.success(t("已刷新"));
     return;
@@ -279,12 +283,6 @@ async function refreshParent(parent: PlatformAccount): Promise<void> {
     if (outcome === "conflict") notifyConflict();
     else if (outcome === "ok") {
       notifyRefreshOutcome(parent.id);
-      const ids = new Set(
-        platformStore.links
-          .filter((link) => link.platformAccountId === parent.id)
-          .map((link) => link.accountId),
-      );
-      await fetchModelsAll(props.accounts.filter((account) => ids.has(account.id)));
     }
   } catch (error) {
     mutationError(error, "刷新失败：{error}");
@@ -296,9 +294,7 @@ async function refreshChild(parent: PlatformAccount, link: PlatformLink): Promis
     const outcome = await platformStore.refreshChild(parent.id, link.accountId);
     if (outcome === "conflict") notifyConflict();
     else if (outcome === "ok") {
-      notifyRefreshOutcome(parent.id);
-      const account = props.accounts.find((item) => item.id === link.accountId);
-      if (account) await fetchModels(account);
+      notifyRefreshOutcome(parent.id, link.accountId);
     }
   } catch (error) {
     mutationError(error, "刷新失败：{error}");
@@ -483,6 +479,10 @@ async function fetchModels(account: Account): Promise<void> {
       upstream_protocol: account.custom_config?.upstream_protocol ?? "chat_completions",
       account_id: account.id,
     });
+    if (discovery.truncated) {
+      message.warning(t("模型列表被截断，未修改已保存的模型。"));
+      return;
+    }
     if (discovery.models.length === 0) {
       message.warning(t("该 Key 未返回可用模型；确认 Key 与站点地址无误后重试。"));
       return;
