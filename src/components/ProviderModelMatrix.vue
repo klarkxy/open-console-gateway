@@ -1,18 +1,25 @@
 <template>
   <div>
-    <ProviderModelEditor
-      :scope="props.scope"
-      :disabled="editorDisabled"
-      @update:busy="editing = $event"
-    />
     <ProviderModelTable
       v-bind="props"
+      :model-editable="editor?.editable ?? false"
+      :editing-disabled="editorDisabled"
+      @edit="editor?.openEditor($event)"
       :action-locked="props.actionLocked || editing"
       @update:overrides="emit('update:overrides', $event)"
       @probe="emit('probe', $event)"
       @remove="emit('remove', $event)"
       @error="emit('error', $event)"
-    />
+    >
+      <template #toolbar-actions>
+        <ProviderModelEditor
+          ref="editor"
+          :scope="props.scope"
+          :disabled="editorDisabled"
+          @update:busy="editing = $event"
+        />
+      </template>
+    </ProviderModelTable>
   </div>
 </template>
 
@@ -43,6 +50,7 @@ const emit = defineEmits<{
   (event: "remove", payload: { modelIds: string[] }): void;
   (event: "error", message: string): void;
 }>();
+const editor = ref<InstanceType<typeof ProviderModelEditor> | null>(null);
 const editing = ref(false);
 const editorDisabled = computed(() => Boolean(
   props.actionLocked || props.removing

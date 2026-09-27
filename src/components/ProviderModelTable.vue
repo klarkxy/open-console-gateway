@@ -5,9 +5,11 @@
         {{ t("全部供应商协议已关闭") }}
       </n-tag>
     </div>
-    <div class="matrix-toolbar" v-if="allMatrixModels.length > 0">
+    <div class="matrix-toolbar" v-if="allMatrixModels.length > 0 || $slots['toolbar-actions']">
       <div class="matrix-toolbar__filters">
+        <slot name="toolbar-actions" />
         <n-input
+          v-if="allMatrixModels.length > 0"
           v-model:value="modelQuery"
           size="small"
           clearable
@@ -15,7 +17,7 @@
           :placeholder="t('搜索模型名或别名')"
           :input-props="{ 'aria-label': t('搜索模型名或别名') }"
         />
-        <label class="matrix-enabled-filter">
+        <label v-if="allMatrixModels.length > 0" class="matrix-enabled-filter">
           <n-switch size="small" v-model:value="enabledOnly" :aria-label="t('仅看已启用')" />
           <span>{{ t("仅看已启用") }}</span>
         </label>
@@ -195,56 +197,72 @@
               />
             </td>
             <td class="matrix-cell matrix-cell--actions">
-              <n-popconfirm
-                v-if="probeSupported"
-                @positive-click="runRowProbe(row.modelId)"
-              >
-                <template #trigger>
-                  <n-tooltip trigger="hover">
-                    <template #trigger>
-                      <n-button
-                        text
-                        size="tiny"
-                        :loading="rowProbing(row.modelId)"
-                        :disabled="rowEditLocked(row.modelId)"
-                        :aria-label="t('测试 {model}', { model: row.modelId })"
-                      >
-                        <template #icon>
-                          <n-icon :component="ApiOutlined" />
-                        </template>
-                      </n-button>
-                    </template>
-                    {{ t("测试 {model}", { model: row.modelId }) }}
-                  </n-tooltip>
-                </template>
-                {{ t("将按当前生效的协议发送一次最小真实请求以测试连接，可能消耗额度；仅作观测，不会启用路由。是否继续？") }}
-              </n-popconfirm>
-              <n-popconfirm
-                :positive-text="t('删除')"
-                :disabled="rowActionLocked(row.modelId)"
-                @positive-click="removeRows([row.modelId])"
-              >
-                <template #trigger>
-                  <n-tooltip trigger="hover">
-                    <template #trigger>
-                      <n-button
-                        text
-                        size="tiny"
-                        type="error"
-                        :disabled="rowActionLocked(row.modelId)"
-                        :loading="props.removing"
-                        :aria-label="t('删除模型')"
-                      >
-                        <template #icon>
-                          <n-icon :component="DeleteOutlined" />
-                        </template>
-                      </n-button>
-                    </template>
-                    {{ t("删除模型") }}
-                  </n-tooltip>
-                </template>
-                {{ removeConfirmText(1) }}
-              </n-popconfirm>
+              <div class="matrix-row-actions">
+                <n-tooltip v-if="modelEditable" trigger="hover">
+                  <template #trigger>
+                    <n-button
+                      text
+                      size="tiny"
+                      :disabled="editingDisabled || rowEditLocked(row.modelId)"
+                      :aria-label="`${t('编辑')} ${row.modelId}`"
+                      @click="emit('edit', row.modelId)"
+                    >
+                      <template #icon><n-icon :component="EditOutlined" /></template>
+                    </n-button>
+                  </template>
+                  {{ t("编辑") }}
+                </n-tooltip>
+                <n-popconfirm
+                  v-if="probeSupported"
+                  @positive-click="runRowProbe(row.modelId)"
+                >
+                  <template #trigger>
+                    <n-tooltip trigger="hover">
+                      <template #trigger>
+                        <n-button
+                          text
+                          size="tiny"
+                          :loading="rowProbing(row.modelId)"
+                          :disabled="rowEditLocked(row.modelId)"
+                          :aria-label="t('测试 {model}', { model: row.modelId })"
+                        >
+                          <template #icon>
+                            <n-icon :component="ApiOutlined" />
+                          </template>
+                        </n-button>
+                      </template>
+                      {{ t("测试 {model}", { model: row.modelId }) }}
+                    </n-tooltip>
+                  </template>
+                  {{ t("将按当前生效的协议发送一次最小真实请求以测试连接，可能消耗额度；仅作观测，不会启用路由。是否继续？") }}
+                </n-popconfirm>
+                <n-popconfirm
+                  :positive-text="t('删除')"
+                  :disabled="rowActionLocked(row.modelId)"
+                  @positive-click="removeRows([row.modelId])"
+                >
+                  <template #trigger>
+                    <n-tooltip trigger="hover">
+                      <template #trigger>
+                        <n-button
+                          text
+                          size="tiny"
+                          type="error"
+                          :disabled="rowActionLocked(row.modelId)"
+                          :loading="props.removing"
+                          :aria-label="t('删除模型')"
+                        >
+                          <template #icon>
+                            <n-icon :component="DeleteOutlined" />
+                          </template>
+                        </n-button>
+                      </template>
+                      {{ t("删除模型") }}
+                    </n-tooltip>
+                  </template>
+                  {{ removeConfirmText(1) }}
+                </n-popconfirm>
+              </div>
             </td>
           </tr>
         </tbody>
@@ -274,7 +292,7 @@ import {
   NTag,
   NTooltip,
 } from "naive-ui";
-import { ApiOutlined, CloseOutlined, DeleteOutlined } from "@vicons/antd";
+import { ApiOutlined, CloseOutlined, DeleteOutlined, EditOutlined } from "@vicons/antd";
 import type {
   ContractScopeKind,
   ModelProtocolOverrideUpdate,
@@ -301,6 +319,8 @@ const props = defineProps<{
   probingModels?: Set<string>;
   actionLocked?: boolean;
   removing?: boolean;
+  modelEditable?: boolean;
+  editingDisabled?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -315,6 +335,7 @@ const emit = defineEmits<{
   (e: "probe", payload: { modelId: string }): void;
   (e: "remove", payload: { modelIds: string[] }): void;
   (e: "error", message: string): void;
+  (e: "edit", modelId: string): void;
 }>();
 
 function enableUnverifiedProtocol(modelId: string, protocol: ProviderProtocol): void {
@@ -800,6 +821,11 @@ function runRowProbe(modelId: string): void {
 .matrix-cell--actions {
   width: 88px;
   white-space: nowrap;
+}
+.matrix-row-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ocg-space-sm);
 }
 .matrix-switch {
   --n-rail-color-active: var(--ocg-primary);

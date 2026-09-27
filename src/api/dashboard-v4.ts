@@ -16,6 +16,9 @@ import type {
   DestinationList,
   AliasPublication,
   AliasPublicationUpdate,
+  CatalogModelEditRequest,
+  CatalogModelsAddRequest,
+  ProviderContracts,
   CatalogModelsRemoveRequest,
   CatalogModelsRemoveResult,
   CpaCatalog,
@@ -191,6 +194,18 @@ export const dashboardV4 = {
     method: "PATCH",
     body: withExpectation(input, expectation),
   }),
+  editCatalogModel: (scopeId: string, input: WithoutExpectation<CatalogModelEditRequest>, expectation: MutationExpectation) =>
+    requestV4<ProviderContracts>(`/provider-contracts/provider/${encodeURIComponent(scopeId)}/catalog/model`, {
+      method: "PUT", body: withExpectation(input, expectation),
+    }),
+  addCatalogModels: (
+    scopeId: string,
+    input: WithoutExpectation<CatalogModelsAddRequest>,
+    expectation: MutationExpectation,
+  ) => requestV4<ProviderContracts>(
+    `/provider-contracts/provider/${encodeURIComponent(scopeId)}/catalog/add`,
+    { method: "POST", body: withExpectation(input, expectation) },
+  ),
   removeCatalogModels: (
     scopeKind: "provider" | "custom_endpoint",
     scopeId: string,

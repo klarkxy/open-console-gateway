@@ -167,6 +167,31 @@ export const useProvidersStore = defineStore("providers", () => {
     definitions.value = next;
   }
 
+  async function editContractCatalogModel(
+    scopeId: string, input: Parameters<typeof providerApi.editContractCatalogModel>[1], expectation: MutationExpectation,
+  ): Promise<ProviderContractsResponse> {
+    const token = beginContractsMutation();
+    try {
+      const result = await providerApi.editContractCatalogModel(scopeId, input, expectation);
+      commitContractsMutation(token, result);
+      return result;
+    } catch (cause) { failContractsMutation(token); throw cause; }
+  }
+
+  async function addContractCatalogModels(
+    scopeId: string, modelIds: string[], expectation: MutationExpectation,
+  ): Promise<ProviderContractsResponse> {
+    const token = beginContractsMutation();
+    try {
+      const result = await providerApi.addContractCatalogModels(scopeId, modelIds, expectation);
+      commitContractsMutation(token, result);
+      return result;
+    } catch (cause) {
+      failContractsMutation(token);
+      throw cause;
+    }
+  }
+
   async function removeContractCatalogModels(
     scopeKind: ContractScopeKind,
     scopeId: string,
@@ -257,6 +282,8 @@ export const useProvidersStore = defineStore("providers", () => {
     invalidateDefinition,
     loadContracts,
     refreshContractCatalog,
+    editContractCatalogModel,
+    addContractCatalogModels,
     removeContractCatalogModels,
     putModelProtocolOverrides,
     applyModelContract,

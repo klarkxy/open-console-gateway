@@ -1,30 +1,13 @@
 <template>
-  <div v-if="editable" class="provider-model-editor">
-    <n-button type="primary" size="small" :disabled="toolbarLocked" @click="openEditor(null)">
-      {{ t("添加模型") }}
-    </n-button>
-    <n-select
-      v-if="modelOptions.length > 0"
-      v-model:value="selectedModelId"
-      class="provider-model-editor__select"
-      size="small"
-      filterable
-      clearable
-      :options="modelOptions"
-      :disabled="toolbarLocked"
-      :placeholder="t('搜索模型名或别名')"
-      :aria-label="t('模型映射')"
-    />
-    <n-button
-      v-if="modelOptions.length > 0"
-      size="small"
-      secondary
-      :disabled="toolbarLocked || !selectedModelId"
-      @click="selectedModelId && openEditor(selectedModelId)"
-    >
-      {{ t("编辑") }}
-    </n-button>
-  </div>
+  <n-button
+    v-if="editable"
+    type="primary"
+    size="small"
+    :disabled="toolbarLocked"
+    @click="openEditor(null)"
+  >
+    {{ t("添加模型") }}
+  </n-button>
 
   <n-modal
     :show="show"
@@ -110,6 +93,8 @@ import { protocolDisplayName, type ProviderScopeView } from "../domain/provider-
 import {
   PROVIDER_MODEL_EDIT_ISSUE_KEYS,
   canEditProviderModels,
+  canEditBuiltinModels,
+  planBuiltinModelEdit,
   planProviderModelEdit,
   providerModelDraft,
   providerModelEditFingerprint,
@@ -130,14 +115,9 @@ const providersStore = useProvidersStore();
 const sessionStore = useSessionStore();
 const message = useMessage();
 const destination = computed(() => props.scope.scope_kind === "custom_endpoint"
-  ? destinationsStore.byId.get(props.scope.scope_id) ?? null : null);
-const editable = computed(() => canEditProviderModels(destination.value));
-const selectedModelId = ref<string | null>(null);
-const modelOptions = computed(() => (destination.value?.catalog ?? []).map((model) => ({
-  value: model.public_model,
-  label: model.public_model === model.upstream_model
-    ? model.public_model : `${model.public_model} → ${model.upstream_model}`,
-})));
+  ? destinationsStore.byId.get(props.scope.scope_id) ?? null
+  : [...destinationsStore.byId.values()].find((d) => d.legacy.kind === "builtin" && d.legacy.id === props.scope.scope_id) ?? null);
+const editable = computed(() => canEditProviderModels(destination.value) || canEditBuiltinModels(destination.value));
 const show = ref(false);
 const saving = ref(false);
 const reloading = ref(false);
@@ -158,7 +138,7 @@ const errorText = computed(() => errorKey.value ? t(errorKey.value) : requestErr
 const toolbarLocked = computed(() => Boolean(props.disabled || show.value || saving.value));
 const stale = computed(() => Boolean(show.value && (
   conflict.value || !captured.value || !destination.value
-  || providerModelEditFingerprint(captured.value) !== providerModelEditFingerprint(destination.value)
+    || providerModelEditFingerprint(captured.value) !== providerModelEditFingerprint(destination.value)
 )));
 const availableProtocols = computed(() => captured.value
   ? providerModelProtocols(captured.value, editingModelId.value) : []);
@@ -170,12 +150,7 @@ const upstreamOverride = computed(() => captured.value?.catalog.find((model) => 
 ))?.upstream_override ?? null);
 
 watch([show, saving, reloading], () => emit("update:busy", show.value || saving.value || reloading.value));
-watch(modelOptions, (options) => {
-  if (selectedModelId.value && !options.some((option) => option.value === selectedModelId.value)) {
-    selectedModelId.value = null;
-  }
-});
-watch(() => props.scope.key, () => { selectedModelId.value = null; resetEditor(); });
+watch(() => props.scope.key, resetEditor);
 watch(() => sessionStore.authenticated, (authenticated) => { if (!authenticated) resetEditor(); });
 onBeforeUnmount(() => { mounted = false; generation += 1; });
 // Providers is kept alive by the shell: leaving the page must close teleported
@@ -198,12 +173,27 @@ function resetEditor(): void {
 
 function openEditor(modelId: string | null): void {
   const source = destination.value;
-  if (toolbarLocked.value || !canEditProviderModels(source) || !sessionStore.authenticated) return;
+  if (toolbarLocked.value || (!canEditProviderModels(source) && !canEditBuiltinModels(source)) || !sessionStore.authenticated) return;
+  // Table identity for sealed providers remains the exact upstream ID.
+  if (modelId !== null && canEditBuiltinModels(source)) {
+    const saved = source.catalog.find((row) => row.upstream_model === modelId);
+    if (!saved) return;
+    modelId = saved.public_model;
+  }
   const expectation = destinationsStore.expectation;
   const nextDraft = providerModelDraft(source, modelId);
   if (!expectation || !nextDraft) {
     message.warning(t("状态已变化，请刷新后重试。"));
     return;
+  }
+  if (canEditBuiltinModels(source)) {
+    if (modelId === null) nextDraft.enabled = false;
+    else if (nextDraft.public_model === nextDraft.upstream_model
+      && providersStore.contracts?.revision === expectation.expectedRevision
+      && providersStore.contracts.process_generation === expectation.processGeneration) {
+      const upstream = nextDraft.upstream_model;
+      nextDraft.public_model = props.scope.models.find((row) => row.model_id === upstream)?.alias || nextDraft.public_model;
+    }
   }
   resetEditor();
   captured.value = source;
@@ -237,10 +227,12 @@ function isCurrent(attempt: number): boolean {
 async function reloadEditor(): Promise<void> {
   if (reloading.value || saving.value) return;
   const attempt = generation;
-  const modelId = editingModelId.value;
+  const modelId = captured.value && canEditBuiltinModels(captured.value)
+    ? captured.value.catalog.find((row) => row.public_model === editingModelId.value)?.upstream_model ?? null
+    : editingModelId.value;
   reloading.value = true;
   try {
-    await destinationsStore.load();
+    await Promise.all([destinationsStore.load(), providersStore.loadContracts()]);
     if (!isCurrent(attempt)) return;
     resetEditor();
     openEditor(modelId);
@@ -255,7 +247,9 @@ async function save(): Promise<void> {
   const source = captured.value;
   const expectation = capturedExpectation.value;
   if (!source || !expectation || !draft.value || !show.value || saving.value || reloading.value || stale.value || props.disabled) return;
-  const plan = planProviderModelEdit(source, draft.value, editingModelId.value);
+  const builtin = canEditBuiltinModels(source);
+  const plan = builtin ? planBuiltinModelEdit(source, draft.value, editingModelId.value)
+    : planProviderModelEdit(source, draft.value, editingModelId.value);
   errorKey.value = null;
   requestError.value = "";
   if (plan.kind === "invalid") {
@@ -265,13 +259,17 @@ async function save(): Promise<void> {
   const attempt = generation;
   saving.value = true;
   try {
-    await destinationsStore.patchDestination(source.id, plan.input, expectation);
+    if ("models" in plan.input) {
+      await destinationsStore.patchDestination(source.id, plan.input, expectation);
+    } else {
+      await providersStore.editContractCatalogModel(source.legacy.id, plan.input, expectation);
+    }
     if (!isCurrent(attempt)) return;
     message.success(t("连接已保存"));
     // Refresh only local projections used by Aliases and supplier details.
     // Never discover models, probe an upstream, or authorize another Key.
     const reads: Promise<unknown>[] = [
-      providersStore.loadContracts(), providersStore.loadConnections(), providersStore.loadCatalog(),
+      builtin ? destinationsStore.load() : providersStore.loadContracts(), providersStore.loadConnections(), providersStore.loadCatalog(),
     ];
     if (source.legacy.kind === "dynamic") {
       providersStore.invalidateDefinition(source.legacy.id);
@@ -297,21 +295,10 @@ async function save(): Promise<void> {
     if (isCurrent(attempt)) saving.value = false;
   }
 }
+defineExpose({ editable, openEditor });
 </script>
 
 <style scoped>
-.provider-model-editor {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--ocg-space-sm);
-  margin-bottom: var(--ocg-space-md);
-}
-.provider-model-editor__select {
-  flex: 1 1 220px;
-  min-width: 160px;
-  max-width: 420px;
-}
 .provider-model-edit-body {
   max-height: min(560px, calc(100dvh - 220px));
   overflow: auto;

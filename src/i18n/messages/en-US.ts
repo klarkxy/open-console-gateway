@@ -1167,6 +1167,12 @@ export const enUSMessages = {
   "模型名称": "Model name",
   "准确的模型名称": "Exact model name",
   "添加模型": "Add model",
+  "手动添加": "Added manually",
+  "模型 ID 不能包含控制字符，且不能超过 200 个字符": "Model IDs cannot contain control characters and must not exceed 200 characters.",
+  "新增模型默认关闭，请保存后开启允许路由。刷新官方目录可能移除未返回的模型。": "New models start disabled. Enable routing after saving. An official catalog refresh may remove models absent from its response.",
+  "模型已添加": "Model added",
+  "该上游模型已存在，请编辑已有模型": "This upstream model already exists. Edit its existing mapping.",
+
   "删除模型": "Remove model",
   "填写新 Key": "Enter the new Key",
   "至少填写一个准确的模型名称": "Enter at least one exact model name",

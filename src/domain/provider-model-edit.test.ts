@@ -3,6 +3,8 @@ import test from "node:test";
 import type { Destination } from "../api/destinations.ts";
 import {
   canEditProviderModels,
+  canEditBuiltinModels,
+  planBuiltinModelEdit,
   planProviderModelEdit,
   providerModelDraft,
   providerModelEditFingerprint,
@@ -229,4 +231,24 @@ test("configuration fingerprints invalidate an open editor after catalog or rout
   changed.catalog = source.catalog;
   changed.protocol_routes![0].endpoint_url = "https://changed.example.test/chat";
   assert.notEqual(providerModelEditFingerprint(changed), fingerprint);
+});
+
+
+test("builtin editor preserves alias, exact upstream, protocols and preferred route in its request", () => {
+  const source = destination(); source.legacy = {kind:"builtin",id:"minimax"}; source.adapter="minimax";
+  source.protocols=["chat_completions","messages","responses"]; source.protocol_routes=[];
+  source.catalog[0].upstream_override=null;
+  const value={...draft(),public_model:"my-minimax",upstream_model:"MiniMax-M2",protocols:["messages","responses"] as const,preferred:"messages" as const};
+  const planned=planBuiltinModelEdit(source,{...value,protocols:[...value.protocols]},"existing");
+  assert.equal(canEditBuiltinModels(source),true);
+  assert.deepEqual(planned,{kind:"save",input:{originalModelId:"vendor/existing-v2",publicModel:"my-minimax",upstreamModel:"MiniMax-M2",protocols:["messages","responses"],preferred:"messages",enabled:true}});
+});
+
+test("builtin editor rejects duplicate upstream mappings, unsupported protocols and stale rows", () => {
+  const source=destination(); source.legacy={kind:"builtin",id:"kimi"};source.adapter="kimi";source.protocols=["chat_completions","messages"];source.protocol_routes=[];source.catalog[0].upstream_override=null;
+  const value={...draft(),protocols:["messages"] as ("messages")[],preferred:"messages" as const};
+  assert.deepEqual(planBuiltinModelEdit(source,{...value,upstream_model:"vendor/existing-v2"},null),{kind:"invalid",issue:"duplicate_upstream_model"});
+  assert.deepEqual(planBuiltinModelEdit(source,draft(),null),{kind:"invalid",issue:"invalid_protocols"});
+  assert.deepEqual(planBuiltinModelEdit(source,value,"gone"),{kind:"invalid",issue:"missing_model"});
+  assert.equal(canEditBuiltinModels({...source,adapter:"cpa"}),false);
 });

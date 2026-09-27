@@ -45,10 +45,7 @@ Provider-preset and user-defined Providers open the same detail shell with up to
 is the default: provider-preset scopes show the model catalog (source line, refresh,
 and the protocol matrix), while user-defined
 Providers show their read-only model mappings with an edit entry. **Pricing**
-always shows the selected Provider's catalog state (`available`, `unpriced`,
-`unavailable`, or not applicable) without inventing rows. **Settings** shows the connection
-facts; provider-preset rows are read-only (provided by the official adapter),
-user-defined rows offer edit/delete, and the **OpenCode Go** scope keeps the
+appears only when the selected Provider supports pricing; official API presets also retain their balance and pricing panel. Unpriced, unavailable, and not-applicable providers have no empty pricing tab. **Settings** appears only for edit/delete actions, account configuration, or managed signup; fixed adapters with no settings omit it. The **OpenCode Go** scope keeps the
 managed-signup **invite URL** here. It is a user-owned `opencode.ai` /
 `console.opencode.ai` HTTPS link (not a sealed origin). Fresh installs may
 ship a demo default; replace it with your own link before a real signup.

@@ -449,12 +449,12 @@
               </div>
             </n-tab-pane>
 
-            <n-tab-pane name="pricing" :tab="t('模型价格')">
+            <n-tab-pane v-if="detailTabs.includes('pricing')" name="pricing" :tab="t('模型价格')">
               <OfficialApiPanel v-if="selectedEntry.model_source === 'official_api_preset'" :provider-id="selectedEntry.provider_id" />
               <PricingCatalog v-else :provider-id="selectedEntry.provider_id" />
             </n-tab-pane>
 
-            <n-tab-pane name="settings" :tab="t('设置')">
+            <n-tab-pane v-if="detailTabs.includes('settings')" name="settings" :tab="t('设置')">
               <ProviderSettingsPanel
                 :entry="selectedEntry"
                 :definition="selectedDefinition"
@@ -639,6 +639,7 @@
 
 <script setup lang="ts">
 import { PROVIDER_SORT_KEYS, sortProvidersByName, type ProviderSort } from "../domain/provider-sort.ts";
+import { providerDetailTabs } from "../domain/provider-detail-tabs.ts";
 import { computed, defineAsyncComponent, h, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import {
@@ -819,7 +820,12 @@ const railItemRows = computed(() => {
   return providersRailItems(destinations.value, providersStore.connections);
 });
 const lastCommittedConnectionId = ref<string | null>(null);
-const activeTab = ref<ProviderDetailTab>("models");
+const requestedTab = ref<ProviderDetailTab>("models");
+const detailTabs = computed(() => providerDetailTabs(selectedEntry.value));
+const activeTab = computed<ProviderDetailTab>({
+  get: () => detailTabs.value.includes(requestedTab.value) ? requestedTab.value : "models",
+  set: (tab) => { requestedTab.value = tab; },
+});
 const definitionLoading = ref(false);
 const definitionError = ref("");
 const catalogRefreshing = ref(false);
@@ -1112,6 +1118,7 @@ function catalogSourceLabel(source: string): string {
   if (source === CATALOG_SOURCE_DECLARED) return t("账号声明");
   if (source === CATALOG_SOURCE_OPENCODE_MODELS) return `OpenCode · ${t("官方来源")}`;
   if (source === CATALOG_SOURCE_COMMAND_CODE_MODELS) return `Command Code · ${t("官方来源")}`;
+  if (source === "manual") return t("手动添加");
   if (source === "preset") return t("供应商预设");
   return source;
 }

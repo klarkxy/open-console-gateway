@@ -599,3 +599,65 @@ test("control plane sync never regresses the revision within one process generat
   assert.equal(control.processGeneration, 100);
   assert.equal(control.pricingRevision, "p3");
 });
+
+
+test("providers store: builtin add commits its receipt and invalidates a pending older load", async () => {
+  freshPinia();
+  const calls = installDeferredFetch();
+  const store = useProvidersStore();
+  const older = store.loadContracts();
+  await waitForCalls(calls, 1);
+  const saved = store.addContractCatalogModels("minimax", ["MiniMax-New"], { expectedRevision: 7, processGeneration: 99 });
+  await waitForCalls(calls, 2);
+  assert.equal(calls[1]!.method, "POST");
+  assert.ok(calls[1]!.url.endsWith("/provider-contracts/provider/minimax/catalog/add"));
+  calls[1]!.resolve(contractsBody(8));
+  await saved;
+  calls[0]!.resolve(contractsBody(7));
+  await older;
+  assert.equal(store.contracts?.revision, 8);
+  assert.equal(store.loading, false);
+  assert.equal(calls.length, 2, "save uses its authoritative receipt without another contracts GET");
+});
+
+test("providers store: builtin add cannot repopulate contracts after logout", async () => {
+  freshPinia();
+  const calls = installDeferredFetch();
+  const store = useProvidersStore();
+  const saved = store.addContractCatalogModels("minimax", ["MiniMax-New"], { expectedRevision: 7, processGeneration: 99 });
+  await waitForCalls(calls, 1);
+  store.clear();
+  calls[0]!.resolve(contractsBody(8));
+  await saved;
+  assert.equal(store.contracts, null);
+});
+
+test("providers store: builtin edit commits alias receipt over a pending older load", async () => {
+  freshPinia();
+  const calls = installDeferredFetch();
+  const store = useProvidersStore();
+  const older = store.loadContracts();
+  await waitForCalls(calls, 1);
+  const saved = store.editContractCatalogModel("minimax", { originalModelId: "MiniMax-M2", publicModel: "my-minimax", upstreamModel: "MiniMax-M2", protocols: ["messages"], preferred: "messages", enabled: true }, { expectedRevision: 7, processGeneration: 99 });
+  await waitForCalls(calls, 2);
+  assert.equal(calls[1]!.method, "PUT");
+  assert.ok(calls[1]!.url.endsWith("/provider-contracts/provider/minimax/catalog/model"));
+  calls[1]!.resolve(contractsBody(8));
+  await saved;
+  calls[0]!.resolve(contractsBody(7));
+  await older;
+  assert.equal(store.contracts?.revision, 8);
+  assert.equal(calls.length, 2);
+});
+
+test("providers store: builtin edit cannot restore contracts after logout", async () => {
+  freshPinia();
+  const calls = installDeferredFetch();
+  const store = useProvidersStore();
+  const saved = store.editContractCatalogModel("minimax", { originalModelId: null, publicModel: "my-minimax", upstreamModel: "MiniMax-M2", protocols: ["messages"], preferred: "messages", enabled: false }, { expectedRevision: 7, processGeneration: 99 });
+  await waitForCalls(calls, 1);
+  useSessionStore().dropSession();
+  calls[0]!.resolve(contractsBody(8));
+  await saved;
+  assert.equal(store.contracts, null);
+});

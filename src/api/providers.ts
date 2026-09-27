@@ -689,6 +689,24 @@ export const providerApi = {
       dashboardV3.refreshContractCatalog(scopeKind, scopeId, expectation)
     ));
   },
+  editContractCatalogModel: async (
+    scopeId: string,
+    input: WithoutExpectation<import("./generated/dashboard-v4.ts").CatalogModelEditRequest>,
+    capturedExpectation: MutationExpectation,
+  ): Promise<ProviderContractsResponse> => {
+    const control = useControlPlaneStore();
+    return presentContracts(await control.runMutation((expectation) =>
+      dashboardV4.editCatalogModel(scopeId, input, expectation), capturedExpectation));
+  },
+  addContractCatalogModels: async (
+    scopeId: string,
+    modelIds: string[],
+    capturedExpectation: MutationExpectation,
+  ): Promise<ProviderContractsResponse> => {
+    const control = useControlPlaneStore();
+    return presentContracts(await control.runMutation((expectation) =>
+      dashboardV4.addCatalogModels(scopeId, { modelIds }, expectation), capturedExpectation));
+  },
   removeContractCatalogModels: async (
     scopeKind: ContractScopeKind,
     scopeId: string,
