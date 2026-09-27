@@ -28,6 +28,7 @@ pub(crate) use crate::redaction::{
 #[derive(Debug, Clone)]
 pub struct RequestTrace {
     pub request_id: String,
+    pub(crate) path: String,
     started_at: Instant,
     client_key_id: Option<String>,
     client_key_name: Option<String>,
@@ -37,6 +38,7 @@ impl RequestTrace {
     pub fn new() -> Self {
         Self {
             request_id: format!("ocg-{}", Uuid::new_v4()),
+            path: String::new(),
             started_at: Instant::now(),
             client_key_id: None,
             client_key_name: None,
@@ -216,6 +218,35 @@ pub fn serialize_diagnostic(mut diagnostic: ErrorDiagnostic) -> String {
     })
 }
 
+/// Only pass non-content metadata; full request content belongs in debug captures.
+pub(crate) fn log_event(
+    db: &Database,
+    trace: &RequestTrace,
+    level: &str,
+    category: &str,
+    event: &str,
+    attempt: Option<u32>,
+    fields: Value,
+) {
+    let encoded = json!({"event": event, "fields": fields}).to_string();
+    if db
+        .log_gateway_diagnostic(
+            level,
+            category,
+            event,
+            Some(&trace.request_id),
+            attempt.map(i64::from),
+            None,
+            None,
+            Some(trace.elapsed_ms().min(i64::MAX as u64) as i64),
+            Some(&encoded),
+        )
+        .is_err()
+    {
+        eprintln!("WARN runtime_log_write_failed category={category}");
+    }
+}
+
 pub fn emit_failure(diagnostic_json: &str) {
     eprintln!("OCG_REQUEST_ERROR {diagnostic_json}");
 }
@@ -237,7 +268,9 @@ pub fn emit_legacy_tool_compat(
         "version": version,
         "dropped_hosted_tools": dropped_hosted_tools,
     });
-    eprintln!("OCG_LEGACY_TOOL_COMPAT {payload}");
+    if crate::runtime_log::Level::from_env() <= crate::runtime_log::Level::Warn {
+        eprintln!("WARN OCG_LEGACY_TOOL_COMPAT {payload}");
+    }
     #[cfg(test)]
     record_legacy_tool_compat_emission(&payload);
 }
@@ -267,6 +300,21 @@ pub(crate) fn log_request_failure(
     diagnostic_json: &str,
     message: &str,
 ) {
+    let _ = db.log_gateway_diagnostic(
+        if diagnostic.error_source == "client" {
+            "warn"
+        } else {
+            "error"
+        },
+        "request",
+        "request_rejected",
+        Some(&trace.request_id),
+        Some(i64::from(diagnostic.attempt)),
+        Some(&diagnostic.error_source),
+        Some(&diagnostic.error_stage),
+        Some(trace.elapsed_ms() as i64),
+        Some(diagnostic_json),
+    );
     let diagnostic_value = serde_json::from_str(diagnostic_json).ok();
     let log = ForwardLog {
         id: 0,

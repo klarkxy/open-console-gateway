@@ -106,6 +106,35 @@ ocg-manager-cli --data-dir /tmp/ocg-cli-test serve --port 19042
 本地 Tauri 构建可能改写 `src-tauri/Cargo.toml` 与
 `src-tauri/gen/schemas/*.json`——只保留有意修改。
 
+## 请求调试与日志分级
+
+`pnpm run dev` 同时默认设置 `OCG_DEBUG_REQUESTS=1`、`OCG_LOG_LEVEL=debug`，
+以及 `OCG_DEBUG_DIR=<仓库>/.artifacts/debug-requests`。启动输出会显示实际路径和级别。
+显式环境变量可覆盖默认值；设置 `OCG_DEBUG_REQUESTS=0` 可关闭落盘。
+普通 CLI／已安装应用启动默认不保存完整请求，日志级别为 `info`。
+
+通过鉴权且未超过大小限制的推理 POST，会在协议解析前保存一份 `client` JSON；
+每次上游尝试会在协议转换、请求规范化之后，最终鉴权检查之前保存一份 `upstream` JSON。
+文件通过响应头 `x-ocg-request-id` 关联，包含尝试编号、URI、请求头和完整 JSON 正文，
+保留消息、工具和内嵌媒体，凭证字段和已知鉴权密钥会脱敏。存在上游文件表示请求已准备，
+不保证实际已发出。非法 JSON／二进制正文只保存长度和哈希，并明确标记
+`invalid_json_omitted`；未鉴权及超限正文不保存。响应正文和 SSE 不落盘、不缓冲。
+这是保留正文内容的调试记录，不是逐字节 HTTP 抓包。
+
+文件包含私人会话内容。默认目录已被 Git 忽略；自定义目录也应保持私有。
+Windows 文件继承目录 ACL，Unix 新目录／文件权限分别为 0700／0600。
+文件完整写入后才重命名发布，落盘失败会警告但不阻断转发。
+每次成功写入后删除最旧的本功能记录，保留最近 1,000 个文件，客户端和上游分别计数；
+这是文件数量上限，不是字节配额。`.partial` 是未完成文件，不能视为完整记录。
+
+`OCG_LOG_LEVEL` 在启动时指定运行日志的最低保存级别：`trace`、`debug`、`info`、
+`warn` 或 `error`。`trace` 增加不含正文的请求结构及指纹；`debug` 增加请求接收、
+上游尝试准备、上游响应头及等待时间；`info` 包含响应就绪和尝试结束状态；
+`warn`／`error` 记录拒绝和失败诊断。响应就绪不代表流式结束，流的最终结果由尝试结束记录体现。
+已有生命周期及控制面事件使用相同阈值，请求统计和计费记录不受分级过滤影响。
+“日志 → 运行日志”支持级别、分类和请求 ID 筛选，先筛选，再取最近 200 条。
+
+
 ---
 
 [维护者指南索引](../MAINTAINER.zh-CN.md) · [English](development.md) · [文档索引](../README.zh-CN.md)

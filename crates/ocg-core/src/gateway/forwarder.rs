@@ -881,6 +881,47 @@ pub(crate) async fn forward_request_with_deadline(
         }
     };
 
+    if state.debug_capture.enabled() {
+        let mut capture_secrets = super::debug_capture::authentication_secrets(&headers);
+        capture_secrets.extend(key.iter().cloned());
+        if let Err(reason) = state
+            .debug_capture
+            .save(
+                trace,
+                "upstream",
+                attempt,
+                &url,
+                &send_headers,
+                bytes::Bytes::copy_from_slice(&attempt_body),
+                &capture_secrets,
+            )
+            .await
+        {
+            super::diagnostics::log_event(
+                &state.db.lock(),
+                trace,
+                "warn",
+                "debug_capture",
+                "capture_failed",
+                Some(attempt),
+                serde_json::json!({"stage": "upstream", "reason": reason}),
+            );
+        }
+    }
+    super::diagnostics::log_event(
+        &state.db.lock(),
+        trace,
+        "debug",
+        "routing",
+        "attempt_prepared",
+        Some(attempt),
+        serde_json::json!({"account_id": account.id, "provider_id": account.provider_id,
+            "client_format": super::diagnostics::api_format_name(plan.client),
+            "upstream_format": super::diagnostics::api_format_name(plan.upstream),
+            "body_bytes": attempt_context.upstream_body_bytes, "stream": plan.stream, "route": route.as_str(),
+            "requested_model": attempt_context.redact_known_secret(&attempt_context.requested_model),
+            "upstream_model": attempt_context.redact_known_secret(&attempt_context.upstream_model)}),
+    );
     let mut timeouts = AttemptTimeouts::from_secs(
         config.non_stream_timeout_secs,
         config.stream_idle_timeout_secs,
@@ -1182,6 +1223,17 @@ pub(crate) async fn forward_request_with_deadline(
     let upstream_wait_ms = upstream_started.elapsed().as_millis() as u64;
 
     let status = upstream_resp.status();
+    super::diagnostics::log_event(
+        &state.db.lock(),
+        trace,
+        if status.is_success() { "debug" } else { "warn" },
+        "upstream",
+        "upstream_headers",
+        Some(attempt),
+        serde_json::json!({"status": status.as_u16(),
+            "wait_ms": upstream_started.elapsed().as_millis(),
+            "headers": super::diagnostics::safe_upstream_headers(upstream_resp.headers(), key.as_deref())}),
+    );
     let is_stream = upstream_resp
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
@@ -3662,6 +3714,47 @@ pub(crate) fn rate_limited_response(
         .into_response()
 }
 
+fn log_attempt_outcome(
+    db: &Database,
+    context: &ForwardAttemptContext,
+    status: &str,
+    http_status: Option<i32>,
+    diagnostic: Option<&ForwardLogDiagnosticUpdate<'_>>,
+) {
+    let level = if status.starts_with("success") {
+        "info"
+    } else if status == "streaming" {
+        "debug"
+    } else if matches!(status, "client_error" | "cancelled") {
+        "warn"
+    } else {
+        "error"
+    };
+    let fields = serde_json::json!({"status": status, "http_status": http_status});
+    super::diagnostics::log_event(
+        db,
+        &context.trace,
+        level,
+        "upstream",
+        "attempt_outcome",
+        Some(context.attempt),
+        fields,
+    );
+    if let Some(diagnostic) = diagnostic {
+        let _ = db.log_gateway_diagnostic(
+            level,
+            "upstream",
+            "attempt_failure",
+            Some(&context.trace.request_id),
+            Some(i64::from(context.attempt)),
+            Some(diagnostic.error_source),
+            Some(diagnostic.error_stage),
+            Some(diagnostic.duration_ms),
+            Some(diagnostic.diagnostic_json),
+        );
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn log_forward(
     db: &Database,
@@ -3697,6 +3790,13 @@ fn log_forward(
         }
         return Ok(id);
     }
+    log_attempt_outcome(
+        db,
+        context,
+        status,
+        http_status,
+        failure.as_ref().map(FailureRecord::update).as_ref(),
+    );
     let transaction = context
         .credit_attempt
         .as_ref()
@@ -3867,6 +3967,7 @@ fn finalize_logged_forward(
     if let Some(transaction) = transaction {
         transaction.commit()?;
     }
+    log_attempt_outcome(db, context, status, http_status, diagnostic);
     Ok(())
 }
 

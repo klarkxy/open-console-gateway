@@ -3767,6 +3767,18 @@
       "additionalProperties": false,
       "description": "GET `/logs/gateway` query. All fields may be omitted.",
       "properties": {
+        "category": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "level": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "limit": {
           "format": "int64",
           "type": [

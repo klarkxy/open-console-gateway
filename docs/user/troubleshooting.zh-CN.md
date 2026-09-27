@@ -18,6 +18,20 @@ Open Console Gateway 出问题，通常先怀疑有别的进程占了 `127.0.0.1
 - **Docker 首次注册的 `OCG_ADMIN_PASSWORD` 没生效。**这两个变量只在数据库还没有管理员时生效，请使用数据库里已有的管理员账号。只有在确认备份有效且确实要完全重置时才重建 `ocg-data` 与 `ocg-browser-profiles`——这会删除全部账号、凭据、设置、Cookie 和浏览器 Profile。
 - **SmartScreen / Gatekeeper 弹窗警告。**当前 Windows 包未签名、macOS 应用使用 ad-hoc 签名。首次启动请用 **Open Anyway** 放行，警告本身不代表篡改。
 
+## 查看更详细的日志
+
+在“日志 → 运行日志”中，可以按级别、精确分类或网关返回的 `x-ocg-request-id` 筛选。
+请求接收、上游尝试准备、响应头及等待时间、失败和结束记录通过同一 ID 关联。
+`response_ready` 表示响应头已就绪；流式请求的最终结果请查看后续 `attempt_outcome`。
+
+启动前设置 `OCG_LOG_LEVEL`，可选 `trace`、`debug`、`info`（默认）、`warn`、`error`。
+它控制运行日志保存级别，不影响请求统计。
+`pnpm run dev` 默认使用 `debug`，并把凭证脱敏后的完整请求内容保存到
+`.artifacts/debug-requests`，保留最近 1,000 个文件。
+设置 `OCG_DEBUG_REQUESTS=0` 可关闭。文件包含会话内容；覆盖范围、存储规则和环境变量见
+[开发指南](../maintainer/development.zh-CN.md#请求调试与日志分级)。
+
+
 ---
 
 [用户指南索引](../USER.zh-CN.md) · [English](troubleshooting.md) · [文档索引](../README.zh-CN.md)

@@ -7,6 +7,9 @@ export function devEnvironment(source = process.env) {
   return {
     ...source,
     OCG_GATEWAY_PORT: source.OCG_GATEWAY_PORT?.trim() || DEFAULT_DEV_GATEWAY_PORT,
+    OCG_DEBUG_REQUESTS: source.OCG_DEBUG_REQUESTS?.trim() || "1",
+    OCG_DEBUG_DIR: source.OCG_DEBUG_DIR?.trim() || fileURLToPath(new URL("../.artifacts/debug-requests", import.meta.url)),
+    OCG_LOG_LEVEL: source.OCG_LOG_LEVEL?.trim() || "debug",
   };
 }
 
@@ -17,6 +20,8 @@ if (isMain) {
   const tauriCli = fileURLToPath(new URL("../node_modules/@tauri-apps/cli/tauri.js", import.meta.url));
   const env = devEnvironment();
   console.log(`Gateway development port: ${env.OCG_GATEWAY_PORT}`);
+  console.log(`Runtime log level: ${env.OCG_LOG_LEVEL}`);
+  console.log(`Request capture: ${env.OCG_DEBUG_REQUESTS === "1" ? env.OCG_DEBUG_DIR : "disabled"}`);
 
   const child = spawn(process.execPath, [tauriCli, "dev"], {
     cwd: process.cwd(),

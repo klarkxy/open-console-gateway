@@ -1253,6 +1253,8 @@ export interface ForwardLogModels {
  * GET `/logs/gateway` query. All fields may be omitted.
  */
 export interface GatewayLogQuery {
+  category?: string | null;
+  level?: string | null;
   limit?: number | null;
   requestId?: string | null;
 }

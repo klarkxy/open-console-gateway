@@ -24,20 +24,51 @@ pub async fn request_trace_middleware(
     next: Next,
 ) -> Response {
     let credential = extract_client_key(request.headers(), &state);
-    let trace = credential
+    let mut trace = credential
         .as_ref()
         .map(|entry| RequestTrace::new().with_client_key(entry.id.clone(), entry.name.clone()))
         .unwrap_or_default();
     let path = request.uri().path().to_string();
+    trace.path = request.uri().to_string();
     let client_body_bytes = request
         .headers()
         .get(axum::http::header::CONTENT_LENGTH)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<usize>().ok());
     let authenticated = credential.is_some();
+    let record_events = authenticated && !path.ends_with(":countTokens");
+    if record_events {
+        super::diagnostics::log_event(
+            &state.db.lock(),
+            &trace,
+            "debug",
+            "request",
+            "request_received",
+            None,
+            serde_json::json!({"method": request.method().as_str(), "format": super::diagnostics::api_format_name(client_format_for_path(&path)), "body_bytes": client_body_bytes, "authenticated": authenticated}),
+        );
+    }
     request.extensions_mut().insert(trace.clone());
     let mut response = next.run(request).await;
-
+    if record_events {
+        let level = if response.status().is_server_error() {
+            "error"
+        } else if response.status().is_client_error() {
+            "warn"
+        } else {
+            "info"
+        };
+        super::diagnostics::log_event(
+            &state.db.lock(),
+            &trace,
+            level,
+            "request",
+            "response_ready",
+            None,
+            serde_json::json!({"status": response.status().as_u16(), "authenticated": authenticated,
+            "stream": response.headers().get("content-type").and_then(|v| v.to_str().ok()).is_some_and(|v| v.starts_with("text/event-stream"))}),
+        );
+    }
     if response.status() == StatusCode::PAYLOAD_TOO_LARGE
         && authenticated
         && response
@@ -625,6 +656,7 @@ async fn proxy_handler_inner(
         );
     };
 
+    super::debug_capture::capture_client(&state, &trace, &headers, body.clone()).await;
     let client_body = body.clone();
     let parsed = match parse_client_request(client_format, body) {
         Ok(parsed) => parsed,
@@ -672,6 +704,7 @@ async fn gemini_proxy_handler(
             None,
         );
     };
+    super::debug_capture::capture_client(&state, &trace, &headers, body.clone()).await;
     let parsed = match parse_gemini_request(model, stream, body.clone()) {
         Ok(parsed) => parsed,
         Err(error) => {

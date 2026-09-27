@@ -126,6 +126,44 @@ that cannot drive in-app upgrades. Optional signing variables:
 
 A local Tauri build may rewrite `src-tauri/Cargo.toml` and
 `src-tauri/gen/schemas/*.json` — keep only the intended edits.
+## Request debugging and log levels
+
+`pnpm run dev` also sets `OCG_DEBUG_REQUESTS=1`, `OCG_LOG_LEVEL=debug`, and
+`OCG_DEBUG_DIR=<repository>/.artifacts/debug-requests`. The startup output shows
+the active path and level. Explicit environment values override these defaults;
+set `OCG_DEBUG_REQUESTS=0` to disable capture. Normal CLI/installed startup does
+not enable capture and defaults to `info`.
+
+Each authenticated, within-limit inference POST saves a `client` JSON file before
+protocol parsing. Each prepared upstream attempt saves an `upstream` file after
+protocol conversion and wire normalization, before the final authorization check.
+Files share the `x-ocg-request-id` response header and include attempt number,
+URI, headers, and complete JSON content (messages, tools and inline media), with
+credential fields and known authentication secrets redacted. An upstream file
+means a prepared attempt, not proof that it was sent. Invalid JSON/binary bodies
+are explicitly marked `invalid_json_omitted` with length and hash; unauthorized
+and over-limit bodies are not captured. Response bodies/SSE are not captured or
+buffered. This is content-level debugging, not byte-identical HTTP packet capture.
+
+Capture files contain private conversation content. The default directory is Git
+ignored; keep any override in a private directory. Files inherit the directory's
+Windows ACL; on Unix new directories/files use modes 0700/0600. Completed files
+are published by rename; failed writes warn without failing forwarding. After
+each successful write, the oldest owned captures are removed to retain the latest
+1,000 files (client and upstream files count separately). This is a file-count
+limit, not a byte quota. Files ending in `.partial` are incomplete, not captures.
+
+`OCG_LOG_LEVEL` sets the minimum persisted runtime severity at startup:
+`trace`, `debug`, `info`, `warn`, or `error`. `trace` adds content-free request
+shape/fingerprint; `debug` adds reception, attempt preparation and upstream
+headers/timing; `info` includes response readiness and completed attempt outcomes;
+`warn`/`error` retain rejection/failure diagnostics. Response readiness is not
+stream completion: the attempt outcome records the later stream result.
+Existing lifecycle/control-plane events use the same threshold. Request accounting
+and billing rows remain independent of this filter. In **Logs → Runtime logs**,
+level, category, and request ID filters apply before the latest-200 limit.
+
+
 ---
 
 [Maintainer guide index](../MAINTAINER.md) · [简体中文](development.zh-CN.md) · [Docs index](../README.md)

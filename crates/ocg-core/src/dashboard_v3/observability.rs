@@ -123,6 +123,8 @@ pub(super) async fn get_gateway_logs(
         GatewayLogReadQuery {
             limit: query.limit,
             request_id: query.request_id,
+            level: query.level,
+            category: query.category,
         },
         |cipher| state.decrypt_key(cipher).ok(),
     )

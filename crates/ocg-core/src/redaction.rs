@@ -149,7 +149,7 @@ fn is_content_key(key: &str) -> bool {
     )
 }
 
-fn is_sensitive_key(key: &str) -> bool {
+pub(crate) fn is_sensitive_key(key: &str) -> bool {
     let lower = key.to_ascii_lowercase();
     let normalized = lower.replace(['-', '_', '.', ' '], "");
     if matches!(

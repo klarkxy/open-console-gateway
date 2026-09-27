@@ -291,3 +291,25 @@ test("renderDiagnostic prefers the row duration and localizes known route legs",
   const gateway = renderDiagnostic(gatewayRow()) as VNode;
   assert.equal(descriptionValue(gateway, t("路由")), null);
 });
+
+test("runtime gateway events show structured fields as message detail without invented timing", () => {
+  const fields = { method: "POST", path: "/v1/messages", body_bytes: 124 };
+  const event = renderDiagnostic(gatewayRow({
+    level: "debug",
+    message: "request_received",
+    diagnostic: { event: "request_received", fields },
+  })) as VNode;
+  assert.equal(descriptionValue(event, t("耗时")), null);
+  assert.equal(findByClass(event, "diagnostic-message")?.type, "section");
+  assert.equal(findByClass(event, "diagnostic-error"), null);
+  assert.equal(vnodeText(findByClass(event, "diagnostic-json") as VNode), JSON.stringify(fields, null, 2));
+
+  const failure = renderDiagnostic(gatewayRow({
+    level: "error",
+    message: "request_rejected",
+    error_source: "gateway",
+    diagnostic: { error_source: "gateway", duration_ms: 13 },
+  })) as VNode;
+  assert.equal(findByClass(failure, "diagnostic-error")?.type, "section");
+  assert.equal(descriptionValue(failure, t("耗时")), "13 ms");
+});

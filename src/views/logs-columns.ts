@@ -173,7 +173,8 @@ export function renderDiagnostic(row: GatewayLog | ForwardLog) {
     [t("路由"), "route" in row ? routeLegLabel(row.route) : null],
     [t("耗时"), row.duration_ms !== null && row.duration_ms !== undefined
       ? `${row.duration_ms} ms`
-      : diagnostic ? `${diagnostic.duration_ms} ms` : null],
+      : diagnostic?.duration_ms !== null && diagnostic?.duration_ms !== undefined
+        ? `${diagnostic.duration_ms} ms` : null],
     [t("上游响应头耗时"), diagnostic?.upstream_wait_ms !== null && diagnostic?.upstream_wait_ms !== undefined
       ? `${diagnostic.upstream_wait_ms} ms` : null],
     [t("重试动作"), diagnostic?.retry_action],
@@ -185,15 +186,17 @@ export function renderDiagnostic(row: GatewayLog | ForwardLog) {
       summary: diagnostic.request_summary,
     }],
     diagnostic?.upstream_error && [t("脱敏上游错误"), diagnostic.upstream_error],
+    diagnostic?.fields && [t("详情"), diagnostic.fields],
   ].filter(Boolean) as Array<[string, unknown]>;
   const errorMessage = "error_message" in row ? row.error_message : row.message;
+  const isRuntimeEvent = "message" in row && typeof diagnostic?.event === "string";
   return h("div", { class: "diagnostic-detail" }, [
     h("dl", { class: "diagnostic-meta" }, items.flatMap(([label, value]) => [
       h("dt", String(label)),
       h("dd", String(value)),
     ])),
-    errorMessage ? h("section", [
-      h("h4", t("错误")),
+    errorMessage ? h("section", { class: isRuntimeEvent ? "diagnostic-message" : "diagnostic-error" }, [
+      h("h4", isRuntimeEvent ? t("消息") : t("错误")),
       h("pre", { class: "error-text" }, errorMessage),
     ]) : null,
     ...detailBlocks.map(([label, value]) => h("section", [

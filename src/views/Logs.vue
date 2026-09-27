@@ -8,7 +8,20 @@
             clearable
             class="request-id-filter"
             :placeholder="t('按请求 ID 精确搜索')"
-              :input-props="{ 'aria-label': t('请求 ID') }"
+            :input-props="{ 'aria-label': t('请求 ID') }"
+          />
+          <n-select
+            v-model:value="gatewayLevelFilter"
+            class="gateway-level-filter"
+            :options="gatewayLevelOptions"
+            :aria-label="t('级别')"
+          />
+          <n-input
+            v-model:value="gatewayCategoryFilter"
+            clearable
+            class="gateway-category-filter"
+            :placeholder="t('按分类精确搜索')"
+            :input-props="{ 'aria-label': t('分类') }"
           />
           <n-tooltip trigger="hover">
             <template #trigger>
@@ -33,7 +46,7 @@
           :columns="gatewayColumns"
           :data="gatewayLogs"
           :row-key="logRowKey"
-          :loading="gatewayLoading"
+          :loading="gatewayLoading && !gatewayLoaded"
           :pagination="gatewayPagination"
           :scroll-x="1200"
           :virtual-scroll="true"
@@ -252,7 +265,7 @@
           :columns="forwardColumns"
           :data="forwardLogs"
           :row-key="logRowKey"
-          :loading="forwardLoading"
+          :loading="forwardLoading && !forwardLoaded"
           :pagination="forwardPagination"
           :scroll-x="1870"
           remote
@@ -288,24 +301,23 @@ import {
   useMessage,
 } from "naive-ui";
 import { ArrowDownOutlined, ArrowUpOutlined, CalendarOutlined, CheckOutlined, ClearOutlined, CopyOutlined, ReloadOutlined } from "@vicons/antd";
-import { UNATTRIBUTED_KEY_FILTER, dashboardApi } from "../api/dashboard";
+import { UNATTRIBUTED_KEY_FILTER } from "../api/dashboard";
 import type {
   ForwardLog,
-  ForwardLogClientKey,
-  ForwardLogSummary,
   GatewayLog,
 } from "../api/dashboard";
 import { t } from "../i18n/index.ts";
 import { locale } from "../i18n/index.ts";
 import { useAccountsStore } from "../stores/accounts.ts";
 import { useProvidersStore } from "../stores/providers.ts";
-import { useSessionStore } from "../stores/session.ts";
+import { useObservabilityStore } from "../stores/observability.ts";
+import { storeToRefs } from "pinia";
 import { formatCost, formatNumber, useClipboard } from "../utils/format.ts";
-import { dashboardErrorDetail } from "../utils/errors.ts";
 import { computeTimeRange, resolveTimeRange, timePresetValues } from "./log-time-range.ts";
 import { routeQuerySearch } from "./app-navigation.ts";
 import type { TimePreset } from "./log-time-range.ts";
 import { gatewayLogMessage } from "./gateway-log-message.ts";
+import { gatewayLogLevelTag, parseGatewayLogLevel, type GatewayLogLevel } from "./gateway-log-level.ts";
 import {
   forwardLogAlias,
   forwardLogLatencyMs,
@@ -338,26 +350,16 @@ const query = new URLSearchParams(routeQuerySearch("logs", route.query));
 const message = useMessage();
 const accountsStore = useAccountsStore();
 const providersStore = useProvidersStore();
-const sessionStore = useSessionStore();
-watch(() => sessionStore.authenticated, (ok) => {
-  if (!ok) {
-    gatewayLoadedAt = 0;
-    forwardLoadedAt = 0;
-  }
-});
+const observabilityStore = useObservabilityStore();
+const {
+  gatewayLogs, gatewayLoaded, gatewayLoading, gatewayError, gatewayLoadedAt,
+  forwardLogs, forwardTotals, forwardLoaded, forwardLoading, forwardError, forwardLoadedAt,
+  models, clientKeys,
+} = storeToRefs(observabilityStore);
 const { copiedTarget, copy, cleanup } = useClipboard();
 const activeTab = ref<LogTab>(query.get("tab") === "gateway" ? "gateway" : "forward");
-const gatewayLogs = ref<GatewayLog[]>([]);
-const forwardLogs = ref<ForwardLog[]>([]);
-// Server state lives in the stores; these are read-through projections.
 const accounts = computed(() => accountsStore.accounts);
-const models = ref<string[]>([]);
-const clientKeys = ref<ForwardLogClientKey[]>([]);
 const providerCatalog = computed(() => providersStore.catalog);
-const gatewayLoading = ref(false);
-const gatewayError = ref("");
-const forwardLoading = ref(false);
-const forwardError = ref("");
 const queryStatus = query.get("status") ?? "";
 const statusFilter = ref<string>(queryStatus === "success_unpriced" ? "success" : queryStatus);
 const accountFilter = ref<string>(query.get("account") ?? "");
@@ -367,6 +369,8 @@ const providerFilter = ref<string>(query.get("provider") ?? "");
 const routeAccountFilter = ref<string>(query.get("route_account") ?? "");
 const credentialAccountFilter = ref<string>(query.get("credential_account") ?? "");
 const requestIdFilter = ref<string>(query.get("request_id") ?? "");
+const gatewayLevelFilter = ref<GatewayLogLevel>(parseGatewayLogLevel(query.get("level")));
+const gatewayCategoryFilter = ref(query.get("category") ?? "");
 const querySort = query.get("sort");
 const queryOrder = query.get("order");
 const sortBy = ref<SortBy>(
@@ -411,14 +415,6 @@ const gatewayPagination = computed(() => ({
   page: gatewayPage.value,
   pageSize,
 }));
-const emptySummary = (): ForwardLogSummary => ({
-  total_requests: 0,
-  prompt_tokens: 0,
-  completion_tokens: 0,
-  cached_tokens: 0,
-  cost: 0,
-});
-const forwardTotals = ref<ForwardLogSummary>(emptySummary());
 const forwardPagination = computed(() => ({
   page: forwardPage.value,
   pageSize,
@@ -463,6 +459,8 @@ const statusMeta = computed<Record<string, { label: string; type: "success" | "w
   error: { label: t("错误"), type: "error" },
 }));
 const allOption = computed(() => ({ label: t("全部"), value: "" }));
+const gatewayLevelOptions = computed(() => [allOption.value, ...(["TRACE", "DEBUG", "INFO", "WARN", "ERROR"] as const)
+  .map((value) => ({ label: value, value }))]);
 const statusOptions = computed(() => [allOption.value, ...Object.entries(statusMeta.value).map(([value, meta]) => ({ label: meta.label, value }))]);
 const accountOptions = computed(() => [allOption.value, ...accounts.value.map((account) => ({ label: account.name, value: account.id }))]);
 const modelOptions = computed(() => [allOption.value, ...models.value.map((model) => ({ label: model, value: model }))]);
@@ -602,7 +600,9 @@ const gatewayColumns = computed(() => [
   },
   { title: t("时间"), key: "created_at", width: 150, render: (row: GatewayLog) => formatDate(row.created_at) },
   { title: t("请求 ID"), key: "request_id", width: 170, render: (row: GatewayLog) => renderRequestId(row, logsColumnContext) },
-  { title: t("级别"), key: "level", width: 80 },
+  { title: t("级别"), key: "level", width: 90, render: (row: GatewayLog) => h(NTag, {
+    type: gatewayLogLevelTag(row.level), size: "small", bordered: false,
+  }, { default: () => row.level }) },
   { title: t("分类"), key: "category", width: 100 },
   { title: t("消息"), key: "message", minWidth: 480, ellipsis: { tooltip: true }, render: (row: GatewayLog) => gatewayLogMessage(row.message) },
 ]);
@@ -691,6 +691,8 @@ function syncQueryState() {
   if (routeAccountFilter.value) query.route_account = routeAccountFilter.value;
   if (credentialAccountFilter.value) query.credential_account = credentialAccountFilter.value;
   if (requestIdFilter.value) query.request_id = requestIdFilter.value;
+  if (gatewayLevelFilter.value) query.level = gatewayLevelFilter.value;
+  if (gatewayCategoryFilter.value.trim()) query.category = gatewayCategoryFilter.value.trim();
   if (activePreset.value === "custom" && timeRange.value) {
     query.start = toIsoString(timeRange.value[0]);
     query.end = toIsoString(timeRange.value[1]);
@@ -702,74 +704,40 @@ function syncQueryState() {
   void router.replace({ query });
 }
 
-let gatewayRequest = 0;
-let gatewayLoadedAt = 0;
 // Auto-refresh on activation skips resources loaded recently, and never
 // duplicates a load that is already in flight (the loading flags cover
 // user-driven triggers too, since those carry the current filters).
 const ACTIVATED_REFRESH_FRESHNESS_MS = 30_000;
 
 async function loadGatewayLogs() {
-  const request = ++gatewayRequest;
-  gatewayLoading.value = true;
-  gatewayError.value = "";
-  try {
-    const logs = await dashboardApi.getGatewayLogs(200, requestIdFilter.value);
-    if (request !== gatewayRequest) return;
-    gatewayLogs.value = logs;
-    gatewayLoadedAt = Date.now();
-    gatewayPage.value = 1;
-  } catch (e) {
-    if (request === gatewayRequest) {
-      gatewayError.value = e instanceof Error ? e.message : String(e);
-      message.error(t("加载运行日志失败：{error}", { error: gatewayError.value }));
-    }
-  } finally {
-    if (request === gatewayRequest) gatewayLoading.value = false;
-  }
+  const error = await observabilityStore.loadGateway({
+    limit: 200,
+    requestId: requestIdFilter.value || null,
+    level: gatewayLevelFilter.value || null,
+    category: gatewayCategoryFilter.value.trim() || null,
+  });
+  if (error) message.error(t("加载运行日志失败：{error}", { error }));
 }
 
-let forwardRequest = 0;
-let forwardLoadedAt = 0;
-
 async function loadForwardLogs() {
-  const request = ++forwardRequest;
-  forwardLoading.value = true;
-  forwardError.value = "";
-  forwardLogs.value = [];
-  forwardTotals.value = emptySummary();
-  try {
-    const requestRange = resolveTimeRange(activePreset.value, timeRange.value);
-    const result = await dashboardApi.getForwardLogs({
-      limit: pageSize,
-      offset: (forwardPage.value - 1) * pageSize,
-      status: statusFilter.value,
-      account_id: accountFilter.value,
-      model: modelFilter.value,
-      key_id: keyFilter.value,
-      provider_id: providerFilter.value,
-      route_account_id: routeAccountFilter.value,
-      credential_account_id: credentialAccountFilter.value,
-      request_id: requestIdFilter.value,
-      start_time: requestRange ? toIsoString(requestRange[0]) : null,
-      end_time: requestRange ? toIsoString(requestRange[1]) : null,
-      sort_by: sortBy.value,
-      sort_order: sortOrder.value,
-    });
-    if (request !== forwardRequest) return;
-    forwardLogs.value = result.items;
-    forwardTotals.value = result.summary;
-    forwardLoadedAt = Date.now();
-  } catch (e) {
-    if (request === forwardRequest) {
-      forwardLogs.value = [];
-      forwardTotals.value = emptySummary();
-      forwardError.value = dashboardErrorDetail(e);
-      message.error(t("加载请求日志失败：{error}", { error: forwardError.value }));
-    }
-  } finally {
-    if (request === forwardRequest) forwardLoading.value = false;
-  }
+  const requestRange = resolveTimeRange(activePreset.value, timeRange.value);
+  const error = await observabilityStore.loadForward({
+    limit: pageSize,
+    offset: (forwardPage.value - 1) * pageSize,
+    status: statusFilter.value,
+    account_id: accountFilter.value,
+    model: modelFilter.value,
+    key_id: keyFilter.value,
+    provider_id: providerFilter.value,
+    route_account_id: routeAccountFilter.value,
+    credential_account_id: credentialAccountFilter.value,
+    request_id: requestIdFilter.value,
+    start_time: requestRange ? toIsoString(requestRange[0]) : null,
+    end_time: requestRange ? toIsoString(requestRange[1]) : null,
+    sort_by: sortBy.value,
+    sort_order: sortOrder.value,
+  });
+  if (error) message.error(t("加载请求日志失败：{error}", { error }));
 }
 
 async function loadAccounts() {
@@ -781,19 +749,13 @@ async function loadAccounts() {
 }
 
 async function loadForwardLogModels() {
-  try {
-    models.value = await dashboardApi.getForwardLogModels();
-  } catch (e) {
-    message.error(t("加载模型筛选失败：{error}", { error: String(e) }));
-  }
+  const error = await observabilityStore.loadModels();
+  if (error) message.error(t("加载模型筛选失败：{error}", { error }));
 }
 
 async function loadForwardLogKeys() {
-  try {
-    clientKeys.value = await dashboardApi.getForwardLogKeys();
-  } catch (e) {
-    message.error(t("加载 Key 筛选失败：{error}", { error: String(e) }));
-  }
+  const error = await observabilityStore.loadKeys();
+  if (error) message.error(t("加载 Key 筛选失败：{error}", { error }));
 }
 
 async function loadProviderCatalog() {
@@ -817,6 +779,23 @@ function changeGatewayPage(page: number) {
   gatewayPage.value = page;
 }
 
+watch(gatewayLevelFilter, () => {
+  gatewayPage.value = 1;
+  syncQueryState();
+  void loadGatewayLogs();
+});
+
+let categoryDebounce: ReturnType<typeof setTimeout> | null = null;
+watch(gatewayCategoryFilter, () => {
+  if (categoryDebounce !== null) clearTimeout(categoryDebounce);
+  gatewayPage.value = 1;
+  categoryDebounce = setTimeout(() => {
+    categoryDebounce = null;
+    syncQueryState();
+    void loadGatewayLogs();
+  }, 300);
+});
+
 watch(activeTab, syncQueryState);
 watch(
   [statusFilter, accountFilter, modelFilter, keyFilter, providerFilter, routeAccountFilter, credentialAccountFilter, timeRange, activePreset, sortBy, sortOrder],
@@ -831,10 +810,10 @@ watch(
 let requestIdDebounce: ReturnType<typeof setTimeout> | null = null;
 watch(requestIdFilter, () => {
   if (requestIdDebounce !== null) clearTimeout(requestIdDebounce);
+  forwardPage.value = 1;
+  gatewayPage.value = 1;
   requestIdDebounce = setTimeout(() => {
     requestIdDebounce = null;
-    forwardPage.value = 1;
-    gatewayPage.value = 1;
     syncQueryState();
     void loadForwardLogs();
     void loadGatewayLogs();
@@ -842,6 +821,7 @@ watch(requestIdFilter, () => {
 });
 onUnmounted(() => {
   if (requestIdDebounce !== null) clearTimeout(requestIdDebounce);
+  if (categoryDebounce !== null) clearTimeout(categoryDebounce);
 });
 
 let activatedOnce = false;
@@ -851,10 +831,10 @@ onActivated(() => {
   if (activatedOnce) {
     // Only the automatic refresh is gated; user actions (search, filters,
     // paging, refresh buttons) call the loaders directly and stay immediate.
-    if (!gatewayLoading.value && Date.now() - gatewayLoadedAt >= ACTIVATED_REFRESH_FRESHNESS_MS) {
+    if (!gatewayLoading.value && Date.now() - gatewayLoadedAt.value >= ACTIVATED_REFRESH_FRESHNESS_MS) {
       void loadGatewayLogs();
     }
-    if (!forwardLoading.value && Date.now() - forwardLoadedAt >= ACTIVATED_REFRESH_FRESHNESS_MS) {
+    if (!forwardLoading.value && Date.now() - forwardLoadedAt.value >= ACTIVATED_REFRESH_FRESHNESS_MS) {
       void loadForwardLogs();
     }
   } else {
@@ -1031,6 +1011,23 @@ onUnmounted(cleanup);
 .request-id-filter {
   width: min(360px, 100%);
   margin-right: auto;
+}
+.gateway-level-filter {
+  width: 130px;
+}
+.gateway-category-filter {
+  width: min(220px, 100%);
+}
+@media (max-width: 650px) {
+  .log-toolbar {
+    flex-wrap: wrap;
+  }
+  .request-id-filter {
+    width: 100%;
+  }
+  .gateway-category-filter {
+    flex: 1 1 140px;
+  }
 }
 :deep(.request-id-cell) {
   display: flex;

@@ -46,6 +46,7 @@ pub struct Database {
     // Field order closes SQLite before releasing the directory's lifetime lock.
     pub(crate) conn: Connection,
     open_guard: open_guard::DatabaseOpenGuard,
+    pub(crate) log_level: crate::runtime_log::Level,
 }
 
 pub(crate) mod account_store;
@@ -4785,7 +4786,11 @@ impl Database {
         let _journal_mode: String =
             conn.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
-        let mut db = Self { conn, open_guard };
+        let mut db = Self {
+            conn,
+            open_guard,
+            log_level: crate::runtime_log::Level::from_env(),
+        };
         let pre_v59_backup_created = existing_version == 58 && !is_fresh;
         if pre_v59_backup_created {
             create_pre_version_backup(&db.conn, &db_path, PRE_V59_BACKUP_FILE_PREFIX, 58)?;
@@ -9694,6 +9699,12 @@ impl Database {
         diagnostic_json: Option<&str>,
     ) -> Result<()> {
         let created_at = Utc::now().to_rfc3339();
+        let level = crate::runtime_log::Level::parse(level)
+            .ok_or_else(|| anyhow::anyhow!("invalid runtime log level"))?;
+        if level < self.log_level {
+            return Ok(());
+        }
+        let level = level.as_str();
         ocg_infra::sqlite_logs::insert_gateway_log(
             &self.conn,
             &GatewayLogInsertRow {
@@ -9896,15 +9907,21 @@ impl Database {
         limit: i64,
         request_id: Option<&str>,
     ) -> Result<Vec<GatewayLog>> {
-        let sql = if request_id.is_some() {
-            "SELECT id, level, category, message, created_at, request_id, attempt,
+        self.query_gateway_logs_filtered(limit, request_id, None, None)
+    }
+
+    pub fn query_gateway_logs_filtered(
+        &self,
+        limit: i64,
+        request_id: Option<&str>,
+        level: Option<&str>,
+        category: Option<&str>,
+    ) -> Result<Vec<GatewayLog>> {
+        let sql = "SELECT id, level, category, message, created_at, request_id, attempt,
                     error_source, error_stage, duration_ms, diagnostic_json
-             FROM gateway_logs WHERE request_id = ?1 ORDER BY id DESC LIMIT ?2"
-        } else {
-            "SELECT id, level, category, message, created_at, request_id, attempt,
-                    error_source, error_stage, duration_ms, diagnostic_json
-             FROM gateway_logs ORDER BY id DESC LIMIT ?1"
-        };
+             FROM gateway_logs WHERE (?1 IS NULL OR request_id = ?1)
+                AND (?2 IS NULL OR level = ?2) AND (?3 IS NULL OR category = ?3)
+             ORDER BY id DESC LIMIT ?4";
         let mut stmt = self.conn.prepare(sql)?;
         let map = |row: &rusqlite::Row<'_>| {
             Ok(GatewayLog {
@@ -9923,11 +9940,10 @@ impl Database {
                     .and_then(|json| serde_json::from_str(&json).ok()),
             })
         };
-        let rows = if let Some(request_id) = request_id {
-            stmt.query_map(params![request_id, limit], map)?
-        } else {
-            stmt.query_map(params![limit], map)?
-        };
+        let rows = stmt.query_map(
+            params![request_id, level, category, limit.clamp(1, 1000)],
+            map,
+        )?;
         rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.into())
     }
 

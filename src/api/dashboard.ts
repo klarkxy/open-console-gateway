@@ -23,6 +23,7 @@ import type {
   AccountUsageUpdate,
   AuthStatus,
   ForwardLogQuery as V3ForwardLogQuery,
+  GatewayLogQuery,
   KeyUpdate,
   MutationExpectation,
   ProxyTestRequest,
@@ -331,8 +332,8 @@ export const dashboardApi = {
   installUpdate: async (expectedVersion: string) =>
     presentUpdateStatus(await withCas((expectation) => dashboardV3.installUpdate(expectedVersion, expectation))),
 
-  getGatewayLogs: async (limit?: number, requestId?: string | null) =>
-    (await dashboardV3.getGatewayLogs({ limit, requestId: requestId ?? null })).items.map(presentGatewayLog),
+  getGatewayLogs: async (query: GatewayLogQuery = {}) =>
+    (await dashboardV3.getGatewayLogs(query)).items.map(presentGatewayLog),
   getForwardLogs: async (query: ForwardLogQuery = {}) =>
     presentForwardLogs(await dashboardV3.getForwardLogs(forwardLogQuery(query))),
   getForwardLogModels: async () => (await dashboardV3.getForwardLogModels()).models,

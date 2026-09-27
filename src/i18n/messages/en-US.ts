@@ -465,6 +465,8 @@ export const enUSMessages = {
   "1 个价格档位": "1 pricing tier",
   "设置加载失败，请重试": "Settings failed to load; try again",
   "加载中…": "Loading…",
+  "详情": "Details",
+  "按分类精确搜索": "Search exact category",
   "按请求 ID 精确搜索": "Exact request ID search",
   "请求 ID": "Request ID",
   "复制请求 ID": "Copy request ID",

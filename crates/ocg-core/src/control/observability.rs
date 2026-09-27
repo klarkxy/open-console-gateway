@@ -34,6 +34,8 @@ pub(crate) struct GatewayRuntimeStatus {
 pub(crate) struct GatewayLogReadQuery {
     pub limit: Option<i64>,
     pub request_id: Option<String>,
+    pub level: Option<String>,
+    pub category: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -252,8 +254,20 @@ pub(crate) fn gateway_logs(
     query: GatewayLogReadQuery,
     decrypt_key: impl Fn(&str) -> Option<String>,
 ) -> Result<Vec<GatewayLog>, ObservabilityError> {
-    let mut logs =
-        db.query_gateway_logs(query.limit.unwrap_or(100), query.request_id.as_deref())?;
+    let level = query
+        .level
+        .as_deref()
+        .map(|value| {
+            crate::runtime_log::Level::parse(value)
+                .ok_or_else(|| ObservabilityError::InvalidQuery("invalid log level".into()))
+        })
+        .transpose()?;
+    let mut logs = db.query_gateway_logs_filtered(
+        query.limit.unwrap_or(100),
+        query.request_id.as_deref(),
+        level.map(|level| level.as_str()),
+        query.category.as_deref(),
+    )?;
     let secrets = dashboard_account_secrets(db, decrypt_key)?;
     for log in &mut logs {
         log.message = redact_known_secrets(&log.message, &secrets);

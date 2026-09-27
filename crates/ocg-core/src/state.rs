@@ -50,6 +50,7 @@ const CLIENT_ROOT_URL_ENV: &str = "OCG_CLIENT_ROOT_URL";
 // also rebinds. Never hold a parking_lot lock across those awaits.
 // Account, key, and usage-sync writers take `settings_update` only.
 pub struct CoreStateInner {
+    pub(crate) debug_capture: crate::gateway::debug_capture::DebugCapture,
     pub db: Mutex<Database>,
     pub config: Mutex<AppConfig>,
     client_root_url_override: Option<String>,
@@ -425,6 +426,7 @@ impl CoreStateInner {
             build_proxy_route_set(&config, &crate::destination_projection::load_runtime(&db)?)?;
         let policy_snapshot = crate::gateway::policy::load_runtime_snapshot(&db)?;
         Ok(Self {
+            debug_capture: crate::gateway::debug_capture::DebugCapture::from_env(&data_dir),
             db: Mutex::new(db),
             config: Mutex::new(config),
             client_root_url_override,

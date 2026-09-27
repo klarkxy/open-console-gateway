@@ -805,6 +805,8 @@ export const dashboardV3 = {
   getGatewayLogs: (query: GatewayLogQuery = {}) => {
     const params = new URLSearchParams({ limit: String(query.limit ?? 100) });
     if (query.requestId) params.set("requestId", query.requestId);
+    if (query.level) params.set("level", query.level);
+    if (query.category) params.set("category", query.category);
     return requestV3<GatewayLogs>(`/logs/gateway?${params}`);
   },
   getForwardLogs: (query: ForwardLogQuery = {}) => {

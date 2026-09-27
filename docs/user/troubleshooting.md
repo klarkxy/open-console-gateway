@@ -78,6 +78,23 @@ get billed for a bad guess.
   **Open Anyway** for the first launch; the warning is not a sign of
   tampering.
 
+## More detailed logs
+
+In **Logs → Runtime logs**, filter by severity, exact category, or the
+`x-ocg-request-id` returned by the Gateway. Request reception, upstream attempt
+preparation, response headers/timing, failures, and completion can be correlated
+by that ID. `response_ready` means the response headers are ready; for streaming
+requests, inspect the later `attempt_outcome` for the final result.
+
+Set `OCG_LOG_LEVEL` before startup to `trace`, `debug`, `info` (default), `warn`,
+or `error`. This controls persisted runtime events, not request accounting.
+`pnpm run dev` defaults to `debug` and saves full, credential-redacted request
+content in `.artifacts/debug-requests`; recent 1,000 files are retained.
+Use `OCG_DEBUG_REQUESTS=0` to disable it. These files contain conversation content;
+see the [development guide](../maintainer/development.md#request-debugging-and-log-levels)
+for coverage, storage, and overrides.
+
+
 ---
 
 [User guide index](../USER.md) · [简体中文](troubleshooting.zh-CN.md) · [Docs index](../README.md)

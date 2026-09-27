@@ -354,11 +354,26 @@ async fn unauthorized_and_expected_fallback_requests_are_not_persisted() {
             .expect("parse failure should keep bounded diagnostic detail");
         assert!(diagnostic["upstream_body_bytes"].is_null());
         assert_eq!(diagnostic["client_body_bytes"], 1);
+        let runtime = db
+            .query_gateway_logs(10, Some(invalid_request_id))
+            .expect("runtime logs should query");
         assert!(
-            db.query_gateway_logs(10, Some(invalid_request_id))
-                .expect("runtime logs should query")
-                .is_empty(),
-            "request failures must not enter runtime logs"
+            runtime
+                .iter()
+                .any(|row| row.level == "warn" && row.error_stage.as_deref() == Some("parse"))
+        );
+        assert!(
+            runtime
+                .iter()
+                .all(|row| row.request_id.as_deref() == Some(invalid_request_id))
+        );
+        let encoded = serde_json::to_string(&runtime).unwrap();
+        assert!(!encoded.contains("gateway-test-key"));
+        assert!(
+            runtime
+                .iter()
+                .filter_map(|row| row.diagnostic.as_ref())
+                .all(|value| value.get("body").is_none())
         );
     }
 
