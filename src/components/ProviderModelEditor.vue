@@ -101,7 +101,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, shallowRef, watch } from "vue";
+import { computed, onBeforeUnmount, onDeactivated, ref, shallowRef, watch } from "vue";
 import { NAlert, NButton, NCheckbox, NCheckboxGroup, NForm, NFormItem, NInput, NModal, NSelect, NSpace, NSwitch, useMessage } from "naive-ui";
 import type { Destination, ProtocolDto } from "../api/destinations.ts";
 import type { MutationExpectation } from "../api/generated/dashboard-v3.ts";
@@ -178,6 +178,9 @@ watch(modelOptions, (options) => {
 watch(() => props.scope.key, () => { selectedModelId.value = null; resetEditor(); });
 watch(() => sessionStore.authenticated, (authenticated) => { if (!authenticated) resetEditor(); });
 onBeforeUnmount(() => { mounted = false; generation += 1; });
+// Providers is kept alive by the shell: leaving the page must close teleported
+// dialogs and invalidate their pending UI receipts, not leave them on another view.
+onDeactivated(resetEditor);
 
 function resetEditor(): void {
   generation += 1;
