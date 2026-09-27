@@ -1,0 +1,69 @@
+name: Platform fix workbench (temporary)
+
+on:
+  push:
+    branches: [fix/platform-refresh-isolation]
+    paths:
+      - '.ocg-platform-fix/**'
+      - '.github/workflows/platform-fix-workbench.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: platform-fix-workbench
+  cancel-in-progress: false
+
+env:
+  CARGO_INCREMENTAL: '0'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  CARGO_TERM_COLOR: always
+
+jobs:
+  apply-and-check:
+    if: github.repository == 'klarkxy/open-console-gateway' && github.ref == 'refs/heads/fix/platform-refresh-isolation'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ github.sha }}
+      - name: Apply the reviewed, exact-match edits on this branch only
+        run: python3 .ocg-platform-fix/apply.py
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271
+        with:
+          version: 10.29.2
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
+        with:
+          shared-key: quality-linux
+          workspaces: '. -> target'
+          cache-on-failure: true
+      - run: pnpm install --frozen-lockfile
+      - run: cargo fmt --all
+      - run: pnpm run contract:v4:generate
+      - name: Commit only the requested source, test, documentation and contract changes
+        env:
+          EXPECTED_HEAD: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          current="$(git ls-remote origin refs/heads/fix/platform-refresh-isolation | cut -f1)"
+          test "$current" = "$EXPECTED_HEAD"
+          git diff --check
+          git add crates/ocg-core/src/platform.rs crates/ocg-core/src/platform crates/ocg-core/src/db/platform.rs crates/ocg-core/src/dashboard_v4/platform_keys.rs crates/ocg-core/src/dashboard_v4/types.rs src/api/platform-accounts.ts src/api/generated/dashboard-v4.ts src/components/PlatformAccountsSection.vue src/domain/platform-refresh.ts src/domain/platform-refresh.test.ts src/stores/platformAccounts.ts src/stores/platformAccounts.test.ts src/i18n/messages/en-US.ts schema/dashboard-api-v4.schema.json docs/user/platform-accounts.md docs/user/platform-accounts.zh-CN.md
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git -c core.hooksPath=/dev/null commit -m 'fix(platform): isolate refresh scopes and paginate New API imports'
+          git push origin HEAD:refs/heads/fix/platform-refresh-isolation
+          echo "Validated source commit: $(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
+      - run: pnpm run contract:v3:check
+      - run: pnpm run contract:v4:check
+      - run: pnpm run test:web
+      - run: pnpm run build:web
+      - run: 'cargo test -p ocg-core --lib platform:: --locked'
+      - run: cargo test -p ocg-core --test dashboard_v3_platforms --locked
+      - run: cargo clippy -p ocg-core --all-targets --locked -- -D warnings
