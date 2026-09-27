@@ -15,6 +15,9 @@ export const useAccountsStore = defineStore("accounts", () => {
   const loaded = ref(false);
   const loading = ref(false);
   const error = ref("");
+  // A delayed model/usage mutation may return an account after its DELETE.
+  // Only a newer authoritative list can confirm an intentional restoration.
+  const removedIds = new Set<string>();
 
   const byId = computed(() => {
     const map = new Map<string, Account>();
@@ -32,6 +35,7 @@ export const useAccountsStore = defineStore("accounts", () => {
     try {
       const list = await dashboardApi.getAccounts();
       if (generation !== loadGeneration) return list;
+      for (const account of list) removedIds.delete(account.id);
       accounts.value = list;
       loaded.value = true;
       error.value = "";
@@ -52,12 +56,13 @@ export const useAccountsStore = defineStore("accounts", () => {
   function setAccounts(list: Account[]): void {
     loadGeneration++;
     loading.value = false;
-    accounts.value = list;
+    accounts.value = list.filter(account => !removedIds.has(account.id));
     loaded.value = true;
     error.value = "";
   }
 
   function upsertAccount(account: Account): void {
+    if (removedIds.has(account.id)) return;
     const exists = accounts.value.some((item) => item.id === account.id);
     setAccounts(exists
       ? accounts.value.map((item) => (item.id === account.id ? account : item))
@@ -65,12 +70,14 @@ export const useAccountsStore = defineStore("accounts", () => {
   }
 
   function removeAccount(id: string): void {
+    removedIds.add(id);
     setAccounts(accounts.value.filter((item) => item.id !== id));
   }
 
   /** Drop the cached list on 401 / logout so the next session reloads fresh. */
   function clearAccounts(): void {
     loadGeneration++;
+    removedIds.clear();
     accounts.value = [];
     loaded.value = false;
     loading.value = false;
