@@ -22,6 +22,8 @@ import type {
   RefusedRowKindDto,
   RoutingClientProtocol,
 } from "../api/generated/dashboard-v4.ts";
+import { useAccountsStore } from "./accounts.ts";
+import { hideRemovedAccountCredentials } from "../domain/confirmed-account-removal.ts";
 
 export interface DestinationProjectionRefusal {
   kind: RefusedRowKindDto | string;
@@ -78,6 +80,16 @@ export const useDestinationsStore = defineStore("destinations", () => {
   const loading = ref(false);
   const error = ref("");
   const refusals = ref<DestinationProjectionRefusal[]>([]);
+
+  // Keep the receipt and its CAS pair intact, but never display a credential
+  // whose local account deletion has already been confirmed. This also
+  // handles failed projection reloads and late catalog mutation receipts.
+  const accounts = useAccountsStore();
+  const visibleProjection = computed(() => hideRemovedAccountCredentials(
+    credentials.value, cards.value, accounts.removedAccountIds,
+  ));
+  const visibleCredentials = computed(() => visibleProjection.value.credentials);
+  const visibleCards = computed(() => visibleProjection.value.cards);
 
   // On-demand routing explanations, keyed by `explainKey(model, protocol)`.
   const explanations = ref<Record<string, RoutingExplanationView>>({});
@@ -145,7 +157,7 @@ export const useDestinationsStore = defineStore("destinations", () => {
 
   const credentialsByLegacyAccountId = computed(() => {
     const map = new Map<string, DestinationCredential>();
-    for (const credential of credentials.value) map.set(credential.legacy_account_id, credential);
+    for (const credential of visibleCredentials.value) map.set(credential.legacy_account_id, credential);
     return map;
   });
 
@@ -458,8 +470,8 @@ export const useDestinationsStore = defineStore("destinations", () => {
 
   return {
     destinations: computed(() => destinations.value),
-    credentials: computed(() => credentials.value),
-    cards: computed(() => cards.value),
+    credentials: visibleCredentials,
+    cards: visibleCards,
     expectation: computed(() => expectation.value),
     loaded: computed(() => loaded.value),
     loading: computed(() => loading.value),

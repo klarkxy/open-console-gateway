@@ -4222,6 +4222,16 @@
           "minimum": 0,
           "type": "integer"
         },
+        "page": {
+          "default": null,
+          "description": "One bounded remote page; omission starts at page one.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "processGeneration": {
           "format": "uint64",
           "minimum": 0,
@@ -4248,6 +4258,15 @@
           "minimum": 0,
           "type": "integer"
         },
+        "nextPage": {
+          "description": "More remote rows exist, even if every row in this batch was skipped.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "revision": {
           "$ref": "#/$defs/ControlRevision"
         },
@@ -4263,6 +4282,7 @@
         }
       },
       "required": [
+        "nextPage",
         "imported",
         "skippedExisting",
         "skippedDisabled",

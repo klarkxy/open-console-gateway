@@ -899,6 +899,9 @@ pub struct AliasPublicationUpdate {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PlatformKeyImportRequest {
+    /// One bounded remote page; omission starts at page one.
+    #[serde(default)]
+    pub page: Option<u32>,
     #[serde(flatten)]
     pub expectation: MutationExpectation,
 }
@@ -915,6 +918,8 @@ pub struct PlatformKeyImportFailure {
 #[serde(rename_all = "camelCase")]
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PlatformKeyImportResult {
+    /// More remote rows exist, even if every row in this batch was skipped.
+    pub next_page: Option<u32>,
     pub imported: u32,
     pub skipped_existing: u32,
     pub skipped_disabled: u32,

@@ -37,6 +37,7 @@ export const usePlatformAccountsStore = defineStore("platformAccounts", () => {
   const error = ref("");
   const mutating = ref(false);
   const importing = ref<Record<string, boolean>>({});
+  const nextImportPage = ref<Record<string, number>>({});
   const refreshing = ref<Record<string, boolean>>({});
   const pendingLink = ref<PlatformPendingLink | null>(null);
   const destinationRefreshError = ref("");
@@ -45,6 +46,8 @@ export const usePlatformAccountsStore = defineStore("platformAccounts", () => {
   // loading/error presentation. Mirrors the load guard in stores/accounts.ts.
   let loadGeneration = 0;
   let sessionEpoch = 0;
+  let refreshEpoch = 0;
+  const refreshRequests = new Map<string, Promise<PlatformWriteOutcome>>();
 
   const parents = computed(() => view.value?.accounts ?? []);
   const links = computed(() => view.value?.links ?? []);
@@ -76,7 +79,7 @@ export const usePlatformAccountsStore = defineStore("platformAccounts", () => {
     loaded.value = true;
     // A reloaded view that already contains the pending account's link settles
     // the retry state without another write.
-    if (pendingLink.value && next.links.some((link) => link.accountId === pendingLink.value!.accountId)) {
+    if (pendingLink.value && next.links.some((link) => link.accountId === pendingLink.value!.accountId && link.platformAccountId === pendingLink.value!.parentId)) {
       pendingLink.value = null;
     }
   }
@@ -103,9 +106,10 @@ export const usePlatformAccountsStore = defineStore("platformAccounts", () => {
   /** Revision-conflict recovery: tokens already refreshed by the CAS layer. */
   async function recoverConflict(): Promise<"conflict"> {
     const session = sessionEpoch;
+    const epoch = refreshEpoch;
     try {
       const next = await platformAccountsApi.list();
-      if (session === sessionEpoch) acceptView(next);
+      if (session === sessionEpoch && epoch === refreshEpoch) acceptView(next);
     } catch {
       // The next explicit action retries; the caller still surfaces conflict.
     }
@@ -127,8 +131,9 @@ export const usePlatformAccountsStore = defineStore("platformAccounts", () => {
     editing: PlatformAccount | null,
   ): Promise<PlatformPersistOutcome> {
     if (!beginMutation()) return "error";
+    const session = sessionEpoch;
     try {
-      acceptView(editing
+      const next = editing
         ? await platformAccountsApi.update(editing.id, {
           name: payload.name,
           ...(payload.userCredential !== undefined ? { userCredential: payload.userCredential } : {}),
@@ -138,97 +143,175 @@ export const usePlatformAccountsStore = defineStore("platformAccounts", () => {
           name: payload.name,
           baseUrl: payload.baseUrl,
           ...(payload.userCredential !== undefined ? { userCredential: payload.userCredential } : {}),
-        }));
+        });
+      if (session !== sessionEpoch) return "error";
+      acceptView(next);
       try {
         // Both create and update change the destination projection revision.
         // Refresh the full snapshot before a card or catalog write can capture
         // its next CAS pair, including edits that leave the parent name alone.
         await useDestinationsStore().refreshAfterMutation();
+        if (session !== sessionEpoch) return "error";
         destinationRefreshError.value = "";
       } catch (error) {
+        if (session !== sessionEpoch) return "error";
         // The platform write already committed; cards keep the previous dest snapshot.
         destinationRefreshError.value = dashboardErrorDetail(error);
         return "saved_refresh_failed";
       }
       return "saved";
     } catch (e) {
+      if (session !== sessionEpoch) return "error";
       if (isRevisionConflict(e)) return recoverConflict();
       throw e;
     } finally {
-      endMutation();
+      if (session === sessionEpoch) endMutation();
     }
+  }
+
+  /** A confirmed deletion invalidates every older complete-list response. */
+  function invalidateObservations(): void {
+    refreshEpoch += 1;
+    loadGeneration += 1;
+    loading.value = false;
+    refreshRequests.clear();
+    refreshing.value = {};
+  }
+
+  /** Called after the existing account DELETE commits, not for unlinking. */
+  function forgetAccount(accountId: string): void {
+    invalidateObservations();
+    if (view.value) {
+      view.value = { ...view.value, links: view.value.links.filter(link => link.accountId !== accountId) };
+    }
+    if (pendingLink.value?.accountId === accountId) pendingLink.value = null;
   }
 
   async function remove(parentId: string): Promise<PlatformWriteOutcome> {
     if (!beginMutation()) return "error";
-    try {
-      await platformAccountsApi.remove(parentId);
-      try {
-        await load();
-      } catch {
-        // Deletion already committed; a list failure is presented via `error`.
-      }
-      return "ok";
-    } catch (e) {
-      if (isRevisionConflict(e)) return recoverConflict();
-      throw e;
-    } finally {
-      endMutation();
-    }
-  }
-
-  async function refreshParent(parentId: string): Promise<PlatformWriteOutcome> {
-    if (refreshing.value[parentId]) return "error";
-    refreshing.value[parentId] = true;
-    try {
-      acceptView(await platformAccountsApi.refresh(parentId));
-      return "ok";
-    } catch (e) {
-      if (isRevisionConflict(e)) return recoverConflict();
-      throw e;
-    } finally {
-      refreshing.value[parentId] = false;
-    }
-  }
-
-  async function refreshChild(parentId: string, accountId: string): Promise<PlatformWriteOutcome> {
-    const key = `${parentId}:${accountId}`;
-    if (refreshing.value[key]) return "error";
     const session = sessionEpoch;
+    try {
+      const ack = await platformAccountsApi.remove(parentId);
+      if (session !== sessionEpoch) return "error";
+      delete nextImportPage.value[parentId];
+      invalidateObservations();
+      if (view.value) {
+        acceptView({
+          ...view.value,
+          accounts: view.value.accounts.filter(parent => parent.id !== parentId),
+          links: view.value.links.filter(link => link.platformAccountId !== parentId),
+          revision: ack.processGeneration === view.value.processGeneration
+            ? Math.max(ack.revision, view.value.revision) : ack.revision,
+          processGeneration: ack.processGeneration,
+        });
+      }
+      if (pendingLink.value?.parentId === parentId) pendingLink.value = null;
+      // Revalidation is read-only. Its failure cannot undo a confirmed DELETE
+      // or cause a second destructive request; the removed row stays removed.
+      await Promise.allSettled([
+        load(),
+        useDestinationsStore().refreshAfterMutation().then(() => {
+          if (session === sessionEpoch) destinationRefreshError.value = "";
+        }, (e: unknown) => {
+          if (session === sessionEpoch) destinationRefreshError.value = dashboardErrorDetail(e);
+        }),
+      ]);
+      return session === sessionEpoch ? "ok" : "error";
+    } catch (e) {
+      if (session !== sessionEpoch) return "error";
+      if (isRevisionConflict(e)) return recoverConflict();
+      throw e;
+    } finally {
+      if (session === sessionEpoch) endMutation();
+    }
+  }
+
+  function refresh(parentId: string, accountId?: string): Promise<PlatformWriteOutcome> {
+    const key = accountId === undefined ? parentId : `${parentId}:${accountId}`;
+    const existing = refreshRequests.get(key);
+    if (existing) return existing;
+    // Parent and child observations use the same control-plane revision.
+    // Serialize a platform's refreshes and coalesce repeated identical calls.
+    if (mutating.value || Object.keys(refreshing.value).some(active => (
+      refreshing.value[active] && (active === parentId || active.startsWith(`${parentId}:`))
+    ))) return Promise.resolve("error");
+    const session = sessionEpoch;
+    const epoch = refreshEpoch;
+    const isCurrent = () => session === sessionEpoch && epoch === refreshEpoch;
     refreshing.value[key] = true;
+    const request = Promise.resolve().then(async (): Promise<PlatformWriteOutcome> => {
+      try {
+        if (!isCurrent()) return "error";
+        const next = await platformAccountsApi.refresh(parentId, accountId);
+        if (!isCurrent()) return "error";
+        acceptView(next);
+        return "ok";
+      } catch (e) {
+        if (!isCurrent()) return "error";
+        if (isRevisionConflict(e)) {
+          await recoverConflict();
+          return isCurrent() ? "conflict" : "error";
+        }
+        throw e;
+      } finally {
+        if (isCurrent()) {
+          refreshRequests.delete(key);
+          delete refreshing.value[key];
+        }
+      }
+    });
+    refreshRequests.set(key, request);
+    return request;
+  }
+
+  function refreshParent(parentId: string): Promise<PlatformWriteOutcome> {
+    return refresh(parentId);
+  }
+
+  function refreshChild(parentId: string, accountId: string): Promise<PlatformWriteOutcome> {
+    return refresh(parentId, accountId);
+  }
+
+  /** Observation during create-and-link, which already owns the mutation lock. */
+  async function commitRefresh(parentId: string, accountId: string): Promise<void> {
+    const session = sessionEpoch;
+    const epoch = refreshEpoch;
     try {
       const next = await platformAccountsApi.refresh(parentId, accountId);
-      if (session !== sessionEpoch) return "error";
-      acceptView(next);
-      return "ok";
+      if (session === sessionEpoch && epoch === refreshEpoch) acceptView(next);
     } catch (e) {
-      if (session !== sessionEpoch) return "error";
-      if (isRevisionConflict(e)) return recoverConflict();
-      throw e;
-    } finally {
-      if (session === sessionEpoch) refreshing.value[key] = false;
+      if (session === sessionEpoch && epoch === refreshEpoch) throw e;
     }
-  }
-
-  /** Refresh without the per-key busy map; used by the create-and-link observation. */
-  async function commitRefresh(parentId: string, accountId: string): Promise<void> {
-    acceptView(await platformAccountsApi.refresh(parentId, accountId));
   }
 
   async function importKeys(parentId: string): Promise<PlatformKeyImportResult | "conflict" | "error"> {
     if (mutating.value || importing.value[parentId]) return "error";
+    const session = sessionEpoch;
     mutating.value = true;
     importing.value[parentId] = true;
     try {
-      const result = await platformAccountsApi.importKeys(parentId);
-      acceptView(await platformAccountsApi.list());
-      return result;
+      const result = await platformAccountsApi.importKeys(parentId, nextImportPage.value[parentId]);
+      if (session !== sessionEpoch) return "error";
+      if (result.nextPage != null) nextImportPage.value[parentId] = result.nextPage;
+      else delete nextImportPage.value[parentId];
+      try {
+        const next = await platformAccountsApi.list();
+        if (session === sessionEpoch) acceptView(next);
+      } catch (e) {
+        // Import already committed. A failed revalidation must not hide its
+        // result or lose the page continuation and invite a duplicate write.
+        if (session === sessionEpoch) error.value = dashboardErrorDetail(e);
+      }
+      return session === sessionEpoch ? result : "error";
     } catch (e) {
+      if (session !== sessionEpoch) return "error";
       if (isRevisionConflict(e)) return recoverConflict();
       throw e;
     } finally {
-      mutating.value = false;
-      importing.value[parentId] = false;
+      if (session === sessionEpoch) {
+        mutating.value = false;
+        importing.value[parentId] = false;
+      }
     }
   }
 
@@ -237,14 +320,15 @@ export const usePlatformAccountsStore = defineStore("platformAccounts", () => {
     parentId: string,
     group: Pick<PlatformGroup, "id" | "platform">,
   ): Promise<PlatformWriteOutcome> {
+    const session = sessionEpoch;
+    const epoch = refreshEpoch;
     try {
-      acceptView(await platformAccountsApi.link(
-        accountId,
-        parentId,
-        platformGroupWrite(group),
-      ));
+      const next = await platformAccountsApi.link(accountId, parentId, platformGroupWrite(group));
+      if (session !== sessionEpoch || epoch !== refreshEpoch) return "error";
+      acceptView(next);
       return "ok";
     } catch (e) {
+      if (session !== sessionEpoch || epoch !== refreshEpoch) return "error";
       if (isRevisionConflict(e)) return recoverConflict();
       throw e;
     }
@@ -252,26 +336,33 @@ export const usePlatformAccountsStore = defineStore("platformAccounts", () => {
 
   async function unlink(accountId: string): Promise<PlatformWriteOutcome> {
     if (!beginMutation()) return "error";
+    const session = sessionEpoch;
     try {
-      acceptView(await platformAccountsApi.unlink(accountId));
+      const next = await platformAccountsApi.unlink(accountId);
+      if (session !== sessionEpoch) return "error";
+      invalidateObservations();
+      acceptView(next);
       return "ok";
     } catch (e) {
+      if (session !== sessionEpoch) return "error";
       if (isRevisionConflict(e)) return recoverConflict();
       throw e;
     } finally {
-      endMutation();
+      if (session === sessionEpoch) endMutation();
     }
   }
 
   async function retryPendingLink(): Promise<PlatformWriteOutcome> {
     const pending = pendingLink.value;
     if (!pending || !beginMutation()) return "error";
+    const session = sessionEpoch;
     try {
       const outcome = await link(pending.accountId, pending.parentId, { id: null, platform: null });
+      if (session !== sessionEpoch) return "error";
       if (outcome === "ok") pendingLink.value = null;
       return outcome;
     } finally {
-      endMutation();
+      if (session === sessionEpoch) endMutation();
     }
   }
 
@@ -295,15 +386,16 @@ export const usePlatformAccountsStore = defineStore("platformAccounts", () => {
   /** Drop the cached view on 401 / logout so the next session reloads fresh. */
   function clear(): void {
     sessionEpoch += 1;
-    loadGeneration += 1;
+    invalidateObservations();
     view.value = null;
     loaded.value = false;
     loading.value = false;
     error.value = "";
     mutating.value = false;
     importing.value = {};
-    refreshing.value = {};
+    nextImportPage.value = {};
     pendingLink.value = null;
+    destinationRefreshError.value = "";
   }
 
   return {
@@ -318,6 +410,7 @@ export const usePlatformAccountsStore = defineStore("platformAccounts", () => {
     refreshing: computed(() => refreshing.value),
     pendingLink: computed(() => pendingLink.value),
     destinationRefreshError: computed(() => destinationRefreshError.value),
+    sessionEpoch: computed(() => sessionEpoch),
     load,
     acceptView,
     recoverConflict,
@@ -325,6 +418,7 @@ export const usePlatformAccountsStore = defineStore("platformAccounts", () => {
     endMutation,
     createOrUpdate,
     remove,
+    forgetAccount,
     refreshParent,
     refreshChild,
     commitRefresh,
