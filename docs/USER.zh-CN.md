@@ -21,6 +21,7 @@
 - [应用](user/applications.zh-CN.md) — DSH 插件安装流程、恢复与移除。
 - [账号](user/accounts.zh-CN.md) — Plan、凭据、排序、额度行为与托管注册。
 - [供应商](user/providers.zh-CN.md) — 目录、供应商合约、按模型协议覆盖、探测与用户定义供应商。
+- [单模型管理](user/provider-models.zh-CN.md) — 新增和编辑 HTTP 模型映射、对外别名与允许的上游协议，删除本地目录行。
 - [模型目录刷新](user/model-catalog-refresh.zh-CN.md) — 刷新模型目录的作用：目录更新、协议证据、首次快照默认与单模型测试。
 - [Plan 与 API 预设](user/provider-presets.zh-CN.md) — 从账号或供应商入口浏览 Plan/API 预设；固定预设提供地址、协议、鉴权与默认模型。
 - [日志与设置](user/logs-settings.zh-CN.md) — 请求日志、设置与代理模式。
