@@ -27,6 +27,9 @@ function fixture() {
   store.acceptView(view());
   return store;
 }
+function currentRevision(store: ReturnType<typeof usePlatformAccountsStore>): number | undefined {
+  return store.view?.revision;
+}
 
 test("identical platform refreshes share one upstream request and retain busy until settlement", async t => {
   const store = fixture();
@@ -61,7 +64,7 @@ test("a late parent response cannot repopulate a cleared store or unlock a newer
   assert.equal(store.refreshing.parent, true);
   fresh.resolve(view(2));
   assert.equal(await second, "ok");
-  assert.equal(store.view?.revision, 2);
+  assert.equal(currentRevision(store), 2);
   assert.deepEqual(store.refreshing, {});
 });
 
