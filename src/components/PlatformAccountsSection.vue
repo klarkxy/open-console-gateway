@@ -64,9 +64,12 @@ import {
   uniquePublicModelCount,
   type PlatformKeyImportFailureCode,
 } from "../domain/platform-accounts.ts";
+import { platformRefreshSnapshot } from "../domain/platform-refresh-snapshot.ts";
+import { mergeDiscoveredAccountCapabilities } from "../domain/usage-refresh-catalog.ts";
 import { accountCapabilities } from "../domain/account-capabilities.ts";
 import { t, type MessageKey } from "../i18n/index.ts";
 import { usePlatformAccountsStore, type PlatformPersistOutcome } from "../stores/platformAccounts.ts";
+import { useBillingStore } from "../stores/billing.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
 import PlatformAccountFormModal, {
   type PlatformAccountFormPayload,
@@ -90,6 +93,7 @@ const emit = defineEmits<{
 const dialog = useDialog();
 const message = useMessage();
 const platformStore = usePlatformAccountsStore();
+const billing = useBillingStore();
 
 const showForm = ref(false);
 const editingPlatform = ref<PlatformAccount | null>(null);
@@ -211,7 +215,13 @@ async function deletePlatform(parent: PlatformAccount): Promise<void> {
   try {
     const outcome = await platformStore.remove(parent.id);
     if (outcome === "conflict") notifyConflict();
-    else if (outcome === "ok") message.success(t("平台账号已删除"));
+    else if (outcome === "ok") {
+      message.success(t("平台账号已删除"));
+      emit("changed");
+      if (platformStore.destinationRefreshError) {
+        emit("destinationRefreshFailed", platformStore.destinationRefreshError);
+      }
+    }
   } catch (error) {
     mutationError(error, "删除失败：{error}");
   }
@@ -262,14 +272,17 @@ async function runImportKeys(parent: PlatformAccount): Promise<void> {
   }
 }
 
-function notifyRefreshOutcome(parentId: string): void {
-  const latest = platformStore.parents.find((item) => item.id === parentId);
-  const errors = latest?.snapshot?.errors ?? [];
-  if (errors.length === 0) {
+function notifyRefreshOutcome(parentId: string, accountId?: string): void {
+  const snapshot = platformRefreshSnapshot({
+    accounts: platformStore.parents, links: platformStore.links,
+  }, parentId, accountId);
+  // Missing receipts are not successful observations.
+  if (!snapshot) return;
+  if (snapshot.errors.length === 0) {
     message.success(t("已刷新"));
     return;
   }
-  const text = [...new Set(errors.map((code) => t(platformSnapshotErrorKey(code))))].join("；");
+  const text = [...new Set(snapshot.errors.map((code) => t(platformSnapshotErrorKey(code))))].join("；");
   message.warning(text);
 }
 
@@ -277,15 +290,9 @@ async function refreshParent(parent: PlatformAccount): Promise<void> {
   try {
     const outcome = await platformStore.refreshParent(parent.id);
     if (outcome === "conflict") notifyConflict();
-    else if (outcome === "ok") {
-      notifyRefreshOutcome(parent.id);
-      const ids = new Set(
-        platformStore.links
-          .filter((link) => link.platformAccountId === parent.id)
-          .map((link) => link.accountId),
-      );
-      await fetchModelsAll(props.accounts.filter((account) => ids.has(account.id)));
-    }
+    else if (outcome === "ok") notifyRefreshOutcome(parent.id);
+    // Model imports remain the explicit fetch-models / fetch-all-models
+    // actions. A balance refresh must not silently rewrite every Key's scope.
   } catch (error) {
     mutationError(error, "刷新失败：{error}");
   }
@@ -295,11 +302,7 @@ async function refreshChild(parent: PlatformAccount, link: PlatformLink): Promis
   try {
     const outcome = await platformStore.refreshChild(parent.id, link.accountId);
     if (outcome === "conflict") notifyConflict();
-    else if (outcome === "ok") {
-      notifyRefreshOutcome(parent.id);
-      const account = props.accounts.find((item) => item.id === link.accountId);
-      if (account) await fetchModels(account);
-    }
+    else if (outcome === "ok") notifyRefreshOutcome(parent.id, link.accountId);
   } catch (error) {
     mutationError(error, "刷新失败：{error}");
   }
@@ -358,6 +361,7 @@ async function onKeyFormSave(payload: PlatformKeyFormPayload): Promise<void> {
 
 async function saveEditedKey(account: Account, payload: PlatformKeyFormPayload): Promise<void> {
   if (!platformStore.beginMutation()) return;
+  const session = billing.sessionEpoch;
   addKeyError.value = "";
   try {
     const updated = await dashboardApi.updateAccount(account.id, {
@@ -365,19 +369,22 @@ async function saveEditedKey(account: Account, payload: PlatformKeyFormPayload):
       notes: payload.notes,
       ...(payload.key ? { key: payload.key } : {}),
     });
+    if (session !== billing.sessionEpoch) return;
     emit("accountUpdated", updated);
     editKeyAccount.value = null;
     message.success(t("已保存"));
   } catch (error) {
+    if (session !== billing.sessionEpoch) return;
     if (isRevisionConflict(error)) {
       await platformStore.recoverConflict();
+      if (session !== billing.sessionEpoch) return;
       notifyConflict();
       editKeyAccount.value = null;
       return;
     }
     addKeyError.value = dashboardErrorDetail(error);
   } finally {
-    platformStore.endMutation();
+    if (session === billing.sessionEpoch) platformStore.endMutation();
   }
 }
 
@@ -391,6 +398,7 @@ async function createAndLinkKey(payload: PlatformKeyFormPayload): Promise<void> 
     return;
   }
   if (!platformStore.beginMutation()) return;
+  const session = billing.sessionEpoch;
   addKeyError.value = "";
   try {
     const discovery = await dashboardApi.discoverCustomModels({
@@ -398,6 +406,7 @@ async function createAndLinkKey(payload: PlatformKeyFormPayload): Promise<void> 
       upstream_protocol: "chat_completions",
       api_key: payload.key,
     });
+    if (session !== billing.sessionEpoch) return;
     if (discovery.models.length === 0) {
       addKeyError.value = t("该 Key 未返回可用模型；确认 Key 与站点地址无误后重试。");
       return;
@@ -413,6 +422,7 @@ async function createAndLinkKey(payload: PlatformKeyFormPayload): Promise<void> 
       },
       model_capabilities: discoveredModelCapabilities(discovery.models),
     });
+    if (session !== billing.sessionEpoch) return;
     platformStore.setPendingLink({ accountId: created.id, parentId: parent.id });
     addKeyParent.value = null;
     try {
@@ -421,6 +431,7 @@ async function createAndLinkKey(payload: PlatformKeyFormPayload): Promise<void> 
         parent.id,
         { id: null, platform: null },
       );
+      if (session !== billing.sessionEpoch || outcome === "error") return;
       if (outcome === "conflict") {
         notifyConflict();
         if (platformStore.pendingLink) message.warning(t("Key 已创建，关联尚未完成。"));
@@ -435,12 +446,15 @@ async function createAndLinkKey(payload: PlatformKeyFormPayload): Promise<void> 
         // Observation is optional; the Key is already routable.
       }
     } catch {
+      if (session !== billing.sessionEpoch) return;
       message.warning(t("Key 已创建，关联尚未完成。"));
       emit("changed");
     }
   } catch (createError) {
+    if (session !== billing.sessionEpoch) return;
     if (isRevisionConflict(createError)) {
       await platformStore.recoverConflict();
+      if (session !== billing.sessionEpoch) return;
       notifyConflict();
       addKeyParent.value = null;
       return;
@@ -463,7 +477,7 @@ async function createAndLinkKey(payload: PlatformKeyFormPayload): Promise<void> 
       },
     });
   } finally {
-    platformStore.endMutation();
+    if (session === billing.sessionEpoch) platformStore.endMutation();
   }
 }
 
@@ -477,31 +491,49 @@ async function fetchModels(account: Account): Promise<void> {
     return;
   }
   if (!platformStore.beginMutation()) return;
+  const session = billing.sessionEpoch;
+  const isCurrent = () => session === billing.sessionEpoch && props.accounts.some(current => (
+    current.id === account.id && current.updated_at === account.updated_at
+  ));
   try {
     const discovery = await dashboardApi.discoverCustomModels({
       endpoint_url: discoveryEndpoint,
       upstream_protocol: account.custom_config?.upstream_protocol ?? "chat_completions",
       account_id: account.id,
     });
+    if (!isCurrent()) return;
     if (discovery.models.length === 0) {
       message.warning(t("该 Key 未返回可用模型；确认 Key 与站点地址无误后重试。"));
       return;
     }
-    const updated = await dashboardApi.updateAccountModelCapabilities(
-      account.id,
-      discoveredModelCapabilities(discovery.models, account.custom_config?.upstream_protocol ?? "chat_completions"),
+    // Preserve existing mappings, including models absent from a truncated
+    // discovery response. Discovery is additive, not an implicit reset.
+    const merged = mergeDiscoveredAccountCapabilities(
+      account.model_capabilities,
+      discovery.models,
+      account.custom_config?.upstream_protocol ?? "chat_completions",
     );
+    const updated = merged.added === 0 ? account : await dashboardApi.updateAccountModelCapabilities(
+      account.id, merged.capabilities,
+    );
+    if (!isCurrent()) return;
     emit("accountUpdated", updated);
     message.success(overlayImportMessage(updated, discovery.truncated));
+    try {
+      await destinations.refreshAfterMutation();
+    } catch (error) {
+      if (session === billing.sessionEpoch) emit("destinationRefreshFailed", dashboardErrorDetail(error));
+    }
   } catch (error) {
+    if (!isCurrent()) return;
     if (isRevisionConflict(error)) {
       await platformStore.recoverConflict();
-      notifyConflict();
+      if (session === billing.sessionEpoch) notifyConflict();
     } else {
       mutationError(error, "操作失败：{error}");
     }
   } finally {
-    platformStore.endMutation();
+    if (session === billing.sessionEpoch) platformStore.endMutation();
   }
 }
 
@@ -534,8 +566,11 @@ function siblingKeys(accountId: string): Account[] {
 }
 
 async function fetchModelsAll(accounts: Account[]): Promise<void> {
+  const session = billing.sessionEpoch;
   for (const account of accounts) {
-    await fetchModels(account);
+    if (session !== billing.sessionEpoch) return;
+    const current = props.accounts.find(row => row.id === account.id);
+    if (current) await fetchModels(current);
   }
 }
 
@@ -558,25 +593,27 @@ async function onLinkSubmit(
 ): Promise<void> {
   const parent = linkParent.value;
   if (!parent || !platformStore.beginMutation()) return;
+  const session = billing.sessionEpoch;
   try {
     const outcome = await platformStore.link(
       selection.accountId,
       parent.id,
       selection.group,
     );
+    if (session !== billing.sessionEpoch) return;
     if (outcome === "conflict") {
       showLink.value = false;
       notifyConflict();
-    } else {
+    } else if (outcome === "ok") {
       showLink.value = false;
       message.success(t("已关联"));
       // Linking rewrites the Key's endpoint to the parent-owned inference URL.
       emit("changed");
     }
   } catch (error) {
-    mutationError(error, "操作失败：{error}");
+    if (session === billing.sessionEpoch) mutationError(error, "操作失败：{error}");
   } finally {
-    platformStore.endMutation();
+    if (session === billing.sessionEpoch) platformStore.endMutation();
   }
 }
 
