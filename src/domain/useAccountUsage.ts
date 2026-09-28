@@ -3,6 +3,7 @@ import type { ComputedRef, Ref } from "vue";
 import { useMessage } from "naive-ui";
 import { DashboardRequestError, dashboardApi } from "../api/dashboard.ts";
 import type { Account, UsageWindow } from "../api/dashboard";
+import type { BillingStatus, ProviderUsage } from "../api/billing.ts";
 import type {
   ProviderCatalogEntry,
   ProviderQuotaWindow,
@@ -67,6 +68,7 @@ export function useAccountUsage(
   // The billing mutation flag ends before companion discovery. Operation
   // identities cover the entire action and cannot unlock a newer session.
   const refreshOperations = ref<Record<string, symbol>>({});
+  const usageLoads = new Map<string, { binding: string; session: number; pending: Promise<void> }>();
   let disposed = false;
   if (getCurrentScope()) onScopeDispose(() => { disposed = true; });
 
@@ -86,7 +88,7 @@ export function useAccountUsage(
   const providerUsageMap = computed(() => {
     const out: Record<string, ProviderUsageResponse> = {};
     for (const [id, slot] of Object.entries(billing.byId)) {
-      const presented = presentedUsageOf(slot.status);
+      const presented = presentedProjectionFor(id, slot.status);
       if (presented) out[id] = presented;
     }
     return out;
@@ -95,7 +97,7 @@ export function useAccountUsage(
   const usageMap = computed(() => {
     const out: Record<string, UsageWindow> = {};
     for (const [id, slot] of Object.entries(billing.byId)) {
-      out[id] = usageWindowFromProviderUsage(slot.status?.usage ?? null, id);
+      out[id] = usageProjectionFor(id, slot.status?.usage ?? null);
     }
     return out;
   });
@@ -121,33 +123,95 @@ export function useAccountUsage(
     return out;
   });
 
+  // Per-account projections, keyed by the slot's `usage` object identity.
+  // The store replaces a slot wholesale but preserves `status`/`usage`
+  // references across loading-only writes, so one account's begin/write cycle
+  // never changes another account's projected reference — whole-table map
+  // entries and row memos keyed on them stay valid.
+  const usageProjections = new Map<string, { source: ProviderUsage | null; window: UsageWindow }>();
+  const presentedProjections = new Map<string, { source: ProviderUsage | null; presented: ProviderUsageResponse | null }>();
+
+  function usageProjectionFor(accountId: string, source: ProviderUsage | null): UsageWindow {
+    const cached = usageProjections.get(accountId);
+    if (cached && cached.source === source) return cached.window;
+    const window = usageWindowFromProviderUsage(source, accountId);
+    usageProjections.set(accountId, { source, window });
+    return window;
+  }
+
+  function presentedProjectionFor(
+    accountId: string,
+    status: BillingStatus | null,
+  ): ProviderUsageResponse | null {
+    // presentedUsageOf depends only on status.usage; keying on the usage
+    // reference keeps the projection stable across status-only replacements.
+    const source = status?.usage ?? null;
+    const cached = presentedProjections.get(accountId);
+    if (cached && cached.source === source) return cached.presented;
+    const presented = presentedUsageOf(status);
+    presentedProjections.set(accountId, { source, presented });
+    return presented;
+  }
+
   // Row-level selectors: subscribing to one account's slot keeps an update
-  // for account X from invalidating rows that only render account Y.
+  // for account X from invalidating rows that only render account Y. Each
+  // selector is created once per account so repeated calls share one computed
+  // instead of accumulating new ones, and the projection cache above keeps
+  // its value referentially stable when the account's usage did not change.
+  const providerUsageSelectors = new Map<string, ComputedRef<ProviderUsageResponse | null>>();
+  const usageSelectors = new Map<string, ComputedRef<UsageWindow>>();
+  const usageLoadingSelectors = new Map<string, ComputedRef<boolean>>();
+  const usageLoadErrorSelectors = new Map<string, ComputedRef<string | null>>();
+  const usageRefreshLoadingSelectors = new Map<string, ComputedRef<boolean>>();
+
   function providerUsageFor(accountId: string): ComputedRef<ProviderUsageResponse | null> {
-    return computed(() => presentedUsageOf(billing.slotFor(accountId).value?.status ?? null));
+    const cached = providerUsageSelectors.get(accountId);
+    if (cached) return cached;
+    const selector = computed(() => presentedProjectionFor(
+      accountId,
+      billing.slotFor(accountId).value?.status ?? null,
+    ));
+    providerUsageSelectors.set(accountId, selector);
+    return selector;
   }
 
   function usageFor(accountId: string): ComputedRef<UsageWindow> {
-    return computed(() => usageWindowFromProviderUsage(
-      billing.slotFor(accountId).value?.status?.usage ?? null,
+    const cached = usageSelectors.get(accountId);
+    if (cached) return cached;
+    const selector = computed(() => usageProjectionFor(
       accountId,
+      billing.slotFor(accountId).value?.status?.usage ?? null,
     ));
+    usageSelectors.set(accountId, selector);
+    return selector;
   }
 
   function usageLoadingFor(accountId: string): ComputedRef<boolean> {
-    return computed(() => billing.slotFor(accountId).value?.loading ?? false);
+    const cached = usageLoadingSelectors.get(accountId);
+    if (cached) return cached;
+    const selector = computed(() => billing.slotFor(accountId).value?.loading ?? false);
+    usageLoadingSelectors.set(accountId, selector);
+    return selector;
   }
 
   function usageLoadErrorFor(accountId: string): ComputedRef<string | null> {
-    return computed(() => {
+    const cached = usageLoadErrorSelectors.get(accountId);
+    if (cached) return cached;
+    const selector = computed(() => {
       const error = billing.slotFor(accountId).value?.error;
       return error ? t(BILLING_ERROR_KEYS[error]) : null;
     });
+    usageLoadErrorSelectors.set(accountId, selector);
+    return selector;
   }
 
   function usageRefreshLoadingFor(accountId: string): ComputedRef<boolean> {
-    return computed(() => Boolean(refreshOperations.value[accountId])
+    const cached = usageRefreshLoadingSelectors.get(accountId);
+    if (cached) return cached;
+    const selector = computed(() => Boolean(refreshOperations.value[accountId])
       || (billing.slotFor(accountId).value?.mutating ?? false));
+    usageRefreshLoadingSelectors.set(accountId, selector);
+    return selector;
   }
 
   function usageLimitsFor(account: Account): UsageLimitView[] {
@@ -482,15 +546,25 @@ export function useAccountUsage(
     return billing.loadPricing();
   }
 
-  async function loadAccountUsage(accountId: string) {
+  function loadAccountUsage(accountId: string): Promise<void> {
     const account = accounts.value.find(({ id }) => id === accountId);
-    if (!account) return;
+    if (!account) return Promise.resolve();
+    const binding = bindingFor(account);
+    const session = billing.sessionEpoch;
+    const pending = usageLoads.get(accountId);
+    const slot = billing.slotFor(accountId).value;
+    if (pending?.binding === binding && pending.session === session
+      && slot?.loading && slot.boundVersion === binding) return pending.pending;
     const isCurrent = requestStillCurrent(account);
-    await billing.load(accountId, bindingFor(account));
-    if (!isCurrent()) return;
-    if (usageCapabilities(account).manual) {
-      syncUsageEdits(accountId, getUsage(accountId));
-    }
+    const request = (async () => {
+      await billing.load(accountId, binding);
+      if (!isCurrent()) return;
+      if (usageCapabilities(account).manual) syncUsageEdits(accountId, getUsage(accountId));
+    })().finally(() => {
+      if (usageLoads.get(accountId)?.pending === request) usageLoads.delete(accountId);
+    });
+    usageLoads.set(accountId, { binding, session, pending: request });
+    return request;
   }
 
   async function revalidateAccountUsage(accountId: string): Promise<void> {
@@ -501,8 +575,16 @@ export function useAccountUsage(
 
   function forgetAccount(accountId: string): void {
     delete refreshOperations.value[accountId];
+    usageLoads.delete(accountId);
     billing.remove(accountId);
     delete usageEdits.value[accountId];
+    usageProjections.delete(accountId);
+    presentedProjections.delete(accountId);
+    providerUsageSelectors.delete(accountId);
+    usageSelectors.delete(accountId);
+    usageLoadingSelectors.delete(accountId);
+    usageLoadErrorSelectors.delete(accountId);
+    usageRefreshLoadingSelectors.delete(accountId);
   }
 
   async function retryQuotaLimits() {
@@ -517,17 +599,56 @@ export function useAccountUsage(
     );
   }
 
-  watch(() => accounts.value.map(account => account.id), ids => {
+  watch(() => accounts.value.map(account => account.id), (ids, previousIds) => {
     const current = new Set(ids);
-    for (const id of new Set([...Object.keys(refreshOperations.value), ...Object.keys(usageEdits.value)])) {
+    for (const id of previousIds) {
       if (!current.has(id)) forgetAccount(id);
     }
   }, { flush: "sync" });
 
+  // The account view owns automatic billing reads. A changed account/endpoint
+  // invalidates its old evidence immediately, then reloads only that binding.
+  // Rows without a slot are still covered by the bounded initial load pass.
+  watch(() => accounts.value.map(account => ({ id: account.id, binding: bindingFor(account) })), rows => {
+    const changed = rows.filter(({ id, binding }) => {
+      const slot = billing.slotFor(id).value;
+      return slot !== undefined && slot.boundVersion !== binding;
+    });
+    for (const { id } of changed) billing.remove(id);
+    const session = billing.sessionEpoch;
+    // Batch synchronous account/connection updates before reading their final
+    // binding. An explicit owner load in this turn already covers the change.
+    void Promise.resolve().then(() => mapWithConcurrency(changed, 4, async ({ id }) => {
+      if (disposed || session !== billing.sessionEpoch) return;
+      const account = accounts.value.find(account => account.id === id);
+      if (!account) return;
+      const slot = billing.slotFor(id).value;
+      if (slot?.boundVersion === bindingFor(account)) return;
+      await loadAccountUsage(id);
+    }));
+  }, { flush: "sync" });
+
   watch(() => billing.sessionEpoch, () => {
     refreshOperations.value = {};
+    usageLoads.clear();
     usageEdits.value = {};
+    // A new session must never serve projections cached from the old one.
+    usageProjections.clear();
+    presentedProjections.clear();
+    providerUsageSelectors.clear();
+    usageSelectors.clear();
+    usageLoadingSelectors.clear();
+    usageLoadErrorSelectors.clear();
+    usageRefreshLoadingSelectors.clear();
   }, { flush: "sync" });
+
+  function ensureAccountUsage(accountId: string): Promise<void> {
+    const account = accounts.value.find(item => item.id === accountId);
+    if (!account) return Promise.resolve();
+    const slot = billing.slotFor(accountId).value;
+    if (slot?.loaded && !slot.error && slot.boundVersion === bindingFor(account)) return Promise.resolve();
+    return loadAccountUsage(accountId);
+  }
 
   return {
     quotaLimits,
@@ -557,6 +678,7 @@ export function useAccountUsage(
     automaticRefreshTarget,
     loadQuotaLimits,
     loadAccountUsage,
+    ensureAccountUsage,
     revalidateAccountUsage,
     retryQuotaLimits,
     forgetAccount,

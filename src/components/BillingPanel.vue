@@ -48,7 +48,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, watch } from "vue";
+import { computed } from "vue";
 import { NButton } from "naive-ui";
 import type { Account } from "../api/dashboard";
 import type { Identity } from "../api/identities.ts";
@@ -87,24 +87,30 @@ const endpointUrl = computed(() => (
   accountInferenceEndpointUrl(props.account, props.identity, props.connections)
 ));
 const binding = computed(() => billingBinding(props.account.updated_at, endpointUrl.value));
-const slot = computed(() => store.byId[props.account.id]);
-const status = computed(() => slot.value?.status ?? null);
-const loading = computed(() => slot.value?.loading ?? false);
-const mutating = computed(() => slot.value?.mutating ?? false);
+const slot = computed(() => store.slotFor(props.account.id).value);
+// Only a snapshot recorded against the current binding may be presented; a
+// changed or unresolved binding reads as empty until the owner reloads it.
+const matched = computed(() => {
+  const current = slot.value;
+  return current && current.boundVersion === binding.value ? current : null;
+});
+const status = computed(() => matched.value?.status ?? null);
+const loading = computed(() => matched.value?.loading ?? false);
+const mutating = computed(() => matched.value?.mutating ?? false);
 const mode = computed(() => billingPanelMode({
   status: status.value,
-  loaded: slot.value?.loaded ?? false,
+  loaded: matched.value?.loaded ?? false,
   loading: loading.value,
-  error: slot.value?.error ?? null,
+  error: matched.value?.error ?? null,
 }));
 const failureKey = computed(() => {
-  const code = slot.value?.error;
+  const code = matched.value?.error;
   return code ? BILLING_ERROR_KEYS[code] : null;
 });
 const overlayKey = computed(() => {
   const code = billingPanelOverlayError({
     status: status.value,
-    error: slot.value?.error ?? null,
+    error: matched.value?.error ?? null,
   });
   return code ? BILLING_ERROR_KEYS[code] : null;
 });
@@ -123,14 +129,6 @@ async function onRefreshCash(): Promise<void> {
     // Store keeps the last snapshot.
   }
 }
-
-watch(
-  () => [props.account.id, props.account.updated_at, endpointUrl.value] as const,
-  () => {
-    reload();
-  },
-  { immediate: true },
-);
 </script>
 
 <style scoped>

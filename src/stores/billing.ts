@@ -74,6 +74,8 @@ export const useBillingStore = defineStore("billing", () => {
   // add/remove invalidates them; value updates flow through each slot ref.
   const slotIndex = ref(0);
   const sessionEpoch = ref(0);
+  // Slot eviction must not reuse a pending request's identity (A -> B -> A).
+  let requestSequence = 0;
   const pricingLimits = ref<PricingLimits | null>(null);
   const pricingLoading = ref(false);
   const pricingError = ref("");
@@ -104,7 +106,7 @@ export const useBillingStore = defineStore("billing", () => {
   function begin(accountId: string, binding: string, flags: BeginFlags): RequestToken {
     const current = slots.get(accountId)?.value;
     const sameBinding = current !== undefined && current.boundVersion === binding;
-    const generation = (current?.generation ?? 0) + 1;
+    const generation = ++requestSequence;
     putSlot(accountId, {
       status: sameBinding ? current.status : null,
       loaded: sameBinding ? current.loaded : false,
