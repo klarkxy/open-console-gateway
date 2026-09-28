@@ -6166,6 +6166,74 @@ fn temp_data_dir(label: &str) -> PathBuf {
     dir
 }
 
+#[test]
+fn peek_schema_version_reports_none_without_a_database_file() {
+    let dir = temp_data_dir("peek-missing");
+    assert_eq!(
+        peek_schema_version(&dir).expect("peek should succeed without a database file"),
+        None
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn peek_schema_version_reads_without_migrating() {
+    let dir = temp_data_dir("peek-version");
+    let db_path = dir.join("data.sqlite");
+    {
+        let conn = Connection::open(&db_path).expect("fixture database should open");
+        conn.execute_batch(
+            "CREATE TABLE schema_version (version INTEGER NOT NULL);
+             INSERT INTO schema_version (version) VALUES (61), (63);",
+        )
+        .expect("fixture schema versions should insert");
+    }
+    let before = fs::read(&db_path).expect("fixture database should read");
+    assert_eq!(
+        peek_schema_version(&dir).expect("peek should read the fixture"),
+        Some(63)
+    );
+    let after = fs::read(&db_path).expect("fixture database should read");
+    assert_eq!(before, after, "peek must not modify the database file");
+    {
+        let conn = Connection::open(&db_path).expect("fixture database should reopen");
+        assert!(
+            !table_exists(&conn, "settings").expect("table probe should succeed"),
+            "peek must not create tables"
+        );
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn peek_app_config_reads_the_settings_row_without_a_database_open() {
+    let dir = temp_data_dir("peek-config");
+    let db_path = dir.join("data.sqlite");
+    {
+        let conn = Connection::open(&db_path).expect("fixture database should open");
+        conn.execute_batch("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);")
+            .expect("fixture settings table should be created");
+        let config = AppConfig {
+            proxy_mode: ProxyMode::Manual,
+            proxy_url: "http://127.0.0.1:7890".to_string(),
+            ..AppConfig::default()
+        };
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES ('config', ?1)",
+            [serde_json::to_string(&config).expect("config should serialize")],
+        )
+        .expect("fixture config row should insert");
+    }
+    let peeked = peek_app_config(&dir).expect("config should parse");
+    assert_eq!(peeked.proxy_mode, ProxyMode::Manual);
+    assert_eq!(peeked.proxy_url, "http://127.0.0.1:7890");
+
+    let missing = temp_data_dir("peek-config-missing");
+    assert!(peek_app_config(&missing).is_none());
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&missing);
+}
+
 fn create_v21_fixture(dir: &Path, include_reserved_account_conflict: bool) {
     let db = Database::open(dir.to_path_buf()).expect("fixture database should open");
     let mut rollback = account("rollback-account");

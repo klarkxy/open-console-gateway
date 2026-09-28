@@ -23,6 +23,12 @@ get billed for a bad guess.
   only, `scripts/free-dev-port.mjs` clears stale Vite
   processes on port `30001`; it does not release `9042` or the desktop
   single-instance lock.
+- **A startup dialog says the data was written by a newer version.** The local
+  data directory was upgraded by a newer Open Console Gateway build, and this
+  version cannot read it. Choose **Yes** to open the release page and download
+  the latest version, or **No** to exit; accounts, configuration, and data are
+  not modified. Install the update and launch again — do not delete the data
+  directory.
 - **`401 Unauthorized` from the upstream.** Zen Free temporarily cools its
   anonymous channel and tries the next compatible card.
   OpenCode Go rotates and records `auth_error` only for a structured

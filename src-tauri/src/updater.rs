@@ -113,6 +113,94 @@ async fn install_update(
     Ok(())
 }
 
+/// Runs the signed updater from a minimal hidden app when startup is blocked
+/// by a data directory written by a newer version: no database, tray, or
+/// dashboard exists yet. Returns after the update flow finishes; the caller
+/// then exits without building the normal app.
+pub fn run_standalone_update(data_dir: &std::path::Path) {
+    let Some(public_key) = embedded_public_key() else {
+        // Unsigned builds cannot verify an update; go straight to the page.
+        crate::startup_ui::open_release_page();
+        return;
+    };
+    let config = ocg_core::db::peek_app_config(data_dir).unwrap_or_default();
+    // The release build merges `plugins.updater.pubkey` into the config; this
+    // standalone path must inject it itself or plugin init fails on null.
+    let mut context = tauri::generate_context!();
+    context.config_mut().plugins.0.insert(
+        "updater".to_string(),
+        serde_json::json!({ "pubkey": public_key }),
+    );
+    let application = tauri::Builder::default()
+        .plugin(
+            tauri_plugin_updater::Builder::new()
+                .pubkey(public_key)
+                .build(),
+        )
+        .setup(move |app| {
+            let handle = app.handle().clone();
+            let config = config.clone();
+            tauri::async_runtime::spawn(async move {
+                standalone_update_flow(&handle, &config).await;
+                handle.exit(0);
+            });
+            Ok(())
+        })
+        .build(context);
+    let application = match application {
+        Ok(application) => application,
+        Err(error) => {
+            crate::startup_ui::show_update_error(&format!("{error:#}"));
+            crate::startup_ui::open_release_page();
+            return;
+        }
+    };
+    application.run(|_, _| {});
+}
+
+async fn standalone_update_flow(app: &AppHandle, config: &AppConfig) {
+    let updater = (|| -> crate::Result<tauri_plugin_updater::Updater> {
+        let endpoint = UPDATE_ENDPOINT
+            .parse()
+            .context("invalid built-in updater endpoint")?;
+        let builder = apply_updater_proxy(app.updater_builder(), config)?;
+        builder
+            .timeout(UPDATE_CHECK_TIMEOUT)
+            .endpoints(vec![endpoint])
+            .and_then(|builder| builder.build())
+            .map_err(Into::into)
+    })();
+    let updater = match updater {
+        Ok(updater) => updater,
+        Err(error) => return fail_standalone_update(&format!("{error:#}")),
+    };
+    let update = match updater.check().await {
+        Ok(Some(update)) => update,
+        Ok(None) => {
+            return fail_standalone_update("the signed update feed has no newer version");
+        }
+        Err(error) => return fail_standalone_update(&format!("{error:#}")),
+    };
+    if !crate::startup_ui::confirm_install_update(&update.version) {
+        return;
+    }
+    let mut update = update;
+    update.timeout = Some(UPDATE_DOWNLOAD_TIMEOUT);
+    let bytes = match update.download(|_, _| {}, || {}).await {
+        Ok(bytes) => bytes,
+        Err(error) => return fail_standalone_update(&format!("{error:#}")),
+    };
+    if let Err(error) = update.install(&bytes) {
+        return fail_standalone_update(&format!("{error:#}"));
+    }
+    // The spawned installer waits for this process to exit; the caller exits now.
+}
+
+fn fail_standalone_update(error: &str) {
+    crate::startup_ui::show_update_error(error);
+    crate::startup_ui::open_release_page();
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum UpdaterProxySetting {
     FollowSystem,

@@ -1194,6 +1194,37 @@ fn schema_version_on(conn: &Connection) -> Result<i32> {
         .unwrap_or(0))
 }
 
+/// Reads the persisted schema version without opening through [`Database`]: no
+/// migrations, no open guard, no cipher. Hosts probe with this before bringing
+/// up their UI so a newer-than-supported database fails with an actionable
+/// prompt instead of a setup error.
+pub fn peek_schema_version(data_dir: &Path) -> Result<Option<i32>> {
+    let db_path = data_dir.join("data.sqlite");
+    if !db_path.exists() {
+        return Ok(None);
+    }
+    let conn = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .with_context(|| format!("failed to open {} read-only", db_path.display()))?;
+    Ok(Some(schema_version_on(&conn)?))
+}
+
+/// Reads the persisted AppConfig without opening through [`Database`], for
+/// hosts that must act (e.g. check for updates) before the full database open
+/// is allowed. Returns None when the file or setting is missing or unreadable.
+pub fn peek_app_config(data_dir: &Path) -> Option<AppConfig> {
+    let db_path = data_dir.join("data.sqlite");
+    let conn = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    let json = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'config'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .ok()??;
+    serde_json::from_str(&json).ok()
+}
+
 fn verify_schema_backup(path: &Path, prefix: &str, source_version: i32) -> Result<()> {
     let backup = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .with_context(|| format!("failed to open {prefix} backup {}", path.display()))?;

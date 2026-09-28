@@ -26,6 +26,12 @@ const GATEWAY_PORT_ENV: &str = "OCG_GATEWAY_PORT";
 
 pub fn run() {
     ocg_core::cpa_runtime::host::run_internal_supervisor_if_requested();
+    if let Some(found) = newer_schema_version() {
+        if startup_ui::prompt_update_for_newer_schema(found, ocg_core::db::CURRENT_SCHEMA_VERSION) {
+            updater::run_standalone_update(&data_dir());
+        }
+        return;
+    }
     let application = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             if !args.iter().any(|arg| arg == "--startup")
@@ -117,6 +123,25 @@ pub fn run() {
                 .log_gateway("info", "gateway", "application exiting");
         }
     });
+}
+
+/// The Tauri builder panics on setup-hook errors, so a newer-than-supported
+/// database is intercepted before it to give the user an actionable dialog.
+/// Probe failures fall through: the normal open path reports its own error.
+/// Development builds skip the interception (set OCG_DEV_STARTUP_GUARD=1 to
+/// exercise it): they are expected to run against any local schema.
+fn newer_schema_version() -> Option<i32> {
+    if cfg!(debug_assertions) && std::env::var_os("OCG_DEV_STARTUP_GUARD").is_none() {
+        return None;
+    }
+    match ocg_core::db::peek_schema_version(&data_dir()) {
+        Ok(Some(found)) if found > ocg_core::db::CURRENT_SCHEMA_VERSION => Some(found),
+        Ok(_) => None,
+        Err(error) => {
+            eprintln!("warning: failed to probe the database schema version: {error:#}");
+            None
+        }
+    }
 }
 
 fn initialize_host() -> Result<state::AppState> {
