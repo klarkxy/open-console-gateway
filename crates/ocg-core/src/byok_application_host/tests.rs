@@ -1740,3 +1740,126 @@ fn make_symlink(src: &Path, dst: &Path) -> std::io::Result<()> {
         std::os::windows::fs::symlink_file(src, dst)
     }
 }
+
+fn record_console(harness: &mut Harness) -> Arc<Mutex<Vec<(Level, String)>>> {
+    let lines = Arc::new(Mutex::new(Vec::new()));
+    harness.host.console = HostConsole::Recording(lines.clone());
+    lines
+}
+
+fn recorded(lines: &Arc<Mutex<Vec<(Level, String)>>>) -> Vec<(Level, String)> {
+    lines.lock().unwrap().clone()
+}
+
+#[test]
+fn host_console_reports_a_completed_write_without_key_material() {
+    let mut h = harness("console-success");
+    let lines = record_console(&mut h);
+    let view = inspect(&h.host, ByokClient::Codex);
+    configure(
+        &h.host,
+        ByokClient::Codex,
+        view.fingerprint.as_deref().unwrap(),
+        vec![model("m", 1000, None)],
+        None,
+    )
+    .unwrap();
+
+    let events = recorded(&lines);
+    assert!(
+        events.iter().any(|(level, message)| *level == Level::Info
+            && message.starts_with("configure finished for codex at ")
+            && message.contains("config.toml")),
+        "a finished write must be reported with the client and file: {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .all(|(_, message)| !message.contains("sk-test-secret")),
+        "the Key never reaches the console sink: {events:?}"
+    );
+}
+
+#[test]
+fn host_console_reports_a_refused_write_and_leaves_the_file_untouched() {
+    let mut h = harness("console-refusal");
+    let lines = record_console(&mut h);
+    let path = target_file(&h.host, ByokClient::Kimi);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let foreign = "[providers.ocg]\ntype = \"openai\"\nbase_url = \"http://example.test\"\n";
+    fs::write(&path, foreign).unwrap();
+    let view = inspect(&h.host, ByokClient::Kimi);
+    let error = configure(
+        &h.host,
+        ByokClient::Kimi,
+        view.fingerprint.as_deref().unwrap(),
+        vec![model("m", 1000, None)],
+        None,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.kind, crate::byok_application::ByokErrorKind::Conflict);
+    assert_eq!(
+        read_text(&path),
+        foreign,
+        "a refused write must not touch the file"
+    );
+    let events = recorded(&lines);
+    assert!(
+        events.iter().any(|(level, message)| *level == Level::Warn
+            && message.contains("already holds a configuration named ocg that OCG does not own")),
+        "the collision must be reported: {events:?}"
+    );
+    assert!(
+        events.iter().any(|(level, message)| *level == Level::Warn
+            && message.starts_with("configure refused for kimi at ")
+            && message.ends_with(": conflict")),
+        "the refusal must name the operation and the reason kind: {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .all(|(_, message)| !message.contains("sk-test-secret")),
+        "the Key never reaches the console sink: {events:?}"
+    );
+}
+
+#[test]
+fn host_console_reports_a_stale_fingerprint_as_an_abandoned_operation() {
+    let mut h = harness("console-stale");
+    let lines = record_console(&mut h);
+    let view = inspect(&h.host, ByokClient::Codex);
+    let stale = view.fingerprint.clone().unwrap();
+
+    configure(
+        &h.host,
+        ByokClient::Codex,
+        &stale,
+        vec![model("m", 1000, None)],
+        None,
+    )
+    .unwrap();
+    let refreshed = inspect(&h.host, ByokClient::Codex);
+    let written = read_text(&target_file(&h.host, ByokClient::Codex));
+    fs::write(
+        &target_file(&h.host, ByokClient::Codex),
+        format!("{written}# edited\n"),
+    )
+    .unwrap();
+    let error = configure(
+        &h.host,
+        ByokClient::Codex,
+        refreshed.fingerprint.as_deref().unwrap(),
+        vec![model("m", 1000, None)],
+        None,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.kind, crate::byok_application::ByokErrorKind::Conflict);
+    let events = recorded(&lines);
+    assert!(
+        events.iter().any(|(level, message)| *level == Level::Warn
+            && message.contains("changed after it was read; the operation was abandoned")),
+        "an operation that lost the race must say so: {events:?}"
+    );
+}

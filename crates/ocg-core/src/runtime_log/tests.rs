@@ -1,4 +1,45 @@
 use super::Level;
+use super::{render_console_block, split_console_lines};
+
+/// A fixed wall clock keeps the rendered shape deterministic.
+fn stamp() -> chrono::DateTime<chrono::Local> {
+    chrono::Local::now()
+        .with_time(chrono::NaiveTime::from_hms_opt(9, 5, 0).unwrap())
+        .unwrap()
+}
+
+#[test]
+fn console_block_stamps_the_message_and_aligns_continuations() {
+    let rendered = render_console_block(Level::Warn, &["head", "tail"], stamp());
+    assert_eq!(rendered[0], "09:05:00 WARN  head");
+    let column = rendered[0].find("head").unwrap();
+    assert!(
+        rendered[1].starts_with(&" ".repeat(column)),
+        "continuations line up under the message column: {rendered:?}"
+    );
+    assert!(rendered[1].ends_with("tail"));
+}
+
+#[test]
+fn console_lines_drop_blanks_and_truncate_on_a_character_boundary() {
+    let long = "é".repeat(200);
+    let lines = split_console_lines(&format!("\n  {long}  \n\n short "));
+    assert_eq!(lines[1], "short");
+    let truncated = &lines[0];
+    assert!(
+        truncated.ends_with('…'),
+        "an over-long line is marked: {truncated}"
+    );
+    let body = &truncated[..truncated.len() - '…'.len_utf8()];
+    assert!(
+        body.len() < 240,
+        "the body respects the console bound: {body}"
+    );
+    assert!(
+        long.starts_with(body),
+        "truncation keeps a prefix of the message"
+    );
+}
 
 #[test]
 fn severity_order_and_normalization() {

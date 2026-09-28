@@ -33,6 +33,8 @@ The host keeps private origin backups, ownership receipts, and an operation jour
 
 Codex and Kimi require the operator to close the client before writes; their in-process writers do not provide a shared external lock. MiniMax and ZCode use their upstream lock conventions. Do not reclaim unknown or live locks. JSON/YAML serialization preserves unrelated values; MiniMax YAML comments are retained only in the original backup. TOML edits preserve comments.
 
+The host writes one operational line per event to process stderr through the shared `runtime_log` console sink: a finished mutation, a refusal with its reason kind, a stale fingerprint, an unowned `ocg` collision, an external edit of owned fields, a pending interrupted write, and a completed rollback. Messages name the client and the file only, and the sink never receives a Key, a request body, or a credential-bearing URL. A refused mutation reports the `ByokErrorKind`, not the response text, so an unsanitized message cannot reach the log. Dashboard-visible receipts stay the user-facing surface.
+
 ## Validation
 
 Run `pnpm run contract:v4:check`, `pnpm run build:web`, the BYOK frontend domain/store/component tests, and the Applications behavior tests. Run Rust filters `dashboard_v4::byok_applications` and `byok_application_host` with the native feature, plus relevant DSH regression tests. Build the native CLI before `node scripts/byok-applications-smoke.mjs`; it uses isolated homes and synthetic credentials. Test the no-default-features CLI capability separately.

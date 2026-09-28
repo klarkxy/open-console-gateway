@@ -33,6 +33,8 @@ Host 在自身数据目录保存私有的原始备份、所有权记录和操作
 
 Codex、Kimi 写入前要求用户关闭客户端，其进程内写入服务不提供共享外部锁。MiniMax、ZCode 遵循上游文件锁约定，不接管未知或仍在使用的锁。JSON/YAML 序列化保留无关字段值；MiniMax YAML 注释仅保留在原始备份中。TOML 编辑保留注释。
 
+Host 通过 `runtime_log` 共享的控制台 sink 向上进程的 stderr 逐事件输出一行运维信息：写入完成、带原因类别的拒绝、fingerprint 过期、非 OCG 所有的 `ocg` 冲突、所属字段被外部修改、存在未完成写入，以及回滚完成。消息只包含客户端名和文件路径，sink 不会收到 Key、请求体或带凭据的 URL。拒绝事件只记录 `ByokErrorKind` 而非响应原文，未脱敏的报错文本无法进入日志。面向用户的界面仍以 Dashboard 可见的 receipt 为准。
+
 ## 验证
 
 运行 `pnpm run contract:v4:check`、`pnpm run build:web`、BYOK 前端领域/状态/组件测试，以及 Applications 行为测试。原生特性下运行 Rust 的 `dashboard_v4::byok_applications`、`byok_application_host` 筛选测试，并执行相关 DSH 回归。先构建原生 CLI，再运行 `node scripts/byok-applications-smoke.mjs`；脚本只使用隔离目录和模拟凭据。另行验证 no-default-features CLI 的能力边界。

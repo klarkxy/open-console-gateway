@@ -5,9 +5,11 @@
 //! directory and are never serialized onto the wire.
 
 use crate::byok_application::{
-    ByokClient, ByokError, ByokHostRequest, ByokInspection, ByokModel, ByokResult, ByokStatus,
+    ByokClient, ByokError, ByokErrorKind, ByokHostRequest, ByokInspection, ByokModel, ByokResult,
+    ByokStatus,
 };
 use crate::dsh_application_host::{absolute_host_path, is_link_or_reparse, user_home};
+use crate::runtime_log::Level;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -39,11 +41,21 @@ pub fn register(core: &crate::state::CoreState) {
     core.set_byok_application_host(Arc::new(move |request| host.execute(request)));
 }
 
+/// Where operational host events go. Production writes process stderr; tests
+/// record instead so the emitted events can be asserted without a pipe.
+#[derive(Clone, Default)]
+enum HostConsole {
+    #[default]
+    Stderr,
+    Recording(Arc<Mutex<Vec<(Level, String)>>>),
+}
+
 struct ByokNativeHost {
     data_dir: PathBuf,
     paths: DiscoveredPaths,
     lock_policy: LockPolicy,
     operations: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    console: HostConsole,
     #[cfg(test)]
     fail_after_writes: Mutex<Option<usize>>,
 }
@@ -55,9 +67,60 @@ impl ByokNativeHost {
             paths,
             lock_policy,
             operations: Mutex::new(HashMap::new()),
+            console: HostConsole::default(),
             #[cfg(test)]
             fail_after_writes: Mutex::new(None),
         }
+    }
+
+    /// Emit one operational line. Messages name the client and the file only:
+    /// Keys, request bodies, and credential-bearing URLs never reach here.
+    fn report(&self, level: Level, message: impl std::fmt::Display) {
+        match &self.console {
+            HostConsole::Stderr => crate::runtime_log::console(level, message),
+            HostConsole::Recording(lines) => {
+                if let Ok(mut lines) = lines.lock() {
+                    lines.push((level, message.to_string()));
+                }
+            }
+        }
+    }
+
+    /// Record why a mutation ended. Only the error kind is logged; the message
+    /// itself stays with the response so nothing unsanitized is written out.
+    fn report_outcome(
+        &self,
+        operation: &str,
+        client: ByokClient,
+        target: &ResolvedTarget,
+        result: &ByokResult<ByokInspection>,
+    ) {
+        let at = target.path.display();
+        match result {
+            Ok(_) => self.report(
+                Level::Info,
+                format!("{operation} finished for {} at {at}", client.id()),
+            ),
+            Err(error) => self.report(
+                Level::Warn,
+                format!(
+                    "{operation} refused for {} at {at}: {}",
+                    client.id(),
+                    error_kind_label(&error.kind)
+                ),
+            ),
+        }
+    }
+
+    fn report_external_change(&self, client: ByokClient, target: &ResolvedTarget) {
+        self.report(
+            Level::Warn,
+            format!(
+                "{} at {} was changed outside OCG; the owned fields were not overwritten",
+                client.id(),
+                target.path.display()
+            ),
+        );
     }
 
     fn execute(&self, request: ByokHostRequest) -> ByokResult<ByokInspection> {
@@ -79,25 +142,31 @@ impl ByokNativeHost {
                 client_closed,
             } => {
                 let secret_text = secret.expose_to_host().to_string();
-                self.mutate(client, target_path.as_deref(), &secret_text, |target| {
-                    self.configure(
-                        client,
-                        target,
-                        &expected_fingerprint,
-                        &gateway_v1_url,
-                        &secret_text,
-                        &models,
-                        default_model_id.as_deref(),
-                        client_closed,
-                    )
-                })
+                self.mutate(
+                    client,
+                    target_path.as_deref(),
+                    &secret_text,
+                    "configure",
+                    |target| {
+                        self.configure(
+                            client,
+                            target,
+                            &expected_fingerprint,
+                            &gateway_v1_url,
+                            &secret_text,
+                            &models,
+                            default_model_id.as_deref(),
+                            client_closed,
+                        )
+                    },
+                )
             }
             ByokHostRequest::Remove {
                 client,
                 target_path,
                 expected_fingerprint,
                 client_closed,
-            } => self.mutate(client, target_path.as_deref(), "", |target| {
+            } => self.mutate(client, target_path.as_deref(), "", "remove", |target| {
                 self.remove(client, target, &expected_fingerprint, client_closed)
             }),
             ByokHostRequest::Recover {
@@ -105,7 +174,7 @@ impl ByokNativeHost {
                 target_path,
                 expected_fingerprint,
                 client_closed,
-            } => self.mutate(client, target_path.as_deref(), "", |target| {
+            } => self.mutate(client, target_path.as_deref(), "", "recover", |target| {
                 self.recover(client, target, &expected_fingerprint, client_closed)
             }),
         }
@@ -128,9 +197,23 @@ impl ByokNativeHost {
                 .or_insert_with(|| Arc::new(Mutex::new(())))
                 .clone()
         };
-        let _guard = lock
-            .lock()
-            .map_err(|_| ByokError::internal("BYOK operation lock is poisoned"))?;
+        let _guard = match lock.try_lock() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                return Err(ByokError::internal("BYOK operation lock is poisoned"));
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {
+                self.report(
+                    Level::Info,
+                    format!(
+                        "waiting for another OCG operation on {}",
+                        target.path.display()
+                    ),
+                );
+                lock.lock()
+                    .map_err(|_| ByokError::internal("BYOK operation lock is poisoned"))?
+            }
+        };
         op(&target)
     }
 
@@ -139,10 +222,14 @@ impl ByokNativeHost {
         client: ByokClient,
         target_path: Option<&str>,
         secret: &str,
+        operation: &str,
         op: impl FnOnce(&ResolvedTarget) -> ByokResult<ByokInspection>,
     ) -> ByokResult<ByokInspection> {
-        let result = self.with_target_lock(client, target_path, op);
-        sanitize(result, secret)
+        self.with_target_lock(client, target_path, |target| {
+            let result = sanitize(op(target), secret);
+            self.report_outcome(operation, client, target, &result);
+            result
+        })
     }
 
     fn inspect(&self, client: ByokClient, target: &ResolvedTarget) -> ByokResult<ByokInspection> {
@@ -206,6 +293,14 @@ impl ByokNativeHost {
         let receipt = load_receipt(&store, &target)?;
         if receipt.as_ref().is_some_and(|r| r.pending.is_some()) || store.load_journal()?.is_some()
         {
+            self.report(
+                Level::Warn,
+                format!(
+                    "{} at {} has an interrupted write; recover it before writing again",
+                    client.id(),
+                    target.path.display()
+                ),
+            );
             return Err(ByokError::precondition(
                 "Recover the interrupted write before configuring",
             ));
@@ -225,11 +320,20 @@ impl ByokNativeHost {
             return Err(ByokError::invalid(detail));
         }
         if parsed.collision {
+            self.report(
+                Level::Warn,
+                format!(
+                    "{} at {} already holds a configuration named ocg that OCG does not own",
+                    client.id(),
+                    target.path.display()
+                ),
+            );
             return Err(ByokError::conflict(
                 "An unowned ocg provider already exists in this configuration",
             ));
         }
         if parsed.user_changed_owned {
+            self.report_external_change(client, &target);
             return Err(ByokError::conflict(
                 "Owned fields changed outside OCG; the configuration was not overwritten",
             ));
@@ -278,6 +382,14 @@ impl ByokNativeHost {
         let receipt = load_receipt(&store, &target)?
             .ok_or_else(|| ByokError::precondition("No OCG-owned configuration to remove"))?;
         if receipt.pending.is_some() || store.load_journal()?.is_some() {
+            self.report(
+                Level::Warn,
+                format!(
+                    "{} at {} has an interrupted write; recover it before removing",
+                    client.id(),
+                    target.path.display()
+                ),
+            );
             return Err(ByokError::precondition(
                 "Recover the interrupted write before removing",
             ));
@@ -294,6 +406,7 @@ impl ByokNativeHost {
             Some(&receipt),
         );
         if parsed.user_changed_owned {
+            self.report_external_change(client, &target);
             return Err(ByokError::conflict(
                 "Owned fields changed outside OCG; the configuration was not overwritten",
             ));
@@ -333,6 +446,14 @@ impl ByokNativeHost {
         };
         _cross.assert_held()?;
         store.recover_journal(&target, &journal)?;
+        self.report(
+            Level::Info,
+            format!(
+                "rolled back an interrupted {} write at {}",
+                client.id(),
+                target.path.display()
+            ),
+        );
         self.inspect(client, &target).map(|mut view| {
             view.activation_required = true;
             view
@@ -362,6 +483,14 @@ impl ByokNativeHost {
         );
         if actual != expected {
             let _ = client;
+            self.report(
+                Level::Warn,
+                format!(
+                    "{} at {} changed after it was read; the operation was abandoned",
+                    client.id(),
+                    target.path.display()
+                ),
+            );
             return Err(ByokError::conflict(
                 "Configuration changed; refresh and retry",
             ));
@@ -498,6 +627,17 @@ fn require_closed(client: ByokClient, client_closed: bool) -> ByokResult<()> {
         ));
     }
     Ok(())
+}
+
+/// Operator-facing reason for a refused mutation. The error message stays
+/// with the response; only this kind label reaches the console sink.
+fn error_kind_label(kind: &ByokErrorKind) -> &'static str {
+    match kind {
+        ByokErrorKind::Invalid => "invalid request",
+        ByokErrorKind::Precondition => "precondition not met",
+        ByokErrorKind::Conflict => "conflict",
+        ByokErrorKind::Internal => "internal error",
+    }
 }
 
 fn sanitize(result: ByokResult<ByokInspection>, secret: &str) -> ByokResult<ByokInspection> {
