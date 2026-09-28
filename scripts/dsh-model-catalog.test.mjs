@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { parseModelCatalog, describeOcgModel, THINKING_LEVELS } from "../integrations/dsh-plugin/model-catalog.js";
-const options = { providerId: "open-console-gateway", baseUrl: "http://127.0.0.1:9042/v1" };
+const options = { providerId: "ocg", baseUrl: "http://127.0.0.1:9042/v1" };
 const parse = (...rows) => parseModelCatalog({ data: rows }, options);
 const declared = (extra = {}) => ({ id: "private-alias", name: "Private model", ocg: {
   schemaVersion: 1, status: "declared", contextWindow: 262144, maxOutputTokens: 32768,

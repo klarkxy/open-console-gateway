@@ -1,11 +1,10 @@
 # Open Console Gateway for DSH
 
 This package is generated and installed by the Open Console Gateway Desktop
-application. It registers `ocg` in the selected DSH profile and retains
-`open-console-gateway` for existing selections. Both routes read the current
-authenticated `GET /v1/models` catalog
-from the local Gateway and forward model calls through the OpenAI-compatible
-Chat Completions endpoint.
+application. It registers `ocg` in the selected DSH profile and reads the
+current authenticated `GET /v1/models` catalog from the local Gateway,
+forwarding model calls through the OpenAI-compatible Chat Completions
+endpoint.
 
 Runtime libraries are loaded from the active DSH installation. This package
 does not declare or install private copies of DSH/pi-ai peer dependencies;

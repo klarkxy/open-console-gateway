@@ -35,7 +35,7 @@ const { PiAiAdapter } = dshPiAi;
 export const name = "open-console-gateway-dsh";
 export const inject = ["llm", "credentials"];
 
-const providerIds = ["ocg", "open-console-gateway"];
+const providerIds = ["ocg"];
 const displayName = "Open Console Gateway";
 const baseUrl = "__OCG_GATEWAY_V1_URL__";
 const credentialRef = "OCG_GATEWAY_KEY";
@@ -256,7 +256,7 @@ export async function apply(ctx) {
     providerInfo(provider) {
       return {
         id: provider,
-        name: provider === "ocg" ? displayName : `${displayName} (legacy)`,
+        name: displayName,
       };
     }
 

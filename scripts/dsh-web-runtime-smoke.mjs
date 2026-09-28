@@ -188,9 +188,8 @@ try {
   assert.ok(live.some((entry) => entry.moduleName === packageName && entry.fiberPhase === "active"));
   const providers = await rpc("llm/listProviders");
   const modelCatalog = await rpc("session/modelCatalog");
-  for (const provider of ["ocg", "open-console-gateway"]) {
-    const name = provider === "ocg" ? "Open Console Gateway" : "Open Console Gateway (legacy)";
-    assert.ok(providers.some((entry) => entry.id === provider && entry.name === name));
+  for (const provider of ["ocg"]) {
+    assert.ok(providers.some((entry) => entry.id === provider && entry.name === "Open Console Gateway"));
     assert.deepEqual(modelCatalog.failures.filter((failure) => failure.id === provider), []);
     assert.ok(modelCatalog.groups.some((group) =>
       group.id === provider &&

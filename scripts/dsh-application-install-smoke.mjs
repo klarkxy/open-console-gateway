@@ -186,13 +186,13 @@ async function main() {
         };
         const plugin = await import(${JSON.stringify(pathToFileURL(installedIndex).href)});
         await plugin.apply(ctx);
-        const models = await adapter.listModels("open-console-gateway");
-        const prepared = await adapter.prepareCall("open-console-gateway", "smoke-model-a");
+        const models = await adapter.listModels("ocg");
+        const prepared = await adapter.prepareCall("ocg", "smoke-model-a");
         if (prepared.model.context.contextWindow !== 262144) throw new Error("context metadata did not reach DSH");
         if (JSON.stringify(prepared.model.reasoning.efforts.map((effort) => effort.id)) !== JSON.stringify(["low", "high", "xhigh"])) throw new Error("reasoning tiers did not reach DSH");
         const streamChunks = [];
         for await (const chunk of prepared.stream({
-          provider: "open-console-gateway",
+          provider: "ocg",
           model: "smoke-model-a",
           reasoningEffort: "xhigh",
           messages: [{

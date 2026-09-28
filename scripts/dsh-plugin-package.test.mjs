@@ -136,7 +136,7 @@ function applyOnlySource(plugin, bootstrap, extra = "") {
 }
 
 for (const explicitMetadata of [false, true]) {
-test(`generated DSH plugin prepares both provider names with ${explicitMetadata ? "explicit metadata" : "no explicit metadata"}`, async () => {
+test(`generated DSH plugin prepares the ocg provider with ${explicitMetadata ? "explicit metadata" : "no explicit metadata"}`, async () => {
   const root = await mkdtemp(join(tmpdir(), "ocg-dsh-plugin-"));
   try {
     const bootstrap = join(root, "credential-handoff");
@@ -191,11 +191,11 @@ test(`generated DSH plugin prepares both provider names with ${explicitMetadata 
       ref: "OCG_GATEWAY_KEY",
       value: "ocg-test-key",
     });
-    assert.deepEqual(result.registeredProviders, ["ocg", "open-console-gateway"]);
+    assert.deepEqual(result.registeredProviders, ["ocg"]);
     for (const provider of result.registeredProviders) {
       assert.deepEqual(result.routes[provider].info, {
         id: provider,
-        name: provider === "ocg" ? "Open Console Gateway" : "Open Console Gateway (legacy)",
+        name: "Open Console Gateway",
       });
       assert.deepEqual(
         result.routes[provider].models.map(({ id }) => id),
