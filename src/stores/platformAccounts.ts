@@ -14,7 +14,7 @@ import { dashboardErrorDetail } from "../utils/errors.ts";
 import { useDestinationsStore } from "./destinations.ts";
 
 export type PlatformPendingLink = { accountId: string; parentId: string };
-export type PlatformPersistOutcome = "saved" | "saved_refresh_failed" | "conflict" | "error";
+export type PlatformPersistOutcome = "saved" | "conflict" | "error";
 export type PlatformWriteOutcome = "ok" | "conflict" | "error";
 
 export interface PlatformAccountWritePayload {
@@ -46,6 +46,7 @@ export const usePlatformAccountsStore = defineStore("platformAccounts", () => {
   // loading/error presentation. Mirrors the load guard in stores/accounts.ts.
   let loadGeneration = 0;
   let sessionEpoch = 0;
+  let destinationReadGeneration = 0;
   let refreshEpoch = 0;
   const refreshRequests = new Map<string, Promise<PlatformWriteOutcome>>();
 
@@ -146,19 +147,7 @@ export const usePlatformAccountsStore = defineStore("platformAccounts", () => {
         });
       if (session !== sessionEpoch) return "error";
       acceptView(next);
-      try {
-        // Both create and update change the destination projection revision.
-        // Refresh the full snapshot before a card or catalog write can capture
-        // its next CAS pair, including edits that leave the parent name alone.
-        await useDestinationsStore().refreshAfterMutation();
-        if (session !== sessionEpoch) return "error";
-        destinationRefreshError.value = "";
-      } catch (error) {
-        if (session !== sessionEpoch) return "error";
-        // The platform write already committed; cards keep the previous dest snapshot.
-        destinationRefreshError.value = dashboardErrorDetail(error);
-        return "saved_refresh_failed";
-      }
+      void refreshDestinationProjection();
       return "saved";
     } catch (e) {
       if (session !== sessionEpoch) return "error";
@@ -166,6 +155,20 @@ export const usePlatformAccountsStore = defineStore("platformAccounts", () => {
       throw e;
     } finally {
       if (session === sessionEpoch) endMutation();
+    }
+  }
+
+  async function refreshDestinationProjection(): Promise<void> {
+    const session = sessionEpoch;
+    const generation = ++destinationReadGeneration;
+    destinationRefreshError.value = "";
+    try {
+      // Keep the previous coherent snapshot/CAS pair until this read commits.
+      await useDestinationsStore().refreshAfterMutation();
+    } catch (error) {
+      if (session === sessionEpoch && generation === destinationReadGeneration) {
+        destinationRefreshError.value = dashboardErrorDetail(error);
+      }
     }
   }
 
@@ -417,6 +420,7 @@ export const usePlatformAccountsStore = defineStore("platformAccounts", () => {
     beginMutation,
     endMutation,
     createOrUpdate,
+    refreshDestinationProjection,
     remove,
     forgetAccount,
     refreshParent,

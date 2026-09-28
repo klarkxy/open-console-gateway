@@ -415,6 +415,7 @@ test("delete removes the destination and its credentials and keeps the new revis
   await pending;
   assert.equal(store.destinations.length, 0);
   assert.equal(store.credentials.length, 0);
+  assert.equal(store.cards.length, 0);
   assert.deepEqual(store.expectation, { expectedRevision: 7, processGeneration: 99 });
 });
 

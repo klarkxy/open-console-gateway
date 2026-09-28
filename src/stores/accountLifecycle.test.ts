@@ -51,7 +51,10 @@ test("duplicate delete clicks send one request and remove only the confirmed Key
   assert.equal(f.accounts.byId.has("a"), true);
   pending.resolve(undefined);
   const results = await Promise.all([first, second]);
-  assert.ok(results.every(result => result.kind === "deleted_refresh_failed"));
+  for (const result of results) {
+    assert.equal(result.kind, "deleted");
+    if (result.kind === "deleted") assert.equal((await result.revalidation).kind, "failed");
+  }
   assert.deepEqual(f.accounts.accounts.map(row => row.id), ["b"]);
   assert.deepEqual(f.platforms.links.map(row => row.accountId), ["b"]);
   assert.deepEqual(f.lifecycle.deleting, {});
@@ -66,6 +69,36 @@ test("a failed DELETE keeps both account and platform link and never revalidates
   assert.equal(f.platforms.links.length, 2);
   assert.equal(f.revalidate.mock.callCount(), 0);
   assert.deepEqual(f.lifecycle.deleting, {});
+});
+
+test("confirmed deletion releases the dialog result and lock before slow revalidation", async t => {
+  const f = fixture(t);
+  const reload = deferred<void>();
+  t.mock.method(useDestinationsStore(), "refreshAfterMutation", () => reload.promise);
+  const remove = t.mock.method(dashboardApi, "deleteAccount", async () => {});
+  let settled = false;
+  const removing = f.lifecycle.remove("a").then(result => { settled = true; return result; });
+  await flush();
+  assert.equal(settled, true);
+  assert.equal(f.accounts.byId.has("a"), false);
+  assert.deepEqual(f.lifecycle.deleting, {});
+  assert.equal(remove.mock.callCount(), 1);
+  const result = await removing;
+  assert.equal(result.kind, "deleted");
+  reload.resolve(undefined);
+  if (result.kind === "deleted") assert.equal((await result.revalidation).kind, "failed");
+});
+
+test("background revalidation cannot report failure into a new session", async t => {
+  const f = fixture(t);
+  const reload = deferred<void>();
+  t.mock.method(useDestinationsStore(), "refreshAfterMutation", () => reload.promise);
+  t.mock.method(dashboardApi, "deleteAccount", async () => {});
+  const result = await f.lifecycle.remove("a");
+  assert.equal(result.kind, "deleted");
+  f.billing.clear();
+  reload.resolve(undefined);
+  if (result.kind === "deleted") assert.equal((await result.revalidation).kind, "cancelled");
 });
 
 test("a revision conflict reloads state without retrying DELETE", async t => {

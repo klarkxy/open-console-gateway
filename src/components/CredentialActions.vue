@@ -15,22 +15,22 @@
     </n-tooltip>
   </div>
 
-  <div v-if="!compact && refreshVisible" :class="actionClass('secondary')">
+  <div v-if="compact ? !!refreshAction : refreshVisible" :class="actionClass('secondary')">
     <n-tooltip trigger="hover">
       <template #trigger>
         <n-button
           circle
           quaternary
           size="small"
-          :aria-label="t('刷新')"
-          :loading="usageRefreshLoading"
-          :disabled="usageLoading || !!usageLoadError"
+          :aria-label="refreshLabel"
+          :loading="refreshState === 'running' || usageRefreshLoading"
+          :disabled="!!refreshState || (compact ? !!refreshAction?.disabled : usageLoading || !!usageLoadError)"
           @click="emit('refresh-usage')"
         >
-          <template #icon><n-icon :component="ReloadOutlined" /></template>
+          <template #icon><n-icon :component="refreshState === 'queued' ? ClockCircleOutlined : ReloadOutlined" /></template>
         </n-button>
       </template>
-      {{ t("刷新") }}
+      {{ refreshLabel }}
     </n-tooltip>
   </div>
 
@@ -143,6 +143,7 @@ import {
 } from "naive-ui";
 import {
   ApiOutlined,
+  ClockCircleOutlined,
   EditOutlined,
   MoreOutlined,
   ReloadOutlined,
@@ -167,6 +168,7 @@ import { accountInferenceEndpointUrl, officialBalanceSupported } from "../domain
 import type { Connection } from "../api/connections.ts";
 import AccountUsageEditor from "./AccountUsageEditor.vue";
 import CreditCalibrationEditor from "./CreditCalibrationEditor.vue";
+import { ACCOUNT_REFRESH_STATE_KEYS, type AccountRefreshState } from "../domain/account-refresh-queue.ts";
 
 const props = withDefaults(
   defineProps<{
@@ -180,6 +182,7 @@ const props = withDefaults(
     usageLoading: boolean;
     usageLoadError: string | null;
     usageRefreshLoading: boolean;
+    refreshState?: AccountRefreshState;
     menuOptions: AccountMenuOption[];
     connections?: readonly Connection[] | null;
     compact?: boolean;
@@ -244,7 +247,11 @@ const toggleBlockedReason = computed(() => {
   if (!props.account.plan_routable) return t("该方案暂不可路由");
   return "";
 });
-const renderedMenuOptions = computed(() => props.menuOptions.map((option) => {
+const refreshAction = computed(() => props.menuOptions.find(option => option.key === "refresh-usage"));
+const refreshLabel = computed(() => props.refreshState
+  ? t(ACCOUNT_REFRESH_STATE_KEYS[props.refreshState])
+  : props.usageRefreshLoading ? t("刷新中") : t("刷新"));
+const renderedMenuOptions = computed(() => props.menuOptions.filter(option => !props.compact || option.key !== "refresh-usage").map((option) => {
   const labelKey = accountMenuLabelKey(option.key);
   return {
     ...option,

@@ -12,6 +12,7 @@ import {
   legacyAppHash,
   normalizeProviderDetailTab,
   readAccountAddDeepLink,
+  readAccountAddReturn,
   readProviderPageQuery,
   resolveAppViewKey,
   routeQuerySearch,
@@ -59,6 +60,7 @@ test("provider deep-link query fields round-trip on the providers view", () => {
     connection: null,
     provider: "command-code",
     destination: null,
+    model: null,
     tab: null,
     add: false,
     preset: null,
@@ -76,6 +78,7 @@ test("provider deep-link query fields round-trip on the providers view", () => {
     connection: null,
     provider: "minimax",
     destination: null,
+    model: null,
     tab: "pricing",
     add: false,
     preset: null,
@@ -94,6 +97,7 @@ test("writing a connection id emits connection= and strips a leftover provider="
     connection: "uuid-open",
     provider: null,
     destination: null,
+    model: null,
     tab: "settings",
     add: false,
     preset: null,
@@ -107,6 +111,7 @@ test("provider= and destination= can coexist on read so selection can rank them"
       connection: null,
       provider: "lab-http",
       destination: "dest-a",
+      model: null,
       tab: null,
       add: false,
       preset: null,
@@ -124,6 +129,7 @@ test("the add flow round-trips with and without a preset", () => {
     connection: null,
     provider: null,
     destination: null,
+    model: null,
     tab: null,
     add: true,
     preset: null,
@@ -139,6 +145,7 @@ test("the add flow round-trips with and without a preset", () => {
     connection: null,
     provider: null,
     destination: null,
+    model: null,
     tab: null,
     add: true,
     preset: "openai",
@@ -148,26 +155,26 @@ test("the add flow round-trips with and without a preset", () => {
 test("legacy provider scope links map onto the new query", () => {
   assert.deepEqual(
     readProviderPageQuery("?view=providers&scope_kind=provider&scope_id=command-code"),
-    { connection: null, provider: "command-code", destination: null, tab: null, add: false, preset: null },
+    { connection: null, provider: "command-code", destination: null, model: null, tab: null, add: false, preset: null },
   );
   assert.deepEqual(
     readProviderPageQuery("?view=providers&scope_kind=dynamic&scope_id=acme"),
-    { connection: null, provider: "acme", destination: null, tab: null, add: false, preset: null },
+    { connection: null, provider: "acme", destination: null, model: null, tab: null, add: false, preset: null },
   );
   assert.deepEqual(
     readProviderPageQuery("?view=providers&scope_kind=preset&scope_id=openai"),
-    { connection: null, provider: null, destination: null, tab: null, add: true, preset: "openai" },
+    { connection: null, provider: null, destination: null, model: null, tab: null, add: true, preset: "openai" },
   );
   // Account-owned custom endpoint scopes have no provider row; degrade to the
   // default selection instead of failing.
   assert.deepEqual(
     readProviderPageQuery("?view=providers&scope_kind=custom_endpoint&scope_id=acc-9"),
-    { connection: null, provider: null, destination: null, tab: null, add: false, preset: null },
+    { connection: null, provider: null, destination: null, model: null, tab: null, add: false, preset: null },
   );
   // An explicit new-style parameter always wins over a stale legacy one.
   assert.deepEqual(
     readProviderPageQuery("?view=providers&provider=kimi&scope_kind=provider&scope_id=opencode"),
-    { connection: null, provider: "kimi", destination: null, tab: null, add: false, preset: null },
+    { connection: null, provider: "kimi", destination: null, model: null, tab: null, add: false, preset: null },
   );
 });
 
@@ -181,11 +188,11 @@ test("legacy provider tab values map onto the detail tabs", () => {
   assert.equal(normalizeProviderDetailTab(null), null);
   assert.deepEqual(
     readProviderPageQuery("?view=providers&scope_kind=provider&scope_id=opencode&tab=other"),
-    { connection: null, provider: "opencode", destination: null, tab: "settings", add: false, preset: null },
+    { connection: null, provider: "opencode", destination: null, model: null, tab: "settings", add: false, preset: null },
   );
   assert.deepEqual(
     readProviderPageQuery("?view=providers&provider=opencode&tab=catalog"),
-    { connection: null, provider: "opencode", destination: null, tab: "models", add: false, preset: null },
+    { connection: null, provider: "opencode", destination: null, model: null, tab: "models", add: false, preset: null },
   );
 });
 
@@ -277,6 +284,7 @@ test("a destination-only Providers scope writes destination= and strips on leave
     connection: null,
     provider: null,
     destination: "dest-site",
+    model: null,
     tab: null,
     add: false,
     preset: null,
@@ -324,6 +332,7 @@ test("routeQuerySearch round-trips into the legacy readers", () => {
     connection: null,
     provider: null,
     destination: "dest-site",
+    model: null,
     tab: "pricing",
     add: false,
     preset: null,
@@ -356,4 +365,41 @@ test("legacyAppHash converts pre-router URLs and leaves routed ones untouched", 
     legacyAppHash("http://127.0.0.1:9042/dashboard/?view=browser#session=abc%2F123"),
     "#/browser?session=abc%2F123",
   );
+});
+
+test("the Providers return context reads on Accounts and strips on leave", () => {
+  assert.deepEqual(
+    readAccountAddReturn("?view=accounts&add=1&from=providers&connection=uuid-open"),
+    { view: "providers", connection: "uuid-open", destination: null },
+  );
+  assert.deepEqual(
+    readAccountAddReturn("?view=accounts&from=providers&destination=dest-site"),
+    { view: "providers", connection: null, destination: "dest-site" },
+  );
+  // No origin marker, or a different view, never qualifies.
+  assert.equal(readAccountAddReturn("?view=accounts&add=1"), null);
+  assert.equal(readAccountAddReturn("?view=providers&from=providers"), null);
+  // The marker is one-shot for Accounts and never leaks into other views.
+  const url = applyAppViewSearchParams(
+    new URL("http://127.0.0.1:9042/dashboard/?view=accounts&from=providers&connection=uuid-open"),
+    "providers",
+    { connection: "uuid-open" },
+  );
+  assert.equal(url.searchParams.get("from"), null);
+  assert.equal(url.searchParams.get("connection"), "uuid-open");
+});
+
+
+test("provider model targets round-trip exactly and clear outside their scope", () => {
+  const model = "vendor/model:latest";
+  const url = applyAppViewSearchParams(new URL("https://ocg.invalid/"), "providers", {
+    provider: "lab-http", tab: "models", model,
+  });
+  assert.equal(readProviderPageQuery(url.search).model, model);
+  assert.deepEqual(appViewRoute("providers", { provider: "lab-http", tab: "models", model }), {
+    name: "providers", query: { provider: "lab-http", tab: "models", model },
+  });
+  assert.equal(applyAppViewSearchParams(new URL(url), "providers", null).searchParams.has("model"), false);
+  assert.equal(applyAppViewSearchParams(new URL(url), "accounts").searchParams.has("model"), false);
+  assert.equal(applyAppViewSearchParams(new URL(url), "providers", { provider: "other" }).searchParams.has("model"), false);
 });

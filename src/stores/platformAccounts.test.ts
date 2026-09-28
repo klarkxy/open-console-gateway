@@ -193,9 +193,10 @@ test("platform accounts store: a committed create reports a destination refresh 
   await waitForCalls(calls, 1);
   calls[0]!.resolve(listBody("parent-new", 8, 99));
   await waitForCalls(calls, 2);
+  assert.equal(await pending, "saved");
+  assert.equal(store.mutating, false, "a confirmed create ends before the read settles");
   calls[1]!.reject(new Error("destination refresh failed"));
-
-  assert.equal(await pending, "saved_refresh_failed");
+  await new Promise(resolve => setImmediate(resolve));
   assert.equal(store.parents[0]?.id, "parent-new", "the committed platform view is retained");
   assert.equal(store.destinationRefreshError, "destination refresh failed");
   assert.equal(destinations.loaded, true, "the prior destination snapshot stays rendered");
@@ -232,6 +233,7 @@ test("platform rename refreshes the destination revision before a layout write",
     revision: { revision: 8, processGeneration: 99, pricingRevision: "p1" },
   });
   assert.equal(await save, "saved");
+  await new Promise(resolve => setImmediate(resolve));
   assert.equal(destinations.destinations[0]?.name, "Renamed");
   assert.deepEqual(destinations.expectation, { expectedRevision: 8, processGeneration: 99 });
 
@@ -263,9 +265,10 @@ test("platform edit reports projection refresh failure and retains its last cohe
   await waitForCalls(calls, 1);
   calls[0]!.resolve(platformView("parent-1", 8, 99));
   await waitForCalls(calls, 2);
+  assert.equal(await save, "saved");
+  assert.equal(store.mutating, false);
   calls[1]!.reject(new Error("projection unavailable"));
-
-  assert.equal(await save, "saved_refresh_failed");
+  await new Promise(resolve => setImmediate(resolve));
   assert.equal(store.destinationRefreshError, "projection unavailable");
   assert.equal(destinations.destinations[0]?.name, "Site");
   assert.deepEqual(destinations.expectation, { expectedRevision: 7, processGeneration: 99 });

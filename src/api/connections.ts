@@ -184,8 +184,8 @@ export function presentConnectionListSnapshot(value: ConnectionList): Connection
   };
 }
 
-async function fetchConnectionSnapshot(): Promise<ConnectionListSnapshot> {
-  const value = await dashboardV4.getConnections();
+async function fetchConnectionSnapshot(signal?: AbortSignal): Promise<ConnectionListSnapshot> {
+  const value = await dashboardV4.getConnections(signal);
   return presentConnectionListSnapshot(value);
 }
 

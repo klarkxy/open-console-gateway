@@ -72,6 +72,7 @@ export interface ProviderScopeQuery {
   provider?: string;
   destination?: string;
   tab?: ProviderDetailTab;
+  model?: string;
   add?: boolean;
   preset?: string;
 }
@@ -82,6 +83,7 @@ export interface ProviderPageQuery {
   provider: string | null;
   destination: string | null;
   tab: ProviderDetailTab | null;
+  model: string | null;
   add: boolean;
   preset: string | null;
 }
@@ -132,6 +134,7 @@ export function readProviderPageQuery(search: string): ProviderPageQuery {
     provider,
     destination: params.get("destination"),
     tab: normalizeProviderDetailTab(params.get("tab")),
+    model: params.get("model"),
     add,
     preset,
   };
@@ -178,6 +181,29 @@ export function accountAddQueryValue(link: AccountAddDeepLink): string {
   return link.optionId ?? "1";
 }
 
+/**
+ * Return context recorded when the Accounts add flow was opened from
+ * Providers (`from=providers`, plus the selected `connection`/`destination`
+ * when known). One-shot like `add`: consumers delete it on use. Cancel
+ * restores the origin; a committed create selects the committed connection.
+ */
+export interface AccountAddReturn {
+  view: "providers";
+  connection: string | null;
+  destination: string | null;
+}
+
+export function readAccountAddReturn(search: string): AccountAddReturn | null {
+  const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
+  if (resolveAppViewKey(params.get("view")) !== "accounts") return null;
+  if (params.get("from") !== "providers") return null;
+  return {
+    view: "providers",
+    connection: params.get("connection"),
+    destination: params.get("destination"),
+  };
+}
+
 export function applyAppViewSearchParams(
   url: URL,
   view: AppViewKey,
@@ -186,6 +212,7 @@ export function applyAppViewSearchParams(
   url.searchParams.set("view", view);
   if (view !== "accounts") {
     url.searchParams.delete("account_id");
+    url.searchParams.delete("from");
     if (view !== "providers") url.searchParams.delete("add");
   }
   // The Applications child tab (`app=dsh`) is scoped to its own view.
@@ -199,6 +226,7 @@ export function applyAppViewSearchParams(
     url.searchParams.delete("destination");
     url.searchParams.delete("preset");
     url.searchParams.delete("tab");
+    url.searchParams.delete("model");
     return url;
   }
   if (scope === undefined) return url;
@@ -207,6 +235,7 @@ export function applyAppViewSearchParams(
     url.searchParams.delete("provider");
     url.searchParams.delete("destination");
     url.searchParams.delete("tab");
+    url.searchParams.delete("model");
     url.searchParams.delete("add");
     url.searchParams.delete("preset");
     return url;
@@ -224,6 +253,8 @@ export function applyAppViewSearchParams(
   }
   if (scope.tab) url.searchParams.set("tab", scope.tab);
   else url.searchParams.delete("tab");
+  if (scope.model) url.searchParams.set("model", scope.model);
+  else url.searchParams.delete("model");
   if (scope.add) url.searchParams.set("add", "1");
   else url.searchParams.delete("add");
   if (scope.preset) url.searchParams.set("preset", scope.preset);

@@ -48,6 +48,11 @@ export function browserAccountsProjectionRefreshHost(): AccountsProjectionRefres
  * keep-alive view, the document is visible, and the session is authenticated.
  * Activate does not fire immediately (the view already loads on enter);
  * becoming visible again does. Logout and hide stop the timer.
+ *
+ * Passes are single-flight: timer and visibility events arriving while one
+ * pass is pending coalesce into at most one follow-up, and a rejected pass
+ * still settles. A coalesced follow-up re-checks the gate, so hiding or
+ * logging out while a pass is in flight never starts another one.
  */
 export function createAccountsProjectionRefresh(options: {
   intervalMs?: number;
@@ -63,6 +68,8 @@ export function createAccountsProjectionRefresh(options: {
   let viewActive = false;
   let timer: number | undefined;
   let bound = false;
+  let passPending = false;
+  let coalesced = false;
 
   function documentVisible(): boolean {
     return options.host.visibilityState() === "visible";
@@ -77,8 +84,27 @@ export function createAccountsProjectionRefresh(options: {
   }
 
   function tick(): void {
-    if (!allowed()) return;
-    void options.refresh();
+    if (!allowed()) {
+      // Events missed while hidden/logged out are dropped, not replayed.
+      coalesced = false;
+      return;
+    }
+    if (passPending) {
+      coalesced = true;
+      return;
+    }
+    passPending = true;
+    const settle = (): void => {
+      passPending = false;
+      if (!coalesced) return;
+      coalesced = false;
+      tick();
+    };
+    try {
+      void Promise.resolve(options.refresh()).then(settle, settle);
+    } catch {
+      settle();
+    }
   }
 
   function arm(): void {
@@ -122,10 +148,12 @@ export function createAccountsProjectionRefresh(options: {
     },
     deactivate() {
       viewActive = false;
+      coalesced = false;
       disarm();
       unbind();
     },
     onSessionDropped() {
+      coalesced = false;
       disarm();
     },
   };

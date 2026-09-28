@@ -10,8 +10,12 @@ import { usePlatformAccountsStore } from "./platformAccounts.ts";
 import { useProvidersStore } from "./providers.ts";
 
 export type AccountRemovalOutcome =
-  | { kind: "deleted" | "conflict" | "cancelled" }
-  | { kind: "deleted_refresh_failed"; detail: string };
+  | { kind: "conflict" | "cancelled" }
+  | { kind: "deleted"; revalidation: Promise<AccountRemovalRevalidation> };
+
+export type AccountRemovalRevalidation =
+  | { kind: "refreshed" | "cancelled" }
+  | { kind: "failed"; detail: string };
 
 /** One local DELETE, followed only by non-destructive projection reads. */
 export const useAccountLifecycleStore = defineStore("accountLifecycle", () => {
@@ -41,17 +45,21 @@ export const useAccountLifecycleStore = defineStore("accountLifecycle", () => {
         accounts.removeAccount(accountId);
         billing.remove(accountId);
         platforms.forgetAccount(accountId);
-        const results = await Promise.allSettled([
+        const revalidation = Promise.allSettled([
           useDestinationsStore().refreshAfterMutation(),
           platforms.load(),
           useIdentitiesStore().loadPresented(),
           useProvidersStore().loadConnections(),
-        ]);
-        if (!current()) return { kind: "cancelled" };
-        const failed = results.find(result => result.status === "rejected");
-        return failed?.status === "rejected"
-          ? { kind: "deleted_refresh_failed", detail: dashboardErrorDetail(failed.reason) }
-          : { kind: "deleted" };
+        ]).then((results): AccountRemovalRevalidation => {
+          if (session !== billing.sessionEpoch) return { kind: "cancelled" };
+          const failed = results.find(result => result.status === "rejected");
+          return failed?.status === "rejected"
+            ? { kind: "failed", detail: dashboardErrorDetail(failed.reason) }
+            : { kind: "refreshed" };
+        });
+        // The DELETE receipt is the completion boundary. Slow projection reads
+        // must not retain the confirmation dialog or the account's delete lock.
+        return { kind: "deleted", revalidation };
       } catch (error) {
         if (!current()) return { kind: "cancelled" };
         if (!isRevisionConflict(error)) throw error;

@@ -11,12 +11,12 @@
   >
     <div class="credential-row__head">
       <n-button quaternary circle size="tiny" class="credential-order-handle"
-        :disabled="orderDisabled" :aria-label="t('调整 Key {name} 的顺序', { name: credential.name })"
+        :disabled="orderDisabled" :aria-label="t('调整 Key {name} 的顺序', { name: account?.name ?? credential.name })"
         aria-describedby="account-order-instructions"
         @pointerdown="emit('order-drag-start', $event)" @keydown="emit('order-keydown', $event)" @click.prevent>
         <template #icon><n-icon :component="HolderOutlined" /></template>
       </n-button>
-      <span class="credential-row__name">{{ credential.name }}</span>
+      <span class="credential-row__name">{{ account?.name ?? credential.name }}</span>
       <n-tag v-if="quotaLabel" size="small" role="status">{{ quotaLabel }}</n-tag>
       <n-tag v-if="cpaStatusLabel" size="small" role="status" :type="cpaStatusType">
         {{ cpaStatusLabel }}
@@ -47,7 +47,7 @@
           :account="account"
           :identity="identity"
           :catalog="catalog"
-          :limits="limits"
+          :limits="rowLimits"
           :now="now"
           :purchase-date-saving="purchaseDateSaving"
           :account-names="accountNames"
@@ -73,17 +73,19 @@
             :account="account"
             :identity="identity"
             :catalog="catalog"
-            :usage="usage"
-            :limits="limits"
+            :usage="rowUsage"
+            :limits="rowLimits"
             :edits="edits"
             :now="now"
-            :usage-loading="usageLoading"
-            :usage-load-error="usageLoadError"
-            :usage-refresh-loading="usageRefreshLoading"
+            :usage-loading="rowUsageLoading"
+            :usage-load-error="rowUsageLoadError"
+            :usage-refresh-loading="rowUsageRefreshLoading"
+            :refresh-state="refreshState"
             :menu-options="rowActions"
             :connections="connections"
             @toggle="!accountDeleting && emit('toggle')"
             @menu-select="selectAction"
+            @refresh-usage="selectAction('refresh-usage')"
             @usage-editor-open="emit('usage-editor-open')"
             @usage-update-draft="(key, value) => emit('usage-update-draft', key, value)"
             @usage-update-resets-first="(key, value) => emit('usage-update-resets-first', key, value)"
@@ -98,10 +100,10 @@
       :account="account"
       :identity="identity"
       :catalog="catalog"
-      :provider-usage="providerUsage"
+      :provider-usage="rowProviderUsage"
       :now="now"
-      :usage-loading="usageLoading"
-      :usage-load-error="usageLoadError"
+      :usage-loading="rowUsageLoading"
+      :usage-load-error="rowUsageLoadError"
       :connections="connections"
       :figure="figure"
       :hide-model-count="hideModelCount"
@@ -112,7 +114,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, unref, type MaybeRef } from "vue";
 import { NTag, NButton, NIcon } from "naive-ui";
 import { HolderOutlined } from "@vicons/antd";
 import { t } from "../i18n/index.ts";
@@ -129,6 +131,7 @@ import type { AccountMenuOption } from "../domain/account-display.ts";
 import type { AccountUsageEdits, UsageLimitView } from "../domain/useAccountUsage.ts";
 import { accountCapabilities } from "../domain/account-capabilities.ts";
 import { accountRowActions } from "../domain/account-row-actions.ts";
+import type { AccountRefreshState } from "../domain/account-refresh-queue.ts";
 import { billingBinding } from "../domain/billing.ts";
 import { findPlanDefinition } from "../domain/plans.ts";
 import { accountInferenceEndpointUrl, officialBalanceSupported } from "../domain/upstream-balance.ts";
@@ -154,14 +157,16 @@ const props = withDefaults(
     account?: Account | null;
     identity?: Identity | null;
     catalog: readonly ProviderCatalogEntry[] | null;
-    usage: UsageWindow;
-    providerUsage: ProviderUsageResponse | null;
-    limits: UsageLimitView[];
+    usage: MaybeRef<UsageWindow>;
+    providerUsage: MaybeRef<ProviderUsageResponse | null>;
+    limits: MaybeRef<UsageLimitView[]>;
     edits: AccountUsageEdits | undefined;
     now: number;
-    usageLoading: boolean;
-    usageLoadError: string | null;
-    usageRefreshLoading: boolean;
+    usageLoading: MaybeRef<boolean>;
+    usageReadBlocked?: boolean;
+    usageLoadError: MaybeRef<string | null>;
+    usageRefreshLoading: MaybeRef<boolean>;
+    refreshState?: AccountRefreshState;
     purchaseDateSaving: boolean;
     quotaLimitsFailed?: boolean;
     menuOptions: AccountMenuOption[];
@@ -217,6 +222,13 @@ const emit = defineEmits<{
 
 const billing = useBillingStore();
 const { confirmDelete, deleting } = useAccountRemoval();
+const rowUsage = computed(() => unref(props.usage));
+const rowProviderUsage = computed(() => unref(props.providerUsage));
+const rowLimits = computed(() => unref(props.limits));
+const rowUsageLoading = computed(() => unref(props.usageLoading) || Boolean(props.usageReadBlocked));
+const rowUsageLoadError = computed(() => unref(props.usageLoadError));
+const rowUsageRefreshLoading = computed(() => unref(props.usageRefreshLoading));
+
 const accountDeleting = computed(() => Boolean(props.account && deleting.value[props.account.id]));
 const refreshSupported = computed(() => {
   const account = props.account;
@@ -239,7 +251,7 @@ const rowActions = computed(() => accountRowActions(props.menuOptions, props.acc
   platformLinked: props.destination.legacy.kind === "platform_parent",
   refreshSupported: refreshSupported.value,
   deleting: accountDeleting.value,
-  refreshBusy: props.usageLoading || props.usageRefreshLoading,
+  refreshBusy: rowUsageLoading.value || rowUsageRefreshLoading.value,
 }));
 
 function selectAction(key: string | number): void {

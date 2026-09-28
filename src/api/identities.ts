@@ -344,8 +344,8 @@ function presentCreatedCredential(value: IdentityCredentialCreateResult): Create
   };
 }
 
-async function fetchIdentitySnapshot(): Promise<IdentityListSnapshot> {
-  const value = await dashboardV4.getAccounts();
+async function fetchIdentitySnapshot(signal?: AbortSignal): Promise<IdentityListSnapshot> {
+  const value = await dashboardV4.getAccounts(signal);
   return presentIdentityListSnapshot(value);
 }
 

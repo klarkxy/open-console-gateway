@@ -180,7 +180,7 @@
             :accounts-by-id="accountsStore.byId"
             :catalog="providerCatalog"
             :links="cardLinksFor(view.parent)"
-            :mutating="platformMutating || busy"
+            :mutating="platformMutating || busy || groupDeletion?.id === view.group.destination.id"
             :importing="view.parent ? Boolean(platformStore.importing[view.parent.id]) : false"
             :refreshing="platformRefreshing"
             :pending-link="platformPendingLink"
@@ -189,6 +189,7 @@
             :dragging="draggingCardId === view.group.id"
             :order-handle-hint="arrangementDisabledHint"
             :can-remove-empty-card="view.group.credentials.length === 0 && removableEmptyCardIds.has(view.group.id)"
+            :can-delete-group="isDestinationDeletable(view.group.destination, destinationsStore.credentials)"
             :arranging-disabled="!arrangementEnabled"
             :cpa-status="cpaStatusFor(view.displayGroup)"
             :collapsed="!sortMode && collapsedCardIds.has(view.group.id)"
@@ -202,7 +203,8 @@
             @order-drag-start="startCardDrag($event, view.group.id)"
             @add-card="addCardAfter(view.group.id)"
             @remove-empty-card="removeEmptyCardById(view.group.id)"
-            @refresh-parent="view.parent && platformSectionRef?.refreshParent(view.parent)"
+            @delete-group="confirmDeleteEmptyGroup(view.group.destination)"
+            @refresh-parent="view.parent && queuePlatformParentRefresh(view.parent)"
             @edit="view.parent && platformSectionRef?.openEdit(view.parent)"
             @delete="view.parent && platformSectionRef?.confirmDelete(view.parent)"
             @add-key="addKeyForCard(view.group, view.parent)"
@@ -231,9 +233,10 @@
                 :quota-retrying="!!quotaRetrying[credential.id]"
                 :cpa-status="cpaStatusFor(view.displayGroup)"
                 :sort-mode="sortMode"
+                :refresh-state="refreshStates[credential.legacy_account_id]"
                 @order-drag-start="startCredentialDrag($event, view.group.id, credential.id)"
                 @order-keydown="handleRowKeydown($event, credential.legacy_account_id)"
-                :usage-loading="!!usageLoading[credential.legacy_account_id] || (!!view.parent && (platformMutating || busy))"
+                :usage-read-blocked="!!view.parent && (platformMutating || busy)"
                 @toggle="toggleAccount(credential.legacy_account_id)"
                 @update-purchase-date="updatePurchaseDate(credential.legacy_account_id, $event)"
                 @reload-usage="loadAccountUsage(credential.legacy_account_id)"
@@ -258,7 +261,8 @@
     </n-space>
 
     <AccountAddModal
-      v-model:show="showAddModal"
+      :show="showAddModal"
+      @update:show="setAddModalVisible"
       :catalog="providerCatalog"
       :catalog-loading="catalogLoading"
       :connections="providersStore.connections"
@@ -273,7 +277,7 @@
       @open-invite-url="openInviteUrl"
       @save-account="onFormSave"
       @create-platform="handleCreatePlatform"
-      @preset-saved="onPresetAccountSaved"
+      @preset-committed="onPresetAccountCommitted"
       @preset-conflict="onPresetAccountConflict"
     />
 
@@ -364,7 +368,8 @@
 
     <ManagedAccountWizard
       v-if="managedWizardAccount"
-      v-model:show="showManagedWizard"
+      :show="showManagedWizard"
+      @update:show="setManagedWizardVisible"
       :account="managedWizardAccount"
       :browser-capabilities="browserCapabilities"
       :opening-target="openingBrowserTarget"
@@ -553,9 +558,12 @@ import {
 } from "../domain/accounts-projection-refresh.ts";
 import { createRevalidateGate } from "../domain/revalidate.ts";
 import { linkForAccount } from "../domain/platform-accounts.ts";
+import { runAccountSaveFollowup } from "../domain/account-save-followup.ts";
+import type { OnboardingIntent } from "../domain/onboarding-draft.ts";
 import type { PlatformAccount, PlatformLink } from "../api/platform-accounts.ts";
 import { useAccountUsage, type UsageLimitView } from "../domain/useAccountUsage.ts";
 import { createAccountsAutoRefresh, type AccountRefreshTarget } from "../domain/accounts-auto-refresh.ts";
+import { createAccountRefreshQueue, platformRefreshBinding, waitForAccountRefreshIdle, type AccountRefreshState } from "../domain/account-refresh-queue.ts";
 import { accountInferenceEndpointUrl, officialBalanceSupported } from "../domain/upstream-balance.ts";
 import { useRoutingCardLayout } from "./useRoutingCardLayout.ts";
 import { MotionConfig, motion } from "motion-v";
@@ -586,11 +594,19 @@ import {
   DESTINATION_EDIT_ISSUE_KEYS,
   destinationEditDraft,
   isDestinationEditable,
+  isDestinationDeletable,
 } from "../domain/destination-edit.ts";
 import { planDestinationSave } from "../domain/destination-edit-save.ts";
 import { t, type MessageKey } from "../i18n/index.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
-import { appViewRoute, readAccountAddDeepLink, readAccountDeepLink, routeQuerySearch } from "./app-navigation.ts";
+import {
+  appViewRoute,
+  readAccountAddDeepLink,
+  readAccountAddReturn,
+  readAccountDeepLink,
+  routeQuerySearch,
+  type ProviderScopeQuery,
+} from "./app-navigation.ts";
 import { mapWithConcurrency } from "../utils/async.ts";
 import { useLocalizedModalCloseLabel } from "../utils/modal-close-label.ts";
 import {
@@ -631,6 +647,11 @@ const platformStore = usePlatformAccountsStore();
 const providersStore = useProvidersStore();
 const settingsStore = useSettingsStore();
 const cpaStore = useCpaStore();
+const refreshStates = ref<Record<string, AccountRefreshState>>({});
+const refreshQueue = createAccountRefreshQueue((id, state) => {
+  if (state) refreshStates.value[id] = state;
+  else delete refreshStates.value[id];
+});
 // The account list lives in the store; the writable computed lets the
 // usage composable and confirmed order receipts keep their Ref<Account[]> contract while every
 // write commits through the store.
@@ -669,12 +690,14 @@ const credentialModalExpectation = ref<MutationExpectation | null>(null);
 const showCreateModal = ref(false);
 const createModalCardId = ref<string | null>(null);
 let accountViewSession = 0;
-watch(() => destinationsStore.loaded, loaded => { if (!loaded) accountViewSession += 1; }, { flush: "sync" });
 const createModalAccountId = ref<string | null>(null);
 const createModalExpectation = ref<MutationExpectation | null>(null);
 const createModalRef = ref<{ noteSaved(): void; noteFailure(error: unknown): void } | null>(null);
 const accountFormRef = ref<{ noteSaved(): void } | null>(null);
 const billingStore = useBillingStore();
+watch(() => billingStore.sessionEpoch, () => { accountViewSession += 1; }, { flush: "sync" });
+const groupDeletion = ref<{ id: string; operation: symbol } | null>(null);
+watch(() => billingStore.sessionEpoch, () => { groupDeletion.value = null; }, { flush: "sync" });
 let pendingCreditCreate: { created: Awaited<ReturnType<typeof identitiesApi.createIdentityCredential>>; credits: CreditSetupInput } | null = null;
 let pendingCreditEdit: { account: Account; credits: CreditSetupInput } | null = null;
 const pendingNewCredits = ref<{ account: Account; credits: CreditSetupInput } | null>(null);
@@ -689,6 +712,9 @@ async function initializeAccountCredits(account: Account, credits: CreditSetupIn
 const showAddModal = ref(false);
 /** One-shot chooser preselection from the `add` deep link; cleared on close. */
 const addInitialOptionId = ref<string | null>(null);
+// Return context recorded when the add flow was opened from Providers.
+const addReturnContext = ref<{ connection: string | null; destination: string | null } | null>(null);
+let addFlowCommitted = false;
 const showTransfer = ref(false);
 const transferMode = ref<"import" | "export">("import");
 const showManagedCreate = ref(false);
@@ -838,13 +864,13 @@ const {
   quotaLimitsLoading,
   quotaLimitsError,
   usageLimitsFor,
-  usageMap,
+  usageFor,
+  providerUsageFor,
+  usageLoadingFor,
+  usageLoadErrorFor,
+  usageRefreshLoadingFor,
   providerUsageMap,
   usageEdits,
-  usageLoading,
-  usageLoadErrors,
-  usageRefreshLoading,
-  getUsage,
   focusUsageEditor,
   updateUsageDraft,
   updateResetsFirstField,
@@ -854,6 +880,7 @@ const {
   automaticRefreshTarget,
   loadQuotaLimits,
   loadAccountUsage,
+  ensureAccountUsage,
   revalidateAccountUsage,
   retryQuotaLimits,
   forgetAccount,
@@ -1118,7 +1145,17 @@ const displayedGroupViews = computed((): DisplayedGroupView[] => {
   return views;
 });
 
-const platformRefreshing = computed(() => platformStore.refreshing);
+const platformRefreshing = computed(() => {
+  const refreshing = { ...platformStore.refreshing };
+  for (const id of Object.keys(refreshStates.value)) {
+    if (id.startsWith("platform:")) refreshing[id.slice("platform:".length)] = true;
+    else {
+      const link = platformStore.linkForAccount(id);
+      if (link) refreshing[`${link.platformAccountId}:${id}`] = true;
+    }
+  }
+  return refreshing;
+});
 const platformPendingLink = computed(() => platformStore.pendingLink);
 
 // Drop memo entries for cards/rows that left the projection so the caches
@@ -1269,8 +1306,8 @@ const rowBindingsMemo = createKeyedMemo<string>();
 function credentialRowBindingsFor(credential: DestinationCredential, destination: Destination) {
   const account = overlayAccountForCredential(credential, accountsStore.byId) ?? null;
   const overlayId = account?.id ?? credential.legacy_account_id;
-  const usage = usageMap.value[overlayId] ?? null;
-  const providerUsage = providerUsageMap.value[overlayId] ?? null;
+  const usage = usageFor(overlayId);
+  const providerUsage = providerUsageFor(overlayId);
   return rowBindingsMemo.get(credential.id, [
     credential,
     destination,
@@ -1281,9 +1318,9 @@ function credentialRowBindingsFor(credential: DestinationCredential, destination
     providerUsage,
     quotaLimits.value,
     usageEdits.value[overlayId] ?? null,
-    !!usageLoading.value[overlayId],
-    usageLoadErrors.value[overlayId] ?? null,
-    !!usageRefreshLoading.value[overlayId],
+    usageLoadingFor(overlayId),
+    usageLoadErrorFor(overlayId),
+    usageRefreshLoadingFor(overlayId),
     !!purchaseDateSaving.value[overlayId],
     busy.value,
     !!quotaLimitsError.value,
@@ -1295,14 +1332,14 @@ function credentialRowBindingsFor(credential: DestinationCredential, destination
     account,
     identity: identityForCard(overlayId),
     catalog: providerCatalog.value,
-    usage: usage ?? getUsage(overlayId),
+    usage,
     providerUsage,
-    limits: account ? usageLimitsFor(account) : EMPTY_ROW_LIMITS,
+    limits: computed(() => account ? usageLimitsFor(account) : EMPTY_ROW_LIMITS),
     edits: usageEdits.value[overlayId],
-    usageLoading: !!usageLoading.value[overlayId],
-    usageLoadError: usageLoadErrors.value[overlayId] ?? null,
-    usageRefreshLoading: !!usageRefreshLoading.value[overlayId],
-    purchaseDateSaving: busy.value || !!purchaseDateSaving.value[overlayId],
+    usageLoading: usageLoadingFor(overlayId),
+    usageLoadError: usageLoadErrorFor(overlayId),
+    usageRefreshLoading: usageRefreshLoadingFor(overlayId),
+    purchaseDateSaving: !!purchaseDateSaving.value[overlayId],
     quotaLimitsFailed: !!quotaLimitsError.value,
     accountNames: accountNamesById.value,
     connections: providersStore.connections,
@@ -1333,7 +1370,7 @@ function rowMenuOptions(
       accountName: menuTarget.name,
       disabled: parent
         ? platformMutating.value || busy.value || !!platformRefreshing.value[`${parent.id}:${credential.legacy_account_id}`]
-        : busy.value || !!usageRefreshLoading.value[overlay.id],
+        : busy.value || usageRefreshLoadingFor(overlay.id).value,
     });
     if (accountCapabilities(overlay, providerCatalog.value, destinationForAccountId(overlay.id)).testable) {
       utilities.push({
@@ -1378,7 +1415,7 @@ function rowMenuOptionsFor(
     platformMutating.value,
     busy.value,
     parent ? !!platformRefreshing.value[`${parent.id}:${credential.legacy_account_id}`] : false,
-    overlay ? !!usageRefreshLoading.value[overlay.id] : false,
+    overlay ? usageRefreshLoadingFor(overlay.id).value : false,
     providerCatalog.value,
     identityForCard(overlayId),
     destinationForAccountId(overlayId),
@@ -1390,8 +1427,7 @@ function rowMenuOptionsFor(
 function handleMenuSelect(key: string | number, accountId: string, parent: PlatformAccount | null = null) {
   if (busy.value) return;
   if (key === "refresh-usage") {
-    if (parent) refreshPlatformChild(parent, accountId);
-    else refreshAccountUsage(accountId);
+    queueAccountRefresh(accountId, parent);
     return;
   }
   if (key === "test-connection") {
@@ -1489,6 +1525,8 @@ function openAddModal(): void {
   // chooser's save payload into an update of the previously edited account.
   editingAccount.value = null;
   addInitialOptionId.value = null;
+  addReturnContext.value = null;
+  addFlowCommitted = false;
   showAddModal.value = true;
   void providersStore.loadConnections().catch(() => undefined);
 }
@@ -1499,13 +1537,24 @@ function openAddModal(): void {
  * modal opens so a reload or close never replays it.
  */
 function applyAccountAddDeepLink(): void {
-  const link = readAccountAddDeepLink(routeQuerySearch("accounts", route.query));
+  const search = routeQuerySearch("accounts", route.query);
+  const link = readAccountAddDeepLink(search);
   if (!link) return;
+  const returnLink = readAccountAddReturn(search);
   const query = { ...route.query };
   delete query.add;
+  delete query.from;
+  if (returnLink) {
+    delete query.connection;
+    delete query.destination;
+  }
   void router.replace({ query });
   editingAccount.value = null;
   addInitialOptionId.value = link.optionId;
+  addReturnContext.value = returnLink
+    ? { connection: returnLink.connection, destination: returnLink.destination }
+    : null;
+  addFlowCommitted = false;
   showAddModal.value = true;
   void providersStore.loadConnections().catch(() => undefined);
 }
@@ -1527,20 +1576,50 @@ async function handleAccountsImported(count: number): Promise<void> {
 // validation, CAS conflict recovery, and the card reload stay in one place.
 async function handleCreatePlatform(payload: PlatformAccountFormPayload): Promise<void> {
   const created = await platformSectionRef.value?.createPlatform(payload);
-  if (created) showAddModal.value = false;
+  if (created) {
+    addFlowCommitted = true;
+    showAddModal.value = false;
+  }
 }
 
-// The atomic create already saved supplier + first account; reload both lists
-// so the account and the new user-defined choice appear.
-async function onPresetAccountSaved(): Promise<void> {
-  await Promise.allSettled([
+// The atomic preset create already persisted supplier + first account: the
+// commit receipt is authoritative, so the chooser closes immediately (marked
+// committed before the close watcher runs), a Providers-origin add navigates
+// to the receipt connection's Models tab, and the projections refresh
+// separately. A slow or failed refresh reports itself and never says the
+// confirmed save failed.
+function onPresetAccountCommitted(result: {
+  connectionId: string;
+  credentialId: string | null;
+  accountId: string | null;
+  replayed: boolean;
+  mode: OnboardingIntent;
+}): void {
+  const context = addReturnContext.value;
+  addFlowCommitted = true;
+  showAddModal.value = false;
+  if (result.mode === "draft") return; // chooser already routed to Providers
+  message.success(t("账号已添加"));
+  if (context) {
+    void router.push(appViewRoute("providers", {
+      connection: result.connectionId,
+      tab: "models",
+    }));
+  }
+  void revalidateAfterPresetCommit();
+}
+
+async function revalidateAfterPresetCommit(): Promise<void> {
+  const session = accountViewSession;
+  const results = await Promise.allSettled([
     loadAccounts(),
     loadProviderCatalog(),
     providersStore.loadCatalog(),
     providersStore.loadConnections(),
   ]);
-  message.success(t("账号已添加"));
-  showAddModal.value = false;
+  if (session === accountViewSession && results.some((result) => result.status === "rejected" || result.value === false)) {
+    message.warning(t("已保存，但列表刷新失败。手动刷新，不要再次提交。"));
+  }
 }
 
 async function onPresetAccountConflict(): Promise<void> {
@@ -1668,6 +1747,38 @@ async function refreshAccountsAndIdentities(): Promise<void> {
   await Promise.all([accountsStore.loadPresented(), loadIdentitiesOverlay(), destinationsStore.load()]);
 }
 
+// Projection reloads after a confirmed credential write run off the page
+// lock; a failure reports itself next to the already-committed write.
+async function revalidateAccountsAndIdentities(): Promise<void> {
+  try {
+    await refreshAccountsAndIdentities();
+  } catch (refreshError) {
+    message.error(t("加载账号失败：{error}", { error: dashboardErrorDetail(refreshError) }));
+  }
+}
+
+// The credential receipt already committed; the projection reload and the
+// card placement follow off the page lock and report their own failures.
+async function revalidateAfterIdentityCredentialCreate(
+  credentialId: string,
+  targetCardId: string | null,
+  session: number,
+): Promise<void> {
+  try {
+    await refreshAccountsAndIdentities();
+    if (session !== accountViewSession) return;
+    if (targetCardId) {
+      const target = destinationsStore.cards.find(card => card.id === targetCardId);
+      const next = target && !target.credential_ids.includes(credentialId)
+        ? moveCredentialToCard(destinationsStore.cards, credentialId, targetCardId) : null;
+      if (next) await destinationsStore.replaceRoutingCardLayout(draftCards(next));
+    }
+  } catch (refreshError) {
+    if (session !== accountViewSession) return;
+    message.error(t("加载账号失败：{error}", { error: dashboardErrorDetail(refreshError) }));
+  }
+}
+
 async function recoverCredentialMutationConflict(error: unknown): Promise<boolean> {
   if (!isRevisionConflict(error)) return false;
   const reloaded = await reloadControlPlaneView();
@@ -1699,12 +1810,8 @@ async function onRotateCredential(payload: { secretInput: string }): Promise<voi
     showCredentialModal.value = false;
     credentialModalAccountId.value = null;
     credentialModalExpectation.value = null;
-    try {
-      await refreshAccountsAndIdentities();
-    } catch (refreshError) {
-      message.error(t("加载账号失败：{error}", { error: dashboardErrorDetail(refreshError) }));
-    }
     message.success(t("Key 已轮换"));
+    void revalidateAccountsAndIdentities();
   } catch (error) {
     if (await recoverCredentialMutationConflict(error)) return;
     message.error(t("轮换 Key 失败：{error}", { error: dashboardErrorDetail(error) }));
@@ -1731,12 +1838,8 @@ async function onPatchBinding(payload: BindingPatchInput): Promise<void> {
     showCredentialModal.value = false;
     credentialModalAccountId.value = null;
     credentialModalExpectation.value = null;
-    try {
-      await refreshAccountsAndIdentities();
-    } catch (refreshError) {
-      message.error(t("加载账号失败：{error}", { error: dashboardErrorDetail(refreshError) }));
-    }
     message.success(t("绑定已更新"));
+    void revalidateAccountsAndIdentities();
   } catch (error) {
     if (await recoverCredentialMutationConflict(error)) return;
     message.error(t("更新绑定失败：{error}", { error: dashboardErrorDetail(error) }));
@@ -1777,19 +1880,8 @@ async function onCreateIdentityCredential(payload: IdentityCredentialCreateInput
     createModalAccountId.value = null;
     createModalExpectation.value = null;
     createModalCardId.value = null;
-    try {
-      await refreshAccountsAndIdentities();
-      if (capturedSession !== accountViewSession) return;
-      if (targetCardId) {
-        const target = destinationsStore.cards.find(card => card.id === targetCardId);
-        const next = target && !target.credential_ids.includes(created.credential_id)
-          ? moveCredentialToCard(destinationsStore.cards, created.credential_id, targetCardId) : null;
-        if (next) await destinationsStore.replaceRoutingCardLayout(draftCards(next));
-      }
-    } catch (refreshError) {
-      message.error(t("加载账号失败：{error}", { error: dashboardErrorDetail(refreshError) }));
-    }
     message.success(t("Key 已添加"));
+    void revalidateAfterIdentityCredentialCreate(created.credential_id, targetCardId, capturedSession);
   } catch (error) {
     if (capturedSession !== accountViewSession) return;
     if (pendingCreditCreate) {
@@ -1869,9 +1961,102 @@ function handlePlatformDestinationRefreshFailure(error: string): void {
   destRefreshErrorDetail.value = error;
 }
 
-function refreshPlatformChild(parent: PlatformAccount, accountId: string): void {
+async function refreshPlatformChild(parent: PlatformAccount, accountId: string): Promise<void> {
   const link = platformStore.linkForAccount(accountId);
-  if (link) platformSectionRef.value?.refreshChild(parent, link);
+  if (link) await platformSectionRef.value?.refreshChild(parent, link);
+}
+function confirmDeleteEmptyGroup(destination: Destination): void {
+  if (busy.value || groupDeletion.value || !isDestinationDeletable(destination, destinationsStore.credentials)) return;
+  const session = billingStore.sessionEpoch;
+  const confirmation = dialog.warning({
+    title: t("删除账号组"),
+    content: t("删除账号组 {name} 及其连接配置和模型映射？", { name: destination.name }),
+    positiveText: t("删除"),
+    negativeText: t("取消"),
+    onPositiveClick: async (): Promise<boolean> => {
+      if (session !== billingStore.sessionEpoch) return true;
+      if (groupDeletion.value) return false;
+      const operation = Symbol(destination.id);
+      groupDeletion.value = { id: destination.id, operation };
+      confirmation.loading = true;
+      try {
+        // Re-read the exact target before deletion: the last Key's background
+        // revalidation may still be pending, and this write needs current CAS.
+        await destinationsStore.load();
+        if (session !== billingStore.sessionEpoch) return true;
+        const latest = destinationsStore.destinations.find(row => row.id === destination.id);
+        if (!latest) return true;
+        if (!isDestinationDeletable(latest, destinationsStore.credentials)) {
+          message.warning(t("仍有 Key 使用此连接，无法删除"));
+          return false;
+        }
+        await destinationsStore.deleteDestination(destination.id);
+        if (session !== billingStore.sessionEpoch) return true;
+        message.success(t("账号组已删除"));
+        void Promise.all([providersStore.loadConnections(), providersStore.loadCatalog(), providersStore.loadContracts()])
+          .catch(() => undefined);
+        return true;
+      } catch (error) {
+        if (session === billingStore.sessionEpoch) {
+          message.error(t("删除失败：{error}", { error: dashboardErrorDetail(error) }));
+        }
+        return false;
+      } finally {
+        if (groupDeletion.value?.operation === operation) groupDeletion.value = null;
+        confirmation.loading = false;
+      }
+    },
+  });
+}
+
+async function waitForPlatformRefresh(id: string, parentId: string, current: () => boolean): Promise<boolean> {
+  const blocked = () => platformStore.mutating || Object.entries(platformStore.refreshing).some(([key, active]) =>
+    active && (key === parentId || key.startsWith(`${parentId}:`)));
+  if (blocked()) refreshStates.value[id] = "queued";
+  const ready = await waitForAccountRefreshIdle(blocked, () => Boolean(refreshStates.value[id]) && current());
+  if (!ready || !refreshStates.value[id] || !current()) return false;
+  refreshStates.value[id] = "running";
+  return true;
+}
+
+function queueAccountRefresh(accountId: string, parent: PlatformAccount | null): void {
+  const account = accountsStore.byId.get(accountId);
+  if (!account) return;
+  const endpoint = destinationForAccountId(accountId);
+  const session = billingStore.sessionEpoch;
+  const isCurrent = () => sessionStore.authenticated && billingStore.sessionEpoch === session
+    && accountsStore.byId.get(accountId)?.updated_at === account.updated_at
+    && destinationForAccountId(accountId)?.id === endpoint?.id
+    && (parent
+      ? platformStore.linkForAccount(accountId)?.platformAccountId === parent.id
+        && platformRefreshBinding(platformStore.parents.find(row => row.id === parent.id)) === platformRefreshBinding(parent)
+      : !platformStore.linkForAccount(accountId));
+  void refreshQueue.enqueue(accountId, isCurrent, async current => {
+    if (parent) {
+      if (!await waitForPlatformRefresh(accountId, parent.id, current)) return;
+      await refreshPlatformChild(platformStore.parents.find(row => row.id === parent.id)!, accountId);
+    } else {
+      // A preceding queued write may have advanced CAS since this row was read.
+      await loadAccountUsage(accountId);
+      if (current()) await refreshAccountUsage(accountId);
+    }
+    if (current()) await destinationsStore.load();
+  }).catch(error => {
+    if (isCurrent()) message.error(t("刷新失败：{error}", { error: dashboardErrorDetail(error) }));
+  });
+}
+
+function queuePlatformParentRefresh(parent: PlatformAccount): void {
+  const session = billingStore.sessionEpoch;
+  const current = () => sessionStore.authenticated && billingStore.sessionEpoch === session
+    && platformRefreshBinding(platformStore.parents.find(row => row.id === parent.id)) === platformRefreshBinding(parent);
+  void refreshQueue.enqueue(`platform:${parent.id}`, current, async isCurrent => {
+    if (!await waitForPlatformRefresh(`platform:${parent.id}`, parent.id, isCurrent)) return;
+    await platformSectionRef.value?.refreshParent(platformStore.parents.find(row => row.id === parent.id)!);
+    if (isCurrent()) await destinationsStore.load();
+  }).catch(error => {
+    if (current()) message.error(t("刷新失败：{error}", { error: dashboardErrorDetail(error) }));
+  });
 }
 
 function fetchPlatformModels(accountId: string): void {
@@ -1946,6 +2131,13 @@ async function ensureInviteUrlSaved(inviteUrl: string): Promise<void> {
 function setManagedCreateVisible(show: boolean): void {
   if (!show && busy.value) return;
   showManagedCreate.value = show;
+  if (!show) restoreAddOrigin();
+}
+
+function setManagedWizardVisible(show: boolean): void {
+  if (!show && busy.value) return;
+  showManagedWizard.value = show;
+  if (!show) restoreAddOrigin();
 }
 
 function openManagedWizard(accountId: string): void {
@@ -1956,6 +2148,7 @@ function openManagedWizard(accountId: string): void {
 }
 
 function openInviteUrl(): void {
+  addReturnContext.value = null;
   showAddModal.value = false;
   void router.push(appViewRoute("providers", {
     provider: DEFAULT_PROVIDER_ID,
@@ -2005,9 +2198,45 @@ watch(showModal, (show) => {
   if (!show) clearAccountDeepLink();
 });
 
+function restoreAddOrigin(): void {
+  addInitialOptionId.value = null;
+  const context = addReturnContext.value;
+  addReturnContext.value = null;
+  if (context && route.name === "accounts") {
+    void router.push(appViewRoute("providers", {
+      ...(context.destination ? { destination: context.destination } : {}),
+      ...(!context.destination && context.connection ? { connection: context.connection } : {}),
+    }));
+  }
+}
+
+function setAddModalVisible(show: boolean): void {
+  if (!show && !addFlowCommitted) restoreAddOrigin();
+  showAddModal.value = show;
+}
+
 watch(showAddModal, (show) => {
-  if (!show) { addInitialOptionId.value = null; pendingNewCredits.value = null; }
+  if (show || showManagedCreate.value) return;
+  addInitialOptionId.value = null;
+  pendingNewCredits.value = null;
+  addReturnContext.value = null;
+  addFlowCommitted = false;
 });
+
+/** Providers-originated add flows select the committed connection on save. */
+function committedAddTarget(
+  created: Account,
+  optionId: string | null,
+  context: { connection: string | null; destination: string | null },
+): ProviderScopeQuery {
+  if (optionId?.startsWith("connection:")) {
+    return { connection: optionId.slice("connection:".length) };
+  }
+  if (created.provider_id !== "custom") return { provider: created.provider_id };
+  if (context.destination) return { destination: context.destination };
+  if (context.connection) return { connection: context.connection };
+  return {};
+}
 
 async function createManagedAccount(): Promise<void> {
   const name = managedDraft.value.name.trim();
@@ -2036,12 +2265,10 @@ async function createManagedAccount(): Promise<void> {
     });
     addAccount(created);
     message.success(t("注册草稿已创建"));
-    const destRefreshed = await refreshDestinationProjection("created_refresh_failed");
-    if (!destRefreshed) notifyDestinationRefreshFailure();
-    void providersStore.loadConnections().catch(() => undefined);
     showManagedCreate.value = false;
     managedWizardAccountId.value = created.id;
     showManagedWizard.value = true;
+    void revalidateAfterManagedCreate(accountViewSession);
   } catch (error) {
     if (await recoverAccountMutationConflict(error)) return;
     message.error(t("创建注册草稿失败：{error}", { error: dashboardErrorDetail(error) }));
@@ -2074,11 +2301,13 @@ async function verifyManagedKey(accountId: string, key: string): Promise<void> {
     replaceAccount(updated);
     if (accountIsReady(updated)) {
       showManagedWizard.value = false;
-      await loadAccountUsage(updated.id);
-      await refreshCatalogIfNewProvider(updated);
+      const context = addReturnContext.value;
+      addReturnContext.value = null;
+      if (context) void router.push(appViewRoute("providers", committedAddTarget(updated, null, context)));
       message.success(isCooling(updated, now.value)
         ? t("Key 有效，账号已启用并按上游响应进入冷却")
         : t("Key 验证成功，账号已启用"));
+      void revalidateAfterManagedKeyReady(updated, accountViewSession);
     }
   } catch (error) {
     if (await recoverAccountMutationConflict(error)) return;
@@ -2160,6 +2389,19 @@ async function refreshCatalogIfNewProvider(account: Account): Promise<void> {
     message.warning(t("刷新模型目录失败：{error}", { error: dashboardErrorDetail(error) }));
     message.info(`${t("供应商")} → ${t("刷新模型目录")}`);
   }
+}
+
+async function revalidateAfterManagedCreate(session: number): Promise<void> {
+  const destRefreshed = await refreshDestinationProjection("created_refresh_failed");
+  if (session !== accountViewSession) return;
+  if (!destRefreshed) notifyDestinationRefreshFailure();
+  void providersStore.loadConnections().catch(() => undefined);
+}
+
+async function revalidateAfterManagedKeyReady(account: Account, session: number): Promise<void> {
+  await loadAccountUsage(account.id);
+  if (session !== accountViewSession) return;
+  await refreshCatalogIfNewProvider(account);
 }
 
 const companionCatalogInflight = new Set<string>();
@@ -2316,37 +2558,51 @@ async function recoverManagedSetupConflict(accountId: string, error: unknown): P
   }
 }
 
-async function loadAccounts() {
+let accountLoadGeneration = 0;
+async function loadAccounts(): Promise<boolean> {
+  const generation = ++accountLoadGeneration;
+  const session = accountViewSession;
+  const current = () => generation === accountLoadGeneration && session === accountViewSession;
   accountListError.value = "";
   const overlay = loadIdentitiesOverlay();
   try {
     const loaded = await accountsStore.loadPresented();
+    if (!current()) return false;
     applyAccountDeepLink();
     try {
       await destinationsStore.load();
     } catch {
       // A projection refusal must not hide the V3 account list.
     }
+    if (!current()) return false;
     refreshCpaSnapshot();
     await overlay;
+    if (!current()) return false;
     if (!providersStore.connections) {
       await providersStore.loadConnections().catch(() => undefined);
     }
+    if (!current()) return false;
     // Limit concurrent provider/local usage reads for large account lists.
-    if (loaded.some(accountHasUsageDisplay)) {
-      await mapWithConcurrency(
-        loaded.filter((account) => (
-          accountIsReady(account)
-          && accountHasUsageDisplay(account)
-        )),
-        4,
-        (account) => loadAccountUsage(account.id),
-      );
-    }
+    await loadUsageSnapshots(loaded, true);
+    return true;
   } catch (e) {
+    if (!current()) return false;
     accountListError.value = dashboardErrorDetail(e);
     message.error(t("加载账号失败：{error}", { error: accountListError.value }));
+    return false;
   }
+}
+
+let usageReadGeneration = 0;
+async function loadUsageSnapshots(list = accounts.value, refresh = false): Promise<void> {
+  const generation = ++usageReadGeneration;
+  const session = billingStore.sessionEpoch;
+  await mapWithConcurrency(list.filter(account => accountIsReady(account) && accountHasUsageDisplay(account)), 4, async account => {
+    // Route identity changes before KeepAlive's leave transition finishes.
+    if (generation !== usageReadGeneration || session !== billingStore.sessionEpoch
+      || !accountsViewActive || route.name !== "accounts" || !sessionStore.authenticated) return;
+    await (refresh ? loadAccountUsage(account.id) : ensureAccountUsage(account.id));
+  });
 }
 
 async function loadRegistrationOptions(): Promise<void> {
@@ -2426,14 +2682,12 @@ async function onFormSave(payload: AccountInput | AccountFormPayload) {
         await initializeAccountCredits(saved, pendingCreditEdit!.credits);
         if (capturedSession !== accountViewSession) return;
       }
-      const destRefreshed = await refreshDestinationProjection();
-      if (!destRefreshed) notifyDestinationRefreshFailure();
-      // purchase_date defines the monthly usage window and changing it clears
-      // the persisted calibration offset, so the local usage snapshot must be
-      // refreshed before the edited account is shown again.
-      if (accountHasUsageDisplay(saved)) await loadAccountUsage(saved.id);
+      // The confirmed receipt ends the save: commit, close, and release the
+      // page. Projection/usage reads follow in the background and report
+      // their own failures; a slow read never says the write failed.
       message.success(t("账号已更新"));
       showModal.value = false;
+      void revalidateAfterAccountSave(saved, capturedSession, "updated");
     } catch (e) {
       if (capturedSession !== accountViewSession) return;
       if (pendingCreditEdit) {
@@ -2444,7 +2698,7 @@ async function onFormSave(payload: AccountInput | AccountFormPayload) {
       if (await recoverAccountMutationConflict(e)) return;
       message.error(t("保存失败：{error}", { error: dashboardErrorDetail(e) }));
     } finally {
-      busy.value = false;
+      if (capturedSession === accountViewSession) busy.value = false;
     }
   } else {
     const { credits, ...accountPayload } = payload as AccountFormPayload;
@@ -2462,18 +2716,18 @@ async function onFormSave(payload: AccountInput | AccountFormPayload) {
         if (capturedSession !== accountViewSession) return;
       }
       message.success(t("账号已添加"));
-      const destRefreshed = await refreshDestinationProjection("created_refresh_failed");
-      if (!destRefreshed) notifyDestinationRefreshFailure();
-      void providersStore.loadConnections().catch(() => undefined);
-      await refreshCatalogIfNewProvider(created);
-      // Go uses official usage; GOAT and Ollama project locally priced OCG request logs.
-      if (accountHasUsageDisplay(created) && accountIsReady(created)) {
-        await loadAccountUsage(created.id);
-      }
-      showModal.value = false;
       // Create payloads arrive from the Add Account chooser's embedded form;
       // only a successful create closes it, so a failed save keeps the draft.
+      const returnContext = addReturnContext.value;
+      const returnOptionId = addInitialOptionId.value;
+      addFlowCommitted = true;
+      showModal.value = false;
       showAddModal.value = false;
+      if (returnContext) {
+        void router.push(appViewRoute("providers", committedAddTarget(created, returnOptionId, returnContext)));
+      }
+      // Go uses official usage; GOAT and Ollama project locally priced OCG request logs.
+      void revalidateAfterAccountSave(created, capturedSession, "created");
     } catch (e) {
       if (capturedSession !== accountViewSession) return;
       if (pendingNewCredits.value) {
@@ -2483,9 +2737,33 @@ async function onFormSave(payload: AccountInput | AccountFormPayload) {
       if (await recoverAccountMutationConflict(e)) return;
       message.error(t("保存失败：{error}", { error: dashboardErrorDetail(e) }));
     } finally {
-      busy.value = false;
+      if (capturedSession === accountViewSession) busy.value = false;
     }
   }
+}
+
+// Follow-up reads after a confirmed account save. They run off the page
+// lock: last-good content stays rendered, each failure reports itself, and
+// nothing here rethrows into the already-completed write.
+async function revalidateAfterAccountSave(
+  account: Account,
+  session: number,
+  kind: "updated" | "created",
+): Promise<void> {
+  await runAccountSaveFollowup({
+    kind,
+    accountId: account.id,
+    hasUsageDisplay: accountHasUsageDisplay(account),
+    usageReady: accountIsReady(account),
+    isCurrent: () => session === accountViewSession,
+    refreshProjection: (created) => refreshDestinationProjection(
+      created ? "created_refresh_failed" : "refresh_failed",
+    ),
+    notifyProjectionFailure: notifyDestinationRefreshFailure,
+    loadConnections: () => providersStore.loadConnections(),
+    refreshCatalogForNewProvider: () => refreshCatalogIfNewProvider(account),
+    loadUsage: (accountId) => loadAccountUsage(accountId),
+  });
 }
 
 async function updatePurchaseDate(accountId: string, purchaseDate: string): Promise<void> {
@@ -2769,12 +3047,16 @@ const automaticRefresh = createAccountsAutoRefresh({
         busy: platformStore.loading || Boolean(platformStore.refreshing[`${parent.id}:${account.id}`])
           || Boolean(platformStore.refreshing[parent.id]),
         refresh: async (isCurrent) => {
-          if (isCurrent()) await platformStore.refreshChild(parent.id, account.id);
+          await refreshQueue.enqueue(account.id, isCurrent, async current => {
+            if (await waitForPlatformRefresh(account.id, parent.id, current)) await platformStore.refreshChild(parent.id, account.id);
+          });
         },
       }];
     }
     const target = automaticRefreshTarget(account);
-    return target ? [target] : [];
+    return target ? [{ ...target, refresh: (isCurrent) => refreshQueue.enqueue(
+      account.id, isCurrent, current => target.refresh(current),
+    ) }] : [];
   }),
 });
 
@@ -2782,6 +3064,8 @@ const projectionRefresh = createAccountsProjectionRefresh({
   host: browserAccountsProjectionRefreshHost(),
   isAuthenticated: () => sessionStore.authenticated,
   refresh: async () => {
+    const session = billingStore.sessionEpoch;
+    const generation = usageReadGeneration;
     const targets = projectionUsageRevalidationScope({
       accounts: accounts.value.filter(account => accountIsReady(account) && accountHasUsageDisplay(account)),
       idOf: (account) => account.id,
@@ -2793,7 +3077,12 @@ const projectionRefresh = createAccountsProjectionRefresh({
       mapWithConcurrency(
         targets,
         4,
-        account => revalidateAccountUsage(account.id),
+        async account => {
+          if (generation !== usageReadGeneration || session !== billingStore.sessionEpoch
+            || !accountsViewActive || route.name !== "accounts" || document.visibilityState !== "visible"
+            || !sessionStore.authenticated) return;
+          await revalidateAccountUsage(account.id);
+        },
       ),
     ]);
     await automaticRefresh.run();
@@ -2802,11 +3091,13 @@ const projectionRefresh = createAccountsProjectionRefresh({
 
 watch(() => sessionStore.authenticated, (ok) => {
   if (!ok) {
+    usageReadGeneration += 1;
     projectionRefresh.onSessionDropped();
     automaticRefresh.reset();
+    refreshQueue.reset();
     fullRefreshGate.reset();
   }
-});
+}, { flush: "sync" });
 
 // Returning to the view restorms the local server with the same reads the
 // 15s projection refresh already covers; gate full re-inits to that cadence.
@@ -2832,7 +3123,7 @@ onActivated(() => {
   applyCachedAccountDeepLink();
   if (!activatedOnce) { activatedOnce = true; return; }
   if (!accountListError.value && !catalogError.value && !fullRefreshGate.shouldRun()) {
-    void automaticRefresh.run();
+    void loadUsageSnapshots().then(() => automaticRefresh.run());
     return;
   }
   fullRefreshGate.record();
@@ -2842,6 +3133,7 @@ onActivated(() => {
 });
 onDeactivated(() => {
   accountsViewActive = false;
+  usageReadGeneration += 1;
   automaticRefresh.pause();
   stopClock();
   projectionRefresh.deactivate();
@@ -2850,6 +3142,8 @@ onDeactivated(() => {
 });
 onUnmounted(() => {
   accountsViewActive = false;
+  usageReadGeneration += 1;
+  refreshQueue.reset();
   automaticRefresh.reset();
   stopClock();
   projectionRefresh.deactivate();

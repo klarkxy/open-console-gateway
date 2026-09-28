@@ -155,3 +155,110 @@ test("deactivate unbinds visibility and ignores later ticks", () => {
   fireVisibility();
   assert.deepEqual(refreshes, []);
 });
+
+function deferred(): { promise: Promise<void>; resolve: () => void; reject: (error: unknown) => void } {
+  let resolve!: () => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<void>((yes, no) => { resolve = () => yes(); reject = no; });
+  return { promise, resolve, reject };
+}
+
+test("overlapping timer and visibility events admit one pending pass and coalesce", async () => {
+  const visibility = { state: "visible" as DocumentVisibilityState };
+  const { host, fireVisibility, tick } = installHost(visibility);
+  const gates: Array<ReturnType<typeof deferred>> = [];
+  const controller = createAccountsProjectionRefresh({
+    host,
+    isAuthenticated: () => true,
+    refresh: () => {
+      const gate = deferred();
+      gates.push(gate);
+      return gate.promise;
+    },
+  });
+  controller.activate();
+  tick();
+  tick();
+  fireVisibility();
+  tick();
+  assert.equal(gates.length, 1);
+  gates[0]!.resolve();
+  await gates[0]!.promise;
+  await Promise.resolve();
+  // Repeated events during the pending pass coalesce into exactly one more.
+  assert.equal(gates.length, 2);
+  gates[1]!.resolve();
+  await gates[1]!.promise;
+  await Promise.resolve();
+  assert.equal(gates.length, 2);
+});
+
+test("a failed pass still settles so the next tick can run", async () => {
+  const visibility = { state: "visible" as DocumentVisibilityState };
+  const { host, tick } = installHost(visibility);
+  const gates: Array<ReturnType<typeof deferred>> = [];
+  const controller = createAccountsProjectionRefresh({
+    host,
+    isAuthenticated: () => true,
+    refresh: () => {
+      const gate = deferred();
+      gates.push(gate);
+      return gate.promise;
+    },
+  });
+  controller.activate();
+  tick();
+  tick();
+  assert.equal(gates.length, 1);
+  gates[0]!.reject(new Error("boom"));
+  await gates[0]!.promise.catch(() => undefined);
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(gates.length, 2);
+  gates[1]!.resolve();
+  await gates[1]!.promise;
+  await Promise.resolve();
+  assert.equal(gates.length, 2);
+  tick();
+  assert.equal(gates.length, 3);
+});
+
+test("a pass settling after hide or logout cannot start a coalesced follow-up", async () => {
+  const visibility = { state: "visible" as DocumentVisibilityState };
+  let authenticated = true;
+  const { host, fireVisibility, tick } = installHost(visibility);
+  const gates: Array<ReturnType<typeof deferred>> = [];
+  const controller = createAccountsProjectionRefresh({
+    host,
+    isAuthenticated: () => authenticated,
+    refresh: () => {
+      const gate = deferred();
+      gates.push(gate);
+      return gate.promise;
+    },
+  });
+  controller.activate();
+  tick();
+  tick();
+  assert.equal(gates.length, 1);
+  visibility.state = "hidden";
+  fireVisibility();
+  gates[0]!.resolve();
+  await gates[0]!.promise;
+  await Promise.resolve();
+  assert.equal(gates.length, 1);
+
+  visibility.state = "visible";
+  fireVisibility();
+  assert.equal(gates.length, 2);
+  tick();
+  authenticated = false;
+  controller.onSessionDropped();
+  gates[1]!.resolve();
+  await gates[1]!.promise;
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(gates.length, 2);
+  tick();
+  assert.equal(gates.length, 2);
+});

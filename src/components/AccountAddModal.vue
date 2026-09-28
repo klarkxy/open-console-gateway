@@ -213,7 +213,6 @@
           :initial-preset-id="currentPreset?.id ?? null"
           :preset-selection-locked="Boolean(currentPreset)"
           context="account"
-          @saved="onPresetSaved"
           @committed="onPresetCommitted"
           @conflict="emit('presetConflict')"
           @busy-change="embeddedFormBusy = $event"
@@ -327,8 +326,18 @@ const emit = defineEmits<{
   (event: "saveAccount", payload: AccountInput | AccountFormPayload): void;
   /** The platform section owns validation, CAS handling, and the write. */
   (event: "createPlatform", payload: PlatformAccountFormPayload): void;
-  /** The atomic supplier+first-account create already persisted both lists. */
-  (event: "presetSaved", providerId: string): void;
+  /**
+   * The atomic supplier+first-account commit receipt is authoritative; the
+   * parent closes the chooser, applies return navigation, and re-reads
+   * projections separately (a slow read never holds the confirmed save open).
+   */
+  (event: "presetCommitted", result: {
+    connectionId: string;
+    credentialId: string | null;
+    accountId: string | null;
+    replayed: boolean;
+    mode: OnboardingIntent;
+  }): void;
   (event: "presetConflict"): void;
 }>();
 
@@ -509,8 +518,10 @@ const currentVariantHost = computed(() => {
 
 /**
  * Any in-flight create (parent account save, platform save, or embedded
- * supplier save/test/discovery) blocks closing and switching, so a late
- * success can never land in a different form or duplicate a write.
+ * supplier save) blocks closing and switching, so a late success can never
+ * land in a different form or duplicate a write. Read-only discovery/test
+ * work in the embedded form does not lock the chooser; its results are
+ * generation-scoped and its in-flight flags die with the form on switch.
  */
 const interactionLocked = computed(() => (
   props.createBusy || props.platformBusy || embeddedFormBusy.value || props.setupPending
@@ -628,33 +639,22 @@ function onRailKeydown(event: KeyboardEvent): void {
   });
 }
 
-let lastCommitWasDraft = false;
-
 function onPresetCommitted(result: {
   connectionId: string;
+  credentialId: string | null;
+  accountId: string | null;
+  replayed: boolean;
   mode: OnboardingIntent;
-  readbackFailed?: boolean;
 }): void {
-  lastCommitWasDraft = result.mode === "draft";
-  if (result.readbackFailed) {
-    message.warning(t("已保存，但列表刷新失败。手动刷新，不要再次提交。"));
-  }
-  if (!lastCommitWasDraft) return;
-  if (!result.readbackFailed) {
-    message.success(t("草稿已保存，到供应商页继续设置"));
-  }
+  // The commit receipt ends the save: forward it at once so the host closes
+  // the chooser, then route a draft to Providers to continue setup. No
+  // readback gates this path.
+  emit("presetCommitted", result);
+  if (result.mode !== "draft") return;
+  message.success(t("草稿已保存，到供应商页继续设置"));
   void router.push(appViewRoute("providers", {
     connection: result.connectionId,
   }));
-}
-
-function onPresetSaved(providerId: string): void {
-  if (lastCommitWasDraft) {
-    lastCommitWasDraft = false;
-    emit("update:show", false);
-    return;
-  }
-  emit("presetSaved", providerId);
 }
 
 function onOuterUpdateShow(value: boolean): void {

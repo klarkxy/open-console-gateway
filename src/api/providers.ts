@@ -811,13 +811,13 @@ export const providerApi = {
     upstream_protocol: "chat_completions" | "responses" | "messages";
     auth_kind: ProviderDefinitionAuthKind;
     key?: string;
-  }) => {
+  }, signal?: AbortSignal) => {
     const value: V3ProviderDefinitionDiscoverResponse = await dashboardV3.discoverProviderDefinitionModels({
       endpointUrl: input.endpoint_url,
       upstreamProtocol: input.upstream_protocol,
       authKind: input.auth_kind,
       key: input.key,
-    });
+    }, signal);
     assertNoSecret(value);
     return { models: value.models, truncated: value.truncated };
   },
@@ -828,7 +828,7 @@ export const providerApi = {
     public_model: string;
     upstream_model: string;
     key?: string;
-  }) => {
+  }, signal?: AbortSignal) => {
     const value: V3ProviderDefinitionTestResponse = await dashboardV3.testProviderDefinition({
       endpointUrl: input.endpoint_url,
       upstreamProtocol: input.upstream_protocol,
@@ -836,7 +836,7 @@ export const providerApi = {
       publicModel: input.public_model,
       upstreamModel: input.upstream_model,
       key: input.key,
-    });
+    }, signal);
     assertNoSecret(value);
     return { ok: value.ok, error: value.error };
   },

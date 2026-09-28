@@ -7,6 +7,12 @@
     <n-button size="small" secondary @click="reload">{{ t("重试") }}</n-button>
   </n-alert>
 
+  <n-alert v-if="platformStore.destinationRefreshError" type="warning"
+    :title="t('已保存，但列表刷新失败。手动刷新，不要再次提交。')">
+    <n-button size="small" secondary :loading="destinations.loading"
+      @click="platformStore.refreshDestinationProjection()">{{ t("重试") }}</n-button>
+  </n-alert>
+
   <PlatformAccountFormModal
     :show="showForm"
     :editing="editingPlatform"
@@ -174,10 +180,7 @@ async function persistPlatform(
     const outcome = await platformStore.createOrUpdate(payload, editing);
     if (outcome === "saved") {
       message.success(editing ? t("平台账号已更新") : t("平台账号已创建"));
-      emit("changed");
-    } else if (outcome === "saved_refresh_failed") {
-      message.warning(t("已保存，但列表刷新失败。手动刷新，不要再次提交。"));
-      emit("destinationRefreshFailed", platformStore.destinationRefreshError);
+
     } else if (outcome === "conflict") {
       notifyConflict();
     }
@@ -198,7 +201,7 @@ async function onFormSave(payload: PlatformAccountFormPayload): Promise<void> {
 /** Add Account chooser entry point; true only when the create persisted. */
 async function createPlatform(payload: PlatformAccountFormPayload): Promise<boolean> {
   const outcome = await persistPlatform(payload, null);
-  return outcome === "saved" || outcome === "saved_refresh_failed";
+  return outcome === "saved";
 }
 
 function confirmDelete(parent: PlatformAccount): void {
@@ -288,23 +291,31 @@ function notifyRefreshOutcome(parentId: string, accountId?: string): void {
 }
 
 async function refreshParent(parent: PlatformAccount): Promise<void> {
+  const session = billing.sessionEpoch;
   try {
     const outcome = await platformStore.refreshParent(parent.id);
+    if (session !== billing.sessionEpoch) return;
     if (outcome === "conflict") notifyConflict();
     else if (outcome === "ok") notifyRefreshOutcome(parent.id);
+    else message.warning(t("平台正在处理其他操作，请稍后刷新"));
     // Model imports remain the explicit fetch-models / fetch-all-models
     // actions. A balance refresh must not silently rewrite every Key's scope.
   } catch (error) {
+    if (session !== billing.sessionEpoch) return;
     mutationError(error, "刷新失败：{error}");
   }
 }
 
 async function refreshChild(parent: PlatformAccount, link: PlatformLink): Promise<void> {
+  const session = billing.sessionEpoch;
   try {
     const outcome = await platformStore.refreshChild(parent.id, link.accountId);
+    if (session !== billing.sessionEpoch) return;
     if (outcome === "conflict") notifyConflict();
     else if (outcome === "ok") notifyRefreshOutcome(parent.id, link.accountId);
+    else message.warning(t("平台正在处理其他操作，请稍后刷新"));
   } catch (error) {
+    if (session !== billing.sessionEpoch) return;
     mutationError(error, "刷新失败：{error}");
   }
 }

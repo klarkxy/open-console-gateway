@@ -198,6 +198,7 @@ const props = defineProps<{
   now: number;
   arrangingDisabled?: boolean;
   canRemoveEmptyCard?: boolean;
+  canDeleteGroup?: boolean;
   cpaStatus?: CpaCardStatus | null;
   /** UI-local fold state; sort mode forces the expanded compact form. */
   collapsed?: boolean;
@@ -217,6 +218,7 @@ const emit = defineEmits<{
   "add-key": [];
   "add-card": [];
   "remove-empty-card": [];
+  "delete-group": [];
   "import-keys": [];
   "link-existing": [];
   "retry-pending-link": [];
@@ -303,7 +305,10 @@ const parentMenuOptions = computed(() => {
     { label: t("再建一张卡片"), key: "add-card", disabled: props.arrangingDisabled },
     ...(props.canRemoveEmptyCard ? [{ label: t("删除空卡片"), key: "remove-empty-card", disabled: props.arrangingDisabled }] : []),
   ];
-  if (!props.parent) return arrangement;
+  if (!props.parent) return [
+    ...arrangement,
+    ...(props.canDeleteGroup ? [{ label: t("删除账号组"), key: "delete-group", disabled: props.mutating }] : []),
+  ];
   return [
     { label: t("刷新"), key: "refresh-parent", disabled: props.mutating || refreshingParent.value },
     ...arrangement,
@@ -335,6 +340,10 @@ const CARD_MOVE_KEYS: Record<string, RoutingCardMove> = {
 };
 
 function handleParentMenuSelect(key: string | number) {
+  if (key === "delete-group") {
+    if (props.canDeleteGroup && !props.mutating) emit("delete-group");
+    return;
+  }
   if (key === "refresh-parent") {
     emit("refresh-parent");
     return;

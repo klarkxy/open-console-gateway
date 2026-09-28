@@ -32,6 +32,8 @@ import type {
   DestinationPatchRequest,
   DestinationPatchResult,
   DestinationCatalogRefreshResult,
+  DestinationModelMetadata,
+  DestinationModelMetadataUpdate,
   DshApplication,
   DshApplicationInstallRequest,
   DshApplicationOutcome,
@@ -73,8 +75,8 @@ export type DestinationCatalogUpdate = WithoutExpectation<DestinationCatalogUpda
 
 export const dashboardV4 = {
   getTemplates: () => requestV4<TemplateList>("/templates"),
-  getConnections: () => requestV4<ConnectionList>("/connections"),
-  getAccounts: () => requestV4<IdentityList>("/accounts"),
+  getConnections: (signal?: AbortSignal) => requestV4<ConnectionList>("/connections", { signal }),
+  getAccounts: (signal?: AbortSignal) => requestV4<IdentityList>("/accounts", { signal }),
   getDestinations: () => requestV4<DestinationList>("/destinations"),
   getCredentials: () => requestV4<CredentialList>("/credentials"),
   refreshDestinationCatalog: (id: string, expectation: MutationExpectation) =>
@@ -97,6 +99,18 @@ export const dashboardV4 = {
       `/destinations/${encodeURIComponent(id)}/model-tests`,
       { method: "POST", body: withExpectation({ publicModel, protocol }, expectation) },
     ),
+  getDestinationModelMetadata: (id: string) =>
+    requestV4<DestinationModelMetadata>(
+      `/destinations/${encodeURIComponent(id)}/model-metadata`,
+    ),
+  putDestinationModelMetadata: (
+    id: string,
+    input: WithoutExpectation<DestinationModelMetadataUpdate>,
+    expectation: MutationExpectation,
+  ) => requestV4<DestinationModelMetadata>(
+    `/destinations/${encodeURIComponent(id)}/model-metadata`,
+    { method: "PUT", body: withExpectation(input, expectation) },
+  ),
   getRoutingCards: () => requestV4<RoutingCardList>("/routing/cards"),
   putRoutingCards: (
     input: WithoutExpectation<RoutingCardUpdate>,
