@@ -37,6 +37,7 @@ pub(crate) mod http_client;
 pub mod kernel;
 pub(crate) mod model_metadata;
 pub mod models;
+pub(crate) mod modelsdev;
 pub mod official_api;
 pub(crate) mod official_protocols;
 pub(crate) mod official_service;

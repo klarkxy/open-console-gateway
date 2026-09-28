@@ -30,8 +30,12 @@ const CLIENT_ROOT_URL_ENV: &str = "OCG_CLIENT_ROOT_URL";
 // Note: Mutex lock ordering is (1) settings_update, (2) db, (2b) quota_probes,
 // (3) config,
 // (4) http_client, (5) gateway, (6) pricing, (7) zen_free_models,
+// (7b) modelsdev_catalog / modelsdev_last_attempt,
 // (8) cpa_models, (9) unpublished_public_models, (10) provider_contracts,
 // (11) dynamic_providers, (12) routing, (13) credential_snapshot.
+// The models.dev locks are leaf locks: readers clone the Arc and drop the
+// guard before taking db, and the refresh task releases db before writing
+// modelsdev_catalog, so the two are never held together.
 // The CPA runtime status mutex is never held while acquiring another sync lock.
 // `activate_zen_free_model_catalog` acquires db → http_client →
 // zen_free_models → provider_contracts, then drops those before
@@ -88,9 +92,15 @@ pub struct CoreStateInner {
     pricing: RwLock<Arc<PricingSnapshot>>,
     pub pricing_refresh: tokio::sync::Mutex<()>,
     zen_free_models: RwLock<Arc<crate::kernel::zen::ZenFreeModelCatalog>>,
+    pub(crate) modelsdev_catalog: RwLock<Arc<crate::modelsdev::ModelsDevCatalog>>,
     cpa_models: RwLock<Arc<Vec<String>>>,
     unpublished_public_models: RwLock<Arc<HashSet<String>>>,
     pub zen_free_models_refresh: tokio::sync::Mutex<()>,
+    /// Serializes the lazy background models.dev catalog refresh. Arc so the
+    /// detached refresh task can hold an owned guard without borrowing state.
+    pub modelsdev_refresh: Arc<tokio::sync::Mutex<()>>,
+    /// Last models.dev refresh attempt; throttles retries after failures.
+    pub(crate) modelsdev_last_attempt: Mutex<Option<chrono::DateTime<chrono::Utc>>>,
     pub provider_models_refresh: tokio::sync::Mutex<()>,
     pub(crate) provider_usage_refresh: crate::usage_sync::ProviderUsageRefreshGate,
     /// Serializes typed operations against the one local CPA integration.
@@ -405,6 +415,7 @@ impl CoreStateInner {
             }
         };
         let zen_free_models = db.zen_free_model_catalog()?.unwrap_or_default();
+        let modelsdev_catalog = crate::modelsdev::load(&db)?;
         let cpa_models = db
             .cpa_model_catalog()?
             .map(|catalog| crate::db::CpaCatalogModel::enabled_ids(&catalog.models))
@@ -452,9 +463,12 @@ impl CoreStateInner {
             pricing: RwLock::new(Arc::new(pricing)),
             pricing_refresh: tokio::sync::Mutex::new(()),
             zen_free_models: RwLock::new(Arc::new(zen_free_models)),
+            modelsdev_catalog: RwLock::new(Arc::new(modelsdev_catalog)),
             cpa_models: RwLock::new(Arc::new(cpa_models)),
             unpublished_public_models: RwLock::new(Arc::new(unpublished_public_models)),
             zen_free_models_refresh: tokio::sync::Mutex::new(()),
+            modelsdev_refresh: Arc::new(tokio::sync::Mutex::new(())),
+            modelsdev_last_attempt: Mutex::new(None),
             provider_models_refresh: tokio::sync::Mutex::new(()),
             provider_usage_refresh: crate::usage_sync::ProviderUsageRefreshGate::new(
                 crate::usage_sync::PROVIDER_REFRESH_CONCURRENCY,
@@ -575,6 +589,10 @@ impl CoreStateInner {
 
     pub fn zen_free_model_catalog(&self) -> Arc<crate::kernel::zen::ZenFreeModelCatalog> {
         self.zen_free_models.read().clone()
+    }
+
+    pub(crate) fn modelsdev_catalog(&self) -> Arc<crate::modelsdev::ModelsDevCatalog> {
+        self.modelsdev_catalog.read().clone()
     }
 
     pub fn cpa_model_catalog(&self) -> Arc<Vec<String>> {

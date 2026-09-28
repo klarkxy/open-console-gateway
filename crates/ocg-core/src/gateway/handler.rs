@@ -326,7 +326,10 @@ fn published_alias_models_response(state: &CoreState) -> axum::response::Respons
             }));
         }
     }
-    if crate::model_metadata::enrich(&state.db.lock(), &snapshot, &mut data).is_err() {
+    // Kick the lazy models.dev refresh; this response still uses the cache.
+    crate::modelsdev::ensure_fresh(&state);
+    let modelsdev = state.modelsdev_catalog();
+    if crate::model_metadata::enrich(&state.db.lock(), &modelsdev, &snapshot, &mut data).is_err() {
         return protocol_error_response(
             ApiFormat::ChatCompletions,
             StatusCode::INTERNAL_SERVER_ERROR,

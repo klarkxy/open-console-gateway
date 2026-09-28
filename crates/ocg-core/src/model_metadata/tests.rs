@@ -200,3 +200,57 @@ fn declarations_are_bound_to_the_exact_destination_route_and_model_mapping() {
         "unknown"
     );
 }
+
+#[test]
+fn modelsdev_fills_only_routes_without_route_specific_facts() {
+    let destination = route_fixture();
+    let model = &destination.catalog[0];
+    let mut catalog = crate::modelsdev::ModelsDevCatalog::default();
+    catalog.models.insert(
+        "upstream".into(),
+        ModelMetadata {
+            context_window: Some(64000),
+            input_modalities: Some(vec!["text".into(), "image".into()]),
+            ..Default::default()
+        },
+    );
+
+    // No record: models.dev supplies the facts.
+    let records = vec![];
+    let (metadata, source) = effective_with_catalog(&records, &catalog, &destination, model);
+    assert_eq!(source, "modelsdev");
+    assert_eq!(metadata.context_window, Some(64000));
+
+    // An upstream observation outranks the public catalog.
+    let mut records = vec![];
+    record_for(&mut records, &destination, model).observed = Some(ModelMetadata {
+        context_window: Some(8000),
+        ..Default::default()
+    });
+    let (metadata, source) = effective_with_catalog(&records, &catalog, &destination, model);
+    assert_eq!(source, "upstream");
+    assert_eq!(metadata.context_window, Some(8000));
+
+    // An operator declaration outranks both.
+    record_for(&mut records, &destination, model).declared = Some(ModelMetadata {
+        context_window: Some(16000),
+        ..Default::default()
+    });
+    let (metadata, source) = effective_with_catalog(&records, &catalog, &destination, model);
+    assert_eq!(source, "operator");
+    assert_eq!(metadata.context_window, Some(16000));
+
+    // A route change invalidates the record; models.dev still applies.
+    let mut changed = destination.clone();
+    changed.base_url = Some("https://other.test/v1".into());
+    let (metadata, source) = effective_with_catalog(&records, &catalog, &changed, model);
+    assert_eq!(source, "modelsdev");
+    assert_eq!(metadata.context_window, Some(64000));
+
+    // No catalog entry and no route-specific record: stays unknown.
+    let empty = crate::modelsdev::ModelsDevCatalog::default();
+    assert_eq!(
+        effective_with_catalog(&[], &empty, &destination, model).1,
+        "unknown"
+    );
+}

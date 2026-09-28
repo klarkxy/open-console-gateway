@@ -158,6 +158,25 @@ pub(crate) fn effective(
     }
 }
 
+/// Effective facts with the models.dev catalog as the last resort. Priority
+/// is operator declaration > upstream observation > models.dev > unknown;
+/// a public-catalog hit never overrides a route-specific fact.
+pub(crate) fn effective_with_catalog(
+    records: &[Record],
+    modelsdev: &crate::modelsdev::ModelsDevCatalog,
+    destination: &Destination,
+    model: &CatalogModel,
+) -> (ModelMetadata, &'static str) {
+    let (metadata, source) = effective(records, destination, model);
+    if source != "unknown" {
+        return (metadata, source);
+    }
+    match crate::modelsdev::lookup(modelsdev, &model.public_model, &model.upstream_model) {
+        Some(found) => (found.clone(), "modelsdev"),
+        None => (metadata, source),
+    }
+}
+
 pub(crate) fn declare(
     db: &Database,
     destination: &Destination,
@@ -226,6 +245,15 @@ pub(crate) fn observe(
 
 /// Normalize explicit directory facts. No model-family guessing and no I/O.
 pub(crate) fn parse_catalog(bytes: &[u8]) -> BTreeMap<String, ModelMetadata> {
+    parse_catalog_limit(bytes, 1000)
+}
+
+/// Same normalization with a caller-chosen row cap. models.dev ingestion
+/// flattens many providers and needs a wider cap than one upstream catalog.
+pub(crate) fn parse_catalog_limit(
+    bytes: &[u8],
+    max_rows: usize,
+) -> BTreeMap<String, ModelMetadata> {
     let Ok(value) = serde_json::from_slice::<Value>(bytes) else {
         return BTreeMap::new();
     };
@@ -233,7 +261,7 @@ pub(crate) fn parse_catalog(bytes: &[u8]) -> BTreeMap<String, ModelMetadata> {
         return BTreeMap::new();
     };
     let mut result = BTreeMap::new();
-    for row in rows.iter().take(1000) {
+    for row in rows.iter().take(max_rows) {
         let Some(id) = row.get("id").and_then(Value::as_str) else {
             continue;
         };
@@ -412,6 +440,7 @@ pub(crate) fn common(models: &[ModelMetadata]) -> ModelMetadata {
 
 pub(crate) fn enrich(
     db: &Database,
+    modelsdev: &crate::modelsdev::ModelsDevCatalog,
     snapshot: &crate::gateway::handler::RuntimeCatalogSnapshot,
     rows: &mut [Value],
 ) -> anyhow::Result<()> {
@@ -439,7 +468,8 @@ pub(crate) fn enrich(
                         id,
                     )
                 {
-                    let (metadata, source) = effective(&records, destination, model);
+                    let (metadata, source) =
+                        effective_with_catalog(&records, modelsdev, destination, model);
                     candidates.push(metadata);
                     sources.insert(source);
                 }

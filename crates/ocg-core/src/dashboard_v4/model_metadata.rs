@@ -90,6 +90,8 @@ pub(super) async fn put(
 }
 
 fn payload(state: &CoreState, id: &str) -> Result<DestinationModelMetadata, V3ApiError> {
+    // Cloned and released before the db lock; see the state lock-order note.
+    let modelsdev = state.modelsdev_catalog();
     let db = state.db.lock();
     let snapshot =
         crate::routing_snapshot::RoutingSnapshot::load(&db).map_err(V3ApiError::internal)?;
@@ -104,7 +106,8 @@ fn payload(state: &CoreState, id: &str) -> Result<DestinationModelMetadata, V3Ap
         .catalog
         .iter()
         .map(|model| {
-            let (metadata, source) = model_metadata::effective(&records, destination, model);
+            let (metadata, source) =
+                model_metadata::effective_with_catalog(&records, &modelsdev, destination, model);
             DestinationModelMetadataEntry {
                 public_model: model.public_model.clone(),
                 upstream_model: model.upstream_model.clone(),
