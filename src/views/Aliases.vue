@@ -92,6 +92,7 @@
               <th>{{ t("供应商 / 方案") }}</th>
               <th>{{ t("路由顺位") }}</th>
               <th>{{ t("上游模型 ID") }}</th>
+              <th><span class="sr-only">{{ t("打开相关目标") }}</span></th>
             </tr>
           </thead>
           <tbody v-for="group in aliasGroups" :key="group.public_model">
@@ -108,8 +109,8 @@
                       <n-switch
                         size="small"
                         :value="group.published"
-                        :disabled="!publicationReady || Boolean(saving[group.public_model])"
-                        :loading="Boolean(saving[group.public_model])"
+                        :disabled="!publicationReady || publicationSaving(group.public_model)"
+                        :loading="publicationSaving(group.public_model)"
                         :aria-label="t('对下游展示此模型')"
                         @update:value="(published) => setPublished(group.public_model, published)"
                       />
@@ -128,6 +129,22 @@
               </td>
               <td class="aliases-rank">{{ rankText(row) }}</td>
               <td><code>{{ row.upstream_model }}</code></td>
+              <td class="aliases-action">
+                <n-tooltip v-if="aliasRowTarget(row)" trigger="hover">
+                  <template #trigger>
+                    <n-button
+                      circle
+                      quaternary
+                      size="small"
+                      :aria-label="row.custom_account_id ? t('打开相关账号') : t('打开相关供应商模型')"
+                      @click="openAliasRowTarget(row)"
+                    >
+                      <template #icon><n-icon :component="LinkOutlined" /></template>
+                    </n-button>
+                  </template>
+                  {{ row.custom_account_id ? t('打开相关账号') : t('打开相关供应商模型') }}
+                </n-tooltip>
+              </td>
             </tr>
           </tbody>
         </table>
@@ -137,14 +154,13 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onActivated, onMounted, ref, watch } from "vue";
-import { NAlert, NButton, NEmpty, NInput, NSpin, NSwitch, NTag, NTooltip } from "naive-ui";
-import type { ProviderDefinitionView } from "../api/providers.ts";
-import { dashboardV4 } from "../api/dashboard-v4.ts";
-import type { CpaCatalogEntry } from "../api/generated/dashboard-v4.ts";
+import { computed, onActivated, onMounted, onUnmounted, ref, watch } from "vue";
+import { useRouter, type RouteLocationRaw } from "vue-router";
+import { NAlert, NButton, NEmpty, NIcon, NInput, NSpin, NSwitch, NTag, NTooltip } from "naive-ui";
+import { LinkOutlined } from "@vicons/antd";
 import { isDynamicCatalogEntry } from "../domain/dynamic-provider.ts";
 import { flattenProviderScopes, normalizeProviderContractsResponse } from "../domain/provider-contracts.ts";
-import { isRevisionConflict } from "../api/dashboard.ts";
+import { CPA_PROVIDER_ID } from "../domain/destination-providers.ts";
 import {
   aliasNameOverlaps,
   aliasRowPlatformLabel,
@@ -157,14 +173,13 @@ import {
 } from "../domain/provider-aliases.ts";
 import { t } from "../i18n/index.ts";
 import { useAccountsStore } from "../stores/accounts.ts";
-import { useControlPlaneStore } from "../stores/controlPlane.ts";
+import { appViewRoute } from "./app-navigation.ts";
 import { useIdentitiesStore } from "../stores/identities.ts";
 import { useProvidersStore } from "../stores/providers.ts";
 import { useSessionStore } from "../stores/session.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
 
 const accountsStore = useAccountsStore();
-const controlPlane = useControlPlaneStore();
 const identitiesStore = useIdentitiesStore();
 const providersStore = useProvidersStore();
 const sessionStore = useSessionStore();
@@ -175,8 +190,15 @@ const contracts = computed(() => {
 });
 const catalog = computed(() => providersStore.catalog);
 const accounts = computed(() => accountsStore.accounts);
-const dynamicProviders = ref<ProviderDefinitionView[]>([]);
-const cpaModels = ref<CpaCatalogEntry[]>([]);
+const dynamicProviders = computed(() => {
+  const enabled = new Set(accounts.value.filter(account => account.enabled).map(account => account.provider_id));
+  return (catalog.value ?? []).flatMap(entry => {
+    if (!isDynamicCatalogEntry(entry) || !enabled.has(entry.provider_id)) return [];
+    const definition = providersStore.definitions.get(entry.provider_id);
+    return definition ? [definition] : [];
+  });
+});
+const cpaModels = computed(() => providersStore.cpaModels ?? []);
 const loading = ref(false);
 const search = ref("");
 const loadError = ref("");
@@ -184,13 +206,15 @@ const accountsLoadError = ref("");
 const dynamicLoadError = ref("");
 const cpaLoadError = ref("");
 const identitiesLoadError = ref("");
-const unpublished = ref<string[]>([]);
-const publicationReady = ref(false);
-const publicationLoadError = ref("");
-const publicationSaveError = ref("");
-const saving = ref<Record<string, boolean>>({});
+// Alias publication lives in the providers store; these are read-through views.
+const unpublished = computed(() => providersStore.aliasUnpublished);
+const publicationReady = computed(() => providersStore.aliasPublicationReady);
+const publicationLoadError = computed(() => providersStore.aliasPublicationLoadError);
+const publicationSaveError = computed(() => providersStore.aliasPublicationSaveError);
+const router = useRouter();
 let activatedOnce = false;
 let aliasesLoadedAt = 0;
+let loadGeneration = 0;
 // Activation refreshes skip data loaded recently; user actions call
 // loadAliases directly and stay immediate.
 const ACTIVATED_REFRESH_FRESHNESS_MS = 30_000;
@@ -249,75 +273,58 @@ function groupHasOverlap(rows: readonly ProviderAliasRow[]): boolean {
   return rows.some((row) => aliasNameOverlaps(row, aliasRows.value));
 }
 
-async function setPublished(publicModel: string, published: boolean): Promise<void> {
-  const key = publicModelPublicationKey(publicModel);
-  const previous = unpublished.value;
-  unpublished.value = published
-    ? previous.filter((name) => publicModelPublicationKey(name) !== key)
-    : previous.some((name) => publicModelPublicationKey(name) === key)
-      ? previous
-      : [...previous, key];
-  saving.value = { ...saving.value, [publicModel]: true };
-  try {
-    if (!controlPlane.hasTokens()) await controlPlane.refresh();
-    const result = await controlPlane.runMutation((expectation) => (
-      dashboardV4.patchAliasPublication({ publicModel, published }, expectation)
-    ));
-    unpublished.value = result.unpublished;
-    publicationSaveError.value = "";
-  } catch (error) {
-    unpublished.value = previous;
-    if (isRevisionConflict(error)) {
-      try {
-        const snapshot = await dashboardV4.getAliasPublication();
-        unpublished.value = snapshot.unpublished;
-        publicationReady.value = true;
-      } catch {
-        // Keep the reverted optimistic state when reload also fails.
-      }
-    }
-    publicationSaveError.value = dashboardErrorDetail(error);
-  } finally {
-    const next = { ...saving.value };
-    delete next[publicModel];
-    saving.value = next;
+// The store owns the write: per-row duplicate guard, optimistic overlay,
+// and overlay-scoped failure reconciliation.
+function setPublished(publicModel: string, published: boolean): void {
+  void providersStore.setAliasPublished(publicModel, published);
+}
+
+function publicationSaving(publicModel: string): boolean {
+  return providersStore.aliasPublicationPending.includes(publicModelPublicationKey(publicModel));
+}
+
+/** Reach the exact relevant account (Custom API rows) or provider models tab. */
+function aliasRowTarget(row: ProviderAliasRow): RouteLocationRaw | null {
+  if (row.custom_account_id) {
+    return appViewRoute("accounts", undefined, { account_id: row.custom_account_id });
   }
+  if (row.provider_id && row.provider_id !== CPA_PROVIDER_ID) {
+    return appViewRoute("providers", { provider: row.provider_id, tab: "models", model: row.public_model });
+  }
+  return null;
+}
+
+function openAliasRowTarget(row: ProviderAliasRow): void {
+  const target = aliasRowTarget(row);
+  if (target) void router.push(target);
 }
 
 async function loadAliases(options: { retain?: boolean } = {}): Promise<void> {
   if (loading.value) return;
+  const generation = ++loadGeneration;
   loading.value = true;
   if (!options.retain) {
     loadError.value = "";
     dynamicLoadError.value = "";
     cpaLoadError.value = "";
     identitiesLoadError.value = "";
-    publicationLoadError.value = "";
   }
   try {
-    const [contractsResult, catalogResult, accountsResult, cpaResult, publicationResult, identitiesResult] = await Promise.allSettled([
+    const [contractsResult, catalogResult, accountsResult, cpaResult, identitiesResult] = await Promise.allSettled([
       providersStore.loadContracts(),
       providersStore.loadCatalog(),
       accountsStore.loadPresented(),
-      dashboardV4.getCpaCatalog(),
-      dashboardV4.getAliasPublication(),
+      providersStore.loadCpaModels(),
       identitiesStore.loadPresented(),
+      providersStore.loadAliasPublication(),
     ]);
+    if (generation !== loadGeneration) return;
     if (identitiesResult.status === "fulfilled") {
       identitiesLoadError.value = "";
     } else {
       identitiesLoadError.value = dashboardErrorDetail(identitiesResult.reason);
     }
-    if (publicationResult.status === "fulfilled") {
-      unpublished.value = publicationResult.value.unpublished;
-      publicationReady.value = true;
-      publicationLoadError.value = "";
-    } else {
-      publicationLoadError.value = dashboardErrorDetail(publicationResult.reason);
-      if (!options.retain) publicationReady.value = false;
-    }
     if (cpaResult.status === "fulfilled") {
-      cpaModels.value = cpaResult.value.models;
       cpaLoadError.value = "";
     } else {
       cpaLoadError.value = dashboardErrorDetail(cpaResult.reason);
@@ -332,27 +339,16 @@ async function loadAliases(options: { retain?: boolean } = {}): Promise<void> {
         isDynamicCatalogEntry(entry) && enabledProviderIds.has(entry.provider_id)
       ));
       if (entries.length === 0) {
-        dynamicProviders.value = [];
         dynamicLoadError.value = "";
       } else {
         const details = await Promise.allSettled(
           entries.map((entry) => providersStore.loadDefinition(entry.provider_id)),
         );
-        const previous = new Map(dynamicProviders.value.map((provider) => [provider.id, provider]));
-        const next: ProviderDefinitionView[] = [];
+        if (generation !== loadGeneration) return;
         const failures: string[] = [];
-        details.forEach((result, index) => {
-          if (result.status === "fulfilled") {
-            next.push(result.value);
-            return;
-          }
-          failures.push(dashboardErrorDetail(result.reason));
-          if (options.retain) {
-            const kept = previous.get(entries[index]?.provider_id ?? "");
-            if (kept) next.push(kept);
-          }
+        details.forEach(result => {
+          if (result.status === "rejected") failures.push(dashboardErrorDetail(result.reason));
         });
-        dynamicProviders.value = next;
         dynamicLoadError.value = failures[0] ?? "";
       }
     }
@@ -368,11 +364,18 @@ async function loadAliases(options: { retain?: boolean } = {}): Promise<void> {
       loadError.value = dashboardErrorDetail(contractsResult.reason);
     }
   } finally {
-    loading.value = false;
+    if (generation === loadGeneration) loading.value = false;
   }
 }
 
-watch(() => sessionStore.authenticated, (ok) => { if (!ok) aliasesLoadedAt = 0; });
+watch(() => sessionStore.authenticated, ok => {
+  if (ok) return;
+  loadGeneration += 1;
+  aliasesLoadedAt = 0;
+  loading.value = false;
+  loadError.value = accountsLoadError.value = dynamicLoadError.value = cpaLoadError.value = identitiesLoadError.value = "";
+}, { flush: "sync" });
+onUnmounted(() => { loadGeneration += 1; });
 onMounted(() => void loadAliases());
 onActivated(() => {
   if (activatedOnce) {

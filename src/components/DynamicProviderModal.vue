@@ -5,7 +5,7 @@
     :embedded="embedded"
     modal-class="dynamic-provider-modal"
     modal-style="width: 720px; max-width: calc(100vw - 32px)"
-    :close-on-esc="!busy"
+    :close-on-esc="!writeBusy"
     @update:show="onSurfaceUpdateShow"
   >
     <n-form label-placement="top" @submit.prevent="onFormSubmit">
@@ -298,7 +298,7 @@
           {{ t(paidTestWarningKey) }}
         </n-popconfirm>
         <n-space>
-          <n-button v-if="!embedded" attr-type="button" :disabled="busy" @click="$emit('update:show', false)">{{ t("取消") }}</n-button>
+          <n-button v-if="!embedded" attr-type="button" :disabled="writeBusy" @click="$emit('update:show', false)">{{ t("取消") }}</n-button>
           <n-button
             v-if="isConfiguredEdit"
             type="primary"
@@ -431,10 +431,12 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (event: "update:show", value: boolean): void;
+  /** Configured edit only; create/resume commit is reported by `committed`. */
   (event: "saved", providerId: string): void;
   /**
-   * Create/resume V4 commit result. `saved` still emits the legacy provider id
-   * resolved from a follow-up connections list so existing hosts keep working.
+   * Create/resume V4 commit receipt. The receipt is authoritative: hosts act
+   * on it directly and re-read projections separately, so a slow or failed
+   * follow-up read never holds a confirmed save open.
    */
   (event: "committed", result: {
     connectionId: string;
@@ -442,7 +444,6 @@ const emit = defineEmits<{
     accountId: string | null;
     replayed: boolean;
     mode: OnboardingIntent;
-    readbackFailed: boolean;
   }): void;
   (event: "conflict"): void;
   /** Hosts embed the form and block dismissal while work is in flight. */
@@ -500,19 +501,67 @@ const formTitle = computed(() => {
 const busy = computed(() => (
   saving.value || discovering.value || testing.value || snapshotLoading.value
 ));
+// Only an in-flight write locks closing/switching. Discovery, tests, and
+// snapshot reads are cancellable: their AbortController, results, and
+// finally blocks are scoped to the exact request generation, so a close or
+// switch never lets a late read touch a newer form.
+const writeBusy = computed(() => saving.value);
 const fieldsLocked = computed(() => busy.value || lastFailure.value === "uncertain");
 // Hosts embedding this form block switching/closing on this signal.
-watch(busy, (value) => emit("busyChange", value));
-onUnmounted(() => {
-  // The busy watcher is already stopped at this point, so release the host's
-  // lock with a direct emit, and invalidate in-flight discovery/test via the
-  // generation counter so an abandoned response can never commit anywhere.
+watch(writeBusy, (value) => emit("busyChange", value));
+const SNAPSHOT_READ_TIMEOUT_MS = 15_000;
+const PROBE_READ_TIMEOUT_MS = 45_000;
+const READ_TIMEOUT_ERROR = "OcgReadTimeout";
+
+function isReadTimeout(error: unknown): boolean {
+  return error instanceof Error && error.name === READ_TIMEOUT_ERROR;
+}
+
+/**
+ * Bounded client wait for a read-only request: the timer aborts the request
+ * and settles the wait even when the underlying call never answers. Writes
+ * never go through here; close/switch aborts the same controller and the
+ * generation guards below invalidate its result, error, and finally.
+ */
+async function boundedRead<T>(
+  controller: AbortController,
+  timeoutMs: number,
+  read: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  let timer: number | null = null;
+  try {
+    return await Promise.race([
+      read(controller.signal),
+      new Promise<never>((_, reject) => {
+        timer = window.setTimeout(() => {
+          controller.abort();
+          const timeout = new Error("bounded read timed out");
+          timeout.name = READ_TIMEOUT_ERROR;
+          reject(timeout);
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== null) window.clearTimeout(timer);
+  }
+}
+
+const readControllers = new Set<AbortController>();
+function resetInFlightReads(): void {
+  for (const controller of readControllers) controller.abort();
+  readControllers.clear();
   requestGeneration.value += 1;
   snapshotGeneration += 1;
-  saving.value = false;
   discovering.value = false;
   testing.value = false;
   snapshotLoading.value = false;
+}
+onUnmounted(() => {
+  // The busy watcher is already stopped at this point, so release the host's
+  // lock with a direct emit, and abort/invalidate in-flight discovery/test
+  // via the generation counters so an abandoned response can never commit.
+  resetInFlightReads();
+  saving.value = false;
   emit("busyChange", false);
 });
 const testNeedsConfirm = dynamicProviderActionNeedsConfirm("test");
@@ -689,6 +738,7 @@ const authOptions = computed(() => DYNAMIC_AUTH_KINDS.map((value) => ({
 })));
 
 let formWasVisible = false;
+let activeContextKey = "";
 
 watch(
   () => [props.show, props.provider, props.initialPresetId, props.resumeConnectionId] as const,
@@ -698,8 +748,9 @@ watch(
       wasVisible: formWasVisible,
     });
     if (!visible) {
-      requestGeneration.value += 1;
+      resetInFlightReads();
       formWasVisible = false;
+      activeContextKey = "";
       draft.value = sanitizeProviderDefinitionDraft(draft.value);
       lastFailure.value = "none";
       lastSignature.value = null;
@@ -711,8 +762,17 @@ watch(
       committedWrite = false;
       return;
     }
-    if (!justOpened) return;
+    // A context switch without a hide (host swaps provider/resume/preset
+    // while open) abandons the old context's reads exactly like a close.
+    const nextContextKey = [
+      provider?.id ?? "",
+      props.resumeConnectionId ?? "",
+      props.initialPresetId ?? "",
+    ].join("|");
+    if (!justOpened && nextContextKey === activeContextKey) return;
+    if (!justOpened) resetInFlightReads();
     formWasVisible = true;
+    activeContextKey = nextContextKey;
     requestGeneration.value += 1;
     testTargetIndex.value = 0;
     settingsOpen.value = false;
@@ -849,13 +909,15 @@ async function discover(): Promise<void> {
   discoveryInfo.value = "";
   discovering.value = true;
   const generation = requestGeneration.value;
+  const controller = new AbortController();
+  readControllers.add(controller);
   try {
-    const result = await providerApi.discoverProviderDefinitionModels({
+    const result = await boundedRead(controller, PROBE_READ_TIMEOUT_MS, (signal) => providerApi.discoverProviderDefinitionModels({
       endpoint_url: draft.value.endpoint_url,
       upstream_protocol: draft.value.upstream_protocol as DynamicUpstreamProtocol,
       auth_kind: draft.value.auth_kind as DynamicAuthKind,
       key: draft.value.key || undefined,
-    });
+    }, signal));
     if (generation !== requestGeneration.value) return;
     discoveredModels.value = result.models;
     discoveryInfo.value = result.models.length === 0
@@ -865,9 +927,10 @@ async function discover(): Promise<void> {
         : t("已获取 {count} 个模型", { count: result.models.length });
   } catch (error) {
     if (generation !== requestGeneration.value) return;
-    discoveryError.value = dashboardErrorDetail(error);
+    discoveryError.value = isReadTimeout(error) ? t("请求超时") : dashboardErrorDetail(error);
   } finally {
-    discovering.value = false;
+    readControllers.delete(controller);
+    if (generation === requestGeneration.value) discovering.value = false;
   }
 }
 
@@ -889,19 +952,23 @@ async function runTest(): Promise<void> {
   formError.value = "";
   testSuccess.value = "";
   const generation = requestGeneration.value;
+  const controller = new AbortController();
+  readControllers.add(controller);
   // Any explicit per-model override wins by presence; otherwise the supplier
   // default applies.
   const route = resolveDynamicMappingRoute(draft.value, mapping);
   const usesOverride = Boolean(mapping.upstream_override);
   try {
-    const result = await providerApi.testProviderDefinition({
+    // A confirmed upstream test may already be running when the client stops
+    // waiting; the timeout only releases the form, never claims a rollback.
+    const result = await boundedRead(controller, PROBE_READ_TIMEOUT_MS, (signal) => providerApi.testProviderDefinition({
       endpoint_url: route.endpoint_url,
       upstream_protocol: route.upstream_protocol as DynamicUpstreamProtocol,
       auth_kind: draft.value.auth_kind as DynamicAuthKind,
       public_model: mapping.public_model,
       upstream_model: mapping.upstream_model,
       key: draft.value.key || undefined,
-    });
+    }, signal));
     if (generation !== requestGeneration.value) return;
     if (result.ok) {
       testSuccess.value = t("测试成功：{model} · {protocol}（{source}）", {
@@ -914,16 +981,20 @@ async function runTest(): Promise<void> {
     }
   } catch (error) {
     if (generation !== requestGeneration.value) return;
-    formError.value = t("测试失败：{error}", { error: dashboardErrorDetail(error) });
+    formError.value = t("测试失败：{error}", {
+      error: isReadTimeout(error) ? t("请求超时") : dashboardErrorDetail(error),
+    });
   } finally {
-    testing.value = false;
+    readControllers.delete(controller);
+    if (generation === requestGeneration.value) testing.value = false;
   }
 }
 
 function onSurfaceUpdateShow(visible: boolean): void {
-  // The standalone modal applies the same busy dismissal guard embedded
-  // hosts enforce: in-flight save/test/discovery keeps the form open.
-  if (!visible && busy.value) return;
+  // The standalone modal applies the same dismissal guard embedded hosts
+  // enforce: only an in-flight write keeps the form open; read-only
+  // discovery/test/snapshot work is abandoned on close.
+  if (!visible && writeBusy.value) return;
   emit("update:show", visible);
 }
 
@@ -931,16 +1002,21 @@ async function captureFormSnapshot(): Promise<void> {
   const generation = ++snapshotGeneration;
   snapshotLoading.value = true;
   snapshotError.value = "";
+  const controller = new AbortController();
+  readControllers.add(controller);
   try {
-    const snapshot = await connectionsApi.listSnapshot();
+    const snapshot = await boundedRead(controller, SNAPSHOT_READ_TIMEOUT_MS, (signal) => connectionsApi.listSnapshot(signal));
     if (generation !== snapshotGeneration) return;
     capturedExpectation.value = onboardingMutationExpectation({
       createListExpectation: snapshot.expectation,
     });
   } catch (error) {
     if (generation !== snapshotGeneration) return;
-    snapshotError.value = t("加载草稿失败：{error}", { error: dashboardErrorDetail(error) });
+    snapshotError.value = t("加载草稿失败：{error}", {
+      error: isReadTimeout(error) ? t("请求超时") : dashboardErrorDetail(error),
+    });
   } finally {
+    readControllers.delete(controller);
     if (generation === snapshotGeneration) snapshotLoading.value = false;
   }
 }
@@ -952,8 +1028,10 @@ async function captureResumeSavedKey(): Promise<void> {
     return;
   }
   const generation = snapshotGeneration;
+  const controller = new AbortController();
+  readControllers.add(controller);
   try {
-    const snapshot = await identitiesApi.listSnapshot();
+    const snapshot = await boundedRead(controller, SNAPSHOT_READ_TIMEOUT_MS, (signal) => identitiesApi.listSnapshot(signal));
     if (generation !== snapshotGeneration) return;
     savedKeyFromSnapshot.value = identityHasSavedMaterialForConnection(
       snapshot.identities,
@@ -962,6 +1040,8 @@ async function captureResumeSavedKey(): Promise<void> {
   } catch {
     if (generation !== snapshotGeneration) return;
     savedKeyFromSnapshot.value = false;
+  } finally {
+    readControllers.delete(controller);
   }
 }
 
@@ -999,23 +1079,6 @@ function buildIntentPayload(intent: OnboardingIntent) {
   return { payload, signature: onboardingPayloadSignature(payload) };
 }
 
-async function resolveLegacyProviderId(connectionId: string): Promise<{
-  id: string;
-  readbackFailed: boolean;
-}> {
-  try {
-    const listed = await connectionsApi.list();
-    return {
-      id: listed.find((item) => item.id === connectionId)?.legacy.id
-        ?? props.provider?.id
-        ?? "",
-      readbackFailed: false,
-    };
-  } catch {
-    return { id: props.provider?.id ?? "", readbackFailed: true };
-  }
-}
-
 function onFormSubmit(): void {
   if (isConfiguredEdit.value) {
     void saveConfigured();
@@ -1046,6 +1109,7 @@ async function completeSetup(): Promise<void> {
 
 async function saveConfigured(): Promise<void> {
   if (busy.value || !props.provider) return;
+  const generation = requestGeneration.value;
   const error = validateProviderDefinitionDraft(draft.value, {
     mode: "edit",
     previousAuthKind: props.provider.auth_kind ?? "",
@@ -1063,10 +1127,12 @@ async function saveConfigured(): Promise<void> {
       buildProviderDefinitionUpdateBody(draft.value, props.provider.auth_kind ?? ""),
       capturedExpectation.value ?? undefined,
     );
+    if (generation !== requestGeneration.value) return;
     draft.value = sanitizeProviderDefinitionDraft(draft.value);
     emit("saved", saved.id);
     emit("update:show", false);
   } catch (cause) {
+    if (generation !== requestGeneration.value) return;
     if (isRevisionConflict(cause)) {
       conflictNotice.value = t("数据已更新，检查后再保存；不会自动重试。");
       adoptRefreshedExpectation();
@@ -1075,12 +1141,13 @@ async function saveConfigured(): Promise<void> {
       formError.value = dashboardErrorDetail(cause);
     }
   } finally {
-    saving.value = false;
+    if (generation === requestGeneration.value) saving.value = false;
   }
 }
 
 async function commitOnboarding(intent: OnboardingIntent): Promise<void> {
   if (busy.value || committedWrite) return;
+  const generation = requestGeneration.value;
   if (lastFailure.value === "uncertain" && lastIntent.value && lastIntent.value !== intent) {
     formError.value = t("提交结果未知。用原内容重试或取消，勿修改后提交。");
     return;
@@ -1102,6 +1169,7 @@ async function commitOnboarding(intent: OnboardingIntent): Promise<void> {
     } else {
       await captureFormSnapshot();
     }
+    if (generation !== requestGeneration.value) return;
     if (!capturedExpectation.value) {
       formError.value = snapshotError.value || t("加载草稿失败：{error}", { error: t("保存失败，请重试") });
       return;
@@ -1112,6 +1180,7 @@ async function commitOnboarding(intent: OnboardingIntent): Promise<void> {
   try {
     ({ payload, signature } = buildIntentPayload(intent));
   } catch (cause) {
+    if (generation !== requestGeneration.value) return;
     if (onboardingUnknownLockedError(cause)) {
       formError.value = t("提交结果未知。用原内容重试或取消，勿修改后提交。");
       return;
@@ -1130,9 +1199,13 @@ async function commitOnboarding(intent: OnboardingIntent): Promise<void> {
   conflictNotice.value = "";
   try {
     const result = await connectionsApi.commitOnboarding(payload, capturedExpectation.value);
+    if (generation !== requestGeneration.value) return;
     committedWrite = true;
     lastFailure.value = "none";
-    const readback = await resolveLegacyProviderId(result.connection_id);
+    // The commit receipt is authoritative: sanitize the Key, report the
+    // receipt, and close/release writeBusy without any legacy-id readback.
+    // Hosts refresh their projections separately and report those failures
+    // on their own, so a slow read can never hold a confirmed save open.
     draft.value = sanitizeProviderDefinitionDraft(draft.value);
     emit("committed", {
       connectionId: result.connection_id,
@@ -1140,11 +1213,10 @@ async function commitOnboarding(intent: OnboardingIntent): Promise<void> {
       accountId: result.account_id,
       replayed: result.replayed,
       mode: intent,
-      readbackFailed: readback.readbackFailed,
     });
-    emit("saved", readback.id);
     emit("update:show", false);
   } catch (cause) {
+    if (generation !== requestGeneration.value) return;
     if (committedWrite) {
       return;
     }
@@ -1167,7 +1239,7 @@ async function commitOnboarding(intent: OnboardingIntent): Promise<void> {
       formError.value = dashboardErrorDetail(cause);
     }
   } finally {
-    saving.value = false;
+    if (generation === requestGeneration.value) saving.value = false;
   }
 }
 </script>

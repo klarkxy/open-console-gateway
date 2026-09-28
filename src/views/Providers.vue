@@ -187,6 +187,7 @@
             <ProviderModelMatrix
               :key="activeScope.key"
               :scope="activeScope"
+              :target-model="targetModel"
               :optimistic-overrides="optimisticOverrides"
               :pending-override-keys="pendingOverrideKeys"
               :probing-models="probingModels"
@@ -419,6 +420,7 @@
                 <ProviderModelMatrix
                   :key="activeScope.key"
                   :scope="activeScope"
+                  :target-model="targetModel"
                   :optimistic-overrides="optimisticOverrides"
                   :pending-override-keys="pendingOverrideKeys"
                   :probing-models="probingModels"
@@ -721,7 +723,6 @@ import {
 import {
   catalogEntryForConnection,
   connectionBrandFamily,
-  connectionForLegacyProvider,
   connectionStatus,
   filterConnections,
   isOnboardingDraftConnection,
@@ -746,6 +747,7 @@ import {
 
 import { catalogEntryFamily } from "../domain/provider-catalog.ts";
 import { accountCreateRequestInput } from "../domain/account-create-payload.ts";
+import type { OnboardingIntent } from "../domain/onboarding-draft.ts";
 import { providerSurfaceFromCatalog } from "../domain/plans.ts";
 import { PROVIDER_PRESETS } from "../domain/provider-presets.ts";
 import {
@@ -770,7 +772,11 @@ const providersStore = useProvidersStore();
 const sessionStore = useSessionStore();
 const route = useRoute();
 const router = useRouter();
-watch(() => sessionStore.authenticated, (ok) => { if (!ok) lastLoadAllSucceededAt = 0; });
+let providerViewSession = 0;
+let loadAllGeneration = 0;
+watch(() => sessionStore.authenticated, (ok) => {
+  if (!ok) { providerViewSession += 1; loadAllGeneration += 1; lastLoadAllSucceededAt = 0; loading.value = false; }
+}, { flush: "sync" });
 const controlPlane = useControlPlaneStore();
 const contracts = computed(() => {
   const value = providersStore.contracts;
@@ -819,7 +825,6 @@ const railItemRows = computed(() => {
   }
   return providersRailItems(destinations.value, providersStore.connections);
 });
-const lastCommittedConnectionId = ref<string | null>(null);
 const requestedTab = ref<ProviderDetailTab>("models");
 const detailTabs = computed(() => providerDetailTabs(selectedEntry.value));
 const activeTab = computed<ProviderDetailTab>({
@@ -1131,6 +1136,9 @@ function currentUrlIsProvidersView(): boolean {
   return route.name === "providers";
 }
 
+const targetModel = computed(() => currentUrlIsProvidersView()
+  ? readProviderPageQuery(routeQuerySearch("providers", route.query)).model : null);
+
 function selectionProjectionReady(): boolean {
   return providersSelectionProjectionReady({
     destinationsLoaded: destinationsStore.loaded,
@@ -1185,6 +1193,7 @@ function writeUrl(userSelection = false) {
       ? { connection: selectedConnectionId.value }
       : {}),
     ...(activeTab.value !== "models" ? { tab: activeTab.value } : {}),
+    ...(!userSelection && targetModel.value ? { model: targetModel.value } : {}),
   }));
 }
 
@@ -1199,6 +1208,7 @@ function applySelection(resolved: ReturnType<typeof resolveProvidersSelection>, 
 function redirectProviderAdd(preset: string | null): void {
   void router.replace(appViewRoute("accounts", undefined, {
     add: accountAddQueryValue(accountAddDeepLinkFromProviderAdd(preset)),
+    from: "providers",
   }));
 }
 
@@ -1213,7 +1223,7 @@ function applyFromQuery(
   }
   if (action === "defer") return action;
   applySelection(resolved, fellBackNotice);
-  const candidate = query.tab ?? activeTab.value;
+  const candidate = query.model ? "models" : query.tab ?? activeTab.value;
   activeTab.value = candidate;
   writeUrl();
   return action;
@@ -1250,7 +1260,17 @@ function onMobileSelect(key: string | number) {
 }
 
 function openAccountAdd(link = accountAddDeepLinkFromProviderAdd(null)): void {
-  void router.push(appViewRoute("accounts", undefined, { add: accountAddQueryValue(link) }));
+  // Record the current selection as the return context: a committed create
+  // selects the committed connection here, and cancel restores this origin.
+  void router.push(appViewRoute("accounts", undefined, {
+    add: accountAddQueryValue(link),
+    from: "providers",
+    ...(selectedDestinationId.value
+      ? { destination: selectedDestinationId.value }
+      : selectedConnectionId.value
+        ? { connection: selectedConnectionId.value }
+        : {}),
+  }));
 }
 
 function openAddFlow() {
@@ -1321,6 +1341,7 @@ async function loadAll(options: {
   if (loading.value) {
     return { ok: false, error: loadError.value };
   }
+  const generation = ++loadAllGeneration;
   loading.value = true;
   if (!options.retain) loadError.value = "";
   try {
@@ -1331,6 +1352,7 @@ async function loadAll(options: {
       accountsStore.loadPresented(),
       destinationsStore.load(),
     ]);
+    if (generation !== loadAllGeneration) return { ok: true, error: "" };
     const outcome = providersPageLoadOutcome({
       destinations: destinationsResult,
       catalog: catalogResult,
@@ -1342,7 +1364,7 @@ async function loadAll(options: {
       freshRequiredLoadSucceeded = true;
       lastLoadAllSucceededAt = Date.now();
     }
-    if (outcome.applySelection) {
+    if (outcome.applySelection && currentUrlIsProvidersView()) {
       applyFromQuery(true, {
         connectionId: options.preferConnectionId,
         providerId: options.preferProviderId,
@@ -1356,7 +1378,7 @@ async function loadAll(options: {
     loadError.value = "";
     return { ok: true, error: "" };
   } finally {
-    loading.value = false;
+    if (generation === loadAllGeneration) loading.value = false;
   }
 }
 
@@ -1490,33 +1512,63 @@ function onEditModalShow(visible: boolean): void {
   }
 }
 
-function onDynamicCommitted(result: { connectionId: string }): void {
-  lastCommittedConnectionId.value = result.connectionId;
+/** An explicit URL target the user navigated to beats a post-write preference. */
+function preferUnlessExplicitQueryTarget(prefer: {
+  connectionId?: string;
+  providerId?: string;
+}): { connectionId?: string; providerId?: string } | undefined {
+  const query = readProviderPageQuery(routeQuerySearch("providers", route.query));
+  if (query.connection || query.provider || query.destination) return undefined;
+  return prefer;
+}
+
+function onDynamicCommitted(result: {
+  connectionId: string;
+  credentialId: string | null;
+  accountId: string | null;
+  replayed: boolean;
+  mode: OnboardingIntent;
+}): void {
+  // The commit receipt is authoritative: report and select from it at once;
+  // projections refresh separately and a failed refresh is never reported as
+  // a save failure. `resumeConnectionId` is still set here: the modal emits
+  // `committed` before its closing `update:show`.
+  const connectionId = result.connectionId;
+  const wasResume = resumeConnectionId.value !== null;
+  message.success(
+    result.mode === "draft"
+      ? t("草稿已保存")
+      : wasResume ? t("供应商已更新") : t("供应商已创建"),
+  );
+  selectedDestinationId.value = null;
+  selectedConnectionId.value = connectionId;
+  writeUrl(true);
+  void revalidateAfterDynamicCommit(connectionId);
+}
+
+async function revalidateAfterDynamicCommit(connectionId: string): Promise<void> {
+  const session = providerViewSession;
+  // A user who picked another target after committing keeps it.
+  const prefer = preferUnlessExplicitQueryTarget({ connectionId });
+  const loaded = await loadAll({ retain: true, preferConnectionId: prefer?.connectionId });
+  if (session !== providerViewSession) return;
+  if (!loaded.ok) {
+    message.warning(t("已保存，但列表刷新失败。手动刷新，不要再次提交。"));
+  }
 }
 
 async function onDynamicSaved(providerId: string): Promise<void> {
-  // Create emits `committed` then `saved`; edit emits only `saved`.
-  const preferConnectionId = lastCommittedConnectionId.value ?? undefined;
-  const created = preferConnectionId !== undefined && resumeConnectionId.value === null;
-  lastCommittedConnectionId.value = null;
-  resumeConnectionId.value = null;
-  resumeHasSavedKey.value = false;
+  const session = providerViewSession;
+  // Configured edit only; create/resume commits arrive via `committed`.
   providersStore.invalidateDefinition(providerId);
-  const loaded = await loadAll({ retain: true, preferConnectionId, preferProviderId: providerId });
+  const prefer = preferUnlessExplicitQueryTarget({ providerId });
+  const loaded = await loadAll({ retain: true, preferProviderId: prefer?.providerId });
+  if (session !== providerViewSession) return;
   if (!loaded.ok) {
     message.warning(t("已保存，但列表刷新失败。手动刷新，不要再次提交。"));
     return;
   }
-  const createdConnection = preferConnectionId
-    ? connections.value.find((item) => item.id === preferConnectionId)
-    : connectionForLegacyProvider(connections.value, providerId);
-  if (createdConnection && isOnboardingDraftConnection(createdConnection)) {
-    message.success(t("草稿已保存"));
-  } else if (created && createdConnection && connectionStatus(createdConnection).kind === "missing_credential") {
-    message.success(t("供应商已保存，待补充凭据"));
-  } else {
-    message.success(created ? t("供应商已创建") : t("供应商已更新"));
-  }
+  message.success(t("供应商已更新"));
 }
 
 function onAddKeyShow(visible: boolean): void {
@@ -1529,17 +1581,35 @@ function openAddKey(): void {
   showAddKeyModal.value = true;
 }
 
+async function revalidateAfterAddKey(): Promise<void> {
+  const session = providerViewSession;
+  // A user who picked another target after committing keeps it.
+  const prefer = preferUnlessExplicitQueryTarget({
+    connectionId: selectedConnectionId.value ?? undefined,
+  });
+  const loaded = await loadAll({ retain: true, preferConnectionId: prefer?.connectionId });
+  if (session !== providerViewSession) return;
+  if (!loaded.ok) {
+    message.warning(t("已保存，但列表刷新失败。手动刷新，不要再次提交。"));
+  }
+}
+
 async function onAddKeySave(payload: AccountInput | AccountFormPayload): Promise<void> {
   if (actionLocked.value || addKeyBusy.value) return;
+  const session = providerViewSession;
   const input = accountCreateRequestInput(payload as AccountInput);
   addKeyBusy.value = true;
   try {
-    await dashboardApi.createAccount(input);
+    const created = await dashboardApi.createAccount(input);
+    // The create receipt is authoritative: commit it to the accounts store,
+    // close, and release unrelated controls before any follow-up read.
+    if (session !== providerViewSession) return;
+    accountsStore.upsertAccount(created);
     message.success(t("账号已添加"));
     showAddKeyModal.value = false;
-    await accountsStore.loadPresented();
-    await loadAll({ retain: true, preferConnectionId: selectedConnection.value?.id ?? undefined });
+    void revalidateAfterAddKey();
   } catch (error) {
+    if (session !== providerViewSession) return;
     if (isRevisionConflict(error) || (error instanceof DashboardRequestError && error.status === 409)) {
       await loadAll({ retain: true });
       message.warning(t("数据已更新，检查后再保存；不会自动重试。"));
@@ -1547,7 +1617,7 @@ async function onAddKeySave(payload: AccountInput | AccountFormPayload): Promise
     }
     message.error(t("保存失败：{error}", { error: dashboardErrorDetail(error) }));
   } finally {
-    addKeyBusy.value = false;
+    if (session === providerViewSession) addKeyBusy.value = false;
   }
 }
 

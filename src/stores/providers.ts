@@ -2,6 +2,7 @@ import { computed, ref, shallowRef } from "vue";
 import { defineStore } from "pinia";
 import { connectionsApi, type Connection } from "../api/connections.ts";
 import { isRevisionConflict } from "../api/dashboard.ts";
+import { dashboardV4 } from "../api/dashboard-v4.ts";
 import { providerApi, type ProviderDefinitionView } from "../api/providers.ts";
 import type {
   ContractScopeKind,
@@ -11,7 +12,11 @@ import type {
   ProviderContractsResponse,
 } from "../api/providers.ts";
 import type { MutationExpectation } from "../api/generated/dashboard-v3.ts";
+import type { CpaCatalogEntry } from "../api/generated/dashboard-v4.ts";
 import { applyModelContractToResponse, type ProviderScopeRef } from "../domain/provider-contracts.ts";
+import { publicModelPublicationKey } from "../domain/provider-aliases.ts";
+import { dashboardErrorDetail } from "../utils/errors.ts";
+import { isLocalMutationCancelled, useControlPlaneStore } from "./controlPlane.ts";
 
 /**
  * Provider catalog and contract fetches used by Providers and Aliases.
@@ -23,6 +28,7 @@ export const useProvidersStore = defineStore("providers", () => {
   const catalog = shallowRef<ProviderCatalogEntry[] | null>(null);
   const contracts = shallowRef<ProviderContractsResponse | null>(null);
   const connections = shallowRef<Connection[] | null>(null);
+  const cpaModels = shallowRef<CpaCatalogEntry[] | null>(null);
   const definitions = shallowRef<Map<string, ProviderDefinitionView>>(new Map());
   const loading = ref(false);
   const error = ref("");
@@ -34,6 +40,7 @@ export const useProvidersStore = defineStore("providers", () => {
   let catalogGeneration = 0;
   let contractsGeneration = 0;
   let connectionsGeneration = 0;
+  let cpaGeneration = 0;
   // Definition loads are per provider: concurrent loads for different
   // providers must not invalidate each other.
   const definitionsGenerations = new Map<string, number>();
@@ -106,6 +113,12 @@ export const useProvidersStore = defineStore("providers", () => {
     if (generation !== connectionsGeneration) return result;
     connections.value = result;
     return result;
+  }
+
+  async function loadCpaModels(): Promise<void> {
+    const generation = ++cpaGeneration;
+    const result = await dashboardV4.getCpaCatalog();
+    if (generation === cpaGeneration) cpaModels.value = result.models;
   }
 
   async function loadContracts(): Promise<ProviderContractsResponse> {
@@ -247,17 +260,110 @@ export const useProvidersStore = defineStore("providers", () => {
     loading.value = false;
   }
 
+  // --- Alias publication ---------------------------------------------------
+  // The authoritative hidden-name list lives here; views render it plus
+  // per-name optimistic overlays. Writes go through the control-plane local
+  // lane so rapid toggles on different rows serialize on fresh CAS tokens
+  // instead of self-conflicting, and each receipt commits only when the
+  // session is still current.
+  const aliasUnpublished = shallowRef<string[] | null>(null);
+  const aliasPublicationOverlays = ref<Readonly<Record<string, boolean>>>({});
+  const aliasPublicationPending = ref<readonly string[]>([]);
+  const aliasPublicationLoadError = ref("");
+  const aliasPublicationSaveError = ref("");
+  let aliasPublicationGeneration = 0;
+
+  /** Effective hidden-name list: authoritative server state plus overlays. */
+  const effectiveAliasUnpublished = computed((): string[] => {
+    let next = aliasUnpublished.value ?? [];
+    for (const [key, published] of Object.entries(aliasPublicationOverlays.value)) {
+      const hidden = next.some((name) => publicModelPublicationKey(name) === key);
+      if (published && hidden) {
+        next = next.filter((name) => publicModelPublicationKey(name) !== key);
+      } else if (!published && !hidden) {
+        next = [...next, key];
+      }
+    }
+    return next;
+  });
+
+  async function loadAliasPublication(): Promise<void> {
+    const generation = ++aliasPublicationGeneration;
+    const session = sessionGeneration;
+    try {
+      const result = await dashboardV4.getAliasPublication();
+      if (generation !== aliasPublicationGeneration || session !== sessionGeneration) return;
+      aliasUnpublished.value = result.unpublished;
+      aliasPublicationLoadError.value = "";
+    } catch (cause) {
+      // A failed read keeps the last committed list (and its ready state).
+      if (generation !== aliasPublicationGeneration || session !== sessionGeneration) return;
+      aliasPublicationLoadError.value = dashboardErrorDetail(cause);
+    }
+  }
+
+  function dropAliasPublicationOverlay(key: string): void {
+    if (!(key in aliasPublicationOverlays.value)) return;
+    const next = { ...aliasPublicationOverlays.value };
+    delete next[key];
+    aliasPublicationOverlays.value = next;
+  }
+
+  async function setAliasPublished(publicModel: string, published: boolean): Promise<void> {
+    const key = publicModelPublicationKey(publicModel);
+    if (aliasPublicationPending.value.includes(key)) return;
+    const session = sessionGeneration;
+    aliasPublicationPending.value = [...aliasPublicationPending.value, key];
+    aliasPublicationOverlays.value = { ...aliasPublicationOverlays.value, [key]: published };
+    try {
+      const result = await useControlPlaneStore().runLocalMutation(
+        `alias-publication:${key}`,
+        (expectation) => dashboardV4.patchAliasPublication({ publicModel, published }, expectation),
+      );
+      if (session !== sessionGeneration) return;
+      // Invalidate any load that started before this ordered receipt.
+      aliasPublicationGeneration += 1;
+      aliasUnpublished.value = result.unpublished;
+      dropAliasPublicationOverlay(key);
+      aliasPublicationSaveError.value = "";
+    } catch (cause) {
+      if (session !== sessionGeneration) return;
+      // Failure reconciles only this row's overlay; another row's accepted
+      // or optimistic presentation is never restored away.
+      dropAliasPublicationOverlay(key);
+      if (isLocalMutationCancelled(cause)) return;
+      if (isRevisionConflict(cause)) {
+        // Reconcile from the server; a failed reconciliation keeps the
+        // reverted (authoritative) presentation.
+        void loadAliasPublication();
+      }
+      aliasPublicationSaveError.value = dashboardErrorDetail(cause);
+    } finally {
+      if (session === sessionGeneration) {
+        aliasPublicationPending.value = aliasPublicationPending.value.filter((entry) => entry !== key);
+      }
+    }
+  }
+
   /** Drop cached catalog/contracts/connections on 401 / logout. */
   function clear(): void {
     sessionGeneration += 1;
     catalogGeneration += 1;
     contractsGeneration += 1;
     connectionsGeneration += 1;
+    cpaGeneration += 1;
+    aliasPublicationGeneration += 1;
     definitionsGenerations.clear();
     catalog.value = null;
     contracts.value = null;
     connections.value = null;
+    cpaModels.value = null;
     definitions.value = new Map();
+    aliasUnpublished.value = null;
+    aliasPublicationOverlays.value = {};
+    aliasPublicationPending.value = [];
+    aliasPublicationLoadError.value = "";
+    aliasPublicationSaveError.value = "";
     loading.value = false;
     error.value = "";
   }
@@ -266,6 +372,7 @@ export const useProvidersStore = defineStore("providers", () => {
     catalog: computed(() => catalog.value),
     contracts: computed(() => contracts.value),
     connections: computed(() => connections.value),
+    cpaModels: computed(() => cpaModels.value),
     definitions: computed(() => definitions.value),
     presetIds: computed(() => {
       const map = new Map<string, string | null>();
@@ -278,6 +385,7 @@ export const useProvidersStore = defineStore("providers", () => {
     error: computed(() => error.value),
     loadCatalog,
     loadConnections,
+    loadCpaModels,
     loadDefinition,
     invalidateDefinition,
     loadContracts,
@@ -287,6 +395,13 @@ export const useProvidersStore = defineStore("providers", () => {
     removeContractCatalogModels,
     putModelProtocolOverrides,
     applyModelContract,
+    aliasUnpublished: effectiveAliasUnpublished,
+    aliasPublicationReady: computed(() => aliasUnpublished.value !== null),
+    aliasPublicationPending: computed(() => aliasPublicationPending.value),
+    aliasPublicationLoadError: computed(() => aliasPublicationLoadError.value),
+    aliasPublicationSaveError: computed(() => aliasPublicationSaveError.value),
+    loadAliasPublication,
+    setAliasPublished,
     clear,
   };
 });
