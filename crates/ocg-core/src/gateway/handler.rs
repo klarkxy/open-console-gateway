@@ -227,17 +227,23 @@ pub async fn models(
 
 fn published_alias_models_response(state: &CoreState) -> axum::response::Response {
     let _settings_update = state.settings_update.lock();
-    let snapshot = match runtime_catalog_snapshot(state) {
-        Ok(snapshot) => snapshot,
-        Err(error) => {
-            return protocol_error_response(
-                ApiFormat::ChatCompletions,
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("failed to load routing configuration: {error}"),
-                None,
-            );
-        }
-    };
+    match published_models_data_locked(state) {
+        Ok(data) => axum::Json(serde_json::json!({"object": "list", "data": data})).into_response(),
+        Err(error) => protocol_error_response(
+            ApiFormat::ChatCompletions,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &error,
+            None,
+        ),
+    }
+}
+
+/// Caller holds settings_update, sharing exactly the authenticated client inventory.
+pub(crate) fn published_models_data_locked(
+    state: &CoreState,
+) -> Result<Vec<serde_json::Value>, String> {
+    let snapshot = runtime_catalog_snapshot(state)
+        .map_err(|error| format!("failed to load routing configuration: {error}"))?;
     let catalogs = snapshot.catalogs();
     let custom_ids = &snapshot.custom;
     let cpa_ids = &snapshot.cpa;
@@ -329,19 +335,9 @@ fn published_alias_models_response(state: &CoreState) -> axum::response::Respons
     // Kick the lazy models.dev refresh; this response still uses the cache.
     crate::modelsdev::ensure_fresh(state);
     let modelsdev = state.modelsdev_catalog();
-    if crate::model_metadata::enrich(&state.db.lock(), &modelsdev, &snapshot, &mut data).is_err() {
-        return protocol_error_response(
-            ApiFormat::ChatCompletions,
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "failed to load model metadata",
-            None,
-        );
-    }
-    axum::Json(serde_json::json!({
-        "object": "list",
-        "data": data
-    }))
-    .into_response()
+    crate::model_metadata::enrich(&state.db.lock(), &modelsdev, &snapshot, &mut data)
+        .map_err(|_| "failed to load model metadata".to_string())?;
+    Ok(data)
 }
 
 fn published_model_ids_contain(data: &[serde_json::Value], id: &str) -> bool {

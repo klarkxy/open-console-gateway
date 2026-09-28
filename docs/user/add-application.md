@@ -3,8 +3,9 @@
 # Manual Client Setup
 
 Use this guide to connect a client directly through the ordinary Gateway API.
-The [Applications page](applications.md) hosts the DSH plugin flow for
-integrating DSH itself.
+The [Applications page](applications.md) also offers local BYOK configuration
+for Codex, Kimi Code, MiniMax Code and ZCode, alongside the DSH plugin flow.
+These flows create or reuse a harness-named ordinary Key and use its entire published model list, without a separate model selection.
 
 ## Connect an unlisted client
 

@@ -130,11 +130,16 @@ fn dsh_application_host_matches_the_native_cli_build_capability() {
     let dir = temp_dir("dsh-host-capability");
     let state = build_state(dir.clone(), test_cipher()).unwrap();
     assert!(state.dsh_application_host().is_none());
+    assert!(state.byok_application_host().is_none());
 
     register_dsh_application_host(&state);
 
     assert_eq!(
         state.dsh_application_host().is_some(),
+        cfg!(feature = "dsh-local-host")
+    );
+    assert_eq!(
+        state.byok_application_host().is_some(),
         cfg!(feature = "dsh-local-host")
     );
     let _ = std::fs::remove_dir_all(dir);

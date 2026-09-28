@@ -25,6 +25,9 @@ export const useConnectionStore = defineStore("connection", () => {
   // it so a load resolving after logout cannot re-populate plaintext.
   // Stale calls still return/throw to their own caller unchanged.
   let loadGeneration = 0;
+  // Distinct from loadGeneration: a harness refresh captured before an awaited
+  // mutation must not start a *new* plaintext fetch after session teardown.
+  let sessionEpoch = 0;
 
   async function load(): Promise<ConnectionInfo> {
     const generation = ++loadGeneration;
@@ -45,8 +48,17 @@ export const useConnectionStore = defineStore("connection", () => {
     }
   }
 
+  /** Session invalidation token; bumped only by `clearSecrets`. */
+  function currentSession(): number {
+    return sessionEpoch;
+  }
+
   /** Refresh after a key mutation; the mutation ack has no plaintext. */
-  async function reloadAfterMutation(): Promise<ConnectionInfo> {
+  async function reloadAfterMutation(expectedSession?: number): Promise<ConnectionInfo> {
+    if (expectedSession !== undefined && expectedSession !== sessionEpoch) {
+      if (info.value) return info.value;
+      throw new Error("connection session ended");
+    }
     const generation = ++loadGeneration;
     try {
       const connection = await dashboardApi.getConnection();
@@ -113,6 +125,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
   /** Drop all plaintext Key material held in memory (401 / logout). */
   function clearSecrets(): void {
+    sessionEpoch += 1;
     loadGeneration += 1;
     info.value = null;
     error.value = "";
@@ -124,6 +137,8 @@ export const useConnectionStore = defineStore("connection", () => {
     loading: computed(() => loading.value),
     error: computed(() => error.value),
     load,
+    currentSession,
+    reloadAfterMutation,
     createKey,
     updateKey,
     deleteKey,

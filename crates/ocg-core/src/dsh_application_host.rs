@@ -96,7 +96,7 @@ pub fn register(core: &crate::state::CoreState) {
     core.set_dsh_application_host(Arc::new(move |request| host.execute(request)));
 }
 
-fn absolute_host_path(path: PathBuf) -> PathBuf {
+pub(crate) fn absolute_host_path(path: PathBuf) -> PathBuf {
     if path.is_absolute() {
         return path;
     }
@@ -125,17 +125,24 @@ impl DshDesktopHost {
             .operation
             .lock()
             .map_err(|_| internal("DSH application operation lock is poisoned"))?;
+        let profiles = self.discovered_profiles();
         match request {
             DshApplicationHostRequest::Inspect {
                 gateway_v1_url,
                 profile_path,
                 runtime_url,
             } => {
-                let host = self.for_profile(profile_path.as_deref())?;
+                let host = self.with_selected_profile(profile_path.as_deref(), &profiles)?;
                 if host.uses_http_runtime(runtime_url.as_deref()) {
-                    host.inspect_http(&gateway_v1_url, runtime_url.as_deref(), None)
+                    host.inspect_http_with_limits(
+                        &gateway_v1_url,
+                        runtime_url.as_deref(),
+                        None,
+                        &profiles,
+                        runtime::DshRuntimeLimits::inspect(),
+                    )
                 } else {
-                    host.inspect(&gateway_v1_url)
+                    host.inspect_using(&gateway_v1_url, &profiles)
                 }
             }
             DshApplicationHostRequest::Install {
@@ -145,19 +152,21 @@ impl DshDesktopHost {
                 runtime_url,
                 secret,
             } => {
-                let host = self.for_profile(profile_path.as_deref())?;
+                let host = self.with_selected_profile(profile_path.as_deref(), &profiles)?;
                 if host.uses_http_runtime(runtime_url.as_deref()) {
                     host.install_http(
                         &expected_fingerprint,
                         &gateway_v1_url,
                         runtime_url.as_deref(),
                         secret.expose_to_host(),
+                        &profiles,
                     )
                 } else {
-                    host.install(
+                    host.install_using(
                         &expected_fingerprint,
                         &gateway_v1_url,
                         secret.expose_to_host(),
+                        &profiles,
                     )
                 }
             }
@@ -167,12 +176,13 @@ impl DshDesktopHost {
                 profile_path,
                 runtime_url,
             } => {
-                let host = self.for_profile(profile_path.as_deref())?;
+                let host = self.with_selected_profile(profile_path.as_deref(), &profiles)?;
                 if host.uses_http_runtime(runtime_url.as_deref()) {
                     host.uninstall_http(
                         &expected_fingerprint,
                         &gateway_v1_url,
                         runtime_url.as_deref(),
+                        &profiles,
                     )
                 } else {
                     Err(DshApplicationError::precondition(
@@ -184,6 +194,15 @@ impl DshDesktopHost {
     }
 
     fn for_profile(&self, requested: Option<&str>) -> DshApplicationResult<Self> {
+        let profiles = self.discovered_profiles();
+        self.with_selected_profile(requested, &profiles)
+    }
+
+    fn with_selected_profile(
+        &self,
+        requested: Option<&str>,
+        profiles: &[DshDiscoveredProfile],
+    ) -> DshApplicationResult<Self> {
         let (home, profile) = match requested {
             None => (self.home.clone(), self.profile.clone()),
             Some(path)
@@ -195,9 +214,8 @@ impl DshDesktopHost {
                 (self.home.clone(), self.profile.clone())
             }
             Some(path) => {
-                let found = self
-                    .discovered_profiles()
-                    .into_iter()
+                let found = profiles
+                    .iter()
                     .find(|candidate| {
                         same_lexical_path(Path::new(&candidate.path), Path::new(path))
                     })
@@ -206,7 +224,7 @@ impl DshDesktopHost {
                             "selected DSH profile was not found in the allowed homes",
                         )
                     })?;
-                (PathBuf::from(found.home), found.name)
+                (PathBuf::from(&found.home), found.name.clone())
             }
         };
         let legacy_bootstrap = same_lexical_path(&home, &self.home) && profile == self.profile;
@@ -223,8 +241,17 @@ impl DshDesktopHost {
     }
 
     fn inspect(&self, gateway_v1_url: &str) -> DshApplicationResult<DshApplicationInspection> {
+        let profiles = self.discovered_profiles();
+        self.inspect_using(gateway_v1_url, &profiles)
+    }
+
+    fn inspect_using(
+        &self,
+        gateway_v1_url: &str,
+        discovered_profiles: &[DshDiscoveredProfile],
+    ) -> DshApplicationResult<DshApplicationInspection> {
         let target_paths = self.target_paths();
-        let discovered_profiles = self.discovered_profiles();
+        let discovered_profiles = discovered_profiles.to_vec();
         let selected_profile_path = self
             .home
             .join("profiles")
@@ -250,14 +277,13 @@ impl DshDesktopHost {
                 application: None,
             });
         };
-        let version = self.read_version(&executable)?;
-        // Version is diagnostic/CAS evidence, not an installation allowlist.
-        // Let DSH's plugin command and registration readback determine success.
-
+        // Status inspect never launches `dsh --version`. Executable presence is
+        // detection; plugin add still verifies the CLI on install. Version stays
+        // unknown rather than guessed from adjacent files.
         let package = self.render_package(gateway_v1_url)?;
         let registration = self.registration_state(&package);
         let handoff_pending = credential_handoff_pending(&self.bootstrap_path());
-        let fingerprint = Some(self.fingerprint(&executable, &version, gateway_v1_url)?);
+        let fingerprint = Some(self.fingerprint(&executable, gateway_v1_url)?);
         let (phase, installed, install_supported, detail) = match registration {
             RegistrationState::Absent => (
                 DshApplicationPhase::Ready,
@@ -306,7 +332,7 @@ impl DshDesktopHost {
             installed,
             install_supported,
             activation_required: installed && handoff_pending,
-            version: Some(version),
+            version: None,
             detail,
             target_paths,
             discovered_profiles,
@@ -349,13 +375,31 @@ impl DshDesktopHost {
         gateway_v1_url: &str,
         runtime_url: Option<&str>,
         observed: Option<HttpObservedChange>,
+        discovered_profiles: &[DshDiscoveredProfile],
+    ) -> DshApplicationResult<DshApplicationInspection> {
+        self.inspect_http_with_limits(
+            gateway_v1_url,
+            runtime_url,
+            observed,
+            discovered_profiles,
+            runtime::DshRuntimeLimits::default(),
+        )
+    }
+
+    fn inspect_http_with_limits(
+        &self,
+        gateway_v1_url: &str,
+        runtime_url: Option<&str>,
+        observed: Option<HttpObservedChange>,
+        discovered_profiles: &[DshDiscoveredProfile],
+        limits: runtime::DshRuntimeLimits,
     ) -> DshApplicationResult<DshApplicationInspection> {
         let runtime_url = self.resolve_runtime_url(runtime_url)?;
         let origin = runtime::DshRuntimeOrigin::parse(&runtime_url).map_err(|_| {
             DshApplicationError::invalid("DSH runtime URL is not a permitted loopback HTTP origin")
         })?;
         let target_paths = self.http_target_paths();
-        let discovered_profiles = self.discovered_profiles();
+        let discovered_profiles = discovered_profiles.to_vec();
         let selected_profile_path = self
             .home
             .join("profiles")
@@ -398,7 +442,11 @@ impl DshDesktopHost {
         let cookie = secret.mint_cookie(&origin).map_err(|_| {
             DshApplicationError::precondition(auth::BrowserGrantError::Unsupported.message())
         })?;
-        let client = match runtime::DshRuntimeClient::connect_session(origin.as_str(), cookie) {
+        let client = match runtime::DshRuntimeClient::connect_session_with_limits(
+            origin.as_str(),
+            cookie,
+            limits,
+        ) {
             Ok(client) => client,
             Err(error) if error.kind == runtime::DshRuntimeErrorKind::Invalid => {
                 return Err(DshApplicationError::invalid(error.message));
@@ -531,6 +579,7 @@ impl DshDesktopHost {
         gateway_v1_url: &str,
         runtime_url: Option<&str>,
         secret: &str,
+        discovered_profiles: &[DshDiscoveredProfile],
     ) -> DshApplicationResult<DshApplicationInspection> {
         if expected_fingerprint.is_empty() {
             return Err(DshApplicationError::invalid(
@@ -542,7 +591,7 @@ impl DshDesktopHost {
                 "the selected Gateway Key cannot be handed to DSH",
             ));
         }
-        let before = self.inspect_http(gateway_v1_url, runtime_url, None)?;
+        let before = self.inspect_http(gateway_v1_url, runtime_url, None, discovered_profiles)?;
         if before.fingerprint.as_deref() != Some(expected_fingerprint) {
             return Err(DshApplicationError::conflict(
                 "DSH installation state changed after it was inspected",
@@ -621,8 +670,12 @@ impl DshDesktopHost {
                 match error.request_id().map(|id| client.wait_for_install(id)) {
                     Some(Ok(Some(change))) => change,
                     Some(Ok(None)) | Some(Err(_)) | None => {
-                        let mut inspection =
-                            self.inspect_http(gateway_v1_url, runtime_url, None)?;
+                        let mut inspection = self.inspect_http(
+                            gateway_v1_url,
+                            runtime_url,
+                            None,
+                            discovered_profiles,
+                        )?;
                         inspection.application = None;
                         inspection.detail = Some(
                             "DSH install response was lost; the running address was rechecked without repeating install"
@@ -640,10 +693,12 @@ impl DshDesktopHost {
                         None,
                         error.remote_code.as_deref(),
                     )),
+                    discovered_profiles,
                 );
             }
             Err(_) => {
-                let mut inspection = self.inspect_http(gateway_v1_url, runtime_url, None)?;
+                let mut inspection =
+                    self.inspect_http(gateway_v1_url, runtime_url, None, discovered_profiles)?;
                 inspection.application = None;
                 inspection.detail = Some("DSH running address did not confirm the install".into());
                 return Ok(inspection);
@@ -656,6 +711,7 @@ impl DshDesktopHost {
             gateway_v1_url,
             runtime_url,
             Some(HttpObservedChange::from_change(&change)),
+            discovered_profiles,
         )
     }
 
@@ -664,13 +720,14 @@ impl DshDesktopHost {
         expected_fingerprint: &str,
         gateway_v1_url: &str,
         runtime_url: Option<&str>,
+        discovered_profiles: &[DshDiscoveredProfile],
     ) -> DshApplicationResult<DshApplicationInspection> {
         if expected_fingerprint.is_empty() {
             return Err(DshApplicationError::invalid(
                 "expectedFingerprint is required",
             ));
         }
-        let before = self.inspect_http(gateway_v1_url, runtime_url, None)?;
+        let before = self.inspect_http(gateway_v1_url, runtime_url, None, discovered_profiles)?;
         if before.fingerprint.as_deref() != Some(expected_fingerprint) {
             return Err(DshApplicationError::conflict(
                 "DSH installation state changed after it was inspected",
@@ -708,10 +765,12 @@ impl DshDesktopHost {
                         None,
                         error.remote_code.as_deref(),
                     )),
+                    discovered_profiles,
                 );
             }
             Err(_) => {
-                let mut inspection = self.inspect_http(gateway_v1_url, runtime_url, None)?;
+                let mut inspection =
+                    self.inspect_http(gateway_v1_url, runtime_url, None, discovered_profiles)?;
                 inspection.application = None;
                 inspection.detail =
                     Some("DSH running address did not confirm the uninstall".into());
@@ -719,7 +778,12 @@ impl DshDesktopHost {
             }
         };
         let observed = HttpObservedChange::from_change(&change);
-        let after = self.inspect_http(gateway_v1_url, runtime_url, Some(observed.clone()))?;
+        let after = self.inspect_http(
+            gateway_v1_url,
+            runtime_url,
+            Some(observed.clone()),
+            discovered_profiles,
+        )?;
         if after.installed && observed.outcome == DshApplicationOutcome::Applied {
             let mut partial = after;
             partial.detail = Some("DSH still lists the OCG plugin after uninstall".into());
@@ -741,6 +805,17 @@ impl DshDesktopHost {
         gateway_v1_url: &str,
         secret: &str,
     ) -> DshApplicationResult<DshApplicationInspection> {
+        let profiles = self.discovered_profiles();
+        self.install_using(expected_fingerprint, gateway_v1_url, secret, &profiles)
+    }
+
+    fn install_using(
+        &self,
+        expected_fingerprint: &str,
+        gateway_v1_url: &str,
+        secret: &str,
+        discovered_profiles: &[DshDiscoveredProfile],
+    ) -> DshApplicationResult<DshApplicationInspection> {
         if expected_fingerprint.is_empty() {
             return Err(DshApplicationError::invalid(
                 "expectedFingerprint is required",
@@ -751,7 +826,7 @@ impl DshDesktopHost {
                 "the selected Gateway Key cannot be handed to DSH",
             ));
         }
-        let before = self.inspect(gateway_v1_url)?;
+        let before = self.inspect_using(gateway_v1_url, discovered_profiles)?;
         if before.fingerprint.as_deref() != Some(expected_fingerprint) {
             return Err(DshApplicationError::conflict(
                 "DSH installation state changed after it was inspected",
@@ -841,7 +916,7 @@ impl DshDesktopHost {
             self.restore_registration(&executable, &package, &registration_before)?;
             return Err(error);
         }
-        self.inspect(gateway_v1_url)
+        self.inspect_using(gateway_v1_url, discovered_profiles)
     }
 
     fn restore_registration(
@@ -911,6 +986,8 @@ impl DshDesktopHost {
         }
     }
 
+    /// Bounded `dsh --version` diagnostic. Status inspect never calls this.
+    /// Installation verifies compatibility through the plugin command, not this string.
     fn read_version(&self, executable: &ResolvedExecutable) -> DshApplicationResult<String> {
         let command = CommandSpec {
             executable: executable.path.clone(),
@@ -1196,7 +1273,6 @@ impl DshDesktopHost {
     fn fingerprint(
         &self,
         executable: &ResolvedExecutable,
-        version: &str,
         gateway_v1_url: &str,
     ) -> DshApplicationResult<String> {
         let package = self.render_package(gateway_v1_url)?;
@@ -1215,8 +1291,6 @@ impl DshDesktopHost {
         hash.update(self.profile.as_bytes());
         hash.update([0]);
         hash.update(executable.path.to_string_lossy().as_bytes());
-        hash.update([0]);
-        hash.update(version.as_bytes());
         hash.update([0]);
         hash.update(package.digest.as_bytes());
         hash.update([0]);
@@ -1735,7 +1809,7 @@ fn terminate_non_windows_process_tree(child: &mut std::process::Child, process_g
     let _ = child.wait();
 }
 
-fn user_home() -> PathBuf {
+pub(crate) fn user_home() -> PathBuf {
     std::env::var_os("USERPROFILE")
         .or_else(|| std::env::var_os("HOME"))
         .filter(|value| !value.is_empty())
@@ -2103,7 +2177,7 @@ fn same_lexical_path(left: &Path, right: &Path) -> bool {
     canonical_lexical_path(left).ok() == canonical_lexical_path(right).ok()
 }
 
-pub(super) fn is_link_or_reparse(path: &Path) -> bool {
+pub(crate) fn is_link_or_reparse(path: &Path) -> bool {
     let Ok(metadata) = fs::symlink_metadata(path) else {
         return false;
     };
@@ -2353,7 +2427,7 @@ fn write_private_atomic(
 }
 
 #[cfg(windows)]
-fn set_private_permissions(path: &Path) -> DshApplicationResult<()> {
+pub(crate) fn set_private_permissions(path: &Path) -> DshApplicationResult<()> {
     use std::ffi::c_void;
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, GENERIC_ALL, LocalFree};
@@ -2595,7 +2669,7 @@ fn verify_windows_private_dacl(
 }
 
 #[cfg(windows)]
-fn replace_file(source: &Path, destination: &Path) -> DshApplicationResult<()> {
+pub(crate) fn replace_file(source: &Path, destination: &Path) -> DshApplicationResult<()> {
     use std::os::windows::ffi::OsStrExt;
     type Bool = i32;
     unsafe extern "system" {
@@ -2646,12 +2720,12 @@ fn replace_file(source: &Path, destination: &Path) -> DshApplicationResult<()> {
 }
 
 #[cfg(not(windows))]
-fn replace_file(source: &Path, destination: &Path) -> DshApplicationResult<()> {
+pub(crate) fn replace_file(source: &Path, destination: &Path) -> DshApplicationResult<()> {
     fs::rename(source, destination).map_err(|error| internal(error.to_string()))
 }
 
 #[cfg(unix)]
-fn sync_parent(path: &Path) -> DshApplicationResult<()> {
+pub(crate) fn sync_parent(path: &Path) -> DshApplicationResult<()> {
     let parent = path
         .parent()
         .ok_or_else(|| internal("DSH integration target has no parent"))?;
@@ -2661,7 +2735,7 @@ fn sync_parent(path: &Path) -> DshApplicationResult<()> {
 }
 
 #[cfg(not(unix))]
-fn sync_parent(_path: &Path) -> DshApplicationResult<()> {
+pub(crate) fn sync_parent(_path: &Path) -> DshApplicationResult<()> {
     Ok(())
 }
 

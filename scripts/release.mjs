@@ -177,6 +177,11 @@ function prepareCliPackage(binary) {
   cpSync(requireFile(join(root, "LICENSE"), "LICENSE"), join(cliPackageDir, "LICENSE"));
   requireFile(join(root, "dist", "index.html"), "dashboard dist");
   cpSync(join(root, "dist"), join(cliPackageDir, "dist"), { recursive: true, force: true });
+  requireFile(join(root, "resources", "codex-byok", "prompt.md"), "Codex BYOK prompt");
+  cpSync(join(root, "resources", "codex-byok"), join(cliPackageDir, "licenses", "codex"), {
+    recursive: true,
+    force: true,
+  });
 }
 
 function archiveCli(platform, output) {
@@ -202,7 +207,7 @@ function archiveCli(platform, output) {
     );
     return;
   }
-  run("tar", ["-czf", output, "-C", cliPackageDir, "ocg-manager-cli", "dist", "LICENSE"]);
+  run("tar", ["-czf", output, "-C", cliPackageDir, "ocg-manager-cli", "dist", "LICENSE", "licenses"]);
 }
 
 async function sha256(path) {

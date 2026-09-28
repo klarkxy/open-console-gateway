@@ -727,7 +727,7 @@ fn dsh_application_contract_is_camel_case_and_secret_free() {
         "runtimeUrl": "http://127.0.0.1:19387"
     }))
     .unwrap();
-    assert_eq!(request.key_id, "primary");
+    assert_eq!(request.key_id.as_deref(), Some("primary"));
     assert_eq!(request.profile_path, None);
     assert_eq!(
         request.runtime_url.as_deref(),

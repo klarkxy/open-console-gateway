@@ -422,6 +422,281 @@
       ],
       "type": "object"
     },
+    "ByokApplication": {
+      "properties": {
+        "activationRequired": {
+          "type": "boolean"
+        },
+        "backupPath": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "client": {
+          "$ref": "#/$defs/ByokClient"
+        },
+        "configPath": {
+          "type": "string"
+        },
+        "configureSupported": {
+          "type": "boolean"
+        },
+        "configuredModelIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "defaultModelId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "detected": {
+          "type": "boolean"
+        },
+        "discoverySource": {
+          "type": "string"
+        },
+        "fingerprint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "gatewayV1Url": {
+          "type": "string"
+        },
+        "recoverySupported": {
+          "type": "boolean"
+        },
+        "removeSupported": {
+          "type": "boolean"
+        },
+        "requiresClosedClient": {
+          "type": "boolean"
+        },
+        "revision": {
+          "$ref": "#/$defs/ControlRevision"
+        },
+        "status": {
+          "$ref": "#/$defs/ByokStatus"
+        },
+        "targetPaths": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "client",
+        "status",
+        "detected",
+        "configPath",
+        "discoverySource",
+        "targetPaths",
+        "configureSupported",
+        "removeSupported",
+        "recoverySupported",
+        "requiresClosedClient",
+        "activationRequired",
+        "fingerprint",
+        "configuredModelIds",
+        "defaultModelId",
+        "backupPath",
+        "detail",
+        "gatewayV1Url",
+        "revision"
+      ],
+      "type": "object"
+    },
+    "ByokClient": {
+      "enum": [
+        "codex",
+        "kimi",
+        "minimax",
+        "zcode"
+      ],
+      "type": "string"
+    },
+    "ByokConfigureRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "clientClosed": {
+          "type": "boolean"
+        },
+        "expectedFingerprint": {
+          "type": "string"
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "targetPath": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "expectedFingerprint",
+        "clientClosed"
+      ],
+      "type": "object"
+    },
+    "ByokInspection": {
+      "properties": {
+        "activationRequired": {
+          "type": "boolean"
+        },
+        "backupPath": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "client": {
+          "$ref": "#/$defs/ByokClient"
+        },
+        "configPath": {
+          "type": "string"
+        },
+        "configureSupported": {
+          "type": "boolean"
+        },
+        "configuredModelIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "defaultModelId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "detected": {
+          "type": "boolean"
+        },
+        "discoverySource": {
+          "type": "string"
+        },
+        "fingerprint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "recoverySupported": {
+          "type": "boolean"
+        },
+        "removeSupported": {
+          "type": "boolean"
+        },
+        "requiresClosedClient": {
+          "type": "boolean"
+        },
+        "status": {
+          "$ref": "#/$defs/ByokStatus"
+        },
+        "targetPaths": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "client",
+        "status",
+        "detected",
+        "configPath",
+        "discoverySource",
+        "targetPaths",
+        "configureSupported",
+        "removeSupported",
+        "recoverySupported",
+        "requiresClosedClient",
+        "activationRequired",
+        "fingerprint",
+        "configuredModelIds",
+        "defaultModelId",
+        "backupPath",
+        "detail"
+      ],
+      "type": "object"
+    },
+    "ByokMutationRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "clientClosed": {
+          "type": "boolean"
+        },
+        "expectedFingerprint": {
+          "type": "string"
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "targetPath": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "expectedFingerprint",
+        "clientClosed"
+      ],
+      "type": "object"
+    },
+    "ByokStatus": {
+      "enum": [
+        "unsupported_runtime",
+        "not_detected",
+        "ready",
+        "configured",
+        "incompatible",
+        "conflict",
+        "recovery_required"
+      ],
+      "type": "string"
+    },
     "CapabilitiesDto": {
       "additionalProperties": false,
       "description": "Destination capability flags. Mirrors the domain `Capabilities` record.",
@@ -2737,7 +3012,10 @@
           "type": "integer"
         },
         "keyId": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "processGeneration": {
           "format": "uint64",
@@ -2760,7 +3038,6 @@
       "required": [
         "expectedRevision",
         "processGeneration",
-        "keyId",
         "expectedFingerprint"
       ],
       "type": "object"
@@ -5903,6 +6180,24 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "anyOf": [
+    {
+      "$ref": "#/$defs/ByokClient"
+    },
+    {
+      "$ref": "#/$defs/ByokStatus"
+    },
+    {
+      "$ref": "#/$defs/ByokInspection"
+    },
+    {
+      "$ref": "#/$defs/ByokApplication"
+    },
+    {
+      "$ref": "#/$defs/ByokConfigureRequest"
+    },
+    {
+      "$ref": "#/$defs/ByokMutationRequest"
+    },
     {
       "$ref": "#/$defs/ControlRevision"
     },

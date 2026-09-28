@@ -403,6 +403,29 @@ pub fn create_sub_key(host: &impl KeyHost, name: &str) -> Result<SubGatewayKey, 
     }
 }
 
+/// Reuses an authenticating named application Key or creates one through the
+/// ordinary Key lifecycle. Caller holds `settings_update` across lookup/create.
+pub fn get_or_create_named_sub_key(
+    host: &impl KeyHost,
+    name: &str,
+) -> Result<(SubGatewayKey, bool), KeyError> {
+    let name = validate_name(name)?;
+    let existing = host
+        .list_active_sub_gateway_keys()
+        .map_err(|error| KeyError::internal("failed to list application keys", error))?
+        .into_iter()
+        .filter(|key| key.authenticates() && key.name.eq_ignore_ascii_case(&name))
+        .min_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then(left.id.cmp(&right.id))
+        });
+    match existing {
+        Some(key) => Ok((key, false)),
+        None => create_sub_key(host, &name).map(|key| (key, true)),
+    }
+}
+
 /// Renames a non-deleted sub key. The snapshot rebuild afterwards keeps
 /// write-time name snapshots current.
 pub fn rename_sub_key(host: &impl KeyHost, id: &str, name: &str) -> Result<(), KeyError> {

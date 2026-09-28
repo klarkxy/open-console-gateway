@@ -109,6 +109,7 @@ export const useSessionStore = defineStore("session", () => {
     cpa: "clear",
     billing: "clear",
     dsh: "clear",
+    byokApplications: "clear",
     temporaryPolicy: "clear",
     observability: "clear",
   } as const;

@@ -16,6 +16,7 @@ pub use crate::billing_types::{
     BillingStatus, CreditBalanceCorrection, CreditCalibrationRequest, CreditConfigureRequest,
     CreditGrantRequest,
 };
+pub use crate::byok_application::{ByokClient, ByokInspection, ByokStatus};
 pub use crate::db::routing_cards::RoutingCard;
 pub use crate::model_metadata::ModelMetadata;
 
@@ -23,6 +24,36 @@ use crate::dashboard_v3::{
     AccountAuthScheme, AccountCredentialKind, AccountUpstreamProtocol, ControlRevision,
     MutationExpectation, ProviderDefinitionAuthKind, RoutingMode, V3Error,
 };
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ByokApplication {
+    #[serde(flatten)]
+    #[schemars(flatten)]
+    pub inspection: ByokInspection,
+    pub gateway_v1_url: String,
+    pub revision: ControlRevision,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ByokConfigureRequest {
+    pub expected_revision: u64,
+    pub process_generation: u64,
+    pub target_path: Option<String>,
+    pub expected_fingerprint: String,
+    pub client_closed: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ByokMutationRequest {
+    pub expected_revision: u64,
+    pub process_generation: u64,
+    pub target_path: Option<String>,
+    pub expected_fingerprint: String,
+    pub client_closed: bool,
+}
+
 use ocg_domain::connection::{
     AuthorizationState, ConnectionLifecycle as DomainConnectionLifecycle, ConnectionOrigin,
     EligibilityReason, EligibilityState, EndpointAuthScheme, EndpointOperation,
@@ -36,6 +67,12 @@ use ocg_domain::credential::{
 
 /// JSON Schema `$defs` names for the V4 catalog.
 pub const CATALOG_TYPE_NAMES: &[&str] = &[
+    "ByokClient",
+    "ByokStatus",
+    "ByokInspection",
+    "ByokApplication",
+    "ByokConfigureRequest",
+    "ByokMutationRequest",
     "ControlRevision",
     "V3Error",
     "EndpointSpec",
@@ -237,7 +274,7 @@ pub struct DshApplicationInstallRequest {
     #[serde(flatten)]
     #[schemars(flatten)]
     pub expectation: MutationExpectation,
-    pub key_id: String,
+    pub key_id: Option<String>,
     pub profile_path: Option<String>,
     pub runtime_url: Option<String>,
     pub expected_fingerprint: String,
@@ -1861,6 +1898,10 @@ pub fn contract_schema() -> Value {
     include_type::<CatalogModelsRemoveResult>(&mut serialize);
     include_type::<AliasPublication>(&mut serialize);
     include_type::<DshApplicationStatus>(&mut serialize);
+    include_type::<ByokClient>(&mut serialize);
+    include_type::<ByokStatus>(&mut serialize);
+    include_type::<ByokInspection>(&mut serialize);
+    include_type::<ByokApplication>(&mut serialize);
     include_type::<DshApplicationOutcome>(&mut serialize);
     include_type::<DshApplication>(&mut serialize);
     include_type::<DshDiscoveredProfile>(&mut serialize);
@@ -1933,6 +1974,8 @@ pub fn contract_schema() -> Value {
     include_type::<CatalogModelsRemoveRequest>(&mut deserialize);
     include_type::<AliasPublicationUpdate>(&mut deserialize);
     include_type::<DshApplicationInstallRequest>(&mut deserialize);
+    include_type::<ByokConfigureRequest>(&mut deserialize);
+    include_type::<ByokMutationRequest>(&mut deserialize);
     include_type::<DshApplicationUninstallRequest>(&mut deserialize);
     include_type::<DshDiscoveredProfile>(&mut deserialize);
     include_type::<PlatformKeyImportRequest>(&mut deserialize);

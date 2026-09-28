@@ -27,6 +27,20 @@ fn snapshot_values(state: &CoreStateInner) -> HashSet<String> {
     state.credential_snapshot.read().keys().cloned().collect()
 }
 
+#[test]
+fn named_application_key_reuses_the_oldest_enabled_case_insensitive_match() {
+    let host = MemoryKeys::new("primary");
+    let first = create_sub_key(&host, "Codex").unwrap();
+    let second = create_sub_key(&host, "codex").unwrap();
+    let (reused, created) = get_or_create_named_sub_key(&host, "CODEX").unwrap();
+    assert!(!created);
+    assert_eq!(reused.id, first.id);
+    set_sub_key_enabled(&host, &first.id, false).unwrap();
+    let (reused, created) = get_or_create_named_sub_key(&host, "codex").unwrap();
+    assert!(!created);
+    assert_eq!(reused.id, second.id);
+}
+
 struct MemoryKeys {
     keys: std::sync::Mutex<Vec<SubGatewayKey>>,
     primary: std::sync::Mutex<String>,

@@ -236,6 +236,8 @@ fn build_state(
 
 fn register_dsh_application_host(_state: &Arc<CoreStateInner>) {
     #[cfg(feature = "dsh-local-host")]
+    ocg_core::byok_application_host::register(_state);
+    #[cfg(feature = "dsh-local-host")]
     ocg_core::dsh_application_host::register(_state);
 }
 

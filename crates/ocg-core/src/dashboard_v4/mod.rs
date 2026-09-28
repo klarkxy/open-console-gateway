@@ -14,6 +14,7 @@
 mod applications;
 mod billing;
 mod bindings;
+mod byok_applications;
 mod catalog;
 mod connections;
 mod cpa;
@@ -54,6 +55,16 @@ pub use types::{
 pub fn api_router(state: CoreState) -> Router<CoreState> {
     let v4_native = Router::new()
         .route("/contract", get(get_contract))
+        .route(
+            "/applications/byok/{client}",
+            get(byok_applications::inspect)
+                .post(byok_applications::configure)
+                .delete(byok_applications::remove),
+        )
+        .route(
+            "/applications/byok/{client}/recover",
+            post(byok_applications::recover),
+        )
         .route("/templates", get(templates::list_templates))
         .route("/connections", get(connections::list_connections))
         .route("/accounts", get(identities::list_accounts))

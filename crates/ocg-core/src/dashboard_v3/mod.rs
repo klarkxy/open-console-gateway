@@ -690,6 +690,13 @@ impl V3ApiError {
             body: V3Error::internal(message.to_string()),
         }
     }
+
+    pub(crate) fn internal_at(state: &CoreState, message: impl std::fmt::Display) -> Self {
+        let mut error = Self::internal(message);
+        error.body.current_revision = Some(state.settings_revision());
+        error.body.process_generation = Some(state.process_generation());
+        error
+    }
 }
 
 impl IntoResponse for V3ApiError {

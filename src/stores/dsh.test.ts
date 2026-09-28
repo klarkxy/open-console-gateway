@@ -10,6 +10,7 @@ import type { DshApplicationView } from "../api/dashboard-v4.ts";
 interface DeferredCall {
   url: string;
   method: string;
+  body: Record<string, unknown> | null;
   resolve: (body: object) => void;
   reject: (error: unknown) => void;
 }
@@ -23,6 +24,7 @@ function installDeferredFetch(): DeferredCall[] {
       calls.push({
         url: String(input),
         method: init.method ?? "GET",
+        body: init.body ? JSON.parse(String(init.body)) as Record<string, unknown> : null,
         resolve: (body) => resolvePromise(new Response(
           JSON.stringify(body),
           { headers: { "Content-Type": "application/json" } },
@@ -99,10 +101,11 @@ test("DSH store: a stale mutation cannot write back after a later load", async (
   const store = useDshStore();
   const mutation = installDeferredFetch();
   const pendingInstall = store.install(
-    { keyId: "primary", expectedFingerprint: "fp-1", runtimeUrl: "http://127.0.0.1:3080" },
+    { expectedFingerprint: "fp-1", runtimeUrl: "http://127.0.0.1:3080" },
     { expectedRevision: 1, processGeneration: 1 },
   );
   await waitForCalls(mutation, 1);
+  assert.equal(Object.prototype.hasOwnProperty.call(mutation[0]!.body ?? {}, "keyId"), false);
 
   const load = installDeferredFetch();
   const pendingLoad = store.load({ runtimeUrl: "http://127.0.0.1:19387" });
@@ -140,7 +143,7 @@ test("DSH store: a load started during install still clears mutating", async () 
   const store = useDshStore();
   const mutation = installDeferredFetch();
   const pendingInstall = store.install(
-    { keyId: "primary", expectedFingerprint: "fp-1", runtimeUrl: "http://127.0.0.1:3080" },
+    { expectedFingerprint: "fp-1", runtimeUrl: "http://127.0.0.1:3080" },
     { expectedRevision: 1, processGeneration: 1 },
   );
   await waitForCalls(mutation, 1);
@@ -174,7 +177,7 @@ test("DSH store: an install started during load still clears loading", async () 
 
   const mutation = installDeferredFetch();
   const pendingInstall = store.install(
-    { keyId: "primary", expectedFingerprint: "fp-1", runtimeUrl: "http://127.0.0.1:3080" },
+    { expectedFingerprint: "fp-1", runtimeUrl: "http://127.0.0.1:3080" },
     { expectedRevision: 1, processGeneration: 1 },
   );
   await waitForCalls(mutation, 1);
@@ -201,7 +204,7 @@ test("dropSession during a deferred install clears busy flags and ignores the re
   const store = useDshStore();
   const mutation = installDeferredFetch();
   const pending = store.install(
-    { keyId: "primary", expectedFingerprint: "fp-1" },
+    { expectedFingerprint: "fp-1" },
     { expectedRevision: 1, processGeneration: 1 },
   );
   await waitForCalls(mutation, 1);
@@ -231,4 +234,19 @@ test("a previous session request cannot clear the new session loading flag", asy
   await newLoad;
   assert.equal(store.loading, false);
   assert.equal(store.loaded, true);
+});
+
+test("DSH store: same-target overlapping loads share one request", async () => {
+  setActivePinia(createPinia());
+  useControlPlaneStore();
+  const store = useDshStore();
+  const calls = installDeferredFetch();
+  const first = store.load({ runtimeUrl: "http://127.0.0.1:3080" });
+  const second = store.load({ runtimeUrl: "http://127.0.0.1:3080" });
+  await waitForCalls(calls, 1);
+  calls[0]!.resolve(appBody({ runtimeUrl: "http://127.0.0.1:3080" }));
+  await Promise.all([first, second]);
+  assert.equal(calls.length, 1);
+  assert.equal(store.application?.runtimeUrl, "http://127.0.0.1:3080");
+  assert.equal(store.loading, false);
 });

@@ -2,7 +2,8 @@
 
 # 手动客户端配置
 
-本指南通过普通 Gateway API 直接连接客户端。[应用页面](applications.zh-CN.md)承载 DSH 插件流程，用于把 DSH 本身接入 Gateway。
+本指南通过普通 Gateway API 直接连接客户端。[应用页面](applications.zh-CN.md)还提供 Codex、Kimi Code、MiniMax Code 和 ZCode 的本机 BYOK 配置，以及 DSH 插件接入流程。
+这些流程自动创建或复用对应 harness 名称的普通 Key，使用全部已发布模型，无需再次选择模型。
 
 ## 接入未收录客户端
 

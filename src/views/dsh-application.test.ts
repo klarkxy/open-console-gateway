@@ -1,16 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { PRIMARY_KEY_ID } from "../api/dashboard-v3.ts";
 import type { DshApplicationView } from "../api/dashboard-v4.ts";
 import { enUSMessages } from "../i18n/messages/en-US.ts";
 import {
   DEFAULT_APPLICATION_TAB,
   DSH_APPLICATION_OUTCOME_KEYS,
-  buildDshInstallKeyOptions,
+  DSH_DEFAULT_KEY_NAME,
+  dshDraftRuntimeFromInspection,
   dshHostDetail,
   dshInstallAction,
   dshInstallExpectation,
+  dshLoadTargetsEqual,
   dshMutationFeedback,
+  dshNormalizedLoadTarget,
   dshStatusPresentation,
   dshUninstallAction,
   normalizeApplicationTab,
@@ -64,33 +66,8 @@ test("application tab deep link stays narrow and defaults to DSH", () => {
   assert.equal(readApplicationTab(""), "dsh");
 });
 
-test("install key options offer the primary plus enabled sub Keys without plaintext", () => {
-  const options = buildDshInstallKeyOptions({
-    primary_key: "ocg-primary-secret",
-    sub_keys: [
-      { id: "sub-1", name: "Laptop", enabled: true, value: "ocg-sub-secret" },
-      { id: "sub-2", name: "Old phone", enabled: false, value: "ocg-disabled-secret" },
-    ],
-  });
-  assert.deepEqual(options, [
-    { id: PRIMARY_KEY_ID, name: "", kind: "primary" },
-    { id: "sub-1", name: "Laptop", kind: "sub" },
-  ]);
-  for (const option of options) {
-    assert.deepEqual(Object.keys(option).sort(), ["id", "kind", "name"]);
-  }
-});
-
-test("install key options degrade when the primary Key or connection is unavailable", () => {
-  assert.deepEqual(buildDshInstallKeyOptions(null), []);
-  assert.deepEqual(buildDshInstallKeyOptions({ primary_key: "", sub_keys: [] }), []);
-  assert.deepEqual(
-    buildDshInstallKeyOptions({
-      primary_key: "",
-      sub_keys: [{ id: "sub-1", name: "Laptop", enabled: true, value: "x" }],
-    }),
-    [{ id: "sub-1", name: "Laptop", kind: "sub" }],
-  );
+test("DSH uses a named ordinary Key rather than a picker", () => {
+  assert.equal(DSH_DEFAULT_KEY_NAME, "dsh");
 });
 
 test("every DSH status has a label, hint, and a meaningful tone", () => {
@@ -148,6 +125,40 @@ test("uninstall action and suggested runtime URL stay semantic", () => {
     assert.ok(key.length > 0, code);
     assert.ok(key in enUSMessages, code);
   }
+});
+
+test("normalized load targets compare trimmed profile and runtime drafts", () => {
+  assert.deepEqual(
+    dshNormalizedLoadTarget("  C:\\web  ", "  http://127.0.0.1:3080  "),
+    { profilePath: "C:\\web", runtimeUrl: "http://127.0.0.1:3080" },
+  );
+  assert.deepEqual(dshNormalizedLoadTarget("   ", ""), { profilePath: undefined, runtimeUrl: undefined });
+  assert.equal(
+    dshLoadTargetsEqual(
+      dshNormalizedLoadTarget("p", "http://127.0.0.1:3080"),
+      dshNormalizedLoadTarget(" p ", "  http://127.0.0.1:3080  "),
+    ),
+    true,
+  );
+  assert.equal(
+    dshLoadTargetsEqual(
+      dshNormalizedLoadTarget("p", "http://127.0.0.1:3080"),
+      dshNormalizedLoadTarget("p", "http://127.0.0.1:9999"),
+    ),
+    false,
+  );
+});
+
+test("draft runtime seed uses the cached inspection, not a live ref", () => {
+  assert.equal(dshDraftRuntimeFromInspection(dshApp({ runtimeUrl: "http://127.0.0.1:9999" })), "http://127.0.0.1:9999");
+  assert.equal(
+    dshDraftRuntimeFromInspection(dshApp({
+      runtimeUrl: null,
+      selectedProfilePath: "C:\\Users\\author\\.dsh\\profiles\\web",
+      discoveredProfiles: [{ home: "C:\\Users\\author\\.dsh", name: "web", path: "C:\\Users\\author\\.dsh\\profiles\\web" }],
+    })),
+    "http://127.0.0.1:3080",
+  );
 });
 
 test("host detail is shown when the action is blocked and omitted for ready/installed summaries", () => {

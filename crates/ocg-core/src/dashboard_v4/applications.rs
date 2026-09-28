@@ -33,7 +33,7 @@ use super::types::{
 struct DshInstallMutationCheck {
     expected_revision: u64,
     process_generation: u64,
-    key_id: String,
+    key_id: Option<String>,
     profile_path: Option<String>,
     runtime_url: Option<String>,
     expected_fingerprint: String,
@@ -99,7 +99,10 @@ pub(super) async fn install_dsh(
     let (gateway_v1_url, secret) = {
         let _settings_update = state.settings_update.lock();
         check_expectation(&state, &input.expectation)?;
-        let secret = selected_gateway_key(&state, &input.key_id)?;
+        let secret = match input.key_id.as_deref() {
+            Some(id) => selected_gateway_key(&state, id)?,
+            None => application_gateway_key(&state, "dsh")?,
+        };
         (gateway_v1_url(&state), secret)
     };
 
@@ -200,6 +203,24 @@ fn selected_gateway_key(state: &CoreState, key_id: &str) -> Result<String, V3Api
     Ok(key.key)
 }
 
+/// Called under settings_update. Keep a newly created Key usable even if a
+/// later native file operation fails; retry reuses it and the error carries
+/// the revised control token rather than hiding that successful Key mutation.
+pub(super) fn application_gateway_key(state: &CoreState, name: &str) -> Result<String, V3ApiError> {
+    let (key, created) = crate::gateway_keys::get_or_create_named_sub_key(state, name).map_err(
+        |error| match error {
+            crate::gateway_keys::KeyError::BadRequest(message) => {
+                V3ApiError::precondition_failed_at(state, message)
+            }
+            crate::gateway_keys::KeyError::Internal(message) => V3ApiError::internal(message),
+        },
+    )?;
+    if created {
+        state.bump_settings_revision();
+    }
+    Ok(key.key)
+}
+
 fn payload(state: &CoreState, inspection: DshApplicationInspection) -> DshApplication {
     DshApplication {
         selected_profile_path: inspection.selected_profile_path,
@@ -249,53 +270,9 @@ fn map_host_error(state: &CoreState, error: DshApplicationError) -> V3ApiError {
             V3ApiError::precondition_failed_at(state, error.message)
         }
         DshApplicationErrorKind::Conflict => V3ApiError::conflict_at(state, error.message),
-        DshApplicationErrorKind::Internal => V3ApiError::internal(error.message),
+        DshApplicationErrorKind::Internal => V3ApiError::internal_at(state, error.message),
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn install_and_uninstall_reject_unknown_fields() {
-        let extra = json!({
-            "expectedRevision": 1,
-            "processGeneration": 1,
-            "keyId": "primary",
-            "expectedFingerprint": "abc",
-            "extra": true
-        });
-        assert!(
-            parse_dsh_mutation::<DshInstallMutationCheck, DshApplicationInstallRequest>(
-                &serde_json::to_vec(&extra).unwrap()
-            )
-            .is_err()
-        );
-        let with_key = json!({
-            "expectedRevision": 1,
-            "processGeneration": 1,
-            "expectedFingerprint": "abc",
-            "keyId": "must-not-be-accepted"
-        });
-        assert!(
-            parse_dsh_mutation::<DshUninstallMutationCheck, DshApplicationUninstallRequest>(
-                &serde_json::to_vec(&with_key).unwrap()
-            )
-            .is_err()
-        );
-        let valid = json!({
-            "expectedRevision": 1,
-            "processGeneration": 1,
-            "expectedFingerprint": "abc",
-            "runtimeUrl": "http://127.0.0.1:3080"
-        });
-        assert!(
-            parse_dsh_mutation::<DshUninstallMutationCheck, DshApplicationUninstallRequest>(
-                &serde_json::to_vec(&valid).unwrap()
-            )
-            .is_ok()
-        );
-    }
-}
+mod tests;

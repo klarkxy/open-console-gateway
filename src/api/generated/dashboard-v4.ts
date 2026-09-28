@@ -5,6 +5,12 @@
  */
 
 export type DashboardApiV4 =
+  | ByokClient
+  | ByokStatus
+  | ByokInspection
+  | ByokApplication
+  | ByokConfigureRequest
+  | ByokMutationRequest
   | ControlRevision
   | V3Error
   | EndpointSpec
@@ -143,6 +149,9 @@ export type DashboardApiV4 =
   | TemporaryPolicyRestrictions
   | TemporaryPolicyUpdate
   | TemporaryPolicyClearRequest;
+export type ByokClient = "codex" | "kimi" | "minimax" | "zcode";
+export type ByokStatus =
+  "unsupported_runtime" | "not_detected" | "ready" | "configured" | "incompatible" | "conflict" | "recovery_required";
 /**
  * Inference operation advertised by one endpoint. Mapped 1:1 from
  * [`UpstreamProtocolKind`].
@@ -445,6 +454,44 @@ export type TemporaryPolicyRule =
       kind: "builtin_override";
     };
 
+export interface ByokInspection {
+  activationRequired: boolean;
+  backupPath: string | null;
+  client: ByokClient;
+  configPath: string;
+  configureSupported: boolean;
+  configuredModelIds: string[];
+  defaultModelId: string | null;
+  detail: string | null;
+  detected: boolean;
+  discoverySource: string;
+  fingerprint: string | null;
+  recoverySupported: boolean;
+  removeSupported: boolean;
+  requiresClosedClient: boolean;
+  status: ByokStatus;
+  targetPaths: string[];
+}
+export interface ByokApplication {
+  activationRequired: boolean;
+  backupPath: string | null;
+  client: ByokClient;
+  configPath: string;
+  configureSupported: boolean;
+  configuredModelIds: string[];
+  defaultModelId: string | null;
+  detail: string | null;
+  detected: boolean;
+  discoverySource: string;
+  fingerprint: string | null;
+  gatewayV1Url: string;
+  recoverySupported: boolean;
+  removeSupported: boolean;
+  requiresClosedClient: boolean;
+  revision: ControlRevision;
+  status: ByokStatus;
+  targetPaths: string[];
+}
 /**
  * Live CAS token, process generation, and pricing snapshot id.
  */
@@ -452,6 +499,20 @@ export interface ControlRevision {
   pricingRevision: string;
   processGeneration: number;
   revision: number;
+}
+export interface ByokConfigureRequest {
+  clientClosed: boolean;
+  expectedFingerprint: string;
+  expectedRevision: number;
+  processGeneration: number;
+  targetPath?: string | null;
+}
+export interface ByokMutationRequest {
+  clientClosed: boolean;
+  expectedFingerprint: string;
+  expectedRevision: number;
+  processGeneration: number;
+  targetPath?: string | null;
 }
 /**
  * Stable non-2xx JSON envelope for every Dashboard V3 error.
@@ -1037,7 +1098,7 @@ export interface DshDiscoveredProfile {
 export interface DshApplicationInstallRequest {
   expectedFingerprint: string;
   expectedRevision: number;
-  keyId: string;
+  keyId?: string | null;
   processGeneration: number;
   profilePath?: string | null;
   runtimeUrl?: string | null;

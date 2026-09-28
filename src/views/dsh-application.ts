@@ -1,15 +1,15 @@
-import { PRIMARY_KEY_ID } from "../api/dashboard-v3.ts";
 import type { DshApplicationOutcome, DshApplicationView } from "../api/dashboard-v4.ts";
-import type { ConnectionInfo } from "../api/dashboard.ts";
 import type { MutationExpectation } from "../api/generated/dashboard-v3.ts";
 import type { DshApplicationStatus } from "../api/generated/dashboard-v4.ts";
 import type { MessageKey } from "../i18n/index.ts";
 
 /**
- * Pure state helpers for the Applications page. The page currently hosts a
- * single DSH child tab; the tab type and `app=` deep link are kept narrow on
- * purpose — this is not a plugin registry.
+ * Pure state helpers for the DSH Applications tab. The `app=` deep link for
+ * the whole Applications page lives in `domain/byok-applications.ts`.
  */
+
+/** Ordinary Key the DSH install uses. The UI never selects a Key. */
+export const DSH_DEFAULT_KEY_NAME = "dsh";
 
 export const APPLICATION_TABS = ["dsh"] as const;
 export type ApplicationTab = (typeof APPLICATION_TABS)[number];
@@ -25,31 +25,6 @@ export function normalizeApplicationTab(raw: string | null | undefined): Applica
 export function readApplicationTab(search: string): ApplicationTab {
   const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
   return normalizeApplicationTab(params.get("app")) ?? DEFAULT_APPLICATION_TAB;
-}
-
-export interface DshInstallKeyOption {
-  id: string;
-  name: string;
-  kind: "primary" | "sub";
-}
-
-/**
- * Keys offered for a DSH install: the primary Key plus every enabled sub Key.
- * Options carry id and display name only — plaintext values never leave the
- * connection payload and are never sent in the install request.
- */
-export function buildDshInstallKeyOptions(
-  connection: Pick<ConnectionInfo, "primary_key" | "sub_keys"> | null | undefined,
-): DshInstallKeyOption[] {
-  if (!connection) return [];
-  const options: DshInstallKeyOption[] = [];
-  if (connection.primary_key) {
-    options.push({ id: PRIMARY_KEY_ID, name: "", kind: "primary" });
-  }
-  for (const key of connection.sub_keys) {
-    if (key.enabled) options.push({ id: key.id, name: key.name, kind: "sub" });
-  }
-  return options;
 }
 
 export type DshStatusTone = "default" | "info" | "success" | "warning" | "error";
@@ -193,3 +168,34 @@ export function dshMutationExpectation(
 
 /** @deprecated Use dshMutationExpectation. */
 export const dshInstallExpectation = dshMutationExpectation;
+
+export interface DshLoadTarget {
+  profilePath?: string;
+  runtimeUrl?: string;
+}
+
+/** Trim empty profile/runtime fields so blur can compare the inspect target. */
+export function dshNormalizedLoadTarget(
+  profilePath?: string | null,
+  runtimeUrl?: string | null,
+): DshLoadTarget {
+  return {
+    profilePath: profilePath?.trim() || undefined,
+    runtimeUrl: runtimeUrl?.trim() || undefined,
+  };
+}
+
+export function dshLoadTargetsEqual(left: DshLoadTarget, right: DshLoadTarget): boolean {
+  return (left.profilePath ?? "") === (right.profilePath ?? "")
+    && (left.runtimeUrl ?? "") === (right.runtimeUrl ?? "");
+}
+
+/** Local draft seed from a cached inspection — not a live server-state ref. */
+export function dshDraftRuntimeFromInspection(
+  app: Pick<DshApplicationView, "runtimeUrl" | "selectedProfilePath" | "discoveredProfiles">,
+): string {
+  if (app.runtimeUrl) return app.runtimeUrl;
+  const name = app.discoveredProfiles.find((profile) => profile.path === app.selectedProfilePath)?.name
+    ?? app.selectedProfilePath.split(/[\\/]/).pop();
+  return suggestedRuntimeUrl(name) ?? "";
+}

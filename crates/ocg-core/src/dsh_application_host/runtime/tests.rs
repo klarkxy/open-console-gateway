@@ -6,7 +6,7 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const TOKEN: &str = "launch-token-SECRET-xyz";
 const COOKIE_VALUE: &str = "v1.test-cookie-SECRET.signature";
@@ -54,6 +54,11 @@ enum FakeAction {
         bytes: usize,
     },
     Reset,
+    HangFor(Duration),
+    SlowRpcOk {
+        delay: Duration,
+        value: Value,
+    },
 }
 
 struct FakeServer {
@@ -299,6 +304,11 @@ fn write_action(stream: &mut TcpStream, port: u16, request: &RecordedRequest, ac
             }
         }
         FakeAction::Reset => {}
+        FakeAction::HangFor(duration) => thread::sleep(duration),
+        FakeAction::SlowRpcOk { delay, value } => {
+            thread::sleep(delay);
+            write_rpc(stream, request, true, None, value);
+        }
     }
 }
 
@@ -771,6 +781,102 @@ fn minted_browser_session_cookie_is_redacted_and_authority_bound() {
         DshRuntimeClient::connect_session(origin.as_str(), cookie).expect("session")
     );
     assert!(!client_debug.contains("v1."));
+}
+
+#[test]
+fn inspect_limits_fail_promptly_on_a_silent_loopback_and_leave_mutation_budgets() {
+    assert_eq!(
+        DshRuntimeLimits::default().mutation_timeout,
+        Duration::from_secs(120)
+    );
+    assert_eq!(
+        DshRuntimeLimits::default().rpc_timeout,
+        Duration::from_secs(20)
+    );
+    assert_eq!(
+        DshRuntimeLimits::inspect().rpc_timeout,
+        Duration::from_secs(2)
+    );
+    assert_eq!(
+        DshRuntimeLimits::inspect().mutation_timeout,
+        Duration::from_secs(120),
+        "inspect sessions must not shorten install/uninstall mutation timeouts"
+    );
+
+    let stall = FakeServer::start(vec![FakeAction::HangFor(Duration::from_secs(1))]);
+    let inspect_client = DshRuntimeClient::connect_session_with_limits(
+        &stall.origin(),
+        cookie_for(&stall.origin(), COOKIE_VALUE),
+        DshRuntimeLimits {
+            connect_timeout: Duration::from_millis(150),
+            exchange_timeout: Duration::from_millis(200),
+            rpc_timeout: Duration::from_millis(200),
+            ..DshRuntimeLimits::inspect()
+        },
+    )
+    .expect("inspect session");
+    let started = Instant::now();
+    let error = inspect_client.list_bundles().expect_err("hung inspect");
+    let elapsed = started.elapsed();
+    assert_eq!(error.unknown_kind, Some(DshRuntimeUnknownKind::Timeout));
+    assert!(
+        elapsed < Duration::from_millis(900),
+        "inspect stall waited {elapsed:?}"
+    );
+}
+
+#[test]
+fn default_rpc_budget_still_accepts_a_delay_that_exceeds_inspect_limits() {
+    let delayed = Duration::from_millis(350);
+    let inspect_server = FakeServer::start(vec![FakeAction::SlowRpcOk {
+        delay: delayed,
+        value: json!([]),
+    }]);
+    let inspect_client = DshRuntimeClient::connect_session_with_limits(
+        &inspect_server.origin(),
+        cookie_for(&inspect_server.origin(), COOKIE_VALUE),
+        DshRuntimeLimits {
+            connect_timeout: Duration::from_millis(100),
+            exchange_timeout: Duration::from_millis(120),
+            rpc_timeout: Duration::from_millis(120),
+            ..DshRuntimeLimits::inspect()
+        },
+    )
+    .expect("inspect session");
+    inspect_client
+        .list_bundles()
+        .expect_err("inspect budget must expire before the delayed reply");
+    drop(inspect_server);
+
+    let default_server = FakeServer::start(vec![FakeAction::SlowRpcOk {
+        delay: delayed,
+        value: json!([]),
+    }]);
+    let default_client = connect_session(&default_server);
+    let bundles = default_client.list_bundles().expect("default rpc");
+    assert!(bundles.is_empty());
+}
+
+#[test]
+fn inspect_session_still_lists_plugins_for_collision_and_restart_detection() {
+    let server = FakeServer::start(vec![
+        FakeAction::RpcOk(json!([])),
+        FakeAction::RpcOk(json!([{
+            "moduleName": "@open-console-gateway/dsh-plugin",
+            "enabled": true,
+            "fiberPhase": "active"
+        }])),
+    ]);
+    let client = DshRuntimeClient::connect_session_with_limits(
+        &server.origin(),
+        cookie_for(&server.origin(), COOKIE_VALUE),
+        DshRuntimeLimits::inspect(),
+    )
+    .expect("inspect session");
+    assert!(client.list_bundles().expect("bundles").is_empty());
+    let plugin = &client.list_plugins().expect("plugins")[0];
+    assert_eq!(plugin.module_name, "@open-console-gateway/dsh-plugin");
+    assert_eq!(plugin.fiber_phase.as_deref(), Some("active"));
 }
 
 #[test]

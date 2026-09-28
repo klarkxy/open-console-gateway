@@ -15,6 +15,7 @@ This guide is for people changing code, cutting releases, debugging the gateway,
 - [Runtime Invariants](maintainer/runtime-invariants.md) — Detailed gateway, alias, Zen Free, plan catalog, access key, proxy, and usage-sync semantics.
 - [Storage And Migrations](maintainer/storage-migration.md) — SQLite schema and migrations, backup, and the operator runbook.
 - [Extending Open Console Gateway](maintainer/extending.md) — Sealed provider extension procedure.
+- [Local BYOK Applications](maintainer/byok-applications.md) — Client format baselines, ownership, recovery, and isolated validation.
 - [Release Artifacts](maintainer/release-artifacts.md) — Supported platform matrix and package names.
 - [CI Workflows](maintainer/ci.md) — Quality, release, and container workflows.
 - [Release Procedure](maintainer/releasing.md) — Version bump, tag, build, and publish checklist.

@@ -1,6 +1,8 @@
 use super::*;
 use serde_json::json;
 use std::sync::Mutex as StdMutex;
+use std::thread;
+use std::time::{Duration, Instant};
 
 struct FakeRunner {
     version: String,
@@ -452,32 +454,85 @@ fn editor_source_collision_blocks_install_before_external_writes() {
 
 #[test]
 fn installation_is_not_gated_by_dsh_version() {
-    for version in [
-        "0.1.4",
-        "0.1.5-rc.1",
-        "0.1.5-rc.2",
-        "0.1.5",
-        "0.1.7-rc.2",
-        "0.2.0",
-        "dev-build",
-    ] {
-        let (root, host, _) = fixture_with_version("versions", version);
-        let gateway = "http://127.0.0.1:9042/v1";
-        let inspected = host.inspect(gateway).unwrap();
-        assert_eq!(inspected.phase, DshApplicationPhase::Ready, "{version}");
-        assert!(inspected.install_supported);
-        assert_eq!(inspected.version.as_deref(), Some(version));
-        let installed = host
-            .install(
-                inspected.fingerprint.as_deref().unwrap(),
-                gateway,
-                "test-key",
-            )
-            .unwrap();
-        assert_eq!(installed.phase, DshApplicationPhase::Installed, "{version}");
-        assert_eq!(installed.version.as_deref(), Some(version));
-        fs::remove_dir_all(root).unwrap();
+    let (root, host, runner) = fixture("versions-ungated");
+    let gateway = "http://127.0.0.1:9042/v1";
+    let inspected = host.inspect(gateway).unwrap();
+    assert_eq!(inspected.phase, DshApplicationPhase::Ready);
+    assert!(inspected.install_supported);
+    assert_eq!(inspected.version, None);
+    assert!(
+        runner.commands.lock().unwrap().is_empty(),
+        "status inspect must not spawn dsh --version"
+    );
+    let installed = host
+        .install(
+            inspected.fingerprint.as_deref().unwrap(),
+            gateway,
+            "test-key",
+        )
+        .unwrap();
+    assert_eq!(installed.phase, DshApplicationPhase::Installed);
+    assert_eq!(installed.version, None);
+    assert!(
+        !runner
+            .commands
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|command| command.args == [OsString::from("--version")]),
+        "install verifies compatibility via plugin add, not --version"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn inspect_does_not_wait_on_a_stalling_version_cli() {
+    struct StallingVersionRunner {
+        commands: StdMutex<Vec<CommandSpec>>,
     }
+    impl CommandRunner for StallingVersionRunner {
+        fn run(&self, command: &CommandSpec) -> Result<CommandOutput, String> {
+            self.commands.lock().unwrap().push(command.clone());
+            if command.args == [OsString::from("--version")] {
+                thread::sleep(Duration::from_secs(8));
+                return Ok(CommandOutput {
+                    success: true,
+                    stdout: "0.1.5-rc.2\n".into(),
+                    stderr: String::new(),
+                });
+            }
+            Err("plugin command should not run during inspect".into())
+        }
+    }
+
+    let (root, mut host, _) = fixture("stall-version");
+    let runner = Arc::new(StallingVersionRunner {
+        commands: StdMutex::new(Vec::new()),
+    });
+    host.runner = runner.clone();
+    let started = Instant::now();
+    let inspected = host.inspect("http://127.0.0.1:9042/v1").unwrap();
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_millis(800),
+        "inspect waited on --version for {elapsed:?}"
+    );
+    assert_eq!(inspected.phase, DshApplicationPhase::Ready);
+    assert!(inspected.install_supported);
+    assert_eq!(inspected.version, None);
+    assert!(runner.commands.lock().unwrap().is_empty());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn opt_in_cli_version_diagnostic_keeps_the_install_class_timeout() {
+    let (root, host, runner) = fixture("version-timeout");
+    let version = host
+        .read_version(&host.resolve_dsh_executable().expect("exe"))
+        .unwrap();
+    assert_eq!(version, "0.1.5-rc.2");
+    assert_eq!(runner.commands.lock().unwrap()[0].timeout, VERSION_TIMEOUT);
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -505,10 +560,10 @@ fn install_materializes_only_the_owned_plugin_and_keeps_the_key_off_argv() {
     let commands = runner.commands.lock().unwrap();
     assert_eq!(
         commands.len(),
-        4,
-        "inspect, install preflight, add, and readback commands"
+        1,
+        "plugin add only; inspect no longer launches --version"
     );
-    let add = &commands[2];
+    let add = &commands[0];
     assert_eq!(add.args[0], "plugin");
     assert_eq!(add.args[1], "--profile");
     assert_eq!(add.args[2], PROFILE);
@@ -696,7 +751,7 @@ fn stale_fingerprint_stops_before_any_install_effect() {
         crate::dsh_application::DshApplicationErrorKind::Conflict
     );
     assert!(!host.bootstrap_path().exists());
-    assert_eq!(runner.commands.lock().unwrap().len(), 2);
+    assert_eq!(runner.commands.lock().unwrap().len(), 0);
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -788,11 +843,11 @@ fn failed_add_restores_absent_registration_and_previous_handoff() {
     let commands = runner.commands.lock().unwrap();
     assert_eq!(
         commands.len(),
-        4,
-        "inspect, preflight, failed add, rollback remove"
+        2,
+        "failed add and rollback remove; inspect does not spawn --version"
     );
-    assert_eq!(commands[2].args[3], "add");
-    assert_eq!(commands[3].args[3], "remove");
+    assert_eq!(commands[0].args[3], "add");
+    assert_eq!(commands[1].args[3], "remove");
     drop(commands);
     fs::remove_dir_all(root).unwrap();
 }
@@ -830,8 +885,12 @@ fn failed_add_does_not_remove_a_concurrent_foreign_registration() {
         Some(&Value::String("https://example.test/concurrent.tgz".into()))
     );
     let commands = runner.commands.lock().unwrap();
-    assert_eq!(commands.len(), 3, "inspect, preflight, failed add only");
-    assert_eq!(commands[2].args[3], "add");
+    assert_eq!(
+        commands.len(),
+        1,
+        "failed add only; inspect does not spawn --version"
+    );
+    assert_eq!(commands[0].args[3], "add");
     drop(commands);
     fs::remove_dir_all(root).unwrap();
 }
@@ -1125,6 +1184,7 @@ struct HttpPluginState {
     remove_application: String,
     drop_install: bool,
     wait_null: bool,
+    hang_status: bool,
     methods: Vec<String>,
 }
 
@@ -1138,6 +1198,7 @@ impl HttpPluginState {
             remove_application: "applied".into(),
             drop_install: false,
             wait_null: false,
+            hang_status: false,
             methods: Vec::new(),
         }
     }
@@ -1167,6 +1228,11 @@ impl HttpPluginFake {
                         if let Ok((rpc_id, method, _body)) = read_rpc(&mut stream) {
                             let mut state = thread_state.lock().unwrap();
                             state.methods.push(method.clone());
+                            if state.hang_status {
+                                drop(state);
+                                thread::sleep(Duration::from_secs(5));
+                                continue;
+                            }
                             if method.ends_with("installBundle") && state.drop_install {
                                 state.drop_install = false;
                                 state.bundles = vec![ocg_bundle(true, true, true)];
@@ -1453,6 +1519,70 @@ fn http_web_install_uninstall_and_restart_do_not_use_desktop_cli() {
         fake.methods()
             .iter()
             .any(|method| method == "pluginManager/removeBundle")
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn http_inspect_lists_plugins_to_detect_restart_and_does_not_spawn_cli() {
+    let (root, host, runner) = fixture("http-inspect-plugins");
+    write_browser_grant(&host.home);
+    let mut state = HttpPluginState::empty();
+    state.bundles = vec![ocg_bundle(true, true, true)];
+    let fake = HttpPluginFake::start(state);
+    let inspected = host
+        .execute(DshApplicationHostRequest::Inspect {
+            gateway_v1_url: "http://127.0.0.1:9042/v1".into(),
+            profile_path: None,
+            runtime_url: Some(fake.origin()),
+        })
+        .unwrap();
+    assert_eq!(inspected.phase, DshApplicationPhase::Installed);
+    assert_eq!(
+        inspected.application,
+        Some(DshApplicationOutcome::RestartRequired)
+    );
+    assert!(inspected.install_supported);
+    let methods = fake.methods();
+    assert!(
+        methods
+            .iter()
+            .any(|method| method == "pluginManager/listBundles")
+    );
+    assert!(
+        methods
+            .iter()
+            .any(|method| method == "pluginManager/listPlugins")
+    );
+    assert!(runner.commands.lock().unwrap().is_empty());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn http_inspect_unresponsive_runtime_returns_within_the_inspect_budget() {
+    let (root, host, _runner) = fixture("http-inspect-hang");
+    write_browser_grant(&host.home);
+    let mut state = HttpPluginState::empty();
+    state.hang_status = true;
+    let fake = HttpPluginFake::start(state);
+    let started = Instant::now();
+    let inspected = host
+        .execute(DshApplicationHostRequest::Inspect {
+            gateway_v1_url: "http://127.0.0.1:9042/v1".into(),
+            profile_path: None,
+            runtime_url: Some(fake.origin()),
+        })
+        .unwrap();
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "hung inspect waited {elapsed:?}"
+    );
+    assert_eq!(inspected.phase, DshApplicationPhase::NotDetected);
+    assert!(!inspected.install_supported);
+    assert_eq!(
+        inspected.detail.as_deref(),
+        Some("DSH running address is not reachable")
     );
     fs::remove_dir_all(root).unwrap();
 }

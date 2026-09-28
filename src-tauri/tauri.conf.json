@@ -20,7 +20,8 @@
     "licenseFile": "../LICENSE",
     "resources": {
       "../dist": "dist",
-      "../LICENSE": "LICENSE"
+      "../LICENSE": "LICENSE",
+      "../resources/codex-byok": "licenses/codex"
     },
     "macOS": {
       "minimumSystemVersion": "11.0",

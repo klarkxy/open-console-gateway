@@ -100,6 +100,7 @@ pub struct DesktopCapabilities {
     dock_visibility_sync: OnceLock<DockVisibilitySync>,
     desktop_update_starter: OnceLock<DesktopUpdateStarter>,
     dsh_application_host: OnceLock<crate::dsh_application::DshApplicationHost>,
+    byok_application_host: OnceLock<crate::byok_application::ByokApplicationHost>,
     desktop_update_status: Mutex<DesktopUpdateStatus>,
 }
 
@@ -110,6 +111,7 @@ impl DesktopCapabilities {
             dock_visibility_sync: OnceLock::new(),
             desktop_update_starter: OnceLock::new(),
             dsh_application_host: OnceLock::new(),
+            byok_application_host: OnceLock::new(),
             desktop_update_status: Mutex::new(DesktopUpdateStatus::new()),
         }
     }
@@ -162,6 +164,17 @@ impl DesktopCapabilities {
 
     pub fn desktop_update_supported(&self) -> bool {
         self.desktop_update_starter.get().is_some()
+    }
+
+    pub fn set_byok_application_host(&self, host: crate::byok_application::ByokApplicationHost) {
+        assert!(
+            self.byok_application_host.set(host).is_ok(),
+            "BYOK host already registered"
+        );
+    }
+
+    pub fn byok_application_host(&self) -> Option<crate::byok_application::ByokApplicationHost> {
+        self.byok_application_host.get().cloned()
     }
 
     pub fn set_dsh_application_host(&self, host: crate::dsh_application::DshApplicationHost) {

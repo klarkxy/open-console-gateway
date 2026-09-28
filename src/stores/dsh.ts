@@ -17,7 +17,7 @@ export interface DshMutationInput {
 }
 
 export interface DshInstallInput extends DshMutationInput {
-  keyId: string;
+  keyId?: string | null;
 }
 
 /**
@@ -37,6 +37,11 @@ export const useDshStore = defineStore("dsh", () => {
   let sessionGeneration = 0;
   let loadInFlight = 0;
   let mutationInFlight = 0;
+  let inflightLoad: { key: string; promise: Promise<void> } | null = null;
+
+  function loadKey(input: DshLoadInput): string {
+    return `${input.profilePath ?? ""}::${input.runtimeUrl ?? ""}`;
+  }
 
   function beginLoad(): number {
     loadInFlight += 1;
@@ -70,7 +75,7 @@ export const useDshStore = defineStore("dsh", () => {
     return true;
   }
 
-  async function load(input: DshLoadInput = {}): Promise<void> {
+  async function runLoad(input: DshLoadInput): Promise<void> {
     const generation = beginLoad();
     if (!input.retain) error.value = "";
     try {
@@ -87,6 +92,16 @@ export const useDshStore = defineStore("dsh", () => {
     }
   }
 
+  async function load(input: DshLoadInput = {}): Promise<void> {
+    const key = loadKey(input);
+    if (inflightLoad?.key === key) return inflightLoad.promise;
+    const pending = runLoad(input).finally(() => {
+      if (inflightLoad?.promise === pending) inflightLoad = null;
+    });
+    inflightLoad = { key, promise: pending };
+    return pending;
+  }
+
   async function install(
     input: DshInstallInput,
     expectation: MutationExpectation,
@@ -95,7 +110,7 @@ export const useDshStore = defineStore("dsh", () => {
     try {
       const result = await dashboardV4.installDshApplication(
         {
-          keyId: input.keyId,
+          ...(input.keyId ? { keyId: input.keyId } : {}),
           profilePath: input.profilePath,
           runtimeUrl: input.runtimeUrl,
           expectedFingerprint: input.expectedFingerprint,
@@ -144,6 +159,7 @@ export const useDshStore = defineStore("dsh", () => {
     sessionGeneration = ++dataGeneration;
     loadInFlight = 0;
     mutationInFlight = 0;
+    inflightLoad = null;
     application.value = null;
     loaded.value = false;
     loading.value = false;

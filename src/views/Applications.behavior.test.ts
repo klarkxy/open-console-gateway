@@ -5,8 +5,10 @@ import { after, before, test } from "node:test";
 import { pathToFileURL } from "node:url";
 import { build } from "vite";
 import vue from "@vitejs/plugin-vue";
-import { reactive, ssrContextKey, type App, type Component } from "vue";
-import { createMemoryHistory, createRouter } from "vue-router";
+import { ssrContextKey, type App, type Component } from "vue";
+import { createPinia, type Pinia } from "pinia";
+import { createMemoryHistory, createRouter, type Router } from "vue-router";
+import type { ByokApplicationView } from "../api/byok-applications.ts";
 import type { DshApplicationView } from "../api/dashboard-v4.ts";
 import {
   createVueHostRenderer,
@@ -21,7 +23,7 @@ import {
 type DshApi = {
   getDshApplication: (profilePath?: string, runtimeUrl?: string) => Promise<DshApplicationView>;
   installDshApplication: (
-    input: { keyId: string; profilePath: string; runtimeUrl?: string | null; expectedFingerprint: string },
+    input: { keyId?: string; profilePath?: string; runtimeUrl?: string | null; expectedFingerprint: string },
     expectation: { expectedRevision: number; processGeneration: number },
   ) => Promise<DshApplicationView>;
   uninstallDshApplication: (
@@ -30,13 +32,28 @@ type DshApi = {
   ) => Promise<DshApplicationView>;
 };
 
+type ByokApi = {
+  inspect: (client: string, targetPath?: string) => Promise<ByokApplicationView>;
+  configure: (client: string, input: Record<string, unknown>, expectation: unknown) => Promise<ByokApplicationView>;
+  remove: (client: string, input: Record<string, unknown>, expectation: unknown) => Promise<ByokApplicationView>;
+  recover: (client: string, input: Record<string, unknown>, expectation: unknown) => Promise<ByokApplicationView>;
+};
+
 type ConnectionState = {
   info: { primary_key: string; sub_keys: Array<{ id: string; name: string; enabled: boolean; value: string }> } | null;
+  loadCount: number;
+  reloadCount: number;
+  reloadError: Error | null;
+  sessionEpoch: number;
+  reloadWait: Promise<ConnectionState["info"]> | null;
+  currentSession: () => number;
   load: () => Promise<ConnectionState["info"]>;
+  reloadAfterMutation: (expectedSession?: number) => Promise<ConnectionState["info"]>;
 };
 
 let buildDir: string;
 let Applications: Component;
+let DshPanel: Component;
 const renderer = createVueHostRenderer();
 
 function applicationsHarnessPlugin() {
@@ -62,24 +79,51 @@ function applicationsHarnessPlugin() {
             : null;
         },
       });
-      export const NRadio = defineComponent({ inheritAttrs: false, props: { value: [String, Number, Boolean] }, setup(props, { attrs, slots }) {
-        return () => h("label", attrs, slots.default?.());
-      } });
-      export const NRadioGroup = pass;
       export const NSelect = pass;
       export const NInput = defineComponent({ inheritAttrs: false, props: { value: String }, setup(props, { attrs }) {
         return () => h("input", { ...attrs, value: props.value });
       } });
-      export const NSpin = pass;
-      export const NTabPane = pass;
-      export const NTabs = defineComponent({ inheritAttrs: false, setup(_, { attrs, slots }) {
-        return () => h("div", attrs, [slots.suffix?.(), slots.default?.()]);
+      export const NCheckbox = defineComponent({ inheritAttrs: false, props: { checked: Boolean }, setup(props, { attrs, slots }) {
+        return () => h("label", { ...attrs, "data-checked": props.checked }, slots.default?.());
       } });
+      export const NSpin = pass;
       export const NTag = pass;
       export const useMessage = () => {
         const record = (type) => (...args) => { (globalThis.__dshMessages ??= []).push({ type, args }); };
         return { error: record("error"), success: record("success"), warning: record("warning") };
       };
+    `,
+    reka: `
+      import { computed, defineComponent, h, inject, provide } from "vue";
+      const key = Symbol("applications-tabs");
+      export const TabsRoot = defineComponent({
+        props: { modelValue: String, activationMode: { type: String, default: "automatic" } },
+        emits: ["update:modelValue"],
+        setup(props, { slots, emit }) {
+          provide(key, {
+            current: computed(() => props.modelValue),
+            select: (value) => emit("update:modelValue", value),
+          });
+          return () => h("div", { "data-activation-mode": props.activationMode }, slots.default?.());
+        },
+      });
+      export const TabsList = defineComponent({ inheritAttrs: false, setup(_, { attrs, slots }) {
+        return () => h("div", { ...attrs, role: "tablist" }, slots.default?.());
+      } });
+      export const TabsTrigger = defineComponent({ inheritAttrs: false, props: { value: String }, setup(props, { attrs }) {
+        const ctx = inject(key);
+        return () => h("button", {
+          ...attrs,
+          role: "tab",
+          "data-state": ctx.current.value === props.value ? "active" : "inactive",
+          tabindex: ctx.current.value === props.value ? 0 : -1,
+          onClick: () => ctx.select(props.value),
+        });
+      } });
+      export const TabsContent = defineComponent({ props: { value: String }, setup(props, { slots }) {
+        const ctx = inject(key);
+        return () => ctx.current.value === props.value ? h("div", { role: "tabpanel" }, slots.default?.()) : null;
+      } });
     `,
     dashboard: `
       export class DashboardRequestError extends Error {
@@ -99,9 +143,11 @@ function applicationsHarnessPlugin() {
     api: `
       export const dashboardV4 = new Proxy({}, { get: (_, key) => (...args) => globalThis.__dshComponentApi[key](...args) });
     `,
+    byokApi: `
+      export const byokApplicationsApi = new Proxy({}, { get: (_, key) => (...args) => globalThis.__byokApi[key](...args) });
+    `,
     connection: `export const useConnectionStore = () => globalThis.__dshConnectionStore;`,
     session: `export const useSessionStore = () => ({ authenticated: true });`,
-    dsh: `export const useDshStore = () => globalThis.__dshStore;`,
     store: `
       export const useControlPlaneStore = () => ({
         hasTokens: () => true,
@@ -113,29 +159,33 @@ function applicationsHarnessPlugin() {
     errors: `export const dashboardErrorDetail = (error) => error instanceof Error ? error.message : String(error);`,
     modal: `export const useLocalizedModalCloseLabel = () => {};`,
   };
-  const sources: Record<string, string> = {
-    "naive-ui": "naive",
-    "../api/dashboard.ts": "dashboard",
-    "../api/dashboard-v3.ts": "dashboardV3",
-    "../api/dashboard-v4.ts": "api",
-    "../stores/connection.ts": "connection",
-    "../stores/controlPlane.ts": "store",
-    "../stores/session.ts": "session",
-    "../stores/dsh.ts": "dsh",
-    "../i18n/index.ts": "i18n",
-    "../utils/errors.ts": "errors",
-    "../utils/modal-close-label.ts": "modal",
-  };
+  const byPath = new Map([
+    ["src/api/dashboard.ts", "dashboard"],
+    ["src/api/dashboard-v3.ts", "dashboardV3"],
+    ["src/api/dashboard-v4.ts", "api"],
+    ["src/api/byok-applications.ts", "byokApi"],
+    ["src/stores/connection.ts", "connection"],
+    ["src/stores/controlPlane.ts", "store"],
+    ["src/stores/session.ts", "session"],
+    ["src/i18n/index.ts", "i18n"],
+    ["src/utils/errors.ts", "errors"],
+    ["src/utils/modal-close-label.ts", "modal"],
+  ]);
+  const root = process.cwd().replaceAll("\\", "/");
   return {
     name: "dsh-applications-harness",
     enforce: "pre" as const,
-    resolveId(source: string) {
+    resolveId(source: string, importer?: string) {
       if (source === "naive-ui") return `${prefix}naive`;
-      const module = sources[source];
+      if (source === "reka-ui") return `${prefix}reka`;
+      if (!importer || !source.startsWith(".")) return null;
+      const cleanImporter = importer.split("?")[0]!.replaceAll("\\", "/");
+      const absolute = path.posix.normalize(path.posix.join(path.posix.dirname(cleanImporter), source));
+      const module = byPath.get(path.posix.relative(root, absolute));
       return module ? `${prefix}${module}` : null;
     },
     load(id: string) {
-      if (id.includes("/src/views/Applications.vue?vue&type=style")) return "";
+      if (id.includes("?vue&type=style")) return "";
       return id.startsWith(prefix) ? modules[id.slice(prefix.length)] : null;
     },
   };
@@ -163,11 +213,28 @@ function dshApp(overrides: Partial<DshApplicationView> = {}): DshApplicationView
   };
 }
 
-function enabledConnection(): ConnectionState["info"] {
+function byokView(overrides: Record<string, unknown> = {}): ByokApplicationView {
   return {
-    primary_key: "ocg-primary-secret",
-    sub_keys: [],
-  };
+    client: "codex",
+    status: "ready",
+    detected: true,
+    configPath: "C:\\Users\\author\\.codex\\config.toml",
+    discoverySource: "default",
+    targetPaths: ["C:\\Users\\author\\.codex\\config.toml"],
+    configureSupported: true,
+    removeSupported: false,
+    recoverySupported: false,
+    requiresClosedClient: true,
+    activationRequired: false,
+    fingerprint: "fp-1",
+    configuredModelIds: [],
+    defaultModelId: null,
+    backupPath: null,
+    detail: null,
+    gatewayV1Url: "http://127.0.0.1:8317/v1",
+    revision: { revision: 7, processGeneration: 3, pricingRevision: "p" },
+    ...overrides,
+  } as ByokApplicationView;
 }
 
 function requestError(message: string, status: number): Error {
@@ -177,9 +244,6 @@ function requestError(message: string, status: number): Error {
   return new Ctor(message, status);
 }
 
-// Structural locators keep these tests independent of label wording: the
-// harness forwards naive-ui props into host-node props, so `type`/`class`
-// identify the same buttons an earlier copy-based `button()` lookup found.
 function installActionButton(root: HostNode): HostNode {
   const actions = walkHostNodes(root).find((node) => node.props.class === "dsh-actions");
   const found = actions && walkHostNodes(actions).find((node) => node.type === "button");
@@ -201,20 +265,58 @@ function errorAlertCount(root: HostNode): number {
   ).length;
 }
 
+function defaultByokApi(): ByokApi {
+  return {
+    inspect: async (client) => byokView({ client }),
+    configure: async () => { throw new Error("configure not stubbed"); },
+    remove: async () => { throw new Error("remove not stubbed"); },
+    recover: async () => { throw new Error("recover not stubbed"); },
+  };
+}
+
+function createConnectionState(): ConnectionState {
+  return {
+    info: null,
+    loadCount: 0,
+    reloadCount: 0,
+    reloadError: null,
+    sessionEpoch: 0,
+    reloadWait: null,
+    currentSession() {
+      return this.sessionEpoch;
+    },
+    async load() {
+      this.loadCount += 1;
+      return this.info;
+    },
+    async reloadAfterMutation(expectedSession?: number) {
+      if (expectedSession !== undefined && expectedSession !== this.sessionEpoch) return this.info;
+      this.reloadCount += 1;
+      if (this.reloadError) throw this.reloadError;
+      if (this.reloadWait) return this.reloadWait;
+      return this.info;
+    },
+  };
+}
+
+function runtimeInput(root: HostNode): HostNode {
+  const found = walkHostNodes(root).find((node) => node.props.class === "dsh-runtime-input");
+  if (!found) throw new Error("runtime URL input should render");
+  return found;
+}
+
 async function mount(options: {
+  shell?: boolean;
   api: Partial<DshApi> & Pick<DshApi, "getDshApplication">;
+  byokApi?: Partial<ByokApi>;
   connection?: ConnectionState;
-}): Promise<{ app: App; root: HostNode; connection: ConnectionState }> {
+  pinia?: Pinia;
+}): Promise<{ app: App; root: HostNode; connection: ConnectionState; router: Router; pinia: Pinia }> {
   installTestWindow({
     href: "http://127.0.0.1/dashboard/?view=applications",
     search: "?view=applications",
   });
-  const connection = reactive(options.connection ?? {
-    info: enabledConnection(),
-    async load() {
-      return this.info;
-    },
-  }) as ConnectionState;
+  const connection = options.connection ?? createConnectionState();
   (globalThis as unknown as { __dshConnectionStore?: ConnectionState }).__dshConnectionStore = connection;
   (globalThis as unknown as { __dshMessages?: Array<{ type: string; args: unknown[] }> }).__dshMessages = [];
   const api: DshApi = {
@@ -227,53 +329,10 @@ async function mount(options: {
     ...options.api,
   };
   (globalThis as { __dshComponentApi?: DshApi }).__dshComponentApi = api;
-  const store = reactive({
-    application: null as DshApplicationView | null,
-    loaded: false,
-    loading: false,
-    mutating: false,
-    error: "",
-    async load(input: { profilePath?: string; runtimeUrl?: string } = {}) {
-      this.loading = true;
-      try {
-        this.application = await api.getDshApplication(input.profilePath, input.runtimeUrl);
-        this.error = "";
-        this.loaded = true;
-      } catch (error) {
-        this.error = error instanceof Error ? error.message : String(error);
-      } finally {
-        this.loading = false;
-      }
-    },
-    async install(input: { keyId: string; profilePath: string; runtimeUrl?: string; expectedFingerprint: string }, expectation: { expectedRevision: number; processGeneration: number }) {
-      this.mutating = true;
-      try {
-        this.application = await api.installDshApplication(input, expectation);
-        return this.application;
-      } finally {
-        this.mutating = false;
-      }
-    },
-    async uninstall(input: { profilePath?: string; runtimeUrl?: string; expectedFingerprint: string }, expectation: { expectedRevision: number; processGeneration: number }) {
-      this.mutating = true;
-      try {
-        this.application = await api.uninstallDshApplication(input, expectation);
-        return this.application;
-      } finally {
-        this.mutating = false;
-      }
-    },
-    clear() {
-      this.application = null;
-      this.loaded = false;
-      this.loading = false;
-      this.mutating = false;
-      this.error = "";
-    },
-  });
-  (globalThis as { __dshStore?: typeof store }).__dshStore = store;
+  const byokApi: ByokApi = { ...defaultByokApi(), ...options.byokApi };
+  (globalThis as { __byokApi?: ByokApi }).__byokApi = byokApi;
   const root: HostNode = { children: [], props: {}, type: "root" };
-  const app = renderer.createApp(Applications);
+  const app = renderer.createApp(options.shell ? Applications : DshPanel);
   app.provide(ssrContextKey, { modules: new Set<string>() });
   const router = createRouter({
     history: createMemoryHistory(),
@@ -281,9 +340,11 @@ async function mount(options: {
   });
   await router.push("/applications");
   app.use(router);
+  const pinia = options.pinia ?? createPinia();
+  app.use(pinia);
   app.mount(root);
   await settle();
-  return { app, root, connection };
+  return { app, root, connection, router, pinia };
 }
 
 before(async () => {
@@ -297,39 +358,46 @@ before(async () => {
     build: {
       emptyOutDir: true,
       lib: {
-        entry: path.resolve("src/views/Applications.vue"),
-        fileName: () => "applications.mjs",
+        entry: {
+          applications: path.resolve("src/views/Applications.vue"),
+          "dsh-panel": path.resolve("src/components/applications/DshApplicationPanel.vue"),
+        },
+        fileName: (_format, name) => `${name}.mjs`,
         formats: ["es"],
       },
       outDir: buildDir,
-      rollupOptions: { external: ["vue", "vue-router"] },
+      rollupOptions: { external: ["vue", "vue-router", "pinia"] },
     },
   });
   Applications = (await import(pathToFileURL(path.join(buildDir, "applications.mjs")).href)).default;
+  DshPanel = (await import(pathToFileURL(path.join(buildDir, "dsh-panel.mjs")).href)).default;
 });
 
 after(async () => {
   await rm(buildDir, { force: true, recursive: true });
 });
 
-test("opening install without an enabled Key shows an error and keeps the dialog closed", async () => {
+test("opening install does not load plaintext Keys and omits keyId", async () => {
+  let installed: Record<string, unknown> | undefined;
   const mounted = await mount({
-    api: { getDshApplication: async () => dshApp() },
-    connection: {
-      info: { primary_key: "", sub_keys: [] },
-      async load() {
-        return this.info;
+    api: {
+      getDshApplication: async () => dshApp(),
+      installDshApplication: async (input) => {
+        installed = input as Record<string, unknown>;
+        return dshApp({ status: "installed", installed: true });
       },
     },
   });
   try {
     await (installActionButton(mounted.root).props.onClick as () => Promise<void>)();
     await settle();
-    assert.equal(errorAlertCount(mounted.root), 1);
-    assert.equal(
-      walkHostNodes(mounted.root).some((node) => node.props.role === "dialog"),
-      false,
-    );
+    assert.equal(walkHostNodes(mounted.root).some((node) => node.props.role === "dialog"), true);
+    assert.equal(mounted.connection.loadCount, 0);
+    assert.equal(walkHostNodes(mounted.root).some((node) => node.props.class === "dsh-key-group"), false);
+    await (installConfirmButton(mounted.root).props.onClick as () => Promise<void>)();
+    await settle();
+    assert.equal(Object.prototype.hasOwnProperty.call(installed ?? {}, "keyId"), false);
+    assert.equal(mounted.connection.reloadCount, 1);
   } finally {
     mounted.app.unmount();
   }
@@ -350,8 +418,8 @@ test("selecting a detected profile inspects and installs that exact target", asy
       getDshApplication: async (path, runtimeUrl) => {
         inspected.push({ path, runtimeUrl });
         return dshApp({
-          selectedProfilePath: path ?? discoveredProfiles[0].path,
-          targetPaths: [path ?? discoveredProfiles[0].path],
+          selectedProfilePath: path ?? discoveredProfiles[0]!.path,
+          targetPaths: [path ?? discoveredProfiles[0]!.path],
           fingerprint: path ? "editor-fingerprint" : "web-fingerprint",
           runtimeUrl: runtimeUrl ?? (path ? null : "http://127.0.0.1:3080"),
           discoveredProfiles,
@@ -421,37 +489,7 @@ test("a 409 install closes the dialog, explains the change, and refreshes status
   }
 });
 
-test("confirm stays disabled without a usable Key and does not install", async () => {
-  let installs = 0;
-  const mounted = await mount({
-    api: {
-      getDshApplication: async () => dshApp(),
-      installDshApplication: async () => {
-        installs += 1;
-        return dshApp({ status: "installed", installed: true });
-      },
-    },
-  });
-  try {
-    await (installActionButton(mounted.root).props.onClick as () => Promise<void>)();
-    await settle();
-    // openInstall requires a Key to show Confirm; drop every usable Key after.
-    mounted.connection.info = {
-      primary_key: "",
-      sub_keys: [{ id: "sub-disabled", name: "off", enabled: false, value: "secret" }],
-    };
-    await settle();
-    const confirm = installConfirmButton(mounted.root);
-    assert.equal(confirm.props.disabled, true);
-    await (confirm.props.onClick as () => Promise<void>)();
-    await settle();
-    assert.equal(installs, 0);
-  } finally {
-    mounted.app.unmount();
-  }
-});
-
-test("a repeated click while installing is ignored when a Key is selected", async () => {
+test("a repeated click while installing is ignored", async () => {
   const pending = deferred<DshApplicationView>();
   let installs = 0;
   const mounted = await mount({
@@ -512,7 +550,7 @@ test("blocked conflict and incompatible states keep the action disabled and show
   });
   try {
     assert.equal(installActionButton(incompatible.root).props.disabled, true);
-    assert.match(text(incompatible.root), /DSH 0\.1\.4 is not a supported 0\.1\.5-rc\.1 or 0\.1\.5-rc\.2 build/);
+    assert.match(text(incompatible.root), /DSH 0\.1\.4 is not a supported 0.1.5-rc.1 or 0.1.5-rc.2 build/);
   } finally {
     incompatible.app.unmount();
   }
@@ -545,9 +583,6 @@ test("uninstall confirm targets the displayed runtime URL and does not send a Ke
     },
   });
   try {
-    const uninstall = walkHostNodes(mounted.root).find((node) => (
-      node.type === "button" && node.props.type !== "primary" && walkHostNodes(node)
-    ));
     const actions = walkHostNodes(mounted.root).find((node) => node.props.class === "dsh-actions");
     const buttons = actions ? walkHostNodes(actions).filter((node) => node.type === "button") : [];
     assert.equal(buttons.length, 2);
@@ -562,7 +597,6 @@ test("uninstall confirm targets the displayed runtime URL and does not send a Ke
     assert.equal(uninstallInput?.expectedFingerprint, "fp-1");
     assert.equal(uninstallInput?.runtimeUrl, "http://127.0.0.1:19387");
     assert.equal(Object.prototype.hasOwnProperty.call(uninstallInput ?? {}, "keyId"), false);
-    void uninstall;
   } finally {
     mounted.app.unmount();
   }
@@ -583,5 +617,244 @@ test("HTTP failures, pending restarts and unconfirmed results never show a succe
       assert.equal(messages.some((entry) => entry.type === "success"), false);
       assert.equal(messages.some((entry) => entry.type === "warning"), true);
     } finally { mounted.app.unmount(); }
+  }
+});
+
+test("install success is kept when connection reload fails", async () => {
+  const mounted = await mount({
+    api: {
+      getDshApplication: async () => dshApp(),
+      installDshApplication: async () => dshApp({ status: "installed", installed: true, enabled: true, application: "applied" }),
+    },
+  });
+  try {
+    mounted.connection.reloadError = new Error("reload failed");
+    await (installActionButton(mounted.root).props.onClick as () => Promise<void>)();
+    await settle();
+    await (installConfirmButton(mounted.root).props.onClick as () => Promise<void>)();
+    await settle();
+    const messages = (globalThis as unknown as { __dshMessages: Array<{ type: string }> }).__dshMessages;
+    assert.equal(messages.some((entry) => entry.type === "success"), true);
+    assert.equal(mounted.connection.reloadCount, 1);
+  } finally {
+    mounted.app.unmount();
+  }
+});
+
+test("install success closes before a slow connection reload finishes", async () => {
+  const pendingReload = deferred<ConnectionState["info"]>();
+  const mounted = await mount({
+    api: {
+      getDshApplication: async () => dshApp(),
+      installDshApplication: async () => dshApp({ status: "installed", installed: true, enabled: true, application: "applied" }),
+    },
+  });
+  try {
+    mounted.connection.reloadWait = pendingReload.promise;
+    await (installActionButton(mounted.root).props.onClick as () => Promise<void>)();
+    await settle();
+    await (installConfirmButton(mounted.root).props.onClick as () => Promise<void>)();
+    await settle();
+    assert.equal(walkHostNodes(mounted.root).some((node) => node.props.role === "dialog"), false);
+    const messages = (globalThis as unknown as { __dshMessages: Array<{ type: string }> }).__dshMessages;
+    assert.equal(messages.some((entry) => entry.type === "success"), true);
+    assert.equal(mounted.connection.reloadCount, 1);
+    pendingReload.resolve(mounted.connection.info);
+    await settle();
+  } finally {
+    mounted.app.unmount();
+  }
+});
+
+test("logout during install does not start a connection reload after the receipt", async () => {
+  const pendingInstall = deferred<DshApplicationView>();
+  const mounted = await mount({
+    api: {
+      getDshApplication: async () => dshApp(),
+      installDshApplication: () => pendingInstall.promise,
+    },
+  });
+  try {
+    await (installActionButton(mounted.root).props.onClick as () => Promise<void>)();
+    await settle();
+    const pendingSave = (installConfirmButton(mounted.root).props.onClick as () => Promise<void>)();
+    await settle();
+    mounted.connection.sessionEpoch += 1;
+    pendingInstall.resolve(dshApp({ status: "installed", installed: true, enabled: true, application: "applied" }));
+    await pendingSave;
+    await settle();
+    assert.equal(walkHostNodes(mounted.root).some((node) => node.props.role === "dialog"), false);
+    const messages = (globalThis as unknown as { __dshMessages: Array<{ type: string }> }).__dshMessages;
+    assert.equal(messages.some((entry) => entry.type === "success"), true);
+    assert.equal(mounted.connection.reloadCount, 0);
+  } finally {
+    mounted.app.unmount();
+  }
+});
+
+test("DSH remount restores profile and runtime drafts from the cached app", async () => {
+  const customPath = "C:\\Users\\author\\.dsh-editor\\profiles\\dsh-editor";
+  const customUrl = "http://127.0.0.1:9999";
+  const discoveredProfiles = [
+    { home: "C:\\Users\\author\\.dsh", name: "web", path: "C:\\Users\\author\\.dsh\\profiles\\web" },
+    { home: "C:\\Users\\author\\.dsh-editor", name: "dsh-editor", path: customPath },
+  ];
+  let loads = 0;
+  const getDshApplication = async (path?: string, runtimeUrl?: string) => {
+    loads += 1;
+    return dshApp({
+      selectedProfilePath: path ?? discoveredProfiles[0]!.path,
+      fingerprint: path ? "editor-fingerprint" : "web-fingerprint",
+      runtimeUrl: runtimeUrl ?? (path ? customUrl : "http://127.0.0.1:3080"),
+      discoveredProfiles,
+    });
+  };
+  const first = await mount({ api: { getDshApplication } });
+  try {
+    const select = walkHostNodes(first.root).find((node) => node.props.class === "dsh-profile-select");
+    assert.ok(select);
+    (select!.props["onUpdate:value"] as (value: string) => void)(customPath);
+    await settle();
+    assert.equal(loads, 2);
+    assert.equal(runtimeInput(first.root).props.value, customUrl);
+  } finally {
+    first.app.unmount();
+  }
+  const second = await mount({
+    api: { getDshApplication },
+    pinia: first.pinia,
+    connection: first.connection,
+  });
+  try {
+    assert.equal(loads, 2, "cached remount must not inspect again");
+    const select = walkHostNodes(second.root).find((node) => node.props.class === "dsh-profile-select");
+    assert.equal(select?.props.value, customPath);
+    assert.equal(runtimeInput(second.root).props.value, customUrl);
+  } finally {
+    second.app.unmount();
+  }
+});
+
+test("unchanged runtime URL blur does not inspect; a changed target still does", async () => {
+  let loads = 0;
+  const mounted = await mount({
+    api: {
+      getDshApplication: async (_path, runtimeUrl) => {
+        loads += 1;
+        return dshApp({ runtimeUrl: runtimeUrl ?? "http://127.0.0.1:3080" });
+      },
+    },
+  });
+  try {
+    assert.equal(loads, 1);
+    const input = runtimeInput(mounted.root);
+    assert.notEqual(input.props.tabindex, "-1");
+    await (input.props.onBlur as () => void)();
+    await settle();
+    assert.equal(loads, 1, "unchanged blur must not inspect");
+    (input.props["onUpdate:value"] as (value: string) => void)("  http://127.0.0.1:3080  ");
+    await settle();
+    await (runtimeInput(mounted.root).props.onBlur as () => void)();
+    await settle();
+    assert.equal(loads, 1, "whitespace-only blur must not inspect");
+    (runtimeInput(mounted.root).props["onUpdate:value"] as (value: string) => void)("http://127.0.0.1:9999");
+    await settle();
+    await (runtimeInput(mounted.root).props.onBlur as () => void)();
+    await settle();
+    assert.equal(loads, 2, "changed runtime URL still inspects");
+    const toolbar = walkHostNodes(mounted.root).find((node) => node.props.class === "dsh-toolbar");
+    const refresh = toolbar && walkHostNodes(toolbar).find((node) => node.type === "button");
+    assert.ok(refresh);
+    await (refresh!.props.onClick as () => Promise<void>)();
+    await settle();
+    assert.equal(loads, 3, "explicit Refresh still inspects");
+  } finally {
+    mounted.app.unmount();
+  }
+});
+
+test("all five tabs switch with pending inspects and explicit Refresh still works", async () => {
+  const dshPending = deferred<DshApplicationView>();
+  let dshLoads = 0;
+  const byokInspects: string[] = [];
+  const byokPending = new Map<string, ReturnType<typeof deferred<ByokApplicationView>>>();
+  const mounted = await mount({
+    shell: true,
+    api: {
+      getDshApplication: async () => {
+        dshLoads += 1;
+        if (dshLoads === 1) return dshPending.promise;
+        return dshApp({ fingerprint: `fp-${dshLoads}` });
+      },
+    },
+    byokApi: {
+      inspect: async (client) => {
+        byokInspects.push(client);
+        const gate = byokPending.get(client) ?? deferred<ByokApplicationView>();
+        byokPending.set(client, gate);
+        return gate.promise;
+      },
+    },
+  });
+  try {
+    const tabs = () => walkHostNodes(mounted.root).filter((node) => node.props.role === "tab");
+    assert.equal(tabs().length, 5);
+    assert.equal(dshLoads, 1);
+
+    for (const index of [1, 2, 3, 4]) {
+      (tabs()[index]!.props.onClick as () => void)();
+      await settle();
+    }
+    assert.deepEqual(byokInspects, ["codex", "kimi", "minimax", "zcode"]);
+
+    (tabs()[0]!.props.onClick as () => void)();
+    await settle();
+    assert.equal(dshLoads, 1, "return to DSH while pending must not start a second inspect");
+    (tabs()[1]!.props.onClick as () => void)();
+    await settle();
+    assert.equal(byokInspects.filter((id) => id === "codex").length, 1);
+
+    dshPending.resolve(dshApp());
+    for (const client of ["codex", "kimi", "minimax", "zcode"]) {
+      byokPending.get(client)?.resolve(byokView({ client }));
+    }
+    await settle();
+
+    (tabs()[0]!.props.onClick as () => void)();
+    await settle(40);
+    assert.equal(dshLoads, 1, "cached DSH revisit must not inspect again");
+    const toolbar = walkHostNodes(mounted.root).find((node) => node.props.class === "dsh-toolbar");
+    const refresh = toolbar && walkHostNodes(toolbar).find((node) => node.type === "button");
+    assert.ok(refresh);
+    await (refresh!.props.onClick as () => Promise<void>)();
+    await settle();
+    assert.equal(dshLoads, 2, "explicit Refresh inspects again");
+  } finally {
+    mounted.app.unmount();
+  }
+});
+
+test("client tabs expose tab semantics and switching syncs the app query", async () => {
+  const mounted = await mount({ shell: true, api: { getDshApplication: async () => dshApp() } });
+  try {
+    const tabs = () => walkHostNodes(mounted.root).filter((node) => node.props.role === "tab");
+    assert.equal(tabs().length, 5);
+    assert.equal(
+      walkHostNodes(mounted.root).find((node) => "data-activation-mode" in node.props)?.props["data-activation-mode"],
+      "manual",
+    );
+    assert.equal(tabs()[0]!.props["data-state"], "active");
+    assert.equal(tabs()[0]!.props.tabindex, 0);
+    assert.equal(tabs()[1]!.props["data-state"], "inactive");
+    assert.equal(tabs()[1]!.props.tabindex, -1);
+    (tabs()[1]!.props.onClick as () => void)();
+    await settle(40);
+    assert.equal(mounted.router.currentRoute.value.query.app, "codex");
+    assert.equal(tabs()[1]!.props["data-state"], "active");
+    assert.equal(tabs()[1]!.props.tabindex, 0);
+    const panels = walkHostNodes(mounted.root).filter((node) => node.props.role === "tabpanel");
+    assert.equal(panels.length, 1);
+  } finally {
+    mounted.app.unmount();
   }
 });

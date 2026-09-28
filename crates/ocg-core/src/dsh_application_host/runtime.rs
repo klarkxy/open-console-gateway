@@ -25,6 +25,10 @@ const DEFAULT_MAX_BODY_BYTES: usize = 1024 * 1024;
 const DEFAULT_EXCHANGE_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(20);
 const DEFAULT_MUTATION_TIMEOUT: Duration = Duration::from_secs(120);
+/// Connect budget for read-only status RPCs against an unresponsive loopback.
+const INSPECT_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
+/// Per-request budget for listBundles/listPlugins during status inspection.
+const INSPECT_RPC_TIMEOUT: Duration = Duration::from_secs(2);
 
 const MSG_INVALID_URL: &str = "DSH runtime URL is not a permitted loopback HTTP origin";
 const MSG_INVALID_COOKIE: &str = "DSH runtime cookie is invalid";
@@ -159,6 +163,7 @@ impl std::error::Error for DshRuntimeError {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct DshRuntimeLimits {
     pub max_body_bytes: usize,
+    pub connect_timeout: Duration,
     pub exchange_timeout: Duration,
     pub rpc_timeout: Duration,
     pub mutation_timeout: Duration,
@@ -168,8 +173,23 @@ impl Default for DshRuntimeLimits {
     fn default() -> Self {
         Self {
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
+            connect_timeout: DEFAULT_MUTATION_TIMEOUT,
             exchange_timeout: DEFAULT_EXCHANGE_TIMEOUT,
             rpc_timeout: DEFAULT_RPC_TIMEOUT,
+            mutation_timeout: DEFAULT_MUTATION_TIMEOUT,
+        }
+    }
+}
+
+impl DshRuntimeLimits {
+    /// Short connect/RPC budgets for read-only status inspection.
+    /// Install/uninstall keep [`Default`] mutation and plugin-inspect timeouts.
+    pub fn inspect() -> Self {
+        Self {
+            max_body_bytes: DEFAULT_MAX_BODY_BYTES,
+            connect_timeout: INSPECT_CONNECT_TIMEOUT,
+            exchange_timeout: INSPECT_RPC_TIMEOUT,
+            rpc_timeout: INSPECT_RPC_TIMEOUT,
             mutation_timeout: DEFAULT_MUTATION_TIMEOUT,
         }
     }
@@ -442,7 +462,7 @@ impl DshRuntimeClient {
         limits: DshRuntimeLimits,
     ) -> Result<Self, DshRuntimeError> {
         let (origin, tokenized) = parse_launch_url(url)?;
-        let http = build_http_client(limits.exchange_timeout.max(limits.mutation_timeout))?;
+        let http = build_http_client(limits)?;
         let cookie = exchange_cookie(&http, &origin, tokenized, limits)?;
         Ok(Self {
             origin,
@@ -467,7 +487,7 @@ impl DshRuntimeClient {
         Ok(Self {
             origin,
             cookie,
-            http: build_http_client(limits.exchange_timeout.max(limits.mutation_timeout))?,
+            http: build_http_client(limits)?,
             limits,
         })
     }
@@ -640,11 +660,17 @@ fn unix_now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-fn build_http_client(timeout: Duration) -> Result<Client, DshRuntimeError> {
+fn build_http_client(limits: DshRuntimeLimits) -> Result<Client, DshRuntimeError> {
     Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
-        .timeout(timeout)
+        .connect_timeout(limits.connect_timeout)
+        .timeout(
+            limits
+                .exchange_timeout
+                .max(limits.rpc_timeout)
+                .max(limits.mutation_timeout),
+        )
         .build()
         .map_err(|_| DshRuntimeError::unknown(DshRuntimeUnknownKind::Transport, MSG_RUNTIME, None))
 }

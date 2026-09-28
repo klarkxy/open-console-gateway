@@ -264,6 +264,39 @@ test("connection store: clearSecrets invalidates a load that resolves after logo
   assert.equal(store.error, "");
 });
 
+test("connection store: logout before a delayed mutation refresh skips a new plaintext fetch", async () => {
+  freshPinia();
+  const calls = installDeferredFetch();
+  const store = useConnectionStore();
+  const captured = store.currentSession();
+
+  store.clearSecrets();
+  await assert.rejects(() => store.reloadAfterMutation(captured), /session ended/);
+
+  assert.equal(calls.length, 0, "must not start GET /connection after session teardown");
+  assert.equal(store.info, null);
+  assert.equal(store.loading, false);
+});
+
+test("connection store: a slow mutation refresh still commits when the session is unchanged", async () => {
+  freshPinia();
+  const calls = installDeferredFetch();
+  const store = useConnectionStore();
+  const captured = store.currentSession();
+
+  const pending = store.reloadAfterMutation(captured);
+  await waitForCalls(calls, 1);
+  assert.equal(store.info, null);
+
+  calls[0]!.resolve(connectionBody("fresh-primary", 8));
+  await pending;
+
+  const readInfo = () => store.info;
+  assert.equal(readInfo()?.primary_key, "fresh-primary");
+  assert.equal(store.loading, false);
+  assert.equal(store.error, "");
+});
+
 test("connection store: a rejected mutation reload still releases the superseded load", async () => {
   freshPinia();
   useControlPlaneStore().sync({ revision: 7, processGeneration: 99, pricingRevision: null });

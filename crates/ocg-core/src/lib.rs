@@ -6,6 +6,9 @@ pub mod auth;
 pub(crate) mod billing;
 pub(crate) mod billing_types;
 pub mod browser;
+pub mod byok_application;
+#[cfg(feature = "dsh-local-host")]
+pub mod byok_application_host;
 pub(crate) mod command_code_usage;
 pub(crate) mod control;
 pub mod cpa;

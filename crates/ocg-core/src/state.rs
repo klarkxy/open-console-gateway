@@ -1035,6 +1035,14 @@ impl CoreStateInner {
         self.desktop.desktop_update_supported()
     }
 
+    pub fn set_byok_application_host(&self, host: crate::byok_application::ByokApplicationHost) {
+        self.desktop.set_byok_application_host(host);
+    }
+
+    pub fn byok_application_host(&self) -> Option<crate::byok_application::ByokApplicationHost> {
+        self.desktop.byok_application_host()
+    }
+
     pub fn set_dsh_application_host(&self, host: crate::dsh_application::DshApplicationHost) {
         self.desktop.set_dsh_application_host(host);
     }

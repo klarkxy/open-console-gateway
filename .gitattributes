@@ -1,3 +1,7 @@
 # Detect text and let core.autocrlf own working-tree endings.
 # Git for Windows defaults to autocrlf=true: checkout CRLF, commit LF.
 * text=auto
+
+# Keep pinned upstream resources byte-identical across Windows checkouts.
+resources/codex-byok/prompt.md text eol=lf
+resources/codex-byok/LICENSE text eol=lf

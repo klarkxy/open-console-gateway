@@ -1,0 +1,22 @@
+OpenAI Codex
+Copyright 2025 OpenAI
+
+This directory contains an unmodified copy of the generic model fallback
+instructions from OpenAI Codex (codex-rs/models-manager/prompt.md).
+These are the official BASE_INSTRUCTIONS used in fallback model descriptors
+for unknown model slugs. OCG includes them explicitly because the custom
+catalog parser requires an instruction source for every model entry.
+This package does not bundle the Codex client or any other Codex sources.
+
+Source: https://github.com/openai/codex
+Path:   codex-rs/models-manager/prompt.md
+Commit: 3d2ee51ca2d5db578f328aa75e20aa22c0197c9a
+URL:    https://github.com/openai/codex/blob/3d2ee51ca2d5db578f328aa75e20aa22c0197c9a/codex-rs/models-manager/prompt.md
+
+Licensed under the Apache License, Version 2.0. See LICENSE in this
+directory.
+
+Applicable attribution from the upstream Codex NOTICE:
+
+OpenAI Codex
+Copyright 2025 OpenAI

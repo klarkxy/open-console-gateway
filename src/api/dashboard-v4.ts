@@ -73,6 +73,9 @@ export type {
  */
 export type DestinationCatalogUpdate = WithoutExpectation<DestinationCatalogUpdateDto>;
 
+/** First-party UI omits `keyId`; the host uses the named `dsh` Key. */
+export type DshApplicationInstallInput = WithoutExpectation<DshApplicationInstallRequest>;
+
 export const dashboardV4 = {
   getTemplates: () => requestV4<TemplateList>("/templates"),
   getConnections: (signal?: AbortSignal) => requestV4<ConnectionList>("/connections", { signal }),
@@ -241,7 +244,7 @@ export const dashboardV4 = {
     return requestV4<DshApplication>(`/applications/dsh${suffix}`);
   },
   installDshApplication: (
-    input: WithoutExpectation<DshApplicationInstallRequest>,
+    input: DshApplicationInstallInput,
     expectation: MutationExpectation,
   ) => requestV4<DshApplication>("/applications/dsh", {
     method: "POST",
@@ -279,7 +282,6 @@ export const dashboardV4 = {
 };
 
 export type DshApplicationView = DshApplication;
-export type DshApplicationInstallInput = DshApplicationInstallRequest;
 export type DshApplicationUninstallInput = DshApplicationUninstallRequest;
 export type TemporaryPolicyConfigurationView = TemporaryPolicyConfiguration;
 export type TemporaryPolicyRestrictionsView = TemporaryPolicyRestrictions;
